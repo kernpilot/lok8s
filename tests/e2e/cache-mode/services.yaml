@@ -1,0 +1,23 @@
+apiVersion: services.lok8s.dev/v1
+kind: Services
+metadata:
+  name: e2e-cache-mode
+
+# Global registry config — the "busybox" service inherits this and
+# declares build: false, so env::kustomization will:
+#   1. Swap the canonical lok8s.local/busybox reference in the
+#      deployment manifest to:
+#        lok8s.cache/library/busybox:1.36
+#   2. Queue a pre-pull of:
+#        https://registry-1.docker.io/library/busybox:1.36
+#      into the lok8s.cache registry before the kind node tries
+#      to pull it.
+registry:
+  endpoint: https://registry-1.docker.io
+  branch: library
+  tag: "1.36"
+
+services:
+  busybox:
+    enabled: true
+    build: false

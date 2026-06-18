@@ -1,0 +1,36 @@
+# Test fixture: Capi kind cluster spec (AWS)
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Capi
+metadata:
+  name: test-aws-production
+spec:
+  kubernetes:
+    version: "v1.31.10"
+  cluster:
+    domain: aws.lok8s.dev
+    namespace: capi-system
+  managementCluster:
+    domain: mgmt.lok8s.dev
+  provider:
+    name: aws
+    config:
+      region: eu-central-1
+      sshKeyName: aws-admin-key
+    credentials:
+      envVars:
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY
+      secretRef: test-aws-credentials
+  controlPlane:
+    replicas: 3
+    type: t3.large
+  workers:
+    general:
+      replicas: 3
+      type: t3.xlarge
+    spot:
+      replicas: 2
+      type: t3.medium
+  bootstrap:
+    - cilium
+    - ccm

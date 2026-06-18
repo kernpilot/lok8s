@@ -1,0 +1,259 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# Capi driver — production clusters via Cluster API
+# Implements: driver::provision, driver::destroy, driver::status, driver::kubeconfig
+# Capi-specific: capi::bootstrap (management cluster bootstrap)
+#
+# Full CAPI logic (detect_provider, generate, wait_ready, ensure_credentials)
+# lives in the sibling drivers/capi/generate — imported here so the driver is
+# self-contained (a driver's main must pull in all of its own siblings; see
+# CONTRACT). Do NOT rely on `lo` pre-importing it.
+
+import ^utils/verbose
+import ^drivers/capi/generate
+
+# ── CLI dispatch ──────────────────────────────────────────
+
+main::driver() {
+  local -a usage=(
+    'provision|p@destructive'  'Provision a CAPI cluster'
+    'destroy|d@destructive'    'Destroy a CAPI cluster'
+    'status|s@readonly'        'Check cluster status'
+    'kubeconfig|k@readonly'    'Extract kubeconfig path'
+  )
+  :usage "CAPI driver" "${@}"
+  "${usage[@]}"
+}
+
+# ── Driver contract ───────────────────────────────────────
+
+driver::provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Provision a CAPI cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+
+  # 1. Determine management cluster
+  local mgmt_domain
+  mgmt_domain=$(yq -r '.spec.managementCluster.domain // ""' "${cluster_yaml}")
+
+  if [[ -z "${mgmt_domain}" ]]; then
+    kubehz::read_config "${cluster_yaml}"
+    if [[ "${LOK8S_KUBEHZ_HOSTING}" != "hosted" ]]; then
+      error "spec.managementCluster.domain is required for self-hosted CAPI"
+      error "set spec.kubehz.hosting: hosted to use kubehz seed cluster"
+      return 1
+    fi
+    kubehz::provision_hosted "${domain}" "${cluster_yaml}"
+    return
+  fi
+
+  # 2. Self-managed — check if mgmt cluster kubeconfig exists
+  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+
+  # If the domain IS the management cluster, bootstrap it
+  if [[ "${domain}" == "${mgmt_domain}" ]]; then
+    if [[ ! -f "${mgmt_kubeconfig}" ]]; then
+      echo "info: bootstrapping management cluster ${mgmt_domain}" >&2
+      capi::bootstrap "${domain}" "${cluster_yaml}"
+      return $?
+    fi
+    # If kubeconfig exists but we're re-provisioning, fall through
+  fi
+
+  if [[ ! -f "${mgmt_kubeconfig}" ]]; then
+    echo "error: management cluster kubeconfig not found: ${mgmt_kubeconfig}" >&2
+    echo "error: provision the management cluster first: lo provision ${mgmt_domain}" >&2
+    return 1
+  fi
+
+  # 3. Detect CAPI provider from spec
+  local provider
+  provider=$(capi::detect_provider "${cluster_yaml}")
+
+  # 4. Ensure credential Secret exists on mgmt cluster
+  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${mgmt_kubeconfig}"
+
+  # 5. Generate CAPI resources from templates
+  local resources
+  resources=$(capi::generate "${cluster_yaml}" "${provider}")
+
+  # 6. Apply to management cluster
+  kubectl apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}")
+
+  # 7. Wait for work cluster to become ready
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}"
+
+  # 8. Extract work cluster kubeconfig
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  clusterctl get kubeconfig "${cluster_name}" \
+    --kubeconfig "${mgmt_kubeconfig}" \
+    > "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+}
+
+driver::destroy() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Destroy a CAPI cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local mgmt_domain cluster_name
+  mgmt_domain=$(yq -r '.spec.managementCluster.domain // ""' "${cluster_yaml}")
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+
+  if [[ -z "${mgmt_domain}" ]]; then
+    kubehz::read_config "${cluster_yaml}"
+    if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+      kubehz::destroy_hosted "${domain}" "${cluster_yaml}"
+      return
+    fi
+    error "spec.managementCluster.domain is required for self-hosted CAPI destroy"
+    return 1
+  fi
+
+  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+  kubectl delete cluster "${cluster_name}" --kubeconfig "${mgmt_kubeconfig}" 2>/dev/null || true
+}
+
+driver::status() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Check CAPI cluster status" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local mgmt_domain cluster_name
+  mgmt_domain=$(yq -r '.spec.managementCluster.domain // ""' "${cluster_yaml}")
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+
+  if [[ -z "${mgmt_domain}" ]]; then
+    echo "Unknown"
+    return
+  fi
+
+  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+  kubectl get cluster "${cluster_name}" --kubeconfig "${mgmt_kubeconfig}" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound"
+}
+
+driver::kubeconfig() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Extract kubeconfig" "${@}"
+
+  echo "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+}
+
+# Optional contract function — Capi needs credential setup
+driver::ensure_credentials() {
+  local cluster_yaml="$1" provider="$2" kubeconfig="$3"
+
+  credentials::require "${provider}" || return 1
+
+  # Delegate to capi::ensure_credentials from drivers/capi/generate
+  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${kubeconfig}"
+}
+
+# ── Management cluster bootstrap ─────────────────────────
+
+# Bootstrap a management cluster from scratch.
+# Flow: temp kind cluster -> clusterctl init -> apply mgmt CR -> wait ->
+#       install operator + CAPI on mgmt -> clusterctl move -> deploy targets -> cleanup
+# Usage: capi::bootstrap <domain> <cluster_yaml>
+capi::bootstrap() {
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local bootstrap_name="lok8s-bootstrap"
+  local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${bootstrap_name}.yaml"
+  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+
+  # Detect provider for infrastructure flag
+  local provider
+  provider=$(capi::detect_provider "${cluster_yaml}")
+
+  local infra_provider
+  case "${provider}" in
+    hetzner) infra_provider="hetzner" ;;
+    aws)     infra_provider="aws" ;;
+    *)
+      echo "error: unsupported provider for bootstrap: ${provider}" >&2
+      return 1
+      ;;
+  esac
+
+  # 1. Create temporary kind bootstrap cluster
+  echo "info: creating bootstrap cluster" >&2
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s}"
+  if ! kind get clusters 2>/dev/null | grep -q "^${bootstrap_name}$"; then
+    kind create cluster --name "${bootstrap_name}"
+  fi
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  kind get kubeconfig --name "${bootstrap_name}" > "${bootstrap_kubeconfig}"
+
+  # 2. Install CAPI core + infrastructure provider on bootstrap
+  echo "info: installing CAPI on bootstrap cluster" >&2
+  clusterctl init \
+    --kubeconfig "${bootstrap_kubeconfig}" \
+    --infrastructure "${infra_provider}" \
+    --core cluster-api \
+    --wait-providers
+
+  # 3. Ensure credentials on bootstrap cluster
+  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${bootstrap_kubeconfig}"
+
+  # 4. Generate and apply management cluster CAPI resources
+  echo "info: applying management cluster resources" >&2
+  local resources
+  resources=$(capi::generate "${cluster_yaml}" "${provider}")
+  kubectl apply --kubeconfig "${bootstrap_kubeconfig}" -f <(echo "${resources}")
+
+  # 5. Wait for management cluster to become ready
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  echo "info: waiting for management cluster to become ready" >&2
+  capi::wait_ready "${bootstrap_kubeconfig}" "${cluster_name}"
+
+  # 6. Extract management cluster kubeconfig
+  clusterctl get kubeconfig "${cluster_name}" \
+    --kubeconfig "${bootstrap_kubeconfig}" \
+    > "${mgmt_kubeconfig}"
+
+  # 7. Install lok8s operator on management cluster
+  echo "info: installing lok8s operator on management cluster" >&2
+  if [[ -d "${PATH_BASE}/operator/deploy" ]]; then
+    kubectl apply --kubeconfig "${mgmt_kubeconfig}" \
+      -f "${PATH_BASE}/operator/deploy/" 2>/dev/null || true
+  fi
+
+  # 8. Install CAPI + providers on management cluster
+  echo "info: installing CAPI on management cluster" >&2
+  clusterctl init \
+    --kubeconfig "${mgmt_kubeconfig}" \
+    --infrastructure "${infra_provider}" \
+    --core cluster-api \
+    --wait-providers
+
+  # 9. Move CAPI resources from bootstrap to management cluster
+  echo "info: moving CAPI resources to management cluster" >&2
+  clusterctl move \
+    --kubeconfig "${bootstrap_kubeconfig}" \
+    --to-kubeconfig "${mgmt_kubeconfig}"
+
+  # 10. Delete bootstrap cluster
+  echo "info: cleaning up bootstrap cluster" >&2
+  kind delete cluster --name "${bootstrap_name}" 2>/dev/null || true
+  rm -f "${bootstrap_kubeconfig}"
+
+  echo "info: management cluster ${domain} bootstrapped successfully" >&2
+}

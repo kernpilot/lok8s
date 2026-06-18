@@ -1,0 +1,6 @@
+# SOPS encryption config for lok8s secret cache files.
+# Recipients are age public keys derived from SSH keys via ssh-to-age.
+# Add team members with: lo secrets add-key <ssh-pubkey-path>
+creation_rules:
+  - path_regex: 'Secret\..*'
+    age: 'age1y9zqnxdrg967rvprcps826t0y49trgczr2h4cwrdsc9l0an2uejqh7eu56'

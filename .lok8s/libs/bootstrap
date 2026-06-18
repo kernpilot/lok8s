@@ -1,0 +1,259 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# bootstrap — framework-level cluster infrastructure addon system
+#
+# Applies spec.bootstrap entries in order after the cluster is provisioned.
+# Works with ALL drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
+#
+# Addon resolution:
+#   "cilium"          → .lok8s/addons/cilium/
+#   "./targets/foo"   → clusters/<domain>/targets/foo/
+#   "/absolute/path"  → /absolute/path/
+#
+# Provider-aware values:
+#   addons/cilium/values.yaml          — base (always loaded)
+#   addons/cilium/values.lo.yaml       — driver-specific (if exists)
+#   addons/cilium/values.hetzner.yaml  — provider-specific (if exists)
+#
+# Inline overrides:
+#   bootstrap:
+#     - cilium:
+#         encryption:
+#           enabled: true
+#
+# The inline config is merged as additional Helm values on top of the
+# provider-aware defaults.
+
+import ^utils/types
+import ^utils/verbose
+
+# ── CLI entry point ──────────────────────────────────────
+
+main::bootstrap() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Apply bootstrap addons" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "cluster spec not found: ${cluster_yaml}"; return 1; }
+
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+
+  bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig}"
+}
+
+# ── Bootstrap engine ─────────────────────────────────────
+
+# bootstrap::_resolve_entries <cluster_yaml> <kind>
+# Resolve which bootstrap addon entries to apply, one per line (none = no
+# output). Pure (no cluster access) so it is unit-testable. Three cases:
+#   - explicit non-empty spec.bootstrap → exactly those entries, in order
+#   - explicit empty `bootstrap: []`    → nothing (authoritative opt-out)
+#   - absent spec.bootstrap             → per-driver default
+# The default is per-driver, NOT one-size-fits-all: only `lo` (kind) ships
+# without a CNI and must have one bootstrapped. KubeOne deploys its own cilium
+# during `kubeone apply`; Capi/Kkp clusters bring their CNI from the
+# management cluster / addon set. Defaulting those to [cilium] caused a stray
+# cilium apply on managed clusters.
+bootstrap::_resolve_entries() {
+  local cluster_yaml="$1" kind="$2"
+  local -a entries
+  mapfile -t entries < <(yq -r '.spec.bootstrap[]?' "${cluster_yaml}")
+  if (( ${#entries[@]} > 0 )); then
+    printf '%s\n' "${entries[@]}"
+    return 0
+  fi
+  # Empty result — distinguish a *defined* empty list (opt out) from an
+  # *absent* key (fall back to the per-driver default).
+  if [[ "$(yq -r '.spec | has("bootstrap")' "${cluster_yaml}")" == "true" ]]; then
+    return 0
+  fi
+  [[ "${kind}" == "lo" ]] && echo "cilium"
+  return 0
+}
+
+# bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
+# Reads spec.bootstrap from the cluster YAML and applies each entry.
+bootstrap::apply() {
+  local domain="$1" cluster_yaml="$2" kubeconfig="$3"
+
+  [[ -f "${kubeconfig}" ]] || {
+    error "bootstrap: kubeconfig not found: ${kubeconfig}"
+    return 1
+  }
+
+  # Detect driver kind and provider for default policy + values resolution
+  local kind provider_name
+  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  provider_name=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
+
+  local -a bootstrap_entries
+  mapfile -t bootstrap_entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}")
+
+  if (( ${#bootstrap_entries[@]} == 0 )); then
+    debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"
+    return 0
+  fi
+
+  # Export the API server endpoint (host + port) parsed from the
+  # kubeconfig so addons can target the real control-plane LB endpoint via
+  # envsubst — e.g. cilium k8sServiceHost on KubeOne, where the in-cluster
+  # ClusterIP (10.96.0.1) is unreachable from a bare-metal worker across
+  # the Hetzner vSwitch and the cilium agent hangs on startup. Picked up
+  # by template::envsubst_whitelist (LOK8S_USER_* vars).
+  local _api_url _api_hostport
+  _api_url=$(yq -r '.clusters[0].cluster.server // ""' "${kubeconfig}" 2>/dev/null)
+  _api_hostport="${_api_url#https://}"
+  _api_hostport="${_api_hostport#http://}"
+  if [[ -n "${_api_hostport}" ]]; then
+    export LOK8S_USER_API_HOST="${_api_hostport%%:*}"
+    local _p="${_api_hostport##*:}"
+    [[ "${_p}" != "${_api_hostport}" && -n "${_p}" ]] || _p="6443"
+    export LOK8S_USER_API_PORT="${_p}"
+    debug "bootstrap: API endpoint ${LOK8S_USER_API_HOST}:${LOK8S_USER_API_PORT} (for addon envsubst)"
+  fi
+
+  local envsubst_whitelist
+  envsubst_whitelist=$(template::envsubst_whitelist)
+
+  local entry
+  for entry in "${bootstrap_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+
+    local addon_name="" addon_dir="" inline_values=""
+
+    # Parse entry: string, map (YAML object), or path
+    if [[ "${entry}" == /* ]]; then
+      # Absolute path
+      addon_dir="${PATH_BASE}${entry}"
+      addon_name="$(basename "${entry}")"
+    elif [[ "${entry}" == ./* || "${entry}" == ../* ]]; then
+      # Relative path to cluster dir
+      addon_dir="${PATH_CLUSTERS}/${domain}/${entry}"
+      addon_name="$(basename "${entry}")"
+    elif [[ "${entry}" == *:* ]]; then
+      # Map entry: "name: {config}" — yq outputs "name: value"
+      # This handles the case where yq -r outputs "cilium: {encryption: ...}"
+      addon_name="${entry%%:*}"
+      addon_name="${addon_name// /}"
+      inline_values="${entry#*: }"
+      addon_dir="${PATH_LOK8S}/addons/${addon_name}"
+    else
+      # Bare name → framework addon
+      addon_name="${entry}"
+      addon_dir="${PATH_LOK8S}/addons/${entry}"
+    fi
+
+    if [[ ! -d "${addon_dir}" ]]; then
+      error "bootstrap: addon not found: ${entry} (resolved to ${addon_dir})"
+      return 1
+    fi
+
+    # KubeOne deploys cilium itself during `kubeone apply` to break the
+    # cni:external deadlock (the apiserver blocks on CCM node-init, which
+    # needs a CNI first). When that driver-managed cilium is already up,
+    # re-applying it here from the kustomize render path is redundant and
+    # races the driver for field ownership — so defer cilium to the driver.
+    # Re-run `lo up` to reconcile cilium on KubeOne clusters; every other
+    # driver (Lo/Capi/Kkp) still gets its CNI from bootstrap as usual.
+    if [[ "${addon_name}" == "cilium" && "${kind}" == "kubeone" ]] \
+       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
+      echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
+      continue
+    fi
+
+    # Merge provider-aware values for framework addons
+    local build_dir="${addon_dir}"
+    if [[ -d "${PATH_LOK8S}/addons/${addon_name}" ]] && [[ -f "${addon_dir}/chart.yaml" ]]; then
+      build_dir=$(mktemp -d)
+      cp -r "${addon_dir}/"* "${build_dir}/"
+
+      # Stack values: base < driver < provider < inline (later wins).
+      # Rationale: facts (provider env) beat preferences (driver flavor)
+      # beat chart defaults (base); explicit user intent (inline) beats
+      # all. See docs/guide/addons.md#why-this-order for the full
+      # explanation.
+      local -a value_files=()
+      [[ ! -f "${addon_dir}/values.yaml" ]] || value_files+=("${addon_dir}/values.yaml")
+      [[ ! -f "${addon_dir}/values.${kind}.yaml" ]] || value_files+=("${addon_dir}/values.${kind}.yaml")
+      [[ -z "${provider_name}" ]] || [[ ! -f "${addon_dir}/values.${provider_name}.yaml" ]] || value_files+=("${addon_dir}/values.${provider_name}.yaml")
+
+      # Add inline overrides as the last (highest-precedence) file
+      if [[ -n "${inline_values}" ]]; then
+        local inline_file="${build_dir}/values.inline.yaml"
+        echo "${inline_values}" > "${inline_file}"
+        value_files+=("${inline_file}")
+      fi
+
+      if (( ${#value_files[@]} > 0 )); then
+        # Merge all values files in order (later files override earlier ones).
+        # Uses ireduce so we handle N files, not just the first two.
+        local merged_values="${build_dir}/values.merged.yaml"
+        if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" > "${merged_values}"; then
+          error "bootstrap: failed to merge values files for ${addon_name}"
+          rm -rf "${build_dir}"
+          return 1
+        fi
+
+        # Update chart.yaml to use merged values
+        if [[ -f "${build_dir}/chart.yaml" ]]; then
+          yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" 2>/dev/null || \
+            sed -i 's|valueFiles:.*|valueFiles:\n  - values.merged.yaml|' "${build_dir}/chart.yaml"
+        fi
+      fi
+    fi
+
+    debug "bootstrap: applying ${addon_name} (${build_dir})"
+    # KHELM_TRUST_ANY_REPO: khelm refuses chart repos not registered in the
+    # local helm config, which would force a manual `helm repo add` per chart
+    # before every bootstrap. The chart repositories are declared in our own
+    # version-controlled chart.yaml files (the trust boundary is code review),
+    # so trust them and keep the bootstrap hands-off. Versions stay pinned.
+    local rendered
+    if ! rendered=$(KHELM_TRUST_ANY_REPO=true \
+                      kustomize build --enable-alpha-plugins "${build_dir}" \
+                      | envsubst "${envsubst_whitelist}"); then
+      error "bootstrap: kustomize build failed for ${addon_name}"
+      [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+      return 1
+    fi
+
+    # Clean up temp dir
+    [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+
+    # Apply with server-side + CRD retry
+    local first_pass_output
+    first_pass_output=$(echo "${rendered}" | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1) || true
+    echo "${first_pass_output}"
+
+    if echo "${first_pass_output}" | grep -qE "ensure CRDs are installed first|failed calling webhook"; then
+      debug "bootstrap: waiting for CRDs and webhooks to settle before retry"
+      kubectl --kubeconfig "${kubeconfig}" wait \
+        --for=condition=Established crd --all --timeout=60s 2>/dev/null || true
+      kubectl --kubeconfig "${kubeconfig}" wait \
+        --for=condition=Available deployment --all --all-namespaces \
+        --timeout=120s 2>/dev/null || true
+      sleep 3
+
+      debug "bootstrap: retrying ${addon_name}"
+      if ! echo "${rendered}" | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f -; then
+        error "bootstrap: kubectl apply failed for ${addon_name} (retry)"
+        return 1
+      fi
+    fi
+
+    debug "bootstrap: waiting for ${addon_name} workloads to become ready"
+    kubectl --kubeconfig "${kubeconfig}" wait \
+      --for=condition=Available deployment --all --all-namespaces \
+      --timeout=180s 2>/dev/null || true
+    kubectl --kubeconfig "${kubeconfig}" rollout status daemonset \
+      --all --all-namespaces --timeout=180s 2>/dev/null || true
+  done
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::bootstrap "${@}"

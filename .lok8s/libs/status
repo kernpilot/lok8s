@@ -1,0 +1,114 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# status — cluster and domain status reporting
+# Reports cluster health, node status, target build state,
+# and Tilt status for a given domain.
+
+import ^utils/types
+import ^utils/verbose
+import ^libs/provision
+
+main::status() {
+  local domain="${domain:-}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to check (default: active domain)'
+    "${args[@]}"
+  )
+  :args "Cluster status" "${@}"
+
+  status::all "${domain}"
+}
+
+# ── Cluster status ──────────────────────────────────────
+# Reports cluster phase from the driver contract.
+# Usage: status::cluster <domain>
+status::cluster() {
+  local domain="$1"
+
+  echo "--- Cluster ---"
+  provision::dispatch_status "${domain}" 2>&1 || true
+  echo ""
+}
+
+# ── Node status ─────────────────────────────────────────
+# Reports node status via kubectl (if kubeconfig is available).
+# Usage: status::nodes
+status::nodes() {
+  if command -v kubectl &>/dev/null && [[ -f "${KUBECONFIG:-}" ]]; then
+    echo "--- Nodes ---"
+    kubectl get nodes -o wide 2>/dev/null || echo "  (not reachable)"
+    echo ""
+  fi
+}
+
+# ── Target status ───────────────────────────────────────
+# Reports build state for each target under .lok8s/<domain>/targets/.
+# Usage: status::targets <domain>
+status::targets() {
+  local domain="$1"
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+
+  echo "--- Targets ---"
+  local -a _targets=()
+  mapfile -t _targets < <(targets::discover "${domain}")
+  if (( ${#_targets[@]} > 0 )); then
+    local tname
+    for tname in "${_targets[@]}"; do
+      [[ -n "${tname}" ]] || continue
+      local artifact="${domain_dir}/artifacts/${tname}/artifacts.yaml"
+      if [[ -f "${artifact}" ]]; then
+        echo "  ${tname}: built"
+      else
+        echo "  ${tname}: pending"
+      fi
+    done
+  else
+    echo "  No targets directory"
+  fi
+  echo ""
+}
+
+# ── Tilt status ─────────────────────────────────────────
+# Reports whether the lok8s-managed Tilt session is running. Tilt is the
+# local dev loop, so this is only meaningful for `lo` (kind) clusters —
+# KubeOne/Capi/Kkp clusters have no local Tilt session and a status check
+# there used to run `tilt status`, which is not even a tilt subcommand
+# (`unknown command "status" for "tilt"`). Liveness comes from lok8s's own
+# PID file (written by tilt::up), not a tilt API call.
+# Usage: status::tilt <kind>
+status::tilt() {
+  local kind="${1:-}"
+  [[ "${kind}" == "lo" ]] || return 0
+
+  echo "--- Tilt ---"
+  local pidfile="${PATH_BASE}/.tilt.pid" pid=""
+  [[ -f "${pidfile}" ]] && pid="$(cat "${pidfile}" 2>/dev/null)"
+  if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+    echo "  running (pid ${pid})"
+  else
+    echo "  (not running)"
+  fi
+}
+
+# ── Run all status checks ──────────────────────────────
+# Convenience function to report full status for a domain.
+# Usage: status::all <domain>
+status::all() {
+  local domain="$1"
+
+  echo "=== Domain: ${domain} ==="
+  echo ""
+
+  # Resolve the driver kind so the Tilt section only runs for `lo` clusters.
+  local kind=""
+  local _spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${_spec}" ]] && kind=$(yq -r '.kind' "${_spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+  status::cluster "${domain}"
+  status::nodes
+  status::targets "${domain}"
+  status::tilt "${kind}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::status "${@}"

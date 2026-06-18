@@ -1,0 +1,150 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz-runner — CI runner config registration stub
+# Registers and manages spec.runner configuration with the kubehz API.
+# The actual runner controller runs on the kubehz-core side;
+# this lib only sends the desired runner spec to the API.
+#
+# Environment:
+#   KUBEHZ_TOKEN   — Bearer token for kubehz API authentication
+#   KUBEHZ_API_URL — Base URL of the kubehz API (https://api.kubehz.dev)
+
+import ^utils/verbose
+
+# ── spec.runner schema ────────────────────────────────────
+#
+# spec:
+#   runner:
+#     provider: hetzner          # required: cloud provider for VMs
+#     type: cpx31                # required: VM type / size
+#     min: 0                     # optional: minimum idle runners (default: 0)
+#     max: 3                     # optional: maximum concurrent runners (default: 3)
+#     ttl: 2h                    # optional: max VM lifetime (default: 2h)
+#     labels:                    # optional: GitHub Actions runner labels
+#       - lok8s
+#       - e2e
+
+# ── Defaults ──────────────────────────────────────────────
+
+: "${KUBEHZ_RUNNER_MIN:=0}"
+: "${KUBEHZ_RUNNER_MAX:=3}"
+: "${KUBEHZ_RUNNER_TTL:=2h}"
+
+# ── Validation ────────────────────────────────────────────
+
+# Validate spec.runner config from a cluster spec file.
+# Usage: kubehz_runner::validate <spec_file>
+# Returns 1 on validation failure.
+kubehz_runner::validate() {
+  local spec_file="$1"
+  local provider type min max ttl
+
+  provider=$(yq -r '.spec.runner.provider // ""' "${spec_file}")
+  type=$(yq -r '.spec.runner.type // ""' "${spec_file}")
+  min=$(yq -r ".spec.runner.min // ${KUBEHZ_RUNNER_MIN}" "${spec_file}")
+  max=$(yq -r ".spec.runner.max // ${KUBEHZ_RUNNER_MAX}" "${spec_file}")
+  ttl=$(yq -r ".spec.runner.ttl // \"${KUBEHZ_RUNNER_TTL}\"" "${spec_file}")
+
+  if [[ -z "${provider}" ]]; then
+    error "spec.runner.provider is required"
+    return 1
+  fi
+
+  if [[ "${provider}" != "hetzner" ]]; then
+    error "spec.runner.provider must be 'hetzner' (got: ${provider})"
+    return 1
+  fi
+
+  if [[ -z "${type}" ]]; then
+    error "spec.runner.type is required (e.g. cpx31, cx22)"
+    return 1
+  fi
+
+  if ! [[ "${min}" =~ ^[0-9]+$ ]] || ! [[ "${max}" =~ ^[0-9]+$ ]]; then
+    error "spec.runner.min and max must be non-negative integers"
+    return 1
+  fi
+
+  if (( min > max )); then
+    error "spec.runner.min (${min}) cannot exceed max (${max})"
+    return 1
+  fi
+
+  if ! [[ "${ttl}" =~ ^[0-9]+[hm]$ ]]; then
+    error "spec.runner.ttl must match format like '2h' or '30m' (got: ${ttl})"
+    return 1
+  fi
+
+  verbose "spec.runner validation passed: provider=${provider} type=${type} min=${min} max=${max} ttl=${ttl}"
+  return 0
+}
+
+# ── API registration ──────────────────────────────────────
+
+# Register runner config with kubehz API.
+# Usage: kubehz_runner::register <cluster_id> <spec_file>
+kubehz_runner::register() {
+  local cluster_id="$1"
+  local spec_file="$2"
+  local api_url="${KUBEHZ_API_URL:?KUBEHZ_API_URL is required}"
+  local token="${KUBEHZ_TOKEN:?KUBEHZ_TOKEN is required}"
+
+  http::require_https "${api_url}" "KUBEHZ_API_URL" || return 1
+
+  kubehz_runner::validate "${spec_file}" || return 1
+
+  local payload
+  payload=$(yq -o=json '.spec.runner' "${spec_file}")
+
+  verbose "Registering runner config for cluster ${cluster_id}"
+  local response http_code
+  response=$(curl -fsSL -w "\n%{http_code}" \
+    -X PUT \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" \
+    "${api_url}/api/clusters/${cluster_id}/runner")
+
+  http_code=$(echo "${response}" | tail -1)
+  local body
+  body=$(echo "${response}" | sed '$d')
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    verbose "Runner config registered successfully"
+    echo "${body}"
+    return 0
+  else
+    error "Failed to register runner config (HTTP ${http_code}): ${body}"
+    return 1
+  fi
+}
+
+# Deregister runner config from kubehz API.
+# Usage: kubehz_runner::deregister <cluster_id>
+kubehz_runner::deregister() {
+  local cluster_id="$1"
+  local api_url="${KUBEHZ_API_URL:?KUBEHZ_API_URL is required}"
+  local token="${KUBEHZ_TOKEN:?KUBEHZ_TOKEN is required}"
+
+  http::require_https "${api_url}" "KUBEHZ_API_URL" || return 1
+
+  verbose "Deregistering runner config for cluster ${cluster_id}"
+  local response http_code
+  response=$(curl -fsSL -w "\n%{http_code}" \
+    -X DELETE \
+    -H "Authorization: Bearer ${token}" \
+    "${api_url}/api/clusters/${cluster_id}/runner")
+
+  http_code=$(echo "${response}" | tail -1)
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    verbose "Runner config deregistered successfully"
+    return 0
+  else
+    local body
+    body=$(echo "${response}" | sed '$d')
+    error "Failed to deregister runner config (HTTP ${http_code}): ${body}"
+    return 1
+  fi
+}

@@ -1,0 +1,178 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# deploy — per-target artifact deployment
+# Iterates targets (from args, or alphabetically from targets/), applies
+# CRDs first, then resources, waits for health between targets.
+# Workload-plane ordering is intentionally not a framework primitive:
+# kubectl handles in-manifest order, Tilt handles runtime deps at the
+# resource level, cluster-infra ordering lives in cluster.spec.bootstrap.
+
+import ^utils/types
+import ^utils/verbose
+
+main::deploy() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local filter cluster_override
+  local -a deploy_targets
+  local -a args=(
+    'domain|:^~domain'   'Domain to use'
+    'filter|'            'Label filter (e.g. type=system)'
+    'cluster-override|'  'Override cluster domain for kubeconfig resolution'
+    'deploy-targets'     'Specific targets to deploy (optional)'
+    "${args[@]:-}"
+  )
+  :args "Deploy artifacts" "${@}"
+  _resolve_kubeconfig_for_domain
+
+  if [[ -n "${filter:-}" ]]; then
+    local fkey="${filter%%=*}"
+    local fval="${filter#*=}"
+    deploy::apply_filtered "${domain}" "$fkey" "$fval"
+  else
+    deploy::apply "${domain}" "${deploy_targets[@]}"
+  fi
+}
+
+main::destroy() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Destroy a cluster" "${@}"
+  provision::dispatch_destroy "${domain}"
+}
+
+# deploy::_has_objects — return 0 if a YAML stream contains at least one
+# kubernetes object, 1 otherwise. Empty streams (zero docs, comments only,
+# whitespace, or only `---` separators) return 1.
+#
+# Used by apply paths to skip `kubectl apply` gracefully — kubectl apply
+# fails with "error: no objects passed to apply" on empty streams, which
+# is technically correct but breaks legitimate workflows like deploying
+# a target that legitimately has no resources yet, or applying a
+# label-filtered subset that excludes everything in a target.
+#
+# Implementation: any line that has a `kind:` declaration is taken as
+# evidence of an object. Robust enough for kustomize output (which
+# always emits a `kind:` field at the top of each doc).
+#
+# Usage:
+#   if deploy::_has_objects <<< "${stream}"; then ...
+#   if deploy::_has_objects < some_file.yaml; then ...
+deploy::_has_objects() {
+  grep -qE '^kind:[[:space:]]+[A-Za-z]'
+}
+
+# Apply per-target artifacts for a domain.
+# Usage: deploy::apply <domain> [target...]
+#   - With explicit targets: apply just those (CLI args).
+#   - Without: iterate alphabetically over targets/<name>/ dirs.
+#   - Order within the loop is alphabetical; it is NOT a dependency order.
+#     If ordering matters, put it in cluster.spec.bootstrap (driver addons)
+#     or express it as Tilt resource_deps inside the Tiltfile.
+deploy::apply() {
+  local domain="${1:-"${DOMAIN_NAME:-lok8s.dev}"}"
+  shift 2>/dev/null || true
+  local -a requested_targets=("$@")
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+  local targets_dir="${domain_dir}/targets"
+  local artifacts_dir="${domain_dir}/artifacts"
+  # Determine which targets to deploy
+  local -a targets=()
+  mapfile -t targets < <(targets::discover "${domain}" "${requested_targets[@]}")
+
+  if (( ${#targets[@]} == 0 )); then
+    warn "No targets to deploy for ${domain}"
+    return 0
+  fi
+
+  for target in "${targets[@]}"; do
+    local artifact="${artifacts_dir}/${target}/artifacts.yaml"
+    if [[ ! -f "${artifact}" ]]; then
+      warn "No artifacts for target ${target}, skipping"
+      continue
+    fi
+
+    debug "Deploying target: ${target}"
+
+    # Phase 1: Extract and apply CRDs first. Server-side apply — large
+    # CRDs (CNPG, CAPI) exceed the client-side last-applied annotation
+    # limit (262144 bytes).
+    local crds
+    crds=$(yq 'select(.kind == "CustomResourceDefinition")' "${artifact}" 2>/dev/null || true)
+    if deploy::_has_objects <<< "${crds}"; then
+      debug "Applying CRDs for ${target}"
+      echo "${crds}" | kubectl apply --server-side --force-conflicts -f -
+      deploy::wait_crds "${crds}"
+    fi
+
+    # Phase 2: Apply remaining resources. Server-side like phase 1 (the
+    # artifact still contains the CRDs; re-applying them server-side is
+    # a no-op). Skip when the artifact has no objects — empty targets
+    # are valid (structure exists, no resources yet) and shouldn't fail
+    # deploy.
+    if deploy::_has_objects < "${artifact}"; then
+      debug "Applying resources for ${target}"
+      kubectl apply --server-side --force-conflicts -f "${artifact}"
+      # Phase 3: Wait for health (only when we actually applied something)
+      deploy::wait_healthy 120
+    else
+      debug "No objects in ${artifact}, skipping apply"
+    fi
+  done
+}
+
+# Apply artifacts with label-based filtering.
+# Usage: deploy::apply_filtered <domain> <label_key> <label_value>
+deploy::apply_filtered() {
+  local domain="$1" label_key="$2" label_value="$3"
+  local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
+
+  for dir in "${artifacts_dir}"/*/; do
+    [[ -d "${dir}" ]] || continue
+    local artifact="${dir}/artifacts.yaml"
+    [[ -f "${artifact}" ]] || continue
+
+    # Validate label key/value to prevent yq injection
+    if [[ ! "${label_key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${label_value}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      error "Invalid filter: key and value must be alphanumeric with . _ - /"
+      return 1
+    fi
+
+    local filtered
+    filtered=$(yq "select(.metadata.labels.\"lok8s.dev/${label_key}\" == \"${label_value}\")" "${artifact}" 2>/dev/null || true)
+    if deploy::_has_objects <<< "${filtered}"; then
+      debug "Applying filtered resources (${label_key}=${label_value}) from $(basename "${dir}")"
+      echo "${filtered}" | kubectl apply -f -
+    else
+      debug "No filtered objects (${label_key}=${label_value}) in $(basename "${dir}"), skipping"
+    fi
+  done
+}
+
+# Wait for CRDs to become established.
+deploy::wait_crds() {
+  local crds="$1"
+  local crd_name
+  while IFS= read -r crd_name; do
+    [[ -n "${crd_name}" ]] || continue
+    debug "Waiting for CRD: ${crd_name}"
+    kubectl wait --for=condition=Established crd/"${crd_name}" --timeout=60s 2>/dev/null || {
+      warn "CRD ${crd_name} not established within timeout"
+    }
+  done < <(echo "${crds}" | yq -r '.metadata.name // ""')
+}
+
+# Wait for deployments in the current context to become available.
+deploy::wait_healthy() {
+  local timeout="${1:-120}"
+  debug "Waiting for deployments to be available (timeout: ${timeout}s)"
+  kubectl wait --for=condition=Available deployment --all \
+    --all-namespaces --timeout="${timeout}s" 2>/dev/null || {
+    warn "Some deployments did not become available within ${timeout}s"
+  }
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::deploy "${@}"

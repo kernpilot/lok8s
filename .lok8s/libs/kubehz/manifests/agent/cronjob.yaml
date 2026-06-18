@@ -1,0 +1,88 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kubehz-heartbeat
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app: kubehz-heartbeat
+            app.kubernetes.io/name: kubehz-agent
+            app.kubernetes.io/part-of: kubehz
+        spec:
+          serviceAccountName: kubehz-agent
+          restartPolicy: Never
+          containers:
+            - name: heartbeat
+              image: registry.k8s.io/kubectl:v1.31.4
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  KUBE_VERSION=$(kubectl version -o json 2>/dev/null | \
+                    sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
+
+                  NODES=$(kubectl get nodes -o json | \
+                    sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' | head -20)
+
+                  NODE_ARRAY="["
+                  first=true
+                  for node in ${NODES}; do
+                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    roles=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null && echo "control-plane" || echo "worker")
+                    if [ "${first}" = "true" ]; then first=false; else NODE_ARRAY="${NODE_ARRAY},"; fi
+                    NODE_ARRAY="${NODE_ARRAY}{\"name\":\"${node}\",\"status\":\"${status}\",\"roles\":\"${roles}\"}"
+                  done
+                  NODE_ARRAY="${NODE_ARRAY}]"
+
+                  CERT_EXPIRY=$(kubectl get csr -o json 2>/dev/null | \
+                    sed -n 's/.*"expirationTimestamp": *"\([^"]*\)".*/\1/p' | \
+                    sort | head -1)
+                  [ -z "${CERT_EXPIRY}" ] && CERT_EXPIRY="unknown"
+
+                  PAYLOAD=$(cat <<PAYLOAD_EOF
+                  {
+                    "clusterId": "${CLUSTER_ID}",
+                    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                    "kubernetes": { "version": "${KUBE_VERSION}" },
+                    "nodes": ${NODE_ARRAY},
+                    "certificates": { "expiresAt": "${CERT_EXPIRY}" }
+                  }
+                  PAYLOAD_EOF
+                  )
+
+                  curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                    -H "Content-Type: application/json" \
+                    -d "${PAYLOAD}"
+              envFrom:
+                - configMapRef:
+                    name: kubehz-agent-config
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 65534
+                capabilities:
+                  drop:
+                    - ALL

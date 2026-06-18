@@ -1,0 +1,15 @@
+# Test fixture: self-hosted registered kubehz cluster
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: self-reg-test
+spec:
+  kubernetes:
+    version: "v1.31.10"
+  cluster:
+    domain: self.kubehz.dev
+    namespace: default
+  kubehz:
+    hosting: self
+    access: registered
+    apiUrl: https://api.kubehz.dev

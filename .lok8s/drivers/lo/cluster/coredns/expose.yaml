@@ -1,0 +1,22 @@
+# CoreDNS LoadBalancer Service — exposes DNS externally
+# Used for domain resolution from developer machine
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns-external
+  namespace: kube-system
+  labels:
+    k8s-app: kube-dns
+spec:
+  type: LoadBalancer
+  selector:
+    k8s-app: kube-dns
+  ports:
+    - name: dns-tcp
+      port: 53
+      targetPort: 53
+      protocol: TCP
+    - name: dns-udp
+      port: 53
+      targetPort: 53
+      protocol: UDP

@@ -1,0 +1,115 @@
+# lok8s binary dependencies — managed by b (github.com/fentas/b)
+# Run `b install` to install all, `b update` to upgrade.
+#
+# Binaries are tagged with `groups:` so profiles can select a subset via
+# JMESPath. Consumers get only the binaries their chosen profile needs.
+
+binaries:
+  oci://docker: {}
+
+  sops:
+    groups: [core]
+  ssh-to-age:
+    groups: [core]
+  kubectl:
+    groups: [core]
+  jq:
+    groups: [core]
+  yq:
+    groups: [core]
+  renvsubst:
+    alias: envsubst
+    groups: [core]
+  github.com/arg-sh/argsh:
+    asset: argsh
+    groups: [core]
+    onPost: "${B_BIN} builtin ${B_EVENT}"
+
+  kustomize:
+    groups: [kustomize]
+  # khelm: kustomize exec plugin discovered via KUSTOMIZE_PLUGIN_HOME.
+  # Used for bootstrap addons at .lok8s/addons/{cilium,metallb,...}.
+  # The framework itself never shells out to the helm CLI.
+  github.com/mgoltzsche/khelm:
+    file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
+    groups: [kustomize]
+
+  kind:
+    groups: [local]
+  mkcert:
+    groups: [local]
+  tilt:
+    groups: [local]
+  github.com/bats-core/bats-core:
+    alias: bats
+    groups: [local, core]
+
+  clusterctl:
+    groups: [capi]
+  hcloud:
+    groups: [capi, kubeone]
+
+  github.com/kubermatic/kubeone:
+    groups: [kubeone]
+
+#
+# ── Env-sync profiles
+# Consumers install with: b env add github.com/kernpilot/lok8s#<profile>
+# See https://binary.help/env-sync/ for details.
+#
+# Profile hierarchy:
+#   core                      — framework only (remote deploy)
+#   kustomize                 — kustomize plugins (standalone)
+#   local     ⊇ core,kustomize — local dev (kind + Tilt)
+#   capi      ⊇ local         — CAPI provisioning
+#   kubeone   ⊇ local         — KubeOne provisioning
+
+profiles:
+  core:
+    description: "Framework only: .lok8s/ + default lok8s.dev domain (remote deploy)"
+    files:
+      .lok8s/**:
+      .envrc:
+      .gitignore:
+      .mcp.json:
+      .bin/b.yaml:
+        select:
+          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'core')])}"
+
+  kustomize:
+    description: "Kustomize plugins (built binaries)"
+    files:
+      .kustomize/**:
+      .bin/b.yaml:
+        select:
+          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'kustomize')])}"
+
+  local:
+    description: "Local dev stack: core + kustomize + Tilt + kind"
+    includes:
+      - core
+      - kustomize
+    files:
+      Tiltfile:
+      services.yaml:
+      .bin/b.yaml:
+        select:
+          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'local')])}"
+
+  capi:
+    description: "Cluster API provisioning (local + CAPI binaries)"
+    includes:
+      - local
+    files:
+      .bin/b.yaml:
+        select:
+          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'capi')])}"
+
+  kubeone:
+    description: "KubeOne provisioning (local + KubeOne binaries)"
+    includes:
+      - local
+    files:
+      .bin/b.yaml:
+        select:
+          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'kubeone')])}"

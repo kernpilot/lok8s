@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubehz-agent-config
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+data:
+  KUBEHZ_API_URL: "KUBEHZ_API_URL_PLACEHOLDER"
+  CLUSTER_ID: "CLUSTER_ID_PLACEHOLDER"

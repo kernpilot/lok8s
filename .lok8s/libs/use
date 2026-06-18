@@ -1,0 +1,88 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# use — set or show the active domain (clusters/.active)
+#
+# `lo use <domain>`         set the active domain (positional)
+# `lo use --domain <d>`     set the active domain (global flag)
+# `lo use`                  show the current active domain + the available ones
+
+import ^utils/verbose
+
+# use::_set_active <domain> — validate and persist the active domain.
+# Pure (only touches PATH_CLUSTERS) so it is unit-testable. Rejects names
+# that fail the character allowlist (path-traversal guard) or that don't
+# resolve to a real domain directory with a cluster/deploy spec.
+use::_set_active() {
+  local target="$1"
+  if [[ ! "${target}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    error "invalid domain name: ${target}"
+    return 1
+  fi
+  local base="${PATH_CLUSTERS}/${target}"
+  if [[ ! -f "${base}/cluster.lok8s.yaml" && ! -f "${base}/deploy.lok8s.yaml" ]]; then
+    error "domain not found: clusters/${target}/ (no cluster.lok8s.yaml or deploy.lok8s.yaml)"
+    return 1
+  fi
+  mkdir -p "${PATH_CLUSTERS}"
+  echo "${target}" > "${PATH_CLUSTERS}/.active"
+  echo "Active domain: ${target}"
+}
+
+main::use() {
+  # The target domain comes from a positional (`lo use <domain>`) or the
+  # global --domain flag (`lo use --domain <domain>`). With neither, show the
+  # current active domain plus the available ones. NOTE: do NOT use the
+  # ~domain type here — it auto-resolves to the *active* domain, which would
+  # make a bare `lo use` silently re-set the active instead of listing.
+  local -a set_domain
+  local -a args=(
+    'set-domain'  'Domain to set active (omit to show current + available)'
+    "${args[@]}"
+  )
+  :args "Set or show the active domain" "${@}"
+
+  # `${set_domain[0]:-}` (not `${#set_domain[@]}`) — the latter throws
+  # "unbound variable" on an empty array under the CLI's `set -u`.
+  local target="${set_domain[0]:-}"
+  if [[ -z "${target}" ]]; then
+    # No positional. main() resolves the global --domain into DOMAIN_NAME, but
+    # so does an absent flag (it falls back to .active). Treat DOMAIN_NAME as
+    # an explicit target only when it differs from the current active — so a
+    # bare `lo use` still lists, while `lo use --domain X` sets X.
+    local _active_now=""
+    [[ -f "${PATH_CLUSTERS}/.active" ]] && _active_now="$(cat "${PATH_CLUSTERS}/.active")"
+    if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "${_active_now}" ]]; then
+      target="${DOMAIN_NAME}"
+    fi
+  fi
+
+  [[ -z "${target}" ]] || { use::_set_active "${target}"; return; }
+
+  # Show current + available domains
+  if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
+    echo "Active: $(cat "${PATH_CLUSTERS}/.active")"
+  else
+    echo "No active domain set."
+  fi
+
+  echo ""
+  echo "Available domains:"
+  for spec in "${PATH_CLUSTERS}"/*/cluster.lok8s.yaml; do
+    [[ -f "${spec}" ]] || continue
+    local d k
+    d="$(basename "$(dirname "${spec}")")"
+    k="$(yq -r '.kind' "${spec}" 2>/dev/null || echo "?")"
+    echo "  ${d} (${k})"
+  done
+
+  for spec in "${PATH_CLUSTERS}"/*/deploy.lok8s.yaml; do
+    [[ -f "${spec}" ]] || continue
+    local d ref
+    d="$(basename "$(dirname "${spec}")")"
+    ref="$(yq -r '.spec.clusterRef.domain // "?"' "${spec}" 2>/dev/null || echo "?")"
+    echo "  ${d} (Deploy -> ${ref})"
+  done
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::use "${@}"

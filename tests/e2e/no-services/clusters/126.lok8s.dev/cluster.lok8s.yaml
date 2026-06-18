@@ -1,0 +1,17 @@
+# Minimal *.lok8s.dev cluster spec. The framework derives every other
+# field from the slot (126) and domain-independent defaults:
+#   network.name:   metadata.name (e2e-noop)
+#   network.cidr:   10.125.126.0/24
+#   registries:     shared, default io-* mirror set
+#   nodes:          CP=1, workers=0, hostPorts=false (slot != 125)
+#   loadBalancer:   pool 10.125.126.125-10.125.126.150
+#   bootstrap:      [cilium] (framework default)
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-noop
+spec:
+  kubernetes:
+    version: "v1.31.4"
+  cluster:
+    domain: 126.lok8s.dev

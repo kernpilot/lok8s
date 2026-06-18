@@ -1,0 +1,338 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# hetzner — Hetzner Cloud provider
+# Declarative resource provisioning from JSON/YAML descriptors via hcloud CLI.
+# Supports cloud VMs + bare metal (Robot) + per-server cloud-init.
+# Adapted from github.com/lanisce/cloud-init/provider/hetzner
+
+PATH_SCRIPTS="${PATH_LOK8S}"
+import ^utils/verbose
+
+: "${CLOUD_HETZNER_JSON:=""}"
+: "${CLOUD_DRY_RUN:=""}"
+: "${CLOUD_DRY_RUN_PATH:=""}"
+
+_HETZNER_DIR="${BASH_SOURCE[0]%/*}"
+# shellcheck source=utils/json.sh
+source "${_HETZNER_DIR}/utils/json.sh"
+# shellcheck source=utils/resources.sh
+source "${_HETZNER_DIR}/utils/resources.sh"
+
+# ── Provider contract ────────────────────────────────────
+#
+# Implements provider::* from .lok8s/libs/provider.
+# PROVIDER_CONFIG_FILE is a YAML or JSON descriptor file.
+# When it's a JSON descriptor (hetzner.json format), the full
+# hetzner::create loop handles all resource types with per-server
+# cloud-init hooks. When it's simple YAML config fields, the
+# provider reads the config and dispatches to the create loop.
+
+_cfg() { yq -r "$1" "${PROVIDER_CONFIG_FILE}"; }
+
+provider::validate() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+
+  command -v hcloud &>/dev/null || {
+    error "hcloud CLI not found. Install: https://github.com/hetznercloud/cli"
+    return 1
+  }
+  credentials::require hetzner || return 1
+  # hcloud auth: HCLOUD_TOKEN env is sufficient (CI/automation); a CLI
+  # context is the interactive alternative — require either, then prove
+  # the credentials actually work with a cheap read call.
+  local context
+  context="$(hcloud context active 2>/dev/null || echo "")"
+  if [[ -z "${HCLOUD_TOKEN:-}" && -z "${context}" ]]; then
+    error "No hcloud credentials: set HCLOUD_TOKEN or run: hcloud context create <name>"
+    return 1
+  fi
+  hcloud server-type list -o noheader &>/dev/null || {
+    error "hcloud API not reachable with the provided credentials"
+    return 1
+  }
+  debug "hetzner provider validated (${context:+context: ${context}}${context:-HCLOUD_TOKEN env})"
+}
+
+provider::credential_data() {
+  [[ -n "${HCLOUD_TOKEN:-}" ]] || { error "HCLOUD_TOKEN not set"; return 1; }
+  echo "hcloud-token=${HCLOUD_TOKEN}"
+  [[ -z "${HROBOT_USER:-}" ]]     || echo "robot-user=${HROBOT_USER}"
+  [[ -z "${HROBOT_PASSWORD:-}" ]] || echo "robot-password=${HROBOT_PASSWORD}"
+}
+
+provider::provision() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  local work_dir="${2:-/tmp}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  # Log all operations to a file (always, regardless of quiet mode)
+  export CLOUD_LOG_FILE="${work_dir}/hetzner-provision.log"
+  mkdir -p "${work_dir}"
+  : > "${CLOUD_LOG_FILE}"
+  _hetzner_log "provision started: config=${config_file} work_dir=${work_dir}"
+
+  [[ -f "${config_file}" ]] || { error "config not found: ${config_file}"; return 1; }
+
+  # Source the cloud-config generator (for per-server cloud-init)
+  local _cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
+  if [[ -f "${_cc_script}" ]]; then
+    # shellcheck source=/dev/null
+    source "${_cc_script}"
+  fi
+
+  # Set up cloud-init environment from config
+  local _ci_path _ci_modules
+  _ci_path=$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")
+  _ci_modules=$(_cfg '.cloudInit.modules // ""' 2>/dev/null || echo "")
+
+  # Resolve relative path from the config file's directory
+  if [[ -n "${_ci_path}" ]] && [[ "${_ci_path}" != /* ]]; then
+    _ci_path="$(dirname "${config_file}")/${_ci_path}"
+  fi
+  # Fall back to built-in default
+  if [[ -z "${_ci_path}" ]] || [[ ! -d "${_ci_path}" ]]; then
+    _ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
+  fi
+
+  export CLOUD_PATH="${_ci_path}"
+  export CLOUD_PATHD="${_ci_modules}"
+  local _ci_user _ci_group _ci_pub
+  _ci_user=$(_cfg '.cloudInit.user // "root"' 2>/dev/null || echo "root")
+  _ci_group=$(_cfg '.cloudInit.group // "root"' 2>/dev/null || echo "root")
+  _ci_pub=$(_cfg '.cloudInit.sshPubPath // ""' 2>/dev/null || echo "")
+  export CLOUD_USER="${_ci_user}"
+  export CLOUD_GROUP="${_ci_group}"
+  export CLOUD_PATH_PUB="${_ci_pub:-${HOME}/.ssh}"
+  CLOUD_PATH_PUB="${CLOUD_PATH_PUB/#\~/${HOME}}"
+
+  # Load the descriptor (JSON or YAML → JSON)
+  CLOUD_HETZNER_JSON="$(envsubst < "${config_file}")"
+  # If the config is YAML (not JSON), convert via yq
+  if ! echo "${CLOUD_HETZNER_JSON}" | jq empty 2>/dev/null; then
+    CLOUD_HETZNER_JSON="$(yq -o json '.' "${config_file}")"
+  fi
+
+  # Run the full provisioning sequence (JSON descriptor loop)
+  hetzner::lookup
+  hetzner::ssh-key
+  hetzner::floating-ip
+  hetzner::network
+  hetzner::load-balancer
+  hetzner::server
+  hetzner::volume
+
+  # Dump result state
+  hetzner::json '.' > "${work_dir}/hetzner.dump.json"
+  debug "hetzner provision complete"
+}
+
+provider::destroy() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  local work_dir="${2:-/tmp}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  # Try to read cluster_name from config, fall back to dump state
+  local cluster_name=""
+  cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
+  if [[ -z "${cluster_name}" ]] && [[ -f "${work_dir}/hetzner.dump.json" ]]; then
+    cluster_name=$(jq -r '.name // .cluster_name // empty' "${work_dir}/hetzner.dump.json" 2>/dev/null || echo "")
+  fi
+
+  # Fall back to reading the name field from the JSON descriptor
+  if [[ -z "${cluster_name}" ]] && [[ -f "${config_file}" ]]; then
+    cluster_name=$(jq -r 'if .server then .server[0].name | split("-") | .[:-2] | join("-") else .cluster_name // empty end' "${config_file}" 2>/dev/null || echo "")
+  fi
+
+  [[ -n "${cluster_name}" ]] || { error "cannot determine cluster name for destroy"; return 1; }
+
+  local selector="lok8s.dev/cluster=${cluster_name}"
+  debug "destroying hetzner resources for ${cluster_name}"
+
+  local ids
+  for resource in load-balancer server placement-group firewall volume floating-ip ssh-key network; do
+    ids=$(hcloud "${resource}" list -o json -l "${selector}" | jq -r '.[].id' 2>/dev/null || echo "")
+    for id in ${ids}; do
+      debug "deleting ${resource} ${id}"
+      hcloud "${resource}" delete "${id}" 2>/dev/null || true
+    done
+  done
+
+  debug "hetzner destroy complete for ${cluster_name}"
+}
+
+# ── Standard output ──────────────────────────────────────
+
+provider::output() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  local cluster_name ssh_user
+  cluster_name=$(_cfg '.cluster_name // ""')
+  ssh_user=$(_cfg '.sshUser // .cloudInit.user // "root"')
+
+  local selector="lok8s.dev/cluster=${cluster_name}"
+
+  local servers_json lb_json net_json
+  servers_json=$(hcloud server list -o json -l "${selector}")
+  lb_json=$(hcloud load-balancer list -o json -l "${selector}")
+  # Networks aren't created with the cluster label, so the label lookup
+  # returns nothing → the CCM never gets the network ID → node init hangs.
+  # Look the network up by its descriptor NAME instead (unique per project).
+  local _net_name_desc
+  _net_name_desc=$(_cfg '.network[0].name // ""' 2>/dev/null || echo "")
+  net_json=$(hcloud network list -o json -l "${selector}")
+  if [[ "$(echo "${net_json}" | jq 'length' 2>/dev/null || echo 0)" == "0" && -n "${_net_name_desc}" ]]; then
+    net_json=$(hcloud network list -o json | jq --arg n "${_net_name_desc}" '[.[] | select(.name == $n)]')
+  fi
+
+  local lb_address
+  lb_address=$(echo "${lb_json}" | jq -r '.[0].public_net.ipv4.ip // empty' 2>/dev/null || echo "")
+
+  # Build access array from SSH key entries in the descriptor
+  local access="[]"
+  local ssh_private_key ssh_public_key
+  ssh_private_key=$(_cfg '.sshPrivateKey // ""' 2>/dev/null || echo "")
+  ssh_public_key=$(_cfg '.sshPublicKey // ""' 2>/dev/null || echo "")
+
+  # Default access entry for cloud VMs
+  access=$(jq -n \
+    --arg user "${ssh_user}" \
+    --arg privkey "${ssh_private_key}" \
+    --arg pubkey "${ssh_public_key}" \
+    '[{"id": "default", "type": "ssh", "user": $user, "port": 22, "privateKey": $privkey, "publicKey": $pubkey}]')
+
+  # Check for bare metal servers with different access
+  if [[ -f "${config_file}" ]]; then
+    local _desc
+    _desc=$(cat "${config_file}")
+    local _has_root
+    _has_root=$(echo "${_desc}" | jq '[.server[]? | select(.["#cloud.root"] == "true")] | length')
+    if (( _has_root > 0 )); then
+      local robot_key
+      robot_key=$(echo "${_desc}" | jq -r '.server[]? | select(.["#cloud.root"] == "true") | .["#ssh-private-key"] // "" | select(. != "")' | head -1)
+      access=$(echo "${access}" | jq \
+        --arg user "${ssh_user}" \
+        --arg privkey "${robot_key:-${ssh_private_key}}" \
+        '. + [{"id": "dedicated", "type": "ssh", "user": $user, "port": 22, "privateKey": $privkey}]')
+    fi
+  fi
+
+  local nodes="[]"
+
+  # Cloud VMs from hcloud
+  local server
+  while IFS= read -r server; do
+    [[ -n "${server}" ]] || continue
+    local name pub_ip priv_ip role group
+    name=$(echo "${server}" | jq -r '.name')
+    pub_ip=$(echo "${server}" | jq -r '.public_net.ipv4.ip')
+    priv_ip=$(echo "${server}" | jq -r '.private_net[0].ip // .public_net.ipv4.ip')
+    role=$(echo "${server}" | jq -r '.labels["lok8s.dev/role"] // "worker"')
+    group=$(echo "${server}" | jq -r '.labels["lok8s.dev/group"] // "default"')
+
+    nodes=$(echo "${nodes}" | jq \
+      --arg name "${name}" --arg role "${role}" --arg group "${group}" \
+      --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
+      --arg user "${ssh_user}" \
+      '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "default", "ssh_user": $user, "ssh_port": 22}]')
+  done < <(echo "${servers_json}" | jq -c '.[]')
+
+  # Bare metal servers from JSON descriptor (#cloud.root with #external-ip)
+  if [[ -f "${config_file}" ]]; then
+    local _desc
+    _desc="${_desc:-$(cat "${config_file}")}"
+    while IFS= read -r server; do
+      [[ -n "${server}" ]] || continue
+      local name pub_ip priv_ip labels role group
+      name=$(echo "${server}" | jq -r '.name')
+      pub_ip=$(echo "${server}" | jq -r '.["#external-ip"] // empty')
+      [[ -n "${pub_ip}" ]] || continue
+      priv_ip=$(echo "${server}" | jq -r '.["#internal-ip"] // .["#external-ip"]')
+      labels=$(echo "${server}" | jq -r '.["#labels"] // ""')
+      role="worker"
+      group="dedicated"
+      [[ "${labels}" != *"role=control-plane"* ]] || role="control-plane"
+
+      nodes=$(echo "${nodes}" | jq \
+        --arg name "${name}" --arg role "${role}" --arg group "${group}" \
+        --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
+        --arg user "${ssh_user}" \
+        '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "dedicated", "ssh_user": $user, "ssh_port": 22}]')
+    done < <(echo "${_desc}" | jq -c '.server[]? | select(.["#cloud.root"] == "true")')
+  fi
+
+  local net_id net_name net_cidr
+  net_id=$(echo "${net_json}" | jq -r '.[0].id // empty' 2>/dev/null || echo "")
+  net_name=$(echo "${net_json}" | jq -r '.[0].name // empty' 2>/dev/null || echo "")
+  net_cidr=$(echo "${net_json}" | jq -r '.[0].ip_range // empty' 2>/dev/null || echo "")
+
+  jq -n \
+    --arg ep "${lb_address}" \
+    --argjson access "${access}" \
+    --argjson nodes "${nodes}" \
+    --arg net_id "${net_id}" --arg net_name "${net_name}" --arg net_cidr "${net_cidr}" \
+    '{
+      "api": {"endpoint": $ep, "port": 6443},
+      "access": $access,
+      "nodes": $nodes,
+      "network": {"id": $net_id, "name": $net_name, "cidr": $net_cidr}
+    }'
+}
+
+provider::status() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  local cluster_name
+  cluster_name=$(_cfg '.cluster_name // ""')
+
+  local servers_json running total
+  servers_json=$(hcloud server list -o json -l "lok8s.dev/cluster=${cluster_name}")
+  total=$(echo "${servers_json}" | jq 'length')
+  running=$(echo "${servers_json}" | jq '[.[] | select(.status == "running")] | length')
+
+  if (( total == 0 )); then echo "NotFound"
+  elif (( running == total )); then echo "Running"
+  else echo "Partial (${running}/${total} running)"; fi
+}
+
+# ── CLI entry point ──────────────────────────────────────
+
+main::hetzner() {
+  local dry_run hetzner_json
+  local -a globals=(
+    'hetzner-json|' 'Path to hetzner.json'
+  )
+  if is::set args; then globals=("${args[@]}"); else
+    local domain
+  fi
+  local -a args=(
+    'dry-run|:+'  'Enable dry-run mode (log commands without executing)'
+    "${globals[@]}"
+  )
+  :args "Hetzner Cloud provisioning" "${@}"
+
+  if [[ -n "${hetzner_json:-}" ]]; then
+    CLOUD_HETZNER_JSON_PATH="${hetzner_json}"
+  elif [[ -n "${domain:-}" ]]; then
+    CLOUD_HETZNER_JSON_PATH="${PATH_CLUSTERS}/${domain}/hetzner.json"
+  else
+    error "Either --hetzner-json or --domain required"
+    return 1
+  fi
+
+  [[ -f "${CLOUD_HETZNER_JSON_PATH}" ]] || {
+    error "No such file: ${CLOUD_HETZNER_JSON_PATH}"
+    return 1
+  }
+
+  if (( dry_run )); then
+    CLOUD_DRY_RUN=1
+    CLOUD_DRY_RUN_PATH="${PATH_LOK8S}/.state/dry-run"
+  fi
+
+  # Use the provider contract
+  export PROVIDER_CONFIG_FILE="${CLOUD_HETZNER_JSON_PATH}"
+  provider::validate || return $?
+  provider::provision "${CLOUD_HETZNER_JSON_PATH}" "$(dirname "${CLOUD_HETZNER_JSON_PATH}")"
+}

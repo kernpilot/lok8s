@@ -1,0 +1,17 @@
+# E2E: remote-lo — kind cluster on a Hetzner VM via provider contract.
+# Uses configRef so the e2e test can generate an ephemeral SSH key
+# and write the provider config with the key path at runtime.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-remote
+spec:
+  kubernetes:
+    version: "v1.31.4"
+  cluster:
+    domain: 129.lok8s.dev
+  provider:
+    name: hetzner
+    configRef: hetzner.json
+  expose:
+    enabled: true

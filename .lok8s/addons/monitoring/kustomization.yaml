@@ -1,0 +1,44 @@
+# monitoring — kube-prometheus-stack (Prometheus + Grafana + Alertmanager +
+# node-exporter + kube-state-metrics). A generic, reusable atom: bootstrap
+# `monitoring` by name to get the metrics/alerting/dashboards stack (chart
+# kube-prometheus-stack @80.2.0).
+#
+# This addon is the generic CONTROLLER/chart with PORTABLE defaults only (split
+# from a composite target the same way cert-manager was). The kubehz-specific
+# GLUE stays with the consuming cluster:
+#   - Helm-values glue (Grafana OIDC/SSO + datasources + persistence + admin
+#     secret, PVC storage classes/sizes, the Alertmanager notification receiver)
+#     → passed as inline `bootstrap:` overrides, deep-merged over values.yaml.
+#   - Kustomize-resource glue (the gateway HTTPRoute, the break-glass Grafana
+#     Secret) → the cluster's monitoring glue target (./targets/monitoring).
+#
+# Namespace: installs into `monitoring`, which is OWNED by the consuming
+# cluster's monitoring glue target (./targets/monitoring/namespace.yaml). We do
+# NOT ship a namespace.yaml here — same reason tempo/metrics-server omit one:
+# the namespace is created by the glue target, so bootstrap `monitoring` BEFORE
+# anything that needs the ns, and bootstrap the glue target alongside it. The
+# `namespace:` transformer still pins every rendered object to `monitoring`
+# (chart.yaml also pins it).
+#
+# Other monitoring-ns tenants (tempo, gatus) need this stack's Prometheus
+# Operator CRDs (ServiceMonitor) + the `monitoring` namespace — bootstrap them
+# AFTER `monitoring`.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployments (Grafana, kube-state-metrics, operator) carry immutable selectors,
+# so the transformer must not touch them (else in-place re-applies / migrations
+# from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: monitoring
+      lok8s.dev/type: system
+      lok8s.dev/category: observability
+
+namespace: monitoring
+
+generators:
+  - chart.yaml

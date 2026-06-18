@@ -1,0 +1,25 @@
+# Test fixture: Lo kind cluster spec WITH spec.oidc (apiserver structured auth).
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: test-oidc
+spec:
+  kubernetes:
+    version: "v1.35.5"
+  cluster:
+    domain: oidc.lok8s.dev
+    namespace: default
+  runtime: kind
+  oidc:
+    issuer: https://id.kubehz.dev
+    clientID: kubectl-cli
+    usernameClaim: email
+    usernamePrefix: "oidc:"
+    groupsClaim: groups
+    groupsPrefix: "oidc:"
+    caBundle: |
+      -----BEGIN CERTIFICATE-----
+      MIIBfakeDEVcertforTESTINGonly
+      -----END CERTIFICATE-----
+  bootstrap:
+    - cilium

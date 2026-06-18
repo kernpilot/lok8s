@@ -1,0 +1,26 @@
+apiVersion: kubeone.k8c.io/v1beta2
+kind: KubeOneCluster
+name: ${CLUSTER_NAME}
+
+versions:
+  kubernetes: "${K8S_VERSION}"
+
+cloudProvider:
+  ${CLOUD_PROVIDER}: {}
+  external: true
+
+clusterNetwork:
+  podSubnet: "${POD_SUBNET}"
+  serviceSubnet: "${SERVICE_SUBNET}"
+  cni:
+    ${CNI_PLUGIN}: {}
+
+features:
+  # Encrypt Secrets at rest in etcd. KubeOne generates and manages the
+  # encryption key + apiserver config and re-encrypts existing Secrets on
+  # apply (the EncryptionConfiguration encryption-provider path).
+  encryptionProviders:
+    enable: true
+
+machineController:
+  deploy: true${OIDC_CP_COMPONENTS}

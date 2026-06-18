@@ -1,0 +1,8 @@
+# Trivial workload target for the no-services scenario.
+# The scenario tests lok8s()'s services-loop-skip path. build::artifacts
+# iterates over targets/<name>/ directories; this one has a single
+# ConfigMap so kubectl apply doesn't error on an empty stream.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - placeholder-configmap.yaml

@@ -1,0 +1,24 @@
+# Values for the system-upgrade-controller chart (108.0.0) — generic addon defaults.
+#
+# IMPORTANT — verified against chart 108.0.0 (`helm show values` + the rendered
+# deployment template): this chart version exposes ONLY the keys below under
+# `global.cattle.systemDefaultRegistry`, `systemUpgradeController.image.*`,
+# `kubectl.image.*`, and the `systemUpgrade*`/`kubectl` config knobs consumed by
+# the controller ConfigMap. It does NOT template `replicaCount`, `resources`,
+# `tolerations`, or `global.cattle.psp.*`. The deployment is hardwired to a
+# single replica, `tolerations: [{operator: Exists}]` (already tolerates every
+# taint — control-plane, master, CriticalAddonsOnly, etc.), and sets no
+# container resource limits/requests.
+#
+# The CONTROLLER scheduling intent is therefore already satisfied by the chart's
+# built-in `operator: Exists` toleration. The PATCH JOBS the controller spawns
+# get their tolerations from each Plan's `.spec.tolerations` (the Plans are
+# cluster GLUE, supplied by the consumer), which IS where they take effect.
+#
+# Left effectively empty on purpose: defaults are correct for the controller. A
+# consumer that mirrors images through a private registry can override
+# global.cattle.systemDefaultRegistry inline.
+global:
+  cattle:
+    # Pull images from Docker Hub (rancher/*) directly; no private mirror.
+    systemDefaultRegistry: ""

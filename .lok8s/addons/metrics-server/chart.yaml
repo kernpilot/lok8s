@@ -1,0 +1,12 @@
+# khelm chart spec for metrics-server (HPA/`kubectl top` resource metrics).
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: metrics-server
+  namespace: kube-system
+kubeVersion: "1.35.5"
+repository: https://kubernetes-sigs.github.io/metrics-server/
+chart: metrics-server
+version: 3.13.0
+valueFiles:
+  - values.yaml

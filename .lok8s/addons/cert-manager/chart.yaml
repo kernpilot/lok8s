@@ -1,0 +1,11 @@
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+kubeVersion: "1.31.12"
+repository: https://charts.jetstack.io
+chart: cert-manager
+version: v1.20.1
+valueFiles:
+  - values.yaml

@@ -1,0 +1,32 @@
+# cert-manager (+ the Hetzner DNS-01 webhook) — framework addon.
+#
+# A generic, reusable atom: bootstrap `cert-manager` by name to get the
+# cert-manager controller + CRDs (jetstack v1.20.1) AND the Hetzner DNS-01 ACME
+# webhook (charts.hetzner.cloud 0.7.0), both in the cert-manager namespace.
+#
+# CLUSTER GLUE stays behind (NOT in this addon): the ClusterIssuer
+# (letsencrypt-prod, solverName: hetzner) and the hetzner-dns API-token Secret —
+# those are per-domain (ACME account, token) and live in the cluster's
+# networking target. Bootstrap `cert-manager` BEFORE the target that ships the
+# ClusterIssuer/Certificate CRs (their CRDs come from here).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart
+# Deployments carry immutable selectors.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: cert-manager
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: cert-manager
+
+generators:
+  - chart.yaml
+  - webhook.yaml
+
+resources:
+  - namespace.yaml

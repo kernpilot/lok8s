@@ -1,0 +1,273 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# init — scaffold lok8s project/service config from a correct template.
+#
+# `lo init service <name>`  scaffold a bare per-service lok8s.yaml, register it
+#                           in the project-root services.yaml, and ensure the
+#                           project-root Tiltfile is the canonical 2-line form.
+#
+# The point of this command is that nobody hand-writes service config from
+# imagination: the emitted lok8s.yaml is shaped to pass the per-service
+# validator in .lok8s/tilt/Tiltfile (build: block required; build is a mapping;
+# dockerfile/context are strings) and the services.yaml entry is shaped to pass
+# _validate_services_yaml. Everything optional is emitted commented-out so the
+# minimal artifact is also a correct one.
+
+import ^utils/verbose
+
+# init::_validate_name <name> — character allowlist / path-traversal guard.
+# Mirrors use::_set_active: a name becomes a directory and a services.yaml key,
+# so reject anything that could escape the project or break the YAML key.
+init::_validate_name() {
+  local name="$1"
+  if [[ ! "${name}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    error "invalid service name: '${name}' (must match ^[a-z0-9][a-z0-9._-]*$)"
+    return 1
+  fi
+}
+
+# init::_scaffold_lokyaml <path> <name> <force> — write a bare service lok8s.yaml.
+#
+# The active block is the smallest config the validator accepts: a `build:`
+# mapping with string context/dockerfile. Every other knob (live_update, ports,
+# workloads, tilt, the multi-image `components:` form) is emitted commented so
+# the file documents the schema without tripping `_validate_service` (which
+# rejects `components` as an unknown top-level key — multi-image repos swap
+# `build:` for `components:`, they do not add it alongside).
+#
+# Idempotent: refuses to clobber an existing lok8s.yaml unless force=1.
+init::_scaffold_lokyaml() {
+  local path="$1" name="$2" force="${3:-0}"
+  local file="${path}/lok8s.yaml"
+
+  if [[ -e "${file}" ]] && (( ! force )); then
+    warn "exists, not overwriting: ${file} (re-run with --force to replace)"
+    return 0
+  fi
+
+  mkdir -p "${path}"
+  cat > "${file}" <<EOF
+# Per-service lok8s.yaml for "${name}" — a bare object (no apiVersion/kind/
+# metadata/spec). The build: block is handed verbatim to Tilt's docker_build().
+# See docs/guide/services.md for the full schema.
+build:
+  context: .
+  dockerfile: Dockerfile          # or lok8s.Dockerfile
+  # live_update:                   # hot-reload without a full image rebuild
+  #   sync: [{ local_path: ./src, remote_path: /app/src }]
+  #   fall_back_on: { files: [package.json] }
+# ports:                           # host:container forwards for local dev
+#   - { from: 3000, to: 3000 }
+# workloads: [${name}]             # optional; default [${name}]
+# tilt: { labels: [${name}] }
+# ---- multi-image repos: use \`components:\` instead of \`build:\` ----
+# components:
+#   - { name: api, build: { context: ., dockerfile: Dockerfile.api } }
+#   - { name: worker, build: { context: ., dockerfile: Dockerfile.worker } }
+EOF
+
+  echo "Scaffolded ${file}"
+}
+
+# init::_merge_services <services_file> <name> <path> — add services.<name>.path.
+#
+# Creates services.yaml from a correct template (registry / defaults / services)
+# when absent. When present, merges with yq so existing entries are preserved —
+# `lo init service` is additive and idempotent. The merged shape stays within
+# the keys _validate_services_yaml allows (services.<name>.path).
+init::_merge_services() {
+  local services_file="$1" name="$2" path="$3"
+
+  if [[ ! -f "${services_file}" ]]; then
+    cat > "${services_file}" <<'EOF'
+# lok8s service definitions — committed.
+# Personal overrides go in services.local.yaml (gitignored, loaded via
+# LOK8S_SERVICE_CONFIG=local). See docs/guide/services.md for the full schema.
+
+registry:
+  endpoint: "${DOCKER_REGISTRY}"   # CI registry endpoint (env-substituted)
+  branch: "${DOCKER_PROJECT}"      # PR/branch slug — what the CI publishes under
+  tag: "${DOCKER_TAG}"             # commit SHA or build tag
+  prefix: lok8s.local              # canonical local image prefix
+
+defaults:
+  build: true        # default for services.<name>.build (true = build locally + Tilt live-update)
+  dockerfile: service
+
+services: {}
+EOF
+    debug "created services.yaml from template: ${services_file}"
+  fi
+
+  # Merge the entry with yq (mikefarah) so comments/other services survive.
+  # strenv() keeps the values literal (no surprise type coercion on the path).
+  SERVICE_NAME="${name}" SERVICE_PATH="${path}" \
+    yq -i '.services[strenv(SERVICE_NAME)].path = strenv(SERVICE_PATH)' "${services_file}"
+
+  echo "Registered services.${name}.path = ${path} in ${services_file}"
+}
+
+# init::_ensure_tiltfile <tiltfile> — guarantee the canonical 2-line Tiltfile.
+#
+# The project-root Tiltfile must be a thin loader so the lok8s extension owns
+# all the build/live-update logic. If it does not exist we write it. If it
+# exists and already loads the extension we leave it alone. If it exists but
+# hardcodes docker_build (the legacy hand-rolled form), we DO NOT clobber it —
+# replacing it could drop bespoke logic — and instead warn loudly.
+init::_ensure_tiltfile() {
+  local tiltfile="$1"
+
+  if [[ ! -f "${tiltfile}" ]]; then
+    cat > "${tiltfile}" <<'EOF'
+load('./.lok8s/tilt/Tiltfile', 'lok8s')
+lok8s()
+EOF
+    echo "Wrote canonical Tiltfile: ${tiltfile}"
+    return 0
+  fi
+
+  if grep -q "load('./.lok8s/tilt/Tiltfile', 'lok8s')" "${tiltfile}"; then
+    debug "Tiltfile already loads the lok8s extension: ${tiltfile}"
+    return 0
+  fi
+
+  if grep -qE '\bdocker_build\b' "${tiltfile}"; then
+    warn "Tiltfile ${tiltfile} hardcodes docker_build — NOT overwriting."
+    warn "Replace its body with the canonical 2-line form so the lok8s extension owns builds:"
+    warn "    load('./.lok8s/tilt/Tiltfile', 'lok8s')"
+    warn "    lok8s()"
+    return 0
+  fi
+
+  # Exists, no docker_build, but also no extension load — unknown custom form.
+  warn "Tiltfile ${tiltfile} exists but does not load the lok8s extension."
+  warn "Add the canonical 2-line form so services are picked up:"
+  warn "    load('./.lok8s/tilt/Tiltfile', 'lok8s')"
+  warn "    lok8s()"
+}
+
+# init::_service <name> <path> <force> — orchestrate the scaffold.
+#
+# Pure (no argsh :args) so it is unit-testable, mirroring the
+# use::_set_active / main::use split. init::service is the thin :args wrapper
+# that resolves flags and the default path, then delegates here.
+init::_service() {
+  local name="$1" path="$2" force="${3:-0}"
+
+  [[ -n "${name}" ]] || { error "service name is required: lo init service <name>"; return 1; }
+  init::_validate_name "${name}" || return 1
+  # Default path is ./<name>, relative to the project root.
+  [[ -n "${path}" ]] || path="./${name}"
+
+  init::_scaffold_lokyaml "${path}" "${name}" "${force}" || return 1
+  init::_merge_services "${PATH_BASE}/services.yaml" "${name}" "${path}" || return 1
+  init::_ensure_tiltfile "${PATH_BASE}/Tiltfile" || return 1
+
+  echo "Done. Next: add a Dockerfile in ${path}, then run 'lo up' (or 'tilt up')."
+}
+
+# init::service <name> [--path <dir>] [--force] — scaffold a bare service.
+init::service() {
+  local path="" force=0
+  local -a service_name
+  local -a args=(
+    'service-name'  'Service name (lowercase; becomes the services.yaml key)'
+    'path|p:'       'Directory for the service (default: ./<name>)'
+    'force|f:+'     'Overwrite an existing lok8s.yaml'
+    "${args[@]:-}"
+  )
+  :args "Scaffold a bare service lok8s.yaml + services.yaml entry + Tiltfile" "${@}"
+
+  init::_service "${service_name[0]:-}" "${path}" "${force}"
+}
+
+# init::_test_template_dir — absolute path to the vendored test scaffold tree.
+#
+# The generic Playwright suite template lives next to this lib, mirroring how the
+# kubehz lib finds its manifests/ (${PATH_LOK8S}/libs/kubehz/manifests). Kept in
+# a function so the path has a single definition and the orchestrator stays
+# unit-testable (tests can stub it).
+init::_test_template_dir() {
+  echo "${PATH_LOK8S}/libs/init.d/test"
+}
+
+# init::_scaffold_tests <dest> <force> — copy the test scaffold into <dest>.
+#
+# Copies the GENERIC, project- and domain-agnostic Playwright suite template
+# (utils/config + tls + resolver + mailpit + api-client + helpers + oidc,
+# fixtures, pages/BasePage + ExamplePage, config/<env> presets, setup/, a
+# placeholder example spec, playwright.config.ts, package.json, tsconfig,
+# .gitignore, README) into the project's tests/ dir. The template carries NO
+# project-specific hostnames or specs — it is parameterized entirely by
+# LOK8S_TEST_DOMAIN / config.urls and the SERVICES map the user edits.
+#
+# Idempotent + safe: refuses to write into a NON-EMPTY destination unless
+# force=1, so an existing suite is never clobbered. With force=1 it overwrites
+# file-by-file (it does NOT delete files the template doesn't ship, so local
+# additions survive).
+init::_scaffold_tests() {
+  local dest="$1" force="${2:-0}"
+  local src; src="$(init::_test_template_dir)"
+
+  [[ -d "${src}" ]] || { error "test scaffold template not found: ${src}"; return 1; }
+
+  if [[ -e "${dest}" ]]; then
+    if [[ ! -d "${dest}" ]]; then
+      error "destination exists and is not a directory: ${dest}"
+      return 1
+    fi
+    # Non-empty (ignoring dotfiles like a stray .gitignore is intentional: any
+    # content counts) and not forced -> refuse, to protect an existing suite.
+    if [[ -n "$(ls -A "${dest}" 2>/dev/null)" ]] && (( ! force )); then
+      warn "exists and is not empty, not overwriting: ${dest} (re-run with --force)"
+      return 0
+    fi
+  fi
+
+  mkdir -p "${dest}"
+  # Copy the template CONTENTS (not the dir itself) into dest. `cp -R src/.`
+  # copies dotfiles too (.gitignore). README.md is intentionally included.
+  cp -R "${src}/." "${dest}/"
+
+  echo "Scaffolded Playwright test suite into ${dest}"
+}
+
+# init::_test <path> <force> — orchestrate the test scaffold. Pure (no :args) so
+# it is unit-testable, mirroring init::_service.
+init::_test() {
+  local path="$1" force="${2:-0}"
+  # Default destination is ./tests at the project root.
+  [[ -n "${path}" ]] || path="${PATH_BASE}/tests"
+
+  init::_scaffold_tests "${path}" "${force}" || return 1
+
+  echo "Done. Next:"
+  echo "  cd ${path} && npm install && npx playwright install chromium"
+  echo "  edit utils/config.ts (the SERVICES map) for your stack, then:"
+  echo "  LOK8S_TEST_DOMAIN=<your-domain> npm test"
+}
+
+# init::test [--path <dir>] [--force] — scaffold a Playwright test suite.
+init::test() {
+  local path="" force=0
+  local -a args=(
+    'path|p:'   'Directory for the suite (default: ./tests)'
+    'force|f:+' 'Overwrite even when the directory is non-empty'
+    "${args[@]:-}"
+  )
+  :args "Scaffold a domain-parameterized Playwright integration suite (tests/)" "${@}"
+
+  init::_test "${path}" "${force}"
+}
+
+main::init() {
+  local -a usage=(
+    'service'  'Scaffold a bare service (lok8s.yaml + services.yaml + Tiltfile)'
+    'test'     'Scaffold a Playwright integration suite (tests/)'
+  )
+  :usage "Scaffold lok8s config from a correct template" "${@}"
+  "${usage[@]}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::init "${@}"

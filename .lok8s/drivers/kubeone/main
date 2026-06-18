@@ -1,0 +1,245 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# KubeOne driver — standalone production clusters via KubeOne
+# Implements: driver::provision, driver::destroy, driver::status, driver::kubeconfig
+#
+# Infrastructure is provisioned by the provider contract
+# (.lok8s/providers/<name>/main). KubeOne installs Kubernetes on
+# the provisioned nodes. No management cluster required.
+#
+# Work directory: clusters/<domain>/.kubeone/
+
+import ^utils/verbose
+import ^drivers/kubeone/config
+
+# ── CLI dispatch ─────────────────��────────────────────────
+
+main::driver() {
+  local -a usage=(
+    'provision|p@destructive'  'Provision a KubeOne cluster'
+    'destroy|d@destructive'    'Destroy a KubeOne cluster'
+    'status|s@readonly'        'Check cluster status'
+    'kubeconfig|k@readonly'    'Extract kubeconfig path'
+  )
+  :usage "KubeOne driver" "${@}"
+  "${usage[@]}"
+}
+
+# ── Driver contract ─���─────────────────────────────────────
+
+driver::provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Provision a KubeOne cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+
+  # Hosted path: delegate to kubehz API
+  kubehz::read_config "${cluster_yaml}"
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+    kubehz::provision_hosted "${domain}" "${cluster_yaml}"
+    return
+  fi
+
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+  mkdir -p "${work_dir}"
+
+  # 1. Provider is already loaded + validated by libs/provision.
+  if ! declare -F provider::provision &>/dev/null; then
+    error "KubeOne driver requires spec.provider (no provider loaded)"
+    return 1
+  fi
+
+  # 2. Provision infrastructure via the provider contract
+  provider::provision "${PROVIDER_CONFIG_FILE}" "${work_dir}"
+
+  # 3. Generate kubeone.yaml
+  local provider_name="${PROVIDER_NAME:-}"
+  kubeone::generate_config "${cluster_yaml}" "${provider_name}" "${work_dir}"
+
+  # 4. Append the host inventory to the manifest itself (apiEndpoint,
+  #    controlPlane.hosts, staticWorkers.hosts). Manifest fields are
+  #    versioned and strictly validated by kubeone — unlike the legacy
+  #    tfjson envelope, whose schema drifted under us (KubeOne 1.13
+  #    rejected the old `control_plane.hosts` shape).
+  rm -f "${work_dir}/output.json"
+  _append_inventory "${PROVIDER_CONFIG_FILE}" "${work_dir}/kubeone.yaml" || return 1
+
+  # 4b. spec.oidc: deliver the apiserver auth-config to every control-plane node
+  #     BEFORE apply. KubeOne can't place the file declaratively, and the manifest
+  #     sets --authentication-config to a fixed node path — so the file must exist
+  #     there or the kube-apiserver won't start. Fail-safe: abort here (no apply)
+  #     if delivery fails, rather than apply a flag that points at a missing file.
+  #     No-op unless spec.oidc is set.
+  kubeone::deliver_oidc_auth_config "${PROVIDER_CONFIG_FILE}" "${work_dir}" || return 1
+
+  # 5. Run kubeone apply
+  kubeone::apply "${work_dir}"
+
+  # 6. Copy kubeconfig to standard location
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  local src_kubeconfig
+  src_kubeconfig=$(kubeone::kubeconfig_path "${work_dir}" "${cluster_name}")
+
+  if [[ -f "${src_kubeconfig}" ]]; then
+    mkdir -p "${PATH_BASE}/.kubeconfig"
+    # Named by metadata.name — framework convention (bootstrap reads it)
+    cp "${src_kubeconfig}" "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+    chmod 600 "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+  else
+    error "Kubeconfig not found at ${src_kubeconfig} after kubeone apply"
+    return 1
+  fi
+}
+
+driver::destroy() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Destroy a KubeOne cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+
+  # Hosted path: delegate to kubehz API
+  kubehz::read_config "${cluster_yaml}"
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+    kubehz::destroy_hosted "${domain}" "${cluster_yaml}"
+    return
+  fi
+
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+
+  # 1. Reset Kubernetes (kubeone reset)
+  if [[ -f "${work_dir}/kubeone.yaml" ]]; then
+    kubeone::reset "${work_dir}" || warn "kubeone reset failed — continuing with infrastructure destroy"
+  fi
+
+  # 2. Destroy infrastructure via provider contract
+  if declare -F provider::destroy &>/dev/null; then
+    provider::destroy "${PROVIDER_CONFIG_FILE:-}" "${work_dir}"
+  else
+    warn "no provider loaded — cannot destroy infrastructure"
+  fi
+
+  # 3. Clean up kubeconfig (named by metadata.name)
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  rm -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+}
+
+driver::status() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Check KubeOne cluster status" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+
+  if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
+    # No kubeone config — check via provider if available
+    if declare -F provider::status &>/dev/null; then
+      provider::status "${PROVIDER_CONFIG_FILE:-}"
+    else
+      echo "NotProvisioned"
+    fi
+    return
+  fi
+
+  kubeone::status "${work_dir}"
+}
+
+driver::kubeconfig() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Extract kubeconfig" "${@}"
+
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
+  echo "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+}
+
+# ── Internal: manifest inventory ─────────────────────────
+#
+# Appends apiEndpoint + controlPlane.hosts + staticWorkers.hosts to the
+# rendered kubeone.yaml from the standard provider::output inventory.
+# Bare-metal/pre-existing nodes (role=worker) become STATIC workers —
+# dynamic (machine-controller) pools come from spec.workers via
+# kubeone::generate_config.
+
+_append_inventory() {
+  local config_file="$1" manifest="$2"
+
+  local output
+  output=$(provider::output "${config_file}")
+
+  local ssh_key
+  ssh_key=$(echo "${output}" | jq -r '.access[0].privateKey // ""')
+  [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
+  if [[ -z "${ssh_key}" || ! -f "${ssh_key}" ]]; then
+    error "kubeone inventory: ssh private key not found (descriptor sshPrivateKey: '${ssh_key}')"
+    return 1
+  fi
+
+  local api_host
+  api_host=$(echo "${output}" | jq -r '.api.endpoint // ""')
+  if [[ -z "${api_host}" ]]; then
+    error "kubeone inventory: no API endpoint (load balancer) in provider output"
+    return 1
+  fi
+
+  # jq render templates (jq strings cannot hold literal newlines — use \n).
+  # Per-host kubelet config (reservations, eviction, maxPods, hardening):
+  # control planes are small VMs (modest reservations), bare-metal static
+  # workers are large boxes
+  # (bigger reservations, higher maxPods). readOnlyPort:0 disables the
+  # insecure kubelet read-only port.
+  local host_body='    - publicAddress: \"\(.public_ip)\"\n      privateAddress: \"\(.private_ip)\"\n      sshUsername: \"\(.ssh_user)\"\n      sshPort: \(.ssh_port)\n      sshPrivateKeyFile: \"\($key)\"\n      hostname: \"\(.name)\"'
+  local cp_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        kubeReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        evictionHard:\n          memory.available: \"500Mi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 110'
+  local worker_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        kubeReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        evictionHard:\n          memory.available: \"1Gi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 250'
+  local cp_tmpl="\"${host_body}${cp_kubelet}\""
+  local worker_tmpl="\"${host_body}${worker_kubelet}\""
+
+  {
+    echo ""
+    echo "apiEndpoint:"
+    echo "  host: \"${api_host}\""
+    echo "  port: 6443"
+    echo ""
+    echo "controlPlane:"
+    echo "  hosts:"
+    echo "${output}" | jq -r --arg key "${ssh_key}" \
+      ".nodes[] | select(.role == \"control-plane\") | ${cp_tmpl}"
+
+    local worker_count
+    worker_count=$(echo "${output}" | jq '[.nodes[] | select(.role == "worker")] | length')
+    if (( worker_count > 0 )); then
+      echo ""
+      echo "staticWorkers:"
+      echo "  hosts:"
+      echo "${output}" | jq -r --arg key "${ssh_key}" \
+        ".nodes[] | select(.role == \"worker\") | ${worker_tmpl}"
+    fi
+  } >> "${manifest}"
+
+  # Hetzner CCM needs the private network to resolve node IPs — without
+  # it, node initialization fails with "failed to get node address from
+  # cloud provider that matches ip: 10.x.x.x" and every node keeps its
+  # uninitialized taint (observed on a live KubeOne cluster).
+  local net_id
+  net_id=$(echo "${output}" | jq -r '.network.id // ""')
+  if [[ -n "${net_id}" ]] && \
+     [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}")" == "true" ]]; then
+    yq -i ".cloudProvider.hetzner.networkID = \"${net_id}\"" "${manifest}"
+  fi
+
+  debug "kubeone inventory appended to ${manifest} (api=${api_host}, workers=${worker_count}, networkID=${net_id:-none})"
+}

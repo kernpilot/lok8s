@@ -1,0 +1,27 @@
+# CAPI KubeadmControlPlane resource template
+# Rendered by capi::generate() with envsubst from cluster.lok8s.yaml spec
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: KubeadmControlPlane
+metadata:
+  name: ${CLUSTER_NAME}-control-plane
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  replicas: ${CP_REPLICAS}
+  version: ${K8S_VERSION}
+  machineTemplate:
+    infrastructureRef:
+      apiVersion: ${INFRA_API_VERSION}
+      kind: ${INFRA_MACHINE_TEMPLATE_KIND}
+      name: ${CLUSTER_NAME}-control-plane
+  kubeadmConfigSpec:
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          cloud-provider: external
+    joinConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          cloud-provider: external

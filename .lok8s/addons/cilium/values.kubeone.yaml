@@ -1,0 +1,67 @@
+# Cilium values for KubeOne (bare metal / cloud VM) clusters.
+#
+# Tuned for the Hetzner private-network topology (validated on a live
+# KubeOne management cluster).
+#
+# IPAM via Kubernetes (kubeadm allocates per-node PodCIDRs).
+ipam:
+  mode: kubernetes
+
+# Tunnel (vxlan): KubeOne nodes span subnets/locations (CPs on an nbg1
+# cloud subnet at 1450 MTU, bare-metal worker on an fsn1 vswitch subnet
+# at 1400 MTU) — native routing needs one L2 segment and silently breaks
+# pod-to-pod across subnets.
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+# MTU: the encapsulated (outer) packet must fit the SMALLEST underlying
+# link on any node-to-node path. The fsn1 vSwitch is 1400; with vxlan
+# overhead (50) the cilium device MTU must be <= 1350. 1300 leaves
+# margin and is safe across both the 1400 vswitch and 1450 cloud subnet.
+# Getting this wrong silently drops large pod-to-pod packets across the
+# cloud<->baremetal boundary (only small packets / TCP handshakes pass).
+MTU: 1300
+
+# kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
+kubeProxyReplacement: false
+
+# CRITICAL: point the cilium agent at the API server's LOAD BALANCER
+# endpoint, not the in-cluster ClusterIP (10.96.0.1). The ClusterIP path
+# goes through kube-proxy DNAT onto the private network; for the
+# bare-metal worker that crosses the 1400-MTU vSwitch and large API
+# responses are dropped, so the agent's init container hangs forever
+# ("Establishing connection to apiserver" on 10.96.0.1) and the node
+# never gets a working CNI. The LB is a public IP reached over the node's
+# main NIC (1500 MTU), no vswitch, no kube-proxy dependency.
+# Must be an IP/host present in the apiserver cert SANs.
+# Templated from the kubeconfig's API endpoint, exported by libs/bootstrap
+# as LOK8S_USER_API_HOST/PORT (the KubeOne driver writes the LB endpoint
+# into the kubeconfig server URL, which is always in the apiserver cert
+# SANs). envsubst fills these from the whitelist at render time.
+k8sServiceHost: "${LOK8S_USER_API_HOST}"
+k8sServicePort: "${LOK8S_USER_API_PORT}"
+
+endpointRoutes:
+  enabled: true
+
+# Hubble on every agent (listenAddress :4244) so `hubble observe` works
+# per-node; relay aggregates cluster-wide for policy development.
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+
+# ── Host firewall ──────────────────────────────────────────────────────
+# Enabling the FEATURE is safe on its own: the host endpoint only goes to
+# default-deny once a CiliumClusterwideNetworkPolicy selects it. We ship
+# it ON but in AUDIT mode so host policies LOG (never drop) what they
+# would block — develop the allow set with `hubble observe --verdict
+# AUDIT`, confirm nothing critical (etcd 2379/2380, apiserver 6443,
+# kubelet 10250, vxlan 8472) is audited, THEN flip policyAuditMode off to
+# enforce. Flipping straight to enforce without a complete allow set
+# deadlocked the cluster twice on 2026-06-12 (default-deny cut etcd peer
+# traffic → quorum loss → apiserver down → unrecoverable without a node
+# reboot + direct-etcd ccnp delete). NEVER enforce blind.
+hostFirewall:
+  enabled: true
+policyAuditMode: true

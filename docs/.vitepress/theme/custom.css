@@ -1,0 +1,121 @@
+/* ──────────────────────────────────────────────────────────────
+   lok8s docs theme
+   Palette drawn from the lok8s logo / badge colors (catppuccin
+   family): sky #89dceb, lavender #b4befe, pink #f5c2e7,
+   green #abe9b3, base #302d41.
+   ────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Typography */
+  --vp-font-family-base: 'Inter Variable', 'Inter', ui-sans-serif, system-ui,
+    -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular,
+    'SF Mono', Menlo, Consolas, monospace;
+
+  /* Brand — accessible teal on light backgrounds */
+  --vp-c-brand-1: #0e7a90;
+  --vp-c-brand-2: #1591aa;
+  --vp-c-brand-3: #1ba8c4;
+  --vp-c-brand-soft: rgba(137, 220, 235, 0.16);
+
+  --vp-c-tip-1: var(--vp-c-brand-1);
+  --vp-c-tip-soft: var(--vp-c-brand-soft);
+
+  --vp-c-bg-soft: color-mix(in srgb, var(--vp-c-bg) 96%, #89dceb);
+}
+
+.dark {
+  /* Brand — the logo's sky on dark */
+  --vp-c-brand-1: #89dceb;
+  --vp-c-brand-2: #74c7ec;
+  --vp-c-brand-3: #5fb8dd;
+  --vp-c-brand-soft: rgba(137, 220, 235, 0.14);
+
+  --vp-c-bg: #16161f;
+  --vp-c-bg-alt: #121219;
+  --vp-c-bg-soft: #1e1e2a;
+  --vp-c-bg-elv: #1e1e2a;
+}
+
+/* ── Typography refinements ─────────────────────────────────── */
+
+:root {
+  font-feature-settings: 'cv11', 'ss01', 'calt';
+  text-rendering: optimizeLegibility;
+}
+
+.VPDoc h1,
+.VPDoc h2,
+.VPDoc h3,
+.VPHero .name,
+.VPHero .text {
+  letter-spacing: -0.02em;
+}
+
+.VPDoc h2 {
+  border-top: 1px solid var(--vp-c-divider);
+  transition: border-color 0.4s;
+}
+
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--vp-c-divider);
+}
+
+::selection {
+  background: var(--vp-c-brand-soft);
+}
+
+/* The mark is black line art — invert it on dark surfaces */
+.dark .VPNavBarTitle .logo,
+.dark .VPNavScreen .logo {
+  filter: invert(1) brightness(1.05);
+}
+
+/* ── View-transition theme toggle (circle reveal) ───────────── */
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root),
+.dark::view-transition-new(root) {
+  z-index: 1;
+}
+
+::view-transition-new(root),
+.dark::view-transition-old(root) {
+  z-index: 9999;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--vp-c-text-3) 50%, transparent);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--vp-c-brand-1) 60%, transparent);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── Landing page: no local-nav strip ───────────────────────── */
+/* The landing has no sidebar, so its mobile "Return to top" strip is
+   wasted chrome — the floating back-to-top arrow covers that job.
+   Docs pages keep VPLocalNav (it carries the sidebar Menu button). */
+html.page-home .VPLocalNav {
+  display: none;
+}

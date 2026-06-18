@@ -1,0 +1,20 @@
+# khelm chart spec for cluster-autoscaler (Cluster API / clusterapi provider).
+#
+# Scales the KubeOne worker node-pool(s) up/down by editing the replica count of
+# Cluster-API MachineDeployments (cloudProvider: clusterapi, CAPI_GROUP set to
+# KubeOne machine-controller's cluster.k8s.io group — see values.yaml). The
+# machine-controller then creates/deletes + joins the Hetzner servers itself, so
+# no Hetzner API token or hand-built join cloud-init is needed here anymore.
+# Release name (= metadata.name) is "cluster-autoscaler", so the Deployment/SA/
+# RBAC are named "cluster-autoscaler" (values.yaml sets fullnameOverride to match).
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+kubeVersion: "1.35.5"
+repository: https://kubernetes.github.io/autoscaler
+chart: cluster-autoscaler
+version: 9.54.0
+valueFiles:
+  - values.yaml

@@ -1,0 +1,9 @@
+apiVersion: services.lok8s.dev/v1
+kind: Services
+metadata:
+  name: e2e-remote-ci
+
+services:
+  app:
+    enabled: true
+    build: true

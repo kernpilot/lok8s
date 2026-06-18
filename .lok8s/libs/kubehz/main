@@ -1,0 +1,285 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz — kubehz platform integration
+# Reads spec.kubehz from cluster.lok8s.yaml, validates the two-axis model
+# (hosting x access), and provides register/deregister/status subcommands.
+#
+# Split files:
+#   libs/kubehz/hosted  — hosted cluster provisioning/destroy via kubehz API
+#   libs/kubehz/deploy  — agent/operator deployment to managed clusters
+
+import ^utils/verbose
+import ^utils/http
+import ^libs/kubehz/hosted
+import ^libs/kubehz/deploy
+
+main::kubehz() {
+  local -a usage=(
+    'register|r@destructive'    'Register cluster with kubehz'
+    'deregister|d@destructive'  'Remove cluster from kubehz'
+    'status|s@readonly'         'Check kubehz registration status'
+  )
+  :usage "kubehz platform integration" "${@}"
+  "${usage[@]}"
+}
+
+# ── Config reader ────────────────────────────────────────
+
+# Read spec.kubehz from a cluster.lok8s.yaml and export env vars.
+# Usage: kubehz::read_config <cluster_yaml>
+# Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL
+kubehz::read_config() {
+  local cluster_yaml="$1"
+
+  LOK8S_KUBEHZ_HOSTING=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
+  LOK8S_KUBEHZ_API_URL=$(yq -r '.spec.kubehz.apiUrl // ""' "${cluster_yaml}")
+
+  # Handle yq boolean false issue — yq treats "none" specially
+  local _access
+  _access=$(yq -r '.spec.kubehz.access' "${cluster_yaml}")
+  if [[ "${_access}" == "null" || -z "${_access}" ]]; then
+    LOK8S_KUBEHZ_ACCESS="none"
+  else
+    LOK8S_KUBEHZ_ACCESS="${_access}"
+  fi
+
+  export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL
+}
+
+# ── Validation ───────────────────────────────────────────
+
+# Validate kubehz configuration values.
+# Must be called after kubehz::read_config.
+# Usage: kubehz::validate_config
+kubehz::validate_config() {
+  case "${LOK8S_KUBEHZ_HOSTING}" in
+    self|hosted) ;;
+    *) error "invalid spec.kubehz.hosting: ${LOK8S_KUBEHZ_HOSTING}"; return 1 ;;
+  esac
+  case "${LOK8S_KUBEHZ_ACCESS}" in
+    none|registered|managed) ;;
+    *) error "invalid spec.kubehz.access: ${LOK8S_KUBEHZ_ACCESS}"; return 1 ;;
+  esac
+
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    error "spec.kubehz.apiUrl is required when hosting: hosted"; return 1
+  fi
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    error "spec.kubehz.apiUrl is required when access: ${LOK8S_KUBEHZ_ACCESS}"; return 1
+  fi
+  # Bearer tokens travel on this URL — never allow plaintext transport
+  if [[ -n "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    http::require_https "${LOK8S_KUBEHZ_API_URL}" "spec.kubehz.apiUrl" || return 1
+  fi
+
+  # Per-kind hosting constraints
+  local kind
+  kind=$(yq -r '.kind' "${LOK8S_SPEC_FILE}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+    case "${kind}" in
+      lo)
+        local has_runner
+        has_runner=$(yq -r '.spec.runner // ""' "${LOK8S_SPEC_FILE}")
+        if [[ -z "${has_runner}" ]]; then
+          error "hosting: hosted with kind: Lo requires spec.runner configuration"; return 1
+        fi ;;
+    esac
+  fi
+}
+
+# ── SSH fingerprint extraction ───────────────────────────
+
+# Extract an SSH fingerprint (or equivalent identifier) for cluster registration.
+# The method varies by cluster kind.
+# Usage: kubehz::get_ssh_fingerprint <cluster_yaml>
+# Outputs: fingerprint string to stdout (MD5 form, e.g. "MD5:aa:bb:...:ff")
+#
+# NOTE: kubehz-core matches the fingerprint against the SSH keys in the user's
+# Hetzner Cloud account, and Hetzner exposes MD5 fingerprints — so we MUST emit
+# MD5 (`-E md5`), not SHA256. The kubehz API normalizes away the "MD5:" prefix.
+kubehz::get_ssh_fingerprint() {
+  local cluster_yaml="$1"
+  local kind
+  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+
+  case "${kind}" in
+    kubeone)
+      # Read SSH public key from provider output access[], fall back to spec
+      local key_file=""
+      if [[ -n "${PROVIDER_CONFIG_FILE:-}" ]] && declare -F provider::output &>/dev/null; then
+        key_file=$(provider::output "${PROVIDER_CONFIG_FILE}" 2>/dev/null | jq -r '.access[0].publicKey // ""')
+      fi
+      [[ -n "${key_file}" ]] || key_file=$(yq -r '.spec.hcloud.sshPublicKeyFile // "~/.ssh/id_ed25519.pub"' "${cluster_yaml}")
+      key_file="${key_file/#\~/$HOME}"
+      ssh-keygen -lf "${key_file}" -E md5 | awk '{print $2}'
+      ;;
+    capi)
+      local key_name
+      key_name=$(yq -r '.spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
+      if [[ -n "${key_name}" ]]; then
+        local pub_key
+        pub_key=$(hcloud ssh-key describe "${key_name}" -o json | jq -r '.public_key')
+        echo "${pub_key}" | ssh-keygen -lf /dev/stdin -E md5 2>/dev/null | awk '{print $2}'
+      fi
+      ;;
+    lo)
+      # Lo clusters don't have SSH keys — use cluster domain as identifier
+      local cluster_domain
+      cluster_domain=$(yq -r '.spec.cluster.domain // ""' "${cluster_yaml}")
+      echo "lo:${cluster_domain}"
+      ;;
+    *)
+      warn "Cannot extract SSH fingerprint for kind=${kind}"
+      return 1
+      ;;
+  esac
+}
+
+# ── Registration ─────────────────────────────────────────
+
+# Register a self-hosted cluster with the kubehz API.
+#
+# This announces a PENDING cluster to kubehz (POST /api/clusters/register) using
+# the SSH-key MD5 fingerprint as the ownership anchor. It does NOT prove
+# ownership and needs NO bearer/token: the user later proves ownership in the
+# dashboard /claim (pasting this fingerprint + their Hetzner Cloud token), which
+# attaches the cluster to their tenant. The printed fingerprint is the user-facing
+# half of that handshake (see the provision GitHub Action job summary).
+#
+# Called during provision when access != none. Non-fatal: warns on failure,
+# returns 0 so provisioning continues without kubehz integration.
+# Usage: kubehz::register_cluster <domain> <cluster_yaml>
+kubehz::register_cluster() {
+  local domain="$1" cluster_yaml="$2"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  # Defense in depth: the fingerprint travels on this URL; never over plain HTTP.
+  # validate_config already checks this, but register_cluster is also reachable
+  # standalone (lo kubehz register), so re-assert before any network call.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 0
+
+  local fingerprint
+  fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
+    warn "Could not extract SSH fingerprint for ${domain}, skipping registration"
+    return 0
+  }
+
+  local payload
+  payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" '{domain: $d, fingerprint: $fp}')
+
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Content-Type: application/json" \
+    -d "${payload}") || {
+    warn "kubehz API request failed for ${domain}, cluster will continue without kubehz integration"
+    return 0
+  }
+
+  local cluster_id
+  cluster_id=$(echo "${response}" | jq -r '.id // empty')
+  if [[ -z "${cluster_id}" ]]; then
+    warn "kubehz registration returned no cluster id, cluster will continue without kubehz integration"
+    return 0
+  fi
+
+  debug "Cluster registered with kubehz (pending claim): ${cluster_id}"
+  # Surface the claim handshake. The fingerprint is public (not a secret), so it
+  # is safe to print; the Hetzner token is NEVER printed or sent here.
+  echo "kubehz: cluster '${domain}' registered (pending). Claim it in the dashboard:"
+  echo "  fingerprint: ${fingerprint}"
+}
+
+# ── Deregistration ───────────────────────────────────────
+
+# Deregister a cluster from the kubehz API.
+# Called during destroy when access != none.
+# Non-fatal: silently ignores errors.
+# Usage: kubehz::deregister_cluster <domain> <cluster_yaml>
+kubehz::deregister_cluster() {
+  local domain="$1" cluster_yaml="$2"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+
+  debug "Cluster ${domain} deregistered from kubehz"
+}
+
+# ── Subcommands ──────────────────────────────────────────
+
+# Manual cluster registration via `lo kubehz register`.
+# Reads config from active domain, validates, and calls the API.
+kubehz::register() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}"
+  kubehz::validate_config || return 1
+
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    error "spec.kubehz.access is 'none' — nothing to register"
+    return 1
+  fi
+
+  # Resolve spec kind for fingerprint extraction
+  provision::resolve_spec "${domain}" 2>/dev/null || true
+
+  kubehz::register_cluster "${domain}" "${cluster_yaml}"
+}
+
+# Manual cluster deregistration via `lo kubehz deregister`.
+kubehz::deregister() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}"
+
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    error "spec.kubehz.access is 'none' — nothing to deregister"
+    return 1
+  fi
+
+  kubehz::deregister_cluster "${domain}" "${cluster_yaml}"
+  echo "Cluster ${domain} deregistered from kubehz"
+}
+
+# Check kubehz registration status via `lo kubehz status`.
+kubehz::status() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}"
+
+  echo "Domain:  ${domain}"
+  echo "Hosting: ${LOK8S_KUBEHZ_HOSTING}"
+  echo "Access:  ${LOK8S_KUBEHZ_ACCESS}"
+  echo "API URL: ${LOK8S_KUBEHZ_API_URL:-<not set>}"
+
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    echo "Status:  not registered (access: none)"
+    return 0
+  fi
+
+  # Query the API for live status
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  local response
+  response=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || {
+    echo "Status:  unknown (API unreachable)"
+    return 0
+  }
+
+  local status_val
+  status_val=$(echo "${response}" | jq -r '.status // "unknown"' 2>/dev/null)
+  echo "Status:  ${status_val}"
+}

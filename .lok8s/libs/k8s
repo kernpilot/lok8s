@@ -1,0 +1,123 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# k8s — Kubernetes artifact generation and rendering
+# Replaces capigen dependency with native envsubst + template approach.
+# Uses capi::generate() for CAPI resources instead of external binary.
+
+import ^utils/types
+import ^utils/verbose
+import ^drivers/capi/generate
+
+main::k8s() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'capi|c@idempotent'            'Generate CAPI resources from cluster spec'
+    'infrastructure|i@idempotent'  'Build infrastructure artifacts'
+    'platform@idempotent'          'Build platform artifacts'
+  )
+  :usage "Render K8s artifacts" "${@}"
+  "${usage[@]}"
+}
+
+# Generate CAPI resources using template-based approach (replaces capigen).
+# Usage: k8s::capi [--spec <path>] [--out <path>]
+k8s::capi() {
+  local spec out
+  local -a args=(
+    'spec|'  'Path to cluster.lok8s.yaml spec'
+    'out|'   'Output file (default: .lok8s/<domain>/artifacts/capi.yaml)'
+    "${args[@]}"
+  )
+  :args "Generate CAPI resources" "${@}"
+
+  # Default spec: look in .lok8s/<domain>/cluster.lok8s.yaml first, fall back to legacy path
+  if [[ -z "${spec:-}" ]]; then
+    local domain="${DOMAIN_NAME:-lok8s.dev}"
+    if [[ -f "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml" ]]; then
+      spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+    else
+      spec="${PATH_BASE}/${domain}.lok8s.yaml"
+    fi
+  fi
+
+  [[ -f "${spec}" ]] || { error "Spec not found: ${spec}"; return 1; }
+
+  # Default output path
+  if [[ -z "${out:-}" ]]; then
+    local domain
+    domain=$(yq -r '.spec.cluster.domain // "unknown"' "${spec}")
+    out="${PATH_CLUSTERS}/${domain}/artifacts/capi.yaml"
+  fi
+
+  mkdir -p "$(dirname "$out")"
+
+  # Detect provider and generate CAPI resources via templates
+  local provider
+  provider=$(capi::detect_provider "${spec}")
+
+  debug "Generating CAPI resources for provider: ${provider}"
+  capi::generate "${spec}" "${provider}" > "${out}"
+
+  # Generate kustomization.yaml
+  local kfile
+  kfile="$(dirname "${out}")/kustomization.yaml"
+  if [[ ! -f "${kfile}" ]]; then
+    cat > "${kfile}" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $(basename "$out")
+EOF
+  fi
+
+  debug "Generated CAPI resources: ${out}"
+}
+
+k8s::infrastructure() {
+  :args "Build infrastructure artifacts" "${@}"
+  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local out_dir="${PATH_CLUSTERS}/${domain}/artifacts"
+  mkdir -p "${out_dir}"
+  KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
+    kustomize build --enable-alpha-plugins "${PATH_CLUSTERS}/${domain}/targets" > "${out_dir}/infrastructure.yaml"
+  local kfile="${out_dir}/kustomization.yaml"
+  if [[ ! -f "${kfile}" ]]; then
+    cat > "${kfile}" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - infrastructure.yaml
+EOF
+  fi
+}
+
+k8s::platform() {
+  :args "Build platform artifacts" "${@}"
+  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  warn "k8s::platform uses legacy overlay paths; consider migrating to targets/"
+  local overlay="${PATH_BASE}/.k8s/overlays/${domain}"
+  local out_dir="${overlay}/artifacts"
+  if [[ ! -d "${overlay}" ]]; then
+    error "Overlay not found: ${overlay}"
+    return 1
+  fi
+  mkdir -p "${out_dir}"
+  KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
+    kustomize build --enable-alpha-plugins "${overlay}" > "${out_dir}/platform.yaml"
+  local kfile="${out_dir}/kustomization.yaml"
+  if [[ ! -f "${kfile}" ]]; then
+    cat > "${kfile}" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - platform.yaml
+EOF
+  fi
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::k8s "${@}"

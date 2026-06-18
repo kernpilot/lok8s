@@ -1,0 +1,48 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# gitops — DEFERRED (post-refactor redesign)
+#
+# The previous implementation emitted Flux Kustomization CRs with
+# dependsOn chains and Argo sync-wave annotations, driven by
+# spec.syncWave. That field was removed as part of the bootstrap/targets
+# refactor; gitops output will be redesigned to work from the new
+# services.yaml + targets model and re-enabled in a follow-up.
+#
+# Leaving the module present as a stub so `lo gitops` emits a clear
+# error instead of a bash-level "command not found".
+
+import ^utils/types
+import ^utils/verbose
+
+main::gitops() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'flux|f'  'Generate Flux manifests (deferred)'
+    'argo|a'  'Annotate artifacts with Argo sync-wave (deferred)'
+  )
+  :usage "GitOps integration (deferred)" "${@}"
+}
+
+gitops::bootstrap() {
+  warn "lo gitops is being redesigned post-refactor; no-op for now"
+  return 0
+}
+
+gitops::flux() {
+  :args "Generate Flux manifests (deferred)" "${@}"
+  error "lo gitops flux is deferred (redesign after services.yaml targets lands)"
+  return 1
+}
+
+gitops::argo() {
+  :args "Annotate artifacts with Argo sync-wave (deferred)" "${@}"
+  error "lo gitops argo is deferred (redesign after services.yaml targets lands)"
+  return 1
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::gitops "${@}"

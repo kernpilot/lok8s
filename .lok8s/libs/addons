@@ -1,0 +1,178 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# addons — list and inspect framework-shipped bootstrap addons
+#
+# Lists addons from the shared .lok8s/addons/ tree, showing name, type
+# (khelm / raw / base), and version (parsed from chart.yaml for khelm
+# addons). Addons are framework-level and work with all drivers; the
+# active domain's driver (cluster.lok8s.yaml `kind`) only selects which
+# values overlay (values.<driver>.yaml) applies at bootstrap time.
+
+import ^utils/types
+import ^utils/verbose
+
+main::addons() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a addons
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    'addons'            'List and inspect specific addons'
+    "${args[@]:-}"
+  )
+  :args "Manage cluster addons" "${@}"
+
+  if is::set addons; then
+    for ((i=0; i<${#addons[@]}; i++)); do
+      addons::show "${addons[$i]}"
+      [[ $i -lt $((${#addons[@]} - 1)) ]] &&
+        printf "\n---\n"
+    done
+    return 0
+  fi
+
+  addons::list
+}
+
+# Resolve the driver kind for the active domain.
+# Usage: addons::_driver [domain]
+# Echoes lowercase driver name. Falls back to "lo" if no spec found.
+addons::_driver() {
+  local _domain="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
+  local spec="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
+  if [[ -f "${spec}" ]]; then
+    yq -r '.kind // "Lo"' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]'
+  else
+    echo "lo"
+  fi
+}
+
+# Resolve the shared addons directory.
+addons::_dir() {
+  echo "${PATH_LOK8S}/addons"
+}
+
+# Classify an addon directory: khelm | raw | base | empty
+addons::_type() {
+  local dir="$1"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    local kind
+    kind=$(yq -r '.kind // ""' "${dir}/chart.yaml" 2>/dev/null)
+    if [[ "${kind}" == "ChartRenderer" ]]; then
+      echo "khelm"
+      return
+    fi
+  fi
+  if [[ -f "${dir}/kustomization.yaml" || -f "${dir}/kustomization.yml" ]]; then
+    # Has kustomization but no chart.yaml → raw or composition
+    echo "raw"
+    return
+  fi
+  echo "empty"
+}
+
+# Get version for a khelm addon. Echoes "-" for non-khelm.
+addons::_version() {
+  local dir="$1"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    yq -r '.version // "-"' "${dir}/chart.yaml" 2>/dev/null
+  else
+    echo "-"
+  fi
+}
+
+# Get the chart repository URL for a khelm addon.
+addons::_repo() {
+  local dir="$1"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    yq -r '.repository // "-"' "${dir}/chart.yaml" 2>/dev/null
+  else
+    echo "-"
+  fi
+}
+
+# Get the chart name for a khelm addon.
+addons::_chart() {
+  local dir="$1"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    yq -r '.chart // "-"' "${dir}/chart.yaml" 2>/dev/null
+  else
+    echo "-"
+  fi
+}
+
+# addons::list — print a table of addons for the active driver.
+addons::list() {
+  local driver addons_dir
+  driver=$(addons::_driver)
+  addons_dir=$(addons::_dir)
+
+  if [[ ! -d "${addons_dir}" ]]; then
+    warn "No addons directory (${addons_dir})"
+    return 0
+  fi
+
+  printf '%-20s  %-8s  %-12s  %s\n' "NAME" "TYPE" "VERSION" "CHART/REPO"
+  printf '%-20s  %-8s  %-12s  %s\n' "----" "----" "-------" "----------"
+
+  local had_entries=0
+  local dir
+  for dir in "${addons_dir}"/*/; do
+    [[ -d "${dir}" ]] || continue
+    local name type version chart repo
+    name=$(basename "${dir}")
+    type=$(addons::_type "${dir}")
+    version=$(addons::_version "${dir}")
+    chart=$(addons::_chart "${dir}")
+    repo=$(addons::_repo "${dir}")
+    local detail="-"
+    if [[ "${chart}" != "-" ]]; then
+      detail="${chart} (${repo})"
+    fi
+    printf '%-20s  %-8s  %-12s  %s\n' "${name}" "${type}" "${version}" "${detail}"
+    had_entries=1
+  done
+
+  if (( ! had_entries )); then
+    echo "  (no addons available)"
+  fi
+}
+
+# addons::show — print detail for one or more addons.
+# Usage: addons::show <name> [name...]
+addons::show() {
+  local name="$1"
+  [[ -n "${name}" ]] || { error "addon name required"; return 1; }
+
+  local driver addons_dir
+  driver=$(addons::_driver)
+  addons_dir=$(addons::_dir)
+  local dir="${addons_dir}/${name}"
+
+  if [[ ! -d "${dir}" ]]; then
+    error "addon '${name}' not found (${dir})"
+    return 1
+  fi
+
+  echo "name:    ${name}"
+  echo "driver:  ${driver}"
+  echo "path:    ${dir}"
+  echo "type:    $(addons::_type "${dir}")"
+  local version chart repo
+  version=$(addons::_version "${dir}")
+  chart=$(addons::_chart "${dir}")
+  repo=$(addons::_repo "${dir}")
+  if [[ "${chart}" != "-" ]]; then
+    echo "chart:   ${chart}"
+    echo "version: ${version}"
+    echo "repo:    ${repo}"
+  fi
+  echo ""
+  echo "files:"
+  local f
+  for f in "${dir}"/*; do
+    [[ -f "${f}" ]] || continue
+    echo "  - $(basename "${f}")"
+  done
+}
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::addons "${@}"

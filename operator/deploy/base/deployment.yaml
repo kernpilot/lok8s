@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lok8s-operator
+  namespace: lok8s-system
+  labels:
+    app.kubernetes.io/name: lok8s-operator
+    app.kubernetes.io/part-of: lok8s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lok8s-operator
+  template:
+    metadata:
+      labels:
+        app: lok8s-operator
+        app.kubernetes.io/name: lok8s-operator
+        app.kubernetes.io/part-of: lok8s
+    spec:
+      serviceAccountName: lok8s-operator
+      containers:
+        - name: operator
+          image: ghcr.io/kernpilot/lok8s-operator:0.1.0
+          env:
+            - name: SHELL_OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: LOG_TYPE
+              value: json
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # reconcile state: materialized cluster specs, kubeconfigs,
+            # secret cache — laid out like a lok8s project
+            - name: state
+              mountPath: /var/lib/lok8s
+      volumes:
+        - name: state
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30

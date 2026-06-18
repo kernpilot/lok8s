@@ -1,0 +1,29 @@
+# Chart fallback defaults. The ADDON-level values.yaml (loaded as a khelm
+# valueFile, and the inline-override surface) carries the real route config; the
+# values here are the conservative standalone defaults so a bare `helm template`
+# of ./chart is valid and renders the workload WITHOUT a route.
+image:
+  repository: axllent/mailpit
+  # Pinned; verified against the axllent/mailpit registry. Bump deliberately.
+  tag: v1.30.1
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# Route OFF by default at the chart level — exposing the UI is opt-in and needs
+# a host + gateway, which the addon values.yaml supplies.
+route:
+  enabled: false
+  host: ""
+  # The Gateway the HTTPRoute attaches to, and the namespace the route lives in
+  # (must match the Gateway's allowedRoutes). namespace "" => the route's own ns.
+  namespace: default
+  gateway:
+    name: ""
+    namespace: default
+    sectionName: https

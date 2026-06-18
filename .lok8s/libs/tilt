@@ -1,0 +1,108 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# tilt — Tilt lifecycle management
+
+import ^utils/types
+import ^utils/verbose
+
+main::tilt() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'up|u@destructive'       'Spin up tilt (interactive, backgrounded)'
+    'ci@destructive'         'Headless build+deploy+wait-ready (tilt ci), exits with real status'
+    'down|d@destructive'     'Spin down tilt'
+    'status|s@readonly'      'Check tilt status'
+    'restart|r@destructive'  'Restart tilt'
+  )
+  :usage "Manage tilt environment" "${@}"
+  "${usage[@]}"
+}
+
+# Derive a deterministic Tilt web port from the active domain name.
+# This prevents port collisions when multiple lok8s projects run Tilt
+# simultaneously.  The port is hashed into the 10351-10499 range (10350 is
+# the Tilt default, intentionally avoided so a bare `tilt up` outside lok8s
+# doesn't collide).
+# Override: set TILT_PORT or spec.tilt.port in the cluster spec.
+tilt::port() {
+  # Explicit override takes priority
+  if [[ -n "${TILT_PORT:-}" ]]; then
+    echo "${TILT_PORT}"
+    return
+  fi
+
+  # Check cluster spec for spec.tilt.port
+  local cluster_spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-lok8s.dev}/cluster.lok8s.yaml"
+  if [[ -f "${cluster_spec}" ]] && command -v yq &>/dev/null; then
+    local spec_port
+    spec_port=$(yq -r '.spec.tilt.port // ""' "${cluster_spec}" 2>/dev/null)
+    if [[ -n "${spec_port}" && "${spec_port}" != "null" ]]; then
+      echo "${spec_port}"
+      return
+    fi
+  fi
+
+  # Hash the domain name into port range 10351-10499
+  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local hash
+  hash=$(printf '%s' "${domain}" | cksum | awk '{print $1}')
+  echo $(( (hash % 149) + 10351 ))
+}
+
+tilt::up() {
+  :args "Spin up tilt" "${@}"
+  tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
+  local port
+  port=$(tilt::port)
+  export TILT_PORT="${port}"
+  local pid="${PATH_BASE}/.tilt"
+  echo "Tilt UI: http://localhost:${port}"
+  nohup tilt up --port="${port}" --file="${PATH_BASE}"/Tiltfile > "${pid}.nohup" 2>&1 &
+  echo $! > "${pid}.pid"
+}
+
+# Headless bring-up for dev/CI/e2e. Unlike tilt::up (which backgrounds an
+# interactive `tilt up` and returns immediately), `tilt ci` runs in the
+# foreground: it builds + deploys every resource, waits for readiness, then
+# exits 0 on success / non-zero on failure — so this function's own exit
+# status is the real build+deploy result. Honors a `--timeout` (passed
+# straight through to `tilt ci`; tilt's default is 30m).
+# Usage: tilt::ci [--timeout <duration>]
+tilt::ci() {
+  local timeout
+  local -a args=(
+    'timeout|t'  'Max time to wait for readiness (e.g. 300s, 10m); passed to `tilt ci`'
+    "${args[@]:-}"
+  )
+  :args "Headless tilt build+deploy+wait (tilt ci)" "${@}"
+  tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
+  local port
+  port=$(tilt::port)
+  export TILT_PORT="${port}"
+  local -a ci_args=(--port="${port}" --file="${PATH_BASE}"/Tiltfile)
+  [[ -n "${timeout:-}" ]] && ci_args+=(--timeout "${timeout}")
+  echo "Tilt CI (headless) on port ${port} — building, deploying, waiting for readiness..."
+  # Foreground + no `nohup`/`&`: tilt ci exits 0 only once all resources are
+  # ready, non-zero otherwise. Returning its status lets callers gate on it.
+  tilt ci "${ci_args[@]}"
+}
+
+tilt::down() {
+  :args "Spin down tilt" "${@}"
+  if [[ -f "${PATH_BASE}/.tilt.pid" ]]; then
+    kill "$(cat "${PATH_BASE}/.tilt.pid")" 2>/dev/null || pkill tilt || :
+  elif (( ${force:-0} )); then
+    pkill tilt || :
+  fi
+  rm -f "${PATH_BASE}/.tilt.pid"
+}
+
+tilt::status() { :args "Check tilt status" "${@}"; tilt doctor; }
+tilt::restart() { :args "Restart tilt" "${@}"; tilt::down; tilt::up; }
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"

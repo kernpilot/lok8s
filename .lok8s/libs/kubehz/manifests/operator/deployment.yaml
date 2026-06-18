@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubehz-operator
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-operator
+    app.kubernetes.io/part-of: kubehz
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubehz-operator
+  template:
+    metadata:
+      labels:
+        app: kubehz-operator
+        app.kubernetes.io/name: kubehz-operator
+        app.kubernetes.io/part-of: kubehz
+    spec:
+      serviceAccountName: kubehz-agent
+      containers:
+        - name: operator
+          image: ghcr.io/kernpilot/kubehz-operator:0.1.0
+          envFrom:
+            - configMapRef:
+                name: kubehz-agent-config
+            - configMapRef:
+                name: kubehz-operator-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 30

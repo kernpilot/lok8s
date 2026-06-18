@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "argsh": {
+      "type": "stdio",
+      "command": ".bin/argsh",
+      "args": ["mcp"],
+      "env": {
+        "PATH_BASE": ".",
+        "PATH_BIN": ".bin"
+      }
+    },
+    "lok8s": {
+      "type": "stdio",
+      "command": ".lok8s/lo",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}

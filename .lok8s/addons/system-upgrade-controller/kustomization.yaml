@@ -1,0 +1,41 @@
+# system-upgrade-controller — Rancher's in-cluster OS patcher. A generic,
+# reusable atom: bootstrap `system-upgrade-controller` by name to get the
+# controller + its upgrade.cattle.io/v1 CRD (chart @108.0.0).
+#
+# This addon is the generic CONTROLLER only (split the same way cnpg-operator is
+# operator+CRD here, CRs in the consumer). The cluster GLUE stays behind in the
+# consuming cluster's glue target (./targets/system-upgrade-controller):
+#   - the upgrade Plan(s) (which nodes to patch, the apt command, cordon/drain
+#     policy, tolerations) — these are upgrade.cattle.io/v1 CRs whose CRD is
+#     installed by THIS addon, so bootstrap this addon BEFORE that glue target;
+#   - the weekly trigger CronJob that bumps the Plans' version;
+#   - the upgrade-Job ServiceAccount/RBAC the Plans reference (distinct from the
+#     chart's own controller ServiceAccount).
+#
+# `namespace: cattle-system` is applied as a transformer because every resource
+# in this addon (chart-rendered + the namespace) lives in cattle-system. We ship
+# namespace.yaml here (the chart hardcodes the ns but does not create it) so the
+# addon owns the controller's home namespace; the glue target's Plans/RBAC reuse
+# it. (Unlike monitoring/tempo, the ns is NOT owned by a target here — the
+# controller is the primary cattle-system tenant.)
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: system-upgrade-controller
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: cattle-system
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml

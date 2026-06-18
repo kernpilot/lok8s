@@ -1,0 +1,10 @@
+# Mailpit — dev/test mail catcher. Apps under development send their outbound
+# mail (password reset, verification, TOTP enrollment, …) to Mailpit over plain
+# SMTP; the captured messages are then viewable in its web UI and assertable via
+# its REST API. NOT a production component — bootstrap it only in dev clusters.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: mailpit

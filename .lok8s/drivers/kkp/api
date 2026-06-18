@@ -1,0 +1,407 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kkp — KKP (Kubermatic Kubernetes Platform) REST API client library
+# Wraps the KKP v2 REST API with Bearer token auth, JSON handling,
+# HTTP error checking, and 429 retry logic.
+#
+# All API calls go through kkp::api() which enforces HTTPS-only,
+# redacts tokens from debug output, and handles common error patterns.
+#
+# Environment:
+#   KKP_TOKEN   — Bearer token for KKP REST API authentication
+#   KKP_API_URL — Base URL of the KKP API (https://kkp.example.com)
+
+import ^utils/verbose
+import ^utils/template
+import ^utils/http
+import ^utils/credentials
+
+# ── Configuration defaults ────────────────────────────────
+
+: "${KKP_MAX_RETRIES:=3}"
+: "${KKP_RETRY_DELAY:=2}"
+: "${KKP_WAIT_TIMEOUT:=600}"
+: "${KKP_WAIT_INTERVAL:=10}"
+
+# ── URL validation ────────────────────────────────────────
+
+# Validate that a URL uses HTTPS.
+# Usage: kkp::validate_url <url>
+# Returns 1 if URL does not use https:// scheme.
+kkp::validate_url() {
+  http::require_https "$1" "KKP API URL"
+}
+
+# ── API client ────────────────────────────────────────────
+
+# Generic KKP REST API caller with auth, JSON handling, and retry.
+# Usage: kkp::api <method> <path> [json_body]
+# Env: KKP_TOKEN, KKP_API_URL
+# Outputs: response body (JSON) to stdout.
+# Returns 1 on HTTP errors, with error details on stderr.
+kkp::api() {
+  local method="$1" path="$2" body="${3:-}"
+
+  if [[ -z "${KKP_TOKEN:-}" ]]; then
+    error "KKP_TOKEN is not set"
+    return 1
+  fi
+
+  if [[ -z "${KKP_API_URL:-}" ]]; then
+    error "KKP_API_URL is not set"
+    return 1
+  fi
+
+  kkp::validate_url "${KKP_API_URL}" || return 1
+
+  local url="${KKP_API_URL}${path}"
+  local -a curl_args=(
+    --silent
+    --show-error
+    --fail-with-body
+    --location
+    --header "Authorization: Bearer ${KKP_TOKEN}"
+    --header "Content-Type: application/json"
+    --header "Accept: application/json"
+    --write-out "\n%{http_code}"
+    --request "${method}"
+  )
+
+  if [[ -n "${body}" ]]; then
+    curl_args+=(--data "${body}")
+  fi
+
+  # Optional custom CA for the TLS handshake — needed when KKP serves a
+  # self-signed / private-CA cert (local mkcert, CI) that isn't in the system
+  # trust store. HTTPS is still enforced (kkp::validate_url); --cacert only
+  # changes WHICH CA verifies the peer, it never disables verification.
+  if [[ -n "${KKP_CA_CERT:-}" ]]; then
+    if [[ -f "${KKP_CA_CERT}" ]]; then
+      curl_args+=(--cacert "${KKP_CA_CERT}")
+    else
+      error "KKP_CA_CERT set but not a readable file: ${KKP_CA_CERT}"
+      return 1
+    fi
+  fi
+
+  # Redact token from debug output
+  debug "KKP API: ${method} ${url} (token=<redacted>)"
+
+  local attempt=0 response http_code output
+  while (( attempt < KKP_MAX_RETRIES )); do
+    attempt=$(( attempt + 1 ))
+
+    output=$(curl "${curl_args[@]}" "${url}" 2>&1) || true
+
+    # Split response body and HTTP status code
+    http_code=$(echo "${output}" | tail -n1)
+    response=$(echo "${output}" | sed '$d')
+
+    # Success codes
+    if [[ "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+      debug "KKP API: ${method} ${path} -> ${http_code}"
+      echo "${response}"
+      return 0
+    fi
+
+    # Rate limited — retry with exponential backoff
+    if [[ "${http_code}" == "429" ]]; then
+      local delay=$(( KKP_RETRY_DELAY * attempt ))
+      warn "KKP API rate limited (429), retrying in ${delay}s (attempt ${attempt}/${KKP_MAX_RETRIES})"
+      sleep "${delay}"
+      continue
+    fi
+
+    # Client/server errors — no retry
+    error "KKP API error: ${method} ${path} -> HTTP ${http_code}"
+    if [[ -n "${response}" ]]; then
+      error "Response: ${response}"
+    fi
+    return 1
+  done
+
+  error "KKP API: max retries (${KKP_MAX_RETRIES}) exhausted for ${method} ${path}"
+  return 1
+}
+
+# ── Cluster operations ────────────────────────────────────
+
+# Create a new cluster via the KKP API.
+# Usage: kkp::create_cluster <project_id> <cluster_json>
+# Outputs: cluster ID to stdout.
+kkp::create_cluster() {
+  local project_id="$1" cluster_json="$2"
+
+  local response
+  response=$(kkp::api POST "/api/v2/projects/${project_id}/clusters" "${cluster_json}") || return 1
+
+  local cluster_id
+  cluster_id=$(echo "${response}" | jq -r '.id // empty')
+  if [[ -z "${cluster_id}" ]]; then
+    error "KKP create_cluster: no cluster ID in response"
+    error "Response: ${response}"
+    return 1
+  fi
+
+  debug "KKP cluster created: ${cluster_id}"
+  echo "${cluster_id}"
+}
+
+# Delete a cluster via the KKP API.
+# Usage: kkp::delete_cluster <project_id> <cluster_id>
+kkp::delete_cluster() {
+  local project_id="$1" cluster_id="$2"
+
+  kkp::api DELETE "/api/v2/projects/${project_id}/clusters/${cluster_id}" >/dev/null || return 1
+  debug "KKP cluster deleted: ${cluster_id}"
+}
+
+# Get cluster details and status.
+# Usage: kkp::get_cluster <project_id> <cluster_id>
+# Outputs: cluster JSON to stdout.
+kkp::get_cluster() {
+  local project_id="$1" cluster_id="$2"
+
+  kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}"
+}
+
+# Get kubeconfig for a cluster, write to file.
+# Usage: kkp::get_kubeconfig <project_id> <cluster_id> <output_file>
+kkp::get_kubeconfig() {
+  local project_id="$1" cluster_id="$2" output_file="$3"
+
+  local kubeconfig
+  kubeconfig=$(kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}/kubeconfig") || return 1
+
+  local output_dir
+  output_dir=$(dirname "${output_file}")
+  mkdir -p "${output_dir}"
+
+  echo "${kubeconfig}" > "${output_file}"
+  debug "KKP kubeconfig written to ${output_file}"
+}
+
+# ── Machine deployment operations ─────────────────────────
+
+# Create a machine deployment (worker pool) for a cluster.
+# Usage: kkp::create_machinedeployment <project_id> <cluster_id> <md_json>
+# Outputs: machine deployment ID to stdout.
+kkp::create_machinedeployment() {
+  local project_id="$1" cluster_id="$2" md_json="$3"
+
+  local response
+  response=$(kkp::api POST "/api/v2/projects/${project_id}/clusters/${cluster_id}/machinedeployments" "${md_json}") || return 1
+
+  local md_id
+  md_id=$(echo "${response}" | jq -r '.id // empty')
+  if [[ -z "${md_id}" ]]; then
+    error "KKP create_machinedeployment: no ID in response"
+    return 1
+  fi
+
+  debug "KKP machine deployment created: ${md_id}"
+  echo "${md_id}"
+}
+
+# List machine deployments for a cluster.
+# Usage: kkp::list_machinedeployments <project_id> <cluster_id>
+# Outputs: JSON array of machine deployments.
+kkp::list_machinedeployments() {
+  local project_id="$1" cluster_id="$2"
+
+  kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}/machinedeployments"
+}
+
+# ── Datacenter operations ─────────────────────────────────
+
+# List available datacenters from the KKP API.
+# Usage: kkp::list_datacenters
+# Outputs: JSON array of datacenters.
+kkp::list_datacenters() {
+  kkp::api GET "/api/v2/dc"
+}
+
+# ── Health and status ─────────────────────────────────────
+
+# Get cluster health endpoint.
+# Usage: kkp::health <project_id> <cluster_id>
+# Outputs: health JSON to stdout.
+kkp::health() {
+  local project_id="$1" cluster_id="$2"
+
+  kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}/health"
+}
+
+# Check that the core control-plane components report healthy.
+# The v2 REST API does NOT expose the Cluster CR's .status.phase — the
+# /health endpoint is the canonical readiness signal (verified against
+# KKP 2.30). Provider-dependent components (machineController, OSM, …)
+# are intentionally not gated on: they stay down for bringyourown.
+# Usage: kkp::core_healthy <health_json>
+kkp::core_healthy() {
+  local health="$1" component status
+  for component in apiserver etcd controller scheduler; do
+    status=$(echo "${health}" | jq -r --arg c "${component}" '.[$c] // "missing"')
+    # Older KKP versions report numeric health (1 = up)
+    [[ "${status}" == "HealthStatusUp" || "${status}" == "1" ]] || return 1
+  done
+}
+
+# Poll until specific named health components are up or timeout.
+# Stricter gate than kkp::core_healthy — machine-deployment creation
+# 503s ("Cluster components are not ready yet") until the provider
+# components (machineController, operatingSystemManager) are up too.
+# Usage: kkp::wait_components <project_id> <cluster_id> <timeout> <component...>
+kkp::wait_components() {
+  local project_id="$1" cluster_id="$2" timeout="$3"
+  shift 3
+  local -a components=("$@")
+
+  local start_time elapsed health status component all_up
+  start_time=$(date +%s)
+
+  debug "Waiting for KKP cluster ${cluster_id} components: ${components[*]} (timeout=${timeout}s)"
+
+  while true; do
+    elapsed=$(( $(date +%s) - start_time ))
+    if (( elapsed >= timeout )); then
+      error "Timed out waiting for KKP cluster ${cluster_id} components (${components[*]}) after ${timeout}s"
+      return 1
+    fi
+
+    if health=$(kkp::health "${project_id}" "${cluster_id}" 2>/dev/null); then
+      all_up=1
+      for component in "${components[@]}"; do
+        status=$(echo "${health}" | jq -r --arg c "${component}" '.[$c] // "missing"')
+        [[ "${status}" == "HealthStatusUp" || "${status}" == "1" ]] || { all_up=0; break; }
+      done
+      (( all_up )) && return 0
+      debug "KKP cluster ${cluster_id} waiting on ${component}: ${status} (elapsed=${elapsed}s)"
+    fi
+
+    sleep "${KKP_WAIT_INTERVAL}"
+  done
+}
+
+# Poll until the cluster's core control plane is healthy or timeout.
+# Uses exponential backoff starting at KKP_WAIT_INTERVAL seconds.
+# Usage: kkp::wait_ready <project_id> <cluster_id> [timeout_seconds]
+# Returns 1 on timeout.
+kkp::wait_ready() {
+  local project_id="$1" cluster_id="$2" timeout="${3:-${KKP_WAIT_TIMEOUT}}"
+
+  local start_time elapsed health interval
+  start_time=$(date +%s)
+  interval="${KKP_WAIT_INTERVAL}"
+
+  debug "Waiting for KKP cluster ${cluster_id} control plane to become healthy (timeout=${timeout}s)"
+
+  while true; do
+    elapsed=$(( $(date +%s) - start_time ))
+    if (( elapsed >= timeout )); then
+      error "Timed out waiting for KKP cluster ${cluster_id} to become healthy after ${timeout}s (last health: ${health:-unknown})"
+      return 1
+    fi
+
+    if health=$(kkp::health "${project_id}" "${cluster_id}" 2>/dev/null); then
+      if kkp::core_healthy "${health}"; then
+        debug "KKP cluster ${cluster_id} control plane is healthy"
+        return 0
+      fi
+      debug "KKP cluster ${cluster_id} health: $(echo "${health}" | jq -c .) (elapsed=${elapsed}s)"
+    else
+      warn "KKP cluster health check failed, retrying..."
+    fi
+
+    sleep "${interval}"
+
+    # Exponential backoff (cap at 60s)
+    interval=$(( interval * 2 ))
+    if (( interval > 60 )); then
+      interval=60
+    fi
+  done
+}
+
+# ── Credential validation ─────────────────────────────────
+
+# Validate required environment variables for KKP operations.
+# Usage: kkp::validate_credentials <cluster_yaml>
+# Checks KKP_TOKEN and provider-specific env vars.
+# Returns 1 with error messages if anything is missing.
+kkp::validate_credentials() {
+  local cluster_yaml="$1"
+  local errors=0
+
+  # KKP API token is always required
+  if [[ -z "${KKP_TOKEN:-}" ]]; then
+    error "KKP_TOKEN env var is required for KKP API authentication"
+    errors=$(( errors + 1 ))
+  fi
+
+  # KKP API URL is always required
+  if [[ -z "${KKP_API_URL:-}" ]]; then
+    # Try to extract from cluster spec
+    local spec_url
+    spec_url=$(yq -r '.spec.kkp.apiUrl // ""' "${cluster_yaml}" 2>/dev/null)
+    if [[ -z "${spec_url}" ]]; then
+      error "KKP_API_URL env var or spec.kkp.apiUrl is required"
+      errors=$(( errors + 1 ))
+    fi
+  fi
+
+  # Validate HTTPS on the API URL if set
+  local api_url="${KKP_API_URL:-}"
+  if [[ -z "${api_url}" ]]; then
+    api_url=$(yq -r '.spec.kkp.apiUrl // ""' "${cluster_yaml}" 2>/dev/null)
+  fi
+  if [[ -n "${api_url}" ]]; then
+    kkp::validate_url "${api_url}" || errors=$(( errors + 1 ))
+  fi
+
+  # Optional custom CA bundle: spec.kkp.caCert seeds KKP_CA_CERT (env wins).
+  # Lets the API client verify a self-signed / private-CA KKP endpoint
+  # (local mkcert, CI) without trusting it system-wide. Relative paths
+  # resolve against the cluster spec's directory.
+  if [[ -z "${KKP_CA_CERT:-}" ]]; then
+    local spec_ca
+    spec_ca=$(yq -r '.spec.kkp.caCert // ""' "${cluster_yaml}" 2>/dev/null)
+    if [[ -n "${spec_ca}" ]]; then
+      [[ "${spec_ca}" == /* ]] || spec_ca="$(dirname "${cluster_yaml}")/${spec_ca}"
+      if [[ -f "${spec_ca}" ]]; then
+        export KKP_CA_CERT="${spec_ca}"
+        debug "KKP CA cert from spec.kkp.caCert: ${spec_ca}"
+      else
+        error "spec.kkp.caCert points to a missing file: ${spec_ca}"
+        errors=$(( errors + 1 ))
+      fi
+    fi
+  fi
+
+  # Provider-specific credential checks (unless using a KKP preset)
+  local preset
+  preset=$(yq -r '.spec.kkp.preset // ""' "${cluster_yaml}" 2>/dev/null)
+  if [[ -z "${preset}" ]]; then
+    local provider
+    provider=$(yq -r '(.spec.provider | select(type == "!!map") | .name) // (.spec.provider | select(type == "!!str")) // ""' "${cluster_yaml}" 2>/dev/null)
+
+    if [[ "${provider}" == "byo" || "${provider}" == "bringyourown" ]]; then
+      debug "bringyourown provider — no cloud credentials required"
+    elif [[ -n "${provider}" ]]; then
+      credentials::require "${provider}" || errors=$(( errors + 1 ))
+    else
+      debug "No provider specified in spec — skipping provider credential check"
+    fi
+  else
+    debug "Using KKP preset '${preset}' — skipping provider credential check"
+  fi
+
+  if (( errors > 0 )); then
+    error "${errors} credential validation error(s)"
+    return 1
+  fi
+
+  debug "KKP credentials validated"
+  return 0
+}

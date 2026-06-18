@@ -1,0 +1,73 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz-deploy — kubehz agent/operator deployment
+# Deploys the heartbeat agent and kubehz operator to managed clusters.
+
+import ^utils/verbose
+
+# ── Agent / Operator deployment ─────────────────────────
+
+# Deploy the heartbeat agent (CronJob + read-only RBAC) to a cluster.
+# Templates KUBEHZ_API_URL and CLUSTER_ID into the configmap before applying.
+# Usage: kubehz::deploy_heartbeat_agent <domain>
+kubehz::deploy_heartbeat_agent() {
+  local domain="$1"
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local agent_dir="${PATH_LOK8S}/libs/kubehz/manifests/agent"
+
+  [[ -f "${kubeconfig}" ]] || { error "Kubeconfig not found: ${kubeconfig}"; return 1; }
+  [[ -d "${agent_dir}" ]] || { error "Agent manifests not found: ${agent_dir}"; return 1; }
+
+  # Template configmap values into a temp copy
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap "rm -rf ${tmp_dir}" RETURN
+
+  cp -r "${agent_dir}"/* "${tmp_dir}/"
+  sed -i "s|KUBEHZ_API_URL_PLACEHOLDER|${LOK8S_KUBEHZ_API_URL}|g" "${tmp_dir}/configmap.yaml"
+  sed -i "s|CLUSTER_ID_PLACEHOLDER|${domain}|g" "${tmp_dir}/configmap.yaml"
+
+  kubectl apply --kubeconfig "${kubeconfig}" -k "${tmp_dir}"
+  debug "Heartbeat agent deployed to ${domain}"
+}
+
+# Deploy the kubehz operator (Deployment + managed RBAC, extends agent).
+# Templates KUBEHZ_API_URL and CLUSTER_ID into the configmaps before applying.
+# Usage: kubehz::deploy_operator <domain>
+kubehz::deploy_operator() {
+  local domain="$1"
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local operator_dir="${PATH_LOK8S}/libs/kubehz/manifests/operator"
+
+  [[ -f "${kubeconfig}" ]] || { error "Kubeconfig not found: ${kubeconfig}"; return 1; }
+  [[ -d "${operator_dir}" ]] || { error "Operator manifests not found: ${operator_dir}"; return 1; }
+
+  # Template configmap values — copy both agent and operator dirs
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap "rm -rf ${tmp_dir}" RETURN
+
+  cp -r "${PATH_LOK8S}/libs/kubehz/manifests/agent" "${tmp_dir}/agent"
+  cp -r "${operator_dir}"/* "${tmp_dir}/"
+  # Fix kustomization base path (relative to tmp_dir)
+  sed -i "s|../agent|./agent|g" "${tmp_dir}/kustomization.yaml"
+  sed -i "s|KUBEHZ_API_URL_PLACEHOLDER|${LOK8S_KUBEHZ_API_URL}|g" "${tmp_dir}/agent/configmap.yaml"
+  sed -i "s|CLUSTER_ID_PLACEHOLDER|${domain}|g" "${tmp_dir}/agent/configmap.yaml"
+
+  kubectl apply --kubeconfig "${kubeconfig}" -k "${tmp_dir}"
+  debug "kubehz operator deployed to ${domain}"
+}
+
+# Remove the kubehz agent/operator by deleting the kubehz-system namespace.
+# Used by `lo kubehz deregister`.
+# Usage: kubehz::remove_agent <domain>
+kubehz::remove_agent() {
+  local domain="$1"
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+
+  [[ -f "${kubeconfig}" ]] || { error "Kubeconfig not found: ${kubeconfig}"; return 1; }
+
+  kubectl delete namespace kubehz-system --kubeconfig "${kubeconfig}" 2>/dev/null || true
+  debug "kubehz agent removed from ${domain}"
+}

@@ -1,0 +1,18 @@
+# Test fixture: services config
+registry:
+  prefix: "lok8s.local"
+  branch: "test-project"
+  tag: "latest"
+services:
+  api:
+    enabled: true
+    build: true
+    path: src/api
+  web:
+    enabled: true
+    build: true
+    path: src/web
+  worker:
+    enabled: false
+    build: false
+    path: src/worker

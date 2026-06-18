@@ -1,0 +1,15 @@
+# Generic, driver-agnostic metrics-server values. The security-relaxing
+# --kubelet-insecure-tls flag is NOT here — it lives in values.kubeone.yaml
+# (only self-managed kubelets need it).
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi
+  limits:
+    memory: 200Mi
+# No PDB: single replica, so minAvailable:1 would block node drains (conflicts
+# with system-upgrade-controller) and the chart otherwise renders both
+# minAvailable + maxUnavailable (an invalid PDB spec). Re-enable with 2 replicas
+# + maxUnavailable:1 if HA is wanted later.
+podDisruptionBudget:
+  enabled: false

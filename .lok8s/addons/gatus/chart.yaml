@@ -1,0 +1,26 @@
+# khelm chart spec for gatus (uptime / status-page dashboard), inflated via
+# khelm at kustomize build time.
+#
+# Generic FRAMEWORK ADDON: chart + portable defaults only. The kubehz-specific
+# glue (the monitored endpoints/checks, the page title, the PVC storage class,
+# the gateway HTTPRoute) is NOT here — see the kustomization header for the split.
+#
+# The ChartRenderer `metadata.name` is the Helm RELEASE name, so it prefixes
+# every generated resource. Pinned to `gatus` so the Service is deterministically
+# named `gatus` (referenced from the consumer's HTTPRoute). Do not rename without
+# updating that route.
+#
+# Installs into the `monitoring` namespace (shared with the monitoring stack) so
+# its ServiceMonitor is picked up by that Prometheus and there is no separate
+# namespace to manage. See kustomization.yaml header for why no namespace.yaml.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: gatus
+  namespace: monitoring
+kubeVersion: "1.35.5"
+repository: https://twin.github.io/helm-charts
+chart: gatus
+version: 1.4.4
+valueFiles:
+  - values.yaml

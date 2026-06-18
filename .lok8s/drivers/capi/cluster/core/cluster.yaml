@@ -1,0 +1,24 @@
+# CAPI Cluster resource template
+# Rendered by capi::generate() with envsubst from cluster.lok8s.yaml spec
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: ${CLUSTER_NAME}
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["10.244.0.0/16"]
+    services:
+      cidrBlocks: ["10.96.0.0/12"]
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+    kind: KubeadmControlPlane
+    name: ${CLUSTER_NAME}-control-plane
+  infrastructureRef:
+    apiVersion: ${INFRA_API_VERSION}
+    kind: ${INFRA_CLUSTER_KIND}
+    name: ${CLUSTER_NAME}

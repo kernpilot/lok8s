@@ -1,0 +1,15 @@
+# Test fixture: Lo kind cluster spec
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: test-local
+spec:
+  kubernetes:
+    version: "v1.31.10"
+  cluster:
+    domain: test.lok8s.dev
+    namespace: default
+  runtime: kind
+  bootstrap:
+    - cilium
+    - metallb

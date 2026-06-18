@@ -1,0 +1,114 @@
+# Spin up & register a cluster from CI.
+#
+# Reusable workflow (workflow_call) + manual trigger (workflow_dispatch) that
+# provisions a committed cluster from your repo with `lo` and — when the cluster
+# opts into kubehz visibility (spec.kubehz.access != none) — registers it and
+# prints the SSH-key MD5 fingerprint to the job summary so you can claim the
+# cluster from the dashboard.
+#
+# It needs exactly ONE secret: HCLOUD_TOKEN (your Hetzner Cloud API token, used by
+# `lo`/the provider to create the infrastructure). No platform/API token is
+# required — ownership is proven later, interactively, when you claim the cluster.
+#
+# Usage (as a reusable workflow from another repo):
+#
+#   jobs:
+#     spinup:
+#       uses: kernpilot/lok8s/.github/workflows/spinup.yml@main
+#       with:
+#         domain: my-cluster.example.com
+#       secrets:
+#         HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+#
+# The cluster.lok8s.yaml for `domain` must already be committed under
+# `clusters/<domain>/` in the calling repo.
+
+name: Spin up & register cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'Cluster domain to provision (must be committed under clusters/<domain>/)'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      domain:
+        description: 'Cluster domain to provision'
+        required: true
+        type: string
+    secrets:
+      HCLOUD_TOKEN:
+        description: 'Hetzner Cloud API token used to create the infrastructure.'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  spinup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install `b` (the binary/env manager). Supply-chain rule: never pipe a
+      # remote script straight into a shell — download to a file, pin the ref,
+      # then execute it. The exact binary versions are pinned by the committed
+      # .bin/b.yaml + .bin/b.lock that `b install` consumes.
+      - name: Install b
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Install pinned dependencies
+        env:
+          # b resolves binary sources from GitHub; a token avoids API rate limits
+          # and 0-byte downloads. GITHUB_TOKEN is the repo-scoped automatic token.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: b install
+
+      # Provision the cluster. For a self-hosted cluster with kubehz visibility,
+      # `lo provision` registers a PENDING cluster and prints its claim
+      # fingerprint. We tee the output so we can lift that line into the summary.
+      - name: Provision & register
+        id: provision
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          set -o pipefail
+          lo provision "${DOMAIN}" 2>&1 | tee /tmp/provision.log
+
+          # register_cluster prints "  fingerprint: <md5>" on success. Lift it
+          # (best-effort; absent for non-kubehz / access:none clusters).
+          fp="$(grep -oE 'fingerprint: .+' /tmp/provision.log | head -n1 | sed 's/^fingerprint: //')"
+          {
+            echo "fingerprint<<EOF"
+            echo "${fp}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Write the claim handshake to the job summary. The fingerprint is public
+      # (not a secret); the Hetzner token is NEVER printed here.
+      - name: Claim instructions
+        if: always() && steps.provision.outputs.fingerprint != ''
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          FINGERPRINT: ${{ steps.provision.outputs.fingerprint }}
+        run: |
+          {
+            echo "## Cluster registered — claim it to take ownership"
+            echo ""
+            echo "Your cluster \`${DOMAIN}\` is registered with kubehz as **pending**."
+            echo "To attach it to your account, open the dashboard **Claim** page and paste:"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| SSH fingerprint (MD5) | \`${FINGERPRINT}\` |"
+            echo "| Hetzner Cloud token | _(enter your own — proves ownership, used once, never stored)_ |"
+            echo ""
+            echo "kubehz verifies the fingerprint against the SSH keys in your Hetzner"
+            echo "account, then attaches the cluster to your tenant."
+          } >> "${GITHUB_STEP_SUMMARY}"

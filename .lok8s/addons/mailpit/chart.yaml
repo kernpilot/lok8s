@@ -1,0 +1,14 @@
+# khelm spec rendering the LOCAL mailpit chart (./chart) — no `repository:` field
+# so khelm treats `chart:` as a local directory path. The chart ships the
+# workload (namespace + deployment + service) AND an optional HTTPRoute gated by
+# values; values.yaml (loaded below) is the override surface, and bootstrap
+# appends driver/provider/inline value files on top of it.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: mailpit
+  namespace: mailpit
+kubeVersion: "1.35.5"
+chart: ./chart
+valueFiles:
+  - values.yaml

@@ -1,0 +1,37 @@
+# gatus — uptime / status-page dashboard. A generic, reusable atom: bootstrap
+# `gatus` by name to get the poller (chart gatus @1.4.4, appVersion v5.27.2).
+#
+# This addon is the generic chart with PORTABLE defaults only. The
+# kubehz-specific GLUE stays with the consuming cluster:
+#   - Helm-values glue (the monitored endpoints/checks, the page title, the
+#     alerting provider, the PVC storage class) → inline `bootstrap:` overrides,
+#     deep-merged over values.yaml.
+#   - Kustomize-resource glue (the gateway HTTPRoute) → the cluster's gatus glue
+#     target (./targets/gatus).
+#
+# Namespace: installs into `monitoring`, which is OWNED by the monitoring glue
+# target (the kube-prometheus-stack stack) — gatus shares it so its
+# ServiceMonitor is picked up by that Prometheus and there is no separate
+# namespace to manage. We do NOT ship a namespace.yaml here (same reason
+# tempo/metrics-server omit one): bootstrap `gatus` AFTER `monitoring` (it needs
+# both the `monitoring` namespace and that stack's ServiceMonitor CRD). The
+# `namespace:` transformer still pins every rendered object to `monitoring`
+# (chart.yaml also pins it).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: gatus
+      lok8s.dev/type: system
+      lok8s.dev/category: observability
+
+namespace: monitoring
+
+generators:
+  - chart.yaml

@@ -1,0 +1,37 @@
+# Test fixture: Capi kind cluster spec (Hetzner)
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Capi
+metadata:
+  name: test-production
+spec:
+  kubernetes:
+    version: "v1.31.10"
+  cluster:
+    domain: prod.lok8s.dev
+    namespace: capi-system
+  managementCluster:
+    domain: mgmt.lok8s.dev
+  provider:
+    name: hetzner
+    config:
+      region: fsn1
+      sshKeyName: test-key
+    credentials:
+      envVars:
+        - HCLOUD_TOKEN
+      secretRef: test-production-credentials
+  controlPlane:
+    replicas: 3
+    type: cax21
+  workers:
+    general:
+      replicas: 2
+      type: cax21
+  bootstrap:
+    - cilium
+    - ccm
+  gitops:
+    provider: flux
+    repo: https://github.com/example/infra.git
+    branch: main
+    path: clusters/prod.lok8s.dev/artifacts

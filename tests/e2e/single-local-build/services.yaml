@@ -1,0 +1,11 @@
+apiVersion: services.lok8s.dev/v1
+kind: Services
+metadata:
+  name: e2e-single-local-build
+
+services:
+  app:
+    enabled: true
+    build: true
+    # Tilt picks up the canonical lok8s.local/app reference from the
+    # deployment manifest; no per-service registry override needed.

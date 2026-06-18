@@ -1,0 +1,18 @@
+# E2E: remote-ci — full remote CI mode. Repo synced to VM,
+# lo provision + tilt run entirely on the remote.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-ci
+spec:
+  kubernetes:
+    version: "v1.31.4"
+  cluster:
+    domain: 130.lok8s.dev
+  provider:
+    name: hetzner
+    configRef: hetzner.json
+  remote:
+    mode: ci
+    expose: true
+    tilt: false          # skip Tilt in e2e — just verify provision works

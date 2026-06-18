@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash disable=SC2034,SC1091
+# vim: set syntax=bash:
+set -euo pipefail
+
+: "${PATH_BASE:="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}"
+: "${PATH_BIN:="${PATH_BASE}/.bin"}"
+: "${PATH_SECRETS:="${PATH_BASE}/.secrets"}"
+: "${PATH_LOK8S:="${PATH_BASE}/.lok8s"}"
+: "${PATH_CLUSTERS:="${PATH_BASE}/clusters"}"
+: "${LOK8S_CLUSTER_NAME:=local}"
+
+: "${KIND_CONFIG:="${PATH_LOK8S}/drivers/lo/cluster/config.yaml"}"
+: "${KIND_EXPERIMENTAL_DOCKER_NETWORK:=lok8s}"
+: "${KIND_NODE_VERSION:=v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2}"
+
+: "${DOMAIN_NAME:="lok8s.dev"}"
+: "${DOMAIN_SANS:="*"}"
+
+ARGSH_SOURCE="${BASH_SOURCE[0]}"
+# argsh's ^-prefix imports resolve relative to PATH_SCRIPTS. We keep the
+# variable as a synonym for PATH_LOK8S so libs that use ^utils/verbose
+# (and similar) keep working without per-file edits.
+PATH_SCRIPTS="${PATH_LOK8S}"
+export PATH_SCRIPTS
+
+source "${PATH_BIN}/argsh"
+import ^libs/deploy
+import ^libs/tilt
+import ^libs/env
+import ^libs/secrets
+import ^libs/k8s
+import ^libs/manifest
+import ^libs/provision
+import ^libs/bootstrap
+import ^libs/kubeconfig
+import ^libs/use
+import ^libs/init
+import ^libs/build
+import ^libs/lint
+import ^libs/status
+import ^libs/gitops
+import ^libs/kubehz/main
+import ^libs/kustomize
+import ^libs/image
+import ^libs/addons
+import ^libs/drivers
+import ^utils/types
+import ^utils/template
+import ^utils/verbose
+import ^utils/targets
+import ^utils/http
+import ^utils/credentials
+import ^drivers/lo/libs/registry
+
+main() {
+  local verbose=0 force=0 remote=0 kubernetes cluster config domain domain_sans
+  cluster="${LOK8S_CLUSTER_NAME}"
+  kubernetes="${KIND_NODE_VERSION}"
+  config="${KIND_CONFIG}"
+  # Read active domain before flag parsing so --domain takes precedence
+  if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
+    local _active
+    _active=$(cat "${PATH_CLUSTERS}/.active")
+    if [[ "${_active}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+      DOMAIN_NAME="${_active}"
+    else
+      warn "Invalid domain in clusters/.active, ignoring"
+    fi
+  fi
+
+  domain="${DOMAIN_NAME}"
+  domain_sans="${DOMAIN_SANS}"
+
+  local -a usage=(
+    'up|u@destructive'                 'Start cluster'
+    'down@destructive'                 'Stop cluster'
+    'clean@destructive'                'Clean up local volumes'
+
+    'provision|p@destructive'          'Provision a cluster (full lifecycle)'
+    'bootstrap@destructive@idempotent' 'Apply/reapply bootstrap addons'
+    'build|b@idempotent'               'Build kustomize targets'
+    'deploy|d@destructive@idempotent'  'Deploy platform'
+    'destroy@destructive'              'Destroy a cluster'
+
+    'use@idempotent'                   'Set/show active domain'
+    'kubeconfig|kc@readonly'           'Print a domain kubeconfig (--oidc for kubelogin exec-plugin)'
+    'init@idempotent'                  'Scaffold service config (lok8s.yaml/services.yaml/Tiltfile)'
+    'lint|l@readonly'                  'Validate structure and specs'
+    'status@readonly'                  'Cluster health and status'
+    'gitops|g'                         'GitOps integration'
+    'kubehz|kh'                        'kubehz platform integration'
+
+    'tilt|t'                           'Manage tilt cluster'
+    'env|e'                            'Manage environment'
+    'k8s'                              'Generate/render K8s artifacts'
+    'kustomize|ku'                     'Manage kustomize plugins (Go)'
+    'registry|r'                       'Manage Docker registries'
+    'image|i'                          'Manage the local cache registry'
+    'addons|a@readonly'                'List driver addons for the active cluster'
+    'secrets|s'                        'Manage secrets (encrypt/decrypt/set)'
+
+    'drivers'                          'Driver-specific commands'
+  )
+
+  local -a args=(
+    '-'             'Global flags:'
+    'verbose|v:+'   'Enable verbose logging'
+    'force|f:+'     'Force operation without prompts'
+    'remote|r:+'    'Provision on remote VM (uses spec.provider + spec.remote)'
+    'kubernetes|'   'Kubernetes version to use'
+    'cluster|s'     'Cluster name to manage'
+    'config|'       'Kind config to use'
+    'domain|'       'Domain to use'
+    'domain-sans|'  'Domain sans to use'
+  )
+
+  :usage "lok8s - local dev orchestration" "${@}"
+  if (( verbose )); then export DEBUG=1; fi
+  if (( remote )); then export LOK8S_REMOTE=1; fi
+  DOMAIN_NAME="${domain}"
+  export DOMAIN_NAME
+
+  # Read spec from active cluster spec (if available)
+  local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  if [[ -f "${cluster_spec}" ]] && command -v yq &>/dev/null; then
+    local spec_net_name spec_cluster_name
+    spec_net_name=$(yq -r '.spec.network.name // ""' "${cluster_spec}" 2>/dev/null || true)
+    if [[ -n "${spec_net_name}" ]]; then
+      KIND_EXPERIMENTAL_DOCKER_NETWORK="${spec_net_name}"
+    fi
+    spec_cluster_name=$(yq -r '.metadata.name // ""' "${cluster_spec}" 2>/dev/null || true)
+    if [[ -n "${spec_cluster_name}" ]]; then
+      cluster="${spec_cluster_name}"
+    fi
+  fi
+
+  export KUBECONFIG="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+  "${usage[@]}"
+}
+
+_list_domains() {
+  # List all domain names from clusters/, one per line (excludes hidden dirs)
+  for dir in "${PATH_CLUSTERS}"/*/; do
+    [[ -d "${dir}" ]] || continue
+    local d
+    d=$(basename "${dir}")
+    [[ "${d}" == .* ]] && continue
+    echo "${d}"
+  done
+}
+
+# -- Convenience orchestrators --
+
+main::up() {
+  local open_tilt ci timeout
+  local -a args=(
+    'open-tilt|o:+'  'Open Tilt in a browser (interactive mode only)'
+    'ci|:+'          'Headless: build+deploy+wait-ready via `tilt ci`, exit with real status (no TTY/browser)'
+    'timeout|t'      'Readiness timeout for --ci (e.g. 300s, 10m); passed to `tilt ci`'
+    "${args[@]}"
+  )
+  :args "Starting cluster" "${@}"
+
+  # Reconcile infra first regardless of mode (kind cluster, registries,
+  # bootstrap addons) — only the post-reconcile Tilt step differs.
+  provision::dispatch "${domain}"
+
+  # Headless mode: foreground `tilt ci` (build + deploy + wait + exit status).
+  # No backgrounded `tilt up`, no browser. Its exit code is main::up's.
+  if (( ci )); then
+    if [[ -n "${timeout:-}" ]]; then
+      tilt::ci --timeout "${timeout}"
+    else
+      tilt::ci
+    fi
+    return
+  fi
+
+  tilt::up && (( open_tilt )) && {
+    local _port
+    _port=$(tilt::port)
+    if command -v xdg-open &>/dev/null; then
+      xdg-open "http://localhost:${_port}"
+    elif command -v open &>/dev/null; then
+      open "http://localhost:${_port}"
+    else
+      echo "Tilt UI: http://localhost:${_port}"
+    fi
+  }
+}
+
+main::down() {
+  tilt::down
+  kind delete cluster --name "${cluster}" 2>/dev/null || true
+}
+
+main::clean() {
+  local all
+  local -a args=(
+    'all|a:+'  'Clean up all volumes'
+    "${args[@]}"
+  )
+  :args "Cleaning up local volumes" "${@}"
+  main::down
+  if (( all )); then
+    docker system prune -f
+    return
+  fi
+  for volume in $(docker volume ls --filter "name=^${cluster}-" -q); do
+    docker volume rm -f "${volume}"
+  done
+  registry::clean
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && -z "${ARGSH_SOURCE}" ]] || main "${@}"

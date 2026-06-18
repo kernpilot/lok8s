@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "tool": {
+    "b": "v4.16.0"
+  },
+  "timestamp": "2026-06-14T17:24:09Z",
+  "binaries": [
+    {
+      "name": "argsh",
+      "version": "",
+      "sha256": "607e12e2dbeb8d350da78f8d2d2dd7a6e409b4585ff57d2a3354083174e87f87",
+      "source": "github.com/arg-sh/argsh",
+      "provider": "github"
+    },
+    {
+      "name": "clusterctl",
+      "version": "",
+      "sha256": "b20044c66b62e273d6fe101ea82a00dc2329c28e2bca1e9b6274b744474429ba",
+      "source": "github.com/kubernetes-sigs/cluster-api",
+      "preset": true
+    },
+    {
+      "name": "hcloud",
+      "version": "",
+      "sha256": "a656183ea9b126fec269df753f95120342e52a3069c92597f2a629b8343e39e3",
+      "source": "github.com/hetznercloud/cli",
+      "preset": true
+    },
+    {
+      "name": "yq",
+      "version": "",
+      "sha256": "75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9",
+      "source": "github.com/mikefarah/yq",
+      "preset": true
+    },
+    {
+      "name": "mkcert",
+      "version": "",
+      "sha256": "6d31c65b03972c6dc4a14ab429f2928300518b26503f58723e532d1b0a3bbb52",
+      "source": "github.com/FiloSottile/mkcert",
+      "preset": true
+    },
+    {
+      "name": "kubeone",
+      "version": "",
+      "sha256": "b7383fe1a5b854bfb1d7a8dbf6db17e787af190eb5d0102d50c02009e1f513d2",
+      "source": "github.com/kubermatic/kubeone",
+      "provider": "github"
+    },
+    {
+      "name": "kubectl",
+      "version": "",
+      "sha256": "7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437",
+      "source": "",
+      "preset": true
+    },
+    {
+      "name": "kustomize",
+      "version": "",
+      "sha256": "f7b1605aa5143e0dcbd754a4d43c47ad7a560c540b1356b064d69fe236164494",
+      "source": "github.com/kubernetes-sigs/kustomize",
+      "preset": true
+    },
+    {
+      "name": "kind",
+      "version": "",
+      "sha256": "eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa",
+      "source": "github.com/kubernetes-sigs/kind",
+      "preset": true
+    },
+    {
+      "name": "jq",
+      "version": "",
+      "sha256": "020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d",
+      "source": "github.com/jqlang/jq",
+      "preset": true
+    },
+    {
+      "name": "tilt",
+      "version": "",
+      "sha256": "a14ab92eafd10f6fc4e08694ff67e6dfbfc7940e0d39a3f3fd3b5d5f160c5a81",
+      "source": "github.com/windmilleng/tilt",
+      "preset": true
+    },
+    {
+      "name": "khelm",
+      "version": "",
+      "sha256": "65b890dbaed53d5bd29ce1b801047e978966a7d1071aa6d5dbec90473cc982b4",
+      "source": "github.com/mgoltzsche/khelm",
+      "provider": "github"
+    },
+    {
+      "name": "docker",
+      "version": "",
+      "sha256": "36fe758b39961505c5edc1c9675f1af18166103454fcd21db5255d381ce540d8",
+      "source": "oci://docker",
+      "provider": "oci",
+      "digest": "sha256:ad68e89b675740867a3bb96488a93fea9209ad36c6305bfba2664912d6dcf11a"
+    },
+    {
+      "name": "sops",
+      "version": "",
+      "sha256": "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a",
+      "source": "github.com/getsops/sops",
+      "preset": true
+    },
+    {
+      "name": "ssh-to-age",
+      "version": "",
+      "sha256": "0a25d354e8154e79cfeecc5443ccf24136efd9d6c903fd03f61858e19a7020c6",
+      "source": "github.com/Mic92/ssh-to-age",
+      "preset": true
+    }
+  ]
+}

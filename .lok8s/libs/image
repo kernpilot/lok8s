@@ -1,0 +1,281 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# image — pre-pull private images into the local cache registry
+#
+# Bridges the credential gap between the dev's docker host (which has
+# upstream creds) and kind's containerd (which doesn't). Pulls
+# `<endpoint>/<branch>/<svc>:<tag>` to the host, retags it to
+# `lok8s.cache/<branch>/<svc>:<tag>`, pushes to the cache registry.
+#
+# Reads its work list from .lok8s/<domain>/artifacts/.cache-queue,
+# written by env::kustomization for every service with build:false +
+# resolved registry.endpoint.
+
+import ^utils/types
+import ^utils/verbose
+
+# image::_registry_tls — is the active cluster's cache registry TLS?
+# Reads the generated .registries.json (the source of truth, also used by
+# the driver). Falls back to plain HTTP (false) when the file is absent —
+# matching the back-compat default. Safe to call from Tilt's local()
+# subshell where the Lo driver may not be sourced.
+image::_registry_tls() {
+  local json="${LOK8S_REGISTRY_JSON:-}"
+  if [[ -z "${json}" || ! -f "${json}" ]]; then
+    local _domain="${DOMAIN_NAME:-lok8s.dev}"
+    json="${PATH_CLUSTERS}/${_domain}/.registries.json"
+  fi
+  [[ -f "${json}" ]] || return 1
+  jq -e '.tls' "${json}" >/dev/null 2>&1
+}
+
+main::image() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'cache|c@destructive@idempotent' 'Pre-pull image(s) into the local cache registry'
+    'list|l@readonly'                'List images currently in the cache registry'
+    'clean|x@destructive'            'Drop all images from the cache registry'
+  )
+  :usage "Manage the local cache registry" "${@}"
+}
+
+# image::cache — pull a service's remote image, retag, push to cache registry
+#
+# Without --all, requires a service name argument and resolves it via the
+# committed services.yaml + active config layer (env::services). With --all,
+# walks the .cache-queue file written by env::kustomization.
+#
+# Idempotent: skips if the cache registry already has a manifest matching
+# the requested ref. --force overrides the skip.
+#
+# Parallelism is controlled by the registry.parallel setting in services.yaml:
+#   0 — unlimited (all services pulled in parallel)
+#   1 — sequential (one at a time)
+#   N — bounded (up to N concurrent pulls)
+# Default: 1.
+image::cache() {
+  debug "Pre-pull images into the local cache registry"
+
+  local force all
+  local -a args=(
+    'force|f:+' 'Force re-pull even if image exists in cache'
+    'all|a:+'   'Process every service in the active cache queue'
+    "${args[@]}"
+  )
+  :args "Pre-pull image(s) into the local cache registry" "${@}"
+
+  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  # cache_host is framework policy — every Lo cluster uses lok8s.cache
+  # as the canonical cache registry hostname. The LO_FRAMEWORK_REGISTRY_HOSTS
+  # map exists in drivers/lo/main but may not be loaded yet when this
+  # lib is sourced standalone (e.g. from Tilt's local() subshell).
+  local cache_host="lok8s.cache"
+
+  # Resolve the cache registry IP. In the happy path it's already
+  # exported by driver::provision -> lo::read_network_config. When
+  # called standalone (Tilt subshell during `lo env kustomization
+  # --pull`) the driver isn't sourced, so we source it lazily and
+  # re-run the reader against the active cluster spec.
+  local cache_ip="${LOK8S_REGISTRY_IP_CACHE:-}"
+  if [[ -z "${cache_ip}" ]]; then
+    local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+    if [[ -f "${cluster_spec}" ]]; then
+      # Source the Lo driver lazily — we don't have a way to know
+      # which driver the cluster uses here without yq-parsing the
+      # spec, but cache-mode is Lo-specific anyway.
+      if ! declare -F lo::read_network_config &>/dev/null; then
+        # shellcheck source=/dev/null
+        source "${PATH_LOK8S}/drivers/lo/main" 2>/dev/null || true
+      fi
+      if declare -F lo::read_network_config &>/dev/null; then
+        lo::read_network_config "${cluster_spec}" >/dev/null 2>&1 || true
+        cache_ip="${LOK8S_REGISTRY_IP_CACHE:-}"
+      fi
+    fi
+  fi
+  # Last-resort fallback — slot 125 default. Only reached if the
+  # active cluster spec can't be resolved at all.
+  cache_ip="${cache_ip:-10.125.125.102}"
+
+  local queue_file="${PATH_CLUSTERS}/${domain}/artifacts/.cache-queue"
+
+  # Resolve parallelism (registry.parallel; default 1).
+  local parallel
+  parallel=$(env::services 2>/dev/null | yq -r '.registry.parallel | tostring')
+  [[ "${parallel}" == "null" ]] && parallel="1"
+  if ! [[ "${parallel}" =~ ^[0-9]+$ ]]; then
+    error "registry.parallel must be a non-negative integer, got: ${parallel}"
+    return 1
+  fi
+
+  if (( all )); then
+    [[ -s "${queue_file}" ]] || {
+      debug "no cache queue at ${queue_file}; nothing to pre-pull"
+      return 0
+    }
+    image::_cache_queue "${queue_file}" "${cache_ip}" "${parallel}" "${force:-0}"
+    return $?
+  fi
+
+  # Single-service mode: argument is the service name. Look it up in the
+  # merged services env to resolve its remote ref.
+  if (( $# == 0 )); then
+    error "image cache: provide a service name or use --all"
+    return 1
+  fi
+
+  local svc="${1}"
+  local merged
+  merged=$(env::services 2>/dev/null)
+
+  local pinned
+  pinned=$(echo "${merged}" | yq -r ".services.\"${svc}\".image // \"\"")
+  if [[ -n "${pinned}" ]]; then
+    error "service '${svc}' has an explicit 'image:' pin — there is nothing to cache, kind pulls it directly"
+    return 1
+  fi
+
+  # Resolve effective registry coordinates for this service.
+  local g_endpoint g_branch g_tag
+  g_endpoint=$(echo "${merged}" | yq -r '.registry.endpoint // "${DOCKER_REGISTRY}"' | envsubst)
+  g_branch=$(echo "${merged}"   | yq -r '.registry.branch   // "${DOCKER_PROJECT}"'  | envsubst)
+  g_tag=$(echo "${merged}"      | yq -r '.registry.tag      // "${DOCKER_TAG}"'      | envsubst)
+
+  local s_endpoint s_branch s_tag
+  s_endpoint=$(echo "${merged}" | yq -r ".services.\"${svc}\".registry.endpoint // \"${g_endpoint}\"" | envsubst)
+  s_branch=$(echo "${merged}"   | yq -r ".services.\"${svc}\".registry.branch   // \"${g_branch}\""   | envsubst)
+  s_tag=$(echo "${merged}"      | yq -r ".services.\"${svc}\".registry.tag      // \"${g_tag}\""      | envsubst)
+
+  if [[ -z "${s_endpoint}" ]]; then
+    error "service '${svc}' has no registry.endpoint configured (set spec.registries.endpoint or services.${svc}.registry.endpoint)"
+    return 1
+  fi
+
+  local remote_ref="${s_endpoint}/${s_branch}/${svc}:${s_tag}"
+  image::_cache_one "${svc}" "${remote_ref}" "${s_branch}" "${s_tag}" "${cache_ip}" "${force:-0}"
+}
+
+# image::_cache_queue — process a TSV cache queue with bounded parallelism
+# TSV format: svc \t remote_ref \t branch \t tag
+image::_cache_queue() {
+  local queue="$1" cache_ip="$2" parallel="$3" force="$4"
+  local total
+  total=$(grep -cv '^$' "${queue}" 2>/dev/null || echo 0)
+  debug "image cache: processing ${total} entries (parallel=${parallel})"
+
+  local -a pids=()
+  local active=0
+
+  while IFS=$'\t' read -r svc remote branch tag; do
+    [[ -z "${svc}" ]] && continue
+
+    if (( parallel == 1 )); then
+      # Sequential — straightforward
+      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}"
+    else
+      # Background, bounded by `parallel` (0 = unlimited)
+      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" &
+      pids+=("$!")
+      active=$(( active + 1 ))
+      if (( parallel > 0 )) && (( active >= parallel )); then
+        wait -n 2>/dev/null || wait "${pids[0]}"
+        # Trim finished pids (best-effort; harmless if a few stay)
+        local -a alive=()
+        for p in "${pids[@]}"; do
+          if kill -0 "${p}" 2>/dev/null; then alive+=("${p}"); fi
+        done
+        pids=("${alive[@]}")
+        active=${#pids[@]}
+      fi
+    fi
+  done < "${queue}"
+
+  # Drain remaining background jobs
+  if (( ${#pids[@]} > 0 )); then
+    for p in "${pids[@]}"; do wait "${p}" || true; done
+  fi
+}
+
+# image::_cache_one — single-image cache operation
+# Idempotent: checks the cache registry's manifest before pulling.
+image::_cache_one() {
+  local svc="$1" remote="$2" branch="$3" tag="$4" cache_ip="$5" force="$6"
+  local cache_path="${branch}/${svc}:${tag}"
+  local cache_ref_local="${cache_ip}/${cache_path}"
+
+  # Strip any scheme prefix from the remote ref. env::generate_images
+  # writes the queue with the full ${endpoint}/${branch}/${svc}:${tag}
+  # form where endpoint usually carries a scheme (https://...). docker
+  # pull/tag/push refuse scheme-qualified refs — they expect a plain
+  # registry host like registry-1.docker.io/library/busybox:1.36.
+  local remote_ref="${remote#https://}"
+  remote_ref="${remote_ref#http://}"
+
+  # In TLS mode the cache registry serves HTTPS with a mkcert cert the
+  # host trusts (mkcert -install) — so `docker manifest inspect` validates
+  # without --insecure. In plain mode the registry is raw-IP HTTP, which
+  # the docker client only reaches via --insecure (or insecure-registries).
+  local -a inspect_flags=()
+  if ! image::_registry_tls; then
+    inspect_flags=(--insecure)
+  fi
+
+  # Skip if already cached (unless --force)
+  if (( ! force )); then
+    if docker manifest inspect "${inspect_flags[@]}" "${cache_ref_local}" >/dev/null 2>&1; then
+      debug "[ ${svc} ] already in cache (${cache_ref_local})"
+      return 0
+    fi
+  fi
+
+  echo ":: [ ${svc} ] caching ${remote_ref} -> ${cache_ref_local}"
+
+  if ! docker pull "${remote_ref}"; then
+    error "[ ${svc} ] failed to pull ${remote_ref} (check upstream credentials)"
+    return 1
+  fi
+
+  if ! docker tag "${remote_ref}" "${cache_ref_local}"; then
+    error "[ ${svc} ] failed to tag ${remote_ref} as ${cache_ref_local}"
+    return 1
+  fi
+
+  if ! docker push "${cache_ref_local}"; then
+    error "[ ${svc} ] failed to push to cache registry at ${cache_ip}"
+    return 1
+  fi
+
+  return 0
+}
+
+# image::list — show what's currently in the cache registry
+image::list() {
+  :args "List images currently in the cache registry" "${@}"
+  debug "List images in the local cache registry"
+  local cache_ip="${LOK8S_REGISTRY_IP_CACHE:-10.125.125.102}"
+  local scheme="http"
+  image::_registry_tls && scheme="https"
+  local catalog_url="${scheme}://${cache_ip}/v2/_catalog"
+  echo ":: cache registry @ ${catalog_url}"
+  # In TLS mode the mkcert CA in the host trust store validates the cert.
+  curl -s "${catalog_url}" | jq . 2>/dev/null || curl -s "${catalog_url}"
+}
+
+# image::clean — drop everything from the cache registry by recreating its volume
+image::clean() {
+  :args "Drop all images from the cache registry" "${@}"
+  debug "Clean the local cache registry"
+  local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s}"
+  local reg_name="${network}-registry-cache"
+  echo ":: dropping cache registry volume (${reg_name})"
+  docker rm -f "${reg_name}" 2>/dev/null || true
+  docker volume rm -f "${reg_name}" 2>/dev/null || true
+  echo ":: run 'lo registry up --cache' or 'lo provision' to recreate"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::image "${@}"

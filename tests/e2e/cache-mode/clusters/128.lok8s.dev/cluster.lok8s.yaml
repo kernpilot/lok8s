@@ -1,0 +1,11 @@
+# Minimal *.lok8s.dev cluster spec. The framework derives every other
+# field from the slot (128) and domain-independent defaults.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-cache
+spec:
+  kubernetes:
+    version: "v1.31.4"
+  cluster:
+    domain: 128.lok8s.dev

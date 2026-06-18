@@ -1,0 +1,50 @@
+# secrets / credentials
+.env
+.secrets/*
+!.secrets/.gitignore
+!.secrets/Secret.*.enc
+.kubeconfig/
+.tilt.*
+**/clusters/.active
+**/clusters/*/artifacts/
+**/clusters/*/.kubeconfig/
+**/clusters/*/.containerd/
+**/clusters/*/.kubeone/
+**/clusters/*/.docker.sock
+**/clusters/*/.provider/
+# generated registry slot-plan (written by `lo`); never commit per-cluster state
+**/clusters/*/.registries.json
+# test scratch: tests that set PATH_CLUSTERS=tests/fixtures/ drop a
+# stray .registries.json here — keep it out of git status
+tests/fixtures/.registries.json
+
+# service overrides
+services.*.yaml
+
+# dependencies
+node_modules/
+
+# claude — the whole agent-tooling tree is internal (planning/handoff/feedback +
+# the cuite subtree); kept local, never published. Root CLAUDE.md/AGENTS.md stay.
+.claude/
+CLAUDE.local.md
+
+# kustomize plugin build outputs (source of truth: kustomize/cmd/<name>/
+# for in-repo plugins, b-managed for vendored plugins like khelm)
+.kustomize/secrets.lok8s.dev/v1/secret/Secret
+.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
+kustomize/dist/
+kustomize/coverage.out
+
+# ignore
+.backlog/
+# VitePress build output
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# VitePress dev cache (vitepress dev run from repo root)
+.vitepress/cache/
+
+# local artifacts
+lint.log
+tests/e2e/*/.secrets/

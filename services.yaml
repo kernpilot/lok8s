@@ -1,0 +1,15 @@
+# lok8s service definitions — committed.
+# Personal overrides go in services.local.yaml (gitignored, loaded via
+# LOK8S_SERVICE_CONFIG=local). See docs/guide/services.md for the full schema.
+
+registry:
+  endpoint: "${DOCKER_REGISTRY}"   # CI registry endpoint (env-substituted)
+  branch: "${DOCKER_PROJECT}"      # PR/branch slug — what the CI publishes under
+  tag: "${DOCKER_TAG}"             # commit SHA or build tag
+  prefix: lok8s.local              # canonical local image prefix
+
+defaults:
+  build: true        # default for services.<name>.build (true = build locally + Tilt live-update)
+  dockerfile: service
+
+services: {}

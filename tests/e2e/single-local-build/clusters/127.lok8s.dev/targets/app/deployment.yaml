@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+        - name: app
+          # Canonical lok8s.local/<service> reference. Tilt's
+          # docker_build() pushes to lok8s.local/app at runtime; the
+          # in-cluster pull resolves the canonical hostname via the
+          # containerd hosts.toml mirror to the build registry on the
+          # project subnet.
+          image: lok8s.local/app
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80

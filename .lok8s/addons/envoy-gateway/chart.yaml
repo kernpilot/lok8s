@@ -1,0 +1,11 @@
+# khelm chart spec for Envoy Gateway
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: envoy-gateway
+  namespace: envoy-gateway-system
+repository: oci://docker.io/envoyproxy
+chart: gateway-helm
+version: v1.7.1
+valueFiles:
+  - values.yaml

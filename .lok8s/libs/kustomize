@@ -1,0 +1,84 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kustomize — kustomize plugin build pipeline (Go)
+#
+# Builds, tests, cleans, and lists lok8s's Go-based kustomize *exec* plugins
+# (the secrets.lok8s.dev/v1/Secret generator, plus any project-local plugins
+# under ./kustomize/) via the unified `lo` CLI:
+#
+#   lo kustomize build      # compile all plugin binaries into .kustomize/
+#   lo kustomize test       # run plugin unit + integration tests
+#   lo kustomize clean      # remove built binaries
+#   lo kustomize list       # list discoverable plugins under .kustomize/
+
+import ^utils/verbose
+
+main::kustomize() {
+  local -a usage=(
+    'build|b'  'Compile all kustomize plugin binaries into .kustomize/'
+    'test|t'   'Run plugin unit + integration tests'
+    'clean'    'Remove built plugin binaries'
+    'list|l'   'List discoverable plugins under .kustomize/'
+  )
+  :usage "Manage kustomize plugins (Go-based exec generators)" "${@}"
+  "${usage[@]}"
+}
+
+# Plugin source dirs: the lok8s FRAMEWORK plugins (the secrets generator etc.,
+# shipped with the framework) plus the project's own kustomize/ if it has any
+# custom plugins. Build output installs into the PROJECT's plugin home
+# (${PATH_BASE}/.kustomize) via the Makefile's overridable BIN_ROOT, so a
+# fresh project gets the framework plugins without carrying the Go source.
+kustomize::_sources() {
+  local fw="${PATH_LOK8S%/*}/kustomize"
+  [[ ! -d "${fw}" ]] || echo "${fw}"
+  [[ ! -d "${PATH_BASE}/kustomize" ]] || echo "${PATH_BASE}/kustomize"
+}
+
+kustomize::build() {
+  command -v go >/dev/null || {
+    error "go is not installed (run 'b install go' or use goenv)"
+    return 1
+  }
+  local s found=0
+  while IFS= read -r s; do
+    [[ -n "${s}" ]] || continue
+    found=1
+    debug "kustomize: building ${s} -> ${PATH_BASE}/.kustomize"
+    ( cd "${s}" && BIN_ROOT="${PATH_BASE}/.kustomize" make build ) || return 1
+  done < <(kustomize::_sources)
+  (( found )) || { error "no kustomize plugin sources (lok8s/kustomize or ${PATH_BASE}/kustomize)"; return 1; }
+}
+
+kustomize::test() {
+  command -v go >/dev/null || {
+    error "go is not installed"
+    return 1
+  }
+  local s rc=0
+  while IFS= read -r s; do
+    [[ -n "${s}" ]] || continue
+    ( cd "${s}" && make test ) || rc=1
+  done < <(kustomize::_sources)
+  return ${rc}
+}
+
+kustomize::clean() {
+  local s
+  while IFS= read -r s; do
+    [[ -n "${s}" ]] || continue
+    ( cd "${s}" && BIN_ROOT="${PATH_BASE}/.kustomize" make clean ) || true
+  done < <(kustomize::_sources)
+}
+
+kustomize::list() {
+  if [[ ! -d "${PATH_BASE}/.kustomize" ]]; then
+    warn "No .kustomize/ directory found"
+    return 0
+  fi
+  echo "Discoverable kustomize plugins under ${PATH_BASE}/.kustomize:"
+  find "${PATH_BASE}/.kustomize" -maxdepth 4 -type f -perm -u+x -printf '  %P\n' 2>/dev/null
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::kustomize "${@}"

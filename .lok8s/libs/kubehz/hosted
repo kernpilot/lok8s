@@ -1,0 +1,142 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz-hosted — kubehz hosted cluster provisioning
+# Handles creating/destroying clusters via the kubehz API for hosting: hosted mode.
+
+import ^utils/verbose
+
+# ── Hosted provisioning ──────────────────────────────────
+
+# Build the JSON payload for creating a hosted cluster via the kubehz API.
+# Usage: kubehz::build_cluster_payload <cluster_yaml>
+# Outputs: JSON string to stdout
+kubehz::build_cluster_payload() {
+  local cluster_yaml="$1"
+  local domain kind provider region k8s_version cp_replicas hosting access
+  domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
+  kind=$(yq -r '.kind' "${cluster_yaml}")
+  provider=$(yq -r '.spec.provider // "hetzner"' "${cluster_yaml}")
+  region=$(yq -r '.spec.hcloud.region // .spec.aws.region // "fsn1"' "${cluster_yaml}")
+  k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+  cp_replicas=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
+  hosting=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
+  access=$(yq -r '.spec.kubehz.access // "none"' "${cluster_yaml}")
+
+  jq -n \
+    --arg domain "${domain}" \
+    --arg kind "${kind}" \
+    --arg provider "${provider}" \
+    --arg region "${region}" \
+    --arg kubernetesVersion "${k8s_version}" \
+    --argjson controlPlaneReplicas "${cp_replicas}" \
+    --arg hosting "${hosting}" \
+    --arg access "${access}" \
+    '{domain: $domain, kind: $kind, provider: $provider, region: $region,
+      kubernetesVersion: $kubernetesVersion, controlPlaneReplicas: $controlPlaneReplicas,
+      hosting: $hosting, access: $access}'
+}
+
+# Wait for a hosted cluster to reach Running state.
+# Polls the kubehz API at 10-second intervals up to a timeout.
+# Usage: kubehz::wait_for_cluster <api_url> <cluster_id> [timeout_seconds]
+kubehz::wait_for_cluster() {
+  local api_url="$1" cluster_id="$2" timeout="${3:-600}"
+  local elapsed=0 status_val
+
+  debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
+
+  while (( elapsed < timeout )); do
+    status_val=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
+      | jq -r '.status // "Unknown"') || status_val="Unknown"
+
+    case "${status_val}" in
+      Running|ready|Ready)
+        debug "Hosted cluster ${cluster_id} is ready"
+        return 0
+        ;;
+      Failed|Error)
+        error "Hosted cluster ${cluster_id} failed: status=${status_val}"
+        return 1
+        ;;
+    esac
+
+    debug "Cluster ${cluster_id} status: ${status_val} (${elapsed}s / ${timeout}s)"
+    sleep 10
+    elapsed=$(( elapsed + 10 ))
+  done
+
+  error "Timed out waiting for hosted cluster ${cluster_id} after ${timeout}s"
+  return 1
+}
+
+# Provision a cluster via the kubehz hosted API.
+# Creates the cluster, waits for it, and downloads the kubeconfig.
+# Usage: kubehz::provision_hosted <domain> <cluster_yaml>
+kubehz::provision_hosted() {
+  local domain="$1" cluster_yaml="$2"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  local payload
+  payload=$(kubehz::build_cluster_payload "${cluster_yaml}")
+
+  debug "Creating hosted cluster for ${domain}"
+
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    -d "${payload}") || {
+    error "Failed to create hosted cluster via kubehz API"
+    return 1
+  }
+
+  local cluster_id
+  cluster_id=$(echo "${response}" | jq -r '.id')
+
+  if [[ -z "${cluster_id}" || "${cluster_id}" == "null" ]]; then
+    error "kubehz API did not return a cluster ID"
+    return 1
+  fi
+
+  debug "Hosted cluster created: ${cluster_id}"
+
+  kubehz::wait_for_cluster "${api_url}" "${cluster_id}"
+
+  # Download kubeconfig
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  mkdir -p "$(dirname "${kubeconfig_path}")"
+  curl -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    > "${kubeconfig_path}" || {
+    error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
+    return 1
+  }
+
+  debug "Hosted cluster ${domain} ready, kubeconfig at ${kubeconfig_path}"
+}
+
+# Destroy a hosted cluster via the kubehz API.
+# Looks up the cluster by domain, then sends DELETE.
+# Usage: kubehz::destroy_hosted <domain> <cluster_yaml>
+kubehz::destroy_hosted() {
+  local domain="$1" cluster_yaml="$2"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  local cluster_id
+  cluster_id=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" 2>/dev/null \
+    | jq -r '.[0].id // .id // empty') || true
+
+  if [[ -n "${cluster_id}" && "${cluster_id}" != "null" ]]; then
+    curl -fsSL -X DELETE "${api_url}/api/clusters/${cluster_id}" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" 2>/dev/null || true
+    debug "Hosted cluster ${domain} (${cluster_id}) destroyed"
+  else
+    debug "No hosted cluster found for ${domain}, nothing to destroy"
+  fi
+
+  # Clean up local kubeconfig
+  rm -f "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+}

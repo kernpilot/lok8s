@@ -1,0 +1,12 @@
+# khelm chart spec for CloudNativePG operator
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: cloudnative-pg
+  namespace: cnpg-system
+kubeVersion: "1.31.12"
+repository: https://cloudnative-pg.io/charts/
+chart: cloudnative-pg
+version: 0.28.0
+valueFiles:
+  - values.yaml

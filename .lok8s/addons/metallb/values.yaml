@@ -1,0 +1,6 @@
+# MetalLB chart values — keep defaults; the framework only customizes
+# the IPAddressPool/L2Advertisement (in pool.yaml), not the chart itself.
+controller:
+  enabled: true
+speaker:
+  enabled: true

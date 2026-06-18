@@ -1,0 +1,307 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# provision — cluster lifecycle dispatch
+# Reads .kind from cluster.lok8s.yaml, sources the matching provider contract
+# implementation from .scripts/provider/<kind>/main, and calls the contract functions.
+
+import ^utils/types
+import ^utils/verbose
+import ^libs/deploy
+import ^libs/build
+import ^libs/gitops
+import ^libs/provider
+
+main::provision() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Provision a cluster" "${@}"
+  provision::dispatch "${domain}"
+}
+
+# Resolve KUBECONFIG for deploy domains that reference another cluster.
+# Requires: $domain, $cluster_override (optional), $PATH_LOK8S
+_resolve_kubeconfig_for_domain() {
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+  local ref_cluster=""
+  if [[ -f "${domain_dir}/deploy.lok8s.yaml" ]] && [[ ! -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
+    ref_cluster="${cluster_override:-}"
+    if [[ -z "${ref_cluster}" ]]; then
+      ref_cluster=$(provision::resolve_clusterref "$domain")
+    fi
+    debug "Deploy domain ${domain} -> cluster ${ref_cluster}"
+  elif [[ -n "${cluster_override:-}" ]]; then
+    ref_cluster="${cluster_override}"
+  fi
+  [[ -n "${ref_cluster}" ]] || return 0
+
+  # Resolve the referenced cluster's kubeconfig. Prefer the canonical
+  # `secret.<domain>.yaml` (the SOPS-fetched per-domain kubeconfig); fall back to
+  # `<cluster metadata.name>.yaml` — the name `lo` writes for a provisioned
+  # cluster (e.g. a domain `example.com` may provision under metadata.name
+  # `my-cluster`, so its kubeconfig is my-cluster.yaml). Without this fallback a
+  # deploy domain whose
+  # target cluster was provisioned under a different metadata.name points
+  # KUBECONFIG at a non-existent file and `lo deploy` fails.
+  local kcfg="${PATH_BASE}/.kubeconfig/secret.${ref_cluster}.yaml"
+  if [[ ! -f "${kcfg}" && -f "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" ]]; then
+    local ref_name=""
+    ref_name=$(yq -r '.metadata.name // ""' "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" 2>/dev/null) || ref_name=""
+    [[ -n "${ref_name}" && -f "${PATH_BASE}/.kubeconfig/${ref_name}.yaml" ]] \
+      && kcfg="${PATH_BASE}/.kubeconfig/${ref_name}.yaml"
+  fi
+  export KUBECONFIG="${kcfg}"
+}
+
+# Resolve the cluster spec YAML for a domain.
+# Cluster domains have cluster.lok8s.yaml, deployment domains have deploy.lok8s.yaml.
+# Usage: provision::resolve_spec <domain>
+# Sets: LOK8S_SPEC_FILE, LOK8S_SPEC_KIND (cluster|deploy)
+provision::resolve_spec() {
+  local domain="$1"
+
+  # No active domain → actionable error instead of a cryptic empty path.
+  if [[ -z "${domain}" ]]; then
+    error "no active domain — set one with 'lo use <domain>' or pass --domain <domain>"
+    return 1
+  fi
+
+  # Validate domain name to prevent path traversal and injection
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    echo "error: invalid domain name: ${domain}" >&2
+    return 1
+  fi
+
+  local base="${PATH_CLUSTERS}/${domain}"
+
+  if [[ -f "${base}/cluster.lok8s.yaml" ]]; then
+    LOK8S_SPEC_FILE="${base}/cluster.lok8s.yaml"
+    LOK8S_SPEC_KIND="cluster"
+  elif [[ -f "${base}/deploy.lok8s.yaml" ]]; then
+    LOK8S_SPEC_FILE="${base}/deploy.lok8s.yaml"
+    LOK8S_SPEC_KIND="deploy"
+  else
+    error "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/${domain}/"
+    return 1
+  fi
+}
+
+# Resolve the clusterRef from a deploy.lok8s.yaml to its cluster domain.
+# Usage: provision::resolve_clusterref <domain>
+# Outputs: the cluster domain name (from spec.clusterRef.domain)
+# Returns 1 if spec is not a deploy domain or clusterRef is missing/invalid.
+provision::resolve_clusterref() {
+  local domain="$1"
+  local base="${PATH_CLUSTERS}/${domain}"
+  local spec_file="${base}/deploy.lok8s.yaml"
+
+  if [[ ! -f "${spec_file}" ]]; then
+    error "No deploy.lok8s.yaml found for ${domain}"
+    return 1
+  fi
+
+  local cluster_ref
+  cluster_ref=$(yq -r '.spec.clusterRef.domain // ""' "${spec_file}")
+  if [[ -z "${cluster_ref}" ]]; then
+    error "deploy.lok8s.yaml for ${domain} missing spec.clusterRef.domain"
+    return 1
+  fi
+
+  # Validate the referenced cluster domain exists
+  if [[ ! -d "${PATH_CLUSTERS}/${cluster_ref}" ]]; then
+    error "clusterRef domain not found: .lok8s/${cluster_ref}/"
+    return 1
+  fi
+
+  if [[ ! -f "${PATH_CLUSTERS}/${cluster_ref}/cluster.lok8s.yaml" ]]; then
+    error "clusterRef domain ${cluster_ref} has no cluster.lok8s.yaml"
+    return 1
+  fi
+
+  echo "${cluster_ref}"
+}
+
+# Dispatch provisioning to the appropriate kind contract implementation.
+# Usage: provision::dispatch <domain>
+provision::dispatch() {
+  local domain="$1"
+  # Fail fast: a missing/empty/bogus domain must stop here, BEFORE any driver
+  # creates a kind cluster or touches infra. (resolve_spec's return was
+  # previously ignored, so `lo up` with no active domain half-provisioned.)
+  provision::resolve_spec "${domain}" || return 1
+
+  if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
+    error "Cannot provision a deployment domain. Use 'lo deploy ${domain}' instead."
+    error "Deployment domains reference a cluster via spec.clusterRef.domain."
+    return 1
+  fi
+
+  local cluster_yaml="${LOK8S_SPEC_FILE}"
+  local kind
+  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+
+  # Source driver implementation
+  local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
+  if [[ ! -f "${kind_script}" ]]; then
+    error "Unknown cluster kind: ${kind} (missing ${kind_script})"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "${kind_script}"
+
+  # Contract: driver must implement driver::provision
+  if ! declare -f driver::provision &>/dev/null; then
+    error "Driver contract violation: ${kind_script} does not implement driver::provision"
+    return 1
+  fi
+
+  # Source the infrastructure provider when the driver needs one
+  # (review A1: provider loading belongs to the dispatch, not behind
+  # --remote). Rules:
+  #   - lo: the provider is only relevant with --remote (provision a
+  #     cloud VM that runs kind); plain local runs ignore it so the
+  #     same spec works locally and remotely.
+  #   - every other driver (kubeone, capi, kkp): load the provider
+  #     whenever spec.provider.name is set — these drivers target real
+  #     infrastructure and there is no "local" interpretation.
+  local _load_provider=0
+  if [[ "${kind}" == "lo" ]]; then
+    [[ "${LOK8S_REMOTE:-}" == "1" ]] && _load_provider=1
+  else
+    _load_provider=1
+  fi
+  if (( _load_provider )); then
+    local _provider_name
+    _provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
+    if [[ -n "${_provider_name}" ]]; then
+      provider::write_config "${cluster_yaml}"
+      provider::load "${_provider_name}"
+      provider::validate "${PROVIDER_CONFIG_FILE}" || {
+        error "Provider '${_provider_name}' validation failed"
+        return 1
+      }
+      debug "Provider '${_provider_name}' loaded and validated"
+    fi
+  fi
+
+  debug "Provisioning ${domain} with kind=${kind}"
+  local _provision_rc=0
+  driver::provision "${domain}" || _provision_rc=$?
+
+  # Return code 100 = driver handled full lifecycle (e.g. remote CI
+  # mode where the remote VM runs provision + bootstrap itself).
+  # Skip all local post-provision steps.
+  if (( _provision_rc == 100 )); then
+    debug "driver handled full lifecycle — skipping post-provision"
+    return 0
+  elif (( _provision_rc != 0 )); then
+    return "${_provision_rc}"
+  fi
+
+  # Post-provision hook (optional, driver can override)
+  if declare -f driver::post_provision &>/dev/null; then
+    driver::post_provision "${domain}"
+  fi
+
+  # kubehz config: read and validate
+  kubehz::read_config "${cluster_yaml}"
+  kubehz::validate_config || return 1
+
+  # kubehz registration: register cluster if access != none
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
+    kubehz::register_cluster "${domain}" "${cluster_yaml}"
+  fi
+
+  # Bootstrap: apply spec.bootstrap addons (cluster infrastructure —
+  # Cilium, MetalLB, cert-manager, etc.) in order with health waits.
+  # Framework-level, works with all drivers. Workload plane (targets/)
+  # is handled by Tilt (lo tilt up) or manual lo deploy.
+  local cluster_name_for_kc
+  cluster_name_for_kc=$(yq -r '.metadata.name' "${cluster_yaml}")
+  local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name_for_kc}.yaml"
+  bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}"
+
+  # Bootstrap GitOps if configured
+  local gitops_provider
+  gitops_provider=$(yq -r '.spec.gitops.provider // ""' "${cluster_yaml}")
+  if [[ -n "${gitops_provider}" ]]; then
+    debug "GitOps provider found: ${gitops_provider}, bootstrapping"
+    gitops::bootstrap "${domain}" "${gitops_provider}"
+  fi
+}
+
+# Dispatch cluster destruction.
+# Usage: provision::dispatch_destroy <domain>
+provision::dispatch_destroy() {
+  local domain="$1"
+  provision::resolve_spec "${domain}"
+
+  if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
+    error "Cannot destroy a deployment domain. Destroy the cluster domain instead."
+    return 1
+  fi
+
+  local cluster_yaml="${LOK8S_SPEC_FILE}"
+  local kind
+  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+
+  local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
+  [[ -f "${kind_script}" ]] || { error "Unknown cluster kind: ${kind}"; return 1; }
+  # shellcheck source=/dev/null
+  source "${kind_script}"
+
+  # Source provider if present and --remote was used (needed for destroy)
+  if [[ "${LOK8S_REMOTE:-}" == "1" ]]; then
+    local _provider_name
+    _provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
+    if [[ -n "${_provider_name}" ]]; then
+      provider::write_config "${cluster_yaml}"
+      provider::load "${_provider_name}"
+    fi
+  fi
+
+  # kubehz deregistration: deregister before destroying
+  kubehz::read_config "${cluster_yaml}"
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
+    kubehz::deregister_cluster "${domain}" "${cluster_yaml}"
+  fi
+
+  debug "Destroying ${domain} with kind=${kind}"
+  driver::destroy "${domain}"
+}
+
+# Dispatch cluster status check.
+# Usage: provision::dispatch_status <domain>
+provision::dispatch_status() {
+  local domain="$1"
+  provision::resolve_spec "${domain}"
+
+  if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
+    # For deployment domains, check the referenced cluster
+    local cluster_ref
+    cluster_ref=$(yq -r '.spec.clusterRef.domain // ""' "${LOK8S_SPEC_FILE}")
+    if [[ -z "${cluster_ref}" ]]; then
+      error "Deployment domain missing spec.clusterRef.domain"
+      return 1
+    fi
+    debug "Deployment domain ${domain} references cluster ${cluster_ref}"
+    provision::dispatch_status "${cluster_ref}"
+    return
+  fi
+
+  local cluster_yaml="${LOK8S_SPEC_FILE}"
+  local kind
+  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+
+  local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
+  [[ -f "${kind_script}" ]] || { error "Unknown cluster kind: ${kind}"; return 1; }
+  # shellcheck source=/dev/null
+  source "${kind_script}"
+
+  driver::status "${domain}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::provision "${@}"

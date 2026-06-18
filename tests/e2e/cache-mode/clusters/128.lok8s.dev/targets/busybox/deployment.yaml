@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: busybox
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: busybox
+  template:
+    metadata:
+      labels:
+        app: busybox
+    spec:
+      containers:
+        - name: busybox
+          # Canonical lok8s.local/<service> reference. For build:false
+          # services, env::kustomization swaps this to
+          #   lok8s.cache/<branch>/<svc>:<tag>
+          # at kustomize-build time, based on the services.yaml
+          # registry config. That means the pod pulls from the
+          # cache registry, not from Docker Hub directly.
+          image: lok8s.local/busybox
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "while true; do echo alive; sleep 30; done"]

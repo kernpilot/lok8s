@@ -1,0 +1,285 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# provider — provider contract and loading
+#
+# ── Provider Contract ─────────────────────────────────────────────
+#
+# Each provider implements these functions in
+# .lok8s/providers/<name>/main:
+#
+#   provider::validate <config_file>
+#     Validate that the provider config and credentials are sufficient
+#     to proceed. Return 0 on success, 1 with diagnostics on stderr.
+#
+#   provider::credential_data <config_file>
+#     Output provider-specific key=value pairs (one per line) for
+#     the Kubernetes credential Secret the driver may push to a
+#     management cluster. Return 1 if required env vars are missing.
+#
+#   provider::provision <config_file> <work_dir>
+#     Provision the cloud infrastructure. <work_dir> is a scratch
+#     directory the provider can write state into. Return 0/1.
+#
+#   provider::destroy <config_file> <work_dir>
+#     Tear down the cloud infrastructure. Return 0/1.
+#
+#   provider::output <config_file>
+#     Output the standard inventory JSON after provisioning. This is
+#     the bridge between providers and drivers — every provider
+#     produces the same shape, every driver reads it.
+#
+#     Standard output schema:
+#       {
+#         "api": { "endpoint": "<ip>", "port": 6443 },
+#         "access": [
+#           {
+#             "id": "default",
+#             "type": "ssh",
+#             "user": "root",
+#             "port": 22,
+#             "privateKey": "~/.ssh/id_ed25519",
+#             "publicKey": "~/.ssh/id_ed25519.pub",
+#             "bastion": ""          // optional: id of another access entry
+#           }
+#           // Additional entries for different access methods:
+#           // { "id": "robot", "type": "ssh", "user": "root", "privateKey": "~/.ssh/robot_key" }
+#           // { "id": "aws-ssm", "type": "ssm", "region": "eu-central-1" }
+#           // { "id": "bastion", "type": "ssh", "host": "bastion.example.com", ... }
+#         ],
+#         "nodes": [
+#           {
+#             "name": "<hostname>",
+#             "role": "control-plane" | "worker",
+#             "group": "<group-name>",
+#             "public_ip": "<ip>",
+#             "private_ip": "<ip>",
+#             "access": "default",   // references access[].id (default: first entry)
+#             // Back-compat: ssh_user + ssh_port still emitted for existing consumers
+#             "ssh_user": "root",
+#             "ssh_port": 22
+#           }
+#         ],
+#         "network": {
+#           "id": "<cloud-id>",
+#           "name": "<network-name>",
+#           "cidr": "<cidr>"
+#         }
+#       }
+#
+# All five functions are required. Providers that don't support one
+# (e.g. a managed service with no provision) should implement
+# it as a no-op returning 0 (or empty JSON for output).
+#
+# Optional:
+#   provider::status <config_file>
+#     Check infrastructure status. Output: Running | Partial | NotFound
+#
+# ── Spec shape ──────────────────────────────────────────────────
+#
+#   spec:
+#     provider:
+#       name: hetzner
+#       config: {}           # inline opaque config (provider-specific)
+#       configRef: ""        # OR: path to config file relative to
+#                            # clusters/<domain>/. Same format as
+#                            # config — just loaded from a file.
+#                            # Mutually exclusive with config.
+#       credentials:
+#         envVars: [HCLOUD_TOKEN]
+#         secretRef: prod-creds
+#
+# ──────────────────────────────────────────────────────────────────
+
+import ^utils/verbose
+
+# provider::read_name <cluster_yaml>
+# Read spec.provider.name from a cluster spec.
+# Outputs the provider name to stdout. Returns 1 if not set.
+provider::read_name() {
+  local cluster_yaml="$1"
+  local name
+  name=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
+  if [[ -z "${name}" ]]; then
+    return 1
+  fi
+  if [[ ! "${name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+    error "provider name '${name}' is invalid (must be alphanumeric + hyphens/underscores)"
+    return 1
+  fi
+  echo "${name}"
+}
+
+# provider::write_config <cluster_yaml>
+# Resolve provider config to PROVIDER_CONFIG_FILE.
+#
+# Two modes (mutually exclusive):
+#   spec.provider.configRef  → load from file relative to clusters/<domain>/
+#   spec.provider.config     → extract inline block
+#
+# The result is always a temp file (or the ref file directly) exported
+# as PROVIDER_CONFIG_FILE. Drivers and provider functions read from it.
+provider::write_config() {
+  local cluster_yaml="$1"
+
+  # Check for configRef first (file mode)
+  local config_ref
+  config_ref=$(yq -r '.spec.provider.configRef // ""' "${cluster_yaml}")
+
+  if [[ -n "${config_ref}" ]]; then
+    # Resolve relative to the cluster's domain directory
+    local domain_dir
+    domain_dir=$(dirname "${cluster_yaml}")
+    local ref_path="${domain_dir}/${config_ref}"
+
+    if [[ ! -f "${ref_path}" ]]; then
+      error "provider.configRef '${config_ref}' not found at ${ref_path}"
+      return 1
+    fi
+
+    PROVIDER_CONFIG_FILE="${ref_path}"
+    export PROVIDER_CONFIG_FILE
+    debug "provider config from configRef: ${ref_path}"
+    return 0
+  fi
+
+  # Inline mode: extract spec.provider.config to a temp file
+  PROVIDER_CONFIG_FILE=$(mktemp /tmp/lok8s-provider-config.XXXXXX.yaml)
+  yq -r '.spec.provider.config // {}' "${cluster_yaml}" > "${PROVIDER_CONFIG_FILE}"
+  export PROVIDER_CONFIG_FILE
+  trap "rm -f '${PROVIDER_CONFIG_FILE}' 2>/dev/null; $(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")" EXIT
+  debug "provider config written to ${PROVIDER_CONFIG_FILE}"
+}
+
+# provider::load <provider_name>
+# Source providers/<name>/main, validate the contract.
+# Sets PROVIDER_NAME.
+provider::load() {
+  local name="$1"
+  local provider_script="${PATH_LOK8S}/providers/${name}/main"
+
+  if [[ ! -f "${provider_script}" ]]; then
+    error "provider '${name}' not found at ${provider_script}"
+    return 1
+  fi
+
+  # shellcheck source=/dev/null
+  source "${provider_script}"
+  export PROVIDER_NAME="${name}"
+  debug "provider '${name}' loaded from ${provider_script}"
+
+  provider::check_contract
+}
+
+# provider::check_contract
+# Verify the sourced provider implements all required functions.
+provider::check_contract() {
+  local -a missing=()
+  local fn
+  for fn in provider::validate provider::credential_data provider::provision provider::destroy provider::output; do
+    declare -F "${fn}" &>/dev/null || missing+=("${fn}")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    error "provider '${PROVIDER_NAME:-unknown}' is missing required functions: ${missing[*]}"
+    return 1
+  fi
+  return 0
+}
+
+# provider::resolve_access <output_json> [access_id]
+# Resolve an access entry from the provider output by id.
+# If no id given, returns the first (default) entry.
+# Follows bastion chains: if the entry has "bastion", resolves it recursively.
+# Outputs a JSON object with the resolved access config.
+provider::resolve_access() {
+  local output="$1"
+  local access_id="${2:-}"
+
+  if [[ -z "${access_id}" ]]; then
+    # Default: first entry
+    echo "${output}" | jq '.access[0] // {}'
+  else
+    echo "${output}" | jq --arg id "${access_id}" '.access[] | select(.id == $id) // {}'
+  fi
+}
+
+# provider::node_access <output_json> <node_name>
+# Get the access config for a specific node, resolving the access reference.
+# Returns the full access entry (with bastion chain resolved if needed).
+provider::node_access() {
+  local output="$1" node_name="$2"
+  local access_id
+  access_id=$(echo "${output}" | jq -r --arg n "${node_name}" '.nodes[] | select(.name == $n) | .access // "default"')
+  provider::resolve_access "${output}" "${access_id}"
+}
+
+# provider::ssh_cmd <output_json> <node_name>
+# Build an SSH command string for connecting to a node, including bastion if configured.
+# Outputs: ssh [bastion opts] user@host
+provider::ssh_cmd() {
+  local output="$1" node_name="$2"
+  local node_json access_json
+
+  node_json=$(echo "${output}" | jq --arg n "${node_name}" '.nodes[] | select(.name == $n)')
+  local pub_ip
+  pub_ip=$(echo "${node_json}" | jq -r '.public_ip')
+  local access_id
+  access_id=$(echo "${node_json}" | jq -r '.access // "default"')
+  access_json=$(provider::resolve_access "${output}" "${access_id}")
+
+  local user port key bastion_id
+  user=$(echo "${access_json}" | jq -r '.user // "root"')
+  port=$(echo "${access_json}" | jq -r '.port // 22')
+  key=$(echo "${access_json}" | jq -r '.privateKey // ""')
+  bastion_id=$(echo "${access_json}" | jq -r '.bastion // ""')
+
+  local -a ssh_args=()
+  [[ -z "${key}" ]] || ssh_args+=(-i "${key}")
+  [[ "${port}" == "22" ]] || ssh_args+=(-p "${port}")
+
+  # Resolve bastion chain
+  if [[ -n "${bastion_id}" ]]; then
+    local bastion_json bastion_user bastion_host bastion_port bastion_key
+    bastion_json=$(provider::resolve_access "${output}" "${bastion_id}")
+    bastion_user=$(echo "${bastion_json}" | jq -r '.user // "root"')
+    bastion_host=$(echo "${bastion_json}" | jq -r '.host // ""')
+    bastion_port=$(echo "${bastion_json}" | jq -r '.port // 22')
+    bastion_key=$(echo "${bastion_json}" | jq -r '.privateKey // ""')
+
+    local -a proxy_args=()
+    [[ -z "${bastion_key}" ]] || proxy_args+=("-i ${bastion_key}")
+    [[ "${bastion_port}" == "22" ]] || proxy_args+=("-p ${bastion_port}")
+
+    ssh_args+=(-o "ProxyCommand=ssh ${proxy_args[*]} -W %h:%p ${bastion_user}@${bastion_host}")
+  fi
+
+  echo "ssh ${ssh_args[*]} ${user}@${pub_ip}"
+}
+
+# provider::detect <cluster_yaml>
+# Detect the infrastructure provider from cluster spec fields.
+# Checks spec.provider first, then infers from spec.hcloud / spec.aws.
+# Outputs provider name to stdout. Returns 1 if not found.
+provider::detect() {
+  local cluster_yaml="$1"
+
+  # Explicit spec.provider.name takes precedence.
+  local provider
+  provider=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
+  if [[ -n "${provider}" ]]; then
+    echo "${provider}"
+    return 0
+  fi
+
+  # Infer from spec fields (legacy path for specs predating the
+  # unified spec.provider block — still occasionally useful for
+  # pure-hcloud or pure-aws specs).
+  if yq -e '.spec.hcloud' "${cluster_yaml}" &>/dev/null; then
+    echo "hetzner"
+  elif yq -e '.spec.aws' "${cluster_yaml}" &>/dev/null; then
+    echo "aws"
+  else
+    error "No provider found in cluster spec: ${cluster_yaml}"
+    return 1
+  fi
+}

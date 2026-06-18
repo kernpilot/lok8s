@@ -1,0 +1,39 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+
+main::drivers() {
+  local name="" list=0 help=0
+  local -a rest args=(
+    "list|l:+" "List available drivers"
+    "help|h:+" "Show help for driver"
+    "name"     "Driver name"
+    "rest"     "Driver-specific arguments"
+  )
+  :args "Driver-specific commands" "${@}"
+  
+  if (( list )); then
+    echo -e "Available drivers:\n"
+    # List available drivers
+    for dir in "${PATH_LOK8S}/drivers"/*/; do
+      [[ -d "${dir}" ]] || continue
+      local d="${dir%/}"
+      d="${d##*/}"
+      [[ -n "${d}" ]] || continue
+      [[ "${d}" == .* ]] && continue
+      printf -- "- %s\n" "${d}"
+    done
+    return 0
+  fi
+  
+  if [[ -n "${name}" ]] && [[ -f "${PATH_LOK8S}/drivers/${name}/main" ]]; then
+    # shellcheck disable=SC1090
+    source "${PATH_LOK8S}/drivers/${name}/main"
+    ! (( help )) || rest+=("--help")
+    main::driver "${rest[@]}"
+    return $?
+  fi
+
+  error "Driver '${name}' not found"
+}
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::drivers "${@}"

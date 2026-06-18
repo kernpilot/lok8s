@@ -1,0 +1,59 @@
+name: Provision Cluster
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'lok8s domain to provision'
+        required: true
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - '.lok8s/*/cluster.lok8s.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Supply-chain rule: don't pipe a remote script into a shell — download
+          # to a file, pin the ref, then execute. Binary versions are pinned by
+          # the committed .bin/b.yaml + .bin/b.lock that `b install` consumes.
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+
+      - name: Detect changed domains
+        id: detect
+        if: github.event_name == 'push'
+        run: |
+          domains=$(git diff --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml' \
+            | sed 's|.lok8s/\(.*\)/cluster.lok8s.yaml|\1|' \
+            | tr '\n' ' ')
+          echo "domains=${domains}" >> "$GITHUB_OUTPUT"
+
+      # Cluster registration with kubehz needs NO platform token — `lo provision`
+      # registers a PENDING cluster anonymously and the user proves ownership by
+      # claiming it in the dashboard (see the `spinup` reusable workflow for the
+      # full claim handshake). Only HCLOUD_TOKEN is required.
+      - name: Provision
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          DOMAIN: ${{ github.event.inputs.domain }}
+        run: |
+          if [[ -n "${DOMAIN}" ]]; then
+            lo provision "${DOMAIN}"
+          else
+            for domain in ${{ steps.detect.outputs.domains }}; do
+              lo provision "${domain}"
+            done
+          fi

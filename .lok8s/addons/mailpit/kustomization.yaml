@@ -1,0 +1,31 @@
+# Mailpit — dev/test mail catcher addon, rendered from the LOCAL chart (./chart)
+# via khelm at kustomize build time.
+#
+# A generic, reusable atom: any lok8s dev cluster that wants to capture outbound
+# mail during development bootstraps `mailpit` (by name) to get the workload
+# (namespace + deployment + service). Apps deliver over SMTP to
+# mailpit.mailpit.svc.cluster.local:1025; captured mail is browsable on the HTTP
+# UI/API (:8025).
+#
+# UNLIKE the other workload addons, the chart ALSO ships an OPTIONAL HTTPRoute
+# exposing the UI — because the route's only cluster-specific bits (host +
+# Gateway) are now VALUES (route.*, see chart/values.yaml + the addon values.yaml
+# override surface), the default host being mailpit.${LOK8S_SPEC_CLUSTER_DOMAIN}.
+# So the route travels with the addon and is flipped/retargeted inline, instead
+# of needing a separate per-cluster routing target.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): mailpit is a
+# Deployment with an immutable `app: mailpit` selector, so the label transformer
+# must not touch the selector or in-place re-applies would fail.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: mailpit
+      lok8s.dev/type: system
+      lok8s.dev/category: dev-tools
+
+generators:
+  - chart.yaml

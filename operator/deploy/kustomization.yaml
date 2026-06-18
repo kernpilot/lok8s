@@ -1,0 +1,7 @@
+# Default deployment: Capi reconciliation only (no Docker socket).
+# For Lo (kind) support use the lo/ overlay: kubectl apply -k operator/deploy/lo/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - base

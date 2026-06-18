@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubehz-operator-config
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-operator
+    app.kubernetes.io/part-of: kubehz
+data:
+  FEATURE_AUTO_REPAIR: "true"
+  FEATURE_NODE_SCALING: "false"
+  FEATURE_WORKLOAD_MONITORING: "true"
+  RECONCILE_INTERVAL: "30s"

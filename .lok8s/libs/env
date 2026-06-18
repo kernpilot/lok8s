@@ -1,0 +1,273 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# env — environment and service configuration
+# Merges services.yaml + services.<config>.yaml, generates root kustomization.yaml.
+# All registry references are now configurable from services.yaml registry config.
+
+import ^utils/types
+import ^utils/verbose
+
+main::env() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'services|v@readonly'         'Print services'
+    'kustomization|k@idempotent'  'Generate kustomization.yaml'
+  )
+  :usage "Manage environment" "${@}"
+  "${usage[@]}"
+}
+
+# Print merged service configuration.
+# Merges services.yaml (committed) + services.<config>.yaml (override).
+# Returns empty YAML ({}) when no services.yaml exists (projects that manage
+# k8s manifests directly without the services abstraction).
+# shellcheck disable=SC2120
+env::services() {
+  debug "Print services"
+
+  local only_services only_registry
+  local -a args=(
+    "only-services|s:+" "Only print services"
+    "only-registry|r:+" "Only print registry"
+    "${args[@]}"
+  )
+  :args "Print services" "${@}"
+
+  local base_file="${PATH_BASE}/services.yaml"
+  if [[ ! -f "${base_file}" ]]; then
+    # Fall back to legacy filenames
+    base_file="${PATH_BASE}/services.base.yaml"
+    if [[ ! -f "${base_file}" ]]; then
+      # No services config at all — return empty YAML
+      debug "No services.yaml found; returning empty config"
+      echo "{}"
+      return 0
+    fi
+  fi
+
+  {
+    cat "${base_file}"
+    # Merge config-specific override if LOK8S_SERVICE_CONFIG is set
+    if [[ -n "${LOK8S_SERVICE_CONFIG:-}" ]]; then
+      local override="${PATH_BASE}/services.${LOK8S_SERVICE_CONFIG}.yaml"
+      if [[ -f "${override}" ]]; then
+        echo -e "\n---\n"
+        cat "${override}"
+      fi
+    fi
+    # Legacy: also merge services.default.yaml if it exists
+    if [[ -f "${PATH_BASE}/services.default.yaml" ]]; then
+      echo -e "\n---\n"
+      cat "${PATH_BASE}/services.default.yaml"
+    fi
+  } | yq eval-all '. as $item ireduce ({}; . * $item )' | {
+    if (( only_services )); then
+      yq '.services'
+    elif (( only_registry )); then
+      yq '.registry'
+    else
+      cat
+    fi
+  } | envsubst
+}
+
+env::kustomization() {
+  debug "Generate kustomization.yaml"
+
+  local no_build pull
+  local -a args=(
+    "no-build|n:+" "Do not build artifacts"
+    "pull|p:+"     "After writing the kustomization, drain the cache queue (lo image cache --all)"
+    "${args[@]}"
+  )
+  :args "Generate kustomization.yaml" "${@}"
+
+  (( no_build )) || build::artifacts
+
+  # Read merged services env once.
+  local merged
+  merged=$(env::services 2>/dev/null)
+
+  # Global registry config. Three distinct concepts:
+  #   prefix   = canonical local image name (lok8s.local — what manifests
+  #              reference, what docker_build produces). Never remote.
+  #   cache    = on-cluster cache hostname (lok8s.cache — what build:false
+  #              services get swapped to so kind pulls without upstream creds).
+  #   endpoint = remote registry target (ghcr.io/org, etc.) — only used
+  #              when pre-pulling a non-built service into the cache.
+  # branch/tag are the path components of both the remote and the cache ref.
+  local g_prefix g_cache g_endpoint g_branch g_tag
+  g_prefix=$(echo "${merged}"   | yq -r '.registry.prefix   // "lok8s.local"')
+  g_cache="lok8s.cache"
+  g_endpoint=$(echo "${merged}" | yq -r '.registry.endpoint // "${DOCKER_REGISTRY}"' | envsubst)
+  g_branch=$(echo "${merged}"   | yq -r '.registry.branch   // "${DOCKER_PROJECT}"'  | envsubst)
+  g_tag=$(echo "${merged}"      | yq -r '.registry.tag      // "${DOCKER_TAG}"'      | envsubst)
+
+  # Default for the per-service `build:` field. Mirrors Tiltfile resolution:
+  # per-service > defaults.build > true.
+  # NOTE: yq's `//` operator is "alternative on null OR false" — it
+  # swallows legitimate `false` values. The only reliable way to
+  # distinguish "missing" from "present and false" is `| tostring`,
+  # which emits "null" for missing keys and "false"/"true" for bools.
+  local default_build
+  default_build=$(echo "${merged}" | yq -r '.defaults.build | tostring')
+  [[ "${default_build}" == "null" ]] && default_build="true"
+
+  # Cache pre-pull queue: services that need a remote image fetched and
+  # pushed into the cache registry before kind tries to pull them. Written
+  # to .lok8s/<domain>/artifacts/.cache-queue (TSV: svc \t remote \t branch \t tag).
+  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
+  mkdir -p "${artifacts_dir}"
+  local cache_queue="${artifacts_dir}/.cache-queue"
+  : > "${cache_queue}"
+
+  local images
+  images=$(env::generate_images "${merged}" "${default_build}" "${g_prefix}" "${g_cache}" "${g_endpoint}" "${g_branch}" "${g_tag}" "${cache_queue}")
+
+  # Write generated kustomization next to the per-target artifacts in the
+  # domain's artifacts/ directory. It references every built target's
+  # artifacts.yaml as a resource, producing one unified pool for Tilt to
+  # partition via filter_yaml(). Target-level ordering/selection is not a
+  # framework concern — Tilt chooses via services.yaml.
+  local out_file="${artifacts_dir}/kustomization.yaml"
+
+  # Drop any stale unified .artifacts.yaml from the pre-per-target era
+  rm -f "${artifacts_dir}/.artifacts.yaml"
+
+  # Collect per-target artifacts.yaml paths, alphabetical. Using relative
+  # paths so the kustomization stays portable.
+  local -a target_resources=()
+  local target_file
+  for target_file in "${artifacts_dir}"/*/artifacts.yaml; do
+    [[ -f "${target_file}" ]] || continue
+    local tname
+    tname=$(basename "$(dirname "${target_file}")")
+    target_resources+=("${tname}/artifacts.yaml")
+  done
+
+  {
+    echo "# Auto-generated by lok8s — do not edit. Source: lo env kustomization."
+    echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+    echo "kind: Kustomization"
+    echo ""
+    if (( ${#target_resources[@]} > 0 )); then
+      echo "resources:"
+      for res in "${target_resources[@]}"; do
+        echo "  - ${res}"
+      done
+    else
+      echo "resources: []"
+    fi
+    if [[ -n "${images}" ]]; then
+      echo ""
+      echo "images:"
+      echo "${images}"
+    fi
+  } > "${out_file}"
+
+  # Cache pre-pull is now opt-in via --pull. Tilt and lo build orchestrate
+  # the cache step separately so failures surface in the right layer and
+  # users can run kustomization generation without forcing a network round
+  # trip. The queue file is always written; consumers drain it when ready.
+  if (( pull )); then
+    if ! declare -F image::cache >/dev/null 2>&1; then
+      error "--pull requires the image lib (run via 'lo env kustomization --pull', not by sourcing env standalone)"
+      return 1
+    fi
+    if [[ -s "${cache_queue}" ]]; then
+      debug "draining $(wc -l < "${cache_queue}") cache queue entries"
+      image::cache --all || {
+        error "image::cache --all failed; check upstream credentials and network"
+        return 1
+      }
+    fi
+  fi
+}
+
+# Generate image override lines for kustomization.yaml from services config.
+# Extracted from env::kustomization for testability.
+# Usage: env::generate_images <merged> <default_build> <g_prefix> <g_cache> <g_endpoint> <g_branch> <g_tag> <cache_queue>
+env::generate_images() {
+  local merged="$1" default_build="$2" g_prefix="$3" g_cache="$4"
+  local g_endpoint="$5" g_branch="$6" g_tag="$7" cache_queue="$8"
+
+  local svc_names svc
+  svc_names=$(echo "${merged}" | yq -r '.services // {} | keys | .[]')
+  [[ -z "${svc_names}" ]] && return 0
+
+  while IFS= read -r svc; do
+    [[ -z "${svc}" ]] && continue
+
+    # Skip disabled services (tostring-sentinel because // swallows false)
+    local enabled
+    enabled=$(echo "${merged}" | yq -r ".services.\"${svc}\".enabled | tostring")
+    [[ "${enabled}" == "null" ]] && enabled="true"
+    [[ "${enabled}" == "false" ]] && continue
+
+    # Resolve effective build (per-service > defaults > true).
+    local svc_build
+    svc_build=$(echo "${merged}" | yq -r ".services.\"${svc}\".build | tostring")
+    [[ "${svc_build}" == "null" ]] && svc_build="${default_build}"
+
+    # Pinned image (mutually exclusive with registry per validator).
+    local pinned
+    pinned=$(echo "${merged}" | yq -r ".services.\"${svc}\".image // \"\"")
+    if [[ -n "${pinned}" ]]; then
+      if [[ "${pinned}" == *@sha256:* ]]; then
+        cat <<EOF
+  - name: ${g_prefix}/${svc}
+    newName: ${pinned%@*}
+    digest: "${pinned##*@}"
+EOF
+      elif [[ "${pinned}" == *:* ]]; then
+        local pin_name="${pinned%:*}"
+        local pin_tag="${pinned##*:}"
+        cat <<EOF
+  - name: ${g_prefix}/${svc}
+    newName: ${pin_name}
+    newTag: "${pin_tag}"
+EOF
+      else
+        cat <<EOF
+  - name: ${g_prefix}/${svc}
+    newName: ${pinned}
+EOF
+      fi
+      continue
+    fi
+
+    # No pin: only emit a swap if we're NOT building locally.
+    [[ "${svc_build}" == "true" ]] && continue
+
+    # build:false branch on registry-presence:
+    #   per-service.registry.endpoint > global.registry.endpoint > skip+warn
+    local s_endpoint s_branch s_tag
+    s_endpoint=$(echo "${merged}" | yq -r ".services.\"${svc}\".registry.endpoint // \"${g_endpoint}\"" | envsubst)
+    s_branch=$(echo "${merged}"   | yq -r ".services.\"${svc}\".registry.branch   // \"${g_branch}\""   | envsubst)
+    s_tag=$(echo "${merged}"      | yq -r ".services.\"${svc}\".registry.tag      // \"${g_tag}\""      | envsubst)
+
+    if [[ -z "${s_endpoint}" ]]; then
+      echo "warn: service '${svc}' has build:false but no registry.endpoint configured — skipping image swap (define registry.endpoint, set image:, or set build:true)" >&2
+      continue
+    fi
+
+    # Cache mode. Manifest swap rewrites to lok8s.cache, and we queue the
+    # remote ref for `lo image cache` to pre-populate.
+    local remote_ref="${s_endpoint}/${s_branch}/${svc}:${s_tag}"
+    printf '%s\t%s\t%s\t%s\n' "${svc}" "${remote_ref}" "${s_branch}" "${s_tag}" >> "${cache_queue}"
+
+    cat <<EOF
+  - name: ${g_prefix}/${svc}
+    newName: ${g_cache}/${s_branch}/${svc}
+    newTag: "${s_tag}"
+EOF
+  done <<< "${svc_names}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::env "${@}"

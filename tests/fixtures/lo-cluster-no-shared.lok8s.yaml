@@ -1,0 +1,32 @@
+# Test fixture: Lo kind cluster spec with shared registries disabled.
+# Slot 125 (default cluster) — see docs/reference/specs.md for the layout.
+# In non-shared mode, all registries live on the project /24 subnet.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: test-no-shared
+spec:
+  kubernetes:
+    version: "v1.31.4"
+  cluster:
+    domain: test.lok8s.dev
+    namespace: default
+  network:
+    name: lok8s
+    cidr: "10.125.125.0/24"
+  registries:
+    shared:
+      enabled: false
+    mirrors:
+      - name: io-docker
+        url: https://registry-1.docker.io
+      - name: io-quay
+        url: https://quay.io
+      - name: io-k8s
+        url: https://registry.k8s.io
+      - name: io-ghcr
+        url: https://ghcr.io
+  runtime: kind
+  bootstrap:
+    - cilium
+    - metallb

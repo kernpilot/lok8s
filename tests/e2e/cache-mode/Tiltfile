@@ -1,0 +1,12 @@
+# E2E: cache-mode Tiltfile
+#
+# Exercises the build:false -> cache pre-pull -> lok8s.cache swap
+# path. Tilt's lok8s() call with the default auto_cache_pull=True
+# runs `lo env kustomization --pull`, which:
+#   1. renders the per-target artifacts (swapping lok8s.local/busybox
+#      to lok8s.cache/library/busybox:1.36 in the deployment manifest),
+#   2. walks the .cache-queue and pre-pulls the upstream image into
+#      the cache registry before any kind node tries to pull it.
+load('../../../.lok8s/tilt/Tiltfile', 'lok8s')
+
+lok8s()

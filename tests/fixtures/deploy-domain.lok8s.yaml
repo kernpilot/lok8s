@@ -1,0 +1,12 @@
+# Test fixture: Deploy kind spec (references a cluster domain)
+# NOTE: Deploy CRD workload selection is being reworked post-refactor —
+# target ordering via spec.syncWave was removed. Deploy specs only
+# reference a cluster via clusterRef today; the workload selection
+# story will land with the services.yaml targets-map design.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Deploy
+metadata:
+  name: staging-apps
+spec:
+  clusterRef:
+    domain: test.lok8s.dev

@@ -1,0 +1,4 @@
+# Runtime-generated files (e2e test writes these in setup_file)
+hetzner.json
+hetzner.yaml
+!cluster.lok8s.yaml

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-placeholder
+  namespace: default
+data:
+  scenario: no-services
+  note: |
+    Placeholder ConfigMap so build::artifacts has at least one target
+    to render and kubectl apply has at least one resource to apply.
+    The scenario itself doesn't care about the contents — it just
+    verifies the empty-services pipeline runs end-to-end.

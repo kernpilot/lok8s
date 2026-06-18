@@ -1,0 +1,35 @@
+# rook-ceph — the Rook-Ceph OPERATOR (controller + CRDs) only. A generic,
+# reusable atom: bootstrap `rook-ceph` by name to get the operator + CRDs (chart
+# rook-ceph @v1.19.6) in the privileged rook-ceph namespace.
+#
+# CLUSTER GLUE stays behind (NOT in this addon): the CephCluster /
+# CephBlockPool / CephObjectStore / StorageClass CRs (cluster.yaml,
+# pool-*.yaml, object-store.yaml), the device-wipe job and the CP-rebuild
+# runbooks — those encode the per-cluster storage topology (per-node
+# deviceFilter, CRUSH device-class separation, mon placement) and live in the
+# consuming cluster's rook-ceph target.
+#
+# Ships namespace.yaml: the rook-ceph namespace is part of the addon (not glue)
+# because the operator's OSD/mon/mgr pods need privileged PodSecurity (host
+# devices, raw block), so the addon owns that PSA-labelled namespace.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: rook-ceph
+      lok8s.dev/type: system
+      lok8s.dev/category: storage
+
+namespace: rook-ceph
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml

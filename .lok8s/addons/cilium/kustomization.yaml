@@ -1,0 +1,24 @@
+# Cilium CNI addon (framework-level, shared by all drivers).
+#
+# Inflated at `kustomize build` time via khelm. Applied by the bootstrap
+# engine when the cluster spec lists "cilium" in spec.bootstrap; values
+# are layered per driver/provider (values.lo.yaml, values.kubeone.yaml).
+#
+# On Lo (kind) clusters this is required because kind is created with
+# disableDefaultCNI:true (so the framework ships a known CNI version).
+# Without it, kind nodes stay NotReady.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Framework labels — picked up by the lok8s tilt extension's system_types
+# loop. Lets `tilt ci` apply these as cluster infrastructure rather than
+# trying to match them to a service in services.yaml.
+labels:
+  - includeSelectors: true
+    pairs:
+      lok8s.dev/name: cni
+      lok8s.dev/type: system
+      lok8s.dev/category: networking
+
+generators:
+  - chart.yaml

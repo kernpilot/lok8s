@@ -1,0 +1,633 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# lint — structure and spec validation
+# Validates domain specs, spec.bootstrap entries (driver addons exist),
+# kustomization references, label conventions, and secrets encryption
+# status.
+
+import ^utils/types
+import ^utils/verbose
+
+main::lint() {
+  local domain="${domain:-}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to validate (default: all)'
+    "${args[@]:-}"
+  )
+  :args "Validate structure and specs" "${@}"
+
+  local -a domains=()
+  if [[ -n "${domain:-}" ]]; then
+    domains=("${domain}")
+  else
+    mapfile -t domains < <(_list_domains)
+  fi
+
+  local errors=0
+  for domain in "${domains[@]}"; do
+    lint::all "${domain}" || errors=$(( errors + 1 ))
+  done
+
+  # Repo-global checks (not per-domain): the services.yaml catalog + every
+  # per-service lok8s.yaml, the one-cluster-per-apex topology, plus Tiltfile/
+  # label drift. These run once regardless of how many domains exist.
+  lint::services || errors=$(( errors + 1 ))
+  lint::apex || errors=$(( errors + 1 ))
+  lint::drift  # warnings only — never bumps the error count
+
+  (( errors == 0 )) || { error "${errors} validation error(s)"; return 1; }
+}
+
+# =============================================================================
+# services.yaml + lok8s.yaml schema validation
+# =============================================================================
+#
+# KEEP IN SYNC WITH .lok8s/tilt/Tiltfile  _validate_services_yaml / _validate_service
+# -----------------------------------------------------------------------------
+# The Tilt extension (.lok8s/tilt/Tiltfile, Starlark) validates the SAME two
+# files at `tilt up` time via fail(). These bash allow-lists MUST mirror the
+# Starlark ones so `lo lint` and `tilt up` agree on what is valid.
+#
+# Why duplicated and not a single shared file: a shared schema file only
+# prevents drift if BOTH readers consume it. The Starlark extension hardcodes
+# its allow-lists inline (and is owned/edited separately), so a YAML/JSON file
+# read only by this bash side would be drift-theater — it would not keep the
+# Starlark copy honest. Until the extension is changed to read the same file,
+# the only truthful option is to duplicate the lists HERE, adjacent and clearly
+# labelled, so a reviewer can diff the two by eye. The arrays below are grouped
+# to match the Starlark `_allowed`/`_*_allowed` locals one-for-one.
+#
+# DELTA (intentional): `components` is a NEW per-service key (review P1.2 /
+# multi-image). lint validates it now; the Starlark `_validate_service` does
+# not yet iterate it. When the extension gains `components` support, this delta
+# disappears — the allow-lists converge again.
+# -----------------------------------------------------------------------------
+
+# services.yaml — top-level + sub-block allow-lists.
+_LINT_SERVICES_TOP=(apiVersion kind metadata registry defaults services)
+_LINT_SERVICES_REGISTRY=(endpoint branch tag prefix parallel)
+_LINT_SERVICES_DEFAULTS=(build dockerfile)
+_LINT_SERVICE_ENTRY=(enabled build path namespace dockerfile watch registry image)
+_LINT_SERVICE_ENTRY_REGISTRY=(endpoint branch tag prefix)
+
+# per-service lok8s.yaml — top-level + components-entry allow-lists.
+_LINT_LOK8S_TOP=(build ports links workloads tilt components)
+_LINT_LOK8S_COMPONENT=(name build ports workloads links)
+
+# Membership test: _lint_in_list <needle> <haystack...>
+_lint_in_list() {
+  local needle="$1"; shift
+  local item
+  for item in "$@"; do
+    [[ "${item}" == "${needle}" ]] && return 0
+  done
+  return 1
+}
+
+# Format an allow-list as a comma-separated hint string ("a, b, c").
+_lint_allowed_hint() {
+  local out="" item
+  for item in "$@"; do
+    out="${out:+${out}, }${item}"
+  done
+  echo "${out}"
+}
+
+# -- services.yaml + every lok8s.yaml -----------------------------------------
+# Validates the repo-root services.yaml against the top-level allow-list, each
+# services.<name> entry, then resolves each enabled service's path: and
+# validates the per-service lok8s.yaml there.
+# Usage: lint::services
+# Returns: 1 if any errors found, 0 otherwise (also 0 when no services.yaml).
+lint::services() {
+  local svc_file="${PATH_BASE}/services.yaml"
+  if [[ ! -f "${svc_file}" ]]; then
+    # Legacy filename fallback (mirrors env::services).
+    svc_file="${PATH_BASE}/services.base.yaml"
+    [[ -f "${svc_file}" ]] || return 0
+  fi
+
+  echo "Validating: services.yaml"
+  local errs=0
+
+  # -- top-level keys --
+  local -a top_keys=()
+  mapfile -t top_keys < <(yq -r 'keys | .[]' "${svc_file}" 2>/dev/null)
+  local k
+  for k in "${top_keys[@]}"; do
+    [[ -n "${k}" ]] || continue
+    if ! _lint_in_list "${k}" "${_LINT_SERVICES_TOP[@]}"; then
+      error "  services.yaml: unknown top-level key '${k}' — allowed: $(_lint_allowed_hint "${_LINT_SERVICES_TOP[@]}")"
+      errs=$(( errs + 1 ))
+    fi
+  done
+
+  # -- registry block --
+  if _lint_in_list registry "${top_keys[@]}"; then
+    local -a reg_keys=()
+    mapfile -t reg_keys < <(yq -r '.registry | keys | .[]' "${svc_file}" 2>/dev/null)
+    for k in "${reg_keys[@]}"; do
+      [[ -n "${k}" ]] || continue
+      if ! _lint_in_list "${k}" "${_LINT_SERVICES_REGISTRY[@]}"; then
+        error "  services.yaml: unknown key 'registry.${k}' — allowed: $(_lint_allowed_hint "${_LINT_SERVICES_REGISTRY[@]}")"
+        errs=$(( errs + 1 ))
+      fi
+    done
+  fi
+
+  # -- defaults block --
+  if _lint_in_list defaults "${top_keys[@]}"; then
+    local -a def_keys=()
+    mapfile -t def_keys < <(yq -r '.defaults | keys | .[]' "${svc_file}" 2>/dev/null)
+    for k in "${def_keys[@]}"; do
+      [[ -n "${k}" ]] || continue
+      if ! _lint_in_list "${k}" "${_LINT_SERVICES_DEFAULTS[@]}"; then
+        error "  services.yaml: unknown key 'defaults.${k}' — allowed: $(_lint_allowed_hint "${_LINT_SERVICES_DEFAULTS[@]}")"
+        errs=$(( errs + 1 ))
+      fi
+    done
+    local df
+    df=$(yq -r '.defaults.dockerfile // ""' "${svc_file}" 2>/dev/null)
+    if [[ -n "${df}" && "${df}" != "service" && "${df}" != "production" ]]; then
+      error "  services.yaml: defaults.dockerfile must be 'service' or 'production', got '${df}'"
+      errs=$(( errs + 1 ))
+    fi
+  fi
+
+  # -- per-service entries --
+  local -a svc_names=()
+  mapfile -t svc_names < <(yq -r '.services // {} | keys | .[]' "${svc_file}" 2>/dev/null)
+  local name
+  for name in "${svc_names[@]}"; do
+    [[ -n "${name}" ]] || continue
+    local -a entry_keys=()
+    mapfile -t entry_keys < <(yq -r ".services.\"${name}\" | keys | .[]" "${svc_file}" 2>/dev/null)
+    for k in "${entry_keys[@]}"; do
+      [[ -n "${k}" ]] || continue
+      if ! _lint_in_list "${k}" "${_LINT_SERVICE_ENTRY[@]}"; then
+        error "  services.yaml: unknown key 'services.${name}.${k}' — allowed: $(_lint_allowed_hint "${_LINT_SERVICE_ENTRY[@]}")"
+        errs=$(( errs + 1 ))
+      fi
+    done
+
+    # image XOR registry (a full pin bypasses registry config).
+    local has_image has_registry
+    has_image=$(_lint_in_list image "${entry_keys[@]}" && echo 1 || echo 0)
+    has_registry=$(_lint_in_list registry "${entry_keys[@]}" && echo 1 || echo 0)
+    if [[ "${has_image}" == 1 && "${has_registry}" == 1 ]]; then
+      error "  services.yaml: services.${name}: 'image' and 'registry' are mutually exclusive"
+      errs=$(( errs + 1 ))
+    fi
+
+    # per-service registry sub-keys.
+    if [[ "${has_registry}" == 1 ]]; then
+      local -a sreg_keys=()
+      mapfile -t sreg_keys < <(yq -r ".services.\"${name}\".registry | keys | .[]" "${svc_file}" 2>/dev/null)
+      for k in "${sreg_keys[@]}"; do
+        [[ -n "${k}" ]] || continue
+        if ! _lint_in_list "${k}" "${_LINT_SERVICE_ENTRY_REGISTRY[@]}"; then
+          error "  services.yaml: unknown key 'services.${name}.registry.${k}' — allowed: $(_lint_allowed_hint "${_LINT_SERVICE_ENTRY_REGISTRY[@]}")"
+          errs=$(( errs + 1 ))
+        fi
+      done
+    fi
+
+    # Resolve path: and validate the per-service lok8s.yaml.
+    local spath
+    spath=$(yq -r ".services.\"${name}\".path // \"./${name}\"" "${svc_file}" 2>/dev/null)
+    [[ -n "${spath}" && "${spath}" != "null" ]] || spath="./${name}"
+    local lok8s_file="${PATH_BASE}/${spath#./}/lok8s.yaml"
+    if [[ -f "${lok8s_file}" ]]; then
+      lint::lok8s_yaml "${name}" "${lok8s_file}"; errs=$(( errs + $? ))
+    fi
+  done
+
+  if (( errs == 0 )); then
+    echo "  OK"
+  else
+    error "  ${errs} services.yaml/lok8s.yaml validation error(s)"
+    return 1
+  fi
+}
+
+# -- single per-service lok8s.yaml --------------------------------------------
+# Validates one lok8s.yaml against the bare schema. `build` is required UNLESS
+# `components` is present (the two are mutually exclusive). When `components`
+# is present, each entry needs `name` + `build`.
+# Usage: lint::lok8s_yaml <service_name> <lok8s.yaml path>
+# Returns: number of errors found
+lint::lok8s_yaml() {
+  local name="$1" file="$2"
+  local errs=0
+
+  local -a keys=()
+  mapfile -t keys < <(yq -r 'keys | .[]' "${file}" 2>/dev/null)
+  local k
+  for k in "${keys[@]}"; do
+    [[ -n "${k}" ]] || continue
+    if ! _lint_in_list "${k}" "${_LINT_LOK8S_TOP[@]}"; then
+      error "  lok8s.yaml (${name}): unknown key '${k}' — allowed: $(_lint_allowed_hint "${_LINT_LOK8S_TOP[@]}")"
+      errs=$(( errs + 1 ))
+    fi
+  done
+
+  local has_build has_components
+  has_build=$(_lint_in_list build "${keys[@]}" && echo 1 || echo 0)
+  has_components=$(_lint_in_list components "${keys[@]}" && echo 1 || echo 0)
+
+  # build and components are mutually exclusive; exactly one must be present.
+  if [[ "${has_build}" == 1 && "${has_components}" == 1 ]]; then
+    error "  lok8s.yaml (${name}): 'build' and 'components' are mutually exclusive"
+    errs=$(( errs + 1 ))
+  elif [[ "${has_build}" == 0 && "${has_components}" == 0 ]]; then
+    error "  lok8s.yaml (${name}): 'build' is required (or use 'components')"
+    errs=$(( errs + 1 ))
+  fi
+
+  # Validate each components[] entry: name + build required.
+  if [[ "${has_components}" == 1 ]]; then
+    local ctype
+    ctype=$(yq -r '.components | type' "${file}" 2>/dev/null)
+    # mikefarah yq emits '!!seq' for lists; tolerate a bare 'seq' too.
+    if [[ "${ctype}" != "!!seq" && "${ctype}" != "seq" ]]; then
+      error "  lok8s.yaml (${name}): 'components' must be a list"
+      errs=$(( errs + 1 ))
+    else
+      local count i
+      count=$(yq -r '.components | length' "${file}" 2>/dev/null)
+      [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+      for (( i = 0; i < count; i++ )); do
+        local cname
+        cname=$(yq -r ".components[${i}].name // \"\"" "${file}" 2>/dev/null)
+        if [[ -z "${cname}" || "${cname}" == "null" ]]; then
+          error "  lok8s.yaml (${name}): components[${i}] is missing required 'name'"
+          errs=$(( errs + 1 ))
+          cname="[${i}]"
+        fi
+        # build required on each component.
+        local cbuild
+        cbuild=$(yq -r ".components[${i}].build // \"\"" "${file}" 2>/dev/null)
+        if [[ -z "${cbuild}" || "${cbuild}" == "null" ]]; then
+          error "  lok8s.yaml (${name}): components[${cname}] is missing required 'build'"
+          errs=$(( errs + 1 ))
+        fi
+        # component entry keys.
+        local -a ckeys=()
+        mapfile -t ckeys < <(yq -r ".components[${i}] | keys | .[]" "${file}" 2>/dev/null)
+        for k in "${ckeys[@]}"; do
+          [[ -n "${k}" ]] || continue
+          if ! _lint_in_list "${k}" "${_LINT_LOK8S_COMPONENT[@]}"; then
+            error "  lok8s.yaml (${name}): components[${cname}].${k} unknown — allowed: $(_lint_allowed_hint "${_LINT_LOK8S_COMPONENT[@]}")"
+            errs=$(( errs + 1 ))
+          fi
+        done
+      done
+    fi
+  fi
+
+  return "${errs}"
+}
+
+# =============================================================================
+# Drift checks (warnings — never hard-fail)
+# =============================================================================
+# (a) project-root Tiltfile hand-rolls docker_build/k8s_yaml while services.yaml
+#     declares services → the catalog is dead/diverged. Suggest the 2-line form.
+# (b) a per-service path: contains its own Tiltfile (redundant — lok8s() reads
+#     each lok8s.yaml from its path).
+# (c) a service's deploy manifests carry no lok8s.dev/name=<service> label
+#     (lok8s() routes on that label and silently drops unmatched resources).
+# Usage: lint::drift
+lint::drift() {
+  local svc_file="${PATH_BASE}/services.yaml"
+  [[ -f "${svc_file}" ]] || svc_file="${PATH_BASE}/services.base.yaml"
+  [[ -f "${svc_file}" ]] || return 0
+
+  # Does services.yaml actually declare any services?
+  local svc_count
+  svc_count=$(yq -r '.services // {} | length' "${svc_file}" 2>/dev/null)
+  [[ "${svc_count}" =~ ^[0-9]+$ ]] || svc_count=0
+
+  # (a) root Tiltfile hardcodes builds/manifests alongside a populated catalog.
+  local tiltfile="${PATH_BASE}/Tiltfile"
+  if (( svc_count > 0 )) && [[ -f "${tiltfile}" ]]; then
+    if grep -qE '(docker_build|k8s_yaml)\(' "${tiltfile}" 2>/dev/null; then
+      warn "  Tiltfile: contains docker_build()/k8s_yaml() while services.yaml declares ${svc_count} service(s) — prefer the 2-line form: load('./.lok8s/tilt/Tiltfile','lok8s'); lok8s()"
+    fi
+  fi
+
+  # Per-service drift: redundant Tiltfile + missing routing label.
+  local -a svc_names=()
+  mapfile -t svc_names < <(yq -r '.services // {} | keys | .[]' "${svc_file}" 2>/dev/null)
+  local name
+  for name in "${svc_names[@]}"; do
+    [[ -n "${name}" ]] || continue
+    local spath
+    spath=$(yq -r ".services.\"${name}\".path // \"./${name}\"" "${svc_file}" 2>/dev/null)
+    [[ -n "${spath}" && "${spath}" != "null" ]] || spath="./${name}"
+    local sdir="${PATH_BASE}/${spath#./}"
+
+    # (b) redundant per-submodule Tiltfile.
+    if [[ -f "${sdir}/Tiltfile" ]]; then
+      warn "  ${name}: ${spath}/Tiltfile is redundant — lok8s() reads ${spath}/lok8s.yaml directly (remove the per-service Tiltfile)"
+    fi
+
+    # (c) deploy manifests missing the lok8s.dev/name routing label.
+    # Best-effort: scan the service's deploy/ dir (if present). For a `components`
+    # service each image is routed by its COMPONENT name (one docker_build each),
+    # NOT the service name — so check every component's label.
+    local ddir="${sdir}/deploy"
+    if [[ -d "${ddir}" ]]; then
+      local lokfile="${sdir}/lok8s.yaml" ncomp
+      local -a route_names=("${name}")
+      if [[ -f "${lokfile}" ]]; then
+        ncomp=$(yq -r '.components // [] | length' "${lokfile}" 2>/dev/null)
+        if [[ "${ncomp}" =~ ^[0-9]+$ ]] && (( ncomp > 0 )); then
+          mapfile -t route_names < <(yq -r '.components[].name' "${lokfile}" 2>/dev/null)
+        fi
+      fi
+      local rname
+      for rname in "${route_names[@]}"; do
+        [[ -n "${rname}" ]] || continue
+        if ! grep -rqsE "lok8s\.dev/name:[[:space:]]*${rname}([[:space:]]|$|\")" "${ddir}" 2>/dev/null; then
+          warn "  ${name}: no 'lok8s.dev/name: ${rname}' label found in ${spath}/deploy — lok8s() will silently drop these manifests"
+        fi
+      done
+    fi
+  done
+}
+
+# -- Schema validation -------------------------------------------------------
+# Validates required fields: kind, apiVersion, metadata.name, spec.kind (cluster)
+# Usage: lint::schema <domain_dir> <spec_file>
+# Returns: number of errors found
+lint::schema() {
+  local domain_dir="$1" spec_file="$2"
+  local errs=0
+
+  local spec_kind
+  spec_kind=$(yq -r '.kind // ""' "${spec_file}")
+  if [[ -z "${spec_kind}" ]]; then
+    error "  Missing required field: kind"
+    errs=$(( errs + 1 ))
+  fi
+
+  local api_version
+  api_version=$(yq -r '.apiVersion // ""' "${spec_file}")
+  if [[ -z "${api_version}" ]]; then
+    error "  Missing required field: apiVersion"
+    errs=$(( errs + 1 ))
+  fi
+
+  local meta_name
+  meta_name=$(yq -r '.metadata.name // ""' "${spec_file}")
+  if [[ -z "${meta_name}" ]]; then
+    error "  Missing required field: metadata.name"
+    errs=$(( errs + 1 ))
+  fi
+
+  if [[ -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
+    local spec_runtime
+    spec_runtime=$(yq -r '.spec.kind // .kind // ""' "${spec_file}")
+    if [[ -z "${spec_runtime}" || "${spec_runtime}" == "null" ]]; then
+      warn "  Missing spec.kind (cluster runtime type)"
+    fi
+  fi
+
+  return "${errs}"
+}
+
+# -- ClusterRef validation ----------------------------------------------------
+# Validates spec.clusterRef for deploy domains.
+# Usage: lint::clusterref <domain_dir> <spec_file>
+# Returns: number of errors found
+lint::clusterref() {
+  local domain_dir="$1" spec_file="$2"
+  local errs=0
+
+  if [[ -f "${domain_dir}/deploy.lok8s.yaml" ]]; then
+    local cluster_ref
+    cluster_ref=$(yq -r '.spec.clusterRef // ""' "${spec_file}")
+    if [[ -z "${cluster_ref}" || "${cluster_ref}" == "null" ]]; then
+      error "  Missing required field: spec.clusterRef"
+      errs=$(( errs + 1 ))
+    else
+      # Validate clusterRef.domain points to a valid cluster domain
+      local ref_domain
+      ref_domain=$(yq -r '.spec.clusterRef.domain // ""' "${spec_file}")
+      if [[ -n "${ref_domain}" ]]; then
+        if [[ ! -d "${PATH_CLUSTERS}/${ref_domain}" ]]; then
+          error "  clusterRef.domain '${ref_domain}' not found in .lok8s/"
+          errs=$(( errs + 1 ))
+        elif [[ ! -f "${PATH_CLUSTERS}/${ref_domain}/cluster.lok8s.yaml" ]]; then
+          error "  clusterRef.domain '${ref_domain}' has no cluster.lok8s.yaml"
+          errs=$(( errs + 1 ))
+        fi
+      fi
+    fi
+  fi
+
+  return "${errs}"
+}
+
+# -- Bootstrap validation -----------------------------------------------------
+# Validates each entry in spec.bootstrap resolves to an existing driver
+# addon directory. Bare names resolve against the cluster kind's addons
+# tree (.lok8s/.scripts/provider/<kind>/addons/<name>/).
+# Usage: lint::bootstrap <domain_dir> <spec_file>
+# Returns: number of errors found
+lint::bootstrap() {
+  local domain_dir="$1" spec_file="$2"
+  local errs=0
+
+  # Only cluster specs carry spec.bootstrap
+  [[ -f "${domain_dir}/cluster.lok8s.yaml" ]] || return 0
+
+  local kind
+  kind=$(yq -r '.kind // ""' "${spec_file}" | tr '[:upper:]' '[:lower:]')
+  [[ -n "${kind}" ]] || return 0
+
+  local -a bootstrap
+  mapfile -t bootstrap < <(yq -r '.spec.bootstrap[]?' "${spec_file}")
+
+  local entry addon_dir
+  for entry in "${bootstrap[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    # Relative/absolute paths are user-owned — just check existence
+    if [[ "${entry}" == ./* || "${entry}" == ../* || "${entry}" == /* ]]; then
+      if [[ "${entry}" == /* ]]; then
+        addon_dir="${PATH_BASE}${entry}"
+      else
+        addon_dir="${domain_dir}/${entry}"
+      fi
+    else
+      # Bare name → shared framework addons tree
+      addon_dir="${PATH_LOK8S}/addons/${entry}"
+    fi
+    if [[ ! -d "${addon_dir}" ]]; then
+      error "  spec.bootstrap entry not found: ${entry} (resolved to ${addon_dir})"
+      errs=$(( errs + 1 ))
+    fi
+  done
+
+  return "${errs}"
+}
+
+# -- Kustomization references -------------------------------------------------
+# Validates kustomization.yaml exists in targets and its resource references resolve.
+# Usage: lint::kustomization <domain_dir>
+# Returns: number of errors found
+lint::kustomization() {
+  local domain_dir="$1"
+  local errs=0
+
+  if [[ -d "${domain_dir}/targets" ]]; then
+    for tdir in "${domain_dir}"/targets/*/; do
+      [[ -d "${tdir}" ]] || continue
+      local tname
+      tname=$(basename "${tdir}")
+      local kustfile="${tdir}kustomization.yaml"
+      if [[ ! -f "${kustfile}" ]]; then
+        warn "  Target ${tname}/ missing kustomization.yaml"
+        continue
+      fi
+      local -a resources
+      mapfile -t resources < <(yq -r '.resources[]?' "${kustfile}")
+      for res in "${resources[@]}"; do
+        [[ -n "${res}" ]] || continue
+        # Remote references (URLs, repo refs) are not checked locally
+        [[ "${res}" == *"://"* ]] && continue
+        # Resources may be files or directories (bases)
+        if [[ ! -e "${tdir}${res}" ]]; then
+          error "  Target ${tname}/: kustomization.yaml references missing path: ${res}"
+          errs=$(( errs + 1 ))
+        fi
+      done
+    done
+  fi
+
+  return "${errs}"
+}
+
+# -- Label convention ----------------------------------------------------------
+# Warns about manifests missing lok8s.dev/* labels.
+# Usage: lint::labels <domain_dir>
+lint::labels() {
+  local domain_dir="$1"
+
+  if [[ -d "${domain_dir}/targets" ]]; then
+    for tdir in "${domain_dir}"/targets/*/; do
+      [[ -d "${tdir}" ]] || continue
+      local tname
+      tname=$(basename "${tdir}")
+      for manifest in "${tdir}"*.yaml; do
+        [[ -f "${manifest}" ]] || continue
+        local mbase
+        mbase=$(basename "${manifest}")
+        [[ "${mbase}" == "kustomization.yaml" ]] && continue
+        local has_label
+        has_label=$(yq -r '.metadata.labels | keys | map(select(test("^lok8s\\.dev/"))) | length' "${manifest}" 2>/dev/null || echo "0")
+        if [[ "${has_label}" == "0" ]]; then
+          warn "  ${tname}/${mbase}: missing lok8s.dev/* label"
+        fi
+      done
+    done
+  fi
+}
+
+# -- Secrets check -------------------------------------------------------------
+# Warns about unencrypted secret files in the secrets/ directory and
+# in the $PATH_SECRETS cache.
+# Usage: lint::secrets <domain_dir>
+lint::secrets() {
+  local domain_dir="$1"
+
+  # Legacy per-domain secrets/ directory (YAML Secret manifests)
+  if [[ -d "${domain_dir}/secrets" ]]; then
+    for secret_file in "${domain_dir}"/secrets/*; do
+      [[ -f "${secret_file}" ]] || continue
+      local sbase
+      sbase=$(basename "${secret_file}")
+      [[ "${sbase}" == *.enc ]] && continue
+      [[ "${sbase}" == *.age ]] && continue
+      if grep -qE '^(data|stringData):' "${secret_file}" 2>/dev/null; then
+        warn "  secrets/${sbase}: appears unencrypted (contains data/stringData)"
+      fi
+    done
+  fi
+
+  # Secret cache ($PATH_SECRETS) — check for missing .enc counterparts
+  secrets::check_unencrypted 2>&1 | while IFS= read -r line; do
+    warn "  ${line}"
+  done
+}
+
+# -- Run all validations -------------------------------------------------------
+# Convenience function to run all lint checks on a single domain.
+# Usage: lint::all <domain>
+# Returns: 1 if any errors found, 0 otherwise
+# Repo-global topology check: a cluster.lok8s.yaml must NOT be a subdomain of
+# another cluster.lok8s.yaml. ONE cluster per plane/apex — subdomains (app.,
+# api., auth., kkp. …) are routing + targets INSIDE the apex cluster, not their
+# own cluster specs. Catches the recurring mistake of inventing
+# clusters/<sub>.<apex>/cluster.lok8s.yaml (see docs/guide/concepts: "One
+# cluster per plane — NOT per subdomain"). deploy.lok8s.yaml domains are exempt
+# (they are deploy targets with a clusterRef, not clusters). Returns 1 on any
+# violation.
+lint::apex() {
+  local -a domains=()
+  local spec
+  for spec in "${PATH_CLUSTERS}"/*/cluster.lok8s.yaml; do
+    [[ -f "${spec}" ]] || continue
+    domains+=("$(basename "$(dirname "${spec}")")")
+  done
+
+  local rc=0 a b
+  for a in "${domains[@]:-}"; do
+    [[ -n "${a}" ]] || continue
+    for b in "${domains[@]:-}"; do
+      [[ -n "${b}" && "${a}" != "${b}" ]] || continue
+      # a is a strict subdomain of b (a ends with ".b")
+      if [[ "${a}" == *".${b}" ]]; then
+        error "  cluster '${a}' is a subdomain of cluster '${b}' — one cluster per plane: express '${a}' as a target/HTTPRoute inside clusters/${b}/, not a separate cluster.lok8s.yaml (docs/guide/concepts: 'One cluster per plane')"
+        rc=1
+      fi
+    done
+  done
+  return ${rc}
+}
+
+lint::all() {
+  local domain="$1"
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+  local errors=0
+
+  echo "Validating: ${domain}"
+
+  # Check spec file exists
+  if [[ ! -f "${domain_dir}/cluster.lok8s.yaml" ]] && [[ ! -f "${domain_dir}/deploy.lok8s.yaml" ]]; then
+    error "  Missing cluster.lok8s.yaml or deploy.lok8s.yaml"
+    return 1
+  fi
+
+  local spec_file=""
+  if [[ -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
+    spec_file="${domain_dir}/cluster.lok8s.yaml"
+  else
+    spec_file="${domain_dir}/deploy.lok8s.yaml"
+  fi
+
+  lint::schema "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
+  lint::clusterref "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
+  lint::bootstrap "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
+  lint::kustomization "${domain_dir}"; errors=$(( errors + $? ))
+  lint::labels "${domain_dir}"
+  lint::secrets "${domain_dir}"
+
+  echo "  OK"
+
+  (( errors == 0 )) || { error "${errors} validation error(s)"; return 1; }
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::lint "${@}"

@@ -1,0 +1,17 @@
+# Cilium values for Lo (kind) clusters.
+#
+# Kind-specific requirements:
+#   1. ipam.mode: cluster-pool — kind doesn't provide pre-allocated per-node PodCIDR
+#   2. routingMode: tunnel — kind nodes are containers on a Docker bridge,
+#      no L3 routable infrastructure for native routing
+#   3. Explicit clusterPoolIPv4PodCIDRList matching the kind cluster's podSubnet
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4ServiceCIDR: 10.96.0.0/12
+    clusterPoolIPv4MaskSize: 24
+
+routingMode: tunnel

@@ -1,0 +1,31 @@
+# MetalLB L2 LoadBalancer for Lo (kind) clusters.
+#
+# Installs the metallb controller + speaker via khelm, plus a project-specific
+# IPAddressPool and L2Advertisement that reference ${LOK8S_SPEC_LOADBALANCER_POOL_*}.
+# The framework runs envsubst on the rendered output (see build::artifacts) so
+# the pool addresses are substituted from the cluster spec at build time.
+#
+# Cluster spec:
+#   spec:
+#     loadBalancer:
+#       pool: "10.125.125.125-10.125.125.150"
+#
+# Resolves at envsubst time to:
+#   addresses:
+#     - 10.125.125.125-10.125.125.150
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: true
+    pairs:
+      lok8s.dev/name: metallb
+      lok8s.dev/type: system
+      lok8s.dev/category: networking
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml
+  - pool.yaml

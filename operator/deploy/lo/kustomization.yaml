@@ -1,0 +1,42 @@
+# Overlay enabling the Lo driver (kind clusters) in the operator.
+#
+# The Lo driver drives the node's Docker daemon: kind clusters are
+# created as sibling containers on the host. That requires the Docker
+# socket and host networking (kind's kubeconfig points at a host port),
+# and the container must run as root to use the socket. This is a
+# deliberate trade-off for CI / single-node management hosts — do NOT
+# apply this overlay on multi-tenant clusters.
+#
+#   kubectl apply -k operator/deploy/lo/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../base
+
+patches:
+  - target:
+      kind: Deployment
+      name: lok8s-operator
+    patch: |-
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+      - op: replace
+        path: /spec/template/spec/containers/0/securityContext/runAsNonRoot
+        value: false
+      - op: replace
+        path: /spec/template/spec/containers/0/securityContext/runAsUser
+        value: 0
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: docker-sock
+          mountPath: /var/run/docker.sock
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket

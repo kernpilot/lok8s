@@ -1,0 +1,408 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# KKP driver — managed clusters via Kubermatic Kubernetes Platform
+# Implements: driver::provision, driver::destroy, driver::status, driver::kubeconfig
+# Optional: driver::ensure_credentials
+#
+# KKP hosts the control plane on a seed cluster. Users only pay for worker nodes.
+# All operations use the KKP REST API via the drivers/kkp/api client library.
+#
+# Work directory: .lok8s/<domain>/.kkp/
+# Kubeconfig: .kubeconfig/<domain>.yaml
+#
+# Required env vars: KKP_TOKEN, KKP_API_URL (or spec.kkp.apiUrl)
+# Optional env vars: HCLOUD_TOKEN (Hetzner), AWS_ACCESS_KEY_ID (AWS)
+
+import ^utils/verbose
+import ^drivers/kkp/api
+
+# ── CLI dispatch ──────────────────────────────────────────
+
+main::driver() {
+  local -a usage=(
+    'provision|p@destructive'  'Provision a KKP cluster'
+    'destroy|d@destructive'    'Destroy a KKP cluster'
+    'status|s@readonly'        'Check cluster status'
+    'kubeconfig|k@readonly'    'Extract kubeconfig path'
+  )
+  :usage "KKP driver" "${@}"
+  "${usage[@]}"
+}
+
+# ── Driver contract ───────────────────────────────────────
+
+driver::provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Provision a KKP cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kkp"
+  mkdir -p "${work_dir}"
+
+  # 1. Validate credentials
+  kkp::validate_credentials "${cluster_yaml}" || return 1
+
+  # 2. Extract config from cluster spec
+  local cluster_name api_url project_id datacenter k8s_version provider
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  api_url=$(yq -r '.spec.kkp.apiUrl' "${cluster_yaml}")
+  project_id=$(yq -r '.spec.kkp.projectId' "${cluster_yaml}")
+  datacenter=$(yq -r '.spec.kkp.datacenter' "${cluster_yaml}")
+  k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+  # provider may be an object ({name: hetzner}) or a bare scalar
+  provider=$(yq -r '(.spec.provider | select(type == "!!map") | .name) // (.spec.provider | select(type == "!!str")) // "hetzner"' "${cluster_yaml}")
+
+  # Use spec URL if KKP_API_URL not set in environment
+  if [[ -z "${KKP_API_URL:-}" ]]; then
+    export KKP_API_URL="${api_url}"
+  fi
+
+  kkp::validate_url "${KKP_API_URL}" || return 1
+
+  # 3. Idempotent re-run: reuse a previously created cluster if it still exists
+  local cluster_id=""
+  if [[ -f "${work_dir}/cluster_id" ]]; then
+    cluster_id=$(cat "${work_dir}/cluster_id")
+    if kkp::get_cluster "${project_id}" "${cluster_id}" >/dev/null 2>&1; then
+      debug "KKP cluster ${cluster_id} already exists — skipping create"
+    else
+      warn "Saved cluster ID ${cluster_id} no longer exists in KKP — creating a new cluster"
+      cluster_id=""
+    fi
+  fi
+
+  # 4. Create cluster
+  if [[ -z "${cluster_id}" ]]; then
+    local cluster_json
+    cluster_json=$(_build_cluster_json \
+      "${cluster_name}" "${k8s_version}" "${datacenter}" "${provider}" "${cluster_yaml}")
+
+    cluster_id=$(kkp::create_cluster "${project_id}" "${cluster_json}") || return 1
+
+    # Persist cluster ID for later operations
+    echo "${cluster_id}" > "${work_dir}/cluster_id"
+    echo "${project_id}" > "${work_dir}/project_id"
+    debug "KKP cluster ID ${cluster_id} saved to ${work_dir}/cluster_id"
+  fi
+
+  # 5. Wait for cluster to reach Running phase
+  kkp::wait_ready "${project_id}" "${cluster_id}" || return 1
+
+  # 6. Create machine deployments (worker pools)
+  _create_worker_pools "${project_id}" "${cluster_id}" "${cluster_yaml}" "${provider}" || return 1
+
+  # 7. Fetch and store kubeconfig (named by metadata.name — framework
+  # convention shared with the other drivers; bootstrap expects it there)
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+  kkp::get_kubeconfig "${project_id}" "${cluster_id}" "${kubeconfig_path}" || return 1
+
+  debug "KKP cluster ${cluster_name} provisioned successfully"
+}
+
+driver::destroy() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Destroy a KKP cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kkp"
+
+  # Read saved cluster/project IDs
+  local cluster_id project_id
+  if [[ -f "${work_dir}/cluster_id" ]] && [[ -f "${work_dir}/project_id" ]]; then
+    cluster_id=$(cat "${work_dir}/cluster_id")
+    project_id=$(cat "${work_dir}/project_id")
+  else
+    # Fallback: extract project ID from spec (cluster ID unavailable)
+    project_id=$(yq -r '.spec.kkp.projectId' "${cluster_yaml}")
+    error "No saved cluster ID found in ${work_dir}/cluster_id"
+    error "Cannot destroy cluster without a cluster ID"
+    return 1
+  fi
+
+  # Set API URL if not in environment
+  if [[ -z "${KKP_API_URL:-}" ]]; then
+    local api_url
+    api_url=$(yq -r '.spec.kkp.apiUrl' "${cluster_yaml}")
+    export KKP_API_URL="${api_url}"
+  fi
+
+  kkp::validate_url "${KKP_API_URL}" || return 1
+
+  # Delete the cluster via KKP API
+  kkp::delete_cluster "${project_id}" "${cluster_id}" || warn "KKP cluster delete failed — continuing cleanup"
+
+  # Clean up local state (kubeconfig is named by metadata.name)
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  rm -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+  rm -rf "${work_dir}"
+
+  debug "KKP cluster ${cluster_id} destroyed and local state cleaned"
+}
+
+driver::status() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Check KKP cluster status" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kkp"
+
+  # Check if cluster was ever provisioned
+  if [[ ! -f "${work_dir}/cluster_id" ]] || [[ ! -f "${work_dir}/project_id" ]]; then
+    echo "NotFound"
+    return
+  fi
+
+  local cluster_id project_id
+  cluster_id=$(cat "${work_dir}/cluster_id")
+  project_id=$(cat "${work_dir}/project_id")
+
+  # Set API URL if not in environment
+  if [[ -z "${KKP_API_URL:-}" ]]; then
+    local api_url
+    api_url=$(yq -r '.spec.kkp.apiUrl' "${cluster_yaml}")
+    export KKP_API_URL="${api_url}"
+  fi
+
+  # The v2 REST API exposes no .status.phase — derive status from the
+  # cluster's existence plus the /health endpoint (see kkp::core_healthy).
+  if ! kkp::get_cluster "${project_id}" "${cluster_id}" >/dev/null 2>&1; then
+    echo "Unknown"
+    return
+  fi
+
+  local health
+  if ! health=$(kkp::health "${project_id}" "${cluster_id}" 2>/dev/null); then
+    echo "Unknown"
+    return
+  fi
+
+  if kkp::core_healthy "${health}"; then
+    echo "Running"
+  else
+    echo "Provisioning"
+  fi
+}
+
+driver::kubeconfig() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Extract kubeconfig" "${@}"
+
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
+  echo "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+}
+
+# Optional: validate credentials before provisioning starts
+driver::ensure_credentials() {
+  local cluster_yaml="$1"
+
+  # Set API URL from spec if needed
+  if [[ -z "${KKP_API_URL:-}" ]]; then
+    local api_url
+    api_url=$(yq -r '.spec.kkp.apiUrl // ""' "${cluster_yaml}" 2>/dev/null)
+    if [[ -n "${api_url}" ]]; then
+      export KKP_API_URL="${api_url}"
+    fi
+  fi
+
+  kkp::validate_credentials "${cluster_yaml}"
+}
+
+# ── Internal helpers ──────────────────────────────────────
+
+# Build the cluster creation JSON payload from cluster spec.
+_build_cluster_json() {
+  local name="$1" version="$2" datacenter="$3" provider="$4" cluster_yaml="$5"
+
+  local preset
+  preset=$(yq -r '.spec.kkp.preset // ""' "${cluster_yaml}" 2>/dev/null)
+
+  local cloud_spec
+  cloud_spec=$(_build_cloud_spec "${provider}" "${cluster_yaml}" "${preset}")
+
+  local json
+  json=$(jq -n \
+    --arg name "${name}" \
+    --arg version "${version}" \
+    --arg dc "${datacenter}" \
+    --argjson cloud "${cloud_spec}" \
+    '{
+      cluster: {
+        name: $name,
+        spec: {
+          version: $version,
+          cloud: ({
+            dc: $dc
+          } + $cloud)
+        }
+      }
+    }')
+
+  echo "${json}"
+}
+
+# Build the cloud spec section based on provider.
+_build_cloud_spec() {
+  local provider="$1" cluster_yaml="$2" preset="$3"
+
+  if [[ -n "${preset}" ]]; then
+    jq -n --arg provider "${provider}" --arg preset "${preset}" \
+      '{($provider): {}, presetName: $preset}'
+    return
+  fi
+
+  case "${provider}" in
+    hetzner)
+      jq -n --arg token "${HCLOUD_TOKEN:-}" \
+        '{hetzner: {token: $token}}'
+      ;;
+    aws)
+      jq -n \
+        --arg key "${AWS_ACCESS_KEY_ID:-}" \
+        --arg secret "${AWS_SECRET_ACCESS_KEY:-}" \
+        '{aws: {accessKeyID: $key, secretAccessKey: $secret}}'
+      ;;
+    byo | bringyourown)
+      # No cloud credentials, no machine-controller — control plane only.
+      # Workers join out-of-band (kubeadm token); pairs with a
+      # `bringyourown` datacenter in the Seed.
+      jq -n '{bringyourown: {}}'
+      ;;
+    *)
+      error "Unsupported KKP provider: ${provider}"
+      return 1
+      ;;
+  esac
+}
+
+# Create worker pool machine deployments from spec.workers.
+_create_worker_pools() {
+  local project_id="$1" cluster_id="$2" cluster_yaml="$3" provider="$4"
+
+  local pool_count
+  pool_count=$(yq -r '.spec.workers | keys | length // 0' "${cluster_yaml}" 2>/dev/null || echo "0")
+
+  if (( pool_count == 0 )); then
+    debug "No worker pools defined in spec"
+    return 0
+  fi
+
+  # MD creation 503s until the provider components are ready — gate on
+  # them only when there are pools to create (byo clusters never have them).
+  kkp::wait_components "${project_id}" "${cluster_id}" "${KKP_WAIT_TIMEOUT}" \
+    machineController operatingSystemManager || return 1
+
+  # Idempotent re-run: skip pools that already exist
+  local existing_pools
+  existing_pools=$(kkp::list_machinedeployments "${project_id}" "${cluster_id}" 2>/dev/null \
+    | jq -r '.[].name' 2>/dev/null) || existing_pools=""
+
+  local pool
+  for pool in $(yq -r '.spec.workers | keys[]' "${cluster_yaml}"); do
+    # Validate pool name
+    if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
+      error "Invalid worker pool name: ${pool} (must be alphanumeric with hyphens)"
+      return 1
+    fi
+
+    if grep -qx "${pool}" <<< "${existing_pools}"; then
+      debug "Worker pool ${pool} already exists — skipping create"
+      continue
+    fi
+
+    # Bracket syntax: pool names contain hyphens, which yq would
+    # otherwise parse as arithmetic (.workers.pool-1 == .workers.pool - 1)
+    local replicas flavor os_name
+    replicas=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
+    flavor=$(yq -r ".spec.workers.[\"${pool}\"].flavor // .spec.workers.[\"${pool}\"].type" "${cluster_yaml}")
+    os_name=$(yq -r ".spec.workers.[\"${pool}\"].operatingSystem // \"ubuntu\"" "${cluster_yaml}")
+
+    if [[ -z "${flavor}" || "${flavor}" == "null" ]]; then
+      error "Worker pool '${pool}' has no flavor/type set"
+      return 1
+    fi
+
+    # Autoscaler config (optional)
+    local autoscaler_min autoscaler_max
+    autoscaler_min=$(yq -r ".spec.workers.[\"${pool}\"].autoscaler.min // 0" "${cluster_yaml}")
+    autoscaler_max=$(yq -r ".spec.workers.[\"${pool}\"].autoscaler.max // 0" "${cluster_yaml}")
+
+    local md_json
+    md_json=$(_build_machinedeployment_json \
+      "${pool}" "${replicas}" "${flavor}" "${os_name}" "${provider}" \
+      "${autoscaler_min}" "${autoscaler_max}")
+
+    kkp::create_machinedeployment "${project_id}" "${cluster_id}" "${md_json}" || {
+      error "Failed to create machine deployment: ${pool}"
+      return 1
+    }
+  done
+}
+
+# Build machine deployment JSON for a worker pool.
+_build_machinedeployment_json() {
+  local name="$1" replicas="$2" flavor="$3" os_name="$4" provider="$5"
+  local autoscaler_min="$6" autoscaler_max="$7"
+
+  local cloud_spec
+  case "${provider}" in
+    hetzner)
+      # REST HetznerNodeSpec field is `type` (machine-controller's internal
+      # rawConfig calls it serverType — do not confuse the two)
+      cloud_spec=$(jq -n --arg flavor "${flavor}" \
+        '{hetzner: {type: $flavor}}')
+      ;;
+    aws)
+      cloud_spec=$(jq -n --arg flavor "${flavor}" \
+        '{aws: {instanceType: $flavor}}')
+      ;;
+    *)
+      error "Unsupported provider for machine deployment: ${provider}"
+      return 1
+      ;;
+  esac
+
+  local os_spec
+  os_spec=$(jq -n --arg os "${os_name}" '{($os): {}}')
+
+  local json
+  json=$(jq -n \
+    --arg name "${name}" \
+    --argjson replicas "${replicas}" \
+    --argjson cloud "${cloud_spec}" \
+    --argjson os "${os_spec}" \
+    '{
+      name: $name,
+      spec: {
+        replicas: $replicas,
+        template: {
+          cloud: $cloud,
+          operatingSystem: $os
+        }
+      }
+    }')
+
+  # Add autoscaler annotations if configured
+  if (( autoscaler_min > 0 )) || (( autoscaler_max > 0 )); then
+    json=$(echo "${json}" | jq \
+      --argjson min "${autoscaler_min}" \
+      --argjson max "${autoscaler_max}" \
+      '.spec.minReplicas = $min | .spec.maxReplicas = $max')
+  fi
+
+  echo "${json}"
+}

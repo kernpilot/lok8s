@@ -1,0 +1,17 @@
+# khelm chart spec for Cilium.
+# Pinned to a known-working version; bump deliberately, not on every chart release.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: cilium
+  namespace: kube-system
+# kubeVersion must be set explicitly so khelm passes it to helm — otherwise
+# helm defaults to v1.20.0 and modern Cilium chart releases reject it.
+# Track the kindest/node version we provision against (.spec.kubernetes.version
+# in the cluster spec).
+kubeVersion: "1.31.4"
+repository: https://helm.cilium.io/
+chart: cilium
+version: 1.19.2
+valueFiles:
+  - values.yaml

@@ -1,0 +1,410 @@
+#!/bin/bash
+# cloud-config generator for Hetzner provider
+# Generates cloud-init user-data YAML for hcloud server create.
+# Adapted from github.com/lanisce/cloud-init (MIT license).
+#
+# Usage:
+#   source .lok8s/providers/hetzner/cloud-config
+#   CLOUD_PATH=/path/to/cloud-init-dir cloud-config::generate
+#
+# The cloud-init dir should contain:
+#   packages          — one package name per line
+#   nameservers       — one IP per line
+#   apt               — apt config YAML
+#   sources.list.d/   — apt source files
+#   write_files/      — files to sync to the VM (with optional .stat)
+#   cloud.d/<name>/   — sub-configurations (selected via CLOUD_PATHD)
+#
+# Environment:
+#   CLOUD_PATH      — path to the cloud-init config dir
+#   CLOUD_PATHD     — colon-separated sub-config names from cloud.d/
+#   CLOUD_USER      — default user (default: root)
+#   CLOUD_GROUP     — default group (default: root)
+#   CLOUD_PATH_PUB  — SSH public key directory (default: ~/.ssh)
+#   CLOUD_ENV_*     — exported as variables in runcmd (CLOUD_ENV_ prefix stripped)
+# shellcheck disable=2044
+
+: "${CLOUD_PATH:=""}"
+: "${CLOUD_PATHD:=""}"
+: "${CLOUD_USER:="root"}"
+: "${CLOUD_GROUP:="root"}"
+: "${CLOUD_PATH_PUB:="${HOME}/.ssh"}"
+
+# Read all *.pub keys from CLOUD_PATH_PUB
+ssh::pub() {
+  unset IFS
+  for pub in $(find "${CLOUD_PATH_PUB}" -type f -name '*.pub' 2>/dev/null); do
+    cut -d' ' -f-2 "${pub}"
+  done
+}
+
+# Returns all config paths (cloud.d sub-configs + default)
+cloud-config::paths() {
+  local file="${1-}"
+  unset IFS
+  mapfile -t paths <<<"${CLOUD_PATHD//:/$'\n'}"
+  for path in "${paths[@]}"; do
+    [[ -n "${path}" ]] || continue
+    echo "${CLOUD_PATH}/cloud.d/${path}${file}"
+  done
+  echo "${CLOUD_PATH}${file}"
+}
+
+# Generate write_files entries (base64 encoded)
+cloud-config::write_files() {
+  mapfile -t paths <<<"$(cloud-config::paths '/write_files')"
+  local written_paths
+
+  unset IFS
+  for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
+    local path="/${file#"${CLOUD_PATH}"*/write_files/}"
+    echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+    written_paths+="${path}:"
+
+    local stat="${file}.stat"
+    local owner="${CLOUD_USER}:${CLOUD_GROUP}"
+    local permissions='0655'
+    local content vars execremote=0
+
+    content="$(cat "${file}")"
+    [ ! -f "${stat}" ] || {
+      ! grep -Eq '^owner: .+$' "${stat}" ||
+        owner="$(sed -En 's/^owner: (.+)$/\1/p' "${stat}")"
+      ! grep -Eq '^permissions: .+$' "${stat}" ||
+        permissions="$(sed -En 's/^permissions: (.+)$/\1/p' "${stat}")"
+      ! grep -q '^execute: true$' "${stat}" ||
+        content="$(bash -c "${content}")"
+      ! grep -q '^execute: remote$' "${stat}" ||
+        execremote=1
+      ! grep -Eq '^envsubst: .+$' "${stat}" || {
+        vars="$(sed -En 's/^envsubst: (.+)$/\1/p' "${stat}")"
+        if [ "${vars}" = "true" ]; then
+          content="$(envsubst < <(echo "${content}"))"
+        else
+          content="$(envsubst "${vars}" < <(echo "${content}"))"
+        fi
+      }
+    }
+
+    # execute: remote — the file is a script run ON THE TARGET (in runcmd) to
+    # produce its real content (e.g. a netplan that detects the NIC name,
+    # which can change). Stage it under a *.lok8s-gen name (netplan only reads
+    # *.yaml, so the staged script is ignored at boot);
+    # cloud-config::runcmd::remote-generate materialises the real file before
+    # the runcmd:true executables run.
+    local emit_path="${path}" emit_perms="${permissions}"
+    (( ! execremote )) || { emit_path="${path}.lok8s-gen"; emit_perms='0700'; }
+
+    cat <<EOF
+- encoding: b64
+  content: $(echo "${content}" | base64 -w0)
+  path: "${emit_path}"
+  owner: ${owner}
+  permissions: '${emit_perms}'
+EOF
+  done
+}
+
+# Export CLOUD_ENV_* variables as runcmd entries
+cloud-config::runcmd::environment() {
+  local -r lookup="CLOUD_ENV_"
+  local name
+  while read -r name; do
+    echo "- export ${name#"${lookup}"}='${!name//\'/\\\'}'"
+  done < <(env | sed -nE 's/^('"${lookup}"'[^=]+).+$/\1/p')
+}
+
+# Generate runcmd from write_files .stat files with runcmd: true
+cloud-config::runcmd::executables() {
+  mapfile -t paths <<<"$(cloud-config::paths '/write_files')"
+  local written_paths path
+
+  unset IFS
+  for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
+    ! grep -q '^runcmd: true$' "${file}" || {
+      path="/${file#"${CLOUD_PATH}"*/write_files/}"
+      echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+      written_paths+="${path}:"
+      echo "- ${path/%.stat}"
+    }
+  done
+}
+
+# Generate runcmd to materialise `execute: remote` files ON THE TARGET: run
+# the staged *.lok8s-gen script, write its stdout to the real path, set
+# perms/owner, drop the stage. Ordered AFTER the CLOUD_ENV_* exports (scripts
+# may use them) and BEFORE the runcmd:true executables (which consume the
+# files, e.g. apply-node-config running `netplan apply`).
+cloud-config::runcmd::remote-generate() {
+  mapfile -t paths <<<"$(cloud-config::paths '/write_files')"
+  local written_paths path owner permissions
+
+  unset IFS
+  for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
+    grep -q '^execute: remote$' "${file}" || continue
+    path="/${file#"${CLOUD_PATH}"*/write_files/}"; path="${path%.stat}"
+    echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+    written_paths+="${path}:"
+    owner="${CLOUD_USER}:${CLOUD_GROUP}"
+    permissions='0644'
+    ! grep -Eq '^owner: .+$' "${file}" ||
+      owner="$(sed -En 's/^owner: (.+)$/\1/p' "${file}")"
+    ! grep -Eq '^permissions: .+$' "${file}" ||
+      permissions="$(sed -En 's/^permissions: (.+)$/\1/p' "${file}")"
+    printf -- '- bash %q.lok8s-gen > %q && chmod %s %q && chown %s %q && rm -f %q.lok8s-gen\n' \
+      "${path}" "${path}" "${permissions}" "${path}" "${owner}" "${path}" "${path}"
+  done
+}
+
+# Generate a self-contained bash script that materialises the write_files
+# and runs the runcmd:true executables DIRECTLY — no cloud-init. Used for
+# bare metal: the Hetzner installimage OS ships WITHOUT cloud-init, so the
+# `cloud-init single` path is a silent no-op (command not found) and the
+# node boots with NONE of its config (e.g. the vswitch netplan → no private
+# network → ClusterIP/apiserver unreachable for every pod). This mirrors
+# what a cloud VM's runcmd does on first boot: write files, export the
+# CLOUD_ENV_* vars, then run the boot-init scripts. Pipe to `ssh host bash -s`;
+# the script prints __LOK8S_BOOTINIT_DONE__ on completion and
+# "lok8s: boot-init FAILED -> <script>" for any executable that exits non-zero.
+cloud-config::remote-script() {
+  mapfile -t paths <<<"$(cloud-config::paths '/write_files')"
+  local written_paths file path stat owner permissions content vars b64 exe
+
+  echo '#!/bin/bash'
+  echo 'set -u'
+  echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+  unset IFS
+  for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
+    path="/${file#"${CLOUD_PATH}"*/write_files/}"
+    echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+    written_paths+="${path}:"
+
+    stat="${file}.stat"
+    owner="root:root"
+    permissions='0655'
+    local execremote=0
+    content="$(cat "${file}")"
+    [ ! -f "${stat}" ] || {
+      ! grep -Eq '^owner: .+$' "${stat}" ||
+        owner="$(sed -En 's/^owner: (.+)$/\1/p' "${stat}")"
+      ! grep -Eq '^permissions: .+$' "${stat}" ||
+        permissions="$(sed -En 's/^permissions: (.+)$/\1/p' "${stat}")"
+      ! grep -q '^execute: true$' "${stat}" ||
+        content="$(bash -c "${content}")"
+      ! grep -q '^execute: remote$' "${stat}" ||
+        execremote=1
+      ! grep -Eq '^envsubst: .+$' "${stat}" || {
+        vars="$(sed -En 's/^envsubst: (.+)$/\1/p' "${stat}")"
+        if [ "${vars}" = "true" ]; then
+          content="$(envsubst < <(echo "${content}"))"
+        else
+          content="$(envsubst "${vars}" < <(echo "${content}"))"
+        fi
+      }
+    }
+
+    # base64 is [A-Za-z0-9+/=] only, so the unquoted heredoc is injection-safe.
+    b64="$(echo "${content}" | base64 -w0)"
+    printf 'mkdir -p %q\n' "$(dirname "${path}")"
+    if (( execremote )); then
+      # execute: remote — write the script, run it on the target, its stdout
+      # becomes the real file (runs before the boot-init executables below).
+      printf 'base64 -d > %q.lok8s-gen <<__LOK8S_F__\n%s\n__LOK8S_F__\n' "${path}" "${b64}"
+      printf 'bash %q.lok8s-gen > %q && chmod %s %q && chown %s %q 2>/dev/null; rm -f %q.lok8s-gen\n' \
+        "${path}" "${path}" "${permissions}" "${path}" "${owner}" "${path}" "${path}"
+      continue
+    fi
+    printf 'base64 -d > %q <<__LOK8S_F__\n%s\n__LOK8S_F__\n' "${path}" "${b64}"
+    printf 'chmod %s %q\n' "${permissions}" "${path}"
+    printf 'chown %s %q 2>/dev/null || true\n' "${owner}" "${path}"
+  done
+
+  # CLOUD_ENV_* exports (same block the cloud VM runcmd gets)
+  cloud-config::runcmd::environment | sed -E 's/^- //'
+
+  # runcmd:true executables — run each, surface failures, never abort the rest
+  while read -r exe; do
+    exe="${exe#- }"
+    [[ -n "${exe}" ]] || continue
+    printf '%s || echo "lok8s: boot-init FAILED -> %s" >&2\n' "${exe}" "${exe}"
+  done < <(cloud-config::runcmd::executables | sort)
+
+  echo 'echo __LOK8S_BOOTINIT_DONE__'
+}
+
+# Generate the installimage post-install script (for `installimage -x`),
+# executed inside the chroot of the freshly installed system. This is the
+# PRIMARY bare-metal bootstrap path: it makes the node self-configure via
+# cloud-init on first boot, exactly like a cloud VM gets its user-data. The
+# Hetzner installimage base image ships no cloud-init, so we install it and
+# seed the NoCloud datasource with our generated user-data — cloud-init then
+# runs write_files + runcmd on first boot (vswitch netplan, MSS clamp,
+# sysctls, packages). cloud-config::remote-script is the SSH fallback if
+# cloud-init somehow doesn't come up. Mirrors the framework philosophy:
+# cloud-init everywhere, bare metal included.
+cloud-config::installimage-post-install() {
+  local user_data
+  user_data="$(cloud-config::generate)" || return 1
+
+  cat <<'__HEAD__'
+#!/bin/bash
+# lok8s installimage post-install — runs in the installed system's chroot.
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+command -v cloud-init >/dev/null 2>&1 || {
+  apt-get update -q
+  apt-get install -y --no-install-recommends cloud-init
+}
+install -d -m 0755 /var/lib/cloud/seed/nocloud
+cat > /var/lib/cloud/seed/nocloud/user-data <<'__LOK8S_USER_DATA__'
+__HEAD__
+
+  printf '%s\n' "${user_data}"
+
+  cat <<'__TAIL__'
+__LOK8S_USER_DATA__
+_hn="$(cat /etc/hostname 2>/dev/null || hostname)"
+printf 'instance-id: lok8s-%s\nlocal-hostname: %s\n' "${_hn}" "${_hn}" \
+  > /var/lib/cloud/seed/nocloud/meta-data
+# Pin the datasource and leave installimage's networking alone — our cloud.d
+# write_files own the netplan; cloud-init must not render its own network.
+cat > /etc/cloud/cloud.cfg.d/99-lok8s.cfg <<'__LOK8S_CFG__'
+datasource_list: [ NoCloud, None ]
+network:
+  config: disabled
+__LOK8S_CFG__
+cloud-init clean --logs >/dev/null 2>&1 || true
+__TAIL__
+}
+
+cloud-config::packages() {
+  mapfile -t paths <<<"$(cloud-config::paths '/packages')"
+  cat "${paths[@]}" 2>/dev/null | uniq
+}
+
+cloud-config::nameservers() {
+  mapfile -t paths <<<"$(cloud-config::paths '/nameservers')"
+  cat "${paths[@]}" 2>/dev/null | uniq
+}
+
+cloud-config::apt() {
+  local _apt _srcs f
+  mapfile -t paths <<<"$(cloud-config::paths '/apt')"
+  _apt="$(cat "${paths[@]}" 2>/dev/null | uniq)"
+
+  mapfile -t paths <<<"$(cloud-config::paths '/sources.list.d')"
+  _srcs="$(find "${paths[@]}" -type f 2>/dev/null)"
+
+  # Nothing to configure → emit nothing; the caller omits the whole `apt:`
+  # key. A bare/empty `apt:` or `sources:` parses as YAML null and crashes
+  # cloud-init's apt_configure ("'NoneType' object has no attribute 'values'").
+  [ -n "${_apt}" ] || [ -n "${_srcs}" ] || return 0
+
+  [ -z "${_apt}" ] || echo "${_apt}"
+  [ -z "${_srcs}" ] || {
+    echo "sources:"
+    while IFS= read -r f; do
+      echo "  $(basename "${f}"):"
+      sed -e 's_^_    _' "${f}"
+    done <<<"${_srcs}"
+  }
+}
+
+# Emit a top-level cloud-config section ONLY when it has content — an empty
+# `apt:` / `packages:` / `resolv_conf:` parses as YAML null and either crashes
+# the matching cloud-init module or fails schema validation. (Surfaced on a
+# bare-metal worker whose config has no apt/packages/nameservers at all.)
+cloud-config::_emit_apt() {
+  local body; body="$(cloud-config::apt)"
+  [ -n "${body}" ] || return 0
+  printf 'apt:\n'; printf '%s\n' "${body}" | sed -e 's_^_  _'
+}
+cloud-config::_emit_packages() {
+  local body; body="$(cloud-config::packages)"
+  [ -n "${body}" ] || return 0
+  printf 'packages:\n'; printf '%s\n' "${body}" | sed -e 's_^_- _'
+}
+cloud-config::_emit_resolv() {
+  local ns; ns="$(cloud-config::nameservers)"
+  [ -n "${ns}" ] || return 0
+  printf 'manage_resolv_conf: true\nresolv_conf:\n  nameservers:\n'
+  printf '%s\n' "${ns}" | sed -e 's_^_  - _'
+}
+
+# Nodes carrying the `ceph-osd` cloud.d module carve a RAW Ceph partition out of
+# the boot disk (cloud.d/ceph-osd/.../ceph-osd-partition.sh). That only works if
+# the root fs stays at the image base, so disable cloud-init's growpart here —
+# the module's runcmd script reclaims the disk, creates the ceph-osd partition,
+# and grows root to a fixed size itself.
+cloud-config::_emit_growpart() {
+  [[ ":${CLOUD_PATHD}:" == *":ceph-osd:"* ]] || return 0
+  printf 'growpart:\n  mode: "off"\n'
+}
+
+# Generate the full cloud-config YAML
+cloud-config::generate() {
+  [[ -d "${CLOUD_PATH}" ]] || {
+    echo "error: cloud-init path does not exist: ${CLOUD_PATH}" >&2
+    return 1
+  }
+
+  # Root access policy follows the access user: with a dedicated
+  # CLOUD_USER we lock root down (remote-lo VM flow); without one the
+  # provisioner (e.g. KubeOne) connects as root — disable_root: 1 would
+  # make cloud-init wrap root's keys in a command="...exit 142"
+  # restriction that breaks every remote command.
+  local _user="${CLOUD_USER:-}"
+  local _disable_root=1
+  [[ -n "${_user}" && "${_user}" != "root" ]] || _disable_root=0
+  local _disable_root_yaml="true"
+  (( _disable_root )) || _disable_root_yaml="false"
+
+  cat <<EOF
+#cloud-config
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: true
+
+disable_root: ${_disable_root_yaml}
+ssh_pwauth: false
+
+mounts:
+- [ tmpfs, /run/shm, "tmpfs", "ro,noexec,nosuid", "0", "0" ]
+
+$(cloud-config::_emit_growpart)
+$(cloud-config::_emit_apt)
+$(cloud-config::_emit_packages)
+$(cloud-config::_emit_resolv)
+
+write_files:
+$(cloud-config::write_files)
+
+$(if (( _disable_root )); then
+cat <<USERS
+users:
+- name: "${_user}"
+  lock_passwd: true
+  shell: /bin/bash
+  ssh-authorized-keys:
+$(ssh::pub | sed -e 's_^_  - _')
+  groups:
+  - docker
+  sudo:
+  - ALL=(ALL) NOPASSWD:ALL
+USERS
+fi)
+
+runcmd:
+- cloud-init single --name write_files --frequency once
+$(cloud-config::runcmd::environment)
+$(cloud-config::runcmd::remote-generate)
+$(cloud-config::runcmd::executables | sort)
+
+final_message: "The system is finally up, after \$UPTIME seconds"
+EOF
+}
+
+# Only execute if called directly
+[[ "${0}" != "${BASH_SOURCE[0]}" ]] || cloud-config::generate "${@}"

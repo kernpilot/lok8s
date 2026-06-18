@@ -1,0 +1,61 @@
+# gatus (twin/gatus chart 1.4.4, appVersion v5.27.2) — generic, portable
+# framework-addon values.
+#
+# This file carries ONLY decisions sane for ANY cluster. Everything
+# cluster-specific is GLUE supplied by the consuming cluster as inline
+# `bootstrap:` overrides (deep-merged on top of this file — see
+# docs/guide/addons.md#inline-overrides), namely:
+#   - config.endpoints : the actual services to monitor (per-cluster).
+#   - config.ui.title  : the status-page title.
+#   - config.alerting  : real alerting providers (none wired by default).
+#   - persistence.storageClassName : cluster storage infra (e.g. ceph-bulk).
+# The gateway HTTPRoute is a kustomize RESOURCE and lives in the consumer's
+# gatus glue target, not in Helm values.
+#
+# TLS is terminated at the consumer's gateway (route), so the chart Ingress
+# stays off here.
+
+# Chart default image for 1.4.4 (kept explicit for clarity / pinning intent).
+image:
+  repository: twinproduction/gatus
+
+# Exposed through the consumer's gateway HTTPRoute, never the chart Ingress.
+ingress:
+  enabled: false
+
+# Scrape gatus' own /metrics with the Prometheus Operator (ServiceMonitor). The
+# CRD is provided by the monitoring stack, which is why gatus is bootstrapped
+# alongside / after `monitoring`.
+serviceMonitor:
+  enabled: true
+
+# Persist the sqlite DB so uptime history survives pod restarts. PVC mounts at
+# /data (see config.storage below). The storageClassName is cluster infra and
+# is supplied inline by the consumer; left unset here so the addon does not
+# hardcode a class that may not exist on a given cluster.
+persistence:
+  enabled: true
+  size: 1Gi
+
+# Modest footprint — gatus is a lightweight poller.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# Gatus application config (rendered into the ConfigMap's config.yaml).
+# ref: https://github.com/TwiN/gatus#configuration
+config:
+  # Expose gatus' own Prometheus metrics at /metrics (scraped via serviceMonitor).
+  metrics: true
+
+  # SQLite on the persistent volume (/data, see persistence above).
+  storage:
+    type: sqlite
+    path: /data/data.db
+
+  # endpoints (the services to monitor) + ui.title + alerting are cluster GLUE —
+  # the consumer supplies them inline. gatus permits zero endpoints, so this
+  # base config is valid as-is.

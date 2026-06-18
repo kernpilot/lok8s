@@ -1,0 +1,9 @@
+# E2E: single-local-build Tiltfile
+load('../../../.lok8s/tilt/Tiltfile', 'lok8s')
+
+# Build the app image and let lok8s() wire it via the canonical
+# lok8s.local/app reference. No image swap (build:true), so no cache
+# pre-pull is needed — auto_cache_pull=False saves a local() call.
+docker_build('lok8s.local/app', './app')
+
+lok8s(auto_cache_pull = False)

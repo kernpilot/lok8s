@@ -1,0 +1,29 @@
+# khelm chart spec for kube-prometheus-stack (Prometheus + Grafana +
+# Alertmanager + node-exporter + kube-state-metrics), inflated via khelm at
+# kustomize build time.
+#
+# This is the generic FRAMEWORK ADDON: chart + portable defaults only. The
+# kubehz-specific glue (Grafana OIDC, datasources, storage classes/sizes,
+# the Alertmanager receiver, the gateway HTTPRoute + break-glass Secret) is
+# NOT here — see the addon README/kustomization header for the split.
+#
+# The ChartRenderer `metadata.name` is used by khelm as the Helm RELEASE name,
+# so it prefixes every generated resource. We pin it to `kube-prometheus-stack`
+# so the Grafana Service is deterministically `kube-prometheus-stack-grafana`
+# and Prometheus is `kube-prometheus-stack-prometheus` (referenced from the
+# consuming cluster's HTTPRoute / Tempo remote-write). Do not rename without
+# updating those references.
+#
+# kubeVersion is pinned explicitly so khelm forwards it to helm (otherwise helm
+# defaults to v1.20.0). Tracks the clusters that consume this addon (1.35.x).
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: kube-prometheus-stack
+  namespace: monitoring
+kubeVersion: "1.35.5"
+repository: https://prometheus-community.github.io/helm-charts
+chart: kube-prometheus-stack
+version: 80.2.0
+valueFiles:
+  - values.yaml

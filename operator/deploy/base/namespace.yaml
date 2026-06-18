@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lok8s-system
+  labels:
+    app.kubernetes.io/name: lok8s-operator
+    app.kubernetes.io/part-of: lok8s

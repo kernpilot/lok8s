@@ -1,0 +1,25 @@
+# metrics-server — Kubernetes resource metrics (HPA / `kubectl top`). A generic,
+# reusable atom: bootstrap `metrics-server` by name to get the metrics API.
+# Installs into the existing kube-system namespace (no namespace.yaml needed).
+# The base values.yaml stays generic (resources + PDB disabled); the
+# security-relaxing --kubelet-insecure-tls flag is layered per driver in
+# values.kubeone.yaml (only self-managed KubeOne kubelets need it — managed/kind
+# kubelets serve certs metrics-server already trusts).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: metrics-server
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: kube-system
+
+generators:
+  - chart.yaml

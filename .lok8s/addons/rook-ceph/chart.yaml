@@ -1,0 +1,23 @@
+# khelm chart spec for the Rook-Ceph OPERATOR (controller + CRDs) only.
+# The CephCluster / CephBlockPool / StorageClass are raw CRs in this target
+# (cluster.yaml, pool-worker.yaml) — not the rook-ceph-cluster chart — so we
+# keep precise control over the multi-tier topology (per-node deviceFilter,
+# CRUSH device-class separation, mon placement, etcd-protective throttles).
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: rook-ceph
+  namespace: rook-ceph
+kubeVersion: "1.35.5"
+repository: https://charts.rook.io/release
+# Rook 1.19.6 (NOT 1.20.0) — the matched/tested pair for Ceph v19.2.3. On Rook
+# 1.20 in this deploy the ceph-csi-operator never registered the rbd CSIDriver
+# (PVCs stayed Pending); Rook 1.19.6 brings up + registers
+# rook-ceph.rbd.csi.ceph.com cleanly (verified end-to-end: PVC Bound + RBD r/w
+# mount). MUST pair with Ceph v19.2.3 (see cluster.yaml — v20.2.1 has the
+# rook#17716 ceph-volume regression). Revisit Rook 1.20 + Ceph Tentacle once both
+# are past these regressions.
+chart: rook-ceph
+version: v1.19.6
+valueFiles:
+  - values.yaml

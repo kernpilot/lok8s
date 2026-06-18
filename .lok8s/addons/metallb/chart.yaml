@@ -1,0 +1,11 @@
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: metallb
+  namespace: metallb-system
+kubeVersion: "1.31.4"
+repository: https://metallb.github.io/metallb
+chart: metallb
+version: 0.15.3
+valueFiles:
+  - values.yaml

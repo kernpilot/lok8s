@@ -1,0 +1,33 @@
+# Test fixture: Kkp kind cluster spec (Hetzner via KKP)
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Kkp
+metadata:
+  name: test-kkp-cluster
+spec:
+  kubernetes:
+    version: "v1.29.2"
+  cluster:
+    domain: kkp-test.lok8s.dev
+    namespace: default
+  kkp:
+    apiUrl: "https://kkp.test.example.com"
+    projectId: "test-project-123"
+    datacenter: "hetzner-fsn1"
+  provider:
+    name: hetzner
+    config: {}
+    credentials:
+      envVars:
+        - KKP_TOKEN
+        - HCLOUD_TOKEN
+  workers:
+    pool-1:
+      replicas: 3
+      flavor: cpx31
+      operatingSystem: ubuntu
+      autoscaler:
+        min: 1
+        max: 10
+  bootstrap:
+    - cilium
+    - ccm

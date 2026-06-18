@@ -1,0 +1,32 @@
+# Test fixture: Lo kind cluster spec with a custom (non-default) slot.
+# Slot 50 — alternate test slot far from the default (125).
+# Confirms the framework picks up the slot's /24 subnet correctly.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: test-custom-net
+spec:
+  kubernetes:
+    version: "v1.31.4"
+  cluster:
+    domain: test-50.lok8s.dev
+    namespace: default
+  network:
+    name: lok8s-test
+    cidr: "10.125.50.0/24"
+  registries:
+    shared:
+      enabled: false
+    mirrors:
+      - name: io-docker
+        url: https://registry-1.docker.io
+      - name: io-quay
+        url: https://quay.io
+      - name: io-k8s
+        url: https://registry.k8s.io
+      - name: io-ghcr
+        url: https://ghcr.io
+  runtime: kind
+  bootstrap:
+    - cilium
+    - metallb

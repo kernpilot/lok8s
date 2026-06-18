@@ -1,0 +1,917 @@
+# pylint: disable=undefined-variable
+# pyright: reportUndefinedVariable=false
+# vim: filetype=python
+
+load('ext://namespace', 'namespace_inject')
+
+# live_update function ordering
+_live_update_keys = ['fall_back_on', 'sync', 'run', 'restart_container']
+
+# JSON paths with relative paths to resolve (# = iterate array)
+_live_update_paths = [
+  'dockerfile',
+  'context',
+  'live_update.sync.#.local_path',
+  'live_update.fall_back_on.files',
+]
+
+# Tilt function mapping (call by string key)
+_locals = {
+  "sync": sync,
+  "run": run,
+  "fall_back_on": lambda files: fall_back_on(files),
+  "restart_container": restart_container,
+}
+
+# ── Colored log helpers ───────────────────────────────────────────────────────
+# Tilt renders ANSI escapes in its UI + terminal. Convention: `::` info = cyan,
+# `:: ... building` = green (action), `!!` warnings = yellow; the name inside
+# `[ … ]` is colored by origin (magenta=user service, blue=static category,
+# red=unlabeled). _green/_red are available standalone.
+def _ansi(code, msg):
+  return '\x1b[%sm%s\x1b[0m' % (code, msg)
+def _green(msg):  return _ansi('32', msg)
+def _yellow(msg): return _ansi('33', msg)
+def _red(msg):    return _ansi('31', msg)
+def _cyan(msg):   return _ansi('36', msg)
+# The NAME inside "[ ... ]" is colored by its ORIGIN so it reads at a glance:
+#   magenta = user-owned service, blue = static category (system infra),
+#   red = unlabeled leftover. (These are the static category/system_types values;
+#   anything else is treated as a user service.)
+_STATIC_NAMES = ['system', 'networking', 'storage', 'infrastructure', 'observability', 'dev-tools', 'identity']
+def _name_color(name):
+  if name == 'unlabeled':   return '1;31'  # bold red    — unlabeled leftovers
+  if name in _STATIC_NAMES: return '1;34'  # bold blue   — static categories
+  return '1;35'                            # bold magenta — user-owned services
+
+# Paint the whole line in `base`, but render just the NAME inside "[ ... ]" in its
+# origin color (see _name_color) so it pops regardless of the line's base color —
+# the brackets stay `base`. Re-establish the base color after the name.
+def _paint(base, s):
+  i = s.find('[ ')
+  j = s.find(' ]')
+  if i >= 0 and j > i:
+    name = s[i + 2:j]
+    return '\x1b[%sm%s\x1b[%sm%s\x1b[0;%sm%s\x1b[0m' % (base, s[:i + 2], _name_color(name), name, base, s[j:])
+  return _ansi(base, s)
+def _info(msg): print(_paint('36', msg))  # cyan,  bold [ name ]
+def _ok(msg):   print(_paint('32', msg))  # green, bold [ name ] — actions (building)
+def _warn(msg): print(_paint('33', msg))  # yellow, bold [ name ]
+def _dim(msg):  print(_ansi('2', msg))     # dim — verbose detail lines
+_CWD = os.getcwd()
+# Loaded as a module, Tilt's cwd is THIS file's dir (<root>/.lok8s/tilt); the repo
+# root is two levels up. Strip that so verbose paths render repo-relative.
+_ROOT = _CWD[:-len('/.lok8s/tilt')] if _CWD.endswith('/.lok8s/tilt') else _CWD
+def _rel(p):  # trim the repo root → readable relative paths
+  return p[len(_ROOT) + 1:] if p.startswith(_ROOT + '/') else p
+
+def _update_paths(obj, prefix, relative_paths=_live_update_paths, warn=True, service_name=''):
+  """Resolve relative paths in a pass-through build config to absolute paths.
+
+  `obj` is a `build:` dict pulled from the user's lok8s.yaml; we walk a list
+  of dotted JSON paths (`_live_update_paths` by default, optionally extended
+  via the `extra_paths` kwarg on `lok8s()`) and rewrite leaves to absolute
+  paths relative to `prefix`.
+
+  The walker is intentionally permissive: lok8s.yaml's `build:` block is a
+  pass-through to Tilt's `docker_build()`, so we can't assume a fixed shape.
+  Unexpected shapes (`#` token applied to a non-list, missing intermediate
+  key, unexpected leaf type) are handled by SKIPPING the path and emitting
+  a warning — never silently swallowed. Set `warn=False` to suppress the
+  warnings if a path is legitimately expected to be absent for some services.
+  """
+  for json_path in relative_paths:
+    paths = json_path.split(".")
+    data = obj
+    resolved = False
+    for i in range(0, len(paths)):
+      token = paths[i]
+
+      if token == '#':
+        # List-iteration token. Tilt's own APIs are polymorphic here
+        # (e.g. live_update.sync accepts dict or list-of-dicts), so we
+        # treat both cases as valid: recurse per-item on a list, or fall
+        # through the token for a non-list (walking the remaining path
+        # directly on the current data).
+        if type(data) == 'list':
+          remaining = '.'.join(paths[i + 1:])
+          for item in data:
+            _update_paths(item, prefix, relative_paths=[remaining], warn=warn, service_name=service_name)
+          resolved = True
+          break
+        # Non-list at `#`: just skip the token and continue walking.
+        continue
+
+      # Not at the leaf yet — descend.
+      if type(data) != 'dict':
+        if warn:
+          _warn("!! [ %s ] path %r: expected dict at token %r, got %s — skipping resolution" % (service_name, json_path, token, type(data)))
+        break
+      if token not in data:
+        # Legitimate absence (field not set). Silently move on.
+        break
+
+      if i == len(paths) - 1:
+        # Leaf — resolve string or list of strings.
+        leaf = data[token]
+        if type(leaf) == 'string':
+          data[token] = os.path.realpath('%s/%s' % (prefix, leaf))
+        elif type(leaf) == 'list':
+          _resolved = []
+          _ok = True
+          for item in leaf:
+            if type(item) != 'string':
+              _ok = False
+              break
+            _resolved.append(os.path.realpath('%s/%s' % (prefix, item)))
+          if _ok:
+            data[token] = _resolved
+          elif warn:
+            _warn("!! [ %s ] path %r: leaf list contains non-string entries — skipping resolution" % (service_name, json_path))
+        elif warn:
+          _warn("!! [ %s ] path %r: leaf is %s (expected string or list) — skipping resolution" % (service_name, json_path, type(leaf)))
+        resolved = True
+        break
+
+      data = data[token]
+
+    # Path walked to completion without hitting a leaf — warn if appropriate.
+    # Note: `break` exits above before reaching here; this else-branch catches
+    # the rare case where iteration exhausts without resolving. Given the
+    # path list, this should not happen, but is worth logging if it ever does.
+    if not resolved and warn and len(paths) > 0 and paths[-1] != '#':
+      # We broke out early (missing key). That's normal — only warn if the
+      # leaf type WOULD have been resolvable but wasn't because the path
+      # didn't exist. Already handled above; nothing to do here.
+      pass
+
+  return obj
+
+def _build_args(name, args):
+  """Convert env var names to {name: value} dict for docker_build build_args."""
+  envs = {}
+  for arg in args:
+    if arg not in os.environ:
+      fail("[ %s ] required build_arg env var not set: %s" % (name, arg))
+    envs[arg] = os.environ[arg]
+  return envs
+
+def _validate_services_yaml(env):
+  """Validate the top-level services.yaml structure. Fail-fast at the boundary."""
+  # apiVersion + kind are optional k8s-style object headers. They
+  # aren't consumed by the Tilt extension, but including them makes
+  # services.yaml look like a proper CRD-shaped object and lets
+  # future tooling (lint, CRD enforcement, operator) assert schema.
+  _allowed = ['apiVersion', 'kind', 'metadata', 'registry', 'defaults', 'services']
+  for k in env:
+    if k not in _allowed:
+      fail("services.yaml: unknown top-level key '%s' (allowed: %s)" % (k, _allowed))
+
+  # If apiVersion/kind are set, at least warn if they're not the
+  # expected lok8s Services shape. Non-fatal — users might be
+  # experimenting with a different schema.
+  if 'apiVersion' in env and not str(env['apiVersion']).startswith('services.lok8s.dev/'):
+    print("services.yaml: warning: apiVersion '%s' is not a services.lok8s.dev/* version" % env['apiVersion'])
+  if 'kind' in env and env['kind'] != 'Services':
+    print("services.yaml: warning: kind '%s' is not 'Services'" % env['kind'])
+
+  if 'registry' in env:
+    _reg_allowed = ['endpoint', 'branch', 'tag', 'prefix', 'parallel']
+    for k in env['registry']:
+      if k not in _reg_allowed:
+        fail("services.yaml: registry.%s unknown (allowed: %s)" % (k, _reg_allowed))
+    if 'parallel' in env['registry']:
+      _p = env['registry']['parallel']
+      if type(_p) != 'int' or _p < 0:
+        fail("services.yaml: registry.parallel must be a non-negative integer (0=unlimited, 1=sequential, N>=2 parallel cap)")
+
+  if 'defaults' in env:
+    _def_allowed = ['dockerfile', 'build']
+    for k in env['defaults']:
+      if k not in _def_allowed:
+        fail("services.yaml: defaults.%s unknown (allowed: %s)" % (k, _def_allowed))
+    if 'dockerfile' in env['defaults']:
+      _v = env['defaults']['dockerfile']
+      if _v not in ['service', 'production']:
+        fail("services.yaml: defaults.dockerfile must be 'service' or 'production', got '%s'" % _v)
+    if 'build' in env['defaults'] and type(env['defaults']['build']) != 'bool':
+      fail("services.yaml: defaults.build must be a bool, got %s" % type(env['defaults']['build']))
+
+  _svc_allowed = ['enabled', 'build', 'path', 'namespace', 'dockerfile', 'watch', 'registry', 'image']
+  for name in env.get('services', {}):
+    svc = env['services'][name]
+    if type(svc) != 'dict':
+      fail("services.yaml: services.%s must be a mapping" % name)
+    for k in svc:
+      if k not in _svc_allowed:
+        fail("services.yaml: services.%s.%s unknown (allowed: %s)" % (name, k, _svc_allowed))
+    if 'dockerfile' in svc and svc['dockerfile'] not in ['service', 'production']:
+      fail("services.yaml: services.%s.dockerfile must be 'service' or 'production', got '%s'" % (name, svc['dockerfile']))
+    if 'watch' in svc and type(svc['watch']) != 'list':
+      fail("services.yaml: services.%s.watch must be a list" % name)
+    if 'build' in svc and type(svc['build']) != 'bool':
+      fail("services.yaml: services.%s.build must be a bool, got %s" % (name, type(svc['build'])))
+    if 'registry' in svc:
+      if type(svc['registry']) != 'dict':
+        fail("services.yaml: services.%s.registry must be a mapping" % name)
+      _reg_keys = ['endpoint', 'branch', 'tag', 'prefix']
+      for k in svc['registry']:
+        if k not in _reg_keys:
+          fail("services.yaml: services.%s.registry.%s unknown (allowed: %s)" % (name, k, _reg_keys))
+    if 'image' in svc and type(svc['image']) != 'string':
+      fail("services.yaml: services.%s.image must be a string (full image ref)" % name)
+    if 'image' in svc and 'registry' in svc:
+      fail("services.yaml: services.%s: 'image' and 'registry' are mutually exclusive (image: pins to a full ref, bypassing registry config)" % name)
+
+def _validate_build(label, build):
+  """Validate a `build:` block. Shared by the top-level single-image form
+  and each `components[].build`.
+
+  `label` is a human-readable prefix for error messages — e.g.
+  "[ api ] lok8s.yaml: build" for the single-image case, or
+  "[ kubehz-core ] lok8s.yaml: components[0] (api) build" for a component.
+  The label always names the `build` block so the message points at the
+  right field regardless of which form is being validated.
+
+  The `build:` block is a pass-through to Tilt's docker_build(); we only
+  validate the shape of fields lok8s itself interprets (path-resolving,
+  env-reading). Everything else is handed verbatim to Tilt, which is the
+  correct layer to validate docker_build kwargs.
+  """
+  if type(build) != 'dict':
+    fail("%s must be a mapping" % label)
+
+  if 'dockerfile' in build and type(build['dockerfile']) != 'string':
+    fail("%s.dockerfile must be a string" % label)
+  if 'context' in build and type(build['context']) != 'string':
+    fail("%s.context must be a string" % label)
+  if 'build_args' in build:
+    if type(build['build_args']) != 'list':
+      fail("%s.build_args must be a list of env var names" % label)
+    for i in range(len(build['build_args'])):
+      if type(build['build_args'][i]) != 'string':
+        fail("%s.build_args[%d] must be a string" % (label, i))
+
+  # live_update shape (Tilt API constraints):
+  #   sync, run, fall_back_on : dict OR list-of-dicts (Tilt allows multiple)
+  #   restart_container       : dict only (Tilt: "may only be included once,
+  #                              and only as the last step")
+  #   live_update.fall_back_on.files : string OR list-of-strings
+  # Other live_update fields are passed through untouched.
+  if 'live_update' in build:
+    lu = build['live_update']
+    if type(lu) != 'dict':
+      fail("%s.live_update must be a mapping" % label)
+
+    # Multi-allowed step types: dict OR list-of-dicts.
+    for _step in ['sync', 'run', 'fall_back_on']:
+      if _step in lu:
+        _val = lu[_step]
+        if type(_val) == 'list':
+          for i in range(len(_val)):
+            if type(_val[i]) != 'dict':
+              fail("%s.live_update.%s[%d] must be a mapping" % (label, _step, i))
+        elif type(_val) != 'dict':
+          fail("%s.live_update.%s must be a mapping or list of mappings" % (label, _step))
+
+    # Singleton step type: must be a dict (typically empty {} since
+    # restart_container() takes no args).
+    if 'restart_container' in lu:
+      if type(lu['restart_container']) != 'dict':
+        fail("%s.live_update.restart_container must be a mapping (Tilt API allows it only once, as the last step)" % label)
+
+    # fall_back_on.files: string OR list-of-strings (when fall_back_on
+    # is given as a single dict; for the list-of-dicts form, each dict
+    # has its own files field which we don't recurse into here).
+    if 'fall_back_on' in lu and type(lu['fall_back_on']) == 'dict' and 'files' in lu['fall_back_on']:
+      _files = lu['fall_back_on']['files']
+      if type(_files) == 'list':
+        for i in range(len(_files)):
+          if type(_files[i]) != 'string':
+            fail("%s.live_update.fall_back_on.files[%d] must be a string" % (label, i))
+      elif type(_files) != 'string':
+        fail("%s.live_update.fall_back_on.files must be a string or list of strings" % label)
+
+def _validate_routing(label, cfg):
+  """Validate the optional `ports`/`links`/`workloads` keys. Shared by the
+  top-level single-image form and each `components[]` entry, since both
+  attach the same routing config to a k8s_resource.
+
+  `label` is a human-readable prefix — e.g. "[ api ] lok8s.yaml" for the
+  single-image form, or "[ kubehz-core ] lok8s.yaml: components[0] (api)"
+  for a component. The key name is appended by each check.
+  """
+  if 'ports' in cfg:
+    if type(cfg['ports']) != 'list':
+      fail("%s: ports must be a list" % label)
+    for i in range(len(cfg['ports'])):
+      p = cfg['ports'][i]
+      if 'from' not in p or 'to' not in p:
+        fail("%s: ports[%d] requires 'from' and 'to'" % (label, i))
+
+  if 'links' in cfg and type(cfg['links']) != 'list':
+    fail("%s: links must be a list" % label)
+
+  if 'workloads' in cfg and type(cfg['workloads']) != 'list':
+    fail("%s: workloads must be a list" % label)
+
+def _validate_service(name, cfg):
+  """Validate a per-service lok8s.yaml. Fail-fast with service context.
+
+  After this returns, the rest of the per-service loop can trust the
+  shape — no defensive checks needed downstream.
+
+  A service is one of two shapes:
+    - single-image: a required top-level `build:` block (the common case).
+    - multi-image: a top-level `components:` list, each entry a named build
+      target (image `lok8s.local/<name>`). `components:` is MUTUALLY
+      EXCLUSIVE with a top-level `build:`.
+  """
+  _allowed = ['build', 'components', 'ports', 'links', 'workloads', 'tilt']
+  for k in cfg:
+    if k not in _allowed:
+      fail("[ %s ] lok8s.yaml: unknown key '%s' (allowed: %s)" % (name, k, _allowed))
+
+  if 'components' in cfg:
+    # Multi-image form. `components` and a top-level `build` are mutually
+    # exclusive: a top-level `build` is the single-image shorthand, while
+    # `components` declares N named images — having both is ambiguous.
+    if 'build' in cfg:
+      fail("[ %s ] lok8s.yaml: 'components' and a top-level 'build' are mutually exclusive — put the build under each component, or drop 'components' for a single image" % name)
+    comps = cfg['components']
+    if type(comps) != 'list' or len(comps) == 0:
+      fail("[ %s ] lok8s.yaml: 'components' must be a non-empty list" % name)
+    _seen = {}
+    for i in range(len(comps)):
+      comp = comps[i]
+      if type(comp) != 'dict':
+        fail("[ %s ] lok8s.yaml: components[%d] must be a mapping" % (name, i))
+      _comp_allowed = ['name', 'build', 'ports', 'links', 'workloads']
+      for k in comp:
+        if k not in _comp_allowed:
+          fail("[ %s ] lok8s.yaml: components[%d].%s unknown (allowed: %s)" % (name, i, k, _comp_allowed))
+      if 'name' not in comp or type(comp['name']) != 'string' or comp['name'] == '':
+        fail("[ %s ] lok8s.yaml: components[%d] requires a non-empty string 'name'" % (name, i))
+      _cname = comp['name']
+      if _cname in _seen:
+        fail("[ %s ] lok8s.yaml: components[%d] duplicate name '%s' (each component builds image lok8s.local/<name>, names must be unique)" % (name, i, _cname))
+      _seen[_cname] = True
+      if 'build' not in comp:
+        fail("[ %s ] lok8s.yaml: components[%d] (%s) missing required 'build' block" % (name, i, _cname))
+      _label = "[ %s ] lok8s.yaml: components[%d] (%s) build" % (name, i, _cname)
+      _validate_build(_label, comp['build'])
+      _validate_routing("[ %s ] lok8s.yaml: components[%d] (%s)" % (name, i, _cname), comp)
+  else:
+    # Single-image form (unchanged behavior).
+    if 'build' not in cfg:
+      fail("[ %s ] lok8s.yaml: missing required 'build' block" % name)
+    _validate_build("[ %s ] lok8s.yaml: build" % name, cfg['build'])
+    _validate_routing("[ %s ] lok8s.yaml" % name, cfg)
+
+  if 'tilt' in cfg:
+    _tilt_allowed = ['resource_deps', 'labels', 'extra_resources']
+    for k in cfg['tilt']:
+      if k not in _tilt_allowed:
+        fail("[ %s ] lok8s.yaml: tilt.%s unknown (allowed: %s)" % (name, k, _tilt_allowed))
+    if 'extra_resources' in cfg['tilt']:
+      if type(cfg['tilt']['extra_resources']) != 'list':
+        fail("[ %s ] lok8s.yaml: tilt.extra_resources must be a list" % name)
+      for i in range(len(cfg['tilt']['extra_resources'])):
+        e = cfg['tilt']['extra_resources'][i]
+        if 'name' not in e:
+          fail("[ %s ] lok8s.yaml: tilt.extra_resources[%d] missing 'name'" % (name, i))
+
+def _build_live_update(build_config):
+  """Transform live_update dict config into Tilt live_update steps.
+
+  Tilt's live_update API allows multiple sync, run, and fall_back_on
+  steps in a single update; restart_container is singleton-only and
+  must be the last step. Per Tilt's docs, the required order is:
+  fall_back_on → sync → run → restart_container.
+
+  We accept dict OR list-of-dicts for sync, run, and fall_back_on,
+  and a single dict for restart_container. The validator
+  (_validate_service) enforces these shape constraints upstream so
+  this dispatcher can trust the input.
+  """
+  result = []
+  for f in sorted(build_config['live_update'].keys(), key=lambda k: _live_update_keys.index(k)):
+    cfg = build_config['live_update'][f]
+    if type(cfg) == 'list':
+      # List form — emit one Tilt step per entry, preserving order.
+      for entry in cfg:
+        result.append(_locals[f](**entry))
+    else:
+      result.append(_locals[f](**cfg))
+  return result
+
+def _process_build(
+    log_name,
+    image_ref,
+    build_in,
+    path_service,
+    dockerfile_type,
+    extra_paths,
+    warn_unresolved_paths,
+    verbose,
+):
+  """Resolve one `build:` block and emit its `docker_build()` call.
+
+  Factored out of `lok8s()` so the single-image and per-component paths
+  share identical behavior: deep-copy → absolutize known paths relative
+  to `path_service` → production-Dockerfile swap → build live_update
+  steps → resolve build_args from env → docker_build(image_ref, ...).
+
+  Args:
+    log_name: label used in print/fail messages (service or component name).
+    image_ref: full image ref to build (e.g. lok8s.local/api).
+    build_in: the user's `build:` dict (NOT mutated — deep-copied here).
+    path_service: service source dir; relative build paths resolve against it.
+    dockerfile_type: 'service' or 'production' (controls the Dockerfile swap).
+    extra_paths: caller-supplied extra JSON paths for _update_paths.
+    warn_unresolved_paths: forwarded to _update_paths.
+  """
+  # _update_paths mutates in place. Deep-copy via JSON round-trip so a
+  # second invocation (another service/component in the same Tiltfile, or
+  # read_yaml caching) never sees mutated state. Starlark has no
+  # copy.deepcopy, so encode/decode is the cheapest portable deep copy.
+  _build = decode_json(encode_json(build_in))
+  _paths = _live_update_paths + extra_paths
+  _build = _update_paths(
+    _build,
+    path_service,
+    relative_paths = _paths,
+    warn = warn_unresolved_paths,
+    service_name = log_name,
+  )
+
+  # Dockerfile override (production vs service/lok8s).
+  if dockerfile_type == 'production' and 'dockerfile' in _build:
+    _original = _build['dockerfile']
+    # Dev convention: lok8s.<name>  →  Production convention: <name>
+    # E.g. lok8s.Dockerfile → Dockerfile, lok8s.entrypoint.sh → entrypoint.sh
+    _production = _original.replace('lok8s.Dockerfile', 'Dockerfile')
+    if os.path.exists(_production):
+      _build['dockerfile'] = _production
+      _info(':: [ %s ] using production Dockerfile' % log_name)
+    else:
+      _warn('!! [ %s ] production Dockerfile not found, using lok8s.dockerfile' % log_name)
+
+  # Build live_update steps. Only when the user declared a live_update
+  # block — _build_live_update indexes build_config['live_update'], so
+  # calling it for a build without live_update would error. (Many real
+  # builds, e.g. a Go operator image, have no live_update at all.)
+  if 'live_update' in _build:
+    _build['live_update'] = _build_live_update(_build)
+
+  # Resolve build_args from env.
+  if 'build_args' in _build:
+    _build['build_args'] = _build_args(log_name, _build['build_args'])
+
+  docker_build(image_ref, **_build)
+  _ok(':: [ %s ] building -> %s' % (log_name, image_ref))
+  if verbose:
+    _dim('   · dockerfile: %s (%s)' % (_rel(_build.get('dockerfile', 'Dockerfile')), dockerfile_type))
+    _dim('   · context:    %s' % _rel(_build.get('context', '.')))
+    if 'build_args' in _build:
+      _dim('   · build_args: %s' % ', '.join([_a for _a in _build['build_args']]))
+    if 'live_update' in build_in:
+      _lu = build_in['live_update']
+      _sync = _lu.get('sync', [])
+      _nsync = len(_sync) if type(_sync) == 'list' else 1
+      _dim('   · live_update: %d sync path(s)%s' % (_nsync, ', + fall_back_on' if 'fall_back_on' in _lu else ''))
+    else:
+      _dim('   · live_update: none (full image rebuild on change)')
+
+def _wire_routing(name, cfg):
+  """Attach `ports`/`links`/`tilt` config to a unit's k8s_resource(s).
+
+  Shared by the single-image path (unit = the service) and each component
+  (unit = the component, whose resource is named via `lok8s.dev/name`).
+  Workloads default to `[name]` unless the config overrides them.
+
+  Note `tilt.extra_resources` is NOT handled here — it's a service-level
+  concern (migration jobs etc.) handled once per service in `lok8s()`,
+  not per component.
+  """
+  if 'ports' in cfg:
+    for port in cfg['ports']:
+      k8s_resource(
+        workload=name,
+        port_forwards='%s:%s' % (port['from'], port['to']),
+      )
+
+  if 'links' in cfg:
+    workloads = cfg.get('workloads', [name])
+    for workload in workloads:
+      k8s_resource(workload=workload, links=cfg['links'])
+
+  if 'tilt' in cfg:
+    tilt_config = cfg['tilt']
+    resource_args = {}
+    if 'resource_deps' in tilt_config:
+      resource_args['resource_deps'] = tilt_config['resource_deps']
+    if 'labels' in tilt_config:
+      resource_args['labels'] = tilt_config['labels']
+    if resource_args:
+      workloads = cfg.get('workloads', [name])
+      for workload in workloads:
+        k8s_resource(workload=workload, **resource_args)
+
+def lok8s(
+    lo_bin = 'lo',
+    label_prefix = 'lok8s.dev',
+    system_types = ['system'],
+    service_config_file = 'lok8s.yaml',
+    upsert_timeout = 90,
+    max_parallel = 2,
+    extra_paths = [],
+    warn_unresolved_paths = True,
+    auto_cache_pull = True,
+    strict_unlabeled = False,
+    apply_unlabeled = True,
+    verbose = True,
+    disable_snapshots_setting = True,
+    disable_secret_scrub = True,
+):
+  """
+  lok8s Tilt extension -- discovers services via `lo env`, builds kustomize
+  artifacts, and configures docker_build with live_update for each service.
+
+  Projects that do not use services.yaml (i.e. manage k8s manifests and
+  docker_build calls directly in their Tiltfile) still benefit from the
+  kustomize artifact pipeline and system-type filtering.
+
+  Args:
+    lo_bin: Path to the lo CLI (default: 'lo', uses PATH)
+    label_prefix: Kubernetes label prefix for filtering (default: 'lok8s.dev')
+    system_types: Type label values to apply as infrastructure (default: ['system'])
+    service_config_file: Per-service Tilt config filename (default: 'lok8s.yaml')
+    upsert_timeout: k8s apply timeout in seconds (default: 90)
+    max_parallel: Max parallel k8s updates (default: 2)
+    extra_paths: Additional JSON paths (relative to the per-service `build:`
+      dict) for _update_paths to resolve. Use this to absolutify paths in
+      fields lok8s doesn't know about — e.g. ['cache_from.#.path'] for a
+      hypothetical custom field. Format matches the built-in
+      `_live_update_paths`: dot-separated keys, `#` iterates a list.
+      Default: [].
+    warn_unresolved_paths: Print a warning when `_update_paths` encounters a
+      shape it can't walk (e.g. a non-dict where it expected a dict, or a
+      non-string leaf). Set to False to silence. Default: True.
+    auto_cache_pull: Run `lo image cache --all` after `lo env kustomization`
+      so build:false services with a configured registry are pre-populated
+      into the local cache registry before kind tries to pull them.
+      Reload-on-services-change re-runs the pull (idempotent skip handles
+      unchanged services). Set to False if your CI ran `lo image cache --all`
+      before invoking Tilt and you want to skip the redundant work.
+      Default: True.
+    strict_unlabeled: When True, unlabeled resources left over after both
+      filter passes (no `lok8s.dev/type=system` AND no matching
+      `lok8s.dev/name`) cause `fail()` instead of just a warning. Use this
+      in CI Tiltfiles to catch missing-label bugs at provision time
+      instead of debugging silent drops later. Default: False.
+    apply_unlabeled: When True, unlabeled leftover resources are still
+      applied via k8s_yaml(), with a warning printed. Escape hatch for
+      legitimate cases where a resource intentionally has neither label.
+      Mutually exclusive with strict_unlabeled. Default: False (drop).
+    verbose: Print per-build detail under each `building ->` line — the resolved
+      dockerfile (+ service/production mode), context, build_args, and
+      live_update summary. Default: True (on). Pass verbose=False to disable, or
+      verbose=None to defer to the LOK8S_VERBOSE env var (truthy enables).
+    disable_snapshots_setting: When True, calls Tilt's `disable_snapshots()`
+      so the project doesn't push snapshots to cloud.tilt.dev. Set False
+      if you want snapshot uploads enabled (rare). Default: True.
+    disable_secret_scrub: When True, calls `secret_settings(disable_scrub=True)`
+      so secret values aren't redacted from Tilt logs. Useful in local dev
+      where the user owns all secrets and wants to inspect them. Set False
+      to enable scrubbing (the safer Tilt default). Default: True.
+  """
+  if strict_unlabeled and apply_unlabeled:
+    fail("lok8s(): strict_unlabeled and apply_unlabeled are mutually exclusive — pick one")
+  # Verbose detail (per-build dockerfile/context/live_update). Defaults to the
+  # LOK8S_VERBOSE env var so it toggles without editing the Tiltfile.
+  if verbose == None:
+    # Explicit truthy allowlist: os.getenv returns None for an unset var, so an
+    # exclusion list would wrongly enable verbose by default — only turn it on
+    # for an explicit truthy value.
+    verbose = os.getenv('LOK8S_VERBOSE', '') in ['1', 'true', 'True', 'TRUE', 'yes', 'on']
+  if disable_snapshots_setting:
+    disable_snapshots()
+  if disable_secret_scrub:
+    secret_settings(disable_scrub=True)
+  update_settings(
+    k8s_upsert_timeout_secs=upsert_timeout,
+    max_parallel_updates=max_parallel,
+  )
+
+  # Watch config files for Tiltfile reload.
+  #
+  # Neither file is read directly by this extension. Both are passed to
+  # `lo env services` (a child process) which does the deep-merge via yq
+  # and emits the result on stdout. We `watch_file` them here so that
+  # editing services.yaml or services.<config>.yaml causes Tilt to reload
+  # the Tiltfile, which re-runs the `local('lo env ...')` calls and picks
+  # up the new content.
+  #
+  # LOK8S_SERVICE_CONFIG selects which override profile to merge — see
+  # docs/guide/services.md "Workflow profiles" — and is consumed by
+  # `lo env services` directly, not by Starlark code here.
+  if os.path.exists('services.yaml'):
+    watch_file('services.yaml')
+  config_name = os.environ.get('LOK8S_SERVICE_CONFIG', '')
+  if config_name:
+    config_path = 'services.%s.yaml' % config_name
+    if os.path.exists(config_path):
+      watch_file(config_path)
+
+  # Resolve the clusters directory. PATH_CLUSTERS env var wins (set by
+  # e2e helpers or user override), else default to ./clusters/ relative
+  # to the Tiltfile's working directory.
+  _clusters_dir = os.environ.get('PATH_CLUSTERS', 'clusters')
+
+  # Resolve active domain: DOMAIN_NAME env var wins, then
+  # <clusters>/.active (written by `lo use <domain>`), then fall back
+  # to lok8s.dev.
+  _domain = os.environ.get('DOMAIN_NAME', '')
+  _active_file = '%s/.active' % _clusters_dir
+  if not _domain and os.path.exists(_active_file):
+    _domain = str(read_file(_active_file)).strip()
+  if not _domain:
+    _domain = 'lok8s.dev'
+
+  # Generate the domain's artifacts/kustomization.yaml and run kustomize
+  # against the artifacts directory.  lok8s-owned output never lands at
+  # the repo root — see docs/guide/services.md for the pipeline.
+  #
+  # `--pull` (default) drains the cache queue right after writing the
+  # kustomization, so build:false services pointing at lok8s.cache are
+  # populated before kustomize build completes. Avoids ImagePullBackOff
+  # thrashing on cold-start; idempotent on reloads. Disable via
+  # auto_cache_pull=False if your CI pre-pulled separately.
+  _artifacts_dir = '%s/%s/artifacts' % (_clusters_dir, _domain)
+  if auto_cache_pull:
+    local('%s env kustomization --pull' % lo_bin)
+  else:
+    local('%s env kustomization' % lo_bin)
+
+  artifacts = local('kustomize build %s' % _artifacts_dir, True, '', True, {})
+
+  # Apply infrastructure components (lok8s.dev/type: system).
+  #
+  # This loop is CONSUMING: each iteration assigns the unmatched remainder
+  # back into `artifacts`, so a resource labeled `type=system` is removed
+  # from the pool. The per-service loop below is also consuming, so by the
+  # time we reach the unlabeled-leftover check, `artifacts` contains only
+  # resources that matched neither a system_type nor any service name.
+  #
+  # System types are partitioned (a resource belongs to exactly one type),
+  # so consuming is correct here: dropping resources from the pool prevents
+  # them from being applied a second time by a later type pass.
+  for type_value in system_types:
+    _yaml, artifacts = filter_yaml(
+      artifacts,
+      labels={('%s/type' % label_prefix): type_value},
+    )
+    if _yaml:
+      _info(":: [ %s ] applying system type" % type_value)
+      k8s_yaml(_yaml, allow_duplicates=True)
+      # Group these infra workloads under a Tilt UI label = their type (e.g.
+      # 'system') instead of leaving them 'unlabeled'. Tilt has no native
+      # group-by-k8s-label, so we reuse the label we just filtered on and apply
+      # it per workload. Only UNIQUELY-named workloads are labeled — a name
+      # shared across namespaces makes k8s_resource(workload=name) ambiguous and
+      # would fail the Tiltfile, so we skip (leave unlabeled) + warn instead.
+      # Tilt UI group per workload: an explicit `<prefix>/category` label (e.g.
+      # networking / storage / infrastructure) wins, else the type ('system').
+      # Lets infra split into a few readable groups instead of one big 'system'.
+      _wl_kinds = ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet']
+      _cat_key = '%s/category' % label_prefix
+      _counts = {}
+      _cat = {}
+      for _doc in decode_yaml_stream(_yaml):
+        if _doc == None:
+          continue
+        if _doc.get('kind', '') in _wl_kinds:
+          _n = _doc.get('metadata', {}).get('name', '')
+          if _n:
+            _counts[_n] = _counts.get(_n, 0) + 1
+            _cat[_n] = _doc.get('metadata', {}).get('labels', {}).get(_cat_key, type_value)
+      for _n in _counts:
+        if _counts[_n] == 1:
+          k8s_resource(workload=_n, labels=[_cat[_n]])
+        else:
+          _warn("!! [ %s ] workload %r left unlabeled (name not unique across namespaces)" % (type_value, _n))
+    else:
+      _warn("!! [ %s ] no resources with type=%s" % (type_value, type_value))
+
+  # Discover services (gracefully handle missing services.yaml)
+  svc_yaml = local('%s env services' % lo_bin, True, '', True, {})
+  svc_env = decode_yaml(svc_yaml)
+  if not svc_env:
+    svc_env = {}
+  _validate_services_yaml(svc_env)
+  registry = svc_env.get('registry', {})
+
+  services = svc_env.get('services', {})
+  if not services:
+    _info(":: lok8s: no services defined (services.yaml absent or empty)")
+    return
+
+  for name in services:
+    service = services[name]
+    if 'enabled' in service and not service['enabled']:
+      continue
+
+    # Resolve service source path
+    _path_service = service.get('path', './%s' % name)
+
+    # Watch additional files
+    if 'watch' in service:
+      for f in service['watch']:
+        watch_file('%s/%s' % (_path_service, f))
+
+    # Load per-service tilt config (lok8s.yaml). Read BEFORE filtering
+    # artifacts so a multi-image service can route its manifests by each
+    # component's `lok8s.dev/name` rather than the service name.
+    _service = read_yaml('%s/%s' % (_path_service, service_config_file), default=False)
+
+    # Determine the set of `lok8s.dev/name` values whose manifests belong
+    # to this service. Single-image (or no/absent lok8s.yaml, image-pin,
+    # build:false) → the service name. Multi-image → each component name,
+    # since a component's Deployment/etc. carries `lok8s.dev/name=<comp>`.
+    #
+    # Peek at `components` defensively here (full shape validation happens
+    # in _validate_service below for build:true services). A malformed
+    # `components` falls back to the service name so the leftover detector
+    # still surfaces the unmatched manifests.
+    _selector_names = [name]
+    if _service and type(_service) == 'dict' and type(_service.get('components', None)) == 'list' and len(_service['components']) > 0:
+      _names = []
+      _ok = True
+      for _c in _service['components']:
+        if type(_c) != 'dict' or type(_c.get('name', None)) != 'string' or _c['name'] == '':
+          _ok = False
+          break
+        _names.append(_c['name'])
+      if _ok:
+        _selector_names = _names
+
+    # Filter k8s artifacts for this service.
+    #
+    # CONSUMING (notice we reassign `artifacts`) — each selector name peels
+    # off its matches from the pool. After this loop, `artifacts` contains
+    # only resources that didn't match any service, which feeds the
+    # unlabeled-leftover detection at the end of `lok8s()`.
+    #
+    # Symmetric with the system-types loop above. The kubernetes label
+    # model is single-value-per-key per resource, so a resource has
+    # exactly one `lok8s.dev/name`, which means consuming is correct:
+    # there's no use case for two services to claim the same resource.
+    for _sel in _selector_names:
+      _yaml, artifacts = filter_yaml(artifacts, labels={('%s/name' % label_prefix): _sel})
+      if _yaml:
+        _info(':: [ %s ] processing artifacts' % _sel)
+        if 'namespace' in service:
+          _info(':: [ %s ] namespace -> %s' % (_sel, service['namespace']))
+          _yaml = namespace_inject(_yaml, service['namespace'])
+        k8s_yaml(_yaml, allow_duplicates=True)
+      else:
+        _warn('!! [ %s ] no artifacts found' % _sel)
+
+    if not _service:
+      _warn('!! [ %s ] no %s found at %s' % (name, service_config_file, _path_service))
+      continue
+
+    # build defaults: per-service > defaults.build > true.
+    # `image:` (full pin) implies build=false — you cannot build a service
+    # that's pinned to an external image ref.
+    _default_build = svc_env.get('defaults', {}).get('build', True)
+
+    if 'image' in service:
+      _info(':: [ %s ] pinned to image %s, skipping build' % (name, service['image']))
+      continue
+
+    if not service.get('build', _default_build):
+      # build=false. Branch on whether a registry source is resolvable:
+      #   - per-service registry.endpoint set      → cache from there
+      #   - global registry.endpoint set           → cache from there
+      #   - neither                                → service is unwired,
+      #     warn and skip. The kustomization swap will also skip it, so
+      #     manifests still apply but pods will fail to pull.
+      _svc_reg = service.get('registry', {})
+      _glb_reg = svc_env.get('registry', {})
+      _has_endpoint = bool(_svc_reg.get('endpoint', '') or _glb_reg.get('endpoint', ''))
+      if _has_endpoint:
+        _info(':: [ %s ] build=false, image will be pre-pulled from registry into cache' % name)
+      else:
+        _warn('!! [ %s ] build=false but no registry.endpoint configured — service will not be deployed (define registry.endpoint, set image:, or set build: true)' % name)
+      continue
+
+    # Validate at the boundary; downstream code can trust the shape.
+    _validate_service(name, _service)
+
+    # Dockerfile override mode (production vs service/lok8s). Applies to
+    # the single build and to every component build alike.
+    _defaults = svc_env.get('defaults', {})
+    _dockerfile_type = service.get('dockerfile', _defaults.get('dockerfile', 'service'))
+
+    # The canonical local image name is `<prefix>/<name>`. The registry
+    # `branch` is a path segment that only matters when pushing to a
+    # remote registry (handled by the kustomization swap for build:false
+    # services). Local Tilt builds use the bare canonical name so
+    # manifests can reference it directly.
+    image_prefix = registry.get('prefix', 'lok8s.local')
+
+    if 'components' in _service:
+      # Multi-image service. Each component is an independent build target
+      # with image `<prefix>/<component-name>`; its ports/links/tilt-labels
+      # wire to its own k8s_resource (named via `lok8s.dev/name=<name>`),
+      # NOT the service name. Build paths absolutize against the SAME
+      # service `path:` as the single-build case (components don't carry
+      # their own path — they differ only by Dockerfile/context within the
+      # one repo, which is the whole point of components over context: ..).
+      for comp in _service['components']:
+        _cname = comp['name']
+        # Components carry no `tilt:` block of their own, so the service-level
+        # tilt (labels, resource_deps) was dropped — multi-image services like
+        # kubehz-core (api + operator) landed in the Tilt "unlabeled" group.
+        # Propagate it so each component groups under the service's tilt.labels.
+        if 'tilt' in _service and 'tilt' not in comp:
+          comp['tilt'] = _service['tilt']
+        _wire_routing(_cname, comp)
+        _process_build(
+          _cname,
+          '%s/%s' % (image_prefix, _cname),
+          comp['build'],
+          _path_service,
+          _dockerfile_type,
+          extra_paths,
+          warn_unresolved_paths,
+          verbose,
+        )
+    else:
+      # Single-image service (unchanged behavior).
+      _wire_routing(name, _service)
+      _process_build(
+        name,
+        '%s/%s' % (image_prefix, name),
+        _service['build'],
+        _path_service,
+        _dockerfile_type,
+        extra_paths,
+        warn_unresolved_paths,
+        verbose,
+      )
+
+    # Service-level extra Tilt resources (migration jobs, etc.). These are
+    # a per-service concern, not per-component, so they're wired once here
+    # rather than inside _wire_routing.
+    if 'tilt' in _service and 'extra_resources' in _service['tilt']:
+      for extra in _service['tilt']['extra_resources']:
+        extra_args = {'new_name': extra['name']}
+        if 'objects' in extra:
+          extra_args['objects'] = extra['objects']
+        if 'resource_deps' in extra:
+          extra_args['resource_deps'] = extra['resource_deps']
+        if 'labels' in extra:
+          extra_args['labels'] = extra['labels']
+        k8s_resource(**extra_args)
+
+  # ── Unlabeled leftover detection ──────────────────────────
+  #
+  # Both filter passes are CONSUMING, so anything still in `artifacts`
+  # failed to match `lok8s.dev/type=<system_type>` AND any service's
+  # `lok8s.dev/name=<service>` label. That's almost always a bug:
+  # missing label, typo, renamed service, or a forgotten `system_types`
+  # entry.
+  #
+  # Note: a service set to `enabled: false` in services.yaml is skipped
+  # by the per-service loop, so its labeled resources end up here. That's
+  # intentional — disabling a service should drop its resources, and the
+  # warning makes the drop visible. To fully suppress, remove the service
+  # from services.yaml entirely.
+  _leftover_docs = decode_yaml_stream(artifacts) if artifacts else []
+  _leftover = [_d for _d in _leftover_docs if _d != None]
+
+  if _leftover:
+    if apply_unlabeled:
+      # Intentionally applying the unlabeled leftovers — one notice is enough.
+      # Skip the per-resource breakdown: it only helps when we DON'T apply them
+      # (to hunt a missing label), and otherwise floods the log (one line per
+      # CRD/Namespace/etc.).
+      _info(':: [ unlabeled ] applying %d unlabeled resource(s) (apply_unlabeled=True)' % len(_leftover))
+      k8s_yaml(artifacts, allow_duplicates=True)
+    else:
+      # NOT applying — list each leftover so a missing-label bug is debuggable.
+      for _doc in _leftover:
+        _kind = _doc.get('kind', '?')
+        _meta = _doc.get('metadata', {})
+        _ns = _meta.get('namespace', '')
+        _name = _meta.get('name', '?')
+        _ns_str = ('%s/' % _ns) if _ns else ''
+        _warn('!! [ unlabeled ] %s %s%s — no %s/{type,name} label match' %
+              (_kind, _ns_str, _name, label_prefix))
+      if strict_unlabeled:
+        fail("lok8s: %d unlabeled resource(s) — see breakdown above. Either add the missing labels, set strict_unlabeled=False to drop with a warning, or set apply_unlabeled=True to apply them anyway." % len(_leftover))
+      else:
+        _warn('!! [ unlabeled ] dropped %d resource(s) (set apply_unlabeled=True to apply, or strict_unlabeled=True to fail)' % len(_leftover))

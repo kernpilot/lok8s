@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on all shell scripts
+        run: |
+          find .lok8s/ operator/hooks/ -name '*.sh' -type f \
+            | xargs shellcheck --shell=bash --severity=warning
+
+  yamllint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: '.lok8s/ operator/ .github/'
+          config_data: |
+            extends: default
+            rules:
+              line-length:
+                max: 200
+              truthy:
+                check-keys: false
+              document-start: disable
+
+  unit-tests:
+    name: Bats Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext-base
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.52.4/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Cache bats
+        uses: actions/cache@v4
+        with:
+          path: tests/libs
+          key: bats-${{ hashFiles('.gitmodules') }}
+
+      - name: Run unit tests
+        run: |
+          tests/libs/bats-core/bin/bats --formatter junit tests/unit/ | tee test-results-unit.xml
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: test-results-unit.xml
+
+  operator-tests:
+    name: Bats Operator Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gettext-base
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.52.4/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Cache bats
+        uses: actions/cache@v4
+        with:
+          path: tests/libs
+          key: bats-${{ hashFiles('.gitmodules') }}
+
+      - name: Run operator tests
+        run: |
+          tests/libs/bats-core/bin/bats --formatter junit tests/operator/ | tee test-results-operator.xml
+
+      - name: Upload operator test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-test-results
+          path: test-results-operator.xml
+
+  integration-tests:
+    name: Integration Tests (Kind)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [shellcheck, unit-tests, operator-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: lok8s-test
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Apply lok8s CRDs
+        run: |
+          kubectl apply --server-side -f operator/crds/
+          kubectl wait --for=condition=Established crd --all --timeout=60s
+
+      - name: Create and read back a Lo resource
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: cluster.lok8s.dev/v1beta1
+          kind: Lo
+          metadata:
+            name: ci-smoke
+          spec:
+            cluster:
+              domain: ci.lok8s.dev
+            runtime: kind
+            bootstrap:
+              - cilium
+          EOF
+          kubectl get lo ci-smoke -o yaml
+          test "$(kubectl get lo ci-smoke -o jsonpath='{.spec.cluster.domain}')" = "ci.lok8s.dev"
+
+      - name: Validate CRD schemas reject bad specs
+        run: |
+          if kubectl apply -f - <<'EOF' 2>/dev/null
+          apiVersion: cluster.lok8s.dev/v1beta1
+          kind: Lo
+          metadata:
+            name: ci-bad
+          spec: {}
+          EOF
+          then
+            echo "expected schema validation to reject a spec without cluster.domain" >&2
+            exit 1
+          fi
