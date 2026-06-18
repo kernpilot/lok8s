@@ -29,6 +29,36 @@ main::build() {
   fi
 }
 
+# Resolve the control-plane API endpoint from the domain's kubeconfig and export
+# LOK8S_USER_API_{HOST,PORT} so ${LOK8S_USER_API_*} in target manifests (e.g. the
+# host-firewall ccnp) resolve at envsubst time. Best-effort: the kubeconfig may not
+# exist yet for a deploy domain (resolved secret not fetched). MUST be called
+# directly (not in a subshell) so the exports persist for the envsubst whitelist.
+build::_resolve_api() {
+  local domain_dir="$1"
+  local _kcfg="${KUBECONFIG:-}"
+  if [[ -z "${_kcfg}" || ! -f "${_kcfg}" ]]; then
+    # Deploy domains (deploy.lok8s.yaml + clusterRef) have NO cluster.lok8s.yaml.
+    # Guard the read: a bare yq on a missing file exits non-zero and, under
+    # set -euo pipefail, would abort the whole build. Read only when present.
+    local _cn=""
+    if [[ -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
+      _cn=$(yq -r '.metadata.name // ""' "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null) || _cn=""
+    fi
+    [[ -n "${_cn}" && -f "${PATH_BASE}/.kubeconfig/${_cn}.yaml" ]] && _kcfg="${PATH_BASE}/.kubeconfig/${_cn}.yaml"
+  fi
+  local _api=""
+  if [[ -f "${_kcfg}" ]]; then
+    _api=$(yq -r '.clusters[0].cluster.server // ""' "${_kcfg}" 2>/dev/null) || _api=""
+  fi
+  _api="${_api#http*://}"
+  if [[ -n "${_api}" ]]; then
+    export LOK8S_USER_API_HOST="${_api%%:*}"
+    local _ap="${_api##*:}"; [[ "${_ap}" != "${_api}" && -n "${_ap}" ]] || _ap="6443"
+    export LOK8S_USER_API_PORT="${_ap}"
+  fi
+}
+
 # Build all (or specified) targets for a domain.
 # Usage: build::targets <domain> [target...]
 build::targets() {
@@ -61,37 +91,10 @@ build::targets() {
     return 0
   fi
 
-  # Export the control-plane API endpoint (host+port) parsed from the cluster's
-  # kubeconfig and envsubst the rendered output below, so ${LOK8S_USER_API_HOST}/
-  # ${LOK8S_USER_API_PORT} in target manifests (e.g. the host-firewall ccnp)
-  # resolve. This path historically skipped envsubst, emitting the literal var
-  # (invalid CIDR on apply); the bootstrap + --split paths already do this.
-  local _kcfg="${KUBECONFIG:-}"
-  if [[ -z "${_kcfg}" || ! -f "${_kcfg}" ]]; then
-    # Deploy domains (deploy.lok8s.yaml + clusterRef) have NO cluster.lok8s.yaml.
-    # Guard the read: a bare `_cn=$(yq … <missing-file>)` exits non-zero and, under
-    # `set -euo pipefail`, aborts the whole build SILENTLY (stderr is 2>/dev/null'd)
-    # before any artifact is written. Only read when the file exists, and `|| _cn=""`
-    # so a yq parse failure can't trip errexit either.
-    local _cn=""
-    if [[ -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
-      _cn=$(yq -r '.metadata.name // ""' "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null) || _cn=""
-    fi
-    [[ -n "${_cn}" && -f "${PATH_BASE}/.kubeconfig/${_cn}.yaml" ]] && _kcfg="${PATH_BASE}/.kubeconfig/${_cn}.yaml"
-  fi
-  # LOK8S_USER_API_* is best-effort (only some targets use it). The kubeconfig may
-  # not exist yet for a deploy domain (resolved secret not fetched), so read it only
-  # when present — same set -e guard as above.
-  local _api=""
-  if [[ -f "${_kcfg}" ]]; then
-    _api=$(yq -r '.clusters[0].cluster.server // ""' "${_kcfg}" 2>/dev/null) || _api=""
-  fi
-  _api="${_api#http*://}"
-  if [[ -n "${_api}" ]]; then
-    export LOK8S_USER_API_HOST="${_api%%:*}"
-    local _ap="${_api##*:}"; [[ "${_ap}" != "${_api}" && -n "${_ap}" ]] || _ap="6443"
-    export LOK8S_USER_API_PORT="${_ap}"
-  fi
+  # Resolve the API endpoint (exports LOK8S_USER_API_*) + build the envsubst
+  # whitelist, so ${LOK8S_USER_*}/${LOK8S_SPEC_*} in target manifests resolve
+  # (e.g. the host-firewall ccnp's CIDR). Shared with build::targets_split.
+  build::_resolve_api "${domain_dir}"
   local _wl; _wl=$(template::envsubst_whitelist)
 
   for target in "${targets[@]}"; do
@@ -135,6 +138,11 @@ build::targets_split() {
   local -a targets=()
   mapfile -t targets < <(targets::discover "${domain}" "${requested_targets[@]}")
 
+  # Same envsubst resolution as build::targets — --split historically skipped
+  # this, emitting literal ${LOK8S_USER_*}/${LOK8S_SPEC_*} (invalid on apply).
+  build::_resolve_api "${domain_dir}"
+  local _wl; _wl=$(template::envsubst_whitelist)
+
   for target in "${targets[@]}"; do
     local target_dir="${targets_dir}/${target}"
     local artifact_dir="${artifacts_dir}/${target}"
@@ -144,9 +152,9 @@ build::targets_split() {
     debug "Building target (split): ${target}"
     mkdir -p "${artifact_dir}"
 
-    # Build into a temp file, then split
+    # Build, envsubst the LOK8S_* vars, then split into per-resource files.
     local combined
-    combined=$(kustomize build --enable-alpha-plugins "${target_dir}")
+    combined=$(kustomize build --enable-alpha-plugins "${target_dir}" | envsubst "${_wl}")
 
     # Remove old split files
     rm -f "${artifact_dir}"/*.yaml
