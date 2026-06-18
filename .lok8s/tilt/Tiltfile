@@ -65,6 +65,22 @@ _ROOT = _CWD[:-len('/.lok8s/tilt')] if _CWD.endswith('/.lok8s/tilt') else _CWD
 def _rel(p):  # trim the repo root → readable relative paths
   return p[len(_ROOT) + 1:] if p.startswith(_ROOT + '/') else p
 
+def _resolve_path(prefix, leaf, json_path, warn, service_name):
+  # Resolve a live_update path leaf, TOLERATING a not-yet-existing path.
+  # os.path.realpath lstat()s every component and FAILS the entire Tiltfile
+  # reload if one is missing (e.g. an uncommitted yarn.lock listed in
+  # fall_back_on, or a sync.local_path not created yet) — an opaque
+  # "lstat ... no such file or directory" that takes down `tilt up`. Guard
+  # with exists() (same pattern as the production-Dockerfile swap below) and
+  # fall back to the unresolved absolute path + a warning, so a missing path
+  # degrades gracefully instead of crashing the reload.
+  p = '%s/%s' % (prefix, leaf)
+  if os.path.exists(p):
+    return os.path.realpath(p)
+  if warn:
+    _warn("!! [ %s ] %r: %s does not exist (yet) — using unresolved path" % (service_name, json_path, _rel(p)))
+  return p
+
 def _update_paths(obj, prefix, relative_paths=_live_update_paths, warn=True, service_name=''):
   """Resolve relative paths in a pass-through build config to absolute paths.
 
@@ -115,7 +131,7 @@ def _update_paths(obj, prefix, relative_paths=_live_update_paths, warn=True, ser
         # Leaf — resolve string or list of strings.
         leaf = data[token]
         if type(leaf) == 'string':
-          data[token] = os.path.realpath('%s/%s' % (prefix, leaf))
+          data[token] = _resolve_path(prefix, leaf, json_path, warn, service_name)
         elif type(leaf) == 'list':
           _resolved = []
           _ok = True
@@ -123,7 +139,7 @@ def _update_paths(obj, prefix, relative_paths=_live_update_paths, warn=True, ser
             if type(item) != 'string':
               _ok = False
               break
-            _resolved.append(os.path.realpath('%s/%s' % (prefix, item)))
+            _resolved.append(_resolve_path(prefix, item, json_path, warn, service_name))
           if _ok:
             data[token] = _resolved
           elif warn:
