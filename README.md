@@ -252,7 +252,7 @@ kustomize/                       # Go source for kustomize plugins
 
 # Operator (separate from kustomize plugins)
 operator/
-  crds/                          # Lo, Capi, Deploy CRDs
+  crds/                          # Lo + Capi (reconciled) + Deploy (definition)
   hooks/                         # shell-operator bash hooks
   deploy/                        # Operator deployment manifests
   Dockerfile
@@ -262,7 +262,7 @@ operator/
 
 ### 🐳 Operator
 
-The lok8s operator runs on management clusters using [shell-operator](https://github.com/flant/shell-operator). It watches three CRDs and reconciles using the same bash libraries as the CLI.
+The lok8s operator runs on management clusters using [shell-operator](https://github.com/flant/shell-operator). It reconciles the `Lo` and `Capi` CRDs using the same bash libraries as the CLI. (KubeOne and Kkp are CLI-only drivers, not operator-reconciled.)
 
 ```bash
 # Apply CRDs
@@ -352,13 +352,13 @@ Full documentation is available at [kernpilot.github.io/lok8s](https://kernpilot
 
 ```bash
 # Local docs development
-yarn docs:dev
+npm run docs:dev
 
 # Build docs
-yarn docs:build
+npm run docs:build
 
 # Preview built docs
-yarn docs:preview --port 4173
+npm run docs:preview
 ```
 
 &nbsp;
