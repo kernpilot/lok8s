@@ -99,13 +99,14 @@ hook::trigger() {
 
       # Extract kubeconfig for the work cluster
       local kubeconfig_secret="${name}-kubeconfig"
-      if clusterctl get kubeconfig "${name}" -n "${namespace}" > "/tmp/${name}-kubeconfig.yaml" 2>/dev/null; then
-        # Store kubeconfig as a Secret
-        kubectl create secret generic "${kubeconfig_secret}" \
+      local kc
+      if kc=$(clusterctl get kubeconfig "${name}" -n "${namespace}" 2>/dev/null) && [[ -n "${kc}" ]]; then
+        # Pipe the work-cluster kubeconfig straight into the Secret — never write
+        # full cluster-admin creds to a predictable, world-readable /tmp path.
+        printf '%s' "${kc}" | kubectl create secret generic "${kubeconfig_secret}" \
           -n "${namespace}" \
-          --from-file=value="/tmp/${name}-kubeconfig.yaml" \
+          --from-file=value=/dev/stdin \
           --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
-        rm -f "/tmp/${name}-kubeconfig.yaml"
 
         # Update Capi CR with kubeconfig reference
         kubectl patch capi "${name}" -n "${namespace}" \

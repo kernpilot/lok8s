@@ -116,19 +116,23 @@ capi::generate_from_spec() {
   local workers
   workers=$(echo "${spec}" | jq -r '.workers // empty')
   if [[ -n "${workers}" && "${workers}" != "null" ]]; then
-    for pool in $(echo "${spec}" | jq -r '.workers | keys[]'); do
+    local pool
+    while IFS= read -r pool; do
+      [[ -n "${pool}" ]] || continue
       export POOL_NAME="${pool}"
-      export POOL_REPLICAS
-      POOL_REPLICAS=$(echo "${spec}" | jq -r ".workers.${pool}.replicas // 1")
-      export POOL_TYPE
-      POOL_TYPE=$(echo "${spec}" | jq -r ".workers.${pool}.type")
+      export POOL_REPLICAS POOL_TYPE
+      # Pass the pool name as a jq --arg — never interpolate a tenant-controlled
+      # key into the jq PROGRAM string (it could rewrite the filter). The CRD's
+      # workers propertyNames pattern also constrains it at admission.
+      POOL_REPLICAS=$(echo "${spec}" | jq -r --arg p "${pool}" '.workers[$p].replicas // 1')
+      POOL_TYPE=$(echo "${spec}" | jq -r --arg p "${pool}" '.workers[$p].type')
       echo "---"
       envsubst < "${tmpl_dir}/core/machine-deployment.yaml"
       if [[ -f "${provider_dir}/hcloud-machine-template.yaml" ]]; then
         echo "---"
         envsubst < "${provider_dir}/hcloud-machine-template.yaml"
       fi
-    done
+    done < <(echo "${spec}" | jq -r '.workers | keys[]')
   fi
 }
 

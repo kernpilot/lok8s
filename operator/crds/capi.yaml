@@ -42,6 +42,10 @@ spec:
           properties:
             spec:
               type: object
+              # Bash drivers/generator read fields not enumerated below
+              # (oidc.usernameClaim, workers.<pool>.imageName, …). Preserve them
+              # rather than letting the apiserver silently prune on write.
+              x-kubernetes-preserve-unknown-fields: true
               required:
                 - cluster
               properties:
@@ -59,6 +63,9 @@ spec:
                     domain:
                       type: string
                       description: Cluster FQDN
+                      # Used in filesystem paths + envsubst by the reconcile hook.
+                      pattern: '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+                      maxLength: 253
                     namespace:
                       type: string
                       default: default
@@ -164,6 +171,11 @@ spec:
                       description: Machine type (e.g. cax11, t3.medium)
                 workers:
                   type: object
+                  # Pool names flow into jq programs + envsubst in the CAPI
+                  # reconcile hook — constrain them to a safe charset at admission
+                  # so a crafted key can't inject into a jq filter or a manifest.
+                  propertyNames:
+                    pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
                   additionalProperties:
                     type: object
                     properties:

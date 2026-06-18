@@ -39,6 +39,12 @@ spec:
           properties:
             spec:
               type: object
+              # The bash drivers read many fields not enumerated below (oidc,
+              # coredns, kubehz, dns, remote, registries.tls/prefix,
+              # nodes.hostPorts, …). Preserve them rather than letting the
+              # apiserver SILENTLY PRUNE them on write (which would disable
+              # OIDC/kubehz/etc. with no error). The readers remain authoritative.
+              x-kubernetes-preserve-unknown-fields: true
               required:
                 - cluster
               properties:
@@ -56,6 +62,11 @@ spec:
                     domain:
                       type: string
                       description: Cluster FQDN
+                      # Constrain to a DNS-ish name: the reconcile hook uses the
+                      # domain in filesystem paths (incl. rm -rf), so reject `/`
+                      # and `..` at admission.
+                      pattern: '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+                      maxLength: 253
                     namespace:
                       type: string
                       default: default
