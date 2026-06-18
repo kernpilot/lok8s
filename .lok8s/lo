@@ -30,7 +30,6 @@ import ^libs/tilt
 import ^libs/env
 import ^libs/secrets
 import ^libs/k8s
-import ^libs/manifest
 import ^libs/provision
 import ^libs/bootstrap
 import ^libs/kubeconfig

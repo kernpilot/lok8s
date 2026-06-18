@@ -12,7 +12,6 @@
 import ^utils/verbose
 import ^utils/http
 import ^libs/kubehz/hosted
-import ^libs/kubehz/deploy
 
 main::kubehz() {
   local -a usage=(
