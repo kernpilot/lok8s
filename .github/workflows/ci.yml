@@ -49,33 +49,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install toolchain (b → argsh, yq)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gettext-base
-
-      - name: Install yq
-        run: |
-          sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/download/v4.52.4/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-
-      - name: Cache bats
-        uses: actions/cache@v4
-        with:
-          path: tests/libs
-          key: bats-${{ hashFiles('.gitmodules') }}
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          # Supply-chain rule: download the pinned installer, then run it.
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+          ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
       - name: Run unit tests
-        run: |
-          tests/libs/bats-core/bin/bats --formatter junit tests/unit/ | tee test-results-unit.xml
-
-      - name: Upload unit test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unit-test-results
-          path: test-results-unit.xml
+        run: ./.bin/argsh test tests/unit/
 
   operator-tests:
     name: Bats Operator Tests
@@ -83,33 +70,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install toolchain (b → argsh, yq)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq gettext-base
-
-      - name: Install yq
-        run: |
-          sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/download/v4.52.4/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-
-      - name: Cache bats
-        uses: actions/cache@v4
-        with:
-          path: tests/libs
-          key: bats-${{ hashFiles('.gitmodules') }}
+          sudo apt-get update && sudo apt-get install -y jq gettext-base
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+          ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
       - name: Run operator tests
-        run: |
-          tests/libs/bats-core/bin/bats --formatter junit tests/operator/ | tee test-results-operator.xml
-
-      - name: Upload operator test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: operator-test-results
-          path: test-results-operator.xml
+        run: ./.bin/argsh test tests/operator/
 
   integration-tests:
     name: Integration Tests (Kind)
