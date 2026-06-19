@@ -40,6 +40,7 @@ import ^libs/lint
 import ^libs/status
 import ^libs/doctor
 import ^libs/version
+import ^libs/crds
 import ^libs/gitops
 import ^libs/kubehz/main
 import ^libs/kustomize
@@ -97,6 +98,7 @@ main() {
     'tilt|t'                           'Manage tilt cluster'
     'env|e'                            'Manage environment'
     'k8s'                              'Generate/render K8s artifacts'
+    'crds'                             'Generate operator CRDs from schema source'
     'kustomize|ku'                     'Manage kustomize plugins (Go)'
     'registry|r'                       'Manage Docker registries'
     'image|i'                          'Manage the local cache registry'

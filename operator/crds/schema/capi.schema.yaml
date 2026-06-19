@@ -1,0 +1,282 @@
+kind: Capi
+group: cluster.lok8s.dev
+version: v1beta1
+plural: capis
+shortNames:
+  - capi
+scope: Namespaced
+printerColumns:
+  - name: Phase
+    type: string
+    jsonPath: .status.phase
+  - name: Ready
+    type: boolean
+    jsonPath: .status.ready
+  - name: Domain
+    type: string
+    jsonPath: .spec.cluster.domain
+  - name: Provider
+    type: string
+    jsonPath: .status.provider
+  - name: Age
+    type: date
+    jsonPath: .metadata.creationTimestamp
+spec:
+  type: object
+  # Bash drivers/generator read fields not enumerated below
+  # (oidc.usernameClaim, workers.<pool>.imageName, …). Preserve them
+  # rather than letting the apiserver silently prune on write.
+  x-kubernetes-preserve-unknown-fields: true
+  required:
+    - cluster
+  properties:
+    kubernetes:
+      type: object
+      properties:
+        version:
+          type: string
+          description: Kubernetes version
+    cluster:
+      type: object
+      required:
+        - domain
+      properties:
+        domain:
+          type: string
+          description: Cluster FQDN
+          # Used in filesystem paths + envsubst by the reconcile hook.
+          pattern: '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+          maxLength: 253
+        namespace:
+          type: string
+          default: default
+          description: Default namespace
+    managementCluster:
+      type: object
+      properties:
+        domain:
+          type: string
+          description: Management cluster domain (omit for SaaS)
+    provider:
+      type: object
+      description: |
+        Infrastructure provider configuration. The framework
+        reads only provider.name to select which
+        .lok8s/providers/<name>/main to source; the config
+        block is opaque and passed to the provider as-is.
+      properties:
+        name:
+          type: string
+          description: |
+            Provider name (e.g. hetzner, aws). Resolves to
+            .lok8s/providers/<name>/main.
+        config:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+          description: |
+            Opaque provider-specific configuration. Passed
+            to the provider contract as PROVIDER_CONFIG_FILE.
+            Mutually exclusive with configRef.
+        configRef:
+          type: string
+          description: |
+            Path to a provider config file, relative to
+            clusters/<domain>/. Same format as config —
+            just loaded from a file. Mutually exclusive
+            with config.
+        credentials:
+          type: object
+          properties:
+            envVars:
+              type: array
+              items:
+                type: string
+              description: Environment variable names the provider expects
+            secretRef:
+              type: string
+              description: Kubernetes Secret name for provider credentials
+    # Legacy provider fields below — deprecated in favor of
+    # spec.provider. Still read by the drivers for backward
+    # compatibility; will be removed in the next API version.
+    credentials:
+      type: object
+      properties:
+        secretName:
+          type: string
+          description: Secret name for provider credentials on mgmt cluster
+    hcloud:
+      type: object
+      properties:
+        region:
+          type: string
+          description: Hetzner Cloud region (e.g. fsn1, nbg1, hel1)
+        sshKeyName:
+          type: string
+          description: SSH key name registered in Hetzner Cloud
+    hrobot:
+      type: object
+      properties:
+        sshKeyName:
+          type: string
+          description: SSH key name for Hetzner Robot
+        hosts:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              serverNumber:
+                type: integer
+              rootDeviceHints:
+                type: object
+                properties:
+                  wwn:
+                    type: string
+    aws:
+      type: object
+      properties:
+        region:
+          type: string
+          description: AWS region (e.g. eu-central-1)
+    controlPlane:
+      type: object
+      properties:
+        replicas:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Number of control plane nodes
+        type:
+          type: string
+          description: Machine type (e.g. cax11, t3.medium)
+    workers:
+      type: object
+      # Pool names flow into jq programs + envsubst in the CAPI
+      # reconcile hook — constrain them to a safe charset at admission
+      # so a crafted key can't inject into a jq filter or a manifest.
+      propertyNames:
+        pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+      additionalProperties:
+        type: object
+        properties:
+          replicas:
+            type: integer
+            minimum: 0
+            default: 1
+          type:
+            type: string
+            description: Machine type
+      description: Worker pool definitions (key = pool name)
+    oidc:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        issuerUrl:
+          type: string
+          description: OIDC issuer URL
+    etcd:
+      type: object
+      properties:
+        encryptionSecretName:
+          type: string
+          description: Secret name for etcd encryption key
+    bootstrap:
+      type: array
+      items:
+        type: string
+      description: |
+        Cluster-infrastructure addons applied in order by the
+        driver during provisioning, before workloads. Each
+        entry resolves against
+        .lok8s/drivers/capi/addons/<name>/ (bare name)
+        or a ./ ../ / path.
+    gitops:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum:
+            - flux
+            - argo
+          description: GitOps controller
+        repo:
+          type: string
+          description: Git repository URL
+        branch:
+          type: string
+          default: main
+          description: Target branch
+        path:
+          type: string
+          description: Artifact path within repo
+        secretRef:
+          type: string
+          description: Secret name for git auth
+status:
+  type: object
+  properties:
+    phase:
+      type: string
+      enum:
+        - Pending
+        - Provisioning
+        - Provisioned
+        - Failed
+      description: Current lifecycle phase
+    ready:
+      type: boolean
+      description: Whether the cluster is fully ready
+    provider:
+      type: string
+      description: Detected CAPI provider name
+    controlPlaneEndpoint:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+    kubeconfig:
+      type: object
+      properties:
+        secretRef:
+          type: string
+          description: Secret containing work cluster kubeconfig
+    targets:
+      type: object
+      additionalProperties:
+        type: string
+      description: Per-target deployment status
+    gitops:
+      type: object
+      properties:
+        provider:
+          type: string
+        status:
+          type: string
+    conditions:
+      type: array
+      items:
+        type: object
+        required:
+          - type
+          - status
+        properties:
+          type:
+            type: string
+          status:
+            type: string
+            enum:
+              - "True"
+              - "False"
+              - Unknown
+          reason:
+            type: string
+          message:
+            type: string
+          lastTransitionTime:
+            type: string
+            format: date-time

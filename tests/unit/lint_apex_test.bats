@@ -27,7 +27,7 @@ _mk_cluster() { # <domain>
 
 _mk_deploy() { # <domain>
   mkdir -p "${PATH_CLUSTERS}/$1"
-  printf 'apiVersion: deploy.lok8s.dev/v1beta1\nkind: Deploy\nmetadata:\n  name: %s\n' \
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Deploy\nmetadata:\n  name: %s\n' \
     "$1" > "${PATH_CLUSTERS}/$1/deploy.lok8s.yaml"
 }
 

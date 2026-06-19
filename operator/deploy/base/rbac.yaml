@@ -6,7 +6,8 @@ metadata:
     app.kubernetes.io/name: lok8s-operator
     app.kubernetes.io/part-of: lok8s
 rules:
-  # lok8s CRDs — full access for reconciliation
+  # lok8s CRDs — full access for reconciliation. All cluster kinds
+  # (Lo, Capi, Kkp, KubeOne, Deploy) share the cluster.lok8s.dev group.
   - apiGroups:
       - cluster.lok8s.dev
     resources:
@@ -14,17 +15,10 @@ rules:
       - los/status
       - capis
       - capis/status
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-  - apiGroups:
-      - deploy.lok8s.dev
-    resources:
+      - kkps
+      - kkps/status
+      - kubeones
+      - kubeones/status
       - deploys
       - deploys/status
     verbs:

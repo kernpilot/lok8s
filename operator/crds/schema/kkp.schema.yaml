@@ -1,0 +1,185 @@
+kind: Kkp
+group: cluster.lok8s.dev
+version: v1beta1
+plural: kkps
+shortNames:
+  - kkp
+scope: Namespaced
+printerColumns:
+  - name: Phase
+    type: string
+    jsonPath: .status.phase
+  - name: Ready
+    type: boolean
+    jsonPath: .status.ready
+  - name: Domain
+    type: string
+    jsonPath: .spec.cluster.domain
+  - name: Datacenter
+    type: string
+    jsonPath: .spec.kkp.datacenter
+  - name: Age
+    type: date
+    jsonPath: .metadata.creationTimestamp
+spec:
+  type: object
+  # The KKP driver reads worker/provider fields not enumerated below.
+  # Preserve them rather than letting the apiserver silently prune on
+  # write (the bash driver stays authoritative).
+  x-kubernetes-preserve-unknown-fields: true
+  required:
+    - cluster
+    - kkp
+  properties:
+    kubernetes:
+      type: object
+      properties:
+        version:
+          type: string
+          description: Kubernetes version (e.g. "v1.29.2")
+    cluster:
+      type: object
+      required:
+        - domain
+      properties:
+        domain:
+          type: string
+          description: Cluster FQDN
+          # Used in filesystem paths by the driver — reject `/` and `..`.
+          pattern: '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+          maxLength: 253
+        namespace:
+          type: string
+          default: default
+          description: Default namespace
+    kkp:
+      type: object
+      description: Kubermatic Kubernetes Platform target.
+      required:
+        - apiUrl
+        - projectId
+        - datacenter
+      properties:
+        apiUrl:
+          type: string
+          pattern: "^https://"
+          description: KKP API endpoint (e.g. https://kkp.kubehz.in.net).
+        projectId:
+          type: string
+          description: KKP project ID the cluster belongs to.
+        datacenter:
+          type: string
+          description: KKP seed datacenter (e.g. hetzner-fsn1).
+    provider:
+      type: object
+      description: |
+        Infrastructure provider configuration. The framework reads only
+        provider.name to select which .lok8s/providers/<name>/main to
+        source; the config block is opaque and passed through as-is.
+      properties:
+        name:
+          type: string
+          description: Provider name (e.g. hetzner).
+        config:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+          description: Opaque provider-specific configuration.
+        configRef:
+          type: string
+          description: Path to a provider config file, relative to clusters/<domain>/.
+        credentials:
+          type: object
+          properties:
+            envVars:
+              type: array
+              items:
+                type: string
+              description: Environment variable names the provider expects.
+            secretRef:
+              type: string
+              description: Kubernetes Secret name for provider credentials.
+    workers:
+      type: object
+      # Pool names may flow into shell/jq programs in the driver —
+      # constrain them to a safe charset at admission.
+      propertyNames:
+        pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+      additionalProperties:
+        type: object
+        properties:
+          replicas:
+            type: integer
+            minimum: 0
+            default: 1
+          flavor:
+            type: string
+            description: Machine type (e.g. cpx31).
+          operatingSystem:
+            type: string
+            description: Node OS (e.g. ubuntu).
+          autoscaler:
+            type: object
+            properties:
+              min:
+                type: integer
+                minimum: 0
+              max:
+                type: integer
+                minimum: 0
+      description: Worker pool definitions (key = pool name).
+    bootstrap:
+      type: array
+      items:
+        type: string
+      description: |
+        Cluster-infrastructure addons applied in order by the driver
+        during provisioning, before workloads. Each entry resolves
+        against .lok8s/addons/<name>/ (bare name) or a ./ ../ / path.
+status:
+  type: object
+  properties:
+    phase:
+      type: string
+      enum:
+        - Pending
+        - Provisioning
+        - Provisioned
+        - Terminating
+        - Failed
+      description: Current lifecycle phase
+    ready:
+      type: boolean
+      description: Whether the cluster is fully ready
+    clusterId:
+      type: string
+      description: KKP-assigned cluster ID
+    kubeconfig:
+      type: object
+      description: Where the cluster's kubeconfig is published
+      properties:
+        secretRef:
+          type: string
+          description: Name of the Secret holding the kubeconfig (key `value`)
+    conditions:
+      type: array
+      items:
+        type: object
+        required:
+          - type
+          - status
+        properties:
+          type:
+            type: string
+          status:
+            type: string
+            enum:
+              - "True"
+              - "False"
+              - Unknown
+          reason:
+            type: string
+          message:
+            type: string
+          lastTransitionTime:
+            type: string
+            format: date-time

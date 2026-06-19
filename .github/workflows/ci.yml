@@ -137,3 +137,24 @@ jobs:
             echo "expected schema validation to reject a spec without cluster.domain" >&2
             exit 1
           fi
+
+      - name: All cluster kinds resolve under cluster.lok8s.dev
+        run: |
+          # Every cluster kind (incl. the regrouped Deploy + new Kkp/KubeOne)
+          # must serve under the one group. A 404 here = a group drift.
+          for kind in Lo Capi Kkp KubeOne Deploy; do
+            kubectl get --raw "/apis/cluster.lok8s.dev/v1beta1" \
+              | grep -q "\"kind\":\"${kind}\"" \
+              || { echo "kind ${kind} not served under cluster.lok8s.dev" >&2; exit 1; }
+          done
+          # Round-trip a Deploy (the kind whose group was corrected).
+          kubectl apply -f - <<'EOF'
+          apiVersion: cluster.lok8s.dev/v1beta1
+          kind: Deploy
+          metadata:
+            name: ci-deploy
+          spec:
+            clusterRef:
+              domain: ci.lok8s.dev
+          EOF
+          test "$(kubectl get deploys.cluster.lok8s.dev ci-deploy -o jsonpath='{.spec.clusterRef.domain}')" = "ci.lok8s.dev"
