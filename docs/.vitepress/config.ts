@@ -3,12 +3,14 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'lok8s',
   description: 'Kubernetes deployment framework — same workflow from local dev to production',
-  // Project pages live at kernpilot.github.io/lok8s/
-  base: '/lok8s/',
+  // Served from the apex custom domain lok8s.io (Pages cname) — so base is '/',
+  // NOT '/lok8s/'. With a project-pages base, every asset 404s at the apex and
+  // the site renders unstyled. The CNAME is pinned in docs/public/CNAME.
+  base: '/',
   cleanUrls: true,
   lastUpdated: true,
   sitemap: {
-    hostname: 'https://kernpilot.github.io/lok8s/',
+    hostname: 'https://lok8s.io/',
   },
   // Internal/planning docs now live in the PRIVATE kubehz-cluster repo
   // (docs/internal/). lok8s is public — keep only this defensive exclude so a
@@ -16,7 +18,7 @@ export default defineConfig({
   srcExclude: ['internal/**'],
   head: [
     ['meta', { name: 'theme-color', content: '#89DCEB' }],
-    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/lok8s/logo.svg' }],
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
     ['meta', { property: 'og:title', content: 'lok8s — Kubernetes from laptop to production' }],
     ['meta', { property: 'og:description', content: 'One CLI, one folder convention, the same workflow from local kind clusters to bare-metal production.' }],
   ],

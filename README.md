@@ -7,7 +7,7 @@
   ·
   <a href="#-cli-reference">CLI Reference</a>
   ·
-  <a href="https://kernpilot.github.io/lok8s/">Documentation</a>
+  <a href="https://lok8s.io/">Documentation</a>
 </h6>
 
 <p align="center">
@@ -357,7 +357,7 @@ This works with Claude Code, VS Code Copilot, Cursor, and any client that suppor
 
 ### 📚 Documentation
 
-Full documentation is available at [kernpilot.github.io/lok8s](https://kernpilot.github.io/lok8s/).
+Full documentation is available at [lok8s.io](https://lok8s.io/).
 
 ```bash
 # Local docs development
