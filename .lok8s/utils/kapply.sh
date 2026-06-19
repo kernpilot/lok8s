@@ -28,10 +28,17 @@ import ^utils/verbose
 KAPPLY_LAST_OUTPUT=""
 
 # True when we may draw the collapsed one-line UI / prompt on the terminal.
+# Where the live UI is drawn: a real terminal, or $KAPPLY_TTY (a file) so the
+# rendering can be captured + asserted in tests.
 kapply::_tty() {
+  [[ -n "${KAPPLY_TTY:-}" ]] && return 0
   [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
   [[ -w /dev/tty ]]
 }
+kapply::_ui() { printf '%s' "${KAPPLY_TTY:-/dev/tty}"; }
+
+# Spinner frames (array, not a substring — avoids byte/char issues on braille).
+_KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 
 # kapply::apply [extra kubectl flags...] < manifest
 #   Reads a manifest on stdin. Extra args (e.g. --kubeconfig <path>) thread
@@ -91,21 +98,45 @@ kapply::_confirm_heal() {
   [[ "${ans}" =~ ^[Yy] ]]
 }
 
-# Stream filter: pass every line through (captured by the caller), and on a
-# terminal collapse the success lines to ONE in-place line + a final summary.
+# Stream filter: pass every line through to stdout (so the caller still
+# captures the full output), and on a terminal render a compact, self-erasing
+# block — a spinner header plus the last ≤3 progress lines scrolling up:
+#
+#   ⠹ applying… (12)
+#       configmap/cilium-config serverside-applied
+#       secret/cilium-ca serverside-applied
+#       service/cilium-envoy serverside-applied
+#
+# On EOF the whole block is erased and replaced by a single  ✓ applied N line.
 kapply::_progress() {
-  local n=0 line width
-  width=$(( $(tput cols 2>/dev/null || echo 80) - 4 ))
-  (( width > 20 )) || width=76
+  local ui; ui="$(kapply::_ui)"
+  local n=0 drawn=0 line frame width l
+  local -a win=()
+  width=$(( $(tput cols 2>/dev/null || echo 80) - 6 )); (( width > 20 )) || width=74
   while IFS= read -r line; do
     printf '%s\n' "${line}"
     case "${line}" in
-      *' serverside-applied'|*' created'|*' configured'|*' unchanged'|*' applied'|*' deleted')
+      *' serverside-applied'|*' created'|*' configured'|*' unchanged'|*' applied'|*' deleted'|*' condition met')
         n=$(( n + 1 ))
-        printf '\r\033[2K  %.*s' "${width}" "${line}" >/dev/tty ;;
+        win+=("${line}"); (( ${#win[@]} > 3 )) && win=("${win[@]: -3}")
+        frame="${_KAPPLY_SPIN[$(( n % ${#_KAPPLY_SPIN[@]} ))]}"
+        {
+          (( drawn )) && printf '\033[%dA' "${drawn}"        # back to block top
+          printf '\r\033[K\033[36m%s\033[0m applying… (%d)\n' "${frame}" "${n}"
+          drawn=1
+          for l in "${win[@]}"; do
+            printf '\033[K      \033[2m%.*s\033[0m\n' "${width}" "${l}"
+            drawn=$(( drawn + 1 ))
+          done
+        } >>"${ui}" 2>/dev/null ;;
     esac
   done
-  (( n )) && printf '\r\033[2K  \033[32m✓\033[0m applied %d resource(s)\n' "${n}" >/dev/tty
+  if (( n )); then
+    {
+      (( drawn )) && printf '\033[%dA\033[0J' "${drawn}"     # erase the block
+      printf '\r\033[K\033[32m✓\033[0m applied %d resource(s)\n' "${n}"
+    } >>"${ui}" 2>/dev/null
+  fi
 }
 
 # Recreate the objects kubectl reported as having an immutable-field conflict.

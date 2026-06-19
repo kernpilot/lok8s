@@ -14,7 +14,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
 
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
-  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT
+  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY
   export APPLY_RC=0
 
   # Stub kubectl: log every call; drive `apply` via APPLY_OUT/APPLY_RC and
@@ -93,6 +93,23 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   run cat "${KLOG}"
   assert_output --partial 'patch Cluster db'
   assert_output --partial 'finalizers'
+}
+
+@test "progress: rolling 3-line window collapses to a single done line" {
+  # KAPPLY_TTY redirects the live UI to a file so we can assert on the render.
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  local pass
+  pass=$(printf 'configmap/a serverside-applied\nsecret/b serverside-applied\nservice/c serverside-applied\nrole/d serverside-applied\n' | kapply::_progress)
+  # full output still passes through (for capture/logs)
+  [[ "${pass}" == *"role/d serverside-applied"* ]]
+  # the UI rendered a spinner header, used in-place cursor-up redraws, and
+  # collapsed to a single done line with the right count.
+  grep -q 'applying…' "${KAPPLY_TTY}"
+  grep -qE $'\033\\[[0-9]+A' "${KAPPLY_TTY}"
+  grep -q 'applied 4 resource' "${KAPPLY_TTY}"
+  # window never exceeds 3 lines: the last redraw frame must not show line "a"
+  local last_frame; last_frame=$(awk 'BEGIN{RS="\033\\[[0-9]+A"} END{print}' "${KAPPLY_TTY}")
+  [[ "${last_frame}" != *"configmap/a"* ]]
 }
 
 @test "unknown error: passed through unchanged, no healing" {
