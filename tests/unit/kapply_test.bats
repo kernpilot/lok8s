@@ -6,6 +6,7 @@
 setup() {
   load "../test_helper"
   setup_tmpdir
+  export LOK8S_NONINTERACTIVE=1
   command -v yq &>/dev/null || skip "yq required for kapply tests"
 
   import() { :; }

@@ -227,23 +227,24 @@ bootstrap::apply() {
     # Clean up temp dir
     [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
 
-    # Apply with server-side + CRD retry. kapply::apply heals immutable /
-    # stuck-Terminating conflicts when --force-recreate is set, and passes
+    # Apply with server-side + CRD retry. kapply::apply renders its own
+    # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating
+    # conflicts (interactive prompt, or --force-recreate), and passes
     # CRD-not-installed / webhook-not-ready errors through unchanged so the
-    # transient-race retry below still fires.
-    local first_pass_output fp_rc=0
-    first_pass_output=$(echo "${rendered}" | kapply::apply --kubeconfig "${kubeconfig}" 2>&1) || fp_rc=$?
-    echo "${first_pass_output}"
+    # transient-race retry below still fires. A herestring (not a pipe) keeps
+    # kapply in this shell so KAPPLY_LAST_OUTPUT is readable here.
+    local fp_rc=0
+    kapply::apply --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
 
-    # Unrecoverable conflict that kapply couldn't (or wasn't allowed to) heal —
-    # fail fast with the hint it already printed, rather than "succeeding" and
-    # letting the next `lo up` / Tilt loop hit the same wall forever.
-    if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted' <<< "${first_pass_output}"; then
-      error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see the hint above (try: lo up --force-recreate)"
+    # Unrecoverable conflict that wasn't healed (declined the prompt, or
+    # non-interactive without --force-recreate) — fail fast rather than
+    # "succeeding" and letting the next `lo up` / Tilt loop hit the same wall.
+    if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted' <<< "${KAPPLY_LAST_OUTPUT}"; then
+      error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)"
       return 1
     fi
 
-    if echo "${first_pass_output}" | grep -qE "ensure CRDs are installed first|failed calling webhook"; then
+    if grep -qE "ensure CRDs are installed first|failed calling webhook" <<< "${KAPPLY_LAST_OUTPUT}"; then
       debug "bootstrap: waiting for CRDs and webhooks to settle before retry"
       kubectl --kubeconfig "${kubeconfig}" wait \
         --for=condition=Established crd --all --timeout=60s 2>/dev/null || true
@@ -253,7 +254,7 @@ bootstrap::apply() {
       sleep 3
 
       debug "bootstrap: retrying ${addon_name}"
-      if ! echo "${rendered}" | kapply::apply --kubeconfig "${kubeconfig}"; then
+      if ! kapply::apply --kubeconfig "${kubeconfig}" <<< "${rendered}"; then
         error "bootstrap: kubectl apply failed for ${addon_name} (retry)"
         return 1
       fi

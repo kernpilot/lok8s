@@ -14,6 +14,7 @@
 setup() {
   load "../test_helper"
   setup_tmpdir
+  export LOK8S_NONINTERACTIVE=1
 
   # bootstrap is an argsh script with `import` — stub it out.
   import() { :; }

@@ -6,6 +6,7 @@
 setup() {
   load "../test_helper"
   setup_tmpdir
+  export LOK8S_NONINTERACTIVE=1
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
 
