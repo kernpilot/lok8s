@@ -183,6 +183,7 @@ _append_inventory() {
 
   local ssh_key
   ssh_key=$(echo "${output}" | jq -r '.access[0].privateKey // ""')
+  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
   [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
   if [[ -z "${ssh_key}" || ! -f "${ssh_key}" ]]; then
     error "kubeone inventory: ssh private key not found (descriptor sshPrivateKey: '${ssh_key}')"

@@ -147,6 +147,8 @@ provider::write_config() {
   PROVIDER_CONFIG_FILE=$(mktemp /tmp/lok8s-provider-config.XXXXXX.yaml)
   yq -r '.spec.provider.config // {}' "${cluster_yaml}" > "${PROVIDER_CONFIG_FILE}"
   export PROVIDER_CONFIG_FILE
+  # shellcheck disable=SC2064 # expand NOW on purpose: capture this temp-file path
+  # and snapshot the existing EXIT trap so we chain (not clobber) it.
   trap "rm -f '${PROVIDER_CONFIG_FILE}' 2>/dev/null; $(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")" EXIT
   debug "provider config written to ${PROVIDER_CONFIG_FILE}"
 }

@@ -21,7 +21,12 @@ jobs:
 
       - name: Run shellcheck on all shell scripts
         run: |
-          find .lok8s/ operator/hooks/ -name '*.sh' -type f \
+          # Two passes: *.sh files (sourced libs often have no shebang) AND
+          # the extensionless argsh libs/drivers (#!/usr/bin/env argsh), which
+          # a `-name '*.sh'` filter alone would silently skip. Overlap is fine.
+          find .lok8s operator/hooks -type f -name '*.sh' \
+            | xargs shellcheck --shell=bash --severity=warning
+          grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks \
             | xargs shellcheck --shell=bash --severity=warning
 
   yamllint:

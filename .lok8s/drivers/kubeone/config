@@ -191,6 +191,7 @@ kubeone::deliver_oidc_auth_config() {
 
   local ssh_key
   ssh_key=$(echo "${output}" | jq -r '.access[0].privateKey // ""')
+  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
   [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
   if [[ -z "${ssh_key}" || ! -f "${ssh_key}" ]]; then
     error "OIDC: ssh private key not found for auth-config delivery ('${ssh_key}')"
@@ -385,12 +386,14 @@ kubeone::apply() {
 # wiped. No-op on a fresh cluster (no reachable CP → nothing to clean).
 # Usage: kubeone::_clean_reinstalled_workers <work_dir>
 kubeone::_clean_reinstalled_workers() {
-  local work_dir="$1" manifest="${work_dir}/kubeone.yaml"
+  local work_dir="$1"
+  local manifest="${work_dir}/kubeone.yaml"
   [[ -f "${manifest}" ]] || return 0
 
   local cp_ip ssh_key
   cp_ip=$(yq -r '.controlPlane.hosts[0].publicAddress // ""' "${manifest}" 2>/dev/null)
   ssh_key=$(yq -r '.controlPlane.hosts[0].sshPrivateKeyFile // ""' "${manifest}" 2>/dev/null)
+  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
   [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
   [[ -n "${cp_ip}" ]] || return 0
 
@@ -433,6 +436,7 @@ kubeone::_cni_bootstrap_during_apply() {
   cp_ip=$(yq -r '.controlPlane.hosts[0].publicAddress // ""' "${manifest}" 2>/dev/null)
   lb_host=$(yq -r '.apiEndpoint.host // ""' "${manifest}" 2>/dev/null)
   ssh_key=$(yq -r '.controlPlane.hosts[0].sshPrivateKeyFile // ""' "${manifest}" 2>/dev/null)
+  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
   [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
   if [[ -z "${cp_ip}" || -z "${lb_host}" ]]; then
     debug "CNI bootstrap: no cp_ip/lb_host in manifest — skipping (non-LB topology)"

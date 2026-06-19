@@ -54,6 +54,7 @@ tilt::port() {
   echo $(( (hash % 149) + 10351 ))
 }
 
+# shellcheck disable=SC2120 # argsh-dispatched; also called arg-less by tilt::restart
 tilt::up() {
   :args "Spin up tilt" "${@}"
   tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
@@ -92,6 +93,7 @@ tilt::ci() {
   tilt ci "${ci_args[@]}"
 }
 
+# shellcheck disable=SC2120 # argsh-dispatched; also called arg-less by tilt::restart
 tilt::down() {
   :args "Spin down tilt" "${@}"
   if [[ -f "${PATH_BASE}/.tilt.pid" ]]; then
