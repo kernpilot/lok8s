@@ -1,0 +1,43 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# version — print lok8s + toolchain versions
+# Reads the framework version from .lok8s/VERSION and reports the versions of
+# the external tools `lo` shells out to (best-effort; "present" if unparsable).
+
+import ^utils/verbose
+
+main::version() {
+  local -a args=(
+    "${args[@]:-}"
+  )
+  :args "Print lok8s and toolchain versions" "${@}"
+
+  local v="dev"
+  [[ -f "${PATH_LOK8S}/VERSION" ]] && v="$(<"${PATH_LOK8S}/VERSION")"
+  printf '%-11s %s\n' "lok8s" "${v}"
+  printf '%-11s %s\n' "bash" "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}"
+
+  local t
+  for t in argsh yq kustomize kubectl kind tilt docker; do
+    command -v "${t}" >/dev/null 2>&1 || continue
+    printf '%-11s %s\n' "${t}" "$(version::_of "${t}")"
+  done
+}
+
+# Best-effort single version string for a tool (no label).
+version::_of() {
+  local t="$1" out=""
+  case "${t}" in
+    argsh)     out="$(argsh --version 2>/dev/null | head -1)" ;;
+    yq)        out="$(yq --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
+    kustomize) out="$(kustomize version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
+    kubectl)   out="$(kubectl version --client 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
+    kind)      out="$(kind --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
+    tilt)      out="$(tilt version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
+    docker)    out="$(docker --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
+  esac
+  echo "${out:-present}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::version "${@}"

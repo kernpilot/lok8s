@@ -1,0 +1,117 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# doctor — environment + toolchain preflight diagnostics
+# Reports bash version (argsh needs >= 4.3), required/optional tool presence,
+# the PATH_* environment, whether the secrets plugin is built, and the active
+# domain. Exits non-zero when a REQUIRED prerequisite is missing.
+
+import ^utils/verbose
+
+main::doctor() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to check (default: active)'
+    "${args[@]:-}"
+  )
+  :args "Diagnose the lok8s environment and toolchain" "${@}"
+
+  local fail=0
+
+  echo "=== lok8s doctor ==="
+  echo
+
+  echo "--- runtime ---"
+  local bv="${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
+  if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) )); then
+    doctor::_ok "bash ${bv}"
+  else
+    doctor::_bad "bash ${bv} — argsh needs >= 4.3 (macOS ships 3.2: brew install bash)"; fail=1
+  fi
+
+  echo
+  echo "--- tools ---"
+  doctor::_tool argsh      1 "argsh runtime (b install / argsh)"        || fail=1
+  doctor::_tool yq         1 "YAML processor"                            || fail=1
+  doctor::_tool kustomize  1 "manifest builder"                         || fail=1
+  doctor::_tool kubectl    1 "Kubernetes CLI"                           || fail=1
+  doctor::_tool envsubst   1 "variable substitution (gettext)"          || fail=1
+  doctor::_tool docker     1 "container runtime"                        || fail=1
+  doctor::_tool jq         0 "JSON processor"
+  doctor::_tool kind       0 "local clusters (Lo driver)"
+  doctor::_tool tilt       0 "dev loop (Lo driver)"
+  doctor::_tool mkcert     0 "local TLS (Lo driver)"
+  doctor::_tool sops       0 "secret encryption"
+  doctor::_tool kubeone    0 "KubeOne driver"
+  doctor::_tool clusterctl 0 "Capi driver"
+
+  echo
+  echo "--- environment ---"
+  doctor::_dir PATH_BASE     "${PATH_BASE:-}"
+  doctor::_dir PATH_LOK8S    "${PATH_LOK8S:-}"
+  doctor::_dir PATH_CLUSTERS "${PATH_CLUSTERS:-}"
+  doctor::_dir PATH_SECRETS  "${PATH_SECRETS:-}"
+  if [[ -n "${KUSTOMIZE_PLUGIN_HOME:-}" ]]; then
+    doctor::_ok "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME}"
+  else
+    doctor::_warn "KUSTOMIZE_PLUGIN_HOME not set (lo build needs it for plugins)"
+  fi
+  if [[ -n "${KUSTOMIZE_PLUGIN_HOME:-}" && -x "${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" ]]; then
+    doctor::_ok "secrets.lok8s.dev plugin built"
+  else
+    doctor::_warn "secrets.lok8s.dev plugin not built (run: lo kustomize build)"
+  fi
+
+  echo
+  echo "--- domain ---"
+  if [[ -n "${domain}" ]]; then
+    local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+    local dspec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
+    if [[ -f "${spec}" ]]; then
+      doctor::_ok "active: ${domain} (kind $(yq -r '.kind // "?"' "${spec}" 2>/dev/null))"
+    elif [[ -f "${dspec}" ]]; then
+      doctor::_ok "active: ${domain} (Deploy -> $(yq -r '.spec.clusterRef.domain // "?"' "${dspec}" 2>/dev/null))"
+    else
+      doctor::_warn "active domain '${domain}' has no cluster.lok8s.yaml / deploy.lok8s.yaml"
+    fi
+  else
+    doctor::_warn "no active domain (run: lo use <domain>)"
+  fi
+
+  echo
+  if (( fail )); then
+    error "doctor: missing required prerequisites (see ✗ above)"
+    return 1
+  fi
+  echo "doctor: all required checks passed."
+}
+
+doctor::_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+doctor::_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+doctor::_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+
+# doctor::_tool <name> <required:0|1> <purpose>  → 0 ok, 1 if required+missing
+doctor::_tool() {
+  local name="$1" required="$2" purpose="$3"
+  if command -v "${name}" >/dev/null 2>&1; then
+    doctor::_ok "${name} — ${purpose}"
+    return 0
+  fi
+  if (( required )); then
+    doctor::_bad "${name} MISSING (required) — ${purpose}"
+    return 1
+  fi
+  doctor::_warn "${name} not found (optional) — ${purpose}"
+  return 0
+}
+
+doctor::_dir() {
+  local name="$1" val="$2"
+  if [[ -n "${val}" && -d "${val}" ]]; then
+    doctor::_ok "${name}=${val}"
+  else
+    doctor::_warn "${name} unset or not a directory (${val:-unset})"
+  fi
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::doctor "${@}"

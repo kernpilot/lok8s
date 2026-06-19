@@ -38,6 +38,8 @@ import ^libs/init
 import ^libs/build
 import ^libs/lint
 import ^libs/status
+import ^libs/doctor
+import ^libs/version
 import ^libs/gitops
 import ^libs/kubehz/main
 import ^libs/kustomize
@@ -87,6 +89,8 @@ main() {
     'init@idempotent'                  'Scaffold service config (lok8s.yaml/services.yaml/Tiltfile)'
     'lint|l@readonly'                  'Validate structure and specs'
     'status@readonly'                  'Cluster health and status'
+    'doctor@readonly'                  'Diagnose the environment + toolchain'
+    'version@readonly'                 'Print lok8s + toolchain versions'
     'gitops|g'                         'GitOps integration'
     'kubehz|kh'                        'kubehz platform integration'
 
