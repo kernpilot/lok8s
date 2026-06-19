@@ -234,7 +234,7 @@ bootstrap::apply() {
     # transient-race retry below still fires. A herestring (not a pipe) keeps
     # kapply in this shell so KAPPLY_LAST_OUTPUT is readable here.
     local fp_rc=0
-    kapply::apply --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
+    kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
 
     # Unrecoverable conflict that wasn't healed (declined the prompt, or
     # non-interactive without --force-recreate) — fail fast rather than
@@ -254,7 +254,7 @@ bootstrap::apply() {
       sleep 3
 
       debug "bootstrap: retrying ${addon_name}"
-      if ! kapply::apply --kubeconfig "${kubeconfig}" <<< "${rendered}"; then
+      if ! kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}"; then
         error "bootstrap: kubectl apply failed for ${addon_name} (retry)"
         return 1
       fi

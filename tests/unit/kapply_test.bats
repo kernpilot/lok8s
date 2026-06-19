@@ -95,18 +95,18 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   assert_output --partial 'finalizers'
 }
 
-@test "progress: rolling 3-line window collapses to a single done line" {
+@test "progress: named rolling window collapses to a phase summary" {
   # KAPPLY_TTY redirects the live UI to a file so we can assert on the render.
   export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
   local pass
-  pass=$(printf 'configmap/a serverside-applied\nsecret/b serverside-applied\nservice/c serverside-applied\nrole/d serverside-applied\n' | kapply::_progress)
+  pass=$(printf 'configmap/a serverside-applied\nsecret/b serverside-applied\nservice/c serverside-applied\nrole/d serverside-applied\n' | kapply::_progress "cilium")
   # full output still passes through (for capture/logs)
   [[ "${pass}" == *"role/d serverside-applied"* ]]
-  # the UI rendered a spinner header, used in-place cursor-up redraws, and
-  # collapsed to a single done line with the right count.
-  grep -q 'applying…' "${KAPPLY_TTY}"
+  # the UI rendered a header named after the phase, used in-place cursor-up
+  # redraws, and collapsed to a single "<phase> · N applied" summary.
+  grep -q 'cilium' "${KAPPLY_TTY}"
   grep -qE $'\033\\[[0-9]+A' "${KAPPLY_TTY}"
-  grep -q 'applied 4 resource' "${KAPPLY_TTY}"
+  grep -q 'cilium · 4 applied' "${KAPPLY_TTY}"
   # window never exceeds 3 lines: the last redraw frame must not show line "a"
   local last_frame; last_frame=$(awk 'BEGIN{RS="\033\\[[0-9]+A"} END{print}' "${KAPPLY_TTY}")
   [[ "${last_frame}" != *"configmap/a"* ]]

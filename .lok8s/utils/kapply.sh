@@ -45,7 +45,16 @@ _KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 #   through every kubectl call. Returns the apply's exit status; stashes the
 #   raw kubectl output in KAPPLY_LAST_OUTPUT.
 kapply::apply() {
-  local -a kf=("$@")
+  # A leading `--label <phase>` names the progress block (the addon/target);
+  # everything else is passed through to kubectl.
+  local label="resources"
+  local -a kf=()
+  while (( $# )); do
+    case "$1" in
+      --label) label="${2:-resources}"; shift 2 ;;
+      *)       kf+=("$1"); shift ;;
+    esac
+  done
   local manifest; manifest=$(cat)
   local out rc rcf; rcf=$(mktemp)
 
@@ -54,7 +63,7 @@ kapply::apply() {
     # echoed) so only the one-line progress reaches the screen.
     out=$( { printf '%s' "${manifest}" \
       | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rcf}"; } \
-      | kapply::_progress )
+      | kapply::_progress "${label}" )
   else
     out=$(printf '%s' "${manifest}" \
       | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rcf}"
@@ -64,8 +73,13 @@ kapply::apply() {
   KAPPLY_LAST_OUTPUT="${out}"
 
   (( rc == 0 )) && return 0
-  # Failure: make sure the errors are visible even in collapsed mode.
-  kapply::_tty && printf '%s\n' "${out}" >&2
+  # Failure (collapsed mode): the successes already rolled up to "✓ applied N";
+  # surface ONLY the error lines here, not the whole stream again. The full
+  # text remains in KAPPLY_LAST_OUTPUT for callers that want it.
+  if kapply::_tty; then
+    grep -vE ' (serverside-applied|created|configured|unchanged|applied|deleted|condition met)$' \
+      <<<"${out}" >&2 || true
+  fi
 
   local immutable=0 terminating=0
   grep -q 'field is immutable' <<<"${out}" && immutable=1
@@ -83,32 +97,41 @@ kapply::apply() {
   printf '%s' "${manifest}" | kubectl "${kf[@]}" apply --server-side --force-conflicts -f -
 }
 
+# A REAL interactive terminal for the prompt — its stdin must be a usable tty
+# (distinct from the display sink, which $KAPPLY_TTY can redirect to a file).
+kapply::_interactive() {
+  [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
+  [[ -r /dev/tty && -w /dev/tty ]]
+}
+
 # Decide whether to heal: explicit flag → yes; interactive → prompt; else no.
 kapply::_confirm_heal() {
   [[ -n "${LOK8S_FORCE_RECREATE:-}" ]] && return 0
-  if ! kapply::_tty; then
+  if ! kapply::_interactive; then
     error "apply blocked by an unrecoverable state (immutable field / stuck Terminating)."
     error "  re-run with --force-recreate to recreate the affected objects (restarts their pods),"
     error "  or resolve the conflict by hand. Not retrying — that would loop."
     return 1
   fi
   local ans
-  printf '\033[33m?\033[0m kapply: recreate the blocked object(s) to recover? [y/N] ' >/dev/tty
-  read -r ans </dev/tty || return 1
+  printf '\033[33m?\033[0m kapply: recreate the blocked object(s) above to recover? this deletes + recreates them (restarts their pods); a one-time fix. [y/N] ' >/dev/tty 2>/dev/null
+  read -r ans </dev/tty 2>/dev/null || return 1
   [[ "${ans}" =~ ^[Yy] ]]
 }
 
 # Stream filter: pass every line through to stdout (so the caller still
 # captures the full output), and on a terminal render a compact, self-erasing
-# block — a spinner header plus the last ≤3 progress lines scrolling up:
+# block — a spinner header (named after the phase) plus the last ≤3 lines
+# scrolling up:
 #
-#   ⠹ applying… (12)
+#   ⠹ cilium
 #       configmap/cilium-config serverside-applied
 #       secret/cilium-ca serverside-applied
 #       service/cilium-envoy serverside-applied
 #
-# On EOF the whole block is erased and replaced by a single  ✓ applied N line.
+# On EOF the block is erased and replaced by a single  ✓ <phase> · N applied.
 kapply::_progress() {
+  local label="${1:-resources}"
   local ui; ui="$(kapply::_ui)"
   local n=0 drawn=0 line frame width l
   local -a win=()
@@ -122,7 +145,7 @@ kapply::_progress() {
         frame="${_KAPPLY_SPIN[$(( n % ${#_KAPPLY_SPIN[@]} ))]}"
         {
           (( drawn )) && printf '\033[%dA' "${drawn}"        # back to block top
-          printf '\r\033[K\033[36m%s\033[0m applying… (%d)\n' "${frame}" "${n}"
+          printf '\r\033[K\033[36m%s\033[0m %s\n' "${frame}" "${label}"
           drawn=1
           for l in "${win[@]}"; do
             printf '\033[K      \033[2m%.*s\033[0m\n' "${width}" "${l}"
@@ -134,7 +157,7 @@ kapply::_progress() {
   if (( n )); then
     {
       (( drawn )) && printf '\033[%dA\033[0J' "${drawn}"     # erase the block
-      printf '\r\033[K\033[32m✓\033[0m applied %d resource(s)\n' "${n}"
+      printf '\r\033[K\033[32m✓\033[0m %s · %d applied\n' "${label}" "${n}"
     } >>"${ui}" 2>/dev/null
   fi
 }
