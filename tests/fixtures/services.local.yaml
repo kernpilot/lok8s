@@ -1,0 +1,13 @@
+# Test fixture: local config override for services
+registry:
+  prefix: "localhost:5000"
+  tag: "dev"
+services:
+  api:
+    enabled: true
+    build: true
+    replicas: 2
+  debug-tool:
+    enabled: true
+    build: true
+    path: src/debug-tool

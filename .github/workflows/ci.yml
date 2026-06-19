@@ -52,6 +52,8 @@ jobs:
           file_or_dir: '.lok8s/ operator/ .github/'
           config_data: |
             extends: default
+            ignore: |
+              **/chart/templates/
             rules:
               line-length:
                 max: 200

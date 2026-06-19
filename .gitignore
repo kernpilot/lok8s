@@ -18,8 +18,10 @@
 # stray .registries.json here — keep it out of git status
 tests/fixtures/.registries.json
 
-# service overrides
+# service overrides (user content under clusters/) — but NOT the test fixtures,
+# which the suite copies in (a gitignored fixture passes locally, fails in CI).
 services.*.yaml
+!tests/fixtures/services.*.yaml
 
 # dependencies
 node_modules/
