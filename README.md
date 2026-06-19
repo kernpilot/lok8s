@@ -38,8 +38,9 @@ with pluggable drivers, ordered cluster-infrastructure bootstrap, and per-target
 ### 📦 Install
 
 ```bash
-# Install b (environment manager)
-curl -fsSL https://raw.githubusercontent.com/fentas/b/master/install.sh | bash
+# Install b (environment manager) — download, then run (don't pipe to a shell)
+curl -fsSL https://raw.githubusercontent.com/fentas/b/master/install.sh -o /tmp/b-install.sh
+bash /tmp/b-install.sh
 
 # Most users: local dev (kind + Tilt + kustomize plugins)
 b env add github.com/kernpilot/lok8s#local
@@ -47,6 +48,10 @@ b env add github.com/kernpilot/lok8s#local
 # Sync into your project
 b sync
 ```
+
+> **Prefer [mise](https://mise.jdx.dev)?** A `mise.toml` ships at the repo root —
+> `mise install && mise activate` provisions the same toolchain + the lok8s
+> environment. Then `lo doctor` to verify.
 
 **Available profiles** (each ships only the binaries it needs):
 
@@ -62,7 +67,7 @@ b sync
 
 See [env-sync docs](https://binary.help/env-sync/) for profile mechanics.
 
-**Prerequisites**: Docker. (`b sync` installs the rest based on your profile.)
+**Prerequisites**: Docker, and **bash ≥ 4.3** (macOS ships 3.2 — `brew install bash`). `b sync` (or `mise install`) provides everything else. Run `lo doctor` to check.
 
 &nbsp;
 

@@ -1,0 +1,42 @@
+# mise.toml — provision the lok8s toolchain with mise (https://mise.jdx.dev),
+# as a convenience alternative to the native `b` env manager (.bin/b.yaml).
+#
+#   mise install      # fetch the pinned tools below
+#   mise activate      # (or `direnv` via .envrc) → tools on PATH + the PATH_* env
+#   lo doctor          # verify the environment
+#
+# Versions mirror .bin/b.lock — bump both together. mise provisions the *tools*
+# `lo` shells out to; it does NOT provide argsh.so (the MCP builtins). For
+# `lo mcp`, run `argsh builtins install` (see the README MCP section).
+
+[tools]
+# ── core (framework + remote deploy) ────────────────────────────
+kubectl    = "1.31.0"
+yq         = "4.53.3"
+jq         = "1.7"
+kustomize  = "5.8.1"
+sops       = "3.9"
+mkcert     = "1.4"
+"github:arg-sh/argsh"        = "0.10.0"
+"github:mgoltzsche/khelm"    = "2"
+"github:Mic92/ssh-to-age"    = "latest"
+"github:containeroo/renvsubst" = { version = "latest", bin = "envsubst" }
+
+# ── local dev (kind + Tilt) ─────────────────────────────────────
+kind       = "0.32.0"
+tilt       = "0.37.3"
+
+# ── provisioning (capi / kubeone) — uncomment when needed ───────
+# clusterctl = "1.8"
+# hcloud     = "1.47"
+# "github:kubermatic/kubeone" = "1.8"
+
+# The lok8s environment (mirrors .envrc), so `mise` alone yields a working `lo`.
+[env]
+PATH_BASE             = "{{config_root}}"
+PATH_BIN              = "{{config_root}}/.bin"
+PATH_LOK8S            = "{{config_root}}/.lok8s"
+PATH_CLUSTERS         = "{{config_root}}/clusters"
+PATH_SECRETS          = "{{config_root}}/.secrets"
+KUSTOMIZE_PLUGIN_HOME = "{{config_root}}/.kustomize"
+_.path = ["{{config_root}}/.bin", "{{config_root}}/.lok8s"]
