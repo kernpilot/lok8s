@@ -26,7 +26,11 @@ main::crds() {
 # Render one schema/<kind>.schema.yaml into a complete CRD on stdout. The spec and
 # status bodies are copied verbatim (so x-kubernetes-preserve-unknown-fields,
 # pattern, propertyNames, etc. survive); the CRD wrapper is pure boilerplate.
-# del(null) drops optional knobs a kind omits (shortNames / status / columns).
+# The three del()s drop ONLY the optional wrapper knobs a kind omits
+# (shortNames / printer columns / status). We must NOT use a recursive
+# `del(.. | select(. == null))` here: that would also strip legitimate nulls
+# inside the verbatim spec/status (e.g. `default: null`, a `null` enum member),
+# silently changing validation with no drift signal.
 crds::_render() {
   yq eval '{
     "apiVersion": "apiextensions.k8s.io/v1",
@@ -45,7 +49,10 @@ crds::_render() {
                    "properties": {"spec": .spec, "status": .status}}}
       }]
     }
-  } | del(.. | select(. == null))' "$1"
+  }
+  | del(.spec.names.shortNames | select(. == null))
+  | del(.spec.versions[0].additionalPrinterColumns | select(. == null))
+  | del(.spec.versions[0].schema.openAPIV3Schema.properties.status | select(. == null))' "$1"
 }
 
 # Generate every CRD from its schema.

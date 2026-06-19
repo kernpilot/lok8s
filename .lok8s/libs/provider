@@ -110,6 +110,20 @@ provider::read_name() {
   echo "${name}"
 }
 
+# Temp provider-config files to remove on process exit. A single idempotent
+# EXIT handler (installed once, re-set harmlessly on each inline call) clears
+# the whole list. We deliberately do NOT re-parse `trap -p` to "chain" an
+# existing trap — that corrupts the trap body on a second call and leaks the
+# earlier temp file. There is no other EXIT trap in lok8s to preserve.
+_PROVIDER_TEMP_CONFIGS=()
+provider::_cleanup_configs() {
+  (( ${#_PROVIDER_TEMP_CONFIGS[@]} )) || return 0
+  local f
+  for f in "${_PROVIDER_TEMP_CONFIGS[@]}"; do
+    rm -f "${f}" 2>/dev/null || true
+  done
+}
+
 # provider::write_config <cluster_yaml>
 # Resolve provider config to PROVIDER_CONFIG_FILE.
 #
@@ -147,9 +161,8 @@ provider::write_config() {
   PROVIDER_CONFIG_FILE=$(mktemp /tmp/lok8s-provider-config.XXXXXX.yaml)
   yq -r '.spec.provider.config // {}' "${cluster_yaml}" > "${PROVIDER_CONFIG_FILE}"
   export PROVIDER_CONFIG_FILE
-  # shellcheck disable=SC2064 # expand NOW on purpose: capture this temp-file path
-  # and snapshot the existing EXIT trap so we chain (not clobber) it.
-  trap "rm -f '${PROVIDER_CONFIG_FILE}' 2>/dev/null; $(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")" EXIT
+  _PROVIDER_TEMP_CONFIGS+=("${PROVIDER_CONFIG_FILE}")
+  trap provider::_cleanup_configs EXIT
   debug "provider config written to ${PROVIDER_CONFIG_FILE}"
 }
 
