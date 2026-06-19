@@ -372,29 +372,6 @@ npm run docs:preview
 
 &nbsp;
 
-### 🎯 Roadmap
-
-- [x] CLI with argsh (lo script + libs)
-- [x] Lo driver contract (kind + registries + CNI + mkcert)
-- [x] Domain-driven .lok8s/ structure
-- [x] `spec.bootstrap` — ordered cluster-infra addons with health waits
-- [x] Per-target kustomize build pipeline
-- [x] Tilt extension for local dev
-- [x] Capi driver contract (Hetzner provider)
-- [x] CAPI template-based resource generation
-- [x] GitOps integration (Flux CD + Argo CD)
-- [x] shell-operator with CRDs (Lo, Capi, Deploy)
-- [x] Secrets kustomize plugin
-- [x] Management cluster bootstrap
-- [x] lo lint validation
-- [x] Remote/CI expose handling (nginx proxy)
-- [x] AWS CAPI provider templates
-- [x] MCP tool server (argsh native builtin)
-- [ ] SaaS mode (kubehz managed clusters)
-- [ ] Additional runtimes (k3s, talos)
-
-&nbsp;
-
 ### 📜 License
 
 [MIT](LICENSE)
