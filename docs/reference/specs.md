@@ -638,7 +638,7 @@ status:
 Defines a deployment domain that targets an existing cluster.
 
 ```yaml
-apiVersion: deploy.lok8s.dev/v1beta1
+apiVersion: cluster.lok8s.dev/v1beta1
 kind: Deploy
 metadata:
   name: api

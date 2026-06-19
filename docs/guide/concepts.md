@@ -143,7 +143,7 @@ A deployment domain has a `deploy.lok8s.yaml` spec with a `clusterRef` pointing 
 
 ```yaml
 # clusters/api.example.com/deploy.lok8s.yaml
-apiVersion: deploy.lok8s.dev/v1beta1
+apiVersion: cluster.lok8s.dev/v1beta1
 kind: Deploy
 metadata:
   name: api

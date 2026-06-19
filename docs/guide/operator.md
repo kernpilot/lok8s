@@ -24,7 +24,7 @@ The operator container bundles the same libraries and driver contracts as the CL
 
 ## Custom Resource Definitions
 
-The operator defines three CRDs in the `cluster.lok8s.dev` and `deploy.lok8s.dev` API groups:
+The operator defines its CRDs in the `cluster.lok8s.dev` API group:
 
 ### Lo (cluster.lok8s.dev/v1beta1)
 
@@ -89,12 +89,12 @@ kubectl get capi
 # prod   Provisioned   true    prod.example.com   hetzner    10m
 ```
 
-### Deploy (deploy.lok8s.dev/v1beta1)
+### Deploy (cluster.lok8s.dev/v1beta1)
 
 For deployment domains that target an existing cluster:
 
 ```yaml
-apiVersion: deploy.lok8s.dev/v1beta1
+apiVersion: cluster.lok8s.dev/v1beta1
 kind: Deploy
 metadata:
   name: api
@@ -108,7 +108,7 @@ spec:
 > redesign. For now, a Deploy spec only carries `clusterRef`.
 
 ```bash
-kubectl get deploy.deploy.lok8s.dev
+kubectl get deploys.cluster.lok8s.dev
 # NAME   PHASE      CLUSTER            AGE
 # api    Deployed   prod.example.com   3m
 ```

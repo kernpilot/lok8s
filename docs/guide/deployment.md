@@ -77,7 +77,7 @@ Deployment domains let you deploy content to another domain's cluster. They have
 
 ```yaml
 # clusters/api.example.com/deploy.lok8s.yaml
-apiVersion: deploy.lok8s.dev/v1beta1
+apiVersion: cluster.lok8s.dev/v1beta1
 kind: Deploy
 metadata:
   name: api

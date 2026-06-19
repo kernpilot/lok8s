@@ -42,7 +42,7 @@ The typical flow:
 
 ## Custom Resource Definitions
 
-Three CRDs in the `cluster.lok8s.dev` and `deploy.lok8s.dev` API groups:
+CRDs in the `cluster.lok8s.dev` API group:
 
 ### Capi (cluster.lok8s.dev/v1beta1) — primary use case
 
@@ -148,7 +148,7 @@ NAME    PHASE         READY   DOMAIN      AGE
 local   Provisioned   true    lok8s.dev   5m
 ```
 
-### Deploy (deploy.lok8s.dev/v1beta1) — deployment domains
+### Deploy (cluster.lok8s.dev/v1beta1) — deployment domains
 
 References an existing cluster. No reconciliation hook is implemented yet —
 this CRD currently serves as a declarative record of "deploy something to
@@ -156,7 +156,7 @@ that cluster." Workload selection is being reworked alongside the
 `services.yaml` targets-map redesign.
 
 ```yaml
-apiVersion: deploy.lok8s.dev/v1beta1
+apiVersion: cluster.lok8s.dev/v1beta1
 kind: Deploy
 metadata:
   name: api
@@ -292,7 +292,7 @@ What gets copied into the container:
 
 The operator ClusterRole grants access to:
 
-- lok8s CRDs (`cluster.lok8s.dev`, `deploy.lok8s.dev`) — full CRUD
+- lok8s CRDs (`cluster.lok8s.dev`) — full CRUD
 - CAPI resources (`cluster.x-k8s.io`, `controlplane.cluster.x-k8s.io`,
   `bootstrap.cluster.x-k8s.io`, `infrastructure.cluster.x-k8s.io`) — full CRUD
 - Core resources (secrets, configmaps, events, namespaces) — read + create

@@ -48,7 +48,7 @@ spec:
 ```
 ```yaml
 # Deploy-only domain (targets another cluster; cannot be `lo provision`ed)
-apiVersion: deploy.lok8s.dev/v1beta1        # NOTE: deploy.lok8s.dev, not cluster.lok8s.dev
+apiVersion: cluster.lok8s.dev/v1beta1        # all cluster kinds incl. Deploy share this group
 kind: Deploy
 metadata: { name: api }
 spec:

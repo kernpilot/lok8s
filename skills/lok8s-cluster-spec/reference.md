@@ -9,7 +9,7 @@ CRDs (`operator/crds/`), and `.lok8s/libs/{bootstrap,provision}` +
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
-| `apiVersion` | yes | — | `cluster.lok8s.dev/v1beta1` (Deploy: `deploy.lok8s.dev/v1beta1`) |
+| `apiVersion` | yes | — | `cluster.lok8s.dev/v1beta1` (all kinds, incl. Deploy) |
 | `kind` | yes | — | `Lo` \| `KubeOne` \| `Capi` \| `Kkp` (\| `Deploy`) |
 | `metadata.name` | yes | — | cluster name; also the kubeconfig filename `.kubeconfig/<name>.yaml` |
 | `spec.cluster.domain` | **yes** | — | cluster FQDN |
@@ -107,7 +107,7 @@ Env: `KKP_TOKEN`, `KKP_API_URL` (or `spec.kkp.apiUrl`), and the provider token.
 ## deploy.lok8s.yaml (CRD: `operator/crds/deploy.yaml`)
 
 ```yaml
-apiVersion: deploy.lok8s.dev/v1beta1       # NOT cluster.lok8s.dev (a stale fixture gets this wrong)
+apiVersion: cluster.lok8s.dev/v1beta1       # Deploy shares the cluster.lok8s.dev group
 kind: Deploy
 metadata: { name: api }
 spec:
