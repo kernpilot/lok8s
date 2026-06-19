@@ -13,7 +13,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/credentials.sh"
-  source "${_PROJECT_ROOT}/.lok8s/libs/provider"
+  source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate"
 
   # Copy CAPI templates to tmpdir (needed by capi::generate)

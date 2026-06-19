@@ -16,7 +16,7 @@ import utils/oidc
 
 # Detect the infrastructure provider from cluster spec fields.
 # Usage: kubeone::detect_provider <cluster_yaml>
-# Delegates to provider::detect from libs/provider.
+# Delegates to provider::detect from utils/provider.
 kubeone::detect_provider() {
   provider::detect "$1"
 }

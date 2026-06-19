@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# provider_test.bats — unit tests for .lok8s/libs/provider
+# provider_test.bats — unit tests for .lok8s/utils/provider.sh
 
 setup() {
   load "../test_helper"
@@ -9,7 +9,7 @@ setup() {
   export -f import
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
-  source "${_PROJECT_ROOT}/.lok8s/libs/provider"
+  source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
 }
 
 teardown() {

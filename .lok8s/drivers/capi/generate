@@ -9,7 +9,7 @@ import utils/template
 
 # Detect the CAPI provider from cluster spec fields.
 # Usage: capi::detect_provider <cluster_yaml>
-# Delegates to provider::detect from libs/provider.
+# Delegates to provider::detect from utils/provider.
 capi::detect_provider() {
   provider::detect "$1"
 }

@@ -20,7 +20,7 @@ source "${_HETZNER_DIR}/utils/resources.sh"
 
 # ── Provider contract ────────────────────────────────────
 #
-# Implements provider::* from .lok8s/libs/provider.
+# Implements provider::* from .lok8s/utils/provider.
 # PROVIDER_CONFIG_FILE is a YAML or JSON descriptor file.
 # When it's a JSON descriptor (hetzner.json format), the full
 # hetzner::create loop handles all resource types with per-server

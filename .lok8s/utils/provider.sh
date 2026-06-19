@@ -1,7 +1,5 @@
-#!/usr/bin/env argsh
 # shellcheck shell=bash disable=SC2034
-# vim: set syntax=bash:
-# provider — provider contract and loading
+# provider.sh — provider contract and loading (sourced helper, no subcommand)
 #
 # ── Provider Contract ─────────────────────────────────────────────
 #

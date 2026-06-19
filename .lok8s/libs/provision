@@ -10,7 +10,7 @@ import ^utils/verbose
 import ^libs/deploy
 import ^libs/build
 import ^libs/gitops
-import ^libs/provider
+import ^utils/provider
 
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
