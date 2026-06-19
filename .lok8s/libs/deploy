@@ -10,6 +10,7 @@
 
 import ^utils/types
 import ^utils/verbose
+import ^utils/kapply
 
 main::deploy() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -104,7 +105,7 @@ deploy::apply() {
     crds=$(yq 'select(.kind == "CustomResourceDefinition")' "${artifact}" 2>/dev/null || true)
     if deploy::_has_objects <<< "${crds}"; then
       debug "Applying CRDs for ${target}"
-      echo "${crds}" | kubectl apply --server-side --force-conflicts -f -
+      echo "${crds}" | kapply::apply
       deploy::wait_crds "${crds}"
     fi
 
@@ -115,7 +116,7 @@ deploy::apply() {
     # deploy.
     if deploy::_has_objects < "${artifact}"; then
       debug "Applying resources for ${target}"
-      kubectl apply --server-side --force-conflicts -f "${artifact}"
+      kapply::apply < "${artifact}"
       # Phase 3: Wait for health (only when we actually applied something)
       deploy::wait_healthy 120
     else
@@ -145,7 +146,7 @@ deploy::apply_filtered() {
     filtered=$(yq "select(.metadata.labels.\"lok8s.dev/${label_key}\" == \"${label_value}\")" "${artifact}" 2>/dev/null || true)
     if deploy::_has_objects <<< "${filtered}"; then
       debug "Applying filtered resources (${label_key}=${label_value}) from $(basename "${dir}")"
-      echo "${filtered}" | kubectl apply -f -
+      echo "${filtered}" | kapply::apply
     else
       debug "No filtered objects (${label_key}=${label_value}) in $(basename "${dir}"), skipping"
     fi

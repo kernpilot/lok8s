@@ -113,6 +113,7 @@ YAML
   kubectl() { return 0; }
   export -f kubectl
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
 }
 

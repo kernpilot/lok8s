@@ -56,7 +56,7 @@ import ^utils/credentials
 import ^drivers/lo/libs/registry
 
 main() {
-  local verbose=0 force=0 remote=0 kubernetes cluster config domain domain_sans
+  local verbose=0 force=0 force_recreate=0 remote=0 kubernetes cluster config domain domain_sans
   cluster="${LOK8S_CLUSTER_NAME}"
   kubernetes="${KIND_NODE_VERSION}"
   config="${KIND_CONFIG}"
@@ -110,9 +110,10 @@ main() {
 
   local -a args=(
     '-'             'Global flags:'
-    'verbose|v:+'   'Enable verbose logging'
-    'force|f:+'     'Force operation without prompts'
-    'remote|r:+'    'Provision on remote VM (uses spec.provider + spec.remote)'
+    'verbose|v:+'        'Enable verbose logging'
+    'force|f:+'          'Force operation without prompts'
+    'force-recreate|:+'  'On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer'
+    'remote|r:+'         'Provision on remote VM (uses spec.provider + spec.remote)'
     'kubernetes|'   'Kubernetes version to use'
     'cluster|s'     'Cluster name to manage'
     'config|'       'Kind config to use'
@@ -123,6 +124,7 @@ main() {
   :usage "lok8s - local dev orchestration" "${@}"
   if (( verbose )); then export DEBUG=1; fi
   if (( remote )); then export LOK8S_REMOTE=1; fi
+  if (( force_recreate )); then export LOK8S_FORCE_RECREATE=1; fi
   DOMAIN_NAME="${domain}"
   export DOMAIN_NAME
 

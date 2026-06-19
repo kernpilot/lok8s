@@ -13,8 +13,13 @@ kind: Kustomization
 # Framework labels — picked up by the lok8s tilt extension's system_types
 # loop. Lets `tilt ci` apply these as cluster infrastructure rather than
 # trying to match them to a service in services.yaml.
+#
+# Metadata-only (includeSelectors: false): the chart owns its Deployment/
+# DaemonSet selectors, which are IMMUTABLE. Injecting lok8s.dev/* into them
+# (the old includeSelectors: true) made every re-apply fail once the live
+# objects' selectors diverged — Tilt only needs these on metadata.
 labels:
-  - includeSelectors: true
+  - includeSelectors: false
     pairs:
       lok8s.dev/name: cni
       lok8s.dev/type: system

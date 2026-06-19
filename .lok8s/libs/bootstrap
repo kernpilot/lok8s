@@ -26,6 +26,7 @@
 
 import ^utils/types
 import ^utils/verbose
+import ^utils/kapply
 
 # ── CLI entry point ──────────────────────────────────────
 
@@ -226,10 +227,21 @@ bootstrap::apply() {
     # Clean up temp dir
     [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
 
-    # Apply with server-side + CRD retry
-    local first_pass_output
-    first_pass_output=$(echo "${rendered}" | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1) || true
+    # Apply with server-side + CRD retry. kapply::apply heals immutable /
+    # stuck-Terminating conflicts when --force-recreate is set, and passes
+    # CRD-not-installed / webhook-not-ready errors through unchanged so the
+    # transient-race retry below still fires.
+    local first_pass_output fp_rc=0
+    first_pass_output=$(echo "${rendered}" | kapply::apply --kubeconfig "${kubeconfig}" 2>&1) || fp_rc=$?
     echo "${first_pass_output}"
+
+    # Unrecoverable conflict that kapply couldn't (or wasn't allowed to) heal —
+    # fail fast with the hint it already printed, rather than "succeeding" and
+    # letting the next `lo up` / Tilt loop hit the same wall forever.
+    if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted' <<< "${first_pass_output}"; then
+      error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see the hint above (try: lo up --force-recreate)"
+      return 1
+    fi
 
     if echo "${first_pass_output}" | grep -qE "ensure CRDs are installed first|failed calling webhook"; then
       debug "bootstrap: waiting for CRDs and webhooks to settle before retry"
@@ -241,7 +253,7 @@ bootstrap::apply() {
       sleep 3
 
       debug "bootstrap: retrying ${addon_name}"
-      if ! echo "${rendered}" | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f -; then
+      if ! echo "${rendered}" | kapply::apply --kubeconfig "${kubeconfig}"; then
         error "bootstrap: kubectl apply failed for ${addon_name} (retry)"
         return 1
       fi

@@ -14,6 +14,7 @@ setup() {
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
 
   kubectl() {
@@ -85,15 +86,13 @@ teardown() {
 @test "deploy::apply uses explicit target args when provided" {
   yq() { cat; }
   export -f yq
+  # kapply pipes the manifest on stdin (-f -); identify the target by content.
+  # The networking artifact is a Namespace named "networking"; the crds
+  # artifact is the "widgets" CRD — so only one should ever reach kubectl.
   kubectl() {
-    # Find the -f <path> argument; echo just the target dir name
-    local prev="" arg
-    for arg in "$@"; do
-      if [[ "${prev}" == "-f" && "${arg}" != "-" ]]; then
-        echo "applied:$(basename "$(dirname "${arg}")")"
-      fi
-      prev="${arg}"
-    done
+    local m; m=$(cat)
+    grep -q 'name: networking' <<<"${m}" && echo "applied:networking"
+    grep -q 'widgets' <<<"${m}"          && echo "applied:crds"
     return 0
   }
   export -f kubectl
