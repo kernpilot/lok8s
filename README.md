@@ -53,6 +53,10 @@ b sync
 > `mise install && mise activate` provisions the same toolchain + the lok8s
 > environment. Then `lo doctor` to verify.
 
+> **Cloning the repo directly?** The `argsh` runtime is vendored in `.bin/`, so
+> `lo doctor` runs straight away and tells you which tools are still missing —
+> no `b install` needed just to diagnose the environment.
+
 **Available profiles** (each ships only the binaries it needs):
 
 | Profile | Includes | Use case |

@@ -3,3 +3,8 @@
 !b
 !b.yaml
 !b.lock
+# Vendor the argsh runtime (pure-bash, ~55KB) so `lo` — and crucially
+# `lo doctor`, which diagnoses the rest of the toolchain — runs on a fresh
+# clone before `b install`. Pinned to b.lock; `b install` refreshes it.
+# NOT argsh.so (that's a platform-specific native binary — fetched by b).
+!argsh

@@ -66,6 +66,13 @@ jobs:
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
+      - name: Vendored argsh runtime is in sync with the lockfile
+        run: |
+          # `b install` just rewrote .bin/argsh from b.lock; if that differs
+          # from the committed copy, the vendored bootstrap runtime is stale.
+          git diff --exit-code -- .bin/argsh \
+            || { echo "::error::.bin/argsh drifted from .bin/b.lock — run 'b install' and commit the result"; exit 1; }
+
       - name: Run unit tests
         run: ./.bin/argsh test tests/unit/
 
