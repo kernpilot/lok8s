@@ -152,11 +152,11 @@ spec:
           description: Machine type (e.g. cax11, t3.medium)
     workers:
       type: object
-      # Pool names flow into jq programs + envsubst in the CAPI
-      # reconcile hook — constrain them to a safe charset at admission
-      # so a crafted key can't inject into a jq filter or a manifest.
-      propertyNames:
-        pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+      # Pool names flow into jq programs + envsubst in the CAPI reconcile
+      # hook. Kubernetes CRD schemas can't constrain map KEYS (propertyNames
+      # is rejected by the apiserver), so the hook is responsible for
+      # sanitizing pool names — it already passes them via `jq --arg`
+      # (injection-safe). additionalProperties only constrains the values.
       additionalProperties:
         type: object
         properties:

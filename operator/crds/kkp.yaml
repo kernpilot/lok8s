@@ -120,10 +120,10 @@ spec:
                           description: Kubernetes Secret name for provider credentials.
                 workers:
                   type: object
-                  # Pool names may flow into shell/jq programs in the driver —
-                  # constrain them to a safe charset at admission.
-                  propertyNames:
-                    pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+                  # Pool names may flow into shell/jq programs in the driver. Kubernetes
+                  # CRD schemas can't constrain map KEYS (propertyNames is rejected by the
+                  # apiserver), so the driver must sanitize pool names; additionalProperties
+                  # only constrains the values.
                   additionalProperties:
                     type: object
                     properties:
