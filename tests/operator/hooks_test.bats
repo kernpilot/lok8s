@@ -225,6 +225,94 @@ EOF
   assert_failure
 }
 
+# --- capi-reconcile.sh deletion/teardown (real hook, sourced) ---
+
+# Source the real hook with stubs. Templates are absent in the repo layout,
+# so detect/generate are stubbed; kubectl is logged.
+capi_hook_load() {
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${KLOG}"
+  source "${_PROJECT_ROOT}/operator/hooks/capi-reconcile.sh"
+  set +e +u
+  set +o pipefail
+
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    case "$*" in
+      *'jsonpath={.metadata.finalizers}'*) echo '["lok8s.dev/capi-teardown"]' ;;
+      'get capi -A -o json'*) echo '{"items":[]}' ;;
+    esac
+    return 0
+  }
+  # Provision path: stub provider detection + manifest generation (templates
+  # live only in the container image), so we exercise the hook wiring.
+  capi::detect_provider_from_spec() { echo "hetzner"; }
+  capi::generate_from_spec() { echo "kind: Cluster"; }
+}
+
+CAPI_CR='{"metadata":{"name":"prod","namespace":"default","finalizers":[]},"spec":{"cluster":{"domain":"prod.lok8s.dev","namespace":"clusters"},"hcloud":{"region":"fsn1"}}}'
+
+@test "capi-reconcile hook::config: events, synchronization, drift schedule, deletion" {
+  capi_hook_load
+  run hook::config
+  assert_success
+  assert_output --partial 'kind: Capi'
+  assert_output --partial '"Added", "Modified"'
+  assert_output --partial 'executeHookOnSynchronization: true'
+  assert_output --partial 'crontab: "*/3 * * * *"'
+  assert_output --partial 'deletionTimestamp'
+}
+
+@test "capi-reconcile: fresh CR gets a finalizer, then provisions" {
+  capi_hook_load
+  capi_hook::reconcile "${CAPI_CR}"
+  run cat "${KLOG}"
+  assert_output --partial '/metadata/finalizers'
+  assert_output --partial '"phase":"Provisioning"'
+  assert_output --partial 'apply -f -'
+}
+
+@test "capi-reconcile: deletion deletes the CAPI Cluster and removes the finalizer" {
+  capi_hook_load
+  local cr='{"metadata":{"name":"prod","namespace":"default","deletionTimestamp":"2026-01-01T00:00:00Z","finalizers":["lok8s.dev/capi-teardown"]},"spec":{"cluster":{"domain":"prod.lok8s.dev","namespace":"clusters"}}}'
+  capi_hook::reconcile "${cr}"
+  run cat "${KLOG}"
+  assert_output --partial '"phase":"Terminating"'
+  # the anti-leak action: delete the CAPI Cluster in spec.cluster.namespace
+  assert_output --partial 'delete cluster.cluster.x-k8s.io prod -n clusters'
+  assert_output --partial '{"metadata":{"finalizers":[]}}'
+  # must NOT try to (re)provision a cluster being deleted
+  refute_output --partial 'apply -f -'
+}
+
+@test "capi-reconcile: failed Cluster delete keeps the finalizer for retry" {
+  capi_hook_load
+  # make the Cluster delete fail; everything else succeeds
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    case "$*" in
+      'delete cluster.cluster.x-k8s.io'*) return 1 ;;
+      *'jsonpath={.metadata.finalizers}'*) echo '["lok8s.dev/capi-teardown"]' ;;
+    esac
+    return 0
+  }
+  local cr='{"metadata":{"name":"prod","namespace":"default","deletionTimestamp":"2026-01-01T00:00:00Z","finalizers":["lok8s.dev/capi-teardown"]},"spec":{"cluster":{"domain":"prod.lok8s.dev","namespace":"clusters"}}}'
+  capi_hook::reconcile "${cr}"
+  run cat "${KLOG}"
+  assert_output --partial 'DestroyFailed'
+  refute_output --partial '{"metadata":{"finalizers":[]}}'
+}
+
+@test "capi-reconcile: schedule event re-lists all Capi resources" {
+  capi_hook_load
+  cat > "${BATS_TEST_TMPDIR}/binding.json" <<'JSON'
+[{"type": "Schedule", "binding": "capi-drift"}]
+JSON
+  BINDING_CONTEXT_PATH="${BATS_TEST_TMPDIR}/binding.json" hook::trigger
+  run cat "${KLOG}"
+  assert_output --partial 'get capi -A -o json'
+}
+
 # --- capi-status-sync.sh phase mapping ---
 
 @test "capi-status-sync maps CAPI phases to lok8s phases" {
