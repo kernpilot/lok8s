@@ -246,11 +246,10 @@ bootstrap::apply() {
 
     if grep -qE "ensure CRDs are installed first|failed calling webhook" <<< "${KAPPLY_LAST_OUTPUT}"; then
       debug "bootstrap: waiting for CRDs and webhooks to settle before retry"
-      kubectl --kubeconfig "${kubeconfig}" wait \
-        --for=condition=Established crd --all --timeout=60s 2>/dev/null || true
-      kubectl --kubeconfig "${kubeconfig}" wait \
-        --for=condition=Available deployment --all --all-namespaces \
-        --timeout=120s 2>/dev/null || true
+      kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
+        --for=condition=Established crd --all --timeout=60s || true
+      kapply::run "deployments ready" kubectl --kubeconfig "${kubeconfig}" wait \
+        --for=condition=Available deployment --all --all-namespaces --timeout=120s || true
       sleep 3
 
       debug "bootstrap: retrying ${addon_name}"
@@ -261,11 +260,10 @@ bootstrap::apply() {
     fi
 
     debug "bootstrap: waiting for ${addon_name} workloads to become ready"
-    kubectl --kubeconfig "${kubeconfig}" wait \
-      --for=condition=Available deployment --all --all-namespaces \
-      --timeout=180s 2>/dev/null || true
-    kubectl --kubeconfig "${kubeconfig}" rollout status daemonset \
-      --all --all-namespaces --timeout=180s 2>/dev/null || true
+    kapply::run "deployments ready" kubectl --kubeconfig "${kubeconfig}" wait \
+      --for=condition=Available deployment --all --all-namespaces --timeout=180s || true
+    kapply::run "daemonsets ready" kubectl --kubeconfig "${kubeconfig}" rollout status daemonset \
+      --all --all-namespaces --timeout=180s || true
   done
 }
 

@@ -5,6 +5,7 @@
 setup() {
   load "../test_helper"
   setup_tmpdir
+  export LOK8S_NONINTERACTIVE=1   # kapply::run → direct exec (no progress UI in tests)
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
 
@@ -46,11 +47,13 @@ setup() {
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/coredns"
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/utils"
 
-  # drivers/lo/main hard-sources ${PATH_LOK8S}/utils/ip.sh and utils/oidc.sh
+  # drivers/lo/main sources ${PATH_LOK8S}/utils/{ip,oidc,kapply}.sh
   cp "${_PROJECT_ROOT}/.lok8s/utils/ip.sh" \
     "${BATS_TEST_TMPDIR}/.lok8s/utils/ip.sh"
   cp "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh" \
     "${BATS_TEST_TMPDIR}/.lok8s/utils/oidc.sh"
+  cp "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh" \
+    "${BATS_TEST_TMPDIR}/.lok8s/utils/kapply.sh"
 
   # Copy Lo fixture
   cp "${FIXTURES_DIR}/lo-cluster.lok8s.yaml" \

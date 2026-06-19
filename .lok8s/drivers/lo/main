@@ -11,6 +11,10 @@ _LO_DIR="${BASH_SOURCE[0]%/*}"
 source "${PATH_LOK8S}/utils/ip.sh"
 # shellcheck source=../../utils/oidc.sh
 source "${PATH_LOK8S}/utils/oidc.sh"
+# kapply (collapsing progress + heal) for the cluster-service phases. Tolerate
+# its absence so minimal test sandboxes that source this driver still load.
+# shellcheck source=../../utils/kapply.sh
+[[ -f "${PATH_LOK8S}/utils/kapply.sh" ]] && source "${PATH_LOK8S}/utils/kapply.sh"
 source "${_LO_DIR}/utils/defaults.sh"
 source "${_LO_DIR}/utils/config-registry.sh"
 source "${_LO_DIR}/utils/config.sh"
@@ -107,11 +111,11 @@ driver::provision() {
         lo::connect_nodes_to_registry_network "${cluster_name}"
       fi
 
-      # Cluster services
+      # Cluster services — each wrapped in a named, collapsing progress phase.
       _lo_extract_kubeconfig "${domain}"
-      lo::apply_local_registry_hosting "${domain}"
-      lo::registry_configmap "${domain}" "${cluster_yaml}"
-      lo::coredns "${domain}"
+      kapply::run registries lo::apply_local_registry_hosting "${domain}"
+      kapply::run registries lo::registry_configmap "${domain}" "${cluster_yaml}"
+      kapply::run coredns lo::coredns "${domain}"
       lo::mkcert "${domain}" "${cluster_yaml}"
 
       if [[ "${LOK8S_REMOTE_EXPOSE:-false}" == "true" ]]; then

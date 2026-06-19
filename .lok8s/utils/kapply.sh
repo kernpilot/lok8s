@@ -22,8 +22,9 @@
 # collapsed to a single in-place line + a one-line summary (like docker
 # build). Off a terminal, full output is printed (CI/Tilt logs). The raw
 # output is always stashed in KAPPLY_LAST_OUTPUT for callers to inspect.
-
-import ^utils/verbose
+#
+# A plain sourceable util — it uses error/warn/debug from utils/verbose.sh,
+# which every caller (the CLI, deploy, bootstrap, the drivers) loads first.
 
 KAPPLY_LAST_OUTPUT=""
 
@@ -31,7 +32,8 @@ KAPPLY_LAST_OUTPUT=""
 # Where the live UI is drawn: a real terminal, or $KAPPLY_TTY (a file) so the
 # rendering can be captured + asserted in tests.
 kapply::_tty() {
-  [[ -n "${KAPPLY_TTY:-}" ]] && return 0
+  [[ -n "${KAPPLY_TTY:-}" ]] && return 0               # test override: force the UI
+  [[ -n "${DEBUG:-}" ]] && return 1                     # verbose (lo -v): print everything, don't aggregate
   [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
   [[ -w /dev/tty ]]
 }
@@ -40,10 +42,61 @@ kapply::_ui() { printf '%s' "${KAPPLY_TTY:-/dev/tty}"; }
 # Spinner frames (array, not a substring — avoids byte/char issues on braille).
 _KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 
+# kubectl success verbs — lines ending in one of these are "progress" (counted
+# + rolled into the window); anything else (errors) is surfaced on failure.
+_KAPPLY_OK=' (serverside-applied|created|configured|unchanged|applied|deleted|annotated|labeled|patched|restarted|scaled|rolled back|condition met)$'
+
+# kapply::run <phase> <command...>
+#   Run an arbitrary command whose output is kubectl-style "<resource> <verb>"
+#   lines (apply + annotate + rollout restart + …) and render it as ONE named,
+#   collapsing progress block — for phases that aren't a single `kapply::apply`
+#   (e.g. the Lo driver's coredns/registry setup). Runs the command in THIS
+#   shell (no subshell — side effects/exports persist) and returns its status.
+kapply::run() {
+  local phase="$1"; shift
+  kapply::_tty || { "$@"; return; }
+  local tmp rcf rc; tmp=$(mktemp); rcf=$(mktemp)
+  # Stream live (so a blocking `kubectl wait` shows readiness as it lands),
+  # tee the full output to a file for the after-the-fact error/empty checks.
+  { "$@" 2>&1; echo "$?" >"${rcf}"; } | tee "${tmp}" | kapply::_progress "${phase}" >/dev/null
+  rc=$(cat "${rcf}"); rm -f "${rcf}"
+  if ! grep -qE "${_KAPPLY_OK}" "${tmp}"; then
+    cat "${tmp}"                                    # no progress lines (warnings/notes) — show as-is
+  elif (( rc != 0 )); then
+    grep -vE "${_KAPPLY_OK}" "${tmp}" >&2 || true   # collapsed, but surface errors on failure
+  fi
+  rm -f "${tmp}"
+  return "${rc}"
+}
+
 # kapply::apply [extra kubectl flags...] < manifest
 #   Reads a manifest on stdin. Extra args (e.g. --kubeconfig <path>) thread
 #   through every kubectl call. Returns the apply's exit status; stashes the
 #   raw kubectl output in KAPPLY_LAST_OUTPUT.
+# One server-side apply: collapse the output on a tty (full off-tty), stash
+# the raw output in KAPPLY_LAST_OUTPUT, surface ONLY error lines on failure,
+# and return kubectl's exit. Used for BOTH the initial apply and the post-heal
+# re-apply, so the re-apply renders the same named progress block (never
+# escapes as raw output).
+kapply::_apply_pass() {
+  local label="$1" manifest="$2"; shift 2
+  local -a kf=("$@")
+  local out rc rcf; rcf=$(mktemp)
+  if kapply::_tty; then
+    out=$( { printf '%s' "${manifest}" \
+      | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rcf}"; } \
+      | kapply::_progress "${label}" )
+  else
+    out=$(printf '%s' "${manifest}" \
+      | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rcf}"
+    printf '%s\n' "${out}"
+  fi
+  rc=$(cat "${rcf}"); rm -f "${rcf}"
+  KAPPLY_LAST_OUTPUT="${out}"
+  (( rc == 0 )) || { kapply::_tty && grep -vE "${_KAPPLY_OK}" <<<"${out}" >&2 || true; }
+  return "${rc}"
+}
+
 kapply::apply() {
   # A leading `--label <phase>` names the progress block (the addon/target);
   # everything else is passed through to kubectl.
@@ -56,45 +109,25 @@ kapply::apply() {
     esac
   done
   local manifest; manifest=$(cat)
-  local out rc rcf; rcf=$(mktemp)
 
-  if kapply::_tty; then
-    # Stream through the collapsing filter; the full output is captured (not
-    # echoed) so only the one-line progress reaches the screen.
-    out=$( { printf '%s' "${manifest}" \
-      | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rcf}"; } \
-      | kapply::_progress "${label}" )
-  else
-    out=$(printf '%s' "${manifest}" \
-      | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rcf}"
-    printf '%s\n' "${out}"
-  fi
-  rc=$(cat "${rcf}"); rm -f "${rcf}"
-  KAPPLY_LAST_OUTPUT="${out}"
-
+  kapply::_apply_pass "${label}" "${manifest}" "${kf[@]}"
+  local rc=$?
   (( rc == 0 )) && return 0
-  # Failure (collapsed mode): the successes already rolled up to "✓ applied N";
-  # surface ONLY the error lines here, not the whole stream again. The full
-  # text remains in KAPPLY_LAST_OUTPUT for callers that want it.
-  if kapply::_tty; then
-    grep -vE ' (serverside-applied|created|configured|unchanged|applied|deleted|condition met)$' \
-      <<<"${out}" >&2 || true
-  fi
 
+  local out="${KAPPLY_LAST_OUTPUT}"
   local immutable=0 terminating=0
   grep -q 'field is immutable' <<<"${out}" && immutable=1
   grep -qE 'object is being deleted|being deleted:' <<<"${out}" && terminating=1
   (( immutable || terminating )) || return "${rc}"
 
-  if ! kapply::_confirm_heal; then
-    return "${rc}"
-  fi
+  kapply::_confirm_heal || return "${rc}"
 
   warn "healing blocked objects, then re-applying once"
   (( immutable ))   && kapply::_heal_immutable "${manifest}" "${out}" "${kf[@]}"
   (( terminating )) && kapply::_heal_terminating "${manifest}" "${kf[@]}"
 
-  printf '%s' "${manifest}" | kubectl "${kf[@]}" apply --server-side --force-conflicts -f -
+  # Re-apply through the SAME display pass — collapses like the first apply.
+  kapply::_apply_pass "${label}" "${manifest}" "${kf[@]}"
 }
 
 # A REAL interactive terminal for the prompt — its stdin must be a usable tty
@@ -139,7 +172,7 @@ kapply::_progress() {
   while IFS= read -r line; do
     printf '%s\n' "${line}"
     case "${line}" in
-      *' serverside-applied'|*' created'|*' configured'|*' unchanged'|*' applied'|*' deleted'|*' condition met')
+      *' serverside-applied'|*' created'|*' configured'|*' unchanged'|*' applied'|*' deleted'|*' annotated'|*' labeled'|*' patched'|*' restarted'|*' scaled'|*' condition met')
         n=$(( n + 1 ))
         win+=("${line}"); (( ${#win[@]} > 3 )) && win=("${win[@]: -3}")
         frame="${_KAPPLY_SPIN[$(( n % ${#_KAPPLY_SPIN[@]} ))]}"
@@ -157,7 +190,7 @@ kapply::_progress() {
   if (( n )); then
     {
       (( drawn )) && printf '\033[%dA\033[0J' "${drawn}"     # erase the block
-      printf '\r\033[K\033[32m✓\033[0m %s · %d applied\n' "${label}" "${n}"
+      printf '\r\033[K\033[32m✓\033[0m %s · %d\n' "${label}" "${n}"
     } >>"${ui}" 2>/dev/null
   fi
 }

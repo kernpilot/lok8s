@@ -106,10 +106,41 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   # redraws, and collapsed to a single "<phase> · N applied" summary.
   grep -q 'cilium' "${KAPPLY_TTY}"
   grep -qE $'\033\\[[0-9]+A' "${KAPPLY_TTY}"
-  grep -q 'cilium · 4 applied' "${KAPPLY_TTY}"
+  grep -q 'cilium · 4' "${KAPPLY_TTY}"
   # window never exceeds 3 lines: the last redraw frame must not show line "a"
   local last_frame; last_frame=$(awk 'BEGIN{RS="\033\\[[0-9]+A"} END{print}' "${KAPPLY_TTY}")
   [[ "${last_frame}" != *"configmap/a"* ]]
+}
+
+@test "run: wraps a mixed-output phase into one collapsed block" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  _phase() { printf 'configmap/coredns unchanged\nservice/coredns-external annotated\ndeployment.apps/coredns restarted\n'; }
+  run kapply::run coredns _phase
+  assert_success
+  grep -q 'coredns · 3' "${KAPPLY_TTY}"   # apply + annotate + restart all counted
+}
+
+@test "run: a phase with no progress lines is shown as-is, not swallowed" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  _warn_only() { echo "warning: skipping (nothing to do)"; }
+  run kapply::run registries _warn_only
+  assert_success
+  assert_output --partial 'warning: skipping'
+}
+
+@test "run: surfaces errors and the command's exit on failure" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  _boom() { echo 'configmap/ok unchanged'; echo 'Error from server: boom'; return 1; }
+  run kapply::run things _boom
+  assert_failure
+  assert_output --partial 'Error from server: boom'
+  refute_output --partial 'configmap/ok'   # success line collapsed, not re-shown
+}
+
+@test "verbose (DEBUG): collapsing UI is disabled — print everything" {
+  unset LOK8S_NONINTERACTIVE KAPPLY_TTY
+  DEBUG=1 run kapply::_tty
+  assert_failure   # _tty false → full output, no aggregation
 }
 
 @test "unknown error: passed through unchanged, no healing" {

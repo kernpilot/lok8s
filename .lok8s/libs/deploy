@@ -170,10 +170,10 @@ deploy::wait_crds() {
 deploy::wait_healthy() {
   local timeout="${1:-120}"
   debug "Waiting for deployments to be available (timeout: ${timeout}s)"
-  kubectl wait --for=condition=Available deployment --all \
-    --all-namespaces --timeout="${timeout}s" 2>/dev/null || {
-    warn "Some deployments did not become available within ${timeout}s"
-  }
+  kapply::run "deployments ready" \
+    kubectl wait --for=condition=Available deployment --all \
+    --all-namespaces --timeout="${timeout}s" \
+    || warn "Some deployments did not become available within ${timeout}s"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::deploy "${@}"
