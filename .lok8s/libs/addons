@@ -37,6 +37,7 @@ main::addons() {
 # Resolve the driver kind for the active domain.
 # Usage: addons::_driver [domain]
 # Echoes lowercase driver name. Falls back to "lo" if no spec found.
+# shellcheck disable=SC2120 # optional [domain] arg; callers invoke it arg-less (active domain)
 addons::_driver() {
   local _domain="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
   local spec="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"

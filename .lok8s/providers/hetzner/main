@@ -29,6 +29,7 @@ source "${_HETZNER_DIR}/utils/resources.sh"
 
 _cfg() { yq -r "$1" "${PROVIDER_CONFIG_FILE}"; }
 
+# shellcheck disable=SC2120 # optional config arg; the sole caller invokes it arg-less
 provider::validate() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
 

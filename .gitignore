@@ -48,3 +48,7 @@ docs/.vitepress/cache/
 # local artifacts
 lint.log
 tests/e2e/*/.secrets/
+
+# argsh native builtin — `argsh builtins install` / some `lo` runs drop this
+# binary in the cwd. It belongs in .bin/ (fetched by `b`); never commit a stray.
+argsh.so
