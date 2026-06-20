@@ -54,13 +54,42 @@ tilt::port() {
   echo $(( (hash % 149) + 10351 ))
 }
 
+# True if a Tilt apiserver is already answering on this project's port. An
+# authoritative check — it queries the live session, so it doesn't trust a
+# possibly-stale .tilt.pid file. Usage: tilt::running [port]
+# shellcheck disable=SC2120 # default port via tilt::port; callers may pass one
+tilt::running() {
+  local port="${1:-$(tilt::port)}"
+  tilt get session --port "${port}" &>/dev/null
+}
+
+# Force an already-running Tilt to re-execute its Tiltfile, so a re-run of
+# `lo up` picks up new services / addons / regenerated artifacts without
+# spawning a duplicate instance. This reloads CONFIG only (the (Tiltfile)
+# resource) — workloads keep hot-reloading through their own live_update; we
+# never `tilt trigger` a workload. Usage: tilt::reload [port]
+# shellcheck disable=SC2120 # default port via tilt::port; callers may pass one
+tilt::reload() {
+  local port="${1:-$(tilt::port)}"
+  tilt trigger '(Tiltfile)' --port "${port}"
+}
+
 # shellcheck disable=SC2120 # argsh-dispatched; also called arg-less by tilt::restart
 tilt::up() {
   :args "Spin up tilt" "${@}"
-  tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
   local port
   port=$(tilt::port)
   export TILT_PORT="${port}"
+
+  # Already running for this project? Don't race a duplicate onto the same
+  # port — reload the Tiltfile so this `lo up` picks up new services/addons.
+  if tilt::running "${port}"; then
+    echo "Tilt already running on http://localhost:${port} — reloading Tiltfile"
+    tilt::reload "${port}" || warn "Tiltfile reload trigger failed (Tilt still running on :${port})"
+    return 0
+  fi
+
+  tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
   local pid="${PATH_BASE}/.tilt"
   echo "Tilt UI: http://localhost:${port}"
   nohup tilt up --port="${port}" --file="${PATH_BASE}"/Tiltfile > "${pid}.nohup" 2>&1 &

@@ -62,6 +62,13 @@ setup() {
   cat > "${shim}/tilt" <<'SH'
 #!/usr/bin/env bash
 if [[ "$1" == doctor ]]; then echo "Env: kind"; exit 0; fi
+# Liveness probe (tilt::running): the apiserver is "down" unless TILT_RUNNING
+# is set. NOT recorded to TILT_CAP — it's a probe, not an action, so action
+# assertions (up/ci/trigger) stay clean.
+if [[ "$1" == get && "$2" == session ]]; then
+  [[ -n "${TILT_RUNNING:-}" ]] && exit 0
+  echo "Error: No tilt apiserver found: tilt-${TILT_PORT:-?}" >&2; exit 1
+fi
 printf '%s\n' "$*" >> "${TILT_CAP}"
 exit 0
 SH
@@ -142,6 +149,35 @@ SH
   assert_output --partial "--port=14242"
   assert_output --partial "--file=${PATH_BASE}/Tiltfile"
   refute_output --partial "ci "
+}
+
+# ── tilt::up — reload an already-running instance instead of duplicating ──
+
+@test "tilt::running reflects the apiserver: down → false, up → true" {
+  run tilt::running 14242
+  assert_failure                       # shim: no apiserver by default
+  export TILT_RUNNING=1
+  run tilt::running 14242
+  assert_success
+}
+
+@test "tilt::up reloads the Tiltfile (no duplicate 'tilt up') when Tilt is already running" {
+  export TILT_RUNNING=1                # apiserver answers → already up
+  run tilt::up
+  assert_success
+  assert_output --partial "reloading Tiltfile"
+
+  run cat "${TILT_CAP}"
+  assert_output --partial "trigger (Tiltfile)"
+  assert_output --partial "--port 14242"
+  refute_output --partial "up --port"   # did NOT background a second instance
+}
+
+@test "tilt::reload triggers the (Tiltfile) resource on the given port" {
+  run tilt::reload 14242
+  assert_success
+  run cat "${TILT_CAP}"
+  assert_output --partial "trigger (Tiltfile) --port 14242"
 }
 
 # ── main::up dispatch — --ci routes to tilt ci, default to tilt up ──
