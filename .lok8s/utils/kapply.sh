@@ -15,6 +15,9 @@
 #   - LOK8S_FORCE_RECREATE (--force-recreate) → heal, no questions asked;
 #   - an interactive terminal → PROMPT [y/N];
 #   - no tty / CI / LOK8S_NONINTERACTIVE → fail fast with a remediation hint.
+# Force-finalizing a stuck-Terminating NAMESPACE is the one heal destructive
+# enough to get a SECOND, pointed confirm in the interactive path (it completes
+# the namespace's deletion + all its contents); --force-recreate still skips it.
 # Every OTHER apply error is returned unchanged so existing retry logic
 # (CRD-not-established, webhook-not-ready) keeps working.
 #
@@ -189,14 +192,14 @@ kapply::apply() {
   local out="${KAPPLY_LAST_OUTPUT}"
   local immutable=0 terminating=0
   grep -q 'field is immutable' <<<"${out}" && immutable=1
-  grep -qE 'object is being deleted|being deleted:' <<<"${out}" && terminating=1
+  grep -qE 'object is being deleted|being deleted:|because it is being terminated' <<<"${out}" && terminating=1
   (( immutable || terminating )) || return "${rc}"
 
   kapply::_confirm_heal || return "${rc}"
 
   warn "healing blocked objects, then re-applying once"
   (( immutable ))   && kapply::_heal_immutable "${manifest}" "${out}" "${kf[@]}"
-  (( terminating )) && kapply::_heal_terminating "${manifest}" "${kf[@]}"
+  (( terminating )) && kapply::_heal_terminating "${manifest}" "${out}" "${kf[@]}"
 
   # Re-apply through the SAME display pass — collapses like the first apply.
   kapply::_apply_pass "${label}" "${manifest}" "${kf[@]}"
@@ -220,6 +223,23 @@ kapply::_confirm_heal() {
   fi
   local ans
   printf '\033[33m?\033[0m kapply: recreate the blocked object(s) above to recover? this deletes + recreates them (restarts their pods); a one-time fix. [y/N] ' >/dev/tty 2>/dev/null
+  read -r ans </dev/tty 2>/dev/null || return 1
+  [[ "${ans}" =~ ^[Yy] ]]
+}
+
+# A SECOND, pointed confirm just for force-finalizing a namespace — the most
+# destructive heal (it completes the deletion of the whole namespace and every
+# object still in it, via a raw /finalize API call, irreversibly). The generic
+# heal prompt above undersells that, so name the namespace and warn explicitly.
+# --force-recreate still skips it (the override must stay usable non-interactively,
+# e.g. CI / the deploy path); no flag + no tty → refuse (don't nuke a namespace
+# unattended).
+kapply::_confirm_ns_finalize() {
+  local name="$1"
+  [[ -n "${LOK8S_FORCE_RECREATE:-}" ]] && return 0
+  kapply::_interactive || return 1
+  local ans
+  printf '\033[31m!\033[0m kapply: namespace/%s is stuck Terminating. Force-remove its finalizers via the API? this COMPLETES its deletion — every object still in it is destroyed, irreversibly. [y/N] ' "${name}" >/dev/tty 2>/dev/null
   read -r ans </dev/tty 2>/dev/null || return 1
   [[ "${ans}" =~ ^[Yy] ]]
 }
@@ -289,31 +309,72 @@ kapply::_heal_immutable() {
             | sed -E 's/(\.[a-z0-9.-]+)? "/ /; s/" is invalid$//' | sort -u)
 }
 
-# Clear finalizers on manifest objects that are stuck Terminating, so the
-# delete completes and the next apply can recreate them. Namespaces finalize
-# via the /finalize subresource (spec.finalizers); everything else (CRs like
-# CNPG Clusters, etc.) via metadata.finalizers.
-kapply::_heal_terminating() {
-  local manifest="$1"; shift
+# Force-complete a stuck-Terminating namespace by dropping its spec.finalizers
+# via the /finalize subresource (the built-in "kubernetes" finalizer that gates
+# the delete on content garbage-collection). No-op unless the namespace really
+# is terminating. Then wait (bounded) for it to actually disappear, so the
+# follow-up apply recreates it cleanly instead of racing its tail-end deletion.
+kapply::_finalize_namespace() {
+  local name="$1"; shift
   local -a kf=("$@")
+  local dts
+  dts=$(kubectl "${kf[@]}" get ns "${name}" \
+    -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || return 0
+  [[ -n "${dts}" ]] || return 0
+  kapply::_confirm_ns_finalize "${name}" \
+    || { warn "  skipped namespace/${name} — force-finalize declined (re-apply will retry)"; return 0; }
+  warn "  force-finalizing stuck-terminating namespace/${name}"
+  kubectl "${kf[@]}" get ns "${name}" -o json 2>/dev/null \
+    | jq 'del(.spec.finalizers)' \
+    | kubectl "${kf[@]}" replace --raw "/api/v1/namespaces/${name}/finalize" -f - >/dev/null 2>&1 \
+    || { warn "  could not finalize namespace/${name}"; return 0; }
+  local i waitn="${KAPPLY_NS_WAIT:-20}"
+  for (( i = 0; i < waitn; i++ )); do
+    kubectl "${kf[@]}" get ns "${name}" &>/dev/null || return 0
+    sleep "${KAPPLY_POLL_INTERVAL:-1}"
+  done
+}
+
+# Heal objects stuck Terminating so the delete completes and the re-apply can
+# recreate them. The apiserver reports the block two different ways:
+#   (a) a 403 on writes INTO a terminating namespace ("...in namespace X
+#       because it is being terminated") — the namespace itself is wedged (a
+#       finalizer on its contents never cleared); force-finalize it. This is
+#       the common "half-torn-down install" case (KKP, CNPG, …).
+#   (b) a manifest object that is itself mid-delete (deletionTimestamp set,
+#       finalizer not clearing) — e.g. a re-applied CNPG Cluster. Namespaces
+#       finalize via /finalize; everything else via metadata.finalizers.
+# CRDs stuck mid-delete are deliberately NOT force-removed here — that would
+# cascade-delete every CR of that kind cluster-wide; the CRD-settle retry in
+# the caller handles that race instead.
+kapply::_heal_terminating() {
+  local manifest="$1" out="$2"; shift 2
+  local -a kf=("$@")
+
+  # (a) namespaces named in "because it is being terminated" 403s
+  local nsname
+  while read -r nsname; do
+    [[ -n "${nsname}" ]] || continue
+    kapply::_finalize_namespace "${nsname}" "${kf[@]}"
+  done < <(grep -oE 'in namespace [a-z0-9][a-z0-9-]* because it is being terminated' <<<"${out}" \
+            | sed -E 's/^in namespace //; s/ because.*$//' | sort -u)
+
+  # (b) manifest objects carrying their own stuck deletionTimestamp
   local kind name ns
   while IFS=$'\t' read -r kind name ns; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
+    if [[ "${kind,,}" == "namespace" || "${kind,,}" == "ns" ]]; then
+      kapply::_finalize_namespace "${name}" "${kf[@]}"
+      continue
+    fi
     local -a nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
     local dts
     dts=$(kubectl "${kf[@]}" get "${kind}" "${name}" "${nsf[@]}" \
       -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || continue
     [[ -n "${dts}" ]] || continue
     warn "  clearing finalizers on stuck-terminating ${kind}/${name}"
-    if [[ "${kind,,}" == "namespace" || "${kind,,}" == "ns" ]]; then
-      kubectl "${kf[@]}" get ns "${name}" -o json 2>/dev/null \
-        | jq 'del(.spec.finalizers)' \
-        | kubectl "${kf[@]}" replace --raw "/api/v1/namespaces/${name}/finalize" -f - >/dev/null 2>&1 \
-        || warn "  could not finalize namespace/${name}"
-    else
-      kubectl "${kf[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
-        --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 \
-        || warn "  could not clear finalizers on ${kind}/${name}"
-    fi
+    kubectl "${kf[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
+      --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 \
+      || warn "  could not clear finalizers on ${kind}/${name}"
   done < <(printf '%s' "${manifest}" | yq -r '[.kind, .metadata.name, (.metadata.namespace // "")] | @tsv' 2>/dev/null)
 }

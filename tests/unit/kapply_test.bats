@@ -95,6 +95,33 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   assert_output --partial 'finalizers'
 }
 
+@test "stuck Terminating namespace (403) WITH --force-recreate: force-finalizes the ns, then re-applies" {
+  # The wedged object is the NAMESPACE itself — named only in the 403 text, not
+  # in the manifest. Heal = drop spec.finalizers via /finalize, then re-apply.
+  export APPLY_RC=1
+  export APPLY_OUT='Error from server (Forbidden): configmaps "ca-bundle" is forbidden: unable to create new content in namespace kubermatic because it is being terminated'
+  export GET_OUT='2026-01-01T00:00:00Z'   # ns has a deletionTimestamp
+  export LOK8S_FORCE_RECREATE=1
+  export KAPPLY_NS_WAIT=0                  # don't poll-wait in the unit test
+  run _kapply "${DEPLOY_MANIFEST}"
+  run cat "${KLOG}"
+  assert_output --partial 'replace --raw /api/v1/namespaces/kubermatic/finalize'
+  # healed → re-applied: two server-side applies total
+  run bash -c "grep -c 'apply --server-side' '${KLOG}'"
+  assert_output 2
+}
+
+@test "force-finalize namespace: declined (non-interactive, no flag) → never calls /finalize" {
+  # Reaching _finalize_namespace without the flag and without a tty must NOT
+  # nuke the namespace — the extra confirm refuses and the heal is skipped.
+  export GET_OUT='2026-01-01T00:00:00Z'   # ns is terminating
+  unset LOK8S_FORCE_RECREATE              # LOK8S_NONINTERACTIVE=1 from setup → no tty
+  run kapply::_finalize_namespace kubermatic
+  assert_success                          # a declined heal is not an error
+  run cat "${KLOG}"
+  refute_output --partial 'finalize'      # the destructive API call never happened
+}
+
 @test "progress: named rolling window collapses to a phase summary" {
   # KAPPLY_TTY redirects the live UI to a file so we can assert on the render.
   export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"

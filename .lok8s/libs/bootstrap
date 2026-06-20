@@ -239,7 +239,7 @@ bootstrap::apply() {
     # Unrecoverable conflict that wasn't healed (declined the prompt, or
     # non-interactive without --force-recreate) — fail fast rather than
     # "succeeding" and letting the next `lo up` / Tilt loop hit the same wall.
-    if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted' <<< "${KAPPLY_LAST_OUTPUT}"; then
+    if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted|because it is being terminated' <<< "${KAPPLY_LAST_OUTPUT}"; then
       error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)"
       return 1
     fi
