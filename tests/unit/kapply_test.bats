@@ -106,10 +106,16 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   # redraws, and collapsed to a single "<phase> · N applied" summary.
   grep -q 'cilium' "${KAPPLY_TTY}"
   grep -qE $'\033\\[[0-9]+A' "${KAPPLY_TTY}"
-  grep -q 'cilium · 4' "${KAPPLY_TTY}"
+  grep -q 'cilium · 4 resources' "${KAPPLY_TTY}"
   # window never exceeds 3 lines: the last redraw frame must not show line "a"
   local last_frame; last_frame=$(awk 'BEGIN{RS="\033\\[[0-9]+A"} END{print}' "${KAPPLY_TTY}")
   [[ "${last_frame}" != *"configmap/a"* ]]
+}
+
+@test "progress: summary is singular for a single resource" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  printf 'configmap/solo serverside-applied\n' | kapply::_progress "lonely" >/dev/null
+  grep -q 'lonely · 1 resource$' "${KAPPLY_TTY}"   # "resource", not "resources"
 }
 
 @test "run: wraps a mixed-output phase into one collapsed block" {
@@ -117,7 +123,7 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   _phase() { printf 'configmap/coredns unchanged\nservice/coredns-external annotated\ndeployment.apps/coredns restarted\n'; }
   run kapply::run coredns _phase
   assert_success
-  grep -q 'coredns · 3' "${KAPPLY_TTY}"   # apply + annotate + restart all counted
+  grep -q 'coredns · 3 resources' "${KAPPLY_TTY}"   # apply + annotate + restart all counted
 }
 
 @test "run: a phase with no progress lines is shown as-is, not swallowed" {

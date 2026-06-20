@@ -260,9 +260,10 @@ kapply::_progress() {
     esac
   done
   if (( n )); then
+    local noun=resources; (( n == 1 )) && noun=resource
     {
       (( drawn )) && printf '\033[%dA\033[0J' "${drawn}"     # erase the block
-      printf '\r\033[K\033[32m✓\033[0m %s · %d\n' "${label}" "${n}"
+      printf '\r\033[K\033[32m✓\033[0m %s · %d %s\n' "${label}" "${n}" "${noun}"
     } >>"${ui}" 2>/dev/null
   fi
 }
