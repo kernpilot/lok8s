@@ -159,6 +159,31 @@ _list_domains() {
 
 # -- Convenience orchestrators --
 
+# Compact run header — the noteworthy facts for the run, replacing the bare
+# kubeconfig path that used to leak from the driver. e.g.
+#
+#   kubehz-dev  lo · kind · v1.31.12
+#   kubeconfig  .kubeconfig/kubehz-dev.yaml
+#
+_lo_header() {
+  local domain="$1"
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local dspec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
+  local meta=""
+  if command -v yq &>/dev/null && [[ -f "${spec}" ]]; then
+    local kind ver
+    kind=$(yq -r '.kind // ""' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    ver=$(yq -r '.spec.kubernetes.version // ""' "${spec}" 2>/dev/null)
+    meta="${kind}"
+    [[ "${kind}" == "lo" ]] && meta="${meta} · kind"
+    [[ -n "${ver}" && "${ver}" != "null" ]] && meta="${meta} · ${ver%%@*}"
+  elif command -v yq &>/dev/null && [[ -f "${dspec}" ]]; then
+    meta="deploy → $(yq -r '.spec.clusterRef.domain // "?"' "${dspec}" 2>/dev/null)"
+  fi
+  printf '\n  \033[1;36m%s\033[0m  \033[2m%s\033[0m\n' "${domain}" "${meta}"
+  printf '  \033[2mkubeconfig  %s\033[0m\n\n' "${KUBECONFIG#"${PATH_BASE}/"}"
+}
+
 main::up() {
   local open_tilt ci timeout
   local -a args=(
@@ -168,6 +193,8 @@ main::up() {
     "${args[@]}"
   )
   :args "Starting cluster" "${@}"
+
+  _lo_header "${domain}"
 
   # Reconcile infra first regardless of mode (kind cluster, registries,
   # bootstrap addons) — only the post-reconcile Tilt step differs.

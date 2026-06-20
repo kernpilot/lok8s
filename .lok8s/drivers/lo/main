@@ -112,7 +112,9 @@ driver::provision() {
       fi
 
       # Cluster services — each wrapped in a named, collapsing progress phase.
-      _lo_extract_kubeconfig "${domain}"
+      # (called for its side effect — writing the kubeconfig file; its echoed
+      # path is a return value for driver::kubeconfig, so discard it here.)
+      _lo_extract_kubeconfig "${domain}" >/dev/null
       kapply::run registries lo::apply_local_registry_hosting "${domain}"
       kapply::run registries lo::registry_configmap "${domain}" "${cluster_yaml}"
       kapply::run coredns lo::coredns "${domain}"
