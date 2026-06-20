@@ -3,16 +3,17 @@
 // stations — define, up, provision, observe — drawn in the logo's
 // hand-inked style when scrolled into view.
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { withBase } from 'vitepress'
 
 const root = ref<HTMLElement>()
 const active = ref(false)
 let observer: IntersectionObserver | undefined
 
 const stations = [
-  { angle: -90, k: 'define', cmd: 'cluster.lok8s.yaml', text: 'One folder per FQDN. Spec, targets, secrets — committed.' },
-  { angle: 0, k: 'up', cmd: 'lo up', text: 'kind cluster with mirrors, TLS, bootstrap waves, Tilt.' },
-  { angle: 90, k: 'ship', cmd: 'lo provision', text: 'Same folder, real driver — CAPI or KubeOne on Hetzner.' },
-  { angle: 180, k: 'observe', cmd: 'lo status', text: 'Health, targets, GitOps — and back to define.' },
+  { angle: -90, k: 'define', cmd: 'cluster.lok8s.yaml', href: '/reference/specs', text: 'One folder per FQDN. Spec, targets, secrets — committed.' },
+  { angle: 0, k: 'up', cmd: 'lo up', href: '/guide/local-dev', text: 'kind cluster with mirrors, TLS, bootstrap waves, Tilt.' },
+  { angle: 90, k: 'ship', cmd: 'lo provision', href: '/guide/capi', text: 'Same folder, real driver — CAPI or KubeOne on Hetzner.' },
+  { angle: 180, k: 'observe', cmd: 'lo status', href: '/reference/cli', text: 'Health, targets, GitOps — and back to define.' },
 ]
 
 function pos(angle: number, r: number) {
@@ -71,7 +72,7 @@ onBeforeUnmount(() => observer?.disconnect())
         :class="`st-${s.k}`"
         :style="{ transitionDelay: `${1.05 + i * 0.18}s` }"
       >
-        <code class="cmd">{{ s.cmd }}</code>
+        <a class="cmd" :href="withBase(s.href)">{{ s.cmd }}</a>
         <p>{{ s.text }}</p>
       </div>
     </div>
@@ -79,7 +80,7 @@ onBeforeUnmount(() => observer?.disconnect())
     <!-- stacked fallback (mobile) -->
     <ol class="stack loop-stack">
       <li v-for="(s, i) in stations" :key="s.k" :style="{ transitionDelay: `${0.2 + i * 0.15}s` }">
-        <code class="cmd">{{ s.cmd }}</code>
+        <a class="cmd" :href="withBase(s.href)">{{ s.cmd }}</a>
         <p>{{ s.text }}</p>
       </li>
     </ol>
@@ -206,6 +207,7 @@ onBeforeUnmount(() => observer?.disconnect())
 .active .st-observe { transform: translate(0, -50%); }
 
 .cmd {
+  display: inline-block;
   font-family: var(--vp-font-family-mono);
   font-size: 13px;
   font-weight: 500;
@@ -213,6 +215,14 @@ onBeforeUnmount(() => observer?.disconnect())
   background: var(--vp-c-brand-soft);
   border-radius: 4px;
   padding: 2px 8px;
+  text-decoration: none;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+/* the command chips link to the matching docs page */
+a.cmd:hover {
+  background: var(--vp-c-brand-1);
+  color: var(--vp-c-bg);
 }
 
 .station p,
