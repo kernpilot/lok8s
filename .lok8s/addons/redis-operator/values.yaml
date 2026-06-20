@@ -1,3 +1,3 @@
 # Defaults are fine: the chart installs the operator controller + the
-# redis.redis.opstreelabs.in CRDs (rendered via includeCRDs in chart.yaml).
+# redis.redis.opstreelabs.in CRDs (khelm renders crds/ by default).
 # No cluster-specific config — Redis instances are declared by the consumer.

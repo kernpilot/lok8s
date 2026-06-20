@@ -1,6 +1,7 @@
 # khelm chart spec for the ot-container-kit Redis operator. Manages Redis (standalone),
 # RedisReplication, RedisSentinel and RedisCluster via the redis.redis.opstreelabs.in
-# CRDs. includeCRDs renders the chart's CRDs (khelm/helm-template skips crds/ otherwise).
+# CRDs. khelm renders the chart's crds/ by default (excludeCRDs defaults false) —
+# unlike `helm template`, no flag is needed; `includeCRDs` is not a khelm field.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
@@ -10,6 +11,5 @@ kubeVersion: "1.31.12"
 repository: https://ot-container-kit.github.io/helm-charts/
 chart: redis-operator
 version: 0.24.0
-includeCRDs: true
 valueFiles:
   - values.yaml
