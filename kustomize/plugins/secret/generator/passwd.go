@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/charset"
@@ -46,8 +47,28 @@ func (g *Passwd) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 		if err != nil {
 			return nil, errs.Wrap(k, err)
 		}
+		required, err := entry.RequireClasses()
+		if err != nil {
+			return nil, errs.Wrap(k, err)
+		}
+		// Validate feasibility up front (clear config error, not a generation
+		// retry-exhaustion): the password must be long enough to hold every
+		// required class, and the charset must be able to supply each one.
+		if len(required) > length {
+			return nil, errs.Wrap(k, fmt.Errorf("require lists %d classes but length is %d", len(required), length))
+		}
+		for _, c := range required {
+			if !charset.PoolContains(chars, c) {
+				return nil, errs.Wrap(k, fmt.Errorf("charset %q has no %q characters to satisfy require", entry.EffectiveChars(), c))
+			}
+		}
 		val, err := ctx.Cache.GetOrCreate(k, func() ([]byte, error) {
-			return random.Password(length, chars)
+			if len(required) == 0 {
+				return random.Password(length, chars)
+			}
+			return random.PasswordSatisfying(length, chars, func(p []byte) bool {
+				return charset.SatisfiesAll(p, required)
+			})
 		})
 		if err != nil {
 			return nil, errs.Wrap(k, err)

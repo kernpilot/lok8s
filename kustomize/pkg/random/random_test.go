@@ -127,3 +127,50 @@ func TestSwapReader_DeterministicForTests(t *testing.T) {
 	// Restore
 	Reader = rand.Reader
 }
+
+func TestPasswordSatisfying_MeetsPredicate(t *testing.T) {
+	hasUpperAndDigit := func(p []byte) bool {
+		up, dig := false, false
+		for _, b := range p {
+			if b >= 'A' && b <= 'Z' {
+				up = true
+			}
+			if b >= '0' && b <= '9' {
+				dig = true
+			}
+		}
+		return up && dig
+	}
+	for i := 0; i < 100; i++ {
+		p, err := PasswordSatisfying(12, "abcABC123", hasUpperAndDigit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p) != 12 || !hasUpperAndDigit(p) {
+			t.Fatalf("password %q did not satisfy predicate", p)
+		}
+	}
+}
+
+func TestPasswordSatisfying_NilPredicate(t *testing.T) {
+	p, err := PasswordSatisfying(10, "abc", nil)
+	if err != nil || len(p) != 10 {
+		t.Fatalf("nil predicate: got %q, %v", p, err)
+	}
+}
+
+func TestPasswordSatisfying_Unsatisfiable(t *testing.T) {
+	// The charset has no uppercase, so this predicate can never pass — it must
+	// error after the attempt bound rather than hang forever.
+	wantsUpper := func(p []byte) bool {
+		for _, b := range p {
+			if b >= 'A' && b <= 'Z' {
+				return true
+			}
+		}
+		return false
+	}
+	if _, err := PasswordSatisfying(8, "abcdef0123", wantsUpper); err == nil {
+		t.Error("expected error for an unsatisfiable constraint")
+	}
+}

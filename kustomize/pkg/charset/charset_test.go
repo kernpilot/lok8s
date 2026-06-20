@@ -86,3 +86,59 @@ func TestResolve_UnknownName_Rejected(t *testing.T) {
 		t.Error("unknown name should be rejected")
 	}
 }
+
+func TestClass_Contains(t *testing.T) {
+	cases := []struct {
+		c    Class
+		b    byte
+		want bool
+	}{
+		{ClassUpper, 'A', true}, {ClassUpper, 'a', false}, {ClassUpper, '1', false}, {ClassUpper, '!', false},
+		{ClassLower, 'a', true}, {ClassLower, 'A', false},
+		{ClassDigit, '5', true}, {ClassDigit, 'a', false},
+		{ClassSymbol, '!', true}, {ClassSymbol, '-', true}, {ClassSymbol, 'a', false}, {ClassSymbol, '0', false}, {ClassSymbol, 'Z', false},
+	}
+	for _, tc := range cases {
+		if got := tc.c.Contains(tc.b); got != tc.want {
+			t.Errorf("%s.Contains(%q) = %v, want %v", tc.c, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestParseClass(t *testing.T) {
+	for _, c := range Classes() {
+		if got, err := ParseClass(string(c)); err != nil || got != c {
+			t.Errorf("ParseClass(%q) = %v, %v", c, got, err)
+		}
+	}
+	if _, err := ParseClass("special"); err == nil {
+		t.Error("ParseClass(special) should error")
+	}
+}
+
+func TestPoolContains(t *testing.T) {
+	alnum, _ := Resolve(NameAlphanum)
+	if PoolContains(alnum, ClassSymbol) {
+		t.Error("alphanum pool must not contain a symbol")
+	}
+	if !PoolContains(alnum, ClassDigit) || !PoolContains(alnum, ClassUpper) {
+		t.Error("alphanum pool must contain digit + upper")
+	}
+	sym, _ := Resolve(NameAlphanumSymbols)
+	if !PoolContains(sym, ClassSymbol) {
+		t.Error("alphanum+symbols pool must contain a symbol")
+	}
+}
+
+func TestSatisfiesAll(t *testing.T) {
+	all := Classes()
+	if !SatisfiesAll([]byte("aA1!"), all) {
+		t.Error("aA1! should satisfy all four classes")
+	}
+	if SatisfiesAll([]byte("aaaaaa"), all) {
+		t.Error("all-lowercase must not satisfy all classes")
+	}
+	if !SatisfiesAll([]byte("anything"), nil) {
+		t.Error("an empty class list is trivially satisfied")
+	}
+}

@@ -25,6 +25,36 @@ func Password(length int, charset string) ([]byte, error) {
 	return passwordFrom(Reader, length, charset)
 }
 
+// satisfyMaxAttempts bounds PasswordSatisfying so an unsatisfiable predicate
+// (or a charset that practically can't meet it) errors instead of looping
+// forever. For realistic constraints the predicate passes within a few draws.
+const satisfyMaxAttempts = 1000
+
+// PasswordSatisfying generates a random password of the given length from
+// charset that also passes the satisfies predicate, using rejection sampling
+// (redraw the whole password until it passes). The output stays uniformly
+// distributed over the set of passwords that satisfy the predicate.
+//
+// Callers must ensure the constraint is feasible (the charset can produce a
+// passing password) — an infeasible predicate errors after satisfyMaxAttempts
+// rather than hanging. A nil predicate is treated as "always satisfied".
+func PasswordSatisfying(length int, charset string, satisfies func([]byte) bool) ([]byte, error) {
+	return passwordSatisfyingFrom(Reader, length, charset, satisfies)
+}
+
+func passwordSatisfyingFrom(r io.Reader, length int, charset string, satisfies func([]byte) bool) ([]byte, error) {
+	for attempt := 0; attempt < satisfyMaxAttempts; attempt++ {
+		p, err := passwordFrom(r, length, charset)
+		if err != nil {
+			return nil, err
+		}
+		if satisfies == nil || satisfies(p) {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("random: no password satisfied the constraints in %d attempts (length=%d, charset size=%d)", satisfyMaxAttempts, length, len(charset))
+}
+
 func passwordFrom(r io.Reader, length int, charset string) ([]byte, error) {
 	if length <= 0 {
 		return nil, fmt.Errorf("random: password length must be > 0, got %d", length)

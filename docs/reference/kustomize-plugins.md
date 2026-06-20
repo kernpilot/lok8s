@@ -66,6 +66,10 @@ passwd:
   REDIS_PASSWORD:
     length: 32
     chars: alphanum+symbols
+  IDP_USER_PASSWORD:                    # guarantee every character class
+    length: 48
+    chars: alphanum+symbols
+    require: [upper, lower, digit, symbol]
 
 env:
   GOOGLE_KEY: AUTHENTIK_UT_GOOGLE_CONSUMER_KEY    # explicit env var
@@ -141,6 +145,31 @@ so it needs no re-`lo secrets allow`.
 | `hex` | `0–9 a–f` | 4 |
 | `base64url` | `A–Z a–z 0–9 - _` | 6 |
 | `custom:<chars>` | exactly the characters you list | varies |
+
+#### Required character classes (`require`)
+
+`require` lists classes the generated password **must** contain at least one
+of — `upper`, `lower`, `digit`, `symbol`:
+
+```yaml
+passwd:
+  IDP_USER_PASSWORD:
+    length: 48
+    chars: alphanum+symbols
+    require: [upper, lower, digit, symbol]
+```
+
+Use it when a downstream policy (e.g. an identity provider's password
+complexity rules) demands all four classes. A plain uniform draw can omit one
+by chance — and because the value is **cached** (the cache is the source of
+truth, never re-rolled), a single non-compliant draw would be a *permanent*
+reject. `require` guarantees the classes are present at generation time, so
+what `lo secrets print` shows is the exact, policy-valid password.
+
+The charset must be able to supply every required class (`require: [symbol]`
+needs `chars: alphanum+symbols`, not the default `alphanum`) and `length` must
+be ≥ the number of required classes — otherwise the build fails with a clear
+config error rather than a bad secret.
 
 ### Running commands (`bash:`)
 
