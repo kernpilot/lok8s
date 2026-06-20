@@ -137,6 +137,40 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   refute_output --partial 'configmap/ok'   # success line collapsed, not re-shown
 }
 
+WL_MANIFEST='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: default
+spec:
+  replicas: 1'
+
+@test "wait_ready: a ready (manifest-scoped) deployment collapses to ✓" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  export GET_OUT='{"items":[{"kind":"Deployment","metadata":{"namespace":"default","name":"web"},"spec":{"replicas":1},"status":{"availableReplicas":1}}]}'
+  run kapply::wait_ready "platform" 30 <<< "${WL_MANIFEST}"
+  assert_success
+  grep -q 'platform · ready' "${KAPPLY_TTY}"
+}
+
+@test "wait_ready: a not-ready workload times out to a ⚠ + names it (best-effort)" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  export GET_OUT='{"items":[{"kind":"Deployment","metadata":{"namespace":"default","name":"web"},"spec":{"replicas":1},"status":{"availableReplicas":0}}]}'
+  run kapply::wait_ready "platform" 0 <<< "${WL_MANIFEST}"   # timeout 0 → immediate ⚠, no sleep
+  assert_success                                              # best-effort: never fatal
+  grep -q 'timed out' "${KAPPLY_TTY}"
+  grep -q 'web' "${KAPPLY_TTY}"                               # shows the pending name
+}
+
+@test "wait_ready: a manifest with no workloads is a no-op" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  run kapply::wait_ready "networking" 30 <<< 'apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}'
+  assert_success
+  [ ! -s "${KAPPLY_TTY}" ]   # nothing rendered
+}
+
 @test "verbose (DEBUG): collapsing UI is disabled — print everything" {
   unset LOK8S_NONINTERACTIVE KAPPLY_TTY
   DEBUG=1 run kapply::_tty

@@ -248,8 +248,6 @@ bootstrap::apply() {
       debug "bootstrap: waiting for CRDs and webhooks to settle before retry"
       kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
         --for=condition=Established crd --all --timeout=60s || true
-      kapply::run "deployments ready" kubectl --kubeconfig "${kubeconfig}" wait \
-        --for=condition=Available deployment --all --all-namespaces --timeout=120s || true
       sleep 3
 
       debug "bootstrap: retrying ${addon_name}"
@@ -259,11 +257,11 @@ bootstrap::apply() {
       fi
     fi
 
+    # Wait only for THIS addon's own workloads (from its rendered manifest) —
+    # not every Deployment in the cluster, which would block on app workloads
+    # and addons applied later. Best-effort: a timeout is a ⚠, not fatal.
     debug "bootstrap: waiting for ${addon_name} workloads to become ready"
-    kapply::run "deployments ready" kubectl --kubeconfig "${kubeconfig}" wait \
-      --for=condition=Available deployment --all --all-namespaces --timeout=180s || true
-    kapply::run "daemonsets ready" kubectl --kubeconfig "${kubeconfig}" rollout status daemonset \
-      --all --all-namespaces --timeout=180s || true
+    kapply::wait_ready "${addon_name} ready" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
   done
 }
 

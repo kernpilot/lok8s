@@ -18,6 +18,11 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
 
+  # These tests exercise the apply logic, not readiness polling — stub the
+  # scoped wait so it doesn't loop on the fake kubectl.
+  kapply::wait_ready() { :; }
+  export -f kapply::wait_ready
+
   kubectl() {
     case "$1" in
       apply) echo "applied" ;;

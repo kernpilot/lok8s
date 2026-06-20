@@ -69,6 +69,67 @@ kapply::run() {
   return "${rc}"
 }
 
+# kapply::wait_ready <label> <timeout-seconds> [kubectl flags...] < manifest
+#   Wait for the Deployments / DaemonSets / StatefulSets IN THE MANIFEST to be
+#   ready — scoped to exactly what we just applied, NOT the whole cluster (so it
+#   never blocks on app workloads or addons applied later). On a terminal it
+#   shows a ticking spinner, the still-pending names, and a countdown; off a
+#   terminal it stays quiet (verbose `debug`s each poll). Best-effort: a timeout
+#   is a ⚠, never fatal — the caller decides whether to care.
+kapply::wait_ready() {
+  local label="$1" timeout="${2:-180}"; shift 2
+  local -a kf=("$@")
+  local manifest; manifest=$(cat)
+  local -a targets=()
+  mapfile -t targets < <(printf '%s' "${manifest}" \
+    | yq -r 'select(.kind == "Deployment" or .kind == "DaemonSet" or .kind == "StatefulSet")
+             | (.kind | downcase) + "|" + (.metadata.namespace // "default") + "|" + .metadata.name' 2>/dev/null \
+    | grep -v '^---$' | sort -u)   # yq emits a --- separator between multi-doc outputs
+  (( ${#targets[@]} )) || return 0
+
+  local ui=""; kapply::_tty && ui="$(kapply::_ui)"
+  local start="${SECONDS}" tick=0
+  while true; do
+    local snap; snap=$(kubectl "${kf[@]}" get deploy,ds,sts --all-namespaces -o json 2>/dev/null || echo '{}')
+    local -a pending=()
+    local t kind ns name r
+    for t in "${targets[@]}"; do
+      IFS='|' read -r kind ns name <<<"${t}"
+      r=$(jq -r --arg k "${kind}" --arg ns "${ns}" --arg n "${name}" '
+        [ .items[] | select((.kind | ascii_downcase) == $k and .metadata.namespace == $ns and .metadata.name == $n) ] | .[0] |
+        if . == null then false
+        elif $k == "daemonset" then ((.status.desiredNumberScheduled // 0) > 0 and (.status.numberReady // 0) >= (.status.desiredNumberScheduled // 1))
+        elif $k == "statefulset" then ((.status.readyReplicas // 0) >= (.spec.replicas // 1))
+        else ((.status.availableReplicas // 0) >= (.spec.replicas // 1)) end' <<<"${snap}" 2>/dev/null)
+      [[ "${r}" == "true" ]] || pending+=("${name}")
+    done
+
+    if (( ${#pending[@]} == 0 )); then
+      [[ -n "${ui}" ]] && printf '\r\033[K\033[32m✓\033[0m %s · ready\n' "${label}" >>"${ui}" 2>/dev/null
+      return 0
+    fi
+    local elapsed=$(( SECONDS - start ))
+    if (( elapsed >= timeout )); then
+      if [[ -n "${ui}" ]]; then
+        printf '\r\033[K\033[33m⚠\033[0m %s · timed out after %ds, %d not ready: \033[2m%.50s\033[0m\n' \
+          "${label}" "${timeout}" "${#pending[@]}" "${pending[*]}" >>"${ui}" 2>/dev/null
+      else
+        warn "${label}: timed out after ${timeout}s; not ready: ${pending[*]}"
+      fi
+      return 0
+    fi
+    if [[ -n "${ui}" ]]; then
+      tick=$(( tick + 1 ))
+      printf '\r\033[K\033[36m%s\033[0m %s · %ds left · waiting on %d: \033[2m%.50s\033[0m' \
+        "${_KAPPLY_SPIN[$(( tick % ${#_KAPPLY_SPIN[@]} ))]}" "${label}" "$(( timeout - elapsed ))" \
+        "${#pending[@]}" "${pending[*]}" >>"${ui}" 2>/dev/null
+    else
+      debug "${label}: waiting on ${#pending[@]}: ${pending[*]}"
+    fi
+    sleep "${KAPPLY_POLL_INTERVAL:-1}"
+  done
+}
+
 # kapply::apply [extra kubectl flags...] < manifest
 #   Reads a manifest on stdin. Extra args (e.g. --kubeconfig <path>) thread
 #   through every kubectl call. Returns the apply's exit status; stashes the

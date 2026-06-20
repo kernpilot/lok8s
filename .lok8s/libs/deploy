@@ -117,8 +117,9 @@ deploy::apply() {
     if deploy::_has_objects < "${artifact}"; then
       debug "Applying resources for ${target}"
       kapply::apply --label "${target}" < "${artifact}"
-      # Phase 3: Wait for health (only when we actually applied something)
-      deploy::wait_healthy 120
+      # Phase 3: wait for THIS target's own workloads to become ready (scoped to
+      # the artifact, not the whole cluster). Best-effort — a timeout is a ⚠.
+      kapply::wait_ready "${target} ready" 120 < "${artifact}"
     else
       debug "No objects in ${artifact}, skipping apply"
     fi
@@ -164,16 +165,6 @@ deploy::wait_crds() {
       warn "CRD ${crd_name} not established within timeout"
     }
   done < <(echo "${crds}" | yq -r '.metadata.name // ""')
-}
-
-# Wait for deployments in the current context to become available.
-deploy::wait_healthy() {
-  local timeout="${1:-120}"
-  debug "Waiting for deployments to be available (timeout: ${timeout}s)"
-  kapply::run "deployments ready" \
-    kubectl wait --for=condition=Available deployment --all \
-    --all-namespaces --timeout="${timeout}s" \
-    || warn "Some deployments did not become available within ${timeout}s"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::deploy "${@}"
