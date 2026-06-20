@@ -119,7 +119,7 @@ deploy::apply() {
       kapply::apply --label "${target}" < "${artifact}"
       # Phase 3: wait for THIS target's own workloads to become ready (scoped to
       # the artifact, not the whole cluster). Best-effort — a timeout is a ⚠.
-      kapply::wait_ready "${target} ready" 120 < "${artifact}"
+      kapply::wait_ready "${target}" 120 < "${artifact}"
     else
       debug "No objects in ${artifact}, skipping apply"
     fi

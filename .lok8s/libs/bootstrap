@@ -261,7 +261,7 @@ bootstrap::apply() {
     # not every Deployment in the cluster, which would block on app workloads
     # and addons applied later. Best-effort: a timeout is a ⚠, not fatal.
     debug "bootstrap: waiting for ${addon_name} workloads to become ready"
-    kapply::wait_ready "${addon_name} ready" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
+    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
   done
 }
 
