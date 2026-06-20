@@ -46,6 +46,17 @@ _KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 # + rolled into the window); anything else (errors) is surfaced on failure.
 _KAPPLY_OK=' (serverside-applied|created|configured|unchanged|applied|deleted|annotated|labeled|patched|restarted|scaled|rolled back|condition met)$'
 
+# Collapse repeated identical error lines (e.g. one webhook-not-ready message
+# emitted once per object) into a single line with a "(×N)" count, preserving
+# first-seen order. Distinct errors (different objects) are kept separate.
+kapply::_aggregate() {
+  awk '
+    { if (!($0 in seen)) { seen[$0]=1; order[++m]=$0 } count[$0]++ }
+    END { for (i=1; i<=m; i++) { l=order[i]
+            if (count[l] > 1) printf "%s  \033[2m(\303\227%d)\033[0m\n", l, count[l]
+            else print l } }'
+}
+
 # kapply::run <phase> <command...>
 #   Run an arbitrary command whose output is kubectl-style "<resource> <verb>"
 #   lines (apply + annotate + rollout restart + …) and render it as ONE named,
@@ -63,7 +74,7 @@ kapply::run() {
   if ! grep -qE "${_KAPPLY_OK}" "${tmp}"; then
     cat "${tmp}"                                    # no progress lines (warnings/notes) — show as-is
   elif (( rc != 0 )); then
-    grep -vE "${_KAPPLY_OK}" "${tmp}" >&2 || true   # collapsed, but surface errors on failure
+    grep -vE "${_KAPPLY_OK}" "${tmp}" | kapply::_aggregate >&2 || true   # surface errors (deduped) on failure
   fi
   rm -f "${tmp}"
   return "${rc}"
@@ -154,7 +165,7 @@ kapply::_apply_pass() {
   fi
   rc=$(cat "${rcf}"); rm -f "${rcf}"
   KAPPLY_LAST_OUTPUT="${out}"
-  (( rc == 0 )) || { kapply::_tty && grep -vE "${_KAPPLY_OK}" <<<"${out}" >&2 || true; }
+  (( rc == 0 )) || { kapply::_tty && grep -vE "${_KAPPLY_OK}" <<<"${out}" | kapply::_aggregate >&2 || true; }
   return "${rc}"
 }
 

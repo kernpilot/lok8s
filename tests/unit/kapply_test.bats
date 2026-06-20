@@ -177,6 +177,14 @@ metadata: {name: cfg, namespace: default}'
   assert_failure   # _tty false → full output, no aggregation
 }
 
+@test "aggregate: identical error lines collapse to (×N); distinct kept" {
+  local out
+  out=$(printf 'webhook refused\nwebhook refused\nwebhook refused\nimmutable: foo\n' | kapply::_aggregate)
+  [[ "$(grep -c 'webhook refused' <<<"${out}")" -eq 1 ]]   # the 3 dupes → one line
+  grep -q '×3' <<<"${out}"
+  grep -q 'immutable: foo' <<<"${out}"                     # distinct line preserved
+}
+
 @test "unknown error: passed through unchanged, no healing" {
   export APPLY_RC=1
   export APPLY_OUT='error: unable to connect to the server: connection refused'
