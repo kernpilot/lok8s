@@ -91,6 +91,7 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	r.Add(generator.NewBash(p.spec.Bash))
 	r.Add(generator.NewSecretRef(p.spec.SecretRef))
 	r.Add(generator.NewHtpasswd(p.spec.Htpasswd))
+	r.Add(generator.NewCert(p.spec.Cert))
 
 	return r, ctx, nil
 }

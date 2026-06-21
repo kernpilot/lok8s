@@ -128,6 +128,7 @@ so it needs no re-`lo secrets allow`.
 | `file:` | Read local file | No | 1 MiB max; path traversal rejected; `mode: raw` (default) or `passthrough` |
 | `b64:` | Pre-base64-encoded passthrough | No | Validates the input is valid base64 |
 | `bash:` | Run a shell command, use its output | Yes | Each command is SHA256-pinned in a committed `.sha` file; on change the build fails until re-approved via `lo secrets allow` |
+| `cert:` | Development CA or leaf cert (crypto/x509, no `mkcert` binary) | Yes | One cert per Secret; CA auto-created on first use. See [Development certificates](#development-certificates-cert) |
 
 > **How a value reaches your pod:** a generator emits raw bytes → kustomize
 > emits `data.<key> = base64(bytes)` → Kubernetes decodes on mount, so a
@@ -259,6 +260,43 @@ metadata: {name: app-secret, namespace: default}
 secretRef:
   DB_PASSWORD: db-secret/password
 ```
+
+### Development certificates (`cert:`)
+
+`cert:` generates a local development CA and the leaf certificates it signs,
+using `crypto/x509` — **no `mkcert` binary** in the build or CI. There's one cert
+per Secret (a `kubernetes.io/tls` Secret holds exactly `tls.crt` + `tls.key`), so
+`cert:` is a single mapping, not a key→entry map.
+
+```yaml
+# The CA Secret (Opaque): emits ca.crt. The CA private key is cached as ca.key
+# for signing but is NEVER written into the Secret.
+apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: dev-ca, namespace: kube-system}
+cert:
+  ca: true
+---
+# A leaf Secret (kubernetes.io/tls): emits tls.crt + tls.key, signed by the CA.
+apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: wildcard-tls, namespace: default}
+type: kubernetes.io/tls
+cert:
+  hosts: [example.test, "*.example.test"]   # DNS names, wildcards, IPs
+  caRef: dev-ca/kube-system                 # <secret>[/<namespace>]
+```
+
+- **CA auto-create, order-independent.** The leaf reads its CA's `ca.crt`/`ca.key`
+  from `caRef`; if they don't exist yet it **creates** the CA there first (mkcert's
+  load-or-create flow), so the CA Secret needn't have been built before the leaf.
+- **Cache-first** like `passwd` — the CA, its key, and each leaf are byte-stable
+  across runs; rotate by deleting the cache file. RSA-3072 CA / RSA-2048 leaf;
+  leaf validity 2 y 3 m (under Apple's 825-day cap).
+- **Trust is out of scope.** The plugin *generates* the CA; it does not install it
+  into OS/browser trust stores (that needs root). Trust the dev CA once per
+  machine with `mkcert -install` (point it at the generated CA) or your platform's
+  trust tool — purely a local convenience, never a build dependency.
 
 ### Type validation
 
