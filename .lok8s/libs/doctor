@@ -63,6 +63,20 @@ main::doctor() {
   fi
 
   echo
+  echo "--- dev TLS (cert: CA) ---"
+  if command -v mkcert &>/dev/null; then
+    local caroot; caroot=$(mkcert -CAROOT 2>/dev/null || true)
+    if [[ -n "${caroot}" && -f "${caroot}/rootCA.pem" ]]; then
+      doctor::_ok "local CA present (${caroot})"
+      echo "    if *.${domain:-<domain>} TLS is rejected by your browser/curl, run: lo trust"
+    else
+      doctor::_warn "no local CA yet — created on first cert: build, then trust it: lo trust"
+    fi
+  else
+    doctor::_warn "mkcert absent — only needed to TRUST the dev CA (lo trust), never to build"
+  fi
+
+  echo
   echo "--- domain ---"
   if [[ -n "${domain}" ]]; then
     local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"

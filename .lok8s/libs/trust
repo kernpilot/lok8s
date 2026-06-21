@@ -1,0 +1,36 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# trust — install the local development CA into the OS / browser trust stores.
+#
+# The CA is the one the secrets `cert:` generator uses (mkcert's CAROOT). The
+# generator deliberately does NOT install it (that needs root); this wraps
+# `mkcert -install` so you don't have to fumble $CAROOT. One-time, per machine,
+# idempotent. mkcert is needed ONLY for this trust step — never for `lo build`.
+
+import ^utils/verbose
+
+main::trust() {
+  :args "Trust the local dev CA (mkcert -install)" "${@}"
+
+  command -v mkcert &>/dev/null || {
+    error "mkcert not found — install it once for trust:  b install mkcert"
+    error "(mkcert is needed only for this trust step, never for the build.)"
+    return 1
+  }
+
+  local caroot
+  caroot=$(mkcert -CAROOT 2>/dev/null || true)
+  echo "Installing the local development CA into your system + browser trust stores."
+  [[ -n "${caroot}" ]] && echo "  CAROOT: ${caroot}"
+  echo "  (you may be prompted for your password)"
+  echo
+
+  # `mkcert -install` creates the CA at CAROOT if absent, then installs it — the
+  # SAME CAROOT the cert: generator load-or-creates, so the two share one CA.
+  mkcert -install || { error "mkcert -install failed"; return 1; }
+
+  echo
+  echo "Done. cert: leaves signed by this CA (e.g. *.${DOMAIN_NAME}) are now trusted"
+  echo "by your browser and curl. Re-running is safe."
+}

@@ -39,6 +39,7 @@ import ^libs/build
 import ^libs/lint
 import ^libs/status
 import ^libs/doctor
+import ^libs/trust
 import ^libs/version
 import ^libs/crds
 import ^libs/gitops
@@ -91,6 +92,7 @@ main() {
     'lint|l@readonly'                  'Validate structure and specs'
     'status@readonly'                  'Cluster health and status'
     'doctor@readonly'                  'Diagnose the environment + toolchain'
+    'trust'                            'Trust the local dev CA (mkcert -install)'
     'version@readonly'                 'Print lok8s + toolchain versions'
     'gitops|g'                         'GitOps integration'
     'kubehz|kh'                        'kubehz platform integration'
