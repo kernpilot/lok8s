@@ -13,6 +13,8 @@ safely. No external secret store is required to get started.
 - Generated values are cached under **`$PATH_SECRETS`** (default `.secrets/`),
   one file per key: `Secret.<name>.<namespace>.<key>`. **The cache is the source
   of truth** — first build generates, later builds reuse, so output is stable.
+  Repos driving **multiple** instances isolate this **per domain** — see
+  [Per-environment isolation](#per-environment-isolation-multiple-instances).
 - Plaintext cache files are **gitignored**. To share them, commit them
   **encrypted** with SOPS/age (below).
 
@@ -104,6 +106,66 @@ lo secrets decrypt         # restore the plaintext cache from the .enc files
 
 Add teammates by putting their age public keys (derived from their SSH keys)
 into `.sops.yaml`'s `creation_rules`, then re-`encrypt`.
+
+## Per-environment isolation (multiple instances)
+
+A repo that drives **more than one** instance — dev and prod, or several
+tenants — must not let those instances share a secret store. lok8s isolates them
+**per domain**: a domain keeps its own store under `clusters/<domain>/secrets/`,
+and both the CLI and `lo build <domain>` use **only that store** for that domain.
+
+```
+clusters/kubehz.dev/secrets/Secret.app.default.PASSWORD{,.enc}
+clusters/kubehz.cloud/secrets/Secret.app.default.PASSWORD{,.enc}
+```
+
+Opt in by creating the directory; from then on it's automatic:
+
+```bash
+lo secrets --domain kubehz.cloud set --name app --namespace default API_TOKEN <v>
+lo build kubehz.cloud            # the secrets plugin reads clusters/kubehz.cloud/secrets/
+```
+
+Why this is the right default for anything multi-environment:
+
+- **No silent sharing.** Cache keys are `Secret.<name>.<ns>.<key>` with no
+  environment in them, so a *single* flat store hands dev and prod the same value
+  for a colliding (name, namespace) — including the same *generated* password or
+  master key, which nobody chose. Per-domain stores make that impossible.
+- **No shared tier, on purpose.** There is no fallback from a domain's store to a
+  shared one. A value genuinely needed in two instances is a deliberate manual
+  copy — the operator consenting to that exposure — never something a default did
+  quietly. Prefer issuing a *separate* credential per instance: most providers
+  can (a per-instance registry robot account, a project-scoped API token, …).
+- **The real boundary is the decrypt key, not the folder.** Folders alone are
+  cosmetic if one age key decrypts everything. Scope SOPS `creation_rules` by
+  path so each environment encrypts to its **own** recipients — then a dev/CI key
+  cannot decrypt prod:
+
+```yaml
+# .sops.yaml — first match wins, so specific rules go BEFORE any catch-all
+creation_rules:
+  - path_regex: clusters/kubehz\.cloud/secrets/Secret\..*
+    age: 'age1prod…'                 # prod-key holders only
+  - path_regex: clusters/.*/secrets/Secret\..*
+    age: 'age1dev…,age1prod…'        # dev/CI (+ prod, who may read everything)
+```
+
+### Migrating a flat `.secrets/` store
+
+Per-domain is opt-in, so existing flat stores keep working until you split them:
+
+```bash
+mkdir -p clusters/<domain>/secrets
+git mv .secrets/Secret.<…>* clusters/<domain>/secrets/   # the keys that domain owns
+lo secrets --domain <domain> encrypt                     # re-encrypt in place
+```
+
+Anything two instances were *sharing* must be **re-issued per instance** (or, if
+truly unavoidable, copied deliberately). The cleanest reset is to regenerate at
+go-live: create the per-domain stores, drop the old flat cache, scope the
+`.sops.yaml` rules to per-environment keys, and let the next build mint fresh,
+isolated values.
 
 ## Using a secret
 

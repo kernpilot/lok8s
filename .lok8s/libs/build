@@ -59,6 +59,23 @@ build::_resolve_api() {
   fi
 }
 
+# Per-instance secret isolation. The kustomize secrets plugin reads $PATH_SECRETS;
+# when a domain keeps its own secrets (clusters/<domain>/secrets/) point the plugin
+# there so each instance generates + reads ONLY its own secrets — never a shared
+# flat store, so dev secrets can't bleed into prod (and vice versa). A domain opts
+# in simply by having that dir (the `lo secrets --domain <d> …` commands write it).
+# Without it, the inherited flat $PATH_SECRETS is used (single-instance projects).
+# Mirrors libs/secrets `secrets::path`; see docs/guide/secrets.md.
+# MUST run un-subshelled so the export reaches the kustomize child.
+build::_export_secrets_path() {
+  local domain_dir="$1"
+  # `if` (not `&&`): a false `[[ … ]] && …` returns non-zero, which as the last
+  # command would fail the caller under `set -e` when a domain has no own store.
+  if [[ -d "${domain_dir}/secrets" ]]; then
+    export PATH_SECRETS="${domain_dir}/secrets"
+  fi
+}
+
 # Build all (or specified) targets for a domain.
 # Usage: build::targets <domain> [target...]
 build::targets() {
@@ -95,6 +112,7 @@ build::targets() {
   # whitelist, so ${LOK8S_USER_*}/${LOK8S_SPEC_*} in target manifests resolve
   # (e.g. the host-firewall ccnp's CIDR). Shared with build::targets_split.
   build::_resolve_api "${domain_dir}"
+  build::_export_secrets_path "${domain_dir}"
   local _wl; _wl=$(template::envsubst_whitelist)
 
   for target in "${targets[@]}"; do
@@ -141,6 +159,7 @@ build::targets_split() {
   # Same envsubst resolution as build::targets — --split historically skipped
   # this, emitting literal ${LOK8S_USER_*}/${LOK8S_SPEC_*} (invalid on apply).
   build::_resolve_api "${domain_dir}"
+  build::_export_secrets_path "${domain_dir}"
   local _wl; _wl=$(template::envsubst_whitelist)
 
   for target in "${targets[@]}"; do
@@ -212,6 +231,7 @@ build::artifacts() {
     error "No targets directory: ${targets_dir}"
     return 1
   fi
+  build::_export_secrets_path "${PATH_CLUSTERS}/${domain}"
 
   # Resolve kubeconfig (some targets need it for cluster-aware kustomize
   # plugins like the khelm ChartRenderer kubeVersion check)

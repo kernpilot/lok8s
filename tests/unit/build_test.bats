@@ -243,3 +243,20 @@ metadata:
   local artifacts_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts/networking"
   [ -f "${artifacts_dir}/kustomization.yaml" ]
 }
+
+# --- build::_export_secrets_path (per-instance secret isolation) ---
+
+@test "build::_export_secrets_path redirects PATH_SECRETS to a domain's own store" {
+  local dd="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+
+  # No per-domain store: must be a clean no-op AND exit 0 — it's the helper's
+  # last command, so a non-zero would abort the build under set -e.
+  run build::_export_secrets_path "${dd}"
+  assert_success
+
+  # Store present: the secrets plugin is pointed at it (never the flat store).
+  export PATH_SECRETS="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${dd}/secrets"
+  build::_export_secrets_path "${dd}"
+  [ "${PATH_SECRETS}" = "${dd}/secrets" ]
+}
