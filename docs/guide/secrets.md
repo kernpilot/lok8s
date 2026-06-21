@@ -10,17 +10,20 @@ safely. No external secret store is required to get started.
   declarative YAML spec into a Kubernetes `Secret` at build time. See the
   [plugin reference](/reference/kustomize-plugins#secrets-generator) for every
   generator type (`passwd`, `bash`, `env`, `file`, `secretRef`, …).
-- Generated values are cached under **`$PATH_SECRETS`** (default `.secrets/`),
-  one file per key: `Secret.<name>.<namespace>.<key>`. **The cache is the source
-  of truth** — first build generates, later builds reuse, so output is stable.
-  Repos driving **multiple** instances isolate this **per domain** — see
-  [Per-environment isolation](#per-environment-isolation-multiple-instances).
+- Generated values are cached one file per key —
+  `Secret.<name>.<namespace>.<key>` — in a **per-domain store**,
+  `clusters/<domain>/secrets/`. **The store is the source of truth** — first
+  build generates, later builds reuse, so output is stable. Each domain has its
+  **own** store, so environments never share a secret (see
+  [Per-environment isolation](#per-environment-isolation)). A project with no
+  domain context falls back to one flat store (`$PATH_SECRETS`, default
+  `.secrets/`).
 - Plaintext cache files are **gitignored**. To share them, commit them
   **encrypted** with SOPS/age (below).
 
 ```
-.secrets/Secret.myapp.default.PASSWORD       ← plaintext (gitignored)
-.secrets/Secret.myapp.default.PASSWORD.enc   ← SOPS-encrypted (committed)
+clusters/app.example.com/secrets/Secret.myapp.default.PASSWORD       ← plaintext (gitignored)
+clusters/app.example.com/secrets/Secret.myapp.default.PASSWORD.enc   ← SOPS-encrypted (committed)
 ```
 
 ## Generating a secret
@@ -42,18 +45,22 @@ generators:
   - secret.yaml
 ```
 
-The first build generates `SESSION_KEY`, caches it, and emits the `Secret`. To
-rotate a value, delete its cache file and rebuild. (Charset options and how to
-generate proper cryptographic keys are covered in the
+`lo build <domain>` generates `SESSION_KEY` into that domain's store
+(`clusters/<domain>/secrets/`), caches it, and emits the `Secret`. To rotate a
+value, delete its cache file and rebuild. (Charset options and how to generate
+proper cryptographic keys are covered in the
 [reference](/reference/kustomize-plugins#generating-cryptographic-keys).)
 
 ## Setting an external value
 
 For secrets that come from outside (an API token, a vendor key), write the value
-straight into the cache instead of generating it:
+straight into the cache instead of generating it. Pass `--domain` so it lands in
+that domain's store (the flag also creates the store on first use):
 
 ```bash
-lo secrets set --name myapp --namespace default API_TOKEN <value>
+lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN <value>
+# omit the value to read it from a prompt / piped stdin (keeps it out of shell history):
+printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN
 ```
 
 It's then cached like any generated value and can be encrypted + committed.
@@ -95,38 +102,24 @@ teammates, commit them **encrypted** — no separate key ceremony, your SSH key
 
 ```bash
 # one-time: derive an age key from ~/.ssh/id_ed25519 and write .sops.yaml
-lo secrets init            # needs `sops` + `ssh-to-age` (b install)
+lo secrets init                                 # needs `sops` + `ssh-to-age` (b install)
 
-lo secrets encrypt         # write Secret.*.enc (SOPS-encrypted) for committing
-git add .secrets/*.enc     # .gitignore allows: .secrets/ + !.secrets/Secret.*.enc
+lo secrets --domain app.example.com encrypt     # write Secret.*.enc for committing
+git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commits only *.enc
 
 # on another machine / for a teammate whose age key is in .sops.yaml:
-lo secrets decrypt         # restore the plaintext cache from the .enc files
+lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
 
 Add teammates by putting their age public keys (derived from their SSH keys)
-into `.sops.yaml`'s `creation_rules`, then re-`encrypt`.
+into `.sops.yaml`'s `creation_rules`, then re-`encrypt`. Scope those rules by
+path to give each environment **different** recipients — see below.
 
-## Per-environment isolation (multiple instances)
+## Per-environment isolation
 
-A repo that drives **more than one** instance — dev and prod, or several
-tenants — must not let those instances share a secret store. lok8s isolates them
-**per domain**: a domain keeps its own store under `clusters/<domain>/secrets/`,
-and both the CLI and `lo build <domain>` use **only that store** for that domain.
-
-```
-clusters/kubehz.dev/secrets/Secret.app.default.PASSWORD{,.enc}
-clusters/kubehz.cloud/secrets/Secret.app.default.PASSWORD{,.enc}
-```
-
-Opt in by creating the directory; from then on it's automatic:
-
-```bash
-lo secrets --domain kubehz.cloud set --name app --namespace default API_TOKEN <v>
-lo build kubehz.cloud            # the secrets plugin reads clusters/kubehz.cloud/secrets/
-```
-
-Why this is the right default for anything multi-environment:
+The per-domain store isn't just organisation — it's the security boundary. A repo
+driving more than one instance (dev and prod, or several tenants) must never let
+them share a store:
 
 - **No silent sharing.** Cache keys are `Secret.<name>.<ns>.<key>` with no
   environment in them, so a *single* flat store hands dev and prod the same value
@@ -177,10 +170,13 @@ bytes.
 ## Inspecting
 
 ```bash
-lo secrets list                     # what's in the cache
-lo secrets print [pattern...]       # show value(s)
-lo secrets path                     # the resolved $PATH_SECRETS for this context
+lo secrets --domain <domain> list             # what's in that domain's store
+lo secrets --domain <domain> print [pattern]   # show value(s)
+lo secrets --domain <domain> path              # the resolved store path for the context
 ```
+
+(Omit `--domain` to act on the flat `$PATH_SECRETS` store — single-instance
+projects, or anything not scoped to a domain.)
 
 ## See also
 
