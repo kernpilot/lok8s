@@ -47,6 +47,16 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	if ctx.Cache == nil {
 		return nil, errs.New("cert generator requires PATH_SECRETS to be set")
 	}
+	if g.spec.CARoot {
+		if g.spec.CA || len(g.spec.Hosts) > 0 || g.spec.CARef != "" {
+			return nil, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no other fields")
+		}
+		caCrt, _, err := caRootCA(ctx) // load-or-create at CAROOT
+		if err != nil {
+			return nil, err
+		}
+		return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
+	}
 	if g.spec.CA && len(g.spec.Hosts) > 0 {
 		return nil, errs.New("cert: set either `ca: true` or `hosts:` (a leaf), not both")
 	}

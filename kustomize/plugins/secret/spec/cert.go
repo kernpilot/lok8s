@@ -26,6 +26,10 @@ type CertSpec struct {
 	// (an OWN CA — the thing leaves point to with caRef). Mutually exclusive with
 	// Hosts and CARef.
 	CA bool `yaml:"ca,omitempty"`
+	// CARoot emits the shared mkcert CAROOT CA's public cert as ca.crt (loading
+	// or creating the CA at CAROOT, mkcert-free) — for distributing trust into the
+	// cluster. Takes no other fields. Mutually exclusive with everything else.
+	CARoot bool `yaml:"caRoot,omitempty"`
 	// Hosts are the SANs for a LEAF certificate: DNS names, IPs, or wildcards
 	// like "*.kubehz.dev". Required for a leaf; must be empty when CA is set.
 	Hosts []string `yaml:"hosts,omitempty"`

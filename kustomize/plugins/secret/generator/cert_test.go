@@ -127,6 +127,40 @@ func TestCert_Leaf_DefaultCAROOT(t *testing.T) {
 	}
 }
 
+func TestCert_CARoot_EmitsSharedCAThatLeafChainsTo(t *testing.T) {
+	caroot := t.TempDir()
+	t.Setenv("CAROOT", caroot)
+	dir := t.TempDir()
+
+	// mkcert-ca equivalent: emit the CAROOT CA's public cert.
+	caOut, err := NewCert(&specpkg.CertSpec{CARoot: true}).Generate(certCtx(t, dir, "kube-system", "mkcert-ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCrt := entryMap(caOut)["ca.crt"]
+	if caCrt == nil {
+		t.Fatal("caRoot did not emit ca.crt")
+	}
+	if onDisk, _ := os.ReadFile(filepath.Join(caroot, "rootCA.pem")); string(caCrt) != string(onDisk) {
+		t.Error("emitted ca.crt does not match CAROOT/rootCA.pem")
+	}
+
+	// kubehz-tls equivalent: a default-CAROOT leaf must chain to that same CA.
+	leafOut, err := NewCert(&specpkg.CertSpec{Hosts: []string{"app.test"}}).Generate(certCtx(t, dir, "default", "tls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caCrt) {
+		t.Fatal("append caRoot CA failed")
+	}
+	blk, _ := pem.Decode(entryMap(leafOut)["tls.crt"])
+	leaf, _ := x509.ParseCertificate(blk.Bytes)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
+		t.Errorf("leaf does not chain to the caRoot-emitted CA: %v", err)
+	}
+}
+
 func TestCert_Validation(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]*specpkg.CertSpec{

@@ -301,6 +301,9 @@ cert:
 
 - **Default = shared CAROOT CA; `caRef` = own store CA** (auto-created on first
   use, so build order is irrelevant).
+- **`cert: {caRoot: true}`** (no `hosts`) emits the shared CAROOT CA's **public
+  cert** as `ca.crt` — for distributing trust into the cluster (e.g. a configmap
+  containerd or a pod reads), mkcert-free. The leaves it signed chain to it.
 - **Cache-first** like `passwd` — CA, key, and leaf are byte-stable across runs;
   rotate by deleting the cache file. RSA-3072 CA / RSA-2048 leaf; leaf validity
   2 y 3 m (under Apple's 825-day cap).
