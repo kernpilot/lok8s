@@ -65,6 +65,25 @@ printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp --name
 
 It's then cached like any generated value and can be encrypted + committed.
 
+## Provision-time credentials (shell env)
+
+Some secrets are consumed by the **CLI / provisioner** as shell environment
+variables — *before* a cluster (or any Kubernetes `Secret`) exists: a cloud API
+token, bare-metal credentials. Keep those in the managed store too — named after
+the env vars you need — and load them with `lo secrets env` instead of a loose
+`.env` file:
+
+```bash
+lo secrets --domain prod set HCLOUD_TOKEN <token> --name hetzner --namespace provisioning
+# …then, in your provisioning script:
+eval "$(lo secrets --domain prod env --name hetzner --namespace provisioning)"   # exports HCLOUD_TOKEN
+```
+
+`env` emits an `export <key>=<value>` line per key of the named secret, with the
+value shell-quoted (`%q`) so the `eval` is injection-safe. The creds get SOPS
+encryption + per-domain isolation like everything else — no plaintext `.env`
+sitting outside the model.
+
 ## No literals in the spec — generate, or pin once
 
 The Secret spec has **no literal/static value field**, by design: a plaintext
