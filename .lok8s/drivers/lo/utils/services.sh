@@ -117,30 +117,42 @@ EOF
   rm -rf "${tmp}"
 }
 
+# lo::certgen — path to the certgen CLI (built by `lo kustomize build` into
+# .kustomize/bin/), or non-zero if not built. It mints dev TLS via crypto/x509 —
+# the mkcert-binary replacement; trust install stays `lo trust` / `mkcert -install`.
+lo::certgen() {
+  local bin="${PATH_BASE}/.kustomize/bin/certgen"
+  [[ -x "${bin}" ]] || return 1
+  echo "${bin}"
+}
+
 lo::mkcert() {
   local domain="$1" cluster_yaml="$2"
   local cluster_domain
   cluster_domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
 
-  if command -v mkcert &>/dev/null; then
-    local tls_dir="${PATH_BASE}/.secrets/tls"
-    mkdir -p "${tls_dir}"
-
-    if [[ ! -f "${tls_dir}/tls.crt" ]] || [[ ! -f "${tls_dir}/tls.key" ]]; then
-      mkcert \
-        -cert-file "${tls_dir}/tls.crt" \
-        -key-file "${tls_dir}/tls.key" \
-        "${cluster_domain}" "*.${cluster_domain}"
-    fi
+  local cg
+  cg=$(lo::certgen) || {
+    echo "warning: certgen not built (run: lo kustomize build) — skipping dev TLS for ${cluster_domain}" >&2
+    return 0
+  }
+  local tls_dir="${PATH_BASE}/.secrets/tls"
+  mkdir -p "${tls_dir}"
+  if [[ ! -f "${tls_dir}/tls.crt" ]] || [[ ! -f "${tls_dir}/tls.key" ]]; then
+    "${cg}" \
+      -cert-file "${tls_dir}/tls.crt" \
+      -key-file "${tls_dir}/tls.key" \
+      "${cluster_domain}" "*.${cluster_domain}"
   fi
 }
 
-# lo::registry_ca_path — absolute path to mkcert's root CA, or empty if
-# mkcert is unavailable / not installed. Used to wire containerd trust.
+# lo::registry_ca_path — absolute path to the local dev CA (CAROOT/rootCA.pem),
+# or empty if certgen is unavailable. Used to wire containerd trust.
 lo::registry_ca_path() {
-  command -v mkcert &>/dev/null || { echo ""; return 0; }
+  local cg
+  cg=$(lo::certgen) || { echo ""; return 0; }
   local caroot
-  caroot=$(mkcert -CAROOT 2>/dev/null) || { echo ""; return 0; }
+  caroot=$("${cg}" -CAROOT 2>/dev/null) || { echo ""; return 0; }
   [[ -n "${caroot}" ]] || { echo ""; return 0; }
   echo "${caroot}/rootCA.pem"
 }
@@ -156,26 +168,17 @@ lo::registry_ca_path() {
 #
 # Idempotent: regenerated only when missing or when the SAN set the cert
 # was built for changed (e.g. IPs shifted, a mirror was added/removed).
-# Requires `mkcert -install` to have been run once on the host so both the
-# host Docker client and `curl` trust the resulting cert. No-op (with a
-# warning) if mkcert is not on PATH.
+# certgen mints the cert (creating the CA at CAROOT if needed); the host Docker
+# client + curl trust it only after `lo trust` (mkcert -install) has run once.
 lo::mkcert_registries() {
   registry::is_tls || return 0
 
-  if ! command -v mkcert &>/dev/null; then
-    echo "error: spec.registries.tls is true but mkcert is not on PATH." >&2
-    echo "       Install mkcert (managed by 'b') and run 'mkcert -install' once." >&2
+  local cg
+  cg=$(lo::certgen) || {
+    echo "error: spec.registries.tls is true but certgen is not built." >&2
+    echo "       Run 'lo kustomize build', then 'lo trust' once so docker push trusts the CA." >&2
     return 1
-  fi
-
-  local ca_path
-  ca_path=$(lo::registry_ca_path)
-  if [[ -z "${ca_path}" || ! -f "${ca_path}" ]]; then
-    echo "error: mkcert root CA not found (run 'mkcert -install' once on this host)." >&2
-    echo "       Registry TLS requires the mkcert CA in the host trust store so" >&2
-    echo "       'docker push' validates the registry cert without insecure-registries." >&2
-    return 1
-  fi
+  }
 
   local tls_dir="${PATH_BASE}/.secrets/tls/registries"
   local crt="${tls_dir}/tls.crt"
@@ -188,6 +191,7 @@ lo::mkcert_registries() {
   # contribute the upstream domain they impersonate inside the cluster.
   # Every registry contributes its IP so raw-IP refs verify.
   local -a sans=()
+  # shellcheck disable=SC2329  # invoked indirectly via `registry::each` below
   _lo_mkcert_san() {
     # registry::each invokes this callback with 6 positional fields; this one only
     # needs ip/reg_domain/host, but the full signature documents the contract.
@@ -223,7 +227,7 @@ lo::mkcert_registries() {
     return 0
   fi
 
-  mkcert -cert-file "${crt}" -key-file "${key}" "${uniq_sans[@]}"
+  "${cg}" -cert-file "${crt}" -key-file "${key}" "${uniq_sans[@]}"
   printf '%s\n' "${uniq_sans[@]}" > "${sans_file}"
   debug "generated registry TLS cert with SANs: ${uniq_sans[*]}"
 }

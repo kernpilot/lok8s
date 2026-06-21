@@ -1,8 +1,6 @@
 package generator
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
@@ -143,42 +141,14 @@ func storeCA(ctx *plugin.Context, ref string) (cert, key []byte, err error) {
 }
 
 // caRootCA loads the shared mkcert CA from CAROOT, creating it there (exactly as
-// mkcert would) if absent. This is the DEFAULT signing CA — one CA per developer,
-// shared across projects and trustable via `mkcert -install`. Note: it writes
-// rootCA.pem / rootCA-key.pem under the user's CAROOT (a side effect outside
-// PATH_SECRETS); use caRef for a self-contained own CA (CI / isolated instances).
+// mkcert would) if absent — the DEFAULT signing CA, shared across projects and
+// trustable via `mkcert -install` / `lo trust`. It writes rootCA.pem under the
+// user's CAROOT (a side effect outside PATH_SECRETS); use caRef for a
+// self-contained own CA (CI / isolated instances).
 func caRootCA(ctx *plugin.Context) (cert, key []byte, err error) {
-	dir := certgen.CARoot()
-	if dir == "" {
-		return nil, nil, errs.New("cert: cannot resolve CAROOT (set $CAROOT, or use caRef for an own CA)")
-	}
-	certPath := filepath.Join(dir, certgen.RootName)
-	keyPath := filepath.Join(dir, certgen.RootKeyName)
-
-	if c, e := os.ReadFile(certPath); e == nil {
-		k, e2 := os.ReadFile(keyPath)
-		if e2 != nil {
-			return nil, nil, errs.Newf("cert: CAROOT %s has %s but no %s (keyless CA cannot sign) — run `mkcert -install` or remove it", dir, certgen.RootName, certgen.RootKeyName)
-		}
-		return c, k, nil
-	}
-	// CA absent → create both (mkcert's newCA).
-	key, err = certgen.NewCAKey(ctx.Rand)
+	cert, key, err = certgen.LoadOrCreateCARoot(ctx.Rand)
 	if err != nil {
-		return nil, nil, errs.Wrap("CAROOT ca.key", err)
-	}
-	cert, err = certgen.SelfSignCA(ctx.Rand, key)
-	if err != nil {
-		return nil, nil, errs.Wrap("CAROOT ca.crt", err)
-	}
-	if err = os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, errs.Wrap("CAROOT", err)
-	}
-	if err = os.WriteFile(keyPath, key, 0o400); err != nil {
-		return nil, nil, errs.Wrap("CAROOT key", err)
-	}
-	if err = os.WriteFile(certPath, cert, 0o644); err != nil {
-		return nil, nil, errs.Wrap("CAROOT cert", err)
 	}
 	return cert, key, nil
 }

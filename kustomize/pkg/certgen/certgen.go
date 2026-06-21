@@ -209,6 +209,43 @@ func SignLeaf(randr io.Reader, caCertPEM, caKeyPEM, leafKeyPEM []byte, hosts []s
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
+// LoadOrCreateCARoot loads the shared CA (cert + key PEM) from CAROOT, creating
+// it there — exactly as mkcert would — if absent. This is the one place that
+// touches CAROOT files; the generator and the certgen CLI both call it.
+func LoadOrCreateCARoot(randr io.Reader) (cert, key []byte, err error) {
+	dir := CARoot()
+	if dir == "" {
+		return nil, nil, fmt.Errorf("cannot resolve CAROOT (set $CAROOT)")
+	}
+	certPath := filepath.Join(dir, RootName)
+	keyPath := filepath.Join(dir, RootKeyName)
+
+	if c, e := os.ReadFile(certPath); e == nil {
+		k, e2 := os.ReadFile(keyPath)
+		if e2 != nil {
+			return nil, nil, fmt.Errorf("CAROOT %s has %s but no %s (keyless CA cannot sign) — run `mkcert -install` / `lo trust`, or remove it", dir, RootName, RootKeyName)
+		}
+		return c, k, nil
+	}
+	// CA absent → create both (mkcert's newCA).
+	if key, err = NewCAKey(randr); err != nil {
+		return nil, nil, err
+	}
+	if cert, err = SelfSignCA(randr, key); err != nil {
+		return nil, nil, err
+	}
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create CAROOT %s: %w", dir, err)
+	}
+	if err = os.WriteFile(keyPath, key, 0o400); err != nil {
+		return nil, nil, fmt.Errorf("write CA key: %w", err)
+	}
+	if err = os.WriteFile(certPath, cert, 0o644); err != nil {
+		return nil, nil, fmt.Errorf("write CA cert: %w", err)
+	}
+	return cert, key, nil
+}
+
 func randomSerial(randr io.Reader) (*big.Int, error) {
 	limit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(randr, limit)

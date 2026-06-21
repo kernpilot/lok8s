@@ -160,11 +160,12 @@ lo::write_certs_d() {
       mkdir -p "${certs_d}/.ca"
       cp "${ca_src}" "${certs_d}/.ca/rootCA.pem"
     else
-      echo "warning: registry TLS enabled but mkcert root CA not found;" >&2
-      echo "         containerd pulls will fail cert verification. Run 'mkcert -install'." >&2
+      echo "warning: registry TLS enabled but the local dev CA was not found;" >&2
+      echo "         containerd pulls will fail cert verification. Run 'lo trust'." >&2
     fi
   fi
 
+  # shellcheck disable=SC2329  # invoked indirectly via `registry::each` below
   _lo_write_certs_d_entry() {
     local name="$1" ip="$2" url="$3" reg_domain="$4" host="$5" type="$6"
     [[ -n "${ip}" ]] || return 0
