@@ -57,17 +57,160 @@ lo::render_registry_config() {
   printf '%s\n%s\n' "${without_http}" "$(lo::registry_http_block)"
 }
 
+# lo::registries_tls_cert — mint the TLS cert the registries serve in TLS mode by
+# driving the secrets.lok8s.dev Secret plugin (the binary lok8s already ships and
+# requires — no mkcert/certgen). The cert is a `cert:` leaf whose SANs are built
+# from .registries.json so it covers every registry IP plus the framework
+# hostnames; the plugin signs it with the shared dev CA at CAROOT (created on
+# demand) and we extract tls.crt/tls.key to .secrets/tls/registries/ for the
+# container mounts.
+#
+# A separate cert from any application wildcard because the SAN list is
+# registry-derived and has its own lifecycle. Idempotent: re-minted only when
+# missing or when the SAN set changed (IPs shifted, a mirror added/removed). The
+# host Docker client + containerd trust it once `lo trust` (mkcert -install) has
+# installed the CA.
+lo::registries_tls_cert() {
+  registry::is_tls || return 0
+
+  local plugin_bin="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}/secrets.lok8s.dev/v1/secret/Secret"
+  # The Secret plugin mints the cert. It's needed across the lok8s flow anyway, so
+  # build it on demand if it's missing and we can (the `lo kustomize build` path is
+  # in scope under `lo`); otherwise fail with guidance.
+  if [[ ! -x "${plugin_bin}" ]] && declare -F kustomize::build >/dev/null; then
+    debug "registry TLS: Secret plugin missing — building it (lo kustomize build)"
+    kustomize::build || true
+  fi
+  if [[ ! -x "${plugin_bin}" ]]; then
+    echo "error: spec.registries.tls is true (default) but the Secret plugin is not built at" >&2
+    echo "       ${plugin_bin}. Build it with 'lo kustomize build' (needs go), or set" >&2
+    echo "       spec.registries.tls: false for plain-HTTP registries. Then retry." >&2
+    return 1
+  fi
+  if [[ -z "${PATH_SECRETS:-}" ]]; then
+    echo "error: PATH_SECRETS is not set — cannot mint the registry TLS cert" >&2
+    return 1
+  fi
+
+  local tls_dir="${PATH_BASE}/.secrets/tls/registries"
+  local crt="${tls_dir}/tls.crt"
+  local key="${tls_dir}/tls.key"
+  local sans_file="${tls_dir}/.sans"
+  mkdir -p "${tls_dir}"
+
+  # Build the SAN list (hostnames first, then IPs) from the registry JSON.
+  # Framework registries contribute their canonical hostname; mirrors contribute
+  # the upstream domain they impersonate. Every registry contributes its IP.
+  local -a sans=()
+  _lo_registry_san() {
+    local name="$1" ip="$2" url="$3" reg_domain="$4" host="$5" type="$6"
+    [[ -n "${host}" ]] && sans+=("${host}")
+    [[ -n "${reg_domain}" ]] && sans+=("${reg_domain}")
+    [[ -n "${ip}" ]] && sans+=("${ip}")
+  }
+  registry::each _lo_registry_san
+
+  if (( ${#sans[@]} == 0 )); then
+    echo "error: no registry SANs resolved — cannot mint registry TLS cert" >&2
+    return 1
+  fi
+
+  # Deduplicate while preserving order.
+  local -A seen=()
+  local -a uniq_sans=()
+  local s
+  for s in "${sans[@]}"; do
+    [[ -n "${seen[${s}]:-}" ]] && continue
+    seen[${s}]=1
+    uniq_sans+=("${s}")
+  done
+
+  # Up to date? (cert present and the SAN set unchanged since the last mint)
+  local sans_repr
+  sans_repr=$(printf '%s\n' "${uniq_sans[@]}")
+  if [[ -f "${crt}" && -f "${key}" && -f "${sans_file}" ]] \
+    && [[ "$(cat "${sans_file}")" == "${sans_repr}" ]]; then
+    debug "registry TLS cert up to date (${#uniq_sans[@]} SANs)"
+    return 0
+  fi
+
+  # (Re)mint. The cert: generator caches its leaf by Secret name, so drop any
+  # stale cache entry first to force a fresh signature for the new SAN set.
+  local name="registries-tls" ns="lok8s-system"
+  rm -f "${PATH_SECRETS}/Secret.${name}.${ns}.tls.crt" \
+        "${PATH_SECRETS}/Secret.${name}.${ns}.tls.key"
+
+  # JSON array of SANs (jq guarantees valid quoting); YAML accepts it inline.
+  local hosts_json
+  hosts_json=$(printf '%s\n' "${uniq_sans[@]}" | jq -R . | jq -s -c .)
+
+  local manifest
+  manifest=$(cat <<EOF
+apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: ${name}
+  namespace: ${ns}
+type: kubernetes.io/tls
+cert:
+  hosts: ${hosts_json}
+EOF
+)
+
+  local out
+  out=$(printf '%s\n' "${manifest}" | "${plugin_bin}") || {
+    echo "error: the Secret plugin failed to mint the registry TLS cert" >&2
+    return 1
+  }
+
+  local crt_b64 key_b64
+  crt_b64=$(printf '%s\n' "${out}" | yq -r '.data["tls.crt"]')
+  key_b64=$(printf '%s\n' "${out}" | yq -r '.data["tls.key"]')
+  if [[ -z "${crt_b64}" || "${crt_b64}" == "null" || -z "${key_b64}" || "${key_b64}" == "null" ]]; then
+    echo "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)" >&2
+    return 1
+  fi
+  printf '%s' "${crt_b64}" | base64 -d > "${crt}"
+  printf '%s' "${key_b64}" | base64 -d > "${key}"
+  printf '%s\n' "${sans_repr}" > "${sans_file}"
+  debug "minted registry TLS cert with SANs: ${uniq_sans[*]}"
+}
+
+# lo::registries_tls_nudge — warn (non-fatally) if registry TLS is on but the dev
+# CA isn't trusted by this host yet. The cluster and in-cluster pulls work
+# regardless (containerd trusts via the explicit certs.d CA file); only host
+# `docker push` (the Tilt build loop) validates against the system trust store,
+# so it fails until the CA is trusted. Detection is best-effort: `openssl verify`
+# checks the same host store the Docker daemon uses.
+lo::registries_tls_nudge() {
+  registry::is_tls || return 0
+  command -v openssl &>/dev/null || return 0   # can't check → stay quiet
+
+  local caroot="${CAROOT:-${XDG_DATA_HOME:-${HOME}/.local/share}/mkcert}"
+  local ca="${caroot}/rootCA.pem"
+  if [[ -f "${ca}" ]] && openssl verify "${ca}" &>/dev/null; then
+    return 0   # CA is in the host trust store → host pushes will verify
+  fi
+
+  warn "Registry TLS is on, but this machine doesn't trust the dev CA yet —"
+  warn "  in-cluster pulls work, but 'docker push' to the build registry will fail."
+  warn "  Fix it once:  lo trust   (or insecure-registries / a rootless runtime)"
+  warn "  How: https://lok8s.io/guide/shared-registries#host-push-trust-options"
+}
+
 lo::registries() {
   local domain="$1" cluster_yaml="$2"
   local registry_config_dir="${PATH_LOK8S}/drivers/lo/cluster/registry"
 
-  # In TLS mode every registry container mounts the shared mkcert cert.
+  # In TLS mode every registry container mounts the shared cert minted by
+  # lo::registries_tls_cert (which must run first — it does, in driver::provision).
   local tls_mount_args=()
   if registry::is_tls; then
     local cert_dir="${PATH_BASE}/.secrets/tls/registries"
     if [[ ! -f "${cert_dir}/tls.crt" ]] || [[ ! -f "${cert_dir}/tls.key" ]]; then
-      echo "error: registry TLS enabled but cert missing at ${cert_dir}" >&2
-      echo "       lo::mkcert_registries must run before lo::registries." >&2
+      echo "error: spec.registries.tls is enabled but no cert at ${cert_dir}" >&2
+      echo "       lo::registries_tls_cert must run before lo::registries (ensure the" >&2
+      echo "       Secret plugin is built: lo kustomize build)." >&2
       return 1
     fi
     tls_mount_args=(--volume "${cert_dir}:${LO_REGISTRY_TLS_MOUNT}:ro")

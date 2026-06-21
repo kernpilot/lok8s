@@ -9,6 +9,10 @@ spec:
     version: "v1.31.4"
   cluster:
     domain: 130.lok8s.dev
+  # Pin plain HTTP: e2e snapshots the certs.d goldens; the TLS default (true)
+  # would rewrite them to https+ca and pull in a generated CA. Off = deterministic.
+  registries:
+    tls: false
   provider:
     name: hetzner
     configRef: hetzner.json

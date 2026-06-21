@@ -53,13 +53,15 @@ registry::config_generate() {
   shared_enabled=$(yq -r '.spec.registries.shared.enabled' "${cluster_yaml}")
   [[ "${shared_enabled}" != "null" && -n "${shared_enabled}" ]] || shared_enabled="true"
 
-  # TLS mode (default false for back-compat). When true, registries serve
-  # HTTPS on :443 with a mkcert cert; clients trust them via the mkcert CA.
+  # TLS mode (default true). When enabled, registries serve HTTPS on :443 with a
+  # cert minted by the Secret plugin (the `cert:` generator), signed by the dev
+  # CA at CAROOT — no `insecure-registries` needed. Opt out with `tls: false`
+  # (plain HTTP on :80, requires the registry IP range in `insecure-registries`).
   local tls_enabled
   tls_enabled=$(yq -r '.spec.registries.tls' "${cluster_yaml}")
   case "${tls_enabled}" in
-    true)  tls_enabled="true" ;;
-    false|null|"") tls_enabled="false" ;;
+    false) tls_enabled="false" ;;
+    true|null|"") tls_enabled="true" ;;
     *)
       echo "error: spec.registries.tls must be true or false, got '${tls_enabled}'" >&2
       return 1

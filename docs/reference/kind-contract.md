@@ -70,8 +70,8 @@ drivers/lo/
     config.sh       lo::read_*_config, validators, spec-env export
     render.sh       kind config YAML rendering
     network.sh      Docker network lifecycle
-    registries.sh   registry container lifecycle
-    services.sh     CoreDNS + mkcert setup
+    registries.sh   registry container lifecycle (+ registry TLS cert)
+    services.sh     CoreDNS setup
     tunnel.sh       SSH tunnel + kubeconfig rewrite
     expose.sh       nginx reverse proxy
     remote.sh       remote VM provisioning + CI mode
@@ -84,7 +84,7 @@ drivers/lo/
 1. Read config (`lo::read_config` → network, registries, nodes, LB)
 2. Validate IPs against subnets
 3. Create Docker bridge network + shared registry network
-4. Generate the registry TLS cert via mkcert (`lo::mkcert_registries`, no-op unless `registries.tls`)
+4. Mint the registry TLS cert via the Secret plugin (`lo::registries_tls_cert`, default; skipped when `registries.tls: false`)
 5. Start registry containers (build, cache, pull-through mirrors)
 6. Write containerd `certs.d/` tree (bind-mounted into kind nodes)
 7. Render + create kind cluster
@@ -94,10 +94,13 @@ drivers/lo/
 11. Apply registry ConfigMap + CoreDNS config (incl. `spec.coredns` →
     `coredns-custom` ConfigMap; see
     [Custom in-cluster DNS](/guide/local-dev#custom-in-cluster-dns))
-12. Generate wildcard application TLS via mkcert
+
+> The application wildcard TLS is **not** a driver step: declare it as a
+> [`cert:` Secret](/reference/kustomize-plugins#development-certificates-cert)
+> in your targets (the gateway serves it), trusted once with `lo trust`.
 
 > Step 4 must precede steps 5 and 6: the registry containers mount the
-> cert, and `certs.d` references mkcert's root CA. The cert is generated
+> cert, and `certs.d` references the dev root CA. The cert is minted
 > before the containers start.
 
 **Provision steps (remote, `--remote` flag):**
@@ -110,7 +113,7 @@ drivers/lo/
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `tls` | `false` | Serve registries over HTTPS (`:443`) with a mkcert cert; no `insecure-registries` needed |
+| `tls` | `true` | Serve registries over HTTPS (`:443`) with a cert minted by the Secret plugin (`cert:` generator); no `insecure-registries` needed. `false` = plain HTTP `:80` |
 | `shared` | `true` | Use shared pull-through mirrors on dedicated network |
 | `network.name` | `lok8s-registries` | Docker network name for shared mirrors |
 | `network.subnet` | `10.125.200.0/24` | Subnet for the shared registry network |
@@ -121,7 +124,7 @@ drivers/lo/
 
 **Two registry kinds**: framework-private (`build`, `cache`) live on the project subnet and never move; pull-through mirrors (`io-*`) optionally live on the shared registry network.
 
-**Containerd wiring**: hostname/IP-to-registry mapping is written by `lo::write_certs_d` to `clusters/<domain>/.containerd/certs.d/` BEFORE `kind create cluster`. Each kind node bind-mounts that directory to `/etc/containerd/certs.d/` via `extraMounts`, so containerd reads it at startup. No post-create `docker exec` step. In plain mode each `hosts.toml` uses `server = "http://<ip>"` + `skip_verify = true`; in TLS mode it uses `server = "https://<ip>"` + `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` (a copy of mkcert's root CA placed in the bind-mounted tree).
+**Containerd wiring**: hostname/IP-to-registry mapping is written by `lo::write_certs_d` to `clusters/<domain>/.containerd/certs.d/` BEFORE `kind create cluster`. Each kind node bind-mounts that directory to `/etc/containerd/certs.d/` via `extraMounts`, so containerd reads it at startup. No post-create `docker exec` step. In plain mode each `hosts.toml` uses `server = "http://<ip>"` + `skip_verify = true`; in TLS mode it uses `server = "https://<ip>"` + `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` (a copy of the dev root CA at CAROOT placed in the bind-mounted tree).
 
 **Destroy behavior:** `driver::destroy` removes only per-project registries (build, cache). Shared pull-through mirror containers and the `lok8s-registries` network are **not** removed, since they may be in use by other projects. Use `lo registry clean --shared` to explicitly remove shared registries.
 

@@ -146,7 +146,7 @@ lo::write_certs_d() {
   find "${certs_d}" -mindepth 1 -delete 2>/dev/null || true
 
   # TLS mode: containerd connects over HTTPS and verifies the registry
-  # cert against mkcert's root CA. Copy the CA into the certs.d tree so
+  # cert against the local dev root CA. Copy the CA into the certs.d tree so
   # each hosts.toml can reference it via the bind mount. Plain mode keeps
   # the HTTP + skip_verify behavior (no CA needed).
   local tls=0
@@ -154,14 +154,17 @@ lo::write_certs_d() {
   if registry::is_tls; then
     tls=1
     scheme="https"
-    local ca_src
-    ca_src=$(lo::registry_ca_path 2>/dev/null || echo "")
-    if [[ -n "${ca_src}" && -f "${ca_src}" ]]; then
+    # Resolve the shared dev CA the way mkcert (and the cert: generator) do
+    # (binary-free): $CAROOT, else the XDG/OS data dir + /mkcert. The registry
+    # cert is signed by this CA; `lo trust` (mkcert -install) installs it.
+    local caroot="${CAROOT:-${XDG_DATA_HOME:-${HOME}/.local/share}/mkcert}"
+    local ca_src="${caroot}/rootCA.pem"
+    if [[ -f "${ca_src}" ]]; then
       mkdir -p "${certs_d}/.ca"
       cp "${ca_src}" "${certs_d}/.ca/rootCA.pem"
     else
-      echo "warning: registry TLS enabled but the local dev CA was not found;" >&2
-      echo "         containerd pulls will fail cert verification. Run 'lo trust'." >&2
+      echo "warning: registry TLS enabled but the local dev CA was not found at" >&2
+      echo "         ${ca_src}; containerd pulls will fail cert verification. Run 'lo trust'." >&2
     fi
   fi
 

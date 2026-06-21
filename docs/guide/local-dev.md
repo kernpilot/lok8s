@@ -172,8 +172,15 @@ When `lo up` runs, the Lo driver performs these steps:
 8. **Apply CoreDNS** config and patches — plus any `spec.coredns` from the
    cluster spec (see [Custom in-cluster DNS](#custom-in-cluster-dns))
 9. **Apply bootstrap addons** — framework runs `.lok8s/libs/bootstrap` to apply `spec.bootstrap` addons in order (default: `[cilium]`), waits for health between each
-10. **Generate TLS certs** via mkcert
-11. **Start Tilt** for live development
+10. **Start Tilt** for live development
+
+> **TLS** is not minted by the driver. The gateway serves a
+> [`cert:` Secret](/reference/kustomize-plugins#development-certificates-cert)
+> you declare in your targets — a leaf signed by your shared dev CA at
+> `CAROOT`, created on first build. Trust it once per machine with
+> [`lo trust`](/guide/secrets) so browsers and `curl` accept `*.<domain>`.
+> (Registry TLS, when `spec.registries.tls` is set, is minted the same way at
+> provision time — see the [kind contract](/reference/kind-contract).)
 
 ## Registry Mirrors
 

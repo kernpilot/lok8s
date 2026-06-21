@@ -105,43 +105,47 @@ spec:
 
 With `shared.enabled: false`, all registry containers use the project network; `shared.network` is ignored. `build` (`.101`) and `cache` (`.102`) are unaffected — they live on the project subnet in both modes.
 
-## TLS registries (no `insecure-registries`)
+## TLS registries (default)
 
-By default the registries serve plain **HTTP** on port `:80` and are addressed by raw IP. For the host Docker daemon to push to them, the registry IP range must be listed in `/etc/docker/daemon.json` under `insecure-registries` — a per-machine manual step that is easy to get wrong (a single CIDR typo silently breaks every cluster's push).
+Registries serve **HTTPS** on port `:443` **by default** (`spec.registries.tls: true`). The cert is minted by the [Secret plugin](/reference/kustomize-plugins#development-certificates-cert) — the same `cert:` generator used for application TLS — signed by your shared dev CA at `CAROOT`, with **no `mkcert` binary** to mint (the CA is created on demand). This avoids the fragile `insecure-registries` daemon edit that plain HTTP otherwise needs (a single CIDR typo there silently breaks every cluster's push).
 
-Set `spec.registries.tls: true` to serve the registries over **HTTPS** with a [mkcert](https://github.com/FiloSottile/mkcert)-signed certificate instead:
+Opt out for plain **HTTP** on `:80` (addressed by raw IP, with the registry IP range listed in `/etc/docker/daemon.json` under `insecure-registries`):
 
 ```yaml
 spec:
   registries:
-    tls: true
+    tls: false   # default is true
 ```
 
-What this does:
+What this does (in the default TLS mode):
 
-- **One cert for all registries.** `lo provision` generates a single certificate into `.secrets/tls/registries/` whose Subject Alternative Names cover every registry's IP plus the framework hostnames `lok8s.local` and `lok8s.cache`. It is regenerated automatically if the IP/hostname set changes (e.g. you add a mirror or change the subnet).
+- **One cert for all registries.** At provision time `lo provision` drives the [Secret plugin](/reference/kustomize-plugins#development-certificates-cert) to mint a single certificate into `.secrets/tls/registries/` whose Subject Alternative Names cover every registry's IP plus the framework hostnames `lok8s.local` and `lok8s.cache`. It is re-minted automatically if the IP/hostname set changes (e.g. you add a mirror or change the subnet).
 - **Registries listen on `:443`.** TLS mode moves the listen port from `:80` to `:443` so that a bare-IP `docker push <ip>/...` — which the Docker client resolves to the HTTPS default port — reaches the registry with no explicit port in the ref.
-- **Host `docker push` validates over HTTPS.** Because mkcert installs its root CA into the system trust store (`mkcert -install`), the Docker client (and `curl`) trust the registry cert. **No `insecure-registries` entry is required.**
-- **Containerd in the kind nodes trusts the same cert.** Each `hosts.toml` is written with `server = "https://<ip>"` and `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` — a copy of mkcert's root CA placed in the bind-mounted `certs.d` tree. No `skip_verify`.
+- **Containerd in the kind nodes trusts the cert directly.** Each `hosts.toml` is written with `server = "https://<ip>"` and `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` — a copy of the dev root CA (`CAROOT`) placed in the bind-mounted `certs.d` tree. This works **without** `mkcert -install`: containerd verifies against the explicit CA file, so in-cluster pulls trust the registries out of the box. No `skip_verify`.
+- **Host `docker push` needs the CA trusted** (in-cluster pulls don't). Run [`lo trust`](/guide/secrets) once — or pick another option in [Host push trust options](#host-push-trust-options) below. Then `docker push` (and `curl`) trust the registries with **no `insecure-registries` entry**.
 
-### Prerequisite: `mkcert -install`
+### Host push trust options {#host-push-trust-options}
 
-Registry TLS relies on the mkcert root CA being in the host trust store. Run this **once** per machine before provisioning a TLS cluster:
+In-cluster pulls work out of the box — containerd trusts the cert via the explicit `certs.d` CA file. Only the **host** `docker push` (Tilt's build loop) must trust the registry cert, because the host Docker daemon validates against its own trust store. `lo provision` mints the cert regardless; you make the host trust it once, by **one** of these:
 
-```bash
-b install mkcert      # if not already managed by b
-mkcert -install       # adds the local CA to the system + browser trust stores
-```
+1. **Trust the dev CA — recommended.**
+   ```bash
+   b install mkcert     # one-time, if not already managed by b
+   lo trust             # wraps `mkcert -install`: installs the dev CA system + browser-wide
+   ```
+   The same CA also makes browsers and `curl` trust your application `*.<domain>` TLS, so this is the one step that covers everything. Needs `sudo` once — see [Trusting the dev CA](/guide/secrets#trusting-the-dev-ca-lo-trust).
 
-`~/.local/share/mkcert/rootCA.pem` is the trust anchor for **both** the host Docker client and containerd inside the kind nodes. If `tls: true` but mkcert is missing or `mkcert -install` was never run, `lo provision` fails fast with a clear message rather than producing a registry the host can't push to.
+2. **Skip verification with `insecure-registries`.** Add the registry IP range to `/etc/docker/daemon.json` under `insecure-registries` and restart Docker. No CA install, but pushes are **unverified** (the fragility TLS is meant to avoid) — least preferred.
 
-> This is a host-level step that cannot be automated by lok8s — installing a CA into the system trust store requires the user's own privileges and consent. It is the only manual prerequisite for TLS registries.
+3. **Per-registry CA, or a rootless runtime.** Trust just this registry (no system-wide change) by dropping `$CAROOT/rootCA.pem` at the daemon's per-registry path: rootful Docker reads `/etc/docker/certs.d/<registry>/ca.crt` (still `sudo`); **rootless Docker / Podman** keep that tree under your home — e.g. Podman reads `~/.config/containers/certs.d/<registry>/ca.crt` — so you can add it **without `sudo`**.
+
+> Installing a CA (option 1 or 3) needs your own privileges/consent, so lok8s can't fully automate it. If the CA isn't trusted, the cluster still comes up but host `docker push` fails verification until you pick one of the above; `lo up` nudges you. (If `tls: true` but the Secret plugin isn't built, `lo provision` fails fast.)
 
 ### Verifying
 
 ```bash
 lo registry status                 # catalog URLs show https:// in TLS mode
-curl https://<build-ip>/v2/        # 200, no -k needed (mkcert CA trusted)
+curl https://<build-ip>/v2/        # 200, no -k needed (dev CA trusted via lo trust)
 ```
 
 ## Managing shared registries

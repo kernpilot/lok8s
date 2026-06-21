@@ -85,10 +85,10 @@ driver::provision() {
         lo::registry_network
       fi
 
-      # Registry TLS cert (mkcert) — must exist before the registry
-      # containers start (they mount it) and before certs.d is written
-      # (it references the mkcert root CA). No-op unless spec.registries.tls.
-      lo::mkcert_registries
+      # Registry TLS cert — mint it (via the Secret plugin) before the registry
+      # containers start (they mount it) and before certs.d is written (it
+      # references the dev CA). No-op unless spec.registries.tls.
+      lo::registries_tls_cert
 
       # Registries + containerd config (must exist before kind create)
       lo::registries "${domain}" "${cluster_yaml}"
@@ -118,11 +118,14 @@ driver::provision() {
       kapply::run registries lo::apply_local_registry_hosting "${domain}"
       kapply::run registries lo::registry_configmap "${domain}" "${cluster_yaml}"
       kapply::run coredns lo::coredns "${domain}"
-      lo::mkcert "${domain}" "${cluster_yaml}"
 
       if [[ "${LOK8S_REMOTE_EXPOSE:-false}" == "true" ]]; then
         lo::expose "${cluster_name}" "${cluster_yaml}"
       fi
+
+      # If registry TLS is on (default) but the dev CA isn't trusted yet, nudge
+      # the user to `lo trust` — host `docker push` validates against it.
+      lo::registries_tls_nudge
       ;;
     *)
       echo "error: unsupported Lo runtime: ${runtime}" >&2

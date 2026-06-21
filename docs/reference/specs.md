@@ -128,7 +128,7 @@ spec:
     name: local                  # Bridge network name (default: metadata.name)
     cidr: "10.125.125.0/24"     # /24 slot — slot-derived from domain for *.lok8s.dev
   registries:                    # Registry mirror configuration
-    tls: false                   # mkcert-signed HTTPS registries (default: false)
+    tls: true                    # HTTPS registries (cert: generator-minted; default: true)
     shared:
       enabled: true              # Pull-through mirrors on a shared network (default: true)
       network:
@@ -277,7 +277,7 @@ lok8s cluster ships with **two framework-private registries** plus
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `tls` | no (default `false`) | Serve registries over HTTPS with a mkcert-signed cert (see [TLS](#registry-tls-mkcert) below) |
+| `tls` | no (default `true`) | HTTPS registries with a cert minted by the Secret plugin; set `false` for plain HTTP (see [TLS](#registry-tls-mkcert) below) |
 | `shared.enabled` | no (default `true`) | Pull-through mirrors live on the shared network |
 | `shared.network.name` | no (default `lok8s-registries`) | Shared registry network name |
 | `shared.network.cidr` | no (default `10.125.200.0/24`) | Shared registry network CIDR |
@@ -291,35 +291,43 @@ port depends on the mode: **`:80`** in the default plain-HTTP mode, or
 the Docker client resolves to the HTTPS default port, reaches the
 registry without an explicit port in the ref).
 
-##### Registry TLS (mkcert) {#registry-tls-mkcert}
+##### Registry TLS {#registry-tls-mkcert}
 
-With `spec.registries.tls: true`, every registry (framework-private
-**and** pull-through mirrors) serves HTTPS with a certificate signed by
-[mkcert](https://github.com/FiloSottile/mkcert)'s local CA. This removes
-the need for an `insecure-registries` entry in the host Docker daemon
-configuration:
+TLS is the **default** (`spec.registries.tls: true`; set `false` for plain
+HTTP). Every registry (framework-private **and** pull-through mirrors)
+serves HTTPS with a certificate minted by the
+[Secret plugin](/reference/kustomize-plugins#development-certificates-cert)
+(the same `cert:` generator used for application TLS), signed by your
+shared dev CA at `CAROOT`. This removes the need for an
+`insecure-registries` entry in the host Docker daemon configuration:
 
-- The cert is generated once into `.secrets/tls/registries/` with every
+- The cert is minted into `.secrets/tls/registries/` with every
   registry's **IP** and (for framework registries) **hostname**
   (`lok8s.local`, `lok8s.cache`) as Subject Alternative Names. It is
-  regenerated automatically if the IP/hostname set changes.
-- **Host `docker push`** validates the cert against the mkcert root CA in
-  the system trust store — so pushes to `lok8s.local`/`lok8s.cache` (and
-  raw IPs) succeed over HTTPS with no daemon configuration.
-- **Containerd inside the kind nodes** trusts the same cert: each
-  `hosts.toml` references a copy of mkcert's `rootCA.pem` mounted into the
-  node's `certs.d` tree (no `skip_verify`).
+  re-minted automatically if the IP/hostname set changes — no `mkcert`
+  binary involved (the CA at `CAROOT` is created on demand).
+- **Containerd inside the kind nodes** trusts the cert via an explicit CA
+  file: each `hosts.toml` references a copy of the dev `rootCA.pem`
+  (`CAROOT`) mounted into the node's `certs.d` tree (no `skip_verify`).
+  This needs **no** `mkcert -install` — in-cluster pulls work out of the box.
+- **Host `docker push`** validates against the system trust store, so the
+  dev CA must be installed there with [`lo trust`](/guide/secrets); then
+  pushes to `lok8s.local`/`lok8s.cache` (and raw IPs) succeed over HTTPS
+  with no daemon configuration.
 
-**Prerequisite:** `mkcert -install` must have been run once on the host
-so both the Docker client and `curl` trust the generated certificate.
-`mkcert` is managed by [`b`](https://github.com/fentas/b) (`b install
-mkcert`); `~/.local/share/mkcert/rootCA.pem` is the trust anchor for both
-the host Docker client and containerd. `lo provision`/`lo up` fail fast
-with a clear message if `tls: true` but mkcert is unavailable or
-`mkcert -install` was never run.
+**Prerequisite:** the cert is minted by the Secret plugin (no mkcert), but
+the **host** Docker client and `curl` only trust it once the dev CA is in
+the system trust store — run [`lo trust`](/guide/secrets) once (it wraps
+`mkcert -install`; `mkcert` is managed by [`b`](https://github.com/fentas/b),
+`b install mkcert`). `$CAROOT/rootCA.pem` (default
+`~/.local/share/mkcert/rootCA.pem`) is the trust anchor. If `tls: true`
+but the Secret plugin isn't built, `lo provision`/`lo up` fail fast; if
+the CA isn't trusted, the cluster still comes up but `docker push` fails
+cert verification until you run `lo trust` (or another option — see
+[Host push trust options](/guide/shared-registries#host-push-trust-options)).
 
-The default (`tls: false`) keeps the plain-HTTP registries, which require
-the registry IP range in the host's `insecure-registries`.
+Opting out with `tls: false` keeps plain-HTTP registries, which instead
+require the registry IP range in the host's `insecure-registries`.
 
 **Default registry set** for slot 125 (the default cluster) with
 `shared.enabled: true`:

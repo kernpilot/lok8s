@@ -211,7 +211,7 @@ func SignLeaf(randr io.Reader, caCertPEM, caKeyPEM, leafKeyPEM []byte, hosts []s
 
 // LoadOrCreateCARoot loads the shared CA (cert + key PEM) from CAROOT, creating
 // it there — exactly as mkcert would — if absent. This is the one place that
-// touches CAROOT files; the generator and the certgen CLI both call it.
+// touches CAROOT files; the cert: generator calls it for default (CAROOT) leaves.
 func LoadOrCreateCARoot(randr io.Reader) (cert, key []byte, err error) {
 	dir := CARoot()
 	if dir == "" {

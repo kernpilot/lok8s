@@ -16,7 +16,9 @@ lo::expose() {
     backend_ip="${LOK8S_NETWORK_BASE_IP:-127.0.0.1}"
   fi
 
-  # TLS cert paths (written by lo::mkcert)
+  # Optional TLS for the proxy. The driver no longer mints this cert; drop a
+  # tls.crt/tls.key here (e.g. extracted from a cert: Secret, or via mkcert) to
+  # serve HTTPS. Absent → the proxy runs plain HTTP (warning below).
   local cert_path="${PATH_BASE}/.secrets/tls/tls.crt"
   local key_path="${PATH_BASE}/.secrets/tls/tls.key"
 

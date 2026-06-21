@@ -25,12 +25,13 @@ the box. **You don't need to bring your own domain to get started**:
 
 ```bash
 lo use lok8s.dev
-lo up    # kind cluster on bridge 10.125.0.0/16, *.lok8s.dev TLS via mkcert
+lo up    # kind cluster on bridge 10.125.0.0/16, *.lok8s.dev dev TLS (cert: generator)
 ```
 
 `lok8s.dev` is a real DNS zone owned by the lok8s project — it resolves
-to the local bridge subnet so the certificates are publicly valid and
-work across machines without `/etc/hosts` edits.
+to the local bridge subnet, so `*.lok8s.dev` works across machines
+without `/etc/hosts` edits. The dev TLS is a [`cert:` Secret](/reference/kustomize-plugins#development-certificates-cert)
+signed by your local CA; trust it once per machine with `lo trust`.
 
 If you run **multiple lok8s projects in parallel**, use numbered
 subdomain shards: `*.1.lok8s.dev`, `*.2.lok8s.dev`, ..., `*.100.lok8s.dev`.

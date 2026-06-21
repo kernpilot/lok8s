@@ -186,6 +186,22 @@ mounted file isn't exposed through `/proc`, crash dumps, or child processes, and
 rotates without a pod restart. The mounted file contains exactly the generated
 bytes.
 
+## Trusting the dev CA (`lo trust`)
+
+The [`cert:` generator](/reference/kustomize-plugins#development-certificates-cert)
+signs development leaf certs (the app wildcard, registry TLS) with a local CA at
+`$CAROOT` (default `~/.local/share/mkcert`), created on first use. Nothing trusts
+that CA until you install it into your system + browser trust stores — once per
+machine:
+
+```bash
+lo trust        # wraps `mkcert -install` (needs mkcert: b install mkcert)
+```
+
+`lo trust` is the **only** step that needs the `mkcert` binary — minting never
+does. After it, browsers accept `https://*.<domain>` and the host Docker daemon
+accepts pushes to TLS registries. `lo doctor` reports whether the CA is trusted.
+
 ## Inspecting
 
 ```bash

@@ -28,12 +28,8 @@ GO := $(if $(GO),$(GO),go)
 SECRET_PLUGIN_PATH := $(BIN_ROOT)/secrets.lok8s.dev/v1/secret
 SECRET_BIN         := $(SECRET_PLUGIN_PATH)/Secret
 
-# certgen: a standalone CLI (NOT a kustomize plugin) the Lo driver uses to mint
-# dev TLS without the mkcert binary. Installed beside the plugins, under bin/.
-CERTGEN_BIN := $(BIN_ROOT)/bin/certgen
-
-# All built binaries (extend when adding more cmd/<name>)
-BINS := $(SECRET_BIN) $(CERTGEN_BIN)
+# All plugin binaries (extend when adding more cmd/<name>)
+BINS := $(SECRET_BIN)
 
 GO_FILES := $(shell find . -name '*.go' -not -path './testdata/*')
 
@@ -46,11 +42,6 @@ build: $(BINS)  ## build all plugin binaries
 $(SECRET_BIN): $(GO_FILES) go.mod
 	@mkdir -p $(SECRET_PLUGIN_PATH)
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $@ ./cmd/secret
-	@echo "  built $@"
-
-$(CERTGEN_BIN): $(GO_FILES) go.mod
-	@mkdir -p $(dir $@)
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $@ ./cmd/certgen
 	@echo "  built $@"
 
 install: build  ## alias for build (no separate install step needed)

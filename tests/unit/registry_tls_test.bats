@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
-# registry_tls_test.bats — unit tests for mkcert-signed TLS registries
-# (spec.registries.tls). Covers config parsing, the .registries.json
-# tls/port fields, query helpers, registry config http-block rendering,
-# containerd certs.d output, the mkcert SAN list, and image-lib TLS
-# detection. No real mkcert/docker calls — those are stubbed.
+# registry_tls_test.bats — unit tests for TLS registries (spec.registries.tls,
+# default true). Covers config parsing, the .registries.json tls/port fields,
+# query helpers, registry config http-block rendering, containerd certs.d output,
+# the Secret-plugin-driven registry cert (SAN list + extraction), the untrusted-CA
+# nudge, and image-lib TLS detection. No real docker/openssl calls — those are
+# stubbed; the Secret plugin is stubbed with a fake exec.
 
 setup() {
   load "../test_helper"
@@ -78,11 +79,11 @@ YAML
 
 # ── Config knob: spec.registries.tls ─────────────────────
 
-@test "tls: defaults to false when spec.registries.tls is absent" {
+@test "tls: defaults to true when spec.registries.tls is absent" {
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${FIXTURES_DIR}/lo-cluster-shared.lok8s.yaml"
-  [ "${LOK8S_REGISTRY_TLS}" = "false" ]
-  [ "${LOK8S_REGISTRY_PORT}" = "80" ]
+  [ "${LOK8S_REGISTRY_TLS}" = "true" ]
+  [ "${LOK8S_REGISTRY_PORT}" = "443" ]
 }
 
 @test "tls: true is parsed and sets port 443" {
@@ -228,12 +229,11 @@ YAML
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
-  # Stub mkcert -CAROOT so lo::registry_ca_path resolves to a real file.
+  # write_certs_d resolves the dev CA from CAROOT directly (binary-free).
   local fake_caroot="${BATS_TEST_TMPDIR}/caroot"
   mkdir -p "${fake_caroot}"
   echo "FAKE-CA" > "${fake_caroot}/rootCA.pem"
-  mkcert() { [[ "$1" == "-CAROOT" ]] && echo "${fake_caroot}"; }
-  export -f mkcert
+  export CAROOT="${fake_caroot}"
 
   export DOMAIN_NAME="test.lok8s.dev"
   lo::write_certs_d
@@ -272,42 +272,42 @@ YAML
   refute_output --partial "ca ="
 }
 
-# ── mkcert SAN list ──────────────────────────────────────
+# ── registry cert via the Secret plugin ──────────────────
 
-@test "mkcert_registries: builds SAN list of hostnames + IPs, requires CA" {
+# Write a fake Secret-plugin exec into a plugin home and export KUSTOMIZE_PLUGIN_HOME.
+# It captures the manifest on stdin (to assert cert.hosts) and emits a k8s Secret
+# with dummy base64 tls.crt/tls.key — what lo::registries_tls_cert extracts.
+_stub_secret_plugin() {
+  local plugin_home="${BATS_TEST_TMPDIR}/.kustomize"
+  mkdir -p "${plugin_home}/secrets.lok8s.dev/v1/secret"
+  cat > "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret" <<STUB
+#!/usr/bin/env bash
+cat > "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: %s\n  tls.key: %s\n' "\$(printf FAKECRT | base64)" "\$(printf FAKEKEY | base64)"
+STUB
+  chmod +x "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret"
+  export KUSTOMIZE_PLUGIN_HOME="${plugin_home}"
+  export PATH_SECRETS="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${PATH_SECRETS}"
+}
+
+@test "registries_tls_cert: builds SAN list + drives the Secret plugin" {
   _write_tls_spec true
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
 
-  # Stub mkcert: -CAROOT prints a dir with a rootCA; cert generation
-  # records the SAN args it was called with.
-  local fake_caroot="${BATS_TEST_TMPDIR}/caroot"
-  mkdir -p "${fake_caroot}"
-  echo "FAKE-CA" > "${fake_caroot}/rootCA.pem"
-  local sans_capture="${BATS_TEST_TMPDIR}/mkcert-sans.txt"
-  export SANS_CAPTURE="${sans_capture}"
-  mkcert() {
-    if [[ "$1" == "-CAROOT" ]]; then echo "${fake_caroot}"; return 0; fi
-    # Skip the -cert-file FILE -key-file FILE prefix, capture the SANs.
-    shift 4
-    printf '%s\n' "$@" > "${SANS_CAPTURE}"
-    # Emit dummy cert+key files at the requested paths.
-    : > "${BATS_TEST_TMPDIR}/.secrets/tls/registries/tls.crt"
-    : > "${BATS_TEST_TMPDIR}/.secrets/tls/registries/tls.key"
-  }
-  export -f mkcert
-  command() {
-    # `command -v mkcert` must succeed.
-    if [[ "$1" == "-v" && "$2" == "mkcert" ]]; then echo "mkcert"; return 0; fi
-    builtin command "$@"
-  }
-  export -f command
-
-  run lo::mkcert_registries
+  run lo::registries_tls_cert
   assert_success
 
-  # SANs must include framework hostnames, mirror domain, and IPs.
-  run cat "${sans_capture}"
+  # Cert material extracted (base64-decoded) from the plugin's Secret output.
+  run cat "${BATS_TEST_TMPDIR}/.secrets/tls/registries/tls.crt"
+  assert_output "FAKECRT"
+  run cat "${BATS_TEST_TMPDIR}/.secrets/tls/registries/tls.key"
+  assert_output "FAKEKEY"
+
+  # SANs handed to the plugin as cert.hosts: framework hostnames, mirror domain, IPs.
+  run cat "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
   assert_output --partial "lok8s.local"
   assert_output --partial "lok8s.cache"
   assert_output --partial "docker.io"
@@ -315,34 +315,69 @@ YAML
   assert_output --partial "10.125.50.102"
 }
 
-@test "mkcert_registries: no-op when TLS disabled" {
+@test "registries_tls_cert: re-mint is skipped when the SAN set is unchanged" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+
+  run lo::registries_tls_cert
+  assert_success
+  rm -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"   # detector: did the plugin run again?
+
+  run lo::registries_tls_cert                         # second call, same SANs
+  assert_success
+  [ ! -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ] # plugin NOT re-invoked
+}
+
+@test "registries_tls_cert: no-op when TLS disabled" {
   _write_tls_spec false
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
-  # mkcert must NOT be invoked.
-  mkcert() { echo "MKCERT SHOULD NOT RUN" >&2; return 99; }
-  export -f mkcert
-
-  run lo::mkcert_registries
+  run lo::registries_tls_cert
   assert_success
   [ ! -f "${BATS_TEST_TMPDIR}/.secrets/tls/registries/tls.crt" ]
 }
 
-@test "mkcert_registries: fails fast when TLS on but mkcert missing" {
+@test "registries_tls_cert: fails fast when the Secret plugin is missing" {
   _write_tls_spec true
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
-  command() {
-    if [[ "$1" == "-v" && "$2" == "mkcert" ]]; then return 1; fi
-    builtin command "$@"
-  }
-  export -f command
+  export KUSTOMIZE_PLUGIN_HOME="${BATS_TEST_TMPDIR}/.kustomize-empty"
+  export PATH_SECRETS="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${PATH_SECRETS}"
 
-  run lo::mkcert_registries
+  run lo::registries_tls_cert
   assert_failure
-  assert_output --partial "mkcert is not on PATH"
+  assert_output --partial "Secret plugin is not built"
+}
+
+# ── untrusted-CA nudge ───────────────────────────────────
+
+@test "registries_tls_nudge: warns to run lo trust when the CA is untrusted" {
+  command -v openssl >/dev/null || skip "openssl not available"
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+
+  export CAROOT="${BATS_TEST_TMPDIR}/empty-caroot"   # no rootCA.pem → untrusted
+  mkdir -p "${CAROOT}"
+
+  run lo::registries_tls_nudge
+  assert_success   # non-fatal
+  assert_output --partial "lo trust"
+}
+
+@test "registries_tls_nudge: silent when TLS disabled" {
+  _write_tls_spec false
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+
+  run lo::registries_tls_nudge
+  assert_success
+  [ -z "${output}" ]
 }
 
 # ── image lib TLS detection ──────────────────────────────
