@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
@@ -91,12 +93,46 @@ func TestCert_Leaf_AutoCreatesCAAndChains(t *testing.T) {
 	}
 }
 
+func TestCert_Leaf_DefaultCAROOT(t *testing.T) {
+	caroot := t.TempDir()
+	t.Setenv("CAROOT", caroot) // never touch the real ~/.local/share/mkcert
+	dir := t.TempDir()
+
+	leaf := &specpkg.CertSpec{Hosts: []string{"kubehz.dev", "*.kubehz.dev"}} // no caRef → CAROOT
+	out, err := NewCert(leaf).Generate(certCtx(t, dir, "default", "tls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryMap(out)
+	if m["tls.crt"] == nil || m["tls.key"] == nil {
+		t.Fatalf("leaf did not emit tls.crt + tls.key: %v", entryKeys(out))
+	}
+
+	// The CA must have been created at CAROOT (mkcert's filenames) and signed it.
+	caPEM, err := os.ReadFile(filepath.Join(caroot, "rootCA.pem"))
+	if err != nil {
+		t.Fatalf("CAROOT rootCA.pem not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(caroot, "rootCA-key.pem")); err != nil {
+		t.Errorf("CAROOT rootCA-key.pem not created: %v", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("append CAROOT CA failed")
+	}
+	blk, _ := pem.Decode(m["tls.crt"])
+	leafCert, _ := x509.ParseCertificate(blk.Bytes)
+	if _, err := leafCert.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.kubehz.dev"}); err != nil {
+		t.Errorf("leaf does not verify against the CAROOT CA: %v", err)
+	}
+}
+
 func TestCert_Validation(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]*specpkg.CertSpec{
-		"ca+hosts":      {CA: true, Hosts: []string{"x"}},
-		"leaf no caRef": {Hosts: []string{"x"}},
-		"empty":         {},
+		"ca+hosts": {CA: true, Hosts: []string{"x"}},
+		"ca+caRef": {CA: true, CARef: "x"},
+		"empty":    {},
 	}
 	for name, spec := range cases {
 		if _, err := NewCert(spec).Generate(certCtx(t, dir, "default", "s")); err == nil {

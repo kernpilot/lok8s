@@ -29,6 +29,9 @@ import (
 	"net"
 	"net/mail"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -37,6 +40,45 @@ const (
 	caOrg   = "lok8s development CA"
 	leafOrg = "lok8s development certificate"
 )
+
+// CA file names inside CAROOT — identical to mkcert's, so a CA created here is
+// interchangeable with one created by `mkcert -install` (and vice versa).
+const (
+	RootName    = "rootCA.pem"
+	RootKeyName = "rootCA-key.pem"
+)
+
+// CARoot resolves the shared local-CA directory exactly the way mkcert does, so
+// both tools share one CA: $CAROOT, else the OS data dir + "/mkcert". Returns ""
+// if it can't be determined (no home directory).
+func CARoot() string {
+	if env := os.Getenv("CAROOT"); env != "" {
+		return env
+	}
+	var dir string
+	switch {
+	case runtime.GOOS == "windows":
+		dir = os.Getenv("LocalAppData")
+	case os.Getenv("XDG_DATA_HOME") != "":
+		dir = os.Getenv("XDG_DATA_HOME")
+	case runtime.GOOS == "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, "Library", "Application Support")
+	default:
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".local", "share")
+	}
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "mkcert")
+}
 
 // NewCAKey returns a fresh RSA-3072 CA private key as PKCS#8 PEM.
 func NewCAKey(randr io.Reader) ([]byte, error) { return newKeyPEM(randr, 3072) }

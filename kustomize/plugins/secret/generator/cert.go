@@ -1,6 +1,8 @@
 package generator
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
@@ -16,9 +18,16 @@ import (
 const pathSecretsEnv = "PATH_SECRETS"
 
 // Cert is the generator for the `cert:` field. It produces either a self-signed
-// development CA (emits ca.crt; caches ca.key for signing) or a leaf certificate
-// signed by such a CA (emits tls.crt + tls.key), using crypto/x509 — no mkcert
-// binary. All material is cached (the cache is the source of truth), so output is
+// development CA or a leaf certificate signed by one, using crypto/x509 — no
+// mkcert binary.
+//
+// A leaf's signing CA, by default, is the SHARED mkcert CA at CAROOT (one CA per
+// developer, across all projects, browser-trustable via `mkcert -install`). Set
+// `caRef` to sign with an OWN, managed CA in the lok8s store instead — for CI,
+// separated instances, or special CAs where a machine-shared CA is undesirable.
+// `ca: true` declares such an own CA Secret.
+//
+// All material is cached (the cache is the source of truth) so output is
 // byte-stable across runs; rotate by deleting the cache file(s).
 type Cert struct {
 	spec *specpkg.CertSpec
@@ -42,19 +51,19 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 		return nil, errs.New("cert: set either `ca: true` or `hosts:` (a leaf), not both")
 	}
 	if g.spec.CA {
-		// The CA lives in THIS Secret's own cache.
+		if g.spec.CARef != "" {
+			return nil, errs.New("cert: `ca: true` and `caRef` are mutually exclusive")
+		}
+		// An own CA, in THIS Secret's store cache.
 		return caEntries(ctx, ctx.Cache)
 	}
 	if len(g.spec.Hosts) == 0 {
 		return nil, errs.New("cert: a leaf needs `hosts:` (or set `ca: true`)")
 	}
-	if g.spec.CARef == "" {
-		return nil, errs.New("cert: a leaf needs `caRef: <secret>[/<namespace>]` naming its signing CA")
-	}
 	return g.leafEntries(ctx)
 }
 
-// caEntries loads-or-creates the CA (key + self-signed cert) in store c and emits
+// caEntries loads-or-creates a CA (key + self-signed cert) in store c and emits
 // ca.crt only — the CA private key (ca.key) stays cached for signing and is never
 // written into the Kubernetes Secret.
 func caEntries(ctx *plugin.Context, c plugin.CacheStore) ([]plugin.Entry, error) {
@@ -69,28 +78,21 @@ func caEntries(ctx *plugin.Context, c plugin.CacheStore) ([]plugin.Entry, error)
 	return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
 }
 
-// leafEntries reads (creating if absent) the CA referenced by caRef, signs a leaf
-// for the spec hosts, and emits tls.crt + tls.key.
+// leafEntries signs a leaf for the spec hosts and emits tls.crt + tls.key. The
+// signing CA is the own store CA named by caRef, or — by default — the shared
+// mkcert CA at CAROOT.
 func (g *Cert) leafEntries(ctx *plugin.Context) ([]plugin.Entry, error) {
-	caName, caNs := parseCARef(g.spec.CARef, ctx.Namespace)
-	pathSecrets, _ := ctx.Env(pathSecretsEnv)
-	if pathSecrets == "" {
-		return nil, errs.New("cert: PATH_SECRETS must be set to resolve caRef")
+	var caCrt, caKey []byte
+	var err error
+	if g.spec.CARef != "" {
+		caCrt, caKey, err = storeCA(ctx, g.spec.CARef)
+	} else {
+		caCrt, caKey, err = caRootCA(ctx)
 	}
-	caStore, err := cache.New(pathSecrets, caNs, caName)
 	if err != nil {
-		return nil, errs.Wrap("caRef", err)
+		return nil, err
 	}
-	// Load-or-create the CA (mkcert's loadCA flow) so build order is irrelevant.
-	caKey, err := caStore.GetOrCreate("ca.key", func() ([]byte, error) { return certgen.NewCAKey(ctx.Rand) })
-	if err != nil {
-		return nil, errs.Wrap("caRef ca.key", err)
-	}
-	caCrt, err := caStore.GetOrCreate("ca.crt", func() ([]byte, error) { return certgen.SelfSignCA(ctx.Rand, caKey) })
-	if err != nil {
-		return nil, errs.Wrap("caRef ca.crt", err)
-	}
-	// Leaf key + cert in THIS Secret's cache.
+
 	leafKey, err := ctx.Cache.GetOrCreate("tls.key", func() ([]byte, error) { return certgen.NewLeafKey(ctx.Rand) })
 	if err != nil {
 		return nil, errs.Wrap("tls.key", err)
@@ -105,6 +107,70 @@ func (g *Cert) leafEntries(ctx *plugin.Context) ([]plugin.Entry, error) {
 		{Key: "tls.crt", Value: leafCrt},
 		{Key: "tls.key", Value: leafKey},
 	}, nil
+}
+
+// storeCA reads (creating if absent) an own CA in the lok8s store, named by ref
+// "<secret>[/<namespace>]". Auto-create makes build order irrelevant.
+func storeCA(ctx *plugin.Context, ref string) (cert, key []byte, err error) {
+	caName, caNs := parseCARef(ref, ctx.Namespace)
+	pathSecrets, _ := ctx.Env(pathSecretsEnv)
+	if pathSecrets == "" {
+		return nil, nil, errs.New("cert: PATH_SECRETS must be set to resolve caRef")
+	}
+	store, err := cache.New(pathSecrets, caNs, caName)
+	if err != nil {
+		return nil, nil, errs.Wrap("caRef", err)
+	}
+	key, err = store.GetOrCreate("ca.key", func() ([]byte, error) { return certgen.NewCAKey(ctx.Rand) })
+	if err != nil {
+		return nil, nil, errs.Wrap("caRef ca.key", err)
+	}
+	cert, err = store.GetOrCreate("ca.crt", func() ([]byte, error) { return certgen.SelfSignCA(ctx.Rand, key) })
+	if err != nil {
+		return nil, nil, errs.Wrap("caRef ca.crt", err)
+	}
+	return cert, key, nil
+}
+
+// caRootCA loads the shared mkcert CA from CAROOT, creating it there (exactly as
+// mkcert would) if absent. This is the DEFAULT signing CA — one CA per developer,
+// shared across projects and trustable via `mkcert -install`. Note: it writes
+// rootCA.pem / rootCA-key.pem under the user's CAROOT (a side effect outside
+// PATH_SECRETS); use caRef for a self-contained own CA (CI / isolated instances).
+func caRootCA(ctx *plugin.Context) (cert, key []byte, err error) {
+	dir := certgen.CARoot()
+	if dir == "" {
+		return nil, nil, errs.New("cert: cannot resolve CAROOT (set $CAROOT, or use caRef for an own CA)")
+	}
+	certPath := filepath.Join(dir, certgen.RootName)
+	keyPath := filepath.Join(dir, certgen.RootKeyName)
+
+	if c, e := os.ReadFile(certPath); e == nil {
+		k, e2 := os.ReadFile(keyPath)
+		if e2 != nil {
+			return nil, nil, errs.Newf("cert: CAROOT %s has %s but no %s (keyless CA cannot sign) — run `mkcert -install` or remove it", dir, certgen.RootName, certgen.RootKeyName)
+		}
+		return c, k, nil
+	}
+	// CA absent → create both (mkcert's newCA).
+	key, err = certgen.NewCAKey(ctx.Rand)
+	if err != nil {
+		return nil, nil, errs.Wrap("CAROOT ca.key", err)
+	}
+	cert, err = certgen.SelfSignCA(ctx.Rand, key)
+	if err != nil {
+		return nil, nil, errs.Wrap("CAROOT ca.crt", err)
+	}
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return nil, nil, errs.Wrap("CAROOT", err)
+	}
+	if err = os.WriteFile(keyPath, key, 0o400); err != nil {
+		return nil, nil, errs.Wrap("CAROOT key", err)
+	}
+	if err = os.WriteFile(certPath, cert, 0o644); err != nil {
+		return nil, nil, errs.Wrap("CAROOT cert", err)
+	}
+	return cert, key, nil
 }
 
 // parseCARef splits "<secret>[/<namespace>]" into (secret, namespace),

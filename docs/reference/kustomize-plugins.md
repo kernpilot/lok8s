@@ -263,40 +263,53 @@ secretRef:
 
 ### Development certificates (`cert:`)
 
-`cert:` generates a local development CA and the leaf certificates it signs,
-using `crypto/x509` — **no `mkcert` binary** in the build or CI. There's one cert
-per Secret (a `kubernetes.io/tls` Secret holds exactly `tls.crt` + `tls.key`), so
-`cert:` is a single mapping, not a key→entry map.
+`cert:` generates leaf certificates (and, when you ask, the CA that signs them)
+with `crypto/x509` — **no `mkcert` binary** in the build or CI. One cert per
+Secret (a `kubernetes.io/tls` Secret holds exactly `tls.crt` + `tls.key`).
+
+By **default** a leaf is signed by the **shared mkcert CA at CAROOT** — one CA per
+developer, across all your projects, trusted once with `mkcert -install`:
 
 ```yaml
-# The CA Secret (Opaque): emits ca.crt. The CA private key is cached as ca.key
-# for signing but is NEVER written into the Secret.
-apiVersion: secrets.lok8s.dev/v1
-kind: Secret
-metadata: {name: dev-ca, namespace: kube-system}
-cert:
-  ca: true
----
-# A leaf Secret (kubernetes.io/tls): emits tls.crt + tls.key, signed by the CA.
 apiVersion: secrets.lok8s.dev/v1
 kind: Secret
 metadata: {name: wildcard-tls, namespace: default}
 type: kubernetes.io/tls
 cert:
   hosts: [example.test, "*.example.test"]   # DNS names, wildcards, IPs
-  caRef: dev-ca/kube-system                 # <secret>[/<namespace>]
 ```
 
-- **CA auto-create, order-independent.** The leaf reads its CA's `ca.crt`/`ca.key`
-  from `caRef`; if they don't exist yet it **creates** the CA there first (mkcert's
-  load-or-create flow), so the CA Secret needn't have been built before the leaf.
-- **Cache-first** like `passwd` — the CA, its key, and each leaf are byte-stable
-  across runs; rotate by deleting the cache file. RSA-3072 CA / RSA-2048 leaf;
-  leaf validity 2 y 3 m (under Apple's 825-day cap).
-- **Trust is out of scope.** The plugin *generates* the CA; it does not install it
-  into OS/browser trust stores (that needs root). Trust the dev CA once per
-  machine with `mkcert -install` (point it at the generated CA) or your platform's
-  trust tool — purely a local convenience, never a build dependency.
+The CA at CAROOT (`$CAROOT`, else mkcert's OS default) is **loaded if present,
+created there if not** — exactly mkcert's flow, so an existing mkcert CA is reused.
+
+For **CI, separated instances, or special CAs**, sign with an **own, managed CA in
+the lok8s store** via `caRef` instead — deterministic, no machine dependency, and
+SOPS-encryptable. Declare it with `ca: true`:
+
+```yaml
+# own CA (Opaque): emits ca.crt. The CA key is cached as ca.key for signing and
+# is NEVER written into the Secret.
+metadata: {name: ci-ca, namespace: kube-system}
+cert: {ca: true}
+---
+metadata: {name: ci-tls, namespace: default}
+type: kubernetes.io/tls
+cert:
+  hosts: [example.test, "*.example.test"]
+  caRef: ci-ca/kube-system                  # <secret>[/<namespace>]
+```
+
+- **Default = shared CAROOT CA; `caRef` = own store CA** (auto-created on first
+  use, so build order is irrelevant).
+- **Cache-first** like `passwd` — CA, key, and leaf are byte-stable across runs;
+  rotate by deleting the cache file. RSA-3072 CA / RSA-2048 leaf; leaf validity
+  2 y 3 m (under Apple's 825-day cap).
+- **CAROOT is a side effect**: the default writes `rootCA.pem`/`rootCA-key.pem`
+  under your CAROOT (a dev convenience). `caRef` keeps the whole build inside
+  `$PATH_SECRETS` with no home-directory writes — prefer it in CI.
+- **Trust is out of scope.** The plugin *generates* the CA; installing it into
+  OS/browser trust stores needs root, so trust it once with `mkcert -install`
+  (same CAROOT) — a local convenience, never a build dependency.
 
 ### Type validation
 

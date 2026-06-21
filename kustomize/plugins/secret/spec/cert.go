@@ -10,21 +10,29 @@ package spec
 //	cert:
 //	  ca: true
 //
-//	# a leaf Secret (kubernetes.io/tls) — emits tls.crt + tls.key, signed by the
-//	# CA named in caRef (auto-created on first use, so build order is irrelevant).
+//	# a leaf Secret (kubernetes.io/tls) — emits tls.crt + tls.key. By default it
+//	# is signed by the SHARED mkcert CA at CAROOT (one CA per developer, across
+//	# projects; trust it once with `mkcert -install`).
 //	cert:
 //	  hosts: [kubehz.dev, "*.kubehz.dev"]
-//	  caRef: mkcert-ca/kubehz-system     # <secret>[/<namespace>]
+//
+//	# …or sign with an OWN, managed CA in the lok8s store (CI, separated
+//	# instances, special CAs) via caRef — deterministic, no machine dependency.
+//	cert:
+//	  hosts: [kubehz.dev, "*.kubehz.dev"]
+//	  caRef: my-ca/kube-system           # <secret>[/<namespace>]
 type CertSpec struct {
-	// CA marks this Secret as a self-signed development root CA. Mutually
-	// exclusive with Hosts.
+	// CA marks this Secret as a self-signed development root CA in the lok8s store
+	// (an OWN CA — the thing leaves point to with caRef). Mutually exclusive with
+	// Hosts and CARef.
 	CA bool `yaml:"ca,omitempty"`
 	// Hosts are the SANs for a LEAF certificate: DNS names, IPs, or wildcards
 	// like "*.kubehz.dev". Required for a leaf; must be empty when CA is set.
 	Hosts []string `yaml:"hosts,omitempty"`
-	// CARef names the CA Secret that signs this leaf, as "<secret>[/<namespace>]"
-	// (namespace defaults to this Secret's namespace). Its ca.crt + ca.key cache
-	// files are read for signing — and created there if absent, so the CA Secret
-	// need not have been built first.
+	// CARef opts a leaf out of the default shared CAROOT CA and signs it with an
+	// OWN CA in the lok8s store, named "<secret>[/<namespace>]" (namespace
+	// defaults to this Secret's namespace). The store CA is auto-created on first
+	// use, so the CA Secret need not have been built first. When empty, the leaf
+	// is signed by the shared mkcert CA at CAROOT (the default).
 	CARef string `yaml:"caRef,omitempty"`
 }
