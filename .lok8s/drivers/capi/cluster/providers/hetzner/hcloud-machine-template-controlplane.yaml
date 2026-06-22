@@ -1,0 +1,15 @@
+# HCloudMachineTemplate for the control plane (referenced by the KCP).
+# Stock image — the kubeadm stack is installed via the KCP preKubeadmCommands.
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: HCloudMachineTemplate
+metadata:
+  name: ${CLUSTER_NAME}-control-plane
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  template:
+    spec:
+      type: ${CP_TYPE}
+      imageName: ${HCLOUD_IMAGE_NAME}

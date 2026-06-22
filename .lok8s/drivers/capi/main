@@ -38,63 +38,140 @@ driver::provision() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
 
   # 1. Determine management cluster
-  local mgmt_domain
+  local mgmt_domain mgmt_local namespace
   mgmt_domain=$(yq -r '.spec.managementCluster.domain // ""' "${cluster_yaml}")
+  mgmt_local=$(yq -r '.spec.managementCluster.local // false' "${cluster_yaml}")
+  namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
 
   if [[ -z "${mgmt_domain}" ]]; then
     kubehz::read_config "${cluster_yaml}"
     if [[ "${LOK8S_KUBEHZ_HOSTING}" != "hosted" ]]; then
       error "spec.managementCluster.domain is required for self-hosted CAPI"
-      error "set spec.kubehz.hosting: hosted to use kubehz seed cluster"
+      error "set spec.kubehz.hosting: hosted to use the kubehz seed cluster"
       return 1
     fi
     kubehz::provision_hosted "${domain}" "${cluster_yaml}"
     return
   fi
 
-  # 2. Self-managed — check if mgmt cluster kubeconfig exists
-  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
-
-  # If the domain IS the management cluster, bootstrap it
-  if [[ "${domain}" == "${mgmt_domain}" ]]; then
-    if [[ ! -f "${mgmt_kubeconfig}" ]]; then
-      echo "info: bootstrapping management cluster ${mgmt_domain}" >&2
-      capi::bootstrap "${domain}" "${cluster_yaml}"
-      return $?
-    fi
-    # If kubeconfig exists but we're re-provisioning, fall through
-  fi
-
-  if [[ ! -f "${mgmt_kubeconfig}" ]]; then
-    echo "error: management cluster kubeconfig not found: ${mgmt_kubeconfig}" >&2
-    echo "error: provision the management cluster first: lo provision ${mgmt_domain}" >&2
-    return 1
-  fi
-
-  # 3. Detect CAPI provider from spec
+  # 2. Detect the infra provider (needed to set up the management cluster).
   local provider
   provider=$(capi::detect_provider "${cluster_yaml}")
 
-  # 4. Ensure credential Secret exists on mgmt cluster
+  # 3. Ensure a management cluster exists.
+  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+  if [[ "${domain}" == "${mgmt_domain}" && ! -f "${mgmt_kubeconfig}" ]]; then
+    # The domain IS the management cluster — bootstrap it on the provider.
+    echo "info: bootstrapping management cluster ${mgmt_domain}" >&2
+    capi::bootstrap "${domain}" "${cluster_yaml}"
+    return $?
+  fi
+  if [[ ! -f "${mgmt_kubeconfig}" ]]; then
+    if [[ "${mgmt_local}" == "true" ]]; then
+      # Cheap, self-contained model: a local kind cluster as the CAPI
+      # management cluster (real workload nodes still on the cloud provider).
+      capi::ensure_local_mgmt "${mgmt_domain}" "${provider}" || return 1
+    else
+      error "management cluster kubeconfig not found: ${mgmt_kubeconfig}"
+      error "provision it first ('lo provision ${mgmt_domain}'), or set spec.managementCluster.local: true"
+      return 1
+    fi
+  fi
+
+  # 4. Ensure the cluster namespace + credential Secret exist on the mgmt cluster.
+  kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
+    --dry-run=client -o yaml | kubectl --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2
   capi::ensure_credentials "${cluster_yaml}" "${provider}" "${mgmt_kubeconfig}"
 
-  # 5. Generate CAPI resources from templates
+  # 5. Generate + apply the CAPI resources. On a freshly-initialized management
+  #    cluster the provider (CAPH) admission webhooks may still be wiring up cert
+  #    injection when clusterctl init returns, so the first apply can fail with
+  #    "connection refused" to the webhook service. Retry with backoff until they
+  #    serve (apply is idempotent, so already-created objects are unchanged).
   local resources
-  resources=$(capi::generate "${cluster_yaml}" "${provider}")
+  resources=$(capi::generate "${cluster_yaml}" "${provider}") || return 1
+  local apply_try
+  for apply_try in $(seq 1 10); do
+    if kubectl apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}") >&2; then
+      break
+    fi
+    if (( apply_try == 10 )); then
+      error "failed to apply CAPI resources after ${apply_try} attempts (provider webhooks not ready?)"
+      return 1
+    fi
+    echo "info: apply failed — provider webhooks may still be starting; retry ${apply_try}/10 in 15s" >&2
+    sleep 15
+  done
 
-  # 6. Apply to management cluster
-  kubectl apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}")
-
-  # 7. Wait for work cluster to become ready
+  # 6. Wait for the workload cluster to provision. Cloud nodes install the
+  #    kubeadm stack via cloud-init, so allow generous time (15m).
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
-  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}"
+  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}" "${namespace}" 900
 
-  # 8. Extract work cluster kubeconfig
+  # 7. Extract the workload kubeconfig under the cluster's metadata.name — the
+  #    path the framework's bootstrap step (CNI + CCM) and the harness expect.
+  #    The kubeconfig secret appears once the control plane is initialized, so
+  #    retry briefly.
   mkdir -p "${PATH_BASE}/.kubeconfig"
-  clusterctl get kubeconfig "${cluster_name}" \
-    --kubeconfig "${mgmt_kubeconfig}" \
-    > "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local kc="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" i
+  for i in $(seq 1 30); do
+    if clusterctl get kubeconfig "${cluster_name}" \
+        --namespace "${namespace}" \
+        --kubeconfig "${mgmt_kubeconfig}" > "${kc}" 2>/dev/null && [[ -s "${kc}" ]]; then
+      break
+    fi
+    sleep 10
+  done
+  [[ -s "${kc}" ]] || { error "could not extract workload kubeconfig for ${cluster_name}"; return 1; }
+
+  # 8. Wait for the workload API server to answer before the framework applies
+  #    the CNI + CCM (the control-plane node still has to finish kubeadm init).
+  #    Fail (so the harness tears down) if it never comes up — otherwise the
+  #    framework would apply bootstrap addons against a dead cluster.
+  echo "info: waiting for the workload API server to become reachable" >&2
+  local reachable=0
+  for i in $(seq 1 60); do
+    if kubectl --kubeconfig "${kc}" get --raw='/readyz' &>/dev/null; then reachable=1; break; fi
+    sleep 10
+  done
+  if (( ! reachable )); then
+    error "workload API server for ${cluster_name} did not become reachable"
+    return 1
+  fi
+}
+
+# Post-provision hook (called by provision::dispatch before bootstrap addons).
+# The Hetzner CCM reads its token from the `hcloud` secret (key `token`) in
+# kube-system on the WORKLOAD cluster; create it here so the `ccm` bootstrap
+# addon finds it. The token is passed via a temp file, never a process arg.
+driver::post_provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Capi post-provision" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local cluster_name provider kubeconfig
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  provider=$(capi::detect_provider "${cluster_yaml}")
+  kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+  [[ -f "${kubeconfig}" ]] || return 0
+
+  if [[ "${provider}" == "hetzner" && -n "${HCLOUD_TOKEN:-}" ]]; then
+    # Run in a subshell with an EXIT trap so the token temp file is always
+    # removed (success, failure, or interrupt) WITHOUT leaking a RETURN trap
+    # into the caller (a function-scoped RETURN trap re-fires on later returns).
+    (
+      tf=$(mktemp)
+      trap 'rm -f "${tf}"' EXIT
+      printf '%s' "${HCLOUD_TOKEN}" > "${tf}"
+      kubectl --kubeconfig "${kubeconfig}" -n kube-system create secret generic hcloud \
+        --from-file=token="${tf}" --dry-run=client -o yaml \
+        | kubectl --kubeconfig "${kubeconfig}" apply -f - >&2
+    )
+  fi
 }
 
 driver::destroy() {
@@ -105,9 +182,11 @@ driver::destroy() {
   :args "Destroy a CAPI cluster" "${@}"
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
-  local mgmt_domain cluster_name
+  local mgmt_domain cluster_name namespace mgmt_local
   mgmt_domain=$(yq -r '.spec.managementCluster.domain // ""' "${cluster_yaml}")
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
+  mgmt_local=$(yq -r '.spec.managementCluster.local // false' "${cluster_yaml}")
 
   if [[ -z "${mgmt_domain}" ]]; then
     kubehz::read_config "${cluster_yaml}"
@@ -120,7 +199,47 @@ driver::destroy() {
   fi
 
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
-  kubectl delete cluster "${cluster_name}" --kubeconfig "${mgmt_kubeconfig}" 2>/dev/null || true
+
+  # If the mgmt kubeconfig was lost but the local kind cluster is still up,
+  # recover it — otherwise we would delete the kind cluster below with a live
+  # workload (and its billed servers) still behind it.
+  if [[ ! -f "${mgmt_kubeconfig}" && "${mgmt_local}" == "true" ]]; then
+    local _kn; _kn=$(capi::mgmt_kind_name "${mgmt_domain}")
+    if kind get clusters 2>/dev/null | grep -qx "${_kn}"; then
+      mkdir -p "${PATH_BASE}/.kubeconfig"
+      kind get kubeconfig --name "${_kn}" > "${mgmt_kubeconfig}" 2>/dev/null || true
+    fi
+  fi
+
+  # Delete the workload Cluster and BLOCK until CAPH has deprovisioned the
+  # Hetzner servers + load balancer (finalizers complete). Deleting the
+  # management cluster before this finishes would orphan billed infrastructure.
+  local del_rc=0
+  if [[ -f "${mgmt_kubeconfig}" ]]; then
+    echo "info: deleting workload cluster ${cluster_name} — waiting for Hetzner teardown (up to 10m)" >&2
+    kubectl delete cluster "${cluster_name}" \
+      --namespace "${namespace}" \
+      --kubeconfig "${mgmt_kubeconfig}" \
+      --ignore-not-found=true \
+      --wait=true --timeout=600s >&2 || del_rc=$?
+  fi
+
+  # Tear down the local kind management cluster we created — but only once the
+  # workload teardown actually completed, so CAPH can finish if it is still
+  # deleting servers.
+  if [[ "${mgmt_local}" == "true" ]]; then
+    local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
+    if (( del_rc == 0 )); then
+      echo "info: deleting local kind management cluster '${kind_name}'" >&2
+      export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
+      kind delete cluster --name "${kind_name}" 2>/dev/null || true
+      rm -f "${mgmt_kubeconfig}"
+    else
+      error "workload cluster delete did not complete — KEEPING the management cluster so CAPH can finish deprovisioning."
+      error "check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -A"
+    fi
+  fi
+  rm -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
 }
 
 driver::status() {
@@ -152,7 +271,11 @@ driver::kubeconfig() {
   )
   :args "Extract kubeconfig" "${@}"
 
-  echo "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  # Written under the workload cluster's metadata.name (see driver::provision).
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  echo "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
 }
 
 # Optional contract function — Capi needs credential setup
@@ -163,6 +286,51 @@ driver::ensure_credentials() {
 
   # Delegate to capi::ensure_credentials from drivers/capi/generate
   capi::ensure_credentials "${cluster_yaml}" "${provider}" "${kubeconfig}"
+}
+
+# Deterministic kind cluster name for a management domain (kind forbids dots).
+# ensure_local_mgmt (create) and driver::destroy (delete) must agree, so the
+# name is derived in one place. e.g. capi-mgmt.lok8s.dev -> capi-mgmt-lok8s-dev
+capi::mgmt_kind_name() { echo "${1//[._]/-}"; }
+
+# Create (or reuse) a LOCAL kind cluster as the CAPI management cluster and
+# install Cluster API + the infra provider on it. Used when the cluster spec
+# sets managementCluster.local: true — the cheap, self-contained dev model
+# (kind management locally, real workload nodes on the cloud provider).
+# Usage: capi::ensure_local_mgmt <mgmt_domain> <provider>
+capi::ensure_local_mgmt() {
+  local mgmt_domain="$1" provider="$2"
+  local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+  local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
+
+  # Pin the provider versions so the example is reproducible (and matches what
+  # the driver was validated against) rather than tracking clusterctl's latest.
+  local capi_version="v1.13.2" infra infra_version
+  case "${provider}" in
+    hetzner) infra="hetzner"; infra_version="v1.1.7" ;;
+    *) error "local management cluster: unsupported provider '${provider}'"; return 1 ;;
+  esac
+
+  echo "info: creating local kind management cluster '${kind_name}'" >&2
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
+  if ! kind get clusters 2>/dev/null | grep -qx "${kind_name}"; then
+    kind create cluster --name "${kind_name}" >&2
+  fi
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  kind get kubeconfig --name "${kind_name}" > "${mgmt_kubeconfig}"
+
+  if kubectl --kubeconfig "${mgmt_kubeconfig}" -n capi-system get deployment capi-controller-manager &>/dev/null; then
+    echo "info: Cluster API already installed on '${kind_name}'" >&2
+  else
+    echo "info: installing Cluster API ${capi_version} + ${infra} ${infra_version} (clusterctl init)" >&2
+    clusterctl init \
+      --kubeconfig "${mgmt_kubeconfig}" \
+      --core "cluster-api:${capi_version}" \
+      --bootstrap "kubeadm:${capi_version}" \
+      --control-plane "kubeadm:${capi_version}" \
+      --infrastructure "${infra}:${infra_version}" \
+      --wait-providers >&2
+  fi
 }
 
 # ── Management cluster bootstrap ─────────────────────────

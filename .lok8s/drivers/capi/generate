@@ -17,123 +17,81 @@ capi::detect_provider() {
 # Generate CAPI resources from templates using values from cluster spec.
 # Usage: capi::generate <cluster_yaml> <provider>
 # Outputs multi-document YAML to stdout.
+#
+# Templates are modelled on CAPH v1.1.7's hcloud "ubuntu" flavor (v1beta2 CAPI
+# core + v1beta1 CAPH, kubeadm stack installed on a stock image via cloud-init).
+# Substitution uses an explicit envsubst whitelist so the cloud-init's own shell
+# variables ($ARCH, $RUNC, $CONTAINERD, $KUBERNETES_VERSION, …) pass through
+# untouched — only the lok8s template vars below are expanded.
 capi::generate() {
   local cluster_yaml="$1" provider="$2"
   local tmpl_dir="${PATH_LOK8S}/drivers/capi/cluster"
+  local core="${tmpl_dir}/core" prov="${tmpl_dir}/providers/hetzner"
 
   if [[ ! -d "${tmpl_dir}" ]]; then
     error "CAPI template directory not found: ${tmpl_dir}"
     return 1
   fi
 
-  # Extract variables from cluster.lok8s.yaml
-  export CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN K8S_VERSION
-  export CP_REPLICAS CREDENTIAL_SECRET_NAME
+  if [[ "${provider}" != "hetzner" ]]; then
+    error "CAPI provider '${provider}' is not supported yet (only 'hetzner')."
+    return 1
+  fi
+
+  # Cluster identity + Kubernetes version (full, trimmed, and minor — the
+  # cloud-init needs the trimmed/minor forms for the apt repo + package pins).
+  export CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN
+  export K8S_VERSION K8S_VERSION_TRIMMED K8S_VERSION_MINOR
+  export CP_REPLICAS CP_TYPE CREDENTIAL_SECRET_NAME
+  export HCLOUD_REGION HCLOUD_SSH_KEY_NAME HCLOUD_IMAGE_NAME
   CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
   CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
   CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
   K8S_VERSION=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+  K8S_VERSION_TRIMMED="${K8S_VERSION#v}"        # v1.31.12 -> 1.31.12
+  K8S_VERSION_MINOR="${K8S_VERSION_TRIMMED%.*}" # 1.31.12  -> 1.31
   CP_REPLICAS=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
-  CREDENTIAL_SECRET_NAME=$(yq -r '.spec.credentials.secretName // (.metadata.name + "-credentials")' "${cluster_yaml}")
+  CP_TYPE=$(yq -r '.spec.controlPlane.type // "cax11"' "${cluster_yaml}")
+  CREDENTIAL_SECRET_NAME=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
+  HCLOUD_REGION=$(yq -r '.spec.provider.config.region // .spec.hcloud.region // "fsn1"' "${cluster_yaml}")
+  HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
+  HCLOUD_IMAGE_NAME=$(yq -r '.spec.provider.config.image // "ubuntu-24.04"' "${cluster_yaml}")
 
-  # Provider-specific variables
-  case "${provider}" in
-    hetzner)
-      export INFRA_API_VERSION="infrastructure.cluster.x-k8s.io/v1beta1"
-      export INFRA_CLUSTER_KIND="HetznerCluster"
-      export INFRA_MACHINE_TEMPLATE_KIND="HCloudMachineTemplate"
-      export HCLOUD_REGION HCLOUD_SSH_KEY_NAME
-      HCLOUD_REGION=$(yq -r '.spec.hcloud.region' "${cluster_yaml}")
-      HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.hcloud.sshKeyName' "${cluster_yaml}")
-      ;;
-    aws)
-      export INFRA_API_VERSION="infrastructure.cluster.x-k8s.io/v1beta2"
-      export INFRA_CLUSTER_KIND="AWSCluster"
-      export INFRA_MACHINE_TEMPLATE_KIND="AWSMachineTemplate"
-      export AWS_REGION AWS_SSH_KEY_NAME AWS_INSTANCE_TYPE
-      AWS_REGION=$(yq -r '.spec.aws.region' "${cluster_yaml}")
-      AWS_SSH_KEY_NAME=$(yq -r '.spec.aws.sshKeyName // ""' "${cluster_yaml}")
-      AWS_INSTANCE_TYPE=$(yq -r '.spec.controlPlane.type // "t3.medium"' "${cluster_yaml}")
-      ;;
-    *)
-      error "Unsupported CAPI provider: ${provider}"
-      return 1
-      ;;
-  esac
-
-  # Render core templates
-  local first=1
-  for tmpl in "${tmpl_dir}/core"/*.yaml; do
-    [[ -f "${tmpl}" ]] || continue
-    if (( first )); then
-      first=0
-    else
-      echo "---"
-    fi
-    envsubst < "${tmpl}"
-  done
-
-  # Render provider templates. Skip hrobot-* here — those are rendered
-  # per-host later, only if spec.hrobot.hosts is configured.
-  local provider_dir="${tmpl_dir}/providers/${provider}"
-  if [[ -d "${provider_dir}" ]]; then
-    for tmpl in "${provider_dir}"/*.yaml; do
-      [[ -f "${tmpl}" ]] || continue
-      case "$(basename "${tmpl}")" in
-        hrobot-*) continue ;;
-      esac
-      echo "---"
-      envsubst < "${tmpl}"
-    done
+  if [[ -z "${HCLOUD_SSH_KEY_NAME}" ]]; then
+    error "spec.provider.config.sshKeyName is required for the hetzner CAPI provider"
+    return 1
   fi
 
-  # Render worker pool machine deployments
+  # Only these are expanded; everything else (cloud-init shell vars) is literal.
+  # shellcheck disable=SC2016  # a literal ${VAR} list is exactly what envsubst wants
+  local wl='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
+
+  # Cluster-scoped resources (Cluster, HetznerCluster, KCP, CP machine template).
+  local first=1 d
+  for d in \
+    "${core}/cluster.yaml" \
+    "${prov}/hetzner-cluster.yaml" \
+    "${core}/kubeadm-control-plane.yaml" \
+    "${prov}/hcloud-machine-template-controlplane.yaml"; do
+    (( first )) || echo "---"; first=0
+    envsubst "${wl}" < "${d}"
+  done
+
+  # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
+  export POOL_NAME POOL_REPLICAS POOL_TYPE
   local pool
   for pool in $(yq -r '.spec.workers | keys[]?' "${cluster_yaml}"); do
-    export POOL_NAME="${pool}"
-    export POOL_REPLICAS POOL_TYPE MACHINE_TEMPLATE_NAME
+    POOL_NAME="${pool}"
     POOL_REPLICAS=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
-    POOL_TYPE=$(yq -r ".spec.workers.${pool}.type" "${cluster_yaml}")
-    MACHINE_TEMPLATE_NAME="${CLUSTER_NAME}-${pool}"
-    echo "---"
-    envsubst < "${tmpl_dir}/core/machine-deployment.yaml"
-
-    # Render provider-specific worker machine template
-    case "${provider}" in
-      hetzner)
-        if [[ -f "${provider_dir}/hcloud-machine-template.yaml" ]]; then
-          export MACHINE_TYPE="${POOL_TYPE}"
-          export MACHINE_IMAGE_NAME
-          MACHINE_IMAGE_NAME=$(yq -r ".spec.workers.${pool}.imageName // \"ubuntu-22.04\"" "${cluster_yaml}")
-          echo "---"
-          envsubst < "${provider_dir}/hcloud-machine-template.yaml"
-        fi
-        ;;
-      aws)
-        if [[ -f "${provider_dir}/aws-machine-template.yaml" ]]; then
-          export AWS_INSTANCE_TYPE="${POOL_TYPE}"
-          echo "---"
-          envsubst < "${provider_dir}/aws-machine-template.yaml"
-        fi
-        ;;
-    esac
-  done
-
-  # Conditional: render hrobot bare metal templates when spec.hrobot.hosts is configured
-  if [[ "${provider}" == "hetzner" ]] && yq -e '.spec.hrobot.hosts' "${cluster_yaml}" &>/dev/null; then
-    local host
-    for host in $(yq -r '.spec.hrobot.hosts[].name' "${cluster_yaml}"); do
-      export HOST_NAME="${host}"
-      export HOST_SERVER_NUMBER ROOT_DEVICE_WWN MACHINE_TEMPLATE_NAME
-      HOST_SERVER_NUMBER=$(yq -r ".spec.hrobot.hosts[] | select(.name == \"${host}\") | .serverNumber" "${cluster_yaml}")
-      ROOT_DEVICE_WWN=$(yq -r ".spec.hrobot.hosts[] | select(.name == \"${host}\") | .rootDeviceHints.wwn // \"\"" "${cluster_yaml}")
-      MACHINE_TEMPLATE_NAME="${CLUSTER_NAME}-${host}"
-      if [[ -f "${provider_dir}/hrobot-machine-template.yaml" ]]; then
-        echo "---"
-        envsubst < "${provider_dir}/hrobot-machine-template.yaml"
-      fi
+    POOL_TYPE=$(yq -r ".spec.workers.${pool}.type // \"cax11\"" "${cluster_yaml}")
+    for d in \
+      "${core}/machine-deployment.yaml" \
+      "${prov}/kubeadm-config-template.yaml" \
+      "${prov}/hcloud-machine-template-worker.yaml"; do
+      echo "---"
+      envsubst "${wl}" < "${d}"
     done
-  fi
+  done
 }
 
 # Create or update the provider credential Secret on the management cluster.
@@ -141,7 +99,7 @@ capi::generate() {
 capi::ensure_credentials() {
   local cluster_yaml="$1" provider="$2" kubeconfig="$3"
   local secret_name namespace
-  secret_name=$(yq -r '.spec.credentials.secretName // (.metadata.name + "-credentials")' "${cluster_yaml}")
+  secret_name=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
   namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
 
   credentials::require "${provider}" || return 1
@@ -174,9 +132,9 @@ capi::ensure_credentials() {
 }
 
 # Wait for a CAPI cluster to become ready.
-# Usage: capi::wait_ready <kubeconfig> <cluster_name> [timeout_seconds]
+# Usage: capi::wait_ready <kubeconfig> <cluster_name> [namespace] [timeout_seconds]
 capi::wait_ready() {
-  local kubeconfig="$1" cluster_name="$2" timeout="${3:-600}"
+  local kubeconfig="$1" cluster_name="$2" namespace="${3:-default}" timeout="${4:-600}"
   local elapsed=0 interval=10
 
   debug "Waiting for CAPI cluster ${cluster_name} to become ready (timeout: ${timeout}s)"
@@ -184,6 +142,7 @@ capi::wait_ready() {
   while (( elapsed < timeout )); do
     local phase
     phase=$(kubectl get cluster "${cluster_name}" \
+      --namespace "${namespace}" \
       --kubeconfig "${kubeconfig}" \
       -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
 

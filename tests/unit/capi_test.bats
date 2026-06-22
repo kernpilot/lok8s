@@ -184,7 +184,7 @@ YAML
 
   run capi::generate "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" "gcp"
   assert_failure
-  assert_output --partial "Unsupported CAPI provider"
+  assert_output --partial "not supported yet"
 }
 
 # --- capi::ensure_credentials ---
@@ -259,52 +259,19 @@ YAML
 }
 
 # --- AWS provider ---
+# capi::generate is scoped to hetzner-hcloud (the shared control-plane/worker
+# templates install the kubeadm stack via Hetzner-flavored cloud-init, so they
+# are not reusable for AWS). Generation cleanly errors for non-hetzner providers;
+# credential handling (capi::ensure_credentials) still supports AWS.
 
-@test "capi::generate produces AWSCluster resource for aws provider" {
-  if ! command -v yq &>/dev/null; then
-    skip "yq required for capi::generate test"
-  fi
-  command -v envsubst || skip "envsubst not available"
-
-  run capi::generate "${BATS_TEST_TMPDIR}/aws-cluster.lok8s.yaml" "aws"
-  assert_success
-  assert_output --partial "kind: Cluster"
-  assert_output --partial "kind: KubeadmControlPlane"
-  assert_output --partial "kind: AWSCluster"
-}
-
-@test "capi::generate renders AWS machine templates for worker pools" {
+@test "capi::generate fails for aws (only hetzner generation is supported)" {
   if ! command -v yq &>/dev/null; then
     skip "yq required"
   fi
-  command -v envsubst || skip "envsubst not available"
 
   run capi::generate "${BATS_TEST_TMPDIR}/aws-cluster.lok8s.yaml" "aws"
-  assert_success
-  assert_output --partial "kind: MachineDeployment"
-  assert_output --partial "kind: AWSMachineTemplate"
-}
-
-@test "capi::generate sets correct AWS region in output" {
-  if ! command -v yq &>/dev/null; then
-    skip "yq required"
-  fi
-  command -v envsubst || skip "envsubst not available"
-
-  run capi::generate "${BATS_TEST_TMPDIR}/aws-cluster.lok8s.yaml" "aws"
-  assert_success
-  assert_output --partial "region: eu-central-1"
-}
-
-@test "capi::generate uses v1beta2 API version for AWS" {
-  if ! command -v yq &>/dev/null; then
-    skip "yq required"
-  fi
-  command -v envsubst || skip "envsubst not available"
-
-  run capi::generate "${BATS_TEST_TMPDIR}/aws-cluster.lok8s.yaml" "aws"
-  assert_success
-  assert_output --partial "infrastructure.cluster.x-k8s.io/v1beta2"
+  assert_failure
+  assert_output --partial "not supported yet"
 }
 
 @test "capi::ensure_credentials creates aws secret" {
@@ -358,8 +325,10 @@ YAML
 }
 
 # --- Conditional hrobot rendering ---
+# The rewritten generator targets hcloud only; bare-metal (hrobot) rendering was
+# dropped, so the hcloud output must never contain a bare-metal template.
 
-@test "capi::generate does not render hrobot template when no hrobot hosts" {
+@test "capi::generate does not render hrobot template (hcloud only)" {
   if ! command -v yq &>/dev/null; then
     skip "yq required"
   fi
@@ -368,50 +337,4 @@ YAML
   run capi::generate "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" "hetzner"
   assert_success
   refute_output --partial "HetznerBareMetalMachineTemplate"
-}
-
-@test "capi::generate renders hrobot template when hrobot hosts configured" {
-  if ! command -v yq &>/dev/null; then
-    skip "yq required"
-  fi
-  command -v envsubst || skip "envsubst not available"
-
-  # Create a cluster spec with hrobot hosts
-  cat > "${BATS_TEST_TMPDIR}/hetzner-hrobot.lok8s.yaml" <<'YAML'
-apiVersion: cluster.lok8s.dev/v1beta1
-kind: Capi
-metadata:
-  name: test-baremetal
-spec:
-  kubernetes:
-    version: "v1.31.10"
-  cluster:
-    domain: bm.lok8s.dev
-    namespace: capi-system
-  credentials:
-    secretName: bm-credentials
-  hcloud:
-    region: fsn1
-    sshKeyName: admin-key
-  hrobot:
-    sshKeyName: robot-key
-    hosts:
-      - name: bm-01
-        serverNumber: 12345
-        rootDeviceHints:
-          wwn: "0x50014ee2b5e1"
-      - name: bm-02
-        serverNumber: 67890
-        rootDeviceHints:
-          wwn: "0x50014ee2b5e2"
-  controlPlane:
-    replicas: 1
-    type: cax21
-YAML
-
-  run capi::generate "${BATS_TEST_TMPDIR}/hetzner-hrobot.lok8s.yaml" "hetzner"
-  assert_success
-  assert_output --partial "HetznerBareMetalMachineTemplate"
-  assert_output --partial "test-baremetal-bm-01"
-  assert_output --partial "test-baremetal-bm-02"
 }

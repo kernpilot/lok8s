@@ -1,5 +1,8 @@
-# Hetzner infrastructure cluster template
-# Rendered by capi::generate() when provider=hetzner
+# HetznerCluster (infrastructure.cluster.x-k8s.io/v1beta1).
+# Rendered by capi::generate() when provider=hetzner. Modelled on CAPH v1.1.7:
+# hcloud-only (no private network), the control-plane endpoint is the hcloud
+# load balancer on :443, and the hcloud token is read from the lok8s credential
+# Secret (created by capi::ensure_credentials in the same namespace).
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
 kind: HetznerCluster
 metadata:
@@ -9,19 +12,18 @@ metadata:
     lok8s.dev/managed: "true"
     lok8s.dev/domain: ${CLUSTER_DOMAIN}
 spec:
+  hcloudNetwork:
+    enabled: false
   controlPlaneRegions:
     - ${HCLOUD_REGION}
   controlPlaneEndpoint:
     host: ""
-    port: 6443
+    port: 443
   controlPlaneLoadBalancer:
-    enabled: true
     region: ${HCLOUD_REGION}
   sshKeys:
     hcloud:
       - name: ${HCLOUD_SSH_KEY_NAME}
-    hrobot: []
-  hcloudPlacementGroup: []
   hetznerSecretRef:
     name: ${CREDENTIAL_SECRET_NAME}
     key:

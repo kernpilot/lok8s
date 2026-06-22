@@ -360,11 +360,16 @@ YAML
 }
 
 @test "capi.sh driver::kubeconfig returns expected path" {
+  # driver::kubeconfig resolves the path from the cluster's metadata.name —
+  # the name under which the framework + driver write the workload kubeconfig.
+  yq() { [[ "$2" == ".metadata.name" ]] && echo "test-cluster" || echo ""; }
+  export -f yq
+
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::kubeconfig "test.lok8s.dev"
   assert_success
-  assert_output "${PATH_BASE}/.kubeconfig/test.lok8s.dev.yaml"
+  assert_output "${PATH_BASE}/.kubeconfig/test-cluster.yaml"
 }
 
 @test "capi.sh driver::ensure_credentials sets up hetzner secret" {

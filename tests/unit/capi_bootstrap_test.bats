@@ -302,7 +302,7 @@ YAML
   run driver::provision "prod.lok8s.dev"
   assert_failure
   assert_output --partial "management cluster kubeconfig not found"
-  assert_output --partial "provision the management cluster first"
+  assert_output --partial "provision it first"
 }
 
 # --- Stub removal verification ---
