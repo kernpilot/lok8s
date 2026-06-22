@@ -28,6 +28,11 @@ capi::generate() {
   local tmpl_dir="${PATH_LOK8S}/drivers/capi/cluster"
   local core="${tmpl_dir}/core" prov="${tmpl_dir}/providers/hetzner"
 
+  if [[ ! -d "${tmpl_dir}" ]]; then
+    error "CAPI template directory not found: ${tmpl_dir}"
+    return 1
+  fi
+
   if [[ "${provider}" != "hetzner" ]]; then
     error "CAPI provider '${provider}' is not supported yet (only 'hetzner')."
     return 1
