@@ -94,7 +94,7 @@ capi::generate() {
 capi::ensure_credentials() {
   local cluster_yaml="$1" provider="$2" kubeconfig="$3"
   local secret_name namespace
-  secret_name=$(yq -r '.spec.credentials.secretName // (.metadata.name + "-credentials")' "${cluster_yaml}")
+  secret_name=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
   namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
 
   credentials::require "${provider}" || return 1

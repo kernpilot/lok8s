@@ -99,17 +99,24 @@ echo ":: [${name}] verifying"
 kubeconfig="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
 [[ -f "${kubeconfig}" ]] || kubeconfig="${PATH_BASE}/.kubeconfig/${domain}.yaml"
 export KUBECONFIG="${kubeconfig}"
-# Cloud nodes install Kubernetes via cloud-init, so first-Ready can take several
-# minutes. Poll for at least one Ready node (`--all` passes vacuously with zero
-# nodes) for up to 8 minutes, then give any remaining nodes a moment to join.
+# Expected Ready nodes = control-plane + worker replicas (cloud drivers); kind
+# has no such fields, so expect at least 1. Requiring the FULL count keeps a
+# broken/never-joining worker pool from passing green — a "≥1 Ready" gate goes
+# green as soon as the control plane registers, masking a dead worker pool.
+expected=$(yq -r '.spec.controlPlane.replicas // 0' "${spec}" 2>/dev/null)
+[[ "${expected}" =~ ^[0-9]+$ ]] || expected=0
+while IFS= read -r _r; do [[ "${_r}" =~ ^[0-9]+$ ]] && expected=$((expected + _r)); done \
+  < <(yq -r '.spec.workers[].replicas // 1' "${spec}" 2>/dev/null)
+(( expected >= 1 )) || expected=1
+# Cloud nodes install Kubernetes via cloud-init, so this can take several minutes.
+echo ":: [${name}] waiting for ${expected} node(s) Ready"
 ready=0
-for _ in $(seq 1 48); do
-  ready=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
-  [[ "${ready}" -ge 1 ]] && break
+for _ in $(seq 1 72); do
+  ready=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')
+  (( ready >= expected )) && break
   sleep 10
 done
-[[ "${ready}" -ge 1 ]] || { echo ":: [${name}] FAILED — no Ready nodes"; kubectl get nodes 2>/dev/null || true; exit 1; }
-kubectl wait --for=condition=Ready node --all --timeout=240s 2>/dev/null || true
+(( ready >= expected )) || { echo ":: [${name}] FAILED — ${ready}/${expected} nodes Ready"; kubectl get nodes 2>/dev/null || true; exit 1; }
 kubectl get nodes
 
 teardown
