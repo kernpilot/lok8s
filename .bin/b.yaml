@@ -74,7 +74,7 @@ profiles:
       .mcp.json:
       .bin/b.yaml:
         select:
-          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'core')])}"
+          - "{binaries: from_items(items(binaries)[?[1].groups && contains([1].groups, 'core')])}"
 
   kustomize:
     description: "Kustomize plugins (built binaries)"
@@ -82,7 +82,7 @@ profiles:
       .kustomize/**:
       .bin/b.yaml:
         select:
-          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'kustomize')])}"
+          - "{binaries: from_items(items(binaries)[?[1].groups && contains([1].groups, 'kustomize')])}"
 
   local:
     description: "Local dev stack: core + kustomize + Tilt + kind"
@@ -94,7 +94,7 @@ profiles:
       services.yaml:
       .bin/b.yaml:
         select:
-          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'local')])}"
+          - "{binaries: from_items(items(binaries)[?[1].groups && contains([1].groups, 'local')])}"
 
   capi:
     description: "Cluster API provisioning (local + CAPI binaries)"
@@ -103,7 +103,7 @@ profiles:
     files:
       .bin/b.yaml:
         select:
-          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'capi')])}"
+          - "{binaries: from_items(items(binaries)[?[1].groups && contains([1].groups, 'capi')])}"
 
   kubeone:
     description: "KubeOne provisioning (local + KubeOne binaries)"
@@ -112,4 +112,4 @@ profiles:
     files:
       .bin/b.yaml:
         select:
-          - "{binaries: from_items(items(binaries)[?contains([1].groups, 'kubeone')])}"
+          - "{binaries: from_items(items(binaries)[?[1].groups && contains([1].groups, 'kubeone')])}"
