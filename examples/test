@@ -51,7 +51,7 @@ secret_bin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
 run() { script -qec "$*" /dev/null; }
 
 # ── teardown (runs on every exit: success, failure, or interrupt) ─────────
-ssh_key_name="" ssh_key_file="" torn_down=0
+ssh_key_name="" ssh_key_dir="" ssh_key_file="" torn_down=0
 teardown() {
   local rc=$?
   set +e
@@ -65,7 +65,7 @@ teardown() {
     echo ":: [${name}] removing throwaway SSH key '${ssh_key_name}'"
     hcloud ssh-key delete "${ssh_key_name}" >/dev/null 2>&1 || true
   fi
-  [[ -n "${ssh_key_file}" ]] && rm -f "${ssh_key_file}" "${ssh_key_file}.pub"
+  [[ -n "${ssh_key_dir}" ]] && rm -rf "${ssh_key_dir}"
 
   # Cost guard: never leave billed servers behind. CAPH names them "<cluster>-*".
   if [[ "${name}" != "lo" && -n "${HCLOUD_TOKEN:-}" ]]; then
@@ -81,7 +81,8 @@ trap teardown EXIT
 if [[ "${name}" != "lo" ]]; then
   ssh_key_name="$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${spec}")"
   if [[ -n "${ssh_key_name}" ]]; then
-    ssh_key_file="$(mktemp -u "${TMPDIR:-/tmp}/lok8s-example-key.XXXXXX")"
+    ssh_key_dir="$(mktemp -d "${TMPDIR:-/tmp}/lok8s-example-key.XXXXXX")"
+    ssh_key_file="${ssh_key_dir}/id_ed25519"
     ssh-keygen -q -t ed25519 -N "" -C "lok8s-example throwaway" -f "${ssh_key_file}"
     echo ":: [${name}] registering throwaway SSH key '${ssh_key_name}'"
     hcloud ssh-key delete "${ssh_key_name}" >/dev/null 2>&1 || true   # idempotent re-runs

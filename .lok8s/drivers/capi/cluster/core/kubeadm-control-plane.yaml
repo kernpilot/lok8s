@@ -122,7 +122,7 @@ spec:
       - localectl set-locale LANG=en_US.UTF-8
       - localectl set-locale LANGUAGE=en_US.UTF-8
       - apt-get update -y
-      - apt-get -y install at jq unzip wget socat mtr logrotate apt-transport-https
+      - apt-get -y install at jq unzip wget socat mtr logrotate apt-transport-https curl gnupg
       - sed -i '/swap/d' /etc/fstab
       - swapoff -a
       - modprobe overlay

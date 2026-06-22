@@ -112,11 +112,18 @@ driver::provision() {
 
   # 8. Wait for the workload API server to answer before the framework applies
   #    the CNI + CCM (the control-plane node still has to finish kubeadm init).
+  #    Fail (so the harness tears down) if it never comes up — otherwise the
+  #    framework would apply bootstrap addons against a dead cluster.
   echo "info: waiting for the workload API server to become reachable" >&2
+  local reachable=0
   for i in $(seq 1 60); do
-    kubectl --kubeconfig "${kc}" get --raw='/readyz' &>/dev/null && break
+    if kubectl --kubeconfig "${kc}" get --raw='/readyz' &>/dev/null; then reachable=1; break; fi
     sleep 10
   done
+  if (( ! reachable )); then
+    error "workload API server for ${cluster_name} did not become reachable"
+    return 1
+  fi
 }
 
 # Post-provision hook (called by provision::dispatch before bootstrap addons).
@@ -140,11 +147,12 @@ driver::post_provision() {
   if [[ "${provider}" == "hetzner" && -n "${HCLOUD_TOKEN:-}" ]]; then
     local tf
     tf=$(mktemp)
+    # Always remove the token temp file, even on apply failure / interrupt.
+    trap 'rm -f "${tf}"' RETURN
     printf '%s' "${HCLOUD_TOKEN}" > "${tf}"
     kubectl --kubeconfig "${kubeconfig}" -n kube-system create secret generic hcloud \
       --from-file=token="${tf}" --dry-run=client -o yaml \
       | kubectl --kubeconfig "${kubeconfig}" apply -f - >&2
-    rm -f "${tf}"
   fi
 }
 
@@ -173,6 +181,17 @@ driver::destroy() {
   fi
 
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+
+  # If the mgmt kubeconfig was lost but the local kind cluster is still up,
+  # recover it — otherwise we would delete the kind cluster below with a live
+  # workload (and its billed servers) still behind it.
+  if [[ ! -f "${mgmt_kubeconfig}" && "${mgmt_local}" == "true" ]]; then
+    local _kn; _kn=$(capi::mgmt_kind_name "${mgmt_domain}")
+    if kind get clusters 2>/dev/null | grep -qx "${_kn}"; then
+      mkdir -p "${PATH_BASE}/.kubeconfig"
+      kind get kubeconfig --name "${_kn}" > "${mgmt_kubeconfig}" 2>/dev/null || true
+    fi
+  fi
 
   # Delete the workload Cluster and BLOCK until CAPH has deprovisioned the
   # Hetzner servers + load balancer (finalizers complete). Deleting the
@@ -266,9 +285,11 @@ capi::ensure_local_mgmt() {
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
   local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
 
-  local infra
+  # Pin the provider versions so the example is reproducible (and matches what
+  # the driver was validated against) rather than tracking clusterctl's latest.
+  local capi_version="v1.13.2" infra infra_version
   case "${provider}" in
-    hetzner) infra="hetzner" ;;
+    hetzner) infra="hetzner"; infra_version="v1.1.7" ;;
     *) error "local management cluster: unsupported provider '${provider}'"; return 1 ;;
   esac
 
@@ -283,13 +304,13 @@ capi::ensure_local_mgmt() {
   if kubectl --kubeconfig "${mgmt_kubeconfig}" -n capi-system get deployment capi-controller-manager &>/dev/null; then
     echo "info: Cluster API already installed on '${kind_name}'" >&2
   else
-    echo "info: installing Cluster API + ${infra} provider (clusterctl init)" >&2
+    echo "info: installing Cluster API ${capi_version} + ${infra} ${infra_version} (clusterctl init)" >&2
     clusterctl init \
       --kubeconfig "${mgmt_kubeconfig}" \
-      --core cluster-api \
-      --bootstrap kubeadm \
-      --control-plane kubeadm \
-      --infrastructure "${infra}" \
+      --core "cluster-api:${capi_version}" \
+      --bootstrap "kubeadm:${capi_version}" \
+      --control-plane "kubeadm:${capi_version}" \
+      --infrastructure "${infra}:${infra_version}" \
       --wait-providers >&2
   fi
 }
