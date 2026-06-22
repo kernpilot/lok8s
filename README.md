@@ -37,17 +37,37 @@ with pluggable drivers, ordered cluster-infrastructure bootstrap, and per-target
 
 ### 📦 Install
 
+One command bootstraps a lok8s project in the current directory — it installs
+[`b`](https://github.com/fentas/b) if missing, pulls the framework plus your
+profile's pinned toolchain into `.bin/`, and drops a re-runnable `lo-up`:
+
 ```bash
-# Install b (environment manager) — download, then run (don't pipe to a shell)
-curl -fsSL https://raw.githubusercontent.com/fentas/b/master/install.sh -o /tmp/b-install.sh
-bash /tmp/b-install.sh
-
-# Most users: local dev (kind + Tilt + kustomize plugins)
-b env add github.com/kernpilot/lok8s#local
-
-# Sync into your project
-b sync
+curl -fsSL https://get.lok8s.io | sh
 ```
+
+It prompts when a terminal is attached and runs unattended otherwise:
+
+```bash
+curl -fsSL https://get.lok8s.io | sh -s -- -y               # no prompts (CI)
+curl -fsSL https://get.lok8s.io | sh -s -- -p kubeone -y    # a specific profile
+```
+
+> **Rather inspect before running?** `curl -fsSL https://get.lok8s.io -o lo-up`,
+> read it, then `sh lo-up`. The script is self-contained (the argsh runtime is
+> bundled) and published at [lok8s.io/lo-up](https://lok8s.io/lo-up).
+
+<details>
+<summary>Prefer to drive <code>b</code> yourself?</summary>
+
+```bash
+# Install b (the environment manager)
+curl -fsSL https://get.binary.help | sh
+
+# Add a profile (most users want local dev), then pull it into your project
+b env add github.com/kernpilot/lok8s#local
+b install
+```
+</details>
 
 > **Prefer [mise](https://mise.jdx.dev)?** A `mise.toml` ships at the repo root —
 > `mise install && mise activate` provisions the same toolchain + the lok8s
@@ -148,8 +168,8 @@ clusters/                  # user content
 | Kind | Purpose | Runtime |
 |------|---------|---------|
 | **Lo** | Local / CI clusters | Docker + kind |
-| **Capi** | Production clusters | Cluster API (Hetzner, AWS) |
-| **KubeOne** | Production clusters | KubeOne (Hetzner, AWS, etc.) |
+| **Capi** | Production clusters | Cluster API — Hetzner Cloud (CAPH) |
+| **KubeOne** | Production clusters | KubeOne (Hetzner) |
 
 **`spec.bootstrap`** — ordered list of cluster-infrastructure addons (CNI, CSI, MetalLB, cert-manager CRDs, ...) applied by the driver at provision time, before any workloads land. See [Concepts](docs/guide/concepts.md#two-deployment-planes) and [Addons](docs/guide/addons.md).
 
@@ -170,16 +190,15 @@ clusters/                  # user content
 | `lo use [domain]` | Set/show active domain |
 | `lo lint [domain]` | Validate structure and specs |
 | `lo status [domain]` | Cluster health and status |
-| `lo gitops flux\|argo [domain]` | Generate GitOps ordering layer |
-| `lo kind network\|create\|delete\|kubeconfig` | Manage kind cluster directly |
+| `lo kubeconfig [domain]` | Print a domain's kubeconfig (`--oidc` for the kubelogin exec-plugin) |
+| `lo gitops flux\|argo [domain]` | GitOps ordering layer _(deferred — currently a no-op)_ |
 | `lo tilt up\|down\|status\|restart` | Manage Tilt environment |
 | `lo registry up\|down\|status\|clean` | Manage registry mirrors |
 | `lo mcp` | Start MCP tool server (stdio) |
 | `lo env services\|kustomization\|secrets` | Environment and service config |
-| `lo manifest list\|addons\|kubernetes\|generate` | Cluster manifest management |
 | `lo k8s capi\|infrastructure\|platform` | K8s artifact generation |
 
-Global flags: `--verbose|-v`, `--force|-f`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain-name`, `--domain-sans`
+Global flags: `--verbose|-v`, `--force|-f`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain-name`, `--domain-sans`
 
 &nbsp;
 
@@ -302,56 +321,6 @@ kubectl get lo
 ```
 
 CRDs: `Lo` (local/CI), `Capi` (production via CAPI), `Deploy` (deployment domains).
-
-&nbsp;
-
-### 🤖 MCP Integration
-
-The `lo` CLI doubles as an [MCP](https://modelcontextprotocol.io/) tool server. Every leaf subcommand — `up`, `down`, `build`, `deploy`, `status`, and more — is exposed as a callable tool over stdio. Dispatchers (`tilt`, `env`, `k8s`, `gitops`) are traversed but not exposed as tools; only their leaf commands appear (e.g. `lo_tilt_up`, `lo_env_services`).
-
-Commands carry tool annotations that inform the AI client:
-
-| Annotation | Meaning | Example commands |
-|-----------|---------|-----------------|
-| `@readonly` | Safe to auto-run, no side effects | `status`, `lint`, `env services` |
-| `@destructive` | May modify/destroy resources | `up`, `down`, `destroy`, `deploy` |
-| `@idempotent` | Safe to retry | `build`, `deploy`, `gitops flux` |
-
-**Requirements**: The [argsh native builtin](https://github.com/arg-sh/argsh) must be installed:
-
-```bash
-argsh builtins install
-# Downloads argsh.so for your platform
-```
-
-**Test it**:
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | ./lo mcp
-# Returns JSON with tool definitions for all lo leaf subcommands
-```
-
-**Configure your AI client** using the `.mcp.json` in the project root:
-
-```json
-{
-  "mcpServers": {
-    "lok8s": {
-      "type": "stdio",
-      "command": ".lok8s/lo",
-      "args": ["mcp"],
-      "env": {
-        "PATH_BASE": ".",
-        "PATH_BIN": ".bin"
-      }
-    }
-  }
-}
-```
-
-The `PATH_BIN` directory must contain `argsh.so` (or a symlink to it) for the native builtin to load. If argsh.so is installed elsewhere, set `ARGSH_BUILTIN_PATH` to the full path of the `.so` file.
-
-This works with Claude Code, VS Code Copilot, Cursor, and any client that supports MCP stdio servers.
 
 &nbsp;
 

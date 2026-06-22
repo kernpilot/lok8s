@@ -64,23 +64,29 @@ metadata:
   name: prod
 spec:
   kubernetes:
-    version: "v1.31.10"
+    version: "v1.31.12"
   cluster:
     domain: prod.example.com
   managementCluster:
-    domain: mgmt.example.com
-  hcloud:
-    region: fsn1
-    sshKeyName: my-key
+    domain: prod-mgmt.example.com
+    local: true
+  provider:
+    name: hetzner
+    config:
+      region: fsn1
+      sshKeyName: my-key
+    credentials:
+      envVars: [HCLOUD_TOKEN]
   controlPlane:
     replicas: 3
+    type: cpx22
   workers:
     general:
       replicas: 3
-      type: cax21
-  gitops:
-    provider: flux
-    repo: https://github.com/myorg/infra.git
+      type: cpx22
+  bootstrap:
+    - cilium
+    - ccm
 ```
 
 ```bash

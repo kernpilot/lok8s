@@ -555,11 +555,12 @@ should not be used in new cluster specs.
 
 ### Capi Spec
 
-> **Note:** Capi retains `controlPlane`, `workers`, and provider-specific
-> fields (`hcloud`, `aws`) in the cluster spec because CAPI generates
-> Kubernetes resources (MachineDeployments, etc.) that need these values
-> directly. This is different from KubeOne where the provider handles
-> node topology.
+> **Note:** Capi keeps `controlPlane` and `workers` in the cluster spec (unlike
+> KubeOne, where the provider owns node topology) because CAPI generates the
+> Kubernetes resources (KubeadmControlPlane, MachineDeployments) directly.
+> Manifest generation targets **Hetzner Cloud only** (`spec.provider.name: hetzner`).
+> See the [CAPI guide](/guide/capi) and the validated `examples/capi` /
+> `examples/capi-ha` specs.
 
 ```yaml
 apiVersion: cluster.lok8s.dev/v1beta1
@@ -568,52 +569,47 @@ metadata:
   name: prod
 spec:
   kubernetes:
-    version: "v1.31.10"
+    version: "v1.31.12"
   cluster:
-    domain: prod.example.com    # Cluster FQDN (required)
+    domain: prod.example.com        # Cluster FQDN (required)
     namespace: default
   managementCluster:
-    domain: mgmt.example.com    # Management cluster domain (omit for SaaS)
-  credentials:
-    secretName: prod-credentials  # Secret name on mgmt cluster
-  # Provider: exactly one of hcloud, aws
-  hcloud:
-    region: fsn1                # Hetzner Cloud region
-    sshKeyName: my-key          # SSH key registered in Hetzner
-  hrobot:                       # Optional: Hetzner bare metal
-    sshKeyName: my-key
-    hosts:
-      - name: node-1
-        serverNumber: 12345
-        rootDeviceHints:
-          wwn: "0x500..."
-  aws:
-    region: eu-central-1        # AWS region
+    domain: prod-mgmt.example.com    # CAPI management cluster domain
+    local: true                      # run it as a local kind cluster
+  provider:
+    name: hetzner                    # only hetzner (CAPH) is generated
+    config:
+      region: fsn1                   # Hetzner Cloud region
+      sshKeyName: my-key             # SSH key registered in Hetzner
+      image: ubuntu-24.04            # stock image; k8s installed via cloud-init
+      network:
+        enabled: false               # true → private hcloud network + CCM networking
+      placementGroups: false         # true → spread anti-affinity (≤ 10 servers/group)
+    credentials:
+      envVars: [HCLOUD_TOKEN]
+      secretRef: prod-credentials    # Secret on the mgmt cluster (default <name>-credentials)
   controlPlane:
-    replicas: 3                 # Control plane nodes (default: 1)
-    type: cax21                 # Machine type
-  workers:                      # Worker pools (key = pool name)
+    replicas: 3                      # odd for etcd quorum (default 1)
+    type: cpx22                      # Hetzner server type
+  workers:                           # each key = its own MachineDeployment pool
     general:
       replicas: 3
-      type: cax21
-    gpu:
+      type: cpx22
+    apps:
       replicas: 1
-      type: ccx33
-  oidc:                           # Capi uses enabled + issuerUrl;
-    enabled: false                # Lo/KubeOne instead use oidc.issuer + oidc.clientID
+      type: cpx22
+  oidc:                              # optional
+    enabled: false
     issuerUrl: https://auth.example.com
   etcd:
     encryptionSecretName: etcd-encryption
-  bootstrap:                    # Cluster-infra addons (ordered)
-    - cilium
-    - ccm
-    - cert-manager
-  gitops:
-    provider: flux              # flux | argo
+  bootstrap:                         # cluster-infra addons (ordered)
+    - cilium                         # CNI
+    - ccm                            # Hetzner cloud-controller-manager
+  gitops:                            # (deferred — currently a no-op)
+    provider: flux
     repo: https://github.com/myorg/infra.git
-    branch: main                # default: main
     path: clusters/prod.example.com/artifacts
-    secretRef: git-auth         # Optional: Secret for git credentials
 ```
 
 #### Capi Status
