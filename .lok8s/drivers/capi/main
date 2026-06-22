@@ -191,7 +191,7 @@ driver::destroy() {
   # workload teardown actually completed, so CAPH can finish if it is still
   # deleting servers.
   if [[ "${mgmt_local}" == "true" ]]; then
-    local kind_name="${mgmt_domain//[._]/-}"
+    local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
     if (( del_rc == 0 )); then
       echo "info: deleting local kind management cluster '${kind_name}'" >&2
       export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
@@ -251,6 +251,11 @@ driver::ensure_credentials() {
   capi::ensure_credentials "${cluster_yaml}" "${provider}" "${kubeconfig}"
 }
 
+# Deterministic kind cluster name for a management domain (kind forbids dots).
+# ensure_local_mgmt (create) and driver::destroy (delete) must agree, so the
+# name is derived in one place. e.g. capi-mgmt.lok8s.dev -> capi-mgmt-lok8s-dev
+capi::mgmt_kind_name() { echo "${1//[._]/-}"; }
+
 # Create (or reuse) a LOCAL kind cluster as the CAPI management cluster and
 # install Cluster API + the infra provider on it. Used when the cluster spec
 # sets managementCluster.local: true — the cheap, self-contained dev model
@@ -259,7 +264,7 @@ driver::ensure_credentials() {
 capi::ensure_local_mgmt() {
   local mgmt_domain="$1" provider="$2"
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
-  local kind_name="${mgmt_domain//[._]/-}"   # capi-mgmt.lok8s.dev -> capi-mgmt-lok8s-dev
+  local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
 
   local infra
   case "${provider}" in
