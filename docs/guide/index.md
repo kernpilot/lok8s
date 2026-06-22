@@ -134,6 +134,7 @@ lo down
 
 ## What's Next
 
+- [Examples](https://github.com/kernpilot/lok8s/tree/main/examples) — runnable, end-to-end-tested projects per driver (`lo`, `capi`, `capi-ha`, …) you can copy as a starting point
 - [Concepts](/guide/concepts) — domains, targets, bootstrap addons, the driver contract
 - [Addons](/guide/addons) — write and reference framework-local addons
 - [Local Dev with Tilt](/guide/local-dev) — configure services for live reload

@@ -139,7 +139,7 @@ Production clusters via Cluster API.
 **Provision steps:**
 1. Read management cluster domain from spec
 2. Load management cluster kubeconfig
-3. Detect CAPI provider (`hetzner` or `aws`)
+3. Detect the provider (`hetzner` only — generation rejects others)
 4. Ensure credential Secret on management cluster
 5. Generate CAPI resources from templates
 6. Apply to management cluster

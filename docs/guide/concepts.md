@@ -320,10 +320,10 @@ spec:
       cluster_name: prod
 ```
 
-The relationship is **many-to-many**: CAPI can use Hetzner or AWS;
-KubeOne can use the same providers. Lo can optionally use a provider
-for remote clusters (`lo up --remote`) — without `--remote`, Lo runs
-locally with no provider.
+The relationship is **many-to-many** in principle, but today **Hetzner** is
+the implemented provider — CAPI via CAPH, KubeOne natively (AWS is planned, see
+the table below). Lo can optionally use a provider for remote clusters
+(`lo up --remote`) — without `--remote`, Lo runs locally with no provider.
 
 Every provider produces a **standard output** after provisioning —
 a JSON inventory of servers, API endpoint, and network info. Drivers
