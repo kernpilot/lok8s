@@ -1,0 +1,27 @@
+# Hetzner DNS-01 ACME webhook for cert-manager — framework addon, split out of
+# `cert-manager` so it is OPT-IN.
+#
+# Bootstrap it AFTER `cert-manager` (it needs cert-manager's CRDs + the
+# cert-manager namespace) on clusters that issue certs via Hetzner DNS-01 — i.e.
+# the public/internal planes with a real ACME + Let's Encrypt path. Dev / kind
+# clusters that fill their Gateway TLS from a `cert:` Secret don't need it: they
+# bootstrap plain `cert-manager` (for the ClusterIssuer/Certificate CRDs that KKP
+# and networking CRs reference) without paying for this webhook + its image pull.
+#
+# CLUSTER GLUE stays behind (NOT in this addon): the ClusterIssuer
+# (letsencrypt-prod, solverName: hetzner) and the hetzner-dns API-token Secret —
+# per-domain (ACME account, token), in the cluster's networking target.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: cert-manager-webhook-hetzner
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: cert-manager
+
+generators:
+  - webhook.yaml

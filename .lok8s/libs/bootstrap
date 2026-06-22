@@ -244,15 +244,36 @@ bootstrap::apply() {
       return 1
     fi
 
-    if grep -qE "ensure CRDs are installed first|failed calling webhook" <<< "${KAPPLY_LAST_OUTPUT}"; then
-      debug "bootstrap: waiting for CRDs and webhooks to settle before retry"
+    # Transient race between an addon's controllers and the resources they own.
+    # Three symptoms: "ensure CRDs are installed first" and "no matches for kind"
+    # / "resource mapping not found" (a CR applied before its CRD is Established),
+    # and "failed calling webhook" (a CR applied before its validating/mutating
+    # webhook is serving — i.e. the webhook Deployment isn't Ready yet).
+    local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
+    if grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+      debug "bootstrap: ${addon_name} hit a CRD/webhook race — settling deps before retry"
+      # (1) CRDs must be Established before their CRs resolve.
       kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
         --for=condition=Established crd --all --timeout=60s || true
-      sleep 3
-
-      debug "bootstrap: retrying ${addon_name}"
-      if ! kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}"; then
-        error "bootstrap: kubectl apply failed for ${addon_name} (retry)"
+      # (2) The KEY wait the old single-retry skipped: this addon's own
+      #     webhook/controller Deployments must be Available before the resources
+      #     they validate will apply. Wait on THIS addon's rendered workloads.
+      kapply::wait_ready "${addon_name}" 120 --kubeconfig "${kubeconfig}" <<< "${rendered}" || true
+      # (3) Retry with backoff to absorb the brief gap between a webhook
+      #     Deployment going Available and its Service endpoints being Ready.
+      local _attempt _rc=1 _max=6 _delay=3
+      for (( _attempt = 1; _attempt <= _max; _attempt++ )); do
+        _rc=0
+        kapply::apply --label "${addon_name} (retry ${_attempt}/${_max})" \
+          --kubeconfig "${kubeconfig}" <<< "${rendered}" || _rc=$?
+        if (( _rc == 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+          break
+        fi
+        sleep "${_delay}"
+        (( _delay < 15 )) && _delay=$(( _delay + 3 ))
+      done
+      if (( _rc != 0 )) || grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+        error "bootstrap: ${addon_name} still failing after ${_max} retries — CRDs/webhook not ready (see above)"
         return 1
       fi
     fi
