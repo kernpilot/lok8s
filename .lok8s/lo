@@ -171,9 +171,9 @@ _lo_header() {
   local domain="$1"
   local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local dspec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
-  local meta=""
+  local meta="" kind=""
   if command -v yq &>/dev/null && [[ -f "${spec}" ]]; then
-    local kind ver
+    local ver
     kind=$(yq -r '.kind // ""' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
     ver=$(yq -r '.spec.kubernetes.version // ""' "${spec}" 2>/dev/null)
     meta="${kind}"
@@ -183,7 +183,24 @@ _lo_header() {
     meta="deploy → $(yq -r '.spec.clusterRef.domain // "?"' "${dspec}" 2>/dev/null)"
   fi
   printf '\n  \033[1;36m%s\033[0m  \033[2m%s\033[0m\n' "${domain}" "${meta}"
-  printf '  \033[2mkubeconfig  %s\033[0m\n\n' "${KUBECONFIG#"${PATH_BASE}/"}"
+  printf '  \033[2mkubeconfig  %s\033[0m\n' "${KUBECONFIG#"${PATH_BASE}/"}"
+
+  # Registry summary (kind clusters only): mode · scheme · count. The flags come
+  # from the SPEC so they reflect THIS run (the default is tls:true); the count
+  # comes from the last-generated .registries.json (stable, refreshed each up).
+  if [[ "${kind}" == "lo" ]] && command -v yq &>/dev/null; then
+    local r_shared r_tls r_mode="local" r_sec="plain" r_count="—"
+    local rjson="${PATH_CLUSTERS}/${domain}/.registries.json"
+    r_shared=$(yq -r '.spec.registries.shared.enabled // true' "${spec}" 2>/dev/null)
+    r_tls=$(yq -r '.spec.registries.tls // true' "${spec}" 2>/dev/null)
+    [[ "${r_shared}" == "true" ]] && r_mode="shared"
+    [[ "${r_tls}" == "true" ]] && r_sec="tls"
+    if command -v jq &>/dev/null && [[ -f "${rjson}" ]]; then
+      r_count=$(jq -r '.registries | length' "${rjson}" 2>/dev/null || echo "—")
+    fi
+    printf '  \033[2mregistries  %s · %s · %s\033[0m\n' "${r_mode}" "${r_sec}" "${r_count}"
+  fi
+  printf '\n'
 }
 
 main::up() {
@@ -227,8 +244,44 @@ main::up() {
 }
 
 main::down() {
+  printf '\n  \033[1;36m%s\033[0m  \033[2mtearing down\033[0m\n' "${cluster}"
+
+  printf '  \033[2m• stopping Tilt\033[0m\n'
   tilt::down
-  kind delete cluster --name "${cluster}" 2>/dev/null || true
+
+  if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
+    printf '  \033[2m• deleting kind cluster (node teardown can take ~10–30s)\033[0m\n'
+    kind delete cluster --name "${cluster}" || true
+  else
+    printf '  \033[2m• kind cluster not running\033[0m\n'
+  fi
+
+  # Registries: a SHARED setup is left up — the mirrors are reused across clusters
+  # and build/cache stay warm for a fast next `lo up`. A non-shared setup is
+  # project-local with nothing to reuse, so tear its containers down (the named
+  # volumes stay, so build cache survives a later recreate).
+  local rjson="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/.registries.json"
+  if command -v jq &>/dev/null && [[ -f "${rjson}" ]]; then
+    local r_shared r_count r_pnet
+    r_shared=$(jq -r '.shared // false' "${rjson}" 2>/dev/null)
+    r_count=$(jq -r '.registries | length' "${rjson}" 2>/dev/null || echo "?")
+    if [[ "${r_shared}" == "true" ]]; then
+      printf '  \033[2mℹ registries left up: %s containers (shared mirrors reused; build/cache kept warm)\033[0m\n' "${r_count}"
+      printf '  \033[2m  remove:     lo registry down\033[0m\n'
+      printf '  \033[2m  + volumes:  lo registry clean --shared\033[0m\n'
+    else
+      r_pnet=$(jq -r '.project_network // ""' "${rjson}" 2>/dev/null)
+      local n removed=0
+      if [[ -n "${r_pnet}" ]]; then
+        while IFS= read -r n; do
+          [[ -n "${n}" ]] || continue
+          docker rm -f "${r_pnet}-registry-${n}" &>/dev/null && removed=$((removed + 1)) || true
+        done < <(jq -r '.registries[].name' "${rjson}" 2>/dev/null)
+      fi
+      printf '  \033[2m• shut down %s registry containers (not shared — nothing to reuse; volumes kept)\033[0m\n' "${removed}"
+    fi
+  fi
+  printf '\n'
 }
 
 main::clean() {
