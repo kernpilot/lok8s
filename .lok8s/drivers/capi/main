@@ -83,10 +83,25 @@ driver::provision() {
     --dry-run=client -o yaml | kubectl --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2
   capi::ensure_credentials "${cluster_yaml}" "${provider}" "${mgmt_kubeconfig}"
 
-  # 5. Generate + apply the CAPI resources.
+  # 5. Generate + apply the CAPI resources. On a freshly-initialized management
+  #    cluster the provider (CAPH) admission webhooks may still be wiring up cert
+  #    injection when clusterctl init returns, so the first apply can fail with
+  #    "connection refused" to the webhook service. Retry with backoff until they
+  #    serve (apply is idempotent, so already-created objects are unchanged).
   local resources
   resources=$(capi::generate "${cluster_yaml}" "${provider}") || return 1
-  kubectl apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}")
+  local apply_try
+  for apply_try in $(seq 1 10); do
+    if kubectl apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}") >&2; then
+      break
+    fi
+    if (( apply_try == 10 )); then
+      error "failed to apply CAPI resources after ${apply_try} attempts (provider webhooks not ready?)"
+      return 1
+    fi
+    echo "info: apply failed — provider webhooks may still be starting; retry ${apply_try}/10 in 15s" >&2
+    sleep 15
+  done
 
   # 6. Wait for the workload cluster to provision. Cloud nodes install the
   #    kubeadm stack via cloud-init, so allow generous time (15m).
@@ -145,14 +160,17 @@ driver::post_provision() {
   [[ -f "${kubeconfig}" ]] || return 0
 
   if [[ "${provider}" == "hetzner" && -n "${HCLOUD_TOKEN:-}" ]]; then
-    local tf
-    tf=$(mktemp)
-    # Always remove the token temp file, even on apply failure / interrupt.
-    trap 'rm -f "${tf}"' RETURN
-    printf '%s' "${HCLOUD_TOKEN}" > "${tf}"
-    kubectl --kubeconfig "${kubeconfig}" -n kube-system create secret generic hcloud \
-      --from-file=token="${tf}" --dry-run=client -o yaml \
-      | kubectl --kubeconfig "${kubeconfig}" apply -f - >&2
+    # Run in a subshell with an EXIT trap so the token temp file is always
+    # removed (success, failure, or interrupt) WITHOUT leaking a RETURN trap
+    # into the caller (a function-scoped RETURN trap re-fires on later returns).
+    (
+      tf=$(mktemp)
+      trap 'rm -f "${tf}"' EXIT
+      printf '%s' "${HCLOUD_TOKEN}" > "${tf}"
+      kubectl --kubeconfig "${kubeconfig}" -n kube-system create secret generic hcloud \
+        --from-file=token="${tf}" --dry-run=client -o yaml \
+        | kubectl --kubeconfig "${kubeconfig}" apply -f - >&2
+    )
   fi
 }
 
