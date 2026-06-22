@@ -8,13 +8,14 @@ that `examples/test <name>` exercises with the repo's framework + toolchain.
 |---|---|---|---|
 | [`lo`](lo/) | `Lo` (kind) | free, local | ✅ **green** — provisions, verifies a Ready node, tears down |
 | [`capi`](capi/) | `Capi` | **real Hetzner** | ✅ **green** — local kind mgmt + CAPH provisions a real 2-node Hetzner cluster (cilium + CCM), Ready, then full teardown |
+| [`capi-ha`](capi-ha/) | `Capi` | **real Hetzner** | ✅ **green** — production-shaped: 3-node HA control plane + private hcloud network + two worker pools |
 | [`kkp`](kkp/) | `Kkp` | **real Hetzner + a KKP** | 📄 template — needs a reachable KKP endpoint + token |
 | [`kkp-hosted`](kkp-hosted/) | `Kkp` (hosted CP) | future | 📄 placeholder until the kubehz hosted plane is GA |
 
-`lo` and `capi` run fully end to end. `kkp` is a runnable **template** (it needs a
-reachable KKP endpoint + token). For cloud drivers, `examples/test` creates a
-throwaway SSH key in setup, deprovisions all infrastructure on teardown, and
-warns if any `<cluster>-*` server remains.
+`lo`, `capi`, and `capi-ha` run fully end to end. `kkp` is a runnable **template**
+(it needs a reachable KKP endpoint + token). For cloud drivers, `examples/test`
+creates a throwaway SSH key in setup, deprovisions all infrastructure on teardown,
+and warns if any `<cluster>-*` server remains.
 
 ## Run a test
 

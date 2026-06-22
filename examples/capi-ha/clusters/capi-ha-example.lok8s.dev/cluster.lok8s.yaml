@@ -1,0 +1,55 @@
+# examples/capi-ha — a production-shaped Hetzner cluster via Cluster API.
+#
+# A heavier counterpart to examples/capi that exercises three more capabilities
+# of the Capi (CAPH) driver at once:
+#   - HA control plane: 3 control-plane nodes (etcd quorum), spread across
+#     physical hosts via a `spread` placement group (anti-affinity).
+#   - Private network: spec.provider.config.network.enabled creates an hcloud
+#     private network; the CCM (networking mode) sets each node's InternalIP to
+#     its private address, so cilium's tunnel runs over the private network.
+#   - Multiple worker pools: `general` and `apps`, each its own MachineDeployment.
+#
+# Still uses a local kind management cluster and stock-image cloud-init install.
+# Cost: 3 + 2 = 5 small shared VMs + 1 load balancer (see the README's note on
+# picking an in-stock type). `examples/test capi-ha` provisions, verifies all
+# nodes Ready, then tears everything down.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Capi
+metadata:
+  name: capi-ha-example
+spec:
+  kubernetes:
+    version: "v1.31.12"
+  cluster:
+    domain: capi-ha-example.lok8s.dev
+  managementCluster:
+    domain: capi-ha-mgmt.lok8s.dev
+    local: true
+  provider:
+    name: hetzner
+    config:
+      region: fsn1
+      sshKeyName: lok8s-example   # created + deleted by examples/test (throwaway)
+      image: ubuntu-24.04
+      network:
+        enabled: true             # private hcloud network (CAPH default 10.0.0.0/16)
+      placementGroups: true        # spread CP + workers across hosts (anti-affinity; ≤10 per group)
+    credentials:
+      envVars:
+        - HCLOUD_TOKEN
+      secretRef: capi-ha-example-credentials
+  controlPlane:
+    replicas: 3                   # HA — odd number for etcd quorum
+    type: cpx22
+  workers:
+    general:
+      replicas: 1
+      type: cpx22
+    apps:
+      replicas: 1
+      type: cpx22
+  # cilium provides the CNI; ccm runs in networking mode (networking.enabled)
+  # so it reconciles pod routes on the private hcloud network.
+  bootstrap:
+    - cilium
+    - ccm: {networking: {enabled: true}}

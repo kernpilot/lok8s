@@ -153,9 +153,10 @@ driver::post_provision() {
   :args "Capi post-provision" "${@}"
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
-  local cluster_name provider kubeconfig
+  local cluster_name provider kubeconfig net_enabled
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   provider=$(capi::detect_provider "${cluster_yaml}")
+  net_enabled=$(yq -r '.spec.provider.config.network.enabled // false' "${cluster_yaml}")
   kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
   [[ -f "${kubeconfig}" ]] || return 0
 
@@ -167,8 +168,15 @@ driver::post_provision() {
       tf=$(mktemp)
       trap 'rm -f "${tf}"' EXIT
       printf '%s' "${HCLOUD_TOKEN}" > "${tf}"
+      # When a private hcloud network is in use, the CCM (networking mode) reads
+      # the network from the `network` key — CAPH names it after the cluster. The
+      # name is not secret, so a literal is fine (the token still uses a file).
+      set -- --from-file=token="${tf}"
+      if [[ "${net_enabled}" == "true" ]]; then
+        set -- "$@" --from-literal=network="${cluster_name}"
+      fi
       kubectl --kubeconfig "${kubeconfig}" -n kube-system create secret generic hcloud \
-        --from-file=token="${tf}" --dry-run=client -o yaml \
+        "$@" --dry-run=client -o yaml \
         | kubectl --kubeconfig "${kubeconfig}" apply -f - >&2
     )
   fi
