@@ -1,0 +1,11 @@
+# Hetzner cloud-controller-manager values.
+#
+# The hcloud token is read from the `hcloud` secret (key `token`) in
+# kube-system — created by the Capi driver's post_provision step before this
+# addon is applied. No private hcloud network in the example, so networking is
+# disabled (cilium owns pod routing via an overlay). Metrics off — the example
+# cluster has no Prometheus.
+networking:
+  enabled: false
+monitoring:
+  enabled: false

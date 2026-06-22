@@ -246,6 +246,19 @@ main::up() {
 main::down() {
   printf '\n  \033[1;36m%s\033[0m  \033[2mtearing down\033[0m\n' "${cluster}"
 
+  # Driver-aware teardown. Cloud drivers (capi/kkp/kubeone) provision real
+  # infrastructure and must be deprovisioned via the driver's destroy contract;
+  # only the local kind driver (lo) is torn down by deleting the kind cluster +
+  # Tilt + registries below.
+  local _spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/cluster.lok8s.yaml" _kind=""
+  [[ -f "${_spec}" ]] && _kind=$(yq -r '.kind' "${_spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  if [[ -n "${_kind}" && "${_kind}" != "lo" ]]; then
+    printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${_kind}"
+    provision::dispatch_destroy "${DOMAIN_NAME}" || true
+    printf '\n'
+    return
+  fi
+
   printf '  \033[2m• stopping Tilt\033[0m\n'
   tilt::down
 

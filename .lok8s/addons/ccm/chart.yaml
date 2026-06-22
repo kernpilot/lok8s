@@ -1,0 +1,14 @@
+# khelm chart spec for the Hetzner cloud-controller-manager (hccm).
+# Pinned; bump deliberately. Reads the hcloud token from the `hcloud` secret
+# (key `token`) in kube-system — created by the Capi driver's post_provision.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: hcloud-cloud-controller-manager
+  namespace: kube-system
+kubeVersion: "1.31.4"
+repository: https://charts.hetzner.cloud
+chart: hcloud-cloud-controller-manager
+version: 1.33.0
+valueFiles:
+  - values.yaml

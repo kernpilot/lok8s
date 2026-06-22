@@ -1,12 +1,20 @@
 # examples/capi — a Hetzner Cloud cluster provisioned with Cluster API.
 #
-# The `Capi` driver runs a kind MANAGEMENT cluster locally and uses Cluster API
-# (CAPH — the Hetzner provider) to provision a real workload cluster on Hetzner.
-# Kept minimal to limit cost: 1 control-plane + 1 worker on the cheapest ARM
-# type (cax11). `examples/test capi` provisions and then tears it down.
+# The `Capi` driver runs a LOCAL kind management cluster (managementCluster.local:
+# true) and uses Cluster API (CAPH, the Hetzner provider) to provision a real
+# workload cluster on Hetzner Cloud. The kubeadm stack is installed on a stock
+# ubuntu image via cloud-init, so no pre-baked node image is needed. Kept minimal
+# to limit cost: 1 control-plane + 1 worker on a small shared type (cpx22).
+# `examples/test capi` provisions, verifies a Ready node, then tears it down.
 #
-# Prerequisites (see README): HCLOUD_TOKEN in .secrets/hetzner.env, and an SSH
-# key named below registered in your Hetzner project.
+# NOTE: server types/locations go in and out of stock at Hetzner. If provisioning
+# fails with "resource_unavailable (error during placement)", pick a type that is
+# available in your region — `hcloud server-type list` + the datacenter's
+# `server_types.available`. (At time of writing, ARM `cax*` was sold out and the
+# smallest available x86 in fsn1 was cpx22.)
+#
+# Prerequisites (see README): HCLOUD_TOKEN in .secrets/hetzner.env. The SSH key
+# named below is created (throwaway) and deleted by `examples/test`.
 apiVersion: cluster.lok8s.dev/v1beta1
 kind: Capi
 metadata:
@@ -16,25 +24,26 @@ spec:
     version: "v1.31.12"
   cluster:
     domain: capi-example.lok8s.dev
-    namespace: capi-system
   managementCluster:
     domain: capi-mgmt.lok8s.dev
+    local: true                 # create a local kind cluster as the CAPI mgmt cluster
   provider:
     name: hetzner
     config:
       region: fsn1
-      sshKeyName: lok8s-example   # must exist in your Hetzner project
+      sshKeyName: lok8s-example # created + deleted by examples/test (throwaway)
+      image: ubuntu-24.04       # stock image; k8s installed via cloud-init
     credentials:
       envVars:
         - HCLOUD_TOKEN
       secretRef: capi-example-credentials
   controlPlane:
     replicas: 1
-    type: cax11
+    type: cpx22
   workers:
     general:
       replicas: 1
-      type: cax11
+      type: cpx22
   bootstrap:
-    - cilium   # CNI
-    - ccm      # Hetzner cloud-controller-manager
+    - cilium   # CNI (cluster-pool IPAM + tunnel; see addons/cilium/values.hetzner.yaml)
+    - ccm      # Hetzner cloud-controller-manager (clears the uninitialized taint)

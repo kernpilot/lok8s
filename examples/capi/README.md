@@ -1,29 +1,45 @@
 # capi — Hetzner Cloud via Cluster API
 
-The `Capi` driver runs a local kind **management** cluster and uses Cluster API
-(the Hetzner provider, CAPH) to provision a **real** workload cluster on Hetzner
-Cloud. Kept small to limit cost (1 control-plane + 1 worker on `cax11`);
-`examples/test capi` tears it down on success.
+The `Capi` driver provisions a **real** workload cluster on Hetzner Cloud with
+Cluster API (CAPH, the Hetzner provider). With `managementCluster.local: true` it
+runs the CAPI management cluster as a local kind cluster, so the only billed
+infrastructure is the workload cluster itself — kept small to limit cost (1
+control-plane + 1 worker on a small shared type). The kubeadm stack is installed
+on a stock ubuntu image via cloud-init, so no pre-baked node image is required.
 
-> ⚠️ This provisions **billed** infrastructure. If you interrupt the test, check
-> your Hetzner Cloud console for leftover servers/load balancers.
+`examples/test capi` runs the whole lifecycle end to end:
+
+1. registers a throwaway SSH key (deleted on teardown),
+2. brings up a local kind management cluster and `clusterctl init`s CAPI + CAPH,
+3. provisions the workload cluster on Hetzner,
+4. applies the CNI (cilium) + Hetzner CCM, waits for a Ready node,
+5. tears everything down — workload servers, load balancer, kind mgmt, SSH key —
+   and warns if any `capi-example-*` server remains.
+
+> ⚠️ This provisions **billed** infrastructure. The harness deprovisions it on
+> teardown, but if you interrupt a run, check your Hetzner Cloud console for
+> leftover servers/load balancers.
+>
+> Server types/locations go in and out of stock at Hetzner. If provisioning fails
+> with `resource_unavailable` ("error during placement"), set
+> `spec.controlPlane.type` / `spec.workers.*.type` to a type that is available in
+> your region (`hcloud server-type list` + the datacenter's
+> `server_types.available`).
 
 ## Prerequisites
 
-1. **Hetzner token** in the gitignored `.secrets/hetzner.env`:
-   ```sh
-   echo 'HCLOUD_TOKEN=<your-token>' > examples/capi/.secrets/hetzner.env
-   ```
-2. **An SSH key in your Hetzner project** named `lok8s-example` (or edit
-   `spec.provider.config.sshKeyName`):
-   ```sh
-   hcloud ssh-key create --name lok8s-example --public-key-from-file ~/.ssh/id_ed25519.pub
-   ```
+**Hetzner token** in the gitignored `.secrets/hetzner.env`:
+
+```sh
+echo 'HCLOUD_TOKEN=<your-token>' > examples/capi/.secrets/hetzner.env
+```
+
+No pre-registered SSH key is needed — `examples/test` generates a throwaway
+keypair, registers it under `spec.provider.config.sshKeyName` for the run, and
+deletes it again on teardown.
 
 ## Run
 
 ```sh
-examples/test capi          # provision → verify nodes Ready → tear down
-# or by hand:
-cd examples/capi && lo use capi-example.lok8s.dev && lo up
+examples/test capi          # kind mgmt → provision → Ready → full teardown
 ```

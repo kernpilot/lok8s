@@ -1,0 +1,16 @@
+# Cilium values for Hetzner Cloud (CAPH) clusters.
+#
+# Like kind, hcloud gives no L3-routable pod network across nodes (the example
+# runs without a private hcloud network), so pod traffic uses an overlay
+# (routingMode: tunnel) and Cilium's operator owns IPAM (cluster-pool) from the
+# cluster podCIDR — no dependency on the CCM/kube-controller-manager allocating
+# per-node CIDRs. CIDRs match the CAPI Cluster's clusterNetwork.
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4ServiceCIDR: 10.96.0.0/12
+    clusterPoolIPv4MaskSize: 24
+
+routingMode: tunnel

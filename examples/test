@@ -8,6 +8,11 @@
 # Runs the example as its own lok8s project (PATH_BASE) against the repo's
 # framework + toolchain (PATH_LOK8S / .bin / .kustomize). Credentials come from
 # the example's gitignored .secrets/ — never from the repo or the environment.
+#
+# Cloud drivers need a registered SSH key. Rather than depend on a pre-existing
+# one, this harness generates a THROWAWAY keypair in setup, registers it under
+# the name the spec references, and deletes it again on teardown (even on
+# failure) — so a run leaves nothing behind in the Hetzner account.
 set -euo pipefail
 
 name="${1:?usage: examples/test <lo|capi|kkp>}"
@@ -45,19 +50,67 @@ secret_bin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
 # headless runs (see FRICTION.md / GOLIVE-TODO 0.2).
 run() { script -qec "$*" /dev/null; }
 
+# ── teardown (runs on every exit: success, failure, or interrupt) ─────────
+ssh_key_name="" ssh_key_file="" torn_down=0
+teardown() {
+  local rc=$?
+  set +e
+  [[ "${torn_down}" == 1 ]] && return "${rc}"
+  torn_down=1
+
+  echo ":: [${name}] tearing down"
+  run "lo down" || true
+
+  if [[ -n "${ssh_key_name}" ]]; then
+    echo ":: [${name}] removing throwaway SSH key '${ssh_key_name}'"
+    hcloud ssh-key delete "${ssh_key_name}" >/dev/null 2>&1 || true
+  fi
+  [[ -n "${ssh_key_file}" ]] && rm -f "${ssh_key_file}" "${ssh_key_file}.pub"
+
+  # Cost guard: never leave billed servers behind. CAPH names them "<cluster>-*".
+  if [[ "${name}" != "lo" && -n "${HCLOUD_TOKEN:-}" ]]; then
+    local left
+    left="$(hcloud server list -o noheader 2>/dev/null | awk -v p="${cluster}-" 'index($2,p)==1' | wc -l | tr -d ' ')"
+    [[ "${left}" == 0 ]] || echo ":: [${name}] WARNING: ${left} Hetzner server(s) matching '${cluster}-*' still present — run 'hcloud server list'"
+  fi
+  return "${rc}"
+}
+trap teardown EXIT
+
+# ── setup: throwaway SSH key for cloud drivers ────────────────────────────
+if [[ "${name}" != "lo" ]]; then
+  ssh_key_name="$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${spec}")"
+  if [[ -n "${ssh_key_name}" ]]; then
+    ssh_key_file="$(mktemp -u "${TMPDIR:-/tmp}/lok8s-example-key.XXXXXX")"
+    ssh-keygen -q -t ed25519 -N "" -C "lok8s-example throwaway" -f "${ssh_key_file}"
+    echo ":: [${name}] registering throwaway SSH key '${ssh_key_name}'"
+    hcloud ssh-key delete "${ssh_key_name}" >/dev/null 2>&1 || true   # idempotent re-runs
+    hcloud ssh-key create --name "${ssh_key_name}" --public-key-from-file "${ssh_key_file}.pub" >/dev/null
+  fi
+fi
+
+# ── provision ─────────────────────────────────────────────────────────────
 echo ":: [${name}] provisioning ${domain} (cluster ${cluster})"
 lo use "${domain}"
 run "lo provision"
 
+# ── verify ──────────────────────────────────────────────────────────────────
 echo ":: [${name}] verifying"
-export KUBECONFIG="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
-kubectl wait --for=condition=Ready node --all --timeout=180s
-# `--all` passes vacuously with zero nodes, so require at least one Ready node.
-ready=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
-[[ "${ready}" -ge 1 ]] || { echo ":: [${name}] FAILED — no Ready nodes"; exit 1; }
+kubeconfig="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+[[ -f "${kubeconfig}" ]] || kubeconfig="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+export KUBECONFIG="${kubeconfig}"
+# Cloud nodes install Kubernetes via cloud-init, so first-Ready can take several
+# minutes. Poll for at least one Ready node (`--all` passes vacuously with zero
+# nodes) for up to 8 minutes, then give any remaining nodes a moment to join.
+ready=0
+for _ in $(seq 1 48); do
+  ready=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
+  [[ "${ready}" -ge 1 ]] && break
+  sleep 10
+done
+[[ "${ready}" -ge 1 ]] || { echo ":: [${name}] FAILED — no Ready nodes"; kubectl get nodes 2>/dev/null || true; exit 1; }
+kubectl wait --for=condition=Ready node --all --timeout=240s 2>/dev/null || true
 kubectl get nodes
 
-echo ":: [${name}] tearing down"
-run "lo down" || true
-
+teardown
 echo ":: [${name}] OK"

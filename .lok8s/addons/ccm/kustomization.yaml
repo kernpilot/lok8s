@@ -1,0 +1,21 @@
+# Hetzner cloud-controller-manager addon (framework-level).
+#
+# Inflated at `kustomize build` time via khelm and applied by the bootstrap
+# engine when a cluster spec lists "ccm" in spec.bootstrap. On Cluster-API
+# Hetzner clusters the kubelet runs with `cloud-provider: external`, so nodes
+# come up tainted `node.cloudprovider.kubernetes.io/uninitialized`; the CCM
+# clears that taint and sets each node's providerID + addresses.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Metadata-only labels (the chart owns its immutable Deployment selectors);
+# picked up by the lok8s tilt extension's system_types loop.
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: ccm
+      lok8s.dev/type: system
+      lok8s.dev/category: networking
+
+generators:
+  - chart.yaml
