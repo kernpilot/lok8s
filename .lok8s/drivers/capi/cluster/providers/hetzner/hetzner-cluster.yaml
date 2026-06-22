@@ -1,8 +1,14 @@
 # HetznerCluster (infrastructure.cluster.x-k8s.io/v1beta1).
 # Rendered by capi::generate() when provider=hetzner. Modelled on CAPH v1.1.7:
-# hcloud-only (no private network), the control-plane endpoint is the hcloud
-# load balancer on :443, and the hcloud token is read from the lok8s credential
-# Secret (created by capi::ensure_credentials in the same namespace).
+# the control-plane endpoint is the hcloud load balancer on :443, and the hcloud
+# token is read from the lok8s credential Secret (created by
+# capi::ensure_credentials in the same namespace).
+#
+# hcloudNetwork.enabled is driven by spec.provider.config.network.enabled — when
+# true, CAPH creates a private hcloud network and attaches all nodes + the LB to
+# it (CAPH defaults: 10.0.0.0/16). Two `spread` placement groups give the control
+# plane and workers anti-affinity across physical hosts (free; max 10 servers per
+# group) — referenced by placementGroupName in the machine templates.
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
 kind: HetznerCluster
 metadata:
@@ -13,7 +19,12 @@ metadata:
     lok8s.dev/domain: ${CLUSTER_DOMAIN}
 spec:
   hcloudNetwork:
-    enabled: false
+    enabled: ${HCLOUD_NETWORK_ENABLED}
+  hcloudPlacementGroups:
+    - name: control-plane
+      type: spread
+    - name: workers
+      type: spread
   controlPlaneRegions:
     - ${HCLOUD_REGION}
   controlPlaneEndpoint:

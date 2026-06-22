@@ -43,7 +43,7 @@ capi::generate() {
   export CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN
   export K8S_VERSION K8S_VERSION_TRIMMED K8S_VERSION_MINOR
   export CP_REPLICAS CP_TYPE CREDENTIAL_SECRET_NAME
-  export HCLOUD_REGION HCLOUD_SSH_KEY_NAME HCLOUD_IMAGE_NAME
+  export HCLOUD_REGION HCLOUD_SSH_KEY_NAME HCLOUD_IMAGE_NAME HCLOUD_NETWORK_ENABLED
   CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
   CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
   CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
@@ -56,6 +56,7 @@ capi::generate() {
   HCLOUD_REGION=$(yq -r '.spec.provider.config.region // .spec.hcloud.region // "fsn1"' "${cluster_yaml}")
   HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
   HCLOUD_IMAGE_NAME=$(yq -r '.spec.provider.config.image // "ubuntu-24.04"' "${cluster_yaml}")
+  HCLOUD_NETWORK_ENABLED=$(yq -r '.spec.provider.config.network.enabled // false' "${cluster_yaml}")
 
   if [[ -z "${HCLOUD_SSH_KEY_NAME}" ]]; then
     error "spec.provider.config.sshKeyName is required for the hetzner CAPI provider"
@@ -64,7 +65,7 @@ capi::generate() {
 
   # Only these are expanded; everything else (cloud-init shell vars) is literal.
   # shellcheck disable=SC2016  # a literal ${VAR} list is exactly what envsubst wants
-  local wl='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
+  local wl='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${HCLOUD_NETWORK_ENABLED} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
 
   # Cluster-scoped resources (Cluster, HetznerCluster, KCP, CP machine template).
   local first=1 d

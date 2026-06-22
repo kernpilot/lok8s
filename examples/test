@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # examples/test — provision, verify, and tear down an example end to end.
 #
-#   examples/test lo      # local kind cluster (free)
-#   examples/test capi    # Hetzner via Cluster API   (needs .secrets/hetzner.env; REAL infra)
-#   examples/test kkp     # Hetzner via Kubermatic KKP (needs a KKP endpoint + tokens)
+#   examples/test lo        # local kind cluster (free)
+#   examples/test capi      # Hetzner via Cluster API     (needs .secrets/hetzner.env; REAL infra)
+#   examples/test capi-ha   # HA + private network + multi-pool (REAL infra)
+#   examples/test kkp       # Hetzner via Kubermatic KKP  (needs a KKP endpoint + tokens)
+#
+# The example name is just the examples/<name>/ directory; any example with a
+# clusters/<domain>/ works.
 #
 # Runs the example as its own lok8s project (PATH_BASE) against the repo's
 # framework + toolchain (PATH_LOK8S / .bin / .kustomize). Credentials come from

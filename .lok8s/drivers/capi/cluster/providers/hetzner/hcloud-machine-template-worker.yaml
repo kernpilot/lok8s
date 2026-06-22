@@ -13,3 +13,4 @@ spec:
     spec:
       type: ${POOL_TYPE}
       imageName: ${HCLOUD_IMAGE_NAME}
+      placementGroupName: workers

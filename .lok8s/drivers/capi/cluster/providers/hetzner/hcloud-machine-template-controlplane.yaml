@@ -13,3 +13,4 @@ spec:
     spec:
       type: ${CP_TYPE}
       imageName: ${HCLOUD_IMAGE_NAME}
+      placementGroupName: control-plane
