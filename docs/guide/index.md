@@ -30,18 +30,31 @@ lok8s is distributed as a `b` environment with five profiles. Pick the one that 
 | `capi` | local | Cluster API provisioning (adds `clusterctl`, `hcloud`) |
 | `kubeone` | local | KubeOne provisioning (adds `kubeone`, `hcloud`) |
 
+The quickest path — one command bootstraps a lok8s project in the current directory (installs [`b`](https://github.com/fentas/b), pulls the framework plus your profile's pinned toolchain into `.bin/`, and drops a `lo-up` you can re-run to update):
+
 ```bash
-# Install b if you haven't already
-curl -fsSL https://raw.githubusercontent.com/fentas/b/master/install.sh | bash
-
-# Most users want local dev
-b env add github.com/kernpilot/lok8s#local
-
-# Sync into your project
-b sync
+curl -fsSL https://get.lok8s.io | sh
 ```
 
-This copies the CLI, libraries, driver contracts, kustomize plugins, templates, and (for `local`+) the Tilt extension into your project. Each profile ships only the binaries it actually needs.
+It prompts when a terminal is attached and runs unattended otherwise. Pass flags after `--`:
+
+```bash
+curl -fsSL https://get.lok8s.io | sh -s -- -y               # no prompts (CI)
+curl -fsSL https://get.lok8s.io | sh -s -- -p kubeone -y    # a specific profile
+```
+
+Under the hood that is just `b` — do it by hand if you prefer:
+
+```bash
+# Install b if you haven't already
+curl -fsSL https://get.binary.help | sh
+
+# Add a profile (most users want local dev), then pull it into your project
+b env add github.com/kernpilot/lok8s#local
+b install
+```
+
+Either way this copies the CLI, libraries, driver contracts, kustomize plugins, templates, and (for `local`+) the Tilt extension into your project. Each profile ships only the binaries it actually needs.
 
 Joining a project that already uses lok8s? Then the toolchain is already
 declared — clone and run a single command:
