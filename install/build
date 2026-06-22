@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# install/build — bundle install/lo-up + the argsh runtime into the single,
+# self-contained docs/public/lo-up (published at https://lok8s.io/lo-up, behind
+# the get.lok8s.io → lok8s.io/lo-up redirect). Re-run after editing install/lo-up.
+#
+# Needs the argsh runtime sources (libraries/*.sh) + the `minifier` binary: the
+# sibling arg-sh/argsh checkout satisfies both. Override with ARGSH_SRC=<path>.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "${here}/.." && pwd)"
+out="${root}/docs/public/lo-up"
+
+# Resolve the argsh runtime source tree.
+argsh_src="${ARGSH_SRC:-}"
+if [[ -z "${argsh_src}" ]]; then
+  for c in "${root}/../arg-sh/argsh" "${root}/../../arg-sh/argsh" "${HOME}/github/arg-sh/argsh"; do
+    [[ -d "${c}/libraries" ]] && { argsh_src="${c}"; break; }
+  done
+fi
+[[ -d "${argsh_src}/libraries" ]] \
+  || { echo "build: argsh runtime not found — set ARGSH_SRC=/path/to/arg-sh/argsh" >&2; exit 1; }
+
+# argsh + its minifier on PATH (minifier ships in the argsh checkout's .bin).
+export PATH="${root}/.bin:${argsh_src}/.bin:${PATH}"
+
+# Variables :args manages by LITERAL name — they must survive minifier
+# obfuscation (the spec array `args`, and each flag's destination variable; note
+# `ref` is a reserved argsh nameref, hence `git_ref`). Keep in sync with lo-up.
+keep=(args non_interactive profile git_ref dir)
+keep_args=(); for v in "${keep[@]}"; do keep_args+=(-i "${v}"); done
+
+mkdir -p "${out%/*}"
+GIT_VERSION="$(git -C "${argsh_src}" describe --tags --always 2>/dev/null || echo unknown)" \
+GIT_COMMIT_SHA="$(git -C "${argsh_src}" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  argsh minify "${argsh_src}"/libraries/*.sh "${here}/lo-up" \
+    -t "${here}/lo-up.min.tmpl" "${keep_args[@]}" -o "${out}"
+chmod +x "${out}"
+rm -f "${root}/argsh.so"   # the argsh CLI drops its builtin in cwd — not ours to keep
+echo "build: ${out} ($(wc -c <"${out}") bytes)"

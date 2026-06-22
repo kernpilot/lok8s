@@ -1,0 +1,124 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# lo-up — the lok8s installer. Bootstraps or updates a project's lok8s env.
+#
+#   curl -fsSL https://get.lok8s.io | sh           # interactive if a TTY is present
+#   curl -fsSL https://get.lok8s.io | sh -s -- -y  # unattended (CI)
+#
+# It detects whether the target directory already carries a lok8s env: if so it
+# UPDATES (b install), otherwise it BOOTSTRAPS (b env add <profile> + b install).
+# It installs `b` (the binary manager) when missing and copies itself into the
+# project's .bin (PATH_BIN) so a later `lo-up` can update in place.
+#
+# Distributed as a single self-contained script (argsh bundled) via the
+# install/lo-up.min.tmpl template — see install/build.
+
+# Upstream + endpoints. Overridable via env for forks / local testing.
+: "${LOUP_REPO:=github.com/kernpilot/lok8s}"
+: "${LOUP_URL:=https://get.lok8s.io}"
+: "${LOUP_B_INSTALL_URL:=https://get.binary.help}"
+
+# ── output (self-contained; no lok8s libs are bundled) ───────────────────────
+_say()  { printf '%b\n' "${*}" >&2; }
+_info() { _say "  \033[36m•\033[0m ${*}"; }
+_ok()   { _say "  \033[32m✓\033[0m ${*}"; }
+_warn() { _say "  \033[33m!\033[0m ${*}"; }
+_die()  { _say "  \033[31m✗\033[0m ${*}"; exit 1; }
+
+# Interactive iff not --non-interactive AND a controlling terminal exists. Under
+# `curl … | sh` stdin is the script, so prompts read from /dev/tty.
+loup::interactive() { (( non_interactive )) && return 1; [[ -e /dev/tty ]]; }
+
+# loup::confirm <prompt> — Y/n gate; auto-yes when non-interactive.
+loup::confirm() {
+  loup::interactive || return 0
+  local ans
+  read -r -p "  ${1} [Y/n] " ans </dev/tty || return 0
+  [[ -z "${ans}" || "${ans}" =~ ^[Yy] ]]
+}
+
+# loup::detect_mode <dir> — "update" if a lok8s env is already present, else
+# "bootstrap". A vendored .lok8s/ or a b.yaml that references the lok8s repo both
+# count as an existing env.
+loup::detect_mode() {
+  local d="${1}"
+  [[ -d "${d}/.lok8s" ]] && { echo update; return; }
+  [[ -f "${d}/.bin/b.yaml" ]] && grep -q 'kernpilot/lok8s' "${d}/.bin/b.yaml" 2>/dev/null \
+    && { echo update; return; }
+  echo bootstrap
+}
+
+# loup::ensure_b — make `b` available, installing it into PATH_BIN if missing.
+loup::ensure_b() {
+  command -v b &>/dev/null && return 0
+  [[ -x "${PATH_BIN}/b" ]] && { export PATH="${PATH_BIN}:${PATH}"; return 0; }
+  command -v curl &>/dev/null || _die "curl is required to install b"
+  _info "installing b (binary manager) → ${PATH_BIN}"
+  mkdir -p "${PATH_BIN}"
+  B_INSTALL_DIR="${PATH_BIN}" sh -c "$(curl -fsSL "${LOUP_B_INSTALL_URL}")" \
+    || _die "failed to install b from ${LOUP_B_INSTALL_URL} (install it manually: https://binary.help)"
+  export PATH="${PATH_BIN}:${PATH}"
+  command -v b &>/dev/null || _die "b is still not on PATH after install"
+  _ok "b installed"
+}
+
+# loup::install_self — persist lo-up into PATH_BIN so a later run updates in place.
+# Re-fetches the canonical bundle (under `curl | sh` there is no local file).
+loup::install_self() {
+  local dest="${PATH_BIN}/lo-up"
+  mkdir -p "${PATH_BIN}"
+  if command -v curl &>/dev/null && curl -fsSL "${LOUP_URL}" -o "${dest}" 2>/dev/null; then
+    chmod +x "${dest}" 2>/dev/null || true
+    _ok "lo-up → ${dest#"${PWD}/"}"
+  else
+    _warn "couldn't persist lo-up into ${dest} (continuing)"
+  fi
+}
+
+main() {
+  # Declared empty so `:args` populates them from flags; defaults applied AFTER
+  # parsing (a pre-set value flag is NOT overridden by `:args`).
+  local non_interactive=0 profile git_ref dir
+  local -a args=(
+    'non-interactive|y:+'  'Run without prompts (CI / unattended)'
+    'profile|p'            'b env profile: core|kustomize|local|capi|kubeone (default: local)'
+    'git-ref|r'            'lok8s git ref/tag to pin (default: main)'
+    'dir|d'                'Target directory (default: current directory)'
+  )
+  :args "lo-up — install or update a lok8s project environment" "${@}"
+  profile="${profile:-local}"; git_ref="${git_ref:-main}"; dir="${dir:-${PWD}}"
+
+  [[ -d "${dir}" ]] || _die "directory not found: ${dir}"
+  cd "${dir}" || _die "cannot enter ${dir}"
+  export PATH_BASE="${PWD}"
+  export PATH_BIN="${PATH_BIN:-${PWD}/.bin}"
+
+  local mode; mode="$(loup::detect_mode "${PWD}")"
+  _say ""
+  _say "  \033[1;36mlo-up\033[0m  \033[2m${mode} · ${PWD}\033[0m"
+
+  loup::ensure_b
+
+  if [[ "${mode}" == "bootstrap" ]]; then
+    loup::confirm "Bootstrap a lok8s '${profile}' env here (${LOUP_REPO}#${profile}@${git_ref})?" \
+      || _die "aborted"
+    _info "adding profile '${profile}' from ${LOUP_REPO}#${git_ref}"
+    b env add "${LOUP_REPO}#${profile}" --version "${git_ref}" || _die "b env add failed"
+  else
+    _info "updating the lok8s env (${LOUP_REPO})"
+  fi
+
+  loup::install_self
+
+  _info "installing binaries + syncing the framework (b install)…"
+  b install || _die "b install failed"
+
+  _ok "lok8s env ready"
+  _say ""
+  _say "  Next:"
+  _say "    \033[2m${PATH_BIN##*/}/lo-up\033[0m   \033[2m# re-run anytime to update\033[0m"
+  _say "    \033[2mlo use <domain> && lo up\033[0m"
+  _say ""
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main "${@}"

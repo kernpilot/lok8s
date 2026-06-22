@@ -1,0 +1,22 @@
+#!/bin/sh
+# lo-up — self-contained lok8s installer (argsh runtime bundled).
+#   curl -fsSL https://get.lok8s.io | sh
+# Built from install/lo-up via `install/build` (argsh minify). Do not edit by hand.
+#
+# POSIX preamble: the bundle below is bash. Re-exec it under bash from a real
+# FILE whenever we're not already running bash-on-a-file — i.e. under a POSIX
+# /bin/sh (no $BASH_VERSION) OR piped with no script file ($0 isn't a file, as
+# with `curl … | sh`). The latter matters even when /bin/sh IS bash: a bundle
+# read from stdin has no ${BASH_SOURCE[0]}, which trips `set -u`. POSIX
+# guarantees the shell hasn't read past this command, so `cat` gets exactly the
+# bash bundle that follows.
+if [ -z "${BASH_VERSION:-}" ] || [ ! -f "${0}" ]; then
+  command -v bash >/dev/null 2>&1 || { echo "lo-up: bash is required (install bash and retry)" >&2; exit 1; }
+  _f=$(mktemp 2>/dev/null || echo "/tmp/lo-up.$$") || exit 1
+  cat >"$_f"; bash "$_f" "$@"; _r=$?; rm -f "$_f"; exit "$_r"
+fi
+set -euo pipefail; ARGSH_COMMIT_SHA="${commit_sha}"; ARGSH_VERSION="${version}"
+# Dispatch is lo-up's own tail (the `|| main "$@"` already in the bundle below);
+# we deliberately do NOT append argsh::shebang afterwards — it would re-dispatch
+# once main has returned and trip on an obfuscated unbound under `set -u`.
+${data}
