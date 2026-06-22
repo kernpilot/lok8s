@@ -45,7 +45,13 @@ Stop the cluster and Tilt.
 lo down
 ```
 
-Stops Tilt, then deletes the kind cluster.
+Stops Tilt and deletes the kind cluster. Registries are handled by their sharing
+mode: a **shared** setup (the default) is left running — the pull-through mirrors
+are reused across clusters and a warm `build`/`cache` speeds up the next `lo up`
+(remove them with `lo registry down`, or `lo registry clean --shared` to drop
+volumes too); a **non-shared** setup is project-local with nothing to reuse, so
+its registry containers are torn down (the named volumes — and thus the build
+cache — are kept).
 
 ### lo clean
 

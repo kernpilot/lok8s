@@ -118,6 +118,8 @@ The inline config is deep-merged on top of the provider-aware defaults.
 |-------|-----------------|-------|
 | `cilium` | Cilium CNI | `cilium/cilium` v1.19.2 |
 | `metallb` | MetalLB L2 load balancer | `metallb/metallb` v0.15.3 |
+| `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.20.1 |
+| `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook — **opt-in**; bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
 
 ### Cilium driver-specific behavior
 
