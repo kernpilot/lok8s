@@ -13,4 +13,3 @@ spec:
     spec:
       type: ${POOL_TYPE}
       imageName: ${HCLOUD_IMAGE_NAME}
-      placementGroupName: workers   # must match a hcloudPlacementGroups name in hetzner-cluster.yaml

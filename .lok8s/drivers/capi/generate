@@ -57,6 +57,8 @@ capi::generate() {
   HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
   HCLOUD_IMAGE_NAME=$(yq -r '.spec.provider.config.image // "ubuntu-24.04"' "${cluster_yaml}")
   HCLOUD_NETWORK_ENABLED=$(yq -r '.spec.provider.config.network.enabled // false' "${cluster_yaml}")
+  local pg_enabled
+  pg_enabled=$(yq -r '.spec.provider.config.placementGroups // false' "${cluster_yaml}")
 
   if [[ -z "${HCLOUD_SSH_KEY_NAME}" ]]; then
     error "spec.provider.config.sshKeyName is required for the hetzner CAPI provider"
@@ -67,32 +69,47 @@ capi::generate() {
   # shellcheck disable=SC2016  # a literal ${VAR} list is exactly what envsubst wants
   local wl='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${HCLOUD_NETWORK_ENABLED} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
 
-  # Cluster-scoped resources (Cluster, HetznerCluster, KCP, CP machine template).
-  local first=1 d
-  for d in \
-    "${core}/cluster.yaml" \
-    "${prov}/hetzner-cluster.yaml" \
-    "${core}/kubeadm-control-plane.yaml" \
-    "${prov}/hcloud-machine-template-controlplane.yaml"; do
-    (( first )) || echo "---"; first=0
-    envsubst "${wl}" < "${d}"
-  done
-
-  # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
-  export POOL_NAME POOL_REPLICAS POOL_TYPE
-  local pool
-  for pool in $(yq -r '.spec.workers | keys[]?' "${cluster_yaml}"); do
-    POOL_NAME="${pool}"
-    POOL_REPLICAS=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
-    POOL_TYPE=$(yq -r ".spec.workers.${pool}.type // \"cax11\"" "${cluster_yaml}")
+  # Render all resources, capturing the stream so optional placement groups can
+  # be injected afterward (envsubst can't conditionally include YAML blocks).
+  local rendered
+  rendered=$(
+    first=1
     for d in \
-      "${core}/machine-deployment.yaml" \
-      "${prov}/kubeadm-config-template.yaml" \
-      "${prov}/hcloud-machine-template-worker.yaml"; do
-      echo "---"
+      "${core}/cluster.yaml" \
+      "${prov}/hetzner-cluster.yaml" \
+      "${core}/kubeadm-control-plane.yaml" \
+      "${prov}/hcloud-machine-template-controlplane.yaml"; do
+      (( first )) || echo "---"; first=0
       envsubst "${wl}" < "${d}"
     done
-  done
+    # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
+    export POOL_NAME POOL_REPLICAS POOL_TYPE
+    for pool in $(yq -r '.spec.workers | keys[]?' "${cluster_yaml}"); do
+      POOL_NAME="${pool}"
+      POOL_REPLICAS=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
+      POOL_TYPE=$(yq -r ".spec.workers.${pool}.type // \"cax11\"" "${cluster_yaml}")
+      for d in \
+        "${core}/machine-deployment.yaml" \
+        "${prov}/kubeadm-config-template.yaml" \
+        "${prov}/hcloud-machine-template-worker.yaml"; do
+        echo "---"
+        envsubst "${wl}" < "${d}"
+      done
+    done
+  )
+
+  # Optional anti-affinity: opt-in `spread` placement groups (control plane +
+  # workers), injected with yq. A spread group caps at 10 servers, so this is OFF
+  # by default — always-on would make a cluster with >10 nodes in a group fail.
+  if [[ "${pg_enabled}" == "true" ]]; then
+    printf '%s\n' "${rendered}" | yq eval '
+      (select(.kind == "HetznerCluster") | .spec.hcloudPlacementGroups) = [{"name": "control-plane", "type": "spread"}, {"name": "workers", "type": "spread"}]
+      | (select(.kind == "HCloudMachineTemplate" and (.metadata.name | test("-control-plane$"))) | .spec.template.spec.placementGroupName) = "control-plane"
+      | (select(.kind == "HCloudMachineTemplate" and (.metadata.name | test("-control-plane$") | not)) | .spec.template.spec.placementGroupName) = "workers"
+    '
+  else
+    printf '%s\n' "${rendered}"
+  fi
 }
 
 # Create or update the provider credential Secret on the management cluster.

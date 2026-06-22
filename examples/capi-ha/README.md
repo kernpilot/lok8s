@@ -4,7 +4,8 @@ A heavier counterpart to [`../capi`](../capi/) that exercises three more
 capabilities of the `Capi` (CAPH) driver in one cluster:
 
 - **HA control plane** — 3 control-plane nodes (etcd quorum), spread across
-  physical hosts with a `spread` placement group (anti-affinity).
+  physical hosts via opt-in `spread` placement groups
+  (`provider.config.placementGroups: true`; anti-affinity).
 - **Private network** — `spec.provider.config.network.enabled: true` makes CAPH
   create a private hcloud network and attach every node + the load balancer to
   it. The CCM runs in **networking mode** (`ccm: {networking: {enabled: true}}`),
@@ -47,11 +48,13 @@ examples/test capi-ha       # kind mgmt → HA provision → all nodes Ready →
 
 - **Scale the control plane**: keep `controlPlane.replicas` odd (1, 3, 5) for etcd quorum.
 - **Add/resize worker pools**: add keys under `spec.workers` (each becomes its own
-  pool); set per-pool `replicas` and `type`. **All** worker pools share one
-  `spread` placement group, and Hetzner caps a spread group at 10 servers — so the
-  **total** worker count across all pools must stay ≤ 10 (exceeding it makes
-  provisioning fail with a placement error, it does not degrade gracefully).
-  Likewise keep total control-plane replicas ≤ 10.
+  pool); set per-pool `replicas` and `type`.
+- **Placement groups** (`provider.config.placementGroups: true`) are opt-in. When
+  on, **all** worker pools share one `spread` placement group and the control
+  plane has its own, and Hetzner caps a spread group at 10 servers — so the
+  **total** worker count (across all pools) and the control-plane count must each
+  stay ≤ 10 (exceeding it fails provisioning with a placement error, it does not
+  degrade gracefully). For larger clusters, leave placement groups off.
 - **Disable the private network**: drop `provider.config.network` (or set
   `enabled: false`) and the `ccm` networking override — that gives you the same
   shape as [`../capi`](../capi/).

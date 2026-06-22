@@ -128,14 +128,21 @@ kubectl get nodes
 # just that nodes are Ready): every node's InternalIP must be RFC1918-private —
 # the CCM in networking mode sets it to the node's private-network address.
 if [[ "$(yq -r '.spec.provider.config.network.enabled // false' "${spec}" 2>/dev/null)" == "true" ]]; then
-  public_ips=$(kubectl get nodes \
-    -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null \
-    | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' | grep -v '^$' || true)
+  rfc1918='^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)'
+  # One InternalIP per line (a node may report several), so a public address
+  # can't hide behind a private one on the same line.
+  internal_ips=$(kubectl get nodes \
+    -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{end}' 2>/dev/null)
+  public_ips=$(printf '%s\n' "${internal_ips}" | grep -v '^$' | grep -vE "${rfc1918}" || true)
+  private_count=$(printf '%s\n' "${internal_ips}" | grep -cE "${rfc1918}" || true)
   if [[ -n "${public_ips}" ]]; then
-    echo ":: [${name}] FAILED — private network enabled but node InternalIP(s) not private: ${public_ips//$'\n'/ }"
-    exit 1
+    echo ":: [${name}] FAILED — private network enabled but non-private InternalIP(s): ${public_ips//$'\n'/ }"; exit 1
   fi
-  echo ":: [${name}] private network verified — all node InternalIPs are RFC1918-private"
+  # Every Ready node must contribute a private InternalIP (catches a node with none).
+  if (( private_count < ready )); then
+    echo ":: [${name}] FAILED — private network enabled but only ${private_count}/${ready} nodes have a private InternalIP"; exit 1
+  fi
+  echo ":: [${name}] private network verified — all ${ready} nodes have RFC1918-private InternalIPs"
 fi
 
 teardown

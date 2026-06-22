@@ -6,9 +6,9 @@
 #
 # hcloudNetwork.enabled is driven by spec.provider.config.network.enabled — when
 # true, CAPH creates a private hcloud network and attaches all nodes + the LB to
-# it (CAPH defaults: 10.0.0.0/16). Two `spread` placement groups give the control
-# plane and workers anti-affinity across physical hosts (free; max 10 servers per
-# group) — referenced by placementGroupName in the machine templates.
+# it (CAPH defaults: 10.0.0.0/16). `spread` placement groups (anti-affinity) are
+# opt-in via spec.provider.config.placementGroups and injected by capi::generate
+# (a spread group caps at 10 servers, so they are off by default).
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
 kind: HetznerCluster
 metadata:
@@ -20,11 +20,6 @@ metadata:
 spec:
   hcloudNetwork:
     enabled: ${HCLOUD_NETWORK_ENABLED}
-  hcloudPlacementGroups:
-    - name: control-plane
-      type: spread
-    - name: workers
-      type: spread
   controlPlaneRegions:
     - ${HCLOUD_REGION}
   controlPlaneEndpoint:

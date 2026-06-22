@@ -33,6 +33,7 @@ spec:
       image: ubuntu-24.04
       network:
         enabled: true             # private hcloud network (CAPH default 10.0.0.0/16)
+      placementGroups: true        # spread CP + workers across hosts (anti-affinity; ≤10 per group)
     credentials:
       envVars:
         - HCLOUD_TOKEN
