@@ -19,7 +19,7 @@
 # failure) — so a run leaves nothing behind in the Hetzner account.
 set -euo pipefail
 
-name="${1:?usage: examples/test <lo|capi|kkp>}"
+name="${1:?usage: examples/test <example>  (e.g. lo, capi, capi-ha, kkp)}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "${here}/.." && pwd)"
 proj="${here}/${name}"
@@ -123,6 +123,20 @@ for _ in $(seq 1 72); do
 done
 (( ready >= expected )) || { echo ":: [${name}] FAILED — ${ready}/${expected} nodes Ready"; kubectl get nodes 2>/dev/null || true; exit 1; }
 kubectl get nodes
+
+# If the spec enables a private hcloud network, prove it's actually in use (not
+# just that nodes are Ready): every node's InternalIP must be RFC1918-private —
+# the CCM in networking mode sets it to the node's private-network address.
+if [[ "$(yq -r '.spec.provider.config.network.enabled // false' "${spec}" 2>/dev/null)" == "true" ]]; then
+  public_ips=$(kubectl get nodes \
+    -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null \
+    | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' | grep -v '^$' || true)
+  if [[ -n "${public_ips}" ]]; then
+    echo ":: [${name}] FAILED — private network enabled but node InternalIP(s) not private: ${public_ips//$'\n'/ }"
+    exit 1
+  fi
+  echo ":: [${name}] private network verified — all node InternalIPs are RFC1918-private"
+fi
 
 teardown
 echo ":: [${name}] OK"

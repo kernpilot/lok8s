@@ -329,6 +329,25 @@ YAML
   [ "${lines[2]}" = "/abs/bar" ]
 }
 
+@test "_resolve_entries: skips comment lines, keeps inline-override entries" {
+  # yq -r emits YAML comments in the list as their own lines; they must not be
+  # returned as (bogus) addon names. An inline-override map entry must survive.
+  cat > "${CLUSTER_YAML}" <<'YAML'
+kind: Capi
+spec:
+  # leading comment
+  bootstrap:
+    - cilium
+    # a comment between entries
+    - ccm: {networking: {enabled: true}}
+YAML
+  run bootstrap::_resolve_entries "${CLUSTER_YAML}" capi
+  assert_success
+  [ "${#lines[@]}" -eq 2 ]
+  [ "${lines[0]}" = "cilium" ]
+  [ "${lines[1]}" = "ccm: {networking: {enabled: true}}" ]
+}
+
 @test "_resolve_entries: explicit empty list opts out (lo)" {
   cat > "${CLUSTER_YAML}" <<'YAML'
 kind: Lo

@@ -13,4 +13,4 @@ spec:
     spec:
       type: ${CP_TYPE}
       imageName: ${HCLOUD_IMAGE_NAME}
-      placementGroupName: control-plane
+      placementGroupName: control-plane   # must match a hcloudPlacementGroups name in hetzner-cluster.yaml

@@ -47,8 +47,11 @@ examples/test capi-ha       # kind mgmt → HA provision → all nodes Ready →
 
 - **Scale the control plane**: keep `controlPlane.replicas` odd (1, 3, 5) for etcd quorum.
 - **Add/resize worker pools**: add keys under `spec.workers` (each becomes its own
-  pool); set per-pool `replicas` and `type`. All workers share one `spread`
-  placement group (Hetzner caps a spread group at 10 servers).
+  pool); set per-pool `replicas` and `type`. **All** worker pools share one
+  `spread` placement group, and Hetzner caps a spread group at 10 servers — so the
+  **total** worker count across all pools must stay ≤ 10 (exceeding it makes
+  provisioning fail with a placement error, it does not degrade gracefully).
+  Likewise keep total control-plane replicas ≤ 10.
 - **Disable the private network**: drop `provider.config.network` (or set
   `enabled: false`) and the `ccm` networking override — that gives you the same
   shape as [`../capi`](../capi/).

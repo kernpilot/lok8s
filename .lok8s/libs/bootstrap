@@ -64,7 +64,9 @@ main::bootstrap() {
 bootstrap::_resolve_entries() {
   local cluster_yaml="$1" kind="$2"
   local -a entries
-  mapfile -t entries < <(yq -r '.spec.bootstrap[]?' "${cluster_yaml}")
+  # Drop comment lines: yq -r emits YAML comments in spec.bootstrap as their own
+  # lines, which must not be mistaken for addon names.
+  mapfile -t entries < <(yq -r '.spec.bootstrap[]?' "${cluster_yaml}" | grep -v '^[[:space:]]*#')
   if (( ${#entries[@]} > 0 )); then
     printf '%s\n' "${entries[@]}"
     return 0
@@ -125,9 +127,6 @@ bootstrap::apply() {
   local entry
   for entry in "${bootstrap_entries[@]}"; do
     [[ -n "${entry}" ]] || continue
-    # yq -r emits YAML comments in spec.bootstrap as their own lines; skip them
-    # so a `# comment` between entries isn't treated as an addon name.
-    [[ "${entry}" == \#* ]] && continue
 
     local addon_name="" addon_dir="" inline_values=""
 

@@ -172,7 +172,9 @@ driver::post_provision() {
       # the network from the `network` key — CAPH names it after the cluster. The
       # name is not secret, so a literal is fine (the token still uses a file).
       set -- --from-file=token="${tf}"
-      [[ "${net_enabled}" == "true" ]] && set -- "$@" --from-literal=network="${cluster_name}"
+      if [[ "${net_enabled}" == "true" ]]; then
+        set -- "$@" --from-literal=network="${cluster_name}"
+      fi
       kubectl --kubeconfig "${kubeconfig}" -n kube-system create secret generic hcloud \
         "$@" --dry-run=client -o yaml \
         | kubectl --kubeconfig "${kubeconfig}" apply -f - >&2
