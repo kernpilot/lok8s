@@ -1,0 +1,19 @@
+# examples/lo — a local kind cluster (the `Lo` driver).
+#
+# The default, zero-cost path: a kind cluster on a local Docker bridge with
+# working TLS, brought up by `lo up`. Uses the `42.lok8s.dev` project subdomain
+# (slot 42 → bridge 10.125.42.0/16) so it never collides with another lok8s
+# project on the same machine. Everything else is derived from *.lok8s.dev
+# defaults — see docs/reference/specs.md#default-resolution.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: lok8s-example
+spec:
+  kubernetes:
+    version: "v1.31.12"
+  cluster:
+    domain: 42.lok8s.dev
+  bootstrap:
+    - cilium    # CNI (kind ships without one)
+    - metallb   # L2 load balancer for the gateway

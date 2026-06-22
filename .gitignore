@@ -3,6 +3,15 @@
 .secrets/*
 !.secrets/.gitignore
 !.secrets/Secret.*.enc
+
+# example projects (examples/<driver>/): credentials + per-run derived state.
+# The cluster.lok8s.yaml configs ARE committed; everything generated is not.
+examples/*/.secrets/
+examples/*/.kustomize/
+examples/*/.provider/
+examples/*/clusters/*/.containerd/
+examples/*/clusters/*/.registries.json
+examples/*/clusters/*/.oidc/
 .kubeconfig/
 .tilt.*
 **/clusters/.active

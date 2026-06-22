@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# examples/test — provision, verify, and tear down an example end to end.
+#
+#   examples/test lo      # local kind cluster (free)
+#   examples/test capi    # Hetzner via Cluster API   (needs .secrets/hetzner.env; REAL infra)
+#   examples/test kkp     # Hetzner via Kubermatic KKP (needs a KKP endpoint + tokens)
+#
+# Runs the example as its own lok8s project (PATH_BASE) against the repo's
+# framework + toolchain (PATH_LOK8S / .bin / .kustomize). Credentials come from
+# the example's gitignored .secrets/ — never from the repo or the environment.
+set -euo pipefail
+
+name="${1:?usage: examples/test <lo|capi|kkp>}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd "${here}/.." && pwd)"
+proj="${here}/${name}"
+[[ -d "${proj}/clusters" ]] || { echo "examples/test: no example '${name}' at ${proj}" >&2; exit 1; }
+
+# lok8s env (no direnv in CI): the example is the project; the framework + the
+# built toolchain/plugins are reused from the repo.
+export PATH_BASE="${proj}"
+export PATH_BIN="${repo}/.bin"
+export PATH_LOK8S="${repo}/.lok8s"
+export PATH_CLUSTERS="${proj}/clusters"
+export PATH_SECRETS="${proj}/.secrets"
+export KUSTOMIZE_PLUGIN_HOME="${repo}/.kustomize"
+export PATH="${PATH_BIN}:${PATH_LOK8S}:${PATH}"
+
+domain="$(cd "${PATH_CLUSTERS}" && for d in */; do echo "${d%/}"; break; done)"
+spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+cluster="$(yq -r '.metadata.name' "${spec}")"
+
+# Cloud credentials (only present for capi/kkp), from the gitignored .secrets.
+[[ -f "${PATH_SECRETS}/hetzner.env" ]] && { set -a; . "${PATH_SECRETS}/hetzner.env"; set +a; }
+if [[ "${name}" != "lo" && -z "${HCLOUD_TOKEN:-}" ]]; then
+  echo "examples/test: ${name} needs HCLOUD_TOKEN — put it in ${PATH_SECRETS}/hetzner.env (gitignored)" >&2
+  exit 2
+fi
+
+# The secrets plugin must exist (registry TLS + secret generators).
+secret_bin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+[[ -x "${secret_bin}" ]] || make -C "${repo}/kustomize" build BIN_ROOT="${KUSTOMIZE_PLUGIN_HOME}" >/dev/null
+
+# kapply's progress UI writes to /dev/tty, so wrap provisioning in a PTY for
+# headless runs (see FRICTION.md / GOLIVE-TODO 0.2).
+run() { script -qec "$*" /dev/null; }
+
+echo ":: [${name}] provisioning ${domain} (cluster ${cluster})"
+lo use "${domain}"
+run "lo provision"
+
+echo ":: [${name}] verifying"
+export KUBECONFIG="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+kubectl wait --for=condition=Ready node --all --timeout=180s
+# `--all` passes vacuously with zero nodes, so require at least one Ready node.
+ready=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
+[[ "${ready}" -ge 1 ]] || { echo ":: [${name}] FAILED — no Ready nodes"; exit 1; }
+kubectl get nodes
+
+echo ":: [${name}] tearing down"
+run "lo down" || true
+
+echo ":: [${name}] OK"

@@ -1,0 +1,40 @@
+# examples/capi — a Hetzner Cloud cluster provisioned with Cluster API.
+#
+# The `Capi` driver runs a kind MANAGEMENT cluster locally and uses Cluster API
+# (CAPH — the Hetzner provider) to provision a real workload cluster on Hetzner.
+# Kept minimal to limit cost: 1 control-plane + 1 worker on the cheapest ARM
+# type (cax11). `examples/test capi` provisions and then tears it down.
+#
+# Prerequisites (see README): HCLOUD_TOKEN in .secrets/hetzner.env, and an SSH
+# key named below registered in your Hetzner project.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Capi
+metadata:
+  name: capi-example
+spec:
+  kubernetes:
+    version: "v1.31.12"
+  cluster:
+    domain: capi-example.lok8s.dev
+    namespace: capi-system
+  managementCluster:
+    domain: capi-mgmt.lok8s.dev
+  provider:
+    name: hetzner
+    config:
+      region: fsn1
+      sshKeyName: lok8s-example   # must exist in your Hetzner project
+    credentials:
+      envVars:
+        - HCLOUD_TOKEN
+      secretRef: capi-example-credentials
+  controlPlane:
+    replicas: 1
+    type: cax11
+  workers:
+    general:
+      replicas: 1
+      type: cax11
+  bootstrap:
+    - cilium   # CNI
+    - ccm      # Hetzner cloud-controller-manager
