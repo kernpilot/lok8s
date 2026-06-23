@@ -44,9 +44,10 @@ def collect(results_dir: Path) -> list[dict]:
                     "dataset_sha": meta.get("dataset_sha", "?"),
                 })
         elif "with_schema" in s:                 # authoring run
+            mode = ("addon-" if s.get("addon") else "") + ("schema" if s.get("with_schema") else "noschema")
             rows.append({
                 "run": name, "kind": "authoring", "model": s.get("model"),
-                "config": "schema" if s.get("with_schema") else "noschema",
+                "config": mode,
                 "route_acc": None, "format_pass": s.get("pass_rate"),
                 "passes": s.get("pass"), "n": s.get("n"), "think": s.get("think"),
                 "dataset_sha": s.get("dataset_sha", "?"),

@@ -100,6 +100,9 @@ eval:
     schema_files:
       - ../skills/lok8s-cluster-spec/SKILL.md
       - ../skills/lok8s-cluster-spec/reference.md
+  addon_dataset: lo_ai/data/addons.json    # for `addoneval` (chart-addon authoring)
+  addon_schema_files:
+    - ../skills/lok8s-addons/SKILL.md
 
 # ---------------------------------------------------------------------------
 # Synthetic data + training (only needed if the benchmark's Bucket B fires).

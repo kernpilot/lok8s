@@ -149,6 +149,25 @@ families). gemma4:12b untested (needs Ollama > 0.24.0). **Rule going forward:
 only benchmark models that fit VRAM (gpu_frac=1.0); spilling models stay in
 history under their old hash.**
 
+### Addon/chart authoring (harbor) — RAG works, but needs a capable model
+
+`addoneval`: author a chart addon, scored offline for **pattern conformance**
+(khelm `ChartRenderer` + kustomization `generators`/`includeSelectors: false`/the
+three `lok8s.dev/*` labels + `host.${LOK8S_SPEC_CLUSTER_DOMAIN}`). With the
+`lok8s-addons` skill in context: **qwen2.5-coder:14b 3/3** (harbor/kube-prometheus/
+cert-manager all conform); **gemma4:e2b 1/3** (follows the pattern but misses the
+domain-var host 2/3). Without schema both 0/3 (neither knows khelm's apiVersion).
+
+So addon authoring is **harder than cluster specs** (gemma4:e2b was 1.0 there,
+1/3 here) — RAG suffices but needs the 14b's capacity; no LoRA. **Refines the
+conductor pick:** if addon authoring matters, the 14b is the safer conductor;
+gemma4:e2b is great for routing + simple specs but weak on the multi-file khelm
+pattern. ("whitelisted domain" = the envsubst whitelist; a host reaches a manifest
+only via `${LOK8S_SPEC_CLUSTER_DOMAIN}`, the whitelisted token.)
+
+Remaining "cover all" dimensions still to build: argument-correctness scoring,
+multi-step agentic debug (mocked tools), and safety/posture gating.
+
 ## Open items
 
 - ~~Confirm the current best ~14B local coder model~~ — **done (2026-06-23):**
