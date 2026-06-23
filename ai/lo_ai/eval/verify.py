@@ -58,7 +58,7 @@ def verify_yaml(cfg, yaml_text: str, vspec: dict) -> tuple[str, str]:
         for base_cmd in commands:
             cmd = [c.replace("{domain}", domain) for c in base_cmd]
             if "{domain}" not in " ".join(base_cmd):
-                cmd = cmd + [domain]
+                cmd = cmd + ["--domain", domain]   # lo takes the domain as a global flag
             try:
                 p = subprocess.run(cmd, cwd=str(project), env=env,
                                    capture_output=True, text=True, timeout=120)

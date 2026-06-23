@@ -149,7 +149,7 @@ def route(catalog: ToolCatalog, llm: LLM, intent: str, strategy: str,
     }
 
 
-def run_bench(cfg: Config) -> dict:
+def run_bench(cfg: Config, tag: str = "", limit: int = 0) -> dict:
     from lo_ai.eval.scorer import score
     from lo_ai.embed import Embedder
 
@@ -162,11 +162,14 @@ def run_bench(cfg: Config) -> dict:
                 if cfg.get("embeddings.enabled") else None)
 
     intents = json.loads(cfg.resolve(cfg["eval"]["dataset"]).read_text())
+    if limit:
+        intents = intents[:limit]
     configs = cfg.get("eval.configs", ["raw", "hierarchy"])
     runs_per = int(cfg.get("eval.runs_per_intent", 5))
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = cfg.resolve(cfg["eval"]["out_dir"]) / f"run-{stamp}"
+    name = f"run-{stamp}" + (f"-{tag}" if tag else "")
+    out_dir = cfg.resolve(cfg["eval"]["out_dir"]) / name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(configs) * len(intents) * runs_per
@@ -192,9 +195,9 @@ def run_bench(cfg: Config) -> dict:
                                "error": f"exception: {e}"}
                     records.append(rec)
                     fh.write(json.dumps(rec) + "\n")
+                    fh.flush()
                     done += 1
-                    print(f"\r[{done}/{total}] {strategy:9} {it['id']:24}", end="")
-    print()
+                print(f"[{done}/{total}] {strategy:10} {it['id']}", flush=True)
 
     summary = score(cfg, intents, records)
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))

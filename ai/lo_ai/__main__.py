@@ -52,7 +52,13 @@ def cmd_route(cfg, args):
 
 def cmd_bench(cfg, args):
     from lo_ai.eval.runner import run_bench
-    run_bench(cfg)
+    if args.model:
+        cfg["llm"]["conductor"]["model"] = args.model
+    if args.runs:
+        cfg.raw["eval"]["runs_per_intent"] = args.runs
+    if args.configs:
+        cfg.raw["eval"]["configs"] = [c.strip() for c in args.configs.split(",")]
+    run_bench(cfg, tag=args.tag, limit=args.limit or 0)
 
 
 def cmd_synth(cfg, args):
@@ -96,7 +102,13 @@ def main(argv=None):
     s.set_defaults(fn=cmd_dump_tools)
     s = sub.add_parser("route"); s.add_argument("-q", "--query", required=True)
     s.set_defaults(fn=cmd_route)
-    sub.add_parser("bench").set_defaults(fn=cmd_bench)
+    b = sub.add_parser("bench")
+    b.add_argument("--model", help="override llm.conductor.model")
+    b.add_argument("--runs", type=int, help="override eval.runs_per_intent")
+    b.add_argument("--configs", help="comma list, override eval.configs")
+    b.add_argument("--tag", default="", help="label appended to the run dir")
+    b.add_argument("--limit", type=int, default=0, help="cap to first N intents")
+    b.set_defaults(fn=cmd_bench)
     s = sub.add_parser("synth"); s.add_argument("-i", "--input", required=True,
                                                 help="schema/feature file ('-' for stdin)")
     s.set_defaults(fn=cmd_synth)
