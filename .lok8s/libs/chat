@@ -4,16 +4,16 @@
 # chat — talk to a local AI about your cluster: transparent, streaming, read-only.
 #
 # Thin shim over the `lochat` Go binary (single static binary, `b`-managed). It
-# resolves the lo runtime (PATH_*, how to launch `lo mcp`), renders the chat
-# config to JSON via yq (injecting the local endpoint into http backends), and
-# hands off. All the intelligence — conductor routing, tool execution, the
-# read-only posture gate — lives in the binary. Flags (-p, --model, --posture)
-# are parsed by the binary; they pass straight through.
+# resolves the lo runtime and hands off — the binary reads a JSON config and
+# launches `lo mcp` itself (inheriting this shell's env, so PATH_*/PATH carry
+# through). No yq, no transforms: the dynamic bits (the lo path, the project dir)
+# are passed as flags; everything else lives in the JSON config. The binary
+# parses -p / --model / --posture, so they pass straight through.
 
 import ^utils/verbose
 
 main::chat() {
-  local bin cfg json rc
+  local bin cfg
   bin="${PATH_BIN}/lochat"
   [[ -x "${bin}" ]] || bin="$(command -v lochat 2>/dev/null || true)"
   [[ -x "${bin}" ]] || {
@@ -23,39 +23,14 @@ main::chat() {
   }
 
   # config: per-project override, else the shipped defaults.
-  cfg="${LO_CHAT_CONFIG:-${PATH_BASE}/lo-chat.yaml}"
-  [[ -f "${cfg}" ]] || cfg="${PATH_LOK8S}/chat/defaults.yaml"
+  cfg="${LO_CHAT_CONFIG:-${PATH_BASE}/lo-chat.json}"
+  [[ -f "${cfg}" ]] || cfg="${PATH_LOK8S}/chat/defaults.json"
   [[ -f "${cfg}" ]] || { error "no chat config (looked for ${cfg})"; return 1; }
-  command -v yq &>/dev/null || { error "yq not found (b install yq)"; return 1; }
 
-  json="$(mktemp -t lo-chat.XXXXXX.json)"
-  # Build the binary's JSON config: mcp (from the lo runtime) + the chat brain
-  # (from $cfg), injecting the local endpoint into every http backend.
-  # shellcheck disable=SC2016
-  LO="${PATH_LOK8S}/lo" yq -o=json eval '
-    .endpoint as $ep
-    | .backends.[] |= (. + {"base_url": $ep, "api_key": "ollama"})
-    | {
-        "mcp": {
-          "command": [strenv(LO), "mcp"],
-          "cwd": strenv(PATH_BASE),
-          "extra_path": [strenv(PATH_BIN), strenv(PATH_LOK8S)],
-          "env": {
-            "PATH_BASE": strenv(PATH_BASE), "PATH_BIN": strenv(PATH_BIN),
-            "PATH_LOK8S": strenv(PATH_LOK8S), "PATH_CLUSTERS": strenv(PATH_CLUSTERS),
-            "PATH_SECRETS": strenv(PATH_SECRETS), "KUSTOMIZE_PLUGIN_HOME": strenv(KUSTOMIZE_PLUGIN_HOME)
-          },
-          "timeout": 120
-        },
-        "conductor": .conductor, "posture": .posture, "max_tool_steps": .max_tool_steps,
-        "schema_files": [.schema_files[] | strenv(PATH_BASE) + "/" + .],
-        "injection": .injection,
-        "backends": .backends
-      }
-  ' "${cfg}" > "${json}" || { rm -f "${json}"; error "failed to render chat config"; return 1; }
-
-  "${bin}" --config "${json}" "${@}"
-  rc=$?
-  rm -f "${json}"
-  return "${rc}"
+  exec "${bin}" \
+    --config "${cfg}" \
+    --lo "${PATH_LOK8S}/lo" \
+    --cwd "${PATH_BASE}" \
+    --base-dir "${PATH_BASE}" \
+    "${@}"
 }

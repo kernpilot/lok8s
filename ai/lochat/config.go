@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 )
 
 // MCPConfig: how to launch `lo mcp` (stdio JSON-RPC).
@@ -38,6 +37,7 @@ type Injection struct {
 
 type Config struct {
 	MCP          MCPConfig                 `json:"mcp"`
+	Endpoint     string                    `json:"endpoint"` // injected as base_url into http backends
 	Conductor    string                    `json:"conductor"`
 	Posture      string                    `json:"posture"`
 	MaxToolSteps int                       `json:"max_tool_steps"`
@@ -54,16 +54,6 @@ func loadConfig(path string) (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
-	}
-	// resolve relative paths against the config file's dir (like the shim's cwd)
-	dir := filepath.Dir(path)
-	for i, f := range c.SchemaFiles {
-		if !filepath.IsAbs(f) {
-			c.SchemaFiles[i] = filepath.Join(dir, f)
-		}
-	}
-	if c.MCP.Cwd != "" && !filepath.IsAbs(c.MCP.Cwd) {
-		c.MCP.Cwd = filepath.Join(dir, c.MCP.Cwd)
 	}
 	if c.Posture == "" {
 		c.Posture = "read-only"

@@ -1,12 +1,14 @@
 // lo chat — a fully-local, transparent, streaming assistant over `lo mcp`.
-// Single static binary (stdlib only). Config arrives as JSON (the argsh shim
-// converts the YAML chat config via yq), so there are no Go module deps.
+// Single static binary (stdlib only). The argsh shim passes a JSON config plus
+// the dynamic bits (--lo, --cwd, --base-dir) from the lo runtime — no yq, no
+// Go module deps.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 func main() {
@@ -14,6 +16,9 @@ func main() {
 	prompt := flag.String("p", "", "single-shot prompt (non-interactive)")
 	model := flag.String("model", "", "conductor backend key (chat.backends)")
 	posture := flag.String("posture", "", "read-only | confirm | open")
+	loPath := flag.String("lo", "", "path to the lo CLI (used to launch `lo mcp`)")
+	cwd := flag.String("cwd", ".", "working dir for lo mcp (the project root / PATH_BASE)")
+	baseDir := flag.String("base-dir", "", "resolve relative schema_files against this (default: --cwd)")
 	flag.Parse()
 
 	if *cfgPath == "" {
@@ -26,6 +31,36 @@ func main() {
 	}
 	if *posture != "" {
 		cfg.Posture = *posture
+	}
+
+	// dynamic bits supplied by the shim from the lo runtime (no yq needed):
+	if *loPath != "" {
+		cfg.MCP.Command = []string{*loPath, "mcp"}
+	}
+	if *cwd != "" {
+		cfg.MCP.Cwd = *cwd
+	}
+	bd := *baseDir
+	if bd == "" {
+		bd = *cwd
+	}
+	for i, f := range cfg.SchemaFiles {
+		if !filepath.IsAbs(f) {
+			cfg.SchemaFiles[i] = filepath.Join(bd, f)
+		}
+	}
+	for _, b := range cfg.Backends {
+		if b.Type != "cli" {
+			if b.BaseURL == "" {
+				b.BaseURL = cfg.Endpoint
+			}
+			if b.APIKey == "" {
+				b.APIKey = "ollama"
+			}
+		}
+	}
+	if len(cfg.MCP.Command) == 0 {
+		die(fmt.Errorf("--lo <path> required (to launch `lo mcp`)"))
 	}
 
 	backends := map[string]Backend{}
