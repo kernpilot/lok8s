@@ -9,6 +9,7 @@ hallucination — if it does, no LoRA is needed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -50,7 +51,9 @@ def author_bench(cfg: Config, with_schema: bool = False, model: str = None,
         spec["model"] = model
     llm = LLM(spec)
 
-    intents = json.loads(cfg.resolve(cfg["eval"]["dataset"]).read_text())
+    ds_path = cfg.resolve(cfg["eval"]["dataset"])
+    dataset_sha = hashlib.sha256(ds_path.read_bytes()).hexdigest()[:12]
+    intents = json.loads(ds_path.read_text())
     fmt = [it for it in intents if it.get("bucket") == "format"]
     if limit:
         fmt = fmt[:limit]
@@ -81,11 +84,13 @@ def author_bench(cfg: Config, with_schema: bool = False, model: str = None,
 
     decided = counts["pass"] + counts["fail"]
     summary = {"model": spec["model"], "with_schema": with_schema, **counts,
-               "n": len(fmt),
+               "n": len(fmt), "dataset_sha": dataset_sha,
                "pass_rate": round(counts["pass"] / decided, 3) if decided else None}
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     (out_dir / "records.jsonl").write_text(
         "\n".join(json.dumps(r) for r in records))
     print(f"\nauthoring [{spec['model']}, schema={with_schema}]: "
           f"{counts['pass']}/{len(fmt)} pass  -> {out_dir}")
+    from lo_ai.eval.ledger import build_ledger
+    build_ledger(cfg)
     return summary

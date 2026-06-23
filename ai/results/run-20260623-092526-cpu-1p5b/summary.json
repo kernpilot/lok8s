@@ -1,0 +1,294 @@
+{
+  "configs": {
+    "raw": {
+      "routing": {
+        "n": 59,
+        "acc": 0.661,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 0,
+        "fail": 8,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.0,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint web.lok8s.dev\n\nError: too many arguments: web.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint cp.lok8s.dev\n\nError: too many arguments: cp.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint lb.lok8s.dev\n\nError: too many arguments: lb.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint dns.lok8s.dev\n\nError: too many arguments: dns.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 9551.729,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "What cluster drivers can I use?",
+          "chose": "lo_addons",
+          "gold": "lo_drivers",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Is Tilt running right now?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Show me the registry status.",
+          "chose": "lo_status",
+          "gold": "lo_registry_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "List the images in the cache registry.",
+          "chose": "lo_image_cache",
+          "gold": "lo_image_list",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Begin hot-reloading my services.",
+          "chose": "lo_deploy",
+          "gold": "lo_tilt_up",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Clear the image cache.",
+          "chose": "lo_image_cache",
+          "gold": "lo_image_clean",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_bootstrap",
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Author a cluster.lok8s.yaml for a kind Lo cluster ml on domain ml.lok8s.dev with an OIDC issuer https://auth.example.com and clientID lok8s.",
+          "chose": "lo_init_service",
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": null
+        }
+      ]
+    },
+    "hierarchy": {
+      "routing": {
+        "n": 59,
+        "acc": 0.356,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 0,
+        "fail": 8,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.0,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint demo.lok8s.dev\n\nError: too many arguments: demo.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint web.lok8s.dev\n\nError: too many arguments: web.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint ml.lok8s.dev\n\nError: too many arguments: ml.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint cp.lok8s.dev\n\nError: too many arguments: cp.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint dns.lok8s.dev\n\nError: too many arguments: dns.lok8s.dev\n\n  Run \"lo -h\" for more information.\n"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 7098.678,
+      "steps_mean": 2,
+      "error_rate": 0.102,
+      "routing_failures": [
+        {
+          "intent": "Give me a quick health summary of the cluster right now.",
+          "chose": "lo_up",
+          "gold": "lo_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "show cluster status",
+          "chose": "lo_provision",
+          "gold": "lo_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Is my environment healthy \u2014 anything broken in my toolchain?",
+          "chose": "lo_provision",
+          "gold": "lo_doctor",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Something's off with my setup, diagnose it.",
+          "chose": "lo_provision",
+          "gold": "lo_doctor",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Validate my cluster specs and config.",
+          "chose": "lo_provision",
+          "gold": "lo_lint",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Check that my cluster.lok8s.yaml is valid.",
+          "chose": "lo_provision",
+          "gold": "lo_lint",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Which addons are available for my cluster?",
+          "chose": "lo_provision",
+          "gold": "lo_addons",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Print the kubeconfig for my domain.",
+          "chose": "lo_use",
+          "gold": "lo_kubeconfig",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "I need the kubeconfig so I can run kubectl.",
+          "chose": "lo_use",
+          "gold": "lo_kubeconfig",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "What cluster drivers can I use?",
+          "chose": "lo_provision",
+          "gold": "lo_drivers",
+          "config": "hierarchy",
+          "err": null
+        }
+      ]
+    }
+  }
+}

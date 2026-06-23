@@ -1,0 +1,276 @@
+{
+  "configs": {
+    "raw": {
+      "routing": {
+        "n": 59,
+        "acc": 0.831,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 0,
+        "fail": 8,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.0,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain demo.lok8s.dev\nValidating: demo.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain obs.lok8s.dev\nValidating: obs.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain lb.lok8s.dev\nValidating: lb.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: kind\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m   Missing required field: metadata.name\n\u001b[0;33m[warn]\u001b[0m   Missing spec.kind (cluster runtime type)\n\u001b[0;31m[error]\u001b[0m 3 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validatio"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "raw",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain dns.lok8s.dev\nValidating: dns.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 7456.305,
+      "steps_mean": 1,
+      "error_rate": 0.051,
+      "routing_failures": [
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Author a complete cluster.lok8s.yaml for a kind Lo cluster named web on domain web.lok8s.dev with 1 control plane node and 3 workers.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": "off-menu choice: None"
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Author a cluster.lok8s.yaml for a kind Lo cluster ml on domain ml.lok8s.dev with an OIDC issuer https://auth.example.com and clientID lok8s.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": "off-menu choice: None"
+        },
+        {
+          "intent": "Create a complete cluster.lok8s.yaml for a kind Lo cluster named cp on domain cp.lok8s.dev with 3 control plane nodes and 0 workers.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": "off-menu choice: None"
+        },
+        {
+          "intent": "Author a kind Lo cluster.lok8s.yaml on domain lb.lok8s.dev with a MetalLB loadBalancer pool covering 10.0.0.10-10.0.0.20.",
+          "chose": "lo_init_service",
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "My cluster won't bootstrap, help me figure out what's wrong.",
+          "chose": "lo_doctor",
+          "gold": "lo_lint",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "The gateway LoadBalancer is stuck in <pending>.",
+          "chose": "lo_doctor",
+          "gold": "lo_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "docker push fails with connection refused during tilt ci.",
+          "chose": "lo_tilt_ci",
+          "gold": "lo_doctor",
+          "config": "raw",
+          "err": null
+        }
+      ]
+    },
+    "hierarchy": {
+      "routing": {
+        "n": 59,
+        "acc": 0.661,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 3,
+        "fail": 5,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.375,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain demo.lok8s.dev\nValidating: demo.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m   spec.bootstrap entry not found: {} (resolved to /mnt/scratch/github/kernpilot/lok8s/.lok8s/addons/{})\n\u001b[0;31m[error]\u001b[0m 2 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain obs.lok8s.dev\nValidating: obs.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain lb.lok8s.dev\nValidating: lb.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 6978.475,
+      "steps_mean": 2.237,
+      "error_rate": 0.085,
+      "routing_failures": [
+        {
+          "intent": "Which addons are available for my cluster?",
+          "chose": "lo_k8s_platform",
+          "gold": "lo_addons",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "What cluster drivers can I use?",
+          "chose": "lo_up",
+          "gold": "lo_drivers",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Is this cluster registered with kubehz?",
+          "chose": "lo_status",
+          "gold": "lo_kubehz_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Switch my active context to domain app.lok8s.dev.",
+          "chose": null,
+          "gold": "lo_use",
+          "config": "hierarchy",
+          "err": "off-menu choice: 'configure'"
+        },
+        {
+          "intent": "Point me at the prod domain.",
+          "chose": "lo_kubeconfig",
+          "gold": "lo_use",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Trust the local dev CA so my browser stops complaining.",
+          "chose": null,
+          "gold": "lo_trust",
+          "config": "hierarchy",
+          "err": "off-menu choice: 'configure'"
+        },
+        {
+          "intent": "Install the dev root CA into my system trust store.",
+          "chose": "lo_secrets_init",
+          "gold": "lo_trust",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Bootstrap the addons defined in my spec.",
+          "chose": "lo_deploy",
+          "gold": "lo_bootstrap",
+          "config": "hierarchy",
+          "err": null
+        }
+      ]
+    }
+  }
+}

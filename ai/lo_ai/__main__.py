@@ -67,6 +67,11 @@ def cmd_authoreval(cfg, args):
                  tag=args.tag, limit=args.limit or 0)
 
 
+def cmd_ledger(cfg, args):
+    from lo_ai.eval.ledger import build_ledger, print_ledger
+    print_ledger(build_ledger(cfg))
+
+
 def cmd_synth(cfg, args):
     from lo_ai.train.synth import generate_pairs
     spec = sys.stdin.read() if args.input == "-" else cfg.resolve(args.input).read_text()
@@ -125,6 +130,8 @@ def main(argv=None):
     a.add_argument("--tag", default="")
     a.add_argument("--limit", type=int, default=0)
     a.set_defaults(fn=cmd_authoreval)
+
+    sub.add_parser("ledger").set_defaults(fn=cmd_ledger)
     s = sub.add_parser("synth"); s.add_argument("-i", "--input", required=True,
                                                 help="schema/feature file ('-' for stdin)")
     s.set_defaults(fn=cmd_synth)

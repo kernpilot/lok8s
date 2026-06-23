@@ -5,6 +5,7 @@ can bucket failures into Routing / Format / Reasoning.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -161,7 +162,9 @@ def run_bench(cfg: Config, tag: str = "", limit: int = 0) -> dict:
     embedder = (Embedder(cfg["embeddings"])
                 if cfg.get("embeddings.enabled") else None)
 
-    intents = json.loads(cfg.resolve(cfg["eval"]["dataset"]).read_text())
+    ds_path = cfg.resolve(cfg["eval"]["dataset"])
+    dataset_sha = hashlib.sha256(ds_path.read_bytes()).hexdigest()[:12]
+    intents = json.loads(ds_path.read_text())
     if limit:
         intents = intents[:limit]
     configs = cfg.get("eval.configs", ["raw", "hierarchy"])
@@ -204,6 +207,9 @@ def run_bench(cfg: Config, tag: str = "", limit: int = 0) -> dict:
     (out_dir / "meta.json").write_text(json.dumps({
         "stamp": stamp, "configs": configs, "runs_per_intent": runs_per,
         "n_tools": len(tools), "model": llm.model, "tool_mode": tool_mode,
+        "dataset_sha": dataset_sha, "n_intents": len(intents),
     }, indent=2))
+    from lo_ai.eval.ledger import build_ledger
+    build_ledger(cfg)
     print(f"\nresults -> {out_dir}")
     return summary
