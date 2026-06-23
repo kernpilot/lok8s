@@ -112,8 +112,21 @@ authoring intents (expand + seed referenced clusters in the verifier to pin the
 RAG delta precisely); routing gold labels have some ambiguity that understates
 true accuracy.
 
+### Model bake-off (think-off, same 59-intent set)
+
+Tested newer/other Qwen — qwen3-coder:30b, qwen3:14b, qwen3.5:4b/9b, qwen3.6:27b.
+**None beats qwen2.5-coder:14b as the conductor.** Routing: 14b **0.881** (3.2s) >
+30b 0.831 (7.5s) > 27b 0.819 (16.5s, VRAM spill) > qwen3.5:4b 0.814 (2.0s) >
+9b 0.746. Authoring +schema: 14b/9b/27b all 0.875; **without** schema the newer
+models fail (0–0.375) — they don't know the lok8s schema, so RAG is essential
+(reconfirms: no LoRA). qwen3.5:4b is a compelling *routing-only* fast/tiny option
+(0.814 @ 2.0s) but authors poorly (0.50). Reasoning mode (think-on) is non-viable:
+~73s/call and truncates. **Task-fit > recency: dense + coder-tuned + VRAM-resident
++ no-think wins.** Verdict: **qwen2.5-coder:14b + diet tools + schema-in-context.**
+
 ## Open items
 
-- Confirm the current best ~14B local coder model (don't freeze on Qwen2.5).
+- ~~Confirm the current best ~14B local coder model~~ — **done (2026-06-23):**
+  qwen2.5-coder:14b won the bake-off vs qwen3-coder:30b / qwen3.5:4b,9b / qwen3.6:27b.
 - `b install` the toolchain in this worktree before running `lo`.
 - Decide cloud-vs-local for the teacher generation step.
