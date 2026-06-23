@@ -9,13 +9,15 @@
   ],
   "backends": {
     "local-e2b": {"api": "ollama", "model": "gemma4:e2b",        "num_ctx": 16384, "temperature": 0.2},
+    "local-e4b": {"api": "ollama", "model": "gemma4:e4b",        "num_ctx": 16384, "temperature": 0.2},
     "local-14b": {"api": "ollama", "model": "qwen2.5-coder:14b", "num_ctx": 16384, "temperature": 0.2},
+    "local-llamafile": {"api": "openai", "model": "local", "base_url": "http://localhost:8080/v1", "num_ctx": 16384, "temperature": 0.2},
     "claude": {"type": "cli", "command": ["claude", "-p"],  "detect": "claude"},
     "gemini": {"type": "cli", "command": ["gemini", "-p"],  "detect": "gemini"},
     "codex":  {"type": "cli", "command": ["codex", "exec"], "detect": "codex"}
   },
   "injection": {
-    "drop": ["lo_init_service", "lo_init_test", "lo_crds_generate", "lo_crds_check",
+    "drop": ["lo_chat", "lo_init_service", "lo_init_test", "lo_crds_generate", "lo_crds_check",
              "lo_env_kustomization", "lo_kustomize_test", "lo_image_cache", "lo_version"],
     "deny": ["lo_secrets_print", "lo_secrets_env"],
     "tiers": {

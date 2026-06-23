@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,15 +37,76 @@ func makeBackend(name string, b *BackendConfig) Backend {
 
 // --------------------------------------------------------------------------
 type httpBackend struct {
-	name string
-	cfg  *BackendConfig
+	name     string
+	cfg      *BackendConfig
+	mu       sync.Mutex
+	probed   bool
+	probedAt time.Time
 }
 
-func (h *httpBackend) Label() string   { return h.name + " (" + h.cfg.Model + ")" }
-func (h *httpBackend) Available() bool { return true }
-func (h *httpBackend) Agentic() bool   { return true }
+func (h *httpBackend) Label() string { return h.name + " (" + h.cfg.Model + ")" }
+func (h *httpBackend) Agentic() bool { return true }
 
-func (h *httpBackend) ollama() bool { return h.cfg.API == "ollama" }
+func (h *httpBackend) ollama() bool         { return h.cfg.API == "ollama" }
+func (h *httpBackend) endpointBase() string { return strings.TrimSuffix(h.cfg.BaseURL, "/v1") }
+
+// Available probes the server (result cached briefly) so /models, cycling and
+// the startup preflight reflect reality without hammering the endpoint.
+func (h *httpBackend) Available() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.probedAt.IsZero() && time.Since(h.probedAt) < 3*time.Second {
+		return h.probed
+	}
+	_, err := h.listModels(700 * time.Millisecond)
+	h.probed, h.probedAt = err == nil, time.Now()
+	return h.probed
+}
+
+// listModels returns the model ids the server currently serves (ollama
+// /api/tags, or OpenAI-compatible /v1/models for llamafile/vLLM/LM Studio/etc.).
+func (h *httpBackend) listModels(timeout time.Duration) ([]string, error) {
+	url := h.cfg.BaseURL + "/models"
+	if h.ollama() {
+		url = h.endpointBase() + "/api/tags"
+	}
+	req, _ := http.NewRequest("GET", url, nil)
+	if h.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+h.cfg.APIKey)
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if h.ollama() {
+		var o struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		json.NewDecoder(resp.Body).Decode(&o)
+		ns := make([]string, 0, len(o.Models))
+		for _, m := range o.Models {
+			ns = append(ns, m.Name)
+		}
+		return ns, nil
+	}
+	var o struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	json.NewDecoder(resp.Body).Decode(&o)
+	ns := make([]string, 0, len(o.Data))
+	for _, m := range o.Data {
+		ns = append(ns, m.ID)
+	}
+	return ns, nil
+}
 
 func (h *httpBackend) body(msgs []Msg, stream bool) (string, map[string]any) {
 	if h.ollama() {
