@@ -143,3 +143,15 @@ _shadow_setup() {
   assert_failure
   assert_output --partial 'Flat-store shadow: Secret.app.default.TOKEN'
 }
+
+@test "check_flat_shadows: bails cleanly when neither PATH_SECRETS nor PATH_BASE is set" {
+  # Both unset must short-circuit BEFORE flat resolves to a bogus "/.secrets"
+  # (which could match an unrelated host dir). No output, no error, no host read.
+  DOM_DIR="${BATS_TEST_TMPDIR}/clusters/app.example.com"
+  mkdir -p "${DOM_DIR}/secrets"
+  printf 'v' > "${DOM_DIR}/secrets/Secret.app.default.TOKEN"
+  unset PATH_SECRETS PATH_BASE
+  run secrets::check_flat_shadows "${DOM_DIR}"
+  assert_success
+  assert_output ''
+}
