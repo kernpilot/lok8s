@@ -94,7 +94,7 @@ Two good options:
 > **Why these aren't auto-pulled.** `llama-server -hf` does its own HF download, and
 > a pre-packaged `*.llamafile` is a **remote executable** — neither is digest-checked
 > the way `ollama pull` is. `lo chat` shows the command; you fetch (and verify) it
-> yourself. Ollama models *are* digest-verified, so those `lo chat` pulls for you.
+> yourself. Ollama models *are* digest-verified, so `lo chat` will pull those for you.
 
 > **Which `:8080` server?** `local-llamafile` is just an OpenAI-compatible backend
 > pointed at `http://localhost:8080` — `llama-server`, `llamafile`, vLLM, or

@@ -26,7 +26,7 @@ llm:
   judge:
     base_url: http://localhost:11434/v1
     model: ""
-    api_key: ollama
+    # api_key: ""                         # only if your server requires auth; omit for local (no header sent)
     temperature: 0.0
     request_timeout: 120
 
