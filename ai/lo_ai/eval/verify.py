@@ -48,6 +48,15 @@ def verify_yaml(cfg, yaml_text: str, vspec: dict) -> tuple[str, str]:
         clusters = Path(tmp) / "clusters"
         ddir = clusters / domain
         ddir.mkdir(parents=True)
+        # seed referenced clusters so a Deploy's clusterRef resolves (else lint
+        # rejects a valid spec because the temp env lacks the target cluster)
+        for ref in (vspec.get("ref_clusters") or []):
+            rdir = clusters / ref
+            rdir.mkdir(parents=True, exist_ok=True)
+            (rdir / "cluster.lok8s.yaml").write_text(
+                "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\n"
+                f"metadata:\n  name: {ref.split('.')[0]}\n"
+                f"spec:\n  cluster:\n    domain: {ref}\n")
         # seed any prelude files (e.g. a base spec an addon edit attaches to)
         for name, content in (vspec.get("prelude") or {}).items():
             (ddir / name).write_text(content)

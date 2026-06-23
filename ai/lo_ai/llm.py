@@ -16,6 +16,25 @@ class LLMError(RuntimeError):
     pass
 
 
+def ps_info(base_url: str, model: str, timeout: float = 5.0):
+    """Query Ollama /api/ps for a loaded model's VRAM footprint.
+    Returns {size_gb, vram_gb, gpu_frac} (gpu_frac 1.0 = fully on GPU / fits)."""
+    root = base_url[:-3] if base_url.endswith("/v1") else base_url
+    url = root.rstrip("/") + "/api/ps"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    for m in data.get("models", []):
+        if model in (m.get("name"), m.get("model")):
+            size, vram = m.get("size", 0), m.get("size_vram", 0)
+            return {"size_gb": round(size / 1e9, 2),
+                    "vram_gb": round(vram / 1e9, 2),
+                    "gpu_frac": round(vram / size, 3) if size else None}
+    return None
+
+
 class LLM:
     def __init__(self, spec: dict):
         self.base_url = spec["base_url"].rstrip("/")

@@ -204,11 +204,19 @@ def run_bench(cfg: Config, tag: str = "", limit: int = 0) -> dict:
 
     summary = score(cfg, intents, records)
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    from lo_ai.llm import ps_info
+    vram = ps_info(llm.base_url, llm.model) or {}
+    if vram.get("gpu_frac") is not None and vram["gpu_frac"] < 0.99:
+        print(f"  ! {llm.model} spills VRAM (gpu_frac={vram['gpu_frac']}, "
+              f"{vram.get('vram_gb')}/{vram.get('size_gb')}GB on GPU) — "
+              f"latency here is not representative of a card that fits it")
     (out_dir / "meta.json").write_text(json.dumps({
         "stamp": stamp, "configs": configs, "runs_per_intent": runs_per,
         "n_tools": len(tools), "model": llm.model, "tool_mode": tool_mode,
         "dataset_sha": dataset_sha, "n_intents": len(intents),
         "think": cfg.get("llm.conductor.think"), "api": cfg.get("llm.conductor.api"),
+        "size_gb": vram.get("size_gb"), "vram_gb": vram.get("vram_gb"),
+        "gpu_frac": vram.get("gpu_frac"),
     }, indent=2))
     from lo_ai.eval.ledger import build_ledger
     build_ledger(cfg)
