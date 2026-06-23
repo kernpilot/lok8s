@@ -1,0 +1,161 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 63,
+        "acc": 0.0,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 12,
+        "pass": 0,
+        "fail": 12,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.0,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-reflector",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-namespace",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": null,
+      "steps_mean": 0,
+      "error_rate": 1.0,
+      "routing_failures": [
+        {
+          "intent": "What is the current state of my cluster?",
+          "chose": null,
+          "gold": "lo_status",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Give me a quick health summary of the cluster right now.",
+          "chose": null,
+          "gold": "lo_status",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "show cluster status",
+          "chose": null,
+          "gold": "lo_status",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Is my environment healthy \u2014 anything broken in my toolchain?",
+          "chose": null,
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Something's off with my setup, diagnose it.",
+          "chose": null,
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Validate my cluster specs and config.",
+          "chose": null,
+          "gold": "lo_lint",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Check that my cluster.lok8s.yaml is valid.",
+          "chose": null,
+          "gold": "lo_lint",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Which addons are available for my cluster?",
+          "chose": null,
+          "gold": "lo_addons",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "Print the kubeconfig for my domain.",
+          "chose": null,
+          "gold": "lo_kubeconfig",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        },
+        {
+          "intent": "I need the kubeconfig so I can run kubectl.",
+          "chose": null,
+          "gold": "lo_kubeconfig",
+          "config": "diet",
+          "err": "exception: 404 Not Found: {\"error\":\"model 'gemma4:12b' not found\"}"
+        }
+      ]
+    }
+  }
+}

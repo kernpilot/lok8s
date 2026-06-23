@@ -124,6 +124,31 @@ models fail (0–0.375) — they don't know the lok8s schema, so RAG is essentia
 ~73s/call and truncates. **Task-fit > recency: dense + coder-tuned + VRAM-resident
 + no-think wins.** Verdict: **qwen2.5-coder:14b + diet tools + schema-in-context.**
 
+### VRAM-fit ranking (think-off, fits-16GB only — dataset b7224ea9d)
+
+Polished round: deploy-ref verifier false-negative fixed (authoring now tops at
+1.0, not 0.875), VRAM captured per run, ranking published for other hardware.
+
+| model | route | author+schema | lat | VRAM |
+|---|---|---|---|---|
+| qwen2.5-coder:14b | **0.873** | 1.00 | 3.1s | 10.9GB |
+| **gemma4:e2b** | 0.841 | 1.00 | **1.4s** | 7.8GB |
+| qwen3.5:4b | 0.794 | 0.58 | 2.2s | 6.1GB |
+| qwen2.5-coder:1.5b | 0.714 | 0.33 | 0.7s | 1.5GB |
+| qwen3.5:9b | 0.714 | 1.00 | 2.5s | 8.9GB |
+| gemma4:e4b | 0.714 | 1.00 | 1.8s | 10.7GB |
+
+**Recommendation matrix (lok8s runs on varied hardware):**
+- Max accuracy → **qwen2.5-coder:14b** (0.873 route, 1.0 author; 10.9GB, 3.1s).
+- Best balance / snappy / smaller cards → **gemma4:e2b** — near-14b routing
+  (0.841) + perfect authoring, 2.3× faster, 7.8GB. Surprise standout.
+- Tiny / routing-only → **qwen2.5-coder:1.5b** (1.5GB, 0.7s; weak authoring 0.33).
+
+Authoring 1.0 needs schema-in-context for all (RAG; no LoRA — reconfirmed across
+families). gemma4:12b untested (needs Ollama > 0.24.0). **Rule going forward:
+only benchmark models that fit VRAM (gpu_frac=1.0); spilling models stay in
+history under their old hash.**
+
 ## Open items
 
 - ~~Confirm the current best ~14B local coder model~~ — **done (2026-06-23):**

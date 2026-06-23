@@ -78,12 +78,12 @@ def _model(r):
 def _ranking(rows):
     """Per-model deployable ranking (think-off) with VRAM + fit — the shareable
     model-selection guide for any card, not just this box."""
-    from collections import Counter
     routing = [r for r in rows if r["kind"] == "routing" and r["route_acc"] is not None]
     if not routing:
         return
-    ds = Counter(r["dataset_sha"] for r in routing).most_common(1)[0][0]
-    pool = [r for r in routing if r["dataset_sha"] == ds and r.get("think") is not True]
+    ds = max(routing, key=lambda r: r.get("run", "")).get("dataset_sha", "?")  # latest run's dataset
+    pool = [r for r in routing if r["dataset_sha"] == ds and r.get("think") is not True
+            and (r.get("err") or 0) < 0.99]   # drop all-errored runs (e.g. failed pull)
     best = {}
     for r in pool:
         k = r["model"]
