@@ -9,6 +9,9 @@ adapters/
 data/
 tools.json
 
+# go — the lochat binary is built by `go build` / `b`, not committed
+lochat/lochat
+
 # python
 __pycache__/
 *.pyc

@@ -40,6 +40,7 @@ import ^libs/lint
 import ^libs/status
 import ^libs/doctor
 import ^libs/trust
+import ^libs/chat
 import ^libs/version
 import ^libs/crds
 import ^libs/gitops
@@ -93,6 +94,7 @@ main() {
     'status@readonly'                  'Cluster health and status'
     'doctor@readonly'                  'Diagnose the environment + toolchain'
     'trust'                            'Trust the local dev CA (mkcert -install)'
+    'chat'                             'Chat with a local AI (transparent, streaming)'
     'version@readonly'                 'Print lok8s + toolchain versions'
     'gitops|g'                         'GitOps integration'
     'kubehz|kh'                        'kubehz platform integration'

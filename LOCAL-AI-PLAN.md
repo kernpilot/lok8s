@@ -241,8 +241,20 @@ Features: transparent (every tool call + gate decision is shown), token streamin
 `/posture`, `/think`, `/tools`, `/clear`. Deps: `requirements-chat.txt`.
 
 Next for chat: confirm-mode (gated mutations with dry-run preview), the doctor-
-tree debug flow, proactive watch via operator hooks, and wiring `lo chat` into
-the real `lo` CLI (currently `python -m lo_ai chat`).
+tree debug flow, proactive watch via operator hooks.
+
+### Shipped: Go port + `lo chat` argsh shim
+
+Ported the assistant to a single static, dependency-free **Go binary**
+(`ai/lochat/`, stdlib only → builds offline, fits `b`'s binary model — the right
+choice for a CLI feature vs Python's runtime/deps). The Python `lo_ai chat`
+stays the reference; the benchmark/training harness stays Python (the ML stack
+is Python-only). Wired as **`lo chat`** via an argsh shim (`.lok8s/libs/chat` +
+`.lok8s/chat/defaults.yaml`, registered in `.lok8s/lo`): the shim renders the
+YAML chat config to JSON with `yq` (env-injected mcp + endpoint) and execs the
+binary. Same design — flat tools, streaming, frontier-CLI escalation (`/model`),
+deterministic posture gate. Verified (gemma4:e2b): "what addons?" answers from
+real `lo addons` output; "tear down my cluster" → `lo_destroy` **gate-blocked**.
 
 ## Open items
 

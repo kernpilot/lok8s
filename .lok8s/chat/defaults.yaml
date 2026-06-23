@@ -1,0 +1,27 @@
+# lo chat defaults. Override per project with ./lo-chat.yaml (same shape).
+# The shim adds `mcp` (how to launch `lo mcp`) and injects `endpoint` into each
+# http backend's base_url, so this file is just the brain + policy + tool tiers.
+# Model picks come from the benchmark (LOCAL-AI-PLAN.md): gemma4:e2b default
+# (fast/tiny), qwen2.5-coder:14b for addon authoring.
+endpoint: http://localhost:11434/v1
+conductor: local-e2b
+posture: read-only          # read-only | confirm | open  (the deterministic safety gate)
+max_tool_steps: 4
+schema_files:               # injected (RAG) when a turn looks like authoring
+  - skills/lok8s-cluster-spec/SKILL.md
+  - skills/lok8s-addons/SKILL.md
+backends:                   # /model switches these mid-conversation
+  local-e2b: {api: ollama, model: gemma4:e2b,        num_ctx: 16384, temperature: 0.2}
+  local-14b: {api: ollama, model: qwen2.5-coder:14b, num_ctx: 16384, temperature: 0.2}
+  claude: {type: cli, command: [claude, -p],  detect: claude}
+  gemini: {type: cli, command: [gemini, -p],  detect: gemini}
+  codex:  {type: cli, command: [codex, exec], detect: codex}
+injection:
+  drop: [lo_init_service, lo_init_test, lo_crds_generate, lo_crds_check,
+         lo_env_kustomization, lo_kustomize_test, lo_image_cache, lo_version]
+  deny: [lo_secrets_print, lo_secrets_env]
+  tiers:
+    readonly: [lo_status, lo_doctor, lo_lint, lo_kubeconfig, lo_addons, lo_drivers,
+               lo_secrets_list, lo_secrets_print, lo_secrets_env, lo_secrets_path,
+               lo_tilt_status, lo_kubehz_status, lo_registry_status, lo_image_list]
+    idempotent: [lo_build, lo_kustomize_build]
