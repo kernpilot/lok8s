@@ -1,0 +1,15 @@
+# real config may hold endpoints / keys — keep only the example tracked
+config.yaml
+
+# harness outputs
+results/
+adapters/
+data/
+*.jsonl
+tools.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

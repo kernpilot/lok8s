@@ -1,0 +1,6 @@
+# Benchmark harness — deliberately tiny so it installs clean on a ROCm box.
+# HTTP is stdlib (urllib); everything else is optional.
+PyYAML>=6.0
+# numpy is OPTIONAL — only speeds up the `semantic` injector. Pure-python cosine
+# fallback is used if it's absent.
+# numpy>=1.26

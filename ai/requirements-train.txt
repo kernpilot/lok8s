@@ -1,0 +1,17 @@
+# Training stack — install on the RX 9070 (gfx1201) box.
+# IMPORTANT: install ROCm PyTorch FIRST so pip doesn't pull CUDA wheels:
+#   pip install --index-url https://download.pytorch.org/whl/rocm6.2 torch
+# (use the rocm index matching your installed ROCm, e.g. rocm6.2 / rocm6.3)
+# then:
+#   pip install -r requirements-train.txt
+#
+# Unsloth has official AMD/ROCm support (gfx1201, QLoRA). If `import unsloth`
+# fails on your ROCm stack, set train.qlora.backend: peft to use the plain
+# transformers+peft path instead.
+transformers>=4.46
+peft>=0.13
+datasets>=3.0
+accelerate>=1.0
+bitsandbytes>=0.44        # AMD/ROCm build; needed for 4-bit
+trl>=0.11
+# unsloth                  # uncomment for the unsloth backend (see install notes above)
