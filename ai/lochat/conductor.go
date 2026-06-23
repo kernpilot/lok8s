@@ -113,7 +113,7 @@ func (c *Conductor) schema(userMsg string) string {
 const routeSys = `You are the lok8s assistant (%s mode). To answer the user you may run lo tools to gather facts. Respond with ONE JSON object per step:
   {"tool": "<name>", "args": {...}}   to run a tool, or
   {"tool": null}                       when you have enough to answer.
-Only [read] tools may run in %s mode. Available tools:
+%s Available tools:
 %s`
 
 const answerSys = "You are the lok8s assistant. Answer the user clearly and concisely from the tool outputs. If they asked you to author lok8s config, output the complete, valid YAML in a fenced block. Surface the exact `lo ...` command when relevant. Don't invent tool output you didn't see.%s"
@@ -136,8 +136,12 @@ func (c *Conductor) Respond(userMsg string) <-chan Event {
 			return
 		}
 
+		constraint := "Only [read] tools may run; [write] tools are blocked."
+		if c.posture == "open" {
+			constraint = "All tools may run, including [write] tools."
+		}
 		routeMsgs := append([]Msg{{Role: "system",
-			Content: fmt.Sprintf(routeSys, c.posture, c.posture, c.catalog.menu())}}, c.history...)
+			Content: fmt.Sprintf(routeSys, c.posture, constraint, c.catalog.menu())}}, c.history...)
 		type kv struct{ tool, out string }
 		var toolCtx []kv
 		for i := 0; i < c.maxSteps; i++ {

@@ -289,6 +289,15 @@ func nextPosture(cur string) string {
 	return postures[0]
 }
 
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func sortedNames(backends map[string]Backend) []string {
 	ns := make([]string, 0, len(backends))
 	for n := range backends {
@@ -369,15 +378,15 @@ func slash(c *Conductor, backends map[string]Backend, msg string) bool {
 			}
 		}
 	case "/posture", "/p":
-		switch arg {
-		case "":
+		switch {
+		case arg == "":
 			c.posture = nextPosture(c.posture)
 			fmt.Printf("%sposture: %s%s\n", cGreen, c.posture, cReset)
-		case "read-only", "open":
+		case contains(postures, arg):
 			c.posture = arg
 			fmt.Printf("%sposture: %s%s\n", cGreen, arg, cReset)
 		default:
-			fmt.Printf("posture: %s  (read-only|open)\n", c.posture)
+			fmt.Printf("posture: %s  (%s)\n", c.posture, strings.Join(postures, "|"))
 		}
 	case "/think", "/t":
 		hb, ok := c.backend.(*httpBackend)
