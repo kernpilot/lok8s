@@ -561,6 +561,14 @@ lint::secrets() {
   secrets::check_unencrypted 2>&1 | while IFS= read -r line; do
     warn "  ${line}"
   done
+
+  # Deprecated flat-store shadows: a per-domain secret ALSO present in the flat
+  # .secrets/ store. The two diverge silently and different tools read different
+  # stores, which can re-key a live cluster from the wrong one. (check_flat_shadows
+  # echoes to stdout — no 2>&1 — so the single warn below is the only prefix.)
+  secrets::check_flat_shadows "${domain_dir}" | while IFS= read -r line; do
+    warn "  ${line}"
+  done
 }
 
 # -- Run all validations -------------------------------------------------------

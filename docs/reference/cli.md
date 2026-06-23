@@ -167,6 +167,7 @@ Checks:
 - Each domain has `cluster.lok8s.yaml` or `deploy.lok8s.yaml`
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
+- Secrets: committed encrypted (`.enc` present and current), and no per-domain secret is shadowed in the deprecated flat `.secrets/` store (identical copy = stale duplicate; differing copy = active drift)
 
 ### lo status
 

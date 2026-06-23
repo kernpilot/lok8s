@@ -179,6 +179,14 @@ go-live: create the per-domain stores, drop the old flat cache, scope the
 `.sops.yaml` rules to per-environment keys, and let the next build mint fresh,
 isolated values.
 
+`lo lint` helps enforce the split: it warns when a `Secret.*` cache entry exists
+in **both** a domain's store and the flat `.secrets/` store — a deprecated
+shadow. Identical copies are a stale duplicate to delete; **differing** copies
+are active drift — different tools then read different stores, which can re-key a
+live cluster from the wrong one. Keep domain secrets in the per-domain store
+only; leave in flat `.secrets/` just the global, non-domain material (a shared
+registry/expose TLS cert).
+
 ## Using a secret
 
 Mount the `Secret` as a **file** rather than injecting it via an env var — a

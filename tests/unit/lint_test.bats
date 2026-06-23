@@ -9,9 +9,14 @@ setup() {
 
   import() { :; }
   export -f import
+  :usage() { :; };  export -f :usage
+  :args()  { shift; }; export -f :args
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/lint"
+  # lint::secrets calls secrets::* helpers (check_unencrypted / check_flat_shadows),
+  # which the `lo` entrypoint loads in production — source them here too.
+  source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
 
   # Create a minimal domain structure
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test-domain"
@@ -733,4 +738,22 @@ YAML
   run lint::all "deploy-valid-ref"
   assert_success
   assert_output --partial "OK"
+}
+
+# --- lint tests: deprecated flat-store shadows ---
+
+@test "lint warns about a flat-store shadow of a per-domain secret" {
+  local secrets_dir="${BATS_TEST_TMPDIR}/clusters/test-domain/secrets"
+  local flat="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${secrets_dir}" "${flat}"
+  # Same Secret.* in BOTH the per-domain store and the flat store = a shadow.
+  printf 'same' > "${secrets_dir}/Secret.app.default.TOKEN"
+  printf 'same' > "${flat}/Secret.app.default.TOKEN"
+
+  _mock_yq_valid
+
+  # Warnings-only: lint still succeeds, but the shadow is reported.
+  run lint::all "test-domain"
+  assert_success
+  assert_output --partial "Flat-store shadow: Secret.app.default.TOKEN"
 }
