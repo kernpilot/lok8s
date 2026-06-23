@@ -208,6 +208,7 @@ def run_bench(cfg: Config, tag: str = "", limit: int = 0) -> dict:
         "stamp": stamp, "configs": configs, "runs_per_intent": runs_per,
         "n_tools": len(tools), "model": llm.model, "tool_mode": tool_mode,
         "dataset_sha": dataset_sha, "n_intents": len(intents),
+        "think": cfg.get("llm.conductor.think"), "api": cfg.get("llm.conductor.api"),
     }, indent=2))
     from lo_ai.eval.ledger import build_ledger
     build_ledger(cfg)

@@ -1,0 +1,149 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 59,
+        "acc": 0.78,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 0,
+        "fail": 8,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.0,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain cp.lok8s.dev\nValidating: cp.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: kind\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m   Missing required field: metadata.name\n\u001b[0;33m[warn]\u001b[0m   Missing spec.kind (cluster runtime type)\n\u001b[0;31m[error]\u001b[0m 3 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validatio"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 6825.898,
+      "steps_mean": 1,
+      "error_rate": 0.102,
+      "routing_failures": [
+        {
+          "intent": "Print the kubeconfig for my domain.",
+          "chose": null,
+          "gold": "lo_kubeconfig",
+          "config": "diet",
+          "err": "unparseable model output"
+        },
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Install the dev root CA into my system trust store.",
+          "chose": null,
+          "gold": "lo_trust",
+          "config": "diet",
+          "err": "unparseable model output"
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": "unparseable model output"
+        },
+        {
+          "intent": "Author a complete cluster.lok8s.yaml for a kind Lo cluster named web on domain web.lok8s.dev with 1 control plane node and 3 workers.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": "unparseable model output"
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": null,
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": "off-menu choice: None"
+        },
+        {
+          "intent": "Create a kind Lo cluster.lok8s.yaml on domain dns.lok8s.dev with a coredns override mapping example.com to 10.0.0.5.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": "unparseable model output"
+        },
+        {
+          "intent": "Service foo is failing \u2014 why?",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "My cluster won't bootstrap, help me figure out what's wrong.",
+          "chose": "lo_doctor",
+          "gold": "lo_lint",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    }
+  }
+}

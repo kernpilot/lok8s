@@ -16,6 +16,10 @@ llm:
     max_tokens: 1536
     tool_mode: json                       # json | native  — how the model is asked to pick a tool
     request_timeout: 120
+    # reasoning models (qwen3.x) need the native Ollama API to control these:
+    api: openai                           # openai | ollama  (ollama enables num_ctx + think)
+    # num_ctx: 8192                        # raise context so thinking doesn't truncate the answer
+    # think: false                         # false = no-think (fast, best for a CLI); true = reason (slow)
 
   # Bucket-C (reasoning) judge. MUST differ from the conductor — never self-judge.
   # Leave model empty to skip auto-judging and just record traces for manual review.

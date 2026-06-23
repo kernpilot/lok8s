@@ -84,7 +84,7 @@ def author_bench(cfg: Config, with_schema: bool = False, model: str = None,
 
     decided = counts["pass"] + counts["fail"]
     summary = {"model": spec["model"], "with_schema": with_schema, **counts,
-               "n": len(fmt), "dataset_sha": dataset_sha,
+               "n": len(fmt), "dataset_sha": dataset_sha, "think": spec.get("think"),
                "pass_rate": round(counts["pass"] / decided, 3) if decided else None}
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     (out_dir / "records.jsonl").write_text(

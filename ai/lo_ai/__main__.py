@@ -50,10 +50,30 @@ def cmd_route(cfg, args):
         print(f"  {o.name} [{o.kind}] — {o.description}")
 
 
+def _apply_llm_overrides(cfg, args):
+    c = cfg["llm"]["conductor"]
+    if getattr(args, "model", None):
+        c["model"] = args.model
+    if getattr(args, "api", None):
+        c["api"] = args.api
+    if getattr(args, "num_ctx", None):
+        c["num_ctx"] = args.num_ctx
+    if getattr(args, "max_tokens", None):
+        c["max_tokens"] = args.max_tokens
+    if getattr(args, "think", None) in ("on", "off"):
+        c["think"] = (args.think == "on")
+
+
+def _add_llm_flags(p):
+    p.add_argument("--api", choices=["openai", "ollama"])
+    p.add_argument("--think", choices=["on", "off"], help="reasoning toggle (ollama api)")
+    p.add_argument("--num-ctx", dest="num_ctx", type=int)
+    p.add_argument("--max-tokens", dest="max_tokens", type=int)
+
+
 def cmd_bench(cfg, args):
     from lo_ai.eval.runner import run_bench
-    if args.model:
-        cfg["llm"]["conductor"]["model"] = args.model
+    _apply_llm_overrides(cfg, args)
     if args.runs:
         cfg.raw["eval"]["runs_per_intent"] = args.runs
     if args.configs:
@@ -63,7 +83,8 @@ def cmd_bench(cfg, args):
 
 def cmd_authoreval(cfg, args):
     from lo_ai.eval.author import author_bench
-    author_bench(cfg, with_schema=args.schema, model=args.model,
+    _apply_llm_overrides(cfg, args)
+    author_bench(cfg, with_schema=args.schema, model=None,
                  tag=args.tag, limit=args.limit or 0)
 
 
@@ -119,6 +140,7 @@ def main(argv=None):
     b.add_argument("--configs", help="comma list, override eval.configs")
     b.add_argument("--tag", default="", help="label appended to the run dir")
     b.add_argument("--limit", type=int, default=0, help="cap to first N intents")
+    _add_llm_flags(b)
     b.set_defaults(fn=cmd_bench)
 
     a = sub.add_parser("authoreval")
@@ -129,6 +151,7 @@ def main(argv=None):
     a.add_argument("--model")
     a.add_argument("--tag", default="")
     a.add_argument("--limit", type=int, default=0)
+    _add_llm_flags(a)
     a.set_defaults(fn=cmd_authoreval)
 
     sub.add_parser("ledger").set_defaults(fn=cmd_ledger)
