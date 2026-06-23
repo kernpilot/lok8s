@@ -133,6 +133,17 @@ class MCPClient:
                 break
         return tools
 
+    def call_tool(self, name: str, arguments: dict | None = None) -> str:
+        """Invoke a tool; return its text output (digested)."""
+        result = self._request("tools/call",
+                               {"name": name, "arguments": arguments or {}})
+        parts = [c.get("text", "") for c in (result or {}).get("content", [])
+                 if c.get("type") == "text"]
+        text = "\n".join(p for p in parts if p)
+        if (result or {}).get("isError"):
+            text = "[tool error] " + text
+        return text or "(tool produced no text output)"
+
 
 def fetch_tools(cfg) -> list[dict]:
     """Get the tool surface, from cache if configured, else live over MCP."""

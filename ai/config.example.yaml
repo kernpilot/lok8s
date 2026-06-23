@@ -49,7 +49,7 @@ lo:
   env: {}                                 # extra env for lo, e.g. {PATH_BASE: ".", ...}
   extra_path: ["./.bin", "./.lok8s"]      # prepended to PATH when launching lo
   tools_cache: ""                         # optional tools.json snapshot for offline runs
-  mcp_timeout: 30
+  mcp_timeout: 120                        # some read tools (lo doctor) are slow
 
 # ---------------------------------------------------------------------------
 # Tool injection — what schemas the model actually sees at a decision point.
@@ -140,4 +140,23 @@ train:
     grad_accum: 4
     offload_optimizer: true               # use the 128GB RAM; keeps 16GB VRAM from OOMing
     out_dir: ./adapters/lok8s-yaml-author
-    export_gguf: true                     # for llama.cpp runtime adapter toggle
+    export_gguf: true
+
+# ---------------------------------------------------------------------------
+# lo chat — the assistant. Conductor routes flat tools + authors with schema in
+# context + debugs via the doctor tree; a deterministic posture gate enforces
+# read-only. Switch the brain mid-chat with /model (local or a frontier CLI).
+# ---------------------------------------------------------------------------
+chat:
+  conductor: local-e2b          # default backend key (gemma4:e2b — fast/tiny)
+  posture: read-only            # read-only | confirm | open  (the safety gate)
+  max_tool_steps: 4
+  schema_files:                 # injected only when a turn looks like authoring (RAG)
+    - ../skills/lok8s-cluster-spec/SKILL.md
+    - ../skills/lok8s-addons/SKILL.md
+  backends:                     # /model lists + switches these (✗ = CLI not installed)
+    local-e2b: {api: ollama, model: gemma4:e2b,        num_ctx: 16384, temperature: 0.2}
+    local-14b: {api: ollama, model: qwen2.5-coder:14b, num_ctx: 16384, temperature: 0.2}
+    claude:    {type: cli, command: ["claude", "-p"], detect: claude}   # escalation
+    gemini:    {type: cli, command: ["gemini", "-p"], detect: gemini}
+    codex:     {type: cli, command: ["codex", "exec"], detect: codex}                     # for llama.cpp runtime adapter toggle

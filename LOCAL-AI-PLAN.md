@@ -222,6 +222,28 @@ posture gate for safety. No LoRA, no training. **Conductor: gemma4:e2b default
 (fast/tiny); qwen2.5-coder:14b when addon authoring matters / as a safer brain;
 safety enforced by the gate regardless of model.**
 
+### Built: `lo chat` v1 (read-only) — the payoff
+
+Shipped the assistant the benchmark spec'd. `python -m lo_ai chat` (interactive
+rich + prompt_toolkit TUI) or `chat -p "<q>"` (single-shot; plain fallback if the
+TUI deps are absent). Conductor routes the flat `lo mcp` tools, executes READ
+tools, and streams a grounded answer (schema-in-context when authoring).
+
+Verified on this box (gemma4:e2b):
+- "what addons are available?" → routes `lo_addons`, executes, answers from the
+  real 20-addon list (not hallucinated).
+- "tear down my cluster" → routes `lo_destroy` → **posture gate BLOCKS it**
+  (read-only) → relays that it needs confirmation. The deterministic gate, proven.
+
+Features: transparent (every tool call + gate decision is shown), token streaming
+(rich Live), pluggable conductor — `/model` switches local ↔ frontier CLI
+(`claude -p` / `gemini` / `codex`, auto-detected via PATH) mid-conversation;
+`/posture`, `/think`, `/tools`, `/clear`. Deps: `requirements-chat.txt`.
+
+Next for chat: confirm-mode (gated mutations with dry-run preview), the doctor-
+tree debug flow, proactive watch via operator hooks, and wiring `lo chat` into
+the real `lo` CLI (currently `python -m lo_ai chat`).
+
 ## Open items
 
 - ~~Confirm the current best ~14B local coder model~~ — **done (2026-06-23):**
