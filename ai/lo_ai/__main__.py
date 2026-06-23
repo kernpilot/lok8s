@@ -61,6 +61,12 @@ def cmd_bench(cfg, args):
     run_bench(cfg, tag=args.tag, limit=args.limit or 0)
 
 
+def cmd_authoreval(cfg, args):
+    from lo_ai.eval.author import author_bench
+    author_bench(cfg, with_schema=args.schema, model=args.model,
+                 tag=args.tag, limit=args.limit or 0)
+
+
 def cmd_synth(cfg, args):
     from lo_ai.train.synth import generate_pairs
     spec = sys.stdin.read() if args.input == "-" else cfg.resolve(args.input).read_text()
@@ -109,6 +115,16 @@ def main(argv=None):
     b.add_argument("--tag", default="", help="label appended to the run dir")
     b.add_argument("--limit", type=int, default=0, help="cap to first N intents")
     b.set_defaults(fn=cmd_bench)
+
+    a = sub.add_parser("authoreval")
+    a.add_argument("--schema", dest="schema", action="store_true",
+                   help="inject the lok8s schema/skill into the authoring prompt")
+    a.add_argument("--no-schema", dest="schema", action="store_false")
+    a.set_defaults(schema=False)
+    a.add_argument("--model")
+    a.add_argument("--tag", default="")
+    a.add_argument("--limit", type=int, default=0)
+    a.set_defaults(fn=cmd_authoreval)
     s = sub.add_parser("synth"); s.add_argument("-i", "--input", required=True,
                                                 help="schema/feature file ('-' for stdin)")
     s.set_defaults(fn=cmd_synth)

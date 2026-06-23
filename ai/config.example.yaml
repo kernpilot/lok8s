@@ -52,7 +52,7 @@ lo:
 # This is the lever the A/B benchmark exists to measure.
 # ---------------------------------------------------------------------------
 injection:
-  strategy: hierarchy                     # raw | diet | hierarchy | semantic
+  strategy: diet                          # raw | diet | hierarchy | semantic (diet won the 14b A/B)
   max_tools: 8                            # never show more than this many schemas at once
   compress: true                          # strip usage prose -> name + one line + minimal args
 
@@ -89,9 +89,13 @@ injection:
 eval:
   dataset: lo_ai/data/intents.json
   runs_per_intent: 5                      # repeat to measure variance (small models are stochastic)
-  configs: [raw, hierarchy]               # A/B: which injection strategies to compare
+  configs: [raw, diet, hierarchy]         # A/B: which injection strategies to compare
   out_dir: ./results
   system_prompt: ""                       # "" -> built-in default (see lo_ai/eval/runner.py)
+  author:                                 # for `authoreval`: schema/skill injected into the authoring prompt
+    schema_files:
+      - ../skills/lok8s-cluster-spec/SKILL.md
+      - ../skills/lok8s-cluster-spec/reference.md
 
 # ---------------------------------------------------------------------------
 # Synthetic data + training (only needed if the benchmark's Bucket B fires).
