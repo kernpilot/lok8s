@@ -11,7 +11,7 @@ llm:
   conductor:
     base_url: http://localhost:11434/v1   # Ollama. llama.cpp server: http://localhost:8080/v1
     model: qwen2.5-coder:14b              # the resident brain; revisit for newer ~14B coder models
-    api_key: ollama                       # most local servers ignore this; placeholder is fine
+    # api_key: ""                         # only set if your server requires auth; omit for local (no header sent)
     temperature: 0.0                      # deterministic-ish for routing; raise to probe variance
     max_tokens: 1536
     tool_mode: json                       # json | native  — how the model is asked to pick a tool

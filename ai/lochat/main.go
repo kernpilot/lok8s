@@ -17,7 +17,7 @@ func main() {
 	model := flag.String("model", "", "conductor backend key (chat.backends)")
 	posture := flag.String("posture", "", "read-only | open")
 	loPath := flag.String("lo", "", "path to the lo CLI (used to launch `lo mcp`)")
-	cwd := flag.String("cwd", ".", "working dir for lo mcp (the project root / PATH_BASE)")
+	cwd := flag.String("cwd", "", "working dir for lo mcp (default: the config's, else current dir)")
 	baseDir := flag.String("base-dir", "", "resolve relative schema_files against this (default: --cwd)")
 	check := flag.Bool("check", false, "run a system check (lo mcp bridge + local AI runtime) and exit")
 	flag.Parse()
@@ -39,11 +39,14 @@ func main() {
 		cfg.MCP.Command = []string{*loPath, "mcp"}
 	}
 	if *cwd != "" {
-		cfg.MCP.Cwd = *cwd
+		cfg.MCP.Cwd = *cwd // flag wins; else keep the config's value
+	}
+	if cfg.MCP.Cwd == "" {
+		cfg.MCP.Cwd = "." // neither set → current dir
 	}
 	bd := *baseDir
 	if bd == "" {
-		bd = *cwd
+		bd = cfg.MCP.Cwd
 	}
 	for i, f := range cfg.SchemaFiles {
 		if !filepath.IsAbs(f) {

@@ -23,9 +23,10 @@ main::chat() {
   }
 
   # config: per-project override, else the shipped defaults.
-  cfg="${LO_CHAT_CONFIG:-${PATH_BASE}/lo-chat.json}"
+  local cfg_project="${LO_CHAT_CONFIG:-${PATH_BASE}/lo-chat.json}"
+  cfg="${cfg_project}"
   [[ -f "${cfg}" ]] || cfg="${PATH_LOK8S}/chat/defaults.json"
-  [[ -f "${cfg}" ]] || { error "no chat config (looked for ${cfg})"; return 1; }
+  [[ -f "${cfg}" ]] || { error "no chat config (looked for ${cfg_project} or ${PATH_LOK8S}/chat/defaults.json)"; return 1; }
 
   # Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an argsh
   # builtin provided by argsh.so (loaded from beside the argsh binary). If that

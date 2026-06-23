@@ -33,14 +33,17 @@ def _teacher_complete(cfg, prompt: str) -> str:
         url = f"{base}/chat/completions"
         body = {"model": t["model"], "max_tokens": 8192,
                 "messages": [{"role": "user", "content": prompt}]}
-        headers = {"Content-Type": "application/json",
-                   "Authorization": f"Bearer {key}"}
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
     else:  # anthropic
         url = f"{base}/messages"
         body = {"model": t["model"], "max_tokens": 8192,
                 "messages": [{"role": "user", "content": prompt}]}
-        headers = {"Content-Type": "application/json", "x-api-key": key,
+        headers = {"Content-Type": "application/json",
                    "anthropic-version": "2023-06-01"}
+        if key:
+            headers["x-api-key"] = key
 
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  method="POST")
