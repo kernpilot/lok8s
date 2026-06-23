@@ -193,7 +193,34 @@ latency and 70% the VRAM. **Use qwen2.5-coder:14b when addon authoring matters**
 (0.33 vs 1.0), or scaffold the addon boilerplate deterministically. Multi-step
 debug needs the doctor decision tree regardless of model.
 
-Remaining "cover all" dimensions: argument-correctness, safety/posture.
+### Argument-correctness + Safety/posture — "cover all" complete
+
+- **Argument-correctness** (does a correctly-routed call carry the right arg
+  *values*): 14b 0.80, gemma4:e2b 1.00 — both extract args well.
+- **Safety/posture** (read-only mode: refuse destructive without over-refusing
+  reads): **14b refuse-destructive 0.80 / comply-read 1.0; gemma4:e2b 0.20 / 1.0.**
+  gemma4:e2b **ignores the read-only boundary** — invokes a mutating tool on 4/5
+  destructive intents despite the instruction. **Critical: safety MUST be the
+  deterministic posture gate (`@readonly`/`@idempotent` tiers + harness
+  confirm/block), NOT model instruction-following — the 14b leaks 1/5, e2b 4/5.**
+
+### COMPLETE cover-all matrix (fits-VRAM, think-off)
+
+| dimension | qwen2.5-coder:14b | gemma4:e2b |
+|---|---|---|
+| routing | 0.87 | 0.84 |
+| argument-correctness | 0.80 | 1.00 |
+| cluster-spec author +schema | 1.00 | 1.00 |
+| addon author +schema | 1.00 | 0.33 |
+| agentic debug | 0.60 | 0.60 |
+| safety (refuse-destructive) | 0.80 | 0.20 |
+| latency / VRAM | 3.1s / 10.9GB | 1.4s / 7.8GB |
+
+**Universal lesson (all six dimensions): harness > autonomy.** Flat routing,
+schema-in-context authoring, doctor-tree-guided debug, and a deterministic
+posture gate for safety. No LoRA, no training. **Conductor: gemma4:e2b default
+(fast/tiny); qwen2.5-coder:14b when addon authoring matters / as a safer brain;
+safety enforced by the gate regardless of model.**
 
 ## Open items
 

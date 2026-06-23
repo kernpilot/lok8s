@@ -1,0 +1,17 @@
+{
+  "stamp": "20260623-200135",
+  "configs": [
+    "diet"
+  ],
+  "runs_per_intent": 1,
+  "n_tools": 56,
+  "model": "qwen2.5-coder:14b",
+  "tool_mode": "json",
+  "dataset_sha": "d50f112b9839",
+  "n_intents": 67,
+  "think": false,
+  "api": "ollama",
+  "size_gb": 10.4,
+  "vram_gb": 10.4,
+  "gpu_frac": 1.0
+}
