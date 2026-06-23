@@ -31,6 +31,23 @@ def _routing(records):
     return {"n": len(have_gold), "acc": acc, "stability": _mean(stabilities)}
 
 
+def _args(records, intents_by_id):
+    """Of correctly-routed records whose intent has gold_arg_values, the fraction
+    whose chosen arguments actually contain those values (extraction accuracy)."""
+    rel = [r for r in records
+           if r.get("chosen_tool") == r.get("gold_tool")
+           and intents_by_id.get(r["intent_id"], {}).get("gold_arg_values")]
+    if not rel:
+        return {"n": 0, "acc": None}
+    ok = 0
+    for r in rel:
+        vals = intents_by_id[r["intent_id"]]["gold_arg_values"]
+        argstr = json.dumps(r.get("arguments") or {}).lower()
+        if all(str(v).lower() in argstr for v in vals):
+            ok += 1
+    return {"n": len(rel), "acc": round(ok / len(rel), 3)}
+
+
 def _format(cfg, records, intents_by_id):
     from lo_ai.eval.verify import verify_yaml
     recs = [r for r in records if r.get("bucket") == "format"]
@@ -97,6 +114,7 @@ def score(cfg, intents, records) -> dict:
         errs = [r for r in recs if r.get("error")]
         summary["configs"][strategy] = {
             "routing": _routing(recs),
+            "args": _args(recs, intents_by_id),
             "format": _format(cfg, recs, intents_by_id),
             "reasoning": _reasoning(cfg, recs),
             "latency_ms_mean": _mean([r["latency_ms"] for r in recs if r["latency_ms"]]),
@@ -115,13 +133,13 @@ def score(cfg, intents, records) -> dict:
 
 def _print_table(summary: dict) -> None:
     print("\n=== A/B comparison ==================================================")
-    hdr = f"{'config':12} {'route_acc':>9} {'stability':>9} {'fmt_pass':>8} {'reason':>7} {'lat_ms':>8} {'steps':>5} {'err':>5}"
+    hdr = f"{'config':12} {'route_acc':>9} {'arg_acc':>8} {'stability':>9} {'fmt_pass':>8} {'reason':>7} {'lat_ms':>8} {'steps':>5} {'err':>5}"
     print(hdr)
     print("-" * len(hdr))
     for strategy, s in summary["configs"].items():
         rt, fm, rs = s["routing"], s["format"], s["reasoning"]
         print(f"{strategy:12} "
-              f"{_fmt(rt['acc']):>9} {_fmt(rt['stability']):>9} "
+              f"{_fmt(rt['acc']):>9} {_fmt(s.get('args', {}).get('acc')):>8} {_fmt(rt['stability']):>9} "
               f"{_fmt(fm.get('pass_rate')):>8} {_fmt(rs.get('pass_rate')):>7} "
               f"{str(s['latency_ms_mean'] or '-'):>8} "
               f"{str(s['steps_mean'] or '-'):>5} {_fmt(s['error_rate']):>5}")

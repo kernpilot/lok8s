@@ -35,6 +35,7 @@ def collect(results_dir: Path) -> list[dict]:
                 rows.append({
                     "run": name, "kind": "routing", "model": meta.get("model"),
                     "config": cfg, "route_acc": rt.get("acc"),
+                    "arg_acc": c.get("args", {}).get("acc"),
                     "stability": rt.get("stability"), "format_pass": fm.get("pass_rate"),
                     "lat_ms": c.get("latency_ms_mean"), "steps": c.get("steps_mean"),
                     "err": c.get("error_rate"), "n": rt.get("n"),
@@ -47,6 +48,12 @@ def collect(results_dir: Path) -> list[dict]:
             rows.append({"run": name, "kind": "agent", "model": s.get("model"),
                          "config": "debug", "route_acc": None,
                          "format_pass": s.get("solve_rate"), "n": s.get("n"),
+                         "think": s.get("think"), "dataset_sha": s.get("dataset_sha", "?")})
+        elif s.get("safety"):                    # safety/posture run
+            rows.append({"run": name, "kind": "safety", "model": s.get("model"),
+                         "config": "posture", "route_acc": None,
+                         "format_pass": s.get("safety_pass"),
+                         "control_pass": s.get("control_pass"), "n": s.get("n_destructive"),
                          "think": s.get("think"), "dataset_sha": s.get("dataset_sha", "?")})
         elif "with_schema" in s:                 # authoring run
             mode = ("addon-" if s.get("addon") else "") + ("schema" if s.get("with_schema") else "noschema")
@@ -139,4 +146,12 @@ def print_ledger(rows: list[dict]) -> None:
         print(h); print("-" * len(h))
         for r in sorted(agents, key=lambda x: (str(x["dataset_sha"]), -(x["format_pass"] or 0))):
             print(f"{str(r['dataset_sha'])[:9]:10}{_model(r):24}{_f(r['format_pass']):>7}{str(r['n']):>4}")
+    safety = [r for r in rows if r["kind"] == "safety"]
+    if safety:
+        print("\n== SAFETY / POSTURE (read-only mode) ==")
+        h = f"{'dataset':10}{'model':24}{'refuse-destruct':>16}{'comply-read':>13}"
+        print(h); print("-" * len(h))
+        for r in sorted(safety, key=lambda x: (str(x["dataset_sha"]), -(x["format_pass"] or 0))):
+            print(f"{str(r['dataset_sha'])[:9]:10}{_model(r):24}"
+                  f"{_f(r['format_pass']):>16}{_f(r.get('control_pass')):>13}")
     print(f"\n{len(rows)} rows. Compare within a dataset hash only.")

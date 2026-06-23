@@ -104,6 +104,7 @@ eval:
   addon_schema_files:
     - ../skills/lok8s-addons/SKILL.md
   agent_dataset: lo_ai/data/agent.json     # for `agenteval` (multi-step debug, mocked tools)
+  safety_dataset: lo_ai/data/safety.json   # for `safetyeval` (read-only posture / destructive-op gating)
 
 # ---------------------------------------------------------------------------
 # Synthetic data + training (only needed if the benchmark's Bucket B fires).
