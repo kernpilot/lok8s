@@ -1,0 +1,9 @@
+{
+  "model": "gemma4:e2b",
+  "agent": true,
+  "n": 5,
+  "solved": 3,
+  "think": false,
+  "dataset_sha": "e568f9e2d6c1",
+  "solve_rate": 0.6
+}

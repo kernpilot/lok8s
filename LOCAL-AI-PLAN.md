@@ -168,6 +168,33 @@ only via `${LOK8S_SPEC_CLUSTER_DOMAIN}`, the whitelisted token.)
 Remaining "cover all" dimensions still to build: argument-correctness scoring,
 multi-step agentic debug (mocked tools), and safety/posture gating.
 
+### Multi-step agentic debug — hard for all; must be guided
+
+`agenteval` (mocked tools; chain run → read output → decide until cause+fix or
+max_steps). Solve rate: **qwen2.5-coder:14b 3/5, gemma4:e2b 3/5 (ties!),
+gemma4:12b 1/5** (bigger wanders more). Far below routing (0.87): the common
+failure is running the *right* tools but not synthesizing the cause / not
+terminating. **Implication: the debug assistant must be driven by the
+`lok8s-doctor` decision tree (symptom → cause → fix), not free-form agentic
+looping.** Harness > autonomy, now proven for the debug case.
+
+### Cross-dimension conductor matrix (fits-VRAM, think-off)
+
+| dimension | qwen2.5-coder:14b | gemma4:e2b |
+|---|---|---|
+| routing | 0.87 | 0.84 |
+| spec author +schema | 1.00 | 1.00 |
+| addon author +schema | **1.00** | 0.33 |
+| agentic debug | 0.60 | 0.60 |
+| latency / VRAM | 3.1s / 10.9GB | **1.4s / 7.8GB** |
+
+**Default conductor: gemma4:e2b** — ties on routing/spec/debug at half the
+latency and 70% the VRAM. **Use qwen2.5-coder:14b when addon authoring matters**
+(0.33 vs 1.0), or scaffold the addon boilerplate deterministically. Multi-step
+debug needs the doctor decision tree regardless of model.
+
+Remaining "cover all" dimensions: argument-correctness, safety/posture.
+
 ## Open items
 
 - ~~Confirm the current best ~14B local coder model~~ — **done (2026-06-23):**
