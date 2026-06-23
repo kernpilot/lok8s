@@ -557,10 +557,21 @@ lint::secrets() {
     done
   fi
 
-  # Secret cache ($PATH_SECRETS) — check for missing .enc counterparts
+  # Secret cache ($PATH_SECRETS) — check for missing .enc counterparts.
+  # `|| true`: lo runs `set -euo pipefail`; pipefail makes this pipe inherit
+  # check_unencrypted's `return 1` (emitted on a finding), which `set -e` would
+  # treat as fatal and abort the lint. These secret checks are warnings-only.
   secrets::check_unencrypted 2>&1 | while IFS= read -r line; do
     warn "  ${line}"
-  done
+  done || true
+
+  # Deprecated flat-store shadows: a per-domain secret ALSO present in the flat
+  # .secrets/ store. The two diverge silently and different tools read different
+  # stores, which can re-key a live cluster from the wrong one. (check_flat_shadows
+  # echoes to stdout — no 2>&1 — so the single warn below is the only prefix.)
+  secrets::check_flat_shadows "${domain_dir}" | while IFS= read -r line; do
+    warn "  ${line}"
+  done || true   # warnings-only under set -euo pipefail (see check_unencrypted above)
 }
 
 # -- Run all validations -------------------------------------------------------

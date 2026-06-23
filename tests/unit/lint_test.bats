@@ -9,9 +9,14 @@ setup() {
 
   import() { :; }
   export -f import
+  :usage() { :; };  export -f :usage
+  :args()  { shift; }; export -f :args
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/lint"
+  # lint::secrets calls secrets::* helpers (check_unencrypted / check_flat_shadows),
+  # which the `lo` entrypoint loads in production — source them here too.
+  source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
 
   # Create a minimal domain structure
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test-domain"
@@ -733,4 +738,38 @@ YAML
   run lint::all "deploy-valid-ref"
   assert_success
   assert_output --partial "OK"
+}
+
+# --- lint tests: deprecated flat-store shadows ---
+
+@test "lint warns about a flat-store shadow of a per-domain secret" {
+  local secrets_dir="${BATS_TEST_TMPDIR}/clusters/test-domain/secrets"
+  local flat="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${secrets_dir}" "${flat}"
+  # Same Secret.* in BOTH the per-domain store and the flat store = a shadow.
+  printf 'same' > "${secrets_dir}/Secret.app.default.TOKEN"
+  printf 'same' > "${flat}/Secret.app.default.TOKEN"
+
+  _mock_yq_valid
+
+  # Warnings-only: lint still succeeds, but the shadow is reported.
+  run lint::all "test-domain"
+  assert_success
+  assert_output --partial "Flat-store shadow: Secret.app.default.TOKEN"
+}
+
+@test "lint::secrets stays zero-exit under set -euo pipefail when a finding exists" {
+  # lo runs `set -euo pipefail`; the warnings-only check pipes (check_unencrypted
+  # / check_flat_shadows) must not let a check's `return 1` (on a finding) abort
+  # the lint via pipefail+errexit. Regression for the `|| true` on those pipes.
+  local dom="${BATS_TEST_TMPDIR}/clusters/test-domain"
+  local flat="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${dom}/secrets" "${flat}"
+  printf 'same' > "${dom}/secrets/Secret.app.default.TOKEN"
+  printf 'same' > "${flat}/Secret.app.default.TOKEN"
+  # domain="" lets check_unencrypted's secrets::path resolve the flat store
+  # without needing PATH_CLUSTERS; both checks then fire (a finding -> return 1).
+  _ls() ( set -euo pipefail; domain=""; lint::secrets "$1" )
+  run _ls "${dom}"
+  assert_success
 }
