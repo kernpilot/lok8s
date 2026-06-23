@@ -278,7 +278,7 @@ func interactive(c *Conductor, backends map[string]Backend) {
 
 // ---- slash commands (with short aliases + cycling shortcuts) ----
 
-var postures = []string{"read-only", "confirm", "open"}
+var postures = []string{"read-only", "open"}
 
 func nextPosture(cur string) string {
 	for i, p := range postures {
@@ -341,7 +341,7 @@ func slash(c *Conductor, backends map[string]Backend, msg string) bool {
 	case "/help", "/?", "/h":
 		fmt.Println(`  /model  /m [name]    no arg: cycle to next model · name: switch
   /models              list models (● active · ✗ not installed)
-  /posture /p [mode]   no arg: cycle · or read-only | confirm | open
+  /posture /p [mode]   no arg: cycle · or read-only | open
   /think  /t [on|off]  toggle reasoning (http backends)
   /tools               list available tools
   /clear  /c           reset the conversation
@@ -373,11 +373,11 @@ func slash(c *Conductor, backends map[string]Backend, msg string) bool {
 		case "":
 			c.posture = nextPosture(c.posture)
 			fmt.Printf("%sposture: %s%s\n", cGreen, c.posture, cReset)
-		case "read-only", "confirm", "open":
+		case "read-only", "open":
 			c.posture = arg
 			fmt.Printf("%sposture: %s%s\n", cGreen, arg, cReset)
 		default:
-			fmt.Printf("posture: %s  (read-only|confirm|open)\n", c.posture)
+			fmt.Printf("posture: %s  (read-only|open)\n", c.posture)
 		}
 	case "/think", "/t":
 		hb, ok := c.backend.(*httpBackend)

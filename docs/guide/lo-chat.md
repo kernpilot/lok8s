@@ -106,7 +106,7 @@ Two good options:
 | --- | --- | --- |
 | `/model` | `/m` | cycle to the next *available* model |
 | `/models` | | list models (● active · ✗ not installed) |
-| `/posture` | `/p` | cycle `read-only` → `confirm` → `open` |
+| `/posture` | `/p` | toggle `read-only` ↔ `open` |
 | `/think` | `/t` | toggle reasoning (Ollama backends) |
 | `/tools` | | list the available tools |
 | `/clear` | `/c` | reset the conversation |
@@ -122,7 +122,6 @@ to a file keeps the raw markdown with no escape codes.
 | Posture | What runs |
 | --- | --- |
 | `read-only` (default) | only `[read]` tools — status, doctor, lint, kubeconfig, … |
-| `confirm` | same gate as read-only (write tools blocked) |
 | `open` | all tools, including writes |
 
 Switch per session with `--posture`, or live with `/posture`. The gate is enforced

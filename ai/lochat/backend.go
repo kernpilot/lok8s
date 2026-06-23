@@ -286,6 +286,8 @@ func (c *cliBackend) Stream(msgs []Msg) (<-chan string, <-chan error) {
 		defer close(errc)
 		cmd := exec.Command(c.cfg.Command[0], c.cfg.Command[1:]...)
 		cmd.Stdin = strings.NewReader(flatten(msgs))
+		var errb bytes.Buffer
+		cmd.Stderr = &errb
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			errc <- err
@@ -300,7 +302,14 @@ func (c *cliBackend) Stream(msgs []Msg) (<-chan string, <-chan error) {
 		for sc.Scan() {
 			toks <- sc.Text() + "\n"
 		}
-		cmd.Wait()
+		// surface a non-zero exit (otherwise a failing CLI looks like an empty answer)
+		if err := cmd.Wait(); err != nil {
+			if msg := strings.TrimSpace(errb.String()); msg != "" {
+				errc <- fmt.Errorf("%s: %s", c.detect(), msg)
+			} else {
+				errc <- fmt.Errorf("%s: %w", c.detect(), err)
+			}
+		}
 	}()
 	return toks, errc
 }

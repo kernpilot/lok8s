@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +12,11 @@ import (
 
 // scriptBackend returns scripted routing JSON, then a canned streamed answer.
 type scriptBackend struct {
-	routes  []string
-	i       int
-	answer  string
-	agentic bool
+	routes    []string
+	i         int
+	answer    string
+	agentic   bool
+	streamErr error
 }
 
 func (s *scriptBackend) Label() string   { return "fake" }
@@ -36,6 +38,9 @@ func (s *scriptBackend) Stream(_ []Msg) (<-chan string, <-chan error) {
 		defer close(errc)
 		for _, w := range strings.Fields(s.answer) {
 			toks <- w + " "
+		}
+		if s.streamErr != nil {
+			errc <- s.streamErr
 		}
 	}()
 	return toks, errc
@@ -167,5 +172,15 @@ func TestConductorGateBlocksWrite(t *testing.T) {
 	}
 	if called {
 		t.Error("CallTool must never run for a gate-blocked tool")
+	}
+}
+
+func TestConductorSurfacesStreamError(t *testing.T) {
+	cat := newCatalog(nil, Injection{})
+	be := &scriptBackend{routes: []string{`{"tool":null}`}, streamErr: errors.New("stream boom"), agentic: true}
+	c := minimalConductor("read-only", cat, fakeTools{}, be)
+	es := collect(c.Respond("hi"))
+	if !has(es, "error", func(e Event) bool { return strings.Contains(e.Error, "stream boom") }) {
+		t.Errorf("a backend stream error must surface as an error event; got %+v", es)
 	}
 }

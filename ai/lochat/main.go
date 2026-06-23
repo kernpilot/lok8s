@@ -15,7 +15,7 @@ func main() {
 	cfgPath := flag.String("config", "", "path to JSON config (required)")
 	prompt := flag.String("p", "", "single-shot prompt (non-interactive)")
 	model := flag.String("model", "", "conductor backend key (chat.backends)")
-	posture := flag.String("posture", "", "read-only | confirm | open")
+	posture := flag.String("posture", "", "read-only | open")
 	loPath := flag.String("lo", "", "path to the lo CLI (used to launch `lo mcp`)")
 	cwd := flag.String("cwd", ".", "working dir for lo mcp (the project root / PATH_BASE)")
 	baseDir := flag.String("base-dir", "", "resolve relative schema_files against this (default: --cwd)")

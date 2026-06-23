@@ -19,7 +19,7 @@ go build -C ai/lochat -o "$PATH_BIN/lochat" .   # onto PATH / .bin (b-managed)
 ```bash
 lo chat                          # interactive TUI (binary on PATH + shim wired)
 lo chat -p "what addons exist?"  # single-shot
-lo chat --model local-14b        # pick a backend; --posture open|confirm|read-only
+lo chat --model local-14b        # pick a backend; --posture open|read-only
 lo chat --check                  # system check (bridge + runtime) + guided setup
 # dev (bypass shim):
 ai/lochat/lochat --config <json> -p "..."

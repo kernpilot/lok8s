@@ -203,6 +203,9 @@ func (m *MCP) notify(method string, params any) {
 }
 
 func (m *MCP) Close() {
+	if m.stdin != nil {
+		_ = m.stdin.Close() // EOF lets `lo mcp` exit cleanly before the Kill backstop
+	}
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
 	}

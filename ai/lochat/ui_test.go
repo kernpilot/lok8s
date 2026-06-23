@@ -89,8 +89,8 @@ func TestMdStreamFences(t *testing.T) {
 }
 
 func TestNextPosture(t *testing.T) {
-	if got := nextPosture("read-only"); got != "confirm" {
-		t.Errorf("read-only -> %q, want confirm", got)
+	if got := nextPosture("read-only"); got != "open" {
+		t.Errorf("read-only -> %q, want open", got)
 	}
 	if got := nextPosture("open"); got != "read-only" {
 		t.Errorf("open -> %q, want read-only (wrap)", got)
