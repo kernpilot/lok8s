@@ -66,7 +66,8 @@ require_tools() {
 
 # --- flat-store shadow / drift detection (no crypto tools needed) -------------
 # secrets::check_flat_shadows compares a domain's per-domain store against the
-# flat ${PATH_BASE}/.secrets store; PATH_SECRETS already points at the flat one.
+# flat store, resolved as ${PATH_SECRETS:-${PATH_BASE}/.secrets} (PATH_SECRETS
+# overrides the default ${PATH_BASE}/.secrets); these tests set PATH_SECRETS to it.
 
 _shadow_setup() {
   DOM_DIR="${BATS_TEST_TMPDIR}/clusters/app.example.com"
@@ -144,14 +145,16 @@ _shadow_setup() {
   assert_output --partial 'Flat-store shadow: Secret.app.default.TOKEN'
 }
 
-@test "check_flat_shadows: bails cleanly when neither PATH_SECRETS nor PATH_BASE is set" {
-  # Both unset must short-circuit BEFORE flat resolves to a bogus "/.secrets"
-  # (which could match an unrelated host dir). No output, no error, no host read.
+@test "check_flat_shadows: under set -u, bails when neither PATH_SECRETS nor PATH_BASE is set" {
+  # Both unset must short-circuit BEFORE flat resolves to a bogus "/.secrets".
+  # Run under `set -u` (as lo does) so this PROVES the guard: without it the bare
+  # ${PATH_BASE} in the flat default would be an unbound-variable abort (non-zero).
   DOM_DIR="${BATS_TEST_TMPDIR}/clusters/app.example.com"
   mkdir -p "${DOM_DIR}/secrets"
   printf 'v' > "${DOM_DIR}/secrets/Secret.app.default.TOKEN"
   unset PATH_SECRETS PATH_BASE
-  run secrets::check_flat_shadows "${DOM_DIR}"
+  _under_u() ( set -u; secrets::check_flat_shadows "$@" )
+  run _under_u "${DOM_DIR}"
   assert_success
   assert_output ''
 }

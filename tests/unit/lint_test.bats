@@ -757,3 +757,19 @@ YAML
   assert_success
   assert_output --partial "Flat-store shadow: Secret.app.default.TOKEN"
 }
+
+@test "lint::secrets stays zero-exit under set -euo pipefail when a finding exists" {
+  # lo runs `set -euo pipefail`; the warnings-only check pipes (check_unencrypted
+  # / check_flat_shadows) must not let a check's `return 1` (on a finding) abort
+  # the lint via pipefail+errexit. Regression for the `|| true` on those pipes.
+  local dom="${BATS_TEST_TMPDIR}/clusters/test-domain"
+  local flat="${BATS_TEST_TMPDIR}/.secrets"
+  mkdir -p "${dom}/secrets" "${flat}"
+  printf 'same' > "${dom}/secrets/Secret.app.default.TOKEN"
+  printf 'same' > "${flat}/Secret.app.default.TOKEN"
+  # domain="" lets check_unencrypted's secrets::path resolve the flat store
+  # without needing PATH_CLUSTERS; both checks then fire (a finding -> return 1).
+  _ls() ( set -euo pipefail; domain=""; lint::secrets "$1" )
+  run _ls "${dom}"
+  assert_success
+}
