@@ -175,6 +175,50 @@ func TestConductorGateBlocksWrite(t *testing.T) {
 	}
 }
 
+func TestAllowedDeniedToolBlocked(t *testing.T) {
+	// lo_secrets_print is read-tagged BUT denied — it must never pass the gate,
+	// even in read-only, and even though its tier says "read".
+	cat := newCatalog(
+		[]Tool{{Name: "lo_secrets_print"}, {Name: "lo_status"}},
+		Injection{
+			Tiers: map[string][]string{"readonly": {"lo_secrets_print", "lo_status"}},
+			Deny:  []string{"lo_secrets_print"},
+		})
+	if minimalConductor("read-only", cat, fakeTools{}, &scriptBackend{}).allowed("lo_secrets_print") {
+		t.Error("a denied read tool must be blocked by the gate")
+	}
+	if minimalConductor("open", cat, fakeTools{}, &scriptBackend{}).allowed("lo_secrets_print") {
+		t.Error("a denied tool must stay blocked even in open posture")
+	}
+	if !minimalConductor("read-only", cat, fakeTools{}, &scriptBackend{}).allowed("lo_status") {
+		t.Error("an exposed read tool should still be allowed")
+	}
+}
+
+func TestExtractJSONBalanced(t *testing.T) {
+	cases := []struct {
+		in   string
+		tool string
+		ok   bool
+	}{
+		{`{"tool":"lo_status"} ... and also {"tool":"lo_doctor"}`, "lo_status", true}, // first object only (greedy regex would grab both → invalid)
+		{`{"args":{"x":"}"},"tool":"lo_lint"}`, "lo_lint", true},                      // brace inside a string literal
+		{`prose { not json `, "", false},                                              // unbalanced
+	}
+	for _, c := range cases {
+		j := extractJSON(c.in)
+		if c.ok != (j != nil) {
+			t.Errorf("extractJSON(%q): nil=%v want ok=%v", c.in, j == nil, c.ok)
+			continue
+		}
+		if c.ok {
+			if tool, _ := j["tool"].(string); tool != c.tool {
+				t.Errorf("extractJSON(%q) tool=%q want %q", c.in, tool, c.tool)
+			}
+		}
+	}
+}
+
 func TestConductorSurfacesStreamError(t *testing.T) {
 	cat := newCatalog(nil, Injection{})
 	be := &scriptBackend{routes: []string{`{"tool":null}`}, streamErr: errors.New("stream boom"), agentic: true}

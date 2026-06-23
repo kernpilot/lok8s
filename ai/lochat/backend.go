@@ -239,6 +239,10 @@ func (h *httpBackend) Stream(msgs []Msg) (<-chan string, <-chan error) {
 				}
 			}
 		}
+		// a truncated stream (server reset, mid-response close) is an error, not a clean end
+		if err := sc.Err(); err != nil {
+			errc <- fmt.Errorf("stream read: %w", err)
+		}
 	}()
 	return toks, errc
 }
@@ -302,6 +306,7 @@ func (c *cliBackend) Stream(msgs []Msg) (<-chan string, <-chan error) {
 		for sc.Scan() {
 			toks <- sc.Text() + "\n"
 		}
+		scanErr := sc.Err()
 		// surface a non-zero exit (otherwise a failing CLI looks like an empty answer)
 		if err := cmd.Wait(); err != nil {
 			if msg := strings.TrimSpace(errb.String()); msg != "" {
@@ -309,6 +314,8 @@ func (c *cliBackend) Stream(msgs []Msg) (<-chan string, <-chan error) {
 			} else {
 				errc <- fmt.Errorf("%s: %w", c.detect(), err)
 			}
+		} else if scanErr != nil {
+			errc <- fmt.Errorf("%s: %w", c.detect(), scanErr)
 		}
 	}()
 	return toks, errc

@@ -58,6 +58,13 @@ func (c *Catalog) tag(n string) string {
 
 func (c *Catalog) isTool(n string) bool { _, ok := c.tools[n]; return ok }
 
+// exposed: is this tool actually on the chat surface? drop/deny-filtered tools
+// (plumbing + secret-readers) are off the menu and must NEVER run, even if the
+// model names one directly and it happens to be read-tagged.
+func (c *Catalog) exposed(n string) bool {
+	return c.isTool(n) && !c.deny[n] && !c.drop[n]
+}
+
 // dieted: the chat surface — minus plumbing (drop) and secret-readers (deny).
 func (c *Catalog) dieted() []string {
 	var out []string

@@ -44,21 +44,52 @@ func newConductor(cfg *Config, b Backend, mcp toolCaller, cat *Catalog) *Conduct
 func (c *Conductor) setBackend(b Backend) { c.backend = b }
 
 func (c *Conductor) allowed(tool string) bool {
+	if !c.catalog.exposed(tool) {
+		return false // drop/deny-filtered tools never run, regardless of posture
+	}
 	return c.posture == "open" || c.catalog.tag(tool) == "read"
 }
 
-var jsonRe = regexp.MustCompile(`(?s)\{.*\}`)
-
+// extractJSON returns the first balanced top-level {...} object in s (tracking
+// string literals + escapes), so a model that wraps its JSON in prose — or emits
+// a trailing second object — doesn't corrupt the parse the way a greedy
+// first-brace-to-last-brace regex would.
 func extractJSON(s string) map[string]any {
-	m := jsonRe.FindString(s)
-	if m == "" {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
 		return nil
 	}
-	var v map[string]any
-	if json.Unmarshal([]byte(m), &v) != nil {
-		return nil
+	depth, inStr, esc := 0, false, false
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case ch == '\\':
+				esc = true
+			case ch == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				var v map[string]any
+				if json.Unmarshal([]byte(s[start:i+1]), &v) != nil {
+					return nil
+				}
+				return v
+			}
+		}
 	}
-	return v
+	return nil
 }
 
 var authorRe = regexp.MustCompile(`(?i)author|write|create|cluster\.lok8s|deploy\.lok8s|addon|chart|secret|yaml`)
@@ -129,11 +160,16 @@ func (c *Conductor) Respond(userMsg string) <-chan Event {
 				continue
 			}
 			if !c.allowed(tool) {
-				ev <- Event{Type: "gate", Tool: tool, Decision: "blocked",
-					Reason: c.posture + ": '" + tool + "' is a write tool"}
+				reason := c.posture + ": '" + tool + "' is a write tool"
+				reprompt := tool + " is a write tool, blocked in " + c.posture +
+					" mode. Tell the user it needs `--posture open`, or use a read tool."
+				if !c.catalog.exposed(tool) {
+					reason = "'" + tool + "' is not available in lo chat"
+					reprompt = tool + " is not available here (off the menu). Pick a tool from the menu or answer directly."
+				}
+				ev <- Event{Type: "gate", Tool: tool, Decision: "blocked", Reason: reason}
 				routeMsgs = append(routeMsgs, Msg{Role: "assistant", Content: raw},
-					Msg{Role: "user", Content: tool + " is a write tool, blocked in " + c.posture +
-						" mode. Tell the user it needs confirmation, or use a read tool."})
+					Msg{Role: "user", Content: reprompt})
 				continue
 			}
 			out := c.mcp.CallTool(tool, args)

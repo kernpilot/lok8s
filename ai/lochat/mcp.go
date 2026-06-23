@@ -168,6 +168,11 @@ func (m *MCP) request(method string, params any) (json.RawMessage, error) {
 	ch := make(chan rpcMsg, 1)
 	m.pending[id] = ch
 	m.mu.Unlock()
+	defer func() { // never leak a pending entry on timeout / process-exit / send error
+		m.mu.Lock()
+		delete(m.pending, id)
+		m.mu.Unlock()
+	}()
 	if err := m.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		return nil, err
 	}

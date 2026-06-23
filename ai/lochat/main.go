@@ -51,13 +51,11 @@ func main() {
 		}
 	}
 	for _, b := range cfg.Backends {
-		if b.Type != "cli" {
-			if b.BaseURL == "" {
-				b.BaseURL = cfg.Endpoint
-			}
-			if b.APIKey == "" {
-				b.APIKey = "ollama"
-			}
+		// local HTTP backends default to the shared endpoint; no Authorization
+		// header is sent unless the config sets api_key (ollama/llamafile/vLLM
+		// need none, and a strict server can opt in via config).
+		if b.Type != "cli" && b.BaseURL == "" {
+			b.BaseURL = cfg.Endpoint
 		}
 	}
 	if len(cfg.MCP.Command) == 0 {
