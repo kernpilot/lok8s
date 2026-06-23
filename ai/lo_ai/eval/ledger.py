@@ -43,6 +43,11 @@ def collect(results_dir: Path) -> list[dict]:
                     "gpu_frac": meta.get("gpu_frac"),
                     "dataset_sha": meta.get("dataset_sha", "?"),
                 })
+        elif s.get("agent"):                     # agentic debug run
+            rows.append({"run": name, "kind": "agent", "model": s.get("model"),
+                         "config": "debug", "route_acc": None,
+                         "format_pass": s.get("solve_rate"), "n": s.get("n"),
+                         "think": s.get("think"), "dataset_sha": s.get("dataset_sha", "?")})
         elif "with_schema" in s:                 # authoring run
             mode = ("addon-" if s.get("addon") else "") + ("schema" if s.get("with_schema") else "noschema")
             rows.append({
@@ -127,4 +132,11 @@ def print_ledger(rows: list[dict]) -> None:
         for r in sorted(auth, key=lambda x: (str(x["dataset_sha"]), -(x["format_pass"] or 0))):
             print(f"{str(r['dataset_sha'])[:9]:10}{_model(r):24}{r['config']:10}"
                   f"{_f(r['format_pass']):>7}{str(r['n']):>4}")
+    agents = [r for r in rows if r["kind"] == "agent"]
+    if agents:
+        print("\n== AGENTIC DEBUG (multi-step, solve rate) ==")
+        h = f"{'dataset':10}{'model':24}{'solve':>7}{'n':>4}"
+        print(h); print("-" * len(h))
+        for r in sorted(agents, key=lambda x: (str(x["dataset_sha"]), -(x["format_pass"] or 0))):
+            print(f"{str(r['dataset_sha'])[:9]:10}{_model(r):24}{_f(r['format_pass']):>7}{str(r['n']):>4}")
     print(f"\n{len(rows)} rows. Compare within a dataset hash only.")

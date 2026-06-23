@@ -103,6 +103,7 @@ eval:
   addon_dataset: lo_ai/data/addons.json    # for `addoneval` (chart-addon authoring)
   addon_schema_files:
     - ../skills/lok8s-addons/SKILL.md
+  agent_dataset: lo_ai/data/agent.json     # for `agenteval` (multi-step debug, mocked tools)
 
 # ---------------------------------------------------------------------------
 # Synthetic data + training (only needed if the benchmark's Bucket B fires).

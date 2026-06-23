@@ -95,6 +95,12 @@ def cmd_addoneval(cfg, args):
                 tag=args.tag, limit=args.limit or 0)
 
 
+def cmd_agenteval(cfg, args):
+    from lo_ai.eval.agent import agent_bench
+    _apply_llm_overrides(cfg, args)
+    agent_bench(cfg, model=None, tag=args.tag, limit=args.limit or 0)
+
+
 def cmd_ledger(cfg, args):
     from lo_ai.eval.ledger import build_ledger, print_ledger
     print_ledger(build_ledger(cfg))
@@ -170,6 +176,13 @@ def main(argv=None):
     ad.add_argument("--limit", type=int, default=0)
     _add_llm_flags(ad)
     ad.set_defaults(fn=cmd_addoneval)
+
+    ae = sub.add_parser("agenteval")
+    ae.add_argument("--model")
+    ae.add_argument("--tag", default="")
+    ae.add_argument("--limit", type=int, default=0)
+    _add_llm_flags(ae)
+    ae.set_defaults(fn=cmd_agenteval)
 
     sub.add_parser("ledger").set_defaults(fn=cmd_ledger)
     s = sub.add_parser("synth"); s.add_argument("-i", "--input", required=True,
