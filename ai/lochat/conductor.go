@@ -20,17 +20,23 @@ type Event struct {
 	Backend  string
 }
 
+// toolCaller is what the conductor needs to execute a tool — satisfied by *MCP
+// and by fakes in tests.
+type toolCaller interface {
+	CallTool(name string, args map[string]any) string
+}
+
 type Conductor struct {
 	cfg      *Config
 	backend  Backend
 	catalog  *Catalog
-	mcp      *MCP
+	mcp      toolCaller
 	posture  string
 	history  []Msg
 	maxSteps int
 }
 
-func newConductor(cfg *Config, b Backend, mcp *MCP, cat *Catalog) *Conductor {
+func newConductor(cfg *Config, b Backend, mcp toolCaller, cat *Catalog) *Conductor {
 	return &Conductor{cfg: cfg, backend: b, mcp: mcp, catalog: cat,
 		posture: cfg.Posture, maxSteps: cfg.MaxToolSteps}
 }
