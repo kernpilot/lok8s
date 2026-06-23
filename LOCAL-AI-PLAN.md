@@ -83,6 +83,35 @@ skill addresses for the Markdown skills.
 **The eval gates everything** — it decides which of P2–P4 even exist. Build it
 first; let measurement, not priors, pick the rest.
 
+## Empirical findings (2026-06-23, real run on the RX 9070 / ROCm gfx1201)
+
+Benchmarked qwen2.5-coder 1.5b/14b and qwen3-coder:30b for real. Three planned
+assumptions were overturned — the eval earned its keep:
+
+1. **The hierarchy router HURTS at every size** (flat/diet > hierarchy):
+   1.5b 0.70 vs 0.34 · 14b **0.88** vs 0.71 · 30b 0.83 vs 0.66. The "60-tool
+   overload" fear didn't materialize — the 14b routes 56 flat tools at 0.88.
+   → dropped the hierarchy router; default `injection.strategy = diet`.
+
+2. **Bigger isn't better here.** qwen2.5-coder:14b (0.88 routing, 3.4 s/call,
+   fully VRAM-resident) beats qwen3-coder:30b (0.83, 7.5 s/call, spills past
+   16 GB → 37/63 CPU/GPU) on **both** accuracy and latency. → conductor = **14b**.
+
+3. **A LoRA is (almost certainly) unnecessary.** Clean authoring eval: the 14b
+   writes valid lok8s YAML **6/8 unaided, 7/8 with the cluster-spec skill in
+   context**, and the lone remaining fail was a verifier false-negative (correct
+   Deploy spec; temp env lacked the referenced cluster) → effectively 8/8.
+   Schema-in-context (RAG) closes the gap; no training/synthetic-data pipeline.
+
+**Architecture collapses to:** 14b conductor + flat/diet tool exposure +
+schema-in-context authoring. No router, no LoRA, no synthetic-data pipeline —
+roughly two-thirds of the original build, deleted by measurement.
+
+Caveats: 1 run/intent (temp 0, stability 1.0 → deterministic, so safe); 8
+authoring intents (expand + seed referenced clusters in the verifier to pin the
+RAG delta precisely); routing gold labels have some ambiguity that understates
+true accuracy.
+
 ## Open items
 
 - Confirm the current best ~14B local coder model (don't freeze on Qwen2.5).
