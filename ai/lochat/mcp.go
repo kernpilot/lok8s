@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,29 @@ import (
 	"sync"
 	"time"
 )
+
+// lockedBuf is a concurrency-safe sink for the child's stderr so we can quote
+// it back in an error if `lo mcp` dies during startup.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) tail() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := strings.TrimSpace(l.b.String())
+	if len(s) > 400 {
+		s = "…" + s[len(s)-400:]
+	}
+	return s
+}
 
 type rpcMsg struct {
 	ID     *int            `json:"id,omitempty"`
@@ -24,6 +48,8 @@ type MCP struct {
 	cfg     MCPConfig
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
+	stderr  *lockedBuf
+	exited  chan struct{} // closed when the child process exits
 	mu      sync.Mutex
 	nextID  int
 	pending map[int]chan rpcMsg
@@ -32,6 +58,7 @@ type MCP struct {
 
 func newMCP(cfg MCPConfig) *MCP {
 	return &MCP{cfg: cfg, pending: map[int]chan rpcMsg{},
+		stderr: &lockedBuf{}, exited: make(chan struct{}),
 		timeout: time.Duration(cfg.Timeout) * time.Second}
 }
 
@@ -65,18 +92,26 @@ func (m *MCP) Start() error {
 	if err != nil {
 		return err
 	}
+	// Capture the child's stderr so a startup failure (e.g. a missing
+	// argsh.so making `mcp` an unknown command) is reported, not swallowed.
+	if os.Getenv("LOCHAT_DEBUG") != "" {
+		cmd.Stderr = io.MultiWriter(m.stderr, os.Stderr)
+	} else {
+		cmd.Stderr = m.stderr
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	m.cmd, m.stdin = cmd, stdin
 	go m.reader(stdout)
+	go func() { _ = cmd.Wait(); close(m.exited) }()
 
 	if _, err := m.request("initialize", map[string]any{
 		"protocolVersion": "2025-06-18",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "lo-chat", "version": "0.1"},
 	}); err != nil {
-		return err
+		return fmt.Errorf("handshake with `%s` failed: %w", strings.Join(m.cfg.Command, " "), err)
 	}
 	m.notify("notifications/initialized", nil)
 	return nil
@@ -89,6 +124,13 @@ func (m *MCP) reader(r io.Reader) {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
+		}
+		if os.Getenv("LOCHAT_DEBUG") != "" {
+			s := line
+			if len(s) > 90 {
+				s = s[:90]
+			}
+			fmt.Fprintln(os.Stderr, "[mcp<]", s)
 		}
 		var msg rpcMsg
 		if json.Unmarshal([]byte(line), &msg) != nil || msg.ID == nil {
@@ -106,6 +148,13 @@ func (m *MCP) reader(r io.Reader) {
 
 func (m *MCP) send(v any) error {
 	b, _ := json.Marshal(v)
+	if os.Getenv("LOCHAT_DEBUG") != "" {
+		s := string(b)
+		if len(s) > 90 {
+			s = s[:90]
+		}
+		fmt.Fprintln(os.Stderr, "[mcp>]", s)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, err := m.stdin.Write(append(b, '\n'))
@@ -128,6 +177,22 @@ func (m *MCP) request(method string, params any) (json.RawMessage, error) {
 			return nil, fmt.Errorf("%s: %s", method, string(msg.Error))
 		}
 		return msg.Result, nil
+	case <-m.exited:
+		// drain a response that may have raced in with the exit
+		select {
+		case msg := <-ch:
+			if len(msg.Error) == 0 {
+				return msg.Result, nil
+			}
+		default:
+		}
+		if errOut := m.stderr.tail(); errOut != "" {
+			if strings.Contains(errOut, "Invalid command: mcp") {
+				errOut += "\n  hint: `lo mcp` is an argsh.so builtin — run `argsh builtins install` to add it next to argsh"
+			}
+			return nil, fmt.Errorf("%s: lo mcp exited: %s", method, errOut)
+		}
+		return nil, fmt.Errorf("%s: lo mcp exited before responding", method)
 	case <-time.After(m.timeout):
 		return nil, fmt.Errorf("timeout waiting for %s", method)
 	}

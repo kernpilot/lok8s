@@ -27,6 +27,19 @@ main::chat() {
   [[ -f "${cfg}" ]] || cfg="${PATH_LOK8S}/chat/defaults.json"
   [[ -f "${cfg}" ]] || { error "no chat config (looked for ${cfg})"; return 1; }
 
+  # Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an argsh
+  # builtin provided by argsh.so (loaded from beside the argsh binary). If that
+  # shared object is missing the bridge dies with "Invalid command: mcp" and the
+  # binary would just wait out its timeout — fail loudly and point at the fix.
+  local argsh_bin
+  argsh_bin="$(command -v argsh 2>/dev/null || true)"
+  [[ -f "${PATH_BIN}/argsh.so" ]] || { [[ -n "${argsh_bin}" ]] && [[ -f "${argsh_bin%/*}/argsh.so" ]]; } || {
+    error "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it."
+    error "Install the matching builtin next to argsh, then retry:"
+    error "  argsh builtins install"
+    return 1
+  }
+
   exec "${bin}" \
     --config "${cfg}" \
     --lo "${PATH_LOK8S}/lo" \
