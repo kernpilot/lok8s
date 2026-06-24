@@ -359,6 +359,16 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the age
 
 &nbsp;
 
+### 🔗 Related projects
+
+lok8s is built on — and shares a philosophy with — a few sibling tools:
+
+- **[`b`](https://github.com/fentas/b)** · [binary.help](https://binary.help) — your one-stop binary manager. It installs and pins lok8s' toolchain, and lok8s ships as a `b` profile.
+- **[`argsh`](https://github.com/arg-sh/argsh)** · [arg.sh](https://arg.sh) — the framework the `lo` CLI is built on; it brings structure and maintainability to complex Bash (typed args, dispatch, and the metadata that becomes lok8s' `--help` and MCP tool schema).
+- **[`atty`](https://github.com/fentas/atty)** · [atty.sh](https://atty.sh) — a suckless-style PTY proxy (Zig) that drops an LLM exec dialog, atuin autosuggest, and guardrail confirmations between your terminal and your shell.
+
+&nbsp;
+
 ### 📜 License
 
 [MIT](LICENSE) © 2025-present [kernpilot](https://github.com/kernpilot)
