@@ -13,7 +13,7 @@ description: >-
 First, gather context: `lo doctor` (env + toolchain preflight — bash >= 4.3,
 required/optional tools, the `PATH_*` env, whether the secrets plugin is built,
 the dev CA, and the active domain; exits non-zero on a missing **required**
-prerequisite), then `lo status <domain>`, `lo lint <domain>`, and (for the dev
+prerequisite), then `lo status --domain <domain>`, `lo lint --domain <domain>`, and (for the dev
 loop) the Tilt logs. Then match the symptom below; the **full table with file
 citations and FIXED/OPEN status is in [`reference.md`](reference.md)**.
 
@@ -37,8 +37,8 @@ citations and FIXED/OPEN status is in [`reference.md`](reference.md)**.
 ```bash
 lo doctor              # env + toolchain preflight; non-zero on a missing required tool
 lo trust               # install the shared dev CA (mkcert -install) — fixes dev TLS / push trust
-lo status <domain>     # cluster + nodes + target builds + Tilt
-lo lint <domain>       # spec / bootstrap / services.yaml / lok8s.yaml / apex checks
+lo status --domain <domain>   # cluster + nodes + target builds + Tilt
+lo lint --domain <domain>     # spec / bootstrap / services.yaml / lok8s.yaml / apex checks
 lo tilt status         # `tilt doctor` (must report Env: kind)
 kubectl get events -A --sort-by=.lastTimestamp | tail -30
 ```

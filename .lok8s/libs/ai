@@ -28,10 +28,10 @@ main::ai() {
     "${args[@]:-}"
   )
   local -a usage=(
-    'check'   'Check the AI setup: lo mcp bridge, local runtime, skill wiring'
-    'skills'  'List the agent skills and how each assistant gets them'
-    'link'    'Symlink (or --copy) the skills into an assistant skill dir'
-    'unlink'  'Remove skills previously linked into an assistant'
+    'check@readonly'    'Check the AI setup: lo mcp bridge, local runtime, skill wiring'
+    'skills@readonly'   'List the agent skills and how each assistant gets them'
+    'link@idempotent'   'Symlink (or --copy) the skills into an assistant skill dir'
+    'unlink@idempotent' 'Remove skills previously linked into an assistant'
   )
   :usage "Manage the lok8s AI integration (lo chat + agent skills)" "${@}"
   "${usage[@]}"
