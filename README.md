@@ -260,7 +260,7 @@ Define services once, in a committed `services.yaml`, with personal overrides in
 Two honest paths to production:
 
 1. **Provision with lok8s (Hetzner today).** The `KubeOne` and `Capi` drivers stand up real clusters on Hetzner Cloud (and bare metal via Hetzner Robot), with batteries-included networking, CNI, encryption-at-rest, and backups guidance. ([CAPI](docs/guide/capi.md) · [Bare Metal](docs/guide/bare-metal.md) · [Networking](docs/guide/networking.md) · [Security](docs/guide/security.md) · [Backups](docs/guide/backups.md))
-2. **Bring your own cluster.** `lo build` renders standard `artifacts.yaml`; `lo deploy` applies it to whatever cluster your kubeconfig points at (use `--remote`/`--cluster` for an existing cluster). EKS, GKE, a Raspberry Pi, a colleague's kind cluster — if `kubectl` can reach it, lok8s can deploy to it.
+2. **Bring your own cluster.** `lo build` renders standard `artifacts.yaml` — plain manifests you `kubectl apply` to whatever cluster your `KUBECONFIG` points at. EKS, GKE, a Raspberry Pi, a colleague's kind cluster — if `kubectl` can reach it, lok8s' output runs on it. (`lo deploy` automates the apply against the kubeconfig it resolves for the domain.)
 
 The optional **operator** ([shell-operator](https://github.com/flant/shell-operator)-based) reconciles `Lo` and `Capi` CRDs on a management cluster using the *same* bash libraries as the CLI, so cluster lifecycle can be declarative when you want it. ([Operator guide](docs/guide/operator.md))
 
