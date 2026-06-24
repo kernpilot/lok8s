@@ -44,7 +44,7 @@
 ### ✨ Why lok8s
 
 - **🧰 Standard tools, not a walled garden.** Targets are plain `kustomize build`s; Helm charts inflate via the [khelm](https://github.com/mgoltzsche/khelm) kustomize plugin (no `helm` CLI to install). The `lo` CLI and the folder convention are *orchestration and ergonomics* — the artifacts underneath are vanilla Kubernetes YAML you could `kubectl apply` by hand. **No lock-in: lok8s produces standard manifests you can take anywhere.**
-- **💻 Dev-first, runs against any cluster.** The default experience is a local `kind` cluster with TLS, a registry mirror, and a Tilt hot-reload loop that just works. `lo build` emits portable `artifacts.yaml`; point `lo deploy` at *any* cluster you have a kubeconfig for. The Hetzner/KubeOne/CAPI provisioners are a *convenience* for standing up production — **not a requirement**.
+- **💻 Dev-first, runs against any cluster.** The default experience is a local `kind` cluster with TLS, a registry mirror, and a Tilt hot-reload loop that just works. `lo build` emits portable `artifacts.yaml` you can `kubectl apply` to *any* cluster. The Hetzner/KubeOne/CAPI provisioners are a *convenience* for standing up production — **not a requirement**.
 - **🤖 AI built in, local-first.** `lo chat` is an on-device assistant for your cluster (read-only by default, with a code-enforced safety gate), and `lo mcp` exposes every `lo` command to agents like Claude Code over [MCP](https://modelcontextprotocol.io/). No data leaves your machine unless you explicitly opt into a frontier model.
 - **🧪 Battle-tested.** The conventions here aren't speculative — they're the residue of ~9 years of running this in production, keeping what survived contact with reality and dropping what didn't.
 - **🐚 Transparent and debuggable.** The CLI is bash (via [argsh](https://github.com/arg-sh/argsh)) — the same `kubectl`/`kustomize`/`kind` commands you'd run by hand, just orchestrated. Nothing is hidden behind a compiled black box; you can read, lint, and step through every step. ([Why bash?](#-why-bash--argsh))
@@ -317,15 +317,15 @@ The kustomize plugins and the `lo chat` engine, where a typed/compiled language 
 | `lo use [domain]` | Set / show the active domain |
 | `lo up [--open-tilt]` | Provision cluster + bootstrap + start Tilt |
 | `lo down` | Stop Tilt + delete the cluster |
-| `lo status [domain]` | Cluster health + per-target build state |
-| `lo provision [domain]` | Full lifecycle: create + bootstrap + build + deploy |
-| `lo build [domain] [target…]` | Render kustomize targets → `artifacts/` |
-| `lo deploy [--filter k=v] [domain] [target…]` | Apply built artifacts (CRDs → resources → health) |
-| `lo lint [domain]` | Validate specs, bootstrap entries, target refs |
+| `lo status` | Cluster health + per-target build state |
+| `lo provision` | Full lifecycle: create + bootstrap + build + deploy |
+| `lo build [target…]` | Render kustomize targets → `artifacts/` |
+| `lo deploy [--filter k=v] [target…]` | Apply built artifacts (CRDs → resources → health) |
+| `lo lint` | Validate specs, bootstrap entries, target refs |
 | `lo doctor` | Diagnose the local environment / toolchain |
 | `lo addons [name]` | List / inspect framework bootstrap addons |
-| `lo kubeconfig [domain]` | Print a domain's kubeconfig (`--oidc` for the kubelogin exec-plugin) |
-| `lo destroy [domain]` | Tear down a cluster |
+| `lo kubeconfig` | Print the domain's kubeconfig (`--oidc` for the kubelogin exec-plugin) |
+| `lo destroy` | Tear down a cluster |
 | `lo clean [--all]` | Clean volumes; optionally prune Docker |
 | `lo chat` | Local AI assistant (read-only by default) |
 | `lo ai check\|skills\|link\|unlink` | Manage AI skills + integration |
@@ -333,7 +333,7 @@ The kustomize plugins and the `lo chat` engine, where a typed/compiled language 
 | `lo tilt up\|down\|status\|restart` | Manage the Tilt environment |
 | `lo registry up\|down\|status\|clean` | Manage registry mirrors |
 
-Global flags: `--verbose|-v`, `--force|-f`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
+Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>` — `[target…]` and `[name]` are the only positionals. Global flags: `--verbose|-v`, `--force|-f`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
 
 &nbsp;
 
