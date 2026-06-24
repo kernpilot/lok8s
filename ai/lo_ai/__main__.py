@@ -107,11 +107,6 @@ def cmd_safetyeval(cfg, args):
     safety_bench(cfg, model=None, tag=args.tag, limit=args.limit or 0)
 
 
-def cmd_chat(cfg, args):
-    from lo_ai.chat.app import run
-    run(cfg, prompt=args.prompt, model=args.model, posture=args.posture)
-
-
 def cmd_ledger(cfg, args):
     from lo_ai.eval.ledger import build_ledger, print_ledger
     print_ledger(build_ledger(cfg))
@@ -201,12 +196,6 @@ def main(argv=None):
     se.add_argument("--limit", type=int, default=0)
     _add_llm_flags(se)
     se.set_defaults(fn=cmd_safetyeval)
-
-    ch = sub.add_parser("chat")
-    ch.add_argument("-p", "--prompt", help="single-shot, non-interactive")
-    ch.add_argument("--model", help="conductor backend key (see chat.backends)")
-    ch.add_argument("--posture", choices=["read-only", "confirm", "open"])
-    ch.set_defaults(fn=cmd_chat)
 
     sub.add_parser("ledger").set_defaults(fn=cmd_ledger)
     s = sub.add_parser("synth"); s.add_argument("-i", "--input", required=True,
