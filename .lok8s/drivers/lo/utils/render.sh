@@ -152,7 +152,7 @@ lo::write_certs_d() {
   # protection travels with the repo — a bare `*` would ignore itself, so it
   # could never be staged). Rewrite when the sentinel is absent so a pre-fix
   # `*`-only file upgrades, but leave a conforming file untouched.
-  local containerd_dir="${certs_d%/certs.d}"
+  local containerd_dir="${certs_d%/*}"  # parent dir (.containerd/), robust to the leaf name
   local gi="${containerd_dir}/.gitignore"
   if [[ ! -f "${gi}" ]] || ! grep -qFx '!.gitignore' "${gi}"; then
     cat > "${gi}" <<'GI'
