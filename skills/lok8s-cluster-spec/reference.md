@@ -1,9 +1,11 @@
 # cluster.lok8s.yaml — full field reference
 
 Authoritative sources: the driver readers (`.lok8s/drivers/lo/utils/config.sh`,
-`.lok8s/drivers/kubeone/config`, `.lok8s/drivers/kkp/main`), the Capi/Lo/Deploy
-CRDs (`operator/crds/`), and `.lok8s/libs/{bootstrap,provision}` +
-`.lok8s/libs/kubehz/main`. The readers win over the CRDs.
+`.lok8s/drivers/kubeone/config`, `.lok8s/drivers/kkp/main`, `.lok8s/drivers/capi/generate`),
+all five CRDs (`operator/crds/{lo,capi,kubeone,kkp,deploy}.yaml`), and
+`.lok8s/libs/{bootstrap,provision}` + `.lok8s/libs/kubehz/main`. The readers win
+over the CRDs — `Lo`/`KubeOne`/`Kkp` schemas set `x-kubernetes-preserve-unknown-fields`
+and enumerate only a subset.
 
 ## Common header (all kinds)
 
@@ -32,7 +34,9 @@ spec:
   loadBalancer:
     pool: 10.125.125.125-10.125.125.150    # MetalLB range; auto for *.lok8s.dev; omit block → no MetalLB
   registries:
-    tls: false                             # mkcert HTTPS registries (reader-only, not in CRD)
+    tls: true                              # DEFAULT true: HTTPS registries, cert minted by the
+                                           # Secret plugin's cert: generator (dev CA at CAROOT, no
+                                           # mkcert binary). `false` = plain HTTP. reader-only, not in CRD
     prefix: lok8s.local
     shared: { enabled: true }
     mirrors:                               # 'build' and 'cache' are RESERVED names — never list them
@@ -43,10 +47,10 @@ spec:
     servers: |  <raw CoreDNS server block>
     overrides: | <raw directives>          # NOTE: plural 'overrides' (docs wrongly say 'override')
     import: ./coredns
-  oidc:                                    # Lo/KubeOne field names — see warning below
+  oidc:                                    # Lo/KubeOne only (Capi reads no oidc — see SKILL.md §4)
     issuer: https://id.example.com
     clientID: "..."
-    usernameClaim: sub                     # defaults: sub / oidc: / groups / oidc:
+    usernameClaim: sub                     # defaults: sub / usernamePrefix oidc: / groups / groupsPrefix oidc:
     groupsClaim: groups
     caBundle: |  <PEM>
   dns: { domainFilter: "zone1.com,zone2.com" }   # for the external-dns addon
@@ -54,7 +58,7 @@ spec:
   kubehz: { hosting: self, access: none }
 ```
 
-## kind: KubeOne (no CRD — reader: `.lok8s/drivers/kubeone/config`)
+## kind: KubeOne (CRD `operator/crds/kubeone.yaml` — preserve-unknown; reader `.lok8s/drivers/kubeone/config`)
 
 ```yaml
 spec:
@@ -71,23 +75,38 @@ spec:
   bootstrap: [ ... ]
 ```
 
-## kind: Capi (CRD: `operator/crds/capi.yaml`)
+## kind: Capi (CRD: `operator/crds/capi.yaml`; reader `.lok8s/drivers/capi/{main,generate}`)
+
+Manifest generation targets **Hetzner Cloud only** (`spec.provider.name: hetzner`).
+Canonical provider block is `spec.provider.{name,config,credentials}` (the validated
+`examples/capi` spec). `spec.hcloud`/`spec.aws` are only legacy *inference* fallbacks
+(`provider::detect`) — prefer `spec.provider`.
 
 ```yaml
 spec:
-  kubernetes: { version: "v1.31.10" }
-  cluster: { domain: prod.example.com }
-  hcloud: { region: fsn1, sshKeyName: my-key }   # exactly one provider block: hcloud | hrobot | aws
-  controlPlane: { replicas: 3, type: cx33 }
-  workers:
-    default: { replicas: 3, type: cx43 }
-  oidc: { enabled: true, issuerUrl: https://id.example.com }   # ⚠️ Capi uses enabled + issuerUrl
-  etcd: { encryptionSecretName: etcd-enc }
-  gitops: { provider: flux, repo: ..., branch: main, path: ./clusters }
-  bootstrap: [ ... ]
+  kubernetes: { version: "v1.31.12" }
+  cluster: { domain: prod.example.com, namespace: default }
+  managementCluster:                          # REQUIRED for self-hosted Capi
+    domain: prod-mgmt.example.com
+    local: true                               # run the CAPI mgmt cluster as a local kind cluster
+  provider:
+    name: hetzner                             # only hetzner (CAPH) is generated
+    config:                                   # opaque; read keys: region, sshKeyName (REQUIRED),
+      region: fsn1                            #   image, network.enabled, placementGroups
+      sshKeyName: my-key
+      image: ubuntu-24.04                     # stock image; k8s installed via cloud-init
+    credentials:
+      envVars: [HCLOUD_TOKEN]
+      secretRef: prod-credentials             # default <metadata.name>-credentials
+  controlPlane: { replicas: 3, type: cpx22 }  # odd for etcd quorum (default 1; default type cax11)
+  workers:                                    # each key = its own MachineDeployment pool
+    general: { replicas: 3, type: cpx22 }
+  bootstrap: [ cilium, ccm ]                  # CNI + Hetzner cloud-controller-manager
+  # NOTE: the Capi driver reads NO spec.oidc (no apiserver OIDC wiring — silent no-op).
+  # spec.etcd / spec.gitops appear in docs but are deferred / not read by the driver.
 ```
 
-## kind: Kkp (no CRD — reader: `.lok8s/drivers/kkp/main`)
+## kind: Kkp (CRD `operator/crds/kkp.yaml` — preserve-unknown; reader `.lok8s/drivers/kkp/main`)
 
 ```yaml
 spec:

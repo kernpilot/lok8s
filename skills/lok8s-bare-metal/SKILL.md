@@ -60,22 +60,26 @@ deletes by label `lok8s.dev/cluster=<cluster_name>`.
 | `#floating-ip` / `#ssh-private-key` | floating-IP index to assign / per-server Robot SSH key |
 
 All `#`-fields on a server are also exported into cloud-init as `CLOUD_ENV_<FIELD>`
-(uppercased, non-alnum→`_`), e.g. `#external-ip` → `CLOUD_ENV__EXTERNAL_IP`.
+(uppercased, then every non-`A–Z` char — incl. digits and the leading `#` — →`_`),
+e.g. `#external-ip` → `CLOUD_ENV__EXTERNAL_IP`.
 
 ## cloud-init config dir
 
-Built-in default: `.lok8s/providers/hetzner/cloud-init/`. A custom dir lives beside
-the cluster spec, selected via `spec.provider.config.cloudInit`:
-```yaml
-spec:
-  provider:
-    name: hetzner
-    config:
-      cloudInit: { path: ./cloud-init, modules: "docker:monitoring", user: root, sshPubPath: ~/.ssh }
+Built-in default: `.lok8s/providers/hetzner/cloud-init/` (packages `docker.io,curl,jq`;
+nameservers `1.1.1.1,8.8.8.8`; a `daemon.json` with `insecure-registries: 10.125.0.0/16`).
+To use a custom dir beside the cluster spec, add a top-level `cloudInit` block to
+`hetzner.json` (the provider reads `.cloudInit.*` from this descriptor):
+```json
+"cloudInit": { "path": "./cloud-init", "modules": "docker:monitoring",
+  "user": "root", "group": "root", "sshPubPath": "~/.ssh" }
 ```
-Structure: `packages`, `nameservers`, `apt`, `write_files/<path>` (+ optional
-`<path>.stat`), `cloud.d/<module>/`. A `.stat` companion sets `owner`,
-`permissions`, `envsubst: true`, `execute: true|remote`, `runcmd: true`.
+`path` resolves relative to `clusters/<domain>/`; `modules` is colon-separated
+(`cloud.d/<module>` dirs); all fields are optional. (With inline `spec.provider.config`
+instead of `configRef`, the same keys live at `spec.provider.config.cloudInit` — they're
+extracted to the descriptor's top level.) Structure: `packages`, `nameservers`, `apt`,
+`write_files/<path>` (+ optional `<path>.stat`, default perms `0655`), `cloud.d/<module>/`.
+A `.stat` companion sets `owner`, `permissions`, `envsubst: true`, `execute: true|remote`,
+`runcmd: true`.
 
 ## vSwitch netplan via `execute: remote`
 

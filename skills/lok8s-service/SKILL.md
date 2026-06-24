@@ -62,16 +62,18 @@ manifests are matched by the label `lok8s.dev/name=<name>`.
 ## `services.yaml` (the catalog)
 
 ```yaml
-registry:                                # all envsubst-expanded
-  prefix: lok8s.local                    # canonical local image name
+registry:                                # endpoint/branch/tag envsubst-expanded
+  endpoint: ${DOCKER_REGISTRY}           # remote pull source for build:false (cache mode)
+  branch: ${DOCKER_PROJECT}              # path segment between endpoint and service name
   tag: ${DOCKER_TAG}
+  prefix: lok8s.local                    # canonical local image name
 defaults: { build: true, dockerfile: service }
 services:
   api:
     path: ./api                          # default ./<name>
     namespace: api                       # inject ns into manifests
     dockerfile: production               # service (dev) | production
-  docs: { build: false, image: ghcr.io/org/docs:latest }   # cache mode (don't build)
+  docs: { image: ghcr.io/org/docs:latest }   # pin a ref (implies build:false; excludes registry:)
 ```
 `parallel` is **top-level only** (under `registry:`), not per-service.
 
@@ -80,9 +82,12 @@ services:
 `lok8s.yaml` declares the **dev** Dockerfile (by convention `lok8s.Dockerfile` —
 hot-reload dev server). Production is selected via `dockerfile: production` in
 `services.yaml` (per-service or `defaults`): lok8s does a literal substring
-replace `lok8s.Dockerfile` → `Dockerfile` on the path (so `api/lok8s.Dockerfile`
-→ `api/Dockerfile`). If the prod file is missing it warns and falls back to the
-dev one. The same swap applies to e.g. `lok8s.entrypoint.sh` → `entrypoint.sh`.
+replace `lok8s.Dockerfile` → `Dockerfile` on the **`build.dockerfile` field
+only** (so `api/lok8s.Dockerfile` → `api/Dockerfile`). If the prod file is
+missing it warns and falls back to the dev one. `lok8s.<name>` ↔ `<name>` (e.g.
+`lok8s.entrypoint.sh` ↔ `entrypoint.sh`) is the documented file-pair convention,
+but lok8s only auto-swaps the dockerfile path — pair any other dev/prod files
+yourself inside the Dockerfile.
 
 ## ⚠️ Common mistakes
 - Adding `apiVersion`/`kind`/`spec` to `lok8s.yaml` — it's an untyped object.

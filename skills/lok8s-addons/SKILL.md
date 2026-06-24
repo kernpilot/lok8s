@@ -89,7 +89,7 @@ so cluster infra isn't mistaken for a `services.yaml` service.
 
 ## 5. Verify
 ```bash
-lo addons                  # list framework addons
-lo lint <domain>           # checks every bootstrap entry resolves
-lo bootstrap --domain <d>  # re-apply spec.bootstrap addons only (idempotent)
+lo addons                    # list framework addons (add a name to show its detail)
+lo lint --domain <d>         # checks every bootstrap entry resolves (omit to lint all)
+lo bootstrap --domain <d>    # re-apply spec.bootstrap addons only (idempotent)
 ```
