@@ -122,13 +122,20 @@ ai::unlink() {
   local who="${agent[0]:-claude}"
   local dst
   dst="$(ai::_agent_skill_dir "${who}")" || { error "${who}: no skill dir"; return 1; }
+  [[ -d "${dst}" ]] || { echo "Nothing linked in ${dst}."; return 0; }
   local src; src="$(ai::_skills_src)"
-  [[ -d "${src}" ]] || { error "no skills dir: ${src}"; return 1; }
-  local s name n=0
-  for s in "${src}"/*/; do
-    [[ -d "${s}" ]] || continue
-    name="$(basename "${s}")"
-    [[ -e "${dst}/${name}" || -L "${dst}/${name}" ]] && { rm -rf "${dst}/${name}"; n=$((n + 1)); }
+  # Iterate the DEST (not the source) so a skill removed/renamed in skills/ after
+  # linking still gets its stale entry cleaned: drop our symlinks (those resolving
+  # into skills/, even if now dangling) + copies whose name matches a current skill.
+  local entry name n=0
+  for entry in "${dst}"/*; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    name="$(basename "${entry}")"
+    if [[ -L "${entry}" ]]; then
+      [[ "$(readlink "${entry}")" == "${src}/"* ]] && { rm -rf "${entry}"; n=$((n + 1)); }
+    elif [[ -d "${src}/${name}" ]]; then
+      rm -rf "${entry}"; n=$((n + 1))
+    fi
   done
   echo "Unlinked ${n} skills from ${dst}."
 }

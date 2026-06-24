@@ -96,8 +96,10 @@ opt-out. See the `lok8s-addons` skill for what to put here vs. in a target.
   `coredns`, `oidc`, `dns.domainFilter`, `kubehz`, `remote`. Absence from the CRD ≠ unsupported.
 - For non-`*.lok8s.dev` `Lo` domains you **must** set `spec.network.{name,cidr}`
   (the reader errors without them; auto-derived only for `*.lok8s.dev`).
-  `spec.loadBalancer.pool` is likewise not auto-derived off-slot — but it's
-  optional (omit the block → no MetalLB); set it only if you want a LoadBalancer.
+  `spec.loadBalancer.pool` IS auto-derived for `*.lok8s.dev` slot domains even if
+  `spec.loadBalancer` is omitted (`lo::read_lb_config` → `lo::slot_from_domain`);
+  off-slot it isn't — set it then. (MetalLB only actually runs if the `metallb`
+  addon is bootstrapped.)
 - `spec.kubehz`: `hosting` ∈ {self,hosted}, `access` ∈ {none,registered,managed};
   `apiUrl` is required (and must be HTTPS) when `hosting: hosted` or `access != none`.
 

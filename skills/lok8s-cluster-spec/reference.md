@@ -32,7 +32,7 @@ spec:
     workers: 0                             # 0-99
     hostPorts: false                       # default true only for slot 125
   loadBalancer:
-    pool: 10.125.125.125-10.125.125.150    # MetalLB range; auto for *.lok8s.dev; omit block → no MetalLB
+    pool: 10.125.125.125-10.125.125.150    # auto-derived for *.lok8s.dev even if omitted; set it off-slot
   registries:
     tls: true                              # DEFAULT true: HTTPS registries, cert minted by the
                                            # Secret plugin's cert: generator (dev CA at CAROOT, no
