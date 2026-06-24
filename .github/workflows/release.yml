@@ -17,19 +17,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Go for both the kustomize plugins (go 1.25) and the lochat binaries (1.22);
+      # the kustomize module needs the higher version, which also builds lochat.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: kustomize/go.mod
+
+      - name: Build kustomize plugins
+        run: make -C kustomize build   # → .kustomize/<group>/<version>/<kind>/<Kind>
+
       - name: Create distributable tarball
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          tar -czf "lok8s-${VERSION}.tar.gz" \
-            .lok8s/ \
-            operator/crds/ \
-            operator/deploy/ \
-            .kustomize/ \
+          # .kustomize/ holds the just-built plugins; include it only if present so
+          # a clean checkout never fails the tar on a missing path.
+          paths=(.lok8s/ operator/crds/ operator/deploy/)
+          if [ -d .kustomize ]; then paths+=(.kustomize/); fi
+          tar -czf "lok8s-${VERSION}.tar.gz" "${paths[@]}" \
             --transform "s,^,lok8s-${VERSION}/,"
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: ai/lochat/go.mod
 
       - name: Build lo chat (lochat) binaries
         run: |
