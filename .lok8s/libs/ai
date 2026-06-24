@@ -49,6 +49,7 @@ ai::check() {
   return "${rc}"
 }
 
+# shellcheck disable=SC2120 # argsh-dispatched (lo ai skills); also called arg-less by ai::check
 ai::skills() {
   :args "List skills + per-assistant delivery" "${@}"
   local src; src="$(ai::_skills_src)"
