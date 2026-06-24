@@ -70,8 +70,8 @@ nameservers `1.1.1.1,8.8.8.8`; a `daemon.json` with `insecure-registries: 10.125
 To use a custom dir beside the cluster spec, add a top-level `cloudInit` block to
 `hetzner.json` (the provider reads `.cloudInit.*` from this descriptor):
 ```json
-"cloudInit": { "path": "./cloud-init", "modules": "docker:monitoring",
-  "user": "root", "group": "root", "sshPubPath": "~/.ssh" }
+{ "cloudInit": { "path": "./cloud-init", "modules": "docker:monitoring",
+                 "user": "root", "group": "root", "sshPubPath": "~/.ssh" } }
 ```
 `path` resolves relative to `clusters/<domain>/`; `modules` is colon-separated
 (`cloud.d/<module>` dirs); all fields are optional. (With inline `spec.provider.config`

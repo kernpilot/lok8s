@@ -73,7 +73,7 @@ services:
     path: ./api                          # default ./<name>
     namespace: api                       # inject ns into manifests
     dockerfile: production               # service (dev) | production
-  docs: { image: ghcr.io/org/docs:latest }   # pin a ref (implies build:false; excludes registry:)
+  docs: { image: ghcr.io/org/docs:1.4.2 }    # pin a ref (implies build:false; excludes registry:)
 ```
 `parallel` is **top-level only** (under `registry:`), not per-service.
 

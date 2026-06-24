@@ -39,10 +39,14 @@ main::ai() {
 
 ai::check() {
   :args "Check the AI setup (runtime + skills)" "${@}"
-  # the runtime side (mcp bridge + local model) is the lochat binary's own check
-  "${PATH_LOK8S}/lo" chat --check || true
+  # the runtime side (mcp bridge + local model) is the lochat binary's own check.
+  # Keep its exit status — a broken runtime should fail `lo ai check` — but still
+  # show the skill wiring below.
+  local rc=0
+  "${PATH_LOK8S}/lo" chat --check || rc=$?
   echo
   ai::skills
+  return "${rc}"
 }
 
 ai::skills() {
