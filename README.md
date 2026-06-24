@@ -147,7 +147,7 @@ From zero to a running local cluster with a live dev loop:
 ```bash
 lo use lok8s.dev          # select the active domain (ships preconfigured)
 lo up                     # create the kind cluster, bootstrap infra, start Tilt
-                          # → Tilt UI on http://localhost:10350
+                          # → Tilt UI on the URL it prints (per-domain port, 10351–10499)
 lo status                 # Running ✓
 lo down                   # tear it all down when you're done
 ```
@@ -185,7 +185,7 @@ flowchart LR
 Concretely, `lo up` runs:
 
 ```
-lo up <domain>
+lo up                    # domain comes from `lo use` / --domain
  ├─ provision   driver creates the cluster        (kind / KubeOne / CAPI / KKP)
  ├─ bootstrap   framework applies spec.bootstrap   (CNI → MetalLB → cert-manager → …,
  │              addons in order, waits healthy      health-gated between stages)
@@ -246,7 +246,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete tree and [Specs referenc
 
 The local experience is the part lok8s polishes hardest, because it's where you live day to day:
 
-- **One command, full loop.** `lo up` creates a `kind` cluster, applies your `spec.bootstrap` infrastructure, and starts **Tilt** — which reads your `services.yaml`, builds images, wires `docker_build` + `live_update`, and gives you a UI at `localhost:10350`. Edit code → Tilt syncs and reloads. ([Local Dev guide](docs/guide/local-dev.md))
+- **One command, full loop.** `lo up` creates a `kind` cluster, applies your `spec.bootstrap` infrastructure, and starts **Tilt** — which reads your `services.yaml`, builds images, wires `docker_build` + `live_update`, and gives you a UI at the URL it prints (a per-domain port in `10351`–`10499`, so parallel projects never collide). Edit code → Tilt syncs and reloads. ([Local Dev guide](docs/guide/local-dev.md))
 - **Working TLS, no manual cert juggling.** The `secrets.lok8s.dev` kustomize plugin's `cert:` generator mints leaf certificates from a shared local dev CA — no `mkcert` dance per project. `lo trust` adds the CA to your system store so browsers are happy. ([Secrets guide](docs/guide/secrets.md), [Kustomize plugins](docs/reference/kustomize-plugins.md))
 - **Fast, shared registry mirrors.** A pull-through mirror network is shared across all your lok8s projects, so images are pulled once, not once-per-cluster. Opt out per project if you'd rather not. ([Shared Registries guide](docs/guide/shared-registries.md))
 - **Multi-project friendly.** Use `*.[N].lok8s.dev` slots to run several local clusters on isolated Docker networks side by side.
@@ -333,7 +333,7 @@ The kustomize plugins and the `lo chat` engine, where a typed/compiled language 
 | `lo tilt up\|down\|status\|restart` | Manage the Tilt environment |
 | `lo registry up\|down\|status\|clean` | Manage registry mirrors |
 
-Global flags: `--verbose|-v`, `--force|-f`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain-name`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
+Global flags: `--verbose|-v`, `--force|-f`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
 
 &nbsp;
 
@@ -355,7 +355,7 @@ npm run docs:build      # build
 
 ### 🤝 Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the agent/contributor guide in [AGENTS.md](AGENTS.md). In short: conventional commits, keep CI green (`npm run lint` + `npm test`), and **security is paramount** — never pipe remote content into a shell, never commit secrets, validate external input.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the agent/contributor guide in [AGENTS.md](AGENTS.md). In short: conventional commits, keep CI green (`npm run lint` + `npm test`), and **security is paramount** — never pipe *untrusted* remote content into a shell, never commit secrets, validate external input.
 
 &nbsp;
 
