@@ -53,3 +53,23 @@ _certs_d() { echo "${PATH_CLUSTERS}/${DOMAIN_NAME}/.containerd/certs.d"; }
   lo::write_certs_d
   assert [ ! -e "${certs_d}/stale.registry" ]
 }
+
+@test "write_certs_d self-protects the generated tree with a .gitignore" {
+  # The whole .containerd tree is regenerated derived state — never committed.
+  # The generator drops an ignore-everything .gitignore so consumer projects
+  # don't depend on a hand-maintained root rule.
+  lo::write_certs_d
+  local gitignore
+  gitignore="$(dirname "$(_certs_d)")/.gitignore"
+  assert [ -f "${gitignore}" ]
+  run grep -Fxq '*' "${gitignore}"
+  assert_success
+}
+
+@test "write_certs_d .gitignore survives the in-place certs.d refresh" {
+  # The .gitignore lives in the .containerd parent, so the certs.d clear
+  # (find -mindepth 1 -delete) must not remove it across re-runs.
+  lo::write_certs_d
+  lo::write_certs_d
+  assert [ -f "$(dirname "$(_certs_d)")/.gitignore" ]
+}
