@@ -1,0 +1,261 @@
+{
+  "configs": {
+    "raw": {
+      "routing": {
+        "n": 59,
+        "acc": 0.881,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 1,
+        "fail": 7,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.125,
+        "failures": [
+          {
+            "intent_id": "fmt-nodes",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 3424.983,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "My cluster won't bootstrap, help me figure out what's wrong.",
+          "chose": "lo_doctor",
+          "gold": "lo_lint",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "The gateway LoadBalancer is stuck in <pending>.",
+          "chose": "lo_doctor",
+          "gold": "lo_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "My deployment says the secret is not found.",
+          "chose": "lo_secrets_decrypt",
+          "gold": "lo_secrets_list",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "docker push fails with connection refused during tilt ci.",
+          "chose": "lo_tilt_ci",
+          "gold": "lo_doctor",
+          "config": "raw",
+          "err": null
+        }
+      ]
+    },
+    "hierarchy": {
+      "routing": {
+        "n": 59,
+        "acc": 0.712,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 1,
+        "fail": 7,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.125,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain demo.lok8s.dev\nValidating: demo.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   spec.bootstrap entry not found: - cilium (resolved to /mnt/scratch/github/kernpilot/lok8s/.lok8s/addons/- cilium)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 3855.644,
+      "steps_mean": 2.288,
+      "error_rate": 0.068,
+      "routing_failures": [
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Clean up the cluster volumes and registry.",
+          "chose": "lo_registry_clean",
+          "gold": "lo_clean",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Switch my active context to domain app.lok8s.dev.",
+          "chose": null,
+          "gold": "lo_use",
+          "config": "hierarchy",
+          "err": "off-menu choice: 'env_services'"
+        },
+        {
+          "intent": "Point me at the prod domain.",
+          "chose": "lo_bootstrap",
+          "gold": "lo_use",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Trust the local dev CA so my browser stops complaining.",
+          "chose": "lo_secrets_set",
+          "gold": "lo_trust",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Install the dev root CA into my system trust store.",
+          "chose": "lo_secrets_set",
+          "gold": "lo_trust",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Register this cluster with kubehz.",
+          "chose": null,
+          "gold": "lo_kubehz_register",
+          "config": "hierarchy",
+          "err": "off-menu choice: 'kubehz_register'"
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_bootstrap",
+          "gold": "lo_provision",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Author a complete cluster.lok8s.yaml for a kind Lo cluster named web on domain web.lok8s.dev with 1 control plane node and 3 workers.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "hierarchy",
+          "err": "off-menu choice: 'k8s_capi'"
+        }
+      ]
+    }
+  }
+}

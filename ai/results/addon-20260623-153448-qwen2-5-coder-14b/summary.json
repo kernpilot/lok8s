@@ -1,0 +1,11 @@
+{
+  "model": "qwen2.5-coder:14b",
+  "with_schema": true,
+  "addon": true,
+  "n": 3,
+  "dataset_sha": "b93901c99584",
+  "think": false,
+  "pass": 0,
+  "fail": 3,
+  "pass_rate": 0.0
+}

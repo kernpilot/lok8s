@@ -1,0 +1,14 @@
+{
+  "stamp": "20260623-124110",
+  "configs": [
+    "diet"
+  ],
+  "runs_per_intent": 3,
+  "n_tools": 56,
+  "model": "qwen3.6:27b",
+  "tool_mode": "json",
+  "dataset_sha": "31c8e96ddd8b",
+  "n_intents": 59,
+  "think": false,
+  "api": "ollama"
+}

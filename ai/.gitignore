@@ -1,0 +1,19 @@
+# real config may hold endpoints / keys — only the example is tracked
+config.yaml
+
+# KEEP per-run summary.json/meta.json + the leaderboard as history (tracked).
+# Ignore only the bulky, regenerable raw records.
+results/**/runs.jsonl
+results/**/records.jsonl
+adapters/
+data/
+tools.json
+
+# go — the lochat binary is built by `go build` / `b`, not committed
+lochat/lochat
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

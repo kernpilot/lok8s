@@ -1,0 +1,162 @@
+# lok8s local-AI harness — configuration.
+# Copy to config.yaml and edit. Everything here is meant to be swapped: endpoints,
+# models, tool-injection strategy, training backend. Nothing about the harness
+# hardcodes a model or a vendor.
+
+# ---------------------------------------------------------------------------
+# LLM endpoints. Any OpenAI-compatible /v1 server works: Ollama, llama.cpp
+# server (--api), vLLM, LM Studio. Swap base_url+model and you've swapped brains.
+# ---------------------------------------------------------------------------
+llm:
+  conductor:
+    base_url: http://localhost:11434/v1   # Ollama. llama.cpp server: http://localhost:8080/v1
+    model: qwen2.5-coder:14b              # the resident brain; revisit for newer ~14B coder models
+    # api_key: ""                         # only set if your server requires auth; omit for local (no header sent)
+    temperature: 0.0                      # deterministic-ish for routing; raise to probe variance
+    max_tokens: 1536
+    tool_mode: json                       # json | native  — how the model is asked to pick a tool
+    request_timeout: 120
+    # reasoning models (qwen3.x) need the native Ollama API to control these:
+    api: openai                           # openai | ollama  (ollama enables num_ctx + think)
+    # num_ctx: 8192                        # raise context so thinking doesn't truncate the answer
+    # think: false                         # false = no-think (fast, best for a CLI); true = reason (slow)
+
+  # Bucket-C (reasoning) judge. MUST differ from the conductor — never self-judge.
+  # Leave model empty to skip auto-judging and just record traces for manual review.
+  judge:
+    base_url: http://localhost:11434/v1
+    model: ""
+    # api_key: ""                         # only if your server requires auth; omit for local (no header sent)
+    temperature: 0.0
+    request_timeout: 120
+
+# ---------------------------------------------------------------------------
+# Embeddings — only used by the `semantic` injector and the `route` debug cmd.
+# ---------------------------------------------------------------------------
+embeddings:
+  enabled: false
+  base_url: http://localhost:11434
+  model: nomic-embed-text
+  api_style: ollama                       # ollama (/api/embeddings) | openai (/v1/embeddings)
+
+# ---------------------------------------------------------------------------
+# The lok8s CLI + its MCP tool surface. The harness speaks MCP (stdio JSON-RPC)
+# to `lo mcp` to get the EXACT tool surface the real assistant would see.
+# ---------------------------------------------------------------------------
+lo:
+  mcp_command: ["./.lok8s/lo", "mcp"]     # how to launch the MCP server
+  cwd: "."                                # a lok8s project root (has .lok8s/, clusters/)
+  env: {}                                 # extra env for lo, e.g. {PATH_BASE: ".", ...}
+  extra_path: ["./.bin", "./.lok8s"]      # prepended to PATH when launching lo
+  tools_cache: ""                         # optional tools.json snapshot for offline runs
+  mcp_timeout: 120                        # some read tools (lo doctor) are slow
+
+# ---------------------------------------------------------------------------
+# Tool injection — what schemas the model actually sees at a decision point.
+# This is the lever the A/B benchmark exists to measure.
+# ---------------------------------------------------------------------------
+injection:
+  strategy: diet                          # raw | diet | hierarchy | semantic (diet won the 14b A/B)
+  max_tools: 8                            # never show more than this many schemas at once
+  compress: true                          # strip usage prose -> name + one line + minimal args
+
+  # diet: plumbing/scaffold/CI tools a chat assistant never needs.
+  drop:
+    - lo_init_service
+    - lo_init_test
+    - lo_crds_generate
+    - lo_crds_check
+    - lo_env_kustomization
+    - lo_kustomize_test
+    - lo_image_cache
+    - lo_version
+
+  # tiers drive the hierarchy injector AND the runtime posture gate.
+  # Defaults mirror the CLI's @readonly / @idempotent annotations.
+  tiers:
+    readonly:
+      [lo_status, lo_doctor, lo_lint, lo_kubeconfig, lo_addons, lo_drivers,
+       lo_secrets_list, lo_secrets_print, lo_secrets_env, lo_secrets_path,
+       lo_tilt_status, lo_kubehz_status, lo_registry_status, lo_image_list]
+    idempotent:
+      [lo_build, lo_kustomize_build]
+    # anything not listed above is treated as `mutating`.
+
+  # secret-reading tools: NEVER expose to the model, even though they're @readonly.
+  deny:
+    - lo_secrets_print
+    - lo_secrets_env
+
+# ---------------------------------------------------------------------------
+# Benchmark
+# ---------------------------------------------------------------------------
+eval:
+  dataset: lo_ai/data/intents.json
+  runs_per_intent: 5                      # repeat to measure variance (small models are stochastic)
+  configs: [raw, diet, hierarchy]         # A/B: which injection strategies to compare
+  out_dir: ./results
+  system_prompt: ""                       # "" -> built-in default (see lo_ai/eval/runner.py)
+  author:                                 # for `authoreval`: schema/skill injected into the authoring prompt
+    schema_files:
+      - ../skills/lok8s-cluster-spec/SKILL.md
+      - ../skills/lok8s-cluster-spec/reference.md
+  addon_dataset: lo_ai/data/addons.json    # for `addoneval` (chart-addon authoring)
+  addon_schema_files:
+    - ../skills/lok8s-addons/SKILL.md
+  agent_dataset: lo_ai/data/agent.json     # for `agenteval` (multi-step debug, mocked tools)
+  safety_dataset: lo_ai/data/safety.json   # for `safetyeval` (read-only posture / destructive-op gating)
+
+# ---------------------------------------------------------------------------
+# Synthetic data + training (only needed if the benchmark's Bucket B fires).
+# ---------------------------------------------------------------------------
+train:
+  teacher:                                # generates (intent, yaml) pairs
+    base_url: https://api.anthropic.com/v1
+    model: claude-sonnet-4-6              # current teacher (Opus 4.8 for hard cases). NOT 3.5.
+    api_key_env: ANTHROPIC_API_KEY
+    style: anthropic                      # anthropic | openai
+    request_timeout: 180
+  generate:
+    per_schema: 100
+    out: ./data/pairs.raw.jsonl
+  verify:                                 # hard-filter: every generated YAML must pass ALL of these
+    commands:
+      - ["./.lok8s/lo", "lint"]           # schema validation
+      - ["./.lok8s/lo", "build"]          # actually renders kustomize/khelm (no `lo --dry-run` exists)
+    out: ./data/pairs.verified.jsonl
+  qlora:
+    # Train on the CONDUCTOR's base so the adapter can be toggled on the resident
+    # model at runtime (llama.cpp /lora-adapters) — no second model, no swap.
+    base_model: Qwen/Qwen2.5-Coder-14B-Instruct
+    backend: unsloth                      # unsloth | peft
+    load_in_4bit: true
+    rank: 16
+    lora_alpha: 32
+    lora_dropout: 0.0
+    learning_rate: 2.0e-4
+    epochs: 3
+    max_seq_len: 4096
+    batch_size: 1
+    grad_accum: 4
+    offload_optimizer: true               # use the 128GB RAM; keeps 16GB VRAM from OOMing
+    out_dir: ./adapters/lok8s-yaml-author
+    export_gguf: true
+
+# ---------------------------------------------------------------------------
+# lo chat — the assistant. Conductor routes flat tools + authors with schema in
+# context + debugs via the doctor tree; a deterministic posture gate enforces
+# read-only. Switch the brain mid-chat with /model (local or a frontier CLI).
+# ---------------------------------------------------------------------------
+chat:
+  conductor: local-e2b          # default backend key (gemma4:e2b — fast/tiny)
+  posture: read-only            # read-only | open  (the safety gate)
+  max_tool_steps: 4
+  schema_files:                 # injected only when a turn looks like authoring (RAG)
+    - ../skills/lok8s-cluster-spec/SKILL.md
+    - ../skills/lok8s-addons/SKILL.md
+  backends:                     # /model lists + switches these (✗ = CLI not installed)
+    local-e2b: {api: ollama, model: gemma4:e2b,        num_ctx: 16384, temperature: 0.2}
+    local-14b: {api: ollama, model: qwen2.5-coder:14b, num_ctx: 16384, temperature: 0.2}
+    claude:    {type: cli, command: ["claude", "-p"], detect: claude}   # escalation
+    gemini:    {type: cli, command: ["gemini", "-p"], detect: gemini}
+    codex:     {type: cli, command: ["codex", "exec"], detect: codex}                     # for llama.cpp runtime adapter toggle

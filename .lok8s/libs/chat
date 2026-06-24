@@ -1,0 +1,50 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# chat — talk to a local AI about your cluster: transparent, streaming, read-only.
+#
+# Thin shim over the `lochat` Go binary (single static binary, `b`-managed). It
+# resolves the lo runtime and hands off — the binary reads a JSON config and
+# launches `lo mcp` itself (inheriting this shell's env, so PATH_*/PATH carry
+# through). No yq, no transforms: the dynamic bits (the lo path, the project dir)
+# are passed as flags; everything else lives in the JSON config. The binary
+# parses -p / --model / --posture, so they pass straight through.
+
+import ^utils/verbose
+
+main::chat() {
+  local bin cfg
+  bin="${PATH_BIN}/lochat"
+  [[ -x "${bin}" ]] || bin="$(command -v lochat 2>/dev/null || true)"
+  [[ -x "${bin}" ]] || {
+    error "lochat binary not found. Build it once:"
+    error "  go build -C ai/lochat -o \"\${PATH_BIN}/lochat\" ."
+    return 1
+  }
+
+  # config: per-project override, else the shipped defaults.
+  local cfg_project="${LO_CHAT_CONFIG:-${PATH_BASE}/lo-chat.json}"
+  cfg="${cfg_project}"
+  [[ -f "${cfg}" ]] || cfg="${PATH_LOK8S}/chat/defaults.json"
+  [[ -f "${cfg}" ]] || { error "no chat config (looked for ${cfg_project} or ${PATH_LOK8S}/chat/defaults.json)"; return 1; }
+
+  # Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an argsh
+  # builtin provided by argsh.so (loaded from beside the argsh binary). If that
+  # shared object is missing the bridge dies with "Invalid command: mcp" and the
+  # binary would just wait out its timeout — fail loudly and point at the fix.
+  local argsh_bin
+  argsh_bin="$(command -v argsh 2>/dev/null || true)"
+  [[ -f "${PATH_BIN}/argsh.so" ]] || { [[ -n "${argsh_bin}" ]] && [[ -f "${argsh_bin%/*}/argsh.so" ]]; } || {
+    error "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it."
+    error "Install the matching builtin next to argsh, then retry:"
+    error "  argsh builtins install"
+    return 1
+  }
+
+  exec "${bin}" \
+    --config "${cfg}" \
+    --lo "${PATH_LOK8S}/lo" \
+    --cwd "${PATH_BASE}" \
+    --base-dir "${PATH_BASE}" \
+    "${@}"
+}

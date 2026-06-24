@@ -1,0 +1,17 @@
+{
+  "stamp": "20260623-200541",
+  "configs": [
+    "diet"
+  ],
+  "runs_per_intent": 1,
+  "n_tools": 56,
+  "model": "gemma4:e2b",
+  "tool_mode": "json",
+  "dataset_sha": "d50f112b9839",
+  "n_intents": 67,
+  "think": false,
+  "api": "ollama",
+  "size_gb": 1.9,
+  "vram_gb": 1.9,
+  "gpu_frac": 1.0
+}

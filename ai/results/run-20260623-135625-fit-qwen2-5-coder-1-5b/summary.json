@@ -1,0 +1,143 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 63,
+        "acc": 0.714,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 12,
+        "pass": 5,
+        "fail": 7,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.417,
+        "failures": [
+          {
+            "intent_id": "fmt-nodes",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-reflector",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-namespace",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy-ns",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain blog.lok8s.dev\nValidating: blog.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: spec.clusterRef\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 698.429,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "Is Tilt running right now?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Is this cluster registered with kubehz?",
+          "chose": "lo_kubehz_register",
+          "gold": "lo_kubehz_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Show me the registry status.",
+          "chose": "lo_status",
+          "gold": "lo_registry_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Begin hot-reloading my services.",
+          "chose": "lo_deploy",
+          "gold": "lo_tilt_up",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Clear the image cache.",
+          "chose": "lo_clean",
+          "gold": "lo_image_clean",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_bootstrap",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a complete cluster.lok8s.yaml for a kind Lo cluster named web on domain web.lok8s.dev with 1 control plane node and 3 workers.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a kind Lo cluster.lok8s.yaml on domain lb.lok8s.dev with a MetalLB loadBalancer pool covering 10.0.0.10-10.0.0.20.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Service foo is failing \u2014 why?",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    }
+  }
+}

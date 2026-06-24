@@ -1,0 +1,131 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 63,
+        "acc": 0.714,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 12,
+        "pass": 7,
+        "fail": 5,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.583,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain demo.lok8s.dev\nValidating: demo.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   spec.bootstrap entry not found: - name: cilium (resolved to /mnt/scratch/github/kernpilot/lok8s/.lok8s/addons/- name: cilium)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-reflector",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-workers2",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy-ns",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 1750.937,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Spin up my dev cluster.",
+          "chose": "lo_provision",
+          "gold": "lo_up",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Begin hot-reloading my services.",
+          "chose": "lo_tilt_restart",
+          "gold": "lo_tilt_up",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a complete cluster.lok8s.yaml for a kind Lo cluster named web on domain web.lok8s.dev with 1 control plane node and 3 workers.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a cluster.lok8s.yaml for a kind Lo cluster ml on domain ml.lok8s.dev with an OIDC issuer https://auth.example.com and clientID lok8s.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a complete cluster.lok8s.yaml for a kind Lo cluster named cp on domain cp.lok8s.dev with 3 control plane nodes and 0 workers.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a kind Lo cluster.lok8s.yaml on domain lb.lok8s.dev with a MetalLB loadBalancer pool covering 10.0.0.10-10.0.0.20.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    }
+  }
+}

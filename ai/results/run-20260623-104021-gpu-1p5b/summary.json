@@ -1,0 +1,361 @@
+{
+  "configs": {
+    "raw": {
+      "routing": {
+        "n": 59,
+        "acc": 0.678,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 4,
+        "fail": 4,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.5,
+        "failures": [
+          {
+            "intent_id": "fmt-addon",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "raw",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 834.593,
+      "steps_mean": 1,
+      "error_rate": 0.017,
+      "routing_failures": [
+        {
+          "intent": "What cluster drivers can I use?",
+          "chose": "lo_addons",
+          "gold": "lo_drivers",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Is Tilt running right now?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Show me the registry status.",
+          "chose": "lo_status",
+          "gold": "lo_registry_status",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "List the images in the cache registry.",
+          "chose": "lo_image_cache",
+          "gold": "lo_image_list",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Begin hot-reloading my services.",
+          "chose": "lo_deploy",
+          "gold": "lo_tilt_up",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Clear the image cache.",
+          "chose": "lo_image_cache",
+          "gold": "lo_image_clean",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Author a cluster.lok8s.yaml for a kind Lo cluster ml on domain ml.lok8s.dev with an OIDC issuer https://auth.example.com and clientID lok8s.",
+          "chose": "lo_init_service",
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Author a kind Lo cluster.lok8s.yaml on domain lb.lok8s.dev with a MetalLB loadBalancer pool covering 10.0.0.10-10.0.0.20.",
+          "chose": "lo_build",
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": null
+        },
+        {
+          "intent": "Create a kind Lo cluster.lok8s.yaml on domain dns.lok8s.dev with a coredns override mapping example.com to 10.0.0.5.",
+          "chose": null,
+          "gold": "lo_provision",
+          "config": "raw",
+          "err": "off-menu choice: None"
+        }
+      ]
+    },
+    "diet": {
+      "routing": {
+        "n": 59,
+        "acc": 0.695,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 4,
+        "fail": 4,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.5,
+        "failures": [
+          {
+            "intent_id": "fmt-nodes",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 703.763,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "Is Tilt running right now?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Is this cluster registered with kubehz?",
+          "chose": "lo_kubehz_register",
+          "gold": "lo_kubehz_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Show me the registry status.",
+          "chose": "lo_status",
+          "gold": "lo_registry_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Begin hot-reloading my services.",
+          "chose": "lo_deploy",
+          "gold": "lo_tilt_up",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Clear the image cache.",
+          "chose": "lo_clean",
+          "gold": "lo_image_clean",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_bootstrap",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a complete cluster.lok8s.yaml for a kind Lo cluster named web on domain web.lok8s.dev with 1 control plane node and 3 workers.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a kind Lo cluster.lok8s.yaml on domain lb.lok8s.dev with a MetalLB loadBalancer pool covering 10.0.0.10-10.0.0.20.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Service foo is failing \u2014 why?",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    },
+    "hierarchy": {
+      "routing": {
+        "n": 59,
+        "acc": 0.339,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 5,
+        "fail": 3,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.625,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "hierarchy",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 1429.712,
+      "steps_mean": 2.051,
+      "error_rate": 0.051,
+      "routing_failures": [
+        {
+          "intent": "What is the current state of my cluster?",
+          "chose": "lo_use",
+          "gold": "lo_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Give me a quick health summary of the cluster right now.",
+          "chose": "lo_up",
+          "gold": "lo_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "show cluster status",
+          "chose": "lo_provision",
+          "gold": "lo_status",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Is my environment healthy \u2014 anything broken in my toolchain?",
+          "chose": "lo_provision",
+          "gold": "lo_doctor",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Something's off with my setup, diagnose it.",
+          "chose": "lo_provision",
+          "gold": "lo_doctor",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Validate my cluster specs and config.",
+          "chose": "lo_provision",
+          "gold": "lo_lint",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Check that my cluster.lok8s.yaml is valid.",
+          "chose": "lo_provision",
+          "gold": "lo_lint",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Which addons are available for my cluster?",
+          "chose": "lo_provision",
+          "gold": "lo_addons",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "Print the kubeconfig for my domain.",
+          "chose": "lo_use",
+          "gold": "lo_kubeconfig",
+          "config": "hierarchy",
+          "err": null
+        },
+        {
+          "intent": "I need the kubeconfig so I can run kubectl.",
+          "chose": "lo_use",
+          "gold": "lo_kubeconfig",
+          "config": "hierarchy",
+          "err": null
+        }
+      ]
+    }
+  }
+}

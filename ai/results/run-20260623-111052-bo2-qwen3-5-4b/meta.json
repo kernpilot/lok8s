@@ -1,0 +1,10 @@
+{
+  "stamp": "20260623-111052",
+  "configs": [
+    "diet"
+  ],
+  "runs_per_intent": 1,
+  "n_tools": 56,
+  "model": "qwen3.5:4b",
+  "tool_mode": "json"
+}

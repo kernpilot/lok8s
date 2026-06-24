@@ -1,0 +1,137 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 59,
+        "acc": 0.797,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 8,
+        "pass": 2,
+        "fail": 6,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.25,
+        "failures": [
+          {
+            "intent_id": "fmt-nodes",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 9206.712,
+      "steps_mean": 1,
+      "error_rate": 0.017,
+      "routing_failures": [
+        {
+          "intent": "Is the dev loop up?",
+          "chose": "lo_status",
+          "gold": "lo_tilt_status",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Clean up the cluster volumes and registry.",
+          "chose": null,
+          "gold": "lo_clean",
+          "config": "diet",
+          "err": "unparseable model output"
+        },
+        {
+          "intent": "Begin hot-reloading my services.",
+          "chose": "lo_tilt_restart",
+          "gold": "lo_tilt_up",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a deploy.lok8s.yaml for domain shop.lok8s.dev that targets the existing cluster on domain kubehz.in.net.",
+          "chose": "lo_provision",
+          "gold": "lo_deploy",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Service foo is failing \u2014 why?",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "My cluster won't bootstrap, help me figure out what's wrong.",
+          "chose": "lo_doctor",
+          "gold": "lo_lint",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "I'm getting ImagePullBackOff on my pods.",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "DNS resolution is broken inside the cluster.",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "model": "qwen2.5-coder:14b",
+  "with_schema": true,
+  "pass": 7,
+  "fail": 1,
+  "error": 0,
+  "skip": 0,
+  "n": 8,
+  "pass_rate": 0.875
+}

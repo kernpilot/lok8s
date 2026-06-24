@@ -1,0 +1,12 @@
+{
+  "model": "gemma4:e4b",
+  "with_schema": false,
+  "pass": 8,
+  "fail": 4,
+  "error": 0,
+  "skip": 0,
+  "n": 12,
+  "dataset_sha": "b7224ea9dee2",
+  "think": false,
+  "pass_rate": 0.667
+}

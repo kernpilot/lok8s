@@ -1,0 +1,30 @@
+{
+  "endpoint": "http://localhost:11434/v1",
+  "conductor": "local-e2b",
+  "posture": "read-only",
+  "max_tool_steps": 4,
+  "schema_files": [
+    "skills/lok8s-cluster-spec/SKILL.md",
+    "skills/lok8s-addons/SKILL.md"
+  ],
+  "backends": {
+    "local-e2b": {"api": "ollama", "model": "gemma4:e2b",        "num_ctx": 16384, "temperature": 0.2},
+    "local-e4b": {"api": "ollama", "model": "gemma4:e4b",        "num_ctx": 16384, "temperature": 0.2},
+    "local-14b": {"api": "ollama", "model": "qwen2.5-coder:14b", "num_ctx": 16384, "temperature": 0.2},
+    "local-llamafile": {"api": "openai", "model": "local", "base_url": "http://localhost:8080/v1", "num_ctx": 16384, "temperature": 0.2},
+    "claude": {"type": "cli", "command": ["claude", "-p"],  "detect": "claude"},
+    "gemini": {"type": "cli", "command": ["gemini", "-p"],  "detect": "gemini"},
+    "codex":  {"type": "cli", "command": ["codex", "exec"], "detect": "codex"}
+  },
+  "injection": {
+    "drop": ["lo_chat", "lo_init_service", "lo_init_test", "lo_crds_generate", "lo_crds_check",
+             "lo_env_kustomization", "lo_kustomize_test", "lo_image_cache", "lo_version"],
+    "deny": ["lo_secrets_print", "lo_secrets_env"],
+    "tiers": {
+      "readonly": ["lo_status", "lo_doctor", "lo_lint", "lo_kubeconfig", "lo_addons", "lo_drivers",
+                   "lo_secrets_list", "lo_secrets_print", "lo_secrets_env", "lo_secrets_path",
+                   "lo_tilt_status", "lo_kubehz_status", "lo_registry_status", "lo_image_list"],
+      "idempotent": ["lo_build", "lo_kustomize_build"]
+    }
+  }
+}

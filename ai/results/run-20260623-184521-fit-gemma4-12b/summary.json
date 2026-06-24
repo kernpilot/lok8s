@@ -1,0 +1,161 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 63,
+        "acc": 0.81,
+        "stability": 1.0
+      },
+      "format": {
+        "n": 12,
+        "pass": 1,
+        "fail": 11,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.083,
+        "failures": [
+          {
+            "intent_id": "fmt-kind-min",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain demo.lok8s.dev\nValidating: demo.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m   Missing required field: metadata.name\n\u001b[0;31m[error]\u001b[0m 2 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-nodes",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain web.lok8s.dev\nValidating: web.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-addon",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain obs.lok8s.dev\nValidating: obs.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain shop.lok8s.dev\nValidating: shop.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: spec.clusterRef\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-oidc",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain ml.lok8s.dev\nValidating: ml.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-cponly",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain cp.lok8s.dev\nValidating: cp.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-lb",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain lb.lok8s.dev\nValidating: lb.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-coredns",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain dns.lok8s.dev\nValidating: dns.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-reflector",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain rfl.lok8s.dev\nValidating: rfl.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          },
+          {
+            "intent_id": "fmt-workers2",
+            "config": "diet",
+            "status": "fail",
+            "log": "$ ./.lok8s/lo lint --domain wk.lok8s.dev\nValidating: wk.lok8s.dev\n  OK\nValidating: services.yaml\n  OK\n\n\u001b[0;31m[error]\u001b[0m   Missing required field: apiVersion\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n\u001b[0;31m[error]\u001b[0m 1 validation error(s)\n"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 10,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 4078.317,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a cluster.lok8s.yaml for a kind Lo cluster ml on domain ml.lok8s.dev with an OIDC issuer https://auth.example.com and clientID lok8s.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain rfl.lok8s.dev that bootstraps cilium and reflector.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Author a kind Lo cluster.lok8s.yaml on domain ns.lok8s.dev with spec.cluster.namespace set to platform and cilium bootstrapped.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a kind Lo cluster.lok8s.yaml on domain wk.lok8s.dev with 1 control plane and 2 workers.",
+          "chose": "lo_k8s_capi",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Service foo is failing \u2014 why?",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "My cluster won't bootstrap, help me figure out what's wrong.",
+          "chose": "lo_doctor",
+          "gold": "lo_lint",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "I'm getting ImagePullBackOff on my pods.",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "cert-manager isn't issuing certificates.",
+          "chose": "lo_status",
+          "gold": "lo_doctor",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    }
+  }
+}

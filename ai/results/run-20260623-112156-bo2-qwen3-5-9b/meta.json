@@ -1,0 +1,12 @@
+{
+  "stamp": "20260623-112156",
+  "configs": [
+    "diet"
+  ],
+  "runs_per_intent": 1,
+  "n_tools": 56,
+  "model": "qwen3.5:9b",
+  "tool_mode": "json",
+  "dataset_sha": "31c8e96ddd8b",
+  "n_intents": 59
+}

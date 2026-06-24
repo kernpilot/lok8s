@@ -1,0 +1,4 @@
+# lo chat TUI. (The non-interactive `chat -p` falls back to plain stdout if these
+# are absent, so the benchmark harness stays dependency-light.)
+rich>=13.0
+prompt_toolkit>=3.0

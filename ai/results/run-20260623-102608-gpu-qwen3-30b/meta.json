@@ -1,0 +1,11 @@
+{
+  "stamp": "20260623-102608",
+  "configs": [
+    "raw",
+    "hierarchy"
+  ],
+  "runs_per_intent": 1,
+  "n_tools": 56,
+  "model": "qwen3-coder:30b",
+  "tool_mode": "json"
+}

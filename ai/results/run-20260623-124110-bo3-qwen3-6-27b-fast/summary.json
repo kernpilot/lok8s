@@ -1,0 +1,107 @@
+{
+  "configs": {
+    "diet": {
+      "routing": {
+        "n": 177,
+        "acc": 0.819,
+        "stability": 0.983
+      },
+      "format": {
+        "n": 24,
+        "pass": 21,
+        "fail": 3,
+        "error": 0,
+        "skip": 0,
+        "pass_rate": 0.875,
+        "failures": [
+          {
+            "intent_id": "fmt-deploy",
+            "config": "diet",
+            "status": "fail",
+            "log": "empty yaml"
+          }
+        ]
+      },
+      "reasoning": {
+        "n": 30,
+        "judged": false,
+        "note": "no judge model configured \u2014 traces recorded for manual review"
+      },
+      "latency_ms_mean": 16496.972,
+      "steps_mean": 1,
+      "error_rate": 0.0,
+      "routing_failures": [
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Tear the cluster down.",
+          "chose": "lo_destroy",
+          "gold": "lo_down",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create the cloud infrastructure for my cluster.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create the cloud infrastructure for my cluster.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create the cloud infrastructure for my cluster.",
+          "chose": "lo_k8s_infrastructure",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_up",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Write a complete cluster.lok8s.yaml for a local kind (kind: Lo) cluster named demo on domain demo.lok8s.dev with cilium in spec.bootstrap.",
+          "chose": "lo_up",
+          "gold": "lo_provision",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": null
+        },
+        {
+          "intent": "Create a cluster.lok8s.yaml for kind Lo on domain obs.lok8s.dev that bootstraps cilium and the tempo addon.",
+          "chose": "lo_provision",
+          "gold": "lo_bootstrap",
+          "config": "diet",
+          "err": null
+        }
+      ]
+    }
+  }
+}
