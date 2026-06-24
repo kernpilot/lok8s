@@ -1,6 +1,6 @@
 {
   "name": "lok8s",
-  "description": "Kubernetes deployment framework for Hetzner — the `lo` CLI (kind/KubeOne/CAPI/KKP drivers), kustomize + Helm, and a Tilt dev loop.",
+  "description": "Kubernetes from laptop to production — one CLI and one folder convention over kustomize, Helm (khelm), kind and Tilt. Dev-first, deploys to any cluster; optional Hetzner provisioning via the KubeOne/CAPI drivers.",
   "homepage": "https://lok8s.io",
   "license": "MIT",
   "repository": {
