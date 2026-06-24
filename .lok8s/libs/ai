@@ -1,0 +1,143 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# ai — manage the lok8s AI integration: the `lo chat` runtime and the agent
+# skills (skills/*/SKILL.md), and how those skills reach assistants.
+#
+# Skill-aware agents (claude) load skills natively from a skill dir, so
+# `lo ai link` (sym)links the lok8s skills there. Agents without a skill system
+# (and the local `lo chat` conductor) get them by instant injection instead.
+# `lo ai check` reports the whole setup (bridge + runtime + skill wiring).
+
+import ^utils/verbose
+
+# where the skills live (the source of truth)
+ai::_skills_src() { echo "${PATH_BASE}/skills"; }
+
+# ai::_agent_skill_dir <agent> — the dir an assistant loads project skills from.
+# Returns 1 for agents with no native skill dir (they get instant injection).
+ai::_agent_skill_dir() {
+  case "${1}" in
+    claude) echo "${PATH_BASE}/.claude/skills" ;;
+    *) return 1 ;;
+  esac
+}
+
+main::ai() {
+  local -a args=(
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'check@readonly'    'Check the AI setup: lo mcp bridge, local runtime, skill wiring'
+    'skills@readonly'   'List the agent skills and how each assistant gets them'
+    'link@idempotent'   'Symlink (or --copy) the skills into an assistant skill dir'
+    'unlink@idempotent' 'Remove skills previously linked into an assistant'
+  )
+  :usage "Manage the lok8s AI integration (lo chat + agent skills)" "${@}"
+  "${usage[@]}"
+}
+
+ai::check() {
+  :args "Check the AI setup (runtime + skills)" "${@}"
+  # the runtime side (mcp bridge + local model) is the lochat binary's own check.
+  # Keep its exit status — a broken runtime should fail `lo ai check` — but still
+  # show the skill wiring below.
+  local rc=0
+  "${PATH_LOK8S}/lo" chat --check || rc=$?
+  echo
+  ai::skills
+  return "${rc}"
+}
+
+ai::skills() {
+  :args "List skills + per-assistant delivery" "${@}"
+  local src; src="$(ai::_skills_src)"
+  [[ -d "${src}" ]] || { error "no skills dir: ${src}"; return 1; }
+  local claude_dir; claude_dir="$(ai::_agent_skill_dir claude)"
+  echo "Agent skills — ${src}"
+  local s name status
+  for s in "${src}"/*/; do
+    [[ -f "${s}SKILL.md" ]] || continue
+    name="$(basename "${s}")"
+    if [[ -L "${claude_dir}/${name}" ]]; then
+      status="claude: linked"
+    elif [[ -e "${claude_dir}/${name}" ]]; then
+      status="claude: copied"
+    else
+      status="lo chat: injected (not linked)"
+    fi
+    printf '  %-24s %s\n' "${name}" "${status}"
+  done
+  echo
+  echo "Link them natively into Claude:  lo ai link claude"
+}
+
+ai::link() {
+  local -a agent
+  local copy
+  local -a args=(
+    'agent'     'Assistant to link skills into (default: claude)'
+    '-'         'Options:'
+    'copy|c:+'  'Copy the skills instead of symlinking'
+    "${args[@]:-}"
+  )
+  :args "Link skills into an assistant skill dir" "${@}"
+
+  local who="${agent[0]:-claude}"
+  local dst
+  dst="$(ai::_agent_skill_dir "${who}")" || {
+    error "${who} has no native skill dir — it gets skills by injection from \`lo chat\`, nothing to link."
+    return 1
+  }
+  local src; src="$(ai::_skills_src)"
+  [[ -d "${src}" ]] || { error "no skills dir: ${src}"; return 1; }
+
+  mkdir -p "${dst}"
+  local s name target n=0
+  for s in "${src}"/*/; do
+    [[ -f "${s}SKILL.md" ]] || continue
+    name="$(basename "${s}")"
+    target="${dst}/${name}"
+    rm -rf "${target}"
+    if [[ "${copy:-0}" != 0 ]]; then
+      cp -r "${s%/}" "${target}"
+    else
+      ln -s "${s%/}" "${target}"
+    fi
+    n=$((n + 1))
+  done
+
+  echo "Linked ${n} skills into ${dst} ($([[ "${copy:-0}" != 0 ]] && echo copy || echo symlink))."
+  echo "${who} (run in this project) now loads the lok8s skills natively."
+}
+
+ai::unlink() {
+  local -a agent
+  local -a args=(
+    'agent'  'Assistant to unlink (default: claude)'
+    "${args[@]:-}"
+  )
+  :args "Remove skills linked into an assistant" "${@}"
+
+  local who="${agent[0]:-claude}"
+  local dst
+  dst="$(ai::_agent_skill_dir "${who}")" || { error "${who}: no skill dir"; return 1; }
+  [[ -d "${dst}" ]] || { echo "Nothing linked in ${dst}."; return 0; }
+  local src; src="$(ai::_skills_src)"
+  # Iterate the DEST (not the source) so a skill removed/renamed in skills/ after
+  # linking still gets its stale entry cleaned: drop our symlinks (those resolving
+  # into skills/, even if now dangling) + copies whose name matches a current skill.
+  local entry name n=0
+  for entry in "${dst}"/*; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    name="$(basename "${entry}")"
+    if [[ -L "${entry}" ]]; then
+      [[ "$(readlink "${entry}")" == "${src}/"* ]] && { rm -rf "${entry}"; n=$((n + 1)); }
+    elif [[ -d "${src}/${name}" ]]; then
+      rm -rf "${entry}"; n=$((n + 1))
+    fi
+  done
+  echo "Unlinked ${n} skills from ${dst}."
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::ai "${@}"

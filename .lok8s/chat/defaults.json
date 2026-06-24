@@ -17,7 +17,8 @@
     "codex":  {"type": "cli", "command": ["codex", "exec"], "detect": "codex"}
   },
   "injection": {
-    "drop": ["lo_chat", "lo_init_service", "lo_init_test", "lo_crds_generate", "lo_crds_check",
+    "drop": ["lo_chat", "lo_ai_check", "lo_ai_skills", "lo_ai_link", "lo_ai_unlink",
+             "lo_init_service", "lo_init_test", "lo_crds_generate", "lo_crds_check",
              "lo_env_kustomization", "lo_kustomize_test", "lo_image_cache", "lo_version"],
     "deny": ["lo_secrets_print", "lo_secrets_env"],
     "tiers": {

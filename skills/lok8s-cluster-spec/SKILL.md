@@ -79,18 +79,27 @@ opt-out. See the `lok8s-addons` skill for what to put here vs. in a target.
 
 ## 4. ⚠️ Pitfalls the CRD won't catch (the readers are authoritative)
 
-- **No CRD ships for `KubeOne` or `Kkp`** — only `Lo`, `Capi`, `Deploy` have
-  OpenAPI schemas (`operator/crds/`). KubeOne/Kkp are validated only by their bash
-  readers, so don't rely on `kubectl` schema validation for them.
-- **OIDC field names differ by kind**: Lo & KubeOne use `spec.oidc.issuer` +
-  `spec.oidc.clientID` (+ `usernameClaim`/`groupsClaim`/`caBundle`); **Capi** uses
-  `spec.oidc.enabled` + `spec.oidc.issuerUrl`. Don't mix them.
+- **All five kinds now ship a CRD** (`operator/crds/{lo,capi,kubeone,kkp,deploy}.yaml`,
+  generated from `operator/crds/schema/*.schema.yaml` via `lo crds generate`). But
+  the `Lo`/`KubeOne`/`Kkp` schemas set `x-kubernetes-preserve-unknown-fields: true`
+  and enumerate only a subset — the bash readers stay authoritative for everything
+  else, so don't rely on `kubectl` schema validation to catch a typo in an
+  unenumerated field (it's preserved, not rejected).
+- **OIDC is read by Lo & KubeOne only**: both use `spec.oidc.issuer` +
+  `spec.oidc.clientID` (+ `usernameClaim`/`usernamePrefix`/`groupsClaim`/
+  `groupsPrefix`/`caBundle`). **Capi reads no `spec.oidc` at all** — its generator
+  doesn't wire the apiserver for OIDC, so an `oidc:` block on a `Capi` spec is a
+  silent no-op (docs may list it as "optional"; the driver ignores it).
 - `spec.coredns.overrides` is **plural** (the reader key); some docs say `override`.
-- Many real `Lo` fields are **not in the CRD** but ARE read by the driver:
-  `registries.tls`/`registries.prefix`, `nodes.hostPorts`, `coredns`, `oidc`,
-  `dns.domainFilter`, `kubehz`, `remote`. Absence from the CRD ≠ unsupported.
+- Many real `Lo` fields are **not enumerated in the CRD** but ARE read by the driver:
+  `registries.tls`/`registries.prefix`, `nodes.hostPorts`/`nodes.maxConcurrentDownloads`,
+  `coredns`, `oidc`, `dns.domainFilter`, `kubehz`, `remote`. Absence from the CRD ≠ unsupported.
 - For non-`*.lok8s.dev` `Lo` domains you **must** set `spec.network.{name,cidr}`
-  and `spec.loadBalancer.pool` (they're auto-derived only for `*.lok8s.dev`).
+  (the reader errors without them; auto-derived only for `*.lok8s.dev`).
+  `spec.loadBalancer.pool` IS auto-derived for `*.lok8s.dev` slot domains even if
+  `spec.loadBalancer` is omitted (`lo::read_lb_config` → `lo::slot_from_domain`);
+  off-slot it isn't — set it then. (MetalLB only actually runs if the `metallb`
+  addon is bootstrapped.)
 - `spec.kubehz`: `hosting` ∈ {self,hosted}, `access` ∈ {none,registered,managed};
   `apiUrl` is required (and must be HTTPS) when `hosting: hosted` or `access != none`.
 
