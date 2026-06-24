@@ -62,8 +62,8 @@ cat services.yaml lok8s.yaml 2>/dev/null   # existing services
 | Need | lok8s primitive | Skill |
 |---|---|---|
 | the app container | a **service** (`lok8s.yaml` + `services.yaml` entry + Dockerfile) | **lok8s-service** |
-| Postgres | the bundled **cnpg-operator** addon + a CNPG `Cluster` workload | **lok8s-addons** |
-| Redis | the bundled **redis-operator** addon + a Redis workload | **lok8s-addons** |
+| Postgres | the built-in **cnpg-operator** addon + a CNPG `Cluster` workload | **lok8s-addons** |
+| Redis | the built-in **redis-operator** addon + a Redis workload | **lok8s-addons** |
 | MySQL / other engines | a **chart addon** (khelm) or a plain workload — no bundled operator | **lok8s-addons** |
 | credentials / TLS | the **secrets** kustomize plugin (`passwd:`, `cert:`) | **lok8s-secrets** |
 | HTTP exposure | the service's `ports` + `links`, routed via the gateway | **lok8s-service** |

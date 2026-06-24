@@ -119,6 +119,7 @@ ai::unlink() {
   local dst
   dst="$(ai::_agent_skill_dir "${who}")" || { error "${who}: no skill dir"; return 1; }
   local src; src="$(ai::_skills_src)"
+  [[ -d "${src}" ]] || { error "no skills dir: ${src}"; return 1; }
   local s name n=0
   for s in "${src}"/*/; do
     [[ -d "${s}" ]] || continue
