@@ -173,6 +173,17 @@ lok8s keeps two concerns strictly separate:
 
 Everything is keyed by FQDN. A **cluster domain** owns a cluster (`cluster.lok8s.yaml`); a **deployment domain** ships content to another domain's cluster (`deploy.lok8s.yaml`).
 
+```mermaid
+flowchart LR
+    spec["cluster.lok8s.yaml<br/>kind: Lo · KubeOne · Capi · Kkp"] --> drv{{driver}}
+    drv -->|provision| k8s[("Kubernetes cluster")]
+    k8s --> a["Plane A — bootstrap<br/>spec.bootstrap addons<br/>(CNI → LB → cert-manager …)"]
+    a --> b["Plane B — workloads<br/>targets/* · kustomize"]
+    b -->|"Tilt (dev) / lo deploy (CI)"| run(["running cluster"])
+```
+
+Concretely, `lo up` runs:
+
 ```
 lo up <domain>
  ├─ provision   driver creates the cluster        (kind / KubeOne / CAPI / KKP)
@@ -264,6 +275,13 @@ lok8s treats AI as a first-class, **local-first** capability — not a cloud dep
 - **`lo chat` — an on-device cluster assistant.** Ask "why won't this deploy?" or "what's the LB IP?" and it routes through `lo` tools, gathers facts, and streams a markdown answer in your terminal. It runs **read-only by default**, enforced in *code* (not by trusting the model), so it can't mutate your cluster unless you switch posture with `/posture open`. Backends are local: [Ollama](https://ollama.com) or any OpenAI-compatible server (llama-server, [llamafile](https://github.com/Mozilla-Ocho/llamafile), vLLM). Frontier CLIs (claude/gemini/codex) are strictly opt-in handoffs. Run `lo chat --check` for a guided setup. ([Local AI guide](docs/guide/lo-chat.md))
 - **`lo mcp` — your CLI as agent tools.** Every leaf `lo` command is exposed as an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio, so agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root.
 - **`lo ai` — wire skills into your assistant.** The repo ships curated [skills](skills/) (cluster specs, services, addons, secrets, the dev loop, troubleshooting…). `lo ai link claude` symlinks them into `.claude/skills/` for native loading; other agents get them by injection. `lo ai check` reports the whole setup at a glance.
+
+Try it in two commands:
+
+```bash
+lo chat --check    # guided: checks the bridge + a local model, prints setup hints
+lo chat            # then ask, e.g. "why won't my deployment start?"
+```
 
 If a piece needs setup (e.g. the MCP bridge wants `argsh builtins install`), `lo ai check` / `lo doctor` tell you exactly what to run.
 
