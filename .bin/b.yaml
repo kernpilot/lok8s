@@ -72,6 +72,7 @@ profiles:
       .envrc:
       .gitignore:
       .mcp.json:
+      skills/**:
       .bin/b.yaml:
         select:
           - "{binaries: from_items(items(binaries)[?[1].groups && contains([1].groups, 'core')])}"
