@@ -54,15 +54,18 @@ _certs_d() { echo "${PATH_CLUSTERS}/${DOMAIN_NAME}/.containerd/certs.d"; }
   assert [ ! -e "${certs_d}/stale.registry" ]
 }
 
-@test "write_certs_d self-protects the generated tree with a .gitignore" {
-  # The whole .containerd tree is regenerated derived state — never committed.
-  # The generator drops an ignore-everything .gitignore so consumer projects
-  # don't depend on a hand-maintained root rule.
+@test "write_certs_d self-protects the generated tree with a committable .gitignore" {
+  # The whole .containerd tree is regenerated derived state — its entries are
+  # never committed. The generator drops a .gitignore that ignores everything
+  # (*) but keeps itself (!.gitignore) so the protection is committable and
+  # travels with the repo, so consumer projects need no hand-maintained rule.
   lo::write_certs_d
   local gitignore
   gitignore="$(dirname "$(_certs_d)")/.gitignore"
   assert [ -f "${gitignore}" ]
   run grep -Fxq '*' "${gitignore}"
+  assert_success
+  run grep -Fxq '!.gitignore' "${gitignore}"
   assert_success
 }
 
@@ -72,4 +75,17 @@ _certs_d() { echo "${PATH_CLUSTERS}/${DOMAIN_NAME}/.containerd/certs.d"; }
   lo::write_certs_d
   lo::write_certs_d
   assert [ -f "$(dirname "$(_certs_d)")/.gitignore" ]
+}
+
+@test "write_certs_d does not clobber an already-conforming .gitignore" {
+  # The sentinel guard (grep !.gitignore) rewrites only a missing or pre-fix
+  # (*-only) file; a conforming one is left untouched — proven by a user marker
+  # surviving a re-run (asserts content-preservation, not just existence).
+  lo::write_certs_d
+  local gi
+  gi="$(dirname "$(_certs_d)")/.gitignore"
+  printf '*\n!.gitignore\n# user-added marker\n' >"${gi}"
+  lo::write_certs_d
+  run grep -Fxq '# user-added marker' "${gi}"
+  assert_success
 }
