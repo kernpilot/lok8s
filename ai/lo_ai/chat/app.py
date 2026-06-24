@@ -142,7 +142,7 @@ def _slash(msg: str, conductor: Conductor, backends: dict, console) -> bool:
     elif cmd == "/help":
         console.print(Panel(
             "/model [name]   list backends / switch the conductor (local or frontier CLI)\n"
-            "/posture [mode] show or set: read-only | confirm | open\n"
+            "/posture [mode] show or set: read-only | open\n"
             "/think on|off   toggle reasoning (if the model supports it)\n"
             "/tools          list the tools the conductor can use\n"
             "/clear          reset the conversation\n"
@@ -167,11 +167,11 @@ def _slash(msg: str, conductor: Conductor, backends: dict, console) -> bool:
         else:
             console.print(f"[red]unknown backend '{arg}'. /model to list.[/red]")
     elif cmd == "/posture":
-        if arg in ("read-only", "confirm", "open"):
+        if arg in ("read-only", "open"):
             conductor.posture = arg
             console.print(f"[green]posture: {arg}[/green]")
         else:
-            console.print(f"posture: {conductor.posture}  (set: read-only | confirm | open)")
+            console.print(f"posture: {conductor.posture}  (set: read-only | open)")
     elif cmd == "/think":
         b = conductor.backend
         if hasattr(b, "think"):

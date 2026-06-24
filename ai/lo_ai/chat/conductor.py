@@ -18,7 +18,7 @@ ROUTE_SYS = """You are the lok8s assistant ({posture} mode). To answer the user 
 may run lo tools to gather facts. Respond with ONE JSON object per step:
   {{"tool": "<name>", "args": {{...}}}}   to run a tool, or
   {{"tool": null}}                          when you have enough to answer.
-Only [read] tools may run in {posture} mode. Available tools:
+{constraint} Available tools:
 {menu}"""
 
 ANSWER_SYS = """You are the lok8s assistant. Answer the user clearly and concisely
@@ -28,13 +28,35 @@ relevant. Don't invent tool output you didn't see.{schema}"""
 
 
 def _json(text: str) -> dict:
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
+    """First balanced {...} object (tracking string literals/escapes) — robust to
+    prose around the JSON or a trailing second object, unlike a greedy regex."""
+    start = text.find("{")
+    if start < 0:
         return {}
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {}
+    depth = 0
+    in_str = esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return {}
+    return {}
 
 
 class Conductor:
@@ -76,7 +98,14 @@ class Conductor:
             f"- {n} [{self._tag(n)}]: {(self.catalog.tools[n].description.splitlines() or [''])[0]}"
             for n in self.tools)
 
+    def _exposed(self, n: str) -> bool:
+        # drop/deny-filtered tools (plumbing + secret-readers) are off the menu and
+        # must never run, even if the model names one and it's read-tagged.
+        return n in self.tools
+
     def _allowed(self, n: str) -> bool:
+        if not self._exposed(n):
+            return False
         return True if self.posture == "open" else self._tag(n) == "read"
 
     def _schema(self, user_msg: str) -> str:
@@ -112,8 +141,11 @@ class Conductor:
             yield {"type": "answer_done"}
             return
 
+        constraint = ("All tools may run, including [write] tools." if self.posture == "open"
+                      else "Only [read] tools may run; [write] tools are blocked.")
         route_msgs = [{"role": "system",
-                       "content": ROUTE_SYS.format(posture=self.posture, menu=self._menu())}] + list(self.history)
+                       "content": ROUTE_SYS.format(posture=self.posture, constraint=constraint,
+                                                   menu=self._menu())}] + list(self.history)
         tool_ctx = []
         for _ in range(self.max_steps):
             try:
@@ -132,11 +164,16 @@ class Conductor:
                                {"role": "user", "content": f"{tool} is not a valid tool. Pick from the menu or answer."}]
                 continue
             if not self._allowed(tool):
-                yield {"type": "gate", "tool": tool, "decision": "blocked",
-                       "reason": f"{self.posture}: '{tool}' is a write tool"}
+                if not self._exposed(tool):
+                    reason = f"'{tool}' is not available in lo chat"
+                    reprompt = f"{tool} is not available here (off the menu). Pick a tool from the menu or answer directly."
+                else:
+                    reason = f"{self.posture}: '{tool}' is a write tool"
+                    reprompt = (f"{tool} is a write tool — blocked in {self.posture} mode. "
+                                "Use `--posture open`, or a read tool.")
+                yield {"type": "gate", "tool": tool, "decision": "blocked", "reason": reason}
                 route_msgs += [{"role": "assistant", "content": json.dumps(j)},
-                               {"role": "user", "content": f"{tool} is a write tool — blocked in {self.posture} mode. "
-                                                           "Tell the user it needs confirmation / elevated mode, or use a read tool."}]
+                               {"role": "user", "content": reprompt}]
                 continue
             try:
                 out = self._mcp.call_tool(tool, args)[:2000]

@@ -149,7 +149,7 @@ train:
 # ---------------------------------------------------------------------------
 chat:
   conductor: local-e2b          # default backend key (gemma4:e2b — fast/tiny)
-  posture: read-only            # read-only | confirm | open  (the safety gate)
+  posture: read-only            # read-only | open  (the safety gate)
   max_tool_steps: 4
   schema_files:                 # injected only when a turn looks like authoring (RAG)
     - ../skills/lok8s-cluster-spec/SKILL.md
