@@ -1,15 +1,16 @@
-FROM ghcr.io/flant/shell-operator:v1.14.0
+FROM ghcr.io/flant/shell-operator:v1.19.5
 
 # Install dependencies:
-#   kubectl, kustomize, yq, jq — core k8s operations
+#   kustomize, yq, jq — core k8s ops (kubectl is pinned from dl.k8s.io below —
+#     Alpine's kubectl lags badly, dragging in stale golang.org/x/net)
 #   docker-cli, kind — Lo driver (kind clusters via the host's Docker)
 #   clusterctl — CAPI management (kubeconfig extraction, move)
 #   flux — GitOps bootstrap (flux bootstrap git)
 #   git, openssh — git operations for GitOps
 #   envsubst — template rendering (part of gettext)
 #   khelm — kustomize exec plugin inflating bootstrap addon charts
-RUN apk add --no-cache \
-      kubectl \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache \
       kustomize \
       yq \
       jq \
@@ -18,11 +19,15 @@ RUN apk add --no-cache \
       gettext \
       docker-cli \
     && ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+    && wget -qO /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/v1.36.2/bin/linux/${ARCH}/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && rm -f /bin/kubectl /usr/bin/kubectl \
     && wget -qO /usr/local/bin/clusterctl \
-      "https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.12.2/clusterctl-linux-${ARCH}" \
+      "https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.13.3/clusterctl-linux-${ARCH}" \
     && chmod +x /usr/local/bin/clusterctl \
     && wget -qO /tmp/flux.tar.gz \
-      "https://github.com/fluxcd/flux2/releases/download/v2.7.5/flux_2.7.5_linux_${ARCH}.tar.gz" \
+      "https://github.com/fluxcd/flux2/releases/download/v2.8.8/flux_2.8.8_linux_${ARCH}.tar.gz" \
     && tar -xzf /tmp/flux.tar.gz -C /usr/local/bin flux \
     && rm -f /tmp/flux.tar.gz \
     && chmod +x /usr/local/bin/flux \
@@ -31,7 +36,7 @@ RUN apk add --no-cache \
     && chmod +x /usr/local/bin/kind \
     && mkdir -p /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer \
     && wget -qO /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer \
-      "https://github.com/mgoltzsche/khelm/releases/download/v2.7.3/khelm-linux-${ARCH}" \
+      "https://github.com/mgoltzsche/khelm/releases/download/v2.8.0/khelm-linux-${ARCH}" \
     && chmod +x /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
 
 # Copy shell-operator hooks
