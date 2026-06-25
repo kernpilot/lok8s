@@ -50,7 +50,7 @@ hooks::_yq_filter() {
   for pair in "${pairs[@]}"; do
     [[ "${pair}" == *=* ]] || { error "hooks: selector clause '${pair}' must be key=value"; return 1; }
     key="${pair%%=*}"; val="${pair#*=}"
-    if [[ ! "${key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${val}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    if [[ ! "${key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${val}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
       error "hooks: invalid selector clause '${pair}' (key/value must be [a-zA-Z0-9._/-])"
       return 1
     fi
@@ -129,16 +129,23 @@ hooks::restart() {
     warn "hooks restart: no workloads match '${selector}'"; return 0
   fi
   # Rollout-restart each matched Deployment/StatefulSet/DaemonSet by kind/name+ns.
-  local kind name ns
+  local kind name ns n=0
   while IFS=$'\t' read -r kind name ns; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
     debug "rollout restart ${kind}/${name} -n ${ns:-default}"
-    kubectl -n "${ns:-default}" rollout restart "${kind,,}/${name}" 2>/dev/null \
-      || warn "hooks restart: ${kind}/${name} (-n ${ns:-default}) failed"
+    if kubectl -n "${ns:-default}" rollout restart "${kind,,}/${name}" 2>/dev/null; then
+      n=$(( n + 1 ))
+    else
+      warn "hooks restart: ${kind}/${name} (-n ${ns:-default}) failed"
+    fi
   done < <(printf '%s\n' "${objs}" | yq -r '
       select(.kind == "Deployment" or .kind == "StatefulSet" or .kind == "DaemonSet")
       | [.kind, .metadata.name, (.metadata.namespace // "default")] | @tsv' 2>/dev/null || true)
-  debug "hooks: restarted workloads matching '${selector}'"
+  if (( n > 0 )); then
+    debug "hooks: restarted ${n} workload(s) matching '${selector}'"
+  else
+    warn "hooks restart: matched objects but none are restartable (Deployment/StatefulSet/DaemonSet) for '${selector}'"
+  fi
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::hooks "${@}"

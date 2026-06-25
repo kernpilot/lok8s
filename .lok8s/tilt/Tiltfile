@@ -612,6 +612,11 @@ def _validate_hooks(label, hooks, hook_do):
     for k in h:
       if k not in _hook_keys:
         fail("%s: hook '%s' unknown key '%s' (allowed: %s)" % (label, n, k, _hook_keys))
+    # `cmd` (full control) and the `do`/`targets` sugar are mutually exclusive —
+    # otherwise `targets` is silently ignored and a non-dict `targets` alongside
+    # `cmd` would crash _wire_hooks at `tgts[k]`.
+    if 'cmd' in h and ('do' in h or 'targets' in h):
+      fail("%s: hook '%s' — 'cmd' is mutually exclusive with 'do'/'targets'" % (label, n))
     if 'do' in h:
       if h['do'] not in hook_do:
         fail("%s: hook '%s' do='%s' unknown (known: %s; add via lok8s(hooks={…}) or set cmd:)" % (label, n, h['do'], sorted(hook_do)))
