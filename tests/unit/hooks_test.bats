@@ -82,3 +82,17 @@ YAML
   assert_success
   refute_output --partial 'name: x'
 }
+
+@test "_yq_filter: accepts '/' in a VALUE too (regex matches the key set + message)" {
+  # Regression for the round-1 fix: the value branch used to reject '/', which
+  # both contradicted the error message and diverged from the Starlark _SEL_CHARS.
+  run hooks::_yq_filter 'role=a/b'
+  assert_success
+  assert_output 'select((.metadata.labels."role" == "a/b"))'
+}
+
+@test "_yq_filter: still rejects a value with a space (arg-split / injection)" {
+  run hooks::_yq_filter 'role=a b'
+  assert_failure
+  assert_output --partial 'invalid selector clause'
+}

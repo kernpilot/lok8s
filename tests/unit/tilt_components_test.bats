@@ -306,3 +306,74 @@ YAML
     | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.LiveUpdateSpec.stopPaths[]?]
         | any(. == "app/package.json")' >/dev/null
 }
+
+# --- tilt.hooks: validation (eval-fail) + wiring (positive) ---------------------
+
+# Set up a single build:true service `app` whose lok8s.yaml carries the given
+# `tilt:` block, with a Deployment so the build isn't pruned.
+_write_hook_fixture() {
+  local tilt_block="$1"
+  mkdir -p "${_SB}/app"
+  printf 'FROM scratch\n' > "${_SB}/app/Dockerfile"
+  printf '#!/bin/sh\n' > "${_SB}/app/seed.sh"
+  cat > "${_SB}/app/lok8s.yaml" <<YAML
+build:
+  context: .
+  dockerfile: Dockerfile
+${tilt_block}
+YAML
+  _write_lo_stub 'services:
+  app:
+    path: ./app'
+  _write_kustomize_stub "$(_deployment app)"
+  _write_root_tiltfile
+}
+
+@test "hooks: a hook with both cmd and do is rejected" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      cmd: "echo hi"
+      do: recreate'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "'cmd' is mutually exclusive with 'do'/'targets'"
+}
+
+@test "hooks: a targets value with shell metacharacters is rejected" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: recreate
+      targets: { app: "a;rm -rf /" }'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "label-safe"
+}
+
+@test "hooks: an unknown 'do' verb is rejected" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: nope
+      targets: { app: x }'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "do='nope' unknown"
+}
+
+@test "hooks: a valid do/targets hook wires a '<name> (hook)' local_resource" {
+  _write_hook_fixture 'tilt:
+  labels: [appgroup]
+  hooks:
+    - name: provision
+      deps: [seed.sh]
+      do: recreate
+      targets: { lok8s.dev/role: seed }'
+  _run_tiltfile_result
+  assert_success
+  # The hook is wired as a local_resource named "provision (hook)" (the `do`
+  # sugar resolved to a cmd; the name carries the "(hook)" suffix, not a prefix).
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "provision (hook)")' >/dev/null
+}
