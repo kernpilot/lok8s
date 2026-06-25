@@ -85,8 +85,12 @@ hooks::recreate() {
   if ! deploy::_has_objects <<< "${objs}"; then
     warn "hooks recreate: no objects match '${selector}'"; return 0
   fi
-  printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - 2>/dev/null || true
-  printf '%s\n' "${objs}" | kapply::apply --label "hook recreate ${selector}"
+  # Atomic-ish recreate: delete (tolerating not-found) THEN apply — chained with
+  # `&&` so a real delete error stops before apply, and an apply failure surfaces
+  # (no `|| true`), making a half-done recreate visible rather than silently
+  # destructive. True one-shot atomicity isn't possible for an immutable Job.
+  printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - \
+    && printf '%s\n' "${objs}" | kapply::apply --label "hook recreate ${selector}"
   info "hooks: recreated objects matching '${selector}'"
 }
 
