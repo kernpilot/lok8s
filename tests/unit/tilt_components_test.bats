@@ -306,3 +306,147 @@ YAML
     | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.LiveUpdateSpec.stopPaths[]?]
         | any(. == "app/package.json")' >/dev/null
 }
+
+# --- tilt.hooks: validation (eval-fail) + wiring (positive) ---------------------
+
+# Set up a single build:true service `app` whose lok8s.yaml carries the given
+# `tilt:` block, with a Deployment so the build isn't pruned.
+_write_hook_fixture() {
+  local tilt_block="$1"
+  mkdir -p "${_SB}/app"
+  printf 'FROM scratch\n' > "${_SB}/app/Dockerfile"
+  printf '#!/bin/sh\n' > "${_SB}/app/seed.sh"
+  cat > "${_SB}/app/lok8s.yaml" <<YAML
+build:
+  context: .
+  dockerfile: Dockerfile
+${tilt_block}
+YAML
+  _write_lo_stub 'services:
+  app:
+    path: ./app'
+  _write_kustomize_stub "$(_deployment app)"
+  _write_root_tiltfile
+}
+
+@test "hooks: a hook with both cmd and do is rejected" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      cmd: "echo hi"
+      do: recreate'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "'cmd' is mutually exclusive with 'do'/'targets'"
+}
+
+@test "hooks: a targets value with shell metacharacters is rejected" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: recreate
+      targets: { app: "a;rm -rf /" }'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "label-safe"
+}
+
+@test "hooks: an unknown 'do' verb is rejected" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: nope
+      targets: { app: x }'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "do='nope' unknown"
+}
+
+@test "hooks: a valid do/targets hook wires a '» <name>' local_resource" {
+  _write_hook_fixture 'tilt:
+  labels: [appgroup]
+  hooks:
+    - name: provision
+      deps: [seed.sh]
+      do: recreate
+      targets: { lok8s.dev/role: seed }'
+  _run_tiltfile_result
+  assert_success
+  # The hook is wired as a local_resource named "» provision" (the `do` sugar
+  # resolved to a cmd; the name carries the `»` glyph prefix, not a suffix).
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» provision")' >/dev/null
+}
+
+@test "hooks: an empty targets value is rejected at eval (not only by lo hooks)" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: recreate
+      targets: { app: "" }'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "non-empty"
+}
+
+@test "hooks: a non-list resource_deps is rejected at eval (not an opaque crash)" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: restart
+      targets: { app: x }
+      resource_deps: "should-be-a-list"'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "resource_deps must be a list"
+}
+
+@test "hooks: wired even for a build:false service (hooks are build-independent)" {
+  # Hooks act on rendered artifacts, which exist regardless of build, so a
+  # build:false (or image-pinned) service must keep its hooks — they wire before
+  # the build gate, not after it.
+  mkdir -p "${_SB}/app"
+  printf '#!/bin/sh\n' > "${_SB}/app/seed.sh"
+  cat > "${_SB}/app/lok8s.yaml" <<'YAML'
+tilt:
+  hooks:
+    - name: provision
+      deps: [seed.sh]
+      do: recreate
+      targets: { lok8s.dev/role: seed }
+YAML
+  _write_lo_stub 'services:
+  app:
+    path: ./app
+    build: false
+    registry:
+      endpoint: reg.example'
+  _write_kustomize_stub "$(_deployment app)"
+  _write_root_tiltfile
+  _run_tiltfile_result
+  assert_success
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» provision")' >/dev/null
+}
+
+@test "hooks: a 'do' verb without targets is rejected (lo hooks needs --selector)" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: recreate'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "needs 'targets'"
+}
+
+@test "hooks: a non-string resource_deps entry is rejected at eval" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: restart
+      targets: { app: x }
+      resource_deps: [123]'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "resource_deps entries must be strings"
+}

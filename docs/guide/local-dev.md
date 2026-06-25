@@ -112,6 +112,41 @@ tilt:
     - backend
 ```
 
+## Hooks — re-run a Job or restart on edit
+
+Not every dev task is a hot-reload. A **seed/bootstrap Job** (provisioning OIDC
+clients, DB roles, …) needs to *re-run* when you edit its script, and a workload
+sometimes needs a *restart* to pick up what an upstream just produced. `tilt.hooks`
+automates both — without leaving your editor and **without touching the deployed
+manifests**: the Job/Deployment stays a plain prod object; the hook just acts on
+it *by label* in dev.
+
+A hook is a thin wrapper over Tilt's `local_resource()`, so you mostly write intent:
+
+```yaml
+tilt:
+  hooks:
+    - name: provision                 # re-run the seed Job when its script changes
+      deps: [deploy/server/seed.sh]   # service-relative; the change trigger
+      do: recreate                    # recreate | restart | apply
+      targets: { lok8s.dev/role: seed }
+    - name: login-pickup              # then restart a dependent workload
+      resource_deps: [hook:provision]
+      deps: [deploy/server/seed.sh]
+      do: restart
+      targets: { app: my-app }
+```
+
+`do:` maps to a hidden `lo hooks` action that filters the **rendered artifacts**
+by the `targets` labels, then `kubectl delete`+apply (`recreate`) / `rollout
+restart` (`restart`). Hooks are **change-only** — they fire on a `deps` edit,
+never at startup — and any `local_resource` keyword (`env`, `trigger_mode`,
+`ignore`, …) passes straight through. Full field reference:
+[schema → tilt.hooks](/reference/schema#tilt-hooks).
+
+> Tag the target with a **distinct label** (e.g. `lok8s.dev/role: seed`) so the
+> selector hits only it — sibling Jobs usually share `lok8s.dev/name`.
+
 ## Dockerfile Convention
 
 Each service should have two Dockerfiles:

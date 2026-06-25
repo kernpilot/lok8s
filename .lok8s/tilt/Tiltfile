@@ -385,7 +385,7 @@ def _validate_service(name, cfg):
     _validate_routing("[ %s ] lok8s.yaml" % name, cfg)
 
   if 'tilt' in cfg:
-    _tilt_allowed = ['resource_deps', 'labels', 'extra_resources']
+    _tilt_allowed = ['resource_deps', 'labels', 'extra_resources', 'hooks']
     for k in cfg['tilt']:
       if k not in _tilt_allowed:
         fail("[ %s ] lok8s.yaml: tilt.%s unknown (allowed: %s)" % (name, k, _tilt_allowed))
@@ -534,6 +534,159 @@ def _wire_routing(name, cfg):
       for workload in workloads:
         k8s_resource(workload=workload, **resource_args)
 
+# ── Hooks ────────────────────────────────────────────────────────────────────
+# Dev-time lifecycle hooks. Like `build:` → docker_build, a `tilt.hooks:` entry
+# is a thin YAML wrapper over Tilt's local_resource(): every local_resource kwarg
+# (deps, resource_deps, trigger_mode, auto_init, ignore, env, dir, allow_parallel,
+# links, labels, …) flows through verbatim. Two keys are SUGAR, dispatched like
+# live_update's `_locals` map:
+#   do:      a verb in `_hook_do` → fills `cmd` with the matching `lo hooks`
+#            action. Extend/override the map via lok8s(hooks={'verb': 'lo …'}).
+#   targets: a label map {k: v, …} → appended to the cmd as `--selector k=v,…`.
+# lok8s also injects context by env (LOK8S_SERVICE / LOK8S_HOOK) and resolves
+# `deps` service-relative (like the per-service `watch`). The DOING — filter the
+# rendered artifacts by label, then delete+apply / rollout restart — lives in
+# `lo hooks` (bash, bats-tested), so Starlark stays thin. Hooks are CHANGE-ONLY
+# (auto_init defaults False): startup is the manifests' own job; a hook re-fires
+# only when a watched file changes. An explicit `cmd:` skips the sugar entirely.
+#
+#   # in a service lok8s.yaml, under tilt:
+#   tilt:
+#     hooks:
+#       - name: provision
+#         deps: [deploy/server/provision-clients.sh]   # service-relative
+#         do: recreate
+#         targets: { lok8s.dev/role: seed, lok8s.dev/name: zitadel }
+#       - name: login-pickup
+#         resource_deps: [hook:provision]
+#         deps: [deploy/server/provision-clients.sh]
+#         do: restart
+#         targets: { app: kubehz-auth }
+
+# do verb → `lo hooks` action. Override/extend per project via lok8s(hooks={…}).
+_hook_do = {
+  'recreate': 'lo hooks recreate',   # delete + apply the selected objects (immutable Jobs re-run)
+  'restart':  'lo hooks restart',    # rollout restart the selected workloads
+  'apply':    'lo hooks apply',      # re-apply the selected objects (no delete)
+}
+
+# Selector chars allowed in a hook's `targets` — mirrors `lo hooks`' bash guard.
+# The label string is concatenated into the local_resource cmd (which runs via
+# `sh -c`), so this is ALSO the shell-safety boundary on the Starlark side: it
+# bans spaces and every metacharacter, so a value can't break arg-splitting or
+# inject. Starlark has no regex, hence the explicit allow-set + `_bad_sel`.
+_SEL_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/'
+
+def _bad_sel(s):
+  for i in range(len(s)):
+    if s[i] not in _SEL_CHARS:
+      return True
+  return False
+
+# Keys a hook entry may carry: the sugar (name/do/targets/cmd) + every
+# local_resource() kwarg that flows through verbatim. A typo fails here with a
+# clear message instead of an opaque error from local_resource(**entry).
+_hook_keys = [
+  'name', 'do', 'targets', 'cmd',
+  'deps', 'resource_deps', 'trigger_mode', 'auto_init', 'ignore', 'env',
+  'links', 'labels', 'allow_parallel', 'dir',
+  'serve_cmd', 'serve_env', 'serve_dir', 'cmd_bat', 'serve_cmd_bat', 'readiness_probe',
+]
+
+def _validate_hooks(label, hooks, hook_do):
+  """Shape-check a service's `tilt.hooks` list. `hook_do` is the active verb map
+  (defaults merged with lok8s(hooks=…)) so an unknown `do` fails fast here."""
+  if type(hooks) != 'list':
+    fail("%s: tilt.hooks must be a list" % label)
+  _seen = {}
+  for i in range(len(hooks)):
+    h = hooks[i]
+    if type(h) != 'dict':
+      fail("%s: tilt.hooks[%d] must be a mapping" % (label, i))
+    if type(h.get('name', None)) != 'string' or h['name'] == '':
+      fail("%s: tilt.hooks[%d] needs a non-empty string 'name'" % (label, i))
+    n = h['name']
+    if n in _seen:
+      fail("%s: duplicate hook name '%s'" % (label, n))
+    _seen[n] = True
+    for k in h:
+      if k not in _hook_keys:
+        fail("%s: hook '%s' unknown key '%s' (allowed: %s)" % (label, n, k, _hook_keys))
+    # `cmd` (full control) and the `do`/`targets` sugar are mutually exclusive —
+    # otherwise `targets` is silently ignored and a non-dict `targets` alongside
+    # `cmd` would crash _wire_hooks at `tgts[k]`.
+    if 'cmd' in h and ('do' in h or 'targets' in h):
+      fail("%s: hook '%s' — 'cmd' is mutually exclusive with 'do'/'targets'" % (label, n))
+    if 'do' in h:
+      if h['do'] not in hook_do:
+        fail("%s: hook '%s' do='%s' unknown (known: %s; add via lok8s(hooks={…}) or set cmd:)" % (label, n, h['do'], sorted(hook_do)))
+      tgts = h.get('targets', {})
+      if type(tgts) != 'dict':
+        fail("%s: hook '%s' targets must be a label map {k: v}" % (label, n))
+      # A `do` verb maps to `lo hooks <verb> --selector …`, which REQUIRES a
+      # selector — so targets is mandatory (and non-empty) for the sugar.
+      if not tgts:
+        fail("%s: hook '%s' do='%s' needs 'targets' — `lo hooks` requires --selector" % (label, n, h['do']))
+      # The selector is concatenated into a shell cmd — keep it label-safe.
+      for k in tgts:
+        if k == '' or _bad_sel(k) or type(tgts[k]) != 'string' or tgts[k] == '' or _bad_sel(tgts[k]):
+          fail("%s: hook '%s' targets '%s: %s' — keys/values must be non-empty and label-safe [A-Za-z0-9._/-]" % (label, n, k, tgts[k]))
+    elif 'cmd' not in h:
+      fail("%s: hook '%s' needs a 'do' verb + 'targets', or an explicit 'cmd'" % (label, n))
+    # Type-check the pass-through kwargs _wire_hooks iterates/spreads, so a wrong
+    # type fails here, not as an opaque crash inside local_resource(**entry).
+    if 'deps' in h and type(h['deps']) != 'list':
+      fail("%s: hook '%s' deps must be a list" % (label, n))
+    if 'resource_deps' in h and type(h['resource_deps']) != 'list':
+      fail("%s: hook '%s' resource_deps must be a list" % (label, n))
+    if 'env' in h and type(h['env']) != 'dict':
+      fail("%s: hook '%s' env must be a mapping {k: v}" % (label, n))
+    # …and their entries are strings (_wire_hooks does d.startswith / '%s/%s' on them).
+    for _dk in ['deps', 'resource_deps']:
+      if _dk in h:
+        for d in h[_dk]:
+          if type(d) != 'string':
+            fail("%s: hook '%s' %s entries must be strings" % (label, n, _dk))
+
+def _wire_hooks(path_service, service, svc_labels, hooks, hook_do):
+  """Wire a service's `tilt.hooks` as change-only local_resources. Mirrors
+  _process_build: deepcopy → massage (sugar→cmd, env context, deps resolve,
+  service grouping) → spread the rest to local_resource()."""
+  for h in hooks:
+    e = decode_json(encode_json(h))            # deepcopy (Starlark has no copy.deepcopy)
+    hname = e.pop('name')
+    tgts = e.pop('targets', {})
+    sel = ','.join(['%s=%s' % (k, tgts[k]) for k in tgts])
+    # `do` sugar → cmd via the map (an explicit `cmd` wins and skips the sugar).
+    if 'cmd' not in e and 'do' in e:
+      e['cmd'] = hook_do[e.pop('do')] + ((' --selector ' + sel) if sel else '')
+    else:
+      e.pop('do', None)
+    # Context by env (domain is lo's resolved global arg — not re-injected here).
+    _env = {'LOK8S_SERVICE': service, 'LOK8S_HOOK': hname}
+    for k in e.get('env', {}):
+      _env[k] = e['env'][k]                    # caller's env wins
+    e['env'] = _env
+    # deps service-relative, like the per-service `watch`.
+    if 'deps' in e:
+      e['deps'] = ['%s/%s' % (path_service, d) for d in e['deps']]
+    # Group the hook with its service in the Tilt UI (its tilt.labels) unless the
+    # hook sets its own; rewrite sibling-hook resource_deps (`hook:<n>`) to the
+    # displayed `» <n>` name.
+    if 'labels' not in e and svc_labels:
+      e['labels'] = svc_labels
+    if 'resource_deps' in e:
+      e['resource_deps'] = [('» %s' % d[len('hook:'):]) if d.startswith('hook:') else d for d in e['resource_deps']]
+    if 'auto_init' not in e:
+      e['auto_init'] = False                   # change-only by default
+    # Glyph-prefixed name: a leading `» ` stays visible in Tilt's resource list,
+    # where a trailing "(hook)" suffix gets truncated off the right edge.
+    _hookname = '» %s' % hname
+    if not e.get('deps', []) and not e['auto_init']:
+      _warn('!! [ %s ] no deps + auto_init=False — this hook can never fire' % _hookname)
+    local_resource(name = _hookname, **e)
+    _info(':: [ %s ] %s' % (_hookname, e.get('cmd', '(custom cmd)')))
+
 def lok8s(
     lo_bin = 'lo',
     label_prefix = 'lok8s.dev',
@@ -549,6 +702,7 @@ def lok8s(
     verbose = True,
     disable_snapshots_setting = True,
     disable_secret_scrub = True,
+    hooks = {},
 ):
   """
   lok8s Tilt extension -- discovers services via `lo env`, builds kustomize
@@ -601,6 +755,9 @@ def lok8s(
       so secret values aren't redacted from Tilt logs. Useful in local dev
       where the user owns all secrets and wants to inspect them. Set False
       to enable scrubbing (the safer Tilt default). Default: True.
+    hooks: Per-project hook verb map merged over the built-in `_hook_do`
+      (recreate/restart/apply). Add or override a `do:` verb → `lo …` action,
+      e.g. lok8s(hooks={'reindex': 'lo hooks reindex'}). Default: {}.
   """
   if strict_unlabeled and apply_unlabeled:
     fail("lok8s(): strict_unlabeled and apply_unlabeled are mutually exclusive — pick one")
@@ -619,6 +776,11 @@ def lok8s(
     k8s_upsert_timeout_secs=upsert_timeout,
     max_parallel_updates=max_parallel,
   )
+
+  # Hook verbs: the built-in `_hook_do` with the project's lok8s(hooks={…}) merged on top.
+  _active_hook_do = dict(_hook_do)
+  for _k in hooks:
+    _active_hook_do[_k] = hooks[_k]
 
   # Watch config files for Tiltfile reload.
   #
@@ -797,6 +959,16 @@ def lok8s(
     if not _service:
       _warn('!! [ %s ] no %s found at %s' % (name, service_config_file, _path_service))
       continue
+
+    # Service-level dev hooks (change-only local_resources) — wired for EVERY
+    # service with a lok8s.yaml, BEFORE the build gates below. Hooks act on the
+    # rendered artifacts (present regardless of build), so a build:false or
+    # image-pinned service keeps its hooks. Validated against the active verb map
+    # (where lok8s(hooks=…) is merged), then wired thin.
+    if 'tilt' in _service and 'hooks' in _service['tilt']:
+      _hooks = _service['tilt']['hooks']
+      _validate_hooks('[ %s ] lok8s.yaml: tilt.hooks' % name, _hooks, _active_hook_do)
+      _wire_hooks(_path_service, name, _service['tilt'].get('labels', []), _hooks, _active_hook_do)
 
     # build defaults: per-service > defaults.build > true.
     # `image:` (full pin) implies build=false — you cannot build a service

@@ -27,6 +27,7 @@ export PATH_SCRIPTS
 source "${PATH_BIN}/argsh"
 import ^libs/deploy
 import ^libs/tilt
+import ^libs/hooks
 import ^libs/env
 import ^libs/secrets
 import ^libs/k8s
@@ -102,6 +103,7 @@ main() {
     'kubehz|kh'                        'kubehz platform integration'
 
     'tilt|t'                           'Manage tilt cluster'
+    '#hooks'                           'Dev hook actions (internal; driven by the Tilt hooks: wrapper)'
     'env|e'                            'Manage environment'
     'k8s'                              'Generate/render K8s artifacts'
     'crds'                             'Generate operator CRDs from schema source'

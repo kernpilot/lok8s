@@ -288,8 +288,57 @@ Tilt-specific resource configuration.
 | `resource_deps` | string[] | Other Tilt resources this depends on. Tilt waits for them to be ready before starting this one. |
 | `labels` | string[] | Tilt UI grouping labels. |
 | `extra_resources` | object[] | Additional `k8s_resource(...)` calls tied to this service (e.g. migration jobs). Each entry: `{name, objects?, resource_deps?, labels?}`. |
+| `hooks` | object[] | Dev-time lifecycle hooks — thin wrappers over Tilt `local_resource()`. See [tilt.hooks](#tilt-hooks) below. |
 
-**Validation**: unknown keys under `tilt` fail. `extra_resources` must be a list, each entry must contain `name`.
+**Validation**: unknown keys under `tilt` fail. `extra_resources` must be a list, each entry must contain `name`. Each `hooks` entry must contain `name` and either a `do` verb (known to the hook map) or an explicit `cmd`.
+
+#### tilt.hooks
+
+A `hooks:` entry is a **thin YAML wrapper over Tilt's `local_resource()`** — the
+same way `build:` wraps `docker_build()`. Every `local_resource` keyword
+(`deps`, `resource_deps`, `trigger_mode`, `auto_init`, `ignore`, `env`, `dir`,
+`allow_parallel`, `links`, `labels`, …) flows through verbatim, so you keep the
+full Tilt API without dropping to Starlark. A hook **acts on already-rendered,
+in-cluster objects by LABEL** when a watched file changes — nothing new is
+deployed, so production is untouched. Hooks are **change-only** (`auto_init`
+defaults to `false`): startup is the manifests' own job; a hook re-fires only on
+edit.
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | _(required)_ Hook id. Wired as the Tilt resource **`» <name>`** (the `»` glyph marks it a hook and stays visible in Tilt's list); reference it from another hook's `resource_deps` as `hook:<name>` (rewritten to the displayed name). |
+| `do` | string | A verb in the hook map → fills `cmd` with the matching `lo hooks` action. Built-in: `recreate` (delete + apply the selected objects — immutable Jobs re-run), `restart` (rollout restart the selected workloads), `apply` (re-apply, no delete). Extend/override via `lok8s(hooks={'verb': 'lo …'})`. |
+| `targets` | object | Label selector `{key: value, …}` → appended to the `cmd` as `--selector key=value,…`. |
+| `cmd` | string | An explicit `local_resource` command. Skips the `do`/`targets` sugar. |
+| `deps` | string[] | Watched files (the change trigger), resolved **service-relative** (like `watch`). |
+| _(any `local_resource` kwarg)_ | — | `resource_deps`, `env`, `trigger_mode`, `ignore`, `dir`, … pass through. |
+
+lok8s injects context as env (`LOK8S_SERVICE`, `LOK8S_HOOK`); the domain is `lo`'s
+already-resolved global arg. The doing — filter the rendered artifacts by label,
+then `kubectl delete`+apply / `rollout restart` — lives in the hidden `lo hooks`
+command (bash, bats-tested), so the Tiltfile stays thin.
+
+```yaml
+tilt:
+  hooks:
+    # Re-run a seed Job when its script changes (replaces a manual re-deploy /
+    # seed-revision bump). recreate = delete + apply the label-selected Job.
+    - name: provision
+      deps: [deploy/server/provision-clients.sh]   # service-relative
+      do: recreate
+      targets: { lok8s.dev/role: seed, lok8s.dev/name: zitadel }
+    # Then restart a dependent workload to pick up what provision published.
+    - name: login-pickup
+      resource_deps: [hook:provision]
+      deps: [deploy/server/provision-clients.sh]
+      do: restart
+      targets: { app: kubehz-auth }
+```
+
+> **Seed-Job targeting.** Give the Job a distinct label (e.g. `lok8s.dev/role: seed`)
+> so the selector hits only it — sibling Jobs typically share `lok8s.dev/name`.
+> Use a non-`type` label so the Job keeps its `lok8s.dev/type` (it still applies
+> through the normal pass).
 
 ### `components`
 
