@@ -1,0 +1,134 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# hooks — dev-time lifecycle actions on rendered artifacts, selected by label.
+#
+# INTERNAL: driven by the Tilt `hooks:` wrapper (a local_resource cmd), not a
+# user workflow. Acts on the live cluster + the domain's rendered artifacts to
+# re-run/refresh a LABELLED subset when a watched file changes:
+#   recreate — delete + apply the matched objects (immutable Jobs re-run)
+#   restart  — rollout restart the matched workloads
+#   apply    — re-apply the matched objects (no delete)
+#
+# Targeting is by LABEL — the same labels lok8s applies — passed kubectl-style:
+#   lo hooks recreate --selector lok8s.dev/type=seed,lok8s.dev/name=zitadel
+# The domain is the parent's resolved global arg (consumed via :^~domain), so the
+# Tilt wrapper never has to pass it.
+import ^utils/types
+import ^utils/verbose
+import ^utils/kapply
+
+main::hooks() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a usage=(
+    'recreate'  'Delete + apply the selected objects (immutable Jobs re-run)'
+    'restart'   'Rollout restart the selected workloads'
+    'apply'     'Re-apply the selected objects (no delete)'
+  )
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :usage "Dev hook actions on rendered artifacts (internal; Tilt hooks:)" "${@}"
+  "${usage[@]}"
+}
+
+# hooks::_yq_filter <selector> — build a yq `select(...)` from a kubectl-style
+# label selector (k=v,k2=v2). Validates each key/value to prevent yq injection.
+hooks::_yq_filter() {
+  local selector="${1:-}"
+  [[ -n "${selector}" ]] || { error "hooks: --selector is required"; return 1; }
+  local -a pairs=() clauses=()
+  IFS=',' read -ra pairs <<< "${selector}"
+  local pair key val
+  for pair in "${pairs[@]}"; do
+    [[ "${pair}" == *=* ]] || { error "hooks: selector clause '${pair}' must be key=value"; return 1; }
+    key="${pair%%=*}"; val="${pair#*=}"
+    if [[ ! "${key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${val}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      error "hooks: invalid selector clause '${pair}' (key/value must be [a-zA-Z0-9._/-])"
+      return 1
+    fi
+    clauses+=("(.metadata.labels.\"${key}\" == \"${val}\")")
+  done
+  (( ${#clauses[@]} )) || { error "hooks: empty --selector"; return 1; }
+  local expr="${clauses[0]}" i
+  for (( i = 1; i < ${#clauses[@]}; i++ )); do expr+=" and ${clauses[i]}"; done
+  printf 'select(%s)\n' "${expr}"
+}
+
+# hooks::_select <domain> <selector> — emit the objects matching the label
+# selector from the domain's rendered artifacts (every target). The on-disk
+# artifacts are the same ones `lo deploy` applies; the Tilt reload keeps the
+# upstream ConfigMaps current, so a recreated Job mounts the edited content.
+hooks::_select() {
+  local domain="$1" selector="$2"
+  local filter; filter="$(hooks::_yq_filter "${selector}")" || return 1
+  local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
+  local dir artifact
+  for dir in "${artifacts_dir}"/*/; do
+    [[ -d "${dir}" ]] || continue
+    artifact="${dir}artifacts.yaml"
+    [[ -f "${artifact}" ]] || continue
+    yq "${filter}" "${artifact}" 2>/dev/null || true
+  done
+}
+
+hooks::recreate() {
+  local selector=''
+  local -a args=(
+    'selector|'  'Label selector (k=v,k2=v2)'
+    "${args[@]:-}"
+  )
+  :args "Delete + apply selected objects (immutable Jobs re-run)" "${@}"
+  _resolve_kubeconfig_for_domain
+  local objs; objs="$(hooks::_select "${domain}" "${selector}")" || return 1
+  if ! deploy::_has_objects <<< "${objs}"; then
+    warn "hooks recreate: no objects match '${selector}'"; return 0
+  fi
+  printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - 2>/dev/null || true
+  printf '%s\n' "${objs}" | kapply::apply --label "hook recreate ${selector}"
+  info "hooks: recreated objects matching '${selector}'"
+}
+
+hooks::apply() {
+  local selector=''
+  local -a args=(
+    'selector|'  'Label selector (k=v,k2=v2)'
+    "${args[@]:-}"
+  )
+  :args "Re-apply selected objects" "${@}"
+  _resolve_kubeconfig_for_domain
+  local objs; objs="$(hooks::_select "${domain}" "${selector}")" || return 1
+  if ! deploy::_has_objects <<< "${objs}"; then
+    warn "hooks apply: no objects match '${selector}'"; return 0
+  fi
+  printf '%s\n' "${objs}" | kapply::apply --label "hook apply ${selector}"
+  info "hooks: applied objects matching '${selector}'"
+}
+
+hooks::restart() {
+  local selector=''
+  local -a args=(
+    'selector|'  'Label selector (k=v,k2=v2)'
+    "${args[@]:-}"
+  )
+  :args "Rollout restart selected workloads" "${@}"
+  _resolve_kubeconfig_for_domain
+  local objs; objs="$(hooks::_select "${domain}" "${selector}")" || return 1
+  if ! deploy::_has_objects <<< "${objs}"; then
+    warn "hooks restart: no workloads match '${selector}'"; return 0
+  fi
+  # Rollout-restart each matched Deployment/StatefulSet/DaemonSet by kind/name+ns.
+  local kind name ns
+  while IFS=$'\t' read -r kind name ns; do
+    [[ -n "${kind}" && -n "${name}" ]] || continue
+    debug "rollout restart ${kind}/${name} -n ${ns:-default}"
+    kubectl -n "${ns:-default}" rollout restart "${kind,,}/${name}" 2>/dev/null \
+      || warn "hooks restart: ${kind}/${name} (-n ${ns:-default}) failed"
+  done < <(printf '%s\n' "${objs}" | yq -r '
+      select(.kind == "Deployment" or .kind == "StatefulSet" or .kind == "DaemonSet")
+      | [.kind, .metadata.name, (.metadata.namespace // "default")] | @tsv' 2>/dev/null || true)
+  info "hooks: restarted workloads matching '${selector}'"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::hooks "${@}"
