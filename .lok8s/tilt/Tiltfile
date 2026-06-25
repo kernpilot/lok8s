@@ -672,17 +672,20 @@ def _wire_hooks(path_service, service, svc_labels, hooks, hook_do):
       e['deps'] = ['%s/%s' % (path_service, d) for d in e['deps']]
     # Group the hook with its service in the Tilt UI (its tilt.labels) unless the
     # hook sets its own; rewrite sibling-hook resource_deps (`hook:<n>`) to the
-    # displayed `<n> (hook)` name.
+    # displayed `» <n>` name.
     if 'labels' not in e and svc_labels:
       e['labels'] = svc_labels
     if 'resource_deps' in e:
-      e['resource_deps'] = [('%s (hook)' % d[len('hook:'):]) if d.startswith('hook:') else d for d in e['resource_deps']]
+      e['resource_deps'] = [('» %s' % d[len('hook:'):]) if d.startswith('hook:') else d for d in e['resource_deps']]
     if 'auto_init' not in e:
       e['auto_init'] = False                   # change-only by default
+    # Glyph-prefixed name: a leading `» ` stays visible in Tilt's resource list,
+    # where a trailing "(hook)" suffix gets truncated off the right edge.
+    _hookname = '» %s' % hname
     if not e.get('deps', []) and not e['auto_init']:
-      _warn('!! [ %s (hook) ] no deps + auto_init=False — this hook can never fire' % hname)
-    local_resource(name = '%s (hook)' % hname, **e)
-    _info(':: [ %s (hook) ] %s' % (hname, e.get('cmd', '(custom cmd)')))
+      _warn('!! [ %s ] no deps + auto_init=False — this hook can never fire' % _hookname)
+    local_resource(name = _hookname, **e)
+    _info(':: [ %s ] %s' % (_hookname, e.get('cmd', '(custom cmd)')))
 
 def lok8s(
     lo_bin = 'lo',

@@ -362,7 +362,7 @@ YAML
   assert_output --partial "do='nope' unknown"
 }
 
-@test "hooks: a valid do/targets hook wires a '<name> (hook)' local_resource" {
+@test "hooks: a valid do/targets hook wires a '» <name>' local_resource" {
   _write_hook_fixture 'tilt:
   labels: [appgroup]
   hooks:
@@ -372,10 +372,10 @@ YAML
       targets: { lok8s.dev/role: seed }'
   _run_tiltfile_result
   assert_success
-  # The hook is wired as a local_resource named "provision (hook)" (the `do`
-  # sugar resolved to a cmd; the name carries the "(hook)" suffix, not a prefix).
+  # The hook is wired as a local_resource named "» provision" (the `do` sugar
+  # resolved to a cmd; the name carries the `»` glyph prefix, not a suffix).
   printf '%s' "${output}" \
-    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "provision (hook)")' >/dev/null
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» provision")' >/dev/null
 }
 
 @test "hooks: an empty targets value is rejected at eval (not only by lo hooks)" {
@@ -426,7 +426,7 @@ YAML
   _run_tiltfile_result
   assert_success
   printf '%s' "${output}" \
-    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "provision (hook)")' >/dev/null
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» provision")' >/dev/null
 }
 
 @test "hooks: a 'do' verb without targets is rejected (lo hooks needs --selector)" {
