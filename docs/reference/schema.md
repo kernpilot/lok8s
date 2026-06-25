@@ -306,7 +306,7 @@ edit.
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | _(required)_ Hook id → Tilt resource `hook:<name>`. |
+| `name` | string | _(required)_ Hook id. Wired as the Tilt resource **`<name> (hook)`**; reference it from another hook's `resource_deps` as `hook:<name>` (rewritten to the displayed name). |
 | `do` | string | A verb in the hook map → fills `cmd` with the matching `lo hooks` action. Built-in: `recreate` (delete + apply the selected objects — immutable Jobs re-run), `restart` (rollout restart the selected workloads), `apply` (re-apply, no delete). Extend/override via `lok8s(hooks={'verb': 'lo …'})`. |
 | `targets` | object | Label selector `{key: value, …}` → appended to the `cmd` as `--selector key=value,…`. |
 | `cmd` | string | An explicit `local_resource` command. Skips the `do`/`targets` sugar. |

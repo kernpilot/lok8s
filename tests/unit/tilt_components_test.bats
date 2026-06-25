@@ -377,3 +377,26 @@ YAML
   printf '%s' "${output}" \
     | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "provision (hook)")' >/dev/null
 }
+
+@test "hooks: an empty targets value is rejected at eval (not only by lo hooks)" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: recreate
+      targets: { app: "" }'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "non-empty"
+}
+
+@test "hooks: a non-list resource_deps is rejected at eval (not an opaque crash)" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: restart
+      targets: { app: x }
+      resource_deps: "should-be-a-list"'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "resource_deps must be a list"
+}
