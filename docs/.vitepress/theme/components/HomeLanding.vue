@@ -91,6 +91,7 @@ const capabilities = [
           <span class="ps1">$</span> {{ INSTALL }}
           <span class="copy">{{ copied ? '✓ copied' : 'copy' }}</span>
         </button>
+        <p class="install-note">Run it from your project root — it scaffolds <code>.bin/</code>, <code>clusters/</code> and a re-runnable <code>lo-up</code> there.</p>
       </div>
       <div class="intro-mark">
         <EnsoHero />
@@ -325,6 +326,20 @@ h1 .accent::after {
   color: var(--vp-c-text-3);
 }
 
+.install-note {
+  margin-top: 10px;
+  max-width: 48ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vp-c-text-2);
+  animation: land-rise 0.55s 0.58s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.install-note code {
+  font-size: 0.92em;
+  color: var(--vp-c-text-1);
+}
+
 .intro-mark {
   position: relative;
 }
@@ -475,11 +490,12 @@ h1 .accent::after {
   .cta { justify-content: center; }
   h1 .accent { margin-inline: auto; }
   .install { max-width: 100%; overflow-x: auto; text-align: left; }
+  .install-note { margin-inline: auto; text-align: center; }
   .scroll-cue { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .kicker, h1 .row, .sub, .cta, .install { animation: none; }
+  .kicker, h1 .row, .sub, .cta, .install, .install-note { animation: none; }
   .scroll-cue { animation: none; }
   .reveal { opacity: 1; transform: none; transition: none; }
   .btn:hover { transform: none; }
