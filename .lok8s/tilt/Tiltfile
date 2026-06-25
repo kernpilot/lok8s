@@ -623,12 +623,16 @@ def _validate_hooks(label, hooks, hook_do):
       tgts = h.get('targets', {})
       if type(tgts) != 'dict':
         fail("%s: hook '%s' targets must be a label map {k: v}" % (label, n))
+      # A `do` verb maps to `lo hooks <verb> --selector …`, which REQUIRES a
+      # selector — so targets is mandatory (and non-empty) for the sugar.
+      if not tgts:
+        fail("%s: hook '%s' do='%s' needs 'targets' — `lo hooks` requires --selector" % (label, n, h['do']))
       # The selector is concatenated into a shell cmd — keep it label-safe.
       for k in tgts:
         if k == '' or _bad_sel(k) or type(tgts[k]) != 'string' or tgts[k] == '' or _bad_sel(tgts[k]):
           fail("%s: hook '%s' targets '%s: %s' — keys/values must be non-empty and label-safe [A-Za-z0-9._/-]" % (label, n, k, tgts[k]))
     elif 'cmd' not in h:
-      fail("%s: hook '%s' needs a 'do' verb (+ optional targets) or an explicit 'cmd'" % (label, n))
+      fail("%s: hook '%s' needs a 'do' verb + 'targets', or an explicit 'cmd'" % (label, n))
     # Type-check the pass-through kwargs _wire_hooks iterates/spreads, so a wrong
     # type fails here, not as an opaque crash inside local_resource(**entry).
     if 'deps' in h and type(h['deps']) != 'list':
@@ -637,6 +641,12 @@ def _validate_hooks(label, hooks, hook_do):
       fail("%s: hook '%s' resource_deps must be a list" % (label, n))
     if 'env' in h and type(h['env']) != 'dict':
       fail("%s: hook '%s' env must be a mapping {k: v}" % (label, n))
+    # …and their entries are strings (_wire_hooks does d.startswith / '%s/%s' on them).
+    for _dk in ['deps', 'resource_deps']:
+      if _dk in h:
+        for d in h[_dk]:
+          if type(d) != 'string':
+            fail("%s: hook '%s' %s entries must be strings" % (label, n, _dk))
 
 def _wire_hooks(path_service, service, svc_labels, hooks, hook_do):
   """Wire a service's `tilt.hooks` as change-only local_resources. Mirrors

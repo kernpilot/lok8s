@@ -428,3 +428,25 @@ YAML
   printf '%s' "${output}" \
     | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "provision (hook)")' >/dev/null
 }
+
+@test "hooks: a 'do' verb without targets is rejected (lo hooks needs --selector)" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: recreate'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "needs 'targets'"
+}
+
+@test "hooks: a non-string resource_deps entry is rejected at eval" {
+  _write_hook_fixture 'tilt:
+  hooks:
+    - name: bad
+      do: restart
+      targets: { app: x }
+      resource_deps: [123]'
+  _run_tiltfile_result
+  assert_failure
+  assert_output --partial "resource_deps entries must be strings"
+}
