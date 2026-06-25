@@ -10,7 +10,7 @@ import TerminalDemo from './TerminalDemo.vue'
 import WorkflowLoop from './WorkflowLoop.vue'
 
 const copied = ref(false)
-const INSTALL = 'b env add github.com/kernpilot/lok8s#local'
+const INSTALL = 'curl -fsSL https://get.lok8s.io | sh'
 
 async function copyInstall() {
   try {
@@ -113,7 +113,7 @@ const capabilities = [
     <!-- ── terminal ──────────────────────────────────── -->
     <section class="block reveal">
       <h2>See it run</h2>
-      <p class="lead">Docker is the only prerequisite — <code>b</code> installs the rest.</p>
+      <p class="lead">Docker is the only prerequisite — the installer pulls the rest.</p>
       <TerminalDemo />
     </section>
 
