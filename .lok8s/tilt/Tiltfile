@@ -947,6 +947,16 @@ def lok8s(
       _warn('!! [ %s ] no %s found at %s' % (name, service_config_file, _path_service))
       continue
 
+    # Service-level dev hooks (change-only local_resources) — wired for EVERY
+    # service with a lok8s.yaml, BEFORE the build gates below. Hooks act on the
+    # rendered artifacts (present regardless of build), so a build:false or
+    # image-pinned service keeps its hooks. Validated against the active verb map
+    # (where lok8s(hooks=…) is merged), then wired thin.
+    if 'tilt' in _service and 'hooks' in _service['tilt']:
+      _hooks = _service['tilt']['hooks']
+      _validate_hooks('[ %s ] lok8s.yaml: tilt.hooks' % name, _hooks, _active_hook_do)
+      _wire_hooks(_path_service, name, _service['tilt'].get('labels', []), _hooks, _active_hook_do)
+
     # build defaults: per-service > defaults.build > true.
     # `image:` (full pin) implies build=false — you cannot build a service
     # that's pinned to an external image ref.
@@ -1041,13 +1051,6 @@ def lok8s(
         if 'labels' in extra:
           extra_args['labels'] = extra['labels']
         k8s_resource(**extra_args)
-
-    # Service-level dev hooks (change-only local_resources). Validated against the
-    # active verb map here (where lok8s(hooks=…) is merged) then wired thin.
-    if 'tilt' in _service and 'hooks' in _service['tilt']:
-      _hooks = _service['tilt']['hooks']
-      _validate_hooks('[ %s ] lok8s.yaml: tilt.hooks' % name, _hooks, _active_hook_do)
-      _wire_hooks(_path_service, name, _service['tilt'].get('labels', []), _hooks, _active_hook_do)
 
   # ── Unlabeled leftover detection ──────────────────────────
   #

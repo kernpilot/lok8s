@@ -400,3 +400,31 @@ YAML
   assert_failure
   assert_output --partial "resource_deps must be a list"
 }
+
+@test "hooks: wired even for a build:false service (hooks are build-independent)" {
+  # Hooks act on rendered artifacts, which exist regardless of build, so a
+  # build:false (or image-pinned) service must keep its hooks — they wire before
+  # the build gate, not after it.
+  mkdir -p "${_SB}/app"
+  printf '#!/bin/sh\n' > "${_SB}/app/seed.sh"
+  cat > "${_SB}/app/lok8s.yaml" <<'YAML'
+tilt:
+  hooks:
+    - name: provision
+      deps: [seed.sh]
+      do: recreate
+      targets: { lok8s.dev/role: seed }
+YAML
+  _write_lo_stub 'services:
+  app:
+    path: ./app
+    build: false
+    registry:
+      endpoint: reg.example'
+  _write_kustomize_stub "$(_deployment app)"
+  _write_root_tiltfile
+  _run_tiltfile_result
+  assert_success
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "provision (hook)")' >/dev/null
+}
