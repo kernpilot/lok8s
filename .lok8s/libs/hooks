@@ -20,6 +20,12 @@ import ^utils/kapply
 
 main::hooks() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  # Driven by Tilt's local_resource — there is no controlling terminal. Force
+  # non-interactive so kapply (and anything else) skip the /dev/tty progress UI +
+  # confirm prompts, which fail with "No such device or address" here. (kapply's
+  # `[[ -w /dev/tty ]]` check passes the permission bit but the device can't be
+  # opened without a controlling tty.)
+  export LOK8S_NONINTERACTIVE=1
   local -a usage=(
     'recreate'  'Delete + apply the selected objects (immutable Jobs re-run)'
     'restart'   'Rollout restart the selected workloads'
@@ -91,7 +97,7 @@ hooks::recreate() {
   # destructive. True one-shot atomicity isn't possible for an immutable Job.
   printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - \
     && printf '%s\n' "${objs}" | kapply::apply --label "hook recreate ${selector}"
-  info "hooks: recreated objects matching '${selector}'"
+  debug "hooks: recreated objects matching '${selector}'"
 }
 
 hooks::apply() {
@@ -107,7 +113,7 @@ hooks::apply() {
     warn "hooks apply: no objects match '${selector}'"; return 0
   fi
   printf '%s\n' "${objs}" | kapply::apply --label "hook apply ${selector}"
-  info "hooks: applied objects matching '${selector}'"
+  debug "hooks: applied objects matching '${selector}'"
 }
 
 hooks::restart() {
@@ -132,7 +138,7 @@ hooks::restart() {
   done < <(printf '%s\n' "${objs}" | yq -r '
       select(.kind == "Deployment" or .kind == "StatefulSet" or .kind == "DaemonSet")
       | [.kind, .metadata.name, (.metadata.namespace // "default")] | @tsv' 2>/dev/null || true)
-  info "hooks: restarted workloads matching '${selector}'"
+  debug "hooks: restarted workloads matching '${selector}'"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::hooks "${@}"
