@@ -375,6 +375,122 @@ YAML
     | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.LiveUpdateSpec.stopPaths[]?] | length == 0' >/dev/null
 }
 
+# --- dockerfile: production on a COMPONENT — same swap + drop, per component ---
+
+@test "dockerfile production: a components build swaps the prod Dockerfile AND drops its live_update (service-mode component keeps it)" {
+  # The documented motivation for the production guard is the multi-image
+  # kubehz-core shape (api + operator as components in ONE lok8s.yaml). The fix
+  # lives in _process_build, which the component path calls per component, so
+  # `dockerfile: production` must do to a COMPONENT exactly what the single-image
+  # test above proves for a top-level build: (a) swap lok8s.Dockerfile ->
+  # Dockerfile, and (b) drop the component's live_update → full image rebuild.
+  #
+  # `dockerfile: production` is a per-SERVICE flag (it flips every component of
+  # that service), so to prove the guard is mode-scoped — not a blanket drop of
+  # all live_update everywhere — a SECOND service `web` stays in the default
+  # `service` mode and MUST keep its live_update intact.
+  #
+  # kubehz-core (production): api carries a live_update + a dev/prod Dockerfile
+  # pair (DISTINCT contents, so the swap is provable via dockerfileContents);
+  # operator declares none (the membership-check branch of the guard).
+  mkdir -p "${_SB}/kubehz-core/operator" "${_SB}/kubehz-core/src"
+  printf 'FROM scratch\n# DEV api lok8s.Dockerfile\n'  > "${_SB}/kubehz-core/lok8s.Dockerfile"
+  printf 'FROM scratch\n# PROD api Dockerfile\n'       > "${_SB}/kubehz-core/Dockerfile"
+  printf 'FROM scratch\n' > "${_SB}/kubehz-core/Dockerfile.operator"
+  printf '{}' > "${_SB}/kubehz-core/package.json"
+  cat > "${_SB}/kubehz-core/lok8s.yaml" <<'YAML'
+components:
+  - name: kubehz-api
+    build:
+      context: .
+      dockerfile: lok8s.Dockerfile
+      live_update:
+        sync:
+          - local_path: ./src
+            remote_path: /app/src
+        fall_back_on:
+          files:
+            - package.json
+    ports:
+      - { from: 3000, to: 3000 }
+    workloads: [kubehz-api]
+  - name: kubehz-operator
+    build:
+      context: .
+      dockerfile: Dockerfile.operator
+      only: [operator/]
+    workloads: [kubehz-operator]
+YAML
+
+  # web: a single-image service in the DEFAULT (service) mode — its live_update
+  # must survive, proving the prod drop is scoped to the production service only.
+  mkdir -p "${_SB}/web/src"
+  printf 'FROM scratch\n' > "${_SB}/web/lok8s.Dockerfile"
+  cat > "${_SB}/web/lok8s.yaml" <<'YAML'
+build:
+  context: .
+  dockerfile: lok8s.Dockerfile
+  live_update:
+    sync:
+      - local_path: ./src
+        remote_path: /app/src
+ports:
+  - { from: 8080, to: 8080 }
+YAML
+
+  # Only kubehz-core flips to production; web stays in the default service mode.
+  _write_lo_stub 'services:
+  kubehz-core:
+    path: ./kubehz-core
+    dockerfile: production
+  web:
+    path: ./web'
+  _write_kustomize_stub "$(_deployment kubehz-api)
+---
+$(_deployment kubehz-operator)
+---
+$(_deployment web)"
+  _write_root_tiltfile
+
+  _run_tiltfile_result
+  assert_success
+
+  # Three builds: the two prod components + the service-mode web.
+  local images
+  images="$(printf '%s' "${output}" \
+    | "${_JQ_BIN}" -r '[.Manifests[]?.ImageTargets[]?.selector] | sort | unique | .[]')"
+  assert_equal "${images}" "lok8s.local/kubehz-api
+lok8s.local/kubehz-operator
+lok8s.local/web"
+
+  # (a) The kubehz-api COMPONENT was built from the PROD Dockerfile contents,
+  # NOT the dev lok8s.Dockerfile — the per-component swap happened.
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[] | select(.Name=="kubehz-api")
+        | .ImageTargets[].BuildDetails.dockerfileContents]
+        | any(. | test("PROD api Dockerfile"))' >/dev/null
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[] | select(.Name=="kubehz-api")
+        | .ImageTargets[].BuildDetails.dockerfileContents]
+        | all(. | test("DEV api lok8s.Dockerfile") | not)' >/dev/null
+
+  # (b) The kubehz-api component's live_update was DROPPED — its LiveUpdateSpec
+  # carries no syncs and no stopPaths (despite the lok8s.yaml declaring both).
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[] | select(.Name=="kubehz-api")
+        | .ImageTargets[].LiveUpdateSpec.syncs[]?] | length == 0' >/dev/null
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[] | select(.Name=="kubehz-api")
+        | .ImageTargets[].LiveUpdateSpec.stopPaths[]?] | length == 0' >/dev/null
+
+  # (c) The service-mode `web` build KEEPS its live_update — proves the drop is
+  # scoped to the production service, not a blanket removal across all builds.
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[] | select(.Name=="web")
+        | .ImageTargets[].LiveUpdateSpec.syncs[]?
+        | select(.localPath=="web/src" and .containerPath=="/app/src")] | length == 1' >/dev/null
+}
+
 # --- tilt.hooks: validation (eval-fail) + wiring (positive) ---------------------
 
 # Set up a single build:true service `app` whose lok8s.yaml carries the given
