@@ -307,6 +307,74 @@ YAML
         | any(. == "app/package.json")' >/dev/null
 }
 
+# --- dockerfile: production — drops live_update + swaps to the prod Dockerfile ---
+
+@test "dockerfile production: swaps lok8s.Dockerfile -> Dockerfile AND drops live_update" {
+  # A production image is compiled/minimal: the prod Dockerfile copies only the
+  # built output — the source dirs the live_update `sync` targets don't exist in
+  # the image, and a failed sync does NOT make Tilt fall back to a rebuild (it
+  # silently serves stale code). So when dockerfile_type is 'production',
+  # _process_build MUST (a) swap lok8s.Dockerfile -> Dockerfile, and (b) drop the
+  # live_update entirely → every change is a full image rebuild.
+  #
+  # The SAME lok8s.yaml is used as the service-path test above (which keeps its
+  # live_update); only `dockerfile: production` in services.yaml differs. The dev
+  # and prod Dockerfiles carry DISTINCT contents so we can prove the swap happened
+  # by reading dockerfileContents from the JSON.
+  mkdir -p "${_SB}/app/src"
+  printf 'FROM scratch\n# DEV lok8s.Dockerfile\n'  > "${_SB}/app/lok8s.Dockerfile"
+  printf 'FROM scratch\n# PROD Dockerfile\n'       > "${_SB}/app/Dockerfile"
+  printf '{}' > "${_SB}/app/package.json"
+  cat > "${_SB}/app/lok8s.yaml" <<'YAML'
+build:
+  context: .
+  dockerfile: lok8s.Dockerfile
+  live_update:
+    sync:
+      - local_path: ./src
+        remote_path: /app/src
+    fall_back_on:
+      files:
+        - package.json
+ports:
+  - { from: 3000, to: 3000 }
+YAML
+
+  # `dockerfile: production` flips _dockerfile_type for this service.
+  _write_lo_stub 'services:
+  app:
+    path: ./app
+    dockerfile: production'
+  _write_kustomize_stub "$(_deployment app)"
+  _write_root_tiltfile
+
+  _run_tiltfile_result
+  assert_success
+
+  # Still exactly one build, the canonical lok8s.local/app.
+  local images
+  images="$(printf '%s' "${output}" \
+    | "${_JQ_BIN}" -r '[.Manifests[]?.ImageTargets[]?.selector] | unique | .[]')"
+  assert_equal "${images}" "lok8s.local/app"
+
+  # (a) The prod Dockerfile was swapped in — the image is built from the PROD
+  # Dockerfile contents, NOT the dev lok8s.Dockerfile.
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.BuildDetails.dockerfileContents]
+        | any(. | test("PROD Dockerfile"))' >/dev/null
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.BuildDetails.dockerfileContents]
+        | all(. | test("DEV lok8s.Dockerfile") | not)' >/dev/null
+
+  # (b) live_update was DROPPED — the prod build's LiveUpdateSpec carries no
+  # syncs and no stopPaths (contrast the service-path test above, which keeps
+  # one sync + the fall_back_on stopPath).
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.LiveUpdateSpec.syncs[]?] | length == 0' >/dev/null
+  printf '%s' "${output}" \
+    | "${_JQ_BIN}" -e '[.Manifests[]?.ImageTargets[]?.LiveUpdateSpec.stopPaths[]?] | length == 0' >/dev/null
+}
+
 # --- tilt.hooks: validation (eval-fail) + wiring (positive) ---------------------
 
 # Set up a single build:true service `app` whose lok8s.yaml carries the given

@@ -473,11 +473,17 @@ def _process_build(
     else:
       _warn('!! [ %s ] production Dockerfile not found, using lok8s.dockerfile' % log_name)
 
-  # Build live_update steps. Only when the user declared a live_update
-  # block — _build_live_update indexes build_config['live_update'], so
-  # calling it for a build without live_update would error. (Many real
-  # builds, e.g. a Go operator image, have no live_update at all.)
-  if 'live_update' in _build:
+  # Build live_update steps — but NEVER for a production build. A production
+  # image is compiled/minimal (the prod Dockerfile copies only the built output
+  # — no source dirs, read-only fs), so a live_update `sync` would fail at
+  # runtime AND Tilt would NOT fall back to a rebuild: the pod silently serves
+  # stale code until a manual `tilt trigger`. Production therefore does a full
+  # image rebuild on change; only the dev image (dockerfile_type 'service')
+  # carries the source the sync targets. (Many builds — e.g. a Go operator —
+  # declare no live_update at all, hence the membership check.)
+  if dockerfile_type == 'production':
+    _build.pop('live_update', None)
+  elif 'live_update' in _build:
     _build['live_update'] = _build_live_update(_build)
 
   # Resolve build_args from env.
@@ -491,11 +497,13 @@ def _process_build(
     _dim('   · context:    %s' % _rel(_build.get('context', '.')))
     if 'build_args' in _build:
       _dim('   · build_args: %s' % ', '.join([_a for _a in _build['build_args']]))
-    if 'live_update' in build_in:
+    if 'live_update' in _build:
       _lu = build_in['live_update']
       _sync = _lu.get('sync', [])
       _nsync = len(_sync) if type(_sync) == 'list' else 1
       _dim('   · live_update: %d sync path(s)%s' % (_nsync, ', + fall_back_on' if 'fall_back_on' in _lu else ''))
+    elif dockerfile_type == 'production' and 'live_update' in build_in:
+      _dim('   · live_update: skipped (production — full image rebuild on change)')
     else:
       _dim('   · live_update: none (full image rebuild on change)')
 
