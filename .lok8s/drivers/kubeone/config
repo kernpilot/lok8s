@@ -47,9 +47,9 @@ kubeone::extract_vars() {
   # substitutes the zone list instead of leaving it empty.
   export LOK8S_SPEC_DNS_DOMAINFILTER
 
-  # spec.oidc — apiserver StructuredAuthenticationConfiguration inputs (consumed
-  # by .lok8s/utils/oidc.sh → oidc::render_auth_config and the kubeone.yaml
-  # render). Absent spec.oidc ⇒ ISSUER/CLIENTID empty ⇒ oidc::enabled false ⇒ NO
+  # spec.oidc — KubeOne features.openidConnect inputs (consumed by
+  # kubeone::_inject_oidc, which yq-merges them into the manifest's features
+  # block). Absent spec.oidc ⇒ ISSUER/CLIENTID empty ⇒ oidc::enabled false ⇒ NO
   # apiserver OIDC wiring (the kubeone.yaml is rendered unchanged). Defaults
   # mirror the schema doc in utils/oidc.sh and the lo driver's export.
   export LOK8S_SPEC_OIDC_ISSUER LOK8S_SPEC_OIDC_CLIENTID
@@ -98,138 +98,79 @@ kubeone::extract_vars() {
   ADDONS_PATH=$(yq -r '.spec.addons.path // "./addons"' "${cluster_yaml}")
 }
 
-# ── OIDC (apiserver StructuredAuthenticationConfiguration) ──
+# ── OIDC (KubeOne-native features.openidConnect) ─────────
 
-# Fixed path on the KubeOne control-plane nodes where the apiserver
-# StructuredAuthenticationConfiguration must live. kubeadm (which KubeOne drives
-# under the hood) maps a hostPath under /etc/kubernetes into the apiserver
-# static pod, so a host file here is reachable by the kube-apiserver.
-KUBEONE_OIDC_AUTH_CONFIG_NODE_PATH="/etc/kubernetes/oidc/auth-config.yaml"
-
-# Render the controlPlaneComponents block that points the kube-apiserver at the
-# OIDC auth-config file, and write the rendered auth-config into the work dir.
-# Emits an EMPTY string (and writes nothing) unless oidc::enabled, so a cluster
-# without spec.oidc renders kubeone.yaml byte-identical to today.
-# Usage: kubeone::render_oidc_components <work_dir>
+# Inject features.openidConnect into the kubeone manifest from spec.oidc. KubeOne
+# wires these into the kubeadm ClusterConfiguration itself, so they propagate to
+# EVERY control plane — init AND join — natively: no scp, no file on the node, no
+# CA-dir mount, no join-wipe.
 #
-# IMPORTANT — KubeOne file-placement limitation (VERIFIED against the
-# KubeOneCluster v1beta2 API; kubeone.k8c.io/v1beta2):
-#   * controlPlaneComponents.apiServer.flags IS supported (map[string]string),
-#     so we CAN declaratively pass --authentication-config to the apiserver.
-#     https://docs.kubermatic.com/kubeone/v1.12/references/kubeone-cluster-v1beta2/
-#   * There is NO top-level `files:` field in v1beta2 (confirmed in the Go types:
-#     k8c.io/kubeone/pkg/apis/kubeone/v1beta2 KubeOneCluster has no Files field),
-#     so KubeOne CANNOT place an arbitrary auth-config file on the CP nodes
-#     declaratively from the manifest. (KubeOne DOES auto-upload+mount files for
-#     SPECIFIC features — e.g. features.staticAuditLog's policy file and
-#     features.openidConnect — but those use the LEGACY --oidc-* flags, not the
-#     structured --authentication-config this feature targets.)
+# (We previously used StructuredAuthenticationConfiguration via
+# --authentication-config, but KubeOne's controlPlaneComponents.apiServer exposes
+# only `flags` — no extraVolumes — so the auth-config file had to ride a host CA
+# dir that `kubeadm join` EMPTIES on joiners, crashlooping their apiservers.
+# features.openidConnect is KubeOne's native, field-for-field equivalent for our
+# use: single IdP + sub/groups claims. The only things it lacks vs structured
+# auth — multi-provider, CEL claim expressions, dynamic reload — we don't use.)
 #
-# Consequence: setting the flag alone would make the apiserver fail to start
-# unless the file is already present at KUBEONE_OIDC_AUTH_CONFIG_NODE_PATH on
-# EVERY CP node. Since KubeOne can't deliver it, the lok8s driver does:
-# kubeone::deliver_oidc_auth_config (below) scps the rendered file to every CP
-# host BEFORE `kubeone apply`, and driver::provision ABORTS if any delivery
-# fails — so we never apply a flag that points at a missing file. The file is
-# rendered into the work dir here; delivery is a separate, fail-safe step.
-kubeone::render_oidc_components() {
-  local work_dir="${1:-}"
+# No-op unless oidc::enabled. Usage: kubeone::_inject_oidc <kubeone.yaml>
+kubeone::_inject_oidc() {
+  local manifest="$1"
+  oidc::enabled || return 0
+  [[ -f "${manifest}" ]] || { error "OIDC: manifest not found: ${manifest}"; return 1; }
 
-  if ! oidc::enabled; then
-    # No spec.oidc: emit nothing (template var resolves to empty → no block).
-    echo ""
-    return 0
+  OIDC_ISSUER="${LOK8S_SPEC_OIDC_ISSUER}"           OIDC_CLIENTID="${LOK8S_SPEC_OIDC_CLIENTID}" \
+  OIDC_UCLAIM="${LOK8S_SPEC_OIDC_USERNAMECLAIM}"     OIDC_UPREFIX="${LOK8S_SPEC_OIDC_USERNAMEPREFIX}" \
+  OIDC_GCLAIM="${LOK8S_SPEC_OIDC_GROUPSCLAIM}"       OIDC_GPREFIX="${LOK8S_SPEC_OIDC_GROUPSPREFIX}" \
+  yq -i '
+    .features.openidConnect.enable = true |
+    .features.openidConnect.config.issuerUrl = strenv(OIDC_ISSUER) |
+    .features.openidConnect.config.clientId = strenv(OIDC_CLIENTID) |
+    .features.openidConnect.config.usernameClaim = strenv(OIDC_UCLAIM) |
+    .features.openidConnect.config.usernamePrefix = strenv(OIDC_UPREFIX) |
+    .features.openidConnect.config.groupsClaim = strenv(OIDC_GCLAIM) |
+    .features.openidConnect.config.groupsPrefix = strenv(OIDC_GPREFIX)
+  ' "${manifest}" || { error "OIDC: failed to inject features.openidConnect"; return 1; }
+
+  # caBundle (optional): KubeOne auto-uploads + mounts the caFile for the
+  # openidConnect feature, so a custom-CA issuer just needs the local file +
+  # caFile path. kubehz uses a public LE issuer, so this is normally skipped.
+  if [[ -n "${LOK8S_SPEC_OIDC_CABUNDLE:-}" ]]; then
+    local _cadir="${manifest%/*}/.oidc"; mkdir -p "${_cadir}"
+    printf '%s\n' "${LOK8S_SPEC_OIDC_CABUNDLE}" > "${_cadir}/oidc-ca.pem"
+    OIDC_CAFILE="${_cadir}/oidc-ca.pem" \
+      yq -i '.features.openidConnect.config.caFile = strenv(OIDC_CAFILE)' "${manifest}" \
+      || { error "OIDC: failed to set caFile"; return 1; }
   fi
-
-  # Render + persist the auth-config file alongside kubeone.yaml. A render
-  # failure is fatal — we must not emit the apiserver flag without the file.
-  if [[ -n "${work_dir}" ]]; then
-    mkdir -p "${work_dir}/.oidc"
-    local rendered
-    if ! rendered=$(oidc::render_auth_config); then
-      error "failed to render apiserver authentication config from spec.oidc"
-      return 1
-    fi
-    printf '%s\n' "${rendered}" > "${work_dir}/.oidc/auth-config.yaml"
-    debug "wrote apiserver authentication config at ${work_dir}/.oidc/auth-config.yaml (delivered to CP nodes by kubeone::deliver_oidc_auth_config before apply)"
-  fi
-
-  # controlPlaneComponents.apiServer.flags is map[string]string in v1beta2.
-  cat <<EOF
-
-controlPlaneComponents:
-  apiServer:
-    flags:
-      authentication-config: "${KUBEONE_OIDC_AUTH_CONFIG_NODE_PATH}"
-EOF
+  debug "OIDC: features.openidConnect injected (issuer ${LOK8S_SPEC_OIDC_ISSUER})"
 }
 
-# Deliver the rendered apiserver auth-config to EVERY control-plane node before
-# `kubeone apply`. KubeOne has no declarative file placement (see above), and the
-# apiserver flag (rendered by kubeone::render_oidc_components) points at a fixed
-# node path — so the file MUST be present there or the kube-apiserver won't start.
-#
-# This is fail-SAFE: it runs BEFORE apply and returns non-zero on ANY failure, so
-# the caller (driver::provision) aborts and never applies a flag that references a
-# missing file. A bug here can at worst stop provisioning — it cannot brick a
-# running control plane. No-op unless oidc::enabled.
-#
-# Usage: kubeone::deliver_oidc_auth_config <provider_config_file> <work_dir>
-kubeone::deliver_oidc_auth_config() {
-  local config_file="$1" work_dir="$2"
-
-  oidc::enabled || return 0
-
-  local auth_config="${work_dir}/.oidc/auth-config.yaml"
-  if [[ ! -f "${auth_config}" ]]; then
-    error "OIDC: auth-config not rendered at ${auth_config} — cannot enable apiserver --authentication-config"
-    return 1
-  fi
-
-  local output
-  output=$(provider::output "${config_file}") || { error "OIDC: provider output failed; cannot resolve CP nodes for auth-config delivery"; return 1; }
-
-  local ssh_key
-  ssh_key=$(echo "${output}" | jq -r '.access[0].privateKey // ""')
-  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
-  [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
-  if [[ -z "${ssh_key}" || ! -f "${ssh_key}" ]]; then
-    error "OIDC: ssh private key not found for auth-config delivery ('${ssh_key}')"
-    return 1
-  fi
-
-  local -a ssh_opts=(
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-    -o ConnectTimeout=15 -i "${ssh_key}"
-  )
-  local node_path="${KUBEONE_OIDC_AUTH_CONFIG_NODE_PATH}"
-  local node_dir="${node_path%/*}"
-
-  local delivered=0 ip user port
-  while IFS=$'\t' read -r ip user port; do
-    [[ -n "${ip}" ]] || continue
-    user="${user:-root}"; port="${port:-22}"
-    debug "OIDC: delivering auth-config to control-plane ${user}@${ip}:${port}"
-    # Root-owned 0700 dir + 0600 file (the apiserver runs as root and the file
-    # configures who it trusts — keep it non-world-readable).
-    if ! ssh "${ssh_opts[@]}" -p "${port}" "${user}@${ip}" "install -d -m 700 ${node_dir}"; then
-      error "OIDC: failed to create ${node_dir} on control-plane ${ip}"
-      return 1
+# spec.registries → containerd registry auth, resolved from a per-domain secretRef.
+# Lets a cluster opt into AUTHENTICATED image pulls (e.g. to dodge docker.io
+# anonymous rate limits) WITHOUT putting creds in the manifest: the spec carries
+# only `auth.secretRef: {name, namespace}`; we resolve it from the per-domain
+# secrets store and write containerRuntime.containerd.registries.<host>.auth so
+# EVERY node (CPs + workers) authenticates. No-op without spec.registries — a
+# cluster that omits it pulls anonymously, unchanged.
+# Usage: kubeone::_inject_registry_auth <kubeone.yaml> <cluster_yaml>
+kubeone::_inject_registry_auth() {
+  local manifest="$1" cluster_yaml="$2" host sname sns
+  while IFS=$'\t' read -r host sname sns; do
+    [[ -n "${host}" && -n "${sname}" ]] || continue
+    [[ "${host}" =~ ^[a-zA-Z0-9._:-]+$ ]] || { warn "registry auth: skipping invalid host '${host}'"; continue; }
+    # `lo secrets env` emits `export KEY=<%q-quoted>` per key — eval is safe.
+    local username="" password=""
+    eval "$(lo secrets --domain "${DOMAIN_NAME:-}" env --name "${sname}" --namespace "${sns:-provisioning}" 2>/dev/null)"
+    if [[ -z "${username:-}" || -z "${password:-}" ]]; then
+      warn "registry auth: secret ${sns:-provisioning}/${sname} lacks username/password — '${host}' left anonymous"
+      unset username password; continue
     fi
-    if ! scp "${ssh_opts[@]}" -P "${port}" "${auth_config}" "${user}@${ip}:${node_path}"; then
-      error "OIDC: failed to copy auth-config to control-plane ${ip}:${node_path}"
-      return 1
-    fi
-    ssh "${ssh_opts[@]}" -p "${port}" "${user}@${ip}" "chmod 600 ${node_path}" \
-      || { error "OIDC: failed to chmod auth-config on ${ip}"; return 1; }
-    (( delivered++ )) || true
-  done < <(echo "${output}" | jq -r '.nodes[] | select(.role == "control-plane") | [.public_ip, .ssh_user, (.ssh_port // 22 | tostring)] | @tsv')
-
-  if (( delivered == 0 )); then
-    error "OIDC: no control-plane nodes found in provider output — cannot deliver auth-config"
-    return 1
-  fi
-  debug "OIDC: auth-config delivered to ${delivered} control-plane node(s)"
+    RUSER="${username}" RPASS="${password}" \
+    yq -i ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" "${manifest}" \
+      || { error "registry auth: failed to inject '${host}'"; unset username password; return 1; }
+    unset username password
+    debug "registry auth: ${host} ← ${sns:-provisioning}/${sname}"
+  done < <(yq -r '.spec.registries // {} | to_entries | .[] | [.key, (.value.auth.secretRef.name // ""), (.value.auth.secretRef.namespace // "provisioning")] | @tsv' "${cluster_yaml}" 2>/dev/null)
 }
 
 # ── Config generation ───────────────────────────────────
@@ -253,15 +194,9 @@ kubeone::generate_config() {
   # Ensure variables are exported
   kubeone::extract_vars "${cluster_yaml}"
 
-  # spec.oidc → controlPlaneComponents.apiServer.flags block (empty unless
-  # oidc::enabled). Also writes the rendered auth-config file into the work dir.
-  # Exported so envsubst substitutes ${OIDC_CP_COMPONENTS} in the template.
-  export OIDC_CP_COMPONENTS
-  OIDC_CP_COMPONENTS=$(kubeone::render_oidc_components "${output_dir}")
-
   # Render the core template
   local rendered
-  rendered=$(envsubst '${CLUSTER_NAME} ${K8S_VERSION} ${CLOUD_PROVIDER} ${POD_SUBNET} ${SERVICE_SUBNET} ${CNI_PLUGIN} ${OIDC_CP_COMPONENTS}' < "${core_tmpl}")
+  rendered=$(envsubst '${CLUSTER_NAME} ${K8S_VERSION} ${CLOUD_PROVIDER} ${POD_SUBNET} ${SERVICE_SUBNET} ${CNI_PLUGIN}' < "${core_tmpl}")
 
   # Append dynamicWorkers block if worker pools are defined
   local pool_count
@@ -318,6 +253,12 @@ kubeone::generate_config() {
   fi
 
   echo "${rendered}" > "${output_dir}/kubeone.yaml"
+
+  # spec.oidc → features.openidConnect, merged into the manifest's features block
+  # (no-op without spec.oidc). KubeOne-native: propagates to joiners, no file.
+  kubeone::_inject_oidc "${output_dir}/kubeone.yaml" || return 1
+  # spec.registries → containerd registry auth (optional; resolves a secretRef).
+  kubeone::_inject_registry_auth "${output_dir}/kubeone.yaml" "${cluster_yaml}" || return 1
   debug "Generated kubeone.yaml at ${output_dir}/kubeone.yaml"
 }
 
@@ -344,37 +285,37 @@ kubeone::apply() {
     args+=(--tfjson output.json)
   fi
 
-  debug "Running (in ${work_dir}): kubeone ${args[*]}"
-  # Subshell cd: kubeone writes <cluster>-kubeconfig into the CWD (no
-  # output flag) — run inside the work dir so artifacts land there.
-  # Hetzner Robot credentials ride along for the CCM: without them the
-  # CCM deletes bare-metal Node objects as "gone from the cloud".
-  #
-  # cni:external deadlock: kubeone applies the CCM then BLOCKS on "waiting
-  # for nodes to initialize by CCM" — but the CCM (not hostNetwork, doesn't
-  # tolerate not-ready:NoSchedule) can't schedule onto NotReady nodes, and
-  # nodes stay NotReady until a CNI is up. So run apply in the background
-  # and deploy the CNI (+ wire the hetzner CCM for the private network and
-  # bare-metal Robot nodes) as soon as the apiserver is reachable.
-
   # A reinstalled static worker leaves a stale not-Ready node object that
   # trips kubeone's "broken host" preflight (apply aborts). Remove it first —
   # safe: static workers only (never CP/etcd), only a not-Ready node whose
   # host is confirmed wiped (no kubelet.conf). No-op on a fresh cluster.
   kubeone::_clean_reinstalled_workers "${work_dir}"
 
+  # Break the cni:external deadlock DECLARATIVELY — no background apply, no
+  # apiserver polling. KubeOne (with cni.external) deploys ccm-hetzner then
+  # BLOCKS up to 10m waiting for nodes to be initialised by the CCM, which
+  # can't schedule without a CNI. But KubeOne applies CUSTOM addons
+  # (spec.addons.path) at its "ensure custom addons" step — which runs BEFORE
+  # that CCM-init wait AND before the static-worker join (verified in
+  # pkg/tasks/tasks.go: addons.EnsureUserAddons → externalccm.Ensure →
+  # joinStaticWorkerNodes). So render OUR cilium + robot-ready CCM into
+  # <work_dir>/addons/ and let kubeone apply them there: the CNI comes up in
+  # that window → the CCM schedules → the wait clears → the worker joins a
+  # robot-aware CCM. Name the Robot servers first so the CCM matches the
+  # bare-metal worker by hostname.
+  kubeone::render_addons "${work_dir}" || return 1
+  kubeone::_name_robot_workers "${work_dir}/kubeone.yaml"
+
+  debug "Running (in ${work_dir}): kubeone ${args[*]}"
+  # Subshell cd: kubeone writes <cluster>-kubeconfig into the CWD (no output
+  # flag) — run inside the work dir so artifacts land there. Hetzner Robot
+  # credentials ride along for the CCM.
   (
     cd "${work_dir}" || exit 1
     [[ -z "${HROBOT_USER:-}" ]]     || export ROBOT_USER="${HROBOT_USER}" HETZNER_ROBOT_USER="${HROBOT_USER}"
     [[ -z "${HROBOT_PASSWORD:-}" ]] || export ROBOT_PASSWORD="${HROBOT_PASSWORD}" HETZNER_ROBOT_PASSWORD="${HROBOT_PASSWORD}"
     kubeone "${args[@]}"
-  ) &
-  local _ko_pid=$!
-
-  kubeone::_cni_bootstrap_during_apply "${work_dir}" "${_ko_pid}" || \
-    warn "kubeone: concurrent CNI bootstrap had errors — apply may hang"
-
-  wait "${_ko_pid}"
+  )
 }
 
 # Remove stale not-Ready node objects for static workers whose host has been
@@ -424,123 +365,71 @@ kubeone::_clean_reinstalled_workers() {
   done
 }
 
-# Deploy the CNI (cilium) + configure the hetzner CCM while `kubeone apply`
-# is blocked waiting for CCM node initialization. Idempotent and
-# best-effort: any failure is logged, never fatal (the apply's own retries
-# still run). Usage: kubeone::_cni_bootstrap_during_apply <work_dir> <apply_pid>
-kubeone::_cni_bootstrap_during_apply() {
-  local work_dir="$1" apply_pid="$2"
-  local manifest="${work_dir}/kubeone.yaml"
+# Stage OUR cilium (CNI) + robot-ready hcloud CCM (+ its secret) into the kubeone
+# addons directory (<work_dir>/addons/), for `kubeone apply` to deploy at its
+# "ensure custom addons" step — BEFORE the CCM-init wait + worker join. This is
+# what lets the synchronous apply break the cni:external deadlock with no
+# background apply / apiserver polling. Renders through addons::render — the SAME
+# canonical khelm path the bootstrap engine uses (value stack + kustomize build +
+# envsubst) — so what kubeone applies == what bootstrap later reconciles.
+# Usage: kubeone::render_addons <work_dir>
+kubeone::render_addons() {
+  local work_dir="$1" manifest="${work_dir}/kubeone.yaml"
+  local addons_dir="${work_dir}/addons"
+  # KubeOne runs `cni: external` (no embedded CNI) + external CCM, so the two
+  # addons need DIFFERENT placement (kubeone pkg/addons/ensure.go):
+  #  - cilium → a NON-embedded-named subdir ("cilium"): there's no embedded CNI
+  #    to override, so it's applied as a plain user addon (EnsureUserAddons).
+  #    NB a subdir named "cni-cilium" (an embedded name) would be SKIPPED unless
+  #    cni:cilium — which is why it must be "cilium".
+  #  - ccm → the embedded name ("ccm-hetzner"): EnsureAddonByName applies a
+  #    same-named subdir INSTEAD of kubeone's embedded ccm → robot-aware CCM, no
+  #    immutable-selector collision.
+  # Both land before externalccm's CCM-init wait; the empty root is skipped
+  # (applier.go: empty dir → no-op). CLEAN FIRST — the work dir persists across
+  # runs, so a stale *.yaml from an earlier render would be picked up by kubeone's
+  # root-addon pass and break the fresh one.
+  rm -rf "${addons_dir}"
+  mkdir -p "${addons_dir}/cilium" "${addons_dir}/ccm-hetzner"
+  local api_host; api_host=$(yq -r '.apiEndpoint.host // ""' "${manifest}" 2>/dev/null)
+  [[ -n "${api_host}" ]] || { error "render_addons: apiEndpoint.host missing from ${manifest}"; return 1; }
 
-  local cp_ip lb_host ssh_key
-  cp_ip=$(yq -r '.controlPlane.hosts[0].publicAddress // ""' "${manifest}" 2>/dev/null)
-  lb_host=$(yq -r '.apiEndpoint.host // ""' "${manifest}" 2>/dev/null)
-  ssh_key=$(yq -r '.controlPlane.hosts[0].sshPrivateKeyFile // ""' "${manifest}" 2>/dev/null)
-  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
-  [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
-  if [[ -z "${cp_ip}" || -z "${lb_host}" ]]; then
-    debug "CNI bootstrap: no cp_ip/lb_host in manifest — skipping (non-LB topology)"
-    return 0
-  fi
+  # cilium (CNI). k8sServiceHost/Port are ${LOK8S_USER_API_*} placeholders in the
+  # cilium values.kubeone.yaml — addons::render's envsubst fills them from the env
+  # we export here. Same driver/provider value stack the bootstrap would apply.
+  export LOK8S_USER_API_HOST="${api_host}" LOK8S_USER_API_PORT="6443"
+  addons::render "${PATH_LOK8S}/addons/cilium" kubeone hetzner "" \
+    > "${addons_dir}/cilium/cilium.yaml" || { error "render cilium addon failed"; return 1; }
 
-  local -a ssh_opts=(
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=6
-  )
-  [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
-
-  # Wait for the leader CP's local apiserver to answer (CP bootstrapped),
-  # bounded by the apply still running.
-  local _waited=0
-  while kill -0 "${apply_pid}" 2>/dev/null; do
-    if ssh "${ssh_opts[@]}" "root@${cp_ip}" \
-         'test -f /etc/kubernetes/admin.conf && timeout 4 curl -sk https://127.0.0.1:6443/healthz 2>/dev/null' \
-         2>/dev/null | grep -q ok; then
-      break
-    fi
-    sleep 10; _waited=$(( _waited + 10 ))
-    (( _waited < 900 )) || { warn "CNI bootstrap: apiserver not up after 900s"; return 0; }
-  done
-  kill -0 "${apply_pid}" 2>/dev/null || return 0  # apply finished/failed already
-
-  local kc="${work_dir}/.cni-kubeconfig"
-  ssh "${ssh_opts[@]}" "root@${cp_ip}" 'cat /etc/kubernetes/admin.conf' > "${kc}" 2>/dev/null
-  yq -i "(.clusters[0].cluster.server) = \"https://${lb_host}:6443\"" "${kc}" 2>/dev/null
-
-  if kubectl --kubeconfig "${kc}" -n kube-system get ds cilium &>/dev/null; then
-    debug "CNI bootstrap: cilium already present — skipping"
-  else
-    debug "CNI bootstrap: deploying cilium (k8sServiceHost=${lb_host}) to unblock CCM"
-    kubeone::_deploy_cilium "${kc}" "${lb_host}" || warn "CNI bootstrap: cilium deploy failed"
-  fi
-  kubeone::_configure_hetzner_ccm "${kc}" "${manifest}" || warn "CNI bootstrap: CCM config failed"
-}
-
-# Render + apply the lok8s cilium addon with the API LB endpoint.
-# Usage: kubeone::_deploy_cilium <kubeconfig> <api_host>
-kubeone::_deploy_cilium() {
-  local kc="$1" api_host="$2"
-  local addon="${PATH_LOK8S}/addons/cilium"
-  local chart_ver
-  chart_ver=$(yq -r '.version' "${addon}/chart.yaml" 2>/dev/null)
-  [[ -n "${chart_ver}" ]] || { error "cilium chart version not found"; return 1; }
-
-  helm repo add cilium https://helm.cilium.io/ >/dev/null 2>&1 || true
-  local rendered="${kc%/*}/.cilium-rendered.yaml"
-  # --set-string for the port: a bare number renders as an int env value
-  # and server-side-apply then rejects it ("expected string, got 6443").
-  LOK8S_USER_API_HOST="${api_host}" LOK8S_USER_API_PORT="6443" \
-  helm template cilium cilium/cilium --version "${chart_ver}" --namespace kube-system \
-    -f "${addon}/values.yaml" -f "${addon}/values.kubeone.yaml" \
-    --set-string "k8sServiceHost=${api_host}" --set-string "k8sServicePort=6443" \
-    2>/dev/null > "${rendered}" || { error "helm template cilium failed"; return 1; }
-
-  # Server-side apply with --force-conflicts so the post-provision bootstrap
-  # (same default field manager, "kubectl") can reconcile this object later
-  # without an ownership fight. A just-started apiserver can briefly 5xx
-  # while it settles, so retry a few times — still best-effort inside the
-  # deadlock-break window (the caller treats any failure as non-fatal).
-  local _try out
-  for _try in 1 2 3; do
-    if out=$(kubectl --kubeconfig "${kc}" apply --server-side --force-conflicts -f "${rendered}" 2>&1); then
-      return 0
-    fi
-    # benign on re-apply: immutable DaemonSet selector/labels — already correct
-    echo "${out}" | grep -qiE "field is immutable|may not be changed" && return 0
-    sleep 5
-  done
-  warn "cilium apply did not converge: ${out}"
-  return 1
-}
-
-# Wire the hetzner CCM for the private network + bare-metal Robot workers.
-# Usage: kubeone::_configure_hetzner_ccm <kubeconfig> <manifest>
-kubeone::_configure_hetzner_ccm() {
-  local kc="$1" manifest="$2"
-  local ccm="deploy/hcloud-cloud-controller-manager" ns="kube-system"
-  kubectl --kubeconfig "${kc}" -n "${ns}" get "${ccm}" &>/dev/null || return 0
-
-  # Private network so the CCM can resolve node InternalIPs.
-  local net_name
-  net_name=$(yq -r '.cloudProvider.hetzner.networkID // ""' "${manifest}" 2>/dev/null)
-  # networkID may be an ID; the CCM also accepts the network NAME via env.
-  kubectl --kubeconfig "${kc}" -n "${ns}" set env "${ccm}" \
-    HCLOUD_NETWORK_ROUTES_ENABLED=false >/dev/null 2>&1 || true
-  [[ -z "${net_name}" ]] || kubectl --kubeconfig "${kc}" -n "${ns}" set env "${ccm}" \
-    "HCLOUD_NETWORK=${net_name}" >/dev/null 2>&1 || true
-
-  # Robot support for bare-metal static workers (else the CCM deletes their
-  # Node objects as "gone from the cloud"). Needs the secret + ROBOT_ENABLED
-  # + the Robot server NAMED exactly like the node.
+  # ccm (robot-aware) — the addon now ALSO emits the `hcloud` secret (env: token
+  # required, HROBOT_* optional → omitted without a bare-metal worker), so the
+  # creds the provider loaded into the env render straight in. No kubectl. Inline
+  # robot values match the `ccm` bootstrap entry (HCLOUD_NETWORK = networkID).
+  local inline=""
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
-    kubectl --kubeconfig "${kc}" -n "${ns}" create secret generic hcloud \
-      --from-literal=robot-user="${HROBOT_USER}" \
-      --from-literal=robot-password="${HROBOT_PASSWORD}" \
-      --dry-run=client -o yaml 2>/dev/null | kubectl --kubeconfig "${kc}" apply -f - >/dev/null 2>&1 || true
-    kubectl --kubeconfig "${kc}" -n "${ns}" set env "${ccm}" ROBOT_ENABLED=true >/dev/null 2>&1 || true
-    kubeone::_name_robot_workers "${manifest}"
+    local net_id; net_id=$(yq -r '.cloudProvider.hetzner.networkID // ""' "${manifest}" 2>/dev/null)
+    inline=$'env:\n  ROBOT_ENABLED: {value: "true"}\n  HCLOUD_NETWORK_ROUTES_ENABLED: {value: "false"}'
+    [[ -z "${net_id}" ]] || inline+=$'\n'"  HCLOUD_NETWORK: {value: \"${net_id}\"}"
   fi
-  kubectl --kubeconfig "${kc}" -n "${ns}" rollout restart "${ccm}" >/dev/null 2>&1 || true
+  addons::render "${PATH_LOK8S}/addons/ccm" kubeone hetzner "${inline}" \
+    > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
+
+  # Context validation: a bare-metal (static) worker MUST have Robot creds in the
+  # secret, or the CCM deletes its Node as "gone from the cloud". The generator
+  # omits the robot keys when HROBOT_* are unset (keeps the addon portable), so
+  # catch the real gap HERE — an early, legible error beats a 10-minute CCM-init
+  # timeout + worker flap.
+  local nworkers; nworkers=$(yq -r '(.staticWorkers.hosts // []) | length' "${manifest}" 2>/dev/null || echo 0)
+  if (( nworkers > 0 )); then
+    local rkeys; rkeys=$(yq -r 'select(.kind=="Secret" and .metadata.name=="hcloud") | .data | keys | join(",")' "${addons_dir}/ccm-hetzner/ccm.yaml" 2>/dev/null)
+    if [[ "${rkeys}" != *robot-user* || "${rkeys}" != *robot-password* ]]; then
+      error "render_addons: bare-metal worker present but Robot creds missing from the hcloud secret"
+      error "  fix: lo secrets set --name hetzner --namespace provisioning HROBOT_USER <user> (+ HROBOT_PASSWORD <pass>)"
+      return 1
+    fi
+  fi
+
+  debug "render_addons: cni-cilium + ccm-hetzner overrides (incl. hcloud secret) -> ${addons_dir}"
 }
 
 # Name each bare-metal Robot server to match its node hostname (the CCM

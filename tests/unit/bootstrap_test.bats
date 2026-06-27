@@ -23,6 +23,9 @@ setup() {
   # Make template::envsubst_whitelist return something harmless.
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+  # bootstrap::apply now renders via addons::render (libs/addons); with `import`
+  # stubbed we source it directly so the shared render path is available.
+  source "${_PROJECT_ROOT}/.lok8s/libs/addons"
 
   # Fake addon dir: .lok8s/addons/testcni/
   ADDON_DIR="${PATH_LOK8S}/addons/testcni"
@@ -324,14 +327,17 @@ spec:
 YAML
   run bootstrap::_resolve_entries "${CLUSTER_YAML}" lo
   assert_success
-  [ "${lines[0]}" = "cilium" ]
-  [ "${lines[1]}" = "./targets/foo" ]
-  [ "${lines[2]}" = "/abs/bar" ]
+  # Entries are emitted as compact JSON (one per line) so map entries survive.
+  [ "${lines[0]}" = '"cilium"' ]
+  [ "${lines[1]}" = '"./targets/foo"' ]
+  [ "${lines[2]}" = '"/abs/bar"' ]
 }
 
-@test "_resolve_entries: skips comment lines, keeps inline-override entries" {
-  # yq -r emits YAML comments in the list as their own lines; they must not be
-  # returned as (bogus) addon names. An inline-override map entry must survive.
+@test "_resolve_entries: drops comments, keeps inline-override map entries (block form)" {
+  # Comments must not become bogus addon names. A map entry written in BLOCK
+  # style — what a YAML formatter rewrites flow maps to — must survive as ONE
+  # entry; compact JSON keeps it on a single line (mapfile would otherwise
+  # shatter a multi-line block map across array elements).
   cat > "${CLUSTER_YAML}" <<'YAML'
 kind: Capi
 spec:
@@ -339,13 +345,15 @@ spec:
   bootstrap:
     - cilium
     # a comment between entries
-    - ccm: {networking: {enabled: true}}
+    - ccm:
+        networking:
+          enabled: true
 YAML
   run bootstrap::_resolve_entries "${CLUSTER_YAML}" capi
   assert_success
   [ "${#lines[@]}" -eq 2 ]
-  [ "${lines[0]}" = "cilium" ]
-  [ "${lines[1]}" = "ccm: {networking: {enabled: true}}" ]
+  [ "${lines[0]}" = '"cilium"' ]
+  [ "${lines[1]}" = '{"ccm":{"networking":{"enabled":true}}}' ]
 }
 
 @test "_resolve_entries: explicit empty list opts out (lo)" {

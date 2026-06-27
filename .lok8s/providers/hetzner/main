@@ -186,8 +186,13 @@ provider::output() {
     net_json=$(hcloud network list -o json | jq --arg n "${_net_name_desc}" '[.[] | select(.name == $n)]')
   fi
 
-  local lb_address
+  local lb_address lb_private
   lb_address=$(echo "${lb_json}" | jq -r '.[0].public_net.ipv4.ip // empty' 2>/dev/null || echo "")
+  # The LB's PRIVATE IP (on the attached network, = k8sServiceHost). The apiserver
+  # serving cert must cover it as a SAN or CP (re)joins fail "apiserver cert not
+  # valid for <ip>". Surfaced so _append_inventory adds it to alternativeNames
+  # automatically (no manual KUBEONE_EXTRA_SANS).
+  lb_private=$(echo "${lb_json}" | jq -r '.[0].private_net[0].ip // empty' 2>/dev/null || echo "")
 
   # Build access array from SSH key entries in the descriptor
   local access="[]"
@@ -269,11 +274,12 @@ provider::output() {
 
   jq -n \
     --arg ep "${lb_address}" \
+    --arg eppriv "${lb_private}" \
     --argjson access "${access}" \
     --argjson nodes "${nodes}" \
     --arg net_id "${net_id}" --arg net_name "${net_name}" --arg net_cidr "${net_cidr}" \
     '{
-      "api": {"endpoint": $ep, "port": 6443},
+      "api": {"endpoint": $ep, "privateEndpoint": $eppriv, "port": 6443},
       "access": $access,
       "nodes": $nodes,
       "network": {"id": $net_id, "name": $net_name, "cidr": $net_cidr}

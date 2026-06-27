@@ -372,7 +372,7 @@ mode is driven by the caller, not the file.
 | `DOMAIN_NAME` | `lok8s.dev` | Domain name |
 | `DOMAIN_SANS` | `*` | Domain SANs |
 | `KIND_EXPERIMENTAL_DOCKER_NETWORK` | `lok8s` | Docker network name |
-| `PATH_SECRETS` | `.secrets` | Global secrets path |
+| `PATH_SECRETS` | `.secrets` | Active domain's store — `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
 | `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` for MCP support |

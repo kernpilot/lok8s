@@ -27,6 +27,7 @@
 import ^utils/types
 import ^utils/verbose
 import ^utils/kapply
+import ^libs/addons
 
 # ── CLI entry point ──────────────────────────────────────
 
@@ -64,9 +65,11 @@ main::bootstrap() {
 bootstrap::_resolve_entries() {
   local cluster_yaml="$1" kind="$2"
   local -a entries
-  # Drop comment lines: yq -r emits YAML comments in spec.bootstrap as their own
-  # lines, which must not be mistaken for addon names.
-  mapfile -t entries < <(yq -r '.spec.bootstrap[]?' "${cluster_yaml}" | grep -v '^[[:space:]]*#')
+  # Emit each entry as compact JSON, one per line: a scalar ("cilium",
+  # "./targets/x") or a map ({"ccm":{<chart values>}}). JSON keeps a map on a
+  # single line (so mapfile doesn't shatter it) and omits YAML comments — so the
+  # apply loop reads structured entries instead of string-splitting them.
+  mapfile -t entries < <(yq -o=json -I=0 '.spec.bootstrap[]?' "${cluster_yaml}")
   if (( ${#entries[@]} > 0 )); then
     printf '%s\n' "${entries[@]}"
     return 0
@@ -84,6 +87,15 @@ bootstrap::_resolve_entries() {
 # Reads spec.bootstrap from the cluster YAML and applies each entry.
 bootstrap::apply() {
   local domain="$1" cluster_yaml="$2" kubeconfig="$3"
+
+  # lo provision drives the bootstrap directly (not via `lo build`), so the
+  # per-domain secrets store isn't exported yet. The secrets.lok8s.dev generators
+  # (passwd/env/…) read $PATH_SECRETS — without it a target carrying a passwd
+  # Secret (e.g. networking's hetzner-dns token) fails to render. Mirror
+  # libs/build::_export_secrets_path: point at clusters/<domain>/secrets if present.
+  if [[ -d "${PATH_CLUSTERS}/${domain}/secrets" ]]; then
+    export PATH_SECRETS="${PATH_CLUSTERS}/${domain}/secrets"
+  fi
 
   [[ -f "${kubeconfig}" ]] || {
     error "bootstrap: kubeconfig not found: ${kubeconfig}"
@@ -121,8 +133,6 @@ bootstrap::apply() {
     debug "bootstrap: API endpoint ${LOK8S_USER_API_HOST}:${LOK8S_USER_API_PORT} (for addon envsubst)"
   fi
 
-  local envsubst_whitelist
-  envsubst_whitelist=$(template::envsubst_whitelist)
 
   local entry
   for entry in "${bootstrap_entries[@]}"; do
@@ -130,26 +140,30 @@ bootstrap::apply() {
 
     local addon_name="" addon_dir="" inline_values=""
 
-    # Parse entry: string, map (YAML object), or path
-    if [[ "${entry}" == /* ]]; then
-      # Absolute path
-      addon_dir="${PATH_BASE}${entry}"
-      addon_name="$(basename "${entry}")"
-    elif [[ "${entry}" == ./* || "${entry}" == ../* ]]; then
-      # Relative path to cluster dir
-      addon_dir="${PATH_CLUSTERS}/${domain}/${entry}"
-      addon_name="$(basename "${entry}")"
-    elif [[ "${entry}" == *:* ]]; then
-      # Map entry: "name: {config}" — yq outputs "name: value"
-      # This handles the case where yq -r outputs "cilium: {encryption: ...}"
-      addon_name="${entry%%:*}"
-      addon_name="${addon_name// /}"
-      inline_values="${entry#*: }"
+    # Each entry is compact JSON (see _resolve_entries): a scalar ("name" or a
+    # "./path") or a map {"name": <inline chart values>}. Read it structurally —
+    # the addon name and its values are real YAML, never string-split.
+    if [[ "${entry}" == \{* ]]; then
+      # Map entry: {"<addon>": <inline helm values>}
+      addon_name="$(yq -r 'keys | .[0]' <<<"${entry}")"
+      inline_values="$(yq -r '.[]' <<<"${entry}")"
       addon_dir="${PATH_LOK8S}/addons/${addon_name}"
     else
-      # Bare name → framework addon
-      addon_name="${entry}"
-      addon_dir="${PATH_LOK8S}/addons/${entry}"
+      # Scalar entry — decode the JSON string to its raw value, then classify.
+      local raw; raw="$(yq -r '.' <<<"${entry}")"
+      if [[ "${raw}" == /* ]]; then
+        # Absolute path
+        addon_dir="${PATH_BASE}${raw}"
+        addon_name="$(basename "${raw}")"
+      elif [[ "${raw}" == ./* || "${raw}" == ../* ]]; then
+        # Relative path to cluster dir
+        addon_dir="${PATH_CLUSTERS}/${domain}/${raw}"
+        addon_name="$(basename "${raw}")"
+      else
+        # Bare name → framework addon
+        addon_name="${raw}"
+        addon_dir="${PATH_LOK8S}/addons/${raw}"
+      fi
     fi
 
     if [[ ! -d "${addon_dir}" ]]; then
@@ -157,77 +171,34 @@ bootstrap::apply() {
       return 1
     fi
 
-    # KubeOne deploys cilium itself during `kubeone apply` to break the
-    # cni:external deadlock (the apiserver blocks on CCM node-init, which
-    # needs a CNI first). When that driver-managed cilium is already up,
-    # re-applying it here from the kustomize render path is redundant and
-    # races the driver for field ownership — so defer cilium to the driver.
-    # Re-run `lo up` to reconcile cilium on KubeOne clusters; every other
-    # driver (Lo/Capi/Kkp) still gets its CNI from bootstrap as usual.
-    if [[ "${addon_name}" == "cilium" && "${kind}" == "kubeone" ]] \
-       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
-      echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-      continue
-    fi
-
-    # Merge provider-aware values for framework addons
-    local build_dir="${addon_dir}"
-    if [[ -d "${PATH_LOK8S}/addons/${addon_name}" ]] && [[ -f "${addon_dir}/chart.yaml" ]]; then
-      build_dir=$(mktemp -d)
-      cp -r "${addon_dir}/"* "${build_dir}/"
-
-      # Stack values: base < driver < provider < inline (later wins).
-      # Rationale: facts (provider env) beat preferences (driver flavor)
-      # beat chart defaults (base); explicit user intent (inline) beats
-      # all. See docs/guide/addons.md#why-this-order for the full
-      # explanation.
-      local -a value_files=()
-      [[ ! -f "${addon_dir}/values.yaml" ]] || value_files+=("${addon_dir}/values.yaml")
-      [[ ! -f "${addon_dir}/values.${kind}.yaml" ]] || value_files+=("${addon_dir}/values.${kind}.yaml")
-      [[ -z "${provider_name}" ]] || [[ ! -f "${addon_dir}/values.${provider_name}.yaml" ]] || value_files+=("${addon_dir}/values.${provider_name}.yaml")
-
-      # Add inline overrides as the last (highest-precedence) file
-      if [[ -n "${inline_values}" ]]; then
-        local inline_file="${build_dir}/values.inline.yaml"
-        echo "${inline_values}" > "${inline_file}"
-        value_files+=("${inline_file}")
+    # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` — as
+    # rendered custom addons (kubeone::render_addons), to break the cni:external
+    # deadlock declaratively (the CCM-init wait can't clear without a CNI). When
+    # the driver-managed objects are already up, re-applying them here from the
+    # kustomize render path is redundant and races the driver for field
+    # ownership — so defer both to the driver on KubeOne. Every other driver
+    # (Lo/Capi/Kkp) still gets them from bootstrap. Re-run `lo up` to reconcile.
+    if [[ "${kind}" == "kubeone" ]]; then
+      if [[ "${addon_name}" == "cilium" ]] \
+         && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
+        echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
+        continue
       fi
-
-      if (( ${#value_files[@]} > 0 )); then
-        # Merge all values files in order (later files override earlier ones).
-        # Uses ireduce so we handle N files, not just the first two.
-        local merged_values="${build_dir}/values.merged.yaml"
-        if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" > "${merged_values}"; then
-          error "bootstrap: failed to merge values files for ${addon_name}"
-          rm -rf "${build_dir}"
-          return 1
-        fi
-
-        # Update chart.yaml to use merged values
-        if [[ -f "${build_dir}/chart.yaml" ]]; then
-          yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" 2>/dev/null || \
-            sed -i 's|valueFiles:.*|valueFiles:\n  - values.merged.yaml|' "${build_dir}/chart.yaml"
-        fi
+      if [[ "${addon_name}" == "ccm" ]] \
+         && kubectl --kubeconfig "${kubeconfig}" -n kube-system get deploy hcloud-cloud-controller-manager &>/dev/null; then
+        echo "[bootstrap] ccm already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
+        continue
       fi
     fi
 
-    debug "bootstrap: applying ${addon_name} (${build_dir})"
-    # KHELM_TRUST_ANY_REPO: khelm refuses chart repos not registered in the
-    # local helm config, which would force a manual `helm repo add` per chart
-    # before every bootstrap. The chart repositories are declared in our own
-    # version-controlled chart.yaml files (the trust boundary is code review),
-    # so trust them and keep the bootstrap hands-off. Versions stay pinned.
+    # Render via the canonical khelm path (value-stacking + kustomize build +
+    # envsubst) — the SAME addons::render the KubeOne driver stages addons with.
+    debug "bootstrap: rendering ${addon_name}"
     local rendered
-    if ! rendered=$(KHELM_TRUST_ANY_REPO=true \
-                      kustomize build --enable-alpha-plugins "${build_dir}" \
-                      | envsubst "${envsubst_whitelist}"); then
-      error "bootstrap: kustomize build failed for ${addon_name}"
-      [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+    if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}"); then
+      error "bootstrap: render failed for ${addon_name}"
       return 1
     fi
-
-    # Clean up temp dir
-    [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
 
     # Apply with server-side + CRD retry. kapply::apply renders its own
     # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating

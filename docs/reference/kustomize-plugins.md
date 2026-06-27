@@ -35,8 +35,9 @@ or your version manager.
 **Binary:** `.kustomize/secrets.lok8s.dev/v1/secret/Secret`
 
 Generates Kubernetes Secret resources from a structured YAML CRD with
-seven generator types. The cache directory `$PATH_SECRETS` is the source
-of truth for stable output across runs.
+nine generator types (`literals`, `passwd`, `env`, `secretRef`, `htpasswd`,
+`file`, `b64`, `bash`, `cert`). The cache directory `$PATH_SECRETS` is the
+source of truth for stable output across runs.
 
 ### Quick example
 
@@ -243,7 +244,10 @@ the hash with a new salt while preserving the username/password.
 
 The cache filename convention is `Secret.<name>.<namespace>.<key>`. A
 producer Secret writes its values under this path; a consumer Secret
-reads them via `secretRef:`:
+reads them via `secretRef:`. Both resolve against `$PATH_SECRETS`, which
+`lo build`/`lo deploy` bind to the **active domain's** store
+(`clusters/<domain>/secrets`) — so a `secretRef` resolves within the selected
+cluster, never a global store:
 
 ```yaml
 # Producer
