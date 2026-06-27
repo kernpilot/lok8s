@@ -296,3 +296,83 @@ func TestFile_PathTraversalErrorIsStructured(t *testing.T) {
 	any = err
 	_ = errors.Is(any, any) // smoke check on error chain
 }
+
+// --- env fallback modes: optional / default / passwd ------------------------
+
+func TestEnv_OptionalOmitsWhenMissing(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{}) // no env
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Optional: true}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("optional + missing env should omit the key, got %d entries", len(got))
+	}
+}
+
+func TestEnv_OptionalEmittedWhenSet(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "present"})
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Optional: true}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || string(got[0].Value) != "present" {
+		t.Errorf("optional + set should emit the value, got %+v", got)
+	}
+}
+
+func TestEnv_DefaultUsedWhenMissing(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{})
+	d := "fallback"
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Default: &d}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || string(got[0].Value) != "fallback" {
+		t.Errorf("default should be used when env missing, got %+v", got)
+	}
+}
+
+func TestEnv_DefaultOverriddenByEnv(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "real"})
+	d := "fallback"
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Default: &d}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "real" {
+		t.Errorf("env should win over default, got %q", got[0].Value)
+	}
+}
+
+func TestEnv_PasswdFallbackGeneratesAndCaches(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{}) // no env → generate
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Passwd: &specpkg.PasswdEntry{Length: 24}}})
+	got1, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got1) != 1 || len(got1[0].Value) != 24 {
+		t.Fatalf("passwd fallback should generate 24 chars, got %q (len %d)", got1[0].Value, len(got1[0].Value))
+	}
+	got2, _ := g.Generate(ctx) // stable across runs (cached)
+	if string(got1[0].Value) != string(got2[0].Value) {
+		t.Errorf("passwd fallback should be stable: %q vs %q", got1[0].Value, got2[0].Value)
+	}
+}
+
+func TestEnv_PasswdFallbackOverriddenByEnv(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "operator-set"})
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Passwd: &specpkg.PasswdEntry{Length: 24}}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "operator-set" {
+		t.Errorf("env should win over passwd fallback, got %q", got[0].Value)
+	}
+}
