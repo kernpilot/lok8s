@@ -410,7 +410,8 @@ kubeone::_clean_reinstalled_workers() {
 # envsubst) — so what kubeone applies == what bootstrap later reconciles.
 # Usage: kubeone::render_addons <work_dir>
 kubeone::render_addons() {
-  local work_dir="$1" manifest="${work_dir}/kubeone.yaml"
+  local work_dir="$1"
+  local manifest="${work_dir}/kubeone.yaml"
   local addons_dir="${work_dir}/addons"
   # This addon set is Hetzner-specific (cilium values.hetzner, the robot-aware
   # hcloud CCM, the hcloud Secret) and render_addons is called unconditionally
