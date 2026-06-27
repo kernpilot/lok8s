@@ -155,6 +155,9 @@ kubeone::_inject_oidc() {
 # Usage: kubeone::_inject_registry_auth <kubeone.yaml> <cluster_yaml>
 kubeone::_inject_registry_auth() {
   local manifest="$1" cluster_yaml="$2" host sname sns
+  # No-op unless the spec declares registries (omitted => anonymous pulls; a
+  # test/CI run without DOMAIN_NAME must not error here).
+  [[ "$(yq -r '.spec.registries // {} | length' "${cluster_yaml}" 2>/dev/null)" != "0" ]] || return 0
   # DOMAIN_NAME anchors the per-domain secrets path; without it the secretRefs
   # would resolve under "${PATH_CLUSTERS}//secrets" (wrong) — fail loud instead.
   [[ -n "${DOMAIN_NAME:-}" ]] \
