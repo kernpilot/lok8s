@@ -203,8 +203,11 @@ addons::render() {
     # gatus) — must render IN PLACE: a copy breaks those relative paths (they
     # resolve from /tmp → /.lok8s, missing). Stacking addons carry no cross-tree refs.
     if [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); then
-      build_dir=$(mktemp -d)
-      cp -r "${addon_dir}/"* "${build_dir}/"
+      build_dir=$(mktemp -d) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
+      # `/.` (not `/*`) so dotfiles (.helmignore, kustomize overlays, …) come too —
+      # a glob drops them and a chart referencing a dotfile would fail to render.
+      cp -r "${addon_dir}/." "${build_dir}/" \
+        || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
       if [[ -n "${inline_values}" ]]; then
         printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
         value_files+=("${build_dir}/values.inline.yaml")
@@ -214,8 +217,8 @@ addons::render() {
         error "addons::render: failed to merge values for ${addon_dir}"
         rm -rf "${build_dir}"; return 1
       fi
-      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" 2>/dev/null \
-        || sed -i 's|valueFiles:.*|valueFiles:\n  - values.merged.yaml|' "${build_dir}/chart.yaml"
+      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
+        || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
     fi
   fi
 
@@ -235,6 +238,13 @@ addons::render() {
           | envsubst "${whitelist}" \
           | yq eval '(.. | select(tag == "!!map" and has("env") and (.env | tag == "!!seq")) | .env[] | select(has("value")) | .value) |= tostring') || rc=$?
   [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+  # A successful build that yields nothing means the addon rendered no resources —
+  # almost always a misconfig (wrong path, everything filtered out). Fail loud
+  # rather than report success for an empty apply.
+  if (( rc == 0 )) && [[ -z "${out}" ]]; then
+    error "addons::render: empty output for ${addon_dir} (no resources rendered)"
+    return 1
+  fi
   (( rc == 0 )) && printf '%s\n' "${out}"
   return ${rc}
 }

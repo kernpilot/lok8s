@@ -253,6 +253,11 @@ _append_inventory() {
   net_id=$(echo "${output}" | jq -r '.network.id // ""')
   if [[ -n "${net_id}" ]] && \
      [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}")" == "true" ]]; then
+    # net_id is interpolated into the yq assignment below — reject anything outside
+    # a safe charset so it can't break yq syntax or inject fields (matches the same
+    # guard in drivers/kubeone/config::render_addons).
+    [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
+      || { error "kubeone inventory: invalid networkID from provider: ${net_id}"; return 1; }
     yq -i ".cloudProvider.hetzner.networkID = \"${net_id}\"" "${manifest}"
   fi
 

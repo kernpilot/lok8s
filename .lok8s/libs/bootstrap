@@ -145,8 +145,10 @@ bootstrap::apply() {
     # the addon name and its values are real YAML, never string-split.
     if [[ "${entry}" == \{* ]]; then
       # Map entry: {"<addon>": <inline helm values>}
-      addon_name="$(yq -r 'keys | .[0]' <<<"${entry}")"
-      inline_values="$(yq -r '.[]' <<<"${entry}")"
+      addon_name="$(yq -r 'keys | .[0]' <<<"${entry}")" \
+        || { error "bootstrap: failed to parse addon name from ${entry}"; return 1; }
+      inline_values="$(yq -r '.[]' <<<"${entry}")" \
+        || { error "bootstrap: failed to parse inline values from ${entry}"; return 1; }
       addon_dir="${PATH_LOK8S}/addons/${addon_name}"
     else
       # Scalar entry — decode the JSON string to its raw value, then classify.

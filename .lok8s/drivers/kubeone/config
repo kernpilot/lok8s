@@ -155,22 +155,44 @@ kubeone::_inject_oidc() {
 # Usage: kubeone::_inject_registry_auth <kubeone.yaml> <cluster_yaml>
 kubeone::_inject_registry_auth() {
   local manifest="$1" cluster_yaml="$2" host sname sns
+  # DOMAIN_NAME anchors the per-domain secrets path; without it the secretRefs
+  # would resolve under "${PATH_CLUSTERS}//secrets" (wrong) — fail loud instead.
+  [[ -n "${DOMAIN_NAME:-}" ]] \
+    || { error "registry auth: DOMAIN_NAME not exported; cannot resolve registry secrets"; return 1; }
+  local secrets_dir="${PATH_CLUSTERS}/${DOMAIN_NAME}/secrets"
+  # Count declared-vs-configured registries: a spec.registries that asks for auth
+  # but ends up with NONE configured (missing/invalid creds) is a breaking
+  # misconfig, not a silent fall-back to anonymous pulls.
+  local n_specified=0 n_configured=0
   while IFS=$'\t' read -r host sname sns; do
     [[ -n "${host}" && -n "${sname}" ]] || continue
+    n_specified=$(( n_specified + 1 ))
     [[ "${host}" =~ ^[a-zA-Z0-9._:-]+$ ]] || { warn "registry auth: skipping invalid host '${host}'"; continue; }
-    # `lo secrets env` emits `export KEY=<%q-quoted>` per key — eval is safe.
-    local username="" password=""
-    eval "$(lo secrets --domain "${DOMAIN_NAME:-}" env --name "${sname}" --namespace "${sns:-provisioning}" 2>/dev/null)"
+    # secretRef name/namespace flow into a filesystem path below — constrain them
+    # to a safe charset (no '/', so no path traversal; no shell/YAML metacharacters).
+    [[ "${sname}" =~ ^[a-zA-Z0-9._-]+$ ]] || { warn "registry auth: skipping invalid secret name '${sname}'"; continue; }
+    [[ -z "${sns}" || "${sns}" =~ ^[a-zA-Z0-9._-]+$ ]] || { warn "registry auth: skipping invalid namespace '${sns}'"; continue; }
+    # Read the resolved creds straight from the per-domain secret cache (each key is
+    # a plaintext file Secret.<name>.<ns>.<key>), exactly as provision::dispatch loads
+    # provider creds — no `eval` of generated shell.
+    local _ns="${sns:-provisioning}" username password
+    username="$(cat "${secrets_dir}/Secret.${sname}.${_ns}.username" 2>/dev/null || true)"
+    password="$(cat "${secrets_dir}/Secret.${sname}.${_ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then
-      warn "registry auth: secret ${sns:-provisioning}/${sname} lacks username/password — '${host}' left anonymous"
+      warn "registry auth: secret ${_ns}/${sname} lacks username/password — '${host}' left anonymous"
       unset username password; continue
     fi
     RUSER="${username}" RPASS="${password}" \
     yq -i ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" "${manifest}" \
       || { error "registry auth: failed to inject '${host}'"; unset username password; return 1; }
     unset username password
-    debug "registry auth: ${host} ← ${sns:-provisioning}/${sname}"
+    n_configured=$(( n_configured + 1 ))
+    debug "registry auth: ${host} ← ${_ns}/${sname}"
   done < <(yq -r '.spec.registries // {} | to_entries | .[] | [.key, (.value.auth.secretRef.name // ""), (.value.auth.secretRef.namespace // "provisioning")] | @tsv' "${cluster_yaml}" 2>/dev/null)
+  if (( n_specified > 0 && n_configured == 0 )); then
+    error "registry auth: ${n_specified} registry(ies) declared in spec.registries but none could be configured (missing/invalid secretRef creds) — populate the secret(s) or remove spec.registries"
+    return 1
+  fi
 }
 
 # ── Config generation ───────────────────────────────────
@@ -216,6 +238,12 @@ kubeone::generate_config() {
       local replicas pool_type
       replicas=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
       pool_type=$(yq -r ".spec.workers.${pool}.type" "${cluster_yaml}")
+      # Spec-controlled values are interpolated into YAML below — validate before
+      # use so a value with newlines/quotes/colons can't inject or malform fields.
+      [[ "${replicas}" =~ ^[0-9]+$ ]] \
+        || { error "Invalid replicas for pool ${pool}: ${replicas} (must be numeric)"; return 1; }
+      [[ "${pool_type}" =~ ^[a-zA-Z0-9._-]+$ ]] \
+        || { error "Invalid server/instance type for pool ${pool}: ${pool_type}"; return 1; }
 
       rendered+=$'\n'"- name: ${pool}"
       rendered+=$'\n'"  replicas: ${replicas}"
@@ -227,6 +255,10 @@ kubeone::generate_config() {
           local datacenter image
           datacenter=$(yq -r '.spec.datacenter // "fsn1"' "${cluster_yaml}")
           image=$(yq -r ".spec.workers.${pool}.image // \"ubuntu-22.04\"" "${cluster_yaml}")
+          [[ "${datacenter}" =~ ^[a-zA-Z0-9._-]+$ ]] \
+            || { error "Invalid datacenter: ${datacenter}"; return 1; }
+          [[ "${image}" =~ ^[a-zA-Z0-9._-]+$ ]] \
+            || { error "Invalid image for pool ${pool}: ${image}"; return 1; }
           rendered+=$'\n'"      serverType: \"${pool_type}\""
           rendered+=$'\n'"      location: \"${datacenter}\""
           rendered+=$'\n'"      image: \"${image}\""
@@ -238,6 +270,10 @@ kubeone::generate_config() {
           region=$(yq -r '.spec.aws.region // "eu-central-1"' "${cluster_yaml}")
           ami=$(yq -r ".spec.workers.${pool}.ami // \"\"" "${cluster_yaml}")
           instance_type="${pool_type}"
+          [[ "${region}" =~ ^[a-zA-Z0-9._-]+$ ]] \
+            || { error "Invalid region: ${region}"; return 1; }
+          [[ -z "${ami}" || "${ami}" =~ ^[a-zA-Z0-9._-]+$ ]] \
+            || { error "Invalid ami for pool ${pool}: ${ami}"; return 1; }
           rendered+=$'\n'"      instanceType: \"${instance_type}\""
           rendered+=$'\n'"      region: \"${region}\""
           if [[ -n "${ami}" ]]; then
@@ -303,8 +339,8 @@ kubeone::apply() {
   # that window → the CCM schedules → the wait clears → the worker joins a
   # robot-aware CCM. Name the Robot servers first so the CCM matches the
   # bare-metal worker by hostname.
+  kubeone::_name_robot_workers "${work_dir}/kubeone.yaml" || return 1
   kubeone::render_addons "${work_dir}" || return 1
-  kubeone::_name_robot_workers "${work_dir}/kubeone.yaml"
 
   debug "Running (in ${work_dir}): kubeone ${args[*]}"
   # Subshell cd: kubeone writes <cluster>-kubeconfig into the CWD (no output
@@ -376,6 +412,12 @@ kubeone::_clean_reinstalled_workers() {
 kubeone::render_addons() {
   local work_dir="$1" manifest="${work_dir}/kubeone.yaml"
   local addons_dir="${work_dir}/addons"
+  # This addon set is Hetzner-specific (cilium values.hetzner, the robot-aware
+  # hcloud CCM, the hcloud Secret) and render_addons is called unconditionally
+  # from kubeone::apply — guard against a non-Hetzner manifest rather than render
+  # the wrong provider's values or emit Hetzner-only resources for it.
+  [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}" 2>/dev/null)" == "true" ]] \
+    || { error "render_addons: unsupported cloudProvider (only Hetzner is supported); manifest ${manifest}"; return 1; }
   # KubeOne runs `cni: external` (no embedded CNI) + external CCM, so the two
   # addons need DIFFERENT placement (kubeone pkg/addons/ensure.go):
   #  - cilium → a NON-embedded-named subdir ("cilium"): there's no embedded CNI
@@ -391,8 +433,10 @@ kubeone::render_addons() {
   # root-addon pass and break the fresh one.
   rm -rf "${addons_dir}"
   mkdir -p "${addons_dir}/cilium" "${addons_dir}/ccm-hetzner"
-  local api_host; api_host=$(yq -r '.apiEndpoint.host // ""' "${manifest}" 2>/dev/null)
-  [[ -n "${api_host}" ]] || { error "render_addons: apiEndpoint.host missing from ${manifest}"; return 1; }
+  local api_host rc; api_host=$(yq -r '.apiEndpoint.host // ""' "${manifest}"); rc=$?
+  if (( rc != 0 )) || [[ -z "${api_host}" ]]; then
+    error "render_addons: failed to read apiEndpoint.host from ${manifest}"; return 1
+  fi
 
   # cilium (CNI). k8sServiceHost/Port are ${LOK8S_USER_API_*} placeholders in the
   # cilium values.kubeone.yaml — addons::render's envsubst fills them from the env
@@ -400,6 +444,18 @@ kubeone::render_addons() {
   export LOK8S_USER_API_HOST="${api_host}" LOK8S_USER_API_PORT="6443"
   addons::render "${PATH_LOK8S}/addons/cilium" kubeone hetzner "" \
     > "${addons_dir}/cilium/cilium.yaml" || { error "render cilium addon failed"; return 1; }
+
+  # Context validation (BEFORE rendering the CCM): a bare-metal (static) worker
+  # MUST have Robot creds, or the CCM deletes its Node as "gone from the cloud".
+  # The generator omits the robot keys when HROBOT_* are unset (keeps the addon
+  # portable), so catch the real gap HERE — an early, legible error beats
+  # rendering an addon we'd only reject, then a 10-minute CCM-init timeout + flap.
+  local nworkers; nworkers=$(yq -r '(.staticWorkers.hosts // []) | length' "${manifest}" 2>/dev/null || echo 0)
+  if (( nworkers > 0 )) && [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
+    error "render_addons: bare-metal worker present but Robot creds missing (HROBOT_USER/HROBOT_PASSWORD)"
+    error "  fix: lo secrets set --name hetzner --namespace provisioning HROBOT_USER <user> (+ HROBOT_PASSWORD <pass>)"
+    return 1
+  fi
 
   # ccm (robot-aware) — the addon now ALSO emits the `hcloud` secret (env: token
   # required, HROBOT_* optional → omitted without a bare-metal worker), so the
@@ -409,25 +465,20 @@ kubeone::render_addons() {
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
     local net_id; net_id=$(yq -r '.cloudProvider.hetzner.networkID // ""' "${manifest}" 2>/dev/null)
     inline=$'env:\n  ROBOT_ENABLED: {value: "true"}\n  HCLOUD_NETWORK_ROUTES_ENABLED: {value: "false"}'
-    [[ -z "${net_id}" ]] || inline+=$'\n'"  HCLOUD_NETWORK: {value: \"${net_id}\"}"
-  fi
-  addons::render "${PATH_LOK8S}/addons/ccm" kubeone hetzner "${inline}" \
-    > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
-
-  # Context validation: a bare-metal (static) worker MUST have Robot creds in the
-  # secret, or the CCM deletes its Node as "gone from the cloud". The generator
-  # omits the robot keys when HROBOT_* are unset (keeps the addon portable), so
-  # catch the real gap HERE — an early, legible error beats a 10-minute CCM-init
-  # timeout + worker flap.
-  local nworkers; nworkers=$(yq -r '(.staticWorkers.hosts // []) | length' "${manifest}" 2>/dev/null || echo 0)
-  if (( nworkers > 0 )); then
-    local rkeys; rkeys=$(yq -r 'select(.kind=="Secret" and .metadata.name=="hcloud") | .data | keys | join(",")' "${addons_dir}/ccm-hetzner/ccm.yaml" 2>/dev/null)
-    if [[ "${rkeys}" != *robot-user* || "${rkeys}" != *robot-password* ]]; then
-      error "render_addons: bare-metal worker present but Robot creds missing from the hcloud secret"
-      error "  fix: lo secrets set --name hetzner --namespace provisioning HROBOT_USER <user> (+ HROBOT_PASSWORD <pass>)"
-      return 1
+    if [[ -n "${net_id}" ]]; then
+      # net_id is interpolated into inline YAML below — reject anything outside a
+      # safe charset so it can't inject fields or malform the values doc.
+      [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
+        || { error "render_addons: invalid networkID '${net_id}' (expected alphanumeric, '-' or '_')"; return 1; }
+      inline+=$'\n'"  HCLOUD_NETWORK: {value: \"${net_id}\"}"
     fi
   fi
+  # The hcloud CCM secret embeds HCLOUD_TOKEN (the addon declares it required); fail
+  # loud here rather than emit a Secret with an empty token the CCM can't auth with.
+  [[ -n "${HCLOUD_TOKEN:-}" ]] \
+    || { error "render_addons: HCLOUD_TOKEN not set (required for hcloud CCM credentials)"; return 1; }
+  addons::render "${PATH_LOK8S}/addons/ccm" kubeone hetzner "${inline}" \
+    > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
 
   debug "render_addons: cni-cilium + ccm-hetzner overrides (incl. hcloud secret) -> ${addons_dir}"
 }
@@ -437,18 +488,32 @@ kubeone::render_addons() {
 kubeone::_name_robot_workers() {
   local manifest="$1"
   [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]] || return 0
-  local n hostname pubip num
+  local n hostname pubip num servers
   n=$(yq -r '.staticWorkers.hosts | length' "${manifest}" 2>/dev/null || echo 0)
   for (( i = 0; i < n; i++ )); do
     hostname=$(yq -r ".staticWorkers.hosts[${i}].hostname // \"\"" "${manifest}")
     pubip=$(yq -r ".staticWorkers.hosts[${i}].publicAddress // \"\"" "${manifest}")
     [[ -n "${hostname}" && -n "${pubip}" ]] || continue
-    num=$(curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" \
-      "https://robot-ws.your-server.de/server" 2>/dev/null \
-      | jq -r --arg ip "${pubip}" '.[].server | select(.server_ip==$ip) | .server_number' 2>/dev/null | head -1)
+    # hostname flows into the Robot API request body below — constrain it to a
+    # safe charset so a malformed manifest value can't malform the request.
+    [[ "${hostname}" =~ ^[a-zA-Z0-9.-]+$ ]] \
+      || { error "robot: invalid hostname '${hostname}' (expected alphanumeric, '.' or '-')"; return 1; }
+    # List Robot servers. `-f` makes HTTP errors (401 bad creds, 5xx) a non-zero
+    # exit instead of a 200-shaped error body; a real failure here must surface —
+    # an unnamed server can't be matched by the CCM and stays NotReady.
+    if ! servers=$(curl -sS -f -u "${HROBOT_USER}:${HROBOT_PASSWORD}" \
+        "https://robot-ws.your-server.de/server" 2>/dev/null); then
+      error "robot: failed to list servers (network/credentials?) — cannot name worker ${hostname}"
+      return 1
+    fi
+    num=$(jq -r --arg ip "${pubip}" '.[].server | select(.server_ip==$ip) | .server_number' <<<"${servers}" 2>/dev/null | head -1)
+    # Not in the Robot inventory → a cloud (non-bare-metal) static worker; skip.
     [[ -n "${num}" ]] || continue
-    curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" \
-      -d "server_name=${hostname}" "https://robot-ws.your-server.de/server/${num}" >/dev/null 2>&1 || true
+    if ! curl -sS -f -u "${HROBOT_USER}:${HROBOT_PASSWORD}" \
+        -d "server_name=${hostname}" "https://robot-ws.your-server.de/server/${num}" >/dev/null 2>&1; then
+      error "robot: failed to set name '${hostname}' on server ${num}"
+      return 1
+    fi
     debug "CNI bootstrap: named Robot server ${num} -> ${hostname}"
   done
 }
