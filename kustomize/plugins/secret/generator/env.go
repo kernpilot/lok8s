@@ -68,7 +68,10 @@ func (g *Env) lookup(ctx *plugin.Context, key string, entry specpkg.EnvEntry) ([
 		return v, false, err
 	}
 
-	// The env var, when set, always wins (and is cached so secretRef sees it).
+	// On a cache MISS (or update mode): a set env var wins over the fallback and
+	// is cached (so secretRef sees it). NB the cache-first branch above means a
+	// cached value — INCLUDING a previously-cached default/passwd fallback —
+	// shadows a newly-set env var until update:true or the cache file is removed.
 	if v, ok := ctx.Env(varName); ok {
 		if err := g.put(ctx, key, []byte(v)); err != nil {
 			return nil, false, err

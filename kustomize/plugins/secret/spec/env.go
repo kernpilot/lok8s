@@ -34,13 +34,17 @@ type EnvEntry struct {
 	// Update bypasses the cache and re-reads the env on every run.
 	// Defaults to false (cache-first behavior).
 	Update bool `yaml:"update,omitempty"`
-	// Optional, when true, OMITS the key entirely if the env var is unset
-	// (instead of erroring). Use for keys a consumer treats as optional
+	// Optional, when true, OMITS the key entirely if the env var is unset AND
+	// uncached (instead of erroring). Use for keys a consumer treats as optional
 	// (e.g. an optional secretKeyRef the chart mounts with optional: true).
+	// Cache-first applies: a value cached on an earlier run keeps being emitted
+	// (not omitted) until update:true or the cache file is removed.
 	Optional bool `yaml:"optional,omitempty"`
-	// Default is a literal fallback used when the env var is unset. A nil
-	// pointer means "no default" — which distinguishes an unset default from
-	// an explicit empty one (`default: ""`).
+	// Default is a literal fallback used when the env var is unset (and uncached).
+	// A nil pointer means "no default" — distinguishing an unset default from an
+	// explicit empty one (`default: ""`). Cache-first applies: once a value (the
+	// default OR a real env value) is cached, it shadows a later-set env var
+	// until update:true or the cache file is removed.
 	Default *string `yaml:"default,omitempty"`
 	// Passwd generates (and caches) a random password when the env var is
 	// unset — the "operator-can-override-or-we-mint-one" pattern. Requires
