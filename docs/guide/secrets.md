@@ -15,9 +15,13 @@ safely. No external secret store is required to get started.
   `clusters/<domain>/secrets/`. **The store is the source of truth** — first
   build generates, later builds reuse, so output is stable. Each domain has its
   **own** store, so environments never share a secret (see
-  [Per-environment isolation](#per-environment-isolation)). A project with no
-  domain context falls back to one flat store (`$PATH_SECRETS`, default
-  `.secrets/`).
+  [Per-environment isolation](#per-environment-isolation)).
+- **`$PATH_SECRETS` is the active domain's store.** `lo build` and `lo deploy`
+  export `PATH_SECRETS=clusters/<domain>/secrets` for the selected domain (set
+  with `lo use`, recorded in `clusters/.active`) — so every generator, and every
+  `secretRef:` that reads another secret, resolves *within that cluster*. Only a
+  project with **no** domain context falls back to one flat store
+  (`$PATH_SECRETS`, default `.secrets/`).
 - Plaintext cache files are **gitignored**. To share them, commit them
   **encrypted** with SOPS/age (below).
 

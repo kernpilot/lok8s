@@ -133,6 +133,20 @@ provision::dispatch() {
   # previously ignored, so `lo up` with no active domain half-provisioned.)
   provision::resolve_spec "${domain}" || return 1
 
+  # Auto-load managed provider credentials from the per-domain secret store so
+  # provisioning works without the operator hand-exporting them: the hetzner
+  # provider needs HCLOUD_TOKEN, and the bare-metal worker + CCM robot mode need
+  # the Robot user/pass. Fills only what's missing; no-op if the secret isn't
+  # present (non-hetzner providers, or a fresh checkout before `lo secrets decrypt`).
+  local _secd="${PATH_CLUSTERS}/${domain}/secrets" _k _v
+  for _k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
+    [[ -n "${!_k:-}" ]] && continue
+    _v="$(cat "${_secd}/Secret.hetzner.provisioning.${_k}" 2>/dev/null)" || continue
+    [[ -n "${_v}" ]] && export "${_k}=${_v}"
+  done
+  [[ -n "${HROBOT_USER:-}" ]]     && export ROBOT_USER="${HROBOT_USER}"         HETZNER_ROBOT_USER="${HROBOT_USER}"
+  [[ -n "${HROBOT_PASSWORD:-}" ]] && export ROBOT_PASSWORD="${HROBOT_PASSWORD}" HETZNER_ROBOT_PASSWORD="${HROBOT_PASSWORD}"
+
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
     error "Cannot provision a deployment domain. Use 'lo deploy ${domain}' instead."
     error "Deployment domains reference a cluster via spec.clusterRef.domain."

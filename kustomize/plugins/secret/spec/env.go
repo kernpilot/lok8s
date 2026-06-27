@@ -20,6 +20,13 @@ import (
 // the first cache miss and cached. Subsequent runs reuse the cached
 // value. When update is true, the cache is bypassed entirely and the
 // current env value is read every run.
+//
+// Env-miss fallback (mutually exclusive — at most one). Without one, a
+// missing env var is an error (the default "required" behavior):
+//
+//	ROBOT_USER:  { var: HROBOT_USER, optional: true }   # unset → OMIT the key
+//	SOME_ID:     { var: X, default: "literal" }         # unset → literal value
+//	SESSION_KEY: { var: SK, passwd: { length: 64 } }    # unset → generate + cache
 type EnvEntry struct {
 	// Var is the environment variable name to read. Empty means "use
 	// the key itself" (i.e. if the spec is `FOO: ~`, read $FOO).
@@ -27,6 +34,38 @@ type EnvEntry struct {
 	// Update bypasses the cache and re-reads the env on every run.
 	// Defaults to false (cache-first behavior).
 	Update bool `yaml:"update,omitempty"`
+	// Optional, when true, OMITS the key entirely if the env var is unset AND
+	// uncached (instead of erroring). Use for keys a consumer treats as optional
+	// (e.g. an optional secretKeyRef the chart mounts with optional: true).
+	// Cache-first applies: a value cached on an earlier run keeps being emitted
+	// (not omitted) until update:true or the cache file is removed.
+	Optional bool `yaml:"optional,omitempty"`
+	// Default is a literal fallback used when the env var is unset (and uncached).
+	// A nil pointer means "no default" — distinguishing an unset default from an
+	// explicit empty one (`default: ""`). Cache-first applies: once a value (the
+	// default OR a real env value) is cached, it shadows a later-set env var
+	// until update:true or the cache file is removed.
+	Default *string `yaml:"default,omitempty"`
+	// Passwd generates (and caches) a random password when the env var is
+	// unset — the "operator-can-override-or-we-mint-one" pattern. Requires
+	// PATH_SECRETS; the generated value is cached so it stays stable.
+	Passwd *PasswdEntry `yaml:"passwd,omitempty"`
+}
+
+// fallbackModes counts how many env-miss fallbacks are configured. At most one
+// is allowed (optional / default / passwd are mutually exclusive).
+func (e EnvEntry) fallbackModes() int {
+	n := 0
+	if e.Optional {
+		n++
+	}
+	if e.Default != nil {
+		n++
+	}
+	if e.Passwd != nil {
+		n++
+	}
+	return n
 }
 
 // envEntryRaw avoids infinite recursion in UnmarshalYAML.
@@ -54,6 +93,9 @@ func (e *EnvEntry) UnmarshalYAML(node *yaml.Node) error {
 			return err
 		}
 		*e = EnvEntry(raw)
+		if e.fallbackModes() > 1 {
+			return kyaml.NodeErrf(node, "env entry: at most one of optional/default/passwd may be set")
+		}
 		return nil
 	default:
 		return kyaml.NodeErrf(node, "env entry must be string, null, or mapping, got %s", nodeKindString(node.Kind))
