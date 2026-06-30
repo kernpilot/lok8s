@@ -494,6 +494,25 @@ YAML
   assert_output --partial "env: values must be scalars"
 }
 
+@test "_parse_entry: env as a list (wrong CONTAINER type) is rejected" {
+  # The env CONTAINER must be a map of KEY: scalar. A YAML list — e.g. someone
+  # writing `env: [LOK8S_USER_FOO=bar]` expecting docker-style entries — would
+  # make to_entries[] emit bogus numeric keys (0=…). Reject the container itself.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"env":["LOK8S_USER_FOO=bar"]}}' n d i e w
+  assert_failure
+  assert_output --partial "env: must be a map"
+}
+
+@test "_parse_entry: env as a scalar (wrong CONTAINER type) is rejected" {
+  # A scalar `.env` (e.g. `env: LOK8S_USER_FOO=bar`) would make to_entries[]
+  # error — reject the container type up front with a clear message.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"env":"LOK8S_USER_FOO=bar"}}' n d i e w
+  assert_failure
+  assert_output --partial "env: must be a map"
+}
+
 @test "_parse_entry: multi-key map entry is rejected" {
   # A bootstrap entry must be a SINGLE-key map; two keys is a config mistake.
   run bootstrap::_parse_entry "test.lok8s.dev" \
@@ -704,4 +723,57 @@ YAML
   # 'a' and let 'd' land last instead.)
   run tail -1 "${log}"
   assert_output "a"
+}
+
+@test "bootstrap::apply FIFO reap fallback: rc accounting + completeness hold" {
+  # Force the bash<5.1 FIFO fallback in _reap_one (wait on the OLDEST pid) even on
+  # a newer bash, by stubbing the feature probe to report unavailable. That path
+  # is the only one on bash<5.1 and is otherwise uncovered here — the throttle
+  # test above skips when `wait -n -p` is unavailable, which it isn't on this
+  # runner. We assert the two invariants that must hold on BOTH reap paths: every
+  # entry still runs, and a failing entry still propagates to a non-zero rc.
+  bootstrap::_have_wait_n_p() { return 1; }
+  export LOK8S_BOOTSTRAP_PARALLEL=2
+  local log="${BATS_TEST_TMPDIR}/fifo.log"
+  : > "${log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    sleep 0.1
+    printf '%s\n' "${name}" >> "${log}"
+    # One entry fails so we prove rc accounting survives the FIFO reap+prune.
+    [ "${name}" = "c" ] && return 1
+    return 0
+  }
+  local n; for n in a b c d; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b
+    - c
+    - d
+YAML
+  # Call directly (NOT via `run`) so the scheduler's background jobs land in THIS
+  # shell's job table — lets us prove no orphan survives. `|| rc=$?` keeps the
+  # non-zero from tripping bats' errexit.
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+
+  # rc accounting: the failing entry 'c' propagated through the FIFO reap path.
+  [ "${rc}" -ne 0 ]
+
+  # Completeness: all four entries ran (the FIFO reap pruned finished jobs so new
+  # ones could launch — no entry was starved or dropped).
+  run wc -l < "${log}"
+  assert_output "4"
+
+  # No surviving background jobs (no orphan left by the FIFO reap+drain).
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
 }

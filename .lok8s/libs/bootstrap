@@ -7,10 +7,13 @@
 #
 # Independent entries apply CONCURRENTLY (capped); an entry flagged `wait: true`
 # is a BARRIER that waits for the in-flight batch, then applies itself with a
-# readiness wait before any later entry starts. Default is `wait: false` — so a
-# spec with no `wait:` keys behaves exactly as before except for the parallelism
-# (the old strictly-serial apply-then-health-wait per entry was the whole ~37min
-# bootstrap phase). See the scheduler block below.
+# readiness wait before any later entry starts. Default is `wait: false`. This
+# changes the OLD behavior in TWO ways, not just one: entries now apply in
+# parallel AND a non-barrier entry no longer gets its own post-apply readiness
+# wait — readiness is gated only at barriers (a spec may have none, in which case
+# nothing waits until the final drain of background applies). The old
+# strictly-serial apply-then-health-wait per entry was the whole ~37min bootstrap
+# phase. See the scheduler block below.
 #
 # Addon resolution:
 #   "cilium"          → .lok8s/addons/cilium/
@@ -170,13 +173,27 @@ bootstrap::_parse_entry() {
       return 1
     fi
     if [[ "$(yq -r 'has("values")' <<<"${_valjson}")" == "true" ]]; then
-      if [[ ! -f "${_o_dir}/chart.yaml" ]]; then
+      # Only flag a non-chart target when the dir EXISTS but lacks chart.yaml.
+      # If the dir is missing entirely, stay silent here and let bootstrap::apply
+      # surface the authoritative "addon not found" — otherwise a typo'd addon
+      # name with `values:` misleads with "not a chart addon" instead.
+      if [[ -d "${_o_dir}" && ! -f "${_o_dir}/chart.yaml" ]]; then
         error "bootstrap: '${_raw}' sets 'values:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'values:' is helm-only"
         return 1
       fi
       _o_inline="$(yq -r '.values' <<<"${_valjson}")"
     fi
     if [[ "$(yq -r 'has("env")' <<<"${_valjson}")" == "true" ]]; then
+      # The env CONTAINER must itself be a map of KEY: scalar. A sequence or
+      # scalar `.env` makes the `to_entries[]` flatten below error out or emit
+      # bogus numeric keys (0=…, 1=…) — reject it up front. (A null/empty `env:`
+      # is a harmless no-op, matching the `// {}` default used below.)
+      local _env_tag
+      _env_tag="$(yq -r '.env | tag' <<<"${_valjson}")"
+      if [[ "${_env_tag}" != "!!map" && "${_env_tag}" != "!!null" ]]; then
+        error "bootstrap: '${_raw}' env: must be a map of KEY: scalar (got ${_env_tag#!!})"
+        return 1
+      fi
       # env: takes KEY: scalar only. A map/array value would tostring-flatten to
       # a bogus string (e.g. the ccm chart-value `env:` map mistakenly placed at
       # the reserved-key level instead of under values:) — reject it so the
@@ -363,6 +380,14 @@ bootstrap::_drain() {
   _BS_RCFILES=()
 }
 
+# Feature probe: does this bash support `wait -n -p` (5.1+)? Factored into its own
+# function so it can be stubbed in tests to force the FIFO fallback path on a
+# newer bash (where the live probe would otherwise always take the `wait -n -p`
+# branch).
+bootstrap::_have_wait_n_p() {
+  (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))
+}
+
 # Free at least one slot: wait for ANY one of OUR in-flight jobs to finish (not
 # necessarily the oldest), so one slow job can't block scheduling while faster
 # ones have already completed. RESTRICTED to our own pids — never a bare `wait`
@@ -375,7 +400,7 @@ bootstrap::_drain() {
 bootstrap::_reap_one() {
   (( ${#_BS_INFLIGHT[@]} )) || return 0
   local _finished=""
-  if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+  if bootstrap::_have_wait_n_p; then
     # bash 5.1+: -n restricted to our pids, -p captures the one that finished.
     wait -n -p _finished "${_BS_INFLIGHT[@]}" 2>/dev/null || true
   fi

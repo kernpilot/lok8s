@@ -163,11 +163,19 @@ The canonical case is the hcloud CCM, whose chart takes a top-level `env:` block
 ```
 
 The same applies to any addon whose Helm values define a top-level `values`,
-`env`, or `wait` key. There is **no automatic migration and (for `values`/`wait`)
-no error** — the entry just renders different values — so audit every inline
-`spec.bootstrap` map entry and move such keys under `values:` **before** the next
-`lo up` / `lo provision`. (A misplaced `env:` map *does* now error out, per the
-scalar rule above, which will catch the CCM case loudly.)
+`env`, or `wait` key — but the three now fail **differently**, so don't assume
+"no error":
+
+- **`values:`** silently reinterprets as the reserved key — **no error**, the
+  entry just renders different (probably wrong) values.
+- **`env:`** reinterprets as the reserved key and a map/array value is **rejected**
+  (the scalar rule above — this catches the CCM case loudly).
+- **`wait:`** reinterprets as the reserved key; a *boolean* is accepted silently,
+  but a **non-boolean** `wait:` (e.g. `wait: "10s"`, or a `wait:` map) now **fails
+  loudly** via the boolean validation above.
+
+There is no automatic migration, so audit every inline `spec.bootstrap` map entry
+and move such keys under `values:` **before** the next `lo up` / `lo provision`.
 :::
 
 ## Parallelism and barriers
