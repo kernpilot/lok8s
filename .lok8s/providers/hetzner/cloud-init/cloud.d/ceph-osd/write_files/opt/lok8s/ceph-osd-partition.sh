@@ -21,7 +21,7 @@ if [[ -z "${DEV}" ]]; then
   DEV="$(printf '%s' "${ROOT_SRC}" | sed -E 's/p?[0-9]+$//')"
 fi
 [[ -b "${DEV}" ]] || { echo "lok8s/ceph-osd: OS disk '${DEV:-?}' is not a block device — skipping"; exit 0; }
-ROOT_GIB="${CEPH_OSD_ROOT_GIB:-40}"
+ROOT_GIB="${CEPH_OSD_ROOT_GIB:-60}"   # cloud-VM root grows to this; 60 leaves headroom for containerd
 
 # Already carved? (a bluestore partition beyond the OS partitions)
 if lsblk -rno FSTYPE "${DEV}" 2>/dev/null | grep -q 'ceph_bluestore'; then
@@ -31,16 +31,28 @@ fi
 TABLE="$(blkid -o value -s PTTYPE "${DEV}" 2>/dev/null || true)"
 case "${TABLE}" in
   gpt)
-    BASE="$(basename "${DEV}")"
-    if lsblk -rno NAME "${DEV}" 2>/dev/null | grep -qx "${BASE}2"; then
-      echo "lok8s/ceph-osd: ${DEV}2 already exists — skipping"; exit 0
+    # Idempotent + shape-agnostic: skip if our labelled OSD partition already exists.
+    if lsblk -rno PARTLABEL "${DEV}" 2>/dev/null | grep -qx 'rook-osd'; then
+      echo "lok8s/ceph-osd: a rook-osd partition already exists on ${DEV} — skipping"; exit 0
     fi
-    echo "lok8s/ceph-osd: GPT ${DEV} — carve OSD (root=${ROOT_GIB}GiB) + grow root"
     sgdisk -e "${DEV}"                                              # backup GPT → disk end, full size usable
-    sgdisk -n "0:${ROOT_GIB}GiB:0" -t "0:8300" -c "0:rook-osd" "${DEV}"
-    partprobe "${DEV}" 2>/dev/null || true; sleep 1
-    growpart "${DEV}" 1
-    resize2fs "${DEV}1"
+    # Cloud VM = one small root to grow; bare-metal installimage = several large OS
+    # partitions already sized (carve OSD in the free tail). Count only DATA partitions
+    # >2GiB so the GPT bios_grub (~1M) + EFI (~256M) helpers don't count — otherwise a
+    # cloud VM's sda1+sda14+sda15 looked like "bare-metal", root never grew, and the CPs
+    # were left on the image's ~4GiB root → DiskPressure → evicted apiserver.
+    NBIG="$(lsblk -rbno SIZE,TYPE "${DEV}" 2>/dev/null | awk '$2=="part" && $1+0 > 2147483648 {n++} END{print n+0}')"
+    if [[ "${NBIG}" -le 1 ]]; then
+      echo "lok8s/ceph-osd: GPT cloud ${DEV} — carve OSD past ${ROOT_GIB}GiB root + grow root"
+      sgdisk -n "0:${ROOT_GIB}GiB:0" -t "0:8300" -c "0:rook-osd" "${DEV}"
+      partprobe "${DEV}" 2>/dev/null || true; sleep 1
+      growpart "${DEV}" 1
+      resize2fs "${DEV}1"
+    else
+      echo "lok8s/ceph-osd: GPT bare-metal ${DEV} (${NBIG} data parts) — carve OSD in the free tail"
+      sgdisk -n "0:0:0" -t "0:8300" -c "0:rook-osd" "${DEV}"        # next free num, largest free block
+      partprobe "${DEV}" 2>/dev/null || true; sleep 1
+    fi
     ;;
   dos|msdos)
     echo "lok8s/ceph-osd: MBR ${DEV} — add a raw OSD partition in the free tail"
