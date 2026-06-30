@@ -357,12 +357,17 @@ bootstrap::_apply_one() {
   # field ownership — so defer both to the driver on KubeOne. Every other driver
   # (Lo/Capi/Kkp) still gets them from bootstrap. Re-run `lo up` to reconcile.
   if [[ "${kind}" == "kubeone" ]]; then
-    if [[ "${addon_name}" == "cilium" ]] \
+    # Key the skip on the addon DIRECTORY basename, NOT addon_name. A `name:`
+    # override changes addon_name (the dependsOn identity) but never addon_dir, so
+    # the driver skip must stay anchored to the cilium/ccm addon dir — otherwise a
+    # `name:`-renamed cilium/ccm would defeat it and double-apply the driver's own.
+    local _ad_base; _ad_base="$(basename "${addon_dir}")"
+    if [[ "${_ad_base}" == "cilium" ]] \
        && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
       echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
       return 0
     fi
-    if [[ "${addon_name}" == "ccm" ]] \
+    if [[ "${_ad_base}" == "ccm" ]] \
        && kubectl --kubeconfig "${kubeconfig}" -n kube-system get deploy hcloud-cloud-controller-manager &>/dev/null; then
       echo "[bootstrap] ccm already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
       return 0

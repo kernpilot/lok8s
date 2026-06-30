@@ -924,6 +924,25 @@ YAML
   assert_output --partial "non-empty scalar"
 }
 
+@test "_parse_entry: null name: is rejected" {
+  # `name: null` / `name: ~` — a null scalar is NOT a name; rejected by the same
+  # non-empty-scalar validation as a map/seq (got !!null), before the empty-string
+  # check. Same family as the empty/bad-charset name: tests.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":null}}' n d i e w x
+  assert_failure
+  assert_output --partial "non-empty scalar"
+}
+
+@test "_parse_entry: seq name: is rejected" {
+  # `name: [a, b]` — a sequence is not a scalar identifier; rejected by the same
+  # non-empty-scalar validation (got !!seq) as the map case above.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":["a","b"]}}' n d i e w x
+  assert_failure
+  assert_output --partial "non-empty scalar"
+}
+
 # --- dependsOn: graph validation (bootstrap::apply) --------------------------
 
 @test "bootstrap::apply errors on dependsOn to an unknown entry" {
