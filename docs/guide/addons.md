@@ -112,6 +112,56 @@ spec:
 
 The inline config is deep-merged on top of the provider-aware defaults.
 
+For an entry that needs more than just inline values, use the explicit map keys
+`values:`, `env:`, and `wait:` (any one of them switches the entry to this form;
+otherwise the whole map is treated as inline values, as above):
+
+```yaml
+spec:
+  bootstrap:
+    - cert-manager:
+        wait: true            # barrier — see below
+    - ccm:
+        values:               # helm values (chart addons only)
+          env:
+            ROBOT_ENABLED: { value: "true" }
+        env:                  # envsubst overrides for this entry's render
+          LOK8S_USER_FOO: bar
+```
+
+- **`values:`** — Helm values, deep-merged like the inline form. Chart addons
+  only; setting it on a kustomize target (a `./targets/` dir with no `chart.yaml`)
+  is an error.
+- **`env:`** — extra envsubst variables exported only while *this* entry renders.
+  Name them to match the whitelist the addons reference (`LOK8S_USER_*` /
+  `LOK8S_SPEC_*`), e.g. cilium's `${LOK8S_USER_API_HOST}`.
+- **`wait:`** — barrier flag, default `false` (see next section).
+
+## Parallelism and barriers
+
+`spec.bootstrap` entries apply **concurrently** by default — independent addons
+(CNI, CCM, metrics-server, RBAC …) no longer wait for each other's workloads to
+become Ready before the next one starts. An entry marked **`wait: true`** is a
+**barrier**: lok8s finishes the in-flight batch, then applies that entry *and*
+waits for its workloads to be Ready, before any later entry starts. Use a barrier
+when something downstream depends on the addon being live (CRDs Established, a
+webhook serving, an Issuer reconciling). Order is still preserved; only the
+health-wait is deferred to barriers.
+
+```yaml
+spec:
+  bootstrap:
+    - cilium                  # these three apply in parallel …
+    - metrics-server
+    - ccm
+    - cert-manager:
+        wait: true            # … barrier: ready before anything below starts
+    - ./targets/networking    # depends on cert-manager CRDs being Established
+```
+
+The concurrency cap defaults to 8 and is tunable with
+`LOK8S_BOOTSTRAP_PARALLEL` (set it to `1` for clean, one-at-a-time output).
+
 ## Framework addons
 
 | Addon | What it installs | Chart |

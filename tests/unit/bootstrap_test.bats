@@ -398,3 +398,212 @@ YAML
   run bootstrap::_resolve_entries "${CLUSTER_YAML}" kkp
   [ -z "$output" ]
 }
+
+# --- entry parser (bootstrap::_parse_entry) ----------------------------------
+# Entries arrive as the compact JSON that _resolve_entries emits: a scalar
+# ("cilium", "./targets/x", "/abs/x") or a map {"<name-or-path>": <value>}.
+# The map value is either the NEW schema (reserved keys values/env/wait) or, for
+# backward-compat, the LEGACY whole-map-is-helm-values form.
+
+@test "_parse_entry: bare name resolves to a framework addon, no overrides" {
+  local p_name p_dir p_inline p_env p_wait
+  bootstrap::_parse_entry "test.lok8s.dev" '"cilium"' p_name p_dir p_inline p_env p_wait
+  [ "${p_name}" = "cilium" ]
+  [ "${p_dir}" = "${PATH_LOK8S}/addons/cilium" ]
+  [ -z "${p_inline}" ]
+  [ -z "${p_env}" ]
+  [ "${p_wait}" = "false" ]
+}
+
+@test "_parse_entry: ./path resolves under the cluster dir" {
+  local p_name p_dir p_inline p_env p_wait
+  bootstrap::_parse_entry "test.lok8s.dev" '"./targets/foo"' p_name p_dir p_inline p_env p_wait
+  [ "${p_name}" = "foo" ]
+  [ "${p_dir}" = "${PATH_CLUSTERS}/test.lok8s.dev/./targets/foo" ]
+  [ -z "${p_inline}" ]
+  [ "${p_wait}" = "false" ]
+}
+
+@test "_parse_entry: /abs path resolves under PATH_BASE" {
+  local p_name p_dir p_inline p_env p_wait
+  bootstrap::_parse_entry "test.lok8s.dev" '"/abs/bar"' p_name p_dir p_inline p_env p_wait
+  [ "${p_name}" = "bar" ]
+  [ "${p_dir}" = "${PATH_BASE}/abs/bar" ]
+}
+
+@test "_parse_entry: map {values} → inline helm values (chart addon)" {
+  # testcni has chart.yaml (setup), so `values:` is allowed.
+  local p_name p_dir p_inline p_env p_wait
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"values":{"shared_all":"inline","nested":{"k":1}}}}' \
+    p_name p_dir p_inline p_env p_wait
+  [ "${p_name}" = "testcni" ]
+  [ "$(yq -r '.shared_all' <<<"${p_inline}")" = "inline" ]
+  [ "$(yq -r '.nested.k' <<<"${p_inline}")" = "1" ]
+  [ -z "${p_env}" ]
+  [ "${p_wait}" = "false" ]
+}
+
+@test "_parse_entry: map {values, env, wait} → all three parsed" {
+  local p_name p_dir p_inline p_env p_wait
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"values":{"a":1},"env":{"LOK8S_USER_FOO":"bar","LOK8S_USER_BAZ":"qux"},"wait":true}}' \
+    p_name p_dir p_inline p_env p_wait
+  [ "$(yq -r '.a' <<<"${p_inline}")" = "1" ]
+  [ "${p_wait}" = "true" ]
+  # env flattened to KEY=VALUE lines (order-independent membership check).
+  grep -qx 'LOK8S_USER_FOO=bar' <<<"${p_env}"
+  grep -qx 'LOK8S_USER_BAZ=qux' <<<"${p_env}"
+}
+
+@test "_parse_entry: legacy map (no reserved key) is the whole-map helm values" {
+  # Backward-compat: `- cilium: {encryption: {enabled: true}}` — the value map
+  # has no reserved key, so the WHOLE map is the inline helm values.
+  local p_name p_dir p_inline p_env p_wait
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"encryption":{"enabled":true}}}' \
+    p_name p_dir p_inline p_env p_wait
+  [ "${p_name}" = "testcni" ]
+  [ "$(yq -r '.encryption.enabled' <<<"${p_inline}")" = "true" ]
+  [ -z "${p_env}" ]
+  [ "${p_wait}" = "false" ]
+}
+
+@test "_parse_entry: 'values:' on a non-chart (kustomize) target is an error" {
+  # A ./targets/ dir with only a kustomization.yaml (no chart.yaml) is not a
+  # chart addon — `values:` (helm-only) must be rejected.
+  local raw_dir="${PATH_CLUSTERS}/test.lok8s.dev/targets/raw"
+  mkdir -p "${raw_dir}"
+  cat > "${raw_dir}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+YAML
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"./targets/raw":{"values":{"x":1}}}' n d i e w
+  assert_failure
+  assert_output --partial "not a chart addon"
+}
+
+# --- env wiring: env: {…} → exported around addons::render --------------------
+
+@test "bootstrap::apply exports env: overrides into the addons::render env" {
+  # The new `env:` map is exported (this addon's subshell only) before render,
+  # so render's envsubst whitelist picks up LOK8S_USER_*/LOK8S_SPEC_* names.
+  local capture="${BATS_TEST_TMPDIR}/env_capture"
+  : > "${capture}"
+  # Capture what addons::render sees for the var, then emit a dummy manifest.
+  addons::render() {
+    printf '%s\n' "${LOK8S_USER_TESTVAR:-UNSET}" > "${capture}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'
+    return 0
+  }
+
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - testcni:
+        env:
+          LOK8S_USER_TESTVAR: hello
+YAML
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  [ "$(cat "${capture}")" = "hello" ]
+}
+
+# --- scheduler: parallel batches split by wait: true barriers ----------------
+
+@test "bootstrap::apply runs non-barrier entries concurrently; wait:true serializes" {
+  # Mock the per-entry apply with a timestamped START/END log + a fixed sleep so
+  # we can assert real-time interleaving from the line order in the log.
+  local log="${BATS_TEST_TMPDIR}/order.log"
+  : > "${log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf 'START %s\n' "${name}" >> "${log}"
+    sleep 0.4
+    printf 'END %s\n' "${name}" >> "${log}"
+    return 0
+  }
+
+  # Five framework addons must exist (the -d addon_dir guard).
+  local n
+  for n in a b c d e; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b
+    - c: { wait: true }
+    - d
+    - e
+YAML
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  # 1-based line number of the first exact-match line, or empty.
+  ln() { grep -n -- "^$1\$" "${log}" | head -1 | cut -d: -f1; }
+  local sa eb_ sb ea_ sc ec_ sd se
+  sa=$(ln "START a"); sb=$(ln "START b"); ea_=$(ln "END a"); eb_=$(ln "END b")
+  sc=$(ln "START c"); ec_=$(ln "END c"); sd=$(ln "START d"); se=$(ln "START e")
+
+  # a and b overlap: each STARTED before the other ENDED.
+  [ "${sa}" -lt "${eb_}" ]
+  [ "${sb}" -lt "${ea_}" ]
+
+  # Barrier c: it STARTS only after BOTH a and b have ENDED.
+  [ "${sc}" -gt "${ea_}" ]
+  [ "${sc}" -gt "${eb_}" ]
+
+  # d and e (after the barrier) START only after c has ENDED.
+  [ "${sd}" -gt "${ec_}" ]
+  [ "${se}" -gt "${ec_}" ]
+}
+
+@test "bootstrap::apply returns non-zero if any parallel entry fails (no orphans)" {
+  # One entry fails; the others succeed. apply must drain the whole batch and
+  # then report failure (never leave a background job behind).
+  local done_log="${BATS_TEST_TMPDIR}/done.log"
+  : > "${done_log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    sleep 0.1
+    printf '%s\n' "${name}" >> "${done_log}"
+    [ "${name}" = "b" ] && return 1
+    return 0
+  }
+  local n
+  for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b
+    - c
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  # All three were launched in the same batch and drained (no orphan left).
+  run wc -l < "${done_log}"
+  assert_output "3"
+}

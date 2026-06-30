@@ -2,8 +2,15 @@
 # shellcheck shell=bash disable=SC2034
 # bootstrap — framework-level cluster infrastructure addon system
 #
-# Applies spec.bootstrap entries in order after the cluster is provisioned.
-# Works with ALL drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
+# Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
+# drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
+#
+# Independent entries apply CONCURRENTLY (capped); an entry flagged `wait: true`
+# is a BARRIER that waits for the in-flight batch, then applies itself with a
+# readiness wait before any later entry starts. Default is `wait: false` — so a
+# spec with no `wait:` keys behaves exactly as before except for the parallelism
+# (the old strictly-serial apply-then-health-wait per entry was the whole ~37min
+# bootstrap phase). See the scheduler block below.
 #
 # Addon resolution:
 #   "cilium"          → .lok8s/addons/cilium/
@@ -15,13 +22,18 @@
 #   addons/cilium/values.lo.yaml       — driver-specific (if exists)
 #   addons/cilium/values.hetzner.yaml  — provider-specific (if exists)
 #
-# Inline overrides:
+# Per-entry overrides (map form):
 #   bootstrap:
-#     - cilium:
-#         encryption:
-#           enabled: true
+#     - cilium:                       # legacy shim: whole map = helm values
+#         encryption: { enabled: true }
+#     - ccm:                          # new schema (reserved keys values/env/wait)
+#         values:                     # helm values (chart addons only)
+#           env: { ROBOT_ENABLED: { value: "true" } }
+#         env:                        # envsubst overrides (exported around render)
+#           LOK8S_USER_FOO: bar
+#         wait: true                  # barrier (default false)
 #
-# The inline config is merged as additional Helm values on top of the
+# The inline values are merged as additional Helm values on top of the
 # provider-aware defaults.
 
 import ^utils/types
@@ -83,8 +95,262 @@ bootstrap::_resolve_entries() {
   return 0
 }
 
+# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait>
+# Parse ONE spec.bootstrap entry (the compact JSON from _resolve_entries) into the
+# five fields the apply path needs — passed back through namerefs (the last five
+# args are caller variable NAMES). Returns 1 (after printing an error) on a
+# malformed entry or on `values:` set against a non-chart target. Pure apart from
+# that one filesystem touch (the chart.yaml check).
+#
+# Entry forms:
+#   scalar  "cilium" | "./targets/x" | "/abs/x"   → name/dir only
+#   map     {"<name-or-path>": <value>}
+#
+# The map VALUE is read in one of two schemas:
+#   NEW    — it carries a reserved key (values | env | wait):
+#              values: <helm values>   chart addons ONLY — a kustomize target
+#                                       (no chart.yaml) with `values:` is an ERROR
+#                                       (`values:` is helm-only).
+#              env:    {KEY: val, ...}  envsubst overrides (see _apply_one).
+#              wait:   true|false       barrier; default false.
+#   LEGACY — no reserved key → the WHOLE value map IS the inline helm values
+#            (e.g. `- cilium: {encryption: {enabled: true}}`), unchanged from
+#            before this flag existed. A legacy chart that needs a *literal*
+#            top-level `values`/`env`/`wait` helm key must nest it under `values:`
+#            (e.g. the `ccm: {env: {...}}` form moves to `ccm: {values: {env: {...}}}`).
+bootstrap::_parse_entry() {
+  local _domain="$1" _entry="$2"
+  local -n _o_name="$3" _o_dir="$4" _o_inline="$5" _o_env="$6" _o_wait="$7"
+  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"
+
+  local _raw _valjson=""
+  if [[ "${_entry}" == \{* ]]; then
+    # Map entry {"<name-or-path>": <value>}
+    _raw="$(yq -r 'keys | .[0]' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse addon name from ${_entry}"; return 1; }
+    _valjson="$(yq -o=json -I=0 '.[]' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse entry value from ${_entry}"; return 1; }
+  else
+    # Scalar entry — decode the JSON string to its raw value.
+    _raw="$(yq -r '.' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse entry ${_entry}"; return 1; }
+  fi
+
+  # Resolve <name-or-path> → addon name + dir. Identical rules for a scalar entry
+  # and a map key: absolute path, ./|../ path relative to the cluster dir, or a
+  # bare framework-addon name.
+  if [[ "${_raw}" == /* ]]; then
+    _o_dir="${PATH_BASE}${_raw}"; _o_name="$(basename "${_raw}")"
+  elif [[ "${_raw}" == ./* || "${_raw}" == ../* ]]; then
+    _o_dir="${PATH_CLUSTERS}/${_domain}/${_raw}"; _o_name="$(basename "${_raw}")"
+  else
+    _o_name="${_raw}"; _o_dir="${PATH_LOK8S}/addons/${_raw}"
+  fi
+
+  # Scalar entry (or a map with an empty/null value): nothing more to parse.
+  [[ -n "${_valjson}" && "${_valjson}" != "null" ]] || return 0
+
+  if [[ "$(yq -r 'has("values") or has("env") or has("wait")' <<<"${_valjson}")" == "true" ]]; then
+    # NEW schema.
+    _o_wait="$(yq -r '.wait // false' <<<"${_valjson}")"
+    if [[ "$(yq -r 'has("values")' <<<"${_valjson}")" == "true" ]]; then
+      if [[ ! -f "${_o_dir}/chart.yaml" ]]; then
+        error "bootstrap: '${_raw}' sets 'values:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'values:' is helm-only"
+        return 1
+      fi
+      _o_inline="$(yq -r '.values' <<<"${_valjson}")"
+    fi
+    if [[ "$(yq -r 'has("env")' <<<"${_valjson}")" == "true" ]]; then
+      # Flatten env: {KEY: scalar} → newline-separated KEY=val lines (scalar
+      # values, coerced to string). Consumed by _apply_one as exported env vars.
+      _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"
+    fi
+  else
+    # LEGACY shim: the whole value map is the inline helm values.
+    _o_inline="$(yq -r '.' <<<"${_valjson}")"
+  fi
+  return 0
+}
+
+# bootstrap::_apply_one <name> <dir> <kind> <provider> <kubeconfig> \
+#                       <inline-values> <wait> [env-lines]
+# Apply ONE resolved bootstrap entry: the KubeOne cilium/ccm skip, addons::render
+# (value-stacking + kustomize build + envsubst), kapply::apply, the
+# immutable/terminating fail-fast, the CRD/webhook race-retry, and — only when
+# <wait> is non-empty — the post-apply kapply::wait_ready (the per-entry health
+# barrier). Returns 0 on success, 1 on an unrecoverable render/apply error.
+#
+# MUST be invoked in a subshell — `( bootstrap::_apply_one ... )` — so the
+# KAPPLY_LAST_OUTPUT global it mutates (and greps right after each apply) stays
+# local to this call. The scheduler runs non-barrier entries as concurrent
+# background subshells; a shared KAPPLY_LAST_OUTPUT would race across them.
+#
+# <env-lines> (optional) is a newline-separated list of KEY=VALUE envsubst
+# overrides from `- <name>: { env: {...} }`. Each is exported HERE (this subshell
+# only — never leaking across entries) before addons::render, so render's envsubst
+# whitelist (template::envsubst_whitelist → ${LOK8S_USER_*}/${LOK8S_SPEC_*}) picks
+# it up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
+# convention the addons reference; other names are exported but not whitelisted.
+bootstrap::_apply_one() {
+  local addon_name="$1" addon_dir="$2" kind="$3" provider_name="$4"
+  local kubeconfig="$5" inline_values="$6" do_wait="$7" env_lines="${8:-}"
+
+  if [[ -n "${env_lines}" ]]; then
+    local _kv _k _v
+    while IFS= read -r _kv; do
+      [[ -n "${_kv}" ]] || continue
+      _k="${_kv%%=*}"; _v="${_kv#*=}"
+      export "${_k}=${_v}"
+    done <<< "${env_lines}"
+  fi
+
+  # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` (as
+  # rendered custom addons, kubeone::render_addons) to break the cni:external
+  # deadlock. When the driver-managed objects are already up, re-applying them
+  # here from the kustomize render path is redundant and races the driver for
+  # field ownership — so defer both to the driver on KubeOne. Every other driver
+  # (Lo/Capi/Kkp) still gets them from bootstrap. Re-run `lo up` to reconcile.
+  if [[ "${kind}" == "kubeone" ]]; then
+    if [[ "${addon_name}" == "cilium" ]] \
+       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
+      echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
+      return 0
+    fi
+    if [[ "${addon_name}" == "ccm" ]] \
+       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get deploy hcloud-cloud-controller-manager &>/dev/null; then
+      echo "[bootstrap] ccm already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
+      return 0
+    fi
+  fi
+
+  # Render via the canonical khelm path (value-stacking + kustomize build +
+  # envsubst) — the SAME addons::render the KubeOne driver stages addons with.
+  debug "bootstrap: rendering ${addon_name}"
+  local rendered
+  if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}"); then
+    error "bootstrap: render failed for ${addon_name}"
+    return 1
+  fi
+
+  # Apply with server-side + CRD retry. kapply::apply renders its own
+  # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating conflicts
+  # (interactive prompt, or --force-recreate), and passes CRD-not-installed /
+  # webhook-not-ready errors through unchanged so the transient-race retry below
+  # still fires. A herestring (not a pipe) keeps kapply in this shell so
+  # KAPPLY_LAST_OUTPUT is readable here.
+  local fp_rc=0
+  kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
+
+  # Unrecoverable conflict that wasn't healed (declined the prompt, or
+  # non-interactive without --force-recreate) — fail fast rather than
+  # "succeeding" and letting the next `lo up` / Tilt loop hit the same wall.
+  if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted|because it is being terminated' <<< "${KAPPLY_LAST_OUTPUT}"; then
+    error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)"
+    return 1
+  fi
+
+  # Transient race between an addon's controllers and the resources they own.
+  # Three symptoms: "ensure CRDs are installed first" and "no matches for kind"
+  # / "resource mapping not found" (a CR applied before its CRD is Established),
+  # and "failed calling webhook" (a CR applied before its validating/mutating
+  # webhook is serving — i.e. the webhook Deployment isn't Ready yet).
+  local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
+  if grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+    debug "bootstrap: ${addon_name} hit a CRD/webhook race — settling deps before retry"
+    # (1) CRDs must be Established before their CRs resolve.
+    kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
+      --for=condition=Established crd --all --timeout=60s || true
+    # (2) The KEY wait the old single-retry skipped: this addon's own
+    #     webhook/controller Deployments must be Available before the resources
+    #     they validate will apply. Wait on THIS addon's rendered workloads.
+    kapply::wait_ready "${addon_name}" 120 --kubeconfig "${kubeconfig}" <<< "${rendered}" || true
+    # (3) Retry with backoff to absorb the brief gap between a webhook
+    #     Deployment going Available and its Service endpoints being Ready.
+    local _attempt _rc=1 _max=6 _delay=3
+    for (( _attempt = 1; _attempt <= _max; _attempt++ )); do
+      _rc=0
+      kapply::apply --label "${addon_name} (retry ${_attempt}/${_max})" \
+        --kubeconfig "${kubeconfig}" <<< "${rendered}" || _rc=$?
+      if (( _rc == 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+        break
+      fi
+      sleep "${_delay}"
+      (( _delay < 15 )) && _delay=$(( _delay + 3 ))
+    done
+    if (( _rc != 0 )) || grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+      error "bootstrap: ${addon_name} still failing after ${_max} retries — CRDs/webhook not ready (see above)"
+      return 1
+    fi
+  fi
+
+  # The per-entry health wait is now the BARRIER — run it only for `wait: true`
+  # entries. Non-barrier entries deliberately skip it (that serial wait was the
+  # whole point of the refactor): the scheduler runs them concurrently and gates
+  # readiness at the next barrier (or the final drain). Best-effort: a timeout is
+  # a ⚠, not fatal — the caller decides whether to care.
+  if [[ -n "${do_wait}" ]]; then
+    debug "bootstrap: waiting for ${addon_name} workloads to become ready"
+    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
+  fi
+  return 0
+}
+
+# ── Parallel scheduler ───────────────────────────────────
+# spec.bootstrap entries apply CONCURRENTLY by default; only an explicit
+# `wait: true` entry is a barrier that (a) waits for the in-flight batch and then
+# (b) applies itself synchronously WITH a readiness wait, before any later entry
+# starts. This collapses the old strictly-serial apply-then-wait phase (~25
+# entries × up to 180s) down to roughly the slowest barrier chain.
+#
+# State is module-level (bash has no closures) so the reap/drain helpers can share
+# it with the bootstrap::apply loop; it is reset at the top of every run.
+_BS_INFLIGHT=()     # pids of running ( _apply_one ) & background jobs
+_BS_RCFILES=()      # parallel to _BS_INFLIGHT: each job's rc-capture file
+_BS_OVERALL_RC=0    # set to 1 if ANY entry (parallel or barrier) failed
+
+# OR a finished job's captured rc into _BS_OVERALL_RC (a missing file = failed).
+bootstrap::_collect_rc() {
+  local _rcf="$1" _r=1
+  [[ -f "${_rcf}" ]] && _r="$(cat "${_rcf}" 2>/dev/null || echo 1)"
+  [[ "${_r}" == "0" ]] || _BS_OVERALL_RC=1
+}
+
+# Wait for ALL in-flight jobs, collect their rcs, clear the batch. Used at a
+# barrier and at the final flush — never leaves orphans.
+bootstrap::_drain() {
+  local _i
+  for _i in "${!_BS_INFLIGHT[@]}"; do
+    wait "${_BS_INFLIGHT[_i]}" 2>/dev/null || true
+    bootstrap::_collect_rc "${_BS_RCFILES[_i]}"
+  done
+  _BS_INFLIGHT=()
+  _BS_RCFILES=()
+}
+
+# Free at least one slot: wait for the OLDEST in-flight job — a SPECIFIC pid, never
+# a bare `wait`/`wait -n` (which could reap a background job owned by the caller,
+# e.g. lo provision running bootstrap::apply in-process) — then prune every job
+# that has since finished, collecting their rcs.
+bootstrap::_reap_one() {
+  (( ${#_BS_INFLIGHT[@]} )) || return 0
+  wait "${_BS_INFLIGHT[0]}" 2>/dev/null || true
+  local -a _alive=() _alive_rcf=()
+  local _i
+  for _i in "${!_BS_INFLIGHT[@]}"; do
+    if (( _i > 0 )) && kill -0 "${_BS_INFLIGHT[_i]}" 2>/dev/null; then
+      _alive+=("${_BS_INFLIGHT[_i]}"); _alive_rcf+=("${_BS_RCFILES[_i]}")
+    else
+      bootstrap::_collect_rc "${_BS_RCFILES[_i]}"
+    fi
+  done
+  _BS_INFLIGHT=("${_alive[@]+"${_alive[@]}"}")
+  _BS_RCFILES=("${_alive_rcf[@]+"${_alive_rcf[@]}"}")
+}
+
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
-# Reads spec.bootstrap from the cluster YAML and applies each entry.
+# Reads spec.bootstrap from the cluster YAML and applies each entry. Independent
+# entries apply in parallel (capped at LOK8S_BOOTSTRAP_PARALLEL, default 8);
+# `wait: true` entries are barriers (see the scheduler block above).
 bootstrap::apply() {
   local domain="$1" cluster_yaml="$2" kubeconfig="$3"
 
@@ -133,132 +399,75 @@ bootstrap::apply() {
     debug "bootstrap: API endpoint ${LOK8S_USER_API_HOST}:${LOK8S_USER_API_PORT} (for addon envsubst)"
   fi
 
+  # ── Schedule entries: parallel batches split by `wait: true` barriers ──
+  local max_parallel="${LOK8S_BOOTSTRAP_PARALLEL:-8}"
+  [[ "${max_parallel}" =~ ^[0-9]+$ ]] && (( max_parallel >= 1 )) || max_parallel=8
+  local _rcdir; _rcdir=$(mktemp -d) \
+    || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
+  _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_OVERALL_RC=0
+  local _seq=0
 
   local entry
   for entry in "${bootstrap_entries[@]}"; do
     [[ -n "${entry}" ]] || continue
+    # A failure already surfaced (a finished parallel job, a barrier, or a parse
+    # error) — stop launching new entries; the post-loop drain flushes any
+    # in-flight so we never leave orphans, then we return non-zero.
+    (( _BS_OVERALL_RC == 0 )) || break
 
-    local addon_name="" addon_dir="" inline_values=""
-
-    # Each entry is compact JSON (see _resolve_entries): a scalar ("name" or a
-    # "./path") or a map {"name": <inline chart values>}. Read it structurally —
-    # the addon name and its values are real YAML, never string-split.
-    if [[ "${entry}" == \{* ]]; then
-      # Map entry: {"<addon>": <inline helm values>}
-      addon_name="$(yq -r 'keys | .[0]' <<<"${entry}")" \
-        || { error "bootstrap: failed to parse addon name from ${entry}"; return 1; }
-      inline_values="$(yq -r '.[]' <<<"${entry}")" \
-        || { error "bootstrap: failed to parse inline values from ${entry}"; return 1; }
-      addon_dir="${PATH_LOK8S}/addons/${addon_name}"
-    else
-      # Scalar entry — decode the JSON string to its raw value, then classify.
-      local raw; raw="$(yq -r '.' <<<"${entry}")"
-      if [[ "${raw}" == /* ]]; then
-        # Absolute path
-        addon_dir="${PATH_BASE}${raw}"
-        addon_name="$(basename "${raw}")"
-      elif [[ "${raw}" == ./* || "${raw}" == ../* ]]; then
-        # Relative path to cluster dir
-        addon_dir="${PATH_CLUSTERS}/${domain}/${raw}"
-        addon_name="$(basename "${raw}")"
-      else
-        # Bare name → framework addon
-        addon_name="${raw}"
-        addon_dir="${PATH_LOK8S}/addons/${raw}"
-      fi
+    local addon_name addon_dir inline_values env_lines do_wait
+    if ! bootstrap::_parse_entry "${domain}" "${entry}" \
+           addon_name addon_dir inline_values env_lines do_wait; then
+      _BS_OVERALL_RC=1; break
     fi
 
     if [[ ! -d "${addon_dir}" ]]; then
       error "bootstrap: addon not found: ${entry} (resolved to ${addon_dir})"
-      return 1
+      _BS_OVERALL_RC=1; break
     fi
 
-    # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` — as
-    # rendered custom addons (kubeone::render_addons), to break the cni:external
-    # deadlock declaratively (the CCM-init wait can't clear without a CNI). When
-    # the driver-managed objects are already up, re-applying them here from the
-    # kustomize render path is redundant and races the driver for field
-    # ownership — so defer both to the driver on KubeOne. Every other driver
-    # (Lo/Capi/Kkp) still gets them from bootstrap. Re-run `lo up` to reconcile.
-    if [[ "${kind}" == "kubeone" ]]; then
-      if [[ "${addon_name}" == "cilium" ]] \
-         && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
-        echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-        continue
-      fi
-      if [[ "${addon_name}" == "ccm" ]] \
-         && kubectl --kubeconfig "${kubeconfig}" -n kube-system get deploy hcloud-cloud-controller-manager &>/dev/null; then
-        echo "[bootstrap] ccm already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-        continue
-      fi
-    fi
-
-    # Render via the canonical khelm path (value-stacking + kustomize build +
-    # envsubst) — the SAME addons::render the KubeOne driver stages addons with.
-    debug "bootstrap: rendering ${addon_name}"
-    local rendered
-    if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}"); then
-      error "bootstrap: render failed for ${addon_name}"
-      return 1
-    fi
-
-    # Apply with server-side + CRD retry. kapply::apply renders its own
-    # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating
-    # conflicts (interactive prompt, or --force-recreate), and passes
-    # CRD-not-installed / webhook-not-ready errors through unchanged so the
-    # transient-race retry below still fires. A herestring (not a pipe) keeps
-    # kapply in this shell so KAPPLY_LAST_OUTPUT is readable here.
-    local fp_rc=0
-    kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
-
-    # Unrecoverable conflict that wasn't healed (declined the prompt, or
-    # non-interactive without --force-recreate) — fail fast rather than
-    # "succeeding" and letting the next `lo up` / Tilt loop hit the same wall.
-    if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted|because it is being terminated' <<< "${KAPPLY_LAST_OUTPUT}"; then
-      error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)"
-      return 1
-    fi
-
-    # Transient race between an addon's controllers and the resources they own.
-    # Three symptoms: "ensure CRDs are installed first" and "no matches for kind"
-    # / "resource mapping not found" (a CR applied before its CRD is Established),
-    # and "failed calling webhook" (a CR applied before its validating/mutating
-    # webhook is serving — i.e. the webhook Deployment isn't Ready yet).
-    local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
-    if grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
-      debug "bootstrap: ${addon_name} hit a CRD/webhook race — settling deps before retry"
-      # (1) CRDs must be Established before their CRs resolve.
-      kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
-        --for=condition=Established crd --all --timeout=60s || true
-      # (2) The KEY wait the old single-retry skipped: this addon's own
-      #     webhook/controller Deployments must be Available before the resources
-      #     they validate will apply. Wait on THIS addon's rendered workloads.
-      kapply::wait_ready "${addon_name}" 120 --kubeconfig "${kubeconfig}" <<< "${rendered}" || true
-      # (3) Retry with backoff to absorb the brief gap between a webhook
-      #     Deployment going Available and its Service endpoints being Ready.
-      local _attempt _rc=1 _max=6 _delay=3
-      for (( _attempt = 1; _attempt <= _max; _attempt++ )); do
-        _rc=0
-        kapply::apply --label "${addon_name} (retry ${_attempt}/${_max})" \
-          --kubeconfig "${kubeconfig}" <<< "${rendered}" || _rc=$?
-        if (( _rc == 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
-          break
-        fi
-        sleep "${_delay}"
-        (( _delay < 15 )) && _delay=$(( _delay + 3 ))
+    if [[ "${do_wait}" == "true" ]]; then
+      # BARRIER: finish the in-flight parallel batch first, then apply this entry
+      # synchronously WITH a readiness wait before any later entry starts. Runs in
+      # the foreground (one at a time) so kapply's interactive heal prompt / tty
+      # progress still work for it. The `( … )` keeps KAPPLY_LAST_OUTPUT local.
+      bootstrap::_drain
+      (( _BS_OVERALL_RC == 0 )) || break
+      local _brc=0
+      ( bootstrap::_apply_one "${addon_name}" "${addon_dir}" "${kind}" "${provider_name}" \
+          "${kubeconfig}" "${inline_values}" "wait" "${env_lines}" ) || _brc=$?
+      (( _brc == 0 )) || _BS_OVERALL_RC=1
+    else
+      # PARALLEL: throttle to the concurrency cap, then launch in the background.
+      # LOK8S_NONINTERACTIVE: N concurrent applies can't share the single /dev/tty
+      # for kapply's collapsing progress UI or its interactive heal prompt — force
+      # the plain, non-interactive path (immutable/terminating still fail fast; a
+      # --force-recreate heal still works, it just never prompts). For clean
+      # one-at-a-time output set LOK8S_BOOTSTRAP_PARALLEL=1 (still skips the serial
+      # per-entry health wait, so still far faster than the old path).
+      while (( ${#_BS_INFLIGHT[@]} >= max_parallel )); do
+        bootstrap::_reap_one
       done
-      if (( _rc != 0 )) || grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
-        error "bootstrap: ${addon_name} still failing after ${_max} retries — CRDs/webhook not ready (see above)"
-        return 1
-      fi
+      _seq=$(( _seq + 1 ))
+      local _rcf="${_rcdir}/${_seq}.rc"
+      # Capture the rc EXPLICITLY (|| _arc=$?) rather than relying on set -e to
+      # let `echo $?` run — under errexit a failing _apply_one would abort the
+      # subshell before the rc was written. _drain treats a missing file as a
+      # failure too, but writing it keeps the signal unambiguous.
+      ( export LOK8S_NONINTERACTIVE=1
+        _arc=0
+        bootstrap::_apply_one "${addon_name}" "${addon_dir}" "${kind}" "${provider_name}" \
+          "${kubeconfig}" "${inline_values}" "" "${env_lines}" || _arc=$?
+        echo "${_arc}" > "${_rcf}" ) &
+      _BS_INFLIGHT+=("$!")
+      _BS_RCFILES+=("${_rcf}")
     fi
-
-    # Wait only for THIS addon's own workloads (from its rendered manifest) —
-    # not every Deployment in the cluster, which would block on app workloads
-    # and addons applied later. Best-effort: a timeout is a ⚠, not fatal.
-    debug "bootstrap: waiting for ${addon_name} workloads to become ready"
-    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
   done
+
+  # Flush the final parallel batch (collect rcs) — no orphans — then report.
+  bootstrap::_drain
+  rm -rf "${_rcdir}"
+  return "${_BS_OVERALL_RC}"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::bootstrap "${@}"
