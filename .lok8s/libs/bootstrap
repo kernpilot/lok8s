@@ -142,6 +142,19 @@ bootstrap::_parse_entry() {
       || { error "bootstrap: failed to parse addon name from ${_entry}"; return 1; }
     _valjson="$(yq -o=json -I=0 '.[]' <<<"${_entry}")" \
       || { error "bootstrap: failed to parse entry value from ${_entry}"; return 1; }
+    # The map VALUE must itself be a map (the {values,env,wait} schema, or the
+    # legacy whole-map-is-helm-values form) or null/empty. A scalar or sequence
+    # value — e.g. `- addon: true` → {"addon":true}, or `- addon: []` →
+    # {"addon":[]} — would let the reserved-key / legacy-values logic below run
+    # `yq '.values'/'.env'/'.wait'` against a scalar/seq and misbehave. Reject it
+    # up front with a clear type.
+    local _val_tag
+    _val_tag="$(yq -r 'tag' <<<"${_valjson}")" \
+      || { error "bootstrap: failed to parse entry value from ${_entry}"; return 1; }
+    if [[ "${_val_tag}" != "!!map" && "${_val_tag}" != "!!null" ]]; then
+      error "bootstrap: '${_raw}' entry value must be a map of {values,env,wait} or chart values, got ${_val_tag#!!}"
+      return 1
+    fi
   else
     # Scalar entry — decode the JSON string to its raw value.
     _raw="$(yq -r '.' <<<"${_entry}")" \
@@ -204,6 +217,18 @@ bootstrap::_parse_entry() {
         error "bootstrap: '${_raw}' env: values must be scalars; non-scalar value for: ${_bad_env//$'\n'/, } (did you mean values:?)"
         return 1
       fi
+      # Each env: key is exported VERBATIM by _apply_one, so it must be a valid
+      # POSIX shell variable name. A key containing '-'/'.' , starting with a
+      # digit, or empty would make `export` fail or silently misbehave. Validate
+      # here (fail fast at parse time, before any apply) with a clear message.
+      local _ek
+      while IFS= read -r _ek; do
+        [[ -n "${_ek}" ]] || continue
+        if [[ ! "${_ek}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          error "bootstrap: '${_raw}' env: key '${_ek}' is not a valid shell variable name (must match [A-Za-z_][A-Za-z0-9_]*)"
+          return 1
+        fi
+      done < <(yq -r '.env // {} | keys | .[]' <<<"${_valjson}")
       # Flatten env: {KEY: scalar} → newline-separated KEY=val lines (scalar
       # values, coerced to string). Consumed by _apply_one as exported env vars.
       _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"

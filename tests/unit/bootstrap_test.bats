@@ -530,6 +530,35 @@ YAML
   assert_output --partial "non-boolean wait"
 }
 
+@test "_parse_entry: map entry with a non-map value is rejected" {
+  # A map-form entry's VALUE must itself be a map (the {values,env,wait} schema
+  # or legacy chart values) or null. A scalar — `- addon: true` → {"addon":true}
+  # — or a sequence — `- addon: []` → {"addon":[]} — would let the reserved-key /
+  # legacy-values logic run yq '.values'/'.wait' against a scalar/seq. Reject it.
+  run bootstrap::_parse_entry "test.lok8s.dev" '{"testcni":true}' n d i e w
+  assert_failure
+  assert_output --partial "entry value must be a map"
+
+  run bootstrap::_parse_entry "test.lok8s.dev" '{"testcni":[]}' n d i e w
+  assert_failure
+  assert_output --partial "entry value must be a map"
+}
+
+@test "_parse_entry: env: key with an illegal shell name is rejected" {
+  # Each env: key is exported VERBATIM by _apply_one, so it must be a valid POSIX
+  # shell variable name. A name with a '-' would make `export` fail/misbehave.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"env":{"MY-VAR":"x"}}}' n d i e w
+  assert_failure
+  assert_output --partial "not a valid shell variable name"
+
+  # A leading-digit name is equally invalid.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"env":{"1X":"y"}}}' n d i e w
+  assert_failure
+  assert_output --partial "not a valid shell variable name"
+}
+
 # --- env wiring: env: {…} → exported around addons::render --------------------
 
 @test "bootstrap::apply exports env: overrides into the addons::render env" {
