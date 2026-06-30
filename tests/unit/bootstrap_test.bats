@@ -598,6 +598,9 @@ YAML
 # --- scheduler: parallel batches split by wait: true barriers ----------------
 
 @test "bootstrap::apply runs non-barrier entries concurrently; wait:true serializes" {
+  # Pin parallelism so the overlap assertions are deterministic regardless of the
+  # ambient env (a CI runner exporting LOK8S_BOOTSTRAP_PARALLEL=1 would serialize).
+  export LOK8S_BOOTSTRAP_PARALLEL=8
   # Mock the per-entry apply with a timestamped START/END log + a fixed sleep so
   # we can assert real-time interleaving from the line order in the log.
   local log="${BATS_TEST_TMPDIR}/order.log"
@@ -656,6 +659,9 @@ YAML
   # One entry fails; the others succeed. apply must drain the whole batch and
   # then report failure — never leaving a background job behind AND removing the
   # scheduler's rc temp dir.
+  # Pin parallelism so all three launch in one wave (the runner stops launching
+  # after a failure surfaces) regardless of the ambient LOK8S_BOOTSTRAP_PARALLEL.
+  export LOK8S_BOOTSTRAP_PARALLEL=8
   local done_log="${BATS_TEST_TMPDIR}/done.log"
   : > "${done_log}"
   bootstrap::_apply_one() {
@@ -943,6 +949,37 @@ YAML
   assert_output --partial "non-empty scalar"
 }
 
+@test "_parse_entry: unquoted bool name: is rejected (must be a string)" {
+  # `name: true` (an unquoted YAML bool, tag !!bool) coerces to "true" and would
+  # slip past the [A-Za-z0-9._-]+ charset check — almost certainly a mistake. The
+  # name: identifier must be a STRING scalar, so reject the bare bool.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":true}}' n d i e w x
+  assert_failure
+  assert_output --partial "non-empty scalar"
+}
+
+@test "_parse_entry: unquoted int name: is rejected (must be a string)" {
+  # `name: 123` (an unquoted YAML int, tag !!int) coerces to "123" and would pass
+  # the charset check — reject it the same way (require a string scalar).
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":123}}' n d i e w x
+  assert_failure
+  assert_output --partial "non-empty scalar"
+}
+
+@test "_parse_entry: a QUOTED string name: that looks like a bool/int is accepted" {
+  # The flip side of the two above: name: "true" / "123" are !!str — a deliberate
+  # string identity, NOT the unquoted-bool/int mistake — so they pass the charset
+  # check and are used verbatim as the entry identifier.
+  local p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":"true"}}' \
+    p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  [ "${p_name}" = "true" ]
+  [ "${p_explicit}" = "true" ]
+}
+
 # --- dependsOn: graph validation (bootstrap::apply) --------------------------
 
 @test "bootstrap::apply errors on dependsOn to an unknown entry" {
@@ -994,6 +1031,8 @@ YAML
   # A (dep-target), B dependsOn:[a], C (independent). B must START only after A
   # ENDS; C must run CONCURRENTLY with A (not gated behind it). Same timestamped
   # START/END + sleep technique as the wait:true barrier test.
+  # Pin parallelism so the a/c overlap assertion doesn't depend on the ambient env.
+  export LOK8S_BOOTSTRAP_PARALLEL=8
   local log="${BATS_TEST_TMPDIR}/dag.log"
   : > "${log}"
   bootstrap::_apply_one() {
@@ -1119,6 +1158,9 @@ YAML
   # dependency); C is independent and STILL runs. apply drains the batch, returns
   # non-zero, leaves no orphan job, and removes its rc temp dir. The test itself
   # completing at all proves the DAG still terminates (no hang) on the failure path.
+  # Pin parallelism so A and the independent C launch in the SAME wave (the runner
+  # stops launching after A's failure surfaces); else C could be starved at =1.
+  export LOK8S_BOOTSTRAP_PARALLEL=8
   local ran_log="${BATS_TEST_TMPDIR}/ran.log"
   : > "${ran_log}"
   bootstrap::_apply_one() {
@@ -1189,6 +1231,8 @@ YAML
 @test "bootstrap::apply: name: override is the dependsOn reference target" {
   # foo (basename) + ./x renamed to bar; c dependsOn:[bar] must wait for the ./x
   # entry — resolved by the OVERRIDE name, not ./x's basename. foo stays parallel.
+  # Pin parallelism so the foo/bar overlap assertion doesn't depend on the ambient env.
+  export LOK8S_BOOTSTRAP_PARALLEL=8
   local log="${BATS_TEST_TMPDIR}/name.log"
   : > "${log}"
   bootstrap::_apply_one() {

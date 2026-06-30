@@ -205,7 +205,12 @@ bootstrap::_parse_entry() {
     if [[ "$(yq -r 'has("name")' <<<"${_valjson}")" == "true" ]]; then
       local _name_tag _oname
       _name_tag="$(yq -r '.name | tag' <<<"${_valjson}")"
-      if [[ "${_name_tag}" == "!!map" || "${_name_tag}" == "!!seq" || "${_name_tag}" == "!!null" ]]; then
+      # name: must be a STRING scalar — reject any other tag (!!bool, !!int,
+      # !!float, !!null, !!map, !!seq). An unquoted YAML bool/int (name: true,
+      # name: 123) coerces to "true"/"123" and would slip past the charset check
+      # below — almost certainly a mistake, so require quoting. A QUOTED
+      # "true"/"123" is !!str and still passes.
+      if [[ "${_name_tag}" != "!!str" ]]; then
         error "bootstrap: '${_raw}' name: must be a non-empty scalar entry name (got ${_name_tag#!!})"
         return 1
       fi
