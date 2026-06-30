@@ -134,8 +134,41 @@ spec:
   is an error.
 - **`env:`** — extra envsubst variables exported only while *this* entry renders.
   Name them to match the whitelist the addons reference (`LOK8S_USER_*` /
-  `LOK8S_SPEC_*`), e.g. cilium's `${LOK8S_USER_API_HOST}`.
-- **`wait:`** — barrier flag, default `false` (see next section).
+  `LOK8S_SPEC_*`), e.g. cilium's `${LOK8S_USER_API_HOST}`. Each value must be a
+  scalar (`KEY: value`); a map/array value is rejected.
+- **`wait:`** — barrier flag, default `false` (see next section). Must be a real
+  boolean (`true`/`false`); `yes`/`on`/`1` are rejected.
+
+::: danger BREAKING CHANGE — migrate before your next `lo up`
+`values`, `env`, and `wait` are now **reserved keys** at the top level of an
+inline map entry. Any one of them present switches the entry to the explicit
+schema above. This **silently changes the meaning** of a legacy entry whose
+inline Helm values *happen to use one of those names as a top-level chart value*.
+
+The canonical case is the hcloud CCM, whose chart takes a top-level `env:` block:
+
+```yaml
+# BEFORE — `env` was a Helm chart value (whole map = inline values)
+- ccm:
+    env:
+      ROBOT_ENABLED: { value: "true" }
+
+# AFTER — `env` is now the reserved envsubst key, so the line above is
+#         reinterpreted as envsubst overrides (and its map value is rejected).
+#         Nest the chart values under `values:`:
+- ccm:
+    values:
+      env:
+        ROBOT_ENABLED: { value: "true" }
+```
+
+The same applies to any addon whose Helm values define a top-level `values`,
+`env`, or `wait` key. There is **no automatic migration and (for `values`/`wait`)
+no error** — the entry just renders different values — so audit every inline
+`spec.bootstrap` map entry and move such keys under `values:` **before** the next
+`lo up` / `lo provision`. (A misplaced `env:` map *does* now error out, per the
+scalar rule above, which will catch the CCM case loudly.)
+:::
 
 ## Parallelism and barriers
 

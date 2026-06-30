@@ -125,7 +125,16 @@ bootstrap::_parse_entry() {
 
   local _raw _valjson=""
   if [[ "${_entry}" == \{* ]]; then
-    # Map entry {"<name-or-path>": <value>}
+    # Map entry {"<name-or-path>": <value>} — must have EXACTLY one key. A
+    # multi-key map is a config mistake (and `yq '.[]'` below would emit one
+    # value per key, silently mixing them).
+    local _nkeys
+    _nkeys="$(yq -r 'keys | length' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse addon name from ${_entry}"; return 1; }
+    if [[ "${_nkeys}" != "1" ]]; then
+      error "bootstrap: entry must be a single-key map, got ${_nkeys} keys: ${_entry}"
+      return 1
+    fi
     _raw="$(yq -r 'keys | .[0]' <<<"${_entry}")" \
       || { error "bootstrap: failed to parse addon name from ${_entry}"; return 1; }
     _valjson="$(yq -o=json -I=0 '.[]' <<<"${_entry}")" \
@@ -153,6 +162,13 @@ bootstrap::_parse_entry() {
   if [[ "$(yq -r 'has("values") or has("env") or has("wait")' <<<"${_valjson}")" == "true" ]]; then
     # NEW schema.
     _o_wait="$(yq -r '.wait // false' <<<"${_valjson}")"
+    # `wait:` must be a real boolean. A non-boolean scalar (yes/on/1, …) would
+    # silently parse as a non-barrier — reject it. A YAML/JSON bool renders as
+    # the string "true"/"false" here, the only accepted forms.
+    if [[ "${_o_wait}" != "true" && "${_o_wait}" != "false" ]]; then
+      error "bootstrap: '${_raw}' has a non-boolean wait: '${_o_wait}' (use true or false)"
+      return 1
+    fi
     if [[ "$(yq -r 'has("values")' <<<"${_valjson}")" == "true" ]]; then
       if [[ ! -f "${_o_dir}/chart.yaml" ]]; then
         error "bootstrap: '${_raw}' sets 'values:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'values:' is helm-only"
@@ -161,6 +177,16 @@ bootstrap::_parse_entry() {
       _o_inline="$(yq -r '.values' <<<"${_valjson}")"
     fi
     if [[ "$(yq -r 'has("env")' <<<"${_valjson}")" == "true" ]]; then
+      # env: takes KEY: scalar only. A map/array value would tostring-flatten to
+      # a bogus string (e.g. the ccm chart-value `env:` map mistakenly placed at
+      # the reserved-key level instead of under values:) — reject it so the
+      # mistake is loud, not silent.
+      local _bad_env
+      _bad_env="$(yq -r '.env // {} | to_entries[] | select((.value | tag == "!!map") or (.value | tag == "!!seq")) | .key' <<<"${_valjson}")"
+      if [[ -n "${_bad_env}" ]]; then
+        error "bootstrap: '${_raw}' env: values must be scalars; non-scalar value for: ${_bad_env//$'\n'/, } (did you mean values:?)"
+        return 1
+      fi
       # Flatten env: {KEY: scalar} → newline-separated KEY=val lines (scalar
       # values, coerced to string). Consumed by _apply_one as exported env vars.
       _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"
@@ -255,6 +281,16 @@ bootstrap::_apply_one() {
   # and "failed calling webhook" (a CR applied before its validating/mutating
   # webhook is serving — i.e. the webhook Deployment isn't Ready yet).
   local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
+
+  # Generic apply failure: kapply::apply returned non-zero and the output matches
+  # NEITHER an immutable/terminating conflict (handled above) NOR the transient
+  # CRD/webhook race (retried below). Fail rather than silently "succeeding" and
+  # letting the next `lo up` / Tilt loop hit the same wall.
+  if (( fp_rc != 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+    error "bootstrap: ${addon_name} apply failed (rc=${fp_rc}) — see above"
+    return 1
+  fi
+
   if grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
     debug "bootstrap: ${addon_name} hit a CRD/webhook race — settling deps before retry"
     # (1) CRDs must be Established before their CRs resolve.
@@ -327,17 +363,32 @@ bootstrap::_drain() {
   _BS_RCFILES=()
 }
 
-# Free at least one slot: wait for the OLDEST in-flight job — a SPECIFIC pid, never
-# a bare `wait`/`wait -n` (which could reap a background job owned by the caller,
-# e.g. lo provision running bootstrap::apply in-process) — then prune every job
-# that has since finished, collecting their rcs.
+# Free at least one slot: wait for ANY one of OUR in-flight jobs to finish (not
+# necessarily the oldest), so one slow job can't block scheduling while faster
+# ones have already completed. RESTRICTED to our own pids — never a bare `wait`
+# or bare `wait -n` (which could reap a background job owned by the caller, e.g.
+# lo provision running bootstrap::apply in-process). On bash 5.1+ this uses
+# `wait -n -p <var> <pids…>` (wait for any of the listed pids, capturing which
+# one finished); older bash falls back to FIFO `wait <oldest-pid>`. Either way we
+# then prune every job that has since finished, collecting their rcs from the
+# rc-capture files (so rc accounting is identical on both paths).
 bootstrap::_reap_one() {
   (( ${#_BS_INFLIGHT[@]} )) || return 0
-  wait "${_BS_INFLIGHT[0]}" 2>/dev/null || true
+  local _finished=""
+  if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+    # bash 5.1+: -n restricted to our pids, -p captures the one that finished.
+    wait -n -p _finished "${_BS_INFLIGHT[@]}" 2>/dev/null || true
+  fi
+  if [[ -z "${_finished}" ]]; then
+    # Fallback (bash < 5.1, or -p left it empty): wait the OLDEST pid.
+    _finished="${_BS_INFLIGHT[0]}"
+    wait "${_finished}" 2>/dev/null || true
+  fi
+  # Prune the reaped job plus any others that have since died; keep the alive.
   local -a _alive=() _alive_rcf=()
   local _i
   for _i in "${!_BS_INFLIGHT[@]}"; do
-    if (( _i > 0 )) && kill -0 "${_BS_INFLIGHT[_i]}" 2>/dev/null; then
+    if [[ "${_BS_INFLIGHT[_i]}" != "${_finished}" ]] && kill -0 "${_BS_INFLIGHT[_i]}" 2>/dev/null; then
       _alive+=("${_BS_INFLIGHT[_i]}"); _alive_rcf+=("${_BS_RCFILES[_i]}")
     else
       bootstrap::_collect_rc "${_BS_RCFILES[_i]}"

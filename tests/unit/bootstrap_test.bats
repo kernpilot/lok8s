@@ -484,6 +484,33 @@ YAML
   assert_output --partial "not a chart addon"
 }
 
+@test "_parse_entry: map-valued env entry is rejected (the ccm-break case)" {
+  # `env:` takes KEY: scalar only. A map value — e.g. the hcloud CCM chart's own
+  # top-level `env:` block accidentally left at the reserved-key level instead of
+  # nested under `values:` — would tostring-flatten to a bogus string. Reject it.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"env":{"ROBOT_ENABLED":{"value":"true"}}}}' n d i e w
+  assert_failure
+  assert_output --partial "env: values must be scalars"
+}
+
+@test "_parse_entry: multi-key map entry is rejected" {
+  # A bootstrap entry must be a SINGLE-key map; two keys is a config mistake.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"wait":true},"other":{"wait":false}}' n d i e w
+  assert_failure
+  assert_output --partial "single-key map"
+}
+
+@test "_parse_entry: non-boolean wait is rejected" {
+  # `wait: yes` (or on/1) must NOT silently become a non-barrier — only a real
+  # boolean true/false is accepted.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"wait":"yes"}}' n d i e w
+  assert_failure
+  assert_output --partial "non-boolean wait"
+}
+
 # --- env wiring: env: {…} → exported around addons::render --------------------
 
 @test "bootstrap::apply exports env: overrides into the addons::render env" {
@@ -574,9 +601,10 @@ YAML
   [ "${se}" -gt "${ec_}" ]
 }
 
-@test "bootstrap::apply returns non-zero if any parallel entry fails (no orphans)" {
+@test "bootstrap::apply returns non-zero if any parallel entry fails (no orphans, temp dir cleaned)" {
   # One entry fails; the others succeed. apply must drain the whole batch and
-  # then report failure (never leave a background job behind).
+  # then report failure — never leaving a background job behind AND removing the
+  # scheduler's rc temp dir.
   local done_log="${BATS_TEST_TMPDIR}/done.log"
   : > "${done_log}"
   bootstrap::_apply_one() {
@@ -585,6 +613,19 @@ YAML
     printf '%s\n' "${name}" >> "${done_log}"
     [ "${name}" = "b" ] && return 1
     return 0
+  }
+  # Capture the scheduler's rc temp dir (the only `mktemp -d` reached here, since
+  # _apply_one is stubbed) so we can assert it is cleaned up afterward.
+  local rcdir_marker="${BATS_TEST_TMPDIR}/rcdir_path"
+  : > "${rcdir_marker}"
+  mktemp() {
+    if [ "$1" = "-d" ]; then
+      local d; d="$(command mktemp -d "${BATS_TEST_TMPDIR}/rcdir.XXXXXX")"
+      printf '%s\n' "${d}" > "${rcdir_marker}"
+      printf '%s\n' "${d}"
+      return 0
+    fi
+    command mktemp "$@"
   }
   local n
   for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
@@ -601,9 +642,66 @@ spec:
     - b
     - c
 YAML
-  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
-  assert_failure
+  # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
+  # background jobs land in THIS shell's job table — lets us prove no orphan
+  # survives. `|| rc=$?` keeps a non-zero from tripping bats' errexit.
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+  [ "${rc}" -ne 0 ]
+
   # All three were launched in the same batch and drained (no orphan left).
   run wc -l < "${done_log}"
   assert_output "3"
+
+  # No surviving background jobs. `jobs -p` must run in the current shell (not a
+  # `$()`/`run` subshell, which has its own empty job table) — redirect to a file.
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
+
+  # The scheduler's rc temp dir was removed.
+  local rcdir; rcdir="$(cat "${rcdir_marker}")"
+  [ -n "${rcdir}" ]
+  [ ! -d "${rcdir}" ]
+}
+
+@test "bootstrap::apply throttle frees a slot when ANY job finishes (not just the oldest)" {
+  # Verify the free-any-slot throttle: with a low cap and one slow leading entry,
+  # the faster trailing entries must still complete promptly — they can't be
+  # blocked waiting on the oldest (slow) pid.
+  (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )) \
+    || skip "wait -n -p needs bash 5.1+ (FIFO fallback is order-sensitive)"
+  export LOK8S_BOOTSTRAP_PARALLEL=2
+  local log="${BATS_TEST_TMPDIR}/throttle.log"
+  : > "${log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    if [ "${name}" = "a" ]; then sleep 0.8; else sleep 0.1; fi
+    printf '%s\n' "${name}" >> "${log}"
+    return 0
+  }
+  local n; for n in a b c d; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b
+    - c
+    - d
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  # All four completed.
+  run wc -l < "${log}"
+  assert_output "4"
+  # 'a' started first but is slowest: with free-any throttling b/c/d finish while
+  # 'a' is still running, so 'a' is recorded LAST. (FIFO-on-oldest would block on
+  # 'a' and let 'd' land last instead.)
+  run tail -1 "${log}"
+  assert_output "a"
 }
