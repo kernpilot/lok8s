@@ -1016,3 +1016,73 @@ YAML
   ! grep -qx 'b' "${waitlog}"
   ! grep -qx 'c' "${waitlog}"
 }
+
+@test "bootstrap::apply: a failed entry's dependents are skipped; independents still run" {
+  # A fails; B dependsOn:[a] must be SKIPPED (you never start work behind a broken
+  # dependency); C is independent and STILL runs. apply drains the batch, returns
+  # non-zero, leaves no orphan job, and removes its rc temp dir. The test itself
+  # completing at all proves the DAG still terminates (no hang) on the failure path.
+  local ran_log="${BATS_TEST_TMPDIR}/ran.log"
+  : > "${ran_log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    sleep 0.1
+    printf '%s\n' "${name}" >> "${ran_log}"
+    [ "${name}" = "a" ] && return 1   # A fails
+    return 0
+  }
+  # Capture the scheduler's rc temp dir (the only `mktemp -d` reached, since
+  # _apply_one is stubbed) so we can assert it is cleaned up afterward.
+  local rcdir_marker="${BATS_TEST_TMPDIR}/rcdir_path"
+  : > "${rcdir_marker}"
+  mktemp() {
+    if [ "$1" = "-d" ]; then
+      local d; d="$(command mktemp -d "${BATS_TEST_TMPDIR}/rcdir.XXXXXX")"
+      printf '%s\n' "${d}" > "${rcdir_marker}"
+      printf '%s\n' "${d}"
+      return 0
+    fi
+    command mktemp "$@"
+  }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        dependsOn: [a]
+    - c
+YAML
+  # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
+  # background jobs land in THIS shell's job table — lets us prove no orphan
+  # survives. `|| rc=$?` keeps the non-zero from tripping bats' errexit.
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+
+  # apply reports failure (A failed).
+  [ "${rc}" -ne 0 ]
+
+  # A ran and failed; C (independent of A) still ran.
+  grep -qx 'a' "${ran_log}"
+  grep -qx 'c' "${ran_log}"
+
+  # B (dependsOn the failed A) was NEVER applied — a failed entry's dependents are
+  # skipped (the runner stops launching once a failure surfaces, before B's now-
+  # "completed" dep could make it launchable).
+  ! grep -qx 'b' "${ran_log}"
+
+  # No surviving background jobs (no orphan left behind on the failure path).
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
+
+  # The scheduler's rc temp dir was removed.
+  local rcdir; rcdir="$(cat "${rcdir_marker}")"
+  [ -n "${rcdir}" ]
+  [ ! -d "${rcdir}" ]
+}

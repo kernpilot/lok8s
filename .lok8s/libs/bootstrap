@@ -496,9 +496,12 @@ bootstrap::_reap_one() {
 }
 
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
-# Reads spec.bootstrap from the cluster YAML and applies each entry. Independent
-# entries apply in parallel (capped at LOK8S_BOOTSTRAP_PARALLEL, default 8);
-# `wait: true` entries are barriers (see the scheduler block above).
+# Reads spec.bootstrap from the cluster YAML and runs the entries as a
+# topological-parallel DAG (independent entries in parallel, capped at
+# LOK8S_BOOTSTRAP_PARALLEL, default 8). Two things add ordering edges: `wait: true`
+# is a GLOBAL gate (edges to/from every entry positionally before/after it) and
+# `dependsOn:` adds explicit edges. Edge resolution + cycle detection are below
+# (see the scheduler block above).
 bootstrap::apply() {
   local domain="$1" cluster_yaml="$2" kubeconfig="$3"
 
@@ -584,7 +587,7 @@ bootstrap::apply() {
     local _dname _j
     while IFS= read -r _dname; do
       [[ -n "${_dname}" ]] || continue
-      _j="${_name2idx[${_dname}]:-}"
+      _j="${_name2idx["${_dname}"]:-}"
       if [[ -z "${_j}" ]]; then
         error "bootstrap: dependsOn: unknown entry '${_dname}'"
         return 1
@@ -624,7 +627,7 @@ bootstrap::apply() {
     _u="${_queue[0]}"; _queue=("${_queue[@]:1}")
     _processed=$(( _processed + 1 ))
     _adj=()
-    [[ -z "${_dependents[${_u}]:-}" ]] || read -ra _adj <<< "${_dependents[${_u}]}"
+    [[ -z "${_dependents["${_u}"]:-}" ]] || read -ra _adj <<< "${_dependents["${_u}"]}"
     for _v in "${_adj[@]+"${_adj[@]}"}"; do
       _indeg[_v]=$(( _indeg[_v] - 1 ))
       (( _indeg[_v] == 0 )) && _queue+=("${_v}")
@@ -653,13 +656,18 @@ bootstrap::apply() {
     if (( _BS_OVERALL_RC == 0 )); then
       local _i2
       for (( _i2 = 0; _i2 < n; _i2++ )); do
-        [[ -z "${_started[${_i2}]:-}" ]] || continue
+        # A foreground gate (below) can flip _BS_OVERALL_RC mid-pass; re-check so
+        # we never launch an entry positioned behind a just-failed gate in the
+        # SAME pass (the background path only surfaces failure on reap, already
+        # guarded by the outer `if` next iteration — keep both paths consistent).
+        (( _BS_OVERALL_RC == 0 )) || break
+        [[ -z "${_started["${_i2}"]:-}" ]] || continue
         (( ${#_BS_INFLIGHT[@]} < max_parallel )) || break
         local _ready=1 _d2
         local -a _dl=()
         [[ -z "${_edeps[_i2]}" ]] || read -ra _dl <<< "${_edeps[_i2]}"
         for _d2 in "${_dl[@]+"${_dl[@]}"}"; do
-          [[ -n "${_BS_COMPLETED[${_d2}]:-}" ]] || { _ready=0; break; }
+          [[ -n "${_BS_COMPLETED["${_d2}"]:-}" ]] || { _ready=0; break; }
         done
         (( _ready )) || continue
         # Readiness wait IFF something needs this entry Ready: a dep-target or a
@@ -668,12 +676,37 @@ bootstrap::apply() {
         if (( _istarget[_i2] )) || [[ "${_waits[_i2]}" == "true" ]]; then
           _wflag="wait"
         fi
-        _started[${_i2}]=1
+        _started["${_i2}"]=1
+
+        if [[ "${_waits[_i2]}" == "true" ]]; then
+          # wait: true GATE — run it SYNCHRONOUSLY in the FOREGROUND, NOT as a
+          # backgrounded subshell and WITHOUT LOK8S_NONINTERACTIVE, so kapply keeps
+          # a usable /dev/tty for its interactive immutable/terminating heal prompt
+          # (a background job has no controlling tty → kapply::_interactive is
+          # false → it can never prompt). This loses NO concurrency: a gate
+          # provably runs ALONE — it depends on every entry positionally before it
+          # (all therefore already completed AND reaped, so nothing is in flight)
+          # and every entry after it depends on the gate (none is launchable until
+          # the gate completes). The ( … ) subshell still isolates the
+          # KAPPLY_LAST_OUTPUT global, yet — being foreground, not `&` — inherits
+          # the terminal. Mark it completed INLINE (same as the reap path) so its
+          # dependents become launchable on the next pass; capture rc EXPLICITLY
+          # (|| _garc=$?) so an errexit-failing apply can't abort the runner.
+          local _garc=0
+          ( bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
+              "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" ) || _garc=$?
+          (( _garc == 0 )) || _BS_OVERALL_RC=1
+          _BS_COMPLETED["${_i2}"]=1
+          _BS_DONE=$(( _BS_DONE + 1 ))
+          continue
+        fi
+
         _seq=$(( _seq + 1 ))
         local _rcf="${_rcdir}/${_seq}.rc"
-        # Each entry runs in its own subshell so KAPPLY_LAST_OUTPUT stays isolated
-        # across concurrent applies; LOK8S_NONINTERACTIVE because N applies can't
-        # share /dev/tty for kapply's collapsing progress UI / interactive heal
+        # Non-gate entries fan out as concurrent BACKGROUND subshells: each in its
+        # own subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent
+        # applies; LOK8S_NONINTERACTIVE because N backgrounded applies have no
+        # shared /dev/tty for kapply's collapsing progress UI / interactive heal
         # prompt (immutable/terminating still fail fast; --force-recreate still
         # heals, it just never prompts). Capture the rc EXPLICITLY (|| _arc=$?) —
         # under errexit a failing _apply_one would abort before `echo $?` runs;
