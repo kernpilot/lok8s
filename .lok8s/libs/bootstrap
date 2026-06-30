@@ -253,7 +253,17 @@ bootstrap::_parse_entry() {
       # Each element must be a scalar name; reject map/seq elements. Extract the
       # per-element tag (one per line) and check in bash — yq's `==` precedence
       # inside select() makes a single-expression filter unreliable here.
-      if yq -r '.dependsOn[] | tag' <<<"${_valjson}" | grep -qxE '!!(map|seq)'; then
+      local -a _dep_tags=()
+      mapfile -t _dep_tags < <(yq -r '.dependsOn[] | tag' <<<"${_valjson}")
+      # A null element (`dependsOn: [~]` / a bare `-` list item) is NOT a name: it
+      # would coerce to the literal string "null" via tostring below and then fail
+      # downstream as a confusing "unknown entry 'null'". Reject it right here at
+      # the element-type validation with a clear message.
+      if printf '%s\n' "${_dep_tags[@]+"${_dep_tags[@]}"}" | grep -qxF '!!null'; then
+        error "bootstrap: '${_raw}' dependsOn: null element — must be a list of entry names"
+        return 1
+      fi
+      if printf '%s\n' "${_dep_tags[@]+"${_dep_tags[@]}"}" | grep -qxE '!!(map|seq)'; then
         error "bootstrap: '${_raw}' dependsOn: each element must be a scalar entry name (got a map/list element)"
         return 1
       fi
@@ -573,9 +583,15 @@ bootstrap::apply() {
 
   # name → index, for resolving dependsOn. A repeated resolved name keeps the
   # last occurrence; dependsOn against an ambiguous name is a config smell anyway.
+  # Warn (don't fail) on a collision so a dependsOn silently resolving to the last
+  # of two same-named entries is at least visible.
   local -A _name2idx=()
   local _k
-  for (( _k = 0; _k < n; _k++ )); do _name2idx["${_names[_k]}"]="${_k}"; done
+  for (( _k = 0; _k < n; _k++ )); do
+    [[ -z "${_name2idx["${_names[_k]}"]:-}" ]] \
+      || warn "bootstrap: dependsOn: duplicate entry name '${_names[_k]}' — references resolve to the last"
+    _name2idx["${_names[_k]}"]="${_k}"
+  done
 
   # Effective dependency edges, stored as a set of "child,parent" keys (child
   # depends on parent → parent must complete first). Three unioned sources:
@@ -589,7 +605,7 @@ bootstrap::apply() {
       [[ -n "${_dname}" ]] || continue
       _j="${_name2idx["${_dname}"]:-}"
       if [[ -z "${_j}" ]]; then
-        error "bootstrap: dependsOn: unknown entry '${_dname}'"
+        error "bootstrap: '${_names[_k]}': dependsOn: unknown entry '${_dname}'"
         return 1
       fi
       _edge["${_k},${_j}"]=1

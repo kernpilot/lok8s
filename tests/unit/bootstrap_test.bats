@@ -846,6 +846,16 @@ YAML
   assert_output --partial "must be a scalar entry name"
 }
 
+@test "_parse_entry: dependsOn with a null element is rejected" {
+  # A null element (`dependsOn: [~]` / a bare `-` list item) is NOT a name: it
+  # would coerce to the literal string "null" and later fail as a confusing
+  # "unknown entry 'null'". Reject it at the element-type validation instead.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"dependsOn":[null]}}' n d i e w x
+  assert_failure
+  assert_output --partial "null element"
+}
+
 # --- dependsOn: graph validation (bootstrap::apply) --------------------------
 
 @test "bootstrap::apply errors on dependsOn to an unknown entry" {
@@ -1078,6 +1088,75 @@ YAML
   ! grep -qx 'b' "${ran_log}"
 
   # No surviving background jobs (no orphan left behind on the failure path).
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
+
+  # The scheduler's rc temp dir was removed.
+  local rcdir; rcdir="$(cat "${rcdir_marker}")"
+  [ -n "${rcdir}" ]
+  [ ! -d "${rcdir}" ]
+}
+
+@test "bootstrap::apply: a failed wait-gate skips later entries; no orphan, temp dir cleaned" {
+  # Distinct from the failing-*dependency* test above: this pins the FOREGROUND
+  # GATE failure path. G is a wait:true gate; X is positioned AFTER it, so the
+  # gate's drain-all/ready-before-later edges make X depend on G. The gate runs
+  # synchronously in the foreground and FAILS — the launch guard
+  # `(( _BS_OVERALL_RC == 0 ))` (and the inner `|| break`) then stops new launches,
+  # so X is NEVER applied. apply drains, returns non-zero, leaves no orphan job,
+  # and removes its rc temp dir.
+  local ran_log="${BATS_TEST_TMPDIR}/ran.log"
+  : > "${ran_log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf '%s\n' "${name}" >> "${ran_log}"
+    [ "${name}" = "g" ] && return 1   # the gate fails
+    return 0
+  }
+  # Capture the scheduler's rc temp dir (the only `mktemp -d` reached, since
+  # _apply_one is stubbed) so we can assert it is cleaned up afterward.
+  local rcdir_marker="${BATS_TEST_TMPDIR}/rcdir_path"
+  : > "${rcdir_marker}"
+  mktemp() {
+    if [ "$1" = "-d" ]; then
+      local d; d="$(command mktemp -d "${BATS_TEST_TMPDIR}/rcdir.XXXXXX")"
+      printf '%s\n' "${d}" > "${rcdir_marker}"
+      printf '%s\n' "${d}"
+      return 0
+    fi
+    command mktemp "$@"
+  }
+  local n; for n in g x; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - g:
+        wait: true
+    - x
+YAML
+  # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
+  # background jobs land in THIS shell's job table — lets us prove no orphan
+  # survives. `|| rc=$?` keeps the non-zero from tripping bats' errexit.
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+
+  # apply reports failure (the gate G failed).
+  [ "${rc}" -ne 0 ]
+
+  # G ran and failed.
+  grep -qx 'g' "${ran_log}"
+
+  # X (behind the failed gate) was NEVER applied — entries positioned after a
+  # failed foreground gate are skipped by the launch guard.
+  ! grep -qx 'x' "${ran_log}"
+
+  # No surviving background jobs (no orphan left behind on the gate-failure path).
   jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
   [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
 
