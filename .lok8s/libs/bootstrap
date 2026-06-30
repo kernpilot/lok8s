@@ -5,15 +5,14 @@
 # Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
 # drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
 #
-# Independent entries apply CONCURRENTLY (capped); an entry flagged `wait: true`
-# is a BARRIER that waits for the in-flight batch, then applies itself with a
-# readiness wait before any later entry starts. Default is `wait: false`. This
-# changes the OLD behavior in TWO ways, not just one: entries now apply in
-# parallel AND a non-barrier entry no longer gets its own post-apply readiness
-# wait — readiness is gated only at barriers (a spec may have none, in which case
-# nothing waits until the final drain of background applies). The old
-# strictly-serial apply-then-health-wait per entry was the whole ~37min bootstrap
-# phase. See the scheduler block below.
+# Entries form a DAG and apply CONCURRENTLY (capped). Two things create an
+# ordering edge: `dependsOn: [name, …]` (wait for those entries' readiness) and
+# `wait: true` (a GLOBAL gate — depends on everything before it, and everything
+# after depends on it). An entry waits for its own workloads to be Ready only
+# when something depends on it (a dep-target) or it is a gate; a pure leaf just
+# applies. With no edges every entry runs in parallel. The old strictly-serial
+# apply-then-health-wait per entry was the whole ~37min bootstrap phase. See the
+# scheduler block below.
 #
 # Addon resolution:
 #   "cilium"          → .lok8s/addons/cilium/
@@ -29,12 +28,13 @@
 #   bootstrap:
 #     - cilium:                       # legacy shim: whole map = helm values
 #         encryption: { enabled: true }
-#     - ccm:                          # new schema (reserved keys values/env/wait)
+#     - ccm:                          # new schema (reserved: values/env/wait/dependsOn)
 #         values:                     # helm values (chart addons only)
 #           env: { ROBOT_ENABLED: { value: "true" } }
 #         env:                        # envsubst overrides (exported around render)
 #           LOK8S_USER_FOO: bar
-#         wait: true                  # barrier (default false)
+#         wait: true                  # global gate (default false)
+#         dependsOn: [cert-manager]   # wait for these entries' readiness first
 #
 # The inline values are merged as additional Helm values on top of the
 # provider-aware defaults.
@@ -98,9 +98,9 @@ bootstrap::_resolve_entries() {
   return 0
 }
 
-# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait>
+# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait> <deps>
 # Parse ONE spec.bootstrap entry (the compact JSON from _resolve_entries) into the
-# five fields the apply path needs — passed back through namerefs (the last five
+# six fields the apply path needs — passed back through namerefs (the last six
 # args are caller variable NAMES). Returns 1 (after printing an error) on a
 # malformed entry or on `values:` set against a non-chart target. Pure apart from
 # that one filesystem touch (the chart.yaml check).
@@ -110,21 +110,25 @@ bootstrap::_resolve_entries() {
 #   map     {"<name-or-path>": <value>}
 #
 # The map VALUE is read in one of two schemas:
-#   NEW    — it carries a reserved key (values | env | wait):
+#   NEW    — it carries a reserved key (values | env | wait | dependsOn):
 #              values: <helm values>   chart addons ONLY — a kustomize target
 #                                       (no chart.yaml) with `values:` is an ERROR
 #                                       (`values:` is helm-only).
 #              env:    {KEY: val, ...}  envsubst overrides (see _apply_one).
-#              wait:   true|false       barrier; default false.
+#              wait:   true|false       global barrier gate; default false.
+#              dependsOn: [name, ...]   wait for these named entries' READINESS
+#                                       before this one (a DAG edge — must be a
+#                                       list of entry names; resolved + cycle-
+#                                       checked in bootstrap::apply).
 #   LEGACY — no reserved key → the WHOLE value map IS the inline helm values
 #            (e.g. `- cilium: {encryption: {enabled: true}}`), unchanged from
 #            before this flag existed. A legacy chart that needs a *literal*
-#            top-level `values`/`env`/`wait` helm key must nest it under `values:`
-#            (e.g. the `ccm: {env: {...}}` form moves to `ccm: {values: {env: {...}}}`).
+#            top-level `values`/`env`/`wait`/`dependsOn` helm key must nest it under
+#            `values:` (e.g. `ccm: {env: {...}}` → `ccm: {values: {env: {...}}}`).
 bootstrap::_parse_entry() {
   local _domain="$1" _entry="$2"
-  local -n _o_name="$3" _o_dir="$4" _o_inline="$5" _o_env="$6" _o_wait="$7"
-  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"
+  local -n _o_name="$3" _o_dir="$4" _o_inline="$5" _o_env="$6" _o_wait="$7" _o_deps="$8"
+  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""
 
   local _raw _valjson=""
   if [[ "${_entry}" == \{* ]]; then
@@ -175,7 +179,7 @@ bootstrap::_parse_entry() {
   # Scalar entry (or a map with an empty/null value): nothing more to parse.
   [[ -n "${_valjson}" && "${_valjson}" != "null" ]] || return 0
 
-  if [[ "$(yq -r 'has("values") or has("env") or has("wait")' <<<"${_valjson}")" == "true" ]]; then
+  if [[ "$(yq -r 'has("values") or has("env") or has("wait") or has("dependsOn")' <<<"${_valjson}")" == "true" ]]; then
     # NEW schema.
     _o_wait="$(yq -r '.wait // false' <<<"${_valjson}")"
     # `wait:` must be a real boolean. A non-boolean scalar (yes/on/1, …) would
@@ -233,6 +237,39 @@ bootstrap::_parse_entry() {
       # values, coerced to string). Consumed by _apply_one as exported env vars.
       _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"
     fi
+    if [[ "$(yq -r 'has("dependsOn")' <<<"${_valjson}")" == "true" ]]; then
+      # dependsOn: a LIST of entry names this entry must wait for (their READINESS)
+      # before it applies — resolved to indices, edge-built, and cycle-checked in
+      # bootstrap::apply (which alone knows every entry's name). Validate the SHAPE
+      # here (fail fast at parse time, same style as the env CONTAINER check): the
+      # container must be a sequence, and every element a scalar name. A map/seq
+      # element (e.g. someone nesting a map) is a config mistake — reject it loud.
+      local _dep_tag
+      _dep_tag="$(yq -r '.dependsOn | tag' <<<"${_valjson}")"
+      if [[ "${_dep_tag}" != "!!seq" ]]; then
+        error "bootstrap: '${_raw}' dependsOn: must be a list of entry names (got ${_dep_tag#!!})"
+        return 1
+      fi
+      # Each element must be a scalar name; reject map/seq elements. Extract the
+      # per-element tag (one per line) and check in bash — yq's `==` precedence
+      # inside select() makes a single-expression filter unreliable here.
+      local -a _dep_tags=()
+      mapfile -t _dep_tags < <(yq -r '.dependsOn[] | tag' <<<"${_valjson}")
+      # A null element (`dependsOn: [~]` / a bare `-` list item) is NOT a name: it
+      # would coerce to the literal string "null" via tostring below and then fail
+      # downstream as a confusing "unknown entry 'null'". Reject it right here at
+      # the element-type validation with a clear message.
+      if printf '%s\n' "${_dep_tags[@]+"${_dep_tags[@]}"}" | grep -qxF '!!null'; then
+        error "bootstrap: '${_raw}' dependsOn: null element — must be a list of entry names"
+        return 1
+      fi
+      if printf '%s\n' "${_dep_tags[@]+"${_dep_tags[@]}"}" | grep -qxE '!!(map|seq)'; then
+        error "bootstrap: '${_raw}' dependsOn: each element must be a scalar entry name (got a map/list element)"
+        return 1
+      fi
+      # Flatten to newline-separated names (scalars coerced to string).
+      _o_deps="$(yq -r '.dependsOn[] | tostring' <<<"${_valjson}")"
+    fi
   else
     # LEGACY shim: the whole value map is the inline helm values.
     _o_inline="$(yq -r '.' <<<"${_valjson}")"
@@ -245,8 +282,9 @@ bootstrap::_parse_entry() {
 # Apply ONE resolved bootstrap entry: the KubeOne cilium/ccm skip, addons::render
 # (value-stacking + kustomize build + envsubst), kapply::apply, the
 # immutable/terminating fail-fast, the CRD/webhook race-retry, and — only when
-# <wait> is non-empty — the post-apply kapply::wait_ready (the per-entry health
-# barrier). Returns 0 on success, 1 on an unrecoverable render/apply error.
+# <wait> is non-empty — the post-apply kapply::wait_ready (the readiness wait the
+# scheduler requests for dep-targets / gates). Returns 0 on success, 1 on an
+# unrecoverable render/apply error.
 #
 # MUST be invoked in a subshell — `( bootstrap::_apply_one ... )` — so the
 # KAPPLY_LAST_OUTPUT global it mutates (and greps right after each apply) stays
@@ -361,11 +399,13 @@ bootstrap::_apply_one() {
     fi
   fi
 
-  # The per-entry health wait is now the BARRIER — run it only for `wait: true`
-  # entries. Non-barrier entries deliberately skip it (that serial wait was the
-  # whole point of the refactor): the scheduler runs them concurrently and gates
-  # readiness at the next barrier (or the final drain). Best-effort: a timeout is
-  # a ⚠, not fatal — the caller decides whether to care.
+  # Post-apply health wait — run it only when the scheduler asks (do_wait set),
+  # i.e. when something depends on THIS entry being Ready: a dep-target (someone's
+  # dependsOn / a later entry behind a gate) or the entry is itself a wait-gate. A
+  # pure leaf skips it (that serial wait was the whole point of the refactor): the
+  # scheduler gates readiness only where a dependency edge needs it. _apply_one
+  # just honors the flag. Best-effort: a timeout is a ⚠, not fatal — the caller
+  # decides whether to care.
   if [[ -n "${do_wait}" ]]; then
     debug "bootstrap: waiting for ${addon_name} workloads to become ready"
     kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
@@ -373,18 +413,31 @@ bootstrap::_apply_one() {
   return 0
 }
 
-# ── Parallel scheduler ───────────────────────────────────
-# spec.bootstrap entries apply CONCURRENTLY by default; only an explicit
-# `wait: true` entry is a barrier that (a) waits for the in-flight batch and then
-# (b) applies itself synchronously WITH a readiness wait, before any later entry
-# starts. This collapses the old strictly-serial apply-then-wait phase (~25
-# entries × up to 180s) down to roughly the slowest barrier chain.
+# ── Topological-parallel scheduler ───────────────────────
+# spec.bootstrap entries form a DAG. An entry runs as soon as its EFFECTIVE
+# dependencies have completed, up to LOK8S_BOOTSTRAP_PARALLEL at once — so
+# independent CRD-operators (cert-manager, envoy-gateway, cnpg-operator,
+# redis-operator, rook-ceph, system-upgrade-controller …) fan out in parallel
+# instead of serializing. Two things create an edge:
+#   • `dependsOn: [name, …]` — an explicit edge: wait for those entries' READINESS.
+#   • `wait: true`           — a GLOBAL gate: it depends on ALL entries before it,
+#                              and every entry after it depends on it (the old
+#                              "drain all before / ready before anything later"
+#                              barrier, expressed as edges).
+# An entry waits for its own workloads to be Ready (kapply::wait_ready) IFF
+# something depends on it (a dep-target) OR it is a wait-gate; a pure leaf
+# (nothing depends on it) just applies and is done. Edge resolution + cycle
+# detection live in bootstrap::apply; this collapses the old strictly-serial
+# apply-then-wait phase down to roughly the slowest dependency chain.
 #
 # State is module-level (bash has no closures) so the reap/drain helpers can share
-# it with the bootstrap::apply loop; it is reset at the top of every run.
-_BS_INFLIGHT=()     # pids of running ( _apply_one ) & background jobs
+# it with the bootstrap::apply runner; it is reset at the top of every run.
+_BS_INFLIGHT=()     # pids of running ( _apply_one ) background jobs
 _BS_RCFILES=()      # parallel to _BS_INFLIGHT: each job's rc-capture file
-_BS_OVERALL_RC=0    # set to 1 if ANY entry (parallel or barrier) failed
+_BS_RUNIDX=()       # parallel to _BS_INFLIGHT: each job's entry INDEX
+declare -gA _BS_COMPLETED=()  # set of completed entry indices (index → 1)
+_BS_DONE=0          # count of completed entries
+_BS_OVERALL_RC=0    # set to 1 if ANY entry failed
 
 # OR a finished job's captured rc into _BS_OVERALL_RC (a missing file = failed).
 bootstrap::_collect_rc() {
@@ -393,16 +446,12 @@ bootstrap::_collect_rc() {
   [[ "${_r}" == "0" ]] || _BS_OVERALL_RC=1
 }
 
-# Wait for ALL in-flight jobs, collect their rcs, clear the batch. Used at a
-# barrier and at the final flush — never leaves orphans.
+# Reap every in-flight job (collect rcs + mark each completed), leaving no
+# orphan. Used as the final safety flush after the runner loop.
 bootstrap::_drain() {
-  local _i
-  for _i in "${!_BS_INFLIGHT[@]}"; do
-    wait "${_BS_INFLIGHT[_i]}" 2>/dev/null || true
-    bootstrap::_collect_rc "${_BS_RCFILES[_i]}"
+  while (( ${#_BS_INFLIGHT[@]} )); do
+    bootstrap::_reap_one
   done
-  _BS_INFLIGHT=()
-  _BS_RCFILES=()
 }
 
 # Feature probe: does this bash support `wait -n -p` (5.1+)? Factored into its own
@@ -420,8 +469,9 @@ bootstrap::_have_wait_n_p() {
 # lo provision running bootstrap::apply in-process). On bash 5.1+ this uses
 # `wait -n -p <var> <pids…>` (wait for any of the listed pids, capturing which
 # one finished); older bash falls back to FIFO `wait <oldest-pid>`. Either way we
-# then prune every job that has since finished, collecting their rcs from the
-# rc-capture files (so rc accounting is identical on both paths).
+# then prune every job that has since finished: collect its rc AND mark its entry
+# INDEX completed (so the runner can launch whatever depended on it). rc
+# accounting + completion are identical on both reap paths.
 bootstrap::_reap_one() {
   (( ${#_BS_INFLIGHT[@]} )) || return 0
   local _finished=""
@@ -435,23 +485,33 @@ bootstrap::_reap_one() {
     wait "${_finished}" 2>/dev/null || true
   fi
   # Prune the reaped job plus any others that have since died; keep the alive.
-  local -a _alive=() _alive_rcf=()
+  local -a _alive=() _alive_rcf=() _alive_idx=()
   local _i
   for _i in "${!_BS_INFLIGHT[@]}"; do
     if [[ "${_BS_INFLIGHT[_i]}" != "${_finished}" ]] && kill -0 "${_BS_INFLIGHT[_i]}" 2>/dev/null; then
-      _alive+=("${_BS_INFLIGHT[_i]}"); _alive_rcf+=("${_BS_RCFILES[_i]}")
+      _alive+=("${_BS_INFLIGHT[_i]}"); _alive_rcf+=("${_BS_RCFILES[_i]}"); _alive_idx+=("${_BS_RUNIDX[_i]}")
     else
+      # Explicitly wait the reaped/dead pid so it's removed from the job table
+      # (a `kill -0`-dead but un-waited job lingers as a "Done" entry → would look
+      # like an orphan). Idempotent for ${_finished} (already reaped → no-op).
+      wait "${_BS_INFLIGHT[_i]}" 2>/dev/null || true
       bootstrap::_collect_rc "${_BS_RCFILES[_i]}"
+      _BS_COMPLETED["${_BS_RUNIDX[_i]}"]=1
+      _BS_DONE=$(( _BS_DONE + 1 ))
     fi
   done
   _BS_INFLIGHT=("${_alive[@]+"${_alive[@]}"}")
   _BS_RCFILES=("${_alive_rcf[@]+"${_alive_rcf[@]}"}")
+  _BS_RUNIDX=("${_alive_idx[@]+"${_alive_idx[@]}"}")
 }
 
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
-# Reads spec.bootstrap from the cluster YAML and applies each entry. Independent
-# entries apply in parallel (capped at LOK8S_BOOTSTRAP_PARALLEL, default 8);
-# `wait: true` entries are barriers (see the scheduler block above).
+# Reads spec.bootstrap from the cluster YAML and runs the entries as a
+# topological-parallel DAG (independent entries in parallel, capped at
+# LOK8S_BOOTSTRAP_PARALLEL, default 8). Two things add ordering edges: `wait: true`
+# is a GLOBAL gate (edges to/from every entry positionally before/after it) and
+# `dependsOn:` adds explicit edges. Edge resolution + cycle detection are below
+# (see the scheduler block above).
 bootstrap::apply() {
   local domain="$1" cluster_yaml="$2" kubeconfig="$3"
 
@@ -500,73 +560,193 @@ bootstrap::apply() {
     debug "bootstrap: API endpoint ${LOK8S_USER_API_HOST}:${LOK8S_USER_API_PORT} (for addon envsubst)"
   fi
 
-  # ── Schedule entries: parallel batches split by `wait: true` barriers ──
+  # ── Plan the DAG: parse every entry, resolve edges, detect cycles ──
   local max_parallel="${LOK8S_BOOTSTRAP_PARALLEL:-8}"
   [[ "${max_parallel}" =~ ^[0-9]+$ ]] && (( max_parallel >= 1 )) || max_parallel=8
-  local _rcdir; _rcdir=$(mktemp -d) \
-    || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
-  _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_OVERALL_RC=0
-  local _seq=0
 
-  local entry
+  # Parse ALL entries up front into parallel arrays (array index = DAG node).
+  local -a _names=() _dirs=() _inlines=() _envs=() _waits=() _depnames=()
+  local n=0 entry
   for entry in "${bootstrap_entries[@]}"; do
     [[ -n "${entry}" ]] || continue
-    # A failure already surfaced (a finished parallel job, a barrier, or a parse
-    # error) — stop launching new entries; the post-loop drain flushes any
-    # in-flight so we never leave orphans, then we return non-zero.
-    (( _BS_OVERALL_RC == 0 )) || break
-
-    local addon_name addon_dir inline_values env_lines do_wait
-    if ! bootstrap::_parse_entry "${domain}" "${entry}" \
-           addon_name addon_dir inline_values env_lines do_wait; then
-      _BS_OVERALL_RC=1; break
+    local _nm _dr _in _ev _wt _dp
+    bootstrap::_parse_entry "${domain}" "${entry}" _nm _dr _in _ev _wt _dp || return 1
+    if [[ ! -d "${_dr}" ]]; then
+      error "bootstrap: addon not found: ${entry} (resolved to ${_dr})"
+      return 1
     fi
+    _names+=("${_nm}"); _dirs+=("${_dr}"); _inlines+=("${_in}")
+    _envs+=("${_ev}"); _waits+=("${_wt}"); _depnames+=("${_dp}")
+    n=$(( n + 1 ))
+  done
+  (( n > 0 )) || { debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"; return 0; }
 
-    if [[ ! -d "${addon_dir}" ]]; then
-      error "bootstrap: addon not found: ${entry} (resolved to ${addon_dir})"
-      _BS_OVERALL_RC=1; break
-    fi
-
-    if [[ "${do_wait}" == "true" ]]; then
-      # BARRIER: finish the in-flight parallel batch first, then apply this entry
-      # synchronously WITH a readiness wait before any later entry starts. Runs in
-      # the foreground (one at a time) so kapply's interactive heal prompt / tty
-      # progress still work for it. The `( … )` keeps KAPPLY_LAST_OUTPUT local.
-      bootstrap::_drain
-      (( _BS_OVERALL_RC == 0 )) || break
-      local _brc=0
-      ( bootstrap::_apply_one "${addon_name}" "${addon_dir}" "${kind}" "${provider_name}" \
-          "${kubeconfig}" "${inline_values}" "wait" "${env_lines}" ) || _brc=$?
-      (( _brc == 0 )) || _BS_OVERALL_RC=1
-    else
-      # PARALLEL: throttle to the concurrency cap, then launch in the background.
-      # LOK8S_NONINTERACTIVE: N concurrent applies can't share the single /dev/tty
-      # for kapply's collapsing progress UI or its interactive heal prompt — force
-      # the plain, non-interactive path (immutable/terminating still fail fast; a
-      # --force-recreate heal still works, it just never prompts). For clean
-      # one-at-a-time output set LOK8S_BOOTSTRAP_PARALLEL=1 (still skips the serial
-      # per-entry health wait, so still far faster than the old path).
-      while (( ${#_BS_INFLIGHT[@]} >= max_parallel )); do
-        bootstrap::_reap_one
-      done
-      _seq=$(( _seq + 1 ))
-      local _rcf="${_rcdir}/${_seq}.rc"
-      # Capture the rc EXPLICITLY (|| _arc=$?) rather than relying on set -e to
-      # let `echo $?` run — under errexit a failing _apply_one would abort the
-      # subshell before the rc was written. _drain treats a missing file as a
-      # failure too, but writing it keeps the signal unambiguous.
-      ( export LOK8S_NONINTERACTIVE=1
-        _arc=0
-        bootstrap::_apply_one "${addon_name}" "${addon_dir}" "${kind}" "${provider_name}" \
-          "${kubeconfig}" "${inline_values}" "" "${env_lines}" || _arc=$?
-        echo "${_arc}" > "${_rcf}" ) &
-      _BS_INFLIGHT+=("$!")
-      _BS_RCFILES+=("${_rcf}")
-    fi
+  # name → index, for resolving dependsOn. A repeated resolved name keeps the
+  # last occurrence; dependsOn against an ambiguous name is a config smell anyway.
+  # Warn (don't fail) on a collision so a dependsOn silently resolving to the last
+  # of two same-named entries is at least visible.
+  local -A _name2idx=()
+  local _k
+  for (( _k = 0; _k < n; _k++ )); do
+    [[ -z "${_name2idx["${_names[_k]}"]:-}" ]] \
+      || warn "bootstrap: dependsOn: duplicate entry name '${_names[_k]}' — references resolve to the last"
+    _name2idx["${_names[_k]}"]="${_k}"
   done
 
-  # Flush the final parallel batch (collect rcs) — no orphans — then report.
-  bootstrap::_drain
+  # Effective dependency edges, stored as a set of "child,parent" keys (child
+  # depends on parent → parent must complete first). Three unioned sources:
+  #   1. explicit dependsOn(i)
+  #   2. every wait-gate g positionally before i  (a gate ⇒ later entries wait on it)
+  #   3. if i is itself a wait-gate: ALL entries before i (a gate ⇒ drain-all-before)
+  local -A _edge=()
+  for (( _k = 0; _k < n; _k++ )); do
+    local _dname _j
+    while IFS= read -r _dname; do
+      [[ -n "${_dname}" ]] || continue
+      _j="${_name2idx["${_dname}"]:-}"
+      if [[ -z "${_j}" ]]; then
+        error "bootstrap: '${_names[_k]}': dependsOn: unknown entry '${_dname}'"
+        return 1
+      fi
+      _edge["${_k},${_j}"]=1
+    done <<< "${_depnames[_k]}"
+    local _g
+    for (( _g = 0; _g < _k; _g++ )); do
+      [[ "${_waits[_g]}" == "true" ]] && _edge["${_k},${_g}"]=1
+      [[ "${_waits[_k]}" == "true" ]] && _edge["${_k},${_g}"]=1
+    done
+  done
+
+  # Derive, from the edge set: per-entry effective deps (space-separated parent
+  # indices), the dep-target flag (does anything depend on this entry?), in-degree
+  # and reverse adjacency (parent → dependents) — used by cycle-check + runner.
+  local -a _edeps=() _istarget=() _indeg=()
+  local -A _dependents=()
+  for (( _k = 0; _k < n; _k++ )); do _edeps[_k]=""; _istarget[_k]=0; _indeg[_k]=0; done
+  local _key _ci _pi
+  for _key in "${!_edge[@]}"; do
+    _ci="${_key%,*}"; _pi="${_key#*,}"
+    _edeps[_ci]+=" ${_pi}"
+    _istarget[_pi]=1
+    _indeg[_ci]=$(( _indeg[_ci] + 1 ))
+    _dependents["${_pi}"]+=" ${_ci}"
+  done
+
+  # Cycle detection (Kahn): peel off in-degree-0 nodes; anything left sits in (or
+  # behind) a cycle — which would deadlock the runner (nothing in it ever becomes
+  # launchable). Fail fast with the offending names.
+  local -a _queue=()
+  for (( _k = 0; _k < n; _k++ )); do (( _indeg[_k] == 0 )) && _queue+=("${_k}"); done
+  local _processed=0 _u _v
+  local -a _adj
+  while (( ${#_queue[@]} )); do
+    _u="${_queue[0]}"; _queue=("${_queue[@]:1}")
+    _processed=$(( _processed + 1 ))
+    _adj=()
+    [[ -z "${_dependents["${_u}"]:-}" ]] || read -ra _adj <<< "${_dependents["${_u}"]}"
+    for _v in "${_adj[@]+"${_adj[@]}"}"; do
+      _indeg[_v]=$(( _indeg[_v] - 1 ))
+      (( _indeg[_v] == 0 )) && _queue+=("${_v}")
+    done
+  done
+  if (( _processed < n )); then
+    local -a _cyc=()
+    for (( _k = 0; _k < n; _k++ )); do (( _indeg[_k] > 0 )) && _cyc+=("${_names[_k]}"); done
+    error "bootstrap: dependsOn: cycle detected (${_cyc[*]})"
+    return 1
+  fi
+
+  # ── Run the DAG: launch every entry whose deps are done, up to the cap ──
+  local _rcdir; _rcdir=$(mktemp -d) \
+    || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
+  _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=()
+  unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
+  _BS_DONE=0; _BS_OVERALL_RC=0
+  local -A _started=()
+  local _seq=0
+
+  while (( _BS_DONE < n )); do
+    # Launch phase: every not-yet-started entry whose effective deps are all
+    # completed, capped at max_parallel concurrent. Stop launching once a failure
+    # surfaced — drain the rest, then report (never start work behind a broken dep).
+    if (( _BS_OVERALL_RC == 0 )); then
+      local _i2
+      for (( _i2 = 0; _i2 < n; _i2++ )); do
+        # A foreground gate (below) can flip _BS_OVERALL_RC mid-pass; re-check so
+        # we never launch an entry positioned behind a just-failed gate in the
+        # SAME pass (the background path only surfaces failure on reap, already
+        # guarded by the outer `if` next iteration — keep both paths consistent).
+        (( _BS_OVERALL_RC == 0 )) || break
+        [[ -z "${_started["${_i2}"]:-}" ]] || continue
+        (( ${#_BS_INFLIGHT[@]} < max_parallel )) || break
+        local _ready=1 _d2
+        local -a _dl=()
+        [[ -z "${_edeps[_i2]}" ]] || read -ra _dl <<< "${_edeps[_i2]}"
+        for _d2 in "${_dl[@]+"${_dl[@]}"}"; do
+          [[ -n "${_BS_COMPLETED["${_d2}"]:-}" ]] || { _ready=0; break; }
+        done
+        (( _ready )) || continue
+        # Readiness wait IFF something needs this entry Ready: a dep-target or a
+        # wait-gate. A pure leaf passes "" → _apply_one skips wait_ready (the point).
+        local _wflag=""
+        if (( _istarget[_i2] )) || [[ "${_waits[_i2]}" == "true" ]]; then
+          _wflag="wait"
+        fi
+        _started["${_i2}"]=1
+
+        if [[ "${_waits[_i2]}" == "true" ]]; then
+          # wait: true GATE — run it SYNCHRONOUSLY in the FOREGROUND, NOT as a
+          # backgrounded subshell and WITHOUT LOK8S_NONINTERACTIVE, so kapply keeps
+          # a usable /dev/tty for its interactive immutable/terminating heal prompt
+          # (a background job has no controlling tty → kapply::_interactive is
+          # false → it can never prompt). This loses NO concurrency: a gate
+          # provably runs ALONE — it depends on every entry positionally before it
+          # (all therefore already completed AND reaped, so nothing is in flight)
+          # and every entry after it depends on the gate (none is launchable until
+          # the gate completes). The ( … ) subshell still isolates the
+          # KAPPLY_LAST_OUTPUT global, yet — being foreground, not `&` — inherits
+          # the terminal. Mark it completed INLINE (same as the reap path) so its
+          # dependents become launchable on the next pass; capture rc EXPLICITLY
+          # (|| _garc=$?) so an errexit-failing apply can't abort the runner.
+          local _garc=0
+          ( bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
+              "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" ) || _garc=$?
+          (( _garc == 0 )) || _BS_OVERALL_RC=1
+          _BS_COMPLETED["${_i2}"]=1
+          _BS_DONE=$(( _BS_DONE + 1 ))
+          continue
+        fi
+
+        _seq=$(( _seq + 1 ))
+        local _rcf="${_rcdir}/${_seq}.rc"
+        # Non-gate entries fan out as concurrent BACKGROUND subshells: each in its
+        # own subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent
+        # applies; LOK8S_NONINTERACTIVE because N backgrounded applies have no
+        # shared /dev/tty for kapply's collapsing progress UI / interactive heal
+        # prompt (immutable/terminating still fail fast; --force-recreate still
+        # heals, it just never prompts). Capture the rc EXPLICITLY (|| _arc=$?) —
+        # under errexit a failing _apply_one would abort before `echo $?` runs;
+        # _collect_rc treats a missing file as a failure too. Set
+        # LOK8S_BOOTSTRAP_PARALLEL=1 for clean one-at-a-time output.
+        ( export LOK8S_NONINTERACTIVE=1
+          _arc=0
+          bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
+            "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" || _arc=$?
+          echo "${_arc}" > "${_rcf}" ) &
+        _BS_INFLIGHT+=("$!")
+        _BS_RCFILES+=("${_rcf}")
+        _BS_RUNIDX+=("${_i2}")
+      done
+    fi
+
+    # Nothing in flight → either everything finished, or a failure halted new
+    # launches and we've drained the rest. Either way, stop looping.
+    (( ${#_BS_INFLIGHT[@]} )) || break
+
+    bootstrap::_reap_one
+  done
+
+  bootstrap::_drain   # safety: never leave an orphan behind
   rm -rf "${_rcdir}"
   return "${_BS_OVERALL_RC}"
 }
