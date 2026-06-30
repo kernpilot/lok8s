@@ -113,20 +113,22 @@ spec:
 The inline config is deep-merged on top of the provider-aware defaults.
 
 For an entry that needs more than just inline values, use the explicit map keys
-`values:`, `env:`, and `wait:` (any one of them switches the entry to this form;
-otherwise the whole map is treated as inline values, as above):
+`values:`, `env:`, `wait:`, and `dependsOn:` (any one of them switches the entry
+to this form; otherwise the whole map is treated as inline values, as above):
 
 ```yaml
 spec:
   bootstrap:
     - cert-manager:
-        wait: true            # barrier — see below
+        wait: true            # global gate — see below
     - ccm:
         values:               # helm values (chart addons only)
           env:
             ROBOT_ENABLED: { value: "true" }
         env:                  # envsubst overrides for this entry's render
           LOK8S_USER_FOO: bar
+    - cert-manager-webhook-hetzner:
+        dependsOn: [cert-manager]   # wait for cert-manager's READINESS first
 ```
 
 - **`values:`** — Helm values, deep-merged like the inline form. Chart addons
@@ -136,14 +138,20 @@ spec:
   Name them to match the whitelist the addons reference (`LOK8S_USER_*` /
   `LOK8S_SPEC_*`), e.g. cilium's `${LOK8S_USER_API_HOST}`. Each value must be a
   scalar (`KEY: value`); a map/array value is rejected.
-- **`wait:`** — barrier flag, default `false` (see next section). Must be a real
-  boolean (`true`/`false`); `yes`/`on`/`1` are rejected.
+- **`wait:`** — global-gate flag, default `false` (see next section). Must be a
+  real boolean (`true`/`false`); `yes`/`on`/`1` are rejected.
+- **`dependsOn:`** — a list of entry names this entry must wait for before it
+  applies (see next section). Each name is the *resolved* name of another entry:
+  the map-key for a chart entry, the basename for a `./path` entry
+  (`./targets/networking` → `networking`), the scalar for a bare entry. Must be a
+  YAML list of scalar names; an unknown name or a dependency cycle is an error.
 
 ::: danger BREAKING CHANGE — migrate before your next `lo up`
-`values`, `env`, and `wait` are now **reserved keys** at the top level of an
-inline map entry. Any one of them present switches the entry to the explicit
-schema above. This **silently changes the meaning** of a legacy entry whose
-inline Helm values *happen to use one of those names as a top-level chart value*.
+`values`, `env`, `wait`, and `dependsOn` are now **reserved keys** at the top
+level of an inline map entry. Any one of them present switches the entry to the
+explicit schema above. This **silently changes the meaning** of a legacy entry
+whose inline Helm values *happen to use one of those names as a top-level chart
+value*.
 
 The canonical case is the hcloud CCM, whose chart takes a top-level `env:` block:
 
@@ -163,8 +171,8 @@ The canonical case is the hcloud CCM, whose chart takes a top-level `env:` block
 ```
 
 The same applies to any addon whose Helm values define a top-level `values`,
-`env`, or `wait` key — but the three now fail **differently**, so don't assume
-"no error":
+`env`, `wait`, or `dependsOn` key — but they now fail **differently**, so don't
+assume "no error":
 
 - **`values:`** silently reinterprets as the reserved key — **no error**, the
   entry just renders different (probably wrong) values.
@@ -178,27 +186,54 @@ There is no automatic migration, so audit every inline `spec.bootstrap` map entr
 and move such keys under `values:` **before** the next `lo up` / `lo provision`.
 :::
 
-## Parallelism and barriers
+## Parallelism, gates, and dependencies
 
-`spec.bootstrap` entries apply **concurrently** by default — independent addons
-(CNI, CCM, metrics-server, RBAC …) no longer wait for each other's workloads to
-become Ready before the next one starts. An entry marked **`wait: true`** is a
-**barrier**: lok8s finishes the in-flight batch, then applies that entry *and*
-waits for its workloads to be Ready, before any later entry starts. Use a barrier
-when something downstream depends on the addon being live (CRDs Established, a
-webhook serving, an Issuer reconciling). Order is still preserved; only the
-health-wait is deferred to barriers.
+`spec.bootstrap` entries form a **dependency DAG** and apply **concurrently** by
+default — independent addons (CNI, CCM, metrics-server, RBAC …) no longer wait
+for each other's workloads to become Ready before the next one starts. Two keys
+add ordering edges:
+
+- **`dependsOn: [name, …]`** — a **local edge**: this entry waits only for the
+  named entries' workloads to become **Ready** (not just applied) before it
+  applies. Everything else still runs in parallel. Reach for this first: it lets
+  independent CRD-operators fan out while still expressing the few real
+  "X needs Y live" relationships.
+- **`wait: true`** — a **global gate**: lok8s finishes everything before the
+  gate, then applies the gate *and* waits for its workloads to be Ready, before
+  **anything** after it starts. It is the heavy hammer — use it only for a true
+  whole-cluster prerequisite (the CNI, the CCM), not for one downstream consumer.
 
 ```yaml
 spec:
   bootstrap:
-    - cilium                  # these three apply in parallel …
+    - cilium:
+        wait: true            # global gate: the CNI must be live cluster-wide
+    - cert-manager            # these fan out in parallel after cilium …
     - metrics-server
     - ccm
-    - cert-manager:
-        wait: true            # … barrier: ready before anything below starts
-    - ./targets/networking    # depends on cert-manager CRDs being Established
+    - cert-manager-webhook-hetzner:
+        dependsOn: [cert-manager]   # … but THIS one waits for cert-manager Ready
+    - ./targets/networking:
+        dependsOn: [cert-manager]   # local edge, not a global gate
 ```
+
+### wait vs dependsOn
+
+| | `wait: true` | `dependsOn: [name, …]` |
+|---|---|---|
+| Scope | **global gate** — everything before drains; everything after waits for it | **local edge** — only this entry waits, only for its named deps |
+| Waits on | the gate's own readiness | the **readiness** of each named dep |
+| Use for | a cluster-wide prerequisite (CNI, CCM) | "X needs Y live" between two specific addons |
+| Parallelism | serializes the whole stack at that point | preserves parallelism for everything off the edge |
+
+Readiness waits are **selective**: an entry runs `kapply::wait_ready` only when
+something depends on it — a `dependsOn` target, an entry sitting behind a gate, or
+the gate itself. A **pure leaf** (nothing depends on it) just applies and is done,
+skipping the health-wait entirely. So adding a `dependsOn` edge is what *makes* its
+target incur a readiness wait; addons nobody waits on stay fire-and-forget.
+
+A `dependsOn` name must resolve to another entry (an unknown name is an error),
+and the resulting graph must be acyclic (a cycle is an error — it would deadlock).
 
 The concurrency cap defaults to 8 and is tunable with
 `LOK8S_BOOTSTRAP_PARALLEL` (set it to `1` for clean, one-at-a-time output).

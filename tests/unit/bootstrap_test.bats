@@ -406,18 +406,19 @@ YAML
 # backward-compat, the LEGACY whole-map-is-helm-values form.
 
 @test "_parse_entry: bare name resolves to a framework addon, no overrides" {
-  local p_name p_dir p_inline p_env p_wait
-  bootstrap::_parse_entry "test.lok8s.dev" '"cilium"' p_name p_dir p_inline p_env p_wait
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" '"cilium"' p_name p_dir p_inline p_env p_wait p_deps
   [ "${p_name}" = "cilium" ]
   [ "${p_dir}" = "${PATH_LOK8S}/addons/cilium" ]
   [ -z "${p_inline}" ]
   [ -z "${p_env}" ]
   [ "${p_wait}" = "false" ]
+  [ -z "${p_deps}" ]
 }
 
 @test "_parse_entry: ./path resolves under the cluster dir" {
-  local p_name p_dir p_inline p_env p_wait
-  bootstrap::_parse_entry "test.lok8s.dev" '"./targets/foo"' p_name p_dir p_inline p_env p_wait
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" '"./targets/foo"' p_name p_dir p_inline p_env p_wait p_deps
   [ "${p_name}" = "foo" ]
   [ "${p_dir}" = "${PATH_CLUSTERS}/test.lok8s.dev/./targets/foo" ]
   [ -z "${p_inline}" ]
@@ -425,30 +426,31 @@ YAML
 }
 
 @test "_parse_entry: /abs path resolves under PATH_BASE" {
-  local p_name p_dir p_inline p_env p_wait
-  bootstrap::_parse_entry "test.lok8s.dev" '"/abs/bar"' p_name p_dir p_inline p_env p_wait
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" '"/abs/bar"' p_name p_dir p_inline p_env p_wait p_deps
   [ "${p_name}" = "bar" ]
   [ "${p_dir}" = "${PATH_BASE}/abs/bar" ]
 }
 
 @test "_parse_entry: map {values} → inline helm values (chart addon)" {
   # testcni has chart.yaml (setup), so `values:` is allowed.
-  local p_name p_dir p_inline p_env p_wait
+  local p_name p_dir p_inline p_env p_wait p_deps
   bootstrap::_parse_entry "test.lok8s.dev" \
     '{"testcni":{"values":{"shared_all":"inline","nested":{"k":1}}}}' \
-    p_name p_dir p_inline p_env p_wait
+    p_name p_dir p_inline p_env p_wait p_deps
   [ "${p_name}" = "testcni" ]
   [ "$(yq -r '.shared_all' <<<"${p_inline}")" = "inline" ]
   [ "$(yq -r '.nested.k' <<<"${p_inline}")" = "1" ]
   [ -z "${p_env}" ]
   [ "${p_wait}" = "false" ]
+  [ -z "${p_deps}" ]
 }
 
 @test "_parse_entry: map {values, env, wait} → all three parsed" {
-  local p_name p_dir p_inline p_env p_wait
+  local p_name p_dir p_inline p_env p_wait p_deps
   bootstrap::_parse_entry "test.lok8s.dev" \
     '{"testcni":{"values":{"a":1},"env":{"LOK8S_USER_FOO":"bar","LOK8S_USER_BAZ":"qux"},"wait":true}}' \
-    p_name p_dir p_inline p_env p_wait
+    p_name p_dir p_inline p_env p_wait p_deps
   [ "$(yq -r '.a' <<<"${p_inline}")" = "1" ]
   [ "${p_wait}" = "true" ]
   # env flattened to KEY=VALUE lines (order-independent membership check).
@@ -459,14 +461,15 @@ YAML
 @test "_parse_entry: legacy map (no reserved key) is the whole-map helm values" {
   # Backward-compat: `- cilium: {encryption: {enabled: true}}` — the value map
   # has no reserved key, so the WHOLE map is the inline helm values.
-  local p_name p_dir p_inline p_env p_wait
+  local p_name p_dir p_inline p_env p_wait p_deps
   bootstrap::_parse_entry "test.lok8s.dev" \
     '{"testcni":{"encryption":{"enabled":true}}}' \
-    p_name p_dir p_inline p_env p_wait
+    p_name p_dir p_inline p_env p_wait p_deps
   [ "${p_name}" = "testcni" ]
   [ "$(yq -r '.encryption.enabled' <<<"${p_inline}")" = "true" ]
   [ -z "${p_env}" ]
   [ "${p_wait}" = "false" ]
+  [ -z "${p_deps}" ]
 }
 
 @test "_parse_entry: 'values:' on a non-chart (kustomize) target is an error" {
@@ -479,7 +482,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 YAML
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"./targets/raw":{"values":{"x":1}}}' n d i e w
+    '{"./targets/raw":{"values":{"x":1}}}' n d i e w x
   assert_failure
   assert_output --partial "not a chart addon"
 }
@@ -489,7 +492,7 @@ YAML
   # top-level `env:` block accidentally left at the reserved-key level instead of
   # nested under `values:` — would tostring-flatten to a bogus string. Reject it.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"env":{"ROBOT_ENABLED":{"value":"true"}}}}' n d i e w
+    '{"testcni":{"env":{"ROBOT_ENABLED":{"value":"true"}}}}' n d i e w x
   assert_failure
   assert_output --partial "env: values must be scalars"
 }
@@ -499,7 +502,7 @@ YAML
   # writing `env: [LOK8S_USER_FOO=bar]` expecting docker-style entries — would
   # make to_entries[] emit bogus numeric keys (0=…). Reject the container itself.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"env":["LOK8S_USER_FOO=bar"]}}' n d i e w
+    '{"testcni":{"env":["LOK8S_USER_FOO=bar"]}}' n d i e w x
   assert_failure
   assert_output --partial "env: must be a map"
 }
@@ -508,7 +511,7 @@ YAML
   # A scalar `.env` (e.g. `env: LOK8S_USER_FOO=bar`) would make to_entries[]
   # error — reject the container type up front with a clear message.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"env":"LOK8S_USER_FOO=bar"}}' n d i e w
+    '{"testcni":{"env":"LOK8S_USER_FOO=bar"}}' n d i e w x
   assert_failure
   assert_output --partial "env: must be a map"
 }
@@ -516,7 +519,7 @@ YAML
 @test "_parse_entry: multi-key map entry is rejected" {
   # A bootstrap entry must be a SINGLE-key map; two keys is a config mistake.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"wait":true},"other":{"wait":false}}' n d i e w
+    '{"testcni":{"wait":true},"other":{"wait":false}}' n d i e w x
   assert_failure
   assert_output --partial "single-key map"
 }
@@ -525,7 +528,7 @@ YAML
   # `wait: yes` (or on/1) must NOT silently become a non-barrier — only a real
   # boolean true/false is accepted.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"wait":"yes"}}' n d i e w
+    '{"testcni":{"wait":"yes"}}' n d i e w x
   assert_failure
   assert_output --partial "non-boolean wait"
 }
@@ -535,11 +538,11 @@ YAML
   # or legacy chart values) or null. A scalar — `- addon: true` → {"addon":true}
   # — or a sequence — `- addon: []` → {"addon":[]} — would let the reserved-key /
   # legacy-values logic run yq '.values'/'.wait' against a scalar/seq. Reject it.
-  run bootstrap::_parse_entry "test.lok8s.dev" '{"testcni":true}' n d i e w
+  run bootstrap::_parse_entry "test.lok8s.dev" '{"testcni":true}' n d i e w x
   assert_failure
   assert_output --partial "entry value must be a map"
 
-  run bootstrap::_parse_entry "test.lok8s.dev" '{"testcni":[]}' n d i e w
+  run bootstrap::_parse_entry "test.lok8s.dev" '{"testcni":[]}' n d i e w x
   assert_failure
   assert_output --partial "entry value must be a map"
 }
@@ -548,13 +551,13 @@ YAML
   # Each env: key is exported VERBATIM by _apply_one, so it must be a valid POSIX
   # shell variable name. A name with a '-' would make `export` fail/misbehave.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"env":{"MY-VAR":"x"}}}' n d i e w
+    '{"testcni":{"env":{"MY-VAR":"x"}}}' n d i e w x
   assert_failure
   assert_output --partial "not a valid shell variable name"
 
   # A leading-digit name is equally invalid.
   run bootstrap::_parse_entry "test.lok8s.dev" \
-    '{"testcni":{"env":{"1X":"y"}}}' n d i e w
+    '{"testcni":{"env":{"1X":"y"}}}' n d i e w x
   assert_failure
   assert_output --partial "not a valid shell variable name"
 }
@@ -805,4 +808,211 @@ YAML
   # No surviving background jobs (no orphan left by the FIFO reap+drain).
   jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
   [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
+}
+
+# --- dependsOn: parse (bootstrap::_parse_entry) ------------------------------
+# dependsOn is the 6th out-param: a newline-separated list of entry names this
+# entry waits on. It is a reserved key (like values/env/wait) so an entry with
+# ONLY dependsOn is the new schema, not legacy whole-map helm values.
+
+@test "_parse_entry: dependsOn list of names is parsed (6th out-param)" {
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"dependsOn":["cert-manager","ccm"]}}' \
+    p_name p_dir p_inline p_env p_wait p_deps
+  [ "${p_name}" = "testcni" ]
+  # Newline-separated names (order-independent membership check).
+  grep -qx 'cert-manager' <<<"${p_deps}"
+  grep -qx 'ccm' <<<"${p_deps}"
+  # dependsOn alone is the NEW schema — no inline helm values leak from it.
+  [ -z "${p_inline}" ]
+  [ "${p_wait}" = "false" ]
+}
+
+@test "_parse_entry: dependsOn that is not a list is rejected" {
+  # `dependsOn: cert-manager` (a bare scalar, not a YAML list) is a config
+  # mistake — the container must be a sequence of names.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"dependsOn":"cert-manager"}}' n d i e w x
+  assert_failure
+  assert_output --partial "dependsOn: must be a list"
+}
+
+@test "_parse_entry: dependsOn with a non-scalar element is rejected" {
+  # Every element must be a scalar entry NAME; a map/list element is rejected.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"dependsOn":[{"name":"x"}]}}' n d i e w x
+  assert_failure
+  assert_output --partial "must be a scalar entry name"
+}
+
+# --- dependsOn: graph validation (bootstrap::apply) --------------------------
+
+@test "bootstrap::apply errors on dependsOn to an unknown entry" {
+  bootstrap::_apply_one() { return 0; }
+  local n; for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        dependsOn: [nope]
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "unknown entry 'nope'"
+}
+
+@test "bootstrap::apply errors on a dependsOn cycle (A→B→A)" {
+  bootstrap::_apply_one() { return 0; }
+  local n; for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a:
+        dependsOn: [b]
+    - b:
+        dependsOn: [a]
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "cycle detected"
+}
+
+# --- dependsOn: DAG scheduling (bootstrap::apply) ----------------------------
+
+@test "bootstrap::apply: dependsOn gates the dependent; independents stay parallel" {
+  # A (dep-target), B dependsOn:[a], C (independent). B must START only after A
+  # ENDS; C must run CONCURRENTLY with A (not gated behind it). Same timestamped
+  # START/END + sleep technique as the wait:true barrier test.
+  local log="${BATS_TEST_TMPDIR}/dag.log"
+  : > "${log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf 'START %s\n' "${name}" >> "${log}"
+    sleep 0.4
+    printf 'END %s\n' "${name}" >> "${log}"
+    return 0
+  }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        dependsOn: [a]
+    - c
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  ln() { grep -n -- "^$1\$" "${log}" | head -1 | cut -d: -f1; }
+  local sa ea_ sb sc ec_
+  sa=$(ln "START a"); ea_=$(ln "END a")
+  sb=$(ln "START b"); sc=$(ln "START c"); ec_=$(ln "END c")
+
+  # a and c overlap (c is NOT gated behind a): each STARTED before the other ENDED.
+  [ "${sa}" -lt "${ec_}" ]
+  [ "${sc}" -lt "${ea_}" ]
+
+  # b (dependsOn a) STARTS only after a has ENDED.
+  [ "${sb}" -gt "${ea_}" ]
+}
+
+@test "bootstrap::apply: wait-gate + dependsOn — both wait for the gate, X also waits for Y" {
+  # A wait-gate G first; then Y and X (dependsOn:[y]) after it. Both Y and X must
+  # wait for G (the gate's drain-all/ready-before-later semantics); X must also
+  # wait for Y (its explicit edge).
+  local log="${BATS_TEST_TMPDIR}/gatedag.log"
+  : > "${log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf 'START %s\n' "${name}" >> "${log}"
+    sleep 0.3
+    printf 'END %s\n' "${name}" >> "${log}"
+    return 0
+  }
+  local n; for n in g y x; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - g:
+        wait: true
+    - y
+    - x:
+        dependsOn: [y]
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  ln() { grep -n -- "^$1\$" "${log}" | head -1 | cut -d: -f1; }
+  local eg sy sx ey
+  eg=$(ln "END g"); sy=$(ln "START y"); sx=$(ln "START x"); ey=$(ln "END y")
+
+  # The gate G gates everything after it: both Y and X start only after G ends.
+  [ "${sy}" -gt "${eg}" ]
+  [ "${sx}" -gt "${eg}" ]
+  # X (dependsOn y) starts only after Y ends.
+  [ "${sx}" -gt "${ey}" ]
+}
+
+@test "bootstrap::apply: only dep-targets do the readiness wait; pure leaves skip it" {
+  # _apply_one receives do_wait (arg 7) — non-empty ⇔ it runs kapply::wait_ready.
+  # The scheduler must set it for a dep-target and leave it empty for a pure leaf.
+  # a is a dep-target (b dependsOn:[a]); b and c are leaves (nothing depends on
+  # them). Record the names called WITH the wait flag set.
+  local waitlog="${BATS_TEST_TMPDIR}/wait.log"
+  : > "${waitlog}"
+  bootstrap::_apply_one() {
+    local name="$1" do_wait="$7"
+    [[ -n "${do_wait}" ]] && printf '%s\n' "${name}" >> "${waitlog}"
+    return 0
+  }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        dependsOn: [a]
+    - c
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  # a (dep-target) DID the readiness wait.
+  grep -qx 'a' "${waitlog}"
+  # the pure leaves b and c did NOT.
+  ! grep -qx 'b' "${waitlog}"
+  ! grep -qx 'c' "${waitlog}"
 }
