@@ -98,19 +98,23 @@ bootstrap::_resolve_entries() {
   return 0
 }
 
-# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait> <deps>
+# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait> <deps> [explicit]
 # Parse ONE spec.bootstrap entry (the compact JSON from _resolve_entries) into the
-# six fields the apply path needs — passed back through namerefs (the last six
-# args are caller variable NAMES). Returns 1 (after printing an error) on a
-# malformed entry or on `values:` set against a non-chart target. Pure apart from
-# that one filesystem touch (the chart.yaml check).
+# fields the apply path needs — passed back through namerefs (the trailing args
+# are caller variable NAMES). The 9th (explicit) is OPTIONAL: set to "true" iff
+# this entry carries an explicit `name:` override, so the caller can treat a name
+# collision as a hard error instead of a tolerated basename clash; omit it and a
+# throwaway local is used instead (so existing six-out-param callers still work).
+# Returns 1 (after printing an error) on a malformed entry or on `values:` set
+# against a non-chart target. Pure apart from that one filesystem touch (the
+# chart.yaml check).
 #
 # Entry forms:
 #   scalar  "cilium" | "./targets/x" | "/abs/x"   → name/dir only
 #   map     {"<name-or-path>": <value>}
 #
 # The map VALUE is read in one of two schemas:
-#   NEW    — it carries a reserved key (values | env | wait | dependsOn):
+#   NEW    — it carries a reserved key (values | env | wait | dependsOn | name):
 #              values: <helm values>   chart addons ONLY — a kustomize target
 #                                       (no chart.yaml) with `values:` is an ERROR
 #                                       (`values:` is helm-only).
@@ -120,6 +124,13 @@ bootstrap::_resolve_entries() {
 #                                       before this one (a DAG edge — must be a
 #                                       list of entry names; resolved + cycle-
 #                                       checked in bootstrap::apply).
+#              name:   <identifier>     OVERRIDE this entry's identity (otherwise
+#                                       the basename / map-key) — the name used by
+#                                       the dependsOn registry, both as a target
+#                                       and a reference. Does NOT change addon_dir.
+#                                       Disambiguates a basename collision (e.g. a
+#                                       `rook-ceph` addon vs a `./targets/rook-ceph`
+#                                       target). Non-empty scalar, [A-Za-z0-9._-]+.
 #   LEGACY — no reserved key → the WHOLE value map IS the inline helm values
 #            (e.g. `- cilium: {encryption: {enabled: true}}`), unchanged from
 #            before this flag existed. A legacy chart that needs a *literal*
@@ -128,7 +139,11 @@ bootstrap::_resolve_entries() {
 bootstrap::_parse_entry() {
   local _domain="$1" _entry="$2"
   local -n _o_name="$3" _o_dir="$4" _o_inline="$5" _o_env="$6" _o_wait="$7" _o_deps="$8"
-  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""
+  # 9th out-param (optional): "true" iff this entry sets an explicit `name:`. Fall
+  # back to a throwaway local when omitted so six-out-param callers keep working.
+  local _bs_discard_explicit=""
+  local -n _o_explicit="${9:-_bs_discard_explicit}"
+  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""; _o_explicit="false"
 
   local _raw _valjson=""
   if [[ "${_entry}" == \{* ]]; then
@@ -179,8 +194,33 @@ bootstrap::_parse_entry() {
   # Scalar entry (or a map with an empty/null value): nothing more to parse.
   [[ -n "${_valjson}" && "${_valjson}" != "null" ]] || return 0
 
-  if [[ "$(yq -r 'has("values") or has("env") or has("wait") or has("dependsOn")' <<<"${_valjson}")" == "true" ]]; then
+  if [[ "$(yq -r 'has("values") or has("env") or has("wait") or has("dependsOn") or has("name")' <<<"${_valjson}")" == "true" ]]; then
     # NEW schema.
+    # `name:` (optional) OVERRIDES this entry's identifier — the resolved basename
+    # (path entries) or map-key (chart entries) — for BOTH the dependsOn registry
+    # and as a dependsOn reference target. It does NOT change _o_dir (still the
+    # path/map-key). Use it to disambiguate a basename collision (e.g. the
+    # `rook-ceph` addon vs a `./targets/rook-ceph` target). Validate as a non-empty
+    # scalar in the entry-name charset (same fail-fast spirit as the env-key check).
+    if [[ "$(yq -r 'has("name")' <<<"${_valjson}")" == "true" ]]; then
+      local _name_tag _oname
+      _name_tag="$(yq -r '.name | tag' <<<"${_valjson}")"
+      if [[ "${_name_tag}" == "!!map" || "${_name_tag}" == "!!seq" || "${_name_tag}" == "!!null" ]]; then
+        error "bootstrap: '${_raw}' name: must be a non-empty scalar entry name (got ${_name_tag#!!})"
+        return 1
+      fi
+      _oname="$(yq -r '.name' <<<"${_valjson}")"
+      if [[ -z "${_oname}" ]]; then
+        error "bootstrap: '${_raw}' name: must be a non-empty string"
+        return 1
+      fi
+      if [[ ! "${_oname}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        error "bootstrap: '${_raw}' name: '${_oname}' is not a valid entry name (must match [A-Za-z0-9._-]+)"
+        return 1
+      fi
+      _o_name="${_oname}"
+      _o_explicit="true"
+    fi
     _o_wait="$(yq -r '.wait // false' <<<"${_valjson}")"
     # `wait:` must be a real boolean. A non-boolean scalar (yes/on/1, …) would
     # silently parse as a non-barrier — reject it. A YAML/JSON bool renders as
@@ -565,32 +605,46 @@ bootstrap::apply() {
   [[ "${max_parallel}" =~ ^[0-9]+$ ]] && (( max_parallel >= 1 )) || max_parallel=8
 
   # Parse ALL entries up front into parallel arrays (array index = DAG node).
-  local -a _names=() _dirs=() _inlines=() _envs=() _waits=() _depnames=()
+  local -a _names=() _dirs=() _inlines=() _envs=() _waits=() _depnames=() _explicit=()
   local n=0 entry
   for entry in "${bootstrap_entries[@]}"; do
     [[ -n "${entry}" ]] || continue
-    local _nm _dr _in _ev _wt _dp
-    bootstrap::_parse_entry "${domain}" "${entry}" _nm _dr _in _ev _wt _dp || return 1
+    local _nm _dr _in _ev _wt _dp _ex
+    bootstrap::_parse_entry "${domain}" "${entry}" _nm _dr _in _ev _wt _dp _ex || return 1
     if [[ ! -d "${_dr}" ]]; then
       error "bootstrap: addon not found: ${entry} (resolved to ${_dr})"
       return 1
     fi
     _names+=("${_nm}"); _dirs+=("${_dr}"); _inlines+=("${_in}")
-    _envs+=("${_ev}"); _waits+=("${_wt}"); _depnames+=("${_dp}")
+    _envs+=("${_ev}"); _waits+=("${_wt}"); _depnames+=("${_dp}"); _explicit+=("${_ex}")
     n=$(( n + 1 ))
   done
   (( n > 0 )) || { debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"; return 0; }
 
-  # name → index, for resolving dependsOn. A repeated resolved name keeps the
-  # last occurrence; dependsOn against an ambiguous name is a config smell anyway.
-  # Warn (don't fail) on a collision so a dependsOn silently resolving to the last
-  # of two same-named entries is at least visible.
-  local -A _name2idx=()
+  # name → indices sharing it (a multimap). A name on >1 entry is a COLLISION;
+  # the handling depends on WHY it collides and whether anything references it:
+  #   • an explicit name: on a colliding entry              → hard error here
+  #     (a deliberately-set identifier must be unique).
+  #   • a basename/map-key collision referenced by dependsOn → hard error below
+  #     (ambiguous — the runner can't pick which entry the reference means).
+  #   • a basename/map-key collision NOTHING dependsOn       → warn (last-wins),
+  #     so a barrier-only config with colliding basenames (e.g. the `rook-ceph`
+  #     addon plus a `./targets/rook-ceph` target, no dependsOn) still applies.
+  local -A _name2idxs=()
   local _k
   for (( _k = 0; _k < n; _k++ )); do
-    [[ -z "${_name2idx["${_names[_k]}"]:-}" ]] \
-      || warn "bootstrap: dependsOn: duplicate entry name '${_names[_k]}' — references resolve to the last"
-    _name2idx["${_names[_k]}"]="${_k}"
+    _name2idxs["${_names[_k]}"]+=" ${_k}"
+  done
+  # An explicit name: that collides with ANY other entry (explicit or resolved) is
+  # always a hard error — two entries can't share a deliberately-set identity.
+  for (( _k = 0; _k < n; _k++ )); do
+    [[ "${_explicit[_k]}" == "true" ]] || continue
+    local -a _share=()
+    read -ra _share <<< "${_name2idxs["${_names[_k]}"]}"
+    if (( ${#_share[@]} > 1 )); then
+      error "bootstrap: duplicate entry name '${_names[_k]}' — name: must be unique (${#_share[@]} entries share it)"
+      return 1
+    fi
   done
 
   # Effective dependency edges, stored as a set of "child,parent" keys (child
@@ -601,13 +655,23 @@ bootstrap::apply() {
   local -A _edge=()
   for (( _k = 0; _k < n; _k++ )); do
     local _dname _j
+    local -a _cand
     while IFS= read -r _dname; do
       [[ -n "${_dname}" ]] || continue
-      _j="${_name2idx["${_dname}"]:-}"
-      if [[ -z "${_j}" ]]; then
+      _cand=()
+      [[ -z "${_name2idxs["${_dname}"]:-}" ]] || read -ra _cand <<< "${_name2idxs["${_dname}"]}"
+      if (( ${#_cand[@]} == 0 )); then
         error "bootstrap: '${_names[_k]}': dependsOn: unknown entry '${_dname}'"
         return 1
       fi
+      # A reference that resolves to a COLLIDED name is ambiguous — error (the
+      # warn-only path is reserved for collisions nobody dependsOn). Set an
+      # explicit name: on one of the colliding entries to disambiguate.
+      if (( ${#_cand[@]} > 1 )); then
+        error "bootstrap: '${_names[_k]}': dependsOn: ambiguous entry '${_dname}' (${#_cand[@]} entries share it — set an explicit name:)"
+        return 1
+      fi
+      _j="${_cand[0]}"
       _edge["${_k},${_j}"]=1
     done <<< "${_depnames[_k]}"
     local _g
@@ -615,6 +679,18 @@ bootstrap::apply() {
       [[ "${_waits[_g]}" == "true" ]] && _edge["${_k},${_g}"]=1
       [[ "${_waits[_k]}" == "true" ]] && _edge["${_k},${_g}"]=1
     done
+  done
+
+  # Collisions still standing here are basename/map-key clashes that NOTHING
+  # dependsOn (a referenced one hard-errored as "ambiguous" above) and carry no
+  # explicit name: (those hard-errored too). Warn (last-wins) — visible, but it
+  # must NOT break a barrier-only config that happens to reuse a basename.
+  local _cn
+  for _cn in "${!_name2idxs[@]}"; do
+    local -a _cids=()
+    read -ra _cids <<< "${_name2idxs["${_cn}"]}"
+    (( ${#_cids[@]} > 1 )) \
+      && warn "bootstrap: duplicate entry name '${_cn}' — ${#_cids[@]} entries share it; a dependsOn on it would be ambiguous (set an explicit name:)"
   done
 
   # Derive, from the edge set: per-entry effective deps (space-separated parent

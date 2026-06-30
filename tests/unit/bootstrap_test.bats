@@ -856,6 +856,74 @@ YAML
   assert_output --partial "null element"
 }
 
+# --- name: override (bootstrap::_parse_entry) --------------------------------
+# `name:` is a reserved key (like values/env/wait/dependsOn): it OVERRIDES this
+# entry's identifier (basename for paths / map-key for chart entries) for the
+# dependsOn registry — but NOT addon_dir. The 9th out-param reports whether it was
+# set explicitly. A non-empty [A-Za-z0-9._-]+ scalar is required.
+
+@test "_parse_entry: name: overrides the resolved identity but not addon_dir" {
+  local p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"./x":{"name":"bar"}}' \
+    p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  # name: REPLACES the basename ("x") as the identity …
+  [ "${p_name}" = "bar" ]
+  # … but addon_dir still comes from the path (UNCHANGED by name:).
+  [ "${p_dir}" = "${PATH_CLUSTERS}/test.lok8s.dev/./x" ]
+  [ "${p_explicit}" = "true" ]
+}
+
+@test "_parse_entry: name: alone is the new schema (no legacy helm-values leak)" {
+  local p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":"renamed"}}' \
+    p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  [ "${p_name}" = "renamed" ]
+  [ -z "${p_inline}" ]
+  [ "${p_explicit}" = "true" ]
+}
+
+@test "_parse_entry: name: combines with dependsOn (the addon-vs-target case)" {
+  local p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"./targets/rook-ceph":{"name":"rook-ceph-cluster","dependsOn":["rook-ceph"]}}' \
+    p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  [ "${p_name}" = "rook-ceph-cluster" ]
+  [ "${p_dir}" = "${PATH_CLUSTERS}/test.lok8s.dev/./targets/rook-ceph" ]
+  grep -qx 'rook-ceph' <<<"${p_deps}"
+  [ "${p_explicit}" = "true" ]
+}
+
+@test "_parse_entry: a bare entry reports explicit=false (no name:)" {
+  local p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  bootstrap::_parse_entry "test.lok8s.dev" '"cilium"' \
+    p_name p_dir p_inline p_env p_wait p_deps p_explicit
+  [ "${p_name}" = "cilium" ]
+  [ "${p_explicit}" = "false" ]
+}
+
+@test "_parse_entry: empty name: is rejected" {
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":""}}' n d i e w x
+  assert_failure
+  assert_output --partial "non-empty string"
+}
+
+@test "_parse_entry: name: with an illegal character is rejected" {
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":"bad/name"}}' n d i e w x
+  assert_failure
+  assert_output --partial "not a valid entry name"
+}
+
+@test "_parse_entry: non-scalar name: is rejected" {
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"name":{"k":"v"}}}' n d i e w x
+  assert_failure
+  assert_output --partial "non-empty scalar"
+}
+
 # --- dependsOn: graph validation (bootstrap::apply) --------------------------
 
 @test "bootstrap::apply errors on dependsOn to an unknown entry" {
@@ -1095,6 +1163,173 @@ YAML
   local rcdir; rcdir="$(cat "${rcdir_marker}")"
   [ -n "${rcdir}" ]
   [ ! -d "${rcdir}" ]
+}
+
+# --- name: override + ambiguity (bootstrap::apply) ---------------------------
+
+@test "bootstrap::apply: name: override is the dependsOn reference target" {
+  # foo (basename) + ./x renamed to bar; c dependsOn:[bar] must wait for the ./x
+  # entry — resolved by the OVERRIDE name, not ./x's basename. foo stays parallel.
+  local log="${BATS_TEST_TMPDIR}/name.log"
+  : > "${log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf 'START %s\n' "${name}" >> "${log}"
+    sleep 0.4
+    printf 'END %s\n' "${name}" >> "${log}"
+    return 0
+  }
+  mkdir -p "${PATH_LOK8S}/addons/foo" "${PATH_LOK8S}/addons/c" \
+           "${PATH_CLUSTERS}/test.lok8s.dev/x"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - foo
+    - ./x:
+        name: bar
+    - c:
+        dependsOn: [bar]
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  ln() { grep -n -- "^$1\$" "${log}" | head -1 | cut -d: -f1; }
+  local sbar ebar sc_ sfoo efoo
+  sbar=$(ln "START bar"); ebar=$(ln "END bar")
+  sc_=$(ln "START c"); sfoo=$(ln "START foo"); efoo=$(ln "END foo")
+
+  # The ./x entry is keyed by its OVERRIDE name "bar" (its basename would be "x").
+  [ -n "${sbar}" ]
+  # c (dependsOn the renamed ./x = "bar") starts only AFTER bar ENDS.
+  [ "${sc_}" -gt "${ebar}" ]
+  # foo is independent — it overlaps bar (each started before the other ended).
+  [ "${sfoo}" -lt "${ebar}" ]
+  [ "${sbar}" -lt "${efoo}" ]
+}
+
+@test "bootstrap::apply: name: replaces the basename (old basename no longer resolves)" {
+  # ./x renamed to bar; a dependsOn on the OLD basename 'x' is now unknown —
+  # proving name: REPLACES (not augments) the resolved identity.
+  bootstrap::_apply_one() { return 0; }
+  mkdir -p "${PATH_LOK8S}/addons/foo" "${PATH_LOK8S}/addons/c" \
+           "${PATH_CLUSTERS}/test.lok8s.dev/x"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - foo
+    - ./x:
+        name: bar
+    - c:
+        dependsOn: [x]
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "unknown entry 'x'"
+}
+
+@test "bootstrap::apply: dependsOn to an ambiguous (collided) name is an error" {
+  # The rook-ceph addon AND ./targets/rook-ceph both resolve to 'rook-ceph'; a
+  # dependsOn referencing it can't pick one → hard error (set an explicit name:).
+  bootstrap::_apply_one() { return 0; }
+  mkdir -p "${PATH_LOK8S}/addons/rook-ceph" "${PATH_LOK8S}/addons/consumer" \
+           "${PATH_CLUSTERS}/test.lok8s.dev/targets/rook-ceph"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - rook-ceph
+    - ./targets/rook-ceph
+    - consumer:
+        dependsOn: [rook-ceph]
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "ambiguous entry 'rook-ceph'"
+}
+
+@test "bootstrap::apply: a basename collision with no dependsOn still applies (warn only)" {
+  # The SAME rook-ceph addon + ./targets/rook-ceph collision, but NOTHING
+  # dependsOn it — the current barrier-only kubehz config — MUST still apply
+  # (warn, not error). This is the compatibility guarantee.
+  bootstrap::_apply_one() { return 0; }
+  mkdir -p "${PATH_LOK8S}/addons/rook-ceph" \
+           "${PATH_CLUSTERS}/test.lok8s.dev/targets/rook-ceph"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - rook-ceph
+    - ./targets/rook-ceph
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+}
+
+@test "bootstrap::apply: two entries with the same explicit name: is an error" {
+  bootstrap::_apply_one() { return 0; }
+  mkdir -p "${PATH_LOK8S}/addons/a" "${PATH_LOK8S}/addons/b"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a:
+        name: dup
+    - b:
+        name: dup
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "name: must be unique"
+}
+
+@test "bootstrap::apply: an explicit name: colliding with a resolved name is an error" {
+  # name: dup on b collides with the bare 'dup' entry's resolved name → hard error
+  # (an explicit name must be unique, whether the other side is explicit or not).
+  bootstrap::_apply_one() { return 0; }
+  mkdir -p "${PATH_LOK8S}/addons/dup" "${PATH_LOK8S}/addons/b"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - dup
+    - b:
+        name: dup
+YAML
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "name: must be unique"
 }
 
 @test "bootstrap::apply: a failed wait-gate skips later entries; no orphan, temp dir cleaned" {
