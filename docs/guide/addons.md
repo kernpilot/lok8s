@@ -113,8 +113,8 @@ spec:
 The inline config is deep-merged on top of the provider-aware defaults.
 
 For an entry that needs more than just inline values, use the explicit map keys
-`values:`, `env:`, `wait:`, and `dependsOn:` (any one of them switches the entry
-to this form; otherwise the whole map is treated as inline values, as above):
+`values:`, `env:`, `wait:`, `dependsOn:`, and `name:` (any one of them switches the
+entry to this form; otherwise the whole map is treated as inline values, as above):
 
 ```yaml
 spec:
@@ -129,6 +129,10 @@ spec:
           LOK8S_USER_FOO: bar
     - cert-manager-webhook-hetzner:
         dependsOn: [cert-manager]   # wait for cert-manager's READINESS first
+    - rook-ceph                     # the operator addon (.lok8s/addons/rook-ceph)
+    - ./targets/rook-ceph:
+        name: rook-ceph-cluster     # disambiguate from the rook-ceph addon above
+        dependsOn: [rook-ceph]      # operator must be Ready before the CephCluster
 ```
 
 - **`values:`** — Helm values, deep-merged like the inline form. Chart addons
@@ -143,12 +147,24 @@ spec:
 - **`dependsOn:`** — a list of entry names this entry must wait for before it
   applies (see next section). Each name is the *resolved* name of another entry:
   the map-key for a chart entry, the basename for a `./path` entry
-  (`./targets/networking` → `networking`), the scalar for a bare entry. Must be a
-  YAML list of scalar names; an unknown name or a dependency cycle is an error.
+  (`./targets/networking` → `networking`), the scalar for a bare entry, or an
+  explicit `name:` override (below). Must be a YAML list of scalar names; an
+  unknown name, an *ambiguous* name (one shared by two entries), or a dependency
+  cycle is an error.
+- **`name:`** — overrides this entry's **identifier**. By default an entry's name
+  is the resolved name (map-key for a chart entry, basename for a `./path`). `name:`
+  replaces it — for **both** being a `dependsOn` target *and* resolving `dependsOn`
+  references — but it does **not** change which directory the addon renders from
+  (still the path/map-key). Reach for it to break a basename collision: the
+  `rook-ceph` addon and a `./targets/rook-ceph` target both resolve to `rook-ceph`,
+  so a `dependsOn: [rook-ceph]` is ambiguous (and the target would even self-
+  reference). Give the target a distinct `name: rook-ceph-cluster` and depend on
+  `rook-ceph` (the addon) unambiguously. Must be a non-empty scalar matching
+  `[A-Za-z0-9._-]+`; a name that duplicates another entry's name is an error.
 
 ::: danger BREAKING CHANGE — migrate before your next `lo up`
-`values`, `env`, `wait`, and `dependsOn` are now **reserved keys** at the top
-level of an inline map entry. Any one of them present switches the entry to the
+`values`, `env`, `wait`, `dependsOn`, and `name` are now **reserved keys** at the
+top level of an inline map entry. Any one of them present switches the entry to the
 explicit schema above. This **silently changes the meaning** of a legacy entry
 whose inline Helm values *happen to use one of those names as a top-level chart
 value*.
@@ -181,6 +197,9 @@ assume "no error":
 - **`wait:`** reinterprets as the reserved key; a *boolean* is accepted silently,
   but a **non-boolean** `wait:` (e.g. `wait: "10s"`, or a `wait:` map) now **fails
   loudly** via the boolean validation above.
+- **`name:`** reinterprets as the reserved identifier key; a non-scalar or
+  charset-invalid value **fails loudly**, and a valid scalar silently becomes the
+  entry's identity instead of a Helm value.
 
 There is no automatic migration, so audit every inline `spec.bootstrap` map entry
 and move such keys under `values:` **before** the next `lo up` / `lo provision`.
@@ -232,8 +251,13 @@ the gate itself. A **pure leaf** (nothing depends on it) just applies and is don
 skipping the health-wait entirely. So adding a `dependsOn` edge is what *makes* its
 target incur a readiness wait; addons nobody waits on stay fire-and-forget.
 
-A `dependsOn` name must resolve to another entry (an unknown name is an error),
-and the resulting graph must be acyclic (a cycle is an error — it would deadlock).
+A `dependsOn` name must resolve to **exactly one** other entry. An unknown name is
+an error; so is an **ambiguous** one — a name shared by two entries (e.g. the
+`rook-ceph` addon and a `./targets/rook-ceph` target both resolving to `rook-ceph`)
+referenced by a `dependsOn` can't be resolved, so set an explicit `name:` on one of
+them to disambiguate. (A shared basename that *nothing* depends on is only a
+warning — it won't break a barrier-only config.) The resulting graph must also be
+acyclic (a cycle is an error — it would deadlock).
 
 The concurrency cap defaults to 8 and is tunable with
 `LOK8S_BOOTSTRAP_PARALLEL` (set it to `1` for clean, one-at-a-time output).
