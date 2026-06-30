@@ -41,39 +41,49 @@ func (g *Passwd) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	sort.Strings(keys)
 	out := make([]plugin.Entry, 0, len(keys))
 	for _, k := range keys {
-		entry := g.spec[k]
-		length := entry.EffectiveLength()
-		chars, err := charset.Resolve(entry.EffectiveChars())
-		if err != nil {
-			return nil, errs.Wrap(k, err)
-		}
-		required, err := entry.RequireClasses()
-		if err != nil {
-			return nil, errs.Wrap(k, err)
-		}
-		// Validate feasibility up front (clear config error, not a generation
-		// retry-exhaustion): the password must be long enough to hold every
-		// required class, and the charset must be able to supply each one.
-		if len(required) > length {
-			return nil, errs.Wrap(k, fmt.Errorf("require lists %d classes but length is %d", len(required), length))
-		}
-		for _, c := range required {
-			if !charset.PoolContains(chars, c) {
-				return nil, errs.Wrap(k, fmt.Errorf("charset %q has no %q characters to satisfy require", entry.EffectiveChars(), c))
-			}
-		}
-		val, err := ctx.Cache.GetOrCreate(k, func() ([]byte, error) {
-			if len(required) == 0 {
-				return random.Password(length, chars)
-			}
-			return random.PasswordSatisfying(length, chars, func(p []byte) bool {
-				return charset.SatisfiesAll(p, required)
-			})
-		})
+		val, err := passwdValue(ctx, k, g.spec[k])
 		if err != nil {
 			return nil, errs.Wrap(k, err)
 		}
 		out = append(out, plugin.Entry{Key: k, Value: val})
 	}
 	return out, nil
+}
+
+// passwdValue generates — or reuses the cached — random password for key per
+// the PasswdEntry. Shared by the passwd generator AND the env passwd-fallback
+// (env: { var: X, passwd: {...} }). Requires ctx.Cache (PATH_SECRETS) so the
+// generated value is byte-stable across runs.
+func passwdValue(ctx *plugin.Context, key string, entry specpkg.PasswdEntry) ([]byte, error) {
+	if ctx.Cache == nil {
+		return nil, errs.New("passwd requires PATH_SECRETS to be set")
+	}
+	length := entry.EffectiveLength()
+	chars, err := charset.Resolve(entry.EffectiveChars())
+	if err != nil {
+		return nil, err
+	}
+	required, err := entry.RequireClasses()
+	if err != nil {
+		return nil, err
+	}
+	// Validate feasibility up front (clear config error, not a generation
+	// retry-exhaustion): the password must be long enough to hold every
+	// required class, and the charset must be able to supply each one.
+	if len(required) > length {
+		return nil, fmt.Errorf("require lists %d classes but length is %d", len(required), length)
+	}
+	for _, c := range required {
+		if !charset.PoolContains(chars, c) {
+			return nil, fmt.Errorf("charset %q has no %q characters to satisfy require", entry.EffectiveChars(), c)
+		}
+	}
+	return ctx.Cache.GetOrCreate(key, func() ([]byte, error) {
+		if len(required) == 0 {
+			return random.Password(length, chars)
+		}
+		return random.PasswordSatisfying(length, chars, func(p []byte) bool {
+			return charset.SatisfiesAll(p, required)
+		})
+	})
 }

@@ -68,15 +68,9 @@ driver::provision() {
   rm -f "${work_dir}/output.json"
   _append_inventory "${PROVIDER_CONFIG_FILE}" "${work_dir}/kubeone.yaml" || return 1
 
-  # 4b. spec.oidc: deliver the apiserver auth-config to every control-plane node
-  #     BEFORE apply. KubeOne can't place the file declaratively, and the manifest
-  #     sets --authentication-config to a fixed node path — so the file must exist
-  #     there or the kube-apiserver won't start. Fail-safe: abort here (no apply)
-  #     if delivery fails, rather than apply a flag that points at a missing file.
-  #     No-op unless spec.oidc is set.
-  kubeone::deliver_oidc_auth_config "${PROVIDER_CONFIG_FILE}" "${work_dir}" || return 1
-
-  # 5. Run kubeone apply
+  # 5. Run kubeone apply (spec.oidc was wired into the manifest as
+  #    features.openidConnect during generate_config — KubeOne propagates it to
+  #    every control plane via the kubeadm ClusterConfiguration; no file delivery)
   kubeone::apply "${work_dir}"
 
   # 6. Copy kubeconfig to standard location
@@ -94,6 +88,9 @@ driver::provision() {
     error "Kubeconfig not found at ${src_kubeconfig} after kubeone apply"
     return 1
   fi
+  # No post-apply CCM step: cilium + the robot-ready CCM were applied BY kubeone
+  # during apply (kubeone::render_addons → <work_dir>/addons/, spec.addons.path),
+  # so the worker joined a robot-aware CCM and nothing needs re-asserting.
 }
 
 driver::destroy() {
@@ -214,6 +211,23 @@ _append_inventory() {
     echo "apiEndpoint:"
     echo "  host: \"${api_host}\""
     echo "  port: 6443"
+    # alternativeNames: every control-plane private IP + any space-separated
+    # KUBEONE_EXTRA_SANS (e.g. the LB private IP used as k8sServiceHost). The
+    # apiserver serving cert must cover these or private-net access + CP (re)joins
+    # fail with "apiserver cert not valid for <ip>" (kubeadm rejects the join).
+    echo "  alternativeNames:"
+    # The LB private IP (k8sServiceHost) — auto-derived by the provider; plus any
+    # space-separated KUBEONE_EXTRA_SANS override; plus every control-plane
+    # private IP. Without these the apiserver cert misses the in-cluster/private
+    # addresses and CP (re)joins fail "apiserver cert not valid for <ip>".
+    local _lbpriv; _lbpriv="$(echo "${output}" | jq -r '.api.privateEndpoint // ""')"
+    [[ -z "${_lbpriv}" ]] || echo "    - \"${_lbpriv}\""
+    local _san
+    for _san in ${KUBEONE_EXTRA_SANS:-}; do
+      [[ "${_san}" == "${_lbpriv}" ]] && continue
+      echo "    - \"${_san}\""
+    done
+    echo "${output}" | jq -r '.nodes[] | select(.role == "control-plane") | "    - \"\(.private_ip)\""'
     echo ""
     echo "controlPlane:"
     echo "  hosts:"
@@ -239,7 +253,24 @@ _append_inventory() {
   net_id=$(echo "${output}" | jq -r '.network.id // ""')
   if [[ -n "${net_id}" ]] && \
      [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}")" == "true" ]]; then
+    # net_id is interpolated into the yq assignment below — reject anything outside
+    # a safe charset so it can't break yq syntax or inject fields (matches the same
+    # guard in drivers/kubeone/config::render_addons).
+    [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
+      || { error "kubeone inventory: invalid networkID from provider: ${net_id}"; return 1; }
     yq -i ".cloudProvider.hetzner.networkID = \"${net_id}\"" "${manifest}"
+  fi
+
+  # Deploy OUR cilium + robot-aware hcloud CCM via addons.path (cni: external +
+  # external CCM): render_addons writes <work_dir>/addons/{cilium,ccm-hetzner}/.
+  # cilium is a plain user addon (no embedded CNI to override); ccm-hetzner uses
+  # the embedded-addon NAME so EnsureAddonByName applies ours INSTEAD of kubeone's
+  # embedded ccm (ours is robot-aware → the bare-metal worker is recognised and
+  # the node-init taint clears before externalccm's wait). (NB delete:true does
+  # NOT disable an embedded addon — kubeone skips embedded-named declared addons
+  # before the delete check; the same-named subdir is the override. ensure.go.)
+  if [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}")" == "true" ]]; then
+    yq -i '.addons.enable = true | .addons.path = "./addons"' "${manifest}"
   fi
 
   debug "kubeone inventory appended to ${manifest} (api=${api_host}, workers=${worker_count}, networkID=${net_id:-none})"

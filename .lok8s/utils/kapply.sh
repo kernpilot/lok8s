@@ -40,7 +40,7 @@ kapply::_tty() {
   [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
   [[ -w /dev/tty ]]
 }
-kapply::_ui() { printf '%s' "${KAPPLY_TTY:-/dev/tty}"; }
+kapply::_ui() { local d="${KAPPLY_TTY:-/dev/tty}"; [[ "${d}" == /dev/tty && ! -t 1 ]] && d=/dev/null; printf '%s' "${d}"; }
 
 # Spinner frames (array, not a substring — avoids byte/char issues on braille).
 _KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
@@ -209,6 +209,11 @@ kapply::apply() {
 # (distinct from the display sink, which $KAPPLY_TTY can redirect to a file).
 kapply::_interactive() {
   [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
+  # Auto-detect headless: with no controlling terminal on our std fds, opening
+  # /dev/tty fails ("No such device or address") in background jobs / CI and
+  # leaves a noisy exit-1 even when the apply itself succeeded. Treat that as
+  # non-interactive instead of relying on LOK8S_NONINTERACTIVE being set.
+  [[ -t 0 && -t 1 ]] || return 1
   [[ -r /dev/tty && -w /dev/tty ]]
 }
 

@@ -296,3 +296,128 @@ func TestFile_PathTraversalErrorIsStructured(t *testing.T) {
 	any = err
 	_ = errors.Is(any, any) // smoke check on error chain
 }
+
+// --- env fallback modes: optional / default / passwd ------------------------
+
+func TestEnv_OptionalOmitsWhenMissing(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{}) // no env
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Optional: true}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("optional + missing env should omit the key, got %d entries", len(got))
+	}
+}
+
+func TestEnv_OptionalEmittedWhenSet(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "present"})
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Optional: true}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || string(got[0].Value) != "present" {
+		t.Errorf("optional + set should emit the value, got %+v", got)
+	}
+}
+
+func TestEnv_DefaultUsedWhenMissing(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{})
+	d := "fallback"
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Default: &d}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || string(got[0].Value) != "fallback" {
+		t.Errorf("default should be used when env missing, got %+v", got)
+	}
+}
+
+// NB: holds only on a cache MISS (fresh cache). Once a value is cached,
+// cache-first shadows env — see TestEnv_CachedDefaultShadowsLaterEnv.
+func TestEnv_DefaultOverriddenByEnv(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "real"})
+	d := "fallback"
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Default: &d}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "real" {
+		t.Errorf("env should win over default, got %q", got[0].Value)
+	}
+}
+
+func TestEnv_PasswdFallbackGeneratesAndCaches(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{}) // no env → generate
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Passwd: &specpkg.PasswdEntry{Length: 24}}})
+	got1, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got1) != 1 || len(got1[0].Value) != 24 {
+		t.Fatalf("passwd fallback should generate 24 chars, got %q (len %d)", got1[0].Value, len(got1[0].Value))
+	}
+	got2, _ := g.Generate(ctx) // stable across runs (cached)
+	if string(got1[0].Value) != string(got2[0].Value) {
+		t.Errorf("passwd fallback should be stable: %q vs %q", got1[0].Value, got2[0].Value)
+	}
+}
+
+func TestEnv_PasswdFallbackOverriddenByEnv(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "operator-set"})
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Passwd: &specpkg.PasswdEntry{Length: 24}}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "operator-set" {
+		t.Errorf("env should win over passwd fallback, got %q", got[0].Value)
+	}
+}
+
+// --- cache x fallback: the cache-first model shadows env (honest cells) ------
+
+func TestEnv_CachedDefaultShadowsLaterEnv(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{}) // env missing -> caches the default
+	d := "dflt"
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Default: &d}})
+	got1, _ := g.Generate(ctx)
+	if string(got1[0].Value) != "dflt" {
+		t.Fatalf("run1 should cache the default, got %q", got1[0].Value)
+	}
+	ctx.Env = func(string) (string, bool) { return "real", true } // env now set
+	got2, _ := g.Generate(ctx)
+	if string(got2[0].Value) != "dflt" {
+		t.Errorf("cache-first: a cached default shadows the later env value, got %q", got2[0].Value)
+	}
+}
+
+func TestEnv_CachedOptionalStaysEmitted(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"V": "once"}) // present -> cached
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "V", Optional: true}})
+	if got1, _ := g.Generate(ctx); len(got1) != 1 {
+		t.Fatalf("run1 should emit, got %d", len(got1))
+	}
+	ctx.Env = func(string) (string, bool) { return "", false } // env removed
+	got2, _ := g.Generate(ctx)
+	if len(got2) != 1 || string(got2[0].Value) != "once" {
+		t.Errorf("cache-first: optional stays emitted from cache (not omitted), got %+v", got2)
+	}
+}
+
+func TestEnv_DefaultEmptyStringEmitted(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{})
+	d := ""
+	g := NewEnv(map[string]specpkg.EnvEntry{"K": {Var: "MISSING", Default: &d}})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || string(got[0].Value) != "" {
+		t.Errorf(`default: "" should emit an empty value (non-nil pointer), got %+v`, got)
+	}
+}

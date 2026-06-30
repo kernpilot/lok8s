@@ -103,56 +103,54 @@ _load_kubeone_config() {
   assert_success
 }
 
-@test "kubeone::render_oidc_components emits apiServer.flags + writes the file when oidc set" {
+@test "kubeone::_inject_oidc merges features.openidConnect when oidc set" {
   _load_kubeone_config
   local spec; spec=$(_kubeone_spec oidc)
   kubeone::extract_vars "${spec}"
-  local work="${BATS_TEST_TMPDIR}/work"
-  run kubeone::render_oidc_components "${work}"
+  local m="${BATS_TEST_TMPDIR}/m.yaml"
+  printf 'features:\n  encryptionProviders:\n    enable: true\n' > "${m}"
+  run kubeone::_inject_oidc "${m}"
   assert_success
-  assert_output --partial "controlPlaneComponents:"
-  assert_output --partial "apiServer:"
-  assert_output --partial "flags:"
-  assert_output --partial 'authentication-config: "/etc/kubernetes/oidc/auth-config.yaml"'
-  # The auth-config file is rendered into the work dir for out-of-band placement.
-  [ -s "${work}/.oidc/auth-config.yaml" ]
-  run grep -q "AuthenticationConfiguration" "${work}/.oidc/auth-config.yaml"
-  assert_success
+  run yq -r '.features.openidConnect.enable' "${m}"
+  assert_output "true"
+  run yq -r '.features.openidConnect.config.usernameClaim' "${m}"
+  assert_output "sub"
+  run yq -r '.features.encryptionProviders.enable' "${m}"
+  assert_output "true"
 }
 
-@test "kubeone::render_oidc_components emits NOTHING when no spec.oidc (back-compat)" {
+@test "kubeone::_inject_oidc is a no-op without spec.oidc (back-compat)" {
   _load_kubeone_config
   local spec; spec=$(_kubeone_spec none)
   kubeone::extract_vars "${spec}"
-  local work="${BATS_TEST_TMPDIR}/work2"
-  run kubeone::render_oidc_components "${work}"
+  local m="${BATS_TEST_TMPDIR}/m2.yaml"
+  printf 'features:\n  encryptionProviders:\n    enable: true\n' > "${m}"
+  run kubeone::_inject_oidc "${m}"
   assert_success
-  [ -z "${output}" ]
-  [ ! -e "${work}/.oidc/auth-config.yaml" ]
+  run yq -r '.features | has("openidConnect")' "${m}"
+  assert_output "false"
 }
 
-@test "kubeone::generate_config renders a valid kubeone.yaml with the oidc flag" {
+@test "kubeone::generate_config wires features.openidConnect for an oidc spec" {
   if ! command -v envsubst &>/dev/null; then skip "envsubst not available"; fi
   _load_kubeone_config
   local spec; spec=$(_kubeone_spec oidc)
   local out="${BATS_TEST_TMPDIR}/gen"
   kubeone::generate_config "${spec}" "hetzner" "${out}"
   [ -f "${out}/kubeone.yaml" ]
-  run yq -r '.controlPlaneComponents.apiServer.flags."authentication-config"' "${out}/kubeone.yaml"
-  assert_success
-  assert_output "/etc/kubernetes/oidc/auth-config.yaml"
-  # core fields still render
+  run yq -r '.features.openidConnect.enable' "${out}/kubeone.yaml"
+  assert_output "true"
   run yq -r '.versions.kubernetes' "${out}/kubeone.yaml"
   assert_output "v1.35.5"
 }
 
-@test "kubeone::generate_config renders kubeone.yaml WITHOUT controlPlaneComponents for a non-oidc spec" {
+@test "kubeone::generate_config omits features.openidConnect for a non-oidc spec" {
   if ! command -v envsubst &>/dev/null; then skip "envsubst not available"; fi
   _load_kubeone_config
   local spec; spec=$(_kubeone_spec none)
   local out="${BATS_TEST_TMPDIR}/gen2"
   kubeone::generate_config "${spec}" "hetzner" "${out}"
   [ -f "${out}/kubeone.yaml" ]
-  run yq -r 'has("controlPlaneComponents")' "${out}/kubeone.yaml"
+  run yq -r '.features | has("openidConnect")' "${out}/kubeone.yaml"
   assert_output "false"
 }

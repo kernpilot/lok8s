@@ -11,6 +11,7 @@
 
 import ^utils/types
 import ^utils/verbose
+import ^utils/template
 
 main::addons() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -175,5 +176,76 @@ addons::show() {
     [[ -f "${f}" ]] || continue
     echo "  - $(basename "${f}")"
   done
+}
+
+# Render a framework addon to stdout via the canonical khelm path — the SINGLE
+# render shared by the bootstrap engine and the KubeOne driver's pre-apply addon
+# staging. Stacks values base < driver(kind) < provider < inline (later wins),
+# rewrites the chart's valueFiles to the merged set, then
+# `kustomize build --enable-alpha-plugins` + envsubst (LOK8S_USER_* placeholders
+# the caller exported, e.g. cilium's k8sServiceHost).
+# Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values]
+addons::render() {
+  local addon_dir="$1" kind="$2" provider_name="${3:-}" inline_values="${4:-}"
+  local build_dir="${addon_dir}"
+  if [[ -f "${addon_dir}/chart.yaml" ]]; then
+    # Stack values: base < driver < provider < inline (later wins). Facts
+    # (provider env) beat preferences (driver flavor) beat chart defaults (base);
+    # explicit caller intent (inline) beats all.
+    local -a value_files=()
+    [[ ! -f "${addon_dir}/values.yaml" ]] || value_files+=("${addon_dir}/values.yaml")
+    [[ ! -f "${addon_dir}/values.${kind}.yaml" ]] || value_files+=("${addon_dir}/values.${kind}.yaml")
+    [[ -z "${provider_name}" ]] || [[ ! -f "${addon_dir}/values.${provider_name}.yaml" ]] \
+      || value_files+=("${addon_dir}/values.${provider_name}.yaml")
+    # Copy to a mktemp build dir ONLY when there's overlay stacking to do. A chart
+    # that pins its OWN chart.yaml valueFiles — e.g. a target referencing a
+    # cross-tree base `../../../../.lok8s/addons/<x>/values.yaml` (monitoring,
+    # gatus) — must render IN PLACE: a copy breaks those relative paths (they
+    # resolve from /tmp → /.lok8s, missing). Stacking addons carry no cross-tree refs.
+    if [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); then
+      build_dir=$(mktemp -d) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
+      # `/.` (not `/*`) so dotfiles (.helmignore, kustomize overlays, …) come too —
+      # a glob drops them and a chart referencing a dotfile would fail to render.
+      cp -r "${addon_dir}/." "${build_dir}/" \
+        || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
+      if [[ -n "${inline_values}" ]]; then
+        printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
+        value_files+=("${build_dir}/values.inline.yaml")
+      fi
+      if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" \
+             > "${build_dir}/values.merged.yaml"; then
+        error "addons::render: failed to merge values for ${addon_dir}"
+        rm -rf "${build_dir}"; return 1
+      fi
+      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
+        || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
+    fi
+  fi
+
+  # KHELM_TRUST_ANY_REPO: chart repos are declared in our own version-controlled
+  # chart.yaml (the trust boundary is code review), so trust them — no manual
+  # `helm repo add`, versions stay pinned.
+  # --enable-exec: secrets.lok8s.dev is an exec plugin (an addon may carry a
+  # Secret.*.yaml generator next to its chart, e.g. ccm's hcloud secret).
+  local whitelist rc=0 out
+  whitelist=$(template::envsubst_whitelist)
+  # Container env `value`s MUST be strings (k8s schema). Helm coerces numeric
+  # values (e.g. cilium's KUBERNETES_SERVICE_PORT from k8sServicePort) back to
+  # ints and charts emit them unquoted → `kubectl apply` rejects them. Coerce
+  # every container env value to a string; `valueFrom` entries (no `value`) are
+  # left untouched.
+  out=$(KHELM_TRUST_ANY_REPO=true kustomize build --enable-alpha-plugins --enable-exec "${build_dir}" \
+          | envsubst "${whitelist}" \
+          | yq eval '(.. | select(tag == "!!map" and has("env") and (.env | tag == "!!seq")) | .env[] | select(has("value")) | .value) |= tostring') || rc=$?
+  [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+  # A successful build that yields nothing means the addon rendered no resources —
+  # almost always a misconfig (wrong path, everything filtered out). Fail loud
+  # rather than report success for an empty apply.
+  if (( rc == 0 )) && [[ -z "${out}" ]]; then
+    error "addons::render: empty output for ${addon_dir} (no resources rendered)"
+    return 1
+  fi
+  (( rc == 0 )) && printf '%s\n' "${out}"
+  return ${rc}
 }
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::addons "${@}"

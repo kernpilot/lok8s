@@ -23,4 +23,4 @@ features:
     enable: true
 
 machineController:
-  deploy: true${OIDC_CP_COMPONENTS}
+  deploy: true
