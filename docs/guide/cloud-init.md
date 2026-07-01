@@ -188,8 +188,9 @@ cloudInit:
 
 Precedence is per file (first occurrence wins): your module's `write_files` /
 `.stat` **shadow** the library's, and library-only files in that module still
-apply. (`packages` and `nameservers` are the exception — they're the *union*,
-de-duplicated, across all sources, not first-wins.) This lets a cluster compose
+apply. (`packages` and `nameservers` are the exception — they're the *union* of
+all sources, concatenated rather than first-wins; `uniq` collapses adjacent
+repeats but a package listed by two sources is harmless.) This lets a cluster compose
 blessed framework modules (like the Ceph OSD disk-carve) while they stay
 maintained in one place — no per-cluster copy to drift.
 
