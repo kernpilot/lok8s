@@ -10,8 +10,8 @@ metadata:
   namespace: rook-ceph
 kubeVersion: "1.35.5"
 repository: https://charts.rook.io/release
-# Rook v1.20.1 + latest Ceph — the Ceph image is set in the cluster's CephCluster
-# CR (not here); keep the operator and Ceph image moving in step. Bare-metal OSD
+# Rook-Ceph operator v1.20.1. Set the Ceph image in the cluster's CephCluster CR
+# (not here) — the latest Ceph, kept in step with this operator. Bare-metal OSD
 # gotcha: the single-disk ceph-osd carve yields a ~1KiB partition (installimage
 # fills the disk) — use a dedicated disk instead. See docs/guide/bare-metal.md.
 chart: rook-ceph
