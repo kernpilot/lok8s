@@ -655,12 +655,15 @@ YAML
   [ "${se}" -gt "${ec_}" ]
 }
 
-@test "bootstrap::apply returns non-zero if any parallel entry fails (no orphans, temp dir cleaned)" {
-  # One entry fails; the others succeed. apply must drain the whole batch and
-  # then report failure — never leaving a background job behind AND removing the
-  # scheduler's rc temp dir.
-  # Pin parallelism so all three launch in one wave (the runner stops launching
-  # after a failure surfaces) regardless of the ambient LOK8S_BOOTSTRAP_PARALLEL.
+@test "bootstrap::apply: a failed LEAF skips nothing; all independents still apply (rc=1)" {
+  # THE live-run regression pin: a failed LEAF (nothing depends on it) must NOT
+  # halt the bootstrap — every unrelated entry still applies. a/b/c are independent
+  # leaves; b fails. All three still run, apply reports non-zero (b failed), NO entry
+  # is skipped (a leaf failure invalidates no dependents), no orphan job is left, and
+  # the scheduler's rc temp dir is removed. (Before the fix, b's failure stopped the
+  # world and starved unrelated consumers — networking/cnpg/harbor in the live run.)
+  # Pin parallelism so all three launch in one wave regardless of the ambient
+  # LOK8S_BOOTSTRAP_PARALLEL.
   export LOK8S_BOOTSTRAP_PARALLEL=8
   local done_log="${BATS_TEST_TMPDIR}/done.log"
   : > "${done_log}"
@@ -701,14 +704,100 @@ spec:
 YAML
   # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
   # background jobs land in THIS shell's job table — lets us prove no orphan
-  # survives. `|| rc=$?` keeps a non-zero from tripping bats' errexit.
+  # survives. Redirect stderr so we can assert NOTHING was skipped. `|| rc=$?`
+  # keeps a non-zero from tripping bats' errexit.
+  local err_log="${BATS_TEST_TMPDIR}/err.log"
   local rc=0
-  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+    2>"${err_log}" || rc=$?
   [ "${rc}" -ne 0 ]
 
-  # All three were launched in the same batch and drained (no orphan left).
+  # All three ran (a leaf failure skips nothing) — no unrelated entry starved.
   run wc -l < "${done_log}"
   assert_output "3"
+
+  # NOTHING was skipped — a failed leaf has no dependents to invalidate.
+  ! grep -q 'skipping' "${err_log}"
+
+  # No surviving background jobs. `jobs -p` must run in the current shell (not a
+  # `$()`/`run` subshell, which has its own empty job table) — redirect to a file.
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
+
+  # The scheduler's rc temp dir was removed.
+  local rcdir; rcdir="$(cat "${rcdir_marker}")"
+  [ -n "${rcdir}" ]
+  [ ! -d "${rcdir}" ]
+}
+
+@test "bootstrap::apply PARALLEL=1: an independent entry behind a failure still runs (later wave)" {
+  # THE anti-starvation pin. Every other failure test launches the independent
+  # sibling in the SAME wave as the failing entry (LOK8S_BOOTSTRAP_PARALLEL=8), so
+  # the OLD stop-the-world code — which `break`s the whole run on the first failure
+  # — would have passed them too: the sibling was already in flight before the
+  # failure surfaced. That proves nothing about work that hasn't launched yet.
+  #
+  # Here cap=1 forces strictly one entry per wave: `a` (fails) launches and is
+  # reaped ALONE, so its failure surfaces BEFORE `b` (independent, no deps, and
+  # positioned AFTER `a`) ever gets a slot. With the fix, `b` STILL launches in the
+  # next wave (an unrelated leaf is never starved by a prior failure). Under the old
+  # stop-the-world behavior it would be starved — a real regression this pins.
+  export LOK8S_BOOTSTRAP_PARALLEL=1
+  local done_log="${BATS_TEST_TMPDIR}/done.log"
+  : > "${done_log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    sleep 0.1
+    printf '%s\n' "${name}" >> "${done_log}"
+    [ "${name}" = "a" ] && return 1   # the FIRST entry fails
+    return 0
+  }
+  # Capture the scheduler's rc temp dir (the only `mktemp -d` reached here, since
+  # _apply_one is stubbed) so we can assert it is cleaned up afterward.
+  local rcdir_marker="${BATS_TEST_TMPDIR}/rcdir_path"
+  : > "${rcdir_marker}"
+  mktemp() {
+    if [ "$1" = "-d" ]; then
+      local d; d="$(command mktemp -d "${BATS_TEST_TMPDIR}/rcdir.XXXXXX")"
+      printf '%s\n' "${d}" > "${rcdir_marker}"
+      printf '%s\n' "${d}"
+      return 0
+    fi
+    command mktemp "$@"
+  }
+  local n
+  for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b
+YAML
+  # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
+  # background jobs land in THIS shell's job table — lets us prove no orphan
+  # survives. Redirect stderr so we can assert NOTHING was skipped. `|| rc=$?`
+  # keeps a non-zero from tripping bats' errexit.
+  local err_log="${BATS_TEST_TMPDIR}/err.log"
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+    2>"${err_log}" || rc=$?
+
+  # apply reports failure (a failed).
+  [ "${rc}" -ne 0 ]
+
+  # a ran and failed; b — starved behind a's failure at cap=1 — STILL applied in a
+  # LATER wave. This exact assertion FAILS under the old stop-the-world `break`.
+  grep -qx 'a' "${done_log}"
+  grep -qx 'b' "${done_log}"
+
+  # NOTHING was skipped — a failed leaf has no dependents to invalidate.
+  ! grep -q 'skipping' "${err_log}"
 
   # No surviving background jobs. `jobs -p` must run in the current shell (not a
   # `$()`/`run` subshell, which has its own empty job table) — redirect to a file.
@@ -1153,13 +1242,14 @@ YAML
   ! grep -qx 'c' "${waitlog}"
 }
 
-@test "bootstrap::apply: a failed entry's dependents are skipped; independents still run" {
+@test "bootstrap::apply: a failed entry's DEPENDENT is skipped, but siblings still run" {
   # A fails; B dependsOn:[a] must be SKIPPED (you never start work behind a broken
-  # dependency); C is independent and STILL runs. apply drains the batch, returns
-  # non-zero, leaves no orphan job, and removes its rc temp dir. The test itself
-  # completing at all proves the DAG still terminates (no hang) on the failure path.
-  # Pin parallelism so A and the independent C launch in the SAME wave (the runner
-  # stops launching after A's failure surfaces); else C could be starved at =1.
+  # dependency) — and logged as such; C is INDEPENDENT and STILL runs (a failure
+  # only invalidates the failed entry's own dependents, not unrelated siblings).
+  # apply drains the batch, returns non-zero, leaves no orphan job, and removes its
+  # rc temp dir. The test completing at all proves the DAG still terminates on the
+  # failure path (no hang). Pin parallelism so A and the independent C launch in the
+  # SAME wave; else C could be starved at =1.
   export LOK8S_BOOTSTRAP_PARALLEL=8
   local ran_log="${BATS_TEST_TMPDIR}/ran.log"
   : > "${ran_log}"
@@ -1200,21 +1290,24 @@ spec:
 YAML
   # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
   # background jobs land in THIS shell's job table — lets us prove no orphan
-  # survives. `|| rc=$?` keeps the non-zero from tripping bats' errexit.
+  # survives. Redirect stderr to assert on the skip log. `|| rc=$?` keeps the
+  # non-zero from tripping bats' errexit.
+  local err_log="${BATS_TEST_TMPDIR}/err.log"
   local rc=0
-  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+    2>"${err_log}" || rc=$?
 
   # apply reports failure (A failed).
   [ "${rc}" -ne 0 ]
 
-  # A ran and failed; C (independent of A) still ran.
+  # A ran and failed; C (independent of A) STILL ran — not stopped by A's failure.
   grep -qx 'a' "${ran_log}"
   grep -qx 'c' "${ran_log}"
 
-  # B (dependsOn the failed A) was NEVER applied — a failed entry's dependents are
-  # skipped (the runner stops launching once a failure surfaces, before B's now-
-  # "completed" dep could make it launchable).
+  # B (dependsOn the failed A) was NEVER applied — a failed entry's transitive
+  # dependents are skipped, and the skip is logged with its cause.
   ! grep -qx 'b' "${ran_log}"
+  grep -q "skipping 'b' — a dependency failed (a)" "${err_log}"
 
   # No surviving background jobs (no orphan left behind on the failure path).
   jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
@@ -1224,6 +1317,60 @@ YAML
   local rcdir; rcdir="$(cat "${rcdir_marker}")"
   [ -n "${rcdir}" ]
   [ ! -d "${rcdir}" ]
+}
+
+@test "bootstrap::apply: a failed entry's TRANSITIVE dependents are all skipped" {
+  # A fails; B dependsOn:[a]; C dependsOn:[b]. Both B AND C must be skipped (the
+  # whole subtree behind the broken dep), each logged, and the run reports non-zero.
+  # Proves the skip propagation is transitive (BFS over the dependents graph), and
+  # that a chain of skipped entries — whose deps never complete — can't wedge the
+  # loop (the test completing proves termination).
+  export LOK8S_BOOTSTRAP_PARALLEL=8
+  local ran_log="${BATS_TEST_TMPDIR}/ran.log"
+  : > "${ran_log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    sleep 0.1
+    printf '%s\n' "${name}" >> "${ran_log}"
+    [ "${name}" = "a" ] && return 1   # A fails
+    return 0
+  }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        dependsOn: [a]
+    - c:
+        dependsOn: [b]
+YAML
+  local err_log="${BATS_TEST_TMPDIR}/err.log"
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+    2>"${err_log}" || rc=$?
+
+  # apply reports failure.
+  [ "${rc}" -ne 0 ]
+
+  # A ran and failed; neither B nor C (transitively behind A) ever applied.
+  grep -qx 'a' "${ran_log}"
+  ! grep -qx 'b' "${ran_log}"
+  ! grep -qx 'c' "${ran_log}"
+
+  # Both skips are logged (cause = the root failed entry a).
+  grep -q "skipping 'b' — a dependency failed (a)" "${err_log}"
+  grep -q "skipping 'c' — a dependency failed (a)" "${err_log}"
+
+  # No orphan job survived the transitive-skip path.
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
 }
 
 # --- name: override + ambiguity (bootstrap::apply) ---------------------------
@@ -1395,14 +1542,15 @@ YAML
   assert_output --partial "name: must be unique"
 }
 
-@test "bootstrap::apply: a failed wait-gate skips later entries; no orphan, temp dir cleaned" {
+@test "bootstrap::apply: a failed wait-gate skips ALL entries after it; no orphan, temp dir cleaned" {
   # Distinct from the failing-*dependency* test above: this pins the FOREGROUND
-  # GATE failure path. G is a wait:true gate; X is positioned AFTER it, so the
-  # gate's drain-all/ready-before-later edges make X depend on G. The gate runs
-  # synchronously in the foreground and FAILS — the launch guard
-  # `(( _BS_OVERALL_RC == 0 ))` (and the inner `|| break`) then stops new launches,
-  # so X is NEVER applied. apply drains, returns non-zero, leaves no orphan job,
-  # and removes its rc temp dir.
+  # GATE failure path. G is a wait:true gate; X and Y are positioned AFTER it, so
+  # the gate's drain-all/ready-before-later edges make BOTH depend on G. The gate
+  # runs synchronously in the foreground and FAILS — its transitive dependents are
+  # every entry after it, so X and Y are skipped (and logged), NEVER applied. This
+  # is the old stop-all behavior, now expressed via the dependents skip (no special
+  # launch guard). apply drains, returns non-zero, leaves no orphan job, and removes
+  # its rc temp dir.
   local ran_log="${BATS_TEST_TMPDIR}/ran.log"
   : > "${ran_log}"
   bootstrap::_apply_one() {
@@ -1424,7 +1572,7 @@ YAML
     fi
     command mktemp "$@"
   }
-  local n; for n in g x; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  local n; for n in g x y; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
   cat > "${CLUSTER_YAML}" <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
 kind: Lo
@@ -1437,12 +1585,16 @@ spec:
     - g:
         wait: true
     - x
+    - y
 YAML
   # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
   # background jobs land in THIS shell's job table — lets us prove no orphan
-  # survives. `|| rc=$?` keeps the non-zero from tripping bats' errexit.
+  # survives. Redirect stderr to assert on the skip log. `|| rc=$?` keeps the
+  # non-zero from tripping bats' errexit.
+  local err_log="${BATS_TEST_TMPDIR}/err.log"
   local rc=0
-  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" || rc=$?
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+    2>"${err_log}" || rc=$?
 
   # apply reports failure (the gate G failed).
   [ "${rc}" -ne 0 ]
@@ -1450,9 +1602,12 @@ YAML
   # G ran and failed.
   grep -qx 'g' "${ran_log}"
 
-  # X (behind the failed gate) was NEVER applied — entries positioned after a
-  # failed foreground gate are skipped by the launch guard.
+  # X and Y (both behind the failed gate) were NEVER applied — a failed gate skips
+  # every entry after it, each logged with the gate as cause.
   ! grep -qx 'x' "${ran_log}"
+  ! grep -qx 'y' "${ran_log}"
+  grep -q "skipping 'x' — a dependency failed (g)" "${err_log}"
+  grep -q "skipping 'y' — a dependency failed (g)" "${err_log}"
 
   # No surviving background jobs (no orphan left behind on the gate-failure path).
   jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"

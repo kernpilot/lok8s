@@ -262,6 +262,28 @@ acyclic (a cycle is an error — it would deadlock).
 The concurrency cap defaults to 8 and is tunable with
 `LOK8S_BOOTSTRAP_PARALLEL` (set it to `1` for clean, one-at-a-time output).
 
+### Failure handling
+
+A bootstrap wants to apply **as much as possible**, so a failing entry does **not**
+stop the whole run. When an entry fails, lok8s skips **only that entry's transitive
+dependents** — the entries that `dependsOn` it (directly or through a chain), plus,
+for a failed `wait: true` gate, everything positioned after the gate (a gate's
+dependents are all-after). Those would fail behind the broken dependency anyway, so
+each is skipped and logged:
+
+```
+bootstrap: skipping 'cnpg-cluster' — a dependency failed (cnpg-operator)
+```
+
+Everything **unrelated** to the failure keeps applying in parallel. In particular a
+failed **leaf** (nothing depends on it — e.g. `gatus`, `tempo`) skips *nothing*: the
+rest of the stack still applies.
+
+The run **returns non-zero** if anything failed *or* was skipped; it returns zero
+only when every entry completed cleanly. Because the failed and skipped entries are
+left un-converged, re-run `lo up` / `lo provision` to reconcile once the underlying
+cause is fixed.
+
 ## Framework addons
 
 | Addon | What it installs | Chart |
