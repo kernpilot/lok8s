@@ -125,24 +125,34 @@ IMAGE /root/.oldroot/nfs/install/../images/Ubuntu-2404-noble-amd64-base.tar.gz
 
 See [Hetzner installimage docs](https://docs.hetzner.com/robot/dedicated-server/operating-systems/installimage/).
 
-### Ceph OSDs: dedicate a disk (don't carve the OS disk)
+### Ceph OSDs on bare metal: force GPT
 
-The framework's `ceph-osd` cloud-init module carves an OSD partition from the
-**free tail** of the OS disk. That works on a cloud VM (root grows to a fixed
-size, the rest is carved), but on bare metal `installimage` sizes the OS
-partitions itself and typically **fills the disk** — leaving only a ~1 KiB
-alignment gap. The carve (`sgdisk -n 0:0:0` on GPT, `parted … 100%` on MBR) then
-grabs that gap and produces a **~1 KiB partition — no usable OSD**.
+Bare-metal `installimage` defaults to an **MBR** partition table. A typical
+Kubernetes disk layout has more than four partitions (`/boot`, `/`,
+`/var/lib/containerd`, …), so MBR must wrap the extras in an **extended
+partition** — and its ~1 KiB marker is what `ceph-volume raw list` (Rook's no-arg
+OSD scan) chokes on: `ceph-bluestore-tool`'s `is_valid_io` asserts, the scan
+returns `{}`, and **every OSD on the node is hidden** — the node provisions fine
+but Ceph shows zero OSDs ([rook#17716](https://github.com/rook/rook/issues/17716);
+fixed upstream in [ceph#69812](https://github.com/ceph/ceph/pull/69812)).
 
-On bare metal, give Ceph its own storage instead:
+Force a GPT table in the installimage so there is no extended partition (`2` =
+always, even on disks < 2 TB):
 
-- **Dedicated raw disk(s)** *(recommended)* — leave one or more drives
-  unpartitioned in the installimage config (comment out their `DRIVE`, omit their
-  `PART` lines) and point Rook at them with a `deviceFilter` (e.g.
-  `^nvme[12]n1$`). Don't add the `ceph-osd` module for those nodes — the layout
-  example above uses exactly this approach.
-- **Or reserve free space** — size the OS root smaller than the disk so the
-  `ceph-osd` carve has a real tail to claim.
+```
+FORCE_GPT 2
+```
+
+::: warning The ceph-osd carve also triggers this on MBR
+Its MBR path (`parted mkpart logical …`) creates a logical → extended partition —
+the exact ~1 KiB trigger. On bare-metal Ceph nodes, **always `FORCE_GPT`**.
+:::
+
+For the OSD storage itself, prefer a **dedicated raw disk** — leave a drive
+unpartitioned (comment out its `DRIVE`, omit its `PART` lines) and point Rook at
+it via `deviceFilter` (e.g. `^nvme[12]n1$`) or `useAllDevices`; the layout example
+above uses exactly this approach. The single-disk `ceph-osd` carve also works, but
+only if installimage leaves a free tail — on a full OS disk it has nothing to claim.
 
 ## vSwitch networking
 
