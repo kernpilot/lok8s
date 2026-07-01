@@ -174,36 +174,47 @@ default.
 
 ### Framework module library
 
-Framework-shipped `cloud.d/` modules (e.g. `ceph-osd`) are reachable from a
-**custom** `cloudInit.path` **without copying them**. When you select a module
-via `modules` / `#cloud.d`, the generator resolves it from your cluster's
-`cloud-init/cloud.d/<name>/` first, then falls back to the framework's
-`.lok8s/providers/hetzner/cloud-init/cloud.d/<name>/`:
+The built-in default dir doubles as a **module library**: framework-shipped
+`cloud.d/` modules (`ceph-osd`, …) are reachable from a **custom `cloudInit.path`
+without copying them**. Select a module (via `cloudInit.modules` or a server's
+`#cloud.d`) and the generator resolves it **your cluster first, then the
+framework** — first match wins. The root/base config comes from your dir alone.
 
-```yaml
-cloudInit:
-  path: ./cloud-init          # your cluster's dir — owns the root/base config
-  modules: "node:ceph-osd"    # node → yours; ceph-osd → framework library
+```text
+#cloud.d: node:ceph-osd            cloudInit.path: ./cloud-init
+                                   ( <fw> = .lok8s/providers/hetzner/cloud-init )
+
+  module "node"     1. clusters/<domain>/cloud-init/cloud.d/node/      ← yours    ✓
+                    2. <fw>/cloud.d/node/                                (skipped)
+
+  module "ceph-osd" 1. clusters/<domain>/cloud-init/cloud.d/ceph-osd/   (absent)
+                    2. <fw>/cloud.d/ceph-osd/                           ← library  ✓
+
+  root config       clusters/<domain>/cloud-init/                      ← YOUR dir only
+    (packages / write_files / nameservers — the framework base is never mixed in)
 ```
 
-Precedence is per file (first occurrence wins): your module's `write_files` /
-`.stat` **shadow** the library's, and library-only files in that module still
-apply. (`packages` and `nameservers` are the exception — they're the *union* of
-all sources, concatenated rather than first-wins; `uniq` collapses adjacent
-repeats but a package listed by two sources is harmless.) This lets a cluster compose
-blessed framework modules (like the Ceph OSD disk-carve) while they stay
-maintained in one place — no per-cluster copy to drift.
+So a cluster ships only what it **owns or overrides** (`node`, and its base) and
+borrows the rest (`ceph-osd`) from the framework — which keeps that module
+maintained in **one place**, so a fix reaches every cluster on the next
+provision. No per-cluster copy to drift.
 
-Two boundaries:
+**Precedence**
 
-- **Root config is cluster-only.** Only `cloud.d/*` modules fall back to the
-  library; the top-level `packages` / `write_files` / `nameservers` come from
-  your `cloudInit.path` alone. A custom path fully owns its base — the built-in
-  default's Docker base is **not** silently mixed in. (Want it? select it as a
-  module, or copy just the files you need.)
-- **`ceph-osd` implies `growpart: off`.** Selecting `ceph-osd` makes the
-  generator disable cloud-init's `growpart` so the module can reclaim the disk
-  and size root itself.
+| Content | Rule |
+|---------|------|
+| a module's `write_files` / `.stat` | **first match wins** — your file shadows the library's; library-only files in the same module still apply (per-file overlay) |
+| `packages` / `nameservers` | **union** of all sources (concatenated; `uniq` only drops *adjacent* repeats — a package listed by two sources is harmless) |
+| root config (top-level `packages` / `write_files` / `nameservers`) | **cluster only** — the built-in default's base is never mixed into a custom path |
+
+**Notes**
+
+- Want the default's Docker base on a custom path? By design it's cluster-only —
+  reference it as a module, or copy just the files you need.
+- Selecting the `ceph-osd` module auto-sets `growpart: off` so it can reclaim the
+  disk and size root itself.
+- With **no** custom `cloudInit.path`, `CLOUD_PATH` *is* the framework dir, so the
+  fallback is a no-op — you get the built-in default unchanged.
 
 ## Full cloudInit config
 
