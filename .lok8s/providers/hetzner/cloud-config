@@ -63,6 +63,19 @@ cloud-config::paths() {
   echo "${CLOUD_PATH}${file}"
 }
 
+# Map a write_files SOURCE path to its install target, anchored at the known
+# roots (CLOUD_PATH / CLOUD_PATH_LIB) so a root dir literally named "write_files"
+# can't mis-strip. Sets REPLY to "/<target>" (callers trim a trailing .stat).
+cloud-config::_wf_target() {
+  local f="${1}"
+  if [[ "${f}" == "${CLOUD_PATH}"/* ]]; then
+    f="${f#"${CLOUD_PATH}"/}"
+  elif [[ -n "${CLOUD_PATH_LIB}" && "${f}" == "${CLOUD_PATH_LIB}"/* ]]; then
+    f="${f#"${CLOUD_PATH_LIB}"/}"
+  fi
+  REPLY="/${f#*/write_files/}"
+}
+
 # Generate write_files entries (base64 encoded)
 cloud-config::write_files() {
   mapfile -t paths <<<"$(cloud-config::paths '/write_files')"
@@ -70,7 +83,7 @@ cloud-config::write_files() {
 
   unset IFS
   for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
-    local path="/${file#*/write_files/}"
+    cloud-config::_wf_target "${file}"; local path="${REPLY}"
     echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
     written_paths+="${path}:"
 
@@ -135,7 +148,7 @@ cloud-config::runcmd::executables() {
   unset IFS
   for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
     ! grep -q '^runcmd: true$' "${file}" || {
-      path="/${file#*/write_files/}"
+      cloud-config::_wf_target "${file}"; path="${REPLY}"
       echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
       written_paths+="${path}:"
       echo "- ${path/%.stat}"
@@ -155,7 +168,7 @@ cloud-config::runcmd::remote-generate() {
   unset IFS
   for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
     grep -q '^execute: remote$' "${file}" || continue
-    path="/${file#*/write_files/}"; path="${path%.stat}"
+    cloud-config::_wf_target "${file}"; path="${REPLY%.stat}"
     echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
     written_paths+="${path}:"
     owner="${CLOUD_USER}:${CLOUD_GROUP}"
@@ -189,7 +202,7 @@ cloud-config::remote-script() {
 
   unset IFS
   for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
-    path="/${file#*/write_files/}"
+    cloud-config::_wf_target "${file}"; path="${REPLY}"
     echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
     written_paths+="${path}:"
 

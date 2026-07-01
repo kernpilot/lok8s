@@ -70,3 +70,30 @@ setup() {
   assert_output --partial "/etc/lok8s/node.conf"        # cluster module still applies
   refute_output --partial "ceph-osd-partition.sh"       # no library ⇒ no fallback
 }
+
+@test "no package duplication when CLOUD_PATH == CLOUD_PATH_LIB (guard holds)" {
+  # packages use cat|uniq (not first-wins), so a double-emit from a missing
+  # CLOUD_PATH==CLOUD_PATH_LIB guard would list each entry twice.
+  export CLOUD_PATH="${LIB}" CLOUD_PATH_LIB="${LIB}" CLOUD_PATHD="ceph-osd" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  local n
+  n=$(grep -c '^- gdisk$' <<<"${output}")   # a ceph-osd package — emitted once
+  [ "${n}" -eq 1 ]
+}
+
+@test "target path resolves even when a root dir is literally named write_files" {
+  # regression guard: the strip must anchor at the root, not the first
+  # '/write_files/' segment — else a cluster dir under a 'write_files' folder
+  # mangles every target path.
+  local wf="${BATS_TEST_TMPDIR}/write_files/cluster"
+  mkdir -p "${wf}/cloud.d/node/write_files/etc/lok8s"
+  echo "x" >"${wf}/cloud.d/node/write_files/etc/lok8s/node.conf"
+  export CLOUD_PATH="${wf}" CLOUD_PATH_LIB="" CLOUD_PATHD="node" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/lok8s/node.conf"'   # not /cluster/cloud.d/...
+  refute_output --partial '/write_files/'                  # no leaked segment
+}
