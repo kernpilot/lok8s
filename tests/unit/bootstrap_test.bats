@@ -730,6 +730,86 @@ YAML
   [ ! -d "${rcdir}" ]
 }
 
+@test "bootstrap::apply PARALLEL=1: an independent entry behind a failure still runs (later wave)" {
+  # THE anti-starvation pin. Every other failure test launches the independent
+  # sibling in the SAME wave as the failing entry (LOK8S_BOOTSTRAP_PARALLEL=8), so
+  # the OLD stop-the-world code — which `break`s the whole run on the first failure
+  # — would have passed them too: the sibling was already in flight before the
+  # failure surfaced. That proves nothing about work that hasn't launched yet.
+  #
+  # Here cap=1 forces strictly one entry per wave: `a` (fails) launches and is
+  # reaped ALONE, so its failure surfaces BEFORE `b` (independent, no deps, and
+  # positioned AFTER `a`) ever gets a slot. With the fix, `b` STILL launches in the
+  # next wave (an unrelated leaf is never starved by a prior failure). Under the old
+  # stop-the-world behavior it would be starved — a real regression this pins.
+  export LOK8S_BOOTSTRAP_PARALLEL=1
+  local done_log="${BATS_TEST_TMPDIR}/done.log"
+  : > "${done_log}"
+  bootstrap::_apply_one() {
+    local name="$1"
+    sleep 0.1
+    printf '%s\n' "${name}" >> "${done_log}"
+    [ "${name}" = "a" ] && return 1   # the FIRST entry fails
+    return 0
+  }
+  # Capture the scheduler's rc temp dir (the only `mktemp -d` reached here, since
+  # _apply_one is stubbed) so we can assert it is cleaned up afterward.
+  local rcdir_marker="${BATS_TEST_TMPDIR}/rcdir_path"
+  : > "${rcdir_marker}"
+  mktemp() {
+    if [ "$1" = "-d" ]; then
+      local d; d="$(command mktemp -d "${BATS_TEST_TMPDIR}/rcdir.XXXXXX")"
+      printf '%s\n' "${d}" > "${rcdir_marker}"
+      printf '%s\n' "${d}"
+      return 0
+    fi
+    command mktemp "$@"
+  }
+  local n
+  for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b
+YAML
+  # Call directly (NOT via `run`, which forks a subshell) so the scheduler's
+  # background jobs land in THIS shell's job table — lets us prove no orphan
+  # survives. Redirect stderr so we can assert NOTHING was skipped. `|| rc=$?`
+  # keeps a non-zero from tripping bats' errexit.
+  local err_log="${BATS_TEST_TMPDIR}/err.log"
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+    2>"${err_log}" || rc=$?
+
+  # apply reports failure (a failed).
+  [ "${rc}" -ne 0 ]
+
+  # a ran and failed; b — starved behind a's failure at cap=1 — STILL applied in a
+  # LATER wave. This exact assertion FAILS under the old stop-the-world `break`.
+  grep -qx 'a' "${done_log}"
+  grep -qx 'b' "${done_log}"
+
+  # NOTHING was skipped — a failed leaf has no dependents to invalidate.
+  ! grep -q 'skipping' "${err_log}"
+
+  # No surviving background jobs. `jobs -p` must run in the current shell (not a
+  # `$()`/`run` subshell, which has its own empty job table) — redirect to a file.
+  jobs -p > "${BATS_TEST_TMPDIR}/jobs_after"
+  [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
+
+  # The scheduler's rc temp dir was removed.
+  local rcdir; rcdir="$(cat "${rcdir_marker}")"
+  [ -n "${rcdir}" ]
+  [ ! -d "${rcdir}" ]
+}
+
 @test "bootstrap::apply throttle frees a slot when ANY job finishes (not just the oldest)" {
   # Verify the free-any-slot throttle: with a low cap and one slow leading entry,
   # the faster trailing entries must still complete promptly — they can't be

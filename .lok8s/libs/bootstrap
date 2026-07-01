@@ -542,6 +542,11 @@ bootstrap::_skip_dependents() {
       _q+=("${_c}")
     done
   done
+  # Explicit success. This runs as the RHS of `|| bootstrap::_skip_dependents` in
+  # the reap path under `set -euo pipefail`; the trailing status must be a
+  # deterministic 0, not the incidental exit status of the last BFS command (e.g.
+  # an empty-queue `while` test), which could otherwise abort the reaper.
+  return 0
 }
 
 # Reap every in-flight job (collect rcs + mark each completed), leaving no
@@ -899,8 +904,12 @@ bootstrap::apply() {
   bootstrap::_drain   # safety: never leave an orphan behind
   rm -rf "${_rcdir}"
   # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
-  # entry completed cleanly.
-  if (( _BS_OVERALL_RC != 0 )) || (( ${#_skip[@]} > 0 )); then
+  # entry completed cleanly. Checking _BS_OVERALL_RC alone is sufficient: _skip is
+  # ONLY ever populated by bootstrap::_skip_dependents, and both of its call sites
+  # (the reap path and the foreground-gate path) set _BS_OVERALL_RC=1 immediately
+  # before invoking it — so a non-empty _skip always implies _BS_OVERALL_RC!=0. The
+  # former `|| (( ${#_skip[@]} > 0 ))` clause was therefore redundant; dropped.
+  if (( _BS_OVERALL_RC != 0 )); then
     return 1
   fi
   return 0
