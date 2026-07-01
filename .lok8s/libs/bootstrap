@@ -528,10 +528,13 @@ bootstrap::_skip_dependents() {
   local _failed="$1"
   local _cause="${_names[${_failed}]}"
   local -a _q=("${_failed}")
+  local _head=0
   local _u _c
   local -a _kids
-  while (( ${#_q[@]} )); do
-    _u="${_q[0]}"; _q=("${_q[@]:1}")
+  # Dequeue via a head index (O(n) total), not an array-shift `_q=("${_q[@]:1}")`
+  # that recopies the whole queue every iteration (O(n²) as the DAG grows).
+  while (( _head < ${#_q[@]} )); do
+    _u="${_q[_head]}"; _head=$(( _head + 1 ))
     _kids=()
     [[ -z "${_dependents["${_u}"]:-}" ]] || read -ra _kids <<< "${_dependents["${_u}"]}"
     for _c in "${_kids[@]+"${_kids[@]}"}"; do
