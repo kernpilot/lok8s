@@ -3,8 +3,8 @@ crds:
   enabled: true
 
 # CSI: RBD only for Phase 1. Enable CephFS later if RWX/shared storage is needed.
-# Rook 1.19.6 deploys the ceph-csi driver (ctrlplugin/nodeplugin) and registers
-# rook-ceph.rbd.csi.ceph.com reliably — verified end-to-end (PVC Bound + RBD r/w).
+# Rook deploys the ceph-csi driver (ctrlplugin/nodeplugin) and registers
+# rook-ceph.rbd.csi.ceph.com (verified end-to-end: PVC Bound + RBD r/w mount).
 csi:
   enableRbdDriver: true
   enableCephfsDriver: false

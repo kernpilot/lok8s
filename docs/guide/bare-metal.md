@@ -125,6 +125,25 @@ IMAGE /root/.oldroot/nfs/install/../images/Ubuntu-2404-noble-amd64-base.tar.gz
 
 See [Hetzner installimage docs](https://docs.hetzner.com/robot/dedicated-server/operating-systems/installimage/).
 
+### Ceph OSDs: dedicate a disk (don't carve the OS disk)
+
+The framework's `ceph-osd` cloud-init module carves an OSD partition from the
+**free tail** of the OS disk. That works on a cloud VM (root grows to a fixed
+size, the rest is carved), but on bare metal `installimage` sizes the OS
+partitions itself and typically **fills the disk** — leaving only a ~1 KiB
+alignment gap. The carve (`sgdisk -n 0:0:0` on GPT, `parted … 100%` on MBR) then
+grabs that gap and produces a **~1 KiB partition — no usable OSD**.
+
+On bare metal, give Ceph its own storage instead:
+
+- **Dedicated raw disk(s)** *(recommended)* — leave one or more drives
+  unpartitioned in the installimage config (comment out their `DRIVE`, omit their
+  `PART` lines) and point Rook at them with a `deviceFilter` (e.g.
+  `^nvme[12]n1$`). Don't add the `ceph-osd` module for those nodes — the layout
+  example above uses exactly this approach.
+- **Or reserve free space** — size the OS root smaller than the disk so the
+  `ceph-osd` carve has a real tail to claim.
+
 ## vSwitch networking
 
 Bare metal servers connect to Hetzner Cloud networks via vSwitch:
