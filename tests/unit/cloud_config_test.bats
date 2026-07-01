@@ -101,13 +101,28 @@ setup() {
 @test "de-dup is literal, not regex — paths differing only at a metachar both emit" {
   # /etc/foo.conf's '.' must NOT regex-match /etc/fooXconf; the old grep -E
   # de-dup would treat them as the same target and skip the second file.
+  # Order matters: the dotted path must be processed SECOND so its regex would
+  # match the already-stored fooXconf (module a runs before b).
   mkdir -p "${CL}/cloud.d/a/write_files/etc" "${CL}/cloud.d/b/write_files/etc"
-  echo a >"${CL}/cloud.d/a/write_files/etc/foo.conf"
-  echo b >"${CL}/cloud.d/b/write_files/etc/fooXconf"
+  echo a >"${CL}/cloud.d/a/write_files/etc/fooXconf"   # stored first
+  echo b >"${CL}/cloud.d/b/write_files/etc/foo.conf"   # second; '.' would regex-match fooXconf
   export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="" CLOUD_PATHD="a:b" \
     CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
   run cloud-config::generate
   assert_success
-  assert_output --partial 'path: "/etc/foo.conf"'
   assert_output --partial 'path: "/etc/fooXconf"'
+  assert_output --partial 'path: "/etc/foo.conf"'      # old grep -E would SKIP this
+}
+
+@test "root-level write_files targets resolve (regression: default-flow daemon.json)" {
+  # a file directly under <path>/write_files/ (no cloud.d module) must map to its
+  # real target, not /write_files/... — e.g. the built-in default's daemon.json.
+  mkdir -p "${CL}/write_files/etc/docker"
+  echo '{}' >"${CL}/write_files/etc/docker/daemon.json"
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="" CLOUD_PATHD="" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/docker/daemon.json"'
+  refute_output --partial 'path: "/write_files/'
 }

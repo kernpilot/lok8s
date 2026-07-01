@@ -73,7 +73,11 @@ cloud-config::_wf_target() {
   elif [[ -n "${CLOUD_PATH_LIB}" && "${f}" == "${CLOUD_PATH_LIB}"/* ]]; then
     f="${f#"${CLOUD_PATH_LIB}"/}"
   fi
-  REPLY="/${f#*/write_files/}"
+  # f is now "cloud.d/<mod>/write_files/<target>" (module) or "write_files/<target>"
+  # (root-level file); strip whichever boundary, leaving <target>.
+  f="${f#cloud.d/*/}"
+  f="${f#write_files/}"
+  REPLY="/${f}"
 }
 
 # Generate write_files entries (base64 encoded)
