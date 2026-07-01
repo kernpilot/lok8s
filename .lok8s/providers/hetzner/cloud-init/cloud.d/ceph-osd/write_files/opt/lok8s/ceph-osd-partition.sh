@@ -56,6 +56,10 @@ case "${TABLE}" in
     ;;
   dos|msdos)
     echo "lok8s/ceph-osd: MBR ${DEV} — add a raw OSD partition in the free tail"
+    # ⚠️ An MBR logical partition lives in an extended partition, whose ~1KiB
+    # marker trips ceph-volume's no-arg `raw list` → {} → HIDES every OSD on the
+    # node (rook#17716; ceph/ceph#69812). Prefer GPT for Ceph nodes (installimage
+    # FORCE_GPT); see docs/guide/bare-metal.md.
     # Start right after the last existing partition (parted machine output: num:start:end:…).
     LAST_END="$(parted -sm "${DEV}" unit MB print 2>/dev/null | awk -F: 'NR>2 && $1 ~ /^[0-9]+$/ {e=$3} END{print e}')"
     LAST_END="${LAST_END%MB}"
