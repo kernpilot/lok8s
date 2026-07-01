@@ -127,20 +127,23 @@ See [Hetzner installimage docs](https://docs.hetzner.com/robot/dedicated-server/
 
 ### Ceph OSDs on bare metal: force GPT
 
-Bare-metal `installimage` defaults to an **MBR** partition table, and MBR uses an
-extended partition — a ~1 KiB marker that `ceph-volume raw list` (Rook's no-arg
+Bare-metal `installimage` defaults to an **MBR** partition table. A typical
+Kubernetes disk layout has more than four partitions (`/boot`, `/`,
+`/var/lib/containerd`, …), so MBR must wrap the extras in an **extended
+partition** — and its ~1 KiB marker is what `ceph-volume raw list` (Rook's no-arg
 OSD scan) chokes on: `ceph-bluestore-tool`'s `is_valid_io` asserts, the scan
 returns `{}`, and **every OSD on the node is hidden** — the node provisions fine
 but Ceph shows zero OSDs ([rook#17716](https://github.com/rook/rook/issues/17716);
 fixed upstream in [ceph#69812](https://github.com/ceph/ceph/pull/69812)).
 
-Force a GPT table in the installimage so there is no extended partition:
+Force a GPT table in the installimage so there is no extended partition (`2` =
+always, even on disks < 2 TB):
 
 ```
 FORCE_GPT 2
 ```
 
-::: warning The `ceph-osd` carve module *manufactures* this on MBR
+::: warning The ceph-osd carve also triggers this on MBR
 Its MBR path (`parted mkpart logical …`) creates a logical → extended partition —
 the exact ~1 KiB trigger. On bare-metal Ceph nodes, **always `FORCE_GPT`**.
 :::
