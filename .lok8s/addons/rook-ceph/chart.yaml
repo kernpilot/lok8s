@@ -12,7 +12,7 @@ kubeVersion: "1.35.5"
 repository: https://charts.rook.io/release
 # Rook-Ceph operator v1.20.1. Set the Ceph image in the cluster's CephCluster CR
 # (not here) — the latest Ceph, kept in step with this operator. Bare-metal OSD
-# gotcha: MBR trips ceph-volume's no-arg `raw list` (#17716) → every OSD hidden;
+# gotcha: MBR trips ceph-volume's no-arg `raw list` (rook#17716) → every OSD hidden;
 # force GPT in installimage. See docs/guide/bare-metal.md.
 chart: rook-ceph
 version: v1.20.1
