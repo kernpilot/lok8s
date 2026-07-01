@@ -480,6 +480,15 @@ bootstrap::_apply_one() {
 # detection live in bootstrap::apply; this collapses the old strictly-serial
 # apply-then-wait phase down to roughly the slowest dependency chain.
 #
+# FAILURE is isolated to the failed entry's SUBTREE — not the whole run. When an
+# entry fails, only its TRANSITIVE dependents (which would fail behind the broken
+# dep) are skipped (bootstrap::_skip_dependents BFS over the parent→children
+# reverse-adjacency); every unrelated entry still applies. A failed LEAF skips
+# nothing. A failed wait-gate skips everything after it automatically — the gate's
+# drain-all/ready-before-later edges make all-after its dependents. This is a
+# deliberate bootstrap policy: apply as much as possible, then report non-zero if
+# anything failed or was skipped (so the caller re-runs `lo up` to converge).
+#
 # State is module-level (bash has no closures) so the reap/drain helpers can share
 # it with the bootstrap::apply runner; it is reset at the top of every run.
 _BS_INFLIGHT=()     # pids of running ( _apply_one ) background jobs
@@ -490,10 +499,49 @@ _BS_DONE=0          # count of completed entries
 _BS_OVERALL_RC=0    # set to 1 if ANY entry failed
 
 # OR a finished job's captured rc into _BS_OVERALL_RC (a missing file = failed).
+# Returns 0 iff the job SUCCEEDED (rc==0); non-zero on failure, so the caller can
+# react — the reap path uses it to skip the failed entry's transitive dependents.
 bootstrap::_collect_rc() {
   local _rcf="$1" _r=1
   [[ -f "${_rcf}" ]] && _r="$(cat "${_rcf}" 2>/dev/null || echo 1)"
-  [[ "${_r}" == "0" ]] || _BS_OVERALL_RC=1
+  if [[ "${_r}" != "0" ]]; then
+    _BS_OVERALL_RC=1
+    return 1
+  fi
+  return 0
+}
+
+# bootstrap::_skip_dependents <failed-index>
+# A failed entry only invalidates its OWN transitive dependents (they would fail
+# behind a broken dependency anyway) — NOT the whole run. BFS the reverse-adjacency
+# (parent → children) from the failed entry and add every not-yet-accounted
+# dependent to the _skip set, logging the cause. Unrelated entries keep flowing.
+#
+# Reads the DAG state (_names, _dependents, _skip, _BS_COMPLETED) from the calling
+# bootstrap::apply frame via bash's dynamic scope — this helper is only ever invoked
+# from within a bootstrap::apply run (inline for a foreground gate, or through
+# _reap_one for a background entry). A dependent already skipped is the BFS "visited"
+# guard; one already completed is left alone (defensive — a real dependent can never
+# have completed before the parent it waits on failed). The cause reported is the
+# ORIGINAL failed entry's name, propagated to the whole invalidated subtree.
+bootstrap::_skip_dependents() {
+  local _failed="$1"
+  local _cause="${_names[${_failed}]}"
+  local -a _q=("${_failed}")
+  local _u _c
+  local -a _kids
+  while (( ${#_q[@]} )); do
+    _u="${_q[0]}"; _q=("${_q[@]:1}")
+    _kids=()
+    [[ -z "${_dependents["${_u}"]:-}" ]] || read -ra _kids <<< "${_dependents["${_u}"]}"
+    for _c in "${_kids[@]+"${_kids[@]}"}"; do
+      [[ -z "${_skip["${_c}"]:-}" ]] || continue          # already skipped (visited)
+      [[ -z "${_BS_COMPLETED["${_c}"]:-}" ]] || continue  # already completed — leave it
+      _skip["${_c}"]=1
+      warn "bootstrap: skipping '${_names[${_c}]}' — a dependency failed (${_cause})"
+      _q+=("${_c}")
+    done
+  done
 }
 
 # Reap every in-flight job (collect rcs + mark each completed), leaving no
@@ -536,7 +584,7 @@ bootstrap::_reap_one() {
   fi
   # Prune the reaped job plus any others that have since died; keep the alive.
   local -a _alive=() _alive_rcf=() _alive_idx=()
-  local _i
+  local _i _ridx
   for _i in "${!_BS_INFLIGHT[@]}"; do
     if [[ "${_BS_INFLIGHT[_i]}" != "${_finished}" ]] && kill -0 "${_BS_INFLIGHT[_i]}" 2>/dev/null; then
       _alive+=("${_BS_INFLIGHT[_i]}"); _alive_rcf+=("${_BS_RCFILES[_i]}"); _alive_idx+=("${_BS_RUNIDX[_i]}")
@@ -545,9 +593,13 @@ bootstrap::_reap_one() {
       # (a `kill -0`-dead but un-waited job lingers as a "Done" entry → would look
       # like an orphan). Idempotent for ${_finished} (already reaped → no-op).
       wait "${_BS_INFLIGHT[_i]}" 2>/dev/null || true
-      bootstrap::_collect_rc "${_BS_RCFILES[_i]}"
-      _BS_COMPLETED["${_BS_RUNIDX[_i]}"]=1
+      _ridx="${_BS_RUNIDX[_i]}"
+      _BS_COMPLETED["${_ridx}"]=1
       _BS_DONE=$(( _BS_DONE + 1 ))
+      # Mark completed FIRST (above), then — iff this entry FAILED — skip only its
+      # transitive dependents (they would fail behind the broken dep). A failure no
+      # longer stops the world: unrelated entries keep launching.
+      bootstrap::_collect_rc "${_BS_RCFILES[_i]}" || bootstrap::_skip_dependents "${_ridx}"
     fi
   done
   _BS_INFLIGHT=("${_alive[@]+"${_alive[@]}"}")
@@ -743,90 +795,102 @@ bootstrap::apply() {
   fi
 
   # ── Run the DAG: launch every entry whose deps are done, up to the cap ──
+  # A failure does NOT stop the world: it only adds the failed entry's transitive
+  # dependents to _skip (bootstrap::_skip_dependents), so unrelated entries still
+  # apply. An entry is launchable when its effective deps are ALL completed AND it
+  # is not started and not skipped. A skipped entry is never launched — and since
+  # its deps may never complete, it must count as "accounted for" so the loop can
+  # end. TERMINATION: every iteration either launches an entry, reaps an in-flight
+  # one, or (nothing in flight after a full launch pass) breaks — so it can't hang.
+  # At that break every remaining entry is completed OR skipped: an entry that was
+  # still launchable (all its deps completed, not skipped) would have launched with
+  # a free slot; a blocked one is transitively behind a skipped entry, hence itself
+  # already in _skip (the BFS reaches every transitive dependent).
   local _rcdir; _rcdir=$(mktemp -d) \
     || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
   _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=()
   unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
   _BS_DONE=0; _BS_OVERALL_RC=0
   local -A _started=()
+  local -A _skip=()   # entry index → 1: skipped (a transitive dependency failed)
   local _seq=0
 
-  while (( _BS_DONE < n )); do
-    # Launch phase: every not-yet-started entry whose effective deps are all
-    # completed, capped at max_parallel concurrent. Stop launching once a failure
-    # surfaced — drain the rest, then report (never start work behind a broken dep).
-    if (( _BS_OVERALL_RC == 0 )); then
-      local _i2
-      for (( _i2 = 0; _i2 < n; _i2++ )); do
-        # A foreground gate (below) can flip _BS_OVERALL_RC mid-pass; re-check so
-        # we never launch an entry positioned behind a just-failed gate in the
-        # SAME pass (the background path only surfaces failure on reap, already
-        # guarded by the outer `if` next iteration — keep both paths consistent).
-        (( _BS_OVERALL_RC == 0 )) || break
-        [[ -z "${_started["${_i2}"]:-}" ]] || continue
-        (( ${#_BS_INFLIGHT[@]} < max_parallel )) || break
-        local _ready=1 _d2
-        local -a _dl=()
-        [[ -z "${_edeps[_i2]}" ]] || read -ra _dl <<< "${_edeps[_i2]}"
-        for _d2 in "${_dl[@]+"${_dl[@]}"}"; do
-          [[ -n "${_BS_COMPLETED["${_d2}"]:-}" ]] || { _ready=0; break; }
-        done
-        (( _ready )) || continue
-        # Readiness wait IFF something needs this entry Ready: a dep-target or a
-        # wait-gate. A pure leaf passes "" → _apply_one skips wait_ready (the point).
-        local _wflag=""
-        if (( _istarget[_i2] )) || [[ "${_waits[_i2]}" == "true" ]]; then
-          _wflag="wait"
-        fi
-        _started["${_i2}"]=1
-
-        if [[ "${_waits[_i2]}" == "true" ]]; then
-          # wait: true GATE — run it SYNCHRONOUSLY in the FOREGROUND, NOT as a
-          # backgrounded subshell and WITHOUT LOK8S_NONINTERACTIVE, so kapply keeps
-          # a usable /dev/tty for its interactive immutable/terminating heal prompt
-          # (a background job has no controlling tty → kapply::_interactive is
-          # false → it can never prompt). This loses NO concurrency: a gate
-          # provably runs ALONE — it depends on every entry positionally before it
-          # (all therefore already completed AND reaped, so nothing is in flight)
-          # and every entry after it depends on the gate (none is launchable until
-          # the gate completes). The ( … ) subshell still isolates the
-          # KAPPLY_LAST_OUTPUT global, yet — being foreground, not `&` — inherits
-          # the terminal. Mark it completed INLINE (same as the reap path) so its
-          # dependents become launchable on the next pass; capture rc EXPLICITLY
-          # (|| _garc=$?) so an errexit-failing apply can't abort the runner.
-          local _garc=0
-          ( bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
-              "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" ) || _garc=$?
-          (( _garc == 0 )) || _BS_OVERALL_RC=1
-          _BS_COMPLETED["${_i2}"]=1
-          _BS_DONE=$(( _BS_DONE + 1 ))
-          continue
-        fi
-
-        _seq=$(( _seq + 1 ))
-        local _rcf="${_rcdir}/${_seq}.rc"
-        # Non-gate entries fan out as concurrent BACKGROUND subshells: each in its
-        # own subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent
-        # applies; LOK8S_NONINTERACTIVE because N backgrounded applies have no
-        # shared /dev/tty for kapply's collapsing progress UI / interactive heal
-        # prompt (immutable/terminating still fail fast; --force-recreate still
-        # heals, it just never prompts). Capture the rc EXPLICITLY (|| _arc=$?) —
-        # under errexit a failing _apply_one would abort before `echo $?` runs;
-        # _collect_rc treats a missing file as a failure too. Set
-        # LOK8S_BOOTSTRAP_PARALLEL=1 for clean one-at-a-time output.
-        ( export LOK8S_NONINTERACTIVE=1
-          _arc=0
-          bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
-            "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" || _arc=$?
-          echo "${_arc}" > "${_rcf}" ) &
-        _BS_INFLIGHT+=("$!")
-        _BS_RCFILES+=("${_rcf}")
-        _BS_RUNIDX+=("${_i2}")
+  while :; do
+    # Launch phase: every not-yet-started, not-skipped entry whose effective deps
+    # have all COMPLETED, capped at max_parallel concurrent.
+    local _i2
+    for (( _i2 = 0; _i2 < n; _i2++ )); do
+      [[ -z "${_started["${_i2}"]:-}" ]] || continue
+      [[ -z "${_skip["${_i2}"]:-}" ]] || continue   # never launch a skipped entry
+      (( ${#_BS_INFLIGHT[@]} < max_parallel )) || break
+      local _ready=1 _d2
+      local -a _dl=()
+      [[ -z "${_edeps[_i2]}" ]] || read -ra _dl <<< "${_edeps[_i2]}"
+      for _d2 in "${_dl[@]+"${_dl[@]}"}"; do
+        [[ -n "${_BS_COMPLETED["${_d2}"]:-}" ]] || { _ready=0; break; }
       done
-    fi
+      (( _ready )) || continue
+      # Readiness wait IFF something needs this entry Ready: a dep-target or a
+      # wait-gate. A pure leaf passes "" → _apply_one skips wait_ready (the point).
+      local _wflag=""
+      if (( _istarget[_i2] )) || [[ "${_waits[_i2]}" == "true" ]]; then
+        _wflag="wait"
+      fi
+      _started["${_i2}"]=1
 
-    # Nothing in flight → either everything finished, or a failure halted new
-    # launches and we've drained the rest. Either way, stop looping.
+      if [[ "${_waits[_i2]}" == "true" ]]; then
+        # wait: true GATE — run it SYNCHRONOUSLY in the FOREGROUND, NOT as a
+        # backgrounded subshell and WITHOUT LOK8S_NONINTERACTIVE, so kapply keeps
+        # a usable /dev/tty for its interactive immutable/terminating heal prompt
+        # (a background job has no controlling tty → kapply::_interactive is
+        # false → it can never prompt). This loses NO concurrency: a gate
+        # provably runs ALONE — it depends on every entry positionally before it
+        # (all therefore already completed AND reaped, so nothing is in flight)
+        # and every entry after it depends on the gate (none is launchable until
+        # the gate completes). The ( … ) subshell still isolates the
+        # KAPPLY_LAST_OUTPUT global, yet — being foreground, not `&` — inherits
+        # the terminal. Mark it completed INLINE (same as the reap path) so its
+        # dependents become launchable on the next pass; capture rc EXPLICITLY
+        # (|| _garc=$?) so an errexit-failing apply can't abort the runner. On
+        # failure, skip its transitive dependents — for a gate that is every entry
+        # after it (the gate's drain-all/ready-before-later edges), so a failed
+        # gate still skips all-after, now via the dependents BFS.
+        local _garc=0
+        ( bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
+            "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" ) || _garc=$?
+        _BS_COMPLETED["${_i2}"]=1
+        _BS_DONE=$(( _BS_DONE + 1 ))
+        if (( _garc != 0 )); then
+          _BS_OVERALL_RC=1
+          bootstrap::_skip_dependents "${_i2}"
+        fi
+        continue
+      fi
+
+      _seq=$(( _seq + 1 ))
+      local _rcf="${_rcdir}/${_seq}.rc"
+      # Non-gate entries fan out as concurrent BACKGROUND subshells: each in its
+      # own subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent
+      # applies; LOK8S_NONINTERACTIVE because N backgrounded applies have no
+      # shared /dev/tty for kapply's collapsing progress UI / interactive heal
+      # prompt (immutable/terminating still fail fast; --force-recreate still
+      # heals, it just never prompts). Capture the rc EXPLICITLY (|| _arc=$?) —
+      # under errexit a failing _apply_one would abort before `echo $?` runs;
+      # _collect_rc treats a missing file as a failure too. On reap, a failed
+      # entry's transitive dependents are skipped (bootstrap::_reap_one). Set
+      # LOK8S_BOOTSTRAP_PARALLEL=1 for clean one-at-a-time output.
+      ( export LOK8S_NONINTERACTIVE=1
+        _arc=0
+        bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
+          "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" || _arc=$?
+        echo "${_arc}" > "${_rcf}" ) &
+      _BS_INFLIGHT+=("$!")
+      _BS_RCFILES+=("${_rcf}")
+      _BS_RUNIDX+=("${_i2}")
+    done
+
+    # Nothing in flight after a full launch pass → everything left is completed or
+    # skipped (or only blocked behind skipped entries, which never launch). Done.
     (( ${#_BS_INFLIGHT[@]} )) || break
 
     bootstrap::_reap_one
@@ -834,7 +898,12 @@ bootstrap::apply() {
 
   bootstrap::_drain   # safety: never leave an orphan behind
   rm -rf "${_rcdir}"
-  return "${_BS_OVERALL_RC}"
+  # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
+  # entry completed cleanly.
+  if (( _BS_OVERALL_RC != 0 )) || (( ${#_skip[@]} > 0 )); then
+    return 1
+  fi
+  return 0
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::bootstrap "${@}"
