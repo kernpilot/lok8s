@@ -126,3 +126,17 @@ setup() {
   assert_output --partial 'path: "/etc/docker/daemon.json"'
   refute_output --partial 'path: "/write_files/'
 }
+
+@test "_wf_target strips the longest root when CLOUD_PATH is a prefix of CLOUD_PATH_LIB" {
+  # pathological: CLOUD_PATH is an ancestor of the library dir. A library file
+  # must strip the (longer) library root, not the shorter CLOUD_PATH.
+  local base="${BATS_TEST_TMPDIR}/base" lib="${BATS_TEST_TMPDIR}/base/lib"
+  mkdir -p "${lib}/cloud.d/ceph/write_files/etc/ceph"
+  echo x >"${lib}/cloud.d/ceph/write_files/etc/ceph/x"
+  export CLOUD_PATH="${base}" CLOUD_PATH_LIB="${lib}" CLOUD_PATHD="ceph" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/ceph/x"'
+  refute_output --partial '/cloud.d/'
+}

@@ -68,11 +68,14 @@ cloud-config::paths() {
 # can't mis-strip. Sets REPLY to "/<target>" (callers trim a trailing .stat).
 cloud-config::_wf_target() {
   local f="${1}"
-  if [[ "${f}" == "${CLOUD_PATH}"/* ]]; then
-    f="${f#"${CLOUD_PATH}"/}"
-  elif [[ -n "${CLOUD_PATH_LIB}" && "${f}" == "${CLOUD_PATH_LIB}"/* ]]; then
-    f="${f#"${CLOUD_PATH_LIB}"/}"
+  # Strip the LONGEST matching root, so a library file is attributed to
+  # CLOUD_PATH_LIB even if CLOUD_PATH happens to be a prefix of it.
+  local root=""
+  if [[ "${f}" == "${CLOUD_PATH}"/* ]]; then root="${CLOUD_PATH}"; fi
+  if [[ -n "${CLOUD_PATH_LIB}" && "${f}" == "${CLOUD_PATH_LIB}"/* && ${#CLOUD_PATH_LIB} -gt ${#root} ]]; then
+    root="${CLOUD_PATH_LIB}"
   fi
+  f="${f#"${root}"/}"
   # f is now "cloud.d/<mod>/write_files/<target>" (module) or "write_files/<target>"
   # (root-level file); strip whichever boundary, leaving <target>.
   f="${f#cloud.d/*/}"
