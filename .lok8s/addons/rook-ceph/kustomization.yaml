@@ -1,6 +1,6 @@
 # rook-ceph — the Rook-Ceph OPERATOR (controller + CRDs) only. A generic,
 # reusable atom: bootstrap `rook-ceph` by name to get the operator + CRDs (chart
-# rook-ceph @v1.19.6) in the privileged rook-ceph namespace.
+# rook-ceph @v1.20.1) in the privileged rook-ceph namespace.
 #
 # CLUSTER GLUE stays behind (NOT in this addon): the CephCluster /
 # CephBlockPool / CephObjectStore / StorageClass CRs (cluster.yaml,
