@@ -84,7 +84,7 @@ cloud-config::write_files() {
   unset IFS
   for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
     cloud-config::_wf_target "${file}"; local path="${REPLY}"
-    echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+    printf ':%s' "${written_paths:-}" | grep -qvF ":${path}:" || continue
     written_paths+="${path}:"
 
     local stat="${file}.stat"
@@ -149,7 +149,7 @@ cloud-config::runcmd::executables() {
   for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
     ! grep -q '^runcmd: true$' "${file}" || {
       cloud-config::_wf_target "${file}"; path="${REPLY}"
-      echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+      printf ':%s' "${written_paths:-}" | grep -qvF ":${path}:" || continue
       written_paths+="${path}:"
       echo "- ${path/%.stat}"
     }
@@ -169,7 +169,7 @@ cloud-config::runcmd::remote-generate() {
   for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
     grep -q '^execute: remote$' "${file}" || continue
     cloud-config::_wf_target "${file}"; path="${REPLY%.stat}"
-    echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+    printf ':%s' "${written_paths:-}" | grep -qvF ":${path}:" || continue
     written_paths+="${path}:"
     owner="${CLOUD_USER}:${CLOUD_GROUP}"
     permissions='0644'
@@ -203,7 +203,7 @@ cloud-config::remote-script() {
   unset IFS
   for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
     cloud-config::_wf_target "${file}"; path="${REPLY}"
-    echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
+    printf ':%s' "${written_paths:-}" | grep -qvF ":${path}:" || continue
     written_paths+="${path}:"
 
     stat="${file}.stat"

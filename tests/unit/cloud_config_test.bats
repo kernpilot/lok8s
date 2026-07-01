@@ -97,3 +97,17 @@ setup() {
   assert_output --partial 'path: "/etc/lok8s/node.conf"'   # not /cluster/cloud.d/...
   refute_output --partial '/write_files/'                  # no leaked segment
 }
+
+@test "de-dup is literal, not regex — paths differing only at a metachar both emit" {
+  # /etc/foo.conf's '.' must NOT regex-match /etc/fooXconf; the old grep -E
+  # de-dup would treat them as the same target and skip the second file.
+  mkdir -p "${CL}/cloud.d/a/write_files/etc" "${CL}/cloud.d/b/write_files/etc"
+  echo a >"${CL}/cloud.d/a/write_files/etc/foo.conf"
+  echo b >"${CL}/cloud.d/b/write_files/etc/fooXconf"
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="" CLOUD_PATHD="a:b" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/foo.conf"'
+  assert_output --partial 'path: "/etc/fooXconf"'
+}

@@ -13,12 +13,12 @@ ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
 
 # kind
 KIND_VERSION="v0.27.0"
-curl -Lo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"
+curl -fLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"
 chmod +x /usr/local/bin/kind
 
 # kubectl (latest stable)
-KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)"
-curl -Lo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+curl -fLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
 chmod +x /usr/local/bin/kubectl
 
 # kustomize — pinned to the project's mise/b version, direct release tarball
@@ -29,7 +29,7 @@ curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kusto
 
 # yq
 YQ_VERSION="v4.44.6"
-curl -Lo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}"
+curl -fLo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}"
 chmod +x /usr/local/bin/yq
 
 # tilt
