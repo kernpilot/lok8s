@@ -1,0 +1,142 @@
+#!/usr/bin/env bats
+# cloud_config_test.bats — the Hetzner cloud-config generator's module search
+# path (cloud-config::paths / CLOUD_PATH_LIB).
+#
+# A cluster with a custom cloudInit.path must be able to reference framework-
+# shipped cloud.d modules (e.g. ceph-osd) WITHOUT copying them into its own
+# tree — the drift trap. Guards:
+#   1. a framework cloud.d module resolves from CLOUD_PATH_LIB as a fallback.
+#   2. the cluster's OWN module + root config still win / apply.
+#   3. the library's ROOT config is NEVER mixed in — a custom path fully owns
+#      its base (so e.g. a KubeOne node doesn't inherit the Lo docker base).
+#   4. when there is no custom path (CLOUD_PATH == CLOUD_PATH_LIB) each module
+#      is emitted exactly once (no double-emit).
+
+setup() {
+  load "../test_helper"
+  setup_tmpdir
+
+  # the real framework module library (ships cloud.d/ceph-osd)
+  LIB="${_PROJECT_ROOT}/.lok8s/providers/hetzner/cloud-init"
+
+  # a cluster cloud-init: its OWN `node` module + root packages, but NO ceph-osd
+  CL="${BATS_TEST_TMPDIR}/cluster"
+  mkdir -p "${CL}/cloud.d/node/write_files/etc/lok8s"
+  echo "cluster-node-marker" >"${CL}/cloud.d/node/write_files/etc/lok8s/node.conf"
+  printf 'cluster-only-pkg\n' >"${CL}/packages"
+
+  PUB="${BATS_TEST_TMPDIR}/nopub"; mkdir -p "${PUB}"
+
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/providers/hetzner/cloud-config"
+}
+
+@test "custom cloudInit.path resolves a framework cloud.d module (ceph-osd) via CLOUD_PATH_LIB" {
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="${LIB}" CLOUD_PATHD="node:ceph-osd" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial "ceph-osd-partition.sh"   # framework library module
+  assert_output --partial "/etc/lok8s/node.conf"    # cluster's own module
+  assert_output --partial "cluster-only-pkg"        # cluster root packages
+  assert_output --partial 'growpart'                # ceph-osd ⇒ growpart: off
+}
+
+@test "the framework library ROOT config is NOT mixed into a custom path" {
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="${LIB}" CLOUD_PATHD="node:ceph-osd" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  # daemon.json / docker packages live in the framework ROOT — a custom path
+  # owns its base, so they must NOT appear.
+  refute_output --partial "/etc/docker/daemon.json"
+}
+
+@test "no custom path (CLOUD_PATH == CLOUD_PATH_LIB) emits each module exactly once" {
+  export CLOUD_PATH="${LIB}" CLOUD_PATH_LIB="${LIB}" CLOUD_PATHD="ceph-osd" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  local n
+  n=$(grep -c 'ceph-osd-partition.sh"' <<<"${output}")
+  [ "${n}" -eq 1 ]
+}
+
+@test "empty CLOUD_PATH_LIB keeps the legacy single-path behaviour" {
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="" CLOUD_PATHD="node:ceph-osd" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial "/etc/lok8s/node.conf"        # cluster module still applies
+  refute_output --partial "ceph-osd-partition.sh"       # no library ⇒ no fallback
+}
+
+@test "no package duplication when CLOUD_PATH == CLOUD_PATH_LIB (guard holds)" {
+  # packages use cat|uniq (not first-wins), so a double-emit from a missing
+  # CLOUD_PATH==CLOUD_PATH_LIB guard would list each entry twice.
+  export CLOUD_PATH="${LIB}" CLOUD_PATH_LIB="${LIB}" CLOUD_PATHD="ceph-osd" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  local n
+  n=$(grep -c '^- gdisk$' <<<"${output}")   # a ceph-osd package — emitted once
+  [ "${n}" -eq 1 ]
+}
+
+@test "target path resolves even when a root dir is literally named write_files" {
+  # regression guard: the strip must anchor at the root, not the first
+  # '/write_files/' segment — else a cluster dir under a 'write_files' folder
+  # mangles every target path.
+  local wf="${BATS_TEST_TMPDIR}/write_files/cluster"
+  mkdir -p "${wf}/cloud.d/node/write_files/etc/lok8s"
+  echo "x" >"${wf}/cloud.d/node/write_files/etc/lok8s/node.conf"
+  export CLOUD_PATH="${wf}" CLOUD_PATH_LIB="" CLOUD_PATHD="node" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/lok8s/node.conf"'   # not /cluster/cloud.d/...
+  refute_output --partial '/write_files/'                  # no leaked segment
+}
+
+@test "de-dup is literal, not regex — paths differing only at a metachar both emit" {
+  # /etc/foo.conf's '.' must NOT regex-match /etc/fooXconf; the old grep -E
+  # de-dup would treat them as the same target and skip the second file.
+  # Order matters: the dotted path must be processed SECOND so its regex would
+  # match the already-stored fooXconf (module a runs before b).
+  mkdir -p "${CL}/cloud.d/a/write_files/etc" "${CL}/cloud.d/b/write_files/etc"
+  echo a >"${CL}/cloud.d/a/write_files/etc/fooXconf"   # stored first
+  echo b >"${CL}/cloud.d/b/write_files/etc/foo.conf"   # second; '.' would regex-match fooXconf
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="" CLOUD_PATHD="a:b" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/fooXconf"'
+  assert_output --partial 'path: "/etc/foo.conf"'      # old grep -E would SKIP this
+}
+
+@test "root-level write_files targets resolve (regression: default-flow daemon.json)" {
+  # a file directly under <path>/write_files/ (no cloud.d module) must map to its
+  # real target, not /write_files/... — e.g. the built-in default's daemon.json.
+  mkdir -p "${CL}/write_files/etc/docker"
+  echo '{}' >"${CL}/write_files/etc/docker/daemon.json"
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="" CLOUD_PATHD="" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/docker/daemon.json"'
+  refute_output --partial 'path: "/write_files/'
+}
+
+@test "_wf_target strips the longest root when CLOUD_PATH is a prefix of CLOUD_PATH_LIB" {
+  # pathological: CLOUD_PATH is an ancestor of the library dir. A library file
+  # must strip the (longer) library root, not the shorter CLOUD_PATH.
+  local base="${BATS_TEST_TMPDIR}/base" lib="${BATS_TEST_TMPDIR}/base/lib"
+  mkdir -p "${lib}/cloud.d/ceph/write_files/etc/ceph"
+  echo x >"${lib}/cloud.d/ceph/write_files/etc/ceph/x"
+  export CLOUD_PATH="${base}" CLOUD_PATH_LIB="${lib}" CLOUD_PATHD="ceph" \
+    CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  run cloud-config::generate
+  assert_success
+  assert_output --partial 'path: "/etc/ceph/x"'
+  refute_output --partial '/cloud.d/'
+}

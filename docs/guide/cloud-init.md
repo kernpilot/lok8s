@@ -54,6 +54,10 @@ at `.lok8s/providers/hetzner/cloud-init/`:
 This is enough for Lo remote clusters — Docker is installed and
 configured for the lok8s registry bridge at boot time.
 
+The same directory also ships reusable **`cloud.d/` modules** (e.g. `ceph-osd`)
+that a cluster can compose from a custom `cloudInit.path` without copying — see
+[Framework module library](#framework-module-library) below.
+
 ## Custom cloud-init
 
 Create a `cloud-init/` directory next to your cluster spec:
@@ -167,6 +171,50 @@ cloudInit:
 The generator walks each module's directory first, then the root
 config. First occurrence of a file wins — modules can override the
 default.
+
+### Framework module library
+
+The built-in default dir doubles as a **module library**: framework-shipped
+`cloud.d/` modules (`ceph-osd`, …) are reachable from a **custom `cloudInit.path`
+without copying them**. Select a module (via `cloudInit.modules` or a server's
+`#cloud.d`) and the generator resolves it **your cluster first, then the
+framework** — first match wins. The root/base config comes from your dir alone.
+
+```text
+#cloud.d: node:ceph-osd            cloudInit.path: ./cloud-init
+                                   ( <fw> = .lok8s/providers/hetzner/cloud-init )
+
+  module "node"     1. clusters/<domain>/cloud-init/cloud.d/node/      ← yours    ✓
+                    2. <fw>/cloud.d/node/                                (skipped)
+
+  module "ceph-osd" 1. clusters/<domain>/cloud-init/cloud.d/ceph-osd/   (absent)
+                    2. <fw>/cloud.d/ceph-osd/                           ← library  ✓
+
+  root config       clusters/<domain>/cloud-init/                      ← YOUR dir only
+    (packages / write_files / nameservers — the framework base is never mixed in)
+```
+
+So a cluster ships only what it **owns or overrides** (`node`, and its base) and
+borrows the rest (`ceph-osd`) from the framework — which keeps that module
+maintained in **one place**, so a fix reaches every cluster on the next
+provision. No per-cluster copy to drift.
+
+**Precedence**
+
+| Content | Rule |
+|---------|------|
+| a module's `write_files` / `.stat` | **first match wins** — your file shadows the library's; library-only files in the same module still apply (per-file overlay) |
+| `packages` / `nameservers` | **union** of all sources (concatenated; `uniq` only drops *adjacent* repeats — a package listed by two sources is harmless) |
+| root config (top-level `packages` / `write_files` / `nameservers`) | **cluster only** — the built-in default's base is never mixed into a custom path |
+
+**Notes**
+
+- Want the default's Docker base on a custom path? By design it's cluster-only —
+  reference it as a module, or copy just the files you need.
+- Selecting the `ceph-osd` module auto-sets `growpart: off` so it can reclaim the
+  disk and size root itself.
+- With **no** custom `cloudInit.path`, `CLOUD_PATH` *is* the framework dir, so the
+  fallback is a no-op — you get the built-in default unchanged.
 
 ## Full cloudInit config
 

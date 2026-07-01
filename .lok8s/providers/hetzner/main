@@ -96,6 +96,11 @@ provider::provision() {
   fi
 
   export CLOUD_PATH="${_ci_path}"
+  # Framework module library: even with a custom cloudInit.path, cloud.d modules
+  # resolve against the framework's shipped modules (ceph-osd, ...) as a fallback,
+  # so clusters compose them without copying (see cloud-config::paths). No-op when
+  # CLOUD_PATH already IS the built-in default.
+  export CLOUD_PATH_LIB="${PATH_LOK8S}/providers/hetzner/cloud-init"
   export CLOUD_PATHD="${_ci_modules}"
   local _ci_user _ci_group _ci_pub
   _ci_user=$(_cfg '.cloudInit.user // "root"' 2>/dev/null || echo "root")
