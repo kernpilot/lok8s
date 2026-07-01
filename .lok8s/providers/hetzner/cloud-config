@@ -17,6 +17,8 @@
 #
 # Environment:
 #   CLOUD_PATH      — path to the cloud-init config dir
+#   CLOUD_PATH_LIB  — optional framework module library; cloud.d modules not
+#                     found under CLOUD_PATH fall back here (root config never does)
 #   CLOUD_PATHD     — colon-separated sub-config names from cloud.d/
 #   CLOUD_USER      — default user (default: root)
 #   CLOUD_GROUP     — default group (default: root)
@@ -25,6 +27,7 @@
 # shellcheck disable=2044
 
 : "${CLOUD_PATH:=""}"
+: "${CLOUD_PATH_LIB:=""}"
 : "${CLOUD_PATHD:=""}"
 : "${CLOUD_USER:="root"}"
 : "${CLOUD_GROUP:="root"}"
@@ -38,14 +41,24 @@ ssh::pub() {
   done
 }
 
-# Returns all config paths (cloud.d sub-configs + default)
+# Returns all config paths for a file type, in precedence order. For each
+# cloud.d module we emit the active <CLOUD_PATH>/cloud.d/<mod> AND, as a
+# fallback, the framework library <CLOUD_PATH_LIB>/cloud.d/<mod> — so a cluster
+# with a custom cloudInit.path can reference framework-shipped modules (ceph-osd,
+# ...) without copying them. Downstream de-dups by target path (first wins), so
+# the cluster's own files shadow the library's. The ROOT config comes from
+# <CLOUD_PATH> only — the library's root is never mixed in, so a custom path
+# fully owns its base config.
 cloud-config::paths() {
   local file="${1-}"
   unset IFS
+  local _lib=""
+  [[ -z "${CLOUD_PATH_LIB}" || "${CLOUD_PATH_LIB}" == "${CLOUD_PATH}" ]] || _lib="${CLOUD_PATH_LIB}"
   mapfile -t paths <<<"${CLOUD_PATHD//:/$'\n'}"
   for path in "${paths[@]}"; do
     [[ -n "${path}" ]] || continue
     echo "${CLOUD_PATH}/cloud.d/${path}${file}"
+    [[ -z "${_lib}" ]] || echo "${_lib}/cloud.d/${path}${file}"
   done
   echo "${CLOUD_PATH}${file}"
 }
@@ -57,7 +70,7 @@ cloud-config::write_files() {
 
   unset IFS
   for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
-    local path="/${file#"${CLOUD_PATH}"*/write_files/}"
+    local path="/${file#*/write_files/}"
     echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
     written_paths+="${path}:"
 
@@ -122,7 +135,7 @@ cloud-config::runcmd::executables() {
   unset IFS
   for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
     ! grep -q '^runcmd: true$' "${file}" || {
-      path="/${file#"${CLOUD_PATH}"*/write_files/}"
+      path="/${file#*/write_files/}"
       echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
       written_paths+="${path}:"
       echo "- ${path/%.stat}"
@@ -142,7 +155,7 @@ cloud-config::runcmd::remote-generate() {
   unset IFS
   for file in $(find "${paths[@]}" -type f -name '*.stat' 2>/dev/null); do
     grep -q '^execute: remote$' "${file}" || continue
-    path="/${file#"${CLOUD_PATH}"*/write_files/}"; path="${path%.stat}"
+    path="/${file#*/write_files/}"; path="${path%.stat}"
     echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
     written_paths+="${path}:"
     owner="${CLOUD_USER}:${CLOUD_GROUP}"
@@ -176,7 +189,7 @@ cloud-config::remote-script() {
 
   unset IFS
   for file in $(find "${paths[@]}" -type f -not -name '*.stat' 2>/dev/null); do
-    path="/${file#"${CLOUD_PATH}"*/write_files/}"
+    path="/${file#*/write_files/}"
     echo "${written_paths:-}" | grep -Evq "(:|^)${path}:" || continue
     written_paths+="${path}:"
 

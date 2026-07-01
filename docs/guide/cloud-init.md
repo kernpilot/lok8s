@@ -54,6 +54,10 @@ at `.lok8s/providers/hetzner/cloud-init/`:
 This is enough for Lo remote clusters — Docker is installed and
 configured for the lok8s registry bridge at boot time.
 
+The same directory also ships reusable **`cloud.d/` modules** (e.g. `ceph-osd`)
+that a cluster can compose from a custom `cloudInit.path` without copying — see
+[Framework module library](#framework-module-library) below.
+
 ## Custom cloud-init
 
 Create a `cloud-init/` directory next to your cluster spec:
@@ -167,6 +171,36 @@ cloudInit:
 The generator walks each module's directory first, then the root
 config. First occurrence of a file wins — modules can override the
 default.
+
+### Framework module library
+
+Framework-shipped `cloud.d/` modules (e.g. `ceph-osd`) are reachable from a
+**custom** `cloudInit.path` **without copying them**. When you select a module
+via `modules` / `#cloud.d`, the generator resolves it from your cluster's
+`cloud-init/cloud.d/<name>/` first, then falls back to the framework's
+`.lok8s/providers/hetzner/cloud-init/cloud.d/<name>/`:
+
+```yaml
+cloudInit:
+  path: ./cloud-init          # your cluster's dir — owns the root/base config
+  modules: "node:ceph-osd"    # node → yours; ceph-osd → framework library
+```
+
+Precedence is per file (first occurrence wins): your module's files **shadow**
+the library's, and library-only files in that module still apply. This lets a
+cluster compose blessed framework modules (like the Ceph OSD disk-carve) while
+they stay maintained in one place — no per-cluster copy to drift.
+
+Two boundaries:
+
+- **Root config is cluster-only.** Only `cloud.d/*` modules fall back to the
+  library; the top-level `packages` / `write_files` / `nameservers` come from
+  your `cloudInit.path` alone. A custom path fully owns its base — the built-in
+  default's Docker base is **not** silently mixed in. (Want it? select it as a
+  module, or copy just the files you need.)
+- **`ceph-osd` implies `growpart: off`.** Selecting `ceph-osd` makes the
+  generator disable cloud-init's `growpart` so the module can reclaim the disk
+  and size root itself.
 
 ## Full cloudInit config
 
