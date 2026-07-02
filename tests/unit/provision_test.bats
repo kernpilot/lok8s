@@ -147,6 +147,62 @@ SCRIPT
   assert_output --partial "Driver contract violation"
 }
 
+@test "provision::dispatch --bootstrap skips driver::provision but runs driver::export + bootstrap::apply" {
+  yq() {
+    case "$2" in
+      .kind) echo "Lo" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  # An existing kubeconfig so the --bootstrap guard passes
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { echo "provision_called"; }
+driver::export() { echo "export_called"; }
+SCRIPT
+
+  # Marker for bootstrap::apply (setup stubs it to a no-op)
+  bootstrap::apply() { echo "bootstrap_applied: $1"; }
+  export -f bootstrap::apply
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+
+  # bootstrap_only passed as the 2nd dispatch arg (the -b flag, provision-scoped)
+  run provision::dispatch "test.lok8s.dev" 1
+  assert_success
+  assert_output --partial "export_called"
+  assert_output --partial "bootstrap_applied: test.lok8s.dev"
+  [[ "${output}" != *"provision_called"* ]]
+}
+
+@test "provision::dispatch --bootstrap fails when the cluster is not provisioned" {
+  yq() {
+    case "$2" in
+      .kind) echo "Lo" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { echo "provision_called"; }
+SCRIPT
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+
+  # No .kubeconfig/test-cluster.yaml → the guard fails before any provision
+  run provision::dispatch "test.lok8s.dev" 1
+  assert_failure
+  assert_output --partial "existing cluster"
+  [[ "${output}" != *"provision_called"* ]]
+}
+
 # --- provision::dispatch_destroy ---
 
 @test "provision::dispatch_destroy calls driver::destroy" {

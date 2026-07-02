@@ -14,12 +14,14 @@ import ^utils/provider
 
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local bootstrap=0
   local -a args=(
-    'domain|:^~domain'  'Domain to use'
+    'domain|:^~domain'   'Domain to use'
+    'bootstrap|b:+'      'Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
-  provision::dispatch "${domain}"
+  provision::dispatch "${domain}" "${bootstrap}"
 }
 
 # Resolve KUBECONFIG for deploy domains that reference another cluster.
@@ -125,9 +127,10 @@ provision::resolve_clusterref() {
 }
 
 # Dispatch provisioning to the appropriate kind contract implementation.
-# Usage: provision::dispatch <domain>
+# Usage: provision::dispatch <domain> [bootstrap_only]
 provision::dispatch() {
   local domain="$1"
+  local bootstrap_only="${2:-0}"
   # Fail fast: a missing/empty/bogus domain must stop here, BEFORE any driver
   # creates a kind cluster or touches infra. (resolve_spec's return was
   # previously ignored, so `lo up` with no active domain half-provisioned.)
@@ -172,52 +175,76 @@ provision::dispatch() {
     return 1
   fi
 
-  # Source the infrastructure provider when the driver needs one
-  # (review A1: provider loading belongs to the dispatch, not behind
-  # --remote). Rules:
-  #   - lo: the provider is only relevant with --remote (provision a
-  #     cloud VM that runs kind); plain local runs ignore it so the
-  #     same spec works locally and remotely.
-  #   - every other driver (kubeone, capi, kkp): load the provider
-  #     whenever spec.provider.name is set — these drivers target real
-  #     infrastructure and there is no "local" interpretation.
-  local _load_provider=0
-  if [[ "${kind}" == "lo" ]]; then
-    [[ "${LOK8S_REMOTE:-}" == "1" ]] && _load_provider=1
+  # --bootstrap (bootstrap_only): re-apply spec.bootstrap on an ALREADY-provisioned
+  # cluster — skip the provider reconcile + driver::provision entirely, then fall
+  # through to the shared bootstrap tail below (driver::export + bootstrap::apply).
+  # The bootstrap DAG (dependsOn/wait:) still runs, so this is the gated path for
+  # rolling a bootstrap-addon upgrade without a full (Hetzner-reconciling) re-provision.
+  if (( bootstrap_only )); then
+    local _bkc
+    _bkc=$(yq -r '.metadata.name // ""' "${cluster_yaml}")
+    [[ -n "${_bkc}" ]] \
+      || { error "--bootstrap: cluster spec has no metadata.name (${cluster_yaml})"; return 1; }
+    [[ -f "${PATH_BASE}/.kubeconfig/${_bkc}.yaml" ]] \
+      || { error "--bootstrap needs an existing cluster (no .kubeconfig/${_bkc}.yaml — run a full 'lo provision' first)"; return 1; }
+    debug "Re-applying spec.bootstrap on ${domain} (skipping infra reconcile)"
   else
-    _load_provider=1
-  fi
-  if (( _load_provider )); then
-    local _provider_name
-    _provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
-    if [[ -n "${_provider_name}" ]]; then
-      provider::write_config "${cluster_yaml}"
-      provider::load "${_provider_name}"
-      provider::validate "${PROVIDER_CONFIG_FILE}" || {
-        error "Provider '${_provider_name}' validation failed"
-        return 1
-      }
-      debug "Provider '${_provider_name}' loaded and validated"
+    # Source the infrastructure provider when the driver needs one
+    # (review A1: provider loading belongs to the dispatch, not behind
+    # --remote). Rules:
+    #   - lo: the provider is only relevant with --remote (provision a
+    #     cloud VM that runs kind); plain local runs ignore it so the
+    #     same spec works locally and remotely.
+    #   - every other driver (kubeone, capi, kkp): load the provider
+    #     whenever spec.provider.name is set — these drivers target real
+    #     infrastructure and there is no "local" interpretation.
+    local _load_provider=0
+    if [[ "${kind}" == "lo" ]]; then
+      [[ "${LOK8S_REMOTE:-}" == "1" ]] && _load_provider=1
+    else
+      _load_provider=1
+    fi
+    if (( _load_provider )); then
+      local _provider_name
+      _provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
+      if [[ -n "${_provider_name}" ]]; then
+        provider::write_config "${cluster_yaml}"
+        provider::load "${_provider_name}"
+        provider::validate "${PROVIDER_CONFIG_FILE}" || {
+          error "Provider '${_provider_name}' validation failed"
+          return 1
+        }
+        debug "Provider '${_provider_name}' loaded and validated"
+      fi
+    fi
+
+    debug "Provisioning ${domain} with kind=${kind}"
+    local _provision_rc=0
+    driver::provision "${domain}" || _provision_rc=$?
+
+    # Return code 100 = driver handled full lifecycle (e.g. remote CI
+    # mode where the remote VM runs provision + bootstrap itself).
+    # Skip all local post-provision steps.
+    if (( _provision_rc == 100 )); then
+      debug "driver handled full lifecycle — skipping post-provision"
+      return 0
+    elif (( _provision_rc != 0 )); then
+      return "${_provision_rc}"
+    fi
+
+    # Post-provision hook: driver SIDE-EFFECTS that need provisioned infra (rare).
+    # Bootstrap ENV belongs in driver::export (below) so it runs on --bootstrap too.
+    if declare -f driver::post_provision &>/dev/null; then
+      driver::post_provision "${domain}"
     fi
   fi
 
-  debug "Provisioning ${domain} with kind=${kind}"
-  local _provision_rc=0
-  driver::provision "${domain}" || _provision_rc=$?
-
-  # Return code 100 = driver handled full lifecycle (e.g. remote CI
-  # mode where the remote VM runs provision + bootstrap itself).
-  # Skip all local post-provision steps.
-  if (( _provision_rc == 100 )); then
-    debug "driver handled full lifecycle — skipping post-provision"
-    return 0
-  elif (( _provision_rc != 0 )); then
-    return "${_provision_rc}"
-  fi
-
-  # Post-provision hook (optional, driver can override)
-  if declare -f driver::post_provision &>/dev/null; then
-    driver::post_provision "${domain}"
+  # driver::export: spec-derived env that spec.bootstrap addons consume
+  # (idempotent — see the driver-contract note in .lok8s/drivers/README.md).
+  # Runs on BOTH paths — full provision AND --bootstrap — so a re-applied
+  # bootstrap graph renders with the same env.
+  if declare -f driver::export &>/dev/null; then
+    driver::export "${domain}"
   fi
 
   # kubehz config: read and validate

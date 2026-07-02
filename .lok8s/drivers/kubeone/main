@@ -2,7 +2,7 @@
 # shellcheck shell=bash disable=SC2034
 # vim: set syntax=bash:
 # KubeOne driver — standalone production clusters via KubeOne
-# Implements: driver::provision, driver::destroy, driver::status, driver::kubeconfig
+# Implements: driver::provision, driver::export, driver::destroy, driver::status, driver::kubeconfig
 #
 # Infrastructure is provisioned by the provider contract
 # (.lok8s/providers/<name>/main). KubeOne installs Kubernetes on
@@ -91,6 +91,23 @@ driver::provision() {
   # No post-apply CCM step: cilium + the robot-ready CCM were applied BY kubeone
   # during apply (kubeone::render_addons → <work_dir>/addons/, spec.addons.path),
   # so the worker joined a robot-aware CCM and nothing needs re-asserting.
+}
+
+# driver::export — spec-derived env consumed by spec.bootstrap addons (LOK8S_SPEC_*).
+# Reuses kubeone::extract_vars (pure yq→export; the extra kubeone-config vars it also
+# sets are harmless). Idempotent, no side effects. Called by provision::dispatch on
+# BOTH the full provision and `--bootstrap` paths — without it, `lo provision -b`
+# would render external-dns with an empty domainFilter and mailpit host `mailpit.`
+# (extract_vars normally runs only via generate_config, inside driver::provision).
+driver::export() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "KubeOne driver export" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  kubeone::extract_vars "${cluster_yaml}"
 }
 
 driver::destroy() {
