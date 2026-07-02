@@ -21,7 +21,13 @@ labels:
       lok8s.dev/type: system
       lok8s.dev/category: infrastructure
 
-namespace: cert-manager
+# NO blanket `namespace:` here. The khelm ChartRenderer (webhook.yaml) already sets
+# the release namespace to cert-manager for the webhook's own resources, and the
+# chart intentionally puts the `webhook-authentication-reader` RoleBinding in
+# kube-system (where the extension-apiserver-authentication-reader Role lives). A
+# blanket `namespace: cert-manager` relocates that RoleBinding into cert-manager →
+# it binds to a non-existent Role → the webhook CrashLoops ("cannot get configmaps
+# extension-apiserver-authentication in kube-system"). Hit live on kubehz 2026-07-02.
 
 generators:
   - webhook.yaml
