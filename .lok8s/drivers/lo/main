@@ -2,7 +2,7 @@
 # shellcheck shell=bash disable=SC2034
 # vim: set syntax=bash:
 # Lo driver — local/CI clusters via kind
-# Implements: driver::provision, driver::destroy, driver::status, driver::kubeconfig, driver::bootstrap
+# Implements: driver::provision, driver::export, driver::destroy, driver::status, driver::kubeconfig
 # Also exposes: lo driver {provision,destroy,status,kubeconfig,bootstrap}
 
 _LO_DIR="${BASH_SOURCE[0]%/*}"
@@ -74,7 +74,6 @@ driver::provision() {
 
       # Read all config from cluster spec
       lo::read_config "${cluster_yaml}"
-      lo::export_spec_envs "${cluster_yaml}"
       lo::validate_ips "${LOK8S_NETWORK_SUBNET}" "${LOK8S_LB_POOL:-}"
 
       local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK}"
@@ -132,6 +131,21 @@ driver::provision() {
       return 1
       ;;
   esac
+}
+
+# driver::export — spec-derived env consumed by spec.bootstrap addons (LOK8S_SPEC_*).
+# Idempotent, no side effects. Called by provision::dispatch on BOTH the full
+# provision and `--bootstrap` paths, so a re-applied bootstrap graph renders with
+# the same env a fresh provision would set.
+driver::export() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Lo driver export" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  lo::export_spec_envs "${cluster_yaml}"
 }
 
 driver::destroy() {

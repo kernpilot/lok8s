@@ -1,7 +1,8 @@
 # Drivers
 
 Cluster-architecture drivers. Each driver implements the **driver contract**
-(`driver::provision`, `driver::destroy`, `driver::status`, `driver::kubeconfig`)
+(`driver::provision`, `driver::destroy`, `driver::status`, `driver::kubeconfig`;
+plus the optional `driver::export` and `driver::post_provision` hooks — see below)
 for a specific way of creating Kubernetes clusters. Bootstrap addons
 (CNI, LB, etc.) are **not** part of the driver contract — they live at
 the framework level in `.lok8s/libs/bootstrap` and run identically
@@ -20,6 +21,22 @@ The framework dispatches to the right driver based on `kind:` in the
 cluster spec (Lo, Capi, KubeOne, Kkp). The dispatch layer (`libs/provision`)
 sources `drivers/<kind>/main`, validates the contract, and calls
 `driver::provision`.
+
+### Optional hooks: `driver::export` vs `driver::post_provision`
+
+Two optional hooks let a driver feed the bootstrap phase — kept deliberately
+separate so `lo provision --bootstrap` (re-apply `spec.bootstrap` on an existing
+cluster, no infra reconcile) is correct on every driver:
+
+- **`driver::export <domain>`** — export the spec-derived env that `spec.bootstrap`
+  addons consume (`LOK8S_SPEC_*`, `HCLOUD_CCM_NETWORK`, …). Must be **idempotent and
+  side-effect-free** (reads the spec only). Dispatch calls it on **both** the full
+  provision *and* the `--bootstrap` path, so a re-applied bootstrap graph renders
+  with the same env a fresh provision would set.
+- **`driver::post_provision <domain>`** — driver **side-effects** that need
+  already-provisioned infrastructure (rare). Runs on the **full-provision path
+  only**, never under `--bootstrap`. Bootstrap env must not live here — put it in
+  `driver::export` so `--bootstrap` picks it up.
 
 ## Providers
 

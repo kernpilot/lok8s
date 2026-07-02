@@ -14,12 +14,14 @@ import ^utils/provider
 
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local bootstrap=0
   local -a args=(
-    'domain|:^~domain'  'Domain to use'
+    'domain|:^~domain'   'Domain to use'
+    'bootstrap|b:+'      'Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
-  provision::dispatch "${domain}"
+  provision::dispatch "${domain}" "${bootstrap}"
 }
 
 # Resolve KUBECONFIG for deploy domains that reference another cluster.
@@ -125,9 +127,10 @@ provision::resolve_clusterref() {
 }
 
 # Dispatch provisioning to the appropriate kind contract implementation.
-# Usage: provision::dispatch <domain>
+# Usage: provision::dispatch <domain> [bootstrap_only]
 provision::dispatch() {
   local domain="$1"
+  local bootstrap_only="${2:-0}"
   # Fail fast: a missing/empty/bogus domain must stop here, BEFORE any driver
   # creates a kind cluster or touches infra. (resolve_spec's return was
   # previously ignored, so `lo up` with no active domain half-provisioned.)
@@ -172,12 +175,12 @@ provision::dispatch() {
     return 1
   fi
 
-  # --bootstrap (LOK8S_BOOTSTRAP): re-apply spec.bootstrap on an ALREADY-provisioned
+  # --bootstrap (bootstrap_only): re-apply spec.bootstrap on an ALREADY-provisioned
   # cluster — skip the provider reconcile + driver::provision entirely, then fall
-  # through to the shared bootstrap tail below. The bootstrap DAG (dependsOn/wait:)
-  # still runs, so this is the gated path for rolling a bootstrap-addon upgrade
-  # without a full (Hetzner-reconciling) re-provision.
-  if [[ "${LOK8S_BOOTSTRAP:-}" == "1" ]]; then
+  # through to the shared bootstrap tail below (driver::export + bootstrap::apply).
+  # The bootstrap DAG (dependsOn/wait:) still runs, so this is the gated path for
+  # rolling a bootstrap-addon upgrade without a full (Hetzner-reconciling) re-provision.
+  if (( bootstrap_only )); then
     local _bkc
     _bkc=$(yq -r '.metadata.name' "${cluster_yaml}")
     [[ -f "${PATH_BASE}/.kubeconfig/${_bkc}.yaml" ]] \
@@ -226,11 +229,19 @@ provision::dispatch() {
     elif (( _provision_rc != 0 )); then
       return "${_provision_rc}"
     fi
+
+    # Post-provision hook: driver SIDE-EFFECTS that need provisioned infra (rare).
+    # Bootstrap ENV belongs in driver::export (below) so it runs on --bootstrap too.
+    if declare -f driver::post_provision &>/dev/null; then
+      driver::post_provision "${domain}"
+    fi
   fi
 
-  # Post-provision hook (optional, driver can override)
-  if declare -f driver::post_provision &>/dev/null; then
-    driver::post_provision "${domain}"
+  # driver::export: spec-derived env that spec.bootstrap addons consume
+  # (idempotent, no side effects). Runs on BOTH paths — full provision AND
+  # --bootstrap — so a re-applied bootstrap graph renders with the same env.
+  if declare -f driver::export &>/dev/null; then
+    driver::export "${domain}"
   fi
 
   # kubehz config: read and validate
