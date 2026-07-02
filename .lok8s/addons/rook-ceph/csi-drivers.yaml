@@ -1,0 +1,61 @@
+# ── ceph-csi-operator: the "work orders" the rook-ceph chart omits ─────────────
+# Rook 1.20 delegates CSI to the ceph-csi-operator (installed by the rook-ceph
+# chart, csi.installCsiOperator=true). That operator is REACTIVE — it renders the
+# rbd provisioner + node plugin + CSIDriver only in response to a `Driver` CR.
+# Rook creates the per-cluster CephConnection + ClientProfile, but NOT the Driver,
+# OperatorConfig, plugin ServiceAccounts, or their RBAC — upstream ships those in
+# a SEPARATE `ceph-csi-drivers` chart that the rook-ceph chart does not pull in.
+# Result without this: the operator sits idle, no rook-ceph.rbd.csi.ceph.com
+# CSIDriver exists, and every ceph PVC stays Pending. (Root-caused on the kubehz
+# pilot 2026-07-02; verified against ceph-csi-operator v1.0.1.)
+#
+# Version tracks the ceph-csi-operator subchart that rook-ceph @v1.20.1 installs
+# (1.0.1) — keep drivers and operator in lockstep.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: ceph-csi-drivers
+  namespace: rook-ceph
+# Pin the K8s version khelm renders against (matches chart.yaml) — otherwise khelm
+# defaults to a stale v1.20.0, which can skew apiVersion / .Capabilities selection.
+kubeVersion: "1.35.5"
+repository: https://ceph.github.io/ceph-csi-operator
+chart: ceph-csi-drivers
+version: 1.0.1
+values:
+  drivers:
+    # rbd only. The CSIDriver is named metadata.name VERBATIM (the operator's
+    # driver_controller.go: `csiDriver.Name = driver.Name`), so the driver name
+    # MUST equal the provisioner Rook writes into every ceph StorageClass —
+    # `<operatorNamespace>.rbd.csi.ceph.com` = rook-ceph.rbd.csi.ceph.com. The
+    # chart also stamps this name into {ctrl,node}Plugin.serviceAccountName and
+    # creates matching SAs + RBAC, and the operator honours that serviceAccountName
+    # over its type-based default (`rbd-*plugin-sa`) — so the whole set is
+    # self-consistent. (A bare Driver without these SAs → FailedCreate: SA missing.)
+    rbd:
+      name: rook-ceph.rbd.csi.ceph.com
+      enabled: true
+      nodePlugin:
+        # csi-rbdplugin (node DaemonSet) must be able to mount RBD volumes on
+        # EVERY node, including the control-plane-tainted CPs (Rook's built-in CSI
+        # tolerated all taints on its plugin DaemonSet; the chart default is none).
+        tolerations:
+          - operator: Exists
+    cephfs:
+      enabled: false
+    nfs:
+      enabled: false
+    nvmeof:
+      enabled: false
+  # Rook already reconciles the per-cluster CephConnection + ClientProfile from the
+  # CephCluster CR — leave these EMPTY so this chart does not create rival copies.
+  cephConnections: []
+  clientProfiles: []
+  # OperatorConfig is optional (the operator IgnoreNotFounds it + ships built-in
+  # default images) but declaring it makes operator-wide defaults explicit and
+  # gives a home for pinning ceph-csi images later. Name/namespace MUST be the
+  # operator's OPERATOR_CONFIG_NAME default in its namespace.
+  operatorConfig:
+    create: true
+    name: ceph-csi-operator-config
+    namespace: rook-ceph
