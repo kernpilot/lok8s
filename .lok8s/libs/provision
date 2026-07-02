@@ -182,7 +182,9 @@ provision::dispatch() {
   # rolling a bootstrap-addon upgrade without a full (Hetzner-reconciling) re-provision.
   if (( bootstrap_only )); then
     local _bkc
-    _bkc=$(yq -r '.metadata.name' "${cluster_yaml}")
+    _bkc=$(yq -r '.metadata.name // ""' "${cluster_yaml}")
+    [[ -n "${_bkc}" ]] \
+      || { error "--bootstrap: cluster spec has no metadata.name (${cluster_yaml})"; return 1; }
     [[ -f "${PATH_BASE}/.kubeconfig/${_bkc}.yaml" ]] \
       || { error "--bootstrap needs an existing cluster (no .kubeconfig/${_bkc}.yaml — run a full 'lo provision' first)"; return 1; }
     debug "Re-applying spec.bootstrap on ${domain} (skipping infra reconcile)"

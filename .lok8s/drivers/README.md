@@ -30,7 +30,7 @@ cluster, no infra reconcile) is correct on every driver:
 
 - **`driver::export <domain>`** — export the spec-derived env that `spec.bootstrap`
   addons consume (`LOK8S_SPEC_*`, `HCLOUD_CCM_NETWORK`, …). Must be **idempotent and
-  side-effect-free** (reads the spec only). Dispatch calls it on **both** the full
+  side-effect-free** (spec-derived only). Dispatch calls it on **both** the full
   provision *and* the `--bootstrap` path, so a re-applied bootstrap graph renders
   with the same env a fresh provision would set.
 - **`driver::post_provision <domain>`** — driver **side-effects** that need

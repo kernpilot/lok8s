@@ -145,6 +145,11 @@ driver::export() {
   :args "Lo driver export" "${@}"
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  # read_config first: export_spec_envs derives LOK8S_SPEC_LOADBALANCER_POOL from
+  # $LOK8S_LB_POOL (set by lo::read_lb_config), so on --bootstrap (where
+  # driver::provision — which normally calls read_config — is skipped) the metallb
+  # pool would otherwise render empty.
+  lo::read_config "${cluster_yaml}"
   lo::export_spec_envs "${cluster_yaml}"
 }
 

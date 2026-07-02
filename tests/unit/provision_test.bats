@@ -151,7 +151,7 @@ SCRIPT
   yq() {
     case "$2" in
       .kind) echo "Lo" ;;
-      .metadata.name) echo "test-cluster" ;;
+      .metadata.name*) echo "test-cluster" ;;
       *) echo "" ;;
     esac
   }
@@ -184,7 +184,7 @@ SCRIPT
   yq() {
     case "$2" in
       .kind) echo "Lo" ;;
-      .metadata.name) echo "test-cluster" ;;
+      .metadata.name*) echo "test-cluster" ;;
       *) echo "" ;;
     esac
   }
