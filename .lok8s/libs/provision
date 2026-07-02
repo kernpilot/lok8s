@@ -240,8 +240,9 @@ provision::dispatch() {
   fi
 
   # driver::export: spec-derived env that spec.bootstrap addons consume
-  # (idempotent, no side effects). Runs on BOTH paths — full provision AND
-  # --bootstrap — so a re-applied bootstrap graph renders with the same env.
+  # (idempotent — see the driver-contract note in .lok8s/drivers/README.md).
+  # Runs on BOTH paths — full provision AND --bootstrap — so a re-applied
+  # bootstrap graph renders with the same env.
   if declare -f driver::export &>/dev/null; then
     driver::export "${domain}"
   fi
