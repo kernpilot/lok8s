@@ -113,6 +113,29 @@ lo provision example.com
 
 Workload deployment is handled separately by `lo deploy` (headless/CI) or Tilt (local dev) — it is not part of `provision`.
 
+### Re-applying bootstrap only (`-b`)
+
+`spec.bootstrap` addons (Cilium, cert-manager, Rook, …) are applied — in
+`dependsOn` order with `wait:` health gates — as the last step of `lo provision`.
+To **re-apply that bootstrap graph on an already-provisioned cluster** without the
+infrastructure reconcile (no `hcloud`/`kubeone` calls, no Hetzner API check), pass
+`-b` / `--bootstrap`:
+
+```bash
+lo provision my-cluster.example.com --bootstrap
+```
+
+It skips the provider reconcile and `driver::provision`, then runs the **same
+bootstrap DAG** against the existing kubeconfig. Because the `dependsOn` / `wait:`
+gates still fire, this is the gated way to **roll a bootstrap-addon upgrade**: bump
+the addon's pinned version (the Rook operator chart, a `cephVersion`, …), then
+`lo provision -b`. That's safer than `lo build <target>` + `kubectl apply`, which
+applies the target directly and **bypasses** the dependency graph and its health
+gates.
+
+Requires a cluster that has already been provisioned (an existing
+`.kubeconfig/<cluster-name>.yaml`); otherwise it errors and changes nothing.
+
 ## Provisioning from CI
 
 You can run `lo provision` from GitHub Actions to spin up a committed cluster on
