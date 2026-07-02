@@ -1,6 +1,8 @@
-# rook-ceph — the Rook-Ceph OPERATOR (controller + CRDs) only. A generic,
-# reusable atom: bootstrap `rook-ceph` by name to get the operator + CRDs (chart
-# rook-ceph @v1.20.1) in the privileged rook-ceph namespace.
+# rook-ceph — the Rook-Ceph OPERATOR (controller + CRDs) + the ceph-csi-operator
+# "work orders" (the Driver + OperatorConfig CRs — see csi-driver-rbd.yaml for the
+# why). A generic, reusable atom: bootstrap `rook-ceph` by name to get the operator
+# + CRDs (chart rook-ceph @v1.20.1) AND a live rbd CSIDriver, in the privileged
+# rook-ceph namespace.
 #
 # CLUSTER GLUE stays behind (NOT in this addon): the CephCluster /
 # CephBlockPool / CephObjectStore / StorageClass CRs (cluster.yaml,
@@ -30,6 +32,11 @@ namespace: rook-ceph
 
 generators:
   - chart.yaml
+  # ceph-csi-operator "work orders" (Driver + OperatorConfig + plugin SAs + RBAC;
+  # see csi-drivers.yaml). NOT cluster glue: the driver name
+  # (rook-ceph.rbd.csi.ceph.com) is fixed by the operator namespace, so it's
+  # generic to the addon — unlike the per-cluster CephCluster/StorageClass CRs.
+  - csi-drivers.yaml
 
 resources:
   - namespace.yaml
