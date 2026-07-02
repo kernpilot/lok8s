@@ -43,7 +43,10 @@ status::nodes() {
 }
 
 # ── Target status ───────────────────────────────────────
-# Reports build state for each target under .lok8s/<domain>/targets/.
+# Lists the targets under clusters/<domain>/targets/ (enumeration only) and
+# reports whether the domain has been built. Per-target build state is no longer
+# tracked: `lo build` composes the domain kustomization into ONE
+# clusters/<domain>/artifacts.yaml.
 # Usage: status::targets <domain>
 status::targets() {
   local domain="$1"
@@ -56,15 +59,16 @@ status::targets() {
     local tname
     for tname in "${_targets[@]}"; do
       [[ -n "${tname}" ]] || continue
-      local artifact="${domain_dir}/artifacts/${tname}/artifacts.yaml"
-      if [[ -f "${artifact}" ]]; then
-        echo "  ${tname}: built"
-      else
-        echo "  ${tname}: pending"
-      fi
+      echo "  ${tname}"
     done
   else
     echo "  No targets directory"
+  fi
+
+  if [[ -f "${domain_dir}/artifacts.yaml" ]]; then
+    echo "  artifacts.yaml: built"
+  else
+    echo "  artifacts.yaml: not built (run 'lo build')"
   fi
   echo ""
 }

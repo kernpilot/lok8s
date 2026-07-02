@@ -6,7 +6,7 @@
 #   2. lo env kustomization runs the services-loop-skip path without
 #      crashing.
 #   3. The auto-generated artifacts/kustomization.yaml references the
-#      single placeholder target.
+#      single composed domain artifact (../artifacts.yaml).
 
 setup_file() {
   load "${BATS_TEST_DIRNAME}/../lib/helpers"
@@ -45,8 +45,8 @@ setup() {
   run e2e::lo env kustomization
   assert_success
   e2e::assert_kustomization_has 'kind: Kustomization'
-  # Per-target build: top-level kustomization references each target's
-  # artifacts.yaml — no unified .artifacts.yaml.
-  e2e::assert_kustomization_has 'placeholder/artifacts\.yaml'
+  # Domain-based build: the overlay kustomization references the single
+  # composed domain artifact one level up (../artifacts.yaml).
+  e2e::assert_kustomization_has '\.\./artifacts\.yaml'
   e2e::assert_kustomization_missing '^images:'
 }

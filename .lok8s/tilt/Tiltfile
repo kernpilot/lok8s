@@ -849,7 +849,10 @@ def lok8s(
   else:
     local('%s env kustomization' % lo_bin)
 
-  artifacts = local('kustomize build %s' % _artifacts_dir, True, '', True, {})
+  # --load-restrictor=LoadRestrictionsNone: the generated overlay references the
+  # single domain artifact one level up (../artifacts.yaml, built by `lo build`);
+  # a raw file above the overlay root is blocked by kustomize's default RootOnly.
+  artifacts = local('kustomize build --load-restrictor=LoadRestrictionsNone %s' % _artifacts_dir, True, '', True, {})
 
   # Apply infrastructure components (lok8s.dev/type: system).
   #

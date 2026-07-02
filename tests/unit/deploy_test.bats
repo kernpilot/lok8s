@@ -1,7 +1,10 @@
 #!/usr/bin/env bats
 # deploy_test.bats — unit tests for .lok8s/libs/deploy
-# Post-refactor: deploy reads targets from .lok8s/<domain>/targets/*/,
-# not from spec.syncWave. Ordering is alphabetical and not semantic.
+#
+# Domain-based deploy: `lo deploy` applies the SINGLE
+# clusters/<domain>/artifacts.yaml — CRDs first (wait Established), then the
+# rest (wait ready). `-l/--label key=value` applies only the matching subset.
+# Real yq drives CRD extraction + label filtering; kubectl is mocked (no cluster).
 
 setup() {
   load "../test_helper"
@@ -18,60 +21,52 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
 
-  # These tests exercise the apply logic, not readiness polling — stub the
+  # These tests exercise apply/filter logic, not readiness polling — stub the
   # scoped wait so it doesn't loop on the fake kubectl.
   kapply::wait_ready() { :; }
   export -f kapply::wait_ready
 
+  # Mock kubectl: consume the piped manifest, record verbs on stdout.
   kubectl() {
     case "$1" in
-      apply) echo "applied" ;;
-      wait) echo "waited" ;;
-      *) echo "kubectl $*" ;;
+      apply) cat >/dev/null 2>&1 || true; echo "applied" ;;
+      wait)  echo "waited: $*" ;;
+      *)     echo "kubectl $*" ;;
     esac
   }
   export -f kubectl
 
-  # Build a minimal domain structure with target dirs + pre-built artifacts
+  # The CRD extraction + label filter use real yq expressions; skip if absent.
+  if ! command -v yq &>/dev/null; then
+    skip "yq not available"
+  fi
+
+  # Build a domain with a single composed artifact: one CRD, one system
+  # Namespace, one platform Deployment.
   local domain="test.lok8s.dev"
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/${domain}"
-  mkdir -p "${domain_dir}/targets/crds"
-  mkdir -p "${domain_dir}/targets/networking"
-  mkdir -p "${domain_dir}/targets/platform"
-  mkdir -p "${domain_dir}/artifacts/crds"
-  mkdir -p "${domain_dir}/artifacts/networking"
-  mkdir -p "${domain_dir}/artifacts/platform"
+  mkdir -p "${domain_dir}"
 
-  cat > "${domain_dir}/cluster.lok8s.yaml" <<'YAML'
-apiVersion: cluster.lok8s.dev/v1beta1
-kind: Lo
-metadata:
-  name: test-local
-spec:
-  bootstrap:
-    - cilium
-YAML
-
-  cat > "${domain_dir}/artifacts/crds/artifacts.yaml" <<'YAML'
+  cat > "${domain_dir}/artifacts.yaml" <<'YAML'
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: widgets.test.lok8s.dev
-YAML
-
-  cat > "${domain_dir}/artifacts/networking/artifacts.yaml" <<'YAML'
+---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: networking
-YAML
-
-  cat > "${domain_dir}/artifacts/platform/artifacts.yaml" <<'YAML'
+  labels:
+    lok8s.dev/type: system
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: test-app
   namespace: default
+  labels:
+    lok8s.dev/type: platform
 YAML
 }
 
@@ -81,67 +76,64 @@ teardown() {
 
 # --- deploy::apply ---
 
-@test "deploy::apply discovers targets from targets/ directory" {
-  yq() { cat; }
-  export -f yq
+@test "deploy::apply applies the single domain artifact" {
   run deploy::apply "test.lok8s.dev"
   assert_success
   assert_output --partial "applied"
 }
 
-@test "deploy::apply uses explicit target args when provided" {
-  yq() { cat; }
-  export -f yq
-  # kapply pipes the manifest on stdin (-f -); identify the target by content.
-  # The networking artifact is a Namespace named "networking"; the crds
-  # artifact is the "widgets" CRD — so only one should ever reach kubectl.
-  kubectl() {
-    local m; m=$(cat)
-    grep -q 'name: networking' <<<"${m}" && echo "applied:networking"
-    grep -q 'widgets' <<<"${m}"          && echo "applied:crds"
-    return 0
-  }
-  export -f kubectl
-
-  run deploy::apply "test.lok8s.dev" "networking"
-  assert_success
-  assert_output --partial "applied:networking"
-  refute_output --partial "applied:crds"
-}
-
-@test "deploy::apply warns when no targets exist" {
-  rm -rf "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/targets"
-  yq() { cat; }
-  export -f yq
+@test "deploy::apply applies CRDs first (waits for Established)" {
   run deploy::apply "test.lok8s.dev"
   assert_success
-  assert_output --partial "No targets to deploy"
+  # The CRD in the artifact is applied + waited on before the rest.
+  assert_output --partial "crd/widgets.test.lok8s.dev"
 }
 
-@test "deploy::apply skips targets with no artifacts file" {
-  rm -f "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts/platform/artifacts.yaml"
-  yq() { cat; }
-  export -f yq
+@test "deploy::apply errors when the artifact is missing (build not run)" {
+  rm -f "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  run deploy::apply "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "run 'lo build' first"
+}
+
+@test "deploy::apply is a graceful no-op on an artifact with no objects" {
+  printf '# just a comment\n---\n' > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   run deploy::apply "test.lok8s.dev"
   assert_success
-  assert_output --partial "No artifacts for target platform"
+  refute_output --partial "applied"
 }
 
 # --- deploy::apply_filtered ---
 
-@test "deploy::apply_filtered selects resources by label" {
-  yq() {
+@test "deploy::apply_filtered applies only the matching subset (full label key)" {
+  # Record exactly which objects reach kubectl apply.
+  kubectl() {
     case "$1" in
-      "select"*) echo "filtered_output" ;;
-      *) cat ;;
+      apply) local m; m=$(cat); grep -q 'kind: Deployment' <<<"${m}" && echo "applied:deployment"; grep -q 'kind: Namespace' <<<"${m}" && echo "applied:namespace"; grep -q 'kind: CustomResourceDefinition' <<<"${m}" && echo "applied:crd"; return 0 ;;
+      wait)  echo "waited" ;;
+      *)     return 0 ;;
     esac
   }
-  export -f yq
-  kubectl() { echo "applied filtered"; }
   export -f kubectl
 
-  run deploy::apply_filtered "test.lok8s.dev" "type" "system"
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
   assert_success
+  assert_output --partial "applied:deployment"
+  refute_output --partial "applied:namespace"
+  refute_output --partial "applied:crd"
+}
+
+@test "deploy::apply_filtered warns and exits 0 when nothing matches" {
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "nonexistent"
+  assert_success
+  assert_output --partial "no objects match"
+}
+
+@test "deploy::apply_filtered errors when the artifact is missing" {
+  rm -f "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "system"
+  assert_failure
+  assert_output --partial "run 'lo build' first"
 }
 
 @test "deploy::apply_filtered rejects injection in label key" {

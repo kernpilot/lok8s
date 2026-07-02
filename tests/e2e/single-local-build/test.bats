@@ -4,8 +4,8 @@
 #
 # Validates:
 #   1. lo env services discovers the single service from services.yaml.
-#   2. lo env kustomization writes per-target artifacts and a
-#      top-level kustomization that references them.
+#   2. lo build composes the domain into one artifacts.yaml and lo env
+#      kustomization writes an overlay that references it.
 #   3. tilt ci builds the app image, pushes to lok8s.local, applies
 #      the deployment, and the pod reaches Running state.
 
@@ -35,11 +35,13 @@ setup() {
   assert_output --partial "app:"
 }
 
-@test "lo env kustomization writes per-target artifacts" {
+@test "lo env kustomization composes one domain artifact + overlay" {
   run e2e::lo env kustomization
   assert_success
+  # Domain-based build: ONE composed artifact at the domain root, plus the
+  # env overlay that wraps it with the image swaps.
+  assert [ -f "${PATH_CLUSTERS}/${DOMAIN_NAME}/artifacts.yaml" ]
   assert [ -f "${PATH_CLUSTERS}/${DOMAIN_NAME}/artifacts/kustomization.yaml" ]
-  assert [ -f "${PATH_CLUSTERS}/${DOMAIN_NAME}/artifacts/app/artifacts.yaml" ]
   # build:true → no image swap; the manifest's lok8s.local/app stays
   # untouched (no `newName:` rewrite in the kustomization).
   e2e::assert_kustomization_missing 'newName:'
