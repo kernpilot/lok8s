@@ -134,7 +134,8 @@ driver::provision() {
 }
 
 # driver::export — spec-derived env consumed by spec.bootstrap addons (LOK8S_SPEC_*).
-# Idempotent, no side effects. Called by provision::dispatch on BOTH the full
+# Idempotent (safe to re-run; lo::read_config below also (re)writes the derived
+# registry map — benign). Called by provision::dispatch on BOTH the full
 # provision and `--bootstrap` paths, so a re-applied bootstrap graph renders with
 # the same env a fresh provision would set.
 driver::export() {

@@ -29,8 +29,10 @@ separate so `lo provision --bootstrap` (re-apply `spec.bootstrap` on an existing
 cluster, no infra reconcile) is correct on every driver:
 
 - **`driver::export <domain>`** — export the spec-derived env that `spec.bootstrap`
-  addons consume (`LOK8S_SPEC_*`, `HCLOUD_CCM_NETWORK`, …). Must be **idempotent and
-  side-effect-free** (spec-derived only). Dispatch calls it on **both** the full
+  addons consume (`LOK8S_SPEC_*`, `HCLOUD_CCM_NETWORK`, …). Must be **idempotent**
+  (safe to re-run) — derive env from the spec, don't reconcile infrastructure (a
+  benign deterministic local write, e.g. lo's registry map, is fine). Dispatch
+  calls it on **both** the full
   provision *and* the `--bootstrap` path, so a re-applied bootstrap graph renders
   with the same env a fresh provision would set.
 - **`driver::post_provision <domain>`** — driver **side-effects** that need
