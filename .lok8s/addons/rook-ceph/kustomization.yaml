@@ -2,7 +2,8 @@
 # "work orders" (the Driver + OperatorConfig + plugin SAs + RBAC — see
 # csi-drivers.yaml for the why). A generic, reusable atom: bootstrap `rook-ceph` by
 # name to get the operator + CRDs (chart rook-ceph @v1.20.1) AND a live rbd
-# CSIDriver, in the privileged rook-ceph namespace.
+# CSIDriver. The operator + its work-order CRs/SAs/RBAC live in the privileged
+# rook-ceph namespace; the CSIDriver it yields is cluster-scoped.
 #
 # CLUSTER GLUE stays behind (NOT in this addon): the CephCluster /
 # CephBlockPool / CephObjectStore / StorageClass CRs (cluster.yaml,

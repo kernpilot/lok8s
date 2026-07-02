@@ -16,6 +16,9 @@ kind: ChartRenderer
 metadata:
   name: ceph-csi-drivers
   namespace: rook-ceph
+# Pin the K8s version khelm renders against (matches chart.yaml) — otherwise khelm
+# defaults to a stale v1.20.0, which can skew apiVersion / .Capabilities selection.
+kubeVersion: "1.35.5"
 repository: https://ceph.github.io/ceph-csi-operator
 chart: ceph-csi-drivers
 version: 1.0.1
