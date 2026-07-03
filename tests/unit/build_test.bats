@@ -157,6 +157,34 @@ YAML
   [ -f "${domain_dir}/artifacts.yaml" ]
 }
 
+@test "build::artifacts preserves a prior artifact when the build fails" {
+  # Regression: a direct `> artifacts.yaml` truncates the target BEFORE the
+  # pipeline runs, so a kustomize failure (under set -o pipefail) would clobber a
+  # prior good artifact with an empty/partial one. The build must render to a
+  # temp file and promote only on success. Run under the real errexit+pipefail.
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: good\n' > "${domain_dir}/artifacts.yaml"
+
+  run bash -c '
+    set -euo pipefail
+    import() { :; }
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
+    export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
+    export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
+    template::envsubst_whitelist() { echo ""; }
+    kustomize() { echo "boom" >&2; return 1; }   # build failure
+    export -f template::envsubst_whitelist kustomize
+    build::artifacts "test.lok8s.dev"
+  '
+  assert_failure
+  assert_output --partial "kustomize build failed"
+  # The prior good artifact is untouched (not truncated/clobbered).
+  run cat "${domain_dir}/artifacts.yaml"
+  assert_output --partial "name: good"
+}
+
 # --- build::_export_secrets_path (per-instance secret isolation) ---
 
 @test "build::_export_secrets_path redirects PATH_SECRETS to a domain's own store" {

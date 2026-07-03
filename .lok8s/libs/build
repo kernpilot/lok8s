@@ -140,11 +140,24 @@ build::artifacts() {
   # bases outside the domain root (../../.targets/*) are kustomize bases, allowed
   # under the default load restrictor; only raw-file refs would need relaxing.
   debug "Building domain kustomization: ${domain_dir}/kustomization.yaml"
-  KUBECONFIG="${kubeconfig}" \
-  KHELM_TRUST_ANY_REPO=true \
-    kustomize build --enable-alpha-plugins "${domain_dir}" \
-    | envsubst "${envsubst_whitelist}" \
-    > "${domain_dir}/artifacts.yaml"
+  # Render to a temp file first, then promote on success. A direct
+  # `> artifacts.yaml` truncates the target BEFORE the pipeline runs, so a
+  # kustomize failure (surfaced under set -o pipefail) would leave a truncated /
+  # empty artifact and clobber a prior good one. Only a fully successful build
+  # is moved into place; a failure removes the temp and leaves the old artifact.
+  local _tmp
+  _tmp=$(mktemp)
+  if KUBECONFIG="${kubeconfig}" \
+     KHELM_TRUST_ANY_REPO=true \
+       kustomize build --enable-alpha-plugins "${domain_dir}" \
+       | envsubst "${envsubst_whitelist}" \
+       > "${_tmp}"; then
+    mv "${_tmp}" "${domain_dir}/artifacts.yaml"
+  else
+    rm -f "${_tmp}"
+    error "kustomize build failed for ${domain}"
+    return 1
+  fi
 }
 
 # Helper: check if a directory has a kustomization file

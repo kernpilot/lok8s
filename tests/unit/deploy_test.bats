@@ -74,6 +74,30 @@ teardown() {
   teardown_tmpdir
 }
 
+# main::deploy is gated by argsh's `:args` builtin (absent when a lib is sourced
+# in bats) and calls _resolve_kubeconfig_for_domain. Shim `:args` to populate
+# `label` from -l/--label exactly as real argsh does (verified: `'label|l'`
+# parses `-l v`, `--label v`, `--label=v` identically), stub the kubeconfig
+# resolver, and stub the two apply entrypoints so the tests assert ROUTING +
+# the key=value guard, not a real deploy.
+_shim_main_deploy() {
+  :args() {
+    shift  # drop the description (first positional)
+    while (( $# )); do
+      case "$1" in
+        -l|--label)     label="${2:-}"; shift ;;
+        -l=*|--label=*) label="${1#*=}" ;;
+      esac
+      shift
+    done
+  }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::apply()          { echo "route=apply domain=${1}"; }
+  deploy::apply_filtered() { echo "route=filtered domain=${1} key=${2} val=${3}"; }
+  export -f :args _resolve_kubeconfig_for_domain deploy::apply deploy::apply_filtered
+  export DOMAIN_NAME="test.lok8s.dev"
+}
+
 # --- deploy::apply ---
 
 @test "deploy::apply applies the single domain artifact" {
@@ -139,13 +163,50 @@ teardown() {
 @test "deploy::apply_filtered rejects injection in label key" {
   run deploy::apply_filtered "test.lok8s.dev" "key; rm -rf /" "value"
   assert_failure
-  assert_output --partial "Invalid filter"
+  assert_output --partial "Invalid label selector"
 }
 
 @test "deploy::apply_filtered rejects injection in label value" {
   run deploy::apply_filtered "test.lok8s.dev" "type" "value; echo pwned"
   assert_failure
-  assert_output --partial "Invalid filter"
+  assert_output --partial "Invalid label selector"
+}
+
+# --- main::deploy -l/--label parsing (routing + key=value guard) ---
+
+@test "main::deploy -l key=value routes to apply_filtered" {
+  _shim_main_deploy
+  run main::deploy -l lok8s.dev/name=zitadel
+  assert_success
+  assert_output --partial "route=filtered domain=test.lok8s.dev key=lok8s.dev/name val=zitadel"
+}
+
+@test "main::deploy without -l routes to apply (full artifact)" {
+  _shim_main_deploy
+  run main::deploy
+  assert_success
+  assert_output --partial "route=apply domain=test.lok8s.dev"
+}
+
+@test "main::deploy -l =value (empty key) errors expected key=value" {
+  _shim_main_deploy
+  run main::deploy -l =value
+  assert_failure
+  assert_output --partial "expected key=value"
+}
+
+@test "main::deploy -l foo (no =) errors expected key=value" {
+  _shim_main_deploy
+  run main::deploy -l foo
+  assert_failure
+  assert_output --partial "expected key=value"
+}
+
+@test "main::deploy -l foo= (empty value) errors expected key=value" {
+  _shim_main_deploy
+  run main::deploy -l foo=
+  assert_failure
+  assert_output --partial "expected key=value"
 }
 
 # --- deploy::wait_crds ---

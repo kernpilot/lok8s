@@ -24,7 +24,7 @@ setup() {
 
   # argsh's `:args`/`:usage` builtins (from argsh.so) are NOT loaded when a
   # lib is `source`d in a bats context — every unit test in this suite
-  # bypasses them (cf. build_test.bats drives build::targets, not the
+  # bypasses them (cf. build_test.bats drives build::artifacts, not the
   # `:args`-gated main::build). To exercise tilt::ci's post-parse body
   # (the `--timeout` passthrough) we install a minimal `:args` shim that
   # reproduces what real argsh does for the one flag that matters here:
