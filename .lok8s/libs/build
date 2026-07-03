@@ -146,7 +146,10 @@ build::artifacts() {
   # empty artifact and clobber a prior good one. Only a fully successful build
   # is moved into place; a failure removes the temp and leaves the old artifact.
   local _tmp
-  _tmp=$(mktemp)
+  # -p "${domain_dir}": keep the temp on the SAME filesystem as the target so the
+  # mv below is an atomic rename (a cross-fs mv is copy+unlink — non-atomic, and an
+  # interrupted one can leave a partial artifacts.yaml).
+  _tmp=$(mktemp -p "${domain_dir}")
   if KUBECONFIG="${kubeconfig}" \
      KHELM_TRUST_ANY_REPO=true \
        kustomize build --enable-alpha-plugins "${domain_dir}" \

@@ -132,7 +132,7 @@ deploy::apply_filtered() {
   # Validate label key/value to prevent yq injection (the value is interpolated
   # into a yq expression below).
   if [[ ! "${label_key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${label_value}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-    error "Invalid label selector: key and value must be alphanumeric with . _ - /"
+    error "Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)"
     return 1
   fi
 
