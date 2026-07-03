@@ -1,32 +1,25 @@
 #!/usr/bin/env argsh
 # shellcheck shell=bash disable=SC2034
 # vim: set syntax=bash:
-# build — kustomize build pipeline
-# Iterates targets for a domain, runs kustomize build per target,
-# writes artifacts to .lok8s/<domain>/artifacts/<target>/.
+# build — kustomize build pipeline (domain-based)
+# Renders the DOMAIN kustomization (clusters/<domain>/kustomization.yaml) —
+# which composes the domain's targets — into ONE clusters/<domain>/artifacts.yaml.
 
 import ^utils/types
 import ^utils/verbose
 
 main::build() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
-  local split cluster_override
-  local -a build_targets
+  local cluster_override
   local -a args=(
     'domain|:^~domain'   'Domain to use'
-    'split|:+'           'Split output into individual resource files'
     'cluster-override|'  'Override cluster domain for kubeconfig resolution'
-    'build-targets'      'Specific targets to build (optional)'
     "${args[@]:-}"
   )
-  :args "Build kustomize targets" "${@}"
+  :args "Build the domain kustomization into one artifacts.yaml" "${@}"
 
   _resolve_kubeconfig_for_domain
-  if (( split )); then
-    build::targets_split "${domain}" "${build_targets[@]}"
-  else
-    build::targets "${domain}" "${build_targets[@]}"
-  fi
+  build::artifacts "${domain}"
 }
 
 # Resolve the control-plane API endpoint from the domain's kubeconfig and export
@@ -76,168 +69,47 @@ build::_export_secrets_path() {
   fi
 }
 
-# Build all (or specified) targets for a domain.
-# Usage: build::targets <domain> [target...]
-build::targets() {
-  local domain="$1"; shift
-  local -a requested_targets=("$@")
-  local domain_dir="${PATH_CLUSTERS}/${domain}"
-  local targets_dir="${domain_dir}/targets"
-  local artifacts_dir="${domain_dir}/artifacts"
-
-  if [[ ! -d "${targets_dir}" ]]; then
-    error "No targets directory: ${targets_dir}"
-    return 1
-  fi
-
-  # Explicit targets must all exist — fail fast before discover silently
-  # drops them.
-  if (( ${#requested_targets[@]} > 0 )); then
-    local t
-    for t in "${requested_targets[@]}"; do
-      [[ -d "${targets_dir}/${t}" ]] || { error "Target not found: ${targets_dir}/${t}"; return 1; }
-    done
-  fi
-
-  # Discover targets
-  local -a targets=()
-  mapfile -t targets < <(targets::discover "${domain}" "${requested_targets[@]}")
-
-  if (( ${#targets[@]} == 0 )); then
-    warn "No targets found in ${targets_dir}"
-    return 0
-  fi
-
-  # Resolve the API endpoint (exports LOK8S_USER_API_*) + build the envsubst
-  # whitelist, so ${LOK8S_USER_*}/${LOK8S_SPEC_*} in target manifests resolve
-  # (e.g. the host-firewall ccnp's CIDR). Shared with build::targets_split.
-  build::_resolve_api "${domain_dir}"
-  build::_export_secrets_path "${domain_dir}"
-  local _wl; _wl=$(template::envsubst_whitelist)
-
-  for target in "${targets[@]}"; do
-    local target_dir="${targets_dir}/${target}"
-    local artifact_dir="${artifacts_dir}/${target}"
-
-    debug "Building target: ${target}"
-    mkdir -p "${artifact_dir}"
-
-    # Run kustomize build, then envsubst LOK8S_USER_* vars (see above).
-    kustomize build --enable-alpha-plugins "${target_dir}" \
-      | envsubst "${_wl}" \
-      > "${artifact_dir}/artifacts.yaml"
-
-    # Generate kustomization.yaml referencing artifacts.yaml
-    cat > "${artifact_dir}/kustomization.yaml" <<'EOF'
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - artifacts.yaml
-EOF
-
-    debug "Built ${target} -> ${artifact_dir}/artifacts.yaml"
-  done
-}
-
-# Build targets with split output: <Kind>.<namespace>.<name>.yaml per resource.
-# Usage: build::targets_split <domain> [target...]
-build::targets_split() {
-  local domain="$1"; shift
-  local -a requested_targets=("$@")
-  local domain_dir="${PATH_CLUSTERS}/${domain}"
-  local targets_dir="${domain_dir}/targets"
-  local artifacts_dir="${domain_dir}/artifacts"
-
-  if [[ ! -d "${targets_dir}" ]]; then
-    error "No targets directory: ${targets_dir}"
-    return 1
-  fi
-
-  local -a targets=()
-  mapfile -t targets < <(targets::discover "${domain}" "${requested_targets[@]}")
-
-  # Same envsubst resolution as build::targets — --split historically skipped
-  # this, emitting literal ${LOK8S_USER_*}/${LOK8S_SPEC_*} (invalid on apply).
-  build::_resolve_api "${domain_dir}"
-  build::_export_secrets_path "${domain_dir}"
-  local _wl; _wl=$(template::envsubst_whitelist)
-
-  for target in "${targets[@]}"; do
-    local target_dir="${targets_dir}/${target}"
-    local artifact_dir="${artifacts_dir}/${target}"
-
-    [[ -d "${target_dir}" ]] || { error "Target not found: ${target_dir}"; return 1; }
-
-    debug "Building target (split): ${target}"
-    mkdir -p "${artifact_dir}"
-
-    # Build, envsubst the LOK8S_* vars, then split into per-resource files.
-    local combined
-    combined=$(kustomize build --enable-alpha-plugins "${target_dir}" | envsubst "${_wl}")
-
-    # Remove old split files
-    rm -f "${artifact_dir}"/*.yaml
-
-    # Split multi-document YAML into individual files
-    local -a resource_files=()
-    local kind ns name filename
-    while IFS= read -r doc; do
-      kind=$(echo "${doc}" | yq -r '.kind // empty')
-      ns=$(echo "${doc}" | yq -r '.metadata.namespace // empty')
-      name=$(echo "${doc}" | yq -r '.metadata.name // empty')
-      [[ -n "${kind}" && -n "${name}" ]] || continue
-
-      if [[ -n "${ns}" ]]; then
-        filename="${kind}.${ns}.${name}.yaml"
-      else
-        filename="${kind}.${name}.yaml"
-      fi
-
-      echo "${doc}" > "${artifact_dir}/${filename}"
-      resource_files+=("  - ${filename}")
-    done < <(echo "${combined}" | yq -s '.' -)
-
-    # Generate kustomization.yaml listing all files
-    {
-      echo "apiVersion: kustomize.config.k8s.io/v1beta1"
-      echo "kind: Kustomization"
-      echo "resources:"
-      for f in "${resource_files[@]}"; do
-        echo "${f}"
-      done
-    } > "${artifact_dir}/kustomization.yaml"
-
-    debug "Built ${target} (split) -> ${artifact_dir}/"
-  done
-}
-
-# Build artifacts via kustomize for the active domain.
+# Build the domain's composed artifact via kustomize alpha plugins.
 #
-# Per-target build: each subdirectory under .lok8s/<domain>/targets/ that
-# has a kustomization.yaml becomes its own artifact at
-# .lok8s/<domain>/artifacts/<target>/artifacts.yaml. No top-level
-# kustomization composition — the workload plane has no framework-level
-# ordering primitive. Selection happens in Tilt (services.yaml) or via
-# explicit args to lo deploy.
+# Renders the DOMAIN kustomization (clusters/<domain>/kustomization.yaml) — which
+# composes the domain's targets (resources: [./targets/foo, ../../.targets/bar];
+# local + shared) — into ONE file clusters/<domain>/artifacts.yaml.
 #
-# Usage: build::artifacts [target...]
-#   - No args: builds every target subdirectory alphabetically.
-#   - With args: builds only the named targets (each must exist).
+# Same pipeline the CLI has always used: --enable-alpha-plugins with
+# $KUSTOMIZE_PLUGIN_HOME (secrets/khelm), KHELM_TRUST_ANY_REPO=true, per-domain
+# secret isolation (build::_export_secrets_path), API-endpoint resolution
+# (build::_resolve_api), kubeconfig resolution for cluster-aware plugins (the
+# khelm ChartRenderer kubeVersion check), and the LOK8S_* envsubst pass.
+#
+# There is no per-target loop and no artifacts/<target>/ output: target ordering
+# and selection live in the domain kustomization the user authors. Selection at
+# deploy time is `lo deploy --label <k=v>` (see libs/deploy).
+#
+# Usage: build::artifacts [<domain>]
 build::artifacts() {
-  debug "Build artifacts via kustomize alpha plugins"
-  local domain="${DOMAIN_NAME:-lok8s.dev}"
-  local targets_dir="${PATH_CLUSTERS}/${domain}/targets"
-  if [[ ! -d "${targets_dir}" ]]; then
-    error "No targets directory: ${targets_dir}"
+  local domain="${1:-${DOMAIN_NAME:-lok8s.dev}}"
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+
+  debug "Build artifacts via kustomize alpha plugins for ${domain}"
+
+  # The domain composes its targets in its own kustomization.yaml. Without it
+  # there is nothing to build — fail clearly with the fix.
+  if ! _has_kustomization "${domain_dir}"; then
+    error "domain ${domain} has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]"
     return 1
   fi
-  build::_export_secrets_path "${PATH_CLUSTERS}/${domain}"
+
+  # Per-domain secret isolation + API endpoint exports (LOK8S_USER_API_*), so
+  # ${LOK8S_USER_*}/${LOK8S_SPEC_*} in target manifests resolve at envsubst time.
+  # MUST run un-subshelled so the exports reach the kustomize child + whitelist.
+  build::_export_secrets_path "${domain_dir}"
+  build::_resolve_api "${domain_dir}"
 
   # Resolve kubeconfig (some targets need it for cluster-aware kustomize
-  # plugins like the khelm ChartRenderer kubeVersion check)
+  # plugins like the khelm ChartRenderer kubeVersion check).
   local kubeconfig="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml"
   if [[ ! -f "${kubeconfig}" ]]; then
-    local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+    local cluster_spec="${domain_dir}/cluster.lok8s.yaml"
     if [[ -f "${cluster_spec}" ]] && command -v yq &>/dev/null; then
       local cluster_name
       cluster_name=$(yq -r '.metadata.name // ""' "${cluster_spec}" 2>/dev/null)
@@ -247,59 +119,48 @@ build::artifacts() {
     fi
   fi
 
-  local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
-  mkdir -p "${artifacts_dir}"
-
-  # Drop stale unified blob from the pre-per-target era, if present.
-  rm -f "${artifacts_dir}/.artifacts.yaml"
-
   # envsubst whitelist: rebuilt on every call so new LOK8S_SPEC_* vars in
   # lo::export_spec_envs are automatically picked up.
   local envsubst_whitelist
   envsubst_whitelist=$(template::envsubst_whitelist)
 
-  # Determine which targets to build
-  local -a requested=("$@")
-  local -a targets=()
-  if (( ${#requested[@]} > 0 )); then
-    for t in "${requested[@]}"; do
-      local tdir="${targets_dir}/${t}"
-      if [[ ! -d "${tdir}" ]] || ! _has_kustomization "${tdir}"; then
-        error "Target ${t} not found or missing kustomization: ${tdir}"
-        return 1
-      fi
-      targets+=("${t}")
+  # Clean stale per-target artifact dirs from the pre-domain-build era so
+  # `lo status`/hooks don't read phantom outputs. Only framework-generated
+  # subdirs (each held an artifacts.yaml) are removed; env's overlay
+  # kustomization.yaml, capi.yaml and .cache-queue live as files directly
+  # under artifacts/ and are preserved.
+  if [[ -d "${domain_dir}/artifacts" ]]; then
+    local _sd
+    for _sd in "${domain_dir}"/artifacts/*/; do
+      [[ -d "${_sd}" && -f "${_sd}artifacts.yaml" ]] && rm -rf "${_sd}"
     done
+  fi
+
+  # Render the whole domain (all composed targets) into one artifact. Directory
+  # bases outside the domain root (../../.targets/*) are kustomize bases, allowed
+  # under the default load restrictor; only raw-file refs would need relaxing.
+  debug "Building domain kustomization: ${domain_dir}/kustomization.yaml"
+  # Render to a temp file first, then promote on success. A direct
+  # `> artifacts.yaml` truncates the target BEFORE the pipeline runs, so a
+  # kustomize failure (surfaced under set -o pipefail) would leave a truncated /
+  # empty artifact and clobber a prior good one. Only a fully successful build
+  # is moved into place; a failure removes the temp and leaves the old artifact.
+  local _tmp
+  # -p "${domain_dir}": keep the temp on the SAME filesystem as the target so the
+  # mv below is an atomic rename (a cross-fs mv is copy+unlink — non-atomic, and an
+  # interrupted one can leave a partial artifacts.yaml).
+  _tmp=$(mktemp -p "${domain_dir}")
+  if KUBECONFIG="${kubeconfig}" \
+     KHELM_TRUST_ANY_REPO=true \
+       kustomize build --enable-alpha-plugins "${domain_dir}" \
+       | envsubst "${envsubst_whitelist}" \
+       > "${_tmp}"; then
+    mv "${_tmp}" "${domain_dir}/artifacts.yaml"
   else
-    local _t
-    while IFS= read -r _t; do
-      [[ -n "${_t}" ]] || continue
-      if _has_kustomization "${targets_dir}/${_t}"; then
-        targets+=("${_t}")
-      else
-        debug "Skipping ${_t}/ (no kustomization file)"
-      fi
-    done < <(targets::discover "${domain}")
+    rm -f "${_tmp}"
+    error "kustomize build failed for ${domain}"
+    return 1
   fi
-
-  if (( ${#targets[@]} == 0 )); then
-    warn "No kustomizable targets found in ${targets_dir}"
-    return 0
-  fi
-
-  # Build each target independently into artifacts/<target>/artifacts.yaml
-  local target
-  for target in "${targets[@]}"; do
-    local target_src="${targets_dir}/${target}"
-    local target_out="${artifacts_dir}/${target}"
-    mkdir -p "${target_out}"
-
-    debug "Building target: ${target}"
-    KUBECONFIG="${kubeconfig}" \
-      kustomize build --enable-alpha-plugins "${target_src}" \
-      | envsubst "${envsubst_whitelist}" \
-      > "${target_out}/artifacts.yaml"
-  done
 }
 
 # Helper: check if a directory has a kustomization file

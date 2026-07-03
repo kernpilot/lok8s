@@ -146,10 +146,9 @@ YAML
 
   export DOMAIN_NAME="test.example"
 
-  # Seed a per-target artifacts.yaml so env::kustomization has
-  # something to reference (discover loop scans */artifacts.yaml).
-  mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts/platform"
-  echo "# placeholder" > "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts/platform/artifacts.yaml"
+  # Seed the single domain artifact so env::kustomization references it.
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.example"
+  echo "# placeholder" > "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts.yaml"
 
   # Merged services env: one service builds locally, one uses registry, one
   # pins an explicit image.
@@ -184,8 +183,8 @@ YAML
   run cat "${out}"
   assert_output --partial "apiVersion: kustomize.config.k8s.io/v1beta1"
   assert_output --partial "kind: Kustomization"
-  # per-target artifact reference emitted as a resource
-  assert_output --partial "platform/artifacts.yaml"
+  # single domain artifact referenced as the sole resource (one level up)
+  assert_output --partial "../artifacts.yaml"
 
   # worker: build=false → registry swap goes through the on-cluster
   # cache (lok8s.cache), not directly to the remote registry. The
@@ -213,8 +212,8 @@ YAML
 
   export DOMAIN_NAME="lok8s.dev"
 
-  mkdir -p "${BATS_TEST_TMPDIR}/clusters/lok8s.dev/artifacts/apps"
-  echo "# placeholder" > "${BATS_TEST_TMPDIR}/clusters/lok8s.dev/artifacts/apps/artifacts.yaml"
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/lok8s.dev"
+  echo "# placeholder" > "${BATS_TEST_TMPDIR}/clusters/lok8s.dev/artifacts.yaml"
 
   # All services build locally — no swaps should be emitted
   env::services() {
@@ -243,6 +242,6 @@ YAML
 
   run cat "${out}"
   assert_output --partial "resources:"
-  assert_output --partial "apps/artifacts.yaml"
+  assert_output --partial "../artifacts.yaml"
   refute_output --partial "name: lok8s.local"
 }

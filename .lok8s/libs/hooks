@@ -63,20 +63,15 @@ hooks::_yq_filter() {
 }
 
 # hooks::_select <domain> <selector> — emit the objects matching the label
-# selector from the domain's rendered artifacts (every target). The on-disk
-# artifacts are the same ones `lo deploy` applies; the Tilt reload keeps the
+# selector from the domain's rendered artifact. This is the same single
+# clusters/<domain>/artifacts.yaml `lo deploy` applies; the Tilt reload keeps the
 # upstream ConfigMaps current, so a recreated Job mounts the edited content.
 hooks::_select() {
   local domain="$1" selector="$2"
   local filter; filter="$(hooks::_yq_filter "${selector}")" || return 1
-  local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
-  local dir artifact
-  for dir in "${artifacts_dir}"/*/; do
-    [[ -d "${dir}" ]] || continue
-    artifact="${dir}artifacts.yaml"
-    [[ -f "${artifact}" ]] || continue
-    yq "${filter}" "${artifact}" 2>/dev/null || true
-  done
+  local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
+  [[ -f "${artifact}" ]] || return 0
+  yq "${filter}" "${artifact}" 2>/dev/null || true
 }
 
 hooks::recreate() {

@@ -1,5 +1,10 @@
 #!/usr/bin/env bats
 # build_test.bats — unit tests for .lok8s/libs/build
+#
+# Domain-based build: `lo build` renders the DOMAIN kustomization
+# (clusters/<domain>/kustomization.yaml, which composes the targets) into ONE
+# clusters/<domain>/artifacts.yaml. There is no per-target loop and no
+# artifacts/<target>/ output.
 
 setup() {
   load "../test_helper"
@@ -16,13 +21,13 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
-  # build::targets calls template::envsubst_whitelist for its envsubst pass. In
+  # build::artifacts calls template::envsubst_whitelist for its envsubst pass. In
   # production it arrives via argsh `import` (stubbed to a no-op above), so stub it
   # here too — otherwise the build path hits "command not found" (status 127).
   template::envsubst_whitelist() { echo ""; }
   export -f template::envsubst_whitelist
 
-  # Create domain directory with targets
+  # Create the domain directory: targets + a domain kustomization composing them.
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   mkdir -p "${domain_dir}/targets/networking"
   mkdir -p "${domain_dir}/targets/platform"
@@ -35,29 +40,23 @@ setup() {
     "${domain_dir}/targets/platform/"
   cp "${FIXTURES_DIR}/targets/platform/deployment.yaml" \
     "${domain_dir}/targets/platform/"
+
+  cat > "${domain_dir}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./targets/networking
+  - ./targets/platform
+YAML
 }
 
 teardown() {
   teardown_tmpdir
 }
 
-# --- build::targets ---
+# --- build::artifacts ---
 
-@test "build::targets discovers all targets in domain directory" {
-  # Mock kustomize to produce some output
-  kustomize() {
-    echo "apiVersion: v1"
-    echo "kind: Namespace"
-    echo "metadata:"
-    echo "  name: test"
-  }
-  export -f kustomize
-
-  run build::targets "test.lok8s.dev"
-  assert_success
-}
-
-@test "build::targets writes artifacts.yaml per target" {
+@test "build::artifacts writes ONE artifacts.yaml from the domain kustomization" {
   kustomize() {
     echo "apiVersion: v1"
     echo "kind: ConfigMap"
@@ -66,83 +65,76 @@ teardown() {
   }
   export -f kustomize
 
-  build::targets "test.lok8s.dev"
+  build::artifacts "test.lok8s.dev"
 
-  local artifacts_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts"
-  [ -f "${artifacts_dir}/networking/artifacts.yaml" ]
-  [ -f "${artifacts_dir}/platform/artifacts.yaml" ]
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  # ONE artifact at the domain root — not per-target.
+  [ -f "${domain_dir}/artifacts.yaml" ]
+  [ ! -d "${domain_dir}/artifacts/networking" ]
+  [ ! -d "${domain_dir}/artifacts/platform" ]
+  run cat "${domain_dir}/artifacts.yaml"
+  assert_output --partial "kind: ConfigMap"
 }
 
-@test "build::targets generates kustomization.yaml per target" {
-  kustomize() { echo "---"; }
+@test "build::artifacts defaults to \$DOMAIN_NAME when no domain arg is given" {
+  export DOMAIN_NAME="test.lok8s.dev"
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
   export -f kustomize
 
-  build::targets "test.lok8s.dev"
+  build::artifacts
 
-  local artifacts_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts"
-  [ -f "${artifacts_dir}/networking/kustomization.yaml" ]
-
-  # Verify kustomization.yaml references artifacts.yaml
-  run grep "artifacts.yaml" "${artifacts_dir}/networking/kustomization.yaml"
-  assert_success
+  [ -f "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml" ]
 }
 
-@test "build::targets builds only specified targets" {
-  kustomize() {
-    echo "apiVersion: v1"
-    echo "kind: Namespace"
-    echo "metadata:"
-    echo "  name: net"
-  }
-  export -f kustomize
+@test "build::artifacts errors when the domain has no kustomization.yaml" {
+  rm -f "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/kustomization.yaml"
 
-  build::targets "test.lok8s.dev" "networking"
-
-  local artifacts_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts"
-  [ -f "${artifacts_dir}/networking/artifacts.yaml" ]
-  [ ! -d "${artifacts_dir}/platform" ]
-}
-
-@test "build::targets fails for missing targets directory" {
-  rm -rf "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/targets"
-
-  run build::targets "test.lok8s.dev"
+  run build::artifacts "test.lok8s.dev"
   assert_failure
-  assert_output --partial "No targets directory"
+  assert_output --partial "has no kustomization.yaml"
 }
 
-@test "build::targets fails for nonexistent requested target" {
-  kustomize() { echo "---"; }
+@test "build::artifacts errors for a nonexistent domain" {
+  run build::artifacts "nope.lok8s.dev"
+  assert_failure
+  assert_output --partial "has no kustomization.yaml"
+}
+
+@test "build::artifacts cleans stale per-target artifact dirs from the pre-domain era" {
+  # A leftover artifacts/<target>/artifacts.yaml from the old per-target build
+  # must be removed so status/hooks don't read phantom output.
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  mkdir -p "${domain_dir}/artifacts/stale"
+  echo "kind: ConfigMap" > "${domain_dir}/artifacts/stale/artifacts.yaml"
+  # A non-target file directly under artifacts/ must be PRESERVED.
+  echo "queued" > "${domain_dir}/artifacts/.cache-queue"
+
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
   export -f kustomize
 
-  run build::targets "test.lok8s.dev" "nonexistent"
-  assert_failure
-  assert_output --partial "Target not found"
+  build::artifacts "test.lok8s.dev"
+
+  [ ! -d "${domain_dir}/artifacts/stale" ]
+  [ -f "${domain_dir}/artifacts/.cache-queue" ]
 }
 
-@test "build::targets handles empty targets directory gracefully" {
-  rm -rf "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/targets/"*
-
-  run build::targets "test.lok8s.dev"
-  assert_success
-  assert_output --partial "No targets found"
-}
-
-@test "build::targets survives a deploy domain (no cluster.lok8s.yaml) under set -e" {
+@test "build::artifacts survives a deploy domain (no cluster.lok8s.yaml) under set -e" {
   # Regression: a DEPLOY domain (deploy.lok8s.yaml + clusterRef) has NO
   # cluster.lok8s.yaml, and its KUBECONFIG resolves to a secret kubeconfig that
-  # may not be on disk yet. The old kubeconfig-introspection block did a bare
-  #   _cn=$(yq … "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null)
-  # which exits non-zero on the missing file and — under the `lo` runtime's
-  # `set -euo pipefail` — aborted the WHOLE build silently (stderr suppressed)
-  # before any artifact was written. This broke `lo build`/`lo deploy` for every
-  # deploy-domain target. The suite's other tests miss it because bats does not
+  # may not be on disk yet. build::_resolve_api must guard the missing-file read
+  # so it does not abort the whole build under `set -euo pipefail`. bats does not
   # run under errexit, so this case runs the build inside an explicit
   # `set -euo pipefail` subshell to mirror the real runtime.
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/deploy.lok8s.dev"
   mkdir -p "${domain_dir}/targets/app"
   cp "${FIXTURES_DIR}/targets/platform/kustomization.yaml" "${domain_dir}/targets/app/"
   cp "${FIXTURES_DIR}/targets/platform/deployment.yaml" "${domain_dir}/targets/app/"
+  cat > "${domain_dir}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./targets/app
+YAML
   # Deliberately NO cluster.lok8s.yaml here — that is what makes it a deploy domain.
 
   run bash -c '
@@ -152,96 +144,45 @@ teardown() {
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
     export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
+    export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
     # KUBECONFIG points at a not-yet-fetched secret kubeconfig (does not exist).
     export KUBECONFIG="'"${BATS_TEST_TMPDIR}"'/.kubeconfig/secret.deploy.lok8s.dev.yaml"
     # Keep the test focused on the kubeconfig-resolution crash, not envsubst.
     template::envsubst_whitelist() { echo ""; }
     kustomize() { printf "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"; }
     export -f template::envsubst_whitelist kustomize
-    build::targets "deploy.lok8s.dev"
+    build::artifacts "deploy.lok8s.dev"
   '
   assert_success
-  [ -f "${domain_dir}/artifacts/app/artifacts.yaml" ]
+  [ -f "${domain_dir}/artifacts.yaml" ]
 }
 
-# --- build::targets_split ---
+@test "build::artifacts preserves a prior artifact when the build fails" {
+  # Regression: a direct `> artifacts.yaml` truncates the target BEFORE the
+  # pipeline runs, so a kustomize failure (under set -o pipefail) would clobber a
+  # prior good artifact with an empty/partial one. The build must render to a
+  # temp file and promote only on success. Run under the real errexit+pipefail.
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: good\n' > "${domain_dir}/artifacts.yaml"
 
-@test "build::targets_split produces individual files per resource" {
-  # Mock kustomize + yq for the split path
-  kustomize() {
-    cat <<'YAML'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: test-ns
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: test-deploy
-  namespace: default
-YAML
-  }
-  export -f kustomize
-
-  # yq -s splits multi-doc YAML; mock to output each doc on its own line
-  yq() {
-    if [[ "$1" == "-s" ]]; then
-      # Read from stdin and split by ---
-      local input
-      input=$(cat)
-      # Output doc 1
-      echo "apiVersion: v1
-kind: Namespace
-metadata:
-  name: test-ns"
-      echo "---"
-      echo "apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: test-deploy
-  namespace: default"
-    elif [[ "$1" == "-r" ]]; then
-      case "$2" in
-        '.kind // empty')
-          local input
-          input=$(cat)
-          if echo "${input}" | grep -q "Namespace"; then
-            echo "Namespace"
-          elif echo "${input}" | grep -q "Deployment"; then
-            echo "Deployment"
-          fi
-          ;;
-        '.metadata.namespace // empty')
-          local input
-          input=$(cat)
-          if echo "${input}" | grep -q "namespace: default"; then
-            echo "default"
-          else
-            echo ""
-          fi
-          ;;
-        '.metadata.name // empty')
-          local input
-          input=$(cat)
-          if echo "${input}" | grep -q "test-ns"; then
-            echo "test-ns"
-          elif echo "${input}" | grep -q "test-deploy"; then
-            echo "test-deploy"
-          fi
-          ;;
-        *) cat ;;
-      esac
-    else
-      cat
-    fi
-  }
-  export -f yq
-
-  build::targets_split "test.lok8s.dev" "networking"
-
-  local artifacts_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts/networking"
-  [ -f "${artifacts_dir}/kustomization.yaml" ]
+  run bash -c '
+    set -euo pipefail
+    import() { :; }
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
+    export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
+    export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
+    template::envsubst_whitelist() { echo ""; }
+    kustomize() { echo "boom" >&2; return 1; }   # build failure
+    export -f template::envsubst_whitelist kustomize
+    build::artifacts "test.lok8s.dev"
+  '
+  assert_failure
+  assert_output --partial "kustomize build failed"
+  # The prior good artifact is untouched (not truncated/clobbered).
+  run cat "${domain_dir}/artifacts.yaml"
+  assert_output --partial "name: good"
 }
 
 # --- build::_export_secrets_path (per-instance secret isolation) ---

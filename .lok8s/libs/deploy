@@ -1,12 +1,13 @@
 #!/usr/bin/env argsh
 # shellcheck shell=bash disable=SC2034
 # vim: set syntax=bash:
-# deploy — per-target artifact deployment
-# Iterates targets (from args, or alphabetically from targets/), applies
-# CRDs first, then resources, waits for health between targets.
-# Workload-plane ordering is intentionally not a framework primitive:
-# kubectl handles in-manifest order, Tilt handles runtime deps at the
-# resource level, cluster-infra ordering lives in cluster.spec.bootstrap.
+# deploy — domain artifact deployment
+# Applies the single clusters/<domain>/artifacts.yaml produced by `lo build`:
+# CRDs first (server-side apply + wait Established), then the rest (server-side
+# apply + scoped wait-ready). `-l/--label <key=value>` deploys only the matching
+# subset. Workload-plane ordering is intentionally not a framework primitive:
+# kubectl handles in-manifest order, Tilt handles runtime deps at the resource
+# level, cluster-infra ordering lives in cluster.spec.bootstrap.
 
 import ^utils/types
 import ^utils/verbose
@@ -14,24 +15,26 @@ import ^utils/kapply
 
 main::deploy() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
-  local filter cluster_override
-  local -a deploy_targets
+  local label cluster_override
   local -a args=(
     'domain|:^~domain'   'Domain to use'
-    'filter|'            'Label filter (e.g. type=system)'
+    'label|l'            'Only deploy resources with this label (key=value; key may be lok8s.dev/<x> or any label key)'
     'cluster-override|'  'Override cluster domain for kubeconfig resolution'
-    'deploy-targets'     'Specific targets to deploy (optional)'
     "${args[@]:-}"
   )
-  :args "Deploy artifacts" "${@}"
+  :args "Deploy the domain artifact" "${@}"
   _resolve_kubeconfig_for_domain
 
-  if [[ -n "${filter:-}" ]]; then
-    local fkey="${filter%%=*}"
-    local fval="${filter#*=}"
-    deploy::apply_filtered "${domain}" "$fkey" "$fval"
+  if [[ -n "${label:-}" ]]; then
+    local lkey="${label%%=*}"
+    local lval="${label#*=}"
+    if [[ -z "${lkey}" || "${lkey}" == "${label}" || -z "${lval}" ]]; then
+      error "invalid --label '${label}' — expected key=value (e.g. lok8s.dev/name=zitadel)"
+      return 1
+    fi
+    deploy::apply_filtered "${domain}" "${lkey}" "${lval}"
   else
-    deploy::apply "${domain}" "${deploy_targets[@]}"
+    deploy::apply "${domain}"
   fi
 }
 
@@ -51,9 +54,8 @@ main::destroy() {
 #
 # Used by apply paths to skip `kubectl apply` gracefully — kubectl apply
 # fails with "error: no objects passed to apply" on empty streams, which
-# is technically correct but breaks legitimate workflows like deploying
-# a target that legitimately has no resources yet, or applying a
-# label-filtered subset that excludes everything in a target.
+# is technically correct but breaks legitimate workflows like a
+# label-filtered subset that excludes everything.
 #
 # Implementation: any line that has a `kind:` declaration is taken as
 # evidence of an object. Robust enough for kustomize output (which
@@ -66,92 +68,97 @@ deploy::_has_objects() {
   grep -qE '^kind:[[:space:]]+[A-Za-z]'
 }
 
-# Apply per-target artifacts for a domain.
-# Usage: deploy::apply <domain> [target...]
-#   - With explicit targets: apply just those (CLI args).
-#   - Without: iterate alphabetically over targets/<name>/ dirs.
-#   - Order within the loop is alphabetical; it is NOT a dependency order.
-#     If ordering matters, put it in cluster.spec.bootstrap (driver addons)
-#     or express it as Tilt resource_deps inside the Tiltfile.
-deploy::apply() {
-  local domain="${1:-"${DOMAIN_NAME:-lok8s.dev}"}"
-  shift 2>/dev/null || true
-  local -a requested_targets=("$@")
-  local domain_dir="${PATH_CLUSTERS}/${domain}"
-  local targets_dir="${domain_dir}/targets"
-  local artifacts_dir="${domain_dir}/artifacts"
-  # Determine which targets to deploy
-  local -a targets=()
-  mapfile -t targets < <(targets::discover "${domain}" "${requested_targets[@]}")
+# deploy::_apply <label> <file>
+#   Apply a manifest FILE in two phases: CRDs first, then everything. The file is
+#   STREAMED (via stdin redirect), never slurped into a bash string — large
+#   artifacts stay off the argv/heredoc path. Empty streams are a graceful no-op.
+#
+#   Phase 1: extract + apply CustomResourceDefinitions, then wait for them to
+#            become Established. Server-side apply — large CRDs (CNPG, CAPI)
+#            exceed the client-side last-applied annotation limit (262144 bytes).
+#            The CRD subset is small, so it stays a string.
+#   Phase 2: apply the whole stream (re-applying the CRDs server-side is a
+#            no-op), then wait for the stream's own Deployments/DaemonSets/
+#            StatefulSets to become ready (scoped to the manifest, not the whole
+#            cluster). Best-effort — a readiness timeout is a ⚠, never fatal.
+deploy::_apply() {
+  local label="$1" file="$2"
 
-  if (( ${#targets[@]} == 0 )); then
-    warn "No targets to deploy for ${domain}"
+  if ! deploy::_has_objects < "${file}"; then
+    debug "No objects for ${label}, skipping apply"
     return 0
   fi
 
-  for target in "${targets[@]}"; do
-    local artifact="${artifacts_dir}/${target}/artifacts.yaml"
-    if [[ ! -f "${artifact}" ]]; then
-      warn "No artifacts for target ${target}, skipping"
-      continue
-    fi
+  # Phase 1: CRDs first (subset small enough to stay a string).
+  local crds
+  crds=$(yq 'select(.kind == "CustomResourceDefinition")' "${file}" 2>/dev/null || true)
+  if deploy::_has_objects <<< "${crds}"; then
+    debug "Applying CRDs for ${label}"
+    echo "${crds}" | kapply::apply --label "${label} crds"
+    deploy::wait_crds "${crds}"
+  fi
 
-    debug "Deploying target: ${target}"
-
-    # Phase 1: Extract and apply CRDs first. Server-side apply — large
-    # CRDs (CNPG, CAPI) exceed the client-side last-applied annotation
-    # limit (262144 bytes).
-    local crds
-    crds=$(yq 'select(.kind == "CustomResourceDefinition")' "${artifact}" 2>/dev/null || true)
-    if deploy::_has_objects <<< "${crds}"; then
-      debug "Applying CRDs for ${target}"
-      echo "${crds}" | kapply::apply --label "${target} crds"
-      deploy::wait_crds "${crds}"
-    fi
-
-    # Phase 2: Apply remaining resources. Server-side like phase 1 (the
-    # artifact still contains the CRDs; re-applying them server-side is
-    # a no-op). Skip when the artifact has no objects — empty targets
-    # are valid (structure exists, no resources yet) and shouldn't fail
-    # deploy.
-    if deploy::_has_objects < "${artifact}"; then
-      debug "Applying resources for ${target}"
-      kapply::apply --label "${target}" < "${artifact}"
-      # Phase 3: wait for THIS target's own workloads to become ready (scoped to
-      # the artifact, not the whole cluster). Best-effort — a timeout is a ⚠.
-      kapply::wait_ready "${target}" 120 < "${artifact}"
-    else
-      debug "No objects in ${artifact}, skipping apply"
-    fi
-  done
+  # Phase 2: apply the rest + scoped wait-ready — both stream from the file.
+  debug "Applying resources for ${label}"
+  kapply::apply --label "${label}" < "${file}"
+  kapply::wait_ready "${label}" 120 < "${file}"
 }
 
-# Apply artifacts with label-based filtering.
+# Apply the domain's single artifact (clusters/<domain>/artifacts.yaml).
+# Usage: deploy::apply <domain>
+deploy::apply() {
+  local domain="${1:-"${DOMAIN_NAME:-lok8s.dev}"}"
+  local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
+
+  if [[ ! -f "${artifact}" ]]; then
+    error "no artifact for ${domain}: ${artifact} — run 'lo build' first"
+    return 1
+  fi
+
+  debug "Deploying ${domain} from ${artifact}"
+  deploy::_apply "${domain}" "${artifact}"
+}
+
+# Apply only the resources in the domain artifact carrying <label_key>=<label_value>.
+# The key is used verbatim: it may be a bare key (app) or a namespaced one
+# (lok8s.dev/name). Selective deploy is user opt-in — it requires the user to
+# have set kustomize `labels:` (or metadata.labels) on the targets they want to
+# address.
 # Usage: deploy::apply_filtered <domain> <label_key> <label_value>
 deploy::apply_filtered() {
   local domain="$1" label_key="$2" label_value="$3"
-  local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
+  local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
 
-  for dir in "${artifacts_dir}"/*/; do
-    [[ -d "${dir}" ]] || continue
-    local artifact="${dir}/artifacts.yaml"
-    [[ -f "${artifact}" ]] || continue
+  # Validate label key/value to prevent yq injection (the value is interpolated
+  # into a yq expression below).
+  if [[ ! "${label_key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${label_value}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    error "Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)"
+    return 1
+  fi
 
-    # Validate label key/value to prevent yq injection
-    if [[ ! "${label_key}" =~ ^[a-zA-Z0-9._/-]+$ ]] || [[ ! "${label_value}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-      error "Invalid filter: key and value must be alphanumeric with . _ - /"
-      return 1
-    fi
+  if [[ ! -f "${artifact}" ]]; then
+    error "no artifact for ${domain}: ${artifact} — run 'lo build' first"
+    return 1
+  fi
 
-    local filtered
-    filtered=$(yq "select(.metadata.labels.\"lok8s.dev/${label_key}\" == \"${label_value}\")" "${artifact}" 2>/dev/null || true)
-    if deploy::_has_objects <<< "${filtered}"; then
-      debug "Applying filtered resources (${label_key}=${label_value}) from $(basename "${dir}")"
-      echo "${filtered}" | kapply::apply --label "$(basename "${dir}")"
-    else
-      debug "No filtered objects (${label_key}=${label_value}) in $(basename "${dir}"), skipping"
-    fi
-  done
+  # Filter the single domain artifact by the (full) label key = value into a temp
+  # file — deploy::_apply streams from a file, and the artifact can be large.
+  # Explicit cleanup on EVERY return path (a `trap … RETURN` would leak to the
+  # caller frame and, under set -u, abort main::deploy on an unbound ${tmp}).
+  local tmp
+  tmp=$(mktemp)
+  yq "select(.metadata.labels.\"${label_key}\" == \"${label_value}\")" "${artifact}" > "${tmp}" 2>/dev/null || true
+  if ! deploy::_has_objects < "${tmp}"; then
+    warn "no objects match ${label_key}=${label_value} in ${artifact}"
+    rm -f "${tmp}"
+    return 0
+  fi
+
+  debug "Deploying ${domain} subset (${label_key}=${label_value})"
+  local rc=0
+  deploy::_apply "${domain} (${label_key}=${label_value})" "${tmp}" || rc=$?
+  rm -f "${tmp}"
+  return "${rc}"
 }
 
 # Wait for CRDs to become established.

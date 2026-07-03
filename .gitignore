@@ -16,6 +16,7 @@ examples/*/clusters/*/.oidc/
 .tilt.*
 **/clusters/.active
 **/clusters/*/artifacts/
+**/clusters/*/artifacts.yaml
 **/clusters/*/.kubeconfig/
 **/clusters/*/.containerd/
 **/clusters/*/.kubeone/

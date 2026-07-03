@@ -50,9 +50,9 @@ setup() {
   assert_output --partial 'required'
 }
 
-@test "_select: returns only label-matching objects from the rendered artifacts" {
-  mkdir -p "${PATH_CLUSTERS}/d.dev/artifacts/zitadel"
-  cat > "${PATH_CLUSTERS}/d.dev/artifacts/zitadel/artifacts.yaml" <<'YAML'
+@test "_select: returns only label-matching objects from the rendered artifact" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  cat > "${PATH_CLUSTERS}/d.dev/artifacts.yaml" <<'YAML'
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -75,9 +75,9 @@ YAML
 }
 
 @test "_select: empty when nothing matches" {
-  mkdir -p "${PATH_CLUSTERS}/d.dev/artifacts/zitadel"
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
   printf 'kind: Job\nmetadata:\n  name: x\n  labels: {lok8s.dev/name: other}\n' \
-    > "${PATH_CLUSTERS}/d.dev/artifacts/zitadel/artifacts.yaml"
+    > "${PATH_CLUSTERS}/d.dev/artifacts.yaml"
   run hooks::_select d.dev 'lok8s.dev/role=seed'
   assert_success
   refute_output --partial 'name: x'

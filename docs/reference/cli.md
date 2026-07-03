@@ -2,7 +2,7 @@
 
 The `lo` CLI is an [argsh](https://github.com/arg-sh/argsh) script located at `.lok8s/lo`.
 
-`lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` and `lo deploy` iterate targets alphabetically with no framework-level ordering. `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
+`lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
 ## Global Flags
 
@@ -91,31 +91,38 @@ Reads `spec.bootstrap` from the cluster spec and applies each addon in order. Us
 
 ### lo build
 
-Build kustomize targets into artifacts.
+Render the domain kustomization into one artifact.
 
 ```bash
-lo build [--split] [domain] [target...]
+lo build [domain]
 ```
 
-Runs `kustomize build --enable-alpha-plugins` for each target. Output goes to `clusters/<domain>/artifacts/<target>/artifacts.yaml`.
+Runs `kustomize build --enable-alpha-plugins` on the domain's own kustomization (`clusters/<domain>/kustomization.yaml`) and writes ONE `clusters/<domain>/artifacts.yaml`. The domain kustomization composes the targets it wants, in order — local and shared:
 
-| Flag | Description |
-|------|-------------|
-| `--split` | Split output into individual `<Kind>.<namespace>.<name>.yaml` files |
+```yaml
+# clusters/<domain>/kustomization.yaml
+resources:
+  - ./targets/networking      # domain-local target
+  - ../../.targets/monitoring  # shared target
+```
+
+A referenced target that does not exist is a clear `kustomize build` error. There is no per-target loop and no `artifacts/<target>/` output — target selection and ordering live in the kustomization you author.
 
 ### lo deploy
 
-Deploy artifacts to a cluster.
+Deploy the domain artifact to a cluster.
 
 ```bash
-lo deploy [--filter key=value] [domain] [target...]
+lo deploy [-l|--label key=value] [domain]
 ```
 
-Applies per-target artifacts. Targets are discovered from `clusters/<domain>/targets/<name>/` alphabetically, or supplied explicitly. Each target: CRDs first, then resources, then wait for health.
+Applies the single `clusters/<domain>/artifacts.yaml`: CRDs first (server-side apply + wait for Established), then the rest (server-side apply + a scoped wait for the manifest's own workloads to become ready). Run `lo build` first.
+
+Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects carrying that label — e.g. `lo deploy -l lok8s.dev/name=zitadel`. It requires you to have labelled the targets you want to address (kustomize `labels:` or `metadata.labels`); without a match it is a graceful no-op. The key may be a bare key or a namespaced one (`lok8s.dev/name`).
 
 | Flag | Description |
 |------|-------------|
-| `--filter` | Label filter (e.g. `type=system`), matches `lok8s.dev/<key>` labels |
+| `-l`, `--label` | Only deploy objects carrying this `key=value` label (opt-in selective deploy) |
 
 ### lo destroy
 

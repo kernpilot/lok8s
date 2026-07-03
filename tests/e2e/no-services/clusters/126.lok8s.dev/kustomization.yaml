@@ -1,0 +1,6 @@
+# Domain kustomization: composes this domain's targets into one artifact
+# (rendered by `lo build`/`lo env kustomization` -> clusters/<domain>/artifacts.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./targets/placeholder
