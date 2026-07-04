@@ -14,6 +14,10 @@ setup() {
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/lint"
+  # lint::bootstrap delegates entry resolution/parsing to bootstrap::_resolve_entries
+  # + bootstrap::_parse_entry (the same functions `lo bootstrap` uses), which the
+  # `lo` entrypoint loads before lint — source them here too.
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   # lint::secrets calls secrets::* helpers (check_unencrypted / check_flat_shadows),
   # which the `lo` entrypoint loads in production — source them here too.
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
@@ -121,6 +125,7 @@ _mock_yq_valid() {
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -147,9 +152,99 @@ _mock_yq_valid() {
   assert_output --partial "Missing cluster.lok8s.yaml or deploy.lok8s.yaml"
 }
 
-# Note: syncWave-validation tests were removed post-refactor. Bootstrap
-# validation (lint::bootstrap) resolves entries against the real
-# provider addons tree; tests mock .spec.bootstrap[]? to empty to skip.
+# Note: syncWave-validation tests were removed post-refactor. The mocked
+# schema/kustomization tests below return "true" for the `.spec | has("bootstrap")`
+# probe, so bootstrap::_resolve_entries honors the fixture's explicit
+# `bootstrap: []` (opt-out) and lint::bootstrap resolves nothing — those tests
+# don't exercise bootstrap. Real spec.bootstrap resolution (scalar + map form)
+# is covered by the real-yq tests immediately below.
+
+# --- lint tests: spec.bootstrap resolution (real yq) ---
+#
+# These call lint::bootstrap directly with REAL yq (no per-test mock) so the
+# shared bootstrap::_resolve_entries / _parse_entry path is exercised end to
+# end. Regression guard: the map form (`- ccm: {wait: true, dependsOn: [...]}`)
+# must NOT be shattered into bogus per-line addon names.
+
+# Regression: a map-form entry (wait/dependsOn/values) must resolve as ONE addon,
+# not shatter into per-line names. lint only checks the addon dir exists — the
+# semantics of wait/dependsOn/values are _parse_entry's job (bootstrap_test.bats).
+@test "lint::bootstrap accepts a map-form entry without shattering it" {
+  local domain_dir="${PATH_CLUSTERS}/mapform"
+  mkdir -p "${domain_dir}" \
+    "${PATH_LOK8S}/addons/cilium" \
+    "${PATH_LOK8S}/addons/cert-manager" \
+    "${PATH_LOK8S}/addons/ccm"
+  # ccm carries `values:`, which _parse_entry only permits on a chart addon
+  # (one with a chart.yaml) — the real ccm addon is exactly that.
+  cat > "${PATH_LOK8S}/addons/ccm/chart.yaml" <<'YAML'
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: ccm
+YAML
+
+  cat > "${domain_dir}/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: mapform
+spec:
+  bootstrap:
+    - cilium
+    - cert-manager
+    - ccm:
+        wait: true
+        dependsOn: [cert-manager]
+        values:
+          env:
+            ROBOT_ENABLED: { value: "true" }
+YAML
+
+  run lint::bootstrap "${domain_dir}" "${domain_dir}/cluster.lok8s.yaml"
+  assert_success
+  refute_output --partial "not found"
+}
+
+@test "lint::bootstrap rejects an unknown addon name" {
+  local domain_dir="${PATH_CLUSTERS}/badboot"
+  mkdir -p "${domain_dir}" "${PATH_LOK8S}/addons/cilium"
+
+  cat > "${domain_dir}/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: badboot
+spec:
+  bootstrap:
+    - cilium
+    - nonexistent-addon
+YAML
+
+  run lint::bootstrap "${domain_dir}" "${domain_dir}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "nonexistent-addon"
+  assert_output --partial "not found"
+}
+
+@test "lint::bootstrap rejects a malformed multi-key entry" {
+  local domain_dir="${PATH_CLUSTERS}/malformed"
+  mkdir -p "${domain_dir}" "${PATH_LOK8S}/addons/cilium"
+
+  cat > "${domain_dir}/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: malformed
+spec:
+  bootstrap:
+    - {ccm: {}, extra: {}}
+YAML
+
+  run lint::bootstrap "${domain_dir}" "${domain_dir}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "single-key map"
+}
 
 @test "lint passes for valid domain" {
   _mock_yq_valid
@@ -234,6 +329,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -262,6 +358,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -290,6 +387,7 @@ YAML
       '.metadata.name // ""') echo "" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -369,6 +467,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -405,6 +504,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *platform*)
@@ -445,6 +545,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *platform*)
@@ -487,6 +588,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
