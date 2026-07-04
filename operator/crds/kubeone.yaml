@@ -71,6 +71,36 @@ spec:
                       type: string
                       default: default
                       description: Default namespace
+                network:
+                  type: object
+                  # The driver reads podSubnet/serviceSubnet/cni/csi here; other network
+                  # knobs are preserved (mirrors the spec-level preserve-unknown policy).
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: |
+                    Cluster networking. The KubeOne bash driver is authoritative; only the
+                    pod/service CIDRs and the CNI/CSI selectors are enumerated here.
+                  properties:
+                    podSubnet:
+                      type: string
+                      description: Pod network CIDR (default 10.244.0.0/16).
+                    serviceSubnet:
+                      type: string
+                      description: Service network CIDR (default 10.96.0.0/12).
+                    cni:
+                      type: string
+                      description: CNI plugin (default canal; e.g. cilium, external).
+                    csi:
+                      type: string
+                      enum:
+                        - external
+                        - hetzner
+                      default: external
+                      description: |
+                        Provider CSI selector (mirrors cni). external (default) = lok8s owns
+                        storage (Ceph / its own CSI) and KubeOne's bundled hcloud CSI is
+                        shadowed and never deployed. hetzner = opt in to KubeOne's embedded
+                        hcloud CSI. BREAKING for pre-existing clusters that relied on the
+                        auto-deployed hcloud CSI — set csi: hetzner to keep it.
                 kubehz:
                   type: object
                   description: |
