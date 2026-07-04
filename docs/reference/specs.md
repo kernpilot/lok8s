@@ -34,7 +34,7 @@ spec:
   kubehz:                                 # kubehz platform integration (optional)
     hosting: self | hosted                # who runs the control plane
     access: none | registered | managed   # kubehz visibility
-    apiUrl: https://api.kubehz.dev        # required when hosting=hosted or access!=none
+    apiUrl: https://api.kubehz.cloud      # required when hosting=hosted or access!=none
 ```
 
 | Field | Required | Default | Description |
@@ -49,9 +49,12 @@ spec:
 | `spec.provider.configRef` | no | — | Provider config file path |
 | `spec.provider.config` | no | — | Inline provider config (mutually exclusive with configRef) |
 | `spec.bootstrap` | no | `[cilium]` | Ordered list of infra addons (default applied by framework bootstrap when omitted) |
-| `spec.kubehz.hosting` | no | `self` | Control plane hosting model |
-| `spec.kubehz.access` | no | `none` | kubehz platform access level |
-| `spec.kubehz.apiUrl` | conditional | — | kubehz API URL |
+| `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it) or `hosted` (kubehz runs it; with `kind: Lo` also requires `spec.runner`) |
+| `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
+| `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting: hosted` or `access != none`; must be HTTPS |
+
+See the [kubehz Platform guide](../guide/kubehz.md) for registration, claiming,
+and the heartbeat agent.
 
 ### Provider output (standard schema)
 

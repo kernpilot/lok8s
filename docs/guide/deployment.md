@@ -200,22 +200,12 @@ under `clusters/<domain>/`.
 
 When a cluster opts into kubehz dashboard visibility (`spec.kubehz.access` is set
 to `registered` or `managed`), `lo provision` registers it as **pending** and
-prints its SSH-key **MD5 fingerprint** — both to the provision log and, in the
-reusable workflow, to the GitHub job summary.
+prints its SSH-key **MD5 fingerprint**. You then claim the cluster in the
+dashboard with that fingerprint plus your own Hetzner Cloud token (used once as
+ownership proof, never stored) — no platform token is needed in CI.
 
-To attach the cluster to your account, open the dashboard **Claim** page and
-provide two things:
-
-1. that **MD5 fingerprint**, and
-2. **your own Hetzner Cloud token** — used once to prove you control the account
-   the cluster's SSH key lives in. It is never stored.
-
-No platform/API token is needed in CI: ownership is proven interactively at claim
-time, not at provision time. You can reproduce the fingerprint locally with:
-
-```bash
-ssh-keygen -E md5 -lf ~/.ssh/id_ed25519.pub
-```
+See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
+registration, claiming, the heartbeat agent, and troubleshooting.
 
 ## Destroy
 

@@ -73,6 +73,7 @@ export default defineConfig({
             { text: 'Security', link: '/guide/security' },
             { text: 'Backups', link: '/guide/backups' },
             { text: 'The Operator', link: '/guide/operator' },
+            { text: 'kubehz Platform', link: '/guide/kubehz' },
           ],
         },
       ],
