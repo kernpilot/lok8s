@@ -68,10 +68,21 @@ _install_fakes() {
   curl() {
     printf '%s\n' "$*" >> "${CURL_LOG}"
     local args="$*"
+    # Simulate a Robot HTTP error: `curl --fail` exits non-zero on 4xx/5xx, while
+    # a curl WITHOUT --fail exits 0 and hands back an error body (the pre-fix
+    # footgun). Honouring -f here proves the code actually passes --fail.
+    if [[ -n "${ROBOT_HTTP_ERROR:-}" ]]; then
+      [[ " ${args} " == *" -f "* ]] && return 22
+      echo '{"error":{"status":500,"code":"INTERNAL_ERROR"}}'; return 0
+    fi
     case "${args}" in
       *"/server"*)
         [[ "${ROBOT_UNREACHABLE:-0}" == 1 ]] && return 1
-        echo '[{"server":{"server_name":"worker-0","server_number":12345,"server_ip":"203.0.113.10"}}]' ;;
+        if [[ -n "${ROBOT_SERVER_JSON:-}" ]]; then
+          echo "${ROBOT_SERVER_JSON}"
+        else
+          echo '[{"server":{"server_name":"worker-0","server_number":12345,"server_ip":"203.0.113.10"}}]'
+        fi ;;
       *"/key"*)
         echo "[{\"key\":{\"fingerprint\":\"${ROBOT_REG_FP:-de:ad:be:ef}\"}}]" ;;
       *"/boot/"*"/rescue"*) [[ "${ROBOT_RESCUE_FAIL:-0}" == 1 ]] && return 1; return 0 ;;
@@ -229,6 +240,89 @@ JSON
   assert_output --partial "config not found"
 }
 
+@test "provider::rebuild resolves a Robot name collision BY IP and never touches the other box" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  # Two Robot servers share the free-text server_name "worker-0" but have
+  # different IPs. Only 203.0.113.10 matches the descriptor #external-ip.
+  export ROBOT_SERVER_JSON='[
+    {"server":{"server_name":"worker-0","server_number":99999,"server_ip":"198.51.100.99"}},
+    {"server":{"server_name":"worker-0","server_number":12345,"server_ip":"203.0.113.10"}}
+  ]'
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+
+  run cat "${CURL_LOG}"
+  # The IP-matching box (robot#12345) is the ONLY one rescued + reset.
+  assert_output --partial "/boot/12345/rescue"
+  assert_output --partial "/reset/12345"
+  # The name-colliding, non-matching box (robot#99999) is NEVER touched.
+  refute_output --partial "/boot/99999"
+  refute_output --partial "/reset/99999"
+}
+
+@test "provider::rebuild atomic preflight: an unresolvable node blocks ALL destructive calls" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  # worker-0's #external-ip (203.0.113.10) matches no Robot server → it can't be
+  # resolved. Preflight must abort BEFORE reimaging the (valid) cloud CP.
+  export ROBOT_SERVER_JSON='[{"server":{"server_name":"other","server_number":55555,"server_ip":"198.51.100.1"}}]'
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+
+  # Node 1 (cp-0) is NEVER reimaged — no partial recovery.
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  # Node 2 (worker-0) is NEVER rescued/reset either.
+  run cat "${CURL_LOG}"
+  refute_output --partial "/reset/"
+  refute_output --partial "/rescue"
+}
+
+@test "provider::rebuild aborts (no destructive call) when the Robot API errors" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  # A --fail curl exits non-zero on HTTP error → the IP resolution fails →
+  # preflight aborts. Without --fail the error would slip through as success.
+  export ROBOT_HTTP_ERROR=1
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  run cat "${CURL_LOG}"
+  refute_output --partial "/reset/"
+  refute_output --partial "/rescue"
+}
+
+@test "provider::rebuild rejects a hostile server name (shell/regex metachars) before acting" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  # A name with shell metacharacters must be refused by the name guard.
+  yq -i -o json '.server[0].name = "cp-0; reboot"' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "refusing suspicious server name"
+
+  # Nothing destructive was issued.
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  run cat "${CURL_LOG}"
+  refute_output --partial "/reset/"
+  refute_output --partial "/rescue"
+}
+
+@test "provider::rebuild fails a rebuild target with no resolvable IP (barrier can't verify it)" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  # Drop worker-0's #external-ip → it resolves to no inventory IP. A node
+  # scheduled for rebuild MUST have a resolvable IP, so this aborts non-zero
+  # instead of silently dropping it from the barrier's wait set.
+  yq -i -o json 'del(.server[1]["#external-ip"])' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "no resolvable public IP"
+
+  # Atomic: the cloud CP is not reimaged either.
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
 # ── provider::doctor ─────────────────────────────────────
 
 @test "provider::doctor warns (never dies) when credentials are missing" {
@@ -269,6 +363,18 @@ JSON
   assert_output --partial "set HROBOT_USER/HROBOT_PASSWORD to reset it automatically"
 }
 
+@test "provider::doctor distinguishes an errored Robot API from a missing key" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
+  # The Robot API returns an HTTP error for every call. --fail makes doctor treat
+  # it as unreachable — it must NOT report the rescue key as "not registered".
+  export ROBOT_HTTP_ERROR=1
+  run provider::doctor "${DESC}"
+  assert_success
+  assert_output --partial "Robot creds set but API not reachable"
+  assert_output --partial "cannot verify rescue key"
+  refute_output --partial "NOT registered in Robot"
+}
+
 @test "provider::doctor is strictly read-only (no destructive command)" {
   export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
   run provider::doctor "${DESC}"
@@ -281,6 +387,10 @@ JSON
   run cat "${CURL_LOG}"
   refute_output --partial "/reset/"
   refute_output --partial "/rescue"
+  # And NO Robot POST — every doctor Robot call is a GET (no -d / --data).
+  refute_output --partial "--data"
+  refute_output --partial "-d os"
+  refute_output --partial "-d type"
   run cat "${SSH_LOG}"
   refute_output --partial "blkdiscard"
   refute_output --partial "installimage -a"

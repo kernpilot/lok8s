@@ -215,11 +215,15 @@ node→cloud-subnet traffic fails immediately after, then works. Don't conclude
 diagnosis (it never changes anything and never fails the command) covering:
 
 - hcloud token present + API reachable; Robot creds present + API reachable
+  (a Robot API error is reported as **unreachable**, never mistaken for a
+  missing key)
 - the **rescue SSH key** is registered in Robot — without it a bare-metal
   reinstall would lock you out (the report tells you to add it)
 - per node: resolvable/reachable, and for each bare-metal node whether it is
   **installed** or **in rescue**
-- inventory sanity (control-plane count, worker resolvable in Robot)
+- inventory sanity (control-plane count; each worker resolves to exactly one
+  Robot server **by its IP** — the Robot `server_name` is free-text and
+  non-unique, so it is never used to identify a machine)
 
 Each not-ready item comes with actionable advice, e.g. *"worker X is installed,
 not in rescue — set `HROBOT_USER`/`HROBOT_PASSWORD` to reset it automatically,
@@ -235,6 +239,12 @@ them (IPs, network, and load-balancer are preserved). This is the optional
 [`#wipe-devices`](#ceph-osds-on-bare-metal-force-gpt), applied during
 `lo provision`). It is DESTRUCTIVE and drives the recovery flow, so it is
 invoked with explicit consent — not on its own.
+
+It resolves and validates **every** declared node up front — cloud VMs must
+match exactly one server carrying the cluster label; bare-metal nodes exactly
+one Robot server whose IP equals the descriptor `#external-ip` — and aborts
+touching *nothing* if any node fails that preflight, so a name collision or a
+partial descriptor can never reimage the wrong (or only some of the) machines.
 :::
 
 ## Logging

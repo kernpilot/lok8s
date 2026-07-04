@@ -13,6 +13,16 @@ import ^utils/verbose
 : "${CLOUD_DRY_RUN_PATH:=""}"
 # Hetzner Robot (dedicated servers) REST API base. Overridable for tests.
 : "${HROBOT_API:=https://robot-ws.your-server.de}"
+# Robot REST API timeouts (seconds). Every Robot curl is `--fail` + timed out so
+# an HTTP 4xx/5xx or a hang can never read as success. The rescue/reset/lookup
+# path uses the longer pair; doctor uses the shorter *_DOCTOR_* pair to stay fast.
+: "${HROBOT_CONNECT_TIMEOUT:=10}"
+: "${HROBOT_MAX_TIME:=30}"
+: "${HROBOT_DOCTOR_CONNECT_TIMEOUT:=5}"
+: "${HROBOT_DOCTOR_MAX_TIME:=8}"
+# Marker that exists ONLY inside Hetzner's rescue system — the single source of
+# truth for the read-only rescue-vs-installed SSH probe (rebuild barrier + doctor).
+_HETZNER_RESCUE_MARKER="/root/.oldroot/nfs/install/installimage"
 
 _HETZNER_DIR="${BASH_SOURCE[0]%/*}"
 # shellcheck source=utils/json.sh
@@ -83,35 +93,15 @@ provider::provision() {
     source "${_cc_script}"
   fi
 
-  # Set up cloud-init environment from config
-  local _ci_path _ci_modules
-  _ci_path=$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")
+  # Set up cloud-init environment from config. The CLOUD_PATH / CLOUD_PATH_LIB /
+  # CLOUD_USER / CLOUD_GROUP / CLOUD_PATH_PUB resolution is shared with
+  # provider::rebuild (one helper, so the two can't drift). CLOUD_PATHD is
+  # provision-specific: the whole-cluster module set from .cloudInit.modules
+  # (rebuild overrides CLOUD_PATHD per server from each server's #cloud.d).
+  hetzner::_export_cloudinit_env "${config_file}"
+  local _ci_modules
   _ci_modules=$(_cfg '.cloudInit.modules // ""' 2>/dev/null || echo "")
-
-  # Resolve relative path from the config file's directory
-  if [[ -n "${_ci_path}" ]] && [[ "${_ci_path}" != /* ]]; then
-    _ci_path="$(dirname "${config_file}")/${_ci_path}"
-  fi
-  # Fall back to built-in default
-  if [[ -z "${_ci_path}" ]] || [[ ! -d "${_ci_path}" ]]; then
-    _ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
-  fi
-
-  export CLOUD_PATH="${_ci_path}"
-  # Framework module library: even with a custom cloudInit.path, cloud.d modules
-  # resolve against the framework's shipped modules (ceph-osd, ...) as a fallback,
-  # so clusters compose them without copying (see cloud-config::paths). No-op when
-  # CLOUD_PATH already IS the built-in default.
-  export CLOUD_PATH_LIB="${PATH_LOK8S}/providers/hetzner/cloud-init"
   export CLOUD_PATHD="${_ci_modules}"
-  local _ci_user _ci_group _ci_pub
-  _ci_user=$(_cfg '.cloudInit.user // "root"' 2>/dev/null || echo "root")
-  _ci_group=$(_cfg '.cloudInit.group // "root"' 2>/dev/null || echo "root")
-  _ci_pub=$(_cfg '.cloudInit.sshPubPath // ""' 2>/dev/null || echo "")
-  export CLOUD_USER="${_ci_user}"
-  export CLOUD_GROUP="${_ci_group}"
-  export CLOUD_PATH_PUB="${_ci_pub:-${HOME}/.ssh}"
-  CLOUD_PATH_PUB="${CLOUD_PATH_PUB/#\~/${HOME}}"
 
   # Load the descriptor (JSON or YAML → JSON)
   CLOUD_HETZNER_JSON="$(envsubst < "${config_file}")"
@@ -348,18 +338,26 @@ provider::rebuild() {
     desc="$(yq -o json '.' "${config_file}")"
   fi
 
+  # Cluster label — the scope EVERY destructive call is confined to, exactly as
+  # provider::destroy / provider::output do. No cluster_name → refuse to act.
+  local cluster_name selector
+  cluster_name="$(echo "${desc}" | jq -r '.cluster_name // ""')"
+  [[ -n "${cluster_name}" ]] || {
+    error "rebuild: descriptor has no cluster_name — refusing to act"; return 1; }
+  selector="lok8s.dev/cluster=${cluster_name}"
+
   # Resolved inventory (descriptor + live cloud state) → per-node public IPs.
   local inv
   inv="$(provider::output "${config_file}")" || {
     error "rebuild: could not resolve inventory (provider::output failed)"; return 1; }
 
-  # Cloud-init generation environment (mirror provider::provision).
+  # Cloud-init generation environment (shared with provider::provision).
   local _cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
   [[ ! -f "${_cc_script}" ]] || {
     # shellcheck source=/dev/null
     source "${_cc_script}"
   }
-  hetzner::_rebuild_cloudinit_env "${config_file}"
+  hetzner::_export_cloudinit_env "${config_file}"
 
   # Readiness-barrier SSH command (identity from the descriptor).
   local _ssh_key
@@ -371,69 +369,93 @@ provider::rebuild() {
                  -o LogLevel=ERROR)
   [[ -z "${_ssh_key}" ]] || _ssh+=(-i "${_ssh_key}")
 
-  # Rescue-key fingerprint (bare-metal only) — derived from the descriptor
-  # public key unless explicitly overridden.
+  # Rescue-key fingerprint (bare-metal only) — from the descriptor public key
+  # unless explicitly overridden. Derived once, reused for every worker.
   local _fp="${PROVIDER_ROBOT_RESCUE_FP:-}"
 
-  local rc=0
-  local -a cloud_ips=() metal_ips=()
   local count
   count="$(echo "${desc}" | jq '(.server // []) | length')"
 
-  local idx server name is_root pub image cloud_d ci num
+  # ── Phase 1 — ATOMIC PREFLIGHT (read-only) ──────────────────────────────
+  # Resolve and validate EVERY node before touching anything: name sanity, a
+  # resolvable public IP, and the destructive target itself — cloud VMs must
+  # resolve to exactly one server carrying the cluster label; bare-metal nodes
+  # to exactly one Robot server whose IP equals the descriptor #external-ip
+  # (NOT its non-unique free-text server_name). Any failure aborts here with
+  # NOTHING reimaged/reset — no partial recovery, no acting on a foreign box.
+  local -a plan=() cloud_ips=() metal_ips=()
+  local idx server name is_root pub image cloud_d ci num ext_ip
   for (( idx=0; idx<count; idx++ )); do
     server="$(echo "${desc}" | jq -c ".server[${idx}]")"
     name="$(echo "${server}" | jq -r '.name // ""')"
-    [[ -n "${name}" ]] || { warn "rebuild: server[${idx}] has no name — skipping"; continue; }
+    [[ -n "${name}" ]] || { error "rebuild: server[${idx}] has no name — aborting"; return 1; }
     # Defense in depth: only ever act on plausible resource names.
     [[ "${name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
-      error "rebuild: refusing suspicious server name '${name}'"; rc=1; continue; }
+      error "rebuild: refusing suspicious server name '${name}'"; return 1; }
     is_root="$(echo "${server}" | jq -r '.["#cloud.root"] // ""')"
     pub="$(echo "${inv}" | jq -r --arg n "${name}" '.nodes[] | select(.name==$n) | .public_ip // empty')"
+    # A node scheduled for rebuild MUST have a resolvable IP — else the barrier
+    # can't confirm it reached its target state (it would be silently skipped
+    # from the wait set), so we refuse rather than under-verify.
+    [[ -n "${pub}" ]] || {
+      error "rebuild: node '${name}' has no resolvable public IP in the inventory — aborting (touch nothing)"; return 1; }
 
     if [[ "${is_root}" == "true" ]]; then
-      # ── Bare-metal: Robot rescue + hardware reset ──
+      # ── Bare-metal: resolve to exactly ONE Robot server BY IP ──
       if [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
-        error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"
-        rc=1; continue
+        error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"; return 1
       fi
       if [[ -z "${_fp}" ]]; then
         _fp="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || _fp=""
       fi
-      if [[ -z "${_fp}" ]]; then
-        error "rebuild: cannot determine rescue key fingerprint for '${name}' (descriptor .sshPublicKey unreadable; set PROVIDER_ROBOT_RESCUE_FP)"
-        rc=1; continue
-      fi
-      num="$(hetzner::_robot_server_number "${name}")"
-      if [[ -z "${num}" ]]; then
-        error "rebuild: bare-metal node '${name}' not found in Robot"
-        rc=1; continue
-      fi
-      _hetzner_print "🔧 rescue+reset \033[1m${name}\033[0m (robot#${num})"
-      hetzner::_robot_rescue "${num}" "${_fp}" || { rc=1; continue; }
-      hetzner::_robot_reset  "${num}"          || { rc=1; continue; }
-      [[ -z "${pub}" ]] || metal_ips+=("${pub}")
+      [[ -n "${_fp}" ]] || {
+        error "rebuild: cannot determine rescue key fingerprint for '${name}' (descriptor .sshPublicKey unreadable; set PROVIDER_ROBOT_RESCUE_FP)"; return 1; }
+      ext_ip="$(echo "${server}" | jq -r '.["#external-ip"] // ""')"
+      [[ -n "${ext_ip}" ]] || {
+        error "rebuild: bare-metal node '${name}' has no #external-ip — cannot resolve it in Robot by IP"; return 1; }
+      num="$(hetzner::_robot_server_number_by_ip "${ext_ip}")" || num=""
+      [[ -n "${num}" ]] || {
+        error "rebuild: bare-metal node '${name}' (${ext_ip}) did not resolve to exactly one Robot server by IP — refusing to rescue/reset (name/IP collision, no match, or Robot API error)"; return 1; }
+      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${_fp}")
+      metal_ips+=("${pub}")
     else
-      # ── Cloud VM: reimage in place with fresh cloud-init ──
+      # ── Cloud VM: name must uniquely carry the cluster label ──
+      hetzner::_cloud_server_unique_labeled "${name}" "${selector}" || {
+        error "rebuild: cloud node '${name}' does not resolve to exactly one server carrying ${selector} — refusing to reimage"; return 1; }
       image="$(echo "${server}" | jq -r '.image // "ubuntu-24.04"')"
       cloud_d="$(echo "${server}" | jq -r '.["#cloud.d"] // ""')"
-      export CLOUD_PATHD="${cloud_d}"
+      declare -F cloud-config::generate &>/dev/null || {
+        error "rebuild: cloud-config generator unavailable"; return 1; }
       ci="${work_dir}/rebuild-${name}.cloud-init.yaml"
-      if ! declare -F cloud-config::generate &>/dev/null; then
-        error "rebuild: cloud-config generator unavailable"; rc=1; continue
-      fi
-      if ! cloud-config::generate > "${ci}" 2>>"${CLOUD_LOG_FILE}"; then
-        error "rebuild: cloud-init generation failed for '${name}'"; rc=1; continue
-      fi
-      _hetzner_print "📦 rebuild \033[1m${name}\033[0m (image ${image})"
-      if ! hcloud server rebuild "${name}" --image "${image}" --user-data-from-file "${ci}"; then
-        error "rebuild: 'hcloud server rebuild ${name}' failed"; rc=1; continue
-      fi
-      [[ -z "${pub}" ]] || cloud_ips+=("${pub}")
+      export CLOUD_PATHD="${cloud_d}"
+      cloud-config::generate > "${ci}" 2>>"${CLOUD_LOG_FILE}" || {
+        error "rebuild: cloud-init generation failed for '${name}'"; return 1; }
+      plan+=("cloud"$'\t'"${name}"$'\t'"${image}"$'\t'"${ci}")
+      cloud_ips+=("${pub}")
     fi
   done
 
-  # Barrier: all cloud VMs cloud-init-done AND all bare-metal in rescue.
+  if (( ${#plan[@]} == 0 )); then
+    warn "rebuild: descriptor declares no servers — nothing to do"
+    return 0
+  fi
+
+  # ── Phase 2 — EXECUTE (destructive). Preflight validated ALL nodes. ─────
+  local rc=0 entry kind pname pa pb
+  for entry in "${plan[@]}"; do
+    IFS=$'\t' read -r kind pname pa pb <<<"${entry}"
+    if [[ "${kind}" == "metal" ]]; then
+      _hetzner_print "🔧 rescue+reset \033[1m${pname}\033[0m (robot#${pa})"
+      hetzner::_robot_rescue "${pa}" "${pb}" || { rc=1; continue; }
+      hetzner::_robot_reset  "${pa}"         || { rc=1; continue; }
+    else
+      _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (image ${pa})"
+      hcloud server rebuild "${pname}" --image "${pa}" --user-data-from-file "${pb}" || {
+        error "rebuild: 'hcloud server rebuild ${pname}' failed"; rc=1; continue; }
+    fi
+  done
+
+  # ── Phase 3 — Barrier: all cloud VMs cloud-init-done AND all workers in rescue.
   hetzner::_rebuild_barrier _ssh cloud_ips metal_ips || rc=1
 
   (( rc != 0 )) || _hetzner_print \
@@ -441,11 +463,14 @@ provider::rebuild() {
   return "${rc}"
 }
 
-# hetzner::_rebuild_cloudinit_env <config_file>
-# Export the CLOUD_* generation environment (same resolution as
-# provider::provision) so cloud-config::generate produces the user-data a
-# fresh provision would.
-hetzner::_rebuild_cloudinit_env() {
+# hetzner::_export_cloudinit_env <config_file>
+# Export the shared CLOUD_* generation environment (CLOUD_PATH / CLOUD_PATH_LIB /
+# CLOUD_USER / CLOUD_GROUP / CLOUD_PATH_PUB) so cloud-config::generate produces
+# the same user-data a fresh provision would. The single source of truth for
+# both provider::provision and provider::rebuild (they can't drift). CLOUD_PATHD
+# is intentionally NOT set here — each caller owns it (provision: whole-cluster
+# .cloudInit.modules; rebuild: per-server #cloud.d).
+hetzner::_export_cloudinit_env() {
   local config_file="$1"
   local _ci_path _ci_user _ci_group _ci_pub
   _ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
@@ -485,7 +510,7 @@ hetzner::_rebuild_barrier() {
     metal_ready=0
     for (( j=0; j<nm; j++ )); do
       "${_sshref[@]}" "root@${_metalref[j]}" \
-        'test -x /root/.oldroot/nfs/install/installimage' 2>/dev/null && metal_ready=$((metal_ready+1))
+        "test -x ${_HETZNER_RESCUE_MARKER}" 2>/dev/null && metal_ready=$((metal_ready+1))
     done
     _hetzner_log "barrier: cloud_ready=${cloud_ready}/${nc} metal_ready=${metal_ready}/${nm}"
     [[ "${cloud_ready}" -eq "${nc}" && "${metal_ready}" -eq "${nm}" ]] && return 0
@@ -507,17 +532,44 @@ hetzner::_rescue_fingerprint() {
     | grep -oE 'MD5:[0-9a-f:]+' | sed 's/^MD5://' | head -1
 }
 
-# hetzner::_robot_server_number <server_name> → Robot server_number (or empty)
-hetzner::_robot_server_number() {
-  local name="$1"
-  curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" 2>/dev/null \
-    | jq -r --arg n "${name}" '.[].server | select(.server_name==$n) | .server_number' 2>/dev/null | head -1
+# hetzner::_robot_server_number_by_ip <ip> [connect_timeout] [max_time]
+#   → Robot server_number for the UNIQUE server whose main IP == <ip>.
+# Robot's server_name is free-text and NOT unique, so we never match on it for a
+# destructive action (a name collision would rescue+reset the wrong bare-metal
+# box). Match on server_ip instead and print a number ONLY when EXACTLY ONE
+# server matches; empty + non-zero on zero/multiple matches or any API error
+# (`--fail` + timeouts so an HTTP 4xx/5xx / hang can't read as a hit).
+hetzner::_robot_server_number_by_ip() {
+  local ip="${1:-}"
+  local ct="${2:-${HROBOT_CONNECT_TIMEOUT}}" mt="${3:-${HROBOT_MAX_TIME}}"
+  [[ -n "${ip}" ]] || return 1
+  local json matches count
+  json="$(curl -f -sS --connect-timeout "${ct}" --max-time "${mt}" \
+            -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" 2>/dev/null)" || return 1
+  matches="$(echo "${json}" | jq -c --arg ip "${ip}" \
+              '[.[].server | select(.server_ip==$ip)]' 2>/dev/null)" || return 1
+  count="$(echo "${matches}" | jq 'length' 2>/dev/null || echo 0)"
+  [[ "${count}" == "1" ]] || return 1
+  echo "${matches}" | jq -r '.[0].server_number'
+}
+
+# hetzner::_cloud_server_unique_labeled <name> <selector>
+# Succeed only if EXACTLY ONE hcloud server named <name> carries the cluster
+# label — the same scoping destroy/output use — so a rebuild can never reimage a
+# name collision, a stale, or a foreign (unlabeled) server.
+hetzner::_cloud_server_unique_labeled() {
+  local name="${1:-}" selector="${2:-}" n
+  [[ -n "${name}" && -n "${selector}" ]] || return 1
+  n="$(hcloud server list -o json -l "${selector}" 2>/dev/null \
+        | jq --arg n "${name}" '[.[] | select(.name==$n)] | length' 2>/dev/null || echo 0)"
+  [[ "${n}" == "1" ]]
 }
 
 # hetzner::_robot_rescue <number> <key_fingerprint>
 hetzner::_robot_rescue() {
   local num="$1" fp="$2"
-  curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
+  curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
+    -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
     -d os=linux --data-urlencode "authorized_key=${fp}" >/dev/null 2>&1 \
     || { error "rebuild: rescue activation failed for robot#${num}"; return 1; }
 }
@@ -525,7 +577,8 @@ hetzner::_robot_rescue() {
 # hetzner::_robot_reset <number>  — hardware reset
 hetzner::_robot_reset() {
   local num="$1"
-  curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/reset/${num}" \
+  curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
+    -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/reset/${num}" \
     -d type=hw >/dev/null 2>&1 \
     || { error "rebuild: hardware reset failed for robot#${num}"; return 1; }
 }
@@ -573,11 +626,15 @@ hetzner::_doctor_checks() {
     printf 'warn\tno hcloud credentials — export HCLOUD_TOKEN or run: hcloud context create <name>\n'
   fi
 
-  # 2) Robot credentials + API reachability.
-  local _have_robot=0
+  # 2) Robot credentials + API reachability. _robot_api_ok lets later checks
+  #    distinguish "API unreachable/errored" from a genuine negative result
+  #    (e.g. key not registered) instead of conflating the two.
+  local _have_robot=0 _robot_api_ok=0
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
     _have_robot=1
-    if curl -sf -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" >/dev/null 2>&1; then
+    if curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+         -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" >/dev/null 2>&1; then
+      _robot_api_ok=1
       printf 'ok\tRobot API reachable\n'
     else
       printf 'warn\tRobot creds set but API not reachable — verify HROBOT_USER/HROBOT_PASSWORD\n'
@@ -596,16 +653,29 @@ hetzner::_doctor_checks() {
   metal_count="$(echo "${desc}" | jq '[(.server // [])[] | select(.["#cloud.root"]=="true")] | length' 2>/dev/null || echo 0)"
 
   # 3) Rescue SSH key registered in Robot (only with bare-metal + Robot creds).
+  #    Distinguish "API errored" from "key not registered" — never report the
+  #    key missing when the /key call itself failed.
   if [[ "${metal_count}" =~ ^[0-9]+$ ]] && (( metal_count > 0 )) && (( _have_robot )); then
-    local _fp
-    _fp="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
-    if [[ -z "${_fp}" ]]; then
-      printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
-    elif curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null \
-           | jq -r '.[].key.fingerprint' 2>/dev/null | grep -qiF "${_fp}"; then
-      printf 'ok\trescue SSH key registered in Robot (%s)\n' "${_fp}"
+    if (( ! _robot_api_ok )); then
+      printf 'warn\tcannot verify rescue key — Robot API unreachable (see above); a missing rescue key would lock out a worker reinstall\n'
     else
-      printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${_fp}"
+      local _fp
+      _fp="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
+      if [[ -z "${_fp}" ]]; then
+        printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
+      else
+        local _keys
+        if _keys="$(curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+                      -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null)"; then
+          if printf '%s' "${_keys}" | jq -r '.[].key.fingerprint' 2>/dev/null | grep -qiF "${_fp}"; then
+            printf 'ok\trescue SSH key registered in Robot (%s)\n' "${_fp}"
+          else
+            printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${_fp}"
+          fi
+        else
+          printf 'warn\tcannot verify rescue key — Robot /key API errored (%s NOT confirmed registered); retry or check Robot creds/network\n' "${_fp}"
+        fi
+      fi
     fi
   fi
 
@@ -630,7 +700,7 @@ hetzner::_doctor_checks() {
   [[ -z "${_key}" ]] || _ssh+=(-i "${_key}")
 
   # 5) Per-node: existence/reachability + bare-metal installed-vs-rescue.
-  local scount idx server name is_root pub num
+  local scount idx server name is_root pub num ext_ip
   scount="$(echo "${desc}" | jq '(.server // []) | length' 2>/dev/null || echo 0)"
   for (( idx=0; idx<scount; idx++ )); do
     server="$(echo "${desc}" | jq -c ".server[${idx}]")"
@@ -639,18 +709,22 @@ hetzner::_doctor_checks() {
     is_root="$(echo "${server}" | jq -r '.["#cloud.root"] // ""')"
     pub="$(echo "${inv}" | jq -r --arg n "${name}" '.nodes[] | select(.name==$n) | .public_ip // empty')"
     if [[ "${is_root}" == "true" ]]; then
-      if (( _have_robot )); then
-        num="$(hetzner::_robot_server_number "${name}" 2>/dev/null)"
-        if [[ -n "${num}" ]]; then
-          printf 'ok\tworker %s resolvable in Robot (robot#%s)\n' "${name}" "${num}"
-        else
-          printf 'warn\tworker %s NOT found in Robot — check the descriptor name matches the Robot server_name\n' "${name}"
-        fi
-      else
+      if (( ! _have_robot )); then
         printf 'warn\tworker %s: cannot check Robot state (no Robot creds)\n' "${name}"
+      elif (( ! _robot_api_ok )); then
+        printf 'warn\tworker %s: cannot check Robot state (Robot API unreachable)\n' "${name}"
+      else
+        # Resolve BY IP (like the destructive path), never by non-unique name.
+        ext_ip="$(echo "${server}" | jq -r '.["#external-ip"] // ""')"
+        num="$(hetzner::_robot_server_number_by_ip "${ext_ip}" "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" "${HROBOT_DOCTOR_MAX_TIME}" 2>/dev/null || echo "")"
+        if [[ -n "${num}" ]]; then
+          printf 'ok\tworker %s resolvable in Robot (robot#%s, by IP %s)\n' "${name}" "${num}" "${ext_ip}"
+        else
+          printf 'warn\tworker %s did NOT uniquely resolve in Robot by IP (%s) — check the Robot server IP matches the descriptor #external-ip\n' "${name}" "${ext_ip:-unset}"
+        fi
       fi
       if [[ -n "${pub}" ]]; then
-        if "${_ssh[@]}" "root@${pub}" 'test -x /root/.oldroot/nfs/install/installimage' 2>/dev/null; then
+        if "${_ssh[@]}" "root@${pub}" "test -x ${_HETZNER_RESCUE_MARKER}" 2>/dev/null; then
           printf 'ok\tworker %s is in rescue (ready for reinstall)\n' "${name}"
         elif "${_ssh[@]}" "root@${pub}" 'true' 2>/dev/null; then
           printf 'warn\tworker %s is installed, not in rescue — set HROBOT_USER/HROBOT_PASSWORD to reset it automatically (provider::rebuild), or activate rescue via the Robot console\n' "${name}"
