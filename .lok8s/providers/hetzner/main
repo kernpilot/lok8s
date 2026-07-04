@@ -207,7 +207,9 @@ provider::output() {
   # Check for bare metal servers with different access
   if [[ -f "${config_file}" ]]; then
     local _desc
-    _desc=$(cat "${config_file}")
+    # Normalize to JSON (yq reads JSON too) so bare-metal extraction works for a
+    # YAML descriptor, matching how _cfg/desc are resolved elsewhere.
+    _desc=$(yq -o json '.' "${config_file}")
     local _has_root
     _has_root=$(echo "${_desc}" | jq '[.server[]? | select(.["#cloud.root"] == "true")] | length')
     if (( _has_root > 0 )); then
@@ -243,7 +245,7 @@ provider::output() {
   # Bare metal servers from JSON descriptor (#cloud.root with #external-ip)
   if [[ -f "${config_file}" ]]; then
     local _desc
-    _desc="${_desc:-$(cat "${config_file}")}"
+    _desc="${_desc:-$(yq -o json '.' "${config_file}")}"
     while IFS= read -r server; do
       [[ -n "${server}" ]] || continue
       local name pub_ip priv_ip labels role group
