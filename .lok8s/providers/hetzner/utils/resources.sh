@@ -93,15 +93,18 @@ hetzner::wipe-devices::script() {
   # Header + rationale. FULL-disk discard (NOT head-only): Ceph bluestore
   # writes redundant bdev-label copies at size-scaled offsets ACROSS the whole
   # disk; a head-only wipe (sgdisk/wipefs) leaves the far copies, so a
-  # freshly-prepared OSD then asserts _check_main_bdev_label N!=M (kin to
-  # rook/rook#17716). We blkdiscard the entire device; dd-zero is the fallback
-  # when the device rejects discard.
+  # freshly-prepared OSD then asserts _check_main_bdev_label N!=M (akin to
+  # rook/rook#17716). We blkdiscard the ENTIRE device; if a device rejects
+  # discard we ABORT — there is NO partial fallback (a head-only dd-zero would
+  # leave those far copies behind and still emit the success sentinel: a silent
+  # false-green). A device is either fully discarded or the install aborts loud.
   cat <<'WIPE_HEADER'
 set -euo pipefail
-# lok8s #wipe-devices — FULL-disk wipe on a fresh (rescue-mode) install.
-# Full discard, not head-only: Ceph bluestore writes redundant bdev-label
-# copies across the whole disk; a head wipe leaves the far copies and a fresh
-# OSD then asserts _check_main_bdev_label N!=M (kin to rook/rook#17716).
+# lok8s #wipe-devices — full-device blkdiscard on a fresh (rescue-mode) install.
+# Full discard, not head-only: Ceph bluestore writes redundant bdev-label copies
+# across the whole disk; a head wipe leaves the far copies and a fresh OSD then
+# asserts _check_main_bdev_label N!=M (akin to rook/rook#17716). If a device does
+# NOT support blkdiscard the install ABORTS — never a partial wipe.
 WIPE_HEADER
 
   if [[ "${_type}" == "boolean" ]]; then
@@ -112,7 +115,7 @@ lsblk -dn -o NAME,TYPE | while read -r _name _dtype; do
   _dev="/dev/${_name}"
   [ -b "${_dev}" ] || { echo "ABORT: ${_dev} not a block device"; exit 1; }
   echo "lok8s: wipe ${_dev}"
-  blkdiscard -f "${_dev}" || dd if=/dev/zero of="${_dev}" bs=1M count=8192
+  blkdiscard -f "${_dev}" || { echo "ABORT: ${_dev} does not support blkdiscard — refusing a partial wipe that could leave stale on-disk state (e.g. Ceph BlueStore labels). Wipe it manually in rescue, or remove it from #wipe-devices."; exit 1; }
   wipefs -a "${_dev}" || true
 done
 WIPE_ALL
@@ -177,10 +180,10 @@ WIPE_ALL
         printf '[ "$_id_ok" = 1 ] || { echo "ABORT: %s identity mismatch (id)"; exit 1; }\n' "${_target}"
       fi
       printf 'echo "lok8s: wipe %s"\n' "${_target}"
-      # block-device assert: never dd/blkdiscard a target that is not a real
+      # block-device assert: never blkdiscard a target that is not a real
       # block special file (a mistyped/renamed by-id path must fail closed).
       printf '[ -b "%s" ] || { echo "ABORT: %s not a block device"; exit 1; }\n' "${_target}" "${_target}"
-      printf 'blkdiscard -f "%s" || dd if=/dev/zero of="%s" bs=1M count=8192\n' "${_target}" "${_target}"
+      printf 'blkdiscard -f "%s" || { echo "ABORT: %s does not support blkdiscard — refusing a partial wipe that could leave stale on-disk state (e.g. Ceph BlueStore labels). Wipe it manually in rescue, or remove it from #wipe-devices."; exit 1; }\n' "${_target}" "${_target}"
       printf 'wipefs -a "%s" || true\n' "${_target}"
     done < <(jq -c '.[]' <<<"${wipe_json}")
   fi

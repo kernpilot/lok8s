@@ -170,17 +170,30 @@ no separate command to run.
 
 ### Rescue-mode gating — a live node is never touched
 
-The wipe is gated **solely** on the server being in Hetzner **rescue mode**
-(RAM-booted, before `installimage` runs). This is the same fresh-install gate
-described in [Subsequent runs](#subsequent-runs): a server that is **not** in
-rescue mode (already installed and running) is never reached by this code path,
-so its disks are never touched. Wiping in rescue mode is safe — nothing on the
-target disks is in use yet, and `installimage` reinstalls the OS disk right
-afterwards.
+The wipe is gated on **two** conditions, both of which must hold: the server is
+in Hetzner **rescue mode** (RAM-booted, before `installimage` runs) **and** an
+`#installimage` config is actually present, so the OS disk **will** be
+reinstalled immediately afterwards. This co-gate means a wipe can never run
+unless a fresh install is about to follow — a rescue node with no installimage
+config is left untouched, exactly like an already-installed one. This is the
+same fresh-install gate described in [Subsequent runs](#subsequent-runs): a
+server that is **not** in rescue mode (already installed and running) is never
+reached by this code path, so its disks are never touched. Wiping in rescue mode
+is safe — nothing on the target disks is in use yet, and `installimage`
+reinstalls the OS disk right afterwards.
 
 If a declared device fails its identity check (below), the wipe **aborts the
 install** with a non-zero status and touches nothing — the framework fails
 loudly rather than installing over disks it could not positively identify.
+
+::: warning A mid-wipe abort can leave a node partially wiped
+The guards run per device, in order, so if wiping several devices aborts partway
+(e.g. an unexpected device fails its identity check after an earlier one was
+already discarded), the node may be left **partially wiped**. This is loud — the
+install stops with a non-zero status — and recoverable: fix the offending
+descriptor entry and re-run `lo provision` (the node is still in rescue mode, so
+the wipe simply runs again from the top).
+:::
 
 ### Two forms
 
@@ -220,6 +233,20 @@ Each entry:
 | `model` | *Sanity guard.* Assert udev `ID_MODEL` equals this **before** wiping. |
 | `id` | *Sanity guard.* Assert a stable id — udev `ID_SERIAL` or `ID_WWN`, or a `/dev/disk/by-id/<id>` match — equals this before wiping. |
 
+::: warning `model` must be the exact udev `ID_MODEL`, not the marketing name
+The guard is a **whole-line exact** match against udev's `ID_MODEL` property,
+which is device-dependent — some device classes replace spaces with
+underscores. Read the exact string off the target node (in rescue mode) rather
+than copying a datasheet name:
+
+```bash
+udevadm info --query=property --name=/dev/nvme1n1 | grep ID_MODEL=
+```
+
+Use the value **after** the `=` verbatim. The example above (`SAMSUNG
+MZQL21T9HCJR-00A07`) is illustrative; the exact form on your hardware may differ.
+:::
+
 `model` and `id` are optional guards. When present, they must match: **any
 declared mismatch aborts the install** and wipes nothing. This is the
 recommended form for nodes where you must not risk erasing the wrong drive —
@@ -233,14 +260,19 @@ the safe default.
 
 ### Why a full wipe, not just the partition table
 
-The wipe uses `blkdiscard` across the **entire** device (falling back to
-zeroing with `dd` if the device rejects discard), not a head-only
+The wipe uses `blkdiscard` across the **entire** device, not a head-only
 `wipefs`/`sgdisk`. Ceph's BlueStore writes redundant block-device labels at
 size-scaled offsets **across the whole disk**; a head-only wipe leaves the far
 copies behind, and a freshly-prepared OSD then trips a
-`_check_main_bdev_label` mismatch (kin to
+`_check_main_bdev_label` mismatch (akin to
 [rook/rook#17716](https://github.com/rook/rook/issues/17716)). Discarding the
 full device avoids that class of "the disk looks half-initialised" failure.
+
+There is **no partial fallback**: if a device does not support discard, the
+install **aborts** rather than falling back to a bounded `dd` zero-fill. A
+head-or-first-few-GiB zero would leave those far-offset labels intact yet still
+report success — a silent false-green. So a device is either fully discarded or
+the install stops loudly.
 
 ## vSwitch networking
 

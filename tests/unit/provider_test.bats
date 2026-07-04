@@ -325,9 +325,22 @@ SCRIPT
   assert_success
   assert_output --partial "lsblk -dn -o NAME,TYPE"
   assert_output --partial 'blkdiscard -f "${_dev}"'
-  assert_output --partial "dd if=/dev/zero"
   assert_output --partial "wipefs -a"
   assert_output --partial "__LOK8S_WIPE_DONE__"
+}
+
+@test "wipe-devices::script has NO dd partial-wipe fallback (abort instead)" {
+  # a device that rejects blkdiscard must ABORT, never partially dd-zero —
+  # a bounded dd would leave far-offset Ceph BlueStore labels + false-green.
+  run hetzner::wipe-devices::script 'true'
+  assert_success
+  refute_output --partial "dd if=/dev/zero"
+  assert_output --partial "does not support blkdiscard"
+
+  run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1"}]'
+  assert_success
+  refute_output --partial "dd if=/dev/zero"
+  assert_output --partial "does not support blkdiscard"
 }
 
 @test "wipe-devices::script true carries the Ceph-bluestore full-discard rationale" {
@@ -373,39 +386,39 @@ SCRIPT
 @test "wipe-devices::script absent (empty) → no-op, nothing emitted" {
   run hetzner::wipe-devices::script ''
   assert_success
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
   [ -z "${output}" ]
 }
 
 @test "wipe-devices::script null → no-op, nothing emitted" {
   run hetzner::wipe-devices::script 'null'
   assert_success
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
 }
 
 @test "wipe-devices::script false → no-op, no blkdiscard emitted" {
   run hetzner::wipe-devices::script 'false'
   assert_success
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
 }
 
 @test "wipe-devices::script rejects a bare string (not true/array), no wipe" {
   run hetzner::wipe-devices::script '"just-a-string"'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
 }
 
 @test "wipe-devices::script rejects an object (not true/array), no wipe" {
   run hetzner::wipe-devices::script '{"device":"/dev/sda"}'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
 }
 
 @test "wipe-devices::script rejects unsafe descriptor values (no injection), no wipe" {
   # a model value carrying shell metacharacters must be refused, not templated
   run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"x\"; rm -rf / #"}]'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
   assert_output --partial "unsafe"
 }
 
@@ -623,27 +636,78 @@ EOF
 @test "wipe-devices::script rejects a device outside /dev (no wipe emitted)" {
   run hetzner::wipe-devices::script '[{"device":"etc/passwd"}]'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
   assert_output --partial "absolute /dev path"
 }
 
 @test "wipe-devices::script rejects a device with '..' traversal (no wipe emitted)" {
   run hetzner::wipe-devices::script '[{"device":"/dev/../etc/passwd"}]'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
   assert_output --partial "without '..'"
 }
 
 @test "wipe-devices::script rejects an id containing a slash (no wipe emitted)" {
   run hetzner::wipe-devices::script '[{"id":"../../dev/sda"}]'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
   assert_output --partial "bare by-id name"
 }
 
 @test "wipe-devices::script rejects an id containing '..' (no wipe emitted)" {
   run hetzner::wipe-devices::script '[{"id":"nvme..evil"}]'
   assert_failure
-  refute_output --partial "blkdiscard"
+  refute_output --partial "blkdiscard -f"
   assert_output --partial "bare by-id name"
+}
+
+# ── hetzner::wipe-devices (the ssh runner) ────────────────
+#
+# Hermetic: stub `hetzner::json` to hand the runner a chosen #wipe-devices value
+# and `ssh` to echo canned remote output — no real ssh/network. The runner's
+# success contract is: the DONE sentinel present AND no line-leading `ABORT:`.
+
+@test "wipe-devices runner: DONE sentinel + no leading ABORT → success" {
+  hetzner::json() { printf '%s\n' 'true'; }
+  local _sshlog="${BATS_TEST_TMPDIR}/ssh.called"
+  ssh() { cat >/dev/null 2>&1; printf '%s\n' "$@" > "${_sshlog}"; printf '%s\n' "lok8s: wipe /dev/sda" "__LOK8S_WIPE_DONE__"; }
+
+  run hetzner::wipe-devices 0 "root@203.0.113.10" -o BatchMode=yes
+  assert_success
+  # ssh WAS invoked (the wipe was actually attempted)
+  [ -f "${_sshlog}" ]
+}
+
+@test "wipe-devices runner: a line-leading ABORT: → failure (even with sentinel)" {
+  hetzner::json() { printf '%s\n' 'true'; }
+  # sentinel present too, so the ONLY reason to fail is the ABORT: detection
+  ssh() { cat >/dev/null 2>&1; printf '%s\n' "ABORT: /dev/sda identity mismatch (model)" "__LOK8S_WIPE_DONE__"; }
+
+  run hetzner::wipe-devices 0 "root@203.0.113.10" -o BatchMode=yes
+  assert_failure
+  assert_output --partial "device wipe FAILED"
+}
+
+@test "wipe-devices runner: mid-line ABORT substring (not line-leading) → success" {
+  hetzner::json() { printf '%s\n' 'true'; }
+  # 'ABORT' appears only mid-line — the ^ABORT: anchor must NOT treat it as a
+  # failure. Sentinel present → the wipe is reported clean.
+  ssh() { cat >/dev/null 2>&1; printf '%s\n' "note: no ABORT: happened here" "__LOK8S_WIPE_DONE__"; }
+
+  run hetzner::wipe-devices 0 "root@203.0.113.10" -o BatchMode=yes
+  assert_success
+  refute_output --partial "device wipe FAILED"
+}
+
+@test "wipe-devices runner: descriptor neither true nor array → rejected, no ssh" {
+  hetzner::json() { printf '%s\n' '"just-a-string"'; }
+  local _sshlog="${BATS_TEST_TMPDIR}/ssh.called"
+  # if ssh is reached the test fails: this marker must never be written
+  ssh() { : > "${_sshlog}"; printf '%s\n' "__LOK8S_WIPE_DONE__"; }
+
+  run hetzner::wipe-devices 0 "root@203.0.113.10" -o BatchMode=yes
+  assert_failure
+  assert_output --partial "must be 'true' or an array"
+  # no wipe was ever attempted over ssh
+  [ ! -f "${_sshlog}" ]
 }
