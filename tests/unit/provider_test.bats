@@ -10,6 +10,12 @@ setup() {
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+
+  # Hetzner resource helpers (for #wipe-devices coverage). resources.sh only
+  # defines functions at source time, so this is inert for the other tests.
+  export CLOUD_LOG_FILE="${BATS_TEST_TMPDIR}/hetzner.log"
+  source "${_PROJECT_ROOT}/.lok8s/providers/hetzner/utils/json.sh"
+  source "${_PROJECT_ROOT}/.lok8s/providers/hetzner/utils/resources.sh"
 }
 
 teardown() {
@@ -303,4 +309,159 @@ SCRIPT
   run provision::dispatch "test.lok8s.dev"
   assert_success
   assert_output --partial "provisioned"
+}
+
+# ── hetzner::wipe-devices::script (#wipe-devices) ─────────
+
+@test "wipe-devices::script true → disk enumeration + blkdiscard loop + sentinel" {
+  run hetzner::wipe-devices::script 'true'
+  assert_success
+  assert_output --partial "lsblk -dn -o NAME,TYPE"
+  assert_output --partial 'blkdiscard -f "${_dev}"'
+  assert_output --partial "dd if=/dev/zero"
+  assert_output --partial "wipefs -a"
+  assert_output --partial "__LOK8S_WIPE_DONE__"
+}
+
+@test "wipe-devices::script true carries the Ceph-bluestore full-discard rationale" {
+  run hetzner::wipe-devices::script 'true'
+  assert_success
+  assert_output --partial "bdev-label"
+  assert_output --partial "rook/rook#17716"
+}
+
+@test "wipe-devices::script list model → ID_MODEL assert-or-abort for that device" {
+  run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"SAMSUNG MZQL2"}]'
+  assert_success
+  assert_output --partial 'grep -qF "ID_MODEL=SAMSUNG MZQL2"'
+  assert_output --partial 'ABORT: /dev/nvme0n1 identity mismatch'
+  assert_output --partial 'blkdiscard -f "/dev/nvme0n1"'
+}
+
+@test "wipe-devices::script list id → asserts ID_SERIAL / ID_WWN / by-id" {
+  run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","id":"S64GNS0T123"}]'
+  assert_success
+  assert_output --partial 'ID_SERIAL=S64GNS0T123'
+  assert_output --partial 'ID_WWN=S64GNS0T123'
+  assert_output --partial '/dev/disk/by-id/S64GNS0T123'
+  assert_output --partial 'ABORT: /dev/nvme0n1 identity mismatch (id)'
+}
+
+@test "wipe-devices::script list model+id → both asserts present" {
+  run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"MOD-X","id":"SER-Y"}]'
+  assert_success
+  assert_output --partial 'ID_MODEL=MOD-X'
+  assert_output --partial 'ID_SERIAL=SER-Y'
+  assert_output --partial 'ID_WWN=SER-Y'
+}
+
+@test "wipe-devices::script id-only entry (no device) targets /dev/disk/by-id" {
+  run hetzner::wipe-devices::script '[{"id":"nvme-Samsung_SSD_123"}]'
+  assert_success
+  assert_output --partial 'blkdiscard -f "/dev/disk/by-id/nvme-Samsung_SSD_123"'
+}
+
+@test "wipe-devices::script absent (empty) → no-op, nothing emitted" {
+  run hetzner::wipe-devices::script ''
+  assert_success
+  refute_output --partial "blkdiscard"
+  [ -z "${output}" ]
+}
+
+@test "wipe-devices::script null → no-op, nothing emitted" {
+  run hetzner::wipe-devices::script 'null'
+  assert_success
+  refute_output --partial "blkdiscard"
+}
+
+@test "wipe-devices::script false → no-op, no blkdiscard emitted" {
+  run hetzner::wipe-devices::script 'false'
+  assert_success
+  refute_output --partial "blkdiscard"
+}
+
+@test "wipe-devices::script rejects a bare string (not true/array), no wipe" {
+  run hetzner::wipe-devices::script '"just-a-string"'
+  assert_failure
+  refute_output --partial "blkdiscard"
+}
+
+@test "wipe-devices::script rejects an object (not true/array), no wipe" {
+  run hetzner::wipe-devices::script '{"device":"/dev/sda"}'
+  assert_failure
+  refute_output --partial "blkdiscard"
+}
+
+@test "wipe-devices::script rejects unsafe descriptor values (no injection), no wipe" {
+  # a model value carrying shell metacharacters must be refused, not templated
+  run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"x\"; rm -rf / #"}]'
+  assert_failure
+  refute_output --partial "blkdiscard"
+  assert_output --partial "unsafe"
+}
+
+@test "wipe-devices::script GUARD: model mismatch aborts before any blkdiscard" {
+  local script
+  script="$(hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"EXPECTED-MODEL"}]')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  # udevadm reports a DIFFERENT model → the guard must fail closed
+  cat > "${stub}/udevadm" <<'EOF'
+#!/usr/bin/env bash
+echo "ID_MODEL=SOME-OTHER-MODEL"
+echo "ID_SERIAL=NOPE"
+exit 0
+EOF
+  # recording fakes: any invocation is a test failure
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+exit 0
+EOF
+  cat > "${stub}/dd" <<EOF
+#!/usr/bin/env bash
+echo "dd \$*" >> "${record}"
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/lsblk"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  run env PATH="${stub}:${PATH}" bash -c "${script}"
+  assert_failure
+  assert_output --partial "ABORT"
+  # the destructive commands must NEVER have run
+  [ ! -f "${record}" ]
+}
+
+@test "wipe-devices::script GUARD: matching model proceeds to blkdiscard" {
+  local script
+  script="$(hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"GOOD-MODEL"}]')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  cat > "${stub}/udevadm" <<'EOF'
+#!/usr/bin/env bash
+echo "ID_MODEL=GOOD-MODEL"
+exit 0
+EOF
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  run env PATH="${stub}:${PATH}" bash -c "${script}"
+  assert_success
+  assert_output --partial "__LOK8S_WIPE_DONE__"
+  refute_output --partial "ABORT"
+  run cat "${record}"
+  assert_output --partial "/dev/nvme0n1"
 }

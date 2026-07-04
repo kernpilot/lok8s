@@ -41,6 +41,183 @@ hetzner::network() {
   hetzner::create 'network'
 }
 
+# ── #wipe-devices: guarded device wipe on FRESH (rescue-mode) install ──
+#
+# Declared per-server in the descriptor as `#wipe-devices`. Two forms:
+#   true                          → wipe ALL physical disks (lsblk TYPE==disk)
+#   [ {device?, model?, id?}, … ] → wipe each matched device, each behind a
+#                                   udev model/id sanity guard (assert-or-abort)
+#
+# Honored TRANSPARENTLY by the bare-metal install path (not a separate command)
+# and gated SOLELY on rescue mode (RAM-booted, pre-installimage) — a
+# live/already-installed node is never reached there, so it is never touched.
+# Absent ⇒ no wipe (safe default).
+
+# _safe — allow only shell-inert characters in a descriptor value that gets
+# templated into the generated remote script. The descriptor is
+# operator-authored, but a destructive op never templates arbitrary-shaped
+# data into a shell (defense-in-depth against injection).
+hetzner::wipe-devices::_safe() {
+  local v="${1:-}" _re='^[A-Za-z0-9_./:@=+ -]+$'
+  [[ -n "${v}" ]] || return 0
+  [[ "${v}" =~ $_re ]] || return 1
+}
+
+# hetzner::wipe-devices::script <wipe-json>
+# PURE: emit a bash remote-script string for the given #wipe-devices value.
+# Empty / null / false ⇒ no-op (emits nothing). Anything other than a boolean
+# or an array ⇒ rejected (return 1, emits nothing). The value is NEVER eval'd.
+# shellcheck disable=SC2016  # the single-quoted printf formats below are LITERAL remote-script code — the $-refs MUST survive un-expanded to run on the server
+hetzner::wipe-devices::script() {
+  local wipe_json="${1:-}"
+  [[ -n "${wipe_json}" && "${wipe_json}" != "null" ]] || return 0
+
+  local _type
+  _type="$(jq -r 'type' <<<"${wipe_json}" 2>/dev/null)" || {
+    error "wipe-devices: value is not valid JSON"
+    return 1
+  }
+  case "${_type}" in
+    boolean)
+      # only `true` is a wipe request; `false` is an explicit no-op
+      [[ "$(jq -r '.' <<<"${wipe_json}")" == "true" ]] || return 0
+      ;;
+    array) ;;
+    *)
+      error "wipe-devices: expected 'true' or an array of devices, got ${_type}"
+      return 1
+      ;;
+  esac
+
+  # Header + rationale. FULL-disk discard (NOT head-only): Ceph bluestore
+  # writes redundant bdev-label copies at size-scaled offsets ACROSS the whole
+  # disk; a head-only wipe (sgdisk/wipefs) leaves the far copies, so a
+  # freshly-prepared OSD then asserts _check_main_bdev_label N!=M (kin to
+  # rook/rook#17716). We blkdiscard the entire device; dd-zero is the fallback
+  # when the device rejects discard.
+  cat <<'WIPE_HEADER'
+set -euo pipefail
+# lok8s #wipe-devices — FULL-disk wipe on a fresh (rescue-mode) install.
+# Full discard, not head-only: Ceph bluestore writes redundant bdev-label
+# copies across the whole disk; a head wipe leaves the far copies and a fresh
+# OSD then asserts _check_main_bdev_label N!=M (kin to rook/rook#17716).
+WIPE_HEADER
+
+  if [[ "${_type}" == "boolean" ]]; then
+    cat <<'WIPE_ALL'
+echo "lok8s: #wipe-devices=true — wiping ALL physical disks"
+lsblk -dn -o NAME,TYPE | while read -r _name _dtype; do
+  [ "${_dtype}" = "disk" ] || continue
+  _dev="/dev/${_name}"
+  echo "lok8s: wipe ${_dev}"
+  blkdiscard -f "${_dev}" || dd if=/dev/zero of="${_dev}" bs=1M count=8192
+  wipefs -a "${_dev}" || true
+done
+WIPE_ALL
+  else
+    local _entry _device _model _id _target _v
+    while IFS= read -r _entry; do
+      [[ -n "${_entry}" ]] || continue
+      _device="$(jq -r '.device // ""' <<<"${_entry}")"
+      _model="$(jq -r '.model // ""' <<<"${_entry}")"
+      _id="$(jq -r '.id // ""' <<<"${_entry}")"
+
+      # boundary check: nothing shell-active reaches the templated script
+      for _v in "${_device}" "${_model}" "${_id}"; do
+        hetzner::wipe-devices::_safe "${_v}" || {
+          error "wipe-devices: refusing unsafe descriptor value: ${_v}"
+          return 1
+        }
+      done
+
+      if [[ -n "${_device}" ]]; then
+        _target="${_device}"
+      elif [[ -n "${_id}" ]]; then
+        _target="/dev/disk/by-id/${_id}"
+      else
+        error "wipe-devices: entry needs at least 'device' or 'id'"
+        return 1
+      fi
+
+      printf '\n# --- wipe %s ---\n' "${_target}"
+      printf '_props="$(udevadm info --query=property --name="%s" 2>/dev/null || true)"\n' "${_target}"
+      # model sanity: assert-or-abort BEFORE any destructive call
+      if [[ -n "${_model}" ]]; then
+        printf 'printf "%%s\\n" "$_props" | grep -qF "ID_MODEL=%s" || { echo "ABORT: %s identity mismatch (model)"; exit 1; }\n' \
+          "${_model}" "${_target}"
+      fi
+      # id sanity: a stable id — udev ID_SERIAL or ID_WWN, or a /dev/disk/by-id match
+      if [[ -n "${_id}" ]]; then
+        printf '_id_ok=0\n'
+        printf 'printf "%%s\\n" "$_props" | grep -qxF "ID_SERIAL=%s" && _id_ok=1 || true\n' "${_id}"
+        printf 'printf "%%s\\n" "$_props" | grep -qxF "ID_WWN=%s" && _id_ok=1 || true\n' "${_id}"
+        printf 'if [ -e "/dev/disk/by-id/%s" ] && [ "$(readlink -f "/dev/disk/by-id/%s")" = "$(readlink -f "%s")" ]; then _id_ok=1; fi\n' \
+          "${_id}" "${_id}" "${_target}"
+        printf '[ "$_id_ok" = 1 ] || { echo "ABORT: %s identity mismatch (id)"; exit 1; }\n' "${_target}"
+      fi
+      printf 'echo "lok8s: wipe %s"\n' "${_target}"
+      printf 'blkdiscard -f "%s" || dd if=/dev/zero of="%s" bs=1M count=8192\n' "${_target}" "${_target}"
+      printf 'wipefs -a "%s" || true\n' "${_target}"
+    done < <(jq -c '.[]' <<<"${wipe_json}")
+  fi
+
+  printf '\necho "__LOK8S_WIPE_DONE__"\n'
+}
+
+# hetzner::wipe-devices <i> <ssh_user@ip> <ssh_opts...>
+# Read .server[<i>]["#wipe-devices"], validate at the boundary (type-check
+# ONLY — never eval), generate the wipe script and pipe it over ssh. Requires
+# the success sentinel AND no ABORT in the output. Returns non-zero on any
+# abort/failure so the install path fails LOUDLY rather than installing over
+# un-wiped disks.
+hetzner::wipe-devices() {
+  local _i="${1}" _dest="${2}"
+  shift 2
+  local -a _ssh_opts=("${@}")
+
+  local _wipe_json
+  _wipe_json="$(hetzner::json -c ".server[${_i}][\"#wipe-devices\"] // null")"
+  [[ -n "${_wipe_json}" && "${_wipe_json}" != "null" ]] || return 0
+
+  # Boundary validation: only `true` or an array are legal; reject (never eval)
+  # anything else.
+  local _type
+  _type="$(jq -r 'type' <<<"${_wipe_json}" 2>/dev/null)" || {
+    error "wipe-devices: #wipe-devices on server[${_i}] is not valid JSON"
+    return 1
+  }
+  case "${_type}" in
+    array) ;;
+    boolean)
+      [[ "$(jq -r '.' <<<"${_wipe_json}")" == "true" ]] || return 0
+      ;;
+    *)
+      error "wipe-devices: #wipe-devices must be 'true' or an array of devices (got ${_type})"
+      return 1
+      ;;
+  esac
+
+  local _script
+  _script="$(hetzner::wipe-devices::script "${_wipe_json}")" || {
+    error "wipe-devices: could not build wipe script for server[${_i}]"
+    return 1
+  }
+  [[ -n "${_script}" ]] || return 0
+
+  _hetzner_print "   🧨 \033[1m#wipe-devices\033[0m: wiping declared devices on \033[1m${_dest}\033[0m (fresh install)"
+
+  local _out _ok=1
+  _out="$(printf '%s\n' "${_script}" | ssh "${_ssh_opts[@]}" "${_dest}" 'bash -s' 2>&1)" || _ok=0
+  grep -q '__LOK8S_WIPE_DONE__' <<<"${_out}" || _ok=0
+  ! grep -q 'ABORT' <<<"${_out}" || _ok=0
+  if (( ! _ok )); then
+    error "wipe-devices: device wipe FAILED on ${_dest} — aborting install (nothing else touched)"
+    grep -E 'ABORT|rror|annot' <<<"${_out}" | sed 's/^/      /' >&2 || true
+    return 1
+  fi
+  _hetzner_print "   ✅ device wipe complete on \033[1m${_dest}\033[0m"
+}
+
 hetzner::server() {
   hetzner::create::after() {
     local findex fid
@@ -55,6 +232,10 @@ hetzner::server() {
   # exports all #-prefixed fields as CLOUD_ENV_* variables, and
   # generates a per-server cloud-config user-data file.
   hetzner::create::hook() { (
+    # Capture the server index BEFORE the field-export loop below reuses `i`
+    # as its counter (needed to read this server's #wipe-devices fresh).
+    local _server_index="${i}"
+
     for (( i=0; i < ${#fields[@]}; i=i+2 )); do
       field="${fields[i]#--}"
 
@@ -99,6 +280,17 @@ hetzner::server() {
              'test -x /root/.oldroot/nfs/install/installimage' 2>/dev/null; then
 
           _hetzner_print "🔧 rescue mode detected on \033[1m${external_ip}\033[0m"
+
+          # Honor #wipe-devices on a FRESH install only. We are inside the
+          # rescue branch (server is RAM-booted, disks not yet reinstalled),
+          # so wiping here is safe and installimage reinstalls the OS disk
+          # afterwards. A declared model/id mismatch aborts (non-zero) and
+          # touches nothing — fail the install rather than install over disks
+          # we could not positively identify.
+          hetzner::wipe-devices "${_server_index}" "${ssh_user}@${external_ip}" "${_ssh_opts[@]}" || {
+            error "aborting install on ${external_ip}: #wipe-devices guard failed"
+            return 1
+          }
 
           if [[ -n "${installimage_conf}" ]] && [[ -f "${installimage_conf}" ]]; then
             _hetzner_print "   📋 running installimage with ${installimage_conf}"
