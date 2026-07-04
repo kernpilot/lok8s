@@ -16,6 +16,13 @@ setup() {
   export CLOUD_LOG_FILE="${BATS_TEST_TMPDIR}/hetzner.log"
   source "${_PROJECT_ROOT}/.lok8s/providers/hetzner/utils/json.sh"
   source "${_PROJECT_ROOT}/.lok8s/providers/hetzner/utils/resources.sh"
+
+  # `[` is a bash builtin, so a PATH stub cannot override it. To exercise the
+  # generated script's `[ -b "$target" ]` block-device assert against synthetic
+  # /dev/fakedisk* targets, prepend this shell-function override: it reports our
+  # fakes as block devices and delegates every other `[` test to the real
+  # builtin. Prepend it to the script under `bash -c` (see execution tests).
+  _WIPE_BRACKET_STUB='[() { if [[ "$1" == "-b" && "$2" == /dev/fakedisk* ]]; then return 0; fi; builtin [ "$@"; }'
 }
 
 teardown() {
@@ -333,7 +340,9 @@ SCRIPT
 @test "wipe-devices::script list model → ID_MODEL assert-or-abort for that device" {
   run hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"SAMSUNG MZQL2"}]'
   assert_success
-  assert_output --partial 'grep -qF "ID_MODEL=SAMSUNG MZQL2"'
+  # whole-line exact match (-qxF), not substring — a prefix model must not match
+  assert_output --partial 'grep -qxF "ID_MODEL=SAMSUNG MZQL2"'
+  refute_output --partial 'grep -qF "ID_MODEL=SAMSUNG MZQL2"'
   assert_output --partial 'ABORT: /dev/nvme0n1 identity mismatch'
   assert_output --partial 'blkdiscard -f "/dev/nvme0n1"'
 }
@@ -439,7 +448,7 @@ EOF
 
 @test "wipe-devices::script GUARD: matching model proceeds to blkdiscard" {
   local script
-  script="$(hetzner::wipe-devices::script '[{"device":"/dev/nvme0n1","model":"GOOD-MODEL"}]')"
+  script="$(hetzner::wipe-devices::script '[{"device":"/dev/fakedisk0","model":"GOOD-MODEL"}]')"
 
   local stub="${BATS_TEST_TMPDIR}/stub"
   mkdir -p "${stub}"
@@ -458,10 +467,183 @@ EOF
   printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
   chmod +x "${stub}"/*
 
-  run env PATH="${stub}:${PATH}" bash -c "${script}"
+  # '[' is a bash builtin PATH stubs cannot override; a shell-function override
+  # makes our fake target pass the `[ -b ]` block-device assert and delegates
+  # every other test to the real builtin.
+  run env PATH="${stub}:${PATH}" bash -c "${_WIPE_BRACKET_STUB}
+${script}"
   assert_success
   assert_output --partial "__LOK8S_WIPE_DONE__"
   refute_output --partial "ABORT"
   run cat "${record}"
-  assert_output --partial "/dev/nvme0n1"
+  assert_output --partial "/dev/fakedisk0"
+}
+
+@test "wipe-devices::script GUARD: id mismatch (ID_SERIAL/ID_WWN) aborts before any blkdiscard" {
+  local script
+  script="$(hetzner::wipe-devices::script '[{"device":"/dev/fakedisk0","id":"EXPECTED-SERIAL"}]')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  # udevadm reports a DIFFERENT serial/wwn, and /dev/disk/by-id/EXPECTED-SERIAL
+  # does not exist → every id branch fails → the guard must fail closed.
+  cat > "${stub}/udevadm" <<'EOF'
+#!/usr/bin/env bash
+echo "ID_SERIAL=SOME-OTHER-SERIAL"
+echo "ID_WWN=0xdeadbeef"
+exit 0
+EOF
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+exit 0
+EOF
+  cat > "${stub}/dd" <<EOF
+#!/usr/bin/env bash
+echo "dd \$*" >> "${record}"
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  # even with the block-device assert satisfied, the id guard must abort first
+  run env PATH="${stub}:${PATH}" bash -c "${_WIPE_BRACKET_STUB}
+${script}"
+  assert_failure
+  assert_output --partial "ABORT: /dev/fakedisk0 identity mismatch (id)"
+  refute_output --partial "__LOK8S_WIPE_DONE__"
+  # the destructive commands must NEVER have run
+  [ ! -f "${record}" ]
+}
+
+@test "wipe-devices::script GUARD: matching id (ID_SERIAL) proceeds to blkdiscard" {
+  local script
+  script="$(hetzner::wipe-devices::script '[{"device":"/dev/fakedisk0","id":"MATCH-SERIAL"}]')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  cat > "${stub}/udevadm" <<'EOF'
+#!/usr/bin/env bash
+echo "ID_SERIAL=MATCH-SERIAL"
+exit 0
+EOF
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  run env PATH="${stub}:${PATH}" bash -c "${_WIPE_BRACKET_STUB}
+${script}"
+  assert_success
+  assert_output --partial "__LOK8S_WIPE_DONE__"
+  refute_output --partial "ABORT"
+  run cat "${record}"
+  assert_output --partial "/dev/fakedisk0"
+}
+
+@test "wipe-devices::script GUARD: true wipes every lsblk disk, skips non-disk rows" {
+  local script
+  script="$(hetzner::wipe-devices::script 'true')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  # two physical disks + one partition row that must be skipped
+  cat > "${stub}/lsblk" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fakedisk0 disk" "fakedisk1 disk" "fakedisk0p1 part"
+EOF
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+exit 0
+EOF
+  cat > "${stub}/dd" <<EOF
+#!/usr/bin/env bash
+echo "dd \$*" >> "${record}"
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  run env PATH="${stub}:${PATH}" bash -c "${_WIPE_BRACKET_STUB}
+${script}"
+  assert_success
+  assert_output --partial "__LOK8S_WIPE_DONE__"
+  refute_output --partial "ABORT"
+  run cat "${record}"
+  assert_output --partial "/dev/fakedisk0"
+  assert_output --partial "/dev/fakedisk1"
+  # the non-disk 'part' row must NOT have been wiped
+  refute_output --partial "fakedisk0p1"
+}
+
+@test "wipe-devices::script GUARD: non-block target aborts before blkdiscard" {
+  local script
+  # a bare device entry (no model/id) → the only gate is the [ -b ] assert
+  script="$(hetzner::wipe-devices::script '[{"device":"/dev/lok8s-nonexistent-testdev"}]')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+exit 0
+EOF
+  cat > "${stub}/dd" <<EOF
+#!/usr/bin/env bash
+echo "dd \$*" >> "${record}"
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/udevadm"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  # NO bracket override here: the real builtin `[ -b ]` must fail on a target
+  # that is not a block special file.
+  run env PATH="${stub}:${PATH}" bash -c "${script}"
+  assert_failure
+  assert_output --partial "ABORT: /dev/lok8s-nonexistent-testdev not a block device"
+  refute_output --partial "__LOK8S_WIPE_DONE__"
+  [ ! -f "${record}" ]
+}
+
+# ── boundary: path-traversal / non-/dev targets rejected at generation ──
+
+@test "wipe-devices::script rejects a device outside /dev (no wipe emitted)" {
+  run hetzner::wipe-devices::script '[{"device":"etc/passwd"}]'
+  assert_failure
+  refute_output --partial "blkdiscard"
+  assert_output --partial "absolute /dev path"
+}
+
+@test "wipe-devices::script rejects a device with '..' traversal (no wipe emitted)" {
+  run hetzner::wipe-devices::script '[{"device":"/dev/../etc/passwd"}]'
+  assert_failure
+  refute_output --partial "blkdiscard"
+  assert_output --partial "without '..'"
+}
+
+@test "wipe-devices::script rejects an id containing a slash (no wipe emitted)" {
+  run hetzner::wipe-devices::script '[{"id":"../../dev/sda"}]'
+  assert_failure
+  refute_output --partial "blkdiscard"
+  assert_output --partial "bare by-id name"
+}
+
+@test "wipe-devices::script rejects an id containing '..' (no wipe emitted)" {
+  run hetzner::wipe-devices::script '[{"id":"nvme..evil"}]'
+  assert_failure
+  refute_output --partial "blkdiscard"
+  assert_output --partial "bare by-id name"
 }

@@ -49,9 +49,10 @@ hetzner::network() {
 #                                   udev model/id sanity guard (assert-or-abort)
 #
 # Honored TRANSPARENTLY by the bare-metal install path (not a separate command)
-# and gated SOLELY on rescue mode (RAM-booted, pre-installimage) — a
-# live/already-installed node is never reached there, so it is never touched.
-# Absent ⇒ no wipe (safe default).
+# and doubly gated: (1) rescue mode (RAM-booted, pre-installimage) AND (2) an
+# installimage config actually present so the OS disk WILL be reinstalled right
+# after. A live/already-installed node, or a rescue node with no installimage,
+# is never wiped. Absent ⇒ no wipe (safe default).
 
 # _safe — allow only shell-inert characters in a descriptor value that gets
 # templated into the generated remote script. The descriptor is
@@ -109,6 +110,7 @@ echo "lok8s: #wipe-devices=true — wiping ALL physical disks"
 lsblk -dn -o NAME,TYPE | while read -r _name _dtype; do
   [ "${_dtype}" = "disk" ] || continue
   _dev="/dev/${_name}"
+  [ -b "${_dev}" ] || { echo "ABORT: ${_dev} not a block device"; exit 1; }
   echo "lok8s: wipe ${_dev}"
   blkdiscard -f "${_dev}" || dd if=/dev/zero of="${_dev}" bs=1M count=8192
   wipefs -a "${_dev}" || true
@@ -130,6 +132,23 @@ WIPE_ALL
         }
       done
 
+      # path-safety (defense against traversal): a 'device' must be an absolute
+      # /dev/… path, an 'id' a bare /dev/disk/by-id name. Reject '..' anywhere
+      # and any '/' inside an id — the dd/blkdiscard target must never be a
+      # relative or attacker-shaped path pointing outside /dev.
+      if [[ -n "${_device}" ]]; then
+        [[ "${_device}" == /dev/* && "${_device}" != *..* ]] || {
+          error "wipe-devices: 'device' must be an absolute /dev path without '..': ${_device}"
+          return 1
+        }
+      fi
+      if [[ -n "${_id}" ]]; then
+        [[ "${_id}" != */* && "${_id}" != *..* ]] || {
+          error "wipe-devices: 'id' must be a bare by-id name (no '/' or '..'): ${_id}"
+          return 1
+        }
+      fi
+
       if [[ -n "${_device}" ]]; then
         _target="${_device}"
       elif [[ -n "${_id}" ]]; then
@@ -141,9 +160,11 @@ WIPE_ALL
 
       printf '\n# --- wipe %s ---\n' "${_target}"
       printf '_props="$(udevadm info --query=property --name="%s" 2>/dev/null || true)"\n' "${_target}"
-      # model sanity: assert-or-abort BEFORE any destructive call
+      # model sanity: assert-or-abort BEFORE any destructive call. Whole-line
+      # exact match (-qxF, like the id asserts below): a declared model that is
+      # only a PREFIX of the real ID_MODEL must NOT match the wrong disk.
       if [[ -n "${_model}" ]]; then
-        printf 'printf "%%s\\n" "$_props" | grep -qF "ID_MODEL=%s" || { echo "ABORT: %s identity mismatch (model)"; exit 1; }\n' \
+        printf 'printf "%%s\\n" "$_props" | grep -qxF "ID_MODEL=%s" || { echo "ABORT: %s identity mismatch (model)"; exit 1; }\n' \
           "${_model}" "${_target}"
       fi
       # id sanity: a stable id — udev ID_SERIAL or ID_WWN, or a /dev/disk/by-id match
@@ -156,6 +177,9 @@ WIPE_ALL
         printf '[ "$_id_ok" = 1 ] || { echo "ABORT: %s identity mismatch (id)"; exit 1; }\n' "${_target}"
       fi
       printf 'echo "lok8s: wipe %s"\n' "${_target}"
+      # block-device assert: never dd/blkdiscard a target that is not a real
+      # block special file (a mistyped/renamed by-id path must fail closed).
+      printf '[ -b "%s" ] || { echo "ABORT: %s not a block device"; exit 1; }\n' "${_target}" "${_target}"
       printf 'blkdiscard -f "%s" || dd if=/dev/zero of="%s" bs=1M count=8192\n' "${_target}" "${_target}"
       printf 'wipefs -a "%s" || true\n' "${_target}"
     done < <(jq -c '.[]' <<<"${wipe_json}")
@@ -209,7 +233,9 @@ hetzner::wipe-devices() {
   local _out _ok=1
   _out="$(printf '%s\n' "${_script}" | ssh "${_ssh_opts[@]}" "${_dest}" 'bash -s' 2>&1)" || _ok=0
   grep -q '__LOK8S_WIPE_DONE__' <<<"${_out}" || _ok=0
-  ! grep -q 'ABORT' <<<"${_out}" || _ok=0
+  # anchored to the explicit 'ABORT:' prefix our guards emit — a stray 'ABORT'
+  # substring in unrelated output must NOT be read as a wipe failure.
+  ! grep -q '^ABORT:' <<<"${_out}" || _ok=0
   if (( ! _ok )); then
     error "wipe-devices: device wipe FAILED on ${_dest} — aborting install (nothing else touched)"
     grep -E 'ABORT|rror|annot' <<<"${_out}" | sed 's/^/      /' >&2 || true
@@ -281,18 +307,21 @@ hetzner::server() {
 
           _hetzner_print "🔧 rescue mode detected on \033[1m${external_ip}\033[0m"
 
-          # Honor #wipe-devices on a FRESH install only. We are inside the
-          # rescue branch (server is RAM-booted, disks not yet reinstalled),
-          # so wiping here is safe and installimage reinstalls the OS disk
-          # afterwards. A declared model/id mismatch aborts (non-zero) and
-          # touches nothing — fail the install rather than install over disks
-          # we could not positively identify.
-          hetzner::wipe-devices "${_server_index}" "${ssh_user}@${external_ip}" "${_ssh_opts[@]}" || {
-            error "aborting install on ${external_ip}: #wipe-devices guard failed"
-            return 1
-          }
-
           if [[ -n "${installimage_conf}" ]] && [[ -f "${installimage_conf}" ]]; then
+            # Honor #wipe-devices ONLY when installimage WILL run — co-gated with
+            # the installimage-present check so a wipe can NEVER happen unless the
+            # OS disk is about to be reinstalled. We are in the rescue branch
+            # (RAM-booted, disks not yet reinstalled) AND have an installimage
+            # config, so wiping here is safe. Doing this BEFORE the config check
+            # would brick a node declared with #wipe-devices but no/invalid
+            # #installimage (wiped OS disk, then "skipping install"). A declared
+            # model/id mismatch, an unverified block device, or a traversal-shaped
+            # target aborts (non-zero) and touches nothing.
+            hetzner::wipe-devices "${_server_index}" "${ssh_user}@${external_ip}" "${_ssh_opts[@]}" || {
+              error "device wipe failed/aborted on ${external_ip}"
+              return 1
+            }
+
             _hetzner_print "   📋 running installimage with ${installimage_conf}"
             scp "${_ssh_opts[@]}" "${installimage_conf}" "${ssh_user}@${external_ip}:/tmp/installimage.conf"
 
