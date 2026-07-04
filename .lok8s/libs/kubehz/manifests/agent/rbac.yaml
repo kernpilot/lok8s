@@ -22,6 +22,36 @@ rules:
     verbs:
       - get
       - list
+  # Heartbeat components[]: apiserver/etcd health via
+  # `kubectl get --raw /readyz?verbose` (+ /version as the reachability
+  # fallback). Read-only, and normally already granted by the default
+  # system:public-info-viewer binding — declared explicitly so the probes
+  # keep working on hardened clusters that prune the default bindings.
+  - nonResourceURLs:
+      - /readyz
+      - /version
+    verbs:
+      - get
+---
+# Heartbeat components[]: scheduler/controller-manager health is derived from
+# the static pods' Ready condition. Namespaced Role (not ClusterRole): the
+# agent only ever reads pods in kube-system — no cluster-wide pod access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-agent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -33,6 +63,23 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
+  name: kubehz-agent
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-agent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
   name: kubehz-agent
 subjects:
   - kind: ServiceAccount

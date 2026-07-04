@@ -54,12 +54,65 @@ spec:
                     sort | head -1)
                   [ -z "${CERT_EXPIRY}" ] && CERT_EXPIRY="unknown"
 
+                  # Control-plane component health. Fail-soft: every probe is
+                  # guarded, and a failed probe OMITS its component — the
+                  # heartbeat itself must never fail because a probe did.
+                  # /readyz?verbose serves two probes at once: the overall
+                  # result -> apiserver, the per-check lines -> etcd. 2>&1 on
+                  # purpose: on HTTP 500 kubectl embeds the [+]/[-] check lines
+                  # in its error text, which is exactly what we parse.
+                  READYZ=$(kubectl get --raw '/readyz?verbose' 2>&1) && READYZ_OK=true || READYZ_OK=false
+
+                  APISERVER_STATUS=""
+                  if [ "${READYZ_OK}" = "true" ]; then
+                    APISERVER_STATUS="Healthy"
+                  else
+                    case "${READYZ}" in
+                      *"[-]"*) APISERVER_STATUS="Unhealthy" ;;
+                      *) kubectl get --raw /version >/dev/null 2>&1 && APISERVER_STATUS="Healthy" || true ;;
+                    esac
+                  fi
+
+                  ETCD_STATUS=""
+                  case "${READYZ}" in
+                    *"[-]etcd"*) ETCD_STATUS="Unhealthy" ;;
+                    *"[+]etcd ok"*) ETCD_STATUS="Healthy" ;;
+                  esac
+
+                  COMPONENTS=""
+                  if [ -n "${APISERVER_STATUS}" ]; then
+                    COMPONENTS="{\"name\":\"apiserver\",\"status\":\"${APISERVER_STATUS}\"}"
+                  fi
+                  if [ -n "${ETCD_STATUS}" ]; then
+                    if [ -n "${COMPONENTS}" ]; then COMPONENTS="${COMPONENTS},"; fi
+                    COMPONENTS="${COMPONENTS}{\"name\":\"etcd\",\"status\":\"${ETCD_STATUS}\"}"
+                  fi
+
+                  # scheduler/controller-manager from the kube-system static
+                  # pods. No matching pods (managed/external control plane) ->
+                  # omit the component rather than report a false Unhealthy.
+                  for comp in kube-scheduler kube-controller-manager; do
+                    ready=$(kubectl get pods -n kube-system -l "component=${comp}" \
+                      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ready=""
+                    cstatus=""
+                    case "${ready}" in
+                      *True*) cstatus="Healthy" ;;
+                      ?*) cstatus="Unhealthy" ;;
+                    esac
+                    if [ -n "${cstatus}" ]; then
+                      if [ -n "${COMPONENTS}" ]; then COMPONENTS="${COMPONENTS},"; fi
+                      COMPONENTS="${COMPONENTS}{\"name\":\"${comp#kube-}\",\"status\":\"${cstatus}\"}"
+                    fi
+                  done
+                  COMPONENT_ARRAY="[${COMPONENTS}]"
+
                   PAYLOAD=$(cat <<PAYLOAD_EOF
                   {
                     "clusterId": "${CLUSTER_ID}",
                     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
                     "kubernetes": { "version": "${KUBE_VERSION}" },
                     "nodes": ${NODE_ARRAY},
+                    "components": ${COMPONENT_ARRAY},
                     "certificates": { "expiresAt": "${CERT_EXPIRY}" }
                   }
                   PAYLOAD_EOF
