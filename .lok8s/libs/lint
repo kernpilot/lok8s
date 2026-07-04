@@ -479,7 +479,9 @@ lint::bootstrap() {
       continue
     fi
     if [[ ! -d "${b_dir}" ]]; then
-      error "  spec.bootstrap entry not found: ${b_name} (resolved to ${b_dir})"
+      # Report the ORIGINAL entry (matches the apply path, bootstrap:685) — the
+      # parsed name alone hides which YAML entry failed for path/name: forms.
+      error "  spec.bootstrap entry not found: ${entry} (resolved to ${b_dir})"
       errs=$(( errs + 1 ))
     fi
   done

@@ -157,10 +157,14 @@ _mock_yq_valid() {
 }
 
 # Note: syncWave-validation tests were removed post-refactor. The mocked
-# schema/kustomization tests below stub yq per-query, so lint::bootstrap sees
-# no explicit spec.bootstrap and resolves the Lo default [cilium] (created in
-# setup). The dedicated real-yq bootstrap tests further down exercise the
-# actual entry resolution (scalar + map form) against fake addon dirs.
+# schema/kustomization tests below stub yq per exact query string and do NOT
+# implement the `.spec | has("bootstrap")` probe _resolve_entries uses to tell
+# an explicit `bootstrap: []` from an absent key — so despite the fixture's
+# `bootstrap: []` they fall through to the Lo default, and (yq is also unmocked
+# inside _parse_entry) resolve to the bare `${PATH_LOK8S}/addons/` dir. The
+# `addons/cilium` mkdir in setup makes that parent exist, keeping these
+# bootstrap-agnostic tests green. Real spec.bootstrap resolution (scalar + map
+# form) is covered by the real-yq tests immediately below.
 
 # --- lint tests: spec.bootstrap resolution (real yq) ---
 #
@@ -169,7 +173,10 @@ _mock_yq_valid() {
 # end. Regression guard: the map form (`- ccm: {wait: true, dependsOn: [...]}`)
 # must NOT be shattered into bogus per-line addon names.
 
-@test "lint::bootstrap accepts map-form entries (wait/dependsOn/values)" {
+# Regression: a map-form entry (wait/dependsOn/values) must resolve as ONE addon,
+# not shatter into per-line names. lint only checks the addon dir exists — the
+# semantics of wait/dependsOn/values are _parse_entry's job (bootstrap_test.bats).
+@test "lint::bootstrap accepts a map-form entry without shattering it" {
   local domain_dir="${PATH_CLUSTERS}/mapform"
   mkdir -p "${domain_dir}" \
     "${PATH_LOK8S}/addons/cilium" \
