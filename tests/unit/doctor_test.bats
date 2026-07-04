@@ -72,9 +72,12 @@ SCRIPT
   run doctor::_provider_section test.example
   assert_success
   assert_output --partial "provider / infrastructure (mock)"
-  # provider::doctor's ok/warn lines rendered in the lib's ✓/! style.
-  assert_output --partial "hcloud API reachable"
-  assert_output --partial "Robot creds unset"
+  # provider::doctor's ok/warn lines rendered in the lib's ✓/! style. Assert the
+  # status GLYPH tied to its message (not just the message substring) so a
+  # prefix-stripping / wrong-status regression — dropping the glyph or mapping
+  # ok→! (or vice-versa) — fails instead of silently passing.
+  assert_output --partial $'\033[32m✓\033[0m hcloud API reachable'
+  assert_output --partial $'\033[33m!\033[0m Robot creds unset'
   assert_output --partial "1 ok, 1 warn"
 }
 

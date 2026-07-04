@@ -245,6 +245,11 @@ match exactly one server carrying the cluster label; bare-metal nodes exactly
 one Robot server whose IP equals the descriptor `#external-ip` — and aborts
 touching *nothing* if any node fails that preflight, so a name collision or a
 partial descriptor can never reimage the wrong (or only some of the) machines.
+
+Set `CLOUD_DRY_RUN=1` to **preview** the reset: it runs the read-only preflight,
+prints the exact per-node reimage / rescue+reset plan (never the Robot
+credentials), and reimages **nothing** — the readiness barrier is skipped since
+no node changed state.
 :::
 
 ## Logging

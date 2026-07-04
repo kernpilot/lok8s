@@ -331,6 +331,14 @@ provider::rebuild() {
   : > "${CLOUD_LOG_FILE}"
   _hetzner_log "rebuild started: config=${config_file} work_dir=${work_dir}"
 
+  # Dry-run plumbing (shared with provision's dry-run::cmd): with CLOUD_DRY_RUN
+  # every destructive action is PRINTED instead of executed, so a future
+  # `lo recover --dry-run` prints the full plan and reimages NOTHING. dry-run::cmd
+  # needs a writable CLOUD_DRY_RUN_PATH — default it under work_dir if the caller
+  # left it unset.
+  [[ -z "${CLOUD_DRY_RUN:-}" || -n "${CLOUD_DRY_RUN_PATH:-}" ]] || \
+    CLOUD_DRY_RUN_PATH="${work_dir}/dry-run"
+
   # Load the descriptor (JSON, or YAML → JSON) exactly like provision.
   local desc
   desc="$(envsubst < "${config_file}")"
@@ -441,21 +449,38 @@ provider::rebuild() {
   fi
 
   # ── Phase 2 — EXECUTE (destructive). Preflight validated ALL nodes. ─────
+  # Under CLOUD_DRY_RUN every destructive action is PRINTED, not run: the cloud
+  # reimage via dry-run::cmd (exactly as provision routes its hcloud writes), the
+  # Robot rescue+reset via the dry-run branch inside each helper. A failure names
+  # the offending node so the operator knows WHICH one failed (and that the
+  # cluster may be left partially reimaged).
   local rc=0 entry kind pname pa pb
   for entry in "${plan[@]}"; do
     IFS=$'\t' read -r kind pname pa pb <<<"${entry}"
     if [[ "${kind}" == "metal" ]]; then
       _hetzner_print "🔧 rescue+reset \033[1m${pname}\033[0m (robot#${pa})"
-      hetzner::_robot_rescue "${pa}" "${pb}" || { rc=1; continue; }
-      hetzner::_robot_reset  "${pa}"         || { rc=1; continue; }
+      hetzner::_robot_rescue "${pa}" "${pb}" || {
+        error "rebuild: node '${pname}' (robot#${pa}) rescue activation failed — cluster may be partially reimaged"; rc=1; continue; }
+      hetzner::_robot_reset  "${pa}" || {
+        error "rebuild: node '${pname}' (robot#${pa}) hardware reset failed — cluster may be partially reimaged"; rc=1; continue; }
     else
       _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (image ${pa})"
-      hcloud server rebuild "${pname}" --image "${pa}" --user-data-from-file "${pb}" || {
-        error "rebuild: 'hcloud server rebuild ${pname}' failed"; rc=1; continue; }
+      dry-run::cmd hcloud server rebuild "${pname}" --image "${pa}" --user-data-from-file "${pb}" || {
+        error "rebuild: node '${pname}' reimage failed ('hcloud server rebuild ${pname}') — cluster may be partially reimaged"; rc=1; continue; }
     fi
   done
 
   # ── Phase 3 — Barrier: all cloud VMs cloud-init-done AND all workers in rescue.
+  # Under dry-run nothing was reimaged, so there is no state transition to wait
+  # for — short-circuit cleanly. (A real cluster would still be "installed" /
+  # never in rescue, so running the barrier here would falsely time out.)
+  if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
+    _hetzner_print "🧪 dry-run: no node was reimaged — skipping readiness barrier"
+    (( rc != 0 )) || _hetzner_print \
+      "🧪 dry-run complete — the plan above WOULD reset the nodes; nothing was changed"
+    return "${rc}"
+  fi
+
   hetzner::_rebuild_barrier _ssh cloud_ips metal_ips || rc=1
 
   (( rc != 0 )) || _hetzner_print \
@@ -494,6 +519,14 @@ hetzner::_export_cloudinit_env() {
 # Wait (namerefs) until every cloud VM reports `cloud-init status ... done`
 # and every bare-metal node is back in the Robot rescue system. Read-only
 # probes. Tunables: PROVIDER_REBUILD_WAIT_TRIES / _WAIT_INTERVAL.
+#
+# LIMITATION: this verifies the target STATE (cloud-init done / booted into
+# rescue), NOT that a reimage actually occurred. A stale OS that never got
+# reimaged could still report `cloud-init status done` from a prior boot and
+# pass the cloud check; a box already sitting in rescue likewise passes the
+# metal check. A robust proof would thread a per-run nonce through the reimage
+# and read it back — deliberately NOT done here (over-engineering for a recovery
+# flow whose caller drives the reset with explicit intent).
 hetzner::_rebuild_barrier() {
   local -n _sshref="$1" _cloudref="$2" _metalref="$3"
   local tries="${PROVIDER_REBUILD_WAIT_TRIES:-48}"
@@ -568,6 +601,13 @@ hetzner::_cloud_server_unique_labeled() {
 # hetzner::_robot_rescue <number> <key_fingerprint>
 hetzner::_robot_rescue() {
   local num="$1" fp="$2"
+  # Honor dry-run: PRINT the intended activation and issue no POST. Kept as an
+  # explicit branch (not dry-run::cmd) so the Robot user:password on the curl
+  # command line is never teed into the plan log.
+  if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
+    _hetzner_print "🧪 [dry-run] would activate Robot rescue on robot#${num} (POST ${HROBOT_API}/boot/${num}/rescue os=linux authorized_key=${fp})"
+    return 0
+  fi
   curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
     -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
     -d os=linux --data-urlencode "authorized_key=${fp}" >/dev/null 2>&1 \
@@ -577,6 +617,10 @@ hetzner::_robot_rescue() {
 # hetzner::_robot_reset <number>  — hardware reset
 hetzner::_robot_reset() {
   local num="$1"
+  if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
+    _hetzner_print "🧪 [dry-run] would hardware-reset robot#${num} (POST ${HROBOT_API}/reset/${num} type=hw)"
+    return 0
+  fi
   curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
     -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/reset/${num}" \
     -d type=hw >/dev/null 2>&1 \
@@ -667,7 +711,12 @@ hetzner::_doctor_checks() {
         local _keys
         if _keys="$(curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
                       -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null)"; then
-          if printf '%s' "${_keys}" | jq -r '.[].key.fingerprint' 2>/dev/null | grep -qiF "${_fp}"; then
+          # Exact, whole-value fingerprint match (case-insensitive). A loose
+          # substring grep would let a short/truncated fingerprint false-match a
+          # longer registered key — compare the /key fingerprint field as a whole.
+          if printf '%s' "${_keys}" | jq -e --arg fp "${_fp}" \
+               'any(.[]?; ((.key.fingerprint // "") | ascii_downcase) == ($fp | ascii_downcase))' \
+               >/dev/null 2>&1; then
             printf 'ok\trescue SSH key registered in Robot (%s)\n' "${_fp}"
           else
             printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${_fp}"

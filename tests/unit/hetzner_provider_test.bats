@@ -204,12 +204,43 @@ JSON
   assert_failure
 }
 
-@test "provider::rebuild is idempotent-safe (re-runs succeed)" {
+@test "provider::rebuild is safe to re-run (retry re-drives the plan; no first-run-only state)" {
   export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  # A recovery must be safe to RETRY. rebuild holds no first-run-only state, so a
+  # second invocation re-issues the SAME destructive plan and still succeeds.
+  # (This is retry-safety, NOT true idempotence: the fakes are stateless, so a
+  # genuine "already in the target state → no-op" cannot be asserted here.)
   run provider::rebuild "${DESC}" "${WORK}"
   assert_success
   run provider::rebuild "${DESC}" "${WORK}"
   assert_success
+  # The retry actually re-issued the cloud reimage (it did not skip / error on
+  # stale state) — the accumulating log holds one 'server rebuild cp-0' per run.
+  run grep -c 'server rebuild cp-0' "${HCLOUD_LOG}"
+  assert_output "2"
+}
+
+@test "provider::rebuild honors CLOUD_DRY_RUN: prints the plan, reimages NOTHING" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  export CLOUD_DRY_RUN=1 CLOUD_DRY_RUN_PATH="${BATS_TEST_TMPDIR}/dry-run"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+
+  # The full plan is logged (what WOULD happen): the cloud reimage command, the
+  # bare-metal rescue+reset, and an explicit dry-run marker.
+  assert_output --partial "hcloud server rebuild cp-0 --image ubuntu-24.04"
+  assert_output --partial "dry-run"
+  assert_output --partial "would activate Robot rescue on robot#12345"
+  assert_output --partial "would hardware-reset robot#12345"
+
+  # … but NO destructive fake ran. The cloud VM was NOT reimaged (dry-run::cmd
+  # printed instead of invoking hcloud), so the hcloud log has no 'server rebuild'.
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  # The Robot worker was NOT rescued/reset — no POST reached the curl fake.
+  run cat "${CURL_LOG}"
+  refute_output --partial "/boot/12345/rescue"
+  refute_output --partial "/reset/12345"
 }
 
 @test "provider::rebuild returns non-zero when a cloud rebuild fails" {
