@@ -8,6 +8,7 @@
 
 import ^utils/types
 import ^utils/verbose
+import ^libs/bootstrap
 
 main::lint() {
   local domain="${domain:-}"
@@ -432,9 +433,19 @@ lint::clusterref() {
 }
 
 # -- Bootstrap validation -----------------------------------------------------
-# Validates each entry in spec.bootstrap resolves to an existing driver
-# addon directory. Bare names resolve against the cluster kind's addons
-# tree (.lok8s/.scripts/provider/<kind>/addons/<name>/).
+# Validates each spec.bootstrap entry resolves to an existing addon directory.
+# Entry resolution + parsing is DELEGATED to the same functions the apply path
+# uses (bootstrap::_resolve_entries / bootstrap::_parse_entry) so `lo lint` and
+# `lo bootstrap` never disagree on what an entry means. Re-implementing the
+# parse here is what used to break the map form: a plain `yq '.spec.bootstrap[]?'`
+# shatters `- ccm: {wait: true, dependsOn: [...]}` into separate YAML lines, each
+# then mis-read as a bogus addon name. Entry forms handled by the shared parser:
+#   "cilium"                        → .lok8s/addons/cilium/
+#   "./targets/foo"                 → clusters/<domain>/targets/foo/
+#   "/abs/path"                     → <repo-root>/abs/path/
+#   {ccm: {values,env,wait,dependsOn,name}}  → map form (ccm addon)
+# A malformed entry (multi-key map, non-map value, bad name:) is reported by
+# _parse_entry itself and counted here.
 # Usage: lint::bootstrap <domain_dir> <spec_file>
 # Returns: number of errors found
 lint::bootstrap() {
@@ -448,25 +459,27 @@ lint::bootstrap() {
   kind=$(yq -r '.kind // ""' "${spec_file}" | tr '[:upper:]' '[:lower:]')
   [[ -n "${kind}" ]] || return 0
 
-  local -a bootstrap
-  mapfile -t bootstrap < <(yq -r '.spec.bootstrap[]?' "${spec_file}")
+  local domain
+  domain=$(basename "${domain_dir}")
 
-  local entry addon_dir
-  for entry in "${bootstrap[@]}"; do
+  # _resolve_entries emits one compact-JSON entry per line (or the per-driver
+  # default when spec.bootstrap is absent) — so a map entry stays intact.
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec_file}" "${kind}")
+
+  local entry b_name b_dir b_inline b_env b_wait b_deps
+  for entry in "${entries[@]}"; do
     [[ -n "${entry}" ]] || continue
-    # Relative/absolute paths are user-owned — just check existence
-    if [[ "${entry}" == ./* || "${entry}" == ../* || "${entry}" == /* ]]; then
-      if [[ "${entry}" == /* ]]; then
-        addon_dir="${PATH_BASE}${entry}"
-      else
-        addon_dir="${domain_dir}/${entry}"
-      fi
-    else
-      # Bare name → shared framework addons tree
-      addon_dir="${PATH_LOK8S}/addons/${entry}"
+    # _parse_entry decodes scalar vs map form and validates the entry shape,
+    # handing back the resolved addon name + dir through namerefs.
+    if ! bootstrap::_parse_entry \
+        "${domain}" "${entry}" b_name b_dir b_inline b_env b_wait b_deps; then
+      # _parse_entry already emitted a specific "bootstrap: ..." error.
+      errs=$(( errs + 1 ))
+      continue
     fi
-    if [[ ! -d "${addon_dir}" ]]; then
-      error "  spec.bootstrap entry not found: ${entry} (resolved to ${addon_dir})"
+    if [[ ! -d "${b_dir}" ]]; then
+      error "  spec.bootstrap entry not found: ${b_name} (resolved to ${b_dir})"
       errs=$(( errs + 1 ))
     fi
   done
