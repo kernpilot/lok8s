@@ -65,7 +65,10 @@ spec:
   kubernetes: { version: "v1.31.12" }
   cluster: { domain: my-cluster.example.com }
   provider: { name: hetzner, configRef: hetzner.json }   # see lok8s-bare-metal skill
-  network: { podSubnet: 10.244.0.0/16, serviceSubnet: 10.96.0.0/12, cni: canal }
+  network: { podSubnet: 10.244.0.0/16, serviceSubnet: 10.96.0.0/12, cni: canal, csi: external }
+  # csi: external (DEFAULT, Ceph-first — no bundled CSI) | hetzner (opt in to
+  # KubeOne's embedded hcloud CSI). Mirrors cni. BREAKING: pre-existing clusters
+  # that relied on the auto-deployed hcloud CSI must set csi: hetzner. See docs/guide/networking.md.
   workers:
     pool-a: { replicas: 3, type: cx33, image: ubuntu-22.04 }   # hetzner; AWS uses ami
   datacenter: fsn1                         # hetzner

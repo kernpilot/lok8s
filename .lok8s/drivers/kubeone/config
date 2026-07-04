@@ -26,13 +26,13 @@ kubeone::detect_provider() {
 # Extract and export variables from cluster.lok8s.yaml for template rendering.
 # Usage: kubeone::extract_vars <cluster_yaml>
 # Exports: CLUSTER_NAME, K8S_VERSION, POD_SUBNET, SERVICE_SUBNET,
-#          CP_REPLICAS, CNI_PLUGIN, CLOUD_PROVIDER, SSH_USER, SSH_PORT,
+#          CP_REPLICAS, CNI_PLUGIN, CSI_PLUGIN, CLOUD_PROVIDER, SSH_USER, SSH_PORT,
 #          ADDONS_ENABLED, ADDONS_PATH
 kubeone::extract_vars() {
   local cluster_yaml="$1"
 
   export CLUSTER_NAME K8S_VERSION POD_SUBNET SERVICE_SUBNET
-  export CP_REPLICAS CNI_PLUGIN CLOUD_PROVIDER
+  export CP_REPLICAS CNI_PLUGIN CSI_PLUGIN CLOUD_PROVIDER
   export SSH_USER SSH_PORT
   export ADDONS_ENABLED ADDONS_PATH
   # spec.cluster.domain — the cluster's own domain, exported for addon envsubst
@@ -72,6 +72,12 @@ kubeone::extract_vars() {
   SERVICE_SUBNET=$(yq -r '.spec.network.serviceSubnet // "10.96.0.0/12"' "${cluster_yaml}")
   CP_REPLICAS=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
   CNI_PLUGIN=$(yq -r '.spec.network.cni // "canal"' "${cluster_yaml}")
+  # spec.network.csi — provider-CSI selector, mirrors spec.network.cni. Absent or
+  # "external" ⇒ lok8s owns storage (Ceph / its own CSI) and KubeOne's embedded
+  # provider CSI is shadowed + no-op'd (see kubeone::render_addons). "hetzner" ⇒
+  # opt in to KubeOne's bundled hcloud CSI. Default "external" = Ceph-first, so an
+  # existing spec that never set this now ships NO bundled CSI (see docs: BREAKING).
+  CSI_PLUGIN=$(yq -r '.spec.network.csi // "external"' "${cluster_yaml}")
 
   # Map provider name to KubeOne cloudProvider key
   local provider
@@ -437,6 +443,26 @@ kubeone::render_addons() {
   # root-addon pass and break the fresh one.
   rm -rf "${addons_dir}"
   mkdir -p "${addons_dir}/cilium" "${addons_dir}/ccm-hetzner"
+
+  # spec.network.csi (CSI_PLUGIN, exported by kubeone::extract_vars) — bundled
+  # provider CSI is OPT-IN. Default "external" (Ceph-first) SHADOWS KubeOne's
+  # embedded csi-hetzner with an EMPTY same-named subdir: EnsureAddonByName
+  # (kubeone pkg/addons/ensure.go) matches a local addon by NAME ONLY —
+  # `a.IsDir() && a.Name() == addonName`, NO content check — and returns before the
+  # embedded fallback, so the empty dir wins; loadAndApplyAddon on an empty dir
+  # logs "empty, skipping" ⇒ the embedded hcloud CSI is never applied (it sits
+  # unused on a Ceph-first cluster, and crash-loops on bare-metal workers whose
+  # kubelet can't reach the cloud metadata service). Same override as ccm-hetzner
+  # above, but here the override is INTENTIONALLY empty (no replacement CSI). It
+  # MUST stay a bare dir: KubeOne pipes addon manifests straight to kubectl (no
+  # kustomize), so a kustomization.yaml here would ERROR. "hetzner" ⇒ skip the
+  # override ⇒ KubeOne deploys its embedded hcloud CSI (opt-in).
+  case "${CSI_PLUGIN:-external}" in
+    external)    mkdir -p "${addons_dir}/csi-hetzner" ;;  # empty ⇒ shadow + no-op the embedded CSI
+    hetzner)     : ;;                                     # opt-in: KubeOne deploys its bundled hcloud CSI
+    *) error "render_addons: invalid spec.network.csi '${CSI_PLUGIN}' (expected 'external' or 'hetzner')"; return 1 ;;
+  esac
+
   local api_host rc; api_host=$(yq -r '.apiEndpoint.host // ""' "${manifest}"); rc=$?
   if (( rc != 0 )) || [[ -z "${api_host}" ]]; then
     error "render_addons: failed to read apiEndpoint.host from ${manifest}"; return 1
@@ -484,7 +510,7 @@ kubeone::render_addons() {
   addons::render "${PATH_LOK8S}/addons/ccm" kubeone hetzner "${inline}" \
     > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
 
-  debug "render_addons: cni-cilium + ccm-hetzner overrides (incl. hcloud secret) -> ${addons_dir}"
+  debug "render_addons: cilium + ccm-hetzner overrides (incl. hcloud secret); csi=${CSI_PLUGIN:-external} -> ${addons_dir}"
 }
 
 # Name each bare-metal Robot server to match its node hostname (the CCM
