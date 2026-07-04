@@ -75,7 +75,7 @@ kubeone::extract_vars() {
   # spec.network.csi — provider-CSI selector, mirrors spec.network.cni. Absent or
   # "external" ⇒ lok8s owns storage (Ceph / its own CSI) and KubeOne's embedded
   # provider CSI is shadowed + no-op'd (see kubeone::render_addons). "hetzner" ⇒
-  # opt IN to KubeOne's bundled hcloud CSI. Default "external" = Ceph-first, so an
+  # opt in to KubeOne's bundled hcloud CSI. Default "external" = Ceph-first, so an
   # existing spec that never set this now ships NO bundled CSI (see docs: BREAKING).
   CSI_PLUGIN=$(yq -r '.spec.network.csi // "external"' "${cluster_yaml}")
 
