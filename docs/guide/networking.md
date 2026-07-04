@@ -87,7 +87,8 @@ e.g. `gateway.yaml`) and are applied by `lo bootstrap` / `lo provision`.
 
 KubeOne ships an **embedded `csi-hetzner` addon** that it force-deploys on every
 Hetzner cluster. On a cluster that provides its own storage — Ceph (Rook), or any
-other CSI you bootstrap — that bundled hcloud CSI is unused and crash-loops. So
+other CSI you bootstrap — that bundled hcloud CSI is unused (and, on a bare-metal
+worker with no cloud metadata service, crash-loops). So
 lok8s makes it **opt-in**, exactly the way `spec.network.cni` gates the CNI:
 
 | `spec.network.csi` | Storage | Behaviour |
@@ -111,7 +112,8 @@ Older lok8s always let KubeOne auto-deploy its hcloud CSI. The default is now
 - **Ceph / own-storage clusters** — unaffected; the crash-looping CSI is simply
   gone. Nothing to do.
 - **Clusters that relied on the hcloud CSI** (PVCs on `hcloud-volumes`) — set
-  `spec.network.csi: hetzner` to keep it, **before** the next `lo provision`.
+  `spec.network.csi: hetzner` to keep it, **before** the next `lo provision`;
+  otherwise those PVCs go unmountable once the driver is removed.
 :::
 
 **How the default works (no bundled CSI):** during `lo provision`, the KubeOne

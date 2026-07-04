@@ -2,8 +2,8 @@
 # kubeone_csi_test.bats — spec.network.csi makes KubeOne's bundled provider CSI
 # opt-in. Verifies (a) kubeone::extract_vars reads spec.network.csi into
 # CSI_PLUGIN (default "external"), and (b) kubeone::render_addons writes an EMPTY
-# csi-hetzner/ override dir on the default (external/empty) path — which shadows +
-# no-op's KubeOne's embedded csi-hetzner — and does NOT create it for csi: hetzner
+# csi-hetzner/ override dir on the default (external/empty) path — which shadows and
+# no-ops KubeOne's embedded csi-hetzner — and does NOT create it for csi: hetzner
 # (opt-in ⇒ KubeOne deploys its bundled hcloud CSI). Uses the real yq from
 # `argsh test`.
 
@@ -109,6 +109,8 @@ YAML
   run kubeone::render_addons "${wd}"
   assert_success
   [ -d "${wd}/addons/csi-hetzner" ]
+  # Override MUST be empty (KubeOne skips an empty dir ⇒ embedded CSI no-op'd).
+  [ -z "$(ls -A "${wd}/addons/csi-hetzner")" ]
 }
 
 @test "render_addons: csi=hetzner does NOT create the override (KubeOne deploys its bundled CSI)" {

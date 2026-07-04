@@ -450,14 +450,15 @@ kubeone::render_addons() {
   # (kubeone pkg/addons/ensure.go) matches a local addon by NAME ONLY —
   # `a.IsDir() && a.Name() == addonName`, NO content check — and returns before the
   # embedded fallback, so the empty dir wins; loadAndApplyAddon on an empty dir
-  # logs "empty, skipping" ⇒ the embedded hcloud CSI is never applied (it otherwise
-  # crash-loops, unused, on a Ceph cluster). Same override mechanism as ccm-hetzner
+  # logs "empty, skipping" ⇒ the embedded hcloud CSI is never applied (it sits
+  # unused on a Ceph-first cluster, and crash-loops on bare-metal workers whose
+  # kubelet can't reach the cloud metadata service). Same override as ccm-hetzner
   # above, but here the override is INTENTIONALLY empty (no replacement CSI). It
   # MUST stay a bare dir: KubeOne pipes addon manifests straight to kubectl (no
   # kustomize), so a kustomization.yaml here would ERROR. "hetzner" ⇒ skip the
   # override ⇒ KubeOne deploys its embedded hcloud CSI (opt-in).
   case "${CSI_PLUGIN:-external}" in
-    external|"") mkdir -p "${addons_dir}/csi-hetzner" ;;  # empty ⇒ shadow + no-op the embedded CSI
+    external)    mkdir -p "${addons_dir}/csi-hetzner" ;;  # empty ⇒ shadow + no-op the embedded CSI
     hetzner)     : ;;                                     # opt-in: KubeOne deploys its bundled hcloud CSI
     *) error "render_addons: invalid spec.network.csi '${CSI_PLUGIN}' (expected 'external' or 'hetzner')"; return 1 ;;
   esac
