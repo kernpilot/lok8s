@@ -599,6 +599,43 @@ ${script}"
   refute_output --partial "fakedisk0p1"
 }
 
+@test "wipe-devices::script rejects an array with a non-object element (no wipe)" {
+  run hetzner::wipe-devices::script '["/dev/nvme0n1"]'
+  assert_failure
+  refute_output --partial "blkdiscard -f"
+}
+
+@test "wipe-devices::script GUARD: true aborts mid-loop when a later disk rejects blkdiscard" {
+  local script
+  script="$(hetzner::wipe-devices::script 'true')"
+
+  local stub="${BATS_TEST_TMPDIR}/stub"
+  mkdir -p "${stub}"
+  local record="${BATS_TEST_TMPDIR}/destructive.calls"
+
+  cat > "${stub}/lsblk" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fakedisk0 disk" "fakedisk1 disk"
+EOF
+  # succeeds on fakedisk0, fails on fakedisk1 (device rejects discard)
+  cat > "${stub}/blkdiscard" <<EOF
+#!/usr/bin/env bash
+echo "blkdiscard \$*" >> "${record}"
+case "\$*" in *fakedisk1*) exit 1 ;; *) exit 0 ;; esac
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/wipefs"
+  chmod +x "${stub}"/*
+
+  run env PATH="${stub}:${PATH}" bash -c "${_WIPE_BRACKET_STUB}
+${script}"
+  # the per-disk exit 1 must propagate out of the lsblk|while subshell:
+  assert_failure
+  refute_output --partial "__LOK8S_WIPE_DONE__"
+  assert_output --partial "ABORT: /dev/fakedisk1 does not support blkdiscard"
+  run cat "${record}"
+  assert_output --partial "/dev/fakedisk0"
+}
+
 @test "wipe-devices::script GUARD: non-block target aborts before blkdiscard" {
   local script
   # a bare device entry (no model/id) → the only gate is the [ -b ] assert

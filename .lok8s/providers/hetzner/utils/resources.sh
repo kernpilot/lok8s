@@ -123,6 +123,12 @@ WIPE_ALL
     local _entry _device _model _id _target _v
     while IFS= read -r _entry; do
       [[ -n "${_entry}" ]] || continue
+      # each array entry must be an object {device?,model?,id?} — reject a bare
+      # string/number/null cleanly rather than emitting noisy jq type errors.
+      [[ "$(jq -r 'type' <<<"${_entry}")" == "object" ]] || {
+        error "wipe-devices: array entries must be objects with device/model/id, got: ${_entry}"
+        return 1
+      }
       _device="$(jq -r '.device // ""' <<<"${_entry}")"
       _model="$(jq -r '.model // ""' <<<"${_entry}")"
       _id="$(jq -r '.id // ""' <<<"${_entry}")"
