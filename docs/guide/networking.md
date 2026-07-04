@@ -100,7 +100,7 @@ lok8s makes it **opt-in**, exactly the way `spec.network.cni` gates the CNI:
 spec:
   network:
     cni: external        # lok8s provides the CNI (Cilium) — same pattern
-    csi: hetzner         # opt IN to KubeOne's bundled hcloud CSI (omit for Ceph-first)
+    csi: hetzner         # opt in to KubeOne's bundled hcloud CSI (omit for Ceph-first)
 ```
 
 This parallels `cni: external`, where lok8s owns the CNI instead of KubeOne's
@@ -113,7 +113,7 @@ Older lok8s always let KubeOne auto-deploy its hcloud CSI. The default is now
   gone. Nothing to do.
 - **Clusters that relied on the hcloud CSI** (PVCs on `hcloud-volumes`) — set
   `spec.network.csi: hetzner` to keep it, **before** the next `lo provision`;
-  otherwise those PVCs go unmountable once the driver is removed.
+  otherwise those PVCs become unmountable once the driver is removed.
 :::
 
 **How the default works (no bundled CSI):** during `lo provision`, the KubeOne
