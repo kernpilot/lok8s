@@ -22,11 +22,6 @@ setup() {
   # which the `lo` entrypoint loads in production — source them here too.
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
 
-  # A resolvable framework addon so the per-driver `lo` default ([cilium]) that
-  # bootstrap::_resolve_entries emits for a Lo cluster with no explicit
-  # spec.bootstrap resolves during the mocked schema/kustomization tests.
-  mkdir -p "${PATH_LOK8S}/addons/cilium"
-
   # Create a minimal domain structure
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test-domain"
   mkdir -p "${domain_dir}/targets/crds"
@@ -130,6 +125,7 @@ _mock_yq_valid() {
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -157,14 +153,11 @@ _mock_yq_valid() {
 }
 
 # Note: syncWave-validation tests were removed post-refactor. The mocked
-# schema/kustomization tests below stub yq per exact query string and do NOT
-# implement the `.spec | has("bootstrap")` probe _resolve_entries uses to tell
-# an explicit `bootstrap: []` from an absent key — so despite the fixture's
-# `bootstrap: []` they fall through to the Lo default, and (yq is also unmocked
-# inside _parse_entry) resolve to the bare `${PATH_LOK8S}/addons/` dir. The
-# `addons/cilium` mkdir in setup makes that parent exist, keeping these
-# bootstrap-agnostic tests green. Real spec.bootstrap resolution (scalar + map
-# form) is covered by the real-yq tests immediately below.
+# schema/kustomization tests below return "true" for the `.spec | has("bootstrap")`
+# probe, so bootstrap::_resolve_entries honors the fixture's explicit
+# `bootstrap: []` (opt-out) and lint::bootstrap resolves nothing — those tests
+# don't exercise bootstrap. Real spec.bootstrap resolution (scalar + map form)
+# is covered by the real-yq tests immediately below.
 
 # --- lint tests: spec.bootstrap resolution (real yq) ---
 #
@@ -336,6 +329,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -364,6 +358,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -392,6 +387,7 @@ YAML
       '.metadata.name // ""') echo "" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -471,6 +467,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
@@ -507,6 +504,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *platform*)
@@ -547,6 +545,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *platform*)
@@ -589,6 +588,7 @@ YAML
       '.metadata.name // ""') echo "test" ;;
       '.spec.kind // .kind // ""') echo "Lo" ;;
       '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
       '.resources[]?')
         case "${file}" in
           *crds*) echo "test-crd.yaml" ;;
