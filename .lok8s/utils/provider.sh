@@ -73,6 +73,21 @@
 #   provider::status <config_file>
 #     Check infrastructure status. Output: Running | Partial | NotFound
 #
+#   provider::rebuild <config_file> <work_dir>
+#     Reset the descriptor's EXISTING nodes to the state provider::provision
+#     expects for a fresh install, WITHOUT recreating cloud resources (IPs,
+#     network, LB preserved). Same signature as provision/destroy. Descriptor-
+#     driven — acts only on nodes it declares. DESTRUCTIVE (reimages nodes) but
+#     does NOT prompt: the caller owns consent. Return 0/1. Used by cluster
+#     recovery; a provider without it simply can't be auto-recovered in place.
+#
+#   provider::doctor <config_file>
+#     READ-ONLY, advisory infrastructure diagnosis — MUST NOT die, MUST NOT
+#     mutate. Prints one `<status>\t<message>` line per check to stdout, where
+#     status is `ok` or `warn`, plus a final `summary\t<n> ok, <m> warn` line;
+#     every not-ready item carries actionable advice. Always returns 0.
+#     `lo doctor` renders this as its "provider / infrastructure" section.
+#
 # ── Spec shape ──────────────────────────────────────────────────
 #
 #   spec:

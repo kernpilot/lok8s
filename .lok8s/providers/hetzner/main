@@ -11,6 +11,8 @@ import ^utils/verbose
 : "${CLOUD_HETZNER_JSON:=""}"
 : "${CLOUD_DRY_RUN:=""}"
 : "${CLOUD_DRY_RUN_PATH:=""}"
+# Hetzner Robot (dedicated servers) REST API base. Overridable for tests.
+: "${HROBOT_API:=https://robot-ws.your-server.de}"
 
 _HETZNER_DIR="${BASH_SOURCE[0]%/*}"
 # shellcheck source=utils/json.sh
@@ -306,6 +308,364 @@ provider::status() {
   if (( total == 0 )); then echo "NotFound"
   elif (( running == total )); then echo "Running"
   else echo "Partial (${running}/${total} running)"; fi
+}
+
+# ── Optional hook: rebuild ───────────────────────────────
+#
+# provider::rebuild <config_file> <work_dir>
+#   Reset the descriptor's EXISTING nodes to the state provider::provision
+#   expects for a fresh install — WITHOUT recreating the cloud resources
+#   (IPs, network, load-balancer are preserved). Descriptor-driven: it acts
+#   ONLY on the servers declared in the descriptor.
+#     • Cloud VMs (no #cloud.root)  → reimaged in place via `hcloud server
+#       rebuild --image <descriptor image> --user-data-from-file <fresh
+#       cloud-init>` (same generator provision's create hook uses).
+#     • Bare-metal (#cloud.root)    → booted into the Robot rescue system
+#       (activate rescue with the descriptor key's fingerprint + hardware
+#       reset), ready for installimage.
+#   Barrier: waits until every cloud VM reports cloud-init done AND every
+#   bare-metal node is in rescue. Returns non-zero if any node fails.
+#
+#   It does NOT wipe data disks: that is the descriptor's #wipe-devices
+#   feature, honored by provision's installimage hook — re-adding an inline
+#   wipe here would double-wipe. This hook is DESTRUCTIVE (it reimages nodes)
+#   but does not prompt: the caller (a future `lo recover`) owns consent.
+provider::rebuild() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  local work_dir="${2:-/tmp}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  [[ -f "${config_file}" ]] || { error "config not found: ${config_file}"; return 1; }
+  mkdir -p "${work_dir}"
+  export CLOUD_LOG_FILE="${work_dir}/hetzner-rebuild.log"
+  : > "${CLOUD_LOG_FILE}"
+  _hetzner_log "rebuild started: config=${config_file} work_dir=${work_dir}"
+
+  # Load the descriptor (JSON, or YAML → JSON) exactly like provision.
+  local desc
+  desc="$(envsubst < "${config_file}")"
+  if ! echo "${desc}" | jq empty 2>/dev/null; then
+    desc="$(yq -o json '.' "${config_file}")"
+  fi
+
+  # Resolved inventory (descriptor + live cloud state) → per-node public IPs.
+  local inv
+  inv="$(provider::output "${config_file}")" || {
+    error "rebuild: could not resolve inventory (provider::output failed)"; return 1; }
+
+  # Cloud-init generation environment (mirror provider::provision).
+  local _cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
+  [[ ! -f "${_cc_script}" ]] || {
+    # shellcheck source=/dev/null
+    source "${_cc_script}"
+  }
+  hetzner::_rebuild_cloudinit_env "${config_file}"
+
+  # Readiness-barrier SSH command (identity from the descriptor).
+  local _ssh_key
+  _ssh_key="$(echo "${desc}" | jq -r '.sshPrivateKey // ""')"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME below
+  [[ "${_ssh_key}" != "~/"* ]] || _ssh_key="${HOME}/${_ssh_key:2}"
+  local -a _ssh=(ssh -o BatchMode=yes -o ConnectTimeout=12
+                 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+                 -o LogLevel=ERROR)
+  [[ -z "${_ssh_key}" ]] || _ssh+=(-i "${_ssh_key}")
+
+  # Rescue-key fingerprint (bare-metal only) — derived from the descriptor
+  # public key unless explicitly overridden.
+  local _fp="${PROVIDER_ROBOT_RESCUE_FP:-}"
+
+  local rc=0
+  local -a cloud_ips=() metal_ips=()
+  local count
+  count="$(echo "${desc}" | jq '(.server // []) | length')"
+
+  local idx server name is_root pub image cloud_d ci num
+  for (( idx=0; idx<count; idx++ )); do
+    server="$(echo "${desc}" | jq -c ".server[${idx}]")"
+    name="$(echo "${server}" | jq -r '.name // ""')"
+    [[ -n "${name}" ]] || { warn "rebuild: server[${idx}] has no name — skipping"; continue; }
+    # Defense in depth: only ever act on plausible resource names.
+    [[ "${name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
+      error "rebuild: refusing suspicious server name '${name}'"; rc=1; continue; }
+    is_root="$(echo "${server}" | jq -r '.["#cloud.root"] // ""')"
+    pub="$(echo "${inv}" | jq -r --arg n "${name}" '.nodes[] | select(.name==$n) | .public_ip // empty')"
+
+    if [[ "${is_root}" == "true" ]]; then
+      # ── Bare-metal: Robot rescue + hardware reset ──
+      if [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
+        error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"
+        rc=1; continue
+      fi
+      if [[ -z "${_fp}" ]]; then
+        _fp="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || _fp=""
+      fi
+      if [[ -z "${_fp}" ]]; then
+        error "rebuild: cannot determine rescue key fingerprint for '${name}' (descriptor .sshPublicKey unreadable; set PROVIDER_ROBOT_RESCUE_FP)"
+        rc=1; continue
+      fi
+      num="$(hetzner::_robot_server_number "${name}")"
+      if [[ -z "${num}" ]]; then
+        error "rebuild: bare-metal node '${name}' not found in Robot"
+        rc=1; continue
+      fi
+      _hetzner_print "🔧 rescue+reset \033[1m${name}\033[0m (robot#${num})"
+      hetzner::_robot_rescue "${num}" "${_fp}" || { rc=1; continue; }
+      hetzner::_robot_reset  "${num}"          || { rc=1; continue; }
+      [[ -z "${pub}" ]] || metal_ips+=("${pub}")
+    else
+      # ── Cloud VM: reimage in place with fresh cloud-init ──
+      image="$(echo "${server}" | jq -r '.image // "ubuntu-24.04"')"
+      cloud_d="$(echo "${server}" | jq -r '.["#cloud.d"] // ""')"
+      export CLOUD_PATHD="${cloud_d}"
+      ci="${work_dir}/rebuild-${name}.cloud-init.yaml"
+      if ! declare -F cloud-config::generate &>/dev/null; then
+        error "rebuild: cloud-config generator unavailable"; rc=1; continue
+      fi
+      if ! cloud-config::generate > "${ci}" 2>>"${CLOUD_LOG_FILE}"; then
+        error "rebuild: cloud-init generation failed for '${name}'"; rc=1; continue
+      fi
+      _hetzner_print "📦 rebuild \033[1m${name}\033[0m (image ${image})"
+      if ! hcloud server rebuild "${name}" --image "${image}" --user-data-from-file "${ci}"; then
+        error "rebuild: 'hcloud server rebuild ${name}' failed"; rc=1; continue
+      fi
+      [[ -z "${pub}" ]] || cloud_ips+=("${pub}")
+    fi
+  done
+
+  # Barrier: all cloud VMs cloud-init-done AND all bare-metal in rescue.
+  hetzner::_rebuild_barrier _ssh cloud_ips metal_ips || rc=1
+
+  (( rc != 0 )) || _hetzner_print \
+    "✅ rebuild complete — nodes reset (data disks untouched; wipe is #wipe-devices during provision)"
+  return "${rc}"
+}
+
+# hetzner::_rebuild_cloudinit_env <config_file>
+# Export the CLOUD_* generation environment (same resolution as
+# provider::provision) so cloud-config::generate produces the user-data a
+# fresh provision would.
+hetzner::_rebuild_cloudinit_env() {
+  local config_file="$1"
+  local _ci_path _ci_user _ci_group _ci_pub
+  _ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
+  if [[ -n "${_ci_path}" && "${_ci_path}" != /* ]]; then
+    _ci_path="$(dirname "${config_file}")/${_ci_path}"
+  fi
+  if [[ -z "${_ci_path}" || ! -d "${_ci_path}" ]]; then
+    _ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
+  fi
+  export CLOUD_PATH="${_ci_path}"
+  export CLOUD_PATH_LIB="${PATH_LOK8S}/providers/hetzner/cloud-init"
+  _ci_user="$(_cfg '.cloudInit.user // "root"' 2>/dev/null || echo "root")"
+  _ci_group="$(_cfg '.cloudInit.group // "root"' 2>/dev/null || echo "root")"
+  _ci_pub="$(_cfg '.cloudInit.sshPubPath // ""' 2>/dev/null || echo "")"
+  export CLOUD_USER="${_ci_user}" CLOUD_GROUP="${_ci_group}"
+  export CLOUD_PATH_PUB="${_ci_pub:-${HOME}/.ssh}"
+  CLOUD_PATH_PUB="${CLOUD_PATH_PUB/#\~/${HOME}}"
+}
+
+# hetzner::_rebuild_barrier <ssh_arr> <cloud_ip_arr> <metal_ip_arr>
+# Wait (namerefs) until every cloud VM reports `cloud-init status ... done`
+# and every bare-metal node is back in the Robot rescue system. Read-only
+# probes. Tunables: PROVIDER_REBUILD_WAIT_TRIES / _WAIT_INTERVAL.
+hetzner::_rebuild_barrier() {
+  local -n _sshref="$1" _cloudref="$2" _metalref="$3"
+  local tries="${PROVIDER_REBUILD_WAIT_TRIES:-48}"
+  local interval="${PROVIDER_REBUILD_WAIT_INTERVAL:-15}"
+  local ssh_user="${CLOUD_USER:-root}"
+  local nc="${#_cloudref[@]}" nm="${#_metalref[@]}"
+  local i j cloud_ready metal_ready
+  for (( i=0; i<tries; i++ )); do
+    cloud_ready=0
+    for (( j=0; j<nc; j++ )); do
+      "${_sshref[@]}" "${ssh_user}@${_cloudref[j]}" \
+        'cloud-init status 2>/dev/null | grep -q done' && cloud_ready=$((cloud_ready+1))
+    done
+    metal_ready=0
+    for (( j=0; j<nm; j++ )); do
+      "${_sshref[@]}" "root@${_metalref[j]}" \
+        'test -x /root/.oldroot/nfs/install/installimage' 2>/dev/null && metal_ready=$((metal_ready+1))
+    done
+    _hetzner_log "barrier: cloud_ready=${cloud_ready}/${nc} metal_ready=${metal_ready}/${nm}"
+    [[ "${cloud_ready}" -eq "${nc}" && "${metal_ready}" -eq "${nm}" ]] && return 0
+    sleep "${interval}"
+  done
+  error "rebuild: nodes did not reach target state within $(( tries * interval ))s"
+  return 1
+}
+
+# hetzner::_rescue_fingerprint <pubkey_path>
+# MD5 fingerprint (colon-hex, the form Hetzner Robot registers) of a public key.
+hetzner::_rescue_fingerprint() {
+  local pub="${1:-}"
+  [[ -n "${pub}" ]] || return 1
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME below
+  [[ "${pub}" != "~/"* ]] || pub="${HOME}/${pub:2}"
+  [[ -f "${pub}" ]] || return 1
+  ssh-keygen -l -E md5 -f "${pub}" 2>/dev/null \
+    | grep -oE 'MD5:[0-9a-f:]+' | sed 's/^MD5://' | head -1
+}
+
+# hetzner::_robot_server_number <server_name> → Robot server_number (or empty)
+hetzner::_robot_server_number() {
+  local name="$1"
+  curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" 2>/dev/null \
+    | jq -r --arg n "${name}" '.[].server | select(.server_name==$n) | .server_number' 2>/dev/null | head -1
+}
+
+# hetzner::_robot_rescue <number> <key_fingerprint>
+hetzner::_robot_rescue() {
+  local num="$1" fp="$2"
+  curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
+    -d os=linux --data-urlencode "authorized_key=${fp}" >/dev/null 2>&1 \
+    || { error "rebuild: rescue activation failed for robot#${num}"; return 1; }
+}
+
+# hetzner::_robot_reset <number>  — hardware reset
+hetzner::_robot_reset() {
+  local num="$1"
+  curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/reset/${num}" \
+    -d type=hw >/dev/null 2>&1 \
+    || { error "rebuild: hardware reset failed for robot#${num}"; return 1; }
+}
+
+# ── Optional hook: doctor ────────────────────────────────
+#
+# provider::doctor <config_file>
+#   Transparent, READ-ONLY infrastructure diagnosis. Prints one TAB-separated
+#   line per check to stdout — `<status>\t<message>` where status ∈ {ok, warn}
+#   — plus a final `summary\t<n> ok, <m> warn` line (the machine-usable
+#   summary). Every not-ready item carries actionable advice. This hook NEVER
+#   exits non-zero (always returns 0) and NEVER mutates anything. `lo doctor`
+#   renders these lines as its "provider / infrastructure" section.
+provider::doctor() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  # Run the checks in a subshell so nothing they do can flip our exit status.
+  local report ok warn
+  report="$(hetzner::_doctor_checks "${config_file}" 2>/dev/null)"
+  [[ -z "${report}" ]] || printf '%s\n' "${report}"
+  ok="$(printf '%s\n' "${report}" | grep -c $'^ok\t' || true)"
+  warn="$(printf '%s\n' "${report}" | grep -c $'^warn\t' || true)"
+  printf 'summary\t%s ok, %s warn\n' "${ok:-0}" "${warn:-0}"
+  return 0
+}
+
+# hetzner::_doctor_checks <config_file>
+# Emit the per-check `<status>\t<message>` lines. READ-ONLY: only hcloud/Robot
+# GETs and non-mutating SSH probes (test -x, cloud-init status). No rebuild,
+# reset, rescue, delete, or any write.
+hetzner::_doctor_checks() {
+  local config_file="$1"
+
+  # 1) hcloud credentials + API reachability.
+  local _ctx=""
+  _ctx="$(hcloud context active 2>/dev/null || echo "")"
+  if [[ -n "${HCLOUD_TOKEN:-}" || -n "${_ctx}" ]]; then
+    if hcloud server-type list -o noheader >/dev/null 2>&1; then
+      printf 'ok\thcloud API reachable\n'
+    else
+      printf 'warn\thcloud credentials set but API not reachable — check HCLOUD_TOKEN / network\n'
+    fi
+  else
+    printf 'warn\tno hcloud credentials — export HCLOUD_TOKEN or run: hcloud context create <name>\n'
+  fi
+
+  # 2) Robot credentials + API reachability.
+  local _have_robot=0
+  if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
+    _have_robot=1
+    if curl -sf -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" >/dev/null 2>&1; then
+      printf 'ok\tRobot API reachable\n'
+    else
+      printf 'warn\tRobot creds set but API not reachable — verify HROBOT_USER/HROBOT_PASSWORD\n'
+    fi
+  else
+    printf 'warn\tRobot creds unset (HROBOT_USER/HROBOT_PASSWORD) — bare-metal rescue/reset unavailable; set them to enable automatic worker reset\n'
+  fi
+
+  # Descriptor → JSON.
+  [[ -f "${config_file}" ]] || { printf 'warn\tdescriptor not found: %s\n' "${config_file}"; return 0; }
+  local desc
+  desc="$(envsubst < "${config_file}" 2>/dev/null)"
+  echo "${desc}" | jq empty 2>/dev/null || desc="$(yq -o json '.' "${config_file}" 2>/dev/null)"
+
+  local metal_count
+  metal_count="$(echo "${desc}" | jq '[(.server // [])[] | select(.["#cloud.root"]=="true")] | length' 2>/dev/null || echo 0)"
+
+  # 3) Rescue SSH key registered in Robot (only with bare-metal + Robot creds).
+  if [[ "${metal_count}" =~ ^[0-9]+$ ]] && (( metal_count > 0 )) && (( _have_robot )); then
+    local _fp
+    _fp="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
+    if [[ -z "${_fp}" ]]; then
+      printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
+    elif curl -sS -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null \
+           | jq -r '.[].key.fingerprint' 2>/dev/null | grep -qiF "${_fp}"; then
+      printf 'ok\trescue SSH key registered in Robot (%s)\n' "${_fp}"
+    else
+      printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${_fp}"
+    fi
+  fi
+
+  # 4) Inventory sanity (control-plane count).
+  local inv
+  inv="$(provider::output "${config_file}" 2>/dev/null || echo '{}')"
+  local cp_count
+  cp_count="$(echo "${inv}" | jq '[(.nodes // [])[] | select(.role=="control-plane")] | length' 2>/dev/null || echo 0)"
+  if [[ "${cp_count}" =~ ^[0-9]+$ ]] && (( cp_count > 0 )); then
+    printf 'ok\tinventory: %s control-plane node(s) resolved\n' "${cp_count}"
+  else
+    printf 'warn\tinventory: no control-plane nodes resolved — check descriptor labels / hcloud state\n'
+  fi
+
+  # SSH identity for read-only node probes.
+  local _key
+  _key="$(echo "${desc}" | jq -r '.sshPrivateKey // ""')"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME below
+  [[ "${_key}" != "~/"* ]] || _key="${HOME}/${_key:2}"
+  local -a _ssh=(ssh -o BatchMode=yes -o ConnectTimeout=6
+                 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+  [[ -z "${_key}" ]] || _ssh+=(-i "${_key}")
+
+  # 5) Per-node: existence/reachability + bare-metal installed-vs-rescue.
+  local scount idx server name is_root pub num
+  scount="$(echo "${desc}" | jq '(.server // []) | length' 2>/dev/null || echo 0)"
+  for (( idx=0; idx<scount; idx++ )); do
+    server="$(echo "${desc}" | jq -c ".server[${idx}]")"
+    name="$(echo "${server}" | jq -r '.name // ""')"
+    [[ -n "${name}" ]] || continue
+    is_root="$(echo "${server}" | jq -r '.["#cloud.root"] // ""')"
+    pub="$(echo "${inv}" | jq -r --arg n "${name}" '.nodes[] | select(.name==$n) | .public_ip // empty')"
+    if [[ "${is_root}" == "true" ]]; then
+      if (( _have_robot )); then
+        num="$(hetzner::_robot_server_number "${name}" 2>/dev/null)"
+        if [[ -n "${num}" ]]; then
+          printf 'ok\tworker %s resolvable in Robot (robot#%s)\n' "${name}" "${num}"
+        else
+          printf 'warn\tworker %s NOT found in Robot — check the descriptor name matches the Robot server_name\n' "${name}"
+        fi
+      else
+        printf 'warn\tworker %s: cannot check Robot state (no Robot creds)\n' "${name}"
+      fi
+      if [[ -n "${pub}" ]]; then
+        if "${_ssh[@]}" "root@${pub}" 'test -x /root/.oldroot/nfs/install/installimage' 2>/dev/null; then
+          printf 'ok\tworker %s is in rescue (ready for reinstall)\n' "${name}"
+        elif "${_ssh[@]}" "root@${pub}" 'true' 2>/dev/null; then
+          printf 'warn\tworker %s is installed, not in rescue — set HROBOT_USER/HROBOT_PASSWORD to reset it automatically (provider::rebuild), or activate rescue via the Robot console\n' "${name}"
+        else
+          printf 'warn\tworker %s (%s) unreachable over SSH — cannot determine rescue/installed state\n' "${name}" "${pub}"
+        fi
+      fi
+    else
+      if [[ -n "${pub}" ]]; then
+        printf 'ok\tcloud node %s present (%s)\n' "${name}" "${pub}"
+      else
+        printf 'warn\tcloud node %s not found in live inventory — it may be missing or unlabeled\n' "${name}"
+      fi
+    fi
+  done
 }
 
 # ── CLI entry point ──────────────────────────────────────

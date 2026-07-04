@@ -20,7 +20,18 @@ Every provider implements five functions:
 | `provider::destroy` | Tear down cloud resources |
 | `provider::output` | Standard inventory JSON (the bridge to drivers) |
 
-Optional: `provider::status` (Running / Partial / NotFound).
+### Optional functions
+
+| Function | Purpose |
+|----------|---------|
+| `provider::status` | Infrastructure status (Running / Partial / NotFound) |
+| `provider::rebuild` | Reset the descriptor's **existing** nodes to a fresh-install state **in place** (no recreate — IPs/network/LB preserved). Same signature as `provision`/`destroy`. Descriptor-driven, DESTRUCTIVE (reimages nodes) but does not prompt — consent belongs to the caller. Powers cluster recovery. |
+| `provider::doctor` | READ-ONLY, advisory infrastructure diagnosis. Never dies, never mutates. Emits `<status>⇥<message>` lines (`ok`/`warn`) + a `summary` line; `lo doctor` renders these as its **provider / infrastructure** section (see [`lo doctor`](../../docs/guide/bare-metal.md#diagnose-infrastructure-lo-doctor)). |
+
+The hetzner provider implements both: cloud VMs are reimaged with `hcloud
+server rebuild`, bare-metal (`#cloud.root`) nodes are booted into the Robot
+rescue system. Neither wipes data disks — that is the descriptor's
+`#wipe-devices` feature, honored during `lo provision`.
 
 ## Standard output
 
