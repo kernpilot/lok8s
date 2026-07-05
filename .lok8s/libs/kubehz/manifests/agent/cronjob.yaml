@@ -197,6 +197,13 @@ spec:
                   # Authenticated heartbeat: the agent-token (A) proves this beat
                   # is the cluster's real, enrolled identity — the platform's
                   # ratchet 401s an anonymous/invalid beat once a token exists.
+                  # Guard an empty A (the Secret read failed this tick): a blank
+                  # bearer is guaranteed to 401, so skip the POST and let the next
+                  # tick retry once the Secret is readable (fail-soft, exit 0).
+                  if [ -z "${AGENT_TOKEN}" ]; then
+                    echo "kubehz: agent-token unavailable; skipping heartbeat (retrying next tick)" >&2
+                    exit 0
+                  fi
                   curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
                     -H "Authorization: Bearer ${AGENT_TOKEN}" \

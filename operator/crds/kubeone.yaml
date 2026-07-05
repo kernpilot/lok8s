@@ -122,7 +122,7 @@ spec:
                         - registered
                         - managed
                       description: >-
-                        registered = read-only heartbeat visibility. managed = reserved, in development — currently behaves as registered (no operator is deployed).
+                        none = no kubehz integration. registered = read-only heartbeat visibility. managed = reserved, in development — currently behaves as registered (no operator is deployed).
                     apiUrl:
                       type: string
                       pattern: "^https://"

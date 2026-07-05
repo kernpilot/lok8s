@@ -132,7 +132,7 @@ STUBS_EOF
   # No store yet → absent.
   [ ! -f "${STORE_A}" ]
 
-  run bash "${RUNNER}"
+  run sh "${RUNNER}"
   assert_success
 
   # A = khz_agt_<64 hex>, C = khzc_<64 hex> — 256-bit, distinct prefixes.
@@ -147,14 +147,14 @@ STUBS_EOF
 @test "agent: a second run NEVER rotates A or C (idempotent secret)" {
   _build_runner
 
-  run bash "${RUNNER}"
+  run sh "${RUNNER}"
   assert_success
   local a1 c1
   a1="$(cat "${STORE_A}")"
   c1="$(cat "${STORE_C}")"
 
   # Re-run against the SAME store (mirrors a re-applied / re-fired agent).
-  run bash "${RUNNER}"
+  run sh "${RUNNER}"
   assert_success
 
   assert_equal "$(cat "${STORE_A}")" "${a1}"
@@ -169,7 +169,7 @@ STUBS_EOF
 
 @test "agent: agent-register posts sha256(A)/sha256(C) — never the plaintext secrets" {
   _build_runner
-  run bash "${RUNNER}"
+  run sh "${RUNNER}"
   assert_success
 
   # Valid JSON with the domain and both hashes.
@@ -202,7 +202,7 @@ STUBS_EOF
 
 @test "agent: the heartbeat sends Authorization: Bearer khz_agt_… and valid JSON" {
   _build_runner
-  run bash "${RUNNER}"
+  run sh "${RUNNER}"
   assert_success
 
   local a
