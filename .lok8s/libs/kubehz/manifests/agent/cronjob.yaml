@@ -126,9 +126,9 @@ spec:
                   # larger cluster reports its first 20 nodes AND logs the
                   # truncation to stderr (never a silent drop).
                   NODES_ALL=$(kubectl get nodes \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || NODES_ALL=""
                   NODES=$(echo "${NODES_ALL}" | head -20)
-                  NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c .)
+                  NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c . || true)
                   [ "${NODE_TOTAL}" -gt 20 ] && echo "kubehz: heartbeat summarizes the first 20 of ${NODE_TOTAL} nodes" >&2
 
                   # Per-node payload. instanceType mirrors the well-known
