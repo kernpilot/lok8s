@@ -100,7 +100,10 @@ spec:
           enum:
             - registered
             - managed
-          description: Heartbeat-only (registered) vs platform-managed.
+          description: >-
+            registered = read-only heartbeat visibility.
+            managed = reserved, in development — currently behaves as
+            registered (no operator is deployed).
         apiUrl:
           type: string
           pattern: "^https://"

@@ -216,7 +216,7 @@ teardown() {
   # access: managed must never point at a non-existent operator image (an apply
   # would ImagePullBackOff forever). Guard the ghost from creeping back into the
   # public repo: no such image string, and no manifests/operator/ directory.
-  run grep -rn "ghcr.io/kernpilot/kubehz-operator" "${_PROJECT_ROOT}/.lok8s/libs/kubehz"
+  run grep -rnF "ghcr.io/kernpilot/kubehz-operator" "${_PROJECT_ROOT}/.lok8s/libs/kubehz"
   assert_failure
   assert [ ! -d "${_PROJECT_ROOT}/.lok8s/libs/kubehz/manifests/operator" ]
   # The real heartbeat agent (access: registered) is untouched.
