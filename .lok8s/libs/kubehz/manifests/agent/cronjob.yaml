@@ -122,8 +122,14 @@ spec:
                   # .status.volumesAttached[].name (CSI handles) — the loop then
                   # runs `kubectl get node runc`, which NotFounds, and `set -e`
                   # kills the whole heartbeat before it ever POSTs.
-                  NODES=$(kubectl get nodes \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | head -20)
+                  # Cap the per-node loop at 20 to bound the beat's runtime; a
+                  # larger cluster reports its first 20 nodes AND logs the
+                  # truncation to stderr (never a silent drop).
+                  NODES_ALL=$(kubectl get nodes \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+                  NODES=$(echo "${NODES_ALL}" | head -20)
+                  NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c .)
+                  [ "${NODE_TOTAL}" -gt 20 ] && echo "kubehz: heartbeat summarizes the first 20 of ${NODE_TOTAL} nodes" >&2
 
                   # Per-node payload. instanceType mirrors the well-known
                   # node.kubernetes.io/instance-type label (set by the cloud
@@ -134,7 +140,7 @@ spec:
                   NODE_ARRAY="["
                   first=true
                   for node in ${NODES}; do
-                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || status=""
                     # roles: control-plane iff the node carries the
                     # node-role.kubernetes.io/control-plane (or legacy /master)
                     # LABEL KEY. Those labels have an EMPTY value, so a per-key
