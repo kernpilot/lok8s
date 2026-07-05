@@ -2,9 +2,11 @@
 #
 # Reusable workflow (workflow_call) + manual trigger (workflow_dispatch) that
 # provisions a committed cluster from your repo with `lo` and — when the cluster
-# opts into kubehz visibility (spec.kubehz.access != none) — registers it and
-# prints the SSH-key MD5 fingerprint to the job summary so you can claim the
-# cluster from the dashboard.
+# opts into kubehz visibility (spec.kubehz.access != none) — registers it via the
+# claim-key flow: a dedicated SSH key 'kubehz-claim-<domain>' is planted in your
+# Hetzner Cloud project, and its fingerprint (the claim ticket) is deliberately
+# kept OUT of logs and the job summary — you read it from your own Hetzner
+# console to claim the cluster from the dashboard.
 #
 # It needs exactly ONE secret: HCLOUD_TOKEN (your Hetzner Cloud API token, used by
 # `lo`/the provider to create the infrastructure). No platform/API token is
@@ -70,8 +72,11 @@ jobs:
         run: b install
 
       # Provision the cluster. For a self-hosted cluster with kubehz visibility,
-      # `lo provision` registers a PENDING cluster and prints its claim
-      # fingerprint. We tee the output so we can lift that line into the summary.
+      # `lo provision` registers a PENDING cluster via the claim-key flow (the
+      # workflow always has HCLOUD_TOKEN): the fingerprint of the planted
+      # 'kubehz-claim-<domain>' key is the claim ticket and is deliberately NOT
+      # printed — a CI log/summary is no place for a claim secret. We only
+      # detect THAT registration happened, to emit the pointer below.
       - name: Provision & register
         id: provision
         env:
@@ -81,34 +86,34 @@ jobs:
           set -o pipefail
           lo provision "${DOMAIN}" 2>&1 | tee /tmp/provision.log
 
-          # register_cluster prints "  fingerprint: <md5>" on success. Lift it
+          # register_cluster prints "registered (pending)" on success. Detect it
           # (best-effort; absent for non-kubehz / access:none clusters).
-          fp="$(grep -oE 'fingerprint: .+' /tmp/provision.log | head -n1 | sed 's/^fingerprint: //')"
-          {
-            echo "fingerprint<<EOF"
-            echo "${fp}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
+          registered=false
+          if grep -q "registered (pending)" /tmp/provision.log; then
+            registered=true
+          fi
+          echo "registered=${registered}" >> "${GITHUB_OUTPUT}"
 
-      # Write the claim handshake to the job summary. The fingerprint is public
-      # (not a secret); the Hetzner token is NEVER printed here.
+      # Point at the claim ticket WITHOUT printing it: the fingerprint of the
+      # kubehz-claim key lives only in the user's Hetzner Cloud project, which
+      # is exactly what makes pasting it at /claim an ownership proof.
       - name: Claim instructions
-        if: always() && steps.provision.outputs.fingerprint != ''
+        if: always() && steps.provision.outputs.registered == 'true'
         env:
           DOMAIN: ${{ inputs.domain }}
-          FINGERPRINT: ${{ steps.provision.outputs.fingerprint }}
         run: |
           {
             echo "## Cluster registered — claim it to take ownership"
             echo ""
-            echo "Your cluster \`${DOMAIN}\` is registered with kubehz as **pending**."
-            echo "To attach it to your account, open the dashboard **Claim** page and paste:"
+            echo "Your cluster \`${DOMAIN}\` is registered with kubehz as **pending**,"
+            echo "and lok8s planted a dedicated claim key \`kubehz-claim-${DOMAIN}\` in your"
+            echo "Hetzner Cloud project. Its fingerprint is your **claim ticket** — treat it"
+            echo "like a password; it is deliberately not printed here."
             echo ""
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| SSH fingerprint (MD5) | \`${FINGERPRINT}\` |"
-            echo "| Hetzner Cloud token | _(enter your own — proves ownership, used once, never stored)_ |"
+            echo "1. Open your Hetzner Cloud console → **Security → SSH keys** and copy the"
+            echo "   fingerprint of \`kubehz-claim-${DOMAIN}\` (or run \`hcloud ssh-key list\`)."
+            echo "2. Paste it on the kubehz dashboard **Claim** page."
             echo ""
-            echo "kubehz verifies the fingerprint against the SSH keys in your Hetzner"
-            echo "account, then attaches the cluster to your tenant."
+            echo "The ticket is one-time use; after a successful claim you may delete the"
+            echo "\`kubehz-claim-${DOMAIN}\` SSH key from your Hetzner project."
           } >> "${GITHUB_STEP_SUMMARY}"

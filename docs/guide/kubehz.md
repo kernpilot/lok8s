@@ -54,43 +54,95 @@ Registration is a **public, unauthenticated** POST to
 
 - the cluster **domain** (which becomes its platform identity), and
 - an SSH-key **MD5 fingerprint** (Hetzner exposes MD5 fingerprints, so lok8s
-  emits `ssh-keygen -E md5`, not SHA256).
+  uses MD5, not SHA256).
 
-How the fingerprint is derived depends on the cluster kind: `KubeOne` reads
-the SSH public key from the provider output (falling back to
+This creates a **pending** cluster on the platform. Registration proves
+nothing by itself and needs no token — ownership is proven later, at claim
+time. If the API is unreachable, provisioning warns and continues without
+the integration. Where the fingerprint comes from depends on the
+environment:
+
+### The claim key (default on Hetzner)
+
+When `HCLOUD_TOKEN` is available — which is every hcloud provisioning
+environment, including the [CI spinup workflow](./deployment.md#provisioning-from-ci)
+— lok8s plants a **dedicated claim key** in your Hetzner Cloud project:
+
+1. It generates an ephemeral ed25519 keypair locally.
+2. It uploads only the **public** half to your hcloud project as an SSH key
+   named `kubehz-claim-<domain>`, and registers that key's MD5 fingerprint
+   with the platform.
+3. It **discards the private key** immediately. The key is never used for
+   SSH — it exists solely so its fingerprint is readable in *your* Hetzner
+   console.
+
+That fingerprint is your **claim ticket**: it lives inside your hcloud
+account, where only you can read it. lok8s therefore does **not** print it
+— not to the terminal, not to CI job summaries:
+
+```
+kubehz: cluster 'my-cluster.example.com' registered (pending).
+  To claim it: open your Hetzner Cloud console → Security → SSH keys,
+  copy the fingerprint of 'kubehz-claim-my-cluster.example.com' (or: hcloud ssh-key list),
+  and paste it at your kubehz dashboard's /claim page.
+```
+
+Re-registering is idempotent: an existing `kubehz-claim-<domain>` key is
+reused as-is, never rotated — the ticket you read from the console stays
+valid.
+
+### Server-key fallback (no `HCLOUD_TOKEN`)
+
+Without `HCLOUD_TOKEN` (non-hcloud contexts), or if planting the claim key
+fails, lok8s falls back to the cluster's own SSH-key fingerprint: `KubeOne`
+reads the SSH public key from the provider output (falling back to
 `spec.hcloud.sshPublicKeyFile`), `Capi` resolves `spec.hcloud.sshKeyName`
 via the hcloud API, and `Lo` clusters — which have no SSH keys — use a
-`lo:<domain>` identifier instead.
-
-This creates a **pending** cluster on the platform and the CLI prints the
-fingerprint (the reusable provision workflow also writes it to the GitHub
-job summary):
+`lo:<domain>` identifier instead. A server-key fingerprint is public (safe
+in logs), so the CLI prints it — and claiming it goes through the
+[token-verification path](#token-verification-fallback-fingerprints):
 
 ```
 kubehz: cluster 'my-cluster.example.com' registered (pending). Claim it in the dashboard:
   fingerprint: MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99
+  note: no HCLOUD_TOKEN in this environment — claiming this cluster will use
+  the token-verification path (fingerprint + your Hetzner Cloud API token).
 ```
-
-Registration proves nothing by itself and needs no token — ownership is
-proven later, at claim time. If the API is unreachable, provisioning warns
-and continues without the integration.
 
 ## Claiming
 
 A pending cluster is attached to your account through the dashboard
-**Claim** page. You provide two things:
+**Claim** page. What you paste there depends on which fingerprint was
+registered.
+
+### With a claim key
+
+The fingerprint of `kubehz-claim-<domain>` works as a **secret ticket
+inside your hcloud account** — being able to read it proves you own the
+project the cluster was provisioned into. No hcloud token is handed to the
+platform:
+
+1. Open your Hetzner Cloud console → **Security → SSH keys** and copy the
+   fingerprint of `kubehz-claim-<domain>` (or run `hcloud ssh-key list`).
+2. Paste it at the dashboard **Claim** page.
+
+Treat that fingerprint like a password while the cluster is pending:
+**never share or post it** — anyone who knows it can claim the cluster.
+It is **one-time use**: the claim consumes it. After a successful claim you
+may delete the `kubehz-claim-<domain>` key from your hcloud project — the
+platform never uses it again.
+
+### Token verification (fallback fingerprints)
+
+A server-key fingerprint is public, so knowing it proves nothing. Claiming
+one takes two inputs:
 
 1. the **MD5 fingerprint** printed at registration, and
 2. **your own Hetzner Cloud API token** — used once to verify that the SSH
    key behind the fingerprint lives in your hcloud account. The token is
    used transiently for that lookup and is **never stored**.
 
-The fingerprint is not a secret (it is safe in logs and job summaries); the
-hcloud token is the actual proof of ownership and never leaves the claim
-request. No platform token is needed in CI: provisioning stays tokenless,
-claiming is interactive.
-
-You can reproduce the fingerprint locally at any time:
+You can reproduce a server-key fingerprint locally at any time:
 
 ```bash
 ssh-keygen -E md5 -lf ~/.ssh/id_ed25519.pub
@@ -192,11 +244,15 @@ registered (or was deregistered) — re-run `lo kubehz register`.
 the cluster is fully functional without it. Re-run `lo kubehz register`
 once the API is reachable.
 
-**Fingerprint mismatch at claim time?** The platform matches MD5
-fingerprints against the SSH keys in *your* hcloud account. Verify the key
-that provisioned the cluster is uploaded there, and compare against
-`ssh-keygen -E md5 -lf <key>.pub` (the `MD5:` prefix is accepted and
-normalized away).
+**Fingerprint mismatch at claim time?** For a claim-key registration, the
+value must match the `kubehz-claim-<domain>` key **exactly as your Hetzner
+console shows it** — copy it fresh from **Security → SSH keys** (or
+`hcloud ssh-key list`); if the key was deleted before claiming, re-run
+`lo kubehz register` to plant a new one. For a token-verification claim,
+the platform matches the fingerprint against the SSH keys in *your* hcloud
+account: verify the key that provisioned the cluster is uploaded there, and
+compare against `ssh-keygen -E md5 -lf <key>.pub` (the `MD5:` prefix is
+accepted and normalized away).
 
 **`spec.kubehz.apiUrl is required` / HTTPS errors?** Set `apiUrl` whenever
 `hosting: hosted` or `access != none`, and use an `https://` URL — plain

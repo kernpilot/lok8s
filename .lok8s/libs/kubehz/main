@@ -135,16 +135,88 @@ kubehz::get_ssh_fingerprint() {
   esac
 }
 
+# ── Claim key (in-account ticket) ────────────────────────
+
+# Provision the dedicated kubehz claim key in the user's Hetzner Cloud project
+# and print its MD5 fingerprint (Hetzner console form, no "MD5:" prefix).
+#
+# The claim model: lok8s generates an EPHEMERAL ed25519 keypair, uploads only
+# the PUBLIC half as an hcloud SSH key named "kubehz-claim-<domain>", and
+# discards the private half (it is never used for SSH — the key exists solely
+# so its fingerprint shows up in the user's Hetzner console). That fingerprint
+# is the claim SECRET: only someone with access to the hcloud project can read
+# it, so pasting it at the dashboard /claim page proves account ownership —
+# an in-account ticket, no hcloud token handed to the platform.
+#
+# Idempotent: if a key with that name already exists, its fingerprint is the
+# outstanding ticket — reuse it, never rotate it (a re-run must keep the value
+# the user reads from the console valid).
+#
+# Requires HCLOUD_TOKEN (or an active hcloud context) + the hcloud CLI — the
+# caller gates on that. Returns 1 on any failure; prints nothing but the
+# fingerprint on success.
+# Usage: kubehz::claim_key_fingerprint <domain>
+kubehz::claim_key_fingerprint() {
+  local domain="$1"
+  local key_name="kubehz-claim-${domain}"
+  local existing fp
+
+  # Reuse an existing claim key's fingerprint (idempotent re-register).
+  if existing=$(hcloud ssh-key describe "${key_name}" -o json 2>/dev/null); then
+    fp=$(jq -r '.fingerprint // empty' <<<"${existing}")
+    [[ -n "${fp}" ]] || return 1
+    echo "${fp}"
+    return 0
+  fi
+
+  # Generate the ephemeral keypair in a private temp dir.
+  local tmp
+  tmp=$(mktemp -d) || return 1
+  if ! ssh-keygen -q -t ed25519 -N "" -C "${key_name}" -f "${tmp}/claim_key" >/dev/null 2>&1; then
+    rm -rf "${tmp}"
+    return 1
+  fi
+
+  if ! hcloud ssh-key create --name "${key_name}" --public-key-from-file "${tmp}/claim_key.pub" >/dev/null 2>&1; then
+    # Create lost a race (or the name got taken between describe and create):
+    # the existing key IS the ticket — settle with one more describe.
+    rm -rf "${tmp}"
+    existing=$(hcloud ssh-key describe "${key_name}" -o json 2>/dev/null) || return 1
+    fp=$(jq -r '.fingerprint // empty' <<<"${existing}")
+    [[ -n "${fp}" ]] || return 1
+    echo "${fp}"
+    return 0
+  fi
+
+  # MD5 fingerprint computed locally from the public key — identical to what
+  # the Hetzner console shows. Normalize to Hetzner's form (strip "MD5:").
+  fp=$(ssh-keygen -lf "${tmp}/claim_key.pub" -E md5 2>/dev/null | awk '{print $2}')
+  # DISCARD the private key — it is never used again.
+  rm -rf "${tmp}"
+  fp="${fp#MD5:}"
+  [[ -n "${fp}" ]] || return 1
+  echo "${fp}"
+}
+
 # ── Registration ─────────────────────────────────────────
 
 # Register a self-hosted cluster with the kubehz API.
 #
-# This announces a PENDING cluster to kubehz (POST /api/clusters/register) using
-# the SSH-key MD5 fingerprint as the ownership anchor. It does NOT prove
-# ownership and needs NO bearer/token: the user later proves ownership in the
-# dashboard /claim (pasting this fingerprint + their Hetzner Cloud token), which
-# attaches the cluster to their tenant. The printed fingerprint is the user-facing
-# half of that handshake (see the provision GitHub Action job summary).
+# This announces a PENDING cluster to kubehz (POST /api/clusters/register) as
+# {domain, fingerprint}. It does NOT prove ownership and needs NO bearer/token —
+# the user proves ownership later at the dashboard /claim page. Two fingerprint
+# sources, decided by the environment:
+#
+#   claim-key path (HCLOUD_TOKEN + hcloud CLI present — every hcloud
+#   provisioning env): the fingerprint of the dedicated claim key
+#   "kubehz-claim-<domain>" (see kubehz::claim_key_fingerprint). That
+#   fingerprint is a claim SECRET readable only inside the user's Hetzner
+#   project, so it is NEVER printed (CI job summaries would leak the ticket).
+#
+#   server-key fallback (non-hcloud contexts, or the claim-key provisioning
+#   failed): the cluster's own SSH-key fingerprint via
+#   kubehz::get_ssh_fingerprint, printed as before — it is public, so claiming
+#   it additionally requires the Hetzner-token verification path.
 #
 # Called during provision when access != none. Non-fatal: warns on failure,
 # returns 0 so provisioning continues without kubehz integration.
@@ -158,11 +230,22 @@ kubehz::register_cluster() {
   # standalone (lo kubehz register), so re-assert before any network call.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 0
 
-  local fingerprint
-  fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
-    warn "Could not extract SSH fingerprint for ${domain}, skipping registration"
-    return 0
-  }
+  local fingerprint="" claim_mode="server"
+  if [[ -n "${HCLOUD_TOKEN:-}" ]] && command -v hcloud &>/dev/null; then
+    if fingerprint=$(kubehz::claim_key_fingerprint "${domain}"); then
+      claim_mode="key"
+    else
+      warn "Could not provision the kubehz claim key 'kubehz-claim-${domain}' in your Hetzner project — falling back to the server SSH-key fingerprint"
+      fingerprint=""
+    fi
+  fi
+
+  if [[ -z "${fingerprint}" ]]; then
+    fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
+      warn "Could not extract SSH fingerprint for ${domain}, skipping registration"
+      return 0
+    }
+  fi
 
   local payload
   payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" '{domain: $d, fingerprint: $fp}')
@@ -183,10 +266,21 @@ kubehz::register_cluster() {
   fi
 
   debug "Cluster registered with kubehz (pending claim): ${cluster_id}"
-  # Surface the claim handshake. The fingerprint is public (not a secret), so it
-  # is safe to print; the Hetzner token is NEVER printed or sent here.
-  echo "kubehz: cluster '${domain}' registered (pending). Claim it in the dashboard:"
-  echo "  fingerprint: ${fingerprint}"
+  if [[ "${claim_mode}" == "key" ]]; then
+    # The fingerprint is the claim secret — do NOT print it (CI job summaries
+    # would leak the ticket). Point the user at their own Hetzner console.
+    echo "kubehz: cluster '${domain}' registered (pending)."
+    echo "  To claim it: open your Hetzner Cloud console → Security → SSH keys,"
+    echo "  copy the fingerprint of 'kubehz-claim-${domain}' (or: hcloud ssh-key list),"
+    echo "  and paste it at your kubehz dashboard's /claim page."
+  else
+    # Server-key fallback: this fingerprint is public (safe in logs); claiming
+    # it requires the Hetzner-token verification path in the dashboard.
+    echo "kubehz: cluster '${domain}' registered (pending). Claim it in the dashboard:"
+    echo "  fingerprint: ${fingerprint}"
+    echo "  note: no HCLOUD_TOKEN in this environment — claiming this cluster will use"
+    echo "  the token-verification path (fingerprint + your Hetzner Cloud API token)."
+  fi
 }
 
 # ── Deregistration ───────────────────────────────────────

@@ -199,10 +199,14 @@ under `clusters/<domain>/`.
 ### Claiming a registered cluster
 
 When a cluster opts into kubehz dashboard visibility (`spec.kubehz.access` is set
-to `registered` or `managed`), `lo provision` registers it as **pending** and
-prints its SSH-key **MD5 fingerprint**. You then claim the cluster in the
-dashboard with that fingerprint plus your own Hetzner Cloud token (used once as
-ownership proof, never stored) — no platform token is needed in CI.
+to `registered` or `managed`), `lo provision` registers it as **pending**. Since
+the workflow runs with `HCLOUD_TOKEN`, lok8s uses the **claim-key** flow: it
+plants a dedicated SSH key `kubehz-claim-<domain>` in your Hetzner Cloud project
+and keeps that key's fingerprint out of the logs and the job summary — the
+fingerprint is your **claim ticket**, readable only inside your hcloud account.
+Copy it from the Hetzner console (**Security → SSH keys**, or
+`hcloud ssh-key list`) and paste it on the dashboard **Claim** page — no platform
+token is needed in CI, and no hcloud token is handed to the platform.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.

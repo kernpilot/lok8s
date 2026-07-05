@@ -7,6 +7,10 @@ setup() {
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
 
+  # The claim-key path gates on HCLOUD_TOKEN — the host/CI environment may
+  # export one, so unset it here; claim-key tests set it explicitly.
+  unset HCLOUD_TOKEN
+
   import() { :; }
   export -f import
 
@@ -129,9 +133,9 @@ teardown() {
   assert_output --partial "Cannot extract SSH fingerprint for kind=unknownkind"
 }
 
-# ── register_cluster: successful registration ────────────
+# ── register_cluster: server-key fallback (no HCLOUD_TOKEN) ─
 
-@test "register_cluster: posts to /api/clusters/register and prints the claim fingerprint" {
+@test "register_cluster: no HCLOUD_TOKEN falls back to server key and prints the fingerprint" {
   yq() {
     case "$2" in
       '.kind') echo "Lo" ;;
@@ -157,14 +161,210 @@ teardown() {
   }
   export -f jq
 
+  # Must NOT be touched without HCLOUD_TOKEN.
+  hcloud() { echo "hcloud must not run without HCLOUD_TOKEN: $*" >&2; return 99; }
+  export -f hcloud
+
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
 
   run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_success
-  # The claim handshake (public fingerprint) is surfaced to the user.
+  # Fallback keeps the old handshake: the (public) fingerprint is printed,
+  # plus the pointer at the token-verification claim path.
   assert_output --partial "Claim it in the dashboard"
+  assert_output --partial "fingerprint: lo:test.kubehz.dev"
+  assert_output --partial "token-verification path"
+}
+
+# ── register_cluster: claim-key path (HCLOUD_TOKEN present) ─
+
+@test "register_cluster: claim-key path uploads kubehz-claim-<domain> and never prints the fingerprint" {
+  yq() {
+    case "$2" in
+      '.kind') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  curl() {
+    [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
+      || { echo "curl wrong endpoint: $*" >&2; return 1; }
+    echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
+  }
+  export -f curl
+
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-001" ;;
+      *'.fingerprint // empty'*) echo "" ;;
+      *) echo '{}' ;;  # payload build (-n) — opaque, curl is mocked
+    esac
+  }
+  export -f jq
+
+  # No existing key -> create; the upload MUST carry the ticket name.
+  hcloud() {
+    case "$1 $2" in
+      "ssh-key describe") return 1 ;;
+      "ssh-key create")
+        [[ " $* " == *" --name kubehz-claim-test.kubehz.dev "* ]] \
+          || { echo "hcloud create wrong key name: $*" >&2; return 1; }
+        [[ " $* " == *"--public-key-from-file"* ]] \
+          || { echo "hcloud create without public key file: $*" >&2; return 1; }
+        return 0 ;;
+      *) echo "unexpected hcloud call: $*" >&2; return 1 ;;
+    esac
+  }
+  export -f hcloud
+
+  # Generation call creates the key files; fingerprint call must use -E md5.
+  ssh-keygen() {
+    if [[ " $* " == *" -t ed25519 "* ]]; then
+      local -a args=("$@"); local i f=""
+      for ((i = 0; i < ${#args[@]}; i++)); do
+        [[ "${args[i]}" == "-f" ]] && f="${args[i + 1]}"
+      done
+      [[ -n "${f}" ]] || { echo "ssh-keygen -t without -f: $*" >&2; return 1; }
+      : > "${f}"
+      : > "${f}.pub"
+      return 0
+    fi
+    [[ " $* " == *" -E md5 "* ]] || { echo "ssh-keygen called without -E md5: $*" >&2; return 1; }
+    echo "256 MD5:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00 kubehz-claim-test.kubehz.dev (ED25519)"
+  }
+  export -f ssh-keygen
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export HCLOUD_TOKEN="test-hcloud-token"
+  # Private temp dir for the ephemeral keypair — lets us assert the discard.
+  export TMPDIR="${BATS_TEST_TMPDIR}/claimtmp"
+  mkdir -p "${TMPDIR}"
+
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registered (pending)"
+  assert_output --partial "Hetzner Cloud console"
+  assert_output --partial "kubehz-claim-test.kubehz.dev"
+  assert_output --partial "/claim"
+  # The fingerprint is now the claim secret — it must NOT appear in output.
+  refute_output --partial "11:22:33"
+  refute_output --partial "fingerprint:"
+
+  # The ephemeral private key is DISCARDED (temp dir removed).
+  run find "${BATS_TEST_TMPDIR}/claimtmp" -mindepth 1
+  assert_output ""
+}
+
+@test "register_cluster: claim-key path reuses an existing kubehz-claim key (no rotate, no print)" {
+  yq() {
+    case "$2" in
+      '.kind') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  curl() {
+    echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
+  }
+  export -f curl
+
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-001" ;;
+      *'.fingerprint // empty'*) echo "ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00:ff" ;;
+      *) echo '{}' ;;
+    esac
+  }
+  export -f jq
+
+  # Existing key: describe succeeds; create/keygen must NOT run (no rotation —
+  # rotating would invalidate the ticket the user already read).
+  hcloud() {
+    case "$1 $2" in
+      "ssh-key describe")
+        [[ "$3" == "kubehz-claim-test.kubehz.dev" ]] \
+          || { echo "describe wrong key name: $*" >&2; return 1; }
+        echo '{"name":"kubehz-claim-test.kubehz.dev","fingerprint":"ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00:ff"}'
+        return 0 ;;
+      *) echo "unexpected hcloud call (must reuse, not create): $*" >&2; return 1 ;;
+    esac
+  }
+  export -f hcloud
+
+  ssh-keygen() { echo "ssh-keygen must not run when the claim key exists: $*" >&2; return 1; }
+  export -f ssh-keygen
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export HCLOUD_TOKEN="test-hcloud-token"
+
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registered (pending)"
+  assert_output --partial "kubehz-claim-test.kubehz.dev"
+  refute_output --partial "ee:dd:cc"
+  refute_output --partial "fingerprint:"
+}
+
+@test "register_cluster: claim-key provisioning failure falls back to the server key" {
+  yq() {
+    case "$2" in
+      '.kind') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  curl() {
+    echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
+  }
+  export -f curl
+
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-001" ;;
+      *'.fingerprint // empty'*) echo "" ;;
+      *) echo '{}' ;;
+    esac
+  }
+  export -f jq
+
+  # hcloud is present but broken (revoked token, API down, …).
+  hcloud() { return 1; }
+  export -f hcloud
+
+  ssh-keygen() {
+    if [[ " $* " == *" -t ed25519 "* ]]; then
+      local -a args=("$@"); local i f=""
+      for ((i = 0; i < ${#args[@]}; i++)); do
+        [[ "${args[i]}" == "-f" ]] && f="${args[i + 1]}"
+      done
+      [[ -n "${f}" ]] && { : > "${f}"; : > "${f}.pub"; }
+      return 0
+    fi
+    echo "256 MD5:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00 x (ED25519)"
+  }
+  export -f ssh-keygen
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export HCLOUD_TOKEN="test-hcloud-token"
+
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  # Fail-soft: registration still happens via the old server-key handshake.
+  assert_output --partial "falling back to the server SSH-key fingerprint"
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
 }
 
