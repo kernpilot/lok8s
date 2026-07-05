@@ -1,0 +1,419 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# recover — rebuild a cluster from bare metal (disaster recovery)
+#
+# `lo recover <domain>` orchestrates already-merged pieces into a single,
+# hands-off bare-metal-up recovery:
+#
+#   resolve → doctor → consent → rebuild → provision → verify
+#
+# It is a THIN orchestrator: every step reuses an existing, tested primitive —
+# provision::resolve_spec / provision::dispatch (= `lo provision`), the provider
+# contract's OPTIONAL provider::rebuild (destructive node reset, atomic preflight,
+# honors CLOUD_DRY_RUN) and provider::doctor (read-only advisory diagnosis). It
+# adds only the glue: transparency (doctor BEFORE anything destructive), the
+# destructive-consent prompt (the guard lives HERE, not in the provider hooks),
+# per-phase timing, and a Ready-vs-inventory verify.
+#
+# DESIGN (converged with the operator):
+#   • doctor ADVISES (never blocks); provider::rebuild ENFORCES (its own atomic
+#     preflight refuses to touch anything if any node fails validation).
+#   • CONSENT lives here. `--force` / LOK8S_NONINTERACTIVE opt out of the prompt.
+#   • `--dry-run` is genuinely safe: it exports CLOUD_DRY_RUN so provider::rebuild
+#     takes its dry-run branches (prints the plan, reimages NOTHING), then STOPS
+#     before any real provision/verify.
+#
+# It supersedes hand-rolled per-cluster DR scripts (e.g. kubehz's `dr-recover`),
+# generalizing their phase-runner + timing shape to any provider-backed cluster
+# whose provider implements provider::rebuild.
+
+import ^utils/verbose
+import ^utils/provider
+import ^libs/provision
+
+# Module state — set by recover::_resolve, consumed by the recover::_* phases.
+# Assigned as globals (not locals) so every phase sees them.
+_RECOVER_DOMAIN=""
+_RECOVER_SPEC=""
+_RECOVER_CONFIG=""
+_RECOVER_PROVIDER=""
+_RECOVER_CLUSTER_NAME=""
+_RECOVER_WORKDIR=""
+
+main::recover() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local skip_rebuild=0 dry_run=0
+  local -a args=(
+    'domain|:^~domain'  'Cluster domain to recover (default: active)'
+    'skip-rebuild|:+'   'Skip the bare-metal node rebuild — re-run provision + verify only'
+    'dry-run|:+'        'Preview the rebuild plan (reimages nothing) and stop before provision'
+    "${args[@]:-}"
+  )
+  :args "Rebuild a cluster from bare metal (disaster recovery)" "${@}"
+
+  # The orchestration lives in recover::_run (no :args) so it is unit-testable
+  # without argsh's flag parser / ~domain validation — the codebase convention.
+  recover::_run "${domain}" "${skip_rebuild}" "${dry_run}"
+}
+
+# recover::_run <domain> <skip_rebuild> <dry_run>
+# The phase orchestrator. Honors the GLOBAL --force (dynamic-scope ${force})
+# and LOK8S_NONINTERACTIVE for the confirm.
+recover::_run() {
+  local domain="$1" skip_rebuild="${2:-0}" dry_run="${3:-0}"
+
+  # Reset module state for this run.
+  declare -ga _RECOVER_TIMINGS=()
+  _RECOVER_DOMAIN="${domain}"
+  _RECOVER_SPEC="" _RECOVER_CONFIG="" _RECOVER_PROVIDER="" _RECOVER_CLUSTER_NAME=""
+  # A work dir is required before anything destructive; abort cleanly if none can
+  # be made. recover::_workdir already emitted the diagnostic; a bare `return 1`
+  # INSIDE its $(...) subshell can't abort us, so guard the assignment here (the
+  # exit status of `var=$(cmd)` is cmd's). Nothing has been touched yet.
+  _RECOVER_WORKDIR="$(recover::_workdir "${domain}")" || return 1
+
+  local t0; t0="$(date +%s 2>/dev/null || echo 0)"
+
+  printf '\n\033[1;36m━━━ recover %s ━━━\033[0m\n' "${domain}" >&2
+
+  # 1. resolve — spec + provider + rebuild-capability. FATAL on failure (before
+  #    anything is touched).
+  recover::_timed resolve recover::_resolve || return 1
+
+  # 2. doctor — transparent, READ-ONLY infrastructure diagnosis. The operator
+  #    sees the infra state + advice BEFORE any destructive action. Advisory:
+  #    it never blocks (enforcement is provider::rebuild's atomic preflight).
+  recover::_timed doctor recover::_doctor || true
+
+  # 3. decide / consent.
+  if (( dry_run )); then
+    # Genuinely safe preview: CLOUD_DRY_RUN flows into provider::rebuild's
+    # dry-run branches — it prints the exact per-node plan and reimages NOTHING.
+    export CLOUD_DRY_RUN=1
+    export CLOUD_DRY_RUN_PATH="${_RECOVER_WORKDIR}/dry-run"
+    recover::_timed rebuild recover::_rebuild \
+      || { unset CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH; return 1; }
+    # Tidy up: don't leave CLOUD_DRY_RUN in the environment behind us (harmless
+    # either way — recover stops here on a dry run and never provisions).
+    unset CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH
+    printf '\n  \033[2mlo provision WOULD run next (fresh install incl. #wipe-devices), then verify.\033[0m\n' >&2
+    recover::_summary "${t0}"
+    printf '\n\033[1;33m━━━ DRY RUN — nothing changed ━━━\033[0m\n' >&2
+    return 0
+  fi
+
+  # Destructive from here. The confirm is THE guard (honors --force /
+  # LOK8S_NONINTERACTIVE). Decline → abort, touch nothing. Pass skip_rebuild so
+  # the prompt wording matches what actually happens (reset vs re-provision).
+  if ! recover::_confirm "${skip_rebuild}"; then
+    warn "recover: aborted by operator — nothing was changed"
+    return 1
+  fi
+
+  # 4. rebuild — DESTRUCTIVE node reset. On failure, do NOT continue to provision
+  #    on a half-reset cluster.
+  if (( skip_rebuild )); then
+    warn "recover: --skip-rebuild — skipping the node rebuild (provision + verify only)"
+    _RECOVER_TIMINGS+=("rebuild=skipped")
+  else
+    recover::_timed rebuild recover::_rebuild \
+      || { error "recover: rebuild failed — NOT provisioning on a half-reset cluster"; return 1; }
+  fi
+
+  # 5. provision — fresh install (`lo provision`; the bare-metal path applies
+  #    #wipe-devices). On failure, stop.
+  recover::_timed provision recover::_provision \
+    || { error "recover: provision failed"; return 1; }
+
+  # 6. verify — node-Ready count vs inventory count. Advisory (never fatal).
+  recover::_timed verify recover::_verify || true
+
+  recover::_summary "${t0}"
+}
+
+# ── phase: resolve ───────────────────────────────────────────────────────────
+# Resolve the spec, require a cluster domain, load the provider, and require the
+# provider implements the rebuild hook. Sets the module state the phases consume.
+recover::_resolve() {
+  provision::resolve_spec "${_RECOVER_DOMAIN}" || return 1
+
+  if [[ "${LOK8S_SPEC_KIND:-}" != "cluster" ]]; then
+    error "recover: '${_RECOVER_DOMAIN}' is not a cluster domain (kind=${LOK8S_SPEC_KIND:-none}) — recover rebuilds a cluster from bare metal; a deploy domain has nothing to reset"
+    return 1
+  fi
+  _RECOVER_SPEC="${LOK8S_SPEC_FILE}"
+
+  recover::_load_provider || return 1
+
+  if ! declare -F provider::rebuild &>/dev/null; then
+    error "provider '${_RECOVER_PROVIDER:-unknown}' does not support recover (no provider::rebuild)"
+    return 1
+  fi
+
+  _RECOVER_CLUSTER_NAME="$(recover::_cluster_name)"
+  debug "recover: resolved ${_RECOVER_DOMAIN} → provider=${_RECOVER_PROVIDER} cluster=${_RECOVER_CLUSTER_NAME}"
+}
+
+# recover::_load_provider — resolve + source the cluster's infrastructure
+# provider, setting _RECOVER_PROVIDER + _RECOVER_CONFIG (PROVIDER_CONFIG_FILE).
+# A distinct seam so the provider machinery is easy to stub in tests.
+recover::_load_provider() {
+  local pname
+  # provider::read_name writes the NAME to stdout (captured here) and its OWN
+  # diagnostic to stderr — e.g. an INVALID spec.provider.name. Do NOT suppress
+  # that stderr (no 2>/dev/null): surfacing it distinguishes an invalid name
+  # from a missing one, so our message must not assert a single cause. It is
+  # quiet on stderr on success, so the happy path stays clean.
+  pname="$(provider::read_name "${_RECOVER_SPEC}")" || {
+    error "recover: cluster '${_RECOVER_DOMAIN}' has no usable spec.provider (recover needs a provider that supports rebuild)"
+    return 1
+  }
+  provider::write_config "${_RECOVER_SPEC}" || {
+    error "recover: could not resolve provider config for '${pname}'"
+    return 1
+  }
+  provider::load "${pname}" || {
+    error "recover: provider '${pname}' failed to load"
+    return 1
+  }
+  _RECOVER_PROVIDER="${pname}"
+  _RECOVER_CONFIG="${PROVIDER_CONFIG_FILE}"
+}
+
+# ── phase: doctor ────────────────────────────────────────────────────────────
+# Render the provider's read-only diagnosis, mirroring `lo doctor`'s
+# "provider / infrastructure" section (doctor::_provider_section). Advisory:
+# always returns 0, never mutates. The provider is already loaded (resolve).
+recover::_doctor() {
+  echo
+  echo "--- provider / infrastructure (${_RECOVER_PROVIDER}) ---"
+  if ! declare -F provider::doctor &>/dev/null; then
+    printf '  \033[33m!\033[0m provider has no doctor hook — infrastructure diagnosis unavailable\n'
+    return 0
+  fi
+  local status msg
+  while IFS=$'\t' read -r status msg; do
+    case "${status}" in
+      ok)      printf '  \033[32m✓\033[0m %s\n' "${msg}" ;;
+      warn)    printf '  \033[33m!\033[0m %s\n' "${msg}" ;;
+      summary) printf '    %s\n' "${msg}" ;;
+      '')      : ;;
+      *)       printf '    %s\n' "${status}${msg:+ ${msg}}" ;;
+    esac
+  done < <(provider::doctor "${_RECOVER_CONFIG}" 2>/dev/null)
+  return 0
+}
+
+# ── phase: rebuild ───────────────────────────────────────────────────────────
+# Reset the cluster's existing nodes from bare metal (provider::rebuild). It is
+# DESTRUCTIVE but does not prompt — consent already happened. Under CLOUD_DRY_RUN
+# it reimages nothing.
+recover::_rebuild() {
+  provider::rebuild "${_RECOVER_CONFIG}" "${_RECOVER_WORKDIR}"
+}
+
+# ── phase: provision ─────────────────────────────────────────────────────────
+# Fresh install on the reset nodes (= `lo provision`). The bare-metal path wipes
+# data disks (#wipe-devices) as part of the normal provision flow.
+recover::_provision() {
+  provision::dispatch "${_RECOVER_DOMAIN}"
+}
+
+# ── phase: verify ────────────────────────────────────────────────────────────
+# Compare Ready nodes (kubectl) to the inventory count (provider::output).
+# KUBECONFIG is PINNED to the RECOVERED cluster's OWN kubeconfig (see
+# recover::_kubeconfig_path) — NEVER the ambient one — so a false green against a
+# DIFFERENT >=N-Ready cluster is impossible; a missing kubeconfig reports the
+# shortfall, it does NOT fall back. Advisory — reports per-node Ready + any
+# not-Ready and always returns 0 (app/data restore is a separate step).
+recover::_verify() {
+  local want ready kubeconfig want_disp
+  want="$(recover::_inventory_count)"
+  # An EMPTY want is the "inventory unresolved" sentinel, NOT a real 0 — show it
+  # as "unknown" and NEVER declare success against it (a bogus 0 must not read as
+  # "all node(s) Ready").
+  want_disp="${want:-unknown}"
+  echo
+  echo "--- verify ---"
+  # Pin to the recovered cluster's kubeconfig. If the driver never wrote one
+  # (e.g. provision failed to produce it), verify must report not-ready rather
+  # than reading whatever cluster the ambient KUBECONFIG happens to point at.
+  kubeconfig="$(recover::_kubeconfig_path)"
+  [[ -f "${kubeconfig}" ]] \
+    || printf '  \033[33m!\033[0m recovered kubeconfig not found (%s) — cannot confirm node readiness\n' "${kubeconfig}" >&2
+  local -x KUBECONFIG="${kubeconfig}"
+  ready="$(recover::_ready_nodes)"
+  printf '  nodes Ready: %s/%s\n' "${ready:-0}" "${want_disp}"
+  if [[ -n "${want}" && "${want}" -gt 0 && "${ready:-0}" -ge "${want}" ]]; then
+    printf '  \033[32m✓\033[0m all %s node(s) Ready — cluster back from bare metal\n' "${want}"
+  else
+    printf '  \033[33m!\033[0m only %s/%s node(s) Ready — run: lo status %s (app/data restore is a separate step)\n' \
+      "${ready:-0}" "${want_disp}" "${_RECOVER_DOMAIN}"
+  fi
+  return 0
+}
+
+# recover::_inventory_count — number of nodes the provider resolves (declared +
+# live). The verify target and the consent-prompt node count.
+#
+# Returns the EMPTY sentinel (echoes nothing) when the inventory cannot be
+# resolved — a failed provider::output (missing creds / API error) or non-JSON /
+# failed jq. Callers MUST distinguish this from a genuine "0" (which only a
+# successful resolve yielding zero nodes produces): consent surfaces it as
+# "unknown", verify never declares success against it. Advisory only —
+# provider::rebuild's own atomic preflight is the real enforcement.
+recover::_inventory_count() {
+  local inv n
+  inv="$(provider::output "${_RECOVER_CONFIG}" 2>/dev/null)" || return 0
+  n="$(printf '%s' "${inv}" | jq '(.nodes // []) | length' 2>/dev/null)" || return 0
+  echo "${n:-0}"
+}
+
+# recover::_ready_nodes — echo the count of Ready nodes; print per-node detail to
+# stderr. Reads the PINNED ${KUBECONFIG} (recover::_verify sets it to the recovered
+# cluster's own kubeconfig). No kubectl / no such kubeconfig → 0 (verify reports the
+# shortfall). A cordoned-but-Ready node shows status `Ready,SchedulingDisabled` — it
+# IS Ready, so match any status STARTING with `Ready` (only NotReady/etc. are not).
+recover::_ready_nodes() {
+  command -v kubectl &>/dev/null || { echo 0; return 0; }
+  [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG}" ]] || { echo 0; return 0; }
+  local nodes
+  nodes="$(kubectl get nodes --no-headers 2>/dev/null)" || { echo 0; return 0; }
+  local name st _rest
+  while read -r name st _rest; do
+    [[ -n "${name}" ]] || continue
+    if [[ "${st}" == Ready* ]]; then
+      printf '  \033[32m✓\033[0m %s %s\n' "${name}" "${st}" >&2
+    else
+      printf '  \033[33m!\033[0m %s %s\n' "${name}" "${st:-Unknown}" >&2
+    fi
+  done <<<"${nodes}"
+  printf '%s\n' "${nodes}" | awk '$2 ~ /^Ready/ { c++ } END { print c + 0 }'
+}
+
+# ── consent ──────────────────────────────────────────────────────────────────
+# The destructive guard. `--force` (global) or LOK8S_NONINTERACTIVE opt out of
+# the prompt; otherwise require a literal "yes". Reads stdin (testable).
+#
+# recover::_confirm [skip_rebuild]
+#   • The node count comes from recover::_inventory_count; an EMPTY (sentinel)
+#     count means the inventory could not be resolved (missing creds / API error)
+#     — say "an unknown number of nodes" rather than a misleading "0".
+#   • Under --skip-rebuild the bare-metal node RESET is skipped, so the prompt
+#     describes the re-provision (still destructive: reinstalls Kubernetes, may
+#     wipe data disks) — NOT a bare-metal reset. Consent is still required.
+recover::_confirm() {
+  local skip_rebuild="${1:-0}"
+  if (( ${force:-0} )) || [[ -n "${LOK8S_NONINTERACTIVE:-}" ]]; then
+    return 0
+  fi
+  local n ans count cluster action
+  cluster="${_RECOVER_CLUSTER_NAME:-${_RECOVER_DOMAIN}}"
+  n="$(recover::_inventory_count)"
+  if [[ -n "${n}" ]]; then
+    count="${n} node(s)"
+  else
+    count="an unknown number of nodes"
+  fi
+  if (( skip_rebuild )); then
+    action="re-provision ${count} of cluster ${cluster} (reinstalling Kubernetes, may wipe data disks) — the bare-metal node reset is SKIPPED"
+  else
+    action="reset ${count} of cluster ${cluster} from bare metal and reinstall them"
+  fi
+  printf '\033[31m!\033[0m recover: this will %s — continue? [type yes to continue] ' \
+    "${action}" >&2
+  read -r ans || return 1
+  [[ "${ans}" == "yes" ]]
+}
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+# recover::_workdir <domain> — provider scratch dir (logs, generated cloud-init,
+# dry-run plan). Reuses the per-domain .provider/ (already gitignored).
+#
+# The domain is VALIDATED before the mkdir with the SAME guard resolve_spec uses
+# (reject empty, '..', '/', anything outside [a-zA-Z0-9][a-zA-Z0-9._-]*). This runs
+# before recover::_resolve (which rejects a bad domain with a proper error), so an
+# unvalidated domain must not drive `mkdir -p PATH_CLUSTERS/<domain>/.provider`
+# (path traversal). A bad — or unwritable — domain falls back to a private mktemp
+# scratch dir; if even that fails it errors + returns non-zero (NO shared /tmp last
+# resort — that would collide across concurrent runs + leak into a global dir) and
+# the caller aborts.
+recover::_workdir() {
+  local domain="$1"
+  if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    local wd="${PATH_CLUSTERS}/${domain}/.provider"
+    if mkdir -p "${wd}" 2>/dev/null; then
+      echo "${wd}"
+      return 0
+    fi
+  fi
+  mktemp -d 2>/dev/null || {
+    error "recover: could not create a work directory (mktemp failed)"
+    return 1
+  }
+}
+
+# recover::_kubeconfig_path — the RECOVERED cluster's OWN kubeconfig, named the way
+# the driver writes it (drivers/kubeone/main: PATH_BASE/.kubeconfig/<metadata.name>.yaml).
+# verify pins KUBECONFIG to THIS so a >=N-Ready OTHER cluster on the ambient
+# KUBECONFIG can't produce a false green.
+#
+# Prefer the DRIVER's own resolver (driver::kubeconfig) when it is loaded, so the
+# path stays in LOCKSTEP with wherever the driver actually writes the kubeconfig
+# (no drift). Fall back to the local reimplementation when no driver is in scope
+# (e.g. unit tests, or a provision that never sourced one) — resolving the same
+# PATH_BASE/.kubeconfig/<metadata.name>.yaml, defaulting to the resolved cluster
+# name / domain when the spec carries no metadata.name.
+recover::_kubeconfig_path() {
+  local path=""
+  if declare -F driver::kubeconfig &>/dev/null; then
+    path="$(driver::kubeconfig "${_RECOVER_DOMAIN}" 2>/dev/null || echo "")"
+  fi
+  if [[ -n "${path}" ]]; then
+    echo "${path}"
+    return 0
+  fi
+  local name=""
+  if [[ -f "${_RECOVER_SPEC:-}" ]]; then
+    name="$(yq -r '.metadata.name // ""' "${_RECOVER_SPEC}" 2>/dev/null || echo "")"
+  fi
+  [[ -n "${name}" && "${name}" != "null" ]] || name="${_RECOVER_CLUSTER_NAME:-${_RECOVER_DOMAIN}}"
+  echo "${PATH_BASE}/.kubeconfig/${name}.yaml"
+}
+
+# recover::_cluster_name — human name for the consent prompt: provider descriptor
+# .cluster_name, else spec metadata.name, else the domain.
+recover::_cluster_name() {
+  local n=""
+  if [[ -f "${_RECOVER_CONFIG:-}" ]]; then
+    n="$(yq -r '.cluster_name // ""' "${_RECOVER_CONFIG}" 2>/dev/null || echo "")"
+  fi
+  if [[ -z "${n}" || "${n}" == "null" ]] && [[ -f "${_RECOVER_SPEC:-}" ]]; then
+    n="$(yq -r '.metadata.name // ""' "${_RECOVER_SPEC}" 2>/dev/null || echo "")"
+  fi
+  [[ -n "${n}" && "${n}" != "null" ]] || n="${_RECOVER_DOMAIN}"
+  echo "${n}"
+}
+
+# recover::_timed <label> <fn> — run <fn>, print + record "<label>=XmYs". Returns
+# <fn>'s exit code so the caller can abort the sequence. (Ported from dr::_timed.)
+recover::_timed() {
+  local label="$1" fn="$2" s e d rc=0
+  s="$(date +%s 2>/dev/null || echo 0)"
+  "${fn}" || rc=$?
+  e="$(date +%s 2>/dev/null || echo 0)"; d=$(( e - s ))
+  printf '\n\033[1;35m━━━ ⏱ %s took %dm %ds ━━━\033[0m\n' "${label}" "$(( d / 60 ))" "$(( d % 60 ))" >&2
+  _RECOVER_TIMINGS+=("${label}=$(( d / 60 ))m$(( d % 60 ))s")
+  return "${rc}"
+}
+
+# recover::_summary <t0> — the wall-clock total + per-phase breakdown.
+recover::_summary() {
+  local t0="$1" t1 d
+  t1="$(date +%s 2>/dev/null || echo 0)"; d=$(( t1 - t0 ))
+  printf '\n\033[1;35m━━━ DONE in %dm %ds — phases: %s ━━━\033[0m\n' \
+    "$(( d / 60 ))" "$(( d % 60 ))" "${_RECOVER_TIMINGS[*]:-}" >&2
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::recover "${@}"

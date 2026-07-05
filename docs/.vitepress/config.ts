@@ -72,6 +72,7 @@ export default defineConfig({
             { text: 'Networking & Ingress', link: '/guide/networking' },
             { text: 'Security', link: '/guide/security' },
             { text: 'Backups', link: '/guide/backups' },
+            { text: 'Disaster Recovery', link: '/guide/recover' },
             { text: 'The Operator', link: '/guide/operator' },
             { text: 'kubehz Platform', link: '/guide/kubehz' },
           ],

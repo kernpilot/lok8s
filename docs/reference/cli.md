@@ -134,6 +134,32 @@ lo destroy [domain]
 
 Calls `driver::destroy` from the appropriate driver contract.
 
+### lo recover
+
+Rebuild a cluster **from bare metal** (disaster recovery). Orchestrates
+`resolve → doctor → consent → rebuild → provision → verify`, reusing the provider's
+`provider::rebuild` node reset and a fresh `lo provision` (incl. the bare-metal
+`#wipe-devices` wipe). Requires a **cluster** domain whose provider implements
+`provider::rebuild`. Restores the cluster, not application data — see
+[Disaster Recovery](../guide/recover.md) and [Backups](../guide/backups.md).
+
+```bash
+lo recover <domain>                 # full recovery (prompts once to confirm)
+lo recover <domain> --dry-run       # preview the rebuild plan; change nothing
+lo recover <domain> --skip-rebuild  # re-provision + verify only
+lo recover <domain> --force         # skip the confirmation prompt
+```
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Run doctor + the `provider::rebuild` plan under `CLOUD_DRY_RUN` (reimages nothing), then stop before provision. |
+| `--skip-rebuild` | Skip the node rebuild — run `lo provision` + verify only. |
+| `--force`, `-f` | Global flag: skip the destructive-consent prompt (also honored via `LOK8S_NONINTERACTIVE=1`). |
+
+The destructive-consent prompt is **the** guard and lives in the command;
+`provider::doctor` only advises, and `provider::rebuild` enforces via its own
+atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
+
 ### lo init
 
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
