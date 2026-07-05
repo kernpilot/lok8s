@@ -247,8 +247,20 @@ kubehz::register_cluster() {
     }
   fi
 
+  # The claim-key path proves the fingerprint is a SECRET in-account ticket
+  # (uploaded only to the owner's Hetzner project, never published), so mark the
+  # registration equality-claimable: the kubehz API's simple fingerprint claim is
+  # then safe. The server-key fallback's fingerprint may be PUBLIC
+  # (github.com/<user>.keys), so send nothing — the API keeps that registration
+  # token-claim-only (its fail-closed default), never equality-claimable.
   local payload
-  payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" '{domain: $d, fingerprint: $fp}')
+  if [[ "${claim_mode}" == "key" ]]; then
+    payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" \
+      '{domain: $d, fingerprint: $fp, claimable: true}')
+  else
+    payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" \
+      '{domain: $d, fingerprint: $fp}')
+  fi
 
   local response
   response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \

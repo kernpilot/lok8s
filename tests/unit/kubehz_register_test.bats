@@ -145,18 +145,26 @@ teardown() {
   }
   export -f yq
 
-  # Assert the producer hits the REGISTER endpoint (not claims/verify).
+  # Assert the producer hits the REGISTER endpoint (not claims/verify) and
+  # capture the JSON body (-d) so we can inspect the claimable flag.
   curl() {
     [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
       || { echo "curl wrong endpoint: $*" >&2; return 1; }
+    local prev="" a
+    for a in "$@"; do
+      [[ "${prev}" == "-d" ]] && printf '%s' "${a}" > "${BATS_TEST_TMPDIR}/register-payload.json"
+      prev="${a}"
+    done
     echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
   }
   export -f curl
 
+  # Delegate the payload build (jq -n …) to real jq so the assertion sees the
+  # actual wire body; the response extraction stays mocked.
   jq() {
-    case "$2" in
-      '.id // empty') echo "cl-001" ;;
-      *) echo "" ;;
+    case "$*" in
+      *'.id // empty'*) echo "cl-001" ;;
+      *) command jq "$@" ;;
     esac
   }
   export -f jq
@@ -176,6 +184,12 @@ teardown() {
   assert_output --partial "Claim it in the dashboard"
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
   assert_output --partial "token-verification path"
+
+  # Server-key fallback: the fingerprint may be PUBLIC, so the registration must
+  # NOT be marked equality-claimable — the payload carries no claimable flag.
+  run cat "${BATS_TEST_TMPDIR}/register-payload.json"
+  refute_output --partial "claimable"
+  assert_output --partial '"fingerprint": "lo:test.kubehz.dev"'
 }
 
 # ── register_cluster: claim-key path (HCLOUD_TOKEN present) ─
@@ -193,6 +207,11 @@ teardown() {
   curl() {
     [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
       || { echo "curl wrong endpoint: $*" >&2; return 1; }
+    local prev="" a
+    for a in "$@"; do
+      [[ "${prev}" == "-d" ]] && printf '%s' "${a}" > "${BATS_TEST_TMPDIR}/register-payload.json"
+      prev="${a}"
+    done
     echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
   }
   export -f curl
@@ -201,7 +220,7 @@ teardown() {
     case "$*" in
       *'.id // empty'*) echo "cl-001" ;;
       *'.fingerprint // empty'*) echo "" ;;
-      *) echo '{}' ;;  # payload build (-n) — opaque, curl is mocked
+      *) command jq "$@" ;;  # payload build (jq -n …) → real JSON so the test can assert the wire body
     esac
   }
   export -f jq
@@ -256,6 +275,11 @@ teardown() {
   refute_output --partial "11:22:33"
   refute_output --partial "fingerprint:"
 
+  # The claim-key path marks the registration equality-claimable: the register
+  # payload carries `claimable: true` (ONLY this path sends the flag).
+  run cat "${BATS_TEST_TMPDIR}/register-payload.json"
+  assert_output --partial '"claimable": true'
+
   # The ephemeral private key is DISCARDED (temp dir removed).
   run find "${BATS_TEST_TMPDIR}/claimtmp" -mindepth 1
   assert_output ""
@@ -272,6 +296,11 @@ teardown() {
   export -f yq
 
   curl() {
+    local prev="" a
+    for a in "$@"; do
+      [[ "${prev}" == "-d" ]] && printf '%s' "${a}" > "${BATS_TEST_TMPDIR}/register-payload.json"
+      prev="${a}"
+    done
     echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
   }
   export -f curl
@@ -280,7 +309,7 @@ teardown() {
     case "$*" in
       *'.id // empty'*) echo "cl-001" ;;
       *'.fingerprint // empty'*) echo "ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00:ff" ;;
-      *) echo '{}' ;;
+      *) command jq "$@" ;;
     esac
   }
   export -f jq
@@ -313,6 +342,10 @@ teardown() {
   assert_output --partial "kubehz-claim-test.kubehz.dev"
   refute_output --partial "ee:dd:cc"
   refute_output --partial "fingerprint:"
+
+  # Reuse is still the claim-key path → the registration is equality-claimable.
+  run cat "${BATS_TEST_TMPDIR}/register-payload.json"
+  assert_output --partial '"claimable": true'
 }
 
 @test "register_cluster: claim-key provisioning failure falls back to the server key" {
@@ -326,6 +359,11 @@ teardown() {
   export -f yq
 
   curl() {
+    local prev="" a
+    for a in "$@"; do
+      [[ "${prev}" == "-d" ]] && printf '%s' "${a}" > "${BATS_TEST_TMPDIR}/register-payload.json"
+      prev="${a}"
+    done
     echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
   }
   export -f curl
@@ -334,7 +372,7 @@ teardown() {
     case "$*" in
       *'.id // empty'*) echo "cl-001" ;;
       *'.fingerprint // empty'*) echo "" ;;
-      *) echo '{}' ;;
+      *) command jq "$@" ;;
     esac
   }
   export -f jq
@@ -366,6 +404,10 @@ teardown() {
   # Fail-soft: registration still happens via the old server-key handshake.
   assert_output --partial "falling back to the server SSH-key fingerprint"
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
+
+  # Fell back to the server key → the registration must NOT be equality-claimable.
+  run cat "${BATS_TEST_TMPDIR}/register-payload.json"
+  refute_output --partial "claimable"
 }
 
 # ── register_cluster: HTTPS is enforced before any network call ─
