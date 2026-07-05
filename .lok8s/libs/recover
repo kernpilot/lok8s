@@ -88,7 +88,11 @@ recover::_run() {
     # dry-run branches — it prints the exact per-node plan and reimages NOTHING.
     export CLOUD_DRY_RUN=1
     export CLOUD_DRY_RUN_PATH="${_RECOVER_WORKDIR}/dry-run"
-    recover::_timed rebuild recover::_rebuild || return 1
+    recover::_timed rebuild recover::_rebuild \
+      || { unset CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH; return 1; }
+    # Tidy up: don't leave CLOUD_DRY_RUN in the environment behind us (harmless
+    # either way — recover stops here on a dry run and never provisions).
+    unset CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH
     printf '\n  \033[2mlo provision WOULD run next (fresh install incl. #wipe-devices), then verify.\033[0m\n' >&2
     recover::_summary "${t0}"
     printf '\n\033[1;33m━━━ DRY RUN — nothing changed ━━━\033[0m\n' >&2
@@ -96,8 +100,9 @@ recover::_run() {
   fi
 
   # Destructive from here. The confirm is THE guard (honors --force /
-  # LOK8S_NONINTERACTIVE). Decline → abort, touch nothing.
-  if ! recover::_confirm; then
+  # LOK8S_NONINTERACTIVE). Decline → abort, touch nothing. Pass skip_rebuild so
+  # the prompt wording matches what actually happens (reset vs re-provision).
+  if ! recover::_confirm "${skip_rebuild}"; then
     warn "recover: aborted by operator — nothing was changed"
     return 1
   fi
@@ -214,8 +219,12 @@ recover::_provision() {
 # shortfall, it does NOT fall back. Advisory — reports per-node Ready + any
 # not-Ready and always returns 0 (app/data restore is a separate step).
 recover::_verify() {
-  local want ready kubeconfig
+  local want ready kubeconfig want_disp
   want="$(recover::_inventory_count)"
+  # An EMPTY want is the "inventory unresolved" sentinel, NOT a real 0 — show it
+  # as "unknown" and NEVER declare success against it (a bogus 0 must not read as
+  # "all node(s) Ready").
+  want_disp="${want:-unknown}"
   echo
   echo "--- verify ---"
   # Pin to the recovered cluster's kubeconfig. If the driver never wrote one
@@ -226,22 +235,29 @@ recover::_verify() {
     || printf '  \033[33m!\033[0m recovered kubeconfig not found (%s) — cannot confirm node readiness\n' "${kubeconfig}" >&2
   local -x KUBECONFIG="${kubeconfig}"
   ready="$(recover::_ready_nodes)"
-  printf '  nodes Ready: %s/%s\n' "${ready:-0}" "${want:-0}"
-  if [[ "${want:-0}" -gt 0 && "${ready:-0}" -ge "${want:-0}" ]]; then
+  printf '  nodes Ready: %s/%s\n' "${ready:-0}" "${want_disp}"
+  if [[ -n "${want}" && "${want}" -gt 0 && "${ready:-0}" -ge "${want}" ]]; then
     printf '  \033[32m✓\033[0m all %s node(s) Ready — cluster back from bare metal\n' "${want}"
   else
     printf '  \033[33m!\033[0m only %s/%s node(s) Ready — run: lo status %s (app/data restore is a separate step)\n' \
-      "${ready:-0}" "${want:-0}" "${_RECOVER_DOMAIN}"
+      "${ready:-0}" "${want_disp}" "${_RECOVER_DOMAIN}"
   fi
   return 0
 }
 
 # recover::_inventory_count — number of nodes the provider resolves (declared +
 # live). The verify target and the consent-prompt node count.
+#
+# Returns the EMPTY sentinel (echoes nothing) when the inventory cannot be
+# resolved — a failed provider::output (missing creds / API error) or non-JSON /
+# failed jq. Callers MUST distinguish this from a genuine "0" (which only a
+# successful resolve yielding zero nodes produces): consent surfaces it as
+# "unknown", verify never declares success against it. Advisory only —
+# provider::rebuild's own atomic preflight is the real enforcement.
 recover::_inventory_count() {
   local inv n
-  inv="$(provider::output "${_RECOVER_CONFIG}" 2>/dev/null)" || { echo 0; return 0; }
-  n="$(printf '%s' "${inv}" | jq '(.nodes // []) | length' 2>/dev/null)" || n=0
+  inv="$(provider::output "${_RECOVER_CONFIG}" 2>/dev/null)" || return 0
+  n="$(printf '%s' "${inv}" | jq '(.nodes // []) | length' 2>/dev/null)" || return 0
   echo "${n:-0}"
 }
 
@@ -270,14 +286,34 @@ recover::_ready_nodes() {
 # ── consent ──────────────────────────────────────────────────────────────────
 # The destructive guard. `--force` (global) or LOK8S_NONINTERACTIVE opt out of
 # the prompt; otherwise require a literal "yes". Reads stdin (testable).
+#
+# recover::_confirm [skip_rebuild]
+#   • The node count comes from recover::_inventory_count; an EMPTY (sentinel)
+#     count means the inventory could not be resolved (missing creds / API error)
+#     — say "an unknown number of nodes" rather than a misleading "0".
+#   • Under --skip-rebuild the bare-metal node RESET is skipped, so the prompt
+#     describes the re-provision (still destructive: reinstalls Kubernetes, may
+#     wipe data disks) — NOT a bare-metal reset. Consent is still required.
 recover::_confirm() {
+  local skip_rebuild="${1:-0}"
   if (( ${force:-0} )) || [[ -n "${LOK8S_NONINTERACTIVE:-}" ]]; then
     return 0
   fi
-  local n ans
+  local n ans count cluster action
+  cluster="${_RECOVER_CLUSTER_NAME:-${_RECOVER_DOMAIN}}"
   n="$(recover::_inventory_count)"
-  printf '\033[31m!\033[0m recover: this will reset %s node(s) of cluster %s from bare metal and reinstall them — continue? [type yes to continue] ' \
-    "${n:-?}" "${_RECOVER_CLUSTER_NAME:-${_RECOVER_DOMAIN}}" >&2
+  if [[ -n "${n}" ]]; then
+    count="${n} node(s)"
+  else
+    count="an unknown number of nodes"
+  fi
+  if (( skip_rebuild )); then
+    action="re-provision ${count} of cluster ${cluster} (reinstalling Kubernetes, may wipe data disks) — the bare-metal node reset is SKIPPED"
+  else
+    action="reset ${count} of cluster ${cluster} from bare metal and reinstall them"
+  fi
+  printf '\033[31m!\033[0m recover: this will %s — continue? [type yes to continue] ' \
+    "${action}" >&2
   read -r ans || return 1
   [[ "${ans}" == "yes" ]]
 }
@@ -306,9 +342,23 @@ recover::_workdir() {
 # recover::_kubeconfig_path — the RECOVERED cluster's OWN kubeconfig, named the way
 # the driver writes it (drivers/kubeone/main: PATH_BASE/.kubeconfig/<metadata.name>.yaml).
 # verify pins KUBECONFIG to THIS so a >=N-Ready OTHER cluster on the ambient
-# KUBECONFIG can't produce a false green. Falls back to the resolved cluster name /
-# domain when the spec carries no metadata.name.
+# KUBECONFIG can't produce a false green.
+#
+# Prefer the DRIVER's own resolver (driver::kubeconfig) when it is loaded, so the
+# path stays in LOCKSTEP with wherever the driver actually writes the kubeconfig
+# (no drift). Fall back to the local reimplementation when no driver is in scope
+# (e.g. unit tests, or a provision that never sourced one) — resolving the same
+# PATH_BASE/.kubeconfig/<metadata.name>.yaml, defaulting to the resolved cluster
+# name / domain when the spec carries no metadata.name.
 recover::_kubeconfig_path() {
+  local path=""
+  if declare -F driver::kubeconfig &>/dev/null; then
+    path="$(driver::kubeconfig "${_RECOVER_DOMAIN}" 2>/dev/null || echo "")"
+  fi
+  if [[ -n "${path}" ]]; then
+    echo "${path}"
+    return 0
+  fi
   local name=""
   if [[ -f "${_RECOVER_SPEC:-}" ]]; then
     name="$(yq -r '.metadata.name // ""' "${_RECOVER_SPEC}" 2>/dev/null || echo "")"

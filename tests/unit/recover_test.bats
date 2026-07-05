@@ -199,6 +199,85 @@ EOF
   refute_output --partial "all 3 node(s) Ready"
 }
 
+# ── inventory count: a failed resolve vs a genuine 0 ─────────────────────────
+
+# A FAILED inventory resolution (provider::output errors — missing creds / API
+# error) must return the EMPTY sentinel, NOT a misleading "0".
+@test "recover inventory_count returns the empty sentinel when provider::output fails" {
+  provider::output() { return 1; }
+  export -f provider::output
+
+  run recover::_inventory_count
+  assert_success
+  assert_output ""
+}
+
+# A genuine resolve still yields a real node count.
+@test "recover inventory_count returns the real node count on success" {
+  provider::output() { printf '{"nodes":[{},{},{}]}'; }
+  export -f provider::output
+
+  run recover::_inventory_count
+  assert_success
+  assert_output "3"
+}
+
+# Non-JSON output (jq failure) is also "unresolved" → empty sentinel, not 0.
+@test "recover inventory_count returns the empty sentinel on non-JSON provider output" {
+  provider::output() { printf 'not json'; }
+  export -f provider::output
+
+  run recover::_inventory_count
+  assert_success
+  assert_output ""
+}
+
+# verify must not read the empty sentinel as a real 0: it shows "unknown" and
+# never declares success (a bogus 0 must not read as "all node(s) Ready").
+@test "recover verify shows 'unknown' (not 0) when the inventory could not be resolved" {
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_CLUSTER_NAME="test.dom"
+  _RECOVER_SPEC="${_FAKE_SPEC}"
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  : > "${PATH_BASE}/.kubeconfig/test.dom.yaml"
+
+  recover::_inventory_count() { return 0; }   # empty sentinel = unresolved
+  recover::_ready_nodes() { echo 3; }
+  export -f recover::_inventory_count recover::_ready_nodes
+
+  run recover::_verify
+  assert_success
+  assert_output --partial "nodes Ready: 3/unknown"
+  refute_output --partial "back from bare metal"
+}
+
+# ── kubeconfig path: reuse the driver's resolver ─────────────────────────────
+
+# When the driver exposes driver::kubeconfig, recover uses IT (lockstep with the
+# driver — no path drift).
+@test "recover kubeconfig path prefers driver::kubeconfig when it is loaded" {
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_CLUSTER_NAME="test.dom"
+  driver::kubeconfig() { echo "/from/driver/${1}.yaml"; }
+  export -f driver::kubeconfig
+
+  run recover::_kubeconfig_path
+  assert_success
+  assert_output "/from/driver/test.dom.yaml"
+}
+
+# With no driver in scope, it falls back to the local resolution — the SAME path
+# the verify tests rely on (PATH_BASE/.kubeconfig/<name>.yaml).
+@test "recover kubeconfig path falls back to local resolution without a driver" {
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_CLUSTER_NAME="test.dom"
+  _RECOVER_SPEC="${_FAKE_SPEC}"   # non-existent → name falls back to cluster name
+
+  run recover::_kubeconfig_path
+  assert_success
+  assert_output "${PATH_BASE}/.kubeconfig/test.dom.yaml"
+}
+
 # ── --skip-rebuild ───────────────────────────────────────────────────────────
 
 @test "recover --skip-rebuild skips rebuild but still provisions + verifies" {
@@ -352,6 +431,53 @@ EOF
   assert_success
   run cat "${RECORD}"
   assert_line --partial "rebuild cfg="
+}
+
+# ── consent wording ──────────────────────────────────────────────────────────
+
+# The consent count is HONEST about a failed inventory resolution: an empty
+# sentinel (missing creds / API error) prompts "an unknown number of nodes",
+# NOT a misleading "0".
+@test "recover confirm says 'unknown' when the inventory could not be resolved" {
+  force=0
+  unset LOK8S_NONINTERACTIVE
+  _RECOVER_CLUSTER_NAME="test.dom"
+  recover::_inventory_count() { return 0; }   # empty sentinel = unresolved
+  export -f recover::_inventory_count
+
+  run recover::_confirm 0 <<<"no"
+  assert_failure   # "no" declines — nothing destructive
+  assert_output --partial "unknown number of nodes"
+  refute_output --partial "reset 0 node(s)"
+}
+
+# Under --skip-rebuild the prompt describes the (still destructive) re-provision,
+# NOT a bare-metal reset that will not happen.
+@test "recover confirm under --skip-rebuild wording reflects re-provision, not a bare-metal reset" {
+  force=0
+  unset LOK8S_NONINTERACTIVE
+  _RECOVER_CLUSTER_NAME="test.dom"
+  recover::_inventory_count() { echo 3; }
+  export -f recover::_inventory_count
+
+  run recover::_confirm 1 <<<"no"   # skip_rebuild=1
+  assert_failure
+  assert_output --partial "re-provision"
+  assert_output --partial "3 node(s)"
+  refute_output --partial "from bare metal"
+}
+
+# Without --skip-rebuild the prompt DOES describe the bare-metal reset.
+@test "recover confirm without --skip-rebuild describes a bare-metal reset" {
+  force=0
+  unset LOK8S_NONINTERACTIVE
+  _RECOVER_CLUSTER_NAME="test.dom"
+  recover::_inventory_count() { echo 3; }
+  export -f recover::_inventory_count
+
+  run recover::_confirm 0 <<<"no"
+  assert_failure
+  assert_output --partial "reset 3 node(s) of cluster test.dom from bare metal"
 }
 
 # ── rebuild failure aborts before provision ──────────────────────────────────
