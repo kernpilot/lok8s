@@ -168,6 +168,61 @@ teardown() {
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
 }
 
+# ── register_cluster: access managed is parked (in development) ───
+
+@test "register_cluster: access managed warns it is not yet available and still registers" {
+  yq() {
+    case "$2" in
+      '.kind') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  curl() {
+    [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
+      || { echo "curl wrong endpoint: $*" >&2; return 1; }
+    echo '{"id": "cl-001", "domain": "test.kubehz.dev", "registered": true}'
+  }
+  export -f curl
+
+  jq() {
+    case "$2" in
+      '.id // empty') echo "cl-001" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  # The managed tier is being rebuilt — no operator, no ghost image is applied.
+  export LOK8S_KUBEHZ_ACCESS="managed"
+
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  # Honest notice: managed is not yet available …
+  assert_output --partial "not yet available"
+  # … but the cluster is still registered for read-only heartbeat visibility.
+  assert_output --partial "Claim it in the dashboard"
+  assert_output --partial "fingerprint: lo:test.kubehz.dev"
+}
+
+# ── regression: the non-functional managed operator stays parked ─
+
+@test "kubehz lib ships no ghost operator image or manifest (parked, never applied)" {
+  # access: managed must never point at a non-existent operator image (an apply
+  # would ImagePullBackOff forever). Guard the ghost from creeping back into the
+  # public repo: no such image string, and no manifests/operator/ directory.
+  run grep -rnF "ghcr.io/kernpilot/kubehz-operator" "${_PROJECT_ROOT}/.lok8s/libs/kubehz"
+  assert_failure
+  assert [ ! -d "${_PROJECT_ROOT}/.lok8s/libs/kubehz/manifests/operator" ]
+  # The real heartbeat agent (access: registered) is untouched.
+  assert [ -f "${_PROJECT_ROOT}/.lok8s/libs/kubehz/manifests/agent/cronjob.yaml" ]
+}
+
 # ── register_cluster: HTTPS is enforced before any network call ─
 
 @test "register_cluster: refuses a plain-HTTP apiUrl (no curl)" {
