@@ -126,7 +126,7 @@ minutes** and POSTs a status snapshot to
   Secret once. It reads no Secrets elsewhere and can rotate nothing.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain — the same
   identity it registers under.
-- **Hardened.** Stock `registry.k8s.io/kubectl` image, non-root, read-only
+- **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only
   root filesystem, all capabilities dropped.
 
 The snapshot contains the Kubernetes version, node list (name/readiness/

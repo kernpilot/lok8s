@@ -238,6 +238,20 @@ STUBS_EOF
   assert_output --partial "secrets"
 }
 
+# ── The agent image must be a shell-capable image, pinned by digest ─
+# The bootstrap/heartbeat script is bash/sh — it CANNOT run on the distroless
+# registry.k8s.io/kubectl image (no shell). Guard the shell-capable image and
+# its digest pin (supply chain) so a future edit can't silently regress either.
+
+@test "agent: the CronJob image is shell-capable and pinned by digest" {
+  local image
+  image="$(command yq '.spec.jobTemplate.spec.template.spec.containers[0].image' "${CRONJOB}")"
+  # Pinned by digest (immutable, supply-chain safe).
+  [[ "${image}" == *"@sha256:"* ]]
+  # Not the distroless kubectl image (no shell → the script is DOA on it).
+  [[ "${image}" != registry.k8s.io/kubectl:* ]]
+}
+
 # ── L4: `lo kubehz claim-code` prints C and NEVER A ──────
 
 @test "claim-code: prints C (khzc_) and never A (khz_agt_)" {
