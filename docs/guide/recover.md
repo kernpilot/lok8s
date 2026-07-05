@@ -3,7 +3,7 @@
 `lo recover <domain>` rebuilds a cluster **from bare metal** back to a working
 Kubernetes cluster — reimaging the nodes in place (IPs, network, and
 load-balancer preserved), then running a fresh `lo provision`. It is the
-foundation a disaster recovery stands on: it restores the **cluster**, not the
+foundation that a disaster recovery stands on: it restores the **cluster**, not the
 application **data** (etcd snapshots, databases, PVs — see [Backups](./backups.md)
 — restore *on top* of a recovered cluster).
 

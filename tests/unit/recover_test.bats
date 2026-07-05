@@ -142,6 +142,63 @@ _fakes_all() {
   assert_output --partial "all 3 node(s) Ready"
 }
 
+# The REAL parse (no _fake_verify_ok): recover::_verify pins KUBECONFIG to the
+# recovered cluster's own kubeconfig and runs the real recover::_ready_nodes over
+# stubbed `kubectl get nodes`. A cordoned-but-Ready node (Ready,SchedulingDisabled)
+# MUST count as Ready; a NotReady node MUST NOT.
+@test "recover verify counts a Ready,SchedulingDisabled node as Ready (real parse)" {
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_CLUSTER_NAME="test.dom"
+  _RECOVER_SPEC="${_FAKE_SPEC}"   # non-existent → name falls back to cluster name
+
+  # The kubeconfig the driver would have written (PATH_BASE/.kubeconfig/<name>.yaml).
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  : > "${PATH_BASE}/.kubeconfig/test.dom.yaml"
+
+  # Inventory (want) = 3; kubectl reports 4 nodes: 3 Ready (incl. a cordoned one)
+  # + 1 NotReady.
+  recover::_inventory_count() { echo 3; }
+  kubectl() {
+    [[ "$1" == "get" ]] || return 0
+    cat <<'EOF'
+cp1  Ready                     control-plane  10d  v1.30.0
+cp2  Ready,SchedulingDisabled  control-plane  10d  v1.30.0
+w1   Ready                     <none>         10d  v1.30.0
+w2   NotReady                  <none>         10d  v1.30.0
+EOF
+  }
+  export -f recover::_inventory_count kubectl
+
+  run recover::_verify
+  assert_success
+  assert_output --partial "nodes Ready: 3/3"
+  assert_output --partial "all 3 node(s) Ready"
+  # per-node detail: the cordoned node is shown yet counted Ready; NotReady is not.
+  assert_output --partial "cp2 Ready,SchedulingDisabled"
+  assert_output --partial "w2 NotReady"
+}
+
+# The kubeconfig pin has no false green: with the recovered cluster's kubeconfig
+# ABSENT, verify must report 0 Ready (never fall back to the ambient KUBECONFIG).
+@test "recover verify reports not-ready when the recovered kubeconfig is missing" {
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_CLUSTER_NAME="test.dom"
+  _RECOVER_SPEC="${_FAKE_SPEC}"
+  # NOTE: no .kubeconfig/test.dom.yaml created.
+
+  recover::_inventory_count() { echo 3; }
+  # A kubectl that WOULD report a healthy cluster if it were ever consulted —
+  # it must not be, because the pinned kubeconfig does not exist.
+  kubectl() { echo "x Ready a b c"; echo "y Ready a b c"; echo "z Ready a b c"; }
+  export -f recover::_inventory_count kubectl
+
+  run recover::_verify
+  assert_success
+  assert_output --partial "recovered kubeconfig not found"
+  assert_output --partial "nodes Ready: 0/3"
+  refute_output --partial "all 3 node(s) Ready"
+}
+
 # ── --skip-rebuild ───────────────────────────────────────────────────────────
 
 @test "recover --skip-rebuild skips rebuild but still provisions + verifies" {
@@ -189,6 +246,34 @@ _fakes_all() {
   assert_output --partial "DRY RUN"
 }
 
+# ── main::recover flag wiring ────────────────────────────────────────────────
+
+# main::recover is the thin :args wrapper; the argsh :args builtin is absent when
+# a lib is sourced in bats, so shim it to parse the flags exactly as argsh does
+# (same approach as deploy_test.bats), then record what recover::_run receives —
+# proving the flag → positional mapping (domain, skip_rebuild, dry_run).
+@test "main::recover maps --skip-rebuild and --dry-run flags to recover::_run positionals" {
+  :args() {
+    shift  # drop the description
+    while (( $# )); do
+      case "$1" in
+        --skip-rebuild) skip_rebuild=1 ;;
+        --dry-run)      dry_run=1 ;;
+        -*)             : ;;
+        *)              domain="$1" ;;
+      esac
+      shift
+    done
+  }
+  recover::_run() { echo "run domain=$1 skip=$2 dry=$3" >> "${RECORD}"; }
+  export -f :args recover::_run
+
+  run main::recover --skip-rebuild --dry-run test.dom
+  assert_success
+  run cat "${RECORD}"
+  assert_output "run domain=test.dom skip=1 dry=1"
+}
+
 # ── consent guard ────────────────────────────────────────────────────────────
 
 @test "recover confirm blocks without --force: a 'no' aborts and rebuild is NOT called" {
@@ -201,6 +286,47 @@ _fakes_all() {
   assert_output --partial "aborted by operator"
 
   # Nothing destructive happened.
+  run cat "${RECORD}"
+  refute_line --partial "rebuild cfg="
+  refute_line --partial "provision test.dom"
+}
+
+# The consent gate must default to ABORT for any non-"yes": an empty answer, a
+# closed stdin (EOF), and a whitespace-only answer all decline — touch nothing.
+@test "recover confirm: an EMPTY answer aborts and rebuild is NOT called" {
+  _fakes_all
+  force=0
+  unset LOK8S_NONINTERACTIVE
+
+  run recover::_run "test.dom" 0 0 <<<""
+  assert_failure
+  assert_output --partial "aborted by operator"
+  run cat "${RECORD}"
+  refute_line --partial "rebuild cfg="
+  refute_line --partial "provision test.dom"
+}
+
+@test "recover confirm: EOF (closed stdin) aborts and rebuild is NOT called" {
+  _fakes_all
+  force=0
+  unset LOK8S_NONINTERACTIVE
+
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure
+  assert_output --partial "aborted by operator"
+  run cat "${RECORD}"
+  refute_line --partial "rebuild cfg="
+  refute_line --partial "provision test.dom"
+}
+
+@test "recover confirm: a WHITESPACE-only answer aborts and rebuild is NOT called" {
+  _fakes_all
+  force=0
+  unset LOK8S_NONINTERACTIVE
+
+  run recover::_run "test.dom" 0 0 <<<"   "
+  assert_failure
+  assert_output --partial "aborted by operator"
   run cat "${RECORD}"
   refute_line --partial "rebuild cfg="
   refute_line --partial "provision test.dom"

@@ -137,7 +137,7 @@ Calls `driver::destroy` from the appropriate driver contract.
 ### lo recover
 
 Rebuild a cluster **from bare metal** (disaster recovery). Orchestrates
-`doctor → consent → rebuild → provision → verify`, reusing the provider's
+`resolve → doctor → consent → rebuild → provision → verify`, reusing the provider's
 `provider::rebuild` node reset and a fresh `lo provision` (incl. the bare-metal
 `#wipe-devices` wipe). Requires a **cluster** domain whose provider implements
 `provider::rebuild`. Restores the cluster, not application data — see

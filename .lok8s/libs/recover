@@ -207,14 +207,24 @@ recover::_provision() {
 }
 
 # ── phase: verify ────────────────────────────────────────────────────────────
-# Compare Ready nodes (kubectl, against the run's KUBECONFIG) to the inventory
-# count (provider::output). Advisory — reports per-node Ready + any not-Ready and
-# always returns 0 (app/data restore is a separate step).
+# Compare Ready nodes (kubectl) to the inventory count (provider::output).
+# KUBECONFIG is PINNED to the RECOVERED cluster's OWN kubeconfig (see
+# recover::_kubeconfig_path) — NEVER the ambient one — so a false green against a
+# DIFFERENT >=N-Ready cluster is impossible; a missing kubeconfig reports the
+# shortfall, it does NOT fall back. Advisory — reports per-node Ready + any
+# not-Ready and always returns 0 (app/data restore is a separate step).
 recover::_verify() {
-  local want ready
+  local want ready kubeconfig
   want="$(recover::_inventory_count)"
   echo
   echo "--- verify ---"
+  # Pin to the recovered cluster's kubeconfig. If the driver never wrote one
+  # (e.g. provision failed to produce it), verify must report not-ready rather
+  # than reading whatever cluster the ambient KUBECONFIG happens to point at.
+  kubeconfig="$(recover::_kubeconfig_path)"
+  [[ -f "${kubeconfig}" ]] \
+    || printf '  \033[33m!\033[0m recovered kubeconfig not found (%s) — cannot confirm node readiness\n' "${kubeconfig}" >&2
+  local -x KUBECONFIG="${kubeconfig}"
   ready="$(recover::_ready_nodes)"
   printf '  nodes Ready: %s/%s\n' "${ready:-0}" "${want:-0}"
   if [[ "${want:-0}" -gt 0 && "${ready:-0}" -ge "${want:-0}" ]]; then
@@ -236,7 +246,10 @@ recover::_inventory_count() {
 }
 
 # recover::_ready_nodes — echo the count of Ready nodes; print per-node detail to
-# stderr. No kubectl / no reachable kubeconfig → 0 (verify reports the shortfall).
+# stderr. Reads the PINNED ${KUBECONFIG} (recover::_verify sets it to the recovered
+# cluster's own kubeconfig). No kubectl / no such kubeconfig → 0 (verify reports the
+# shortfall). A cordoned-but-Ready node shows status `Ready,SchedulingDisabled` — it
+# IS Ready, so match any status STARTING with `Ready` (only NotReady/etc. are not).
 recover::_ready_nodes() {
   command -v kubectl &>/dev/null || { echo 0; return 0; }
   [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG}" ]] || { echo 0; return 0; }
@@ -245,13 +258,13 @@ recover::_ready_nodes() {
   local name st _rest
   while read -r name st _rest; do
     [[ -n "${name}" ]] || continue
-    if [[ "${st}" == "Ready" ]]; then
-      printf '  \033[32m✓\033[0m %s Ready\n' "${name}" >&2
+    if [[ "${st}" == Ready* ]]; then
+      printf '  \033[32m✓\033[0m %s %s\n' "${name}" "${st}" >&2
     else
       printf '  \033[33m!\033[0m %s %s\n' "${name}" "${st:-Unknown}" >&2
     fi
   done <<<"${nodes}"
-  printf '%s\n' "${nodes}" | awk '$2 == "Ready" { c++ } END { print c + 0 }'
+  printf '%s\n' "${nodes}" | awk '$2 ~ /^Ready/ { c++ } END { print c + 0 }'
 }
 
 # ── consent ──────────────────────────────────────────────────────────────────
@@ -272,11 +285,36 @@ recover::_confirm() {
 # ── helpers ──────────────────────────────────────────────────────────────────
 # recover::_workdir <domain> — provider scratch dir (logs, generated cloud-init,
 # dry-run plan). Reuses the per-domain .provider/ (already gitignored).
+#
+# The domain is VALIDATED before the mkdir with the SAME guard resolve_spec uses
+# (reject empty, '..', '/', anything outside [a-zA-Z0-9][a-zA-Z0-9._-]*). This runs
+# before recover::_resolve (which rejects a bad domain with a proper error), so an
+# unvalidated domain must not drive `mkdir -p PATH_CLUSTERS/<domain>/.provider`
+# (path traversal). A bad — or unwritable — domain falls back to a scratch dir.
 recover::_workdir() {
   local domain="$1"
-  local wd="${PATH_CLUSTERS}/${domain}/.provider"
-  mkdir -p "${wd}" 2>/dev/null || wd="$(mktemp -d 2>/dev/null || echo /tmp)"
-  echo "${wd}"
+  if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    local wd="${PATH_CLUSTERS}/${domain}/.provider"
+    if mkdir -p "${wd}" 2>/dev/null; then
+      echo "${wd}"
+      return 0
+    fi
+  fi
+  mktemp -d 2>/dev/null || echo /tmp
+}
+
+# recover::_kubeconfig_path — the RECOVERED cluster's OWN kubeconfig, named the way
+# the driver writes it (drivers/kubeone/main: PATH_BASE/.kubeconfig/<metadata.name>.yaml).
+# verify pins KUBECONFIG to THIS so a >=N-Ready OTHER cluster on the ambient
+# KUBECONFIG can't produce a false green. Falls back to the resolved cluster name /
+# domain when the spec carries no metadata.name.
+recover::_kubeconfig_path() {
+  local name=""
+  if [[ -f "${_RECOVER_SPEC:-}" ]]; then
+    name="$(yq -r '.metadata.name // ""' "${_RECOVER_SPEC}" 2>/dev/null || echo "")"
+  fi
+  [[ -n "${name}" && "${name}" != "null" ]] || name="${_RECOVER_CLUSTER_NAME:-${_RECOVER_DOMAIN}}"
+  echo "${PATH_BASE}/.kubeconfig/${name}.yaml"
 }
 
 # recover::_cluster_name — human name for the consent prompt: provider descriptor
