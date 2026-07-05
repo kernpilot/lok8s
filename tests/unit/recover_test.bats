@@ -516,6 +516,62 @@ EOF
   assert_output "resolve"
 }
 
+# An INVALID spec.provider.name is DISTINCT from a MISSING one. _load_provider
+# must (1) surface provider::read_name's OWN diagnostic (not swallow it with a
+# 2>/dev/null) and (2) not assert a single "no spec.provider" cause.
+@test "recover _load_provider surfaces read_name's diagnostic on an invalid provider name" {
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_SPEC="${_FAKE_SPEC}"
+  # Reproduce provider::read_name's invalid-name path: diagnostic on stderr,
+  # nothing on stdout (no captured name), non-zero exit.
+  provider::read_name() {
+    error "provider name 'bad name!' is invalid (must be alphanumeric + hyphens/underscores)"
+    return 1
+  }
+  export -f provider::read_name
+
+  run recover::_load_provider
+  assert_failure
+  # read_name's diagnostic surfaces — a 2>/dev/null regression would hide it.
+  assert_output --partial "provider name 'bad name!' is invalid"
+  # recover's own message no longer asserts a bare "no spec.provider" cause.
+  assert_output --partial "no usable spec.provider"
+  refute_output --partial "has no spec.provider"
+}
+
+# ── _workdir: no shared-/tmp last resort ─────────────────────────────────────
+
+# When the per-domain dir is unusable AND mktemp fails, _workdir must NOT echo
+# the SHARED /tmp (concurrent-run collisions + a global leak) — it errors and
+# returns non-zero with EMPTY stdout.
+@test "recover _workdir returns non-zero and never echoes /tmp when mktemp fails" {
+  mktemp() { return 1; }   # force the last-resort branch to fail
+  export -f mktemp
+
+  run recover::_workdir "../bad"   # invalid domain → skips the per-domain mkdir
+  assert_failure
+  refute_output --partial "/tmp"
+  assert_output --partial "could not create a work directory"
+}
+
+# recover::_run must abort the moment the work dir can't be created — BEFORE
+# resolve/doctor/consent/rebuild — so nothing destructive runs.
+@test "recover aborts (nothing destructive) when the work dir cannot be created" {
+  _fakes_all
+  force=1                  # would otherwise proceed through the whole flow
+  mktemp() { return 1; }   # make the mktemp fallback fail
+  export -f mktemp
+
+  run recover::_run "../bad" 0 0   # invalid domain → per-domain mkdir skipped → mktemp fails
+  assert_failure
+  assert_output --partial "could not create a work directory"
+
+  # It aborted at the work-dir step: the RECORD is EMPTY — no phase ran
+  # (no resolve/rebuild/provision).
+  run cat "${RECORD}"
+  assert_output ""
+}
+
 @test "recover rejects a non-cluster (deploy) domain" {
   provision::resolve_spec() {
     echo "resolve" >> "${RECORD}"

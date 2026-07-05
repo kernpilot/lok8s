@@ -67,7 +67,11 @@ recover::_run() {
   declare -ga _RECOVER_TIMINGS=()
   _RECOVER_DOMAIN="${domain}"
   _RECOVER_SPEC="" _RECOVER_CONFIG="" _RECOVER_PROVIDER="" _RECOVER_CLUSTER_NAME=""
-  _RECOVER_WORKDIR="$(recover::_workdir "${domain}")"
+  # A work dir is required before anything destructive; abort cleanly if none can
+  # be made. recover::_workdir already emitted the diagnostic; a bare `return 1`
+  # INSIDE its $(...) subshell can't abort us, so guard the assignment here (the
+  # exit status of `var=$(cmd)` is cmd's). Nothing has been touched yet.
+  _RECOVER_WORKDIR="$(recover::_workdir "${domain}")" || return 1
 
   local t0; t0="$(date +%s 2>/dev/null || echo 0)"
 
@@ -156,8 +160,13 @@ recover::_resolve() {
 # A distinct seam so the provider machinery is easy to stub in tests.
 recover::_load_provider() {
   local pname
-  pname="$(provider::read_name "${_RECOVER_SPEC}" 2>/dev/null)" || {
-    error "recover: cluster '${_RECOVER_DOMAIN}' has no spec.provider — recover needs a provider that supports rebuild"
+  # provider::read_name writes the NAME to stdout (captured here) and its OWN
+  # diagnostic to stderr — e.g. an INVALID spec.provider.name. Do NOT suppress
+  # that stderr (no 2>/dev/null): surfacing it distinguishes an invalid name
+  # from a missing one, so our message must not assert a single cause. It is
+  # quiet on stderr on success, so the happy path stays clean.
+  pname="$(provider::read_name "${_RECOVER_SPEC}")" || {
+    error "recover: cluster '${_RECOVER_DOMAIN}' has no usable spec.provider (recover needs a provider that supports rebuild)"
     return 1
   }
   provider::write_config "${_RECOVER_SPEC}" || {
@@ -326,7 +335,10 @@ recover::_confirm() {
 # (reject empty, '..', '/', anything outside [a-zA-Z0-9][a-zA-Z0-9._-]*). This runs
 # before recover::_resolve (which rejects a bad domain with a proper error), so an
 # unvalidated domain must not drive `mkdir -p PATH_CLUSTERS/<domain>/.provider`
-# (path traversal). A bad — or unwritable — domain falls back to a scratch dir.
+# (path traversal). A bad — or unwritable — domain falls back to a private mktemp
+# scratch dir; if even that fails it errors + returns non-zero (NO shared /tmp last
+# resort — that would collide across concurrent runs + leak into a global dir) and
+# the caller aborts.
 recover::_workdir() {
   local domain="$1"
   if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
@@ -336,7 +348,10 @@ recover::_workdir() {
       return 0
     fi
   fi
-  mktemp -d 2>/dev/null || echo /tmp
+  mktemp -d 2>/dev/null || {
+    error "recover: could not create a work directory (mktemp failed)"
+    return 1
+  }
 }
 
 # recover::_kubeconfig_path — the RECOVERED cluster's OWN kubeconfig, named the way
