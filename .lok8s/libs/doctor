@@ -7,6 +7,7 @@
 # domain. Exits non-zero when a REQUIRED prerequisite is missing.
 
 import ^utils/verbose
+import ^utils/provider
 
 main::doctor() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -92,6 +93,9 @@ main::doctor() {
     doctor::_warn "no active domain (run: lo use <domain>)"
   fi
 
+  # Provider / infrastructure diagnosis — advisory, never affects the exit code.
+  doctor::_provider_section "${domain}"
+
   echo
   if (( fail )); then
     error "doctor: missing required prerequisites (see ✗ above)"
@@ -103,6 +107,50 @@ main::doctor() {
 doctor::_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 doctor::_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 doctor::_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+
+# doctor::_provider_section <domain>
+# If the active domain is a provider-backed cluster whose provider implements
+# the OPTIONAL provider::doctor hook, render its infrastructure diagnosis as a
+# "provider / infrastructure" section (in the doctor lib's ✓/! style). Purely
+# advisory: it never changes the doctor exit code and never mutates anything.
+# Silent (prints nothing) when there is no provider-backed cluster spec.
+doctor::_provider_section() {
+  local domain="$1"
+  [[ -n "${domain}" ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] || return 0
+
+  local pname
+  pname="$(provider::read_name "${spec}" 2>/dev/null)" || return 0
+  [[ -n "${pname}" ]] || return 0
+
+  echo
+  echo "--- provider / infrastructure (${pname}) ---"
+
+  if ! provider::write_config "${spec}" 2>/dev/null; then
+    doctor::_warn "could not resolve provider config for ${pname}"
+    return 0
+  fi
+  if ! provider::load "${pname}" 2>/dev/null; then
+    doctor::_warn "provider '${pname}' failed to load (contract check)"
+    return 0
+  fi
+  if ! declare -F provider::doctor &>/dev/null; then
+    doctor::_warn "provider '${pname}' has no doctor hook — infrastructure diagnosis unavailable"
+    return 0
+  fi
+
+  local status msg
+  while IFS=$'\t' read -r status msg; do
+    case "${status}" in
+      ok)      doctor::_ok   "${msg}" ;;
+      warn)    doctor::_warn "${msg}" ;;
+      summary) printf '    %s\n' "${msg}" ;;
+      '')      : ;;
+      *)       printf '    %s\n' "${status}${msg:+ ${msg}}" ;;
+    esac
+  done < <(provider::doctor "${PROVIDER_CONFIG_FILE}" 2>/dev/null)
+}
 
 # doctor::_tool <name> <required:0|1> <purpose>  → 0 ok, 1 if required+missing
 doctor::_tool() {

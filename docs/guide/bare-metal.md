@@ -327,6 +327,51 @@ node→cloud-subnet traffic fails immediately after, then works. Don't conclude
 (the gateway forwards but doesn't answer ICMP).
 :::
 
+## Diagnose infrastructure (`lo doctor`)
+
+`lo doctor <domain>` extends its environment/toolchain checks with a
+**provider / infrastructure** section for any domain whose cluster spec has a
+`spec.provider`. For the Hetzner provider this is a **read-only, advisory**
+diagnosis (it never changes anything and never fails the command) covering:
+
+- hcloud token present + API reachable; Robot creds present + API reachable
+  (a Robot API error is reported as **unreachable**, never mistaken for a
+  missing key)
+- the **rescue SSH key** is registered in Robot — without it a bare-metal
+  reinstall would lock you out (the report tells you to add it)
+- per node: resolvable/reachable, and for each bare-metal node whether it is
+  **installed** or **in rescue**
+- inventory sanity (control-plane count; each worker resolves to exactly one
+  Robot server **by its IP** — the Robot `server_name` is free-text and
+  non-unique, so it is never used to identify a machine)
+
+Each not-ready item comes with actionable advice, e.g. *"worker X is installed,
+not in rescue — set `HROBOT_USER`/`HROBOT_PASSWORD` to reset it automatically,
+or activate rescue via the Robot console"*. Run it before a recovery to see, at
+a glance, whether the infrastructure is ready.
+
+::: tip Resetting nodes in place
+The Hetzner provider can reset the cluster's **existing** nodes back to a
+fresh-install state — cloud VMs reimaged with `hcloud server rebuild`,
+bare-metal nodes booted into rescue via the Robot API — **without** recreating
+them (IPs, network, and load-balancer are preserved). This is the optional
+`provider::rebuild` hook; data disks are left untouched (that is
+[`#wipe-devices`](#ceph-osds-on-bare-metal-force-gpt), applied during
+`lo provision`). It is DESTRUCTIVE and drives the recovery flow, so it is
+invoked with explicit consent — not on its own.
+
+It resolves and validates **every** declared node up front — cloud VMs must
+match exactly one server carrying the cluster label; bare-metal nodes exactly
+one Robot server whose IP equals the descriptor `#external-ip` — and aborts
+touching *nothing* if any node fails that preflight, so a name collision or a
+partial descriptor can never reimage the wrong (or only some of the) machines.
+
+Set `CLOUD_DRY_RUN=1` to **preview** the reset: it runs the read-only preflight,
+prints the exact per-node reimage / rescue+reset plan (never the Robot
+credentials), and reimages **nothing** — the readiness barrier is skipped since
+no node changed state.
+:::
+
 ## Logging
 
 All provider operations are logged to `<work_dir>/hetzner-provision.log`.
@@ -334,8 +379,9 @@ Set `CLOUD_QUIET=1` to suppress console output (log-only mode).
 
 ## Limitations
 
-- Rescue mode activation is **manual** (via Hetzner Robot console).
-  Automating this via the Robot API (`HROBOT_USER` + `HROBOT_PASSWORD`)
-  is planned but not implemented.
+- Rescue mode activation is **manual** (via Hetzner Robot console) for the
+  first provision. Automatic rescue+reset via the Robot API (`HROBOT_USER` +
+  `HROBOT_PASSWORD`) is available for **resetting existing nodes** through the
+  optional `provider::rebuild` hook (see [Diagnose infrastructure](#diagnose-infrastructure-lo-doctor)).
 - The provider does not manage the dedicated server lifecycle (ordering,
   cancellation) — only provisioning via installimage.
