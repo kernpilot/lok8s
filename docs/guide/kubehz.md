@@ -168,15 +168,15 @@ minutes** and POSTs a status snapshot to
   root filesystem, all capabilities dropped.
 
 The snapshot contains the Kubernetes version, node list (name/readiness/
-role, capped at 20 nodes), certificate expiry, and control-plane component
-health:
+role/instance type, capped at 20 nodes), certificate expiry, and
+control-plane component health:
 
 ```json
 {
   "clusterId": "my-cluster.example.com",
   "timestamp": "2026-07-04T12:00:00Z",
   "kubernetes": { "version": "v1.31.8" },
-  "nodes": [{ "name": "cp-1", "status": "True", "roles": "control-plane" }],
+  "nodes": [{ "name": "cp-1", "status": "True", "roles": "control-plane", "instanceType": "cx32" }],
   "components": [
     { "name": "apiserver", "status": "Healthy" },
     { "name": "etcd", "status": "Healthy" },
@@ -186,6 +186,13 @@ health:
   "certificates": { "expiresAt": "2027-06-15T00:00:00Z" }
 }
 ```
+
+Each node's `instanceType` mirrors the well-known
+`node.kubernetes.io/instance-type` label (set by the cloud provider, e.g.
+`cx32` on Hetzner) — this is what lets the dashboard show a price overview
+for self-hosted clusters. Nodes without the label (bare metal, kind, no
+CCM) report an empty string; like every other probe, it never breaks the
+heartbeat.
 
 Component health is honestly derived — `apiserver` and `etcd` from the
 apiserver's `/readyz?verbose` checks, `scheduler` and `controller-manager`
