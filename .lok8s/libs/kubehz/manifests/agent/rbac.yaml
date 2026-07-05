@@ -86,3 +86,58 @@ subjects:
   - kind: ServiceAccount
     name: kubehz-agent
     namespace: kubehz-system
+---
+# Agent-identity bootstrap (P0 self-hosted claim). The heartbeat CronJob
+# generates the agent-token (A) + claim-code (C) into Secret kubehz-agent and
+# reads A back to authenticate its heartbeat. Namespaced Role in kubehz-system,
+# scoped to that one Secret's lifecycle. Two rules, least privilege:
+#   (a) `get` is scoped by resourceNames to the single kubehz-agent Secret —
+#       the agent reads A/C back but CANNOT read any OTHER Secret in the
+#       namespace (Kubernetes RBAC honors resourceNames for get).
+#   (b) `create` cannot be name-restricted (a resource has no name until it is
+#       created, so resourceNames never matches a create) — this rule is
+#       unavoidably namespace-wide; it only grants create (bootstrap the Secret
+#       when absent), never read.
+# Deliberately NO update/patch/delete — the Secret is generated once and NEVER
+# rotated, so the agent must not be able to change it. Least privilege that also
+# enforces the never-rotate invariant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-agent-secret
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - kubehz-agent
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-agent-secret
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-agent-secret
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system

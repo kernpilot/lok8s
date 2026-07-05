@@ -32,6 +32,12 @@ setup() {
   cat > "${stubs}" <<'STUBS_EOF'
 kubectl() {
   case "$*" in
+    # An enrolled agent identity exists: the heartbeat reads its agent-token
+    # back and authenticates with it. The empty-token guard skips the POST when
+    # no token is readable, so the fixture must supply one for the heartbeat to
+    # fire. claim-code is left to the default (empty) → the best-effort
+    # self-register stays a no-op here.
+    *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
     "version -o json") printf '{"serverVersion":{"gitVersion":"v1.31.4"}}\n' ;;
     "get nodes -o json") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     *"jsonpath={.status.conditions"*) printf 'True' ;;

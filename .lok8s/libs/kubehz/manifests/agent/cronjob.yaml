@@ -26,12 +26,81 @@ spec:
           restartPolicy: Never
           containers:
             - name: heartbeat
-              image: registry.k8s.io/kubectl:v1.31.4
+              # alpine/k8s carries a shell + bash/curl/kubectl/sha256sum/coreutils,
+              # which the bootstrap + heartbeat script needs. The previous
+              # registry.k8s.io/kubectl image is DISTROLESS (no shell) — the script
+              # could never run on it. Pinned by digest (supply chain). No openssl
+              # in-image, so rand_hex uses the /dev/urandom fallback (verified).
+              image: alpine/k8s:1.31.4@sha256:9c4976d47656d78cf53a92b0203fc54ac45eae18a2b45001ac221c27da4c8036
               command:
                 - /bin/sh
                 - -c
                 - |
                   set -e
+
+                  # ── Agent identity: self-generated, create-if-absent, NEVER rotated ──
+                  # One Secret (kubehz-system/kubehz-agent) holds two 256-bit values:
+                  #   agent-token A = khz_agt_<hex32> — the live heartbeat credential,
+                  #     sent as `Authorization: Bearer A`. It NEVER transits a browser
+                  #     and is NEVER printed by any command (no lo subcommand emits it).
+                  #   claim-code  C = khzc_<hex32>  — the one-time proof the user pastes
+                  #     into the dashboard /claim page (`lo kubehz claim-code`).
+                  # The platform stores only sha256(A)/sha256(C) and can never push a
+                  # credential inward. Generated once and idempotently reused: a re-run
+                  # NEVER rotates (rotating A breaks heartbeats; rotating C breaks a
+                  # claim the user may already hold).
+                  rand_hex() {
+                    if command -v openssl >/dev/null 2>&1; then
+                      openssl rand -hex 32
+                    else
+                      od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+                    fi
+                  }
+                  sha256_hex() {
+                    if command -v sha256sum >/dev/null 2>&1; then
+                      sha256sum | cut -d' ' -f1
+                    else
+                      openssl dgst -sha256 | awk '{print $NF}'
+                    fi
+                  }
+
+                  if ! kubectl get secret kubehz-agent -n kubehz-system >/dev/null 2>&1; then
+                    NEW_A="khz_agt_$(rand_hex)"
+                    NEW_C="khzc_$(rand_hex)"
+                    # create-if-absent; tolerate a concurrent creator so we never rotate.
+                    kubectl create secret generic kubehz-agent -n kubehz-system \
+                      --from-literal=agent-token="${NEW_A}" \
+                      --from-literal=claim-code="${NEW_C}" >/dev/null 2>&1 || true
+                    NEW_A=""
+                    NEW_C=""
+                  fi
+
+                  # Always read the authoritative values back from the Secret (not the
+                  # just-generated ones), so a concurrent creator's values win — no
+                  # rotation, ever. The Secret is the single source of truth for A and C.
+                  AGENT_TOKEN=$(kubectl get secret kubehz-agent -n kubehz-system \
+                    -o jsonpath='{.data.agent-token}' 2>/dev/null | base64 -d)
+                  CLAIM_CODE=$(kubectl get secret kubehz-agent -n kubehz-system \
+                    -o jsonpath='{.data.claim-code}' 2>/dev/null | base64 -d)
+
+                  # ── Self-register: POST {domain, sha256(A), sha256(C)} — HASHES ONLY ──
+                  # Idempotent by (domain, sha256(A)) server-side, so re-asserting every
+                  # tick is safe. Best-effort: a failure never aborts the heartbeat (the
+                  # next tick retries). Only hashes leave the cluster — never A or C in
+                  # the clear.
+                  if [ -n "${AGENT_TOKEN}" ] && [ -n "${CLAIM_CODE}" ]; then
+                    AGENT_TOKEN_HASH=$(printf %s "${AGENT_TOKEN}" | sha256_hex)
+                    CLAIM_CODE_HASH=$(printf %s "${CLAIM_CODE}" | sha256_hex)
+                    REGISTER_PAYLOAD=$(printf \
+                      '{"domain":"%s","agentTokenHash":"%s","claimCodeHash":"%s"}' \
+                      "${CLUSTER_ID}" "${AGENT_TOKEN_HASH}" "${CLAIM_CODE_HASH}")
+                    curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
+                      -H "Content-Type: application/json" \
+                      -d "${REGISTER_PAYLOAD}" >/dev/null 2>&1 \
+                      || echo "kubehz: agent-register attempt failed; retrying next tick" >&2
+                  fi
+                  # C stayed in memory only to compute its hash above; drop it now.
+                  CLAIM_CODE=""
 
                   KUBE_VERSION=$(kubectl version -o json 2>/dev/null | \
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
@@ -125,8 +194,19 @@ spec:
                   PAYLOAD_EOF
                   )
 
+                  # Authenticated heartbeat: the agent-token (A) proves this beat
+                  # is the cluster's real, enrolled identity — the platform's
+                  # ratchet 401s an anonymous/invalid beat once a token exists.
+                  # Guard an empty A (the Secret read failed this tick): a blank
+                  # bearer is guaranteed to 401, so skip the POST and let the next
+                  # tick retry once the Secret is readable (fail-soft, exit 0).
+                  if [ -z "${AGENT_TOKEN}" ]; then
+                    echo "kubehz: agent-token unavailable; skipping heartbeat (retrying next tick)" >&2
+                    exit 0
+                  fi
                   curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
+                    -H "Authorization: Bearer ${AGENT_TOKEN}" \
                     -d "${PAYLOAD}"
               envFrom:
                 - configMapRef:
