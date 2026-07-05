@@ -18,6 +18,7 @@ main::kubehz() {
     'register|r@destructive'    'Register cluster with kubehz'
     'deregister|d@destructive'  'Remove cluster from kubehz'
     'status|s@readonly'         'Check kubehz registration status'
+    'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
   )
   :usage "kubehz platform integration" "${@}"
   "${usage[@]}"
@@ -139,15 +140,22 @@ kubehz::get_ssh_fingerprint() {
 
 # Register a self-hosted cluster with the kubehz API.
 #
-# This announces a PENDING cluster to kubehz (POST /api/clusters/register) using
-# the SSH-key MD5 fingerprint as the ownership anchor. It does NOT prove
-# ownership and needs NO bearer/token: the user later proves ownership in the
-# dashboard /claim (pasting this fingerprint + their Hetzner Cloud token), which
-# attaches the cluster to their tenant. The printed fingerprint is the user-facing
-# half of that handshake (see the provision GitHub Action job summary).
+# VESTIGIAL for the self-hosted agent path — kept, but no longer the primary
+# mechanism. A self-hosted cluster now proves ownership with the IN-CLUSTER
+# agent-secret: the heartbeat agent (manifests/agent) self-generates the
+# agent-token A + claim-code C, POSTs {domain, sha256(A), sha256(C)} to
+# /api/clusters/agent-register, and the user claims by pasting C — via
+# `lo kubehz claim-code` — into the dashboard. That path is provider-agnostic
+# (no SSH fingerprint, no hcloud token). This function is retained as a
+# best-effort PRE-AGENT announce (it makes the cluster visible before the agent
+# is deployed) and as the lo-side half of the fingerprint-equality anchor the
+# API keeps for hosted-CP auto-claim / manual fallback; it never itself proves
+# ownership.
 #
-# Called during provision when access != none. Non-fatal: warns on failure,
-# returns 0 so provisioning continues without kubehz integration.
+# It announces a PENDING cluster (POST /api/clusters/register) with the SSH-key
+# MD5 fingerprint and needs NO bearer/token. Called during provision when
+# access != none. Non-fatal: warns on failure, returns 0 so provisioning
+# continues without kubehz integration.
 # Usage: kubehz::register_cluster <domain> <cluster_yaml>
 kubehz::register_cluster() {
   local domain="$1" cluster_yaml="$2"
@@ -187,6 +195,10 @@ kubehz::register_cluster() {
   # is safe to print; the Hetzner token is NEVER printed or sent here.
   echo "kubehz: cluster '${domain}' registered (pending). Claim it in the dashboard:"
   echo "  fingerprint: ${fingerprint}"
+  # Point at the primary, provider-agnostic path: once the in-cluster heartbeat
+  # agent is deployed it self-registers and mints a one-time claim code.
+  echo "kubehz: preferred — deploy the heartbeat agent, then claim with:"
+  echo "  lo kubehz claim-code   # prints the code to paste at the dashboard /claim page"
 }
 
 # ── Deregistration ───────────────────────────────────────
@@ -281,4 +293,38 @@ kubehz::status() {
   local status_val
   status_val=$(echo "${response}" | jq -r '.status // "unknown"' 2>/dev/null)
   echo "Status:  ${status_val}"
+}
+
+# Print the one-time claim code (C) for the dashboard /claim page, via
+# `lo kubehz claim-code`. Reads it from the in-cluster kubehz-agent Secret using
+# the ACTIVE kubeconfig (this runs against the user's cluster, not the spec).
+#
+# SECURITY: the agent-token (A) is the live heartbeat credential and is NEVER
+# printed by any command — this subcommand only ever reads `.data.claim-code`
+# (C), the disposable one-time proof that is MEANT to transit to the dashboard.
+kubehz::claim-code() {
+  local ns="kubehz-system" secret="kubehz-agent"
+
+  if ! kubectl -n "${ns}" get secret "${secret}" >/dev/null 2>&1; then
+    error "secret/${secret} not found in ${ns}. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster."
+    return 1
+  fi
+
+  local code
+  code=$(kubectl -n "${ns}" get secret "${secret}" \
+    -o jsonpath='{.data.claim-code}' 2>/dev/null | base64 -d)
+
+  if [[ -z "${code}" ]]; then
+    error "secret/${secret} has no claim-code yet — the agent mints it on its first run. Wait for one heartbeat, then retry."
+    return 1
+  fi
+
+  # C on stdout (pipe-friendly: `lo kubehz claim-code | pbcopy`); the human hint
+  # goes to stderr so a pipe captures only the code. A is never emitted here.
+  echo "${code}"
+  {
+    echo
+    echo "Paste this one-time claim code at the dashboard /claim page while signed in"
+    echo "to attribute this cluster to your account. It is single-use — do not share it."
+  } >&2
 }
