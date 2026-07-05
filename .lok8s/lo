@@ -32,6 +32,7 @@ import ^libs/env
 import ^libs/secrets
 import ^libs/k8s
 import ^libs/provision
+import ^libs/recover
 import ^libs/bootstrap
 import ^libs/kubeconfig
 import ^libs/use
@@ -88,6 +89,7 @@ main() {
     'build|b@idempotent'               'Build kustomize targets'
     'deploy|d@destructive@idempotent'  'Deploy platform'
     'destroy@destructive'              'Destroy a cluster'
+    'recover@destructive'              'Rebuild a cluster from bare metal (disaster recovery)'
 
     'use@idempotent'                   'Set/show active domain'
     'kubeconfig|kc@readonly'           'Print a domain kubeconfig (--oidc for kubelogin exec-plugin)'
