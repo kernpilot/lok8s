@@ -73,6 +73,12 @@ main::bootstrap() {
 bootstrap::dispatch() {
   local domain="$1"
 
+  # Reject a path-traversal / injected domain before it builds any filesystem
+  # path (same guard as provision::resolve_spec).
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
+    error "invalid domain name: ${domain}"; return 1
+  }
+
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "cluster spec not found: ${cluster_yaml}"; return 1; }
 
@@ -84,6 +90,11 @@ bootstrap::dispatch() {
   # driver::export is available. Guard a missing driver the same way.
   local kind
   kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  # kind is untrusted YAML interpolated into a path we `source` — constrain it to
+  # a bare driver name so a crafted spec can't traverse / source an arbitrary file.
+  [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || {
+    error "invalid cluster kind: ${kind}"; return 1
+  }
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
   if [[ ! -f "${kind_script}" ]]; then
     error "Unknown cluster kind: ${kind} (missing ${kind_script})"

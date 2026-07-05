@@ -1688,3 +1688,27 @@ YAML
   assert_output --partial "Unknown cluster kind: bogus"
   [[ "${output}" != *"apply must not run"* ]]
 }
+
+@test "bootstrap::dispatch rejects a path-traversal domain (no filesystem access)" {
+  run bootstrap::dispatch "../../../etc"
+  assert_failure
+  assert_output --partial "invalid domain name"
+}
+
+@test "bootstrap::dispatch rejects a malicious cluster kind (path traversal in .kind)" {
+  # A crafted spec whose kind traverses out of drivers/ must be rejected BEFORE
+  # the source — it must never source an arbitrary file.
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: ../../../tmp/evil
+metadata:
+  name: e2e-test
+YAML
+
+  bootstrap::apply() { echo "apply must not run"; }
+
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "invalid cluster kind"
+  [[ "${output}" != *"apply must not run"* ]]
+}
