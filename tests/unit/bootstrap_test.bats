@@ -1618,3 +1618,97 @@ YAML
   [ -n "${rcdir}" ]
   [ ! -d "${rcdir}" ]
 }
+
+# --- bootstrap::dispatch (standalone `lo bootstrap` path) ---------------------
+# Regression: the standalone `lo bootstrap <domain>` path (main::bootstrap →
+# bootstrap::dispatch) must source the driver and run driver::export BEFORE
+# bootstrap::apply, so spec.bootstrap addons' ${LOK8S_SPEC_*} refs substitute.
+# Before the fix it went straight to bootstrap::apply with driver::export never
+# called, leaving LOK8S_SPEC_* unset (the friction log entry).
+
+# Write a fake Lo driver whose driver::export exports LOK8S_SPEC_CLUSTER_DOMAIN —
+# the value the friction reports as empty on the standalone path. The driver
+# contract calls driver::export "<domain>", so it reads $1 (mirrors the real
+# drivers, minus the argsh :args parsing unavailable in the bats harness).
+_write_fake_driver_with_export() {
+  local driver_dir="${PATH_LOK8S}/drivers/lo"
+  mkdir -p "${driver_dir}"
+  cat > "${driver_dir}/main" <<'SCRIPT'
+driver::export() { export LOK8S_SPEC_CLUSTER_DOMAIN="$1"; }
+SCRIPT
+}
+
+@test "bootstrap::dispatch runs driver::export before apply → LOK8S_SPEC_* is set" {
+  write_cluster_spec "testcni"
+  _write_fake_driver_with_export
+
+  # Capture the spec env AS SEEN BY bootstrap::apply — proves driver::export ran
+  # first and the value is non-empty by the time apply is reached.
+  bootstrap::apply() { echo "apply spec_domain=[${LOK8S_SPEC_CLUSTER_DOMAIN:-EMPTY}]"; }
+
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_success
+  assert_output --partial "apply spec_domain=[test.lok8s.dev]"
+  # The empty-render regression must NOT recur.
+  [[ "${output}" != *"spec_domain=[EMPTY]"* ]]
+}
+
+@test "bootstrap::dispatch tolerates a driver without driver::export (still applies)" {
+  write_cluster_spec "testcni"
+  # Driver implements the contract minimally — no optional driver::export.
+  local driver_dir="${PATH_LOK8S}/drivers/lo"
+  mkdir -p "${driver_dir}"
+  cat > "${driver_dir}/main" <<'SCRIPT'
+driver::provision() { :; }
+SCRIPT
+
+  bootstrap::apply() { echo "apply reached: $1"; }
+
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_success
+  assert_output --partial "apply reached: test.lok8s.dev"
+}
+
+@test "bootstrap::dispatch fails on an unknown driver kind (missing driver script)" {
+  # kind=Bogus → no drivers/bogus/main → hard error, apply never reached.
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Bogus
+metadata:
+  name: e2e-test
+spec:
+  bootstrap:
+    - testcni
+YAML
+
+  bootstrap::apply() { echo "apply must not run"; }
+
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "Unknown cluster kind: bogus"
+  [[ "${output}" != *"apply must not run"* ]]
+}
+
+@test "bootstrap::dispatch rejects a path-traversal domain (no filesystem access)" {
+  run bootstrap::dispatch "../../../etc"
+  assert_failure
+  assert_output --partial "invalid domain name"
+}
+
+@test "bootstrap::dispatch rejects a malicious cluster kind (path traversal in .kind)" {
+  # A crafted spec whose kind traverses out of drivers/ must be rejected BEFORE
+  # the source — it must never source an arbitrary file.
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: ../../../tmp/evil
+metadata:
+  name: e2e-test
+YAML
+
+  bootstrap::apply() { echo "apply must not run"; }
+
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "invalid cluster kind"
+  [[ "${output}" != *"apply must not run"* ]]
+}
