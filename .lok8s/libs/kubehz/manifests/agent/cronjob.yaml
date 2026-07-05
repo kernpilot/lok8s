@@ -102,11 +102,34 @@ spec:
                   # C stayed in memory only to compute its hash above; drop it now.
                   CLAIM_CODE=""
 
-                  KUBE_VERSION=$(kubectl version -o json 2>/dev/null | \
+                  # kubernetesVersion = the SERVER version. The apiserver
+                  # /version endpoint returns a single-object JSON with exactly
+                  # one "gitVersion", so this extraction is unambiguous. NOTE:
+                  # `kubectl version -o json` carries BOTH clientVersion and
+                  # serverVersion — a first-match `sed … | head -1` grabbed the
+                  # CLIENT (= the kubectl image tag, v1.31.x), reporting the wrong
+                  # version for every cluster. `kubectl version -o jsonpath=…` is
+                  # NOT usable: kubectl rejects it (`--output must be 'yaml' or
+                  # 'json'`). /version is already reachable (used as the apiserver
+                  # health fallback below), so no extra RBAC is needed.
+                  KUBE_VERSION=$(kubectl get --raw /version 2>/dev/null | \
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
 
-                  NODES=$(kubectl get nodes -o json | \
-                    sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' | head -20)
+                  # Node NAMES only, via a targeted jsonpath over
+                  # .items[].metadata.name. A greedy `get nodes -o json | sed
+                  # 's/.*"name":"…"/…/'` ALSO scrapes .status.runtimeHandlers[].name
+                  # (e.g. "runc"/"crun", present on k8s ≳1.27) and
+                  # .status.volumesAttached[].name (CSI handles) — the loop then
+                  # runs `kubectl get node runc`, which NotFounds, and `set -e`
+                  # kills the whole heartbeat before it ever POSTs.
+                  # Cap the per-node loop at 20 to bound the beat's runtime; a
+                  # larger cluster reports its first 20 nodes AND logs the
+                  # truncation to stderr (never a silent drop).
+                  NODES_ALL=$(kubectl get nodes \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || NODES_ALL=""
+                  NODES=$(echo "${NODES_ALL}" | head -20)
+                  NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c . || true)
+                  [ "${NODE_TOTAL}" -gt 20 ] && echo "kubehz: heartbeat summarizes the first 20 of ${NODE_TOTAL} nodes" >&2
 
                   # Per-node payload. instanceType mirrors the well-known
                   # node.kubernetes.io/instance-type label (set by the cloud
@@ -117,8 +140,20 @@ spec:
                   NODE_ARRAY="["
                   first=true
                   for node in ${NODES}; do
-                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
-                    roles=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null && echo "control-plane" || echo "worker")
+                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || status=""
+                    # roles: control-plane iff the node carries the
+                    # node-role.kubernetes.io/control-plane (or legacy /master)
+                    # LABEL KEY. Those labels have an EMPTY value, so a per-key
+                    # jsonpath returns "" (exit 0) whether the label is present or
+                    # ABSENT — the old `… && echo control-plane` thus fired for
+                    # EVERY node. Test the key's presence in the rendered labels
+                    # map instead (jsonpath prints it as JSON on the pinned
+                    # kubectl); default worker. Fail-soft under set -e.
+                    labels=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels}' 2>/dev/null) || labels=""
+                    case "${labels}" in
+                      *'"node-role.kubernetes.io/control-plane"'*|*'"node-role.kubernetes.io/master"'*) roles="control-plane" ;;
+                      *) roles="worker" ;;
+                    esac
                     itype=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null) || itype=""
                     if [ "${first}" = "true" ]; then first=false; else NODE_ARRAY="${NODE_ARRAY},"; fi
                     NODE_ARRAY="${NODE_ARRAY}{\"name\":\"${node}\",\"status\":\"${status}\",\"roles\":\"${roles}\",\"instanceType\":\"${itype}\"}"

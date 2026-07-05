@@ -80,14 +80,39 @@ kubectl() {
       printf '%s' "${_c}" > "${STORE_C}"
       return 0
       ;;
-    "version -o json") printf '{"serverVersion":{"gitVersion":"v1.31.4"}}\n' ;;
-    "get nodes -o json") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
-    *"jsonpath={.status.conditions"*) printf 'True' ;;
-    *"control-plane}"*) printf ''; return 0 ;;
-    *"instance-type}"*) printf 'cx32'; return 0 ;;
+    # kubernetesVersion = the SERVER version. The FIX reads the apiserver
+    # /version endpoint (single "gitVersion"). `version -o json` carries BOTH a
+    # client (v1.31.4) and a DIFFERENT server (v1.35.5) — the regression guard.
+    *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
+    "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
+
+    # Node NAMES via a targeted jsonpath (the FIX). The `-o json` fixture is a
+    # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
+    # volumesAttached): dormant unless the extraction regresses.
+    "get nodes -o jsonpath="*) printf 'cp-1\nworker-1\n' ;;
+    "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1"},"status":{"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1"},"status":{"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
+
+    # Per-node queries. An unreal node name (a greedy-sed ghost) NotFounds like
+    # real kubectl → the old code's unguarded status=$(…) aborts under set -e.
+    "get node "*)
+      _n=$3
+      case "${_n}" in
+        cp-1|worker-1) : ;;
+        *) echo "Error from server (NotFound): nodes \"${_n}\" not found" >&2; return 1 ;;
+      esac
+      case "$*" in
+        *"jsonpath={.status.conditions"*) printf 'True' ;;
+        *"instance-type}"*) if [ "${_n}" = "cp-1" ]; then printf 'cx32'; else printf 'cpx41'; fi; return 0 ;;
+        *"jsonpath={.metadata.labels}"*)
+          if [ "${_n}" = "cp-1" ]; then
+            printf '%s' '{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}'
+          else
+            printf '%s' '{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}'
+          fi ;;
+        *) printf '' ;;
+      esac ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
-    *"/version"*) printf 'ok\n'; return 0 ;;
     "get pods"*) printf ''; return 0 ;;
     *) printf '' ;;
   esac
@@ -219,6 +244,20 @@ STUBS_EOF
   assert_output "test.example.com"
   run command jq -r '.nodes[0].instanceType' "${HEARTBEAT_OUT}"
   assert_output "cx32"
+
+  # Node identity, per-node roles, and the SERVER version — the P0 heartbeat
+  # parsing fixes. Names are exactly the two metadata names (never a
+  # runtimeHandler/CSI-handle ghost); cp-1 is control-plane, worker-1 is worker
+  # (an absent role label is not misread as control-plane); the kubernetes
+  # version is the server's (v1.35.5), not the client image tag (v1.31.4).
+  run command jq -rc '[.nodes[].name]' "${HEARTBEAT_OUT}"
+  assert_output '["cp-1","worker-1"]'
+  run command jq -r '.nodes[] | select(.name == "cp-1") | .roles' "${HEARTBEAT_OUT}"
+  assert_output "control-plane"
+  run command jq -r '.nodes[] | select(.name == "worker-1") | .roles' "${HEARTBEAT_OUT}"
+  assert_output "worker"
+  run command jq -r '.kubernetes.version' "${HEARTBEAT_OUT}"
+  assert_output "v1.35.5"
 
   # A must never appear in the heartbeat BODY — only in the Authorization header.
   run grep -F "${a}" "${HEARTBEAT_OUT}"
