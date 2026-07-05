@@ -32,69 +32,75 @@ Two independent axes:
 | `hosting` | `self` (default) | You provision and own the control plane — the normal lok8s flow. |
 | | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
 | `access` | `none` (default) | No platform contact whatsoever. |
-| | `registered` | The cluster is announced to kubehz at provision time and can send heartbeats — read-only dashboard visibility. |
+| | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats — read-only dashboard visibility. |
 | | `managed` | **In development — not yet available.** Reserved for the managed tier (operator-driven remediation). Today `managed` behaves exactly like `registered` (read-only heartbeat visibility) and prints an "in development" notice; no operator is deployed. |
 
 `apiUrl` is required when `hosting: hosted` **or** `access != none`, and it
-must be **HTTPS** — bearer tokens and fingerprints travel on this URL, so
-`lo` refuses plain-HTTP endpoints outright.
+must be **HTTPS** — the agent's bearer token travels on this URL, so `lo`
+refuses plain-HTTP endpoints outright.
 
 ## Registration
 
-When `access` is `registered` or `managed`, the last `lo provision` step
-registers the cluster with the platform. The same call is available
-standalone:
+When `access` is `registered` or `managed`, the cluster registers itself
+**from inside the cluster** — the heartbeat agent
+([below](#the-heartbeat-agent)) owns this. On its first run the agent generates
+two 256-bit secrets locally and announces only their SHA-256 hashes to
+`POST /api/clusters/agent-register`:
 
-```bash
-lo kubehz register
-```
+| Secret | Key in `kubehz-agent` | Role |
+|--------|-----------------------|------|
+| **agent-token** `A` | `agent-token` | The live credential every heartbeat authenticates with (`Authorization: Bearer A`). It **never** leaves the cluster and is **never** printed by any command. |
+| **claim-code** `C`  | `claim-code`  | A one-time proof you paste into the dashboard to claim the cluster. |
 
-Registration is a **public, unauthenticated** POST to
-`/api/clusters/register` carrying exactly two things:
+The platform stores only `sha256(A)` and `sha256(C)` — it can never push a
+credential into your cluster, and a database leak yields no usable secret. The
+secrets are generated **once** and never rotated, so re-applying the agent is a
+no-op. Registration is **provider-agnostic**: no SSH key, no hcloud token,
+nothing Hetzner-specific.
 
-- the cluster **domain** (which becomes its platform identity), and
-- an SSH-key **MD5 fingerprint** (Hetzner exposes MD5 fingerprints, so lok8s
-  emits `ssh-keygen -E md5`, not SHA256).
-
-How the fingerprint is derived depends on the cluster kind: `KubeOne` reads
-the SSH public key from the provider output (falling back to
-`spec.hcloud.sshPublicKeyFile`), `Capi` resolves `spec.hcloud.sshKeyName`
-via the hcloud API, and `Lo` clusters — which have no SSH keys — use a
-`lo:<domain>` identifier instead.
-
-This creates a **pending** cluster on the platform and the CLI prints the
-fingerprint (the reusable provision workflow also writes it to the GitHub
-job summary):
-
-```
-kubehz: cluster 'my-cluster.example.com' registered (pending). Claim it in the dashboard:
-  fingerprint: MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99
-```
-
-Registration proves nothing by itself and needs no token — ownership is
-proven later, at claim time. If the API is unreachable, provisioning warns
-and continues without the integration.
+::: details Legacy: `lo kubehz register`
+A pre-agent announce still exists and runs automatically at the end of
+`lo provision` (or standalone via `lo kubehz register`): it POSTs the cluster
+domain plus an SSH-key MD5 fingerprint to `/api/clusters/register`, making the
+cluster visible before the agent is deployed. It is **vestigial** for
+self-hosted clusters — the agent's self-registration and the claim code below
+are the real path — and is kept only as a best-effort announce and as the
+anchor for the platform's hosted-control-plane auto-claim. It proves nothing
+and needs no token; if the API is unreachable it warns and provisioning
+continues.
+:::
 
 ## Claiming
 
-A pending cluster is attached to your account through the dashboard
-**Claim** page. You provide two things:
+Claiming attaches a registered cluster to your account. It is
+**provider-agnostic and needs no hcloud token** — you prove ownership by reading
+a one-time code out of the cluster (which only its operator can do) and pasting
+it into the dashboard while signed in.
 
-1. the **MD5 fingerprint** printed at registration, and
-2. **your own Hetzner Cloud API token** — used once to verify that the SSH
-   key behind the fingerprint lives in your hcloud account. The token is
-   used transiently for that lookup and is **never stored**.
+1. **Deploy the heartbeat agent** ([below](#the-heartbeat-agent)). On its first
+   run it registers the cluster and generates the claim code.
 
-The fingerprint is not a secret (it is safe in logs and job summaries); the
-hcloud token is the actual proof of ownership and never leaves the claim
-request. No platform token is needed in CI: provisioning stays tokenless,
-claiming is interactive.
+2. **Read the claim code** with your kubeconfig pointed at the cluster:
 
-You can reproduce the fingerprint locally at any time:
+   ```bash
+   lo kubehz claim-code
+   ```
 
-```bash
-ssh-keygen -E md5 -lf ~/.ssh/id_ed25519.pub
-```
+   It prints the code (`khzc_…`) plus a paste hint. The equivalent raw command
+   is:
+
+   ```bash
+   kubectl -n kubehz-system get secret kubehz-agent \
+     -o jsonpath='{.data.claim-code}' | base64 -d
+   ```
+
+3. **Paste it** into the dashboard **Claim** page while signed in. The cluster
+   is attributed to your account and the code is consumed (single-use).
+
+The claim code is the *only* secret that transits your browser, and only once.
+The **agent-token** — the credential that authenticates heartbeats — never
+leaves the cluster and is never printed by `lo kubehz claim-code` or any other
+command.
 
 ## The heartbeat agent
 
@@ -103,15 +109,23 @@ Dashboard visibility comes from a small in-cluster agent: a CronJob
 minutes** and POSTs a status snapshot to
 `/api/clusters/<domain>/heartbeat`. Properties worth knowing:
 
-- **Outbound-only.** The agent pushes; the platform never connects into
-  your cluster and holds no credentials for it.
-- **Read-only RBAC.** The `kubehz-agent` ServiceAccount can only read
-  cluster state: `get`/`list` on nodes, namespaces, componentstatuses and
-  CSRs, pods in `kube-system` only (a namespaced Role, for control-plane
-  health), and `get` on the `/readyz` + `/version` API paths. Nothing
-  grants write access.
-- **Domain-keyed.** The payload's `clusterId` is the cluster domain — the
-  same identity used at registration.
+- **Self-bootstrapping identity.** On each run the agent ensures one Secret,
+  `kubehz-agent` in `kubehz-system`, holding a self-generated agent-token `A`
+  (`khz_agt_…`) and claim-code `C` (`khzc_…`). It is created once and **never
+  rotated**; the platform only ever receives `sha256(A)`/`sha256(C)`.
+- **Authenticated.** Every heartbeat carries `Authorization: Bearer A`. Once a
+  cluster has enrolled a token, the platform rejects anonymous heartbeats for
+  it — the identity is proven from the first beat.
+- **Outbound-only.** The agent pushes; the platform never connects into your
+  cluster and holds no credentials for it (only verifier hashes).
+- **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
+  state — `get`/`list` on nodes, namespaces, componentstatuses and CSRs, `list`
+  pods in `kube-system` only (control-plane health), and `get` on the `/readyz`
+  + `/version` API paths — plus `get`+`create` (never `update`/`patch`/`delete`)
+  on Secrets in its own `kubehz-system` namespace to bootstrap its identity
+  Secret once. It reads no Secrets elsewhere and can rotate nothing.
+- **Domain-keyed.** The payload's `clusterId` is the cluster domain — the same
+  identity it registers under.
 - **Hardened.** Stock `registry.k8s.io/kubectl` image, non-root, read-only
   root filesystem, all capabilities dropped.
 
@@ -161,6 +175,10 @@ sed -i "s|CLUSTER_ID_PLACEHOLDER|my-cluster.example.com|g" "$agent/configmap.yam
 kubectl apply -k "$agent"
 ```
 
+On its first run the agent creates its identity Secret, self-registers, and
+starts beating. Then read the claim code with `lo kubehz claim-code` and paste
+it into the dashboard to [claim](#claiming) the cluster.
+
 ## Status and deregistration
 
 ```bash
@@ -192,18 +210,19 @@ kubectl -n kubehz-system get cronjob kubehz-heartbeat   # SUSPEND + LAST SCHEDUL
 kubectl -n kubehz-system logs -l app=kubehz-heartbeat
 ```
 
-A `4xx` from the API in those logs usually means the cluster is not
-registered (or was deregistered) — re-run `lo kubehz register`.
+A `4xx` from the API in those logs usually means the agent could not register
+or authenticate: a `401` is a missing or rejected agent-token, a `404` means the
+cluster is not registered yet. The agent self-registers on its first run and
+retries every tick, so a transient API outage clears itself.
 
-**Registration failed during provisioning?** It is non-fatal by design;
-the cluster is fully functional without it. Re-run `lo kubehz register`
-once the API is reachable.
+**Registration failed during provisioning?** Provisioning no longer depends on
+it — a self-hosted cluster registers from inside, once the agent is deployed.
+Deploy the agent (above); it registers and starts beating on its own.
 
-**Fingerprint mismatch at claim time?** The platform matches MD5
-fingerprints against the SSH keys in *your* hcloud account. Verify the key
-that provisioned the cluster is uploaded there, and compare against
-`ssh-keygen -E md5 -lf <key>.pub` (the `MD5:` prefix is accepted and
-normalized away).
+**No claim code yet?** `lo kubehz claim-code` reads it from the `kubehz-agent`
+Secret. If the Secret or its `claim-code` key is missing, the agent has not run
+yet — confirm the CronJob fired at least once, then retry. Make sure your
+kubeconfig points at the cluster you mean to claim.
 
 **`spec.kubehz.apiUrl is required` / HTTPS errors?** Set `apiUrl` whenever
 `hosting: hosted` or `access != none`, and use an `https://` URL — plain
