@@ -22,7 +22,7 @@ setup() {
 
   # Extract the embedded heartbeat (containers[0].command[2] — the `-c` script).
   HEARTBEAT="${BATS_TEST_TMPDIR}/heartbeat.sh"
-  command yq '.spec.jobTemplate.spec.template.spec.containers[0].command[2]' \
+  command yq -r '.spec.jobTemplate.spec.template.spec.containers[0].command[2]' \
     "${CRONJOB}" > "${HEARTBEAT}"
 
   # Stubs: a single node "cp-1". STUB_ITYPE is the instance-type label it
