@@ -33,7 +33,7 @@ Two independent axes:
 | | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The cluster is announced to kubehz at provision time and can send heartbeats — read-only dashboard visibility. |
-| | `managed` | `registered` plus the kubehz operator (a `kubehz-operator` Deployment with its own write RBAC, `kubehz-managed`) may act on the cluster. |
+| | `managed` | **In development — not yet available.** Reserved for the managed tier (operator-driven remediation). Today `managed` behaves exactly like `registered` (read-only heartbeat visibility) and prints an "in development" notice; no operator is deployed. |
 
 `apiUrl` is required when `hosting: hosted` **or** `access != none`, and it
 must be **HTTPS** — bearer tokens and fingerprints travel on this URL, so

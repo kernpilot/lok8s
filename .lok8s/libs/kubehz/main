@@ -7,7 +7,11 @@
 #
 # Split files:
 #   libs/kubehz/hosted  — hosted cluster provisioning/destroy via kubehz API
-#   libs/kubehz/deploy  — agent/operator deployment to managed clusters
+#
+# The self-hosted heartbeat agent ships as a kustomize dir under
+# libs/kubehz/manifests/agent/ (applied out-of-band — see docs/guide/kubehz.md).
+# The "managed" access tier (operator-driven remediation) is in development and
+# not yet available: access: managed registers for heartbeat visibility only.
 
 import ^utils/verbose
 import ^utils/http
@@ -157,6 +161,15 @@ kubehz::register_cluster() {
   # validate_config already checks this, but register_cluster is also reachable
   # standalone (lo kubehz register), so re-assert before any network call.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 0
+
+  # The 'managed' access tier (operator-driven remediation) is in development
+  # and not yet available. There is no operator to deploy — never pretend
+  # otherwise (an apply would only ImagePullBackOff on a non-existent image).
+  # Register for read-only heartbeat visibility only, exactly like
+  # access: registered, and say so plainly.
+  if [[ "${LOK8S_KUBEHZ_ACCESS:-}" == "managed" ]]; then
+    warn "spec.kubehz.access: 'managed' is in development and not yet available — registering for read-only heartbeat visibility only (as with access: registered)."
+  fi
 
   local fingerprint
   fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
