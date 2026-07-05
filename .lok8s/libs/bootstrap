@@ -54,12 +54,49 @@ main::bootstrap() {
   )
   :args "Apply bootstrap addons" "${@}"
 
+  bootstrap::dispatch "${domain}"
+}
+
+# bootstrap::dispatch <domain>
+# Standalone `lo bootstrap` core (factored out of main::bootstrap so it is
+# testable without the argsh :args builtin, mirroring main::provision →
+# provision::dispatch).
+#
+# CRITICAL: source the domain's driver and run driver::export BEFORE
+# bootstrap::apply. driver::export populates the spec-derived env
+# (LOK8S_SPEC_CLUSTER_DOMAIN, LOK8S_SPEC_DNS_DOMAINFILTER, LOK8S_SPEC_OIDC_*, …)
+# that spec.bootstrap addons reference via ${LOK8S_SPEC_*}. Without it, this
+# standalone path left those UNSET and the addons rendered them empty — the
+# `lo provision [--bootstrap]` path was correct because provision::dispatch
+# sources the driver (provision:161-170) and calls driver::export
+# (provision:246-247) before bootstrap::apply. This converges the two.
+bootstrap::dispatch() {
+  local domain="$1"
+
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "cluster spec not found: ${cluster_yaml}"; return 1; }
 
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+
+  # Source the driver (same resolution as provision::dispatch) so its
+  # driver::export is available. Guard a missing driver the same way.
+  local kind
+  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
+  if [[ ! -f "${kind_script}" ]]; then
+    error "Unknown cluster kind: ${kind} (missing ${kind_script})"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "${kind_script}"
+
+  # driver::export: idempotent spec-derived env (LOK8S_SPEC_*, …) — optional per
+  # the driver contract (see .lok8s/drivers/README.md), so probe before calling.
+  if declare -f driver::export &>/dev/null; then
+    driver::export "${domain}"
+  fi
 
   bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig}"
 }
