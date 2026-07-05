@@ -36,7 +36,7 @@ kubectl() {
     "get nodes -o json") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     *"jsonpath={.status.conditions"*) printf 'True' ;;
     *"control-plane}"*) printf ''; return 0 ;;
-    *"instance-type}"*) printf '%s' "${STUB_ITYPE}"; return 0 ;;
+    *"instance-type}"*) [ -n "${STUB_ITYPE_FAIL:-}" ] && return 1; printf '%s' "${STUB_ITYPE}"; return 0 ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     *"/version"*) printf 'ok\n'; return 0 ;;
@@ -82,6 +82,9 @@ teardown() {
   assert_output --partial "name: kubehz-heartbeat"
   # The per-node field is present in the rendered heartbeat script.
   assert_output --partial '\"instanceType\":\"'
+  # …sourced from the GA label key, not the deprecated beta alias (pins the key
+  # so a silent swap to beta.kubernetes.io/instance-type fails here).
+  assert_output --partial 'node\.kubernetes\.io/instance-type'
 }
 
 # ── Labeled node → instanceType is the label value ───────
@@ -115,6 +118,22 @@ teardown() {
   # The field is present but empty — never omitted, never a broken heartbeat.
   run command jq -r '.nodes[0] | has("instanceType")' "${STUB_PAYLOAD_OUT}"
   assert_output "true"
+  run command jq -r '.nodes[0].instanceType' "${STUB_PAYLOAD_OUT}"
+  assert_output ""
+}
+
+# ── instance-type kubectl error → "" (fail-soft under set -e) ──
+
+@test "heartbeat: an instance-type kubectl error is fail-soft (instanceType \"\", valid JSON)" {
+  # kubectl returns non-zero for the instance-type lookup — the `|| itype=""`
+  # guard must absorb it so `set -e` does not abort the whole heartbeat.
+  export STUB_ITYPE_FAIL=1
+  run bash "${RUNNER}"
+  assert_success
+
+  run command jq -e . "${STUB_PAYLOAD_OUT}"
+  assert_success
+
   run command jq -r '.nodes[0].instanceType' "${STUB_PAYLOAD_OUT}"
   assert_output ""
 }
