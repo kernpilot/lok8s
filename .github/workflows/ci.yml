@@ -87,6 +87,13 @@ jobs:
             || { echo "::error::.bin/argsh drifted from .bin/b.lock — run 'b install' and commit the result"; exit 1; }
 
       - name: Run unit tests
+        env:
+          # `argsh test` docker-forwards to the argsh container (no host bats).
+          # PATH_BIN makes it mount .bin — the b-pinned toolchain, incl. the
+          # kustomize the render tests need — at /usr/local/sbin (read-only),
+          # matching local dev where direnv exports PATH_BIN. Without it the
+          # container only has its own tools and `kustomize build` tests 127.
+          PATH_BIN: ${{ github.workspace }}/.bin
         run: ./.bin/argsh test tests/unit/
 
   operator-tests:
@@ -107,6 +114,9 @@ jobs:
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
       - name: Run operator tests
+        env:
+          # Same .bin mount as the unit-tests job (see comment there).
+          PATH_BIN: ${{ github.workspace }}/.bin
         run: ./.bin/argsh test tests/operator/
 
   integration-tests:
