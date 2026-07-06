@@ -15,16 +15,23 @@ lo audit --json          # machine-readable output (stable schema, see below)
 ## What it checks
 
 Each check is fail-soft: an input it cannot read yields `unknown` (never an
-error), so the audit always completes.
+error), so the audit always completes. One deliberate fail-**closed** exception:
+an `EncryptionConfiguration` that is *present but unparseable* counts as
+not-encrypting → **fail**, not unknown — a config that provably exists but can't
+be proven to encrypt must not be trusted.
 
 | id | severity | What it looks at |
 |----|----------|------------------|
-| `encryption-at-rest` | high | Secret encryption at rest (etcd). For KubeOne the authoritative signal is the driver's `features.encryptionProviders.enable`; a `spec.features.encryptionProviders.enable` override wins; a rendered `EncryptionConfiguration` in `lo build` artifacts counts as proof **only when a real provider (`aescbc`/`secretbox`/`kms`) is the write provider for the `secrets` resource** — an `identity`-only or empty config encrypts nothing and is treated as disabled. **Disabled on a prod-intent cluster → fail.** A local `kind` (`kind: Lo`) cluster is not-applicable (pass). |
-| `cilium-policy-enforcement` | high | Cilium `policyAuditMode` / `policyEnforcementMode` in the **effective** cilium values (base < driver < provider < inline). **Audit mode = insecure** (see below). |
+| `encryption-at-rest` | high | Secret encryption at rest (etcd). For KubeOne the authoritative signal is the driver's `features.encryptionProviders.enable`; a `spec.features.encryptionProviders.enable` override wins; a rendered `EncryptionConfiguration` in `lo build` artifacts counts as proof **only when a real provider (`aescbc`/`secretbox`/`kms`) is the write provider for the FIRST resource group covering `secrets`** (apiserver precedence: the first matching group wins — a later wildcard group can't rescue a `secrets → identity` group) — an `identity`-only or empty config encrypts nothing and is treated as disabled. **Disabled on a prod-intent cluster → fail.** A local `kind` (`kind: Lo`) cluster is **always** not-applicable (pass), even if an encryption config is present. |
+| `cilium-policy-enforcement` | high | Cilium `policyAuditMode` / `policyEnforcementMode` in the **effective** cilium values (base < driver < provider < inline). **Audit mode = insecure** (see below). Values that fail to parse/merge (e.g. a broken inline override) → `unknown`, never a silent pass. |
 | `exposed-endpoints` | medium / low | `NodePort` and `LoadBalancer` Services, `HTTPRoute`s, and whether a default-Deny `SecurityPolicy` (IP-allowlist) carve-out fronts them. |
 | `k8s-version-support` | high / medium | Is `spec.kubernetes.version` a still-supported minor? EOL on a prod-intent cluster is a fail; on a dev cluster it's a warn. |
 | `privileged-workloads` | medium | `privileged`, `hostNetwork`, or `hostPath` in the cluster's **own targets** (the vetted framework addons are out of scope to avoid noise). |
 | `plaintext-endpoints` | high / medium | A non-HTTPS `spec.oidc.issuer` (fail — the apiserver would trust tokens over cleartext) and `http://` endpoints referenced in targets (warn). |
+
+"Prod-intent" is every cluster `kind` **except** `Lo` (the local kind driver) —
+an empty or unknown `kind` is scored as prod-intent too, fail-closed: a cluster
+that cannot be proven to be a dev cluster is treated like production.
 
 ### Cilium: audit mode vs enforce (the headline)
 

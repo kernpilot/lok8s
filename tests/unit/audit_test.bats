@@ -165,6 +165,31 @@ YAML
   assert_equal "$(_status_of cilium-policy-enforcement)" "fail"
 }
 
+# SECURITY REGRESSION (Copilot review round 2, audit:289): a merge/parse
+# failure of the effective cilium values — e.g. an unparseable `values:` string
+# in the spec.bootstrap inline override — made `merged` empty and fell through
+# to the enforcing-PASS branch. Unreadable values can prove nothing: → unknown.
+@test "an unparseable cilium values override → unknown, never a fall-through pass" {
+  _cilium_values kubeone <<'YAML'
+policyAuditMode: true
+YAML
+  # chart.yaml so the bootstrap parser accepts the `values:` reserved key
+  # (values: is helm-only); the override itself is a broken YAML string.
+  touch "${PATH_LOK8S}/addons/cilium/chart.yaml"
+  _spec badinline <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap:
+    - cilium:
+        values: "policyAuditMode: [unclosed"
+YAML
+  audit::run_domain badinline
+  assert_equal "$(_status_of cilium-policy-enforcement)" "unknown"
+}
+
 @test "cilium not in spec.bootstrap → not-applicable pass" {
   _spec no-cilium <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
@@ -312,6 +337,86 @@ resources:
       - identity: {}
 YAML
   audit::run_domain artok
+  assert_equal "$(_status_of encryption-at-rest)" "pass"
+}
+
+# SECURITY REGRESSION (review round 2): k8s EncryptionConfiguration precedence —
+# the FIRST resources entry matching a resource wins. A `secrets → identity`
+# group listed BEFORE a wildcard aescbc group writes Secrets PLAINTEXT; the
+# later covering group must never rescue the verdict (the old scan passed if
+# ANY covering group had a real write provider).
+@test "identity-first covering group is a fail — a later wildcard aescbc group must not rescue it" {
+  _spec artprec <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  cat > "${PATH_CLUSTERS}/artprec/artifacts.yaml" <<'YAML'
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - identity: {}
+  - resources: ["*.*"]
+    providers:
+      - aescbc: { keys: [{ name: k1, secret: c2VjcmV0 }] }
+YAML
+  audit::run_domain artprec
+  assert_equal "$(_status_of encryption-at-rest)" "fail"
+  assert_equal "$(_sev_of encryption-at-rest)" "high"
+}
+
+@test "aescbc secrets group first + identity wildcard later passes (first covering group wins)" {
+  _spec artprec2 <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  cat > "${PATH_CLUSTERS}/artprec2/artifacts.yaml" <<'YAML'
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - aescbc: { keys: [{ name: k1, secret: c2VjcmV0 }] }
+  - resources: ["*.*"]
+    providers:
+      - identity: {}
+YAML
+  audit::run_domain artprec2
+  assert_equal "$(_status_of encryption-at-rest)" "pass"
+}
+
+# Copilot review round 2 (audit:165): kind=lo is documented n/a for
+# encryption-at-rest — the short-circuit must beat EVERY other path. An
+# explicit enable: false plus a rendered identity-only EncryptionConfiguration
+# used to reach the disabled branch and emit a WARN on a dev cluster.
+@test "kind=lo with encryption disabled AND an identity-only artifact is still n/a (pass), never warn" {
+  _spec lona <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  features: { encryptionProviders: { enable: false } }
+  bootstrap: [ cilium ]
+YAML
+  cat > "${PATH_CLUSTERS}/lona/artifacts.yaml" <<'YAML'
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - identity: {}
+YAML
+  audit::run_domain lona
   assert_equal "$(_status_of encryption-at-rest)" "pass"
 }
 
@@ -472,6 +577,33 @@ spec:
 YAML
   audit::run_domain ver-dev
   assert_equal "$(_status_of k8s-version-support)" "warn"
+}
+
+# Copilot review round 2 (audit:636): prod-intent semantics — the doc says
+# "everything except kind=lo is prod-intent"; the code treated an EMPTY kind as
+# dev. Now they agree, fail-closed: only kind=lo is dev; empty/unknown kinds
+# are scored like production.
+@test "_prod_intent: kind=lo is dev; kubeone and EMPTY/unknown kinds are prod-intent" {
+  run audit::_prod_intent lo
+  assert_failure
+  run audit::_prod_intent kubeone
+  assert_success
+  run audit::_prod_intent ""
+  assert_success
+  run audit::_prod_intent somefuturekind
+  assert_success
+}
+
+@test "a spec with NO kind is scored prod-intent (fail-closed): EOL k8s is a fail, not a warn" {
+  _spec nokind <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.31.4" }
+  bootstrap: []
+YAML
+  audit::run_domain nokind
+  assert_equal "$(_status_of k8s-version-support)" "fail"
 }
 
 @test "a newer-than-known k8s minor warns (stale support list)" {

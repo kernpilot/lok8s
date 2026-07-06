@@ -10,7 +10,10 @@
 #
 # Every check is a separate, independently testable function and is FAIL-SOFT:
 # an input it cannot read yields a `unknown` finding, never an error — the audit
-# never blocks and never touches a cluster. Checks:
+# never blocks and never touches a cluster. One deliberate fail-CLOSED
+# exception: an EncryptionConfiguration that is PRESENT but unparseable counts
+# as not-encrypting → FAIL, not unknown (its presence is readable; only the
+# proof is not — see audit::_encryption_encrypts_secrets). Checks:
 #
 #   encryption-at-rest        Secret encryption at rest (etcd) configured?
 #   cilium-policy-enforcement Cilium policyAuditMode / policyEnforcementMode —
@@ -155,11 +158,24 @@ audit::run_domain() {
 # EncryptionConfiguration in artifacts is accepted as proof ONLY when it uses a
 # real provider (aescbc/aesgcm/secretbox/kms) for the `secrets` resource — an
 # identity-only or empty config encrypts NOTHING and is treated as DISABLED, not
-# pass. FAIL if explicitly disabled on a prod-intent cluster; n/a (pass) for a
-# kind/dev cluster.
+# pass. FAIL if explicitly disabled on a prod-intent cluster. kind=lo (local
+# kind/dev) short-circuits to n/a (pass) FIRST — the documented contract — so no
+# other path (an explicit enable: false, an identity-only config) can degrade a
+# throwaway dev cluster to warn.
 audit::check_encryption() {
   local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
   local id="encryption-at-rest" title="Secret encryption at rest (etcd)"
+
+  # kind=lo is documented not-applicable — short-circuit BEFORE any evaluation
+  # so every encryption path (spec flag, driver default, rendered artifacts)
+  # lands here for a dev cluster; none of them may emit a warn.
+  if [[ "${kind}" == "lo" ]]; then
+    audit::_emit "${id}" "${title}" high pass \
+      "kind=lo (local kind/dev cluster) — at-rest encryption is not required for a throwaway cluster." \
+      "For a production cluster (KubeOne), keep features.encryptionProviders.enable: true (the shipped default)."
+    return 0
+  fi
+
   local prod_intent=0
   audit::_prod_intent "${kind}" && prod_intent=1
 
@@ -224,12 +240,6 @@ audit::check_encryption() {
       "Set features.encryptionProviders.enable: true (KubeOne driver) and re-provision so the apiserver encrypts Secrets with a real provider (aescbc/secretbox/kms), not identity."
     return 0
   fi
-  if [[ "${kind}" == "lo" ]]; then
-    audit::_emit "${id}" "${title}" high pass \
-      "kind=lo (local kind/dev cluster) — at-rest encryption is not required for a throwaway cluster." \
-      "For a production cluster (KubeOne), keep features.encryptionProviders.enable: true (the shipped default)."
-    return 0
-  fi
   audit::_emit "${id}" "${title}" high unknown \
     "Could not statically determine at-rest encryption for kind=${kind} — no spec/driver flag and no rendered EncryptionConfiguration." \
     "Run 'lo build ${domain}' to render artifacts, or confirm the control plane sets --encryption-provider-config."
@@ -282,11 +292,26 @@ audit::check_cilium() {
       "Ensure the cilium addon ships values.yaml / values.${kind}.yaml."
     return 0
   fi
-  local merged audit_mode enforce_mode
+  local merged audit_mode="" enforce_mode=""
   merged=$(audit::_merge_yaml "${vfiles[@]}" 2>/dev/null) || merged=""
   [[ -n "${tmp_inline}" ]] && rm -f "${tmp_inline}"
-  audit_mode=$(yq -r '.policyAuditMode // false' <<<"${merged}" 2>/dev/null || echo "")
-  enforce_mode=$(yq -r '.policyEnforcementMode // ""' <<<"${merged}" 2>/dev/null || echo "")
+  # Guard on `merged` BEFORE the yq reads: yq happily emits the `// false`
+  # default for EMPTY input, which would masquerade a failed merge as
+  # "enforcing" further down.
+  if [[ -n "${merged}" ]]; then
+    audit_mode=$(yq -r '.policyAuditMode // false' <<<"${merged}" 2>/dev/null) || audit_mode=""
+    enforce_mode=$(yq -r '.policyEnforcementMode // ""' <<<"${merged}" 2>/dev/null) || enforce_mode=""
+  fi
+  # Merge/parse failure (e.g. an unparseable inline override in spec.bootstrap)
+  # → UNKNOWN, never a fall-through pass and never a crash: values we cannot
+  # read cannot prove enforcement is on. A successful read always yields
+  # "true"/"false" for audit_mode, so anything else means unreadable values.
+  if [[ "${audit_mode}" != "true" && "${audit_mode}" != "false" ]]; then
+    audit::_emit "${id}" "${title}" high unknown \
+      "Could not parse/merge the effective Cilium values (base/driver/provider/inline override) — the values are unreadable, so the enforcement state cannot be proven." \
+      "Fix the YAML (addons/cilium/values*.yaml or the spec.bootstrap cilium override), then re-run 'lo audit'."
+    return 0
+  fi
 
   if [[ "${audit_mode}" == "true" ]]; then
     audit::_emit "${id}" "${title}" high fail \
@@ -627,12 +652,13 @@ audit::_count_status() {
   printf '%s' "${n}"
 }
 
-# audit::_prod_intent <kind> → 0 (prod-intent) if kind is a real-infra driver.
-# kind=lo is a local kind/dev cluster; everything else (kubeone/capi/kkp) is
-# prod-intent for scoring purposes.
+# audit::_prod_intent <kind> → 0 (prod-intent) for everything EXCEPT kind=lo.
+# kind=lo is the local kind/dev driver; kubeone/capi/kkp are real infra. An
+# EMPTY/unknown kind counts as prod-intent too — fail-closed: a cluster we
+# cannot prove to be a dev cluster is scored like production.
 audit::_prod_intent() {
   local kind="$1"
-  [[ -n "${kind}" && "${kind}" != "lo" ]]
+  [[ "${kind}" != "lo" ]]
 }
 
 # audit::_minor_rank <maj.min> → maj*1000+min (numeric ordering)
@@ -697,12 +723,17 @@ audit::_artifacts_contain() {
 
 # audit::_encryption_encrypts_secrets <domain_dir> → 0 if a rendered
 # EncryptionConfiguration uses a REAL provider (aescbc/aesgcm/secretbox/kms) as
-# the WRITE (first) provider for a resource group that covers `secrets` — the
-# bare `secrets` resource, or the `*.` (core group) / `*.*` (all) wildcards.
-# A config that leaves `secrets` to `identity` — or lists identity first (new
-# writes go out in plaintext) — encrypts NOTHING, so a bare
-# `kind: EncryptionConfiguration` is NOT accepted as proof. Fail-soft: an
-# unreadable/parse-error artifact yields no match (never a false pass).
+# the WRITE (first) provider of the FIRST resource group covering `secrets` —
+# the bare `secrets` resource, or the `*.` (core group) / `*.*` (all) wildcards.
+# FIRST covering group only (the `[ … ][0]` collect below), because that is the
+# apiserver's precedence: the first resources entry matching a resource wins —
+# `secrets → identity` listed BEFORE `*.* → aescbc` writes Secrets PLAINTEXT,
+# and the later covering group must never rescue the verdict. Likewise identity
+# listed first WITHIN a group (new writes go out plaintext) encrypts NOTHING,
+# so a bare `kind: EncryptionConfiguration` is NOT accepted as proof.
+# Fail-CLOSED on unreadable input: a parse-error config yields no proof here,
+# and the caller — which already knows the config EXISTS — reports FAIL, not
+# unknown (a config we cannot parse must not be trusted as encrypting).
 audit::_encryption_encrypts_secrets() {
   local domain_dir="$1"
   local -a files=()
@@ -715,9 +746,9 @@ audit::_encryption_encrypts_secrets() {
         aescbc|aesgcm|secretbox|kms|kmsv2) return 0 ;;
       esac
     done < <(yq eval-all -N '
-      select(.kind == "EncryptionConfiguration")
-      | (.resources // [])[]
-      | select((.resources // []) | any_c(. == "secrets" or . == "*.*" or . == "*."))
+      [ select(.kind == "EncryptionConfiguration")
+        | (.resources // [])[]
+        | select((.resources // []) | any_c(. == "secrets" or . == "*.*" or . == "*.")) ][0]
       | (.providers // [])[0] | select(tag == "!!map") | keys | .[0]
     ' "${f}" 2>/dev/null)
   done
