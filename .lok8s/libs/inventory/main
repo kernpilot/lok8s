@@ -90,8 +90,12 @@ inventory::build_json() {
     bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || {
       # An unparseable entry is skipped, never fatal (the deploy already failed
       # loudly on it upstream) — but say so instead of silently thinning the
-      # inventory (review #52 round 1, both reviewers).
-      warn "inventory: skipping unparseable bootstrap entry '${e}'"
+      # inventory (review #52 round 1). Log only the entry's NAME/key: map-form
+      # entries carry inline values/env, which must not reach (CI-captured)
+      # logs from this path (round 2, both reviewers).
+      local _key
+      _key=$(jq -r 'if type == "object" then (keys[0] // "?") else tostring end' <<<"${e}" 2>/dev/null) || _key="?"
+      warn "inventory: skipping unparseable bootstrap entry '${_key}'"
       continue
     }
     local src="target" chart_version category
