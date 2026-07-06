@@ -41,10 +41,38 @@ jobs:
   deploy:
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url || steps.deployment-final.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
     steps:
+      # GitHub Pages intermittently fails deployments server-side within
+      # seconds ("Deployment failed, try again later.", API status
+      # `deployment_failed`, no diagnostics). Re-deploying the identical
+      # artifact reliably succeeds (proven repeatedly via workflow_dispatch
+      # re-runs of the exact sha that had just failed), so the failure is a
+      # transient backend condition, not content/config — DNS, cert, and the
+      # lok8s.io custom domain all check out. deploy-pages@v4 does not retry
+      # a hard `deployment_failed`, hence the manual retry chain below.
       - name: Deploy to GitHub Pages
         id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: Wait before retry (transient Pages backend failure)
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 60
+
+      - name: Deploy to GitHub Pages (retry)
+        id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: Wait before final retry
+        if: steps.deployment.outcome == 'failure' && steps.deployment-retry.outcome == 'failure'
+        run: sleep 180
+
+      - name: Deploy to GitHub Pages (final retry)
+        id: deployment-final
+        if: steps.deployment.outcome == 'failure' && steps.deployment-retry.outcome == 'failure'
         uses: actions/deploy-pages@v4
