@@ -87,7 +87,13 @@ inventory::build_json() {
   for e in "${entries[@]+"${entries[@]}"}"; do
     [[ -n "${e}" ]] || continue
     nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
-    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || {
+      # An unparseable entry is skipped, never fatal (the deploy already failed
+      # loudly on it upstream) — but say so instead of silently thinning the
+      # inventory (review #52 round 1, both reviewers).
+      warn "inventory: skipping unparseable bootstrap entry '${e}'"
+      continue
+    }
     local src="target" chart_version category
     [[ "${dr}" == "${addons_dir}/"* ]] && src="addon"
     chart_version=$(addons::_version "${dr}")
