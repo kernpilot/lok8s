@@ -14,10 +14,11 @@ import ^utils/verbose
 import ^utils/template
 
 main::addons() {
-  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local domain="${domain:-${DOMAIN_NAME:-}}" detail=0
   local -a addons
   local -a args=(
     'domain|:^~domain'  'Domain to use'
+    'detail|:+'         'Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure'
     'addons'            'List and inspect specific addons'
     "${args[@]:-}"
   )
@@ -29,6 +30,11 @@ main::addons() {
       [[ $i -lt $((${#addons[@]} - 1)) ]] &&
         printf "\n---\n"
     done
+    return 0
+  fi
+
+  if (( detail )); then
+    addons::detail "${domain}"
     return 0
   fi
 
@@ -176,6 +182,122 @@ addons::show() {
     [[ -f "${f}" ]] || continue
     echo "  - $(basename "${f}")"
   done
+}
+
+# Read an addon's lok8s.dev/category label from its manifests. Echoes the
+# category (infrastructure/networking/observability/storage/dev-tools) or "-".
+addons::_category() {
+  local dir="$1" line cat=""
+  line=$(grep -rhoE 'lok8s\.dev/category:[[:space:]]*[a-zA-Z0-9-]+' "${dir}" 2>/dev/null | head -1)
+  cat="${line##*:}"                 # drop everything up to the colon
+  cat="${cat//[[:space:]]/}"        # trim surrounding whitespace
+  echo "${cat:--}"
+}
+
+# addons::_config_hint <name> — a one-line "how to configure" pointer for a
+# framework addon. This is the small in-repo config-help catalog: every addon
+# under .lok8s/addons/ MUST have an entry here (a parity test fails on drift, so
+# adding an addon without a hint breaks CI). Keep each hint to the handful of
+# knobs users actually touch.
+addons::_config_hint() {
+  case "$1" in
+    autoscaler)                   echo "min/max nodes per MachineDeployment via cluster-autoscaler annotations";;
+    ccm)                          echo "spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)";;
+    cert-manager)                 echo "issue TLS via ClusterIssuer/Certificate CRs in a networking target";;
+    cert-manager-webhook-hetzner) echo "needs the hetzner-dns token Secret; pair with a DNS-01 ClusterIssuer";;
+    cilium)                       echo "encryption + policy mode (policyAuditMode) in cilium inline values / values.<driver>.yaml";;
+    cnpg-operator)                echo "declare databases as CNPG Cluster CRs in a target";;
+    envoy-gateway)                echo "define Gateway + HTTPRoutes in a networking target";;
+    external-dns)                 echo "set the managed DNS zones via spec.dns.domainFilter";;
+    gatus)                        echo "configure monitored endpoints in the gatus target/values";;
+    local-path-provisioner)       echo "set as default StorageClass; values in addons/local-path-provisioner";;
+    mailpit)                      echo "expose via an HTTPRoute target (dev SMTP capture)";;
+    metallb)                      echo "set the address pool via spec.loadBalancer.pool";;
+    metrics-server)               echo "usually no config; values in addons/metrics-server";;
+    monitoring)                   echo "Prometheus/Grafana scrape + OIDC config via the monitoring target values";;
+    oidc-rbac)                    echo "spec.oidc.groupsClaim + the oidc group->cluster-role bindings";;
+    redis-operator)               echo "declare Redis CRs in a target";;
+    reflector)                    echo "annotate the source Secret/ConfigMap to mirror across namespaces";;
+    rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
+    system-upgrade-controller)    echo "declare upgrade Plans in a target (Rancher SUC)";;
+    tempo)                        echo "configure trace storage/retention via the tempo values";;
+    *)                            echo "";;
+  esac
+}
+
+# addons::detail [domain] — inventory the addons THIS cluster DEPLOYS.
+# Reads spec.bootstrap through the SAME shared parser the apply path uses
+# (bootstrap::_resolve_entries / _parse_entry — so map-form entries stay intact),
+# intersected with the .lok8s/addons/ tree, and prints each addon's category
+# (lok8s.dev/category label) + a one-line config pointer. `./targets/*` (and
+# absolute-path) entries are listed as per-cluster targets (glue), not framework
+# addons. Read-only, cluster-free.
+addons::detail() {
+  local domain="${1:-${domain:-${DOMAIN_NAME:-}}}"
+
+  # Reject a path-traversal / injected domain BEFORE it builds any filesystem
+  # path (same guard as bootstrap::dispatch / provision::resolve_spec /
+  # audit::run_domain — rejects '/', '..', absolute and non-allowlisted names).
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    warn "Invalid domain name '${domain}' — nothing to inventory"
+    return 0
+  fi
+
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local addons_dir
+  addons_dir=$(addons::_dir)
+
+  if [[ ! -f "${spec}" ]]; then
+    warn "No cluster spec for '${domain}' (${spec}) — nothing to inventory"
+    return 0
+  fi
+  # The bootstrap parser is loaded by the `lo` entrypoint before addons is used;
+  # guard so a direct source without it fails loud instead of mis-parsing.
+  if ! declare -f bootstrap::_resolve_entries &>/dev/null; then
+    error "bootstrap parser not loaded — run via 'lo addons --detail'"
+    return 1
+  fi
+
+  local kind
+  kind=$(yq -r '.kind // "Lo"' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+
+  printf 'Addons deployed by %s (kind=%s)\n\n' "${domain}" "${kind}"
+  printf '%-24s  %-14s  %-8s  %-10s  %s\n' "NAME" "CATEGORY" "TYPE" "VERSION" "CONFIGURE"
+  printf '%-24s  %-14s  %-8s  %-10s  %s\n' "----" "--------" "----" "-------" "---------"
+
+  local e nm dr inl ev wt dp count=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
+    count=$(( count + 1 ))
+    local base
+    base=$(basename "${dr}")
+    if [[ "${dr}" == "${addons_dir}/"* ]]; then
+      # Framework addon.
+      local cat type version hint
+      cat=$(addons::_category "${dr}")
+      type=$(addons::_type "${dr}")
+      version=$(addons::_version "${dr}")
+      hint=$(addons::_config_hint "${base}")
+      [[ -n "${hint}" ]] || hint="see docs/guide/addons.md"
+      printf '%-24s  %-14s  %-8s  %-10s  %s\n' "${nm}" "${cat}" "${type}" "${version}" "${hint}"
+    else
+      # Per-cluster target (glue) — a ./targets/* or /abs path entry.
+      local tpath="${dr//\/.\//\/}"          # normalize the /./ from ./targets
+      tpath="${tpath#"${PATH_BASE}/"}"
+      printf '%-24s  %-14s  %-8s  %-10s  %s\n' \
+        "${nm}" "target" "target" "-" "per-cluster glue in ${tpath}"
+    fi
+  done
+
+  if (( count == 0 )); then
+    echo "  (spec.bootstrap is empty — this cluster deploys no addons)"
+  fi
+  printf '\nConfigure an addon: edit its spec.bootstrap inline values, or its addons/<name>/values.<driver>.yaml — see docs/guide/addons.md.\n'
 }
 
 # Render a framework addon to stdout via the canonical khelm path — the SINGLE

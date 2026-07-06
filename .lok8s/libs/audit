@@ -1,0 +1,769 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# audit — static security-posture audit (read-only, cluster-free)
+#
+# A linter-style command that reads cluster.lok8s.yaml + the rendered
+# addon/kustomize inputs (exactly like `lo lint` — NO live cluster needed) and
+# reports security findings with a severity, a per-cluster score, and a
+# non-zero exit when any FAIL-level finding is present.
+#
+# Every check is a separate, independently testable function and is FAIL-SOFT:
+# an input it cannot read yields a `unknown` finding, never an error — the audit
+# never blocks and never touches a cluster. One deliberate fail-CLOSED
+# exception: an EncryptionConfiguration that is PRESENT but unparseable counts
+# as not-encrypting → FAIL, not unknown (its presence is readable; only the
+# proof is not — see audit::_encryption_encrypts_secrets). Checks:
+#
+#   encryption-at-rest        Secret encryption at rest (etcd) configured?
+#   cilium-policy-enforcement Cilium policyAuditMode / policyEnforcementMode —
+#                             AUDIT mode = INSECURE (logged, not enforced).
+#   exposed-endpoints         LoadBalancer/NodePort Services, HTTPRoutes with no
+#                             IP-allowlist SecurityPolicy carve-out.
+#   k8s-version-support       Is spec.kubernetes.version still a supported minor?
+#   privileged-workloads      privileged / hostNetwork / hostPath in targets.
+#   plaintext-endpoints       non-HTTPS OIDC issuer / http:// endpoints.
+#
+# JSON (`--json`) emits a STABLE schema for tooling (the dashboard builds to it):
+#   { "domain", "score", "grade",
+#     "summary": {"pass","warn","fail","unknown"},
+#     "checks": [ {"id","title","severity","status","detail","remediation"} ] }
+# `severity` ∈ critical|high|medium|low ; `status` ∈ pass|warn|fail|unknown.
+
+import ^utils/types
+import ^utils/verbose
+import ^libs/bootstrap
+
+# ── Supported Kubernetes minors ──────────────────────────────────────────────
+# A static list is intentional (cluster-free). UPDATE THIS when new minors
+# release or old ones reach End-of-Life — see https://kubernetes.io/releases/
+# (upstream supports the newest 3 minors; a minor is EOL ~14 months after
+# release). Verified 2026-07-06 against endoflife.date: 1.34 EOL 2026-10-27,
+# 1.35 EOL 2027-02-28, 1.36 EOL 2027-06-28 — while 1.33 reached EOL 2026-06-28
+# (so a 1.33 cluster now flags EOL).
+_AUDIT_K8S_SUPPORTED_MINORS="1.34 1.35 1.36"
+_AUDIT_K8S_LATEST_MINOR="1.36"
+
+# Findings accumulator — TSV lines: id \t title \t severity \t status \t detail
+# \t remediation. Reset per domain by audit::run_domain.
+_AUDIT_FINDINGS=()
+
+# ── CLI entry point ──────────────────────────────────────────────────────────
+
+main::audit() {
+  # Domain may be given as a positional (`lo audit <domain>`) or the --domain
+  # flag (`lo audit --domain <domain>`). The `lo` entrypoint always resolves a
+  # default (the active domain / DOMAIN_NAME), so a bare `lo audit` audits THAT
+  # active domain — it does not silently sweep the fleet. The multi-domain
+  # fallback below is reachable only on a direct call that passes no domain at
+  # all (e.g. programmatic use); the CLI never hits it.
+  local domain="${domain:-}" json=0
+  local -a audit_domain
+  local -a args=(
+    'domain|:^~domain'  'Domain to audit (default: the active domain)'
+    'json|:+'           'Emit machine-readable JSON (stable schema for tooling)'
+    'audit-domain'      'Domain to audit (positional; omit for the active domain)'
+    "${args[@]:-}"
+  )
+  :args "Static security-posture audit (read-only, cluster-free)" "${@}"
+
+  # `${audit_domain[0]:-}` (not `${#audit_domain[@]}`) — the latter trips
+  # "unbound variable" on an empty array under the CLI's `set -u`.
+  local target="${audit_domain[0]:-${domain:-}}"
+
+  local -a domains=()
+  if [[ -n "${target}" ]]; then
+    domains=("${target}")
+  else
+    # No domain resolved at all — only reachable on a direct/programmatic call
+    # (the `lo` CLI always supplies the active domain). Audit every domain.
+    mapfile -t domains < <(_list_domains)
+  fi
+
+  local any_fail=0 d
+  if (( json )); then
+    # One domain → the single documented object; several → a JSON array of them.
+    if (( ${#domains[@]} == 1 )); then
+      audit::run_domain "${domains[0]}"
+      audit::render_json "${domains[0]}"
+      [[ "$(audit::_count_status fail)" == "0" ]] || any_fail=1
+    else
+      printf '['
+      local first=1
+      for d in "${domains[@]+"${domains[@]}"}"; do
+        audit::run_domain "${d}"
+        (( first )) || printf ','
+        first=0
+        audit::render_json "${d}"
+        [[ "$(audit::_count_status fail)" == "0" ]] || any_fail=1
+      done
+      printf ']\n'
+    fi
+  else
+    for d in "${domains[@]+"${domains[@]}"}"; do
+      audit::run_domain "${d}"
+      audit::render_human "${d}"
+      [[ "$(audit::_count_status fail)" == "0" ]] || any_fail=1
+    done
+  fi
+
+  (( any_fail == 0 )) || return 1
+}
+
+# ── Runner ───────────────────────────────────────────────────────────────────
+
+# audit::run_domain <domain>
+# Resolve the domain's spec + kind + provider, then run every check. Resets the
+# findings accumulator first. Always returns 0 (findings carry status); the
+# caller checks audit::_count_status fail.
+audit::run_domain() {
+  local domain="$1"
+  _AUDIT_FINDINGS=()
+
+  # Reject a path-traversal / injected domain before it builds any filesystem
+  # path (same guard as bootstrap::dispatch / provision::resolve_spec).
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    audit::_emit "cluster-spec" "Cluster spec" high unknown \
+      "Invalid domain name '${domain}'." "Use a domain under clusters/."
+    return 0
+  fi
+
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+  local spec_file="${domain_dir}/cluster.lok8s.yaml"
+  if [[ ! -f "${spec_file}" ]]; then
+    audit::_emit "cluster-spec" "Cluster spec" high unknown \
+      "No cluster.lok8s.yaml under ${domain_dir} (deploy-only or missing domain)." \
+      "Audit the referenced cluster (spec.clusterRef.domain) instead."
+    return 0
+  fi
+
+  local kind provider
+  kind=$(yq -r '.kind // ""' "${spec_file}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  provider=$(yq -r '.spec.provider.name // ""' "${spec_file}" 2>/dev/null || echo "")
+
+  audit::check_encryption   "${domain}" "${domain_dir}" "${spec_file}" "${kind}" "${provider}"
+  audit::check_cilium       "${domain}" "${domain_dir}" "${spec_file}" "${kind}" "${provider}"
+  audit::check_exposed      "${domain}" "${domain_dir}" "${spec_file}" "${kind}" "${provider}"
+  audit::check_k8s_version  "${domain}" "${domain_dir}" "${spec_file}" "${kind}"
+  audit::check_privileged   "${domain}" "${domain_dir}" "${spec_file}" "${kind}"
+  audit::check_plaintext    "${domain}" "${domain_dir}" "${spec_file}" "${kind}"
+  return 0
+}
+
+# ── Checks ───────────────────────────────────────────────────────────────────
+
+# Encryption at rest — is the apiserver told to encrypt Secrets before writing
+# them to etcd? For KubeOne the authoritative static signal is the driver's
+# features.encryptionProviders.enable; a spec override wins; a rendered
+# EncryptionConfiguration in artifacts is accepted as proof ONLY when it uses a
+# real provider (aescbc/aesgcm/secretbox/kms) for the `secrets` resource — an
+# identity-only or empty config encrypts NOTHING and is treated as DISABLED, not
+# pass. FAIL if explicitly disabled on a prod-intent cluster. kind=lo (local
+# kind/dev) short-circuits to n/a (pass) FIRST — the documented contract — so no
+# other path (an explicit enable: false, an identity-only config) can degrade a
+# throwaway dev cluster to warn.
+audit::check_encryption() {
+  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
+  local id="encryption-at-rest" title="Secret encryption at rest (etcd)"
+
+  # kind=lo is documented not-applicable — short-circuit BEFORE any evaluation
+  # so every encryption path (spec flag, driver default, rendered artifacts)
+  # lands here for a dev cluster; none of them may emit a warn.
+  if [[ "${kind}" == "lo" ]]; then
+    audit::_emit "${id}" "${title}" high pass \
+      "kind=lo (local kind/dev cluster) — at-rest encryption is not required for a throwaway cluster." \
+      "For a production cluster (KubeOne), keep features.encryptionProviders.enable: true (the shipped default)."
+    return 0
+  fi
+
+  local prod_intent=0
+  audit::_prod_intent "${kind}" && prod_intent=1
+
+  # 1. Spec override wins (a user can force it on or off). Read WITHOUT yq's `//`
+  # default operator — `//` treats a literal `false` as empty and would swallow
+  # an explicit enable: false, mis-reporting a disabled cluster as unset.
+  local spec_enable
+  spec_enable=$(yq -r '.spec.features.encryptionProviders.enable' "${spec_file}" 2>/dev/null || echo "null")
+  if [[ "${spec_enable}" == "null" ]]; then
+    spec_enable=$(yq -r '.spec.encryption.atRest' "${spec_file}" 2>/dev/null || echo "null")
+  fi
+  [[ "${spec_enable}" == "null" ]] && spec_enable=""
+
+  # 2. KubeOne driver default — the authoritative static signal for kubeone.
+  local driver_enable="" ko_core="${PATH_LOK8S}/drivers/kubeone/cluster/core/kubeone.yaml"
+  if [[ "${kind}" == "kubeone" && -f "${ko_core}" ]]; then
+    driver_enable=$(yq -r '.features.encryptionProviders.enable' "${ko_core}" 2>/dev/null || echo "null")
+    [[ "${driver_enable}" == "null" ]] && driver_enable=""
+  fi
+
+  # 3. Rendered-artifacts fallback (any driver): a REAL EncryptionConfiguration.
+  # The mere presence of `kind: EncryptionConfiguration` is not proof — an
+  # identity-only (or empty) config encrypts nothing. `artifact_present` records
+  # that a config exists; `artifact_encrypts` requires a real provider to be the
+  # write provider for the `secrets` resource.
+  local artifact_present=0 artifact_encrypts=0
+  if audit::_artifacts_contain "${domain_dir}" 'kind: EncryptionConfiguration'; then
+    artifact_present=1
+    if audit::_encryption_encrypts_secrets "${domain_dir}"; then
+      artifact_encrypts=1
+    fi
+  fi
+
+  local enabled=""   # true | false | "" (unknown)
+  if [[ "${spec_enable}" == "true" || "${spec_enable}" == "false" ]]; then
+    enabled="${spec_enable}"
+  elif [[ -n "${driver_enable}" ]]; then
+    enabled="${driver_enable}"
+  fi
+
+  # PASS: an explicit enable, or artifacts that PROVABLY encrypt Secrets.
+  if [[ "${enabled}" == "true" || "${artifact_encrypts}" == 1 ]]; then
+    audit::_emit "${id}" "${title}" high pass \
+      "At-rest encryption is configured — the apiserver encrypts Secrets before writing them to etcd." \
+      "No action. Rotate the encryption key periodically (KubeOne re-encrypts Secrets on apply)."
+    return 0
+  fi
+  # FAIL/WARN: explicitly disabled (flag false) OR a rendered
+  # EncryptionConfiguration that leaves `secrets` unencrypted (identity-only /
+  # empty / identity as the write provider). Both leave Secrets base64 in etcd.
+  if [[ "${enabled}" == "false" || "${artifact_present}" == 1 ]]; then
+    local sev="high" st="fail"
+    (( prod_intent )) || { sev="medium"; st="warn"; }
+    local detail
+    if [[ "${enabled}" == "false" ]]; then
+      detail="At-rest encryption is DISABLED (encryptionProviders.enable: false) — Secrets are stored base64-only in etcd."
+    else
+      detail="A rendered EncryptionConfiguration does NOT encrypt Secrets — no aescbc/secretbox/kms provider is the write provider for the 'secrets' resource (identity-only or empty) — Secrets are stored base64-only in etcd."
+    fi
+    audit::_emit "${id}" "${title}" "${sev}" "${st}" \
+      "${detail}" \
+      "Set features.encryptionProviders.enable: true (KubeOne driver) and re-provision so the apiserver encrypts Secrets with a real provider (aescbc/secretbox/kms), not identity."
+    return 0
+  fi
+  audit::_emit "${id}" "${title}" high unknown \
+    "Could not statically determine at-rest encryption for kind=${kind} — no spec/driver flag and no rendered EncryptionConfiguration." \
+    "Run 'lo build ${domain}' to render artifacts, or confirm the control plane sets --encryption-provider-config."
+  return 0
+}
+
+# Cilium policy mode — AUDIT mode logs policy verdicts but enforces NOTHING, so
+# a cluster in policyAuditMode: true has NetworkPolicies that block nothing.
+# This is a HIGH finding and is the shipped default for KubeOne
+# (addons/cilium/values.kubeone.yaml: policyAuditMode: true), so it fires on the
+# stock pilot config — by design.
+audit::check_cilium() {
+  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
+  local id="cilium-policy-enforcement" title="Cilium network-policy enforcement"
+
+  # Is cilium deployed? Resolve spec.bootstrap through the SAME parser the apply
+  # path uses, then find the entry whose resolved dir basename is 'cilium'.
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec_file}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp cil_dir="" cil_inline="" found=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
+    if [[ "$(basename "${dr}")" == "cilium" ]]; then
+      cil_dir="${dr}"; cil_inline="${inl}"; found=1; break
+    fi
+  done
+  if (( ! found )); then
+    audit::_emit "${id}" "${title}" high pass \
+      "Cilium is not in spec.bootstrap — network-policy enforcement is provided by another CNI (not audited here)." \
+      "If this cluster uses a different CNI, ensure its NetworkPolicy support is enabled and enforcing."
+    return 0
+  fi
+
+  # Effective values: base < driver(kind) < provider < inline (later wins) — the
+  # same stacking addons::render uses, but a pure yq merge (no kustomize/network).
+  local -a vfiles=()
+  [[ -f "${cil_dir}/values.yaml" ]] && vfiles+=("${cil_dir}/values.yaml")
+  [[ -f "${cil_dir}/values.${kind}.yaml" ]] && vfiles+=("${cil_dir}/values.${kind}.yaml")
+  [[ -n "${provider}" && -f "${cil_dir}/values.${provider}.yaml" ]] && vfiles+=("${cil_dir}/values.${provider}.yaml")
+  local tmp_inline=""
+  if [[ -n "${cil_inline}" && "${cil_inline}" != "null" ]]; then
+    tmp_inline=$(mktemp) && printf '%s\n' "${cil_inline}" > "${tmp_inline}" && vfiles+=("${tmp_inline}")
+  fi
+  if (( ${#vfiles[@]} == 0 )); then
+    [[ -n "${tmp_inline}" ]] && rm -f "${tmp_inline}"
+    audit::_emit "${id}" "${title}" high unknown \
+      "Could not read Cilium values under ${cil_dir}." \
+      "Ensure the cilium addon ships values.yaml / values.${kind}.yaml."
+    return 0
+  fi
+  local merged audit_mode="" enforce_mode=""
+  merged=$(audit::_merge_yaml "${vfiles[@]}" 2>/dev/null) || merged=""
+  [[ -n "${tmp_inline}" ]] && rm -f "${tmp_inline}"
+  # Guard on `merged` BEFORE the yq reads: yq happily emits the `// false`
+  # default for EMPTY input, which would masquerade a failed merge as
+  # "enforcing" further down.
+  if [[ -n "${merged}" ]]; then
+    audit_mode=$(yq -r '.policyAuditMode // false' <<<"${merged}" 2>/dev/null) || audit_mode=""
+    enforce_mode=$(yq -r '.policyEnforcementMode // ""' <<<"${merged}" 2>/dev/null) || enforce_mode=""
+  fi
+  # Merge/parse failure (e.g. an unparseable inline override in spec.bootstrap)
+  # → UNKNOWN, never a fall-through pass and never a crash: values we cannot
+  # read cannot prove enforcement is on. A successful read always yields
+  # "true"/"false" for audit_mode, so anything else means unreadable values.
+  if [[ "${audit_mode}" != "true" && "${audit_mode}" != "false" ]]; then
+    audit::_emit "${id}" "${title}" high unknown \
+      "Could not parse/merge the effective Cilium values (base/driver/provider/inline override) — the values are unreadable, so the enforcement state cannot be proven." \
+      "Fix the YAML (addons/cilium/values*.yaml or the spec.bootstrap cilium override), then re-run 'lo audit'."
+    return 0
+  fi
+
+  if [[ "${audit_mode}" == "true" ]]; then
+    audit::_emit "${id}" "${title}" high fail \
+      "Cilium policyAuditMode: true — NetworkPolicies (incl. host-firewall CCNPs) are LOGGED, not enforced; nothing is actually blocked." \
+      "Validate the allow-set (hubble observe --verdict AUDIT covers etcd 2379/2380, apiserver 6443, kubelet 10250, vxlan 8472), then set policyAuditMode: false in addons/cilium/values.${kind}.yaml (or a spec.bootstrap cilium override) to ENFORCE."
+    return 0
+  fi
+  if [[ "${enforce_mode}" == "never" ]]; then
+    audit::_emit "${id}" "${title}" high fail \
+      "Cilium policyEnforcementMode: never — NetworkPolicy enforcement is disabled cluster-wide." \
+      "Set policyEnforcementMode to 'default' (or 'always') so NetworkPolicies are honored."
+    return 0
+  fi
+  audit::_emit "${id}" "${title}" high pass \
+    "Cilium enforces NetworkPolicies (policyAuditMode: false, policyEnforcementMode: ${enforce_mode:-default})." \
+    "No action — keep policyAuditMode off; add NetworkPolicies to restrict east-west traffic."
+  return 0
+}
+
+# Publicly-exposed endpoints — NodePort Services (reachable on every node),
+# LoadBalancer Services, and HTTPRoutes without a default-Deny SecurityPolicy
+# (IP-allowlist) carve-out. Scans the cluster's own targets + any `lo build`
+# artifacts. Fail-soft: nothing to scan → unknown.
+audit::check_exposed() {
+  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
+  local id="exposed-endpoints" title="Publicly-exposed endpoints"
+
+  local -a files=()
+  mapfile -t files < <({ audit::_target_files "${domain_dir}"; audit::_artifact_files "${domain_dir}"; })
+  if (( ${#files[@]} == 0 )); then
+    audit::_emit "${id}" "${title}" medium unknown \
+      "No rendered targets/artifacts found to scan for exposed endpoints." \
+      "Run 'lo build ${domain}' first for full endpoint coverage."
+    return 0
+  fi
+
+  # `([^[:alnum:]_]|$)` is a PORTABLE word-boundary (POSIX ERE): match the whole
+  # word (NodePort, not NodePortXyz) without the GNU-only `\b`, which is
+  # undefined under busybox/BSD grep — where a silently-failing pattern would be
+  # a security-tool false-pass. See audit::_grep_count.
+  local nodeport lb routes secpol_deny=0
+  nodeport=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*NodePort([^[:alnum:]_]|$)' "${files[@]}")
+  lb=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*LoadBalancer([^[:alnum:]_]|$)' "${files[@]}")
+  routes=$(audit::_grep_count '^[[:space:]]*kind:[[:space:]]*HTTPRoute([^[:alnum:]_]|$)' "${files[@]}")
+  grep -qsE 'defaultAction:[[:space:]]*Deny' "${files[@]}" 2>/dev/null && secpol_deny=1
+
+  if (( nodeport > 0 )); then
+    audit::_emit "${id}" "${title}" medium fail \
+      "${nodeport} manifest(s) declare a NodePort Service — a node port is reachable on EVERY node's IP, bypassing the gateway." \
+      "Route through the single shared LoadBalancer/gateway instead; drop NodePort or restrict it at the firewall."
+    return 0
+  fi
+  if (( routes > 0 && ! secpol_deny )); then
+    audit::_emit "${id}" "${title}" medium warn \
+      "${routes} HTTPRoute(s) exposed with no default-Deny SecurityPolicy (IP-allowlist) carve-out." \
+      "For a pre-prod/locked-down plane attach an Envoy Gateway SecurityPolicy (authorization.defaultAction: Deny + allow CIDRs) to the Gateway."
+    return 0
+  fi
+  if (( lb > 0 && secpol_deny )); then
+    audit::_emit "${id}" "${title}" low pass \
+      "${lb} LoadBalancer + a default-Deny SecurityPolicy carve-out — external exposure is IP-allowlisted." \
+      "No action — keep the allowlist current; widen it only deliberately."
+    return 0
+  fi
+  if (( lb > 0 )); then
+    audit::_emit "${id}" "${title}" low warn \
+      "${lb} LoadBalancer Service exposed (expected for the shared gateway); no default-Deny allowlist detected." \
+      "Fine for a public plane fronted by TLS + per-route auth; add a SecurityPolicy allowlist for a locked-down plane."
+    return 0
+  fi
+  audit::_emit "${id}" "${title}" low pass \
+    "No NodePort/LoadBalancer/HTTPRoute exposure found in the scanned manifests." \
+    "No action."
+  return 0
+}
+
+# Kubernetes version support — is spec.kubernetes.version still a supported
+# minor? EOL → FAIL (prod-intent) / WARN (dev); newer-than-known → WARN (update
+# the list); unparseable → unknown.
+audit::check_k8s_version() {
+  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4"
+  local id="k8s-version-support" title="Kubernetes version support (EOL)"
+
+  local raw
+  raw=$(yq -r '.spec.kubernetes.version // ""' "${spec_file}" 2>/dev/null || echo "")
+  raw="${raw%%@*}"; raw="${raw#v}"
+  if [[ ! "${raw}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    audit::_emit "${id}" "${title}" medium unknown \
+      "Could not parse spec.kubernetes.version ('${raw:-<empty>}')." \
+      "Set spec.kubernetes.version to a supported release, e.g. v${_AUDIT_K8S_LATEST_MINOR}.x."
+    return 0
+  fi
+  local minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+  local rank=$(( BASH_REMATCH[1] * 1000 + BASH_REMATCH[2] ))
+  local oldest="${_AUDIT_K8S_SUPPORTED_MINORS%% *}"
+  local oldest_rank latest_rank
+  oldest_rank=$(audit::_minor_rank "${oldest}")
+  latest_rank=$(audit::_minor_rank "${_AUDIT_K8S_LATEST_MINOR}")
+
+  if audit::_in_list "${minor}" ${_AUDIT_K8S_SUPPORTED_MINORS}; then
+    audit::_emit "${id}" "${title}" high pass \
+      "Kubernetes ${minor} is within the supported window (${_AUDIT_K8S_SUPPORTED_MINORS// /, })." \
+      "Keep upgrading within the window; plan the next minor before this one reaches EOL."
+    return 0
+  fi
+  if (( rank > latest_rank )); then
+    audit::_emit "${id}" "${title}" low warn \
+      "Kubernetes ${minor} is newer than the newest minor this audit knows (${_AUDIT_K8S_LATEST_MINOR}) — the support list may be stale." \
+      "Update _AUDIT_K8S_SUPPORTED_MINORS in .lok8s/libs/audit (see https://kubernetes.io/releases/)."
+    return 0
+  fi
+  local sev="high" st="fail"
+  audit::_prod_intent "${kind}" || { sev="medium"; st="warn"; }
+  audit::_emit "${id}" "${title}" "${sev}" "${st}" \
+    "Kubernetes ${minor} is End-of-Life (oldest supported minor: ${oldest}) — no upstream security patches." \
+    "Upgrade to a supported minor (${_AUDIT_K8S_SUPPORTED_MINORS// /, }); for KubeOne bump spec.kubernetes.version and run 'lo provision'."
+  return 0
+}
+
+# Privileged / host-level workloads — privileged securityContext, hostNetwork,
+# or hostPath in the cluster's OWN targets. Scoped to targets/ (not the vetted
+# framework addons, which legitimately need host access) to avoid noise. WARN,
+# since some per-cluster glue genuinely needs it — the point is to make it
+# visible.
+audit::check_privileged() {
+  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4"
+  local id="privileged-workloads" title="Privileged / host-level workloads"
+
+  local -a files=()
+  mapfile -t files < <(audit::_target_files "${domain_dir}")
+  if (( ${#files[@]} == 0 )); then
+    audit::_emit "${id}" "${title}" medium pass \
+      "No per-cluster target manifests to scan (framework addons are vetted separately)." \
+      "No action."
+    return 0
+  fi
+  # Portable word-boundary `([^[:alnum:]_]|$)` (not the GNU-only `\b`) so the
+  # match holds on busybox/BSD grep too (a silent miss here would under-report).
+  local priv host_net host_path total
+  priv=$(audit::_grep_count '^[[:space:]]*privileged:[[:space:]]*true([^[:alnum:]_]|$)' "${files[@]}")
+  host_net=$(audit::_grep_count '^[[:space:]]*hostNetwork:[[:space:]]*true([^[:alnum:]_]|$)' "${files[@]}")
+  host_path=$(audit::_grep_count '^[[:space:]]*hostPath:' "${files[@]}")
+  total=$(( priv + host_net + host_path ))
+  if (( total == 0 )); then
+    audit::_emit "${id}" "${title}" medium pass \
+      "No privileged / hostNetwork / hostPath usage in per-cluster targets." \
+      "No action."
+    return 0
+  fi
+  audit::_emit "${id}" "${title}" medium warn \
+    "Per-cluster targets use elevated access: privileged=${priv}, hostNetwork=${host_net}, hostPath=${host_path} manifest(s)." \
+    "Confirm each is required; drop privileged/hostNetwork/hostPath where possible and prefer a least-privilege securityContext."
+  return 0
+}
+
+# Plaintext (non-HTTPS) endpoints — a non-HTTPS OIDC issuer is a FAIL (the
+# apiserver would trust tokens over cleartext); http:// endpoints referenced in
+# per-cluster targets are a WARN. Best-effort scan (excludes localhost / schema
+# URLs / in-cluster .svc).
+audit::check_plaintext() {
+  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4"
+  local id="plaintext-endpoints" title="Plaintext (non-HTTPS) endpoints"
+
+  local issuer
+  issuer=$(yq -r '.spec.oidc.issuer // ""' "${spec_file}" 2>/dev/null || echo "")
+  if [[ -n "${issuer}" && "${issuer}" != https://* ]]; then
+    audit::_emit "${id}" "${title}" high fail \
+      "spec.oidc.issuer is not HTTPS ('${issuer}') — the apiserver would trust an OIDC token issuer over plaintext." \
+      "Use an https:// URL for spec.oidc.issuer."
+    return 0
+  fi
+
+  local -a files=()
+  mapfile -t files < <(audit::_target_files "${domain_dir}")
+  local http_hits=0
+  if (( ${#files[@]} > 0 )); then
+    http_hits=$(grep -rhosE 'http://[a-zA-Z0-9._-]+' "${files[@]}" 2>/dev/null \
+      | grep -vE 'http://(localhost|127\.0\.0\.1|www\.w3\.org|schemas?\.|.*\.svc([.:]|$))' \
+      | sort -u | wc -l | tr -d ' ') || http_hits=0
+    http_hits="${http_hits:-0}"
+  fi
+  if (( http_hits > 0 )); then
+    audit::_emit "${id}" "${title}" medium warn \
+      "${http_hits} plaintext http:// endpoint(s) referenced in per-cluster targets." \
+      "Prefer https:// for every external endpoint; terminate TLS at the shared Envoy gateway."
+    return 0
+  fi
+  audit::_emit "${id}" "${title}" high pass \
+    "No plaintext OIDC issuer or http:// endpoints found." \
+    "Keep all external endpoints on HTTPS."
+  return 0
+}
+
+# ── Rendering ────────────────────────────────────────────────────────────────
+
+# Human-readable report for the CURRENT findings. Ordered fail → warn → unknown
+# → pass, and within each group by severity (critical first) — the most
+# actionable first. Colorless for deterministic output/piping.
+audit::render_human() {
+  local domain="$1"
+  local score grade p w f u
+  read -r score grade p w f u <<< "$(audit::_score)"
+  local total=$(( p + w + f + u ))
+
+  printf '\n  audit · %s   score %s/100  (grade %s)\n' "${domain}" "${score}" "${grade}"
+  printf '  %s checks · %s fail · %s warn · %s unknown · %s pass\n\n' \
+    "${total}" "${f}" "${w}" "${u}" "${p}"
+
+  local st
+  for st in fail warn unknown pass; do
+    audit::_render_status_group "${st}"
+  done
+}
+
+# audit::_render_status_group <status>
+audit::_render_status_group() {
+  local want="$1"
+  local line id title sev st detail rem
+  local -a rows=()
+  for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
+    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
+    [[ "${st}" == "${want}" ]] || continue
+    rows+=("$(printf '%d\t%s' "$(audit::_sev_rank "${sev}")" "${line}")")
+  done
+  (( ${#rows[@]} > 0 )) || return 0
+  mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -n -s)
+  for line in "${rows[@]}"; do
+    line="${line#*$'\t'}"   # drop the sort-rank prefix
+    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
+    printf '  %-4s [%-8s] %s — %s\n' "$(audit::_status_label "${st}")" "${sev}" "${id}" "${title}"
+    printf '         %s\n' "${detail}"
+    [[ "${st}" == "pass" ]] || printf '         remediation: %s\n' "${rem}"
+  done
+  printf '\n'
+}
+
+# Machine-readable JSON — the STABLE schema the dashboard consumes. Hand-rolled
+# (no jq dependency) with explicit escaping.
+audit::render_json() {
+  local domain="$1"
+  local score grade p w f u
+  read -r score grade p w f u <<< "$(audit::_score)"
+
+  printf '{'
+  printf '"domain":"%s",' "$(audit::_json_escape "${domain}")"
+  printf '"score":%s,' "${score}"
+  printf '"grade":"%s",' "${grade}"
+  printf '"summary":{"pass":%s,"warn":%s,"fail":%s,"unknown":%s},' "${p}" "${w}" "${f}" "${u}"
+  printf '"checks":['
+  local line id title sev st detail rem first=1
+  for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
+    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
+    (( first )) || printf ','
+    first=0
+    printf '{"id":"%s","title":"%s","severity":"%s","status":"%s","detail":"%s","remediation":"%s"}' \
+      "$(audit::_json_escape "${id}")" "$(audit::_json_escape "${title}")" \
+      "$(audit::_json_escape "${sev}")" "$(audit::_json_escape "${st}")" \
+      "$(audit::_json_escape "${detail}")" "$(audit::_json_escape "${rem}")"
+  done
+  printf ']}'
+  printf '\n'
+}
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+# audit::_emit <id> <title> <severity> <status> <detail> <remediation>
+audit::_emit() {
+  local id="$1" title="$2" severity="$3" status="$4" detail="$5" remediation="$6"
+  # TSV storage — strip any embedded tabs/newlines defensively.
+  detail="${detail//$'\t'/ }"; detail="${detail//$'\n'/ }"
+  remediation="${remediation//$'\t'/ }"; remediation="${remediation//$'\n'/ }"
+  _AUDIT_FINDINGS+=("${id}"$'\t'"${title}"$'\t'"${severity}"$'\t'"${status}"$'\t'"${detail}"$'\t'"${remediation}")
+}
+
+# audit::_score → "<score> <grade> <pass> <warn> <fail> <unknown>"
+# Start at 100; subtract a severity-weighted penalty per warn/fail; clamp [0,100].
+audit::_score() {
+  local score=100 p=0 w=0 f=0 u=0 line id title sev st detail rem
+  local blind=0   # a high/critical check we could NOT evaluate (status unknown)
+  for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
+    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
+    case "${st}" in
+      pass)    p=$(( p + 1 ));;
+      warn)    w=$(( w + 1 )); score=$(( score - $(audit::_weight "${sev}" warn) ));;
+      fail)    f=$(( f + 1 )); score=$(( score - $(audit::_weight "${sev}" fail) ));;
+      unknown) u=$(( u + 1 ))
+               case "${sev}" in critical|high) blind=1;; esac;;
+    esac
+  done
+  (( score < 0 )) && score=0
+  # A high/critical check we could not evaluate must NOT read as a perfect
+  # score: "couldn't check" is not "passed". Cap the score at 70 (grade C at
+  # best) so score-keyed tooling can't grade an un-auditable cluster A/B.
+  if (( blind )) && (( score > 70 )); then score=70; fi
+  local grade="F"
+  if   (( score >= 90 )); then grade="A"
+  elif (( score >= 80 )); then grade="B"
+  elif (( score >= 70 )); then grade="C"
+  elif (( score >= 60 )); then grade="D"
+  fi
+  printf '%s %s %s %s %s %s' "${score}" "${grade}" "${p}" "${w}" "${f}" "${u}"
+}
+
+# audit::_weight <severity> <fail|warn> → penalty points
+audit::_weight() {
+  local sev="$1" kind="$2"
+  if [[ "${kind}" == "fail" ]]; then
+    case "${sev}" in
+      critical) echo 40;; high) echo 25;; medium) echo 15;; low) echo 5;; *) echo 10;;
+    esac
+  else
+    case "${sev}" in
+      critical) echo 15;; high) echo 10;; medium) echo 5;; low) echo 2;; *) echo 5;;
+    esac
+  fi
+}
+
+# audit::_sev_rank <severity> → sort rank (critical first)
+audit::_sev_rank() {
+  case "$1" in
+    critical) echo 0;; high) echo 1;; medium) echo 2;; low) echo 3;; *) echo 4;;
+  esac
+}
+
+audit::_status_label() {
+  case "$1" in
+    fail) printf 'FAIL';; warn) printf 'WARN';; pass) printf 'PASS';; *) printf 'UNKN';;
+  esac
+}
+
+# audit::_count_status <status> → count of findings with that status
+audit::_count_status() {
+  local want="$1" n=0 line id title sev st detail rem
+  for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
+    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
+    [[ "${st}" == "${want}" ]] && n=$(( n + 1 ))
+  done
+  printf '%s' "${n}"
+}
+
+# audit::_prod_intent <kind> → 0 (prod-intent) for everything EXCEPT kind=lo.
+# kind=lo is the local kind/dev driver; kubeone/capi/kkp are real infra. An
+# EMPTY/unknown kind counts as prod-intent too — fail-closed: a cluster we
+# cannot prove to be a dev cluster is scored like production.
+audit::_prod_intent() {
+  local kind="$1"
+  [[ "${kind}" != "lo" ]]
+}
+
+# audit::_minor_rank <maj.min> → maj*1000+min (numeric ordering)
+audit::_minor_rank() {
+  local v="$1"
+  [[ "${v}" =~ ^([0-9]+)\.([0-9]+) ]] || { echo 0; return 0; }
+  echo $(( BASH_REMATCH[1] * 1000 + BASH_REMATCH[2] ))
+}
+
+# audit::_in_list <needle> <item...>
+audit::_in_list() {
+  local needle="$1"; shift
+  local item
+  for item in "$@"; do
+    [[ "${item}" == "${needle}" ]] && return 0
+  done
+  return 1
+}
+
+# audit::_grep_count <ere> <file...> → number of files matching (pipefail-safe).
+# grep exits 1 on no-match; under the caller's `set -euo pipefail` a bare
+# `x=$(grep … | wc -l)` would abort the whole audit — this absorbs that.
+audit::_grep_count() {
+  local ere="$1"; shift
+  (( $# > 0 )) || { echo 0; return 0; }
+  local n
+  n=$(grep -lsE -- "${ere}" "$@" 2>/dev/null | wc -l | tr -d ' ') || n=0
+  echo "${n:-0}"
+}
+
+# audit::_merge_yaml <file...> → deep-merged YAML (later files win). Empty → {}.
+audit::_merge_yaml() {
+  (( $# > 0 )) || { echo '{}'; return 0; }
+  yq eval-all '. as $item ireduce ({}; . * $item)' "$@"
+}
+
+# audit::_target_files <domain_dir> → the cluster's own hand-written target
+# manifests (one per line), or nothing.
+audit::_target_files() {
+  local domain_dir="$1"
+  [[ -d "${domain_dir}/targets" ]] || return 0
+  find "${domain_dir}/targets" -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null
+}
+
+# audit::_artifact_files <domain_dir> → files rendered by `lo build`
+# (clusters/<domain>/artifacts.yaml and clusters/<domain>/artifacts/<t>/artifacts.yaml).
+audit::_artifact_files() {
+  local domain_dir="$1"
+  [[ -f "${domain_dir}/artifacts.yaml" ]] && echo "${domain_dir}/artifacts.yaml"
+  [[ -d "${domain_dir}/artifacts" ]] && find "${domain_dir}/artifacts" -type f -name '*.yaml' 2>/dev/null
+  return 0
+}
+
+# audit::_artifacts_contain <domain_dir> <pattern> → 0 if any artifact matches.
+audit::_artifacts_contain() {
+  local domain_dir="$1" pattern="$2"
+  local -a files=()
+  mapfile -t files < <(audit::_artifact_files "${domain_dir}")
+  (( ${#files[@]} > 0 )) || return 1
+  grep -qsF -- "${pattern}" "${files[@]}" 2>/dev/null
+}
+
+# audit::_encryption_encrypts_secrets <domain_dir> → 0 if a rendered
+# EncryptionConfiguration uses a REAL provider (aescbc/aesgcm/secretbox/kms) as
+# the WRITE (first) provider of the FIRST resource group covering `secrets` —
+# the bare `secrets` resource, or the `*.` (core group) / `*.*` (all) wildcards.
+# FIRST covering group only (the `[ … ][0]` collect below), because that is the
+# apiserver's precedence: the first resources entry matching a resource wins —
+# `secrets → identity` listed BEFORE `*.* → aescbc` writes Secrets PLAINTEXT,
+# and the later covering group must never rescue the verdict. Likewise identity
+# listed first WITHIN a group (new writes go out plaintext) encrypts NOTHING,
+# so a bare `kind: EncryptionConfiguration` is NOT accepted as proof.
+# Fail-CLOSED on unreadable input: a parse-error config yields no proof here,
+# and the caller — which already knows the config EXISTS — reports FAIL, not
+# unknown (a config we cannot parse must not be trusted as encrypting).
+audit::_encryption_encrypts_secrets() {
+  local domain_dir="$1"
+  local -a files=()
+  mapfile -t files < <(audit::_artifact_files "${domain_dir}")
+  (( ${#files[@]} > 0 )) || return 1
+  local f writer
+  for f in "${files[@]}"; do
+    while IFS= read -r writer; do
+      case "${writer}" in
+        aescbc|aesgcm|secretbox|kms|kmsv2) return 0 ;;
+      esac
+    done < <(yq eval-all -N '
+      [ select(.kind == "EncryptionConfiguration")
+        | (.resources // [])[]
+        | select((.resources // []) | any_c(. == "secrets" or . == "*.*" or . == "*.")) ][0]
+      | (.providers // [])[0] | select(tag == "!!map") | keys | .[0]
+    ' "${f}" 2>/dev/null)
+  done
+  return 1
+}
+
+# audit::_json_escape <string> → JSON-safe string (no surrounding quotes).
+audit::_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  printf '%s' "${s}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::audit "${@}"

@@ -71,6 +71,7 @@ export default defineConfig({
             { text: 'Cloud-Init', link: '/guide/cloud-init' },
             { text: 'Networking & Ingress', link: '/guide/networking' },
             { text: 'Security', link: '/guide/security' },
+            { text: 'Security Audit (lo audit)', link: '/guide/audit' },
             { text: 'Backups', link: '/guide/backups' },
             { text: 'Disaster Recovery', link: '/guide/recover' },
             { text: 'The Operator', link: '/guide/operator' },
