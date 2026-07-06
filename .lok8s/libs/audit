@@ -34,9 +34,11 @@ import ^libs/bootstrap
 # ── Supported Kubernetes minors ──────────────────────────────────────────────
 # A static list is intentional (cluster-free). UPDATE THIS when new minors
 # release or old ones reach End-of-Life — see https://kubernetes.io/releases/
-# (upstream supports roughly the newest ~3–4 minors; a minor is EOL ~14 months
-# after release). Verified against the 2026-07 release list.
-_AUDIT_K8S_SUPPORTED_MINORS="1.33 1.34 1.35 1.36"
+# (upstream supports the newest 3 minors; a minor is EOL ~14 months after
+# release). Verified 2026-07-06 against endoflife.date: 1.34 EOL 2026-10-27,
+# 1.35 EOL 2027-02-28, 1.36 EOL 2027-06-28 — while 1.33 reached EOL 2026-06-28
+# (so a 1.33 cluster now flags EOL).
+_AUDIT_K8S_SUPPORTED_MINORS="1.34 1.35 1.36"
 _AUDIT_K8S_LATEST_MINOR="1.36"
 
 # Findings accumulator — TSV lines: id \t title \t severity \t status \t detail
@@ -47,13 +49,17 @@ _AUDIT_FINDINGS=()
 
 main::audit() {
   # Domain may be given as a positional (`lo audit <domain>`) or the --domain
-  # flag (`lo audit --domain <domain>`); with neither, audit EVERY domain.
+  # flag (`lo audit --domain <domain>`). The `lo` entrypoint always resolves a
+  # default (the active domain / DOMAIN_NAME), so a bare `lo audit` audits THAT
+  # active domain — it does not silently sweep the fleet. The multi-domain
+  # fallback below is reachable only on a direct call that passes no domain at
+  # all (e.g. programmatic use); the CLI never hits it.
   local domain="${domain:-}" json=0
   local -a audit_domain
   local -a args=(
-    'domain|:^~domain'  'Domain to audit (default: all)'
+    'domain|:^~domain'  'Domain to audit (default: the active domain)'
     'json|:+'           'Emit machine-readable JSON (stable schema for tooling)'
-    'audit-domain'      'Domain to audit (positional; omit to audit all)'
+    'audit-domain'      'Domain to audit (positional; omit for the active domain)'
     "${args[@]:-}"
   )
   :args "Static security-posture audit (read-only, cluster-free)" "${@}"
@@ -66,6 +72,8 @@ main::audit() {
   if [[ -n "${target}" ]]; then
     domains=("${target}")
   else
+    # No domain resolved at all — only reachable on a direct/programmatic call
+    # (the `lo` CLI always supplies the active domain). Audit every domain.
     mapfile -t domains < <(_list_domains)
   fi
 
@@ -144,8 +152,11 @@ audit::run_domain() {
 # Encryption at rest — is the apiserver told to encrypt Secrets before writing
 # them to etcd? For KubeOne the authoritative static signal is the driver's
 # features.encryptionProviders.enable; a spec override wins; a rendered
-# EncryptionConfiguration in artifacts is accepted as proof. FAIL if explicitly
-# disabled on a prod-intent cluster; n/a (pass) for a kind/dev cluster.
+# EncryptionConfiguration in artifacts is accepted as proof ONLY when it uses a
+# real provider (aescbc/aesgcm/secretbox/kms) for the `secrets` resource — an
+# identity-only or empty config encrypts NOTHING and is treated as DISABLED, not
+# pass. FAIL if explicitly disabled on a prod-intent cluster; n/a (pass) for a
+# kind/dev cluster.
 audit::check_encryption() {
   local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
   local id="encryption-at-rest" title="Secret encryption at rest (etcd)"
@@ -169,9 +180,18 @@ audit::check_encryption() {
     [[ "${driver_enable}" == "null" ]] && driver_enable=""
   fi
 
-  # 3. Rendered-artifacts fallback (any driver): an EncryptionConfiguration.
-  local artifact_hit=0
-  audit::_artifacts_contain "${domain_dir}" 'kind: EncryptionConfiguration' && artifact_hit=1
+  # 3. Rendered-artifacts fallback (any driver): a REAL EncryptionConfiguration.
+  # The mere presence of `kind: EncryptionConfiguration` is not proof — an
+  # identity-only (or empty) config encrypts nothing. `artifact_present` records
+  # that a config exists; `artifact_encrypts` requires a real provider to be the
+  # write provider for the `secrets` resource.
+  local artifact_present=0 artifact_encrypts=0
+  if audit::_artifacts_contain "${domain_dir}" 'kind: EncryptionConfiguration'; then
+    artifact_present=1
+    if audit::_encryption_encrypts_secrets "${domain_dir}"; then
+      artifact_encrypts=1
+    fi
+  fi
 
   local enabled=""   # true | false | "" (unknown)
   if [[ "${spec_enable}" == "true" || "${spec_enable}" == "false" ]]; then
@@ -180,18 +200,28 @@ audit::check_encryption() {
     enabled="${driver_enable}"
   fi
 
-  if [[ "${enabled}" == "true" || "${artifact_hit}" == 1 ]]; then
+  # PASS: an explicit enable, or artifacts that PROVABLY encrypt Secrets.
+  if [[ "${enabled}" == "true" || "${artifact_encrypts}" == 1 ]]; then
     audit::_emit "${id}" "${title}" high pass \
       "At-rest encryption is configured — the apiserver encrypts Secrets before writing them to etcd." \
       "No action. Rotate the encryption key periodically (KubeOne re-encrypts Secrets on apply)."
     return 0
   fi
-  if [[ "${enabled}" == "false" ]]; then
+  # FAIL/WARN: explicitly disabled (flag false) OR a rendered
+  # EncryptionConfiguration that leaves `secrets` unencrypted (identity-only /
+  # empty / identity as the write provider). Both leave Secrets base64 in etcd.
+  if [[ "${enabled}" == "false" || "${artifact_present}" == 1 ]]; then
     local sev="high" st="fail"
     (( prod_intent )) || { sev="medium"; st="warn"; }
+    local detail
+    if [[ "${enabled}" == "false" ]]; then
+      detail="At-rest encryption is DISABLED (encryptionProviders.enable: false) — Secrets are stored base64-only in etcd."
+    else
+      detail="A rendered EncryptionConfiguration does NOT encrypt Secrets — no aescbc/secretbox/kms provider is the write provider for the 'secrets' resource (identity-only or empty) — Secrets are stored base64-only in etcd."
+    fi
     audit::_emit "${id}" "${title}" "${sev}" "${st}" \
-      "At-rest encryption is DISABLED (encryptionProviders.enable: false) — Secrets are stored base64-only in etcd." \
-      "Set features.encryptionProviders.enable: true (KubeOne driver) and re-provision so the apiserver encrypts Secrets."
+      "${detail}" \
+      "Set features.encryptionProviders.enable: true (KubeOne driver) and re-provision so the apiserver encrypts Secrets with a real provider (aescbc/secretbox/kms), not identity."
     return 0
   fi
   if [[ "${kind}" == "lo" ]]; then
@@ -293,10 +323,14 @@ audit::check_exposed() {
     return 0
   fi
 
+  # `([^[:alnum:]_]|$)` is a PORTABLE word-boundary (POSIX ERE): match the whole
+  # word (NodePort, not NodePortXyz) without the GNU-only `\b`, which is
+  # undefined under busybox/BSD grep — where a silently-failing pattern would be
+  # a security-tool false-pass. See audit::_grep_count.
   local nodeport lb routes secpol_deny=0
-  nodeport=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*NodePort\b' "${files[@]}")
-  lb=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*LoadBalancer\b' "${files[@]}")
-  routes=$(audit::_grep_count '^[[:space:]]*kind:[[:space:]]*HTTPRoute\b' "${files[@]}")
+  nodeport=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*NodePort([^[:alnum:]_]|$)' "${files[@]}")
+  lb=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*LoadBalancer([^[:alnum:]_]|$)' "${files[@]}")
+  routes=$(audit::_grep_count '^[[:space:]]*kind:[[:space:]]*HTTPRoute([^[:alnum:]_]|$)' "${files[@]}")
   grep -qsE 'defaultAction:[[:space:]]*Deny' "${files[@]}" 2>/dev/null && secpol_deny=1
 
   if (( nodeport > 0 )); then
@@ -389,9 +423,11 @@ audit::check_privileged() {
       "No action."
     return 0
   fi
+  # Portable word-boundary `([^[:alnum:]_]|$)` (not the GNU-only `\b`) so the
+  # match holds on busybox/BSD grep too (a silent miss here would under-report).
   local priv host_net host_path total
-  priv=$(audit::_grep_count '^[[:space:]]*privileged:[[:space:]]*true\b' "${files[@]}")
-  host_net=$(audit::_grep_count '^[[:space:]]*hostNetwork:[[:space:]]*true\b' "${files[@]}")
+  priv=$(audit::_grep_count '^[[:space:]]*privileged:[[:space:]]*true([^[:alnum:]_]|$)' "${files[@]}")
+  host_net=$(audit::_grep_count '^[[:space:]]*hostNetwork:[[:space:]]*true([^[:alnum:]_]|$)' "${files[@]}")
   host_path=$(audit::_grep_count '^[[:space:]]*hostPath:' "${files[@]}")
   total=$(( priv + host_net + host_path ))
   if (( total == 0 )); then
@@ -529,16 +565,22 @@ audit::_emit() {
 # Start at 100; subtract a severity-weighted penalty per warn/fail; clamp [0,100].
 audit::_score() {
   local score=100 p=0 w=0 f=0 u=0 line id title sev st detail rem
+  local blind=0   # a high/critical check we could NOT evaluate (status unknown)
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
     IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
     case "${st}" in
       pass)    p=$(( p + 1 ));;
       warn)    w=$(( w + 1 )); score=$(( score - $(audit::_weight "${sev}" warn) ));;
       fail)    f=$(( f + 1 )); score=$(( score - $(audit::_weight "${sev}" fail) ));;
-      unknown) u=$(( u + 1 ));;
+      unknown) u=$(( u + 1 ))
+               case "${sev}" in critical|high) blind=1;; esac;;
     esac
   done
   (( score < 0 )) && score=0
+  # A high/critical check we could not evaluate must NOT read as a perfect
+  # score: "couldn't check" is not "passed". Cap the score at 70 (grade C at
+  # best) so score-keyed tooling can't grade an un-auditable cluster A/B.
+  if (( blind )) && (( score > 70 )); then score=70; fi
   local grade="F"
   if   (( score >= 90 )); then grade="A"
   elif (( score >= 80 )); then grade="B"
@@ -651,6 +693,35 @@ audit::_artifacts_contain() {
   mapfile -t files < <(audit::_artifact_files "${domain_dir}")
   (( ${#files[@]} > 0 )) || return 1
   grep -qsF -- "${pattern}" "${files[@]}" 2>/dev/null
+}
+
+# audit::_encryption_encrypts_secrets <domain_dir> → 0 if a rendered
+# EncryptionConfiguration uses a REAL provider (aescbc/aesgcm/secretbox/kms) as
+# the WRITE (first) provider for a resource group that covers `secrets` — the
+# bare `secrets` resource, or the `*.` (core group) / `*.*` (all) wildcards.
+# A config that leaves `secrets` to `identity` — or lists identity first (new
+# writes go out in plaintext) — encrypts NOTHING, so a bare
+# `kind: EncryptionConfiguration` is NOT accepted as proof. Fail-soft: an
+# unreadable/parse-error artifact yields no match (never a false pass).
+audit::_encryption_encrypts_secrets() {
+  local domain_dir="$1"
+  local -a files=()
+  mapfile -t files < <(audit::_artifact_files "${domain_dir}")
+  (( ${#files[@]} > 0 )) || return 1
+  local f writer
+  for f in "${files[@]}"; do
+    while IFS= read -r writer; do
+      case "${writer}" in
+        aescbc|aesgcm|secretbox|kms|kmsv2) return 0 ;;
+      esac
+    done < <(yq eval-all -N '
+      select(.kind == "EncryptionConfiguration")
+      | (.resources // [])[]
+      | select((.resources // []) | any_c(. == "secrets" or . == "*.*" or . == "*."))
+      | (.providers // [])[0] | select(tag == "!!map") | keys | .[0]
+    ' "${f}" 2>/dev/null)
+  done
+  return 1
 }
 
 # audit::_json_escape <string> → JSON-safe string (no surrounding quotes).

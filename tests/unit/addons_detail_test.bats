@@ -76,6 +76,34 @@ YAML
   assert_output --partial "nothing to inventory"
 }
 
+# PATH-TRAVERSAL GUARD (Copilot review round 1): addons::detail builds a
+# filesystem path from the caller-provided domain, so it must reject a
+# traversal/injected name (same guard as bootstrap::dispatch) BEFORE touching
+# the path — never inventory (or stat) an escaped location.
+@test "detail rejects a path-traversal / absolute / injected domain" {
+  local d
+  for d in '../etc' '/abs' 'foo/../bar' '../../root' 'a/b' '.hidden'; do
+    run addons::detail "${d}"
+    assert_success
+    assert_output --partial "Invalid domain"
+    refute_output --partial "Addons deployed by"
+  done
+}
+
+@test "detail accepts a valid (dotted) domain name" {
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  _spec good.example <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: g }
+spec:
+  bootstrap: []
+YAML
+  run addons::detail good.example
+  assert_success
+  assert_output --partial "Addons deployed by good.example"
+}
+
 @test "detail resolves a map-form entry as ONE addon (no shattering)" {
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
   _spec mapform <<'YAML'

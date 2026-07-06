@@ -225,7 +225,10 @@ YAML
   assert_equal "$(_status_of encryption-at-rest)" "pass"
 }
 
-@test "a rendered EncryptionConfiguration artifact counts as configured" {
+# SECURITY REGRESSION: an EncryptionConfiguration that encrypts NOTHING (empty
+# resources, or identity as the write provider for `secrets`) must NOT be
+# green-lit — the mere presence of `kind: EncryptionConfiguration` is not proof.
+@test "an empty EncryptionConfiguration artifact (resources: []) is a fail, not a pass" {
   _spec art <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
 kind: Capi
@@ -240,6 +243,75 @@ kind: EncryptionConfiguration
 resources: []
 YAML
   audit::run_domain art
+  assert_equal "$(_status_of encryption-at-rest)" "fail"
+  assert_equal "$(_sev_of encryption-at-rest)" "high"
+}
+
+@test "an identity-only EncryptionConfiguration for secrets is a fail (encrypts nothing)" {
+  _spec artid <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  cat > "${PATH_CLUSTERS}/artid/artifacts.yaml" <<'YAML'
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - identity: {}
+YAML
+  audit::run_domain artid
+  assert_equal "$(_status_of encryption-at-rest)" "fail"
+}
+
+@test "identity listed as the WRITE (first) provider for secrets is a fail" {
+  _spec artwrite <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  cat > "${PATH_CLUSTERS}/artwrite/artifacts.yaml" <<'YAML'
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - identity: {}
+      - secretbox: { keys: [{ name: k1, secret: c2VjcmV0 }] }
+YAML
+  audit::run_domain artwrite
+  assert_equal "$(_status_of encryption-at-rest)" "fail"
+}
+
+@test "a rendered EncryptionConfiguration with a real provider for secrets passes" {
+  _spec artok <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Capi
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  cat > "${PATH_CLUSTERS}/artok/artifacts.yaml" <<'YAML'
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - secretbox:
+          keys:
+            - name: key1
+              secret: c2VjcmV0
+      - identity: {}
+YAML
+  audit::run_domain artok
   assert_equal "$(_status_of encryption-at-rest)" "pass"
 }
 
@@ -310,6 +382,53 @@ metadata: { name: app }
 YAML
   audit::run_domain routes
   assert_equal "$(_status_of exposed-endpoints)" "warn"
+}
+
+# PORTABLE-BOUNDARY REGRESSION (Copilot review round 1): the exposure patterns
+# use a POSIX word-boundary `([^[:alnum:]_]|$)` instead of the GNU-only `\b`.
+# These two tests lock BOTH edges of that boundary so a future regex regression
+# is caught: it must still MATCH the real value even with trailing content, and
+# must NOT over-match a word that merely starts with the value.
+@test "exposed-endpoints still fires for NodePort with a trailing comment (boundary matches)" {
+  _spec npc <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target npc net/svc.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: np }
+spec:
+  type: NodePort  # exposed on every node's IP
+YAML
+  audit::run_domain npc
+  assert_equal "$(_status_of exposed-endpoints)" "fail"
+}
+
+@test "exposed-endpoints does NOT treat a NodePort-prefixed word as NodePort (boundary rejects)" {
+  _spec npn <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  # 'NodePortless' is not a Service type; dropping the word-boundary would make
+  # the NodePort pattern match it (a false FAIL), so this asserts a clean pass.
+  _target npn net/cm.yaml <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: cm }
+data:
+  type: NodePortless
+YAML
+  audit::run_domain npn
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
 }
 
 # =============================================================================
@@ -425,6 +544,29 @@ spec:
         privileged: true
 YAML
   audit::run_domain priv
+  assert_equal "$(_status_of privileged-workloads)" "warn"
+}
+
+@test "privileged check fires for hostNetwork/hostPath too (portable boundary)" {
+  _spec hn <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target hn app/pod.yaml <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata: { name: p }
+spec:
+  hostNetwork: true  # shares the node netns
+  volumes:
+    - name: h
+      hostPath: { path: /var/run }
+YAML
+  audit::run_domain hn
   assert_equal "$(_status_of privileged-workloads)" "warn"
 }
 
@@ -545,4 +687,24 @@ metadata: { name: d }
 YAML
   audit::run_domain deployonly
   assert_equal "$(_status_of cluster-spec)" "unknown"
+}
+
+@test "a high/critical unknown caps the grade — couldn't-check is not a perfect score" {
+  # A deploy-only domain yields a single HIGH 'unknown' (cluster-spec); it must
+  # NOT read as a perfect A/100 for score-keyed tooling.
+  mkdir -p "${PATH_CLUSTERS}/blind"
+  cat > "${PATH_CLUSTERS}/blind/deploy.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Deploy
+metadata: { name: d }
+YAML
+  _json() { audit::run_domain blind; audit::render_json blind; }
+  run _json
+  assert_success
+  local grade score
+  grade=$(echo "${output}" | jq -r '.grade')
+  score=$(echo "${output}" | jq -r '.score')
+  [ "${grade}" != "A" ]
+  [ "${grade}" != "B" ]
+  [ "${score}" -le 70 ]
 }

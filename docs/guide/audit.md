@@ -7,8 +7,8 @@ non-zero exit when anything **fails**. It never touches a live cluster and needs
 no kubeconfig, so it runs offline and in CI.
 
 ```bash
-lo audit                 # audit every domain under clusters/
-lo audit kubehz.in.net   # audit one cluster
+lo audit                 # audit the active domain (lo use <domain>)
+lo audit kubehz.in.net   # audit a specific cluster
 lo audit --json          # machine-readable output (stable schema, see below)
 ```
 
@@ -19,7 +19,7 @@ error), so the audit always completes.
 
 | id | severity | What it looks at |
 |----|----------|------------------|
-| `encryption-at-rest` | high | Secret encryption at rest (etcd). For KubeOne the authoritative signal is the driver's `features.encryptionProviders.enable`; a `spec.features.encryptionProviders.enable` override wins; a rendered `EncryptionConfiguration` in `lo build` artifacts counts as proof. **Disabled on a prod-intent cluster → fail.** A local `kind` (`kind: Lo`) cluster is not-applicable (pass). |
+| `encryption-at-rest` | high | Secret encryption at rest (etcd). For KubeOne the authoritative signal is the driver's `features.encryptionProviders.enable`; a `spec.features.encryptionProviders.enable` override wins; a rendered `EncryptionConfiguration` in `lo build` artifacts counts as proof **only when a real provider (`aescbc`/`secretbox`/`kms`) is the write provider for the `secrets` resource** — an `identity`-only or empty config encrypts nothing and is treated as disabled. **Disabled on a prod-intent cluster → fail.** A local `kind` (`kind: Lo`) cluster is not-applicable (pass). |
 | `cilium-policy-enforcement` | high | Cilium `policyAuditMode` / `policyEnforcementMode` in the **effective** cilium values (base < driver < provider < inline). **Audit mode = insecure** (see below). |
 | `exposed-endpoints` | medium / low | `NodePort` and `LoadBalancer` Services, `HTTPRoute`s, and whether a default-Deny `SecurityPolicy` (IP-allowlist) carve-out fronts them. |
 | `k8s-version-support` | high / medium | Is `spec.kubernetes.version` a still-supported minor? EOL on a prod-intent cluster is a fail; on a dev cluster it's a warn. |
@@ -70,8 +70,12 @@ The report starts at 100 and subtracts a severity-weighted penalty per finding:
 | **warn** | 15 | 10 | 5 | 2 |
 
 The score is clamped to `[0, 100]` and mapped to a grade (`A` ≥ 90, `B` ≥ 80,
-`C` ≥ 70, `D` ≥ 60, `F` < 60). `pass` and `unknown` cost nothing. The command
-exits non-zero **iff** any finding has status `fail`, so it gates CI.
+`C` ≥ 70, `D` ≥ 60, `F` < 60). A `pass` costs nothing, and a low-severity
+`unknown` is free too — but a **high/critical check that cannot be evaluated**
+(`unknown`, e.g. a deploy-only or unreadable cluster) caps the score at **70
+(grade C at best)**: "couldn't check" must never read as a perfect score for
+score-keyed tooling. The command exits non-zero **iff** any finding has status
+`fail`, so it gates CI.
 
 Findings are printed most-actionable first (fail → warn → unknown → pass, and by
 severity within each group).
@@ -114,7 +118,7 @@ The supported-minors list is static (the audit is cluster-free) and lives in
 `.lok8s/libs/audit`:
 
 ```bash
-_AUDIT_K8S_SUPPORTED_MINORS="1.33 1.34 1.35 1.36"
+_AUDIT_K8S_SUPPORTED_MINORS="1.34 1.35 1.36"
 _AUDIT_K8S_LATEST_MINOR="1.36"
 ```
 

@@ -234,6 +234,15 @@ addons::_config_hint() {
 # addons. Read-only, cluster-free.
 addons::detail() {
   local domain="${1:-${domain:-${DOMAIN_NAME:-}}}"
+
+  # Reject a path-traversal / injected domain BEFORE it builds any filesystem
+  # path (same guard as bootstrap::dispatch / provision::resolve_spec /
+  # audit::run_domain — rejects '/', '..', absolute and non-allowlisted names).
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    warn "Invalid domain name '${domain}' — nothing to inventory"
+    return 0
+  fi
+
   local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local addons_dir
   addons_dir=$(addons::_dir)
