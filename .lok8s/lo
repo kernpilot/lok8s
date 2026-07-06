@@ -49,6 +49,7 @@ import ^libs/version
 import ^libs/crds
 import ^libs/gitops
 import ^libs/kubehz/main
+import ^libs/inventory/main
 import ^libs/kustomize
 import ^libs/image
 import ^libs/addons

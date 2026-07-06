@@ -110,6 +110,13 @@ bootstrap::dispatch() {
   fi
 
   bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig}"
+
+  # Refresh the in-cluster ClusterInventory after a standalone `lo bootstrap`
+  # too (same tail as provision::dispatch — fail-soft, probed because tests
+  # source this lib without the inventory lib loaded).
+  if declare -f inventory::publish &>/dev/null; then
+    inventory::publish "${domain}" "${cluster_yaml}" "${kubeconfig}"
+  fi
 }
 
 # ── Bootstrap engine ─────────────────────────────────────

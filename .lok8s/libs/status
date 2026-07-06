@@ -42,6 +42,36 @@ status::nodes() {
   fi
 }
 
+# ── ClusterInventory ────────────────────────────────────
+# Shows the in-cluster ClusterInventory (lok8s.dev/v1alpha1 singleton
+# "cluster", written by lo at the end of provision/bootstrap) when the
+# cluster is reachable and the CR exists. Read-only, fail-soft: silently
+# skipped otherwise.
+# Usage: status::inventory
+status::inventory() {
+  command -v kubectl &>/dev/null || return 0
+  command -v jq &>/dev/null || return 0
+  [[ -f "${KUBECONFIG:-}" ]] || return 0
+
+  local inv
+  inv=$(kubectl get clusterinventories.lok8s.dev cluster -o json 2>/dev/null) || return 0
+  [[ -n "${inv}" ]] || return 0
+
+  echo "--- Inventory (ClusterInventory/cluster) ---"
+  jq -r '
+    "  lok8s:      \(.spec.lok8sVersion // "?")",
+    "  driver:     \(.spec.kind // "?")\(if .spec.provider then " · " + .spec.provider else "" end)",
+    (if .spec.kubernetesVersion then "  kubernetes: \(.spec.kubernetesVersion)" else empty end),
+    "  specHash:   \(.spec.specHash // "?" | .[0:12])…",
+    "  renderedAt: \(.spec.renderedAt // "?")",
+    "  addons:     \(.spec.addons // [] | length)",
+    (.spec.addons // [] | .[] |
+      "    \(.name)\(if .chartVersion then " " + .chartVersion else "" end)\(if .category then " (" + .category + ")" else "" end)"),
+    (if .status.lastReported then "  agent:      last reported \(.status.lastReported)" else empty end)
+  ' <<< "${inv}" 2>/dev/null || echo "  (unreadable inventory)"
+  echo ""
+}
+
 # ── Target status ───────────────────────────────────────
 # Lists the targets under clusters/<domain>/targets/ (enumeration only) and
 # reports whether the domain has been built. Per-target build state is no longer
@@ -111,6 +141,7 @@ status::all() {
 
   status::cluster "${domain}"
   status::nodes
+  status::inventory
   status::targets "${domain}"
   status::tilt "${kind}"
 }
