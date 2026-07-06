@@ -28,6 +28,7 @@ teardown() {
 @test "committed operator/crds are in sync with their schema" {
   CRD_SCHEMA_DIR="${_PROJECT_ROOT}/operator/crds/schema"
   CRD_OUT_DIR="${_PROJECT_ROOT}/operator/crds"
+  CRD_INVENTORY_MIRROR="${_PROJECT_ROOT}/.lok8s/libs/inventory/manifests/clusterinventory.crd.yaml"
   run crds::check
   assert_success
   assert_output --partial "up to date"
@@ -49,11 +50,48 @@ teardown() {
   done
 }
 
+# --- ClusterInventory (lok8s.dev — deliberately NOT the operator group) ---
+
+@test "ClusterInventory is a cluster-scoped lok8s.dev/v1alpha1 kind with a status subresource" {
+  local crd="${_PROJECT_ROOT}/operator/crds/clusterinventory.yaml"
+  run yq -r '.spec.group' "${crd}"
+  assert_output "lok8s.dev"
+  run yq -r '.spec.scope' "${crd}"
+  assert_output "Cluster"
+  run yq -r '.spec.versions[0].name' "${crd}"
+  assert_output "v1alpha1"
+  run yq -r '.spec.versions[0].subresources | has("status")' "${crd}"
+  assert_output "true"
+}
+
+@test "ClusterInventory schema is strictly metadata (no preserve-unknown anywhere)" {
+  # Match the marker as a YAML KEY — a doc-string mention would not weaken
+  # pruning, but the key anywhere in the schema would.
+  run grep -c "x-kubernetes-preserve-unknown-fields:" \
+    "${_PROJECT_ROOT}/operator/crds/clusterinventory.yaml"
+  assert_failure   # grep -c exits 1 on zero matches
+  assert_output "0"
+}
+
+@test "ClusterInventory addon entries enumerate exactly the metadata fields" {
+  # yq keys preserve document order (unlike jq's sorted keys).
+  run yq -r '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.addons.items.properties | keys | join(",")' \
+    "${_PROJECT_ROOT}/operator/crds/clusterinventory.yaml"
+  assert_output "name,chartVersion,appVersion,category,source"
+}
+
+@test "the .lok8s inventory CRD mirror is identical to the operator copy" {
+  run diff "${_PROJECT_ROOT}/operator/crds/clusterinventory.yaml" \
+    "${_PROJECT_ROOT}/.lok8s/libs/inventory/manifests/clusterinventory.crd.yaml"
+  assert_success
+}
+
 # --- sandbox round-trip ---
 
 _sandbox() { # copy real schemas into a writable sandbox, point the lib at it
   CRD_SCHEMA_DIR="${BATS_TEST_TMPDIR}/schema"
   CRD_OUT_DIR="${BATS_TEST_TMPDIR}/out"
+  CRD_INVENTORY_MIRROR="${BATS_TEST_TMPDIR}/mirror/clusterinventory.crd.yaml"
   mkdir -p "${CRD_SCHEMA_DIR}" "${CRD_OUT_DIR}"
   cp "${_PROJECT_ROOT}"/operator/crds/schema/*.schema.yaml "${CRD_SCHEMA_DIR}/"
 }
@@ -87,6 +125,15 @@ _sandbox() { # copy real schemas into a writable sandbox, point the lib at it
   _sandbox
   crds::generate
   echo "  hand-edited: true" >> "${CRD_OUT_DIR}/lo.yaml"
+  run crds::check
+  assert_failure
+  assert_output --partial "STALE"
+}
+
+@test "check fails when the .lok8s inventory mirror drifts from its schema" {
+  _sandbox
+  crds::generate
+  echo "  hand-edited: true" >> "${CRD_INVENTORY_MIRROR}"
   run crds::check
   assert_failure
   assert_output --partial "STALE"

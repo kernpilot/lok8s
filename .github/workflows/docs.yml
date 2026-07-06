@@ -30,6 +30,15 @@ jobs:
       - name: Install deps
         run: yarn install --frozen-lockfile
 
+      # Machine-readable addon index, served at /addons-index.json (docs/public/
+      # is copied verbatim into the site root by VitePress). The kubehz platform
+      # polls it to compute ClusterInventory availableUpdates — no git access
+      # needed. yq + jq are preinstalled on ubuntu-24.04 runners.
+      - name: Build addons index (served at /addons-index.json)
+        run: |
+          bash docs/.vitepress/build-addons-index.sh > docs/public/addons-index.json
+          jq -e '.generatedAt and (.addons | length > 0)' docs/public/addons-index.json
+
       - name: Build docs
         run: yarn docs:build
 

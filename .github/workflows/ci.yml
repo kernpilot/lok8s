@@ -35,9 +35,9 @@ jobs:
           # Two passes: *.sh files (sourced libs often have no shebang) AND
           # the extensionless argsh libs/drivers (#!/usr/bin/env argsh), which
           # a `-name '*.sh'` filter alone would silently skip. Overlap is fine.
-          find .lok8s operator/hooks -type f -name '*.sh' \
+          find .lok8s operator/hooks docs/.vitepress -type f -name '*.sh' \
             | xargs shellcheck --shell=bash --severity=warning
-          grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks \
+          grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress \
             | xargs shellcheck --shell=bash --severity=warning
 
   yamllint:
@@ -172,6 +172,44 @@ jobs:
             echo "expected schema validation to reject a spec without cluster.domain" >&2
             exit 1
           fi
+
+      - name: ClusterInventory round-trips and prunes non-metadata fields
+        run: |
+          # The inventory CRD (lok8s.dev group, cluster-scoped singleton) must
+          # round-trip — and, critically, PRUNE anything beyond the enumerated
+          # metadata fields: values/secrets structurally cannot land in it.
+          kubectl apply --server-side --field-manager=lok8s -f - <<'EOF'
+          apiVersion: lok8s.dev/v1alpha1
+          kind: ClusterInventory
+          metadata:
+            name: cluster
+          spec:
+            lok8sVersion: 0.1.0
+            kind: kubeone
+            provider: hetzner
+            kubernetesVersion: v1.31.12
+            specHash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            renderedAt: "2026-01-01T00:00:00Z"
+            values:
+              smuggled: chart-values-must-be-pruned
+            addons:
+              - name: cilium
+                chartVersion: 1.19.2
+                category: networking
+                source: addon
+                inlineValues: must-be-pruned-too
+          EOF
+          test "$(kubectl get clusterinventories.lok8s.dev cluster -o jsonpath='{.spec.kubernetesVersion}')" = "v1.31.12"
+          # No preserve-unknown-fields anywhere: both smuggled keys are gone.
+          kubectl get clusterinventories.lok8s.dev cluster -o json | jq -e '
+            (.spec | has("values") | not) and
+            (.spec.addons[0] | has("inlineValues") | not) and
+            (.spec.addons[0].chartVersion == "1.19.2")'
+          # Status is a subresource: writable via --subresource, never via spec apply.
+          kubectl patch clusterinventories.lok8s.dev cluster --subresource=status --type=merge \
+            -p '{"status":{"lastReported":"2026-01-01T00:00:00Z","observedAddons":[{"name":"cilium","version":"1.19.2","healthy":true}]}}'
+          kubectl get clusterinventories.lok8s.dev cluster -o json \
+            | jq -e '.status.observedAddons[0].healthy == true'
 
       - name: All cluster kinds resolve under cluster.lok8s.dev
         run: |

@@ -188,7 +188,10 @@ addons::show() {
 # category (infrastructure/networking/observability/storage/dev-tools) or "-".
 addons::_category() {
   local dir="$1" line cat=""
-  line=$(grep -rhoE 'lok8s\.dev/category:[[:space:]]*[a-zA-Z0-9-]+' "${dir}" 2>/dev/null | head -1)
+  # LC_ALL=C sort before head -1: grep -r traversal follows readdir order
+  # (filesystem-dependent), and the category feeds deterministic artifacts
+  # (ClusterInventory, addons-index.json) — pick a stable winner.
+  line=$(grep -rhoE 'lok8s\.dev/category:[[:space:]]*[a-zA-Z0-9-]+' "${dir}" 2>/dev/null | LC_ALL=C sort | head -1)
   cat="${line##*:}"                 # drop everything up to the colon
   cat="${cat//[[:space:]]/}"        # trim surrounding whitespace
   echo "${cat:--}"

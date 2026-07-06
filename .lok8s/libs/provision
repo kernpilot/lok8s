@@ -265,6 +265,16 @@ provision::dispatch() {
   local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name_for_kc}.yaml"
   bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}"
 
+  # Record WHAT was deployed into the cluster itself: the ClusterInventory
+  # singleton (lok8s.dev/v1alpha1, name "cluster") — metadata only (versions,
+  # addon names/categories, spec hash; never values or secrets). FAIL-SOFT by
+  # contract: inventory::publish warns and returns 0 on any cluster/CRD
+  # problem, so it can never break a provision. Probe first — tests source
+  # this lib standalone without the inventory lib loaded.
+  if declare -f inventory::publish &>/dev/null; then
+    inventory::publish "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}"
+  fi
+
   # Bootstrap GitOps if configured
   local gitops_provider
   gitops_provider=$(yq -r '.spec.gitops.provider // ""' "${cluster_yaml}")

@@ -1,0 +1,184 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# inventory — the ClusterInventory (lok8s.dev/v1alpha1) writer
+#
+# `lo` records WHAT it deployed into the cluster itself: a cluster-scoped
+# SINGLETON ClusterInventory named "cluster" (OpenShift-ClusterVersion-style
+# spec/status split). lo owns .spec (framework/driver/k8s versions, the
+# sha256 of cluster.lok8s.yaml, and the resolved spec.bootstrap addon set with
+# chart versions + categories); the in-cluster agent owns .status via the
+# status subresource (observedAddons/availableUpdates/lastReported) — lo only
+# defines that schema, it never writes status.
+#
+# STRICTLY metadata: the CRD schema enumerates every field and carries no
+# x-kubernetes-preserve-unknown-fields, so chart values / env overrides /
+# credentials structurally cannot land in the inventory (the apiserver prunes
+# anything beyond the enumerated fields).
+#
+# inventory::publish is FAIL-SOFT by contract: an unreachable cluster, a
+# missing kubeconfig, a CRD conflict, RBAC — none of it may ever break a
+# provision/bootstrap. It warns and returns 0.
+
+import ^utils/verbose
+import ^libs/bootstrap
+import ^libs/addons
+
+INVENTORY_API_VERSION="lok8s.dev/v1alpha1"
+INVENTORY_CRD_NAME="clusterinventories.lok8s.dev"
+
+# Resolve the generated ClusterInventory CRD manifest. Two homes for the same
+# generated artifact (single source: operator/crds/schema/, drift-gated by
+# `lo crds check`): consumer repos vendor only .lok8s/** (b env sync), so the
+# mirror inside .lok8s is the one guaranteed present; the lok8s repo itself
+# additionally has operator/crds/.
+inventory::_crd_manifest() {
+  local c
+  for c in "${PATH_LOK8S}/libs/inventory/manifests/clusterinventory.crd.yaml" \
+           "${PATH_BASE}/operator/crds/clusterinventory.yaml"; do
+    [[ -f "${c}" ]] && { echo "${c}"; return 0; }
+  done
+  return 1
+}
+
+# UTC RFC-3339 timestamp. Honors SOURCE_DATE_EPOCH (reproducible builds /
+# deterministic tests); bash's printf %()T with TZ=UTC avoids a GNU-vs-busybox
+# `date -d @epoch` portability split.
+inventory::_now() {
+  if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+    TZ=UTC printf '%(%Y-%m-%dT%H:%M:%SZ)T\n' "${SOURCE_DATE_EPOCH}"
+  else
+    date -u +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
+# inventory::build_json <domain> <cluster_yaml>
+# Print the full ClusterInventory CR as JSON on stdout. PURE (no cluster
+# access) so it is unit-testable. Resolves spec.bootstrap through the SAME
+# shared parser the apply path uses (bootstrap::_resolve_entries /
+# _parse_entry — map-form entries stay intact, per-driver defaults included)
+# and reads each addon's pinned chart version + lok8s.dev/category label via
+# the addons helpers. Only entry NAMES + version/category metadata are
+# emitted — inline values/env never leave this function.
+inventory::build_json() {
+  local domain="$1" cluster_yaml="$2"
+  [[ -f "${cluster_yaml}" ]] || { error "inventory: cluster spec not found: ${cluster_yaml}"; return 1; }
+
+  local kind provider k8s_version lok8s_version spec_hash rendered_at
+  kind=$(yq -r '.kind // "Lo"' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  provider=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
+  k8s_version=$(yq -r '.spec.kubernetes.version // ""' "${cluster_yaml}")
+  k8s_version="${k8s_version%%@*}"   # strip a kindest-node @sha256 digest suffix
+  lok8s_version="dev"
+  [[ -f "${PATH_LOK8S}/VERSION" ]] && lok8s_version="$(<"${PATH_LOK8S}/VERSION")"
+  spec_hash=$(sha256sum "${cluster_yaml}" | awk '{print $1}')
+  rendered_at=$(inventory::_now)
+
+  local addons_dir="${PATH_LOK8S}/addons"
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}" 2>/dev/null)
+
+  # Build the addons array entry-by-entry with jq --arg (never string
+  # interpolation), omitting unknown optional fields. appVersion is not
+  # tracked by the khelm chart.yaml pins today, so it is never emitted here —
+  # the schema keeps the field for the agent / future metadata.
+  local addons_json="[]"
+  local e nm dr inl ev wt dp
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || {
+      # An unparseable entry is skipped, never fatal (the deploy already failed
+      # loudly on it upstream) — but say so instead of silently thinning the
+      # inventory (review #52 round 1). Log only the entry's NAME/key: map-form
+      # entries carry inline values/env, which must not reach (CI-captured)
+      # logs from this path (round 2, both reviewers).
+      local _key
+      _key=$(jq -r 'if type == "object" then (keys[0] // "?") else tostring end' <<<"${e}" 2>/dev/null) || _key="?"
+      warn "inventory: skipping unparseable bootstrap entry '${_key}'"
+      continue
+    }
+    local src="target" chart_version category
+    [[ "${dr}" == "${addons_dir}/"* ]] && src="addon"
+    chart_version=$(addons::_version "${dr}")
+    [[ "${chart_version}" != "-" ]] || chart_version=""
+    category=$(addons::_category "${dr}")
+    [[ "${category}" != "-" ]] || category=""
+    addons_json=$(jq --arg n "${nm}" --arg cv "${chart_version}" \
+                     --arg cat "${category}" --arg src "${src}" \
+      '. += [({name: $n, source: $src}
+             + (if $cv  != "" then {chartVersion: $cv} else {} end)
+             + (if $cat != "" then {category: $cat}    else {} end))]' \
+      <<< "${addons_json}") || { error "inventory: failed to build addon entry for ${nm}"; return 1; }
+  done
+
+  jq -n --arg apiVersion "${INVENTORY_API_VERSION}" \
+        --arg domain "${domain}" \
+        --arg lok8sVersion "${lok8s_version}" \
+        --arg kind "${kind}" \
+        --arg provider "${provider}" \
+        --arg k8s "${k8s_version}" \
+        --arg specHash "${spec_hash}" \
+        --arg renderedAt "${rendered_at}" \
+        --argjson addons "${addons_json}" \
+    '{apiVersion: $apiVersion,
+      kind: "ClusterInventory",
+      metadata: {name: "cluster", labels: {"lok8s.dev/domain": $domain}},
+      spec: ({lok8sVersion: $lok8sVersion,
+              kind: $kind,
+              specHash: $specHash,
+              renderedAt: $renderedAt,
+              addons: $addons}
+             + (if $provider != "" then {provider: $provider}      else {} end)
+             + (if $k8s      != "" then {kubernetesVersion: $k8s}  else {} end))}'
+}
+
+# inventory::publish <domain> <cluster_yaml> <kubeconfig>
+# Apply the ClusterInventory CRD (idempotent) + the CR spec (server-side
+# apply, field manager "lok8s") to the cluster. FAIL-SOFT: every failure path
+# warns and returns 0 — publishing the inventory must never break a
+# provision/deploy. Skips cleanly when there is no cluster spec (deploy
+# domains) or no reachable cluster.
+inventory::publish() {
+  local domain="$1" cluster_yaml="$2" kubeconfig="$3"
+
+  # Deploy domains (and anything else without its own cluster.lok8s.yaml)
+  # have no inventory of their own — the referenced cluster's inventory is
+  # written when THAT cluster provisions/bootstraps.
+  [[ -f "${cluster_yaml}" ]] || {
+    debug "inventory: no cluster spec at ${cluster_yaml} — nothing to publish"
+    return 0
+  }
+  if [[ ! -f "${kubeconfig}" ]]; then
+    warn "inventory: kubeconfig not found (${kubeconfig}) — skipping ClusterInventory publish"
+    return 0
+  fi
+
+  local crd
+  if ! crd=$(inventory::_crd_manifest); then
+    warn "inventory: ClusterInventory CRD manifest not found — skipping publish"
+    return 0
+  fi
+  if ! kubectl --kubeconfig "${kubeconfig}" apply --server-side --field-manager=lok8s \
+        -f "${crd}" >/dev/null 2>&1; then
+    warn "inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish"
+    return 0
+  fi
+  # Best-effort: a fresh CRD needs a moment to be Established before its CRs
+  # resolve. Non-fatal — the SSA below would just warn.
+  kubectl --kubeconfig "${kubeconfig}" wait --for=condition=Established \
+    "crd/${INVENTORY_CRD_NAME}" --timeout=30s >/dev/null 2>&1 || true
+
+  local cr
+  if ! cr=$(inventory::build_json "${domain}" "${cluster_yaml}"); then
+    warn "inventory: failed to build the ClusterInventory for ${domain} — skipping publish"
+    return 0
+  fi
+  if kubectl --kubeconfig "${kubeconfig}" apply --server-side --field-manager=lok8s \
+       -f - <<< "${cr}" >/dev/null 2>&1; then
+    debug "inventory: published ClusterInventory 'cluster' for ${domain}"
+  else
+    warn "inventory: failed to publish the ClusterInventory for ${domain} (provision/deploy unaffected)"
+  fi
+  return 0
+}

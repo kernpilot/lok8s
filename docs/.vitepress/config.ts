@@ -75,6 +75,7 @@ export default defineConfig({
             { text: 'Backups', link: '/guide/backups' },
             { text: 'Disaster Recovery', link: '/guide/recover' },
             { text: 'The Operator', link: '/guide/operator' },
+            { text: 'Cluster Inventory', link: '/guide/inventory' },
             { text: 'kubehz Platform', link: '/guide/kubehz' },
           ],
         },
