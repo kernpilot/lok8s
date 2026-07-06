@@ -39,6 +39,7 @@ import ^libs/use
 import ^libs/init
 import ^libs/build
 import ^libs/lint
+import ^libs/audit
 import ^libs/status
 import ^libs/doctor
 import ^libs/trust
@@ -95,6 +96,7 @@ main() {
     'kubeconfig|kc@readonly'           'Print a domain kubeconfig (--oidc for kubelogin exec-plugin)'
     'init@idempotent'                  'Scaffold service config (lok8s.yaml/services.yaml/Tiltfile)'
     'lint|l@readonly'                  'Validate structure and specs'
+    'audit|au@readonly'                'Static security-posture audit (read-only, cluster-free; --json)'
     'status@readonly'                  'Cluster health and status'
     'doctor@readonly'                  'Diagnose the environment + toolchain'
     'trust'                            'Trust the local dev CA (mkcert -install)'
