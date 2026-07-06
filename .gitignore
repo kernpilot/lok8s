@@ -64,3 +64,7 @@ tests/e2e/*/.secrets/
 # argsh native builtin — `argsh builtins install` / some `lo` runs drop this
 # binary in the cwd. It belongs in .bin/ (fetched by `b`); never commit a stray.
 argsh.so
+
+# generated addon index (built by docs/.vitepress/build-addons-index.sh in the
+# Deploy Docs workflow; never commit a locally-generated copy)
+docs/public/addons-index.json
