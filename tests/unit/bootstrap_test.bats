@@ -1728,7 +1728,12 @@ YAML
 @test "restore_d: plaintext store working copy wins (no sops needed)" {
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
-  unset PATH_SECRETS
+  # Cross-domain-skew regression: a stale PATH_SECRETS (another domain's store,
+  # e.g. exported by an earlier build) must be IGNORED — the store resolves
+  # from the domain argument.
+  export PATH_SECRETS="${BATS_TEST_TMPDIR}/clusters/other.lok8s.dev/secrets"
+  mkdir -p "${PATH_SECRETS}/restore.d"
+  echo "kind: WrongDomainSecret" > "${PATH_SECRETS}/restore.d/tls-a.yaml"
   local d="${PATH_CLUSTERS}/test.lok8s.dev"
   mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
   echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
@@ -1737,9 +1742,12 @@ YAML
   sops() { echo "sops-called" >> "${BATS_TEST_TMPDIR}/sops.log"; return 1; }
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
-  grep -q "tls-a.yaml" "${BATS_TEST_TMPDIR}/kubectl.log"
+  # Pin the args: right kubeconfig + THIS domain's store file (not PATH_SECRETS's)
+  grep -q -- "--kubeconfig ${BATS_TEST_TMPDIR}/kubeconfig" "${BATS_TEST_TMPDIR}/kubectl.log"
+  grep -q "test.lok8s.dev/secrets/restore.d/tls-a.yaml" "${BATS_TEST_TMPDIR}/kubectl.log"
+  ! grep -q "other.lok8s.dev" "${BATS_TEST_TMPDIR}/kubectl.log"
   [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
-  [[ "$output" == *"restored 1 manifest"* ]]
+  [[ "$output" == *"restore.d — 1 applied, 0 skipped"* ]]
 }
 
 @test "restore_d: sops fallback when no plaintext working copy" {
@@ -1749,12 +1757,15 @@ YAML
   local d="${PATH_CLUSTERS}/test.lok8s.dev"
   mkdir -p "${d}/restore.d"
   echo "cipher" > "${d}/restore.d/tls-b.sops.yaml"
-  kubectl() { cat > /dev/null; echo "applied-stdin" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
-  sops() { echo "kind: Secret"; }
+  kubectl() { cat > /dev/null; echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  sops() { echo "$*" >> "${BATS_TEST_TMPDIR}/sops.log"; echo "kind: Secret"; }
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
-  grep -q "applied-stdin" "${BATS_TEST_TMPDIR}/kubectl.log"
-  [[ "$output" == *"restored 1 manifest"* ]]
+  # Pin the args: sops decrypts THE file; kubectl applies stdin to the right kubeconfig
+  grep -q -- "-d ${d}/restore.d/tls-b.sops.yaml" "${BATS_TEST_TMPDIR}/sops.log"
+  grep -q -- "--kubeconfig ${BATS_TEST_TMPDIR}/kubeconfig" "${BATS_TEST_TMPDIR}/kubectl.log"
+  grep -q -- "-f -" "${BATS_TEST_TMPDIR}/kubectl.log"
+  [[ "$output" == *"restore.d — 1 applied, 0 skipped"* ]]
 }
 
 @test "restore_d: decrypt failure warns and continues (never fatal)" {
@@ -1769,4 +1780,5 @@ YAML
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
   [[ "$output" == *"could not decrypt/apply tls-c"* ]]
+  [[ "$output" == *"restore.d — 0 applied, 1 skipped"* ]]
 }

@@ -681,31 +681,40 @@ bootstrap::_restore_d() {
   local domain="$1" kubeconfig="$2"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
   [[ -d "${rdir}" ]] || return 0
-  local f base plain applied=0 skipped=0
+  local f base plain applied=0 skipped=0 _err=""
   for f in "${rdir}"/*.sops.yaml; do
-    [[ -e "${f}" ]] || break
+    # Nullglob-style guard; `continue` (not break) so one dangling entry can't
+    # abort the remaining valid restores.
+    [[ -e "${f}" ]] || continue
     base="$(basename "${f}" .sops.yaml)"
     # Plaintext-first: the per-domain secret store's working copy
     # (secrets/restore.d/<name>.yaml — gitignored, present once the operator has
     # run `lo secrets decrypt`) needs no age identity, so restore works from an
     # agent/CI sandbox where the SSH-derived key isn't available. The committed
     # .sops.yaml is the fresh-checkout fallback (sops decrypts with the
-    # operator's key).
-    plain="${PATH_SECRETS:-${PATH_CLUSTERS}/${domain}/secrets}/restore.d/${base}.yaml"
-    if [[ -f "${plain}" ]] \
-      && kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f "${plain}" >/dev/null 2>&1; then
-      applied=$(( applied + 1 ))
-      debug "bootstrap: restore.d applied ${base} (store working copy)"
-    elif sops -d "${f}" 2>/dev/null \
-      | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
+    # operator's key). Resolve the store from THIS domain — not $PATH_SECRETS,
+    # which may still point at a different domain's store from an earlier build.
+    plain="${PATH_CLUSTERS}/${domain}/secrets/restore.d/${base}.yaml"
+    if [[ -f "${plain}" ]]; then
+      if _err="$(kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f "${plain}" 2>&1 >/dev/null)"; then
+        applied=$(( applied + 1 ))
+        debug "bootstrap: restore.d applied ${base} (store working copy)"
+        continue
+      fi
+      debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err}"
+    fi
+    if _err="$(sops -d "${f}" 2>&1 \
+      | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
       applied=$(( applied + 1 ))
       debug "bootstrap: restore.d applied ${base} (sops)"
     else
       skipped=$(( skipped + 1 ))
+      debug "bootstrap: restore.d ${base} failed: ${_err}"
       warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
     fi
   done
-  (( applied == 0 )) || printf '\033[32m✓\033[0m bootstrap: restored %d manifest(s) from restore.d\n' "${applied}" >&2
+  (( applied == 0 && skipped == 0 )) \
+    || printf '\033[32m✓\033[0m bootstrap: restore.d — %d applied, %d skipped\n' "${applied}" "${skipped}" >&2
   return 0
 }
 

@@ -149,8 +149,8 @@ provision::load_provider_creds() {
   # the Robot creds aren't set (cloud-only provisions) — as the function's last
   # command that would become its return value and abort the unguarded callers
   # (provision::dispatch, recover::_resolve) under `set -e`. Harmless when this
-  # block was inline in dispatch; a landmine once extracted. Unit tests 534/581
-  # caught it.
+  # block was inline in dispatch; a landmine once extracted. Pinned by the
+  # "returns 0 when robot creds absent" unit test.
   return 0
 }
 
