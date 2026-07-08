@@ -10,3 +10,12 @@ networking:
   enabled: false
 monitoring:
   enabled: false
+# Pin the CCM to control-plane nodes. On a cluster with bare-metal (Hetzner
+# Robot) workers, the CCM MUST run on an hcloud cloud VM: it queries the hcloud
+# metadata service (169.254.169.254) to detect its own network attachment, which
+# does not exist on Robot servers → init fails ("serverIsAttachedToNetwork ...
+# context deadline exceeded"). The chart's control-plane TOLERATION only permits
+# a CP node; without a nodeSelector the scheduler can still place it on a worker.
+# Safe for cloud-only clusters too (a control-plane always exists).
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
