@@ -670,6 +670,45 @@ bootstrap::_reap_one() {
   _BS_RUNIDX=("${_alive_idx[@]+"${_alive_idx[@]}"}")
 }
 
+# bootstrap::_restore_d <domain> <kubeconfig>
+# Apply clusters/<domain>/restore.d/*.sops.yaml (sops-encrypted Kubernetes
+# manifests) before the bootstrap DAG. See the call site in bootstrap::apply for
+# the rationale (DR restore, e.g. issued TLS Secrets so cert-manager reuses
+# instead of re-issuing). Per-file failures WARN and continue — DR must not
+# wedge on a missing age key; the fallback (the owner controller re-creates /
+# re-issues) is the pre-restore.d behavior. Always returns 0.
+bootstrap::_restore_d() {
+  local domain="$1" kubeconfig="$2"
+  local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
+  [[ -d "${rdir}" ]] || return 0
+  local f base plain applied=0 skipped=0
+  for f in "${rdir}"/*.sops.yaml; do
+    [[ -e "${f}" ]] || break
+    base="$(basename "${f}" .sops.yaml)"
+    # Plaintext-first: the per-domain secret store's working copy
+    # (secrets/restore.d/<name>.yaml — gitignored, present once the operator has
+    # run `lo secrets decrypt`) needs no age identity, so restore works from an
+    # agent/CI sandbox where the SSH-derived key isn't available. The committed
+    # .sops.yaml is the fresh-checkout fallback (sops decrypts with the
+    # operator's key).
+    plain="${PATH_SECRETS:-${PATH_CLUSTERS}/${domain}/secrets}/restore.d/${base}.yaml"
+    if [[ -f "${plain}" ]] \
+      && kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f "${plain}" >/dev/null 2>&1; then
+      applied=$(( applied + 1 ))
+      debug "bootstrap: restore.d applied ${base} (store working copy)"
+    elif sops -d "${f}" 2>/dev/null \
+      | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
+      applied=$(( applied + 1 ))
+      debug "bootstrap: restore.d applied ${base} (sops)"
+    else
+      skipped=$(( skipped + 1 ))
+      warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
+    fi
+  done
+  (( applied == 0 )) || printf '\033[32m✓\033[0m bootstrap: restored %d manifest(s) from restore.d\n' "${applied}" >&2
+  return 0
+}
+
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
 # Reads spec.bootstrap from the cluster YAML and runs the entries as a
 # topological-parallel DAG (independent entries in parallel, capped at
@@ -724,6 +763,18 @@ bootstrap::apply() {
     export LOK8S_USER_API_PORT="${_p}"
     debug "bootstrap: API endpoint ${LOK8S_USER_API_HOST}:${LOK8S_USER_API_PORT} (for addon envsubst)"
   fi
+
+  # ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──
+  # Applied BEFORE any addon so restored state exists when the addons'
+  # reconcilers first look for it. Canonical use: issued wildcard TLS Secrets —
+  # cert-manager finds a valid existing Secret and REUSES it instead of
+  # re-issuing via ACME (repeated recoveries would otherwise exhaust the Let's
+  # Encrypt duplicate-cert limit, 5/domain-set/week, and strand the cluster
+  # without TLS). Bootstrap-time ONLY (recover / provision / --bootstrap), never
+  # plain builds/deploys — so a cert-manager-RENEWED secret is not clobbered by
+  # a stale backup on routine rollouts. A stale (expired) restore is harmless:
+  # its owner sees it invalid and re-issues (the normal path).
+  bootstrap::_restore_d "${domain}" "${kubeconfig}"
 
   # ── Plan the DAG: parse every entry, resolve edges, detect cycles ──
   local max_parallel="${LOK8S_BOOTSTRAP_PARALLEL:-8}"

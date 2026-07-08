@@ -97,21 +97,25 @@ hetzner::create() {
   local -r create_hook="$(type -t hetzner::create::hook)"
 
   local i id name
-  while IFS=',' read -r i id name; do
+  # Read the server stream on a DEDICATED fd (9), not stdin: the bare-metal
+  # create::hook runs `ssh` (installimage), and ssh reads stdin — on stdin that
+  # would SWALLOW the remaining loop rows, so only the FIRST bare-metal server
+  # got processed and the rest stranded in rescue (KubeOne then looped on
+  # `sudo: command not found`). Feeding the loop via fd 9 makes it immune to any
+  # stdin-reading body command.
+  while IFS=',' read -r i id name <&9; do
     # Check for #cloud.root (bare metal / pre-existing server)
     local is_root
     is_root=$(hetzner::json -r --arg w "${what}" --argjson i "${i}" '.[$w][$i]["#cloud.root"] // ""')
 
-    [[ -z "${id}" ]] || {
-      _hetzner_print "🦗 skip \033[3m${what}\033[0m \033[1m${name}\033[0m (${id})"
-
-      [[ -z "${create_after-}" ]] ||
-        hetzner::create::after
-
-      continue
-    }
-
-    # Bare metal servers: don't create via hcloud, just run hooks
+    # Bare metal (#cloud.root) MUST precede the id-skip below: robot hardware
+    # ALWAYS "exists" (has an id), so an id-based skip would strand every bare-
+    # metal worker whose id resolved non-empty in the rescue system — only the
+    # one that happened to resolve an empty id got installimaged, the rest were
+    # skipped and KubeOne then looped forever on `sudo: command not found`
+    # (rescue = no sudo). The hook itself self-gates on rescue mode (installimages
+    # a rescue-booted node, no-ops an already-installed one), so running it
+    # unconditionally per bare-metal server is correct + idempotent.
     if [[ "${is_root}" == "true" ]]; then
       _hetzner_print "🔧 bare metal \033[3m${what}\033[0m \033[1m${name}\033[0m (pre-existing)"
 
@@ -154,6 +158,17 @@ hetzner::create() {
 
       continue
     fi
+
+    # Cloud servers: skip if already created (has an id). (Bare metal handled
+    # above — it must NOT be id-skipped; see the #cloud.root branch.)
+    [[ -z "${id}" ]] || {
+      _hetzner_print "🦗 skip \033[3m${what}\033[0m \033[1m${name}\033[0m (${id})"
+
+      [[ -z "${create_after-}" ]] ||
+        hetzner::create::after
+
+      continue
+    }
 
     # Cloud VMs: standard hcloud create
 
@@ -210,7 +225,7 @@ hetzner::create() {
 
     [[ -z "${create_after-}" ]] ||
       hetzner::create::after
-  done < <(hetzner::json::loop "${what}")
+  done 9< <(hetzner::json::loop "${what}")
   unset IFS
 
   unset -f \

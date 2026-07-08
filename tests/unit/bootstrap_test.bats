@@ -1712,3 +1712,61 @@ YAML
   assert_output --partial "invalid cluster kind"
   [[ "${output}" != *"apply must not run"* ]]
 }
+
+# --- bootstrap::_restore_d (pre-bootstrap DR restore) ---
+
+@test "restore_d: no restore.d dir is a silent no-op" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev"
+  kubectl() { echo "kubectl-called" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  [ ! -f "${BATS_TEST_TMPDIR}/kubectl.log" ]
+}
+
+@test "restore_d: plaintext store working copy wins (no sops needed)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  echo "kind: Secret" > "${d}/secrets/restore.d/tls-a.yaml"
+  kubectl() { echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  sops() { echo "sops-called" >> "${BATS_TEST_TMPDIR}/sops.log"; return 1; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  grep -q "tls-a.yaml" "${BATS_TEST_TMPDIR}/kubectl.log"
+  [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
+  [[ "$output" == *"restored 1 manifest"* ]]
+}
+
+@test "restore_d: sops fallback when no plaintext working copy" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-b.sops.yaml"
+  kubectl() { cat > /dev/null; echo "applied-stdin" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  sops() { echo "kind: Secret"; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  grep -q "applied-stdin" "${BATS_TEST_TMPDIR}/kubectl.log"
+  [[ "$output" == *"restored 1 manifest"* ]]
+}
+
+@test "restore_d: decrypt failure warns and continues (never fatal)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-c.sops.yaml"
+  kubectl() { return 1; }
+  sops() { return 1; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not decrypt/apply tls-c"* ]]
+}

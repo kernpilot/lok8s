@@ -145,6 +145,13 @@ provision::load_provider_creds() {
   done
   [[ -n "${HROBOT_USER:-}" ]]     && export ROBOT_USER="${HROBOT_USER}"         HETZNER_ROBOT_USER="${HROBOT_USER}"
   [[ -n "${HROBOT_PASSWORD:-}" ]] && export ROBOT_PASSWORD="${HROBOT_PASSWORD}" HETZNER_ROBOT_PASSWORD="${HROBOT_PASSWORD}"
+  # Always succeed: the trailing `[[ -n ]] && export` is FALSE (returns 1) when
+  # the Robot creds aren't set (cloud-only provisions) — as the function's last
+  # command that would become its return value and abort the unguarded callers
+  # (provision::dispatch, recover::_resolve) under `set -e`. Harmless when this
+  # block was inline in dispatch; a landmine once extracted. Unit tests 534/581
+  # caught it.
+  return 0
 }
 
 # Dispatch provisioning to the appropriate kind contract implementation.

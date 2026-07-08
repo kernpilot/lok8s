@@ -551,3 +551,47 @@ YAML
   _resolve_kubeconfig_for_domain
   [ "${KUBECONFIG}" = "${BATS_TEST_TMPDIR}/.kubeconfig/secret.test.lok8s.dev.yaml" ]
 }
+
+# --- provision::load_provider_creds ---
+
+@test "provision::load_provider_creds returns 0 when robot creds absent (set -e regression)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD ROBOT_USER ROBOT_PASSWORD
+
+  # Pre-fix, the trailing `[[ -n HROBOT_PASSWORD ]] && export` made the function
+  # return 1 with no creds, aborting dispatch/recover under set -e.
+  run provision::load_provider_creds "test.lok8s.dev"
+  [ "$status" -eq 0 ]
+}
+
+@test "provision::load_provider_creds loads creds from the per-domain store" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  local secd="${PATH_CLUSTERS}/test.lok8s.dev/secrets"
+  mkdir -p "${secd}"
+  printf 'tok-123' > "${secd}/Secret.hetzner.provisioning.HCLOUD_TOKEN"
+  printf 'rob-usr' > "${secd}/Secret.hetzner.provisioning.HROBOT_USER"
+  printf 'rob-pwd' > "${secd}/Secret.hetzner.provisioning.HROBOT_PASSWORD"
+  unset HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD ROBOT_USER ROBOT_PASSWORD
+
+  provision::load_provider_creds "test.lok8s.dev"
+  [ "${HCLOUD_TOKEN}" = "tok-123" ]
+  [ "${ROBOT_USER}" = "rob-usr" ]
+  [ "${HETZNER_ROBOT_USER}" = "rob-usr" ]
+  [ "${ROBOT_PASSWORD}" = "rob-pwd" ]
+  [ "${HETZNER_ROBOT_PASSWORD}" = "rob-pwd" ]
+}
+
+@test "provision::load_provider_creds does not clobber preset env" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  local secd="${PATH_CLUSTERS}/test.lok8s.dev/secrets"
+  mkdir -p "${secd}"
+  printf 'store-token' > "${secd}/Secret.hetzner.provisioning.HCLOUD_TOKEN"
+  export HCLOUD_TOKEN="env-token"
+  unset HROBOT_USER HROBOT_PASSWORD ROBOT_USER ROBOT_PASSWORD
+
+  provision::load_provider_creds "test.lok8s.dev"
+  [ "${HCLOUD_TOKEN}" = "env-token" ]
+}
