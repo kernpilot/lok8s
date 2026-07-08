@@ -1742,12 +1742,14 @@ YAML
   sops() { echo "sops-called" >> "${BATS_TEST_TMPDIR}/sops.log"; return 1; }
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
+  [[ "$output" == *"restore.d — 1 applied, 0 skipped"* ]]
   # Pin the args: right kubeconfig + THIS domain's store file (not PATH_SECRETS's)
   grep -q -- "--kubeconfig ${BATS_TEST_TMPDIR}/kubeconfig" "${BATS_TEST_TMPDIR}/kubectl.log"
   grep -q "test.lok8s.dev/secrets/restore.d/tls-a.yaml" "${BATS_TEST_TMPDIR}/kubectl.log"
-  ! grep -q "other.lok8s.dev" "${BATS_TEST_TMPDIR}/kubectl.log"
   [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
-  [[ "$output" == *"restore.d — 1 applied, 0 skipped"* ]]
+  # Negative assertion via run (a bare `! grep` is inert under bats set-e)
+  run grep -q "other.lok8s.dev" "${BATS_TEST_TMPDIR}/kubectl.log"
+  [ "$status" -ne 0 ]
 }
 
 @test "restore_d: sops fallback when no plaintext working copy" {
@@ -1766,6 +1768,24 @@ YAML
   grep -q -- "--kubeconfig ${BATS_TEST_TMPDIR}/kubeconfig" "${BATS_TEST_TMPDIR}/kubectl.log"
   grep -q -- "-f -" "${BATS_TEST_TMPDIR}/kubectl.log"
   [[ "$output" == *"restore.d — 1 applied, 0 skipped"* ]]
+}
+
+@test "restore_d: sops stderr is separated — never piped into kubectl stdin" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-w.sops.yaml"
+  # sops succeeds but emits a WARNING on stderr; kubectl must receive ONLY the
+  # payload (round-1 regression: `sops 2>&1 | kubectl` mixed the warning into
+  # the YAML stream).
+  kubectl() { cat > "${BATS_TEST_TMPDIR}/kubectl.stdin"; }
+  sops() { echo "WARN: deprecated keygroup" >&2; echo "kind: Secret"; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restore.d — 1 applied, 0 skipped"* ]]
+  [ "$(cat "${BATS_TEST_TMPDIR}/kubectl.stdin")" = "kind: Secret" ]
 }
 
 @test "restore_d: decrypt failure warns and continues (never fatal)" {

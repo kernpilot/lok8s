@@ -701,17 +701,30 @@ bootstrap::_restore_d() {
         debug "bootstrap: restore.d applied ${base} (store working copy)"
         continue
       fi
-      debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err}"
+      debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err%%$'\n'*}"
     fi
-    if _err="$(sops -d "${f}" 2>&1 \
-      | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
-      applied=$(( applied + 1 ))
-      debug "bootstrap: restore.d applied ${base} (sops)"
+    # Decrypt and apply as SEPARATE steps with separate stderr: piping
+    # `sops 2>&1 | kubectl` would inject sops warnings into kubectl's stdin
+    # (corrupting the YAML) and _err would only ever see kubectl's stderr.
+    local _dec="" _serr
+    _serr="$(mktemp)"
+    if _dec="$(sops -d "${f}" 2>"${_serr}")"; then
+      if _err="$(printf '%s\n' "${_dec}" \
+        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
+        applied=$(( applied + 1 ))
+        debug "bootstrap: restore.d applied ${base} (sops)"
+      else
+        skipped=$(( skipped + 1 ))
+        # First line only — kubectl errors can quote input fragments.
+        debug "bootstrap: restore.d ${base} apply failed: ${_err%%$'\n'*}"
+        warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
+      fi
     else
       skipped=$(( skipped + 1 ))
-      debug "bootstrap: restore.d ${base} failed: ${_err}"
+      debug "bootstrap: restore.d ${base} decrypt failed: $(head -n1 "${_serr}" 2>/dev/null)"
       warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
     fi
+    rm -f "${_serr}"
   done
   (( applied == 0 && skipped == 0 )) \
     || printf '\033[32m✓\033[0m bootstrap: restore.d — %d applied, %d skipped\n' "${applied}" "${skipped}" >&2
