@@ -138,6 +138,12 @@ recover::_run() {
 recover::_resolve() {
   provision::resolve_spec "${_RECOVER_DOMAIN}" || return 1
 
+  # Load provider creds NOW — the bare-metal provider::doctor + provider::rebuild
+  # phases (which run BEFORE provision) need HCLOUD_TOKEN/HROBOT_* to resolve node
+  # IPs. provision::dispatch loads them itself, but only after rebuild — too late
+  # for recover, whose dry-run otherwise aborts "no resolvable public IP".
+  provision::load_provider_creds "${_RECOVER_DOMAIN}"
+
   if [[ "${LOK8S_SPEC_KIND:-}" != "cluster" ]]; then
     error "recover: '${_RECOVER_DOMAIN}' is not a cluster domain (kind=${LOK8S_SPEC_KIND:-none}) — recover rebuilds a cluster from bare metal; a deploy domain has nothing to reset"
     return 1
