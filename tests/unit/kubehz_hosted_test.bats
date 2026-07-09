@@ -275,6 +275,59 @@ clusters:
   assert_output --partial "/api/capacity"
 }
 
+@test "provision_hosted: splits status from a MULTI-LINE (pretty-printed) JSON body" {
+  if ! command -v jq &>/dev/null; then skip "jq not available"; fi
+
+  # A pretty-printed 503 body — every field on its own line, then the trailing
+  # %{http_code} line. Locks in the newline-split: http_code must be the LAST
+  # line and the body must keep ALL its interior newlines.
+  curl() {
+    case "$*" in
+      *POST*api/clusters*)
+        printf '%s\n%s\n' \
+'{
+  "ok": false,
+  "data": {
+    "code": "AT_CAPACITY",
+    "message": "at capacity",
+    "detail": {
+      "tier": "starter",
+      "used": 20,
+      "limit": 20,
+      "retryAfter": 1800
+    }
+  }
+}' \
+          '503'
+        ;;
+      *) printf '%s\n%s\n' '{}' '200' ;;
+    esac
+  }
+  export -f curl
+
+  yq() {
+    case "$2" in
+      '.spec.cluster.domain') echo "test.kubehz.dev" ;;
+      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.controlPlane.replicas // 1') echo "1" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::provision_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  # The multi-line body parsed correctly → the capacity envelope rendered.
+  assert_output --partial "at capacity for the 'starter' plan"
+  assert_output --partial "20/20"
+}
+
 @test "provision_hosted: surfaces the api message on a non-capacity error status" {
   if ! command -v jq &>/dev/null; then skip "jq not available"; fi
 
