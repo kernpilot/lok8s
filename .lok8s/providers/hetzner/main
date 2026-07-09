@@ -41,6 +41,45 @@ source "${_HETZNER_DIR}/utils/resources.sh"
 
 _cfg() { yq -r "$1" "${PROVIDER_CONFIG_FILE}"; }
 
+# _validate_node_labels <labels-json> [<node-name>]
+# Light k8s-label validity guard: drop any key/value that violates the
+# Kubernetes label constraints and warn, so a bad label fails EARLY here
+# (clear message, keeps provisioning) instead of late inside `kubeone apply`
+# (opaque kubeadm/labelNodes error). Rules enforced (k8s syntax):
+#   value: <=63 chars, empty OR [alnum]([alnum._-]*[alnum])?
+#   key:   optional "<dns-subdomain>/" prefix (<=253) + name segment
+#          <=63 chars matching [alnum]([alnum._-]*[alnum])?
+# Echoes the filtered labels JSON map. Proportionate: skip+warn, not fatal.
+_validate_node_labels() {
+  local labels_json="${1:-'{}'}" node="${2:-node}"
+  local dropped
+  dropped=$(echo "${labels_json}" | jq -r '
+    def valid_seg: test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
+    def valid_value: . == "" or test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
+    def valid_key:
+      (. | split("/")) as $p
+      | (if ($p | length) == 1 then ($p[0] | valid_seg)
+         elif ($p | length) == 2 then (($p[0] | length) <= 253 and ($p[0] | test("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")) and ($p[1] | valid_seg))
+         else false end);
+    to_entries[] | select((.key | valid_key | not) or (.value | valid_value | not)) | .key' 2>/dev/null)
+  if [[ -n "${dropped}" ]]; then
+    local k
+    while IFS= read -r k; do
+      [[ -n "${k}" ]] || continue
+      warn "node ${node}: dropping invalid k8s label '${k}' (violates key/value syntax or 63-char limit)"
+    done <<< "${dropped}"
+  fi
+  echo "${labels_json}" | jq -c '
+    def valid_seg: test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
+    def valid_value: . == "" or test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
+    def valid_key:
+      (. | split("/")) as $p
+      | (if ($p | length) == 1 then ($p[0] | valid_seg)
+         elif ($p | length) == 2 then (($p[0] | length) <= 253 and ($p[0] | test("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")) and ($p[1] | valid_seg))
+         else false end);
+    with_entries(select((.key | valid_key) and (.value | valid_value)))'
+}
+
 # shellcheck disable=SC2120 # optional config arg; the sole caller invokes it arg-less
 provider::validate() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
@@ -234,12 +273,20 @@ provider::output() {
     priv_ip=$(echo "${server}" | jq -r '.private_net[0].ip // .public_net.ipv4.ip')
     role=$(echo "${server}" | jq -r '.labels["lok8s.dev/role"] // "worker"')
     group=$(echo "${server}" | jq -r '.labels["lok8s.dev/group"] // "default"')
+    # Node labels to stamp on the k8s Node (via kubeone labelNodes). Carry every
+    # hcloud server label EXCEPT the lok8s.dev/{cluster,role,group} orchestration
+    # keys (those select infra, they are not node taxonomy). This is how the
+    # tier.kubehz.cloud/* + capability.* + role.kubehz.cloud/platform taxonomy
+    # reaches the Node.
+    local node_labels
+    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"])')
+    node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
     nodes=$(echo "${nodes}" | jq \
       --arg name "${name}" --arg role "${role}" --arg group "${group}" \
       --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
-      --arg user "${ssh_user}" \
-      '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "default", "ssh_user": $user, "ssh_port": 22}]')
+      --arg user "${ssh_user}" --argjson labels "${node_labels}" \
+      '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "default", "ssh_user": $user, "ssh_port": 22, "labels": $labels}]')
   done < <(echo "${servers_json}" | jq -c '.[]')
 
   # Bare metal servers from JSON descriptor (#cloud.root with #external-ip)
@@ -257,12 +304,27 @@ provider::output() {
       role="worker"
       group="dedicated"
       [[ "${labels}" != *"role=control-plane"* ]] || role="control-plane"
+      # Parse the comma-separated "k=v,k=v" #labels string into a node-label map,
+      # dropping the lok8s.dev/{cluster,role,group} orchestration keys (same rule
+      # as the cloud-VM path). Also drop the bare `role` key: `role=control-plane`
+      # is an orchestration SELECTOR consumed above to set the node role — it is
+      # not node taxonomy and must not survive as a Node label. Everything else —
+      # the tier.kubehz.cloud/*, capability.*, role.kubehz.cloud/platform taxonomy
+      # — becomes a Node label kubeone stamps on provision AND recover.
+      # split("=") then rejoin .[1:] so a value that itself contains "=" (e.g.
+      # base64 padding, k=a=b) is preserved intact instead of truncated at the
+      # first "=". select((.[0]|length) > 0) drops a leading "=" / empty key
+      # ("=orphan") which would otherwise emit a "" label key.
+      local node_labels
+      node_labels=$(echo "${labels}" | jq -R -c 'split(",") | map(select(length>0) | split("=") | select((.[0]|length) > 0) | {(.[0]): (.[1:]|join("="))}) | add // {}
+        | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"], .["role"])')
+      node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
       nodes=$(echo "${nodes}" | jq \
         --arg name "${name}" --arg role "${role}" --arg group "${group}" \
         --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
-        --arg user "${ssh_user}" \
-        '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "dedicated", "ssh_user": $user, "ssh_port": 22}]')
+        --arg user "${ssh_user}" --argjson labels "${node_labels}" \
+        '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "dedicated", "ssh_user": $user, "ssh_port": 22, "labels": $labels}]')
     done < <(echo "${_desc}" | jq -c '.server[]? | select(.["#cloud.root"] == "true")')
   fi
 
