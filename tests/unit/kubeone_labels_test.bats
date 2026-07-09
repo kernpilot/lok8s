@@ -14,8 +14,12 @@ setup() {
   load "../test_helper"
   setup_tmpdir
 
-  command -v jq &>/dev/null || skip "jq required"
-  command -v yq &>/dev/null || skip "yq required"
+  # FAIL-HARD (not skip) if jq/yq are missing: these tests exercise the label
+  # RENDER/PARSE path and are worthless without them. A silent skip would ship
+  # a false-green suite ("1..N ok" that validated nothing). Run via
+  # `PATH_BIN=$PWD/.bin ./.bin/argsh test …` (CI does; mounts the b toolchain).
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run tests with PATH_BIN=\$PWD/.bin (mounts the b toolchain)" >&2; return 1; }
+  command -v yq &>/dev/null || { echo "FATAL: yq required — run tests with PATH_BIN=\$PWD/.bin (mounts the b toolchain)" >&2; return 1; }
 
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
 
@@ -48,7 +52,9 @@ _stub_output() {
     {"name": "cp-0", "role": "control-plane", "public_ip": "192.0.2.1", "private_ip": "10.0.1.1", "ssh_user": "root", "ssh_port": 22, "labels": {}},
     {"name": "w-0", "role": "worker", "public_ip": "192.0.2.10", "private_ip": "10.0.1.10", "ssh_user": "root", "ssh_port": 22,
      "labels": {"tier.kubehz.cloud/free": "true", "tier.kubehz.cloud/pro": "true", "capability.kubehz.cloud/monitoring": "true", "role.kubehz.cloud/platform": "true"}},
-    {"name": "w-1", "role": "worker", "public_ip": "192.0.2.11", "private_ip": "10.0.1.11", "ssh_user": "root", "ssh_port": 22, "labels": {}}
+    {"name": "w-1", "role": "worker", "public_ip": "192.0.2.11", "private_ip": "10.0.1.11", "ssh_user": "root", "ssh_port": 22, "labels": {}},
+    {"name": "w-evil", "role": "worker", "public_ip": "192.0.2.12", "private_ip": "10.0.1.12", "ssh_user": "root", "ssh_port": 22,
+     "labels": {"x.kubehz.cloud/inject": "a\"\n      role: control-plane\n      # b"}}
   ],
   "network": {"id": "", "name": "", "cidr": ""}
 }
@@ -111,5 +117,24 @@ YAML
   manifest=$(_render)
   run yq -e '.staticWorkers.hosts | length' "${manifest}"
   assert_success
-  assert_output "2"
+  assert_output "3"
+}
+
+@test "YAML injection: a value with a quote+newline stays a single escaped scalar (no manifest break)" {
+  manifest=$(_render)
+  # The whole manifest must still parse — a raw "\(.value)" interpolation would
+  # break YAML here (the embedded `role: control-plane` / newline would smuggle
+  # in structure). @json keeps it one escaped scalar.
+  run yq -e '.staticWorkers.hosts | length' "${manifest}"
+  assert_success
+  assert_output "3"
+  # The malicious value round-trips VERBATIM as the label value, not as injected
+  # YAML structure: the literal string (quote + newline + would-be keys) is the
+  # value of x.kubehz.cloud/inject and nothing more.
+  run yq -o json '.staticWorkers.hosts[] | select(.hostname == "w-evil") | .labels["x.kubehz.cloud/inject"]' "${manifest}"
+  assert_success
+  assert_output $'"a\\"\\n      role: control-plane\\n      # b"'
+  # And the injected text did NOT become a real key on the host.
+  run yq -r '.staticWorkers.hosts[] | select(.hostname == "w-evil") | has("role")' "${manifest}"
+  assert_output "false"
 }
