@@ -92,13 +92,29 @@ kubehz::render_capacity_rejection() {
   local usage=""
   [[ -n "${used}" && -n "${limit}" ]] && usage=" (currently ${used}/${limit})"
 
+  # Humanize the raw retryAfter seconds into a friendlier "~N min" / "~Ns" so
+  # the operator doesn't have to divide by 60 in their head. Non-numeric / empty
+  # -> no hint line at all.
+  local retry_hint=""
+  if [[ "${retry}" =~ ^[0-9]+$ ]]; then
+    if (( retry >= 60 )); then
+      retry_hint="~$(( (retry + 30) / 60 )) min"
+    else
+      retry_hint="~${retry}s"
+    fi
+  fi
+
   error "kubehz: the platform is at capacity for the '${tier}' plan right now${usage}."
   echo "  The hosted control-plane pool for this plan is full. You can:" >&2
   echo "    • retry later — capacity frees as clusters are torn down" >&2
-  [[ -n "${retry}" ]] && echo "    • suggested wait: ~${retry}s" >&2
-  echo "    • choose a different plan (spec.kubehz.plan)" >&2
+  [[ -n "${retry_hint}" ]] && echo "    • suggested wait: ${retry_hint}" >&2
+  # NOTE: the tier is chosen server-side (kubehz-api), not via a lok8s spec field
+  # — there is no spec.kubehz.plan. Point at the real levers instead: check live
+  # per-plan availability, or run self-hosted (spec.kubehz.hosting: self) now.
+  echo "    • check live per-plan availability and retry when a slot opens:" >&2
+  echo "        ${LOK8S_KUBEHZ_API_URL}/api/capacity" >&2
   echo "    • run a self-hosted cluster meanwhile (spec.kubehz.hosting: self)" >&2
-  echo "  Live availability per plan: ${LOK8S_KUBEHZ_API_URL}/api/capacity" >&2
+  echo "    • still stuck? contact kubehz support with the tier + time above" >&2
 }
 
 # Provision a cluster via the kubehz hosted API.

@@ -233,7 +233,10 @@ clusters:
 # ── provision_hosted: capacity rejection (the "max mechanism") ───────────
 
 @test "provision_hosted: renders a friendly capacity envelope on 503 AT_CAPACITY" {
-  if ! command -v jq &>/dev/null; then skip "jq not available"; fi
+  # FAIL-HARD (not skip) if jq is absent: this test parses the envelope and is
+  # worthless without it. A silent skip would ship a false-green suite. Run via
+  # PATH_BIN=$PWD/.bin ./.bin/argsh test … (CI mounts the b toolchain).
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
 
   # curl returns the enveloped 503 body + a trailing HTTP status line (the -w
   # format the real client uses), so the client can split the two.
@@ -273,10 +276,15 @@ clusters:
   assert_output --partial "40/40"
   assert_output --partial "hosting: self"
   assert_output --partial "/api/capacity"
+  # retryAfter 3600 is humanized to "~60 min" (not the raw "~3600s").
+  assert_output --partial "~60 min"
+  refute_output --partial "~3600s"
+  # The remedy must NOT advise a non-existent spec.kubehz.plan field.
+  refute_output --partial "spec.kubehz.plan"
 }
 
 @test "provision_hosted: splits status from a MULTI-LINE (pretty-printed) JSON body" {
-  if ! command -v jq &>/dev/null; then skip "jq not available"; fi
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
 
   # A pretty-printed 503 body — every field on its own line, then the trailing
   # %{http_code} line. Locks in the newline-split: http_code must be the LAST
@@ -326,6 +334,28 @@ clusters:
   # The multi-line body parsed correctly → the capacity envelope rendered.
   assert_output --partial "at capacity for the 'starter' plan"
   assert_output --partial "20/20"
+  # retryAfter 1800 humanizes to ~30 min.
+  assert_output --partial "~30 min"
+}
+
+@test "render_capacity_rejection: a sub-60s retryAfter stays in seconds (~Ns)" {
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  run kubehz::render_capacity_rejection '{"data":{"detail":{"tier":"dev","used":3,"limit":3,"retryAfter":45}}}'
+  assert_output --partial "~45s"
+  refute_output --partial "min"
+}
+
+@test "render_capacity_rejection: a missing/non-numeric retryAfter emits no wait hint" {
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  run kubehz::render_capacity_rejection '{"data":{"detail":{"tier":"dev"}}}'
+  assert_output --partial "at capacity for the 'dev' plan"
+  refute_output --partial "suggested wait"
+  # And still never advises the phantom spec.kubehz.plan field.
+  refute_output --partial "spec.kubehz.plan"
 }
 
 @test "provision_hosted: surfaces the api message on a non-capacity error status" {
