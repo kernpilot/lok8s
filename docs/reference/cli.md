@@ -94,7 +94,7 @@ Reads `spec.bootstrap` from the cluster spec and applies each addon in order. Us
 Render the domain kustomization into one artifact.
 
 ```bash
-lo build [domain]
+lo build [--domain <domain>] [--cluster-override <domain>]
 ```
 
 Runs `kustomize build --enable-alpha-plugins` on the domain's own kustomization (`clusters/<domain>/kustomization.yaml`) and writes ONE `clusters/<domain>/artifacts.yaml`. The domain kustomization composes the targets it wants, in order — local and shared:
@@ -113,7 +113,7 @@ A referenced target that does not exist is a clear `kustomize build` error. Ther
 Deploy the domain artifact to a cluster.
 
 ```bash
-lo deploy [-l|--label key=value] [domain]
+lo deploy [--domain <domain>] [-l|--label key=value]
 ```
 
 Applies the single `clusters/<domain>/artifacts.yaml`: CRDs first (server-side apply + wait for Established), then the rest (server-side apply + a scoped wait for the manifest's own workloads to become ready). Run `lo build` first.

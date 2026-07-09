@@ -241,7 +241,11 @@ main::up() {
     return
   fi
 
-  tilt::up && (( open_tilt )) && {
+  tilt::up
+  # NOTE: not `tilt::up && (( open_tilt )) && {…}` — with --open unset the
+  # arithmetic evaluates 0 as the function's LAST command, so a successful
+  # interactive `lo up` exited 1 (review find, 2026-07-09).
+  if (( open_tilt )); then
     local _port
     _port=$(tilt::port)
     if command -v xdg-open &>/dev/null; then
@@ -251,7 +255,7 @@ main::up() {
     else
       echo "Tilt UI: http://localhost:${_port}"
     fi
-  }
+  fi
 }
 
 main::down() {
@@ -265,7 +269,12 @@ main::down() {
   [[ -f "${_spec}" ]] && _kind=$(yq -r '.kind' "${_spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
   if [[ -n "${_kind}" && "${_kind}" != "lo" ]]; then
     printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${_kind}"
-    provision::dispatch_destroy "${DOMAIN_NAME}" || true
+    # A failed driver destroy means infrastructure may be ORPHANED (and billed)
+    # — that must be a visible non-zero exit, never a silent success.
+    if ! provision::dispatch_destroy "${DOMAIN_NAME}"; then
+      printf '  \033[31m✗ driver destroy failed — infrastructure may still exist; inspect and re-run\033[0m\n'
+      return 1
+    fi
     printf '\n'
     return
   fi
