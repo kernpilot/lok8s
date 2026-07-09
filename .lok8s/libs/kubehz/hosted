@@ -71,6 +71,32 @@ kubehz::wait_for_cluster() {
   return 1
 }
 
+# Render a friendly, human-readable message for a capacity rejection (the
+# kubehz-api "max mechanism": POST /api/clusters answers 503 AT_CAPACITY when the
+# hosted control-plane pool for the requested plan is full). The api error body
+# carries a structured `data.detail` { tier, used, limit, retryAfter } — surface
+# it plainly so the operator knows WHY and WHAT to do, not a bare "request failed".
+# Usage: kubehz::render_capacity_rejection <domain> <error_body_json>
+kubehz::render_capacity_rejection() {
+  local domain="$1" body="$2"
+  local tier used limit retry
+  tier=$(echo "${body}" | jq -r '.data.detail.tier // .detail.tier // "this plan"' 2>/dev/null) || tier="this plan"
+  used=$(echo "${body}" | jq -r '.data.detail.used // .detail.used // empty' 2>/dev/null) || used=""
+  limit=$(echo "${body}" | jq -r '.data.detail.limit // .detail.limit // empty' 2>/dev/null) || limit=""
+  retry=$(echo "${body}" | jq -r '.data.detail.retryAfter // .detail.retryAfter // empty' 2>/dev/null) || retry=""
+
+  local usage=""
+  [[ -n "${used}" && -n "${limit}" ]] && usage=" (currently ${used}/${limit})"
+
+  error "kubehz: the platform is at capacity for the '${tier}' plan right now${usage}."
+  echo "  The hosted control-plane pool for this plan is full. You can:" >&2
+  echo "    • retry later — capacity frees as clusters are torn down" >&2
+  [[ -n "${retry}" ]] && echo "    • suggested wait: ~${retry}s" >&2
+  echo "    • choose a different plan (spec.kubehz.plan)" >&2
+  echo "    • run a self-hosted cluster meanwhile (spec.kubehz.hosting: self)" >&2
+  echo "  Live availability per plan: ${api_url:-${LOK8S_KUBEHZ_API_URL}}/api/capacity" >&2
+}
+
 # Provision a cluster via the kubehz hosted API.
 # Creates the cluster, waits for it, and downloads the kubeconfig.
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
@@ -83,17 +109,38 @@ kubehz::provision_hosted() {
 
   debug "Creating hosted cluster for ${domain}"
 
-  local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters" \
+  # Capture BOTH the response body and the HTTP status. We deliberately drop
+  # curl's -f (fail-silently-on-HTTP-error) here so a 503 AT_CAPACITY body is
+  # available to render — the capacity envelope is the whole point. The status is
+  # appended on its own trailing line via -w and split off.
+  local raw response http_code
+  raw=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
     -d "${payload}") || {
-    error "Failed to create hosted cluster via kubehz API"
+    error "Failed to create hosted cluster via kubehz API (network error)"
     return 1
   }
+  http_code="${raw##*$'\n'}"
+  response="${raw%$'\n'*}"
+
+  # Capacity rejection (the "max mechanism"): a structured 503 AT_CAPACITY.
+  if [[ "${http_code}" == "503" ]] \
+    && echo "${response}" | jq -e '(.data.code // .code) == "AT_CAPACITY"' >/dev/null 2>&1; then
+    kubehz::render_capacity_rejection "${domain}" "${response}"
+    return 1
+  fi
+
+  # Any other non-2xx: surface the api's own message when it carries one.
+  if [[ "${http_code}" != 2* ]]; then
+    local msg
+    msg=$(echo "${response}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
+    error "Failed to create hosted cluster via kubehz API (HTTP ${http_code})${msg:+: ${msg}}"
+    return 1
+  fi
 
   local cluster_id
-  cluster_id=$(echo "${response}" | jq -r '.id')
+  cluster_id=$(echo "${response}" | jq -r '.data.id // .id')
 
   if [[ -z "${cluster_id}" || "${cluster_id}" == "null" ]]; then
     error "kubehz API did not return a cluster ID"
