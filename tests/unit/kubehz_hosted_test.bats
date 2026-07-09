@@ -140,7 +140,8 @@ teardown() {
     _curl_calls+=("$*")
     case "$*" in
       *POST*api/clusters*)
-        echo '{"id":"cl-hosted-001","status":"Creating"}'
+        # Enveloped create (UI route) + the trailing HTTP-status line (-w).
+        printf '%s\n%s\n' '{"ok":true,"data":{"id":"cl-hosted-001","status":"Creating"}}' '201'
         ;;
       *api/clusters/cl-hosted-001/kubeconfig*)
         echo "apiVersion: v1
@@ -160,6 +161,9 @@ clusters:
 
   jq() {
     case "$*" in
+      # The AT_CAPACITY guard's `jq -e` probe — return non-zero (not a capacity error).
+      *AT_CAPACITY*) return 1 ;;
+      *'.data.id // .id'*) echo "cl-hosted-001" ;;
       *'.id'*) echo "cl-hosted-001" ;;
       *'.status'*) echo "Running" ;;
       *-n*) echo '{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"v1.31.10","controlPlaneReplicas":1}' ;;
@@ -196,12 +200,15 @@ clusters:
 
 @test "provision_hosted: fails when API returns no cluster ID" {
   curl() {
-    echo '{"error":"bad request"}'
+    # A 200 whose body carries no id, plus the trailing status line.
+    printf '%s\n%s\n' '{"ok":true,"data":{}}' '200'
   }
   export -f curl
 
   jq() {
     case "$*" in
+      *AT_CAPACITY*) return 1 ;;
+      *'.data.id // .id'*) echo "null" ;;
       *'.id'*) echo "null" ;;
       *-n*) echo '{"domain":"x"}' ;;
       *) echo "" ;;
@@ -221,6 +228,171 @@ clusters:
   run kubehz::provision_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_failure
   assert_output --partial "did not return a cluster ID"
+}
+
+# ── provision_hosted: capacity rejection (the "max mechanism") ───────────
+
+@test "provision_hosted: renders a friendly capacity envelope on 503 AT_CAPACITY" {
+  # FAIL-HARD (not skip) if jq is absent: this test parses the envelope and is
+  # worthless without it. A silent skip would ship a false-green suite. Run via
+  # PATH_BIN=$PWD/.bin ./.bin/argsh test … (CI mounts the b toolchain).
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
+
+  # curl returns the enveloped 503 body + a trailing HTTP status line (the -w
+  # format the real client uses), so the client can split the two.
+  curl() {
+    case "$*" in
+      *POST*api/clusters*)
+        printf '%s\n%s\n' \
+          '{"ok":false,"data":{"code":"AT_CAPACITY","message":"at capacity","detail":{"tier":"dev","used":40,"limit":40,"retryAfter":3600}}}' \
+          '503'
+        ;;
+      *) printf '%s\n%s\n' '{}' '200' ;;
+    esac
+  }
+  export -f curl
+
+  yq() {
+    case "$2" in
+      '.spec.cluster.domain') echo "test.kubehz.dev" ;;
+      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.controlPlane.replicas // 1') echo "1" ;;
+      '.spec.provider // "hetzner"') echo "hetzner" ;;
+      '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::provision_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "at capacity for the 'dev' plan"
+  assert_output --partial "40/40"
+  assert_output --partial "hosting: self"
+  assert_output --partial "/api/capacity"
+  # retryAfter 3600 is humanized to "~60 min" (not the raw "~3600s").
+  assert_output --partial "~60 min"
+  refute_output --partial "~3600s"
+  # The remedy must NOT advise a non-existent spec.kubehz.plan field.
+  refute_output --partial "spec.kubehz.plan"
+}
+
+@test "provision_hosted: splits status from a MULTI-LINE (pretty-printed) JSON body" {
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
+
+  # A pretty-printed 503 body — every field on its own line, then the trailing
+  # %{http_code} line. Locks in the newline-split: http_code must be the LAST
+  # line and the body must keep ALL its interior newlines.
+  curl() {
+    case "$*" in
+      *POST*api/clusters*)
+        printf '%s\n%s\n' \
+'{
+  "ok": false,
+  "data": {
+    "code": "AT_CAPACITY",
+    "message": "at capacity",
+    "detail": {
+      "tier": "starter",
+      "used": 20,
+      "limit": 20,
+      "retryAfter": 1800
+    }
+  }
+}' \
+          '503'
+        ;;
+      *) printf '%s\n%s\n' '{}' '200' ;;
+    esac
+  }
+  export -f curl
+
+  yq() {
+    case "$2" in
+      '.spec.cluster.domain') echo "test.kubehz.dev" ;;
+      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.controlPlane.replicas // 1') echo "1" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::provision_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  # The multi-line body parsed correctly → the capacity envelope rendered.
+  assert_output --partial "at capacity for the 'starter' plan"
+  assert_output --partial "20/20"
+  # retryAfter 1800 humanizes to ~30 min.
+  assert_output --partial "~30 min"
+}
+
+@test "render_capacity_rejection: a sub-60s retryAfter stays in seconds (~Ns)" {
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  run kubehz::render_capacity_rejection '{"data":{"detail":{"tier":"dev","used":3,"limit":3,"retryAfter":45}}}'
+  assert_output --partial "~45s"
+  refute_output --partial "min"
+}
+
+@test "render_capacity_rejection: a missing/non-numeric retryAfter emits no wait hint" {
+  command -v jq &>/dev/null || { echo "FATAL: jq required — run with PATH_BIN=\$PWD/.bin" >&2; return 1; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  run kubehz::render_capacity_rejection '{"data":{"detail":{"tier":"dev"}}}'
+  assert_output --partial "at capacity for the 'dev' plan"
+  refute_output --partial "suggested wait"
+  # And still never advises the phantom spec.kubehz.plan field.
+  refute_output --partial "spec.kubehz.plan"
+}
+
+@test "provision_hosted: surfaces the api message on a non-capacity error status" {
+  if ! command -v jq &>/dev/null; then skip "jq not available"; fi
+
+  curl() {
+    case "$*" in
+      *POST*api/clusters*)
+        printf '%s\n%s\n' \
+          '{"ok":false,"data":{"code":"HOSTED_BACKEND_ERROR","message":"Failed to schedule the hosted control plane"}}' \
+          '502'
+        ;;
+      *) printf '%s\n%s\n' '{}' '200' ;;
+    esac
+  }
+  export -f curl
+
+  yq() {
+    case "$2" in
+      '.spec.cluster.domain') echo "test.kubehz.dev" ;;
+      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.controlPlane.replicas // 1') echo "1" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::provision_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "HTTP 502"
+  assert_output --partial "Failed to schedule the hosted control plane"
 }
 
 # ── destroy_hosted ───────────────────────────────────────
