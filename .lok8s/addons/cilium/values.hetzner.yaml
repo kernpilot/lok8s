@@ -11,6 +11,14 @@ ipam:
     clusterPoolIPv4PodCIDRList:
       - 10.244.0.0/16
     clusterPoolIPv4ServiceCIDR: 10.96.0.0/12
-    clusterPoolIPv4MaskSize: 24
+    # /23 per node (~510 pod IPs) — /24 (~254) was the hard ceiling on
+    # hosted-CP density: the operator packs the busiest worker until Cilium
+    # returns postIpamFailure "range is full". The pod CIDR is a /16 (65 536
+    # IPs); even 7×/23 = 3 584 leaves huge headroom. Bumping the mask does NOT
+    # resize existing CiliumNode /24 blocks — the operator only hands out the
+    # new mask when it (re)allocates a fresh block, i.e. after the node's
+    # CiliumNode CR is deleted+recreated (rolling drain / node replace). Safe
+    # to run mixed masks meanwhile (the pool allocator tracks CIDRs, no overlap).
+    clusterPoolIPv4MaskSize: 23
 
 routingMode: tunnel
