@@ -218,10 +218,16 @@ _append_inventory() {
   # (bigger reservations, higher maxPods). readOnlyPort:0 disables the
   # insecure kubelet read-only port.
   local host_body='    - publicAddress: \"\(.public_ip)\"\n      privateAddress: \"\(.private_ip)\"\n      sshUsername: \"\(.ssh_user)\"\n      sshPort: \(.ssh_port)\n      sshPrivateKeyFile: \"\($key)\"\n      hostname: \"\(.name)\"'
+  # Node labels block: kubeone's HostConfig.labels (map[string]string) is synced
+  # to Node labels by the labelNodes task (pkg/tasks/nodes.go:109) on both `lo up`
+  # AND `lo recover` — this is how the tier.kubehz.cloud/* taxonomy from
+  # hetzner.json #labels reaches (and survives on) the Node. Empty map -> no block.
+  # Sorted (to_entries|sort) so the rendered manifest is deterministic.
+  local host_labels='\((.labels // {}) | if length > 0 then "\n      labels:" + (to_entries | sort_by(.key) | map("\n        \"\(.key)\": \"\(.value)\"") | join("")) else "" end)'
   local cp_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        kubeReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        evictionHard:\n          memory.available: \"500Mi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 110'
   local worker_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        kubeReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        evictionHard:\n          memory.available: \"1Gi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 250'
-  local cp_tmpl="\"${host_body}${cp_kubelet}\""
-  local worker_tmpl="\"${host_body}${worker_kubelet}\""
+  local cp_tmpl="\"${host_body}${host_labels}${cp_kubelet}\""
+  local worker_tmpl="\"${host_body}${host_labels}${worker_kubelet}\""
 
   {
     echo ""

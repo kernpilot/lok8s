@@ -234,12 +234,19 @@ provider::output() {
     priv_ip=$(echo "${server}" | jq -r '.private_net[0].ip // .public_net.ipv4.ip')
     role=$(echo "${server}" | jq -r '.labels["lok8s.dev/role"] // "worker"')
     group=$(echo "${server}" | jq -r '.labels["lok8s.dev/group"] // "default"')
+    # Node labels to stamp on the k8s Node (via kubeone labelNodes). Carry every
+    # hcloud server label EXCEPT the lok8s.dev/{cluster,role,group} orchestration
+    # keys (those select infra, they are not node taxonomy). This is how the
+    # tier.kubehz.cloud/* + capability.* + role.kubehz.cloud/platform taxonomy
+    # reaches the Node.
+    local node_labels
+    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"])')
 
     nodes=$(echo "${nodes}" | jq \
       --arg name "${name}" --arg role "${role}" --arg group "${group}" \
       --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
-      --arg user "${ssh_user}" \
-      '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "default", "ssh_user": $user, "ssh_port": 22}]')
+      --arg user "${ssh_user}" --argjson labels "${node_labels}" \
+      '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "default", "ssh_user": $user, "ssh_port": 22, "labels": $labels}]')
   done < <(echo "${servers_json}" | jq -c '.[]')
 
   # Bare metal servers from JSON descriptor (#cloud.root with #external-ip)
@@ -257,12 +264,20 @@ provider::output() {
       role="worker"
       group="dedicated"
       [[ "${labels}" != *"role=control-plane"* ]] || role="control-plane"
+      # Parse the comma-separated "k=v,k=v" #labels string into a node-label map,
+      # dropping the lok8s.dev/{cluster,role,group} orchestration keys (same rule
+      # as the cloud-VM path). Everything else — the tier.kubehz.cloud/*,
+      # capability.*, role.kubehz.cloud/platform taxonomy — becomes a Node label
+      # kubeone stamps on provision AND recover.
+      local node_labels
+      node_labels=$(echo "${labels}" | jq -R -c 'split(",") | map(select(length>0) | split("=") | {(.[0]): (.[1] // "")}) | add // {}
+        | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"])')
 
       nodes=$(echo "${nodes}" | jq \
         --arg name "${name}" --arg role "${role}" --arg group "${group}" \
         --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
-        --arg user "${ssh_user}" \
-        '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "dedicated", "ssh_user": $user, "ssh_port": 22}]')
+        --arg user "${ssh_user}" --argjson labels "${node_labels}" \
+        '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "dedicated", "ssh_user": $user, "ssh_port": 22, "labels": $labels}]')
     done < <(echo "${_desc}" | jq -c '.server[]? | select(.["#cloud.root"] == "true")')
   fi
 
