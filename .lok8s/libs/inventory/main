@@ -64,7 +64,7 @@ inventory::_now() {
 # the addons helpers. Only entry NAMES + version/category metadata are
 # emitted — inline values/env never leave this function.
 inventory::build_json() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   [[ -f "${cluster_yaml}" ]] || { error "inventory: cluster spec not found: ${cluster_yaml}"; return 1; }
 
   local kind provider k8s_version lok8s_version spec_hash rendered_at
@@ -96,9 +96,9 @@ inventory::build_json() {
       # inventory (review #52 round 1). Log only the entry's NAME/key: map-form
       # entries carry inline values/env, which must not reach (CI-captured)
       # logs from this path (round 2, both reviewers).
-      local _key
-      _key=$(jq -r 'if type == "object" then (keys[0] // "?") else tostring end' <<<"${e}" 2>/dev/null) || _key="?"
-      warn "inventory: skipping unparseable bootstrap entry '${_key}'"
+      local key
+      key=$(jq -r 'if type == "object" then (keys[0] // "?") else tostring end' <<<"${e}" 2>/dev/null) || key="?"
+      warn "inventory: skipping unparseable bootstrap entry '${key}'"
       continue
     }
     local src="target" chart_version category
@@ -143,7 +143,7 @@ inventory::build_json() {
 # provision/deploy. Skips cleanly when there is no cluster spec (deploy
 # domains) or no reachable cluster.
 inventory::publish() {
-  local domain="$1" cluster_yaml="$2" kubeconfig="$3"
+  local domain="${1}" cluster_yaml="${2}" kubeconfig="${3}"
 
   # Deploy domains (and anything else without its own cluster.lok8s.yaml)
   # have no inventory of their own — the referenced cluster's inventory is

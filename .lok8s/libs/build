@@ -28,27 +28,27 @@ main::build() {
 # exist yet for a deploy domain (resolved secret not fetched). MUST be called
 # directly (not in a subshell) so the exports persist for the envsubst whitelist.
 build::_resolve_api() {
-  local domain_dir="$1"
-  local _kcfg="${KUBECONFIG:-}"
-  if [[ -z "${_kcfg}" || ! -f "${_kcfg}" ]]; then
+  local domain_dir="${1}"
+  local kubeconfig="${KUBECONFIG:-}"
+  if [[ -z "${kubeconfig}" || ! -f "${kubeconfig}" ]]; then
     # Deploy domains (deploy.lok8s.yaml + clusterRef) have NO cluster.lok8s.yaml.
     # Guard the read: a bare yq on a missing file exits non-zero and, under
     # set -euo pipefail, would abort the whole build. Read only when present.
-    local _cn=""
+    local cluster_name=""
     if [[ -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
-      _cn=$(yq -r '.metadata.name // ""' "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null) || _cn=""
+      cluster_name=$(yq -r '.metadata.name // ""' "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null) || cluster_name=""
     fi
-    [[ -n "${_cn}" && -f "${PATH_BASE}/.kubeconfig/${_cn}.yaml" ]] && _kcfg="${PATH_BASE}/.kubeconfig/${_cn}.yaml"
+    [[ -n "${cluster_name}" && -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" ]] && kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
   fi
-  local _api=""
-  if [[ -f "${_kcfg}" ]]; then
-    _api=$(yq -r '.clusters[0].cluster.server // ""' "${_kcfg}" 2>/dev/null) || _api=""
+  local api=""
+  if [[ -f "${kubeconfig}" ]]; then
+    api=$(yq -r '.clusters[0].cluster.server // ""' "${kubeconfig}" 2>/dev/null) || api=""
   fi
-  _api="${_api#http*://}"
-  if [[ -n "${_api}" ]]; then
-    export LOK8S_USER_API_HOST="${_api%%:*}"
-    local _ap="${_api##*:}"; [[ "${_ap}" != "${_api}" && -n "${_ap}" ]] || _ap="6443"
-    export LOK8S_USER_API_PORT="${_ap}"
+  api="${api#http*://}"
+  if [[ -n "${api}" ]]; then
+    export LOK8S_USER_API_HOST="${api%%:*}"
+    local api_port="${api##*:}"; [[ "${api_port}" != "${api}" && -n "${api_port}" ]] || api_port="6443"
+    export LOK8S_USER_API_PORT="${api_port}"
   fi
 }
 
@@ -61,7 +61,7 @@ build::_resolve_api() {
 # Mirrors libs/secrets `secrets::path`; see docs/guide/secrets.md.
 # MUST run un-subshelled so the export reaches the kustomize child.
 build::_export_secrets_path() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   # `if` (not `&&`): a false `[[ … ]] && …` returns non-zero, which as the last
   # command would fail the caller under `set -e` when a domain has no own store.
   if [[ -d "${domain_dir}/secrets" ]]; then
@@ -130,9 +130,9 @@ build::artifacts() {
   # kustomization.yaml, capi.yaml and .cache-queue live as files directly
   # under artifacts/ and are preserved.
   if [[ -d "${domain_dir}/artifacts" ]]; then
-    local _sd
-    for _sd in "${domain_dir}"/artifacts/*/; do
-      [[ -d "${_sd}" && -f "${_sd}artifacts.yaml" ]] && rm -rf "${_sd}"
+    local sd
+    for sd in "${domain_dir}"/artifacts/*/; do
+      [[ -d "${sd}" && -f "${sd}artifacts.yaml" ]] && rm -rf "${sd}"
     done
   fi
 
@@ -145,19 +145,19 @@ build::artifacts() {
   # kustomize failure (surfaced under set -o pipefail) would leave a truncated /
   # empty artifact and clobber a prior good one. Only a fully successful build
   # is moved into place; a failure removes the temp and leaves the old artifact.
-  local _tmp
+  local tmp
   # -p "${domain_dir}": keep the temp on the SAME filesystem as the target so the
   # mv below is an atomic rename (a cross-fs mv is copy+unlink — non-atomic, and an
   # interrupted one can leave a partial artifacts.yaml).
-  _tmp=$(mktemp -p "${domain_dir}")
+  tmp=$(mktemp -p "${domain_dir}")
   if KUBECONFIG="${kubeconfig}" \
      KHELM_TRUST_ANY_REPO=true \
        kustomize build --enable-alpha-plugins "${domain_dir}" \
        | envsubst "${envsubst_whitelist}" \
-       > "${_tmp}"; then
-    mv "${_tmp}" "${domain_dir}/artifacts.yaml"
+       > "${tmp}"; then
+    mv "${tmp}" "${domain_dir}/artifacts.yaml"
   else
-    rm -f "${_tmp}"
+    rm -f "${tmp}"
     error "kustomize build failed for ${domain}"
     return 1
   fi
@@ -165,7 +165,7 @@ build::artifacts() {
 
 # Helper: check if a directory has a kustomization file
 _has_kustomization() {
-  local dir="$1"
+  local dir="${1}"
   [[ -f "${dir}/kustomization.yaml" ]] \
     || [[ -f "${dir}/kustomization.yml" ]] \
     || [[ -f "${dir}/Kustomization" ]]

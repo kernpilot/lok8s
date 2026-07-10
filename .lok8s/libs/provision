@@ -32,7 +32,7 @@ _resolve_kubeconfig_for_domain() {
   if [[ -f "${domain_dir}/deploy.lok8s.yaml" ]] && [[ ! -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
     ref_cluster="${cluster_override:-}"
     if [[ -z "${ref_cluster}" ]]; then
-      ref_cluster=$(provision::resolve_clusterref "$domain")
+      ref_cluster=$(provision::resolve_clusterref "${domain}")
     fi
     debug "Deploy domain ${domain} -> cluster ${ref_cluster}"
   elif [[ -n "${cluster_override:-}" ]]; then
@@ -48,14 +48,14 @@ _resolve_kubeconfig_for_domain() {
   # deploy domain whose
   # target cluster was provisioned under a different metadata.name points
   # KUBECONFIG at a non-existent file and `lo deploy` fails.
-  local kcfg="${PATH_BASE}/.kubeconfig/secret.${ref_cluster}.yaml"
-  if [[ ! -f "${kcfg}" && -f "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" ]]; then
+  local kubeconfig="${PATH_BASE}/.kubeconfig/secret.${ref_cluster}.yaml"
+  if [[ ! -f "${kubeconfig}" && -f "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" ]]; then
     local ref_name=""
     ref_name=$(yq -r '.metadata.name // ""' "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" 2>/dev/null) || ref_name=""
     [[ -n "${ref_name}" && -f "${PATH_BASE}/.kubeconfig/${ref_name}.yaml" ]] \
-      && kcfg="${PATH_BASE}/.kubeconfig/${ref_name}.yaml"
+      && kubeconfig="${PATH_BASE}/.kubeconfig/${ref_name}.yaml"
   fi
-  export KUBECONFIG="${kcfg}"
+  export KUBECONFIG="${kubeconfig}"
 }
 
 # Resolve the cluster spec YAML for a domain.
@@ -63,7 +63,7 @@ _resolve_kubeconfig_for_domain() {
 # Usage: provision::resolve_spec <domain>
 # Sets: LOK8S_SPEC_FILE, LOK8S_SPEC_KIND (cluster|deploy)
 provision::resolve_spec() {
-  local domain="$1"
+  local domain="${1}"
 
   # No active domain → actionable error instead of a cryptic empty path.
   if [[ -z "${domain}" ]]; then
@@ -96,7 +96,7 @@ provision::resolve_spec() {
 # Outputs: the cluster domain name (from spec.clusterRef.domain)
 # Returns 1 if spec is not a deploy domain or clusterRef is missing/invalid.
 provision::resolve_clusterref() {
-  local domain="$1"
+  local domain="${1}"
   local base="${PATH_CLUSTERS}/${domain}"
   local spec_file="${base}/deploy.lok8s.yaml"
 
@@ -136,12 +136,12 @@ provision::resolve_clusterref() {
 # which must have creds BEFORE its doctor/rebuild phases (they resolve node IPs)
 # — provision loads them too but only runs after rebuild, too late for recover.
 provision::load_provider_creds() {
-  local domain="$1"
-  local _secd="${PATH_CLUSTERS}/${domain}/secrets" _k _v
-  for _k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
-    [[ -n "${!_k:-}" ]] && continue
-    _v="$(cat "${_secd}/Secret.hetzner.provisioning.${_k}" 2>/dev/null)" || continue
-    [[ -n "${_v}" ]] && export "${_k}=${_v}"
+  local domain="${1}"
+  local secrets_dir="${PATH_CLUSTERS}/${domain}/secrets" k v
+  for k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
+    [[ -n "${!k:-}" ]] && continue
+    v="$(cat "${secrets_dir}/Secret.hetzner.provisioning.${k}" 2>/dev/null)" || continue
+    [[ -n "${v}" ]] && export "${k}=${v}"
   done
   [[ -n "${HROBOT_USER:-}" ]]     && export ROBOT_USER="${HROBOT_USER}"         HETZNER_ROBOT_USER="${HROBOT_USER}"
   [[ -n "${HROBOT_PASSWORD:-}" ]] && export ROBOT_PASSWORD="${HROBOT_PASSWORD}" HETZNER_ROBOT_PASSWORD="${HROBOT_PASSWORD}"
@@ -157,7 +157,7 @@ provision::load_provider_creds() {
 # Dispatch provisioning to the appropriate kind contract implementation.
 # Usage: provision::dispatch <domain> [bootstrap_only]
 provision::dispatch() {
-  local domain="$1"
+  local domain="${1}"
   local bootstrap_only="${2:-0}"
   # Fail fast: a missing/empty/bogus domain must stop here, BEFORE any driver
   # creates a kind cluster or touches infra. (resolve_spec's return was
@@ -200,12 +200,12 @@ provision::dispatch() {
   # The bootstrap DAG (dependsOn/wait:) still runs, so this is the gated path for
   # rolling a bootstrap-addon upgrade without a full (Hetzner-reconciling) re-provision.
   if (( bootstrap_only )); then
-    local _bkc
-    _bkc=$(yq -r '.metadata.name // ""' "${cluster_yaml}")
-    [[ -n "${_bkc}" ]] \
+    local bkc
+    bkc=$(yq -r '.metadata.name // ""' "${cluster_yaml}")
+    [[ -n "${bkc}" ]] \
       || { error "--bootstrap: cluster spec has no metadata.name (${cluster_yaml})"; return 1; }
-    [[ -f "${PATH_BASE}/.kubeconfig/${_bkc}.yaml" ]] \
-      || { error "--bootstrap needs an existing cluster (no .kubeconfig/${_bkc}.yaml — run a full 'lo provision' first)"; return 1; }
+    [[ -f "${PATH_BASE}/.kubeconfig/${bkc}.yaml" ]] \
+      || { error "--bootstrap needs an existing cluster (no .kubeconfig/${bkc}.yaml — run a full 'lo provision' first)"; return 1; }
     debug "Re-applying spec.bootstrap on ${domain} (skipping infra reconcile)"
   else
     # Source the infrastructure provider when the driver needs one
@@ -217,38 +217,38 @@ provision::dispatch() {
     #   - every other driver (kubeone, capi, kkp): load the provider
     #     whenever spec.provider.name is set — these drivers target real
     #     infrastructure and there is no "local" interpretation.
-    local _load_provider=0
+    local load_provider=0
     if [[ "${kind}" == "lo" ]]; then
-      [[ "${LOK8S_REMOTE:-}" == "1" ]] && _load_provider=1
+      [[ "${LOK8S_REMOTE:-}" == "1" ]] && load_provider=1
     else
-      _load_provider=1
+      load_provider=1
     fi
-    if (( _load_provider )); then
-      local _provider_name
-      _provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
-      if [[ -n "${_provider_name}" ]]; then
+    if (( load_provider )); then
+      local provider_name
+      provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
+      if [[ -n "${provider_name}" ]]; then
         provider::write_config "${cluster_yaml}"
-        provider::load "${_provider_name}"
+        provider::load "${provider_name}"
         provider::validate "${PROVIDER_CONFIG_FILE}" || {
-          error "Provider '${_provider_name}' validation failed"
+          error "Provider '${provider_name}' validation failed"
           return 1
         }
-        debug "Provider '${_provider_name}' loaded and validated"
+        debug "Provider '${provider_name}' loaded and validated"
       fi
     fi
 
     debug "Provisioning ${domain} with kind=${kind}"
-    local _provision_rc=0
-    driver::provision "${domain}" || _provision_rc=$?
+    local provision_rc=0
+    driver::provision "${domain}" || provision_rc=$?
 
     # Return code 100 = driver handled full lifecycle (e.g. remote CI
     # mode where the remote VM runs provision + bootstrap itself).
     # Skip all local post-provision steps.
-    if (( _provision_rc == 100 )); then
+    if (( provision_rc == 100 )); then
       debug "driver handled full lifecycle — skipping post-provision"
       return 0
-    elif (( _provision_rc != 0 )); then
-      return "${_provision_rc}"
+    elif (( provision_rc != 0 )); then
+      return "${provision_rc}"
     fi
 
     # Post-provision hook: driver SIDE-EFFECTS that need provisioned infra (rare).
@@ -306,7 +306,7 @@ provision::dispatch() {
 # Dispatch cluster destruction.
 # Usage: provision::dispatch_destroy <domain>
 provision::dispatch_destroy() {
-  local domain="$1"
+  local domain="${1}"
   provision::resolve_spec "${domain}"
 
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
@@ -325,11 +325,11 @@ provision::dispatch_destroy() {
 
   # Source provider if present and --remote was used (needed for destroy)
   if [[ "${LOK8S_REMOTE:-}" == "1" ]]; then
-    local _provider_name
-    _provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
-    if [[ -n "${_provider_name}" ]]; then
+    local provider_name
+    provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
+    if [[ -n "${provider_name}" ]]; then
       provider::write_config "${cluster_yaml}"
-      provider::load "${_provider_name}"
+      provider::load "${provider_name}"
     fi
   fi
 
@@ -346,7 +346,7 @@ provision::dispatch_destroy() {
 # Dispatch cluster status check.
 # Usage: provision::dispatch_status <domain>
 provision::dispatch_status() {
-  local domain="$1"
+  local domain="${1}"
   provision::resolve_spec "${domain}"
 
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then

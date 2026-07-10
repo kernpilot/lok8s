@@ -31,14 +31,12 @@ jobs:
           shellcheck --version
 
       - name: Run shellcheck on all shell scripts
-        run: |
-          # Two passes: *.sh files (sourced libs often have no shebang) AND
-          # the extensionless argsh libs/drivers (#!/usr/bin/env argsh), which
-          # a `-name '*.sh'` filter alone would silently skip. Overlap is fine.
-          find .lok8s operator/hooks docs/.vitepress -type f -name '*.sh' \
-            | xargs shellcheck --shell=bash --severity=warning
-          grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress \
-            | xargs shellcheck --shell=bash --severity=warning
+        # File discovery + invocations live in ONE place, shared with
+        # `npm run lint` — see hack/lint-shell.sh.
+        run: bash hack/lint-shell.sh warning
+
+      - name: Enforce brace style (SC2250 — "${var}", never "$var")
+        run: bash hack/lint-shell.sh braces
 
   yamllint:
     name: YAML Lint

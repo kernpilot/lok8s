@@ -54,7 +54,7 @@ k8s::capi() {
     out="${PATH_CLUSTERS}/${domain}/artifacts/capi.yaml"
   fi
 
-  mkdir -p "$(dirname "$out")"
+  mkdir -p "$(dirname "${out}")"
 
   # Detect provider and generate CAPI resources via templates
   local provider
@@ -64,14 +64,14 @@ k8s::capi() {
   capi::generate "${spec}" "${provider}" > "${out}"
 
   # Generate kustomization.yaml
-  local kfile
-  kfile="$(dirname "${out}")/kustomization.yaml"
-  if [[ ! -f "${kfile}" ]]; then
-    cat > "${kfile}" <<EOF
+  local kustomization_file
+  kustomization_file="$(dirname "${out}")/kustomization.yaml"
+  if [[ ! -f "${kustomization_file}" ]]; then
+    cat > "${kustomization_file}" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - $(basename "$out")
+  - $(basename "${out}")
 EOF
   fi
 
@@ -85,9 +85,9 @@ k8s::infrastructure() {
   mkdir -p "${out_dir}"
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
     kustomize build --enable-alpha-plugins "${PATH_CLUSTERS}/${domain}/targets" > "${out_dir}/infrastructure.yaml"
-  local kfile="${out_dir}/kustomization.yaml"
-  if [[ ! -f "${kfile}" ]]; then
-    cat > "${kfile}" <<EOF
+  local kustomization_file="${out_dir}/kustomization.yaml"
+  if [[ ! -f "${kustomization_file}" ]]; then
+    cat > "${kustomization_file}" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -109,9 +109,9 @@ k8s::platform() {
   mkdir -p "${out_dir}"
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
     kustomize build --enable-alpha-plugins "${overlay}" > "${out_dir}/platform.yaml"
-  local kfile="${out_dir}/kustomization.yaml"
-  if [[ ! -f "${kfile}" ]]; then
-    cat > "${kfile}" <<EOF
+  local kustomization_file="${out_dir}/kustomization.yaml"
+  if [[ ! -f "${kustomization_file}" ]]; then
+    cat > "${kustomization_file}" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

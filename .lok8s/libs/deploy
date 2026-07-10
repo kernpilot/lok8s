@@ -82,7 +82,7 @@ deploy::_has_objects() {
 #            StatefulSets to become ready (scoped to the manifest, not the whole
 #            cluster). Best-effort — a readiness timeout is a ⚠, never fatal.
 deploy::_apply() {
-  local label="$1" file="$2"
+  local label="${1}" file="${2}"
 
   if ! deploy::_has_objects < "${file}"; then
     debug "No objects for ${label}, skipping apply"
@@ -126,7 +126,7 @@ deploy::apply() {
 # address.
 # Usage: deploy::apply_filtered <domain> <label_key> <label_value>
 deploy::apply_filtered() {
-  local domain="$1" label_key="$2" label_value="$3"
+  local domain="${1}" label_key="${2}" label_value="${3}"
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
 
   # Validate label key/value to prevent yq injection (the value is interpolated
@@ -163,7 +163,7 @@ deploy::apply_filtered() {
 
 # Wait for CRDs to become established.
 deploy::wait_crds() {
-  local crds="$1"
+  local crds="${1}"
   local crd_name
   while IFS= read -r crd_name; do
     [[ -n "${crd_name}" ]] || continue

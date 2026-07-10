@@ -165,7 +165,7 @@ image::cache() {
 # image::_cache_queue — process a TSV cache queue with bounded parallelism
 # TSV format: svc \t remote_ref \t branch \t tag
 image::_cache_queue() {
-  local queue="$1" cache_ip="$2" parallel="$3" force="$4"
+  local queue="${1}" cache_ip="${2}" parallel="${3}" force="${4}"
   local total
   total=$(grep -cv '^$' "${queue}" 2>/dev/null || echo 0)
   debug "image cache: processing ${total} entries (parallel=${parallel})"
@@ -206,7 +206,7 @@ image::_cache_queue() {
 # image::_cache_one — single-image cache operation
 # Idempotent: checks the cache registry's manifest before pulling.
 image::_cache_one() {
-  local svc="$1" remote="$2" branch="$3" tag="$4" cache_ip="$5" force="$6"
+  local svc="${1}" remote="${2}" branch="${3}" tag="${4}" cache_ip="${5}" force="${6}"
   local cache_path="${branch}/${svc}:${tag}"
   local cache_ref_local="${cache_ip}/${cache_path}"
 

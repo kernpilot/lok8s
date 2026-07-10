@@ -18,7 +18,7 @@ import ^utils/oidc
 # Usage: kubeone::detect_provider <cluster_yaml>
 # Delegates to provider::detect from utils/provider.
 kubeone::detect_provider() {
-  provider::detect "$1"
+  provider::detect "${1}"
 }
 
 # ── Variable extraction ─────────────────────────────────
@@ -29,7 +29,7 @@ kubeone::detect_provider() {
 #          CP_REPLICAS, CNI_PLUGIN, CSI_PLUGIN, CLOUD_PROVIDER, SSH_USER, SSH_PORT,
 #          ADDONS_ENABLED, ADDONS_PATH
 kubeone::extract_vars() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   export CLUSTER_NAME K8S_VERSION POD_SUBNET SERVICE_SUBNET
   export CP_REPLICAS CNI_PLUGIN CSI_PLUGIN CLOUD_PROVIDER
@@ -87,13 +87,13 @@ kubeone::extract_vars() {
   # SSH config — read from provider output access[] if available,
   # fall back to spec.ssh for backward compatibility
   if [[ -n "${PROVIDER_CONFIG_FILE:-}" ]] && declare -F provider::output &>/dev/null; then
-    local _output
-    _output=$(provider::output "${PROVIDER_CONFIG_FILE}" 2>/dev/null) || true
-    if [[ -n "${_output}" ]]; then
-      SSH_USER=$(echo "${_output}" | jq -r '.access[0].user // "root"')
-      SSH_PORT=$(echo "${_output}" | jq -r '.access[0].port // 22')
-      SSH_PRIVATE_KEY=$(echo "${_output}" | jq -r '.access[0].privateKey // ""')
-      SSH_PUBLIC_KEY=$(echo "${_output}" | jq -r '.access[0].publicKey // ""')
+    local output
+    output=$(provider::output "${PROVIDER_CONFIG_FILE}" 2>/dev/null) || true
+    if [[ -n "${output}" ]]; then
+      SSH_USER=$(echo "${output}" | jq -r '.access[0].user // "root"')
+      SSH_PORT=$(echo "${output}" | jq -r '.access[0].port // 22')
+      SSH_PRIVATE_KEY=$(echo "${output}" | jq -r '.access[0].privateKey // ""')
+      SSH_PUBLIC_KEY=$(echo "${output}" | jq -r '.access[0].publicKey // ""')
     fi
   fi
   : "${SSH_USER:=$(yq -r '.spec.ssh.user // "root"' "${cluster_yaml}")}"
@@ -121,7 +121,7 @@ kubeone::extract_vars() {
 #
 # No-op unless oidc::enabled. Usage: kubeone::_inject_oidc <kubeone.yaml>
 kubeone::_inject_oidc() {
-  local manifest="$1"
+  local manifest="${1}"
   oidc::enabled || return 0
   [[ -f "${manifest}" ]] || { error "OIDC: manifest not found: ${manifest}"; return 1; }
 
@@ -142,9 +142,9 @@ kubeone::_inject_oidc() {
   # openidConnect feature, so a custom-CA issuer just needs the local file +
   # caFile path. kubehz uses a public LE issuer, so this is normally skipped.
   if [[ -n "${LOK8S_SPEC_OIDC_CABUNDLE:-}" ]]; then
-    local _cadir="${manifest%/*}/.oidc"; mkdir -p "${_cadir}"
-    printf '%s\n' "${LOK8S_SPEC_OIDC_CABUNDLE}" > "${_cadir}/oidc-ca.pem"
-    OIDC_CAFILE="${_cadir}/oidc-ca.pem" \
+    local cadir="${manifest%/*}/.oidc"; mkdir -p "${cadir}"
+    printf '%s\n' "${LOK8S_SPEC_OIDC_CABUNDLE}" > "${cadir}/oidc-ca.pem"
+    OIDC_CAFILE="${cadir}/oidc-ca.pem" \
       yq -i '.features.openidConnect.config.caFile = strenv(OIDC_CAFILE)' "${manifest}" \
       || { error "OIDC: failed to set caFile"; return 1; }
   fi
@@ -160,7 +160,7 @@ kubeone::_inject_oidc() {
 # cluster that omits it pulls anonymously, unchanged.
 # Usage: kubeone::_inject_registry_auth <kubeone.yaml> <cluster_yaml>
 kubeone::_inject_registry_auth() {
-  local manifest="$1" cluster_yaml="$2" host sname sns
+  local manifest="${1}" cluster_yaml="${2}" host sname sns
   # No-op unless the spec declares registries (omitted => anonymous pulls; a
   # test/CI run without DOMAIN_NAME must not error here).
   [[ "$(yq -r '.spec.registries // {} | length' "${cluster_yaml}" 2>/dev/null)" != "0" ]] || return 0
@@ -184,11 +184,11 @@ kubeone::_inject_registry_auth() {
     # Read the resolved creds straight from the per-domain secret cache (each key is
     # a plaintext file Secret.<name>.<ns>.<key>), exactly as provision::dispatch loads
     # provider creds — no `eval` of generated shell.
-    local _ns="${sns:-provisioning}" username password
-    username="$(cat "${secrets_dir}/Secret.${sname}.${_ns}.username" 2>/dev/null || true)"
-    password="$(cat "${secrets_dir}/Secret.${sname}.${_ns}.password" 2>/dev/null || true)"
+    local ns="${sns:-provisioning}" username password
+    username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
+    password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then
-      warn "registry auth: secret ${_ns}/${sname} lacks username/password — '${host}' left anonymous"
+      warn "registry auth: secret ${ns}/${sname} lacks username/password — '${host}' left anonymous"
       unset username password; continue
     fi
     RUSER="${username}" RPASS="${password}" \
@@ -196,7 +196,7 @@ kubeone::_inject_registry_auth() {
       || { error "registry auth: failed to inject '${host}'"; unset username password; return 1; }
     unset username password
     n_configured=$(( n_configured + 1 ))
-    debug "registry auth: ${host} ← ${_ns}/${sname}"
+    debug "registry auth: ${host} ← ${ns}/${sname}"
   done < <(yq -r '.spec.registries // {} | to_entries | .[] | [.key, (.value.auth.secretRef.name // ""), (.value.auth.secretRef.namespace // "provisioning")] | @tsv' "${cluster_yaml}" 2>/dev/null)
   if (( n_specified > 0 && n_configured == 0 )); then
     error "registry auth: ${n_specified} registry(ies) declared in spec.registries but none could be configured (missing/invalid secretRef creds) — populate the secret(s) or remove spec.registries"
@@ -211,7 +211,7 @@ kubeone::_inject_registry_auth() {
 # Usage: kubeone::generate_config <cluster_yaml> <provider> <output_dir>
 # Writes: <output_dir>/kubeone.yaml
 kubeone::generate_config() {
-  local cluster_yaml="$1" provider="$2" output_dir="$3"
+  local cluster_yaml="${1}" provider="${2}" output_dir="${3}"
   local tmpl_dir="${PATH_LOK8S}/drivers/kubeone/cluster"
   local core_tmpl="${tmpl_dir}/core/kubeone.yaml"
 
@@ -313,7 +313,7 @@ kubeone::generate_config() {
 # Usage: kubeone::apply <work_dir>
 # Expects: kubeone.yaml + output.json in work_dir
 kubeone::apply() {
-  local work_dir="$1"
+  local work_dir="${1}"
 
   if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
     error "kubeone.yaml not found in ${work_dir}"
@@ -372,7 +372,7 @@ kubeone::apply() {
 # wiped. No-op on a fresh cluster (no reachable CP → nothing to clean).
 # Usage: kubeone::_clean_reinstalled_workers <work_dir>
 kubeone::_clean_reinstalled_workers() {
-  local work_dir="$1"
+  local work_dir="${1}"
   local manifest="${work_dir}/kubeone.yaml"
   [[ -f "${manifest}" ]] || return 0
 
@@ -419,7 +419,7 @@ kubeone::_clean_reinstalled_workers() {
 # envsubst) — so what kubeone applies == what bootstrap later reconciles.
 # Usage: kubeone::render_addons <work_dir>
 kubeone::render_addons() {
-  local work_dir="$1"
+  local work_dir="${1}"
   local manifest="${work_dir}/kubeone.yaml"
   local addons_dir="${work_dir}/addons"
   # This addon set is Hetzner-specific (cilium values.hetzner, the robot-aware
@@ -516,7 +516,7 @@ kubeone::render_addons() {
 # Name each bare-metal Robot server to match its node hostname (the CCM
 # matches Robot servers by name). Usage: kubeone::_name_robot_workers <manifest>
 kubeone::_name_robot_workers() {
-  local manifest="$1"
+  local manifest="${1}"
   [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]] || return 0
   local n hostname pubip num servers
   n=$(yq -r '.staticWorkers.hosts | length' "${manifest}" 2>/dev/null || echo 0)
@@ -551,7 +551,7 @@ kubeone::_name_robot_workers() {
 # Run kubeone reset (tear down Kubernetes on existing infrastructure).
 # Usage: kubeone::reset <work_dir>
 kubeone::reset() {
-  local work_dir="$1"
+  local work_dir="${1}"
 
   if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
     error "kubeone.yaml not found in ${work_dir}"
@@ -576,7 +576,7 @@ kubeone::reset() {
 # Usage: kubeone::status <work_dir>
 # Outputs: Healthy | Degraded | NotFound | Unknown
 kubeone::status() {
-  local work_dir="$1"
+  local work_dir="${1}"
 
   if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
     echo "NotProvisioned"
@@ -615,7 +615,7 @@ kubeone::status() {
 # Usage: kubeone::kubeconfig_path <work_dir> <cluster_name>
 # Outputs: path to <cluster_name>-kubeconfig
 kubeone::kubeconfig_path() {
-  local work_dir="$1" cluster_name="$2"
+  local work_dir="${1}" cluster_name="${2}"
   echo "${work_dir}/${cluster_name}-kubeconfig"
 }
 
@@ -625,7 +625,7 @@ kubeone::kubeconfig_path() {
 # Usage: kubeone::validate_credentials <cluster_yaml> <provider>
 # Returns 1 with error message if anything is missing.
 kubeone::validate_credentials() {
-  local cluster_yaml="$1" provider="$2"
+  local cluster_yaml="${1}" provider="${2}"
   local errors=0
 
   # Provider-specific env var checks

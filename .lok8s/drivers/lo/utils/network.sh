@@ -51,7 +51,7 @@ lo::registry_network() {
 }
 
 lo::connect_nodes_to_registry_network() {
-  local cluster_name="$1"
+  local cluster_name="${1}"
   local registry_network
   registry_network=$(registry::network_name)
 

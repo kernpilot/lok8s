@@ -38,7 +38,7 @@ LOK8S_REGISTRY_JSON=""
 #          hyphens converted to underscores, e.g. io-docker →
 #          LOK8S_REGISTRY_IP_IO_DOCKER)
 registry::config_generate() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   local domain_dir
   domain_dir=$(dirname "${cluster_yaml}")
 
@@ -106,22 +106,22 @@ registry::config_generate() {
   else
     local i
     for (( i = 0; i < mirror_count; i++ )); do
-      local _n _u
-      _n=$(yq -r ".spec.registries.mirrors[${i}].name" "${cluster_yaml}")
-      _u=$(yq -r ".spec.registries.mirrors[${i}].url // \"\"" "${cluster_yaml}")
+      local n u
+      n=$(yq -r ".spec.registries.mirrors[${i}].name" "${cluster_yaml}")
+      u=$(yq -r ".spec.registries.mirrors[${i}].url // \"\"" "${cluster_yaml}")
 
-      lo::validate_mirror_name "${_n}" || return 1
-      if [[ "${_n}" == "build" || "${_n}" == "cache" ]]; then
-        echo "error: spec.registries.mirrors: '${_n}' is reserved for the framework" >&2
+      lo::validate_mirror_name "${n}" || return 1
+      if [[ "${n}" == "build" || "${n}" == "cache" ]]; then
+        echo "error: spec.registries.mirrors: '${n}' is reserved for the framework" >&2
         return 1
       fi
-      [[ -n "${_u}" ]] || {
-        echo "error: spec.registries.mirrors[${i}] (${_n}): url is required" >&2
+      [[ -n "${u}" ]] || {
+        echo "error: spec.registries.mirrors[${i}] (${n}): url is required" >&2
         return 1
       }
 
-      m_names+=("${_n}")
-      m_urls+=("${_u}")
+      m_names+=("${n}")
+      m_urls+=("${u}")
     done
   fi
 
@@ -192,11 +192,11 @@ registry::config_generate() {
   export LOK8S_REGISTRY_IP_CACHE="${cache_ip}"
 
   # Mirror IP exports (read back from JSON — single jq call)
-  local _exports
-  _exports=$(jq -r '.registries[] | select(.type == "mirror") |
+  local exports
+  exports=$(jq -r '.registries[] | select(.type == "mirror") |
     "export LOK8S_REGISTRY_IP_" + (.name | gsub("-";"_") | ascii_upcase) + "=" + .ip' \
     "${LOK8S_REGISTRY_JSON}")
-  eval "${_exports}"
+  eval "${exports}"
 }
 
 # ── Query helpers ─────────────────────────────────────────
@@ -206,7 +206,7 @@ registry::config_generate() {
 # Callback receives: name ip url domain host type
 # Single jq fork for the entire iteration.
 registry::each() {
-  local callback="$1"
+  local callback="${1}"
   local json="${LOK8S_REGISTRY_JSON:-}"
   [[ -f "${json}" ]] || { echo "error: .registries.json not found (run registry::config_generate first)" >&2; return 1; }
 
@@ -226,7 +226,7 @@ registry::each() {
 # Get a single field for a named registry.
 # Usage: registry::get <name> <field>
 registry::get() {
-  local name="$1" field="$2"
+  local name="${1}" field="${2}"
   jq -r --arg n "${name}" --arg f "${field}" \
     '.registries[] | select(.name == $n) | .[$f] // ""' \
     "${LOK8S_REGISTRY_JSON}"
@@ -253,7 +253,7 @@ registry::port() {
 # addresses the registry. In plain mode :80 is likewise implicit.
 # Usage: registry::url <ip>
 registry::url() {
-  local ip="$1"
+  local ip="${1}"
   if registry::is_tls; then
     echo "https://${ip}"
   else
@@ -280,7 +280,7 @@ registry::project_network() {
 # Usage: registry::container <name>
 # Outputs: container_name\tnetwork_name
 registry::container() {
-  local name="$1"
+  local name="${1}"
   local json="${LOK8S_REGISTRY_JSON}"
 
   jq -r --arg n "${name}" '

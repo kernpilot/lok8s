@@ -52,13 +52,13 @@ ssh::pub() {
 cloud-config::paths() {
   local file="${1-}"
   unset IFS
-  local _lib=""
-  [[ -z "${CLOUD_PATH_LIB}" || "${CLOUD_PATH_LIB}" == "${CLOUD_PATH}" ]] || _lib="${CLOUD_PATH_LIB}"
+  local lib=""
+  [[ -z "${CLOUD_PATH_LIB}" || "${CLOUD_PATH_LIB}" == "${CLOUD_PATH}" ]] || lib="${CLOUD_PATH_LIB}"
   mapfile -t paths <<<"${CLOUD_PATHD//:/$'\n'}"
   for path in "${paths[@]}"; do
     [[ -n "${path}" ]] || continue
     echo "${CLOUD_PATH}/cloud.d/${path}${file}"
-    [[ -z "${_lib}" ]] || echo "${_lib}/cloud.d/${path}${file}"
+    [[ -z "${lib}" ]] || echo "${lib}/cloud.d/${path}${file}"
   done
   echo "${CLOUD_PATH}${file}"
 }
@@ -322,25 +322,25 @@ cloud-config::nameservers() {
 }
 
 cloud-config::apt() {
-  local _apt _srcs f
+  local apt srcs f
   mapfile -t paths <<<"$(cloud-config::paths '/apt')"
-  _apt="$(cat "${paths[@]}" 2>/dev/null | uniq)"
+  apt="$(cat "${paths[@]}" 2>/dev/null | uniq)"
 
   mapfile -t paths <<<"$(cloud-config::paths '/sources.list.d')"
-  _srcs="$(find "${paths[@]}" -type f 2>/dev/null)"
+  srcs="$(find "${paths[@]}" -type f 2>/dev/null)"
 
   # Nothing to configure → emit nothing; the caller omits the whole `apt:`
   # key. A bare/empty `apt:` or `sources:` parses as YAML null and crashes
   # cloud-init's apt_configure ("'NoneType' object has no attribute 'values'").
-  [ -n "${_apt}" ] || [ -n "${_srcs}" ] || return 0
+  [ -n "${apt}" ] || [ -n "${srcs}" ] || return 0
 
-  [ -z "${_apt}" ] || echo "${_apt}"
-  [ -z "${_srcs}" ] || {
+  [ -z "${apt}" ] || echo "${apt}"
+  [ -z "${srcs}" ] || {
     echo "sources:"
     while IFS= read -r f; do
       echo "  $(basename "${f}"):"
       sed -e 's_^_    _' "${f}"
-    done <<<"${_srcs}"
+    done <<<"${srcs}"
   }
 }
 
@@ -387,11 +387,11 @@ cloud-config::generate() {
   # provisioner (e.g. KubeOne) connects as root — disable_root: 1 would
   # make cloud-init wrap root's keys in a command="...exit 142"
   # restriction that breaks every remote command.
-  local _user="${CLOUD_USER:-}"
-  local _disable_root=1
-  [[ -n "${_user}" && "${_user}" != "root" ]] || _disable_root=0
-  local _disable_root_yaml="true"
-  (( _disable_root )) || _disable_root_yaml="false"
+  local user="${CLOUD_USER:-}"
+  local disable_root=1
+  [[ -n "${user}" && "${user}" != "root" ]] || disable_root=0
+  local disable_root_yaml="true"
+  (( disable_root )) || disable_root_yaml="false"
 
   cat <<EOF
 #cloud-config
@@ -400,7 +400,7 @@ package_update: true
 package_upgrade: true
 package_reboot_if_required: true
 
-disable_root: ${_disable_root_yaml}
+disable_root: ${disable_root_yaml}
 ssh_pwauth: false
 
 mounts:
@@ -414,10 +414,10 @@ $(cloud-config::_emit_resolv)
 write_files:
 $(cloud-config::write_files)
 
-$(if (( _disable_root )); then
+$(if (( disable_root )); then
 cat <<USERS
 users:
-- name: "${_user}"
+- name: "${user}"
   lock_passwd: true
   shell: /bin/bash
   ssh-authorized-keys:

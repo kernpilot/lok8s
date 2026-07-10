@@ -57,7 +57,7 @@ crds::_render() {
   }
   | del(.spec.names.shortNames | select(. == null))
   | del(.spec.versions[0].additionalPrinterColumns | select(. == null))
-  | del(.spec.versions[0].schema.openAPIV3Schema.properties.status | select(. == null))' "$1"
+  | del(.spec.versions[0].schema.openAPIV3Schema.properties.status | select(. == null))' "${1}"
 }
 
 # Generate every CRD from its schema.

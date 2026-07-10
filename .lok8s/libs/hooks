@@ -67,7 +67,7 @@ hooks::_yq_filter() {
 # clusters/<domain>/artifacts.yaml `lo deploy` applies; the Tilt reload keeps the
 # upstream ConfigMaps current, so a recreated Job mounts the edited content.
 hooks::_select() {
-  local domain="$1" selector="$2"
+  local domain="${1}" selector="${2}"
   local filter; filter="$(hooks::_yq_filter "${selector}")" || return 1
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
   [[ -f "${artifact}" ]] || return 0

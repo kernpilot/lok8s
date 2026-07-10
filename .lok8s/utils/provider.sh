@@ -110,7 +110,7 @@ import ^utils/verbose
 # Read spec.provider.name from a cluster spec.
 # Outputs the provider name to stdout. Returns 1 if not set.
 provider::read_name() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   local name
   name=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
   if [[ -z "${name}" ]]; then
@@ -147,7 +147,7 @@ provider::_cleanup_configs() {
 # The result is always a temp file (or the ref file directly) exported
 # as PROVIDER_CONFIG_FILE. Drivers and provider functions read from it.
 provider::write_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   # Check for configRef first (file mode)
   local config_ref
@@ -183,7 +183,7 @@ provider::write_config() {
 # Source providers/<name>/main, validate the contract.
 # Sets PROVIDER_NAME.
 provider::load() {
-  local name="$1"
+  local name="${1}"
   local provider_script="${PATH_LOK8S}/providers/${name}/main"
 
   if [[ ! -f "${provider_script}" ]]; then
@@ -220,7 +220,7 @@ provider::check_contract() {
 # Follows bastion chains: if the entry has "bastion", resolves it recursively.
 # Outputs a JSON object with the resolved access config.
 provider::resolve_access() {
-  local output="$1"
+  local output="${1}"
   local access_id="${2:-}"
 
   if [[ -z "${access_id}" ]]; then
@@ -235,7 +235,7 @@ provider::resolve_access() {
 # Get the access config for a specific node, resolving the access reference.
 # Returns the full access entry (with bastion chain resolved if needed).
 provider::node_access() {
-  local output="$1" node_name="$2"
+  local output="${1}" node_name="${2}"
   local access_id
   access_id=$(echo "${output}" | jq -r --arg n "${node_name}" '.nodes[] | select(.name == $n) | .access // "default"')
   provider::resolve_access "${output}" "${access_id}"
@@ -245,7 +245,7 @@ provider::node_access() {
 # Build an SSH command string for connecting to a node, including bastion if configured.
 # Outputs: ssh [bastion opts] user@host
 provider::ssh_cmd() {
-  local output="$1" node_name="$2"
+  local output="${1}" node_name="${2}"
   local node_json access_json
 
   node_json=$(echo "${output}" | jq --arg n "${node_name}" '.nodes[] | select(.name == $n)')
@@ -289,7 +289,7 @@ provider::ssh_cmd() {
 # Checks spec.provider first, then infers from spec.hcloud / spec.aws.
 # Outputs provider name to stdout. Returns 1 if not found.
 provider::detect() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   # Explicit spec.provider.name takes precedence.
   local provider

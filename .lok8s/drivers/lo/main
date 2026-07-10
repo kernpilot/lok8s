@@ -211,7 +211,7 @@ driver::status() {
 
 # Internal kubeconfig extraction — called by driver::provision and driver::kubeconfig
 _lo_extract_kubeconfig() {
-  local domain="$1"
+  local domain="${1}"
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"

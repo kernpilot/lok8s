@@ -18,17 +18,17 @@ main::version() {
   printf '%-11s %s\n' "lok8s" "${v}"
   printf '%-11s %s\n' "bash" "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}"
 
-  local t
-  for t in argsh yq kustomize kubectl kind tilt docker; do
-    command -v "${t}" >/dev/null 2>&1 || continue
-    printf '%-11s %s\n' "${t}" "$(version::_of "${t}")"
+  local tool
+  for tool in argsh yq kustomize kubectl kind tilt docker; do
+    command -v "${tool}" >/dev/null 2>&1 || continue
+    printf '%-11s %s\n' "${tool}" "$(version::_of "${tool}")"
   done
 }
 
 # Best-effort single version string for a tool (no label).
 version::_of() {
-  local t="$1" out=""
-  case "${t}" in
+  local tool="${1}" out=""
+  case "${tool}" in
     argsh)     out="$(argsh --version 2>/dev/null | head -1)" ;;
     yq)        out="$(yq --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;
     kustomize) out="$(kustomize version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;

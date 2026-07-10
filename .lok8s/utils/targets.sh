@@ -6,8 +6,8 @@
 # Usage: targets::discover <domain> [requested_targets...]
 # If requested_targets are given, only return those that exist.
 targets::discover() {
-  local domain="$1"; shift
-  local -a requested=("$@")
+  local domain="${1}"; shift
+  local -a requested=("${@}")
   local targets_dir="${PATH_CLUSTERS}/${domain}/targets"
 
   [[ -d "${targets_dir}" ]] || return 0

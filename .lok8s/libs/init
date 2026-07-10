@@ -20,7 +20,7 @@ import ^utils/verbose
 # Mirrors use::_set_active: a name becomes a directory and a services.yaml key,
 # so reject anything that could escape the project or break the YAML key.
 init::_validate_name() {
-  local name="$1"
+  local name="${1}"
   if [[ ! "${name}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     error "invalid service name: '${name}' (must match ^[a-z0-9][a-z0-9._-]*$)"
     return 1
@@ -38,7 +38,7 @@ init::_validate_name() {
 #
 # Idempotent: refuses to clobber an existing lok8s.yaml unless force=1.
 init::_scaffold_lokyaml() {
-  local path="$1" name="$2" force="${3:-0}"
+  local path="${1}" name="${2}" force="${3:-0}"
   local file="${path}/lok8s.yaml"
 
   if [[ -e "${file}" ]] && (( ! force )); then
@@ -77,7 +77,7 @@ EOF
 # `lo init service` is additive and idempotent. The merged shape stays within
 # the keys _validate_services_yaml allows (services.<name>.path).
 init::_merge_services() {
-  local services_file="$1" name="$2" path="$3"
+  local services_file="${1}" name="${2}" path="${3}"
 
   if [[ ! -f "${services_file}" ]]; then
     cat > "${services_file}" <<'EOF'
@@ -116,7 +116,7 @@ EOF
 # hardcodes docker_build (the legacy hand-rolled form), we DO NOT clobber it —
 # replacing it could drop bespoke logic — and instead warn loudly.
 init::_ensure_tiltfile() {
-  local tiltfile="$1"
+  local tiltfile="${1}"
 
   if [[ ! -f "${tiltfile}" ]]; then
     cat > "${tiltfile}" <<'EOF'
@@ -153,7 +153,7 @@ EOF
 # use::_set_active / main::use split. init::service is the thin :args wrapper
 # that resolves flags and the default path, then delegates here.
 init::_service() {
-  local name="$1" path="$2" force="${3:-0}"
+  local name="${1}" path="${2}" force="${3:-0}"
 
   [[ -n "${name}" ]] || { error "service name is required: lo init service <name>"; return 1; }
   init::_validate_name "${name}" || return 1
@@ -207,7 +207,7 @@ init::_test_template_dir() {
 # file-by-file (it does NOT delete files the template doesn't ship, so local
 # additions survive).
 init::_scaffold_tests() {
-  local dest="$1" force="${2:-0}"
+  local dest="${1}" force="${2:-0}"
   local src; src="$(init::_test_template_dir)"
 
   [[ -d "${src}" ]] || { error "test scaffold template not found: ${src}"; return 1; }
@@ -236,7 +236,7 @@ init::_scaffold_tests() {
 # init::_test <path> <force> — orchestrate the test scaffold. Pure (no :args) so
 # it is unit-testable, mirroring init::_service.
 init::_test() {
-  local path="$1" force="${2:-0}"
+  local path="${1}" force="${2:-0}"
   # Default destination is ./tests at the project root.
   [[ -n "${path}" ]] || path="${PATH_BASE}/tests"
 

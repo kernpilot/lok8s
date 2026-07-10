@@ -2,7 +2,7 @@
 # expose.sh — Nginx reverse proxy for remote cluster access
 
 lo::expose() {
-  local cluster_name="$1" cluster_yaml="$2"
+  local cluster_name="${1}" cluster_yaml="${2}"
   local domain
   domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
 

@@ -5,7 +5,7 @@
 # Usage: http::require_https <url> [label]
 # Returns 1 if URL does not use https:// scheme.
 http::require_https() {
-  local url="$1" label="${2:-URL}"
+  local url="${1}" label="${2:-URL}"
 
   if [[ "${url}" != https://* ]]; then
     error "${label} must use HTTPS: ${url}"

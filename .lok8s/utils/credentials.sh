@@ -6,7 +6,7 @@
 # Usage: credentials::require <provider>
 # Returns 0 if all required vars are set, 1 with error messages if not.
 credentials::require() {
-  local provider="$1"
+  local provider="${1}"
   local -a missing=()
 
   case "${provider}" in

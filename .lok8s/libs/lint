@@ -78,9 +78,9 @@ _LINT_LOK8S_COMPONENT=(name build ports workloads links)
 
 # Membership test: _lint_in_list <needle> <haystack...>
 _lint_in_list() {
-  local needle="$1"; shift
+  local needle="${1}"; shift
   local item
-  for item in "$@"; do
+  for item in "${@}"; do
     [[ "${item}" == "${needle}" ]] && return 0
   done
   return 1
@@ -89,7 +89,7 @@ _lint_in_list() {
 # Format an allow-list as a comma-separated hint string ("a, b, c").
 _lint_allowed_hint() {
   local out="" item
-  for item in "$@"; do
+  for item in "${@}"; do
     out="${out:+${out}, }${item}"
   done
   echo "${out}"
@@ -219,7 +219,7 @@ lint::services() {
 # Usage: lint::lok8s_yaml <service_name> <lok8s.yaml path>
 # Returns: number of errors found
 lint::lok8s_yaml() {
-  local name="$1" file="$2"
+  local name="${1}" file="${2}"
   local errs=0
 
   local -a keys=()
@@ -364,7 +364,7 @@ lint::drift() {
 # Usage: lint::schema <domain_dir> <spec_file>
 # Returns: number of errors found
 lint::schema() {
-  local domain_dir="$1" spec_file="$2"
+  local domain_dir="${1}" spec_file="${2}"
   local errs=0
 
   local spec_kind
@@ -404,7 +404,7 @@ lint::schema() {
 # Usage: lint::clusterref <domain_dir> <spec_file>
 # Returns: number of errors found
 lint::clusterref() {
-  local domain_dir="$1" spec_file="$2"
+  local domain_dir="${1}" spec_file="${2}"
   local errs=0
 
   if [[ -f "${domain_dir}/deploy.lok8s.yaml" ]]; then
@@ -449,7 +449,7 @@ lint::clusterref() {
 # Usage: lint::bootstrap <domain_dir> <spec_file>
 # Returns: number of errors found
 lint::bootstrap() {
-  local domain_dir="$1" spec_file="$2"
+  local domain_dir="${1}" spec_file="${2}"
   local errs=0
 
   # Only cluster specs carry spec.bootstrap
@@ -495,7 +495,7 @@ lint::bootstrap() {
 # Usage: lint::kustomization <domain_dir>
 # Returns: number of errors found
 lint::kustomization() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   local errs=0
 
   if [[ -d "${domain_dir}/targets" ]]; then
@@ -530,7 +530,7 @@ lint::kustomization() {
 # Warns about manifests missing lok8s.dev/* labels.
 # Usage: lint::labels <domain_dir>
 lint::labels() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
 
   if [[ -d "${domain_dir}/targets" ]]; then
     for tdir in "${domain_dir}"/targets/*/; do
@@ -557,7 +557,7 @@ lint::labels() {
 # in the $PATH_SECRETS cache.
 # Usage: lint::secrets <domain_dir>
 lint::secrets() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
 
   # Legacy per-domain secrets/ directory (YAML Secret manifests)
   if [[ -d "${domain_dir}/secrets" ]]; then
@@ -626,7 +626,7 @@ lint::apex() {
 }
 
 lint::all() {
-  local domain="$1"
+  local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
   local errors=0
 

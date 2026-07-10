@@ -8,13 +8,13 @@
 : "${NC:=\033[0m}"
 
 debug() {
-  [[ -z "${DEBUG:-}" ]] || echo -e "${GREEN}[debug]${NC} $*" >&2
+  [[ -z "${DEBUG:-}" ]] || echo -e "${GREEN}[debug]${NC} ${*}" >&2
 }
 
 error() {
-  echo -e "${RED}[error]${NC} $*" >&2
+  echo -e "${RED}[error]${NC} ${*}" >&2
 }
 
 warn() {
-  echo -e "${YELLOW}[warn]${NC} $*" >&2
+  echo -e "${YELLOW}[warn]${NC} ${*}" >&2
 }

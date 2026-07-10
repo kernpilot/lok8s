@@ -38,13 +38,13 @@ EOF
 # Write the CR as a cluster spec where the driver contract expects it:
 # $PATH_CLUSTERS/<domain>/cluster.lok8s.yaml
 lo_hook::materialize_spec() {
-  local domain="$1" object_json="$2"
+  local domain="${1}" object_json="${2}"
   mkdir -p "${PATH_CLUSTERS}/${domain}"
   echo "${object_json}" | yq -P '.' > "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
 }
 
 lo_hook::ensure_finalizer() {
-  local name="$1" namespace="$2" finalizers_json="$3"
+  local name="${1}" namespace="${2}" finalizers_json="${3}"
   if echo "${finalizers_json}" | jq -e --arg f "${FINALIZER}" 'index($f) != null' >/dev/null 2>&1; then
     return 0
   fi
@@ -56,7 +56,7 @@ lo_hook::ensure_finalizer() {
 }
 
 lo_hook::remove_finalizer() {
-  local name="$1" namespace="$2"
+  local name="${1}" namespace="${2}"
   local remaining
   remaining=$(kubectl get lo "${name}" -n "${namespace}" \
     -o jsonpath='{.metadata.finalizers}' 2>/dev/null |
@@ -69,7 +69,7 @@ lo_hook::remove_finalizer() {
 # Publish the cluster's kubeconfig as Secret <name>-kubeconfig and
 # reference it from status.
 lo_hook::publish_kubeconfig() {
-  local name="$1" namespace="$2" domain="$3"
+  local name="${1}" namespace="${2}" domain="${3}"
   local cluster_name kubeconfig_path
   cluster_name=$(yq -r '.metadata.name' "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
   kubeconfig_path="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
@@ -86,7 +86,7 @@ lo_hook::publish_kubeconfig() {
 }
 
 lo_hook::teardown() {
-  local name="$1" namespace="$2" domain="$3"
+  local name="${1}" namespace="${2}" domain="${3}"
 
   hook::patch_status lo "${name}" "${namespace}" \
     '{"status":{"phase":"Terminating","ready":false}}'
@@ -106,7 +106,7 @@ lo_hook::teardown() {
 }
 
 lo_hook::provision() {
-  local name="$1" namespace="$2" domain="$3"
+  local name="${1}" namespace="${2}" domain="${3}"
 
   hook::patch_status lo "${name}" "${namespace}" \
     '{"status":{"phase":"Provisioning","ready":false}}'
@@ -130,7 +130,7 @@ lo_hook::provision() {
 
 # Converge one Lo object (full JSON) toward its spec.
 lo_hook::reconcile() {
-  local object_json="$1"
+  local object_json="${1}"
 
   local name namespace domain deletion finalizers
   name=$(echo "${object_json}" | jq -r '.metadata.name')

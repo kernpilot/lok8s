@@ -41,7 +41,7 @@ EOF
 
 # Detect CAPI provider from the CR spec JSON.
 capi::detect_provider_from_spec() {
-  local spec="$1"
+  local spec="${1}"
   if echo "${spec}" | jq -e '.hcloud' &>/dev/null; then
     echo "hetzner"
   elif echo "${spec}" | jq -e '.aws' &>/dev/null; then
@@ -55,7 +55,7 @@ capi::detect_provider_from_spec() {
 # Generate CAPI resources from templates using CR spec values.
 # Templates are copied into /hooks/capi-templates/ in the container.
 capi::generate_from_spec() {
-  local spec="$1" provider="$2" name="$3"
+  local spec="${1}" provider="${2}" name="${3}"
   local tmpl_dir="${HOOK_DIR}/capi-templates"
 
   if [[ ! -d "${tmpl_dir}" ]]; then
@@ -147,7 +147,7 @@ capi::generate_from_spec() {
 }
 
 capi_hook::ensure_finalizer() {
-  local name="$1" namespace="$2" finalizers_json="$3"
+  local name="${1}" namespace="${2}" finalizers_json="${3}"
   if echo "${finalizers_json}" | jq -e --arg f "${FINALIZER}" 'index($f) != null' >/dev/null 2>&1; then
     return 0
   fi
@@ -159,7 +159,7 @@ capi_hook::ensure_finalizer() {
 }
 
 capi_hook::remove_finalizer() {
-  local name="$1" namespace="$2"
+  local name="${1}" namespace="${2}"
   local remaining
   remaining=$(kubectl get capi "${name}" -n "${namespace}" \
     -o jsonpath='{.metadata.finalizers}' 2>/dev/null |
@@ -179,7 +179,7 @@ capi_hook::remove_finalizer() {
 # cluster. The CAPI Cluster lives in spec.cluster.namespace (not necessarily
 # the CR's namespace) and is named after the CR (CLUSTER_NAME in generate).
 capi_hook::teardown() {
-  local name="$1" namespace="$2" spec="$3"
+  local name="${1}" namespace="${2}" spec="${3}"
   local cluster_ns
   cluster_ns=$(echo "${spec}" | jq -r '.cluster.namespace // "default"')
 
@@ -199,7 +199,7 @@ capi_hook::teardown() {
 
 # Detect provider, render the CAPI manifests from templates, and apply them.
 capi_hook::provision() {
-  local name="$1" namespace="$2" spec="$3"
+  local name="${1}" namespace="${2}" spec="${3}"
 
   kubectl patch capi "${name}" -n "${namespace}" \
     --type merge --subresource status \
@@ -239,7 +239,7 @@ capi_hook::provision() {
 # Converge one Capi object (full JSON) toward its spec — provision when live,
 # finalizer-guarded teardown when it's being deleted.
 capi_hook::reconcile() {
-  local object_json="$1"
+  local object_json="${1}"
   local name namespace spec deletion finalizers
   name=$(echo "${object_json}" | jq -r '.metadata.name')
   namespace=$(echo "${object_json}" | jq -r '.metadata.namespace // "default"')

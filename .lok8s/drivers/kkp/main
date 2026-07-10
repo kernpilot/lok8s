@@ -208,7 +208,7 @@ driver::kubeconfig() {
 
 # Optional: validate credentials before provisioning starts
 driver::ensure_credentials() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   # Set API URL from spec if needed
   if [[ -z "${KKP_API_URL:-}" ]]; then
@@ -226,7 +226,7 @@ driver::ensure_credentials() {
 
 # Build the cluster creation JSON payload from cluster spec.
 _build_cluster_json() {
-  local name="$1" version="$2" datacenter="$3" provider="$4" cluster_yaml="$5"
+  local name="${1}" version="${2}" datacenter="${3}" provider="${4}" cluster_yaml="${5}"
 
   local preset
   preset=$(yq -r '.spec.kkp.preset // ""' "${cluster_yaml}" 2>/dev/null)
@@ -257,7 +257,7 @@ _build_cluster_json() {
 
 # Build the cloud spec section based on provider.
 _build_cloud_spec() {
-  local provider="$1" cluster_yaml="$2" preset="$3"
+  local provider="${1}" cluster_yaml="${2}" preset="${3}"
 
   if [[ -n "${preset}" ]]; then
     jq -n --arg provider "${provider}" --arg preset "${preset}" \
@@ -291,7 +291,7 @@ _build_cloud_spec() {
 
 # Create worker pool machine deployments from spec.workers.
 _create_worker_pools() {
-  local project_id="$1" cluster_id="$2" cluster_yaml="$3" provider="$4"
+  local project_id="${1}" cluster_id="${2}" cluster_yaml="${3}" provider="${4}"
 
   local pool_count
   pool_count=$(yq -r '.spec.workers | keys | length // 0' "${cluster_yaml}" 2>/dev/null || echo "0")
@@ -355,8 +355,8 @@ _create_worker_pools() {
 
 # Build machine deployment JSON for a worker pool.
 _build_machinedeployment_json() {
-  local name="$1" replicas="$2" flavor="$3" os_name="$4" provider="$5"
-  local autoscaler_min="$6" autoscaler_max="$7"
+  local name="${1}" replicas="${2}" flavor="${3}" os_name="${4}" provider="${5}"
+  local autoscaler_min="${6}" autoscaler_max="${7}"
 
   local cloud_spec
   case "${provider}" in

@@ -196,7 +196,7 @@ driver::kubeconfig() {
 # by provider::output) as hosts[].labels for KubeOne's labelNodes task.
 
 _append_inventory() {
-  local config_file="$1" manifest="$2"
+  local config_file="${1}" manifest="${2}"
 
   local output
   output=$(provider::output "${config_file}")
@@ -305,12 +305,12 @@ _append_inventory() {
     # space-separated KUBEONE_EXTRA_SANS override; plus every control-plane
     # private IP. Without these the apiserver cert misses the in-cluster/private
     # addresses and CP (re)joins fail "apiserver cert not valid for <ip>".
-    local _lbpriv; _lbpriv="$(echo "${output}" | jq -r '.api.privateEndpoint // ""')"
-    [[ -z "${_lbpriv}" ]] || echo "    - \"${_lbpriv}\""
-    local _san
-    for _san in ${KUBEONE_EXTRA_SANS:-}; do
-      [[ "${_san}" == "${_lbpriv}" ]] && continue
-      echo "    - \"${_san}\""
+    local lb_private_ip; lb_private_ip="$(echo "${output}" | jq -r '.api.privateEndpoint // ""')"
+    [[ -z "${lb_private_ip}" ]] || echo "    - \"${lb_private_ip}\""
+    local san
+    for san in ${KUBEONE_EXTRA_SANS:-}; do
+      [[ "${san}" == "${lb_private_ip}" ]] && continue
+      echo "    - \"${san}\""
     done
     echo "${output}" | jq -r '.nodes[] | select(.role == "control-plane") | "    - \"\(.private_ip)\""'
     echo ""

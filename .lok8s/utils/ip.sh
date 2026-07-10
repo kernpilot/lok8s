@@ -5,7 +5,7 @@
 # Validate dotted-quad IPv4 format (0-255 per octet)
 # Usage: ip::validate_format <ip>
 ip::validate_format() {
-  local ip="$1"
+  local ip="${1}"
   if [[ ! "${ip}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
     echo "error: invalid IP format '${ip}'" >&2
     return 1
@@ -20,7 +20,7 @@ ip::validate_format() {
 # Convert dotted-quad IP to a 32-bit integer
 # Usage: ip::to_int <ip>
 ip::to_int() {
-  local ip="$1"
+  local ip="${1}"
   ip::validate_format "${ip}" || return 1
   local a b c d
   IFS='.' read -r a b c d <<< "${ip}"
@@ -30,14 +30,14 @@ ip::to_int() {
 # Convert 32-bit integer back to dotted-quad IP
 # Usage: ip::from_int <int>
 ip::from_int() {
-  local n="$1"
+  local n="${1}"
   echo "$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))"
 }
 
 # Add an offset to an IP address
 # Usage: ip::add <ip> <offset>
 ip::add() {
-  local ip="$1" offset="$2"
+  local ip="${1}" offset="${2}"
   local n
   n=$(ip::to_int "${ip}")
   ip::from_int $(( n + offset ))
@@ -47,7 +47,7 @@ ip::add() {
 # Usage: ip::validate_in_subnet <ip> <cidr>
 # Returns 0 if valid, 1 if not
 ip::validate_in_subnet() {
-  local ip="$1" cidr="$2"
+  local ip="${1}" cidr="${2}"
   local subnet_ip="${cidr%/*}"
   local prefix_len="${cidr#*/}"
   local mask=$(( (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF ))

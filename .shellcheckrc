@@ -1,0 +1,3 @@
+# House style: always brace variable expansions — "${var}", "${1}", not "$var"/"$1".
+# SC2250 only flags named vars; positionals are swept by convention + review.
+enable=require-variable-braces

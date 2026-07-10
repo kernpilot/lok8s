@@ -21,7 +21,7 @@
 # ── Validation ────────────────────────────────────────────
 
 lo::validate_mirror_name() {
-  local name="$1"
+  local name="${1}"
   if [[ ! "${name}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     echo "error: invalid mirror name '${name}': must match ^[a-z0-9][a-z0-9-]*$" >&2
     return 1
@@ -29,7 +29,7 @@ lo::validate_mirror_name() {
 }
 
 lo::validate_ips() {
-  local subnet="$1"
+  local subnet="${1}"
   local metallb_pool="${2:-}"
   local errors=0
 
@@ -41,7 +41,7 @@ lo::validate_ips() {
   shared_cidr=$(registry::network_cidr)
 
   _lo_validate_registry_ip() {
-    local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
     local target_subnet="${subnet}"
     if registry::is_shared && [[ "${type}" == "mirror" ]]; then
       target_subnet="${shared_cidr}"
@@ -114,7 +114,7 @@ lo::slot_from_domain() {
 # ── Config readers ────────────────────────────────────────
 
 lo::read_network_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   local net_name net_cidr
   net_name=$(yq -r '.spec.network.name // ""' "${cluster_yaml}")
@@ -147,13 +147,13 @@ lo::read_network_config() {
 }
 
 lo::read_node_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
-  local _default_host_ports="false"
-  local _slot
-  _slot=$(lo::slot_from_domain "${cluster_yaml}")
-  if [[ "${_slot}" == "${LO_DEFAULT_SLOT}" ]]; then
-    _default_host_ports="true"
+  local default_host_ports="false"
+  local slot
+  slot=$(lo::slot_from_domain "${cluster_yaml}")
+  if [[ "${slot}" == "${LO_DEFAULT_SLOT}" ]]; then
+    default_host_ports="true"
   fi
 
   local has_nodes
@@ -162,38 +162,38 @@ lo::read_node_config() {
   if [[ -n "${has_nodes}" ]]; then
     LOK8S_CP_COUNT=$(yq -r '.spec.nodes.controlPlane // 1' "${cluster_yaml}")
     LOK8S_WORKER_COUNT=$(yq -r '.spec.nodes.workers // 0' "${cluster_yaml}")
-    local _hp
-    _hp=$(yq -r '.spec.nodes.hostPorts' "${cluster_yaml}")
-    if [[ "${_hp}" == "null" || -z "${_hp}" ]]; then
-      LOK8S_HOST_PORTS="${_default_host_ports}"
+    local host_ports
+    host_ports=$(yq -r '.spec.nodes.hostPorts' "${cluster_yaml}")
+    if [[ "${host_ports}" == "null" || -z "${host_ports}" ]]; then
+      LOK8S_HOST_PORTS="${default_host_ports}"
     else
-      LOK8S_HOST_PORTS="${_hp}"
+      LOK8S_HOST_PORTS="${host_ports}"
     fi
   else
     LOK8S_CP_COUNT=1
     LOK8S_WORKER_COUNT=0
-    LOK8S_HOST_PORTS="${_default_host_ports}"
+    LOK8S_HOST_PORTS="${default_host_ports}"
   fi
 
   LOK8S_EXTRA_MOUNTS_COUNT=$(yq -r '.spec.nodes.extraMounts | length // 0' "${cluster_yaml}")
 
-  local _mcd
-  _mcd=$(yq -r '.spec.nodes.maxConcurrentDownloads' "${cluster_yaml}")
-  if [[ "${_mcd}" == "null" || -z "${_mcd}" ]]; then
+  local max_downloads
+  max_downloads=$(yq -r '.spec.nodes.maxConcurrentDownloads' "${cluster_yaml}")
+  if [[ "${max_downloads}" == "null" || -z "${max_downloads}" ]]; then
     LOK8S_MAX_CONCURRENT_DOWNLOADS=3
   else
-    if ! [[ "${_mcd}" =~ ^[1-9][0-9]*$ ]]; then
-      echo "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '${_mcd}'" >&2
+    if ! [[ "${max_downloads}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '${max_downloads}'" >&2
       return 1
     fi
-    LOK8S_MAX_CONCURRENT_DOWNLOADS="${_mcd}"
+    LOK8S_MAX_CONCURRENT_DOWNLOADS="${max_downloads}"
   fi
 
   export LOK8S_CP_COUNT LOK8S_WORKER_COUNT LOK8S_HOST_PORTS LOK8S_EXTRA_MOUNTS_COUNT LOK8S_MAX_CONCURRENT_DOWNLOADS
 }
 
 lo::read_lb_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   local has_lb
   has_lb=$(yq -r '.spec.loadBalancer // ""' "${cluster_yaml}")
@@ -205,10 +205,10 @@ lo::read_lb_config() {
   fi
 
   if [[ -z "${LOK8S_LB_POOL}" ]]; then
-    local _slot
-    _slot=$(lo::slot_from_domain "${cluster_yaml}")
-    if [[ -n "${_slot}" ]]; then
-      LOK8S_LB_POOL="10.125.${_slot}.125-10.125.${_slot}.150"
+    local slot
+    slot=$(lo::slot_from_domain "${cluster_yaml}")
+    if [[ -n "${slot}" ]]; then
+      LOK8S_LB_POOL="10.125.${slot}.125-10.125.${slot}.150"
     fi
   fi
 
@@ -216,30 +216,30 @@ lo::read_lb_config() {
 }
 
 lo::read_remote_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   LOK8S_REMOTE_MODE=$(yq -r '.spec.remote.mode // "docker"' "${cluster_yaml}")
 
-  local _expose
-  _expose=$(yq -r '.spec.remote.expose' "${cluster_yaml}")
-  if [[ "${_expose}" == "null" || -z "${_expose}" ]]; then
+  local expose
+  expose=$(yq -r '.spec.remote.expose' "${cluster_yaml}")
+  if [[ "${expose}" == "null" || -z "${expose}" ]]; then
     if [[ -n "${PROVIDER_NAME:-}" ]]; then
       LOK8S_REMOTE_EXPOSE="true"
     else
       LOK8S_REMOTE_EXPOSE="false"
     fi
   else
-    LOK8S_REMOTE_EXPOSE="${_expose}"
+    LOK8S_REMOTE_EXPOSE="${expose}"
   fi
 
   LOK8S_REMOTE_SYNC_PATH=$(yq -r '.spec.remote.sync.path // "."' "${cluster_yaml}")
   LOK8S_REMOTE_SYNC_DEST=$(yq -r '.spec.remote.sync.dest // "/workspace"' "${cluster_yaml}")
 
-  local -a _default_exclude=(".git" "node_modules" ".secrets" ".kubeconfig" "clusters/.active")
-  local _exclude_json
-  _exclude_json=$(yq -r '.spec.remote.sync.exclude // "null"' "${cluster_yaml}")
-  if [[ "${_exclude_json}" == "null" ]]; then
-    LOK8S_REMOTE_SYNC_EXCLUDE=("${_default_exclude[@]}")
+  local -a default_exclude=(".git" "node_modules" ".secrets" ".kubeconfig" "clusters/.active")
+  local exclude_json
+  exclude_json=$(yq -r '.spec.remote.sync.exclude // "null"' "${cluster_yaml}")
+  if [[ "${exclude_json}" == "null" ]]; then
+    LOK8S_REMOTE_SYNC_EXCLUDE=("${default_exclude[@]}")
   else
     mapfile -t LOK8S_REMOTE_SYNC_EXCLUDE < <(yq -r '.spec.remote.sync.exclude[]?' "${cluster_yaml}")
   fi
@@ -251,7 +251,7 @@ lo::read_remote_config() {
 
 # lo::read_config — read all config sections in the correct order.
 lo::read_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   lo::read_network_config "${cluster_yaml}"   # also calls read_registry_config
   lo::read_node_config "${cluster_yaml}"
   lo::read_lb_config "${cluster_yaml}"
@@ -260,7 +260,7 @@ lo::read_config() {
 # ── Spec env export ───────────────────────────────────────
 
 lo::export_spec_envs() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   LOK8S_SPEC_CLUSTER_NAME=$(yq -r '.metadata.name // ""' "${cluster_yaml}")
   LOK8S_SPEC_CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain // ""' "${cluster_yaml}")

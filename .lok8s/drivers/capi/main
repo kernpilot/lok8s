@@ -199,10 +199,10 @@ driver::destroy() {
   # recover it — otherwise we would delete the kind cluster below with a live
   # workload (and its billed servers) still behind it.
   if [[ ! -f "${mgmt_kubeconfig}" && "${mgmt_local}" == "true" ]]; then
-    local _kn; _kn=$(capi::mgmt_kind_name "${mgmt_domain}")
-    if kind get clusters 2>/dev/null | grep -qx "${_kn}"; then
+    local kind_cluster; kind_cluster=$(capi::mgmt_kind_name "${mgmt_domain}")
+    if kind get clusters 2>/dev/null | grep -qx "${kind_cluster}"; then
       mkdir -p "${PATH_BASE}/.kubeconfig"
-      kind get kubeconfig --name "${_kn}" > "${mgmt_kubeconfig}" 2>/dev/null || true
+      kind get kubeconfig --name "${kind_cluster}" > "${mgmt_kubeconfig}" 2>/dev/null || true
     fi
   fi
 
@@ -275,7 +275,7 @@ driver::kubeconfig() {
 
 # Optional contract function — Capi needs credential setup
 driver::ensure_credentials() {
-  local cluster_yaml="$1" provider="$2" kubeconfig="$3"
+  local cluster_yaml="${1}" provider="${2}" kubeconfig="${3}"
 
   credentials::require "${provider}" || return 1
 
@@ -294,7 +294,7 @@ capi::mgmt_kind_name() { echo "${1//[._]/-}"; }
 # (kind management locally, real workload nodes on the cloud provider).
 # Usage: capi::ensure_local_mgmt <mgmt_domain> <provider>
 capi::ensure_local_mgmt() {
-  local mgmt_domain="$1" provider="$2"
+  local mgmt_domain="${1}" provider="${2}"
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
   local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
 
@@ -335,7 +335,7 @@ capi::ensure_local_mgmt() {
 #       install operator + CAPI on mgmt -> clusterctl move -> deploy targets -> cleanup
 # Usage: capi::bootstrap <domain>   (cluster_yaml is re-derived from the domain)
 capi::bootstrap() {
-  local domain="$1"
+  local domain="${1}"
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local bootstrap_name="lok8s-bootstrap"
   local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${bootstrap_name}.yaml"
