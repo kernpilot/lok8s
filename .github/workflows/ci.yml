@@ -173,12 +173,15 @@ jobs:
             exit 1
           fi
 
-      - name: ClusterInventory round-trips and prunes non-metadata fields
+      - name: ClusterInventory rejects non-metadata fields and round-trips
         run: |
-          # The inventory CRD (lok8s.dev group, cluster-scoped singleton) must
-          # round-trip — and, critically, PRUNE anything beyond the enumerated
-          # metadata fields: values/secrets structurally cannot land in it.
-          kubectl apply --server-side --field-manager=lok8s -f - <<'EOF'
+          # The inventory CRD (lok8s.dev group, cluster-scoped singleton) is
+          # metadata-ONLY. lo writes it with server-side apply
+          # (libs/inventory/main), and SSA REJECTS undeclared fields outright
+          # ("field not declared in schema") rather than pruning them — values/
+          # secrets structurally cannot land in it. The old assertion expected
+          # client-side-apply pruning and failed on every run: SSA errors first.
+          cat > /tmp/smuggled-inventory.yaml <<'EOF'
           apiVersion: lok8s.dev/v1alpha1
           kind: ClusterInventory
           metadata:
@@ -191,16 +194,40 @@ jobs:
             specHash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             renderedAt: "2026-01-01T00:00:00Z"
             values:
-              smuggled: chart-values-must-be-pruned
+              smuggled: chart-values-must-be-rejected
             addons:
               - name: cilium
                 chartVersion: 1.19.2
                 category: networking
                 source: addon
-                inlineValues: must-be-pruned-too
+                inlineValues: must-be-rejected-too
+          EOF
+          if kubectl apply --server-side --field-manager=lok8s               -f /tmp/smuggled-inventory.yaml 2>/tmp/smuggled-err.txt; then
+            echo "smuggled spec.values/inlineValues were ACCEPTED — the schema no longer rejects unknown fields" >&2
+            exit 1
+          fi
+          grep -q 'field not declared in schema' /tmp/smuggled-err.txt             || { echo "apply failed for an unexpected reason:" >&2; cat /tmp/smuggled-err.txt >&2; exit 1; }
+
+          # A clean CR (production shape) round-trips via the same SSA path.
+          kubectl apply --server-side --field-manager=lok8s -f - <<'EOF'
+          apiVersion: lok8s.dev/v1alpha1
+          kind: ClusterInventory
+          metadata:
+            name: cluster
+          spec:
+            lok8sVersion: 0.1.0
+            kind: kubeone
+            provider: hetzner
+            kubernetesVersion: v1.31.12
+            specHash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            renderedAt: "2026-01-01T00:00:00Z"
+            addons:
+              - name: cilium
+                chartVersion: 1.19.2
+                category: networking
+                source: addon
           EOF
           test "$(kubectl get clusterinventories.lok8s.dev cluster -o jsonpath='{.spec.kubernetesVersion}')" = "v1.31.12"
-          # No preserve-unknown-fields anywhere: both smuggled keys are gone.
           kubectl get clusterinventories.lok8s.dev cluster -o json | jq -e '
             (.spec | has("values") | not) and
             (.spec.addons[0] | has("inlineValues") | not) and
