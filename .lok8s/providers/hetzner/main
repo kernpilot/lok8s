@@ -49,6 +49,9 @@ _cfg() { yq -r "$1" "${PROVIDER_CONFIG_FILE}"; }
 #   value: <=63 chars, empty OR [alnum]([alnum._-]*[alnum])?
 #   key:   optional "<dns-subdomain>/" prefix (<=253) + name segment
 #          <=63 chars matching [alnum]([alnum._-]*[alnum])?
+# A single trailing "-" on a key is KubeOne's addRemoveKeyValues REMOVAL
+# marker ("key-": "" deletes the Node label on the next apply) — the key is
+# validated as if the marker were absent, so a removal entry passes through.
 # Echoes the filtered labels JSON map. Proportionate: skip+warn, not fatal.
 _validate_node_labels() {
   local labels_json="${1:-'{}'}" node="${2:-node}"
@@ -57,7 +60,7 @@ _validate_node_labels() {
     def valid_seg: test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
     def valid_value: . == "" or test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
     def valid_key:
-      (. | split("/")) as $p
+      (sub("-$"; "") | split("/")) as $p
       | (if ($p | length) == 1 then ($p[0] | valid_seg)
          elif ($p | length) == 2 then (($p[0] | length) <= 253 and ($p[0] | test("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")) and ($p[1] | valid_seg))
          else false end);
@@ -73,7 +76,7 @@ _validate_node_labels() {
     def valid_seg: test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
     def valid_value: . == "" or test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");
     def valid_key:
-      (. | split("/")) as $p
+      (sub("-$"; "") | split("/")) as $p
       | (if ($p | length) == 1 then ($p[0] | valid_seg)
          elif ($p | length) == 2 then (($p[0] | length) <= 253 and ($p[0] | test("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")) and ($p[1] | valid_seg))
          else false end);
