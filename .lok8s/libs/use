@@ -50,9 +50,9 @@ main::use() {
     # so does an absent flag (it falls back to .active). Treat DOMAIN_NAME as
     # an explicit target only when it differs from the current active — so a
     # bare `lo use` still lists, while `lo use --domain X` sets X.
-    local _active_now=""
-    [[ -f "${PATH_CLUSTERS}/.active" ]] && _active_now="$(cat "${PATH_CLUSTERS}/.active")"
-    if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "${_active_now}" ]]; then
+    local active_now=""
+    [[ -f "${PATH_CLUSTERS}/.active" ]] && active_now="$(cat "${PATH_CLUSTERS}/.active")"
+    if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "${active_now}" ]]; then
       target="${DOMAIN_NAME}"
     fi
   fi

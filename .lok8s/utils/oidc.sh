@@ -96,9 +96,9 @@ oidc::render_auth_config() {
     echo "      certificateAuthority: |"
     # Indent every line of the PEM under the block scalar. printf keeps the
     # final newline handling predictable; the while-read is set -e safe.
-    local _line
-    while IFS= read -r _line || [[ -n "${_line}" ]]; do
-      echo "        ${_line}"
+    local line
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      echo "        ${line}"
     done <<< "${ca_bundle}"
   fi
   echo "    claimMappings:"

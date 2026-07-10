@@ -130,10 +130,10 @@ provider::provision() {
   [[ -f "${config_file}" ]] || { error "config not found: ${config_file}"; return 1; }
 
   # Source the cloud-config generator (for per-server cloud-init)
-  local _cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
-  if [[ -f "${_cc_script}" ]]; then
+  local cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
+  if [[ -f "${cc_script}" ]]; then
     # shellcheck source=/dev/null
-    source "${_cc_script}"
+    source "${cc_script}"
   fi
 
   # Set up cloud-init environment from config. The CLOUD_PATH / CLOUD_PATH_LIB /
@@ -142,9 +142,9 @@ provider::provision() {
   # provision-specific: the whole-cluster module set from .cloudInit.modules
   # (rebuild overrides CLOUD_PATHD per server from each server's #cloud.d).
   hetzner::_export_cloudinit_env "${config_file}"
-  local _ci_modules
-  _ci_modules=$(_cfg '.cloudInit.modules // ""' 2>/dev/null || echo "")
-  export CLOUD_PATHD="${_ci_modules}"
+  local ci_modules
+  ci_modules=$(_cfg '.cloudInit.modules // ""' 2>/dev/null || echo "")
+  export CLOUD_PATHD="${ci_modules}"
 
   # Load the descriptor (JSON or YAML → JSON)
   CLOUD_HETZNER_JSON="$(envsubst < "${config_file}")"
@@ -219,11 +219,11 @@ provider::output() {
   # Networks aren't created with the cluster label, so the label lookup
   # returns nothing → the CCM never gets the network ID → node init hangs.
   # Look the network up by its descriptor NAME instead (unique per project).
-  local _net_name_desc
-  _net_name_desc=$(_cfg '.network[0].name // ""' 2>/dev/null || echo "")
+  local net_name_desc
+  net_name_desc=$(_cfg '.network[0].name // ""' 2>/dev/null || echo "")
   net_json=$(hcloud network list -o json -l "${selector}")
-  if [[ "$(echo "${net_json}" | jq 'length' 2>/dev/null || echo 0)" == "0" && -n "${_net_name_desc}" ]]; then
-    net_json=$(hcloud network list -o json | jq --arg n "${_net_name_desc}" '[.[] | select(.name == $n)]')
+  if [[ "$(echo "${net_json}" | jq 'length' 2>/dev/null || echo 0)" == "0" && -n "${net_name_desc}" ]]; then
+    net_json=$(hcloud network list -o json | jq --arg n "${net_name_desc}" '[.[] | select(.name == $n)]')
   fi
 
   local lb_address lb_private
@@ -249,15 +249,15 @@ provider::output() {
 
   # Check for bare metal servers with different access
   if [[ -f "${config_file}" ]]; then
-    local _desc
+    local desc
     # Normalize to JSON (yq reads JSON too) so bare-metal extraction works for a
     # YAML descriptor, matching how _cfg/desc are resolved elsewhere.
-    _desc=$(yq -o json '.' "${config_file}")
-    local _has_root
-    _has_root=$(echo "${_desc}" | jq '[.server[]? | select(.["#cloud.root"] == "true")] | length')
-    if (( _has_root > 0 )); then
+    desc=$(yq -o json '.' "${config_file}")
+    local has_root
+    has_root=$(echo "${desc}" | jq '[.server[]? | select(.["#cloud.root"] == "true")] | length')
+    if (( has_root > 0 )); then
       local robot_key
-      robot_key=$(echo "${_desc}" | jq -r '.server[]? | select(.["#cloud.root"] == "true") | .["#ssh-private-key"] // "" | select(. != "")' | head -1)
+      robot_key=$(echo "${desc}" | jq -r '.server[]? | select(.["#cloud.root"] == "true") | .["#ssh-private-key"] // "" | select(. != "")' | head -1)
       access=$(echo "${access}" | jq \
         --arg user "${ssh_user}" \
         --arg privkey "${robot_key:-${ssh_private_key}}" \
@@ -295,8 +295,8 @@ provider::output() {
 
   # Bare metal servers from JSON descriptor (#cloud.root with #external-ip)
   if [[ -f "${config_file}" ]]; then
-    local _desc
-    _desc="${_desc:-$(yq -o json '.' "${config_file}")}"
+    local desc
+    desc="${desc:-$(yq -o json '.' "${config_file}")}"
     while IFS= read -r server; do
       [[ -n "${server}" ]] || continue
       local name pub_ip priv_ip labels role group
@@ -329,7 +329,7 @@ provider::output() {
         --arg pub "${pub_ip}" --arg priv "${priv_ip}" \
         --arg user "${ssh_user}" --argjson labels "${node_labels}" \
         '. + [{"name": $name, "role": $role, "group": $group, "public_ip": $pub, "private_ip": $priv, "access": "dedicated", "ssh_user": $user, "ssh_port": 22, "labels": $labels}]')
-    done < <(echo "${_desc}" | jq -c '.server[]? | select(.["#cloud.root"] == "true")')
+    done < <(echo "${desc}" | jq -c '.server[]? | select(.["#cloud.root"] == "true")')
   fi
 
   local net_id net_name net_cidr
@@ -428,26 +428,26 @@ provider::rebuild() {
     error "rebuild: could not resolve inventory (provider::output failed)"; return 1; }
 
   # Cloud-init generation environment (shared with provider::provision).
-  local _cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
-  [[ ! -f "${_cc_script}" ]] || {
+  local cc_script="${PATH_LOK8S}/providers/hetzner/cloud-config"
+  [[ ! -f "${cc_script}" ]] || {
     # shellcheck source=/dev/null
-    source "${_cc_script}"
+    source "${cc_script}"
   }
   hetzner::_export_cloudinit_env "${config_file}"
 
   # Readiness-barrier SSH command (identity from the descriptor).
-  local _ssh_key
-  _ssh_key="$(echo "${desc}" | jq -r '.sshPrivateKey // ""')"
+  local ssh_key
+  ssh_key="$(echo "${desc}" | jq -r '.sshPrivateKey // ""')"
   # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME below
-  [[ "${_ssh_key}" != "~/"* ]] || _ssh_key="${HOME}/${_ssh_key:2}"
-  local -a _ssh=(ssh -o BatchMode=yes -o ConnectTimeout=12
+  [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
+  local -a ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=12
                  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
                  -o LogLevel=ERROR)
-  [[ -z "${_ssh_key}" ]] || _ssh+=(-i "${_ssh_key}")
+  [[ -z "${ssh_key}" ]] || ssh_cmd+=(-i "${ssh_key}")
 
   # Rescue-key fingerprint (bare-metal only) — from the descriptor public key
   # unless explicitly overridden. Derived once, reused for every worker.
-  local _fp="${PROVIDER_ROBOT_RESCUE_FP:-}"
+  local fp="${PROVIDER_ROBOT_RESCUE_FP:-}"
 
   local count
   count="$(echo "${desc}" | jq '(.server // []) | length')"
@@ -481,10 +481,10 @@ provider::rebuild() {
       if [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
         error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"; return 1
       fi
-      if [[ -z "${_fp}" ]]; then
-        _fp="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || _fp=""
+      if [[ -z "${fp}" ]]; then
+        fp="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || fp=""
       fi
-      [[ -n "${_fp}" ]] || {
+      [[ -n "${fp}" ]] || {
         error "rebuild: cannot determine rescue key fingerprint for '${name}' (descriptor .sshPublicKey unreadable; set PROVIDER_ROBOT_RESCUE_FP)"; return 1; }
       ext_ip="$(echo "${server}" | jq -r '.["#external-ip"] // ""')"
       [[ -n "${ext_ip}" ]] || {
@@ -492,7 +492,7 @@ provider::rebuild() {
       num="$(hetzner::_robot_server_number_by_ip "${ext_ip}")" || num=""
       [[ -n "${num}" ]] || {
         error "rebuild: bare-metal node '${name}' (${ext_ip}) did not resolve to exactly one Robot server by IP — refusing to rescue/reset (name/IP collision, no match, or Robot API error)"; return 1; }
-      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${_fp}")
+      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${fp}")
       metal_ips+=("${pub}")
     else
       # ── Cloud VM: name must uniquely carry the cluster label ──
@@ -549,7 +549,7 @@ provider::rebuild() {
     return "${rc}"
   fi
 
-  hetzner::_rebuild_barrier _ssh cloud_ips metal_ips || rc=1
+  hetzner::_rebuild_barrier ssh_cmd cloud_ips metal_ips || rc=1
 
   (( rc != 0 )) || _hetzner_print \
     "✅ rebuild complete — nodes reset (data disks untouched; wipe is #wipe-devices during provision)"
@@ -565,21 +565,21 @@ provider::rebuild() {
 # .cloudInit.modules; rebuild: per-server #cloud.d).
 hetzner::_export_cloudinit_env() {
   local config_file="${1}"
-  local _ci_path _ci_user _ci_group _ci_pub
-  _ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
-  if [[ -n "${_ci_path}" && "${_ci_path}" != /* ]]; then
-    _ci_path="$(dirname "${config_file}")/${_ci_path}"
+  local ci_path ci_user ci_group ci_pub
+  ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
+  if [[ -n "${ci_path}" && "${ci_path}" != /* ]]; then
+    ci_path="$(dirname "${config_file}")/${ci_path}"
   fi
-  if [[ -z "${_ci_path}" || ! -d "${_ci_path}" ]]; then
-    _ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
+  if [[ -z "${ci_path}" || ! -d "${ci_path}" ]]; then
+    ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
   fi
-  export CLOUD_PATH="${_ci_path}"
+  export CLOUD_PATH="${ci_path}"
   export CLOUD_PATH_LIB="${PATH_LOK8S}/providers/hetzner/cloud-init"
-  _ci_user="$(_cfg '.cloudInit.user // "root"' 2>/dev/null || echo "root")"
-  _ci_group="$(_cfg '.cloudInit.group // "root"' 2>/dev/null || echo "root")"
-  _ci_pub="$(_cfg '.cloudInit.sshPubPath // ""' 2>/dev/null || echo "")"
-  export CLOUD_USER="${_ci_user}" CLOUD_GROUP="${_ci_group}"
-  export CLOUD_PATH_PUB="${_ci_pub:-${HOME}/.ssh}"
+  ci_user="$(_cfg '.cloudInit.user // "root"' 2>/dev/null || echo "root")"
+  ci_group="$(_cfg '.cloudInit.group // "root"' 2>/dev/null || echo "root")"
+  ci_pub="$(_cfg '.cloudInit.sshPubPath // ""' 2>/dev/null || echo "")"
+  export CLOUD_USER="${ci_user}" CLOUD_GROUP="${ci_group}"
+  export CLOUD_PATH_PUB="${ci_pub:-${HOME}/.ssh}"
   CLOUD_PATH_PUB="${CLOUD_PATH_PUB/#\~/${HOME}}"
 }
 
@@ -726,9 +726,9 @@ hetzner::_doctor_checks() {
   local config_file="${1}"
 
   # 1) hcloud credentials + API reachability.
-  local _ctx=""
-  _ctx="$(hcloud context active 2>/dev/null || echo "")"
-  if [[ -n "${HCLOUD_TOKEN:-}" || -n "${_ctx}" ]]; then
+  local ctx=""
+  ctx="$(hcloud context active 2>/dev/null || echo "")"
+  if [[ -n "${HCLOUD_TOKEN:-}" || -n "${ctx}" ]]; then
     if hcloud server-type list -o noheader >/dev/null 2>&1; then
       printf 'ok\thcloud API reachable\n'
     else
@@ -738,15 +738,15 @@ hetzner::_doctor_checks() {
     printf 'warn\tno hcloud credentials — export HCLOUD_TOKEN or run: hcloud context create <name>\n'
   fi
 
-  # 2) Robot credentials + API reachability. _robot_api_ok lets later checks
+  # 2) Robot credentials + API reachability. robot_api_ok lets later checks
   #    distinguish "API unreachable/errored" from a genuine negative result
   #    (e.g. key not registered) instead of conflating the two.
-  local _have_robot=0 _robot_api_ok=0
+  local have_robot=0 robot_api_ok=0
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
-    _have_robot=1
+    have_robot=1
     if curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
          -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" >/dev/null 2>&1; then
-      _robot_api_ok=1
+      robot_api_ok=1
       printf 'ok\tRobot API reachable\n'
     else
       printf 'warn\tRobot creds set but API not reachable — verify HROBOT_USER/HROBOT_PASSWORD\n'
@@ -767,30 +767,30 @@ hetzner::_doctor_checks() {
   # 3) Rescue SSH key registered in Robot (only with bare-metal + Robot creds).
   #    Distinguish "API errored" from "key not registered" — never report the
   #    key missing when the /key call itself failed.
-  if [[ "${metal_count}" =~ ^[0-9]+$ ]] && (( metal_count > 0 )) && (( _have_robot )); then
-    if (( ! _robot_api_ok )); then
+  if [[ "${metal_count}" =~ ^[0-9]+$ ]] && (( metal_count > 0 )) && (( have_robot )); then
+    if (( ! robot_api_ok )); then
       printf 'warn\tcannot verify rescue key — Robot API unreachable (see above); a missing rescue key would lock out a worker reinstall\n'
     else
-      local _fp
-      _fp="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
-      if [[ -z "${_fp}" ]]; then
+      local fp
+      fp="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
+      if [[ -z "${fp}" ]]; then
         printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
       else
-        local _keys
-        if _keys="$(curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+        local keys
+        if keys="$(curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
                       -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null)"; then
           # Exact, whole-value fingerprint match (case-insensitive). A loose
           # substring grep would let a short/truncated fingerprint false-match a
           # longer registered key — compare the /key fingerprint field as a whole.
-          if printf '%s' "${_keys}" | jq -e --arg fp "${_fp}" \
+          if printf '%s' "${keys}" | jq -e --arg fp "${fp}" \
                'any(.[]?; ((.key.fingerprint // "") | ascii_downcase) == ($fp | ascii_downcase))' \
                >/dev/null 2>&1; then
-            printf 'ok\trescue SSH key registered in Robot (%s)\n' "${_fp}"
+            printf 'ok\trescue SSH key registered in Robot (%s)\n' "${fp}"
           else
-            printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${_fp}"
+            printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${fp}"
           fi
         else
-          printf 'warn\tcannot verify rescue key — Robot /key API errored (%s NOT confirmed registered); retry or check Robot creds/network\n' "${_fp}"
+          printf 'warn\tcannot verify rescue key — Robot /key API errored (%s NOT confirmed registered); retry or check Robot creds/network\n' "${fp}"
         fi
       fi
     fi
@@ -808,13 +808,13 @@ hetzner::_doctor_checks() {
   fi
 
   # SSH identity for read-only node probes.
-  local _key
-  _key="$(echo "${desc}" | jq -r '.sshPrivateKey // ""')"
+  local key
+  key="$(echo "${desc}" | jq -r '.sshPrivateKey // ""')"
   # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME below
-  [[ "${_key}" != "~/"* ]] || _key="${HOME}/${_key:2}"
-  local -a _ssh=(ssh -o BatchMode=yes -o ConnectTimeout=6
+  [[ "${key}" != "~/"* ]] || key="${HOME}/${key:2}"
+  local -a ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=6
                  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-  [[ -z "${_key}" ]] || _ssh+=(-i "${_key}")
+  [[ -z "${key}" ]] || ssh_cmd+=(-i "${key}")
 
   # 5) Per-node: existence/reachability + bare-metal installed-vs-rescue.
   local scount idx server name is_root pub num ext_ip
@@ -826,9 +826,9 @@ hetzner::_doctor_checks() {
     is_root="$(echo "${server}" | jq -r '.["#cloud.root"] // ""')"
     pub="$(echo "${inv}" | jq -r --arg n "${name}" '.nodes[] | select(.name==$n) | .public_ip // empty')"
     if [[ "${is_root}" == "true" ]]; then
-      if (( ! _have_robot )); then
+      if (( ! have_robot )); then
         printf 'warn\tworker %s: cannot check Robot state (no Robot creds)\n' "${name}"
-      elif (( ! _robot_api_ok )); then
+      elif (( ! robot_api_ok )); then
         printf 'warn\tworker %s: cannot check Robot state (Robot API unreachable)\n' "${name}"
       else
         # Resolve BY IP (like the destructive path), never by non-unique name.
@@ -841,9 +841,9 @@ hetzner::_doctor_checks() {
         fi
       fi
       if [[ -n "${pub}" ]]; then
-        if "${_ssh[@]}" "root@${pub}" "test -x ${_HETZNER_RESCUE_MARKER}" 2>/dev/null; then
+        if "${ssh_cmd[@]}" "root@${pub}" "test -x ${_HETZNER_RESCUE_MARKER}" 2>/dev/null; then
           printf 'ok\tworker %s is in rescue (ready for reinstall)\n' "${name}"
-        elif "${_ssh[@]}" "root@${pub}" 'true' 2>/dev/null; then
+        elif "${ssh_cmd[@]}" "root@${pub}" 'true' 2>/dev/null; then
           printf 'warn\tworker %s is installed, not in rescue — set HROBOT_USER/HROBOT_PASSWORD to reset it automatically (provider::rebuild), or activate rescue via the Robot console\n' "${name}"
         else
           printf 'warn\tworker %s (%s) unreachable over SSH — cannot determine rescue/installed state\n' "${name}" "${pub}"

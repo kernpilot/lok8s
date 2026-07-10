@@ -69,10 +69,10 @@ main() {
   config="${KIND_CONFIG}"
   # Read active domain before flag parsing so --domain takes precedence
   if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
-    local _active
-    _active=$(cat "${PATH_CLUSTERS}/.active")
-    if [[ "${_active}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-      DOMAIN_NAME="${_active}"
+    local active
+    active=$(cat "${PATH_CLUSTERS}/.active")
+    if [[ "${active}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+      DOMAIN_NAME="${active}"
     else
       warn "Invalid domain in clusters/.active, ignoring"
     fi
@@ -246,14 +246,14 @@ main::up() {
   # arithmetic evaluates 0 as the function's LAST command, so a successful
   # interactive `lo up` exited 1 (review find, 2026-07-09).
   if (( open_tilt )); then
-    local _port
-    _port=$(tilt::port)
+    local port
+    port=$(tilt::port)
     if command -v xdg-open &>/dev/null; then
-      xdg-open "http://localhost:${_port}"
+      xdg-open "http://localhost:${port}"
     elif command -v open &>/dev/null; then
-      open "http://localhost:${_port}"
+      open "http://localhost:${port}"
     else
-      echo "Tilt UI: http://localhost:${_port}"
+      echo "Tilt UI: http://localhost:${port}"
     fi
   fi
 }
@@ -265,10 +265,10 @@ main::down() {
   # infrastructure and must be deprovisioned via the driver's destroy contract;
   # only the local kind driver (lo) is torn down by deleting the kind cluster +
   # Tilt + registries below.
-  local _spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/cluster.lok8s.yaml" _kind=""
-  [[ -f "${_spec}" ]] && _kind=$(yq -r '.kind' "${_spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-  if [[ -n "${_kind}" && "${_kind}" != "lo" ]]; then
-    printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${_kind}"
+  local spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/cluster.lok8s.yaml" kind=""
+  [[ -f "${spec}" ]] && kind=$(yq -r '.kind' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  if [[ -n "${kind}" && "${kind}" != "lo" ]]; then
+    printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${kind}"
     # A failed driver destroy means infrastructure may be ORPHANED (and billed)
     # — that must be a visible non-zero exit, never a silent success.
     if ! provision::dispatch_destroy "${DOMAIN_NAME}"; then

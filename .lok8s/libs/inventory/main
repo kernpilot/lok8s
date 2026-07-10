@@ -96,9 +96,9 @@ inventory::build_json() {
       # inventory (review #52 round 1). Log only the entry's NAME/key: map-form
       # entries carry inline values/env, which must not reach (CI-captured)
       # logs from this path (round 2, both reviewers).
-      local _key
-      _key=$(jq -r 'if type == "object" then (keys[0] // "?") else tostring end' <<<"${e}" 2>/dev/null) || _key="?"
-      warn "inventory: skipping unparseable bootstrap entry '${_key}'"
+      local key
+      key=$(jq -r 'if type == "object" then (keys[0] // "?") else tostring end' <<<"${e}" 2>/dev/null) || key="?"
+      warn "inventory: skipping unparseable bootstrap entry '${key}'"
       continue
     }
     local src="target" chart_version category

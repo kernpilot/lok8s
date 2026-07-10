@@ -83,11 +83,11 @@ status::targets() {
   local domain_dir="${PATH_CLUSTERS}/${domain}"
 
   echo "--- Targets ---"
-  local -a _targets=()
-  mapfile -t _targets < <(targets::discover "${domain}")
-  if (( ${#_targets[@]} > 0 )); then
+  local -a targets=()
+  mapfile -t targets < <(targets::discover "${domain}")
+  if (( ${#targets[@]} > 0 )); then
     local tname
-    for tname in "${_targets[@]}"; do
+    for tname in "${targets[@]}"; do
       [[ -n "${tname}" ]] || continue
       echo "  ${tname}"
     done
@@ -136,8 +136,8 @@ status::all() {
 
   # Resolve the driver kind so the Tilt section only runs for `lo` clusters.
   local kind=""
-  local _spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
-  [[ -f "${_spec}" ]] && kind=$(yq -r '.kind' "${_spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] && kind=$(yq -r '.kind' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
 
   status::cluster "${domain}"
   status::nodes

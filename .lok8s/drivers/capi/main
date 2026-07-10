@@ -199,10 +199,10 @@ driver::destroy() {
   # recover it — otherwise we would delete the kind cluster below with a live
   # workload (and its billed servers) still behind it.
   if [[ ! -f "${mgmt_kubeconfig}" && "${mgmt_local}" == "true" ]]; then
-    local _kn; _kn=$(capi::mgmt_kind_name "${mgmt_domain}")
-    if kind get clusters 2>/dev/null | grep -qx "${_kn}"; then
+    local kn; kn=$(capi::mgmt_kind_name "${mgmt_domain}")
+    if kind get clusters 2>/dev/null | grep -qx "${kn}"; then
       mkdir -p "${PATH_BASE}/.kubeconfig"
-      kind get kubeconfig --name "${_kn}" > "${mgmt_kubeconfig}" 2>/dev/null || true
+      kind get kubeconfig --name "${kn}" > "${mgmt_kubeconfig}" 2>/dev/null || true
     fi
   fi
 

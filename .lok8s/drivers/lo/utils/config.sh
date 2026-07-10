@@ -149,11 +149,11 @@ lo::read_network_config() {
 lo::read_node_config() {
   local cluster_yaml="${1}"
 
-  local _default_host_ports="false"
-  local _slot
-  _slot=$(lo::slot_from_domain "${cluster_yaml}")
-  if [[ "${_slot}" == "${LO_DEFAULT_SLOT}" ]]; then
-    _default_host_ports="true"
+  local default_host_ports="false"
+  local slot
+  slot=$(lo::slot_from_domain "${cluster_yaml}")
+  if [[ "${slot}" == "${LO_DEFAULT_SLOT}" ]]; then
+    default_host_ports="true"
   fi
 
   local has_nodes
@@ -162,31 +162,31 @@ lo::read_node_config() {
   if [[ -n "${has_nodes}" ]]; then
     LOK8S_CP_COUNT=$(yq -r '.spec.nodes.controlPlane // 1' "${cluster_yaml}")
     LOK8S_WORKER_COUNT=$(yq -r '.spec.nodes.workers // 0' "${cluster_yaml}")
-    local _hp
-    _hp=$(yq -r '.spec.nodes.hostPorts' "${cluster_yaml}")
-    if [[ "${_hp}" == "null" || -z "${_hp}" ]]; then
-      LOK8S_HOST_PORTS="${_default_host_ports}"
+    local hp
+    hp=$(yq -r '.spec.nodes.hostPorts' "${cluster_yaml}")
+    if [[ "${hp}" == "null" || -z "${hp}" ]]; then
+      LOK8S_HOST_PORTS="${default_host_ports}"
     else
-      LOK8S_HOST_PORTS="${_hp}"
+      LOK8S_HOST_PORTS="${hp}"
     fi
   else
     LOK8S_CP_COUNT=1
     LOK8S_WORKER_COUNT=0
-    LOK8S_HOST_PORTS="${_default_host_ports}"
+    LOK8S_HOST_PORTS="${default_host_ports}"
   fi
 
   LOK8S_EXTRA_MOUNTS_COUNT=$(yq -r '.spec.nodes.extraMounts | length // 0' "${cluster_yaml}")
 
-  local _mcd
-  _mcd=$(yq -r '.spec.nodes.maxConcurrentDownloads' "${cluster_yaml}")
-  if [[ "${_mcd}" == "null" || -z "${_mcd}" ]]; then
+  local mcd
+  mcd=$(yq -r '.spec.nodes.maxConcurrentDownloads' "${cluster_yaml}")
+  if [[ "${mcd}" == "null" || -z "${mcd}" ]]; then
     LOK8S_MAX_CONCURRENT_DOWNLOADS=3
   else
-    if ! [[ "${_mcd}" =~ ^[1-9][0-9]*$ ]]; then
-      echo "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '${_mcd}'" >&2
+    if ! [[ "${mcd}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '${mcd}'" >&2
       return 1
     fi
-    LOK8S_MAX_CONCURRENT_DOWNLOADS="${_mcd}"
+    LOK8S_MAX_CONCURRENT_DOWNLOADS="${mcd}"
   fi
 
   export LOK8S_CP_COUNT LOK8S_WORKER_COUNT LOK8S_HOST_PORTS LOK8S_EXTRA_MOUNTS_COUNT LOK8S_MAX_CONCURRENT_DOWNLOADS
@@ -205,10 +205,10 @@ lo::read_lb_config() {
   fi
 
   if [[ -z "${LOK8S_LB_POOL}" ]]; then
-    local _slot
-    _slot=$(lo::slot_from_domain "${cluster_yaml}")
-    if [[ -n "${_slot}" ]]; then
-      LOK8S_LB_POOL="10.125.${_slot}.125-10.125.${_slot}.150"
+    local slot
+    slot=$(lo::slot_from_domain "${cluster_yaml}")
+    if [[ -n "${slot}" ]]; then
+      LOK8S_LB_POOL="10.125.${slot}.125-10.125.${slot}.150"
     fi
   fi
 
@@ -220,26 +220,26 @@ lo::read_remote_config() {
 
   LOK8S_REMOTE_MODE=$(yq -r '.spec.remote.mode // "docker"' "${cluster_yaml}")
 
-  local _expose
-  _expose=$(yq -r '.spec.remote.expose' "${cluster_yaml}")
-  if [[ "${_expose}" == "null" || -z "${_expose}" ]]; then
+  local expose
+  expose=$(yq -r '.spec.remote.expose' "${cluster_yaml}")
+  if [[ "${expose}" == "null" || -z "${expose}" ]]; then
     if [[ -n "${PROVIDER_NAME:-}" ]]; then
       LOK8S_REMOTE_EXPOSE="true"
     else
       LOK8S_REMOTE_EXPOSE="false"
     fi
   else
-    LOK8S_REMOTE_EXPOSE="${_expose}"
+    LOK8S_REMOTE_EXPOSE="${expose}"
   fi
 
   LOK8S_REMOTE_SYNC_PATH=$(yq -r '.spec.remote.sync.path // "."' "${cluster_yaml}")
   LOK8S_REMOTE_SYNC_DEST=$(yq -r '.spec.remote.sync.dest // "/workspace"' "${cluster_yaml}")
 
-  local -a _default_exclude=(".git" "node_modules" ".secrets" ".kubeconfig" "clusters/.active")
-  local _exclude_json
-  _exclude_json=$(yq -r '.spec.remote.sync.exclude // "null"' "${cluster_yaml}")
-  if [[ "${_exclude_json}" == "null" ]]; then
-    LOK8S_REMOTE_SYNC_EXCLUDE=("${_default_exclude[@]}")
+  local -a default_exclude=(".git" "node_modules" ".secrets" ".kubeconfig" "clusters/.active")
+  local exclude_json
+  exclude_json=$(yq -r '.spec.remote.sync.exclude // "null"' "${cluster_yaml}")
+  if [[ "${exclude_json}" == "null" ]]; then
+    LOK8S_REMOTE_SYNC_EXCLUDE=("${default_exclude[@]}")
   else
     mapfile -t LOK8S_REMOTE_SYNC_EXCLUDE < <(yq -r '.spec.remote.sync.exclude[]?' "${cluster_yaml}")
   fi

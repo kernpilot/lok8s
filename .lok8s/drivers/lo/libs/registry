@@ -18,9 +18,9 @@ source "${_LO_UTILS}/registries.sh"
 _registry_init() {
   [[ -n "${LOK8S_REGISTRY_JSON:-}" ]] && [[ -f "${LOK8S_REGISTRY_JSON}" ]] && return 0
   local _domain="${DOMAIN_NAME:-lok8s.dev}"
-  local _cluster_yaml="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
-  if [[ -f "${_cluster_yaml}" ]]; then
-    lo::read_network_config "${_cluster_yaml}"
+  local cluster_yaml="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
+  if [[ -f "${cluster_yaml}" ]]; then
+    lo::read_network_config "${cluster_yaml}"
   fi
 }
 
@@ -43,14 +43,14 @@ main::registry() {
 registry::up() {
   _registry_init
   local _domain="${DOMAIN_NAME:-lok8s.dev}"
-  local _cluster_yaml="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
+  local cluster_yaml="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
 
   lo::network
   if registry::is_shared; then
     lo::registry_network
   fi
 
-  lo::registries "${_domain}" "${_cluster_yaml}"
+  lo::registries "${_domain}" "${cluster_yaml}"
 }
 
 registry::down() {

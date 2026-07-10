@@ -40,12 +40,12 @@ kubehz::read_config() {
   LOK8S_KUBEHZ_API_URL=$(yq -r '.spec.kubehz.apiUrl // ""' "${cluster_yaml}")
 
   # Handle yq boolean false issue — yq treats "none" specially
-  local _access
-  _access=$(yq -r '.spec.kubehz.access' "${cluster_yaml}")
-  if [[ "${_access}" == "null" || -z "${_access}" ]]; then
+  local access
+  access=$(yq -r '.spec.kubehz.access' "${cluster_yaml}")
+  if [[ "${access}" == "null" || -z "${access}" ]]; then
     LOK8S_KUBEHZ_ACCESS="none"
   else
-    LOK8S_KUBEHZ_ACCESS="${_access}"
+    LOK8S_KUBEHZ_ACCESS="${access}"
   fi
 
   export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL

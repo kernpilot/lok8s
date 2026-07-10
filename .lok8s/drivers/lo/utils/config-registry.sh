@@ -106,22 +106,22 @@ registry::config_generate() {
   else
     local i
     for (( i = 0; i < mirror_count; i++ )); do
-      local _n _u
-      _n=$(yq -r ".spec.registries.mirrors[${i}].name" "${cluster_yaml}")
-      _u=$(yq -r ".spec.registries.mirrors[${i}].url // \"\"" "${cluster_yaml}")
+      local n u
+      n=$(yq -r ".spec.registries.mirrors[${i}].name" "${cluster_yaml}")
+      u=$(yq -r ".spec.registries.mirrors[${i}].url // \"\"" "${cluster_yaml}")
 
-      lo::validate_mirror_name "${_n}" || return 1
-      if [[ "${_n}" == "build" || "${_n}" == "cache" ]]; then
-        echo "error: spec.registries.mirrors: '${_n}' is reserved for the framework" >&2
+      lo::validate_mirror_name "${n}" || return 1
+      if [[ "${n}" == "build" || "${n}" == "cache" ]]; then
+        echo "error: spec.registries.mirrors: '${n}' is reserved for the framework" >&2
         return 1
       fi
-      [[ -n "${_u}" ]] || {
-        echo "error: spec.registries.mirrors[${i}] (${_n}): url is required" >&2
+      [[ -n "${u}" ]] || {
+        echo "error: spec.registries.mirrors[${i}] (${n}): url is required" >&2
         return 1
       }
 
-      m_names+=("${_n}")
-      m_urls+=("${_u}")
+      m_names+=("${n}")
+      m_urls+=("${u}")
     done
   fi
 
@@ -192,11 +192,11 @@ registry::config_generate() {
   export LOK8S_REGISTRY_IP_CACHE="${cache_ip}"
 
   # Mirror IP exports (read back from JSON — single jq call)
-  local _exports
-  _exports=$(jq -r '.registries[] | select(.type == "mirror") |
+  local exports
+  exports=$(jq -r '.registries[] | select(.type == "mirror") |
     "export LOK8S_REGISTRY_IP_" + (.name | gsub("-";"_") | ascii_upcase) + "=" + .ip' \
     "${LOK8S_REGISTRY_JSON}")
-  eval "${_exports}"
+  eval "${exports}"
 }
 
 # ── Query helpers ─────────────────────────────────────────

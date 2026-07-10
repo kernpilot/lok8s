@@ -20,11 +20,11 @@ lo::coredns() {
   # ("address already in use by coredns-external") → gateway stuck <pending> →
   # nothing serves. Setting the annotation now (pre-metallb) makes metallb honor
   # it on first allocation. Only meaningful for a range pool.
-  local _pool
-  _pool=$(yq -r '.spec.loadBalancer.pool // ""' "${cluster_yaml}")
-  if [[ "${_pool}" == *-* ]]; then
+  local pool
+  pool=$(yq -r '.spec.loadBalancer.pool // ""' "${cluster_yaml}")
+  if [[ "${pool}" == *-* ]]; then
     kubectl annotate svc coredns-external -n kube-system --kubeconfig "${kubeconfig}" \
-      "metallb.universe.tf/loadBalancerIPs=${_pool##*-}" --overwrite
+      "metallb.universe.tf/loadBalancerIPs=${pool##*-}" --overwrite
   fi
 
   # Per-cluster custom CoreDNS from spec.coredns — loaded into the

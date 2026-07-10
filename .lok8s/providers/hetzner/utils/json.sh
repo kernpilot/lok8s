@@ -86,9 +86,9 @@ hetzner::create() {
   local -r what="${1}"; shift
 
   # Skip if this resource type doesn't exist in the descriptor
-  local _has
-  _has=$(hetzner::json -r --arg w "${what}" '.[$w] // empty | length')
-  if [[ -z "${_has}" ]] || [[ "${_has}" == "0" ]]; then
+  local has
+  has=$(hetzner::json -r --arg w "${what}" '.[$w] // empty | length')
+  if [[ -z "${has}" ]] || [[ "${has}" == "0" ]]; then
     debug "skip ${what} (not in descriptor)"
     return 0
   fi
@@ -200,18 +200,18 @@ hetzner::create() {
     )
 
     # filter args from fields (skip #-prefixed)
-    local field _val
+    local field val
     local -a cmd=() args=()
     for (( x=0; x < ${#fields[@]}; x=x+2 )); do
       [[ "${fields[x]:2:1}" != "#" ]] ||
         continue
 
-      _val="${fields[x + 1]}"
+      val="${fields[x + 1]}"
       # hcloud receives values verbatim — expand a leading ~ ourselves
       # (e.g. ssh-key public-key-from-file: ~/.ssh/...)
       # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
-      [[ "${_val}" != "~/"* ]] || _val="${HOME}/${_val:2}"
-      args+=("${fields[x]/%#*}" "${_val}")
+      [[ "${val}" != "~/"* ]] || val="${HOME}/${val:2}"
+      args+=("${fields[x]/%#*}" "${val}")
     done
 
     # check for create hook

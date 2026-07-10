@@ -24,52 +24,52 @@ lo::provision_remote() {
 
   # Wait for SSH
   debug "waiting for SSH on ${remote_ip}..."
-  local _attempts=0 _ssh_ok=0
-  while (( _attempts < 30 )); do
+  local attempts=0 ssh_ok=0
+  while (( attempts < 30 )); do
     if ssh -o ConnectTimeout=5 -o BatchMode=yes "${remote_user}@${remote_ip}" true 2>/dev/null; then
-      _ssh_ok=1
-      debug "SSH ready on ${remote_ip} (after $(( _attempts * 2 ))s)"
+      ssh_ok=1
+      debug "SSH ready on ${remote_ip} (after $(( attempts * 2 ))s)"
       break
     fi
-    _attempts=$(( _attempts + 1 ))
+    attempts=$(( attempts + 1 ))
     sleep 2
   done
-  if (( ! _ssh_ok )); then
+  if (( ! ssh_ok )); then
     error "SSH not reachable on ${remote_ip} after 60s"
     return 1
   fi
 
   # Wait for cloud-init
   debug "waiting for cloud-init to finish on ${remote_ip}..."
-  local _ci_done=0
-  _attempts=0
-  while (( _attempts < 90 )); do
+  local ci_done=0
+  attempts=0
+  while (( attempts < 90 )); do
     if ssh "${remote_user}@${remote_ip}" 'test -f /var/lib/cloud/instance/boot-finished' 2>/dev/null; then
-      _ci_done=1
-      debug "cloud-init finished on ${remote_ip} (after $(( _attempts * 3 ))s)"
+      ci_done=1
+      debug "cloud-init finished on ${remote_ip} (after $(( attempts * 3 ))s)"
       break
     fi
-    _attempts=$(( _attempts + 1 ))
+    attempts=$(( attempts + 1 ))
     sleep 3
   done
-  if (( ! _ci_done )); then
+  if (( ! ci_done )); then
     warn "cloud-init did not finish within 270s — proceeding anyway"
   fi
 
   # Wait for Docker
   debug "waiting for Docker on ${remote_ip}..."
-  local _docker_ok=0
-  _attempts=0
-  while (( _attempts < 60 )); do
+  local docker_ok=0
+  attempts=0
+  while (( attempts < 60 )); do
     if ssh "${remote_user}@${remote_ip}" 'command -v docker && docker info' &>/dev/null; then
-      _docker_ok=1
-      debug "Docker ready on ${remote_ip} (after $(( _attempts * 3 ))s)"
+      docker_ok=1
+      debug "Docker ready on ${remote_ip} (after $(( attempts * 3 ))s)"
       break
     fi
-    _attempts=$(( _attempts + 1 ))
+    attempts=$(( attempts + 1 ))
     sleep 3
   done
-  if (( ! _docker_ok )); then
+  if (( ! docker_ok )); then
     error "Docker not available on ${remote_ip} after 180s. Check cloud-init logs: ssh ${remote_user}@${remote_ip} cat /var/log/cloud-init-output.log"
     return 1
   fi
@@ -81,16 +81,16 @@ lo::provision_remote() {
   debug "remote Docker: DOCKER_HOST=${DOCKER_HOST}"
 
   # Verify Docker is reachable
-  local _dh_ok=0
-  for (( _attempts=0; _attempts < 10; _attempts++ )); do
+  local dh_ok=0
+  for (( attempts=0; attempts < 10; attempts++ )); do
     if docker info &>/dev/null; then
-      _dh_ok=1
-      debug "DOCKER_HOST verified (attempt ${_attempts})"
+      dh_ok=1
+      debug "DOCKER_HOST verified (attempt ${attempts})"
       break
     fi
     sleep 3
   done
-  if (( ! _dh_ok )); then
+  if (( ! dh_ok )); then
     error "Docker not reachable via DOCKER_HOST=${DOCKER_HOST}"
     return 1
   fi
