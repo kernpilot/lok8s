@@ -31,7 +31,7 @@
     "chat:test": "go test -C ai/lochat -race ./...",
     "chat:lint": "go vet -C ai/lochat ./... && test -z \"$(gofmt -l ai/lochat)\"",
     "test": "./.bin/argsh test tests/unit/ tests/operator/",
-    "lint": "find .lok8s operator/hooks docs/.vitepress -type f -name '*.sh' | xargs shellcheck --shell=bash --severity=warning && grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress | xargs shellcheck --shell=bash --severity=warning"
+    "lint": "find .lok8s operator/hooks docs/.vitepress -type f -name '*.sh' | xargs shellcheck --shell=bash --severity=warning && grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress | xargs shellcheck --shell=bash --severity=warning && { find .lok8s operator/hooks docs/.vitepress -type f -name '*.sh'; grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress; } | sort -u | xargs shellcheck --shell=bash --enable=require-variable-braces --include=SC2250"
   },
   "devDependencies": {
     "@fontsource-variable/inter": "^5.2.8",

@@ -73,19 +73,19 @@ hetzner::wipe-devices::script() {
   local wipe_json="${1:-}"
   [[ -n "${wipe_json}" && "${wipe_json}" != "null" ]] || return 0
 
-  local type
-  type="$(jq -r 'type' <<<"${wipe_json}" 2>/dev/null)" || {
+  local json_type
+  json_type="$(jq -r 'type' <<<"${wipe_json}" 2>/dev/null)" || {
     error "wipe-devices: value is not valid JSON"
     return 1
   }
-  case "${type}" in
+  case "${json_type}" in
     boolean)
       # only `true` is a wipe request; `false` is an explicit no-op
       [[ "$(jq -r '.' <<<"${wipe_json}")" == "true" ]] || return 0
       ;;
     array) ;;
     *)
-      error "wipe-devices: expected 'true' or an array of devices, got ${type}"
+      error "wipe-devices: expected 'true' or an array of devices, got ${json_type}"
       return 1
       ;;
   esac
@@ -107,7 +107,7 @@ set -euo pipefail
 # NOT support blkdiscard the install ABORTS — never a partial wipe.
 WIPE_HEADER
 
-  if [[ "${type}" == "boolean" ]]; then
+  if [[ "${json_type}" == "boolean" ]]; then
     cat <<'WIPE_ALL'
 echo "lok8s: #wipe-devices=true — wiping ALL physical disks"
 lsblk -dn -o NAME,TYPE | while read -r _name _dtype; do
@@ -214,18 +214,18 @@ hetzner::wipe-devices() {
 
   # Boundary validation: only `true` or an array are legal; reject (never eval)
   # anything else.
-  local type
-  type="$(jq -r 'type' <<<"${wipe_json}" 2>/dev/null)" || {
+  local json_type
+  json_type="$(jq -r 'type' <<<"${wipe_json}" 2>/dev/null)" || {
     error "wipe-devices: #wipe-devices on server[${server_index}] is not valid JSON"
     return 1
   }
-  case "${type}" in
+  case "${json_type}" in
     array) ;;
     boolean)
       [[ "$(jq -r '.' <<<"${wipe_json}")" == "true" ]] || return 0
       ;;
     *)
-      error "wipe-devices: #wipe-devices must be 'true' or an array of devices (got ${type})"
+      error "wipe-devices: #wipe-devices must be 'true' or an array of devices (got ${json_type})"
       return 1
       ;;
   esac
