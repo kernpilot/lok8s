@@ -1,5 +1,6 @@
 #!/usr/bin/env argsh
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # vim: set syntax=bash:
 # image — pre-pull private images into the local cache registry
 #
@@ -11,6 +12,7 @@
 # Reads its work list from .lok8s/<domain>/artifacts/.cache-queue,
 # written by env::kustomization for every service with build:false +
 # resolved registry.endpoint.
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
 # AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
 # the `local domain="${domain:-...}"` sites are NOT clobbers — the RHS default
 # keeps the parent's inherited value (flag > env > default).

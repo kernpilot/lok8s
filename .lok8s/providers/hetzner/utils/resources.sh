@@ -1,4 +1,5 @@
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash disable=SC2016,SC2034,SC2154
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # resources.sh — Hetzner resource-type dispatchers
 # Each function sets up create hooks and delegates to hetzner::create.
 

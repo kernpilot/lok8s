@@ -1,9 +1,11 @@
 #!/usr/bin/env argsh
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # vim: set syntax=bash:
 # env — environment and service configuration
 # Merges services.yaml + services.<config>.yaml, generates root kustomization.yaml.
 # All registry references are now configurable from services.yaml registry config.
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
 # AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
 # the `local domain="${domain:-...}"` sites are NOT clobbers — the RHS default
 # keeps the parent's inherited value (flag > env > default).

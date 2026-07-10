@@ -1,5 +1,6 @@
 #!/usr/bin/env argsh
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # vim: set syntax=bash:
 # audit — static security-posture audit (read-only, cluster-free)
 #

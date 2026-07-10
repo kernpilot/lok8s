@@ -234,6 +234,13 @@ lo::read_remote_config() {
 
   LOK8S_REMOTE_SYNC_PATH=$(yq -r '.spec.remote.sync.path // "."' "${cluster_yaml}")
   LOK8S_REMOTE_SYNC_DEST=$(yq -r '.spec.remote.sync.dest // "/workspace"' "${cluster_yaml}")
+  # Boundary validation: dest is interpolated into single-quoted REMOTE shell
+  # commands (remote.sh ssh mkdir/cd) — a quote or metacharacter in it would
+  # break out of the quoting on the remote host. Plain path charset only.
+  if [[ ! "${LOK8S_REMOTE_SYNC_DEST}" =~ ^[A-Za-z0-9_./~-]+$ ]]; then
+    error "spec.remote.sync.dest must be a plain path ([A-Za-z0-9_./~-]), got: ${LOK8S_REMOTE_SYNC_DEST}"
+    return 1
+  fi
 
   local -a default_exclude=(".git" "node_modules" ".secrets" ".kubeconfig" "clusters/.active")
   local exclude_json

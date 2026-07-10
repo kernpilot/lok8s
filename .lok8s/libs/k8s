@@ -4,6 +4,7 @@
 # k8s — Kubernetes artifact generation and rendering
 # Replaces capigen dependency with native envsubst + template approach.
 # Uses capi::generate() for CAPI resources instead of external binary.
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
 # AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
 # the `local domain="${domain:-...}"` sites are NOT clobbers — the RHS default
 # keeps the parent's inherited value (flag > env > default).

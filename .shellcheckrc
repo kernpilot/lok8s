@@ -5,8 +5,9 @@ enable=require-variable-braces
 # Repo-wide suppressions — systematic false-positive classes for an argsh codebase
 # (lint runs unfiltered via `argsh lint`, so info-level checks count):
 # SC1091: sources resolve through argsh `import`/PATH_* indirection shellcheck can't follow.
-# SC2016: single-quoted $ is pervasive BY DESIGN — jq/yq/awk programs and generated
-#         remote-script literals must not expand locally.
 # SC2329: "function never invoked" — argsh dispatches via usage arrays and named
 #         hook callbacks (create::hook etc.), invisible to static call analysis.
-disable=SC1091,SC2016,SC2329
+# (SC2016 is deliberately NOT repo-wide: it catches real forgot-to-expand bugs in a
+# codebase that composes remote ssh commands. The files whose single-quoted $ is
+# jq/yq/awk program text or remote-script literals disable it per-file.)
+disable=SC1091,SC2329

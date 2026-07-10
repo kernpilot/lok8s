@@ -1,4 +1,5 @@
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # json.sh — Hetzner JSON descriptor engine
 # JSON helpers, lookup, and generic resource create loop.
 # Operates on the global CLOUD_HETZNER_JSON state.
