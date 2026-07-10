@@ -32,16 +32,21 @@ _run_lo() {
 }
 
 # Static invariant: in every argsh script, each `:usage` call is paired with a
-# `"${usage[@]}"` dispatch in the same file. A hub that parses but never
-# dispatches is silently inert — exactly the lo image / lo gitops bug.
+# `"${usage[@]}"` dispatch in the SAME FUNCTION. A hub that parses but never
+# dispatches is silently inert — exactly the lo image / lo gitops bug. Scoped
+# per function (house style: `name() {` … closing `}` at column 0), not per
+# file, so one healthy hub can't mask an inert sibling in the same lib.
 @test "every :usage call is paired with a usage-array dispatch" {
-  local f calls dispatches failed=0
+  local f out failed=0
   while IFS= read -r f; do
-    calls=$(grep -cE '^\s*:usage ' "${f}") || true
-    (( calls > 0 )) || continue
-    dispatches=$(grep -cE '^\s*"\$\{usage\[@\]\}"' "${f}") || true
-    if (( dispatches < calls )); then
-      echo "inert dispatch: ${f#"${_PROJECT_ROOT}/"} has ${calls} :usage call(s) but only ${dispatches} \"\${usage[@]}\" dispatch(es)" >&2
+    out=$(awk '
+      /^[A-Za-z_:][A-Za-z0-9_:.-]*\(\)[[:space:]]*\{/ { fn=$1; sub(/\(\).*/, "", fn); pending=0 }
+      fn != "" && /^[[:space:]]*:usage / { pending=1 }
+      fn != "" && /^[[:space:]]*"\$\{usage\[@\]\}"/ { pending=0 }
+      /^\}/ { if (pending) printf "inert dispatch: %s: %s() calls :usage but never dispatches the usage array\n", FILENAME, fn; fn=""; pending=0 }
+    ' "${f}")
+    if [[ -n "${out}" ]]; then
+      echo "${out//${_PROJECT_ROOT}\//}" >&2
       failed=1
     fi
   done < <(
