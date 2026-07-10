@@ -8,9 +8,9 @@
 #   kubeone.yaml   — rendered KubeOneCluster manifest
 #   output.json    — tfjson (from hetzner::generate_tfjson or equivalent)
 
-import utils/verbose
-import utils/template
-import utils/oidc
+import ^utils/verbose
+import ^utils/template
+import ^utils/oidc
 
 # ── Provider detection ──────────────────────────────────
 

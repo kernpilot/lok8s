@@ -7,6 +7,7 @@
 
 PATH_SCRIPTS="${PATH_LOK8S}"
 import ^utils/verbose
+import ^utils/types
 
 : "${CLOUD_HETZNER_JSON:=""}"
 : "${CLOUD_DRY_RUN:=""}"
@@ -797,15 +798,17 @@ hetzner::_doctor_checks() {
 
 main::hetzner() {
   local dry_run hetzner_json
-  local -a globals=(
-    'hetzner-json|' 'Path to hetzner.json'
-  )
-  if is::set args; then globals=("${args[@]}"); else
-    local domain
-  fi
+  local domain="${domain:-}"
+  # One unconditional array, both ways of running. The old conditional build
+  # was broken in both directions: standalone declared `domain` but no flag
+  # entry (the advertised --domain was unparseable), and under `lo` it
+  # REPLACED the array — silently dropping --hetzner-json. The `:^` domain
+  # entry yields to lo's own non-inheritable `domain|` duplicate in the tail.
   local -a args=(
-    'dry-run|:+'  'Enable dry-run mode (log commands without executing)'
-    "${globals[@]}"
+    'dry-run|:+'        'Enable dry-run mode (log commands without executing)'
+    'hetzner-json|'     'Path to hetzner.json'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
   )
   :args "Hetzner Cloud provisioning" "${@}"
 

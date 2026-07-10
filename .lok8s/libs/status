@@ -13,7 +13,7 @@ main::status() {
   local domain="${domain:-}"
   local -a args=(
     'domain|:^~domain'  'Domain to check (default: active domain)'
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :args "Cluster status" "${@}"
 

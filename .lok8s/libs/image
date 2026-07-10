@@ -42,6 +42,7 @@ main::image() {
     'clean|x@destructive'            'Drop all images from the cache registry'
   )
   :usage "Manage the local cache registry" "${@}"
+  "${usage[@]}"
 }
 
 # image::cache — pull a service's remote image, retag, push to cache registry
@@ -61,11 +62,12 @@ main::image() {
 image::cache() {
   debug "Pre-pull images into the local cache registry"
 
-  local force all
+  local force all service=""
   local -a args=(
+    'service'   'Service to pre-pull (omit with --all)'
     'force|f:+' 'Force re-pull even if image exists in cache'
     'all|a:+'   'Process every service in the active cache queue'
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :args "Pre-pull image(s) into the local cache registry" "${@}"
 
@@ -122,14 +124,14 @@ image::cache() {
     return $?
   fi
 
-  # Single-service mode: argument is the service name. Look it up in the
+  # Single-service mode: the `service` positional. Look it up in the
   # merged services env to resolve its remote ref.
-  if (( $# == 0 )); then
+  if [[ -z "${service}" ]]; then
     error "image cache: provide a service name or use --all"
     return 1
   fi
 
-  local svc="${1}"
+  local svc="${service}"
   local merged
   merged=$(env::services 2>/dev/null)
 

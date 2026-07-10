@@ -26,6 +26,7 @@ main::gitops() {
     'argo|a'  'Annotate artifacts with Argo sync-wave (deferred)'
   )
   :usage "GitOps integration (deferred)" "${@}"
+  "${usage[@]}"
 }
 
 gitops::bootstrap() {

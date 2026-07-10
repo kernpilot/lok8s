@@ -1,6 +1,11 @@
 #!/usr/bin/env argsh
 # shellcheck shell=bash disable=SC2034
 # vim: set syntax=bash:
+# drivers — direct access to a driver's own CLI (`lo drivers <name> <cmd>`)
+#
+# Sources .lok8s/drivers/<name>/main and dispatches to its main::driver usage
+# table (provision/destroy/status/kubeconfig). Mostly a debugging/ops door —
+# the normal path is `lo provision`, which routes through provision::dispatch.
 
 main::drivers() {
   local name="" list=0 help=0
@@ -9,9 +14,10 @@ main::drivers() {
     "help|h:+" "Show help for driver"
     "name"     "Driver name"
     "rest"     "Driver-specific arguments"
+    "${args[@]:-}"
   )
   :args "Driver-specific commands" "${@}"
-  
+
   if (( list )); then
     echo -e "Available drivers:\n"
     # List available drivers
@@ -25,10 +31,17 @@ main::drivers() {
     done
     return 0
   fi
-  
+
+  # The name lands in a path we source — allowlist it (same guard class as
+  # bootstrap::dispatch's domain/kind validation).
+  if [[ -n "${name}" && ! "${name}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    error "Invalid driver name: ${name}"
+    return 1
+  fi
   if [[ -n "${name}" ]] && [[ -f "${PATH_LOK8S}/drivers/${name}/main" ]]; then
     # shellcheck disable=SC1090
     source "${PATH_LOK8S}/drivers/${name}/main"
+    declare -F main::driver >/dev/null || { error "driver '${name}' has no main::driver entry"; return 1; }
     ! (( help )) || rest+=("--help")
     main::driver "${rest[@]}"
     return $?

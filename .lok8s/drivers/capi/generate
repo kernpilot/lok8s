@@ -4,8 +4,8 @@
 # Detects provider from cluster spec, generates CAPI resources from templates,
 # manages credential Secrets, and polls cluster readiness.
 
-import utils/verbose
-import utils/template
+import ^utils/verbose
+import ^utils/template
 
 # Detect the CAPI provider from cluster spec fields.
 # Usage: capi::detect_provider <cluster_yaml>

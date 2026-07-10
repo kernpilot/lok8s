@@ -100,7 +100,7 @@ main() {
     'audit|au@readonly'                'Static security-posture audit (read-only, cluster-free; --json)'
     'status@readonly'                  'Cluster health and status'
     'doctor@readonly'                  'Diagnose the environment + toolchain'
-    'trust'                            'Trust the local dev CA (mkcert -install)'
+    'trust@idempotent'                 'Trust the local dev CA (mkcert -install)'
     'chat'                             'Chat with a local AI (transparent, streaming)'
     'ai'                               'Manage the AI integration (lo chat + agent skills)'
     'version@readonly'                 'Print lok8s + toolchain versions'
@@ -335,4 +335,8 @@ main::clean() {
   registry::clean
 }
 
-[[ "${0}" != "${BASH_SOURCE[0]}" && -z "${ARGSH_SOURCE}" ]] || main "${@}"
+# Entrypoint guard: run main only when executed directly. The libs' guard
+# variant can't work here — lo self-sets ARGSH_SOURCE (line 20), so any
+# ARGSH_SOURCE test is a tautology (the old `-z` form made this line always
+# dispatch, executing the CLI even when sourced).
+[[ "${0}" != "${BASH_SOURCE[0]}" ]] || main "${@}"
