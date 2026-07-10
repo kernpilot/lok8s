@@ -331,7 +331,10 @@ kubehz::status() {
 # printed by any command — this subcommand only ever reads `.data.claim-code`
 # (C), the disposable one-time proof that is MEANT to transit to the dashboard.
 kubehz::claim-code() {
-  # No domain flag — reads the live cluster via the ACTIVE kubeconfig.
+  # Reads the LIVE cluster via the ambient kubeconfig (exported by main from
+  # the active domain BEFORE dispatch). The global --domain flag inherited via
+  # the args tail still parses here but does NOT re-point the kubeconfig —
+  # switch clusters with `lo use <domain>` first.
   local -a args=("${args[@]:-}")
   :args "Print the one-time claim code" "${@}"
   local ns="kubehz-system" secret="kubehz-agent"
