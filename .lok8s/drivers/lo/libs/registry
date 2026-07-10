@@ -34,7 +34,7 @@ main::registry() {
   local shared
   local -a args=(
     'shared|S:+' 'Include shared mirrors (for clean/status)'
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :usage "Manage registry" "${@}"
   "${usage[@]}"

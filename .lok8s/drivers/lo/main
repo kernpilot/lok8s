@@ -3,7 +3,7 @@
 # vim: set syntax=bash:
 # Lo driver — local/CI clusters via kind
 # Implements: driver::provision, driver::export, driver::destroy, driver::status, driver::kubeconfig
-# Also exposes: lo driver {provision,destroy,status,kubeconfig,bootstrap}
+# Also exposes: lo drivers lo {provision,destroy,status,kubeconfig}
 
 _LO_DIR="${BASH_SOURCE[0]%/*}"
 
@@ -35,7 +35,7 @@ main::driver() {
     'provision|p@destructive'  'Provision a cluster'
     'destroy|d@destructive'    'Destroy a cluster'
     'status|s@readonly'        'Check cluster status'
-    'kubeconfig|k@readonly'    'Extract kubeconfig'
+    'kubeconfig|k'             'Extract kubeconfig (writes .kubeconfig/, may open an SSH tunnel)'
   )
   :usage "Lo driver" "${@}"
   "${usage[@]}"

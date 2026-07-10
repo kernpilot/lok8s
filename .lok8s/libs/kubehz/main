@@ -236,6 +236,11 @@ kubehz::deregister_cluster() {
 # Reads config from active domain, validates, and calls the API.
 kubehz::register() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Register cluster with kubehz" "${@}"
   [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
@@ -258,6 +263,11 @@ kubehz::register() {
 # Manual cluster deregistration via `lo kubehz deregister`.
 kubehz::deregister() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Remove cluster from kubehz" "${@}"
   [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
@@ -277,6 +287,11 @@ kubehz::deregister() {
 # Check kubehz registration status via `lo kubehz status`.
 kubehz::status() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Check kubehz registration status" "${@}"
   [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
@@ -316,6 +331,12 @@ kubehz::status() {
 # printed by any command — this subcommand only ever reads `.data.claim-code`
 # (C), the disposable one-time proof that is MEANT to transit to the dashboard.
 kubehz::claim-code() {
+  # Reads the LIVE cluster via the ambient kubeconfig (exported by main from
+  # the active domain BEFORE dispatch). The global --domain flag inherited via
+  # the args tail still parses here but does NOT re-point the kubeconfig —
+  # switch clusters with `lo use <domain>` first.
+  local -a args=("${args[@]:-}")
+  :args "Print the one-time claim code" "${@}"
   local ns="kubehz-system" secret="kubehz-agent"
 
   if ! kubectl -n "${ns}" get secret "${secret}" >/dev/null 2>&1; then
@@ -341,3 +362,5 @@ kubehz::claim-code() {
     echo "to attribute this cluster to your account. It is single-use — do not share it."
   } >&2
 }
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::kubehz "${@}"

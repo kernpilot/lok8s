@@ -16,10 +16,10 @@ import ^utils/verbose
 
 main::kustomize() {
   local -a usage=(
-    'build|b'  'Compile all kustomize plugin binaries into .kustomize/'
-    'test|t'   'Run plugin unit + integration tests'
-    'clean'    'Remove built plugin binaries'
-    'list|l'   'List discoverable plugins under .kustomize/'
+    'build|b@idempotent'  'Compile all kustomize plugin binaries into .kustomize/'
+    'test|t'              'Run plugin unit + integration tests'
+    'clean@destructive'   'Remove built plugin binaries'
+    'list|l@readonly'     'List discoverable plugins under .kustomize/'
   )
   :usage "Manage kustomize plugins (Go-based exec generators)" "${@}"
   "${usage[@]}"
@@ -37,6 +37,8 @@ kustomize::_sources() {
 }
 
 kustomize::build() {
+  local -a args=("${args[@]:-}")
+  :args "Compile kustomize plugin binaries" "${@}"
   command -v go >/dev/null || {
     error "go is not installed (run 'b install go' or use goenv)"
     return 1
@@ -52,6 +54,8 @@ kustomize::build() {
 }
 
 kustomize::test() {
+  local -a args=("${args[@]:-}")
+  :args "Run plugin unit + integration tests" "${@}"
   command -v go >/dev/null || {
     error "go is not installed"
     return 1
@@ -65,6 +69,8 @@ kustomize::test() {
 }
 
 kustomize::clean() {
+  local -a args=("${args[@]:-}")
+  :args "Remove built plugin binaries" "${@}"
   local s
   while IFS= read -r s; do
     [[ -n "${s}" ]] || continue
@@ -73,6 +79,8 @@ kustomize::clean() {
 }
 
 kustomize::list() {
+  local -a args=("${args[@]:-}")
+  :args "List discoverable plugins" "${@}"
   if [[ ! -d "${PATH_BASE}/.kustomize" ]]; then
     warn "No .kustomize/ directory found"
     return 0

@@ -188,6 +188,12 @@ driver::kubeconfig() {
 # Bare-metal/pre-existing nodes (role=worker) become STATIC workers —
 # dynamic (machine-controller) pools come from spec.workers via
 # kubeone::generate_config.
+#
+# Hosts are DESCRIPTOR-ANCHORED: only servers declared in the descriptor's
+# server[] array (matched by name) are emitted — label-discovered VMs that
+# are not declared (machine-controller machines share the cluster label) are
+# skipped with a warning. Each emitted host carries its node.labels (plumbed
+# by provider::output) as hosts[].labels for KubeOne's labelNodes task.
 
 _append_inventory() {
   local config_file="$1" manifest="$2"
@@ -211,6 +217,59 @@ _append_inventory() {
     return 1
   fi
 
+  # The descriptor is the source of truth for cluster MEMBERSHIP.
+  # provider::output discovers cloud VMs BY LABEL (lok8s.dev/cluster=<name>) —
+  # a sweep that also matches VMs the cluster created for ITSELF at runtime:
+  # KubeOne machine-controller (MachineDeployment) workers carry the same
+  # cluster label. Those are dynamic nodes kubeone must never SSH into —
+  # emitting them as staticWorkers made `kubeone apply` try to adopt live
+  # machine-controller nodes (2026-07-10 production incident). Anchor BOTH
+  # controlPlane.hosts and staticWorkers.hosts to the descriptor's server[]
+  # list, matched by name.
+  local desc
+  desc="$(envsubst < "${config_file}")"
+  if ! echo "${desc}" | jq empty 2>/dev/null; then
+    # YAML descriptor: convert the ALREADY-envsubst'd text (stdin), never the
+    # raw file — re-reading the file discards ${VAR} expansion and anchors
+    # against unexpanded names (review round 1). NB the provider's own loads
+    # still re-read the file (pre-existing, tracked as a follow-up issue).
+    # A failed/empty conversion errors HERE — falling through would surface as
+    # a misleading "declares no server[]" refusal (review round 2).
+    if ! desc="$(yq -o json '.' - <<<"${desc}" 2>/dev/null)" \
+       || [[ -z "${desc}" ]] || ! echo "${desc}" | jq empty 2>/dev/null; then
+      error "kubeone inventory: descriptor ${config_file} is neither valid JSON nor valid YAML (after envsubst) — fix the descriptor before provisioning"
+      return 1
+    fi
+  fi
+  local declared
+  declared=$(echo "${desc}" | jq -c '[(.server // [])[].name // empty]' 2>/dev/null) || declared=""
+  if [[ -z "${declared}" || "$(echo "${declared}" | jq 'length')" == "0" ]]; then
+    error "kubeone inventory: descriptor ${config_file} declares no server[] — refusing to build a host inventory from label discovery alone"
+    return 1
+  fi
+  local skipped
+  while IFS= read -r skipped; do
+    [[ -n "${skipped}" ]] || continue
+    warn "kubeone inventory: skipping ${skipped} — carries the cluster label but is not declared in the descriptor's server[] (machine-controller or foreign VM, never a static host)"
+  done < <(echo "${output}" | jq -r --argjson declared "${declared}" \
+    '.nodes[] | select(.name as $n | ($declared | index($n)) == null) | "\(.name) (role=\(.role))"')
+
+  # Keep only declared nodes (their node.labels — plumbed by provider::output
+  # from hcloud server labels / the descriptor's `#labels` — ride along and are
+  # rendered below as the host's labels: map for KubeOne's labelNodes task).
+  output=$(echo "${output}" | jq --argjson declared "${declared}" \
+    '.nodes = [.nodes[] | select(.name as $n | ($declared | index($n)) != null)]') \
+    || { error "kubeone inventory: failed to anchor provider inventory to the descriptor"; return 1; }
+
+  # Zero control planes after anchoring = descriptor/provider name mismatch
+  # (e.g. envsubst env drift between runs). Fail HERE with the cause instead
+  # of handing kubeone an empty controlPlane.hosts and an opaque validation
+  # error (review round 1).
+  if [[ "$(echo "${output}" | jq '[.nodes[] | select(.role == "control-plane")] | length')" == "0" ]]; then
+    error "kubeone inventory: anchoring left ZERO control-plane hosts — no provider control-plane node matches the descriptor's server[] names (name drift?)"
+    return 1
+  fi
+
   # jq render templates (jq strings cannot hold literal newlines — use \n).
   # Per-host kubelet config (reservations, eviction, maxPods, hardening):
   # control planes are small VMs (modest reservations), bare-metal static
@@ -218,10 +277,19 @@ _append_inventory() {
   # (bigger reservations, higher maxPods). readOnlyPort:0 disables the
   # insecure kubelet read-only port.
   local host_body='    - publicAddress: \"\(.public_ip)\"\n      privateAddress: \"\(.private_ip)\"\n      sshUsername: \"\(.ssh_user)\"\n      sshPort: \(.ssh_port)\n      sshPrivateKeyFile: \"\($key)\"\n      hostname: \"\(.name)\"'
+  # Node labels block: kubeone's HostConfig.labels (map[string]string) is synced
+  # to Node labels by the labelNodes task (pkg/tasks/nodes.go:109) on both `lo up`
+  # AND `lo recover` — this is how the tier.kubehz.cloud/* taxonomy from
+  # hetzner.json #labels reaches (and survives on) the Node. Empty map -> no block.
+  # Sorted (sort_by(.key)) so the rendered manifest is deterministic.
+  # @json emits each key/value as a properly-quoted+escaped JSON string, which is
+  # valid YAML — this is what prevents YAML injection when a label value contains
+  # a quote, colon or newline (raw "\(.key)":"\(.value)" would break the manifest).
+  local host_labels='\((.labels // {}) | if length > 0 then "\n      labels:" + (to_entries | sort_by(.key) | map("\n        \(.key|@json): \(.value|@json)") | join("")) else "" end)'
   local cp_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        kubeReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        evictionHard:\n          memory.available: \"500Mi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 110'
   local worker_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        kubeReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        evictionHard:\n          memory.available: \"1Gi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 250'
-  local cp_tmpl="\"${host_body}${cp_kubelet}\""
-  local worker_tmpl="\"${host_body}${worker_kubelet}\""
+  local cp_tmpl="\"${host_body}${host_labels}${cp_kubelet}\""
+  local worker_tmpl="\"${host_body}${host_labels}${worker_kubelet}\""
 
   {
     echo ""

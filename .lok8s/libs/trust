@@ -11,6 +11,9 @@
 import ^utils/verbose
 
 main::trust() {
+  # No flags of its own — declare the array explicitly so the parent's global
+  # flags flow in via the documented pattern rather than implicit dynamic scope.
+  local -a args=("${args[@]:-}")
   :args "Trust the local dev CA (mkcert -install)" "${@}"
 
   command -v mkcert &>/dev/null || {
@@ -34,3 +37,5 @@ main::trust() {
   echo "Done. cert: leaves signed by this CA (e.g. *.${DOMAIN_NAME}) are now trusted"
   echo "by your browser and curl. Re-running is safe."
 }
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::trust "${@}"

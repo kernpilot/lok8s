@@ -34,7 +34,7 @@ env::services() {
   local -a args=(
     "only-services|s:+" "Only print services"
     "only-registry|r:+" "Only print registry"
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :args "Print services" "${@}"
 
@@ -83,7 +83,7 @@ env::kustomization() {
   local -a args=(
     "no-build|n:+" "Do not build artifacts"
     "pull|p:+"     "After writing the kustomization, drain the cache queue (lo image cache --all)"
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :args "Generate kustomization.yaml" "${@}"
 

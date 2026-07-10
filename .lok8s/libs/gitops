@@ -26,6 +26,7 @@ main::gitops() {
     'argo|a'  'Annotate artifacts with Argo sync-wave (deferred)'
   )
   :usage "GitOps integration (deferred)" "${@}"
+  "${usage[@]}"
 }
 
 gitops::bootstrap() {
@@ -34,12 +35,14 @@ gitops::bootstrap() {
 }
 
 gitops::flux() {
+  local -a args=("${args[@]:-}")
   :args "Generate Flux manifests (deferred)" "${@}"
   error "lo gitops flux is deferred (redesign after services.yaml targets lands)"
   return 1
 }
 
 gitops::argo() {
+  local -a args=("${args[@]:-}")
   :args "Annotate artifacts with Argo sync-wave (deferred)" "${@}"
   error "lo gitops argo is deferred (redesign after services.yaml targets lands)"
   return 1

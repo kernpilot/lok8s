@@ -3,6 +3,9 @@
 # vim: set syntax=bash:
 # inventory — the ClusterInventory (lok8s.dev/v1alpha1) writer
 #
+# LIBRARY-ONLY: no main::* entry point and no dispatch guard — its functions
+# are called from libs/deploy + libs/bootstrap; not directly executable.
+#
 # `lo` records WHAT it deployed into the cluster itself: a cluster-scoped
 # SINGLETON ClusterInventory named "cluster" (OpenShift-ClusterVersion-style
 # spec/status split). lo owns .spec (framework/driver/k8s versions, the

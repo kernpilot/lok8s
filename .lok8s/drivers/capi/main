@@ -63,7 +63,7 @@ driver::provision() {
   if [[ "${domain}" == "${mgmt_domain}" && ! -f "${mgmt_kubeconfig}" ]]; then
     # The domain IS the management cluster — bootstrap it on the provider.
     echo "info: bootstrapping management cluster ${mgmt_domain}" >&2
-    capi::bootstrap "${domain}" "${cluster_yaml}"
+    capi::bootstrap "${domain}"
     return $?
   fi
   if [[ ! -f "${mgmt_kubeconfig}" ]]; then
@@ -333,7 +333,7 @@ capi::ensure_local_mgmt() {
 # Bootstrap a management cluster from scratch.
 # Flow: temp kind cluster -> clusterctl init -> apply mgmt CR -> wait ->
 #       install operator + CAPI on mgmt -> clusterctl move -> deploy targets -> cleanup
-# Usage: capi::bootstrap <domain> <cluster_yaml>
+# Usage: capi::bootstrap <domain>   (cluster_yaml is re-derived from the domain)
 capi::bootstrap() {
   local domain="$1"
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
