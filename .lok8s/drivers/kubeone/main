@@ -192,8 +192,8 @@ driver::kubeconfig() {
 # Hosts are DESCRIPTOR-ANCHORED: only servers declared in the descriptor's
 # server[] array (matched by name) are emitted — label-discovered VMs that
 # are not declared (machine-controller machines share the cluster label) are
-# skipped with a warning. Per-server `#labels` become hosts[].labels so
-# KubeOne's labelNodes task keeps Node labels in sync on every apply.
+# skipped with a warning. Each emitted host carries its node.labels (plumbed
+# by provider::output) as hosts[].labels for KubeOne's labelNodes task.
 
 _append_inventory() {
   local config_file="$1" manifest="$2"
@@ -244,13 +244,11 @@ _append_inventory() {
   done < <(echo "${output}" | jq -r --argjson declared "${declared}" \
     '.nodes[] | select(.name as $n | ($declared | index($n)) == null) | "\(.name) (role=\(.role))"')
 
-  # Keep only declared nodes, and attach each one's descriptor `#labels`
-  # (comma-separated k=v) — rendered below as the host's labels: map so
-  # KubeOne's labelNodes task syncs them onto the Node object on every apply
-  # (the descriptor, not a manual `kubectl label`, stays the source of truth).
+  # Keep only declared nodes (their node.labels — plumbed by provider::output
+  # from hcloud server labels / the descriptor's `#labels` — ride along and are
+  # rendered below as the host's labels: map for KubeOne's labelNodes task).
   output=$(echo "${output}" | jq --argjson declared "${declared}" \
-    --argjson lbls "$(echo "${desc}" | jq -c '[(.server // [])[] | {key: (.name // ""), value: (.["#labels"] // "")}] | from_entries')" \
-    '.nodes = [.nodes[] | select(.name as $n | ($declared | index($n)) != null) | .labels = ($lbls[.name] // "")]') \
+    '.nodes = [.nodes[] | select(.name as $n | ($declared | index($n)) != null)]') \
     || { error "kubeone inventory: failed to anchor provider inventory to the descriptor"; return 1; }
 
   # jq render templates (jq strings cannot hold literal newlines — use \n).
@@ -260,26 +258,19 @@ _append_inventory() {
   # (bigger reservations, higher maxPods). readOnlyPort:0 disables the
   # insecure kubelet read-only port.
   local host_body='    - publicAddress: \"\(.public_ip)\"\n      privateAddress: \"\(.private_ip)\"\n      sshUsername: \"\(.ssh_user)\"\n      sshPort: \(.ssh_port)\n      sshPrivateKeyFile: \"\($key)\"\n      hostname: \"\(.name)\"'
+  # Node labels block: kubeone's HostConfig.labels (map[string]string) is synced
+  # to Node labels by the labelNodes task (pkg/tasks/nodes.go:109) on both `lo up`
+  # AND `lo recover` — this is how the tier.kubehz.cloud/* taxonomy from
+  # hetzner.json #labels reaches (and survives on) the Node. Empty map -> no block.
+  # Sorted (sort_by(.key)) so the rendered manifest is deterministic.
+  # @json emits each key/value as a properly-quoted+escaped JSON string, which is
+  # valid YAML — this is what prevents YAML injection when a label value contains
+  # a quote, colon or newline (raw "\(.key)":"\(.value)" would break the manifest).
+  local host_labels='\((.labels // {}) | if length > 0 then "\n      labels:" + (to_entries | sort_by(.key) | map("\n        \(.key|@json): \(.value|@json)") | join("")) else "" end)'
   local cp_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        kubeReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        evictionHard:\n          memory.available: \"500Mi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 110'
   local worker_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        kubeReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        evictionHard:\n          memory.available: \"1Gi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 250'
-  local cp_tmpl="\"${host_body}\" + labels_block + \"${cp_kubelet}\""
-  local worker_tmpl="\"${host_body}\" + labels_block + \"${worker_kubelet}\""
-
-  # labels_block — a host's descriptor `#labels` rendered as its labels: map
-  # (`\n      labels:\n        "k": "v"`). tojson quoting = safe YAML
-  # double-quoted scalars for arbitrary keys/values. A bare `key-` entry (no
-  # `=`) renders as `"key-": ""` — KubeOne's addRemoveKeyValues REMOVAL suffix,
-  # passed through untouched so a descriptor can delete a node label on the
-  # next apply. No `#labels` ⇒ empty string ⇒ output identical to before.
-  local jq_defs='
-    def label_kv: (index("=")) as $i
-      | if $i == null then "\n        \(tojson): \"\""
-        else "\n        \(.[:$i] | tojson): \(.[$i+1:] | tojson)" end;
-    def labels_block:
-      ((.labels // "") | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $ls
-      | if ($ls | length) == 0 then ""
-        else "\n      labels:" + ($ls | map(label_kv) | join("")) end;
-  '
+  local cp_tmpl="\"${host_body}${host_labels}${cp_kubelet}\""
+  local worker_tmpl="\"${host_body}${host_labels}${worker_kubelet}\""
 
   {
     echo ""
@@ -307,7 +298,7 @@ _append_inventory() {
     echo "controlPlane:"
     echo "  hosts:"
     echo "${output}" | jq -r --arg key "${ssh_key}" \
-      "${jq_defs} .nodes[] | select(.role == \"control-plane\") | ${cp_tmpl}"
+      ".nodes[] | select(.role == \"control-plane\") | ${cp_tmpl}"
 
     local worker_count
     worker_count=$(echo "${output}" | jq '[.nodes[] | select(.role == "worker")] | length')
@@ -316,7 +307,7 @@ _append_inventory() {
       echo "staticWorkers:"
       echo "  hosts:"
       echo "${output}" | jq -r --arg key "${ssh_key}" \
-        "${jq_defs} .nodes[] | select(.role == \"worker\") | ${worker_tmpl}"
+        ".nodes[] | select(.role == \"worker\") | ${worker_tmpl}"
     fi
   } >> "${manifest}"
 

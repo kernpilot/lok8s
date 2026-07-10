@@ -42,7 +42,7 @@ Fields starting with `#` are **metadata** — they're not passed to
 | `#internal-ip` | Server's private/vSwitch IP |
 | `#installimage` | Path to Hetzner installimage config file |
 | `#cloud.d` | Cloud-init module directory to apply |
-| `#labels` | Comma-separated `k=v` node labels — emitted as the host's `labels:` in the generated kubeone.yaml, so KubeOne's `labelNodes` task syncs them onto the Node on every apply (suffix a key with `-` to remove a label); `role=control-plane` selects the role |
+| `#labels` | Comma-separated `k=v` node labels — carried through the provider output into the host's `labels:` in the generated kubeone.yaml, so KubeOne's `labelNodes` task syncs them onto the Node on every apply (suffix a key with `-` to remove a label). `role=control-plane` selects the role; the `lok8s.dev/*` and bare `role` orchestration keys are consumed as selectors, never synced to the Node |
 | `#floating-ip` | Index into the `floating-ip` array to assign |
 | `#wipe-devices` | Data devices to full-wipe on a **fresh** install ([details](#wiping-data-devices)) |
 

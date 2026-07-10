@@ -47,9 +47,11 @@ kubehz::wait_for_cluster() {
   debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
 
   while (( elapsed < timeout )); do
+    # GET /api/clusters/{id} is an enveloped UI route ({ok,data,traceId}), so the
+    # status is at .data.status; the // .status fallback tolerates a bare body.
     status_val=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}" \
       -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
-      | jq -r '.status // "Unknown"') || status_val="Unknown"
+      | jq -r '.data.status // .status // "Unknown"') || status_val="Unknown"
 
     case "${status_val}" in
       Running|ready|Ready)
@@ -71,6 +73,50 @@ kubehz::wait_for_cluster() {
   return 1
 }
 
+# Render a friendly, human-readable message for a capacity rejection (the
+# kubehz-api "max mechanism": POST /api/clusters answers 503 AT_CAPACITY when the
+# hosted control-plane pool for the requested plan is full). The api error body
+# carries a structured `data.detail` { tier, used, limit, retryAfter } — surface
+# it plainly so the operator knows WHY and WHAT to do, not a bare "request failed".
+# The api origin for the "live availability" pointer comes from the module-global
+# LOK8S_KUBEHZ_API_URL (set by kubehz::read_config), NOT the caller's locals.
+# Usage: kubehz::render_capacity_rejection <error_body_json>
+kubehz::render_capacity_rejection() {
+  local body="$1"
+  local tier used limit retry
+  tier=$(echo "${body}" | jq -r '.data.detail.tier // .detail.tier // "this plan"' 2>/dev/null) || tier="this plan"
+  used=$(echo "${body}" | jq -r '.data.detail.used // .detail.used // empty' 2>/dev/null) || used=""
+  limit=$(echo "${body}" | jq -r '.data.detail.limit // .detail.limit // empty' 2>/dev/null) || limit=""
+  retry=$(echo "${body}" | jq -r '.data.detail.retryAfter // .detail.retryAfter // empty' 2>/dev/null) || retry=""
+
+  local usage=""
+  [[ -n "${used}" && -n "${limit}" ]] && usage=" (currently ${used}/${limit})"
+
+  # Humanize the raw retryAfter seconds into a friendlier "~N min" / "~Ns" so
+  # the operator doesn't have to divide by 60 in their head. Non-numeric / empty
+  # -> no hint line at all.
+  local retry_hint=""
+  if [[ "${retry}" =~ ^[0-9]+$ ]]; then
+    if (( retry >= 60 )); then
+      retry_hint="~$(( (retry + 30) / 60 )) min"
+    else
+      retry_hint="~${retry}s"
+    fi
+  fi
+
+  error "kubehz: the platform is at capacity for the '${tier}' plan right now${usage}."
+  echo "  The hosted control-plane pool for this plan is full. You can:" >&2
+  echo "    • retry later — capacity frees as clusters are torn down" >&2
+  [[ -n "${retry_hint}" ]] && echo "    • suggested wait: ${retry_hint}" >&2
+  # NOTE: the tier is chosen server-side (kubehz-api), not via a lok8s spec field
+  # — there is no spec.kubehz.plan. Point at the real levers instead: check live
+  # per-plan availability, or run self-hosted (spec.kubehz.hosting: self) now.
+  echo "    • check live per-plan availability and retry when a slot opens:" >&2
+  echo "        ${LOK8S_KUBEHZ_API_URL}/api/capacity" >&2
+  echo "    • run a self-hosted cluster meanwhile (spec.kubehz.hosting: self)" >&2
+  echo "    • still stuck? contact kubehz support with the tier + time above" >&2
+}
+
 # Provision a cluster via the kubehz hosted API.
 # Creates the cluster, waits for it, and downloads the kubeconfig.
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
@@ -83,17 +129,41 @@ kubehz::provision_hosted() {
 
   debug "Creating hosted cluster for ${domain}"
 
-  local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters" \
+  # Capture BOTH the response body and the HTTP status. We deliberately drop
+  # curl's -f (fail-silently-on-HTTP-error) here so a 503 AT_CAPACITY body is
+  # available to render — the capacity envelope is the whole point. The status is
+  # appended on its own trailing line via -w and split off.
+  local raw response http_code
+  raw=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
     -d "${payload}") || {
-    error "Failed to create hosted cluster via kubehz API"
+    error "Failed to create hosted cluster via kubehz API (network error)"
     return 1
   }
+  http_code="${raw##*$'\n'}"
+  response="${raw%$'\n'*}"
+
+  # Capacity rejection (the "max mechanism"): a structured 503 AT_CAPACITY.
+  if [[ "${http_code}" == "503" ]] \
+    && echo "${response}" | jq -e '(.data.code // .code) == "AT_CAPACITY"' >/dev/null 2>&1; then
+    kubehz::render_capacity_rejection "${response}"
+    return 1
+  fi
+
+  # Any other non-2xx: surface the api's own message + help when it carries them
+  # (the {code,message,help} envelope — help is the actionable half).
+  if [[ "${http_code}" != 2* ]]; then
+    local msg help
+    msg=$(echo "${response}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
+    help=$(echo "${response}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
+    error "Failed to create hosted cluster via kubehz API (HTTP ${http_code})${msg:+: ${msg}}"
+    [[ -n "${help}" ]] && echo "  ${help}" >&2
+    return 1
+  fi
 
   local cluster_id
-  cluster_id=$(echo "${response}" | jq -r '.id')
+  cluster_id=$(echo "${response}" | jq -r '.data.id // .id')
 
   if [[ -z "${cluster_id}" || "${cluster_id}" == "null" ]]; then
     error "kubehz API did not return a cluster ID"
@@ -124,10 +194,13 @@ kubehz::destroy_hosted() {
   local domain="$1" cluster_yaml="$2"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
+  # GET /api/clusters is an enveloped, PAGINATED UI route: the rows are at
+  # .data[] (with pagination under meta). The // fallbacks tolerate a bare list
+  # or object body so this keeps working against any shape.
   local cluster_id
   cluster_id=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN}" 2>/dev/null \
-    | jq -r '.[0].id // .id // empty') || true
+    | jq -r '.data[0].id // .data.id // .[0].id // .id // empty') || true
 
   if [[ -n "${cluster_id}" && "${cluster_id}" != "null" ]]; then
     curl -fsSL -X DELETE "${api_url}/api/clusters/${cluster_id}" \

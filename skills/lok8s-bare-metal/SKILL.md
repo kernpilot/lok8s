@@ -56,7 +56,7 @@ deletes by label `lok8s.dev/cluster=<cluster_name>`.
 | `#external-ip` / `#internal-ip` | public / private IP (SSH + provider output) |
 | `#installimage` | path to the Hetzner installimage config file |
 | `#cloud.d` | cloud-init module dir(s) for this server (sets `CLOUD_PATHD`) |
-| `#labels` | comma-separated `k=v`; `role=control-plane` else worker; synced to Node labels via KubeOne labelNodes on every apply (`key-` removes) |
+| `#labels` | comma-separated `k=v`; `role=control-plane` else worker; synced to Node labels via KubeOne labelNodes on every apply (`key-` removes; `lok8s.dev/*` + bare `role` selector keys not synced) |
 | `#floating-ip` / `#ssh-private-key` | floating-IP index to assign / per-server Robot SSH key |
 
 All `#`-fields on a server are also exported into cloud-init as `CLOUD_ENV_<FIELD>`

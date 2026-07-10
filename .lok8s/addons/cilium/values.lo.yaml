@@ -12,6 +12,11 @@ ipam:
     clusterPoolIPv4PodCIDRList:
       - 10.244.0.0/16
     clusterPoolIPv4ServiceCIDR: 10.96.0.0/12
+    # /24 (~254 pod IPs/node) is intentional dev drift from prod's /23
+    # (values.hetzner.yaml): kind/dev runs a handful of pods on 1-2 nodes with
+    # no hosted-CP density pressure, so the extra IPs the /23 buys on Hetzner
+    # aren't needed here. Kept explicit so the difference reads as a deliberate
+    # per-environment choice, not accidental drift.
     clusterPoolIPv4MaskSize: 24
 
 routingMode: tunnel
