@@ -61,7 +61,7 @@ hetzner::network() {
 hetzner::wipe-devices::_safe() {
   local v="${1:-}" _re='^[A-Za-z0-9_./:@=+ -]+$'
   [[ -n "${v}" ]] || return 0
-  [[ "${v}" =~ $_re ]] || return 1
+  [[ "${v}" =~ ${_re} ]] || return 1
 }
 
 # hetzner::wipe-devices::script <wipe-json>

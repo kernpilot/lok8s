@@ -34,7 +34,7 @@ main::kubehz() {
 # Usage: kubehz::read_config <cluster_yaml>
 # Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL
 kubehz::read_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   LOK8S_KUBEHZ_HOSTING=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
   LOK8S_KUBEHZ_API_URL=$(yq -r '.spec.kubehz.apiUrl // ""' "${cluster_yaml}")
@@ -103,7 +103,7 @@ kubehz::validate_config() {
 # Hetzner Cloud account, and Hetzner exposes MD5 fingerprints — so we MUST emit
 # MD5 (`-E md5`), not SHA256. The kubehz API normalizes away the "MD5:" prefix.
 kubehz::get_ssh_fingerprint() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   local kind
   kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
 
@@ -115,7 +115,7 @@ kubehz::get_ssh_fingerprint() {
         key_file=$(provider::output "${PROVIDER_CONFIG_FILE}" 2>/dev/null | jq -r '.access[0].publicKey // ""')
       fi
       [[ -n "${key_file}" ]] || key_file=$(yq -r '.spec.hcloud.sshPublicKeyFile // "~/.ssh/id_ed25519.pub"' "${cluster_yaml}")
-      key_file="${key_file/#\~/$HOME}"
+      key_file="${key_file/#\~/${HOME}}"
       ssh-keygen -lf "${key_file}" -E md5 | awk '{print $2}'
       ;;
     capi)
@@ -162,7 +162,7 @@ kubehz::get_ssh_fingerprint() {
 # continues without kubehz integration.
 # Usage: kubehz::register_cluster <domain> <cluster_yaml>
 kubehz::register_cluster() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   # Defense in depth: the fingerprint travels on this URL; never over plain HTTP.
@@ -221,7 +221,7 @@ kubehz::register_cluster() {
 # Non-fatal: silently ignores errors.
 # Usage: kubehz::deregister_cluster <domain> <cluster_yaml>
 kubehz::deregister_cluster() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \

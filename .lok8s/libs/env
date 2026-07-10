@@ -181,8 +181,8 @@ env::kustomization() {
 # Extracted from env::kustomization for testability.
 # Usage: env::generate_images <merged> <default_build> <g_prefix> <g_cache> <g_endpoint> <g_branch> <g_tag> <cache_queue>
 env::generate_images() {
-  local merged="$1" default_build="$2" g_prefix="$3" g_cache="$4"
-  local g_endpoint="$5" g_branch="$6" g_tag="$7" cache_queue="$8"
+  local merged="${1}" default_build="${2}" g_prefix="${3}" g_cache="${4}"
+  local g_endpoint="${5}" g_branch="${6}" g_tag="${7}" cache_queue="${8}"
 
   local svc_names svc
   svc_names=$(echo "${merged}" | yq -r '.services // {} | keys | .[]')

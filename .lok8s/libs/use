@@ -14,7 +14,7 @@ import ^utils/verbose
 # that fail the character allowlist (path-traversal guard) or that don't
 # resolve to a real domain directory with a cluster/deploy spec.
 use::_set_active() {
-  local target="$1"
+  local target="${1}"
   if [[ ! "${target}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
     error "invalid domain name: ${target}"
     return 1

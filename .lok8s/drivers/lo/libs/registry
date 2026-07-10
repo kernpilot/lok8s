@@ -56,7 +56,7 @@ registry::up() {
 registry::down() {
   _registry_init
   _down_entry() {
-    local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
     local container_info
     container_info=$(registry::container "${name}")
     local reg_name="${container_info%%	*}"
@@ -72,7 +72,7 @@ registry::clean() {
 
   if (( ${shared:-0} )); then
     _clean_shared() {
-      local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+      local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
       [[ "${type}" == "mirror" ]] || return 0
       local reg_name="lok8s-registry-${name}"
       docker rm -f "${reg_name}" 2>/dev/null || true
@@ -96,7 +96,7 @@ registry::clean() {
 registry::status() {
   _registry_init
   _status_entry() {
-    local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
     local container_info label
     container_info=$(registry::container "${name}")
     local reg_name="${container_info%%	*}"

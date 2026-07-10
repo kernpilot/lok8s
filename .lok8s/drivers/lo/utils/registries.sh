@@ -34,7 +34,7 @@ EOF
 # hardcoded http: stanza (the `http:` line plus its indented children),
 # and appends the mode-appropriate block.
 lo::render_registry_config() {
-  local config_file="$1" url="$2"
+  local config_file="${1}" url="${2}"
 
   local base
   if [[ -n "${url}" ]]; then
@@ -103,7 +103,7 @@ lo::registries_tls_cert() {
   # the upstream domain they impersonate. Every registry contributes its IP.
   local -a sans=()
   _lo_registry_san() {
-    local name="$1" ip="$2" url="$3" reg_domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
     [[ -n "${host}" ]] && sans+=("${host}")
     [[ -n "${reg_domain}" ]] && sans+=("${reg_domain}")
     [[ -n "${ip}" ]] && sans+=("${ip}")
@@ -199,7 +199,7 @@ lo::registries_tls_nudge() {
 }
 
 lo::registries() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local registry_config_dir="${PATH_LOK8S}/drivers/lo/cluster/registry"
 
   # In TLS mode every registry container mounts the shared cert minted by
@@ -217,7 +217,7 @@ lo::registries() {
   fi
 
   _lo_registry_start() {
-    local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
     local container_info
     container_info=$(registry::container "${name}")
     local reg_name="${container_info%%	*}"
@@ -258,7 +258,7 @@ lo::registries() {
 }
 
 lo::apply_local_registry_hosting() {
-  local domain="$1"
+  local domain="${1}"
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}" 2>/dev/null)
@@ -288,10 +288,10 @@ EOF
 }
 
 lo::cleanup_registries() {
-  local cluster_name="$1"
+  local cluster_name="${1}"
 
   _lo_registry_cleanup() {
-    local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
     # Skip shared mirrors — they persist across project lifecycles
     if registry::is_shared && [[ "${type}" == "mirror" ]]; then
       return 0
@@ -307,7 +307,7 @@ lo::cleanup_registries() {
 }
 
 lo::registry_configmap() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"

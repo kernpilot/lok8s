@@ -37,14 +37,14 @@ import() { :; }
     [[ "${_spec}" == *'|'* ]] && continue
     _name="${_spec//-/_}"
     if (( $# > 0 )); then
-      printf -v "${_name}" '%s' "$1"
+      printf -v "${_name}" '%s' "${1}"
       shift
     fi
   done
 }
 
 :usage() {
-  echo "error: argsh dispatcher invoked inside the operator runtime: $*" >&2
+  echo "error: argsh dispatcher invoked inside the operator runtime: ${*}" >&2
   return 1
 }
 
@@ -72,7 +72,7 @@ unset _f
 # Patch a CR's status subresource; failures are logged, not masked.
 # Usage: hook::patch_status <kind> <name> <namespace> <merge-json>
 hook::patch_status() {
-  local kind="$1" name="$2" namespace="$3" patch="$4"
+  local kind="${1}" name="${2}" namespace="${3}" patch="${4}"
   if ! kubectl patch "${kind}" "${name}" -n "${namespace}" \
     --type merge --subresource status -p "${patch}" 2>&1; then
     echo "warn: failed to patch ${kind} ${namespace}/${name} status" >&2

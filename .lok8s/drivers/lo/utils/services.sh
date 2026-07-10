@@ -2,7 +2,7 @@
 # services.sh — Cluster service setup (CoreDNS)
 
 lo::coredns() {
-  local domain="$1"
+  local domain="${1}"
   local coredns_dir="${PATH_LOK8S}/drivers/lo/cluster/coredns"
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name kubeconfig
@@ -56,7 +56,7 @@ lo::coredns() {
 # Do NOT define the same zone via both hosts and a raw server/import (CoreDNS
 # rejects duplicate zone blocks).
 lo::coredns_custom() {
-  local domain="$1" cluster_yaml="$2" kubeconfig="$3"
+  local domain="${1}" cluster_yaml="${2}" kubeconfig="${3}"
   local tmp; tmp=$(mktemp -d)
   # NOTE: no `trap ... RETURN` for cleanup — a RETURN trap is NOT function-local
   # without `set -o functrace`, so it leaks and re-fires when the CALLER returns,

@@ -41,7 +41,7 @@ case "${TABLE}" in
     # >2GiB so the GPT bios_grub (~1M) + EFI (~256M) helpers don't count — otherwise a
     # cloud VM's sda1+sda14+sda15 looked like "bare-metal", root never grew, and the CPs
     # were left on the image's ~4GiB root → DiskPressure → evicted apiserver.
-    NBIG="$(lsblk -rbno SIZE,TYPE "${DEV}" 2>/dev/null | awk '$2=="part" && $1+0 > 2147483648 {n++} END{print n+0}')"
+    NBIG="$(lsblk -rbno SIZE,TYPE "${DEV}" 2>/dev/null | awk '${2}=="part" && ${1}+0 > 2147483648 {n++} END{print n+0}')"
     if [[ "${NBIG}" -le 1 ]]; then
       echo "lok8s/ceph-osd: GPT cloud ${DEV} — carve OSD past ${ROOT_GIB}GiB root + grow root"
       sgdisk -n "0:${ROOT_GIB}GiB:0" -t "0:8300" -c "0:rook-osd" "${DEV}"
@@ -61,7 +61,7 @@ case "${TABLE}" in
     # node (rook#17716; ceph/ceph#69812). Prefer GPT for Ceph nodes (installimage
     # FORCE_GPT); see docs/guide/bare-metal.md.
     # Start right after the last existing partition (parted machine output: num:start:end:…).
-    LAST_END="$(parted -sm "${DEV}" unit MB print 2>/dev/null | awk -F: 'NR>2 && $1 ~ /^[0-9]+$/ {e=$3} END{print e}')"
+    LAST_END="$(parted -sm "${DEV}" unit MB print 2>/dev/null | awk -F: 'NR>2 && ${1} ~ /^[0-9]+$/ {e=$3} END{print e}')"
     LAST_END="${LAST_END%MB}"
     [[ -n "${LAST_END}" ]] || LAST_END="$(( ROOT_GIB * 1000 ))"
     parted -s -a optimal "${DEV}" mkpart logical "${LAST_END}MB" 100%

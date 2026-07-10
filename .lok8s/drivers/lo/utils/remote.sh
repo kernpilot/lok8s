@@ -4,7 +4,7 @@
 # Wait for SSH, cloud-init, and Docker on a freshly provisioned VM.
 # Sets: LOK8S_REMOTE_IP, LOK8S_REMOTE_USER, DOCKER_HOST
 lo::provision_remote() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
   mkdir -p "${work_dir}"
 
@@ -98,7 +98,7 @@ lo::provision_remote() {
 
 # CI mode: sync repo to remote VM, run lo provision remotely, set up expose + tunnel
 lo::remote_ci() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local remote="${LOK8S_REMOTE_USER}@${LOK8S_REMOTE_IP}"
   local dest="${LOK8S_REMOTE_SYNC_DEST}"
   local cluster_name

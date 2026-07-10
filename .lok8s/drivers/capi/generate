@@ -11,7 +11,7 @@ import ^utils/template
 # Usage: capi::detect_provider <cluster_yaml>
 # Delegates to provider::detect from utils/provider.
 capi::detect_provider() {
-  provider::detect "$1"
+  provider::detect "${1}"
 }
 
 # Generate CAPI resources from templates using values from cluster spec.
@@ -24,7 +24,7 @@ capi::detect_provider() {
 # variables ($ARCH, $RUNC, $CONTAINERD, $KUBERNETES_VERSION, …) pass through
 # untouched — only the lok8s template vars below are expanded.
 capi::generate() {
-  local cluster_yaml="$1" provider="$2"
+  local cluster_yaml="${1}" provider="${2}"
   local tmpl_dir="${PATH_LOK8S}/drivers/capi/cluster"
   local core="${tmpl_dir}/core" prov="${tmpl_dir}/providers/hetzner"
 
@@ -115,7 +115,7 @@ capi::generate() {
 # Create or update the provider credential Secret on the management cluster.
 # Usage: capi::ensure_credentials <cluster_yaml> <provider> <kubeconfig>
 capi::ensure_credentials() {
-  local cluster_yaml="$1" provider="$2" kubeconfig="$3"
+  local cluster_yaml="${1}" provider="${2}" kubeconfig="${3}"
   local secret_name namespace
   secret_name=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
   namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
@@ -152,7 +152,7 @@ capi::ensure_credentials() {
 # Wait for a CAPI cluster to become ready.
 # Usage: capi::wait_ready <kubeconfig> <cluster_name> [namespace] [timeout_seconds]
 capi::wait_ready() {
-  local kubeconfig="$1" cluster_name="$2" namespace="${3:-default}" timeout="${4:-600}"
+  local kubeconfig="${1}" cluster_name="${2}" namespace="${3:-default}" timeout="${4:-600}"
   local elapsed=0 interval=10
 
   debug "Waiting for CAPI cluster ${cluster_name} to become ready (timeout: ${timeout}s)"

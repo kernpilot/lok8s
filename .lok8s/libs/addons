@@ -26,8 +26,8 @@ main::addons() {
 
   if is::set addons; then
     for ((i=0; i<${#addons[@]}; i++)); do
-      addons::show "${addons[$i]}"
-      [[ $i -lt $((${#addons[@]} - 1)) ]] &&
+      addons::show "${addons[${i}]}"
+      [[ ${i} -lt $((${#addons[@]} - 1)) ]] &&
         printf "\n---\n"
     done
     return 0
@@ -62,7 +62,7 @@ addons::_dir() {
 
 # Classify an addon directory: khelm | raw | base | empty
 addons::_type() {
-  local dir="$1"
+  local dir="${1}"
   if [[ -f "${dir}/chart.yaml" ]]; then
     local kind
     kind=$(yq -r '.kind // ""' "${dir}/chart.yaml" 2>/dev/null)
@@ -81,7 +81,7 @@ addons::_type() {
 
 # Get version for a khelm addon. Echoes "-" for non-khelm.
 addons::_version() {
-  local dir="$1"
+  local dir="${1}"
   if [[ -f "${dir}/chart.yaml" ]]; then
     yq -r '.version // "-"' "${dir}/chart.yaml" 2>/dev/null
   else
@@ -91,7 +91,7 @@ addons::_version() {
 
 # Get the chart repository URL for a khelm addon.
 addons::_repo() {
-  local dir="$1"
+  local dir="${1}"
   if [[ -f "${dir}/chart.yaml" ]]; then
     yq -r '.repository // "-"' "${dir}/chart.yaml" 2>/dev/null
   else
@@ -101,7 +101,7 @@ addons::_repo() {
 
 # Get the chart name for a khelm addon.
 addons::_chart() {
-  local dir="$1"
+  local dir="${1}"
   if [[ -f "${dir}/chart.yaml" ]]; then
     yq -r '.chart // "-"' "${dir}/chart.yaml" 2>/dev/null
   else
@@ -149,7 +149,7 @@ addons::list() {
 # addons::show — print detail for one or more addons.
 # Usage: addons::show <name> [name...]
 addons::show() {
-  local name="$1"
+  local name="${1}"
   [[ -n "${name}" ]] || { error "addon name required"; return 1; }
 
   local driver addons_dir
@@ -187,7 +187,7 @@ addons::show() {
 # Read an addon's lok8s.dev/category label from its manifests. Echoes the
 # category (infrastructure/networking/observability/storage/dev-tools) or "-".
 addons::_category() {
-  local dir="$1" line cat=""
+  local dir="${1}" line cat=""
   # LC_ALL=C sort before head -1: grep -r traversal follows readdir order
   # (filesystem-dependent), and the category feeds deterministic artifacts
   # (ClusterInventory, addons-index.json) — pick a stable winner.
@@ -203,7 +203,7 @@ addons::_category() {
 # adding an addon without a hint breaks CI). Keep each hint to the handful of
 # knobs users actually touch.
 addons::_config_hint() {
-  case "$1" in
+  case "${1}" in
     autoscaler)                   echo "min/max nodes per MachineDeployment via cluster-autoscaler annotations";;
     ccm)                          echo "spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)";;
     cert-manager)                 echo "issue TLS via ClusterIssuer/Certificate CRs in a networking target";;
@@ -311,7 +311,7 @@ addons::detail() {
 # the caller exported, e.g. cilium's k8sServiceHost).
 # Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values]
 addons::render() {
-  local addon_dir="$1" kind="$2" provider_name="${3:-}" inline_values="${4:-}"
+  local addon_dir="${1}" kind="${2}" provider_name="${3:-}" inline_values="${4:-}"
   local build_dir="${addon_dir}"
   if [[ -f "${addon_dir}/chart.yaml" ]]; then
     # Stack values: base < driver < provider < inline (later wins). Facts

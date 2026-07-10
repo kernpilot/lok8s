@@ -28,7 +28,7 @@ main::build() {
 # exist yet for a deploy domain (resolved secret not fetched). MUST be called
 # directly (not in a subshell) so the exports persist for the envsubst whitelist.
 build::_resolve_api() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   local _kcfg="${KUBECONFIG:-}"
   if [[ -z "${_kcfg}" || ! -f "${_kcfg}" ]]; then
     # Deploy domains (deploy.lok8s.yaml + clusterRef) have NO cluster.lok8s.yaml.
@@ -61,7 +61,7 @@ build::_resolve_api() {
 # Mirrors libs/secrets `secrets::path`; see docs/guide/secrets.md.
 # MUST run un-subshelled so the export reaches the kustomize child.
 build::_export_secrets_path() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   # `if` (not `&&`): a false `[[ … ]] && …` returns non-zero, which as the last
   # command would fail the caller under `set -e` when a domain has no own store.
   if [[ -d "${domain_dir}/secrets" ]]; then
@@ -165,7 +165,7 @@ build::artifacts() {
 
 # Helper: check if a directory has a kustomization file
 _has_kustomization() {
-  local dir="$1"
+  local dir="${1}"
   [[ -f "${dir}/kustomization.yaml" ]] \
     || [[ -f "${dir}/kustomization.yml" ]] \
     || [[ -f "${dir}/Kustomization" ]]

@@ -27,7 +27,7 @@ main::version() {
 
 # Best-effort single version string for a tool (no label).
 version::_of() {
-  local t="$1" out=""
+  local t="${1}" out=""
   case "${t}" in
     argsh)     out="$(argsh --version 2>/dev/null | head -1)" ;;
     yq)        out="$(yq --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)" ;;

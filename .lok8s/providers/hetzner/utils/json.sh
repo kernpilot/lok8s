@@ -9,20 +9,20 @@
 # ── Output helpers ─────────────────────────────────────
 
 _hetzner_log() {
-  echo "[$(date -Iseconds)] $*" >> "${CLOUD_LOG_FILE}"
+  echo "[$(date -Iseconds)] ${*}" >> "${CLOUD_LOG_FILE}"
 }
 
 _hetzner_print() {
-  _hetzner_log "$*"
+  _hetzner_log "${*}"
   if [[ -z "${CLOUD_QUIET:-}" ]]; then
-    echo -e "$*"
+    echo -e "${*}"
   fi
 }
 
 # ── Dry-run helpers ──────────────────────────────────────
 
 dry-run::cmd() {
-  _hetzner_log "cmd: $*"
+  _hetzner_log "cmd: ${*}"
   if [[ -n "${CLOUD_DRY_RUN}" ]]; then
     mkdir -p "${CLOUD_DRY_RUN_PATH}"
     echo "${@}" | tee -a "${CLOUD_DRY_RUN_PATH}/dry-run-cmd.log"

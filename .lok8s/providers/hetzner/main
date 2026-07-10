@@ -40,7 +40,7 @@ source "${_HETZNER_DIR}/utils/resources.sh"
 # cloud-init hooks. When it's simple YAML config fields, the
 # provider reads the config and dispatches to the create loop.
 
-_cfg() { yq -r "$1" "${PROVIDER_CONFIG_FILE}"; }
+_cfg() { yq -r "${1}" "${PROVIDER_CONFIG_FILE}"; }
 
 # _validate_node_labels <labels-json> [<node-name>]
 # Light k8s-label validity guard: drop any key/value that violates the
@@ -564,7 +564,7 @@ provider::rebuild() {
 # is intentionally NOT set here — each caller owns it (provision: whole-cluster
 # .cloudInit.modules; rebuild: per-server #cloud.d).
 hetzner::_export_cloudinit_env() {
-  local config_file="$1"
+  local config_file="${1}"
   local _ci_path _ci_user _ci_group _ci_pub
   _ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
   if [[ -n "${_ci_path}" && "${_ci_path}" != /* ]]; then
@@ -596,7 +596,7 @@ hetzner::_export_cloudinit_env() {
 # and read it back — deliberately NOT done here (over-engineering for a recovery
 # flow whose caller drives the reset with explicit intent).
 hetzner::_rebuild_barrier() {
-  local -n _sshref="$1" _cloudref="$2" _metalref="$3"
+  local -n _sshref="${1}" _cloudref="${2}" _metalref="${3}"
   local tries="${PROVIDER_REBUILD_WAIT_TRIES:-48}"
   local interval="${PROVIDER_REBUILD_WAIT_INTERVAL:-15}"
   local ssh_user="${CLOUD_USER:-root}"
@@ -668,7 +668,7 @@ hetzner::_cloud_server_unique_labeled() {
 
 # hetzner::_robot_rescue <number> <key_fingerprint>
 hetzner::_robot_rescue() {
-  local num="$1" fp="$2"
+  local num="${1}" fp="${2}"
   # Honor dry-run: PRINT the intended activation and issue no POST. Kept as an
   # explicit branch (not dry-run::cmd) so the Robot user:password on the curl
   # command line is never teed into the plan log.
@@ -684,7 +684,7 @@ hetzner::_robot_rescue() {
 
 # hetzner::_robot_reset <number>  — hardware reset
 hetzner::_robot_reset() {
-  local num="$1"
+  local num="${1}"
   if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
     _hetzner_print "🧪 [dry-run] would hardware-reset robot#${num} (POST ${HROBOT_API}/reset/${num} type=hw)"
     return 0
@@ -723,7 +723,7 @@ provider::doctor() {
 # GETs and non-mutating SSH probes (test -x, cloud-init status). No rebuild,
 # reset, rescue, delete, or any write.
 hetzner::_doctor_checks() {
-  local config_file="$1"
+  local config_file="${1}"
 
   # 1) hcloud credentials + API reachability.
   local _ctx=""

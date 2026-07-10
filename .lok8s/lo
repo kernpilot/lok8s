@@ -179,7 +179,7 @@ _list_domains() {
 #   kubeconfig  .kubeconfig/kubehz-dev.yaml
 #
 _lo_header() {
-  local domain="$1"
+  local domain="${1}"
   local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local dspec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
   local meta="" kind=""

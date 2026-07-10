@@ -74,7 +74,7 @@ main::bootstrap() {
 # sources the driver (provision:161-170) and calls driver::export
 # (provision:246-247) before bootstrap::apply. This converges the two.
 bootstrap::dispatch() {
-  local domain="$1"
+  local domain="${1}"
 
   # Reject a path-traversal / injected domain before it builds any filesystem
   # path (same guard as provision::resolve_spec).
@@ -136,7 +136,7 @@ bootstrap::dispatch() {
 # management cluster / addon set. Defaulting those to [cilium] caused a stray
 # cilium apply on managed clusters.
 bootstrap::_resolve_entries() {
-  local cluster_yaml="$1" kind="$2"
+  local cluster_yaml="${1}" kind="${2}"
   local -a entries
   # Emit each entry as compact JSON, one per line: a scalar ("cilium",
   # "./targets/x") or a map ({"ccm":{<chart values>}}). JSON keeps a map on a
@@ -207,8 +207,8 @@ bootstrap::_resolve_entries() {
 #            key must nest it under `values:` (e.g. `ccm: {env: {...}}` →
 #            `ccm: {values: {env: {...}}}`).
 bootstrap::_parse_entry() {
-  local _domain="$1" _entry="$2"
-  local -n _o_name="$3" _o_dir="$4" _o_inline="$5" _o_env="$6" _o_wait="$7" _o_deps="$8"
+  local _domain="${1}" _entry="${2}"
+  local -n _o_name="${3}" _o_dir="${4}" _o_inline="${5}" _o_env="${6}" _o_wait="${7}" _o_deps="${8}"
   # 9th out-param (optional): "true" iff this entry sets an explicit `name:`. Fall
   # back to a throwaway local when omitted so six-out-param callers keep working.
   local _bs_discard_explicit=""
@@ -479,8 +479,8 @@ bootstrap::_parse_entry() {
 # it up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
 # convention the addons reference; other names are exported but not whitelisted.
 bootstrap::_apply_one() {
-  local addon_name="$1" addon_dir="$2" kind="$3" provider_name="$4"
-  local kubeconfig="$5" inline_values="$6" do_wait="$7" env_lines="${8:-}"
+  local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
+  local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
 
   if [[ -n "${env_lines}" ]]; then
     local _kv _k _v
@@ -638,7 +638,7 @@ _BS_OVERALL_RC=0    # set to 1 if ANY entry failed
 # Returns 0 iff the job SUCCEEDED (rc==0); non-zero on failure, so the caller can
 # react — the reap path uses it to skip the failed entry's transitive dependents.
 bootstrap::_collect_rc() {
-  local _rcf="$1" _r=1
+  local _rcf="${1}" _r=1
   [[ -f "${_rcf}" ]] && _r="$(cat "${_rcf}" 2>/dev/null || echo 1)"
   if [[ "${_r}" != "0" ]]; then
     _BS_OVERALL_RC=1
@@ -661,7 +661,7 @@ bootstrap::_collect_rc() {
 # have completed before the parent it waits on failed). The cause reported is the
 # ORIGINAL failed entry's name, propagated to the whole invalidated subtree.
 bootstrap::_skip_dependents() {
-  local _failed="$1"
+  local _failed="${1}"
   local _cause="${_names[${_failed}]}"
   local -a _q=("${_failed}")
   local _head=0
@@ -759,7 +759,7 @@ bootstrap::_reap_one() {
 # wedge on a missing age key; the fallback (the owner controller re-creates /
 # re-issues) is the pre-restore.d behavior. Always returns 0.
 bootstrap::_restore_d() {
-  local domain="$1" kubeconfig="$2"
+  local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
   [[ -d "${rdir}" ]] || return 0
   local f base plain applied=0 skipped=0 _err=""
@@ -820,7 +820,7 @@ bootstrap::_restore_d() {
 # `dependsOn:` adds explicit edges. Edge resolution + cycle detection are below
 # (see the scheduler block above).
 bootstrap::apply() {
-  local domain="$1" cluster_yaml="$2" kubeconfig="$3"
+  local domain="${1}" cluster_yaml="${2}" kubeconfig="${3}"
 
   # lo provision drives the bootstrap directly (not via `lo build`), so the
   # per-domain secrets store isn't exported yet. The secrets.lok8s.dev generators

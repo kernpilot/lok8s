@@ -104,9 +104,9 @@ main::doctor() {
   echo "doctor: all required checks passed."
 }
 
-doctor::_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-doctor::_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
-doctor::_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+doctor::_ok()   { printf '  \033[32m✓\033[0m %s\n' "${1}"; }
+doctor::_warn() { printf '  \033[33m!\033[0m %s\n' "${1}"; }
+doctor::_bad()  { printf '  \033[31m✗\033[0m %s\n' "${1}"; }
 
 # doctor::_provider_section <domain>
 # If the active domain is a provider-backed cluster whose provider implements
@@ -115,7 +115,7 @@ doctor::_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
 # advisory: it never changes the doctor exit code and never mutates anything.
 # Silent (prints nothing) when there is no provider-backed cluster spec.
 doctor::_provider_section() {
-  local domain="$1"
+  local domain="${1}"
   [[ -n "${domain}" ]] || return 0
   local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${spec}" ]] || return 0
@@ -154,7 +154,7 @@ doctor::_provider_section() {
 
 # doctor::_tool <name> <required:0|1> <purpose>  → 0 ok, 1 if required+missing
 doctor::_tool() {
-  local name="$1" required="$2" purpose="$3"
+  local name="${1}" required="${2}" purpose="${3}"
   if command -v "${name}" >/dev/null 2>&1; then
     doctor::_ok "${name} — ${purpose}"
     return 0
@@ -168,7 +168,7 @@ doctor::_tool() {
 }
 
 doctor::_dir() {
-  local name="$1" val="$2"
+  local name="${1}" val="${2}"
   if [[ -n "${val}" && -d "${val}" ]]; then
     doctor::_ok "${name}=${val}"
   else

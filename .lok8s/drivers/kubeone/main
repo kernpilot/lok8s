@@ -196,7 +196,7 @@ driver::kubeconfig() {
 # by provider::output) as hosts[].labels for KubeOne's labelNodes task.
 
 _append_inventory() {
-  local config_file="$1" manifest="$2"
+  local config_file="${1}" manifest="${2}"
 
   local output
   output=$(provider::output "${config_file}")

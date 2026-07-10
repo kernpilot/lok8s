@@ -54,7 +54,7 @@ k8s::capi() {
     out="${PATH_CLUSTERS}/${domain}/artifacts/capi.yaml"
   fi
 
-  mkdir -p "$(dirname "$out")"
+  mkdir -p "$(dirname "${out}")"
 
   # Detect provider and generate CAPI resources via templates
   local provider
@@ -71,7 +71,7 @@ k8s::capi() {
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - $(basename "$out")
+  - $(basename "${out}")
 EOF
   fi
 

@@ -67,12 +67,12 @@ kapply::_aggregate() {
 #   (e.g. the Lo driver's coredns/registry setup). Runs the command in THIS
 #   shell (no subshell — side effects/exports persist) and returns its status.
 kapply::run() {
-  local phase="$1"; shift
-  kapply::_tty || { "$@"; return; }
+  local phase="${1}"; shift
+  kapply::_tty || { "${@}"; return; }
   local tmp rcf rc; tmp=$(mktemp); rcf=$(mktemp)
   # Stream live (so a blocking `kubectl wait` shows readiness as it lands),
   # tee the full output to a file for the after-the-fact error/empty checks.
-  { "$@" 2>&1; echo "$?" >"${rcf}"; } | tee "${tmp}" | kapply::_progress "${phase}" >/dev/null
+  { "${@}" 2>&1; echo "$?" >"${rcf}"; } | tee "${tmp}" | kapply::_progress "${phase}" >/dev/null
   rc=$(cat "${rcf}"); rm -f "${rcf}"
   if ! grep -qE "${_KAPPLY_OK}" "${tmp}"; then
     cat "${tmp}"                                    # no progress lines (warnings/notes) — show as-is
@@ -91,8 +91,8 @@ kapply::run() {
 #   terminal it stays quiet (verbose `debug`s each poll). Best-effort: a timeout
 #   is a ⚠, never fatal — the caller decides whether to care.
 kapply::wait_ready() {
-  local label="$1" timeout="${2:-180}"; shift 2
-  local -a kf=("$@")
+  local label="${1}" timeout="${2:-180}"; shift 2
+  local -a kf=("${@}")
   local manifest; manifest=$(cat)
   local -a targets=()
   mapfile -t targets < <(printf '%s' "${manifest}" \
@@ -154,8 +154,8 @@ kapply::wait_ready() {
 # re-apply, so the re-apply renders the same named progress block (never
 # escapes as raw output).
 kapply::_apply_pass() {
-  local label="$1" manifest="$2"; shift 2
-  local -a kf=("$@")
+  local label="${1}" manifest="${2}"; shift 2
+  local -a kf=("${@}")
   local out rc rcf; rcf=$(mktemp)
   if kapply::_tty; then
     out=$( { printf '%s' "${manifest}" \
@@ -178,9 +178,9 @@ kapply::apply() {
   local label="resources"
   local -a kf=()
   while (( $# )); do
-    case "$1" in
+    case "${1}" in
       --label) label="${2:-resources}"; shift 2 ;;
-      *)       kf+=("$1"); shift ;;
+      *)       kf+=("${1}"); shift ;;
     esac
   done
   local manifest; manifest=$(cat)
@@ -240,7 +240,7 @@ kapply::_confirm_heal() {
 # e.g. CI / the deploy path); no flag + no tty → refuse (don't nuke a namespace
 # unattended).
 kapply::_confirm_ns_finalize() {
-  local name="$1"
+  local name="${1}"
   [[ -n "${LOK8S_FORCE_RECREATE:-}" ]] && return 0
   kapply::_interactive || return 1
   local ans
@@ -300,8 +300,8 @@ kapply::_progress() {
 # (core resources have no `.<group>`). We recreate by kind+name from the same
 # manifest — `replace --force` = delete + create, which bypasses immutability.
 kapply::_heal_immutable() {
-  local manifest="$1" out="$2"; shift 2
-  local -a kf=("$@")
+  local manifest="${1}" out="${2}"; shift 2
+  local -a kf=("${@}")
   local kind name
   while read -r kind name; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
@@ -320,8 +320,8 @@ kapply::_heal_immutable() {
 # is terminating. Then wait (bounded) for it to actually disappear, so the
 # follow-up apply recreates it cleanly instead of racing its tail-end deletion.
 kapply::_finalize_namespace() {
-  local name="$1"; shift
-  local -a kf=("$@")
+  local name="${1}"; shift
+  local -a kf=("${@}")
   local dts
   dts=$(kubectl "${kf[@]}" get ns "${name}" \
     -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || return 0
@@ -353,8 +353,8 @@ kapply::_finalize_namespace() {
 # cascade-delete every CR of that kind cluster-wide; the CRD-settle retry in
 # the caller handles that race instead.
 kapply::_heal_terminating() {
-  local manifest="$1" out="$2"; shift 2
-  local -a kf=("$@")
+  local manifest="${1}" out="${2}"; shift 2
+  local -a kf=("${@}")
 
   # (a) namespaces named in "because it is being terminated" 403s
   local nsname

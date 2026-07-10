@@ -15,7 +15,7 @@ import ^utils/verbose
 # Usage: kubehz::build_cluster_payload <cluster_yaml>
 # Outputs: JSON string to stdout
 kubehz::build_cluster_payload() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   local domain kind provider region k8s_version cp_replicas hosting access
   domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
   kind=$(yq -r '.kind' "${cluster_yaml}")
@@ -44,7 +44,7 @@ kubehz::build_cluster_payload() {
 # Polls the kubehz API at 10-second intervals up to a timeout.
 # Usage: kubehz::wait_for_cluster <api_url> <cluster_id> [timeout_seconds]
 kubehz::wait_for_cluster() {
-  local api_url="$1" cluster_id="$2" timeout="${3:-600}"
+  local api_url="${1}" cluster_id="${2}" timeout="${3:-600}"
   local elapsed=0 status_val
 
   debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
@@ -85,7 +85,7 @@ kubehz::wait_for_cluster() {
 # LOK8S_KUBEHZ_API_URL (set by kubehz::read_config), NOT the caller's locals.
 # Usage: kubehz::render_capacity_rejection <error_body_json>
 kubehz::render_capacity_rejection() {
-  local body="$1"
+  local body="${1}"
   local tier used limit retry
   tier=$(echo "${body}" | jq -r '.data.detail.tier // .detail.tier // "this plan"' 2>/dev/null) || tier="this plan"
   used=$(echo "${body}" | jq -r '.data.detail.used // .detail.used // empty' 2>/dev/null) || used=""
@@ -124,7 +124,7 @@ kubehz::render_capacity_rejection() {
 # Creates the cluster, waits for it, and downloads the kubeconfig.
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
 kubehz::provision_hosted() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   local payload
@@ -194,7 +194,7 @@ kubehz::provision_hosted() {
 # Looks up the cluster by domain, then sends DELETE.
 # Usage: kubehz::destroy_hosted <domain> <cluster_yaml>
 kubehz::destroy_hosted() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   # GET /api/clusters is an enveloped, PAGINATED UI route: the rows are at

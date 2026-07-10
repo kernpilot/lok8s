@@ -24,7 +24,7 @@ main::status() {
 # Reports cluster phase from the driver contract.
 # Usage: status::cluster <domain>
 status::cluster() {
-  local domain="$1"
+  local domain="${1}"
 
   echo "--- Cluster ---"
   provision::dispatch_status "${domain}" 2>&1 || true
@@ -79,7 +79,7 @@ status::inventory() {
 # clusters/<domain>/artifacts.yaml.
 # Usage: status::targets <domain>
 status::targets() {
-  local domain="$1"
+  local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
 
   echo "--- Targets ---"
@@ -129,7 +129,7 @@ status::tilt() {
 # Convenience function to report full status for a domain.
 # Usage: status::all <domain>
 status::all() {
-  local domain="$1"
+  local domain="${1}"
 
   echo "=== Domain: ${domain} ==="
   echo ""

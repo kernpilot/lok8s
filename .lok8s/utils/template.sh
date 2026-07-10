@@ -8,7 +8,7 @@ import ^utils/verbose
 # Usage: template::render <template_file> <cluster_yaml>
 # Outputs rendered YAML to stdout.
 template::render() {
-  local template="$1" cluster_yaml="$2"
+  local template="${1}" cluster_yaml="${2}"
 
   [[ -f "${template}" ]] || { error "Template not found: ${template}"; return 1; }
   [[ -f "${cluster_yaml}" ]] || { error "Cluster spec not found: ${cluster_yaml}"; return 1; }
@@ -28,7 +28,7 @@ template::render() {
 # Render all template files in a directory, concatenated with --- separators.
 # Usage: template::render_dir <dir> <cluster_yaml>
 template::render_dir() {
-  local dir="$1" cluster_yaml="$2"
+  local dir="${1}" cluster_yaml="${2}"
   local first=1
 
   [[ -d "${dir}" ]] || { error "Template directory not found: ${dir}"; return 1; }

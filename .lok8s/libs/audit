@@ -117,7 +117,7 @@ main::audit() {
 # findings accumulator first. Always returns 0 (findings carry status); the
 # caller checks audit::_count_status fail.
 audit::run_domain() {
-  local domain="$1"
+  local domain="${1}"
   _AUDIT_FINDINGS=()
 
   # Reject a path-traversal / injected domain before it builds any filesystem
@@ -163,7 +163,7 @@ audit::run_domain() {
 # other path (an explicit enable: false, an identity-only config) can degrade a
 # throwaway dev cluster to warn.
 audit::check_encryption() {
-  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
+  local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}" provider="${5}"
   local id="encryption-at-rest" title="Secret encryption at rest (etcd)"
 
   # kind=lo is documented not-applicable — short-circuit BEFORE any evaluation
@@ -252,7 +252,7 @@ audit::check_encryption() {
 # (addons/cilium/values.kubeone.yaml: policyAuditMode: true), so it fires on the
 # stock pilot config — by design.
 audit::check_cilium() {
-  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
+  local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}" provider="${5}"
   local id="cilium-policy-enforcement" title="Cilium network-policy enforcement"
 
   # Is cilium deployed? Resolve spec.bootstrap through the SAME parser the apply
@@ -336,7 +336,7 @@ audit::check_cilium() {
 # (IP-allowlist) carve-out. Scans the cluster's own targets + any `lo build`
 # artifacts. Fail-soft: nothing to scan → unknown.
 audit::check_exposed() {
-  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4" provider="$5"
+  local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}" provider="${5}"
   local id="exposed-endpoints" title="Publicly-exposed endpoints"
 
   local -a files=()
@@ -392,7 +392,7 @@ audit::check_exposed() {
 # minor? EOL → FAIL (prod-intent) / WARN (dev); newer-than-known → WARN (update
 # the list); unparseable → unknown.
 audit::check_k8s_version() {
-  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4"
+  local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}"
   local id="k8s-version-support" title="Kubernetes version support (EOL)"
 
   local raw
@@ -437,7 +437,7 @@ audit::check_k8s_version() {
 # since some per-cluster glue genuinely needs it — the point is to make it
 # visible.
 audit::check_privileged() {
-  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4"
+  local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}"
   local id="privileged-workloads" title="Privileged / host-level workloads"
 
   local -a files=()
@@ -472,7 +472,7 @@ audit::check_privileged() {
 # per-cluster targets are a WARN. Best-effort scan (excludes localhost / schema
 # URLs / in-cluster .svc).
 audit::check_plaintext() {
-  local domain="$1" domain_dir="$2" spec_file="$3" kind="$4"
+  local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}"
   local id="plaintext-endpoints" title="Plaintext (non-HTTPS) endpoints"
 
   local issuer
@@ -511,7 +511,7 @@ audit::check_plaintext() {
 # → pass, and within each group by severity (critical first) — the most
 # actionable first. Colorless for deterministic output/piping.
 audit::render_human() {
-  local domain="$1"
+  local domain="${1}"
   local score grade p w f u
   read -r score grade p w f u <<< "$(audit::_score)"
   local total=$(( p + w + f + u ))
@@ -528,7 +528,7 @@ audit::render_human() {
 
 # audit::_render_status_group <status>
 audit::_render_status_group() {
-  local want="$1"
+  local want="${1}"
   local line id title sev st detail rem
   local -a rows=()
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
@@ -551,7 +551,7 @@ audit::_render_status_group() {
 # Machine-readable JSON — the STABLE schema the dashboard consumes. Hand-rolled
 # (no jq dependency) with explicit escaping.
 audit::render_json() {
-  local domain="$1"
+  local domain="${1}"
   local score grade p w f u
   read -r score grade p w f u <<< "$(audit::_score)"
 
@@ -579,7 +579,7 @@ audit::render_json() {
 
 # audit::_emit <id> <title> <severity> <status> <detail> <remediation>
 audit::_emit() {
-  local id="$1" title="$2" severity="$3" status="$4" detail="$5" remediation="$6"
+  local id="${1}" title="${2}" severity="${3}" status="${4}" detail="${5}" remediation="${6}"
   # TSV storage — strip any embedded tabs/newlines defensively.
   detail="${detail//$'\t'/ }"; detail="${detail//$'\n'/ }"
   remediation="${remediation//$'\t'/ }"; remediation="${remediation//$'\n'/ }"
@@ -617,7 +617,7 @@ audit::_score() {
 
 # audit::_weight <severity> <fail|warn> → penalty points
 audit::_weight() {
-  local sev="$1" kind="$2"
+  local sev="${1}" kind="${2}"
   if [[ "${kind}" == "fail" ]]; then
     case "${sev}" in
       critical) echo 40;; high) echo 25;; medium) echo 15;; low) echo 5;; *) echo 10;;
@@ -631,20 +631,20 @@ audit::_weight() {
 
 # audit::_sev_rank <severity> → sort rank (critical first)
 audit::_sev_rank() {
-  case "$1" in
+  case "${1}" in
     critical) echo 0;; high) echo 1;; medium) echo 2;; low) echo 3;; *) echo 4;;
   esac
 }
 
 audit::_status_label() {
-  case "$1" in
+  case "${1}" in
     fail) printf 'FAIL';; warn) printf 'WARN';; pass) printf 'PASS';; *) printf 'UNKN';;
   esac
 }
 
 # audit::_count_status <status> → count of findings with that status
 audit::_count_status() {
-  local want="$1" n=0 line id title sev st detail rem
+  local want="${1}" n=0 line id title sev st detail rem
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
     IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
     [[ "${st}" == "${want}" ]] && n=$(( n + 1 ))
@@ -657,22 +657,22 @@ audit::_count_status() {
 # EMPTY/unknown kind counts as prod-intent too — fail-closed: a cluster we
 # cannot prove to be a dev cluster is scored like production.
 audit::_prod_intent() {
-  local kind="$1"
+  local kind="${1}"
   [[ "${kind}" != "lo" ]]
 }
 
 # audit::_minor_rank <maj.min> → maj*1000+min (numeric ordering)
 audit::_minor_rank() {
-  local v="$1"
+  local v="${1}"
   [[ "${v}" =~ ^([0-9]+)\.([0-9]+) ]] || { echo 0; return 0; }
   echo $(( BASH_REMATCH[1] * 1000 + BASH_REMATCH[2] ))
 }
 
 # audit::_in_list <needle> <item...>
 audit::_in_list() {
-  local needle="$1"; shift
+  local needle="${1}"; shift
   local item
-  for item in "$@"; do
+  for item in "${@}"; do
     [[ "${item}" == "${needle}" ]] && return 0
   done
   return 1
@@ -682,23 +682,23 @@ audit::_in_list() {
 # grep exits 1 on no-match; under the caller's `set -euo pipefail` a bare
 # `x=$(grep … | wc -l)` would abort the whole audit — this absorbs that.
 audit::_grep_count() {
-  local ere="$1"; shift
+  local ere="${1}"; shift
   (( $# > 0 )) || { echo 0; return 0; }
   local n
-  n=$(grep -lsE -- "${ere}" "$@" 2>/dev/null | wc -l | tr -d ' ') || n=0
+  n=$(grep -lsE -- "${ere}" "${@}" 2>/dev/null | wc -l | tr -d ' ') || n=0
   echo "${n:-0}"
 }
 
 # audit::_merge_yaml <file...> → deep-merged YAML (later files win). Empty → {}.
 audit::_merge_yaml() {
   (( $# > 0 )) || { echo '{}'; return 0; }
-  yq eval-all '. as $item ireduce ({}; . * $item)' "$@"
+  yq eval-all '. as $item ireduce ({}; . * $item)' "${@}"
 }
 
 # audit::_target_files <domain_dir> → the cluster's own hand-written target
 # manifests (one per line), or nothing.
 audit::_target_files() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   [[ -d "${domain_dir}/targets" ]] || return 0
   find "${domain_dir}/targets" -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null
 }
@@ -706,7 +706,7 @@ audit::_target_files() {
 # audit::_artifact_files <domain_dir> → files rendered by `lo build`
 # (clusters/<domain>/artifacts.yaml and clusters/<domain>/artifacts/<t>/artifacts.yaml).
 audit::_artifact_files() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   [[ -f "${domain_dir}/artifacts.yaml" ]] && echo "${domain_dir}/artifacts.yaml"
   [[ -d "${domain_dir}/artifacts" ]] && find "${domain_dir}/artifacts" -type f -name '*.yaml' 2>/dev/null
   return 0
@@ -714,7 +714,7 @@ audit::_artifact_files() {
 
 # audit::_artifacts_contain <domain_dir> <pattern> → 0 if any artifact matches.
 audit::_artifacts_contain() {
-  local domain_dir="$1" pattern="$2"
+  local domain_dir="${1}" pattern="${2}"
   local -a files=()
   mapfile -t files < <(audit::_artifact_files "${domain_dir}")
   (( ${#files[@]} > 0 )) || return 1
@@ -735,7 +735,7 @@ audit::_artifacts_contain() {
 # and the caller — which already knows the config EXISTS — reports FAIL, not
 # unknown (a config we cannot parse must not be trusted as encrypting).
 audit::_encryption_encrypts_secrets() {
-  local domain_dir="$1"
+  local domain_dir="${1}"
   local -a files=()
   mapfile -t files < <(audit::_artifact_files "${domain_dir}")
   (( ${#files[@]} > 0 )) || return 1
@@ -757,7 +757,7 @@ audit::_encryption_encrypts_secrets() {
 
 # audit::_json_escape <string> → JSON-safe string (no surrounding quotes).
 audit::_json_escape() {
-  local s="$1"
+  local s="${1}"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
   s="${s//$'\t'/\\t}"

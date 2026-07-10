@@ -30,7 +30,7 @@ import ^utils/credentials
 # Usage: kkp::validate_url <url>
 # Returns 1 if URL does not use https:// scheme.
 kkp::validate_url() {
-  http::require_https "$1" "KKP API URL"
+  http::require_https "${1}" "KKP API URL"
 }
 
 # ── API client ────────────────────────────────────────────
@@ -41,7 +41,7 @@ kkp::validate_url() {
 # Outputs: response body (JSON) to stdout.
 # Returns 1 on HTTP errors, with error details on stderr.
 kkp::api() {
-  local method="$1" path="$2" body="${3:-}"
+  local method="${1}" path="${2}" body="${3:-}"
 
   if [[ -z "${KKP_TOKEN:-}" ]]; then
     error "KKP_TOKEN is not set"
@@ -131,7 +131,7 @@ kkp::api() {
 # Usage: kkp::create_cluster <project_id> <cluster_json>
 # Outputs: cluster ID to stdout.
 kkp::create_cluster() {
-  local project_id="$1" cluster_json="$2"
+  local project_id="${1}" cluster_json="${2}"
 
   local response
   response=$(kkp::api POST "/api/v2/projects/${project_id}/clusters" "${cluster_json}") || return 1
@@ -151,7 +151,7 @@ kkp::create_cluster() {
 # Delete a cluster via the KKP API.
 # Usage: kkp::delete_cluster <project_id> <cluster_id>
 kkp::delete_cluster() {
-  local project_id="$1" cluster_id="$2"
+  local project_id="${1}" cluster_id="${2}"
 
   kkp::api DELETE "/api/v2/projects/${project_id}/clusters/${cluster_id}" >/dev/null || return 1
   debug "KKP cluster deleted: ${cluster_id}"
@@ -161,7 +161,7 @@ kkp::delete_cluster() {
 # Usage: kkp::get_cluster <project_id> <cluster_id>
 # Outputs: cluster JSON to stdout.
 kkp::get_cluster() {
-  local project_id="$1" cluster_id="$2"
+  local project_id="${1}" cluster_id="${2}"
 
   kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}"
 }
@@ -169,7 +169,7 @@ kkp::get_cluster() {
 # Get kubeconfig for a cluster, write to file.
 # Usage: kkp::get_kubeconfig <project_id> <cluster_id> <output_file>
 kkp::get_kubeconfig() {
-  local project_id="$1" cluster_id="$2" output_file="$3"
+  local project_id="${1}" cluster_id="${2}" output_file="${3}"
 
   local kubeconfig
   kubeconfig=$(kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}/kubeconfig") || return 1
@@ -188,7 +188,7 @@ kkp::get_kubeconfig() {
 # Usage: kkp::create_machinedeployment <project_id> <cluster_id> <md_json>
 # Outputs: machine deployment ID to stdout.
 kkp::create_machinedeployment() {
-  local project_id="$1" cluster_id="$2" md_json="$3"
+  local project_id="${1}" cluster_id="${2}" md_json="${3}"
 
   local response
   response=$(kkp::api POST "/api/v2/projects/${project_id}/clusters/${cluster_id}/machinedeployments" "${md_json}") || return 1
@@ -208,7 +208,7 @@ kkp::create_machinedeployment() {
 # Usage: kkp::list_machinedeployments <project_id> <cluster_id>
 # Outputs: JSON array of machine deployments.
 kkp::list_machinedeployments() {
-  local project_id="$1" cluster_id="$2"
+  local project_id="${1}" cluster_id="${2}"
 
   kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}/machinedeployments"
 }
@@ -228,7 +228,7 @@ kkp::list_datacenters() {
 # Usage: kkp::health <project_id> <cluster_id>
 # Outputs: health JSON to stdout.
 kkp::health() {
-  local project_id="$1" cluster_id="$2"
+  local project_id="${1}" cluster_id="${2}"
 
   kkp::api GET "/api/v2/projects/${project_id}/clusters/${cluster_id}/health"
 }
@@ -240,7 +240,7 @@ kkp::health() {
 # are intentionally not gated on: they stay down for bringyourown.
 # Usage: kkp::core_healthy <health_json>
 kkp::core_healthy() {
-  local health="$1" component status
+  local health="${1}" component status
   for component in apiserver etcd controller scheduler; do
     status=$(echo "${health}" | jq -r --arg c "${component}" '.[$c] // "missing"')
     # Older KKP versions report numeric health (1 = up)
@@ -254,9 +254,9 @@ kkp::core_healthy() {
 # components (machineController, operatingSystemManager) are up too.
 # Usage: kkp::wait_components <project_id> <cluster_id> <timeout> <component...>
 kkp::wait_components() {
-  local project_id="$1" cluster_id="$2" timeout="$3"
+  local project_id="${1}" cluster_id="${2}" timeout="${3}"
   shift 3
-  local -a components=("$@")
+  local -a components=("${@}")
 
   local start_time elapsed health status component all_up
   start_time=$(date +%s)
@@ -289,7 +289,7 @@ kkp::wait_components() {
 # Usage: kkp::wait_ready <project_id> <cluster_id> [timeout_seconds]
 # Returns 1 on timeout.
 kkp::wait_ready() {
-  local project_id="$1" cluster_id="$2" timeout="${3:-${KKP_WAIT_TIMEOUT}}"
+  local project_id="${1}" cluster_id="${2}" timeout="${3:-${KKP_WAIT_TIMEOUT}}"
 
   local start_time elapsed health interval
   start_time=$(date +%s)
@@ -331,7 +331,7 @@ kkp::wait_ready() {
 # Checks KKP_TOKEN and provider-specific env vars.
 # Returns 1 with error messages if anything is missing.
 kkp::validate_credentials() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   local errors=0
 
   # KKP API token is always required

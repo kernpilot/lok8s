@@ -61,7 +61,7 @@ main::recover() {
 # The phase orchestrator. Honors the GLOBAL --force (dynamic-scope ${force})
 # and LOK8S_NONINTERACTIVE for the confirm.
 recover::_run() {
-  local domain="$1" skip_rebuild="${2:-0}" dry_run="${3:-0}"
+  local domain="${1}" skip_rebuild="${2:-0}" dry_run="${3:-0}"
 
   # Reset module state for this run.
   declare -ga _RECOVER_TIMINGS=()
@@ -346,7 +346,7 @@ recover::_confirm() {
 # resort — that would collide across concurrent runs + leak into a global dir) and
 # the caller aborts.
 recover::_workdir() {
-  local domain="$1"
+  local domain="${1}"
   if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
     local wd="${PATH_CLUSTERS}/${domain}/.provider"
     if mkdir -p "${wd}" 2>/dev/null; then
@@ -405,7 +405,7 @@ recover::_cluster_name() {
 # recover::_timed <label> <fn> — run <fn>, print + record "<label>=XmYs". Returns
 # <fn>'s exit code so the caller can abort the sequence. (Ported from dr::_timed.)
 recover::_timed() {
-  local label="$1" fn="$2" s e d rc=0
+  local label="${1}" fn="${2}" s e d rc=0
   s="$(date +%s 2>/dev/null || echo 0)"
   "${fn}" || rc=$?
   e="$(date +%s 2>/dev/null || echo 0)"; d=$(( e - s ))
@@ -416,7 +416,7 @@ recover::_timed() {
 
 # recover::_summary <t0> — the wall-clock total + per-phase breakdown.
 recover::_summary() {
-  local t0="$1" t1 d
+  local t0="${1}" t1 d
   t1="$(date +%s 2>/dev/null || echo 0)"; d=$(( t1 - t0 ))
   printf '\n\033[1;35m━━━ DONE in %dm %ds — phases: %s ━━━\033[0m\n' \
     "$(( d / 60 ))" "$(( d % 60 ))" "${_RECOVER_TIMINGS[*]:-}" >&2

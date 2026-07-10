@@ -4,7 +4,7 @@
 # Open an SSH tunnel for the k8s API and rewrite kubeconfig to localhost.
 # Usage: lo::kubeconfig_tunnel <kubeconfig_path> <remote_user> <remote_ip>
 lo::kubeconfig_tunnel() {
-  local kubeconfig_path="$1" remote_user="$2" remote_ip="$3"
+  local kubeconfig_path="${1}" remote_user="${2}" remote_ip="${3}"
 
   local current_server
   current_server=$(yq -r '.clusters[0].cluster.server' "${kubeconfig_path}")

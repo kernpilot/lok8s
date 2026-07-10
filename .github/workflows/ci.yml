@@ -40,6 +40,16 @@ jobs:
           grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress \
             | xargs shellcheck --shell=bash --severity=warning
 
+      - name: Enforce brace style (SC2250 — "${var}", never "$var")
+        run: |
+          # SC2250 is style-severity, so the warning-level passes above skip
+          # it. Dedicated pass: enable the optional check (also in
+          # .shellcheckrc for local runs) and report ONLY it.
+          { find .lok8s operator/hooks docs/.vitepress -type f -name '*.sh'
+            grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress
+          } | sort -u \
+            | xargs shellcheck --shell=bash --enable=require-variable-braces --include=SC2250
+
   yamllint:
     name: YAML Lint
     runs-on: ubuntu-latest

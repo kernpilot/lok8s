@@ -38,7 +38,7 @@ LOK8S_REGISTRY_JSON=""
 #          hyphens converted to underscores, e.g. io-docker →
 #          LOK8S_REGISTRY_IP_IO_DOCKER)
 registry::config_generate() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   local domain_dir
   domain_dir=$(dirname "${cluster_yaml}")
 
@@ -206,7 +206,7 @@ registry::config_generate() {
 # Callback receives: name ip url domain host type
 # Single jq fork for the entire iteration.
 registry::each() {
-  local callback="$1"
+  local callback="${1}"
   local json="${LOK8S_REGISTRY_JSON:-}"
   [[ -f "${json}" ]] || { echo "error: .registries.json not found (run registry::config_generate first)" >&2; return 1; }
 
@@ -226,7 +226,7 @@ registry::each() {
 # Get a single field for a named registry.
 # Usage: registry::get <name> <field>
 registry::get() {
-  local name="$1" field="$2"
+  local name="${1}" field="${2}"
   jq -r --arg n "${name}" --arg f "${field}" \
     '.registries[] | select(.name == $n) | .[$f] // ""' \
     "${LOK8S_REGISTRY_JSON}"
@@ -253,7 +253,7 @@ registry::port() {
 # addresses the registry. In plain mode :80 is likewise implicit.
 # Usage: registry::url <ip>
 registry::url() {
-  local ip="$1"
+  local ip="${1}"
   if registry::is_tls; then
     echo "https://${ip}"
   else
@@ -280,7 +280,7 @@ registry::project_network() {
 # Usage: registry::container <name>
 # Outputs: container_name\tnetwork_name
 registry::container() {
-  local name="$1"
+  local name="${1}"
   local json="${LOK8S_REGISTRY_JSON}"
 
   jq -r --arg n "${name}" '

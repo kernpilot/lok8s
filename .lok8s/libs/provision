@@ -32,7 +32,7 @@ _resolve_kubeconfig_for_domain() {
   if [[ -f "${domain_dir}/deploy.lok8s.yaml" ]] && [[ ! -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
     ref_cluster="${cluster_override:-}"
     if [[ -z "${ref_cluster}" ]]; then
-      ref_cluster=$(provision::resolve_clusterref "$domain")
+      ref_cluster=$(provision::resolve_clusterref "${domain}")
     fi
     debug "Deploy domain ${domain} -> cluster ${ref_cluster}"
   elif [[ -n "${cluster_override:-}" ]]; then
@@ -63,7 +63,7 @@ _resolve_kubeconfig_for_domain() {
 # Usage: provision::resolve_spec <domain>
 # Sets: LOK8S_SPEC_FILE, LOK8S_SPEC_KIND (cluster|deploy)
 provision::resolve_spec() {
-  local domain="$1"
+  local domain="${1}"
 
   # No active domain → actionable error instead of a cryptic empty path.
   if [[ -z "${domain}" ]]; then
@@ -96,7 +96,7 @@ provision::resolve_spec() {
 # Outputs: the cluster domain name (from spec.clusterRef.domain)
 # Returns 1 if spec is not a deploy domain or clusterRef is missing/invalid.
 provision::resolve_clusterref() {
-  local domain="$1"
+  local domain="${1}"
   local base="${PATH_CLUSTERS}/${domain}"
   local spec_file="${base}/deploy.lok8s.yaml"
 
@@ -136,7 +136,7 @@ provision::resolve_clusterref() {
 # which must have creds BEFORE its doctor/rebuild phases (they resolve node IPs)
 # — provision loads them too but only runs after rebuild, too late for recover.
 provision::load_provider_creds() {
-  local domain="$1"
+  local domain="${1}"
   local _secd="${PATH_CLUSTERS}/${domain}/secrets" _k _v
   for _k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
     [[ -n "${!_k:-}" ]] && continue
@@ -157,7 +157,7 @@ provision::load_provider_creds() {
 # Dispatch provisioning to the appropriate kind contract implementation.
 # Usage: provision::dispatch <domain> [bootstrap_only]
 provision::dispatch() {
-  local domain="$1"
+  local domain="${1}"
   local bootstrap_only="${2:-0}"
   # Fail fast: a missing/empty/bogus domain must stop here, BEFORE any driver
   # creates a kind cluster or touches infra. (resolve_spec's return was
@@ -306,7 +306,7 @@ provision::dispatch() {
 # Dispatch cluster destruction.
 # Usage: provision::dispatch_destroy <domain>
 provision::dispatch_destroy() {
-  local domain="$1"
+  local domain="${1}"
   provision::resolve_spec "${domain}"
 
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
@@ -346,7 +346,7 @@ provision::dispatch_destroy() {
 # Dispatch cluster status check.
 # Usage: provision::dispatch_status <domain>
 provision::dispatch_status() {
-  local domain="$1"
+  local domain="${1}"
   provision::resolve_spec "${domain}"
 
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then

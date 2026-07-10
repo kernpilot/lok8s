@@ -21,7 +21,7 @@
 # ── Validation ────────────────────────────────────────────
 
 lo::validate_mirror_name() {
-  local name="$1"
+  local name="${1}"
   if [[ ! "${name}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     echo "error: invalid mirror name '${name}': must match ^[a-z0-9][a-z0-9-]*$" >&2
     return 1
@@ -29,7 +29,7 @@ lo::validate_mirror_name() {
 }
 
 lo::validate_ips() {
-  local subnet="$1"
+  local subnet="${1}"
   local metallb_pool="${2:-}"
   local errors=0
 
@@ -41,7 +41,7 @@ lo::validate_ips() {
   shared_cidr=$(registry::network_cidr)
 
   _lo_validate_registry_ip() {
-    local name="$1" ip="$2" url="$3" domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
     local target_subnet="${subnet}"
     if registry::is_shared && [[ "${type}" == "mirror" ]]; then
       target_subnet="${shared_cidr}"
@@ -114,7 +114,7 @@ lo::slot_from_domain() {
 # ── Config readers ────────────────────────────────────────
 
 lo::read_network_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   local net_name net_cidr
   net_name=$(yq -r '.spec.network.name // ""' "${cluster_yaml}")
@@ -147,7 +147,7 @@ lo::read_network_config() {
 }
 
 lo::read_node_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   local _default_host_ports="false"
   local _slot
@@ -193,7 +193,7 @@ lo::read_node_config() {
 }
 
 lo::read_lb_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   local has_lb
   has_lb=$(yq -r '.spec.loadBalancer // ""' "${cluster_yaml}")
@@ -216,7 +216,7 @@ lo::read_lb_config() {
 }
 
 lo::read_remote_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   LOK8S_REMOTE_MODE=$(yq -r '.spec.remote.mode // "docker"' "${cluster_yaml}")
 
@@ -251,7 +251,7 @@ lo::read_remote_config() {
 
 # lo::read_config — read all config sections in the correct order.
 lo::read_config() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
   lo::read_network_config "${cluster_yaml}"   # also calls read_registry_config
   lo::read_node_config "${cluster_yaml}"
   lo::read_lb_config "${cluster_yaml}"
@@ -260,7 +260,7 @@ lo::read_config() {
 # ── Spec env export ───────────────────────────────────────
 
 lo::export_spec_envs() {
-  local cluster_yaml="$1"
+  local cluster_yaml="${1}"
 
   LOK8S_SPEC_CLUSTER_NAME=$(yq -r '.metadata.name // ""' "${cluster_yaml}")
   LOK8S_SPEC_CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain // ""' "${cluster_yaml}")

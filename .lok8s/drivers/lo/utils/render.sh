@@ -2,7 +2,7 @@
 # render.sh — Kind config rendering (YAML/TOML generation)
 
 lo::render_kind_config() {
-  local cluster_name="$1" k8s_version="$2" network="$3" cluster_yaml="${4:-}"
+  local cluster_name="${1}" k8s_version="${2}" network="${3}" cluster_yaml="${4:-}"
 
   local nodes_yaml
   nodes_yaml=$(lo::render_nodes "${k8s_version}" "${cluster_yaml}")
@@ -27,7 +27,7 @@ EOF
 }
 
 lo::render_certs_d_mount() {
-  local host_path="$1"
+  local host_path="${1}"
   cat <<EOF
       - hostPath: ${host_path}
         containerPath: /etc/containerd/certs.d
@@ -38,7 +38,7 @@ EOF
 # Render the nodes section.
 # Usage: lo::render_nodes <k8s_version> <cluster_yaml>
 lo::render_nodes() {
-  local k8s_version="$1"
+  local k8s_version="${1}"
   local cluster_yaml="${2:-}"
   local result="nodes:"
 
@@ -191,7 +191,7 @@ GI
 
   # shellcheck disable=SC2329  # invoked indirectly via `registry::each` below
   _lo_write_certs_d_entry() {
-    local name="$1" ip="$2" url="$3" reg_domain="$4" host="$5" type="$6"
+    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
     [[ -n "${ip}" ]] || return 0
 
     local hostname=""
@@ -340,7 +340,7 @@ EOF
 # Render the node-0 extraMount entry that binds the host auth-config file to the
 # fixed node path. Usage: lo::render_oidc_mount <host_path>
 lo::render_oidc_mount() {
-  local host_path="$1"
+  local host_path="${1}"
   cat <<EOF
       - hostPath: ${host_path}
         containerPath: ${LO_OIDC_AUTH_CONFIG_NODE_PATH}
