@@ -65,7 +65,11 @@ driver::provision() {
 
       # Remote CI mode: delegate everything to the VM, skip local post-provision
       if [[ "${LOK8S_REMOTE:-}" == "1" ]]; then
-        lo::read_remote_config "${cluster_yaml}"
+        # || return: this whole tree runs under provision's `driver::provision
+        # || rc=$?`, which disables errexit — without the explicit return, a
+        # failed config read (e.g. rejected sync.dest) would fall through into
+        # lo::remote_ci and ssh/rsync with the bad value anyway.
+        lo::read_remote_config "${cluster_yaml}" || return 1
         if [[ "${LOK8S_REMOTE_MODE}" == "ci" ]] && [[ -n "${LOK8S_REMOTE_IP:-}" ]]; then
           lo::remote_ci "${domain}" "${cluster_yaml}"
           return 100

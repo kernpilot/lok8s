@@ -22,9 +22,10 @@ export ARGSH_DOCKER_IMAGE="${ARGSH_DOCKER_IMAGE:-ghcr.io/arg-sh/argsh@sha256:990
 # *.sh files (sourced libs often lack a shebang) UNION the extensionless
 # argsh/bash scripts a -name filter alone would skip. Overlap is fine.
 # grep exits 1 on zero matches — tolerate exactly that (the find half may
-# still yield files) while letting real errors (exit 2) kill the run.
+# still yield files) while real errors (exit 2) kill the run with their
+# original status.
 {
   find .lok8s operator/hooks docs/.vitepress hack -type f -name '*.sh'
   grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress hack \
-    || [[ "${?}" -eq 1 ]]
+    || { rc="${?}"; [[ "${rc}" -eq 1 ]] || exit "${rc}"; }
 } | sort -u | xargs -r ./.bin/argsh lint
