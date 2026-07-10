@@ -42,9 +42,16 @@ Fields starting with `#` are **metadata** — they're not passed to
 | `#internal-ip` | Server's private/vSwitch IP |
 | `#installimage` | Path to Hetzner installimage config file |
 | `#cloud.d` | Cloud-init module directory to apply |
-| `#labels` | Comma-separated labels (included in provider output) |
+| `#labels` | Comma-separated `k=v` node labels — emitted as the host's `labels:` in the generated kubeone.yaml, so KubeOne's `labelNodes` task syncs them onto the Node on every apply (suffix a key with `-` to remove a label); `role=control-plane` selects the role |
 | `#floating-ip` | Index into the `floating-ip` array to assign |
 | `#wipe-devices` | Data devices to full-wipe on a **fresh** install ([details](#wiping-data-devices)) |
+
+The generated kubeone.yaml host inventory is **descriptor-anchored**: only
+servers declared in `server[]` become `controlPlane.hosts` /
+`staticWorkers.hosts`. Cloud VMs that merely carry the cluster label but are
+not declared — e.g. workers created at runtime by KubeOne's machine-controller
+from `spec.workers` — are skipped with a warning, never adopted as static
+hosts.
 
 ## Provisioning flow
 
