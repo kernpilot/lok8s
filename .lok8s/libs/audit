@@ -411,6 +411,7 @@ audit::check_k8s_version() {
   oldest_rank=$(audit::_minor_rank "${oldest}")
   latest_rank=$(audit::_minor_rank "${_AUDIT_K8S_LATEST_MINOR}")
 
+  # shellcheck disable=SC2086  # deliberate word-split: the constant is a space-separated list
   if audit::_in_list "${minor}" ${_AUDIT_K8S_SUPPORTED_MINORS}; then
     audit::_emit "${id}" "${title}" high pass \
       "Kubernetes ${minor} is within the supported window (${_AUDIT_K8S_SUPPORTED_MINORS// /, })." \

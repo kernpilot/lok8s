@@ -271,6 +271,7 @@ hetzner::server() {
     # as its counter (needed to read this server's #wipe-devices fresh).
     local server_index="${i}"
 
+    # shellcheck disable=SC2030  # the hook body is a per-server subshell; reusing i cannot leak out
     for (( i=0; i < ${#fields[@]}; i=i+2 )); do
       field="${fields[i]#--}"
 
@@ -350,6 +351,7 @@ hetzner::server() {
               fi
             fi
 
+            # shellcheck disable=SC2029  # post_install_flag expands CLIENT-side by design
             ssh "${ssh_opts[@]}" "${ssh_user}@${external_ip}" \
               "echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections 2>/dev/null; \
                /root/.oldroot/nfs/install/installimage -a -c /tmp/installimage.conf${post_install_flag} && reboot" || {
@@ -454,6 +456,7 @@ hetzner::load-balancer() {
     # selectors legitimately contain commas and csv-splitting mangled
     # them (and the resulting hcloud errors were silently swallowed).
     local row target_type target_value use_private_ip
+    # shellcheck disable=SC2031  # i is the outer create-loop index, read inside the per-LB subshell hook
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
       target_type=$(jq -r '.type // empty' <<<"${row}")
@@ -490,6 +493,7 @@ hetzner::load-balancer() {
     done < <(hetzner::json -c ".[\"load-balancer\"][${i}][\"#targets\"][]?" 2>/dev/null)
 
     local protocol listen_port dest_port
+    # shellcheck disable=SC2031  # i is the outer create-loop index, read inside the per-LB subshell hook
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
       protocol=$(jq -r '.protocol // empty' <<<"${row}")
