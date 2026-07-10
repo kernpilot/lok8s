@@ -162,12 +162,12 @@ lo::read_node_config() {
   if [[ -n "${has_nodes}" ]]; then
     LOK8S_CP_COUNT=$(yq -r '.spec.nodes.controlPlane // 1' "${cluster_yaml}")
     LOK8S_WORKER_COUNT=$(yq -r '.spec.nodes.workers // 0' "${cluster_yaml}")
-    local hp
-    hp=$(yq -r '.spec.nodes.hostPorts' "${cluster_yaml}")
-    if [[ "${hp}" == "null" || -z "${hp}" ]]; then
+    local host_ports
+    host_ports=$(yq -r '.spec.nodes.hostPorts' "${cluster_yaml}")
+    if [[ "${host_ports}" == "null" || -z "${host_ports}" ]]; then
       LOK8S_HOST_PORTS="${default_host_ports}"
     else
-      LOK8S_HOST_PORTS="${hp}"
+      LOK8S_HOST_PORTS="${host_ports}"
     fi
   else
     LOK8S_CP_COUNT=1
@@ -177,16 +177,16 @@ lo::read_node_config() {
 
   LOK8S_EXTRA_MOUNTS_COUNT=$(yq -r '.spec.nodes.extraMounts | length // 0' "${cluster_yaml}")
 
-  local mcd
-  mcd=$(yq -r '.spec.nodes.maxConcurrentDownloads' "${cluster_yaml}")
-  if [[ "${mcd}" == "null" || -z "${mcd}" ]]; then
+  local max_downloads
+  max_downloads=$(yq -r '.spec.nodes.maxConcurrentDownloads' "${cluster_yaml}")
+  if [[ "${max_downloads}" == "null" || -z "${max_downloads}" ]]; then
     LOK8S_MAX_CONCURRENT_DOWNLOADS=3
   else
-    if ! [[ "${mcd}" =~ ^[1-9][0-9]*$ ]]; then
-      echo "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '${mcd}'" >&2
+    if ! [[ "${max_downloads}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '${max_downloads}'" >&2
       return 1
     fi
-    LOK8S_MAX_CONCURRENT_DOWNLOADS="${mcd}"
+    LOK8S_MAX_CONCURRENT_DOWNLOADS="${max_downloads}"
   fi
 
   export LOK8S_CP_COUNT LOK8S_WORKER_COUNT LOK8S_HOST_PORTS LOK8S_EXTRA_MOUNTS_COUNT LOK8S_MAX_CONCURRENT_DOWNLOADS

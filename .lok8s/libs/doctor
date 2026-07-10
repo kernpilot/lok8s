@@ -81,11 +81,11 @@ main::doctor() {
   echo "--- domain ---"
   if [[ -n "${domain}" ]]; then
     local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
-    local dspec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
+    local deploy_spec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
     if [[ -f "${spec}" ]]; then
       doctor::_ok "active: ${domain} (kind $(yq -r '.kind // "?"' "${spec}" 2>/dev/null))"
-    elif [[ -f "${dspec}" ]]; then
-      doctor::_ok "active: ${domain} (Deploy -> $(yq -r '.spec.clusterRef.domain // "?"' "${dspec}" 2>/dev/null))"
+    elif [[ -f "${deploy_spec}" ]]; then
+      doctor::_ok "active: ${domain} (Deploy -> $(yq -r '.spec.clusterRef.domain // "?"' "${deploy_spec}" 2>/dev/null))"
     else
       doctor::_warn "active domain '${domain}' has no cluster.lok8s.yaml / deploy.lok8s.yaml"
     fi

@@ -29,26 +29,26 @@ main::build() {
 # directly (not in a subshell) so the exports persist for the envsubst whitelist.
 build::_resolve_api() {
   local domain_dir="${1}"
-  local kcfg="${KUBECONFIG:-}"
-  if [[ -z "${kcfg}" || ! -f "${kcfg}" ]]; then
+  local kubeconfig="${KUBECONFIG:-}"
+  if [[ -z "${kubeconfig}" || ! -f "${kubeconfig}" ]]; then
     # Deploy domains (deploy.lok8s.yaml + clusterRef) have NO cluster.lok8s.yaml.
     # Guard the read: a bare yq on a missing file exits non-zero and, under
     # set -euo pipefail, would abort the whole build. Read only when present.
-    local cn=""
+    local cluster_name=""
     if [[ -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
-      cn=$(yq -r '.metadata.name // ""' "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null) || cn=""
+      cluster_name=$(yq -r '.metadata.name // ""' "${domain_dir}/cluster.lok8s.yaml" 2>/dev/null) || cluster_name=""
     fi
-    [[ -n "${cn}" && -f "${PATH_BASE}/.kubeconfig/${cn}.yaml" ]] && kcfg="${PATH_BASE}/.kubeconfig/${cn}.yaml"
+    [[ -n "${cluster_name}" && -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" ]] && kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
   fi
   local api=""
-  if [[ -f "${kcfg}" ]]; then
-    api=$(yq -r '.clusters[0].cluster.server // ""' "${kcfg}" 2>/dev/null) || api=""
+  if [[ -f "${kubeconfig}" ]]; then
+    api=$(yq -r '.clusters[0].cluster.server // ""' "${kubeconfig}" 2>/dev/null) || api=""
   fi
   api="${api#http*://}"
   if [[ -n "${api}" ]]; then
     export LOK8S_USER_API_HOST="${api%%:*}"
-    local ap="${api##*:}"; [[ "${ap}" != "${api}" && -n "${ap}" ]] || ap="6443"
-    export LOK8S_USER_API_PORT="${ap}"
+    local api_port="${api##*:}"; [[ "${api_port}" != "${api}" && -n "${api_port}" ]] || api_port="6443"
+    export LOK8S_USER_API_PORT="${api_port}"
   fi
 }
 

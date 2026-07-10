@@ -67,20 +67,20 @@ capi::generate() {
 
   # Only these are expanded; everything else (cloud-init shell vars) is literal.
   # shellcheck disable=SC2016  # a literal ${VAR} list is exactly what envsubst wants
-  local wl='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${HCLOUD_NETWORK_ENABLED} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
+  local allowed_vars='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${HCLOUD_NETWORK_ENABLED} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
 
   # Render all resources, capturing the stream so optional placement groups can
   # be injected afterward (envsubst can't conditionally include YAML blocks).
   local rendered
   rendered=$(
     first=1
-    for d in \
+    for tpl in \
       "${core}/cluster.yaml" \
       "${prov}/hetzner-cluster.yaml" \
       "${core}/kubeadm-control-plane.yaml" \
       "${prov}/hcloud-machine-template-controlplane.yaml"; do
       (( first )) || echo "---"; first=0
-      envsubst "${wl}" < "${d}"
+      envsubst "${allowed_vars}" < "${tpl}"
     done
     # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
     export POOL_NAME POOL_REPLICAS POOL_TYPE
@@ -88,12 +88,12 @@ capi::generate() {
       POOL_NAME="${pool}"
       POOL_REPLICAS=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
       POOL_TYPE=$(yq -r ".spec.workers.${pool}.type // \"cax11\"" "${cluster_yaml}")
-      for d in \
+      for tpl in \
         "${core}/machine-deployment.yaml" \
         "${prov}/kubeadm-config-template.yaml" \
         "${prov}/hcloud-machine-template-worker.yaml"; do
         echo "---"
-        envsubst "${wl}" < "${d}"
+        envsubst "${allowed_vars}" < "${tpl}"
       done
     done
   )

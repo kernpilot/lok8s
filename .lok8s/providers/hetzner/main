@@ -447,7 +447,7 @@ provider::rebuild() {
 
   # Rescue-key fingerprint (bare-metal only) — from the descriptor public key
   # unless explicitly overridden. Derived once, reused for every worker.
-  local fp="${PROVIDER_ROBOT_RESCUE_FP:-}"
+  local fingerprint="${PROVIDER_ROBOT_RESCUE_FP:-}"
 
   local count
   count="$(echo "${desc}" | jq '(.server // []) | length')"
@@ -481,10 +481,10 @@ provider::rebuild() {
       if [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
         error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"; return 1
       fi
-      if [[ -z "${fp}" ]]; then
-        fp="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || fp=""
+      if [[ -z "${fingerprint}" ]]; then
+        fingerprint="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || fingerprint=""
       fi
-      [[ -n "${fp}" ]] || {
+      [[ -n "${fingerprint}" ]] || {
         error "rebuild: cannot determine rescue key fingerprint for '${name}' (descriptor .sshPublicKey unreadable; set PROVIDER_ROBOT_RESCUE_FP)"; return 1; }
       ext_ip="$(echo "${server}" | jq -r '.["#external-ip"] // ""')"
       [[ -n "${ext_ip}" ]] || {
@@ -492,7 +492,7 @@ provider::rebuild() {
       num="$(hetzner::_robot_server_number_by_ip "${ext_ip}")" || num=""
       [[ -n "${num}" ]] || {
         error "rebuild: bare-metal node '${name}' (${ext_ip}) did not resolve to exactly one Robot server by IP — refusing to rescue/reset (name/IP collision, no match, or Robot API error)"; return 1; }
-      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${fp}")
+      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${fingerprint}")
       metal_ips+=("${pub}")
     else
       # ── Cloud VM: name must uniquely carry the cluster label ──
@@ -642,10 +642,10 @@ hetzner::_rescue_fingerprint() {
 # (`--fail` + timeouts so an HTTP 4xx/5xx / hang can't read as a hit).
 hetzner::_robot_server_number_by_ip() {
   local ip="${1:-}"
-  local ct="${2:-${HROBOT_CONNECT_TIMEOUT}}" mt="${3:-${HROBOT_MAX_TIME}}"
+  local connect_timeout="${2:-${HROBOT_CONNECT_TIMEOUT}}" max_time="${3:-${HROBOT_MAX_TIME}}"
   [[ -n "${ip}" ]] || return 1
   local json matches count
-  json="$(curl -f -sS --connect-timeout "${ct}" --max-time "${mt}" \
+  json="$(curl -f -sS --connect-timeout "${connect_timeout}" --max-time "${max_time}" \
             -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" 2>/dev/null)" || return 1
   matches="$(echo "${json}" | jq -c --arg ip "${ip}" \
               '[.[].server | select(.server_ip==$ip)]' 2>/dev/null)" || return 1
@@ -668,17 +668,17 @@ hetzner::_cloud_server_unique_labeled() {
 
 # hetzner::_robot_rescue <number> <key_fingerprint>
 hetzner::_robot_rescue() {
-  local num="${1}" fp="${2}"
+  local num="${1}" fingerprint="${2}"
   # Honor dry-run: PRINT the intended activation and issue no POST. Kept as an
   # explicit branch (not dry-run::cmd) so the Robot user:password on the curl
   # command line is never teed into the plan log.
   if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
-    _hetzner_print "🧪 [dry-run] would activate Robot rescue on robot#${num} (POST ${HROBOT_API}/boot/${num}/rescue os=linux authorized_key=${fp})"
+    _hetzner_print "🧪 [dry-run] would activate Robot rescue on robot#${num} (POST ${HROBOT_API}/boot/${num}/rescue os=linux authorized_key=${fingerprint})"
     return 0
   fi
   curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
     -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
-    -d os=linux --data-urlencode "authorized_key=${fp}" >/dev/null 2>&1 \
+    -d os=linux --data-urlencode "authorized_key=${fingerprint}" >/dev/null 2>&1 \
     || { error "rebuild: rescue activation failed for robot#${num}"; return 1; }
 }
 
@@ -771,9 +771,9 @@ hetzner::_doctor_checks() {
     if (( ! robot_api_ok )); then
       printf 'warn\tcannot verify rescue key — Robot API unreachable (see above); a missing rescue key would lock out a worker reinstall\n'
     else
-      local fp
-      fp="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
-      if [[ -z "${fp}" ]]; then
+      local fingerprint
+      fingerprint="${PROVIDER_ROBOT_RESCUE_FP:-$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')" 2>/dev/null)}"
+      if [[ -z "${fingerprint}" ]]; then
         printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
       else
         local keys
@@ -782,15 +782,15 @@ hetzner::_doctor_checks() {
           # Exact, whole-value fingerprint match (case-insensitive). A loose
           # substring grep would let a short/truncated fingerprint false-match a
           # longer registered key — compare the /key fingerprint field as a whole.
-          if printf '%s' "${keys}" | jq -e --arg fp "${fp}" \
-               'any(.[]?; ((.key.fingerprint // "") | ascii_downcase) == ($fp | ascii_downcase))' \
+          if printf '%s' "${keys}" | jq -e --arg fingerprint "${fingerprint}" \
+               'any(.[]?; ((.key.fingerprint // "") | ascii_downcase) == ($fingerprint | ascii_downcase))' \
                >/dev/null 2>&1; then
-            printf 'ok\trescue SSH key registered in Robot (%s)\n' "${fp}"
+            printf 'ok\trescue SSH key registered in Robot (%s)\n' "${fingerprint}"
           else
-            printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${fp}"
+            printf 'warn\trescue key %s NOT registered in Robot — a worker reinstall would lock out; add the key in the Robot console (Key management) or via the Robot API before recovering\n' "${fingerprint}"
           fi
         else
-          printf 'warn\tcannot verify rescue key — Robot /key API errored (%s NOT confirmed registered); retry or check Robot creds/network\n' "${fp}"
+          printf 'warn\tcannot verify rescue key — Robot /key API errored (%s NOT confirmed registered); retry or check Robot creds/network\n' "${fingerprint}"
         fi
       fi
     fi

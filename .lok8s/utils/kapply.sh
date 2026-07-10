@@ -40,7 +40,7 @@ kapply::_tty() {
   [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
   [[ -w /dev/tty ]]
 }
-kapply::_ui() { local d="${KAPPLY_TTY:-/dev/tty}"; [[ "${d}" == /dev/tty && ! -t 1 ]] && d=/dev/null; printf '%s' "${d}"; }
+kapply::_ui() { local sink="${KAPPLY_TTY:-/dev/tty}"; [[ "${sink}" == /dev/tty && ! -t 1 ]] && sink=/dev/null; printf '%s' "${sink}"; }
 
 # Spinner frames (array, not a substring — avoids byte/char issues on braille).
 _KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
@@ -69,11 +69,11 @@ kapply::_aggregate() {
 kapply::run() {
   local phase="${1}"; shift
   kapply::_tty || { "${@}"; return; }
-  local tmp rcf rc; tmp=$(mktemp); rcf=$(mktemp)
+  local tmp rc_file rc; tmp=$(mktemp); rc_file=$(mktemp)
   # Stream live (so a blocking `kubectl wait` shows readiness as it lands),
   # tee the full output to a file for the after-the-fact error/empty checks.
-  { "${@}" 2>&1; echo "$?" >"${rcf}"; } | tee "${tmp}" | kapply::_progress "${phase}" >/dev/null
-  rc=$(cat "${rcf}"); rm -f "${rcf}"
+  { "${@}" 2>&1; echo "$?" >"${rc_file}"; } | tee "${tmp}" | kapply::_progress "${phase}" >/dev/null
+  rc=$(cat "${rc_file}"); rm -f "${rc_file}"
   if ! grep -qE "${_KAPPLY_OK}" "${tmp}"; then
     cat "${tmp}"                                    # no progress lines (warnings/notes) — show as-is
   elif (( rc != 0 )); then
@@ -92,7 +92,7 @@ kapply::run() {
 #   is a ⚠, never fatal — the caller decides whether to care.
 kapply::wait_ready() {
   local label="${1}" timeout="${2:-180}"; shift 2
-  local -a kf=("${@}")
+  local -a kubectl_flags=("${@}")
   local manifest; manifest=$(cat)
   local -a targets=()
   mapfile -t targets < <(printf '%s' "${manifest}" \
@@ -104,7 +104,7 @@ kapply::wait_ready() {
   local ui=""; kapply::_tty && ui="$(kapply::_ui)"
   local start="${SECONDS}" tick=0
   while true; do
-    local snap; snap=$(kubectl "${kf[@]}" get deploy,ds,sts --all-namespaces -o json 2>/dev/null || echo '{}')
+    local snap; snap=$(kubectl "${kubectl_flags[@]}" get deploy,ds,sts --all-namespaces -o json 2>/dev/null || echo '{}')
     local -a pending=()
     local t kind ns name r
     for t in "${targets[@]}"; do
@@ -155,18 +155,18 @@ kapply::wait_ready() {
 # escapes as raw output).
 kapply::_apply_pass() {
   local label="${1}" manifest="${2}"; shift 2
-  local -a kf=("${@}")
-  local out rc rcf; rcf=$(mktemp)
+  local -a kubectl_flags=("${@}")
+  local out rc rc_file; rc_file=$(mktemp)
   if kapply::_tty; then
     out=$( { printf '%s' "${manifest}" \
-      | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rcf}"; } \
+      | kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rc_file}"; } \
       | kapply::_progress "${label}" )
   else
     out=$(printf '%s' "${manifest}" \
-      | kubectl "${kf[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rcf}"
+      | kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rc_file}"
     printf '%s\n' "${out}"
   fi
-  rc=$(cat "${rcf}"); rm -f "${rcf}"
+  rc=$(cat "${rc_file}"); rm -f "${rc_file}"
   KAPPLY_LAST_OUTPUT="${out}"
   (( rc == 0 )) || { kapply::_tty && grep -vE "${_KAPPLY_OK}" <<<"${out}" | kapply::_aggregate >&2 || true; }
   return "${rc}"
@@ -176,16 +176,16 @@ kapply::apply() {
   # A leading `--label <phase>` names the progress block (the addon/target);
   # everything else is passed through to kubectl.
   local label="resources"
-  local -a kf=()
+  local -a kubectl_flags=()
   while (( $# )); do
     case "${1}" in
       --label) label="${2:-resources}"; shift 2 ;;
-      *)       kf+=("${1}"); shift ;;
+      *)       kubectl_flags+=("${1}"); shift ;;
     esac
   done
   local manifest; manifest=$(cat)
 
-  kapply::_apply_pass "${label}" "${manifest}" "${kf[@]}"
+  kapply::_apply_pass "${label}" "${manifest}" "${kubectl_flags[@]}"
   local rc=$?
   (( rc == 0 )) && return 0
 
@@ -198,11 +198,11 @@ kapply::apply() {
   kapply::_confirm_heal || return "${rc}"
 
   warn "healing blocked objects, then re-applying once"
-  (( immutable ))   && kapply::_heal_immutable "${manifest}" "${out}" "${kf[@]}"
-  (( terminating )) && kapply::_heal_terminating "${manifest}" "${out}" "${kf[@]}"
+  (( immutable ))   && kapply::_heal_immutable "${manifest}" "${out}" "${kubectl_flags[@]}"
+  (( terminating )) && kapply::_heal_terminating "${manifest}" "${out}" "${kubectl_flags[@]}"
 
   # Re-apply through the SAME display pass — collapses like the first apply.
-  kapply::_apply_pass "${label}" "${manifest}" "${kf[@]}"
+  kapply::_apply_pass "${label}" "${manifest}" "${kubectl_flags[@]}"
 }
 
 # A REAL interactive terminal for the prompt — its stdin must be a usable tty
@@ -301,14 +301,14 @@ kapply::_progress() {
 # manifest — `replace --force` = delete + create, which bypasses immutability.
 kapply::_heal_immutable() {
   local manifest="${1}" out="${2}"; shift 2
-  local -a kf=("${@}")
+  local -a kubectl_flags=("${@}")
   local kind name
   while read -r kind name; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
     warn "  recreating immutable ${kind}/${name}"
     printf '%s' "${manifest}" \
       | yq "select(.kind == \"${kind}\" and .metadata.name == \"${name}\")" \
-      | kubectl "${kf[@]}" replace --force -f - >/dev/null 2>&1 \
+      | kubectl "${kubectl_flags[@]}" replace --force -f - >/dev/null 2>&1 \
       || warn "  could not recreate ${kind}/${name}"
   done < <(grep -oE '[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" is invalid' <<<"${out}" \
             | sed -E 's/(\.[a-z0-9.-]+)? "/ /; s/" is invalid$//' | sort -u)
@@ -321,21 +321,21 @@ kapply::_heal_immutable() {
 # follow-up apply recreates it cleanly instead of racing its tail-end deletion.
 kapply::_finalize_namespace() {
   local name="${1}"; shift
-  local -a kf=("${@}")
+  local -a kubectl_flags=("${@}")
   local dts
-  dts=$(kubectl "${kf[@]}" get ns "${name}" \
+  dts=$(kubectl "${kubectl_flags[@]}" get ns "${name}" \
     -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || return 0
   [[ -n "${dts}" ]] || return 0
   kapply::_confirm_ns_finalize "${name}" \
     || { warn "  skipped namespace/${name} — force-finalize declined (re-apply will retry)"; return 0; }
   warn "  force-finalizing stuck-terminating namespace/${name}"
-  kubectl "${kf[@]}" get ns "${name}" -o json 2>/dev/null \
+  kubectl "${kubectl_flags[@]}" get ns "${name}" -o json 2>/dev/null \
     | jq 'del(.spec.finalizers)' \
-    | kubectl "${kf[@]}" replace --raw "/api/v1/namespaces/${name}/finalize" -f - >/dev/null 2>&1 \
+    | kubectl "${kubectl_flags[@]}" replace --raw "/api/v1/namespaces/${name}/finalize" -f - >/dev/null 2>&1 \
     || { warn "  could not finalize namespace/${name}"; return 0; }
   local i waitn="${KAPPLY_NS_WAIT:-20}"
   for (( i = 0; i < waitn; i++ )); do
-    kubectl "${kf[@]}" get ns "${name}" &>/dev/null || return 0
+    kubectl "${kubectl_flags[@]}" get ns "${name}" &>/dev/null || return 0
     sleep "${KAPPLY_POLL_INTERVAL:-1}"
   done
 }
@@ -354,13 +354,13 @@ kapply::_finalize_namespace() {
 # the caller handles that race instead.
 kapply::_heal_terminating() {
   local manifest="${1}" out="${2}"; shift 2
-  local -a kf=("${@}")
+  local -a kubectl_flags=("${@}")
 
   # (a) namespaces named in "because it is being terminated" 403s
   local nsname
   while read -r nsname; do
     [[ -n "${nsname}" ]] || continue
-    kapply::_finalize_namespace "${nsname}" "${kf[@]}"
+    kapply::_finalize_namespace "${nsname}" "${kubectl_flags[@]}"
   done < <(grep -oE 'in namespace [a-z0-9][a-z0-9-]* because it is being terminated' <<<"${out}" \
             | sed -E 's/^in namespace //; s/ because.*$//' | sort -u)
 
@@ -369,16 +369,16 @@ kapply::_heal_terminating() {
   while IFS=$'\t' read -r kind name ns; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
     if [[ "${kind,,}" == "namespace" || "${kind,,}" == "ns" ]]; then
-      kapply::_finalize_namespace "${name}" "${kf[@]}"
+      kapply::_finalize_namespace "${name}" "${kubectl_flags[@]}"
       continue
     fi
     local -a nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
     local dts
-    dts=$(kubectl "${kf[@]}" get "${kind}" "${name}" "${nsf[@]}" \
+    dts=$(kubectl "${kubectl_flags[@]}" get "${kind}" "${name}" "${nsf[@]}" \
       -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || continue
     [[ -n "${dts}" ]] || continue
     warn "  clearing finalizers on stuck-terminating ${kind}/${name}"
-    kubectl "${kf[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
+    kubectl "${kubectl_flags[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
       --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 \
       || warn "  could not clear finalizers on ${kind}/${name}"
   done < <(printf '%s' "${manifest}" | yq -r '[.kind, .metadata.name, (.metadata.namespace // "")] | @tsv' 2>/dev/null)

@@ -339,12 +339,12 @@ hetzner::server() {
             # via cloud-init on first boot, exactly like a cloud VM. Without
             # it the Hetzner base image (no cloud-init) boots unconfigured —
             # no vswitch, no private network.
-            local ix=""
+            local post_install_flag=""
             if declare -F cloud-config::installimage-post-install &>/dev/null; then
               if cloud-config::installimage-post-install \
                    | ssh "${ssh_opts[@]}" "${ssh_user}@${external_ip}" \
                        'cat > /tmp/lok8s-post-install && chmod +x /tmp/lok8s-post-install'; then
-                ix=" -x /tmp/lok8s-post-install"
+                post_install_flag=" -x /tmp/lok8s-post-install"
               else
                 warn "could not stage installimage post-install on ${external_ip}"
               fi
@@ -352,7 +352,7 @@ hetzner::server() {
 
             ssh "${ssh_opts[@]}" "${ssh_user}@${external_ip}" \
               "echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections 2>/dev/null; \
-               /root/.oldroot/nfs/install/installimage -a -c /tmp/installimage.conf${ix} && reboot" || {
+               /root/.oldroot/nfs/install/installimage -a -c /tmp/installimage.conf${post_install_flag} && reboot" || {
               error "installimage failed on ${external_ip}"
               return 1
             }
@@ -394,12 +394,12 @@ hetzner::server() {
             # Fallback: if cloud-init is absent or errored, apply the node
             # config directly over SSH (write_files + runcmd:true scripts).
             if (( ! ci_done )) && declare -F cloud-config::remote-script &>/dev/null; then
-              local rs
-              rs="$(cloud-config::remote-script)"
-              if [[ -n "${rs}" ]]; then
+              local remote_script
+              remote_script="$(cloud-config::remote-script)"
+              if [[ -n "${remote_script}" ]]; then
                 _hetzner_print "   🔧 fallback: applying node config directly to \033[1m${external_ip}\033[0m"
                 local out ok=1
-                out="$(printf '%s\n' "${rs}" | ssh "${ssh_opts[@]}" \
+                out="$(printf '%s\n' "${remote_script}" | ssh "${ssh_opts[@]}" \
                           "${ssh_user}@${external_ip}" 'bash -s' 2>&1)" || ok=0
                 grep -q '__LOK8S_BOOTINIT_DONE__' <<<"${out}" || ok=0
                 ! grep -q 'lok8s: boot-init FAILED' <<<"${out}" || ok=0

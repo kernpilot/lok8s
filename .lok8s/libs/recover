@@ -286,13 +286,13 @@ recover::_ready_nodes() {
   [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG}" ]] || { echo 0; return 0; }
   local nodes
   nodes="$(kubectl get nodes --no-headers 2>/dev/null)" || { echo 0; return 0; }
-  local name st _rest
-  while read -r name st _rest; do
+  local name node_status _rest
+  while read -r name node_status _rest; do
     [[ -n "${name}" ]] || continue
-    if [[ "${st}" == Ready* ]]; then
-      printf '  \033[32m✓\033[0m %s %s\n' "${name}" "${st}" >&2
+    if [[ "${node_status}" == Ready* ]]; then
+      printf '  \033[32m✓\033[0m %s %s\n' "${name}" "${node_status}" >&2
     else
-      printf '  \033[33m!\033[0m %s %s\n' "${name}" "${st:-Unknown}" >&2
+      printf '  \033[33m!\033[0m %s %s\n' "${name}" "${node_status:-Unknown}" >&2
     fi
   done <<<"${nodes}"
   printf '%s\n' "${nodes}" | awk '$2 ~ /^Ready/ { c++ } END { print c + 0 }'
@@ -348,9 +348,9 @@ recover::_confirm() {
 recover::_workdir() {
   local domain="${1}"
   if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-    local wd="${PATH_CLUSTERS}/${domain}/.provider"
-    if mkdir -p "${wd}" 2>/dev/null; then
-      echo "${wd}"
+    local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
+    if mkdir -p "${work_dir}" 2>/dev/null; then
+      echo "${work_dir}"
       return 0
     fi
   fi

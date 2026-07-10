@@ -81,16 +81,16 @@ lo::provision_remote() {
   debug "remote Docker: DOCKER_HOST=${DOCKER_HOST}"
 
   # Verify Docker is reachable
-  local dh_ok=0
+  local docker_host_ok=0
   for (( attempts=0; attempts < 10; attempts++ )); do
     if docker info &>/dev/null; then
-      dh_ok=1
+      docker_host_ok=1
       debug "DOCKER_HOST verified (attempt ${attempts})"
       break
     fi
     sleep 3
   done
-  if (( ! dh_ok )); then
+  if (( ! docker_host_ok )); then
     error "Docker not reachable via DOCKER_HOST=${DOCKER_HOST}"
     return 1
   fi

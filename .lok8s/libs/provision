@@ -48,14 +48,14 @@ _resolve_kubeconfig_for_domain() {
   # deploy domain whose
   # target cluster was provisioned under a different metadata.name points
   # KUBECONFIG at a non-existent file and `lo deploy` fails.
-  local kcfg="${PATH_BASE}/.kubeconfig/secret.${ref_cluster}.yaml"
-  if [[ ! -f "${kcfg}" && -f "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" ]]; then
+  local kubeconfig="${PATH_BASE}/.kubeconfig/secret.${ref_cluster}.yaml"
+  if [[ ! -f "${kubeconfig}" && -f "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" ]]; then
     local ref_name=""
     ref_name=$(yq -r '.metadata.name // ""' "${PATH_CLUSTERS}/${ref_cluster}/cluster.lok8s.yaml" 2>/dev/null) || ref_name=""
     [[ -n "${ref_name}" && -f "${PATH_BASE}/.kubeconfig/${ref_name}.yaml" ]] \
-      && kcfg="${PATH_BASE}/.kubeconfig/${ref_name}.yaml"
+      && kubeconfig="${PATH_BASE}/.kubeconfig/${ref_name}.yaml"
   fi
-  export KUBECONFIG="${kcfg}"
+  export KUBECONFIG="${kubeconfig}"
 }
 
 # Resolve the cluster spec YAML for a domain.
@@ -137,10 +137,10 @@ provision::resolve_clusterref() {
 # — provision loads them too but only runs after rebuild, too late for recover.
 provision::load_provider_creds() {
   local domain="${1}"
-  local secd="${PATH_CLUSTERS}/${domain}/secrets" k v
+  local secrets_dir="${PATH_CLUSTERS}/${domain}/secrets" k v
   for k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
     [[ -n "${!k:-}" ]] && continue
-    v="$(cat "${secd}/Secret.hetzner.provisioning.${k}" 2>/dev/null)" || continue
+    v="$(cat "${secrets_dir}/Secret.hetzner.provisioning.${k}" 2>/dev/null)" || continue
     [[ -n "${v}" ]] && export "${k}=${v}"
   done
   [[ -n "${HROBOT_USER:-}" ]]     && export ROBOT_USER="${HROBOT_USER}"         HETZNER_ROBOT_USER="${HROBOT_USER}"

@@ -227,15 +227,15 @@ audit::check_encryption() {
   # EncryptionConfiguration that leaves `secrets` unencrypted (identity-only /
   # empty / identity as the write provider). Both leave Secrets base64 in etcd.
   if [[ "${enabled}" == "false" || "${artifact_present}" == 1 ]]; then
-    local sev="high" st="fail"
-    (( prod_intent )) || { sev="medium"; st="warn"; }
+    local severity="high" status="fail"
+    (( prod_intent )) || { severity="medium"; status="warn"; }
     local detail
     if [[ "${enabled}" == "false" ]]; then
       detail="At-rest encryption is DISABLED (encryptionProviders.enable: false) — Secrets are stored base64-only in etcd."
     else
       detail="A rendered EncryptionConfiguration does NOT encrypt Secrets — no aescbc/secretbox/kms provider is the write provider for the 'secrets' resource (identity-only or empty) — Secrets are stored base64-only in etcd."
     fi
-    audit::_emit "${id}" "${title}" "${sev}" "${st}" \
+    audit::_emit "${id}" "${title}" "${severity}" "${status}" \
       "${detail}" \
       "Set features.encryptionProviders.enable: true (KubeOne driver) and re-provision so the apiserver encrypts Secrets with a real provider (aescbc/secretbox/kms), not identity."
     return 0
@@ -423,9 +423,9 @@ audit::check_k8s_version() {
       "Update _AUDIT_K8S_SUPPORTED_MINORS in .lok8s/libs/audit (see https://kubernetes.io/releases/)."
     return 0
   fi
-  local sev="high" st="fail"
-  audit::_prod_intent "${kind}" || { sev="medium"; st="warn"; }
-  audit::_emit "${id}" "${title}" "${sev}" "${st}" \
+  local severity="high" status="fail"
+  audit::_prod_intent "${kind}" || { severity="medium"; status="warn"; }
+  audit::_emit "${id}" "${title}" "${severity}" "${status}" \
     "Kubernetes ${minor} is End-of-Life (oldest supported minor: ${oldest}) — no upstream security patches." \
     "Upgrade to a supported minor (${_AUDIT_K8S_SUPPORTED_MINORS// /, }); for KubeOne bump spec.kubernetes.version and run 'lo provision'."
   return 0
@@ -520,30 +520,30 @@ audit::render_human() {
   printf '  %s checks · %s fail · %s warn · %s unknown · %s pass\n\n' \
     "${total}" "${f}" "${w}" "${u}" "${p}"
 
-  local st
-  for st in fail warn unknown pass; do
-    audit::_render_status_group "${st}"
+  local status
+  for status in fail warn unknown pass; do
+    audit::_render_status_group "${status}"
   done
 }
 
 # audit::_render_status_group <status>
 audit::_render_status_group() {
   local want="${1}"
-  local line id title sev st detail rem
+  local line id title severity status detail rem
   local -a rows=()
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
-    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
-    [[ "${st}" == "${want}" ]] || continue
-    rows+=("$(printf '%d\t%s' "$(audit::_sev_rank "${sev}")" "${line}")")
+    IFS=$'\t' read -r id title severity status detail rem <<< "${line}"
+    [[ "${status}" == "${want}" ]] || continue
+    rows+=("$(printf '%d\t%s' "$(audit::_sev_rank "${severity}")" "${line}")")
   done
   (( ${#rows[@]} > 0 )) || return 0
   mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -n -s)
   for line in "${rows[@]}"; do
     line="${line#*$'\t'}"   # drop the sort-rank prefix
-    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
-    printf '  %-4s [%-8s] %s — %s\n' "$(audit::_status_label "${st}")" "${sev}" "${id}" "${title}"
+    IFS=$'\t' read -r id title severity status detail rem <<< "${line}"
+    printf '  %-4s [%-8s] %s — %s\n' "$(audit::_status_label "${status}")" "${severity}" "${id}" "${title}"
     printf '         %s\n' "${detail}"
-    [[ "${st}" == "pass" ]] || printf '         remediation: %s\n' "${rem}"
+    [[ "${status}" == "pass" ]] || printf '         remediation: %s\n' "${rem}"
   done
   printf '\n'
 }
@@ -561,14 +561,14 @@ audit::render_json() {
   printf '"grade":"%s",' "${grade}"
   printf '"summary":{"pass":%s,"warn":%s,"fail":%s,"unknown":%s},' "${p}" "${w}" "${f}" "${u}"
   printf '"checks":['
-  local line id title sev st detail rem first=1
+  local line id title severity status detail rem first=1
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
-    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
+    IFS=$'\t' read -r id title severity status detail rem <<< "${line}"
     (( first )) || printf ','
     first=0
     printf '{"id":"%s","title":"%s","severity":"%s","status":"%s","detail":"%s","remediation":"%s"}' \
       "$(audit::_json_escape "${id}")" "$(audit::_json_escape "${title}")" \
-      "$(audit::_json_escape "${sev}")" "$(audit::_json_escape "${st}")" \
+      "$(audit::_json_escape "${severity}")" "$(audit::_json_escape "${status}")" \
       "$(audit::_json_escape "${detail}")" "$(audit::_json_escape "${rem}")"
   done
   printf ']}'
@@ -589,16 +589,16 @@ audit::_emit() {
 # audit::_score → "<score> <grade> <pass> <warn> <fail> <unknown>"
 # Start at 100; subtract a severity-weighted penalty per warn/fail; clamp [0,100].
 audit::_score() {
-  local score=100 p=0 w=0 f=0 u=0 line id title sev st detail rem
+  local score=100 p=0 w=0 f=0 u=0 line id title severity status detail rem
   local blind=0   # a high/critical check we could NOT evaluate (status unknown)
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
-    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
-    case "${st}" in
+    IFS=$'\t' read -r id title severity status detail rem <<< "${line}"
+    case "${status}" in
       pass)    p=$(( p + 1 ));;
-      warn)    w=$(( w + 1 )); score=$(( score - $(audit::_weight "${sev}" warn) ));;
-      fail)    f=$(( f + 1 )); score=$(( score - $(audit::_weight "${sev}" fail) ));;
+      warn)    w=$(( w + 1 )); score=$(( score - $(audit::_weight "${severity}" warn) ));;
+      fail)    f=$(( f + 1 )); score=$(( score - $(audit::_weight "${severity}" fail) ));;
       unknown) u=$(( u + 1 ))
-               case "${sev}" in critical|high) blind=1;; esac;;
+               case "${severity}" in critical|high) blind=1;; esac;;
     esac
   done
   (( score < 0 )) && score=0
@@ -617,13 +617,13 @@ audit::_score() {
 
 # audit::_weight <severity> <fail|warn> → penalty points
 audit::_weight() {
-  local sev="${1}" kind="${2}"
+  local severity="${1}" kind="${2}"
   if [[ "${kind}" == "fail" ]]; then
-    case "${sev}" in
+    case "${severity}" in
       critical) echo 40;; high) echo 25;; medium) echo 15;; low) echo 5;; *) echo 10;;
     esac
   else
-    case "${sev}" in
+    case "${severity}" in
       critical) echo 15;; high) echo 10;; medium) echo 5;; low) echo 2;; *) echo 5;;
     esac
   fi
@@ -644,10 +644,10 @@ audit::_status_label() {
 
 # audit::_count_status <status> → count of findings with that status
 audit::_count_status() {
-  local want="${1}" n=0 line id title sev st detail rem
+  local want="${1}" n=0 line id title severity status detail rem
   for line in "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}"; do
-    IFS=$'\t' read -r id title sev st detail rem <<< "${line}"
-    [[ "${st}" == "${want}" ]] && n=$(( n + 1 ))
+    IFS=$'\t' read -r id title severity status detail rem <<< "${line}"
+    [[ "${status}" == "${want}" ]] && n=$(( n + 1 ))
   done
   printf '%s' "${n}"
 }
