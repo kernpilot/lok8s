@@ -118,3 +118,28 @@ _validated_json() { _validate_node_labels "$1" "${2:-node}" 2>/dev/null; }
   assert_success
   assert_output --partial 'dropping invalid k8s label'
 }
+
+# ── addRemoveKeyValues removal marker ───────────────────────
+# A single trailing "-" on a key is KubeOne's label REMOVAL convention
+# ("key-": "" deletes the Node label on the next apply, nodes.go
+# addRemoveKeyValues) — documented on the descriptor's #node-tiers, so the
+# marker must survive both the #labels parse and the validity guard.
+
+@test "#labels parse: a bare 'key-' removal entry becomes an empty-valued label (marker intact)" {
+  run _parse_labels 'old.example.com/retired-'
+  assert_success
+  assert_output '{"old.example.com/retired-":""}'
+}
+
+@test "validity guard: a single trailing '-' (KubeOne removal marker) is kept" {
+  run _validate_node_labels '{"old.example.com/retired-":""}' node-g
+  assert_success
+  assert_output '{"old.example.com/retired-":""}'
+}
+
+@test "validity guard: only ONE trailing '-' is tolerated (a double dash is still invalid)" {
+  run _validated_json '{"x.kubehz.cloud/bad--":"","ok/k":"v"}' node-h
+  assert_success
+  refute_output --partial 'bad--'
+  assert_output --partial '"ok/k":"v"'
+}

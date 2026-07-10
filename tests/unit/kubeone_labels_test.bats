@@ -74,6 +74,15 @@ kind: KubeOneCluster
 cloudProvider:
   none: {}
 YAML
+  # The inventory is DESCRIPTOR-ANCHORED: only server[]-declared names are
+  # emitted as hosts (kubeone_inventory_test.bats pins that contract), so the
+  # descriptor must declare every stubbed node for the render under test.
+  cat > "${BATS_TEST_TMPDIR}/config.json" <<'JSON'
+{ "cluster_name": "test",
+  "server": [
+    { "name": "cp-0" }, { "name": "w-0" }, { "name": "w-1" }, { "name": "w-evil" }
+  ] }
+JSON
   _append_inventory "${BATS_TEST_TMPDIR}/config.json" "${manifest}"
   echo "${manifest}"
 }
