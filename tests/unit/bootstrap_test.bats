@@ -1069,6 +1069,239 @@ YAML
   [ "${p_explicit}" = "true" ]
 }
 
+# --- valueFiles: helm values files (bootstrap::_parse_entry + apply) ---------
+# valueFiles is a reserved key (like values/env/wait/dependsOn/name): a !!seq of
+# helm values FILE paths, each resolved relative to the CLUSTER DIR (the same
+# base ./targets/... entries resolve from; absolute paths pass through) and
+# pre-merged — in list order, inline `values:` on top — into the inline-values
+# string handed to addons::render, so the effective stack is:
+#   base < driver < provider < valueFiles (in order) < values:
+
+# Write a values file under the cluster dir. Usage: write_value_file <relpath> <<yaml
+write_value_file() {
+  local f="${PATH_CLUSTERS}/test.lok8s.dev/$1"
+  mkdir -p "$(dirname "${f}")"
+  cat > "${f}"
+}
+
+@test "_parse_entry: valueFiles alone is the new schema (file contents become the inline values)" {
+  write_value_file "values/extra.yaml" <<'YAML'
+marker: "filevalue"
+nested:
+  from_file: true
+YAML
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":["./values/extra.yaml"]}}' \
+    p_name p_dir p_inline p_env p_wait p_deps
+  [ "${p_name}" = "testcni" ]
+  # The file's values ride the inline channel …
+  [ "$(yq -r '.marker' <<<"${p_inline}")" = "filevalue" ]
+  [ "$(yq -r '.nested.from_file' <<<"${p_inline}")" = "true" ]
+  # … and valueFiles is a RESERVED key, not a legacy whole-map helm value.
+  [ "$(yq -r 'has("valueFiles")' <<<"${p_inline}")" = "false" ]
+  [ -z "${p_env}" ]
+  [ "${p_wait}" = "false" ]
+}
+
+@test "_parse_entry: two valueFiles merge in list order (later wins, deep-merge preserved)" {
+  write_value_file "vf/a.yaml" <<'YAML'
+shared: "first"
+nested:
+  overridden: "first"
+  from_first: true
+YAML
+  write_value_file "vf/b.yaml" <<'YAML'
+shared: "second"
+nested:
+  overridden: "second"
+  from_second: true
+YAML
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":["./vf/a.yaml","./vf/b.yaml"]}}' \
+    p_name p_dir p_inline p_env p_wait p_deps
+  # Later file wins on the conflicting keys …
+  [ "$(yq -r '.shared' <<<"${p_inline}")" = "second" ]
+  [ "$(yq -r '.nested.overridden' <<<"${p_inline}")" = "second" ]
+  # … while each file's unique nested keys survive (deep merge, not replace).
+  [ "$(yq -r '.nested.from_first' <<<"${p_inline}")" = "true" ]
+  [ "$(yq -r '.nested.from_second' <<<"${p_inline}")" = "true" ]
+}
+
+@test "_parse_entry: inline values: wins over valueFiles (files under, map on top)" {
+  write_value_file "vf/base.yaml" <<'YAML'
+shared: "file"
+nested:
+  overridden: "file"
+  from_file: true
+YAML
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":["./vf/base.yaml"],"values":{"shared":"inline","nested":{"overridden":"inline"}}}}' \
+    p_name p_dir p_inline p_env p_wait p_deps
+  # The inline values: map is the most explicit layer — it wins the conflicts …
+  [ "$(yq -r '.shared' <<<"${p_inline}")" = "inline" ]
+  [ "$(yq -r '.nested.overridden' <<<"${p_inline}")" = "inline" ]
+  # … but the file's non-conflicting key deep-merges through.
+  [ "$(yq -r '.nested.from_file' <<<"${p_inline}")" = "true" ]
+}
+
+@test "_parse_entry: an absolute valueFiles path passes through unchanged" {
+  local abs="${BATS_TEST_TMPDIR}/abs-values.yaml"
+  printf 'marker: "absolute"\n' > "${abs}"
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    "{\"testcni\":{\"valueFiles\":[\"${abs}\"]}}" \
+    p_name p_dir p_inline p_env p_wait p_deps
+  [ "$(yq -r '.marker' <<<"${p_inline}")" = "absolute" ]
+}
+
+@test "_parse_entry: valueFiles with a missing file is a hard error naming the resolved path" {
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":["./vf/does-not-exist.yaml"]}}' n d i e w x
+  assert_failure
+  assert_output --partial "valueFiles: file not found"
+  # The error names the RESOLVED path (cluster-dir base), not just the raw ref.
+  assert_output --partial "${PATH_CLUSTERS}/test.lok8s.dev/./vf/does-not-exist.yaml"
+}
+
+@test "_parse_entry: valueFiles that is not a list is rejected" {
+  # `valueFiles: ./x.yaml` (a bare scalar) is a config mistake — the container
+  # must be a sequence of file paths.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":"./x.yaml"}}' n d i e w x
+  assert_failure
+  assert_output --partial "valueFiles: must be a list of file paths (got str)"
+
+  # A map container is equally wrong.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":{"f":"./x.yaml"}}}' n d i e w x
+  assert_failure
+  assert_output --partial "valueFiles: must be a list of file paths (got map)"
+}
+
+@test "_parse_entry: valueFiles with a non-string element is rejected" {
+  # A null element (`[~]` / a bare `-`) is not a path …
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":[null]}}' n d i e w x
+  assert_failure
+  assert_output --partial "each element must be a file path string (got null)"
+
+  # … and neither is a nested map.
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":[{"f":"./x.yaml"}]}}' n d i e w x
+  assert_failure
+  assert_output --partial "each element must be a file path string (got map)"
+}
+
+@test "_parse_entry: an empty valueFiles list is a harmless no-op (like an empty values:)" {
+  # `valueFiles: []` is vacuous config, not an error — nothing merges, inline
+  # values (when present) pass through untouched. Pinned so the behavior is a
+  # decision, not an accident (review round 2).
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":[],"values":{"kept":"yes"}}}' \
+    p_name p_dir p_inline p_env p_wait p_deps
+  [ "$(yq -r '.kept' <<<"${p_inline}")" = "yes" ]
+}
+
+@test "_parse_entry: an empty-string valueFiles element is a hard error (not silently skipped)" {
+  # "" is !!str so it passes the element-tag check — but it is not a path.
+  # Review round 1 (Copilot): the resolve loop used to `continue` past it,
+  # contradicting the fail-fast contract ("never render with half the values").
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":[""]}}' n d i e w x
+  assert_failure
+  assert_output --partial "valueFiles: empty element"
+}
+
+@test "_parse_entry: 'valueFiles:' on a non-chart (kustomize) target is an error" {
+  # Same helm-only rule as values: — a ./targets/ dir with only a
+  # kustomization.yaml has no chart to feed the values to.
+  local raw_dir="${PATH_CLUSTERS}/test.lok8s.dev/targets/rawvf"
+  mkdir -p "${raw_dir}"
+  cat > "${raw_dir}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+YAML
+  write_value_file "vf/x.yaml" <<'YAML'
+marker: x
+YAML
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"./targets/rawvf":{"valueFiles":["./vf/x.yaml"]}}' n d i e w x
+  assert_failure
+  assert_output --partial "not a chart addon"
+}
+
+@test "bootstrap::apply: valueFiles layer beats provider, loses to inline values: (end-to-end stack)" {
+  # The full precedence chain through the real render staging:
+  #   base < driver < provider < valueFiles < values:
+  # The value file overrides shared_all/nested.overridden (beats provider); the
+  # inline values: map overrides them again (beats the file); every layer's
+  # unique key survives the deep merge.
+  write_value_file "values/testcni.dev.yaml" <<'YAML'
+shared_all: "valuefile"
+only_valuefile: "valuefile"
+nested:
+  overridden: "valuefile"
+  from_valuefile: true
+YAML
+  write_cluster_spec "testcni: {valueFiles: [./values/testcni.dev.yaml], values: {shared_all: inline, nested: {overridden: inline}}}"
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  local merged="${BATS_TEST_TMPDIR}/last_merged.yaml"
+  [ -f "${merged}" ]
+
+  # Inline values: is the top layer — it wins over the value file.
+  [ "$(yq -r '.shared_all' "${merged}")" = "inline" ]
+  [ "$(yq -r '.nested.overridden' "${merged}")" = "inline" ]
+
+  # The value file's unique keys made it through (it beat provider on the
+  # conflicts before inline re-overrode them, and deep merge kept the rest).
+  [ "$(yq -r '.only_valuefile' "${merged}")" = "valuefile" ]
+  [ "$(yq -r '.nested.from_valuefile' "${merged}")" = "true" ]
+
+  # Lower layers still contribute their unique keys.
+  [ "$(yq -r '.only_base' "${merged}")" = "base" ]
+  [ "$(yq -r '.only_driver' "${merged}")" = "driver" ]
+  [ "$(yq -r '.only_provider' "${merged}")" = "provider" ]
+  [ "$(yq -r '.nested.from_base' "${merged}")" = "true" ]
+  [ "$(yq -r '.nested.from_driver' "${merged}")" = "true" ]
+  [ "$(yq -r '.nested.from_provider' "${merged}")" = "true" ]
+}
+
+@test "bootstrap::apply: valueFiles-only entry renders with the file's values applied" {
+  # No inline values: — the file alone is the top layer and must win over the
+  # provider values in the staged merge.
+  write_value_file "values/testcni.dev.yaml" <<'YAML'
+shared_all: "valuefile"
+nested:
+  overridden: "valuefile"
+  from_valuefile: true
+YAML
+  write_cluster_spec "testcni: {valueFiles: [./values/testcni.dev.yaml]}"
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+
+  local merged="${BATS_TEST_TMPDIR}/last_merged.yaml"
+  [ -f "${merged}" ]
+
+  # The file wins over provider < driver < base …
+  [ "$(yq -r '.shared_all' "${merged}")" = "valuefile" ]
+  [ "$(yq -r '.nested.overridden' "${merged}")" = "valuefile" ]
+  [ "$(yq -r '.nested.from_valuefile' "${merged}")" = "true" ]
+  # … and the lower layers' unique keys survive.
+  [ "$(yq -r '.only_base' "${merged}")" = "base" ]
+  [ "$(yq -r '.only_driver' "${merged}")" = "driver" ]
+  [ "$(yq -r '.only_provider' "${merged}")" = "provider" ]
+  # The reserved key itself never leaks into the helm values.
+  [ "$(yq -r 'has("valueFiles")' "${merged}")" = "false" ]
+}
+
 # --- dependsOn: graph validation (bootstrap::apply) --------------------------
 
 @test "bootstrap::apply errors on dependsOn to an unknown entry" {

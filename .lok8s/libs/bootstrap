@@ -28,16 +28,19 @@
 #   bootstrap:
 #     - cilium:                       # legacy shim: whole map = helm values
 #         encryption: { enabled: true }
-#     - ccm:                          # new schema (reserved: values/env/wait/dependsOn)
+#     - ccm:                          # new schema (reserved: values/valueFiles/env/wait/dependsOn/name)
 #         values:                     # helm values (chart addons only)
 #           env: { ROBOT_ENABLED: { value: "true" } }
+#         valueFiles:                 # helm values FILES (chart addons only),
+#           - ./targets/ccm/values.dev.yaml   # cluster-dir-relative, merged in list order
 #         env:                        # envsubst overrides (exported around render)
 #           LOK8S_USER_FOO: bar
 #         wait: true                  # global gate (default false)
 #         dependsOn: [cert-manager]   # wait for these entries' readiness first
 #
 # The inline values are merged as additional Helm values on top of the
-# provider-aware defaults.
+# provider-aware defaults; valueFiles slot in between (base < driver <
+# provider < valueFiles < values:).
 
 import ^utils/types
 import ^utils/verbose
@@ -169,10 +172,21 @@ bootstrap::_resolve_entries() {
 #   map     {"<name-or-path>": <value>}
 #
 # The map VALUE is read in one of two schemas:
-#   NEW    — it carries a reserved key (values | env | wait | dependsOn | name):
+#   NEW    — it carries a reserved key (values | valueFiles | env | wait | dependsOn | name):
 #              values: <helm values>   chart addons ONLY — a kustomize target
 #                                       (no chart.yaml) with `values:` is an ERROR
 #                                       (`values:` is helm-only).
+#              valueFiles: [path, ...]  helm values FILES (chart addons ONLY, same
+#                                       rule as values:) — a !!seq of path strings,
+#                                       each resolved relative to the CLUSTER DIR
+#                                       (clusters/<domain>/ — the same base
+#                                       ./targets/... entries resolve from) unless
+#                                       absolute; a missing file is an ERROR. The
+#                                       files pre-merge (in list order, inline
+#                                       values: on top) into the inline-values
+#                                       string handed to addons::render, so the
+#                                       effective stack is base < driver <
+#                                       provider < valueFiles < values:.
 #              env:    {KEY: val, ...}  envsubst overrides (see _apply_one).
 #              wait:   true|false       global barrier gate; default false.
 #              dependsOn: [name, ...]   wait for these named entries' READINESS
@@ -189,8 +203,9 @@ bootstrap::_resolve_entries() {
 #   LEGACY — no reserved key → the WHOLE value map IS the inline helm values
 #            (e.g. `- cilium: {encryption: {enabled: true}}`), unchanged from
 #            before this flag existed. A legacy chart that needs a *literal*
-#            top-level `values`/`env`/`wait`/`dependsOn` helm key must nest it under
-#            `values:` (e.g. `ccm: {env: {...}}` → `ccm: {values: {env: {...}}}`).
+#            top-level `values`/`valueFiles`/`env`/`wait`/`dependsOn`/`name` helm
+#            key must nest it under `values:` (e.g. `ccm: {env: {...}}` →
+#            `ccm: {values: {env: {...}}}`).
 bootstrap::_parse_entry() {
   local _domain="$1" _entry="$2"
   local -n _o_name="$3" _o_dir="$4" _o_inline="$5" _o_env="$6" _o_wait="$7" _o_deps="$8"
@@ -249,7 +264,7 @@ bootstrap::_parse_entry() {
   # Scalar entry (or a map with an empty/null value): nothing more to parse.
   [[ -n "${_valjson}" && "${_valjson}" != "null" ]] || return 0
 
-  if [[ "$(yq -r 'has("values") or has("env") or has("wait") or has("dependsOn") or has("name")' <<<"${_valjson}")" == "true" ]]; then
+  if [[ "$(yq -r 'has("values") or has("valueFiles") or has("env") or has("wait") or has("dependsOn") or has("name")' <<<"${_valjson}")" == "true" ]]; then
     # NEW schema.
     # `name:` (optional) OVERRIDES this entry's identifier — the resolved basename
     # (path entries) or map-key (chart entries) — for BOTH the dependsOn registry
@@ -299,6 +314,72 @@ bootstrap::_parse_entry() {
         return 1
       fi
       _o_inline="$(yq -r '.values' <<<"${_valjson}")"
+    fi
+    if [[ "$(yq -r 'has("valueFiles")' <<<"${_valjson}")" == "true" ]]; then
+      # valueFiles: helm values FILES layered between the provider values and the
+      # inline `values:` map — big per-cluster value blocks (e.g. gatus endpoint
+      # lists) live in files instead of bloating the cluster spec. Same helm-only
+      # rule as `values:` (a kustomize target has no chart to feed); same
+      # missing-dir leniency (let bootstrap::apply surface "addon not found").
+      if [[ -d "${_o_dir}" && ! -f "${_o_dir}/chart.yaml" ]]; then
+        error "bootstrap: '${_raw}' sets 'valueFiles:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'valueFiles:' is helm-only"
+        return 1
+      fi
+      # The container must be a SEQUENCE of file paths. A scalar
+      # (`valueFiles: ./x.yaml`) or a map is a config mistake — reject it up
+      # front (same fail-fast spirit as the env/dependsOn container checks).
+      local _vf_tag
+      _vf_tag="$(yq -r '.valueFiles | tag' <<<"${_valjson}")"
+      if [[ "${_vf_tag}" != "!!seq" ]]; then
+        error "bootstrap: '${_raw}' valueFiles: must be a list of file paths (got ${_vf_tag#!!})"
+        return 1
+      fi
+      # Every element must be a STRING scalar — an unquoted bool/int, a null
+      # element (`[~]` / a bare `-`), or a nested map/list is not a path (same
+      # strictness as the name: tag check).
+      local _vf_bad
+      _vf_bad="$(yq -r '[.valueFiles[] | tag | select(. != "!!str")] | .[0] // ""' <<<"${_valjson}")"
+      if [[ -n "${_vf_bad}" ]]; then
+        error "bootstrap: '${_raw}' valueFiles: each element must be a file path string (got ${_vf_bad#!!})"
+        return 1
+      fi
+      # Resolve each path against the CLUSTER DIR (the directory holding the
+      # cluster's lok8s yaml — the same base ./targets/... entries resolve
+      # from); an absolute path passes through. A missing file is a hard error:
+      # silently skipping it would render the addon with half its values.
+      local -a _vf_files=()
+      local _vf
+      while IFS= read -r _vf; do
+        # An empty-string element ("") is !!str, so it survives the tag check
+        # above — but it is not a path. Hard error (NOT a silent skip): the
+        # fail-fast contract is "never render with half the values".
+        if [[ -z "${_vf}" ]]; then
+          error "bootstrap: '${_raw}' valueFiles: empty element — each element must be a file path"
+          return 1
+        fi
+        [[ "${_vf}" == /* ]] || _vf="${PATH_CLUSTERS}/${_domain}/${_vf}"
+        if [[ ! -f "${_vf}" ]]; then
+          error "bootstrap: '${_raw}' valueFiles: file not found: ${_vf}"
+          return 1
+        fi
+        _vf_files+=("${_vf}")
+      done < <(yq -r '.valueFiles[]' <<<"${_valjson}")
+      if (( ${#_vf_files[@]} > 0 )); then
+        # Pre-merge — the files in list order, then the inline `values:` map on
+        # top when present — with the SAME deep-merge idiom addons::render
+        # stacks values with (maps deep-merge, lists REPLACE). The result rides
+        # the existing inline channel (render's 4th arg), so the effective
+        # precedence is base < driver < provider < valueFiles < values: and
+        # addons::render needs no signature change.
+        if [[ -n "${_o_inline}" && "${_o_inline}" != "null" ]]; then
+          _o_inline="$(yq eval-all '. as $item ireduce ({}; . * $item)' \
+              "${_vf_files[@]}" <(printf '%s\n' "${_o_inline}"))" \
+            || { error "bootstrap: '${_raw}' valueFiles: failed to merge (${_vf_files[*]})"; return 1; }
+        else
+          _o_inline="$(yq eval-all '. as $item ireduce ({}; . * $item)' "${_vf_files[@]}")" \
+            || { error "bootstrap: '${_raw}' valueFiles: failed to merge (${_vf_files[*]})"; return 1; }
+        fi
+      fi
     fi
     if [[ "$(yq -r 'has("env")' <<<"${_valjson}")" == "true" ]]; then
       # The env CONTAINER must itself be a map of KEY: scalar. A sequence or

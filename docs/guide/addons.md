@@ -54,7 +54,8 @@ are combined, not replaced.
 1. `values.yaml` — base (shared across all drivers and providers)
 2. `values.${kind}.yaml` — driver (`lo`, `kubeone`, `capi`, `kkp`)
 3. `values.${provider}.yaml` — provider (`hetzner`, `aws`, ...)
-4. Inline overrides from `spec.bootstrap` (per-cluster)
+4. Inline overrides from `spec.bootstrap` (per-cluster): `valueFiles:`
+   entries first (in list order), then the inline `values:` map on top
 
 ### Why this order
 
@@ -113,8 +114,9 @@ spec:
 The inline config is deep-merged on top of the provider-aware defaults.
 
 For an entry that needs more than just inline values, use the explicit map keys
-`values:`, `env:`, `wait:`, `dependsOn:`, and `name:` (any one of them switches the
-entry to this form; otherwise the whole map is treated as inline values, as above):
+`values:`, `valueFiles:`, `env:`, `wait:`, `dependsOn:`, and `name:` (any one of
+them switches the entry to this form; otherwise the whole map is treated as
+inline values, as above):
 
 ```yaml
 spec:
@@ -127,6 +129,9 @@ spec:
             ROBOT_ENABLED: { value: "true" }
         env:                  # envsubst overrides for this entry's render
           LOK8S_USER_FOO: bar
+    - gatus:
+        valueFiles:           # helm values FILES, relative to the cluster dir
+          - ./targets/gatus/values.dev.yaml
     - cert-manager-webhook-hetzner:
         dependsOn: [cert-manager]   # wait for cert-manager's READINESS first
     - rook-ceph                     # the operator addon (.lok8s/addons/rook-ceph)
@@ -138,6 +143,17 @@ spec:
 - **`values:`** — Helm values, deep-merged like the inline form. Chart addons
   only; setting it on a kustomize target (a `./targets/` dir with no `chart.yaml`)
   is an error.
+- **`valueFiles:`** — a list of Helm values **files**, for per-cluster value
+  blocks too big to inline (a gatus endpoint list, a monitoring scrape config).
+  Each path resolves **relative to the cluster directory** (the one containing
+  `cluster.lok8s.yaml` — the same base `./targets/...` entries resolve from);
+  absolute paths pass through unchanged. The files merge in list order **between**
+  the provider values and the inline `values:` map, so the full stack is
+  `values.yaml` < `values.${kind}.yaml` < `values.${provider}.yaml` <
+  `valueFiles:` (in order) < `values:` — the inline map stays the most explicit
+  signal. Same deep-merge semantics as every other layer (nested maps combine,
+  lists replace). Must be a YAML list of path strings; a missing file is a hard
+  error (never silently skipped), and like `values:` it is chart-addons-only.
 - **`env:`** — extra envsubst variables exported only while *this* entry renders.
   Name them to match the whitelist the addons reference (`LOK8S_USER_*` /
   `LOK8S_SPEC_*`), e.g. cilium's `${LOK8S_USER_API_HOST}`. Each value must be a
@@ -163,9 +179,9 @@ spec:
   `[A-Za-z0-9._-]+`; a name that duplicates another entry's name is an error.
 
 ::: danger BREAKING CHANGE — migrate before your next `lo up`
-`values`, `env`, `wait`, `dependsOn`, and `name` are now **reserved keys** at the
-top level of an inline map entry. Any one of them present switches the entry to the
-explicit schema above. This **silently changes the meaning** of a legacy entry
+`values`, `valueFiles`, `env`, `wait`, `dependsOn`, and `name` are now **reserved
+keys** at the top level of an inline map entry. Any one of them present switches
+the entry to the explicit schema above. This **silently changes the meaning** of a legacy entry
 whose inline Helm values *happen to use one of those names as a top-level chart
 value*.
 
