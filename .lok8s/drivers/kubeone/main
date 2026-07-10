@@ -233,7 +233,13 @@ _append_inventory() {
     # raw file — re-reading the file discards ${VAR} expansion and anchors
     # against unexpanded names (review round 1). NB the provider's own loads
     # still re-read the file (pre-existing, tracked as a follow-up issue).
-    desc="$(yq -o json '.' - <<<"${desc}")"
+    # A failed/empty conversion errors HERE — falling through would surface as
+    # a misleading "declares no server[]" refusal (review round 2).
+    if ! desc="$(yq -o json '.' - <<<"${desc}" 2>/dev/null)" \
+       || [[ -z "${desc}" ]] || ! echo "${desc}" | jq empty 2>/dev/null; then
+      error "kubeone inventory: descriptor ${config_file} is neither valid JSON nor valid YAML (after envsubst) — fix the descriptor before provisioning"
+      return 1
+    fi
   fi
   local declared
   declared=$(echo "${desc}" | jq -c '[(.server // [])[].name // empty]' 2>/dev/null) || declared=""

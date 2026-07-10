@@ -216,3 +216,13 @@ JSON
   assert_failure
   assert_output --partial "ZERO control-plane hosts"
 }
+
+@test "an unparseable descriptor fails with a parse error, not 'declares no server[]' (round-2 fix)" {
+  printf '{{ this is neither JSON nor YAML: [unclosed\n' > "${DESCRIPTOR}"
+  _stub_provider_output "$(jq -n --argjson a "$(_node cp-0 control-plane)" '[$a]')"
+
+  run _append_inventory "${DESCRIPTOR}" "${MANIFEST}"
+  assert_failure
+  assert_output --partial "neither valid JSON nor valid YAML"
+  refute_output --partial "declares no server[]"
+}
