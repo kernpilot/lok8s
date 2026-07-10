@@ -21,7 +21,7 @@ targets::discover() {
     local dir
     for dir in "${targets_dir}"/*/; do
       [[ -d "${dir}" ]] || continue
-      echo "$(basename "${dir}")"
+      basename "${dir}"
     done
   fi
 }

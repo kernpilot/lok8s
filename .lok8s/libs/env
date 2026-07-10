@@ -1,9 +1,15 @@
 #!/usr/bin/env argsh
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # vim: set syntax=bash:
 # env — environment and service configuration
 # Merges services.yaml + services.<config>.yaml, generates root kustomization.yaml.
 # All registry references are now configurable from services.yaml registry config.
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
+# AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
+# the `local domain="${domain:-...}"` sites are NOT clobbers — the RHS default
+# keeps the parent's inherited value (flag > env > default).
+# argsh disable-file=AG012
 
 import ^utils/types
 import ^utils/verbose
@@ -121,7 +127,7 @@ env::kustomization() {
   # Cache pre-pull queue: services that need a remote image fetched and
   # pushed into the cache registry before kind tries to pull them. Written
   # to .lok8s/<domain>/artifacts/.cache-queue (TSV: svc \t remote \t branch \t tag).
-  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
   local artifacts_dir="${PATH_CLUSTERS}/${domain}/artifacts"
   mkdir -p "${artifacts_dir}"
   local cache_queue="${artifacts_dir}/.cache-queue"

@@ -1,4 +1,5 @@
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # expose.sh — Nginx reverse proxy for remote cluster access
 
 lo::expose() {

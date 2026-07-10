@@ -1,5 +1,6 @@
 #!/usr/bin/env argsh
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # kubeone — KubeOne cluster provisioning library
 # Detects provider from cluster spec, extracts variables for template rendering,
 # generates kubeone.yaml configs, and wraps kubeone CLI operations.
@@ -320,14 +321,14 @@ kubeone::apply() {
     return 1
   fi
 
-  local -a args=(
+  local -a kubeone_args=(
     apply
     --manifest kubeone.yaml
     --auto-approve
   )
 
   if [[ -f "${work_dir}/output.json" ]]; then
-    args+=(--tfjson output.json)
+    kubeone_args+=(--tfjson output.json)
   fi
 
   # A reinstalled static worker leaves a stale not-Ready node object that
@@ -351,7 +352,7 @@ kubeone::apply() {
   kubeone::_name_robot_workers "${work_dir}/kubeone.yaml" || return 1
   kubeone::render_addons "${work_dir}" || return 1
 
-  debug "Running (in ${work_dir}): kubeone ${args[*]}"
+  debug "Running (in ${work_dir}): kubeone ${kubeone_args[*]}"
   # Subshell cd: kubeone writes <cluster>-kubeconfig into the CWD (no output
   # flag) — run inside the work dir so artifacts land there. Hetzner Robot
   # credentials ride along for the CCM.
@@ -359,7 +360,7 @@ kubeone::apply() {
     cd "${work_dir}" || exit 1
     [[ -z "${HROBOT_USER:-}" ]]     || export ROBOT_USER="${HROBOT_USER}" HETZNER_ROBOT_USER="${HROBOT_USER}"
     [[ -z "${HROBOT_PASSWORD:-}" ]] || export ROBOT_PASSWORD="${HROBOT_PASSWORD}" HETZNER_ROBOT_PASSWORD="${HROBOT_PASSWORD}"
-    kubeone "${args[@]}"
+    kubeone "${kubeone_args[@]}"
   )
 }
 
@@ -402,10 +403,12 @@ kubeone::_clean_reinstalled_workers() {
     # host freshly reinstalled? (no kubelet config present)
     ssh "${ssh_opts[@]}" "root@${wip}" 'test ! -e /etc/kubernetes/kubelet.conf' 2>/dev/null || continue
     # stale node object that is NOT Ready?
+    # shellcheck disable=SC2029  # kctl/wname expand CLIENT-side by design — they compose the remote command
     ready=$(ssh "${ssh_opts[@]}" "root@${cp_ip}" \
       "${kctl} get node ${wname} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'" 2>/dev/null || echo "")
     [[ -n "${ready}" && "${ready}" != "True" ]] || continue
     warn "kubeone: ${wname} reinstalled (no kubelet) but a stale ${ready}-Ready node exists — removing it so apply re-joins cleanly"
+    # shellcheck disable=SC2029  # client-side expansion intended (same command composition)
     ssh "${ssh_opts[@]}" "root@${cp_ip}" "${kctl} delete node ${wname} --timeout=20s" >/dev/null 2>&1 || true
   done
 }
@@ -558,18 +561,18 @@ kubeone::reset() {
     return 1
   fi
 
-  local -a args=(
+  local -a kubeone_args=(
     reset
     --manifest "${work_dir}/kubeone.yaml"
     --auto-approve
   )
 
   if [[ -f "${work_dir}/output.json" ]]; then
-    args+=(--tfjson "${work_dir}/output.json")
+    kubeone_args+=(--tfjson "${work_dir}/output.json")
   fi
 
-  debug "Running: kubeone ${args[*]}"
-  kubeone "${args[@]}"
+  debug "Running: kubeone ${kubeone_args[*]}"
+  kubeone "${kubeone_args[@]}"
 }
 
 # Parse kubeone status output into a single-word status.
@@ -583,17 +586,17 @@ kubeone::status() {
     return
   fi
 
-  local -a args=(
+  local -a kubeone_args=(
     status
     --manifest "${work_dir}/kubeone.yaml"
   )
 
   if [[ -f "${work_dir}/output.json" ]]; then
-    args+=(--tfjson "${work_dir}/output.json")
+    kubeone_args+=(--tfjson "${work_dir}/output.json")
   fi
 
   local output
-  if output=$(kubeone "${args[@]}" 2>&1); then
+  if output=$(kubeone "${kubeone_args[@]}" 2>&1); then
     # Check for known status patterns in kubeone output
     if echo "${output}" | grep -qi "healthy"; then
       echo "Healthy"

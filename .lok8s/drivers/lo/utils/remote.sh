@@ -106,6 +106,7 @@ lo::remote_ci() {
 
   debug "CI mode: syncing repo to ${remote}:${dest}"
 
+  # shellcheck disable=SC2029  # dest expands CLIENT-side by design — it composes the remote command
   ssh "${remote}" "mkdir -p '${dest}'" || {
     error "failed to create ${dest} on ${remote}"
     return 1
@@ -138,6 +139,7 @@ lo::remote_ci() {
 
   # Run lo provision on the remote VM (without --remote)
   debug "starting lo provision on ${remote}"
+  # shellcheck disable=SC2029  # dest/domain expand CLIENT-side by design
   ssh "${remote}" "cd '${dest}' && \
     export DOMAIN_NAME='${domain}' && \
     export PATH_BASE='${dest}' && \
@@ -154,6 +156,7 @@ lo::remote_ci() {
   # Start Tilt if enabled
   if [[ "${LOK8S_REMOTE_TILT}" == "true" ]]; then
     debug "starting Tilt on ${remote}"
+    # shellcheck disable=SC2029  # dest/domain expand CLIENT-side by design
     ssh "${remote}" "cd '${dest}' && \
       export DOMAIN_NAME='${domain}' && \
       export PATH_BASE='${dest}' && \

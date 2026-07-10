@@ -4,6 +4,11 @@
 # k8s — Kubernetes artifact generation and rendering
 # Replaces capigen dependency with native envsubst + template approach.
 # Uses capi::generate() for CAPI resources instead of external binary.
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
+# AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
+# the `local domain="${domain:-...}"` sites are NOT clobbers — the RHS default
+# keeps the parent's inherited value (flag > env > default).
+# argsh disable-file=AG012
 
 import ^utils/types
 import ^utils/verbose
@@ -37,7 +42,7 @@ k8s::capi() {
 
   # Default spec: look in .lok8s/<domain>/cluster.lok8s.yaml first, fall back to legacy path
   if [[ -z "${spec:-}" ]]; then
-    local domain="${DOMAIN_NAME:-lok8s.dev}"
+    local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
     if [[ -f "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml" ]]; then
       spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
     else
@@ -47,11 +52,12 @@ k8s::capi() {
 
   [[ -f "${spec}" ]] || { error "Spec not found: ${spec}"; return 1; }
 
-  # Default output path
+  # Default output path — anchored to the SPEC's domain (not the --domain
+  # flag): the artifact must land next to the cluster the spec describes.
   if [[ -z "${out:-}" ]]; then
-    local domain
-    domain=$(yq -r '.spec.cluster.domain // "unknown"' "${spec}")
-    out="${PATH_CLUSTERS}/${domain}/artifacts/capi.yaml"
+    local spec_domain
+    spec_domain=$(yq -r '.spec.cluster.domain // "unknown"' "${spec}")
+    out="${PATH_CLUSTERS}/${spec_domain}/artifacts/capi.yaml"
   fi
 
   mkdir -p "$(dirname "${out}")"
@@ -80,7 +86,7 @@ EOF
 
 k8s::infrastructure() {
   :args "Build infrastructure artifacts" "${@}"
-  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
   local out_dir="${PATH_CLUSTERS}/${domain}/artifacts"
   mkdir -p "${out_dir}"
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
@@ -98,7 +104,7 @@ EOF
 
 k8s::platform() {
   :args "Build platform artifacts" "${@}"
-  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
   warn "k8s::platform uses legacy overlay paths; consider migrating to targets/"
   local overlay="${PATH_BASE}/.k8s/overlays/${domain}"
   local out_dir="${overlay}/artifacts"

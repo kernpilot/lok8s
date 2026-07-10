@@ -1,5 +1,6 @@
 #!/usr/bin/env argsh
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # vim: set syntax=bash:
 # image — pre-pull private images into the local cache registry
 #
@@ -11,6 +12,11 @@
 # Reads its work list from .lok8s/<domain>/artifacts/.cache-queue,
 # written by env::kustomization for every service with build:false +
 # resolved registry.endpoint.
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
+# AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
+# the `local domain="${domain:-...}"` sites are NOT clobbers — the RHS default
+# keeps the parent's inherited value (flag > env > default).
+# argsh disable-file=AG012
 
 import ^utils/types
 import ^utils/verbose
@@ -71,7 +77,7 @@ image::cache() {
   )
   :args "Pre-pull image(s) into the local cache registry" "${@}"
 
-  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
   # cache_host is framework policy — every Lo cluster uses lok8s.cache
   # as the canonical cache registry hostname. The LO_FRAMEWORK_REGISTRY_HOSTS
   # map exists in drivers/lo/main but may not be loaded yet when this

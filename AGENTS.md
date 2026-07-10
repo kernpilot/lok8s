@@ -41,7 +41,7 @@ Security applies to every change — features, fixes, refactors, tests.
 ```bash
 GITHUB_TOKEN=$(gh auth token) ./.bin/b install   # pinned toolchain (argsh, kustomize, yq, …)
 ./.bin/argsh test tests/unit/ tests/operator/    # bats suites
-npm run lint                                     # shellcheck --severity=warning (or: ./.bin/argsh lint)
+npm run lint                                     # argsh lint (shellcheck + argsh-lint) via hack/lint-shell.sh
 ```
 
 Use conventional commits (`feat:`, `fix:`, `docs:`, `chore:`, …). Keep CI green —
