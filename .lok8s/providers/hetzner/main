@@ -54,7 +54,7 @@ _cfg() { yq -r "$1" "${PROVIDER_CONFIG_FILE}"; }
 # validated as if the marker were absent, so a removal entry passes through.
 # Echoes the filtered labels JSON map. Proportionate: skip+warn, not fatal.
 _validate_node_labels() {
-  local labels_json="${1:-'{}'}" node="${2:-node}"
+  local labels_json="${1:-"{}"}" node="${2:-node}"
   local dropped
   dropped=$(echo "${labels_json}" | jq -r '
     def valid_seg: test("^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$");

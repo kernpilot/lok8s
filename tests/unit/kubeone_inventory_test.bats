@@ -146,15 +146,20 @@ JSON
 }
 
 @test "a key- removal marker (KubeOne addRemoveKeyValues) renders as an empty-valued label" {
+  # A CP is declared+present — a manifest with zero control planes is refused
+  # by the post-anchoring guard (round-1 fix), so worker-only fixtures are
+  # invalid by design.
   cat > "${DESCRIPTOR}" <<'JSON'
 { "cluster_name": "prod",
   "server": [
+    { "name": "cp-0", "type": "cx43" },
     { "name": "worker-0", "#cloud.root": "true", "#external-ip": "203.0.113.10" }
   ] }
 JSON
   _stub_provider_output "$(jq -n \
+    --argjson cp "$(_node cp-0 control-plane)" \
     --argjson a "$(_node worker-0 worker '{"tier.kubehz.cloud/pro": "true", "old.example.com/retired-": ""}')" \
-    '[$a]')"
+    '[$cp, $a]')"
 
   run _append_inventory "${DESCRIPTOR}" "${MANIFEST}"
   assert_success
@@ -172,4 +177,42 @@ JSON
   run _append_inventory "${DESCRIPTOR}" "${MANIFEST}"
   assert_failure
   assert_output --partial "declares no server[]"
+}
+
+@test "YAML descriptor keeps envsubst expansion when extracting server[] (round-1 fix)" {
+  # ${TEST_CP_NAME} must be expanded BEFORE the YAML→JSON conversion — the
+  # regression re-read the raw file and anchored against the literal string.
+  DESCRIPTOR="${BATS_TEST_TMPDIR}/hetzner.yaml"
+  cat > "${DESCRIPTOR}" <<'YAML'
+cluster_name: prod
+server:
+  - name: ${TEST_CP_NAME}
+    type: cx43
+YAML
+  export TEST_CP_NAME="cp-0"
+  local nodes
+  nodes=$(jq -n --argjson a "$(_node cp-0 control-plane)" '[$a]')
+  _stub_provider_output "${nodes}"
+
+  run _append_inventory "${DESCRIPTOR}" "${MANIFEST}"
+  assert_success
+  run yq -r '.controlPlane.hosts[0].hostname' "${MANIFEST}"
+  assert_output "cp-0"
+}
+
+@test "anchoring that leaves zero control planes fails with the cause (round-1 fix)" {
+  cat > "${DESCRIPTOR}" <<'JSON'
+{ "cluster_name": "prod",
+  "server": [ { "name": "worker-0", "#cloud.root": "true" } ] }
+JSON
+  local nodes
+  nodes=$(jq -n \
+    --argjson a "$(_node drifted-cp-name control-plane)" \
+    --argjson b "$(_node worker-0 worker)" \
+    '[$a, $b]')
+  _stub_provider_output "${nodes}"
+
+  run _append_inventory "${DESCRIPTOR}" "${MANIFEST}"
+  assert_failure
+  assert_output --partial "ZERO control-plane hosts"
 }
