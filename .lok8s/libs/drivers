@@ -8,10 +8,15 @@
 # the normal path is `lo provision`, which routes through provision::dispatch.
 
 main::drivers() {
-  local name="" list=0 help=0
+  # NOTE: no local help flag — argsh's :args intercepts -h/--help at parse
+  # time and exits with the generated help, so a `help|h:+` entry (and any
+  # `(( help ))` branch) can never fire. Forwarding --help to the driver is
+  # likewise unreachable through this command; use the driver's own
+  # subcommand help once dispatched (`lo drivers <name> provision` errors
+  # usefully via the driver's :args).
+  local name="" list=0
   local -a rest args=(
     "list|l:+" "List available drivers"
-    "help|h:+" "Show help for driver"
     "name"     "Driver name"
     "rest"     "Driver-specific arguments"
     "${args[@]:-}"
@@ -32,14 +37,10 @@ main::drivers() {
     return 0
   fi
 
-  # No driver named: --help gets usage guidance instead of the misleading
-  # "Driver '' not found"; a bare call gets a pointer to --list.
+  # No driver named: a bare call gets a pointer to --list instead of the
+  # misleading "Driver '' not found". (--help never reaches here — argsh
+  # answers it at parse time with the generated usage.)
   if [[ -z "${name}" ]]; then
-    if (( help )); then
-      echo "Usage: lo drivers [--list] <name> [driver args...]"
-      echo "Run 'lo drivers --list' to see available drivers."
-      return 0
-    fi
     error "Driver name required — try: lo drivers --list"
     return 1
   fi
@@ -54,7 +55,6 @@ main::drivers() {
     # shellcheck disable=SC1090
     source "${PATH_LOK8S}/drivers/${name}/main"
     declare -F main::driver >/dev/null || { error "driver '${name}' has no main::driver entry"; return 1; }
-    ! (( help )) || rest+=("--help")
     main::driver "${rest[@]}"
     return $?
   fi
