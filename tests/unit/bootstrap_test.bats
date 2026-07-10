@@ -1195,6 +1195,16 @@ YAML
   assert_output --partial "each element must be a file path string (got map)"
 }
 
+@test "_parse_entry: an empty-string valueFiles element is a hard error (not silently skipped)" {
+  # "" is !!str so it passes the element-tag check — but it is not a path.
+  # Review round 1 (Copilot): the resolve loop used to `continue` past it,
+  # contradicting the fail-fast contract ("never render with half the values").
+  run bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":[""]}}' n d i e w x
+  assert_failure
+  assert_output --partial "valueFiles: empty element"
+}
+
 @test "_parse_entry: 'valueFiles:' on a non-chart (kustomize) target is an error" {
   # Same helm-only rule as values: — a ./targets/ dir with only a
   # kustomization.yaml has no chart to feed the values to.

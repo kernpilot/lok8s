@@ -350,7 +350,13 @@ bootstrap::_parse_entry() {
       local -a _vf_files=()
       local _vf
       while IFS= read -r _vf; do
-        [[ -n "${_vf}" ]] || continue
+        # An empty-string element ("") is !!str, so it survives the tag check
+        # above — but it is not a path. Hard error (NOT a silent skip): the
+        # fail-fast contract is "never render with half the values".
+        if [[ -z "${_vf}" ]]; then
+          error "bootstrap: '${_raw}' valueFiles: empty element — each element must be a file path"
+          return 1
+        fi
         [[ "${_vf}" == /* ]] || _vf="${PATH_CLUSTERS}/${_domain}/${_vf}"
         if [[ ! -f "${_vf}" ]]; then
           error "bootstrap: '${_raw}' valueFiles: file not found: ${_vf}"
