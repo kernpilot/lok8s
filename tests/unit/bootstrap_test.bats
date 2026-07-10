@@ -1195,6 +1195,17 @@ YAML
   assert_output --partial "each element must be a file path string (got map)"
 }
 
+@test "_parse_entry: an empty valueFiles list is a harmless no-op (like an empty values:)" {
+  # `valueFiles: []` is vacuous config, not an error — nothing merges, inline
+  # values (when present) pass through untouched. Pinned so the behavior is a
+  # decision, not an accident (review round 2).
+  local p_name p_dir p_inline p_env p_wait p_deps
+  bootstrap::_parse_entry "test.lok8s.dev" \
+    '{"testcni":{"valueFiles":[],"values":{"kept":"yes"}}}' \
+    p_name p_dir p_inline p_env p_wait p_deps
+  [ "$(yq -r '.kept' <<<"${p_inline}")" = "yes" ]
+}
+
 @test "_parse_entry: an empty-string valueFiles element is a hard error (not silently skipped)" {
   # "" is !!str so it passes the element-tag check — but it is not a path.
   # Review round 1 (Copilot): the resolve loop used to `continue` past it,
