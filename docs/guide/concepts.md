@@ -279,9 +279,9 @@ in-manifest ordering, Tilt handles live runtime dependencies at the
 resource level via `resource_deps`, and GitOps engines translate their
 own ordering primitives.
 
-Each target is built independently (`artifacts/<target>/artifacts.yaml`)
-and can be deployed together (`lo deploy`) or individually
-(`lo deploy <target>`).
+The domain kustomization composes its targets into ONE
+`clusters/<domain>/artifacts.yaml` (`lo build`); deploy everything
+(`lo deploy`) or a labelled subset (`lo deploy -l lok8s.dev/name=<target>`).
 
 ## Cluster Kinds (Drivers)
 
@@ -350,13 +350,13 @@ lo up <domain>
                             applies with service-enable filters, wires
                             image swaps / live reload
 
-lo build [target...]        per-target kustomize build
- └─ artifacts/<target>/artifacts.yaml
+lo build                     domain kustomization build
+ └─ clusters/<domain>/artifacts.yaml   (ONE artifact, targets composed)
 
-lo deploy [target...]       per-target apply loop
- ├─ extract + apply CRDs
- ├─ apply remaining resources
- └─ wait healthy, next target
+lo deploy [-l key=value]     domain artifact apply
+ ├─ extract + apply CRDs (server-side, wait Established)
+ ├─ apply remaining resources (optionally label-scoped)
+ └─ scoped wait for the manifest's own workloads
 ```
 
 - `lo up` is the one-shot dev flow: provision + bootstrap + tilt.

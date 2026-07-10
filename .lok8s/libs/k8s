@@ -31,7 +31,7 @@ k8s::capi() {
   local -a args=(
     'spec|'  'Path to cluster.lok8s.yaml spec'
     'out|'   'Output file (default: .lok8s/<domain>/artifacts/capi.yaml)'
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :args "Generate CAPI resources" "${@}"
 

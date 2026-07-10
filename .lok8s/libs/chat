@@ -48,3 +48,5 @@ main::chat() {
     --base-dir "${PATH_BASE}" \
     "${@}"
 }
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::chat "${@}"

@@ -227,7 +227,11 @@ teardown() {
 }
 
 @test "capi::bootstrap fails for unsupported provider" {
-  cat > "${BATS_TEST_TMPDIR}/gcp-cluster.yaml" <<'YAML'
+  # capi::bootstrap derives cluster_yaml from the domain — the spec must live
+  # at the real per-domain path (the old ignored 2nd-arg form let this test
+  # pass on "missing spec" instead of the provider check).
+  mkdir -p "${PATH_CLUSTERS}/gcp.lok8s.dev"
+  cat > "${PATH_CLUSTERS}/gcp.lok8s.dev/cluster.lok8s.yaml" <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
 kind: Capi
 metadata:
@@ -247,8 +251,9 @@ YAML
     skip "yq required"
   fi
 
-  run capi::bootstrap "gcp.lok8s.dev" "${BATS_TEST_TMPDIR}/gcp-cluster.yaml"
+  run capi::bootstrap "gcp.lok8s.dev"
   assert_failure
+  assert_output --partial "unsupported provider"
 }
 
 # --- driver::provision (bootstrap path) ---

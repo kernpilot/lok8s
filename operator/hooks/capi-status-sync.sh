@@ -6,7 +6,8 @@
 # direct target deployment when a cluster becomes Provisioned.
 set -euo pipefail
 
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+# BASH_SOURCE (not $0) so the file resolves correctly when sourced by tests.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH_BASE="${HOOK_DIR}"
 
 # Shim argsh 'import' for plain bash — libs use 'import libs/...' which is
@@ -153,8 +154,11 @@ hook::trigger() {
   done
 }
 
-if [[ "${1:-}" == "--config" ]]; then
-  hook::config
-else
-  hook::trigger
+# Run only when executed (shell-operator); tests source this file.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  if [[ "${1:-}" == "--config" ]]; then
+    hook::config
+  else
+    hook::trigger
+  fi
 fi

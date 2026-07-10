@@ -75,17 +75,19 @@ injection:
   # Defaults mirror the CLI's @readonly / @idempotent annotations.
   tiers:
     readonly:
-      [lo_status, lo_doctor, lo_lint, lo_kubeconfig, lo_addons, lo_drivers,
-       lo_secrets_list, lo_secrets_print, lo_secrets_env, lo_secrets_path,
+      [lo_status, lo_doctor, lo_lint, lo_audit, lo_addons,
+       lo_secrets_list, lo_secrets_path, lo_kubehz_claim-code,
        lo_tilt_status, lo_kubehz_status, lo_registry_status, lo_image_list]
     idempotent:
       [lo_build, lo_kustomize_build]
     # anything not listed above is treated as `mutating`.
 
-  # secret-reading tools: NEVER expose to the model, even though they're @readonly.
+  # secret/credential-emitting tools: NEVER expose to the model, even though
+  # they're @readonly (lo_kubeconfig prints the admin client cert+key).
   deny:
     - lo_secrets_print
     - lo_secrets_env
+    - lo_kubeconfig
 
 # ---------------------------------------------------------------------------
 # Benchmark

@@ -2,7 +2,7 @@
 # template.sh — YAML template rendering via envsubst
 # Exports variables from a cluster spec YAML and renders template files.
 
-import utils/verbose
+import ^utils/verbose
 
 # Render a template file by exporting vars from a cluster spec YAML.
 # Usage: template::render <template_file> <cluster_yaml>

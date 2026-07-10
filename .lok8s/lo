@@ -100,7 +100,7 @@ main() {
     'audit|au@readonly'                'Static security-posture audit (read-only, cluster-free; --json)'
     'status@readonly'                  'Cluster health and status'
     'doctor@readonly'                  'Diagnose the environment + toolchain'
-    'trust'                            'Trust the local dev CA (mkcert -install)'
+    'trust@idempotent'                 'Trust the local dev CA (mkcert -install)'
     'chat'                             'Chat with a local AI (transparent, streaming)'
     'ai'                               'Manage the AI integration (lo chat + agent skills)'
     'version@readonly'                 'Print lok8s + toolchain versions'
@@ -241,7 +241,11 @@ main::up() {
     return
   fi
 
-  tilt::up && (( open_tilt )) && {
+  tilt::up
+  # NOTE: not `tilt::up && (( open_tilt )) && {…}` — with --open unset the
+  # arithmetic evaluates 0 as the function's LAST command, so a successful
+  # interactive `lo up` exited 1 (review find, 2026-07-09).
+  if (( open_tilt )); then
     local _port
     _port=$(tilt::port)
     if command -v xdg-open &>/dev/null; then
@@ -251,7 +255,7 @@ main::up() {
     else
       echo "Tilt UI: http://localhost:${_port}"
     fi
-  }
+  fi
 }
 
 main::down() {
@@ -265,7 +269,12 @@ main::down() {
   [[ -f "${_spec}" ]] && _kind=$(yq -r '.kind' "${_spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
   if [[ -n "${_kind}" && "${_kind}" != "lo" ]]; then
     printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${_kind}"
-    provision::dispatch_destroy "${DOMAIN_NAME}" || true
+    # A failed driver destroy means infrastructure may be ORPHANED (and billed)
+    # — that must be a visible non-zero exit, never a silent success.
+    if ! provision::dispatch_destroy "${DOMAIN_NAME}"; then
+      printf '  \033[31m✗ driver destroy failed — infrastructure may still exist; inspect and re-run\033[0m\n'
+      return 1
+    fi
     printf '\n'
     return
   fi
@@ -326,4 +335,8 @@ main::clean() {
   registry::clean
 }
 
-[[ "${0}" != "${BASH_SOURCE[0]}" && -z "${ARGSH_SOURCE}" ]] || main "${@}"
+# Entrypoint guard: run main only when executed directly. The libs' guard
+# variant can't work here — lo self-sets ARGSH_SOURCE (line 20), so any
+# ARGSH_SOURCE test is a tautology (the old `-z` form made this line always
+# dispatch, executing the CLI even when sourced).
+[[ "${0}" != "${BASH_SOURCE[0]}" ]] || main "${@}"

@@ -27,9 +27,9 @@ main::hooks() {
   # opened without a controlling tty.)
   export LOK8S_NONINTERACTIVE=1
   local -a usage=(
-    'recreate'  'Delete + apply the selected objects (immutable Jobs re-run)'
-    'restart'   'Rollout restart the selected workloads'
-    'apply'     'Re-apply the selected objects (no delete)'
+    'recreate@destructive'          'Delete + apply the selected objects (immutable Jobs re-run)'
+    'restart@destructive'           'Rollout restart the selected workloads'
+    'apply@destructive@idempotent'  'Re-apply the selected objects (no delete)'
   )
   local -a args=(
     'domain|:^~domain'  'Domain to use'

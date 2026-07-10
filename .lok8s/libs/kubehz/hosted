@@ -3,6 +3,9 @@
 # vim: set syntax=bash:
 # kubehz-hosted — kubehz hosted cluster provisioning
 # Handles creating/destroying clusters via the kubehz API for hosting: hosted mode.
+#
+# LIBRARY-ONLY: no main::* entry point and no dispatch guard — loaded via
+# libs/kubehz/main; not directly executable.
 
 import ^utils/verbose
 

@@ -38,7 +38,7 @@ main::use() {
   local -a set_domain
   local -a args=(
     'set-domain'  'Domain to set active (omit to show current + available)'
-    "${args[@]}"
+    "${args[@]:-}"
   )
   :args "Set or show the active domain" "${@}"
 
