@@ -32,13 +32,25 @@ main::drivers() {
     return 0
   fi
 
+  # No driver named: --help gets usage guidance instead of the misleading
+  # "Driver '' not found"; a bare call gets a pointer to --list.
+  if [[ -z "${name}" ]]; then
+    if (( help )); then
+      echo "Usage: lo drivers [--list] <name> [driver args...]"
+      echo "Run 'lo drivers --list' to see available drivers."
+      return 0
+    fi
+    error "Driver name required — try: lo drivers --list"
+    return 1
+  fi
+
   # The name lands in a path we source — allowlist it (same guard class as
   # bootstrap::dispatch's domain/kind validation).
-  if [[ -n "${name}" && ! "${name}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  if [[ ! "${name}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     error "Invalid driver name: ${name}"
     return 1
   fi
-  if [[ -n "${name}" ]] && [[ -f "${PATH_LOK8S}/drivers/${name}/main" ]]; then
+  if [[ -f "${PATH_LOK8S}/drivers/${name}/main" ]]; then
     # shellcheck disable=SC1090
     source "${PATH_LOK8S}/drivers/${name}/main"
     declare -F main::driver >/dev/null || { error "driver '${name}' has no main::driver entry"; return 1; }
@@ -48,5 +60,6 @@ main::drivers() {
   fi
 
   error "Driver '${name}' not found"
+  return 1
 }
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::drivers "${@}"

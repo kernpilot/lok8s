@@ -113,7 +113,7 @@ A referenced target that does not exist is a clear `kustomize build` error. Ther
 Deploy the domain artifact to a cluster.
 
 ```bash
-lo deploy [--domain <domain>] [-l|--label key=value]
+lo deploy [--domain <domain>] [--cluster-override <domain>] [-l|--label key=value]
 ```
 
 Applies the single `clusters/<domain>/artifacts.yaml`: CRDs first (server-side apply + wait for Established), then the rest (server-side apply + a scoped wait for the manifest's own workloads to become ready). Run `lo build` first.
@@ -123,6 +123,7 @@ Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects ca
 | Flag | Description |
 |------|-------------|
 | `-l`, `--label` | Only deploy objects carrying this `key=value` label (opt-in selective deploy) |
+| `--cluster-override` | Override the cluster domain used for kubeconfig resolution (deploy domains) |
 
 ### lo destroy
 
