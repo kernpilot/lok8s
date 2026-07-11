@@ -45,15 +45,7 @@ setup() {
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/driver"
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/registry"
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/coredns"
-  mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/utils"
-
-  # drivers/lo/main sources ${PATH_LOK8S}/utils/{ip,oidc,kapply}.sh
-  cp "${_PROJECT_ROOT}/.lok8s/utils/ip.sh" \
-    "${BATS_TEST_TMPDIR}/.lok8s/utils/ip.sh"
-  cp "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh" \
-    "${BATS_TEST_TMPDIR}/.lok8s/utils/oidc.sh"
-  cp "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh" \
-    "${BATS_TEST_TMPDIR}/.lok8s/utils/kapply.sh"
+  vendor_lo_utils
 
   # Copy Lo fixture
   cp "${FIXTURES_DIR}/lo-cluster.lok8s.yaml" \
