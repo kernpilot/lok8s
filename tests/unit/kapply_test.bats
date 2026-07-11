@@ -272,3 +272,26 @@ IN
   [[ "$output" != *"resource"* ]]
   [[ "$output" == *"already deployed"* ]]
 }
+
+@test "render_captured: retry passes count each resource once (no inflation)" {
+  # the CRD-race retry re-applies the whole manifest — the summary must count
+  # distinct resources, not lines-per-pass
+  run kapply::render_captured cnpg 0 <<'IN'
+namespace/cnpg-system serverside-applied
+deployment.apps/cnpg serverside-applied
+namespace/cnpg-system serverside-applied
+deployment.apps/cnpg serverside-applied
+customresourcedefinition.apiextensions.k8s.io/clusters.cnpg.io condition met
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"· 3 resources"* ]]
+}
+
+@test "render_captured: off-tty output is plain (no ANSI, embedded escapes stripped)" {
+  # bats stdout is a pipe, so this exercises the non-tty path directly
+  run kapply::render_captured networking 1 < <(printf 'secret/x serverside-applied\n\033[31mcolored controller error\033[0m\n')
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\033'* ]]                       # zero escape sequences
+  [[ "$output" == *"✗ networking · 1 resource"* ]]   # exact plain header
+  [[ "$output" == *"colored controller error"* ]]    # payload kept, colors gone
+}

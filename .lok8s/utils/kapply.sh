@@ -70,30 +70,47 @@ kapply::_aggregate() {
 #   lines collapse to a single "· N resources" count (matching the live UI's
 #   final line); every other line (errors, CRD/webhook-race retries, wait
 #   output) is surfaced and deduped via kapply::_aggregate. <rc> picks ✓/✗.
+#   Styling is tty-only: off-tty (CI, piped logs) the same collapsed block is
+#   emitted PLAIN — no ANSI of our own, and embedded escapes in the captured
+#   lines are stripped (controller/kubectl errors can carry their own colors).
 kapply::render_captured() {
   local label="${1}" rc="${2:-0}"
   local marker=✓ color=32
   (( rc == 0 )) || { marker=✗; color=31; }
+  # Capture tty-ness ONCE at entry: inside a pipeline segment below, fd 1 is a
+  # pipe, so a later [[ -t 1 ]] would always be false.
+  local is_tty=0; [[ -t 1 ]] && is_tty=1
+  local c_on='' c_off='' c_dim=''
+  (( is_tty )) && { c_on=$'\033['"${color}m"; c_off=$'\033[0m'; c_dim=$'\033[2m'; }
   local line n=0
+  # Count DISTINCT resources (keyed on the first token), not raw OK lines: the
+  # CRD/webhook-race retry re-applies the whole manifest up to 6×, and a raw
+  # line count would inflate "· N resources" by the number of passes.
+  local -A seen_resource=()
   local -a extra=()
   # `|| [[ -n ... ]]`: keep a final line that lacks a trailing newline (a killed
   # job's buffered output can end mid-write) — plain read would drop it.
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if [[ "${line}" =~ ${_KAPPLY_OK} ]]; then
-      n=$(( n + 1 ))
+      seen_resource["${line%% *}"]=1
     elif [[ -n "${line}" ]]; then
       extra+=("${line}")
     fi
   done
+  n=${#seen_resource[@]}
   if (( n > 0 )); then
     local noun=resources; (( n == 1 )) && noun=resource
-    printf '\033[%sm%s\033[0m %s \033[2m· %d %s\033[0m\n' "${color}" "${marker}" "${label}" "${n}" "${noun}"
+    printf '%s%s%s %s %s· %d %s%s\n' "${c_on}" "${marker}" "${c_off}" "${label}" "${c_dim}" "${n}" "${noun}" "${c_off}"
   else
-    printf '\033[%sm%s\033[0m %s\n' "${color}" "${marker}" "${label}"
+    printf '%s%s%s %s\n' "${c_on}" "${marker}" "${c_off}" "${label}"
   fi
   (( ${#extra[@]} )) || return 0
-  printf '%s\n' "${extra[@]}" | kapply::_aggregate | while IFS= read -r line; do
-    printf '      \033[2m%s\033[0m\n' "${line}"
+  printf '%s\n' "${extra[@]}" | kapply::_aggregate | {
+    # off-tty: strip ALL escapes — _aggregate's ×N styling and any colors the
+    # captured lines brought along — so CI/piped logs stay plain text.
+    if (( is_tty )); then cat; else sed $'s/\x1b\\[[0-9;]*m//g'; fi
+  } | while IFS= read -r line; do
+    printf '      %s%s%s\n' "${c_dim}" "${line}" "${c_off}"
   done
 }
 

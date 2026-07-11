@@ -2068,7 +2068,7 @@ YAML
     local name="$1"
     printf 'secret/%s serverside-applied\n' "${name}"
     if [[ "${name}" == "b" ]]; then
-      echo 'Error from server: admission webhook denied' 
+      echo 'Error from server: admission webhook denied'
       echo 'Error from server: admission webhook denied'
       return 1
     fi
@@ -2098,4 +2098,20 @@ YAML
   [ -z "${_BS_TICKER_PID}" ]
   # stop is a no-op when nothing started
   bootstrap::_ticker_stop
+}
+
+@test "bootstrap::apply: DEBUG flushes verbatim (de-interleaved, never collapsed)" {
+  # kapply's contract: verbose (lo -v) prints everything, no aggregation — the
+  # buffered-block flush must honor it too.
+  export LOK8S_BOOTSTRAP_PARALLEL=8 DEBUG=1
+  bootstrap::_apply_one() {
+    printf 'configmap/%s-one serverside-applied\n' "$1"
+    return 0
+  }
+  mkdir -p "${PATH_LOK8S}/addons/a"
+  write_cluster_spec "a"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"configmap/a-one serverside-applied"* ]]
+  [[ "$output" != *"· 1 resource"* ]]
 }

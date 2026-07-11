@@ -740,8 +740,13 @@ bootstrap::_ticker_start() {
   for _ri in "${_BS_RUNIDX[@]+"${_BS_RUNIDX[@]}"}"; do _rn+=("${_names[_ri]}"); done
   local _names_s="${_rn[*]}" _done="${_BS_DONE}" _total="${n}" _cols
   _cols=$(tput cols 2>/dev/null || echo 80)
+  # Tie the ticker's life to the SCHEDULER process: if lo is SIGTERM'd (kill of
+  # the pid only — Ctrl-C already takes the whole process group), _ticker_stop
+  # never runs; the parent-alive loop condition makes the ticker exit on its
+  # own within one frame instead of spinning on the terminal forever.
+  local _parent="${BASHPID:-$$}"
   ( _i=0
-    while :; do
+    while kill -0 "${_parent}" 2>/dev/null; do
       _frame="${_KAPPLY_SPIN[$(( _i % ${#_KAPPLY_SPIN[@]} ))]}"
       _line="${_names_s}"; _budget=$(( _cols - 20 )); (( _budget < 8 )) && _budget=8
       (( ${#_line} > _budget )) && _line="${_line:0:_budget-1}…"
@@ -797,11 +802,17 @@ bootstrap::_reap_one() {
       # we own the foreground: the concurrent jobs couldn't share /dev/tty for the
       # live collapsing UI, so they buffered to a file (see the launch site) and
       # we render it here — collapsed on success, errors surfaced on failure.
+      # `|| true` on every flush path: a rendering hiccup must never abort the
+      # reap loop under errexit (that would skip _drain + the rcdir cleanup).
       if [[ -f "${_BS_OUTFILES[_i]}" ]]; then
-        if declare -F kapply::render_captured >/dev/null 2>&1; then
-          kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}"
+        if [[ -n "${DEBUG:-}" ]]; then
+          # verbose (lo -v): honor kapply's "print everything, don't aggregate"
+          # contract — still de-interleaved (buffered per job), but verbatim.
+          cat "${_BS_OUTFILES[_i]}" || true
+        elif declare -F kapply::render_captured >/dev/null 2>&1; then
+          kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}" || true
         else
-          cat "${_BS_OUTFILES[_i]}"   # fallback: still de-interleaved, just not collapsed
+          cat "${_BS_OUTFILES[_i]}" || true   # fallback: de-interleaved, not collapsed
         fi
         rm -f "${_BS_OUTFILES[_i]}"
       fi
