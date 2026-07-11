@@ -1,0 +1,29 @@
+# khelm chart spec for Flux CD (the GitOps toolkit), inflated via khelm at
+# kustomize build time.
+#
+# Generic FRAMEWORK ADDON: the chart + portable controller defaults only. The
+# per-cluster GitOps glue (the GitRepository source + the Kustomization that
+# points Flux at a repo path) is NOT here — that is cluster-specific and lives
+# in inline `bootstrap:` values or a dedicated flux-system target. See the
+# kustomization header for the split.
+#
+# Chart: fluxcd-community/flux2 (the community umbrella chart bundling the Flux
+# controllers + CRDs), NOT the CLI-driven `flux install`. Pins the whole
+# toolkit so bootstrap is declarative and version-controlled like every other
+# addon.
+#
+# kubeVersion must be set explicitly so khelm forwards it to helm — otherwise
+# helm defaults to v1.20.0 and the chart's own kubeVersion constraint / CRDs may
+# reject it. Tracks the kindest/node version we provision against
+# (.spec.kubernetes.version in the cluster spec), same pin as cilium.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: flux2
+  namespace: flux-system
+kubeVersion: "1.31.4"
+repository: https://fluxcd-community.github.io/helm-charts
+chart: flux2
+version: 2.18.4
+valueFiles:
+  - values.yaml
