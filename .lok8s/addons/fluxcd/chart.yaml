@@ -12,10 +12,12 @@
 # toolkit so bootstrap is declarative and version-controlled like every other
 # addon.
 #
-# kubeVersion must be set explicitly so khelm forwards it to helm — otherwise
-# helm defaults to v1.20.0 and the chart's own kubeVersion constraint / CRDs may
-# reject it. Tracks the kindest/node version we provision against
-# (.spec.kubernetes.version in the cluster spec), same pin as cilium.
+# kubeVersion must be set explicitly so khelm forwards a version to helm —
+# otherwise helm defaults to v1.20.0, which some charts' kubeVersion constraints
+# reject (the flux2 chart itself declares no such constraint, but we pin anyway
+# for parity with the other addons and to feed helm a real version). Tracks the
+# kindest/node version we provision against (.spec.kubernetes.version in the
+# cluster spec), same pin as cilium.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
