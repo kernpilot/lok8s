@@ -71,8 +71,10 @@ kapply::_aggregate() {
 #   final line); every other line (errors, CRD/webhook-race retries, wait
 #   output) is surfaced and deduped via kapply::_aggregate. <rc> picks ✓/✗.
 #   Styling is tty-only: off-tty (CI, piped logs) the same collapsed block is
-#   emitted PLAIN — no ANSI of our own, and embedded escapes in the captured
-#   lines are stripped (controller/kubectl errors can carry their own colors).
+#   emitted PLAIN — no ANSI of our own, and embedded CSI sequences + carriage
+#   returns in the captured lines are stripped (controller/kubectl errors can
+#   carry their own colors/cursor moves; OSC and bare ESC are left alone —
+#   nothing in an apply stream realistically emits those).
 kapply::render_captured() {
   local label="${1}" rc="${2:-0}"
   local marker=✓ color=32
@@ -118,9 +120,9 @@ kapply::render_captured() {
   fi
   (( ${#extra[@]} )) || return 0
   printf '%s\n' "${extra[@]}" | kapply::_aggregate | {
-    # off-tty: strip ALL terminal control — _aggregate's ×N styling, any colors
-    # the captured lines brought along, cursor-move CSI sequences, and carriage
-    # returns — so CI/piped logs stay plain text.
+    # off-tty: strip CSI sequences (any terminator — _aggregate's ×N styling,
+    # captured colors, cursor moves) and carriage returns, so CI/piped logs
+    # stay plain text.
     if (( is_tty )); then cat; else sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' | tr -d '\r'; fi
   } | while IFS= read -r line; do
     printf '      %s%s%s\n' "${c_dim}" "${line}" "${c_off}"

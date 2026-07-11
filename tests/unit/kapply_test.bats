@@ -314,3 +314,10 @@ IN
   [[ "$output" == *"· 1 resource"* ]]
   [[ "$output" == *"Warning: resource configmaps/y"* ]]
 }
+
+@test "render_captured: off-tty strips carriage returns from captured lines" {
+  run kapply::render_captured cr-test 1 < <(printf 'secret/x serverside-applied\nprogress line\rovertyped error\n')
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\r'* ]]
+  [[ "$output" == *"overtyped error"* ]]
+}
