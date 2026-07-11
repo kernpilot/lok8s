@@ -213,6 +213,7 @@ addons::_config_hint() {
     cnpg-operator)                echo "declare databases as CNPG Cluster CRs in a target";;
     envoy-gateway)                echo "define Gateway + HTTPRoutes in a networking target";;
     external-dns)                 echo "set the managed DNS zones via spec.dns.domainFilter";;
+    fluxcd)                       echo "GitRepository + Kustomization are per-cluster glue; set them inline (extraObjects) or in a flux-system target";;
     gatus)                        echo "configure monitored endpoints in the gatus target/values";;
     local-path-provisioner)       echo "set as default StorageClass; values in addons/local-path-provisioner";;
     mailpit)                      echo "expose via an HTTPRoute target (dev SMTP capture)";;
