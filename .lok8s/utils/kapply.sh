@@ -60,6 +60,43 @@ kapply::_aggregate() {
             else print l } }'
 }
 
+# kapply::render_captured <label> <rc>
+#   Render a CAPTURED apply-output stream (read from stdin) as the OFFLINE
+#   equivalent of the live collapsing block. The bootstrap DAG fans non-gate
+#   entries out as concurrent background jobs, which cannot each own /dev/tty
+#   for the live spinner (they would garble each other) — so they buffer their
+#   output to a file and the serialized foreground reap renders it here, one
+#   de-interleaved block per entry. Routine "…applied/…created/…condition met"
+#   lines collapse to a single "· N resources" count (matching the live UI's
+#   final line); every other line (errors, CRD/webhook-race retries, wait
+#   output) is surfaced and deduped via kapply::_aggregate. <rc> picks ✓/✗.
+kapply::render_captured() {
+  local label="${1}" rc="${2:-0}"
+  local marker=✓ color=32
+  (( rc == 0 )) || { marker=✗; color=31; }
+  local line n=0
+  local -a extra=()
+  # `|| [[ -n ... ]]`: keep a final line that lacks a trailing newline (a killed
+  # job's buffered output can end mid-write) — plain read would drop it.
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${line}" =~ ${_KAPPLY_OK} ]]; then
+      n=$(( n + 1 ))
+    elif [[ -n "${line}" ]]; then
+      extra+=("${line}")
+    fi
+  done
+  if (( n > 0 )); then
+    local noun=resources; (( n == 1 )) && noun=resource
+    printf '\033[%sm%s\033[0m %s \033[2m· %d %s\033[0m\n' "${color}" "${marker}" "${label}" "${n}" "${noun}"
+  else
+    printf '\033[%sm%s\033[0m %s\n' "${color}" "${marker}" "${label}"
+  fi
+  (( ${#extra[@]} )) || return 0
+  printf '%s\n' "${extra[@]}" | kapply::_aggregate | while IFS= read -r line; do
+    printf '      \033[2m%s\033[0m\n' "${line}"
+  done
+}
+
 # kapply::run <phase> <command...>
 #   Run an arbitrary command whose output is kubectl-style "<resource> <verb>"
 #   lines (apply + annotate + rollout restart + …) and render it as ONE named,

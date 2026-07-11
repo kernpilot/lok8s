@@ -228,3 +228,47 @@ metadata: {name: cfg, namespace: default}'
   refute_output --partial 'replace --force'
   refute_output --partial 'patch'
 }
+
+# ── kapply::render_captured (offline block for buffered bootstrap jobs) ───────
+
+@test "render_captured: collapses routine apply lines to a resource count" {
+  run kapply::render_captured cert-manager 0 <<'IN'
+namespace/cert-manager serverside-applied
+deployment.apps/cert-manager serverside-applied
+customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io condition met
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓"*"cert-manager"*"· 3 resources"* ]]
+  # the whole point: the routine per-object lines are collapsed away
+  [[ "$output" != *"serverside-applied"* ]]
+  [[ "$output" != *"condition met"* ]]
+}
+
+@test "render_captured: failure marks ✗ and surfaces deduped error lines" {
+  run kapply::render_captured networking 1 <<'IN'
+secret/kubehz-tls serverside-applied
+no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
+no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✗"*"networking"*"· 1 resource"* ]]
+  [[ "$output" == *'no matches for kind "GatewayClass"'* ]]
+  [[ "$output" == *"×2"* ]]
+}
+
+@test "render_captured: keeps a final line that lacks a trailing newline" {
+  # a killed job's buffer can end mid-write; plain `read` would drop the line
+  run kapply::render_captured broken 1 < <(printf 'secret/x serverside-applied\npartial error, no newline')
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"partial error, no newline"* ]]
+}
+
+@test "render_captured: zero applied resources renders a bare header" {
+  run kapply::render_captured cilium 0 <<'IN'
+[bootstrap] cilium already deployed by the KubeOne driver — skipping
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓"*"cilium"* ]]
+  [[ "$output" != *"resource"* ]]
+  [[ "$output" == *"already deployed"* ]]
+}
