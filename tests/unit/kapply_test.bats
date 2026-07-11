@@ -295,3 +295,22 @@ IN
   [[ "$output" == *"✗ networking · 1 resource"* ]]   # exact plain header
   [[ "$output" == *"colored controller error"* ]]    # payload kept, colors gone
 }
+
+@test "render_captured: indented OK-verb line surfaces instead of crashing the shell" {
+  # an empty first token would be seen_resource[""]= — a FATAL bad-subscript
+  # under set -e that killed the scheduler mid-reap (round-2 review find)
+  run kapply::render_captured weird 0 < <(printf 'secret/x serverside-applied\n    patched\n')
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"· 1 resource"* ]]
+  [[ "$output" == *"patched"* ]]
+}
+
+@test "render_captured: prose ending in an OK verb is surfaced, not counted" {
+  run kapply::render_captured warn 0 <<'IN'
+namespace/x serverside-applied
+Warning: resource configmaps/y lacks the last-applied annotation and was configured
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"· 1 resource"* ]]
+  [[ "$output" == *"Warning: resource configmaps/y"* ]]
+}

@@ -82,7 +82,7 @@ kapply::render_captured() {
   local is_tty=0; [[ -t 1 ]] && is_tty=1
   local c_on='' c_off='' c_dim=''
   (( is_tty )) && { c_on=$'\033['"${color}m"; c_off=$'\033[0m'; c_dim=$'\033[2m'; }
-  local line n=0
+  local line key n=0
   # Count DISTINCT resources (keyed on the first token), not raw OK lines: the
   # CRD/webhook-race retry re-applies the whole manifest up to 6×, and a raw
   # line count would inflate "· N resources" by the number of passes.
@@ -92,7 +92,19 @@ kapply::render_captured() {
   # job's buffered output can end mid-write) — plain read would drop it.
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if [[ "${line}" =~ ${_KAPPLY_OK} ]]; then
-      seen_resource["${line%% *}"]=1
+      # Count ONLY when the first token has kubectl's type/name resource shape.
+      # This guards two verified traps: an INDENTED line ending in an OK verb
+      # makes the token EMPTY, and seen_resource[""]= is a fatal bad-subscript
+      # under set -e — it would kill the scheduler mid-reap, past any || true
+      # (assignment errors abort non-interactive shells); and prose that merely
+      # ENDS in an OK verb ("Warning: … configured") must surface as a message,
+      # not vanish into the count.
+      key="${line%% *}"
+      if [[ -n "${key}" && "${key}" == */* ]]; then
+        seen_resource["${key}"]=1
+      else
+        extra+=("${line}")
+      fi
     elif [[ -n "${line}" ]]; then
       extra+=("${line}")
     fi
@@ -106,9 +118,10 @@ kapply::render_captured() {
   fi
   (( ${#extra[@]} )) || return 0
   printf '%s\n' "${extra[@]}" | kapply::_aggregate | {
-    # off-tty: strip ALL escapes — _aggregate's ×N styling and any colors the
-    # captured lines brought along — so CI/piped logs stay plain text.
-    if (( is_tty )); then cat; else sed $'s/\x1b\\[[0-9;]*m//g'; fi
+    # off-tty: strip ALL terminal control — _aggregate's ×N styling, any colors
+    # the captured lines brought along, cursor-move CSI sequences, and carriage
+    # returns — so CI/piped logs stay plain text.
+    if (( is_tty )); then cat; else sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' | tr -d '\r'; fi
   } | while IFS= read -r line; do
     printf '      %s%s%s\n' "${c_dim}" "${line}" "${c_off}"
   done
