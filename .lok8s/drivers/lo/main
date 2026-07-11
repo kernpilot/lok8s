@@ -11,10 +11,9 @@ _LO_DIR="${BASH_SOURCE[0]%/*}"
 source "${PATH_LOK8S}/utils/ip.sh"
 # shellcheck source=../../utils/oidc.sh
 source "${PATH_LOK8S}/utils/oidc.sh"
-# kapply (collapsing progress + heal) for the cluster-service phases. Tolerate
-# its absence so minimal test sandboxes that source this driver still load.
+# kapply (collapsing progress + heal) for the cluster-service phases.
 # shellcheck source=../../utils/kapply.sh
-[[ -f "${PATH_LOK8S}/utils/kapply.sh" ]] && source "${PATH_LOK8S}/utils/kapply.sh"
+source "${PATH_LOK8S}/utils/kapply.sh"
 source "${_LO_DIR}/utils/defaults.sh"
 source "${_LO_DIR}/utils/config-registry.sh"
 source "${_LO_DIR}/utils/config.sh"

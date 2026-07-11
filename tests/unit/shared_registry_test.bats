@@ -17,10 +17,7 @@ setup() {
   mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/registry"
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/coredns"
-  mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/utils"
-
-  cp "${_PROJECT_ROOT}/.lok8s/utils/ip.sh" "${BATS_TEST_TMPDIR}/.lok8s/utils/ip.sh"
-  cp "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh" "${BATS_TEST_TMPDIR}/.lok8s/utils/oidc.sh"
+  vendor_lo_utils
 
   echo 'kind: Cluster' > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/config.yaml"
   echo '{}' > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/coredns/corefile.yaml"

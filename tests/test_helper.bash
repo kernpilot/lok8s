@@ -71,6 +71,19 @@ teardown_tmpdir() {
   [[ -d "${BATS_TEST_TMPDIR:-}" ]] && rm -rf "${BATS_TEST_TMPDIR}"
 }
 
+# Vendor the framework utils that drivers/lo/main sources unconditionally
+# (ip, oidc, kapply) into the per-test PATH_LOK8S tree, so a sandbox can source
+# the real lo driver. Single source of truth: when the driver gains a new
+# framework-util dependency, add it here — not to every sandbox's setup().
+# Requires setup_tmpdir (BATS_TEST_TMPDIR) + _PROJECT_ROOT.
+vendor_lo_utils() {
+  mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/utils"
+  local util
+  for util in ip oidc kapply; do
+    cp "${_PROJECT_ROOT}/.lok8s/utils/${util}.sh" "${BATS_TEST_TMPDIR}/.lok8s/utils/${util}.sh"
+  done
+}
+
 # Mock a command by creating a bash function that overrides it.
 # Usage: mock_command <name> [exit_code] [stdout_output]
 mock_command() {
