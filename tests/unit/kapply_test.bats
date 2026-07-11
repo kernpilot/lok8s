@@ -228,3 +228,96 @@ metadata: {name: cfg, namespace: default}'
   refute_output --partial 'replace --force'
   refute_output --partial 'patch'
 }
+
+# ── kapply::render_captured (offline block for buffered bootstrap jobs) ───────
+
+@test "render_captured: collapses routine apply lines to a resource count" {
+  run kapply::render_captured cert-manager 0 <<'IN'
+namespace/cert-manager serverside-applied
+deployment.apps/cert-manager serverside-applied
+customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io condition met
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓"*"cert-manager"*"· 3 resources"* ]]
+  # the whole point: the routine per-object lines are collapsed away
+  [[ "$output" != *"serverside-applied"* ]]
+  [[ "$output" != *"condition met"* ]]
+}
+
+@test "render_captured: failure marks ✗ and surfaces deduped error lines" {
+  run kapply::render_captured networking 1 <<'IN'
+secret/kubehz-tls serverside-applied
+no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
+no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✗"*"networking"*"· 1 resource"* ]]
+  [[ "$output" == *'no matches for kind "GatewayClass"'* ]]
+  [[ "$output" == *"×2"* ]]
+}
+
+@test "render_captured: keeps a final line that lacks a trailing newline" {
+  # a killed job's buffer can end mid-write; plain `read` would drop the line
+  run kapply::render_captured broken 1 < <(printf 'secret/x serverside-applied\npartial error, no newline')
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"partial error, no newline"* ]]
+}
+
+@test "render_captured: zero applied resources renders a bare header" {
+  run kapply::render_captured cilium 0 <<'IN'
+[bootstrap] cilium already deployed by the KubeOne driver — skipping
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓"*"cilium"* ]]
+  [[ "$output" != *"resource"* ]]
+  [[ "$output" == *"already deployed"* ]]
+}
+
+@test "render_captured: retry passes count each resource once (no inflation)" {
+  # the CRD-race retry re-applies the whole manifest — the summary must count
+  # distinct resources, not lines-per-pass
+  run kapply::render_captured cnpg 0 <<'IN'
+namespace/cnpg-system serverside-applied
+deployment.apps/cnpg serverside-applied
+namespace/cnpg-system serverside-applied
+deployment.apps/cnpg serverside-applied
+customresourcedefinition.apiextensions.k8s.io/clusters.cnpg.io condition met
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"· 3 resources"* ]]
+}
+
+@test "render_captured: off-tty output is plain (no ANSI, embedded escapes stripped)" {
+  # bats stdout is a pipe, so this exercises the non-tty path directly
+  run kapply::render_captured networking 1 < <(printf 'secret/x serverside-applied\n\033[31mcolored controller error\033[0m\n')
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\033'* ]]                       # zero escape sequences
+  [[ "$output" == *"✗ networking · 1 resource"* ]]   # exact plain header
+  [[ "$output" == *"colored controller error"* ]]    # payload kept, colors gone
+}
+
+@test "render_captured: indented OK-verb line surfaces instead of crashing the shell" {
+  # an empty first token would be seen_resource[""]= — a FATAL bad-subscript
+  # under set -e that killed the scheduler mid-reap (round-2 review find)
+  run kapply::render_captured weird 0 < <(printf 'secret/x serverside-applied\n    patched\n')
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"· 1 resource"* ]]
+  [[ "$output" == *"patched"* ]]
+}
+
+@test "render_captured: prose ending in an OK verb is surfaced, not counted" {
+  run kapply::render_captured warn 0 <<'IN'
+namespace/x serverside-applied
+Warning: resource configmaps/y lacks the last-applied annotation and was configured
+IN
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"· 1 resource"* ]]
+  [[ "$output" == *"Warning: resource configmaps/y"* ]]
+}
+
+@test "render_captured: off-tty strips carriage returns from captured lines" {
+  run kapply::render_captured cr-test 1 < <(printf 'secret/x serverside-applied\nprogress line\rovertyped error\n')
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\r'* ]]
+  [[ "$output" == *"overtyped error"* ]]
+}

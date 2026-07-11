@@ -2035,3 +2035,83 @@ YAML
   [[ "$output" == *"could not decrypt/apply tls-c"* ]]
   [[ "$output" == *"restore.d — 0 applied, 1 skipped"* ]]
 }
+
+# ── Buffered parallel output → de-interleaved collapsed blocks ────────────────
+
+@test "bootstrap::apply flushes each parallel entry as one collapsed block (no raw interleaving)" {
+  export LOK8S_BOOTSTRAP_PARALLEL=8
+  # Stub the per-entry apply to emit kubectl-style lines on stdout — the launch
+  # site buffers them per job; the reap must render collapsed blocks instead.
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf 'configmap/%s-one serverside-applied\n' "${name}"
+    printf 'deployment.apps/%s-two serverside-applied\n' "${name}"
+    sleep 0.1
+    return 0
+  }
+  local n
+  for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b"
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "$status" -eq 0 ]
+  # each entry is one collapsed block…
+  [[ "$output" == *"a "*"· 2 resources"* ]]
+  [[ "$output" == *"b "*"· 2 resources"* ]]
+  # …and the raw per-object lines never reach the terminal
+  [[ "$output" != *"serverside-applied"* ]]
+}
+
+@test "bootstrap::apply: a failed entry's block is ✗-marked with its errors surfaced" {
+  export LOK8S_BOOTSTRAP_PARALLEL=8
+  bootstrap::_apply_one() {
+    local name="$1"
+    printf 'secret/%s serverside-applied\n' "${name}"
+    if [[ "${name}" == "b" ]]; then
+      echo 'Error from server: admission webhook denied'
+      echo 'Error from server: admission webhook denied'
+      return 1
+    fi
+    return 0
+  }
+  local n
+  for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b"
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"✗"*"b"*"· 1 resource"* ]]
+  [[ "$output" == *"admission webhook denied"* ]]
+  [[ "$output" == *"×2"* ]]        # duplicate error lines deduped with a count
+  [[ "$output" == *"✓"*"a"* ]]     # the unrelated entry still applied + rendered
+}
+
+@test "ticker: inert off-tty (never leaves a background pid behind)" {
+  # Under bats stdout is not a terminal, so the animation must not start — the
+  # safety property that keeps CI/piped logs free of spinner frames.
+  _BS_TICKER_PID=""
+  _BS_RUNIDX=(); _BS_DONE=0
+  local n=0 _names=()
+  run bootstrap::_ticker_start
+  [ "$status" -eq 0 ]
+  bootstrap::_ticker_start
+  [ -z "${_BS_TICKER_PID}" ]
+  # stop is a no-op when nothing started
+  bootstrap::_ticker_stop
+}
+
+@test "bootstrap::apply: DEBUG flushes verbatim (de-interleaved, never collapsed)" {
+  # kapply's contract: verbose (lo -v) prints everything, no aggregation — the
+  # buffered-block flush must honor it too.
+  export LOK8S_BOOTSTRAP_PARALLEL=8 DEBUG=1
+  bootstrap::_apply_one() {
+    printf 'configmap/%s-one serverside-applied\n' "$1"
+    return 0
+  }
+  mkdir -p "${PATH_LOK8S}/addons/a"
+  write_cluster_spec "a"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"configmap/a-one serverside-applied"* ]]
+  [[ "$output" != *"· 1 resource"* ]]
+}

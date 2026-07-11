@@ -60,6 +60,75 @@ kapply::_aggregate() {
             else print l } }'
 }
 
+# kapply::render_captured <label> <rc>
+#   Render a CAPTURED apply-output stream (read from stdin) as the OFFLINE
+#   equivalent of the live collapsing block. The bootstrap DAG fans non-gate
+#   entries out as concurrent background jobs, which cannot each own /dev/tty
+#   for the live spinner (they would garble each other) — so they buffer their
+#   output to a file and the serialized foreground reap renders it here, one
+#   de-interleaved block per entry. Routine "…applied/…created/…condition met"
+#   lines collapse to a single "· N resources" count (matching the live UI's
+#   final line); every other line (errors, CRD/webhook-race retries, wait
+#   output) is surfaced and deduped via kapply::_aggregate. <rc> picks ✓/✗.
+#   Styling is tty-only: off-tty (CI, piped logs) the same collapsed block is
+#   emitted PLAIN — no ANSI of our own, and embedded CSI sequences + carriage
+#   returns in the captured lines are stripped (controller/kubectl errors can
+#   carry their own colors/cursor moves; OSC and bare ESC are left alone —
+#   nothing in an apply stream realistically emits those).
+kapply::render_captured() {
+  local label="${1}" rc="${2:-0}"
+  local marker=✓ color=32
+  (( rc == 0 )) || { marker=✗; color=31; }
+  # Capture tty-ness ONCE at entry: inside a pipeline segment below, fd 1 is a
+  # pipe, so a later [[ -t 1 ]] would always be false.
+  local is_tty=0; [[ -t 1 ]] && is_tty=1
+  local c_on='' c_off='' c_dim=''
+  (( is_tty )) && { c_on=$'\033['"${color}m"; c_off=$'\033[0m'; c_dim=$'\033[2m'; }
+  local line key n=0
+  # Count DISTINCT resources (keyed on the first token), not raw OK lines: the
+  # CRD/webhook-race retry re-applies the whole manifest up to 6×, and a raw
+  # line count would inflate "· N resources" by the number of passes.
+  local -A seen_resource=()
+  local -a extra=()
+  # `|| [[ -n ... ]]`: keep a final line that lacks a trailing newline (a killed
+  # job's buffered output can end mid-write) — plain read would drop it.
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${line}" =~ ${_KAPPLY_OK} ]]; then
+      # Count ONLY when the first token has kubectl's type/name resource shape.
+      # This guards two verified traps: an INDENTED line ending in an OK verb
+      # makes the token EMPTY, and seen_resource[""]= is a fatal bad-subscript
+      # under set -e — it would kill the scheduler mid-reap, past any || true
+      # (assignment errors abort non-interactive shells); and prose that merely
+      # ENDS in an OK verb ("Warning: … configured") must surface as a message,
+      # not vanish into the count.
+      key="${line%% *}"
+      if [[ -n "${key}" && "${key}" == */* ]]; then
+        seen_resource["${key}"]=1
+      else
+        extra+=("${line}")
+      fi
+    elif [[ -n "${line}" ]]; then
+      extra+=("${line}")
+    fi
+  done
+  n=${#seen_resource[@]}
+  if (( n > 0 )); then
+    local noun=resources; (( n == 1 )) && noun=resource
+    printf '%s%s%s %s %s· %d %s%s\n' "${c_on}" "${marker}" "${c_off}" "${label}" "${c_dim}" "${n}" "${noun}" "${c_off}"
+  else
+    printf '%s%s%s %s\n' "${c_on}" "${marker}" "${c_off}" "${label}"
+  fi
+  (( ${#extra[@]} )) || return 0
+  printf '%s\n' "${extra[@]}" | kapply::_aggregate | {
+    # off-tty: strip CSI sequences (any terminator — _aggregate's ×N styling,
+    # captured colors, cursor moves) and carriage returns, so CI/piped logs
+    # stay plain text.
+    if (( is_tty )); then cat; else sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' | tr -d '\r'; fi
+  } | while IFS= read -r line; do
+    printf '      %s%s%s\n' "${c_dim}" "${line}" "${c_off}"
+  done
+}
+
 # kapply::run <phase> <command...>
 #   Run an arbitrary command whose output is kubectl-style "<resource> <verb>"
 #   lines (apply + annotate + rollout restart + …) and render it as ONE named,
