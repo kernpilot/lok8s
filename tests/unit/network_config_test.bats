@@ -15,9 +15,10 @@ setup() {
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/coredns"
   mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/utils"
 
-  # Copy ip + oidc utilities so drivers/lo/main can source them
+  # Copy ip + oidc + kapply utilities so drivers/lo/main can source them
   cp "${_PROJECT_ROOT}/.lok8s/utils/ip.sh" "${BATS_TEST_TMPDIR}/.lok8s/utils/ip.sh"
   cp "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh" "${BATS_TEST_TMPDIR}/.lok8s/utils/oidc.sh"
+  cp "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh" "${BATS_TEST_TMPDIR}/.lok8s/utils/kapply.sh"
 
   echo 'kind: Cluster' > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/config.yaml"
   echo '{}' > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/cluster/coredns/corefile.yaml"
