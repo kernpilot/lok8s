@@ -15,7 +15,17 @@ examples/*/clusters/*/.oidc/
 .kubeconfig/
 .tilt.*
 **/clusters/.active
-**/clusters/*/artifacts/
+# The single rendered artifact embeds plaintext Secrets — never committable.
+# The split-mode layout (build::split) IS committable by design: per-resource
+# files with Secrets sops-encrypted, so artifacts/ is only ignored for its
+# legacy per-target subdirs; split files + the generated .gitignore pass.
+# (Consumer repos that predate split mode may carry their own broader ignore —
+# relax it like this when adopting spec.build.artifacts: split.)
+**/clusters/*/artifacts/*/
+**/clusters/*/artifacts/.cache-queue
+**/clusters/*/artifacts/kustomization.yaml
+**/clusters/*/artifacts/capi.yaml
+**/clusters/*/.artifacts-stage.*/
 **/clusters/*/artifacts.yaml
 **/clusters/*/.kubeconfig/
 **/clusters/*/.containerd/

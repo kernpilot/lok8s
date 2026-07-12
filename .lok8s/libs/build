@@ -10,16 +10,71 @@ import ^utils/verbose
 
 main::build() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
-  local cluster_override
+  local cluster_override split single
   local -a args=(
     'domain|:^~domain'   'Domain to use'
     'cluster-override|'  'Override cluster domain for kubeconfig resolution'
+    'split|:+'           'Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)'
+    'single|:+'          'Skip the split emit even when the spec declares it (debug override)'
     "${args[@]:-}"
   )
   :args "Build the domain kustomization into one artifacts.yaml" "${@}"
 
+  if (( ${split:-0} && ${single:-0} )); then
+    error "--split and --single are mutually exclusive"
+    return 1
+  fi
+
+  # The split trigger itself lives in build::artifacts (so EVERY build path —
+  # incl. env::kustomization's direct call in the `lo up` loop — honors the
+  # spec; a flag-only trigger would let dev builds silently stale the
+  # committed GitOps dir). The flags are debug overrides communicated via
+  # LOK8S_BUILD_SPLIT and WARN when they contradict the spec.
+  local mode override=""
+  mode=$(build::_artifacts_mode "${PATH_CLUSTERS}/${domain}")
+  if (( ${single:-0} )); then
+    [[ "${mode}" != "split" ]] || warn "--single overrides spec.build.artifacts=split — the committed artifacts/ dir is now STALE for ${domain}"
+    override=0
+  elif (( ${split:-0} )); then
+    [[ "${mode}" == "split" ]] || warn "--split without spec.build.artifacts=split — one-off output; declare it in the spec so every build (CI, recovery) matches"
+    override=1
+  fi
+
   _resolve_kubeconfig_for_domain
-  build::artifacts "${domain}"
+  LOK8S_BUILD_SPLIT="${override}" build::artifacts "${domain}"
+}
+
+# Resolve the domain's spec file: cluster domains carry cluster.lok8s.yaml,
+# deploy domains deploy.lok8s.yaml. Echoes the path (empty when neither exists).
+build::_spec_file() {
+  local domain_dir="${1}"
+  local spec_file
+  for spec_file in "${domain_dir}/cluster.lok8s.yaml" "${domain_dir}/deploy.lok8s.yaml"; do
+    [[ -f "${spec_file}" ]] || continue
+    echo "${spec_file}"
+    return 0
+  done
+  echo ""
+}
+
+# Resolve the domain's artifacts mode: "split" or "single" (default).
+# Declared via spec.build.artifacts; setting a spec.gitops.provider IMPLIES
+# split (a GitOps consumer without committable per-resource output is
+# meaningless) unless the spec explicitly pins artifacts: single.
+build::_artifacts_mode() {
+  local domain_dir="${1}"
+  local spec_file
+  spec_file=$(build::_spec_file "${domain_dir}")
+  if [[ -n "${spec_file}" ]]; then
+    local declared provider
+    declared=$(yq -r '.spec.build.artifacts // ""' "${spec_file}" 2>/dev/null) || declared=""
+    provider=$(yq -r '.spec.gitops.provider // ""' "${spec_file}" 2>/dev/null) || provider=""
+    if [[ "${declared}" == "split" || ( -n "${provider}" && "${declared}" != "single" ) ]]; then
+      echo "split"
+      return 0
+    fi
+  fi
+  echo "single"
 }
 
 # Resolve the control-plane API endpoint from the domain's kubeconfig and export
@@ -161,6 +216,223 @@ build::artifacts() {
     error "kustomize build failed for ${domain}"
     return 1
   fi
+
+  # Split emit rides EVERY successful build of a split-mode domain (spec-
+  # declared, or forced/skipped via LOK8S_BUILD_SPLIT=1/0 by the debug flags)
+  # — including env::kustomization's direct call in the `lo up` loop, so the
+  # committed GitOps layout can never silently stale behind artifacts.yaml.
+  local split_mode="${LOK8S_BUILD_SPLIT:-}"
+  if [[ -z "${split_mode}" ]]; then
+    [[ "$(build::_artifacts_mode "${domain_dir}")" == "split" ]] && split_mode=1 || split_mode=0
+  fi
+  if (( split_mode )); then
+    build::split "${domain}" || return 1
+  fi
+}
+
+# Split the built artifacts.yaml into per-resource files under
+# clusters/<domain>/artifacts/ — the committable, GitOps-consumable layout
+# (revives the first-draft `--split`, now spec-declared):
+#
+#   <Kind>.<namespace>.<name>.yaml          namespaced resources
+#   <Kind>.<name>.yaml                      cluster-scoped resources
+#   Secret[.<namespace>].<name>.sops.yaml   Secrets — NEVER written plaintext;
+#     sops-encrypted (data/stringData only) to the age recipients declared in
+#     spec.gitops.age. No recipients + a Secret in the render = HARD FAIL.
+#
+# Per-resource files give a per-object git history and are exactly what a
+# reconciler (Flux kustomize-controller with native sops decryption) wants to
+# watch. artifacts.yaml stays the source `lo deploy` applies — the split dir
+# is derived from it AFTER a successful build, never rendered separately.
+#
+# GitOps shaping applied to the split output ONLY (`lo deploy` semantics
+# unchanged):
+#   - Jobs lose ttlSecondsAfterFinished: a TTL-reaped Job is "missing" to a
+#     reconciler and gets recreated every interval → infinite re-run loop.
+#   - Jobs gain kustomize.toolkit.fluxcd.io/force: fixed-name Jobs are
+#     immutable, so a spec change must delete+recreate, not patch.
+#
+# Ownership rule for stale-file cleanup: this function owns every file in
+# artifacts/ whose name starts with an uppercase Kind segment (plus the
+# .gitignore guard). Lowercase files some envs keep directly under artifacts/
+# (kustomization.yaml, capi.yaml, .cache-queue) are never touched.
+#
+# Usage: build::split <domain>
+build::split() {
+  local domain="${1}"
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+  local artifact="${domain_dir}/artifacts.yaml"
+  local out_dir="${domain_dir}/artifacts"
+
+  [[ -s "${artifact}" ]] || { error "no ${artifact} to split — build first"; return 1; }
+
+  # Secrets in the render require declared recipients BEFORE any file is
+  # written (fail closed — a plaintext Secret on disk, even briefly, is the
+  # incident class this whole mode exists to prevent). Recipient format is
+  # validated (bech32 age public keys only — convert SSH keys with ssh-to-age
+  # first) before it is interpolated anywhere.
+  local secret_count recipients=""
+  secret_count=$(yq -N 'select(.kind == "Secret") | .metadata.name' "${artifact}" 2>/dev/null | grep -c . || true)
+  if (( secret_count > 0 )); then
+    local spec_file
+    spec_file=$(build::_spec_file "${domain_dir}")
+    if [[ -n "${spec_file}" ]]; then
+      recipients=$(yq -r '(.spec.gitops.age // []) | join(",")' "${spec_file}" 2>/dev/null) || recipients=""
+    fi
+    if [[ -z "${recipients}" ]]; then
+      error "split: ${secret_count} Secret(s) in the render but no spec.gitops.age recipients — refusing to write plaintext Secrets. Declare the age public keys (reconciler key + break-glass) in the spec."
+      return 1
+    fi
+    local r
+    for r in ${recipients//,/ }; do
+      [[ "${r}" =~ ^age1[a-z0-9]+$ ]] || { error "split: '${r}' is not an age public key (spec.gitops.age)"; return 1; }
+    done
+    command -v sops &>/dev/null || { error "split: sops not found (required to encrypt Secrets) — install it (b install) or skip the split for this run with LOK8S_BUILD_SPLIT=0 / lo build --single"; return 1; }
+  fi
+
+  # Everything is assembled in temp dirs first; ${out_dir} is only touched in
+  # the final swap after every document is emitted, encrypted and verified —
+  # a mid-split failure (sops error, collision) must not leave a pruned or
+  # partial artifacts/ (the single-file build gets the same guarantee from
+  # its tmp+atomic-mv). ${stage} lives next to ${out_dir} so the final moves
+  # stay on one filesystem.
+  local tmp_dir stage
+  tmp_dir=$(mktemp -d)
+  stage=$(mktemp -d -p "${domain_dir}" ".artifacts-stage.XXXXXX")
+  # Expand NOW (locals are out of scope when the trap fires) — intentional.
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp_dir}' '${stage}'" RETURN
+
+  # sops discovers a repo-level .sops.yaml from cwd and then REQUIRES a
+  # matching creation rule even when recipients are passed — give it a
+  # dedicated config (global --config flag; it is not accepted after the
+  # subcommand) whose catch-all rule carries the gitops recipients.
+  local sops_config="${tmp_dir}/sops-gitops.yaml"
+  if (( secret_count > 0 )); then
+    cat > "${sops_config}" <<EOF
+creation_rules:
+  - age: '${recipients}'
+EOF
+  fi
+
+  # NON-Secret documents: one yq pass shapes Jobs + filters Secrets OUT, a
+  # second splits into <Kind>.<namespace>.<name>.yml under the tmp dir. The
+  # .yml extension is appended IN the expression — yq -s only auto-appends
+  # when the name has no dot, and ours always do. stdin needs the explicit
+  # `-`. Filename segments come from kustomize-validated metadata (RFC 1123),
+  # so they are filesystem-safe; the filter drops the namespace segment for
+  # cluster-scoped resources.
+  yq eval '
+      select(.kind != "Secret")
+      | (select(.kind == "Job") | .spec) |= del(.ttlSecondsAfterFinished)
+      | (select(.kind == "Job") | .metadata.annotations."kustomize.toolkit.fluxcd.io/force") = "enabled"
+      | .' "${artifact}" > "${tmp_dir}/nonsecret.stream" \
+    || { error "split: failed to shape ${artifact}"; return 1; }
+  # Guard the empty stream (a Secrets-only render): yq -s on empty stdin
+  # emits one junk '.yml' file for the null document.
+  if [[ -s "${tmp_dir}/nonsecret.stream" ]]; then
+    (
+      cd "${tmp_dir}" || exit 1
+      yq -s '([.kind, .metadata.namespace // "", .metadata.name] | filter(. != "") | join(".")) + ".yml"' - \
+        < "${tmp_dir}/nonsecret.stream"
+    ) || { error "split: failed to split ${artifact}"; return 1; }
+    rm -f "${tmp_dir}/nonsecret.stream"
+  fi
+
+  # Same kind+namespace+name across different API groups would silently
+  # overwrite each other in the filename scheme — refuse instead of losing a
+  # document (rare; revisit with a group segment if it ever bites).
+  local doc_count file_count
+  doc_count=$(yq -N '.kind' "${artifact}" 2>/dev/null | grep -c . || true)
+  file_count=$(find "${tmp_dir}" -maxdepth 1 -name '*.yml' | wc -l)
+  if (( doc_count - secret_count != file_count )); then
+    error "split: $(( doc_count - secret_count )) non-Secret documents rendered but ${file_count} files emitted — kind/namespace/name collision across API groups; not supported"
+    return 1
+  fi
+
+  local f emitted=0
+  for f in "${tmp_dir}"/*.yml; do
+    [[ -e "${f}" ]] || continue
+    local base="${f##*/}"
+    mv "${f}" "${stage}/${base%.yml}.yaml"
+    emitted=$((emitted + 1))
+  done
+
+  # Secret documents: plaintext NEVER touches disk — each is streamed from
+  # the artifact straight into sops via stdin (--filename-override gives sops
+  # its input type hint). Selector inputs are guarded even though kustomize
+  # already validated them (defense against a crafted artifacts.yaml).
+  local secrets=0 pair ns name
+  while IFS=/ read -r ns name; do
+    [[ -n "${name}" ]] || continue
+    if ! [[ "${name}" =~ ^[a-z0-9.-]+$ && ( -z "${ns}" || "${ns}" =~ ^[a-z0-9-]+$ ) ]]; then
+      error "split: refusing Secret with non-RFC1123 metadata: ns='${ns}' name='${name}'"
+      return 1
+    fi
+    local outfile
+    outfile="${stage}/Secret${ns:+.${ns}}.${name}.sops.yaml"
+    yq eval "select(.kind == \"Secret\" and .metadata.name == \"${name}\" and (.metadata.namespace // \"\") == \"${ns}\")" "${artifact}" \
+      | sops --config "${sops_config}" encrypt \
+          --input-type yaml --output-type yaml \
+          --encrypted-regex '^(data|stringData)$' \
+          --filename-override secret.yaml \
+          --output "${outfile}" /dev/stdin \
+      || { error "split: sops encrypt failed for Secret ${ns}/${name}"; return 1; }
+    # Trust nothing: the file must exist AND carry sops metadata — a masked
+    # encrypt failure (exit 0, no/plain output) must not reach the swap.
+    if [[ ! -s "${outfile}" ]] || ! grep -q '^sops:' "${outfile}"; then
+      error "split: ${outfile##*/} missing or not sops-encrypted — aborting"
+      return 1
+    fi
+    secrets=$((secrets + 1))
+    emitted=$((emitted + 1))
+  done < <(yq -N 'select(.kind == "Secret") | ((.metadata.namespace // "") | tostring) + "/" + (.metadata.name | tostring)' "${artifact}")
+
+  # The pairs listing feeds the loop through a process substitution whose
+  # failure is SILENT under bash — without this count post-condition a
+  # mid-list yq crash would emit fewer Secrets than rendered and the swap
+  # below would prune the missing ones from the committed layout (and via a
+  # pruning reconciler, from the CLUSTER). Fail instead.
+  if (( secrets != secret_count )); then
+    error "split: rendered ${secret_count} Secret(s) but emitted ${secrets} — refusing the swap (listing failure?)"
+    return 1
+  fi
+
+  # Post-conditions on the STAGE, before anything replaces the live dir:
+  # no plaintext Secret escaped, no unrendered template residue.
+  if compgen -G "${stage}/Secret.*.yaml" | grep -v '\.sops\.yaml$' >/dev/null 2>&1; then
+    error "split: plaintext Secret file(s) present in the staged output — aborting"
+    return 1
+  fi
+  # The pattern is a LITERAL ${LOK8S_ (unrendered residue), not an expansion.
+  # shellcheck disable=SC2016
+  if grep -rl '\${LOK8S_' "${stage}" --include='*.yaml' >/dev/null 2>&1; then
+    error "split: unrendered \${LOK8S_*} residue in the staged output — check the envsubst whitelist/env"
+    return 1
+  fi
+
+  # Defense net: even a bugged emit must not let a plaintext Secret get
+  # committed from this dir.
+  cat > "${stage}/.gitignore" <<'EOF'
+# GENERATED (build::split). Plaintext Secrets must never be committed —
+# only the sops-encrypted twins pass.
+Secret.*.yaml
+!Secret.*.sops.yaml
+EOF
+
+  # SWAP: prune previously generated files (uppercase-Kind ownership rule —
+  # env-owned lowercase files like kustomization.yaml/capi.yaml survive) so
+  # objects dropped from the render disappear from git (the reconciler's
+  # prune signal), then move the verified stage into place.
+  mkdir -p "${out_dir}"
+  for f in "${out_dir}"/[A-Z]*.yaml; do
+    [[ -e "${f}" ]] && rm -f "${f}"
+  done
+  for f in "${stage}"/.gitignore "${stage}"/*; do
+    [[ -e "${f}" ]] && mv "${f}" "${out_dir}/"
+  done
+
+  debug "split: ${emitted} file(s) → ${out_dir} (${secrets} sops Secret(s))"
 }
 
 # Helper: check if a directory has a kustomization file

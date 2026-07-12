@@ -155,12 +155,12 @@ lo down                   # tear it all down when you're done
 That's the interactive loop. For headless/CI or deploying to a remote cluster, the same definitions drive a build → deploy pipeline:
 
 ```bash
-lo build                  # render every kustomize target → artifacts/<target>/artifacts.yaml
+lo build                  # render the domain kustomization → clusters/<domain>/artifacts.yaml
 lo deploy                 # apply built artifacts (CRDs first, then resources, with health waits)
 lo lint                   # validate specs, bootstrap entries, and target references
 ```
 
-`lo build`'s output is plain Kubernetes YAML — `kubectl apply -f clusters/<domain>/artifacts/<target>/artifacts.yaml` works against any cluster, with or without the rest of lok8s.
+`lo build`'s output is plain Kubernetes YAML — `kubectl apply -f clusters/<domain>/artifacts.yaml` works against any cluster, with or without the rest of lok8s. With `spec.build.artifacts: split` the build additionally emits committable per-resource files under `clusters/<domain>/artifacts/` (Secrets sops-encrypted) for GitOps consumers — see [specs](https://kernpilot.github.io/lok8s/reference/specs.html).
 
 &nbsp;
 
