@@ -23,6 +23,8 @@ examples/*/clusters/*/.oidc/
 # relax it like this when adopting spec.build.artifacts: split.)
 **/clusters/*/artifacts/*/
 **/clusters/*/artifacts/.cache-queue
+**/clusters/*/artifacts/kustomization.yaml
+**/clusters/*/artifacts/capi.yaml
 **/clusters/*/.artifacts-stage.*/
 **/clusters/*/artifacts.yaml
 **/clusters/*/.kubeconfig/

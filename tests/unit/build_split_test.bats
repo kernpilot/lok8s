@@ -243,7 +243,7 @@ STUB
   [ -f "${DOMAIN_DIR}/artifacts/Deployment.app.old.yaml" ]
   [ ! -e "${DOMAIN_DIR}/artifacts/Deployment.app.web.yaml" ]
   # and no staging directory litter is left behind
-  run bash -c "ls -d '${DOMAIN_DIR}'/tmp.* 2>/dev/null | wc -l"
+  run bash -c "ls -d '${DOMAIN_DIR}'/.artifacts-stage.* 2>/dev/null | wc -l"
   [ "$output" = "0" ]
 }
 
@@ -272,6 +272,11 @@ EOF
   run build::split "${DOMAIN}"
   [ "$status" -eq 0 ]
   [ -f "${DOMAIN_DIR}/artifacts/Secret.app.only.sops.yaml" ]
+  # no junk files from the empty non-Secret stream
+  run bash -c "ls '${DOMAIN_DIR}/artifacts/'*.yml 2>/dev/null | wc -l"
+  [ "$output" = "0" ]
+  run bash -c "ls '${DOMAIN_DIR}/artifacts/' | grep -c '^\.yml$\|^yml$'"
+  [ "$output" = "0" ]
 }
 
 @test "split: emitted-Secret count mismatch refuses the swap" {
