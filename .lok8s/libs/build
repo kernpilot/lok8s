@@ -236,7 +236,7 @@ build::artifacts() {
 #
 #   <Kind>.<namespace>.<name>.yaml          namespaced resources
 #   <Kind>.<name>.yaml                      cluster-scoped resources
-#   Secret.<namespace>.<name>.sops.yaml     Secrets — NEVER written plaintext;
+#   Secret[.<namespace>].<name>.sops.yaml   Secrets — NEVER written plaintext;
 #     sops-encrypted (data/stringData only) to the age recipients declared in
 #     spec.gitops.age. No recipients + a Secret in the render = HARD FAIL.
 #
