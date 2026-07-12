@@ -35,6 +35,13 @@ spec:
     hosting: self | hosted                # who runs the control plane
     access: none | registered | managed   # kubehz visibility
     apiUrl: https://api.kubehz.cloud      # required when hosting=hosted or access!=none
+  build:                                  # build output shape (optional)
+    artifacts: single | split             # split = per-resource files under artifacts/
+  gitops:                                 # GitOps consumption (optional; implies artifacts: split)
+    provider: flux                        # reconciler the split output feeds
+    age:                                  # sops age PUBLIC keys for Secret.*.sops.yaml
+      - age1reconcilerkey…                #   the reconciler's runtime decryption key
+      - age1breakglasskey…                #   operator break-glass
 ```
 
 | Field | Required | Default | Description |
@@ -52,6 +59,20 @@ spec:
 | `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it) or `hosted` (kubehz runs it; with `kind: Lo` also requires `spec.runner`) |
 | `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
 | `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting: hosted` or `access != none`; must be HTTPS |
+| `spec.build.artifacts` | no | `single` | `split` additionally emits per-resource files under `clusters/<domain>/artifacts/` — `<Kind>.<namespace>.<name>.yaml`, Secrets as sops-encrypted `Secret.<ns>.<name>.sops.yaml` (committable; per-object git history for GitOps) |
+| `spec.gitops.provider` | no | — | Declares the reconciler consuming the split output (implies `build.artifacts: split` unless explicitly `single`) |
+| `spec.gitops.age` | conditional | — | age public keys the split mode encrypts Secrets to; **required** whenever the render contains a Secret (build fails closed otherwise) |
+
+Split-mode notes: `artifacts.yaml` remains the single source `lo deploy`
+applies — the split dir is derived from it after every successful build. Jobs
+in the split output are GitOps-shaped (`ttlSecondsAfterFinished` stripped — a
+TTL-reaped Job would be recreated by the reconciler every interval — and
+annotated `kustomize.toolkit.fluxcd.io/force` so fixed-name Jobs recreate on
+spec changes). `lo build --split` / `--single` exist as debug overrides and
+warn when they contradict the spec. Chart-minted random secrets must be pinned
+(chart `existingSecret` hooks + the secrets plugin) or every build rotates
+them — verify with a double-build diff before pointing a reconciler at the
+output.
 
 See the [kubehz Platform guide](../guide/kubehz.md) for registration, claiming,
 and the heartbeat agent.

@@ -1,0 +1,192 @@
+#!/usr/bin/env bats
+# build_split_test.bats — the spec-declared split-artifacts mode (#72):
+#   (a) mode resolution: spec.build.artifacts / spec.gitops.provider implies /
+#       explicit single pins,
+#   (b) build::split emits <Kind>.<namespace>.<name>.yaml per resource
+#       (cluster-scoped without the namespace segment),
+#   (c) Secrets are NEVER written plaintext — sops-encrypted with the
+#       spec.gitops.age recipients, and a Secret WITHOUT recipients hard-fails,
+#   (d) Jobs are GitOps-shaped (TTL stripped, force annotation added),
+#   (e) stale generated files are pruned; env-owned lowercase files survive.
+# Real yq drives the shaping/split; sops is stubbed (the encryption contract
+# is asserted via the stub's arguments + output marker).
+
+setup() {
+  load "../test_helper"
+  setup_tmpdir
+  export LOK8S_NONINTERACTIVE=1
+  export PATH_BASE="${BATS_TEST_TMPDIR}"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+
+  import() { :; }
+  export -f import
+
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
+
+  command -v yq &>/dev/null || skip "yq not available"
+
+  DOMAIN="fixture.lok8s.dev"
+  DOMAIN_DIR="${PATH_CLUSTERS}/${DOMAIN}"
+  mkdir -p "${DOMAIN_DIR}"
+
+  # sops stub: records its argv and emits a marker file so the tests can
+  # assert the encryption call shape without real age keys.
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  cat > "${BATS_TEST_TMPDIR}/bin/sops" <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "${SOPS_STUB_LOG}"
+out=""
+prev=""
+for a in "$@"; do
+  [[ "${prev}" == "--output" ]] && out="${a}"
+  prev="${a}"
+done
+printf 'sops: {stubbed: true}\n' > "${out}"
+STUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/sops"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  export SOPS_STUB_LOG="${BATS_TEST_TMPDIR}/sops.log"
+}
+
+write_spec() { # write_spec <yaml-body>
+  cat > "${DOMAIN_DIR}/cluster.lok8s.yaml" <<EOF
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: fixture }
+spec:
+${1}
+EOF
+}
+
+write_artifact() { # a Deployment + cluster-scoped CRB + TTL'd Job + Secret
+  cat > "${DOMAIN_DIR}/artifacts.yaml" <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: app
+spec: { replicas: 1 }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: web-crb
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed
+  namespace: app
+spec:
+  ttlSecondsAfterFinished: 0
+  template: { spec: { restartPolicy: Never, containers: [{ name: x, image: busybox }] } }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: creds
+  namespace: app
+data: { password: aHVudGVyMg== }
+EOF
+}
+
+@test "mode: default is single" {
+  write_spec "  cluster: { domain: ${DOMAIN} }"
+  run build::_artifacts_mode "${DOMAIN_DIR}"
+  [ "$status" -eq 0 ]
+  [ "$output" = "single" ]
+}
+
+@test "mode: spec.build.artifacts=split" {
+  write_spec "  build: { artifacts: split }"
+  run build::_artifacts_mode "${DOMAIN_DIR}"
+  [ "$output" = "split" ]
+}
+
+@test "mode: gitops.provider implies split" {
+  write_spec "  gitops: { provider: flux }"
+  run build::_artifacts_mode "${DOMAIN_DIR}"
+  [ "$output" = "split" ]
+}
+
+@test "mode: explicit single pins even with gitops.provider" {
+  write_spec "$(printf '  build: { artifacts: single }\n  gitops: { provider: flux }')"
+  run build::_artifacts_mode "${DOMAIN_DIR}"
+  [ "$output" = "single" ]
+}
+
+@test "split: per-resource files, cluster-scoped without namespace segment" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  [ -f "${DOMAIN_DIR}/artifacts/Deployment.app.web.yaml" ]
+  [ -f "${DOMAIN_DIR}/artifacts/ClusterRoleBinding.web-crb.yaml" ]
+  [ -f "${DOMAIN_DIR}/artifacts/Job.app.seed.yaml" ]
+}
+
+@test "split: Secret emitted ONLY as sops file, recipients passed via config" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1aaa, age1bbb]')"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  [ -f "${DOMAIN_DIR}/artifacts/Secret.app.creds.sops.yaml" ]
+  [ ! -f "${DOMAIN_DIR}/artifacts/Secret.app.creds.yaml" ]
+  # encryption call shape: encrypted-regex limits to data/stringData, and a
+  # dedicated sops config (not the repo's .sops.yaml) carries the recipients
+  grep -qF -- '--encrypted-regex ^(data|stringData)$' "${SOPS_STUB_LOG}"
+  grep -qF -- '--config' "${SOPS_STUB_LOG}"
+}
+
+@test "split: Secret without spec.gitops.age recipients hard-fails, writes nothing" {
+  write_spec "  build: { artifacts: split }"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to write plaintext Secrets"* ]]
+  [ ! -e "${DOMAIN_DIR}/artifacts/Secret.app.creds.yaml" ]
+  [ ! -e "${DOMAIN_DIR}/artifacts/Secret.app.creds.sops.yaml" ]
+}
+
+@test "split: Jobs are GitOps-shaped (TTL stripped, force annotation)" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  run yq -r '.spec.ttlSecondsAfterFinished // "gone"' "${DOMAIN_DIR}/artifacts/Job.app.seed.yaml"
+  [ "$output" = "gone" ]
+  run yq -r '.metadata.annotations."kustomize.toolkit.fluxcd.io/force"' "${DOMAIN_DIR}/artifacts/Job.app.seed.yaml"
+  [ "$output" = "enabled" ]
+}
+
+@test "split: prunes stale generated files, preserves env-owned lowercase files" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  write_artifact
+  mkdir -p "${DOMAIN_DIR}/artifacts"
+  echo "stale" > "${DOMAIN_DIR}/artifacts/Deployment.app.gone.yaml"
+  echo "env-owned" > "${DOMAIN_DIR}/artifacts/kustomization.yaml"
+  echo "env-owned" > "${DOMAIN_DIR}/artifacts/capi.yaml"
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  [ ! -e "${DOMAIN_DIR}/artifacts/Deployment.app.gone.yaml" ]
+  [ -f "${DOMAIN_DIR}/artifacts/kustomization.yaml" ]
+  [ -f "${DOMAIN_DIR}/artifacts/capi.yaml" ]
+}
+
+@test "split: .gitignore defense net blocks plaintext Secrets" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  grep -q '^Secret\.\*\.yaml$' "${DOMAIN_DIR}/artifacts/.gitignore"
+  grep -q '^!Secret\.\*\.sops\.yaml$' "${DOMAIN_DIR}/artifacts/.gitignore"
+}
+
+@test "split: no artifacts.yaml errors clearly" {
+  write_spec "  build: { artifacts: split }"
+  run build::split "${DOMAIN}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"build first"* ]]
+}
