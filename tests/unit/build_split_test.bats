@@ -190,3 +190,73 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"build first"* ]]
 }
+
+@test "mode: deploy.lok8s.yaml domains resolve too" {
+  rm -f "${DOMAIN_DIR}/cluster.lok8s.yaml"
+  cat > "${DOMAIN_DIR}/deploy.lok8s.yaml" <<'EOF'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Deploy
+spec:
+  gitops: { provider: flux, age: [age1testkey] }
+EOF
+  run build::_artifacts_mode "${DOMAIN_DIR}"
+  [ "$output" = "split" ]
+}
+
+@test "split: non-age recipient is rejected (input validation)" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: ["age1ok; rm -rf /"]')"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not an age public key"* ]]
+}
+
+@test "split: kind/ns/name collision across API groups is refused" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  cat > "${DOMAIN_DIR}/artifacts.yaml" <<'EOF'
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata: { name: db, namespace: x }
+---
+apiVersion: kubermatic.k8c.io/v1
+kind: Cluster
+metadata: { name: db, namespace: x }
+EOF
+  run build::split "${DOMAIN}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"collision"* ]]
+}
+
+@test "split: a mid-split failure leaves the existing artifacts/ UNTOUCHED" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  write_artifact
+  mkdir -p "${DOMAIN_DIR}/artifacts"
+  echo "previous good render" > "${DOMAIN_DIR}/artifacts/Deployment.app.old.yaml"
+  # make the stubbed sops fail → the swap must never happen
+  cat > "${BATS_TEST_TMPDIR}/bin/sops" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/sops"
+  run build::split "${DOMAIN}"
+  [ "$status" -ne 0 ]
+  [ -f "${DOMAIN_DIR}/artifacts/Deployment.app.old.yaml" ]
+  [ ! -e "${DOMAIN_DIR}/artifacts/Deployment.app.web.yaml" ]
+  # and no staging directory litter is left behind
+  run bash -c "ls -d '${DOMAIN_DIR}'/tmp.* 2>/dev/null | wc -l"
+  [ "$output" = "0" ]
+}
+
+@test "split: REAL sops end-to-end (encrypts, no plaintext)" {
+  # bypass the stub — use the toolchain sops with a syntactically valid age
+  # recipient (encryption needs only the public key)
+  export PATH="${PATH#${BATS_TEST_TMPDIR}/bin:}"
+  command -v sops &>/dev/null || skip "sops not available"
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p]')"
+  write_artifact
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  grep -q '^sops:' "${DOMAIN_DIR}/artifacts/Secret.app.creds.sops.yaml"
+  grep -q 'ENC\[' "${DOMAIN_DIR}/artifacts/Secret.app.creds.sops.yaml"
+  ! grep -q 'aHVudGVyMg==' "${DOMAIN_DIR}/artifacts/Secret.app.creds.sops.yaml"
+}

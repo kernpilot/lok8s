@@ -9,7 +9,12 @@ kustomization into ONE artifact, then **deploy** that artifact to a cluster.
 > `clusters/<domain>/artifacts/<target>/artifacts.yaml`. Instead **you** compose
 > the domain's targets in `clusters/<domain>/kustomization.yaml`, and the
 > framework renders that into a single `clusters/<domain>/artifacts.yaml`. There
-> is no per-target `lo build <target>` and no `--split`.
+> is no per-target `lo build <target>`. Domains with `spec.build.artifacts:
+> split` (or a `spec.gitops.provider`) additionally emit committable
+> per-resource files under `clusters/<domain>/artifacts/` — Secrets
+> sops-encrypted — for GitOps consumers (see the
+> [spec reference](../reference/specs.md)); `lo deploy` always applies the
+> single `artifacts.yaml`.
 
 The active domain is selected with `lo use <domain>` (or per-command with
 `--domain <domain>`); the examples below assume it is set.
