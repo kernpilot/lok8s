@@ -269,7 +269,8 @@ build::split() {
   # Secrets in the render require declared recipients BEFORE any file is
   # written (fail closed — a plaintext Secret on disk, even briefly, is the
   # incident class this whole mode exists to prevent). Recipient format is
-  # validated (age/ssh public keys only) before it is interpolated anywhere.
+  # validated (bech32 age public keys only — convert SSH keys with ssh-to-age
+  # first) before it is interpolated anywhere.
   local secret_count recipients=""
   secret_count=$(yq -N 'select(.kind == "Secret") | .metadata.name' "${artifact}" 2>/dev/null | grep -c . || true)
   if (( secret_count > 0 )); then
@@ -286,7 +287,7 @@ build::split() {
     for r in ${recipients//,/ }; do
       [[ "${r}" =~ ^age1[a-z0-9]+$ ]] || { error "split: '${r}' is not an age public key (spec.gitops.age)"; return 1; }
     done
-    command -v sops &>/dev/null || { error "split: sops not found (required to encrypt Secrets)"; return 1; }
+    command -v sops &>/dev/null || { error "split: sops not found (required to encrypt Secrets) — install it (b install) or skip the split for this run with LOK8S_BUILD_SPLIT=0 / lo build --single"; return 1; }
   fi
 
   # Everything is assembled in temp dirs first; ${out_dir} is only touched in
@@ -297,7 +298,7 @@ build::split() {
   # stay on one filesystem.
   local tmp_dir stage
   tmp_dir=$(mktemp -d)
-  stage=$(mktemp -d -p "${domain_dir}")
+  stage=$(mktemp -d -p "${domain_dir}" ".artifacts-stage.XXXXXX")
   # Expand NOW (locals are out of scope when the trap fires) — intentional.
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp_dir}' '${stage}'" RETURN
@@ -321,15 +322,22 @@ EOF
   # `-`. Filename segments come from kustomize-validated metadata (RFC 1123),
   # so they are filesystem-safe; the filter drops the namespace segment for
   # cluster-scoped resources.
-  (
-    cd "${tmp_dir}" || exit 1
-    yq eval '
+  yq eval '
       select(.kind != "Secret")
       | (select(.kind == "Job") | .spec) |= del(.ttlSecondsAfterFinished)
       | (select(.kind == "Job") | .metadata.annotations."kustomize.toolkit.fluxcd.io/force") = "enabled"
-      | .' "${artifact}" \
-    | yq -s '([.kind, .metadata.namespace // "", .metadata.name] | filter(. != "") | join(".")) + ".yml"' -
-  ) || { error "split: failed to shape/split ${artifact}"; return 1; }
+      | .' "${artifact}" > "${tmp_dir}/nonsecret.stream" \
+    || { error "split: failed to shape ${artifact}"; return 1; }
+  # Guard the empty stream (a Secrets-only render): yq -s on empty stdin
+  # emits one junk '.yml' file for the null document.
+  if [[ -s "${tmp_dir}/nonsecret.stream" ]]; then
+    (
+      cd "${tmp_dir}" || exit 1
+      yq -s '([.kind, .metadata.namespace // "", .metadata.name] | filter(. != "") | join(".")) + ".yml"' - \
+        < "${tmp_dir}/nonsecret.stream"
+    ) || { error "split: failed to split ${artifact}"; return 1; }
+    rm -f "${tmp_dir}/nonsecret.stream"
+  fi
 
   # Same kind+namespace+name across different API groups would silently
   # overwrite each other in the filename scheme — refuse instead of losing a
@@ -370,9 +378,25 @@ EOF
           --filename-override secret.yaml \
           --output "${outfile}" /dev/stdin \
       || { error "split: sops encrypt failed for Secret ${ns}/${name}"; return 1; }
+    # Trust nothing: the file must exist AND carry sops metadata — a masked
+    # encrypt failure (exit 0, no/plain output) must not reach the swap.
+    if [[ ! -s "${outfile}" ]] || ! grep -q '^sops:' "${outfile}"; then
+      error "split: ${outfile##*/} missing or not sops-encrypted — aborting"
+      return 1
+    fi
     secrets=$((secrets + 1))
     emitted=$((emitted + 1))
-  done < <(yq -N 'select(.kind == "Secret") | (.metadata.namespace // "") + "/" + .metadata.name' "${artifact}")
+  done < <(yq -N 'select(.kind == "Secret") | ((.metadata.namespace // "") | tostring) + "/" + (.metadata.name | tostring)' "${artifact}")
+
+  # The pairs listing feeds the loop through a process substitution whose
+  # failure is SILENT under bash — without this count post-condition a
+  # mid-list yq crash would emit fewer Secrets than rendered and the swap
+  # below would prune the missing ones from the committed layout (and via a
+  # pruning reconciler, from the CLUSTER). Fail instead.
+  if (( secrets != secret_count )); then
+    error "split: rendered ${secret_count} Secret(s) but emitted ${secrets} — refusing the swap (listing failure?)"
+    return 1
+  fi
 
   # Post-conditions on the STAGE, before anything replaces the live dir:
   # no plaintext Secret escaped, no unrendered template residue.
@@ -401,7 +425,7 @@ EOF
   # objects dropped from the render disappear from git (the reconciler's
   # prune signal), then move the verified stage into place.
   mkdir -p "${out_dir}"
-  for f in "${out_dir}"/[A-Z]*.yaml "${out_dir}"/[A-Z]*.sops.yaml; do
+  for f in "${out_dir}"/[A-Z]*.yaml; do
     [[ -e "${f}" ]] && rm -f "${f}"
   done
   for f in "${stage}"/.gitignore "${stage}"/*; do

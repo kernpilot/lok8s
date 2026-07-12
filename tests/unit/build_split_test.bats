@@ -247,6 +247,55 @@ STUB
   [ "$output" = "0" ]
 }
 
+@test "split: non-RFC1123 Secret metadata is refused (selector guard)" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  cat > "${DOMAIN_DIR}/artifacts.yaml" <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata: { name: "Bad_Name", namespace: app }
+data: { k: dGVzdA== }
+EOF
+  run build::split "${DOMAIN}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"non-RFC1123"* ]]
+  [ ! -e "${DOMAIN_DIR}/artifacts/Secret.app.Bad_Name.sops.yaml" ]
+}
+
+@test "split: Secrets-only render works (empty non-Secret split)" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  cat > "${DOMAIN_DIR}/artifacts.yaml" <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata: { name: only, namespace: app }
+data: { k: dGVzdA== }
+EOF
+  run build::split "${DOMAIN}"
+  [ "$status" -eq 0 ]
+  [ -f "${DOMAIN_DIR}/artifacts/Secret.app.only.sops.yaml" ]
+}
+
+@test "split: emitted-Secret count mismatch refuses the swap" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  write_artifact
+  mkdir -p "${DOMAIN_DIR}/artifacts"
+  echo "live" > "${DOMAIN_DIR}/artifacts/Secret.app.keepme.sops.yaml"
+  # sops stub that eats the call without producing output → secrets stays 0…
+  # actually produce output but make the LISTING see more: simulate by a stub
+  # that succeeds while we corrupt the pairs source is impractical here, so
+  # instead assert the guard via a stub that silently produces NO file AND
+  # exits 0 (a masked encrypt failure = same class: emitted < rendered).
+  cat > "${BATS_TEST_TMPDIR}/bin/sops" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/sops"
+  run build::split "${DOMAIN}"
+  # either the post-condition (sops-metadata check on stage) or the count
+  # guard must stop the swap — the pre-existing file survives regardless
+  [ "$status" -ne 0 ]
+  [ -f "${DOMAIN_DIR}/artifacts/Secret.app.keepme.sops.yaml" ]
+}
+
 @test "split: REAL sops end-to-end (encrypts, no plaintext)" {
   # bypass the stub — use the toolchain sops with a syntactically valid age
   # recipient (encryption needs only the public key)
