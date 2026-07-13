@@ -139,6 +139,40 @@ func TestRun_OutputNone_UnknownValue_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestRun_OutputNone_WhitespaceValue_FailsClosed proves a PRESENT but
+// whitespace-only value (trims to "") is rejected, not silently normal-emitted
+// — an explicitly-empty "" is still normal (see TestRun_Normal_EmitsSecret with
+// OutputEnv:"").
+func TestRun_OutputNone_WhitespaceValue_FailsClosed(t *testing.T) {
+	_, err := runEntry(t, []byte(passwdSpec), map[string]string{
+		OutputEnv:      "  ",
+		PathSecretsEnv: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("whitespace-only LOK8S_SECRETS_OUTPUT must fail closed")
+	}
+	if !strings.Contains(err.Error(), OutputEnv) {
+		t.Errorf("error should name %s: %v", OutputEnv, err)
+	}
+}
+
+// TestRun_OutputEmpty_NormalEmit proves an explicitly-EMPTY value is treated as
+// unset (normal emit) — the one present value that does not fail closed.
+func TestRun_OutputEmpty_NormalEmit(t *testing.T) {
+	out, err := runEntry(t, []byte(`apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: { name: t, namespace: default }
+type: Opaque
+literals: { K: v }
+`), map[string]string{OutputEnv: ""})
+	if err != nil {
+		t.Fatalf("empty OUTPUT should emit normally: %v", err)
+	}
+	if len(out) == 0 {
+		t.Error("empty OUTPUT must NOT suppress the emit")
+	}
+}
+
 // TestRun_Normal_EmitsSecret is the regression: neither knob set → the
 // plugin renders the Secret as before.
 func TestRun_Normal_EmitsSecret(t *testing.T) {

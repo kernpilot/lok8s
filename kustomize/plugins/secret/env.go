@@ -54,16 +54,16 @@ func disabled(env func(string) (string, bool)) bool {
 }
 
 // suppressOutput reports whether the emit write must be suppressed
-// (LOK8S_SECRETS_OUTPUT=none). It returns an error for any unrecognized
-// non-empty value (fail closed). An unset or empty value means normal emit.
+// (LOK8S_SECRETS_OUTPUT=none). It fails closed: any value that is PRESENT and
+// non-empty but not "none" is rejected — including a whitespace-only value
+// (which trims to ""), so a typo can never silently fall through to a normal
+// emit. Only truly unset OR an explicitly-empty value ("") means normal emit.
 func suppressOutput(env func(string) (string, bool)) (bool, error) {
 	v, ok := env(OutputEnv)
-	if !ok {
+	if !ok || v == "" {
 		return false, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "":
-		return false, nil
 	case OutputNone:
 		return true, nil
 	default:
