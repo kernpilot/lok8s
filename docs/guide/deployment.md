@@ -65,6 +65,65 @@ domain example.com has no kustomization.yaml — compose its targets there,
 e.g. resources: [./targets/foo, ../../.targets/bar]
 ```
 
+### Split output (GitOps) {#split-output}
+
+A domain with `spec.build.artifacts: split` (or a `spec.gitops.provider`) also
+emits committable **per-resource** files under `clusters/<domain>/artifacts/` —
+`<Kind>.<namespace>.<name>.yaml`, and Secrets as sops-encrypted
+`Secret.<ns>.<name>.sops.yaml` (data/stringData encrypted to the
+`spec.gitops.age` recipients). This is the layout a reconciler (Flux
+kustomize-controller with native sops decryption) watches; `lo deploy` still
+applies the single `artifacts.yaml`. See the
+[spec reference](../reference/specs.md) for the full field list.
+
+**Encryption is decoupled from the split** via `spec.build.encrypt`:
+
+```yaml
+spec:
+  build:
+    artifacts: split
+    encrypt:
+      type: sops        # default (only supported value); anything else = hard error
+      on: change        # default; or "always"
+```
+
+- `encrypt.on: change` (default) **skips re-encrypting unchanged Secrets.** sops
+  mints a fresh data key on every encrypt, so re-encrypting an identical Secret
+  churns the whole ciphertext each build. In `change` mode split decrypts the
+  committed twin (with the ambient age key `lo build` already uses to read the
+  store) and, if it **canonically** matches the fresh render (key order /
+  formatting don't count), keeps the existing file byte-for-byte. If the prior
+  can't be decrypted — no key, corrupt, missing — it re-encrypts (fail safe: it
+  can't prove "unchanged"). A Secret that vanished from the render is still
+  pruned (present-in-render decides pruning, not whether it was re-encrypted).
+- `encrypt.on: always` re-encrypts every Secret every build (the original
+  behavior; no compare).
+
+> Chart-minted random secrets still need pinning (chart `existingSecret` hooks +
+> the secrets plugin). `on: change` only suppresses churn when the **rendered**
+> value is stable — a value that changes every render is a real change and gets
+> re-encrypted. Verify with a double-build diff before pointing a reconciler at
+> the output.
+
+### CI render without secrets (`--no-secrets`)
+
+`lo build --no-secrets` splits **only** non-Secret resources. It never renders,
+re-encrypts, prunes, or even reads a committed `Secret.*.sops.yaml`, and it does
+**not** invoke the secret generators — so it needs no secrets store and no age
+key. This is the CI render path: regenerate the non-secret artifacts (e.g. after
+an image-automation pin bump) on a runner that has neither the store nor the key,
+without touching — or accidentally deleting — the committed encrypted Secrets.
+
+```bash
+lo build --no-secrets --domain example.com   # CI: non-secret artifacts only
+```
+
+The swap's prune is guarded to leave `Secret.*.sops.yaml` alone (without the
+guard, a `--no-secrets` build's empty secret stage would sweep every committed
+Secret, and a pruning reconciler would then delete them from the cluster). A
+non-Secret resource dropped from the render is still pruned as usual.
+`--no-secrets` cannot be combined with `--single` (it shapes the split emit).
+
 ## Deploy
 
 ```bash

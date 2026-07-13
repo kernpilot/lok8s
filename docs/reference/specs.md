@@ -37,6 +37,9 @@ spec:
     apiUrl: https://api.kubehz.cloud      # required when hosting=hosted or access!=none
   build:                                  # build output shape (optional)
     artifacts: single | split             # split = per-resource files under artifacts/
+    encrypt:                              # Secret-encryption policy for split mode
+      type: sops                          # default (only value); anything else = hard error
+      on: change | always                 # change (default) skips re-encrypting unchanged Secrets
   gitops:                                 # GitOps consumption (optional; implies artifacts: split)
     provider: flux                        # reconciler the split output feeds
     age:                                  # sops age PUBLIC keys for Secret.*.sops.yaml
@@ -60,6 +63,8 @@ spec:
 | `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
 | `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting: hosted` or `access != none`; must be HTTPS |
 | `spec.build.artifacts` | no | `single` | `split` additionally emits per-resource files under `clusters/<domain>/artifacts/` — `<Kind>.<namespace>.<name>.yaml`, Secrets as sops-encrypted `Secret.<ns>.<name>.sops.yaml` (committable; per-object git history for GitOps) |
+| `spec.build.encrypt.type` | no | `sops` | How split-mode Secrets are encrypted. `sops` is the only supported value today; anything else is a hard build error (decoupled from the split trigger — `artifacts: split` shapes every resource, `encrypt` governs only the Secret twins) |
+| `spec.build.encrypt.on` | no | `change` | When a Secret's committed `Secret.*.sops.yaml` is re-encrypted. `change` (default) keeps the existing ciphertext byte-for-byte when the prior decrypts to the same (canonical) plaintext — killing the per-build churn from sops's fresh-per-encrypt data key. `always` re-encrypts every Secret every build (the original behavior). See the [build guide](../guide/deployment.md#split-output). |
 | `spec.gitops.provider` | no | — | Declares the reconciler consuming the split output (implies `build.artifacts: split` unless explicitly `single`) |
 | `spec.gitops.age` | conditional | — | age public keys the split mode encrypts Secrets to; **required** whenever the render contains a Secret (build fails closed otherwise) |
 
@@ -69,10 +74,29 @@ in the split output are GitOps-shaped (`ttlSecondsAfterFinished` stripped — a
 TTL-reaped Job would be recreated by the reconciler every interval — and
 annotated `kustomize.toolkit.fluxcd.io/force` so fixed-name Jobs recreate on
 spec changes). `lo build --split` / `--single` exist as debug overrides and
-warn when they contradict the spec. Chart-minted random secrets must be pinned
-(chart `existingSecret` hooks + the secrets plugin) or every build rotates
-them — verify with a double-build diff before pointing a reconciler at the
-output.
+warn when they contradict the spec.
+
+**Secret churn — `encrypt.on: change` (default).** sops mints a fresh data key
+on every `encrypt`, so re-encrypting an *unchanged* Secret rewrites its whole
+ciphertext and dirties the git diff each build. With `on: change`, split
+compares each Secret against its committed twin: if the prior **decrypts here**
+(using the ambient sops age key `lo build` already has — the owner key is a
+recipient) and its decrypted content **canonically equals** the fresh render, the
+existing file is kept verbatim (no re-encrypt). If the prior can't be decrypted
+(no key / corrupt / missing) it re-encrypts — it can never *prove* "unchanged",
+so it fails safe. `on: always` disables the compare. Chart-minted random secrets
+must still be pinned (chart `existingSecret` hooks + the secrets plugin) or the
+*rendered* value changes every build (a real change → a re-encrypt) — verify with
+a double-build diff before pointing a reconciler at the output.
+
+**CI render — `lo build --no-secrets`.** For the CI path that has **no secrets
+store and no age key** but must still regenerate non-Secret artifacts (e.g. after
+an image-automation pin bump), `lo build --no-secrets` splits **only** non-Secret
+resources. It never renders, re-encrypts, prunes, or even *reads* a committed
+`Secret.*.sops.yaml` — those are left completely inert — and the secret
+generators are never invoked (so the cache-first passwd/bash generators can't mint
+fresh values on a store miss). The swap's prune is guarded to exclude
+`Secret.*.sops.yaml`; a non-Secret dropped from the render is still pruned.
 
 See the [kubehz Platform guide](../guide/kubehz.md) for registration, claiming,
 and the heartbeat agent.
