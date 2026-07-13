@@ -77,7 +77,7 @@ if [[ "${op}" == "decrypt" ]]; then
   [[ -f "${local_in}" ]] || exit 1
   b64=$(sed -n 's/^[[:space:]]*stub_enc:[[:space:]]*//p' "${local_in}")
   [[ -n "${b64}" ]] || exit 1                 # not a stub-encrypted prior → fail
-  printf '%s' "${b64}" | base64 -d || exit 1
+  printf '%s' "${b64}" | base64 --decode || exit 1
   exit 0
 fi
 
@@ -86,7 +86,7 @@ echo "$@" >> "${SOPS_ENCRYPT_LOG:-/dev/null}"
 plaintext=$(cat)                              # from /dev/stdin
 {
   printf 'sops:\n'
-  printf '    stub_enc: %s\n' "$(printf '%s' "${plaintext}" | base64 -w0)"
+  printf '    stub_enc: %s\n' "$(printf '%s' "${plaintext}" | base64 | tr -d '\n')"
 } > "${out}"
 STUB
   chmod +x "${BATS_TEST_TMPDIR}/bin/sops"
@@ -366,4 +366,37 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "${DOMAIN_DIR}/artifacts/kustomization.yaml" ]
   [ -f "${DOMAIN_DIR}/artifacts/Secret.app.creds.sops.yaml" ]
+}
+
+# ── build::_no_secrets — the flag/env precedence (the round-1 bug's home) ─────
+# main::build is argsh-:args-gated and not unit-tested directly, so the effective
+# --no-secrets resolution is factored into build::_no_secrets and pinned here.
+# The round-1 fix was BROKEN precisely because NO test drove this path: the
+# vendored argsh reports an absent `:+` flag as a literal "0", so a `${flag:-…}`
+# fallback never fired and a pre-set env was clobbered (Case B).
+
+@test "_no_secrets: flag ON wins → 1 (env 0 or 1)" {
+  LOK8S_BUILD_NO_SECRETS=0 run build::_no_secrets 1; [ "$output" = 1 ]
+  LOK8S_BUILD_NO_SECRETS=1 run build::_no_secrets 1; [ "$output" = 1 ]
+}
+
+@test "_no_secrets: flag OFF inherits a pre-set env=1 (Case B — the clobber bug)" {
+  LOK8S_BUILD_NO_SECRETS=1 run build::_no_secrets 0
+  [ "$output" = 1 ]
+}
+
+@test "_no_secrets: flag OFF + no env → 0" {
+  unset LOK8S_BUILD_NO_SECRETS
+  run build::_no_secrets 0
+  [ "$output" = 0 ]
+}
+
+@test "_no_secrets: robust whether argsh yields \"\" or \"0\" for an absent flag" {
+  # env set → inherit regardless of the flag's empty/0 form
+  LOK8S_BUILD_NO_SECRETS=1 run build::_no_secrets "";  [ "$output" = 1 ]
+  LOK8S_BUILD_NO_SECRETS=1 run build::_no_secrets 0;   [ "$output" = 1 ]
+  # no env → 0 regardless of the flag's empty/0 form
+  unset LOK8S_BUILD_NO_SECRETS
+  run build::_no_secrets "";  [ "$output" = 0 ]
+  run build::_no_secrets 0;   [ "$output" = 0 ]
 }

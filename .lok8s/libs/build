@@ -51,12 +51,26 @@ main::build() {
   _resolve_kubeconfig_for_domain
   # --no-secrets rides through to build::split via the env, independent of the
   # split trigger (spec- or flag-driven) — it only shapes WHAT a split emits.
-  # The flag WINS when passed; otherwise inherit a pre-set LOK8S_BUILD_NO_SECRETS
-  # (the documented env trigger — `LOK8S_BUILD_NO_SECRETS=1 lo build`) rather than
-  # clobber it to 0.
   LOK8S_BUILD_SPLIT="${override}" \
-    LOK8S_BUILD_NO_SECRETS="${no_secrets:-${LOK8S_BUILD_NO_SECRETS:-0}}" \
+    LOK8S_BUILD_NO_SECRETS="$(build::_no_secrets "${no_secrets:-0}")" \
     build::artifacts "${domain}"
+}
+
+# Resolve the effective --no-secrets bit (echoes 0|1). The FLAG wins when on;
+# otherwise a pre-set LOK8S_BUILD_NO_SECRETS env (the documented equivalent
+# trigger, `LOK8S_BUILD_NO_SECRETS=1 lo build`) is honored rather than clobbered.
+# Robust to how argsh reports an ABSENT `:+` boolean — the vendored runtime sets
+# it to a literal "0" (not empty), so a `${flag:-…}` fallback would never fire;
+# we compare against "1" explicitly, which is correct whether argsh yields "",
+# "0", or "1". Presence-only: there is no `--no-secrets=0` off-form (argsh strips
+# `=…` and forces the value to 1), so "flag wins" means "flag ON wins".
+build::_no_secrets() {
+  local flag="${1:-0}"
+  if [[ "${flag}" == 1 || "${LOK8S_BUILD_NO_SECRETS:-0}" == 1 ]]; then
+    echo 1
+  else
+    echo 0
+  fi
 }
 
 # Resolve the domain's spec file: cluster domains carry cluster.lok8s.yaml,
