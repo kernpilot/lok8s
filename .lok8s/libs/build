@@ -326,8 +326,19 @@ build::artifacts() {
   # mv below is an atomic rename (a cross-fs mv is copy+unlink — non-atomic, and an
   # interrupted one can leave a partial artifacts.yaml).
   tmp=$(mktemp -p "${domain_dir}")
+  # --no-secrets store-free wiring: in no-secrets mode the render itself must
+  # not touch the secrets store. The split-side guards (build::split) leave the
+  # committed Secret.*.sops.yaml inert, but the split runs AFTER this kustomize
+  # build — the render above still invokes the secrets.lok8s.dev exec generator,
+  # which would read/mint $PATH_SECRETS. LOK8S_SECRETS_DISABLE=1 makes that
+  # generator emit nothing and never read the store, so the whole render needs
+  # no store or key (this — not the split shaping alone — is what makes
+  # --no-secrets truly store-free). Explicit 0 otherwise (unambiguous off).
+  local secrets_disable=0
+  (( ${LOK8S_BUILD_NO_SECRETS:-0} )) && secrets_disable=1
   if KUBECONFIG="${kubeconfig}" \
      KHELM_TRUST_ANY_REPO=true \
+     LOK8S_SECRETS_DISABLE="${secrets_disable}" \
        kustomize build --enable-alpha-plugins "${domain_dir}" \
        | envsubst "${envsubst_whitelist}" \
        > "${tmp}"; then

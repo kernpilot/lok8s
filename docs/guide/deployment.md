@@ -118,6 +118,14 @@ without touching — or accidentally deleting — the committed encrypted Secret
 lo build --no-secrets --domain example.com   # CI: non-secret artifacts only
 ```
 
+**Store-free render.** `--no-secrets` exports `LOK8S_SECRETS_DISABLE=1` to the
+underlying `kustomize build`, which makes the `secrets.lok8s.dev` exec generator
+emit nothing and never read `$PATH_SECRETS`. This — not the split shaping alone
+— is what makes the render truly store-free: without it the `kustomize build`
+step would still invoke the generator and mint/read the store, even though the
+split later leaves the committed encrypted Secrets inert. See
+[`LOK8S_SECRETS_DISABLE`](../reference/kustomize-plugins.md#env-contract).
+
 The swap's prune is guarded to leave `Secret.*.sops.yaml` alone (without the
 guard, a `--no-secrets` build's empty secret stage would sweep every committed
 Secret, and a pruning reconciler would then delete them from the cluster). A

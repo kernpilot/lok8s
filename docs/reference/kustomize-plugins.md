@@ -240,6 +240,32 @@ To rotate a value, delete its file from `$PATH_SECRETS` and re-run
 `kustomize build`. For htpasswd, deleting just `<key>.bcrypt` regenerates
 the hash with a new salt while preserving the username/password.
 
+### Env contract
+
+Beyond `$PATH_SECRETS` (the cache directory), two env vars shape a run. A
+caller — chiefly the `lo build` pipeline — sets them on the `kustomize build`
+invocation to steer the generator without editing any Secret CRD.
+
+| Env var | Value | Effect |
+|---|---|---|
+| `LOK8S_SECRETS_DISABLE` | `1` / `true` (case-insensitive) | **Store-free OFF switch.** The plugin emits **nothing** and short-circuits before any store access: it never reads `$PATH_SECRETS`, never touches or mints the cache, and never runs a generator. Returns success with empty output — kustomize accepts a generator that yields zero resources. Any other value (incl. unset, `0`) is off. |
+| `LOK8S_SECRETS_OUTPUT` | `none` | **Run-but-suppress.** Runs the **full** pipeline — generators run, so store reads/mints and type validation still happen (side effects intact) — but suppresses the final output write, so zero resources are rendered. Use case: prime or validate the cache without rendering. An empty/unset value is a normal emit; any other non-empty value is **rejected** (fail closed) so a typo can't silently emit secrets. |
+
+**Precedence:** `LOK8S_SECRETS_DISABLE` wins over `LOK8S_SECRETS_OUTPUT` — disable
+means "do nothing at all", so the store is never consulted even if
+`LOK8S_SECRETS_OUTPUT=none` is also set.
+
+`LOK8S_SECRETS_DISABLE=1` is what [`lo build --no-secrets`](../guide/deployment.md#ci-render-without-secrets-no-secrets)
+exports to make a CI render **store-free**: the split shaping alone leaves the
+committed encrypted Secrets inert, but without `DISABLE` the `kustomize build`
+render would still invoke this generator and hit the store.
+
+> **Known limitation.** `LOK8S_SECRETS_DISABLE` emits *nothing*, which is safe
+> when no consumer references the Secret by name (kustomize transformers only
+> touch resources present in the render). A consumer that strategic-merge-patches
+> a *specific* Secret by name would need a placeholder-emitting variant instead —
+> not built today.
+
 ### Cross-secret references
 
 The cache filename convention is `Secret.<name>.<namespace>.<key>`. A
