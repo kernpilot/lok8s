@@ -51,8 +51,11 @@ main::build() {
   _resolve_kubeconfig_for_domain
   # --no-secrets rides through to build::split via the env, independent of the
   # split trigger (spec- or flag-driven) — it only shapes WHAT a split emits.
+  # The flag WINS when passed; otherwise inherit a pre-set LOK8S_BUILD_NO_SECRETS
+  # (the documented env trigger — `LOK8S_BUILD_NO_SECRETS=1 lo build`) rather than
+  # clobber it to 0.
   LOK8S_BUILD_SPLIT="${override}" \
-    LOK8S_BUILD_NO_SECRETS="${no_secrets:-0}" \
+    LOK8S_BUILD_NO_SECRETS="${no_secrets:-${LOK8S_BUILD_NO_SECRETS:-0}}" \
     build::artifacts "${domain}"
 }
 
@@ -526,7 +529,7 @@ EOF
   # already validated them (defense against a crafted artifacts.yaml).
   # (In --no-secrets mode secret_count is 0, so this loop is skipped entirely and
   # no Secret is read, decrypted, or written.)
-  local secrets=0 pair ns name
+  local secrets=0 ns name
   while IFS=/ read -r ns name; do
     [[ -n "${name}" ]] || continue
     if ! [[ "${name}" =~ ^[a-z0-9.-]+$ && ( -z "${ns}" || "${ns}" =~ ^[a-z0-9-]+$ ) ]]; then
