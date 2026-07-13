@@ -7,7 +7,7 @@ import (
 )
 
 // Run is the secret plugin's entrypoint, wrapping the generic
-// plugin.Run runner with the two store-shaping env knobs
+// plugin.RunEnv runner with the two store-shaping env knobs
 // (LOK8S_SECRETS_DISABLE / LOK8S_SECRETS_OUTPUT). cmd/secret/main.go
 // calls this instead of plugin.Run directly so the knobs are honored on
 // every kustomize invocation.

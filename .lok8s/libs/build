@@ -334,6 +334,9 @@ build::artifacts() {
   # generator emit nothing and never read the store, so the whole render needs
   # no store or key (this — not the split shaping alone — is what makes
   # --no-secrets truly store-free). Explicit 0 otherwise (unambiguous off).
+  # NB: this bash gate is numeric-truthy (LOK8S_BUILD_NO_SECRETS=1); the Go
+  # plugin's LOK8S_SECRETS_DISABLE also accepts "true". `lo build --no-secrets`
+  # always passes 1, so the two layers agree in practice.
   local secrets_disable=0
   (( ${LOK8S_BUILD_NO_SECRETS:-0} )) && secrets_disable=1
   if KUBECONFIG="${kubeconfig}" \
