@@ -78,6 +78,42 @@ teardown() {
   assert_output --partial "resources:"
 }
 
+# (d) --no-secrets (LOK8S_BUILD_NO_SECRETS=1) exports LOK8S_SECRETS_DISABLE=1
+# to the kustomize invocation → the secrets.lok8s.dev exec generator emits
+# nothing and never reads the store, so the render is store-free. A kustomize
+# stub records the env it was invoked with (mirrors the sops-stub argv record).
+stub_kustomize_env() {
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  export KUSTOMIZE_ENV_LOG="${BATS_TEST_TMPDIR}/kustomize.env"
+  : > "${KUSTOMIZE_ENV_LOG}"
+  cat > "${BATS_TEST_TMPDIR}/bin/kustomize" <<'STUB'
+#!/usr/bin/env bash
+# record the disable knob the build lib set for this invocation
+printf 'LOK8S_SECRETS_DISABLE=%s\n' "${LOK8S_SECRETS_DISABLE-<unset>}" >> "${KUSTOMIZE_ENV_LOG}"
+# emit a minimal valid resource so the build pipeline (envsubst > tmp) succeeds
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stub\n'
+STUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/kustomize"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+}
+
+@test "--no-secrets: build::artifacts exports LOK8S_SECRETS_DISABLE=1 to kustomize" {
+  stub_kustomize_env
+  LOK8S_BUILD_NO_SECRETS=1 run build::artifacts "${DOMAIN}"
+  assert_success
+  run cat "${KUSTOMIZE_ENV_LOG}"
+  assert_output --partial "LOK8S_SECRETS_DISABLE=1"
+}
+
+@test "default build: LOK8S_SECRETS_DISABLE is 0 (secrets rendered normally)" {
+  stub_kustomize_env
+  run build::artifacts "${DOMAIN}"
+  assert_success
+  run cat "${KUSTOMIZE_ENV_LOG}"
+  assert_output --partial "LOK8S_SECRETS_DISABLE=0"
+  refute_output --partial "LOK8S_SECRETS_DISABLE=1"
+}
+
 # (c) Selective deploy filters the single artifact by label.
 @test "lo deploy -l <key=value> applies only the matching subset" {
   build::artifacts "${DOMAIN}"

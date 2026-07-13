@@ -24,6 +24,13 @@ import (
 // The fileRoot is the working directory at invocation time, used by
 // the file generator to resolve relative paths in the spec.
 func Run(argv []string, stdin io.Reader, stdout io.Writer, p Plugin) error {
+	return RunEnv(argv, stdin, stdout, DefaultEnv, p)
+}
+
+// RunEnv is Run with an explicit env lookup, so a caller (or test) can
+// thread a controlled environment into Build/generators instead of the
+// process env. Run is the thin wrapper that passes DefaultEnv.
+func RunEnv(argv []string, stdin io.Reader, stdout io.Writer, env func(string) (string, bool), p Plugin) error {
 	src, closer, err := openSpec(argv, stdin)
 	if err != nil {
 		return err
@@ -38,7 +45,7 @@ func Run(argv []string, stdin io.Reader, stdout io.Writer, p Plugin) error {
 	if err != nil {
 		return fmt.Errorf("getwd: %w", err)
 	}
-	registry, ctx, err := p.Build(DefaultEnv, fileRoot)
+	registry, ctx, err := p.Build(env, fileRoot)
 	if err != nil {
 		return err
 	}

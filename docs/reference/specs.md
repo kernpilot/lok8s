@@ -95,8 +95,12 @@ an image-automation pin bump), `lo build --no-secrets` splits **only** non-Secre
 resources. It never renders, re-encrypts, prunes, or even *reads* a committed
 `Secret.*.sops.yaml` — those are left completely inert — and the secret
 generators are never invoked (so the cache-first passwd/bash generators can't mint
-fresh values on a store miss). The swap's prune is guarded to exclude
-`Secret.*.sops.yaml`; a non-Secret dropped from the render is still pruned.
+fresh values on a store miss). It achieves this by exporting
+`LOK8S_SECRETS_DISABLE=1` to the `kustomize build` render (the split shaping alone
+would not stop the render from hitting the store); the swap's prune is guarded to
+exclude `Secret.*.sops.yaml`; a non-Secret dropped from the render is still
+pruned. See the plugin's
+[env contract](kustomize-plugins.md#env-contract).
 
 See the [kubehz Platform guide](../guide/kubehz.md) for registration, claiming,
 and the heartbeat agent.
