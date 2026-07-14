@@ -305,7 +305,7 @@ for the full workflow.
 
 ```bash
 lo secrets init                                # set up SOPS/age from your SSH key
-lo secrets set --name <n> --namespace <ns> <key> <value>   # write a literal value (`-`/omitted: read stdin)
+lo secrets set --name <n> --namespace <ns> <key> <value>   # write a literal value (omitted: read stdin; `-`: same, argsh > v0.10.0)
 lo secrets allow                               # approve bash: generators after a change
 lo secrets encrypt                             # write committable Secret.*.enc files
 lo secrets decrypt                             # restore the plaintext cache from .enc

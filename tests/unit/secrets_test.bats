@@ -158,3 +158,42 @@ _shadow_setup() {
   assert_success
   assert_output ''
 }
+
+# ── secrets set — value from stdin ───────────────────────────────────────
+# These run the lib STANDALONE through the real argsh runtime (the stubbed
+# :args in setup() can't parse positionals), so the value positional's
+# :~stdin type is actually exercised. ARGSH_BUILTIN_PATH pins the repo's
+# argsh.so so the runtime doesn't try to download one into the tmpdir.
+# The inner bash unsets the exported :usage/:args/import STUBS from setup()
+# (export -f) — the standalone run must use the real argsh implementations.
+
+secrets_cli() {
+  ARGSH_BUILTIN_PATH="${ARGSH_BUILTIN_PATH:-${_PROJECT_ROOT}/.bin/argsh.so}" \
+  PATH_SCRIPTS="${_PROJECT_ROOT}/.lok8s" \
+    bash -c 'unset -f :usage :args import 2>/dev/null; exec "${@}"' -- \
+    "${_PROJECT_ROOT}/.bin/argsh" "${_PROJECT_ROOT}/.lok8s/libs/secrets" "${@}"
+}
+secrets_cli_piped() { printf %s "${1}" | secrets_cli "${@:2}"; }
+
+@test "secrets set: literal value lands in the cache" {
+  run secrets_cli set -n app KEY literal-v
+  assert_success
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "literal-v" ]
+}
+
+@test "secrets set: omitted value reads piped stdin" {
+  run secrets_cli_piped piped-v set -n app KEY
+  assert_success
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "piped-v" ]
+}
+
+@test "secrets set: explicit - reads piped stdin (argsh with arg-sh/argsh#176)" {
+  # Older argsh parsers reject a bare `-` as `unknown flag` before the
+  # :~stdin type can consume it — probe and skip on those.
+  if secrets_cli_piped probe set -n probe P - 2>&1 | grep -q 'unknown flag'; then
+    skip "argsh parser predates bare-dash positional support (arg-sh/argsh#176)"
+  fi
+  run secrets_cli_piped dash-v set -n app KEY -
+  assert_success
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "dash-v" ]
+}
