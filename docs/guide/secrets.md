@@ -66,7 +66,8 @@ lo secrets set --domain app.example.com --name myapp --namespace default API_TOK
 # omit the value to read it from a prompt / piped stdin (keeps it out of shell history):
 printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN
 # or pass `-` explicitly (POSIX stdin placeholder), e.g. from a file
-# (needs argsh newer than v0.10.0 — older parsers reject a bare `-`):
+# (needs an argsh build including arg-sh/argsh#176 — older parsers
+# reject a bare `-`):
 lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN - < token.txt
 ```
 

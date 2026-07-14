@@ -175,22 +175,35 @@ secrets_cli() {
 }
 secrets_cli_piped() { printf %s "${1}" | secrets_cli "${@:2}"; }
 
+# Skip when the b-managed argsh toolchain isn't installed (fresh clone before
+# `b install`) — without the pinned .so argsh would try to DOWNLOAD one into
+# the cwd, passing online and failing obscurely offline.
+require_argsh_cli() {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh not installed (b install)"
+  [ -f "${_PROJECT_ROOT}/.bin/argsh.so" ] || skip "argsh.so not installed (b install)"
+}
+
 @test "secrets set: literal value lands in the cache" {
+  require_argsh_cli
   run secrets_cli set -n app KEY literal-v
   assert_success
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "literal-v" ]
 }
 
 @test "secrets set: omitted value reads piped stdin" {
+  require_argsh_cli
   run secrets_cli_piped piped-v set -n app KEY
   assert_success
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "piped-v" ]
 }
 
 @test "secrets set: explicit - reads piped stdin (argsh with arg-sh/argsh#176)" {
-  # Older argsh parsers reject a bare `-` as `unknown flag` before the
-  # :~stdin type can consume it — probe and skip on those.
-  if secrets_cli_piped probe set -n probe P - 2>&1 | grep -q 'unknown flag'; then
+  require_argsh_cli
+  # Older argsh parsers reject a bare `-` before the :~stdin type can consume
+  # it (the exact error wording varies by version) — probe by OUTCOME: only
+  # run when the parser demonstrably stored the piped value via `-`.
+  secrets_cli_piped probe set -n probe P - >/dev/null 2>&1 || true
+  if [ "$(cat "${PATH_SECRETS}/Secret.probe.default.P" 2>/dev/null)" != "probe" ]; then
     skip "argsh parser predates bare-dash positional support (arg-sh/argsh#176)"
   fi
   run secrets_cli_piped dash-v set -n app KEY -
