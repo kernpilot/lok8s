@@ -19,9 +19,11 @@ tunnelProtocol: vxlan
 #   * pod veth MTU     = THIS VALUE, RAW (no overhead subtraction!)
 #   * cilium_wg0       = value − 80   (WireGuard overhead)
 #   * node route MTU   = value − 130  (vxlan 50 + WireGuard 80)
-#   * effective inner ceiling = value − 130 — vxlan encapsulates FIRST,
-#     then the vxlan packet must fit cilium_wg0 (proven: inner traffic
-#     passes at exactly value−130 and blackholes one byte above it).
+#   * effective inner ceiling = value − 130 (measured: inner traffic
+#     passes at exactly value−130 and blackholes one byte above; whether
+#     wg0 = value−80 binding the vxlan'd packet or the value−130 node
+#     routes pin it is indistinguishable from outside — the arithmetic
+#     is the same either way).
 # So pods BELIEVE the raw value but can only push value−130 cross-node:
 # TCP survives via PMTUD/MSS; UDP/ICMP above the ceiling silently drop.
 # Pick the value so that:
@@ -34,8 +36,10 @@ tunnelProtocol: vxlan
 # 1380 → ceiling 1250, wire ≤ 1380, margin 20 to the vSwitch. ⚠ On any
 # change: running pods keep their old veth until restarted; a value
 # LOWERING shrinks the ceiling under running pods' veth and their large
-# packets blackhole — roll workloads promptly (a RAISE is safe for
-# existing pods: their veth only sits further below the new ceiling).
+# packets blackhole — roll workloads promptly. A RAISE is safe for
+# existing pods: their old veth (old value) is at most the old ceiling
+# + 130 = the NEW ceiling when raising by >= 130, and exactly ON the
+# ceiling at Δ=130 (equal is safe — traffic passes AT value−130).
 MTU: 1380
 
 # kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
@@ -67,8 +71,8 @@ endpointRoutes:
 # got lost early in the project; restored 2026-07-15. Enabling on a LIVE
 # cluster is supported: agents pair up as keys distribute (no strict
 # mode, so no drop-until-encrypted window), but remember the MTU note
-# above — the 80-byte WireGuard overhead is why MTU is 1250, and pods
-# must be rolling-restarted after the change to pick the lower MTU up.
+# above — the WireGuard overhead is baked into the value−130 ceiling,
+# and an MTU LOWERING needs a prompt workload roll (see the MTU note).
 # strictMode (mandate encryption, drop plaintext) requires NATIVE
 # routing — it is NOT available under tunnel/vxlan, so it is not a
 # quick follow-up here: it rides a future kubeProxyReplacement/native-
