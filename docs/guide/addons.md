@@ -342,6 +342,10 @@ spec:
     - sso-gate: { dependsOn: [envoy-gateway] }
 ```
 
+(Without `envoy-gateway` the `SecurityPolicy` CRD does not exist: the
+apply retries a few times and then fails that bootstrap entry loudly —
+the rest of the DAG continues.)
+
 Then, per service you want protected:
 
 ```yaml
