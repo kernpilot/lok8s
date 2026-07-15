@@ -74,11 +74,13 @@ Kubernetes.
 
 What runs on the cluster. Split into two planes:
 
-- **Plane A — cluster infrastructure** (`spec.bootstrap`). Ordered list
-  of framework addons applied during provisioning (by
-  `.lok8s/libs/bootstrap`, identically for every driver), with health
-  waits between stages. CNI → MetalLB → cert-manager → ... The cluster
-  is not considered ready until this phase completes.
+- **Plane A — cluster infrastructure** (`spec.bootstrap`). Framework
+  addons applied during provisioning (by `.lok8s/libs/bootstrap`,
+  identically for every driver) as a **dependency DAG**: `dependsOn:`
+  declares ordering edges, `wait:` gates readiness, and independent
+  entries apply in parallel (CNI first, then e.g. cert-manager and the
+  operators concurrently). The cluster is not considered ready until
+  the whole DAG converges.
 - **Plane B — workloads** (`targets/`). User-named kustomize
   directories, each built independently into
   `artifacts/<target>/artifacts.yaml`. Applied by Tilt (dev) or

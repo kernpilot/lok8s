@@ -260,10 +260,12 @@ Entry resolution:
 - **`./path`** / **`../path`** → relative to `clusters/<domain>/`
 - **`/path`** → relative to repo root
 
-Ordering matters: each entry is applied, then lok8s waits for
-Deployments/DaemonSets to become ready before moving to the next. This
-is where "deploy order" earns its keep — you can't safely apply
-MetalLB before CNI is running.
+Entries form a **dependency DAG**, not a strict sequence: an entry
+waits for its `dependsOn:` targets (and its own `wait:` health gates)
+and otherwise applies in parallel with its siblings. List order is only
+the default edge when no `dependsOn:` is given. This is where "deploy
+order" earns its keep — you can't safely apply MetalLB before CNI is
+running — without serializing the independent addons.
 
 If `spec.bootstrap` is omitted, the framework defaults to `[cilium]`
 (every cluster needs a CNI). Framework addons support driver- and
@@ -344,8 +346,8 @@ the full spec shape.
 ```
 lo up <domain>
  ├─ provision               driver creates the cluster (kind/CAPI)
- ├─ bootstrap               apply spec.bootstrap addons in order,
- │                          wait healthy between stages
+ ├─ bootstrap               apply the spec.bootstrap addon DAG
+ │                          (dependsOn/wait gates, parallel otherwise)
  └─ tilt up                 Tilt reads services.yaml, builds targets,
                             applies with service-enable filters, wires
                             image swaps / live reload
