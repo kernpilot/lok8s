@@ -2,11 +2,14 @@
 # template_envsubst_test.bats — the envsubst flavor shim (template::envsubst)
 #
 # lok8s restricts substitution to explicit variable lists. GNU gettext
-# envsubst takes the list as a SHELL-FORMAT positional arg; renvsubst
-# (b's curated envsubst) rejects positional args entirely and wants
-# --variable filters. The shim must translate transparently — these tests
-# pin both dialects with fake flavor binaries, plus the real system GNU
-# envsubst when available.
+# envsubst takes the list as a SHELL-FORMAT positional arg; every other
+# flavor is unfit for filtering manifest streams (renvsubst rejects the
+# positional arg, aborts on `${arr[0]}` in embedded scripts, and silently
+# rewrites `${V:?req}` → `${V}`), so the non-GNU path substitutes NATIVELY
+# via jq without touching the binary. These tests pin the dispatch with
+# fake flavor binaries, the native pass's correctness (incl. the exact
+# constructs renvsubst mangles), and the real system GNU envsubst when
+# available.
 
 setup() {
   load "../test_helper"
@@ -75,11 +78,11 @@ SH
   assert_output "gnu"
 }
 
-@test "flavor detection: renvsubst (anything non-GNU)" {
+@test "flavor detection: other (anything non-GNU)" {
   _fake_renvsubst
   run template::envsubst_flavor
   assert_success
-  assert_output "renvsubst"
+  assert_output "other"
 }
 
 @test "GNU dialect: SHELL-FORMAT string passed through as one arg" {
@@ -94,17 +97,67 @@ SH
   assert_output '${VAR_A} ${VAR_B} '
 }
 
-@test "renvsubst dialect: SHELL-FORMAT translated to --variable filters" {
+@test "non-GNU flavor: envsubst binary is never invoked (native jq path)" {
+  # The fake renvsubst hard-rejects any non-filter invocation, so a correct
+  # substitution result proves the restricted path never touched it.
+  _fake_renvsubst
+  export NATIVE_T1="hello"
+  run bash -c '
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    printf "a=\${NATIVE_T1}\n" | template::envsubst "\${NATIVE_T1} "
+  '
+  assert_success
+  assert_output "a=hello"
+}
+
+@test "native path: braced + unbraced forms, identifier boundary respected" {
+  _fake_renvsubst
+  export NATIVE_T1="hello"
+  export NATIVE_T1_LONGER="nope"
+  run bash -c '
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    printf "a=\${NATIVE_T1} b=\$NATIVE_T1 c=\$NATIVE_T1_LONGER\n" \
+      | template::envsubst "\${NATIVE_T1} "
+  '
+  assert_success
+  # $NATIVE_T1_LONGER must NOT be eaten by the shorter listed name.
+  assert_output 'a=hello b=hello c=$NATIVE_T1_LONGER'
+}
+
+@test "native path: listed-but-unset substitutes empty (GNU semantics)" {
   _fake_renvsubst
   run bash -c '
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
-    echo "x" | template::envsubst "\${VAR_A} \${VAR_B} "
+    unset NATIVE_UNSET
+    printf "a=[\${NATIVE_UNSET}]\n" | template::envsubst "\${NATIVE_UNSET} "
   '
   assert_success
-  assert_output "renvsubst-called"
-  run cat "${ARGS_OUT}"
-  assert_line --index 0 "--variable=VAR_A"
-  assert_line --index 1 "--variable=VAR_B"
+  assert_output "a=[]"
+}
+
+@test "native path: exotic \${…} and unlisted vars pass through untouched" {
+  # The exact constructs renvsubst mangles: ${arr[0]} aborts its parser and
+  # ${V:?req} is silently rewritten to ${V} — both must survive verbatim.
+  _fake_renvsubst
+  export NATIVE_T1="hello"
+  run bash -c '
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    printf "s=\${arr[0]} v=\${V:?req} g=\${0##*/} o=\$OTHER x=\${NATIVE_T1}\n" \
+      | template::envsubst "\${NATIVE_T1} "
+  '
+  assert_success
+  assert_output 's=${arr[0]} v=${V:?req} g=${0##*/} o=$OTHER x=hello'
+}
+
+@test "native path: replacement value with regex/sed special chars stays literal" {
+  _fake_renvsubst
+  export NATIVE_T1='he&llo\n$x'
+  run bash -c '
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    printf "a=\${NATIVE_T1}\n" | template::envsubst "\${NATIVE_T1} "
+  '
+  assert_success
+  assert_output 'a=he&llo\n$x'
 }
 
 @test "empty whitelist replaces NOTHING under renvsubst (no filterless call)" {
