@@ -36,10 +36,12 @@ tunnelProtocol: vxlan
 # 1380 → ceiling 1250, wire ≤ 1380, margin 20 to the vSwitch. ⚠ On any
 # change: running pods keep their old veth until restarted; a value
 # LOWERING shrinks the ceiling under running pods' veth and their large
-# packets blackhole — roll workloads promptly. A RAISE is safe for
-# existing pods: their old veth (old value) is at most the old ceiling
-# + 130 <= the NEW ceiling when raising by >= 130, and exactly ON the
-# ceiling at Δ=130 (equal is safe — traffic passes AT value−130).
+# packets blackhole — roll workloads promptly. A RAISE never introduces
+# new blackholing for existing pods (the ceiling only moves up); at
+# Δ >= 130 the raise additionally ELIMINATES the old blackhole class for
+# already-running pods without restarting them (their old veth = old
+# value lands at or under the new ceiling; equal is safe — traffic
+# passes AT value−130).
 MTU: 1380
 
 # kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
