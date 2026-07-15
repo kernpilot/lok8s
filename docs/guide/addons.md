@@ -41,7 +41,7 @@ khelm → kustomize.
   kustomization.yaml      kustomize entry point
   values.yaml             base values (always loaded)
   values.lo.yaml          Lo/kind overrides (tunnel mode, cluster-pool IPAM)
-  values.kubeone.yaml     KubeOne/bare metal overrides (native routing)
+  values.kubeone.yaml     KubeOne/bare metal overrides (tunnel + WireGuard)
   values.hetzner.yaml     Hetzner provider overrides (optional)
   values.aws.yaml         AWS provider overrides (optional)
 ```
@@ -70,7 +70,7 @@ disagree the framework has to pick a winner. The rule:
 | Layer | Scope | Typical content |
 |-------|-------|----------------|
 | `values.yaml` | every cluster | Chart-wide defaults that must hold regardless of where the cluster runs (image registries, metric ports, namespaces). |
-| `values.${kind}.yaml` | one driver flavor | Driver-required choices (`lo` needs tunnel mode + `cluster-pool` IPAM because kind can't route; `kubeone` prefers native routing on real L3 networks). |
+| `values.${kind}.yaml` | one driver flavor | Driver-required choices (`lo` needs tunnel mode + `cluster-pool` IPAM because kind can't route; `kubeone` uses tunnel/vxlan — nodes span subnets — plus WireGuard encryption). |
 | `values.${provider}.yaml` | one infrastructure | Environment facts the provider knows (BGP peers on Hetzner, ENI limits on AWS, loadBalancer class names). |
 | inline | one cluster | Per-cluster intent you can't express elsewhere (enable Hubble for debugging, bump resource limits for a beefy node). |
 

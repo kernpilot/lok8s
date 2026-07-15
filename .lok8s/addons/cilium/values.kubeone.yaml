@@ -22,9 +22,13 @@ tunnelProtocol: vxlan
 # silently drops large pod-to-pod packets across the cloud<->baremetal
 # boundary (only small packets / TCP handshakes pass). The 1400-vSwitch
 # assumption also lives in docs/guide/cloud-init.md + bare-metal.md
-# (netplan `mtu: 1400`) — change them together. NOTE on changes:
-# running pods keep their veth MTU until recreated — an MTU lowering
-# needs a rolling restart of workloads to fully take effect.
+# (netplan `mtu: 1400`) — change them together. ⚠ On an MTU LOWERING:
+# running pods keep their old (larger) veth MTU until recreated, and with
+# the new overhead their large packets now BLACKHOLE on the smallest-link
+# paths — an active regression, not a missed optimization. Roll all
+# workloads promptly after applying. (The cilium_wg0 device itself is
+# safe: with an explicit MTU, v1.19 derives wg0 = MTU - 80 = 1170 —
+# pkg/mtu/cell.go configuredMTU branch + the wireguard mtu-reconciler.)
 MTU: 1250
 
 # kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
@@ -74,6 +78,11 @@ encryption:
 # eBPF-based egress shaping (per-pod limits via the
 # kubernetes.io/egress-bandwidth annotation) + BBR congestion control
 # for pod traffic (kernel >= 5.18 — see the WireGuard note; same fleet).
+# CAVEAT: BBR pacing across the encap+WireGuard async-crypto path depends
+# on skb-timestamp survival (fine on this fleet's 6.x kernels, but verify
+# throughput after enabling — BBR+WireGuard has known rough edges).
+# NOTE: nothing gates this FILE (chart addons skip the render test and the
+# chart schema allows unknown keys) — typos ship silently; review hard.
 bandwidthManager:
   enabled: true
   bbr: true
