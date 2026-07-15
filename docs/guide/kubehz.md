@@ -44,8 +44,8 @@ refuses plain-HTTP endpoints outright.
 Your spec's `bootstrap` section applies to a **hosted** cluster too: after
 `lo provision` has the control plane running and the kubeconfig downloaded,
 the same bootstrap DAG a self-hosted cluster gets is applied onto it — your
-gateway, sso-gate, cert-manager, whatever you declared. Two hosted-specific
-rules:
+gateway, sso-gate, cert-manager, whatever you declared. A few
+hosted-specific rules:
 
 - **`cilium` and `ccm` are platform-owned** and always skipped (matched on
   the addon directory, so a `name:`-renamed entry skips too): the hosting

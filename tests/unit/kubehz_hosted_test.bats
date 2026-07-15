@@ -662,3 +662,15 @@ _hosted_kc_harness() {
   assert_success
   [[ -f "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml" ]] || fail "domain kubeconfig missing"
 }
+
+@test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name'*) echo "shortname" ;; *) echo "1" ;; esac; }
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  echo kc > "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
+  echo kc > "${PATH_BASE}/.kubeconfig/shortname.yaml"
+  run kubehz::destroy_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  [[ ! -f "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml" ]] || fail "domain kubeconfig leaked"
+  [[ ! -f "${PATH_BASE}/.kubeconfig/shortname.yaml" ]] || fail "mirror kubeconfig leaked (build would prefer it)"
+}
