@@ -8,7 +8,6 @@
 # libs/kubehz/main; not directly executable.
 
 import ^utils/verbose
-import ^libs/bootstrap
 
 # ── Hosted provisioning ──────────────────────────────────
 
@@ -190,32 +189,17 @@ kubehz::provision_hosted() {
 
   debug "Hosted cluster ${domain} ready, kubeconfig at ${kubeconfig_path}"
 
-  # ── Customer bootstrap addons ──────────────────────────────────────────
-  # Apply the spec's bootstrap DAG onto the hosted cluster, same as a
-  # self-hosted provision would — the hosted spec's bootstrap section used
-  # to be silently dead (provision returned right here). Two guards:
-  #   • CNI-class addons (cilium/ccm) are PLATFORM-OWNED on hosted clusters
-  #     (KKP manages the CNI as a system application; the CCM runs seed-side)
-  #     — bootstrap::_apply_one skips them unconditionally via the
-  #     LOK8S_BOOTSTRAP_HOSTED flag bootstrap::apply exports.
-  #   • A CP-only cluster (no Ready workers yet) can't run addon workloads,
-  #     and wait-gated entries would hang — skip with a clear notice; the
-  #     apply is idempotent, re-run `lo provision`/`lo up` once workers join.
-  local entries ready_nodes
-  entries=$(yq -r '.spec.bootstrap // [] | length' "${cluster_yaml}")
-  if [[ "${entries}" == "0" ]]; then
-    debug "hosted ${domain}: no bootstrap entries"
-    return 0
+  # provision::dispatch runs the shared bootstrap::apply AFTER this driver
+  # returns, reading .kubeconfig/<metadata.name>.yaml — mirror the download
+  # there when the spec's metadata.name differs from the domain, or the
+  # dispatch tail fails on a missing kubeconfig right after a successful
+  # hosted provision. (bootstrap::apply itself owns the hosted gates:
+  # OIDC-kubeconfig reachability, Ready-worker check, platform-owned skips.)
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  if [[ -n "${cluster_name}" && "${cluster_name}" != "null" && "${cluster_name}" != "${domain}" ]]; then
+    cp "${kubeconfig_path}" "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
   fi
-  ready_nodes=$(kubectl --kubeconfig "${kubeconfig_path}" get nodes --no-headers 2>/dev/null \
-    | awk '$2 == "Ready"' | wc -l | tr -d ' ')
-  if [[ "${ready_nodes:-0}" == "0" ]]; then
-    echo "[kubehz] ${domain}: hosted control plane is up but has no Ready workers yet —" >&2
-    echo "[kubehz] skipping the ${entries} bootstrap addon(s); re-run 'lo provision' (or 'lo up') after workers join" >&2
-    return 0
-  fi
-  echo "[kubehz] applying ${entries} bootstrap addon(s) onto hosted ${domain} (${ready_nodes} Ready worker(s))" >&2
-  bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig_path}"
 }
 
 # Destroy a hosted cluster via the kubehz API.

@@ -3,6 +3,10 @@
 # SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # bootstrap — framework-level cluster infrastructure addon system
 #
+# BOOTSTRAP_PLATFORM_OWNED: addon DIRS that must never bootstrap onto a
+# HOSTED cluster (the platform owns them there). Extend here, nowhere else.
+BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
+#
 # Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
 # drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
 #
@@ -493,17 +497,20 @@ bootstrap::_apply_one() {
   fi
 
   # HOSTED clusters: the CNI + cloud integration belong to the PLATFORM —
-  # KKP manages cilium as a system ApplicationInstallation in the user
-  # cluster (with the kubehz encryption default) and runs the cloud
-  # integration seed-side. Unconditional (not existence-gated): even
-  # mid-install, bootstrapping our own copy would fight KKP for ownership
-  # of the datapath.
+  # the hosted control plane manages cilium as a system application in the
+  # user cluster and runs the cloud integration on its side. Unconditional
+  # (not existence-gated): even mid-install, bootstrapping our own copy
+  # would fight the platform for ownership of the datapath. The list lives
+  # in BOOTSTRAP_PLATFORM_OWNED (top of this file) — one place to extend.
+  local _ad_base; _ad_base="$(basename "${addon_dir}")"
   if [[ "${LOK8S_BOOTSTRAP_HOSTED:-false}" == "true" ]]; then
-    local _hosted_base; _hosted_base="$(basename "${addon_dir}")"
-    if [[ "${_hosted_base}" == "cilium" || "${_hosted_base}" == "ccm" ]]; then
-      echo "[bootstrap] ${_hosted_base} is platform-owned on a hosted cluster (KKP manages the CNI/cloud integration) — skipping" >&2
-      return 0
-    fi
+    local _po
+    for _po in ${BOOTSTRAP_PLATFORM_OWNED}; do
+      if [[ "${_ad_base}" == "${_po}" ]]; then
+        echo "[bootstrap] ${_ad_base} is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping" >&2
+        return 0
+      fi
+    done
   fi
 
   # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` (as
@@ -517,7 +524,6 @@ bootstrap::_apply_one() {
     # override changes addon_name (the dependsOn identity) but never addon_dir, so
     # the driver skip must stay anchored to the cilium/ccm addon dir — otherwise a
     # `name:`-renamed cilium/ccm would defeat it and double-apply the driver's own.
-    local _ad_base; _ad_base="$(basename "${addon_dir}")"
     if [[ "${_ad_base}" == "cilium" ]] \
        && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
       echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
@@ -937,6 +943,37 @@ bootstrap::apply() {
     export LOK8S_BOOTSTRAP_HOSTED=true
   else
     export LOK8S_BOOTSTRAP_HOSTED=false
+  fi
+
+  # ── Hosted gate ────────────────────────────────────────────────────────
+  # Two things make a hosted apply pointless right now, and they need
+  # DIFFERENT messages (conflating them sends users chasing the wrong fix):
+  #   1. The default hosted kubeconfig is OIDC/kubelogin — it carries no
+  #      embedded credential, so a headless kubectl fails outright. That is
+  #      an AUTH/reachability problem, not "no workers".
+  #   2. A CP-only cluster (no Ready workers yet) can't run addon
+  #      workloads and wait-gated entries would hang.
+  # Both skip WITHOUT failing the provision (return 0 — the cluster itself
+  # is fine); re-running `lo provision`/`lo bootstrap` later is idempotent.
+  if [[ "${LOK8S_BOOTSTRAP_HOSTED}" == "true" ]]; then
+    local _nodes_out _nodes_rc=0
+    _nodes_out=$(kubectl --kubeconfig "${kubeconfig}" get nodes --no-headers 2>&1) || _nodes_rc=$?
+    if (( _nodes_rc != 0 )); then
+      echo "[bootstrap] hosted ${domain}: cannot reach the cluster with ${kubeconfig}" >&2
+      echo "[bootstrap] the default hosted kubeconfig is OIDC (kubelogin + a browser sign-in) — install the" >&2
+      echo "[bootstrap] kubelogin plugin and run interactively, then re-run 'lo provision' or 'lo bootstrap'." >&2
+      echo "[bootstrap] bootstrap addons NOT applied. (kubectl: $(head -n1 <<<"${_nodes_out}"))" >&2
+      return 0
+    fi
+    local _ready
+    # Ready may read "Ready" or "Ready,SchedulingDisabled" — match the prefix.
+    _ready=$(awk '$2 ~ /^Ready(,|$)/' <<<"${_nodes_out}" | wc -l | tr -d ' ')
+    if [[ "${_ready:-0}" == "0" ]]; then
+      echo "[bootstrap] hosted ${domain}: control plane is up but has no Ready workers yet —" >&2
+      echo "[bootstrap] skipping bootstrap addons; re-run 'lo provision' (or 'lo bootstrap') after workers join." >&2
+      return 0
+    fi
+    echo "[bootstrap] hosted ${domain}: ${_ready} Ready worker(s) — applying bootstrap addons" >&2
   fi
 
   local -a bootstrap_entries

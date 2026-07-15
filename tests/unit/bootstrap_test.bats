@@ -2154,3 +2154,50 @@ YAML
   assert_output --partial "RENDER_CALLED"
   refute_output --partial "platform-owned"
 }
+
+# ── hosted gates in bootstrap::apply (reachability vs no-workers) ────────────
+
+_hosted_apply_harness() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  mkdir -p "${PATH_CLUSTERS}/h.test"
+  cat > "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: h }
+spec:
+  kubehz: { hosting: hosted }
+  bootstrap: [cert-manager]
+YAML
+  echo "kc" > "${BATS_TEST_TMPDIR}/kc.yaml"
+}
+
+@test "hosted apply: unreachable cluster warns about the OIDC kubeconfig and skips (rc 0)" {
+  _hosted_apply_harness
+  kubectl() { echo "error: You must be logged in" >&2; return 1; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "cannot reach the cluster"
+  assert_output --partial "kubelogin"
+  refute_output --partial "no Ready workers"
+}
+
+@test "hosted apply: zero Ready workers skips with the workers notice (rc 0)" {
+  _hosted_apply_harness
+  kubectl() { printf 'cp1 NotReady control-plane 1d v1.33\n'; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "no Ready workers yet"
+  refute_output --partial "kubelogin"
+}
+
+@test "hosted apply: Ready,SchedulingDisabled COUNTS as a worker (prefix match)" {
+  _hosted_apply_harness
+  kubectl() { printf 'w1 Ready,SchedulingDisabled worker 1d v1.33\n'; }
+  # Proceeds past the gate — the resolve/scheduler will then run; stub the
+  # scheduler entry-point to observe the pass-through without a real apply.
+  bootstrap::_resolve_entries() { :; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "1 Ready worker(s)"
+}

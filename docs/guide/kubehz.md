@@ -48,15 +48,21 @@ gateway, sso-gate, cert-manager, whatever you declared. Two hosted-specific
 rules:
 
 - **`cilium` and `ccm` are platform-owned** and always skipped (matched on
-  the addon directory, so a `name:`-renamed entry skips too): the platform
-  manages the CNI as a KKP system application — with WireGuard encryption
-  on by default — and runs the cloud integration on its side. Declaring
-  them is harmless; bootstrapping your own copy would fight the platform
-  for the datapath, so `lo` refuses on your behalf.
+  the addon directory, so a `name:`-renamed entry skips too): the hosting
+  platform manages the CNI as a system application and runs the cloud
+  integration on its side (kubehz, for one, ships its hosted CNI with
+  WireGuard encryption on by default — a platform property, not something
+  this skip configures). Declaring them is harmless; bootstrapping your
+  own copy would fight the platform for the datapath, so `lo` refuses on
+  your behalf.
+- **You need working kubectl access**: the default hosted kubeconfig is
+  OIDC (kubelogin + a browser sign-in). Headless/CI runs without it get a
+  clear notice and the bootstrap is skipped — install the kubelogin
+  plugin and re-run `lo provision` or `lo bootstrap` interactively.
 - **Workers first**: a control plane with no Ready workers can't run addon
   workloads, and `wait:`-gated entries would hang — `lo` skips the
-  bootstrap with a notice and you re-run `lo provision` (or `lo up`) once
-  workers have joined. The apply is idempotent.
+  bootstrap with a notice and you re-run once workers have joined. The
+  apply is idempotent.
 
 ## Registration
 
