@@ -186,7 +186,8 @@ addons::show() {
 }
 
 # Read an addon's lok8s.dev/category label from its manifests. Echoes the
-# category (infrastructure/networking/observability/storage/dev-tools) or "-".
+# category (infrastructure/networking/observability/storage/security/
+# gitops/dev-tools) or "-".
 addons::_category() {
   local dir="${1}" line cat=""
   # LC_ALL=C sort before head -1: grep -r traversal follows readdir order

@@ -17,8 +17,11 @@ spec:
     provider:
       # PLACEHOLDER — patch from your consuming target (kustomization.yaml
       # header). `.invalid` is a reserved TLD (RFC 2606): it can never
-      # resolve, so an unpatched policy fails Envoy Gateway's admission
-      # instead of half-working against something unexpected.
+      # resolve, so OIDC discovery fails at Envoy Gateway's TRANSLATION
+      # step and the policy reports not-Accepted instead of half-working
+      # against something unexpected. NOTE: routes that DO carry the
+      # protect label while the policy is broken answer 500 (fail-closed)
+      # — patch the issuer BEFORE labeling any route.
       issuer: https://sso-gate-unconfigured.invalid
     clientID: sso-gate-unconfigured
     clientSecret:

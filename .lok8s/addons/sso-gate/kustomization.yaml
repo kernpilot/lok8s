@@ -32,11 +32,13 @@
 #   namespace: my-apps
 #   resources: [<lok8s>/.lok8s/addons/sso-gate]
 #
-# ── Configuring the issuer (REQUIRED — the addon is inert until patched) ─────
-# The shipped issuer/clientID are placeholders that Envoy Gateway rejects at
-# admission, so an unpatched sso-gate protects NOTHING (routes stay public —
-# fail-open by design at this layer; do not rely on it as the only guard for
-# secrets). Patch them from the consuming target (do NOT edit this addon):
+# ── Configuring the issuer (REQUIRED — patch BEFORE labeling routes) ─────────
+# The shipped issuer/clientID are placeholders whose OIDC discovery can never
+# succeed, so Envoy Gateway marks the policy not-Accepted at translation (EG
+# has no admission webhook). UNLABELED routes are never affected — but a route
+# that already carries the protect label while the policy is broken (bad
+# issuer, missing sso-gate-client Secret) answers 500: the gate FAILS CLOSED,
+# never open. Patch these from the consuming target (do NOT edit this addon):
 #
 #   patches:
 #     - target: { kind: SecurityPolicy, name: sso-gate }
