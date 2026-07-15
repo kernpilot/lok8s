@@ -41,7 +41,7 @@ khelm → kustomize.
   kustomization.yaml      kustomize entry point
   values.yaml             base values (always loaded)
   values.lo.yaml          Lo/kind overrides (tunnel mode, cluster-pool IPAM)
-  values.kubeone.yaml     KubeOne/bare metal overrides (native routing)
+  values.kubeone.yaml     KubeOne/bare metal overrides (tunnel + WireGuard)
   values.hetzner.yaml     Hetzner provider overrides (optional)
   values.aws.yaml         AWS provider overrides (optional)
 ```
@@ -70,7 +70,7 @@ disagree the framework has to pick a winner. The rule:
 | Layer | Scope | Typical content |
 |-------|-------|----------------|
 | `values.yaml` | every cluster | Chart-wide defaults that must hold regardless of where the cluster runs (image registries, metric ports, namespaces). |
-| `values.${kind}.yaml` | one driver flavor | Driver-required choices (`lo` needs tunnel mode + `cluster-pool` IPAM because kind can't route; `kubeone` prefers native routing on real L3 networks). |
+| `values.${kind}.yaml` | one driver flavor | Driver-required choices (`lo` needs tunnel mode + `cluster-pool` IPAM because kind can't route; `kubeone` uses tunnel/vxlan — nodes span subnets — plus WireGuard encryption). |
 | `values.${provider}.yaml` | one infrastructure | Environment facts the provider knows (BGP peers on Hetzner, ENI limits on AWS, loadBalancer class names). |
 | inline | one cluster | Per-cluster intent you can't express elsewhere (enable Hubble for debugging, bump resource limits for a beefy node). |
 
@@ -314,10 +314,10 @@ cause is fixed.
 A concrete example of the driver-layer in action — these values are
 set in `values.lo.yaml` and `values.kubeone.yaml`:
 
-| Driver | IPAM | Routing | Why |
-|--------|------|---------|-----|
-| Lo (kind) | `cluster-pool` | `tunnel` | Kind nodes are Docker containers — no L3 routing available |
-| KubeOne | `kubernetes` | `native` | Real infrastructure — native routing, kube-proxy replacement works |
+| Driver | IPAM | Routing | Encryption | Why |
+|--------|------|---------|------------|-----|
+| Lo (kind) | `cluster-pool` | `tunnel` | off | Kind nodes are containers on ONE host kernel — no L3 routing, and encrypting loopback-adjacent traffic buys nothing |
+| KubeOne | `kubernetes` (driver) → `cluster-pool` effective on Hetzner (the provider layer wins the merge) | `tunnel` (vxlan) | **WireGuard** (pod + node) | Nodes span subnets/locations (cloud subnet + bare-metal vSwitch) — native routing needs one L2 segment; traffic crosses shared infrastructure, so it ships encrypted. Mind the MTU: smallest underlay − 50 (vxlan) − 80 (WireGuard); running pods keep their old veth MTU until restarted |
 
 ### MetalLB
 

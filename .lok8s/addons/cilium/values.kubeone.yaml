@@ -16,11 +16,20 @@ tunnelProtocol: vxlan
 
 # MTU: the encapsulated (outer) packet must fit the SMALLEST underlying
 # link on any node-to-node path. The fsn1 vSwitch is 1400; with vxlan
-# overhead (50) the cilium device MTU must be <= 1350. 1300 leaves
-# margin and is safe across both the 1400 vswitch and 1450 cloud subnet.
-# Getting this wrong silently drops large pod-to-pod packets across the
-# cloud<->baremetal boundary (only small packets / TCP handshakes pass).
-MTU: 1300
+# overhead (50) PLUS WireGuard overhead (80 — encryption below) the
+# cilium device MTU must be <= 1270. 1250 leaves margin and is safe
+# across both the 1400 vswitch and 1450 cloud subnet. Getting this wrong
+# silently drops large pod-to-pod packets across the cloud<->baremetal
+# boundary (only small packets / TCP handshakes pass). The 1400-vSwitch
+# assumption also lives in docs/guide/cloud-init.md + bare-metal.md
+# (netplan `mtu: 1400`) — change them together. ⚠ On an MTU LOWERING:
+# running pods keep their old (larger) veth MTU until recreated, and with
+# the new overhead their large packets now BLACKHOLE on the smallest-link
+# paths — an active regression, not a missed optimization. Roll all
+# workloads promptly after applying. (The cilium_wg0 device itself is
+# safe: with an explicit MTU, v1.19 derives wg0 = MTU - 80 = 1170 —
+# pkg/mtu/cell.go configuredMTU branch + the wireguard mtu-reconciler.)
+MTU: 1250
 
 # kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
 kubeProxyReplacement: false
@@ -43,6 +52,65 @@ k8sServicePort: "${LOK8S_USER_API_PORT}"
 
 endpointRoutes:
   enabled: true
+
+# ── Encryption (WireGuard) ─────────────────────────────────────────────
+# Transparent encryption of ALL pod-to-pod and node-to-node traffic —
+# in-kernel WireGuard (>= 5.6; KubeOne targets Ubuntu LTS, comfortably
+# newer). This was part of the original production reference config and
+# got lost early in the project; restored 2026-07-15. Enabling on a LIVE
+# cluster is supported: agents pair up as keys distribute (no strict
+# mode, so no drop-until-encrypted window), but remember the MTU note
+# above — the 80-byte WireGuard overhead is why MTU is 1250, and pods
+# must be rolling-restarted after the change to pick the lower MTU up.
+# strictMode (mandate encryption, drop plaintext) requires NATIVE
+# routing — it is NOT available under tunnel/vxlan, so it is not a
+# quick follow-up here: it rides a future kubeProxyReplacement/native-
+# routing migration, if ever.
+encryption:
+  enabled: true
+  type: wireguard
+  # Node-to-node too (host-owned traffic between cluster nodes), not just
+  # pod-to-pod: on Hetzner the vSwitch/private-network path crosses
+  # shared infrastructure.
+  nodeEncryption: true
+
+# ── Bandwidth manager + BBR ────────────────────────────────────────────
+# eBPF-based egress shaping (per-pod limits via the
+# kubernetes.io/egress-bandwidth annotation) + BBR congestion control
+# for pod traffic (kernel >= 5.18 — see the WireGuard note; same fleet).
+# CAVEAT: BBR pacing across the encap+WireGuard async-crypto path depends
+# on skb-timestamp survival (fine on this fleet's 6.x kernels, but verify
+# throughput after enabling — BBR+WireGuard has known rough edges).
+# NOTE: nothing gates this FILE (chart addons skip the render test and the
+# chart schema allows unknown keys) — typos ship silently; review hard.
+bandwidthManager:
+  enabled: true
+  bbr: true
+
+# ── Operator HA ────────────────────────────────────────────────────────
+# Two operators on distinct nodes: IPAM/identity GC must survive a node
+# loss on a real multi-node cluster (kind keeps the base single replica).
+# The chart's DEFAULT podAntiAffinity already requires distinct hosts —
+# not restated here. On a single-node cluster the second replica stays
+# Pending (degraded, not deadlocked).
+operator:
+  replicas: 2
+  rollOutPods: true
+
+# Agent memory bounds (no CPU limit — throttling the datapath agent under
+# load hurts more than it protects).
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 3Gi
+
+# Production log volume; hubble carries the observability. (`logOptions`
+# is the chart's real knob at 1.19.x — a bare `logLevel:` key is silently
+# ignored by the schema.)
+logOptions:
+  level: warning
 
 # Hubble on every agent (listenAddress :4244) so `hubble observe` works
 # per-node; relay aggregates cluster-wide for policy development.
