@@ -2194,12 +2194,15 @@ YAML
 @test "hosted apply: Ready,SchedulingDisabled COUNTS as a worker (prefix match)" {
   _hosted_apply_harness
   kubectl() { printf 'w1 Ready,SchedulingDisabled worker 1d v1.33\n'; }
-  # Proceeds past the gate — the resolve/scheduler will then run; stub the
-  # scheduler entry-point to observe the pass-through without a real apply.
-  bootstrap::_resolve_entries() { :; }
+  # The gate now runs AFTER the entries-resolve (real spec: 1 entry), so it
+  # must PRINT the pass-through line; stop the run right after it by failing
+  # the entry parse — the assertion pair (worker line printed + rc!=0 from
+  # the stub) proves the gate passed and only the stub aborted.
+  bootstrap::_parse_entry() { return 1; }
   run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
-  assert_success
+  assert_failure
   assert_output --partial "1 Ready worker(s)"
+  refute_output --partial "no Ready workers"
 }
 
 @test "hosted apply: Ready CONTROL-PLANE nodes do not count as workers" {
