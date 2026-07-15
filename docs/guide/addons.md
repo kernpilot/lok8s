@@ -314,10 +314,10 @@ cause is fixed.
 A concrete example of the driver-layer in action — these values are
 set in `values.lo.yaml` and `values.kubeone.yaml`:
 
-| Driver | IPAM | Routing | Why |
-|--------|------|---------|-----|
-| Lo (kind) | `cluster-pool` | `tunnel` | Kind nodes are Docker containers — no L3 routing available |
-| KubeOne | `kubernetes` | `native` | Real infrastructure — native routing, kube-proxy replacement works |
+| Driver | IPAM | Routing | Encryption | Why |
+|--------|------|---------|------------|-----|
+| Lo (kind) | `cluster-pool` | `tunnel` | off | Kind nodes are containers on ONE host kernel — no L3 routing, and encrypting loopback-adjacent traffic buys nothing |
+| KubeOne | `kubernetes` | `tunnel` (vxlan) | **WireGuard** (pod + node) | Nodes span subnets/locations (cloud subnet + bare-metal vSwitch) — native routing needs one L2 segment; traffic crosses shared infrastructure, so it ships encrypted. Mind the MTU: smallest underlay − 50 (vxlan) − 80 (WireGuard) |
 
 ### MetalLB
 
