@@ -1,0 +1,67 @@
+# sso-gate — put any HTTP service behind OIDC single sign-on at the gateway.
+#
+# A generic, reusable atom in the oidc-rbac mold: bootstrap `sso-gate` by name
+# and any HTTPRoute you label `sso.lok8s.dev/protect: "true"` starts requiring
+# an OIDC login BEFORE traffic reaches the service — no sidecar, no app change.
+# Envoy Gateway's SecurityPolicy runs the whole flow (redirect to the issuer,
+# callback, session cookie, token validation) inside the gateway listener.
+#
+# Enforcement is a POLICY ATTACHMENT: routes without the label stay public.
+# Removing the label (or deleting this addon) makes the route public again;
+# the route object itself never changes shape.
+#
+# ── Requirements ──────────────────────────────────────────────────────────────
+#   - the `envoy-gateway` addon (SecurityPolicy is its CRD; any OIDC issuer works)
+#   - a client registered at your issuer with redirect URI
+#       https://<each-protected-host>/oauth2/callback
+#   - a Secret `sso-gate-client` (key `client-secret`) NEXT TO the policy —
+#     i.e. in this addon's namespace (see below). Use the secrets plugin:
+#       apiVersion: secrets.lok8s.dev/v1
+#       kind: Secret
+#       metadata: { name: sso-gate-client, namespace: default }
+#       env: { client-secret: SSO_GATE_CLIENT_SECRET }
+#
+# ── Namespacing (the one sharp edge) ─────────────────────────────────────────
+# `targetSelectors` only matches HTTPRoutes in the SAME namespace as the
+# SecurityPolicy. This addon ships the policy in `default` (where a stock
+# lok8s gateway target puts its routes). Routes in another namespace need
+# their own copy — layer it from a target:
+#
+#   apiVersion: kustomize.config.k8s.io/v1beta1
+#   kind: Kustomization
+#   namespace: my-apps
+#   resources: [<lok8s>/.lok8s/addons/sso-gate]
+#
+# ── Configuring the issuer (REQUIRED — patch BEFORE labeling routes) ─────────
+# The shipped issuer/clientID are placeholders whose OIDC discovery can never
+# succeed, so Envoy Gateway marks the policy not-Accepted at translation (EG
+# has no admission webhook). UNLABELED routes are never affected — but a route
+# that already carries the protect label while the policy is broken (bad
+# issuer, missing sso-gate-client Secret) answers 500: the gate FAILS CLOSED,
+# never open. Patch these from the consuming target (do NOT edit this addon):
+#
+#   patches:
+#     - target: { kind: SecurityPolicy, name: sso-gate }
+#       patch: |-
+#         - op: replace
+#           path: /spec/oidc/provider/issuer
+#           value: "https://id.example.com"
+#         - op: replace
+#           path: /spec/oidc/clientID
+#           value: "my-gateway-client"
+#
+# Works with ANY spec-compliant OIDC issuer (ZITADEL, Keycloak, authentik,
+# Dex, ...). kubehz hosted clusters get this wired automatically by the
+# kubehz operator instead of this addon.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: sso-gate
+      lok8s.dev/type: system
+      lok8s.dev/category: security
+
+resources:
+  - securitypolicy.yaml

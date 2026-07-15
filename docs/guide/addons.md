@@ -325,6 +325,54 @@ MetalLB uses the `${LOK8S_SPEC_LOADBALANCER_POOL}` envsubst variable
 from `spec.loadBalancer.pool` in the cluster spec. The pool range
 defines the IP addresses MetalLB can assign to LoadBalancer services.
 
+### sso-gate — OIDC login in front of any service
+
+`sso-gate` puts any HTTP service behind OIDC single sign-on **at the
+gateway** — no sidecar, no change to the app. It ships one Envoy Gateway
+[`SecurityPolicy`](https://gateway.envoyproxy.io/docs/tasks/security/oidc/)
+that matches every `HTTPRoute` labeled `sso.lok8s.dev/protect: "true"` in
+its namespace; Envoy runs the whole login flow (redirect to the issuer,
+callback, session cookie, token validation) before traffic reaches the
+service. Works with any spec-compliant OIDC issuer.
+
+```yaml
+spec:
+  bootstrap:
+    - envoy-gateway            # required: SecurityPolicy is its CRD
+    - sso-gate: { dependsOn: [envoy-gateway] }
+```
+
+(Without `envoy-gateway` the `SecurityPolicy` CRD does not exist: the
+apply retries a few times and then fails that bootstrap entry loudly —
+the rest of the DAG continues.)
+
+Then, per service you want protected:
+
+```yaml
+# on the service's HTTPRoute
+metadata:
+  labels:
+    sso.lok8s.dev/protect: "true"
+```
+
+Routes without the label stay public; removing the label makes a route
+public again. A labeled route with a broken policy (unpatched issuer,
+missing client Secret) answers **500 — the gate fails closed, never
+open** — so configure these three things *before* labeling any route
+(see the header of `.lok8s/addons/sso-gate/kustomization.yaml` for
+copy-paste patches):
+
+1. **Issuer + client ID** — patch `SecurityPolicy/sso-gate` from a
+   consuming target.
+2. **Client secret** — a Secret `sso-gate-client` (key `client-secret`)
+   in the policy's namespace, e.g. via the secrets plugin.
+3. **Redirect URI** — register `https://<each-protected-host>/oauth2/callback`
+   at your issuer.
+
+One sharp edge: `targetSelectors` only matches routes in the **same
+namespace** as the policy (shipped: `default`). For routes in another
+namespace, layer a second copy with a kustomize `namespace:` transform.
+
 ## Writing a custom addon
 
 1. Create a directory under `.lok8s/addons/<name>/`

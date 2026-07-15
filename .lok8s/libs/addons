@@ -186,7 +186,8 @@ addons::show() {
 }
 
 # Read an addon's lok8s.dev/category label from its manifests. Echoes the
-# category (infrastructure/networking/observability/storage/dev-tools) or "-".
+# category (infrastructure/networking/observability/storage/security/
+# gitops/dev-tools) or "-".
 addons::_category() {
   local dir="${1}" line cat=""
   # LC_ALL=C sort before head -1: grep -r traversal follows readdir order
@@ -224,6 +225,7 @@ addons::_config_hint() {
     redis-operator)               echo "declare Redis CRs in a target";;
     reflector)                    echo "annotate the source Secret/ConfigMap to mirror across namespaces";;
     rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
+    sso-gate)                     echo "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect";;
     system-upgrade-controller)    echo "declare upgrade Plans in a target (Rancher SUC)";;
     tempo)                        echo "configure trace storage/retention via the tempo values";;
     *)                            echo "";;
