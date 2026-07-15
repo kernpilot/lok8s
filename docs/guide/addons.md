@@ -317,7 +317,7 @@ set in `values.lo.yaml` and `values.kubeone.yaml`:
 | Driver | IPAM | Routing | Encryption | Why |
 |--------|------|---------|------------|-----|
 | Lo (kind) | `cluster-pool` | `tunnel` | off | Kind nodes are containers on ONE host kernel — no L3 routing, and encrypting loopback-adjacent traffic buys nothing |
-| KubeOne | `kubernetes` | `tunnel` (vxlan) | **WireGuard** (pod + node) | Nodes span subnets/locations (cloud subnet + bare-metal vSwitch) — native routing needs one L2 segment; traffic crosses shared infrastructure, so it ships encrypted. Mind the MTU: smallest underlay − 50 (vxlan) − 80 (WireGuard) |
+| KubeOne | `kubernetes` (driver) → `cluster-pool` effective on Hetzner (the provider layer wins the merge) | `tunnel` (vxlan) | **WireGuard** (pod + node) | Nodes span subnets/locations (cloud subnet + bare-metal vSwitch) — native routing needs one L2 segment; traffic crosses shared infrastructure, so it ships encrypted. Mind the MTU: smallest underlay − 50 (vxlan) − 80 (WireGuard); running pods keep their old veth MTU until restarted |
 
 ### MetalLB
 

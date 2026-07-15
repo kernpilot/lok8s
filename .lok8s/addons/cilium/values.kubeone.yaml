@@ -20,7 +20,9 @@ tunnelProtocol: vxlan
 # cilium device MTU must be <= 1270. 1250 leaves margin and is safe
 # across both the 1400 vswitch and 1450 cloud subnet. Getting this wrong
 # silently drops large pod-to-pod packets across the cloud<->baremetal
-# boundary (only small packets / TCP handshakes pass). NOTE on changes:
+# boundary (only small packets / TCP handshakes pass). The 1400-vSwitch
+# assumption also lives in docs/guide/cloud-init.md + bare-metal.md
+# (netplan `mtu: 1400`) — change them together. NOTE on changes:
 # running pods keep their veth MTU until recreated — an MTU lowering
 # needs a rolling restart of workloads to fully take effect.
 MTU: 1250
@@ -56,9 +58,10 @@ endpointRoutes:
 # mode, so no drop-until-encrypted window), but remember the MTU note
 # above — the 80-byte WireGuard overhead is why MTU is 1250, and pods
 # must be rolling-restarted after the change to pick the lower MTU up.
-# strictMode (mandate encryption, drop plaintext) is a deliberate
-# follow-up AFTER the fleet has soaked encrypted — flipping it first
-# risks partitioning pods on not-yet-rolled agents.
+# strictMode (mandate encryption, drop plaintext) requires NATIVE
+# routing — it is NOT available under tunnel/vxlan, so it is not a
+# quick follow-up here: it rides a future kubeProxyReplacement/native-
+# routing migration, if ever.
 encryption:
   enabled: true
   type: wireguard
@@ -78,16 +81,12 @@ bandwidthManager:
 # ── Operator HA ────────────────────────────────────────────────────────
 # Two operators on distinct nodes: IPAM/identity GC must survive a node
 # loss on a real multi-node cluster (kind keeps the base single replica).
+# The chart's DEFAULT podAntiAffinity already requires distinct hosts —
+# not restated here. On a single-node cluster the second replica stays
+# Pending (degraded, not deadlocked).
 operator:
   replicas: 2
   rollOutPods: true
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchLabels:
-              io.cilium/app: operator
-          topologyKey: kubernetes.io/hostname
 
 # Agent memory bounds (no CPU limit — throttling the datapath agent under
 # load hurts more than it protects).
@@ -98,8 +97,11 @@ resources:
   limits:
     memory: 3Gi
 
-# Production log volume; hubble carries the observability.
-logLevel: warning
+# Production log volume; hubble carries the observability. (`logOptions`
+# is the chart's real knob at 1.19.x — a bare `logLevel:` key is silently
+# ignored by the schema.)
+logOptions:
+  level: warning
 
 # Hubble on every agent (listenAddress :4244) so `hubble observe` works
 # per-node; relay aggregates cluster-wide for policy development.
