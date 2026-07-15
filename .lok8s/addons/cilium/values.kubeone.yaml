@@ -38,7 +38,7 @@ tunnelProtocol: vxlan
 # LOWERING shrinks the ceiling under running pods' veth and their large
 # packets blackhole — roll workloads promptly. A RAISE is safe for
 # existing pods: their old veth (old value) is at most the old ceiling
-# + 130 = the NEW ceiling when raising by >= 130, and exactly ON the
+# + 130 <= the NEW ceiling when raising by >= 130, and exactly ON the
 # ceiling at Δ=130 (equal is safe — traffic passes AT value−130).
 MTU: 1380
 
