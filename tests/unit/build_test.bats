@@ -19,6 +19,7 @@ setup() {
   # Source build.sh (and its deps that argsh `import` pulls in at runtime)
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
   # build::artifacts calls template::envsubst_whitelist for its envsubst pass. In
@@ -142,6 +143,7 @@ YAML
     import() { :; }
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
     export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
     export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
@@ -170,6 +172,7 @@ YAML
     import() { :; }
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
     export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
     export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
