@@ -945,7 +945,18 @@ bootstrap::apply() {
     export LOK8S_BOOTSTRAP_HOSTED=false
   fi
 
+  local -a bootstrap_entries
+  mapfile -t bootstrap_entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}")
+
+  if (( ${#bootstrap_entries[@]} == 0 )); then
+    debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"
+    return 0
+  fi
+
   # ── Hosted gate ────────────────────────────────────────────────────────
+  # AFTER the empty-entries return on purpose: a spec with no bootstrap
+  # entries (or an explicit `bootstrap: []` opt-out) must not probe the
+  # cluster at all, let alone print a misleading skip notice.
   # Two things make a hosted apply pointless right now, and they need
   # DIFFERENT messages (conflating them sends users chasing the wrong fix):
   #   1. The default hosted kubeconfig is OIDC/kubelogin — it carries no
@@ -969,7 +980,10 @@ bootstrap::apply() {
     fi
     local _ready
     # Ready may read "Ready" or "Ready,SchedulingDisabled" — match the prefix.
-    _ready=$(awk '$2 ~ /^Ready(,|$)/' <<<"${_nodes_out}" | wc -l | tr -d ' ')
+    # Control-plane-ROLE nodes don't count as workers (KKP-hosted user
+    # clusters register none — the CP runs as pods on the platform seed —
+    # but other hosted shapes might, and the message says "workers").
+    _ready=$(awk '$2 ~ /^Ready(,|$)/ && $3 !~ /control-plane|master/' <<<"${_nodes_out}" | wc -l | tr -d ' ')
     if [[ "${_ready:-0}" == "0" ]]; then
       echo "[bootstrap] hosted ${domain}: control plane is up but has no Ready workers yet —" >&2
       echo "[bootstrap] skipping bootstrap addons; re-run 'lo provision' (or 'lo bootstrap') after workers join." >&2
@@ -978,13 +992,6 @@ bootstrap::apply() {
     echo "[bootstrap] hosted ${domain}: ${_ready} Ready worker(s) — applying bootstrap addons" >&2
   fi
 
-  local -a bootstrap_entries
-  mapfile -t bootstrap_entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}")
-
-  if (( ${#bootstrap_entries[@]} == 0 )); then
-    debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"
-    return 0
-  fi
 
   # Export the API server endpoint (host + port) parsed from the
   # kubeconfig so addons can target the real control-plane LB endpoint via

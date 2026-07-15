@@ -2201,3 +2201,27 @@ YAML
   assert_success
   assert_output --partial "1 Ready worker(s)"
 }
+
+@test "hosted apply: Ready CONTROL-PLANE nodes do not count as workers" {
+  _hosted_apply_harness
+  kubectl() { printf 'cp1 Ready control-plane 1d v1.33\ncp2 Ready master 1d v1.33\n'; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "no Ready workers yet"
+}
+
+@test "hosted apply: an EMPTY bootstrap never probes the cluster" {
+  _hosted_apply_harness
+  # Overwrite the spec with no bootstrap entries; a kubectl call would fail loudly.
+  cat > "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: h }
+spec:
+  kubehz: { hosting: hosted }
+YAML
+  kubectl() { echo "PROBE_MUST_NOT_RUN" >&2; return 1; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  refute_output --partial "PROBE_MUST_NOT_RUN"
+}
