@@ -2115,3 +2115,116 @@ YAML
   [[ "$output" == *"configmap/a-one serverside-applied"* ]]
   [[ "$output" != *"· 1 resource"* ]]
 }
+
+# ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
+
+@test "hosted: _apply_one skips cilium unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium" "kubeone" "hetzner" "/kc" "" "" ""
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
+@test "hosted: _apply_one skips ccm unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "ccm" "/nonexistent/addons/ccm" "capi" "hetzner" "/kc" "" "" ""
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
+@test "hosted: a NAME-renamed cilium entry still skips (anchored on the addon dir)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "my-cni" "/nonexistent/addons/cilium" "kubeone" "hetzner" "/kc" "" "" ""
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
+@test "self-hosted: LOK8S_BOOTSTRAP_HOSTED=false does not trigger the hosted skip" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=false
+  # Non-kubeone kind so the driver skip does not fire either; prove the call
+  # REACHES the render step (the guard did not swallow it) by stubbing the
+  # render to fail loudly.
+  addons::render() { echo "RENDER_CALLED" >&2; return 1; }
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium" "capi" "hetzner" "/kc" "" "" ""
+  assert_failure
+  assert_output --partial "RENDER_CALLED"
+  refute_output --partial "platform-owned"
+}
+
+# ── hosted gates in bootstrap::apply (reachability vs no-workers) ────────────
+
+_hosted_apply_harness() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  mkdir -p "${PATH_CLUSTERS}/h.test"
+  cat > "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: h }
+spec:
+  kubehz: { hosting: hosted }
+  bootstrap: [cert-manager]
+YAML
+  echo "kc" > "${BATS_TEST_TMPDIR}/kc.yaml"
+}
+
+@test "hosted apply: unreachable cluster warns about the OIDC kubeconfig and skips (rc 0)" {
+  _hosted_apply_harness
+  kubectl() { echo "error: You must be logged in" >&2; return 1; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "cannot reach the cluster"
+  assert_output --partial "kubelogin"
+  refute_output --partial "no Ready workers"
+}
+
+@test "hosted apply: zero Ready workers skips with the workers notice (rc 0)" {
+  _hosted_apply_harness
+  kubectl() { printf 'cp1 NotReady control-plane 1d v1.33\n'; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "no Ready workers yet"
+  refute_output --partial "kubelogin"
+}
+
+@test "hosted apply: Ready,SchedulingDisabled COUNTS as a worker (prefix match)" {
+  _hosted_apply_harness
+  kubectl() { printf 'w1 Ready,SchedulingDisabled worker 1d v1.33\n'; }
+  # The gate now runs AFTER the entries-resolve (real spec: 1 entry), so it
+  # must PRINT the pass-through line; stop the run right after it by failing
+  # the entry parse — the assertion pair (worker line printed + rc!=0 from
+  # the stub) proves the gate passed and only the stub aborted.
+  bootstrap::_parse_entry() { return 1; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_failure
+  assert_output --partial "1 Ready worker(s)"
+  refute_output --partial "no Ready workers"
+}
+
+@test "hosted apply: Ready CONTROL-PLANE nodes do not count as workers" {
+  _hosted_apply_harness
+  kubectl() { printf 'cp1 Ready control-plane 1d v1.33\ncp2 Ready master 1d v1.33\n'; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  assert_output --partial "no Ready workers yet"
+}
+
+@test "hosted apply: an EMPTY bootstrap never probes the cluster" {
+  _hosted_apply_harness
+  # Overwrite the spec with no bootstrap entries; a kubectl call would fail loudly.
+  cat > "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: h }
+spec:
+  kubehz: { hosting: hosted }
+YAML
+  kubectl() { echo "PROBE_MUST_NOT_RUN" >&2; return 1; }
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_success
+  refute_output --partial "PROBE_MUST_NOT_RUN"
+}

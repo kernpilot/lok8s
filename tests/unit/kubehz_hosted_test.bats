@@ -625,3 +625,52 @@ clusters:
   assert_success
   assert_output --partial "capi_hosted_destroy_called"
 }
+
+# ── provision_hosted → dispatch kubeconfig mirror ────────────────────────────
+# provision::dispatch applies the bootstrap DAG with .kubeconfig/<metadata.name>
+# .yaml — provision_hosted mirrors its domain-keyed download there when the two
+# names differ (the hosted gates themselves live in bootstrap::apply and are
+# covered by bootstrap_test.bats).
+
+_hosted_kc_harness() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.test" KUBEHZ_TOKEN="t"
+  curl() {
+    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then echo "kc-bytes"; return 0; fi
+    printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
+  }
+  export -f curl
+  kubehz::wait_for_cluster() { :; }
+  debug() { :; }; error() { echo "ERR: $*" >&2; }
+}
+
+@test "provision_hosted: mirrors the kubeconfig to the metadata.name path when it differs" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "shortname" ;; *) echo "1" ;; esac; }
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  [[ -f "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml" ]] || fail "domain kubeconfig missing"
+  [[ -f "${PATH_BASE}/.kubeconfig/shortname.yaml" ]] || fail "metadata.name mirror missing"
+  run cat "${PATH_BASE}/.kubeconfig/shortname.yaml"
+  assert_output "kc-bytes"
+}
+
+@test "provision_hosted: no mirror when metadata.name equals the domain" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  [[ -f "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml" ]] || fail "domain kubeconfig missing"
+}
+
+@test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name'*) echo "shortname" ;; *) echo "1" ;; esac; }
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  echo kc > "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
+  echo kc > "${PATH_BASE}/.kubeconfig/shortname.yaml"
+  run kubehz::destroy_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  [[ ! -f "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml" ]] || fail "domain kubeconfig leaked"
+  [[ ! -f "${PATH_BASE}/.kubeconfig/shortname.yaml" ]] || fail "mirror kubeconfig leaked (build would prefer it)"
+}

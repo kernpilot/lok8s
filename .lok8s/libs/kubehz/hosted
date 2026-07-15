@@ -188,6 +188,25 @@ kubehz::provision_hosted() {
   }
 
   debug "Hosted cluster ${domain} ready, kubeconfig at ${kubeconfig_path}"
+
+  # provision::dispatch runs the shared bootstrap::apply AFTER this driver
+  # returns, reading .kubeconfig/<metadata.name>.yaml — mirror the download
+  # there when the spec's metadata.name differs from the domain, or the
+  # dispatch tail fails on a missing kubeconfig right after a successful
+  # hosted provision. (bootstrap::apply itself owns the hosted gates:
+  # OIDC-kubeconfig reachability, Ready-worker check, platform-owned skips.)
+  chmod 600 "${kubeconfig_path}" || true
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  if [[ -n "${cluster_name}" && "${cluster_name}" != "null" && "${cluster_name}" != "${domain}" ]]; then
+    # Guarded: a pathological metadata.name must not fail a provision that
+    # already succeeded — warn and leave the domain-keyed file as the source.
+    if cp "${kubeconfig_path}" "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" 2>/dev/null; then
+      chmod 600 "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" || true
+    else
+      echo "[kubehz] warning: could not mirror the kubeconfig to .kubeconfig/${cluster_name}.yaml — the bootstrap step will report it missing" >&2
+    fi
+  fi
 }
 
 # Destroy a hosted cluster via the kubehz API.
@@ -213,6 +232,15 @@ kubehz::destroy_hosted() {
     debug "No hosted cluster found for ${domain}, nothing to destroy"
   fi
 
-  # Clean up local kubeconfig
+  # Clean up local kubeconfigs — the domain-keyed download AND the
+  # metadata.name mirror provision_hosted made for the dispatch tail. A
+  # stale mirror is not cosmetic: libs/build PREFERS <metadata.name>.yaml
+  # when present, so after destroy+reprovision it would silently feed
+  # builds with the dead cluster's credentials.
   rm -f "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local _mirror_name
+  _mirror_name=$(yq -r '.metadata.name // ""' "${cluster_yaml}" 2>/dev/null) || _mirror_name=""
+  if [[ -n "${_mirror_name}" && "${_mirror_name}" != "null" && "${_mirror_name}" != "${domain}" ]]; then
+    rm -f "${PATH_BASE}/.kubeconfig/${_mirror_name}.yaml"
+  fi
 }
