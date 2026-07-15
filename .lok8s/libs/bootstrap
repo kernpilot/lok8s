@@ -957,7 +957,9 @@ bootstrap::apply() {
   # is fine); re-running `lo provision`/`lo bootstrap` later is idempotent.
   if [[ "${LOK8S_BOOTSTRAP_HOSTED}" == "true" ]]; then
     local _nodes_out _nodes_rc=0
-    _nodes_out=$(kubectl --kubeconfig "${kubeconfig}" get nodes --no-headers 2>&1) || _nodes_rc=$?
+    # Bounded: kubectl's default request timeout is unlimited — a transient
+    # API problem must not stall the provisioning path (Copilot round 1).
+    _nodes_out=$(kubectl --kubeconfig "${kubeconfig}" --request-timeout=15s get nodes --no-headers 2>&1) || _nodes_rc=$?
     if (( _nodes_rc != 0 )); then
       echo "[bootstrap] hosted ${domain}: cannot reach the cluster with ${kubeconfig}" >&2
       echo "[bootstrap] the default hosted kubeconfig is OIDC (kubelogin + a browser sign-in) — install the" >&2
