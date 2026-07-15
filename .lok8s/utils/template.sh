@@ -50,3 +50,59 @@ template::render_dir() {
 template::envsubst_whitelist() {
   env | awk -F= '/^LOK8S_(SPEC|USER)_/ {printf "${%s} ", $1}'
 }
+
+# ── envsubst flavor shim ─────────────────────────────────────────────────────
+# Everywhere lok8s renders manifests it restricts substitution to an explicit
+# variable list, so arbitrary `$…` in user content survives untouched. GNU
+# gettext envsubst takes that list as one SHELL-FORMAT positional arg
+# ('${A} ${B}'); renvsubst — the envsubst `b` curates (.bin/b.yaml alias) —
+# REJECTS positional args ("ERROR: Unknown flag", exit 1, which under pipefail
+# fails the whole build) and expects --variable/--prefix filters instead.
+# template::envsubst takes the GNU SHELL-FORMAT string and speaks whichever
+# dialect the `envsubst` on PATH understands. Both flavors substitute a
+# listed-but-unset var with the empty string, so behavior is identical.
+# Restricted call sites go through this shim; a bare `envsubst < file`
+# (substitute-everything) works in both flavors and needs no shim.
+
+# Flavor is per-process stable — detect once, cache.
+declare -g _TEMPLATE_ENVSUBST_FLAVOR=""
+
+# Usage: template::envsubst_flavor  → echoes "gnu" or "renvsubst"
+template::envsubst_flavor() {
+  if [[ -z "${_TEMPLATE_ENVSUBST_FLAVOR}" ]]; then
+    if envsubst --version 2>/dev/null | grep -q "GNU gettext"; then
+      _TEMPLATE_ENVSUBST_FLAVOR="gnu"
+    else
+      _TEMPLATE_ENVSUBST_FLAVOR="renvsubst"
+    fi
+  fi
+  echo "${_TEMPLATE_ENVSUBST_FLAVOR}"
+}
+
+# Substitute stdin→stdout restricted to the vars named in a GNU SHELL-FORMAT
+# string. An empty/whitespace-only list replaces NOTHING (GNU semantics) —
+# critical under renvsubst, whose filterless default substitutes EVERYTHING.
+# Usage: … | template::envsubst '${VAR_A} ${VAR_B} '
+template::envsubst() {
+  local shell_format="${1:-}"
+  local -a vars=()
+  local tok
+  # Word-splitting the format string IS the parse: '${A} ${B}' → A B.
+  # shellcheck disable=SC2086
+  for tok in ${shell_format}; do
+    tok="${tok#\$}"
+    tok="${tok#\{}"
+    tok="${tok%\}}"
+    [[ -z "${tok}" ]] || vars+=("${tok}")
+  done
+  if (( ${#vars[@]} == 0 )); then
+    cat
+  elif [[ "$(template::envsubst_flavor)" == "gnu" ]]; then
+    envsubst "${shell_format}"
+  else
+    local -a args=()
+    local v
+    for v in "${vars[@]}"; do args+=("--variable=${v}"); done
+    envsubst "${args[@]}"
+  fi
+}

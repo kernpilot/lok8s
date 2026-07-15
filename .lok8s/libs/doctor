@@ -8,6 +8,7 @@
 
 import ^utils/verbose
 import ^utils/provider
+import ^utils/template
 
 main::doctor() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -36,7 +37,14 @@ main::doctor() {
   doctor::_tool yq         1 "YAML processor"                            || fail=1
   doctor::_tool kustomize  1 "manifest builder"                         || fail=1
   doctor::_tool kubectl    1 "Kubernetes CLI"                           || fail=1
-  doctor::_tool envsubst   1 "variable substitution (gettext)"          || fail=1
+  if doctor::_tool envsubst 1 "variable substitution"; then
+    # Both dialects are supported via template::envsubst (GNU gettext takes a
+    # SHELL-FORMAT arg, renvsubst takes --variable filters) — report which one
+    # is on PATH so a substitution surprise is diagnosable at a glance.
+    doctor::_ok "envsubst flavor: $(template::envsubst_flavor)"
+  else
+    fail=1
+  fi
   doctor::_tool docker     1 "container runtime"                        || fail=1
   doctor::_tool jq         0 "JSON processor"
   doctor::_tool kind       0 "local clusters (Lo driver)"

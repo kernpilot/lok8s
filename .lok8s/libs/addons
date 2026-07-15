@@ -364,7 +364,7 @@ addons::render() {
   # every container env value to a string; `valueFrom` entries (no `value`) are
   # left untouched.
   out=$(KHELM_TRUST_ANY_REPO=true kustomize build --enable-alpha-plugins --enable-exec "${build_dir}" \
-          | envsubst "${whitelist}" \
+          | template::envsubst "${whitelist}" \
           | yq eval '(.. | select(tag == "!!map" and has("env") and (.env | tag == "!!seq")) | .env[] | select(has("value")) | .value) |= tostring') || rc=$?
   [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
   # A successful build that yields nothing means the addon rendered no resources —

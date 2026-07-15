@@ -33,6 +33,18 @@
 : "${CLOUD_GROUP:="root"}"
 : "${CLOUD_PATH_PUB:="${HOME}/.ssh"}"
 
+# Restricted envsubst for `.stat` var lists: inside `lo` delegate to
+# template::envsubst (handles both GNU gettext and renvsubst — the latter
+# rejects the SHELL-FORMAT positional arg); sourced standalone we keep the
+# historical direct call, which needs GNU envsubst.
+cloud-config::envsubst() {
+  if declare -F template::envsubst &>/dev/null; then
+    template::envsubst "${1}"
+  else
+    envsubst "${1}"
+  fi
+}
+
 # Read all *.pub keys from CLOUD_PATH_PUB
 ssh::pub() {
   unset IFS
@@ -114,7 +126,7 @@ cloud-config::write_files() {
         if [ "${vars}" = "true" ]; then
           content="$(envsubst < <(echo "${content}"))"
         else
-          content="$(envsubst "${vars}" < <(echo "${content}"))"
+          content="$(cloud-config::envsubst "${vars}" < <(echo "${content}"))"
         fi
       }
     }
@@ -232,7 +244,7 @@ cloud-config::remote-script() {
         if [ "${vars}" = "true" ]; then
           content="$(envsubst < <(echo "${content}"))"
         else
-          content="$(envsubst "${vars}" < <(echo "${content}"))"
+          content="$(cloud-config::envsubst "${vars}" < <(echo "${content}"))"
         fi
       }
     }
