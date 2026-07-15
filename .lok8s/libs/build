@@ -344,7 +344,7 @@ build::artifacts() {
      KHELM_TRUST_ANY_REPO=true \
      LOK8S_SECRETS_DISABLE="${secrets_disable}" \
        kustomize build --enable-alpha-plugins "${domain_dir}" \
-       | envsubst "${envsubst_whitelist}" \
+       | template::envsubst "${envsubst_whitelist}" \
        > "${tmp}"; then
     mv "${tmp}" "${domain_dir}/artifacts.yaml"
   else

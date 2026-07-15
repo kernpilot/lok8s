@@ -28,6 +28,7 @@ setup() {
   export -f import
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
   command -v yq &>/dev/null || skip "yq not available"
