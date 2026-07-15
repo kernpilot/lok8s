@@ -55,33 +55,41 @@ template::envsubst_whitelist() {
 # Everywhere lok8s renders manifests it restricts substitution to an explicit
 # variable list, so arbitrary `$…` in user content survives untouched. GNU
 # gettext envsubst takes that list as one SHELL-FORMAT positional arg
-# ('${A} ${B}'); renvsubst — the envsubst `b` curates (.bin/b.yaml alias) —
-# REJECTS positional args ("ERROR: Unknown flag", exit 1, which under pipefail
-# fails the whole build) and expects --variable/--prefix filters instead.
-# template::envsubst takes the GNU SHELL-FORMAT string and speaks whichever
-# dialect the `envsubst` on PATH understands. Both flavors substitute a
-# listed-but-unset var with the empty string, so behavior is identical.
-# Restricted call sites go through this shim; a bare `envsubst < file`
-# (substitute-everything) works in both flavors and needs no shim.
+# ('${A} ${B}'). Every other flavor is UNFIT for filtering a manifest stream:
+# renvsubst (the envsubst `b` curates) rejects the positional arg outright,
+# and even with --variable filters its expression parser chokes on shell
+# embedded in ConfigMaps — `${arr[0]}` hard-fails the whole pipe and
+# `${V:?required}` is silently rewritten to `${V}` (content corruption) even
+# when V is not in the filter. And no GitHub-releases alternative fits either:
+# a8m/envsubst has no whitelist (and empties unset refs), drone/envsubst is a
+# library. So template::envsubst uses GNU envsubst when that's what's on
+# PATH, and otherwise substitutes NATIVELY — no envsubst needed at all for
+# the restricted path. Only bare substitute-everything `envsubst < file`
+# sites (framework-owned templates, no exotic `${…}`) touch the binary
+# directly.
 
 # Flavor is per-process stable — detect once, cache.
 declare -g _TEMPLATE_ENVSUBST_FLAVOR=""
 
-# Usage: template::envsubst_flavor  → echoes "gnu" or "renvsubst"
+# Usage: template::envsubst_flavor  → echoes "gnu" or "other"
 template::envsubst_flavor() {
   if [[ -z "${_TEMPLATE_ENVSUBST_FLAVOR}" ]]; then
     if envsubst --version 2>/dev/null | grep -q "GNU gettext"; then
       _TEMPLATE_ENVSUBST_FLAVOR="gnu"
     else
-      _TEMPLATE_ENVSUBST_FLAVOR="renvsubst"
+      _TEMPLATE_ENVSUBST_FLAVOR="other"
     fi
   fi
   echo "${_TEMPLATE_ENVSUBST_FLAVOR}"
 }
 
 # Substitute stdin→stdout restricted to the vars named in a GNU SHELL-FORMAT
-# string. An empty/whitespace-only list replaces NOTHING (GNU semantics) —
-# critical under renvsubst, whose filterless default substitutes EVERYTHING.
+# string. An empty/whitespace-only list replaces NOTHING (GNU semantics).
+# GNU envsubst handles it when present; otherwise a native jq pass replaces
+# exactly the literal `${NAME}` and boundary-delimited `$NAME` tokens of the
+# listed vars (listed-but-unset → empty string, like GNU) and guarantees every
+# other byte of the stream — including `${arr[0]}`/`${x:?}` shell in embedded
+# scripts — passes through untouched.
 # Usage: … | template::envsubst '${VAR_A} ${VAR_B} '
 template::envsubst() {
   local shell_format="${1:-}"
@@ -100,9 +108,19 @@ template::envsubst() {
   elif [[ "$(template::envsubst_flavor)" == "gnu" ]]; then
     envsubst "${shell_format}"
   else
-    local -a args=()
-    local v
-    for v in "${vars[@]}"; do args+=("--variable=${v}"); done
-    envsubst "${args[@]}"
+    # jq, deliberately not awk/sed/perl: jq has exactly ONE implementation
+    # (b-pinned in the toolchain, required below by lo anyway) while awk
+    # forks (gawk/mawk/busybox) disagree on regex details. Var names are
+    # [A-Za-z0-9_] so they are regex-safe verbatim; the replacement value is
+    # a jq string variable and therefore literal (no `&`/backref surprises);
+    # the lookahead is the identifier boundary GNU applies to unbraced $NAME
+    # ($FOO must not fire inside $FOOBAR). Unset/empty → "" like GNU (jq's
+    # // only triggers on null, so a set-but-empty value stays "").
+    jq -Rr --arg names "${vars[*]}" '
+      ($names | split(" ") | map(select(length > 0))) as $ns
+      | reduce $ns[] as $n (.;
+          gsub("\\$\\{" + $n + "\\}"; ($ENV[$n] // ""))
+          | gsub("\\$" + $n + "(?![A-Za-z0-9_])"; ($ENV[$n] // "")))
+    '
   fi
 }

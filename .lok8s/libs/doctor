@@ -38,15 +38,17 @@ main::doctor() {
   doctor::_tool kustomize  1 "manifest builder"                         || fail=1
   doctor::_tool kubectl    1 "Kubernetes CLI"                           || fail=1
   if doctor::_tool envsubst 1 "variable substitution"; then
-    # Both dialects are supported via template::envsubst (GNU gettext takes a
-    # SHELL-FORMAT arg, renvsubst takes --variable filters) — report which one
-    # is on PATH so a substitution surprise is diagnosable at a glance.
+    # Restricted (whitelist) substitution uses GNU envsubst when that is what
+    # is on PATH and a native jq pass otherwise (template::envsubst) — report
+    # the flavor so a substitution surprise is diagnosable at a glance.
     doctor::_ok "envsubst flavor: $(template::envsubst_flavor)"
   else
     fail=1
   fi
   doctor::_tool docker     1 "container runtime"                        || fail=1
-  doctor::_tool jq         0 "JSON processor"
+  # jq is REQUIRED: template::envsubst's native path (any non-GNU envsubst,
+  # e.g. b's renvsubst alias) substitutes via jq.
+  doctor::_tool jq         1 "JSON processor (restricted substitution)"       || fail=1
   doctor::_tool kind       0 "local clusters (Lo driver)"
   doctor::_tool tilt       0 "dev loop (Lo driver)"
   doctor::_tool mkcert     0 "local TLS (Lo driver)"
