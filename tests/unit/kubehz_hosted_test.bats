@@ -625,3 +625,58 @@ clusters:
   assert_success
   assert_output --partial "capi_hosted_destroy_called"
 }
+
+# ── provision_hosted → customer bootstrap addons ─────────────────────────────
+# The tail of provision_hosted: after the kubeconfig lands, the spec's
+# bootstrap DAG is applied onto the hosted cluster — node-gated (a CP-only
+# cluster skips with a re-run notice) and entry-gated (no entries: quiet).
+
+_hosted_bootstrap_harness() {
+  # Source the hosted lib fresh with stubs for everything up to the tail.
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.test" KUBEHZ_TOKEN="t"
+  export BLOG="${BATS_TEST_TMPDIR}/calls.log"; : > "${BLOG}"
+  # API happy path: create -> 201 + id, then ready, then kubeconfig bytes.
+  curl() {
+    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then echo "kc-bytes"; return 0; fi
+    printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
+  }
+  export -f curl
+  kubehz::wait_for_cluster() { :; }
+  bootstrap::apply() { echo "bootstrap::apply $*" >> "${BLOG}"; }
+  debug() { :; }; error() { echo "ERR: $*" >&2; }
+}
+
+@test "provision_hosted: applies bootstrap when workers are Ready" {
+  _hosted_bootstrap_harness
+  yq() { case "$2" in *bootstrap*) echo "2" ;; *) echo "x" ;; esac; }
+  kubectl() { printf 'w1 Ready worker 1d v1.33\nw2 Ready worker 1d v1.33\n'; }
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  assert_output --partial "applying 2 bootstrap addon(s)"
+  run cat "${BLOG}"
+  assert_output --partial "bootstrap::apply test.kubehz.dev /dev/null"
+}
+
+@test "provision_hosted: skips bootstrap with a notice when no Ready workers" {
+  _hosted_bootstrap_harness
+  yq() { case "$2" in *bootstrap*) echo "3" ;; *) echo "x" ;; esac; }
+  kubectl() { return 1; } # CP up, zero nodes visible
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  assert_output --partial "no Ready workers yet"
+  assert_output --partial "re-run 'lo provision'"
+  run cat "${BLOG}"
+  refute_output --partial "bootstrap::apply"
+}
+
+@test "provision_hosted: quiet when the spec has no bootstrap entries" {
+  _hosted_bootstrap_harness
+  yq() { case "$2" in *bootstrap*) echo "0" ;; *) echo "x" ;; esac; }
+  kubectl() { printf 'w1 Ready worker 1d v1.33\n'; }
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  refute_output --partial "applying"
+  run cat "${BLOG}"
+  refute_output --partial "bootstrap::apply"
+}

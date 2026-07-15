@@ -8,6 +8,7 @@
 # libs/kubehz/main; not directly executable.
 
 import ^utils/verbose
+import ^libs/bootstrap
 
 # ── Hosted provisioning ──────────────────────────────────
 
@@ -188,6 +189,33 @@ kubehz::provision_hosted() {
   }
 
   debug "Hosted cluster ${domain} ready, kubeconfig at ${kubeconfig_path}"
+
+  # ── Customer bootstrap addons ──────────────────────────────────────────
+  # Apply the spec's bootstrap DAG onto the hosted cluster, same as a
+  # self-hosted provision would — the hosted spec's bootstrap section used
+  # to be silently dead (provision returned right here). Two guards:
+  #   • CNI-class addons (cilium/ccm) are PLATFORM-OWNED on hosted clusters
+  #     (KKP manages the CNI as a system application; the CCM runs seed-side)
+  #     — bootstrap::_apply_one skips them unconditionally via the
+  #     LOK8S_BOOTSTRAP_HOSTED flag bootstrap::apply exports.
+  #   • A CP-only cluster (no Ready workers yet) can't run addon workloads,
+  #     and wait-gated entries would hang — skip with a clear notice; the
+  #     apply is idempotent, re-run `lo provision`/`lo up` once workers join.
+  local entries ready_nodes
+  entries=$(yq -r '.spec.bootstrap // [] | length' "${cluster_yaml}")
+  if [[ "${entries}" == "0" ]]; then
+    debug "hosted ${domain}: no bootstrap entries"
+    return 0
+  fi
+  ready_nodes=$(kubectl --kubeconfig "${kubeconfig_path}" get nodes --no-headers 2>/dev/null \
+    | awk '$2 == "Ready"' | wc -l | tr -d ' ')
+  if [[ "${ready_nodes:-0}" == "0" ]]; then
+    echo "[kubehz] ${domain}: hosted control plane is up but has no Ready workers yet —" >&2
+    echo "[kubehz] skipping the ${entries} bootstrap addon(s); re-run 'lo provision' (or 'lo up') after workers join" >&2
+    return 0
+  fi
+  echo "[kubehz] applying ${entries} bootstrap addon(s) onto hosted ${domain} (${ready_nodes} Ready worker(s))" >&2
+  bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig_path}"
 }
 
 # Destroy a hosted cluster via the kubehz API.

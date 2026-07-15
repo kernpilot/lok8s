@@ -2115,3 +2115,42 @@ YAML
   [[ "$output" == *"configmap/a-one serverside-applied"* ]]
   [[ "$output" != *"· 1 resource"* ]]
 }
+
+# ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
+
+@test "hosted: _apply_one skips cilium unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium" "kubeone" "hetzner" "/kc" "" "" ""
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
+@test "hosted: _apply_one skips ccm unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "ccm" "/nonexistent/addons/ccm" "capi" "hetzner" "/kc" "" "" ""
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
+@test "hosted: a NAME-renamed cilium entry still skips (anchored on the addon dir)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "my-cni" "/nonexistent/addons/cilium" "kubeone" "hetzner" "/kc" "" "" ""
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
+@test "self-hosted: LOK8S_BOOTSTRAP_HOSTED=false does not trigger the hosted skip" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=false
+  # Non-kubeone kind so the driver skip does not fire either; prove the call
+  # REACHES the render step (the guard did not swallow it) by stubbing the
+  # render to fail loudly.
+  addons::render() { echo "RENDER_CALLED" >&2; return 1; }
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium" "capi" "hetzner" "/kc" "" "" ""
+  assert_failure
+  assert_output --partial "RENDER_CALLED"
+  refute_output --partial "platform-owned"
+}

@@ -39,6 +39,25 @@ Two independent axes:
 must be **HTTPS** — the agent's bearer token travels on this URL, so `lo`
 refuses plain-HTTP endpoints outright.
 
+## Bootstrap addons on hosted clusters
+
+Your spec's `bootstrap` section applies to a **hosted** cluster too: after
+`lo provision` has the control plane running and the kubeconfig downloaded,
+the same bootstrap DAG a self-hosted cluster gets is applied onto it — your
+gateway, sso-gate, cert-manager, whatever you declared. Two hosted-specific
+rules:
+
+- **`cilium` and `ccm` are platform-owned** and always skipped (matched on
+  the addon directory, so a `name:`-renamed entry skips too): the platform
+  manages the CNI as a KKP system application — with WireGuard encryption
+  on by default — and runs the cloud integration on its side. Declaring
+  them is harmless; bootstrapping your own copy would fight the platform
+  for the datapath, so `lo` refuses on your behalf.
+- **Workers first**: a control plane with no Ready workers can't run addon
+  workloads, and `wait:`-gated entries would hang — `lo` skips the
+  bootstrap with a notice and you re-run `lo provision` (or `lo up`) once
+  workers have joined. The apply is idempotent.
+
 ## Registration
 
 When `access` is `registered` or `managed`, the cluster registers itself
