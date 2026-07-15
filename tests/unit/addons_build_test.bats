@@ -22,7 +22,11 @@ setup() {
     # (anchored: a comment mentioning ChartRenderer must not lose coverage).
     [[ -f "${dir}chart.yaml" ]] && continue
     grep -rlqE '^kind: ChartRenderer' "${dir}" && continue
-    kustomize build "${dir}" >/dev/null 2>&1 || failed+=("${name}")
+    # Keep the build's stderr: on failure it goes into the fail message so
+    # the CI log names the actual kustomize error, not just the addon.
+    if ! out=$(kustomize build "${dir}" 2>&1 >/dev/null); then
+      failed+=("${name}: ${out}")
+    fi
     built=$((built + 1))
   done
   [[ ${#failed[@]} -eq 0 ]] || fail "raw addon(s) failed kustomize build: ${failed[*]}"
