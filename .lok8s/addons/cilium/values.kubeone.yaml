@@ -14,22 +14,35 @@ ipam:
 routingMode: tunnel
 tunnelProtocol: vxlan
 
-# MTU: the encapsulated (outer) packet must fit the SMALLEST underlying
-# link on any node-to-node path. The fsn1 vSwitch is 1400; with vxlan
-# overhead (50) PLUS WireGuard overhead (80 — encryption below) the
-# cilium device MTU must be <= 1270. 1250 leaves margin and is safe
-# across both the 1400 vswitch and 1450 cloud subnet. Getting this wrong
-# silently drops large pod-to-pod packets across the cloud<->baremetal
-# boundary (only small packets / TCP handshakes pass). The 1400-vSwitch
-# assumption also lives in docs/guide/cloud-init.md + bare-metal.md
-# (netplan `mtu: 1400`) — change them together. ⚠ On an MTU LOWERING:
-# running pods keep their old (larger) veth MTU until recreated, and with
-# the new overhead their large packets now BLACKHOLE on the smallest-link
-# paths — an active regression, not a missed optimization. Roll all
-# workloads promptly after applying. (The cilium_wg0 device itself is
-# safe: with an explicit MTU, v1.19 derives wg0 = MTU - 80 = 1170 —
-# pkg/mtu/cell.go configuredMTU branch + the wireguard mtu-reconciler.)
-MTU: 1250
+# MTU — measured semantics at cilium 1.19.2 (live ladder-test, 2026-07-15;
+# the naive reading cost a prod blackhole window):
+#   * pod veth MTU     = THIS VALUE, RAW (no overhead subtraction!)
+#   * cilium_wg0       = value − 80   (WireGuard overhead)
+#   * node route MTU   = value − 130  (vxlan 50 + WireGuard 80)
+#   * effective inner ceiling = value − 130 (measured: inner traffic
+#     passes at exactly value−130 and blackholes one byte above; whether
+#     wg0 = value−80 binding the vxlan'd packet or the value−130 node
+#     routes pin it is indistinguishable from outside — the arithmetic
+#     is the same either way).
+# So pods BELIEVE the raw value but can only push value−130 cross-node:
+# TCP survives via PMTUD/MSS; UDP/ICMP above the ceiling silently drop.
+# Pick the value so that:
+#   1. ceiling (value−130) ≥ 1232 (EDNS default — DNS must never truncate
+#      into the blackhole), and
+#   2. the max wire frame (= ceiling + 130 = value) ≤ the SMALLEST
+#      underlay link on any node path. The fsn1 vSwitch is 1400 (also in
+#      docs/guide/cloud-init.md + bare-metal.md netplan — change together);
+#      cloud subnets are 1450.
+# 1380 → ceiling 1250, wire ≤ 1380, margin 20 to the vSwitch. ⚠ On any
+# change: running pods keep their old veth until restarted; a value
+# LOWERING shrinks the ceiling under running pods' veth and their large
+# packets blackhole — roll workloads promptly. A RAISE never introduces
+# new blackholing for existing pods (the ceiling only moves up); at
+# Δ >= 130 the raise additionally ELIMINATES the old blackhole class for
+# already-running pods without restarting them (their old veth = old
+# value lands at or under the new ceiling; equal is safe — traffic
+# passes AT value−130).
+MTU: 1380
 
 # kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
 kubeProxyReplacement: false
@@ -60,8 +73,8 @@ endpointRoutes:
 # got lost early in the project; restored 2026-07-15. Enabling on a LIVE
 # cluster is supported: agents pair up as keys distribute (no strict
 # mode, so no drop-until-encrypted window), but remember the MTU note
-# above — the 80-byte WireGuard overhead is why MTU is 1250, and pods
-# must be rolling-restarted after the change to pick the lower MTU up.
+# above — the WireGuard overhead is baked into the value−130 ceiling,
+# and an MTU LOWERING needs a prompt workload roll (see the MTU note).
 # strictMode (mandate encryption, drop plaintext) requires NATIVE
 # routing — it is NOT available under tunnel/vxlan, so it is not a
 # quick follow-up here: it rides a future kubeProxyReplacement/native-
