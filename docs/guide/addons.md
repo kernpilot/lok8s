@@ -355,8 +355,8 @@ Routes without the label stay public; removing the label makes a route
 public again. A labeled route with a broken policy (unpatched issuer,
 missing client Secret) answers **500 — the gate fails closed, never
 open** — so configure these three things *before* labeling any route
-(see the header of `addons/sso-gate/kustomization.yaml` for copy-paste
-patches):
+(see the header of `.lok8s/addons/sso-gate/kustomization.yaml` for
+copy-paste patches):
 
 1. **Issuer + client ID** — patch `SecurityPolicy/sso-gate` from a
    consuming target.
