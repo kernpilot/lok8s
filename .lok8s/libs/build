@@ -7,6 +7,7 @@
 
 import ^utils/types
 import ^utils/verbose
+import ^utils/template
 
 main::build() {
   local domain="${domain:-${DOMAIN_NAME:-}}"

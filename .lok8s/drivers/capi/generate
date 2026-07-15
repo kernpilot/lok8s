@@ -80,7 +80,7 @@ capi::generate() {
       "${core}/kubeadm-control-plane.yaml" \
       "${prov}/hcloud-machine-template-controlplane.yaml"; do
       (( first )) || echo "---"; first=0
-      envsubst "${allowed_vars}" < "${tpl}"
+      template::envsubst "${allowed_vars}" < "${tpl}"
     done
     # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
     export POOL_NAME POOL_REPLICAS POOL_TYPE
