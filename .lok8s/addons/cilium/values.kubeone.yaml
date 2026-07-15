@@ -66,27 +66,15 @@ k8sServicePort: "${LOK8S_USER_API_PORT}"
 endpointRoutes:
   enabled: true
 
-# ── Encryption (WireGuard) ─────────────────────────────────────────────
-# Transparent encryption of ALL pod-to-pod and node-to-node traffic —
-# in-kernel WireGuard (>= 5.6; KubeOne targets Ubuntu LTS, comfortably
-# newer). This was part of the original production reference config and
-# got lost early in the project; restored 2026-07-15. Enabling on a LIVE
-# cluster is supported: agents pair up as keys distribute (no strict
-# mode, so no drop-until-encrypted window), but remember the MTU note
-# above — the WireGuard overhead is baked into the value−130 ceiling,
-# and an MTU LOWERING needs a prompt workload roll (see the MTU note).
-# strictMode (mandate encryption, drop plaintext) requires NATIVE
-# routing — it is NOT available under tunnel/vxlan, so it is not a
-# quick follow-up here: it rides a future kubeProxyReplacement/native-
-# routing migration, if ever.
-encryption:
-  enabled: true
-  type: wireguard
-  # Node-to-node too (host-owned traffic between cluster nodes), not just
-  # pod-to-pod: on Hetzner the vSwitch/private-network path crosses
-  # shared infrastructure.
-  nodeEncryption: true
-
+# ── Encryption (WireGuard) — lives in the PROVIDER layer ───────────────
+# encryption.{enabled,type,nodeEncryption} moved to values.hetzner.yaml
+# (merged ON TOP of this file for any Hetzner cluster): the rationale —
+# node traffic crossing shared Hetzner infrastructure — is a property of
+# the PROVIDER, not this driver, and the provider layer also covers
+# CAPI/CAPH clusters. The MTU above still assumes the WireGuard overhead
+# (the value−130 ceiling): a KubeOne cluster on a provider WITHOUT an
+# encryption layer just gains 80 bytes of unused headroom — safe, never
+# a blackhole.
 # ── Bandwidth manager + BBR ────────────────────────────────────────────
 # eBPF-based egress shaping (per-pod limits via the
 # kubernetes.io/egress-bandwidth annotation) + BBR congestion control
