@@ -224,6 +224,7 @@ addons::_config_hint() {
     redis-operator)               echo "declare Redis CRs in a target";;
     reflector)                    echo "annotate the source Secret/ConfigMap to mirror across namespaces";;
     rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
+    sso-gate)                     echo "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect";;
     system-upgrade-controller)    echo "declare upgrade Plans in a target (Rancher SUC)";;
     tempo)                        echo "configure trace storage/retention via the tempo values";;
     *)                            echo "";;

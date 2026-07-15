@@ -1,0 +1,35 @@
+# The single enforcement object: one SecurityPolicy per namespace, matching
+# every HTTPRoute labeled sso.lok8s.dev/protect=true in that namespace.
+# See kustomization.yaml for the REQUIRED issuer/clientID patch and the
+# per-namespace layering pattern.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: sso-gate
+  namespace: default
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels:
+        sso.lok8s.dev/protect: "true"
+  oidc:
+    provider:
+      # PLACEHOLDER — patch from your consuming target (kustomization.yaml
+      # header). `.invalid` is a reserved TLD (RFC 2606): it can never
+      # resolve, so an unpatched policy fails Envoy Gateway's admission
+      # instead of half-working against something unexpected.
+      issuer: https://sso-gate-unconfigured.invalid
+    clientID: sso-gate-unconfigured
+    clientSecret:
+      # key `client-secret`; must live in this policy's namespace.
+      name: sso-gate-client
+    scopes:
+      - openid
+      - email
+      # Ask for group claims so a follow-up `jwt` + `authorization` section
+      # (role-gating) can act on them; harmless if the issuer has none.
+      - groups
+    # redirectURL/logoutPath deliberately NOT set: Envoy Gateway defaults to
+    # https://<host>/oauth2/callback and /logout — register that callback at
+    # the issuer for every protected host.

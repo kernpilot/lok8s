@@ -325,6 +325,48 @@ MetalLB uses the `${LOK8S_SPEC_LOADBALANCER_POOL}` envsubst variable
 from `spec.loadBalancer.pool` in the cluster spec. The pool range
 defines the IP addresses MetalLB can assign to LoadBalancer services.
 
+### sso-gate — OIDC login in front of any service
+
+`sso-gate` puts any HTTP service behind OIDC single sign-on **at the
+gateway** — no sidecar, no change to the app. It ships one Envoy Gateway
+[`SecurityPolicy`](https://gateway.envoyproxy.io/docs/tasks/security/oidc/)
+that matches every `HTTPRoute` labeled `sso.lok8s.dev/protect: "true"` in
+its namespace; Envoy runs the whole login flow (redirect to the issuer,
+callback, session cookie, token validation) before traffic reaches the
+service. Works with any spec-compliant OIDC issuer.
+
+```yaml
+spec:
+  bootstrap:
+    - envoy-gateway            # required: SecurityPolicy is its CRD
+    - sso-gate: { dependsOn: [envoy-gateway] }
+```
+
+Then, per service you want protected:
+
+```yaml
+# on the service's HTTPRoute
+metadata:
+  labels:
+    sso.lok8s.dev/protect: "true"
+```
+
+Routes without the label stay public; removing the label makes a route
+public again. Three things to configure (the addon is **inert until the
+issuer is patched** — see the header of `addons/sso-gate/kustomization.yaml`
+for copy-paste patches):
+
+1. **Issuer + client ID** — patch `SecurityPolicy/sso-gate` from a
+   consuming target.
+2. **Client secret** — a Secret `sso-gate-client` (key `client-secret`)
+   in the policy's namespace, e.g. via the secrets plugin.
+3. **Redirect URI** — register `https://<each-protected-host>/oauth2/callback`
+   at your issuer.
+
+One sharp edge: `targetSelectors` only matches routes in the **same
+namespace** as the policy (shipped: `default`). For routes in another
+namespace, layer a second copy with a kustomize `namespace:` transform.
+
 ## Writing a custom addon
 
 1. Create a directory under `.lok8s/addons/<name>/`
