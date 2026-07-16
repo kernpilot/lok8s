@@ -1,0 +1,106 @@
+# Grafana Loki (chart 7.1.0, app 3.6.x) — SingleBinary, portable defaults.
+#
+# Defaults are kept wherever sane; this file only carries the decisions that
+# differ. Loki is INTERNAL-ONLY: no chart Ingress/gateway route — reached in
+# cluster at:
+#   - loki.monitoring:3100   push (promtail) + query (Grafana datasource) + /metrics
+#
+# Storage: the chart PVC uses the CLUSTER DEFAULT StorageClass — pin one
+# per-cluster via inline overrides when the default is not what logs should
+# land on (e.g. `singleBinary.persistence.storageClass: ceph-bulk`).
+# Retention defaults to 7 days — an OPERATIONS log store, not an archive;
+# raise per-cluster inline if needed.
+#
+# ── Grafana datasource (handled by the consumer, not this addon) ────────────
+# Add to the monitoring stack's `grafana.additionalDataSources` (REMEMBER:
+# helm replaces lists — carry the complete list):
+#
+#   - name: Loki
+#     type: loki
+#     uid: loki
+#     access: proxy
+#     url: http://loki.monitoring:3100
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2026-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    retention_period: 168h # 7d — operations window, override per-cluster
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 30Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# Zero out every scalable-mode deployment the chart would otherwise consider.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# None of the accessory fleet: the nginx gateway (consumers hit the Service
+# directly), the memcached caches (~10Gi of requests at chart defaults), the
+# canary, or the helm test.
+gateway:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+
+# No rules sidecar: lok8s ships Loki ruler rules nowhere (alerting lives in
+# Prometheus), and the sidecar is what drags in a CLUSTER-WIDE get/watch on
+# configmaps+secrets (chart default ClusterRole) — an RBAC surface this
+# addon has no business holding. With the sidecar off + rbac.namespaced,
+# the chart renders NO RBAC objects at all (single-binary loki never talks
+# to the API server; the bare ServiceAccount remains).
+sidecar:
+  rules:
+    enabled: false
+rbac:
+  namespaced: true
+
+# Scrape loki's own metrics via the Prometheus Operator (the monitoring addon
+# watches ServiceMonitors namespace-wide); no self-monitoring agent.
+monitoring:
+  serviceMonitor:
+    enabled: true
+    # EXPLICIT namespace: the chart omits metadata.namespace on the monitor
+    # (helm would stamp it at install; khelm+kustomize does not, and the
+    # kustomization namespace transformer does not reach it) — a reconciler
+    # refuses the namespace-less object. Same fix in the promtail addon.
+    namespace: monitoring
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false

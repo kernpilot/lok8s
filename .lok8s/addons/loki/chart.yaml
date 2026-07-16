@@ -1,0 +1,29 @@
+# khelm chart spec for Grafana Loki (SingleBinary mode) — the cluster log
+# store, inflated via khelm at kustomize build time.
+#
+# This is the upstream `loki` chart pinned to its SingleBinary deployment
+# mode (values.yaml) — NOT loki-distributed. One StatefulSet, filesystem
+# chunk storage on a PVC. Sized as a per-cluster operations log store
+# (incident forensics, alert/trace correlation), not compliance archival.
+#
+# The ChartRenderer `metadata.name` is used by khelm as the Helm RELEASE
+# name, so it prefixes every generated resource and is also the Service
+# name. We pin it to `loki` so the Service is deterministically
+# `loki.monitoring:3100` (the Grafana datasource URL and promtail's push
+# target). Do not rename without updating both consumers.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: loki
+  namespace: monitoring
+kubeVersion: "1.35.5"
+# khelm renders OFFLINE: the chart gates its ServiceMonitor on
+# Capabilities.APIVersions, which is empty without this — the monitor would
+# silently vanish from the render (metrics unscraped, everything green).
+apiVersions:
+  - monitoring.coreos.com/v1/ServiceMonitor
+repository: https://grafana.github.io/helm-charts
+chart: loki
+version: 7.1.0
+valueFiles:
+  - values.yaml

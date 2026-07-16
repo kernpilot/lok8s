@@ -217,11 +217,13 @@ addons::_config_hint() {
     fluxcd)                       echo "GitRepository + Kustomization are per-cluster glue; set them inline (extraObjects) or in a flux-system target";;
     gatus)                        echo "configure monitored endpoints in the gatus target/values";;
     local-path-provisioner)       echo "set as default StorageClass; values in addons/local-path-provisioner";;
+    loki)                         echo "bootstrap AFTER monitoring; pin storageClass/retention inline; add the Grafana Loki datasource in the monitoring values";;
     mailpit)                      echo "expose via an HTTPRoute target (dev SMTP capture)";;
     metallb)                      echo "set the address pool via spec.loadBalancer.pool";;
     metrics-server)               echo "usually no config; values in addons/metrics-server";;
     monitoring)                   echo "Prometheus/Grafana scrape + OIDC config via the monitoring target values";;
     oidc-rbac)                    echo "spec.oidc.groupsClaim + the oidc group->cluster-role bindings";;
+    promtail)                     echo "bootstrap AFTER loki (its push target); tolerates all taints so control-plane logs ship too";;
     redis-operator)               echo "declare Redis CRs in a target";;
     reflector)                    echo "annotate the source Secret/ConfigMap to mirror across namespaces";;
     rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
