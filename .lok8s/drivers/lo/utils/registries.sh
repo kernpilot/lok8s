@@ -218,7 +218,8 @@ lo::registries() {
   fi
 
   _lo_registry_start() {
-    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
+    # reg_domain: keep the per-entry field from shadowing an inherited `domain`.
+    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
     local container_info
     container_info=$(registry::container "${name}")
     local reg_name="${container_info%%	*}"
@@ -292,7 +293,8 @@ lo::cleanup_registries() {
   local cluster_name="${1}"
 
   _lo_registry_cleanup() {
-    local name="${1}" ip="${2}" url="${3}" domain="${4}" host="${5}" type="${6}"
+    # reg_domain: keep the per-entry field from shadowing an inherited `domain`.
+    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
     # Skip shared mirrors — they persist across project lifecycles
     if registry::is_shared && [[ "${type}" == "mirror" ]]; then
       return 0

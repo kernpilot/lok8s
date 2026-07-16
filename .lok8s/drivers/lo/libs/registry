@@ -96,8 +96,8 @@ registry::clean() {
   if (( ${shared:-0} )); then
     _clean_shared() {
       # `reg_domain`, not `domain`: the entry field must not shadow the
-    # inherited main::registry domain arg (AG012).
-    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
+      # inherited main::registry domain arg (AG012).
+      local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
       [[ "${type}" == "mirror" ]] || return 0
       local reg_name="lok8s-registry-${name}"
       docker rm -f "${reg_name}" 2>/dev/null || true

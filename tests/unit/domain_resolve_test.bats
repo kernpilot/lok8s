@@ -45,16 +45,18 @@ teardown() {
   assert_output "deploy-dom"
 }
 
-@test "DOMAIN_NAME env wins over .active (with a notice on stderr)" {
+@test "DOMAIN_NAME env wins over .active (with a notice on STDERR only)" {
   export DOMAIN_NAME="kind-dom"
   echo "cloud-dom" > "${PATH_CLUSTERS}/.active"
-  run domain::resolve
+  # --separate-stderr: the notice MUST NOT leak into stdout — callers do
+  # `domain="$(domain::resolve)"` and a stdout notice would corrupt the value.
+  run --separate-stderr domain::resolve
   assert_success
-  assert_line "kind-dom"
+  assert_output "kind-dom"
   # The conflict must be VISIBLE — a silently-dead layer is how the original
   # incident happened (env exported, .active won, nobody knew).
-  assert_output --partial "notice:"
-  assert_output --partial "cloud-dom"
+  [[ "${stderr}" == *"notice:"* ]] || fail "expected a conflict notice on stderr, got: ${stderr}"
+  [[ "${stderr}" == *"cloud-dom"* ]] || fail "the notice should name the losing .active domain"
 }
 
 @test "env == .active resolves quietly" {
@@ -72,12 +74,13 @@ teardown() {
   assert_output "cloud-dom"
 }
 
-@test "invalid .active content is warned about and ignored" {
+@test "invalid .active content is warned about, ignored, and falls back to the default" {
   echo '../evil; rm -rf /' > "${PATH_CLUSTERS}/.active"
-  run domain::resolve
+  run --separate-stderr domain::resolve
   assert_success
-  assert_output --partial "warning:"
-  refute_output --partial "evil"
+  # Not just "no evil": the resolution must land on the terminal default.
+  assert_output "lok8s.dev"
+  [[ "${stderr}" == *"warning:"* ]] || fail "expected an invalid-.active warning on stderr, got: ${stderr}"
 }
 
 @test "nothing set resolves to the framework default (lok8s.dev)" {

@@ -134,12 +134,22 @@ main() {
     'domain-sans|'  'Domain sans to use'
   )
 
+  # Remember the pre-parse default so consumers can tell an EXPLICIT
+  # `--domain X` apart from the ambient resolution (env/.active). `lo use`
+  # needs this: with env now outranking .active, "DOMAIN_NAME != .active" no
+  # longer implies the user passed a flag — acting on it would let a bare
+  # `lo use` silently rewrite .active from the environment.
+  local _domain_default="${domain}"
+
   :usage "lok8s - local dev orchestration" "${@}"
   if (( verbose )); then export DEBUG=1; fi
   if (( remote )); then export LOK8S_REMOTE=1; fi
   if (( force_recreate )); then export LOK8S_FORCE_RECREATE=1; fi
   DOMAIN_NAME="${domain}"
   export DOMAIN_NAME
+  LOK8S_DOMAIN_EXPLICIT=0
+  [[ "${domain}" == "${_domain_default}" ]] || LOK8S_DOMAIN_EXPLICIT=1
+  export LOK8S_DOMAIN_EXPLICIT
 
   # Read spec from active cluster spec (if available)
   local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
@@ -332,7 +342,13 @@ main::clean() {
   for volume in $(docker volume ls --filter "name=^${cluster}-" -q); do
     docker volume rm -f "${volume}"
   done
-  registry::clean
+  # Registries are a Lo-driver artifact — nothing to clean for cloud/deploy
+  # domains, and the driver gate in _registry_init would (rightly) refuse.
+  if [[ "$(domain::driver "${domain}" 2>/dev/null || true)" == "lo" ]]; then
+    registry::clean
+  else
+    debug "skipping registry cleanup — domain '${domain}' is not a Lo cluster"
+  fi
 }
 
 # Entrypoint guard: run main only when executed directly. The libs' guard

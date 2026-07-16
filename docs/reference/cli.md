@@ -403,7 +403,7 @@ mode is driven by the caller, not the file.
 | `LOK8S_CLUSTER_NAME` | `local` | Cluster name |
 | `KIND_NODE_VERSION` | `v1.31.12@sha256:...` | Kind node image |
 | `KIND_CONFIG` | `<cluster_path>/config/kind-cluster.yaml` | Kind config file |
-| `DOMAIN_NAME` | `lok8s.dev` | Domain name |
+| `DOMAIN_NAME` | (empty) | Domain override. Full precedence: `--domain` flag > `DOMAIN_NAME` env > `clusters/.active` > `lok8s.dev`. When the env var and `.active` disagree, `lo` prints a one-line notice naming which won |
 | `DOMAIN_SANS` | `*` | Domain SANs |
 | `KIND_EXPERIMENTAL_DOCKER_NETWORK` | `lok8s` | Docker network name |
 | `PATH_SECRETS` | `.secrets` | Active domain's store — `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
