@@ -1,0 +1,25 @@
+# promtail — node-level log collector for the loki addon. A generic,
+# reusable atom: bootstrap `promtail` by name (chart promtail @6.17.1).
+#
+# Installs into the existing `monitoring` namespace (owned by the monitoring
+# target — no namespace.yaml here, same as tempo/loki). Bootstrap AFTER
+# `loki` (its push target) — a promtail that starts first just retries, but
+# the ordering keeps first-boot logs clean. INTERNAL-ONLY: no Ingress; the
+# only server it runs is the :3101 metrics endpoint.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# DaemonSet carries an immutable selector the transformer must not touch.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: promtail
+      lok8s.dev/type: system
+      lok8s.dev/category: observability
+
+namespace: monitoring
+
+generators:
+  - chart.yaml

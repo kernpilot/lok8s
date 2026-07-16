@@ -1,0 +1,28 @@
+# loki — Grafana Loki single-binary log store. A generic, reusable atom:
+# bootstrap `loki` by name to get the cluster log backend (chart loki @7.1.0).
+#
+# Installs into the existing `monitoring` namespace, which is OWNED by the
+# monitoring target — we do NOT ship a namespace.yaml here (same reason tempo
+# omits one). Bootstrap `loki` AFTER monitoring: it needs the namespace AND
+# the Prometheus Operator ServiceMonitor CRD. Loki is INTERNAL-ONLY (no chart
+# Ingress / gateway HTTPRoute — consumed by Grafana + promtail), so all
+# rendered objects already target `monitoring` (chart.yaml pins it) and a
+# top-level `namespace:` transformer is safe.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# StatefulSet carries an immutable selector, so the transformer must not
+# touch it (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: loki
+      lok8s.dev/type: system
+      lok8s.dev/category: observability
+
+namespace: monitoring
+
+generators:
+  - chart.yaml

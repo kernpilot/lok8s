@@ -1,0 +1,24 @@
+# promtail (chart 6.17.1) — every node's container logs into the loki addon.
+# Chart defaults are right for the DaemonSet + kubernetes_sd pipeline; this
+# file carries only the push target, control-plane coverage, and metrics.
+config:
+  clients:
+    - url: http://loki.monitoring:3100/loki/api/v1/push
+
+# Cover control-plane nodes too: on self-managed clusters the CP components
+# often are not scrapeable (localhost-bound metrics — see the monitoring
+# addon's control-plane note), so their LOGS are the incident signal.
+tolerations:
+  - effect: NoSchedule
+    operator: Exists
+
+# Scraped by the Prometheus Operator (monitoring addon).
+serviceMonitor:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
