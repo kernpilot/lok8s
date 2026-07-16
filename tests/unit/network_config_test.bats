@@ -40,6 +40,8 @@ teardown() {
     esac
   }
   export -f yq
+  # The file must exist: a missing spec now errors before any yq read.
+  touch "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   run lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"

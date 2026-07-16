@@ -9,6 +9,9 @@
 
 setup() {
   load "../test_helper"
+  # `run --separate-stderr` (used below) needs bats >= 1.5 — declare it so
+  # older bats fails LOUDLY instead of warning (BW02).
+  bats_require_minimum_version 1.5.0
   # shellcheck source=/dev/null
   source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
 
@@ -134,5 +137,13 @@ teardown() {
 @test "require_driver fails usefully on an unknown domain" {
   run domain::require_driver lo "nope" "the image cache"
   assert_failure
-  assert_output --partial "not found"
+  assert_output --partial "no readable cluster/deploy spec"
+}
+
+@test "driver read failure (unreadable spec kind) fails instead of empty-succeeding" {
+  # yq|tr used to mask a yq failure into rc=0 + empty driver (Copilot round 2).
+  mkdir -p "${PATH_CLUSTERS}/broken-dom"
+  printf 'kind: [unclosed\n' > "${PATH_CLUSTERS}/broken-dom/cluster.lok8s.yaml"
+  run domain::driver "broken-dom"
+  assert_failure
 }

@@ -134,12 +134,18 @@ main() {
     'domain-sans|'  'Domain sans to use'
   )
 
-  # Remember the pre-parse default so consumers can tell an EXPLICIT
-  # `--domain X` apart from the ambient resolution (env/.active). `lo use`
-  # needs this: with env now outranking .active, "DOMAIN_NAME != .active" no
-  # longer implies the user passed a flag — acting on it would let a bare
-  # `lo use` silently rewrite .active from the environment.
-  local _domain_default="${domain}"
+  # Detect an EXPLICIT `--domain` flag so consumers can tell it apart from
+  # the ambient resolution (env/.active). `lo use` needs this: with env now
+  # outranking .active, "DOMAIN_NAME != .active" no longer implies a flag —
+  # acting on it would let a bare `lo use` silently rewrite .active from the
+  # environment. Scanned from the raw argv (not a value comparison — that
+  # misclassified `--domain X` as implicit whenever X equaled the default).
+  local _domain_flag=0 _arg
+  for _arg in "${@}"; do
+    [[ "${_arg}" == "--domain" || "${_arg}" == --domain=* ]] || continue
+    _domain_flag=1
+    break
+  done
 
   :usage "lok8s - local dev orchestration" "${@}"
   if (( verbose )); then export DEBUG=1; fi
@@ -147,8 +153,7 @@ main() {
   if (( force_recreate )); then export LOK8S_FORCE_RECREATE=1; fi
   DOMAIN_NAME="${domain}"
   export DOMAIN_NAME
-  LOK8S_DOMAIN_EXPLICIT=0
-  [[ "${domain}" == "${_domain_default}" ]] || LOK8S_DOMAIN_EXPLICIT=1
+  LOK8S_DOMAIN_EXPLICIT="${_domain_flag}"
   export LOK8S_DOMAIN_EXPLICIT
 
   # Read spec from active cluster spec (if available)
@@ -347,7 +352,9 @@ main::clean() {
   if [[ "$(domain::driver "${domain}" 2>/dev/null || true)" == "lo" ]]; then
     registry::clean
   else
-    debug "skipping registry cleanup — domain '${domain}' is not a Lo cluster"
+    # Visible, not debug: on a migrated/deleted domain this leaves any
+    # lok8s-registry-* containers behind — say so instead of hiding it.
+    warn "skipping registry cleanup — domain '${domain}' is not a Lo cluster (leftover registries: docker rm -f \$(docker ps -aq --filter name=-registry-))"
   fi
 }
 

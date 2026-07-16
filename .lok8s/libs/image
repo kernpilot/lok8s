@@ -273,6 +273,9 @@ image::list() {
   :args "List images currently in the cache registry" "${@}"
   debug "List images in the local cache registry"
   local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
+  # Same gate as image::cache: the cache registry only exists on Lo (kind)
+  # clusters — fail with the driver named, not an IP-resolution error.
+  domain::require_driver lo "${domain}" "the image cache" || return 1
   local cache_ip="${LOK8S_REGISTRY_IP_CACHE:-}"
   if [[ -z "${cache_ip}" ]]; then
     local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"

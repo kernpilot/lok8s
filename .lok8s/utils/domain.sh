@@ -69,7 +69,15 @@ domain::driver() {
     echo ""
     return 1
   fi
-  yq -r '.kind // ""' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]'
+  # No `yq | tr` pipeline: without pipefail a yq failure (unreadable spec,
+  # invalid YAML, missing yq) would be masked by tr's rc 0 and "succeed"
+  # with an empty driver — confusing every downstream consumer.
+  local kind
+  kind=$(yq -r '.kind // ""' "${cluster_yaml}") || kind=""
+  if [[ -z "${kind}" ]]; then
+    echo "" && return 1
+  fi
+  echo "${kind,,}"
 }
 
 # domain::require_driver — gate a driver-specific operation on the resolved
@@ -83,7 +91,9 @@ domain::require_driver() {
   local want="${1}" domain="${2}" what="${3:-this operation}"
   local got
   got=$(domain::driver "${domain}") || {
-    echo "error: domain '${domain}' not found under clusters/ — cannot run ${what}" >&2
+    # Covers both a missing domain dir and a dir whose spec is unreadable —
+    # "not found" alone misled when the directory existed but had no spec.
+    echo "error: domain '${domain}' has no readable cluster/deploy spec under clusters/ — cannot run ${what}" >&2
     return 1
   }
   if [[ "${got}" != "${want}" ]]; then
