@@ -74,10 +74,10 @@ main() {
   config="${KIND_CONFIG}"
   # THE single domain-resolution point. Precedence (domain::resolve):
   # --domain flag (parsed below, overrides this default) > DOMAIN_NAME env >
-  # clusters/.active > "". Every subcommand/lib inherits the result — via the
-  # argsh `'domain|:^~domain'` arg (this local is their default through
-  # dynamic scoping) or the re-exported DOMAIN_NAME after parsing. Do NOT
-  # re-derive the domain from `.active` anywhere below main.
+  # clusters/.active > lok8s.dev. Every subcommand/lib inherits the result —
+  # via the argsh `'domain|:^~domain'` arg (this local is their default
+  # through dynamic scoping) or the re-exported DOMAIN_NAME after parsing.
+  # Do NOT re-derive the domain from `.active` anywhere below main.
   domain="$(domain::resolve)"
   domain_sans="${DOMAIN_SANS}"
 

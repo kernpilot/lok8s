@@ -17,7 +17,9 @@ import ^utils/domain
 # Usage in args array: 'domain:~domain' 'Description'
 to::domain() {
   local value="${1}"
-  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE}/clusters}"
+  # Same fallback chain as utils/domain.sh — a mismatch would make the
+  # validator and the resolver consult different directories.
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
 
   # Empty explicit value → the canonical default chain (env → .active).
   value="$(domain::resolve "${value}")"
