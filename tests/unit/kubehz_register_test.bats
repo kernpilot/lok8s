@@ -440,3 +440,121 @@ teardown() {
   assert_failure
   assert_output --partial "access is 'none'"
 }
+
+# ── direct_claim: authenticated register (KUBEHZ_TOKEN) ───
+
+@test "direct_claim: registers with the bearer and reports the claimed cluster" {
+  yq() {
+    case "$2" in
+      '.kind') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  # Must send the bearer to the REGISTER endpoint.
+  curl() {
+    [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
+      || { echo "wrong endpoint: $*" >&2; return 1; }
+    [[ " $* " == *"Authorization: Bearer khzt_test"* ]] \
+      || { echo "missing bearer: $*" >&2; return 1; }
+    echo '{"id":"cl-777","claimed":true}'
+  }
+  export -f curl
+
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-777" ;;
+      *'.claimed // false'*) echo "true" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="khzt_test"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  assert_output --partial "registered and claimed to your account"
+}
+
+@test "direct_claim: a non-claimed response fails (falls back)" {
+  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  export -f yq
+  curl() { echo '{"id":"cl-1","claimed":false}'; }
+  export -f curl
+  jq() { case "$*" in *'.id // empty'*) echo "cl-1" ;; *'.claimed // false'*) echo "false" ;; *) echo "" ;; esac; }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="khzt_test"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_failure
+}
+
+@test "direct_claim: connectHcloudToken connects the hcloud token when writable" {
+  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  export -f yq
+
+  # Register → claimed; credentials POST → writable token.
+  curl() {
+    if [[ " $* " == *"/api/credentials"* ]]; then
+      [[ " $* " == *"Authorization: Bearer khzt_test"* ]] || { echo "cred missing bearer" >&2; return 1; }
+      echo '{"data":{"stored":true,"validation":{"checked":true,"authenticated":true,"writable":true}}}'
+    else
+      echo '{"id":"cl-9","claimed":true}'
+    fi
+  }
+  export -f curl
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-9" ;;
+      *'.claimed // false'*) echo "true" ;;
+      *'.data.validation.writable // "unknown"'*) echo "true" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="khzt_test"
+  export HCLOUD_TOKEN="hc_test"
+  export LOK8S_KUBEHZ_CONNECT_TOKEN="true"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  assert_output --partial "provisioning is enabled"
+}
+
+@test "direct_claim: connectHcloudToken warns when a read-only token is connected" {
+  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  export -f yq
+  curl() {
+    if [[ " $* " == *"/api/credentials"* ]]; then
+      echo '{"data":{"stored":true,"validation":{"writable":false}}}'
+    else
+      echo '{"id":"cl-9","claimed":true}'
+    fi
+  }
+  export -f curl
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-9" ;;
+      *'.claimed // false'*) echo "true" ;;
+      *'.data.validation.writable // "unknown"'*) echo "false" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="khzt_test" HCLOUD_TOKEN="hc_test" LOK8S_KUBEHZ_CONNECT_TOKEN="true"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  assert_output --partial "READ-ONLY"
+}
