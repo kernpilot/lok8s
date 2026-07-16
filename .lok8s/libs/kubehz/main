@@ -140,6 +140,59 @@ kubehz::get_ssh_fingerprint() {
   esac
 }
 
+# ── Claim-key registration (API-minted) ─────────────────
+#
+# PRIMARY registration for hcloud-backed clusters: the kubehz API mints the
+# claim key SERVER-SIDE ({domain, claimKey: true}) — it stores only the MD5
+# fingerprint (equality-claimable) and discards the private key; we upload the
+# returned PUBLIC key into the owner's Hetzner Cloud account under
+# kubehz-claim-<domain>. Two-way verification: kubehz knows the fingerprint it
+# minted; only someone who can read the hcloud account can present it. The
+# user then claims with the fingerprint ALONE (dashboard, or the API with a
+# clusters:write token) — no cluster access, no CLI, no local openssh.
+#
+# Re-runs ROTATE server-side (same pending row, fresh fingerprint), so we
+# replace the hcloud key by name on every run. Fail-soft: any failure returns
+# 1 and the caller falls back to the legacy fingerprint announce.
+kubehz::ensure_claim_key() {
+  local domain="${1}" api_url="${2}"
+  local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
+
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg d "${domain}" '{domain: $d, claimKey: true}')") || return 1
+
+  local cluster_id public_key fingerprint key_name
+  cluster_id=$(jq -r '.id // empty' <<<"${response}")
+  public_key=$(jq -r '.claimKey.publicKey // empty' <<<"${response}")
+  fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
+  key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
+  [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" ]] || return 1
+
+  # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
+  # kubehz-claim key must not linger in the account.
+  local existing_id
+  existing_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
+  if [[ -n "${existing_id}" ]]; then
+    curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+      "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
+  fi
+  curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+    -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}')" \
+    >/dev/null || return 1
+
+  debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
+  echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
+  echo "kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:"
+  echo "  curl -X POST ${api_url}/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\"
+  echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${fingerprint}\"}'"
+  echo "  fingerprint: ${fingerprint}   (also visible in Hetzner Console -> Security -> SSH keys)"
+}
+
 # ── Registration ─────────────────────────────────────────
 
 # Register a self-hosted cluster with the kubehz API.
@@ -177,6 +230,14 @@ kubehz::register_cluster() {
   # access: registered, and say so plainly.
   if [[ "${LOK8S_KUBEHZ_ACCESS:-}" == "managed" ]]; then
     warn "spec.kubehz.access: 'managed' is in development and not yet available — registering for read-only heartbeat visibility only (as with access: registered)."
+  fi
+
+  # PRIMARY: API-minted claim key (hcloud-backed clusters — the token is in
+  # env during provisioning). Falls through to the legacy server-key
+  # fingerprint announce when unavailable.
+  if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+    kubehz::ensure_claim_key "${domain}" "${api_url}" && return 0
+    warn "kubehz claim-key registration failed for ${domain}; falling back to the legacy fingerprint announce"
   fi
 
   local fingerprint
@@ -226,6 +287,15 @@ kubehz::deregister_cluster() {
 
   curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+
+  # Best-effort: retire the kubehz claim key from the hcloud account.
+  if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
+    key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+      "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
+    [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+      "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+  fi
 
   debug "Cluster ${domain} deregistered from kubehz"
 }
