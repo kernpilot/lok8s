@@ -17,6 +17,11 @@ metadata:
   name: loki
   namespace: monitoring
 kubeVersion: "1.35.5"
+# khelm renders OFFLINE: the chart gates its ServiceMonitor on
+# Capabilities.APIVersions, which is empty without this — the monitor would
+# silently vanish from the render (metrics unscraped, everything green).
+apiVersions:
+  - monitoring.coreos.com/v1/ServiceMonitor
 repository: https://grafana.github.io/helm-charts
 chart: loki
 version: 7.1.0

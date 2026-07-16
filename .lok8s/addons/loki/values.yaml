@@ -78,6 +78,17 @@ lokiCanary:
 test:
   enabled: false
 
+# No rules sidecar: lok8s ships Loki ruler rules nowhere (alerting lives in
+# Prometheus), and the sidecar is what drags in a CLUSTER-WIDE get/watch on
+# configmaps+secrets (chart default ClusterRole) — an RBAC surface this
+# addon has no business holding. rbac.namespaced keeps any remaining RBAC
+# namespace-scoped.
+sidecar:
+  rules:
+    enabled: false
+rbac:
+  namespaced: true
+
 # Scrape loki's own metrics via the Prometheus Operator (the monitoring addon
 # watches ServiceMonitors namespace-wide); no self-monitoring agent.
 monitoring:
