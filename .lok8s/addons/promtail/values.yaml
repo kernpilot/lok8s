@@ -9,8 +9,9 @@ config:
 # often are not scrapeable (localhost-bound metrics — see the monitoring
 # addon's control-plane note), so their LOGS are the incident signal.
 tolerations:
-  - effect: NoSchedule
-    operator: Exists
+  # Bare Exists = tolerate EVERY taint (NoSchedule + NoExecute + custom) —
+  # the rook-ceph CSI nodePlugin precedent for run-everywhere DaemonSets.
+  - operator: Exists
 
 # Scraped by the Prometheus Operator (monitoring addon).
 serviceMonitor:
