@@ -31,10 +31,17 @@ domain::resolve() {
     return 0
   fi
 
-  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-}/clusters}"
+  # `.` fallback keeps a bare (PATH_BASE-less) sourcing repo-relative — an
+  # empty expansion would consult the system root's /clusters.
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
   local active=""
   if [[ -f "${path_clusters}/.active" ]]; then
-    active=$(<"${path_clusters}/.active")
+    # Guarded read: an unreadable .active must warn-and-fall-back, not abort
+    # the caller under set -e ("never fails" is this function's contract).
+    active=$(cat "${path_clusters}/.active" 2>/dev/null) || {
+      echo "warning: clusters/.active exists but is unreadable, ignoring" >&2
+      active=""
+    }
     if [[ -n "${active}" && ! "${active}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
       echo "warning: invalid domain in clusters/.active, ignoring" >&2
       active=""
@@ -59,7 +66,7 @@ domain::resolve() {
 # prints "" and returns 1. Mirrors provision::dispatch's routing field.
 domain::driver() {
   local domain="${1}"
-  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-}/clusters}"
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
   local cluster_yaml="${path_clusters}/${domain}/cluster.lok8s.yaml"
   if [[ ! -f "${cluster_yaml}" ]]; then
     if [[ -f "${path_clusters}/${domain}/deploy.lok8s.yaml" ]]; then
