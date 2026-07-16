@@ -13,9 +13,13 @@ tolerations:
   # the rook-ceph CSI nodePlugin precedent for run-everywhere DaemonSets.
   - operator: Exists
 
-# Scraped by the Prometheus Operator (monitoring addon).
+# Scraped by the Prometheus Operator (monitoring addon). namespace is set
+# EXPLICITLY: the chart omits metadata.namespace on the ServiceMonitor and
+# the kustomization's namespace transformer does not reach it (proven live:
+# Flux refused the namespace-less object). Same fix in the loki addon.
 serviceMonitor:
   enabled: true
+  namespace: monitoring
 
 resources:
   requests:

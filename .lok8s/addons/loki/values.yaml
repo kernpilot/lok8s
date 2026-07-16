@@ -81,8 +81,9 @@ test:
 # No rules sidecar: lok8s ships Loki ruler rules nowhere (alerting lives in
 # Prometheus), and the sidecar is what drags in a CLUSTER-WIDE get/watch on
 # configmaps+secrets (chart default ClusterRole) — an RBAC surface this
-# addon has no business holding. rbac.namespaced keeps any remaining RBAC
-# namespace-scoped.
+# addon has no business holding. With the sidecar off + rbac.namespaced,
+# the chart renders NO RBAC objects at all (single-binary loki never talks
+# to the API server; the bare ServiceAccount remains).
 sidecar:
   rules:
     enabled: false
@@ -94,6 +95,11 @@ rbac:
 monitoring:
   serviceMonitor:
     enabled: true
+    # EXPLICIT namespace: the chart omits metadata.namespace on the monitor
+    # (helm would stamp it at install; khelm+kustomize does not, and the
+    # kustomization namespace transformer does not reach it) — a reconciler
+    # refuses the namespace-less object. Same fix in the promtail addon.
+    namespace: monitoring
   selfMonitoring:
     enabled: false
     grafanaAgent:
