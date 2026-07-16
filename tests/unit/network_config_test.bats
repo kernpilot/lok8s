@@ -47,7 +47,7 @@ teardown() {
   assert_output --partial "spec.network.cidr is required"
 }
 
-@test "read_network_config: requires explicit name" {
+@test "read_network_config: requires explicit name (error names the FILE it parsed)" {
   yq() {
     case "$2" in
       '.spec.network.name // ""') echo "" ;;
@@ -56,11 +56,22 @@ teardown() {
     esac
   }
   export -f yq
+  # The file must exist: a MISSING spec is its own, distinct error now.
+  touch "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   run lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   assert_failure
-  assert_output --partial "spec.network.name is required"
+  assert_output --partial "spec.network.name is missing"
+  # The message must point the investigation at the right file.
+  assert_output --partial "test.lok8s.dev/cluster.lok8s.yaml"
+}
+
+@test "read_network_config: a missing spec file is its own error" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  run lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/nope/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "cluster spec not found"
 }
 
 @test "read_network_config: derives base IP from cidr (slot 50)" {

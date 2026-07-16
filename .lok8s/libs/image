@@ -19,6 +19,7 @@
 # argsh disable-file=AG012
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 
 # image::_registry_tls — is the active cluster's cache registry TLS?
@@ -78,6 +79,11 @@ image::cache() {
   :args "Pre-pull image(s) into the local cache registry" "${@}"
 
   local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
+  # The cache registry is a Lo-driver (local kind cluster) feature — fail at
+  # the door with the driver named, not three layers down on a spec field
+  # other drivers never carry (this once ran against a KubeOne spec because
+  # clusters/.active pointed there).
+  domain::require_driver lo "${domain}" "the image cache" || return 1
   # cache_host is framework policy — every Lo cluster uses lok8s.cache
   # as the canonical cache registry hostname. The LO_FRAMEWORK_REGISTRY_HOSTS
   # map exists in drivers/lo/main but may not be loaded yet when this
@@ -93,9 +99,6 @@ image::cache() {
   if [[ -z "${cache_ip}" ]]; then
     local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
     if [[ -f "${cluster_spec}" ]]; then
-      # Source the Lo driver lazily — we don't have a way to know
-      # which driver the cluster uses here without yq-parsing the
-      # spec, but cache-mode is Lo-specific anyway.
       if ! declare -F lo::read_network_config &>/dev/null; then
         # shellcheck source=/dev/null
         source "${PATH_LOK8S}/drivers/lo/main" 2>/dev/null || true
@@ -106,9 +109,13 @@ image::cache() {
       fi
     fi
   fi
-  # Last-resort fallback — slot 125 default. Only reached if the
-  # active cluster spec can't be resolved at all.
-  cache_ip="${cache_ip:-10.125.125.102}"
+  # No guessed fallback: a wrong IP burns a connect-timeout per layer and
+  # reads as a network problem; an error names itself. (The old slot-125
+  # default 10.125.125.102 did exactly that against a non-default network.)
+  if [[ -z "${cache_ip}" ]]; then
+    error "cannot resolve the cache registry IP for domain '${domain}' (spec.network unreadable?) — export LOK8S_REGISTRY_IP_CACHE=<ip> to override"
+    return 1
+  fi
 
   local queue_file="${PATH_CLUSTERS}/${domain}/artifacts/.cache-queue"
 
@@ -265,7 +272,23 @@ image::_cache_one() {
 image::list() {
   :args "List images currently in the cache registry" "${@}"
   debug "List images in the local cache registry"
-  local cache_ip="${LOK8S_REGISTRY_IP_CACHE:-10.125.125.102}"
+  local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
+  local cache_ip="${LOK8S_REGISTRY_IP_CACHE:-}"
+  if [[ -z "${cache_ip}" ]]; then
+    local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+    if [[ -f "${cluster_spec}" ]] && ! declare -F lo::read_network_config &>/dev/null; then
+      # shellcheck source=/dev/null
+      source "${PATH_LOK8S}/drivers/lo/main" 2>/dev/null || true
+    fi
+    if declare -F lo::read_network_config &>/dev/null && [[ -f "${cluster_spec}" ]]; then
+      lo::read_network_config "${cluster_spec}" >/dev/null 2>&1 || true
+      cache_ip="${LOK8S_REGISTRY_IP_CACHE:-}"
+    fi
+  fi
+  if [[ -z "${cache_ip}" ]]; then
+    error "cannot resolve the cache registry IP for domain '${domain}' — export LOK8S_REGISTRY_IP_CACHE=<ip> to override"
+    return 1
+  fi
   local scheme="http"
   image::_registry_tls && scheme="https"
   local catalog_url="${scheme}://${cache_ip}/v2/_catalog"

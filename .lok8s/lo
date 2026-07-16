@@ -15,7 +15,10 @@ set -euo pipefail
 : "${KIND_EXPERIMENTAL_DOCKER_NETWORK:=lok8s}"
 : "${KIND_NODE_VERSION:=v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2}"
 
-: "${DOMAIN_NAME:="lok8s.dev"}"
+# NO DOMAIN_NAME default here: a baked-in value would masquerade as
+# user-set env and outrank clusters/.active in domain::resolve's
+# flag > env > .active > lok8s.dev chain (the terminal default lives in
+# utils/domain.sh, at the END of the chain where it belongs).
 : "${DOMAIN_SANS:="*"}"
 
 ARGSH_SOURCE="${BASH_SOURCE[0]}"
@@ -56,6 +59,7 @@ import ^libs/image
 import ^libs/addons
 import ^libs/drivers
 import ^utils/types
+import ^utils/domain
 import ^utils/template
 import ^utils/verbose
 import ^utils/targets
@@ -68,18 +72,13 @@ main() {
   cluster="${LOK8S_CLUSTER_NAME}"
   kubernetes="${KIND_NODE_VERSION}"
   config="${KIND_CONFIG}"
-  # Read active domain before flag parsing so --domain takes precedence
-  if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
-    local active
-    active=$(cat "${PATH_CLUSTERS}/.active")
-    if [[ "${active}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-      DOMAIN_NAME="${active}"
-    else
-      warn "Invalid domain in clusters/.active, ignoring"
-    fi
-  fi
-
-  domain="${DOMAIN_NAME}"
+  # THE single domain-resolution point. Precedence (domain::resolve):
+  # --domain flag (parsed below, overrides this default) > DOMAIN_NAME env >
+  # clusters/.active > "". Every subcommand/lib inherits the result — via the
+  # argsh `'domain|:^~domain'` arg (this local is their default through
+  # dynamic scoping) or the re-exported DOMAIN_NAME after parsing. Do NOT
+  # re-derive the domain from `.active` anywhere below main.
+  domain="$(domain::resolve)"
   domain_sans="${DOMAIN_SANS}"
 
   local -a usage=(
