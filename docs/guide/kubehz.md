@@ -34,7 +34,7 @@ Two independent axes:
 | | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats — read-only dashboard visibility. |
-| | `managed` | **In development — not yet available.** Reserved for the managed tier (operator-driven remediation). Today `managed` behaves exactly like `registered` (read-only heartbeat visibility) and prints an "in development" notice; no operator is deployed. |
+| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)** — the platform enforces the tier once the cluster is claimed. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. |
 
 Plus one opt-in flag:
 

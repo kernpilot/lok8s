@@ -168,9 +168,9 @@ teardown() {
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
 }
 
-# ── register_cluster: access managed is parked (in development) ───
+# ── register_cluster: access managed notes the platform-side tier gate ───
 
-@test "register_cluster: access managed warns it is not yet available and still registers" {
+@test "register_cluster: access managed notes the Supporter+ gate and still registers" {
   yq() {
     case "$2" in
       '.kind') echo "Lo" ;;
@@ -198,13 +198,13 @@ teardown() {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
-  # The managed tier is being rebuilt — no operator, no ghost image is applied.
+  # Managed is live but subscription-gated PLATFORM-side; registration is identical.
   export LOK8S_KUBEHZ_ACCESS="managed"
 
   run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_success
-  # Honest notice: managed is not yet available …
-  assert_output --partial "not yet available"
+  # Honest notice: the gate lives platform-side (Supporter+), after claiming.
+  assert_output --partial "Supporter+"
   # … but the cluster is still registered for read-only heartbeat visibility.
   assert_output --partial "Claim it in the dashboard"
   assert_output --partial "fingerprint: lo:test.kubehz.dev"

@@ -10,8 +10,12 @@
 #
 # The self-hosted heartbeat agent ships as a kustomize dir under
 # libs/kubehz/manifests/agent/ (applied out-of-band — see docs/guide/kubehz.md).
-# The "managed" access tier (operator-driven remediation) is in development and
-# not yet available: access: managed registers for heartbeat visibility only.
+# The "managed" access tier is LIVE and subscription-gated (Supporter+): it
+# registers like `registered`, and the kubehz platform's management features
+# (healing policies, capacity watches, desired-state management) activate once
+# the cluster is claimed by an entitled tenant. Acting stays PULL-based: the
+# in-cluster agent fetches desired state and applies it locally — the platform
+# never pushes into the cluster.
 
 import ^utils/verbose
 import ^utils/http
@@ -294,13 +298,13 @@ kubehz::register_cluster() {
   # standalone (lo kubehz register), so re-assert before any network call.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 0
 
-  # The 'managed' access tier (operator-driven remediation) is in development
-  # and not yet available. There is no operator to deploy — never pretend
-  # otherwise (an apply would only ImagePullBackOff on a non-existent image).
-  # Register for read-only heartbeat visibility only, exactly like
-  # access: registered, and say so plainly.
+  # The 'managed' access tier is live but subscription-gated on the PLATFORM
+  # side (Supporter+): registration itself is identical to `registered`; the
+  # management features unlock in the dashboard once the cluster is claimed by
+  # an entitled tenant. lo cannot check the tenant tier here, so just say
+  # where the gate lives.
   if [[ "${LOK8S_KUBEHZ_ACCESS:-}" == "managed" ]]; then
-    warn "spec.kubehz.access: 'managed' is in development and not yet available — registering for read-only heartbeat visibility only (as with access: registered)."
+    echo "kubehz: access 'managed' — management features activate in the dashboard once the cluster is claimed by a Supporter+ tenant."
   fi
 
   # PRIMARY (authenticated): a KUBEHZ_TOKEN (a clusters:write API token from the
