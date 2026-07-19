@@ -15,7 +15,10 @@ set -euo pipefail
 : "${KIND_EXPERIMENTAL_DOCKER_NETWORK:=lok8s}"
 : "${KIND_NODE_VERSION:=v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2}"
 
-: "${DOMAIN_NAME:="lok8s.dev"}"
+# NO DOMAIN_NAME default here: a baked-in value would masquerade as
+# user-set env and outrank clusters/.active in domain::resolve's
+# flag > env > .active > lok8s.dev chain (the terminal default lives in
+# utils/domain.sh, at the END of the chain where it belongs).
 : "${DOMAIN_SANS:="*"}"
 
 ARGSH_SOURCE="${BASH_SOURCE[0]}"
@@ -56,6 +59,7 @@ import ^libs/image
 import ^libs/addons
 import ^libs/drivers
 import ^utils/types
+import ^utils/domain
 import ^utils/template
 import ^utils/verbose
 import ^utils/targets
@@ -68,18 +72,13 @@ main() {
   cluster="${LOK8S_CLUSTER_NAME}"
   kubernetes="${KIND_NODE_VERSION}"
   config="${KIND_CONFIG}"
-  # Read active domain before flag parsing so --domain takes precedence
-  if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
-    local active
-    active=$(cat "${PATH_CLUSTERS}/.active")
-    if [[ "${active}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-      DOMAIN_NAME="${active}"
-    else
-      warn "Invalid domain in clusters/.active, ignoring"
-    fi
-  fi
-
-  domain="${DOMAIN_NAME}"
+  # THE single domain-resolution point. Precedence (domain::resolve):
+  # --domain flag (parsed below, overrides this default) > DOMAIN_NAME env >
+  # clusters/.active > lok8s.dev. Every subcommand/lib inherits the result —
+  # via the argsh `'domain|:^~domain'` arg (this local is their default
+  # through dynamic scoping) or the re-exported DOMAIN_NAME after parsing.
+  # Do NOT re-derive the domain from `.active` anywhere below main.
+  domain="$(domain::resolve)"
   domain_sans="${DOMAIN_SANS}"
 
   local -a usage=(
@@ -135,12 +134,27 @@ main() {
     'domain-sans|'  'Domain sans to use'
   )
 
+  # Detect an EXPLICIT `--domain` flag so consumers can tell it apart from
+  # the ambient resolution (env/.active). `lo use` needs this: with env now
+  # outranking .active, "DOMAIN_NAME != .active" no longer implies a flag —
+  # acting on it would let a bare `lo use` silently rewrite .active from the
+  # environment. Scanned from the raw argv (not a value comparison — that
+  # misclassified `--domain X` as implicit whenever X equaled the default).
+  local _domain_flag=0 _arg
+  for _arg in "${@}"; do
+    [[ "${_arg}" == "--domain" || "${_arg}" == --domain=* ]] || continue
+    _domain_flag=1
+    break
+  done
+
   :usage "lok8s - local dev orchestration" "${@}"
   if (( verbose )); then export DEBUG=1; fi
   if (( remote )); then export LOK8S_REMOTE=1; fi
   if (( force_recreate )); then export LOK8S_FORCE_RECREATE=1; fi
   DOMAIN_NAME="${domain}"
   export DOMAIN_NAME
+  LOK8S_DOMAIN_EXPLICIT="${_domain_flag}"
+  export LOK8S_DOMAIN_EXPLICIT
 
   # Read spec from active cluster spec (if available)
   local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
@@ -333,7 +347,15 @@ main::clean() {
   for volume in $(docker volume ls --filter "name=^${cluster}-" -q); do
     docker volume rm -f "${volume}"
   done
-  registry::clean
+  # Registries are a Lo-driver artifact — nothing to clean for cloud/deploy
+  # domains, and the driver gate in _registry_init would (rightly) refuse.
+  if [[ "$(domain::driver "${domain}" 2>/dev/null || true)" == "lo" ]]; then
+    registry::clean
+  else
+    # Visible, not debug: on a migrated/deleted domain this leaves any
+    # lok8s-registry-* containers behind — say so instead of hiding it.
+    warn "skipping registry cleanup — domain '${domain}' is not a Lo cluster (leftover registries: docker rm -f \$(docker ps -aq --filter name=-registry-))"
+  fi
 }
 
 # Entrypoint guard: run main only when executed directly. The libs' guard

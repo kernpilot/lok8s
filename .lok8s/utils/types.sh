@@ -1,9 +1,13 @@
 # shellcheck shell=bash
 # argsh custom type validators for lok8s
 
+import ^utils/domain
+
 # to::domain -- validate a lok8s domain name at parse time.
 # Called by argsh when user provides a domain positional/flag value.
-# NOT called on defaults (argsh skips type validation for pre-set locals).
+# NOT called on defaults (argsh skips type validation for pre-set locals) —
+# which is why `lo` main resolves the DEFAULT itself, through the same
+# domain::resolve this validator uses (one precedence, two entry points).
 #
 # Validates:
 #   1. Character format (alphanumeric, dots, hyphens)
@@ -13,15 +17,12 @@
 # Usage in args array: 'domain:~domain' 'Description'
 to::domain() {
   local value="${1}"
-  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE}/clusters}"
+  # Same fallback chain as utils/domain.sh — a mismatch would make the
+  # validator and the resolver consult different directories.
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
 
-  # Resolve default: DOMAIN_NAME env → .active file
-  if [[ -z "${value}" ]]; then
-    value="${DOMAIN_NAME:-}"
-  fi
-  if [[ -z "${value}" && -f "${path_clusters}/.active" ]]; then
-    value="$(cat "${path_clusters}/.active")"
-  fi
+  # Empty explicit value → the canonical default chain (env → .active).
+  value="$(domain::resolve "${value}")"
   if [[ -z "${value}" ]]; then
     echo "no domain specified" >&2
     return 1

@@ -166,6 +166,12 @@ lo use lok8s.dev        # set active domain
 lo use                  # show active domain and list all domains
 ```
 
+The full resolution order for every command is `--domain` flag > `DOMAIN_NAME`
+environment variable > `clusters/.active` > `lok8s.dev`. The env var outranks
+`.active` (the same layering as `KUBECONFIG` vs a kubectl context: an exported
+variable is a more explicit act than previously persisted state) — when both
+are set and disagree, `lo` prints a one-line notice naming which one won.
+
 ## Directory Layout
 
 Framework and user content are separated at the top level: `.lok8s/`

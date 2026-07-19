@@ -116,6 +116,14 @@ lo::slot_from_domain() {
 lo::read_network_config() {
   local cluster_yaml="${1}"
 
+  # Missing spec is its own error, checked BEFORE any yq read: under `set -e`
+  # a failing yq on a missing file would kill the caller before the intended
+  # message could ever print.
+  if [[ ! -f "${cluster_yaml}" ]]; then
+    echo "error: cluster spec not found: ${cluster_yaml}" >&2
+    return 1
+  fi
+
   local net_name net_cidr
   net_name=$(yq -r '.spec.network.name // ""' "${cluster_yaml}")
   net_cidr=$(yq -r '.spec.network.cidr // ""' "${cluster_yaml}")
@@ -133,8 +141,14 @@ lo::read_network_config() {
     fi
   fi
 
-  [[ -n "${net_name}" ]] || { echo "error: spec.network.name is required (no default — metadata.name was also empty)" >&2; return 1; }
-  [[ -n "${net_cidr}" ]] || { echo "error: spec.network.cidr is required (e.g. \"10.125.50.0/24\" for slot 50; defaults only apply to *.lok8s.dev domains)" >&2; return 1; }
+  # Error with exactly what was inspected: the FILE and which fallback branch
+  # was even eligible — a message claiming "metadata.name was empty" on a
+  # path that never read it once sent a whole investigation to the wrong file.
+  if [[ -z "${net_name}" ]]; then
+    echo "error: ${cluster_yaml}: spec.network.name is missing (slot defaults only apply to *.lok8s.dev domains). Is this a Lo (kind) cluster spec?" >&2
+    return 1
+  fi
+  [[ -n "${net_cidr}" ]] || { echo "error: ${cluster_yaml}: spec.network.cidr is required (e.g. \"10.125.50.0/24\" for slot 50; defaults only apply to *.lok8s.dev domains)" >&2; return 1; }
 
   LOK8S_NETWORK_BASE_IP="${net_cidr%/*}"
 
