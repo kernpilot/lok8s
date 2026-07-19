@@ -63,7 +63,7 @@ spec:
         apiUrl:
           type: string
           pattern: "^https://"
-          description: KKP API endpoint (e.g. https://kkp.kubehz.in.net).
+          description: KKP API endpoint (e.g. https://kkp.example.com).
         projectId:
           type: string
           description: KKP project ID the cluster belongs to.

@@ -7,8 +7,8 @@ point at.
 
 ## Prerequisites
 
-- A reachable **KKP endpoint** (`spec.kkp.apiUrl`) — e.g. the kubehz internal
-  plane `https://kkp.kubehz.in.net`.
+- A reachable **KKP endpoint** (`spec.kkp.apiUrl`) — e.g.
+  `https://kkp.example.com`.
 - A KKP **project id** (`spec.kkp.projectId`) and **datacenter**
   (`spec.kkp.datacenter`, e.g. `hetzner-fsn1`).
 - A **KKP API token** and a **Hetzner token**, in the gitignored
