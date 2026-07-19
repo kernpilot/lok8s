@@ -8,7 +8,7 @@ no kubeconfig, so it runs offline and in CI.
 
 ```bash
 lo audit                 # audit the active domain (lo use <domain>)
-lo audit kubehz.in.net   # audit a specific cluster
+lo audit my-cluster.example.com   # audit a specific cluster
 lo audit --json          # machine-readable output (stable schema, see below)
 ```
 
@@ -95,7 +95,7 @@ array of these objects.
 
 ```json
 {
-  "domain": "kubehz.in.net",
+  "domain": "my-cluster.example.com",
   "score": 75,
   "grade": "C",
   "summary": { "pass": 5, "warn": 0, "fail": 1, "unknown": 0 },
@@ -143,18 +143,18 @@ each addon's category (from its `lok8s.dev/category` label) and a one-line "how
 to configure" pointer:
 
 ```bash
-lo addons --detail --domain kubehz.in.net
+lo addons --detail --domain my-cluster.example.com
 ```
 
 ```
-Addons deployed by kubehz.in.net (kind=kubeone)
+Addons deployed by my-cluster.example.com (kind=kubeone)
 
 NAME          CATEGORY        TYPE   VERSION   CONFIGURE
 ----          --------        ----   -------   ---------
 cilium        networking      khelm  1.19.2    encryption + policy mode (policyAuditMode) in cilium inline values / values.<driver>.yaml
 ccm           networking      khelm  1.33.0    spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)
 cert-manager  infrastructure  khelm  v1.20.1   issue TLS via ClusterIssuer/Certificate CRs in a networking target
-networking    target          target -         per-cluster glue in clusters/kubehz.in.net/targets/networking
+networking    target          target -         per-cluster glue in clusters/my-cluster.example.com/targets/networking
 ```
 
 `./targets/*` (and absolute-path) entries are listed as **targets** (per-cluster
