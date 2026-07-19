@@ -15,7 +15,7 @@ spec:
     domain: kkp-example.lok8s.dev
     namespace: default
   kkp:
-    apiUrl: "https://kkp.kubehz.in.net"   # your KKP endpoint
+    apiUrl: "https://kkp.example.com"     # your KKP endpoint
     projectId: "<your-kkp-project-id>"    # from the KKP dashboard / API
     datacenter: "hetzner-fsn1"
   provider:
