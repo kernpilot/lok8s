@@ -147,8 +147,9 @@ cert:
   stdin if value omitted). Add `--encrypt` (short `-e`; alias `--enc`) to SOPS-encrypt
   the value in the same step — writes the plaintext cache **and** its `.enc` for exactly
   that one file (not a store-wide sweep); needs `.sops.yaml` (else it errors). Writing
-  plaintext-only while `.sops.yaml` exists **warns** the committed `.enc` is now stale.
-  Put non-secret identifiers (client IDs, usernames) in plain config.
+  plaintext-only while `.sops.yaml` exists **warns** that value has no matching `.enc`
+  yet (missing on a first write, or stale after an edit). Put non-secret identifiers
+  (client IDs, usernames) in plain config.
 - **Per-domain vs flat store:** without `--domain`, `lo secrets` (and a raw
   `kustomize build`) hits the flat `$PATH_SECRETS` store — NOT a domain's
   `clusters/<domain>/secrets/`. The two diverge silently; building from the wrong

@@ -91,7 +91,8 @@ printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp API_TO
 staging note under [Committing secrets](#committing-secrets-sops-age)) and needs
 encryption already set up (`.sops.yaml` present, via `lo secrets init`); without it the
 set fails. When encryption **is** configured but you write plaintext-only (no
-`--encrypt`), `set` warns that the committed `.enc` is now stale — re-run with
+`--encrypt`), `set` warns that this value has no matching `.enc` yet — whether that's a
+first write (none exists) or an edit (the committed one is now stale) — so re-run with
 `--encrypt` or `lo secrets encrypt` before committing.
 
 ## Provision-time credentials (shell env)

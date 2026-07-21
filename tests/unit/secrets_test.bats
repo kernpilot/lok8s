@@ -217,12 +217,11 @@ require_argsh_cli() {
 # must exist — its presence == "encryption is configured". These run through the
 # real argsh runtime (secrets_cli) so the flag spec is actually parsed.
 #
-# NOTE on the sops recipient: sops discovers .sops.yaml by walking up from the
-# file path, and the repo's own /workspace/.sops.yaml (path_regex 'Secret\..*')
-# can shadow the tmpdir one under Docker — so the produced .enc may be encrypted
-# to the repo key, not decryptable here. These tests therefore assert .enc
-# EXISTENCE / which files were touched (recipient-independent), never a decrypt
-# round-trip (that is what the top-of-file round-trip test covers on a dev box).
+# secrets::_encrypt_file pins `sops --config ${PATH_BASE}/.sops.yaml`, so the
+# config it uses is exactly the one the gate checked — it does NOT walk up and
+# pick a different .sops.yaml (e.g. the repo's own /workspace/.sops.yaml under
+# Docker). That is what lets the round-trip test below decrypt with the tmpdir
+# key: the .enc really is encrypted to the recipient we configured.
 
 # The alias/parse tests need NO crypto tools: with .sops.yaml absent the gate
 # fails fast, so all three spellings must produce the SAME "No .sops.yaml" error
@@ -255,8 +254,7 @@ require_argsh_cli() {
 @test "secrets set --encrypt: encrypts exactly that file, others untouched" {
   require_argsh_cli
   require_tools
-  # Configure encryption (gate = ${PATH_BASE}/.sops.yaml present). A tmpdir key
-  # keeps it self-contained; the produced .enc's recipient is irrelevant here.
+  # Configure encryption (gate = ${PATH_BASE}/.sops.yaml present) with a tmpdir key.
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
   printf 'creation_rules:\n  - path_regex: .*\n    age: %s\n' \
     "$(ssh-to-age < "${BATS_TEST_TMPDIR}/id.pub")" > "${PATH_BASE}/.sops.yaml"
@@ -264,21 +262,29 @@ require_argsh_cli() {
   # A pre-existing sibling plaintext with NO .enc — must stay plaintext-only.
   printf 'sib' > "${PATH_SECRETS}/Secret.other.default.SIB"
 
-  run secrets_cli set -n app --encrypt KEY val
+  run secrets_cli set -n app --encrypt KEY 'round-trip-me'
   assert_success
   assert_output --partial 'Set + encrypted app/default/KEY'
   # exactly this file encrypted …
   [ -f "${PATH_SECRETS}/Secret.app.default.KEY.enc" ]
   # … and the sibling was NOT swept up
   [ ! -f "${PATH_SECRETS}/Secret.other.default.SIB.enc" ]
+  # … and it decrypts with OUR tmpdir key — proving --config pinned the config
+  # we set (not a shadowing .sops.yaml higher up, e.g. the repo's own one).
+  local got
+  got="$(SOPS_AGE_KEY="$(ssh-to-age -private-key < "${BATS_TEST_TMPDIR}/id")" \
+    sops --config "${PATH_BASE}/.sops.yaml" decrypt \
+      --input-type binary --output-type binary \
+      "${PATH_SECRETS}/Secret.app.default.KEY.enc")"
+  [ "${got}" = 'round-trip-me' ]
 }
 
-# ── secrets set — stale-.enc warning (plaintext write while encryption is on) ──
-# When .sops.yaml exists but --encrypt is NOT passed, a plaintext write leaves
-# the committed .enc stale — warn (always-on; no quiet level to gate on). Silent
-# when .sops.yaml is absent. This path is crypto-free (never invokes sops), so it
-# runs without require_tools.
-@test "secrets set: warns about a stale .enc when .sops.yaml exists but --encrypt omitted" {
+# ── secrets set — missing/stale-.enc warning (plaintext write, encryption on) ──
+# When .sops.yaml exists but --encrypt is NOT passed, the plaintext write has no
+# matching .enc (either none yet, or the committed one is now stale) — warn
+# (always-on; no quiet level to gate on). Silent when .sops.yaml is absent. This
+# path is crypto-free (never invokes sops), so it runs without require_tools.
+@test "secrets set: warns about a missing/stale .enc when .sops.yaml exists but --encrypt omitted" {
   require_argsh_cli
   : > "${PATH_BASE}/.sops.yaml"   # presence is all the gate checks
   run secrets_cli set -n app KEY val
