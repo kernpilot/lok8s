@@ -51,6 +51,7 @@ type Secret struct {
 	Htpasswd  map[string]HtpasswdEntry  `yaml:"htpasswd,omitempty"`
 	File      map[string]FileEntry      `yaml:"file,omitempty"`
 	B64       map[string]string         `yaml:"b64,omitempty"`
+	Key       map[string]KeyEntry       `yaml:"key,omitempty"`
 
 	// Cert is a single development CA or leaf certificate (one cert per Secret),
 	// generated with crypto/x509 — no mkcert binary. See CertSpec.

@@ -7,11 +7,11 @@
 //
 // Generator order (set in Build) is:
 //
-//	literals → env → b64 → file → passwd → template → bash → secretRef → htpasswd → cert
+//	literals → env → b64 → file → passwd → key → template → bash → secretRef → htpasswd → cert
 //
 // Rationale: stateless generators run first so any cache state needed
-// by secretRef/htpasswd has already been written by passwd/template within
-// the same plugin run if applicable.
+// by secretRef/htpasswd (and template: secretRef sub-sections) has already
+// been written by passwd/key/template within the same plugin run if applicable.
 package secret
 
 import (
@@ -88,6 +88,7 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	r.Add(generator.NewB64(p.spec.B64))
 	r.Add(generator.NewFile(p.spec.File))
 	r.Add(generator.NewPasswd(p.spec.Passwd))
+	r.Add(generator.NewKey(p.spec.Key))
 	r.Add(generator.NewTemplate(p.spec.Template))
 	r.Add(generator.NewBash(p.spec.Bash))
 	r.Add(generator.NewSecretRef(p.spec.SecretRef))
