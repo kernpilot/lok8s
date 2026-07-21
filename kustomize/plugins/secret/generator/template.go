@@ -63,8 +63,10 @@ func (g *Template) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 
 // composeTemplate generates every field's value and substitutes them into the
 // pattern, returning the composed bytes. Fields are generated in sorted name
-// order for deterministic entropy consumption from a deterministic Rand (test
-// readers); with crypto/rand the order is immaterial.
+// order purely for deterministic dispatch — charset fields draw from the
+// package-global crypto/rand reader (random.Reader), and only bytes fields use
+// ctx.Rand, so byte-stability across runs rests on the CACHE, not on RNG
+// determinism.
 func composeTemplate(ctx *plugin.Context, entry *specpkg.TemplateEntry) ([]byte, error) {
 	names := make([]string, 0, len(entry.Fields))
 	for name := range entry.Fields {

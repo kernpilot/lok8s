@@ -236,11 +236,20 @@ composed string by the entry key (like `passwd:`), and has **no approval gate**.
   | `base64url-unpadded` | url-safe `-_`, no `=` | `⌈4N/3⌉` |
   | `hex` | lowercase `0-9a-f` | `2N` |
 
+  > **`base64` (the default) and `base64-unpadded` emit `+` and `/`** — the
+  > standard alphabet. Those are not safe in a URL, a filename, or a k8s
+  > label/annotation value. If the secret lands anywhere url-safe, choose
+  > `base64url` / `base64url-unpadded` (`-_` alphabet). `bytes` is capped at 4096.
+
 **Pattern rules.** The pattern is validated at parse time: it must be non-empty,
 every `{name}` must have a matching field, and **every declared field must be
 referenced** (an unused field is a typo, so it's an error). Write a **literal
 brace** by doubling it — `{{` → `{`, `}}` → `}`. An unterminated `{` or a stray
-`}` is rejected.
+`}` is rejected. A field referenced **twice** (`pattern: "{a}-{a}"`) is generated
+**once** and the single value is substituted at both sites (→ `V-V`), never drawn
+twice. Substitution is a **single pass**: a generated value that happens to
+contain `{...}` is emitted literally, not re-expanded — so field values can never
+inject placeholders.
 
 **Caching.** Cache-first like `passwd:` — the **composed** value is stored under
 the entry key (`Secret.<name>.<ns>.<key>`), not the pattern or per-field state.

@@ -79,6 +79,11 @@ const (
 	EncHex              = "hex"
 )
 
+// MaxFieldBytes caps a bytes-mode field's raw byte count. Key material is at
+// most a few dozen bytes; anything past this is a fat-fingered config (e.g.
+// bytes: 32000000 → a ~32 MB Secret), so it's rejected at decode time.
+const MaxFieldBytes = 4096
+
 // templateEntryRaw avoids infinite recursion in UnmarshalYAML.
 type templateEntryRaw TemplateEntry
 
@@ -153,6 +158,9 @@ func (f TemplateField) validate() error {
 		if f.Bytes <= 0 {
 			return fmt.Errorf("bytes must be > 0, got %d", f.Bytes)
 		}
+		if f.Bytes > MaxFieldBytes {
+			return fmt.Errorf("bytes must be <= %d, got %d (a secret this large is almost certainly a typo)", MaxFieldBytes, f.Bytes)
+		}
 		if _, err := validateEncoding(f.EffectiveEncoding()); err != nil {
 			return err
 		}
@@ -161,12 +169,23 @@ func (f TemplateField) validate() error {
 		if f.Length <= 0 {
 			return fmt.Errorf("length must be > 0 (a template field needs an explicit length)")
 		}
-		if _, err := charset.Resolve(f.EffectiveChars()); err != nil {
+		chars, err := charset.Resolve(f.EffectiveChars())
+		if err != nil {
 			return err
 		}
-		for _, r := range f.Require {
-			if _, err := charset.ParseClass(r); err != nil {
-				return err
+		req, err := f.RequireClasses()
+		if err != nil {
+			return err
+		}
+		// Feasibility, checked statically so an impossible config fails at
+		// decode instead of only on a cache-miss generation. The generator
+		// re-checks these (belt-and-suspenders).
+		if len(req) > f.Length {
+			return fmt.Errorf("require lists %d classes but length is %d", len(req), f.Length)
+		}
+		for _, c := range req {
+			if !charset.PoolContains(chars, c) {
+				return fmt.Errorf("charset %q has no %q characters to satisfy require", f.EffectiveChars(), c)
 			}
 		}
 		return nil

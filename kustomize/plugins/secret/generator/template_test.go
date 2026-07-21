@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
+
 	specpkg "github.com/kernpilot/lok8s/kustomize/plugins/secret/spec"
 )
 
@@ -120,6 +122,58 @@ func TestTemplate_LiteralBracesUnescaped(t *testing.T) {
 	// {{ → {, then {x} → "aaa", then }} → } : "{aaa}"
 	if string(got[0].Value) != "{aaa}" {
 		t.Errorf("literal-brace unescape wrong: %q, want {aaa}", got[0].Value)
+	}
+}
+
+func TestTemplate_RepeatedPlaceholderSameDraw(t *testing.T) {
+	// A field referenced twice is generated ONCE; the single value fills both
+	// sites. A 24-char field re-drawn independently would (astronomically
+	// likely) differ, so equal halves prove single-generation semantics.
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {
+			Pattern: "{a}-{a}",
+			Fields:  map[string]specpkg.TemplateField{"a": {Length: 24, Chars: "alphanum"}},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(string(got[0].Value), "-", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected V-V, got %q", got[0].Value)
+	}
+	if parts[0] != parts[1] {
+		t.Errorf("repeated {a} must be the SAME single draw, got %q vs %q", parts[0], parts[1])
+	}
+	if len(parts[0]) != 24 {
+		t.Errorf("each half should be a 24-char draw, got len %d", len(parts[0]))
+	}
+}
+
+func TestTemplate_ValueContainingBraceNotReSubstituted(t *testing.T) {
+	// Security-relevant single-pass property: a generated value that contains
+	// '{...}' must be emitted LITERALLY, never re-expanded — otherwise a field
+	// value could inject a placeholder for another field. Drive Substitute
+	// directly with adversarial values (the generator produces random bytes, so
+	// this exercises the substitution engine deterministically).
+	entry := specpkg.TemplateEntry{
+		Pattern: "{a} {b}",
+		Fields: map[string]specpkg.TemplateField{
+			"a": {Length: 1, Chars: "custom:x"},
+			"b": {Length: 1, Chars: "custom:y"},
+		},
+	}
+	got, err := entry.Substitute(map[string]string{
+		"a": "he}llo", // contains a stray brace
+		"b": "{c}",    // looks like a placeholder for a non-existent field "c"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "he}llo {c}" {
+		t.Errorf("single-pass violated: value braces were re-expanded; got %q, want %q", got, "he}llo {c}")
 	}
 }
 
@@ -248,5 +302,36 @@ func TestTemplate_InfeasibleRequireErrors(t *testing.T) {
 	})
 	if _, err := g.Generate(ctx); err == nil {
 		t.Fatal("expected feasibility error for require digit on a digit-less charset")
+	}
+}
+
+func TestTemplate_SecretRefCanReferenceTemplateKey(t *testing.T) {
+	// template runs before secretRef in the plugin dispatch order, so a
+	// consumer Secret can pull a template-composed value by reference. Simulate
+	// that: a producer runs template: to mint+cache SIGNING_KEY, then a consumer
+	// secretRef reads it out of the shared $PATH_SECRETS store.
+	dir := t.TempDir()
+
+	producerCache, err := cache.New(dir, "matrix", "synapse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerCtx := newCtxFromCache("matrix", "synapse", producerCache)
+	produced, err := NewTemplate(synapseSpec()).Generate(producerCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(produced[0].Value)
+
+	consumerCache, _ := cache.New(dir, "matrix", "consumer")
+	consumerCtx := newCtxFromCache("matrix", "consumer", consumerCache)
+	got, err := NewSecretRef(map[string]specpkg.SecretRefEntry{
+		"KEY": {Secret: "synapse", Namespace: "matrix", Key: "SIGNING_KEY"},
+	}).Generate(consumerCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != want {
+		t.Errorf("secretRef did not resolve the template-composed value: got %q, want %q", got[0].Value, want)
 	}
 }

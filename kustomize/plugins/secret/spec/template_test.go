@@ -258,6 +258,60 @@ func TestTemplate_BadRequireClassRejected(t *testing.T) {
 	}
 }
 
+// --- parse-time feasibility (parity with the generator's runtime guards) ---
+
+func TestTemplate_RequireMoreClassesThanLengthRejectedAtParse(t *testing.T) {
+	// 3 required classes cannot fit in length 1 — must fail at DECODE, not only
+	// on a cache-miss generation.
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{x}"
+    fields:
+      x: {length: 1, chars: alphanum, require: [upper, lower, digit]}
+`)
+	if err == nil || !strings.Contains(err.Error(), "length") {
+		t.Errorf("expected feasibility (length) error at parse, got %v", err)
+	}
+}
+
+func TestTemplate_RequireInfeasibleCharsetRejectedAtParse(t *testing.T) {
+	// custom:abc has no digits → require digit is impossible; caught at decode.
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{x}"
+    fields:
+      x: {length: 8, chars: "custom:abc", require: [digit]}
+`)
+	if err == nil || !strings.Contains(err.Error(), "digit") {
+		t.Errorf("expected feasibility (charset) error at parse, got %v", err)
+	}
+}
+
+func TestTemplate_BytesUpperBoundRejected(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{x}"
+    fields:
+      x: {bytes: 32000000, encoding: base64}
+`)
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("expected bytes-upper-bound error, got %v", err)
+	}
+}
+
+func TestTemplate_BytesAtUpperBoundAllowed(t *testing.T) {
+	// The cap itself is valid (boundary).
+	in := []byte(tmplHeader + `template:
+  K:
+    pattern: "{x}"
+    fields:
+      x: {bytes: 4096, encoding: hex}
+`)
+	if _, err := DecodeBytes(in); err != nil {
+		t.Errorf("bytes at the cap (4096) should be allowed, got %v", err)
+	}
+}
+
 func TestTemplate_StrayBraceRejected(t *testing.T) {
 	err := decodeTemplateErr(t, `template:
   K:
