@@ -210,3 +210,90 @@ require_argsh_cli() {
   assert_success
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "dash-v" ]
 }
+
+# ── secrets set --encrypt ────────────────────────────────────────────────
+# `--encrypt` (short -e; alias --enc) encrypts ONLY the just-written file via
+# secrets::_encrypt_file (never a whole-store sweep). Gate: ${PATH_BASE}/.sops.yaml
+# must exist — its presence == "encryption is configured". These run through the
+# real argsh runtime (secrets_cli) so the flag spec is actually parsed.
+#
+# NOTE on the sops recipient: sops discovers .sops.yaml by walking up from the
+# file path, and the repo's own /workspace/.sops.yaml (path_regex 'Secret\..*')
+# can shadow the tmpdir one under Docker — so the produced .enc may be encrypted
+# to the repo key, not decryptable here. These tests therefore assert .enc
+# EXISTENCE / which files were touched (recipient-independent), never a decrypt
+# round-trip (that is what the top-of-file round-trip test covers on a dev box).
+
+# The alias/parse tests need NO crypto tools: with .sops.yaml absent the gate
+# fails fast, so all three spellings must produce the SAME "No .sops.yaml" error
+# AND still have written the plaintext cache (proving the KEY/value positionals
+# parsed with the flag consumed — an unknown flag would instead shift them).
+@test "secrets set --encrypt: without .sops.yaml → error, non-zero (no .enc)" {
+  require_argsh_cli
+  run secrets_cli set -n app --encrypt KEY val
+  assert_failure
+  assert_output --partial 'No .sops.yaml'
+  # cache still written (plaintext), but no .enc produced
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "val" ]
+  [ ! -f "${PATH_SECRETS}/Secret.app.default.KEY.enc" ]
+}
+
+@test "secrets set --enc/-e: parse the same as --encrypt" {
+  require_argsh_cli
+  # No .sops.yaml → each spelling fails identically at the encrypt gate; the
+  # plaintext cache lands under the right (name,ns,key), proving the token was
+  # recognized as the boolean flag (not swallowed as a positional).
+  for flag in --encrypt --enc -e; do
+    rm -f "${PATH_SECRETS}"/Secret.app.default.*
+    run secrets_cli set -n app "${flag}" KEY val
+    assert_failure
+    assert_output --partial 'No .sops.yaml'
+    [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "val" ]
+  done
+}
+
+@test "secrets set --encrypt: encrypts exactly that file, others untouched" {
+  require_argsh_cli
+  require_tools
+  # Configure encryption (gate = ${PATH_BASE}/.sops.yaml present). A tmpdir key
+  # keeps it self-contained; the produced .enc's recipient is irrelevant here.
+  ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
+  printf 'creation_rules:\n  - path_regex: .*\n    age: %s\n' \
+    "$(ssh-to-age < "${BATS_TEST_TMPDIR}/id.pub")" > "${PATH_BASE}/.sops.yaml"
+
+  # A pre-existing sibling plaintext with NO .enc — must stay plaintext-only.
+  printf 'sib' > "${PATH_SECRETS}/Secret.other.default.SIB"
+
+  run secrets_cli set -n app --encrypt KEY val
+  assert_success
+  assert_output --partial 'Set + encrypted app/default/KEY'
+  # exactly this file encrypted …
+  [ -f "${PATH_SECRETS}/Secret.app.default.KEY.enc" ]
+  # … and the sibling was NOT swept up
+  [ ! -f "${PATH_SECRETS}/Secret.other.default.SIB.enc" ]
+}
+
+# ── secrets set — stale-.enc warning (plaintext write while encryption is on) ──
+# When .sops.yaml exists but --encrypt is NOT passed, a plaintext write leaves
+# the committed .enc stale — warn (always-on; no quiet level to gate on). Silent
+# when .sops.yaml is absent. This path is crypto-free (never invokes sops), so it
+# runs without require_tools.
+@test "secrets set: warns about a stale .enc when .sops.yaml exists but --encrypt omitted" {
+  require_argsh_cli
+  : > "${PATH_BASE}/.sops.yaml"   # presence is all the gate checks
+  run secrets_cli set -n app KEY val
+  assert_success
+  assert_output --partial 'wrote plaintext cache only'
+  assert_output --partial "run 'lo secrets encrypt' or re-run with --encrypt/-e"
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.KEY")" = "val" ]
+  [ ! -f "${PATH_SECRETS}/Secret.app.default.KEY.enc" ]   # plaintext only
+}
+
+@test "secrets set: NO stale-.enc warning when .sops.yaml is absent" {
+  require_argsh_cli
+  # No .sops.yaml under PATH_BASE → encryption not configured → stay quiet.
+  run secrets_cli set -n app KEY val
+  assert_success
+  refute_output --partial 'wrote plaintext cache only'
+  assert_output --partial 'Set app/default/KEY'
+}

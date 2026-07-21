@@ -144,8 +144,11 @@ cert:
   build root, max 1 MiB. `secretRef` likewise rejects path traversal.
 - **No plaintext secrets in committed manifests** — generate them, or pin once with
   `lo secrets [--domain <d>] set --name <n> [--namespace <ns>] <KEY> [value]` (reads
-  stdin if value omitted). Put non-secret identifiers (client IDs, usernames) in
-  plain config.
+  stdin if value omitted). Add `--encrypt` (short `-e`; alias `--enc`) to SOPS-encrypt
+  the value in the same step — writes the plaintext cache **and** its `.enc` for exactly
+  that one file (not a store-wide sweep); needs `.sops.yaml` (else it errors). Writing
+  plaintext-only while `.sops.yaml` exists **warns** the committed `.enc` is now stale.
+  Put non-secret identifiers (client IDs, usernames) in plain config.
 - **Per-domain vs flat store:** without `--domain`, `lo secrets` (and a raw
   `kustomize build`) hits the flat `$PATH_SECRETS` store — NOT a domain's
   `clusters/<domain>/secrets/`. The two diverge silently; building from the wrong
@@ -164,6 +167,7 @@ the flat single-instance store).
 ```bash
 lo secrets init                            # derive an age key from your SSH key → .sops.yaml
 lo secrets --domain <d> set --name myapp SESSION_KEY    # seed/pin a cached value (reads stdin)
+lo secrets --domain <d> set --name myapp API_TOKEN --encrypt  # pin + SOPS-encrypt this one file (-e/--enc)
 lo secrets allow                           # approve new/changed bash: generator hashes
 lo secrets --domain <d> encrypt            # SOPS-encrypt the cache → Secret.*.enc (commit these)
 lo secrets --domain <d> decrypt            # restore plaintext from .enc on another machine
