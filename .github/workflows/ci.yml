@@ -103,6 +103,144 @@ jobs:
           PATH_BIN: ${{ github.workspace }}/.bin
         run: ./.bin/argsh test tests/operator/
 
+  e2e-lo-up:
+    name: E2E (lo up --ci)
+    runs-on: ubuntu-latest
+    needs: [shellcheck, unit-tests, operator-tests]
+    # Bounded outer budget: provision (kind create + cilium bootstrap) runs
+    # BEFORE `tilt ci` and is NOT covered by the tilt --timeout below, so a
+    # hung provision must be killed by the job. ~18min ceiling; a healthy run
+    # is well under that (see LOK8S_TILT_TIMEOUT + the outer `timeout` wrap).
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust the plain-HTTP dev registries (10.125.0.0/16)
+        # `lo up` stands up plain-HTTP registry containers on the project
+        # subnet (spec.registries.tls:false in the fixture) and Tilt pushes
+        # the locally-built image to the build registry (10.125.<slot>.101)
+        # over the host Docker daemon. Without an insecure-registries entry
+        # the host `docker push` rejects the plain-HTTP endpoint. This mirrors
+        # the range the framework's own Hetzner provider trusts (see
+        # .lok8s/providers/hetzner/.../etc/docker/daemon.json).
+        run: |
+          sudo mkdir -p /etc/docker
+          # Merge (don't clobber) any existing daemon.json.
+          existing='{}'
+          [ -f /etc/docker/daemon.json ] && existing="$(cat /etc/docker/daemon.json)"
+          echo "${existing}" \
+            | jq '.["insecure-registries"] = (((.["insecure-registries"] // []) + ["10.125.0.0/16"]) | unique)' \
+            | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          # Wait for the daemon to come back before the toolchain uses it.
+          for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{json .RegistryConfig.InsecureRegistryCIDRs}}'
+
+      - name: Install toolchain (b → argsh, kind, tilt, kustomize, khelm)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq gettext-base
+          # Supply-chain rule: download the pinned installer, then run it.
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          # No profile filter: `b install` pulls every binary in .bin/b.yaml —
+          # the `local` set (kind, tilt, mkcert) + kustomize + the khelm
+          # ChartRenderer exec plugin — everything `lo up` (kind driver + Tilt)
+          # needs. Vendored .bin already carries most; this reconciles to the lock.
+          b install
+          ./.bin/argsh builtins install   # argsh.so — argsh runtime + builtins
+          # `b install` drops every binary into .bin (next to b.yaml). Put it on
+          # PATH so the later verify/diagnostics steps get kubectl/kind/tilt, and
+          # `lo` (which shells out to them) finds them without a per-step export.
+          echo "${GITHUB_WORKSPACE}/.bin" >> "${GITHUB_PATH}"
+
+      - name: Run lo up --ci against the single-local-build fixture
+        # Exercises the real path: provision a kind cluster + docker registries,
+        # bootstrap Cilium, then `tilt ci` builds the app image, pushes it to
+        # the build registry, deploys it, and waits for the pod to be Ready.
+        # `lo up --ci` exits non-zero unless the whole stack converges, so the
+        # step's exit status IS the end-to-end result.
+        env:
+          FIXTURE: single-local-build
+          DOMAIN: 127.lok8s.dev
+          CLUSTER: e2e-slb
+          # tilt ci's own readiness wait (build+deploy). The provision phase
+          # before it is bounded by the outer `timeout` wrap instead.
+          LOK8S_TILT_TIMEOUT: 300s
+          # Outer wall-clock kill for the whole `lo up --ci` (provision + tilt),
+          # so a hung kind-create / cilium-wait fails in minutes, not at the
+          # job's 18min ceiling.
+          LOK8S_UP_TIMEOUT: 720
+        run: |
+          set -euo pipefail
+          ROOT="${GITHUB_WORKSPACE}"
+          BASE="${ROOT}/tests/e2e/${FIXTURE}"
+
+          # Replicate the e2e helper env (tests/e2e/lib/helpers.bash :: e2e::init):
+          # the fixture dir is PATH_BASE; framework + toolchain stay at the repo root.
+          export PATH_BASE="${BASE}"
+          export PATH_LOK8S="${ROOT}/.lok8s"
+          export PATH_SCRIPTS="${PATH_LOK8S}"
+          export PATH_BIN="${ROOT}/.bin"
+          export PATH_CLUSTERS="${BASE}/clusters"
+          export PATH_SECRETS="${BASE}/.secrets"
+          export KUSTOMIZE_PLUGIN_HOME="${ROOT}/.kustomize"
+          export DOMAIN_NAME="${DOMAIN}"
+          export LOK8S_CLUSTER_NAME="${CLUSTER}"
+          export KUBECONFIG="${BASE}/.kubeconfig/${CLUSTER}.yaml"
+          mkdir -p "${BASE}/.kubeconfig"
+          # No host-port bind: the kind node shouldn't fight the runner for 80/443.
+          export LOK8S_HOST_PORTS=false
+          # Deterministic Tilt port (slot 127 -> 10427), matching the e2e helpers.
+          export TILT_PORT=10427
+          # Expose lo + the b toolchain to Tilt's local()/docker_build subprocesses.
+          export PATH="${PATH_LOK8S}:${PATH_BIN}:${PATH}"
+
+          echo "::group::lo doctor"
+          lo doctor || true
+          echo "::endgroup::"
+
+          # `lo up --ci` = provision::dispatch (kind + registries + cilium) then
+          # `tilt ci` (build + deploy + wait). Gate on its real exit status.
+          # Domain comes from DOMAIN_NAME (domain::resolve honors it; no .active
+          # in the fixture) — the same env path the e2e helpers exercise.
+          timeout "${LOK8S_UP_TIMEOUT}" \
+            lo up --ci --timeout "${LOK8S_TILT_TIMEOUT}"
+
+      - name: Verify the app pod is Running
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE:-single-local-build}/.kubeconfig/${CLUSTER:-e2e-slb}.yaml"
+          kubectl get pods -A
+          phase="$(kubectl get pod -l app=app -o jsonpath='{.items[0].status.phase}')"
+          echo "app pod phase: ${phase}"
+          test "${phase}" = "Running"
+        env:
+          FIXTURE: single-local-build
+          CLUSTER: e2e-slb
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          export KUBECONFIG="${GITHUB_WORKSPACE}/tests/e2e/single-local-build/.kubeconfig/e2e-slb.yaml"
+          echo "::group::docker ps"
+          docker ps -a || true
+          echo "::endgroup::"
+          echo "::group::kind clusters"
+          kind get clusters || true
+          echo "::endgroup::"
+          echo "::group::nodes + pods"
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          echo "::endgroup::"
+          echo "::group::cilium + app describe"
+          kubectl -n kube-system get pods || true
+          kubectl describe pod -l app=app || true
+          kubectl -n kube-system logs -l k8s-app=cilium --tail=50 || true
+          echo "::endgroup::"
+
   integration-tests:
     name: Integration Tests (Kind)
     runs-on: ubuntu-latest
