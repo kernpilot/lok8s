@@ -174,6 +174,12 @@ func templateEnvValue(ctx *plugin.Context, key string, e specpkg.EnvEntry) (stri
 // and namespace, taken from the Context — so `{ as_token: as_token }` reads this
 // secret's own as_token key. Cross-secret refs use the (secret, ns, key) triple.
 func templateSecretRefValue(ctx *plugin.Context, r specpkg.TemplateSecretRef) ([]byte, error) {
+	// r.Key can be empty only when a `!!null` map value skipped the entry's
+	// UnmarshalYAML (yaml.v3 quirk). Fail with a clear message rather than
+	// attempting to read the malformed "Secret.<name>.<ns>." cache filename.
+	if r.Key == "" {
+		return nil, errs.New("secretRef key is empty (a null/`~` value?) — set a sibling key or secret/key")
+	}
 	secret := r.Secret
 	if secret == "" {
 		secret = ctx.Name // sibling: a key in THIS secret

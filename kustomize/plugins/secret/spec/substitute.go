@@ -280,9 +280,11 @@ func applySubstring(value, op string) (string, error) {
 	spec := op[1:]
 	offStr := spec
 	lenStr := ""
+	hasLen := false
 	if colon := strings.IndexByte(spec, ':'); colon >= 0 {
 		offStr = spec[:colon]
 		lenStr = spec[colon+1:]
+		hasLen = true
 	}
 	off, err := strconv.Atoi(strings.TrimSpace(offStr))
 	if err != nil {
@@ -291,7 +293,10 @@ func applySubstring(value, op string) (string, error) {
 	if off < 0 || off > len(value) {
 		return "", fmt.Errorf("substring operator %q: offset %d out of range for value of length %d", op, off, len(value))
 	}
-	if lenStr == "" {
+	// No colon → substring to end. A colon with a missing length (`:off:`) is
+	// malformed — kept in lockstep with validateSubstringShape, which rejects it
+	// at decode.
+	if !hasLen {
 		return value[off:], nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(lenStr))

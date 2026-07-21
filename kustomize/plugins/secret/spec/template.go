@@ -253,11 +253,17 @@ func (t *TemplateEntry) validate() error {
 	}
 	// Re-validate the typed sub-sections whose per-entry UnmarshalYAML can be
 	// SKIPPED by yaml.v3 (a !!null map value leaves the zero struct, bypassing
-	// the unmarshaler). Only bytes: has a hard "> 0" invariant that a zero value
-	// would silently violate (0 random bytes → empty string), so guard it here.
+	// the unmarshaler). bytes: has a "> 0" invariant and secretRef: needs a
+	// non-empty key — a zero value would otherwise slip past decode and only
+	// surface as a confusing runtime error.
 	for _, name := range sortedStringKeys(t.Bytes) {
 		if err := t.Bytes[name].validate(); err != nil {
 			return fmt.Errorf("bytes field %q: %v", name, err)
+		}
+	}
+	for _, name := range sortedStringKeys(t.SecretRef) {
+		if t.SecretRef[name].Key == "" {
+			return fmt.Errorf("secretRef field %q: key is required (a null/`~` value?)", name)
 		}
 	}
 	return nil

@@ -223,7 +223,7 @@ be produced by **exactly one** sub-section):
 | `literals:` | string | `{ tag: matrix-hookshot }` |
 | `passwd:` | [`passwd`](#password-charsets-passwd) entry | `{ pw: { length: 32, chars: hex } }` |
 | `bytes:` | `{ bytes: N, encoding: … }` (or shorthand `N`) | `{ seed: { bytes: 32, encoding: base64-unpadded } }` |
-| `env:` | [`env`](#env-contract) entry (`optional`→empty, `default`, `passwd` fallbacks) | `{ region: "$AWS_REGION" }` |
+| `env:` | [`env`](#env-contract) entry (`optional`→empty, `default`, `passwd` fallbacks) | `{ region: AWS_REGION }` (env var **name**, no `$`/shell expansion) |
 | `secretRef:` | [`secretRef`](#cross-secret-references) entry + **sibling shorthand** | `{ token: as_token }` (sibling) · `{ dbpw: db/password }` (cross) |
 | `key:` | [`key`](#private-keys-key) entry | `{ pem: ed25519 }` |
 

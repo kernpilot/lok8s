@@ -356,6 +356,22 @@ secretRef:
 	}
 }
 
+func TestSecretRef_NullValueRejectedAtDecode(t *testing.T) {
+	// `R: ~` skips SecretRefEntry.UnmarshalYAML (yaml.v3 !!null quirk), leaving
+	// Secret+Key empty. Secret.validate() must reject it at decode so it fails
+	// with a clear message instead of a confusing runtime "read /default/:" error.
+	in := []byte(`apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: t}
+secretRef:
+  R: ~
+`)
+	_, err := DecodeBytes(in)
+	if err == nil || !strings.Contains(err.Error(), "secret is required") {
+		t.Errorf("expected null secretRef rejected at decode, got %v", err)
+	}
+}
+
 func TestSecretRef_MissingKey(t *testing.T) {
 	in := []byte(`apiVersion: secrets.lok8s.dev/v1
 kind: Secret

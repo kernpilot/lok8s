@@ -537,6 +537,22 @@ func TestTemplate_SiblingSecretRefMissingErrors(t *testing.T) {
 	}
 }
 
+// A secretRef whose Key is empty (a !!null value that skipped the unmarshaler)
+// must fail with a clear message, not attempt to read a malformed cache file.
+func TestTemplate_SecretRefEmptyKeyErrorsClearly(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "{x}", SecretRef: map[string]specpkg.TemplateSecretRef{"x": {}}}, // empty Key
+	})
+	_, err := g.Generate(ctx)
+	if err == nil {
+		t.Fatal("expected error for empty secretRef key")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should call out the empty key: %v", err)
+	}
+}
+
 // TestTemplate_OperatorAppliedAtGenerate: an operator in the pattern transforms
 // the resolved value at generation time.
 func TestTemplate_OperatorAppliedAtGenerate(t *testing.T) {

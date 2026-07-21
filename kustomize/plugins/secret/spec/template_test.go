@@ -459,6 +459,20 @@ func TestTemplate_SecretRefMappingRequiresSecret(t *testing.T) {
 	}
 }
 
+func TestTemplate_SecretRefNullValueRejectedAtDecode(t *testing.T) {
+	// A !!null value skips TemplateSecretRef.UnmarshalYAML (yaml.v3), leaving an
+	// empty Key — the entry-level re-validation must catch it at DECODE, not defer
+	// to a confusing runtime "no such file" error.
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{r}"
+    secretRef: { r: ~ }
+`)
+	if err == nil || !strings.Contains(err.Error(), "key is required") {
+		t.Errorf("expected empty-key secretRef error at decode, got %v", err)
+	}
+}
+
 func TestTemplate_KeySubsectionParse(t *testing.T) {
 	in := []byte(tmplHeader + `template:
   config.yml:

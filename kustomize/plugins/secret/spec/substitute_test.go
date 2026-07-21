@@ -168,6 +168,20 @@ func TestSubstitute_SubstringOutOfRange(t *testing.T) {
 	}
 }
 
+// `:off:` (colon with a missing length) is malformed — decode AND render must
+// AGREE that it's an error (the "lockstep" property between validateSubstringShape
+// and applySubstring).
+func TestSubstitute_SubstringTrailingColonRejectedBothPaths(t *testing.T) {
+	// Decode path (parse rejects the shape).
+	if err := decodePatternErr(t, "{a:1:}"); err == nil || !strings.Contains(err.Error(), "length") {
+		t.Errorf("decode should reject `:1:`, got %v", err)
+	}
+	// Render path (applySubstring must also reject, not silently treat as :off).
+	if _, err := sub(t, "{a:1:}", map[string]string{"a": "abc"}); err == nil {
+		t.Error("render should reject `:1:` (missing length), not fall back to :off")
+	}
+}
+
 // A range-valid substring at the exact boundary must succeed.
 func TestSubstitute_SubstringBoundary(t *testing.T) {
 	got, err := sub(t, "{a:2:3}", map[string]string{"a": "abcde"})
