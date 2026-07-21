@@ -44,6 +44,7 @@ type Secret struct {
 	// custom UnmarshalYAML support for shorthand forms.
 	Literals  map[string]string         `yaml:"literals,omitempty"`
 	Passwd    map[string]PasswdEntry    `yaml:"passwd,omitempty"`
+	Template  map[string]TemplateEntry  `yaml:"template,omitempty"`
 	Bash      map[string]BashEntry      `yaml:"bash,omitempty"`
 	Env       map[string]EnvEntry       `yaml:"env,omitempty"`
 	SecretRef map[string]SecretRefEntry `yaml:"secretRef,omitempty"`
