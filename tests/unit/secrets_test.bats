@@ -255,8 +255,11 @@ require_argsh_cli() {
   require_argsh_cli
   require_tools
   # Configure encryption (gate = ${PATH_BASE}/.sops.yaml present) with a tmpdir key.
+  # Use the real-world rule shape (Secret\..* — same as `secrets::init` writes),
+  # not a catch-all .*, so the test exercises the recipient scoping sops actually
+  # applies (path_regex is matched against the cache filename argument).
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
-  printf 'creation_rules:\n  - path_regex: .*\n    age: %s\n' \
+  printf 'creation_rules:\n  - path_regex: Secret\\..*\n    age: %s\n' \
     "$(ssh-to-age < "${BATS_TEST_TMPDIR}/id.pub")" > "${PATH_BASE}/.sops.yaml"
 
   # A pre-existing sibling plaintext with NO .enc — must stay plaintext-only.
