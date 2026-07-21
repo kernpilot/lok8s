@@ -35,9 +35,9 @@ or your version manager.
 **Binary:** `.kustomize/secrets.lok8s.dev/v1/secret/Secret`
 
 Generates Kubernetes Secret resources from a structured YAML CRD with
-nine generator types (`literals`, `passwd`, `env`, `secretRef`, `htpasswd`,
-`file`, `b64`, `bash`, `cert`). The cache directory `$PATH_SECRETS` is the
-source of truth for stable output across runs.
+ten generator types (`literals`, `passwd`, `template`, `env`, `secretRef`,
+`htpasswd`, `file`, `b64`, `bash`, `cert`). The cache directory `$PATH_SECRETS`
+is the source of truth for stable output across runs.
 
 ### Quick example
 
@@ -71,6 +71,13 @@ passwd:
     length: 48
     chars: alphanum+symbols
     require: [upper, lower, digit, symbol]
+
+template:
+  MATRIX_SIGNING_KEY:                   # composite: literal prefix + fields
+    pattern: "ed25519 a_{kid} {seed}"
+    fields:
+      kid:  {length: 4, chars: "custom:abcdefghijklmnopqrstuvwxyz"}
+      seed: {bytes: 32, encoding: base64-unpadded}
 
 env:
   GOOGLE_KEY: AUTHENTIK_UT_GOOGLE_CONSUMER_KEY    # explicit env var
@@ -123,6 +130,7 @@ so it needs no re-`lo secrets allow`.
 |-----------|----------|-------|-------|
 | `literals:` | Plain key/value map | No | Verbatim, base64-encoded at emit |
 | `passwd:` | Random password from charset | Yes | Cache-first; delete the cache file to rotate |
+| `template:` | Composite value: a pattern with `{name}` placeholders filled by named random fields | Yes | Cache-first (the *composed* value is cached by key, not the pattern). For multi-part secrets — retires fragile `bash:` format-glue. See [Composite secrets](#composite-secrets-template) |
 | `env:` | Read from env var | Yes (unless `update: true`) | Falls back to key as var name when value is null |
 | `secretRef:` | Read from another Secret's cache file | Reads cross-secret | Shorthand `"secret/key"` or `"secret/ns/key"`; no path traversal |
 | `htpasswd:` | Bcrypt-hashed username:password line | Yes (3 files: `.username`, `.password`, `.bcrypt`) | Username generator starts with a letter; cost factor 10 |
@@ -172,6 +180,81 @@ The charset must be able to supply every required class (`require: [symbol]`
 needs `chars: alphanum+symbols`, not the default `alphanum`) and `length` must
 be ≥ the number of required classes — otherwise the build fails with a clear
 config error rather than a bad secret.
+
+### Composite secrets (`template:`)
+
+`template:` builds a secret whose value has a **fixed structure** — a literal
+pattern with `{name}` placeholders, each filled by a named random field. It
+exists for multi-part values that `passwd:` can't express (it makes exactly one
+random string, no prefix/composition) and that would otherwise fall back to a
+brittle `bash:` pipeline.
+
+The motivating case is a Matrix/synapse **ed25519 signing key**, whose on-disk
+format is `ed25519 a_<key-id> <base64 of 32 random bytes>`:
+
+```yaml
+template:
+  SIGNING_KEY:
+    pattern: "ed25519 a_{kid} {seed}"
+    fields:
+      kid:  {length: 4, chars: "custom:abcdefghijklmnopqrstuvwxyz"}  # charset field
+      seed: {bytes: 32, encoding: base64-unpadded}                    # bytes field
+```
+
+renders to e.g. `ed25519 a_nsnx Oji0Bha34hv3gcoEkRMLAg2Q4jTFG0n4WQd+I9bx77s`.
+
+**Why not `bash:`.** Gluing that together in shell (`printf 'ed25519 a_%s %s' "$(tr -dc a-z </dev/urandom | head -c4)" "$(head -c32 /dev/urandom | base64)"`)
+has two failure modes `template:` avoids: (1) the `tr … | head` pipeline
+**SIGPIPEs** in a non-tty render (`head` closes the pipe early → the process
+exits 141), and (2) `bash:` is SHA-pinned, so **any edit to the command forces a
+`lo secrets allow` re-approval** and re-keys the value across every plane.
+`template:` composes the value in-process from `crypto/rand`, caches the
+composed string by the entry key (like `passwd:`), and has **no approval gate**.
+
+**Fields — one of two modes each (exactly one; both/neither is a config error):**
+
+- **charset field** — draw `length` characters from a charset (same DSL as
+  `passwd:` — see [charsets](#password-charsets-passwd)). `length` is **required**
+  (there is no default for a template field — the shape is explicit). Optional
+  `chars` (default `alphanum`) and `require:` (class constraints, same as
+  `passwd:`).
+
+  ```yaml
+  fields:
+    token: {length: 40, chars: base64url, require: [lower, digit]}
+  ```
+
+- **bytes field** — read `bytes` raw `crypto/rand` bytes, then encode. This is
+  true N-bytes-of-entropy (not a charset draw), so a `bytes: 32` seed is a full
+  256 bits regardless of the output alphabet.
+
+  | `encoding` | Output alphabet | Length for N bytes |
+  |---|---|---|
+  | `base64` (default) | standard `+/`, padded | `4·⌈N/3⌉` |
+  | `base64url` | url-safe `-_`, padded | `4·⌈N/3⌉` |
+  | `base64-unpadded` | standard `+/`, no `=` | `⌈4N/3⌉` |
+  | `base64url-unpadded` | url-safe `-_`, no `=` | `⌈4N/3⌉` |
+  | `hex` | lowercase `0-9a-f` | `2N` |
+
+**Pattern rules.** The pattern is validated at parse time: it must be non-empty,
+every `{name}` must have a matching field, and **every declared field must be
+referenced** (an unused field is a typo, so it's an error). Write a **literal
+brace** by doubling it — `{{` → `{`, `}}` → `}`. An unterminated `{` or a stray
+`}` is rejected.
+
+**Caching.** Cache-first like `passwd:` — the **composed** value is stored under
+the entry key (`Secret.<name>.<ns>.<key>`), not the pattern or per-field state.
+The pattern/fields are deliberately **not hashed** (that hash is the `bash:`
+approval-gate model this generator escapes): editing the pattern only changes
+*newly generated* keys; existing cached values are reused verbatim. Rotate by
+deleting the cache file.
+
+> **Migrating an existing `bash:`-generated composite to `template:` re-keys it
+> once.** The value is keyed by the entry name, but the *bytes* a `template:`
+> composes won't match whatever the old `bash:` command produced, and there's no
+> shared cache file between the two generators. Plan a one-time rotation (delete
+> the old cache entry, let `template:` mint a fresh value, roll the consumer) —
+> after that it's byte-stable like any other cached generator.
 
 ### Running commands (`bash:`)
 
@@ -225,16 +308,23 @@ Mind the entropy: the default `alphanum` charset is ~5.95 bits/char, so
 key. Use `chars: hex` (4 bits/char × 64 = 256) or `chars: base64url`, and size
 `length` for the bit count you need.
 
-Reserve `bash:` + `openssl` for material `passwd` can't produce — e.g. an RSA
-private key (`exec: openssl genrsa 4096`, `newline: ensure`). Equally valid, but
-it pulls in the approval gate above.
+For a **composite** value — random bytes wrapped in a fixed format, like a
+Matrix/synapse `ed25519 a_<id> <base64 seed>` signing key — use
+[`template:`](#composite-secrets-template) rather than `bash:`. A bytes field
+(`{bytes: 32, encoding: base64-unpadded}`) is a full 256 bits of `crypto/rand`
+entropy in the exact wire shape, with no shell pipeline and no approval gate.
+
+Reserve `bash:` + `openssl` for material neither `passwd` nor `template` can
+produce — e.g. an RSA private key (`exec: openssl genrsa 4096`,
+`newline: ensure`). Equally valid, but it pulls in the approval gate above.
 
 ### Cache-first determinism
 
 The cache directory `$PATH_SECRETS` is the **source of truth** for stable
-output. Cached generators (`passwd`, `secretRef`, `htpasswd`, `bash`) check the
-cache before generating; on cache hit, they return the existing value
-unchanged. This produces byte-stable kustomize output across runs.
+output. Cached generators (`passwd`, `template`, `secretRef`, `htpasswd`,
+`bash`) check the cache before generating; on cache hit, they return the
+existing value unchanged. This produces byte-stable kustomize output across
+runs.
 
 To rotate a value, delete its file from `$PATH_SECRETS` and re-run
 `kustomize build`. For htpasswd, deleting just `<key>.bcrypt` regenerates

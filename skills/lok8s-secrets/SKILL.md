@@ -4,7 +4,7 @@ description: >-
   Use when writing a lok8s secrets.lok8s.dev Secret generator (a Secret.*.yaml
   used by a kustomization) or managing secrets via `lo secrets` / `lo trust`.
   Covers the generator forms
-  (passwd/bash/env/file/secretRef/htpasswd/literals/b64/cert), the per-domain
+  (passwd/template/bash/env/file/secretRef/htpasswd/literals/b64/cert), the per-domain
   `clusters/<domain>/secrets/` cache store, and the caching/approval/path gotchas.
 ---
 
@@ -47,6 +47,7 @@ generators: [ Secret.myapp.default.yaml ]
 |---------|----------|---------|---------|
 | `literals` | verbatim value | no | `API_MODE: prod` |
 | `passwd` | random password | yes | `PW: { length: 32, chars: alphanum+symbols }` or `PW: 32` |
+| `template` | composite: pattern with `{name}` placeholders filled by random fields | yes | `K: { pattern: "ed25519 a_{kid} {seed}", fields: { kid: {length: 4, chars: "custom:abc…z"}, seed: {bytes: 32, encoding: base64-unpadded} } }` — for multi-part secrets; retires fragile `bash:` glue |
 | `env` | value of a host env var | yes (unless `update: true`) | `TOKEN: MY_ENV_VAR` (null → use the key name) |
 | `file` | contents of a local file | no | `ca.crt: ./certs/ca.crt` or `{ path: ..., mode: passthrough }` |
 | `b64` | pre-base64 passthrough | no | `DATA: <base64>` |

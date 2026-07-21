@@ -9,7 +9,7 @@ safely. No external secret store is required to get started.
 - The **secrets kustomize plugin** (`secrets.lok8s.dev/v1/Secret`) turns a
   declarative YAML spec into a Kubernetes `Secret` at build time. See the
   [plugin reference](/reference/kustomize-plugins#secrets-generator) for every
-  generator type (`passwd`, `bash`, `env`, `file`, `secretRef`, …).
+  generator type (`passwd`, `template`, `bash`, `env`, `file`, `secretRef`, …).
 - Generated values are cached one file per key —
   `Secret.<name>.<namespace>.<key>` — in a **per-domain store**,
   `clusters/<domain>/secrets/`. **The store is the source of truth** — first
