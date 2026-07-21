@@ -79,6 +79,21 @@ To store the literal string `-` as a value, use the pipe form:
 
 It's then cached like any generated value and can be encrypted + committed.
 
+Pass **`--encrypt`** (short `-e`; the alias `--enc` also works) to SOPS-encrypt the
+value in the same step — it writes the plaintext cache **and** its `.enc` in one go,
+so you never leave a fresh value lying unencrypted:
+
+```bash
+printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp API_TOKEN --encrypt
+```
+
+`--encrypt` encrypts **only** the file it just wrote (not a whole-store sweep — see the
+staging note under [Committing secrets](#committing-secrets-sops-age)) and needs
+encryption already set up (`.sops.yaml` present, via `lo secrets init`); without it the
+set fails. When encryption **is** configured but you write plaintext-only (no
+`--encrypt`), `set` warns that the committed `.enc` is now stale — re-run with
+`--encrypt` or `lo secrets encrypt` before committing.
+
 ## Provision-time credentials (shell env)
 
 Some secrets are consumed by the **CLI / provisioner** as shell environment
