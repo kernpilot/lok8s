@@ -390,6 +390,10 @@ key:
 - `key:` is also usable as a **[template sub-section](#composite-secrets-template)**
   (`template: { config.yml: { pattern: "…{pem}…", key: { pem: ed25519 } } }`) to
   inline a generated key into a config file, via the same reuse path.
+- An empty entry — `passkey.pem: {}` **or** a null `passkey.pem: ~` — is the
+  shorthand for "all defaults" (RSA-4096 PKCS#8), the same way `passwd: { K: ~ }`
+  defaults its length. (Only the *scalar* shorthand must name an algorithm, e.g.
+  `passkey.pem: rsa`.)
 
 Use `key:` for private keys; use [`cert:`](#development-certificates-cert) when
 you need an X.509 certificate (leaf or CA), not a bare key.
