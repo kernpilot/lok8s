@@ -58,6 +58,16 @@ func passwdValue(ctx *plugin.Context, key string, entry specpkg.PasswdEntry) ([]
 	if ctx.Cache == nil {
 		return nil, errs.New("passwd requires PATH_SECRETS to be set")
 	}
+	return ctx.Cache.GetOrCreate(key, func() ([]byte, error) {
+		return passwdDraw(entry)
+	})
+}
+
+// passwdDraw generates a fresh random password per the PasswdEntry with NO
+// caching — the feasibility check + charset draw only. Used directly by callers
+// whose caching happens at a coarser grain (e.g. a template: sub-section, where
+// the COMPOSED value is the cached unit, not the individual field).
+func passwdDraw(entry specpkg.PasswdEntry) ([]byte, error) {
 	length := entry.EffectiveLength()
 	chars, err := charset.Resolve(entry.EffectiveChars())
 	if err != nil {
@@ -78,12 +88,10 @@ func passwdValue(ctx *plugin.Context, key string, entry specpkg.PasswdEntry) ([]
 			return nil, fmt.Errorf("charset %q has no %q characters to satisfy require", entry.EffectiveChars(), c)
 		}
 	}
-	return ctx.Cache.GetOrCreate(key, func() ([]byte, error) {
-		if len(required) == 0 {
-			return random.Password(length, chars)
-		}
-		return random.PasswordSatisfying(length, chars, func(p []byte) bool {
-			return charset.SatisfiesAll(p, required)
-		})
+	if len(required) == 0 {
+		return random.Password(length, chars)
+	}
+	return random.PasswordSatisfying(length, chars, func(p []byte) bool {
+		return charset.SatisfiesAll(p, required)
 	})
 }

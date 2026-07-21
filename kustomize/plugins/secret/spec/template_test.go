@@ -368,3 +368,263 @@ func TestTemplate_RejectsUnknownFieldKey(t *testing.T) {
 		t.Errorf("expected unknown field-key error, got %v", err)
 	}
 }
+
+// --- typed sub-sections (literals / passwd / bytes / env / secretRef / key) ---
+
+func TestTemplate_TypedSubsectionsParse(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  registration.yml:
+    pattern: "id: {tag}\nas: \"{as_token}\"\nregion: {region}\nseed: {seed}\npw: {pw}\n"
+    literals:  { tag: matrix-hookshot }
+    secretRef: { as_token: as_token }
+    env:       { region: "$AWS_REGION" }
+    bytes:     { seed: { bytes: 32, encoding: base64-unpadded } }
+    passwd:    { pw: { length: 16, chars: hex } }
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := s.Template["registration.yml"]
+	if e.Literals["tag"] != "matrix-hookshot" {
+		t.Errorf("literals: %+v", e.Literals)
+	}
+	if e.SecretRef["as_token"].Key != "as_token" || e.SecretRef["as_token"].Secret != "" {
+		t.Errorf("sibling secretRef: %+v", e.SecretRef["as_token"])
+	}
+	if e.Env["region"].Var != "$AWS_REGION" {
+		t.Errorf("env: %+v", e.Env["region"])
+	}
+	if e.Bytes["seed"].Bytes != 32 || e.Bytes["seed"].EffectiveEncoding() != "base64-unpadded" {
+		t.Errorf("bytes: %+v", e.Bytes["seed"])
+	}
+	if e.Passwd["pw"].Length != 16 || e.Passwd["pw"].EffectiveChars() != "hex" {
+		t.Errorf("passwd: %+v", e.Passwd["pw"])
+	}
+}
+
+func TestTemplate_SecretRefSiblingAndCrossForms(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  K:
+    pattern: "{sib} {cross} {crossns}"
+    secretRef:
+      sib: sibling_key
+      cross: other-secret/their_key
+      crossns: other-secret/other-ns/their_key
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr := s.Template["K"].SecretRef
+	if sr["sib"].Secret != "" || sr["sib"].Key != "sibling_key" {
+		t.Errorf("sibling: %+v", sr["sib"])
+	}
+	if sr["cross"].Secret != "other-secret" || sr["cross"].Namespace != "" || sr["cross"].Key != "their_key" {
+		t.Errorf("cross: %+v", sr["cross"])
+	}
+	if sr["crossns"].Secret != "other-secret" || sr["crossns"].Namespace != "other-ns" || sr["crossns"].Key != "their_key" {
+		t.Errorf("crossns: %+v", sr["crossns"])
+	}
+}
+
+func TestTemplate_SecretRefMappingForm(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  K:
+    pattern: "{r}"
+    secretRef:
+      r: { secret: db, namespace: prod, key: password }
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := s.Template["K"].SecretRef["r"]
+	if r.Secret != "db" || r.Namespace != "prod" || r.Key != "password" {
+		t.Errorf("mapping form: %+v", r)
+	}
+}
+
+func TestTemplate_SecretRefMappingRequiresSecret(t *testing.T) {
+	// The mapping form is a cross-secret ref, so secret is required (only the
+	// bare-string sibling shorthand may omit it).
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{r}"
+    secretRef:
+      r: { key: password }
+`)
+	if err == nil || !strings.Contains(err.Error(), "secret") {
+		t.Errorf("expected secret-required error, got %v", err)
+	}
+}
+
+func TestTemplate_SecretRefNullValueRejectedAtDecode(t *testing.T) {
+	// A !!null value skips TemplateSecretRef.UnmarshalYAML (yaml.v3), leaving an
+	// empty Key — the entry-level re-validation must catch it at DECODE, not defer
+	// to a confusing runtime "no such file" error.
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{r}"
+    secretRef: { r: ~ }
+`)
+	if err == nil || !strings.Contains(err.Error(), "key is required") {
+		t.Errorf("expected empty-key secretRef error at decode, got %v", err)
+	}
+}
+
+func TestTemplate_KeySubsectionParse(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  config.yml:
+    pattern: "key: |\n{pem}\n"
+    key: { pem: ed25519 }
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Template["config.yml"].Key["pem"].EffectiveAlgorithm() != "ed25519" {
+		t.Errorf("key subsection: %+v", s.Template["config.yml"].Key["pem"])
+	}
+}
+
+func TestTemplate_BytesShorthandInSubsection(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  K:
+    pattern: "{seed}"
+    bytes: { seed: 16 }
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := s.Template["K"].Bytes["seed"]
+	if b.Bytes != 16 || b.EffectiveEncoding() != "base64" {
+		t.Errorf("bytes shorthand: %+v", b)
+	}
+}
+
+func TestTemplate_BytesSubsectionRejectsZero(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{s}"
+    bytes: { s: 0 }
+`)
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("expected bytes>0 error, got %v", err)
+	}
+}
+
+func TestTemplate_BytesSubsectionNullRejected(t *testing.T) {
+	// A !!null map value skips BytesEntry.UnmarshalYAML (yaml.v3 quirk), leaving
+	// Bytes: 0 — the entry-level re-validation in TemplateEntry.validate must
+	// still catch it rather than silently emitting an empty field.
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{s}"
+    bytes: { s: ~ }
+`)
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("expected bytes>0 error for null bytes entry, got %v", err)
+	}
+}
+
+func TestTemplate_BytesSubsectionRejectsBadEncoding(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{s}"
+    bytes: { s: { bytes: 16, encoding: base32 } }
+`)
+	if err == nil || !strings.Contains(err.Error(), "encoding") {
+		t.Errorf("expected encoding error, got %v", err)
+	}
+}
+
+// fields: and typed sub-sections may coexist, each producing distinct placeholders.
+func TestTemplate_FieldsAndTypedCoexist(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  K:
+    pattern: "{legacy}-{tag}"
+    fields:   { legacy: {length: 4, chars: hex} }
+    literals: { tag: v1 }
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := s.Template["K"]
+	if e.Fields["legacy"].Length != 4 || e.Literals["tag"] != "v1" {
+		t.Errorf("coexist: fields=%+v literals=%+v", e.Fields, e.Literals)
+	}
+}
+
+// A placeholder declared by TWO sub-sections is ambiguous → rejected.
+func TestTemplate_DuplicateAcrossSubsectionsRejected(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{dup}"
+    literals: { dup: a }
+    passwd:   { dup: 8 }
+`)
+	if err == nil || !strings.Contains(err.Error(), "more than one sub-section") {
+		t.Errorf("expected duplicate-declaration error, got %v", err)
+	}
+}
+
+// A placeholder declared in fields: AND a typed sub-section is also ambiguous.
+func TestTemplate_DuplicateFieldsAndTypedRejected(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{dup}"
+    fields:   { dup: {length: 4} }
+    literals: { dup: a }
+`)
+	if err == nil || !strings.Contains(err.Error(), "more than one sub-section") {
+		t.Errorf("expected duplicate-declaration error, got %v", err)
+	}
+}
+
+// Placeholders in the pattern that no sub-section produces are rejected.
+func TestTemplate_UndeclaredAcrossAllSubsections(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{a}-{missing}"
+    literals: { a: x }
+`)
+	if err == nil || !strings.Contains(err.Error(), "{missing}") {
+		t.Errorf("expected undeclared error mentioning {missing}, got %v", err)
+	}
+}
+
+// A typed sub-section field not referenced by the pattern is dead config.
+func TestTemplate_UnusedTypedFieldRejected(t *testing.T) {
+	err := decodeTemplateErr(t, `template:
+  K:
+    pattern: "{a}"
+    literals: { a: x, dead: y }
+`)
+	if err == nil || !strings.Contains(err.Error(), "dead") {
+		t.Errorf("expected unused-field error mentioning dead, got %v", err)
+	}
+}
+
+// Operators in the pattern resolve against the DECLARED field name (before the
+// operator), so a typed field is matched even when the placeholder carries one.
+func TestTemplate_OperatorPlaceholderMatchesDeclaredField(t *testing.T) {
+	in := []byte(tmplHeader + `template:
+  K:
+    pattern: "{tag^^}"
+    literals: { tag: hookshot }
+`)
+	s, err := DecodeBytes(in)
+	if err != nil {
+		t.Fatalf("operator placeholder should match declared field: %v", err)
+	}
+	got, err := s.Template["K"].Substitute(map[string]string{"tag": "hookshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "HOOKSHOT" {
+		t.Errorf("got %q, want HOOKSHOT", got)
+	}
+}

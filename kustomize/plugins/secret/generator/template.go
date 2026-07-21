@@ -1,13 +1,13 @@
 package generator
 
 import (
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"sort"
 
+	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
 	"github.com/kernpilot/lok8s/kustomize/pkg/charset"
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
@@ -18,11 +18,12 @@ import (
 
 // Template is the generator for the `template:` field. It composes a fixed
 // pattern with `{name}` placeholders into a single secret value, drawing each
-// placeholder from a named random field (charset or raw bytes). The COMPOSED
-// value is cached by the entry key — like passwd:, the store is the source of
-// truth, so output is byte-stable across runs. The pattern/fields are NOT
-// hashed (that is the bash: approval-gate model this generator exists to
-// avoid): editing the pattern only affects freshly-generated keys.
+// placeholder from a typed sub-section (literals / passwd / bytes / env /
+// secretRef / key) or the legacy fields: shorthand. The COMPOSED value is
+// cached by the entry key — like passwd:, the store is the source of truth, so
+// output is byte-stable across runs. The pattern/fields are NOT hashed (that is
+// the bash: approval-gate model this generator exists to avoid): editing the
+// pattern only affects freshly-generated keys.
 type Template struct {
 	spec map[string]specpkg.TemplateEntry
 }
@@ -62,27 +63,14 @@ func (g *Template) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 }
 
 // composeTemplate generates every field's value and substitutes them into the
-// pattern, returning the composed bytes. Fields are generated in sorted name
-// order purely for deterministic dispatch — charset fields draw from the
-// package-global crypto/rand reader (random.Reader), and only bytes fields use
-// ctx.Rand, so byte-stability across runs rests on the CACHE, not on RNG
-// determinism.
+// pattern, returning the composed bytes. Fields across all sub-sections are
+// generated in a single sorted-by-name pass purely for deterministic dispatch;
+// byte-stability across runs rests on the CACHE, not on RNG determinism.
 func composeTemplate(ctx *plugin.Context, entry *specpkg.TemplateEntry) ([]byte, error) {
-	names := make([]string, 0, len(entry.Fields))
-	for name := range entry.Fields {
-		names = append(names, name)
+	values, err := generateTemplateValues(ctx, entry)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(names)
-
-	values := make(map[string]string, len(entry.Fields))
-	for _, name := range names {
-		v, err := generateField(ctx, entry.Fields[name])
-		if err != nil {
-			return nil, errs.Wrap("field "+name, err)
-		}
-		values[name] = v
-	}
-
 	s, err := entry.Substitute(values)
 	if err != nil {
 		return nil, err
@@ -90,7 +78,134 @@ func composeTemplate(ctx *plugin.Context, entry *specpkg.TemplateEntry) ([]byte,
 	return []byte(s), nil
 }
 
-// generateField produces one field's string value: a charset draw or an
+// generateTemplateValues resolves every declared placeholder (across fields: +
+// the typed sub-sections) to its string value. Names are processed in sorted
+// order for deterministic dispatch.
+func generateTemplateValues(ctx *plugin.Context, entry *specpkg.TemplateEntry) (map[string]string, error) {
+	values := map[string]string{}
+
+	// Legacy fields:
+	for _, name := range sortedKeys(entry.Fields) {
+		v, err := generateField(ctx, entry.Fields[name])
+		if err != nil {
+			return nil, errs.Wrap("field "+name, err)
+		}
+		values[name] = v
+	}
+	// literals:
+	for _, name := range sortedKeys(entry.Literals) {
+		values[name] = entry.Literals[name]
+	}
+	// passwd: (drawn fresh — the composed template value is the cached unit, so
+	// there is no per-field cache key to key on)
+	for _, name := range sortedKeys(entry.Passwd) {
+		v, err := passwdDraw(entry.Passwd[name])
+		if err != nil {
+			return nil, errs.Wrap("passwd "+name, err)
+		}
+		values[name] = string(v)
+	}
+	// bytes:
+	for _, name := range sortedKeys(entry.Bytes) {
+		v, err := bytesValue(ctx, entry.Bytes[name])
+		if err != nil {
+			return nil, errs.Wrap("bytes "+name, err)
+		}
+		values[name] = v
+	}
+	// env:
+	for _, name := range sortedKeys(entry.Env) {
+		v, err := templateEnvValue(ctx, name, entry.Env[name])
+		if err != nil {
+			return nil, errs.Wrap("env "+name, err)
+		}
+		values[name] = v
+	}
+	// secretRef:
+	for _, name := range sortedKeys(entry.SecretRef) {
+		v, err := templateSecretRefValue(ctx, entry.SecretRef[name])
+		if err != nil {
+			return nil, errs.Wrap("secretRef "+name, err)
+		}
+		values[name] = string(v)
+	}
+	// key:
+	for _, name := range sortedKeys(entry.Key) {
+		v, err := generateKey(ctx, entry.Key[name])
+		if err != nil {
+			return nil, errs.Wrap("key "+name, err)
+		}
+		values[name] = string(v)
+	}
+	return values, nil
+}
+
+// templateEnvValue resolves a template env: sub-section value. Unlike the
+// top-level env: generator this does NOT cache per-field (the composed template
+// value is the cached unit), so it reads the env var directly. Fallbacks on an
+// unset var mirror env:'s (default → literal, passwd → generated), except that
+// `optional` yields an EMPTY string rather than omitting the key — a placeholder
+// must resolve to something, or it would leave a hole in the pattern.
+func templateEnvValue(ctx *plugin.Context, key string, e specpkg.EnvEntry) (string, error) {
+	varName := e.EffectiveVar(key)
+	if v, ok := ctx.Env(varName); ok {
+		return v, nil
+	}
+	switch {
+	case e.Default != nil:
+		return *e.Default, nil
+	case e.Passwd != nil:
+		p, err := passwdDraw(*e.Passwd)
+		if err != nil {
+			return "", err
+		}
+		return string(p), nil
+	case e.Optional:
+		// A placeholder must have a value — an omitted key would leave a hole in
+		// the pattern. Treat optional+unset as an empty string (documented).
+		return "", nil
+	default:
+		return "", errs.Newf("env var %q not set", varName)
+	}
+}
+
+// templateSecretRefValue resolves a template secretRef: sub-section value. A
+// sibling reference (Secret empty) is resolved against the OWNING secret's name
+// and namespace, taken from the Context — so `{ as_token: as_token }` reads this
+// secret's own as_token key. Cross-secret refs use the (secret, ns, key) triple.
+func templateSecretRefValue(ctx *plugin.Context, r specpkg.TemplateSecretRef) ([]byte, error) {
+	// r.Key can be empty only when a `!!null` map value skipped the entry's
+	// UnmarshalYAML (yaml.v3 quirk). Fail with a clear message rather than
+	// attempting to read the malformed "Secret.<name>.<ns>." cache filename.
+	if r.Key == "" {
+		return nil, errs.New("secretRef key is empty (a null/`~` value?) — set a sibling key or secret/key")
+	}
+	secret := r.Secret
+	if secret == "" {
+		secret = ctx.Name // sibling: a key in THIS secret
+	}
+	ns := r.Namespace
+	if ns == "" {
+		ns = ctx.Namespace
+	}
+	filename := cache.FormatName(secret, ns, r.Key)
+	val, err := ctx.Cache.ReadByName(filename)
+	if err != nil {
+		return nil, errs.Newf("read %s/%s/%s: %v", secret, ns, r.Key, err)
+	}
+	return val, nil
+}
+
+// bytesValue reads a bytes: sub-section's raw crypto/rand bytes and encodes them.
+func bytesValue(ctx *plugin.Context, b specpkg.BytesEntry) (string, error) {
+	buf := make([]byte, b.Bytes)
+	if _, err := io.ReadFull(randReader(ctx), buf); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+	return encodeBytes(buf, b.EffectiveEncoding())
+}
+
+// generateField produces one LEGACY field's string value: a charset draw or an
 // encoded run of crypto/rand bytes.
 func generateField(ctx *plugin.Context, f specpkg.TemplateField) (string, error) {
 	if f.IsBytes() {
@@ -141,11 +256,7 @@ func generateCharsetField(f specpkg.TemplateField) (string, error) {
 // configured encoding.
 func generateBytesField(ctx *plugin.Context, f specpkg.TemplateField) (string, error) {
 	buf := make([]byte, f.Bytes)
-	r := ctx.Rand
-	if r == nil {
-		r = rand.Reader
-	}
-	if _, err := io.ReadFull(r, buf); err != nil {
+	if _, err := io.ReadFull(randReader(ctx), buf); err != nil {
 		return "", fmt.Errorf("read random bytes: %w", err)
 	}
 	return encodeBytes(buf, f.EffectiveEncoding())
@@ -167,4 +278,15 @@ func encodeBytes(b []byte, enc string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown encoding %q", enc)
 	}
+}
+
+// sortedKeys returns the sorted keys of a string-keyed map (deterministic
+// dispatch order for template field generation).
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

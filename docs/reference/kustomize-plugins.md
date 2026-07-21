@@ -130,9 +130,10 @@ so it needs no re-`lo secrets allow`.
 |-----------|----------|-------|-------|
 | `literals:` | Plain key/value map | No | Verbatim, base64-encoded at emit |
 | `passwd:` | Random password from charset | Yes | Cache-first; delete the cache file to rotate |
-| `template:` | Composite value: a pattern with `{name}` placeholders filled by named random fields | Yes | Cache-first (the *composed* value is cached by key, not the pattern). For multi-part secrets — retires fragile `bash:` format-glue. See [Composite secrets](#composite-secrets-template) |
+| `template:` | Composite value: a pattern with `{name}` placeholders filled by typed sub-sections (literals/passwd/bytes/env/secretRef/key) | Yes | Cache-first (the *composed* value is cached by key, not the pattern). For multi-part secrets — retires fragile `bash:` format-glue. See [Composite secrets](#composite-secrets-template) |
 | `env:` | Read from env var | Yes (unless `update: true`) | Falls back to key as var name when value is null |
 | `secretRef:` | Read from another Secret's cache file | Reads cross-secret | Shorthand `"secret/key"` or `"secret/ns/key"`; no path traversal |
+| `key:` | Asymmetric private key (RSA or Ed25519) as PKCS#8 PEM | Yes | Cache-first (existing key reused verbatim — no re-key). Retires `bash: openssl genpkey`. See [Private keys](#private-keys-key) |
 | `htpasswd:` | Bcrypt-hashed username:password line | Yes (3 files: `.username`, `.password`, `.bcrypt`) | Username generator starts with a letter; cost factor 10 |
 | `file:` | Read local file | No | 1 MiB max; path traversal rejected; `mode: raw` (default) or `passthrough` |
 | `b64:` | Pre-base64-encoded passthrough | No | Validates the input is valid base64 |
@@ -184,26 +185,96 @@ config error rather than a bad secret.
 ### Composite secrets (`template:`)
 
 `template:` builds a secret whose value has a **fixed structure** — a literal
-pattern with `{name}` placeholders, each filled by a named random field. It
-exists for multi-part values that `passwd:` can't express (it makes exactly one
-random string, no prefix/composition) and that would otherwise fall back to a
-brittle `bash:` pipeline.
+pattern with `{name}` placeholders — where each placeholder is produced by a
+typed **sub-section** that reuses the top-level generator types. Think of it as a
+**mini-Secret embedded in a pattern**: `literals:`, `passwd:`, `env:`,
+`secretRef:`, `key:`, plus a template-local `bytes:` (raw `crypto/rand` bytes +
+encoding). It exists for multi-part values that `passwd:` can't express (it makes
+exactly one random string, no prefix/composition) and that would otherwise fall
+back to a brittle `bash:` pipeline.
 
-The motivating case is a Matrix/synapse **ed25519 signing key**, whose on-disk
-format is `ed25519 a_<key-id> <base64 of 32 random bytes>`:
+The motivating case is the matrix-hookshot **registration.yml**, which inlines
+two appservice tokens generated elsewhere in the same Secret, plus its RSA
+**passkey.pem**:
+
+```yaml
+passwd:
+  as_token: { length: 64, chars: hex }   # the shared appservice tokens
+  hs_token: { length: 64, chars: hex }
+key:
+  passkey.pem: rsa                        # RSA-4096 PKCS#8 PEM (see key: below)
+template:
+  registration.yml:
+    pattern: "id: matrix-hookshot\nas_token: \"{as_token}\"\nhs_token: \"{hs_token}\"\n"
+    secretRef:                            # sibling shorthand — keys in THIS Secret
+      as_token: as_token
+      hs_token: hs_token
+```
+
+Because `secretRef` pulls the *same* cached `as_token`/`hs_token`, the tokens in
+`registration.yml` are byte-identical to the top-level keys — one source of
+truth, so hookshot and Synapse always agree.
+
+**Typed sub-sections** (each is `map[placeholder] → <entry>`; a placeholder must
+be produced by **exactly one** sub-section):
+
+| Sub-section | Entry type | Example |
+|---|---|---|
+| `literals:` | string | `{ tag: matrix-hookshot }` |
+| `passwd:` | [`passwd`](#password-charsets-passwd) entry | `{ pw: { length: 32, chars: hex } }` |
+| `bytes:` | `{ bytes: N, encoding: … }` (or shorthand `N`) | `{ seed: { bytes: 32, encoding: base64-unpadded } }` |
+| `env:` | [`env`](#env-contract) entry (`optional`→empty, `default`, `passwd` fallbacks) | `{ region: AWS_REGION }` (env var **name**, no `$`/shell expansion) |
+| `secretRef:` | [`secretRef`](#cross-secret-references) entry + **sibling shorthand** | `{ token: as_token }` (sibling) · `{ dbpw: db/password }` (cross) |
+| `key:` | [`key`](#private-keys-key) entry | `{ pem: ed25519 }` |
+
+The **sibling shorthand** is the key addition to `secretRef`: a bare string with
+**no `/`** means "a key in **this** Secret" (current secret + namespace) —
+`{ as_token: as_token }` above. The `secret/key` and `secret/ns/key` forms (and
+the full mapping) still reference **other** secrets, exactly as top-level
+`secretRef:`.
+
+The template-local `bytes:` sub-section reads N raw `crypto/rand` bytes and
+encodes them — true N-bytes-of-entropy (not a charset draw), so `bytes: 32` is a
+full 256 bits regardless of alphabet. Encodings and the url-safety caveat are the
+same as the legacy bytes field below (`bytes` is capped at 4096).
+
+**Legacy `fields:` (backward-compat, still supported).** Before the typed
+sub-sections, a template declared its fields under `fields:`, each in one of two
+modes. This still works byte-identically — the synapse **ed25519 signing key**
+uses it — but the typed sub-sections above are **preferred** for new templates:
 
 ```yaml
 template:
-  SIGNING_KEY:
-    pattern: "ed25519 a_{kid} {seed}"
+  signing.key:
+    pattern: "ed25519 a_{kid} {seed}\n"
     fields:
       kid:  {length: 4, chars: "custom:abcdefghijklmnopqrstuvwxyz"}  # charset field
       seed: {bytes: 32, encoding: base64-unpadded}                    # bytes field
 ```
 
-renders to e.g. `ed25519 a_nsnx Oji0Bha34hv3gcoEkRMLAg2Q4jTFG0n4WQd+I9bx77s`.
+renders to e.g. `ed25519 a_nsnx Oji0Bha34hv3gcoEkRMLAg2Q4jTFG0n4WQd+I9bx77s`. A
+`fields:` entry is **charset-mode** (`length` + optional `chars`/`require`, same
+DSL as [`passwd:`](#password-charsets-passwd)) **XOR bytes-mode** (`bytes` +
+optional `encoding`) — exactly one; both/neither is a config error. The bytes
+encodings:
 
-**Why not `bash:`.** Gluing that together in shell (`printf 'ed25519 a_%s %s' "$(tr -dc a-z </dev/urandom | head -c4)" "$(head -c32 /dev/urandom | base64)"`)
+| `encoding` | Output alphabet | Length for N bytes |
+|---|---|---|
+| `base64` (default) | standard `+/`, padded | `4·⌈N/3⌉` |
+| `base64url` | url-safe `-_`, padded | `4·⌈N/3⌉` |
+| `base64-unpadded` | standard `+/`, no `=` | `⌈4N/3⌉` |
+| `base64url-unpadded` | url-safe `-_`, no `=` | `⌈4N/3⌉` |
+| `hex` | lowercase `0-9a-f` | `2N` |
+
+> **`base64` (the default) and `base64-unpadded` emit `+` and `/`** — the
+> standard alphabet. Those are not safe in a URL, a filename, or a k8s
+> label/annotation value. If the secret lands anywhere url-safe, choose
+> `base64url` / `base64url-unpadded` (`-_` alphabet). `bytes` is capped at 4096.
+
+`fields:` and the typed sub-sections **may coexist** in one entry (each producing
+distinct placeholders).
+
+**Why not `bash:`.** Gluing a composite together in shell (`printf 'ed25519 a_%s %s' "$(tr -dc a-z </dev/urandom | head -c4)" "$(head -c32 /dev/urandom | base64)"`)
 has two failure modes `template:` avoids: (1) the `tr … | head` pipeline
 **SIGPIPEs** in a non-tty render (`head` closes the pipe early → the process
 exits 141), and (2) `bash:` is SHA-pinned, so **any edit to the command forces a
@@ -211,45 +282,37 @@ exits 141), and (2) `bash:` is SHA-pinned, so **any edit to the command forces a
 `template:` composes the value in-process from `crypto/rand`, caches the
 composed string by the entry key (like `passwd:`), and has **no approval gate**.
 
-**Fields — one of two modes each (exactly one; both/neither is a config error):**
-
-- **charset field** — draw `length` characters from a charset (same DSL as
-  `passwd:` — see [charsets](#password-charsets-passwd)). `length` is **required**
-  (there is no default for a template field — the shape is explicit). Optional
-  `chars` (default `alphanum`) and `require:` (class constraints, same as
-  `passwd:`).
-
-  ```yaml
-  fields:
-    token: {length: 40, chars: base64url, require: [lower, digit]}
-  ```
-
-- **bytes field** — read `bytes` raw `crypto/rand` bytes, then encode. This is
-  true N-bytes-of-entropy (not a charset draw), so a `bytes: 32` seed is a full
-  256 bits regardless of the output alphabet.
-
-  | `encoding` | Output alphabet | Length for N bytes |
-  |---|---|---|
-  | `base64` (default) | standard `+/`, padded | `4·⌈N/3⌉` |
-  | `base64url` | url-safe `-_`, padded | `4·⌈N/3⌉` |
-  | `base64-unpadded` | standard `+/`, no `=` | `⌈4N/3⌉` |
-  | `base64url-unpadded` | url-safe `-_`, no `=` | `⌈4N/3⌉` |
-  | `hex` | lowercase `0-9a-f` | `2N` |
-
-  > **`base64` (the default) and `base64-unpadded` emit `+` and `/`** — the
-  > standard alphabet. Those are not safe in a URL, a filename, or a k8s
-  > label/annotation value. If the secret lands anywhere url-safe, choose
-  > `base64url` / `base64url-unpadded` (`-_` alphabet). `bytes` is capped at 4096.
-
 **Pattern rules.** The pattern is validated at parse time: it must be non-empty,
-every `{name}` must have a matching field, and **every declared field must be
-referenced** (an unused field is a typo, so it's an error). Write a **literal
-brace** by doubling it — `{{` → `{`, `}}` → `}`. An unterminated `{` or a stray
-`}` is rejected. A field referenced **twice** (`pattern: "{a}-{a}"`) is generated
-**once** and the single value is substituted at both sites (→ `V-V`), never drawn
-twice. Substitution is a **single pass**: a generated value that happens to
-contain `{...}` is emitted literally, not re-expanded — so field values can never
-inject placeholders.
+every `{name}` must resolve to a field declared by exactly one sub-section (or
+`fields:`), and **every declared field must be referenced** (an unused field is a
+typo, so it's an error). Write a **literal brace** by doubling it — `{{` → `{`,
+`}}` → `}`. An unterminated `{` or a stray `}` is rejected. A field referenced
+**twice** (`pattern: "{a}-{a}"`) is generated **once** and the single value is
+substituted at both sites (→ `V-V`), never drawn twice. Substitution is a
+**single pass**: a generated value that happens to contain `{...}` is emitted
+literally, not re-expanded — so field values can never inject placeholders.
+
+#### Substitution operators
+
+A placeholder may carry a **bash-style parameter-expansion operator**, applied to
+the resolved value at substitution time. Operators are **literal** (no
+glob/regex) and parse **after** the field name:
+
+| Operator | Effect | `{x…}` on `x = "matrix-hookshot.pem"` |
+|---|---|---|
+| `{x^^}` / `{x,,}` | upper / lower (whole string) | `MATRIX-HOOKSHOT.PEM` / `matrix-hookshot.pem` |
+| `{x^}` / `{x,}` | upper / lower **first char** | `Matrix-hookshot.pem` / `matrix-hookshot.pem` |
+| `{x%%suf}` / `{x%suf}` | strip trailing literal (longest / shortest — identical for a literal) | `{x%%.pem}` → `matrix-hookshot` |
+| `{x##pre}` / `{x#pre}` | strip leading literal | `{x##matrix-}` → `hookshot.pem` |
+| `{x//old/new}` / `{x/old/new}` | replace all / first (literal) | `{x//-/_}` → `matrix_hookshot.pem` |
+| `{x:off}` / `{x:off:len}` | substring by **byte** offset (+ optional length) | `{x:0:6}` → `matrix` |
+
+Plain `{x}` is unchanged; `{{`/`}}` are still literal braces. A **malformed**
+operator (`{x%%%y}`, `{x/onlyold}`, `{x:abc}`) is rejected at **decode** time; a
+substring whose offset/length runs past the *value* errors at render time (byte
+offsets, not bash's silent clamping). First-char case ops are rune-aware. Field
+names that literally contain an operator sigil (`^ , % # / :`) can't take an
+operator — but no Secret data key uses those.
 
 **Caching.** Cache-first like `passwd:` — the **composed** value is stored under
 the entry key (`Secret.<name>.<ns>.<key>`), not the pattern or per-field state.
@@ -301,6 +364,40 @@ lo secrets allow
 
 Until then the build refuses to execute the `bash:` entries.
 
+### Private keys (`key:`)
+
+`key:` mints an **asymmetric private key** — RSA or Ed25519 — as **PKCS#8 PEM**,
+the format `openssl genpkey` produces by default. It's the shell-free, approval-
+gate-free replacement for `bash: { exec: "openssl genpkey …" }`:
+
+```yaml
+key:
+  passkey.pem: rsa                 # shorthand: algorithm → all defaults (rsa/4096/pkcs8)
+  signing.pem:
+    algorithm: ed25519             # rsa (default) | ed25519
+  db-client.pem:
+    algorithm: rsa
+    bits: 2048                     # RSA modulus size (rsa only; default 4096)
+    encoding: pkcs8                # only pkcs8 (the default) is supported
+```
+
+- **Cache-first** like `passwd:` — an existing cached key is reused **verbatim**,
+  so `key:` **never re-keys**. A key minted earlier by `openssl` and dropped into
+  `$PATH_SECRETS` (or committed via SOPS) is served unchanged; delete the cache
+  file to rotate.
+- **RSA** defaults to **4096** bits; sizes below 2048 are rejected at decode.
+  **Ed25519** has a fixed size, so it takes no `bits`.
+- `key:` is also usable as a **[template sub-section](#composite-secrets-template)**
+  (`template: { config.yml: { pattern: "…{pem}…", key: { pem: ed25519 } } }`) to
+  inline a generated key into a config file, via the same reuse path.
+- An empty entry — `passkey.pem: {}` **or** a null `passkey.pem: ~` — is the
+  shorthand for "all defaults" (RSA-4096 PKCS#8), the same way `passwd: { K: ~ }`
+  defaults its length. (Only the *scalar* shorthand must name an algorithm, e.g.
+  `passkey.pem: rsa`.)
+
+Use `key:` for private keys; use [`cert:`](#development-certificates-cert) when
+you need an X.509 certificate (leaf or CA), not a bare key.
+
 ### Generating cryptographic keys
 
 For a random **symmetric key**, prefer `passwd` with an explicit charset — it's
@@ -317,20 +414,22 @@ Mind the entropy: the default `alphanum` charset is ~5.95 bits/char, so
 key. Use `chars: hex` (4 bits/char × 64 = 256) or `chars: base64url`, and size
 `length` for the bit count you need.
 
-For a **composite** value — random bytes wrapped in a fixed format, like a
-Matrix/synapse `ed25519 a_<id> <base64 seed>` signing key — use
-[`template:`](#composite-secrets-template) rather than `bash:`. A bytes field
-(`{bytes: 32, encoding: base64-unpadded}`) is a full 256 bits of `crypto/rand`
-entropy in the exact wire shape, with no shell pipeline and no approval gate.
+For an **asymmetric private key** (RSA/Ed25519), use [`key:`](#private-keys-key) —
+PKCS#8 PEM, cache-first, no shell. For a **composite** value — random bytes
+wrapped in a fixed format, like a Matrix/synapse `ed25519 a_<id> <base64 seed>`
+signing key — use [`template:`](#composite-secrets-template) rather than `bash:`.
+A bytes field (`{bytes: 32, encoding: base64-unpadded}`) is a full 256 bits of
+`crypto/rand` entropy in the exact wire shape, with no shell pipeline and no
+approval gate.
 
-Reserve `bash:` + `openssl` for material neither `passwd` nor `template` can
-produce — e.g. an RSA private key (`exec: openssl genrsa 4096`,
-`newline: ensure`). Equally valid, but it pulls in the approval gate above.
+Reserve `bash:` + `openssl` for material none of `passwd` / `key` / `template`
+can produce. (`key:` now covers the common `openssl genpkey`/`genrsa` cases
+without the approval gate.)
 
 ### Cache-first determinism
 
 The cache directory `$PATH_SECRETS` is the **source of truth** for stable
-output. Cached generators (`passwd`, `template`, `secretRef`, `htpasswd`,
+output. Cached generators (`passwd`, `key`, `template`, `secretRef`, `htpasswd`,
 `bash`) check the cache before generating; on cache hit, they return the
 existing value unchanged. This produces byte-stable kustomize output across
 runs.

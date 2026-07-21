@@ -12,40 +12,63 @@ import (
 )
 
 // TemplateEntry is the spec for a composite secret assembled from a fixed
-// pattern with `{name}` placeholders, each substituted by a named random
-// field. It exists so multi-part secrets with a literal structure — e.g. a
-// Matrix/synapse ed25519 signing key `ed25519 a_<kid> <base64 seed>` — can be
+// pattern with `{name}` placeholders. It is a "mini-Secret + pattern": each
+// placeholder is produced by a typed sub-section — reusing the top-level
+// generator types (literals, passwd, env, secretRef, key) plus a template-local
+// bytes: sub-section — so a multi-part secret with a literal structure can be
 // declared instead of glued together in a fragile `bash:` pipeline.
 //
-// Why not bash: a shell one-liner like `printf 'ed25519 a_%s %s' "$(tr ... </dev/urandom | head)" ...`
-// (1) SIGPIPEs in non-tty renders (`tr | head` closes the pipe early → exit 141)
-// and (2) is SHA-pinned, so any edit forces a `lo secrets allow` re-approval and
-// re-keys every plane. template: composes the value in-process from crypto/rand,
-// caches it by the entry key like passwd:, and needs no approval gate.
-//
-// Example:
+// Example (matrix-hookshot registration + passkey):
 //
 //	template:
-//	  SIGNING_KEY:
-//	    pattern: "ed25519 a_{kid} {seed}"
-//	    fields:
-//	      kid:  {length: 4, chars: "custom:abcdefghijklmnopqrstuvwxyz"}
-//	      seed: {bytes: 32, encoding: base64-unpadded}
+//	  registration.yml:
+//	    pattern: "id: matrix-hookshot\nas_token: \"{as_token}\"\nhs_token: \"{hs_token}\"\n"
+//	    secretRef: { as_token: as_token, hs_token: hs_token }   # sibling keys in THIS secret
+//	  passkey.pem:
+//	    key: rsa
 //
-// Literal braces are written doubled: `{{` → `{`, `}}` → `}`.
+// Every placeholder in the pattern must be produced by exactly one sub-section
+// (or fields:), and every declared field must be referenced.
+//
+// Literal braces are written doubled: `{{` → `{`, `}}` → `}`. Placeholder names
+// may carry a bash-style substitution operator (e.g. `{name^^}`, `{name%%.suf}`)
+// applied to the resolved value — see Substitute.
 type TemplateEntry struct {
-	// Pattern is the output template. `{name}` is replaced by field "name";
-	// `{{`/`}}` are literal braces. Must be non-empty and every placeholder
-	// must have a matching Fields entry (and vice versa).
+	// Pattern is the output template. `{name}` is replaced by the field named
+	// "name" (optionally transformed by an operator); `{{`/`}}` are literal
+	// braces. Must be non-empty; every placeholder must resolve to a declared
+	// field (across all sub-sections + Fields) and vice versa.
 	Pattern string `yaml:"pattern"`
-	// Fields maps each placeholder name to its random-field spec.
-	Fields map[string]TemplateField `yaml:"fields"`
+
+	// Fields is the LEGACY shorthand sub-section: charset-mode (length/chars/
+	// require, like passwd:) XOR bytes-mode (bytes/encoding). Kept for backward
+	// compatibility; prefer the typed sub-sections below. Fields and the typed
+	// sub-sections may coexist (a placeholder is produced by exactly one).
+	Fields map[string]TemplateField `yaml:"fields,omitempty"`
+
+	// --- typed sub-sections (each: map[placeholder]→<top-level entry type>) ---
+
+	// Literals maps a placeholder to a verbatim string.
+	Literals map[string]string `yaml:"literals,omitempty"`
+	// Passwd maps a placeholder to a random-password spec (charset draw).
+	Passwd map[string]PasswdEntry `yaml:"passwd,omitempty"`
+	// Bytes maps a placeholder to a raw-crypto/rand-bytes-then-encode spec.
+	Bytes map[string]BytesEntry `yaml:"bytes,omitempty"`
+	// Env maps a placeholder to an environment-variable spec.
+	Env map[string]EnvEntry `yaml:"env,omitempty"`
+	// SecretRef maps a placeholder to another cached key's value. A bare string
+	// with no "/" is a SIBLING key in THIS secret (current secret + namespace);
+	// "secret/key" and "secret/ns/key" reference another secret.
+	SecretRef map[string]TemplateSecretRef `yaml:"secretRef,omitempty"`
+	// Key maps a placeholder to a generated private key (PKCS#8 PEM).
+	Key map[string]KeyEntry `yaml:"key,omitempty"`
 }
 
-// TemplateField is a single random field referenced by a Pattern placeholder.
-// A field is EITHER charset-mode (draw Length characters from a charset, the
-// same DSL as passwd:) OR bytes-mode (read Bytes crypto/rand bytes, then
-// encode). Exactly one mode must be configured — both or neither is an error.
+// TemplateField is a single LEGACY random field referenced by a Pattern
+// placeholder. A field is EITHER charset-mode (draw Length characters from a
+// charset, the same DSL as passwd:) OR bytes-mode (read Bytes crypto/rand
+// bytes, then encode). Exactly one mode must be configured — both or neither is
+// an error.
 type TemplateField struct {
 	// --- charset mode ---
 	// Length is the number of characters to draw. Required (> 0) in charset
@@ -70,6 +93,57 @@ type TemplateField struct {
 	Encoding string `yaml:"encoding,omitempty"`
 }
 
+// TemplateSecretRef is a template's secretRef sub-section value. It stores the
+// same (secret, namespace, key) triple as SecretRefEntry (so the same resolver
+// applies), but its unmarshaler adds a SIBLING shorthand: a bare string with no
+// "/" is a key in THIS secret, left with Secret empty as a sentinel the
+// generator fills in from the owning Secret's name.
+type TemplateSecretRef SecretRefEntry
+
+// UnmarshalYAML accepts the sibling shorthand (a bare "key" → this secret), the
+// cross-secret shorthands ("secret/key", "secret/ns/key"), or a full mapping.
+func (r *TemplateSecretRef) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		s := node.Value
+		if s == "" {
+			return kyaml.NodeErrf(node, "secretRef shorthand must not be empty")
+		}
+		parts := strings.Split(s, "/")
+		switch len(parts) {
+		case 1:
+			// Sibling: a key in THIS secret. Secret stays empty (resolved by the
+			// generator from the owning Secret's name).
+			r.Key = parts[0]
+		case 2:
+			r.Secret = parts[0]
+			r.Key = parts[1]
+		case 3:
+			r.Secret = parts[0]
+			r.Namespace = parts[1]
+			r.Key = parts[2]
+		default:
+			return kyaml.NodeErrf(node, "secretRef shorthand must be \"key\", \"secret/key\", or \"secret/namespace/key\", got %q", s)
+		}
+	case yaml.MappingNode:
+		var raw SecretRefEntry
+		// SecretRefEntry.UnmarshalYAML requires Secret; a mapping form here is a
+		// cross-secret reference, so that requirement is exactly right. Decode via
+		// the alias to reuse its strict-field checking + validation.
+		if err := (&raw).UnmarshalYAML(node); err != nil {
+			return err
+		}
+		*r = TemplateSecretRef(raw)
+		return nil
+	default:
+		return kyaml.NodeErrf(node, "secretRef entry must be string or mapping, got %s", nodeKindString(node.Kind))
+	}
+	if r.Key == "" {
+		return kyaml.NodeErrf(node, "secretRef.key is required")
+	}
+	return nil
+}
+
 // Recognized bytes-mode encodings.
 const (
 	EncBase64           = "base64"
@@ -79,9 +153,9 @@ const (
 	EncHex              = "hex"
 )
 
-// MaxFieldBytes caps a bytes-mode field's raw byte count. Key material is at
-// most a few dozen bytes; anything past this is a fat-fingered config (e.g.
-// bytes: 32000000 → a ~32 MB Secret), so it's rejected at decode time.
+// MaxFieldBytes caps a bytes field's raw byte count. Key material is at most a
+// few dozen bytes; anything past this is a fat-fingered config (e.g. bytes:
+// 32000000 → a ~32 MB Secret), so it's rejected at decode time.
 const MaxFieldBytes = 4096
 
 // templateEntryRaw avoids infinite recursion in UnmarshalYAML.
@@ -105,47 +179,99 @@ func (t *TemplateEntry) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// declaredFields returns the set of every placeholder name declared across all
+// sub-sections (fields + typed), and an error if the same placeholder is
+// declared by more than one sub-section (which would make its producer
+// ambiguous).
+func (t *TemplateEntry) declaredFields() (map[string]bool, error) {
+	// One (section, names) pair per sub-section, in a fixed order for stable
+	// error messages. Each names list is pre-sorted for determinism.
+	sections := []struct {
+		name  string
+		names []string
+	}{
+		{"fields", sortedStringKeys(t.Fields)},
+		{"literals", sortedStringKeys(t.Literals)},
+		{"passwd", sortedStringKeys(t.Passwd)},
+		{"bytes", sortedStringKeys(t.Bytes)},
+		{"env", sortedStringKeys(t.Env)},
+		{"secretRef", sortedStringKeys(t.SecretRef)},
+		{"key", sortedStringKeys(t.Key)},
+	}
+	declared := make(map[string]bool)
+	for _, s := range sections {
+		for _, name := range s.names {
+			if declared[name] {
+				return nil, fmt.Errorf("field %q is declared by more than one sub-section (last: %s)", name, s.name)
+			}
+			declared[name] = true
+		}
+	}
+	return declared, nil
+}
+
 // validate checks the pattern/field contract: non-empty pattern, balanced
-// braces, every placeholder declared, every declared field referenced, and
-// each field individually valid.
+// braces, every placeholder declared by exactly one sub-section, every declared
+// field referenced, and each legacy field individually valid. (The typed
+// sub-sections validate themselves in their own unmarshalers.)
 func (t *TemplateEntry) validate() error {
 	if t.Pattern == "" {
 		return fmt.Errorf("template pattern must not be empty")
 	}
-	used, err := parsePlaceholders(t.Pattern)
+	refs, err := parsePlaceholders(t.Pattern)
 	if err != nil {
 		return err
 	}
-	// Every placeholder must have a matching field.
-	for _, name := range used {
-		if _, ok := t.Fields[name]; !ok {
-			return fmt.Errorf("pattern references {%s} but no such field is declared", name)
+	declared, err := t.declaredFields()
+	if err != nil {
+		return err
+	}
+	// Every placeholder must resolve to a declared field.
+	usedSet := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		usedSet[ref.name] = true
+		if !declared[ref.name] {
+			return fmt.Errorf("pattern references {%s} but no such field is declared", ref.name)
 		}
 	}
 	// Every declared field must be referenced (catch dead config / typos).
-	usedSet := make(map[string]bool, len(used))
-	for _, name := range used {
-		usedSet[name] = true
+	declaredNames := make([]string, 0, len(declared))
+	for name := range declared {
+		declaredNames = append(declaredNames, name)
 	}
-	// Deterministic error order for stable messages/tests.
-	names := make([]string, 0, len(t.Fields))
-	for name := range t.Fields {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
+	sort.Strings(declaredNames)
+	for _, name := range declaredNames {
 		if !usedSet[name] {
 			return fmt.Errorf("field %q is declared but not referenced in the pattern", name)
 		}
+	}
+	// Validate each legacy field's mode (typed sub-sections already validated).
+	for _, name := range sortedStringKeys(t.Fields) {
 		if err := t.Fields[name].validate(); err != nil {
 			return fmt.Errorf("field %q: %v", name, err)
+		}
+	}
+	// Re-validate the typed sub-sections whose per-entry UnmarshalYAML can be
+	// SKIPPED by yaml.v3 (a !!null map value leaves the zero struct, bypassing
+	// the unmarshaler). bytes: has a "> 0" invariant and secretRef: needs a
+	// non-empty key — a zero value would otherwise slip past decode and only
+	// surface as a confusing runtime error.
+	for _, name := range sortedStringKeys(t.Bytes) {
+		if err := t.Bytes[name].validate(); err != nil {
+			return fmt.Errorf("bytes field %q: %v", name, err)
+		}
+	}
+	for _, name := range sortedStringKeys(t.SecretRef) {
+		if t.SecretRef[name].Key == "" {
+			return fmt.Errorf("secretRef field %q: key is required (a null/`~` value?)", name)
 		}
 	}
 	return nil
 }
 
-// validate checks a single field: exactly one mode, and that mode's fields
-// are well-formed (positive length/bytes, known encoding, parseable classes).
+// validate checks a single legacy field: exactly one mode, and that mode's
+// fields are well-formed (positive length/bytes, known encoding, parseable
+// classes).
 func (f TemplateField) validate() error {
 	charsetMode := f.Length != 0 || f.Chars != "" || len(f.Require) > 0
 	bytesMode := f.Bytes != 0 || f.Encoding != ""
@@ -242,85 +368,13 @@ func validateEncoding(enc string) (string, error) {
 	}
 }
 
-// parsePlaceholders extracts the ordered list of `{name}` placeholder names
-// from a pattern, treating `{{` and `}}` as literal braces. It also validates
-// that every brace is part of a placeholder or an escape — an unmatched `{` or
-// a stray `}` is a config error (so a mistyped pattern fails loudly instead of
-// silently emitting a broken value). Placeholder names must be non-empty.
-func parsePlaceholders(pattern string) ([]string, error) {
-	var names []string
-	for i := 0; i < len(pattern); {
-		c := pattern[i]
-		switch c {
-		case '{':
-			if i+1 < len(pattern) && pattern[i+1] == '{' {
-				i += 2 // literal "{"
-				continue
-			}
-			end := strings.IndexByte(pattern[i+1:], '}')
-			if end < 0 {
-				return nil, fmt.Errorf("unterminated placeholder: '{' at offset %d has no closing '}'", i)
-			}
-			name := pattern[i+1 : i+1+end]
-			if name == "" {
-				return nil, fmt.Errorf("empty placeholder {} at offset %d", i)
-			}
-			if strings.ContainsAny(name, "{}") {
-				return nil, fmt.Errorf("placeholder name %q at offset %d must not contain braces", name, i)
-			}
-			names = append(names, name)
-			i += 1 + end + 1
-		case '}':
-			if i+1 < len(pattern) && pattern[i+1] == '}' {
-				i += 2 // literal "}"
-				continue
-			}
-			return nil, fmt.Errorf("stray '}' at offset %d (write '}}' for a literal brace)", i)
-		default:
-			i++
-		}
+// sortedStringKeys returns the sorted keys of any string-keyed map — used for
+// deterministic iteration in validation.
+func sortedStringKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	return names, nil
-}
-
-// Substitute renders the pattern, replacing each `{name}` with values[name]
-// and unescaping `{{`/`}}`. It assumes the pattern already passed validation
-// (every placeholder has a value); a missing value is treated as an internal
-// error so the generator surfaces it rather than emitting a partial string.
-func (t TemplateEntry) Substitute(values map[string]string) (string, error) {
-	var b strings.Builder
-	b.Grow(len(t.Pattern))
-	for i := 0; i < len(t.Pattern); {
-		c := t.Pattern[i]
-		switch c {
-		case '{':
-			if i+1 < len(t.Pattern) && t.Pattern[i+1] == '{' {
-				b.WriteByte('{')
-				i += 2
-				continue
-			}
-			end := strings.IndexByte(t.Pattern[i+1:], '}')
-			if end < 0 {
-				return "", fmt.Errorf("internal: unterminated placeholder at offset %d", i)
-			}
-			name := t.Pattern[i+1 : i+1+end]
-			v, ok := values[name]
-			if !ok {
-				return "", fmt.Errorf("internal: no value for field %q", name)
-			}
-			b.WriteString(v)
-			i += 1 + end + 1
-		case '}':
-			if i+1 < len(t.Pattern) && t.Pattern[i+1] == '}' {
-				b.WriteByte('}')
-				i += 2
-				continue
-			}
-			return "", fmt.Errorf("internal: stray '}' at offset %d", i)
-		default:
-			b.WriteByte(c)
-			i++
-		}
-	}
-	return b.String(), nil
+	sort.Strings(keys)
+	return keys
 }

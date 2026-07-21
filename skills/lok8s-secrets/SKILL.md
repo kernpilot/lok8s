@@ -4,7 +4,7 @@ description: >-
   Use when writing a lok8s secrets.lok8s.dev Secret generator (a Secret.*.yaml
   used by a kustomization) or managing secrets via `lo secrets` / `lo trust`.
   Covers the generator forms
-  (passwd/template/bash/env/file/secretRef/htpasswd/literals/b64/cert), the per-domain
+  (passwd/key/template/bash/env/file/secretRef/htpasswd/literals/b64/cert), the per-domain
   `clusters/<domain>/secrets/` cache store, and the caching/approval/path gotchas.
 ---
 
@@ -47,7 +47,8 @@ generators: [ Secret.myapp.default.yaml ]
 |---------|----------|---------|---------|
 | `literals` | verbatim value | no | `API_MODE: prod` |
 | `passwd` | random password | yes | `PW: { length: 32, chars: alphanum+symbols }` or `PW: 32` |
-| `template` | composite: pattern with `{name}` placeholders filled by random fields | yes | `K: { pattern: "ed25519 a_{kid} {seed}", fields: { kid: {length: 4, chars: "custom:abc…z"}, seed: {bytes: 32, encoding: base64-unpadded} } }` — for multi-part secrets; retires fragile `bash:` glue |
+| `key` | RSA/Ed25519 private key, PKCS#8 PEM | yes | `passkey.pem: rsa` or `{ algorithm: ed25519 }` / `{ algorithm: rsa, bits: 2048 }` — cache-first (NO re-key); retires `bash: openssl genpkey` |
+| `template` | composite: pattern with `{name}` placeholders filled by typed sub-sections | yes | see below — for multi-part secrets; retires fragile `bash:` glue |
 | `env` | value of a host env var | yes (unless `update: true`) | `TOKEN: MY_ENV_VAR` (null → use the key name) |
 | `file` | contents of a local file | no | `ca.crt: ./certs/ca.crt` or `{ path: ..., mode: passthrough }` |
 | `b64` | pre-base64 passthrough | no | `DATA: <base64>` |
@@ -57,8 +58,39 @@ generators: [ Secret.myapp.default.yaml ]
 | `cert` | dev CA or leaf cert (`crypto/x509`, no mkcert binary) | yes | `cert: { hosts: [example.test, "*.example.test"] }` — see below |
 
 `chars` charsets: `alphanum`, `alphanum+symbols`, `hex`, `base64url`,
-`custom:<chars>`. For crypto keys prefer **`passwd`** (e.g. `{length: 64, chars: hex}`)
-over `bash`+openssl — no approval gate.
+`custom:<chars>`. For a **symmetric** key prefer **`passwd`** (`{length: 64, chars: hex}`);
+for an **asymmetric** private key use **`key`** (RSA/Ed25519 PEM) — both beat
+`bash`+openssl (no approval gate).
+
+## `template:` — composite secrets (mini-Secret + pattern)
+
+A `template:` entry has a `pattern:` with `{name}` placeholders, each produced by
+a typed **sub-section** reusing the top-level types (`literals`/`passwd`/`env`/
+`secretRef`/`key`) plus a template-local `bytes:` (raw `crypto/rand` + encoding).
+The **composed** value is cached by the entry key (not the pattern → no approval
+gate; editing the pattern only affects newly-minted keys).
+
+```yaml
+passwd:  { as_token: {length: 64, chars: hex}, hs_token: {length: 64, chars: hex} }
+key:     { passkey.pem: rsa }
+template:
+  registration.yml:
+    pattern: "id: matrix-hookshot\nas_token: \"{as_token}\"\nhs_token: \"{hs_token}\"\n"
+    secretRef: { as_token: as_token, hs_token: hs_token }   # SIBLING shorthand: key in THIS secret
+```
+
+- **`secretRef` sibling shorthand:** a bare string with **no `/`** = a key in
+  **this** Secret (e.g. `as_token`); `secret/key` and `secret/ns/key` still
+  reference other secrets. (Threads the owning Secret's name/ns automatically.)
+- **`bytes:`** covers raw-entropy fields (the synapse `seed`): `{ seed: { bytes: 32, encoding: base64-unpadded } }`.
+- **Legacy `fields:`** (charset XOR bytes mode) still works byte-identically —
+  the synapse ed25519 key uses it — but the typed sub-sections are preferred.
+  `fields:` and typed sub-sections may coexist. Every placeholder must be
+  produced by exactly one sub-section; every declared field must be referenced.
+- **Substitution operators** (bash-style, literal) apply to the resolved value:
+  `{x^^}`/`{x,,}` (case), `{x^}`/`{x,}` (first char), `{x%%suf}`/`{x%suf}` (strip
+  trailing), `{x##pre}`/`{x#pre}` (strip leading), `{x//old/new}`/`{x/old/new}`
+  (replace), `{x:off}`/`{x:off:len}` (substring). Malformed → decode error.
 
 ```yaml
 bash:

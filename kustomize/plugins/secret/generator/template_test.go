@@ -305,6 +305,273 @@ func TestTemplate_InfeasibleRequireErrors(t *testing.T) {
 	}
 }
 
+// --- typed sub-sections + operators (new form) ---
+
+// TestTemplate_LegacyFieldsByteStableVsBaseline is the back-compat guard: the
+// legacy `fields:` charset+bytes path must keep producing the SAME shape it did
+// before the typed sub-sections were added. We pin the synapse regex (the exact
+// contract the live synapse-signingkey Secret depends on) so a regression in the
+// legacy path is caught here rather than in a live render.
+func TestTemplate_LegacyFieldsByteStableVsBaseline(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"signing.key": {
+			Pattern: "ed25519 a_{kid} {seed}\n",
+			Fields: map[string]specpkg.TemplateField{
+				"kid":  {Length: 4, Chars: "custom:abcdefghijklmnopqrstuvwxyz"},
+				"seed": {Bytes: 32, Encoding: "base64-unpadded"},
+			},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Trailing newline via the pattern (= the old bash: newline: ensure).
+	re := regexp.MustCompile(`^ed25519 a_[a-z]{4} [A-Za-z0-9+/]{43}\n$`)
+	if !re.MatchString(string(got[0].Value)) {
+		t.Errorf("legacy fields: output drifted from the synapse contract: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_TypedSubsectionsEquivalentToLegacy: the synapse shape expressed
+// with the typed sub-sections (bytes: + literals: — no legacy fields:) produces
+// the same regex-matching shape, proving the new path is a drop-in.
+func TestTemplate_TypedSubsectionsSynapseShape(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"signing.key": {
+			Pattern:  "{algo} a_{kid} {seed}\n",
+			Literals: map[string]string{"algo": "ed25519"},
+			Passwd:   map[string]specpkg.PasswdEntry{"kid": {Length: 4, Chars: "custom:abcdefghijklmnopqrstuvwxyz"}},
+			Bytes:    map[string]specpkg.BytesEntry{"seed": {Bytes: 32, Encoding: "base64-unpadded"}},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`^ed25519 a_[a-z]{4} [A-Za-z0-9+/]{43}\n$`)
+	if !re.MatchString(string(got[0].Value)) {
+		t.Errorf("typed sub-sections did not match synapse shape: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_LiteralsSubsection generates a literal-only field.
+func TestTemplate_LiteralsSubsection(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "tag={tag}", Literals: map[string]string{"tag": "matrix-hookshot"}},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "tag=matrix-hookshot" {
+		t.Errorf("literals sub-section: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_PasswdSubsectionNotSeparatelyCached: the passwd: sub-section is
+// drawn fresh into the COMPOSED value (the composed value is the cached unit);
+// it must NOT write a stray per-field cache file (e.g. under an empty key).
+func TestTemplate_PasswdSubsectionNoStrayCacheFile(t *testing.T) {
+	ctx, dir := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "{pw}", Passwd: map[string]specpkg.PasswdEntry{"pw": {Length: 12, Chars: "hex"}}},
+	})
+	if _, err := g.Generate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Only the composed entry (Secret.test-secret.default.K) should exist.
+	entries, _ := osReadDir(dir)
+	for _, name := range entries {
+		if name != "Secret.test-secret.default.K" {
+			t.Errorf("unexpected cache file %q — passwd sub-section must not cache per-field", name)
+		}
+	}
+	// Composed value must be stable (cache hit on the entry key).
+	got2, _ := g.Generate(ctx)
+	first, _ := ctx.Cache.Get("K")
+	if string(first) != string(got2[0].Value) {
+		t.Error("composed value not stable across runs")
+	}
+}
+
+// TestTemplate_BytesSubsection produces the synapse seed case.
+func TestTemplate_BytesSubsection(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "{seed}", Bytes: map[string]specpkg.BytesEntry{"seed": {Bytes: 32, Encoding: "hex"}}},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(got[0].Value)); !m {
+		t.Errorf("bytes sub-section (hex 32B) wrong shape: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_EnvSubsection reads an env var into a placeholder.
+func TestTemplate_EnvSubsection(t *testing.T) {
+	ctx, _ := newCtx(t, map[string]string{"AWS_REGION": "eu-central"})
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "region={region}", Env: map[string]specpkg.EnvEntry{"region": {Var: "AWS_REGION"}}},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "region=eu-central" {
+		t.Errorf("env sub-section: %q", got[0].Value)
+	}
+}
+
+func TestTemplate_EnvSubsectionMissingErrors(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "{x}", Env: map[string]specpkg.EnvEntry{"x": {Var: "NOPE"}}},
+	})
+	if _, err := g.Generate(ctx); err == nil {
+		t.Fatal("expected error for missing required env var in template sub-section")
+	}
+}
+
+func TestTemplate_EnvSubsectionDefaultAndOptional(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	d := "fallback"
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {
+			Pattern: "d={d} o={o}",
+			Env: map[string]specpkg.EnvEntry{
+				"d": {Var: "MISS1", Default: &d},
+				"o": {Var: "MISS2", Optional: true}, // unset optional → empty
+			},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "d=fallback o=" {
+		t.Errorf("env default/optional: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_KeySubsectionEmbedsPEM inlines a generated key into a pattern.
+func TestTemplate_KeySubsectionEmbedsPEM(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"config": {Pattern: "-----\n{pem}", Key: map[string]specpkg.KeyEntry{"pem": {Algorithm: "ed25519"}}},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got[0].Value), "BEGIN PRIVATE KEY") {
+		t.Errorf("key sub-section did not embed a PEM key: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_SiblingSecretRefResolvesOwnSecret: a sibling secretRef (Secret
+// empty) reads a key in THIS secret, resolved via the owner name/namespace from
+// the Context.
+func TestTemplate_SiblingSecretRefResolvesOwnSecret(t *testing.T) {
+	dir := t.TempDir()
+	c, err := cache.New(dir, "element", "hookshot-secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put("as_token", []byte("DEADBEEF")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := newCtxFromCache("element", "hookshot-secrets", c)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"registration.yml": {
+			Pattern:   "as_token: {as_token}",
+			SecretRef: map[string]specpkg.TemplateSecretRef{"as_token": {Key: "as_token"}},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "as_token: DEADBEEF" {
+		t.Errorf("sibling secretRef did not resolve own secret: %q", got[0].Value)
+	}
+}
+
+// TestTemplate_CrossSecretRefFromTemplate: a cross-secret secretRef in a
+// template sub-section reads another secret's cached key.
+func TestTemplate_CrossSecretRefFromTemplate(t *testing.T) {
+	dir := t.TempDir()
+	producer, _ := cache.New(dir, "prod", "db")
+	if err := producer.Put("password", []byte("s3cr3t")); err != nil {
+		t.Fatal(err)
+	}
+	consumer, _ := cache.New(dir, "default", "app")
+	ctx := newCtxFromCache("default", "app", consumer)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"conn": {
+			Pattern:   "pw={pw}",
+			SecretRef: map[string]specpkg.TemplateSecretRef{"pw": {Secret: "db", Namespace: "prod", Key: "password"}},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "pw=s3cr3t" {
+		t.Errorf("cross-secret ref: %q", got[0].Value)
+	}
+}
+
+func TestTemplate_SiblingSecretRefMissingErrors(t *testing.T) {
+	ctx, _ := newCtx(t, nil) // empty cache
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "{x}", SecretRef: map[string]specpkg.TemplateSecretRef{"x": {Key: "nonexistent"}}},
+	})
+	if _, err := g.Generate(ctx); err == nil {
+		t.Fatal("expected error resolving a missing sibling key")
+	}
+}
+
+// A secretRef whose Key is empty (a !!null value that skipped the unmarshaler)
+// must fail with a clear message, not attempt to read a malformed cache file.
+func TestTemplate_SecretRefEmptyKeyErrorsClearly(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {Pattern: "{x}", SecretRef: map[string]specpkg.TemplateSecretRef{"x": {}}}, // empty Key
+	})
+	_, err := g.Generate(ctx)
+	if err == nil {
+		t.Fatal("expected error for empty secretRef key")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should call out the empty key: %v", err)
+	}
+}
+
+// TestTemplate_OperatorAppliedAtGenerate: an operator in the pattern transforms
+// the resolved value at generation time.
+func TestTemplate_OperatorAppliedAtGenerate(t *testing.T) {
+	ctx, _ := newCtx(t, nil)
+	g := NewTemplate(map[string]specpkg.TemplateEntry{
+		"K": {
+			Pattern:  "{tag^^} {file%%.pem}",
+			Literals: map[string]string{"tag": "hookshot", "file": "passkey.pem"},
+		},
+	})
+	got, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[0].Value) != "HOOKSHOT passkey" {
+		t.Errorf("operators at generate: %q", got[0].Value)
+	}
+}
+
 func TestTemplate_SecretRefCanReferenceTemplateKey(t *testing.T) {
 	// template runs before secretRef in the plugin dispatch order, so a
 	// consumer Secret can pull a template-composed value by reference. Simulate
