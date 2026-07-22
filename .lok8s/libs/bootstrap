@@ -835,7 +835,7 @@ bootstrap::_reap_one() {
       local _exrc=1
       [[ -f "${_BS_RCFILES[_i]}" ]] && _exrc="$(cat "${_BS_RCFILES[_i]}" 2>/dev/null || echo 1)"
       if [[ "${_exrc}" != "0" ]] && [[ -f "${_BS_OUTFILES[_i]}" ]] \
-        && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" ]] \
+        && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" && -n "${_KAPPLY_TERMINATING_RE:-}" ]] \
         && grep -qE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_BS_OUTFILES[_i]}"; then
         _BS_PARKED+=("${_ridx}")
         # Surface the conflict detail NOW (we own the foreground): parking would
@@ -903,7 +903,7 @@ bootstrap::_reap_one() {
 # deletes + recreates the blocked object; each is then marked completed (unblocking
 # dependents on the next launch pass) or, on failure, fails + skips its dependents.
 bootstrap::_resolve_parked() {
-  local -a _parked=("${_BS_PARKED[@]}")
+  local -a _parked=("${_BS_PARKED[@]+"${_BS_PARKED[@]}"}")
   _BS_PARKED=()
   local _pi _accept=0 _list=""
   for _pi in "${_parked[@]}"; do _list+=" ${_names[_pi]}"; done
@@ -942,7 +942,7 @@ bootstrap::_resolve_parked() {
       _BS_COMPLETED["${_pi}"]=1
       _BS_DONE=$(( _BS_DONE + 1 ))
       _BS_OVERALL_RC=1
-      error "bootstrap: ${_names[_pi]} needs recreate (immutable/terminating) — re-run with --force to auto-recreate, or resolve by hand"
+      error "bootstrap: ${_names[_pi]} needs recreate (immutable/terminating) — re-run with --force (or --force-recreate) to auto-recreate, or resolve by hand"
       bootstrap::_skip_dependents "${_pi}"
     fi
   done

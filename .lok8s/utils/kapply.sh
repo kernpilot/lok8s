@@ -268,7 +268,7 @@ kapply::apply() {
 
   local out="${KAPPLY_LAST_OUTPUT}"
   local immutable=0 terminating=0
-  grep -q "${_KAPPLY_IMMUTABLE_RE}" <<<"${out}" && immutable=1
+  grep -qE "${_KAPPLY_IMMUTABLE_RE}" <<<"${out}" && immutable=1
   grep -qE "${_KAPPLY_TERMINATING_RE}" <<<"${out}" && terminating=1
   (( immutable || terminating )) || return "${rc}"
 
