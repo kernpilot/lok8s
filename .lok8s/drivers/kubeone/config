@@ -27,8 +27,8 @@ kubeone::detect_provider() {
 # Extract and export variables from cluster.lok8s.yaml for template rendering.
 # Usage: kubeone::extract_vars <cluster_yaml>
 # Exports: CLUSTER_NAME, K8S_VERSION, POD_SUBNET, SERVICE_SUBNET,
-#          CP_REPLICAS, CNI_PLUGIN, CSI_PLUGIN, CLOUD_PROVIDER, SSH_USER, SSH_PORT,
-#          ADDONS_ENABLED, ADDONS_PATH
+#          CP_REPLICAS, CNI_PLUGIN, CSI_PLUGIN, CLOUD_PROVIDER, KUBE_PROXY_SKIP,
+#          SSH_USER, SSH_PORT, ADDONS_ENABLED, ADDONS_PATH
 kubeone::extract_vars() {
   local cluster_yaml="${1}"
 
@@ -85,6 +85,8 @@ kubeone::extract_vars() {
   # replacement takes over. The Cilium side is set INDEPENDENTLY in the cilium addon
   # values (kubeProxyReplacement + bpf.masquerade); the two are opted into
   # separately on purpose. KUBE_PROXY_SKIP is the bool templated into the manifest.
+  # (String enum: a YAML bool 'kubeProxy: false' is NOT recognized as disable — use
+  # the 'disabled' string; mirrors the cni/csi // "default" convention.)
   local kube_proxy
   kube_proxy=$(yq -r '.spec.network.kubeProxy // "enabled"' "${cluster_yaml}")
   case "${kube_proxy}" in
@@ -236,8 +238,10 @@ kubeone::generate_config() {
 
   mkdir -p "${output_dir}"
 
-  # Ensure variables are exported
-  kubeone::extract_vars "${cluster_yaml}"
+  # Ensure variables are exported. Guard the call: extract_vars can return non-zero
+  # (e.g. an invalid spec.network.kubeProxy), and under `set -e` an unguarded call
+  # would abort the process instead of cleanly propagating the error to callers.
+  kubeone::extract_vars "${cluster_yaml}" || return
 
   # Render the core template
   local rendered
