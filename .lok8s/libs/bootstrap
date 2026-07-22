@@ -515,25 +515,25 @@ bootstrap::_apply_one() {
 
   # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` (as
   # rendered custom addons, kubeone::render_addons) to break the cni:external
-  # deadlock. When the driver-managed objects are already up, re-applying them
-  # here from the kustomize render path is redundant and races the driver for
-  # field ownership — so defer both to the driver on KubeOne. Every other driver
-  # (Lo/Capi/Kkp) still gets them from bootstrap. Re-run `lo up` to reconcile.
-  if [[ "${kind}" == "kubeone" ]]; then
-    # Key the skip on the addon DIRECTORY basename, NOT addon_name. A `name:`
-    # override changes addon_name (the dependsOn identity) but never addon_dir, so
-    # the driver skip must stay anchored to the cilium/ccm addon dir — otherwise a
-    # `name:`-renamed cilium/ccm would defeat it and double-apply the driver's own.
-    if [[ "${_ad_base}" == "cilium" ]] \
-       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
-      echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-      return 0
-    fi
-    if [[ "${_ad_base}" == "ccm" ]] \
-       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get deploy hcloud-cloud-controller-manager &>/dev/null; then
-      echo "[bootstrap] ccm already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-      return 0
-    fi
+  # deadlock. On a FULL provision that reconcile has just run, so re-applying them
+  # here would race the driver for field ownership — kapply uses
+  # `apply --server-side --force-conflicts` (below), so it would forcibly STEAL
+  # ownership and the next `kubeone apply` fights back. So defer to the driver on a
+  # full provision. But on `lo provision --bootstrap` the infra reconcile is
+  # SKIPPED — the driver did NOT apply cilium/ccm this run, so bootstrap is the
+  # ONLY applier and MUST run to reconcile them from spec.bootstrap (a cilium
+  # version bump, kubeProxyReplacement, policyAuditMode, encryption…). So gate on
+  # the PATH — LOK8S_BOOTSTRAP_ONLY, set by provision::dispatch — NOT on "does the
+  # DaemonSet exist": that old existence check could never tell a fresh
+  # driver-apply (full provision) from a weeks-old DS (--bootstrap), so it silently
+  # blocked EVERY cilium/ccm reconcile through --bootstrap. Every other driver
+  # (Lo/Capi/Kkp) always gets them from bootstrap. Keyed on the addon DIRECTORY
+  # basename (a `name:` override changes addon_name, not addon_dir, so a renamed
+  # cilium/ccm can't defeat the skip and double-apply the driver's own).
+  if [[ "${kind}" == "kubeone" ]] && [[ "${LOK8S_BOOTSTRAP_ONLY:-0}" != "1" ]] \
+     && { [[ "${_ad_base}" == "cilium" ]] || [[ "${_ad_base}" == "ccm" ]]; }; then
+    echo "[bootstrap] ${_ad_base} is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)" >&2
+    return 0
   fi
 
   # Render via the canonical khelm path (value-stacking + kustomize build +
