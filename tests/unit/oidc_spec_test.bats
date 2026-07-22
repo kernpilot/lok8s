@@ -89,6 +89,9 @@ _load_kubeone_config() {
   # ones the OIDC path doesn't need so the file sources cleanly.
   provider::detect() { echo "hetzner"; }
   export -f provider::detect
+  # generate_config's manifest render uses template::envsubst; `import` is stubbed,
+  # so source it explicitly (as with oidc.sh).
+  source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/config"
 }
