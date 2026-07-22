@@ -124,7 +124,7 @@ main() {
   local -a args=(
     '-'             'Global flags:'
     'verbose|v:+'        'Enable verbose logging'
-    'force|f:+'          'Force operation without prompts'
+    'force|f:+'          'Force operation without prompts (also recreates immutable/terminating conflicts)'
     'force-recreate|:+'  'On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer'
     'remote|r:+'         'Provision on remote VM (uses spec.provider + spec.remote)'
     'kubernetes|'   'Kubernetes version to use'

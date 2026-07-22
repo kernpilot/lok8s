@@ -945,6 +945,9 @@ YAML
   [ "${rc}" -ne 0 ]
   # It PARKED (deferred), not plain-failed: the reap park marker appears ...
   grep -q 'will confirm at the end' "${out}"
+  # ... the underlying kubectl conflict detail is surfaced (not silently dropped on
+  # park) so the user can resolve by hand ...
+  grep -q 'field is immutable' "${out}"
   # ... and the batched drain resolve gave the actionable --force hint.
   grep -q 'needs recreate' "${out}"
   grep -q -- '--force' "${out}"
@@ -978,6 +981,43 @@ YAML
   # the re-apply ran exactly once for the parked entry
   run cat "${applied}"
   assert_output "addonA"
+}
+
+@test "bootstrap: --force (LOK8S_FORCE_RECREATE) heals inline — the entry never parks" {
+  # With --force set, the background kapply auto-recreates in-job, so the entry never
+  # reaches the reap park branch. Model that: the stub succeeds when force is set,
+  # else emits the conflict marker + fails. Expect a clean run, no park, no prompt —
+  # this also proves the force env actually reaches the backgrounded apply.
+  bootstrap::_apply_one() {
+    local name="$1"
+    if [ "${name}" = "b" ] && [ -z "${LOK8S_FORCE_RECREATE:-}" ]; then
+      echo "The Deployment \"b\" is invalid: spec.selector: field is immutable" >&2
+      return 1
+    fi
+    return 0
+  }
+  export LOK8S_FORCE_RECREATE=1
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        wait: true
+    - c
+YAML
+  local out="${BATS_TEST_TMPDIR}/force.out" rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>&1 || rc=$?
+  # Force → healed inline → clean run, NO park marker, NO batch prompt.
+  [ "${rc}" -eq 0 ]
+  ! grep -q 'will confirm at the end' "${out}"
+  ! grep -q 'needs recreate' "${out}"
 }
 
 # --- dependsOn: parse (bootstrap::_parse_entry) ------------------------------

@@ -835,8 +835,18 @@ bootstrap::_reap_one() {
       local _exrc=1
       [[ -f "${_BS_RCFILES[_i]}" ]] && _exrc="$(cat "${_BS_RCFILES[_i]}" 2>/dev/null || echo 1)"
       if [[ "${_exrc}" != "0" ]] && [[ -f "${_BS_OUTFILES[_i]}" ]] \
-        && grep -qE 'field is immutable|object is being deleted|being deleted:|because it is being terminated' "${_BS_OUTFILES[_i]}"; then
+        && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" ]] \
+        && grep -qE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_BS_OUTFILES[_i]}"; then
         _BS_PARKED+=("${_ridx}")
+        # Surface the conflict detail NOW (we own the foreground): parking would
+        # otherwise discard the buffered kubectl error, and on a fail-fast / declined
+        # heal the user needs to see WHICH object/field is blocked to resolve by hand.
+        # Then note the deferral — the batched recreate confirmation is at the drain.
+        if declare -F kapply::render_captured >/dev/null 2>&1; then
+          kapply::render_captured "${_names[_ridx]}" 1 < "${_BS_OUTFILES[_i]}" || true
+        else
+          cat "${_BS_OUTFILES[_i]}" >&2 || true
+        fi
         printf '\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n' \
           "${_names[_ridx]}" >&2
         rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}"
@@ -902,7 +912,7 @@ bootstrap::_resolve_parked() {
     _accept=1   # --force / --force-recreate → no prompt, just heal
   elif [[ -t 0 && -t 1 && -r /dev/tty && -w /dev/tty ]]; then
     printf '\n\033[33m?\033[0m bootstrap: %d addon(s) need recreate to reconcile (immutable/terminating):%s\n' \
-      "${#_parked[@]}" "${_list}" >&2
+      "${#_parked[@]}" "${_list}" >/dev/tty
     printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods). [y/N] ' >/dev/tty
     local _ans=""
     read -r _ans </dev/tty 2>/dev/null || _ans=""

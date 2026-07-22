@@ -49,6 +49,14 @@ _KAPPLY_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 # + rolled into the window); anything else (errors) is surfaced on failure.
 _KAPPLY_OK=' (serverside-applied|created|configured|unchanged|applied|deleted|annotated|labeled|patched|restarted|scaled|rolled back|condition met)$'
 
+# Conflict markers kubectl emits when an apply cannot proceed without a recreate.
+# SHARED with the bootstrap scheduler: its reap-park detection greps the UNION of
+# these so it parks exactly the conflicts kapply::apply heals below — add a new
+# conflict class HERE, in one place, or the two would silently drift (park-but-not-
+# heal, or heal-but-not-park).
+_KAPPLY_IMMUTABLE_RE='field is immutable'
+_KAPPLY_TERMINATING_RE='object is being deleted|being deleted:|because it is being terminated'
+
 # Collapse repeated identical error lines (e.g. one webhook-not-ready message
 # emitted once per object) into a single line with a "(×N)" count, preserving
 # first-seen order. Distinct errors (different objects) are kept separate.
@@ -260,8 +268,8 @@ kapply::apply() {
 
   local out="${KAPPLY_LAST_OUTPUT}"
   local immutable=0 terminating=0
-  grep -q 'field is immutable' <<<"${out}" && immutable=1
-  grep -qE 'object is being deleted|being deleted:|because it is being terminated' <<<"${out}" && terminating=1
+  grep -q "${_KAPPLY_IMMUTABLE_RE}" <<<"${out}" && immutable=1
+  grep -qE "${_KAPPLY_TERMINATING_RE}" <<<"${out}" && terminating=1
   (( immutable || terminating )) || return "${rc}"
 
   kapply::_confirm_heal || return "${rc}"
