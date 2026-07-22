@@ -117,6 +117,13 @@ bootstrap::dispatch() {
     driver::export "${domain}"
   fi
 
+  # A standalone `lo bootstrap` NEVER provisions — the KubeOne driver did not run
+  # `kubeone apply` this invocation, so bootstrap is the sole applier and MUST
+  # reconcile cilium/ccm from spec.bootstrap (identical intent to
+  # `lo provision --bootstrap`). Set the gate to reconcile-only so the KubeOne
+  # cilium/ccm skip in _apply_one does NOT fire.
+  export LOK8S_BOOTSTRAP_ONLY=1
+
   bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig}"
 
   # Refresh the in-cluster ClusterInventory after a standalone `lo bootstrap`
@@ -944,6 +951,15 @@ bootstrap::apply() {
   else
     export LOK8S_BOOTSTRAP_HOSTED=false
   fi
+
+  # LOK8S_BOOTSTRAP_ONLY gates the KubeOne cilium/ccm skip in _apply_one. Both
+  # entry points set it explicitly BEFORE calling us — provision::dispatch to the
+  # --bootstrap flag (0 = full provision, 1 = --bootstrap), bootstrap::dispatch
+  # (standalone `lo bootstrap`) to 1. Default here to 0 (defer to the driver) so a
+  # caller that forgets — or a stale value inherited from a parent process — can
+  # never trigger a spurious re-apply that races `kubeone apply` for SSA field
+  # ownership. This is the converge point for the two entry paths.
+  export LOK8S_BOOTSTRAP_ONLY="${LOK8S_BOOTSTRAP_ONLY:-0}"
 
   local -a bootstrap_entries
   mapfile -t bootstrap_entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}")

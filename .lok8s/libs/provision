@@ -272,7 +272,7 @@ provision::dispatch() {
   # field-ownership race. On --bootstrap the reconcile was skipped, so the driver
   # did NOT apply them this run and bootstrap is the only applier — it must run to
   # reconcile cilium/ccm from spec.bootstrap. Consumed by the KubeOne skip in
-  # bootstrap::_apply_entry (which used to key on "the DaemonSet exists" — a proxy
+  # bootstrap::_apply_one (which used to key on "the DaemonSet exists" — a proxy
   # that could not tell a fresh driver-apply from a weeks-old cluster).
   export LOK8S_BOOTSTRAP_ONLY="${bootstrap_only}"
 
