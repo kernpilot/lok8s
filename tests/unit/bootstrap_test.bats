@@ -905,6 +905,81 @@ YAML
   [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
 }
 
+# --- immutable/terminating conflict: park + batched heal ---------------------
+
+@test "bootstrap: a background immutable conflict PARKS, then fails fast non-interactively (no --force)" {
+  # A background kapply runs non-interactive, so on an immutable/terminating conflict
+  # it cannot prompt — it errors. _reap_one must PARK the entry (not fail it inline),
+  # and at the drain _resolve_parked must fail-fast (no tty, no --force) with a
+  # --force hint + skip its dependents. Stub _apply_one to emit kubectl's immutable
+  # marker + fail for the gate entry 'b'.
+  bootstrap::_apply_one() {
+    local name="$1"
+    if [ "${name}" = "b" ]; then
+      echo "The Deployment \"b\" is invalid: spec.selector: field is immutable" >&2
+      return 1
+    fi
+    return 0
+  }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        wait: true
+    - c
+YAML
+  # Call directly (background jobs → this shell); `|| rc=$?` keeps the non-zero from
+  # tripping bats' errexit. Combined output → a file we grep.
+  local out="${BATS_TEST_TMPDIR}/park.out" rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>&1 || rc=$?
+
+  # Non-interactive + no --force → the parked heal fails the run.
+  [ "${rc}" -ne 0 ]
+  # It PARKED (deferred), not plain-failed: the reap park marker appears ...
+  grep -q 'will confirm at the end' "${out}"
+  # ... and the batched drain resolve gave the actionable --force hint.
+  grep -q 'needs recreate' "${out}"
+  grep -q -- '--force' "${out}"
+  # 'c' waits on the gate 'b'; a failed heal skips it (dependents BFS).
+  grep -q 'skipping' "${out}"
+}
+
+@test "bootstrap::_resolve_parked: --force auto-recreates a parked entry (no prompt)" {
+  # Directly exercise the ACCEPT branch: with LOK8S_FORCE_RECREATE set, _resolve_parked
+  # re-applies each parked entry FOREGROUND with force (kapply deletes+recreates) and
+  # marks it completed — no tty prompt, dependents NOT skipped. Relies on dynamic
+  # scoping for the launch locals, so we set them in a wrapper that calls it.
+  local applied="${BATS_TEST_TMPDIR}/reapplied.log"; : > "${applied}"
+  bootstrap::_apply_one() { echo "$1" >> "${applied}"; return 0; }
+  bootstrap::_skip_dependents() { echo "skip:$1"; }   # must NOT run on a clean heal
+
+  _run_resolve() {
+    local -a _names=(addonA) _dirs=(/x) _inlines=("") _envs=("") _waits=("false")
+    local -A _istarget=()
+    local kind=lo provider_name=hetzner kubeconfig=/kc
+    declare -gA _BS_COMPLETED=(); _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=(0)
+    export LOK8S_FORCE_RECREATE=1
+    bootstrap::_resolve_parked
+    echo "rc=${_BS_OVERALL_RC} done=${_BS_DONE} done0=${_BS_COMPLETED[0]:-}"
+  }
+  run _run_resolve
+  assert_success
+  assert_output --partial "recreated"              # "✓ addonA · recreated"
+  assert_output --partial "rc=0 done=1 done0=1"     # completed cleanly, no failure
+  refute_output --partial "skip:"                   # dependents NOT skipped on success
+  # the re-apply ran exactly once for the parked entry
+  run cat "${applied}"
+  assert_output "addonA"
+}
+
 # --- dependsOn: parse (bootstrap::_parse_entry) ------------------------------
 # dependsOn is the 6th out-param: a newline-separated list of entry names this
 # entry waits on. It is a reserved key (like values/env/wait) so an entry with
