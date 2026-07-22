@@ -33,7 +33,7 @@ kubeone::extract_vars() {
   local cluster_yaml="${1}"
 
   export CLUSTER_NAME K8S_VERSION POD_SUBNET SERVICE_SUBNET
-  export CP_REPLICAS CNI_PLUGIN CSI_PLUGIN CLOUD_PROVIDER
+  export CP_REPLICAS CNI_PLUGIN CSI_PLUGIN CLOUD_PROVIDER KUBE_PROXY_SKIP
   export SSH_USER SSH_PORT
   export ADDONS_ENABLED ADDONS_PATH
   # spec.cluster.domain — the cluster's own domain, exported for addon envsubst
@@ -79,6 +79,19 @@ kubeone::extract_vars() {
   # opt in to KubeOne's bundled hcloud CSI. Default "external" = Ceph-first, so an
   # existing spec that never set this now ships NO bundled CSI (see docs: BREAKING).
   CSI_PLUGIN=$(yq -r '.spec.network.csi // "external"' "${cluster_yaml}")
+  # spec.network.kubeProxy — kube-proxy installation toggle (default "enabled").
+  # "disabled" ⇒ clusterNetwork.kubeProxy.skipInstallation=true in the manifest, so
+  # kubeadm does NOT deploy kube-proxy — for clusters where Cilium's kube-proxy
+  # replacement takes over. The Cilium side is set INDEPENDENTLY in the cilium addon
+  # values (kubeProxyReplacement + bpf.masquerade); the two are opted into
+  # separately on purpose. KUBE_PROXY_SKIP is the bool templated into the manifest.
+  local kube_proxy
+  kube_proxy=$(yq -r '.spec.network.kubeProxy // "enabled"' "${cluster_yaml}")
+  case "${kube_proxy}" in
+    enabled)  KUBE_PROXY_SKIP=false ;;
+    disabled) KUBE_PROXY_SKIP=true ;;
+    *) error "extract_vars: invalid spec.network.kubeProxy '${kube_proxy}' (expected 'enabled' or 'disabled')"; return 1 ;;
+  esac
 
   # Map provider name to KubeOne cloudProvider key
   local provider
@@ -228,7 +241,11 @@ kubeone::generate_config() {
 
   # Render the core template
   local rendered
-  rendered=$(envsubst '${CLUSTER_NAME} ${K8S_VERSION} ${CLOUD_PROVIDER} ${POD_SUBNET} ${SERVICE_SUBNET} ${CNI_PLUGIN}' < "${core_tmpl}")
+  # template::envsubst (not raw envsubst): this is a WHITELISTED render, and only
+  # bare substitute-everything `envsubst < file` may touch the binary directly —
+  # the toolchain's renvsubst rejects the positional whitelist. The wrapper uses
+  # GNU envsubst when present (identical output) and a native jq pass otherwise.
+  rendered=$(template::envsubst '${CLUSTER_NAME} ${K8S_VERSION} ${CLOUD_PROVIDER} ${POD_SUBNET} ${SERVICE_SUBNET} ${CNI_PLUGIN} ${KUBE_PROXY_SKIP}' < "${core_tmpl}")
 
   # Append dynamicWorkers block if worker pools are defined
   local pool_count
