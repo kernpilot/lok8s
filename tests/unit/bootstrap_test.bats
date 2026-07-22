@@ -2290,7 +2290,8 @@ YAML
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
   assert_success
   refute_output --partial "applied by the KubeOne driver on a full provision"
-  # No skip → the render path runs → merged values file is produced.
+  # No skip → the render path runs → merged values file is produced (cilium/ccm now
+  # reconcile through the same background path as every other addon → normal ✓ · N).
   [ -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
 }
 

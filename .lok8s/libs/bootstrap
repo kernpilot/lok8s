@@ -537,6 +537,11 @@ bootstrap::_apply_one() {
   # (Lo/Capi/Kkp) always gets them from bootstrap. Keyed on the addon DIRECTORY
   # basename (a `name:` override changes addon_name, not addon_dir, so a renamed
   # cilium/ccm can't defeat the skip and double-apply the driver's own).
+  # Full provision: the KubeOne driver already applied cilium/ccm, so skip here to
+  # avoid double-applying. On --bootstrap (LOK8S_BOOTSTRAP_ONLY=1) bootstrap is the
+  # sole applier, so fall through and reconcile from spec.bootstrap — it runs the
+  # same background path as every other addon, so the reconcile surfaces as the
+  # normal "✓ <addon> · N resources" block (no dedicated breadcrumb needed).
   if [[ "${kind}" == "kubeone" ]] && [[ "${LOK8S_BOOTSTRAP_ONLY:-0}" != "1" ]] \
      && { [[ "${_ad_base}" == "cilium" ]] || [[ "${_ad_base}" == "ccm" ]]; }; then
     echo "[bootstrap] ${_ad_base} is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)" >&2
@@ -666,6 +671,8 @@ _BS_TICKER_PID=""   # pid of the background progress ticker (animates the status
 declare -gA _BS_COMPLETED=()  # set of completed entry indices (index → 1)
 _BS_DONE=0          # count of completed entries
 _BS_OVERALL_RC=0    # set to 1 if ANY entry failed
+_BS_PARKED=()       # entry indices that parked on an immutable/terminating
+                    #   conflict; resolved (batch-heal) at the drain point
 
 # OR a finished job's captured rc into _BS_OVERALL_RC (a missing file = failed).
 # Returns 0 iff the job SUCCEEDED (rc==0); non-zero on failure, so the caller can
@@ -819,39 +826,116 @@ bootstrap::_reap_one() {
       # like an orphan). Idempotent for ${_finished} (already reaped → no-op).
       wait "${_BS_INFLIGHT[_i]}" 2>/dev/null || true
       _ridx="${_BS_RUNIDX[_i]}"
-      _BS_COMPLETED["${_ridx}"]=1
-      _BS_DONE=$(( _BS_DONE + 1 ))
-      _jrc=0
-      # Mark completed FIRST (above), then collect rc. _collect_rc still ORs a
-      # failure into _BS_OVERALL_RC; capture its verdict here for the flush marker.
-      bootstrap::_collect_rc "${_BS_RCFILES[_i]}" || _jrc=1
-      # Flush this entry's buffered output as ONE de-interleaved block, now that
-      # we own the foreground: the concurrent jobs couldn't share /dev/tty for the
-      # live collapsing UI, so they buffered to a file (see the launch site) and
-      # we render it here — collapsed on success, errors surfaced on failure.
-      # `|| true` on every flush path: a rendering hiccup must never abort the
-      # reap loop under errexit (that would skip _drain + the rcdir cleanup).
-      if [[ -f "${_BS_OUTFILES[_i]}" ]]; then
-        if [[ -n "${DEBUG:-}" ]]; then
-          # verbose (lo -v): honor kapply's "print everything, don't aggregate"
-          # contract — still de-interleaved (buffered per job), but verbatim.
-          cat "${_BS_OUTFILES[_i]}" || true
-        elif declare -F kapply::render_captured >/dev/null 2>&1; then
-          kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}" || true
-        else
-          cat "${_BS_OUTFILES[_i]}" || true   # fallback: de-interleaved, not collapsed
+      # PARK check FIRST. A background kapply runs under LOK8S_NONINTERACTIVE, so on
+      # an immutable/terminating conflict it can't prompt — it errors (rc != 0) and
+      # the buffered output names the conflict. Detect that pair (exact rc from the
+      # rcfile + the marker text) and PARK the entry: record it for the drain-point
+      # batch heal and DON'T complete it / DON'T OR overall_rc. Anything else falls
+      # through to the normal complete + collect_rc + render below (the `else`).
+      local _exrc=1
+      [[ -f "${_BS_RCFILES[_i]}" ]] && _exrc="$(cat "${_BS_RCFILES[_i]}" 2>/dev/null || echo 1)"
+      if [[ "${_exrc}" != "0" ]] && [[ -f "${_BS_OUTFILES[_i]}" ]] \
+        && grep -qE 'field is immutable|object is being deleted|being deleted:|because it is being terminated' "${_BS_OUTFILES[_i]}"; then
+        _BS_PARKED+=("${_ridx}")
+        printf '\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n' \
+          "${_names[_ridx]}" >&2
+        rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}"
+      else
+        _BS_COMPLETED["${_ridx}"]=1
+        _BS_DONE=$(( _BS_DONE + 1 ))
+        _jrc=0
+        # Mark completed FIRST (above), then collect rc. _collect_rc still ORs a
+        # failure into _BS_OVERALL_RC; capture its verdict here for the flush marker.
+        bootstrap::_collect_rc "${_BS_RCFILES[_i]}" || _jrc=1
+        # Flush this entry's buffered output as ONE de-interleaved block, now that
+        # we own the foreground: the concurrent jobs couldn't share /dev/tty for the
+        # live collapsing UI, so they buffered to a file (see the launch site) and
+        # we render it here — collapsed on success, errors surfaced on failure.
+        # `|| true` on every flush path: a rendering hiccup must never abort the
+        # reap loop under errexit (that would skip _drain + the rcdir cleanup).
+        if [[ -f "${_BS_OUTFILES[_i]}" ]]; then
+          if [[ -n "${DEBUG:-}" ]]; then
+            # verbose (lo -v): honor kapply's "print everything, don't aggregate"
+            # contract — still de-interleaved (buffered per job), but verbatim.
+            cat "${_BS_OUTFILES[_i]}" || true
+          elif declare -F kapply::render_captured >/dev/null 2>&1; then
+            kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}" || true
+          else
+            cat "${_BS_OUTFILES[_i]}" || true   # fallback: de-interleaved, not collapsed
+          fi
+          rm -f "${_BS_OUTFILES[_i]}"
         fi
-        rm -f "${_BS_OUTFILES[_i]}"
+        # iff this entry FAILED, skip only its transitive dependents (they would fail
+        # behind the broken dep). A failure no longer stops the world.
+        (( _jrc == 0 )) || bootstrap::_skip_dependents "${_ridx}"
       fi
-      # iff this entry FAILED, skip only its transitive dependents (they would fail
-      # behind the broken dep). A failure no longer stops the world.
-      (( _jrc == 0 )) || bootstrap::_skip_dependents "${_ridx}"
     fi
   done
   _BS_INFLIGHT=("${_alive[@]+"${_alive[@]}"}")
   _BS_RCFILES=("${_alive_rcf[@]+"${_alive_rcf[@]}"}")
   _BS_RUNIDX=("${_alive_idx[@]+"${_alive_idx[@]}"}")
   _BS_OUTFILES=("${_alive_out[@]+"${_alive_out[@]}"}")
+}
+
+# bootstrap::_resolve_parked
+# Batch-heal the entries parked by _reap_one on an immutable/terminating conflict.
+# Called from bootstrap::apply at the quiescent drain point (nothing in flight), so
+# the scheduler owns /dev/tty for a SINGLE prompt covering ALL parked entries —
+# replacing the old per-object foreground kapply prompts. Relies on dynamic scoping
+# for the launch locals (_names/_dirs/_inlines/_envs/_waits/_istarget + kind/
+# provider_name/kubeconfig), exactly like _reap_one and _skip_dependents.
+#
+# Decision: --force / --force-recreate (LOK8S_FORCE_RECREATE) auto-accepts; else an
+# interactive tty gets ONE y/N; else (non-interactive, no force) fail-fast per entry
+# with actionable guidance. (A per-addon force:true key is a planned follow-up — it
+# would export LOK8S_FORCE_RECREATE for that entry and land here as auto-accept.)
+# Accepted entries are re-applied FOREGROUND with LOK8S_FORCE_RECREATE=1 so kapply
+# deletes + recreates the blocked object; each is then marked completed (unblocking
+# dependents on the next launch pass) or, on failure, fails + skips its dependents.
+bootstrap::_resolve_parked() {
+  local -a _parked=("${_BS_PARKED[@]}")
+  _BS_PARKED=()
+  local _pi _accept=0 _list=""
+  for _pi in "${_parked[@]}"; do _list+=" ${_names[_pi]}"; done
+
+  if [[ -n "${LOK8S_FORCE_RECREATE:-}" ]]; then
+    _accept=1   # --force / --force-recreate → no prompt, just heal
+  elif [[ -t 0 && -t 1 && -r /dev/tty && -w /dev/tty ]]; then
+    printf '\n\033[33m?\033[0m bootstrap: %d addon(s) need recreate to reconcile (immutable/terminating):%s\n' \
+      "${#_parked[@]}" "${_list}" >&2
+    printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods). [y/N] ' >/dev/tty
+    local _ans=""
+    read -r _ans </dev/tty 2>/dev/null || _ans=""
+    [[ "${_ans}" =~ ^[Yy] ]] && _accept=1
+  fi
+
+  for _pi in "${_parked[@]}"; do
+    # Same readiness rule as the launch loop: wait IFF a dep-target or a wait-gate.
+    local _wflag=""
+    { (( _istarget[_pi] )) || [[ "${_waits[_pi]}" == "true" ]]; } && _wflag="wait"
+    if (( _accept )); then
+      local _rc=0
+      ( export LOK8S_FORCE_RECREATE=1
+        bootstrap::_apply_one "${_names[_pi]}" "${_dirs[_pi]}" "${kind}" "${provider_name}" \
+          "${kubeconfig}" "${_inlines[_pi]}" "${_wflag}" "${_envs[_pi]}" ) || _rc=$?
+      _BS_COMPLETED["${_pi}"]=1
+      _BS_DONE=$(( _BS_DONE + 1 ))
+      if (( _rc != 0 )); then
+        _BS_OVERALL_RC=1
+        bootstrap::_skip_dependents "${_pi}"
+      else
+        printf '\033[32m✓\033[0m %s \033[2m· recreated\033[0m\n' "${_names[_pi]}" >&2
+      fi
+    else
+      # Declined (or non-interactive with no --force): announce WHY + how to fix,
+      # then mark completed + skip its dependents (a failed heal fails the entry).
+      _BS_COMPLETED["${_pi}"]=1
+      _BS_DONE=$(( _BS_DONE + 1 ))
+      _BS_OVERALL_RC=1
+      error "bootstrap: ${_names[_pi]} needs recreate (immutable/terminating) — re-run with --force to auto-recreate, or resolve by hand"
+      bootstrap::_skip_dependents "${_pi}"
+    fi
+  done
 }
 
 # bootstrap::_restore_d <domain> <kubeconfig>
@@ -1188,7 +1272,7 @@ bootstrap::apply() {
     || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
   _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=(); _BS_OUTFILES=()
   unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
-  _BS_DONE=0; _BS_OVERALL_RC=0
+  _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=()
   local -A _started=()
   local -A _skip=()   # entry index → 1: skipped (a transitive dependency failed)
   local _seq=0
@@ -1216,35 +1300,16 @@ bootstrap::apply() {
       fi
       _started["${_i2}"]=1
 
-      if [[ "${_waits[_i2]}" == "true" ]]; then
-        # wait: true GATE — run it SYNCHRONOUSLY in the FOREGROUND, NOT as a
-        # backgrounded subshell and WITHOUT LOK8S_NONINTERACTIVE, so kapply keeps
-        # a usable /dev/tty for its interactive immutable/terminating heal prompt
-        # (a background job has no controlling tty → kapply::_interactive is
-        # false → it can never prompt). This loses NO concurrency: a gate
-        # provably runs ALONE — it depends on every entry positionally before it
-        # (all therefore already completed AND reaped, so nothing is in flight)
-        # and every entry after it depends on the gate (none is launchable until
-        # the gate completes). The ( … ) subshell still isolates the
-        # KAPPLY_LAST_OUTPUT global, yet — being foreground, not `&` — inherits
-        # the terminal. Mark it completed INLINE (same as the reap path) so its
-        # dependents become launchable on the next pass; capture rc EXPLICITLY
-        # (|| _garc=$?) so an errexit-failing apply can't abort the runner. On
-        # failure, skip its transitive dependents — for a gate that is every entry
-        # after it (the gate's drain-all/ready-before-later edges), so a failed
-        # gate still skips all-after, now via the dependents BFS.
-        local _garc=0
-        ( bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
-            "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" ) || _garc=$?
-        _BS_COMPLETED["${_i2}"]=1
-        _BS_DONE=$(( _BS_DONE + 1 ))
-        if (( _garc != 0 )); then
-          _BS_OVERALL_RC=1
-          bootstrap::_skip_dependents "${_i2}"
-        fi
-        continue
-      fi
-
+      # wait: true GATES (cilium/ccm, or any addon) run through the SAME background
+      # path as everything else. The barrier is enforced by DAG edges (a gate ⇒
+      # drain-all-before + every later entry waits on it — built in the edge pass),
+      # NOT by foreground execution, so a gate still runs ALONE and its dependents
+      # still wait. Running it headless like the rest gives it the shared spinner +
+      # render_captured "✓ · N resources" instead of a silent, ephemeral foreground
+      # kapply UI. Heal on an immutable/terminating conflict is now uniform for all
+      # entries: kapply errors under LOK8S_NONINTERACTIVE, the reap PARKS it, and
+      # the drain point batch-heals (--force auto-recreates; an interactive tty
+      # prompts once; else fail-fast) — see _reap_one/_resolve_parked.
       _seq=$(( _seq + 1 ))
       local _rcf="${_rcdir}/${_seq}.rc"
       local _out="${_rcdir}/${_seq}.out"
@@ -1273,8 +1338,13 @@ bootstrap::apply() {
     done
 
     # Nothing in flight after a full launch pass → everything left is completed or
-    # skipped (or only blocked behind skipped entries, which never launch). Done.
-    (( ${#_BS_INFLIGHT[@]} )) || break
+    # skipped (or only blocked behind skipped entries, which never launch) — UNLESS
+    # entries parked on an immutable/terminating conflict. Resolve those (batch heal)
+    # at this quiescent drain point, where the scheduler owns the tty for a single
+    # prompt, then loop: resolving a parked entry completes it, unblocking dependents
+    # the next launch pass picks up. Only when nothing is in flight AND nothing is
+    # parked are we truly done.
+    (( ${#_BS_INFLIGHT[@]} )) || { (( ${#_BS_PARKED[@]} == 0 )) && break; bootstrap::_resolve_parked; continue; }
 
     bootstrap::_reap_one
   done
@@ -1284,9 +1354,10 @@ bootstrap::apply() {
   # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
   # entry completed cleanly. Checking _BS_OVERALL_RC alone is sufficient: _skip is
   # ONLY ever populated by bootstrap::_skip_dependents, and both of its call sites
-  # (the reap path and the foreground-gate path) set _BS_OVERALL_RC=1 immediately
-  # before invoking it — so a non-empty _skip always implies _BS_OVERALL_RC!=0. The
-  # former `|| (( ${#_skip[@]} > 0 ))` clause was therefore redundant; dropped.
+  # (the reap path and the parked-heal path _resolve_parked) set _BS_OVERALL_RC=1
+  # immediately before invoking it — so a non-empty _skip always implies
+  # _BS_OVERALL_RC!=0. The former `|| (( ${#_skip[@]} > 0 ))` clause was therefore
+  # redundant; dropped.
   if (( _BS_OVERALL_RC != 0 )); then
     return 1
   fi
