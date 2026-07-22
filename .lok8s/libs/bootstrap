@@ -953,12 +953,13 @@ bootstrap::apply() {
   fi
 
   # LOK8S_BOOTSTRAP_ONLY gates the KubeOne cilium/ccm skip in _apply_one. Both
-  # entry points set it explicitly BEFORE calling us — provision::dispatch to the
+  # entry points set it EXPLICITLY before calling us — provision::dispatch to the
   # --bootstrap flag (0 = full provision, 1 = --bootstrap), bootstrap::dispatch
-  # (standalone `lo bootstrap`) to 1. Default here to 0 (defer to the driver) so a
-  # caller that forgets — or a stale value inherited from a parent process — can
-  # never trigger a spurious re-apply that races `kubeone apply` for SSA field
-  # ownership. This is the converge point for the two entry paths.
+  # (standalone `lo bootstrap`) to 1 — so any value inherited from a parent
+  # process is overwritten on every real path before it reaches the gate. The
+  # `:-0` here is a pure safety floor for a hypothetical direct bootstrap::apply
+  # caller that sets nothing: default to 0 (defer to the driver) so it can never
+  # trigger a spurious re-apply that races `kubeone apply` for SSA field ownership.
   export LOK8S_BOOTSTRAP_ONLY="${LOK8S_BOOTSTRAP_ONLY:-0}"
 
   local -a bootstrap_entries
