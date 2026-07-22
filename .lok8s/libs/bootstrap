@@ -117,6 +117,13 @@ bootstrap::dispatch() {
     driver::export "${domain}"
   fi
 
+  # A standalone `lo bootstrap` NEVER provisions — the KubeOne driver did not run
+  # `kubeone apply` this invocation, so bootstrap is the sole applier and MUST
+  # reconcile cilium/ccm from spec.bootstrap (identical intent to
+  # `lo provision --bootstrap`). Set the gate to reconcile-only so the KubeOne
+  # cilium/ccm skip in _apply_one does NOT fire.
+  export LOK8S_BOOTSTRAP_ONLY=1
+
   bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig}"
 
   # Refresh the in-cluster ClusterInventory after a standalone `lo bootstrap`
@@ -515,25 +522,25 @@ bootstrap::_apply_one() {
 
   # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` (as
   # rendered custom addons, kubeone::render_addons) to break the cni:external
-  # deadlock. When the driver-managed objects are already up, re-applying them
-  # here from the kustomize render path is redundant and races the driver for
-  # field ownership — so defer both to the driver on KubeOne. Every other driver
-  # (Lo/Capi/Kkp) still gets them from bootstrap. Re-run `lo up` to reconcile.
-  if [[ "${kind}" == "kubeone" ]]; then
-    # Key the skip on the addon DIRECTORY basename, NOT addon_name. A `name:`
-    # override changes addon_name (the dependsOn identity) but never addon_dir, so
-    # the driver skip must stay anchored to the cilium/ccm addon dir — otherwise a
-    # `name:`-renamed cilium/ccm would defeat it and double-apply the driver's own.
-    if [[ "${_ad_base}" == "cilium" ]] \
-       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get ds cilium &>/dev/null; then
-      echo "[bootstrap] cilium already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-      return 0
-    fi
-    if [[ "${_ad_base}" == "ccm" ]] \
-       && kubectl --kubeconfig "${kubeconfig}" -n kube-system get deploy hcloud-cloud-controller-manager &>/dev/null; then
-      echo "[bootstrap] ccm already deployed by the KubeOne driver — skipping (re-run 'lo up' to reconcile)" >&2
-      return 0
-    fi
+  # deadlock. On a FULL provision that reconcile has just run, so re-applying them
+  # here would race the driver for field ownership — kapply uses
+  # `apply --server-side --force-conflicts` (below), so it would forcibly STEAL
+  # ownership and the next `kubeone apply` fights back. So defer to the driver on a
+  # full provision. But on `lo provision --bootstrap` the infra reconcile is
+  # SKIPPED — the driver did NOT apply cilium/ccm this run, so bootstrap is the
+  # ONLY applier and MUST run to reconcile them from spec.bootstrap (a cilium
+  # version bump, kubeProxyReplacement, policyAuditMode, encryption…). So gate on
+  # the PATH — LOK8S_BOOTSTRAP_ONLY, set by provision::dispatch — NOT on "does the
+  # DaemonSet exist": that old existence check could never tell a fresh
+  # driver-apply (full provision) from a weeks-old DS (--bootstrap), so it silently
+  # blocked EVERY cilium/ccm reconcile through --bootstrap. Every other driver
+  # (Lo/Capi/Kkp) always gets them from bootstrap. Keyed on the addon DIRECTORY
+  # basename (a `name:` override changes addon_name, not addon_dir, so a renamed
+  # cilium/ccm can't defeat the skip and double-apply the driver's own).
+  if [[ "${kind}" == "kubeone" ]] && [[ "${LOK8S_BOOTSTRAP_ONLY:-0}" != "1" ]] \
+     && { [[ "${_ad_base}" == "cilium" ]] || [[ "${_ad_base}" == "ccm" ]]; }; then
+    echo "[bootstrap] ${_ad_base} is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)" >&2
+    return 0
   fi
 
   # Render via the canonical khelm path (value-stacking + kustomize build +
@@ -944,6 +951,16 @@ bootstrap::apply() {
   else
     export LOK8S_BOOTSTRAP_HOSTED=false
   fi
+
+  # LOK8S_BOOTSTRAP_ONLY gates the KubeOne cilium/ccm skip in _apply_one. Both
+  # entry points set it EXPLICITLY before calling us — provision::dispatch to the
+  # --bootstrap flag (0 = full provision, 1 = --bootstrap), bootstrap::dispatch
+  # (standalone `lo bootstrap`) to 1 — so any value inherited from a parent
+  # process is overwritten on every real path before it reaches the gate. The
+  # `:-0` here is a pure safety floor for a hypothetical direct bootstrap::apply
+  # caller that sets nothing: default to 0 (defer to the driver) so it can never
+  # trigger a spurious re-apply that races `kubeone apply` for SSA field ownership.
+  export LOK8S_BOOTSTRAP_ONLY="${LOK8S_BOOTSTRAP_ONLY:-0}"
 
   local -a bootstrap_entries
   mapfile -t bootstrap_entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}")

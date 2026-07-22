@@ -2228,3 +2228,104 @@ YAML
   assert_success
   refute_output --partial "PROBE_MUST_NOT_RUN"
 }
+
+# --- KubeOne cilium/ccm reconcile gate: path-based, NOT "does the DaemonSet exist" --
+# A full provision (LOK8S_BOOTSTRAP_ONLY=0, set by provision::dispatch) defers
+# cilium/ccm to the driver — `kubeone apply` just applied them, so re-applying here
+# would race for SSA field ownership. `lo provision --bootstrap` AND standalone
+# `lo bootstrap` (both =1) are the sole applier and MUST reconcile from spec.
+
+# Stub an addon named $1 + a kind=KubeOne spec that explicitly lists it, so
+# _apply_one resolves the entry and reaches the gate.
+_setup_kubeone_addon() {
+  local name="${1}" dir="${PATH_LOK8S}/addons/${1}"
+  mkdir -p "${dir}"
+  cat > "${dir}/chart.yaml" <<YAML
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: ${name}
+valueFiles:
+  - values.yaml
+YAML
+  echo "marker: ${name}" > "${dir}/values.yaml"
+  cat > "${CLUSTER_YAML}" <<YAML
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - ${name}
+YAML
+}
+
+@test "bootstrap: KubeOne defers cilium to the driver on a full provision (=0)" {
+  _setup_kubeone_addon cilium
+  export LOK8S_BOOTSTRAP_ONLY=0   # provision::dispatch sets this on a full provision
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "applied by the KubeOne driver on a full provision"
+  # Skip fires BEFORE render → kustomize never ran → no merged values produced.
+  [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: KubeOne defers ccm to the driver on a full provision (=0)" {
+  _setup_kubeone_addon ccm
+  export LOK8S_BOOTSTRAP_ONLY=0
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "applied by the KubeOne driver on a full provision"
+  [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: KubeOne reconciles cilium on --bootstrap (LOK8S_BOOTSTRAP_ONLY=1)" {
+  _setup_kubeone_addon cilium
+  export LOK8S_BOOTSTRAP_ONLY=1
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  refute_output --partial "applied by the KubeOne driver on a full provision"
+  # No skip → the render path runs → merged values file is produced.
+  [ -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: unset gate defaults to defer (safe fallback, never a spurious re-apply)" {
+  _setup_kubeone_addon cilium
+  unset LOK8S_BOOTSTRAP_ONLY   # no dispatch set it → bootstrap::apply defaults to 0
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "applied by the KubeOne driver on a full provision"
+  [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: standalone lo bootstrap (dispatch) runs in reconcile mode (=1) on KubeOne" {
+  # Regression guard: the gate flag must be set on the bootstrap::dispatch path
+  # too, not only provision::dispatch — else `lo bootstrap` silently skips cilium.
+  local dom="kotest"
+  mkdir -p "${PATH_CLUSTERS}/${dom}" "${PATH_LOK8S}/drivers/kubeone"
+  : > "${PATH_LOK8S}/drivers/kubeone/main"   # sourceable no-op driver
+  cat > "${PATH_CLUSTERS}/${dom}/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: kotest
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - cilium
+YAML
+  # Capture the gate value dispatch hands to apply (stub replaces the real apply).
+  bootstrap::apply() { echo "GATE=${LOK8S_BOOTSTRAP_ONLY:-unset}"; }
+  unset LOK8S_BOOTSTRAP_ONLY
+
+  run bootstrap::dispatch "${dom}"
+  assert_success
+  assert_output --partial "GATE=1"
+}

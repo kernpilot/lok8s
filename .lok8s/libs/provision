@@ -266,6 +266,16 @@ provision::dispatch() {
     driver::export "${domain}"
   fi
 
+  # Tell bootstrap::apply which path this is. On a full provision the infra
+  # reconcile above ran, so the KubeOne driver JUST applied cilium + the hcloud
+  # CCM (kubeone::render_addons) — bootstrap must defer to avoid a server-side
+  # field-ownership race. On --bootstrap the reconcile was skipped, so the driver
+  # did NOT apply them this run and bootstrap is the only applier — it must run to
+  # reconcile cilium/ccm from spec.bootstrap. Consumed by the KubeOne skip in
+  # bootstrap::_apply_one (which used to key on "the DaemonSet exists" — a proxy
+  # that could not tell a fresh driver-apply from a weeks-old cluster).
+  export LOK8S_BOOTSTRAP_ONLY="${bootstrap_only}"
+
   # kubehz config: read and validate
   kubehz::read_config "${cluster_yaml}"
   kubehz::validate_config || return 1
