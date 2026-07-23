@@ -63,15 +63,19 @@ clean:  ## remove built binaries
 	rm -f $(BINS)
 	rm -rf dist/
 
-# Cross-platform release builds (not needed for local dev)
+# Cross-platform release builds (not needed for local dev).
+# Asset naming is a CONTRACT: kustomize-secret-<os>-<arch> is what release
+# consumers address via `b` (asset: "kustomize-secret-*"), so the release
+# workflow attaches these files verbatim. Don't rename without bumping the
+# consumers (kubehz-cluster/.bin/b.yaml + b.ci.yaml).
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
-dist:  ## build cross-platform release tarballs
+dist:  ## build cross-platform release binaries (kustomize-secret-<os>-<arch>)
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \
 	  echo "  building $$os/$$arch..."; \
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
 	    $(GO) build -trimpath -ldflags '$(LDFLAGS)' \
-	      -o dist/Secret-$$os-$$arch ./cmd/secret ; \
+	      -o dist/kustomize-secret-$$os-$$arch ./cmd/secret ; \
 	done
 
 help:  ## show this help

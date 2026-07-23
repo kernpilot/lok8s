@@ -83,7 +83,7 @@ jobs:
 
           # register_cluster prints "  fingerprint: <md5>" on success. Lift it
           # (best-effort; absent for non-kubehz / access:none clusters).
-          fp="$(grep -oE 'fingerprint: .+' /tmp/provision.log | head -n1 | sed 's/^fingerprint: //')"
+          fp="$(grep -oE 'fingerprint: [^ ]+' /tmp/provision.log | head -n1 | sed 's/^fingerprint: //')"
           {
             echo "fingerprint<<EOF"
             echo "${fp}"

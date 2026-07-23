@@ -168,9 +168,9 @@ teardown() {
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
 }
 
-# ── register_cluster: access managed is parked (in development) ───
+# ── register_cluster: access managed notes the platform-side tier gate ───
 
-@test "register_cluster: access managed warns it is not yet available and still registers" {
+@test "register_cluster: access managed notes the Supporter+ gate and still registers" {
   yq() {
     case "$2" in
       '.kind') echo "Lo" ;;
@@ -198,13 +198,13 @@ teardown() {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
-  # The managed tier is being rebuilt — no operator, no ghost image is applied.
+  # Managed is live but subscription-gated PLATFORM-side; registration is identical.
   export LOK8S_KUBEHZ_ACCESS="managed"
 
   run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_success
-  # Honest notice: managed is not yet available …
-  assert_output --partial "not yet available"
+  # Honest notice: the gate lives platform-side (Supporter+), after claiming.
+  assert_output --partial "Supporter+"
   # … but the cluster is still registered for read-only heartbeat visibility.
   assert_output --partial "Claim it in the dashboard"
   assert_output --partial "fingerprint: lo:test.kubehz.dev"
@@ -363,6 +363,24 @@ teardown() {
   assert_success
 }
 
+# ── deregister_cluster: refuses plain-HTTP (no curl) ─────
+
+@test "deregister_cluster: refuses a plain-HTTP apiUrl (no curl)" {
+  # The KUBEHZ_TOKEN bearer travels on this URL, and deregister skips
+  # validate_config (reachable standalone), so it must re-assert HTTPS itself.
+  curl() { echo "curl should not run over plain HTTP" >&2; return 99; }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="http://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "must use HTTPS"
+}
+
 # ── status subcommand: access none ───────────────────────
 
 @test "status: shows not registered when access is none" {
@@ -439,4 +457,122 @@ teardown() {
   run kubehz::deregister
   assert_failure
   assert_output --partial "access is 'none'"
+}
+
+# ── direct_claim: authenticated register (KUBEHZ_TOKEN) ───
+
+@test "direct_claim: registers with the bearer and reports the claimed cluster" {
+  yq() {
+    case "$2" in
+      '.kind') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  # Must send the bearer to the REGISTER endpoint.
+  curl() {
+    [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
+      || { echo "wrong endpoint: $*" >&2; return 1; }
+    [[ " $* " == *"Authorization: Bearer khzt_test"* ]] \
+      || { echo "missing bearer: $*" >&2; return 1; }
+    echo '{"id":"cl-777","claimed":true}'
+  }
+  export -f curl
+
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-777" ;;
+      *'.claimed // false'*) echo "true" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="khzt_test"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  assert_output --partial "registered and claimed to your account"
+}
+
+@test "direct_claim: a non-claimed response fails (falls back)" {
+  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  export -f yq
+  curl() { echo '{"id":"cl-1","claimed":false}'; }
+  export -f curl
+  jq() { case "$*" in *'.id // empty'*) echo "cl-1" ;; *'.claimed // false'*) echo "false" ;; *) echo "" ;; esac; }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="khzt_test"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_failure
+}
+
+@test "direct_claim: connectHcloudToken connects the hcloud token when writable" {
+  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  export -f yq
+
+  # Register → claimed; credentials POST → writable token.
+  curl() {
+    if [[ " $* " == *"/api/credentials"* ]]; then
+      [[ " $* " == *"Authorization: Bearer khzt_test"* ]] || { echo "cred missing bearer" >&2; return 1; }
+      echo '{"data":{"stored":true,"validation":{"checked":true,"authenticated":true,"writable":true}}}'
+    else
+      echo '{"id":"cl-9","claimed":true}'
+    fi
+  }
+  export -f curl
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-9" ;;
+      *'.claimed // false'*) echo "true" ;;
+      *'.data.validation.writable // "unknown"'*) echo "true" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="khzt_test"
+  export HCLOUD_TOKEN="hc_test"
+  export LOK8S_KUBEHZ_CONNECT_TOKEN="true"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  assert_output --partial "provisioning is enabled"
+}
+
+@test "direct_claim: connectHcloudToken warns when a read-only token is connected" {
+  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  export -f yq
+  curl() {
+    if [[ " $* " == *"/api/credentials"* ]]; then
+      echo '{"data":{"stored":true,"validation":{"writable":false}}}'
+    else
+      echo '{"id":"cl-9","claimed":true}'
+    fi
+  }
+  export -f curl
+  jq() {
+    case "$*" in
+      *'.id // empty'*) echo "cl-9" ;;
+      *'.claimed // false'*) echo "true" ;;
+      *'.data.validation.writable // "unknown"'*) echo "false" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="khzt_test" HCLOUD_TOKEN="hc_test" LOK8S_KUBEHZ_CONNECT_TOKEN="true"
+
+  run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  assert_output --partial "READ-ONLY"
 }

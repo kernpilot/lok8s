@@ -49,8 +49,22 @@ jobs:
             echo "built lochat-${os}-${arch}"
           done
 
+      - name: Build kustomize plugin release binaries
+        run: |
+          # Standalone per-platform binaries of the secrets.lok8s.dev/v1/Secret
+          # exec plugin (asset contract: kustomize-secret-<os>-<arch>, same
+          # matrix as lochat) so consumers install it via `b` instead of
+          # building from source, e.g. in .bin/b.yaml:
+          #   github.com/kernpilot/lok8s:
+          #     asset: kustomize-secret-*
+          #     file: ../.kustomize/secrets.lok8s.dev/v1/secret/Secret
+          # (The tarball's .kustomize/ copy above only covers the build host's
+          # os/arch; these assets are what b's os/arch matching addresses.)
+          make -C kustomize dist
+          cp kustomize/dist/kustomize-secret-* "${GITHUB_WORKSPACE}/"
+
       - name: Checksums
-        run: sha256sum lok8s-*.tar.gz lochat-* | tee SHA256SUMS.txt
+        run: sha256sum lok8s-*.tar.gz lochat-* kustomize-secret-* | tee SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -59,6 +73,7 @@ jobs:
           files: |
             lok8s-*.tar.gz
             lochat-*
+            kustomize-secret-*
             SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

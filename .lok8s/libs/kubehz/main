@@ -10,8 +10,12 @@
 #
 # The self-hosted heartbeat agent ships as a kustomize dir under
 # libs/kubehz/manifests/agent/ (applied out-of-band — see docs/guide/kubehz.md).
-# The "managed" access tier (operator-driven remediation) is in development and
-# not yet available: access: managed registers for heartbeat visibility only.
+# The "managed" access tier is LIVE and subscription-gated (Supporter+): it
+# registers like `registered`, and the kubehz platform's management features
+# (healing policies, capacity watches, desired-state management) activate once
+# the cluster is claimed by an entitled tenant. Acting stays PULL-based: the
+# in-cluster agent fetches desired state and applies it locally — the platform
+# never pushes into the cluster.
 
 import ^utils/verbose
 import ^utils/http
@@ -32,7 +36,8 @@ main::kubehz() {
 
 # Read spec.kubehz from a cluster.lok8s.yaml and export env vars.
 # Usage: kubehz::read_config <cluster_yaml>
-# Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL
+# Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL,
+#       LOK8S_KUBEHZ_CONNECT_TOKEN
 kubehz::read_config() {
   local cluster_yaml="${1}"
 
@@ -48,7 +53,13 @@ kubehz::read_config() {
     LOK8S_KUBEHZ_ACCESS="${access}"
   fi
 
-  export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL
+  # Opt-in: also hand the platform your HCLOUD_TOKEN so the dashboard can drive
+  # provisioning (worker pools, SSH keys) on your account. Default false — the
+  # token is otherwise used only locally by lo and never sent. Only ever acted
+  # on when a KUBEHZ_TOKEN identifies the owning tenant (see register_cluster).
+  LOK8S_KUBEHZ_CONNECT_TOKEN=$(yq -r '.spec.kubehz.connectHcloudToken // false' "${cluster_yaml}")
+
+  export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL LOK8S_KUBEHZ_CONNECT_TOKEN
 }
 
 # ── Validation ───────────────────────────────────────────
@@ -140,6 +151,126 @@ kubehz::get_ssh_fingerprint() {
   esac
 }
 
+# ── Claim-key registration (API-minted) ─────────────────
+#
+# PRIMARY registration for hcloud-backed clusters: the kubehz API mints the
+# claim key SERVER-SIDE ({domain, claimKey: true}) — it stores only the MD5
+# fingerprint (equality-claimable) and discards the private key; we upload the
+# returned PUBLIC key into the owner's Hetzner Cloud account under
+# kubehz-claim-<domain>. Two-way verification: kubehz knows the fingerprint it
+# minted; only someone who can read the hcloud account can present it. The
+# user then claims with the fingerprint ALONE (dashboard, or the API with a
+# clusters:write token) — no cluster access, no CLI, no local openssh.
+#
+# Re-runs ROTATE server-side (same pending row, fresh fingerprint), so we
+# replace the hcloud key by name on every run. Fail-soft: any failure returns
+# 1 and the caller falls back to the legacy fingerprint announce.
+kubehz::ensure_claim_key() {
+  local domain="${1}" api_url="${2}"
+  local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
+  # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
+  http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
+
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg d "${domain}" '{domain: $d, claimKey: true}')") || return 1
+
+  local cluster_id public_key fingerprint key_name
+  cluster_id=$(jq -r '.id // empty' <<<"${response}")
+  public_key=$(jq -r '.claimKey.publicKey // empty' <<<"${response}")
+  fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
+  key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
+  [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
+
+  # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
+  # kubehz-claim key must not linger in the account.
+  local existing_id
+  existing_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
+  if [[ -n "${existing_id}" ]]; then
+    curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+      "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
+  fi
+  curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+    -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}')" \
+    >/dev/null || return 1
+
+  debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
+  echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
+  echo "kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:"
+  echo "  curl -X POST ${api_url}/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\"
+  echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${fingerprint}\"}'"
+  echo "  fingerprint: ${fingerprint}   (also visible in Hetzner Console -> Security -> SSH keys)"
+}
+
+# ── Direct claim (authenticated) ─────────────────────────
+
+# Register a cluster ATTRIBUTED DIRECTLY to the caller's tenant, using a
+# KUBEHZ_TOKEN (a clusters:write API token minted in the dashboard's
+# Access -> API Tokens). The API attributes the row to the token's tenant at
+# register time — no claim key, no fingerprint round-trip, no human claim step.
+#
+# When spec.kubehz.connectHcloudToken is true AND HCLOUD_TOKEN is present, it
+# then hands the platform the hcloud token (encrypted at rest, validated against
+# the cluster) so the dashboard can drive provisioning. The token is sent ONLY
+# on the HTTPS API URL and only for THIS opt-in — never printed, never logged.
+#
+# Fail-soft: any failure returns 1 and the caller falls back to the anonymous
+# flow. Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url>
+kubehz::direct_claim() {
+  local domain="${1}" cluster_yaml="${2}" api_url="${3}"
+
+  local fingerprint
+  fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
+    warn "Could not extract SSH fingerprint for ${domain}"
+    return 1
+  }
+
+  # Direct-attributed register: the bearer proves the tenant; the row lands owned.
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg d "${domain}" --arg fp "${fingerprint}" '{domain: $d, fingerprint: $fp}')") || return 1
+
+  local cluster_id claimed
+  cluster_id=$(jq -r '.id // empty' <<<"${response}")
+  claimed=$(jq -r '.claimed // false' <<<"${response}")
+  [[ -n "${cluster_id}" ]] || return 1
+
+  if [[ "${claimed}" != "true" ]]; then
+    warn "kubehz register did not attribute ${domain} to your tenant (is KUBEHZ_TOKEN a clusters:write token?)"
+    return 1
+  fi
+  echo "kubehz: cluster '${domain}' registered and claimed to your account (${cluster_id})."
+
+  # Optionally connect the hcloud token for dashboard-driven provisioning.
+  if [[ "${LOK8S_KUBEHZ_CONNECT_TOKEN:-false}" == "true" ]]; then
+    if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
+      warn "spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect."
+      return 0
+    fi
+    local cred
+    cred=$(curl -fsSL -X POST "${api_url}/api/credentials" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$(jq -n --arg v "${HCLOUD_TOKEN}" --arg c "${cluster_id}" \
+        '{type: "hcloud_token", value: $v, validate: true, clusterId: $c}')") || {
+      warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
+      return 0
+    }
+    # writable:false → stored for pricing but provisioning locked; say so plainly.
+    if [[ "$(jq -r '.data.validation.writable // "unknown"' <<<"${cred}")" == "false" ]]; then
+      echo "kubehz: hcloud token connected, but it is READ-ONLY — dashboard provisioning stays locked. Use a Read & Write token for worker pools."
+    else
+      echo "kubehz: hcloud token connected — dashboard provisioning is enabled."
+    fi
+  fi
+}
+
 # ── Registration ─────────────────────────────────────────
 
 # Register a self-hosted cluster with the kubehz API.
@@ -170,13 +301,31 @@ kubehz::register_cluster() {
   # standalone (lo kubehz register), so re-assert before any network call.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 0
 
-  # The 'managed' access tier (operator-driven remediation) is in development
-  # and not yet available. There is no operator to deploy — never pretend
-  # otherwise (an apply would only ImagePullBackOff on a non-existent image).
-  # Register for read-only heartbeat visibility only, exactly like
-  # access: registered, and say so plainly.
+  # The 'managed' access tier is live but subscription-gated on the PLATFORM
+  # side (Supporter+): registration itself is identical to `registered`; the
+  # management features unlock in the dashboard once the cluster is claimed by
+  # an entitled tenant. lo cannot check the tenant tier here, so just say
+  # where the gate lives.
   if [[ "${LOK8S_KUBEHZ_ACCESS:-}" == "managed" ]]; then
-    warn "spec.kubehz.access: 'managed' is in development and not yet available — registering for read-only heartbeat visibility only (as with access: registered)."
+    echo "kubehz: access 'managed' — management features activate in the dashboard once the cluster is claimed by a Supporter+ tenant."
+  fi
+
+  # PRIMARY (authenticated): a KUBEHZ_TOKEN (a clusters:write API token from the
+  # dashboard's Access → API Tokens) proves the owning tenant, so the cluster is
+  # claimed DIRECTLY at register time — no claim-key mint, no fingerprint hop.
+  # Optionally hands the platform the HCLOUD_TOKEN too (spec.kubehz.
+  # connectHcloudToken) so the dashboard can drive provisioning.
+  if [[ -n "${KUBEHZ_TOKEN:-}" ]]; then
+    kubehz::direct_claim "${domain}" "${cluster_yaml}" "${api_url}" && return 0
+    warn "kubehz direct claim failed for ${domain}; falling back to the anonymous registration flow"
+  fi
+
+  # SECONDARY (anonymous, hcloud-backed): API-minted claim key — the token is in
+  # env during provisioning; a human claims fingerprint-solo in the dashboard.
+  # Falls through to the legacy server-key fingerprint announce when unavailable.
+  if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+    kubehz::ensure_claim_key "${domain}" "${api_url}" && return 0
+    warn "kubehz claim-key registration failed for ${domain}; falling back to the legacy fingerprint announce"
   fi
 
   local fingerprint
@@ -224,8 +373,26 @@ kubehz::deregister_cluster() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
-  curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+  # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
+  # validate_config (reachable standalone via `lo kubehz deregister`), so guard
+  # each call by its own URL — mirrors register_cluster's standalone re-assert.
+  if http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+    curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+  fi
+
+  # Best-effort: retire the kubehz claim key from the hcloud account. The name
+  # mirrors the API's minted convention (kubehz-claim-<domain>, see header) —
+  # deregister has no register response to read .claimKey.name from.
+  if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
+    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE"; then
+      key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+        "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
+      [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+        "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+    fi
+  fi
 
   debug "Cluster ${domain} deregistered from kubehz"
 }

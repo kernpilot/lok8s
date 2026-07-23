@@ -23,6 +23,7 @@ spec:
     hosting: self                        # self | hosted
     access: registered                   # none | registered | managed
     apiUrl: https://api.kubehz.cloud     # required when hosted or access != none
+    connectHcloudToken: false            # opt-in: hand kubehz your HCLOUD_TOKEN (see below)
 ```
 
 Two independent axes:
@@ -33,7 +34,13 @@ Two independent axes:
 | | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats — read-only dashboard visibility. |
-| | `managed` | **In development — not yet available.** Reserved for the managed tier (operator-driven remediation). Today `managed` behaves exactly like `registered` (read-only heartbeat visibility) and prints an "in development" notice; no operator is deployed. |
+| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)** — the platform enforces the tier once the cluster is claimed. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. |
+
+Plus one opt-in flag:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `connectHcloudToken` | `false` | When `true` **and** a `KUBEHZ_TOKEN` is set, `lo provision` also stores your `HCLOUD_TOKEN` with the platform (encrypted at rest, used only to manage your clusters) so the dashboard can drive provisioning — worker pools, SSH keys. Without it the token is used only locally by `lo` and never sent. A read-only token is stored for account-exact pricing but leaves provisioning locked. |
 
 `apiUrl` is required when `hosting: hosted` **or** `access != none`, and it
 must be **HTTPS** — the agent's bearer token travels on this URL, so `lo`
@@ -217,6 +224,16 @@ registration (and runs automatically during `lo destroy` when
 `access != none`). Both send an `Authorization: Bearer $KUBEHZ_TOKEN`
 header when that environment variable is set — claimed clusters may
 require it.
+
+### `KUBEHZ_TOKEN`: claim at provision time
+
+`KUBEHZ_TOKEN` is a `clusters:write` API token you mint in the dashboard
+(**Access → API Tokens**). When it is set during `lo provision`, the cluster
+is **claimed directly to your tenant at registration** — no claim code to
+paste, no fingerprint step. It shows up in your dashboard already owned. Pair
+it with `spec.kubehz.connectHcloudToken: true` to also wire dashboard-driven
+provisioning in the same run. Without `KUBEHZ_TOKEN`, `lo provision` registers
+anonymously and you [claim](#claiming) the cluster afterwards.
 
 Deregistering only removes the platform-side registration. To remove the
 in-cluster agent as well:
