@@ -363,6 +363,24 @@ teardown() {
   assert_success
 }
 
+# ── deregister_cluster: refuses plain-HTTP (no curl) ─────
+
+@test "deregister_cluster: refuses a plain-HTTP apiUrl (no curl)" {
+  # The KUBEHZ_TOKEN bearer travels on this URL, and deregister skips
+  # validate_config (reachable standalone), so it must re-assert HTTPS itself.
+  curl() { echo "curl should not run over plain HTTP" >&2; return 99; }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="http://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "must use HTTPS"
+}
+
 # ── status subcommand: access none ───────────────────────
 
 @test "status: shows not registered when access is none" {

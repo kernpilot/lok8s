@@ -36,7 +36,8 @@ main::kubehz() {
 
 # Read spec.kubehz from a cluster.lok8s.yaml and export env vars.
 # Usage: kubehz::read_config <cluster_yaml>
-# Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL
+# Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL,
+#       LOK8S_KUBEHZ_CONNECT_TOKEN
 kubehz::read_config() {
   local cluster_yaml="${1}"
 
@@ -167,6 +168,8 @@ kubehz::get_ssh_fingerprint() {
 kubehz::ensure_claim_key() {
   local domain="${1}" api_url="${2}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
+  # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
+  http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
 
   local response
   response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
@@ -178,7 +181,7 @@ kubehz::ensure_claim_key() {
   public_key=$(jq -r '.claimKey.publicKey // empty' <<<"${response}")
   fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
   key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
-  [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" ]] || return 1
+  [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
 
   # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
   # kubehz-claim key must not linger in the account.
@@ -370,16 +373,25 @@ kubehz::deregister_cluster() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
-  curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+  # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
+  # validate_config (reachable standalone via `lo kubehz deregister`), so guard
+  # each call by its own URL — mirrors register_cluster's standalone re-assert.
+  if http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+    curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+  fi
 
-  # Best-effort: retire the kubehz claim key from the hcloud account.
+  # Best-effort: retire the kubehz claim key from the hcloud account. The name
+  # mirrors the API's minted convention (kubehz-claim-<domain>, see header) —
+  # deregister has no register response to read .claimKey.name from.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
     local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
-    key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-      "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
-    [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-      "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE"; then
+      key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+        "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
+      [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+        "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+    fi
   fi
 
   debug "Cluster ${domain} deregistered from kubehz"
