@@ -6,8 +6,20 @@
 # Networking off by default (cilium owns pod routing via an overlay); the
 # KubeOne driver flips routes/robot via per-cluster inline values. Metrics off
 # (no Prometheus in the base).
+# networking.enabled stays FALSE: turning it on makes the chart add
+# --allocate-node-cidrs + --cluster-cidr (the CCM would own node-CIDR allocation
+# / pod routing), which CONFLICTS with Cilium. Clusters that need the private
+# network for InternalIP resolution inject HCLOUD_NETWORK via inline `env`
+# instead (KubeOne driver) — WITHOUT the CIDR/route flags. BUT the chart only
+# emits `hostNetwork: true` under networking.enabled, and the network-attachment
+# probe the CCM then runs (serverIsAttachedToNetwork → 169.254.169.254) is
+# UNREACHABLE from the pod netns → CrashLoopBackOff. So hostNetwork is forced on
+# via a kustomization patch (see kustomization.yaml) and dnsPolicy is set to
+# ClusterFirstWithHostNet so cluster DNS still resolves in the host netns.
 networking:
   enabled: false
+# host netns → the link-local metadata service (169.254.169.254) is reachable.
+dnsPolicy: ClusterFirstWithHostNet
 monitoring:
   enabled: false
 # Pin the CCM to control-plane nodes. On a cluster with bare-metal (Hetzner
