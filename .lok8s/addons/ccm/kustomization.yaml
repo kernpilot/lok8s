@@ -17,6 +17,19 @@ labels:
       lok8s.dev/type: system
       lok8s.dev/category: networking
 
+# The chart only sets `hostNetwork: true` when networking.enabled=true — which we
+# can't use (it also forces --allocate-node-cidrs, conflicting with Cilium). Force
+# it on here so the CCM's network-attachment probe (169.254.169.254) resolves from
+# the host netns instead of CrashLooping. dnsPolicy comes from values.yaml.
+patches:
+  - target:
+      kind: Deployment
+      name: hcloud-cloud-controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+
 generators:
   - chart.yaml
   # The `hcloud` secret the CCM mounts — ONE place, every driver. Sourced from
