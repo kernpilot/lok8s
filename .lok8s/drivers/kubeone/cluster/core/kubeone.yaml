@@ -14,6 +14,11 @@ clusterNetwork:
   serviceSubnet: "${SERVICE_SUBNET}"
   cni:
     ${CNI_PLUGIN}: {}
+  # kube-proxy install toggle (spec.network.kubeProxy → KUBE_PROXY_SKIP). Default
+  # false = kubeadm installs kube-proxy. true (spec.network.kubeProxy: disabled)
+  # skips it — pair with Cilium kubeProxyReplacement in the cilium addon values.
+  kubeProxy:
+    skipInstallation: ${KUBE_PROXY_SKIP}
 
 features:
   # Encrypt Secrets at rest in etcd. KubeOne generates and manages the

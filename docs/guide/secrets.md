@@ -9,7 +9,10 @@ safely. No external secret store is required to get started.
 - The **secrets kustomize plugin** (`secrets.lok8s.dev/v1/Secret`) turns a
   declarative YAML spec into a Kubernetes `Secret` at build time. See the
   [plugin reference](/reference/kustomize-plugins#secrets-generator) for every
-  generator type (`passwd`, `bash`, `env`, `file`, `secretRef`, …).
+  generator type (`passwd`, `key`, `template`, `bash`, `env`, `file`,
+  `secretRef`, `cert`, …). `template:` composes multi-part secrets from typed
+  sub-sections + a pattern; `key:` mints RSA/Ed25519 private keys as PKCS#8 PEM
+  (no `openssl`, no approval gate).
 - Generated values are cached one file per key —
   `Secret.<name>.<namespace>.<key>` — in a **per-domain store**,
   `clusters/<domain>/secrets/`. **The store is the source of truth** — first
@@ -75,6 +78,22 @@ To store the literal string `-` as a value, use the pipe form:
 `printf %s - | lo secrets set … API_TOKEN`.
 
 It's then cached like any generated value and can be encrypted + committed.
+
+Pass **`--encrypt`** (short `-e`; the alias `--enc` also works) to SOPS-encrypt the
+value in the same step — it writes the plaintext cache **and** its `.enc` in one go,
+so you never leave a fresh value lying unencrypted:
+
+```bash
+printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp API_TOKEN --encrypt
+```
+
+`--encrypt` encrypts **only** the file it just wrote (not a whole-store sweep — see the
+staging note under [Committing secrets](#committing-secrets-sops-age)) and needs
+encryption already set up (`.sops.yaml` present, via `lo secrets init`); without it the
+set fails. When encryption **is** configured but you write plaintext-only (no
+`--encrypt`), `set` warns that this value has no matching `.enc` yet — whether that's a
+first write (none exists) or an edit (the committed one is now stale) — so re-run with
+`--encrypt` or `lo secrets encrypt` before committing.
 
 ## Provision-time credentials (shell env)
 

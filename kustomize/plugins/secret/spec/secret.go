@@ -10,6 +10,7 @@ package spec
 
 import (
 	"io"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 
@@ -44,12 +45,14 @@ type Secret struct {
 	// custom UnmarshalYAML support for shorthand forms.
 	Literals  map[string]string         `yaml:"literals,omitempty"`
 	Passwd    map[string]PasswdEntry    `yaml:"passwd,omitempty"`
+	Template  map[string]TemplateEntry  `yaml:"template,omitempty"`
 	Bash      map[string]BashEntry      `yaml:"bash,omitempty"`
 	Env       map[string]EnvEntry       `yaml:"env,omitempty"`
 	SecretRef map[string]SecretRefEntry `yaml:"secretRef,omitempty"`
 	Htpasswd  map[string]HtpasswdEntry  `yaml:"htpasswd,omitempty"`
 	File      map[string]FileEntry      `yaml:"file,omitempty"`
 	B64       map[string]string         `yaml:"b64,omitempty"`
+	Key       map[string]KeyEntry       `yaml:"key,omitempty"`
 
 	// Cert is a single development CA or leaf certificate (one cert per Secret),
 	// generated with crypto/x509 — no mkcert binary. See CertSpec.
@@ -111,7 +114,31 @@ func (s *Secret) validate() error {
 	if s.Metadata.Name == "" {
 		return errs.New("metadata.name is required")
 	}
+	// A `!!null` map value (`R: ~`) skips SecretRefEntry.UnmarshalYAML (yaml.v3
+	// quirk), leaving Secret+Key empty — which the string/mapping forms would
+	// have rejected. Catch it here so it fails with a clear decode error rather
+	// than a confusing "read /default/: no such file" at generation time.
+	for _, key := range sortedRefKeys(s.SecretRef) {
+		r := s.SecretRef[key]
+		if r.Secret == "" {
+			return errs.Newf("secretRef %q: secret is required (a null/`~` value?)", key)
+		}
+		if r.Key == "" {
+			return errs.Newf("secretRef %q: key is required (a null/`~` value?)", key)
+		}
+	}
 	return nil
+}
+
+// sortedRefKeys returns the sorted keys of a secretRef map for a deterministic
+// validation order (stable error messages).
+func sortedRefKeys(m map[string]SecretRefEntry) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // nodeKindString is a small helper used by custom unmarshalers in the

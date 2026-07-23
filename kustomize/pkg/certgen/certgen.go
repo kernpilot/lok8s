@@ -16,6 +16,7 @@ package certgen
 
 import (
 	"crypto"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -81,16 +82,37 @@ func CARoot() string {
 }
 
 // NewCAKey returns a fresh RSA-3072 CA private key as PKCS#8 PEM.
-func NewCAKey(randr io.Reader) ([]byte, error) { return newKeyPEM(randr, 3072) }
+func NewCAKey(randr io.Reader) ([]byte, error) { return NewRSAKeyPEM(randr, 3072) }
 
 // NewLeafKey returns a fresh RSA-2048 leaf private key as PKCS#8 PEM.
-func NewLeafKey(randr io.Reader) ([]byte, error) { return newKeyPEM(randr, 2048) }
+func NewLeafKey(randr io.Reader) ([]byte, error) { return NewRSAKeyPEM(randr, 2048) }
 
-func newKeyPEM(randr io.Reader, bits int) ([]byte, error) {
+// NewRSAKeyPEM returns a fresh RSA private key of the given bit size as
+// PKCS#8 PEM — the same format openssl's `genpkey` default emits. Exported so
+// the key: generator (and template key: sub-section) can mint RSA keys with
+// the identical marshalling the cert: generator uses.
+func NewRSAKeyPEM(randr io.Reader, bits int) ([]byte, error) {
 	key, err := rsa.GenerateKey(randr, bits)
 	if err != nil {
 		return nil, fmt.Errorf("generate %d-bit key: %w", bits, err)
 	}
+	return marshalPKCS8PEM(key)
+}
+
+// NewEd25519KeyPEM returns a fresh Ed25519 private key as PKCS#8 PEM (matching
+// openssl `genpkey -algorithm ed25519`). Ed25519 has a fixed key size, so it
+// takes no bit-size parameter.
+func NewEd25519KeyPEM(randr io.Reader) ([]byte, error) {
+	_, key, err := ed25519.GenerateKey(randr)
+	if err != nil {
+		return nil, fmt.Errorf("generate ed25519 key: %w", err)
+	}
+	return marshalPKCS8PEM(key)
+}
+
+// marshalPKCS8PEM DER-encodes a private key as PKCS#8 and wraps it in a
+// "PRIVATE KEY" PEM block.
+func marshalPKCS8PEM(key crypto.PrivateKey) ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("marshal key: %w", err)

@@ -905,6 +905,121 @@ YAML
   [ ! -s "${BATS_TEST_TMPDIR}/jobs_after" ]
 }
 
+# --- immutable/terminating conflict: park + batched heal ---------------------
+
+@test "bootstrap: a background immutable conflict PARKS, then fails fast non-interactively (no --force)" {
+  # A background kapply runs non-interactive, so on an immutable/terminating conflict
+  # it cannot prompt — it errors. _reap_one must PARK the entry (not fail it inline),
+  # and at the drain _resolve_parked must fail-fast (no tty, no --force) with a
+  # --force hint + skip its dependents. Stub _apply_one to emit kubectl's immutable
+  # marker + fail for the gate entry 'b'.
+  bootstrap::_apply_one() {
+    local name="$1"
+    if [ "${name}" = "b" ]; then
+      echo "The Deployment \"b\" is invalid: spec.selector: field is immutable" >&2
+      return 1
+    fi
+    return 0
+  }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        wait: true
+    - c
+YAML
+  # Call directly (background jobs → this shell); `|| rc=$?` keeps the non-zero from
+  # tripping bats' errexit. Combined output → a file we grep.
+  local out="${BATS_TEST_TMPDIR}/park.out" rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>&1 || rc=$?
+
+  # Non-interactive + no --force → the parked heal fails the run.
+  [ "${rc}" -ne 0 ]
+  # It PARKED (deferred), not plain-failed: the reap park marker appears ...
+  grep -q 'will confirm at the end' "${out}"
+  # ... the underlying kubectl conflict detail is surfaced (not silently dropped on
+  # park) so the user can resolve by hand ...
+  grep -q 'field is immutable' "${out}"
+  # ... and the batched drain resolve gave the actionable --force hint.
+  grep -q 'needs recreate' "${out}"
+  grep -q -- '--force' "${out}"
+  # 'c' waits on the gate 'b'; a failed heal skips it (dependents BFS).
+  grep -q 'skipping' "${out}"
+}
+
+@test "bootstrap::_resolve_parked: --force auto-recreates a parked entry (no prompt)" {
+  # Directly exercise the ACCEPT branch: with LOK8S_FORCE_RECREATE set, _resolve_parked
+  # re-applies each parked entry FOREGROUND with force (kapply deletes+recreates) and
+  # marks it completed — no tty prompt, dependents NOT skipped. Relies on dynamic
+  # scoping for the launch locals, so we set them in a wrapper that calls it.
+  local applied="${BATS_TEST_TMPDIR}/reapplied.log"; : > "${applied}"
+  bootstrap::_apply_one() { echo "$1" >> "${applied}"; return 0; }
+  bootstrap::_skip_dependents() { echo "skip:$1"; }   # must NOT run on a clean heal
+
+  _run_resolve() {
+    local -a _names=(addonA) _dirs=(/x) _inlines=("") _envs=("") _waits=("false")
+    local -A _istarget=()
+    local kind=lo provider_name=hetzner kubeconfig=/kc
+    declare -gA _BS_COMPLETED=(); _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=(0)
+    export LOK8S_FORCE_RECREATE=1
+    bootstrap::_resolve_parked
+    echo "rc=${_BS_OVERALL_RC} done=${_BS_DONE} done0=${_BS_COMPLETED[0]:-}"
+  }
+  run _run_resolve
+  assert_success
+  assert_output --partial "recreated"              # "✓ addonA · recreated"
+  assert_output --partial "rc=0 done=1 done0=1"     # completed cleanly, no failure
+  refute_output --partial "skip:"                   # dependents NOT skipped on success
+  # the re-apply ran exactly once for the parked entry
+  run cat "${applied}"
+  assert_output "addonA"
+}
+
+@test "bootstrap: --force (LOK8S_FORCE_RECREATE) heals inline — the entry never parks" {
+  # With --force set, the background kapply auto-recreates in-job, so the entry never
+  # reaches the reap park branch. Model that: the stub succeeds when force is set,
+  # else emits the conflict marker + fails. Expect a clean run, no park, no prompt —
+  # this also proves the force env actually reaches the backgrounded apply.
+  bootstrap::_apply_one() {
+    local name="$1"
+    if [ "${name}" = "b" ] && [ -z "${LOK8S_FORCE_RECREATE:-}" ]; then
+      echo "The Deployment \"b\" is invalid: spec.selector: field is immutable" >&2
+      return 1
+    fi
+    return 0
+  }
+  export LOK8S_FORCE_RECREATE=1
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        wait: true
+    - c
+YAML
+  local out="${BATS_TEST_TMPDIR}/force.out" rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>&1 || rc=$?
+  # Force → healed inline → clean run, NO park marker, NO batch prompt.
+  [ "${rc}" -eq 0 ]
+  ! grep -q 'will confirm at the end' "${out}"
+  ! grep -q 'needs recreate' "${out}"
+}
+
 # --- dependsOn: parse (bootstrap::_parse_entry) ------------------------------
 # dependsOn is the 6th out-param: a newline-separated list of entry names this
 # entry waits on. It is a reserved key (like values/env/wait) so an entry with
@@ -2227,4 +2342,106 @@ YAML
   run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
   assert_success
   refute_output --partial "PROBE_MUST_NOT_RUN"
+}
+
+# --- KubeOne cilium/ccm reconcile gate: path-based, NOT "does the DaemonSet exist" --
+# A full provision (LOK8S_BOOTSTRAP_ONLY=0, set by provision::dispatch) defers
+# cilium/ccm to the driver — `kubeone apply` just applied them, so re-applying here
+# would race for SSA field ownership. `lo provision --bootstrap` AND standalone
+# `lo bootstrap` (both =1) are the sole applier and MUST reconcile from spec.
+
+# Stub an addon named $1 + a kind=KubeOne spec that explicitly lists it, so
+# _apply_one resolves the entry and reaches the gate.
+_setup_kubeone_addon() {
+  local name="${1}" dir="${PATH_LOK8S}/addons/${1}"
+  mkdir -p "${dir}"
+  cat > "${dir}/chart.yaml" <<YAML
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: ${name}
+valueFiles:
+  - values.yaml
+YAML
+  echo "marker: ${name}" > "${dir}/values.yaml"
+  cat > "${CLUSTER_YAML}" <<YAML
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - ${name}
+YAML
+}
+
+@test "bootstrap: KubeOne defers cilium to the driver on a full provision (=0)" {
+  _setup_kubeone_addon cilium
+  export LOK8S_BOOTSTRAP_ONLY=0   # provision::dispatch sets this on a full provision
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "applied by the KubeOne driver on a full provision"
+  # Skip fires BEFORE render → kustomize never ran → no merged values produced.
+  [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: KubeOne defers ccm to the driver on a full provision (=0)" {
+  _setup_kubeone_addon ccm
+  export LOK8S_BOOTSTRAP_ONLY=0
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "applied by the KubeOne driver on a full provision"
+  [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: KubeOne reconciles cilium on --bootstrap (LOK8S_BOOTSTRAP_ONLY=1)" {
+  _setup_kubeone_addon cilium
+  export LOK8S_BOOTSTRAP_ONLY=1
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  refute_output --partial "applied by the KubeOne driver on a full provision"
+  # No skip → the render path runs → merged values file is produced (cilium/ccm now
+  # reconcile through the same background path as every other addon → normal ✓ · N).
+  [ -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: unset gate defaults to defer (safe fallback, never a spurious re-apply)" {
+  _setup_kubeone_addon cilium
+  unset LOK8S_BOOTSTRAP_ONLY   # no dispatch set it → bootstrap::apply defaults to 0
+
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "applied by the KubeOne driver on a full provision"
+  [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+}
+
+@test "bootstrap: standalone lo bootstrap (dispatch) runs in reconcile mode (=1) on KubeOne" {
+  # Regression guard: the gate flag must be set on the bootstrap::dispatch path
+  # too, not only provision::dispatch — else `lo bootstrap` silently skips cilium.
+  local dom="kotest"
+  mkdir -p "${PATH_CLUSTERS}/${dom}" "${PATH_LOK8S}/drivers/kubeone"
+  : > "${PATH_LOK8S}/drivers/kubeone/main"   # sourceable no-op driver
+  cat > "${PATH_CLUSTERS}/${dom}/cluster.lok8s.yaml" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: kotest
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - cilium
+YAML
+  # Capture the gate value dispatch hands to apply (stub replaces the real apply).
+  bootstrap::apply() { echo "GATE=${LOK8S_BOOTSTRAP_ONLY:-unset}"; }
+  unset LOK8S_BOOTSTRAP_ONLY
+
+  run bootstrap::dispatch "${dom}"
+  assert_success
+  assert_output --partial "GATE=1"
 }

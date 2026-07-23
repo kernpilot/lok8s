@@ -124,7 +124,7 @@ main() {
   local -a args=(
     '-'             'Global flags:'
     'verbose|v:+'        'Enable verbose logging'
-    'force|f:+'          'Force operation without prompts'
+    'force|f:+'          'Force operation without prompts (also recreates immutable/terminating conflicts)'
     'force-recreate|:+'  'On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer'
     'remote|r:+'         'Provision on remote VM (uses spec.provider + spec.remote)'
     'kubernetes|'   'Kubernetes version to use'
@@ -150,7 +150,11 @@ main() {
   :usage "lok8s - local dev orchestration" "${@}"
   if (( verbose )); then export DEBUG=1; fi
   if (( remote )); then export LOK8S_REMOTE=1; fi
-  if (( force_recreate )); then export LOK8S_FORCE_RECREATE=1; fi
+  # --force|-f subsumes --force-recreate: "force without prompts" includes
+  # auto-recreating immutable/terminating conflicts — the non-interactive / DR
+  # "just do it" escape for the batched heal (e.g. lo recover, a known-messy
+  # re-apply). --force-recreate stays as the explicit spelling.
+  if (( force || force_recreate )); then export LOK8S_FORCE_RECREATE=1; fi
   DOMAIN_NAME="${domain}"
   export DOMAIN_NAME
   LOK8S_DOMAIN_EXPLICIT="${_domain_flag}"

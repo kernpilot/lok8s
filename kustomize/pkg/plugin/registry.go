@@ -13,7 +13,8 @@ import (
 // The order matters because some generators may depend on cache state
 // produced by earlier generators (e.g. secretRef reading values written
 // by passwd in the same plugin run). The Secret plugin uses this order:
-// literals → env → b64 → file → passwd → secretRef → htpasswd.
+// literals → env → b64 → file → passwd → template → bash → secretRef →
+// htpasswd → cert.
 type Registry struct {
 	generators []Generator
 }
