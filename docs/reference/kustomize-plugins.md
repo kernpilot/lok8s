@@ -285,7 +285,7 @@ composed string by the entry key (like `passwd:`), and has **no approval gate**.
 **Pattern rules.** The pattern is validated at parse time: it must be non-empty,
 every `{name}` must resolve to a field declared by exactly one sub-section (or
 `fields:`), and **every declared field must be referenced** (an unused field is a
-typo, so it's an error). Write a **literal brace** by doubling it — `{{` → `{`,
+typo, so it's an error). Write a **literal brace** by doubling it — <span v-pre>`{{`</span> → `{`,
 `}}` → `}`. An unterminated `{` or a stray `}` is rejected. A field referenced
 **twice** (`pattern: "{a}-{a}"`) is generated **once** and the single value is
 substituted at both sites (→ `V-V`), never drawn twice. Substitution is a
@@ -307,7 +307,7 @@ glob/regex) and parse **after** the field name:
 | `{x//old/new}` / `{x/old/new}` | replace all / first (literal) | `{x//-/_}` → `matrix_hookshot.pem` |
 | `{x:off}` / `{x:off:len}` | substring by **byte** offset (+ optional length) | `{x:0:6}` → `matrix` |
 
-Plain `{x}` is unchanged; `{{`/`}}` are still literal braces. A **malformed**
+Plain `{x}` is unchanged; <span v-pre>`{{`</span>/`}}` are still literal braces. A **malformed**
 operator (`{x%%%y}`, `{x/onlyold}`, `{x:abc}`) is rejected at **decode** time; a
 substring whose offset/length runs past the *value* errors at render time (byte
 offsets, not bash's silent clamping). First-char case ops are rune-aware. Field
