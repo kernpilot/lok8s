@@ -1,0 +1,85 @@
+#!/usr/bin/env bats
+# tilt_preflight_test.bats — gating tests for `lo tilt preflight`.
+#
+# kapply::preflight (the sweep itself) is covered in kapply_test.bats; here
+# we pin the GATE in tilt::preflight: the kill switch, the non-kind driver
+# refusal, the LOK8S_FORCE_CLEAR_TERMINATING override, and the --age
+# passthrough. kapply::preflight is stubbed to a recorder — these tests never
+# touch kubectl.
+
+setup() {
+  load "../test_helper"
+  setup_tmpdir
+  command -v yq &>/dev/null || skip "yq required (domain::driver reads the cluster spec)"
+
+  import() { :; }
+  export -f import
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+
+  # Minimal :args shim (same rationale as tilt_ci_test.bats: argsh builtins
+  # are not loaded when a lib is sourced in bats): populate `age` from
+  # --age <v> | --age=<v> | -a <v>.
+  :args() {
+    shift
+    while (( $# )); do
+      case "$1" in
+        --age=*|--age|-a)
+          if [[ "$1" == *=* ]]; then age="${1#*=}"; else age="${2:-}"; shift; fi ;;
+      esac
+      shift
+    done
+  }
+  export -f :args
+  source "${_PROJECT_ROOT}/.lok8s/libs/tilt"
+
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  mkdir -p "${PATH_CLUSTERS}/dev.test" "${PATH_CLUSTERS}/prod.test"
+  echo 'kind: Lo' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml"
+  echo 'kind: KubeOne' > "${PATH_CLUSTERS}/prod.test/cluster.lok8s.yaml"
+
+  SWEEP_LOG="${BATS_TEST_TMPDIR}/sweep.log"; : > "${SWEEP_LOG}"
+  kapply::preflight() { echo "kapply::preflight $*" >> "${SWEEP_LOG}"; cat >/dev/null; }
+  export -f kapply::preflight
+  unset LOK8S_PREFLIGHT LOK8S_FORCE_CLEAR_TERMINATING DOMAIN_NAME
+}
+
+teardown() { teardown_tmpdir; }
+
+@test "preflight gate: LOK8S_PREFLIGHT=0 disables the sweep entirely" {
+  export DOMAIN_NAME=dev.test LOK8S_PREFLIGHT=0
+  run tilt::preflight <<< 'kind: ConfigMap'
+  assert_success
+  [[ ! -s "${SWEEP_LOG}" ]]
+}
+
+@test "preflight gate: LOK8S_PREFLIGHT=false disables too (not only literal 0)" {
+  export DOMAIN_NAME=dev.test LOK8S_PREFLIGHT=false
+  run tilt::preflight <<< 'kind: ConfigMap'
+  assert_success
+  [[ ! -s "${SWEEP_LOG}" ]]
+}
+
+@test "preflight gate: non-kind driver refuses without the override" {
+  export DOMAIN_NAME=prod.test
+  run tilt::preflight <<< 'kind: ConfigMap'
+  assert_success
+  assert_output --partial 'not force-clearing'
+  [[ ! -s "${SWEEP_LOG}" ]]
+}
+
+@test "preflight gate: LOK8S_FORCE_CLEAR_TERMINATING=1 overrides the driver refusal" {
+  export DOMAIN_NAME=prod.test LOK8S_FORCE_CLEAR_TERMINATING=1
+  run tilt::preflight <<< 'kind: ConfigMap'
+  assert_success
+  run cat "${SWEEP_LOG}"
+  assert_output --partial 'kapply::preflight'
+}
+
+@test "preflight gate: lo driver sweeps and --age passes through" {
+  export DOMAIN_NAME=dev.test
+  run tilt::preflight --age 120 <<< 'kind: ConfigMap'
+  assert_success
+  run cat "${SWEEP_LOG}"
+  assert_output --partial 'kapply::preflight --age 120'
+}

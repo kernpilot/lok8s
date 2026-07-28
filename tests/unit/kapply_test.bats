@@ -321,3 +321,136 @@ IN
   [[ "$output" != *$'\r'* ]]
   [[ "$output" == *"overtyped error"* ]]
 }
+
+# --- kapply::preflight -------------------------------------------------------
+# The pre-apply sweep for stuck-Terminating objects (Tilt's k8s_yaml path
+# never goes through kapply::apply, so it can't self-heal there). The stub
+# distinguishes the two GET shapes so the batched manifest path is actually
+# exercised: `get -f -` answers GET_OUT, `get ns|namespace …` answers
+# NS_GET_OUT — a regression that stopped feeding the manifest to kubectl
+# could not stay green on the referenced-namespace fetch alone.
+
+_preflight() { printf '%s' "$1" | kapply::preflight; }
+_preflight_stub() {
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    case "$1" in
+      get)
+        case "$2" in
+          -f)           echo "${GET_OUT:-}" ;;
+          ns|namespace)
+            # With NS_FINALIZE_SUCCEEDS the stub turns stateful: after the
+            # /finalize replace, the namespace reads as GONE — so the
+            # honesty re-check's success branch is reachable. Without it,
+            # the stub keeps answering "still terminating" (failure branch).
+            if [[ -n "${NS_FINALIZE_SUCCEEDS:-}" && -f "${BATS_TEST_TMPDIR}/ns.finalized" ]]; then
+              :
+            else
+              echo "${NS_GET_OUT:-}"
+            fi ;;
+          *)            echo "${GET_OUT:-}" ;;
+        esac
+        return 0 ;;
+      replace) touch "${BATS_TEST_TMPDIR}/ns.finalized"; return 0 ;;
+      patch)   return "${PATCH_RC:-0}" ;;
+      *)       return 0 ;;
+    esac
+  }
+  export -f kubectl
+}
+
+@test "preflight: nothing terminating → no patches, reports nothing stuck" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app"}}'
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'nothing stuck'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: object stuck past the age threshold → finalizers cleared with qualified type" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  export GET_OUT='{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}'
+  run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'cnpg.io/deleteDatabase'
+  run cat "${KLOG}"
+  # The stuck object must have come in via the BATCHED manifest get…
+  assert_output --partial 'get -f - -o json --ignore-not-found'
+  # …and go out via a fully-qualified patch (bare kind would be ambiguous).
+  assert_output --partial 'patch Database.v1.postgresql.cnpg.io status -n kubehz-system --type merge'
+}
+
+@test "preflight: deletion younger than the age threshold is left to drain" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  local fresh; fresh=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"'"${fresh}"'","finalizers":["kubernetes.io/pvc-protection"]}}'
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'letting it drain'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: unparseable deletionTimestamp is skipped, never force-cleared" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"not-a-time","finalizers":["kubernetes.io/pvc-protection"]}}'
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'unparseable deletionTimestamp'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: stuck namespace arrives via the referenced-ns fetch, finalizes via /finalize" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  # GET_OUT stays empty: the namespace is REFERENCED by the manifest (ns
+  # `default`), not declared in it — this pins the second fetch path.
+  export NS_GET_OUT='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"mla","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["kubernetes"]}}'
+  export KAPPLY_NS_WAIT=0
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  # The static stub keeps answering with a deletionTimestamp after the
+  # finalize, so the honesty re-check must report the wedge, not "patched".
+  assert_output --partial 'could not finalize namespace/mla'
+  run cat "${KLOG}"
+  assert_output --partial 'replace --raw /api/v1/namespaces/mla/finalize'
+}
+
+@test "preflight: successfully finalized namespace reports force-finalized, not a wedge" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  export NS_GET_OUT='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"mla","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["kubernetes"]}}'
+  export NS_FINALIZE_SUCCEEDS=1 KAPPLY_NS_WAIT=0
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'force-finalized Namespace/mla'
+  refute_output --partial 'could not finalize'
+}
+
+@test "preflight: stuck CRD is refused, never force-cleared" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  export GET_OUT='{"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition","metadata":{"name":"kubehzclusters.kubehz.dev","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["customresourcecleanup.apiextensions.k8s.io"]}}'
+  run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'refusing to force stuck CustomResourceDefinition/kubehzclusters.kubehz.dev'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: failed patch reports the object and still exits 0" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"2020-01-01T00:00:00Z"}}'
+  export PATCH_RC=1
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'could not clear finalizers on PersistentVolumeClaim/data'
+}
