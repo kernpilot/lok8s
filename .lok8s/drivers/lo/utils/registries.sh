@@ -37,11 +37,13 @@ EOF
 lo::render_registry_config() {
   local config_file="${1}" url="${2}"
 
+  # Pure-bash placeholder substitution — envsubst is NOT portable here: the
+  # b-managed Go envsubst (a8m) rejects gettext's SHELL-FORMAT positional
+  # argument with "Unknown flag: ${REMOTE_URL}", silently emptying the config.
   local base
+  base=$(cat "${config_file}")
   if [[ -n "${url}" ]]; then
-    base=$(REMOTE_URL="${url}" envsubst '${REMOTE_URL}' < "${config_file}")
-  else
-    base=$(cat "${config_file}")
+    base="${base//'${REMOTE_URL}'/${url}}"
   fi
 
   # Drop the existing http: block (top-level key + its 2-space-indented
@@ -199,13 +201,32 @@ lo::registries_tls_nudge() {
   warn "  How: https://lok8s.io/guide/shared-registries#host-push-trust-options"
 }
 
+# lo::registry_ip_holder <network> <ip> — name of the container currently
+# holding <ip> on <network>, empty if free. IPv4Address carries the /prefix,
+# so match "<ip>/" as a prefix (never .2 matching .20).
+lo::registry_ip_holder() {
+  local network="${1}" ip="${2}"
+  docker network inspect "${network}" \
+    -f '{{range .Containers}}{{.IPv4Address}} {{.Name}}{{"\n"}}{{end}}' 2>/dev/null \
+    | awk -v ip="${ip}/" 'index($1, ip) == 1 { print $2; exit }'
+}
+
+# lo::registries — reconcile every registry container to its desired state.
+# Idempotent: a RUNNING container whose config-hash label matches is left
+# alone; drift (config, image, address, TLS cert) or a dead container means
+# recreate. Emits kubectl-style "registry/<name> <verb>" progress lines so
+# callers can wrap it in kapply::run for the collapsing services-style UI.
+# One registry failing does not abort the rest — errors are surfaced and the
+# function returns non-zero at the end.
 lo::registries() {
   local domain="${1}" cluster_yaml="${2}"
   local registry_config_dir="${PATH_LOK8S}/drivers/lo/cluster/registry"
 
   # In TLS mode every registry container mounts the shared cert minted by
   # lo::registries_tls_cert (which must run first — it does, in driver::provision).
-  local tls_mount_args=()
+  # The cert content feeds the config hash: registries read it once at startup,
+  # so a re-minted cert (SAN change) must recreate the containers.
+  local tls_mount_args=() cert_sig=""
   if registry::is_tls; then
     local cert_dir="${PATH_BASE}/.secrets/tls/registries"
     if [[ ! -f "${cert_dir}/tls.crt" ]] || [[ ! -f "${cert_dir}/tls.key" ]]; then
@@ -215,7 +236,20 @@ lo::registries() {
       return 1
     fi
     tls_mount_args=(--volume "${cert_dir}:${LO_REGISTRY_TLS_MOUNT}:ro")
+    cert_sig=$(sha256sum "${cert_dir}/tls.crt")
+    cert_sig="${cert_sig%% *}"
   fi
+
+  mkdir -p "${LO_REGISTRY_STATE_DIR}"
+
+  # Containers evicted from a squatted registry IP ("network<TAB>name"). Kind
+  # nodes attach to the shared network with DYNAMIC addresses; after a reboot
+  # (or on a legacy network created without the reserved --ip-range) they can
+  # grab the static IPs the registries own. Evicted squatters are re-attached
+  # only after ALL registries hold their addresses, so the dynamic re-attach
+  # can't squat the next registry in the loop.
+  local -a evicted=()
+  local failed=0
 
   _lo_registry_start() {
     # reg_domain: keep the per-entry field from shadowing an inherited `domain`.
@@ -225,38 +259,99 @@ lo::registries() {
     local reg_name="${container_info%%	*}"
     local reg_network="${container_info##*	}"
 
-    local running
-    running=$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)
-    [[ "${running}" != "true" ]] || return 0
-
-    docker volume create "${reg_name}" 2>/dev/null || true
-    docker rm -f "${reg_name}" 2>/dev/null || true
-
     local config_file="${registry_config_dir}/${name}.yaml"
     if [[ ! -f "${config_file}" ]] && [[ -n "${url}" ]]; then
       config_file="${registry_config_dir}/mirror.yaml"
     fi
     if [[ ! -f "${config_file}" ]]; then
-      echo "error: no registry config for '${name}' at ${registry_config_dir}" >&2
-      return 1
+      echo "error: registry/${reg_name}: no config for '${name}' at ${registry_config_dir}" >&2
+      failed=1
+      return 0
     fi
 
     # Render config for the active mode (TLS block swap + mirror URL).
-    local tmp_config
-    tmp_config=$(mktemp)
-    lo::render_registry_config "${config_file}" "${url}" > "${tmp_config}"
+    local rendered
+    rendered=$(lo::render_registry_config "${config_file}" "${url}")
 
-    docker run -d --restart=always --name "${reg_name}" \
+    local desired_hash
+    desired_hash=$(printf '%s\n' "${rendered}" "${LO_REGISTRY_IMAGE}" "${reg_network}" "${ip}" "${cert_sig}" | sha256sum)
+    desired_hash="${desired_hash%% *}"
+
+    local state current_hash
+    state=$(docker inspect -f '{{.State.Status}}' "${reg_name}" 2>/dev/null || echo absent)
+    current_hash=$(docker inspect -f '{{index .Config.Labels "lok8s.dev/config-hash"}}' "${reg_name}" 2>/dev/null || true)
+
+    if [[ "${state}" == "running" && "${current_hash}" == "${desired_hash}" ]]; then
+      echo "registry/${reg_name} unchanged"
+      return 0
+    fi
+
+    local verb
+    case "${state}" in
+      absent)  verb="created" ;;
+      running) verb="configured" ;;   # up, but config/image/cert drifted
+      *)       verb="restarted" ;;    # created/exited/dead — recreate
+    esac
+
+    # Durable config path — the daemon re-binds it on every container restart
+    # (see LO_REGISTRY_STATE_DIR in defaults.sh).
+    local config_path="${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
+    printf '%s\n' "${rendered}" > "${config_path}"
+
+    docker volume create "${reg_name}" >/dev/null 2>&1 || true
+    docker rm -f "${reg_name}" >/dev/null 2>&1 || true
+
+    # Free the static IP if a dynamically-attached container squats it.
+    local holder
+    holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
+    if [[ -n "${holder}" ]]; then
+      debug "registry ${reg_name}: evicting ${holder} from ${ip} on ${reg_network}"
+      docker network disconnect -f "${reg_network}" "${holder}" >/dev/null 2>&1 || true
+      evicted+=("${reg_network}"$'\t'"${holder}")
+    fi
+
+    local run_err
+    if ! run_err=$(docker run -d --restart=always --name "${reg_name}" \
+      --label "lok8s.dev/config-hash=${desired_hash}" \
       --volume "${reg_name}:/var/lib/registry" \
-      --volume "${tmp_config}:/config.yaml:ro" \
+      --volume "${config_path}:/config.yaml:ro" \
       "${tls_mount_args[@]}" \
       --net="${reg_network}" --ip "${ip}" \
-      "${LO_REGISTRY_IMAGE}" "/config.yaml"
+      "${LO_REGISTRY_IMAGE}" "/config.yaml" 2>&1 >/dev/null); then
+      # Lost a race with a concurrent `lo` run (shared mirrors are host-global):
+      # the other run winning IS the desired state.
+      if [[ "$(docker inspect -f '{{.State.Status}}' "${reg_name}" 2>/dev/null)" == "running" ]]; then
+        echo "registry/${reg_name} unchanged"
+        return 0
+      fi
+      # Don't leave a half-created container behind — `docker run` creates it
+      # even when the start fails, and a stuck-Created container shadows the
+      # name on the next attempt.
+      docker rm -f "${reg_name}" >/dev/null 2>&1 || true
+      echo "error: registry/${reg_name}: ${run_err}" >&2
+      failed=1
+      return 0
+    fi
 
-    rm -f "${tmp_config}"
+    echo "registry/${reg_name} ${verb}"
   }
 
   registry::each _lo_registry_start
+
+  # Re-attach evicted squatters — except our own registry containers (each
+  # re-runs with its static IP in its own iteration; identified by the
+  # config-hash label). Every registry now holds its address, so the dynamic
+  # re-attach lands on a free IP.
+  local entry net victim
+  for entry in "${evicted[@]}"; do
+    net="${entry%%$'\t'*}"
+    victim="${entry##*$'\t'}"
+    docker inspect "${victim}" &>/dev/null || continue
+    [[ -z "$(docker inspect -f '{{index .Config.Labels "lok8s.dev/config-hash"}}' "${victim}" 2>/dev/null)" ]] || continue
+    docker network connect "${net}" "${victim}" >/dev/null 2>&1 || true
+  done
+
+  (( failed == 0 ))
 }
 
 lo::apply_local_registry_hosting() {
@@ -304,6 +399,7 @@ lo::cleanup_registries() {
     local reg_name="${container_info%%	*}"
     docker rm -f "${reg_name}" 2>/dev/null || true
     docker volume rm -f "${reg_name}" 2>/dev/null || true
+    rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
   }
 
   registry::each _lo_registry_cleanup

@@ -9,6 +9,8 @@ import ^utils/domain
 # Source Lo driver utils at file scope for config + registry helpers
 _LO_UTILS="${PATH_LOK8S}/drivers/lo/utils"
 source "${PATH_LOK8S}/utils/ip.sh"
+# kapply::run — the collapsing progress block around registry reconciliation.
+source "${PATH_LOK8S}/utils/kapply.sh"
 source "${_LO_UTILS}/defaults.sh"
 source "${_LO_UTILS}/config-registry.sh"
 source "${_LO_UTILS}/config.sh"
@@ -71,7 +73,7 @@ registry::up() {
     lo::registry_network
   fi
 
-  lo::registries "${_domain}" "${cluster_yaml}"
+  kapply::run registries lo::registries "${_domain}" "${cluster_yaml}"
 }
 
 registry::down() {
@@ -102,6 +104,7 @@ registry::clean() {
       local reg_name="lok8s-registry-${name}"
       docker rm -f "${reg_name}" 2>/dev/null || true
       docker volume rm -f "${reg_name}" 2>/dev/null || true
+      rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
     }
     registry::each _clean_shared
 
@@ -120,6 +123,17 @@ registry::clean() {
 
 registry::status() {
   _registry_init || return 1
+
+  # One aligned line per registry, kapply-style markers:
+  #   ✓ build      [project] kubehz-registry-build → https://10.125.125.101 · 3 repos
+  #   ⚠ cache      [project] kubehz-registry-cache → … · running, unreachable
+  #   ✗ io-docker  [shared]  lok8s-registry-io-docker → … · not running
+  # Repo names print dimmed under the line in verbose mode (lo -v).
+  local _c_ok='' _c_warn='' _c_err='' _c_dim='' _c_off=''
+  if [[ -t 1 ]]; then
+    _c_ok=$'\033[32m' _c_warn=$'\033[33m' _c_err=$'\033[31m' _c_dim=$'\033[2m' _c_off=$'\033[0m'
+  fi
+
   _status_entry() {
     # `reg_domain`, not `domain`: the entry field must not shadow the
     # inherited main::registry domain arg (AG012).
@@ -142,20 +156,37 @@ registry::status() {
       | grep -x "${reg_name}" || true)
 
     # TLS mode serves HTTPS (mkcert cert trusted via the host CA store).
-    local catalog_url
-    catalog_url="$(registry::url "${ip}")/v2/_catalog"
-    echo "${label} ${name} (${reg_name}) -> ${catalog_url}"
-    if [[ -z "${container_on_network}" ]]; then
-      echo "  (not running)"
-    else
+    local endpoint
+    endpoint="$(registry::url "${ip}")"
+
+    local marker="${_c_err}✗${_c_off}" state="not running" repos=""
+    if [[ -n "${container_on_network}" ]]; then
       local catalog
-      if catalog=$(curl -sf --connect-timeout 1 --max-time 2 "${catalog_url}" 2>/dev/null); then
-        echo "${catalog}" | jq . 2>/dev/null || echo "  ${catalog}"
+      if catalog=$(curl -sf --connect-timeout 1 --max-time 2 "${endpoint}/v2/_catalog" 2>/dev/null); then
+        marker="${_c_ok}✓${_c_off}"
+        local n
+        n=$(jq -r '.repositories | length' <<<"${catalog}" 2>/dev/null || echo "")
+        if [[ -n "${n}" ]]; then
+          local noun=repos; [[ "${n}" == "1" ]] && noun=repo
+          state="${n} ${noun}"
+          repos=$(jq -r '.repositories[]' <<<"${catalog}" 2>/dev/null || true)
+        else
+          state="up"
+        fi
       else
-        echo "  (running but unreachable)"
+        marker="${_c_warn}⚠${_c_off}"
+        state="running, unreachable"
       fi
     fi
-    echo
+
+    printf '%b %-10s %-9s %s → %s · %s\n' \
+      "${marker}" "${name}" "${label}" "${reg_name}" "${endpoint}" "${state}"
+    if [[ -n "${DEBUG:-}" && -n "${repos}" ]]; then
+      local repo
+      while IFS= read -r repo; do
+        printf '      %s%s%s\n' "${_c_dim}" "${repo}" "${_c_off}"
+      done <<<"${repos}"
+    fi
   }
   registry::each _status_entry
 }
