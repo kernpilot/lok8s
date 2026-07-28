@@ -19,6 +19,12 @@ LO_REGISTRY_OFFSET_CACHE=102
 LO_REGISTRY_OFFSET_MIRRORS=103
 # In-container mount point for the mkcert registry cert+key (TLS mode).
 LO_REGISTRY_TLS_MOUNT="/etc/registry/certs"
+# Durable home for rendered registry configs. Each container bind-mounts
+# <state-dir>/<container-name>.yaml — the file MUST outlive the `lo` run:
+# with --restart=always the Docker daemon re-binds it on every restart, and
+# a vanished source is recreated as an empty DIRECTORY, killing the registry
+# (the old mktemp-and-delete approach broke every registry on reboot).
+LO_REGISTRY_STATE_DIR="${LO_REGISTRY_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/lok8s/registries}"
 
 LO_SHARED_REGISTRY_NETWORK="lok8s-registries"
 LO_SHARED_REGISTRY_CIDR="10.125.200.0/24"

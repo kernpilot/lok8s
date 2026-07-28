@@ -92,8 +92,10 @@ driver::provision() {
       # references the dev CA). No-op unless spec.registries.tls.
       lo::registries_tls_cert
 
-      # Registries + containerd config (must exist before kind create)
-      lo::registries "${domain}" "${cluster_yaml}"
+      # Registries + containerd config (must exist before kind create).
+      # kapply::run collapses the per-registry "registry/<name> <verb>" lines
+      # into the same named progress block the cluster-service phases get.
+      kapply::run registries lo::registries "${domain}" "${cluster_yaml}"
       lo::write_certs_d
 
       # apiserver StructuredAuthenticationConfiguration (spec.oidc) — write the
