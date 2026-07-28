@@ -460,3 +460,112 @@ kapply::_heal_terminating() {
       || warn "  could not clear finalizers on ${kind}/${name}"
   done < <(printf '%s' "${manifest}" | yq -r '[.kind, .metadata.name, (.metadata.namespace // "")] | @tsv' 2>/dev/null)
 }
+
+# kapply::preflight [--age <seconds>] [kubectl flags...] < manifest
+#   Sweep the MANIFEST's objects for stuck-Terminating state BEFORE an apply
+#   that does not go through kapply::apply — Tilt's k8s_yaml path retries a
+#   terminating object until its upsert timeout and then fails the whole
+#   build ("timeout waiting for delete"). Two deadlocks make "stuck"
+#   permanent, both hit on cluster/Tilt restarts:
+#     - a PVC held by kubernetes.io/pvc-protection while the replacement pod
+#       that references it cannot start until the PVC finishes deleting;
+#     - a finalizer whose owning controller is gone (a CNPG Database whose
+#       Cluster was already deleted, an operator torn down mid-delete, …).
+#   Objects terminating LONGER than --age (default 30s, or
+#   KAPPLY_PREFLIGHT_AGE) get their finalizers cleared so the delete
+#   completes and the follow-up apply recreates them; younger deletions are
+#   presumed to be legitimately draining and are left to finish. Namespaces
+#   finalize via the /finalize subresource.
+#   NO prompts here — the CALLER is the gate (`lo tilt preflight` refuses
+#   non-kind drivers unless LOK8S_FORCE_CLEAR_TERMINATING is set). Every
+#   object cleared is about to be re-applied from this same manifest, which
+#   is what makes the force defensible. Best-effort: per-object failures
+#   warn; always returns 0 so a preflight can never brick the deploy it
+#   protects.
+kapply::preflight() {
+  local age="${KAPPLY_PREFLIGHT_AGE:-30}"
+  local -a kubectl_flags=()
+  while (( $# )); do
+    case "${1}" in
+      --age) age="${2:-30}"; shift 2 ;;
+      *)     kubectl_flags+=("${1}"); shift ;;
+    esac
+  done
+  local manifest; manifest=$(cat)
+
+  # ONE batched GET for every manifest object (a single process/connection,
+  # not one kubectl per doc — a rendered domain is hundreds of docs). Missing
+  # objects are skipped; unknown kinds (a CRD not yet installed) error to
+  # stderr without stopping the sweep, hence the || true.
+  local live
+  live=$(printf '%s' "${manifest}" \
+    | kubectl "${kubectl_flags[@]}" get -f - -o json --ignore-not-found 2>/dev/null) || true
+
+  # A namespace REFERENCED by the manifest but not declared in it still
+  # blocks every create inside it while terminating — fetch those too.
+  local referenced
+  referenced=$(printf '%s' "${manifest}" \
+    | yq -r '.metadata.namespace // ""' 2>/dev/null | grep -v '^---$' | sort -u | grep . || true)
+  local ns_live=""
+  if [[ -n "${referenced}" ]]; then
+    # shellcheck disable=SC2086 # newline-separated names, split on purpose
+    ns_live=$(kubectl "${kubectl_flags[@]}" get namespace ${referenced} \
+      -o json --ignore-not-found 2>/dev/null) || true
+  fi
+
+  # Same block UI as every other kapply phase (bootstrap addons, deploy):
+  # counted "<type>/<name> patched" lines collapse into "✓ preflight · N
+  # resources"; per-object detail (age, finalizers) + failures surface as the
+  # dim indented lines. Off-tty (Tilt's captured log) the same block renders
+  # plain — see kapply::render_captured.
+  local now; now=$(date -u +%s)
+  local apiver kind ns name dts fins epoch stuck rc=0 report=""
+  local -a nsf
+  while IFS=$'\t' read -r apiver kind ns name dts fins; do
+    # "-" is the cluster-scoped placeholder: tab counts as IFS WHITESPACE, so
+    # a genuinely empty TSV field would collapse and shift every later field.
+    [[ "${ns}" == "-" ]] && ns=""
+    [[ -n "${kind}" && -n "${name}" && -n "${dts}" ]] || continue
+    # An unparseable timestamp yields epoch 0 → counts as old → cleared.
+    epoch=$(date -ud "${dts}" +%s 2>/dev/null || echo 0)
+    if (( now - epoch < age )); then
+      report+="${kind}/${name}${ns:+ (ns ${ns})} deleting only $(( now - epoch ))s (< ${age}s) — letting it drain"$'\n'
+      continue
+    fi
+    if [[ "${kind}" == "Namespace" ]]; then
+      # The caller already gated this force — assert the override for this
+      # one call so _finalize_namespace's own confirm doesn't re-ask/refuse.
+      LOK8S_FORCE_RECREATE=1 kapply::_finalize_namespace "${name}" "${kubectl_flags[@]}"
+      report+="namespace/${name} patched"$'\n'
+      report+="force-finalized Namespace/${name} — stuck $(( (now - epoch) / 60 ))m${fins:+ · finalizers: ${fins}}"$'\n'
+      continue
+    fi
+    # Fully-qualified type (Kind.version.group) — a bare kind is ambiguous
+    # the moment two groups share it (v1 Secret vs secrets.lok8s.dev Secret).
+    stuck="${kind}"
+    [[ "${apiver}" == */* ]] && stuck="${kind}.${apiver##*/}.${apiver%%/*}"
+    nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
+    if kubectl "${kubectl_flags[@]}" patch "${stuck}" "${name}" "${nsf[@]}" \
+         --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
+      report+="${stuck,,}/${name} patched"$'\n'
+      report+="cleared ${kind}/${name}${ns:+ (ns ${ns})} — stuck $(( (now - epoch) / 60 ))m${fins:+ · finalizers: ${fins}}"$'\n'
+    else
+      report+="could not clear finalizers on ${kind}/${name}${ns:+ (ns ${ns})}"$'\n'
+      rc=1
+    fi
+  done < <(printf '%s\n%s' "${live}" "${ns_live}" \
+    | jq -r '(.items // [.])[]? | select(.metadata.deletionTimestamp)
+             | [.apiVersion, .kind, (.metadata.namespace // "-"), .metadata.name,
+                .metadata.deletionTimestamp, (.metadata.finalizers // [] | join(","))]
+             | @tsv' 2>/dev/null)
+
+  if [[ -n "${report}" ]]; then
+    printf '%s' "${report}" | kapply::render_captured "preflight" "${rc}"
+  else
+    # Nothing stuck: one honest line, same glyph family as the block UI.
+    local c_on='' c_off='' c_dim=''
+    [[ -t 1 ]] && { c_on=$'\033[32m'; c_off=$'\033[0m'; c_dim=$'\033[2m'; }
+    printf '%s✓%s preflight %s· nothing stuck%s\n' "${c_on}" "${c_off}" "${c_dim}" "${c_off}"
+  fi
+  return 0
+}

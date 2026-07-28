@@ -321,3 +321,71 @@ IN
   [[ "$output" != *$'\r'* ]]
   [[ "$output" == *"overtyped error"* ]]
 }
+
+# --- kapply::preflight -------------------------------------------------------
+# The pre-apply sweep for stuck-Terminating objects (Tilt's k8s_yaml path
+# never goes through kapply::apply, so it can't self-heal there). GET_OUT
+# drives the batched `kubectl get -f -` (and the referenced-namespace get —
+# the stub answers every `get` the same way; duplicate JSON docs are the
+# same object and clearing is idempotent, so that's harmless here).
+
+_preflight() { printf '%s' "$1" | kapply::preflight; }
+
+@test "preflight: nothing terminating → no patches, reports nothing stuck" {
+  command -v jq &>/dev/null || skip "jq required"
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app"}}'
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'nothing stuck'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: object stuck past the age threshold → finalizers cleared with qualified type" {
+  command -v jq &>/dev/null || skip "jq required"
+  export GET_OUT='{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}'
+  run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'preflight'
+  assert_output --partial 'cnpg.io/deleteDatabase'
+  run cat "${KLOG}"
+  assert_output --partial 'patch Database.v1.postgresql.cnpg.io status -n kubehz-system --type merge'
+}
+
+@test "preflight: deletion younger than the age threshold is left to drain" {
+  command -v jq &>/dev/null || skip "jq required"
+  local fresh; fresh=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"'"${fresh}"'","finalizers":["kubernetes.io/pvc-protection"]}}'
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'letting it drain'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: stuck namespace finalizes via the /finalize subresource, no confirm needed" {
+  command -v jq &>/dev/null || skip "jq required"
+  export GET_OUT='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"mla","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["kubernetes"]}}'
+  export KAPPLY_NS_WAIT=0
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  run cat "${KLOG}"
+  assert_output --partial 'replace --raw /api/v1/namespaces/mla/finalize'
+}
+
+@test "preflight: failed patch reports the object and still exits 0" {
+  command -v jq &>/dev/null || skip "jq required"
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"2020-01-01T00:00:00Z"}}'
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    case "$1" in
+      get)   echo "${GET_OUT:-}"; return 0 ;;
+      patch) return 1 ;;
+      *)     return 0 ;;
+    esac
+  }
+  export -f kubectl
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'could not clear finalizers on PersistentVolumeClaim/data'
+}

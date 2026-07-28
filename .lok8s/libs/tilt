@@ -6,6 +6,8 @@
 
 import ^utils/types
 import ^utils/verbose
+import ^utils/domain
+import ^utils/kapply
 
 main::tilt() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -19,6 +21,7 @@ main::tilt() {
     'down|d@destructive'     'Spin down tilt'
     'status|s@readonly'      'Check tilt status'
     'restart|r@destructive'  'Restart tilt'
+    'preflight@destructive'  'Force-clear stuck-Terminating objects in the manifest on stdin'
   )
   :usage "Manage tilt environment" "${@}"
   "${usage[@]}"
@@ -136,5 +139,40 @@ tilt::down() {
 
 tilt::status() { :args "Check tilt status" "${@}"; tilt doctor; }
 tilt::restart() { :args "Restart tilt" "${@}"; tilt::down; tilt::up; }
+
+# tilt::preflight — called by the Tilt extension right after it renders the
+# domain (local('lo tilt preflight', stdin=artifacts)), BEFORE any k8s_yaml
+# applies: force-clear manifest objects stuck Terminating so Tilt's apply
+# doesn't spin on "currently being deleted" until its upsert timeout and fail
+# the build. The sweep itself is kapply::preflight; the GATING lives here:
+#   - LOK8S_PREFLIGHT=0 disables the sweep entirely (kill switch);
+#   - only the `lo` (local kind) driver is force-cleared by default — remote
+#     clusters need an explicit LOK8S_FORCE_CLEAR_TERMINATING=1. Clearing a
+#     finalizer skips its controller's cleanup: fine to lose on a throwaway
+#     kind cluster, a data-loss footgun on a real one.
+# Always exits 0 — a preflight must never brick the `tilt up` it protects.
+tilt::preflight() {
+  local age
+  local -a args=(
+    'age|a'  'Only clear objects terminating longer than this many seconds (default 30)'
+    "${args[@]:-}"
+  )
+  :args "Force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
+  if [[ "${LOK8S_PREFLIGHT:-1}" == "0" ]]; then
+    cat >/dev/null
+    return 0
+  fi
+  local resolved driver
+  resolved=$(domain::resolve "${domain:-}")
+  driver=$(domain::driver "${resolved}") || driver=""
+  if [[ "${driver}" != "lo" && -z "${LOK8S_FORCE_CLEAR_TERMINATING:-}" ]]; then
+    warn "preflight: '${resolved}' uses the '${driver:-unknown}' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)"
+    cat >/dev/null
+    return 0
+  fi
+  local -a age_flag=()
+  [[ -n "${age:-}" ]] && age_flag=(--age "${age}")
+  kapply::preflight "${age_flag[@]}"
+}
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"

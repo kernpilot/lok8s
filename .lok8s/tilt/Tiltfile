@@ -720,6 +720,7 @@ def lok8s(
     disable_snapshots_setting = True,
     disable_secret_scrub = True,
     hooks = {},
+    preflight = True,
 ):
   """
   lok8s Tilt extension -- discovers services via `lo env`, builds kustomize
@@ -775,6 +776,13 @@ def lok8s(
     hooks: Per-project hook verb map merged over the built-in `_hook_do`
       (recreate/restart/apply). Add or override a `do:` verb → `lo …` action,
       e.g. lok8s(hooks={'reindex': 'lo hooks reindex'}). Default: {}.
+    preflight: Run `lo tilt preflight` on the rendered artifacts before any
+      k8s_yaml apply — force-clears manifest objects stuck Terminating
+      (deletionTimestamp set, finalizer never clearing) so Tilt's apply
+      doesn't block on "currently being deleted" until the upsert timeout
+      and fail the build on cluster/Tilt restarts. Gated inside the CLI to
+      the local kind driver (LOK8S_FORCE_CLEAR_TERMINATING=1 overrides;
+      LOK8S_PREFLIGHT=0 disables). Default: True.
   """
   if strict_unlabeled and apply_unlabeled:
     fail("lok8s(): strict_unlabeled and apply_unlabeled are mutually exclusive — pick one")
@@ -853,6 +861,16 @@ def lok8s(
   # single domain artifact one level up (../artifacts.yaml, built by `lo build`);
   # a raw file above the overlay root is blocked by kustomize's default RootOnly.
   artifacts = local('kustomize build --load-restrictor=LoadRestrictionsNone %s' % _artifacts_dir, True, '', True, {})
+
+  # Preflight BEFORE any k8s_yaml: force-clear rendered objects stuck
+  # Terminating, or Tilt's apply retries "currently being deleted" until its
+  # upsert timeout and fails the build (the restart deadlock: a PVC held by
+  # pvc-protection while its replacement pod waits on that same PVC, a CNPG
+  # Database whose Cluster is gone, …). Runs on every Tiltfile execution, so
+  # mid-session reloads are covered too. Driver gating + kill switch live in
+  # `lo tilt preflight` — on a non-kind cluster it is a warn-and-skip no-op.
+  if preflight:
+    local('%s tilt preflight' % lo_bin, stdin = artifacts)
 
   # Apply infrastructure components (lok8s.dev/type: system).
   #
