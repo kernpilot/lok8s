@@ -14,14 +14,98 @@ import ^utils/provider
 
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local force="${force:-0}"
   local bootstrap=0
   local -a args=(
     'domain|:^~domain'   'Domain to use'
     'bootstrap|b:+'      'Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)'
+    'force|f:^:+'        'Skip the real-infrastructure confirmation (cloud drivers)'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
   provision::dispatch "${domain}" "${bootstrap}"
+}
+
+# ── Real-infrastructure gate ──────────────────────────────
+# Cloud drivers (kubeone/capi/kkp) reconcile REAL infrastructure: the provider
+# creates/updates cloud resources, the driver apply can roll a live control
+# plane, and destroy deprovisions servers. The local kind driver (lo) stays
+# frictionless. Before any of that runs, show what is about to happen and
+# require an interactive yes — unless --force|-f (the global user flag,
+# reaching here via argsh dynamic scoping, same as recover::_confirm).
+# Without a terminal, refuse instead of proceeding silently.
+
+# A terminal we may prompt on. Tests stub this function directly.
+# NOTE: LOK8S_NONINTERACTIVE means REFUSE here, while recover::_confirm treats
+# it as consent — deliberate: recover is an explicit DR command whose entry
+# already demanded a literal yes; up/provision are ambient and fail closed.
+provision::_interactive() {
+  [[ -n "${LOK8S_NONINTERACTIVE:-}" ]] && return 1
+  [[ -n "${CI:-}" && "${CI:-}" != "false" ]] && return 1
+  [[ -t 0 ]]
+}
+
+# provision::confirm_infra <domain> <cluster_yaml> <kind> <action>
+#   action: reconcile | bootstrap | destroy
+# Prompt goes to stderr, the answer is read from stdin (testable — same idiom
+# as recover::_confirm). destroy demands a literal "yes"; the reconcile and
+# bootstrap actions accept y/yes. Returns 3 on a decline/refusal so callers
+# can tell "operator said no" apart from a real failure.
+provision::confirm_infra() {
+  local domain="${1}" cluster_yaml="${2}" kind="${3}" action="${4}"
+  # The local kind driver is exempt — EXCEPT in remote mode, where it
+  # provisions a cloud VM via spec.provider (the same rule dispatch uses to
+  # decide provider loading): that is real infrastructure too.
+  [[ "${kind}" == "lo" && "${LOK8S_REMOTE:-}" != "1" ]] && return 0
+  # `force`: the global --force|-f, inherited via dynamic scoping (never
+  # declared locally here — recover::_confirm precedent).
+  (( ${force:-0} )) && return 0
+
+  local cluster_name k8s_version provider_name addons
+  cluster_name=$(yq -r '.metadata.name // "?"' "${cluster_yaml}" 2>/dev/null)
+  k8s_version=$(yq -r '.spec.kubernetes.version // "?"' "${cluster_yaml}" 2>/dev/null)
+  provider_name=$(yq -r '.spec.provider.name // "?"' "${cluster_yaml}" 2>/dev/null)
+  addons=$(yq -r '.spec.bootstrap | length' "${cluster_yaml}" 2>/dev/null) || addons=0
+  [[ "${addons}" =~ ^[0-9]+$ ]] || addons=0
+
+  {
+    printf '\n  \033[1;33m⚠ %s\033[0m \033[2m·\033[0m cluster \033[1m%s\033[0m (%s) targets \033[1mreal infrastructure\033[0m \033[2m(%s driver · provider %s)\033[0m\n' \
+      "${domain}" "${cluster_name}" "${k8s_version}" "${kind}" "${provider_name}"
+    case "${action}" in
+      destroy)
+        printf '    \033[31mnext: driver destroy — deprovisions the cluster'\''s cloud resources (servers, LBs, volumes)\033[0m\n'
+        ;;
+      bootstrap)
+        printf '    \033[2mnext: re-apply %s bootstrap addons on the LIVE cluster\033[0m\n' "${addons}"
+        ;;
+      *)
+        if [[ "${kind}" == "lo" ]]; then
+          # Only reachable in remote mode — the local path is exempt above.
+          printf '    \033[2mnext: provider reconcile (provisions/updates the remote VM) → kind cluster on the\033[0m\n'
+          printf '    \033[2m      VM → kubehz registration → bootstrap DAG (%s addons)\033[0m\n' "${addons}"
+        else
+          printf '    \033[2mnext: provider reconcile (creates/updates cloud resources) → %s apply (can roll the\033[0m\n' "${kind}"
+          printf '    \033[2m      control plane) → addons → kubehz registration → bootstrap DAG (%s addons)\033[0m\n' "${addons}"
+        fi
+        ;;
+    esac
+  } >&2
+
+  if ! provision::_interactive; then
+    error "refusing to ${action} '${domain}' non-interactively — re-run with --force"
+    return 3
+  fi
+
+  local ans=""
+  if [[ "${action}" == "destroy" ]]; then
+    printf '\n  continue? [type yes to continue] ' >&2
+    read -r ans || { error "aborted — '${domain}' left untouched"; return 3; }
+    [[ "${ans}" == "yes" ]] || { error "aborted — '${domain}' left untouched"; return 3; }
+  else
+    printf '\n  proceed? [y/N] ' >&2
+    read -r ans || { error "aborted — '${domain}' left untouched"; return 3; }
+    [[ "${ans,,}" =~ ^(y|yes)$ ]] || { error "aborted — '${domain}' left untouched"; return 3; }
+  fi
 }
 
 # Resolve KUBECONFIG for deploy domains that reference another cluster.
@@ -185,6 +269,15 @@ provision::dispatch() {
     error "Unknown cluster kind: ${kind} (missing ${kind_script})"
     return 1
   fi
+
+  # Real-infrastructure gate: summary + confirmation BEFORE the provider or
+  # driver touch anything (after the kind check, so a bogus kind stays a
+  # plain error). No-op for the local kind driver; every other EXISTING
+  # driver targets real infrastructure — new drivers are gated by default.
+  local gate_action="reconcile"
+  (( bootstrap_only )) && gate_action="bootstrap"
+  # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
+  provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "${gate_action}" || return $?
   # shellcheck source=/dev/null
   source "${kind_script}"
 
@@ -317,7 +410,9 @@ provision::dispatch() {
 # Usage: provision::dispatch_destroy <domain>
 provision::dispatch_destroy() {
   local domain="${1}"
-  provision::resolve_spec "${domain}"
+  # Fail fast on a missing/bogus domain — same rule as provision::dispatch;
+  # continuing would feed the gate/driver an unset LOK8S_SPEC_FILE.
+  provision::resolve_spec "${domain}" || return 1
 
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
     error "Cannot destroy a deployment domain. Destroy the cluster domain instead."
@@ -330,6 +425,11 @@ provision::dispatch_destroy() {
 
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
   [[ -f "${kind_script}" ]] || { error "Unknown cluster kind: ${kind}"; return 1; }
+
+  # Real-infrastructure gate — destroying a cloud cluster deprovisions
+  # servers/LBs/volumes; confirm before deregistration or the driver run.
+  # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
+  provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "destroy" || return $?
   # shellcheck source=/dev/null
   source "${kind_script}"
 
@@ -350,7 +450,13 @@ provision::dispatch_destroy() {
   fi
 
   debug "Destroying ${domain} with kind=${kind}"
-  driver::destroy "${domain}"
+  # Remap a driver rc of 3: that value is the GATE's decline sentinel, and a
+  # subprocess exit 3 here (e.g. curl) must not read as "operator said no"
+  # to main::down (which would suppress its orphaned-infra warning).
+  local destroy_rc=0
+  driver::destroy "${domain}" || destroy_rc=$?
+  (( destroy_rc == 3 )) && destroy_rc=1
+  return "${destroy_rc}"
 }
 
 # Dispatch cluster status check.

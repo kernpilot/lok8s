@@ -51,9 +51,9 @@ jobs:
           DOMAIN: ${{ github.event.inputs.domain }}
         run: |
           if [[ -n "${DOMAIN}" ]]; then
-            lo provision "${DOMAIN}"
+            lo provision --force --domain "${DOMAIN}"
           else
             for domain in ${{ steps.detect.outputs.domains }}; do
-              lo provision "${domain}"
+              lo provision --force --domain "${domain}"
             done
           fi

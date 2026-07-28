@@ -43,11 +43,13 @@ _RECOVER_WORKDIR=""
 
 main::recover() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local force="${force:-0}"
   local skip_rebuild=0 dry_run=0
   local -a args=(
     'domain|:^~domain'  'Cluster domain to recover (default: active)'
     'skip-rebuild|:+'   'Skip the bare-metal node rebuild — re-run provision + verify only'
     'dry-run|:+'        'Preview the rebuild plan (reimages nothing) and stop before provision'
+    'force|f:^:+'       'Skip the recovery consent prompt (DR automation)'
     "${args[@]:-}"
   )
   :args "Rebuild a cluster from bare metal (disaster recovery)" "${@}"
@@ -223,6 +225,12 @@ recover::_rebuild() {
 # Fresh install on the reset nodes (= `lo provision`). The bare-metal path wipes
 # data disks (#wipe-devices) as part of the normal provision flow.
 recover::_provision() {
+  # Consent already happened at recover's entry (same contract as
+  # recover::_rebuild) — pre-authorize the dispatch's real-infrastructure
+  # gate so DR never stalls on a prompt mid-recovery. `force` reaches
+  # provision::confirm_infra via dynamic scoping (the argsh idiom).
+  # shellcheck disable=SC2034
+  local force=1
   provision::dispatch "${_RECOVER_DOMAIN}"
 }
 
