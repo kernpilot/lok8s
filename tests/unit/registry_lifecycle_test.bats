@@ -319,6 +319,35 @@ docker() {
   assert_output --partial "registry/lok8s-registry-io-docker created"
 }
 
+@test "registries: late squatter after the holder check is evicted on retry" {
+  _load_driver
+  printf 'running\n\n' > "${FAKE_DOCKER}/containers/late-node"
+
+  # Delegate to the real fake, but have the FIRST `docker run` for io-docker
+  # simulate a squatter landing between the holder check and the run: inject
+  # the network entry and fail — the retry's holder re-check must evict it.
+  eval "_real_docker() $(declare -f docker | tail -n +2)"
+  LATE_ONCE="${BATS_TEST_TMPDIR}/late-once"
+  docker() {
+    if [[ "${1} ${2:-}" == "run -d" && "${*}" == *lok8s-registry-io-docker* && ! -f "${LATE_ONCE}" ]]; then
+      touch "${LATE_ONCE}"
+      echo "docker ${*}" >> "${DOCKER_LOG}"
+      echo "10.125.200.2/24 late-node" >> "${FAKE_DOCKER}/networks/lok8s-registries"
+      echo "docker: failed to set up container networking: Address already in use" >&2
+      return 125
+    fi
+    _real_docker "${@}"
+  }
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-io-docker created"
+  grep -q "^10.125.200.2/24 lok8s-registry-io-docker$" \
+    "${FAKE_DOCKER}/networks/lok8s-registries"
+  grep -q "^docker network disconnect -f lok8s-registries late-node$" "${DOCKER_LOG}"
+}
+
 @test "registries: losing the start race to a concurrent lo is unchanged" {
   _load_driver
   lo::registries "test.lok8s.dev" \

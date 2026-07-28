@@ -320,8 +320,13 @@ lo::registries() {
     esac
 
     # Durable config path — the daemon re-binds it on every container restart
-    # (see LO_REGISTRY_STATE_DIR in defaults.sh).
-    printf '%s\n' "${rendered}" > "${config_path}"
+    # (see LO_REGISTRY_STATE_DIR in defaults.sh). Guarded: a failed write
+    # (read-only dir, disk full) must not proceed to remove a healthy
+    # container that would then restart against a stale or missing config.
+    if ! printf '%s\n' "${rendered}" > "${config_path}"; then
+      echo "error: registry/${reg_name}: cannot write config at ${config_path}" >&2
+      return 1
+    fi
 
     docker volume create "${reg_name}" >/dev/null 2>&1 || true
     docker rm -f "${reg_name}" >/dev/null 2>&1 || true
@@ -365,7 +370,7 @@ lo::registries() {
       # One bounded retry for a transiently-held address: the endpoint of the
       # container we just removed can lag its release, and a late squatter can
       # appear between the holder check and the run.
-      if [[ "${run_err}" == *"ddress already in use"* ]]; then
+      if [[ "${run_err,,}" == *"address already in use"* ]]; then
         holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
         if [[ -n "${holder}" ]]; then
           debug "registry ${reg_name}: evicting late squatter ${holder} from ${ip}"
