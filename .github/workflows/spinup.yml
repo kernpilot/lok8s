@@ -79,7 +79,7 @@ jobs:
           DOMAIN: ${{ inputs.domain }}
         run: |
           set -o pipefail
-          lo provision --force "${DOMAIN}" 2>&1 | tee /tmp/provision.log
+          lo provision --force --domain "${DOMAIN}" 2>&1 | tee /tmp/provision.log
 
           # register_cluster prints "  fingerprint: <md5>" on success. Lift it
           # (best-effort; absent for non-kubehz / access:none clusters).
