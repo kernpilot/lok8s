@@ -234,11 +234,13 @@ _lo_header() {
 }
 
 main::up() {
+  local force="${force:-0}"
   local open_tilt ci timeout
   local -a args=(
     'open-tilt|o:+'  'Open Tilt in a browser (interactive mode only)'
     'ci|:+'          'Headless: build+deploy+wait-ready via `tilt ci`, exit with real status (no TTY/browser)'
     'timeout|t'      'Readiness timeout for --ci (e.g. 300s, 10m); passed to `tilt ci`'
+    'force|f:^~force' 'Skip the real-infrastructure confirmation (cloud drivers)'
     "${args[@]}"
   )
   :args "Starting cluster" "${@}"
