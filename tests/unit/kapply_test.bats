@@ -324,15 +324,34 @@ IN
 
 # --- kapply::preflight -------------------------------------------------------
 # The pre-apply sweep for stuck-Terminating objects (Tilt's k8s_yaml path
-# never goes through kapply::apply, so it can't self-heal there). GET_OUT
-# drives the batched `kubectl get -f -` (and the referenced-namespace get —
-# the stub answers every `get` the same way; duplicate JSON docs are the
-# same object and clearing is idempotent, so that's harmless here).
+# never goes through kapply::apply, so it can't self-heal there). The stub
+# distinguishes the two GET shapes so the batched manifest path is actually
+# exercised: `get -f -` answers GET_OUT, `get ns|namespace …` answers
+# NS_GET_OUT — a regression that stopped feeding the manifest to kubectl
+# could not stay green on the referenced-namespace fetch alone.
 
 _preflight() { printf '%s' "$1" | kapply::preflight; }
+_preflight_stub() {
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    case "$1" in
+      get)
+        case "$2" in
+          -f)           echo "${GET_OUT:-}" ;;
+          ns|namespace) echo "${NS_GET_OUT:-}" ;;
+          *)            echo "${GET_OUT:-}" ;;
+        esac
+        return 0 ;;
+      patch) return "${PATCH_RC:-0}" ;;
+      *)     return 0 ;;
+    esac
+  }
+  export -f kubectl
+}
 
 @test "preflight: nothing terminating → no patches, reports nothing stuck" {
   command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
   export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app"}}'
   run _preflight "${DEPLOY_MANIFEST}"
   assert_success
@@ -343,17 +362,21 @@ _preflight() { printf '%s' "$1" | kapply::preflight; }
 
 @test "preflight: object stuck past the age threshold → finalizers cleared with qualified type" {
   command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
   export GET_OUT='{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}'
   run _preflight "${CR_MANIFEST}"
   assert_success
-  assert_output --partial 'preflight'
   assert_output --partial 'cnpg.io/deleteDatabase'
   run cat "${KLOG}"
+  # The stuck object must have come in via the BATCHED manifest get…
+  assert_output --partial 'get -f - -o json --ignore-not-found'
+  # …and go out via a fully-qualified patch (bare kind would be ambiguous).
   assert_output --partial 'patch Database.v1.postgresql.cnpg.io status -n kubehz-system --type merge'
 }
 
 @test "preflight: deletion younger than the age threshold is left to drain" {
   command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
   local fresh; fresh=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"'"${fresh}"'","finalizers":["kubernetes.io/pvc-protection"]}}'
   run _preflight "${DEPLOY_MANIFEST}"
@@ -363,28 +386,38 @@ _preflight() { printf '%s' "$1" | kapply::preflight; }
   refute_output --partial ' patch '
 }
 
-@test "preflight: stuck namespace finalizes via the /finalize subresource, no confirm needed" {
+@test "preflight: unparseable deletionTimestamp is skipped, never force-cleared" {
   command -v jq &>/dev/null || skip "jq required"
-  export GET_OUT='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"mla","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["kubernetes"]}}'
+  _preflight_stub
+  export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"not-a-time","finalizers":["kubernetes.io/pvc-protection"]}}'
+  run _preflight "${DEPLOY_MANIFEST}"
+  assert_success
+  assert_output --partial 'unparseable deletionTimestamp'
+  run cat "${KLOG}"
+  refute_output --partial ' patch '
+}
+
+@test "preflight: stuck namespace arrives via the referenced-ns fetch, finalizes via /finalize" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  # GET_OUT stays empty: the namespace is REFERENCED by the manifest (ns
+  # `default`), not declared in it — this pins the second fetch path.
+  export NS_GET_OUT='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"mla","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["kubernetes"]}}'
   export KAPPLY_NS_WAIT=0
   run _preflight "${DEPLOY_MANIFEST}"
   assert_success
+  # The static stub keeps answering with a deletionTimestamp after the
+  # finalize, so the honesty re-check must report the wedge, not "patched".
+  assert_output --partial 'could not finalize namespace/mla'
   run cat "${KLOG}"
   assert_output --partial 'replace --raw /api/v1/namespaces/mla/finalize'
 }
 
 @test "preflight: failed patch reports the object and still exits 0" {
   command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
   export GET_OUT='{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"2020-01-01T00:00:00Z"}}'
-  kubectl() {
-    echo "kubectl $*" >> "${KLOG}"
-    case "$1" in
-      get)   echo "${GET_OUT:-}"; return 0 ;;
-      patch) return 1 ;;
-      *)     return 0 ;;
-    esac
-  }
-  export -f kubectl
+  export PATCH_RC=1
   run _preflight "${DEPLOY_MANIFEST}"
   assert_success
   assert_output --partial 'could not clear finalizers on PersistentVolumeClaim/data'

@@ -487,7 +487,9 @@ kapply::preflight() {
   local -a kubectl_flags=()
   while (( $# )); do
     case "${1}" in
-      --age) age="${2:-30}"; shift 2 ;;
+      # Tolerate a trailing value-less --age (keep the default): a bare
+      # `shift 2` on one remaining arg fails and would abort under set -e.
+      --age) [[ -n "${2:-}" ]] && { age="${2}"; shift; }; shift ;;
       *)     kubectl_flags+=("${1}"); shift ;;
     esac
   done
@@ -495,8 +497,11 @@ kapply::preflight() {
 
   # ONE batched GET for every manifest object (a single process/connection,
   # not one kubectl per doc — a rendered domain is hundreds of docs). Missing
-  # objects are skipped; unknown kinds (a CRD not yet installed) error to
-  # stderr without stopping the sweep, hence the || true.
+  # objects are skipped. Unknown kinds (a CRD not yet installed) make kubectl
+  # error without stopping the sweep — DELIBERATELY silenced (2>/dev/null):
+  # on a cold start every not-yet-installed CRD would spam one error per doc
+  # into the Tilt log on every reload, and the apply that follows surfaces
+  # any real problem anyway. Hence also the || true.
   local live
   live=$(printf '%s' "${manifest}" \
     | kubectl "${kubectl_flags[@]}" get -f - -o json --ignore-not-found 2>/dev/null) || true
@@ -526,8 +531,17 @@ kapply::preflight() {
     # a genuinely empty TSV field would collapse and shift every later field.
     [[ "${ns}" == "-" ]] && ns=""
     [[ -n "${kind}" && -n "${name}" && -n "${dts}" ]] || continue
-    # An unparseable timestamp yields epoch 0 → counts as old → cleared.
-    epoch=$(date -ud "${dts}" +%s 2>/dev/null || echo 0)
+    # GNU date first, BSD/macOS `-j -f` fallback. An UNPARSEABLE timestamp
+    # must SKIP the object, not count as old — defaulting to "old" would
+    # silently disable the age gate on any platform where parsing fails and
+    # force-clear legitimately-draining deletions.
+    epoch=$(date -ud "${dts}" +%s 2>/dev/null) \
+      || epoch=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "${dts}" +%s 2>/dev/null) \
+      || epoch=""
+    if [[ -z "${epoch}" ]]; then
+      report+="${kind}/${name}${ns:+ (ns ${ns})} — unparseable deletionTimestamp '${dts}', not touching it"$'\n'
+      continue
+    fi
     if (( now - epoch < age )); then
       report+="${kind}/${name}${ns:+ (ns ${ns})} deleting only $(( now - epoch ))s (< ${age}s) — letting it drain"$'\n'
       continue
@@ -536,8 +550,16 @@ kapply::preflight() {
       # The caller already gated this force — assert the override for this
       # one call so _finalize_namespace's own confirm doesn't re-ask/refuse.
       LOK8S_FORCE_RECREATE=1 kapply::_finalize_namespace "${name}" "${kubectl_flags[@]}"
-      report+="namespace/${name} patched"$'\n'
-      report+="force-finalized Namespace/${name} — stuck $(( (now - epoch) / 60 ))m${fins:+ · finalizers: ${fins}}"$'\n'
+      # _finalize_namespace warns-and-returns-0 on failure; re-check the live
+      # state so the report never claims success for a namespace still wedged.
+      if kubectl "${kubectl_flags[@]}" get ns "${name}" \
+           -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null | grep -q .; then
+        report+="could not finalize namespace/${name} — still terminating"$'\n'
+        rc=1
+      else
+        report+="namespace/${name} patched"$'\n'
+        report+="force-finalized Namespace/${name} — stuck $(( (now - epoch) / 60 ))m${fins:+ · finalizers: ${fins}}"$'\n'
+      fi
       continue
     fi
     # Fully-qualified type (Kind.version.group) — a bare kind is ambiguous

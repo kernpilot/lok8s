@@ -158,7 +158,7 @@ tilt::preflight() {
     "${args[@]:-}"
   )
   :args "Force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
-  if [[ "${LOK8S_PREFLIGHT:-1}" == "0" ]]; then
+  if [[ "${LOK8S_PREFLIGHT:-1}" =~ ^(0|false)$ ]]; then
     cat >/dev/null
     return 0
   fi
