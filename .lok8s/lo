@@ -240,7 +240,7 @@ main::up() {
     'open-tilt|o:+'  'Open Tilt in a browser (interactive mode only)'
     'ci|:+'          'Headless: build+deploy+wait-ready via `tilt ci`, exit with real status (no TTY/browser)'
     'timeout|t'      'Readiness timeout for --ci (e.g. 300s, 10m); passed to `tilt ci`'
-    'force|f:^~force' 'Skip the real-infrastructure confirmation (cloud drivers)'
+    'force|f:^:+'    'Skip the real-infrastructure confirmation (cloud drivers)'
     "${args[@]}"
   )
   :args "Starting cluster" "${@}"
@@ -291,8 +291,14 @@ main::down() {
   if [[ -n "${kind}" && "${kind}" != "lo" ]]; then
     printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${kind}"
     # A failed driver destroy means infrastructure may be ORPHANED (and billed)
-    # — that must be a visible non-zero exit, never a silent success.
-    if ! provision::dispatch_destroy "${DOMAIN_NAME}"; then
+    # — that must be a visible non-zero exit, never a silent success. A gate
+    # DECLINE (sentinel rc 3) is different: nothing ran, nothing is orphaned —
+    # exit non-zero without the scary orphan warning.
+    local destroy_rc=0
+    provision::dispatch_destroy "${DOMAIN_NAME}" || destroy_rc=$?
+    if (( destroy_rc == 3 )); then
+      return 1
+    elif (( destroy_rc != 0 )); then
       printf '  \033[31m✗ driver destroy failed — infrastructure may still exist; inspect and re-run\033[0m\n'
       return 1
     fi

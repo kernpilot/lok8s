@@ -63,6 +63,15 @@ _assume_no_tty() { provision::_interactive() { return 1; }; }
   assert_output ""
 }
 
+@test "gate: remote-mode lo driver is NOT exempt (cloud VM)" {
+  _assume_no_tty
+  export LOK8S_REMOTE=1
+  run provision::confirm_infra "test.dev" "${SPEC}" "lo" "reconcile"
+  [ "${status}" -eq 3 ]
+  assert_output --partial "provisions/updates the remote VM"
+  assert_output --partial "refusing to reconcile"
+}
+
 # ── Non-interactive refusal ──────────────────────────────
 
 @test "gate: non-interactive reconcile refuses with summary + hint" {
@@ -85,21 +94,24 @@ _assume_no_tty() { provision::_interactive() { return 1; }; }
 
 # ── Interactive prompt ───────────────────────────────────
 
-@test "gate: reconcile accepts y" {
+@test "gate: reconcile accepts y and yes" {
   _assume_tty
   run provision::confirm_infra "test.prod" "${SPEC}" "kubeone" "reconcile" <<< "y"
   assert_success
   assert_output --partial "proceed? [y/N]"
+
+  run provision::confirm_infra "test.prod" "${SPEC}" "kubeone" "reconcile" <<< "yes"
+  assert_success
 }
 
-@test "gate: reconcile aborts on n (and on empty answer)" {
+@test "gate: reconcile aborts on n / empty answer with sentinel rc 3" {
   _assume_tty
   run provision::confirm_infra "test.prod" "${SPEC}" "kubeone" "reconcile" <<< "n"
-  assert_failure
+  [ "${status}" -eq 3 ]
   assert_output --partial "aborted — 'test.prod' left untouched"
 
   run provision::confirm_infra "test.prod" "${SPEC}" "kubeone" "reconcile" <<< ""
-  assert_failure
+  [ "${status}" -eq 3 ]
 }
 
 @test "gate: bootstrap action names the addon re-apply" {
@@ -124,4 +136,39 @@ _assume_no_tty() { provision::_interactive() { return 1; }; }
   run provision::confirm_infra "test.prod" "${SPEC}" "kubeone" "destroy" <<< "yes"
   assert_success
   assert_output --partial "deprovisions the cluster's cloud resources"
+}
+
+# ── Dispatch wiring ──────────────────────────────────────
+
+# Minimal dispatch harness: resolve/creds stubbed, a fake kubeone driver dir
+# so the kind check passes, recorders proving the gate fires FIRST.
+_setup_dispatch_stubs() {
+  mkdir -p "${BATS_TEST_TMPDIR}/.lok8s/drivers/kubeone"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/kubeone/main" <<'EOF'
+driver::provision() { echo "DRIVER-PROVISION-RAN"; }
+driver::destroy()   { echo "DRIVER-DESTROY-RAN"; }
+EOF
+  provision::resolve_spec() { LOK8S_SPEC_FILE="${SPEC}"; LOK8S_SPEC_KIND="kubeone"; }
+  provision::load_provider_creds() { :; }
+  kubehz::read_config() { :; }
+  kubehz::deregister_cluster() { echo "DEREGISTERED"; }
+  LOK8S_KUBEHZ_ACCESS="agent"
+}
+
+@test "dispatch_destroy: decline stops before deregistration and the driver" {
+  _assume_tty
+  _setup_dispatch_stubs
+  run provision::dispatch_destroy "test.prod" <<< "no"
+  [ "${status}" -eq 3 ]
+  refute_output --partial "DEREGISTERED"
+  refute_output --partial "DRIVER-DESTROY-RAN"
+}
+
+@test "dispatch: bootstrap_only maps to the bootstrap gate action" {
+  _assume_tty
+  _setup_dispatch_stubs
+  run provision::dispatch "test.prod" 1 <<< "n"
+  [ "${status}" -eq 3 ]
+  assert_output --partial "re-apply 3 bootstrap addons"
+  refute_output --partial "DRIVER-PROVISION-RAN"
 }

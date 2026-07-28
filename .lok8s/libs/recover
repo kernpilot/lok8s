@@ -49,7 +49,7 @@ main::recover() {
     'domain|:^~domain'  'Cluster domain to recover (default: active)'
     'skip-rebuild|:+'   'Skip the bare-metal node rebuild — re-run provision + verify only'
     'dry-run|:+'        'Preview the rebuild plan (reimages nothing) and stop before provision'
-    'force|f:^~force'   'Skip the recovery consent prompt (DR automation)'
+    'force|f:^:+'       'Skip the recovery consent prompt (DR automation)'
     "${args[@]:-}"
   )
   :args "Rebuild a cluster from bare metal (disaster recovery)" "${@}"
