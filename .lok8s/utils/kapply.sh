@@ -487,12 +487,17 @@ kapply::preflight() {
   local -a kubectl_flags=()
   while (( $# )); do
     case "${1}" in
-      # Tolerate a trailing value-less --age (keep the default): a bare
-      # `shift 2` on one remaining arg fails and would abort under set -e.
-      --age) [[ -n "${2:-}" ]] && { age="${2}"; shift; }; shift ;;
+      # Tolerate a value-less --age (keep the default): a bare `shift 2` on
+      # one remaining arg fails and would abort under set -e, and swallowing
+      # a following flag as the value would misfile its own argument.
+      --age) [[ -n "${2:-}" && "${2}" != -* ]] && { age="${2}"; shift; }; shift ;;
       *)     kubectl_flags+=("${1}"); shift ;;
     esac
   done
+  # The age gate is a SAFETY threshold used in arithmetic below — a
+  # non-numeric value ("30s") would blow up the comparison / read as 0 and
+  # force-clear everything terminating at all. Fall back to the default.
+  [[ "${age}" =~ ^[0-9]+$ ]] || age=30
   local manifest; manifest=$(cat)
 
   # ONE batched GET for every manifest object (a single process/connection,
@@ -536,7 +541,7 @@ kapply::preflight() {
     # silently disable the age gate on any platform where parsing fails and
     # force-clear legitimately-draining deletions.
     epoch=$(date -ud "${dts}" +%s 2>/dev/null) \
-      || epoch=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "${dts}" +%s 2>/dev/null) \
+      || epoch=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "${dts}" +%s 2>/dev/null) \
       || epoch=""
     if [[ -z "${epoch}" ]]; then
       report+="${kind}/${name}${ns:+ (ns ${ns})} — unparseable deletionTimestamp '${dts}', not touching it"$'\n'
@@ -544,6 +549,13 @@ kapply::preflight() {
     fi
     if (( now - epoch < age )); then
       report+="${kind}/${name}${ns:+ (ns ${ns})} deleting only $(( now - epoch ))s (< ${age}s) — letting it drain"$'\n'
+      continue
+    fi
+    if [[ "${kind}" == "CustomResourceDefinition" ]]; then
+      # NEVER force a CRD: clearing its finalizer cascade-deletes every CR
+      # of that kind cluster-wide — including objects outside this manifest.
+      # Same carve-out as kapply::_heal_terminating's CRD rationale.
+      report+="refusing to force stuck CustomResourceDefinition/${name} — clearing it would cascade-delete every CR of that kind; resolve by hand"$'\n'
       continue
     fi
     if [[ "${kind}" == "Namespace" ]]; then
