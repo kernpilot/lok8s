@@ -273,9 +273,35 @@ lo::registries() {
     local rendered
     rendered=$(lo::render_registry_config "${config_file}" "${url}")
 
+    # Desired-state hash. config_path is part of it: moving
+    # LO_REGISTRY_STATE_DIR must recreate containers, or they'd keep a bind
+    # to the abandoned path and the vanished-mount failure would return.
+    local config_path="${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
     local desired_hash
-    desired_hash=$(printf '%s\n' "${rendered}" "${LO_REGISTRY_IMAGE}" "${reg_network}" "${ip}" "${cert_sig}" | sha256sum)
+    desired_hash=$(printf '%s\n' "${rendered}" "${LO_REGISTRY_IMAGE}" "${reg_network}" "${ip}" "${config_path}" "${cert_sig}" | sha256sum)
     desired_hash="${desired_hash%% *}"
+
+    # Serialize reconciliation of this registry across concurrent `lo` runs
+    # (shared mirrors are host-global). Best-effort: without flock, two
+    # simultaneous runs can race rm/run on the same container — the loser's
+    # in-flight container may be removed, healed by the next run.
+    local lockfd=0
+    if command -v flock >/dev/null 2>&1 && exec 9>"${config_path}.lock"; then
+      lockfd=1
+      flock -w 60 9 || debug "registry ${reg_name}: lock wait timed out, proceeding unlocked"
+    fi
+    _lo_registry_reconcile "${reg_name}" "${reg_network}" "${ip}" \
+      "${config_path}" "${rendered}" "${desired_hash}" || failed=1
+    (( lockfd )) && exec 9>&-
+    return 0
+  }
+
+  # The mutating half of the reconcile, run under the per-registry lock.
+  # Inspects state INSIDE the lock so a concurrent run that just (re)created
+  # the container is observed, not clobbered.
+  _lo_registry_reconcile() {
+    local reg_name="${1}" reg_network="${2}" ip="${3}"
+    local config_path="${4}" rendered="${5}" desired_hash="${6}"
 
     local state current_hash
     state=$(docker inspect -f '{{.State.Status}}' "${reg_name}" 2>/dev/null || echo absent)
@@ -295,13 +321,16 @@ lo::registries() {
 
     # Durable config path — the daemon re-binds it on every container restart
     # (see LO_REGISTRY_STATE_DIR in defaults.sh).
-    local config_path="${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
     printf '%s\n' "${rendered}" > "${config_path}"
 
     docker volume create "${reg_name}" >/dev/null 2>&1 || true
     docker rm -f "${reg_name}" >/dev/null 2>&1 || true
 
-    # Free the static IP if a dynamically-attached container squats it.
+    # Free the static IP if another container squats it. Usually a kind node
+    # that dynamically grabbed it (re-attached after the loop); a STALE lok8s
+    # registry holding it (IP layout drift) is also evicted — its own
+    # iteration recreates it at its new address this same run, whereas
+    # skipping it would strand THIS registry for a whole extra run.
     local holder
     holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
     if [[ -n "${holder}" ]]; then
@@ -310,15 +339,19 @@ lo::registries() {
       evicted+=("${reg_network}"$'\t'"${holder}")
     fi
 
-    local run_err
-    if ! run_err=$(docker run -d --restart=always --name "${reg_name}" \
-      --label "lok8s.dev/config-hash=${desired_hash}" \
-      --volume "${reg_name}:/var/lib/registry" \
-      --volume "${config_path}:/config.yaml:ro" \
-      "${tls_mount_args[@]}" \
-      --net="${reg_network}" --ip "${ip}" \
-      "${LO_REGISTRY_IMAGE}" "/config.yaml" 2>&1 >/dev/null); then
-      # Lost a race with a concurrent `lo` run (shared mirrors are host-global):
+    local attempt run_err=""
+    for attempt in 1 2; do
+      if run_err=$(docker run -d --restart=always --name "${reg_name}" \
+        --label "lok8s.dev/config-hash=${desired_hash}" \
+        --volume "${reg_name}:/var/lib/registry" \
+        --volume "${config_path}:/config.yaml:ro" \
+        "${tls_mount_args[@]}" \
+        --net="${reg_network}" --ip "${ip}" \
+        "${LO_REGISTRY_IMAGE}" "/config.yaml" 2>&1 >/dev/null); then
+        echo "registry/${reg_name} ${verb}"
+        return 0
+      fi
+      # Lost a race with a concurrent `lo` run despite best-effort locking:
       # the other run winning IS the desired state.
       if [[ "$(docker inspect -f '{{.State.Status}}' "${reg_name}" 2>/dev/null)" == "running" ]]; then
         echo "registry/${reg_name} unchanged"
@@ -328,12 +361,26 @@ lo::registries() {
       # even when the start fails, and a stuck-Created container shadows the
       # name on the next attempt.
       docker rm -f "${reg_name}" >/dev/null 2>&1 || true
-      echo "error: registry/${reg_name}: ${run_err}" >&2
-      failed=1
-      return 0
-    fi
+      (( attempt == 1 )) || break
+      # One bounded retry for a transiently-held address: the endpoint of the
+      # container we just removed can lag its release, and a late squatter can
+      # appear between the holder check and the run.
+      if [[ "${run_err}" == *"ddress already in use"* ]]; then
+        holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
+        if [[ -n "${holder}" ]]; then
+          debug "registry ${reg_name}: evicting late squatter ${holder} from ${ip}"
+          docker network disconnect -f "${reg_network}" "${holder}" >/dev/null 2>&1 || true
+          evicted+=("${reg_network}"$'\t'"${holder}")
+        else
+          sleep 1
+        fi
+      else
+        break
+      fi
+    done
 
-    echo "registry/${reg_name} ${verb}"
+    echo "error: registry/${reg_name}: ${run_err}" >&2
+    return 1
   }
 
   registry::each _lo_registry_start
@@ -399,7 +446,7 @@ lo::cleanup_registries() {
     local reg_name="${container_info%%	*}"
     docker rm -f "${reg_name}" 2>/dev/null || true
     docker volume rm -f "${reg_name}" 2>/dev/null || true
-    rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
+    rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml" "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml.lock"
   }
 
   registry::each _lo_registry_cleanup

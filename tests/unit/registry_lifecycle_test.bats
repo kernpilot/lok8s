@@ -260,6 +260,21 @@ docker() {
   assert_output --partial "registry/lok8s-registry-build unchanged"
 }
 
+@test "registries: moving LO_REGISTRY_STATE_DIR recreates containers" {
+  _load_driver
+  lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" > /dev/null
+  # The config path feeds the hash: containers still bound to the abandoned
+  # path must be recreated or the vanished-mount failure returns.
+  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state-moved"
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-build configured"
+  [ -f "${LO_REGISTRY_STATE_DIR}/lok8s-registry-build.yaml" ]
+}
+
 @test "registries: a dead container is recreated as restarted" {
   _load_driver
   lo::registries "test.lok8s.dev" \

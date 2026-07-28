@@ -104,7 +104,7 @@ registry::clean() {
       local reg_name="lok8s-registry-${name}"
       docker rm -f "${reg_name}" 2>/dev/null || true
       docker volume rm -f "${reg_name}" 2>/dev/null || true
-      rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml"
+      rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml" "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml.lock"
     }
     registry::each _clean_shared
 
