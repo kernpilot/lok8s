@@ -36,8 +36,12 @@ main::provision() {
 # Without a terminal, refuse instead of proceeding silently.
 
 # A terminal we may prompt on. Tests stub this function directly.
+# NOTE: LOK8S_NONINTERACTIVE means REFUSE here, while recover::_confirm treats
+# it as consent — deliberate: recover is an explicit DR command whose entry
+# already demanded a literal yes; up/provision are ambient and fail closed.
 provision::_interactive() {
-  [[ -n "${LOK8S_NONINTERACTIVE:-}" || -n "${CI:-}" ]] && return 1
+  [[ -n "${LOK8S_NONINTERACTIVE:-}" ]] && return 1
+  [[ -n "${CI:-}" && "${CI:-}" != "false" ]] && return 1
   [[ -t 0 ]]
 }
 
@@ -446,7 +450,13 @@ provision::dispatch_destroy() {
   fi
 
   debug "Destroying ${domain} with kind=${kind}"
-  driver::destroy "${domain}"
+  # Remap a driver rc of 3: that value is the GATE's decline sentinel, and a
+  # subprocess exit 3 here (e.g. curl) must not read as "operator said no"
+  # to main::down (which would suppress its orphaned-infra warning).
+  local destroy_rc=0
+  driver::destroy "${domain}" || destroy_rc=$?
+  (( destroy_rc == 3 )) && destroy_rc=1
+  return "${destroy_rc}"
 }
 
 # Dispatch cluster status check.

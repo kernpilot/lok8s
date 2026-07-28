@@ -164,6 +164,15 @@ EOF
   refute_output --partial "DRIVER-DESTROY-RAN"
 }
 
+@test "dispatch_destroy: accept runs deregistration then the driver" {
+  _assume_tty
+  _setup_dispatch_stubs
+  run provision::dispatch_destroy "test.prod" <<< "yes"
+  assert_success
+  assert_output --partial "DEREGISTERED"
+  assert_output --partial "DRIVER-DESTROY-RAN"
+}
+
 @test "dispatch: bootstrap_only maps to the bootstrap gate action" {
   _assume_tty
   _setup_dispatch_stubs
