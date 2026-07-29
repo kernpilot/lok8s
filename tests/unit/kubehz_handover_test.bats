@@ -149,6 +149,11 @@ _mock_node_binaries() {
   assert_output --partial "handover: verified"
   assert_output --partial "handover: receive complete"
 
+  # The verify probe talks to the LOCAL apiserver — admin.conf's endpoint DNS
+  # still points at the platform until the operator cuts over.
+  run grep -F -- "--server https://127.0.0.1:6443" "${CALLS}"
+  assert_success
+
   # Call order: snapshot restore BEFORE kubeadm init BEFORE the verify probe.
   # The init carries the preflight ignore for the pre-restored etcd dir AND
   # skips the addon phases (restored DNS/proxy state must not be overwritten).

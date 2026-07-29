@@ -367,6 +367,13 @@ handover::kubeadm_init() {
     --skip-phases=addon/coredns,addon/kube-proxy
 }
 
+# The bundle's endpoint DNS (also the apiserver cert's SAN) — used as the
+# TLS server name when probing the apiserver on its local address.
+handover::endpoint_dns() {
+  local bundle="${1}"
+  tr -d '[:space:]' < "${bundle}/endpoint-dns"
+}
+
 # Post-init verification: the apiserver answers WITH the restored data, and
 # the live CA is byte-identical to the bundle's — identity preserved, the
 # whole point of the seeded restore. Never cut DNS over before this passes.
@@ -374,7 +381,16 @@ handover::verify() {
   local bundle="${1}" k8s_dir="${2}"
   local kubeconfig="${k8s_dir}/admin.conf"
   local waited=0 timeout="${KUBEHZ_HANDOVER_WAIT:-300}"
-  until kubectl --kubeconfig "${kubeconfig}" get ns kube-system >/dev/null 2>&1; do
+  # --server: admin.conf points at the cluster's ENDPOINT DNS, which still
+  # resolves to the PLATFORM until the operator cuts over (that is the whole
+  # point of the human gate). Verifying through it would either time out or —
+  # worse — silently probe the old control plane. Talk to the local apiserver
+  # and rely on the config's CA/credentials (the endpoint name stays in the
+  # cert SANs, so TLS validates via the kubeconfig's tls-server-name).
+  local local_api="https://127.0.0.1:6443"
+  until kubectl --kubeconfig "${kubeconfig}" --server "${local_api}" \
+    --tls-server-name "$(handover::endpoint_dns "${bundle}")" \
+    get ns kube-system >/dev/null 2>&1; do
     (( waited < timeout )) || {
       error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} get ns kube-system kept failing) — state left behind: ${k8s_dir}/pki holds the bundle PKI and the restored etcd data dir may be corrupt (a truncated snapshot restores 'successfully' under --skip-hash-check and only fails here). Clean up ('kubeadm reset') before retrying."
       return 1
