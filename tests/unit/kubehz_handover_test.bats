@@ -268,6 +268,145 @@ _mock_node_binaries() {
   assert_success
 }
 
+@test "handover receive: a kkp:// snapshot-location is refused as KKP-internal (use --snapshot)" {
+  _make_bundle
+  # kubehz-core writes kkp://<destination>/<clusterID>/<backupName> — not a
+  # fetchable URL; the refusal must say so and point at --snapshot.
+  printf 'kkp://s3-eu-central/cl-001/snap-2026-07-29' > "${BUNDLE}/snapshot-location"
+  _mock_node_binaries
+
+  run handover::receive --bundle "${BUNDLE}"
+  assert_failure
+  assert_output --partial "KKP-internal locator"
+  assert_output --partial "--snapshot"
+  # Refused BEFORE any node mutation.
+  [ ! -s "${CALLS}" ]
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
+@test "handover receive: PKI placement + encryption-config write happen BEFORE kubeadm init" {
+  _make_bundle
+  _mock_node_binaries
+  # Make place_pki (cp) and write_encryption_config (its chmod 600) observable
+  # in the shared CALLS log — thin pass-through wrappers over the real tools.
+  cp() { echo "cp $*" >> "${CALLS}"; command cp "$@"; }
+  chmod() { echo "chmod $*" >> "${CALLS}"; command chmod "$@"; }
+  export -f cp chmod
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+
+  local init_line
+  init_line=$(grep -n '^kubeadm init' "${CALLS}" | head -1 | cut -d: -f1)
+  [ -n "${init_line}" ]
+
+  # Every one of the six PKI files is in place BEFORE kubeadm init runs —
+  # kubeadm must find them to REUSE (not re-mint) the identity.
+  local key pki_line
+  for key in ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key; do
+    pki_line=$(grep -n "^cp ${BUNDLE}/${key} " "${CALLS}" | head -1 | cut -d: -f1)
+    [ -n "${pki_line}" ] || { echo "no cp recorded for ${key}" >&2; return 1; }
+    [ "${pki_line}" -lt "${init_line}" ] || { echo "${key} placed AFTER kubeadm init" >&2; return 1; }
+  done
+
+  # …and so is the EncryptionConfiguration (its 0600 tighten is the marker).
+  local enc_line
+  enc_line=$(grep -n '^chmod 600 .*kubehz-encryption-config.yaml' "${CALLS}" | head -1 | cut -d: -f1)
+  [ -n "${enc_line}" ]
+  [ "${enc_line}" -lt "${init_line}" ]
+}
+
+@test "handover receive: a kubeadm init failure names the seeded state and the --force re-run" {
+  _make_bundle
+  etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
+  kubeadm() { echo "kubeadm $*" >> "${CALLS}"; return 1; }
+  kubectl() { return 0; }
+  export -f etcdutl kubeadm kubectl
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "state left behind"
+  assert_output --partial "${KUBEHZ_HANDOVER_K8S_DIR}/pki"
+  assert_output --partial "${KUBEHZ_HANDOVER_ETCD_DIR}"
+  assert_output --partial "kubeadm reset"
+  assert_output --partial "--force"
+}
+
+@test "handover: a fetched snapshot lands 0600 inside the private workdir" {
+  _make_bundle
+  printf 'https://backups.example.com/snap.db' > "${BUNDLE}/snapshot-location"
+  curl() {
+    local out=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "-o" ] && out="$2"
+      shift
+    done
+    printf 'snapshot-bytes' > "${out}"
+    return 0
+  }
+  export -f curl
+
+  local workdir="${BATS_TEST_TMPDIR}/work"
+  mkdir -p "${workdir}"
+  run handover::fetch_snapshot "${BUNDLE}" "" "${workdir}"
+  assert_success
+  assert_output "${workdir}/kubehz-handover-snapshot.db"
+  run stat -c '%a' "${workdir}/kubehz-handover-snapshot.db"
+  assert_output "600"
+}
+
+@test "handover receive: scrubs the extracted bundle + fetched snapshot on failure" {
+  _make_bundle
+  printf 'https://backups.example.com/snap.db' > "${BUNDLE}/snapshot-location"
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+
+  etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
+  kubeadm() { echo "kubeadm $*" >> "${CALLS}"; return 1; }   # fail LATE
+  kubectl() { return 0; }
+  curl() {
+    local out=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "-o" ] && out="$2"
+      shift
+    done
+    printf 'snapshot-bytes' > "${out}"
+    return 0
+  }
+  export -f etcdutl kubeadm kubectl curl
+
+  # Confine mktemp so the workdir (extracted PKI + encryption key + downloaded
+  # snapshot) is observable — after the failure it must be GONE.
+  export TMPDIR="${BATS_TEST_TMPDIR}/scratch"
+  mkdir -p "${TMPDIR}"
+
+  run handover::receive --bundle "${tarball}"
+  assert_failure
+  assert_output --partial "kubeadm init FAILED"
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+  # The user's own bundle archive is never touched.
+  [ -f "${tarball}" ]
+}
+
+@test "handover receive: a successful receive leaves no scratch behind and keeps user files" {
+  _make_bundle
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+  _mock_node_binaries
+
+  export TMPDIR="${BATS_TEST_TMPDIR}/scratch"
+  mkdir -p "${TMPDIR}"
+
+  run handover::receive --bundle "${tarball}" --snapshot "${SNAPSHOT}"
+  assert_success
+  assert_output --partial "handover: receive complete"
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+  # The user-provided snapshot lives OUTSIDE the workdir and stays.
+  [ -f "${SNAPSHOT}" ]
+}
+
 @test "handover: write_kubeadm_config rejects a non-hostname endpoint-dns (injection guard)" {
   _make_bundle
   printf 'evil.example.com"\n  extraArgs:\n    - name: pwn' > "${BUNDLE}/endpoint-dns"
@@ -287,7 +426,7 @@ _mock_node_binaries() {
 
 # ── preseed: the thin kubeone variant ────────────────────
 
-@test "handover preseed: scps exactly the six PKI files to the node's /etc/kubernetes/pki" {
+@test "handover preseed: transfers the six PKI files per-file with immediate key tightening" {
   _make_bundle
   ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
   scp() { echo "scp $*" >> "${CALLS}"; return 0; }
@@ -297,27 +436,58 @@ _mock_node_binaries() {
   assert_success
   assert_output --partial "PKI pre-seeded on 203.0.113.7"
 
-  # mkdir first, then ONE scp with all six PKI files, then the chmod.
+  # The remote pki dir is created under umask 077 — 0700 from the very start,
+  # so nothing inside is reachable while the transfer is in flight.
+  run grep -F "umask 077 && mkdir -p /etc/kubernetes/pki" "${CALLS}"
+  assert_success
+
+  # SIX per-file scps, one per PKI key…
   run grep -c '^scp ' "${CALLS}"
-  assert_output "1"
-  local scp_line
-  scp_line=$(grep '^scp ' "${CALLS}")
+  assert_output "6"
   local key
   for key in ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key; do
-    [[ "${scp_line}" == *"${BUNDLE}/${key}"* ]] || {
-      echo "scp is missing ${key}: ${scp_line}" >&2
-      return 1
-    }
+    run grep -F "${BUNDLE}/${key} root@203.0.113.7:/etc/kubernetes/pki/${key}" "${CALLS}"
+    assert_success
   done
   # …and NEVER the restore-only artifacts (the encryption key stays off the
   # wire until kubeone's own config delivery handles it).
-  [[ "${scp_line}" != *encryption-key* ]]
-  [[ "${scp_line}" != *snapshot-location* ]]
-  [[ "${scp_line}" == *"root@203.0.113.7:/etc/kubernetes/pki/"* ]]
+  run grep -E '^scp .*(encryption-key|snapshot-location)' "${CALLS}"
+  assert_failure
 
-  # Key modes are tightened on the node afterwards.
+  # Every private key is tightened to 0600 IMMEDIATELY after its own transfer
+  # (ca.key's chmod precedes the NEXT file's scp — not one chmod at the end).
+  local chmod_ca scp_sa_pub
+  chmod_ca=$(grep -n 'chmod 600 /etc/kubernetes/pki/ca.key' "${CALLS}" | head -1 | cut -d: -f1)
+  scp_sa_pub=$(grep -n "^scp .*${BUNDLE}/sa.pub" "${CALLS}" | head -1 | cut -d: -f1)
+  [ -n "${chmod_ca}" ] && [ -n "${scp_sa_pub}" ]
+  [ "${chmod_ca}" -lt "${scp_sa_pub}" ]
+  run grep -F "chmod 600 /etc/kubernetes/pki/sa.key" "${CALLS}"
+  assert_success
+  run grep -F "chmod 600 /etc/kubernetes/pki/front-proxy-ca.key" "${CALLS}"
+  assert_success
+}
+
+@test "handover preseed: a mid-transfer failure has already tightened earlier keys (per-file chmod)" {
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  # sa.key (4th file) dies mid-transfer.
+  scp() {
+    echo "scp $*" >> "${CALLS}"
+    case "$*" in *"/sa.key "*) return 1 ;; esac
+    return 0
+  }
+  export -f ssh scp
+
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+  assert_failure
+  assert_output --partial "copying sa.key"
+  # ca.key had ALREADY been chmod 600 before the failure — the whole point of
+  # the per-file tighten.
   run grep -F "chmod 600 /etc/kubernetes/pki/ca.key" "${CALLS}"
   assert_success
+  # Nothing after the failed file went over the wire.
+  run grep -F "front-proxy-ca.crt" "${CALLS}"
+  assert_failure
 }
 
 @test "handover preseed: --node is required" {

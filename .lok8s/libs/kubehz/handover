@@ -55,17 +55,25 @@ kubehz::handover() {
 # ── Bundle handling ──────────────────────────────────────
 
 # Resolve --bundle into a directory: a directory is used as-is; a file (the
-# api's one-time .tar.gz download) is unpacked into a private temp dir.
+# api's one-time .tar.gz download) is unpacked into a private (0700) dir —
+# inside the caller's workdir when one is given, so the caller's cleanup trap
+# scrubs the extracted PKI + encryption key on every exit path (a direct call
+# without a workdir owns the mktemp dir and must remove it itself).
 # Outputs the bundle dir on stdout.
 handover::resolve_bundle() {
-  local bundle="${1}"
+  local bundle="${1}" workdir="${2:-}"
   if [[ -d "${bundle}" ]]; then
     echo "${bundle}"
     return 0
   fi
   if [[ -f "${bundle}" ]]; then
     local dir
-    dir=$(mktemp -d) || return 1
+    if [[ -n "${workdir}" ]]; then
+      dir="${workdir}/bundle"
+      mkdir -p "${dir}" || return 1
+    else
+      dir=$(mktemp -d) || return 1
+    fi
     chmod 700 "${dir}"
     if ! tar -xzf "${bundle}" -C "${dir}" 2>/dev/null; then
       error "handover: ${bundle} is neither a bundle directory nor a readable .tar.gz archive"
@@ -110,31 +118,50 @@ handover::place_pki() {
 
 # Obtain the etcd snapshot: an explicit --snapshot file wins; otherwise the
 # bundle's snapshot-location is fetched BEST-EFFORT (s3:// needs an aws CLI on
-# the node, https:// uses curl, an absolute path is used in place). Every
-# failure names the fix: download it yourself and re-run with --snapshot.
+# the node, https:// uses curl, an absolute path is used in place; kkp:// is a
+# KKP-internal locator and always refused). Every failure names the fix:
+# download it yourself and re-run with --snapshot. A download lands 0600
+# inside the caller's private workdir (an etcd snapshot IS the full cluster
+# state, secrets included) and is scrubbed by the caller's cleanup trap; a
+# user-provided --snapshot or on-node absolute path is never touched.
 # Outputs the local snapshot path.
 handover::fetch_snapshot() {
-  local bundle="${1}" override="${2:-}"
+  local bundle="${1}" override="${2:-}" workdir="${3:-}"
   if [[ -n "${override}" ]]; then
     [[ -f "${override}" ]] || { error "handover: --snapshot file not found: ${override}"; return 1; }
     echo "${override}"
     return 0
   fi
-  local location out="${TMPDIR:-/tmp}/kubehz-handover-snapshot.db"
+  if [[ -z "${workdir}" ]]; then
+    workdir=$(mktemp -d) || return 1
+    chmod 700 "${workdir}"
+  fi
+  local location out="${workdir}/kubehz-handover-snapshot.db"
   location=$(<"${bundle}/snapshot-location")
   case "${location}" in
+    kkp://*)
+      # kubehz-core writes kkp://<destination>/<clusterID>/<backupName> — a
+      # KKP-internal locator naming the platform's backup destination, NOT a
+      # fetchable URL from this node.
+      error "handover: snapshot-location '${location}' is a KKP-internal locator (kkp://<destination>/<clusterID>/<backupName>) — it cannot be fetched from this node. Obtain the snapshot object via the platform (the tier2/api bundle download provides it) and re-run with --snapshot <file>"
+      return 1
+      ;;
     s3://*)
       command -v aws >/dev/null 2>&1 || {
         error "handover: the snapshot lives at ${location} but no aws CLI is on this node — download it with any s3 client against the platform's object store and re-run with --snapshot <file>"
         return 1
       }
-      aws s3 cp "${location}" "${out}" >/dev/null || {
+      # 0600 BEFORE any bytes land, plus an umask guard for tools that write
+      # a fresh file (aws downloads to a part-file, then renames over out).
+      { : > "${out}" && chmod 600 "${out}"; } || return 1
+      ( umask 077 && aws s3 cp "${location}" "${out}" >/dev/null ) || {
         error "handover: fetching ${location} via the aws CLI failed — download it yourself and re-run with --snapshot <file>"
         return 1
       }
       ;;
     https://*)
-      curl -fsSL "${location}" -o "${out}" || {
+      { : > "${out}" && chmod 600 "${out}"; } || return 1
+      ( umask 077 && curl -fsSL "${location}" -o "${out}" ) || {
         error "handover: downloading the snapshot from ${location} failed — download it yourself and re-run with --snapshot <file>"
         return 1
       }
@@ -295,12 +322,24 @@ handover::receive() {
   local k8s_dir="${KUBEHZ_HANDOVER_K8S_DIR:-/etc/kubernetes}"
   local etcd_dir="${KUBEHZ_HANDOVER_ETCD_DIR:-/var/lib/etcd}"
 
+  # Private scratch (0700) for the bundle extraction + a downloaded snapshot —
+  # PKI, the encryption key and the etcd snapshot must not linger on disk.
+  # Scrubbed on EVERY exit path; a user-provided --bundle dir or --snapshot
+  # file lives outside it and is never touched. Expand NOW (locals are out of
+  # scope when the trap fires — the libs/build idiom); a re-fire on a caller
+  # return is a harmless idempotent rm.
+  local workdir
+  workdir=$(mktemp -d) || return 1
+  chmod 700 "${workdir}"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${workdir}'" RETURN
+
   local bundle_dir
-  bundle_dir=$(handover::resolve_bundle "${bundle}") || return 1
+  bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
   handover::validate_bundle "${bundle_dir}" || return 1
 
   if [[ -d "${k8s_dir}" ]] && [[ -n "$(ls -A "${k8s_dir}" 2>/dev/null)" ]] && ! (( force )); then
-    error "handover: ${k8s_dir} is not empty — this node already runs (or ran) Kubernetes. receive expects a FRESH target node; on a used node run 'kubeadm reset' first, or re-run with --force if you really mean to overwrite."
+    error "handover: ${k8s_dir} is not empty — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains."
     return 1
   fi
   if [[ -d "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
@@ -314,14 +353,17 @@ handover::receive() {
 
   # Fail before touching the node: resolve the snapshot first.
   local snapshot_file
-  snapshot_file=$(handover::fetch_snapshot "${bundle_dir}" "${snapshot}") || return 1
+  snapshot_file=$(handover::fetch_snapshot "${bundle_dir}" "${snapshot}" "${workdir}") || return 1
 
   handover::place_pki "${bundle_dir}" "${k8s_dir}" || return 1
   handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" || return 1
   handover::write_encryption_config "${bundle_dir}" "${k8s_dir}" >/dev/null || return 1
   local kubeadm_config="${k8s_dir}/kubehz-handover-kubeadm.yaml"
   handover::write_kubeadm_config "${bundle_dir}" "${k8s_dir}" "${kubeadm_config}" || return 1
-  handover::kubeadm_init "${kubeadm_config}" || return 1
+  handover::kubeadm_init "${kubeadm_config}" || {
+    error "handover: kubeadm init FAILED after the node was seeded — state left behind: ${k8s_dir}/pki holds the bundle PKI and ${etcd_dir} holds the restored snapshot. Clean up first ('kubeadm reset' removes both, or delete ${k8s_dir} and ${etcd_dir} yourself), then re-run receive with --force."
+    return 1
+  }
   handover::verify "${bundle_dir}" "${k8s_dir}" || return 1
 
   if (( single_node )); then
@@ -352,8 +394,17 @@ handover::preseed() {
   )
   :args "Pre-seed exported PKI onto a kubeone node before kubeone apply" "${@}"
 
+  # Same scratch + cleanup contract as receive: an extracted .tar.gz bundle
+  # (PKI + encryption key on disk) is scrubbed on every exit path. Expand NOW
+  # (libs/build idiom); a trap re-fire is a harmless idempotent rm.
+  local workdir
+  workdir=$(mktemp -d) || return 1
+  chmod 700 "${workdir}"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${workdir}'" RETURN
+
   local bundle_dir
-  bundle_dir=$(handover::resolve_bundle "${bundle}") || return 1
+  bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
   handover::validate_bundle "${bundle_dir}" || return 1
 
   # Same non-interactive SSH posture as the kubeone driver's node probes.
@@ -363,25 +414,33 @@ handover::preseed() {
   )
   [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
 
+  # umask 077 → the pki dir is 0700 from the start: even a file that lands
+  # loose is unreachable while the transfer is in flight.
   ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
-    'mkdir -p /etc/kubernetes/pki' || {
+    'umask 077 && mkdir -p /etc/kubernetes/pki' || {
     error "handover: cannot reach ${user}@${node} over SSH"
     return 1
   }
 
+  # Per-file transfer with an IMMEDIATE per-key chmod (never one chmod at the
+  # very end): private keys are 0600 even when a later copy dies mid-transfer.
   local key
-  local -a files=()
   for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
-    files+=("${bundle_dir}/${key}")
+    scp "${ssh_opts[@]}" -P "${port}" "${bundle_dir}/${key}" \
+      "${user}@${node}:/etc/kubernetes/pki/${key}" || {
+      error "handover: copying ${key} to ${node} failed"
+      return 1
+    }
+    case "${key}" in
+      *.key)
+        ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
+          "chmod 600 /etc/kubernetes/pki/${key}" || {
+          error "handover: could not chmod 600 /etc/kubernetes/pki/${key} on ${node} — key material must not stay readable; fix the mode and re-run"
+          return 1
+        }
+        ;;
+    esac
   done
-  scp "${ssh_opts[@]}" -P "${port}" "${files[@]}" "${user}@${node}:/etc/kubernetes/pki/" || {
-    error "handover: copying the PKI to ${node} failed"
-    return 1
-  }
-  # Key material on the node: tighten modes (scp does not guarantee them).
-  ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
-    'chmod 600 /etc/kubernetes/pki/ca.key /etc/kubernetes/pki/sa.key /etc/kubernetes/pki/front-proxy-ca.key' \
-    || warn "handover: could not tighten key modes on ${node} — chmod 600 the .key files yourself"
 
   echo "handover: PKI pre-seeded on ${node}. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity."
 }

@@ -116,26 +116,42 @@ kubectl() {
       if [ -n "${STUB_DAEMONSETS+x}" ]; then printf '%s' "${STUB_DAEMONSETS}"; else printf 'cilium\nkube-proxy\n'; fi ;;
     "get configmap kubeadm-config"*)
       printf '  networking:\n    dnsDomain: cluster.local\n    podSubnet: 10.244.0.0/16\n    serviceSubnet: 10.96.0.0/12\n' ;;
-    "get storageclasses -o json")
-      printf '%s\n' '{"items":[{"metadata":{"name":"hcloud-volumes","annotations":{"storageclass.kubernetes.io/is-default-class":"true"}},"provisioner":"csi.hetzner.cloud"},{"metadata":{"name":"ceph-block"},"provisioner":"rook-ceph.rbd.csi.ceph.com"}]}' ;;
-    "get pv -o json")
+    # Prefix-glob matches: the assessment probes append --request-timeout=5s
+    # (a stalled apiserver degrades ONE probe, never the whole beat).
+    # STUB_SC_JSON overrides the StorageClass dump (the >50-cap fixture).
+    "get storageclasses -o json"*)
+      if [ -n "${STUB_SC_JSON:-}" ]; then printf '%s\n' "${STUB_SC_JSON}"; else
+        printf '%s\n' '{"items":[{"metadata":{"name":"hcloud-volumes","annotations":{"storageclass.kubernetes.io/is-default-class":"true"}},"provisioner":"csi.hetzner.cloud"},{"metadata":{"name":"ceph-block"},"provisioner":"rook-ceph.rbd.csi.ceph.com"}]}'
+      fi ;;
+    "get pv -o json"*)
       printf '%s\n' '{"items":[{"metadata":{"name":"pv-1","annotations":{"pv.kubernetes.io/provisioned-by":"csi.hetzner.cloud"}},"spec":{"capacity":{"storage":"10Gi"}}},{"metadata":{"name":"pv-2"},"spec":{"csi":{"driver":"csi.hetzner.cloud"},"capacity":{"storage":"30Gi"}}},{"metadata":{"name":"pv-3","annotations":{"pv.kubernetes.io/provisioned-by":"rook-ceph.rbd.csi.ceph.com"}},"spec":{"capacity":{"storage":"512Mi"}}}]}' ;;
-    "get services -A -o json")
+    "get services -A -o json"*)
       printf '%s\n' '{"items":[{"spec":{"type":"LoadBalancer"}},{"spec":{"type":"ClusterIP"}},{"spec":{"type":"LoadBalancer"}}]}' ;;
-    "get validatingwebhookconfigurations -o json") printf '%s\n' '{"items":[{},{},{}]}' ;;
-    "get mutatingwebhookconfigurations -o json") printf '%s\n' '{"items":[{}]}' ;;
-    "get nodes -l node-role.kubernetes.io/control-plane -o name") printf 'node/cp-1\n' ;;
-    "get nodes -l node-role.kubernetes.io/master -o name") printf '' ;;
+    "get validatingwebhookconfigurations -o json"*) printf '%s\n' '{"items":[{},{},{}]}' ;;
+    "get mutatingwebhookconfigurations -o json"*) printf '%s\n' '{"items":[{}]}' ;;
+    "get nodes -l node-role.kubernetes.io/control-plane -o name"*) printf 'node/cp-1\n' ;;
+    "get nodes -l node-role.kubernetes.io/master -o name"*) printf '' ;;
 
     "get pods"*) printf ''; return 0 ;;
     *) printf '' ;;
   esac
 }
 curl() {
+  # Capture the POSTed body (-d); every call overwrites STUB_PAYLOAD_OUT so a
+  # retry's payload is what the test asserts on. Each invocation is logged to
+  # STUB_CURL_LOG (call-count asserts). STUB_CURL_FAIL_ASSESS=1 fails any POST
+  # whose body carries an assessment (the api-zod-400 simulation) — the plain
+  # retry then succeeds.
+  _body=""
   while [ "$#" -gt 0 ]; do
-    [ "$1" = "-d" ] && printf '%s' "$2" > "${STUB_PAYLOAD_OUT}"
+    if [ "$1" = "-d" ]; then _body="$2"; shift; fi
     shift
   done
+  echo "curl" >> "${STUB_CURL_LOG}"
+  [ -z "${_body}" ] || printf '%s' "${_body}" > "${STUB_PAYLOAD_OUT}"
+  if [ -n "${STUB_CURL_FAIL_ASSESS:-}" ]; then
+    case "${_body}" in *'"assessment"'*) return 22 ;; esac
+  fi
   # The heartbeat response body — STUB_RESPONSE drives the actions[] tests.
   printf '%s' "${STUB_RESPONSE:-}"
   return 0
@@ -150,6 +166,7 @@ STUBS_EOF
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
+  export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
 }
 
 teardown() {
@@ -357,6 +374,61 @@ teardown() {
   assert_output "40"
   run command jq -r '.assessment.pvSummary.byProvisioner["rook-ceph.rbd.csi.ceph.com"].totalGi' "${STUB_PAYLOAD_OUT}"
   assert_output "0.5"
+}
+
+# ── Assessment: array caps (the api zod schema caps at 50) ──
+# An uncapped storageClasses list 400s the WHOLE heartbeat server-side; the
+# agent must cap at 50 (logged, never a silent drop) so the beat always fits.
+
+@test "assessment: >50 StorageClasses are capped to 50 and the beat still succeeds" {
+  export STUB_SC_JSON
+  STUB_SC_JSON=$(command jq -nc '{items: [range(60) | {metadata: {name: "sc-\(.)"}, provisioner: "csi.example.com"}]}')
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "first 50 of 60 StorageClasses"
+
+  run command jq -e . "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -r '.assessment.storageClasses | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "50"
+  run command jq -r '.assessment.storageClasses[0].name' "${STUB_PAYLOAD_OUT}"
+  assert_output "sc-0"
+}
+
+# ── Heartbeat POST failure with an assessment attached: retry WITHOUT it ──
+# The regression this pins: an unguarded RESPONSE=$(curl -f …) under set -e
+# aborted BEFORE the marker write, so a rejected (e.g. over-cap → zod 400)
+# assessment resent deterministically every 5 minutes and the heartbeat was
+# PERMANENTLY lost. The fix retries once without the assessment so the plain
+# beat always lands, then moves the marker to break the resend loop.
+
+@test "heartbeat: a rejected assessment POST retries ONCE as a plain heartbeat (beat never lost)" {
+  export STUB_CURL_FAIL_ASSESS=1
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "retrying once without it"
+
+  # Exactly two heartbeat POSTs: the assessment one (failed) + the plain retry.
+  run grep -c '^curl$' "${STUB_CURL_LOG}"
+  assert_output "2"
+
+  # The payload that LANDED (last capture) is the plain beat — full heartbeat
+  # fields, no assessment.
+  run command jq -e . "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+  assert_output "test.example.com"
+  run command jq -rc '[.nodes[].name]' "${STUB_PAYLOAD_OUT}"
+  assert_output '["cp-1","worker-1"]'
+
+  # The marker moved anyway — a known-rejected assessment must NOT resend
+  # every 5 minutes; the next attempt waits for 24h or a platform request.
+  run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
+  assert_success
 }
 
 # ── Assessment gating: at most once per 24h ──────────────
