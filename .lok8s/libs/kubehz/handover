@@ -30,6 +30,8 @@
 #   KUBEHZ_HANDOVER_K8S_DIR   target /etc/kubernetes  (default)
 #   KUBEHZ_HANDOVER_ETCD_DIR  target /var/lib/etcd    (default)
 #   KUBEHZ_HANDOVER_WAIT      apiserver-ready timeout seconds (default 300)
+#   KUBEHZ_HANDOVER_ETCD_IMAGE_TAG  etcd image tag for the target's static pod
+#                             (default 3.5.21-0 — the platform's source line)
 
 import ^utils/verbose
 
@@ -299,6 +301,13 @@ EOF
 # exported endpoint DNS stays the apiserver endpoint ("keep" strategy repoints
 # DNS at this node, so the serving cert must cover it) and the apiserver
 # mounts the secrets-at-rest encryption config.
+# etcd VERSION PIN ($4): the restored data comes from the platform's etcd
+# line (KKP CE 2.30 ships 3.5.21); kubeadm's default etcd is often a major
+# ahead (3.6.x), and etcd 3.6 PANICS applying the snapshot's member-attribute
+# entries (RaftCluster.UpdateAttributes on a 3.5-origin restore — proven on a
+# real target, tier2 run 17). Boot the SOURCE line first; upgrading etcd
+# afterwards is the standard in-place path. The caller validates the tag
+# (fail-before-touching-the-node contract).
 handover::write_kubeadm_config() {
   local bundle="${1}" k8s_dir="${2}" out="${3}"
   local enc="${k8s_dir}/kubehz-encryption-config.yaml" dns
@@ -309,10 +318,14 @@ handover::write_kubeadm_config() {
     error "handover: bundle endpoint-dns '${dns}' is not a plain hostname — refusing to render the kubeadm config"
     return 1
   }
+  local etcd_tag="${4}"
   cat > "${out}" <<EOF
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 controlPlaneEndpoint: "${dns}:6443"
+etcd:
+  local:
+    imageTag: "${etcd_tag}"
 apiServer:
   certSANs:
     - "${dns}"
@@ -438,12 +451,19 @@ handover::receive() {
   snapshot_file=$(handover::fetch_snapshot "${bundle_dir}" "${snapshot}" "${workdir}") || return 1
   member_identity="$(handover::member_identity)" || return 1
   read -r node_name peer_url <<<"${member_identity}"
+  # Validate the etcd pin here too — a bad override must not strand seeded PKI.
+  local etcd_tag="${KUBEHZ_HANDOVER_ETCD_IMAGE_TAG:-3.5.21-0}"
+  # Docker tag grammar: alnum/underscore first char, then [alnum._-], ≤128.
+  [[ "${etcd_tag}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$ ]] || {
+    error "handover: KUBEHZ_HANDOVER_ETCD_IMAGE_TAG '${etcd_tag}' is not a plain image tag — refusing before touching the node"
+    return 1
+  }
 
   handover::place_pki "${bundle_dir}" "${k8s_dir}" || return 1
   handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" "${node_name}" "${peer_url}" || return 1
   handover::write_encryption_config "${bundle_dir}" "${k8s_dir}" >/dev/null || return 1
   local kubeadm_config="${k8s_dir}/kubehz-handover-kubeadm.yaml"
-  handover::write_kubeadm_config "${bundle_dir}" "${k8s_dir}" "${kubeadm_config}" || return 1
+  handover::write_kubeadm_config "${bundle_dir}" "${k8s_dir}" "${kubeadm_config}" "${etcd_tag}" || return 1
   handover::kubeadm_init "${kubeadm_config}" || {
     error "handover: kubeadm init FAILED after the node was seeded — state left behind: ${k8s_dir}/pki holds the bundle PKI and ${etcd_dir} holds the restored snapshot. Clean up first ('kubeadm reset' removes both, or delete ${k8s_dir} and ${etcd_dir} yourself), then re-run receive with --force."
     return 1
