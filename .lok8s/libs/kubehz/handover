@@ -320,13 +320,9 @@ EOF
 handover::write_kubeadm_config() {
   local bundle="${1}" k8s_dir="${2}" out="${3}"
   local enc="${k8s_dir}/kubehz-encryption-config.yaml" dns
-  dns=$(<"${bundle}/endpoint-dns")
-  # dns is interpolated into generated YAML — reject anything outside a safe
-  # hostname charset (no YAML injection from a tampered bundle).
-  [[ "${dns}" =~ ^[a-zA-Z0-9.-]+$ ]] || {
-    error "handover: bundle endpoint-dns '${dns}' is not a plain hostname — refusing to render the kubeadm config"
-    return 1
-  }
+  # ONE validated reader (handover::endpoint_dns) — dns is interpolated into
+  # generated YAML and passed to kubectl, so the charset gate lives there.
+  dns="$(handover::endpoint_dns "${bundle}")" || return 1
   local etcd_tag="${4}"
   cat > "${out}" <<EOF
 apiVersion: kubeadm.k8s.io/v1beta4
@@ -370,8 +366,16 @@ handover::kubeadm_init() {
 # The bundle's endpoint DNS (also the apiserver cert's SAN) — used as the
 # TLS server name when probing the apiserver on its local address.
 handover::endpoint_dns() {
-  local bundle="${1}"
-  tr -d '[:space:]' < "${bundle}/endpoint-dns"
+  local bundle="${1}" dns
+  dns="$(tr -d '[:space:]' < "${bundle}/endpoint-dns")"
+  # Same charset gate the kubeadm-config renderer applies — this value also
+  # reaches kubectl as --tls-server-name, so a tampered bundle gets one
+  # validated reader, not two.
+  [[ "${dns}" =~ ^[a-zA-Z0-9.-]+$ ]] || {
+    error "handover: bundle endpoint-dns '${dns}' is not a plain hostname"
+    return 1
+  }
+  printf '%s' "${dns}"
 }
 
 # Post-init verification: the apiserver answers WITH the restored data, and
@@ -387,9 +391,10 @@ handover::verify() {
   # worse — silently probe the old control plane. Talk to the local apiserver
   # and rely on the config's CA/credentials (the endpoint name stays in the
   # cert SANs, so TLS validates via the kubeconfig's tls-server-name).
-  local local_api="https://127.0.0.1:6443"
+  local local_api="https://127.0.0.1:6443" server_name
+  server_name="$(handover::endpoint_dns "${bundle}")" || return 1
   until kubectl --kubeconfig "${kubeconfig}" --server "${local_api}" \
-    --tls-server-name "$(handover::endpoint_dns "${bundle}")" \
+    --tls-server-name "${server_name}" \
     get ns kube-system >/dev/null 2>&1; do
     (( waited < timeout )) || {
       error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} get ns kube-system kept failing) — state left behind: ${k8s_dir}/pki holds the bundle PKI and the restored etcd data dir may be corrupt (a truncated snapshot restores 'successfully' under --skip-hash-check and only fails here). Clean up ('kubeadm reset') before retrying."

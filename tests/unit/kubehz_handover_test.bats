@@ -151,7 +151,9 @@ _mock_node_binaries() {
 
   # The verify probe talks to the LOCAL apiserver — admin.conf's endpoint DNS
   # still points at the platform until the operator cuts over.
-  run grep -F -- "--server https://127.0.0.1:6443" "${CALLS}"
+  # BOTH args are load-bearing: --server alone blanks TLSServerName and the
+  # cert (SANs = the endpoint DNS) would be checked against 127.0.0.1.
+  run grep -F -- "--server https://127.0.0.1:6443 --tls-server-name cl-001.kubermatic.kkp.kubehz.in.net" "${CALLS}"
   assert_success
 
   # Call order: snapshot restore BEFORE kubeadm init BEFORE the verify probe.
