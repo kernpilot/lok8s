@@ -272,7 +272,10 @@ SCRIPT
   export -f bootstrap::apply
 
   source "${_PROJECT_ROOT}/.lok8s/libs/provision"
-  provision::dispatch "test.lok8s.dev"
+  # Remote-lo targets a real cloud VM, so the infra gate (provision::confirm_infra,
+  # lok8s#103) demands consent — bypass via the dynamic-scope force flag; consent
+  # is the gate suite's subject, provider loading is this test's.
+  force=1 provision::dispatch "test.lok8s.dev"
 
   # Verify provider::validate was called
   [ -f "${provision_log}" ]
