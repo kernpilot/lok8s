@@ -198,8 +198,21 @@ handover::fetch_snapshot() {
 # Restore the snapshot into <etcd_dir>. etcdutl is the modern tool; etcdctl
 # (ETCDCTL_API=3) is the fallback on older nodes. Both refuse an existing
 # data dir, so an empty leftover dir is removed first.
+#
+# MEMBER IDENTITY must be rewritten at restore time: a default restore mints
+# a member named "default" with localhost peer URLs, and kubeadm's etcd
+# static pod then starts with --name <node> + the node-IP peer URL — etcd
+# refuses the mismatched data dir and crash-loops (the receive's kubeadm
+# init dies waiting for an apiserver that never gets its datastore). Restore
+# with the SAME name + peer URL kubeadm will use, exactly like the upstream
+# kubeadm disaster-recovery runbook.
 handover::restore_snapshot() {
   local snapshot="${1}" etcd_dir="${2}"
+  local node_name node_ip peer_url
+  node_name="$(hostname)"
+  # kubeadm advertises the default-route source address; mirror it.
+  node_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1)"
+  peer_url="https://${node_ip:-127.0.0.1}:2380"
   if [[ -e "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
     error "handover: ${etcd_dir} is not empty — refusing to restore over existing etcd data"
     return 1
@@ -212,9 +225,15 @@ handover::restore_snapshot() {
   # snapshot rides the platform's authenticated channels, and a corrupt
   # restore fails loudly at etcd startup.
   if command -v etcdutl >/dev/null 2>&1; then
-    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true || return 1
+    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true \
+      --name "${node_name}" \
+      --initial-cluster "${node_name}=${peer_url}" \
+      --initial-advertise-peer-urls "${peer_url}" || return 1
   elif command -v etcdctl >/dev/null 2>&1; then
-    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true || return 1
+    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true \
+      --name "${node_name}" \
+      --initial-cluster "${node_name}=${peer_url}" \
+      --initial-advertise-peer-urls "${peer_url}" || return 1
   else
     error "handover: neither etcdutl nor etcdctl found on this node — install the etcd client tooling and re-run"
     return 1

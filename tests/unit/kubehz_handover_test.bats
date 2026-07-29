@@ -266,6 +266,11 @@ _mock_node_binaries() {
   run grep -F "etcdutl snapshot restore ${SNAPSHOT}" "${CALLS}"
   assert_success
   assert_output --partial -- "--skip-hash-check=true"
+  # The restore must rewrite member identity to what kubeadm's static pod
+  # starts with — a "default" member crash-loops etcd on first boot.
+  assert_output --partial -- "--name $(hostname)"
+  assert_output --partial -- "--initial-cluster $(hostname)="
+  assert_output --partial -- "--initial-advertise-peer-urls https://"
 }
 
 @test "handover receive: an incomplete bundle stops BEFORE any node mutation" {
