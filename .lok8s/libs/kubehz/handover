@@ -280,6 +280,14 @@ handover::write_encryption_config() {
     return 1
   }
   mkdir -p "${k8s_dir}" || return 1
+  # PROVIDER + KEY NAME must match what the SOURCE cluster encrypted with —
+  # the stored values carry the "k8s:enc:<provider>:v1:<keyname>:" prefix and
+  # the apiserver refuses anything else ("no matching prefix found", proven
+  # on a real target: tier2 run 18 booted a healthy apiserver that could not
+  # read a single Secret). The platform operator configures KKP with
+  # secretbox / kubehz-key-1 (kubehz-core etcd_encryption.go
+  # etcdEncryptionKeyName) — mirror it verbatim. Follow-up: carry the
+  # provider+name in the bundle instead of pinning the platform constant.
   cat > "${out}" <<EOF
 apiVersion: apiserver.config.k8s.io/v1
 kind: EncryptionConfiguration
@@ -287,9 +295,9 @@ resources:
   - resources:
       - secrets
     providers:
-      - aescbc:
+      - secretbox:
           keys:
-            - name: kubehz-handover
+            - name: kubehz-key-1
               secret: ${key}
       - identity: {}
 EOF

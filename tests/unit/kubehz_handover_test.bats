@@ -201,6 +201,10 @@ _mock_node_binaries() {
   local enc="${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
   run cat "${enc}"
   assert_output --partial "kind: EncryptionConfiguration"
+  # Provider + key name are the SOURCE cluster's (secretbox / kubehz-key-1,
+  # kubehz-core etcd_encryption.go) — the stored-value prefix must match.
+  assert_output --partial "secretbox:"
+  assert_output --partial "name: kubehz-key-1"
   assert_output --partial "secret: dGVzdC1lbmNyeXB0aW9uLWtleQ=="
   run stat -c '%a' "${enc}"
   assert_output "600"
