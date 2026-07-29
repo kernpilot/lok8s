@@ -394,7 +394,8 @@ handover::verify() {
   # point of the human gate). Verifying through it would either time out or —
   # worse — silently probe the old control plane. Talk to the local apiserver
   # and rely on the config's CA/credentials (the endpoint name stays in the
-  # cert SANs, so TLS validates via the kubeconfig's tls-server-name).
+  # cert SANs, so we set --tls-server-name EXPLICITLY: --server alone blanks
+  # the server name and the cert would be checked against 127.0.0.1).
   local local_api="https://127.0.0.1:6443" server_name
   server_name="$(handover::endpoint_dns "${bundle}")" || return 1
   until kubectl --kubeconfig "${kubeconfig}" --server "${local_api}" \
