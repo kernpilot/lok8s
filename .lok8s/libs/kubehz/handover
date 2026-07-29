@@ -75,6 +75,20 @@ handover::resolve_bundle() {
       dir=$(mktemp -d) || return 1
     fi
     chmod 700 "${dir}"
+    # Path-traversal guard: reject any archive entry that is absolute or
+    # climbs out (`..` component) BEFORE extraction — a malicious bundle must
+    # not write outside the private dir (GNU tar defends by default, bsdtar
+    # historically did not; the listing check is tar-flavor-independent).
+    local entry
+    while IFS= read -r entry; do
+      case "${entry}" in
+        /*|*../*|../*|*/..)
+          error "handover: refusing ${bundle} — archive entry escapes the bundle dir: ${entry}"
+          rm -rf "${dir}"
+          return 1
+          ;;
+      esac
+    done < <(tar -tzf "${bundle}" 2>/dev/null)
     if ! tar -xzf "${bundle}" -C "${dir}" 2>/dev/null; then
       error "handover: ${bundle} is neither a bundle directory nor a readable .tar.gz archive"
       rm -rf "${dir}"

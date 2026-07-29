@@ -557,3 +557,16 @@ _mock_node_binaries() {
   assert_success
   assert_output --partial "handover: receive complete"
 }
+
+@test "resolve_bundle: rejects a path-traversal archive before extraction" {
+  local evil="${BATS_TEST_TMPDIR}/evil.tar.gz" marker="${BATS_TEST_TMPDIR}/escaped"
+  mkdir -p "${BATS_TEST_TMPDIR}/payload"
+  echo pwned > "${BATS_TEST_TMPDIR}/payload/escaped"
+  # ../-prefixed entry: extraction into <dir> would land NEXT TO it.
+  tar -czf "${evil}" -C "${BATS_TEST_TMPDIR}/payload" --transform 's|^|../|' escaped 2>/dev/null \
+    || tar -czf "${evil}" -C "${BATS_TEST_TMPDIR}/payload" -s '|^|../|' escaped
+  run handover::resolve_bundle "${evil}"
+  assert_failure
+  assert_output --partial "escapes the bundle dir"
+  [ ! -e "${marker}" ]
+}
