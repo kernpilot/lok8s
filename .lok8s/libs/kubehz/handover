@@ -205,10 +205,16 @@ handover::restore_snapshot() {
     return 1
   fi
   [[ ! -d "${etcd_dir}" ]] || rmdir "${etcd_dir}" 2>/dev/null || true
+  # --skip-hash-check: KKP's etcd-backup jobs STREAM the snapshot off a live
+  # member, and streamed snapshots carry no sha256 trailer — the check can
+  # only ever fail on a handover bundle (KKP's own EtcdRestore controller
+  # skips it for the same reason). Integrity still holds end to end: the
+  # snapshot rides the platform's authenticated channels, and a corrupt
+  # restore fails loudly at etcd startup.
   if command -v etcdutl >/dev/null 2>&1; then
-    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" || return 1
+    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true || return 1
   elif command -v etcdctl >/dev/null 2>&1; then
-    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" || return 1
+    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true || return 1
   else
     error "handover: neither etcdutl nor etcdctl found on this node — install the etcd client tooling and re-run"
     return 1
@@ -323,7 +329,11 @@ handover::verify() {
 # already carries Kubernetes state unless --force (and even then: run
 # `kubeadm reset` yourself first on a previously-used node).
 handover::receive() {
-  local bundle="" snapshot="" single_node=0 force=0
+  # force: honor the INHERITED field when the dispatch chain already consumed
+  # --force from argv (the #103 infra-gate made force inherited; a plain
+  # `local force=0` here shadowed that dynamic-scope value and the flag never
+  # reached the guards below).
+  local bundle="" snapshot="" single_node=0 force="${force:-0}"
   local -a args=(
     'bundle|b:!'      'Export bundle: a directory or .tar.gz with the contract keys'
     'snapshot|s'      'Pre-downloaded etcd snapshot file (skips the snapshot-location fetch)'
@@ -352,7 +362,13 @@ handover::receive() {
   bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
   handover::validate_bundle "${bundle_dir}" || return 1
 
-  if [[ -d "${k8s_dir}" ]] && [[ -n "$(ls -A "${k8s_dir}" 2>/dev/null)" ]] && ! (( force )); then
+  # "not empty" means REAL content: kubeadm's packages pre-create empty
+  # skeleton dirs (manifests/, pki/) on every stock image, and `kubeadm
+  # reset` leaves them behind too — refusing on those makes the documented
+  # remedy unsatisfiable. Only files (or non-empty subtrees) block.
+  local k8s_real=""
+  [[ -d "${k8s_dir}" ]] && k8s_real="$(find "${k8s_dir}" -type f -print -quit 2>/dev/null)"
+  if [[ -n "${k8s_real}" ]] && ! (( force )); then
     error "handover: ${k8s_dir} is not empty — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains."
     return 1
   fi

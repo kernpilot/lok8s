@@ -230,6 +230,43 @@ _mock_node_binaries() {
   [ ! -s "${CALLS}" ]
 }
 
+@test "handover receive: kubeadm's empty package-skeleton dirs do NOT block" {
+  # Stock images (and `kubeadm reset`) leave empty manifests/ + pki/ behind —
+  # the guard must only refuse REAL content, or its own documented remedy
+  # (kubeadm reset) can never satisfy it.
+  _make_bundle
+  _mock_node_binaries
+  mkdir -p "${KUBEHZ_HANDOVER_K8S_DIR}/manifests" "${KUBEHZ_HANDOVER_K8S_DIR}/pki"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+}
+
+@test "handover receive: dispatch-consumed --force (inherited field) flips the guard" {
+  # The infra-gate made `force` an inherited argsh field: `lo … receive
+  # --force` is consumed by the dispatch chain and arrives here only as the
+  # dynamically-scoped variable — receive must honor it, not shadow it.
+  _make_bundle
+  _mock_node_binaries
+  mkdir -p "${KUBEHZ_HANDOVER_K8S_DIR}"
+  touch "${KUBEHZ_HANDOVER_K8S_DIR}/kubelet.conf"
+
+  local force=1
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+}
+
+@test "handover receive: the restore skips the hash check (KKP snapshots are streamed, no trailer)" {
+  _make_bundle
+  _mock_node_binaries
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run grep -F "etcdutl snapshot restore ${SNAPSHOT}" "${CALLS}"
+  assert_success
+  assert_output --partial -- "--skip-hash-check=true"
+}
+
 @test "handover receive: an incomplete bundle stops BEFORE any node mutation" {
   _make_bundle
   rm "${BUNDLE}/front-proxy-ca.crt"
