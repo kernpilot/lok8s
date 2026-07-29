@@ -219,6 +219,21 @@ _mock_node_binaries() {
   assert_output "600"
 }
 
+@test "handover receive: --single-node untaints via the LOCAL apiserver, not the pre-cutover DNS" {
+  _make_bundle
+  _mock_node_binaries
+
+  run handover::receive --single-node --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  # The untaint must carry the same pinning as verify — admin.conf's endpoint
+  # DNS still points at the platform (same CA), so an unpinned call could
+  # untaint the WRONG cluster and report success.
+  run grep -F -- "taint nodes --all" "${CALLS}"
+  assert_success
+  assert_output --partial -- "--server https://127.0.0.1:6443"
+  assert_output --partial -- "--tls-server-name cl-001.kubermatic.kkp.kubehz.in.net"
+}
+
 @test "handover receive: an out-of-charset etcd image tag is refused BEFORE any node mutation" {
   _make_bundle
   _mock_node_binaries

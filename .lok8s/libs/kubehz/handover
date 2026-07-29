@@ -367,7 +367,11 @@ handover::kubeadm_init() {
 # TLS server name when probing the apiserver on its local address.
 handover::endpoint_dns() {
   local bundle="${1}" dns
-  dns="$(tr -d '[:space:]' < "${bundle}/endpoint-dns")"
+  # Trim EDGES only (a trailing newline is normal); interior whitespace must
+  # still fail the charset gate rather than be silently welded together.
+  dns="$(< "${bundle}/endpoint-dns")"
+  dns="${dns#"${dns%%[![:space:]]*}"}"
+  dns="${dns%"${dns##*[![:space:]]}"}"
   # Same charset gate the kubeadm-config renderer applies — this value also
   # reaches kubectl as --tls-server-name, so a tampered bundle gets one
   # validated reader, not two.
@@ -397,7 +401,7 @@ handover::verify() {
     --tls-server-name "${server_name}" \
     get ns kube-system >/dev/null 2>&1; do
     (( waited < timeout )) || {
-      error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} get ns kube-system kept failing) — state left behind: ${k8s_dir}/pki holds the bundle PKI and the restored etcd data dir may be corrupt (a truncated snapshot restores 'successfully' under --skip-hash-check and only fails here). Clean up ('kubeadm reset') before retrying."
+      error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} --server ${local_api} --tls-server-name ${server_name} get ns kube-system kept failing) — state left behind: ${k8s_dir}/pki holds the bundle PKI and the restored etcd data dir may be corrupt (a truncated snapshot restores 'successfully' under --skip-hash-check and only fails here). Clean up ('kubeadm reset') before retrying."
       return 1
     }
     sleep 5
@@ -508,14 +512,22 @@ handover::receive() {
   }
   handover::verify "${bundle_dir}" "${k8s_dir}" || return 1
 
+  local endpoint_dns
+  endpoint_dns="$(handover::endpoint_dns "${bundle_dir}")" || return 1
+
   if (( single_node )); then
-    kubectl --kubeconfig "${k8s_dir}/admin.conf" taint nodes --all \
-      node-role.kubernetes.io/control-plane- >/dev/null 2>&1 \
-      || warn "handover: could not untaint the control-plane node — run: kubectl taint nodes --all node-role.kubernetes.io/control-plane-"
+    # Pinned to the LOCAL apiserver for the same reason verify is: admin.conf's
+    # endpoint DNS still resolves to the PLATFORM until cutover, and its CA is
+    # the same identity — an unpinned call could untaint the WRONG cluster's
+    # nodes and report success.
+    kubectl --kubeconfig "${k8s_dir}/admin.conf" \
+      --server "https://127.0.0.1:6443" --tls-server-name "${endpoint_dns}" \
+      taint nodes --all node-role.kubernetes.io/control-plane- >/dev/null 2>&1 \
+      || warn "handover: could not untaint the control-plane node — run: kubectl --server https://127.0.0.1:6443 --tls-server-name ${endpoint_dns} taint nodes --all node-role.kubernetes.io/control-plane-"
   fi
 
   echo "handover: receive complete. Next steps:"
-  echo "  1. point the endpoint DNS ($(<"${bundle_dir}/endpoint-dns")) at this node"
+  echo "  1. point the endpoint DNS (${endpoint_dns}) at this node"
   echo "  2. ack the cutover in the kubehz dashboard (the platform waits for a target-side heartbeat)"
   echo "  3. join workers / additional control planes as needed"
 }
