@@ -166,7 +166,7 @@ _mock_node_binaries() {
   assert_success
 
   # kubeadm init got the config AND the documented preflight ignore.
-  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd" "${CALLS}"
+  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy" "${CALLS}"
   assert_success
 
   # PKI was seeded byte-identical (kubeadm reuses it — the identity anchor).

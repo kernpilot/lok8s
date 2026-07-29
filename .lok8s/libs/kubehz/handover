@@ -354,8 +354,16 @@ EOF
 # DirAvailable ignore from the contract.
 handover::kubeadm_init() {
   local config="${1}"
+  # --skip-phases addons: the restored state ALREADY carries the source
+  # cluster's DNS and proxy configuration — kubeadm's stock addon templates
+  # conflict with it instead of adopting it (proven on a real target, tier2
+  # run 19: everything up to kubelet-finalize succeeded and the very last
+  # step died on the restored CoreDNS Deployment's immutable selector).
+  # Overwriting restored addons with kubeadm defaults is also semantically
+  # wrong for a handover.
   kubeadm init --config "${config}" \
-    --ignore-preflight-errors=DirAvailable--var-lib-etcd
+    --ignore-preflight-errors=DirAvailable--var-lib-etcd \
+    --skip-phases=addon/coredns,addon/kube-proxy
 }
 
 # Post-init verification: the apiserver answers WITH the restored data, and
