@@ -96,7 +96,11 @@ _mock_node_binaries() {
   etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; }
   kubectl() { echo "kubectl $*" >> "${CALLS}"; return 0; }
-  export -f etcdutl kubeadm kubectl
+  # Deterministic node identity for the restore's member rewrite — uppercase
+  # on purpose so the lowercase mirroring is exercised.
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl hostname ip
 }
 
 # ── Bundle validation ────────────────────────────────────
@@ -266,6 +270,12 @@ _mock_node_binaries() {
   run grep -F "etcdutl snapshot restore ${SNAPSHOT}" "${CALLS}"
   assert_success
   assert_output --partial -- "--skip-hash-check=true"
+  # The restore must rewrite member identity to what kubeadm's static pod
+  # starts with — a "default" member crash-loops etcd on first boot. Exact
+  # values from the mocked node: lowercased hostname + route src address.
+  assert_output --partial -- "--name node-x"
+  assert_output --partial -- "--initial-cluster node-x=https://10.9.8.7:2380"
+  assert_output --partial -- "--initial-advertise-peer-urls https://10.9.8.7:2380"
 }
 
 @test "handover receive: an incomplete bundle stops BEFORE any node mutation" {
@@ -292,13 +302,29 @@ _mock_node_binaries() {
   assert_output --partial "--snapshot"
 }
 
+@test "handover receive: no derivable advertise address fails BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  # Both route lookups come back empty → identity resolution must fail
+  # loudly, and place_pki must never run (no stranded PKI).
+  ip() { return 1; }
+  export -f ip
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "cannot determine this node's advertise address"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
 @test "handover receive: etcdctl is the fallback when etcdutl is absent" {
   _make_bundle
   # Only etcdctl exists (older node) — plus the rest of the happy path.
   etcdctl() { echo "etcdctl $*" >> "${CALLS}"; }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; }
   kubectl() { echo "kubectl $*" >> "${CALLS}"; return 0; }
-  export -f etcdctl kubeadm kubectl
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdctl kubeadm kubectl hostname ip
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_success
@@ -306,8 +332,9 @@ _mock_node_binaries() {
   assert_success
   # The fallback path must skip the hash check too (streamed KKP snapshots
   # carry no trailer) — pinned here so only the etcdutl branch keeping the
-  # flag cannot pass this test.
+  # flag cannot pass this test. Same for the member-identity rewrite.
   assert_output --partial -- "--skip-hash-check=true"
+  assert_output --partial -- "--initial-cluster node-x=https://10.9.8.7:2380"
 }
 
 @test "handover receive: a kkp:// snapshot-location is refused as KKP-internal (use --snapshot)" {
