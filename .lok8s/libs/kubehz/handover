@@ -309,10 +309,25 @@ handover::write_kubeadm_config() {
     error "handover: bundle endpoint-dns '${dns}' is not a plain hostname — refusing to render the kubeadm config"
     return 1
   }
+  # etcd VERSION PIN: the restored data comes from the platform's etcd line
+  # (KKP CE 2.30 ships 3.5.21); kubeadm's default etcd is often a major ahead
+  # (3.6.x), and etcd 3.6 PANICS applying the snapshot's member-attribute
+  # entries (RaftCluster.UpdateAttributes on a 3.5-origin restore — proven on
+  # a real target, tier2 run 17). Boot the SOURCE line first; upgrading etcd
+  # afterwards is the standard in-place path. Override via
+  # KUBEHZ_HANDOVER_ETCD_IMAGE_TAG when the platform moves its etcd.
+  local etcd_tag="${KUBEHZ_HANDOVER_ETCD_IMAGE_TAG:-3.5.21-0}"
+  [[ "${etcd_tag}" =~ ^[a-zA-Z0-9._-]+$ ]] || {
+    error "handover: KUBEHZ_HANDOVER_ETCD_IMAGE_TAG '${etcd_tag}' is not a plain image tag — refusing to render the kubeadm config"
+    return 1
+  }
   cat > "${out}" <<EOF
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 controlPlaneEndpoint: "${dns}:6443"
+etcd:
+  local:
+    imageTag: "${etcd_tag}"
 apiServer:
   certSANs:
     - "${dns}"

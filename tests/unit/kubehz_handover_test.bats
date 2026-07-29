@@ -193,6 +193,18 @@ _mock_node_binaries() {
   assert_output --partial '- "cl-001.kubermatic.kkp.kubehz.in.net"'
   assert_output --partial "name: encryption-provider-config"
   assert_output --partial "value: ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  # The etcd image pins to the SOURCE line — kubeadm's default 3.6 panics
+  # applying a 3.5-origin restore (tier2 run 17).
+  assert_output --partial 'imageTag: "3.5.21-0"'
+}
+
+@test "handover receive: a hostile etcd image tag is refused (injection guard)" {
+  _make_bundle
+  _mock_node_binaries
+  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.21-0"\nevil: yes' \
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "not a plain image tag"
 
   # The EncryptionConfiguration embeds the bundle key, mode 600.
   local enc="${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
