@@ -209,10 +209,20 @@ handover::fetch_snapshot() {
 handover::restore_snapshot() {
   local snapshot="${1}" etcd_dir="${2}"
   local node_name node_ip peer_url
-  node_name="$(hostname)"
-  # kubeadm advertises the default-route source address; mirror it.
-  node_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1)"
-  peer_url="https://${node_ip:-127.0.0.1}:2380"
+  # kubeadm lowercases the node name (nodeutil.GetHostname) — mirror it, or
+  # an uppercase hostname reintroduces the exact identity mismatch.
+  node_name="$(hostname | tr '[:upper:]' '[:lower:]')"
+  # kubeadm advertises the default-route source address; mirror it (portable
+  # awk, no GNU-grep -P). No route → fail LOUDLY: a silent localhost peer is
+  # precisely the crash-loop this rewrite exists to prevent. (IPv6-only nodes
+  # need the v6 route; kubeadm would advertise v6 there too.)
+  node_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  [[ -n "${node_ip}" ]] || node_ip="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  if [[ -z "${node_ip}" ]]; then
+    error "handover: cannot determine this node's advertise address (no default route?) — etcd's member peer URL must match what kubeadm advertises; fix routing and re-run."
+    return 1
+  fi
+  peer_url="https://${node_ip}:2380"
   if [[ -e "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
     error "handover: ${etcd_dir} is not empty — refusing to restore over existing etcd data"
     return 1

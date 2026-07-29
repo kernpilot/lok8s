@@ -96,7 +96,11 @@ _mock_node_binaries() {
   etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; }
   kubectl() { echo "kubectl $*" >> "${CALLS}"; return 0; }
-  export -f etcdutl kubeadm kubectl
+  # Deterministic node identity for the restore's member rewrite — uppercase
+  # on purpose so the lowercase mirroring is exercised.
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl hostname ip
 }
 
 # ── Bundle validation ────────────────────────────────────
@@ -267,10 +271,11 @@ _mock_node_binaries() {
   assert_success
   assert_output --partial -- "--skip-hash-check=true"
   # The restore must rewrite member identity to what kubeadm's static pod
-  # starts with — a "default" member crash-loops etcd on first boot.
-  assert_output --partial -- "--name $(hostname)"
-  assert_output --partial -- "--initial-cluster $(hostname)="
-  assert_output --partial -- "--initial-advertise-peer-urls https://"
+  # starts with — a "default" member crash-loops etcd on first boot. Exact
+  # values from the mocked node: lowercased hostname + route src address.
+  assert_output --partial -- "--name node-x"
+  assert_output --partial -- "--initial-cluster node-x=https://10.9.8.7:2380"
+  assert_output --partial -- "--initial-advertise-peer-urls https://10.9.8.7:2380"
 }
 
 @test "handover receive: an incomplete bundle stops BEFORE any node mutation" {
@@ -303,7 +308,9 @@ _mock_node_binaries() {
   etcdctl() { echo "etcdctl $*" >> "${CALLS}"; }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; }
   kubectl() { echo "kubectl $*" >> "${CALLS}"; return 0; }
-  export -f etcdctl kubeadm kubectl
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdctl kubeadm kubectl hostname ip
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_success
@@ -311,8 +318,9 @@ _mock_node_binaries() {
   assert_success
   # The fallback path must skip the hash check too (streamed KKP snapshots
   # carry no trailer) — pinned here so only the etcdutl branch keeping the
-  # flag cannot pass this test.
+  # flag cannot pass this test. Same for the member-identity rewrite.
   assert_output --partial -- "--skip-hash-check=true"
+  assert_output --partial -- "--initial-cluster node-x=https://10.9.8.7:2380"
 }
 
 @test "handover receive: a kkp:// snapshot-location is refused as KKP-internal (use --snapshot)" {
