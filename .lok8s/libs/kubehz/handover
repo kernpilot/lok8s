@@ -9,8 +9,9 @@
 # control plane onto THE NODE IT RUNS ON (kubeadm driver path): seed the
 # exported PKI into /etc/kubernetes/pki, restore the etcd snapshot into
 # /var/lib/etcd, then `kubeadm init` with
-# --ignore-preflight-errors=DirAvailable--var-lib-etcd against the pre-seeded
-# state. kubeadm REUSES existing ca/sa/front-proxy files instead of minting
+# --ignore-preflight-errors=DirAvailable--var-lib-etcd and the addon phases
+# skipped (the restored state carries the source's DNS/proxy) against the
+# pre-seeded state. kubeadm REUSES existing ca/sa/front-proxy files instead of minting
 # new ones — that is what preserves the cluster identity (same CA, same SA
 # signing keys, same secrets-at-rest encryption key).
 #
