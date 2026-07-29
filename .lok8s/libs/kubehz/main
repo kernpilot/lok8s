@@ -520,12 +520,14 @@ kubehz::assess() {
   # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
 
-  # Resolve the cluster id by domain — the same enveloped/paginated lookup
-  # shape destroy_hosted tolerates (.data[] rows, bare-body fallbacks).
+  # Resolve the cluster id by domain. The list endpoint IGNORES ?domain=, so
+  # filter CLIENT-SIDE — .data[0] would silently pick the tenant's newest
+  # cluster and serve the wrong feasibility on multi-cluster tenants.
   local cluster_id
-  cluster_id=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
+  cluster_id=$(curl -fsSL "${api_url}/api/clusters" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
-    | jq -r '.data[0].id // .data.id // .[0].id // .id // empty') || cluster_id=""
+    | jq -r --arg d "${domain}" \
+      '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)] | first | .id) // empty') || cluster_id=""
   if [[ -z "${cluster_id}" ]]; then
     error "kubehz: no cluster found for ${domain} — is it registered + claimed, and is KUBEHZ_TOKEN set?"
     return 1

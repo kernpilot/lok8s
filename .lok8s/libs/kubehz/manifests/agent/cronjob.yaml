@@ -471,6 +471,7 @@ spec:
                       # window or an explicit platform "assess" request.
                       echo "kubehz: plain heartbeat landed; deferring the rejected assessment (next attempt after 24h or on request)" >&2
                       ASSESS_DELIVERED=1
+                      ASSESS_REJECTED=1
                     fi
                   fi
                   if [ "${HB_RC}" -ne 0 ]; then
@@ -493,8 +494,12 @@ spec:
                   fi
                   # Desired actions stay PULL-based: an "assess" in the response
                   # arms the marker so the NEXT tick collects + sends a fresh
-                  # assessment (handover contract §1 refresh path).
-                  if printf '%s' "${RESPONSE}" | \
+                  # assessment (handover contract §1 refresh path). NOT when this
+                  # tick's assessment was REJECTED: the plain retry's response
+                  # still carries the un-served ask (the server clears it only on
+                  # assessment-bearing beats), and re-arming would bypass the 24h
+                  # deferral into an every-other-tick resend of the same poison.
+                  if [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
                       jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
                     kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
