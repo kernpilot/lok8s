@@ -205,10 +205,16 @@ handover::restore_snapshot() {
     return 1
   fi
   [[ ! -d "${etcd_dir}" ]] || rmdir "${etcd_dir}" 2>/dev/null || true
+  # --skip-hash-check: KKP's etcd-backup jobs STREAM the snapshot off a live
+  # member, and streamed snapshots carry no sha256 trailer — the check can
+  # only ever fail on a handover bundle (KKP's own EtcdRestore controller
+  # skips it for the same reason). Integrity still holds end to end: the
+  # snapshot rides the platform's authenticated channels, and a corrupt
+  # restore fails loudly at etcd startup.
   if command -v etcdutl >/dev/null 2>&1; then
-    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" || return 1
+    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true || return 1
   elif command -v etcdctl >/dev/null 2>&1; then
-    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" || return 1
+    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" --skip-hash-check=true || return 1
   else
     error "handover: neither etcdutl nor etcdctl found on this node — install the etcd client tooling and re-run"
     return 1
@@ -299,7 +305,7 @@ handover::verify() {
   local waited=0 timeout="${KUBEHZ_HANDOVER_WAIT:-300}"
   until kubectl --kubeconfig "${kubeconfig}" get ns kube-system >/dev/null 2>&1; do
     (( waited < timeout )) || {
-      error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} get ns kube-system kept failing)"
+      error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} get ns kube-system kept failing) — state left behind: ${k8s_dir}/pki holds the bundle PKI and the restored etcd data dir may be corrupt (a truncated snapshot restores 'successfully' under --skip-hash-check and only fails here). Clean up ('kubeadm reset') before retrying."
       return 1
     }
     sleep 5
@@ -323,12 +329,16 @@ handover::verify() {
 # already carries Kubernetes state unless --force (and even then: run
 # `kubeadm reset` yourself first on a previously-used node).
 handover::receive() {
-  local bundle="" snapshot="" single_node=0 force=0
+  # force: honor the INHERITED field when the dispatch chain already consumed
+  # --force from argv (the #103 infra-gate made force inherited; a plain
+  # `local force=0` here shadowed that dynamic-scope value and the flag never
+  # reached the guards below).
+  local bundle="" snapshot="" single_node=0 force="${force:-0}"
   local -a args=(
     'bundle|b:!'      'Export bundle: a directory or .tar.gz with the contract keys'
     'snapshot|s'      'Pre-downloaded etcd snapshot file (skips the snapshot-location fetch)'
     'single-node|:+'  'Untaint the control-plane node after init (single-node target)'
-    'force|f:+'       'Proceed even when target dirs are not empty (DESTROYS existing etcd data)'
+    'force|f:^:+'     'Proceed even when target dirs are not empty (DESTROYS existing etcd data)'
     "${args[@]:-}"
   )
   :args "Restore an exported control plane onto THIS node" "${@}"
@@ -352,8 +362,23 @@ handover::receive() {
   bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
   handover::validate_bundle "${bundle_dir}" || return 1
 
-  if [[ -d "${k8s_dir}" ]] && [[ -n "$(ls -A "${k8s_dir}" 2>/dev/null)" ]] && ! (( force )); then
-    error "handover: ${k8s_dir} is not empty — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains."
+  # "not empty" means REAL content: kubeadm's packages pre-create empty
+  # skeleton dirs (manifests/, pki/) on every stock image, and `kubeadm
+  # reset` leaves them behind too — refusing on those makes the documented
+  # remedy unsatisfiable. Only files (or non-empty subtrees) block.
+  local k8s_real="" k8s_find_rc=0
+  if [[ -d "${k8s_dir}" ]]; then
+    # ANY non-directory entry is content (files, symlinks, sockets, FIFOs) —
+    # and a traversal error fails CLOSED: guessing "empty" before a
+    # destructive receive is the one wrong direction.
+    k8s_real="$(find "${k8s_dir}" ! -type d -print -quit 2>/dev/null)" || k8s_find_rc=$?
+    if (( k8s_find_rc )) && [[ -z "${k8s_real}" ]] && ! (( force )); then
+      error "handover: cannot inspect ${k8s_dir} (find exit ${k8s_find_rc}) — refusing to assume it is empty; fix permissions or re-run with --force."
+      return 1
+    fi
+  fi
+  if [[ -n "${k8s_real}" ]] && ! (( force )); then
+    error "handover: ${k8s_dir} holds existing content (${k8s_real}) — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains."
     return 1
   fi
   if [[ -d "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
