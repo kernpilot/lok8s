@@ -225,7 +225,7 @@ _mock_node_binaries() {
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_failure
   assert_output --partial "holds existing content"
-  assert_output --partial "kubelet.conf"
+  assert_output --partial "${KUBEHZ_HANDOVER_K8S_DIR}/kubelet.conf"
   assert_output --partial "--force"
   # Nothing ran against the node.
   [ ! -s "${CALLS}" ]

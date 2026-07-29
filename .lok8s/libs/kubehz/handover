@@ -366,8 +366,17 @@ handover::receive() {
   # skeleton dirs (manifests/, pki/) on every stock image, and `kubeadm
   # reset` leaves them behind too — refusing on those makes the documented
   # remedy unsatisfiable. Only files (or non-empty subtrees) block.
-  local k8s_real=""
-  [[ -d "${k8s_dir}" ]] && k8s_real="$(find "${k8s_dir}" \( -type f -o -type l \) -print -quit 2>/dev/null)"
+  local k8s_real="" k8s_find_rc=0
+  if [[ -d "${k8s_dir}" ]]; then
+    # ANY non-directory entry is content (files, symlinks, sockets, FIFOs) —
+    # and a traversal error fails CLOSED: guessing "empty" before a
+    # destructive receive is the one wrong direction.
+    k8s_real="$(find "${k8s_dir}" ! -type d -print -quit 2>/dev/null)" || k8s_find_rc=$?
+    if (( k8s_find_rc )) && [[ -z "${k8s_real}" ]] && ! (( force )); then
+      error "handover: cannot inspect ${k8s_dir} (find exit ${k8s_find_rc}) — refusing to assume it is empty; fix permissions or re-run with --force."
+      return 1
+    fi
+  fi
   if [[ -n "${k8s_real}" ]] && ! (( force )); then
     error "handover: ${k8s_dir} holds existing content (${k8s_real}) — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains."
     return 1
