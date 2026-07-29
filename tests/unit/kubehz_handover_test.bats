@@ -149,6 +149,13 @@ _mock_node_binaries() {
   assert_output --partial "handover: verified"
   assert_output --partial "handover: receive complete"
 
+  # The verify probe talks to the LOCAL apiserver — admin.conf's endpoint DNS
+  # still points at the platform until the operator cuts over.
+  # BOTH args are load-bearing: --server alone blanks TLSServerName and the
+  # cert (SANs = the endpoint DNS) would be checked against 127.0.0.1.
+  run grep -F -- "--server https://127.0.0.1:6443 --tls-server-name cl-001.kubermatic.kkp.kubehz.in.net" "${CALLS}"
+  assert_success
+
   # Call order: snapshot restore BEFORE kubeadm init BEFORE the verify probe.
   # The init carries the preflight ignore for the pre-restored etcd dir AND
   # skips the addon phases (restored DNS/proxy state must not be overwritten).
@@ -210,6 +217,21 @@ _mock_node_binaries() {
   assert_output --partial "secret: dGVzdC1lbmNyeXB0aW9uLWtleQ=="
   run stat -c '%a' "${enc}"
   assert_output "600"
+}
+
+@test "handover receive: --single-node untaints via the LOCAL apiserver, not the pre-cutover DNS" {
+  _make_bundle
+  _mock_node_binaries
+
+  run handover::receive --single-node --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  # The untaint must carry the same pinning as verify — admin.conf's endpoint
+  # DNS still points at the platform (same CA), so an unpinned call could
+  # untaint the WRONG cluster and report success.
+  run grep -F -- "taint nodes --all" "${CALLS}"
+  assert_success
+  assert_output --partial -- "--server https://127.0.0.1:6443"
+  assert_output --partial -- "--tls-server-name cl-001.kubermatic.kkp.kubehz.in.net"
 }
 
 @test "handover receive: an out-of-charset etcd image tag is refused BEFORE any node mutation" {
