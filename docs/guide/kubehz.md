@@ -155,7 +155,12 @@ minutes** and POSTs a status snapshot to
   pods in `kube-system` only (control-plane health), and `get` on the `/readyz`
   + `/version` API paths — plus `get`+`create` (never `update`/`patch`/`delete`)
   on Secrets in its own `kubehz-system` namespace to bootstrap its identity
-  Secret once. It reads no Secrets elsewhere and can rotate nothing.
+  Secret once. It reads no Secrets elsewhere and can rotate nothing. The
+  [assessment](#assessment-and-handover) adds read-only probe grants
+  (storageclasses, persistentvolumes, services `list`, webhook configuration
+  `list`, `get` on the one CAPI CRD, kube-system daemonset `list` + the
+  `kubeadm-config` ConfigMap) and `get`/`patch` scoped to the single
+  `kubehz-agent-config` ConfigMap for its send-gate marker.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain — the same
   identity it registers under.
 - **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only
@@ -241,6 +246,49 @@ in-cluster agent as well:
 ```bash
 kubectl delete namespace kubehz-system
 ```
+
+## Assessment and handover
+
+The heartbeat agent also collects a compact **assessment** of the cluster —
+Kubernetes version, datastore (`etcd`/`kine`/`unknown`), CNI, pod/service
+CIDRs, StorageClasses, a PV summary grouped by provisioner, LoadBalancer and
+webhook counts, node/control-plane counts. It is kubectl-only, read-only,
+fail-soft, and sent **at most once per 24 h** (or when the platform requests
+a refresh through the heartbeat response). The platform turns it into a
+handover **feasibility** verdict.
+
+```bash
+lo kubehz assess    # pretty-print the stored assessment + feasibility
+```
+
+`assess` authenticates like `lo kubehz status` (`KUBEHZ_TOKEN` against
+`spec.kubehz.apiUrl`).
+
+### Receiving an ejected control plane
+
+When you move a **hosted** control plane onto your own machine, the platform
+exports a bundle (cluster CA, service-account keys, front-proxy CA, the
+secrets-at-rest encryption key, an etcd snapshot location, and the endpoint
+DNS name). Two target-side commands consume it:
+
+```bash
+# kubeadm path — run ON the fresh target node (writes /etc/kubernetes and
+# /var/lib/etcd, runs kubeadm):
+lo kubehz handover receive --bundle ./export-bundle [--snapshot ./snap.db] [--single-node]
+
+# kubeone path — pre-seed only the PKI on node0, then provision as usual;
+# kubeadm reuses existing CA files, preserving cluster identity:
+lo kubehz handover preseed --bundle ./export-bundle --node <node0-ip>
+lo provision
+```
+
+`receive` refuses a node that already carries Kubernetes state (use
+`kubeadm reset` first, or `--force` if you really mean it), restores the etcd
+snapshot (`--snapshot` for a pre-downloaded file; `s3://` locations need an
+`aws` CLI on the node), seeds the exported PKI, runs `kubeadm init` with the
+pre-seeded state, and **verifies the resulting cluster CA is byte-identical
+to the bundle's** before telling you to cut DNS over. If that verify fails,
+do not cut over — the restored cluster did not keep its identity.
 
 ## Troubleshooting
 

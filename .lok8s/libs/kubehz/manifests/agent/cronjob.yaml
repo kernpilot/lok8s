@@ -26,8 +26,9 @@ spec:
           restartPolicy: Never
           containers:
             - name: heartbeat
-              # alpine/k8s carries a shell + bash/curl/kubectl/sha256sum/coreutils,
-              # which the bootstrap + heartbeat script needs. The previous
+              # alpine/k8s carries a shell + bash/curl/kubectl/sha256sum/coreutils
+              # AND jq/awk (both load-bearing for the assessment block), which
+              # the bootstrap + heartbeat script needs. The previous
               # registry.k8s.io/kubectl image is DISTROLESS (no shell) — the script
               # could never run on it. Pinned by digest (supply chain). No openssl
               # in-image, so rand_hex uses the /dev/urandom fallback (verified).
@@ -217,10 +218,199 @@ spec:
                   done
                   COMPONENT_ARRAY="[${COMPONENTS}]"
 
+                  # ── Assessment (handover contract §1) ──────────────────────
+                  # OPTIONAL heartbeat field, sent AT MOST once per 24h — or on
+                  # the tick after the platform requested one via the heartbeat
+                  # response's desired actions[] ("assess"). The pod is
+                  # ephemeral (CronJob), so the gate marker persists as
+                  # annotations on the kubehz-agent-config ConfigMap:
+                  #   kubehz.cloud/last-assessment  (epoch seconds of last send)
+                  #   kubehz.cloud/assess-requested ("true" = send next tick)
+                  # get/patch on that ONE ConfigMap comes from the
+                  # kubehz-agent-marker Role. An UNREADABLE marker (old install
+                  # without the new RBAC) sends NOTHING — fail-closed beats
+                  # spamming a full assessment every 5-minute tick.
+                  NOW_EPOCH=$(date -u +%s)
+                  ASSESS_NOW=""
+                  ASSESS_REQ=""
+                  if MARKER=$(kubectl get configmap kubehz-agent-config -n kubehz-system \
+                      -o jsonpath='{.metadata.annotations}' --request-timeout=5s 2>/dev/null); then
+                    LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
+                    ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
+                    case "${LAST_ASSESS}" in
+                      ''|*[!0-9]*) ASSESS_NOW=1 ;;
+                      *) [ $(( NOW_EPOCH - LAST_ASSESS )) -lt 86400 ] || ASSESS_NOW=1 ;;
+                    esac
+                    [ "${ASSESS_REQ}" != "true" ] || ASSESS_NOW=1
+                  fi
+
+                  ASSESSMENT=""
+                  if [ -n "${ASSESS_NOW}" ]; then
+                    # datastore + etcdReachable: etcd static pods in kube-system
+                    # are the primary probe; with none visible, the
+                    # kube-apiserver pod's --etcd-servers flag decides (absent
+                    # or a unix socket -> kine); neither pod visible (managed /
+                    # external CP) -> "unknown". Reachability falls back to the
+                    # /readyz etcd check captured above.
+                    # Every assessment probe carries --request-timeout=5s: a
+                    # stalled apiserver degrades THAT probe (fail-soft empty)
+                    # instead of eating the whole beat (activeDeadlineSeconds
+                    # is the backstop, but it kills the beat with it).
+                    APISERVER_ARGS=$(kubectl get pods -n kube-system -l component=kube-apiserver \
+                      -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' --request-timeout=5s 2>/dev/null) || APISERVER_ARGS=""
+                    DATASTORE="unknown"
+                    ETCD_REACHABLE=false
+                    ETCD_READY=$(kubectl get pods -n kube-system -l component=etcd \
+                      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' --request-timeout=5s 2>/dev/null) || ETCD_READY=""
+                    case "${ETCD_READY}" in
+                      *[![:space:]]*)
+                        DATASTORE="etcd"
+                        case "${ETCD_READY}" in *True*) ETCD_REACHABLE=true ;; esac
+                        ;;
+                      *)
+                        case "${APISERVER_ARGS}" in
+                          *--etcd-servers=unix:*) DATASTORE="kine" ;;
+                          *--etcd-servers=*)      DATASTORE="etcd" ;;
+                          *[![:space:]]*)         DATASTORE="kine" ;;
+                        esac
+                        case "${READYZ}" in *"[+]etcd ok"*) ETCD_REACHABLE=true ;; esac
+                        ;;
+                    esac
+
+                    CAPI=false
+                    kubectl get crd clusters.cluster.x-k8s.io --request-timeout=5s >/dev/null 2>&1 && CAPI=true
+
+                    # CNI guess from the kube-system daemonsets; only kube-proxy
+                    # present -> "kube-proxy-only" (no CNI daemonset visible).
+                    CNI="unknown"
+                    DS_NAMES=$(kubectl get daemonsets -n kube-system \
+                      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' --request-timeout=5s 2>/dev/null) || DS_NAMES=""
+                    case "${DS_NAMES}" in
+                      *cilium*)     CNI="cilium" ;;
+                      *calico*)     CNI="calico" ;;
+                      *flannel*)    CNI="flannel" ;;
+                      *kube-proxy*) CNI="kube-proxy-only" ;;
+                    esac
+
+                    # Pod/service CIDR: the kubeadm-config ConfigMap when
+                    # readable, else the apiserver's --service-cluster-ip-range
+                    # flag for the service half; null when neither is visible.
+                    POD_CIDR=""
+                    SERVICE_CIDR=""
+                    KUBEADM_CFG=$(kubectl get configmap kubeadm-config -n kube-system \
+                      -o jsonpath='{.data.ClusterConfiguration}' --request-timeout=5s 2>/dev/null) || KUBEADM_CFG=""
+                    if [ -n "${KUBEADM_CFG}" ]; then
+                      POD_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *podSubnet: *//p' | head -1)
+                      SERVICE_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *serviceSubnet: *//p' | head -1)
+                    fi
+                    if [ -z "${SERVICE_CIDR}" ]; then
+                      SERVICE_CIDR=$(printf '%s\n' "${APISERVER_ARGS}" | \
+                        sed -n 's/.*--service-cluster-ip-range=\([^" ]*\).*/\1/p' | head -1)
+                    fi
+
+                    SC_JSON=$(kubectl get storageclasses -o json --request-timeout=5s 2>/dev/null | \
+                      jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner, isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' 2>/dev/null) || SC_JSON=""
+                    [ -n "${SC_JSON}" ] || SC_JSON="[]"
+                    # The api's zod schema caps arrays at 50 — an uncapped list
+                    # 400s the WHOLE heartbeat. Cap here (first 50, logged, never
+                    # a silent drop) so the beat always fits the contract.
+                    SC_TOTAL=$(printf '%s' "${SC_JSON}" | jq 'length' 2>/dev/null) || SC_TOTAL=0
+                    if [ "${SC_TOTAL:-0}" -gt 50 ]; then
+                      echo "kubehz: assessment reports the first 50 of ${SC_TOTAL} StorageClasses" >&2
+                      SC_JSON=$(printf '%s' "${SC_JSON}" | jq -c '.[:50]' 2>/dev/null) || SC_JSON="[]"
+                    fi
+
+                    # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
+                    # awk converts capacities to Gi and groups by provisioner.
+                    PV_LINES=$(kubectl get pv -o json --request-timeout=5s 2>/dev/null | \
+                      jq -r '.items[] | [(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"), (.spec.capacity.storage // "0")] | @tsv' 2>/dev/null) || PV_LINES=""
+                    PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
+                      function gi(s,  n, u) {
+                        n = s + 0; u = s
+                        sub(/^[0-9.]+/, "", u)
+                        if (u == "Gi") return n
+                        if (u == "Ti") return n * 1024
+                        if (u == "Pi") return n * 1024 * 1024
+                        if (u == "Mi") return n / 1024
+                        if (u == "Ki") return n / 1024 / 1024
+                        if (u == "T") return n * 1e12 / 1073741824
+                        if (u == "G") return n * 1e9 / 1073741824
+                        if (u == "M") return n * 1e6 / 1073741824
+                        if (u == "k" || u == "K") return n * 1e3 / 1073741824
+                        return n / 1073741824
+                      }
+                      function fmt(x,  s) { s = sprintf("%.2f", x); sub(/\.?0+$/, "", s); return s }
+                      NF >= 2 { p = $1; gsub(/[\\"]/, "", p); c[p]++; g[p] += gi($2); n++; t += gi($2) }
+                      END {
+                        # byProvisioner keys are capped at 50 (the api zod cap);
+                        # count/totalGi stay the true totals across ALL PVs.
+                        printf "{\"count\":%d,\"totalGi\":%s,\"byProvisioner\":{", n, fmt(t)
+                        sep = ""; keys = 0
+                        for (p in c) {
+                          if (++keys > 50) break
+                          printf "%s\"%s\":{\"count\":%d,\"totalGi\":%s}", sep, p, c[p], fmt(g[p]); sep = ","
+                        }
+                        printf "}}"
+                      }') || PV_SUMMARY='{"count":0,"totalGi":0,"byProvisioner":{}}'
+
+                    LB_COUNT=$(kubectl get services -A -o json --request-timeout=5s 2>/dev/null | \
+                      jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
+                    [ -n "${LB_COUNT}" ] || LB_COUNT=0
+                    VALIDATING=$(kubectl get validatingwebhookconfigurations -o json --request-timeout=5s 2>/dev/null | \
+                      jq '.items | length' 2>/dev/null) || VALIDATING=""
+                    [ -n "${VALIDATING}" ] || VALIDATING=0
+                    MUTATING=$(kubectl get mutatingwebhookconfigurations -o json --request-timeout=5s 2>/dev/null | \
+                      jq '.items | length' 2>/dev/null) || MUTATING=""
+                    [ -n "${MUTATING}" ] || MUTATING=0
+
+                    CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o name --request-timeout=5s 2>/dev/null | grep -c .) || CP_NODES=0
+                    if [ "${CP_NODES}" = "0" ]; then
+                      CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/master -o name --request-timeout=5s 2>/dev/null | grep -c .) || CP_NODES=0
+                    fi
+
+                    # etcdDbBytes needs the etcd metrics endpoint (TLS client
+                    # certs, CP-local) — unreachable from this pod: null.
+                    # Assembled with jq (in the alpine/k8s image) so a probe
+                    # value can never break the JSON; any assembly failure
+                    # drops the assessment, never the heartbeat.
+                    ASSESSMENT=$(jq -cn \
+                      --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                      --arg k8sVersion "${KUBE_VERSION}" \
+                      --arg datastore "${DATASTORE}" \
+                      --argjson etcdReachable "${ETCD_REACHABLE}" \
+                      --argjson capiManaged "${CAPI}" \
+                      --arg cni "${CNI}" \
+                      --arg podCidr "${POD_CIDR}" \
+                      --arg serviceCidr "${SERVICE_CIDR}" \
+                      --argjson storageClasses "${SC_JSON}" \
+                      --argjson pvSummary "${PV_SUMMARY}" \
+                      --argjson loadBalancers "${LB_COUNT}" \
+                      --argjson validating "${VALIDATING}" \
+                      --argjson mutating "${MUTATING}" \
+                      --argjson nodes "${NODE_TOTAL:-0}" \
+                      --argjson cpNodes "${CP_NODES}" \
+                      '{collectedAt: $collectedAt, k8sVersion: $k8sVersion,
+                        datastore: $datastore, etcdReachable: $etcdReachable,
+                        capiManaged: $capiManaged, cni: $cni,
+                        podCidr: (if $podCidr == "" then null else $podCidr end),
+                        serviceCidr: (if $serviceCidr == "" then null else $serviceCidr end),
+                        storageClasses: $storageClasses, pvSummary: $pvSummary,
+                        loadBalancers: $loadBalancers,
+                        webhooks: {validating: $validating, mutating: $mutating},
+                        cpUsage: {nodes: $nodes, cpNodes: $cpNodes, etcdDbBytes: null}}' \
+                      2>/dev/null) || ASSESSMENT=""
+                    [ -n "${ASSESSMENT}" ] || echo "kubehz: assessment assembly failed; heartbeat continues without it" >&2
+                  fi
+
+                  ASSESSMENT_FIELD=""
+                  [ -z "${ASSESSMENT}" ] || ASSESSMENT_FIELD="\"assessment\": ${ASSESSMENT},"
+
+                  BEAT_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                   PAYLOAD=$(cat <<PAYLOAD_EOF
                   {
                     "clusterId": "${CLUSTER_ID}",
-                    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                    "timestamp": "${BEAT_TS}",
+                    ${ASSESSMENT_FIELD}
                     "kubernetes": { "version": "${KUBE_VERSION}" },
                     "nodes": ${NODE_ARRAY},
                     "components": ${COMPONENT_ARRAY},
@@ -239,10 +429,81 @@ spec:
                     echo "kubehz: agent-token unavailable; skipping heartbeat (retrying next tick)" >&2
                     exit 0
                   fi
-                  curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                  # The POST is GUARDED (|| rc): an unguarded RESPONSE=$(curl -f …)
+                  # under set -e aborts BEFORE the marker write — a rejected
+                  # assessment (e.g. an over-cap array 400ing the zod schema)
+                  # then resends deterministically every 5 minutes and the
+                  # heartbeat is PERMANENTLY lost. On ANY failure with an
+                  # assessment attached, retry ONCE without it so the plain
+                  # heartbeat always lands; only then handle the marker.
+                  HB_RC=0
+                  RESPONSE=$(curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
                     -H "Authorization: Bearer ${AGENT_TOKEN}" \
-                    -d "${PAYLOAD}"
+                    -d "${PAYLOAD}") || HB_RC=$?
+                  ASSESS_DELIVERED=""
+                  if [ "${HB_RC}" -eq 0 ] && [ -n "${ASSESSMENT}" ]; then
+                    ASSESS_DELIVERED=1
+                  fi
+                  if [ "${HB_RC}" -ne 0 ] && [ -n "${ASSESSMENT}" ]; then
+                    echo "kubehz: heartbeat with assessment failed (curl rc=${HB_RC}); retrying once without it" >&2
+                    PLAIN_PAYLOAD=$(cat <<PLAIN_EOF
+                  {
+                    "clusterId": "${CLUSTER_ID}",
+                    "timestamp": "${BEAT_TS}",
+                    "kubernetes": { "version": "${KUBE_VERSION}" },
+                    "nodes": ${NODE_ARRAY},
+                    "components": ${COMPONENT_ARRAY},
+                    "certificates": { "expiresAt": "${CERT_EXPIRY}" }
+                  }
+                  PLAIN_EOF
+                  )
+                    HB_RC=0
+                    RESPONSE=$(curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                      -H "Content-Type: application/json" \
+                      -H "Authorization: Bearer ${AGENT_TOKEN}" \
+                      -d "${PLAIN_PAYLOAD}") || HB_RC=$?
+                    if [ "${HB_RC}" -eq 0 ]; then
+                      # The plain beat landed → the assessment itself was the
+                      # poison. Move the marker anyway: resending a rejected
+                      # assessment every 5 minutes is exactly the loop this
+                      # guards against; the next attempt waits for the 24h
+                      # window or an explicit platform "assess" request.
+                      echo "kubehz: plain heartbeat landed; deferring the rejected assessment (next attempt after 24h or on request)" >&2
+                      ASSESS_DELIVERED=1
+                      ASSESS_REJECTED=1
+                    fi
+                  fi
+                  if [ "${HB_RC}" -ne 0 ]; then
+                    echo "kubehz: heartbeat POST failed (curl rc=${HB_RC}); retrying next tick" >&2
+                    exit 1
+                  fi
+                  printf '%s\n' "${RESPONSE}"
+
+                  # Assessment handled → move the 24h marker; clear a served
+                  # assess request. A failed annotate only risks a RE-send next
+                  # tick (idempotent server-side), never a lost heartbeat.
+                  if [ -n "${ASSESS_DELIVERED}" ]; then
+                    kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                      "kubehz.cloud/last-assessment=${NOW_EPOCH}" >/dev/null 2>&1 \
+                      || echo "kubehz: could not persist the assessment marker; the next tick may resend" >&2
+                    if [ "${ASSESS_REQ}" = "true" ]; then
+                      kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                        "kubehz.cloud/assess-requested-" >/dev/null 2>&1 || true
+                    fi
+                  fi
+                  # Desired actions stay PULL-based: an "assess" in the response
+                  # arms the marker so the NEXT tick collects + sends a fresh
+                  # assessment (handover contract §1 refresh path). NOT when this
+                  # tick's assessment was REJECTED: the plain retry's response
+                  # still carries the un-served ask (the server clears it only on
+                  # assessment-bearing beats), and re-arming would bypass the 24h
+                  # deferral into an every-other-tick resend of the same poison.
+                  if [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
+                      jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
+                    kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                      "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
+                  fi
               envFrom:
                 - configMapRef:
                     name: kubehz-agent-config
