@@ -22,6 +22,50 @@ rules:
     verbs:
       - get
       - list
+  # Assessment probes (handover contract §1) — read-only, list/get only:
+  #   storageclasses          → storageClasses[] (name/provisioner/isDefault)
+  #   persistentvolumes       → pvSummary (count + Gi grouped by provisioner)
+  #   services (cluster-wide) → loadBalancers count (type=LoadBalancer)
+  #   webhookconfigurations   → webhooks.validating/mutating counts
+  #   the CAPI CRD            → capiManaged presence probe; `get` is
+  #     resourceNames-scoped to clusters.cluster.x-k8s.io — the agent can
+  #     read no other CRD and cannot enumerate them.
+  # nodes list (cpUsage counts) is already granted above.
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - list
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs:
+      - list
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    resourceNames:
+      - clusters.cluster.x-k8s.io
+    verbs:
+      - get
   # Heartbeat components[]: apiserver/etcd health via
   # `kubectl get --raw /readyz?verbose` (+ /version as the reachability
   # fallback). Read-only, and normally already granted by the default
@@ -53,6 +97,24 @@ rules:
       - pods
     verbs:
       - list
+  # Assessment probes (handover contract §1), kube-system only:
+  #   daemonsets       → CNI guess (cilium/calico/flannel/kube-proxy-only)
+  #   kubeadm-config   → pod/service CIDR; `get` is resourceNames-scoped to
+  #     that ONE ConfigMap — no other kube-system ConfigMap is readable.
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+    verbs:
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - kubeadm-config
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -137,6 +199,49 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: kubehz-agent-secret
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system
+---
+# Assessment gate marker (handover contract §1). The CronJob pod is ephemeral,
+# so the "sent at most once per 24h / send-on-request" gate persists as
+# annotations on the kubehz-agent-config ConfigMap
+# (kubehz.cloud/last-assessment + kubehz.cloud/assess-requested). get+patch
+# only, BOTH resourceNames-scoped to that single ConfigMap (both verbs honor
+# resourceNames) — the agent can annotate nothing else and still cannot
+# create/update/delete any ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-agent-marker
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - kubehz-agent-config
+    verbs:
+      - get
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-agent-marker
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-agent-marker
 subjects:
   - kind: ServiceAccount
     name: kubehz-agent
