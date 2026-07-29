@@ -150,6 +150,8 @@ _mock_node_binaries() {
   assert_output --partial "handover: receive complete"
 
   # Call order: snapshot restore BEFORE kubeadm init BEFORE the verify probe.
+  # The init carries the preflight ignore for the pre-restored etcd dir AND
+  # skips the addon phases (restored DNS/proxy state must not be overwritten).
   run cat "${CALLS}"
   assert_success
   local restore_line init_line verify_line
@@ -166,7 +168,7 @@ _mock_node_binaries() {
   assert_success
 
   # kubeadm init got the config AND the documented preflight ignore.
-  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd" "${CALLS}"
+  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy" "${CALLS}"
   assert_success
 
   # PKI was seeded byte-identical (kubeadm reuses it — the identity anchor).
