@@ -150,6 +150,8 @@ _mock_node_binaries() {
   assert_output --partial "handover: receive complete"
 
   # Call order: snapshot restore BEFORE kubeadm init BEFORE the verify probe.
+  # The init carries the preflight ignore for the pre-restored etcd dir AND
+  # skips the addon phases (restored DNS/proxy state must not be overwritten).
   run cat "${CALLS}"
   assert_success
   local restore_line init_line verify_line
