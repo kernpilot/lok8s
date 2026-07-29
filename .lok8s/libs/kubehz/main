@@ -6,7 +6,10 @@
 # (hosting x access), and provides register/deregister/status subcommands.
 #
 # Split files:
-#   libs/kubehz/hosted  — hosted cluster provisioning/destroy via kubehz API
+#   libs/kubehz/hosted    — hosted cluster provisioning/destroy via kubehz API
+#   libs/kubehz/handover  — control-plane handover, eject target side
+#                           (receive/preseed) + the assess pretty-printer's
+#                           data comes from the api (see kubehz::assess below)
 #
 # The self-hosted heartbeat agent ships as a kustomize dir under
 # libs/kubehz/manifests/agent/ (applied out-of-band — see docs/guide/kubehz.md).
@@ -20,6 +23,7 @@
 import ^utils/verbose
 import ^utils/http
 import ^libs/kubehz/hosted
+import ^libs/kubehz/handover
 
 main::kubehz() {
   local -a usage=(
@@ -27,6 +31,8 @@ main::kubehz() {
     'deregister|d@destructive'  'Remove cluster from kubehz'
     'status|s@readonly'         'Check kubehz registration status'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
+    'assess|a@readonly'         'Show the platform assessment + handover feasibility'
+    'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
   )
   :usage "kubehz platform integration" "${@}"
   "${usage[@]}"
@@ -488,6 +494,136 @@ kubehz::status() {
   local status_val
   status_val=$(echo "${response}" | jq -r '.status // "unknown"' 2>/dev/null)
   echo "Status:  ${status_val}"
+}
+
+# Show the platform's stored assessment + handover feasibility via
+# `lo kubehz assess` — GET /api/clusters/<id>/assessment (handover contract
+# §1), authenticated with the SAME tenant-token source `lo kubehz status`
+# uses (KUBEHZ_TOKEN on spec.kubehz.apiUrl). Read-only: the probe itself runs
+# in-cluster (the heartbeat agent) at most once per 24h — request a refresh
+# in the dashboard when the shown assessment is stale.
+kubehz::assess() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Show the platform assessment + handover feasibility" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
+  # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+
+  # Resolve the cluster id by domain — the same enveloped/paginated lookup
+  # shape destroy_hosted tolerates (.data[] rows, bare-body fallbacks).
+  local cluster_id
+  cluster_id=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
+    | jq -r '.data[0].id // .data.id // .[0].id // .id // empty') || cluster_id=""
+  if [[ -z "${cluster_id}" ]]; then
+    error "kubehz: no cluster found for ${domain} — is it registered + claimed, and is KUBEHZ_TOKEN set?"
+    return 1
+  fi
+
+  local response
+  response=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}/assessment" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+    error "kubehz: could not fetch the assessment for ${domain} (${cluster_id})"
+    return 1
+  }
+  kubehz::render_assessment "${domain}" "${response}"
+}
+
+# Pretty-print {assessment, assessedAt, feasibility}: one aligned line per
+# probe with kapply-style markers — the `lo registry status` output idiom.
+kubehz::render_assessment() {
+  local domain="${1}" response="${2}"
+  local c_ok='' c_warn='' c_dim='' c_off=''
+  if [[ -t 1 ]]; then
+    c_ok=$'\033[32m' c_warn=$'\033[33m' c_dim=$'\033[2m' c_off=$'\033[0m'
+  fi
+
+  local body
+  body=$(jq -c '.data // .' <<<"${response}" 2>/dev/null) || {
+    error "kubehz: unexpected assessment response (not JSON)"
+    return 1
+  }
+  if ! jq -e '.assessment != null' <<<"${body}" >/dev/null 2>&1; then
+    echo "No assessment recorded for ${domain} yet."
+    echo "The in-cluster agent sends one at most every 24h — request a refresh in the dashboard, or wait for the next heartbeat."
+    return 0
+  fi
+
+  local a assessed collected
+  a=$(jq -c '.assessment' <<<"${body}")
+  assessed=$(jq -r '.assessedAt // empty' <<<"${body}")
+  collected=$(jq -r '.collectedAt // empty' <<<"${a}")
+  echo "kubehz assessment — ${domain}${collected:+ · collected ${collected}}${assessed:+ · stored ${assessed}}"
+  echo
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" kubernetes \
+    "$(jq -r '.k8sVersion // "unknown"' <<<"${a}")"
+
+  # datastore — the restore/graft hinge: kine or unreachable etcd → recreation.
+  local datastore reachable marker note
+  datastore=$(jq -r '.datastore // "unknown"' <<<"${a}")
+  reachable=$(jq -r '.etcdReachable // false' <<<"${a}")
+  if [[ "${datastore}" == "etcd" && "${reachable}" == "true" ]]; then
+    marker="${c_ok}✓${c_off}" note="etcd · reachable"
+  elif [[ "${datastore}" == "etcd" ]]; then
+    marker="${c_warn}⚠${c_off}" note="etcd · NOT reachable"
+  else
+    marker="${c_warn}⚠${c_off}" note="${datastore}"
+  fi
+  printf '%b %-14s %s\n' "${marker}" datastore "${note}"
+
+  if [[ "$(jq -r '.capiManaged // false' <<<"${a}")" == "true" ]]; then
+    printf '%b %-14s %s\n' "${c_warn}⚠${c_off}" capi \
+      "Cluster API CRDs present — pause the CAPI controllers before handover"
+  else
+    printf '%b %-14s %s\n' "${c_ok}✓${c_off}" capi "not CAPI-managed"
+  fi
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" cni "$(jq -r '.cni // "unknown"' <<<"${a}")"
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" networks \
+    "pods $(jq -r '.podCidr // "?"' <<<"${a}") · services $(jq -r '.serviceCidr // "?"' <<<"${a}")"
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" storage \
+    "$(jq -r '.storageClasses | length' <<<"${a}") classes · $(jq -r '.pvSummary.count // 0' <<<"${a}") PVs · $(jq -r '.pvSummary.totalGi // 0' <<<"${a}")Gi"
+  # Per-provisioner detail (dimmed) — this drives the data-move plan.
+  local prov cnt gi
+  while IFS=$'\t' read -r prov cnt gi; do
+    [[ -n "${prov}" ]] || continue
+    printf '      %b%s — %s PVs · %sGi%b\n' "${c_dim}" "${prov}" "${cnt}" "${gi}" "${c_off}"
+  done < <(jq -r '.pvSummary.byProvisioner // {} | to_entries[] | "\(.key)\t\(.value.count)\t\(.value.totalGi)"' <<<"${a}")
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" loadbalancers \
+    "$(jq -r '.loadBalancers // 0' <<<"${a}") LoadBalancer service(s)"
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" webhooks \
+    "$(jq -r '.webhooks.validating // 0' <<<"${a}") validating · $(jq -r '.webhooks.mutating // 0' <<<"${a}") mutating"
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" nodes \
+    "$(jq -r '.cpUsage.nodes // 0' <<<"${a}") total · $(jq -r '.cpUsage.cpNodes // 0' <<<"${a}") control-plane"
+
+  local path line
+  path=$(jq -r '.feasibility.path // empty' <<<"${body}")
+  if [[ -n "${path}" ]]; then
+    echo
+    echo "Feasibility: ${path}"
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      printf '  %b·%b %s\n' "${c_dim}" "${c_off}" "${line}"
+    done < <(jq -r '.feasibility.reasons // [] | .[]' <<<"${body}")
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      printf '  %b⚠%b %s\n' "${c_warn}" "${c_off}" "${line}"
+    done < <(jq -r '.feasibility.warnings // [] | .[]' <<<"${body}")
+  fi
 }
 
 # Print the one-time claim code (C) for the dashboard /claim page, via

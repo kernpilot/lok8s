@@ -1,0 +1,387 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz-handover — eject TARGET side of a control-plane handover
+# (the cross-repo handover contract, §4 lok8s scope — kept verbatim with
+# kubehz-cluster/docs/internal/handover-implementation.md).
+#
+# `lo kubehz handover receive --bundle <path>` restores an exported hosted
+# control plane onto THE NODE IT RUNS ON (kubeadm driver path): seed the
+# exported PKI into /etc/kubernetes/pki, restore the etcd snapshot into
+# /var/lib/etcd, then `kubeadm init` with
+# --ignore-preflight-errors=DirAvailable--var-lib-etcd against the pre-seeded
+# state. kubeadm REUSES existing ca/sa/front-proxy files instead of minting
+# new ones — that is what preserves the cluster identity (same CA, same SA
+# signing keys, same secrets-at-rest encryption key).
+#
+# `lo kubehz handover preseed --bundle <path> --node <ip>` is the thin
+# kubeone-driver variant: it ONLY places the PKI on node0 BEFORE
+# `kubeone apply` (lo provision) runs — kubeone's kubeadm then initializes
+# with the seeded CA files. Snapshot restore is not part of preseed.
+#
+# Bundle layout (contract §2 export Secret, one file per key):
+#   ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key
+#   encryption-key snapshot-location endpoint-dns
+#
+# LIBRARY-ONLY: no main::* entry point and no dispatch guard — loaded via
+# libs/kubehz/main; not directly executable.
+#
+# Test seams (bats exercises every step against a sandbox):
+#   KUBEHZ_HANDOVER_K8S_DIR   target /etc/kubernetes  (default)
+#   KUBEHZ_HANDOVER_ETCD_DIR  target /var/lib/etcd    (default)
+#   KUBEHZ_HANDOVER_WAIT      apiserver-ready timeout seconds (default 300)
+
+import ^utils/verbose
+
+# The contract §2 bundle keys. The six PKI files are what preseed places;
+# receive additionally needs the restore artifacts.
+KUBEHZ_HANDOVER_PKI_KEYS=(
+  ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key
+)
+KUBEHZ_HANDOVER_BUNDLE_KEYS=(
+  "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"
+  encryption-key snapshot-location endpoint-dns
+)
+
+kubehz::handover() {
+  local -a usage=(
+    'receive|r@destructive'  'Restore an exported control plane onto THIS node (kubeadm path)'
+    'preseed|p@destructive'  'Pre-seed exported PKI onto a kubeone node before kubeone apply'
+  )
+  :usage "Control-plane handover — eject target side" "${@}"
+  "${usage[@]}"
+}
+
+# ── Bundle handling ──────────────────────────────────────
+
+# Resolve --bundle into a directory: a directory is used as-is; a file (the
+# api's one-time .tar.gz download) is unpacked into a private temp dir.
+# Outputs the bundle dir on stdout.
+handover::resolve_bundle() {
+  local bundle="${1}"
+  if [[ -d "${bundle}" ]]; then
+    echo "${bundle}"
+    return 0
+  fi
+  if [[ -f "${bundle}" ]]; then
+    local dir
+    dir=$(mktemp -d) || return 1
+    chmod 700 "${dir}"
+    if ! tar -xzf "${bundle}" -C "${dir}" 2>/dev/null; then
+      error "handover: ${bundle} is neither a bundle directory nor a readable .tar.gz archive"
+      rm -rf "${dir}"
+      return 1
+    fi
+    echo "${dir}"
+    return 0
+  fi
+  error "handover: bundle not found: ${bundle}"
+  return 1
+}
+
+# Validate bundle completeness: every contract §2 key must exist and be
+# non-empty. The error NAMES the missing key.
+handover::validate_bundle() {
+  local dir="${1}" key
+  for key in "${KUBEHZ_HANDOVER_BUNDLE_KEYS[@]}"; do
+    if [[ ! -s "${dir}/${key}" ]]; then
+      error "handover: bundle is incomplete — missing or empty key: ${key} (expected at ${dir}/${key})"
+      return 1
+    fi
+  done
+}
+
+# ── Receive steps (each small + separately testable) ─────
+
+# Seed the exported PKI into <k8s_dir>/pki. kubeadm init reuses EXISTING
+# ca/sa/front-proxy files instead of minting new ones — the identity anchor.
+handover::place_pki() {
+  local bundle="${1}" k8s_dir="${2}" key
+  mkdir -p "${k8s_dir}/pki" || return 1
+  for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    cp "${bundle}/${key}" "${k8s_dir}/pki/${key}" || {
+      error "handover: could not place ${key} into ${k8s_dir}/pki"
+      return 1
+    }
+  done
+  chmod 644 "${k8s_dir}/pki/ca.crt" "${k8s_dir}/pki/front-proxy-ca.crt" "${k8s_dir}/pki/sa.pub"
+  chmod 600 "${k8s_dir}/pki/ca.key" "${k8s_dir}/pki/front-proxy-ca.key" "${k8s_dir}/pki/sa.key"
+}
+
+# Obtain the etcd snapshot: an explicit --snapshot file wins; otherwise the
+# bundle's snapshot-location is fetched BEST-EFFORT (s3:// needs an aws CLI on
+# the node, https:// uses curl, an absolute path is used in place). Every
+# failure names the fix: download it yourself and re-run with --snapshot.
+# Outputs the local snapshot path.
+handover::fetch_snapshot() {
+  local bundle="${1}" override="${2:-}"
+  if [[ -n "${override}" ]]; then
+    [[ -f "${override}" ]] || { error "handover: --snapshot file not found: ${override}"; return 1; }
+    echo "${override}"
+    return 0
+  fi
+  local location out="${TMPDIR:-/tmp}/kubehz-handover-snapshot.db"
+  location=$(<"${bundle}/snapshot-location")
+  case "${location}" in
+    s3://*)
+      command -v aws >/dev/null 2>&1 || {
+        error "handover: the snapshot lives at ${location} but no aws CLI is on this node — download it with any s3 client against the platform's object store and re-run with --snapshot <file>"
+        return 1
+      }
+      aws s3 cp "${location}" "${out}" >/dev/null || {
+        error "handover: fetching ${location} via the aws CLI failed — download it yourself and re-run with --snapshot <file>"
+        return 1
+      }
+      ;;
+    https://*)
+      curl -fsSL "${location}" -o "${out}" || {
+        error "handover: downloading the snapshot from ${location} failed — download it yourself and re-run with --snapshot <file>"
+        return 1
+      }
+      ;;
+    /*)
+      [[ -f "${location}" ]] || {
+        error "handover: snapshot-location points at ${location}, which does not exist on this node — re-run with --snapshot <file>"
+        return 1
+      }
+      out="${location}"
+      ;;
+    *)
+      error "handover: unsupported snapshot-location '${location}' (expected s3://, https:// or an absolute path) — re-run with --snapshot <file>"
+      return 1
+      ;;
+  esac
+  echo "${out}"
+}
+
+# Restore the snapshot into <etcd_dir>. etcdutl is the modern tool; etcdctl
+# (ETCDCTL_API=3) is the fallback on older nodes. Both refuse an existing
+# data dir, so an empty leftover dir is removed first.
+handover::restore_snapshot() {
+  local snapshot="${1}" etcd_dir="${2}"
+  if [[ -e "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
+    error "handover: ${etcd_dir} is not empty — refusing to restore over existing etcd data"
+    return 1
+  fi
+  [[ ! -d "${etcd_dir}" ]] || rmdir "${etcd_dir}" 2>/dev/null || true
+  if command -v etcdutl >/dev/null 2>&1; then
+    etcdutl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" || return 1
+  elif command -v etcdctl >/dev/null 2>&1; then
+    ETCDCTL_API=3 etcdctl snapshot restore "${snapshot}" --data-dir "${etcd_dir}" || return 1
+  else
+    error "handover: neither etcdutl nor etcdctl found on this node — install the etcd client tooling and re-run"
+    return 1
+  fi
+}
+
+# Write the EncryptionConfiguration the restored apiserver needs: the bundle's
+# encryption-key is the SAME key the source cluster encrypted its Secrets at
+# rest with — without it the restored apiserver cannot decrypt them. 0600:
+# the file embeds key material. Outputs the file path.
+handover::write_encryption_config() {
+  local bundle="${1}" k8s_dir="${2}"
+  local out="${k8s_dir}/kubehz-encryption-config.yaml" key
+  key=$(<"${bundle}/encryption-key")
+  # The key lands inside YAML we generate — allow only base64 charset so a
+  # tampered bundle cannot inject config (same guard class as the kubeone
+  # networkID interpolation).
+  [[ "${key}" =~ ^[A-Za-z0-9+/=]+$ ]] || {
+    error "handover: bundle encryption-key is not base64 — refusing to render the EncryptionConfiguration"
+    return 1
+  }
+  mkdir -p "${k8s_dir}" || return 1
+  cat > "${out}" <<EOF
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+    providers:
+      - aescbc:
+          keys:
+            - name: kubehz-handover
+              secret: ${key}
+      - identity: {}
+EOF
+  chmod 600 "${out}"
+  echo "${out}"
+}
+
+# Render the kubeadm ClusterConfiguration (v1beta4 — kubeadm >= v1.31): the
+# exported endpoint DNS stays the apiserver endpoint ("keep" strategy repoints
+# DNS at this node, so the serving cert must cover it) and the apiserver
+# mounts the secrets-at-rest encryption config.
+handover::write_kubeadm_config() {
+  local bundle="${1}" k8s_dir="${2}" out="${3}"
+  local enc="${k8s_dir}/kubehz-encryption-config.yaml" dns
+  dns=$(<"${bundle}/endpoint-dns")
+  # dns is interpolated into generated YAML — reject anything outside a safe
+  # hostname charset (no YAML injection from a tampered bundle).
+  [[ "${dns}" =~ ^[a-zA-Z0-9.-]+$ ]] || {
+    error "handover: bundle endpoint-dns '${dns}' is not a plain hostname — refusing to render the kubeadm config"
+    return 1
+  }
+  cat > "${out}" <<EOF
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+controlPlaneEndpoint: "${dns}:6443"
+apiServer:
+  certSANs:
+    - "${dns}"
+  extraArgs:
+    - name: encryption-provider-config
+      value: ${enc}
+  extraVolumes:
+    - name: kubehz-encryption-config
+      hostPath: ${enc}
+      mountPath: ${enc}
+      readOnly: true
+      pathType: File
+EOF
+}
+
+# The init itself: /var/lib/etcd is pre-populated by the restore, which
+# kubeadm's preflight would otherwise refuse — exactly the documented
+# DirAvailable ignore from the contract.
+handover::kubeadm_init() {
+  local config="${1}"
+  kubeadm init --config "${config}" \
+    --ignore-preflight-errors=DirAvailable--var-lib-etcd
+}
+
+# Post-init verification: the apiserver answers WITH the restored data, and
+# the live CA is byte-identical to the bundle's — identity preserved, the
+# whole point of the seeded restore. Never cut DNS over before this passes.
+handover::verify() {
+  local bundle="${1}" k8s_dir="${2}"
+  local kubeconfig="${k8s_dir}/admin.conf"
+  local waited=0 timeout="${KUBEHZ_HANDOVER_WAIT:-300}"
+  until kubectl --kubeconfig "${kubeconfig}" get ns kube-system >/dev/null 2>&1; do
+    (( waited < timeout )) || {
+      error "handover: the apiserver did not become ready within ${timeout}s (kubectl --kubeconfig ${kubeconfig} get ns kube-system kept failing)"
+      return 1
+    }
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+
+  local want got
+  want=$(sha256sum "${bundle}/ca.crt" | cut -d' ' -f1)
+  got=$(sha256sum "${k8s_dir}/pki/ca.crt" | cut -d' ' -f1)
+  if [[ "${want}" != "${got}" ]]; then
+    error "handover: CA hash mismatch after kubeadm init — ${k8s_dir}/pki/ca.crt is NOT the bundle's CA (identity was not preserved; do NOT cut over)"
+    return 1
+  fi
+  echo "handover: verified — apiserver is up and the cluster CA matches the export bundle (sha256 ${got})"
+}
+
+# ── Subcommands ──────────────────────────────────────────
+
+# `lo kubehz handover receive` — RUNS ON THE TARGET NODE (it writes
+# /etc/kubernetes and /var/lib/etcd and calls kubeadm). Refuses a node that
+# already carries Kubernetes state unless --force (and even then: run
+# `kubeadm reset` yourself first on a previously-used node).
+handover::receive() {
+  local bundle="" snapshot="" single_node=0 force=0
+  local -a args=(
+    'bundle|b:!'      'Export bundle: a directory or .tar.gz with the contract keys'
+    'snapshot|s'      'Pre-downloaded etcd snapshot file (skips the snapshot-location fetch)'
+    'single-node|:+'  'Untaint the control-plane node after init (single-node target)'
+    'force|f:+'       'Proceed even when target dirs are not empty (DESTROYS existing etcd data)'
+    "${args[@]:-}"
+  )
+  :args "Restore an exported control plane onto THIS node" "${@}"
+
+  local k8s_dir="${KUBEHZ_HANDOVER_K8S_DIR:-/etc/kubernetes}"
+  local etcd_dir="${KUBEHZ_HANDOVER_ETCD_DIR:-/var/lib/etcd}"
+
+  local bundle_dir
+  bundle_dir=$(handover::resolve_bundle "${bundle}") || return 1
+  handover::validate_bundle "${bundle_dir}" || return 1
+
+  if [[ -d "${k8s_dir}" ]] && [[ -n "$(ls -A "${k8s_dir}" 2>/dev/null)" ]] && ! (( force )); then
+    error "handover: ${k8s_dir} is not empty — this node already runs (or ran) Kubernetes. receive expects a FRESH target node; on a used node run 'kubeadm reset' first, or re-run with --force if you really mean to overwrite."
+    return 1
+  fi
+  if [[ -d "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
+    if (( force )); then
+      rm -rf "${etcd_dir}"
+    else
+      error "handover: ${etcd_dir} is not empty — refusing to restore over existing etcd data (re-run with --force to overwrite)."
+      return 1
+    fi
+  fi
+
+  # Fail before touching the node: resolve the snapshot first.
+  local snapshot_file
+  snapshot_file=$(handover::fetch_snapshot "${bundle_dir}" "${snapshot}") || return 1
+
+  handover::place_pki "${bundle_dir}" "${k8s_dir}" || return 1
+  handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" || return 1
+  handover::write_encryption_config "${bundle_dir}" "${k8s_dir}" >/dev/null || return 1
+  local kubeadm_config="${k8s_dir}/kubehz-handover-kubeadm.yaml"
+  handover::write_kubeadm_config "${bundle_dir}" "${k8s_dir}" "${kubeadm_config}" || return 1
+  handover::kubeadm_init "${kubeadm_config}" || return 1
+  handover::verify "${bundle_dir}" "${k8s_dir}" || return 1
+
+  if (( single_node )); then
+    kubectl --kubeconfig "${k8s_dir}/admin.conf" taint nodes --all \
+      node-role.kubernetes.io/control-plane- >/dev/null 2>&1 \
+      || warn "handover: could not untaint the control-plane node — run: kubectl taint nodes --all node-role.kubernetes.io/control-plane-"
+  fi
+
+  echo "handover: receive complete. Next steps:"
+  echo "  1. point the endpoint DNS ($(<"${bundle_dir}/endpoint-dns")) at this node"
+  echo "  2. ack the cutover in the kubehz dashboard (the platform waits for a target-side heartbeat)"
+  echo "  3. join workers / additional control planes as needed"
+}
+
+# `lo kubehz handover preseed` — kubeone-driver variant, deliberately THIN:
+# place the six PKI files on node0 over SSH before `kubeone apply`
+# (lo provision) runs; kubeadm reuses existing CA files by design, so the
+# provisioned cluster keeps the exported identity. No snapshot, no init here.
+handover::preseed() {
+  local bundle="" node="" user="root" port=22 ssh_key=""
+  local -a args=(
+    'bundle|b:!'    'Export bundle: a directory or .tar.gz with the contract keys'
+    'node|n:!'      'Target node address (kubeone node0) to place the PKI on'
+    'user|u'        'SSH user'
+    'port|p:~int'   'SSH port'
+    'ssh-key|i'     'SSH private key file'
+    "${args[@]:-}"
+  )
+  :args "Pre-seed exported PKI onto a kubeone node before kubeone apply" "${@}"
+
+  local bundle_dir
+  bundle_dir=$(handover::resolve_bundle "${bundle}") || return 1
+  handover::validate_bundle "${bundle_dir}" || return 1
+
+  # Same non-interactive SSH posture as the kubeone driver's node probes.
+  local -a ssh_opts=(
+    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10
+  )
+  [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
+
+  ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
+    'mkdir -p /etc/kubernetes/pki' || {
+    error "handover: cannot reach ${user}@${node} over SSH"
+    return 1
+  }
+
+  local key
+  local -a files=()
+  for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    files+=("${bundle_dir}/${key}")
+  done
+  scp "${ssh_opts[@]}" -P "${port}" "${files[@]}" "${user}@${node}:/etc/kubernetes/pki/" || {
+    error "handover: copying the PKI to ${node} failed"
+    return 1
+  }
+  # Key material on the node: tighten modes (scp does not guarantee them).
+  ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
+    'chmod 600 /etc/kubernetes/pki/ca.key /etc/kubernetes/pki/sa.key /etc/kubernetes/pki/front-proxy-ca.key' \
+    || warn "handover: could not tighten key modes on ${node} — chmod 600 the .key files yourself"
+
+  echo "handover: PKI pre-seeded on ${node}. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity."
+}
