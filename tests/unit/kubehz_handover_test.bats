@@ -196,15 +196,6 @@ _mock_node_binaries() {
   # The etcd image pins to the SOURCE line — kubeadm's default 3.6 panics
   # applying a 3.5-origin restore (tier2 run 17).
   assert_output --partial 'imageTag: "3.5.21-0"'
-}
-
-@test "handover receive: a hostile etcd image tag is refused (injection guard)" {
-  _make_bundle
-  _mock_node_binaries
-  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.21-0"\nevil: yes' \
-    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
-  assert_failure
-  assert_output --partial "not a plain image tag"
 
   # The EncryptionConfiguration embeds the bundle key, mode 600.
   local enc="${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
@@ -213,6 +204,17 @@ _mock_node_binaries() {
   assert_output --partial "secret: dGVzdC1lbmNyeXB0aW9uLWtleQ=="
   run stat -c '%a' "${enc}"
   assert_output "600"
+}
+
+@test "handover receive: an out-of-charset etcd image tag is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.21-0" evil' \
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "not a plain image tag"
+  # Fail-early contract: nothing was seeded.
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
 }
 
 @test "handover receive: a CA re-minted by kubeadm init FAILS the verify (identity lost)" {
