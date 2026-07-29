@@ -224,7 +224,8 @@ _mock_node_binaries() {
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_failure
-  assert_output --partial "is not empty"
+  assert_output --partial "holds existing content"
+  assert_output --partial "kubelet.conf"
   assert_output --partial "--force"
   # Nothing ran against the node.
   [ ! -s "${CALLS}" ]
@@ -303,6 +304,10 @@ _mock_node_binaries() {
   assert_success
   run grep -F "etcdctl snapshot restore ${SNAPSHOT} --data-dir ${KUBEHZ_HANDOVER_ETCD_DIR}" "${CALLS}"
   assert_success
+  # The fallback path must skip the hash check too (streamed KKP snapshots
+  # carry no trailer) — pinned here so only the etcdutl branch keeping the
+  # flag cannot pass this test.
+  assert_output --partial -- "--skip-hash-check=true"
 }
 
 @test "handover receive: a kkp:// snapshot-location is refused as KKP-internal (use --snapshot)" {
