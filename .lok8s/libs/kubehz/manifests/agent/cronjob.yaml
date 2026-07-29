@@ -309,7 +309,9 @@ spec:
                     fi
 
                     SC_JSON=$(kubectl get storageclasses -o json --request-timeout=5s 2>/dev/null | \
-                      jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner, isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' 2>/dev/null) || SC_JSON=""
+                      jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
+                          isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
+                        2>/dev/null) || SC_JSON=""
                     [ -n "${SC_JSON}" ] || SC_JSON="[]"
                     # The api's zod schema caps arrays at 50 — an uncapped list
                     # 400s the WHOLE heartbeat. Cap here (first 50, logged, never
@@ -323,7 +325,8 @@ spec:
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
                     # awk converts capacities to Gi and groups by provisioner.
                     PV_LINES=$(kubectl get pv -o json --request-timeout=5s 2>/dev/null | \
-                      jq -r '.items[] | [(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"), (.spec.capacity.storage // "0")] | @tsv' 2>/dev/null) || PV_LINES=""
+                      jq -r '.items[] | [(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
+                          (.spec.capacity.storage // "0")] | @tsv' 2>/dev/null) || PV_LINES=""
                     PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
                       function gi(s,  n, u) {
                         n = s + 0; u = s
