@@ -302,6 +302,20 @@ _mock_node_binaries() {
   assert_output --partial "--snapshot"
 }
 
+@test "handover receive: no derivable advertise address fails BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  # Both route lookups come back empty → identity resolution must fail
+  # loudly, and place_pki must never run (no stranded PKI).
+  ip() { return 1; }
+  export -f ip
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "cannot determine this node's advertise address"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
 @test "handover receive: etcdctl is the fallback when etcdutl is absent" {
   _make_bundle
   # Only etcdctl exists (older node) — plus the rest of the happy path.

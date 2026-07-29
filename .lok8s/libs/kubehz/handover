@@ -195,6 +195,32 @@ handover::fetch_snapshot() {
   echo "${out}"
 }
 
+# Resolve the etcd member identity kubeadm's static pod will start with —
+# the restore must rewrite membership to EXACTLY this or etcd refuses the
+# data dir and crash-loops. Prints "<name> <peer-url>"; fails loudly when no
+# advertise address can be derived (a silent localhost peer is the bug).
+handover::member_identity() {
+  local node_name node_ip peer_url
+  # kubeadm lowercases the node name (nodeutil.GetHostname) — mirror it, or
+  # an uppercase hostname reintroduces the exact identity mismatch.
+  node_name="$(hostname | tr '[:upper:]' '[:lower:]')"
+  # kubeadm advertises the default-route source address; mirror it (portable
+  # awk, no GNU-grep -P).
+  node_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  if [[ -n "${node_ip}" ]]; then
+    peer_url="https://${node_ip}:2380"
+  else
+    # IPv6-only node: kubeadm advertises the v6 source — URL needs brackets.
+    node_ip="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    [[ -n "${node_ip}" ]] && peer_url="https://[${node_ip}]:2380"
+  fi
+  if [[ -z "${node_ip}" ]]; then
+    error "handover: cannot determine this node's advertise address (no default route?) — etcd's member peer URL must match what kubeadm advertises; fix routing and re-run."
+    return 1
+  fi
+  printf '%s %s\n' "${node_name}" "${peer_url}"
+}
+
 # Restore the snapshot into <etcd_dir>. etcdutl is the modern tool; etcdctl
 # (ETCDCTL_API=3) is the fallback on older nodes. Both refuse an existing
 # data dir, so an empty leftover dir is removed first.
@@ -208,21 +234,7 @@ handover::fetch_snapshot() {
 # kubeadm disaster-recovery runbook.
 handover::restore_snapshot() {
   local snapshot="${1}" etcd_dir="${2}"
-  local node_name node_ip peer_url
-  # kubeadm lowercases the node name (nodeutil.GetHostname) — mirror it, or
-  # an uppercase hostname reintroduces the exact identity mismatch.
-  node_name="$(hostname | tr '[:upper:]' '[:lower:]')"
-  # kubeadm advertises the default-route source address; mirror it (portable
-  # awk, no GNU-grep -P). No route → fail LOUDLY: a silent localhost peer is
-  # precisely the crash-loop this rewrite exists to prevent. (IPv6-only nodes
-  # need the v6 route; kubeadm would advertise v6 there too.)
-  node_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  [[ -n "${node_ip}" ]] || node_ip="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  if [[ -z "${node_ip}" ]]; then
-    error "handover: cannot determine this node's advertise address (no default route?) — etcd's member peer URL must match what kubeadm advertises; fix routing and re-run."
-    return 1
-  fi
-  peer_url="https://${node_ip}:2380"
+  local node_name="${3}" peer_url="${4}"
   if [[ -e "${etcd_dir}" ]] && [[ -n "$(ls -A "${etcd_dir}" 2>/dev/null)" ]]; then
     error "handover: ${etcd_dir} is not empty — refusing to restore over existing etcd data"
     return 1
@@ -419,12 +431,16 @@ handover::receive() {
     fi
   fi
 
-  # Fail before touching the node: resolve the snapshot first.
-  local snapshot_file
+  # Fail before touching the node: resolve the snapshot AND the member
+  # identity first (an identity failure after place_pki would strand seeded
+  # PKI behind the non-empty guard).
+  local snapshot_file member_identity node_name peer_url
   snapshot_file=$(handover::fetch_snapshot "${bundle_dir}" "${snapshot}" "${workdir}") || return 1
+  member_identity="$(handover::member_identity)" || return 1
+  read -r node_name peer_url <<<"${member_identity}"
 
   handover::place_pki "${bundle_dir}" "${k8s_dir}" || return 1
-  handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" || return 1
+  handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" "${node_name}" "${peer_url}" || return 1
   handover::write_encryption_config "${bundle_dir}" "${k8s_dir}" >/dev/null || return 1
   local kubeadm_config="${k8s_dir}/kubehz-handover-kubeadm.yaml"
   handover::write_kubeadm_config "${bundle_dir}" "${k8s_dir}" "${kubeadm_config}" || return 1
