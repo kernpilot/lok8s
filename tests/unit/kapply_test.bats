@@ -331,6 +331,7 @@ IN
 # could not stay green on the referenced-namespace fetch alone.
 
 _preflight() { printf '%s' "$1" | kapply::preflight; }
+_preflight_opts() { local manifest="$1"; shift; printf '%s' "${manifest}" | kapply::preflight "$@"; }
 _preflight_stub() {
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
@@ -348,15 +349,38 @@ _preflight_stub() {
             else
               echo "${NS_GET_OUT:-}"
             fi ;;
+          crd)
+            # CRD existence probe: after the drain (first instance patch)
+            # cleanup "completes" and the CRD reads as gone — unless
+            # CRD_STAYS pins it wedged (exercises the force/still-stuck
+            # branches).
+            if [[ -z "${CRD_STAYS:-}" && -f "${BATS_TEST_TMPDIR}/crd.drained" ]]; then
+              return 1
+            fi
+            return 0 ;;
+          "${CRD_NAME:-none}") echo "${CRD_INSTANCES:-}" ;;
           *)            echo "${GET_OUT:-}" ;;
         esac
         return 0 ;;
       replace) touch "${BATS_TEST_TMPDIR}/ns.finalized"; return 0 ;;
-      patch)   return "${PATCH_RC:-0}" ;;
+      patch)
+        [[ "$2" == "${CRD_NAME:-none}" ]] && touch "${BATS_TEST_TMPDIR}/crd.drained"
+        return "${PATCH_RC:-0}" ;;
       *)       return 0 ;;
     esac
   }
   export -f kubectl
+}
+
+# Fixture pair for the CRD-policy tests: the stuck CRD arrives via the
+# manifest get; its instances via `get <crd-name> -A`.
+_stuck_crd_fixture() {
+  export CRD_NAME="kubehzclusters.kubehz.dev"
+  export GET_OUT='{"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition","metadata":{"name":"kubehzclusters.kubehz.dev","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["customresourcecleanup.apiextensions.k8s.io"]}}'
+  export CRD_INSTANCES='{"items":[
+    {"metadata":{"namespace":"kubehz-system","name":"k6-burst-1","finalizers":["kubehz.dev/cluster-cleanup"]}},
+    {"metadata":{"namespace":"kubehz-system","name":"k6-burst-2","finalizers":["kubehz.dev/cluster-cleanup"]}}]}'
+  export KAPPLY_CRD_WAIT=1 KAPPLY_POLL_INTERVAL=0
 }
 
 @test "preflight: nothing terminating → no patches, reports nothing stuck" {
@@ -434,15 +458,77 @@ _preflight_stub() {
   refute_output --partial 'could not finalize'
 }
 
-@test "preflight: stuck CRD is refused, never force-cleared" {
+@test "preflight: stuck CRD drains its instances by default, never touches the CRD finalizer" {
   command -v jq &>/dev/null || skip "jq required"
-  _preflight_stub
-  export GET_OUT='{"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition","metadata":{"name":"kubehzclusters.kubehz.dev","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["customresourcecleanup.apiextensions.k8s.io"]}}'
+  _preflight_stub; _stuck_crd_fixture
   run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'drained 2 instance(s) of CustomResourceDefinition/kubehzclusters.kubehz.dev'
+  run cat "${KLOG}"
+  assert_output --partial 'patch kubehzclusters.kubehz.dev k6-burst-1 -n kubehz-system'
+  assert_output --partial 'patch kubehzclusters.kubehz.dev k6-burst-2 -n kubehz-system'
+  refute_output --partial 'patch crd '
+}
+
+@test "preflight: crds=skip refuses the CRD entirely" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  run _preflight_opts "${CR_MANIFEST}" --crds skip
   assert_success
   assert_output --partial 'refusing to force stuck CustomResourceDefinition/kubehzclusters.kubehz.dev'
   run cat "${KLOG}"
   refute_output --partial ' patch '
+}
+
+@test "preflight: crds=drain on a CRD still wedged after drain reports it, does not escalate" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export CRD_STAYS=1
+  run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'still terminating after draining 2 instance(s)'
+  run cat "${KLOG}"
+  refute_output --partial 'patch crd '
+}
+
+@test "preflight: crds=force escalates to stripping the CRD finalizer after a failed drain" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export CRD_STAYS=1
+  run _preflight_opts "${CR_MANIFEST}" --crds force
+  assert_success
+  assert_output --partial 'FORCED CustomResourceDefinition/kubehzclusters.kubehz.dev'
+  run cat "${KLOG}"
+  assert_output --partial 'patch crd kubehzclusters.kubehz.dev'
+}
+
+@test "preflight: crds=force allowlist tolerates csv whitespace" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export CRD_STAYS=1
+  run _preflight_opts "${CR_MANIFEST}" --crds force --crd-allow 'other.example.com, kubehzclusters.kubehz.dev'
+  assert_success
+  assert_output --partial 'FORCED CustomResourceDefinition/kubehzclusters.kubehz.dev'
+}
+
+@test "preflight: non-numeric KAPPLY_CRD_WAIT falls back instead of aborting the report" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export KAPPLY_CRD_WAIT="20s"
+  run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'drained 2 instance(s)'
+}
+
+@test "preflight: crds=force respects the allowlist — non-listed CRD is not stripped" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export CRD_STAYS=1
+  run _preflight_opts "${CR_MANIFEST}" --crds force --crd-allow other.example.com
+  assert_success
+  assert_output --partial 'not forcing its finalizer'
+  run cat "${KLOG}"
+  refute_output --partial 'patch crd '
 }
 
 @test "preflight: failed patch reports the object and still exits 0" {
