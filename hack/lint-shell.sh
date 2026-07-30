@@ -25,7 +25,7 @@ export ARGSH_DOCKER_IMAGE="${ARGSH_DOCKER_IMAGE:-ghcr.io/arg-sh/argsh@sha256:990
 # still yield files) while real errors (exit 2) kill the run with their
 # original status.
 {
-  find .lok8s operator/hooks docs/.vitepress hack -type f -name '*.sh'
-  grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress hack \
+  find .lok8s operator/hooks docs/.vitepress hack install -type f -name '*.sh'
+  grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s operator/hooks docs/.vitepress hack install \
     || { rc="${?}"; [[ "${rc}" -eq 1 ]] || exit "${rc}"; }
 } | sort -u | xargs -r ./.bin/argsh lint

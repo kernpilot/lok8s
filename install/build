@@ -7,6 +7,8 @@
 # sibling arg-sh/argsh checkout satisfies both. Override with ARGSH_SRC=<path>.
 set -euo pipefail
 
+die() { echo "build: ${*}" >&2; exit 1; }
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "${here}/.." && pwd)"
 out="${root}/docs/public/lo-up"
@@ -24,17 +26,116 @@ fi
 # argsh + its minifier on PATH (minifier ships in the argsh checkout's .bin).
 export PATH="${root}/.bin:${argsh_src}/.bin:${PATH}"
 
-# Variables :args manages by LITERAL name — they must survive minifier
-# obfuscation (the spec array `args`, and each flag's destination variable; note
-# `ref` is a reserved argsh nameref, hence `git_ref`). Keep in sync with lo-up.
-keep=(args non_interactive profile git_ref dir)
+# Names that must survive minifier obfuscation:
+#   - the `:args` spec array and each flag's destination variable, which :args
+#     resolves by LITERAL name (note `ref` is a reserved argsh nameref, hence
+#     `git_ref`);
+#   - `tty`, because the minifier renames the bare word in the redirect
+#     `read … </dev/tty` as if it were an identifier. It shipped as
+#     `</dev/a81`, so the read failed, `loup::confirm`'s `|| return 0` treated
+#     that as "yes", and the published installer never actually prompted.
+# Keep in sync with lo-up.
+keep=(args non_interactive profile git_ref dir tty)
 keep_args=(); for v in "${keep[@]}"; do keep_args+=(-i "${v}"); done
 
+# `argsh minify` renders the template with GNU envsubst and a SHELL-FORMAT
+# whitelist ('$data,$commit_sha,$version'). renvsubst — which lok8s installs AS
+# `envsubst` for its own templating — rejects that argument, and argsh redirects
+# into the output before the failure surfaces, so the published bundle is
+# truncated to 0 bytes while the build looks like it only "warned". Resolve GNU
+# envsubst explicitly and put it first.
+# Search every envsubst on PATH, then the keg-only Homebrew locations gettext
+# hides in. Discovery runs BEFORE the shim is prepended, so a GNU-reporting
+# wrapper cannot find its way back to us.
+gnu_envsubst=""
+while IFS= read -r c; do
+  [[ -x "${c}" ]] || continue
+  "${c}" --version 2>/dev/null | grep -q 'GNU gettext' || continue
+  gnu_envsubst="${c}"
+  break
+done < <(
+  {
+    type -aP envsubst 2>/dev/null || true
+    printf '%s\n' \
+      /usr/bin/envsubst \
+      /bin/envsubst \
+      /usr/local/bin/envsubst \
+      /opt/homebrew/bin/envsubst \
+      /opt/homebrew/opt/gettext/bin/envsubst \
+      /usr/local/opt/gettext/bin/envsubst
+  } | awk '!seen[$0]++'
+)
+[[ -n "${gnu_envsubst}" ]] \
+  || die "GNU envsubst not found on PATH or in the usual gettext locations — install gettext (renvsubst is NOT a substitute: it rejects the SHELL-FORMAT whitelist)"
+shim="$(mktemp -d)"; tmp_out=""
+# Covers both scratch paths: `set -e` aborts before any inline rm on a minify
+# failure, which used to leak the temp bundle.
+probe=""
+trap 'rm -rf "${shim}" ${probe:+"${probe}"}; [[ -n "${tmp_out}" ]] && rm -f "${tmp_out}"' EXIT
+ln -s "${gnu_envsubst}" "${shim}/envsubst"
+export PATH="${shim}:${PATH}"
+
+# Build to a temp file and only publish once it is verified: a 0-byte or
+# unparseable bundle at docs/public/lo-up is served straight to
+# `curl … | sh` users.
 mkdir -p "${out%/*}"
+# Beside the output, not in /tmp: the publish step must be an atomic rename,
+# and a cross-device mv degrades to a copy whose interruption leaves exactly the
+# truncated bundle this whole dance exists to prevent.
+tmp_out="$(mktemp "${out}.XXXXXX")"
 GIT_VERSION="$(git -C "${argsh_src}" describe --tags --always 2>/dev/null || echo unknown)" \
 GIT_COMMIT_SHA="$(git -C "${argsh_src}" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   argsh minify "${argsh_src}"/libraries/*.sh "${here}/lo-up" \
-    -t "${here}/lo-up.min.tmpl" "${keep_args[@]}" -o "${out}"
+    -t "${here}/lo-up.min.tmpl" "${keep_args[@]}" -o "${tmp_out}"
+
+[[ -s "${tmp_out}" ]] \
+  || die "minify produced an EMPTY bundle"
+bash -n "${tmp_out}" 2>/dev/null \
+  || die "minify produced an unparseable bundle"
+
+# Run it. `grep`-for-a-marker is too weak — the template's header comment alone
+# satisfies it, so a 300-byte truncation passed. `--help` exercises the argsh
+# runtime, the :args spec and the obfuscated variable names in one go.
+chmod +x "${tmp_out}"
+# Explicit `bash` and a closed stdin. The bundle's shebang is /bin/sh, and on a
+# dash /bin/sh the template's POSIX preamble re-execs by `cat`-ing STDIN into a
+# temp file — which here would be the BUILD's stdin, producing empty output on a
+# pipe and hanging on a TTY.
+help_out="$(bash "${tmp_out}" --help </dev/null 2>&1)" \
+  || die "bundle failed to run --help:"$'\n'"${help_out}"
+grep -q 'install or update a lok8s project environment' <<<"${help_out}" \
+  || die "bundle --help does not render lo-up's usage:"$'\n'"${help_out}"
+
+# Behaviour, not usage text: a `:args` spec string ('profile|p') is a literal the
+# minifier never touches, so --help keeps advertising --profile even when the
+# DESTINATION variable was renamed and the flag silently stops working. Drive the
+# bundle against a stub `b` and check the values actually arrive.
+probe="$(mktemp -d)"
+mkdir -p "${probe}/.bin"
+cat > "${probe}/.bin/b" <<'STUB'
+#!/bin/sh
+echo "${@}" >> "${B_PROBE_LOG}"
+exit 0
+STUB
+chmod +x "${probe}/.bin/b"
+printf 'binaries: {}\n' > "${probe}/.bin/b.yaml"
+# Exits non-zero at the verification guard (the stub installs nothing); the flag
+# plumbing is what the log proves, so the status is not the signal here.
+B_PROBE_LOG="${probe}/calls" PATH="${probe}/.bin:${PATH}" LOUP_URL="file:///dev/null" \
+  bash "${tmp_out}" -y --profile kustomize --git-ref v9.9.9 --dir "${probe}" \
+  </dev/null >/dev/null 2>&1 || true
+grep -q '#kustomize' "${probe}/calls" 2>/dev/null \
+  || die "--profile never reached 'b env add' — the minifier renamed its destination variable"
+grep -q 'v9.9.9' "${probe}/calls" 2>/dev/null \
+  || die "--git-ref never reached 'b env add' — the minifier renamed its destination variable"
+
+# Literal paths the minifier has mangled before (see `keep` above). A renamed
+# /dev/tty turns the confirmation prompt into a silent auto-yes, which no
+# smoke test catches because the prompt is skipped, not broken.
+grep -q '</dev/tty' "${tmp_out}" \
+  || die "bundle lost the </dev/tty redirect — the confirm prompt would silently auto-yes"
+
+mv "${tmp_out}" "${out}"
 chmod +x "${out}"
 rm -f "${root}/argsh.so"   # the argsh CLI drops its builtin in cwd — not ours to keep
 echo "build: ${out} ($(wc -c <"${out}") bytes)"

@@ -43,7 +43,7 @@ loup::confirm() {
 loup::detect_mode() {
   local d="${1}"
   [[ -d "${d}/.lok8s" ]] && { echo update; return; }
-  [[ -f "${d}/.bin/b.yaml" ]] && grep -q 'kernpilot/lok8s' "${d}/.bin/b.yaml" 2>/dev/null \
+  [[ -f "${d}/.bin/b.yaml" ]] && grep -q "${LOUP_REPO#*/}" "${d}/.bin/b.yaml" 2>/dev/null \
     && { echo update; return; }
   echo bootstrap
 }
@@ -60,6 +60,46 @@ loup::ensure_b() {
   export PATH="${PATH_BIN}:${PATH}"
   command -v b &>/dev/null || _die "b is still not on PATH after install"
   _ok "b installed"
+}
+
+# loup::verify_registered — assert `b env add` actually recorded the env.
+#
+# `b` has shipped more than one silent rc-0 no-op: a subcommand --version that
+# was mistaken for the root's version banner (fentas/b#180) printed the banner
+# and exited 0 without registering anything, and an env sync can print a full
+# add plan while writing no files (fentas/b#184). Both leave a fresh machine
+# with an "installed" env that has nothing in it, and the failure only surfaces
+# much later as a missing binary. Check the artefact, not the exit code.
+# NOTE: `.bin/b.yaml` is cwd-relative on purpose, NOT ${PATH_BIN}-relative. `b`
+# resolves its config as <cwd>/.bin/b.yaml regardless of where it installs
+# binaries, so PATH_BIN is right for verify_materialised and wrong here.
+loup::verify_registered() {
+  [[ -f "${PWD}/.bin/b.yaml" ]] \
+    || _die "no ${PWD}/.bin/b.yaml — the env was never registered (run: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
+  # Match on LOUP_REPO's org/repo, not a hardcoded one: a fork pointed here via
+  # LOUP_REPO would otherwise register fine and then be told to run the very
+  # command that just succeeded.
+  grep -q "${LOUP_REPO#*/}" "${PWD}/.bin/b.yaml" 2>/dev/null \
+    || _die ".bin/b.yaml registered no lok8s env — nothing here can update (run: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
+}
+
+# loup::verify_materialised — assert `b install` actually produced a usable env:
+# the vendored framework, the `lo` entrypoint, and the binaries `lo` shells out
+# to on every command. Anything missing here means a later `lo use` fails with a
+# far less obvious error.
+loup::verify_materialised() {
+  local -a missing=()
+  [[ -d "${PWD}/.lok8s" ]] || missing+=(".lok8s/ (vendored framework)")
+  [[ -f "${PWD}/.lok8s/lo" ]] || missing+=(".lok8s/lo (CLI entrypoint)")
+
+  local bin
+  for bin in argsh kubectl jq yq; do
+    [[ -x "${PATH_BIN}/${bin}" ]] || command -v "${bin}" &>/dev/null \
+      || missing+=("${PATH_BIN##*/}/${bin}")
+  done
+
+  (( ${#missing[@]} == 0 )) || _die "b install reported success but the env is incomplete — missing: ${missing[*]}
+    Re-run with 'b install --force', or check 'b env status' and 'b install --dry-run'."
 }
 
 # loup::install_self — persist lo-up into PATH_BIN so a later run updates in place.
@@ -107,11 +147,17 @@ main() {
   else
     _info "updating the lok8s env (${LOUP_REPO})"
   fi
+  # BOTH paths: detect_mode calls a bare vendored .lok8s/ an "update", so a
+  # checkout with the framework but no b.yaml entry would skip registration
+  # entirely, `b install` would no-op, and the binaries check would pass on
+  # whatever is already on PATH — reporting a ready env that can never update.
+  loup::verify_registered
 
   loup::install_self
 
   _info "installing binaries + syncing the framework (b install)…"
   b install || _die "b install failed"
+  loup::verify_materialised
 
   _ok "lok8s env ready"
   _say ""
