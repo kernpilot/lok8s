@@ -30,11 +30,42 @@ export PATH="${root}/.bin:${argsh_src}/.bin:${PATH}"
 keep=(args non_interactive profile git_ref dir)
 keep_args=(); for v in "${keep[@]}"; do keep_args+=(-i "${v}"); done
 
+# `argsh minify` renders the template with GNU envsubst and a SHELL-FORMAT
+# whitelist ('$data,$commit_sha,$version'). renvsubst — which lok8s installs AS
+# `envsubst` for its own templating — rejects that argument, and argsh redirects
+# into the output before the failure surfaces, so the published bundle is
+# truncated to 0 bytes while the build looks like it only "warned". Resolve GNU
+# envsubst explicitly and put it first.
+gnu_envsubst=""
+for c in /usr/bin/envsubst /bin/envsubst /usr/local/bin/envsubst; do
+  [[ -x "${c}" ]] && "${c}" --version 2>/dev/null | grep -q 'GNU gettext' \
+    && { gnu_envsubst="${c}"; break; }
+done
+[[ -n "${gnu_envsubst}" ]] \
+  || { echo "build: GNU envsubst not found — install gettext (renvsubst cannot render the template)" >&2; exit 1; }
+shim="$(mktemp -d)"; trap 'rm -rf "${shim}"' EXIT
+ln -s "${gnu_envsubst}" "${shim}/envsubst"
+export PATH="${shim}:${PATH}"
+
+# Build to a temp file and only publish once it is verified: a 0-byte or
+# unparseable bundle at docs/public/lo-up is served straight to
+# `curl … | sh` users.
 mkdir -p "${out%/*}"
+tmp_out="$(mktemp)"
 GIT_VERSION="$(git -C "${argsh_src}" describe --tags --always 2>/dev/null || echo unknown)" \
 GIT_COMMIT_SHA="$(git -C "${argsh_src}" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   argsh minify "${argsh_src}"/libraries/*.sh "${here}/lo-up" \
-    -t "${here}/lo-up.min.tmpl" "${keep_args[@]}" -o "${out}"
+    -t "${here}/lo-up.min.tmpl" "${keep_args[@]}" -o "${tmp_out}"
+
+[[ -s "${tmp_out}" ]] \
+  || { rm -f "${tmp_out}"; echo "build: minify produced an EMPTY bundle — refusing to publish" >&2; exit 1; }
+bash -n "${tmp_out}" 2>/dev/null \
+  || { rm -f "${tmp_out}"; echo "build: minify produced an unparseable bundle — refusing to publish" >&2; exit 1; }
+# The template's own preamble must survive, and so must lo-up's entrypoint.
+grep -q 'lo-up' "${tmp_out}" \
+  || { rm -f "${tmp_out}"; echo "build: bundle does not look like lo-up — refusing to publish" >&2; exit 1; }
+
+mv "${tmp_out}" "${out}"
 chmod +x "${out}"
 rm -f "${root}/argsh.so"   # the argsh CLI drops its builtin in cwd — not ours to keep
 echo "build: ${out} ($(wc -c <"${out}") bytes)"

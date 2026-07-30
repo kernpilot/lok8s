@@ -62,6 +62,40 @@ loup::ensure_b() {
   _ok "b installed"
 }
 
+# loup::verify_registered — assert `b env add` actually recorded the env.
+#
+# `b` has shipped more than one silent rc-0 no-op: a subcommand --version that
+# was mistaken for the root's version banner (fentas/b#180) printed the banner
+# and exited 0 without registering anything, and an env sync can print a full
+# add plan while writing no files (fentas/b#184). Both leave a fresh machine
+# with an "installed" env that has nothing in it, and the failure only surfaces
+# much later as a missing binary. Check the artefact, not the exit code.
+loup::verify_registered() {
+  [[ -f "${PWD}/.bin/b.yaml" ]] \
+    || _die "b env add reported success but ${PWD}/.bin/b.yaml does not exist"
+  grep -q 'kernpilot/lok8s' "${PWD}/.bin/b.yaml" 2>/dev/null \
+    || _die "b env add reported success but registered no lok8s env in .bin/b.yaml (try: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
+}
+
+# loup::verify_materialised — assert `b install` actually produced a usable env:
+# the vendored framework, the `lo` entrypoint, and the binaries `lo` shells out
+# to on every command. Anything missing here means a later `lo use` fails with a
+# far less obvious error.
+loup::verify_materialised() {
+  local -a missing=()
+  [[ -d "${PWD}/.lok8s" ]] || missing+=(".lok8s/ (vendored framework)")
+  [[ -f "${PWD}/.lok8s/lo" ]] || missing+=(".lok8s/lo (CLI entrypoint)")
+
+  local bin
+  for bin in argsh kubectl jq yq; do
+    [[ -x "${PATH_BIN}/${bin}" ]] || command -v "${bin}" &>/dev/null \
+      || missing+=("${PATH_BIN##*/}/${bin}")
+  done
+
+  (( ${#missing[@]} == 0 )) || _die "b install reported success but the env is incomplete — missing: ${missing[*]}
+    Re-run with 'b install --force', or check 'b env status' and 'b install --dry-run'."
+}
+
 # loup::install_self — persist lo-up into PATH_BIN so a later run updates in place.
 # Re-fetches the canonical bundle (under `curl | sh` there is no local file).
 loup::install_self() {
@@ -104,6 +138,7 @@ main() {
       || _die "aborted"
     _info "adding profile '${profile}' from ${LOUP_REPO}#${git_ref}"
     b env add "${LOUP_REPO}#${profile}" --version "${git_ref}" || _die "b env add failed"
+    loup::verify_registered
   else
     _info "updating the lok8s env (${LOUP_REPO})"
   fi
@@ -112,6 +147,7 @@ main() {
 
   _info "installing binaries + syncing the framework (b install)…"
   b install || _die "b install failed"
+  loup::verify_materialised
 
   _ok "lok8s env ready"
   _say ""
