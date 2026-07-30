@@ -44,13 +44,29 @@ keep_args=(); for v in "${keep[@]}"; do keep_args+=(-i "${v}"); done
 # into the output before the failure surfaces, so the published bundle is
 # truncated to 0 bytes while the build looks like it only "warned". Resolve GNU
 # envsubst explicitly and put it first.
+# Search every envsubst on PATH, then the keg-only Homebrew locations gettext
+# hides in. Discovery runs BEFORE the shim is prepended, so a GNU-reporting
+# wrapper cannot find its way back to us.
 gnu_envsubst=""
-for c in /usr/bin/envsubst /bin/envsubst /usr/local/bin/envsubst; do
-  [[ -x "${c}" ]] && "${c}" --version 2>/dev/null | grep -q 'GNU gettext' \
-    && { gnu_envsubst="${c}"; break; }
-done
+while IFS= read -r c; do
+  [[ -x "${c}" ]] || continue
+  "${c}" --version 2>/dev/null | grep -q 'GNU gettext' || continue
+  gnu_envsubst="${c}"
+  break
+done < <(
+  {
+    type -aP envsubst 2>/dev/null || true
+    printf '%s\n' \
+      /usr/bin/envsubst \
+      /bin/envsubst \
+      /usr/local/bin/envsubst \
+      /opt/homebrew/bin/envsubst \
+      /opt/homebrew/opt/gettext/bin/envsubst \
+      /usr/local/opt/gettext/bin/envsubst
+  } | awk '!seen[$0]++'
+)
 [[ -n "${gnu_envsubst}" ]] \
-  || die "GNU envsubst not found — install gettext (renvsubst cannot render the template)"
+  || die "GNU envsubst not found on PATH or in the usual gettext locations — install gettext (renvsubst is NOT a substitute: it rejects the SHELL-FORMAT whitelist)"
 shim="$(mktemp -d)"; tmp_out=""
 # Covers both scratch paths: `set -e` aborts before any inline rm on a minify
 # failure, which used to leak the temp bundle.
