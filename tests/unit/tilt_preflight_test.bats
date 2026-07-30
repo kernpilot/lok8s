@@ -111,6 +111,19 @@ YAML
   [[ ! -s "${SWEEP_LOG}" ]]
 }
 
+@test "preflight spec: scalar shorthand `preflight: false` disables too" {
+  export DOMAIN_NAME=dev.test
+  cat > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+spec:
+  tilt:
+    preflight: false
+YAML
+  run tilt::preflight <<< 'kind: ConfigMap'
+  assert_success
+  [[ ! -s "${SWEEP_LOG}" ]]
+}
+
 @test "preflight spec: age/crds/crdForceAllow flow through from the cluster spec" {
   export DOMAIN_NAME=dev.test
   cat > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml" <<'YAML'

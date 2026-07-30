@@ -461,7 +461,8 @@ kapply::_heal_terminating() {
   done < <(printf '%s' "${manifest}" | yq -r '[.kind, .metadata.name, (.metadata.namespace // "")] | @tsv' 2>/dev/null)
 }
 
-# kapply::preflight [--age <seconds>] [kubectl flags...] < manifest
+# kapply::preflight [--age <seconds>] [--crds drain|skip|force]
+#                   [--crd-allow <csv>] [kubectl flags...] < manifest
 #   Sweep the MANIFEST's objects for stuck-Terminating state BEFORE an apply
 #   that does not go through kapply::apply — Tilt's k8s_yaml path retries a
 #   terminating object until its upsert timeout and then fails the whole
@@ -660,8 +661,11 @@ kapply::_preflight_crd() {
     | jq -r '.items[]? | [(.metadata.namespace // "-"), .metadata.name] | @tsv' 2>/dev/null)
 
   # With the instances gone, customresourcecleanup completes near-instantly.
-  local i
-  for (( i = 0; i < ${KAPPLY_CRD_WAIT:-20}; i++ )); do
+  # Numeric guard mirrors the age gate: a bad override must not abort the
+  # subshell mid-report with an arithmetic error.
+  local i crd_wait="${KAPPLY_CRD_WAIT:-20}"
+  [[ "${crd_wait}" =~ ^[0-9]+$ ]] || crd_wait=20
+  for (( i = 0; i < crd_wait; i++ )); do
     kubectl "${kubectl_flags[@]}" get crd "${name}" &>/dev/null || break
     sleep "${KAPPLY_POLL_INTERVAL:-1}"
   done
@@ -688,8 +692,9 @@ kapply::_preflight_crd() {
 }
 
 # Empty allowlist = every manifest CRD may be forced; otherwise exact match.
+# Whitespace around csv entries is stripped so a hand-typed "a, b" matches.
 kapply::_crd_allowed() {
-  local name="${1}" allow="${2}"
+  local name="${1}" allow="${2// /}"
   [[ -z "${allow}" ]] && return 0
   [[ ",${allow}," == *",${name},"* ]]
 }

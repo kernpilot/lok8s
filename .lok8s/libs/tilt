@@ -151,11 +151,12 @@ tilt::preflight_config() {
   local spec="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}/${domain}/cluster.lok8s.yaml"
   local enabled="true" age="-" crds="-" allow="-"
   if [[ -f "${spec}" ]]; then
-    # NOT `.enabled // true`: the alternative operator treats an explicit
-    # `false` as empty and would read "enabled: false" as true. Read raw and
-    # compare — only a literal false disables.
-    enabled=$(yq -r '.spec.tilt.preflight.enabled' "${spec}" 2>/dev/null) || enabled=""
-    [[ "${enabled}" == "false" ]] || enabled="true"
+    # NOT `… // true`: the alternative operator treats an explicit `false`
+    # as empty and would read a disable as true. Read raw and compare —
+    # only a literal false disables. The scalar shorthand `preflight: false`
+    # (no map) counts too, so a terse disable isn't silently ignored.
+    enabled=$(yq -r '.spec.tilt.preflight.enabled, .spec.tilt.preflight' "${spec}" 2>/dev/null | grep -cx false) || true
+    [[ "${enabled}" != "0" ]] && enabled="false" || enabled="true"
     age=$(yq -r '.spec.tilt.preflight.age // "-"' "${spec}" 2>/dev/null) || age="-"
     crds=$(yq -r '.spec.tilt.preflight.crds // "-"' "${spec}" 2>/dev/null) || crds="-"
     allow=$(yq -r '.spec.tilt.preflight.crdForceAllow // [] | join(",")' "${spec}" 2>/dev/null) || allow=""
@@ -169,7 +170,9 @@ tilt::preflight_config() {
 # applies: force-clear manifest objects stuck Terminating so Tilt's apply
 # doesn't spin on "currently being deleted" until its upsert timeout and fail
 # the build. The sweep itself is kapply::preflight; GATING + policy live
-# here, with precedence CLI flag > env > cluster spec > default:
+# here, with precedence CLI flag > cluster spec > kapply env defaults
+# (KAPPLY_PREFLIGHT_AGE/_CRDS backstop only what neither flag nor spec set;
+# the LOK8S_* kill switches below outrank everything):
 #   - LOK8S_PREFLIGHT=0 (env) or spec.tilt.preflight.enabled=false disables
 #     the sweep entirely;
 #   - only the `lo` (local kind) driver is force-cleared by default — remote
