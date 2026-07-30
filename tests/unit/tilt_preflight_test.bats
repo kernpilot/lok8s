@@ -111,7 +111,7 @@ YAML
   [[ ! -s "${SWEEP_LOG}" ]]
 }
 
-@test "preflight spec: scalar shorthand `preflight: false` disables too" {
+@test "preflight spec: scalar shorthand 'preflight: false' disables too" {
   export DOMAIN_NAME=dev.test
   cat > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml" <<'YAML'
 kind: Lo

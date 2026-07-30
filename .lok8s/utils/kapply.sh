@@ -694,7 +694,8 @@ kapply::_preflight_crd() {
 # Empty allowlist = every manifest CRD may be forced; otherwise exact match.
 # Whitespace around csv entries is stripped so a hand-typed "a, b" matches.
 kapply::_crd_allowed() {
-  local name="${1}" allow="${2// /}"
+  local name="${1}" allow="${2:-}"
+  allow="${allow// /}"
   [[ -z "${allow}" ]] && return 0
   [[ ",${allow}," == *",${name},"* ]]
 }

@@ -502,6 +502,24 @@ _stuck_crd_fixture() {
   assert_output --partial 'patch crd kubehzclusters.kubehz.dev'
 }
 
+@test "preflight: crds=force allowlist tolerates csv whitespace" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export CRD_STAYS=1
+  run _preflight_opts "${CR_MANIFEST}" --crds force --crd-allow 'other.example.com, kubehzclusters.kubehz.dev'
+  assert_success
+  assert_output --partial 'FORCED CustomResourceDefinition/kubehzclusters.kubehz.dev'
+}
+
+@test "preflight: non-numeric KAPPLY_CRD_WAIT falls back instead of aborting the report" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub; _stuck_crd_fixture
+  export KAPPLY_CRD_WAIT="20s"
+  run _preflight "${CR_MANIFEST}"
+  assert_success
+  assert_output --partial 'drained 2 instance(s)'
+}
+
 @test "preflight: crds=force respects the allowlist — non-listed CRD is not stripped" {
   command -v jq &>/dev/null || skip "jq required"
   _preflight_stub; _stuck_crd_fixture

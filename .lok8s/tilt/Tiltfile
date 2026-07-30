@@ -784,7 +784,8 @@ def lok8s(
       the local kind driver (LOK8S_FORCE_CLEAR_TERMINATING=1 overrides;
       LOK8S_PREFLIGHT=0 disables). Per-domain policy lives in the cluster
       spec under spec.tilt.preflight (enabled / age / crds drain|skip|force
-      / crdForceAllow) — stuck CRDs default to `drain`: instance finalizers
+      / crdForceAllow; the scalar shorthand `preflight: false` disables the
+      sweep too) — stuck CRDs default to `drain`: instance finalizers
       are cleared so customresourcecleanup completes naturally; the CRD's
       own finalizer is only stripped under `force`. Default: True.
   """
