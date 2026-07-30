@@ -7,6 +7,8 @@
 # sibling arg-sh/argsh checkout satisfies both. Override with ARGSH_SRC=<path>.
 set -euo pipefail
 
+die() { echo "build: ${*}" >&2; exit 1; }
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "${here}/.." && pwd)"
 out="${root}/docs/public/lo-up"
@@ -24,10 +26,16 @@ fi
 # argsh + its minifier on PATH (minifier ships in the argsh checkout's .bin).
 export PATH="${root}/.bin:${argsh_src}/.bin:${PATH}"
 
-# Variables :args manages by LITERAL name — they must survive minifier
-# obfuscation (the spec array `args`, and each flag's destination variable; note
-# `ref` is a reserved argsh nameref, hence `git_ref`). Keep in sync with lo-up.
-keep=(args non_interactive profile git_ref dir)
+# Names that must survive minifier obfuscation:
+#   - the `:args` spec array and each flag's destination variable, which :args
+#     resolves by LITERAL name (note `ref` is a reserved argsh nameref, hence
+#     `git_ref`);
+#   - `tty`, because the minifier renames the bare word in the redirect
+#     `read … </dev/tty` as if it were an identifier. It shipped as
+#     `</dev/a81`, so the read failed, `loup::confirm`'s `|| return 0` treated
+#     that as "yes", and the published installer never actually prompted.
+# Keep in sync with lo-up.
+keep=(args non_interactive profile git_ref dir tty)
 keep_args=(); for v in "${keep[@]}"; do keep_args+=(-i "${v}"); done
 
 # `argsh minify` renders the template with GNU envsubst and a SHELL-FORMAT
@@ -42,8 +50,11 @@ for c in /usr/bin/envsubst /bin/envsubst /usr/local/bin/envsubst; do
     && { gnu_envsubst="${c}"; break; }
 done
 [[ -n "${gnu_envsubst}" ]] \
-  || { echo "build: GNU envsubst not found — install gettext (renvsubst cannot render the template)" >&2; exit 1; }
-shim="$(mktemp -d)"; trap 'rm -rf "${shim}"' EXIT
+  || die "GNU envsubst not found — install gettext (renvsubst cannot render the template)"
+shim="$(mktemp -d)"; tmp_out=""
+# Covers both scratch paths: `set -e` aborts before any inline rm on a minify
+# failure, which used to leak the temp bundle.
+trap 'rm -rf "${shim}"; [[ -n "${tmp_out}" ]] && rm -f "${tmp_out}"' EXIT
 ln -s "${gnu_envsubst}" "${shim}/envsubst"
 export PATH="${shim}:${PATH}"
 
@@ -51,19 +62,38 @@ export PATH="${shim}:${PATH}"
 # unparseable bundle at docs/public/lo-up is served straight to
 # `curl … | sh` users.
 mkdir -p "${out%/*}"
-tmp_out="$(mktemp)"
+# Beside the output, not in /tmp: the publish step must be an atomic rename,
+# and a cross-device mv degrades to a copy whose interruption leaves exactly the
+# truncated bundle this whole dance exists to prevent.
+tmp_out="$(mktemp "${out}.XXXXXX")"
 GIT_VERSION="$(git -C "${argsh_src}" describe --tags --always 2>/dev/null || echo unknown)" \
 GIT_COMMIT_SHA="$(git -C "${argsh_src}" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   argsh minify "${argsh_src}"/libraries/*.sh "${here}/lo-up" \
     -t "${here}/lo-up.min.tmpl" "${keep_args[@]}" -o "${tmp_out}"
 
 [[ -s "${tmp_out}" ]] \
-  || { rm -f "${tmp_out}"; echo "build: minify produced an EMPTY bundle — refusing to publish" >&2; exit 1; }
+  || die "minify produced an EMPTY bundle"
 bash -n "${tmp_out}" 2>/dev/null \
-  || { rm -f "${tmp_out}"; echo "build: minify produced an unparseable bundle — refusing to publish" >&2; exit 1; }
-# The template's own preamble must survive, and so must lo-up's entrypoint.
-grep -q 'lo-up' "${tmp_out}" \
-  || { rm -f "${tmp_out}"; echo "build: bundle does not look like lo-up — refusing to publish" >&2; exit 1; }
+  || die "minify produced an unparseable bundle"
+
+# Run it. `grep`-for-a-marker is too weak — the template's header comment alone
+# satisfies it, so a 300-byte truncation passed. `--help` exercises the argsh
+# runtime, the :args spec and the obfuscated variable names in one go.
+chmod +x "${tmp_out}"
+help_out="$("${tmp_out}" --help 2>&1)" \
+  || die "bundle failed to run --help:"$'\n'"${help_out}"
+grep -q 'install or update a lok8s project environment' <<<"${help_out}" \
+  || die "bundle --help does not render lo-up's usage:"$'\n'"${help_out}"
+for v in non-interactive profile git-ref dir; do
+  grep -q -- "--${v}" <<<"${help_out}" \
+    || die "bundle --help lost the --${v} flag (minifier renamed a :args destination?)"
+done
+
+# Literal paths the minifier has mangled before (see `keep` above). A renamed
+# /dev/tty turns the confirmation prompt into a silent auto-yes, which no
+# smoke test catches because the prompt is skipped, not broken.
+grep -q '</dev/tty' "${tmp_out}" \
+  || die "bundle lost the </dev/tty redirect — the confirm prompt would silently auto-yes"
 
 mv "${tmp_out}" "${out}"
 chmod +x "${out}"

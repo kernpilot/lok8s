@@ -70,11 +70,14 @@ loup::ensure_b() {
 # add plan while writing no files (fentas/b#184). Both leave a fresh machine
 # with an "installed" env that has nothing in it, and the failure only surfaces
 # much later as a missing binary. Check the artefact, not the exit code.
+# NOTE: `.bin/b.yaml` is cwd-relative on purpose, NOT ${PATH_BIN}-relative. `b`
+# resolves its config as <cwd>/.bin/b.yaml regardless of where it installs
+# binaries, so PATH_BIN is right for verify_materialised and wrong here.
 loup::verify_registered() {
   [[ -f "${PWD}/.bin/b.yaml" ]] \
-    || _die "b env add reported success but ${PWD}/.bin/b.yaml does not exist"
+    || _die "no ${PWD}/.bin/b.yaml — the env was never registered (run: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
   grep -q 'kernpilot/lok8s' "${PWD}/.bin/b.yaml" 2>/dev/null \
-    || _die "b env add reported success but registered no lok8s env in .bin/b.yaml (try: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
+    || _die ".bin/b.yaml registered no lok8s env — nothing here can update (run: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
 }
 
 # loup::verify_materialised — assert `b install` actually produced a usable env:
@@ -138,10 +141,14 @@ main() {
       || _die "aborted"
     _info "adding profile '${profile}' from ${LOUP_REPO}#${git_ref}"
     b env add "${LOUP_REPO}#${profile}" --version "${git_ref}" || _die "b env add failed"
-    loup::verify_registered
   else
     _info "updating the lok8s env (${LOUP_REPO})"
   fi
+  # BOTH paths: detect_mode calls a bare vendored .lok8s/ an "update", so a
+  # checkout with the framework but no b.yaml entry would skip registration
+  # entirely, `b install` would no-op, and the binaries check would pass on
+  # whatever is already on PATH — reporting a ready env that can never update.
+  loup::verify_registered
 
   loup::install_self
 

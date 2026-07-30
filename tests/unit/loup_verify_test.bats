@@ -37,7 +37,7 @@ setup() {
 @test "verify_registered fails when b.yaml was never created" {
   run loup::verify_registered
   [ "${status}" -eq 1 ]
-  [[ "${output}" == *"does not exist"* ]]
+  [[ "${output}" == *"never registered"* ]]
 }
 
 @test "verify_registered fails when b.yaml has no lok8s env (the rc-0 no-op)" {
@@ -131,4 +131,32 @@ materialise() {
   chmod +x "${stub}/kubectl"
   PATH="${stub}:${PATH}" run loup::verify_materialised
   [ "${status}" -eq 0 ]
+}
+
+# --- wiring ---
+#
+# The tests above source the functions in isolation, so they stay green even if
+# main() stops calling them. Pin the call sites too.
+
+@test "lo-up calls verify_registered outside the bootstrap branch" {
+  local src="${_PROJECT_ROOT}/install/lo-up"
+  grep -q '^  loup::verify_registered$' "${src}" \
+    || fail "loup::verify_registered is not called at main()'s top level — an env with a vendored .lok8s but no b.yaml entry would report ready"
+}
+
+@test "lo-up calls verify_materialised after b install" {
+  local src="${_PROJECT_ROOT}/install/lo-up"
+  grep -A 1 '^  b install' "${src}" | grep -q 'loup::verify_materialised' \
+    || fail "loup::verify_materialised does not follow 'b install' — a no-op install would report ready"
+}
+
+@test "the published bundle is in sync with install/lo-up" {
+  # docs/public/lo-up is a generated artifact served to `curl … | sh`. A stale
+  # bundle means the guards exist in the repo but not in what users run.
+  local bundle="${_PROJECT_ROOT}/docs/public/lo-up"
+  [ -s "${bundle}" ] || fail "docs/public/lo-up is missing or empty"
+  grep -q 'registered no lok8s env' "${bundle}" \
+    || fail "docs/public/lo-up predates the verification guards — re-run install/build"
+  grep -q '</dev/tty' "${bundle}" \
+    || fail "docs/public/lo-up lost the </dev/tty redirect — the confirm prompt would silently auto-yes"
 }
