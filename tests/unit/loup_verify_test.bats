@@ -160,3 +160,56 @@ materialise() {
   grep -q '</dev/tty' "${bundle}" \
     || fail "docs/public/lo-up lost the </dev/tty redirect — the confirm prompt would silently auto-yes"
 }
+
+# --- behaviour of the PUBLISHED bundle ---
+#
+# The greps above pin the source; these drive the artifact users actually run.
+# That catches what source-level assertions cannot: a minifier that renames a
+# `:args` destination leaves the spec string (and so `--help`) untouched while
+# the flag silently stops working.
+
+_stub_project() {
+  local dir="${1}"
+  mkdir -p "${dir}/.bin"
+  cat > "${dir}/.bin/b" <<'STUB'
+#!/bin/sh
+echo "${@}" >> "${B_PROBE_LOG}"
+exit 0
+STUB
+  chmod +x "${dir}/.bin/b"
+  printf 'binaries: {}\n' > "${dir}/.bin/b.yaml"
+}
+
+@test "bundle: --profile and --git-ref reach 'b env add'" {
+  local dir="${BATS_TEST_TMPDIR}/proj"
+  _stub_project "${dir}"
+  B_PROBE_LOG="${dir}/calls" PATH="${dir}/.bin:${PATH}" LOUP_URL="file:///dev/null" \
+    run bash "${_PROJECT_ROOT}/docs/public/lo-up" -y --profile kustomize --git-ref v9.9.9 --dir "${dir}"
+  # Exits at the verification guard — the stub installs nothing. The log is the
+  # signal: the flag values had to survive minification to get there.
+  run cat "${dir}/calls"
+  assert_output --partial "#kustomize"
+  assert_output --partial "v9.9.9"
+}
+
+@test "bundle: a b that exits 0 without doing anything does NOT report a ready env" {
+  local dir="${BATS_TEST_TMPDIR}/proj"
+  _stub_project "${dir}"
+  B_PROBE_LOG="${dir}/calls" PATH="${dir}/.bin:${PATH}" LOUP_URL="file:///dev/null" \
+    run bash "${_PROJECT_ROOT}/docs/public/lo-up" -y --dir "${dir}"
+  assert_failure
+  refute_output --partial "lok8s env ready"
+  assert_output --partial "registered no lok8s env"
+}
+
+@test "bundle: LOUP_REPO override is not told to re-run the command that just ran" {
+  local dir="${BATS_TEST_TMPDIR}/proj"
+  _stub_project "${dir}"
+  # A fork registers under its own org; the guard must match on LOUP_REPO, not a
+  # hardcoded kernpilot/lok8s.
+  printf 'envs:\n  git@github.com:acme/lok8s#local: {}\n' > "${dir}/.bin/b.yaml"
+  B_PROBE_LOG="${dir}/calls" PATH="${dir}/.bin:${PATH}" LOUP_URL="file:///dev/null" \
+    LOUP_REPO="github.com/acme/lok8s" \
+    run bash "${_PROJECT_ROOT}/docs/public/lo-up" -y --dir "${dir}"
+  refute_output --partial "registered no lok8s env"
+}

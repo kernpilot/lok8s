@@ -54,7 +54,8 @@ done
 shim="$(mktemp -d)"; tmp_out=""
 # Covers both scratch paths: `set -e` aborts before any inline rm on a minify
 # failure, which used to leak the temp bundle.
-trap 'rm -rf "${shim}"; [[ -n "${tmp_out}" ]] && rm -f "${tmp_out}"' EXIT
+probe=""
+trap 'rm -rf "${shim}" ${probe:+"${probe}"}; [[ -n "${tmp_out}" ]] && rm -f "${tmp_out}"' EXIT
 ln -s "${gnu_envsubst}" "${shim}/envsubst"
 export PATH="${shim}:${PATH}"
 
@@ -80,14 +81,37 @@ bash -n "${tmp_out}" 2>/dev/null \
 # satisfies it, so a 300-byte truncation passed. `--help` exercises the argsh
 # runtime, the :args spec and the obfuscated variable names in one go.
 chmod +x "${tmp_out}"
-help_out="$("${tmp_out}" --help 2>&1)" \
+# Explicit `bash` and a closed stdin. The bundle's shebang is /bin/sh, and on a
+# dash /bin/sh the template's POSIX preamble re-execs by `cat`-ing STDIN into a
+# temp file — which here would be the BUILD's stdin, producing empty output on a
+# pipe and hanging on a TTY.
+help_out="$(bash "${tmp_out}" --help </dev/null 2>&1)" \
   || die "bundle failed to run --help:"$'\n'"${help_out}"
 grep -q 'install or update a lok8s project environment' <<<"${help_out}" \
   || die "bundle --help does not render lo-up's usage:"$'\n'"${help_out}"
-for v in non-interactive profile git-ref dir; do
-  grep -q -- "--${v}" <<<"${help_out}" \
-    || die "bundle --help lost the --${v} flag (minifier renamed a :args destination?)"
-done
+
+# Behaviour, not usage text: a `:args` spec string ('profile|p') is a literal the
+# minifier never touches, so --help keeps advertising --profile even when the
+# DESTINATION variable was renamed and the flag silently stops working. Drive the
+# bundle against a stub `b` and check the values actually arrive.
+probe="$(mktemp -d)"
+mkdir -p "${probe}/.bin"
+cat > "${probe}/.bin/b" <<'STUB'
+#!/bin/sh
+echo "${@}" >> "${B_PROBE_LOG}"
+exit 0
+STUB
+chmod +x "${probe}/.bin/b"
+printf 'binaries: {}\n' > "${probe}/.bin/b.yaml"
+# Exits non-zero at the verification guard (the stub installs nothing); the flag
+# plumbing is what the log proves, so the status is not the signal here.
+B_PROBE_LOG="${probe}/calls" PATH="${probe}/.bin:${PATH}" LOUP_URL="file:///dev/null" \
+  bash "${tmp_out}" -y --profile kustomize --git-ref v9.9.9 --dir "${probe}" \
+  </dev/null >/dev/null 2>&1 || true
+grep -q '#kustomize' "${probe}/calls" 2>/dev/null \
+  || die "--profile never reached 'b env add' — the minifier renamed its destination variable"
+grep -q 'v9.9.9' "${probe}/calls" 2>/dev/null \
+  || die "--git-ref never reached 'b env add' — the minifier renamed its destination variable"
 
 # Literal paths the minifier has mangled before (see `keep` above). A renamed
 # /dev/tty turns the confirmation prompt into a silent auto-yes, which no

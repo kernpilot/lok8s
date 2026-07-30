@@ -43,7 +43,7 @@ loup::confirm() {
 loup::detect_mode() {
   local d="${1}"
   [[ -d "${d}/.lok8s" ]] && { echo update; return; }
-  [[ -f "${d}/.bin/b.yaml" ]] && grep -q 'kernpilot/lok8s' "${d}/.bin/b.yaml" 2>/dev/null \
+  [[ -f "${d}/.bin/b.yaml" ]] && grep -q "${LOUP_REPO#*/}" "${d}/.bin/b.yaml" 2>/dev/null \
     && { echo update; return; }
   echo bootstrap
 }
@@ -76,7 +76,10 @@ loup::ensure_b() {
 loup::verify_registered() {
   [[ -f "${PWD}/.bin/b.yaml" ]] \
     || _die "no ${PWD}/.bin/b.yaml — the env was never registered (run: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
-  grep -q 'kernpilot/lok8s' "${PWD}/.bin/b.yaml" 2>/dev/null \
+  # Match on LOUP_REPO's org/repo, not a hardcoded one: a fork pointed here via
+  # LOUP_REPO would otherwise register fine and then be told to run the very
+  # command that just succeeded.
+  grep -q "${LOUP_REPO#*/}" "${PWD}/.bin/b.yaml" 2>/dev/null \
     || _die ".bin/b.yaml registered no lok8s env — nothing here can update (run: b env add ${LOUP_REPO}#${profile} --version ${git_ref})"
 }
 
