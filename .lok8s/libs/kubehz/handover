@@ -24,6 +24,13 @@
 #   ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key
 #   encryption-key snapshot-location endpoint-dns
 #
+# Optional keys — the platform's own values, so the target does not have to
+# hardcode platform constants. Absent means "use the default", which keeps
+# bundles exported by older operators working:
+#   encryption-provider  (default secretbox)
+#   encryption-key-name  (default kubehz-key-1)
+#   etcd-version         (default 3.5.21-0, the platform's etcd line)
+#
 # LIBRARY-ONLY: no main::* entry point and no dispatch guard — loaded via
 # libs/kubehz/main; not directly executable.
 #
@@ -32,7 +39,8 @@
 #   KUBEHZ_HANDOVER_ETCD_DIR  target /var/lib/etcd    (default)
 #   KUBEHZ_HANDOVER_WAIT      apiserver-ready timeout seconds (default 300)
 #   KUBEHZ_HANDOVER_ETCD_IMAGE_TAG  etcd image tag for the target's static pod
-#                             (default 3.5.21-0 — the platform's source line)
+#                             (overrides the bundle's etcd-version; default
+#                             3.5.21-0 — the platform's source line)
 
 import ^utils/verbose
 
@@ -265,14 +273,45 @@ handover::restore_snapshot() {
   fi
 }
 
+# handover::bundle_value <bundle> <key> <default> — read an OPTIONAL bundle file.
+# Missing or blank falls back to <default>. Trailing newlines are stripped: the
+# operator writes these as Secret values and a stray newline would end up inside
+# a YAML scalar or an image tag.
+handover::bundle_value() {
+  local bundle="${1}" key="${2}" default="${3}" value
+  [[ -f "${bundle}/${key}" ]] || { echo "${default}"; return 0; }
+  value="$(<"${bundle}/${key}")"
+  value="${value//[[:space:]]/}"
+  [[ -n "${value}" ]] || { echo "${default}"; return 0; }
+  echo "${value}"
+}
+
 # Write the EncryptionConfiguration the restored apiserver needs: the bundle's
 # encryption-key is the SAME key the source cluster encrypted its Secrets at
 # rest with — without it the restored apiserver cannot decrypt them. 0600:
 # the file embeds key material. Outputs the file path.
 handover::write_encryption_config() {
   local bundle="${1}" k8s_dir="${2}"
-  local out="${k8s_dir}/kubehz-encryption-config.yaml" key
+  local out="${k8s_dir}/kubehz-encryption-config.yaml" key provider key_name
   key=$(<"${bundle}/encryption-key")
+  provider="$(handover::bundle_value "${bundle}" encryption-provider secretbox)"
+  key_name="$(handover::bundle_value "${bundle}" encryption-key-name kubehz-key-1)"
+  # Allowlist: these are the apiserver's symmetric-key providers, and each takes
+  # the same `keys: [{name, secret}]` shape we render below. `kms` is a
+  # different structure entirely and cannot be substituted here.
+  case "${provider}" in
+    secretbox | aescbc | aesgcm) ;;
+    *)
+      error "handover: bundle encryption-provider '${provider}' is not one of secretbox/aescbc/aesgcm — refusing to render the EncryptionConfiguration"
+      return 1
+      ;;
+  esac
+  # The name lands in YAML we generate; keep it to the charset Kubernetes
+  # accepts for a provider key name so a tampered bundle cannot inject config.
+  [[ "${key_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]] || {
+    error "handover: bundle encryption-key-name '${key_name}' is not a plain name — refusing to render the EncryptionConfiguration"
+    return 1
+  }
   # The key lands inside YAML we generate — allow only base64 charset so a
   # tampered bundle cannot inject config (same guard class as the kubeone
   # networkID interpolation).
@@ -281,14 +320,14 @@ handover::write_encryption_config() {
     return 1
   }
   mkdir -p "${k8s_dir}" || return 1
-  # PROVIDER + KEY NAME must match what the SOURCE cluster encrypted with —
-  # the stored values carry the "k8s:enc:<provider>:v1:<keyname>:" prefix and
-  # the apiserver refuses anything else ("no matching prefix found", proven
-  # on a real target: tier2 run 18 booted a healthy apiserver that could not
-  # read a single Secret). The platform operator configures KKP with
-  # secretbox / kubehz-key-1 (kubehz-core etcd_encryption.go
-  # etcdEncryptionKeyName) — mirror it verbatim. Follow-up: carry the
-  # provider+name in the bundle instead of pinning the platform constant.
+  # PROVIDER + KEY NAME must match what the SOURCE cluster encrypted with — the
+  # stored values carry the "k8s:enc:<provider>:v1:<keyname>:" prefix and the
+  # apiserver refuses anything else ("no matching prefix found", proven on a real
+  # target: tier2 run 18 booted a healthy apiserver that could not read a single
+  # Secret). They come from the bundle so the target mirrors whatever the source
+  # actually used; the defaults are the platform's own (kubehz-core
+  # etcd_encryption.go etcdEncryptionKeyName) for bundles exported before the
+  # operator carried them.
   cat > "${out}" <<EOF
 apiVersion: apiserver.config.k8s.io/v1
 kind: EncryptionConfiguration
@@ -296,9 +335,9 @@ resources:
   - resources:
       - secrets
     providers:
-      - secretbox:
+      - ${provider}:
           keys:
-            - name: kubehz-key-1
+            - name: ${key_name}
               secret: ${key}
       - identity: {}
 EOF
@@ -495,10 +534,15 @@ handover::receive() {
   member_identity="$(handover::member_identity)" || return 1
   read -r node_name peer_url <<<"${member_identity}"
   # Validate the etcd pin here too — a bad override must not strand seeded PKI.
-  local etcd_tag="${KUBEHZ_HANDOVER_ETCD_IMAGE_TAG:-3.5.21-0}"
+  # Precedence: explicit env override > the bundle's own etcd line > the
+  # platform default. The bundle value is what the SOURCE ran, which is what the
+  # snapshot has to be replayed by — etcd 3.6 PANICS on a 3.5-origin restore.
+  local etcd_tag="${KUBEHZ_HANDOVER_ETCD_IMAGE_TAG:-}"
+  [[ -n "${etcd_tag}" ]] \
+    || etcd_tag="$(handover::bundle_value "${bundle_dir}" etcd-version 3.5.21-0)"
   # Docker tag grammar: alnum/underscore first char, then [alnum._-], ≤128.
   [[ "${etcd_tag}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$ ]] || {
-    error "handover: KUBEHZ_HANDOVER_ETCD_IMAGE_TAG '${etcd_tag}' is not a plain image tag — refusing before touching the node"
+    error "handover: etcd image tag '${etcd_tag}' is not a plain image tag — refusing before touching the node"
     return 1
   }
 

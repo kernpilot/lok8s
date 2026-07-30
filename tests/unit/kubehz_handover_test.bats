@@ -535,6 +535,74 @@ _mock_node_binaries() {
   assert_output --partial "not base64"
 }
 
+# ── bundle-carried platform metadata ─────────────────────
+#
+# provider / key name / etcd line come FROM the bundle so the target mirrors
+# whatever the source actually encrypted and ran with, instead of hardcoding
+# platform constants. Absent keys keep older bundles working.
+
+@test "handover: write_encryption_config defaults to the platform's secretbox/kubehz-key-1" {
+  _make_bundle
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- secretbox:"
+  assert_output --partial "name: kubehz-key-1"
+}
+
+@test "handover: write_encryption_config honours a bundle-carried provider and key name" {
+  _make_bundle
+  echo aescbc > "${BUNDLE}/encryption-provider"
+  echo source-key-7 > "${BUNDLE}/encryption-key-name"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- aescbc:"
+  assert_output --partial "name: source-key-7"
+  refute_output --partial "secretbox"
+  refute_output --partial "kubehz-key-1"
+}
+
+@test "handover: write_encryption_config rejects an unknown provider" {
+  _make_bundle
+  echo kms > "${BUNDLE}/encryption-provider"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_failure
+  assert_output --partial "not one of secretbox/aescbc/aesgcm"
+}
+
+@test "handover: write_encryption_config rejects a key name carrying YAML (injection guard)" {
+  _make_bundle
+  printf 'k1"\n            - name: pwn' > "${BUNDLE}/encryption-key-name"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_failure
+  assert_output --partial "not a plain name"
+}
+
+@test "handover: a blank bundle value falls back to the default" {
+  _make_bundle
+  printf '\n' > "${BUNDLE}/encryption-provider"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- secretbox:"
+}
+
+@test "handover: bundle_value strips the trailing newline the operator writes" {
+  _make_bundle
+  printf '3.5.21-0\n' > "${BUNDLE}/etcd-version"
+  run handover::bundle_value "${BUNDLE}" etcd-version fallback
+  assert_success
+  assert_output "3.5.21-0"
+}
+
+@test "handover: bundle_value falls back when the key is absent" {
+  _make_bundle
+  run handover::bundle_value "${BUNDLE}" nosuchkey the-default
+  assert_success
+  assert_output "the-default"
+}
+
 # ── preseed: the thin kubeone variant ────────────────────
 
 @test "handover preseed: transfers the six PKI files per-file with immediate key tightening" {
