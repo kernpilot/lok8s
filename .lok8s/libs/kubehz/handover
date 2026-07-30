@@ -281,7 +281,13 @@ handover::bundle_value() {
   local bundle="${1}" key="${2}" default="${3}" value
   [[ -f "${bundle}/${key}" ]] || { echo "${default}"; return 0; }
   value="$(<"${bundle}/${key}")"
-  value="${value//[[:space:]]/}"
+  # Trim SURROUNDING whitespace only. The operator writes these as Secret values
+  # and a trailing newline would land inside a YAML scalar or an image tag.
+  # Internal whitespace is left intact deliberately: stripping it could turn a
+  # wrong value into a plausible one, whereas the per-value guards (the provider
+  # allowlist, the key-name and image-tag grammars) reject it loudly.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
   [[ -n "${value}" ]] || { echo "${default}"; return 0; }
   echo "${value}"
 }

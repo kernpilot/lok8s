@@ -234,6 +234,56 @@ _mock_node_binaries() {
   assert_output --partial -- "--tls-server-name cl-001.kubermatic.kkp.kubehz.in.net"
 }
 
+@test "handover receive: a bundle-carried etcd-version reaches the kubeadm config" {
+  _make_bundle
+  _mock_node_binaries
+  echo '3.5.99-0' > "${BUNDLE}/etcd-version"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml"
+  assert_output --partial 'imageTag: "3.5.99-0"'
+  refute_output --partial '3.5.21-0'
+}
+
+@test "handover receive: the env override beats a bundle-carried etcd-version" {
+  _make_bundle
+  _mock_node_binaries
+  echo '3.5.99-0' > "${BUNDLE}/etcd-version"
+
+  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.88-0' \
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml"
+  assert_output --partial 'imageTag: "3.5.88-0"'
+}
+
+@test "handover receive: an out-of-charset BUNDLE etcd-version is refused before any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf '3.5.21-0" evil\n' > "${BUNDLE}/etcd-version"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "not a plain image tag"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
+@test "handover receive: a bundle-carried provider and key name reach the EncryptionConfiguration" {
+  _make_bundle
+  _mock_node_binaries
+  echo aesgcm > "${BUNDLE}/encryption-provider"
+  echo src-key-2 > "${BUNDLE}/encryption-key-name"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- aesgcm:"
+  assert_output --partial "name: src-key-2"
+  refute_output --partial "secretbox"
+  refute_output --partial "kubehz-key-1"
+}
+
 @test "handover receive: an out-of-charset etcd image tag is refused BEFORE any node mutation" {
   _make_bundle
   _mock_node_binaries
