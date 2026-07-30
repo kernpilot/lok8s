@@ -279,7 +279,11 @@ handover::restore_snapshot() {
 # a YAML scalar or an image tag.
 handover::bundle_value() {
   local bundle="${1}" key="${2}" default="${3}" value
-  [[ -f "${bundle}/${key}" ]] || { echo "${default}"; return 0; }
+  # printf, not echo: a value of exactly `-n`/`-e`/`-neE` would be eaten as an
+  # echo flag, return empty, and fall back to the default IN SILENCE — which for
+  # etcd-version means quietly reverting to the platform tag the warn above
+  # exists to make loud.
+  [[ -f "${bundle}/${key}" ]] || { printf '%s\n' "${default}"; return 0; }
   value="$(<"${bundle}/${key}")"
   # Trim SURROUNDING whitespace only. The operator writes these as Secret values
   # and a trailing newline would land inside a YAML scalar or an image tag.
@@ -288,8 +292,8 @@ handover::bundle_value() {
   # allowlist, the key-name and image-tag grammars) reject it loudly.
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
-  [[ -n "${value}" ]] || { echo "${default}"; return 0; }
-  echo "${value}"
+  [[ -n "${value}" ]] || { printf '%s\n' "${default}"; return 0; }
+  printf '%s\n' "${value}"
 }
 
 # Write the EncryptionConfiguration the restored apiserver needs: the bundle's
@@ -305,6 +309,24 @@ handover::bundle_value() {
 # PKI and a restored member dir behind the non-empty guard — exactly what the
 # fail-early contract in receive exists to avoid. The writer keeps calling it so
 # it stays safe for direct callers.
+# handover::encryption_key <bundle> — read and VALIDATE the base64 key, echoing
+# it. Shared by the pre-flight block and write_encryption_config for the same
+# reason as encryption_metadata: the key lands inside YAML this renders, and
+# rejecting it from the writer alone happens after the node is already seeded.
+handover::encryption_key() {
+  local bundle="${1}" key
+  key="$(<"${bundle}/encryption-key")"
+  # Trim EDGES only — interior whitespace must fail the charset gate rather than
+  # be silently welded together.
+  key="${key#"${key%%[![:space:]]*}"}"
+  key="${key%"${key##*[![:space:]]}"}"
+  [[ "${key}" =~ ^[A-Za-z0-9+/=]+$ ]] || {
+    error "handover: bundle encryption-key is not base64 — refusing to render the EncryptionConfiguration"
+    return 1
+  }
+  printf '%s\n' "${key}"
+}
+
 handover::encryption_metadata() {
   local bundle="${1}" provider key_name
   provider="$(handover::bundle_value "${bundle}" encryption-provider secretbox)"
@@ -331,16 +353,9 @@ handover::encryption_metadata() {
 handover::write_encryption_config() {
   local bundle="${1}" k8s_dir="${2}"
   local out="${k8s_dir}/kubehz-encryption-config.yaml" key provider key_name meta
-  key=$(<"${bundle}/encryption-key")
+  key="$(handover::encryption_key "${bundle}")" || return 1
   meta="$(handover::encryption_metadata "${bundle}")" || return 1
   read -r provider key_name <<<"${meta}"
-  # The key lands inside YAML we generate — allow only base64 charset so a
-  # tampered bundle cannot inject config (same guard class as the kubeone
-  # networkID interpolation).
-  [[ "${key}" =~ ^[A-Za-z0-9+/=]+$ ]] || {
-    error "handover: bundle encryption-key is not base64 — refusing to render the EncryptionConfiguration"
-    return 1
-  }
   mkdir -p "${k8s_dir}" || return 1
   # PROVIDER + KEY NAME must match what the SOURCE cluster encrypted with — the
   # stored values carry the "k8s:enc:<provider>:v1:<keyname>:" prefix and the
@@ -570,13 +585,20 @@ handover::receive() {
   fi
   # Docker tag grammar: alnum/underscore first char, then [alnum._-], ≤128.
   [[ "${etcd_tag}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$ ]] || {
-    error "handover: etcd image tag '${etcd_tag}' is not a plain image tag — refusing before touching the node"
+    error "handover: etcd image tag '${etcd_tag:0:64}' is not a plain image tag — refusing before touching the node"
     return 1
   }
 
-  # Same fail-early reason as the tag: a rejection inside write_encryption_config
-  # would land after the PKI and the snapshot are already on the node.
+  # EVERY bundle-derived value is validated here, before the node is touched.
+  # A rejection from inside write_encryption_config or write_kubeadm_config lands
+  # after place_pki and restore_snapshot have run, stranding seeded PKI and a
+  # restored member dir behind the non-empty guard — a `kubeadm reset` and a
+  # --force re-run for what is only a malformed bundle. The individual writers
+  # keep their own checks so they stay safe for direct callers.
   handover::encryption_metadata "${bundle_dir}" >/dev/null || return 1
+  handover::encryption_key "${bundle_dir}" >/dev/null || return 1
+  local endpoint_dns
+  endpoint_dns="$(handover::endpoint_dns "${bundle_dir}")" || return 1
 
   handover::place_pki "${bundle_dir}" "${k8s_dir}" || return 1
   handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" "${node_name}" "${peer_url}" || return 1
@@ -588,9 +610,6 @@ handover::receive() {
     return 1
   }
   handover::verify "${bundle_dir}" "${k8s_dir}" || return 1
-
-  local endpoint_dns
-  endpoint_dns="$(handover::endpoint_dns "${bundle_dir}")" || return 1
 
   if (( single_node )); then
     # Pinned to the LOCAL apiserver for the same reason verify is: admin.conf's

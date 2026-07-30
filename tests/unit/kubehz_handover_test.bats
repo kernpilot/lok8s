@@ -93,7 +93,12 @@ _make_bundle() {
 
 # Happy-path mocks: every external binary logs into CALLS.
 _mock_node_binaries() {
-  etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
+  # A real restore leaves ${ETCD_DIR}/member behind. The mock must too, or the
+  # "nothing was seeded" assertions pass whether or not the restore ran.
+  etcdutl() {
+    echo "etcdutl $*" >> "${CALLS}"
+    mkdir -p "${KUBEHZ_HANDOVER_ETCD_DIR}/member"
+  }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; }
   kubectl() { echo "kubectl $*" >> "${CALLS}"; return 0; }
   # Deterministic node identity for the restore's member rewrite — uppercase
@@ -318,6 +323,53 @@ _mock_node_binaries() {
   assert_output --partial "name: src-key-2"
   refute_output --partial "secretbox"
   refute_output --partial "kubehz-key-1"
+}
+
+@test "handover receive: a non-base64 encryption-key is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf 'k3y"\ninjected: yaml\n' > "${BUNDLE}/encryption-key"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "is not base64"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover receive: a bad endpoint-dns is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf 'evil.example.com"\n  extraArgs: pwn\n' > "${BUNDLE}/endpoint-dns"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "not a plain hostname"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover: bundle_value keeps interior whitespace so the guards can reject it" {
+  _make_bundle
+  # Welding this into `aescbc` would make a malformed bundle render happily.
+  printf 'aes cbc\n' > "${BUNDLE}/encryption-provider"
+  run handover::bundle_value "${BUNDLE}" encryption-provider secretbox
+  assert_success
+  assert_output "aes cbc"
+
+  run handover::encryption_metadata "${BUNDLE}"
+  assert_failure
+  assert_output --partial "is not one of secretbox/aescbc/aesgcm"
+}
+
+@test "handover: bundle_value returns a value that looks like an echo flag" {
+  _make_bundle
+  # `echo -n` prints nothing and would silently fall back to the default —
+  # for etcd-version that means quietly reverting to the platform tag.
+  printf -- '-n\n' > "${BUNDLE}/etcd-version"
+  run handover::bundle_value "${BUNDLE}" etcd-version 3.5.21-0
+  assert_success
+  assert_output -- "-n"
 }
 
 @test "handover receive: an out-of-charset etcd image tag is refused BEFORE any node mutation" {
