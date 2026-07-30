@@ -269,6 +269,42 @@ _mock_node_binaries() {
   [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
 }
 
+@test "handover receive: a bad bundle provider is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  echo kms > "${BUNDLE}/encryption-provider"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "is not one of secretbox/aescbc/aesgcm"
+  # Rejecting inside write_encryption_config would strand these.
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover receive: a bad bundle key name is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf 'k1"\n            - name: pwn\n' > "${BUNDLE}/encryption-key-name"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "is not a plain name"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover receive: an override diverging from the bundle etcd-version warns" {
+  _make_bundle
+  _mock_node_binaries
+  echo '3.5.99-0' > "${BUNDLE}/etcd-version"
+
+  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.88-0' \
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  assert_output --partial "overrides the bundle's etcd-version '3.5.99-0'"
+}
+
 @test "handover receive: a bundle-carried provider and key name reach the EncryptionConfiguration" {
   _make_bundle
   _mock_node_binaries

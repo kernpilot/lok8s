@@ -296,28 +296,44 @@ handover::bundle_value() {
 # encryption-key is the SAME key the source cluster encrypted its Secrets at
 # rest with — without it the restored apiserver cannot decrypt them. 0600:
 # the file embeds key material. Outputs the file path.
-handover::write_encryption_config() {
-  local bundle="${1}" k8s_dir="${2}"
-  local out="${k8s_dir}/kubehz-encryption-config.yaml" key provider key_name
-  key=$(<"${bundle}/encryption-key")
+# handover::encryption_metadata <bundle> — resolve and VALIDATE the two
+# EncryptionConfiguration values, echoing "<provider> <key-name>".
+#
+# Shared by the pre-flight block and write_encryption_config so a tampered
+# bundle is refused BEFORE the node is touched. Rejecting inside the writer
+# alone happens after place_pki and restore_snapshot have run, stranding seeded
+# PKI and a restored member dir behind the non-empty guard — exactly what the
+# fail-early contract in receive exists to avoid. The writer keeps calling it so
+# it stays safe for direct callers.
+handover::encryption_metadata() {
+  local bundle="${1}" provider key_name
   provider="$(handover::bundle_value "${bundle}" encryption-provider secretbox)"
   key_name="$(handover::bundle_value "${bundle}" encryption-key-name kubehz-key-1)"
   # Allowlist: these are the apiserver's symmetric-key providers, and each takes
-  # the same `keys: [{name, secret}]` shape we render below. `kms` is a
-  # different structure entirely and cannot be substituted here.
+  # the same `keys: [{name, secret}]` shape write_encryption_config renders.
+  # `kms` is a different structure entirely and cannot be substituted there.
   case "${provider}" in
     secretbox | aescbc | aesgcm) ;;
     *)
-      error "handover: bundle encryption-provider '${provider}' is not one of secretbox/aescbc/aesgcm — refusing to render the EncryptionConfiguration"
+      error "handover: bundle encryption-provider '${provider:0:64}' is not one of secretbox/aescbc/aesgcm"
       return 1
       ;;
   esac
-  # The name lands in YAML we generate; keep it to the charset Kubernetes
-  # accepts for a provider key name so a tampered bundle cannot inject config.
+  # The name lands in YAML we generate; keep it to the charset Kubernetes accepts
+  # for a provider key name so a tampered bundle cannot inject config.
   [[ "${key_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]] || {
-    error "handover: bundle encryption-key-name '${key_name}' is not a plain name — refusing to render the EncryptionConfiguration"
+    error "handover: bundle encryption-key-name '${key_name:0:64}' is not a plain name"
     return 1
   }
+  echo "${provider} ${key_name}"
+}
+
+handover::write_encryption_config() {
+  local bundle="${1}" k8s_dir="${2}"
+  local out="${k8s_dir}/kubehz-encryption-config.yaml" key provider key_name meta
+  key=$(<"${bundle}/encryption-key")
+  meta="$(handover::encryption_metadata "${bundle}")" || return 1
+  read -r provider key_name <<<"${meta}"
   # The key lands inside YAML we generate — allow only base64 charset so a
   # tampered bundle cannot inject config (same guard class as the kubeone
   # networkID interpolation).
@@ -543,14 +559,24 @@ handover::receive() {
   # Precedence: explicit env override > the bundle's own etcd line > the
   # platform default. The bundle value is what the SOURCE ran, which is what the
   # snapshot has to be replayed by — etcd 3.6 PANICS on a 3.5-origin restore.
-  local etcd_tag="${KUBEHZ_HANDOVER_ETCD_IMAGE_TAG:-}"
-  [[ -n "${etcd_tag}" ]] \
-    || etcd_tag="$(handover::bundle_value "${bundle_dir}" etcd-version 3.5.21-0)"
+  local etcd_tag="${KUBEHZ_HANDOVER_ETCD_IMAGE_TAG:-}" bundle_tag
+  bundle_tag="$(handover::bundle_value "${bundle_dir}" etcd-version "")"
+  if [[ -z "${etcd_tag}" ]]; then
+    etcd_tag="${bundle_tag:-3.5.21-0}"
+  elif [[ -n "${bundle_tag}" && "${bundle_tag}" != "${etcd_tag}" ]]; then
+    # A stale override silently defeating the value the source exported is worth
+    # saying out loud — it is the etcd-3.6-panics-on-a-3.5-snapshot trap.
+    warn "handover: KUBEHZ_HANDOVER_ETCD_IMAGE_TAG '${etcd_tag}' overrides the bundle's etcd-version '${bundle_tag}'"
+  fi
   # Docker tag grammar: alnum/underscore first char, then [alnum._-], ≤128.
   [[ "${etcd_tag}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$ ]] || {
     error "handover: etcd image tag '${etcd_tag}' is not a plain image tag — refusing before touching the node"
     return 1
   }
+
+  # Same fail-early reason as the tag: a rejection inside write_encryption_config
+  # would land after the PKI and the snapshot are already on the node.
+  handover::encryption_metadata "${bundle_dir}" >/dev/null || return 1
 
   handover::place_pki "${bundle_dir}" "${k8s_dir}" || return 1
   handover::restore_snapshot "${snapshot_file}" "${etcd_dir}" "${node_name}" "${peer_url}" || return 1
