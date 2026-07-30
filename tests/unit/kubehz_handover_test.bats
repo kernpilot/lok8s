@@ -93,7 +93,12 @@ _make_bundle() {
 
 # Happy-path mocks: every external binary logs into CALLS.
 _mock_node_binaries() {
-  etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
+  # A real restore leaves ${ETCD_DIR}/member behind. The mock must too, or the
+  # "nothing was seeded" assertions pass whether or not the restore ran.
+  etcdutl() {
+    echo "etcdutl $*" >> "${CALLS}"
+    mkdir -p "${KUBEHZ_HANDOVER_ETCD_DIR}/member"
+  }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; }
   kubectl() { echo "kubectl $*" >> "${CALLS}"; return 0; }
   # Deterministic node identity for the restore's member rewrite — uppercase
@@ -232,6 +237,139 @@ _mock_node_binaries() {
   assert_success
   assert_output --partial -- "--server https://127.0.0.1:6443"
   assert_output --partial -- "--tls-server-name cl-001.kubermatic.kkp.kubehz.in.net"
+}
+
+@test "handover receive: a bundle-carried etcd-version reaches the kubeadm config" {
+  _make_bundle
+  _mock_node_binaries
+  echo '3.5.99-0' > "${BUNDLE}/etcd-version"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml"
+  assert_output --partial 'imageTag: "3.5.99-0"'
+  refute_output --partial '3.5.21-0'
+}
+
+@test "handover receive: the env override beats a bundle-carried etcd-version" {
+  _make_bundle
+  _mock_node_binaries
+  echo '3.5.99-0' > "${BUNDLE}/etcd-version"
+
+  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.88-0' \
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml"
+  assert_output --partial 'imageTag: "3.5.88-0"'
+}
+
+@test "handover receive: an out-of-charset BUNDLE etcd-version is refused before any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf '3.5.21-0" evil\n' > "${BUNDLE}/etcd-version"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "not a plain image tag"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
+@test "handover receive: a bad bundle provider is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  echo kms > "${BUNDLE}/encryption-provider"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "is not one of secretbox/aescbc/aesgcm"
+  # Rejecting inside write_encryption_config would strand these.
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover receive: a bad bundle key name is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf 'k1"\n            - name: pwn\n' > "${BUNDLE}/encryption-key-name"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "is not a plain name"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover receive: an override diverging from the bundle etcd-version warns" {
+  _make_bundle
+  _mock_node_binaries
+  echo '3.5.99-0' > "${BUNDLE}/etcd-version"
+
+  KUBEHZ_HANDOVER_ETCD_IMAGE_TAG='3.5.88-0' \
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  assert_output --partial "overrides the bundle's etcd-version '3.5.99-0'"
+}
+
+@test "handover receive: a bundle-carried provider and key name reach the EncryptionConfiguration" {
+  _make_bundle
+  _mock_node_binaries
+  echo aesgcm > "${BUNDLE}/encryption-provider"
+  echo src-key-2 > "${BUNDLE}/encryption-key-name"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- aesgcm:"
+  assert_output --partial "name: src-key-2"
+  refute_output --partial "secretbox"
+  refute_output --partial "kubehz-key-1"
+}
+
+@test "handover receive: a non-base64 encryption-key is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf 'k3y"\ninjected: yaml\n' > "${BUNDLE}/encryption-key"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "is not base64"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover receive: a bad endpoint-dns is refused BEFORE any node mutation" {
+  _make_bundle
+  _mock_node_binaries
+  printf 'evil.example.com"\n  extraArgs: pwn\n' > "${BUNDLE}/endpoint-dns"
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "not a plain hostname"
+  [ ! -d "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  [ ! -d "${KUBEHZ_HANDOVER_ETCD_DIR}/member" ]
+}
+
+@test "handover: bundle_value keeps interior whitespace so the guards can reject it" {
+  _make_bundle
+  # Welding this into `aescbc` would make a malformed bundle render happily.
+  printf 'aes cbc\n' > "${BUNDLE}/encryption-provider"
+  run handover::bundle_value "${BUNDLE}" encryption-provider secretbox
+  assert_success
+  assert_output "aes cbc"
+
+  run handover::encryption_metadata "${BUNDLE}"
+  assert_failure
+  assert_output --partial "is not one of secretbox/aescbc/aesgcm"
+}
+
+@test "handover: bundle_value returns a value that looks like an echo flag" {
+  _make_bundle
+  # `echo -n` prints nothing and would silently fall back to the default —
+  # for etcd-version that means quietly reverting to the platform tag.
+  printf -- '-n\n' > "${BUNDLE}/etcd-version"
+  run handover::bundle_value "${BUNDLE}" etcd-version 3.5.21-0
+  assert_success
+  assert_output -- "-n"
 }
 
 @test "handover receive: an out-of-charset etcd image tag is refused BEFORE any node mutation" {
@@ -533,6 +671,74 @@ _mock_node_binaries() {
   run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
   assert_failure
   assert_output --partial "not base64"
+}
+
+# ── bundle-carried platform metadata ─────────────────────
+#
+# provider / key name / etcd line come FROM the bundle so the target mirrors
+# whatever the source actually encrypted and ran with, instead of hardcoding
+# platform constants. Absent keys keep older bundles working.
+
+@test "handover: write_encryption_config defaults to the platform's secretbox/kubehz-key-1" {
+  _make_bundle
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- secretbox:"
+  assert_output --partial "name: kubehz-key-1"
+}
+
+@test "handover: write_encryption_config honours a bundle-carried provider and key name" {
+  _make_bundle
+  echo aescbc > "${BUNDLE}/encryption-provider"
+  echo source-key-7 > "${BUNDLE}/encryption-key-name"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- aescbc:"
+  assert_output --partial "name: source-key-7"
+  refute_output --partial "secretbox"
+  refute_output --partial "kubehz-key-1"
+}
+
+@test "handover: write_encryption_config rejects an unknown provider" {
+  _make_bundle
+  echo kms > "${BUNDLE}/encryption-provider"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_failure
+  assert_output --partial "not one of secretbox/aescbc/aesgcm"
+}
+
+@test "handover: write_encryption_config rejects a key name carrying YAML (injection guard)" {
+  _make_bundle
+  printf 'k1"\n            - name: pwn' > "${BUNDLE}/encryption-key-name"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_failure
+  assert_output --partial "not a plain name"
+}
+
+@test "handover: a blank bundle value falls back to the default" {
+  _make_bundle
+  printf '\n' > "${BUNDLE}/encryption-provider"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  assert_output --partial "- secretbox:"
+}
+
+@test "handover: bundle_value strips the trailing newline the operator writes" {
+  _make_bundle
+  printf '3.5.21-0\n' > "${BUNDLE}/etcd-version"
+  run handover::bundle_value "${BUNDLE}" etcd-version fallback
+  assert_success
+  assert_output "3.5.21-0"
+}
+
+@test "handover: bundle_value falls back when the key is absent" {
+  _make_bundle
+  run handover::bundle_value "${BUNDLE}" nosuchkey the-default
+  assert_success
+  assert_output "the-default"
 }
 
 # ── preseed: the thin kubeone variant ────────────────────
