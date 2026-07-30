@@ -484,20 +484,26 @@ kapply::_heal_terminating() {
 #   protects.
 kapply::preflight() {
   local age="${KAPPLY_PREFLIGHT_AGE:-30}"
+  local crds="${KAPPLY_PREFLIGHT_CRDS:-drain}" crd_allow=""
   local -a kubectl_flags=()
   while (( $# )); do
     case "${1}" in
-      # Tolerate a value-less --age (keep the default): a bare `shift 2` on
+      # Tolerate a value-less flag (keep the default): a bare `shift 2` on
       # one remaining arg fails and would abort under set -e, and swallowing
       # a following flag as the value would misfile its own argument.
-      --age) [[ -n "${2:-}" && "${2}" != -* ]] && { age="${2}"; shift; }; shift ;;
-      *)     kubectl_flags+=("${1}"); shift ;;
+      --age)       [[ -n "${2:-}" && "${2}" != -* ]] && { age="${2}"; shift; }; shift ;;
+      --crds)      [[ -n "${2:-}" && "${2}" != -* ]] && { crds="${2}"; shift; }; shift ;;
+      --crd-allow) [[ -n "${2:-}" && "${2}" != -* ]] && { crd_allow="${2}"; shift; }; shift ;;
+      *)           kubectl_flags+=("${1}"); shift ;;
     esac
   done
   # The age gate is a SAFETY threshold used in arithmetic below — a
   # non-numeric value ("30s") would blow up the comparison / read as 0 and
   # force-clear everything terminating at all. Fall back to the default.
   [[ "${age}" =~ ^[0-9]+$ ]] || age=30
+  # Unknown CRD policy falls back to drain — the safe middle: it resolves
+  # the instance-finalizer deadlock without ever touching a CRD finalizer.
+  [[ "${crds}" =~ ^(drain|skip|force)$ ]] || crds=drain
   local manifest; manifest=$(cat)
 
   # ONE batched GET for every manifest object (a single process/connection,
@@ -552,10 +558,12 @@ kapply::preflight() {
       continue
     fi
     if [[ "${kind}" == "CustomResourceDefinition" ]]; then
-      # NEVER force a CRD: clearing its finalizer cascade-deletes every CR
-      # of that kind cluster-wide — including objects outside this manifest.
-      # Same carve-out as kapply::_heal_terminating's CRD rationale.
-      report+="refusing to force stuck CustomResourceDefinition/${name} — clearing it would cascade-delete every CR of that kind; resolve by hand"$'\n'
+      # Policy-driven (--crds drain|skip|force) — see _preflight_crd. The
+      # helper emits report lines on stdout so this loop's locals stay ours
+      # (no dynamic-scope mutation from a callee).
+      local crd_report
+      crd_report=$(kapply::_preflight_crd "${name}" "${crds}" "${crd_allow}" "${kubectl_flags[@]}") || rc=1
+      [[ -n "${crd_report}" ]] && report+="${crd_report}"$'\n'
       continue
     fi
     if [[ "${kind}" == "Namespace" ]]; then
@@ -602,4 +610,86 @@ kapply::preflight() {
     printf '%s✓%s preflight %s· nothing stuck%s\n' "${c_on}" "${c_off}" "${c_dim}" "${c_off}"
   fi
   return 0
+}
+
+# kapply::_preflight_crd <crd-name> <mode> <allow-csv> [kubectl flags...]
+#   Handle ONE stuck-Terminating CustomResourceDefinition per the --crds
+#   policy. Report lines go to stdout (the caller folds them into the block
+#   UI); returns non-zero when something stayed wedged.
+#
+#   A terminating CRD is almost never stuck on its OWN finalizer:
+#   customresourcecleanup waits for the CRD's INSTANCES to go, and the
+#   instances wait on finalizers owned by an operator that is typically part
+#   of the very apply this preflight unblocks (operator down → CRs wedge →
+#   CRD wedges → apply that would restart the operator can't run). Hence:
+#
+#   skip  — report and stand back (the conservative carve-out).
+#   drain — clear finalizers on the INSTANCES only: once the CRD delete was
+#           accepted every CR of that kind is doomed anyway, so skipping
+#           their cleanup loses nothing. The CRD's own finalizer is never
+#           touched — cleanup then completes naturally, leaving no orphaned
+#           etcd data and no zombie CRs when the CRD is re-applied.
+#   force — drain first; if the CRD is STILL wedged after the bounded wait,
+#           strip its finalizer too (restricted to <allow-csv> when set).
+#           Last resort: orphaned CR data in etcd RESURRECTS as stale
+#           objects the moment the CRD is re-created.
+kapply::_preflight_crd() {
+  local name="${1}" mode="${2}" allow="${3}"; shift 3
+  local -a kubectl_flags=("${@}")
+
+  if [[ "${mode}" == "skip" ]]; then
+    echo "refusing to force stuck CustomResourceDefinition/${name} — crds policy is 'skip' (clearing it would cascade-delete every CR of that kind); resolve by hand"
+    return 0
+  fi
+
+  local rc=0 drained=0 failed=0
+  local ns iname
+  local -a nsf
+  while IFS=$'\t' read -r ns iname; do
+    [[ -n "${iname}" ]] || continue
+    [[ "${ns}" == "-" ]] && ns=""
+    nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
+    if kubectl "${kubectl_flags[@]}" patch "${name}" "${iname}" "${nsf[@]}" \
+         --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
+      drained=$(( drained + 1 ))
+    else
+      echo "could not clear finalizers on ${name}/${iname}"
+      failed=$(( failed + 1 )); rc=1
+    fi
+  done < <(kubectl "${kubectl_flags[@]}" get "${name}" -A -o json 2>/dev/null \
+    | jq -r '.items[]? | [(.metadata.namespace // "-"), .metadata.name] | @tsv' 2>/dev/null)
+
+  # With the instances gone, customresourcecleanup completes near-instantly.
+  local i
+  for (( i = 0; i < ${KAPPLY_CRD_WAIT:-20}; i++ )); do
+    kubectl "${kubectl_flags[@]}" get crd "${name}" &>/dev/null || break
+    sleep "${KAPPLY_POLL_INTERVAL:-1}"
+  done
+  if ! kubectl "${kubectl_flags[@]}" get crd "${name}" &>/dev/null; then
+    echo "customresourcedefinition/${name} patched"
+    echo "drained ${drained} instance(s) of CustomResourceDefinition/${name} — cleanup completed on its own"
+    return "${rc}"
+  fi
+
+  if [[ "${mode}" == "force" ]] && kapply::_crd_allowed "${name}" "${allow}"; then
+    if kubectl "${kubectl_flags[@]}" patch crd "${name}" \
+         --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
+      echo "customresourcedefinition/${name} patched"
+      echo "FORCED CustomResourceDefinition/${name} finalizer off after drain (${drained} cleared, ${failed} failed) — stale etcd CRs may resurrect on re-apply"
+    else
+      echo "could not force finalizers on CustomResourceDefinition/${name}"
+      rc=1
+    fi
+    return "${rc}"
+  fi
+
+  echo "CustomResourceDefinition/${name} still terminating after draining ${drained} instance(s) — not forcing its finalizer (crds policy: ${mode}$( [[ "${mode}" == "force" ]] && echo ", not in crd-allow" ))"
+  return 1
+}
+
+# Empty allowlist = every manifest CRD may be forced; otherwise exact match.
+kapply::_crd_allowed() {
+  local name="${1}" allow="${2}"
+  [[ -z "${allow}" ]] && return 0
+  [[ ",${allow}," == *",${name},"* ]]
 }

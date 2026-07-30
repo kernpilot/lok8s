@@ -140,21 +140,51 @@ tilt::down() {
 tilt::status() { :args "Check tilt status" "${@}"; tilt doctor; }
 tilt::restart() { :args "Restart tilt" "${@}"; tilt::down; tilt::up; }
 
+# tilt::preflight_config <domain> — the domain's spec.tilt.preflight from
+# cluster.lok8s.yaml (same home as spec.tilt.port), as one placeholder-safe
+# TSV line: enabled, age, crds, crd-allow-csv. "-" marks an unset field —
+# tab counts as IFS whitespace, so a genuinely empty field would collapse
+# under `read` and shift every later field. Missing spec file (deploy-only
+# domains) or unreadable YAML yields all-defaults.
+tilt::preflight_config() {
+  local domain="${1}"
+  local spec="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}/${domain}/cluster.lok8s.yaml"
+  local enabled="true" age="-" crds="-" allow="-"
+  if [[ -f "${spec}" ]]; then
+    # NOT `.enabled // true`: the alternative operator treats an explicit
+    # `false` as empty and would read "enabled: false" as true. Read raw and
+    # compare — only a literal false disables.
+    enabled=$(yq -r '.spec.tilt.preflight.enabled' "${spec}" 2>/dev/null) || enabled=""
+    [[ "${enabled}" == "false" ]] || enabled="true"
+    age=$(yq -r '.spec.tilt.preflight.age // "-"' "${spec}" 2>/dev/null) || age="-"
+    crds=$(yq -r '.spec.tilt.preflight.crds // "-"' "${spec}" 2>/dev/null) || crds="-"
+    allow=$(yq -r '.spec.tilt.preflight.crdForceAllow // [] | join(",")' "${spec}" 2>/dev/null) || allow=""
+    [[ -n "${allow}" ]] || allow="-"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "${enabled}" "${age}" "${crds}" "${allow}"
+}
+
 # tilt::preflight — called by the Tilt extension right after it renders the
 # domain (local('lo tilt preflight', stdin=artifacts)), BEFORE any k8s_yaml
 # applies: force-clear manifest objects stuck Terminating so Tilt's apply
 # doesn't spin on "currently being deleted" until its upsert timeout and fail
-# the build. The sweep itself is kapply::preflight; the GATING lives here:
-#   - LOK8S_PREFLIGHT=0 disables the sweep entirely (kill switch);
+# the build. The sweep itself is kapply::preflight; GATING + policy live
+# here, with precedence CLI flag > env > cluster spec > default:
+#   - LOK8S_PREFLIGHT=0 (env) or spec.tilt.preflight.enabled=false disables
+#     the sweep entirely;
 #   - only the `lo` (local kind) driver is force-cleared by default — remote
 #     clusters need an explicit LOK8S_FORCE_CLEAR_TERMINATING=1. Clearing a
 #     finalizer skips its controller's cleanup: fine to lose on a throwaway
-#     kind cluster, a data-loss footgun on a real one.
+#     kind cluster, a data-loss footgun on a real one;
+#   - stuck-CRD policy (drain/skip/force + allowlist) comes from the spec
+#     unless flags override — see kapply::_preflight_crd for the semantics.
 # Always exits 0 — a preflight must never brick the `tilt up` it protects.
 tilt::preflight() {
-  local age
+  local age crds crd_allow
   local -a args=(
-    'age|a'  'Only clear objects terminating longer than this many seconds (default 30)'
+    'age|a'      'Only clear objects terminating longer than this many seconds (default 30)'
+    'crds|c'     'Stuck-CRD policy: drain (clear instance finalizers), skip, or force'
+    'crd-allow|' 'Comma-separated CRD names the force policy may strip (empty = all)'
     "${args[@]:-}"
   )
   :args "Force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
@@ -170,9 +200,27 @@ tilt::preflight() {
     cat >/dev/null
     return 0
   fi
-  local -a age_flag=()
-  [[ -n "${age:-}" ]] && age_flag=(--age "${age}")
-  kapply::preflight "${age_flag[@]}"
+
+  local enabled spec_age spec_crds spec_allow
+  IFS=$'\t' read -r enabled spec_age spec_crds spec_allow < <(tilt::preflight_config "${resolved}")
+  if [[ "${enabled}" =~ ^(false|0)$ ]]; then
+    cat >/dev/null
+    return 0
+  fi
+
+  # CLI flag > spec; "-" is the spec's unset marker. Unset options are NOT
+  # passed down — kapply::preflight owns the real defaults (30 / drain).
+  local -a sweep=()
+  age="${age:-}";             [[ "${age}" == "-" ]] && age=""
+  crds="${crds:-}";           [[ "${crds}" == "-" ]] && crds=""
+  crd_allow="${crd_allow:-}"; [[ "${crd_allow}" == "-" ]] && crd_allow=""
+  [[ "${spec_age}" != "-" && -z "${age}" ]] && age="${spec_age}"
+  [[ "${spec_crds}" != "-" && -z "${crds}" ]] && crds="${spec_crds}"
+  [[ "${spec_allow}" != "-" && -z "${crd_allow}" ]] && crd_allow="${spec_allow}"
+  [[ -n "${age}" ]] && sweep+=(--age "${age}")
+  [[ -n "${crds}" ]] && sweep+=(--crds "${crds}")
+  [[ -n "${crd_allow}" ]] && sweep+=(--crd-allow "${crd_allow}")
+  kapply::preflight "${sweep[@]}"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"
