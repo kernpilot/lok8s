@@ -898,3 +898,32 @@ _mock_node_binaries() {
   assert_output --partial "escapes the bundle dir"
   [ ! -e "${marker}" ]
 }
+
+@test "resolve_bundle: traversal-guard truth table — every ..-component position rejected, literal dots pass" {
+  # Drive the guard's case statement directly: the tar stub answers -tzf
+  # with the single entry under test (bare `..` can't even be crafted with
+  # a real tar --transform, hence the stub), -xzf is a no-op.
+  local probe="${BATS_TEST_TMPDIR}/probe.tar.gz"
+  : > "${probe}"
+  tar() {
+    if [[ "$*" == *-tzf* ]]; then printf '%s\n' "${TAR_ENTRY}"; else return 0; fi
+  }
+  export -f tar
+
+  # Genuine traversals: a `..` COMPONENT in any position, or an absolute path.
+  local entry
+  for entry in '/abs/path' '..' '../x' 'a/../b' 'a/..' './../x' './..' 'x/../'; do
+    TAR_ENTRY="${entry}" run handover::resolve_bundle "${probe}"
+    assert_failure
+    assert_output --partial "escapes the bundle dir"
+  done
+
+  # Literal dot-names are NOT traversals — the old `*../*` pattern rejected
+  # these (false positives); the component-anchored set must let them reach
+  # extraction (no "escapes" refusal — later bundle validation is a
+  # different failure and not asserted here).
+  for entry in 'foo../bar' 'a/..foo' 'x..' 'ok/path'; do
+    TAR_ENTRY="${entry}" run handover::resolve_bundle "${probe}"
+    refute_output --partial "escapes the bundle dir"
+  done
+}

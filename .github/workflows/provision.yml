@@ -27,7 +27,7 @@ jobs:
           # Supply-chain rule: don't pipe a remote script into a shell — download
           # to a file, pin the ref, then execute. Binary versions are pinned by
           # the committed .bin/b.yaml + .bin/b.lock that `b install` consumes.
-          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.18.4/install.sh -o /tmp/b-install.sh
           B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install

@@ -58,7 +58,7 @@ jobs:
       # .bin/b.yaml + .bin/b.lock that `b install` consumes.
       - name: Install b
         run: |
-          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.18.4/install.sh -o /tmp/b-install.sh
           B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
