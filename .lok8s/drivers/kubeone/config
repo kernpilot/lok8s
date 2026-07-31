@@ -51,24 +51,15 @@ kubeone::extract_vars() {
   # spec.oidc — KubeOne features.openidConnect inputs (consumed by
   # kubeone::_inject_oidc, which yq-merges them into the manifest's features
   # block). Absent spec.oidc ⇒ ISSUER/CLIENTID empty ⇒ oidc::enabled false ⇒ NO
-  # apiserver OIDC wiring (the kubeone.yaml is rendered unchanged). Defaults
-  # mirror the schema doc in utils/oidc.sh and the lo driver's export.
-  export LOK8S_SPEC_OIDC_ISSUER LOK8S_SPEC_OIDC_CLIENTID
-  export LOK8S_SPEC_OIDC_USERNAMECLAIM LOK8S_SPEC_OIDC_USERNAMEPREFIX
-  export LOK8S_SPEC_OIDC_GROUPSCLAIM LOK8S_SPEC_OIDC_GROUPSPREFIX
-  export LOK8S_SPEC_OIDC_CABUNDLE
+  # apiserver OIDC wiring (the kubeone.yaml is rendered unchanged). Single
+  # source of truth for the reads + defaults: utils/oidc.sh (oidc::load_spec,
+  # which also exports the vars).
+  oidc::load_spec "${cluster_yaml}" || return 1
 
   CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
   K8S_VERSION=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
   LOK8S_SPEC_CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain // ""' "${cluster_yaml}")
   LOK8S_SPEC_DNS_DOMAINFILTER=$(yq -r '.spec.dns.domainFilter // ""' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_ISSUER=$(yq -r '.spec.oidc.issuer // ""' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_CLIENTID=$(yq -r '.spec.oidc.clientID // ""' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_USERNAMECLAIM=$(yq -r '.spec.oidc.usernameClaim // "sub"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_USERNAMEPREFIX=$(yq -r '.spec.oidc.usernamePrefix // "oidc:"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_GROUPSCLAIM=$(yq -r '.spec.oidc.groupsClaim // "groups"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_GROUPSPREFIX=$(yq -r '.spec.oidc.groupsPrefix // "oidc:"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_CABUNDLE=$(yq -r '.spec.oidc.caBundle // ""' "${cluster_yaml}")
   POD_SUBNET=$(yq -r '.spec.network.podSubnet // "10.244.0.0/16"' "${cluster_yaml}")
   SERVICE_SUBNET=$(yq -r '.spec.network.serviceSubnet // "10.96.0.0/12"' "${cluster_yaml}")
   CP_REPLICAS=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")

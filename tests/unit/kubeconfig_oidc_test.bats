@@ -83,11 +83,36 @@ _write_domain() {
 @test "emit_oidc follows a deploy domain's clusterRef to the cluster spec" {
   _write_domain oidc.lok8s.dev "${FIXTURES_DIR}/lo-cluster-oidc.lok8s.yaml"
   mkdir -p "${PATH_CLUSTERS}/deploy.lok8s.dev"
-  echo "spec: {clusterRef: oidc.lok8s.dev}" > "${PATH_CLUSTERS}/deploy.lok8s.dev/deploy.lok8s.yaml"
-  provision::resolve_clusterref() { echo "oidc.lok8s.dev"; }
-  export -f provision::resolve_clusterref
+  cat > "${PATH_CLUSTERS}/deploy.lok8s.dev/deploy.lok8s.yaml" <<'EOF'
+spec:
+  clusterRef:
+    domain: oidc.lok8s.dev
+EOF
+  # The REAL resolver (libs/provision), not a stub — it reads
+  # .spec.clusterRef.domain, so this also pins the deploy-yaml shape.
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
 
   run kubeconfig::emit_oidc deploy.lok8s.dev "${_SRC}"
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"--oidc-client-id=kubectl-cli"* ]]
+}
+
+@test "emit_oidc rejects a plain-http issuer" {
+  _write_domain http.lok8s.dev "${FIXTURES_DIR}/lo-cluster-oidc.lok8s.yaml"
+  yq -i '.spec.oidc.issuer = "http://id.kubehz.dev"' \
+    "${PATH_CLUSTERS}/http.lok8s.dev/cluster.lok8s.yaml"
+
+  run kubeconfig::emit_oidc http.lok8s.dev "${_SRC}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"must be an https:// URL"* ]]
+}
+
+@test "emit_oidc fails loud on a malformed cluster spec (no generic masking)" {
+  mkdir -p "${PATH_CLUSTERS}/bad.lok8s.dev"
+  printf 'spec: [unclosed\n' > "${PATH_CLUSTERS}/bad.lok8s.dev/cluster.lok8s.yaml"
+
+  run kubeconfig::emit_oidc bad.lok8s.dev "${_SRC}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not parse cluster spec"* ]]
+  [[ "${output}" != *"no usable spec.oidc"* ]]
 }

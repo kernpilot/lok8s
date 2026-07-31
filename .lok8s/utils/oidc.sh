@@ -46,6 +46,10 @@ oidc::enabled() {
 oidc::load_spec() {
   local cluster_yaml="${1}"
   [[ -f "${cluster_yaml}" ]] || { error "oidc: cluster spec not found: ${cluster_yaml}"; return 1; }
+  # Fail loud on a malformed spec here, instead of surfacing a raw yq parse
+  # error (under errexit) from whichever read below hits it first.
+  yq -e '.' "${cluster_yaml}" >/dev/null 2>&1 \
+    || { error "oidc: could not parse cluster spec: ${cluster_yaml}"; return 1; }
 
   export LOK8S_SPEC_OIDC_ISSUER LOK8S_SPEC_OIDC_CLIENTID
   export LOK8S_SPEC_OIDC_USERNAMECLAIM LOK8S_SPEC_OIDC_USERNAMEPREFIX
