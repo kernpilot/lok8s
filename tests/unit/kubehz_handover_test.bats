@@ -392,7 +392,12 @@ _mock_node_binaries() {
     printf 'freshly-minted-DIFFERENT-ca\n' > "${KUBEHZ_HANDOVER_K8S_DIR}/pki/ca.crt"
   }
   kubectl() { return 0; }
-  export -f etcdutl kubeadm kubectl
+  # Node identity stubs — WITHOUT these the member-identity derivation
+  # depends on the HOST's iproute2 + default route: green on a dev box,
+  # red on CI (no `ip`) with "cannot determine advertise address".
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl hostname ip
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_failure
@@ -570,7 +575,10 @@ _mock_node_binaries() {
   etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; return 1; }
   kubectl() { return 0; }
-  export -f etcdutl kubeadm kubectl
+  # Node identity stubs — see the CA re-mint test: never depend on host `ip`.
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl hostname ip
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_failure
@@ -622,7 +630,10 @@ _mock_node_binaries() {
     printf 'snapshot-bytes' > "${out}"
     return 0
   }
-  export -f etcdutl kubeadm kubectl curl
+  # Node identity stubs — see the CA re-mint test: never depend on host `ip`.
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl curl hostname ip
 
   # Confine mktemp so the workdir (extracted PKI + encryption key + downloaded
   # snapshot) is observable — after the failure it must be GONE.
@@ -886,4 +897,39 @@ _mock_node_binaries() {
   assert_failure
   assert_output --partial "escapes the bundle dir"
   [ ! -e "${marker}" ]
+}
+
+@test "resolve_bundle: traversal-guard truth table — every ..-component position rejected, literal dots pass" {
+  # Drive the guard's case statement directly: the tar stub answers -tzf
+  # with the single entry under test (bare `..` can't even be crafted with
+  # a real tar --transform, hence the stub), -xzf is a no-op.
+  local probe="${BATS_TEST_TMPDIR}/probe.tar.gz"
+  : > "${probe}"
+  # Confine resolve_bundle's mktemp workdirs — the pass-through iterations
+  # would otherwise litter the real /tmp (never cleaned on the later
+  # validation failure).
+  export TMPDIR="${BATS_TEST_TMPDIR}"
+  tar() {
+    if [[ "$*" == *-tzf* ]]; then printf '%s\n' "${TAR_ENTRY}"; else return 0; fi
+  }
+  export -f tar
+
+  # Genuine traversals: a `..` COMPONENT in any position, or an absolute path.
+  local entry
+  for entry in '/abs/path' '..' '../x' 'a/../b' 'a/..' './../x' './..' 'x/../'; do
+    TAR_ENTRY="${entry}" run handover::resolve_bundle "${probe}"
+    assert_failure
+    assert_output --partial "escapes the bundle dir"
+  done
+
+  # Literal dot-names are NOT traversals — the old `*../*` pattern rejected
+  # these (false positives); the component-anchored set must let them PAST
+  # the guard, and with the guard passed resolve_bundle completes (echoes
+  # the extraction dir) — assert_success pins that, not just the absence of
+  # the refusal message.
+  for entry in 'foo../bar' 'a/..foo' 'x..' 'ok/path'; do
+    TAR_ENTRY="${entry}" run handover::resolve_bundle "${probe}"
+    assert_success
+    refute_output --partial "escapes the bundle dir"
+  done
 }

@@ -57,7 +57,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y gettext-base
           # Supply-chain rule: download the pinned installer, then run it.
-          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.18.4/install.sh -o /tmp/b-install.sh
           B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
@@ -91,7 +91,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update && sudo apt-get install -y jq gettext-base
-          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.18.4/install.sh -o /tmp/b-install.sh
           B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
@@ -142,7 +142,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y jq gettext-base
           # Supply-chain rule: download the pinned installer, then run it.
-          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.17.2/install.sh -o /tmp/b-install.sh
+          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.18.4/install.sh -o /tmp/b-install.sh
           B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           # No profile filter: `b install` pulls every binary in .bin/b.yaml —

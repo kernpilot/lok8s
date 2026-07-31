@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash disable=SC2016,SC2034,SC1091
 # SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
+# TODO: narrow to next-line disables once argsh-lint honors them (>0.1.0).
+# AG012 suppressed file-wide (next-line disable not honored in argsh-lint 0.1.0):
+# main::up's `local force="${force:-0}"` is NOT a clobber — it's the documented
+# `:^` inheritable-field idiom (the RHS default preserves the parent's value).
+# argsh disable-file=AG012
 # vim: set syntax=bash:
 set -euo pipefail
 

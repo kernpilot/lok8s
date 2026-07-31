@@ -1,9 +1,9 @@
 {
   "version": 1,
   "tool": {
-    "b": "v4.16.0"
+    "b": "v4.18.4"
   },
-  "timestamp": "2026-06-24T09:45:53Z",
+  "timestamp": "2026-07-31T12:47:50Z",
   "binaries": [
     {
       "name": "argsh",
@@ -92,10 +92,10 @@
     {
       "name": "docker",
       "version": "",
-      "sha256": "80b40fa11d797a71ea15f9a31e7004790ddac95f58a8222a40c08f08a639faba",
+      "sha256": "dda0804fca9b37a16e688356049ddf51fdd4c1a435c0a41055ec81cdf121535a",
       "source": "oci://docker",
       "provider": "oci",
-      "digest": "sha256:7bb861a04bb42bda1d237fc2cb539f9823c9b666ecfbfdbd3e534ab74c8cb976"
+      "digest": "sha256:bfec1f5159c63a81ca6fdedbd81404d2c0e16378ed0feec3bb3fbf3998847659"
     },
     {
       "name": "sops",
