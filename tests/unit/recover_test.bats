@@ -600,3 +600,24 @@ EOF
   run cat "${RECORD}"
   assert_output "resolve"
 }
+
+# ── recover::_pick_domain — the positional/flag precedence + arity guard ────
+
+@test "recover _pick_domain: positional outranks the flag/active fallback" {
+  run recover::_pick_domain "active.dom" "explicit.dom"
+  [ "$status" -eq 0 ]
+  [ "$output" = "explicit.dom" ]
+}
+
+@test "recover _pick_domain: falls back to --domain/active without a positional" {
+  # Under `set -u` an empty array expands to ONE empty arg — must fall through.
+  run recover::_pick_domain "active.dom" ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "active.dom" ]
+}
+
+@test "recover _pick_domain: rejects a second positional loudly (greedy-array guard)" {
+  run recover::_pick_domain "active.dom" "explicit.dom" "stray-token"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"too many arguments"*"stray-token"* ]]
+}
