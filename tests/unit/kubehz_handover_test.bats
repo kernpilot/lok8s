@@ -392,7 +392,12 @@ _mock_node_binaries() {
     printf 'freshly-minted-DIFFERENT-ca\n' > "${KUBEHZ_HANDOVER_K8S_DIR}/pki/ca.crt"
   }
   kubectl() { return 0; }
-  export -f etcdutl kubeadm kubectl
+  # Node identity stubs — WITHOUT these the member-identity derivation
+  # depends on the HOST's iproute2 + default route: green on a dev box,
+  # red on CI (no `ip`) with "cannot determine advertise address".
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl hostname ip
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_failure
@@ -570,7 +575,10 @@ _mock_node_binaries() {
   etcdutl() { echo "etcdutl $*" >> "${CALLS}"; }
   kubeadm() { echo "kubeadm $*" >> "${CALLS}"; return 1; }
   kubectl() { return 0; }
-  export -f etcdutl kubeadm kubectl
+  # Node identity stubs — see the CA re-mint test: never depend on host `ip`.
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl hostname ip
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_failure
@@ -622,7 +630,10 @@ _mock_node_binaries() {
     printf 'snapshot-bytes' > "${out}"
     return 0
   }
-  export -f etcdutl kubeadm kubectl curl
+  # Node identity stubs — see the CA re-mint test: never depend on host `ip`.
+  hostname() { echo "Node-X"; }
+  ip() { echo "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0"; }
+  export -f etcdutl kubeadm kubectl curl hostname ip
 
   # Confine mktemp so the workdir (extracted PKI + encryption key + downloaded
   # snapshot) is observable — after the failure it must be GONE.

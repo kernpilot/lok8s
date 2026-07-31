@@ -92,8 +92,12 @@ handover::resolve_bundle() {
     # historically did not; the listing check is tar-flavor-independent).
     local entry
     while IFS= read -r entry; do
+      # Reject every position a `..` COMPONENT can take (sole, leading,
+      # interior, trailing) + absolute paths. Component-anchored on purpose:
+      # the old `*../*` also matched harmless names like `foo../bar` AND
+      # shadowed the `../*` alternative entirely (SC2221/SC2222).
       case "${entry}" in
-        /*|*../*|../*|*/..)
+        /*|..|../*|*/../*|*/..)
           error "handover: refusing ${bundle} — archive entry escapes the bundle dir: ${entry}"
           rm -rf "${dir}"
           return 1
