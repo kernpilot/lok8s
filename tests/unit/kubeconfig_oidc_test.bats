@@ -116,3 +116,13 @@ EOF
   [[ "${output}" == *"could not parse cluster spec"* ]]
   [[ "${output}" != *"no usable spec.oidc"* ]]
 }
+
+@test "load_spec accepts a comment-only (null) yaml — not a parse error" {
+  mkdir -p "${PATH_CLUSTERS}/null.lok8s.dev"
+  printf '# intentionally empty\n' > "${PATH_CLUSTERS}/null.lok8s.dev/cluster.lok8s.yaml"
+
+  run kubeconfig::emit_oidc null.lok8s.dev "${_SRC}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"no usable spec.oidc"* ]]
+  [[ "${output}" != *"could not parse cluster spec"* ]]
+}
