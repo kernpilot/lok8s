@@ -905,6 +905,10 @@ _mock_node_binaries() {
   # a real tar --transform, hence the stub), -xzf is a no-op.
   local probe="${BATS_TEST_TMPDIR}/probe.tar.gz"
   : > "${probe}"
+  # Confine resolve_bundle's mktemp workdirs — the pass-through iterations
+  # would otherwise litter the real /tmp (never cleaned on the later
+  # validation failure).
+  export TMPDIR="${BATS_TEST_TMPDIR}"
   tar() {
     if [[ "$*" == *-tzf* ]]; then printf '%s\n' "${TAR_ENTRY}"; else return 0; fi
   }
@@ -919,11 +923,13 @@ _mock_node_binaries() {
   done
 
   # Literal dot-names are NOT traversals — the old `*../*` pattern rejected
-  # these (false positives); the component-anchored set must let them reach
-  # extraction (no "escapes" refusal — later bundle validation is a
-  # different failure and not asserted here).
+  # these (false positives); the component-anchored set must let them PAST
+  # the guard, and with the guard passed resolve_bundle completes (echoes
+  # the extraction dir) — assert_success pins that, not just the absence of
+  # the refusal message.
   for entry in 'foo../bar' 'a/..foo' 'x..' 'ok/path'; do
     TAR_ENTRY="${entry}" run handover::resolve_bundle "${probe}"
+    assert_success
     refute_output --partial "escapes the bundle dir"
   done
 }
