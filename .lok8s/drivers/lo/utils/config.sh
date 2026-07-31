@@ -298,18 +298,8 @@ lo::export_spec_envs() {
   # by .lok8s/utils/oidc.sh → oidc::render_auth_config and the kind render).
   # Absent spec.oidc ⇒ ISSUER/CLIENTID empty ⇒ oidc::enabled false ⇒ NO apiserver
   # OIDC wiring (strict back-compat: the rendered kind config is unchanged).
-  # Defaults mirror the schema doc in utils/oidc.sh.
-  LOK8S_SPEC_OIDC_ISSUER=$(yq -r '.spec.oidc.issuer // ""' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_CLIENTID=$(yq -r '.spec.oidc.clientID // ""' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_USERNAMECLAIM=$(yq -r '.spec.oidc.usernameClaim // "sub"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_USERNAMEPREFIX=$(yq -r '.spec.oidc.usernamePrefix // "oidc:"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_GROUPSCLAIM=$(yq -r '.spec.oidc.groupsClaim // "groups"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_GROUPSPREFIX=$(yq -r '.spec.oidc.groupsPrefix // "oidc:"' "${cluster_yaml}")
-  LOK8S_SPEC_OIDC_CABUNDLE=$(yq -r '.spec.oidc.caBundle // ""' "${cluster_yaml}")
-  export LOK8S_SPEC_OIDC_ISSUER LOK8S_SPEC_OIDC_CLIENTID
-  export LOK8S_SPEC_OIDC_USERNAMECLAIM LOK8S_SPEC_OIDC_USERNAMEPREFIX
-  export LOK8S_SPEC_OIDC_GROUPSCLAIM LOK8S_SPEC_OIDC_GROUPSPREFIX
-  export LOK8S_SPEC_OIDC_CABUNDLE
+  # Single source of truth for the reads + defaults: utils/oidc.sh.
+  oidc::load_spec "${cluster_yaml}" || return 1
 
   export LOK8S_SPEC_NETWORK_NAME="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}"
   export LOK8S_SPEC_NETWORK_SUBNET="${LOK8S_NETWORK_SUBNET:-}"

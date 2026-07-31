@@ -27,11 +27,14 @@ teardown() {
 _lo_export_for() {
   local fixture="$1"
   # config.sh references LO_DEFAULT_* + registry helpers; source defaults and
-  # stub the registry/LB lookups export_spec_envs touches.
+  # stub the registry/LB lookups export_spec_envs touches. oidc.sh provides
+  # oidc::load_spec (export_spec_envs delegates the spec.oidc reads to it —
+  # in the driver, lo/main sources it before config.sh).
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/defaults.sh"
   registry::get() { echo ""; }
   registry::config_generate() { :; }
   export -f registry::get registry::config_generate
+  source "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config.sh"
   lo::export_spec_envs "${fixture}"
 }

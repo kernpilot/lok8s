@@ -37,6 +37,45 @@ oidc::enabled() {
   [[ -n "${LOK8S_SPEC_OIDC_ISSUER:-}" && -n "${LOK8S_SPEC_OIDC_CLIENTID:-}" ]]
 }
 
+# oidc::load_spec — export the LOK8S_SPEC_OIDC_* vars from a cluster spec file,
+# with the same defaults the drivers apply (lo::export_spec_envs /
+# kubeone::extract_vars). Lets commands that run OUTSIDE a driver context
+# (`lo kubeconfig --oidc` in a fresh shell) read spec.oidc without a
+# provision/bootstrap having exported the vars first.
+# Usage: oidc::load_spec <cluster_yaml>
+oidc::load_spec() {
+  local cluster_yaml="${1}"
+  [[ -f "${cluster_yaml}" ]] || { error "oidc: cluster spec not found: ${cluster_yaml}"; return 1; }
+  # Fail loud on a malformed spec here, instead of surfacing a raw yq parse
+  # error (under errexit) from whichever read below hits it first. No `-e`:
+  # an empty/comment-only document is VALID yaml (null) — the reads below
+  # resolve it to their defaults; only a real parse error must fail.
+  yq '.' "${cluster_yaml}" >/dev/null 2>&1 \
+    || { error "oidc: could not parse cluster spec: ${cluster_yaml}"; return 1; }
+
+  export LOK8S_SPEC_OIDC_ISSUER LOK8S_SPEC_OIDC_CLIENTID
+  export LOK8S_SPEC_OIDC_USERNAMECLAIM LOK8S_SPEC_OIDC_USERNAMEPREFIX
+  export LOK8S_SPEC_OIDC_GROUPSCLAIM LOK8S_SPEC_OIDC_GROUPSPREFIX
+  export LOK8S_SPEC_OIDC_CABUNDLE
+
+  LOK8S_SPEC_OIDC_ISSUER=$(yq -r '.spec.oidc.issuer // ""' "${cluster_yaml}")
+  LOK8S_SPEC_OIDC_CLIENTID=$(yq -r '.spec.oidc.clientID // ""' "${cluster_yaml}")
+  LOK8S_SPEC_OIDC_USERNAMECLAIM=$(yq -r '.spec.oidc.usernameClaim // "sub"' "${cluster_yaml}")
+  LOK8S_SPEC_OIDC_USERNAMEPREFIX=$(yq -r '.spec.oidc.usernamePrefix // "oidc:"' "${cluster_yaml}")
+  LOK8S_SPEC_OIDC_GROUPSCLAIM=$(yq -r '.spec.oidc.groupsClaim // "groups"' "${cluster_yaml}")
+  LOK8S_SPEC_OIDC_GROUPSPREFIX=$(yq -r '.spec.oidc.groupsPrefix // "oidc:"' "${cluster_yaml}")
+  LOK8S_SPEC_OIDC_CABUNDLE=$(yq -r '.spec.oidc.caBundle // ""' "${cluster_yaml}")
+
+  # Boundary rule enforced ONCE for every consumer (both drivers + the OIDC
+  # kubeconfig): a configured issuer must be https — previously only
+  # render_auth_config checked, so the kubeone manifest path could inject a
+  # plain-http issuer silently.
+  if [[ -n "${LOK8S_SPEC_OIDC_ISSUER}" && "${LOK8S_SPEC_OIDC_ISSUER}" != https://* ]]; then
+    error "spec.oidc.issuer must be an https:// URL, got '${LOK8S_SPEC_OIDC_ISSUER}'"
+    return 1
+  fi
+}
+
 # oidc::render_auth_config — emit a valid AuthenticationConfiguration YAML to
 # stdout from the LOK8S_SPEC_OIDC_* vars. Returns non-zero (and emits nothing)
 # when no issuer is configured, so callers can guard cheaply.
