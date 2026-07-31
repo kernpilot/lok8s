@@ -57,6 +57,7 @@ lo recover <domain> --force         # skip the confirmation prompt (non-interact
 
 | Flag | Description |
 |------|-------------|
+| `--domain <domain>` | Flag form of the target domain (the positional wins when both are given; default: the active domain). |
 | `--dry-run` | Run the read-only doctor + the `provider::rebuild` **plan** (reimages nothing), print that `lo provision` would follow, then stop. |
 | `--skip-rebuild` | Skip the node rebuild — run `lo provision` + verify only. Use when the nodes are already in the fresh-install state. |
 | `--force` | Global flag: skip the destructive-consent prompt. |

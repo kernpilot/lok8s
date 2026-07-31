@@ -45,14 +45,22 @@ main::recover() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
   local skip_rebuild=0 dry_run=0
+  # `lo recover <domain>` — the documented form. A command that reimages a
+  # whole fleet should NAME its target rather than inherit whatever .active
+  # happens to point at mid-incident; the positional outranks --domain/active
+  # (same pattern as `lo use`, and like there NOT ~domain-typed: the spec
+  # resolve phase validates existence and fails before anything destructive).
+  local -a recover_domain
   local -a args=(
-    'domain|:^~domain'  'Cluster domain to recover (default: active)'
+    'recover-domain'    'Cluster domain to recover (default: --domain / active)'
+    'domain|:^~domain'  'Cluster domain to recover (flag form; default: active)'
     'skip-rebuild|:+'   'Skip the bare-metal node rebuild — re-run provision + verify only'
     'dry-run|:+'        'Preview the rebuild plan (reimages nothing) and stop before provision'
     'force|f:^:+'       'Skip the recovery consent prompt (DR automation)'
     "${args[@]:-}"
   )
   :args "Rebuild a cluster from bare metal (disaster recovery)" "${@}"
+  domain="${recover_domain[0]:-${domain}}"
 
   # The orchestration lives in recover::_run (no :args) so it is unit-testable
   # without argsh's flag parser / ~domain validation — the codebase convention.
