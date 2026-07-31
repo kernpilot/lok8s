@@ -60,11 +60,27 @@ main::recover() {
     "${args[@]:-}"
   )
   :args "Rebuild a cluster from bare metal (disaster recovery)" "${@}"
-  domain="${recover_domain[0]:-${domain}}"
+  domain="$(recover::_pick_domain "${domain}" "${recover_domain[@]:-}")" || return 1
 
   # The orchestration lives in recover::_run (no :args) so it is unit-testable
   # without argsh's flag parser / ~domain validation — the codebase convention.
   recover::_run "${domain}" "${skip_rebuild}" "${dry_run}"
+}
+
+# recover::_pick_domain <fallback> [positional…]
+# The positional outranks --domain/active. An argsh array positional is
+# GREEDY (extra tokens append instead of tripping "too many arguments"), and
+# on a command that reimages a fleet a mistyped flag must fail loudly, never
+# be swallowed — so a second positional is a hard error. Empty expansion of
+# the array under `set -u` arrives as one empty arg: falls through to the
+# fallback.
+recover::_pick_domain() {
+  local fallback="${1}"; shift || true
+  if (( ${#} > 1 )); then
+    error "too many arguments: ${*:2}"
+    return 1
+  fi
+  printf '%s' "${1:-${fallback}}"
 }
 
 # recover::_run <domain> <skip_rebuild> <dry_run>
