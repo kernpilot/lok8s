@@ -223,6 +223,10 @@ teardown() {
   # (0/12-on-a-healthy-pilot bug, 2026-08-01).
   run bash "${RUNNER}"
   assert_success
+  # Both stub nodes present AND both mapped — `unique` alone could pass on a
+  # one-node payload (review round 1 nit).
+  run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "2"
   run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
   assert_output "Ready"
 }
