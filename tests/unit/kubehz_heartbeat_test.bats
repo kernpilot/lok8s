@@ -78,7 +78,7 @@ kubectl() {
       case "$*" in
         *"jsonpath={.status.conditions"*)
           [ -n "${STUB_READY_STATUS_FAIL:-}" ] && return 1
-          printf 'True' ;;
+          printf '%s' "${STUB_READY_STATUS-True}" ;;
         *"instance-type}"*)
           [ -n "${STUB_ITYPE_FAIL:-}" ] && return 1
           if [ "${_n}" = "cp-1" ]; then printf '%s' "${STUB_ITYPE-cx32}"; else printf 'cpx41'; fi
@@ -231,11 +231,22 @@ teardown() {
   assert_output "Ready"
 }
 
+@test "heartbeat: a NotReady node maps the raw False to \"NotReady\"" {
+  # Round-2 mutation check: breaking the False arm passed the suite — this
+  # pins it. The stub reports False for every node this run.
+  export STUB_READY_STATUS="False"
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
+  assert_output "NotReady"
+}
+
 @test "heartbeat: a failed status probe reports \"Unknown\", never an empty string" {
   export STUB_READY_STATUS_FAIL=1
   run bash "${RUNNER}"
   assert_success
-  run command jq -r '.nodes[0].status' "${STUB_PAYLOAD_OUT}"
+  # The stub fails the probe for EVERY node — both must land as Unknown.
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
   assert_output "Unknown"
 }
 
