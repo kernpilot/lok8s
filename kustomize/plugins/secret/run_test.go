@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // runEntry drives secret.Run with the spec on stdin (argv len 1 → stdin
@@ -231,8 +233,14 @@ literals:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "immutable: true") {
-		t.Errorf("immutable: true must pass through to the rendered Secret:\n%s", out)
+	// Decode-and-check: top-level field, not a substring match that a
+	// comment or a nested leak would also satisfy.
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := doc["immutable"].(bool); !ok || !got {
+		t.Errorf("top-level immutable must be true, got %v:\n%s", doc["immutable"], out)
 	}
 }
 

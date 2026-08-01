@@ -309,6 +309,26 @@ kapply::_confirm_heal() {
   [[ "${ans}" =~ ^[Yy] ]]
 }
 
+# A SECOND, pointed confirm just for recreating a SEALED Secret (one applied
+# with `immutable: true` — a crown jewel by declaration). Recreating it is a
+# RE-KEY: exactly the event the seal exists to make deliberate. The generic
+# heal prompt undersells that, so name the Secret and spell out the blast
+# radius. --force-recreate still proceeds (it IS the documented rotation path
+# and must stay usable non-interactively) but logs a pointed warning per
+# Secret instead of recreating silently.
+kapply::_confirm_secret_recreate() {
+  local name="${1}"
+  if [[ -n "${LOK8S_FORCE_RECREATE:-}" ]]; then
+    warn "  RE-KEYING sealed Secret/${name} (--force-recreate): pods keep the old value until restarted; state encrypted under it may be orphaned"
+    return 0
+  fi
+  kapply::_interactive || return 1
+  local ans
+  printf '\033[31m!\033[0m kapply: Secret/%s is SEALED (immutable). Recreating it RE-KEYS the credential — pods keep the old value until restarted, and state encrypted under it may be orphaned. Really re-key? [y/N] ' "${name}" >/dev/tty 2>/dev/null
+  read -r ans </dev/tty 2>/dev/null || return 1
+  [[ "${ans}" =~ ^[Yy] ]]
+}
+
 # A SECOND, pointed confirm just for force-finalizing a namespace — the most
 # destructive heal (it completes the deletion of the whole namespace and every
 # object still in it, via a raw /finalize API call, irreversibly). The generic
@@ -382,6 +402,10 @@ kapply::_heal_immutable() {
   local kind name
   while read -r kind name; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
+    if [[ "${kind}" == "Secret" ]]; then
+      kapply::_confirm_secret_recreate "${name}" \
+        || { warn "  keeping sealed Secret/${name} (re-key declined)"; continue; }
+    fi
     warn "  recreating immutable ${kind}/${name}"
     printf '%s' "${manifest}" \
       | yq "select(.kind == \"${kind}\" and .metadata.name == \"${name}\")" \

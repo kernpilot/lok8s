@@ -606,7 +606,10 @@ instead of corrupting state.
 
 Rotation becomes a deliberate act: delete the Secret and re-apply (and delete
 the cache entry under `$PATH_SECRETS` if the value itself should change).
-There is no in-place edit — that's the point.
+There is no in-place edit — that's the point. **Un-sealing is the same deal**:
+the apiserver also rejects removing `immutable: true` from a live sealed
+Secret, so dropping the field from the spec still requires a delete + re-apply
+to take effect.
 
 Trade-offs to know:
 
