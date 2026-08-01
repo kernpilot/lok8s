@@ -142,6 +142,18 @@ spec:
                   first=true
                   for node in ${NODES}; do
                     status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || status=""
+                    # The jsonpath yields the RAW NodeCondition value — literally
+                    # True/False/Unknown — but the platform's vocabulary is
+                    # Ready/NotReady/Unknown (dashboard isNodeReady requires the
+                    # exact word "Ready", case-insensitively — "True" never
+                    # matches; the pilot showed 0/12 Ready on a healthy cluster,
+                    # 2026-08-01). Map here so the wire always carries the
+                    # canonical word; an empty/failed probe reports Unknown.
+                    case "${status}" in
+                      True) status="Ready" ;;
+                      False) status="NotReady" ;;
+                      *) status="Unknown" ;;
+                    esac
                     # roles: control-plane iff the node carries the
                     # node-role.kubernetes.io/control-plane (or legacy /master)
                     # LABEL KEY. Those labels have an EMPTY value, so a per-key

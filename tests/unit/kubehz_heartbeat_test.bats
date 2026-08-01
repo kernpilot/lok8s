@@ -76,7 +76,9 @@ kubectl() {
         *) echo "Error from server (NotFound): nodes \"${_n}\" not found" >&2; return 1 ;;
       esac
       case "$*" in
-        *"jsonpath={.status.conditions"*) printf 'True' ;;
+        *"jsonpath={.status.conditions"*)
+          [ -n "${STUB_READY_STATUS_FAIL:-}" ] && return 1
+          printf '%s' "${STUB_READY_STATUS-True}" ;;
         *"instance-type}"*)
           [ -n "${STUB_ITYPE_FAIL:-}" ] && return 1
           if [ "${_n}" = "cp-1" ]; then printf '%s' "${STUB_ITYPE-cx32}"; else printf 'cpx41'; fi
@@ -210,6 +212,42 @@ teardown() {
   assert_output "cx32"
   run command jq -r '.nodes[0].name' "${STUB_PAYLOAD_OUT}"
   assert_output "cp-1"
+}
+
+# ── Node status: canonical vocabulary, never the raw condition value ──────
+
+@test "heartbeat: node status maps the raw Ready-condition True to \"Ready\" on the wire" {
+  # Real kubectl's jsonpath on conditions[?(@.type=="Ready")].status yields the
+  # literal condition value ("True") — the stub mirrors that. The platform
+  # counts ready nodes by an exact "Ready" match, so the agent must translate
+  # (0/12-on-a-healthy-pilot bug, 2026-08-01).
+  run bash "${RUNNER}"
+  assert_success
+  # Both stub nodes present AND both mapped — `unique` alone could pass on a
+  # one-node payload (review round 1 nit).
+  run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "2"
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
+  assert_output "Ready"
+}
+
+@test "heartbeat: a NotReady node maps the raw False to \"NotReady\"" {
+  # Round-2 mutation check: breaking the False arm passed the suite — this
+  # pins it. The stub reports False for every node this run.
+  export STUB_READY_STATUS="False"
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
+  assert_output "NotReady"
+}
+
+@test "heartbeat: a failed status probe reports \"Unknown\", never an empty string" {
+  export STUB_READY_STATUS_FAIL=1
+  run bash "${RUNNER}"
+  assert_success
+  # The stub fails the probe for EVERY node — both must land as Unknown.
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
+  assert_output "Unknown"
 }
 
 # ── Unlabeled node → instanceType is "" (fail-soft) ──────

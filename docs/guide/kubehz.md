@@ -175,7 +175,7 @@ control-plane component health:
   "clusterId": "my-cluster.example.com",
   "timestamp": "2026-07-04T12:00:00Z",
   "kubernetes": { "version": "v1.31.8" },
-  "nodes": [{ "name": "cp-1", "status": "True", "roles": "control-plane", "instanceType": "cx32" }],
+  "nodes": [{ "name": "cp-1", "status": "Ready", "roles": "control-plane", "instanceType": "cx32" }],
   "components": [
     { "name": "apiserver", "status": "Healthy" },
     { "name": "etcd", "status": "Healthy" },
