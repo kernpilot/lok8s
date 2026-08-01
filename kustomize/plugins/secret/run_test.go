@@ -258,7 +258,13 @@ literals:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "immutable") {
+	// Decode-and-check: substring matching could false-positive on
+	// base64-encoded data that happens to contain "immutable".
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := doc["immutable"]; present {
 		t.Errorf("immutable must be omitted when unset:\n%s", out)
 	}
 }

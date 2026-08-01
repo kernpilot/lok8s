@@ -195,7 +195,13 @@ func TestSecretBuilder_Immutable_OmittedWhenNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "immutable") {
+	// Decode-and-check: substring matching could false-positive on
+	// base64-encoded data that happens to contain "immutable".
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := doc["immutable"]; present {
 		t.Errorf("nil Immutable must be omitted entirely:\n%s", out)
 	}
 }
