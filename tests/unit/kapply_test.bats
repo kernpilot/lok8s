@@ -113,6 +113,31 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   refute_output --partial 'replace --force'
 }
 
+@test "sealed Secret interactive decline: 'n' at the pointed prompt keeps the Secret" {
+  # The REACHABLE decline: an interactive operator answered y to the generic
+  # heal prompt, then n to the crown-jewel confirm. Stub the tty seams — bats
+  # has no /dev/tty to type into.
+  unset LOK8S_FORCE_RECREATE
+  kapply::_interactive() { return 0; }
+  kapply::_ask() { return 1; }              # operator answers "n"
+  local err='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable'
+  run kapply::_heal_immutable "${SECRET_MANIFEST}" "${err}"
+  assert_output --partial 'keeping sealed Secret/zitadel-credentials'
+  run cat "${KLOG}"
+  refute_output --partial 'replace --force'
+}
+
+@test "sealed Secret interactive accept: 'y' at the pointed prompt recreates it" {
+  unset LOK8S_FORCE_RECREATE
+  kapply::_interactive() { return 0; }
+  kapply::_ask() { return 0; }              # operator answers "y"
+  local err='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable'
+  run kapply::_heal_immutable "${SECRET_MANIFEST}" "${err}"
+  assert_output --partial 'recreating immutable Secret/zitadel-credentials'
+  run cat "${KLOG}"
+  assert_output --partial 'replace --force'
+}
+
 @test "stuck Terminating WITH --force-recreate: clears finalizers on the CR" {
   export APPLY_RC=1
   export APPLY_OUT='Error from server: object is being deleted: clusters.postgresql.cnpg.io "db" already exists'

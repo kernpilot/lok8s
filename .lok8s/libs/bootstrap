@@ -911,9 +911,16 @@ bootstrap::_resolve_parked() {
   if [[ -n "${LOK8S_FORCE_RECREATE:-}" ]]; then
     _accept=1   # --force / --force-recreate → no prompt, just heal
   elif [[ -t 0 && -t 1 && -r /dev/tty && -w /dev/tty ]]; then
+    # NOTE this single batch prompt REPLACES kapply's per-object confirms for
+    # accepted entries (they re-apply under LOK8S_FORCE_RECREATE=1), so it must
+    # carry the sealed-Secret warning itself: a SEALED (immutable) Secret among
+    # the blocked objects gets re-keyed by the recreate. kapply still prints
+    # its pointed per-Secret "RE-KEYING sealed Secret/<name>" line during the
+    # heal, so what happened stays visible even when accepted from here.
     printf '\n\033[33m?\033[0m bootstrap: %d addon(s) need recreate to reconcile (immutable/terminating):%s\n' \
       "${#_parked[@]}" "${_list}" >/dev/tty
-    printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods). [y/N] ' >/dev/tty
+    printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods);\n' >/dev/tty
+    printf ' \033[31m!\033[0m any SEALED Secret among them is RE-KEYED by this. [y/N] ' >/dev/tty
     local _ans=""
     read -r _ans </dev/tty 2>/dev/null || _ans=""
     [[ "${_ans}" =~ ^[Yy] ]] && _accept=1

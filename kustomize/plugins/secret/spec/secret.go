@@ -38,7 +38,7 @@ type Secret struct {
 	// Immutable, when true, emits `immutable: true` on the rendered
 	// Secret: the apiserver then rejects any apply that would CHANGE the
 	// value ("field is immutable") — rotation becomes a deliberate
-	// delete+recreate (`lo --force-recreate`). Use for crown-jewel
+	// delete+recreate (`lo up --force-recreate`). Use for crown-jewel
 	// secrets whose silent rotation orphans stateful data (encryption
 	// masterkeys, DB credentials, signing keys). Omitted ⇒ k8s default
 	// (mutable).
