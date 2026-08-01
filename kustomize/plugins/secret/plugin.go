@@ -111,6 +111,7 @@ func (p *Plugin) Emit(entries []plugin.Entry, w io.Writer) error {
 	if len(p.spec.Metadata.Annotations) > 0 {
 		b.Annotations = p.spec.Metadata.Annotations
 	}
+	b.Immutable = p.spec.Immutable
 	for _, e := range entries {
 		b.Add(e.Key, e.Value)
 	}

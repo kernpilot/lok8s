@@ -40,6 +40,14 @@ spec:
   selector:
     matchLabels: {app: web}'
 
+  SECRET_MANIFEST='apiVersion: v1
+kind: Secret
+metadata:
+  name: zitadel-credentials
+  namespace: zitadel
+immutable: true
+data: {}'
+
   CR_MANIFEST='apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -82,6 +90,71 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   # healed → re-applied: two apply calls total
   run bash -c "grep -c 'apply --server-side' '${KLOG}'"
   assert_output 2
+}
+
+@test "sealed Secret WITH --force-recreate: recreates, but with a pointed RE-KEY warning" {
+  export APPLY_RC=1
+  export APPLY_OUT='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable when `immutable` is set'
+  export LOK8S_FORCE_RECREATE=1
+  run _kapply "${SECRET_MANIFEST}"
+  assert_output --partial 'RE-KEYING sealed Secret/zitadel-credentials'
+  run cat "${KLOG}"
+  assert_output --partial 'replace --force'
+}
+
+@test "sealed Secret declined (non-interactive, no flag): kept, never recreated" {
+  # Reaching _heal_immutable without the flag and without a tty must NOT
+  # re-key the Secret — the crown-jewel confirm refuses and the object is kept.
+  unset LOK8S_FORCE_RECREATE                # LOK8S_NONINTERACTIVE=1 from setup → no tty
+  local err='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable'
+  run kapply::_heal_immutable "${SECRET_MANIFEST}" "${err}"
+  assert_output --partial 'keeping sealed Secret/zitadel-credentials'
+  run cat "${KLOG}"
+  refute_output --partial 'replace --force'
+}
+
+@test "UNSEALED Secret with an immutable-field conflict: generic heal, no re-key prompt" {
+  # A plain Secret can hit "field is immutable" too (e.g. a type: change).
+  # The crown-jewel confirm must NOT trigger — only the manifest's
+  # immutable: true earns the pointed RE-KEY treatment.
+  export APPLY_RC=1
+  export APPLY_OUT='Error from server (Invalid): Secret "plain-creds" is invalid: type: field is immutable'
+  export LOK8S_FORCE_RECREATE=1
+  local plain='apiVersion: v1
+kind: Secret
+metadata:
+  name: plain-creds
+  namespace: default
+data: {}'
+  run _kapply "${plain}"
+  refute_output --partial 'RE-KEYING'
+  run cat "${KLOG}"
+  assert_output --partial 'replace --force'
+}
+
+@test "sealed Secret interactive decline: 'n' at the pointed prompt keeps the Secret" {
+  # The REACHABLE decline: an interactive operator answered y to the generic
+  # heal prompt, then n to the crown-jewel confirm. Stub the tty seams — bats
+  # has no /dev/tty to type into.
+  unset LOK8S_FORCE_RECREATE
+  kapply::_interactive() { return 0; }
+  kapply::_ask() { return 1; }              # operator answers "n"
+  local err='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable'
+  run kapply::_heal_immutable "${SECRET_MANIFEST}" "${err}"
+  assert_output --partial 'keeping sealed Secret/zitadel-credentials'
+  run cat "${KLOG}"
+  refute_output --partial 'replace --force'
+}
+
+@test "sealed Secret interactive accept: 'y' at the pointed prompt recreates it" {
+  unset LOK8S_FORCE_RECREATE
+  kapply::_interactive() { return 0; }
+  kapply::_ask() { return 0; }              # operator answers "y"
+  local err='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable'
+  run kapply::_heal_immutable "${SECRET_MANIFEST}" "${err}"
+  assert_output --partial 'recreating immutable Secret/zitadel-credentials'
+  run cat "${KLOG}"
+  assert_output --partial 'replace --force'
 }
 
 @test "stuck Terminating WITH --force-recreate: clears finalizers on the CR" {

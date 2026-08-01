@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // runEntry drives secret.Run with the spec on stdin (argv len 1 → stdin
@@ -212,5 +214,57 @@ func TestRun_DisableWinsOverOutput(t *testing.T) {
 	}
 	if n := countEntries(t, store); n != 0 {
 		t.Errorf("disable must not touch the store even with output=none set, found %d entries", n)
+	}
+}
+
+// TestRun_Immutable_PassesThrough proves `immutable: true` in the spec lands
+// as the Secret's top-level immutable field — the seal for crown-jewel
+// secrets (rotation only via deliberate delete+recreate).
+func TestRun_Immutable_PassesThrough(t *testing.T) {
+	in := []byte(`apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: sealed
+immutable: true
+literals:
+  key: value
+`)
+	out, err := runEntry(t, in, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Decode-and-check: top-level field, not a substring match that a
+	// comment or a nested leak would also satisfy.
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := doc["immutable"].(bool); !ok || !got {
+		t.Errorf("top-level immutable must be true, got %v:\n%s", doc["immutable"], out)
+	}
+}
+
+// TestRun_Immutable_OmittedByDefault proves the field never appears unless
+// asked for — existing renders stay byte-identical.
+func TestRun_Immutable_OmittedByDefault(t *testing.T) {
+	in := []byte(`apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: plain
+literals:
+  key: value
+`)
+	out, err := runEntry(t, in, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Decode-and-check: substring matching could false-positive on
+	// base64-encoded data that happens to contain "immutable".
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := doc["immutable"]; present {
+		t.Errorf("immutable must be omitted when unset:\n%s", out)
 	}
 }

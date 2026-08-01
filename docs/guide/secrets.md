@@ -224,6 +224,17 @@ mounted file isn't exposed through `/proc`, crash dumps, or child processes, and
 rotates without a pod restart. The mounted file contains exactly the generated
 bytes.
 
+## Sealing crown jewels (`immutable: true`)
+
+For secrets whose **silent rotation would orphan stateful data** — an encryption
+masterkey, a database password, a signing key — add `immutable: true` to the
+spec. It passes through to the k8s Secret's native `immutable` field (stable
+since 1.21), so any apply that would *change* the live value is rejected by the
+apiserver instead of quietly re-keying a running system. Rotation then requires
+an explicit delete + re-apply. See
+[Sealing a secret](/reference/kustomize-plugins#sealing-a-secret-immutable) for
+the full semantics and trade-offs.
+
 ## Trusting the dev CA (`lo trust`)
 
 The [`cert:` generator](/reference/kustomize-plugins#development-certificates-cert)

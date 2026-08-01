@@ -294,6 +294,17 @@ kapply::_interactive() {
   [[ -r /dev/tty && -w /dev/tty ]]
 }
 
+# One tty prompt: print the (pre-formatted) question on /dev/tty and read the
+# answer from it. Returns 0 on y/Y. The single read path shared by the three
+# confirms below — and the seam tests stub to script an answer, since bats has
+# no /dev/tty to type into.
+kapply::_ask() {
+  local prompt="${1}" ans
+  printf '%s' "${prompt}" >/dev/tty 2>/dev/null
+  read -r ans </dev/tty 2>/dev/null || return 1
+  [[ "${ans}" =~ ^[Yy] ]]
+}
+
 # Decide whether to heal: explicit flag → yes; interactive → prompt; else no.
 kapply::_confirm_heal() {
   [[ -n "${LOK8S_FORCE_RECREATE:-}" ]] && return 0
@@ -303,10 +314,24 @@ kapply::_confirm_heal() {
     error "  or resolve the conflict by hand. Not retrying — that would loop."
     return 1
   fi
-  local ans
-  printf '\033[33m?\033[0m kapply: recreate the blocked object(s) above to recover? this deletes + recreates them (restarts their pods); a one-time fix. [y/N] ' >/dev/tty 2>/dev/null
-  read -r ans </dev/tty 2>/dev/null || return 1
-  [[ "${ans}" =~ ^[Yy] ]]
+  kapply::_ask $'\033[33m?\033[0m kapply: recreate the blocked object(s) above to recover? this deletes + recreates them (restarts their pods); a one-time fix. [y/N] '
+}
+
+# A SECOND, pointed confirm just for recreating a SEALED Secret (one applied
+# with `immutable: true` — a crown jewel by declaration). Recreating it is a
+# RE-KEY: exactly the event the seal exists to make deliberate. The generic
+# heal prompt undersells that, so name the Secret and spell out the blast
+# radius. --force-recreate still proceeds (it IS the documented rotation path
+# and must stay usable non-interactively) but logs a pointed warning per
+# Secret instead of recreating silently.
+kapply::_confirm_secret_recreate() {
+  local name="${1}"
+  if [[ -n "${LOK8S_FORCE_RECREATE:-}" ]]; then
+    warn "  RE-KEYING sealed Secret/${name} (--force-recreate): pods keep the old value until restarted; state encrypted under it may be orphaned"
+    return 0
+  fi
+  kapply::_interactive || return 1
+  kapply::_ask "$(printf '\033[31m!\033[0m kapply: Secret/%s is SEALED (immutable). Recreating it RE-KEYS the credential — pods keep the old value until restarted, and state encrypted under it may be orphaned. Really re-key? [y/N] ' "${name}")"
 }
 
 # A SECOND, pointed confirm just for force-finalizing a namespace — the most
@@ -320,10 +345,7 @@ kapply::_confirm_ns_finalize() {
   local name="${1}"
   [[ -n "${LOK8S_FORCE_RECREATE:-}" ]] && return 0
   kapply::_interactive || return 1
-  local ans
-  printf '\033[31m!\033[0m kapply: namespace/%s is stuck Terminating. Force-remove its finalizers via the API? this COMPLETES its deletion — every object still in it is destroyed, irreversibly. [y/N] ' "${name}" >/dev/tty 2>/dev/null
-  read -r ans </dev/tty 2>/dev/null || return 1
-  [[ "${ans}" =~ ^[Yy] ]]
+  kapply::_ask "$(printf '\033[31m!\033[0m kapply: namespace/%s is stuck Terminating. Force-remove its finalizers via the API? this COMPLETES its deletion — every object still in it is destroyed, irreversibly. [y/N] ' "${name}")"
 }
 
 # Stream filter: pass every line through to stdout (so the caller still
@@ -382,6 +404,18 @@ kapply::_heal_immutable() {
   local kind name
   while read -r kind name; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
+    # The crown-jewel confirm applies only to Secrets the manifest actually
+    # SEALS (immutable: true) — a plain Secret can hit "field is immutable"
+    # too (e.g. a type: change) and gets the generic heal, no re-key drama.
+    if [[ "${kind}" == "Secret" ]]; then
+      local sealed
+      sealed=$(printf '%s' "${manifest}" \
+        | yq "select(.kind == \"Secret\" and .metadata.name == \"${name}\") | .immutable // false" 2>/dev/null)
+      if [[ "${sealed}" == *true* ]]; then
+        kapply::_confirm_secret_recreate "${name}" \
+          || { warn "  keeping sealed Secret/${name} (re-key declined)"; continue; }
+      fi
+    fi
     warn "  recreating immutable ${kind}/${name}"
     printf '%s' "${manifest}" \
       | yq "select(.kind == \"${kind}\" and .metadata.name == \"${name}\")" \

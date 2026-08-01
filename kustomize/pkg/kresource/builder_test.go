@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestNewSecret_DefaultsToOpaque(t *testing.T) {
@@ -139,5 +141,67 @@ func TestSecretBuilder_HasAndKeys(t *testing.T) {
 	}
 	if _, ok := keys["a"]; !ok {
 		t.Error("Keys missing a")
+	}
+}
+
+func TestSecretBuilder_Immutable_Emitted(t *testing.T) {
+	b := NewSecret("sealed", "ns", "")
+	tr := true
+	b.Immutable = &tr
+	b.Add("k", []byte("v"))
+	out, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Decode-and-check: the field must be TOP-LEVEL (a string-contains would
+	// also pass if it leaked under metadata or into data).
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := doc["immutable"].(bool); !ok || !got {
+		t.Errorf("top-level immutable must be true, got %v:\n%s", doc["immutable"], out)
+	}
+	meta, _ := doc["metadata"].(map[string]any)
+	if _, leaked := meta["immutable"]; leaked {
+		t.Errorf("immutable must not appear under metadata:\n%s", out)
+	}
+}
+
+func TestSecretBuilder_Immutable_FalseEmittedAsIs(t *testing.T) {
+	// An explicit false survives omitempty (non-nil pointer) — same k8s
+	// semantics as omitting it, but the user's declaration is preserved.
+	b := NewSecret("unsealed", "ns", "")
+	fa := false
+	b.Immutable = &fa
+	b.Add("k", []byte("v"))
+	out, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := doc["immutable"].(bool); !ok || got {
+		t.Errorf("top-level immutable must be false, got %v:\n%s", doc["immutable"], out)
+	}
+}
+
+func TestSecretBuilder_Immutable_OmittedWhenNil(t *testing.T) {
+	b := NewSecret("plain", "ns", "")
+	b.Add("k", []byte("v"))
+	out, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Decode-and-check: substring matching could false-positive on
+	// base64-encoded data that happens to contain "immutable".
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := doc["immutable"]; present {
+		t.Errorf("nil Immutable must be omitted entirely:\n%s", out)
 	}
 }
