@@ -113,6 +113,25 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   refute_output --partial 'replace --force'
 }
 
+@test "UNSEALED Secret with an immutable-field conflict: generic heal, no re-key prompt" {
+  # A plain Secret can hit "field is immutable" too (e.g. a type: change).
+  # The crown-jewel confirm must NOT trigger — only the manifest's
+  # immutable: true earns the pointed RE-KEY treatment.
+  export APPLY_RC=1
+  export APPLY_OUT='Error from server (Invalid): Secret "plain-creds" is invalid: type: field is immutable'
+  export LOK8S_FORCE_RECREATE=1
+  local plain='apiVersion: v1
+kind: Secret
+metadata:
+  name: plain-creds
+  namespace: default
+data: {}'
+  run _kapply "${plain}"
+  refute_output --partial 'RE-KEYING'
+  run cat "${KLOG}"
+  assert_output --partial 'replace --force'
+}
+
 @test "sealed Secret interactive decline: 'n' at the pointed prompt keeps the Secret" {
   # The REACHABLE decline: an interactive operator answered y to the generic
   # heal prompt, then n to the crown-jewel confirm. Stub the tty seams — bats

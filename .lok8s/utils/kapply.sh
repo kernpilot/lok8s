@@ -404,9 +404,17 @@ kapply::_heal_immutable() {
   local kind name
   while read -r kind name; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
+    # The crown-jewel confirm applies only to Secrets the manifest actually
+    # SEALS (immutable: true) — a plain Secret can hit "field is immutable"
+    # too (e.g. a type: change) and gets the generic heal, no re-key drama.
     if [[ "${kind}" == "Secret" ]]; then
-      kapply::_confirm_secret_recreate "${name}" \
-        || { warn "  keeping sealed Secret/${name} (re-key declined)"; continue; }
+      local sealed
+      sealed=$(printf '%s' "${manifest}" \
+        | yq "select(.kind == \"Secret\" and .metadata.name == \"${name}\") | .immutable // false" 2>/dev/null)
+      if [[ "${sealed}" == *true* ]]; then
+        kapply::_confirm_secret_recreate "${name}" \
+          || { warn "  keeping sealed Secret/${name} (re-key declined)"; continue; }
+      fi
     fi
     warn "  recreating immutable ${kind}/${name}"
     printf '%s' "${manifest}" \
