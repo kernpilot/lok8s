@@ -144,10 +144,11 @@ spec:
                     status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || status=""
                     # The jsonpath yields the RAW NodeCondition value — literally
                     # True/False/Unknown — but the platform's vocabulary is
-                    # Ready/NotReady/Unknown (dashboard isNodeReady counts an
-                    # exact "ready" match; the pilot showed 0/12 Ready on a
-                    # healthy cluster, 2026-08-01). Map here so the wire always
-                    # carries the canonical word; an empty probe stays Unknown.
+                    # Ready/NotReady/Unknown (dashboard isNodeReady requires the
+                    # exact word "Ready", case-insensitively — "True" never
+                    # matches; the pilot showed 0/12 Ready on a healthy cluster,
+                    # 2026-08-01). Map here so the wire always carries the
+                    # canonical word; an empty/failed probe reports Unknown.
                     case "${status}" in
                       True) status="Ready" ;;
                       False) status="NotReady" ;;
