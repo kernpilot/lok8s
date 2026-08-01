@@ -21,7 +21,10 @@ type SecretBuilder struct {
 	Type        string
 	Annotations map[string]string
 	Labels      map[string]string
-	data        map[string][]byte
+	// Immutable maps to the Secret's top-level `immutable` field
+	// (nil ⇒ omitted ⇒ k8s default, mutable).
+	Immutable *bool
+	data      map[string][]byte
 }
 
 // NewSecret returns a SecretBuilder with the given metadata. Type
@@ -80,6 +83,7 @@ type secretYAML struct {
 	APIVersion string            `yaml:"apiVersion"`
 	Kind       string            `yaml:"kind"`
 	Metadata   secretMeta        `yaml:"metadata"`
+	Immutable  *bool             `yaml:"immutable,omitempty"`
 	Type       string            `yaml:"type"`
 	Data       map[string]string `yaml:"data,omitempty"`
 }
@@ -113,8 +117,9 @@ func (b *SecretBuilder) Marshal() ([]byte, error) {
 			Labels:      b.Labels,
 			Annotations: b.Annotations,
 		},
-		Type: b.Type,
-		Data: encoded,
+		Immutable: b.Immutable,
+		Type:      b.Type,
+		Data:      encoded,
 	}
 	return kyaml.Encode(doc)
 }

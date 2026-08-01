@@ -578,6 +578,46 @@ Supported types and their required keys:
 
 Unknown types pass through without validation.
 
+### Sealing a secret (`immutable:`)
+
+`immutable: true` passes straight through to the Kubernetes Secret's top-level
+[`immutable` field](https://kubernetes.io/docs/concepts/configuration/secret/#secret-immutable)
+(stable since k8s 1.21). Once applied, the apiserver **rejects any write that
+would change the data**:
+
+```
+Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable when `immutable` is set
+```
+
+```yaml
+apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: zitadel-credentials, namespace: zitadel}
+immutable: true
+passwd:
+  masterkey: 32
+```
+
+Use it for **crown-jewel secrets whose silent rotation orphans stateful data**
+— encryption masterkeys, database credentials, signing keys. A stale secrets
+store (or a re-render against the wrong `$PATH_SECRETS`) can otherwise re-key
+a live value in one `kubectl apply`; with the seal, that apply fails loudly
+instead of corrupting state.
+
+Rotation becomes a deliberate act: delete the Secret and re-apply (and delete
+the cache entry under `$PATH_SECRETS` if the value itself should change).
+There is no in-place edit — that's the point.
+
+Trade-offs to know:
+
+- Pods **do not see new values** until the Secret is recreated *and* the pods
+  restart — same as any secret rotation, but the seal makes the ordering
+  explicit.
+- Kubelets **stop watching** immutable secrets, which reduces apiserver load
+  on large clusters (the reason the feature exists upstream).
+- Omitted ⇒ mutable (the k8s default). `immutable: false` is emitted as-is
+  and behaves like omitting it.
+
 ### Security
 
 - **Path traversal rejected** in `file:` and `secretRef:` (no `..`, no absolute paths)

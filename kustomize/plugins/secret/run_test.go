@@ -214,3 +214,43 @@ func TestRun_DisableWinsOverOutput(t *testing.T) {
 		t.Errorf("disable must not touch the store even with output=none set, found %d entries", n)
 	}
 }
+
+// TestRun_Immutable_PassesThrough proves `immutable: true` in the spec lands
+// as the Secret's top-level immutable field — the seal for crown-jewel
+// secrets (rotation only via deliberate delete+recreate).
+func TestRun_Immutable_PassesThrough(t *testing.T) {
+	in := []byte(`apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: sealed
+immutable: true
+literals:
+  key: value
+`)
+	out, err := runEntry(t, in, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "immutable: true") {
+		t.Errorf("immutable: true must pass through to the rendered Secret:\n%s", out)
+	}
+}
+
+// TestRun_Immutable_OmittedByDefault proves the field never appears unless
+// asked for — existing renders stay byte-identical.
+func TestRun_Immutable_OmittedByDefault(t *testing.T) {
+	in := []byte(`apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: plain
+literals:
+  key: value
+`)
+	out, err := runEntry(t, in, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "immutable") {
+		t.Errorf("immutable must be omitted when unset:\n%s", out)
+	}
+}

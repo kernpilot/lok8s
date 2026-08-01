@@ -141,3 +141,29 @@ func TestSecretBuilder_HasAndKeys(t *testing.T) {
 		t.Error("Keys missing a")
 	}
 }
+
+func TestSecretBuilder_Immutable_Emitted(t *testing.T) {
+	b := NewSecret("sealed", "ns", "")
+	tr := true
+	b.Immutable = &tr
+	b.Add("k", []byte("v"))
+	out, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "immutable: true") {
+		t.Errorf("immutable: true missing from output:\n%s", out)
+	}
+}
+
+func TestSecretBuilder_Immutable_OmittedWhenNil(t *testing.T) {
+	b := NewSecret("plain", "ns", "")
+	b.Add("k", []byte("v"))
+	out, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "immutable") {
+		t.Errorf("nil Immutable must be omitted entirely:\n%s", out)
+	}
+}

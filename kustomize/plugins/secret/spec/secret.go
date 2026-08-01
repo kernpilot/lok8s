@@ -35,6 +35,15 @@ type Secret struct {
 	// Defaults to Opaque when omitted.
 	Type string `yaml:"type,omitempty"`
 
+	// Immutable, when true, emits `immutable: true` on the rendered
+	// Secret: the apiserver then rejects any apply that would CHANGE the
+	// value ("field is immutable") — rotation becomes a deliberate
+	// delete+recreate (`lo --force-recreate`). Use for crown-jewel
+	// secrets whose silent rotation orphans stateful data (encryption
+	// masterkeys, DB credentials, signing keys). Omitted ⇒ k8s default
+	// (mutable).
+	Immutable *bool `yaml:"immutable,omitempty"`
+
 	// Validate enables required-key validation for the chosen Type.
 	// When false, type-specific key requirements (e.g. tls.crt+tls.key
 	// for kubernetes.io/tls) are not enforced. Defaults to true via
