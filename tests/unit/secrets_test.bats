@@ -56,6 +56,13 @@ require_tools() {
 @test "secrets: encrypt writes a .secrets/.gitignore that commits only .enc" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
+  # setup() stubs `:args`, so --ssh-key is never parsed and secrets::init falls
+  # back to LOK8S_SSH_KEY, which defaults to ${HOME}/.ssh/id_ed25519 — the
+  # developer's PRIVATE key. ssh-to-age then fails to parse it and the test dies
+  # for a reason that has nothing to do with .gitignore. The round-trip test
+  # above already exports this for the same reason; this one did not
+  # (visual-audit r256).
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
   printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
   secrets::init --ssh-key "${BATS_TEST_TMPDIR}/id.pub"
   run secrets::encrypt
