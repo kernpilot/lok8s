@@ -74,6 +74,67 @@ hooks::_select() {
   yq "${filter}" "${artifact}" 2>/dev/null || true
 }
 
+# hooks::_overlay_images <live-images-json> — read ONE rendered object on stdin,
+# emit it with each container's image replaced by the ref the CLUSTER is running
+# for the container of the same name. Containers absent from the live object keep
+# their rendered ref.
+#
+# WHY THIS EXISTS. `recreate` re-applies from the rendered artifact, which
+# carries the DECLARED ref (e.g. `lok8s.local/kubehz-api-migrate`). In a Tilt dev
+# loop the running object carries Tilt's built-and-pushed ref
+# (`<registry>/lok8s.local_kubehz-api-migrate:tilt-<hash>`) — image injection
+# happens on Tilt's deploy path, not in the YAML. Re-applying the declared ref
+# therefore points the workload at an image nobody pushed, and it sits in
+# ImagePullBackOff forever while Tilt still reports the resource ok, because
+# TILT's last deploy did succeed. Measured on kubehz-api-migrate, whose DB
+# migration had been blocked since the hook last fired (visual-audit r251).
+#
+# Pure: the caller does the cluster lookup, so this half is unit-testable.
+hooks::_overlay_images() {
+  local live="${1:-[]}"
+  LOK8S_LIVE_IMAGES="${live}" yq '
+    (strenv(LOK8S_LIVE_IMAGES) | from_json) as $live
+    | (.spec.template.spec.containers[]?, .spec.template.spec.initContainers[]?) |=
+        (. as $c | .image = (($live | map(select(.name == $c.name)) | .[0].image) // $c.image))
+  '
+}
+
+# hooks::_live_images <kind> <name> <namespace> — the running object'"'"'s container
+# images as a JSON array of {name, image}. Empty array when the object does not
+# exist yet (a first-ever apply has nothing to preserve).
+hooks::_live_images() {
+  local kind="${1}" name="${2}" ns="${3}" live
+  [[ -n "${kind}" && -n "${name}" ]] || { printf '[]'; return 0; }
+  live="$(kubectl get "${kind}" "${name}" ${ns:+-n "${ns}"} -o json 2>/dev/null)" || { printf '[]'; return 0; }
+  [[ -n "${live}" ]] || { printf '[]'; return 0; }
+  yq -p=json -o=json -I=0 '
+    [ (.spec.template.spec.containers[]?, .spec.template.spec.initContainers[]?)
+      | {"name": .name, "image": .image} ]
+  ' <<< "${live}" 2>/dev/null || printf '[]'
+}
+
+# hooks::_preserve_images — read the selected objects on stdin, emit them with
+# live image refs overlaid (see hooks::_overlay_images).
+hooks::_preserve_images() {
+  local objs; objs="$(cat)"
+  local -a idx; mapfile -t idx < <(yq 'documentIndex' <<< "${objs}" 2>/dev/null)
+  [[ ${#idx[@]} -gt 0 ]] || { printf '%s\n' "${objs}"; return 0; }
+  local i doc kind name ns imgs first=1
+  for i in "${idx[@]}"; do
+    doc="$(yq "select(documentIndex == ${i})" <<< "${objs}")"
+    kind="$(yq -r '.kind // ""' <<< "${doc}")"
+    name="$(yq -r '.metadata.name // ""' <<< "${doc}")"
+    ns="$(yq -r '.metadata.namespace // ""' <<< "${doc}")"
+    imgs="$(hooks::_live_images "${kind}" "${name}" "${ns}")"
+    if [[ "${imgs}" != '[]' ]]; then
+      doc="$(hooks::_overlay_images "${imgs}" <<< "${doc}")"
+    fi
+    (( first )) || printf -- '---\n'
+    first=0
+    printf '%s\n' "${doc}"
+  done
+}
+
 hooks::recreate() {
   local selector=''
   local -a args=(
@@ -90,8 +151,12 @@ hooks::recreate() {
   # `&&` so a real delete error stops before apply, and an apply failure surfaces
   # (no `|| true`), making a half-done recreate visible rather than silently
   # destructive. True one-shot atomicity isn't possible for an immutable Job.
+  # Capture the images the cluster is RUNNING before deleting — the rendered
+  # artifact carries the declared ref, which in a Tilt loop is not the ref that
+  # was actually pushed (see hooks::_overlay_images).
+  local applied; applied="$(printf '%s\n' "${objs}" | hooks::_preserve_images)"
   printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - \
-    && printf '%s\n' "${objs}" | kapply::apply --label "hook recreate ${selector}"
+    && printf '%s\n' "${applied}" | kapply::apply --label "hook recreate ${selector}"
   debug "hooks: recreated objects matching '${selector}'"
 }
 

@@ -96,3 +96,95 @@ YAML
   assert_failure
   assert_output --partial 'invalid selector clause'
 }
+
+# ── Image preservation across recreate ───────────────────────────────────────
+# `recreate` re-applies from the rendered artifact, which carries the DECLARED
+# image ref. Under Tilt the running object carries Tilt's built-and-pushed ref —
+# injection happens on Tilt's deploy path, not in the YAML — so re-applying the
+# declared ref points the workload at an image nobody pushed. Measured on
+# kubehz-api-migrate, whose DB migration had been blocked since the hook last
+# fired (visual-audit r251).
+
+@test "_overlay_images: replaces the declared ref with the live one, by container name" {
+  run hooks::_overlay_images '[{"name":"migrate","image":"reg/lok8s.local_kubehz-api-migrate:tilt-abc"}]' <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mig
+  namespace: ns
+spec:
+  template:
+    spec:
+      containers:
+        - name: migrate
+          image: lok8s.local/kubehz-api-migrate
+YAML
+  assert_success
+  assert_output --partial 'reg/lok8s.local_kubehz-api-migrate:tilt-abc'
+  refute_output --partial 'image: lok8s.local/kubehz-api-migrate'
+}
+
+@test "_overlay_images: a container the live object does not have keeps its rendered ref" {
+  run hooks::_overlay_images '[{"name":"migrate","image":"reg/a:tilt-1"}]' <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mig
+spec:
+  template:
+    spec:
+      containers:
+        - name: migrate
+          image: lok8s.local/a
+        - name: sidecar
+          image: lok8s.local/b
+YAML
+  assert_success
+  assert_output --partial 'reg/a:tilt-1'
+  assert_output --partial 'lok8s.local/b'
+}
+
+@test "_overlay_images: initContainers are preserved too" {
+  run hooks::_overlay_images '[{"name":"wait","image":"reg/wait:tilt-9"},{"name":"app","image":"reg/app:tilt-9"}]' <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: d
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait
+          image: lok8s.local/wait
+      containers:
+        - name: app
+          image: lok8s.local/app
+YAML
+  assert_success
+  assert_output --partial 'reg/wait:tilt-9'
+  assert_output --partial 'reg/app:tilt-9'
+}
+
+@test "_overlay_images: an empty live list is a no-op (first-ever apply)" {
+  run hooks::_overlay_images '[]' <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mig
+spec:
+  template:
+    spec:
+      containers:
+        - name: migrate
+          image: lok8s.local/kubehz-api-migrate
+YAML
+  assert_success
+  assert_output --partial 'lok8s.local/kubehz-api-migrate'
+}
+
+@test "_live_images: a missing object yields an empty array, not a failure" {
+  kubectl() { return 1; }
+  run hooks::_live_images Job nope ns
+  assert_success
+  assert_output '[]'
+}
