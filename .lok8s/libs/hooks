@@ -135,6 +135,29 @@ hooks::_preserve_images() {
   done
 }
 
+# hooks::_object_names — the metadata.name of every selected object, one per line.
+hooks::_object_names() {
+  # yq prints a `---` between documents; left in, it becomes a bogus name, every
+  # tilt::has_resource lookup for it fails, and _tilt_can_recreate silently says
+  # "Tilt does not own this" for EVERY multi-object selection — disabling the
+  # Tilt path exactly where it matters most. Caught by the unit test below.
+  yq -r '.metadata.name // ""' <<< "${1}" 2>/dev/null | grep -vE '^(---)?$' || true
+}
+
+# hooks::_tilt_can_recreate — does the running Tilt session own EVERY selected
+# object? All-or-nothing on purpose: recreating half a set through Tilt and half
+# through kubectl would leave the two halves on different image refs, which is a
+# subtler version of the bug this exists to avoid.
+hooks::_tilt_can_recreate() {
+  local objs="${1}" name any=0
+  declare -F tilt::has_resource >/dev/null || return 1
+  for name in $(hooks::_object_names "${objs}"); do
+    any=1
+    tilt::has_resource "${name}" || return 1
+  done
+  (( any ))
+}
+
 hooks::recreate() {
   local selector=''
   local -a args=(
@@ -151,9 +174,38 @@ hooks::recreate() {
   # `&&` so a real delete error stops before apply, and an apply failure surfaces
   # (no `|| true`), making a half-done recreate visible rather than silently
   # destructive. True one-shot atomicity isn't possible for an immutable Job.
-  # Capture the images the cluster is RUNNING before deleting — the rendered
-  # artifact carries the declared ref, which in a Tilt loop is not the ref that
-  # was actually pushed (see hooks::_overlay_images).
+  # UNDER TILT, LET TILT DO IT. The rendered artifact carries the DECLARED image
+  # ref (`lok8s.local/<name>`); the image that was actually built and pushed only
+  # exists under Tilt's content-hash tag, because injection happens on Tilt's
+  # deploy path and never reaches the YAML. Applying the rendered object
+  # therefore points the workload at an image nobody pushed, and it sits in
+  # ImagePullBackOff while Tilt still reports the resource ok — its own last
+  # deploy did succeed (kubehz-cluster AUDIT.md r251).
+  #
+  # Preserving the LIVE object's refs (hooks::_preserve_images, below) fixes that
+  # only while something is running: a Job that has completed and been cleaned up
+  # has nothing to preserve, and the raw ref ships anyway. Measured — that is
+  # exactly how the migration Job broke again after the preservation fix landed
+  # (r260). Tilt is the only party that knows the real ref in both cases, so when
+  # a Tilt session owns this resource, hand the work to it.
+  # `declare -F` rather than an import: the `lo` entrypoint loads libs/tilt
+  # alongside this one, but hooks does not otherwise depend on it, and the unit
+  # tests source hooks alone. Absent tilt helpers simply mean "no Tilt" and the
+  # kubectl path below runs — the same answer as a stopped session.
+  if declare -F tilt::running >/dev/null && tilt::running \
+     && hooks::_tilt_can_recreate "${objs}"; then
+    local name
+    for name in $(hooks::_object_names "${objs}"); do
+      tilt::trigger_resource "${name}" || {
+        error "hooks recreate: tilt trigger failed for '${name}'"; return 1
+      }
+      debug "hooks: recreated '${name}' through Tilt (image injection preserved)"
+    done
+    return 0
+  fi
+
+  # No Tilt session (or it does not own these objects): fall back to delete +
+  # apply, carrying over the live image refs where an object is still running.
   local applied; applied="$(printf '%s\n' "${objs}" | hooks::_preserve_images)"
   printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - \
     && printf '%s\n' "${applied}" | kapply::apply --label "hook recreate ${selector}"

@@ -188,3 +188,45 @@ YAML
   assert_success
   assert_output '[]'
 }
+
+# ── Tilt owns the recreate when Tilt owns the objects ────────────────────────
+# Preserving live image refs only helps while something is running; a completed,
+# cleaned-up Job has nothing to preserve and the raw ref ships anyway (measured,
+# kubehz-cluster AUDIT.md r260). Tilt knows the real ref in both cases.
+
+@test "_object_names: one metadata.name per document" {
+  run hooks::_object_names "$(cat <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mig-a
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mig-b
+YAML
+)"
+  assert_success
+  assert_line --index 0 'mig-a'
+  assert_line --index 1 'mig-b'
+}
+
+@test "_tilt_can_recreate: false when the tilt helpers are not loaded" {
+  run hooks::_tilt_can_recreate "$(printf 'kind: Job\nmetadata:\n  name: mig\n')"
+  assert_failure
+}
+
+@test "_tilt_can_recreate: true only when Tilt knows EVERY object" {
+  tilt::has_resource() { [ "$1" = "known" ]; }
+  run hooks::_tilt_can_recreate "$(printf 'kind: Job\nmetadata:\n  name: known\n')"
+  assert_success
+  run hooks::_tilt_can_recreate "$(printf 'kind: Job\nmetadata:\n  name: known\n---\nkind: Job\nmetadata:\n  name: other\n')"
+  assert_failure
+}
+
+@test "_tilt_can_recreate: false when the selection is empty" {
+  tilt::has_resource() { return 0; }
+  run hooks::_tilt_can_recreate ""
+  assert_failure
+}
