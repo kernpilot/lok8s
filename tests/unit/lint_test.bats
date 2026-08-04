@@ -6,6 +6,14 @@ setup() {
   setup_tmpdir
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
+  # PIN the flat store rather than letting it default to ${PATH_BASE}/.secrets.
+  # secrets::check_flat_shadows resolves `PATH_SECRETS:-${PATH_BASE}/.secrets`,
+  # so an AMBIENT PATH_SECRETS — which every shell in the kubehz sandbox exports,
+  # pointing at the real repo — silently redirected the check away from this
+  # test's fixture and the flat-store-shadow test failed for reasons that had
+  # nothing to do with the code (visual-audit r254). A test that depends on a
+  # variable being absent passes or fails according to who runs it.
+  export PATH_SECRETS="${BATS_TEST_TMPDIR}/.secrets"
 
   import() { :; }
   export -f import
