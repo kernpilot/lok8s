@@ -93,7 +93,16 @@ capi::generate() {
         "${prov}/kubeadm-config-template.yaml" \
         "${prov}/hcloud-machine-template-worker.yaml"; do
         echo "---"
-        envsubst "${allowed_vars}" < "${tpl}"
+        # template::envsubst, NOT bare envsubst: the control-plane loop above
+        # already goes through the flavor shim, and this one did not. On any
+        # machine whose `envsubst` is not GNU gettext — which includes the
+        # renvsubst build `b` curates — the bare call rejects the whitelist
+        # positional arg and writes "ERROR: Unknown flag: ${CLUSTER_NAME} …"
+        # into the manifest stream instead of the template, so every worker
+        # MachineDeployment / KubeadmConfigTemplate / machine template is
+        # replaced by an error line. A CAPI cluster then comes up with a control
+        # plane and no workers, or fails to apply at all (visual-audit r255).
+        template::envsubst "${allowed_vars}" < "${tpl}"
       done
     done
   )
