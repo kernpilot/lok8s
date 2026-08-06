@@ -240,7 +240,21 @@ kubeone::generate_config() {
   # bare substitute-everything `envsubst < file` may touch the binary directly —
   # the toolchain's renvsubst rejects the positional whitelist. The wrapper uses
   # GNU envsubst when present (identical output) and a native jq pass otherwise.
-  rendered=$(template::envsubst '${CLUSTER_NAME} ${K8S_VERSION} ${CLOUD_PROVIDER} ${POD_SUBNET} ${SERVICE_SUBNET} ${CNI_PLUGIN} ${KUBE_PROXY_SKIP}' < "${core_tmpl}")
+  # GUARDED, and it has to be explicit: libs/provision:341 runs the driver as
+  # `driver::provision || provision_rc=$?`, and testing a command's status
+  # disables errexit for the whole call tree below it. So a bare assignment here
+  # does NOT abort — it leaves ${rendered} empty and the provision walks on. That
+  # is issue #91: a worker re-join that "exited 0 but never executed kubeone
+  # apply". The lo driver documents the same trap and defends the same way.
+  rendered=$(template::envsubst '${CLUSTER_NAME} ${K8S_VERSION} ${CLOUD_PROVIDER} ${POD_SUBNET} ${SERVICE_SUBNET} ${CNI_PLUGIN} ${KUBE_PROXY_SKIP}' < "${core_tmpl}") || {
+    error "failed to render the KubeOne manifest from ${core_tmpl}"
+    error "  (is envsubst GNU gettext? the toolchain's renvsubst rejects the positional whitelist)"
+    return 1
+  }
+  [[ -n "${rendered}" ]] || {
+    error "the KubeOne manifest rendered EMPTY from ${core_tmpl} — refusing to continue"
+    return 1
+  }
 
   # Append dynamicWorkers block if worker pools are defined
   local pool_count

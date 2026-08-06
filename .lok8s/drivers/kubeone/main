@@ -59,7 +59,10 @@ driver::provision() {
 
   # 3. Generate kubeone.yaml
   local provider_name="${PROVIDER_NAME:-}"
-  kubeone::generate_config "${cluster_yaml}" "${provider_name}" "${work_dir}"
+  # || return: this tree runs under libs/provision's `driver::provision ||
+  # provision_rc=$?`, which disables errexit — without the explicit return, a
+  # failed manifest render falls straight through to the apply below (issue #91).
+  kubeone::generate_config "${cluster_yaml}" "${provider_name}" "${work_dir}" || return 1
 
   # 4. Append the host inventory to the manifest itself (apiEndpoint,
   #    controlPlane.hosts, staticWorkers.hosts). Manifest fields are
