@@ -983,6 +983,113 @@ YAML
   assert_output "addonA"
 }
 
+# --- the batched prompt must name what a `y` destroys -----------------------
+#
+# Accepting at this prompt re-applies every parked entry under
+# LOK8S_FORCE_RECREATE=1, which makes kapply::_confirm_ns_finalize return 0
+# WITHOUT asking. So the pointed per-namespace confirm never runs, and whatever
+# this prompt does not say is not said at all.
+#
+# On 2026-07-30 it said only "restarts pods". One `y` force-finalized
+# kubehz-system, mla and element on the dev cluster — CNPG volumes, the
+# runtime-minted PATs and the minio buckets went with them.
+
+# Drive _resolve_parked through the real dynamic-scope contract, capturing the
+# prompt instead of writing it to a tty bats does not have. Answers "n": these
+# tests are about the TEXT, and declining keeps the heal out of the picture.
+_run_prompt() {   # <prompt-capture-file> [stuck-ns...]
+  local capture="${1}"; shift
+  bootstrap::_interactive() { return 0; }
+  bootstrap::_ask() { printf '%s' "${1}" > "${capture}"; return 1; }
+  bootstrap::_skip_dependents() { :; }
+  bootstrap::_apply_one() { :; }
+  local -a _names=(addonA) _dirs=(/x) _inlines=("") _envs=("") _waits=("false")
+  local -A _istarget=()
+  local kind=lo provider_name=hetzner kubeconfig=/kc
+  declare -gA _BS_COMPLETED=(); _BS_DONE=0; _BS_OVERALL_RC=0
+  _BS_PARKED=(0); _BS_PARKED_NS=("${@}")
+  unset LOK8S_FORCE_RECREATE
+  bootstrap::_resolve_parked
+}
+
+@test "bootstrap::_resolve_parked: the prompt NAMES every namespace a 'y' force-finalizes" {
+  local p="${BATS_TEST_TMPDIR}/prompt.txt"
+  _run_prompt "${p}" kubehz-system mla element
+
+  run cat "${p}"
+  # Every namespace named — an operator cannot consent to destroying something
+  # the prompt never mentioned.
+  assert_output --partial "kubehz-system"
+  assert_output --partial "mla"
+  assert_output --partial "element"
+  # …and named as DESTRUCTION, not as a restart. These three phrases are the
+  # difference between the wording that lost three namespaces and one that
+  # would not have.
+  assert_output --partial "FORCE-FINALIZED"
+  assert_output --partial "COMPLETES their deletion"
+  assert_output --partial "DESTROYED IRREVERSIBLY"
+  # The pre-existing sealed-Secret warning must survive alongside it.
+  assert_output --partial "RE-KEYED"
+  assert_output --partial "[y/N]"
+}
+
+@test "bootstrap::_resolve_parked: no stuck namespace → no namespace warning" {
+  # A warning printed on every heal is one nobody reads by the third time. With
+  # nothing to force-finalize the destructive block must be absent — that is
+  # what keeps it meaningful when it does appear.
+  local p="${BATS_TEST_TMPDIR}/prompt.txt"
+  _run_prompt "${p}"
+
+  run cat "${p}"
+  refute_output --partial "FORCE-FINALIZED"
+  refute_output --partial "DESTROYED IRREVERSIBLY"
+  # The prompt is otherwise intact.
+  assert_output --partial "need recreate to reconcile"
+  assert_output --partial "RE-KEYED"
+  assert_output --partial "[y/N]"
+}
+
+@test "bootstrap: a terminating-namespace 403 reaches the prompt from the real apply output" {
+  # The wiring test. The two above would pass even if _BS_PARKED_NS were never
+  # populated from anything real, so this one starts where the incident did: a
+  # background apply failing with the apiserver's actual 403 text, and asserts
+  # the namespace named in THAT text is the one the prompt warns about.
+  local p="${BATS_TEST_TMPDIR}/prompt.txt"
+  bootstrap::_apply_one() {
+    [ "${1}" = "b" ] || return 0
+    echo 'Error from server (Forbidden): error when creating "x": secrets "s" is' \
+         'forbidden: unable to create new content in namespace kubehz-system' \
+         'because it is being terminated' >&2
+    return 1
+  }
+  bootstrap::_interactive() { return 0; }
+  bootstrap::_ask() { printf '%s' "${1}" > "${p}"; return 1; }
+  unset LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE
+
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - a
+    - b:
+        wait: true
+    - c
+YAML
+  local rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" >/dev/null 2>&1 || rc=$?
+
+  [ -s "${p}" ]   # the prompt was actually composed and offered
+  run cat "${p}"
+  assert_output --partial "kubehz-system"
+  assert_output --partial "FORCE-FINALIZED"
+}
+
 @test "bootstrap: --force (LOK8S_FORCE_RECREATE) heals inline — the entry never parks" {
   # With --force set, the background kapply auto-recreates in-job, so the entry never
   # reaches the reap park branch. Model that: the stub succeeds when force is set,

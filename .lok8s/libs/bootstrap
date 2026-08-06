@@ -673,6 +673,11 @@ _BS_DONE=0          # count of completed entries
 _BS_OVERALL_RC=0    # set to 1 if ANY entry failed
 _BS_PARKED=()       # entry indices that parked on an immutable/terminating
                     #   conflict; resolved (batch-heal) at the drain point
+_BS_PARKED_NS=()    # namespaces those conflicts would FORCE-FINALIZE, harvested
+                    #   from each parked entry's kubectl output before it is
+                    #   discarded. The drain prompt names them: accepting there
+                    #   re-applies under LOK8S_FORCE_RECREATE=1, which makes
+                    #   kapply's pointed per-namespace confirm return 0 unasked.
 
 # OR a finished job's captured rc into _BS_OVERALL_RC (a missing file = failed).
 # Returns 0 iff the job SUCCEEDED (rc==0); non-zero on failure, so the caller can
@@ -838,6 +843,22 @@ bootstrap::_reap_one() {
         && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" && -n "${_KAPPLY_TERMINATING_RE:-}" ]] \
         && grep -qE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_BS_OUTFILES[_i]}"; then
         _BS_PARKED+=("${_ridx}")
+        # Harvest the namespaces this conflict would force-finalize BEFORE the
+        # buffered output is deleted below — the drain prompt has to name them,
+        # and this file is the only place that evidence exists. Same extractor
+        # kapply::_heal_terminating acts on, so the prompt cannot name a
+        # different set than the heal destroys.
+        if declare -F kapply::terminating_namespaces >/dev/null 2>&1; then
+          local _pns _seen _known
+          while read -r _pns; do
+            [[ -n "${_pns}" ]] || continue
+            _seen=0
+            for _known in ${_BS_PARKED_NS[@]+"${_BS_PARKED_NS[@]}"}; do
+              [[ "${_known}" == "${_pns}" ]] && { _seen=1; break; }
+            done
+            (( _seen )) || _BS_PARKED_NS+=("${_pns}")
+          done < <(kapply::terminating_namespaces < "${_BS_OUTFILES[_i]}")
+        fi
         # Surface the conflict detail NOW (we own the foreground): parking would
         # otherwise discard the buffered kubectl error, and on a fail-fast / declined
         # heal the user needs to see WHICH object/field is blocked to resolve by hand.
@@ -902,28 +923,65 @@ bootstrap::_reap_one() {
 # Accepted entries are re-applied FOREGROUND with LOK8S_FORCE_RECREATE=1 so kapply
 # deletes + recreates the blocked object; each is then marked completed (unblocking
 # dependents on the next launch pass) or, on failure, fails + skips its dependents.
+# The tty seams for the batched prompt — mirroring kapply::_interactive/_ask.
+# One place touches /dev/tty, which is what makes the prompt TEXT assertable in
+# a unit test (bats has no tty to type into). The gate is deliberately the same
+# expression it replaced: interactive iff both std fds are terminals AND
+# /dev/tty is usable.
+bootstrap::_interactive() { [[ -t 0 && -t 1 && -r /dev/tty && -w /dev/tty ]]; }
+
+bootstrap::_ask() {
+  local prompt="${1}" ans=""
+  printf '%s' "${prompt}" >/dev/tty 2>/dev/null
+  read -r ans </dev/tty 2>/dev/null || return 1
+  [[ "${ans}" =~ ^[Yy] ]]
+}
+
+# bootstrap::_recreate_prompt <count> <names> [stuck-namespace...]
+# Compose the batched recreate prompt. Split out from _resolve_parked because
+# this text IS the safety control — the single consent gate for every heal in
+# the batch — so it has to be assertable rather than buried in a tty write.
+#
+# The prompt REPLACES kapply's pointed per-object confirms for accepted entries
+# (they re-apply under LOK8S_FORCE_RECREATE=1, which returns 0 from both
+# kapply::_confirm_secret_recreate and kapply::_confirm_ns_finalize without
+# asking). Everything those confirms would have said must therefore be said
+# here, or it is not said at all.
+bootstrap::_recreate_prompt() {
+  local count="${1}" list="${2}"; shift 2
+  printf '\n\033[33m?\033[0m bootstrap: %d addon(s) need recreate to reconcile (immutable/terminating):%s\n' \
+    "${count}" "${list}"
+  printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods);\n'
+  printf ' \033[31m!\033[0m any SEALED Secret among them is RE-KEYED by this.\n'
+  # The namespace case is strictly worse than a re-key, and until 2026-07-30 it
+  # was invisible here: accepting force-finalizes these via the raw /finalize
+  # API, which COMPLETES their deletion — everything still inside dies with
+  # them. On that date one `y` at this prompt, whose worst-case reading was
+  # "restarts pods", took kubehz-system, mla and element off the dev cluster
+  # along with the CNPG data, the runtime-minted PATs and the minio buckets.
+  # Only printed when there ARE such namespaces: a warning that shows up every
+  # time is one nobody reads by the third time.
+  if (( $# )); then
+    printf ' \033[31m!!\033[0m %d namespace(s) stuck Terminating will be FORCE-FINALIZED:\n' "${#}"
+    printf '      %s\n' "${@}"
+    printf ' \033[31m!!\033[0m that COMPLETES their deletion — EVERY object still in them is\n'
+    printf '      DESTROYED IRREVERSIBLY (volume data, runtime-minted Secrets, buckets).\n'
+  fi
+  printf ' [y/N] '
+}
+
 bootstrap::_resolve_parked() {
   local -a _parked=("${_BS_PARKED[@]+"${_BS_PARKED[@]}"}")
-  _BS_PARKED=()
+  local -a _pns=("${_BS_PARKED_NS[@]+"${_BS_PARKED_NS[@]}"}")
+  _BS_PARKED=(); _BS_PARKED_NS=()
   local _pi _accept=0 _list=""
   for _pi in "${_parked[@]}"; do _list+=" ${_names[_pi]}"; done
 
   if [[ -n "${LOK8S_FORCE_RECREATE:-}" ]]; then
     _accept=1   # --force / --force-recreate → no prompt, just heal
-  elif [[ -t 0 && -t 1 && -r /dev/tty && -w /dev/tty ]]; then
-    # NOTE this single batch prompt REPLACES kapply's per-object confirms for
-    # accepted entries (they re-apply under LOK8S_FORCE_RECREATE=1), so it must
-    # carry the sealed-Secret warning itself: a SEALED (immutable) Secret among
-    # the blocked objects gets re-keyed by the recreate. kapply still prints
-    # its pointed per-Secret "RE-KEYING sealed Secret/<name>" line during the
-    # heal, so what happened stays visible even when accepted from here.
-    printf '\n\033[33m?\033[0m bootstrap: %d addon(s) need recreate to reconcile (immutable/terminating):%s\n' \
-      "${#_parked[@]}" "${_list}" >/dev/tty
-    printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods);\n' >/dev/tty
-    printf ' \033[31m!\033[0m any SEALED Secret among them is RE-KEYED by this. [y/N] ' >/dev/tty
-    local _ans=""
-    read -r _ans </dev/tty 2>/dev/null || _ans=""
-    [[ "${_ans}" =~ ^[Yy] ]] && _accept=1
+  elif bootstrap::_interactive; then
+    bootstrap::_ask "$(bootstrap::_recreate_prompt \
+      "${#_parked[@]}" "${_list}" ${_pns[@]+"${_pns[@]}"})" && _accept=1
   fi
 
   for _pi in "${_parked[@]}"; do
@@ -1289,7 +1347,7 @@ bootstrap::apply() {
     || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
   _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=(); _BS_OUTFILES=()
   unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
-  _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=()
+  _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=(); _BS_PARKED_NS=()
   local -A _started=()
   local -A _skip=()   # entry index → 1: skipped (a transitive dependency failed)
   local _seq=0

@@ -451,6 +451,21 @@ kapply::_finalize_namespace() {
   done
 }
 
+# Read an apply's error output on stdin; print the namespaces a terminating-heal
+# would FORCE-FINALIZE, one per line, deduped. The apiserver's 403 on any write
+# INTO a terminating namespace names it, and that name is the whole input to the
+# force-finalize below.
+#
+# ONE definition because two callers need this exact set: _heal_terminating
+# finalizes it, and bootstrap's batched recreate prompt must NAME it before
+# asking for consent (bootstrap::_resolve_parked). Deriving it twice is how a
+# consent prompt and the action it authorises drift apart — and this prompt is
+# the only thing standing between an operator and an irreversible deletion.
+kapply::terminating_namespaces() {
+  grep -oE 'in namespace [a-z0-9][a-z0-9-]* because it is being terminated' \
+    | sed -E 's/^in namespace //; s/ because.*$//' | sort -u
+}
+
 # Heal objects stuck Terminating so the delete completes and the re-apply can
 # recreate them. The apiserver reports the block two different ways:
 #   (a) a 403 on writes INTO a terminating namespace ("...in namespace X
@@ -472,8 +487,7 @@ kapply::_heal_terminating() {
   while read -r nsname; do
     [[ -n "${nsname}" ]] || continue
     kapply::_finalize_namespace "${nsname}" "${kubectl_flags[@]}"
-  done < <(grep -oE 'in namespace [a-z0-9][a-z0-9-]* because it is being terminated' <<<"${out}" \
-            | sed -E 's/^in namespace //; s/ because.*$//' | sort -u)
+  done < <(kapply::terminating_namespaces <<<"${out}")
 
   # (b) manifest objects carrying their own stuck deletionTimestamp
   local kind name ns
