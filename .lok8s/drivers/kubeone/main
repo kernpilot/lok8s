@@ -39,7 +39,10 @@ driver::provision() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
 
   # Hosted path: delegate to kubehz API
-  kubehz::read_config "${cluster_yaml}"
+  # || return: this whole tree runs under libs/provision's `driver::provision ||
+  # provision_rc=$?`, which disables errexit — every unguarded call here is a
+  # silent-continue (issue #91).
+  kubehz::read_config "${cluster_yaml}" || return 1
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
     kubehz::provision_hosted "${domain}" "${cluster_yaml}"
     return
@@ -55,7 +58,10 @@ driver::provision() {
   fi
 
   # 2. Provision infrastructure via the provider contract
-  provider::provision "${PROVIDER_CONFIG_FILE}" "${work_dir}"
+  # || return: without it a failed INFRASTRUCTURE reconcile falls through to the
+  # manifest render and `kubeone apply`, i.e. applying against hosts that were
+  # never created.
+  provider::provision "${PROVIDER_CONFIG_FILE}" "${work_dir}" || return 1
 
   # 3. Generate kubeone.yaml
   local provider_name="${PROVIDER_NAME:-}"
@@ -75,7 +81,13 @@ driver::provision() {
   # 5. Run kubeone apply (spec.oidc was wired into the manifest as
   #    features.openidConnect during generate_config — KubeOne propagates it to
   #    every control plane via the kubeadm ClusterConfiguration; no file delivery)
-  kubeone::apply "${work_dir}"
+  # || return, and this is the one that actually bit. The kubeconfig check below
+  # decides this function's exit status, and on any cluster provisioned BEFORE
+  # (a worker re-join — issue #91's scenario) that file already exists, so a
+  # failed apply was masked by a stale kubeconfig and reported as success. It
+  # only failed correctly on a first-ever provision, which is why a
+  # fresh-install test would never have caught it.
+  kubeone::apply "${work_dir}" || return 1
 
   # 6. Copy kubeconfig to standard location
   local cluster_name
