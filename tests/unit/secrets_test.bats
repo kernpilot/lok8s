@@ -313,3 +313,95 @@ require_argsh_cli() {
   refute_output --partial 'wrote plaintext cache only'
   assert_output --partial 'Set app/default/KEY'
 }
+
+# ── secrets set — live-cluster drift warning ─────────────────────────────
+# `set` writes the STORE; the running workload keeps its old value until
+# `lo build` + apply. The gap is by design, the silence was the bug (the
+# 2026-06-15 drift trap). These pin the warning AND its silences — an
+# advisory that fires when it should not is as bad as one that never fires.
+#
+# kubectl is a PATH shim so no cluster is needed. It is exported onto PATH
+# ahead of any real kubectl, and the standalone `secrets_cli` run inherits it.
+
+# stub_kubectl <live-base64-or-empty> [current-context]
+# Records its argv to ${STUB_LOG} so the jsonpath can be asserted.
+stub_kubectl() {
+  local live="${1}" ctx="${2:-kind-test}"
+  export STUB_BIN="${BATS_TEST_TMPDIR}/stubbin"
+  export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  mkdir -p "${STUB_BIN}"
+  cat > "${STUB_BIN}/kubectl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\${*}" >> "${STUB_LOG}"
+if [[ "\${1}" == "config" ]]; then printf '%s' '${ctx}'; exit 0; fi
+printf '%s' '${live}'
+EOF
+  chmod +x "${STUB_BIN}/kubectl"
+  export PATH="${STUB_BIN}:${PATH}"
+}
+
+@test "live drift: warns when the live Secret holds a different value" {
+  stub_kubectl "$(printf 'old-v' | base64 | tr -d '\n')"
+  run secrets::_live_drift app default KEY new-v
+  assert_success
+  assert_output --partial 'still holds the PREVIOUS value'
+  assert_output --partial "kind-test"
+}
+
+@test "live drift: SILENT when the live Secret already matches" {
+  stub_kubectl "$(printf 'same-v' | base64 | tr -d '\n')"
+  run secrets::_live_drift app default KEY same-v
+  assert_success
+  refute_output --partial 'PREVIOUS value'
+}
+
+@test "live drift: silent when the Secret/key is absent live (not yet deployed)" {
+  stub_kubectl ""
+  run secrets::_live_drift app default KEY any-v
+  assert_success
+  refute_output --partial 'PREVIOUS value'
+}
+
+@test "live drift: silent when kubectl is not installed" {
+  # Empty PATH inside a SUBSHELL (the _under_u idiom above): exporting it in
+  # the test body strands teardown without `rm`, failing a test whose own
+  # assertions passed.
+  mkdir -p "${BATS_TEST_TMPDIR}/emptybin"
+  _no_kubectl() ( export PATH="${BATS_TEST_TMPDIR}/emptybin"; secrets::_live_drift "${@}" )
+  run _no_kubectl app default KEY any-v
+  assert_success
+  assert_output ''
+}
+
+@test "live drift: a dotted key uses the bracket jsonpath, not a nested path" {
+  # `{.data.tls.crt}` resolves to nothing, which would read as "no drift" and
+  # silently disarm the check for every dotted key (tls.crt, ca.crt, .dockercfg).
+  stub_kubectl "$(printf 'old' | base64 | tr -d '\n')"
+  run secrets::_live_drift app default tls.crt new
+  assert_success
+  assert_output --partial 'still holds the PREVIOUS value'
+  grep -qF "jsonpath={.data['tls\\.crt']}" "${STUB_LOG}"
+}
+
+@test "live drift: a live value differing ONLY by a trailing newline is caught" {
+  # The store side can never carry a trailing newline (both the `$(cat)` stdin
+  # path and argsh positionals strip it), so a live `v\n` against a stored `v`
+  # is a real difference: rendering the store and applying it WOULD rewrite the
+  # Secret. Decoding the live side through a command substitution would strip
+  # that newline, compare v==v and report "no drift" — a false negative, which
+  # is the original silent trap with a green tick on it. base64-to-base64 sees
+  # it. This test fails if anyone "simplifies" the comparison to a decode.
+  stub_kubectl "$(printf 'v\n' | base64 | tr -d '\n')"
+  run secrets::_live_drift app default KEY v
+  assert_success
+  assert_output --partial 'still holds the PREVIOUS value'
+}
+
+@test "secrets set: is WIRED to the drift check (warns through the real CLI)" {
+  require_argsh_cli
+  stub_kubectl "$(printf 'old-v' | base64 | tr -d '\n')"
+  run secrets_cli set -n app KEY new-v
+  assert_success
+  assert_output --partial 'still holds the PREVIOUS value'
+  assert_output --partial 'Set app/default/KEY'
+}
