@@ -49,6 +49,22 @@ main::build() {
     override=1
   fi
 
+  # Say which domain this is, BEFORE touching anything.
+  #
+  # `lo build` writes clusters/<domain>/artifacts* and reads
+  # clusters/<domain>/secrets. A run against the wrong domain renders one
+  # cluster's manifests from another cluster's secret store — which is how a
+  # live ZITADEL masterkey and DB password were re-keyed from the wrong store,
+  # leaving a database that could no longer decrypt itself.
+  #
+  # The domain comes from --domain > DOMAIN_NAME > clusters/.active, and that
+  # last one is state a `lo use` persisted possibly hours ago. domain::resolve
+  # already warns when the env and `.active` DISAGREE; the dangerous case it
+  # cannot see is when nothing disagrees and the answer is simply not what the
+  # operator assumed. Unconditional, on stderr, so piping the artifacts is
+  # unaffected.
+  echo "lo build: domain ${domain}" >&2
+
   _resolve_kubeconfig_for_domain
   # --no-secrets rides through to build::split via the env, independent of the
   # split trigger (spec- or flag-driven) — it only shapes WHAT a split emits.

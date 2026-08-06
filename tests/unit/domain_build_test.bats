@@ -136,3 +136,56 @@ STUB
   assert_output --partial "applied:Namespace"
   refute_output --partial "applied:Deployment"
 }
+
+# ── The domain announcement ───────────────────────────────────────────────
+# `lo build` writes clusters/<domain>/artifacts* and reads that domain's secret
+# store. A run against the wrong domain renders one cluster's manifests from
+# another's secrets — the failure that re-keyed a live ZITADEL masterkey. The
+# domain can come from clusters/.active, i.e. state a `lo use` set hours ago,
+# so every build says which domain it is acting on before it acts.
+#
+# domain::resolve already warns when DOMAIN_NAME and .active DISAGREE; these
+# cover the silent case where nothing disagrees and the answer is simply not
+# what the operator assumed.
+#
+# main::build is driven directly: :args is the argsh runtime (not available
+# here), and it feeds `domain` through dynamic scoping — which is exactly how
+# the real `lo` main hands the resolved domain down, so setting it is faithful.
+
+_announce_setup() {
+  :args() { :; };                       export -f :args
+  _resolve_kubeconfig_for_domain() { :; }
+}
+
+@test "lo build announces the resolved domain before rendering" {
+  _announce_setup
+  local domain="${DOMAIN}"
+  run main::build
+  assert_success
+  assert_output --partial "lo build: domain ${DOMAIN}"
+}
+
+@test "lo build announces the domain it acts on, not the active one" {
+  # .active says one thing, the resolved domain another: the announcement must
+  # name the domain actually built, or it is worse than silence.
+  _announce_setup
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters"
+  echo "some-other.lok8s.dev" > "${BATS_TEST_TMPDIR}/clusters/.active"
+  local domain="${DOMAIN}"
+  run main::build
+  assert_success
+  assert_output --partial "lo build: domain ${DOMAIN}"
+  refute_output --partial "some-other.lok8s.dev"
+}
+
+@test "the announcement precedes the render (it warns BEFORE acting)" {
+  # Ordering is the whole point: a line printed after artifacts.yaml is written
+  # tells the operator what already happened, not what is about to.
+  _announce_setup
+  local domain="${DOMAIN}"
+  build::artifacts() { echo "RENDERING"; }
+  run main::build
+  assert_success
+  [[ "${lines[0]}" == *"lo build: domain ${DOMAIN}"* ]]
+  assert_output --partial "RENDERING"
+}

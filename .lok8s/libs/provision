@@ -23,6 +23,12 @@ main::provision() {
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
+  # Same reason as `lo build` (see the note there): the domain can come from
+  # clusters/.active — state a `lo use` persisted hours ago — and provision
+  # reconciles THAT domain's infrastructure. Cloud drivers additionally gate on
+  # an interactive confirmation, but the local kind path is deliberately
+  # frictionless and would otherwise never say which domain it acted on.
+  echo "lo provision: domain ${domain}" >&2
   provision::dispatch "${domain}" "${bootstrap}"
 }
 
