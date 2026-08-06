@@ -362,7 +362,43 @@ build::artifacts() {
        kustomize build --enable-alpha-plugins "${domain_dir}" \
        | template::envsubst "${envsubst_whitelist}" \
        > "${tmp}"; then
+    # A render that produced NOTHING must not replace a good artifact.
+    #
+    # kustomize exits 0 for an empty result — `resources: []`, a target list
+    # that lost its entries, a base that stopped resolving — so the pipeline
+    # above succeeds and the atomic promote below installs a 0-byte
+    # artifacts.yaml over the previous good one. That is not a failure
+    # anywhere it can be noticed: on the prod path render.yml COMMITS the
+    # artifacts and Flux applies them with prune: true, so an empty render
+    # deletes every resource it used to manage.
+    #
+    # Measured before this guard: gutting the domain kustomization's
+    # `resources:` gave rc=0, 0 documents, 0 bytes, and the only line printed
+    # was the domain announcement (AUDIT.md r302).
+    #
+    # Refuse only where it would DESTROY something. An empty render over an
+    # empty/absent artifact is a new or genuinely empty domain — warn, but
+    # nothing is lost. `|| true`: grep -c exits 1 on zero matches, which would
+    # abort under set -e.
+    local docs=0 prior=0
+    docs=$(grep -c '^kind:' "${tmp}" 2>/dev/null) || true
+    if [[ -f "${domain_dir}/artifacts.yaml" ]]; then
+      prior=$(grep -c '^kind:' "${domain_dir}/artifacts.yaml" 2>/dev/null) || true
+    fi
+    if (( docs == 0 && prior > 0 )); then
+      rm -f "${tmp}"
+      error "refusing to replace ${domain} artifacts.yaml (${prior} document(s)) with an EMPTY render"
+      error "  kustomize succeeded but produced nothing — check ${domain_dir}/kustomization.yaml resources:"
+      error "  applying an empty artifact would prune everything it manages (Flux prune: true)"
+      return 1
+    fi
+    (( docs > 0 )) || warn "${domain} rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?"
+
     mv "${tmp}" "${domain_dir}/artifacts.yaml"
+    # Say what was produced. A silent success cannot distinguish a full render
+    # from one that quietly lost most of its resources; the count is the only
+    # cheap thing an operator can check against what they expected.
+    echo "lo build: ${domain} rendered ${docs} document(s) -> ${domain_dir}/artifacts.yaml" >&2
   else
     rm -f "${tmp}"
     error "kustomize build failed for ${domain}"

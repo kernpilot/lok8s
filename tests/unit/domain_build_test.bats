@@ -189,3 +189,52 @@ _announce_setup() {
   [[ "${lines[0]}" == *"lo build: domain ${DOMAIN}"* ]]
   assert_output --partial "RENDERING"
 }
+
+# ── An empty render must not replace a good artifact ──────────────────────
+# kustomize exits 0 for an empty result (`resources: []`, a target list that
+# lost its entries, a base that stopped resolving). The atomic promote then
+# installs a 0-byte artifacts.yaml over the previous good one — and on the prod
+# path render.yml COMMITS that and Flux applies it with prune: true, deleting
+# every resource the domain managed. Measured before the guard: rc=0, 0
+# documents, 0 bytes, silent.
+
+_gut_resources() {
+  cat > "${DOMAIN_DIR}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+YAML
+}
+
+@test "an empty render is REFUSED when it would replace a non-empty artifact" {
+  build::artifacts "${DOMAIN}"
+  local before
+  before=$(grep -c '^kind:' "${DOMAIN_DIR}/artifacts.yaml")
+  [ "${before}" -gt 0 ]
+
+  _gut_resources
+  run build::artifacts "${DOMAIN}"
+  assert_failure
+  assert_output --partial "refusing to replace"
+  assert_output --partial "prune"
+  # The good artifact is still on disk, untouched.
+  [ "$(grep -c '^kind:' "${DOMAIN_DIR}/artifacts.yaml")" -eq "${before}" ]
+}
+
+@test "an empty render is ALLOWED when there is no artifact to lose" {
+  # A new or genuinely empty domain destroys nothing — warn, do not fail.
+  _gut_resources
+  rm -f "${DOMAIN_DIR}/artifacts.yaml"
+  run build::artifacts "${DOMAIN}"
+  assert_success
+  assert_output --partial "rendered 0 documents"
+}
+
+@test "a successful build reports how many documents it produced" {
+  # A silent success cannot distinguish a full render from one that quietly
+  # lost most of its resources.
+  run build::artifacts "${DOMAIN}"
+  assert_success
+  assert_output --partial "rendered"
+  assert_output --partial "document(s)"
+}
