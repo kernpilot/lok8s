@@ -405,3 +405,59 @@ EOF
   assert_output --partial 'still holds the PREVIOUS value'
   assert_output --partial 'Set app/default/KEY'
 }
+
+# ── secrets encrypt --name ────────────────────────────────────────────────
+# Without a filter this walks the WHOLE store and encrypts every plaintext
+# whose .enc is older — including entries the operator was mid-edit on. That is
+# the deliberate "stage everything" move, and the wrong default for "I changed
+# one secret". Committing an .enc for a value nobody meant to publish is not
+# something the store can walk back.
+#
+# Driven through secrets_cli (the REAL argsh runtime): setup() stubs :args, so a
+# flag tested here would never be parsed and the assertions would pass on
+# behaviour that does not exist.
+
+_two_secrets() {
+  require_tools
+  require_argsh_cli
+  ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  secrets_cli init --ssh-key "${BATS_TEST_TMPDIR}/id.pub" >/dev/null
+  printf 'alpha-val' > "${PATH_SECRETS}/Secret.alpha.default.TOKEN"
+  printf 'beta-val'  > "${PATH_SECRETS}/Secret.beta.default.TOKEN"
+}
+
+@test "secrets encrypt --name: encrypts ONLY that Secret, leaves the rest alone" {
+  _two_secrets
+  run secrets_cli encrypt --name alpha
+  assert_success
+  [ -f "${PATH_SECRETS}/Secret.alpha.default.TOKEN.enc" ]
+  # The whole point: beta was not staged.
+  [ ! -f "${PATH_SECRETS}/Secret.beta.default.TOKEN.enc" ]
+}
+
+@test "secrets encrypt without --name still sweeps the whole store" {
+  _two_secrets
+  run secrets_cli encrypt
+  assert_success
+  [ -f "${PATH_SECRETS}/Secret.alpha.default.TOKEN.enc" ]
+  [ -f "${PATH_SECRETS}/Secret.beta.default.TOKEN.enc" ]
+}
+
+@test "secrets encrypt --name: a name that matches NOTHING fails loudly" {
+  # A typo must not print a reassuring line and exit 0, leaving the operator to
+  # commit whatever stale .enc is already on disk.
+  _two_secrets
+  run secrets_cli encrypt --name alphaa
+  assert_failure
+  assert_output --partial "no cache files for Secret 'alphaa'"
+  # …and it must not have quietly encrypted something else instead.
+  [ ! -f "${PATH_SECRETS}/Secret.alpha.default.TOKEN.enc" ]
+}
+
+@test "secrets encrypt --name: rejects a name that could escape the store" {
+  _two_secrets
+  run secrets_cli encrypt --name "../../etc"
+  assert_failure
+  assert_output --partial "invalid --name"
+}
