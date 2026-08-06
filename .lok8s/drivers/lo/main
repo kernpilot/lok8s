@@ -76,8 +76,13 @@ driver::provision() {
       fi
 
       # Read all config from cluster spec
-      lo::read_config "${cluster_yaml}"
-      lo::validate_ips "${LOK8S_NETWORK_SUBNET}" "${LOK8S_LB_POOL:-}"
+      lo::read_config "${cluster_yaml}" || return 1
+      # || return: lo::validate_ips prints "N IP validation error(s). Aborting."
+      # and returns 1 — but errexit is suppressed here (this tree runs under
+      # provision's `driver::provision || rc=$?`, as the comment above notes), so
+      # without this the run continued past its own abort message and built the
+      # networks, registry TLS and containerd config for a REJECTED config.
+      lo::validate_ips "${LOK8S_NETWORK_SUBNET}" "${LOK8S_LB_POOL:-}" || return 1
 
       local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK}"
 
