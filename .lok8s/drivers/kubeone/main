@@ -136,7 +136,11 @@ driver::destroy() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
 
   # Hosted path: delegate to kubehz API
-  kubehz::read_config "${cluster_yaml}"
+  # || return: errexit is suppressed here (libs/provision:463 runs
+  # `driver::destroy || destroy_rc=$?`). Without it LOK8S_KUBEHZ_HOSTING is never
+  # set, the hosted branch is skipped, and a HOSTED cluster gets the self-hosted
+  # teardown instead of the kubehz API call — the wrong destroy entirely.
+  kubehz::read_config "${cluster_yaml}" || return 1
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
     kubehz::destroy_hosted "${domain}" "${cluster_yaml}"
     return
@@ -151,7 +155,11 @@ driver::destroy() {
 
   # 2. Destroy infrastructure via provider contract
   if declare -F provider::destroy &>/dev/null; then
-    provider::destroy "${PROVIDER_CONFIG_FILE:-}" "${work_dir}"
+    # || return: without it a failed INFRASTRUCTURE destroy falls through to the
+    # kubeconfig cleanup below, whose `rm -f` always exits 0 — so this function
+    # returned SUCCESS while the servers stayed up and billing, AND deleted the
+    # one handle left to reach them. Returning here keeps the kubeconfig.
+    provider::destroy "${PROVIDER_CONFIG_FILE:-}" "${work_dir}" || return 1
   else
     warn "no provider loaded — cannot destroy infrastructure"
   fi
