@@ -865,6 +865,22 @@ def lok8s(
   # --load-restrictor=LoadRestrictionsNone: the generated overlay references the
   # single domain artifact one level up (../artifacts.yaml, built by `lo build`);
   # a raw file above the overlay root is blocked by kustomize's default RootOnly.
+  # Tell Tilt the domain artifact is an INPUT. Without this the render above runs
+  # once at eval time with nothing declaring its source, so after a fresh
+  # `lo build` Tilt keeps applying the stale eval-time render until someone
+  # remembers `tilt trigger "(Tiltfile)"` — silently. It bit twice in one session
+  # (a fixed env conflict that "persisted", a spec patch overwritten by a stale
+  # re-apply) and is issue #63.3.
+  #
+  # ONLY the flat artifact, deliberately NOT _artifacts_dir: `lo env
+  # kustomization` above WRITES kustomization.yaml into that directory on every
+  # eval, so watching it would make each eval trigger the next one forever.
+  # services.yaml and the per-service configs are already watched the same way a
+  # few dozen lines up; this closes the one input that was missing.
+  _domain_artifact = '%s/%s/artifacts.yaml' % (_clusters_dir, _domain)
+  if os.path.exists(_domain_artifact):
+    watch_file(_domain_artifact)
+
   artifacts = local('kustomize build --load-restrictor=LoadRestrictionsNone %s' % _artifacts_dir, True, '', True, {})
 
   # Preflight BEFORE any k8s_yaml: force-clear rendered objects stuck
