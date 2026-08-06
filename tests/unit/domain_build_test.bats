@@ -215,7 +215,7 @@ YAML
   _gut_resources
   run build::artifacts "${DOMAIN}"
   assert_failure
-  assert_output --partial "refusing to replace"
+  assert_output --partial "refusing to overwrite"
   assert_output --partial "prune"
   # The good artifact is still on disk, untouched.
   [ "$(grep -c '^kind:' "${DOMAIN_DIR}/artifacts.yaml")" -eq "${before}" ]
@@ -237,4 +237,41 @@ YAML
   assert_success
   assert_output --partial "rendered"
   assert_output --partial "document(s)"
+}
+
+@test "an empty render is REFUSED when only the SPLIT dir has something to lose" {
+  # Split-mode domains keep their committed state in artifacts/, not in
+  # artifacts.yaml. Counting only the single file waved the empty render
+  # through: artifacts.yaml got zeroed, artifacts/ was left stale disagreeing
+  # with it, and the build then failed downstream with "build first" —
+  # immediately after a build (AUDIT.md r303).
+  mkdir -p "${DOMAIN_DIR}/artifacts"
+  cat > "${DOMAIN_DIR}/artifacts/Namespace.keep-me.yaml" <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata: {name: keep-me}
+YAML
+  rm -f "${DOMAIN_DIR}/artifacts.yaml"
+  _gut_resources
+
+  run build::artifacts "${DOMAIN}"
+  assert_failure
+  assert_output --partial "refusing to overwrite"
+  # The split layout survived, and no empty artifacts.yaml was promoted.
+  [ -f "${DOMAIN_DIR}/artifacts/Namespace.keep-me.yaml" ]
+  [ ! -f "${DOMAIN_DIR}/artifacts.yaml" ]
+}
+
+@test "the split-dir count uses the same ownership rule as the prune" {
+  # The swap prunes [A-Z]*.yaml and leaves env-owned lowercase files alone, so
+  # a dir holding ONLY kustomization.yaml has nothing generated to lose and an
+  # empty render there must still be allowed.
+  mkdir -p "${DOMAIN_DIR}/artifacts"
+  printf 'resources: []\n' > "${DOMAIN_DIR}/artifacts/kustomization.yaml"
+  rm -f "${DOMAIN_DIR}/artifacts.yaml"
+  _gut_resources
+
+  run build::artifacts "${DOMAIN}"
+  assert_success
+  assert_output --partial "rendered 0 documents"
 }

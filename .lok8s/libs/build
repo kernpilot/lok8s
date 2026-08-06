@@ -385,9 +385,18 @@ build::artifacts() {
     if [[ -f "${domain_dir}/artifacts.yaml" ]]; then
       prior=$(grep -c '^kind:' "${domain_dir}/artifacts.yaml" 2>/dev/null) || true
     fi
+    # A SPLIT-mode domain keeps its committed state in artifacts/, not in
+    # artifacts.yaml — so a domain whose artifacts.yaml is absent or already
+    # empty can still have a full split layout to lose, and counting only the
+    # single file would wave the empty render through. Counted with the same
+    # uppercase-Kind ownership rule the swap prunes by, so the two agree about
+    # what "generated" means.
+    if (( prior == 0 )) && [[ -d "${domain_dir}/artifacts" ]]; then
+      prior=$(find "${domain_dir}/artifacts" -maxdepth 1 -type f -name '[A-Z]*.yaml' 2>/dev/null | wc -l)
+    fi
     if (( docs == 0 && prior > 0 )); then
       rm -f "${tmp}"
-      error "refusing to replace ${domain} artifacts.yaml (${prior} document(s)) with an EMPTY render"
+      error "refusing to overwrite ${domain}'s rendered output (${prior} existing document(s)/file(s)) with an EMPTY render"
       error "  kustomize succeeded but produced nothing — check ${domain_dir}/kustomization.yaml resources:"
       error "  applying an empty artifact would prune everything it manages (Flux prune: true)"
       return 1
