@@ -8,6 +8,7 @@
 PATH_SCRIPTS="${PATH_LOK8S}"
 import ^utils/verbose
 import ^utils/types
+import ^utils/template
 
 : "${CLOUD_HETZNER_JSON:=""}"
 : "${CLOUD_DRY_RUN:=""}"
@@ -147,11 +148,9 @@ provider::provision() {
   export CLOUD_PATHD="${ci_modules}"
 
   # Load the descriptor (JSON or YAML → JSON)
-  CLOUD_HETZNER_JSON="$(envsubst < "${config_file}")"
-  # If the config is YAML (not JSON), convert via yq
-  if ! echo "${CLOUD_HETZNER_JSON}" | jq empty 2>/dev/null; then
-    CLOUD_HETZNER_JSON="$(yq -o json '.' "${config_file}")"
-  fi
+  # template::descriptor_json, not envsubst-then-reread: the old YAML branch
+  # re-read the RAW file and threw the expansion away (issue #65).
+  CLOUD_HETZNER_JSON="$(template::descriptor_json "${config_file}")" || return 1
 
   # Run the full provisioning sequence (JSON descriptor loop)
   hetzner::lookup
@@ -252,7 +251,7 @@ provider::output() {
     local desc
     # Normalize to JSON (yq reads JSON too) so bare-metal extraction works for a
     # YAML descriptor, matching how _cfg/desc are resolved elsewhere.
-    desc=$(yq -o json '.' "${config_file}")
+    desc=$(template::descriptor_json "${config_file}") || return 1
     local has_root
     has_root=$(echo "${desc}" | jq '[.server[]? | select(.["#cloud.root"] == "true")] | length')
     if (( has_root > 0 )); then
@@ -296,7 +295,7 @@ provider::output() {
   # Bare metal servers from JSON descriptor (#cloud.root with #external-ip)
   if [[ -f "${config_file}" ]]; then
     local desc
-    desc="${desc:-$(yq -o json '.' "${config_file}")}"
+    desc="${desc:-$(template::descriptor_json "${config_file}")}"
     while IFS= read -r server; do
       [[ -n "${server}" ]] || continue
       local name pub_ip priv_ip labels role group
@@ -409,10 +408,7 @@ provider::rebuild() {
 
   # Load the descriptor (JSON, or YAML → JSON) exactly like provision.
   local desc
-  desc="$(envsubst < "${config_file}")"
-  if ! echo "${desc}" | jq empty 2>/dev/null; then
-    desc="$(yq -o json '.' "${config_file}")"
-  fi
+  desc="$(template::descriptor_json "${config_file}")" || return 1
 
   # Cluster label — the scope EVERY destructive call is confined to, exactly as
   # provider::destroy / provider::output do. No cluster_name → refuse to act.
@@ -758,8 +754,7 @@ hetzner::_doctor_checks() {
   # Descriptor → JSON.
   [[ -f "${config_file}" ]] || { printf 'warn\tdescriptor not found: %s\n' "${config_file}"; return 0; }
   local desc
-  desc="$(envsubst < "${config_file}" 2>/dev/null)"
-  echo "${desc}" | jq empty 2>/dev/null || desc="$(yq -o json '.' "${config_file}" 2>/dev/null)"
+  desc="$(template::descriptor_json "${config_file}" 2>/dev/null)" || desc=""
 
   local metal_count
   metal_count="$(echo "${desc}" | jq '[(.server // [])[] | select(.["#cloud.root"]=="true")] | length' 2>/dev/null || echo 0)"

@@ -217,12 +217,24 @@ kubehz::destroy_hosted() {
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   # GET /api/clusters is an enveloped, PAGINATED UI route: the rows are at
-  # .data[] (with pagination under meta). The // fallbacks tolerate a bare list
-  # or object body so this keeps working against any shape.
+  # .data[] (with pagination under meta). This tolerates a bare list or object
+  # body too — which the previous expression only CLAIMED to do.
+  #
+  # It was `.data[0].id // .data.id // .[0].id // .id // empty`, and `//` does
+  # not rescue an ERROR: `.data[0]` on an object body, or `.data` on a bare
+  # list, aborts the whole program (jq rc 5) before any alternative is tried.
+  # Measured across the shapes, only the enveloped-list one worked; the other
+  # four — including the empty `{"data":[]}` — errored. With `|| true` swallowing
+  # that, cluster_id came back empty and destroy reported "no hosted cluster
+  # found, nothing to destroy" for a cluster that exists. It then kept running,
+  # and billing (issue #65).
+  #
+  # `.data?` suppresses the error instead of relying on `//`; the array/object
+  # branch then handles both row shapes.
   local cluster_id
   cluster_id=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN}" 2>/dev/null \
-    | jq -r '.data[0].id // .data.id // .[0].id // .id // empty') || true
+    | jq -r '(.data? // .) | (if type=="array" then (.[0] // {}) else . end) | .id? // empty') || true
 
   if [[ -n "${cluster_id}" && "${cluster_id}" != "null" ]]; then
     curl -fsSL -X DELETE "${api_url}/api/clusters/${cluster_id}" \

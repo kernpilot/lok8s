@@ -124,3 +124,41 @@ template::envsubst() {
     '
   fi
 }
+
+# template::descriptor_json <file>
+# Read a cluster descriptor (JSON or YAML), expand ${VARS}, emit JSON.
+#
+# The point is the YAML branch. The pattern this replaces was:
+#
+#     desc=$(envsubst < "${file}")
+#     echo "${desc}" | jq empty || desc=$(yq -o json '.' "${file}")
+#                                                        ^^^^^^^^
+# — on the YAML path it re-read the RAW file and silently threw the expansion
+# away, so every ${VAR} reached the provider unexpanded. Five sites in the
+# hetzner provider did this (issue #65); the identical bug in the kubeone
+# inventory was fixed inline earlier, which is why this is a shared helper now
+# rather than a sixth copy.
+#
+# yq reads the EXPANDED TEXT from stdin. Bare `envsubst < file` is the
+# substitute-everything form, which is the only invocation the toolchain's
+# renvsubst also accepts (see template::envsubst for the whitelisted case).
+template::descriptor_json() {
+  local file="${1}"
+  [[ -f "${file}" ]] || { error "descriptor not found: ${file}"; return 1; }
+
+  local expanded
+  expanded="$(envsubst < "${file}")" || {
+    error "failed to expand variables in ${file}"
+    return 1
+  }
+
+  if printf '%s' "${expanded}" | jq empty 2>/dev/null; then
+    printf '%s' "${expanded}"
+    return 0
+  fi
+
+  printf '%s' "${expanded}" | yq -o json '.' - || {
+    error "descriptor ${file} is neither valid JSON nor valid YAML (after expansion)"
+    return 1
+  }
+}

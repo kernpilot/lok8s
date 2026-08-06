@@ -21,6 +21,11 @@ setup() {
 
   import() { :; }
   export -f import
+  # `import` is stubbed above, so anything the provider imports must be sourced
+  # here explicitly. utils/template supplies template::descriptor_json, which
+  # replaced the envsubst/yq BINARY calls the provider used to make — a shell
+  # function needs loading where a binary did not (AUDIT.md r329).
+  source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
 
   # Recording fakes' log files.
   export HCLOUD_LOG="${BATS_TEST_TMPDIR}/hcloud.log"
