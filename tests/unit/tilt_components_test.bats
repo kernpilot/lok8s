@@ -546,7 +546,7 @@ YAML
   assert_output --partial "do='nope' unknown"
 }
 
-@test "hooks: a valid do/targets hook wires a '» <name>' local_resource" {
+@test "hooks: a valid do/targets hook wires a '» <service>:<name>' local_resource" {
   _write_hook_fixture 'tilt:
   labels: [appgroup]
   hooks:
@@ -556,10 +556,19 @@ YAML
       targets: { lok8s.dev/role: seed }'
   _run_tiltfile_result
   assert_success
-  # The hook is wired as a local_resource named "» provision" (the `do` sugar
-  # resolved to a cmd; the name carries the `»` glyph prefix, not a suffix).
+  # The hook is wired as a local_resource named "» app:provision": the `do`
+  # sugar resolved to a cmd, the `»` glyph is a prefix, and the name is
+  # NAMESPACED BY SERVICE.
+  #
+  # It used to be the bare "» provision". Hook resources are registered
+  # globally in a Tilt session, so two services declaring a hook of the same
+  # name produced a duplicate resource and killed the whole Tiltfile eval -
+  # real, and worked around downstream by renaming one of them
+  # (kubehz-status carried `status-db-migrate` purely to dodge kubehz-api's
+  # `db-migrate`). Fixed by lok8s #63.1; these two assertions were the only
+  # thing still describing the old shape, and had been failing since.
   printf '%s' "${output}" \
-    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» provision")' >/dev/null
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» app:provision")' >/dev/null
 }
 
 @test "hooks: an empty targets value is rejected at eval (not only by lo hooks)" {
@@ -610,7 +619,7 @@ YAML
   _run_tiltfile_result
   assert_success
   printf '%s' "${output}" \
-    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» provision")' >/dev/null
+    | "${_JQ_BIN}" -e '[.Manifests[].Name] | any(. == "» app:provision")' >/dev/null
 }
 
 @test "hooks: a 'do' verb without targets is rejected (lo hooks needs --selector)" {
