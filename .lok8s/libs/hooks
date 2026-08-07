@@ -92,6 +92,11 @@ hooks::_select() {
 # Pure: the caller does the cluster lookup, so this half is unit-testable.
 hooks::_overlay_images() {
   local live="${1:-[]}"
+  # $live below is a YQ variable, bound by `as $live` inside the program — not a
+  # shell expansion. The single quotes are load-bearing: the shell must not touch
+  # it. (A shell `live` is also in scope two lines up, which is what makes this
+  # read wrong at a glance.)
+  # shellcheck disable=SC2016
   LOK8S_LIVE_IMAGES="${live}" yq '
     (strenv(LOK8S_LIVE_IMAGES) | from_json) as $live
     | (.spec.template.spec.containers[]?, .spec.template.spec.initContainers[]?) |=
