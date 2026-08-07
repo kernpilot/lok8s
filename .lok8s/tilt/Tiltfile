@@ -665,6 +665,20 @@ def _validate_hooks(label, hooks, hook_do):
           if type(d) != 'string':
             fail("%s: hook '%s' %s entries must be strings" % (label, n, _dk))
 
+def _hook_ref(service, dep):
+  """Resolve a resource_deps entry that addresses a hook.
+
+  `hook:<name>`       -> this service's hook   -> '» <service>:<name>'
+  `hook:<svc>:<name>` -> another service's     -> '» <svc>:<name>'
+  anything else       -> passed through (an ordinary resource name)
+  """
+  if not dep.startswith('hook:'):
+    return dep
+  rest = dep[len('hook:'):]
+  if ':' in rest:
+    return '» %s' % rest
+  return '» %s:%s' % (service, rest)
+
 def _wire_hooks(path_service, service, svc_labels, hooks, hook_do):
   """Wire a service's `tilt.hooks` as change-only local_resources. Mirrors
   _process_build: deepcopy → massage (sugar→cmd, env context, deps resolve,
@@ -693,12 +707,22 @@ def _wire_hooks(path_service, service, svc_labels, hooks, hook_do):
     if 'labels' not in e and svc_labels:
       e['labels'] = svc_labels
     if 'resource_deps' in e:
-      e['resource_deps'] = [('» %s' % d[len('hook:'):]) if d.startswith('hook:') else d for d in e['resource_deps']]
+        # `hook:<name>` is THIS service's hook; `hook:<svc>:<name>` addresses
+        # another service's. Bare names qualify with the declaring service,
+        # because hook resources are per-service now.
+        e['resource_deps'] = [_hook_ref(service, d) for d in e['resource_deps']]
     if 'auto_init' not in e:
       e['auto_init'] = False                   # change-only by default
     # Glyph-prefixed name: a leading `» ` stays visible in Tilt's resource list,
     # where a trailing "(hook)" suffix gets truncated off the right edge.
-    _hookname = '» %s' % hname
+      # NAMESPACED per service. It used to be the bare hook name, which is a
+      # GLOBAL Tilt resource name: two services declaring the same hook (both
+      # kubehz-api and kubehz-status wanted `db-migrate`) collided with
+      # `local_resource named "..." already exists`, the Tiltfile stayed in
+      # error, and NO service updated — the dev plane served stale code for ~23h
+      # before anyone noticed. Renaming one of them was the workaround; this
+      # removes the need for it (issue #63.1).
+      _hookname = '» %s:%s' % (service, hname)
     if not e.get('deps', []) and not e['auto_init']:
       _warn('!! [ %s ] no deps + auto_init=False — this hook can never fire' % _hookname)
     local_resource(name = _hookname, **e)
