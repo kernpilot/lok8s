@@ -516,7 +516,7 @@ def _process_build(
     else:
       _dim('   · live_update: none (full image rebuild on change)')
 
-def _wire_routing(name, cfg):
+def _wire_routing(name, cfg, default_workload = True):
   """Attach `ports`/`links`/`tilt` config to a unit's k8s_resource(s).
 
   Shared by the single-image path (unit = the service) and each component
@@ -527,6 +527,21 @@ def _wire_routing(name, cfg):
   concern (migration jobs etc.) handled once per service in `lok8s()`,
   not per component.
   """
+  # Does this unit assert that a workload named after it EXISTS? For the
+  # single-image service path it always does. For a COMPONENT it does not:
+  # a build-only component (the migrate-Job pattern — image consumed by a
+  # hash-suffixed Job like kubehz-api-migrate-69b2cm5bh9) has no resource of
+  # its own name. Defaulting to [name] there made k8s_resource() reference an
+  # unknown resource and killed the whole Tiltfile eval, so every service
+  # froze; the workaround was an explicit `workloads: []` in each affected
+  # service config (issue #63.2).
+  #
+  # ports/links/workloads are the author asserting a workload exists. Without
+  # any of them a component is only inheriting the service tilt: block for
+  # Tilt GROUPING, which was never meant to invent a workload ref.
+  _asserts_workload = ('ports' in cfg) or ('links' in cfg) or ('workloads' in cfg)
+  _default_wl = [name] if (default_workload or _asserts_workload) else []
+
   if 'ports' in cfg:
     for port in cfg['ports']:
       k8s_resource(
@@ -535,7 +550,7 @@ def _wire_routing(name, cfg):
       )
 
   if 'links' in cfg:
-    workloads = cfg.get('workloads', [name])
+    workloads = cfg.get('workloads', _default_wl)
     for workload in workloads:
       k8s_resource(workload=workload, links=cfg['links'])
 
@@ -547,7 +562,7 @@ def _wire_routing(name, cfg):
     if 'labels' in tilt_config:
       resource_args['labels'] = tilt_config['labels']
     if resource_args:
-      workloads = cfg.get('workloads', [name])
+      workloads = cfg.get('workloads', _default_wl)
       for workload in workloads:
         k8s_resource(workload=workload, **resource_args)
 
@@ -1109,7 +1124,7 @@ def lok8s(
         # Propagate it so each component groups under the service's tilt.labels.
         if 'tilt' in _service and 'tilt' not in comp:
           comp['tilt'] = _service['tilt']
-        _wire_routing(_cname, comp)
+        _wire_routing(_cname, comp, default_workload = False)
         _process_build(
           _cname,
           '%s/%s' % (image_prefix, _cname),
