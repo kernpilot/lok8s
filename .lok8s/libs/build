@@ -403,11 +403,24 @@ build::artifacts() {
     fi
     (( docs > 0 )) || warn "${domain} rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?"
 
-    mv "${tmp}" "${domain_dir}/artifacts.yaml"
-    # Say what was produced. A silent success cannot distinguish a full render
-    # from one that quietly lost most of its resources; the count is the only
-    # cheap thing an operator can check against what they expected.
-    echo "lo build: ${domain} rendered ${docs} document(s) -> ${domain_dir}/artifacts.yaml" >&2
+    # Promote ONLY when the content changed. An unconditional mv refreshes the
+    # mtime of a byte-identical artifact, and everything that WATCHES the file
+    # treats mtime as change — measured live (2026-08-07): the Tiltfile reads
+    # artifacts.yaml during eval and `lo env kustomization --pull` runs during
+    # eval, so every eval rewrote the file, which re-triggered the eval — a
+    # self-sustaining reload loop that starved every queued build for hours.
+    # cmp exits fast on the first differing byte; an unchanged render becomes
+    # a no-op and the watch stays quiet.
+    if [[ -f "${domain_dir}/artifacts.yaml" ]] && cmp -s "${tmp}" "${domain_dir}/artifacts.yaml"; then
+      rm -f "${tmp}"
+      debug "${domain}: render unchanged (${docs} document(s)) — artifacts.yaml left untouched"
+    else
+      mv "${tmp}" "${domain_dir}/artifacts.yaml"
+      # Say what was produced. A silent success cannot distinguish a full render
+      # from one that quietly lost most of its resources; the count is the only
+      # cheap thing an operator can check against what they expected.
+      echo "lo build: ${domain} rendered ${docs} document(s) -> ${domain_dir}/artifacts.yaml" >&2
+    fi
   else
     rm -f "${tmp}"
     error "kustomize build failed for ${domain}"
