@@ -20,9 +20,9 @@ Platform integration is configured per cluster in `cluster.lok8s.yaml`:
 ```yaml
 spec:
   kubehz:
-    hosting: self                        # self | hosted
+    hosting: self                        # self | hosted | shared
     access: registered                   # none | registered | managed
-    apiUrl: https://api.kubehz.cloud     # required when hosted or access != none
+    apiUrl: https://api.kubehz.cloud     # required when hosted/shared, or access != none
     connectHcloudToken: false            # opt-in: hand kubehz your HCLOUD_TOKEN (see below)
 ```
 
@@ -32,6 +32,7 @@ Two independent axes:
 |------|--------|---------|
 | `hosting` | `self` (default) | You provision and own the control plane — the normal lok8s flow. |
 | | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
+| | `shared` | kubehz runs a control plane shared by many customers and you get namespaces on it, with nodes you register yourself. Requires `apiUrl` and `kind: Kubehz` — see [Spaces](#spaces). |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats — read-only dashboard visibility. |
 | | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)** — the platform enforces the tier once the cluster is claimed. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. |
@@ -42,9 +43,78 @@ Plus one opt-in flag:
 |-----|---------|---------|
 | `connectHcloudToken` | `false` | When `true` **and** a `KUBEHZ_TOKEN` is set, `lo provision` also stores your `HCLOUD_TOKEN` with the platform (encrypted at rest, used only to manage your clusters) so the dashboard can drive provisioning — worker pools, SSH keys. Without it the token is used only locally by `lo` and never sent. A read-only token is stored for account-exact pricing but leaves provisioning locked. |
 
-`apiUrl` is required when `hosting: hosted` **or** `access != none`, and it
+`apiUrl` is required when `hosting` is `hosted` or `shared`, **or** when
+`access != none`, and it
 must be **HTTPS** — the agent's bearer token travels on this URL, so `lo`
 refuses plain-HTTP endpoints outright.
+
+## Spaces
+
+`hosting: shared` is the third shape: kubehz runs a control plane shared by
+many customers, you get namespaces on it, and **you register your own
+machines** as the nodes your workloads run on. There is no control plane to
+provision, so the driver is thin — `kind: Kubehz`.
+
+```yaml
+# clusters/acme.example.org/cluster.lok8s.yaml
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Kubehz
+metadata:
+  name: acme
+spec:
+  cluster:
+    domain: acme.example.org
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.cloud
+    space:
+      slug: acme          # optional — defaults to the domain's first label
+      name: Acme Prod     # optional — defaults to the slug
+      nodes:              # optional — one join ticket minted per name
+        - worker-1
+        - worker-2
+```
+
+`lo provision` creates the space (or adopts it, if it already exists) and
+mints a single-use join ticket for every node listed under
+`space.nodes`. `lo destroy` removes the space.
+
+```bash
+lo provision                  # create/adopt the space + mint join tickets
+lo kubehz join worker-3       # mint another ticket, any time
+lo kubehz status              # space phase, plan, and the registered nodes
+lo kubehz deregister          # remove the space
+```
+
+A few things worth knowing before you reach for it:
+
+- **`KUBEHZ_TOKEN` is required**, not optional as it is elsewhere: a space
+  belongs to your account from the moment it exists, so there is no anonymous
+  path and no claim step.
+- **A join ticket is shown once**, is bound to one node name, and expires
+  quickly. Nothing stores the plaintext — a lost ticket is re-minted, never
+  recovered.
+- **There is no kubeconfig to download.** The control plane is
+  platform-operated and is not handed out; you reach your namespaces with
+  your kubehz account (OIDC). `lo kubeconfig` on a space says exactly that
+  rather than producing a file that could not work.
+- **`spec.bootstrap` does not apply.** The platform baseline (CNI, ingress,
+  certificates, DNS) is already running on the shared plane, and a space
+  cannot install cluster-scoped things anyway.
+- **Machines are yours.** lok8s does not provision them and kubehz does not
+  bill for them. Deregistering a node withdraws its credentials; shutting the
+  machine down is still your call.
+
+Joining a node — requirements, the recommended host firewall, the bare-metal
+lane — is documented on the platform side:
+[kubehz docs → Spaces](https://kubehz.io/docs/spaces/).
+
+::: tip Still no lock-in
+A space is the one shape where the control plane is not yours, so it is worth
+being explicit: everything else in lok8s keeps working without kubehz, and
+moving to a cluster of your own (`hosting: hosted` or `self`) is a supported
+path rather than an export-and-rebuild.
+:::
 
 ## Bootstrap addons on hosted clusters
 
@@ -315,5 +385,5 @@ yet — confirm the CronJob fired at least once, then retry. Make sure your
 kubeconfig points at the cluster you mean to claim.
 
 **`spec.kubehz.apiUrl is required` / HTTPS errors?** Set `apiUrl` whenever
-`hosting: hosted` or `access != none`, and use an `https://` URL — plain
-HTTP is rejected.
+`hosting` is `hosted` or `shared`, or `access != none`, and use an `https://`
+URL — plain HTTP is rejected.

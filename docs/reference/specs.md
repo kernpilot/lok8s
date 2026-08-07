@@ -14,7 +14,7 @@ Every `cluster.lok8s.yaml` shares this base structure regardless of kind:
 
 ```yaml
 apiVersion: cluster.lok8s.dev/v1beta1
-kind: Lo | KubeOne | Capi | Kkp         # driver selection
+kind: Lo | KubeOne | Capi | Kkp | Kubehz  # driver selection
 metadata:
   name: my-cluster                        # unique cluster name
 spec:
@@ -32,9 +32,13 @@ spec:
     - cilium                              # bare name: .lok8s/addons/<name>/
     - ./targets/networking                # ./path: relative to cluster dir
   kubehz:                                 # kubehz platform integration (optional)
-    hosting: self | hosted                # who runs the control plane
+    hosting: self | hosted | shared       # who runs the control plane
     access: none | registered | managed   # kubehz visibility
-    apiUrl: https://api.kubehz.cloud      # required when hosting=hosted or access!=none
+    apiUrl: https://api.kubehz.cloud      # required when hosting=hosted|shared or access!=none
+    space:                                # hosting: shared only (kind: Kubehz)
+      slug: acme                          # namespace name; defaults to the domain's first label
+      name: Acme Prod                     # display name; defaults to the slug
+      nodes: [worker-1]                   # join tickets minted for these names on provision
   build:                                  # build output shape (optional)
     artifacts: single | split             # split = per-resource files under artifacts/
     encrypt:                              # Secret-encryption policy for split mode
@@ -50,7 +54,7 @@ spec:
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `apiVersion` | yes | — | Always `cluster.lok8s.dev/v1beta1` |
-| `kind` | yes | — | Driver: `Lo`, `KubeOne`, `Capi`, `Kkp` |
+| `kind` | yes | — | Driver: `Lo`, `KubeOne`, `Capi`, `Kkp`, `Kubehz` (a kubehz Space — `hosting: shared`) |
 | `metadata.name` | yes | — | Unique cluster name |
 | `spec.kubernetes.version` | yes | — | Kubernetes version |
 | `spec.cluster.domain` | yes | — | Cluster FQDN (folder name convention) |
@@ -59,9 +63,12 @@ spec:
 | `spec.provider.configRef` | no | — | Provider config file path |
 | `spec.provider.config` | no | — | Inline provider config (mutually exclusive with configRef) |
 | `spec.bootstrap` | no | `[cilium]` | Ordered list of infra addons (default applied by framework bootstrap when omitted) |
-| `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it) or `hosted` (kubehz runs it; with `kind: Lo` also requires `spec.runner`) |
+| `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it), `hosted` (kubehz runs it; with `kind: Lo` also requires `spec.runner`), or `shared` (a kubehz Space — namespaces on a shared plane, nodes you register; requires `kind: Kubehz`) |
 | `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
-| `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting: hosted` or `access != none`; must be HTTPS |
+| `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting` is `hosted` or `shared`, or `access != none`; must be HTTPS |
+| `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
+| `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
+| `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — node names to mint a single-use join ticket for during `lo provision` |
 | `spec.build.artifacts` | no | `single` | `split` additionally emits per-resource files under `clusters/<domain>/artifacts/` — `<Kind>.<namespace>.<name>.yaml`, Secrets as sops-encrypted `Secret.<ns>.<name>.sops.yaml` (committable; per-object git history for GitOps) |
 | `spec.build.encrypt.type` | no | `sops` | How split-mode Secrets are encrypted. `sops` is the only supported value today; anything else is a hard build error (decoupled from the split trigger — `artifacts: split` shapes every resource, `encrypt` governs only the Secret twins) |
 | `spec.build.encrypt.on` | no | `change` | When a Secret's committed `Secret.*.sops.yaml` is re-encrypted. `change` (default) keeps the existing ciphertext byte-for-byte when the prior decrypts to the same (canonical) plaintext — killing the per-build churn from sops's fresh-per-encrypt data key. `always` re-encrypts every Secret every build (the original behavior). See the [build guide](../guide/deployment.md#split-output). |

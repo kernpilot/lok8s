@@ -361,3 +361,43 @@ yq_space_defaults() {
   assert_output --partial "Plan:    shared-free"
   assert_output --partial "worker-1  Ready  hcloud"
 }
+
+# ── docs ↔ code: the hosting enum must not drift ─────────
+# The public docs state the accepted values in three places (the guide's yaml
+# example, its axis table, and the specs reference). A value the code accepts
+# but the docs omit is an undiscoverable feature; a value the docs promise but
+# the code rejects is a broken promise. `shared` was missing from the specs
+# reference until P4.4 — exactly this drift, caught by reading rather than by
+# a test. Now it is a test.
+
+@test "docs: the documented hosting enum matches what validate_config accepts" {
+  local guide="${_PROJECT_ROOT}/docs/guide/kubehz.md"
+  local specs="${_PROJECT_ROOT}/docs/reference/specs.md"
+  [ -f "${guide}" ] && [ -f "${specs}" ]
+
+  # The values the CODE accepts, read from the case arm itself.
+  local accepted
+  accepted=$(grep -oE '^\s+self\|hosted\|shared\)' "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main" | tr -d ' )')
+  [ "${accepted}" = "self|hosted|shared" ]
+
+  # Each documented surface must name every accepted value.
+  local value
+  for value in self hosted shared; do
+    grep -q "hosting: self | hosted | shared" "${specs}" \
+      || { echo "specs.md yaml block does not list the full hosting enum" >&2; return 1; }
+    grep -qE "\`${value}\`" "${guide}" \
+      || { echo "guide does not document hosting value: ${value}" >&2; return 1; }
+    grep -qE "\`${value}\`" "${specs}" \
+      || { echo "specs reference does not document hosting value: ${value}" >&2; return 1; }
+  done
+}
+
+@test "docs: the Kubehz driver kind is documented wherever the driver list is" {
+  local specs="${_PROJECT_ROOT}/docs/reference/specs.md"
+  # The kind exists as a driver on disk...
+  [ -f "${_PROJECT_ROOT}/.lok8s/drivers/kubehz/main" ]
+  # ...so both driver lists in the reference must name it, or a user reading
+  # the spec cannot discover the one kind that hosting: shared requires.
+  grep -q 'kind: Lo | KubeOne | Capi | Kkp | Kubehz' "${specs}"
+  grep -qE '\| `kind` \| yes \|.*`Kubehz`' "${specs}"
+}
