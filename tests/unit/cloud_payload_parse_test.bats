@@ -72,11 +72,35 @@ _payloads() {
 @test "every embedded JSON payload parses" {
   # daemon.json is written straight into /etc/docker: a corrupted one leaves the
   # node without a container runtime.
+  #
+  # Pick the parser from what EXISTS, and refuse when nothing does — the same
+  # rule the shell test above already applies to interpreters, and for the same
+  # reason.
+  #
+  # This was a bare `python3 ... 2>/dev/null || bad+=("${f}")`. CI runs bats
+  # inside the argsh container (there is no host bats to forward past), and that
+  # image ships jq but NO python3: python3 exited 127, the discarded stderr hid
+  # it, and every JSON payload came back "unparseable". lok8s CI was red for six
+  # days over a daemon.json that parses fine. A missing parser and a corrupt file
+  # must never produce the same result.
+  local parser=""
+  if command -v jq >/dev/null 2>&1; then
+    parser="jq"
+  elif command -v python3 >/dev/null 2>&1; then
+    parser="python3"
+  fi
+  [ -n "${parser}" ] || {
+    echo "no JSON parser available (looked for jq, python3) — refusing to pass a check that parsed nothing" >&2
+    return 1
+  }
+
   local checked=0 bad=()
   while IFS= read -r f; do
     [[ "${f}" == *.json ]] || continue
-    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${f}" 2>/dev/null \
-      || bad+=("${f}")
+    case "${parser}" in
+      jq)      jq . "${f}" >/dev/null 2>&1 || bad+=("${f}") ;;
+      python3) python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${f}" 2>/dev/null || bad+=("${f}") ;;
+    esac
     checked=$((checked + 1))
   done < <(_payloads)
 
@@ -85,7 +109,8 @@ _payloads() {
     return 1
   }
   [ "${#bad[@]}" -eq 0 ] || {
-    printf 'unparseable JSON payload: %s\n' "${bad[@]}" >&2
+    echo "unparseable JSON payload — ${parser} rejected:" >&2
+    printf '  %s\n' "${bad[@]}" >&2
     return 1
   }
 }
