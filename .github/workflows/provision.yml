@@ -24,11 +24,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          # Supply-chain rule: don't pipe a remote script into a shell — download
-          # to a file, pin the ref, then execute. Binary versions are pinned by
-          # the committed .bin/b.yaml + .bin/b.lock that `b install` consumes.
-          curl -fsSL https://raw.githubusercontent.com/fentas/b/v4.18.4/install.sh -o /tmp/b-install.sh
-          B_INSTALL_DIR="${HOME}/.local/bin" bash /tmp/b-install.sh
+          # Supply-chain rule: no remote script is executed at all here, and the
+          # other binary versions are pinned by the committed .bin/b.yaml +
+          # .bin/b.lock that `b install` consumes.
+          # Pin the BINARY, not just the installer script. install.sh resolves
+          # `releases/latest` with an UNAUTHENTICATED curl (it takes no token), so
+          # on a rate-limited Actions runner IP the reply carries no "tag_name",
+          # LATEST comes back empty and it exits "Failed to determine latest
+          # version". That is how E2E broke on 2026-08-07 while it sat skipped
+          # behind a red gate, having passed on 2026-08-01 with this same pinned
+          # URL. Pinning removes the API call; the checksum makes the download
+          # verifiable, which resolving "latest" never was.
+          B_VERSION=4.18.6
+          curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
+          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
 
