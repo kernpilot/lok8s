@@ -266,6 +266,16 @@ teardown() {
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
+  # capi::detect_provider lives outside drivers/capi/main, so it is NOT defined
+  # by the source above. This test used to reach its assertion anyway: the call
+  # exited 127 ("command not found"), the assignment was unguarded, and execution
+  # simply continued to the kubeconfig check. Once that call is guarded
+  # (capi_provision_guards_test.bats), the driver correctly refuses at the
+  # missing helper and never prints the message this test is about. Stubbing it
+  # keeps the test exercising the scenario it names — a missing management
+  # cluster kubeconfig — rather than a missing function.
+  capi::detect_provider() { echo "hetzner"; }
+
   run driver::provision "test.lok8s.dev"
   assert_failure
   assert_output --partial "management cluster kubeconfig not found"
