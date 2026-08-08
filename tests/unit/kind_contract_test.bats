@@ -117,6 +117,17 @@ teardown() {
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
 
+  # The `docker` stub above answers every `network` subcommand with "ok", so
+  # lo::registry_network's subnet verification compares "ok" against the
+  # fixture's 10.125.200.0/24 and legitimately refuses ("run 'lo registry clean
+  # --shared'"). That refusal used to be SWALLOWED — the call was unguarded, so
+  # provision walked past it into `kind create` and this test passed on an error.
+  # Now that it is guarded (lo_provision_guards_test.bats), the driver correctly
+  # aborts. Stub the function so this test exercises the contract it names —
+  # that provision reaches `kind create cluster` — rather than the subnet check,
+  # which it was never feeding real input.
+  lo::registry_network() { return 0; }
+
   run driver::provision "test.lok8s.dev"
   assert_success
 }
@@ -265,6 +276,16 @@ teardown() {
   export -f yq
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
+
+  # capi::detect_provider lives outside drivers/capi/main, so it is NOT defined
+  # by the source above. This test used to reach its assertion anyway: the call
+  # exited 127 ("command not found"), the assignment was unguarded, and execution
+  # simply continued to the kubeconfig check. Once that call is guarded
+  # (capi_provision_guards_test.bats), the driver correctly refuses at the
+  # missing helper and never prints the message this test is about. Stubbing it
+  # keeps the test exercising the scenario it names — a missing management
+  # cluster kubeconfig — rather than a missing function.
+  capi::detect_provider() { echo "hetzner"; }
 
   run driver::provision "test.lok8s.dev"
   assert_failure

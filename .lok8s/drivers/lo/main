@@ -86,55 +86,72 @@ driver::provision() {
 
       local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK}"
 
-      # Docker networks
-      lo::network
+      # Docker networks.
+      # || return throughout this branch: errexit is suppressed here
+      # (libs/provision:341 runs `driver::provision || provision_rc=$?`), and
+      # the branch used to END on lo::registries_tls_nudge — an advisory check
+      # about the host trust store that returns 0 on every path. So its status
+      # became the function's, and every failure below was reported as a
+      # provisioned cluster.
+      lo::network || return 1
       if registry::is_shared; then
-        lo::registry_network
+        lo::registry_network || return 1
       fi
 
       # Registry TLS cert — mint it (via the Secret plugin) before the registry
       # containers start (they mount it) and before certs.d is written (it
       # references the dev CA). No-op unless spec.registries.tls.
-      lo::registries_tls_cert
+      lo::registries_tls_cert || return 1
 
       # Registries + containerd config (must exist before kind create).
       # kapply::run collapses the per-registry "registry/<name> <verb>" lines
       # into the same named progress block the cluster-service phases get.
-      kapply::run registries lo::registries "${domain}" "${cluster_yaml}"
-      lo::write_certs_d
+      kapply::run registries lo::registries "${domain}" "${cluster_yaml}" || return 1
+      lo::write_certs_d || return 1
 
       # apiserver StructuredAuthenticationConfiguration (spec.oidc) — write the
       # host file before `kind create` so node 0's extraMount has a target. No-op
       # unless oidc::enabled (no spec.oidc ⇒ kind config byte-identical to today).
-      lo::write_oidc_auth_config "${domain}"
+      lo::write_oidc_auth_config "${domain}" || return 1
 
       # Kind cluster
       local rendered_config
-      rendered_config=$(lo::render_kind_config "${cluster_name}" "${k8s_version}" "${network}" "${cluster_yaml}")
+      # Guarded AND checked for emptiness: this is issue #91's own shape — an
+      # unguarded assignment whose failure leaves the variable empty, and the
+      # empty value then flows into `kind create --config <(echo "")`.
+      rendered_config=$(lo::render_kind_config "${cluster_name}" "${k8s_version}" "${network}" "${cluster_yaml}") || return 1
+      [[ -n "${rendered_config}" ]] || {
+        error "the kind config for ${cluster_name} rendered EMPTY — refusing to create a cluster from it"
+        return 1
+      }
       export KIND_EXPERIMENTAL_DOCKER_NETWORK="${network}"
       if ! kind get clusters 2>/dev/null | grep -q "^${cluster_name}$"; then
-        kind create cluster --name "${cluster_name}" --config <(echo "${rendered_config}")
+        kind create cluster --name "${cluster_name}" --config <(echo "${rendered_config}") || return 1
       fi
 
       if registry::is_shared; then
-        lo::connect_nodes_to_registry_network "${cluster_name}"
+        lo::connect_nodes_to_registry_network "${cluster_name}" || return 1
       fi
 
       # Cluster services — each wrapped in a named, collapsing progress phase.
       # (called for its side effect — writing the kubeconfig file; its echoed
       # path is a return value for driver::kubeconfig, so discard it here.)
-      _lo_extract_kubeconfig "${domain}" >/dev/null
-      kapply::run registries lo::apply_local_registry_hosting "${domain}"
-      kapply::run registries lo::registry_configmap "${domain}" "${cluster_yaml}"
-      kapply::run coredns lo::coredns "${domain}"
+      _lo_extract_kubeconfig "${domain}" >/dev/null || return 1
+      kapply::run registries lo::apply_local_registry_hosting "${domain}" || return 1
+      kapply::run registries lo::registry_configmap "${domain}" "${cluster_yaml}" || return 1
+      kapply::run coredns lo::coredns "${domain}" || return 1
 
       if [[ "${LOK8S_REMOTE_EXPOSE:-false}" == "true" ]]; then
-        lo::expose "${cluster_name}" "${cluster_yaml}"
+        lo::expose "${cluster_name}" "${cluster_yaml}" || return 1
       fi
 
       # If registry TLS is on (default) but the dev CA isn't trusted yet, nudge
       # the user to `lo trust` — host `docker push` validates against it.
+      # Advisory only — deliberately NOT guarded: not trusting the dev CA is a
+      # host-setup nag, not a failed provision. The explicit `return 0` is what
+      # stops its status from becoming this function's verdict.
       lo::registries_tls_nudge
+      return 0
       ;;
     *)
       echo "error: unsupported Lo runtime: ${runtime}" >&2
