@@ -128,6 +128,28 @@ teardown() {
   # which it was never feeding real input.
   lo::registry_network() { return 0; }
 
+  # Same reasoning, second swallowed error — and this one is INVISIBLE on a
+  # developer box. lo::registries_tls_cert mints the registry TLS Secret through
+  # the secrets.lok8s.dev kustomize plugin, which is a Go binary built into
+  # .kustomize/. A workstation that has run `lo kustomize build` has it, so the
+  # call succeeds and the test passes; CI never builds it, so the call fails with
+  # "the Secret plugin is not built at …". Unguarded, that error was swallowed in
+  # BOTH environments and nobody could tell the difference. Guarded, the driver
+  # correctly aborts — and the test only fails where the plugin is absent, which
+  # is exactly the local-green/CI-red split that hid it (AUDIT.md r834).
+  #
+  # Reproduce the CI condition locally with:
+  #   KUSTOMIZE_PLUGIN_HOME=$(mktemp -d) ./.bin/argsh test tests/unit/kind_contract_test.bats
+  # The stub MINTS the cert rather than just returning 0: lo::registries verifies
+  # ${PATH_BASE}/.secrets/tls/registries/{tls.crt,tls.key} and refuses without
+  # them, so a bare `return 0` only moves the failure one line down. Mirroring the
+  # real function's observable effect keeps the rest of the path honest.
+  lo::registries_tls_cert() {
+    mkdir -p "${PATH_BASE}/.secrets/tls/registries"
+    printf 'test-cert\n' > "${PATH_BASE}/.secrets/tls/registries/tls.crt"
+    printf 'test-key\n'  > "${PATH_BASE}/.secrets/tls/registries/tls.key"
+  }
+
   run driver::provision "test.lok8s.dev"
   assert_success
 }
