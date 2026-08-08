@@ -172,7 +172,9 @@ kubehz::space_wait_active() {
 
   while (( elapsed < timeout )); do
     kubehz::space_api GET "/api/spaces/${space_id}" 2>/dev/null || true
-    phase=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.phase // .phase // "Unknown"' 2>/dev/null) || phase="Unknown"
+    # The api serves `status` (the r384 overlay), never `phase` — reading
+    # phase kept this loop at "Unknown" until timeout (review round 1, A3).
+    phase=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.status // .status // "Unknown"' 2>/dev/null) || phase="Unknown"
     case "${phase}" in
       Active)
         debug "Space ${space_id} is Active"
@@ -303,7 +305,7 @@ kubehz::space_status() {
 
   local space_id phase plan
   space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id')
-  phase=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.phase // "Unknown"')
+  phase=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.status // "Unknown"')
   plan=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.planId // "-"')
   echo "Space:   ${LOK8S_SPACE_SLUG} (id: ${space_id})"
   echo "Phase:   ${phase}"
@@ -314,8 +316,11 @@ kubehz::space_status() {
     return 0
   }
   local count
-  count=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | length' 2>/dev/null) || count=0
-  echo "Nodes:   ${count}"
+  # The route answers {nodes:[{name,lane,status,…}], usage:{nodes,maxNodes}} —
+  # treating it as an array printed the OBJECT's key count (review round 1, A3).
+  count=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.nodes // 0' 2>/dev/null) || count=0
+  local max; max=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.maxNodes // "-"' 2>/dev/null) || max='-'
+  echo "Nodes:   ${count}/${max}"
   echo "${KUBEHZ_SPACE_API_BODY}" \
-    | jq -r '(.data? // .) | .[]? | "  " + .nodeName + "  " + (.status // "-") + "  " + (.lane // "-")' 2>/dev/null || true
+    | jq -r '(.data? // .) | .nodes[]? | "  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")' 2>/dev/null || true
 }

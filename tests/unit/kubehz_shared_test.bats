@@ -159,9 +159,9 @@ yq_space_defaults() {
       "GET /api/spaces")
         printf '{"ok":true,"data":[]}\n200' ;;
       "POST /api/spaces")
-        printf '{"ok":true,"data":{"id":"sp-123","slug":"acme","phase":"Provisioning"}}\n201' ;;
+        printf '{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Provisioning"}}\n201' ;;
       "GET /api/spaces/sp-123")
-        printf '{"ok":true,"data":{"id":"sp-123","phase":"Active"}}\n200' ;;
+        printf '{"ok":true,"data":{"id":"sp-123","status":"Active"}}\n200' ;;
       "POST /api/spaces/sp-123/join-token")
         printf '{"ok":true,"data":{"token":"khzj_TESTTOKEN","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}\n201' ;;
       *)
@@ -196,9 +196,9 @@ yq_space_defaults() {
     [[ "${method}" == "POST" ]] && echo "${url}" >> "${CURL_POSTS}"
     case "${method} ${url##*api.example.test}" in
       "GET /api/spaces")
-        printf '{"ok":true,"data":[{"id":"sp-777","slug":"acme","phase":"Active"}]}\n200' ;;
+        printf '{"ok":true,"data":[{"id":"sp-777","slug":"acme","status":"Active"}]}\n200' ;;
       "GET /api/spaces/sp-777")
-        printf '{"ok":true,"data":{"id":"sp-777","phase":"Active"}}\n200' ;;
+        printf '{"ok":true,"data":{"id":"sp-777","status":"Active"}}\n200' ;;
       *)
         printf '{"ok":false}\n500' ;;
     esac
@@ -259,7 +259,7 @@ yq_space_defaults() {
       "GET /api/spaces")
         # First list: empty. After the racing 409: the winner's row.
         if [[ -f "${CURL_STATE}" ]]; then
-          printf '{"ok":true,"data":[{"id":"sp-race","slug":"acme","phase":"Active"}]}\n200'
+          printf '{"ok":true,"data":[{"id":"sp-race","slug":"acme","status":"Active"}]}\n200'
         else
           printf '{"ok":true,"data":[]}\n200'
         fi ;;
@@ -267,7 +267,7 @@ yq_space_defaults() {
         touch "${CURL_STATE}"
         printf '{"ok":false,"data":{"code":"CONFLICT","message":"slug exists"}}\n409' ;;
       "GET /api/spaces/sp-race")
-        printf '{"ok":true,"data":{"id":"sp-race","phase":"Active"}}\n200' ;;
+        printf '{"ok":true,"data":{"id":"sp-race","status":"Active"}}\n200' ;;
       *)
         printf '{"ok":false}\n500' ;;
     esac
@@ -304,7 +304,7 @@ yq_space_defaults() {
     done
     case "${method} ${url##*api.example.test}" in
       "GET /api/spaces")
-        printf '{"ok":true,"data":[{"id":"sp-9","slug":"acme","phase":"Active"}]}\n200' ;;
+        printf '{"ok":true,"data":[{"id":"sp-9","slug":"acme","status":"Active"}]}\n200' ;;
       "DELETE /api/spaces/sp-9")
         printf '{"ok":true}\n200' ;;
       *)
@@ -346,9 +346,12 @@ yq_space_defaults() {
     done
     case "${method} ${url##*api.example.test}" in
       "GET /api/spaces")
-        printf '{"ok":true,"data":[{"id":"sp-5","slug":"acme","phase":"Active","planId":"shared-free"}]}\n200' ;;
+        printf '{"ok":true,"data":[{"id":"sp-5","slug":"acme","status":"Active","planId":"shared-free"}]}\n200' ;;
       "GET /api/spaces/sp-5/nodes")
-        printf '{"ok":true,"data":[{"nodeName":"worker-1","status":"Ready","lane":"hcloud"}]}\n200' ;;
+        # The REAL route shape (kubehz-api nodes.get.ts): an OBJECT with
+        # `nodes` (each {name,…} — not nodeName) and `usage` — the old
+        # bare-array mock is exactly why the parsing bug survived its tests.
+        printf '{"ok":true,"data":{"nodes":[{"name":"worker-1","status":"Ready","lane":"hcloud"}],"usage":{"nodes":1,"maxNodes":2}}}\n200' ;;
       *)
         printf '{"ok":false}\n500' ;;
     esac
