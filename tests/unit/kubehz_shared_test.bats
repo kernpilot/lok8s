@@ -159,11 +159,11 @@ yq_space_defaults() {
       "GET /api/spaces")
         printf '{"ok":true,"data":[]}\n200' ;;
       "POST /api/spaces")
-        printf '{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Provisioning"}}\n201' ;;
+        printf '{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Pending"}}\n201' ;;
       "GET /api/spaces/sp-123")
         printf '{"ok":true,"data":{"id":"sp-123","status":"Active"}}\n200' ;;
       "POST /api/spaces/sp-123/join-token")
-        printf '{"ok":true,"data":{"token":"khzj_TESTTOKEN","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}\n201' ;;
+        printf '{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}\n201' ;;
       *)
         printf '{"ok":false}\n500' ;;
     esac
@@ -176,7 +176,7 @@ yq_space_defaults() {
   assert_output --partial "worker-1"
   assert_output --partial "worker-2"
   # Two nodes declared → the plaintext ticket appears exactly twice.
-  [ "$(grep -c "khzj_TESTTOKEN" <<<"${output}")" -eq 2 ]
+  [ "$(grep -c "a1b2c3.d4e5f6g7h8i9j0k1" <<<"${output}")" -eq 2 ]
 }
 
 @test "provision_shared: adopts an existing space instead of re-creating" {
