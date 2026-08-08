@@ -356,6 +356,46 @@ YAML
   assert_output --partial "Missing required field: apiVersion"
 }
 
+@test "a FAILING lint does not also print OK" {
+  # lint::all printed "  OK" UNCONDITIONALLY, before the error check:
+  #
+  #     lint::labels …; lint::secrets …
+  #     echo "  OK"
+  #     (( errors == 0 )) || { error "${errors} validation error(s)"; return 1; }
+  #
+  # so a failing domain produced "  OK" and then "N validation error(s)". The
+  # exit code was right, but the human-readable output said the opposite of the
+  # verdict — and this repo's own history is a list of green signals that meant
+  # nothing. An operator scanning a multi-domain `lo lint` sees the OK per
+  # domain; the summary error is one line at the very end.
+  yq() {
+    local query="$2"
+    local file="$3"
+    case "${query}" in
+      '.kind // ""') echo "Lo" ;;
+      '.apiVersion // ""') echo "" ;;
+      '.metadata.name // ""') echo "test" ;;
+      '.spec.kind // .kind // ""') echo "Lo" ;;
+      '.spec.bootstrap[]?') ;;
+      '.spec | has("bootstrap")') echo "true" ;;
+      '.resources[]?')
+        case "${file}" in
+          *crds*) echo "test-crd.yaml" ;;
+          *networking*) echo "namespace.yaml" ;;
+          *platform*) echo "deployment.yaml" ;;
+        esac
+        ;;
+      '.metadata.labels | keys | map(select(test("^lok8s\\.dev/"))) | length') echo "1" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  run lint::all "test-domain"
+  assert_failure
+  refute_line "  OK"
+}
+
 @test "lint catches missing kind" {
   yq() {
     local query="$2"
