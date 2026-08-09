@@ -105,6 +105,25 @@ A few things worth knowing before you reach for it:
   bill for them. Deregistering a node withdraws its credentials; shutting the
   machine down is still your call.
 
+### Limits, and whose problem each one is
+
+A space runs inside two independent budgets, and the error codes keep them
+apart deliberately:
+
+- **Your space's plan quota** — nodes and namespaces per space. Exceeding it
+  answers `403 QUOTA_EXCEEDED` and names the limit. Fix: remove something or
+  move to a bigger plan.
+- **The platform's capacity** — how much a shared control plane can carry.
+  When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
+  join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
+  (a space create with nowhere to land). Both say so explicitly: *"this is a
+  platform capacity limit, not an account limit"* — upgrading your plan will
+  not change them, and nothing you delete will either.
+
+The platform manages its own headroom (shared planes are added as they fill),
+so the 409s are expected to be rare and transient — retry later, and if one
+persists, that is a support ticket, not a configuration hunt.
+
 Joining a node — requirements, the recommended host firewall, the bare-metal
 lane — is documented on the platform side:
 [kubehz docs → Spaces](https://kubehz.io/docs/spaces/).
