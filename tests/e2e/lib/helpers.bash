@@ -48,31 +48,12 @@ _E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _E2E_DIR="$(cd "${_E2E_LIB_DIR}/.." && pwd)"
 _PROJECT_ROOT="$(cd "${_E2E_DIR}/../.." && pwd)"
 
-# Load bats assertion libraries. No vendored submodules — use
-# `argsh test` which provides bats + bats-support + bats-assert.
-_load_bats_libs() {
-  local d
-  for d in /usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib "${_PROJECT_ROOT}/.bin/lib"; do
-    [[ -d "${d}/bats-support" ]] || continue
-    [[ ":${BATS_LIB_PATH:-}:" == *":${d}:"* ]] || BATS_LIB_PATH="${BATS_LIB_PATH:+${BATS_LIB_PATH}:}${d}"
-  done
-  export BATS_LIB_PATH
-
-  if declare -F bats_load_library &>/dev/null; then
-    bats_load_library bats-support
-    bats_load_library bats-assert
-    return 0
-  fi
-  for d in /usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib "${_PROJECT_ROOT}/.bin/lib"; do
-    if [[ -f "${d}/bats-support/load.bash" ]] && [[ -f "${d}/bats-assert/load.bash" ]]; then
-      load "${d}/bats-support/load.bash"
-      load "${d}/bats-assert/load.bash"
-      return 0
-    fi
-  done
-  echo "error: bats-support/bats-assert not found. Run tests via: argsh test" >&2
-  return 1
-}
+# Load bats assertion libraries via the shared loader (worktree-aware
+# resolution lives there; the unit helper uses the same one so the suites
+# can't drift). Deliberately NOT sourcing tests/test_helper.bash here — its
+# load-time side effects (PATH_BASE export, unset ARGSH_SOURCE, verbose.sh,
+# fixtures) belong to the unit plane; e2e sets its environment in e2e::init.
+source "${_PROJECT_ROOT}/tests/lib/bats_libs.bash"
 _load_bats_libs
 
 # Default timeouts. Scenarios can override by setting these before
