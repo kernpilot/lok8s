@@ -117,6 +117,39 @@ teardown() {
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
 
+  # The `docker` stub above answers every `network` subcommand with "ok", so
+  # lo::registry_network's subnet verification compares "ok" against the
+  # fixture's 10.125.200.0/24 and legitimately refuses ("run 'lo registry clean
+  # --shared'"). That refusal used to be SWALLOWED — the call was unguarded, so
+  # provision walked past it into `kind create` and this test passed on an error.
+  # Now that it is guarded (lo_provision_guards_test.bats), the driver correctly
+  # aborts. Stub the function so this test exercises the contract it names —
+  # that provision reaches `kind create cluster` — rather than the subnet check,
+  # which it was never feeding real input.
+  lo::registry_network() { return 0; }
+
+  # Same reasoning, second swallowed error — and this one is INVISIBLE on a
+  # developer box. lo::registries_tls_cert mints the registry TLS Secret through
+  # the secrets.lok8s.dev kustomize plugin, which is a Go binary built into
+  # .kustomize/. A workstation that has run `lo kustomize build` has it, so the
+  # call succeeds and the test passes; CI never builds it, so the call fails with
+  # "the Secret plugin is not built at …". Unguarded, that error was swallowed in
+  # BOTH environments and nobody could tell the difference. Guarded, the driver
+  # correctly aborts — and the test only fails where the plugin is absent, which
+  # is exactly the local-green/CI-red split that hid it (AUDIT.md r834).
+  #
+  # Reproduce the CI condition locally with:
+  #   KUSTOMIZE_PLUGIN_HOME=$(mktemp -d) ./.bin/argsh test tests/unit/kind_contract_test.bats
+  # The stub MINTS the cert rather than just returning 0: lo::registries verifies
+  # ${PATH_BASE}/.secrets/tls/registries/{tls.crt,tls.key} and refuses without
+  # them, so a bare `return 0` only moves the failure one line down. Mirroring the
+  # real function's observable effect keeps the rest of the path honest.
+  lo::registries_tls_cert() {
+    mkdir -p "${PATH_BASE}/.secrets/tls/registries"
+    printf 'test-cert\n' > "${PATH_BASE}/.secrets/tls/registries/tls.crt"
+    printf 'test-key\n'  > "${PATH_BASE}/.secrets/tls/registries/tls.key"
+  }
+
   run driver::provision "test.lok8s.dev"
   assert_success
 }
@@ -265,6 +298,16 @@ teardown() {
   export -f yq
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
+
+  # capi::detect_provider lives outside drivers/capi/main, so it is NOT defined
+  # by the source above. This test used to reach its assertion anyway: the call
+  # exited 127 ("command not found"), the assignment was unguarded, and execution
+  # simply continued to the kubeconfig check. Once that call is guarded
+  # (capi_provision_guards_test.bats), the driver correctly refuses at the
+  # missing helper and never prints the message this test is about. Stubbing it
+  # keeps the test exercising the scenario it names — a missing management
+  # cluster kubeconfig — rather than a missing function.
+  capi::detect_provider() { echo "hetzner"; }
 
   run driver::provision "test.lok8s.dev"
   assert_failure
