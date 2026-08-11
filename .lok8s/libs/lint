@@ -649,12 +649,22 @@ lint::all() {
   lint::clusterref "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::bootstrap "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::kustomization "${domain_dir}"; errors=$(( errors + $? ))
+  # Advisory by design, and deliberately not added to `errors`: labels reports a
+  # missing convention label, and secrets is documented warnings-only at its own
+  # definition (three separate notes there) — as is lint::drift at the repo-wide
+  # aggregator. Their findings print; they do not decide the verdict.
   lint::labels "${domain_dir}"
   lint::secrets "${domain_dir}"
 
-  echo "  OK"
-
+  # The verdict is printed AFTER it is computed. `echo "  OK"` used to sit one
+  # line ABOVE this check and ran unconditionally, so a failing domain printed
+  # "  OK" and then "N validation error(s)". The exit code was correct
+  # throughout; the human-readable output contradicted it, and with several
+  # domains the per-domain OK is what an operator scans while the summary error
+  # is a single line at the very end.
   (( errors == 0 )) || { error "${errors} validation error(s)"; return 1; }
+
+  echo "  OK"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::lint "${@}"
