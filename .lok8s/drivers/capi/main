@@ -217,15 +217,25 @@ driver::destroy() {
   # Without this guard the delete below is silently SKIPPED (del_rc stays 0),
   # the workload kubeconfig is removed anyway, and the function returns
   # success — the same silent-success class as the del_rc guard at the bottom,
-  # just entered one step earlier. Only the remote case hard-fails: with a
-  # local management cluster a missing kubeconfig AND a missing kind cluster
-  # is what a completed destroy looks like, and a re-run of 'lo down' must
-  # stay idempotent.
-  if [[ ! -f "${mgmt_kubeconfig}" && "${mgmt_local}" != "true" ]]; then
-    error "management kubeconfig ${mgmt_kubeconfig} not found — cannot reach management cluster ${mgmt_domain} to delete workload cluster ${cluster_name}"
-    error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml — Hetzner servers and load balancer may still be running and billing"
-    error "  restore the management cluster kubeconfig, then re-run 'lo down'"
-    return 1
+  # just entered one step earlier. The remote case always hard-fails. The
+  # local case is exempt ONLY when the workload kubeconfig is gone too: a
+  # missing mgmt kubeconfig AND a missing workload kubeconfig is what a
+  # completed destroy looks like (re-runs of 'lo down' stay idempotent) —
+  # but a workload kubeconfig still on disk means the previous destroy never
+  # finished, and reporting success here would delete the only handle while
+  # Hetzner servers may still be billing.
+  if [[ ! -f "${mgmt_kubeconfig}" ]]; then
+    if [[ "${mgmt_local}" != "true" ]]; then
+      error "management kubeconfig ${mgmt_kubeconfig} not found — cannot reach management cluster ${mgmt_domain} to delete workload cluster ${cluster_name}"
+      error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml — Hetzner servers and load balancer may still be running and billing"
+      error "  restore the management cluster kubeconfig, then re-run 'lo down'"
+      return 1
+    elif [[ -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" ]]; then
+      error "local management kubeconfig is gone but workload cluster ${cluster_name} still has a kubeconfig — the previous destroy never completed"
+      error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml — Hetzner servers and load balancer may still be running and billing"
+      error "  recreate the management cluster ('lo up' on ${mgmt_domain}) and re-run 'lo down', or clean up via 'hcloud server list'"
+      return 1
+    fi
   fi
 
   # Delete the workload Cluster and BLOCK until CAPH has deprovisioned the

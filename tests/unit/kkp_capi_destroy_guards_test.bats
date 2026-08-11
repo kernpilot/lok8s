@@ -234,6 +234,48 @@ _load_capi_destroy() {
   }
 }
 
+@test "capi: LOCAL mgmt gone but workload kubeconfig present is a failed destroy" {
+  # Round 2: the local-mgmt exemption is safe only when the workload
+  # kubeconfig is gone too. mgmt kubeconfig missing + kind cluster wiped
+  # (docker prune) + workload kubeconfig STILL on disk = a destroy that never
+  # completed — the old exemption called it success and deleted the only
+  # handle while Hetzner servers may still be billing.
+  _load_capi_destroy
+  sed -i 's/local: false/local: true/' "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  rm -f "${PATH_BASE}/.kubeconfig/mgmt.dev.yaml"
+
+  local rc=0
+  driver::destroy test.dev || rc=$?
+
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::destroy returned 0 although the workload kubeconfig still" >&2
+    echo "exists and no management cluster is reachable — an incomplete" >&2
+    echo "destroy was reported as a completed one." >&2
+    return 1
+  }
+  [ -f "${PATH_BASE}/.kubeconfig/destroytest.yaml" ] || {
+    echo "the workload kubeconfig was deleted on the incomplete-destroy path." >&2
+    return 1
+  }
+}
+
+@test "capi: LOCAL mgmt gone AND workload kubeconfig gone stays idempotent (rc 0)" {
+  # Anti-vacuity companion: both kubeconfigs absent is what a COMPLETED
+  # destroy looks like — a re-run of 'lo down' must keep returning 0.
+  _load_capi_destroy
+  sed -i 's/local: false/local: true/' "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  rm -f "${PATH_BASE}/.kubeconfig/mgmt.dev.yaml" "${PATH_BASE}/.kubeconfig/destroytest.yaml"
+
+  local rc=0
+  driver::destroy test.dev || rc=$?
+
+  [ "${rc}" -eq 0 ] || {
+    echo "a re-run of 'lo down' after a completed destroy now FAILS (rc=${rc})" >&2
+    echo "— the round-2 guard broke idempotence." >&2
+    return 1
+  }
+}
+
 @test "capi: the fully-successful path returns 0 and removes the kubeconfig" {
   _load_capi_destroy
 
