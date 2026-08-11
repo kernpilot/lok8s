@@ -79,7 +79,7 @@ _load() {
   lo::apply_local_registry_hosting() { return 0; }
   lo::registry_configmap()   { return 0; }
   # kapply::run <phase> <fn> [args…] — run the function, as the real one does.
-  kapply::run() { local _phase="${1}" fn="${2}"; shift 2; "${fn}" "${@}"; }
+  kapply::run() { local phase="${1}" fn="${2}"; shift 2; "${fn}" "${@}"; }
   # `kind get clusters` must come back EMPTY so the create branch is taken.
   kind() { case "${1:-}" in get) return 0 ;; *) return 0 ;; esac; }
 }
@@ -143,6 +143,14 @@ _load() {
     echo "'kind create cluster' was invoked with an EMPTY --config." >&2
     return 1
   }
+  # Skipping creation is necessary but not sufficient: a refactor that refuses
+  # to create yet still returns 0 would report a provisioned cluster that does
+  # not exist.
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although the rendered kind config was" >&2
+    echo "EMPTY and no cluster was created." >&2
+    return 1
+  }
 }
 
 @test "lo provision: a FAILED kubeconfig extraction does not report success" {
@@ -157,6 +165,88 @@ _load() {
     echo "Everything downstream (bootstrap, addons) reads that file." >&2
     return 1
   }
+}
+
+@test "lo provision: a FAILED remote provision does not fall back to a local kind cluster" {
+  # lo::provision_remote returns 1 when the VM's SSH/Docker never came up.
+  # Unguarded, that failure fell through into the LOCAL kind path below it and
+  # `lo up` reported success — for a local cluster the user never asked for.
+  _load
+  export PROVIDER_NAME="hetzner"
+  provider::provision() { return 0; }   # declare -F gate in the driver
+  lo::provision_remote() { return 1; }
+  local marker="${BATS_TEST_TMPDIR}/kind-create-was-called"
+  kind() {
+    case "${1:-}" in
+      get)    return 0 ;;
+      create) touch "${marker}"; return 0 ;;
+      *)      return 0 ;;
+    esac
+  }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although lo::provision_remote FAILED" >&2
+    echo "(SSH/Docker unreachable) — the failure fell through to local kind." >&2
+    return 1
+  }
+  [ ! -f "${marker}" ] || {
+    echo "a LOCAL 'kind create cluster' ran after the remote provision failed." >&2
+    return 1
+  }
+}
+
+@test "lo provision: a FAILED remote CI run does not return the 100 success sentinel" {
+  # 100 means "remote CI handled the full lifecycle" and libs/provision maps it
+  # to return 0. Unguarded, `lo::remote_ci; return 100` relabeled every remote
+  # CI failure (ssh mkdir, rsync, the remote provision itself) as that sentinel.
+  _load
+  export LOK8S_REMOTE=1
+  lo::read_remote_config() {
+    LOK8S_REMOTE_MODE="ci"
+    LOK8S_REMOTE_IP="203.0.113.7"
+    return 0
+  }
+  lo::remote_ci() { return 1; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -ne 100 ] || {
+    echo "driver::provision returned the remote-CI SUCCESS sentinel (100)" >&2
+    echo "although lo::remote_ci FAILED — libs/provision maps 100 to rc=0." >&2
+    return 1
+  }
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although lo::remote_ci FAILED." >&2
+    return 1
+  }
+  unset LOK8S_REMOTE
+}
+
+@test "lo provision: a SUCCESSFUL remote CI run still returns the 100 sentinel" {
+  # ANTI-VACUITY for the guard above: `|| return 1` must not swallow the
+  # sentinel on the success path.
+  _load
+  export LOK8S_REMOTE=1
+  lo::read_remote_config() {
+    LOK8S_REMOTE_MODE="ci"
+    LOK8S_REMOTE_IP="203.0.113.7"
+    return 0
+  }
+  lo::remote_ci() { return 0; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -eq 100 ] || {
+    echo "a successful remote CI run returned ${rc}, not the 100 sentinel —" >&2
+    echo "libs/provision would run the local post-provision steps anyway." >&2
+    return 1
+  }
+  unset LOK8S_REMOTE
 }
 
 @test "lo provision: the fully-successful path still returns 0" {

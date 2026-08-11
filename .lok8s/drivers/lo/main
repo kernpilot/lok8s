@@ -59,7 +59,17 @@ driver::provision() {
 
       # Remote: provision VM, wait for SSH/Docker, set DOCKER_HOST
       if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::provision &>/dev/null; then
-        lo::provision_remote "${domain}" "${cluster_yaml}"
+        # || return: errexit is suppressed here (this tree runs under
+        # provision's `driver::provision || rc=$?`), so an unreachable remote
+        # (SSH/Docker never came up) would otherwise FALL THROUGH into the
+        # local kind path below and report a provisioned cluster — the wrong
+        # cluster, on the wrong machine. (A provider that yields no nodes
+        # returns 0 with an explicit "running kind locally" — that intentional
+        # fallback is unaffected.)
+        lo::provision_remote "${domain}" "${cluster_yaml}" || {
+          error "remote provision via provider '${PROVIDER_NAME}' failed — refusing to fall back to a local kind cluster"
+          return 1
+        }
       fi
 
       # Remote CI mode: delegate everything to the VM, skip local post-provision
@@ -70,7 +80,11 @@ driver::provision() {
         # lo::remote_ci and ssh/rsync with the bad value anyway.
         lo::read_remote_config "${cluster_yaml}" || return 1
         if [[ "${LOK8S_REMOTE_MODE}" == "ci" ]] && [[ -n "${LOK8S_REMOTE_IP:-}" ]]; then
-          lo::remote_ci "${domain}" "${cluster_yaml}"
+          # || return 1: 100 is the "remote CI handled the FULL lifecycle"
+          # success sentinel (libs/provision maps it to return 0). A failed
+          # lo::remote_ci (ssh/rsync/remote provision) must surface as a
+          # failure, not be relabeled as that sentinel.
+          lo::remote_ci "${domain}" "${cluster_yaml}" || return 1
           return 100
         fi
       fi
