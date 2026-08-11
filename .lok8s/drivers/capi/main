@@ -147,8 +147,15 @@ driver::provision() {
   # || return: a cluster that never became ready is the whole reason this step
   # exists. Unguarded it fell through to the kubeconfig extraction, which then
   # failed on its own 5 minutes later with "could not extract workload
-  # kubeconfig" — a symptom reported as the cause.
-  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}" "${namespace}" 900 || return 1
+  # kubeconfig" — a symptom reported as the cause. The CAPI resources were
+  # already applied above, so CAPH may have created real Hetzner resources by
+  # now — say so, like the destroy path does, instead of leaving the operator
+  # to guess whether anything is billing.
+  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}" "${namespace}" 900 || {
+    error "CAPI resources were applied — Hetzner servers and a load balancer may exist and keep billing"
+    error "  run 'lo down' to tear down, or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -n ${namespace}"
+    return 1
+  }
 
   # 7. Extract the workload kubeconfig under the cluster's metadata.name — the
   #    path the framework's bootstrap step (CNI + CCM) and the harness expect.
@@ -269,33 +276,32 @@ driver::destroy() {
   # Tear down the local kind management cluster we created — but only once the
   # workload teardown actually completed, so CAPH can finish if it is still
   # deleting servers.
-  if [[ "${mgmt_local}" == "true" ]]; then
+  if [[ "${mgmt_local}" == "true" ]] && (( del_rc == 0 )); then
     local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
-    if (( del_rc == 0 )); then
-      echo "info: deleting local kind management cluster '${kind_name}'" >&2
-      export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
-      kind delete cluster --name "${kind_name}" 2>/dev/null || true
-      rm -f "${mgmt_kubeconfig}"
-    else
-      error "workload cluster delete did not complete — KEEPING the management cluster so CAPH can finish deprovisioning."
-      error "check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -A"
-    fi
+    echo "info: deleting local kind management cluster '${kind_name}'" >&2
+    export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
+    kind delete cluster --name "${kind_name}" 2>/dev/null || true
+    rm -f "${mgmt_kubeconfig}"
   fi
 
-  # A failed teardown must not report success, and must not delete the handle.
+  # A failed teardown must not report success, and must not delete any handle.
   #
-  # Both halves were wrong here. The error above only fires when the management
-  # cluster is LOCAL, so a remote-mgmt teardown that timed out said nothing at
-  # all; and either way execution reached the `rm -f` below, which cannot fail,
-  # so this function returned 0. libs/provision:463 then read success and
-  # main::down suppressed its orphaned-infra warning — the exact case the rc
-  # remap at libs/provision:459 exists to preserve. Meanwhile CAPH may still be
+  # Before this block existed, only the LOCAL-mgmt branch above complained, so a
+  # remote-mgmt teardown that timed out said nothing at all; and either way
+  # execution reached the `rm -f` below, which cannot fail, so this function
+  # returned 0. libs/provision:463 then read success and main::down suppressed
+  # its orphaned-infra warning — the exact case the rc remap at
+  # libs/provision:459 exists to preserve. Meanwhile CAPH may still be
   # deprovisioning, or may have given up with servers and a load balancer still
-  # billing, and the kubeconfig that could reach them was gone.
+  # billing, and the kubeconfig that could reach them was gone. This is the ONE
+  # place that reports the failure — mgmt-local only adds its extra line here.
   if (( del_rc != 0 )); then
     error "workload cluster delete did not complete (rc=${del_rc}) — Hetzner servers and load balancer may still be running and billing"
     error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml so the cluster stays reachable"
-    error "  check 'hcloud server list', then re-run 'lo down'"
+    if [[ "${mgmt_local}" == "true" ]]; then
+      error "  KEEPING the local kind management cluster so CAPH can finish deprovisioning"
+    fi
+    error "  check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -A"
     return 1
   fi
 

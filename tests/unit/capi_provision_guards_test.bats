@@ -68,7 +68,10 @@ _load() {
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
   :args() { domain="test.dev"; }
-  kubehz::read_config()       { export LOK8S_KUBEHZ_HOSTING="self-hosted"; return 0; }
+  # "self" is the real value (libs/kubehz/main validates hosting ∈ self|hosted);
+  # any stub must speak the production vocabulary or it pins a scenario that
+  # cannot occur.
+  kubehz::read_config()       { export LOK8S_KUBEHZ_HOSTING="self"; return 0; }
   capi::detect_provider()     { echo "hetzner"; }
   capi::ensure_credentials()  { return 0; }
   capi::ensure_local_mgmt()   { return 0; }
@@ -147,23 +150,37 @@ _load() {
   # LOK8S_KUBEHZ_HOSTING stays unset, the != "hosted" branch is taken, and the
   # operator of a HOSTED cluster is told to set spec.managementCluster.domain —
   # advice that is wrong for their configuration.
+  #
+  # PRODUCTION read_config, not a stub: review round 1 found the first version
+  # of this test proved nothing about production — it stubbed
+  # `kubehz::read_config() { return 1; }`, but the production function could
+  # NEVER return non-zero (yq failures died inside assignments; the trailing
+  # `export` reset the status to 0), so the guard it pinned was vacuous. The
+  # production repro is a spec file that cannot be read: read_config now refuses
+  # it (see kubehz_config_test.bats), and the driver must surface THAT error,
+  # not the managementCluster.domain advice.
   _load
-  # No managementCluster.domain → the hosted decision point.
-  cat > "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" <<'YAML'
-apiVersion: cluster.lok8s.dev/v1beta1
-kind: Lo
-metadata:
-  name: provtest
-spec:
-  cluster:
-    namespace: default
-YAML
-  kubehz::read_config() { return 1; }
+  # Restore the real read_config over _load's stub (import is a no-op here, so
+  # sourcing the driver did not bring the lib in).
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  # No spec file at all → every yq at the top of driver::provision fails softly
+  # (errexit is off in this call tree), mgmt_domain stays empty, and the driver
+  # reaches the read_config guard with a file it cannot read.
+  rm -f "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
 
   local rc=0 out
   out="$(driver::provision test.dev 2>&1)" || rc=$?
 
-  [ "${rc}" -ne 0 ]
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although the cluster spec could not be read." >&2
+    return 1
+  }
+  [[ "${out}" == *"cannot read cluster spec"* ]] || {
+    echo "expected read_config's own diagnosis ('cannot read cluster spec')." >&2
+    echo "Output was:" >&2
+    printf '%s\n' "${out}" | sed 's/^/    /' >&2
+    return 1
+  }
   [[ "${out}" != *"managementCluster.domain is required"* ]] || {
     echo "a failed kubehz::read_config was reported as a missing" >&2
     echo "spec.managementCluster.domain. Output was:" >&2
