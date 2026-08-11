@@ -5,35 +5,9 @@
 _TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PROJECT_ROOT="$(cd "${_TESTS_DIR}/.." && pwd)"
 
-# Load bats assertion libraries. No vendored submodules — use
-# `argsh test` which provides bats + bats-support + bats-assert.
-_load_bats_libs() {
-  # Ensure BATS_LIB_PATH includes standard locations where argsh's
-  # Docker image (and system installs) place bats-support/bats-assert.
-  local d
-  for d in /usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib "${_PROJECT_ROOT}/.bin/lib"; do
-    [[ -d "${d}/bats-support" ]] || continue
-    [[ ":${BATS_LIB_PATH:-}:" == *":${d}:"* ]] || BATS_LIB_PATH="${BATS_LIB_PATH:+${BATS_LIB_PATH}:}${d}"
-  done
-  export BATS_LIB_PATH
-
-  # bats_load_library (bats >= 1.5)
-  if declare -F bats_load_library &>/dev/null; then
-    bats_load_library bats-support
-    bats_load_library bats-assert
-    return 0
-  fi
-  # Direct load fallback (bats < 1.5)
-  for d in /usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib; do
-    if [[ -f "${d}/bats-support/load.bash" ]] && [[ -f "${d}/bats-assert/load.bash" ]]; then
-      load "${d}/bats-support/load.bash"
-      load "${d}/bats-assert/load.bash"
-      return 0
-    fi
-  done
-  echo "error: bats-support/bats-assert not found. Run tests via: argsh test" >&2
-  return 1
-}
+# Load bats assertion libraries via the shared loader (worktree-aware
+# resolution lives there; e2e uses the same one so the suites can't drift).
+source "${_TESTS_DIR}/lib/bats_libs.bash"
 _load_bats_libs
 
 # Project root used by all library scripts

@@ -135,8 +135,30 @@ driver::destroy() {
 
   kkp::validate_url "${KKP_API_URL}" || return 1
 
-  # Delete the cluster via KKP API
-  kkp::delete_cluster "${project_id}" "${cluster_id}" || warn "KKP cluster delete failed — continuing cleanup"
+  # Delete the cluster via KKP API.
+  #
+  # This used to be `|| warn "…continuing cleanup"`, and the cleanup below then
+  # ran `rm -rf "${work_dir}"` — which holds cluster_id. Read with the guard at
+  # the top of this function ("Cannot destroy cluster without a cluster ID",
+  # return 1), that made a transient API failure PERMANENT: the user cluster kept
+  # running and billing, `lo down` reported success because the tail of this
+  # function cannot fail, and the only handle capable of retrying the delete had
+  # just been deleted. The libs/provision destroy call site
+  # (provision::dispatch_destroy) runs `driver::destroy || destroy_rc=$?`,
+  # so errexit is off here and nothing else would have caught it (issue #91's
+  # class, kubeone_destroy_guards_test.bats pins the sibling).
+  #
+  # Local cleanup is still deliberately tolerant of a failed REMOTE call — it
+  # just may not happen after one, and may not claim success it did not have.
+  local del_rc=0
+  kkp::delete_cluster "${project_id}" "${cluster_id}" || del_rc=$?
+  if (( del_rc != 0 )); then
+    error "KKP cluster delete FAILED (cluster ${cluster_id}, project ${project_id})"
+    error "  the cluster is still running and still billing"
+    error "  KEEPING ${work_dir} — cluster_id there is the only handle a retry has"
+    error "  retry with 'lo down', or delete the cluster in the KKP UI"
+    return 1
+  fi
 
   # Clean up local state (kubeconfig is named by metadata.name)
   local cluster_name

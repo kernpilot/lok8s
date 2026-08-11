@@ -92,10 +92,24 @@ loup::verify_materialised() {
   [[ -d "${PWD}/.lok8s" ]] || missing+=(".lok8s/ (vendored framework)")
   [[ -f "${PWD}/.lok8s/lo" ]] || missing+=(".lok8s/lo (CLI entrypoint)")
 
+  # Strip a trailing slash BEFORE taking the basename: with PATH_BIN=".../.bin/"
+  # a bare ${PATH_BIN##*/} is empty, so the missing-binary line read "/argsh".
+  local bin_dir="${PATH_BIN%/}"
+  bin_dir="${bin_dir##*/}"
+
+  # envsubst is in this list because leaving it out made the check LIE: `b
+  # install` renders every manifest through it (b.yaml's core group maps
+  # renvsubst→envsubst), so without it templating breaks on the first `lo use`
+  # while lo-up reports a clean install. A verification that passes on a broken
+  # env is worse than no verification — it is the reason nobody looks. This
+  # list is the every-command subset of b.yaml's `core` group (core also ships
+  # sops, ssh-to-age and bats, which `lo` does not need on every invocation and
+  # are deliberately not checked here); keep the subset in sync when core's
+  # runtime needs change. libs/doctor checks the same binary for the same reason.
   local bin
-  for bin in argsh kubectl jq yq; do
+  for bin in argsh kubectl jq yq envsubst; do
     [[ -x "${PATH_BIN}/${bin}" ]] || command -v "${bin}" &>/dev/null \
-      || missing+=("${PATH_BIN##*/}/${bin}")
+      || missing+=("${bin_dir}/${bin}")
   done
 
   (( ${#missing[@]} == 0 )) || _die "b install reported success but the env is incomplete — missing: ${missing[*]}
