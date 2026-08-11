@@ -68,9 +68,11 @@ _required_bins() {
 # The same list as it survives minification. The minifier renames the loop
 # VARIABLE but not the string literals, so `for bin in argsh kubectl jq yq …`
 # ships as `for a1 in argsh kubectl jq yq …` — the names are intact and
-# comparable. Anchored on `in argsh` because argsh is always first.
+# comparable. Anchored on `in argsh` because argsh is always first. The class
+# includes `-` so a future required binary like ssh-to-age (already in b.yaml's
+# core group) doesn't truncate the capture and fail for the wrong reason.
 _bundle_bins() {
-  grep -o 'in argsh[a-z0-9 ]*' "${BUNDLE}" | head -1 | sed 's/^in //; s/ *$//'
+  grep -om1 'in argsh[a-z0-9 -]*' "${BUNDLE}" | sed 's/^in //; s/ *$//'
 }
 
 @test "the published bundle's required-binary list matches the source exactly" {

@@ -73,7 +73,7 @@ materialise() {
   mkdir -p .lok8s
   printf '#!/bin/sh\n' > .lok8s/lo
   local bin
-  for bin in argsh kubectl jq yq; do
+  for bin in argsh kubectl jq yq envsubst; do
     printf '#!/bin/sh\n' > "${PATH_BIN}/${bin}"
     chmod +x "${PATH_BIN}/${bin}"
   done
