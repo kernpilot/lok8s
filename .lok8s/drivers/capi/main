@@ -184,7 +184,14 @@ driver::destroy() {
   mgmt_local=$(yq -r '.spec.managementCluster.local // false' "${cluster_yaml}")
 
   if [[ -z "${mgmt_domain}" ]]; then
-    kubehz::read_config "${cluster_yaml}"
+    # || return: errexit is suppressed here (the libs/provision destroy call
+    # site, provision::dispatch_destroy, runs `driver::destroy || destroy_rc=$?`).
+    # Without it a failed config read leaves
+    # LOK8S_KUBEHZ_HOSTING unset, the hosted branch is skipped, and a HOSTED
+    # cluster falls through to the "managementCluster.domain is required" error —
+    # the wrong diagnosis for the wrong path. The kubeone driver guards the same
+    # call for the same reason.
+    kubehz::read_config "${cluster_yaml}" || return 1
     if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
       kubehz::destroy_hosted "${domain}" "${cluster_yaml}"
       return
@@ -203,6 +210,31 @@ driver::destroy() {
     if kind get clusters 2>/dev/null | grep -qx "${kind_cluster}"; then
       mkdir -p "${PATH_BASE}/.kubeconfig"
       kind get kubeconfig --name "${kind_cluster}" > "${mgmt_kubeconfig}" 2>/dev/null || true
+    fi
+  fi
+
+  # A management kubeconfig we cannot find is a destroy we cannot perform.
+  # Without this guard the delete below is silently SKIPPED (del_rc stays 0),
+  # the workload kubeconfig is removed anyway, and the function returns
+  # success — the same silent-success class as the del_rc guard at the bottom,
+  # just entered one step earlier. The remote case always hard-fails. The
+  # local case is exempt ONLY when the workload kubeconfig is gone too: a
+  # missing mgmt kubeconfig AND a missing workload kubeconfig is what a
+  # completed destroy looks like (re-runs of 'lo down' stay idempotent) —
+  # but a workload kubeconfig still on disk means the previous destroy never
+  # finished, and reporting success here would delete the only handle while
+  # Hetzner servers may still be billing.
+  if [[ ! -f "${mgmt_kubeconfig}" ]]; then
+    if [[ "${mgmt_local}" != "true" ]]; then
+      error "management kubeconfig ${mgmt_kubeconfig} not found — cannot reach management cluster ${mgmt_domain} to delete workload cluster ${cluster_name}"
+      error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml — Hetzner servers and load balancer may still be running and billing"
+      error "  restore the management cluster kubeconfig, then re-run 'lo down'"
+      return 1
+    elif [[ -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" ]]; then
+      error "local management kubeconfig is gone but workload cluster ${cluster_name} still has a kubeconfig — the previous destroy never completed"
+      error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml — Hetzner servers and load balancer may still be running and billing"
+      error "  recreate the management cluster ('lo up' on ${mgmt_domain}) and re-run 'lo down', or clean up via 'hcloud server list'"
+      return 1
     fi
   fi
 
@@ -234,6 +266,25 @@ driver::destroy() {
       error "check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -A"
     fi
   fi
+
+  # A failed teardown must not report success, and must not delete the handle.
+  #
+  # Both halves were wrong here. The error above only fires when the management
+  # cluster is LOCAL, so a remote-mgmt teardown that timed out said nothing at
+  # all; and either way execution reached the `rm -f` below, which cannot fail,
+  # so this function returned 0. The libs/provision destroy call site
+  # (provision::dispatch_destroy) then read success and main::down suppressed
+  # its orphaned-infra warning — the exact case that call site's rc=3 remap
+  # exists to preserve. Meanwhile CAPH may still be
+  # deprovisioning, or may have given up with servers and a load balancer still
+  # billing, and the kubeconfig that could reach them was gone.
+  if (( del_rc != 0 )); then
+    error "workload cluster delete did not complete (rc=${del_rc}) — Hetzner servers and load balancer may still be running and billing"
+    error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml so the cluster stays reachable"
+    error "  check 'hcloud server list', then re-run 'lo down'"
+    return 1
+  fi
+
   rm -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
 }
 
