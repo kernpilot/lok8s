@@ -13,8 +13,11 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
 
-  # Create domain structure
+  # Create domain structure. The spec file must EXIST (content is irrelevant to
+  # the tests that stub yq): read_config refuses a missing/unreadable file
+  # instead of "succeeding" with empty vars.
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev"
+  : > "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
 }
 
 teardown() {
@@ -105,6 +108,31 @@ teardown() {
   kubehz::read_config "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
 
   [ "${LOK8S_KUBEHZ_ACCESS}" = "none" ]
+}
+
+# ── read_config: a missing spec file is an ERROR ─────────
+# The guard `kubehz::read_config … || return 1` in the capi/kubeone drivers is
+# only real if read_config can actually fail. It could not, historically: every
+# yq failure happened inside an assignment and the trailing `export` reset the
+# function's status to 0, so a missing file "succeeded" with empty vars and sent
+# the driver down the wrong branch.
+
+@test "read_config: fails on a missing spec file" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  run kubehz::read_config "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/does-not-exist.yaml"
+  assert_failure
+  assert_output --partial "cannot read cluster spec"
+}
+
+@test "read_config: propagates a yq failure instead of exporting empty vars" {
+  yq() { return 1; }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  run kubehz::read_config "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  assert_failure
 }
 
 # ── validate_config: valid self/none passes ──────────────

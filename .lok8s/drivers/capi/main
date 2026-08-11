@@ -44,7 +44,13 @@ driver::provision() {
   namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
 
   if [[ -z "${mgmt_domain}" ]]; then
-    kubehz::read_config "${cluster_yaml}"
+    # || return: errexit is suppressed here (libs/provision:341 runs
+    # `driver::provision || provision_rc=$?`). Unguarded, a failed read left
+    # LOK8S_KUBEHZ_HOSTING unset, so the != "hosted" branch below told the
+    # operator of a HOSTED cluster to set spec.managementCluster.domain — the
+    # wrong advice for their configuration, and it hides the real error. The
+    # destroy path guards the same call for the same reason.
+    kubehz::read_config "${cluster_yaml}" || return 1
     if [[ "${LOK8S_KUBEHZ_HOSTING}" != "hosted" ]]; then
       error "spec.managementCluster.domain is required for self-hosted CAPI"
       error "set spec.kubehz.hosting: hosted to use the kubehz seed cluster"
@@ -55,8 +61,11 @@ driver::provision() {
   fi
 
   # 2. Detect the infra provider (needed to set up the management cluster).
+  # || return: an undetected provider is an EMPTY string that flows into
+  # ensure_local_mgmt, ensure_credentials and generate, each of which then builds
+  # the wrong thing rather than refusing.
   local provider
-  provider=$(capi::detect_provider "${cluster_yaml}")
+  provider=$(capi::detect_provider "${cluster_yaml}") || return 1
 
   # 3. Ensure a management cluster exists.
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
@@ -79,9 +88,37 @@ driver::provision() {
   fi
 
   # 4. Ensure the cluster namespace + credential Secret exist on the mgmt cluster.
-  kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
-    --dry-run=client -o yaml | kubectl --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2
-  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${mgmt_kubeconfig}"
+  # || return on BOTH: without the namespace the credential Secret and the CAPI
+  # resources land nowhere; without the credentials the apply below still
+  # SUCCEEDS — applying CAPI custom resources is only writing CRs — and then CAPH
+  # cannot authenticate to the provider, so no Machine is ever created. That
+  # failure surfaces, if at all, fifteen minutes later in capi::wait_ready and is
+  # attributed to the wrong thing, on a cluster the operator was told was being
+  # provisioned. errexit is off here (libs/provision:341), so neither aborts on
+  # its own.
+  # Rendered into a variable rather than piped, so BOTH halves are checked. A
+  # `create … | apply` pipeline reports only the LAST command's status, so a
+  # failing `create namespace` is invisible to a trailing `|| return 1` unless
+  # pipefail happens to be set — and this file cannot assume it is. The first
+  # version of this guard was written as a pipe and did nothing; the test for it
+  # stayed red after the "fix", which is the only reason that was noticed.
+  # Emptiness is checked HERE, not at detection, because this is the first place
+  # an empty provider does damage — it is threaded into the credential Secret and
+  # into generate. Checking it at detection instead would pre-empt the
+  # "management cluster kubeconfig not found" diagnosis for a spec that never
+  # reaches this point, which kind_contract_test.bats pins as the intended
+  # message.
+  [[ -n "${provider}" ]] || {
+    error "could not detect the infrastructure provider from ${cluster_yaml}"
+    return 1
+  }
+
+  local ns_manifest
+  ns_manifest=$(kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
+    --dry-run=client -o yaml) || return 1
+  printf '%s\n' "${ns_manifest}" \
+    | kubectl --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2 || return 1
+  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${mgmt_kubeconfig}" || return 1
 
   # 5. Generate + apply the CAPI resources. On a freshly-initialized management
   #    cluster the provider (CAPH) admission webhooks may still be wiring up cert
@@ -107,7 +144,18 @@ driver::provision() {
   #    kubeadm stack via cloud-init, so allow generous time (15m).
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
-  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}" "${namespace}" 900
+  # || return: a cluster that never became ready is the whole reason this step
+  # exists. Unguarded it fell through to the kubeconfig extraction, which then
+  # failed on its own 5 minutes later with "could not extract workload
+  # kubeconfig" — a symptom reported as the cause. The CAPI resources were
+  # already applied above, so CAPH may have created real Hetzner resources by
+  # now — say so, like the destroy path does, instead of leaving the operator
+  # to guess whether anything is billing.
+  capi::wait_ready "${mgmt_kubeconfig}" "${cluster_name}" "${namespace}" 900 || {
+    error "CAPI resources were applied — Hetzner servers and a load balancer may exist and keep billing"
+    error "  run 'lo down' to tear down, or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -n ${namespace}"
+    return 1
+  }
 
   # 7. Extract the workload kubeconfig under the cluster's metadata.name — the
   #    path the framework's bootstrap step (CNI + CCM) and the harness expect.
@@ -254,34 +302,33 @@ driver::destroy() {
   # Tear down the local kind management cluster we created — but only once the
   # workload teardown actually completed, so CAPH can finish if it is still
   # deleting servers.
-  if [[ "${mgmt_local}" == "true" ]]; then
+  if [[ "${mgmt_local}" == "true" ]] && (( del_rc == 0 )); then
     local kind_name; kind_name=$(capi::mgmt_kind_name "${mgmt_domain}")
-    if (( del_rc == 0 )); then
-      echo "info: deleting local kind management cluster '${kind_name}'" >&2
-      export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
-      kind delete cluster --name "${kind_name}" 2>/dev/null || true
-      rm -f "${mgmt_kubeconfig}"
-    else
-      error "workload cluster delete did not complete — KEEPING the management cluster so CAPH can finish deprovisioning."
-      error "check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -A"
-    fi
+    echo "info: deleting local kind management cluster '${kind_name}'" >&2
+    export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s-example}"
+    kind delete cluster --name "${kind_name}" 2>/dev/null || true
+    rm -f "${mgmt_kubeconfig}"
   fi
 
-  # A failed teardown must not report success, and must not delete the handle.
+  # A failed teardown must not report success, and must not delete any handle.
   #
-  # Both halves were wrong here. The error above only fires when the management
-  # cluster is LOCAL, so a remote-mgmt teardown that timed out said nothing at
-  # all; and either way execution reached the `rm -f` below, which cannot fail,
-  # so this function returned 0. The libs/provision destroy call site
+  # Before this block existed, only the LOCAL-mgmt branch above complained, so a
+  # remote-mgmt teardown that timed out said nothing at all; and either way
+  # execution reached the `rm -f` below, which cannot fail, so this function
+  # returned 0. The libs/provision destroy call site
   # (provision::dispatch_destroy) then read success and main::down suppressed
   # its orphaned-infra warning — the exact case that call site's rc=3 remap
   # exists to preserve. Meanwhile CAPH may still be
   # deprovisioning, or may have given up with servers and a load balancer still
-  # billing, and the kubeconfig that could reach them was gone.
+  # billing, and the kubeconfig that could reach them was gone. This is the ONE
+  # place that reports the failure — mgmt-local only adds its extra line here.
   if (( del_rc != 0 )); then
     error "workload cluster delete did not complete (rc=${del_rc}) — Hetzner servers and load balancer may still be running and billing"
     error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml so the cluster stays reachable"
-    error "  check 'hcloud server list', then re-run 'lo down'"
+    if [[ "${mgmt_local}" == "true" ]]; then
+      error "  KEEPING the local kind management cluster so CAPH can finish deprovisioning"
+    fi
+    error "  check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig ${mgmt_kubeconfig} get cluster,machine -A"
     return 1
   fi
 

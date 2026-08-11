@@ -47,12 +47,26 @@ main::kubehz() {
 kubehz::read_config() {
   local cluster_yaml="${1}"
 
-  LOK8S_KUBEHZ_HOSTING=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
-  LOK8S_KUBEHZ_API_URL=$(yq -r '.spec.kubehz.apiUrl // ""' "${cluster_yaml}")
+  # Fail loudly on a missing/unreadable spec. Without this check the function
+  # could NEVER return non-zero: every yq failure happened inside an assignment
+  # whose status the next statement discarded, and the trailing `export` set the
+  # function's status to 0 — so callers that guard this call (the capi/kubeone
+  # drivers) were guarding a no-op, and a missing file "succeeded" with empty
+  # vars that sent the driver down the wrong branch.
+  if [[ ! -r "${cluster_yaml}" ]]; then
+    error "cannot read cluster spec: ${cluster_yaml:-<empty path>}"
+    return 1
+  fi
+
+  # || return on every read: errexit is suppressed in the driver call trees
+  # (libs/provision runs `driver::provision || rc=$?`), so a yq parse failure
+  # must be propagated explicitly or it degrades into empty vars + exit 0.
+  LOK8S_KUBEHZ_HOSTING=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}") || return 1
+  LOK8S_KUBEHZ_API_URL=$(yq -r '.spec.kubehz.apiUrl // ""' "${cluster_yaml}") || return 1
 
   # Handle yq boolean false issue — yq treats "none" specially
   local access
-  access=$(yq -r '.spec.kubehz.access' "${cluster_yaml}")
+  access=$(yq -r '.spec.kubehz.access' "${cluster_yaml}") || return 1
   if [[ "${access}" == "null" || -z "${access}" ]]; then
     LOK8S_KUBEHZ_ACCESS="none"
   else
@@ -63,7 +77,7 @@ kubehz::read_config() {
   # provisioning (worker pools, SSH keys) on your account. Default false — the
   # token is otherwise used only locally by lo and never sent. Only ever acted
   # on when a KUBEHZ_TOKEN identifies the owning tenant (see register_cluster).
-  LOK8S_KUBEHZ_CONNECT_TOKEN=$(yq -r '.spec.kubehz.connectHcloudToken // false' "${cluster_yaml}")
+  LOK8S_KUBEHZ_CONNECT_TOKEN=$(yq -r '.spec.kubehz.connectHcloudToken // false' "${cluster_yaml}") || return 1
 
   export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL LOK8S_KUBEHZ_CONNECT_TOKEN
 }
