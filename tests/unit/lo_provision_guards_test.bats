@@ -198,6 +198,68 @@ _load() {
   }
 }
 
+@test "lo provision: a FAILED provider does not masquerade as 'no nodes — local kind'" {
+  # One level below the lo::provision_remote guard (round 2): an unguarded
+  # provider::provision / provider::output failure fell through with empty
+  # output and took the legitimate no-nodes local-kind fallback with rc 0.
+  _load
+  export PROVIDER_NAME="hetzner"
+  provider::provision() { return 1; }
+  provider::output() { echo '{"nodes":[]}'; }
+  local marker="${BATS_TEST_TMPDIR}/kind-create-was-called"
+  kind() {
+    case "${1:-}" in
+      get)    return 0 ;;
+      create) touch "${marker}"; return 0 ;;
+      *)      return 0 ;;
+    esac
+  }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although provider::provision FAILED —" >&2
+    echo "the failure masqueraded as the legitimate no-nodes fallback." >&2
+    return 1
+  }
+  [ ! -f "${marker}" ] || {
+    echo "a LOCAL 'kind create cluster' ran after the provider FAILED." >&2
+    return 1
+  }
+}
+
+@test "lo provision: a provider that loads but yields no nodes STILL runs local kind" {
+  # Anti-vacuity companion for the guard above: the intentional fallback
+  # (provider ok, zero nodes in output) must keep working — rc 0 and a real
+  # local kind create.
+  _load
+  export PROVIDER_NAME="hetzner"
+  provider::provision() { return 0; }
+  provider::output() { echo '{"nodes":[]}'; }
+  local marker="${BATS_TEST_TMPDIR}/kind-create-was-called"
+  kind() {
+    case "${1:-}" in
+      get)    return 1 ;;
+      create) touch "${marker}"; return 0 ;;
+      *)      return 0 ;;
+    esac
+  }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -eq 0 ] || {
+    echo "the legitimate no-nodes fallback now FAILS (rc=${rc}) — the guard" >&2
+    echo "conflated provider failure with an empty node list." >&2
+    return 1
+  }
+  [ -f "${marker}" ] || {
+    echo "local 'kind create' never ran on the legitimate no-nodes fallback." >&2
+    return 1
+  }
+}
+
 @test "lo provision: a FAILED remote CI run does not return the 100 success sentinel" {
   # 100 means "remote CI handled the full lifecycle" and libs/provision maps it
   # to return 0. Unguarded, `lo::remote_ci; return 100` relabeled every remote

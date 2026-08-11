@@ -8,10 +8,21 @@ lo::provision_remote() {
   local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
   mkdir -p "${work_dir}"
 
-  provider::provision "${PROVIDER_CONFIG_FILE}" "${work_dir}"
+  # Guarded like the call sites in drivers/lo/main: a FAILED provider (API
+  # error, quota, bad credentials) must surface as rc 1, not conflate with
+  # the legitimate "loaded but no nodes" fallback below — errexit is
+  # suppressed under the dispatch `|| rc=$?` pattern, so an unguarded call
+  # would fall through with empty output and masquerade as no-nodes.
+  provider::provision "${PROVIDER_CONFIG_FILE}" "${work_dir}" || {
+    error "provider provision failed — refusing to treat it as 'no nodes'"
+    return 1
+  }
 
   local provider_output
-  provider_output=$(provider::output "${PROVIDER_CONFIG_FILE}")
+  provider_output=$(provider::output "${PROVIDER_CONFIG_FILE}") || {
+    error "provider output failed — refusing to treat it as 'no nodes'"
+    return 1
+  }
 
   local remote_ip remote_user
   remote_ip=$(echo "${provider_output}" | jq -r '.nodes[0].public_ip // empty')
