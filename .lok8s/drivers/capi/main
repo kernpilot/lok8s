@@ -184,8 +184,9 @@ driver::destroy() {
   mgmt_local=$(yq -r '.spec.managementCluster.local // false' "${cluster_yaml}")
 
   if [[ -z "${mgmt_domain}" ]]; then
-    # || return: errexit is suppressed here (libs/provision:463 runs
-    # `driver::destroy || destroy_rc=$?`). Without it a failed config read leaves
+    # || return: errexit is suppressed here (the libs/provision destroy call
+    # site, provision::dispatch_destroy, runs `driver::destroy || destroy_rc=$?`).
+    # Without it a failed config read leaves
     # LOK8S_KUBEHZ_HOSTING unset, the hosted branch is skipped, and a HOSTED
     # cluster falls through to the "managementCluster.domain is required" error —
     # the wrong diagnosis for the wrong path. The kubeone driver guards the same
@@ -210,6 +211,21 @@ driver::destroy() {
       mkdir -p "${PATH_BASE}/.kubeconfig"
       kind get kubeconfig --name "${kind_cluster}" > "${mgmt_kubeconfig}" 2>/dev/null || true
     fi
+  fi
+
+  # A management kubeconfig we cannot find is a destroy we cannot perform.
+  # Without this guard the delete below is silently SKIPPED (del_rc stays 0),
+  # the workload kubeconfig is removed anyway, and the function returns
+  # success — the same silent-success class as the del_rc guard at the bottom,
+  # just entered one step earlier. Only the remote case hard-fails: with a
+  # local management cluster a missing kubeconfig AND a missing kind cluster
+  # is what a completed destroy looks like, and a re-run of 'lo down' must
+  # stay idempotent.
+  if [[ ! -f "${mgmt_kubeconfig}" && "${mgmt_local}" != "true" ]]; then
+    error "management kubeconfig ${mgmt_kubeconfig} not found — cannot reach management cluster ${mgmt_domain} to delete workload cluster ${cluster_name}"
+    error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml — Hetzner servers and load balancer may still be running and billing"
+    error "  restore the management cluster kubeconfig, then re-run 'lo down'"
+    return 1
   fi
 
   # Delete the workload Cluster and BLOCK until CAPH has deprovisioned the
@@ -246,9 +262,10 @@ driver::destroy() {
   # Both halves were wrong here. The error above only fires when the management
   # cluster is LOCAL, so a remote-mgmt teardown that timed out said nothing at
   # all; and either way execution reached the `rm -f` below, which cannot fail,
-  # so this function returned 0. libs/provision:463 then read success and
-  # main::down suppressed its orphaned-infra warning — the exact case the rc
-  # remap at libs/provision:459 exists to preserve. Meanwhile CAPH may still be
+  # so this function returned 0. The libs/provision destroy call site
+  # (provision::dispatch_destroy) then read success and main::down suppressed
+  # its orphaned-infra warning — the exact case that call site's rc=3 remap
+  # exists to preserve. Meanwhile CAPH may still be
   # deprovisioning, or may have given up with servers and a load balancer still
   # billing, and the kubeconfig that could reach them was gone.
   if (( del_rc != 0 )); then

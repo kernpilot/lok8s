@@ -393,6 +393,13 @@ YAML
   cp "${FIXTURES_DIR}/capi-cluster.lok8s.yaml" \
     "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
+  # The management kubeconfig must exist for the delete to run at all: a
+  # missing one with a remote management cluster is now a FAILED destroy
+  # (kkp_capi_destroy_guards_test.bats pins that), and this test's old green
+  # came precisely from the delete being silently skipped.
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  printf 'apiVersion: v1\nkind: Config\n' > "${PATH_BASE}/.kubeconfig/mgmt.lok8s.dev.yaml"
+
   yq() {
     case "$2" in
       '.spec.managementCluster.domain // ""') echo "mgmt.lok8s.dev" ;;

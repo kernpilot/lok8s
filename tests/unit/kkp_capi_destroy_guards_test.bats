@@ -4,7 +4,8 @@
 #
 # Why this exists
 # ---------------
-# `libs/provision:463` runs `driver::destroy "${domain}" || destroy_rc=$?`, which
+# The libs/provision destroy call site (provision::dispatch_destroy) runs
+# `driver::destroy "${domain}" || destroy_rc=$?`, which
 # disables errexit for the whole call tree. kubeone_destroy_guards_test.bats pins
 # that driver. The kkp and capi drivers have the same caller and were never
 # checked, and both end in a command that cannot fail:
@@ -29,7 +30,7 @@
 # capi's failure is louder but ends the same way. It prints "KEEPING the
 # management cluster so CAPH can finish deprovisioning" — good advice — and then
 # returns 0, so `main::down` reads success and suppresses the orphaned-infra
-# warning that libs/provision:459 explicitly exists to preserve.
+# warning that the rc=3 remap at that call site explicitly exists to preserve.
 #
 # What this does NOT change: `kkp::delete_cluster || warn` and kubeone's
 # `kubeone::reset || warn` are both deliberate on their own terms — a failed
@@ -178,7 +179,7 @@ _load_capi_destroy() {
     echo "driver::destroy returned 0 although the workload cluster delete" >&2
     echo "FAILED. The driver even prints 'KEEPING the management cluster' —" >&2
     echo "then reports success, so main::down suppresses its orphaned-infra" >&2
-    echo "warning (the case libs/provision:459 exists to protect)." >&2
+    echo "warning (the case provision::dispatch_destroy's rc remap protects)." >&2
     return 1
   }
 }
@@ -195,6 +196,40 @@ _load_capi_destroy() {
   [ -f "${PATH_BASE}/.kubeconfig/destroytest.yaml" ] || {
     echo "the workload kubeconfig was deleted after a FAILED teardown —" >&2
     echo "servers may still be up and the handle to them is gone." >&2
+    return 1
+  }
+}
+
+@test "capi: a MISSING mgmt kubeconfig (remote mgmt) is a failed destroy, not a success" {
+  # With the management kubeconfig gone and the management cluster REMOTE
+  # (mgmt_local=false — no kind-based recovery possible), the delete cannot even
+  # be attempted. The old code skipped it silently (del_rc stayed 0), removed
+  # the workload kubeconfig, and returned success — the same silent-success
+  # class, entered one step earlier.
+  _load_capi_destroy
+  rm -f "${PATH_BASE}/.kubeconfig/mgmt.dev.yaml"
+
+  local rc=0
+  driver::destroy test.dev || rc=$?
+
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::destroy returned 0 although the mgmt kubeconfig is missing" >&2
+    echo "and the management cluster is remote — no delete was ever attempted," >&2
+    echo "yet lo down reports success while Hetzner keeps billing." >&2
+    return 1
+  }
+}
+
+@test "capi: a MISSING mgmt kubeconfig (remote mgmt) KEEPS the workload kubeconfig" {
+  _load_capi_destroy
+  rm -f "${PATH_BASE}/.kubeconfig/mgmt.dev.yaml"
+
+  local rc=0
+  driver::destroy test.dev || rc=$?
+
+  [ -f "${PATH_BASE}/.kubeconfig/destroytest.yaml" ] || {
+    echo "the workload kubeconfig was deleted although the destroy never ran —" >&2
+    echo "the servers are still up and the handle to them is gone." >&2
     return 1
   }
 }

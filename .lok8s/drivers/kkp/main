@@ -143,15 +143,16 @@ driver::destroy() {
   # return 1), that made a transient API failure PERMANENT: the user cluster kept
   # running and billing, `lo down` reported success because the tail of this
   # function cannot fail, and the only handle capable of retrying the delete had
-  # just been deleted. libs/provision:463 runs `driver::destroy || destroy_rc=$?`,
+  # just been deleted. The libs/provision destroy call site
+  # (provision::dispatch_destroy) runs `driver::destroy || destroy_rc=$?`,
   # so errexit is off here and nothing else would have caught it (issue #91's
   # class, kubeone_destroy_guards_test.bats pins the sibling).
   #
   # Local cleanup is still deliberately tolerant of a failed REMOTE call — it
   # just may not happen after one, and may not claim success it did not have.
-  local delete_rc=0
-  kkp::delete_cluster "${project_id}" "${cluster_id}" || delete_rc=$?
-  if (( delete_rc != 0 )); then
+  local del_rc=0
+  kkp::delete_cluster "${project_id}" "${cluster_id}" || del_rc=$?
+  if (( del_rc != 0 )); then
     error "KKP cluster delete FAILED (cluster ${cluster_id}, project ${project_id})"
     error "  the cluster is still running and still billing"
     error "  KEEPING ${work_dir} — cluster_id there is the only handle a retry has"
