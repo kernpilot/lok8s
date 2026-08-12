@@ -23,6 +23,7 @@
 import ^utils/verbose
 import ^utils/http
 import ^libs/kubehz/hosted
+import ^libs/kubehz/shared
 import ^libs/kubehz/handover
 
 main::kubehz() {
@@ -30,6 +31,7 @@ main::kubehz() {
     'register|r@destructive'    'Register cluster with kubehz'
     'deregister|d@destructive'  'Remove cluster from kubehz'
     'status|s@readonly'         'Check kubehz registration status'
+    'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
@@ -89,7 +91,7 @@ kubehz::read_config() {
 # Usage: kubehz::validate_config
 kubehz::validate_config() {
   case "${LOK8S_KUBEHZ_HOSTING}" in
-    self|hosted) ;;
+    self|hosted|shared) ;;
     *) error "invalid spec.kubehz.hosting: ${LOK8S_KUBEHZ_HOSTING}"; return 1 ;;
   esac
   case "${LOK8S_KUBEHZ_ACCESS}" in
@@ -99,6 +101,16 @@ kubehz::validate_config() {
 
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
     error "spec.kubehz.apiUrl is required when hosting: hosted"; return 1
+  fi
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    error "spec.kubehz.apiUrl is required when hosting: shared"; return 1
+  fi
+  # A Space has no agent to enroll: `access: registered` on hosting: shared
+  # would later run an agent deregister against a space that never had one
+  # (provision::dispatch_destroy dispatches on access). Refuse it up front.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && "${LOK8S_KUBEHZ_ACCESS}" == "registered" ]]; then
+    error "spec.kubehz.access: registered is not valid with hosting: shared (a Space has no agent; use access: none)"
+    return 1
   fi
   if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
     error "spec.kubehz.apiUrl is required when access: ${LOK8S_KUBEHZ_ACCESS}"; return 1
@@ -120,6 +132,17 @@ kubehz::validate_config() {
           error "hosting: hosted with kind: Lo requires spec.runner configuration"; return 1
         fi ;;
     esac
+  fi
+  # The hosting axis is one vocabulary, but shared is its own driver: a space
+  # has no infrastructure for the other kinds' machinery to manage, and those
+  # drivers have no notion of a space. Keep the pairing exact both ways.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && -n "${kind}" && "${kind}" != "kubehz" ]]; then
+    error "hosting: shared requires kind: Kubehz (the space driver); got kind: ${kind}"
+    return 1
+  fi
+  if [[ "${kind}" == "kubehz" && "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
+    error "kind: Kubehz requires spec.kubehz.hosting: shared (got: ${LOK8S_KUBEHZ_HOSTING})"
+    return 1
   fi
 }
 
@@ -433,8 +456,14 @@ kubehz::register() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
   kubehz::validate_config || return 1
+
+  # A space IS its registration — creating it (lo provision) is the whole act.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    error "hosting: shared has nothing to register separately — 'lo provision' creates the space"
+    return 1
+  fi
 
   if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
     error "spec.kubehz.access is 'none' — nothing to register"
@@ -460,7 +489,14 @@ kubehz::deregister() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  # Space-aware: deregistering a shared-hosting domain removes the SPACE
+  # (namespaces + node registrations) — same act as lo destroy.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    kubehz::destroy_shared "${domain}" "${cluster_yaml}"
+    return $?
+  fi
 
   if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
     error "spec.kubehz.access is 'none' — nothing to deregister"
@@ -484,12 +520,18 @@ kubehz::status() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
 
   echo "Domain:  ${domain}"
   echo "Hosting: ${LOK8S_KUBEHZ_HOSTING}"
   echo "Access:  ${LOK8S_KUBEHZ_ACCESS}"
   echo "API URL: ${LOK8S_KUBEHZ_API_URL:-<not set>}"
+
+  # Space-aware: a shared-hosting domain's status IS its space's status.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    kubehz::space_status "${domain}" "${cluster_yaml}"
+    return $?
+  fi
 
   if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
     echo "Status:  not registered (access: none)"
@@ -510,6 +552,49 @@ kubehz::status() {
   echo "Status:  ${status_val}"
 }
 
+# Mint a node join ticket for the active domain's space via `lo kubehz join`.
+# The ticket is single-node, single-use and short-lived; the plaintext is
+# printed exactly once and never stored.
+kubehz::join() {
+  local domain="${domain:-${DOMAIN_NAME:-}}" node
+  local -a args=(
+    'node'              'Node name the ticket may enroll (a DNS label)'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Mint a node join ticket" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+  [[ -n "${node}" ]] || { error "Node name required: lo kubehz join <node-name>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  # || return: same guard as the driver leg — an unread config must not
+  # flow into the hosting check as an empty string ("this domain is
+  # hosting: ").
+  kubehz::read_config "${cluster_yaml}" || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
+    error "join tickets are for hosting: shared (this domain is hosting: ${LOK8S_KUBEHZ_HOSTING})"
+    return 1
+  fi
+  kubehz::validate_config || return 1
+  [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
+    error "KUBEHZ_TOKEN is required to mint a join ticket"
+    return 1
+  }
+
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
+  kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
+  [[ -n "${KUBEHZ_SPACE_ROW}" ]] || {
+    error "No space '${LOK8S_SPACE_SLUG}' found — run 'lo provision' first"
+    return 1
+  }
+  local space_id
+  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+  [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to mint a ticket"; return 1; }
+  kubehz::space_mint_join "${space_id}" "${node}"
+}
+
 # Show the platform's stored assessment + handover feasibility via
 # `lo kubehz assess` — GET /api/clusters/<id>/assessment (handover contract
 # §1), authenticated with the SAME tenant-token source `lo kubehz status`
@@ -528,7 +613,16 @@ kubehz::assess() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  # Space-aware: assessment measures a cluster's own control plane for
+  # handover feasibility — a space has no control plane to assess.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    echo "Assessment does not apply to hosting: shared — a space has no control"
+    echo "plane of its own. Use 'lo kubehz status' for the space + node view."
+    return 0
+  fi
+
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
   # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.

@@ -14,6 +14,7 @@ across every driver. See the [Driver Contract reference](https://kernpilot.githu
 | **capi** | `capi/main` | Production clusters via [Cluster API](https://cluster-api.sigs.k8s.io) |
 | **kubeone** | `kubeone/main` | Production clusters via [KubeOne](https://docs.kubermatic.com/kubeone) |
 | **kkp** | `kkp/main` | Managed clusters via [Kubermatic KKP](https://www.kubermatic.com) REST API |
+| **kubehz** | `kubehz/main` | [kubehz](https://kubehz.cloud) Spaces — platform-operated shared control plane, you bring the nodes (`spec.kubehz.hosting: shared`) |
 
 ## How drivers work
 

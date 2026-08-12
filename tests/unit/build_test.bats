@@ -204,3 +204,47 @@ YAML
   build::_export_secrets_path "${dd}"
   [ "${PATH_SECRETS}" = "${dd}/secrets" ]
 }
+
+# --- unchanged render must not touch the artifact (mtime IS the watch signal) ---
+
+@test "build::artifacts leaves a byte-identical artifacts.yaml untouched (no mtime churn)" {
+  kustomize() {
+    echo "apiVersion: v1"
+    echo "kind: ConfigMap"
+    echo "metadata:"
+    echo "  name: stable-cm"
+  }
+  export -f kustomize
+
+  build::artifacts "test.lok8s.dev"
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  [ -f "${domain_dir}/artifacts.yaml" ]
+
+  # Age the artifact so a rewrite is detectable, then rebuild IDENTICAL content.
+  touch -d '2020-01-01 00:00:00' "${domain_dir}/artifacts.yaml"
+  local before
+  before=$(stat -c '%Y' "${domain_dir}/artifacts.yaml")
+
+  build::artifacts "test.lok8s.dev"
+
+  local after
+  after=$(stat -c '%Y' "${domain_dir}/artifacts.yaml")
+  # An unchanged render must be a filesystem no-op: file watchers (the
+  # Tiltfile reads this file during eval, and the eval runs the build) treat
+  # mtime as change, and an unconditional rewrite self-triggers the watcher
+  # forever — measured live 2026-08-07 as an eval loop that starved every
+  # queued Tilt build for hours.
+  [ "${before}" = "${after}" ]
+
+  # ...and a CHANGED render still promotes.
+  kustomize() {
+    echo "apiVersion: v1"
+    echo "kind: ConfigMap"
+    echo "metadata:"
+    echo "  name: changed-cm"
+  }
+  export -f kustomize
+  build::artifacts "test.lok8s.dev"
+  run cat "${domain_dir}/artifacts.yaml"
+  assert_output --partial "changed-cm"
+}

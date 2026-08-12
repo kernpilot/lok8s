@@ -1,0 +1,106 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz driver — Spaces on the kubehz shared control plane
+# Implements: driver::provision, driver::destroy, driver::status, driver::kubeconfig
+#
+# The thinnest driver in the tree, on purpose: a Space has no infrastructure
+# of its own. The platform operates the control plane; you bring machines and
+# join them as nodes. Provision = create/adopt the Space + mint join tickets;
+# destroy = deregister it. There is no kubeconfig to extract — access is via
+# your kubehz login (OIDC), and the control plane is never directly exposed.
+#
+# Requires: spec.kubehz.hosting: shared, spec.kubehz.apiUrl, KUBEHZ_TOKEN.
+
+import ^utils/verbose
+import ^libs/kubehz/main
+
+# ── CLI dispatch ──────────────────────────────────────────
+
+main::driver() {
+  local -a usage=(
+    'provision|p@destructive'  'Create/adopt the space + mint node join tickets'
+    'destroy|d@destructive'    'Remove the space from kubehz'
+    'status|s@readonly'        'Show space + node status'
+    'kubeconfig|k@readonly'    'Explain how space access works (no kubeconfig download)'
+  )
+  :usage "kubehz space driver" "${@}"
+  "${usage[@]}"
+}
+
+# Shared entry validation: every contract function needs the same config
+# preconditions, and a clear error beats a curl failure three calls deep.
+# Usage: driver::ensure_shared_config <domain>
+# Sets: DRIVER_CLUSTER_YAML
+driver::ensure_shared_config() {
+  local domain="${1}"
+  DRIVER_CLUSTER_YAML="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${DRIVER_CLUSTER_YAML}" ]] || {
+    error "No cluster.lok8s.yaml for domain: ${domain}"
+    return 1
+  }
+  # || return: errexit is suppressed around driver dispatch
+  # (libs/provision:341) — unguarded, a failed read leaves
+  # LOK8S_KUBEHZ_HOSTING unset and validate_config misdiagnoses the spec
+  # ("invalid spec.kubehz.hosting: ") instead of surfacing the real error.
+  # The same class capi/main fixed in #122.
+  kubehz::read_config "${DRIVER_CLUSTER_YAML}" || return 1
+  kubehz::validate_config || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
+    error "kind: Kubehz requires spec.kubehz.hosting: shared (got: ${LOK8S_KUBEHZ_HOSTING})"
+    return 1
+  fi
+}
+
+# ── Driver contract ───────────────────────────────────────
+
+driver::provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Provision a kubehz space" "${@}"
+
+  driver::ensure_shared_config "${domain}" || return 1
+  kubehz::provision_shared "${domain}" "${DRIVER_CLUSTER_YAML}" || return 1
+
+  # rc 100 = full lifecycle handled: a Space has no bootstrap plane, no
+  # kubeconfig file and no addons — the dispatch tail (bootstrap::apply on
+  # .kubeconfig/<name>.yaml) must not run.
+  return 100
+}
+
+driver::destroy() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Destroy a kubehz space" "${@}"
+
+  driver::ensure_shared_config "${domain}" || return 1
+  kubehz::destroy_shared "${domain}" "${DRIVER_CLUSTER_YAML}"
+}
+
+driver::status() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Space status" "${@}"
+
+  driver::ensure_shared_config "${domain}" || return 1
+  kubehz::space_status "${domain}" "${DRIVER_CLUSTER_YAML}"
+}
+
+driver::kubeconfig() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Space access" "${@}"
+
+  error "A space has no downloadable kubeconfig — the control plane is platform-operated."
+  echo "  Access your namespaces with your kubehz account (OIDC): the dashboard's" >&2
+  echo "  space page provides a ready-made kubeconfig snippet for 'kubectl oidc-login'." >&2
+  return 1
+}
