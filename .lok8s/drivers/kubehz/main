@@ -39,7 +39,12 @@ driver::ensure_shared_config() {
     error "No cluster.lok8s.yaml for domain: ${domain}"
     return 1
   }
-  kubehz::read_config "${DRIVER_CLUSTER_YAML}"
+  # || return: errexit is suppressed around driver dispatch
+  # (libs/provision:341) — unguarded, a failed read leaves
+  # LOK8S_KUBEHZ_HOSTING unset and validate_config misdiagnoses the spec
+  # ("invalid spec.kubehz.hosting: ") instead of surfacing the real error.
+  # The same class capi/main fixed in #122.
+  kubehz::read_config "${DRIVER_CLUSTER_YAML}" || return 1
   kubehz::validate_config || return 1
   if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
     error "kind: Kubehz requires spec.kubehz.hosting: shared (got: ${LOK8S_KUBEHZ_HOSTING})"

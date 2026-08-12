@@ -105,6 +105,13 @@ kubehz::validate_config() {
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
     error "spec.kubehz.apiUrl is required when hosting: shared"; return 1
   fi
+  # A Space has no agent to enroll: `access: registered` on hosting: shared
+  # would later run an agent deregister against a space that never had one
+  # (provision::dispatch_destroy dispatches on access). Refuse it up front.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && "${LOK8S_KUBEHZ_ACCESS}" == "registered" ]]; then
+    error "spec.kubehz.access: registered is not valid with hosting: shared (a Space has no agent; use none or managed)"
+    return 1
+  fi
   if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
     error "spec.kubehz.apiUrl is required when access: ${LOK8S_KUBEHZ_ACCESS}"; return 1
   fi
@@ -562,7 +569,10 @@ kubehz::join() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  # || return: same guard as the driver leg — an unread config must not
+  # flow into the hosting check as an empty string ("this domain is
+  # hosting: ").
+  kubehz::read_config "${cluster_yaml}" || return 1
   if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
     error "join tickets are for hosting: shared (this domain is hosting: ${LOK8S_KUBEHZ_HOSTING})"
     return 1
@@ -573,7 +583,7 @@ kubehz::join() {
     return 1
   }
 
-  kubehz::space_config "${domain}" "${cluster_yaml}"
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
   kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
   [[ -n "${KUBEHZ_SPACE_ROW}" ]] || {
     error "No space '${LOK8S_SPACE_SLUG}' found — run 'lo provision' first"

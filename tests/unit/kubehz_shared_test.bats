@@ -380,7 +380,7 @@ yq_space_defaults() {
 
   # The values the CODE accepts, read from the case arm itself.
   local accepted
-  accepted=$(grep -oE '^\s+self\|hosted\|shared\)' "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main" | tr -d ' )')
+  accepted=$(grep -oE '^[[:space:]]+self\|hosted\|shared\)' "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main" | tr -d ' )')
   [ "${accepted}" = "self|hosted|shared" ]
 
   # Each documented surface must name every accepted value.
@@ -403,4 +403,39 @@ yq_space_defaults() {
   # the spec cannot discover the one kind that hosting: shared requires.
   grep -q 'kind: Lo | KubeOne | Capi | Kkp | Kubehz' "${specs}"
   grep -qE '\| `kind` \| yes \|.*`Kubehz`' "${specs}"
+}
+
+# ── the auth contract (review round 1, F4) ───────────────
+
+@test "space_api: every call carries the bearer token — a driver that drops auth must fail HERE" {
+  # The other mocks in this file ignore -H entirely, so a regression that
+  # stops sending Authorization would stay green everywhere else. This one
+  # test pins the header contract for the whole client.
+  curl() {
+    local auth_seen=""
+    while (( $# )); do
+      case "$1" in
+        # NON-EMPTY bearer required — comparing against ${KUBEHZ_TOKEN} would
+        # let the empty-token leg match its own emptiness.
+        -H) [[ "$2" == "Authorization: Bearer "?* ]] && auth_seen=1; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [[ -z "${auth_seen}" ]]; then
+      printf '{"error":"no bearer"}\n401'
+      return 0
+    fi
+    printf '{"ok":true,"data":{"id":"sp-auth"}}\n200'
+  }
+  export -f curl
+
+  run kubehz::space_api GET "/api/spaces/sp-auth"
+  [ "$status" -eq 0 ]
+  # And the negative leg: an empty token env must not silently send
+  # "Bearer " — the api answers 401 and space_api reports non-2xx (rc 2).
+  local saved="${KUBEHZ_TOKEN}"
+  KUBEHZ_TOKEN=""
+  run kubehz::space_api GET "/api/spaces/sp-auth"
+  [ "$status" -ne 0 ]
+  KUBEHZ_TOKEN="${saved}"
 }

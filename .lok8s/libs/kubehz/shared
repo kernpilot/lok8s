@@ -28,12 +28,15 @@ kubehz::space_config() {
   local domain="${1}" cluster_yaml="${2}"
   local default_slug="${domain%%.*}"
 
-  LOK8S_SPACE_SLUG=$(yq -r '.spec.kubehz.space.slug // ""' "${cluster_yaml}")
+  # || return on every read: errexit is off on the provision path, and a
+  # yq PARSE failure is not "no slug configured" — falling back to the
+  # default here would let destroy_shared target the WRONG space.
+  LOK8S_SPACE_SLUG=$(yq -r '.spec.kubehz.space.slug // ""' "${cluster_yaml}") || return 1
   [[ -n "${LOK8S_SPACE_SLUG}" ]] || LOK8S_SPACE_SLUG="${default_slug}"
-  LOK8S_SPACE_NAME=$(yq -r '.spec.kubehz.space.name // ""' "${cluster_yaml}")
+  LOK8S_SPACE_NAME=$(yq -r '.spec.kubehz.space.name // ""' "${cluster_yaml}") || return 1
   [[ -n "${LOK8S_SPACE_NAME}" ]] || LOK8S_SPACE_NAME="${LOK8S_SPACE_SLUG}"
-  LOK8S_SPACE_PLAN=$(yq -r '.spec.kubehz.space.plan // ""' "${cluster_yaml}")
-  LOK8S_SPACE_REGION=$(yq -r '.spec.kubehz.space.region // ""' "${cluster_yaml}")
+  LOK8S_SPACE_PLAN=$(yq -r '.spec.kubehz.space.plan // ""' "${cluster_yaml}") || return 1
+  LOK8S_SPACE_REGION=$(yq -r '.spec.kubehz.space.region // ""' "${cluster_yaml}") || return 1
 
   LOK8S_SPACE_NODES=()
   local node
@@ -117,7 +120,8 @@ kubehz::space_ensure() {
   kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
   if [[ -n "${KUBEHZ_SPACE_ROW}" ]]; then
     debug "Space '${LOK8S_SPACE_SLUG}' already exists — adopting"
-    KUBEHZ_SPACE_ID=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id')
+    KUBEHZ_SPACE_ID=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+    [[ -n "${KUBEHZ_SPACE_ID}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
     return 0
   fi
 
@@ -151,7 +155,8 @@ kubehz::space_ensure() {
           kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || true
           if [[ -n "${KUBEHZ_SPACE_ROW}" ]]; then
             debug "Space '${LOK8S_SPACE_SLUG}' appeared concurrently — adopting"
-            KUBEHZ_SPACE_ID=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id')
+            KUBEHZ_SPACE_ID=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+            [[ -n "${KUBEHZ_SPACE_ID}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
             return 0
           fi
         fi
@@ -172,6 +177,17 @@ kubehz::space_wait_active() {
 
   while (( elapsed < timeout )); do
     kubehz::space_api GET "/api/spaces/${space_id}" 2>/dev/null || true
+    # Fail FAST on the statuses that never heal within the window: an expired
+    # token stays 401/403 for all 300s, and a 404 means the space was deleted
+    # out from under us — looping to timeout buries the real cause (round 1 F3).
+    case "${KUBEHZ_SPACE_API_STATUS}" in
+      401|403)
+        error "kubehz API refused the token while waiting for space ${space_id} (HTTP ${KUBEHZ_SPACE_API_STATUS})"
+        return 1 ;;
+      404)
+        error "space ${space_id} vanished while waiting for it to become Active"
+        return 1 ;;
+    esac
     # The api serves `status` (the r384 overlay), never `phase` — reading
     # phase kept this loop at "Unknown" until timeout (review round 1, A3).
     phase=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.status // .status // "Unknown"' 2>/dev/null) || phase="Unknown"
@@ -234,7 +250,7 @@ kubehz::provision_shared() {
     return 1
   }
 
-  kubehz::space_config "${domain}" "${cluster_yaml}"
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
 
   kubehz::space_ensure "${domain}" "${cluster_yaml}" || return 1
   local space_id="${KUBEHZ_SPACE_ID}"
@@ -269,7 +285,7 @@ kubehz::provision_shared() {
 kubehz::destroy_shared() {
   local domain="${1}" cluster_yaml="${2}"
 
-  kubehz::space_config "${domain}" "${cluster_yaml}"
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
 
   kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
   if [[ -z "${KUBEHZ_SPACE_ROW}" ]]; then
@@ -278,7 +294,8 @@ kubehz::destroy_shared() {
   fi
 
   local space_id
-  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id')
+  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+  [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
   local rc=0
   kubehz::space_api DELETE "/api/spaces/${space_id}" || rc=$?
   if (( rc != 0 )); then
@@ -295,7 +312,7 @@ kubehz::destroy_shared() {
 kubehz::space_status() {
   local domain="${1}" cluster_yaml="${2}"
 
-  kubehz::space_config "${domain}" "${cluster_yaml}"
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
 
   kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
   if [[ -z "${KUBEHZ_SPACE_ROW}" ]]; then
@@ -304,7 +321,8 @@ kubehz::space_status() {
   fi
 
   local space_id phase plan
-  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id')
+  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+  [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
   phase=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.status // "Unknown"')
   plan=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.planId // "-"')
   echo "Space:   ${LOK8S_SPACE_SLUG} (id: ${space_id})"
