@@ -109,7 +109,7 @@ kubehz::validate_config() {
   # would later run an agent deregister against a space that never had one
   # (provision::dispatch_destroy dispatches on access). Refuse it up front.
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && "${LOK8S_KUBEHZ_ACCESS}" == "registered" ]]; then
-    error "spec.kubehz.access: registered is not valid with hosting: shared (a Space has no agent; use none or managed)"
+    error "spec.kubehz.access: registered is not valid with hosting: shared (a Space has no agent; use access: none)"
     return 1
   fi
   if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
@@ -456,7 +456,7 @@ kubehz::register() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
   kubehz::validate_config || return 1
 
   # A space IS its registration — creating it (lo provision) is the whole act.
@@ -489,7 +489,7 @@ kubehz::deregister() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
 
   # Space-aware: deregistering a shared-hosting domain removes the SPACE
   # (namespaces + node registrations) — same act as lo destroy.
@@ -520,7 +520,7 @@ kubehz::status() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
 
   echo "Domain:  ${domain}"
   echo "Hosting: ${LOK8S_KUBEHZ_HOSTING}"
@@ -589,7 +589,10 @@ kubehz::join() {
     error "No space '${LOK8S_SPACE_SLUG}' found — run 'lo provision' first"
     return 1
   }
-  kubehz::space_mint_join "$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id')" "${node}"
+  local space_id
+  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+  [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to mint a ticket"; return 1; }
+  kubehz::space_mint_join "${space_id}" "${node}"
 }
 
 # Show the platform's stored assessment + handover feasibility via
@@ -610,7 +613,7 @@ kubehz::assess() {
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
 
-  kubehz::read_config "${cluster_yaml}"
+  kubehz::read_config "${cluster_yaml}" || return 1
 
   # Space-aware: assessment measures a cluster's own control plane for
   # handover feasibility — a space has no control plane to assess.

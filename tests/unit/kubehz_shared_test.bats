@@ -415,9 +415,10 @@ yq_space_defaults() {
     local auth_seen=""
     while (( $# )); do
       case "$1" in
-        # NON-EMPTY bearer required — comparing against ${KUBEHZ_TOKEN} would
-        # let the empty-token leg match its own emptiness.
-        -H) [[ "$2" == "Authorization: Bearer "?* ]] && auth_seen=1; shift 2 ;;
+        # EXACT bearer required (round 2): any-non-empty let a wrong variable
+        # (e.g. HCLOUD_TOKEN) pass. The sentinel is pinned by the test env,
+        # and the empty-token leg cannot match because ?* demands substance.
+        -H) [[ "$2" == "Authorization: Bearer khz_test_token" ]] && auth_seen=1; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -438,4 +439,62 @@ yq_space_defaults() {
   run kubehz::space_api GET "/api/spaces/sp-auth"
   [ "$status" -ne 0 ]
   KUBEHZ_TOKEN="${saved}"
+}
+
+# ── mutation pins for the round-1/round-2 guards ─────────
+# Each of these fails if its guard is deleted (review round 2: "revert every
+# hunk except the grep/auth-test and the suite stays green" — no longer true).
+
+@test "validate_config: rejects access: registered with hosting: shared (a Space has no agent)" {
+  export LOK8S_KUBEHZ_HOSTING="shared" LOK8S_KUBEHZ_ACCESS="registered" \
+         LOK8S_KUBEHZ_API_URL="https://api.example.test" LOK8S_KUBEHZ_KIND="Kubehz"
+  run kubehz::validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"access: none"* ]]
+}
+
+@test "space_wait_active: fails fast on 401 instead of looping to timeout" {
+  curl() { printf '{"error":"unauthorized"}\n401'; }
+  export -f curl
+  local start end
+  start=$SECONDS
+  run kubehz::space_wait_active "sp-x" 60
+  end=$SECONDS
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refused the token"* ]]
+  # fail-FAST: well under the 60s window (one poll, no 5s-loop grind)
+  (( end - start < 15 ))
+}
+
+@test "space_wait_active: fails fast on 404 — the space vanished" {
+  curl() { printf '{"error":"gone"}\n404'; }
+  export -f curl
+  run kubehz::space_wait_active "sp-x" 60
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"vanished"* ]]
+}
+
+@test "space_config: a yq parse failure refuses, never defaults the slug" {
+  # A broken yaml must not fall back to the domain label — destroy_shared
+  # would target the WRONG space (round 1 F2).
+  local broken="${BATS_TEST_TMPDIR}/broken.yaml"
+  printf '{{ not yaml' > "${broken}"
+  run kubehz::space_config "acme.example" "${broken}"
+  [ "$status" -ne 0 ]
+}
+
+@test "read_config guard: the driver refuses a broken cluster.lok8s.yaml with the READ error, not a hosting misdiagnosis" {
+  local dom="brokenspec.example"
+  mkdir -p "${PATH_CLUSTERS}/${dom}"
+  printf '{{ not yaml' > "${PATH_CLUSTERS}/${dom}/cluster.lok8s.yaml"
+  # source WITHOUT error suppression — a failed source made this test pass
+  # on exit 127 ('command not found'), exercising nothing (BW01 caught it).
+  source "${_PROJECT_ROOT}/.lok8s/drivers/kubehz/main"
+  run driver::ensure_shared_config "${dom}"
+  [ "$status" -ne 0 ]
+  # The guard's whole point: the error must NOT be the empty-var misdiagnosis.
+  # (Round 2 self-catch: the first version of this assert embedded a newline
+  # that never matches anything — vacuously true, mutation survived.)
+  [[ "$output" != *"invalid spec.kubehz.hosting:"* ]]
+  rm -rf "${PATH_CLUSTERS}/${dom}"
 }
