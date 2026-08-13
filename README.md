@@ -46,7 +46,7 @@
 - **🧰 Standard tools, not a walled garden.** Targets are plain `kustomize build`s; Helm charts inflate via the [khelm](https://github.com/mgoltzsche/khelm) kustomize plugin (no `helm` CLI to install). The `lo` CLI and the folder convention are *orchestration and ergonomics* — the artifacts underneath are vanilla Kubernetes YAML you could `kubectl apply` by hand. **No lock-in: lok8s produces standard manifests you can take anywhere.**
 - **💻 Dev-first, runs against any cluster.** The default experience is a local `kind` cluster with TLS, a registry mirror, and a Tilt hot-reload loop that just works. `lo build` emits portable `artifacts.yaml` you can `kubectl apply` to *any* cluster. The Hetzner/KubeOne/CAPI provisioners are a *convenience* for standing up production — **not a requirement**.
 - **🤖 AI built in, local-first.** `lo chat` is an on-device assistant for your cluster (read-only by default, with a code-enforced safety gate), and `lo mcp` exposes every `lo` command to agents like Claude Code over [MCP](https://modelcontextprotocol.io/). No data leaves your machine unless you explicitly opt into a frontier model.
-- **🧪 Battle-tested.** The conventions here aren't speculative — they're the residue of ~9 years of running this in production, keeping what survived contact with reality and dropping what didn't.
+- **🧪 Nine years in production.** The conventions here aren't speculative — they're the residue of ~9 years of running this in production, keeping what survived contact with reality and dropping what didn't.
 - **🐚 Transparent and debuggable.** The CLI is bash (via [argsh](https://github.com/arg-sh/argsh)) — the same `kubectl`/`kustomize`/`kind` commands you'd run by hand, just orchestrated. Nothing is hidden behind a compiled black box; you can read, lint, and step through every step. ([Why bash?](#-why-bash--argsh))
 
 &nbsp;
@@ -79,7 +79,7 @@ Honesty up front — lok8s is opinionated, and that won't fit everyone.
 
 - You're fully invested in a managed platform's native workflow (EKS/GKE/AKS + their tooling) and don't want another convention on top.
 - You prefer a pure-GitOps, controller-driven model (Argo/Flux as the source of truth) — lok8s can emit manifests for that, but its dev-loop is CLI/Tilt-centric, and the in-tree `lo gitops` layer is still being built.
-- You need turnkey production provisioning on a cloud other than Hetzner today — the provisioning drivers currently target Hetzner. (You can still deploy lok8s-built artifacts to *any* cluster; you'd just bring your own provisioning.)
+- You need ready-made production provisioning on a cloud other than Hetzner today — the provisioning drivers currently target Hetzner. (You can still deploy lok8s-built artifacts to *any* cluster; you'd just bring your own provisioning.)
 - A compiled, single-binary tool with no bash anywhere is a hard requirement for your team.
 
 &nbsp;
@@ -231,7 +231,7 @@ clusters/
     └── deploy.lok8s.yaml
 ```
 
-Why this is powerful:
+Why this matters:
 
 - **The folder name is the cluster's API hostname**, so the same brand can be served by different environments without collisions (`clusters/example.com/` locally, `clusters/cluster.example.in.net/` in prod).
 - **Secrets are per-domain** (`clusters/<domain>/secrets/`), so dev and prod can never accidentally cross-pollinate credentials.
