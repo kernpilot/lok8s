@@ -90,3 +90,71 @@ lo::connect_nodes_to_registry_network() {
     docker network connect "${registry_network}" "${node}" 2>/dev/null || true
   done
 }
+
+# lo::heal_node_ips <cluster-name> [kubeconfig]
+# Repair kind nodes that registered their InternalIP on the WRONG docker network.
+#
+# Shared-registry clusters are dual-homed: kind creates the node on the cluster
+# network ($KIND_EXPERIMENTAL_DOCKER_NETWORK) and
+# lo::connect_nodes_to_registry_network attaches a second NIC on the registry
+# network. Docker names endpoints by attach order, so when a registry endpoint is
+# recreated it can come back as eth0 — and kind's entrypoint, which derives
+# --node-ip from the first interface it finds, then pins kubelet to the REGISTRY
+# address on the next container restart. That address is dynamically allocated,
+# so it also drifts, leaving the node registered on an IP that answers nowhere.
+#
+# The failure is silent and brutal: the node stays Ready (kubelet dials OUT
+# fine), but nothing can reach INTO it — apiserver→kubelet and every cross-node
+# pod route break, so any pod on that node becomes unreachable. Observed
+# 2026-08-17 on kubehz-dev: cert-manager-webhook lived there, so every
+# webhook-validated apply failed and `lo up` died on `networking` + `cnpg-plugin`
+# after burning all 6 of bootstrap's CRD/webhook retries — retries that can never
+# win, because this is not the transient race they exist for.
+#
+# So heal it here instead: kubelet's --node-ip must match the node's address on
+# the CLUSTER network. Idempotent and silent when everything already agrees.
+lo::heal_node_ips() {
+  local cluster_name="${1}" kubeconfig="${2:-}"
+  local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}"
+  [[ -n "${network}" ]] || return 0
+
+  local node want have healed=()
+  for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
+    # The node's address on the CLUSTER network — the only correct --node-ip.
+    want=$(docker inspect "${node}" \
+      --format "{{with index .NetworkSettings.Networks \"${network}\"}}{{.IPAddress}}{{end}}" 2>/dev/null || true)
+    [[ -n "${want}" ]] || continue
+
+    have=$(docker exec "${node}" cat /var/lib/kubelet/kubeadm-flags.env 2>/dev/null \
+      | sed -n 's/.*--node-ip=\([^ "]*\).*/\1/p')
+    [[ -n "${have}" ]] || continue
+    [[ "${have}" == "${want}" ]] && continue
+
+    # Dual-stack (--node-ip=v4,v6) is a deliberate config, not the drift this
+    # heals — a naive rewrite would silently drop the v6 half. Warn, don't touch.
+    if [[ "${have}" == *,* ]]; then
+      warn "lo: ${node} has a dual-stack --node-ip=${have} — not healing (expected ${want} on ${network})"
+      continue
+    fi
+
+    warn "lo: ${node} registered --node-ip=${have} (wrong network) — repointing to ${want} on ${network}"
+    docker exec "${node}" bash -c "
+      sed -i 's|--node-ip=${have}|--node-ip=${want}|' /var/lib/kubelet/kubeadm-flags.env
+      printf '%s' '${want}' > /kind/old-ipv4
+      systemctl restart kubelet
+    " 2>/dev/null || { warn "lo: could not repair ${node} — see 'docker exec ${node} systemctl status kubelet'"; continue; }
+    healed+=("${node}")
+  done
+
+  (( ${#healed[@]} )) || return 0
+
+  # The CNI caches the node address too (Cilium mirrors it into CiliumNode and
+  # every peer's tunnel map), so a repaired node keeps routing to the dead IP
+  # until its agent re-registers. Best-effort: on a first provision there is no
+  # CNI yet, and bootstrap installs a fresh one moments later either way.
+  [[ -n "${kubeconfig}" ]] || return 0
+  for node in "${healed[@]}"; do
+    kubectl --kubeconfig "${kubeconfig}" -n kube-system delete pod \
+      -l k8s-app=cilium --field-selector "spec.nodeName=${node}" 2>/dev/null || true
+  done
+}

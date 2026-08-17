@@ -2,9 +2,11 @@
 
 ## Overview
 
-By default, each lok8s project provisions its own set of Docker registry pull-through mirrors (docker.io, ghcr.io, quay.io, registry.k8s.io). When multiple projects run on the same machine, this duplicates cached layers across containers, wasting disk space and network bandwidth.
+By default, each lok8s project provisions its own set of Docker registry pull-through mirrors (docker.io, ghcr.io, quay.io, registry.k8s.io) on the project's own network. When multiple projects run on the same machine, this duplicates cached layers across containers, which costs disk space and network bandwidth.
 
-Shared registries solve this by placing pull-through mirrors on a dedicated Docker network (`lok8s-registries`) that kind nodes from any project can connect to. Each project still gets its own **build** and **cache** registries for pushing locally-built and credentialed-pre-pulled images, but the read-only public mirrors are shared.
+Shared registries remove that duplication. The pull-through mirrors move to a dedicated Docker network (`lok8s-registries`) that kind nodes from any project connect to. Each project keeps its own **build** and **cache** registries for locally-built and credentialed content — only the read-only public mirrors are shared.
+
+Shared mode is **opt-in** (`spec.registries.shared.enabled: true`; the default is `false` since v0.x, 2026-08). The reason for the flip: shared mode attaches a second network interface to every kind node, and a node with two interfaces can register the wrong one as its node IP after a Docker endpoint re-attach. The node then stays `Ready` while every route into it is dead — see [Node-IP drift](#node-ip-drift) below. lok8s heals this automatically on each `lo up`, but a topology that cannot drift is the safer default.
 
 ## How it works
 
@@ -55,7 +57,7 @@ spec:
     cidr: "10.125.125.0/24"           # slot 125 (default cluster)
   registries:
     shared:
-      enabled: true                   # default: true
+      enabled: true                   # opt-in (default: false)
       network:
         name: lok8s-registries        # default
         cidr: "10.125.200.0/24"       # default
@@ -74,7 +76,7 @@ spec:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `shared.enabled` | `true` | Pull-through mirrors live on the shared network |
+| `shared.enabled` | `false` | Opt in to put pull-through mirrors on the shared network |
 | `shared.network.name` | `lok8s-registries` | Docker network for shared mirrors |
 | `shared.network.cidr` | `10.125.200.0/24` | Subnet for the shared network |
 | `mirrors[].name` | required | Mirror identifier (must not be `build` or `cache`) |
@@ -86,24 +88,30 @@ You never specify registry IPs — the framework computes them:
 - Mirrors in shared mode → `.2`, `.3`, `.4`, ... on the shared network
 - Mirrors in non-shared mode → `.103`, `.104`, ... on the project subnet
 
-## Opting out
+## Per-project mode (the default)
 
-Set `shared.enabled: false` to put all registries on the project subnet:
+With `shared.enabled: false` (or the key absent), all registry containers use the project network; `shared.network` is ignored. Mirrors get sequential IPs at `.103+`:
 
 ```yaml
 spec:
   network:
     cidr: "10.125.50.0/24"            # slot 50
   registries:
-    shared:
-      enabled: false
     mirrors:
       - name: io-docker               # → 10.125.50.103
         url: https://registry-1.docker.io
       # ...
 ```
 
-With `shared.enabled: false`, all registry containers use the project network; `shared.network` is ignored. `build` (`.101`) and `cache` (`.102`) are unaffected — they live on the project subnet in both modes.
+`build` (`.101`) and `cache` (`.102`) are unaffected — they live on the project subnet in both modes.
+
+## Node-IP drift
+
+Why shared mode is opt-in. In shared mode every kind node is attached to two Docker networks: the cluster network and `lok8s-registries`. Docker orders interfaces by endpoint creation, so a node's registry endpoint can become `eth0` after Docker re-attaches it — for example, after the framework evicts a node that squats a mirror's static IP. On the next container restart, kind's entrypoint derives kubelet's `--node-ip` from the first interface, and the node registers on the registry network.
+
+The failure is silent: the node lease keeps renewing, so the node reports `Ready` — but kubelet rejects every node-status update (`failed to validate nodeIP`), and no traffic reaches the node from the apiserver or from pods on other nodes. Webhooks that run on the drifted node time out cluster-wide.
+
+`lo up` detects and repairs this on every run of a shared-mode cluster: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the flag, restarts kubelet, and restarts the node's CNI agent. Non-shared clusters have one network per node, so they cannot drift.
 
 ## TLS registries (default)
 

@@ -189,7 +189,7 @@ spec:
   registries:                    # Registry mirror configuration
     tls: true                    # HTTPS registries (cert: generator-minted; default: true)
     shared:
-      enabled: true              # Pull-through mirrors on a shared network (default: true)
+      enabled: true              # Pull-through mirrors on a shared network (opt-in; default: false)
       network:
         name: lok8s-registries   # Shared network name (default)
         cidr: "10.125.200.0/24"  # Shared network CIDR (default)
@@ -255,7 +255,7 @@ When a field is missing, the Lo driver fills it in via two layers:
 
    | Field | Default |
    |---|---|
-   | `registries.shared.enabled` | `true` |
+   | `registries.shared.enabled` | `false` |
    | `registries.shared.network.name` | `lok8s-registries` |
    | `registries.shared.network.cidr` | `10.125.200.0/24` |
    | `registries.mirrors` | `io-{docker,quay,k8s,ghcr}` on the standard upstream URLs |
@@ -329,15 +329,16 @@ lok8s cluster ships with **two framework-private registries** plus
   config. **Do not list them in `spec.registries.mirrors`** — they
   ship implicitly.
 - **Pull-through mirrors** (`io-docker`, `io-quay`, `io-k8s`, `io-ghcr`
-  by default) — transparent caches for public upstreams. When
-  `shared.enabled` is true (the default), they live on the shared
-  registry network at `10.125.200.0/24` so multiple kind clusters
-  reuse one cache.
+  by default) — transparent caches for public upstreams. They live on
+  the project subnet at `.103+`. With `shared.enabled: true` (opt-in)
+  they move to the shared registry network at `10.125.200.0/24` so
+  multiple kind clusters reuse one cache — see
+  [Shared registries](/guide/shared-registries) for the trade-off.
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `tls` | no (default `true`) | HTTPS registries with a cert minted by the Secret plugin; set `false` for plain HTTP (see [TLS](#registry-tls-mkcert) below) |
-| `shared.enabled` | no (default `true`) | Pull-through mirrors live on the shared network |
+| `shared.enabled` | no (default `false`) | Opt in to put pull-through mirrors on the shared network |
 | `shared.network.name` | no (default `lok8s-registries`) | Shared registry network name |
 | `shared.network.cidr` | no (default `10.125.200.0/24`) | Shared registry network CIDR |
 | `mirrors[].name` | yes (per entry) | Registry name (must not be `build` or `cache`) |
@@ -388,8 +389,8 @@ cert verification until you run `lo trust` (or another option — see
 Opting out with `tls: false` keeps plain-HTTP registries, which instead
 require the registry IP range in the host's `insecure-registries`.
 
-**Default registry set** for slot 125 (the default cluster) with
-`shared.enabled: true`:
+**Registry set** for slot 125 (the default cluster) with
+`shared.enabled: true` (opt-in):
 
 | Name | IP | Hostname | Purpose |
 |------|-----|----------|---------|
@@ -400,9 +401,9 @@ require the registry IP range in the host's `insecure-registries`.
 | `io-k8s` | `10.125.200.4` | `registry.k8s.io` | Pull-through mirror |
 | `io-ghcr` | `10.125.200.5` | `ghcr.io` | Pull-through mirror |
 
-For other slots, replace `125.125` with `125.<slot>`. In non-shared
-mode (`shared.enabled: false`), pull-throughs move to the project
-subnet at `.103+`.
+For other slots, replace `125.125` with `125.<slot>`. In the default
+per-project mode, pull-throughs live on the project subnet at `.103+`
+instead.
 
 **Containerd wiring**: hostname → IP resolution happens via per-host `hosts.toml` files written by `lo::write_certs_d` to `clusters/<domain>/.containerd/certs.d/`. That directory is bind-mounted into every kind node via `extraMounts`, so containerd reads it on startup. Each host gets BOTH a hostname-keyed entry AND a raw-IP-keyed entry, covering both naming conventions.
 

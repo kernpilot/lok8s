@@ -307,15 +307,18 @@ YAML
   [ "${LOK8S_NETWORK_CIDR}" = "10.125.126.0/24" ]
   [ "${LOK8S_NETWORK_BASE_IP}" = "10.125.126.0" ]
 
-  # Registries defaulted to shared:enabled + standard mirrors.
-  [ "${LOK8S_REGISTRY_SHARED}" = "true" ]
-  [ "${LOK8S_REGISTRY_NETWORK_CIDR}" = "10.125.200.0/24" ]
+  # Registries default to NOT shared (flipped 2026-08-17: shared mode
+  # dual-homes every kind node, which is what makes node-IP drift possible —
+  # see lo::heal_node_ips). The standard mirror set still ships by default,
+  # but on the PROJECT subnet at .103+ — opt into the shared network with
+  # spec.registries.shared.enabled: true.
+  [ "${LOK8S_REGISTRY_SHARED}" = "false" ]
   [ "${LOK8S_REGISTRY_IP_BUILD}"     = "10.125.126.101" ]
   [ "${LOK8S_REGISTRY_IP_CACHE}"     = "10.125.126.102" ]
-  [ "${LOK8S_REGISTRY_IP_IO_DOCKER}" = "10.125.200.2" ]
-  [ "${LOK8S_REGISTRY_IP_IO_QUAY}"   = "10.125.200.3" ]
-  [ "${LOK8S_REGISTRY_IP_IO_K8S}"    = "10.125.200.4" ]
-  [ "${LOK8S_REGISTRY_IP_IO_GHCR}"   = "10.125.200.5" ]
+  [ "${LOK8S_REGISTRY_IP_IO_DOCKER}" = "10.125.126.103" ]
+  [ "${LOK8S_REGISTRY_IP_IO_QUAY}"   = "10.125.126.104" ]
+  [ "${LOK8S_REGISTRY_IP_IO_K8S}"    = "10.125.126.105" ]
+  [ "${LOK8S_REGISTRY_IP_IO_GHCR}"   = "10.125.126.106" ]
 }
 
 @test "read_node_config: bare lok8s.dev defaults hostPorts to true" {
@@ -385,7 +388,7 @@ YAML
 }
 
 @test "read_registry_config: non-lok8s.dev domain gets default registries+mirrors" {
-  # Domain-independent defaults (shared registries, io-* mirror set)
+  # Domain-independent defaults (per-project registries, io-* mirror set)
   # apply to ANY domain — including non-lok8s.dev — as long as
   # spec.network.{name,cidr} is explicit. Only slot-derived fields
   # (network.cidr, loadBalancer.pool, hostPorts) are *.lok8s.dev-only.
@@ -405,13 +408,13 @@ YAML
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/prod.example.com/cluster.lok8s.yaml"
 
-  # Registries defaulted even without *.lok8s.dev.
-  [ "${LOK8S_REGISTRY_SHARED}" = "true" ]
-  [ "${LOK8S_REGISTRY_NETWORK_CIDR}" = "10.125.200.0/24" ]
+  # Registries defaulted even without *.lok8s.dev — and, like everywhere,
+  # NOT shared: mirrors go on the project subnet at .103+.
+  [ "${LOK8S_REGISTRY_SHARED}" = "false" ]
   [ "${LOK8S_REGISTRY_IP_BUILD}"     = "192.168.1.101" ]
   [ "${LOK8S_REGISTRY_IP_CACHE}"     = "192.168.1.102" ]
-  [ "${LOK8S_REGISTRY_IP_IO_DOCKER}" = "10.125.200.2" ]
-  [ "${LOK8S_REGISTRY_IP_IO_GHCR}"   = "10.125.200.5" ]
+  [ "${LOK8S_REGISTRY_IP_IO_DOCKER}" = "192.168.1.103" ]
+  [ "${LOK8S_REGISTRY_IP_IO_GHCR}"   = "192.168.1.106" ]
 }
 
 # ── No-back-compat: legacy bare specs error out ──────────
