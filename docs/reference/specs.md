@@ -189,8 +189,8 @@ spec:
   registries:                    # Registry mirror configuration
     tls: true                    # HTTPS registries (cert: generator-minted; default: true)
     shared:
-      enabled: true              # Pull-through mirrors on a shared network (opt-in; default: false)
-      network:
+      enabled: false             # Pull-through mirrors on a shared network (opt-in; default: false)
+      network:                   # Only read when enabled: true
         name: lok8s-registries   # Shared network name (default)
         cidr: "10.125.200.0/24"  # Shared network CIDR (default)
     mirrors:                     # Pull-through mirror list (default: io-* set below)

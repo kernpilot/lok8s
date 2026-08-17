@@ -72,6 +72,8 @@ _load() {
   printf '%s' "172.31.0.2" > "$(node_oldip bad)"
   printf '%s' "10.9.0.2"   > "$(node_oldip good)"
   echo 'server: https://172.31.0.2:6443' > "$(node_conf bad)"
+  # A superstring of the stale address — the \b-anchored sed must NOT touch it.
+  echo 'peer: 172.31.0.20' >> "$(node_conf bad)"
 
   kind() { [[ "${1:-}" == "get" ]] && printf '%s\n' good bad; return 0; }
 
@@ -149,6 +151,12 @@ _load() {
     echo "kubelet.conf still references the dead address — kind's entrypoint" >&2
     echo "updates its whole files_to_update set on an address change, and so" >&2
     echo "must the heal." >&2
+    return 1
+  }
+  grep -q 'peer: 172.31.0.20' "$(node_conf bad)" || {
+    echo "The sed rewrote 172.31.0.20 — a SUPERSTRING of the stale address." >&2
+    echo "The \b anchors are load-bearing: without them a repair corrupts any" >&2
+    echo "address that merely starts with the stale one." >&2
     return 1
   }
   [ "$(cat "$(node_oldip bad)")" = "10.9.0.3" ] || {
