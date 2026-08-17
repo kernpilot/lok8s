@@ -200,7 +200,7 @@ When `lo up` runs, the Lo driver performs these steps:
    `*.lok8s.dev` domains — see [Specs reference](/reference/specs#default-resolution))
 2. **Validate IPs** — all registry IPs and MetalLB pool must be within their subnets
 3. **Create docker network** with the configured CIDR
-4. **Start registry containers** — the framework always ships `build` and `cache` on the project subnet, plus the configured pull-through mirrors on the shared network (default) or project subnet
+4. **Start registry containers** — the framework always ships `build` and `cache` on the project subnet, plus the configured pull-through mirrors on the project subnet (default) or the shared network (opt-in)
 5. **Render kind config** — nodes and containerd patches generated from spec
 6. **Create kind cluster** with rendered config
 7. **Create registry ConfigMap** (`lok8s-registries` in `kube-system`)
@@ -228,15 +228,16 @@ hostname (via containerd's `hosts.toml`).
 |----------|------------------------|----------|---------|
 | `build` | `10.125.125.101` | `lok8s.local` | Local build images (Tilt push target) |
 | `cache` | `10.125.125.102` | `lok8s.cache` | `build: false` pre-pull target |
-| `io-docker` | `10.125.200.2` | `docker.io` | Docker Hub pull-through cache |
-| `io-quay` | `10.125.200.3` | `quay.io` | Quay pull-through cache |
-| `io-k8s` | `10.125.200.4` | `registry.k8s.io` | Kubernetes images cache |
-| `io-ghcr` | `10.125.200.5` | `ghcr.io` | GitHub Container Registry cache |
+| `io-docker` | `10.125.125.103` | `docker.io` | Docker Hub pull-through cache |
+| `io-quay` | `10.125.125.104` | `quay.io` | Quay pull-through cache |
+| `io-k8s` | `10.125.125.105` | `registry.k8s.io` | Kubernetes images cache |
+| `io-ghcr` | `10.125.125.106` | `ghcr.io` | GitHub Container Registry cache |
 
 `build` and `cache` always live on the project subnet (`10.125.<slot>.0/24`)
-at fixed offsets. Pull-through mirrors live on the shared
-`lok8s-registries` network (`10.125.200.0/24`) by default, or on the
-project subnet (`.103+`) when `spec.registries.shared.enabled: false`.
+at fixed offsets, and by default the pull-through mirrors do too (`.103+`).
+With `spec.registries.shared.enabled: true` (opt-in) the mirrors move to
+the shared `lok8s-registries` network (`10.125.200.0/24`) so multiple
+projects reuse one cache.
 
 See the [Specs reference — Registries Configuration](/reference/specs#registries-configuration)
 for the full schema.

@@ -88,7 +88,7 @@ spec:
           properties:
             enabled:
               type: boolean
-              default: true
+              default: false
               description: |
                 When true, pull-through mirrors live on a separate shared
                 network (default 10.125.200.0/24) so multiple clusters

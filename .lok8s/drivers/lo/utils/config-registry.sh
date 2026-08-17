@@ -48,10 +48,16 @@ registry::config_generate() {
     return 1
   }
 
-  # Read shared settings from spec
+  # Read shared settings from spec. Default: NOT shared (flipped 2026-08-17,
+  # was true). Shared mode dual-homes every kind node onto the registry
+  # network, and docker's endpoint ordering lets that second NIC become eth0
+  # after an evict/re-attach — kind's entrypoint then pins kubelet's --node-ip
+  # to the registry network, silently black-holing every route INTO the node
+  # (observed live; see lo::heal_node_ips). Cross-project mirror sharing is
+  # worth opting into, not a topology to impose by default.
   local shared_enabled
   shared_enabled=$(yq -r '.spec.registries.shared.enabled' "${cluster_yaml}")
-  [[ "${shared_enabled}" != "null" && -n "${shared_enabled}" ]] || shared_enabled="true"
+  [[ "${shared_enabled}" != "null" && -n "${shared_enabled}" ]] || shared_enabled="false"
 
   # TLS mode (default true). When enabled, registries serve HTTPS on :443 with a
   # cert minted by the Secret plugin (the `cert:` generator), signed by the dev

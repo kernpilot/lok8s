@@ -114,7 +114,7 @@ drivers/lo/
 | Field | Default | Description |
 |-------|---------|-------------|
 | `tls` | `true` | Serve registries over HTTPS (`:443`) with a cert minted by the Secret plugin (`cert:` generator); no `insecure-registries` needed. `false` = plain HTTP `:80` |
-| `shared` | `true` | Use shared pull-through mirrors on dedicated network |
+| `shared` | `false` | Opt in to shared pull-through mirrors on the dedicated network |
 | `network.name` | `lok8s-registries` | Docker network name for shared mirrors |
 | `network.subnet` | `10.125.200.0/24` | Subnet for the shared registry network |
 | `baseIP` | required | Base IP for pull-through mirror computation (`10.125.200.0` in shared mode; project `/24` start in non-shared mode) |

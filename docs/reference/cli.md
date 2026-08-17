@@ -46,12 +46,12 @@ lo down
 ```
 
 Stops Tilt and deletes the kind cluster. Registries are handled by their sharing
-mode: a **shared** setup (the default) is left running — the pull-through mirrors
-are reused across clusters and a warm `build`/`cache` speeds up the next `lo up`
-(remove them with `lo registry down`, or `lo registry clean --shared` to drop
-volumes too); a **non-shared** setup is project-local with nothing to reuse, so
-its registry containers are torn down (the named volumes — and thus the build
-cache — are kept).
+mode: a **non-shared** setup (the default) is project-local with nothing to
+reuse, so its registry containers are torn down (the named volumes — and thus
+the build cache — are kept); a **shared** setup (opt-in) is left running — the
+pull-through mirrors are reused across clusters and a warm `build`/`cache`
+speeds up the next `lo up` (remove them with `lo registry down`, or
+`lo registry clean --shared` to drop volumes too).
 
 ### lo clean
 
@@ -260,16 +260,17 @@ The default 6-registry set:
 |------|------------|----------|---------|
 | `build` | `10.125.125.101` | `lok8s.local` | Tilt push target for locally-built images |
 | `cache` | `10.125.125.102` | `lok8s.cache` | Pre-pull target for `build:false` services with a remote registry |
-| `io-docker` | `10.125.200.2` | `docker.io` | Pull-through mirror (shared network) |
-| `io-quay` | `10.125.200.3` | `quay.io` | Pull-through mirror (shared network) |
-| `io-k8s` | `10.125.200.4` | `registry.k8s.io` | Pull-through mirror (shared network) |
-| `io-ghcr` | `10.125.200.5` | `ghcr.io` | Pull-through mirror (shared network) |
+| `io-docker` | `10.125.125.103` | `docker.io` | Pull-through mirror |
+| `io-quay` | `10.125.125.104` | `quay.io` | Pull-through mirror |
+| `io-k8s` | `10.125.125.105` | `registry.k8s.io` | Pull-through mirror |
+| `io-ghcr` | `10.125.125.106` | `ghcr.io` | Pull-through mirror |
 
-`build` and `cache` always live on the project subnet (`.101`/`.102`).
-With `spec.registries.shared.enabled: true` (the default) mirrors live on
-the shared `lok8s-registries` network so multiple projects reuse one
-cache; with `enabled: false` they move onto the project subnet
-(`.103`+).
+`build` and `cache` always live on the project subnet (`.101`/`.102`),
+and by default the mirrors do too (`.103`+). With
+`spec.registries.shared.enabled: true` (opt-in) the mirrors move to the
+shared `lok8s-registries` network (`10.125.200.2`+) so multiple projects
+reuse one cache — see
+[Shared registries](/guide/shared-registries) for the trade-off.
 
 ### lo image
 
