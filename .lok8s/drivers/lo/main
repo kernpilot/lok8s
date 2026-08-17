@@ -153,14 +153,17 @@ driver::provision() {
       local node_kubeconfig
       node_kubeconfig=$(_lo_extract_kubeconfig "${domain}") || return 1
 
-      # Shared mode only: repair any node kubelet pinned to the wrong docker
-      # network's address. The registry NIC (attached above) is the only thing
-      # that dual-homes a node, so single-network clusters cannot drift — and
-      # the heal must run AFTER that attach (it is what perturbs the interface
-      # order) and after the kubeconfig exists (the CNI nudge needs it). No-op
-      # when every node already agrees. Advisory: a node we cannot reach into
-      # is not a reason to fail the provision.
-      if registry::is_shared; then
+      # Repair any node kubelet pinned to the wrong docker network's address.
+      # The registry NIC (attached above) is the only thing that dual-homes a
+      # node, so single-network clusters cannot drift — but gate on NIC
+      # MEMBERSHIP, not just the spec: after the shared→per-project default
+      # flip, an already-drifted cluster whose spec omits shared.enabled reads
+      # "not shared" while its nodes still carry the registry NIC. The heal
+      # must run AFTER the attach (it is what perturbs the address resolution)
+      # and after the kubeconfig exists (the CNI nudge + latch-up check need
+      # it). No-op when every node already agrees. Advisory: a node we cannot
+      # reach into is not a reason to fail the provision.
+      if registry::is_shared || lo::nodes_on_registry_network "${cluster_name}"; then
         lo::heal_node_ips "${cluster_name}" "${node_kubeconfig}" || true
       fi
 

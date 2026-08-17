@@ -30,9 +30,10 @@ Within slot `<n>` the `/24` subnet `10.125.<n>.0/24` is split:
   10.125.<n>.151-254             kind nodes (docker IPAM)
 ```
 
-When `spec.registries.shared: true` (the default), the io-* mirrors
-move to the shared registry network at `10.125.200.0/24` and are
-shared across all clusters.
+By default the io-* mirrors live on the project subnet at `.103+`.
+With `spec.registries.shared.enabled: true` (opt-in) they move to the
+shared registry network at `10.125.200.0/24`, reused across all
+clusters.
 
 ## DNS
 

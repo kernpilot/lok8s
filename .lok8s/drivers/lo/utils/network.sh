@@ -91,34 +91,60 @@ lo::connect_nodes_to_registry_network() {
   done
 }
 
+# lo::nodes_on_registry_network <cluster-name>
+# True when at least one of the cluster's kind nodes is attached to the shared
+# registry network. The gate for lo::heal_node_ips: a node can only register on
+# the wrong network if it HAS a second network — and after the shared→per-project
+# default flip, an already-drifted cluster whose spec omits shared.enabled reads
+# "not shared" while its nodes still carry the registry NIC from the old default.
+# Gating on membership (not the spec) covers exactly that upgrade.
+lo::nodes_on_registry_network() {
+  local cluster_name="${1}"
+  local members
+  members=$(docker network inspect "$(registry::network_name)" \
+    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null) || return 1
+  local node
+  for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
+    [[ " ${members} " == *" ${node} "* ]] && return 0
+  done
+  return 1
+}
+
 # lo::heal_node_ips <cluster-name> [kubeconfig]
 # Repair kind nodes that registered their InternalIP on the WRONG docker network.
 #
 # Shared-registry clusters are dual-homed: kind creates the node on the cluster
 # network ($KIND_EXPERIMENTAL_DOCKER_NETWORK) and
 # lo::connect_nodes_to_registry_network attaches a second NIC on the registry
-# network. Docker names endpoints by attach order, so when a registry endpoint is
-# recreated it can come back as eth0 — and kind's entrypoint, which derives
-# --node-ip from the first interface it finds, then pins kubelet to the REGISTRY
-# address on the next container restart. That address is dynamically allocated,
-# so it also drifts, leaving the node registered on an IP that answers nowhere.
+# network. kind's entrypoint derives the node address from docker DNS
+# (getent ahostsv4 on the container hostname), and for a dual-homed container
+# that lookup can flip to the REGISTRY network's address after an endpoint
+# re-attach — the entrypoint then rewrites --node-ip and every other address
+# reference to it on the next container restart. That address is dynamically
+# allocated, so it also drifts, leaving the node registered on an IP that
+# answers nowhere.
 #
-# The failure is silent and brutal: the node stays Ready (kubelet dials OUT
-# fine), but nothing can reach INTO it — apiserver→kubelet and every cross-node
-# pod route break, so any pod on that node becomes unreachable. Observed
-# 2026-08-17 on kubehz-dev: cert-manager-webhook lived there, so every
-# webhook-validated apply failed and `lo up` died on `networking` + `cnpg-plugin`
-# after burning all 6 of bootstrap's CRD/webhook retries — retries that can never
-# win, because this is not the transient race they exist for.
+# The failure is silent and brutal: the node stays Ready (the lease heartbeat is
+# a separate path from node status), but kubelet rejects every node-status
+# update ("failed to validate nodeIP") and nothing can reach INTO the node —
+# apiserver→kubelet and every cross-node pod route break. Observed 2026-08-17 on
+# kubehz-dev: cert-manager-webhook lived there, so every webhook-validated apply
+# failed and `lo up` died on `networking` + `cnpg-plugin` after burning all 6 of
+# bootstrap's CRD/webhook retries — retries that can never win, because this is
+# not the transient race they exist for.
 #
-# So heal it here instead: kubelet's --node-ip must match the node's address on
-# the CLUSTER network. Idempotent and silent when everything already agrees.
+# The repair replicates the entrypoint's OWN update mechanism, but keyed on the
+# cluster-network address instead of DNS luck: sed the stale address across the
+# same files_to_update set the entrypoint maintains, write /kind/old-ipv4 so the
+# next boot's diff is quiet, restart kubelet. Idempotent and silent when
+# everything already agrees.
 lo::heal_node_ips() {
   local cluster_name="${1}" kubeconfig="${2:-}"
   local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}"
   [[ -n "${network}" ]] || return 0
 
-  local node want have healed=()
+  local node want have observed
+  local -a healed=()
   for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
     # The node's address on the CLUSTER network — the only correct --node-ip.
     want=$(docker inspect "${node}" \
@@ -128,7 +154,25 @@ lo::heal_node_ips() {
     have=$(docker exec "${node}" cat /var/lib/kubelet/kubeadm-flags.env 2>/dev/null \
       | sed -n 's/.*--node-ip=\([^ "]*\).*/\1/p')
     [[ -n "${have}" ]] || continue
-    [[ "${have}" == "${want}" ]] && continue
+
+    if [[ "${have}" == "${want}" ]]; then
+      # The file agrees — but a prior heal may have died between the sed and
+      # the kubelet restart, leaving kubelet running on the dead address while
+      # the file (the only thing the drift check reads) looks repaired. The
+      # Node object's InternalIP is the running truth: node status is frozen
+      # at the last ACCEPTED address, so a mismatch means kubelet never
+      # restarted onto the repaired flag. Restart it now.
+      [[ -n "${kubeconfig}" ]] || continue
+      observed=$(kubectl --kubeconfig "${kubeconfig}" get node "${node}" \
+        -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
+      if [[ -n "${observed}" ]] && [[ "${observed}" != "${want}" ]]; then
+        warn "lo: ${node} flag already repaired but the node still reports ${observed} — restarting kubelet"
+        docker exec "${node}" systemctl restart kubelet 2>/dev/null \
+          || warn "lo: could not restart kubelet on ${node}"
+        healed+=("${node}")
+      fi
+      continue
+    fi
 
     # Dual-stack (--node-ip=v4,v6) is a deliberate config, not the drift this
     # heals — a naive rewrite would silently drop the v6 half. Warn, don't touch.
@@ -137,9 +181,22 @@ lo::heal_node_ips() {
       continue
     fi
 
+    # Same file set kind's entrypoint updates on an address change (manifests
+    # only exist on control-plane nodes — existence-guarded). \b-anchored like
+    # the entrypoint's own sed, so 10.125.200.2 can't match inside .200.20.
     warn "lo: ${node} registered --node-ip=${have} (wrong network) — repointing to ${want} on ${network}"
     docker exec "${node}" bash -c "
-      sed -i 's|--node-ip=${have}|--node-ip=${want}|' /var/lib/kubelet/kubeadm-flags.env
+      for f in /etc/kubernetes/manifests/etcd.yaml \
+               /etc/kubernetes/manifests/kube-apiserver.yaml \
+               /etc/kubernetes/manifests/kube-controller-manager.yaml \
+               /etc/kubernetes/manifests/kube-scheduler.yaml \
+               /etc/kubernetes/controller-manager.conf \
+               /etc/kubernetes/scheduler.conf \
+               /etc/kubernetes/kubelet.conf \
+               /kind/kubeadm.conf \
+               /var/lib/kubelet/kubeadm-flags.env; do
+        [ -f \"\${f}\" ] && sed -i 's|\b${have//./\\.}\b|${want}|g' \"\${f}\"
+      done
       printf '%s' '${want}' > /kind/old-ipv4
       systemctl restart kubelet
     " 2>/dev/null || { warn "lo: could not repair ${node} — see 'docker exec ${node} systemctl status kubelet'"; continue; }

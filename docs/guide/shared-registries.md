@@ -111,7 +111,16 @@ Why shared mode is opt-in. In shared mode every kind node is attached to two Doc
 
 The failure is silent: the node lease keeps renewing, so the node reports `Ready` — but kubelet rejects every node-status update (`failed to validate nodeIP`), and no traffic reaches the node from the apiserver or from pods on other nodes. Webhooks that run on the drifted node time out cluster-wide.
 
-`lo up` detects and repairs this on every run of a shared-mode cluster: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the flag, restarts kubelet, and restarts the node's CNI agent. Non-shared clusters have one network per node, so they cannot drift.
+`lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment — so a cluster provisioned under the old shared default is healed too. Per-project clusters have one network per node, so they cannot drift.
+
+## Migrating from the old shared default
+
+Before 2026-08, `shared.enabled` defaulted to `true`. If your spec omits the key, the next `lo up` provisions per-project mirrors at `.103+` on the project subnet. Two consequences:
+
+1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless — the node-IP check above still guards them.
+2. The old shared mirror containers (`lok8s-registry-io-*`) and their volumes stay behind. Remove them with `lo registry clean --shared` when no other project uses them.
+
+To keep the old behavior, set `spec.registries.shared.enabled: true` explicitly.
 
 ## TLS registries (default)
 

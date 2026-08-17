@@ -226,7 +226,7 @@ _lo_header() {
   if [[ "${kind}" == "lo" ]] && command -v yq &>/dev/null; then
     local r_shared r_tls r_mode="local" r_sec="plain" r_count="—"
     local registries_json="${PATH_CLUSTERS}/${domain}/.registries.json"
-    r_shared=$(yq -r '.spec.registries.shared.enabled // true' "${spec}" 2>/dev/null)
+    r_shared=$(yq -r '.spec.registries.shared.enabled // false' "${spec}" 2>/dev/null)
     r_tls=$(yq -r '.spec.registries.tls // true' "${spec}" 2>/dev/null)
     [[ "${r_shared}" == "true" ]] && r_mode="shared"
     [[ "${r_tls}" == "true" ]] && r_sec="tls"

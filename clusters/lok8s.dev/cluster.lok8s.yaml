@@ -6,7 +6,7 @@
 #
 #   network.name:       "local" (from metadata.name)
 #   network.cidr:       "10.125.125.0/24"
-#   registries.shared:  enabled, "lok8s-registries" @ 10.125.200.0/24
+#   registries.shared:  disabled (opt-in; mirrors on the project subnet .103+)
 #   registries.mirrors: io-docker, io-quay, io-k8s, io-ghcr
 #   nodes:              CP=1, workers=0
 #   nodes.hostPorts:    true  (slot 125 owns 80/443/8080 on the host)
