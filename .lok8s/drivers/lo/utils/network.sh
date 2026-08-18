@@ -38,11 +38,41 @@ lo::registry_dynamic_range() {
   echo "$(ip::add "${base}" $(( 1 << (31 - prefix) )))/$(( prefix + 1 ))"
 }
 
+# lo::registry_network_create <network> <subnet> [ip-range]
+# The one place the shared network is created. The reserved dynamic range is
+# what makes registry-IP squatting IMPOSSIBLE — statics live below it, dynamic
+# attachers (kind nodes) can only ever land inside it.
+lo::registry_network_create() {
+  local network="${1}" subnet="${2}" dynamic_range="${3:-}"
+  local ip_range_args=()
+  [[ -n "${dynamic_range}" ]] && ip_range_args=(--ip-range "${dynamic_range}")
+
+  docker network create -d=bridge --subnet "${subnet}" \
+    "${ip_range_args[@]}" \
+    -o "com.docker.network.bridge.enable_ip_masquerade=true" \
+    -o "com.docker.network.bridge.enable_icc=true" \
+    --label "lok8s.registry=shared" \
+    "${network}"
+}
+
+# lo::registry_network
+# Ensure the shared registry network exists WITH the reserved dynamic range.
+#
+# A network created before the range reservation is force-recreated: the
+# attached lok8s mirror containers are removed too, so the lo::registries
+# reconcile that follows in the same run recreates them at their static
+# addresses on the new network; kind nodes are force-detached and re-attach
+# via lo::connect_nodes_to_registry_network (this run for the active cluster,
+# the next `lo up` for any other project). No in-place migration choreography
+# — the network and its mirrors are cheap, disposable state.
 lo::registry_network() {
   local network
   network=$(registry::network_name)
   local subnet
   subnet=$(registry::network_cidr)
+
+  local dynamic_range=""
+  dynamic_range=$(lo::registry_dynamic_range "${subnet}") || dynamic_range=""
 
   if docker network inspect "${network}" &>/dev/null; then
     local current_subnet
@@ -53,24 +83,38 @@ lo::registry_network() {
       echo "error: run 'lo registry clean --shared' to recreate, or adjust spec.registries.network.subnet" >&2
       return 1
     fi
-    # A pre-ip-range network stays usable: lo::registries evicts any node
-    # squatting a registry IP and re-attaches it afterwards, which converges
-    # to the same layout the reserved range enforces up front.
-    return 0
+
+    # Range already reserved — nothing to do.
+    local current_range
+    current_range=$(docker network inspect "${network}" \
+      --format '{{range .IPAM.Config}}{{.IPRange}}{{end}}' 2>/dev/null || true)
+    if [[ -n "${current_range}" ]] || [[ -z "${dynamic_range}" ]]; then
+      return 0
+    fi
+
+    # Legacy network without the reserved range: recreate it. Remove OUR
+    # mirror containers first (a running mirror whose config-hash still
+    # matches would otherwise reconcile as "unchanged" while detached from
+    # the new network); their named volumes — the cache — survive.
+    warn "lo: registry network '${network}' predates the reserved dynamic range — recreating it with ${dynamic_range} (mirrors + nodes re-attach via the normal reconcile)"
+    local name
+    for name in $(docker network inspect "${network}" \
+      -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' 2>/dev/null); do
+      if [[ "${name}" == lok8s-registry-* ]]; then
+        # Removed, not detached: a running mirror with a matching config-hash
+        # would reconcile "unchanged" while off-network. Cache volumes survive.
+        docker rm -f "${name}" >/dev/null 2>&1 || true
+      else
+        # `docker network rm` REFUSES a network with active endpoints (even
+        # with -f, which only suppresses the not-found error — verified live)
+        # — every remaining member must be detached explicitly.
+        docker network disconnect -f "${network}" "${name}" >/dev/null 2>&1 || true
+      fi
+    done
+    docker network rm "${network}" >/dev/null || return 1
   fi
 
-  local ip_range_args=()
-  local dynamic_range
-  if dynamic_range=$(lo::registry_dynamic_range "${subnet}"); then
-    ip_range_args=(--ip-range "${dynamic_range}")
-  fi
-
-  docker network create -d=bridge --subnet "${subnet}" \
-    "${ip_range_args[@]}" \
-    -o "com.docker.network.bridge.enable_ip_masquerade=true" \
-    -o "com.docker.network.bridge.enable_icc=true" \
-    --label "lok8s.registry=shared" \
-    "${network}"
+  lo::registry_network_create "${network}" "${subnet}" "${dynamic_range}"
 }
 
 lo::connect_nodes_to_registry_network() {

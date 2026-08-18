@@ -2,8 +2,9 @@
 # registry_lifecycle_test.bats — unit tests for the idempotent registry
 # container lifecycle (lo::registries): desired-state reconciliation via the
 # config-hash label, durable config files under LO_REGISTRY_STATE_DIR, the
-# squatted-IP eviction/re-attach heal, portable ${REMOTE_URL} rendering (no
-# envsubst), and the reserved dynamic range for the shared network.
+# loud squatted-IP failure, portable ${REMOTE_URL} rendering (no envsubst),
+# and the reserved dynamic range for the shared network — including the
+# recreate of a legacy network that predates the reservation.
 #
 # Docker is stubbed with a file-backed fake: containers/<name> holds
 # "status\nhash", networks/<net> holds "ip/prefix name" lines — enough state
@@ -143,8 +144,30 @@ docker() {
       shift
       case "${sub}" in
         inspect)
-          [[ -f "${FAKE_DOCKER}/networks/${1}" ]] || return 1
-          cat "${FAKE_DOCKER}/networks/${1}"
+          # --format (either side of the name): IPAM metadata comes from
+          # networks/<net>.meta ("subnet\nrange"). Bare/-f inspect keeps the
+          # historical cat of the member lines (the awk in registry_ip_holder
+          # feeds on it).
+          local nfmt="" nnet="" narg
+          for narg in "${@}"; do
+            case "${narg}" in
+              --format|-f) ;;
+              '{{'*) nfmt="${narg}" ;;
+              *) [[ -z "${nnet}" ]] && nnet="${narg}" ;;
+            esac
+          done
+          [[ -f "${FAKE_DOCKER}/networks/${nnet}" ]] || return 1
+          if [[ "${nfmt}" == *"Subnet"* ]]; then
+            sed -n 1p "${FAKE_DOCKER}/networks/${nnet}.meta" 2>/dev/null
+          elif [[ "${nfmt}" == *"IPRange"* ]]; then
+            sed -n 2p "${FAKE_DOCKER}/networks/${nnet}.meta" 2>/dev/null
+          elif [[ "${nfmt}" == *"IPv4Address"* ]]; then
+            cat "${FAKE_DOCKER}/networks/${nnet}"
+          elif [[ "${nfmt}" == *"Containers"*"Name"* ]]; then
+            awk '{print $2}' "${FAKE_DOCKER}/networks/${nnet}"
+          else
+            cat "${FAKE_DOCKER}/networks/${nnet}"
+          fi
           ;;
         disconnect)
           [[ "${1}" == "-f" ]] && shift
@@ -152,6 +175,28 @@ docker() {
           ;;
         connect)
           echo "10.125.200.240/24 ${2}" >> "${FAKE_DOCKER}/networks/${1}"
+          ;;
+        create)
+          local -a nargv=("${@}")
+          local j nname="${nargv[-1]}" nsubnet="" nrange=""
+          for (( j = 0; j < ${#nargv[@]}; j++ )); do
+            case "${nargv[${j}]}" in
+              --subnet)   nsubnet="${nargv[$(( j + 1 ))]}" ;;
+              --ip-range) nrange="${nargv[$(( j + 1 ))]}" ;;
+            esac
+          done
+          : > "${FAKE_DOCKER}/networks/${nname}"
+          printf '%s\n%s\n' "${nsubnet}" "${nrange}" > "${FAKE_DOCKER}/networks/${nname}.meta"
+          ;;
+        rm)
+          # Real docker: rm REFUSES a network with active endpoints; -f only
+          # suppresses the not-found error (verified live 2026-08-18).
+          [[ "${1}" == "-f" ]] && shift
+          if [[ -s "${FAKE_DOCKER}/networks/${1}" ]]; then
+            echo "Error response from daemon: error while removing network: network ${1} has active endpoints" >&2
+            return 1
+          fi
+          rm -f "${FAKE_DOCKER}/networks/${1}" "${FAKE_DOCKER}/networks/${1}.meta"
           ;;
       esac
       ;;
@@ -195,6 +240,80 @@ docker() {
   _load_driver
   run lo::registry_dynamic_range "10.0.0.0/31"
   assert_failure
+}
+
+@test "registry_network: fresh create reserves the dynamic range" {
+  _load_driver
+  rm -f "${FAKE_DOCKER}/networks/lok8s-registries"
+
+  run lo::registry_network
+  assert_success
+  grep -q -- "--ip-range 10.125.200.128/25" "${DOCKER_LOG}" || {
+    echo "network created WITHOUT the reserved range — dynamic attachers can" >&2
+    echo "squat the mirrors' static IPs again." >&2
+    return 1
+  }
+  [ "$(sed -n 2p "${FAKE_DOCKER}/networks/lok8s-registries.meta")" = "10.125.200.128/25" ]
+}
+
+@test "registry_network: a range-reserved network is left untouched" {
+  _load_driver
+  printf '10.125.200.0/24\n10.125.200.128/25\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"
+  : > "${DOCKER_LOG}"
+
+  run lo::registry_network
+  assert_success
+  ! grep -qE "^docker network (rm|create)" "${DOCKER_LOG}" || {
+    echo "a correctly-configured network was churned:" >&2
+    cat "${DOCKER_LOG}" >&2
+    return 1
+  }
+}
+
+@test "registry_network: a legacy no-range network is recreated, mirrors removed" {
+  _load_driver
+  # Pre-reservation network: subnet only, a mirror + a kind node attached.
+  printf '10.125.200.0/24\n\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"
+  printf 'running\nsome-hash\n' > "${FAKE_DOCKER}/containers/lok8s-registry-io-docker"
+  printf 'running\n\n' > "${FAKE_DOCKER}/containers/test-node"
+  echo "10.125.200.2/24 lok8s-registry-io-docker" >> "${FAKE_DOCKER}/networks/lok8s-registries"
+  echo "10.125.200.7/24 test-node" >> "${FAKE_DOCKER}/networks/lok8s-registries"
+
+  run lo::registry_network
+  assert_success
+
+  # Recreated with the range.
+  [ "$(sed -n 2p "${FAKE_DOCKER}/networks/lok8s-registries.meta")" = "10.125.200.128/25" ]
+  # The mirror container was REMOVED — a running mirror with a matching
+  # config-hash would otherwise reconcile "unchanged" while detached from
+  # the new network, silently breaking every pull.
+  [ ! -f "${FAKE_DOCKER}/containers/lok8s-registry-io-docker" ] || {
+    echo "the mirror survived the recreate — lo::registries will report it" >&2
+    echo "unchanged and never re-attach it." >&2
+    return 1
+  }
+  # The kind node is detached but NOT removed — it re-attaches via
+  # lo::connect_nodes_to_registry_network on its cluster's next lo up.
+  [ -f "${FAKE_DOCKER}/containers/test-node" ]
+  ! grep -q "^docker rm -f test-node$" "${DOCKER_LOG}"
+}
+
+@test "registry_network: legacy recreate then reconcile restores the mirror at its static IP" {
+  _load_driver
+  # End-to-end: the recreate (above) followed by the normal lo::registries
+  # run must land the mirror back on .2 on the NEW network — the property
+  # the whole recreate design leans on.
+  printf '10.125.200.0/24\n\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"
+  printf 'running\nsome-hash\n' > "${FAKE_DOCKER}/containers/lok8s-registry-io-docker"
+  echo "10.125.200.2/24 lok8s-registry-io-docker" >> "${FAKE_DOCKER}/networks/lok8s-registries"
+
+  lo::registry_network
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-io-docker created"
+  grep -q "^10.125.200.2/24 lok8s-registry-io-docker$" \
+    "${FAKE_DOCKER}/networks/lok8s-registries"
 }
 
 # ── IP holder lookup ─────────────────────────────────────
@@ -287,24 +406,24 @@ docker() {
   assert_output --partial "registry/lok8s-registry-io-docker restarted"
 }
 
-@test "registries: evicts a node squatting the static IP and re-attaches it" {
+@test "registries: a persistently squatted static IP fails loudly, holder named" {
   _load_driver
-  # A kind node grabbed the mirror's .2 via dynamic allocation (the reboot
-  # failure mode). It has no config-hash label — it is not one of ours.
+  # A container holds the mirror's .2. Eviction is GONE by design — on a
+  # range-reserved network this cannot happen, so when it does (legacy
+  # network, concurrent tooling) the fix is recreating the network, not
+  # silently detaching someone else's container.
   printf 'running\n\n' > "${FAKE_DOCKER}/containers/test-node"
   echo "10.125.200.2/24 test-node" >> "${FAKE_DOCKER}/networks/lok8s-registries"
 
   run lo::registries "test.lok8s.dev" \
     "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
-  assert_success
-  assert_output --partial "registry/lok8s-registry-io-docker created"
+  assert_failure
+  assert_output --partial "held by 'test-node'"
+  assert_output --partial "lo registry clean --shared"
 
-  # The registry owns its IP; the node was re-attached (dynamically) after.
-  grep -q "^10.125.200.2/24 lok8s-registry-io-docker$" \
-    "${FAKE_DOCKER}/networks/lok8s-registries"
+  # The squatter was NOT touched — no eviction, no shuffle.
   grep -q " test-node$" "${FAKE_DOCKER}/networks/lok8s-registries"
-  grep -q "^docker network disconnect -f lok8s-registries test-node$" "${DOCKER_LOG}"
-  grep -q "^docker network connect lok8s-registries test-node$" "${DOCKER_LOG}"
+  ! grep -q "^docker network disconnect -f lok8s-registries test-node$" "${DOCKER_LOG}"
 }
 
 @test "registries: one failure doesn't abort the rest, rc is non-zero" {
@@ -319,25 +438,23 @@ docker() {
   assert_output --partial "registry/lok8s-registry-io-docker created"
 }
 
-@test "registries: late squatter after the holder check is evicted on retry" {
+@test "registries: a transiently-held address succeeds on the bounded retry" {
   _load_driver
-  printf 'running\n\n' > "${FAKE_DOCKER}/containers/late-node"
-
-  # Delegate to the real fake, but have the FIRST `docker run` for io-docker
-  # simulate a squatter landing between the holder check and the run: inject
-  # the network entry and fail — the retry's holder re-check must evict it.
+  # The endpoint of a just-removed container can lag its release: the first
+  # `docker run` fails address-in-use with NO visible holder (the entry is
+  # already gone by the re-check) — the retry must succeed, not fail loudly.
   eval "_real_docker() $(declare -f docker | tail -n +2)"
-  LATE_ONCE="${BATS_TEST_TMPDIR}/late-once"
+  LAG_ONCE="${BATS_TEST_TMPDIR}/lag-once"
   docker() {
-    if [[ "${1} ${2:-}" == "run -d" && "${*}" == *lok8s-registry-io-docker* && ! -f "${LATE_ONCE}" ]]; then
-      touch "${LATE_ONCE}"
+    if [[ "${1} ${2:-}" == "run -d" && "${*}" == *lok8s-registry-io-docker* && ! -f "${LAG_ONCE}" ]]; then
+      touch "${LAG_ONCE}"
       echo "docker ${*}" >> "${DOCKER_LOG}"
-      echo "10.125.200.2/24 late-node" >> "${FAKE_DOCKER}/networks/lok8s-registries"
       echo "docker: failed to set up container networking: Address already in use" >&2
       return 125
     fi
     _real_docker "${@}"
   }
+  sleep() { :; }
 
   run lo::registries "test.lok8s.dev" \
     "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
@@ -345,7 +462,6 @@ docker() {
   assert_output --partial "registry/lok8s-registry-io-docker created"
   grep -q "^10.125.200.2/24 lok8s-registry-io-docker$" \
     "${FAKE_DOCKER}/networks/lok8s-registries"
-  grep -q "^docker network disconnect -f lok8s-registries late-node$" "${DOCKER_LOG}"
 }
 
 @test "registries: losing the start race to a concurrent lo is unchanged" {

@@ -242,13 +242,6 @@ lo::registries() {
 
   mkdir -p "${LO_REGISTRY_STATE_DIR}"
 
-  # Containers evicted from a squatted registry IP ("network<TAB>name"). Kind
-  # nodes attach to the shared network with DYNAMIC addresses; after a reboot
-  # (or on a legacy network created without the reserved --ip-range) they can
-  # grab the static IPs the registries own. Evicted squatters are re-attached
-  # only after ALL registries hold their addresses, so the dynamic re-attach
-  # can't squat the next registry in the loop.
-  local -a evicted=()
   local failed=0
 
   _lo_registry_start() {
@@ -331,19 +324,6 @@ lo::registries() {
     docker volume create "${reg_name}" >/dev/null 2>&1 || true
     docker rm -f "${reg_name}" >/dev/null 2>&1 || true
 
-    # Free the static IP if another container squats it. Usually a kind node
-    # that dynamically grabbed it (re-attached after the loop); a STALE lok8s
-    # registry holding it (IP layout drift) is also evicted — its own
-    # iteration recreates it at its new address this same run, whereas
-    # skipping it would strand THIS registry for a whole extra run.
-    local holder
-    holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
-    if [[ -n "${holder}" ]]; then
-      debug "registry ${reg_name}: evicting ${holder} from ${ip} on ${reg_network}"
-      docker network disconnect -f "${reg_network}" "${holder}" >/dev/null 2>&1 || true
-      evicted+=("${reg_network}"$'\t'"${holder}")
-    fi
-
     local attempt run_err=""
     for attempt in 1 2; do
       if run_err=$(docker run -d --restart=always --name "${reg_name}" \
@@ -368,17 +348,19 @@ lo::registries() {
       docker rm -f "${reg_name}" >/dev/null 2>&1 || true
       (( attempt == 1 )) || break
       # One bounded retry for a transiently-held address: the endpoint of the
-      # container we just removed can lag its release, and a late squatter can
-      # appear between the holder check and the run.
+      # container we just removed can lag its release. A PERSISTENT holder
+      # should be impossible on a range-reserved network (lo::registry_network
+      # recreates legacy ones) — if one appears anyway, fail loudly with the
+      # holder named rather than shuffling someone else's container.
+      local holder
       if [[ "${run_err,,}" == *"address already in use"* ]]; then
         holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
         if [[ -n "${holder}" ]]; then
-          debug "registry ${reg_name}: evicting late squatter ${holder} from ${ip}"
-          docker network disconnect -f "${reg_network}" "${holder}" >/dev/null 2>&1 || true
-          evicted+=("${reg_network}"$'\t'"${holder}")
-        else
-          sleep 1
+          echo "error: registry/${reg_name}: ${ip} is held by '${holder}' on '${reg_network}'." >&2
+          echo "error: recreate the shared network: lo registry clean --shared && lo up" >&2
+          return 1
         fi
+        sleep 1
       else
         break
       fi
@@ -389,19 +371,6 @@ lo::registries() {
   }
 
   registry::each _lo_registry_start
-
-  # Re-attach evicted squatters — except our own registry containers (each
-  # re-runs with its static IP in its own iteration; identified by the
-  # config-hash label). Every registry now holds its address, so the dynamic
-  # re-attach lands on a free IP.
-  local entry net victim
-  for entry in "${evicted[@]}"; do
-    net="${entry%%$'\t'*}"
-    victim="${entry##*$'\t'}"
-    docker inspect "${victim}" &>/dev/null || continue
-    [[ -z "$(docker inspect -f '{{index .Config.Labels "lok8s.dev/config-hash"}}' "${victim}" 2>/dev/null)" ]] || continue
-    docker network connect "${net}" "${victim}" >/dev/null 2>&1 || true
-  done
 
   (( failed == 0 ))
 }

@@ -50,8 +50,8 @@ registry::config_generate() {
 
   # Read shared settings from spec. Default: NOT shared (flipped 2026-08-17,
   # was true). Shared mode dual-homes every kind node onto the registry
-  # network, and docker's endpoint ordering lets that second NIC become eth0
-  # after an evict/re-attach — kind's entrypoint then pins kubelet's --node-ip
+  # network, and docker's address resolution for a dual-homed container can
+  # flip after endpoint churn — kind's entrypoint then pins kubelet's --node-ip
   # to the registry network, silently black-holing every route INTO the node
   # (observed live; see lo::heal_node_ips). Cross-project mirror sharing is
   # worth opting into, not a topology to impose by default.
