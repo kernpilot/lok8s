@@ -289,10 +289,10 @@ registry::container() {
   local name="${1}"
   local json="${LOK8S_REGISTRY_JSON}"
 
-  jq -r --arg n "${name}" '
+  jq -r --arg n "${name}" --arg p "${LO_SHARED_REGISTRY_PREFIX}" '
     (.registries[] | select(.name == $n)) as $r |
     if .shared and $r.type == "mirror"
-    then ["lok8s-registry-" + $n, .network.name]
+    then [$p + $n, .network.name]
     else [.project_network + "-registry-" + $n, .project_network]
     end | @tsv
   ' "${json}"

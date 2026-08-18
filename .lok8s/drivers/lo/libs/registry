@@ -68,9 +68,9 @@ registry::up() {
   _domain="$(_registry_domain)"
   local cluster_yaml="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
 
-  lo::network
+  lo::network || return 1
   if registry::is_shared; then
-    lo::registry_network
+    lo::registry_network || return 1
   fi
 
   kapply::run registries lo::registries "${_domain}" "${cluster_yaml}"
@@ -101,23 +101,28 @@ registry::clean() {
       # inherited main::registry domain arg (AG012).
       local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
       [[ "${type}" == "mirror" ]] || return 0
-      local reg_name="lok8s-registry-${name}"
+      local reg_name="${LO_SHARED_REGISTRY_PREFIX}${name}"
       docker rm -f "${reg_name}" 2>/dev/null || true
       docker volume rm -f "${reg_name}" 2>/dev/null || true
       rm -f "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml" "${LO_REGISTRY_STATE_DIR}/${reg_name}.yaml.lock"
     }
     registry::each _clean_shared
 
+    # An explicitly-invoked clean must actually clear the network — it is the
+    # remediation the squatted-registry error recommends, which fires exactly
+    # when a holder is attached. Detach whatever remains (named, so the
+    # operator sees whose containers were cut) before removing; a detached
+    # kind node re-attaches on its cluster's next `lo up`.
     local net
     net=$(registry::network_name)
-    local remaining
-    remaining="$(docker network inspect -f '{{len .Containers}}' "${net}" 2>/dev/null || echo 0)"
-    if [[ "${remaining}" == "0" ]]; then
-      docker network rm "${net}" 2>/dev/null || true
-      debug "Removed empty registry network ${net}"
-    else
-      debug "Registry network ${net} still has ${remaining} container(s), kept"
-    fi
+    local member
+    for member in $(docker network inspect "${net}" \
+      -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' 2>/dev/null); do
+      warn "registry clean: detaching '${member}' from ${net} (re-attaches on its cluster's next 'lo up')"
+      docker network disconnect -f "${net}" "${member}" >/dev/null 2>&1 || true
+    done
+    docker network rm "${net}" 2>/dev/null || true
+    debug "Removed registry network ${net}"
   fi
 }
 

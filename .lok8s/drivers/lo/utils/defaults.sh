@@ -27,4 +27,9 @@ LO_REGISTRY_TLS_MOUNT="/etc/registry/certs"
 LO_REGISTRY_STATE_DIR="${LO_REGISTRY_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/lok8s/registries}"
 
 LO_SHARED_REGISTRY_NETWORK="lok8s-registries"
+# Container-name prefix for SHARED mirrors — the ownership contract between
+# the recreate in lo::registry_network (which may docker-rm matching
+# containers), registry::container (which names them), and registry::clean.
+# One spelling; a rename that misses a site strands mirrors mid-recreate.
+LO_SHARED_REGISTRY_PREFIX="lok8s-registry-"
 LO_SHARED_REGISTRY_CIDR="10.125.200.0/24"

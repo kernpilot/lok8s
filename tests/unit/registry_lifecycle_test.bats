@@ -162,6 +162,9 @@ docker() {
           elif [[ "${nfmt}" == *"IPRange"* ]]; then
             sed -n 2p "${FAKE_DOCKER}/networks/${nnet}.meta" 2>/dev/null
           elif [[ "${nfmt}" == *"IPv4Address"* ]]; then
+            # ORDER MATTERS: registry_ip_holder's template contains
+            # IPv4Address AND Containers/Name — this branch must win or the
+            # holder lookup gets names-only lines and every match fails.
             cat "${FAKE_DOCKER}/networks/${nnet}"
           elif [[ "${nfmt}" == *"Containers"*"Name"* ]]; then
             awk '{print $2}' "${FAKE_DOCKER}/networks/${nnet}"
@@ -240,6 +243,30 @@ docker() {
   _load_driver
   run lo::registry_dynamic_range "10.0.0.0/31"
   assert_failure
+}
+
+@test "network_dynamic_range: /24 reserves the upper /26 for kind nodes" {
+  _load_driver
+  run lo::network_dynamic_range "10.125.125.0/24"
+  assert_success
+  # .192+ — ABOVE the registries (.101-.110) and the default MetalLB pool
+  # (.125-.150): a dynamically-attached node can collide with neither.
+  assert_output "10.125.125.192/26"
+}
+
+@test "network: fresh project network reserves the node range" {
+  _load_driver
+  rm -f "${FAKE_DOCKER}/networks/lok8s"
+
+  run lo::network
+  assert_success
+  grep -q -- "--ip-range 10.125.50.0/24" "${DOCKER_LOG}" && return 1
+  grep -q -- "--ip-range 10.125.50.192/26" "${DOCKER_LOG}" || {
+    echo "the project network was created WITHOUT its reserved node range —" >&2
+    echo "a rebooting node can squat build/cache (.101/.102) or a MetalLB" >&2
+    echo "pool address again." >&2
+    return 1
+  }
 }
 
 @test "registry_network: fresh create reserves the dynamic range" {
@@ -464,6 +491,55 @@ docker() {
     "${FAKE_DOCKER}/networks/lok8s-registries"
 }
 
+@test "registry_network: legacy recreate survives a lagging endpoint release" {
+  _load_driver
+  # First `docker network rm` fails (a just-removed mirror's endpoint lags
+  # its release — the daemon behavior the codebase documents), the retry
+  # succeeds. Without the bounded retry the recreate dies here transiently.
+  printf '10.125.200.0/24\n\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"
+  printf 'running\nsome-hash\n' > "${FAKE_DOCKER}/containers/lok8s-registry-io-docker"
+  echo "10.125.200.2/24 lok8s-registry-io-docker" >> "${FAKE_DOCKER}/networks/lok8s-registries"
+
+  eval "_real_docker() $(declare -f docker | tail -n +2)"
+  LAGGED="${BATS_TEST_TMPDIR}/net-rm-lagged"
+  docker() {
+    if [[ "${1} ${2:-} ${3:-}" == "network rm lok8s-registries" && ! -f "${LAGGED}" ]]; then
+      touch "${LAGGED}"
+      echo "docker network ${*:2}" >> "${DOCKER_LOG}"
+      echo "Error response from daemon: error while removing network: network lok8s-registries has active endpoints" >&2
+      return 1
+    fi
+    _real_docker "${@}"
+  }
+  sleep() { :; }
+
+  run lo::registry_network
+  assert_success
+  [ "$(sed -n 2p "${FAKE_DOCKER}/networks/lok8s-registries.meta")" = "10.125.200.128/25" ]
+}
+
+@test "registries: a project-network squat gets the node-reboot remediation" {
+  _load_driver
+  # Same persistent-holder failure, but on the PROJECT network (build/cache
+  # live there): the shared-net "clean --shared" hint cannot fix it — the
+  # error must point at the squatting node instead.
+  printf 'running\n\n' > "${FAKE_DOCKER}/containers/test-node"
+  echo "10.125.50.101/24 test-node" >> "${FAKE_DOCKER}/networks/lok8s"
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "held by 'test-node'"
+  assert_output --partial "docker network disconnect -f lok8s test-node"
+  # The shared-net remediation must NOT be offered for a project-net squat.
+  ! grep -q "clean --shared && lo up" <<< "${output}" || {
+    echo "the error recommends 'lo registry clean --shared' for a PROJECT-" >&2
+    echo "network squat — that command touches a different network and" >&2
+    echo "cannot fix this." >&2
+    return 1
+  }
+}
+
 @test "registries: losing the start race to a concurrent lo is unchanged" {
   _load_driver
   lo::registries "test.lok8s.dev" \
@@ -505,4 +581,35 @@ docker() {
   # Shared mirrors persist across project lifecycles.
   [ -f "${FAKE_DOCKER}/containers/lok8s-registry-io-docker" ]
   [ -f "${LO_REGISTRY_STATE_DIR}/lok8s-registry-io-docker.yaml" ]
+}
+
+@test "registry clean --shared: detaches holders so the network actually goes away" {
+  _load_driver
+  # libs/registry sources its deps from ${PATH_LOK8S} — point it at the real
+  # tree (each @test runs in its own process; nothing leaks).
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/libs/registry"
+  # The real init needs the (stubbed-out) domain helpers — re-derive the
+  # registry JSON from the spec instead.
+  _registry_init() {
+    lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  }
+  lo::cleanup_registries() { :; }
+  warn() { echo "warn: ${*}"; }
+
+  # A foreign holder is attached — exactly the state the squatted-registry
+  # error sends the operator here to fix. The old empty-check kept the
+  # network, sending the next lo up straight back into the same error.
+  printf '10.125.200.0/24\n\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"
+  echo "10.125.200.2/24 foreign-node" >> "${FAKE_DOCKER}/networks/lok8s-registries"
+
+  local shared=1 domain="test.lok8s.dev"
+  run registry::clean
+  assert_success
+  assert_output --partial "detaching 'foreign-node'"
+  [ ! -f "${FAKE_DOCKER}/networks/lok8s-registries" ] || {
+    echo "the network survived clean --shared — the recommended remediation" >&2
+    echo "loops back into the same squatted-IP failure forever." >&2
+    return 1
+  }
 }

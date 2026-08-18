@@ -357,7 +357,19 @@ lo::registries() {
         holder=$(lo::registry_ip_holder "${reg_network}" "${ip}")
         if [[ -n "${holder}" ]]; then
           echo "error: registry/${reg_name}: ${ip} is held by '${holder}' on '${reg_network}'." >&2
-          echo "error: recreate the shared network: lo registry clean --shared && lo up" >&2
+          if [[ "${reg_network}" == "$(registry::network_name)" ]]; then
+            # Shared net: recreating it (which reserves the dynamic range) is
+            # always the fix — clean detaches any holder.
+            echo "error: recreate the shared network: lo registry clean --shared && lo up" >&2
+          else
+            # Project net (legacy, created before its reserved range): the
+            # holder is almost always a kind node that grabbed the address
+            # after a host reboot. Detaching a live node changes its address
+            # (lo up heals the node-ip afterwards); recreating the cluster
+            # rebuilds the network WITH the range.
+            echo "error: a kind node likely grabbed this address after a reboot — run: docker network disconnect -f ${reg_network} ${holder} && lo up" >&2
+            echo "error: (or recreate the cluster — 'lo down && lo up' — to rebuild '${reg_network}' with its reserved dynamic range)" >&2
+          fi
           return 1
         fi
         sleep 1

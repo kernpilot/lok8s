@@ -16,13 +16,38 @@ lo::network() {
   fi
 
   if ! docker network inspect "${network}" &>/dev/null; then
+    # Reserve the upper quarter for Docker's dynamic allocation (kind nodes),
+    # same idea as the shared network's reservation: everything static on the
+    # project net — build/cache at .101/.102, non-shared mirrors at .103+, the
+    # MetalLB pool at .125-.150 — lives BELOW it, so a node can never squat a
+    # registry address or collide with an LB IP after a reboot. Legacy
+    # networks (no range) keep working; a squat there fails loudly with the
+    # holder named (see lo::registries).
+    local ip_range_args=()
+    local dynamic_range
+    if dynamic_range=$(lo::network_dynamic_range "${subnet}"); then
+      ip_range_args=(--ip-range "${dynamic_range}")
+    fi
     docker network create -d=bridge --subnet "${subnet}" \
+      "${ip_range_args[@]}" \
       -o "com.docker.network.bridge.name=${network}" \
       -o "com.docker.network.bridge.enable_ip_masquerade=true" \
       -o "com.docker.network.bridge.enable_icc=true" \
       -o "com.docker.network.bridge.host_binding_ipv4=0.0.0.0" \
       "${network}"
   fi
+}
+
+# lo::network_dynamic_range <cidr> — the upper QUARTER of <cidr> as its own
+# CIDR (10.125.125.0/24 → 10.125.125.192/26). The project net needs a smaller
+# dynamic pool than the shared net's upper half: its static tenants reach
+# higher (registries .101+, the default MetalLB pool up to .150), and ~60
+# dynamic addresses is far beyond any kind cluster's node count.
+lo::network_dynamic_range() {
+  local cidr="${1}"
+  local base="${cidr%/*}" prefix="${cidr#*/}"
+  (( prefix >= 1 && prefix <= 28 )) || return 1
+  echo "$(ip::add "${base}" $(( 3 << (30 - prefix) )))/$(( prefix + 2 ))"
 }
 
 # lo::registry_dynamic_range <cidr> — the upper half of <cidr> as its own
@@ -80,7 +105,7 @@ lo::registry_network() {
       --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
     if [[ "${current_subnet}" != "${subnet}" ]]; then
       echo "error: registry network '${network}' exists with subnet ${current_subnet}, expected ${subnet}" >&2
-      echo "error: run 'lo registry clean --shared' to recreate, or adjust spec.registries.network.subnet" >&2
+      echo "error: run 'lo registry clean --shared' to recreate, or adjust spec.registries.shared.network.cidr" >&2
       return 1
     fi
 
@@ -97,10 +122,28 @@ lo::registry_network() {
     # matches would otherwise reconcile as "unchanged" while detached from
     # the new network); their named volumes — the cache — survive.
     warn "lo: registry network '${network}' predates the reserved dynamic range — recreating it with ${dynamic_range} (mirrors + nodes re-attach via the normal reconcile)"
+
+    # Serialize the recreate across concurrent `lo` runs (the shared network
+    # is host-global). Best-effort, same pattern as the registry reconcile:
+    # without flock a loser can rm the WINNER's freshly-created network.
+    local lockfd=0
+    mkdir -p "${LO_REGISTRY_STATE_DIR}" 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1 && exec 8>"${LO_REGISTRY_STATE_DIR}/${network}.netlock"; then
+      lockfd=1
+      flock -w 60 8 || debug "registry network ${network}: lock wait timed out, proceeding unlocked"
+      # The winner may have finished the recreate while we waited — re-check.
+      current_range=$(docker network inspect "${network}" \
+        --format '{{range .IPAM.Config}}{{.IPRange}}{{end}}' 2>/dev/null || true)
+      if [[ -n "${current_range}" ]]; then
+        (( lockfd )) && exec 8>&-
+        return 0
+      fi
+    fi
+
     local name
     for name in $(docker network inspect "${network}" \
       -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' 2>/dev/null); do
-      if [[ "${name}" == lok8s-registry-* ]]; then
+      if [[ "${name}" == "${LO_SHARED_REGISTRY_PREFIX}"* ]]; then
         # Removed, not detached: a running mirror with a matching config-hash
         # would reconcile "unchanged" while off-network. Cache volumes survive.
         docker rm -f "${name}" >/dev/null 2>&1 || true
@@ -111,7 +154,15 @@ lo::registry_network() {
         docker network disconnect -f "${network}" "${name}" >/dev/null 2>&1 || true
       fi
     done
-    docker network rm "${network}" >/dev/null || return 1
+    # A just-removed container's endpoint can lag its release (the same lag
+    # the registry-start retry absorbs) — one bounded retry before giving up.
+    local attempt rm_rc=1
+    for attempt in 1 2; do
+      docker network rm "${network}" >/dev/null && { rm_rc=0; break; }
+      (( attempt == 1 )) && sleep 1
+    done
+    (( lockfd )) && exec 8>&-
+    (( rm_rc == 0 )) || return 1
   fi
 
   lo::registry_network_create "${network}" "${subnet}" "${dynamic_range}"
