@@ -121,8 +121,13 @@ registry::clean() {
       warn "registry clean: detaching '${member}' from ${net} (re-attaches on its cluster's next 'lo up')"
       docker network disconnect -f "${net}" "${member}" >/dev/null 2>&1 || true
     done
-    docker network rm "${net}" 2>/dev/null || true
-    debug "Removed registry network ${net}"
+    if docker network inspect "${net}" &>/dev/null; then
+      if ! docker network rm "${net}" 2>/dev/null; then
+        warn "registry clean: could not remove ${net} — it still has attached containers (docker network inspect ${net})"
+        return 1
+      fi
+      debug "Removed registry network ${net}"
+    fi
   fi
 }
 

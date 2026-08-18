@@ -283,6 +283,21 @@ docker() {
   [ "$(sed -n 2p "${FAKE_DOCKER}/networks/lok8s-registries.meta")" = "10.125.200.128/25" ]
 }
 
+@test "registry_network: a WRONG existing range is recreated, not accepted" {
+  _load_driver
+  # A range that differs from the derived one (older tooling, hand-made
+  # network) can still let dynamic allocation overlap the statics — mere
+  # non-emptiness must not pass for "reserved".
+  printf '10.125.200.0/24\n10.125.200.64/26\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"
+
+  run lo::registry_network
+  assert_success
+  [ "$(sed -n 2p "${FAKE_DOCKER}/networks/lok8s-registries.meta")" = "10.125.200.128/25" ] || {
+    echo "a mismatched --ip-range (10.125.200.64/26) was accepted as reserved" >&2
+    return 1
+  }
+}
+
 @test "registry_network: a range-reserved network is left untouched" {
   _load_driver
   printf '10.125.200.0/24\n10.125.200.128/25\n' > "${FAKE_DOCKER}/networks/lok8s-registries.meta"

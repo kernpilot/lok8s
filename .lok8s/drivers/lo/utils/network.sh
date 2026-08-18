@@ -45,9 +45,10 @@ lo::network() {
 # dynamic addresses is far beyond any kind cluster's node count.
 lo::network_dynamic_range() {
   local cidr="${1}"
-  local base="${cidr%/*}" prefix="${cidr#*/}"
+  local base="${cidr%/*}" prefix="${cidr#*/}" start
   (( prefix >= 1 && prefix <= 28 )) || return 1
-  echo "$(ip::add "${base}" $(( 3 << (30 - prefix) )))/$(( prefix + 2 ))"
+  start=$(ip::add "${base}" $(( 3 << (30 - prefix) ))) || return 1
+  echo "${start}/$(( prefix + 2 ))"
 }
 
 # lo::registry_dynamic_range <cidr> — the upper half of <cidr> as its own
@@ -58,9 +59,10 @@ lo::network_dynamic_range() {
 # ("Address already in use" on every restart).
 lo::registry_dynamic_range() {
   local cidr="${1}"
-  local base="${cidr%/*}" prefix="${cidr#*/}"
+  local base="${cidr%/*}" prefix="${cidr#*/}" start
   (( prefix >= 1 && prefix <= 30 )) || return 1
-  echo "$(ip::add "${base}" $(( 1 << (31 - prefix) )))/$(( prefix + 1 ))"
+  start=$(ip::add "${base}" $(( 1 << (31 - prefix) ))) || return 1
+  echo "${start}/$(( prefix + 1 ))"
 }
 
 # lo::registry_network_create <network> <subnet> [ip-range]
@@ -109,11 +111,13 @@ lo::registry_network() {
       return 1
     fi
 
-    # Range already reserved — nothing to do.
+    # THE reserved range — nothing to do. A non-empty range that differs
+    # (older tooling, a hand-made network) is NOT safe: dynamic allocation
+    # could still overlap the statics — recreate it like the no-range case.
     local current_range
     current_range=$(docker network inspect "${network}" \
       --format '{{range .IPAM.Config}}{{.IPRange}}{{end}}' 2>/dev/null || true)
-    if [[ -n "${current_range}" ]] || [[ -z "${dynamic_range}" ]]; then
+    if [[ "${current_range}" == "${dynamic_range}" ]] || [[ -z "${dynamic_range}" ]]; then
       return 0
     fi
 
@@ -121,7 +125,7 @@ lo::registry_network() {
     # mirror containers first (a running mirror whose config-hash still
     # matches would otherwise reconcile as "unchanged" while detached from
     # the new network); their named volumes — the cache — survive.
-    warn "lo: registry network '${network}' predates the reserved dynamic range — recreating it with ${dynamic_range} (mirrors + nodes re-attach via the normal reconcile)"
+    warn "lo: registry network '${network}' lacks the reserved dynamic range (has '${current_range:-none}') — recreating it with ${dynamic_range} (mirrors + nodes re-attach via the normal reconcile)"
 
     # Serialize the recreate across concurrent `lo` runs (the shared network
     # is host-global). Best-effort, same pattern as the registry reconcile:
@@ -131,38 +135,57 @@ lo::registry_network() {
     if command -v flock >/dev/null 2>&1 && exec 8>"${LO_REGISTRY_STATE_DIR}/${network}.netlock"; then
       lockfd=1
       flock -w 60 8 || debug "registry network ${network}: lock wait timed out, proceeding unlocked"
-      # The winner may have finished the recreate while we waited — re-check.
+      # The winner may have finished the recreate while we waited — re-check
+      # against the SAME equality as above, not mere non-emptiness.
       current_range=$(docker network inspect "${network}" \
         --format '{{range .IPAM.Config}}{{.IPRange}}{{end}}' 2>/dev/null || true)
-      if [[ -n "${current_range}" ]]; then
+      if [[ "${current_range}" == "${dynamic_range}" ]]; then
         (( lockfd )) && exec 8>&-
         return 0
       fi
     fi
 
-    local name
-    for name in $(docker network inspect "${network}" \
-      -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' 2>/dev/null); do
-      if [[ "${name}" == "${LO_SHARED_REGISTRY_PREFIX}"* ]]; then
-        # Removed, not detached: a running mirror with a matching config-hash
-        # would reconcile "unchanged" while off-network. Cache volumes survive.
-        docker rm -f "${name}" >/dev/null 2>&1 || true
-      else
-        # `docker network rm` REFUSES a network with active endpoints (even
-        # with -f, which only suppresses the not-found error — verified live)
-        # — every remaining member must be detached explicitly.
-        docker network disconnect -f "${network}" "${name}" >/dev/null 2>&1 || true
-      fi
-    done
-    # A just-removed container's endpoint can lag its release (the same lag
-    # the registry-start retry absorbs) — one bounded retry before giving up.
-    local attempt rm_rc=1
-    for attempt in 1 2; do
-      docker network rm "${network}" >/dev/null && { rm_rc=0; break; }
-      (( attempt == 1 )) && sleep 1
-    done
+    # From here to the create the lock must stay HELD: releasing it between
+    # the rm and the create re-opens the exact window it exists for — a
+    # loser's rm retry removing the winner's freshly-created network.
+    local rm_rc=0
+    if docker network inspect "${network}" &>/dev/null; then
+      local name
+      for name in $(docker network inspect "${network}" \
+        -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' 2>/dev/null); do
+        if [[ "${name}" == "${LO_SHARED_REGISTRY_PREFIX}"* ]]; then
+          # Removed, not detached: a running mirror with a matching config-hash
+          # would reconcile "unchanged" while off-network. Cache volumes survive.
+          docker rm -f "${name}" >/dev/null 2>&1 || true
+        else
+          # `docker network rm` REFUSES a network with active endpoints (even
+          # with -f, which only suppresses the not-found error — verified live)
+          # — every remaining member must be detached explicitly.
+          docker network disconnect -f "${network}" "${name}" >/dev/null 2>&1 || true
+        fi
+      done
+      # A just-removed container's endpoint can lag its release (the same lag
+      # the registry-start retry absorbs) — one bounded retry before giving up.
+      # stderr is held back until the retry also fails: a transiently-lagging
+      # first attempt is expected, not something to print.
+      local attempt rm_err=""
+      rm_rc=1
+      for attempt in 1 2; do
+        rm_err=$(docker network rm "${network}" 2>&1 >/dev/null) && { rm_rc=0; break; }
+        (( attempt == 1 )) && sleep 1
+      done
+      (( rm_rc == 0 )) || [[ -z "${rm_err}" ]] || echo "${rm_err}" >&2
+    fi
+    # else: a prior run removed the network but died before recreating it —
+    # fall through and create.
+
+    local create_rc=0
+    if (( rm_rc == 0 )); then
+      lo::registry_network_create "${network}" "${subnet}" "${dynamic_range}" || create_rc=1
+    fi
     (( lockfd )) && exec 8>&-
     (( rm_rc == 0 )) || return 1
+    return "${create_rc}"
   fi
 
   lo::registry_network_create "${network}" "${subnet}" "${dynamic_range}"
