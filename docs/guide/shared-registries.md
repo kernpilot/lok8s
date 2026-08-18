@@ -107,9 +107,11 @@ spec:
 
 ## Node-IP drift
 
-Why shared mode is opt-in. In shared mode every kind node is attached to two Docker networks: the cluster network and `lok8s-registries`. Docker orders interfaces by endpoint creation, so a node's registry endpoint can become `eth0` after Docker re-attaches it — for example, after the framework evicts a node that squats a mirror's static IP. On the next container restart, kind's entrypoint derives kubelet's `--node-ip` from the first interface, and the node registers on the registry network.
+Why shared mode is opt-in. In shared mode every kind node is attached to two Docker networks: the cluster network and `lok8s-registries`. Docker resolves a dual-homed container's address by an undefined preference, so a node's registry endpoint can win after endpoint churn (a daemon restart, a manual re-attach). On the next container restart, kind's entrypoint derives kubelet's `--node-ip` from the first interface, and the node registers on the registry network.
 
 The failure is silent: the node lease keeps renewing, so the node reports `Ready` — but kubelet rejects every node-status update (`failed to validate nodeIP`), and no traffic reaches the node from the apiserver or from pods on other nodes. Webhooks that run on the drifted node time out cluster-wide.
+
+Since 2026-08 the shared network reserves its upper half (`10.125.200.128/25`) as the only range Docker hands to dynamic attachers. Mirrors keep static addresses below it, so a node can never squat a mirror's IP. A network created before this reservation is recreated automatically on the next `lo up`. The running project's mirrors are rebuilt at the same addresses in the same run. The pull-through cache lives in named volumes and survives. Detached kind nodes (and another project's mirrors) come back on that project's next `lo up`. Until then those nodes pull from upstream directly. The detach is endpoint churn — the node-IP check above guards against its side effects.
 
 `lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment — so a cluster provisioned under the old shared default is healed too. Per-project clusters have one network per node, so they cannot drift.
 

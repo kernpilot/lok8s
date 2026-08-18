@@ -27,7 +27,7 @@ Within slot `<n>` the `/24` subnet `10.125.<n>.0/24` is split:
   10.125.<n>.103-106             io-* mirrors (when shared: false)
   10.125.<n>.107-124             reserved
   10.125.<n>.125-150             MetalLB pool (26 IPs)
-  10.125.<n>.151-254             kind nodes (docker IPAM)
+  10.125.<n>.192-254             kind nodes (docker IPAM — reserved --ip-range .192/26)
 ```
 
 By default the io-* mirrors live on the project subnet at `.103+`.
