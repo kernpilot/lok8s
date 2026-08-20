@@ -312,12 +312,15 @@ lo kubehz status        # local spec + live platform status for the domain
 lo kubehz deregister    # remove the cluster from the platform
 ```
 
-`status` prints the configured hosting/access/apiUrl and queries the
-platform for the cluster's live status; `deregister` deletes the platform
-registration (and runs automatically during `lo destroy` when
-`access != none`). Both send an `Authorization: Bearer $KUBEHZ_TOKEN`
-header when that environment variable is set — claimed clusters may
-require it.
+`status` prints the configured hosting/access/apiUrl, then reads your
+registry row on the platform: the cluster's live status, its id, and the
+last heartbeat. `deregister` deletes the platform registration: it resolves
+the cluster id from your registry and sends `DELETE /api/clusters/<id>`
+(and runs automatically during `lo destroy` when `access != none`). Both
+look the cluster up through the tenant registry, so both need
+`KUBEHZ_TOKEN` set to a `clusters:write` token of the owning tenant —
+without it, `status` reports the HTTP refusal and `deregister` refuses
+without deleting anything.
 
 ### `KUBEHZ_TOKEN`: claim at provision time
 
@@ -329,8 +332,9 @@ it with `spec.kubehz.connectHcloudToken: true` to also wire dashboard-driven
 provisioning in the same run. Without `KUBEHZ_TOKEN`, `lo provision` registers
 anonymously and you [claim](#claiming) the cluster afterwards.
 
-Deregistering only removes the platform-side registration. To remove the
-in-cluster agent as well:
+Deregistering deletes the platform cluster record and, when `HCLOUD_TOKEN`
+is set, the `kubehz-claim-<domain>` SSH key from your Hetzner Cloud
+account. The in-cluster agent survives — to remove it as well:
 
 ```bash
 kubectl delete namespace kubehz-system

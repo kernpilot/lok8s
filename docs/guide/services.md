@@ -288,7 +288,7 @@ When `image:` is set, the service is **never built locally** even if
 
 ## How the image swap actually works
 
-When you run `lo up` (or `lo build`), `lo env kustomization` generates a
+When you run `lo up` (or `lo build`), lok8s generates a
 `kustomization.yaml` at `clusters/<domain>/artifacts/kustomization.yaml`
 containing an `images:` block. Nothing is written at the repo root — all
 lok8s-generated files live inside the domain's artifacts directory next
@@ -324,14 +324,13 @@ rules say it should be:
 When a service has `build: false` AND a `registry.endpoint` resolves
 (per-service or global), lok8s puts that service in **cache mode**:
 
-1. **At `lo build` / `lo up` time**, `lo env kustomization` records the
+1. **At `lo build` / `lo up` time**, the build's env-render step records the
    service in `clusters/<domain>/artifacts/.cache-queue` (a TSV file with
    one row per service: `<svc>\t<remote_ref>\t<branch>\t<tag>`).
 2. The kustomize image swap rewrites the manifest reference from
    `${prefix}/<service>` to **`lok8s.cache/${branch}/<service>:${tag}`** —
    pointing at the **local cache registry**, NOT the remote endpoint.
-3. **Cache pre-pull is opt-in** via `lo env kustomization --pull`.
-   Tilt invokes this automatically (controlled by the `auto_cache_pull`
+3. **Cache pre-pull runs automatically in Tilt** (controlled by the `auto_cache_pull`
    kwarg on `lok8s()`, default `True`). For each queue entry the puller:
    - Checks if the cache registry already has a manifest matching the
      ref. **Skips if present** (idempotent — reload cycles are cheap).
@@ -348,13 +347,9 @@ If you run a build pipeline in CI before standing up Tilt, pre-pull the
 cache as a separate step so Tilt doesn't have to. Two equivalent ways:
 
 ```bash
-# Option A: drain the queue in one go via the kustomization flag
-lo env kustomization --pull
-
-# Option B: write the queue first, drain it later
-lo env kustomization
+lo build                # renders artifacts and writes the .cache-queue
 # ... other CI steps ...
-lo image cache --all
+lo image cache --all    # drain the queue
 ```
 
 Then in your `Tiltfile`, disable the in-Tilt pre-pull so it doesn't
@@ -384,7 +379,7 @@ Three reasons:
    service overrides without changing remote tags, the pre-pull step is
    a no-op (idempotent skip), but the developer might want to check the
    generated kustomization without forcing a network round trip.
-   `lo env kustomization` (without `--pull`) gives you that.
+   `lo build` regenerates it without any pull.
 
 ### Why a separate `cache` registry instead of reusing `build`?
 
@@ -407,7 +402,7 @@ lo image cache api
 # Force re-pull (skip the "already in cache" check)
 lo image cache api --force
 
-# Process the entire queue from the most recent `lo env kustomization`
+# Process the entire queue written by the most recent build
 lo image cache --all
 
 # List what's currently in the cache registry
@@ -859,5 +854,5 @@ upstream by kustomize because no kustomize target references them).
 
 - [Local Dev with Tilt](/guide/local-dev) — the broader Tilt workflow
 - [Concepts](/guide/concepts) — domains, targets, and the FQDN convention
-- [CLI Reference](/reference/cli) — `lo env services`, `lo env kustomization`
+- [CLI Reference](/reference/cli) — `lo build`, `lo image cache`
 - [Schema Reference](/reference/schema) — exhaustive field-by-field tables for `services.yaml` and `lok8s.yaml`

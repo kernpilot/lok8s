@@ -319,8 +319,8 @@ The kustomize plugins and the `lo chat` engine, where a typed/compiled language 
 | `lo down` | Stop Tilt + delete the cluster |
 | `lo status` | Cluster health + per-target build state |
 | `lo provision` | Provision cluster infra + apply `spec.bootstrap` addons (no Tilt, no `targets/` deploy) |
-| `lo build [target…]` | Render kustomize targets → `artifacts/` |
-| `lo deploy [-l k=v] [target…]` | Apply built artifacts (CRDs → resources → health) |
+| `lo build` | Render the domain kustomization → `clusters/<domain>/artifacts.yaml` |
+| `lo deploy [-l k=v]` | Apply the domain artifact (CRDs → resources → health) |
 | `lo lint` | Validate specs, bootstrap entries, target refs |
 | `lo doctor` | Diagnose the local environment / toolchain |
 | `lo addons [name]` | List / inspect framework bootstrap addons |
@@ -333,7 +333,7 @@ The kustomize plugins and the `lo chat` engine, where a typed/compiled language 
 | `lo tilt up\|down\|status\|restart` | Manage the Tilt environment |
 | `lo registry up\|down\|status\|clean` | Manage registry mirrors |
 
-Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>` — `[target…]` and `[name]` are the only positionals. Global flags: `--verbose|-v`, `--force|-f`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
+Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>` — in this table only `lo use [domain]` and `lo addons [name]` take a positional. `lo build` and `lo deploy` take none: both act on the whole domain kustomization (deploy narrows via `-l key=value`, not targets). Global flags: `--verbose|-v`, `--force|-f`, `--force-recreate`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
 
 &nbsp;
 

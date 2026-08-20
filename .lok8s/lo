@@ -114,9 +114,9 @@ main() {
 
     'tilt|t'                           'Manage tilt cluster'
     '#hooks'                           'Dev hook actions (internal; driven by the Tilt hooks: wrapper)'
-    'env|e'                            'Manage environment'
-    'k8s'                              'Generate/render K8s artifacts'
-    'crds'                             'Generate operator CRDs from schema source'
+    '#env'                             'Service/env config rendering (internal; driven by the Tilt extension)'
+    '#k8s'                             'K8s artifact generation (internal; legacy capigen-era paths)'
+    '#crds'                            'Operator CRD generation from schema source (internal; CI drift gate)'
     'kustomize|ku'                     'Manage kustomize plugins (Go)'
     'registry|r'                       'Manage Docker registries'
     'image|i'                          'Manage the local cache registry'

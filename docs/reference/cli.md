@@ -9,7 +9,8 @@ The `lo` CLI is an [argsh](https://github.com/arg-sh/argsh) script located at `.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--verbose` | `-v` | Enable verbose/debug logging (sets `DEBUG=1`) |
-| `--force` | `-f` | Force operation without prompts |
+| `--force` | `-f` | Force operation without prompts (also recreates immutable/terminating conflicts, like `--force-recreate`) |
+| `--force-recreate` | | On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer |
 | `--remote` | `-r` | Provision on a remote VM (activates `spec.provider` + `spec.remote`) |
 | `--kubernetes` | | Kubernetes version to use |
 | `--cluster` | `-s` | Cluster name to manage (default: `local`) |
@@ -72,12 +73,17 @@ Stops Tilt, deletes the kind cluster, removes cluster-prefixed Docker volumes, a
 Provision a cluster through the full lifecycle.
 
 ```bash
-lo provision [--domain <domain>] [--remote|-r]
+lo provision [--domain <domain>] [--bootstrap|-b] [--force|-f] [--remote|-r]
 ```
 
 Resolves the cluster spec, sources the driver contract, calls `driver::provision`, then runs `bootstrap::apply` to apply `spec.bootstrap` addons in order with health waits between stages.
 
 With `--remote`: loads `spec.provider`, provisions the cloud VM, then either sets `DOCKER_HOST` to the remote Docker (docker mode) or syncs the repo and runs `lo provision` on the VM (CI mode). See [Remote clusters](#remote-clusters).
+
+| Flag | Description |
+|------|-------------|
+| `--bootstrap`, `-b` | Re-apply `spec.bootstrap` only, on an existing cluster (skip the infra reconcile) |
+| `--force`, `-f` | Global flag: skip the real-infrastructure confirmation prompt (cloud drivers) |
 
 ### lo bootstrap
 
@@ -130,7 +136,7 @@ Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects ca
 Destroy a cluster.
 
 ```bash
-lo destroy [domain]
+lo destroy [--domain <domain>]
 ```
 
 Calls `driver::destroy` from the appropriate driver contract.
@@ -150,6 +156,8 @@ lo recover <domain> --dry-run       # preview the rebuild plan; change nothing
 lo recover <domain> --skip-rebuild  # re-provision + verify only
 lo recover <domain> --force         # skip the confirmation prompt
 ```
+
+Name the target: the positional `<domain>` is the documented form and outranks `--domain` and the active domain — a command that reimages a fleet must not inherit whatever `.active` points at mid-incident. Omitting both falls back to `--domain`, then the active domain.
 
 | Flag | Description |
 |------|-------------|
@@ -194,7 +202,7 @@ Without arguments: shows the active domain and lists all available domains with 
 Validate domain structure and specs.
 
 ```bash
-lo lint [domain]
+lo lint [--domain <domain>]
 ```
 
 Checks:
@@ -208,7 +216,7 @@ Checks:
 Check cluster health and status.
 
 ```bash
-lo status [domain]
+lo status [--domain <domain>]
 ```
 
 Delegates to the driver contract's `driver::status` function. For Lo clusters: checks if the kind cluster exists. For Capi clusters: queries the CAPI Cluster resource phase.
@@ -218,8 +226,8 @@ Delegates to the driver contract's `driver::status` function. For Lo clusters: c
 GitOps integration (Flux / Argo). **Deferred.** Both subcommands currently return a deferred-error stub — the integration is being redesigned around the new `services.yaml` targets-map model.
 
 ```bash
-lo gitops flux [domain]    # (deferred)
-lo gitops argo [domain]    # (deferred)
+lo gitops flux [--domain <domain>]    # (deferred)
+lo gitops argo [--domain <domain>]    # (deferred)
 ```
 
 ### Cluster lifecycle (there is no `lo kind`)
@@ -278,25 +286,12 @@ Manage the local cache registry — pre-pull private/CI images so kind can fetch
 
 ```bash
 lo image cache <service> [--force|-f]   # Pre-pull a single service's image
-lo image cache --all [--force|-f]       # Drain the queue from `lo env kustomization`
+lo image cache --all [--force|-f]       # Drain the pre-pull queue written at build time
 lo image list                            # Show what's currently in the cache registry
 lo image clean                           # Drop the cache registry volume
 ```
 
 The cache flow runs automatically as part of `lo build` / `lo up` when any service has `build: false` and a resolved `registry.endpoint`. See [Services Configuration → Cache mode](/guide/services#cache-mode-the-lok8scache-registry) for the full pipeline. Parallelism is controlled via `registry.parallel` in `services.yaml` (`0` unlimited, `1` sequential default, `N≥2` bounded).
-
-### lo env
-
-Manage environment and service configuration.
-
-```bash
-lo env services [--only-services|-s] [--only-registry|-r]
-lo env kustomization [--no-build|-n] [--pull|-p]
-```
-
-**services**: Prints merged service config (services.yaml + overrides).
-
-**kustomization**: Generates `kustomization.yaml` with image references from registry config inside `clusters/<domain>/artifacts/`. Writes a `.cache-queue` TSV file alongside listing every `build:false` service that needs a pre-pull. The `--pull` flag drains that queue immediately by invoking `lo image cache --all` (otherwise the queue is just written and a separate consumer drains it later — Tilt does this automatically via `lok8s()`'s `auto_cache_pull` kwarg, CI does it explicitly).
 
 ### lo secrets
 
@@ -311,6 +306,8 @@ lo secrets set --name <n> <key> --encrypt      # write + SOPS-encrypt this one f
 lo secrets allow                               # approve bash: generators after a change
 lo secrets encrypt                             # write committable Secret.*.enc files
 lo secrets decrypt                             # restore the plaintext cache from .enc
+lo secrets add-key <ssh-pubkey-path|age1…>     # add an age recipient to .sops.yaml + re-key the store (--all: every domain)
+lo secrets env --name <n> [--namespace <ns>]   # emit injection-safe `export KEY=value` lines for a cached secret (for eval)
 lo secrets list | print [pattern...] | path    # inspect the cache
 ```
 
@@ -318,16 +315,6 @@ lo secrets list | print [pattern...] | path    # inspect the cache
 `ssh-to-age`, ed25519 only) and writes `.sops.yaml`; `encrypt`/`decrypt`
 round-trip the cache so secrets commit safely as `Secret.*.enc`. Needs `sops`
 and `ssh-to-age` (`b install`).
-
-### lo k8s
-
-Generate and render Kubernetes artifacts.
-
-```bash
-lo k8s capi [--spec path] [--out path]   # Generate CAPI resources
-lo k8s infrastructure                      # Build infrastructure artifacts
-lo k8s platform                            # Build platform artifacts
-```
 
 ### lo mcp
 
@@ -337,7 +324,7 @@ Start an MCP (Model Context Protocol) tool server over stdio.
 lo mcp
 ```
 
-Exposes every leaf `lo` subcommand as a callable tool via the [MCP protocol](https://modelcontextprotocol.io/). AI clients (Claude Code, VS Code Copilot, Cursor) connect over stdio and can invoke `up`, `down`, `build`, `deploy`, `status`, and all other commands programmatically. Dispatchers (`tilt`, `env`, `k8s`, `gitops`) are traversed but not exposed -- only their leaf commands appear as tools.
+Exposes every user-facing leaf `lo` subcommand as a callable tool via the [MCP protocol](https://modelcontextprotocol.io/). AI clients (Claude Code, VS Code Copilot, Cursor) connect over stdio and can invoke `up`, `down`, `build`, `deploy`, `status`, and all other commands programmatically. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed but not exposed -- only their leaf commands appear as tools. Framework-internal commands (hidden from `--help`) are not exposed either.
 
 Commands carry tool annotations that inform the client about behavior:
 
@@ -362,8 +349,8 @@ Configure your AI client using the `.mcp.json` included in the project root.
 Print a domain's kubeconfig on stdout.
 
 ```bash
-lo kubeconfig [domain]        # admin kubeconfig (alias: lo kc)
-lo kubeconfig --oidc          # kubelogin exec-plugin kubeconfig (browser OIDC login)
+lo kubeconfig [--domain <domain>]    # admin kubeconfig (alias: lo kc)
+lo kubeconfig --oidc                 # kubelogin exec-plugin kubeconfig (browser OIDC login)
 lo kubeconfig --cluster-override <domain>   # resolve against another cluster domain
 ```
 
@@ -436,15 +423,6 @@ lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats 
 lo kubehz join                # mint a node join ticket (hosting: shared)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
-```
-
-### lo crds
-
-Generate operator CRDs from the schema source.
-
-```bash
-lo crds generate
-lo crds check                 # verify the generated CRDs are current
 ```
 
 ### lo kustomize

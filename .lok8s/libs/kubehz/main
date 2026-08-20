@@ -410,20 +410,55 @@ kubehz::register_cluster() {
 
 # ── Deregistration ───────────────────────────────────────
 
-# Deregister a cluster from the kubehz API.
-# Called during destroy when access != none.
-# Non-fatal: silently ignores errors.
+# Deregister a cluster from the kubehz API: resolve the platform id for the
+# domain, DELETE /api/clusters/<id>, then retire the hcloud claim key.
+# Called during destroy when access != none, and standalone via
+# `lo kubehz deregister`. Each outcome is reported distinctly — removed /
+# not registered / refused — and the function returns 1 whenever REMOVAL
+# FAILED (lookup error, refused delete). An already-absent row is
+# idempotent SUCCESS: the desired end state holds. (The old form DELETEd
+# /api/clusters?domain=… — a route+method the api does not serve — and
+# `|| true` swallowed the 404, so the row survived every "deregister".)
 # Usage: kubehz::deregister_cluster <domain> <cluster_yaml>
 kubehz::deregister_cluster() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
+  local rc=0
 
   # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
   # validate_config (reachable standalone via `lo kubehz deregister`), so guard
   # each call by its own URL — mirrors register_cluster's standalone re-assert.
-  if http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
-    curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+    rc=1
+  else
+    local cluster_id="" resolve_rc=0
+    cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
+    if (( resolve_rc == 2 )); then
+      echo "kubehz: no cluster is registered for ${domain} — nothing to remove on the platform."
+    elif (( resolve_rc != 0 )); then
+      error "kubehz: cannot read the cluster registry at ${api_url} — the registration for ${domain} was not removed. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
+      rc=1
+    else
+      # Status + body captured (the re-enroll idiom): a refused delete must
+      # surface with the api's own message, not vanish into `curl -f`.
+      local response http_code
+      if ! response=$(curl -sSL -w $'\n%{http_code}' -X DELETE \
+        "${api_url}/api/clusters/${cluster_id}" \
+        -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}"); then
+        error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
+        rc=1
+      else
+        http_code="${response##*$'\n'}"
+        if [[ "${http_code}" == 2* ]]; then
+          echo "kubehz: cluster ${domain} (${cluster_id}) removed from the platform."
+        else
+          local msg
+          msg=$(jq -r '.data.message // .message // empty' <<<"${response%$'\n'*}" 2>/dev/null) || msg=""
+          error "kubehz: delete refused for ${domain} (${cluster_id}) — HTTP ${http_code}${msg:+: ${msg}}. The registration was not removed."
+          rc=1
+        fi
+      fi
+    fi
   fi
 
   # Best-effort: retire the kubehz claim key from the hcloud account. The name
@@ -439,7 +474,7 @@ kubehz::deregister_cluster() {
     fi
   fi
 
-  debug "Cluster ${domain} deregistered from kubehz"
+  return "${rc}"
 }
 
 # ── Subcommands ──────────────────────────────────────────
@@ -505,8 +540,10 @@ kubehz::deregister() {
     return 1
   fi
 
+  # Outcome reporting (removed / not registered / refused) lives inside
+  # deregister_cluster — no unconditional success line here: the old one
+  # printed "deregistered" over a swallowed 404.
   kubehz::deregister_cluster "${domain}" "${cluster_yaml}"
-  echo "Cluster ${domain} deregistered from kubehz"
 }
 
 # Check kubehz registration status via `lo kubehz status`.
@@ -540,18 +577,54 @@ kubehz::status() {
     return 0
   fi
 
-  # Query the API for live status
+  # Query the tenant registry for the live row. The list endpoint IGNORES
+  # ?domain= and answers the pagination envelope {ok, data: […]} — the old
+  # code read `.status` off that ENVELOPE, so this line printed
+  # "Status: unknown" for every registered cluster. Filter the rows
+  # client-side (the resolve_cluster_id / space_lookup idiom) and read the
+  # ROW's fields (ClusterSchema: status, lastHeartbeat, connected).
   local api_url="${LOK8S_KUBEHZ_API_URL}"
-  local response
-  response=$(curl -fsSL "${api_url}/api/clusters?domain=${domain}" \
+  # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  local raw http_code response
+  raw=$(curl -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" \
     -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || {
-    echo "Status:  unknown (API unreachable)"
+    echo "Status:  unknown (API unreachable: ${api_url})"
     return 0
   }
+  http_code="${raw##*$'\n'}"
+  response="${raw%$'\n'*}"
+  if [[ "${http_code}" != 2* ]]; then
+    echo "Status:  unknown (HTTP ${http_code} — set KUBEHZ_TOKEN to a clusters:write token of the owning tenant)"
+    return 0
+  fi
 
-  local status_val
-  status_val=$(echo "${response}" | jq -r '.status // "unknown"' 2>/dev/null)
-  echo "Status:  ${status_val}"
+  # Oldest-first, same as resolve_cluster_id: the server binds agent
+  # identity to the OLDEST active row for a domain.
+  local row
+  row=$(jq -c --arg d "${domain}" \
+    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+      | sort_by(.createdAt) | first) // empty' <<<"${response}" 2>/dev/null) || row=""
+  if [[ -z "${row}" ]]; then
+    echo "Status:  not registered (no cluster for ${domain} in this tenant's registry)"
+    return 0
+  fi
+
+  local status_val cluster_id last_beat connected
+  status_val=$(jq -r '.status // "unknown"' <<<"${row}")
+  cluster_id=$(jq -r '.id // "-"' <<<"${row}")
+  last_beat=$(jq -r '.lastHeartbeat // empty' <<<"${row}")
+  connected=$(jq -r '.connected // empty' <<<"${row}")
+  echo "Status:  ${status_val} (id: ${cluster_id})"
+  if [[ -n "${last_beat}" ]]; then
+    case "${connected}" in
+      true)  echo "Beat:    ${last_beat} (connected)" ;;
+      false) echo "Beat:    ${last_beat} (stale — outside the reporting window)" ;;
+      *)     echo "Beat:    ${last_beat}" ;;
+    esac
+  else
+    echo "Beat:    none yet — deploy the heartbeat agent (see docs/guide/kubehz.md)"
+  fi
 }
 
 # Mint a node join ticket for the active domain's space via `lo kubehz join`.
@@ -777,21 +850,35 @@ kubehz::claim-code() {
 # registry. The list endpoint IGNORES ?domain=, so filter CLIENT-SIDE —
 # .data[0] would silently pick the tenant's newest cluster on multi-cluster
 # tenants. Requires KUBEHZ_TOKEN (the id is only visible to the owning
-# tenant); prints the id, or returns 1 printing nothing.
+# tenant). Prints the id; on failure prints nothing and returns 1 (the list
+# request failed) or 2 (the list answered, but carries no row for the
+# domain). Callers that only need "no id" treat any non-zero rc as failure;
+# deregister/destroy branch on the distinction so a lookup FAILURE is never
+# reported as "not registered".
 # Usage: kubehz::resolve_cluster_id <domain> <api_url>
 kubehz::resolve_cluster_id() {
-  local domain="${1}" api_url="${2}" cluster_id
+  local domain="${1}" api_url="${2}" response cluster_id
+  response=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || return 1
   # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
   # is served newest-first, but the server binds agent identity (heartbeat,
   # desired) to the OLDEST active row for a domain — picking the newest armed
   # the WRONG cluster when a duplicate registration existed (review r1
   # medium). Oldest-first matches the server's binding.
-  cluster_id=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
-    | jq -r --arg d "${domain}" \
-      '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
-        | sort_by(.createdAt) | first | .id) // empty') || cluster_id=""
-  [[ -n "${cluster_id}" ]] || return 1
+  # `.data?` (not `.data // .`): `//` does not rescue a jq ERROR, and `.data`
+  # on a bare-list body aborts the whole program before the alternative runs
+  # (the trap the old hosted-destroy lookup documented). `?` suppresses it.
+  cluster_id=$(jq -r --arg d "${domain}" \
+    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+      | sort_by(.createdAt) | first | .id) // empty' <<<"${response}" 2>/dev/null) || return 1
+  # A >500-cluster tenant pages past the cap; a truncated list must not read
+  # as "not registered" silently.
+  local total
+  total=$(jq -r '.meta.pagination.total // 0' <<<"${response}" 2>/dev/null) || total=0
+  if [[ -z "${cluster_id}" ]] && (( total > 500 )); then
+    warn "kubehz: tenant has ${total} clusters (first 500 checked) — the domain may sit past the page cap"
+  fi
+  [[ -n "${cluster_id}" ]] || return 2
   echo "${cluster_id}"
 }
 
