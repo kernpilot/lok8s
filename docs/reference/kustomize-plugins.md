@@ -532,6 +532,15 @@ cert:
 - **`cert: {caRoot: true}`** (no `hosts`) emits the shared CAROOT CA's **public
   cert** as `ca.crt` — for distributing trust into the cluster (e.g. a configmap
   containerd or a pod reads), mkcert-free. The leaves it signed chain to it.
+- **`includeKey: true`** (on `ca: true` or `caRoot: true`) emits the CA
+  **keypair** as `tls.crt` + `tls.key` instead of `ca.crt` — the shape a
+  [cert-manager CA issuer](https://cert-manager.io/docs/configuration/ca/)
+  signs with. See [Two ways to serve dev TLS](#two-ways-to-serve-dev-tls)
+  below. Invalid on a leaf: a leaf always emits its key.
+- **`includeKey` moves a CA private key into the cluster.** That is the point —
+  cert-manager must sign with it — but it is a real change in posture. Use it
+  for a development CA only, never for a CA that signs anything outside the
+  cluster.
 - **Cache-first** like `passwd` — CA, key, and leaf are byte-stable across runs;
   rotate by deleting the cache file. RSA-3072 CA / RSA-2048 leaf; leaf validity
   2 y 3 m (under Apple's 825-day cap).
@@ -541,6 +550,50 @@ cert:
 - **Trust is out of scope.** The plugin *generates* the CA; installing it into
   OS/browser trust stores needs root, so trust it once with `mkcert -install`
   (same CAROOT) — a local convenience, never a build dependency.
+
+#### Two ways to serve dev TLS
+
+The plugin supports two models. Pick one per project:
+
+1. **Generate leaves directly** (`cert: {hosts: […]}`) — the build mints each
+   TLS Secret. Zero cluster components; the cert exists before the first pod
+   starts. Rotation is manual (delete the cache file, rebuild).
+2. **Give the CA to cert-manager** (`cert: {caRoot: true, includeKey: true}`
+   plus a `ClusterIssuer`) — the build ships only the CA Secret; cert-manager
+   issues and renews every leaf in-cluster. Use this when production already
+   issues through cert-manager: the same `Certificate` objects then work on
+   both planes, and only the issuer differs.
+
+The cert-manager model in full — both certs chain to the same CAROOT CA your
+browser already trusts:
+
+```yaml
+# 1. the CA Secret cert-manager signs with (this plugin)
+apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: dev-root-ca, namespace: cert-manager}
+type: kubernetes.io/tls
+cert:
+  caRoot: true
+  includeKey: true
+---
+# 2. the issuer (plain manifest) — in production the same NAME is an ACME issuer,
+#    so Certificate objects are identical on both planes
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: {name: platform-issuer}
+spec:
+  ca: {secretName: dev-root-ca}
+---
+# 3. certificates as in production (plain manifests)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: wildcard-tls, namespace: default}
+spec:
+  secretName: wildcard-tls
+  issuerRef: {name: platform-issuer, kind: ClusterIssuer}
+  dnsNames: [example.test, "*.example.test"]
+```
 
 ### Type validation
 

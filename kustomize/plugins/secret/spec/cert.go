@@ -21,6 +21,13 @@ package spec
 //	cert:
 //	  hosts: [kubehz.dev, "*.kubehz.dev"]
 //	  caRef: my-ca/kube-system           # <secret>[/<namespace>]
+//
+//	# the CA for a cert-manager CA issuer (kubernetes.io/tls) — emits the CA
+//	# keypair as tls.crt + tls.key so cert-manager can sign with it. Explicit
+//	# opt-in: this puts a CA PRIVATE KEY into the cluster (dev posture).
+//	cert:
+//	  caRoot: true
+//	  includeKey: true
 type CertSpec struct {
 	// CA marks this Secret as a self-signed development root CA in the lok8s store
 	// (an OWN CA — the thing leaves point to with caRef). Mutually exclusive with
@@ -39,4 +46,11 @@ type CertSpec struct {
 	// use, so the CA Secret need not have been built first. When empty, the leaf
 	// is signed by the shared mkcert CA at CAROOT (the default).
 	CARef string `yaml:"caRef,omitempty"`
+	// IncludeKey emits a CA Secret's PRIVATE KEY alongside its cert, as the
+	// tls.crt + tls.key pair a cert-manager CA issuer signs with — so a project
+	// can hand issuance to cert-manager instead of generating leaves directly.
+	// Valid only with CA or CARoot (a leaf always emits its key). Explicit
+	// opt-in because it moves a CA private key into the cluster: acceptable for
+	// a development CA, wrong for anything else.
+	IncludeKey bool `yaml:"includeKey,omitempty"`
 }

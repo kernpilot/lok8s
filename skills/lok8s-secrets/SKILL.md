@@ -124,8 +124,15 @@ cert:
 - **`caRef: <secret>[/<namespace>]`** on a leaf signs with that own store CA
   instead of the shared CAROOT one — deterministic, no home-dir writes, SOPS-able
   (prefer in CI). The CA is auto-created on first use, so build order is irrelevant.
-- **`cert: { caRoot: true }`** (no other fields) emits the shared CAROOT CA's
-  **public cert** as `ca.crt`, for distributing trust into the cluster.
+- **`cert: { caRoot: true }`** emits the shared CAROOT CA's **public cert** as
+  `ca.crt`, for distributing trust into the cluster. Takes no other field except
+  `includeKey`.
+- **`includeKey: true`** (on `ca: true` or `caRoot: true`) emits the CA
+  **keypair** as `tls.crt` + `tls.key` — the Secret a cert-manager CA
+  `ClusterIssuer` signs with. Use it to hand issuance to cert-manager instead of
+  generating leaves directly. Explicit opt-in: it puts a CA private key into the
+  cluster, which is acceptable for a development CA only. Invalid on a leaf (a
+  leaf always emits its key).
 - The default writes `rootCA.pem` under `$CAROOT` (a side effect outside
   `$PATH_SECRETS`); `caRef` keeps everything inside the store.
 - **Trust is out of scope of the build.** The plugin only *generates* the CA;

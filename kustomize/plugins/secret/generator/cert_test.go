@@ -161,12 +161,85 @@ func TestCert_CARoot_EmitsSharedCAThatLeafChainsTo(t *testing.T) {
 	}
 }
 
+func TestCert_CARoot_IncludeKey_EmitsCAKeypairAsTLSPair(t *testing.T) {
+	caroot := t.TempDir()
+	t.Setenv("CAROOT", caroot)
+	dir := t.TempDir()
+
+	// cert-manager CA-issuer shape: the CAROOT CA's keypair as tls.crt + tls.key.
+	out, err := NewCert(&specpkg.CertSpec{CARoot: true, IncludeKey: true}).
+		Generate(certCtx(t, dir, "cert-manager", "dev-root-ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryMap(out)
+	if m["tls.crt"] == nil || m["tls.key"] == nil {
+		t.Fatalf("includeKey did not emit tls.crt + tls.key: %v", entryKeys(out))
+	}
+	if _, ok := m["ca.crt"]; ok {
+		t.Error("includeKey emitted ca.crt too — the issuer shape is exactly tls.crt + tls.key")
+	}
+	// Both halves must be the CAROOT files — the SAME CA the default leaves chain to.
+	if onDisk, _ := os.ReadFile(filepath.Join(caroot, "rootCA.pem")); string(m["tls.crt"]) != string(onDisk) {
+		t.Error("tls.crt does not match CAROOT/rootCA.pem")
+	}
+	if onDisk, _ := os.ReadFile(filepath.Join(caroot, "rootCA-key.pem")); string(m["tls.key"]) != string(onDisk) {
+		t.Error("tls.key does not match CAROOT/rootCA-key.pem")
+	}
+	// The emitted pair must actually SIGN: tls.crt is a CA cert that verifies a
+	// default-CAROOT leaf (what cert-manager will do with the pair).
+	leafOut, err := NewCert(&specpkg.CertSpec{Hosts: []string{"app.test"}}).Generate(certCtx(t, dir, "default", "tls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(m["tls.crt"]) {
+		t.Fatal("append includeKey tls.crt failed")
+	}
+	blk, _ := pem.Decode(entryMap(leafOut)["tls.crt"])
+	leaf, _ := x509.ParseCertificate(blk.Bytes)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
+		t.Errorf("leaf does not chain to the includeKey-emitted CA: %v", err)
+	}
+}
+
+func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
+	dir := t.TempDir()
+	out, err := NewCert(&specpkg.CertSpec{CA: true, IncludeKey: true}).
+		Generate(certCtx(t, dir, "cert-manager", "ci-root-ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryMap(out)
+	if m["tls.crt"] == nil || m["tls.key"] == nil {
+		t.Fatalf("own CA includeKey did not emit tls.crt + tls.key: %v", entryKeys(out))
+	}
+	// A caRef leaf must chain to the emitted tls.crt (same store CA).
+	leafOut, err := NewCert(&specpkg.CertSpec{Hosts: []string{"app.test"}, CARef: "ci-root-ca/cert-manager"}).
+		Generate(certCtx(t, dir, "default", "tls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(m["tls.crt"]) {
+		t.Fatal("append own-CA tls.crt failed")
+	}
+	blk, _ := pem.Decode(entryMap(leafOut)["tls.crt"])
+	leaf, _ := x509.ParseCertificate(blk.Bytes)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
+		t.Errorf("caRef leaf does not chain to the includeKey own CA: %v", err)
+	}
+}
+
 func TestCert_Validation(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]*specpkg.CertSpec{
-		"ca+hosts": {CA: true, Hosts: []string{"x"}},
-		"ca+caRef": {CA: true, CARef: "x"},
-		"empty":    {},
+		"ca+hosts":        {CA: true, Hosts: []string{"x"}},
+		"ca+caRef":        {CA: true, CARef: "x"},
+		"empty":           {},
+		"leaf+includeKey": {Hosts: []string{"x"}, IncludeKey: true},
+		"only+includeKey": {IncludeKey: true},
+		"caRoot+caRef":    {CARoot: true, CARef: "x"},
 	}
 	for name, spec := range cases {
 		if _, err := NewCert(spec).Generate(certCtx(t, dir, "default", "s")); err == nil {
