@@ -188,7 +188,7 @@ image::_cache_queue() {
   # by `wait -n` reports 127 on a second `wait`), and discarding the rcs made
   # a run with failed pulls exit 0.
   local faildir
-  faildir=$(mktemp -d) || return 1
+  faildir=$(mktemp -d) || { error "image cache: cannot create the failure-marker dir (mktemp -d failed)"; return 1; }
 
   local -a pids=()
   local active=0 idx=0

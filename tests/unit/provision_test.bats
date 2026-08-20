@@ -73,7 +73,7 @@ teardown() {
     case "$1" in
       -r)
         case "$2" in
-          .kind) echo "Lo" ;;
+          '.kind // ""') echo "Lo" ;;
           '.spec.gitops.provider // ""') echo "" ;;
           *) echo "" ;;
         esac
@@ -112,7 +112,7 @@ SCRIPT
 @test "provision::dispatch fails for unknown kind" {
   yq() {
     case "$2" in
-      .kind) echo "UnknownKind" ;;
+      '.kind // ""') echo "UnknownKind" ;;
       *) echo "" ;;
     esac
   }
@@ -128,7 +128,7 @@ SCRIPT
 @test "provision::dispatch fails when kind script missing driver::provision" {
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       *) echo "" ;;
     esac
   }
@@ -150,7 +150,7 @@ SCRIPT
 @test "provision::dispatch --bootstrap skips driver::provision but runs driver::export + bootstrap::apply" {
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       .metadata.name*) echo "test-cluster" ;;
       *) echo "" ;;
     esac
@@ -183,7 +183,7 @@ SCRIPT
 @test "provision::dispatch --bootstrap fails when the cluster is not provisioned" {
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       .metadata.name*) echo "test-cluster" ;;
       *) echo "" ;;
     esac
@@ -208,7 +208,7 @@ SCRIPT
 @test "provision::dispatch_destroy calls driver::destroy" {
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       *) echo "" ;;
     esac
   }
@@ -244,7 +244,7 @@ SCRIPT
 @test "provision::dispatch_status calls driver::status" {
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       *) echo "" ;;
     esac
   }
@@ -276,7 +276,7 @@ SCRIPT
     case "$1" in
       -r)
         case "$2" in
-          .kind) echo "Lo" ;;
+          '.kind // ""') echo "Lo" ;;
           '.spec.clusterRef.domain // ""') echo "test.lok8s.dev" ;;
           *) echo "" ;;
         esac
@@ -346,7 +346,7 @@ YAML
     case "$1" in
       -r)
         case "$2" in
-          .kind) echo "Lo" ;;
+          '.kind // ""') echo "Lo" ;;
           '.spec.gitops.provider // ""') echo "" ;;
           *) echo "" ;;
         esac
@@ -379,7 +379,7 @@ SCRIPT
     case "$1" in
       -r)
         case "$2" in
-          .kind) echo "Lo" ;;
+          '.kind // ""') echo "Lo" ;;
           '.spec.gitops.provider // ""') echo "flux" ;;
           *) echo "" ;;
         esac

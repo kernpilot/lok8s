@@ -263,8 +263,12 @@ kubeone::generate_config() {
   if (( pool_count > 0 )); then
     rendered+=$'\n\ndynamicWorkers:'
 
+    # while-read, not `for … in $(yq …)`: word-splitting would break a
+    # whitespace-bearing pool name into fragments BEFORE validation — each
+    # fragment could pass the regex and render pools that don't exist.
     local pool
-    for pool in $(yq -r '.spec.workers | keys[]' "${cluster_yaml}"); do
+    while IFS= read -r pool; do
+      [[ -n "${pool}" ]] || continue
       # Validate pool name to prevent yq injection
       if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
         error "Invalid worker pool name: ${pool} (must be alphanumeric with hyphens)"
@@ -323,7 +327,7 @@ kubeone::generate_config() {
           return 1
           ;;
       esac
-    done
+    done < <(yq -r '.spec.workers | keys[]' "${cluster_yaml}")
   fi
 
   echo "${rendered}" > "${output_dir}/kubeone.yaml"
