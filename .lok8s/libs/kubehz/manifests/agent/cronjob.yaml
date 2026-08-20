@@ -284,7 +284,11 @@ spec:
                       case "${CLAIM_PLACED}" in
                         ''|*[!0-9]*) : ;;
                         *)
+                          # wc -l first: grep -Eq is LINE-based, so a multi-line
+                          # value whose first line matches would pass and break
+                          # the beat JSON — require zero embedded newlines.
                           if [ $(( NOW_EPOCH - CLAIM_PLACED )) -lt 900 ] \
+                            && [ "$(printf '%s' "${CLAIM_NONCE}" | wc -l)" -eq 0 ] \
                             && printf '%s' "${CLAIM_NONCE}" | grep -Eq '^khzn_[A-Za-z0-9_-]{15,195}$'; then
                             CLAIM_LIVE=1
                           fi ;;
