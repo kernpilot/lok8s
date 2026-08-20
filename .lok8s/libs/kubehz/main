@@ -777,21 +777,25 @@ kubehz::claim-code() {
 # registry. The list endpoint IGNORES ?domain=, so filter CLIENT-SIDE —
 # .data[0] would silently pick the tenant's newest cluster on multi-cluster
 # tenants. Requires KUBEHZ_TOKEN (the id is only visible to the owning
-# tenant); prints the id, or returns 1 printing nothing.
+# tenant). Prints the id; on failure prints nothing and returns 1 (the list
+# request failed) or 2 (the list answered, but carries no row for the
+# domain). Callers that only need "no id" treat any non-zero rc as failure;
+# deregister/destroy branch on the distinction so a lookup FAILURE is never
+# reported as "not registered".
 # Usage: kubehz::resolve_cluster_id <domain> <api_url>
 kubehz::resolve_cluster_id() {
-  local domain="${1}" api_url="${2}" cluster_id
+  local domain="${1}" api_url="${2}" response cluster_id
+  response=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || return 1
   # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
   # is served newest-first, but the server binds agent identity (heartbeat,
   # desired) to the OLDEST active row for a domain — picking the newest armed
   # the WRONG cluster when a duplicate registration existed (review r1
   # medium). Oldest-first matches the server's binding.
-  cluster_id=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
-    | jq -r --arg d "${domain}" \
-      '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
-        | sort_by(.createdAt) | first | .id) // empty') || cluster_id=""
-  [[ -n "${cluster_id}" ]] || return 1
+  cluster_id=$(jq -r --arg d "${domain}" \
+    '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+      | sort_by(.createdAt) | first | .id) // empty' <<<"${response}" 2>/dev/null) || return 1
+  [[ -n "${cluster_id}" ]] || return 2
   echo "${cluster_id}"
 }
 

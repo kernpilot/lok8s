@@ -396,25 +396,37 @@ clusters:
 }
 
 # ── destroy_hosted ───────────────────────────────────────
+#
+# Pins the REAL contract: resolve the id from the tenant registry
+# (kubehz::resolve_cluster_id — client-side domain filter, oldest-first),
+# then DELETE /api/clusters/<id>. Real jq — the resolution logic under test
+# IS the jq filter. A query-string DELETE, or a delete on an unresolved id,
+# fails the test.
 
-@test "destroy_hosted: looks up cluster and sends DELETE" {
+@test "destroy_hosted: resolves the id (oldest row, not .data[0]) and DELETEs by id" {
+  yq() { echo ""; }
+  export -f yq
   curl() {
-    case "$*" in
-      *"GET"*|*"api/clusters?domain"*)
-        echo '{"id":"cl-001","status":"Running"}'
-        ;;
-      *DELETE*)
-        echo '{"success":true}'
-        ;;
-      *) echo '{}' ;;
-    esac
+    if [[ " $* " == *" DELETE "* ]]; then
+      [[ "$*" != *"?domain="* ]] \
+        || { echo "query-string DELETE (route does not exist): $*" >&2; return 1; }
+      [[ " $* " == *" https://api.kubehz.dev/api/clusters/cl-old "* ]] \
+        || { echo "DELETE wrong id/path: $*" >&2; return 1; }
+      printf '{"ok":true,"data":{"deleted":true,"id":"cl-old"}}\n200'
+    else
+      [[ "$*" == *"/api/clusters?perPage=500"* ]] \
+        || { echo "unexpected GET: $*" >&2; return 1; }
+      # Newest-first list, two rows for the domain: .data[0] is the WRONG
+      # cluster (the bug this pins against).
+      cat <<'EOF'
+{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+]}
+EOF
+    fi
   }
   export -f curl
-
-  jq() {
-    echo "cl-001"
-  }
-  export -f jq
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
@@ -432,14 +444,40 @@ clusters:
   [ ! -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
 }
 
-@test "destroy_hosted: succeeds silently when no cluster found" {
+@test "destroy_hosted: REFUSES when the registry lookup fails (no delete, kubeconfig kept)" {
+  yq() { echo ""; }
+  export -f yq
   curl() {
+    [[ " $* " != *" DELETE "* ]] \
+      || { echo "DELETE must not run when the lookup failed: $*" >&2; return 1; }
     return 1
   }
   export -f curl
 
-  jq() { echo ""; }
-  export -f jq
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+
+  run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "nothing was deleted"
+  # The cluster may still exist — its credentials must survive the refusal.
+  [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+}
+
+@test "destroy_hosted: no row for the domain stays idempotent (nothing to destroy)" {
+  yq() { echo ""; }
+  export -f yq
+  curl() {
+    [[ " $* " != *" DELETE "* ]] \
+      || { echo "DELETE must not run without a resolved id: $*" >&2; return 1; }
+    echo '{"ok":true,"data":[{"id":"cl-other","domain":"other.example.com","createdAt":"2026-03-01T00:00:00Z"}]}'
+  }
+  export -f curl
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
@@ -449,6 +487,30 @@ clusters:
 
   run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_success
+  assert_output --partial "nothing to destroy"
+}
+
+@test "destroy_hosted: a refused DELETE reports the HTTP status and returns 1" {
+  yq() { echo ""; }
+  export -f yq
+  curl() {
+    if [[ " $* " == *" DELETE "* ]]; then
+      printf '{"ok":false,"data":{"message":"forbidden"}}\n403'
+    else
+      echo '{"ok":true,"data":[{"id":"cl-1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
+    fi
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "HTTP 403"
 }
 
 # ── KubeOne driver hosted branch ─────────────────────────
@@ -666,6 +728,18 @@ _hosted_kc_harness() {
 @test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name'*) echo "shortname" ;; *) echo "1" ;; esac; }
+  # The harness curl answers the CREATE route; destroy resolves through the
+  # registry list and DELETEs by id — answer those two.
+  curl() {
+    if [[ "$*" == *"/api/clusters?perPage=500"* ]]; then
+      echo '{"ok":true,"data":[{"id":"cl-1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
+    elif [[ " $* " == *" DELETE "* ]]; then
+      printf '{"ok":true,"data":{"deleted":true,"id":"cl-1"}}\n200'
+    else
+      printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
+    fi
+  }
+  export -f curl
   mkdir -p "${PATH_BASE}/.kubeconfig"
   echo kc > "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
   echo kc > "${PATH_BASE}/.kubeconfig/shortname.yaml"
