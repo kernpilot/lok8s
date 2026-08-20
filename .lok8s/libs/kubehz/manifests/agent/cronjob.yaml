@@ -607,6 +607,12 @@ spec:
                     DESIRED_ETAG=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
                     DESIRED_ERR=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
                   fi
+                  if [ -z "${MARKER_OK}" ]; then
+                    # Fail closed like the assessment gate: without the marker
+                    # ConfigMap the etag/error state cannot persist, so every
+                    # tick would re-poll and re-log — skip entirely.
+                    echo "kubehz: desired-state poll skipped (marker ConfigMap unreadable)" >&2
+                  else
                   set -- -H "Authorization: Bearer ${AGENT_TOKEN}"
                   [ -z "${DESIRED_ETAG}" ] || set -- "$@" -H "If-None-Match: ${DESIRED_ETAG}"
                   DES_RC=0
@@ -626,9 +632,12 @@ spec:
                         fi
                         ;;
                       200)
-                        # Body = the one JSON line after the header block; the
-                        # ETag header is stored verbatim (opaque validator).
-                        DES_BODY=$(printf '%s\n' "${DES_OUT}" | grep '^{' | tail -1) || DES_BODY=""
+                        # Body = everything past the first blank line (end of
+                        # the header block), minus the __code marker — robust
+                        # to multi-line/pretty-printed JSON, which the old
+                        # grep '^{' single-line assumption was not. The ETag
+                        # header is stored verbatim (opaque validator).
+                        DES_BODY=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -e '1,/^$/d' -e '/^__code=/d') || DES_BODY=""
                         DES_NEW_ETAG=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1)
                         DES_REV=$(printf '%s' "${DES_BODY}" | jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
                         if [ -z "${DES_REV}" ]; then
@@ -663,6 +672,7 @@ spec:
                         echo "kubehz: desired-state poll returned HTTP ${DES_CODE:-<none>}; retrying next tick" >&2
                         ;;
                     esac
+                  fi
                   fi
               envFrom:
                 - configMapRef:
