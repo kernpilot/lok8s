@@ -10,18 +10,31 @@ BIN_ROOT    ?= ../.kustomize
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X $(MODULE)/internal/version.Version=$(VERSION)
 
-# Prefer the goenv-managed `go` binary if a usable one exists. The system
-# `go` shim on this dev box is a stale 1.22.0 wrapper pointing at a 1.26.0
-# stdlib, which produces "version mismatch" errors during compilation. We
-# pick the highest installed goenv version that's >= 1.22.
-# Pick the highest real `go` from goenv OR mise installs, falling back to a
-# `go` on PATH. (The bare PATH `go`/shim is often a stale wrapper or an unset
-# mise shim — "No version is set for shim: go" — that fails to compile.)
+# Pick a `go` that PROVABLY compiles. A candidate can lie: a goenv/mise
+# install can print a version yet fail every build with "compile: version X
+# does not match go tool version Y" (stale or partial toolchain), and an
+# unset mise/goenv PATH shim errors with "No version is set for shim: go".
+# Version-sorting candidates cannot see either failure, so the picker
+# VALIDATES instead: each candidate must compile a trivial CGO_ENABLED=0
+# program under this module's `go` directive — the same toolchain resolution
+# the real build performs. First working candidate wins; the PATH `go` (what
+# the developer's shell uses) is tried first, then goenv/mise installs,
+# newest first. Override with `make build GO=…` — a make ARGUMENT; an
+# environment prefix does not beat `GO :=`.
 GO := $(shell \
-  for d in $(HOME)/.goenv/versions $(HOME)/.local/share/mise/installs/go; do \
-    [ -d $$d ] && ls -d $$d/*/bin/go 2>/dev/null; \
-  done | sort -V | tail -1)
-GO := $(if $(GO),$(GO),$(shell command -v go))
+  tmp=$$(mktemp -d); \
+  { echo 'module probe'; grep '^go ' go.mod; } > $$tmp/go.mod; \
+  printf 'package main\n\nfunc main() {}\n' > $$tmp/main.go; \
+  { command -v go; \
+    for d in $(HOME)/.goenv/versions $(HOME)/.local/share/mise/installs/go; do \
+      [ -d $$d ] && ls -d $$d/*/bin/go 2>/dev/null | sort -rV; \
+    done; } | while read -r g; do \
+      [ -x "$$g" ] || continue; \
+      if ( cd $$tmp && CGO_ENABLED=0 GOFLAGS= "$$g" build -o /dev/null . ) >/dev/null 2>&1; then \
+        echo "$$g"; break; \
+      fi; \
+    done; \
+  rm -rf $$tmp)
 GO := $(if $(GO),$(GO),go)
 
 # --- Plugin: secrets.lok8s.dev/v1/Secret ---
