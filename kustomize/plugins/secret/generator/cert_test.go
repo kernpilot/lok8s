@@ -199,24 +199,37 @@ func TestCert_CARoot_IncludeKey_EmitsCAKeypairAsTLSPair(t *testing.T) {
 	if !roots.AppendCertsFromPEM(m["tls.crt"]) {
 		t.Fatal("append includeKey tls.crt failed")
 	}
-	blk, _ := pem.Decode(entryMap(leafOut)["tls.crt"])
-	leaf, _ := x509.ParseCertificate(blk.Bytes)
+	leaf := parseLeaf(t, entryMap(leafOut)["tls.crt"])
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
 		t.Errorf("leaf does not chain to the includeKey-emitted CA: %v", err)
 	}
 	assertPairMatches(t, m["tls.crt"], m["tls.key"])
 }
 
+// parseLeaf decodes a PEM certificate with real assertions — a malformed PEM
+// fails with the reason, not a nil-deref stack trace.
+func parseLeaf(t *testing.T, certPEM []byte) *x509.Certificate {
+	t.Helper()
+	blk, _ := pem.Decode(certPEM)
+	if blk == nil {
+		t.Fatal("tls.crt is not PEM")
+	}
+	cert, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatalf("tls.crt does not parse: %v", err)
+	}
+	return cert
+}
+
 // assertPairMatches proves tls.key IS the private half of tls.crt directly
 // (public-key equality), not transitively via file layout.
 func assertPairMatches(t *testing.T, certPEM, keyPEM []byte) {
 	t.Helper()
-	blk, _ := pem.Decode(certPEM)
-	cert, err := x509.ParseCertificate(blk.Bytes)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cert := parseLeaf(t, certPEM)
 	kblk, _ := pem.Decode(keyPEM)
+	if kblk == nil {
+		t.Fatal("tls.key is not PEM")
+	}
 	key, err := x509.ParsePKCS8PrivateKey(kblk.Bytes)
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +287,10 @@ func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
 	}
 	// The emitted pair must belong together: tls.key must be the cached ca.key
 	// that signed tls.crt.
-	c, _ := cache.New(dir, "cert-manager", "ci-root-ca")
+	c, err := cache.New(dir, "cert-manager", "ci-root-ca")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cachedKey, err := c.GetOrCreate("ca.key", func() ([]byte, error) { return nil, fmt.Errorf("ca.key not cached") })
 	if err != nil {
 		t.Fatal(err)
@@ -292,8 +308,7 @@ func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
 	if !roots.AppendCertsFromPEM(m["tls.crt"]) {
 		t.Fatal("append own-CA tls.crt failed")
 	}
-	blk, _ := pem.Decode(entryMap(leafOut)["tls.crt"])
-	leaf, _ := x509.ParseCertificate(blk.Bytes)
+	leaf := parseLeaf(t, entryMap(leafOut)["tls.crt"])
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
 		t.Errorf("caRef leaf does not chain to the includeKey own CA: %v", err)
 	}
