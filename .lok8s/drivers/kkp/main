@@ -119,8 +119,6 @@ driver::destroy() {
     cluster_id=$(cat "${work_dir}/cluster_id")
     project_id=$(cat "${work_dir}/project_id")
   else
-    # Fallback: extract project ID from spec (cluster ID unavailable)
-    project_id=$(yq -r '.spec.kkp.projectId' "${cluster_yaml}")
     error "No saved cluster ID found in ${work_dir}/cluster_id"
     error "Cannot destroy cluster without a cluster ID"
     return 1

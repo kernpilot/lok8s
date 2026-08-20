@@ -271,9 +271,11 @@ kubeone::generate_config() {
         return 1
       fi
 
+      # Bracket syntax: pool names contain hyphens, which yq would
+      # otherwise parse as arithmetic (.workers.pool-1 == .workers.pool - 1)
       local replicas pool_type
-      replicas=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
-      pool_type=$(yq -r ".spec.workers.${pool}.type" "${cluster_yaml}")
+      replicas=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
+      pool_type=$(yq -r ".spec.workers.[\"${pool}\"].type" "${cluster_yaml}")
       # Spec-controlled values are interpolated into YAML below — validate before
       # use so a value with newlines/quotes/colons can't inject or malform fields.
       [[ "${replicas}" =~ ^[0-9]+$ ]] \
@@ -290,7 +292,7 @@ kubeone::generate_config() {
         hetzner)
           local datacenter image
           datacenter=$(yq -r '.spec.datacenter // "fsn1"' "${cluster_yaml}")
-          image=$(yq -r ".spec.workers.${pool}.image // \"ubuntu-22.04\"" "${cluster_yaml}")
+          image=$(yq -r ".spec.workers.[\"${pool}\"].image // \"ubuntu-22.04\"" "${cluster_yaml}")
           [[ "${datacenter}" =~ ^[a-zA-Z0-9._-]+$ ]] \
             || { error "Invalid datacenter: ${datacenter}"; return 1; }
           [[ "${image}" =~ ^[a-zA-Z0-9._-]+$ ]] \
@@ -623,11 +625,13 @@ kubeone::status() {
 
   local output
   if output=$(kubeone "${kubeone_args[@]}" 2>&1); then
-    # Check for known status patterns in kubeone output
-    if echo "${output}" | grep -qi "healthy"; then
-      echo "Healthy"
-    elif echo "${output}" | grep -qi "degraded\|not healthy"; then
+    # Check for known status patterns in kubeone output. Negative patterns
+    # FIRST: "not healthy" contains "healthy", so testing "healthy" first
+    # reported a degraded cluster as Healthy.
+    if echo "${output}" | grep -qi "degraded\|not healthy\|unhealthy"; then
       echo "Degraded"
+    elif echo "${output}" | grep -qi "healthy"; then
+      echo "Healthy"
     else
       echo "Unknown"
     fi

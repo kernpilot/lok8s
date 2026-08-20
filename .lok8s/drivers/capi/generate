@@ -85,9 +85,16 @@ capi::generate() {
     # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
     export POOL_NAME POOL_REPLICAS POOL_TYPE
     for pool in $(yq -r '.spec.workers | keys[]?' "${cluster_yaml}"); do
+      # Validate the name (it lands in template envs), then read via bracket
+      # syntax: pool names contain hyphens, which yq would otherwise parse as
+      # arithmetic (.workers.pool-1 == .workers.pool - 1).
+      if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
+        echo "error: invalid worker pool name: ${pool} (must be alphanumeric with hyphens)" >&2
+        return 1
+      fi
       POOL_NAME="${pool}"
-      POOL_REPLICAS=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
-      POOL_TYPE=$(yq -r ".spec.workers.${pool}.type // \"cax11\"" "${cluster_yaml}")
+      POOL_REPLICAS=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
+      POOL_TYPE=$(yq -r ".spec.workers.[\"${pool}\"].type // \"cax11\"" "${cluster_yaml}")
       for tpl in \
         "${core}/machine-deployment.yaml" \
         "${prov}/kubeadm-config-template.yaml" \
