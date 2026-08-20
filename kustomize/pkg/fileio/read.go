@@ -56,6 +56,27 @@ func SafeRead(rootDir, path string, maxSize int64) ([]byte, error) {
 		return nil, errs.Newf("file: path escapes root directory: %q", path)
 	}
 
+	// The check above is lexical only — a symlink inside rootDir can still
+	// point anywhere on the host. Resolve both sides and re-check
+	// containment on the RESOLVED paths (rootDir itself may sit behind a
+	// symlink, e.g. /tmp on macOS, so it must be resolved too).
+	resolvedRoot, err := filepath.EvalSymlinks(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("file: resolve root %q: %w", rootDir, err)
+	}
+	resolved, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errs.Newf("file: not found: %q", path)
+		}
+		return nil, fmt.Errorf("file: resolve %q: %w", path, err)
+	}
+	rel, err = filepath.Rel(resolvedRoot, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, errs.Newf("file: symlink escapes root directory: %q", path)
+	}
+	full = resolved
+
 	st, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
