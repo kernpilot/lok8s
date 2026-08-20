@@ -104,6 +104,83 @@ func TestSafeRead_SizeLimit(t *testing.T) {
 	}
 }
 
+func TestSafeRead_RejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "host-secret")
+	if err := os.WriteFile(secret, []byte("exfil"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leaf symlink pointing outside the root.
+	if err := os.Symlink(secret, filepath.Join(root, "leaf-link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SafeRead(root, "leaf-link", 0); err == nil {
+		t.Error("expected error for leaf symlink escaping root")
+	} else if !strings.Contains(err.Error(), "symlink escapes") {
+		t.Errorf("expected 'symlink escapes' in error, got %q", err.Error())
+	}
+
+	// Directory symlink: root/dir-link/host-secret resolves outside.
+	if err := os.Symlink(outside, filepath.Join(root, "dir-link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SafeRead(root, "dir-link/host-secret", 0); err == nil {
+		t.Error("expected error for directory symlink escaping root")
+	} else if !strings.Contains(err.Error(), "symlink escapes") {
+		t.Errorf("expected 'symlink escapes' in error, got %q", err.Error())
+	}
+}
+
+func TestSafeRead_DanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, "gone.txt"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := SafeRead(root, "dangling", 0)
+	if err == nil {
+		t.Fatal("expected error for dangling symlink")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got %q", err.Error())
+	}
+}
+
+func TestSafeRead_AllowsSymlinkInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("in-tree"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.txt", filepath.Join(root, "alias.txt")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := SafeRead(root, "alias.txt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "in-tree" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestSafeRead_RootBehindSymlink(t *testing.T) {
+	// rootDir itself reached via a symlink (the /tmp-on-macOS shape): in-tree
+	// files must still read fine after both sides are resolved.
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "f.txt"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := t.TempDir()
+	linkedRoot := filepath.Join(linkParent, "root-link")
+	if err := os.Symlink(real, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SafeRead(linkedRoot, "f.txt", 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSafeRead_DefaultMaxSize(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "x.txt")

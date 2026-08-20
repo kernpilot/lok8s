@@ -248,7 +248,7 @@ The local experience is the part lok8s polishes hardest, because it's where you 
 
 - **One command, full loop.** `lo up` creates a `kind` cluster, applies your `spec.bootstrap` infrastructure, and starts **Tilt** — which reads your `services.yaml`, builds images, wires `docker_build` + `live_update`, and gives you a UI at the URL it prints (a per-domain port in `10351`–`10499`, so parallel projects never collide). Edit code → Tilt syncs and reloads. ([Local Dev guide](docs/guide/local-dev.md))
 - **Working TLS, no manual cert juggling.** The `secrets.lok8s.dev` kustomize plugin's `cert:` generator mints leaf certificates from a shared local dev CA — no `mkcert` dance per project. `lo trust` adds the CA to your system store so browsers are happy. ([Secrets guide](docs/guide/secrets.md), [Kustomize plugins](docs/reference/kustomize-plugins.md))
-- **Fast, shared registry mirrors.** A pull-through mirror network is shared across all your lok8s projects, so images are pulled once, not once-per-cluster. Opt out per project if you'd rather not. ([Shared Registries guide](docs/guide/shared-registries.md))
+- **Fast, shared registry mirrors.** A pull-through mirror network can be shared across all your lok8s projects, so images are pulled once, not once-per-cluster. Opt in per project with `spec.registries.shared.enabled: true` (off by default — the safer single-network topology). ([Shared Registries guide](docs/guide/shared-registries.md))
 - **Multi-project friendly.** Use `*.[N].lok8s.dev` slots to run several local clusters on isolated Docker networks side by side.
 
 Define services once, in a committed `services.yaml`, with personal overrides in a gitignored `services.<config>.yaml` ("I'm not working on the frontend today" → `enabled: false`). Each buildable service carries a small `lok8s.yaml` describing its build, ports, and live-update rules. ([Services guide](docs/guide/services.md))
@@ -318,9 +318,9 @@ The kustomize plugins and the `lo chat` engine, where a typed/compiled language 
 | `lo up [--open-tilt]` | Provision cluster + bootstrap + start Tilt |
 | `lo down` | Stop Tilt + delete the cluster |
 | `lo status` | Cluster health + per-target build state |
-| `lo provision` | Full lifecycle: create + bootstrap + build + deploy |
+| `lo provision` | Provision cluster infra + apply `spec.bootstrap` addons (no Tilt, no `targets/` deploy) |
 | `lo build [target…]` | Render kustomize targets → `artifacts/` |
-| `lo deploy [--filter k=v] [target…]` | Apply built artifacts (CRDs → resources → health) |
+| `lo deploy [-l k=v] [target…]` | Apply built artifacts (CRDs → resources → health) |
 | `lo lint` | Validate specs, bootstrap entries, target refs |
 | `lo doctor` | Diagnose the local environment / toolchain |
 | `lo addons [name]` | List / inspect framework bootstrap addons |

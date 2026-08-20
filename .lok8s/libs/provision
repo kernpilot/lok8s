@@ -244,6 +244,26 @@ provision::load_provider_creds() {
   return 0
 }
 
+# provision::read_kind <cluster_yaml> — read + validate .kind. The value is
+# untrusted YAML interpolated into a path we `source`; constrain it to a bare
+# driver name so a crafted spec can't traverse / source an arbitrary file
+# (same guard as bootstrap's driver resolution).
+provision::read_kind() {
+  local kind
+  # `// ""`: a missing .kind must read as empty, not the literal "null"
+  # (which would pass the regex and mis-report as an unknown driver later).
+  kind=$(yq -r '.kind // ""' "${1}" | tr '[:upper:]' '[:lower:]')
+  [[ -n "${kind}" ]] || {
+    error "cluster spec has no .kind: ${1}"
+    return 1
+  }
+  [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || {
+    error "invalid cluster kind: ${kind}"
+    return 1
+  }
+  echo "${kind}"
+}
+
 # Dispatch provisioning to the appropriate kind contract implementation.
 # Usage: provision::dispatch <domain> [bootstrap_only]
 provision::dispatch() {
@@ -267,7 +287,7 @@ provision::dispatch() {
 
   local cluster_yaml="${LOK8S_SPEC_FILE}"
   local kind
-  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  kind=$(provision::read_kind "${cluster_yaml}") || return 1
 
   # Source driver implementation
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
@@ -353,7 +373,9 @@ provision::dispatch() {
     # Post-provision hook: driver SIDE-EFFECTS that need provisioned infra (rare).
     # Bootstrap ENV belongs in driver::export (below) so it runs on --bootstrap too.
     if declare -f driver::post_provision &>/dev/null; then
-      driver::post_provision "${domain}"
+      # Explicit gate: dispatch also runs under callers that suppress errexit
+      # (`lo recover`), where an ungated failure here would be swallowed.
+      driver::post_provision "${domain}" || return 1
     fi
   fi
 
@@ -362,7 +384,7 @@ provision::dispatch() {
   # Runs on BOTH paths — full provision AND --bootstrap — so a re-applied
   # bootstrap graph renders with the same env.
   if declare -f driver::export &>/dev/null; then
-    driver::export "${domain}"
+    driver::export "${domain}" || return 1
   fi
 
   # Tell bootstrap::apply which path this is. On a full provision the infra
@@ -375,13 +397,18 @@ provision::dispatch() {
   # that could not tell a fresh driver-apply from a weeks-old cluster).
   export LOK8S_BOOTSTRAP_ONLY="${bootstrap_only}"
 
-  # kubehz config: read and validate
-  kubehz::read_config "${cluster_yaml}"
-  kubehz::validate_config || return 1
+  # kubehz config + registration. Probe first — tests source this lib
+  # standalone without the kubehz lib loaded (same contract as
+  # inventory::publish below); with the lib present, every step is gated.
+  if declare -f kubehz::read_config &>/dev/null; then
+    kubehz::read_config "${cluster_yaml}" || return 1
+    kubehz::validate_config || return 1
 
-  # kubehz registration: register cluster if access != none
-  if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
-    kubehz::register_cluster "${domain}" "${cluster_yaml}"
+    # kubehz registration: register cluster if access != none. Unset access
+    # (read_config didn't export it) means no kubehz config — same as none.
+    if [[ "${LOK8S_KUBEHZ_ACCESS:-none}" != "none" ]]; then
+      kubehz::register_cluster "${domain}" "${cluster_yaml}" || return 1
+    fi
   fi
 
   # Bootstrap: apply spec.bootstrap addons (cluster infrastructure —
@@ -391,7 +418,10 @@ provision::dispatch() {
   local cluster_name_for_kc
   cluster_name_for_kc=$(yq -r '.metadata.name' "${cluster_yaml}")
   local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name_for_kc}.yaml"
-  bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}"
+  # Probe first (standalone-source test contract, as above); gated when present.
+  if declare -f bootstrap::apply &>/dev/null; then
+    bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}" || return 1
+  fi
 
   # Record WHAT was deployed into the cluster itself: the ClusterInventory
   # singleton (lok8s.dev/v1alpha1, name "cluster") — metadata only (versions,
@@ -408,7 +438,7 @@ provision::dispatch() {
   gitops_provider=$(yq -r '.spec.gitops.provider // ""' "${cluster_yaml}")
   if [[ -n "${gitops_provider}" ]]; then
     debug "GitOps provider found: ${gitops_provider}, bootstrapping"
-    gitops::bootstrap "${domain}" "${gitops_provider}"
+    gitops::bootstrap "${domain}" "${gitops_provider}" || return 1
   fi
 }
 
@@ -427,7 +457,7 @@ provision::dispatch_destroy() {
 
   local cluster_yaml="${LOK8S_SPEC_FILE}"
   local kind
-  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  kind=$(provision::read_kind "${cluster_yaml}") || return 1
 
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
   [[ -f "${kind_script}" ]] || { error "Unknown cluster kind: ${kind}"; return 1; }
@@ -486,7 +516,7 @@ provision::dispatch_status() {
 
   local cluster_yaml="${LOK8S_SPEC_FILE}"
   local kind
-  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  kind=$(provision::read_kind "${cluster_yaml}") || return 1
 
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
   [[ -f "${kind_script}" ]] || { error "Unknown cluster kind: ${kind}"; return 1; }

@@ -84,10 +84,22 @@ capi::generate() {
     done
     # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
     export POOL_NAME POOL_REPLICAS POOL_TYPE
-    for pool in $(yq -r '.spec.workers | keys[]?' "${cluster_yaml}"); do
+    # while-read, not `for … in $(yq …)`: word-splitting would break a
+    # whitespace-bearing pool name into fragments BEFORE validation — each
+    # fragment could pass the regex and generate manifests for pools that
+    # don't exist. read consumes each name exactly as yq emits it.
+    while IFS= read -r pool; do
+      [[ -n "${pool}" ]] || continue
+      # Validate the name (it lands in template envs), then read via bracket
+      # syntax: pool names contain hyphens, which yq would otherwise parse as
+      # arithmetic (.workers.pool-1 == .workers.pool - 1).
+      if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
+        echo "error: invalid worker pool name: ${pool} (must be alphanumeric with hyphens)" >&2
+        return 1
+      fi
       POOL_NAME="${pool}"
-      POOL_REPLICAS=$(yq -r ".spec.workers.${pool}.replicas // 1" "${cluster_yaml}")
-      POOL_TYPE=$(yq -r ".spec.workers.${pool}.type // \"cax11\"" "${cluster_yaml}")
+      POOL_REPLICAS=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
+      POOL_TYPE=$(yq -r ".spec.workers.[\"${pool}\"].type // \"cax11\"" "${cluster_yaml}")
       for tpl in \
         "${core}/machine-deployment.yaml" \
         "${prov}/kubeadm-config-template.yaml" \
@@ -104,7 +116,7 @@ capi::generate() {
         # plane and no workers, or fails to apply at all (visual-audit r255).
         template::envsubst "${allowed_vars}" < "${tpl}"
       done
-    done
+    done < <(yq -r '.spec.workers | keys[]?' "${cluster_yaml}")
   )
 
   # Optional anti-affinity: opt-in `spread` placement groups (control plane +

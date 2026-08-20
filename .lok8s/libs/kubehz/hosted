@@ -175,7 +175,10 @@ kubehz::provision_hosted() {
 
   debug "Hosted cluster created: ${cluster_id}"
 
-  kubehz::wait_for_cluster "${api_url}" "${cluster_id}"
+  # Gate explicitly — this runs in the errexit-suppressed provision tree, so
+  # an ungated wait lets a Failed hosted cluster "succeed" into the
+  # kubeconfig download below.
+  kubehz::wait_for_cluster "${api_url}" "${cluster_id}" || return 1
 
   # Download kubeconfig
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
