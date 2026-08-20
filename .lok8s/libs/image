@@ -208,7 +208,10 @@ image::_cache_queue() {
       pids+=("$!")
       active=$(( active + 1 ))
       if (( parallel > 0 )) && (( active >= parallel )); then
-        wait -n 2>/dev/null || true
+        # Job rcs live in faildir markers, so both waits only synchronize;
+        # the second is the bash<4.3 fallback that keeps parallelism bounded
+        # when `wait -n` is unsupported.
+        wait -n 2>/dev/null || wait "${pids[0]}" 2>/dev/null || true
         # Trim finished pids (best-effort; harmless if a few stay)
         local -a alive=()
         for p in "${pids[@]}"; do

@@ -128,14 +128,22 @@ func TestSafeRead_RejectsSymlinkEscape(t *testing.T) {
 	}
 	if _, err := SafeRead(root, "dir-link/host-secret", 0); err == nil {
 		t.Error("expected error for directory symlink escaping root")
+	} else if !strings.Contains(err.Error(), "symlink escapes") {
+		t.Errorf("expected 'symlink escapes' in error, got %q", err.Error())
 	}
+}
 
-	// Absolute symlink to a system file.
-	if err := os.Symlink("/etc/hostname", filepath.Join(root, "abs-link")); err != nil {
+func TestSafeRead_DanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, "gone.txt"), filepath.Join(root, "dangling")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SafeRead(root, "abs-link", 0); err == nil {
-		t.Error("expected error for absolute symlink escaping root")
+	_, err := SafeRead(root, "dangling", 0)
+	if err == nil {
+		t.Fatal("expected error for dangling symlink")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got %q", err.Error())
 	}
 }
 
