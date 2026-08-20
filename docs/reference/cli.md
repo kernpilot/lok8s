@@ -431,6 +431,8 @@ lo kubehz register            # register the cluster with the platform
 lo kubehz deregister          # remove it
 lo kubehz status              # registration + heartbeat status
 lo kubehz claim-code          # print the one-time claim code for the dashboard
+lo kubehz claim --nonce <v>   # place a dashboard-minted claim nonce for the agent to echo
+lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats resume)
 lo kubehz join                # mint a node join ticket (hosting: shared)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)

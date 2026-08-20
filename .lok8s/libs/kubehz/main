@@ -33,6 +33,8 @@ main::kubehz() {
     'status|s@readonly'         'Check kubehz registration status'
     'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
+    'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
+    're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
   )
@@ -628,18 +630,11 @@ kubehz::assess() {
   # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
 
-  # Resolve the cluster id by domain. The list endpoint IGNORES ?domain=, so
-  # filter CLIENT-SIDE — .data[0] would silently pick the tenant's newest
-  # cluster and serve the wrong feasibility on multi-cluster tenants.
   local cluster_id
-  cluster_id=$(curl -fsSL "${api_url}/api/clusters" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
-    | jq -r --arg d "${domain}" \
-      '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)] | first | .id) // empty') || cluster_id=""
-  if [[ -z "${cluster_id}" ]]; then
+  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
     error "kubehz: no cluster found for ${domain} — is it registered + claimed, and is KUBEHZ_TOKEN set?"
     return 1
-  fi
+  }
 
   local response
   response=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}/assessment" \
@@ -774,6 +769,209 @@ kubehz::claim-code() {
     echo "Paste this one-time claim code at the dashboard /claim page while signed in"
     echo "to attribute this cluster to your account. It is single-use — do not share it."
   } >&2
+}
+
+# ── Cluster-id resolution (registry lookup) ──────────────
+
+# Resolve the platform cluster id (cl-<uuid8>) for a domain from the tenant's
+# registry. The list endpoint IGNORES ?domain=, so filter CLIENT-SIDE —
+# .data[0] would silently pick the tenant's newest cluster on multi-cluster
+# tenants. Requires KUBEHZ_TOKEN (the id is only visible to the owning
+# tenant); prints the id, or returns 1 printing nothing.
+# Usage: kubehz::resolve_cluster_id <domain> <api_url>
+kubehz::resolve_cluster_id() {
+  local domain="${1}" api_url="${2}" cluster_id
+  # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
+  # is served newest-first, but the server binds agent identity (heartbeat,
+  # desired) to the OLDEST active row for a domain — picking the newest armed
+  # the WRONG cluster when a duplicate registration existed (review r1
+  # medium). Oldest-first matches the server's binding.
+  cluster_id=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
+    | jq -r --arg d "${domain}" \
+      '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+        | sort_by(.createdAt) | first | .id) // empty') || cluster_id=""
+  [[ -n "${cluster_id}" ]] || return 1
+  echo "${cluster_id}"
+}
+
+# ── Mode-3 claim nonce (challenge-response) ──────────────
+
+# Place a dashboard-minted claim-challenge nonce where the heartbeat agent can
+# echo it, via `lo kubehz claim --nonce <value>`. Mode 3 of the claim flow:
+# the signed-in user mints the nonce (POST /api/claims/challenge), places it
+# here, and the agent echoes it inside its next AUTHENTICATED heartbeat —
+# proving account (the mint) AND cluster access (the bearer beat) in one round
+# trip. On success the heartbeat response carries the additive `claim` key and
+# the agent clears the nonce; a wrong/expired nonce produces no signal (the
+# beat never fails because of it).
+#
+# The nonce persists as annotations on the kubehz-agent-config ConfigMap (the
+# agent's established marker surface): kubehz.cloud/claim-nonce + the
+# …-placed epoch stamp, written in ONE annotate call so the agent never reads
+# a half-written pair. The write runs with the OPERATOR's ambient kubeconfig
+# (exported by main from the active domain — switch clusters with
+# `lo use <domain>` first); the agent's own RBAC stays untouched — its marker
+# Role already grants get/patch on this one ConfigMap, which is exactly what
+# the CronJob needs to read and later clear the nonce.
+#
+# SECURITY: the nonce is a claim ticket — this command never prints it, and no
+# error message may echo it; only its presence/shape is reported.
+kubehz::claim() {
+  local nonce
+  local -a args=(
+    'nonce|n:!'  'Claim-challenge nonce minted in the dashboard (khzn_…)'
+    "${args[@]:-}"
+  )
+  :args "Place a claim-challenge nonce for the heartbeat agent" "${@}"
+
+  # Shape check BEFORE any cluster call: the api mints khzn_ + 43 base64url
+  # chars and its heartbeat schema bounds the whole value at 20..200 chars —
+  # reject anything outside that envelope, without echoing the value.
+  if [[ ! "${nonce}" =~ ^khzn_[A-Za-z0-9_-]{15,195}$ ]]; then
+    error "invalid claim nonce: expected a dashboard-minted khzn_… value (20-200 chars); nothing was placed"
+    return 1
+  fi
+
+  local ns="kubehz-system" cm="kubehz-agent-config"
+  if ! kubectl -n "${ns}" get configmap "${cm}" >/dev/null 2>&1; then
+    error "configmap/${cm} not found in ${ns}. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster."
+    return 1
+  fi
+
+  # One call, both annotations: the value and its placement stamp. The agent
+  # clears a stampless nonce as unsourced, and expires a stamped one after the
+  # api's challenge TTL (15 minutes) so a dead nonce never echoes forever.
+  kubectl -n "${ns}" annotate --overwrite configmap "${cm}" \
+    "kubehz.cloud/claim-nonce=${nonce}" \
+    "kubehz.cloud/claim-nonce-placed=$(date -u +%s)" >/dev/null || {
+    error "could not annotate configmap/${cm} — check your kubeconfig permissions"
+    return 1
+  }
+
+  echo "kubehz: claim nonce placed for the agent."
+  echo "The next heartbeat (within 5 minutes) echoes it to the platform; on success the"
+  echo "dashboard shows the cluster claimed and the agent clears the nonce. The challenge"
+  echo "expires 15 minutes after minting — mint and place a fresh one if it lapses."
+}
+
+# ── Agent-token re-enrollment (agent-identity contract R2) ─
+
+# Re-enroll a REGENERATED in-cluster agent token with the platform via
+# `lo kubehz re-enroll`. The recovery for a real incident class: the
+# kubehz-system namespace (and with it Secret kubehz-agent) is lost, the
+# agent's create-if-absent bootstrap mints a FRESH token — whose beats then
+# fail the platform's hash ratchet, which still expects the old hash. This
+# command reads the CURRENT in-cluster token, hashes it (sha256, lowercase
+# hex) and registers the hash via POST /api/clusters/{id}/agent-token,
+# authenticated with the USER's platform bearer (KUBEHZ_TOKEN — the same
+# clusters:write credential `lo kubehz register` uses; the tenant must own
+# the cluster). The server revokes the prior token and arms the new one;
+# heartbeats resume on the agent's next tick.
+#
+# Deliberately an OPERATOR action from OUTSIDE the cluster: the agent's own
+# RBAC has no update/patch on the Secret (the never-rotate invariant) and the
+# agent cannot re-enroll itself — exactly why the authed route exists. The
+# token plaintext never leaves this machine and is never printed; only its
+# hash is sent, HTTPS-only.
+kubehz::re-enroll() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Re-enroll the in-cluster agent token with kubehz" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    error "hosting: shared has no heartbeat agent to re-enroll (a Space has no agent)"
+    return 1
+  fi
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    error "spec.kubehz.access is 'none' — no agent identity to re-enroll"
+    return 1
+  fi
+
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
+  # KUBEHZ_TOKEN + the token hash travel on this URL — never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
+    error "KUBEHZ_TOKEN is required to re-enroll (a clusters:write API token from the dashboard's Access -> API Tokens)"
+    return 1
+  }
+
+  # The CURRENT in-cluster token — whatever the agent's bootstrap minted —
+  # read via the ambient kubeconfig (this runs against the user's cluster;
+  # switch with `lo use <domain>` first). Never printed.
+  local agent_token
+  agent_token=$(kubectl -n kubehz-system get secret kubehz-agent \
+    -o jsonpath='{.data.agent-token}' 2>/dev/null | base64 -d) || agent_token=""
+  if [[ -z "${agent_token}" ]]; then
+    error "secret/kubehz-agent has no agent-token in kubehz-system — deploy the heartbeat agent and wait one tick (it mints the token on its first run)"
+    return 1
+  fi
+
+  # sha256, lowercase hex — the exact verifier shape the route stores. The
+  # openssl fallback mirrors the agent's own sha256_hex helper.
+  local token_hash
+  if command -v sha256sum >/dev/null 2>&1; then
+    token_hash=$(printf %s "${agent_token}" | sha256sum | cut -d' ' -f1) || token_hash=""
+  else
+    token_hash=$(printf %s "${agent_token}" | openssl dgst -sha256 | awk '{print $NF}') || token_hash=""
+  fi
+  agent_token=""
+  if [[ ! "${token_hash}" =~ ^[0-9a-f]{64}$ ]]; then
+    error "could not hash the agent token (need sha256sum or openssl)"
+    return 1
+  fi
+
+  # The agent-token route takes the canonical cl-<uuid8> id only (unlike the
+  # heartbeat, which also accepts the domain) — resolve it from the registry
+  # the way `lo kubehz assess` does.
+  local cluster_id
+  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
+    error "kubehz: no cluster found for ${domain} — is it registered + claimed, and does KUBEHZ_TOKEN belong to the owning tenant?"
+    return 1
+  }
+
+  # Capture body AND status so a refusal is reported honestly: 409
+  # AGENT_TOKEN_CONFLICT = the hash is already registered/revoked (generate a
+  # fresh token); 404 = not this tenant's cluster (the api answers a uniform
+  # 404 cross-tenant).
+  local response http_code body
+  response=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}')") || {
+    error "kubehz: agent-token request failed (network) — retry once ${api_url} is reachable"
+    return 1
+  }
+  http_code="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+
+  if [[ "${http_code}" != "200" ]]; then
+    local code msg
+    code=$(jq -r '.data.code // empty' <<<"${body}" 2>/dev/null) || code=""
+    msg=$(jq -r '.data.message // empty' <<<"${body}" 2>/dev/null) || msg=""
+    error "kubehz: re-enroll refused (HTTP ${http_code}${code:+ ${code}})${msg:+: ${msg}}"
+    return 1
+  fi
+
+  local rotated
+  rotated=$(jq -r '.rotated // false' <<<"${body}" 2>/dev/null) || rotated=""
+  if [[ "${rotated}" == "true" ]]; then
+    echo "kubehz: agent token re-enrolled for ${domain} (${cluster_id})."
+    echo "The platform revoked the previous token and armed the in-cluster one;"
+    echo "heartbeats resume on the agent's next tick (within 5 minutes)."
+  else
+    echo "kubehz: the in-cluster agent token is already the live one for ${domain} (${cluster_id}) — nothing rotated."
+    echo "If heartbeats still fail, check the agent's logs (kubehz-system, CronJob kubehz-heartbeat)."
+  fi
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::kubehz "${@}"

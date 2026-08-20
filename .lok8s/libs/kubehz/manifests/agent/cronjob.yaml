@@ -245,8 +245,11 @@ spec:
                   NOW_EPOCH=$(date -u +%s)
                   ASSESS_NOW=""
                   ASSESS_REQ=""
+                  MARKER_OK=""
+                  MARKER=""
                   if MARKER=$(kubectl get configmap kubehz-agent-config -n kubehz-system \
                       -o jsonpath='{.metadata.annotations}' --request-timeout=5s 2>/dev/null); then
+                    MARKER_OK=1
                     LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
                     ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
                     case "${LAST_ASSESS}" in
@@ -255,6 +258,57 @@ spec:
                     esac
                     [ "${ASSESS_REQ}" != "true" ] || ASSESS_NOW=1
                   fi
+
+                  # ── Mode-3 claim nonce (challenge-response) ───────────────
+                  # `lo kubehz claim --nonce` places a dashboard-minted khzn_
+                  # nonce + an epoch placement stamp on the marker ConfigMap
+                  # (one annotate call, so the pair is never half-written).
+                  # Echo it as `claim: {nonce}` inside the AUTHENTICATED beat;
+                  # a wrong/expired nonce yields a response byte-identical to
+                  # a nonce-less beat, so echoing is always safe. The nonce is
+                  # a claim ticket: NEVER logged, never printed — only its
+                  # presence is acted on. Clearing (below and on success) uses
+                  # the marker Role's existing get/patch — no new RBAC.
+                  CLAIM_NONCE=""
+                  if [ -n "${MARKER_OK}" ]; then
+                    CLAIM_NONCE=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce" // ""' 2>/dev/null) || CLAIM_NONCE=""
+                    CLAIM_PLACED=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce-placed" // ""' 2>/dev/null) || CLAIM_PLACED=""
+                    if [ -n "${CLAIM_NONCE}" ]; then
+                      # Expire a dead nonce so it never echoes forever: the
+                      # api's challenge TTL is 15 minutes (900s, the server
+                      # default) — past that the echo can never succeed. A
+                      # missing/invalid stamp or a malformed value (not the
+                      # CLI's shape) is cleared the same way: the CLI always
+                      # writes a valid pair, so anything else is unsourced.
+                      CLAIM_LIVE=""
+                      case "${CLAIM_PLACED}" in
+                        ''|*[!0-9]*) : ;;
+                        *)
+                          # Age must sit in [0, 900): a FUTURE stamp (operator
+                          # clock ahead) must not read as live, or a dead nonce
+                          # echoes until time catches up. wc -l: grep -Eq is
+                          # LINE-based, so a multi-line value whose first line
+                          # matches would pass and break the beat JSON.
+                          CLAIM_AGE=$(( NOW_EPOCH - CLAIM_PLACED ))
+                          if [ "${CLAIM_AGE}" -ge 0 ] && [ "${CLAIM_AGE}" -lt 900 ] \
+                            && [ "$(printf '%s' "${CLAIM_NONCE}" | wc -l)" -eq 0 ] \
+                            && printf '%s' "${CLAIM_NONCE}" | grep -Eq '^khzn_[A-Za-z0-9_-]{15,195}$'; then
+                            CLAIM_LIVE=1
+                          fi ;;
+                      esac
+                      if [ -z "${CLAIM_LIVE}" ]; then
+                        if kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                          "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1; then
+                          echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
+                        else
+                          echo "kubehz: could not clear the expired/invalid claim nonce (annotate failed); retrying next tick" >&2
+                        fi
+                        CLAIM_NONCE=""
+                      fi
+                    fi
+                  fi
+                  CLAIM_FIELD=""
+                  [ -z "${CLAIM_NONCE}" ] || CLAIM_FIELD='"claim": {"nonce": "'"${CLAIM_NONCE}"'"},'
 
                   ASSESSMENT=""
                   if [ -n "${ASSESS_NOW}" ]; then
@@ -426,6 +480,7 @@ spec:
                     "clusterId": "${CLUSTER_ID}",
                     "timestamp": "${BEAT_TS}",
                     ${ASSESSMENT_FIELD}
+                    ${CLAIM_FIELD}
                     "kubernetes": { "version": "${KUBE_VERSION}" },
                     "nodes": ${NODE_ARRAY},
                     "components": ${COMPONENT_ARRAY},
@@ -466,6 +521,7 @@ spec:
                   {
                     "clusterId": "${CLUSTER_ID}",
                     "timestamp": "${BEAT_TS}",
+                    ${CLAIM_FIELD}
                     "kubernetes": { "version": "${KUBE_VERSION}" },
                     "nodes": ${NODE_ARRAY},
                     "components": ${COMPONENT_ARRAY},
@@ -495,6 +551,20 @@ spec:
                   fi
                   printf '%s\n' "${RESPONSE}"
 
+                  # Claim succeeded → the response carries the additive
+                  # `claim: {verified: true}` key, the platform's cue to clear
+                  # the nonce from the config (it is consumed server-side and
+                  # can never succeed again). A beat whose nonce was wrong or
+                  # expired carries NO cue and clears nothing — the expiry
+                  # window above bounds how long such a nonce keeps echoing.
+                  if [ -n "${CLAIM_NONCE}" ] && printf '%s' "${RESPONSE}" | \
+                      jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
+                    kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                      "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 \
+                      || echo "kubehz: claim verified but the nonce annotation could not be cleared; the next tick will expire it" >&2
+                    echo "kubehz: cluster claim verified by the platform" >&2
+                  fi
+
                   # Assessment handled → move the 24h marker; clear a served
                   # assess request. A failed annotate only risks a RE-send next
                   # tick (idempotent server-side), never a lost heartbeat.
@@ -518,6 +588,100 @@ spec:
                       jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
                     kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
+                  fi
+
+                  # ── Desired-state poll — REPORT-ONLY (the P0 slice) ───────
+                  # GET /api/clusters/<id>/desired with the SAME identifier and
+                  # agent-token bearer the heartbeat uses. Strong ETag flow:
+                  # the stored validator rides If-None-Match; 304 = unchanged =
+                  # stay silent (the cheap path, every 5-minute tick). This
+                  # slice only REPORTS what the platform declares — revision,
+                  # execution flags, k8s-version skew — and acts on NOTHING:
+                  # the acting pull loop is the P2 Go-agent capability
+                  # (managed-platform-spec §8) and arrives with it. Markers
+                  # persist on the kubehz-agent-config ConfigMap (the same
+                  # annotation pattern + RBAC as the assessment gate):
+                  #   kubehz.cloud/desired-etag      last-seen validator
+                  #                                  (opaque — never parsed)
+                  #   kubehz.cloud/desired-revision  last-seen revision
+                  #   kubehz.cloud/desired-error     last refusal state, so a
+                  #     401/403/404 logs once per state CHANGE — a
+                  #     misconfigured cluster must not crashloop or spam.
+                  DESIRED_ETAG=""
+                  DESIRED_ERR=""
+                  if [ -n "${MARKER_OK}" ]; then
+                    DESIRED_ETAG=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
+                    DESIRED_ERR=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
+                  fi
+                  if [ -z "${MARKER_OK}" ]; then
+                    # Fail closed like the assessment gate: without the marker
+                    # ConfigMap the etag/error state cannot persist, so every
+                    # tick would re-poll and re-log — skip entirely.
+                    echo "kubehz: desired-state poll skipped (marker ConfigMap unreadable)" >&2
+                  else
+                  set -- -H "Authorization: Bearer ${AGENT_TOKEN}"
+                  [ -z "${DESIRED_ETAG}" ] || set -- "$@" -H "If-None-Match: ${DESIRED_ETAG}"
+                  DES_RC=0
+                  DES_OUT=$(curl -sS -D - -w '\n__code=%{http_code}' "$@" \
+                    "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/desired" 2>/dev/null) || DES_RC=$?
+                  if [ "${DES_RC}" -ne 0 ]; then
+                    echo "kubehz: desired-state poll failed (curl rc=${DES_RC}); retrying next tick" >&2
+                  else
+                    DES_CODE=$(printf '%s\n' "${DES_OUT}" | sed -n 's/^__code=//p' | tail -1)
+                    case "${DES_CODE}" in
+                      304)
+                        # Unchanged — silent. Clear a sticky refusal state so a
+                        # later refusal logs again (e.g. after a re-enroll).
+                        if [ -n "${DESIRED_ERR}" ]; then
+                          kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                            "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
+                        fi
+                        ;;
+                      200)
+                        # Body = everything past the first blank line (end of
+                        # the header block), minus the __code marker — robust
+                        # to multi-line/pretty-printed JSON, which the old
+                        # grep '^{' single-line assumption was not. The ETag
+                        # header is stored verbatim (opaque validator).
+                        DES_BODY=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -e '1,/^$/d' -e '/^__code=/d') || DES_BODY=""
+                        DES_NEW_ETAG=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1)
+                        DES_REV=$(printf '%s' "${DES_BODY}" | jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
+                        # Missing ETag counts as unparseable too: persisting an
+                        # empty validator would wipe If-None-Match and force a
+                        # full 200 every tick.
+                        if [ -z "${DES_REV}" ] || [ -z "${DES_NEW_ETAG}" ]; then
+                          echo "kubehz: desired-state response was unparseable; retrying next tick" >&2
+                        else
+                          DES_FLAGS=$(printf '%s' "${DES_BODY}" | jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
+                          [ -n "${DES_FLAGS}" ] || DES_FLAGS="none"
+                          DES_K8S=$(printf '%s' "${DES_BODY}" | jq -r '.kubernetesVersion // empty' 2>/dev/null) || DES_K8S=""
+                          DES_SKEW=""
+                          if [ -n "${DES_K8S}" ] && [ "${DES_K8S}" != "${KUBE_VERSION}" ]; then
+                            DES_SKEW=" — desired k8s ${DES_K8S}, local ${KUBE_VERSION}"
+                          fi
+                          echo "kubehz: desired state changed — revision ${DES_REV}, execution flags on: ${DES_FLAGS}${DES_SKEW} (report-only; acting arrives with the Go agent)"
+                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                            "kubehz.cloud/desired-etag=${DES_NEW_ETAG}" \
+                            "kubehz.cloud/desired-revision=${DES_REV}" >/dev/null 2>&1 \
+                            || echo "kubehz: could not persist the desired-state marker; the next poll re-reports" >&2
+                          if [ -n "${DESIRED_ERR}" ]; then
+                            kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                              "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
+                          fi
+                        fi
+                        ;;
+                      401|403|404)
+                        if [ "${DESIRED_ERR}" != "${DES_CODE}" ]; then
+                          echo "kubehz: desired-state poll refused (HTTP ${DES_CODE}) — check the cluster's enrollment/claim; identical refusals stay quiet" >&2
+                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                            "kubehz.cloud/desired-error=${DES_CODE}" >/dev/null 2>&1 || true
+                        fi
+                        ;;
+                      *)
+                        echo "kubehz: desired-state poll returned HTTP ${DES_CODE:-<none>}; retrying next tick" >&2
+                        ;;
+                    esac
+                  fi
                   fi
               envFrom:
                 - configMapRef:

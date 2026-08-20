@@ -141,15 +141,35 @@ kubectl() {
 curl() {
   # Capture the POSTed body (-d); every call overwrites STUB_PAYLOAD_OUT so a
   # retry's payload is what the test asserts on. Each invocation is logged to
-  # STUB_CURL_LOG (call-count asserts). STUB_CURL_FAIL_ASSESS=1 fails any POST
-  # whose body carries an assessment (the api-zod-400 simulation) — the plain
-  # retry then succeeds.
+  # STUB_CURL_LOG with its URL (call-count asserts grep per endpoint).
+  # STUB_CURL_FAIL_ASSESS=1 fails any POST whose body carries an assessment
+  # (the api-zod-400 simulation) — the plain retry then succeeds. The
+  # /desired endpoint emulates the poll's `-sS -D - -w '\n__code=…'` wire
+  # format (header dump, blank line, one-line body, __code marker) driven by
+  # STUB_DESIRED_CODE/_ETAG/_BODY; the presented If-None-Match lands in
+  # STUB_DESIRED_INM_OUT.
   _body=""
+  _url=""
+  _inm=""
   while [ "$#" -gt 0 ]; do
-    if [ "$1" = "-d" ]; then _body="$2"; shift; fi
+    case "$1" in
+      -d) _body="$2"; shift ;;
+      -H) case "$2" in "If-None-Match: "*) _inm="${2#If-None-Match: }" ;; esac; shift ;;
+      http*://*) _url="$1" ;;
+    esac
     shift
   done
-  echo "curl" >> "${STUB_CURL_LOG}"
+  echo "curl ${_url}" >> "${STUB_CURL_LOG}"
+  case "${_url}" in
+    */desired)
+      [ -z "${_inm}" ] || printf '%s\n' "${_inm}" > "${STUB_DESIRED_INM_OUT}"
+      _code="${STUB_DESIRED_CODE:-304}"
+      printf 'HTTP/2 %s \r\nEtag: %s\r\n\r\n' "${_code}" "${STUB_DESIRED_ETAG}"
+      [ "${_code}" != "200" ] || printf '%s\n' "${STUB_DESIRED_BODY}"
+      printf '\n__code=%s' "${_code}"
+      return 0
+      ;;
+  esac
   [ -z "${_body}" ] || printf '%s' "${_body}" > "${STUB_PAYLOAD_OUT}"
   if [ -n "${STUB_CURL_FAIL_ASSESS:-}" ]; then
     case "${_body}" in *'"assessment"'*) return 22 ;; esac
@@ -169,6 +189,12 @@ STUBS_EOF
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
+  # Desired-state poll fixtures: default 304 (unchanged → silent) so the
+  # heartbeat-focused tests see no extra output/annotations; the poll tests
+  # flip STUB_DESIRED_CODE to 200/401 and assert the report-only behavior.
+  export STUB_DESIRED_INM_OUT="${BATS_TEST_TMPDIR}/desired-inm.txt"
+  export STUB_DESIRED_ETAG='"7-100"'
+  export STUB_DESIRED_BODY='{"revision":7,"kubernetesVersion":null,"workerPools":[],"execution":{"scaling":true,"upgrades":false,"healing":false},"healing":{"enabled":false}}'
 }
 
 teardown() {
@@ -449,7 +475,8 @@ teardown() {
   assert_output --partial "retrying once without it"
 
   # Exactly two heartbeat POSTs: the assessment one (failed) + the plain retry.
-  run grep -c '^curl$' "${STUB_CURL_LOG}"
+  # (Scoped to the heartbeat endpoint — the desired-state poll is its own call.)
+  run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
   assert_output "2"
 
   # The payload that LANDED (last capture) is the plain beat — full heartbeat
@@ -603,4 +630,196 @@ teardown() {
   # kube-system: daemonsets (CNI guess) + the kubeadm-config ConfigMap.
   assert_output --partial "daemonsets"
   assert_output --partial "kubeadm-config"
+}
+
+# ── Mode-3 claim nonce: echo, expiry, success-cue clear ──
+# `lo kubehz claim --nonce` places kubehz.cloud/claim-nonce (+ the -placed
+# epoch stamp) on the marker ConfigMap; the beat echoes it as claim.nonce and
+# clears it on the response's additive claim.verified cue — or after the api's
+# 15-minute challenge TTL, so a dead nonce never echoes forever.
+
+@test "claim: a live placed nonce is echoed as claim.nonce in the beat" {
+  local now nonce
+  now=$(date -u +%s)
+  nonce="khzn_l1vE_p1AcEd_n0ncE_43charsBase64urlValue0"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  # The nonce value never surfaces in stdout/stderr — it is a claim ticket.
+  refute_output --partial "${nonce}"
+
+  run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
+  assert_output "${nonce}"
+  # Not cleared: the stub response carried no claim.verified cue.
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_failure
+}
+
+@test "claim: no nonce annotation means no claim key on the wire" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+}
+
+@test "claim: an expired nonce (past the 15-min TTL) is cleared and NOT echoed" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'"}'
+
+  run bash "${RUNNER}"
+  assert_success
+
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/claim-nonce-placed-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "claim: a stampless/malformed nonce is cleared as unsourced (never echoed)" {
+  # The CLI always writes nonce + stamp in ONE annotate call — a value without
+  # a valid stamp did not come from it and must not echo forever.
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_st4mplEss_n0ncE_43charsBase64urlValue00"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "claim: the response's claim.verified cue clears the nonce annotations" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+  export STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}'
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "claim verified"
+
+  run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
+  assert_output "khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000"
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/claim-nonce-placed-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "claim: a cue-less response (wrong/expired nonce server-side) clears nothing" {
+  # Anti-oracle: the response is byte-identical to a nonce-less beat — the
+  # agent keeps echoing until the local TTL window closes.
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_uNvEr1f1Ed_n0ncE_43charsBase64urlValue0","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+  export STUB_RESPONSE='{"status":"ok"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_failure
+}
+
+# ── Desired-state poll: REPORT-ONLY (P0 slice) ───────────
+# After the beat the agent polls GET /clusters/<id>/desired with the stored
+# ETag: 304 stays silent, 200 logs revision + on-flags + version skew and
+# persists the new validator, 401/403/404 log once per state change. NO
+# acting — that is the P2 Go agent.
+
+@test "desired: 304 stays silent and persists nothing" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/desired-etag":"\"7-100\""}'
+  export STUB_DESIRED_CODE=304
+
+  run bash "${RUNNER}"
+  assert_success
+  refute_output --partial "desired state changed"
+  run grep -F "kubehz.cloud/desired-etag=" "${STUB_ANNOTATE_LOG}"
+  assert_failure
+
+  # The stored validator was presented verbatim as If-None-Match.
+  run cat "${STUB_DESIRED_INM_OUT}"
+  assert_output '"7-100"'
+}
+
+@test "desired: 200 logs revision + on-flags + version skew and stores the new ETag" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/desired-etag":"\"6-100\""}'
+  export STUB_DESIRED_CODE=200
+  export STUB_DESIRED_ETAG='"8-110"'
+  export STUB_DESIRED_BODY='{"revision":8,"kubernetesVersion":"v1.36.0","workerPools":[],"execution":{"scaling":true,"upgrades":true,"healing":false},"healing":{"enabled":false}}'
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "desired state changed — revision 8"
+  assert_output --partial "flags on: scaling,upgrades"
+  # Local (stub server) is v1.35.5 → the skew is reported.
+  assert_output --partial "desired k8s v1.36.0, local v1.35.5"
+  # Report-only: the slice says so on every changed report.
+  assert_output --partial "report-only"
+
+  run grep -F 'kubehz.cloud/desired-etag="8-110"' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/desired-revision=8" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "desired: no flags on and no skew reports 'none' without a version tail" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+  export STUB_DESIRED_CODE=200
+  export STUB_DESIRED_ETAG='"3-000"'
+  export STUB_DESIRED_BODY='{"revision":3,"kubernetesVersion":null,"workerPools":[],"execution":{"scaling":false,"upgrades":false,"healing":false},"healing":{"enabled":false}}'
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "revision 3, execution flags on: none"
+  refute_output --partial "desired k8s"
+}
+
+@test "desired: a 401 logs once and stays quiet while the state is unchanged" {
+  local now
+  now=$(date -u +%s)
+  # First refusal: no stored error state → log + persist it.
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+  export STUB_DESIRED_CODE=401
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "desired-state poll refused (HTTP 401)"
+  run grep -F "kubehz.cloud/desired-error=401" "${STUB_ANNOTATE_LOG}"
+  assert_success
+
+  # Same refusal with the state already stored → silent (once per change).
+  : > "${STUB_ANNOTATE_LOG}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/desired-error":"401"}'
+  run bash "${RUNNER}"
+  assert_success
+  refute_output --partial "desired-state poll refused"
+}
+
+@test "desired: the poll never fails the tick (beat already landed)" {
+  # An unparseable 200 (garbage body) degrades to a stderr note; exit stays 0.
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+  export STUB_DESIRED_CODE=200
+  export STUB_DESIRED_BODY='not json'
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "unparseable"
 }
