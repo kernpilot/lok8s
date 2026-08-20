@@ -321,6 +321,39 @@ SCRIPT
   assert_output --partial "provisioned"
 }
 
+# ── provision::read_kind ──────────────────────────────────
+
+@test "provision::read_kind reads and lowercases .kind" {
+  cat > "${BATS_TEST_TMPDIR}/spec.yaml" <<'YAML'
+kind: KubeOne
+YAML
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  run provision::read_kind "${BATS_TEST_TMPDIR}/spec.yaml"
+  assert_success
+  assert_output "kubeone"
+}
+
+@test "provision::read_kind rejects a missing .kind (yq's null must not pass as a driver name)" {
+  cat > "${BATS_TEST_TMPDIR}/spec.yaml" <<'YAML'
+metadata:
+  name: nokind
+YAML
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  run provision::read_kind "${BATS_TEST_TMPDIR}/spec.yaml"
+  assert_failure
+  assert_output --partial "no .kind"
+}
+
+@test "provision::read_kind rejects a traversal-shaped kind (it is interpolated into a sourced path)" {
+  cat > "${BATS_TEST_TMPDIR}/spec.yaml" <<'YAML'
+kind: "../../evil"
+YAML
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  run provision::read_kind "${BATS_TEST_TMPDIR}/spec.yaml"
+  assert_failure
+  assert_output --partial "invalid cluster kind"
+}
+
 # ── hetzner::wipe-devices::script (#wipe-devices) ─────────
 
 @test "wipe-devices::script true → disk enumeration + blkdiscard loop + sentinel" {
