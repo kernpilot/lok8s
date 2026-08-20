@@ -80,14 +80,14 @@ hooks::_select() {
 # their rendered ref.
 #
 # WHY THIS EXISTS. `recreate` re-applies from the rendered artifact, which
-# carries the DECLARED ref (e.g. `lok8s.local/kubehz-api-migrate`). In a Tilt dev
-# loop the running object carries Tilt's built-and-pushed ref
-# (`<registry>/lok8s.local_kubehz-api-migrate:tilt-<hash>`) — image injection
-# happens on Tilt's deploy path, not in the YAML. Re-applying the declared ref
-# therefore points the workload at an image nobody pushed, and it sits in
+# carries the DECLARED ref (e.g. `lok8s.local/<name>`). In a Tilt dev loop the
+# running object carries Tilt's built-and-pushed ref
+# (`<registry>/lok8s.local_<name>:tilt-<hash>`) — image injection happens on
+# Tilt's deploy path, not in the YAML. Re-applying the declared ref therefore
+# points the workload at an image nobody pushed, and it sits in
 # ImagePullBackOff forever while Tilt still reports the resource ok, because
-# TILT's last deploy did succeed. Measured on kubehz-api-migrate, whose DB
-# migration had been blocked since the hook last fired (visual-audit r251).
+# TILT's last deploy did succeed — measured on a migrate Job whose DB migration
+# sat blocked exactly this way since the hook last fired.
 #
 # Pure: the caller does the cluster lookup, so this half is unit-testable.
 hooks::_overlay_images() {
@@ -180,19 +180,14 @@ hooks::recreate() {
   # (no `|| true`), making a half-done recreate visible rather than silently
   # destructive. True one-shot atomicity isn't possible for an immutable Job.
   # UNDER TILT, LET TILT DO IT. The rendered artifact carries the DECLARED image
-  # ref (`lok8s.local/<name>`); the image that was actually built and pushed only
-  # exists under Tilt's content-hash tag, because injection happens on Tilt's
-  # deploy path and never reaches the YAML. Applying the rendered object
-  # therefore points the workload at an image nobody pushed, and it sits in
-  # ImagePullBackOff while Tilt still reports the resource ok — its own last
-  # deploy did succeed (kubehz-cluster AUDIT.md r251).
-  #
-  # Preserving the LIVE object's refs (hooks::_preserve_images, below) fixes that
-  # only while something is running: a Job that has completed and been cleaned up
-  # has nothing to preserve, and the raw ref ships anyway. Measured — that is
-  # exactly how the migration Job broke again after the preservation fix landed
-  # (r260). Tilt is the only party that knows the real ref in both cases, so when
-  # a Tilt session owns this resource, hand the work to it.
+  # ref while the built-and-pushed image only exists under Tilt's content-hash
+  # tag (full rationale at hooks::_overlay_images). Preserving the LIVE object's
+  # refs (hooks::_preserve_images, below) fixes that only while something is
+  # running: a Job that has completed and been cleaned up has nothing to
+  # preserve, and the raw ref ships anyway — measured, a migration Job broke
+  # again exactly this way after the preservation fix landed. Tilt is the only
+  # party that knows the real ref in both cases, so when a Tilt session owns
+  # this resource, hand the work to it.
   # `declare -F` rather than an import: the `lo` entrypoint loads libs/tilt
   # alongside this one, but hooks does not otherwise depend on it, and the unit
   # tests source hooks alone. Absent tilt helpers simply mean "no Tilt" and the

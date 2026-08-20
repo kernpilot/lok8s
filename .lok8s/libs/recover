@@ -24,9 +24,9 @@
 #     takes its dry-run branches (prints the plan, reimages NOTHING), then STOPS
 #     before any real provision/verify.
 #
-# It supersedes hand-rolled per-cluster DR scripts (e.g. kubehz's `dr-recover`),
-# generalizing their phase-runner + timing shape to any provider-backed cluster
-# whose provider implements provider::rebuild.
+# It supersedes hand-rolled per-cluster DR scripts, generalizing their
+# phase-runner + timing shape to any provider-backed cluster whose provider
+# implements provider::rebuild.
 
 import ^utils/verbose
 import ^utils/provider

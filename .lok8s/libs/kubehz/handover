@@ -363,8 +363,8 @@ handover::write_encryption_config() {
   mkdir -p "${k8s_dir}" || return 1
   # PROVIDER + KEY NAME must match what the SOURCE cluster encrypted with — the
   # stored values carry the "k8s:enc:<provider>:v1:<keyname>:" prefix and the
-  # apiserver refuses anything else ("no matching prefix found", proven on a real
-  # target: tier2 run 18 booted a healthy apiserver that could not read a single
+  # apiserver refuses anything else ("no matching prefix found" — proven on a
+  # real target: a healthy apiserver booted but could not read a single
   # Secret). They come from the bundle so the target mirrors whatever the source
   # actually used; the defaults are the platform's own (kubehz-core
   # etcd_encryption.go etcdEncryptionKeyName) for bundles exported before the
@@ -394,7 +394,7 @@ EOF
 # line (KKP CE 2.30 ships 3.5.21); kubeadm's default etcd is often a major
 # ahead (3.6.x), and etcd 3.6 PANICS applying the snapshot's member-attribute
 # entries (RaftCluster.UpdateAttributes on a 3.5-origin restore — proven on a
-# real target, tier2 run 17). Boot the SOURCE line first; upgrading etcd
+# real target). Boot the SOURCE line first; upgrading etcd
 # afterwards is the standard in-place path. The caller validates the tag
 # (fail-before-touching-the-node contract).
 handover::write_kubeadm_config() {
@@ -433,11 +433,10 @@ handover::kubeadm_init() {
   local config="${1}"
   # --skip-phases addons: the restored state ALREADY carries the source
   # cluster's DNS and proxy configuration — kubeadm's stock addon templates
-  # conflict with it instead of adopting it (proven on a real target, tier2
-  # run 19: everything up to kubelet-finalize succeeded and the very last
-  # step died on the restored CoreDNS Deployment's immutable selector).
-  # Overwriting restored addons with kubeadm defaults is also semantically
-  # wrong for a handover.
+  # conflict with it instead of adopting it (proven on a real target: init
+  # died at the last step on the restored CoreDNS Deployment's immutable
+  # selector). Overwriting restored addons with kubeadm defaults is also
+  # semantically wrong for a handover.
   kubeadm init --config "${config}" \
     --ignore-preflight-errors=DirAvailable--var-lib-etcd \
     --skip-phases=addon/coredns,addon/kube-proxy
