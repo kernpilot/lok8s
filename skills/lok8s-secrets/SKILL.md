@@ -131,8 +131,10 @@ cert:
   **keypair** as `tls.crt` + `tls.key` — the Secret a cert-manager CA
   `ClusterIssuer` signs with. Use it to hand issuance to cert-manager instead of
   generating leaves directly. Explicit opt-in: it puts a CA private key into the
-  cluster, which is acceptable for a development CA only. Invalid on a leaf (a
-  leaf always emits its key).
+  cluster — with `caRoot` that key is the machine-shared, browser-trusted mkcert
+  CA (cluster read access = mint certs your browser accepts), so prefer
+  `ca: true` + `includeKey` on shared machines or CI. Invalid on a leaf (a leaf
+  always emits its key).
 - The default writes `rootCA.pem` under `$CAROOT` (a side effect outside
   `$PATH_SECRETS`); `caRef` keeps everything inside the store.
 - **Trust is out of scope of the build.** The plugin only *generates* the CA;

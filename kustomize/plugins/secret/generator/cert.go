@@ -47,7 +47,7 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	}
 	if g.spec.CARoot {
 		if g.spec.CA || len(g.spec.Hosts) > 0 || g.spec.CARef != "" {
-			return nil, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no field but `includeKey`")
+			return nil, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no other field except `includeKey`")
 		}
 		caCrt, caKey, err := caRootCA(ctx) // load-or-create at CAROOT
 		if err != nil {

@@ -538,9 +538,12 @@ cert:
   signs with. See [Two ways to serve dev TLS](#two-ways-to-serve-dev-tls)
   below. Invalid on a leaf: a leaf always emits its key.
 - **`includeKey` moves a CA private key into the cluster.** That is the point —
-  cert-manager must sign with it — but it is a real change in posture. Use it
-  for a development CA only, never for a CA that signs anything outside the
-  cluster.
+  cert-manager must sign with it — but it is a real change in posture. With
+  `caRoot` the key is the **machine-shared mkcert CA** your browser trusts:
+  anyone who can read the Secret can then mint certificates your browser
+  accepts for ANY site. Use it on single-developer clusters only; on shared
+  machines or CI, pair `includeKey` with an own CA (`ca: true`) so the
+  blast radius stays inside that cluster's trust, never your browser's.
 - **Cache-first** like `passwd` — CA, key, and leaf are byte-stable across runs;
   rotate by deleting the cache file. RSA-3072 CA / RSA-2048 leaf; leaf validity
   2 y 3 m (under Apple's 825-day cap).

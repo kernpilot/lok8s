@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
@@ -214,6 +215,19 @@ func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
 	if m["tls.crt"] == nil || m["tls.key"] == nil {
 		t.Fatalf("own CA includeKey did not emit tls.crt + tls.key: %v", entryKeys(out))
 	}
+	if len(out) != 2 {
+		t.Errorf("own CA includeKey must emit EXACTLY tls.crt + tls.key, got %v", entryKeys(out))
+	}
+	// The emitted pair must belong together: tls.key must be the cached ca.key
+	// that signed tls.crt.
+	c, _ := cache.New(dir, "cert-manager", "ci-root-ca")
+	cachedKey, err := c.GetOrCreate("ca.key", func() ([]byte, error) { return nil, fmt.Errorf("ca.key not cached") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(m["tls.key"]) != string(cachedKey) {
+		t.Error("tls.key does not match the cached ca.key that signed tls.crt")
+	}
 	// A caRef leaf must chain to the emitted tls.crt (same store CA).
 	leafOut, err := NewCert(&specpkg.CertSpec{Hosts: []string{"app.test"}, CARef: "ci-root-ca/cert-manager"}).
 		Generate(certCtx(t, dir, "default", "tls"))
@@ -233,17 +247,25 @@ func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
 
 func TestCert_Validation(t *testing.T) {
 	dir := t.TempDir()
-	cases := map[string]*specpkg.CertSpec{
-		"ca+hosts":        {CA: true, Hosts: []string{"x"}},
-		"ca+caRef":        {CA: true, CARef: "x"},
-		"empty":           {},
-		"leaf+includeKey": {Hosts: []string{"x"}, IncludeKey: true},
-		"only+includeKey": {IncludeKey: true},
-		"caRoot+caRef":    {CARoot: true, CARef: "x"},
+	cases := map[string]struct {
+		spec *specpkg.CertSpec
+		want string // substring the error must carry — the INTENDED failure
+	}{
+		"ca+hosts":        {&specpkg.CertSpec{CA: true, Hosts: []string{"x"}}, "not both"},
+		"ca+caRef":        {&specpkg.CertSpec{CA: true, CARef: "x"}, "mutually exclusive"},
+		"empty":           {&specpkg.CertSpec{}, "needs `hosts:`"},
+		"leaf+includeKey": {&specpkg.CertSpec{Hosts: []string{"x"}, IncludeKey: true}, "a leaf always emits its key"},
+		"only+includeKey": {&specpkg.CertSpec{IncludeKey: true}, "a leaf always emits its key"},
+		"caRoot+caRef":    {&specpkg.CertSpec{CARoot: true, CARef: "x"}, "takes no other field"},
 	}
-	for name, spec := range cases {
-		if _, err := NewCert(spec).Generate(certCtx(t, dir, "default", "s")); err == nil {
+	for name, tc := range cases {
+		_, err := NewCert(tc.spec).Generate(certCtx(t, dir, "default", "s"))
+		if err == nil {
 			t.Errorf("%s: expected an error, got nil", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q does not carry the intended reason %q", name, err, tc.want)
 		}
 	}
 }
