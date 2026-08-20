@@ -179,7 +179,7 @@ kubehz::space_wait_active() {
     kubehz::space_api GET "/api/spaces/${space_id}" 2>/dev/null || true
     # Fail FAST on the statuses that never heal within the window: an expired
     # token stays 401/403 for all 300s, and a 404 means the space was deleted
-    # out from under us — looping to timeout buries the real cause (round 1 F3).
+    # out from under us — looping to timeout buries the real cause.
     case "${KUBEHZ_SPACE_API_STATUS}" in
       401|403)
         error "kubehz API refused the token while waiting for space ${space_id} (HTTP ${KUBEHZ_SPACE_API_STATUS})"
@@ -188,8 +188,8 @@ kubehz::space_wait_active() {
         error "space ${space_id} vanished while waiting for it to become Active"
         return 1 ;;
     esac
-    # The api serves `status` (the r384 overlay), never `phase` — reading
-    # phase kept this loop at "Unknown" until timeout (review round 1, A3).
+    # The api serves the observed `status` overlay, never `phase` — reading
+    # phase kept this loop at "Unknown" until timeout.
     phase=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.status // .status // "Unknown"' 2>/dev/null) || phase="Unknown"
     case "${phase}" in
       Active)
@@ -335,7 +335,7 @@ kubehz::space_status() {
   }
   local count
   # The route answers {nodes:[{name,lane,status,…}], usage:{nodes,maxNodes}} —
-  # treating it as an array printed the OBJECT's key count (review round 1, A3).
+  # treating it as an array printed the OBJECT's key count.
   count=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.nodes // 0' 2>/dev/null) || count=0
   local max; max=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.maxNodes // "-"' 2>/dev/null) || max='-'
   echo "Nodes:   ${count}/${max}"

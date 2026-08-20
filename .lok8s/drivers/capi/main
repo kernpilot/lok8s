@@ -96,18 +96,15 @@ driver::provision() {
   # attributed to the wrong thing, on a cluster the operator was told was being
   # provisioned. errexit is off here (libs/provision:341), so neither aborts on
   # its own.
-  # Rendered into a variable rather than piped, so BOTH halves are checked. A
+  # Rendered into a variable rather than piped, so BOTH halves are checked: a
   # `create … | apply` pipeline reports only the LAST command's status, so a
   # failing `create namespace` is invisible to a trailing `|| return 1` unless
-  # pipefail happens to be set — and this file cannot assume it is. The first
-  # version of this guard was written as a pipe and did nothing; the test for it
-  # stayed red after the "fix", which is the only reason that was noticed.
-  # Emptiness is checked HERE, not at detection, because this is the first place
-  # an empty provider does damage — it is threaded into the credential Secret and
-  # into generate. Checking it at detection instead would pre-empt the
-  # "management cluster kubeconfig not found" diagnosis for a spec that never
-  # reaches this point, which kind_contract_test.bats pins as the intended
-  # message.
+  # pipefail happens to be set — this file cannot assume it is (a piped first
+  # version of this guard did nothing). Emptiness is checked HERE, not at
+  # detection: this is the first place an empty provider does damage (it is
+  # threaded into the credential Secret and into generate), and checking earlier
+  # would pre-empt the "management cluster kubeconfig not found" diagnosis
+  # kind_contract_test.bats pins as the intended message.
   [[ -n "${provider}" ]] || {
     error "could not detect the infrastructure provider from ${cluster_yaml}"
     return 1
@@ -310,18 +307,14 @@ driver::destroy() {
     rm -f "${mgmt_kubeconfig}"
   fi
 
-  # A failed teardown must not report success, and must not delete any handle.
-  #
-  # Before this block existed, only the LOCAL-mgmt branch above complained, so a
-  # remote-mgmt teardown that timed out said nothing at all; and either way
-  # execution reached the `rm -f` below, which cannot fail, so this function
-  # returned 0. The libs/provision destroy call site
-  # (provision::dispatch_destroy) then read success and main::down suppressed
-  # its orphaned-infra warning — the exact case that call site's rc=3 remap
-  # exists to preserve. Meanwhile CAPH may still be
-  # deprovisioning, or may have given up with servers and a load balancer still
-  # billing, and the kubeconfig that could reach them was gone. This is the ONE
-  # place that reports the failure — mgmt-local only adds its extra line here.
+  # A failed teardown must not report success, and must not delete any handle:
+  # without this block a timed-out delete fell through to the infallible
+  # `rm -f`, returned 0, and main::down suppressed its orphaned-infra warning
+  # (the case provision::dispatch_destroy's rc=3 remap exists to preserve) —
+  # while CAPH may still be deprovisioning, or may have given up with servers
+  # and a load balancer still billing, and the kubeconfig that could reach
+  # them was gone. This is the ONE place that reports the failure — mgmt-local
+  # only adds its extra line here.
   if (( del_rc != 0 )); then
     error "workload cluster delete did not complete (rc=${del_rc}) — Hetzner servers and load balancer may still be running and billing"
     error "  KEEPING ${PATH_BASE}/.kubeconfig/${cluster_name}.yaml so the cluster stays reachable"

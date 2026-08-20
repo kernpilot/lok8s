@@ -10,14 +10,8 @@ BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 # Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
 # drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
 #
-# Entries form a DAG and apply CONCURRENTLY (capped). Two things create an
-# ordering edge: `dependsOn: [name, …]` (wait for those entries' readiness) and
-# `wait: true` (a GLOBAL gate — depends on everything before it, and everything
-# after depends on it). An entry waits for its own workloads to be Ready only
-# when something depends on it (a dep-target) or it is a gate; a pure leaf just
-# applies. With no edges every entry runs in parallel. The old strictly-serial
-# apply-then-health-wait per entry was the whole ~37min bootstrap phase. See the
-# scheduler block below.
+# Entries form a DAG and apply CONCURRENTLY (capped) — ordering edges come from
+# `dependsOn: [name, …]` and `wait: true`; semantics in the scheduler block below.
 #
 # Addon resolution:
 #   "cilium"          → .lok8s/addons/cilium/
@@ -29,23 +23,10 @@ BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 #   addons/cilium/values.lo.yaml       — driver-specific (if exists)
 #   addons/cilium/values.hetzner.yaml  — provider-specific (if exists)
 #
-# Per-entry overrides (map form):
-#   bootstrap:
-#     - cilium:                       # legacy shim: whole map = helm values
-#         encryption: { enabled: true }
-#     - ccm:                          # new schema (reserved: values/valueFiles/env/wait/dependsOn/name)
-#         values:                     # helm values (chart addons only)
-#           env: { ROBOT_ENABLED: { value: "true" } }
-#         valueFiles:                 # helm values FILES (chart addons only),
-#           - ./targets/ccm/values.dev.yaml   # cluster-dir-relative, merged in list order
-#         env:                        # envsubst overrides (exported around render)
-#           LOK8S_USER_FOO: bar
-#         wait: true                  # global gate (default false)
-#         dependsOn: [cert-manager]   # wait for these entries' readiness first
-#
-# The inline values are merged as additional Helm values on top of the
-# provider-aware defaults; valueFiles slot in between (base < driver <
-# provider < valueFiles < values:).
+# Per-entry overrides (map form): the reserved keys values / valueFiles / env /
+# wait / dependsOn / name, plus the legacy whole-map-is-helm-values shim — full
+# schema + examples documented at bootstrap::_parse_entry. Effective helm-values
+# stack: base < driver < provider < valueFiles < values:.
 
 import ^utils/types
 import ^utils/verbose
@@ -71,13 +52,9 @@ main::bootstrap() {
 # provision::dispatch).
 #
 # CRITICAL: source the domain's driver and run driver::export BEFORE
-# bootstrap::apply. driver::export populates the spec-derived env
-# (LOK8S_SPEC_CLUSTER_DOMAIN, LOK8S_SPEC_DNS_DOMAINFILTER, LOK8S_SPEC_OIDC_*, …)
-# that spec.bootstrap addons reference via ${LOK8S_SPEC_*}. Without it, this
-# standalone path left those UNSET and the addons rendered them empty — the
-# `lo provision [--bootstrap]` path was correct because provision::dispatch
-# sources the driver (provision:161-170) and calls driver::export
-# (provision:246-247) before bootstrap::apply. This converges the two.
+# bootstrap::apply — it populates the spec-derived env (LOK8S_SPEC_*) that
+# spec.bootstrap addons reference via envsubst; without it they render those
+# values empty. Same order provision::dispatch uses.
 bootstrap::dispatch() {
   local domain="${1}"
 
@@ -221,8 +198,6 @@ bootstrap::_resolve_entries() {
 bootstrap::_parse_entry() {
   local _domain="${1}" _entry="${2}"
   local -n _o_name="${3}" _o_dir="${4}" _o_inline="${5}" _o_env="${6}" _o_wait="${7}" _o_deps="${8}"
-  # 9th out-param (optional): "true" iff this entry sets an explicit `name:`. Fall
-  # back to a throwaway local when omitted so six-out-param callers keep working.
   local _bs_discard_explicit=""
   local -n _o_explicit="${9:-_bs_discard_explicit}"
   _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""; _o_explicit="false"
@@ -278,11 +253,7 @@ bootstrap::_parse_entry() {
 
   if [[ "$(yq -r 'has("values") or has("valueFiles") or has("env") or has("wait") or has("dependsOn") or has("name")' <<<"${_valjson}")" == "true" ]]; then
     # NEW schema.
-    # `name:` (optional) OVERRIDES this entry's identifier — the resolved basename
-    # (path entries) or map-key (chart entries) — for BOTH the dependsOn registry
-    # and as a dependsOn reference target. It does NOT change _o_dir (still the
-    # path/map-key). Use it to disambiguate a basename collision (e.g. the
-    # `rook-ceph` addon vs a `./targets/rook-ceph` target). Validate as a non-empty
+    # name: semantics documented in the function header. Validate as a non-empty
     # scalar in the entry-name charset (same fail-fast spirit as the env-key check).
     if [[ "$(yq -r 'has("name")' <<<"${_valjson}")" == "true" ]]; then
       local _name_tag _oname
@@ -328,11 +299,9 @@ bootstrap::_parse_entry() {
       _o_inline="$(yq -r '.values' <<<"${_valjson}")"
     fi
     if [[ "$(yq -r 'has("valueFiles")' <<<"${_valjson}")" == "true" ]]; then
-      # valueFiles: helm values FILES layered between the provider values and the
-      # inline `values:` map — big per-cluster value blocks (e.g. gatus endpoint
-      # lists) live in files instead of bloating the cluster spec. Same helm-only
-      # rule as `values:` (a kustomize target has no chart to feed); same
-      # missing-dir leniency (let bootstrap::apply surface "addon not found").
+      # valueFiles: same helm-only rule as `values:` (a kustomize target has no
+      # chart to feed); same missing-dir leniency (let bootstrap::apply surface
+      # "addon not found"). Schema + precedence in the function header.
       if [[ -d "${_o_dir}" && ! -f "${_o_dir}/chart.yaml" ]]; then
         error "bootstrap: '${_raw}' sets 'valueFiles:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'valueFiles:' is helm-only"
         return 1
@@ -377,12 +346,10 @@ bootstrap::_parse_entry() {
         _vf_files+=("${_vf}")
       done < <(yq -r '.valueFiles[]' <<<"${_valjson}")
       if (( ${#_vf_files[@]} > 0 )); then
-        # Pre-merge — the files in list order, then the inline `values:` map on
-        # top when present — with the SAME deep-merge idiom addons::render
-        # stacks values with (maps deep-merge, lists REPLACE). The result rides
-        # the existing inline channel (render's 4th arg), so the effective
-        # precedence is base < driver < provider < valueFiles < values: and
-        # addons::render needs no signature change.
+        # Pre-merge (files in list order, inline `values:` on top) with the SAME
+        # deep-merge idiom addons::render stacks values with (maps deep-merge,
+        # lists REPLACE); the result rides render's existing inline-values arg,
+        # so addons::render needs no signature change.
         if [[ -n "${_o_inline}" && "${_o_inline}" != "null" ]]; then
           _o_inline="$(yq eval-all '. as $item ireduce ({}; . * $item)' \
               "${_vf_files[@]}" <(printf '%s\n' "${_o_inline}"))" \
@@ -431,12 +398,10 @@ bootstrap::_parse_entry() {
       _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"
     fi
     if [[ "$(yq -r 'has("dependsOn")' <<<"${_valjson}")" == "true" ]]; then
-      # dependsOn: a LIST of entry names this entry must wait for (their READINESS)
-      # before it applies — resolved to indices, edge-built, and cycle-checked in
-      # bootstrap::apply (which alone knows every entry's name). Validate the SHAPE
-      # here (fail fast at parse time, same style as the env CONTAINER check): the
-      # container must be a sequence, and every element a scalar name. A map/seq
-      # element (e.g. someone nesting a map) is a config mistake — reject it loud.
+      # dependsOn: resolved to indices, edge-built, and cycle-checked in
+      # bootstrap::apply (which alone knows every entry's name). Validate only the
+      # SHAPE here, fail-fast at parse time (same style as the env CONTAINER
+      # check): a sequence container, every element a scalar name.
       local _dep_tag
       _dep_tag="$(yq -r '.dependsOn | tag' <<<"${_valjson}")"
       if [[ "${_dep_tag}" != "!!seq" ]]; then
@@ -522,26 +487,18 @@ bootstrap::_apply_one() {
 
   # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` (as
   # rendered custom addons, kubeone::render_addons) to break the cni:external
-  # deadlock. On a FULL provision that reconcile has just run, so re-applying them
-  # here would race the driver for field ownership — kapply uses
-  # `apply --server-side --force-conflicts` (below), so it would forcibly STEAL
-  # ownership and the next `kubeone apply` fights back. So defer to the driver on a
-  # full provision. But on `lo provision --bootstrap` the infra reconcile is
-  # SKIPPED — the driver did NOT apply cilium/ccm this run, so bootstrap is the
-  # ONLY applier and MUST run to reconcile them from spec.bootstrap (a cilium
-  # version bump, kubeProxyReplacement, policyAuditMode, encryption…). So gate on
-  # the PATH — LOK8S_BOOTSTRAP_ONLY, set by provision::dispatch — NOT on "does the
-  # DaemonSet exist": that old existence check could never tell a fresh
-  # driver-apply (full provision) from a weeks-old DS (--bootstrap), so it silently
-  # blocked EVERY cilium/ccm reconcile through --bootstrap. Every other driver
-  # (Lo/Capi/Kkp) always gets them from bootstrap. Keyed on the addon DIRECTORY
-  # basename (a `name:` override changes addon_name, not addon_dir, so a renamed
-  # cilium/ccm can't defeat the skip and double-apply the driver's own).
-  # Full provision: the KubeOne driver already applied cilium/ccm, so skip here to
-  # avoid double-applying. On --bootstrap (LOK8S_BOOTSTRAP_ONLY=1) bootstrap is the
-  # sole applier, so fall through and reconcile from spec.bootstrap — it runs the
-  # same background path as every other addon, so the reconcile surfaces as the
-  # normal "✓ <addon> · N resources" block (no dedicated breadcrumb needed).
+  # deadlock. On a FULL provision that reconcile has just run — re-applying here
+  # would steal SSA field ownership (kapply uses `apply --server-side
+  # --force-conflicts`) and the next `kubeone apply` fights back, so defer to the
+  # driver. On `lo provision --bootstrap` the infra reconcile is SKIPPED —
+  # bootstrap is the ONLY applier and MUST reconcile cilium/ccm from
+  # spec.bootstrap. So gate on the PATH — LOK8S_BOOTSTRAP_ONLY, set by
+  # provision::dispatch — NOT on "does the DaemonSet exist": that check can never
+  # tell a fresh driver-apply from a weeks-old DS, so it silently blocked EVERY
+  # cilium/ccm reconcile through --bootstrap. Every other driver (Lo/Capi/Kkp)
+  # always gets them from bootstrap. Keyed on the addon DIRECTORY basename: a
+  # `name:` override changes addon_name, not addon_dir, so a renamed cilium/ccm
+  # can't defeat the skip and double-apply the driver's own.
   if [[ "${kind}" == "kubeone" ]] && [[ "${LOK8S_BOOTSTRAP_ONLY:-0}" != "1" ]] \
      && { [[ "${_ad_base}" == "cilium" ]] || [[ "${_ad_base}" == "ccm" ]]; }; then
     echo "[bootstrap] ${_ad_base} is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)" >&2
@@ -693,10 +650,9 @@ bootstrap::_collect_rc() {
 }
 
 # bootstrap::_skip_dependents <failed-index>
-# A failed entry only invalidates its OWN transitive dependents (they would fail
-# behind a broken dependency anyway) — NOT the whole run. BFS the reverse-adjacency
-# (parent → children) from the failed entry and add every not-yet-accounted
-# dependent to the _skip set, logging the cause. Unrelated entries keep flowing.
+# BFS the reverse-adjacency (parent → children) from the failed entry and add
+# every not-yet-accounted dependent to the _skip set, logging the cause —
+# failure-isolation policy in the scheduler block above.
 #
 # Reads the DAG state (_names, _dependents, _skip, _BS_COMPLETED) from the calling
 # bootstrap::apply frame via bash's dynamic scope — this helper is only ever invoked
@@ -918,8 +874,7 @@ bootstrap::_reap_one() {
 #
 # Decision: --force / --force-recreate (LOK8S_FORCE_RECREATE) auto-accepts; else an
 # interactive tty gets ONE y/N; else (non-interactive, no force) fail-fast per entry
-# with actionable guidance. (A per-addon force:true key is a planned follow-up — it
-# would export LOK8S_FORCE_RECREATE for that entry and land here as auto-accept.)
+# with actionable guidance.
 # Accepted entries are re-applied FOREGROUND with LOK8S_FORCE_RECREATE=1 so kapply
 # deletes + recreates the blocked object; each is then marked completed (unblocking
 # dependents on the next launch pass) or, on failure, fails + skips its dependents.
@@ -953,14 +908,13 @@ bootstrap::_recreate_prompt() {
     "${count}" "${list}"
   printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods);\n'
   printf ' \033[31m!\033[0m any SEALED Secret among them is RE-KEYED by this.\n'
-  # The namespace case is strictly worse than a re-key, and until 2026-07-30 it
-  # was invisible here: accepting force-finalizes these via the raw /finalize
-  # API, which COMPLETES their deletion — everything still inside dies with
-  # them. On that date one `y` at this prompt, whose worst-case reading was
-  # "restarts pods", took kubehz-system, mla and element off the dev cluster
-  # along with the CNPG data, the runtime-minted PATs and the minio buckets.
-  # Only printed when there ARE such namespaces: a warning that shows up every
-  # time is one nobody reads by the third time.
+  # The namespace case is strictly worse than a re-key: accepting force-finalizes
+  # these via the raw /finalize API, which COMPLETES their deletion — everything
+  # still inside dies with them (volume data, runtime-minted Secrets, buckets).
+  # One accept at an earlier prompt that did NOT name the namespaces destroyed
+  # live cluster data, hence the explicit list. Only printed when there ARE such
+  # namespaces: a warning that shows up every time is one nobody reads by the
+  # third time.
   if (( $# )); then
     printf ' \033[31m!!\033[0m %d namespace(s) stuck Terminating will be FORCE-FINALIZED:\n' "${#}"
     printf '      %s\n' "${@}"
@@ -1076,11 +1030,8 @@ bootstrap::_restore_d() {
 
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
 # Reads spec.bootstrap from the cluster YAML and runs the entries as a
-# topological-parallel DAG (independent entries in parallel, capped at
-# LOK8S_BOOTSTRAP_PARALLEL, default 8). Two things add ordering edges: `wait: true`
-# is a GLOBAL gate (edges to/from every entry positionally before/after it) and
-# `dependsOn:` adds explicit edges. Edge resolution + cycle detection are below
-# (see the scheduler block above).
+# topological-parallel DAG (capped at LOK8S_BOOTSTRAP_PARALLEL, default 8);
+# edge semantics in the scheduler block above.
 bootstrap::apply() {
   local domain="${1}" cluster_yaml="${2}" kubeconfig="${3}"
 
@@ -1145,7 +1096,7 @@ bootstrap::apply() {
   if [[ "${LOK8S_BOOTSTRAP_HOSTED}" == "true" ]]; then
     local _nodes_out _nodes_rc=0
     # Bounded: kubectl's default request timeout is unlimited — a transient
-    # API problem must not stall the provisioning path (Copilot round 1).
+    # API problem must not stall the provisioning path.
     _nodes_out=$(kubectl --kubeconfig "${kubeconfig}" --request-timeout=15s get nodes --no-headers 2>&1) || _nodes_rc=$?
     if (( _nodes_rc != 0 )); then
       echo "[bootstrap] hosted ${domain}: cannot reach the cluster with ${kubeconfig}" >&2
@@ -1375,32 +1326,26 @@ bootstrap::apply() {
       fi
       _started["${_i2}"]=1
 
-      # wait: true GATES (cilium/ccm, or any addon) run through the SAME background
-      # path as everything else. The barrier is enforced by DAG edges (a gate ⇒
-      # drain-all-before + every later entry waits on it — built in the edge pass),
-      # NOT by foreground execution, so a gate still runs ALONE and its dependents
-      # still wait. Running it headless like the rest gives it the shared spinner +
-      # render_captured "✓ · N resources" instead of a silent, ephemeral foreground
-      # kapply UI. Heal on an immutable/terminating conflict is now uniform for all
-      # entries: kapply errors under LOK8S_NONINTERACTIVE, the reap PARKS it, and
-      # the drain point batch-heals (--force auto-recreates; an interactive tty
-      # prompts once; else fail-fast) — see _reap_one/_resolve_parked.
+      # wait: true GATES run through the SAME background path as everything else —
+      # the barrier is enforced by DAG edges (built in the edge pass), NOT by
+      # foreground execution, so a gate still runs ALONE and its dependents still
+      # wait, while getting the shared spinner + collapsed render_captured UI.
+      # Immutable/terminating heal is uniform for all entries: kapply errors under
+      # LOK8S_NONINTERACTIVE, the reap PARKS the entry, and the drain point
+      # batch-heals — see _reap_one/_resolve_parked.
       _seq=$(( _seq + 1 ))
       local _rcf="${_rcdir}/${_seq}.rc"
       local _out="${_rcdir}/${_seq}.out"
-      # Non-gate entries fan out as concurrent BACKGROUND subshells: each in its
-      # own subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent
-      # applies; LOK8S_NONINTERACTIVE because N backgrounded applies have no
-      # shared /dev/tty for kapply's collapsing progress UI / interactive heal
-      # prompt (immutable/terminating still fail fast; --force-recreate still
-      # heals, it just never prompts). Their stdout+stderr is BUFFERED to ${_out}
-      # (not written raw+interleaved to the terminal) and rendered as one
-      # de-interleaved, collapsed block when the job is reaped — see
-      # bootstrap::_reap_one → kapply::render_captured. Capture the rc EXPLICITLY
-      # (|| _arc=$?) — under errexit a failing _apply_one would abort before
-      # `echo $?` runs; _collect_rc treats a missing file as a failure too. On
-      # reap, a failed entry's transitive dependents are skipped. Set
-      # LOK8S_BOOTSTRAP_PARALLEL=1 for clean one-at-a-time output.
+      # Entries fan out as concurrent BACKGROUND subshells: each in its own
+      # subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent applies;
+      # LOK8S_NONINTERACTIVE because N backgrounded applies have no shared
+      # /dev/tty (--force-recreate still heals, it just never prompts). Their
+      # stdout+stderr is BUFFERED to ${_out} and rendered as one de-interleaved,
+      # collapsed block on reap — see bootstrap::_reap_one → render_captured.
+      # Capture the rc EXPLICITLY (|| _arc=$?) — under errexit a failing
+      # _apply_one would abort before `echo $?` runs; _collect_rc treats a missing
+      # file as a failure too. Set LOK8S_BOOTSTRAP_PARALLEL=1 for clean
+      # one-at-a-time output.
       ( export LOK8S_NONINTERACTIVE=1
         _arc=0
         bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
@@ -1427,12 +1372,9 @@ bootstrap::apply() {
   bootstrap::_drain   # safety: never leave an orphan behind
   rm -rf "${_rcdir}"
   # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
-  # entry completed cleanly. Checking _BS_OVERALL_RC alone is sufficient: _skip is
-  # ONLY ever populated by bootstrap::_skip_dependents, and both of its call sites
-  # (the reap path and the parked-heal path _resolve_parked) set _BS_OVERALL_RC=1
-  # immediately before invoking it — so a non-empty _skip always implies
-  # _BS_OVERALL_RC!=0. The former `|| (( ${#_skip[@]} > 0 ))` clause was therefore
-  # redundant; dropped.
+  # entry completed cleanly. _BS_OVERALL_RC alone suffices: _skip is only ever
+  # populated by bootstrap::_skip_dependents, and both call sites set
+  # _BS_OVERALL_RC=1 immediately before invoking it.
   if (( _BS_OVERALL_RC != 0 )); then
     return 1
   fi

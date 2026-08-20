@@ -34,10 +34,8 @@ def _green(msg):  return _ansi('32', msg)
 def _yellow(msg): return _ansi('33', msg)
 def _red(msg):    return _ansi('31', msg)
 def _cyan(msg):   return _ansi('36', msg)
-# The NAME inside "[ ... ]" is colored by its ORIGIN so it reads at a glance:
-#   magenta = user-owned service, blue = static category (system infra),
-#   red = unlabeled leftover. (These are the static category/system_types values;
-#   anything else is treated as a user service.)
+# _STATIC_NAMES are the static category/system_types values (colored blue);
+# anything else is treated as a user service (magenta) — see the key above.
 _STATIC_NAMES = ['system', 'networking', 'storage', 'infrastructure', 'observability', 'dev-tools', 'identity']
 def _name_color(name):
   if name == 'unlabeled':   return '1;31'  # bold red    — unlabeled leftovers
@@ -151,14 +149,9 @@ def _update_paths(obj, prefix, relative_paths=_live_update_paths, warn=True, ser
 
       data = data[token]
 
-    # Path walked to completion without hitting a leaf — warn if appropriate.
-    # Note: `break` exits above before reaching here; this else-branch catches
-    # the rare case where iteration exhausts without resolving. Given the
-    # path list, this should not happen, but is worth logging if it ever does.
+    # Iteration exhausted without resolving: an early `break` (missing key —
+    # legitimate absence) already handled every warnable case above.
     if not resolved and warn and len(paths) > 0 and paths[-1] != '#':
-      # We broke out early (missing key). That's normal — only warn if the
-      # leaf type WOULD have been resolvable but wasn't because the path
-      # didn't exist. Already handled above; nothing to do here.
       pass
 
   return obj
@@ -730,13 +723,9 @@ def _wire_hooks(path_service, service, svc_labels, hooks, hook_do):
       e['auto_init'] = False                   # change-only by default
     # Glyph-prefixed name: a leading `» ` stays visible in Tilt's resource list,
     # where a trailing "(hook)" suffix gets truncated off the right edge.
-      # NAMESPACED per service. It used to be the bare hook name, which is a
-      # GLOBAL Tilt resource name: two services declaring the same hook (both
-      # kubehz-api and kubehz-status wanted `db-migrate`) collided with
-      # `local_resource named "..." already exists`, the Tiltfile stayed in
-      # error, and NO service updated — the dev plane served stale code for ~23h
-      # before anyone noticed. Renaming one of them was the workaround; this
-      # removes the need for it (issue #63.1).
+      # NAMESPACED per service: a bare hook name is a GLOBAL Tilt resource
+      # name — two services declaring the same hook name collided, wedged the
+      # Tiltfile in error, and NO service updated until noticed (issue #63.1).
       _hookname = '» %s:%s' % (service, hname)
     if not e.get('deps', []) and not e['auto_init']:
       _warn('!! [ %s ] no deps + auto_init=False — this hook can never fire' % _hookname)
@@ -906,10 +895,8 @@ def lok8s(
   # a raw file above the overlay root is blocked by kustomize's default RootOnly.
   # Tell Tilt the domain artifact is an INPUT. Without this the render above runs
   # once at eval time with nothing declaring its source, so after a fresh
-  # `lo build` Tilt keeps applying the stale eval-time render until someone
-  # remembers `tilt trigger "(Tiltfile)"` — silently. It bit twice in one session
-  # (a fixed env conflict that "persisted", a spec patch overwritten by a stale
-  # re-apply) and is issue #63.3.
+  # `lo build` Tilt silently keeps applying the stale eval-time render until
+  # someone remembers `tilt trigger "(Tiltfile)"` (issue #63.3).
   #
   # ONLY the flat artifact, deliberately NOT _artifacts_dir: `lo env
   # kustomization` above WRITES kustomization.yaml into that directory on every

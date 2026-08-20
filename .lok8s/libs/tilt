@@ -86,8 +86,8 @@ tilt::reload() {
 # exists precisely to re-run a workload, and it MUST go through Tilt because the
 # rendered artifact carries the declared image ref (`lok8s.local/<name>`) while
 # the pushed image only exists under Tilt's content-hash tag. Applying the
-# rendered YAML directly points the workload at an image nobody pushed
-# (kubehz-cluster AUDIT.md r251/r260). Usage: tilt::trigger_resource <name> [port]
+# rendered YAML directly points the workload at an image nobody pushed.
+# Usage: tilt::trigger_resource <name> [port]
 tilt::trigger_resource() {
   local name="${1}" port="${2:-$(tilt::port)}"
   tilt trigger "${name}" --port "${port}" &>/dev/null

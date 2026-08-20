@@ -49,20 +49,16 @@ main::build() {
     override=1
   fi
 
-  # Say which domain this is, BEFORE touching anything.
-  #
-  # `lo build` writes clusters/<domain>/artifacts* and reads
-  # clusters/<domain>/secrets. A run against the wrong domain renders one
-  # cluster's manifests from another cluster's secret store — which is how a
-  # live ZITADEL masterkey and DB password were re-keyed from the wrong store,
-  # leaving a database that could no longer decrypt itself.
-  #
-  # The domain comes from --domain > DOMAIN_NAME > clusters/.active, and that
-  # last one is state a `lo use` persisted possibly hours ago. domain::resolve
-  # already warns when the env and `.active` DISAGREE; the dangerous case it
-  # cannot see is when nothing disagrees and the answer is simply not what the
-  # operator assumed. Unconditional, on stderr, so piping the artifacts is
-  # unaffected.
+  # Say which domain this is, BEFORE touching anything. `lo build` writes
+  # clusters/<domain>/artifacts* and reads clusters/<domain>/secrets — a run
+  # against the wrong domain renders one cluster's manifests from another
+  # cluster's secret store (one such run re-keyed a live database's encryption
+  # secrets and it could no longer decrypt itself). The domain comes from
+  # --domain > DOMAIN_NAME > clusters/.active, and that last one is state a
+  # `lo use` persisted possibly hours ago; domain::resolve warns on a
+  # DISAGREEMENT, but not when nothing disagrees and the answer is simply not
+  # what the operator assumed. Unconditional, on stderr, so piping the
+  # artifacts is unaffected.
   echo "lo build: domain ${domain}" >&2
 
   _resolve_kubeconfig_for_domain
@@ -367,14 +363,11 @@ build::artifacts() {
     # kustomize exits 0 for an empty result — `resources: []`, a target list
     # that lost its entries, a base that stopped resolving — so the pipeline
     # above succeeds and the atomic promote below installs a 0-byte
-    # artifacts.yaml over the previous good one. That is not a failure
-    # anywhere it can be noticed: on the prod path render.yml COMMITS the
-    # artifacts and Flux applies them with prune: true, so an empty render
-    # deletes every resource it used to manage.
-    #
-    # Measured before this guard: gutting the domain kustomization's
-    # `resources:` gave rc=0, 0 documents, 0 bytes, and the only line printed
-    # was the domain announcement (AUDIT.md r302).
+    # artifacts.yaml over the previous good one (measured: an emptied
+    # `resources:` gives rc=0, 0 documents, 0 bytes, no other output). That is
+    # not a failure anywhere it can be noticed: on the prod path render.yml
+    # COMMITS the artifacts and Flux applies them with prune: true, so an
+    # empty render deletes every resource it used to manage.
     #
     # Refuse only where it would DESTROY something. An empty render over an
     # empty/absent artifact is a new or genuinely empty domain — warn, but
@@ -405,12 +398,10 @@ build::artifacts() {
 
     # Promote ONLY when the content changed. An unconditional mv refreshes the
     # mtime of a byte-identical artifact, and everything that WATCHES the file
-    # treats mtime as change — measured live (2026-08-07): the Tiltfile reads
-    # artifacts.yaml during eval and `lo env kustomization --pull` runs during
-    # eval, so every eval rewrote the file, which re-triggered the eval — a
-    # self-sustaining reload loop that starved every queued build for hours.
-    # cmp exits fast on the first differing byte; an unchanged render becomes
-    # a no-op and the watch stays quiet.
+    # treats mtime as change — a Tiltfile that both reads artifacts.yaml and
+    # rewrites it during eval self-triggered a reload loop that starved every
+    # queued build for hours (2026-08-07). cmp exits fast on the first
+    # differing byte; an unchanged render is a no-op and the watch stays quiet.
     if [[ -f "${domain_dir}/artifacts.yaml" ]] && cmp -s "${tmp}" "${domain_dir}/artifacts.yaml"; then
       rm -f "${tmp}"
       debug "${domain}: render unchanged (${docs} document(s)) — artifacts.yaml left untouched"
@@ -504,12 +495,10 @@ build::split() {
   # ZERO Secrets to emit (secret_count forced to 0 below → no recipient check, no
   # sops config, no Secret loop, no secret-count post-condition), while keeping
   # the ACTUAL count for the collision-check arithmetic (non-Secret docs =
-  # doc_count - actual). The committed Secret.*.sops.yaml files are left wholly
-  # inert: never created, never re-encrypted, and — critically — EXCLUDED from
-  # the swap's prune (see the prune glob at the bottom). Without that prune
-  # guard a --no-secrets build would sweep every committed Secret (its stage has
-  # none) and a pruning reconciler would then delete them from the CLUSTER — the
-  # single dangerous edge this mode has to defend.
+  # doc_count - actual). Committed Secret.*.sops.yaml files stay wholly inert:
+  # never created, never re-encrypted, and — critically — EXCLUDED from the
+  # swap's prune (see the guard at the prune glob, the single dangerous edge
+  # this mode has to defend).
   local no_secrets="${LOK8S_BUILD_NO_SECRETS:-0}"
 
   # Secrets in the render require declared recipients BEFORE any file is
@@ -649,11 +638,9 @@ EOF
     fresh=$(yq eval "select(.kind == \"Secret\" and .metadata.name == \"${name}\" and (.metadata.namespace // \"\") == \"${ns}\")" "${artifact}") \
       || { error "split: failed to select Secret ${ns}/${name}"; return 1; }
 
-    # encrypt.on: change — if the committed twin already decrypts to this exact
-    # (canonical) plaintext, KEEP it byte-for-byte instead of re-encrypting.
-    # sops rotates its data key on every encrypt, so re-encrypting an unchanged
-    # Secret would churn the ciphertext (and the git diff) for no value change.
-    # A failed decrypt / mismatch / missing prior falls through to encrypt.
+    # encrypt.on: change — keep the committed twin byte-for-byte when it already
+    # decrypts to this canonical plaintext (rationale in build::_secret_unchanged);
+    # any decrypt failure / mismatch / missing prior falls through to encrypt.
     if [[ "${encrypt_on}" == "change" ]] \
        && printf '%s' "${fresh}" | build::_secret_unchanged "${prior}"; then
       cp -p "${prior}" "${outfile}" \
@@ -676,9 +663,6 @@ EOF
     fi
     secrets=$((secrets + 1))
     emitted=$((emitted + 1))
-    # --no-secrets never enters this loop: the process substitution yields an
-    # empty list below, so no Secret is read/decrypted/encrypted. (secret_count
-    # is also 0, so the post-condition below is satisfied at secrets==0.)
   done < <( (( no_secrets )) || yq -N 'select(.kind == "Secret") | ((.metadata.namespace // "") | tostring) + "/" + (.metadata.name | tostring)' "${artifact}")
 
   # The pairs listing feeds the loop through a process substitution whose

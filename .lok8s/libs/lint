@@ -656,12 +656,9 @@ lint::all() {
   lint::labels "${domain_dir}"
   lint::secrets "${domain_dir}"
 
-  # The verdict is printed AFTER it is computed. `echo "  OK"` used to sit one
-  # line ABOVE this check and ran unconditionally, so a failing domain printed
-  # "  OK" and then "N validation error(s)". The exit code was correct
-  # throughout; the human-readable output contradicted it, and with several
-  # domains the per-domain OK is what an operator scans while the summary error
-  # is a single line at the very end.
+  # The verdict is printed AFTER it is computed: an unconditional "  OK" above
+  # this check once printed "  OK" followed by "N validation error(s)" — the
+  # exit code was right, but the per-domain line an operator scans was not.
   (( errors == 0 )) || { error "${errors} validation error(s)"; return 1; }
 
   echo "  OK"

@@ -255,10 +255,10 @@ _append_inventory() {
   if ! echo "${desc}" | jq empty 2>/dev/null; then
     # YAML descriptor: convert the ALREADY-envsubst'd text (stdin), never the
     # raw file — re-reading the file discards ${VAR} expansion and anchors
-    # against unexpanded names (review round 1). NB the provider's own loads
-    # still re-read the file (pre-existing, tracked as a follow-up issue).
-    # A failed/empty conversion errors HERE — falling through would surface as
-    # a misleading "declares no server[]" refusal (review round 2).
+    # against unexpanded names. NB the provider's own loads still re-read the
+    # file (pre-existing, tracked as a follow-up issue). A failed/empty
+    # conversion errors HERE — falling through would surface as a misleading
+    # "declares no server[]" refusal.
     if ! desc="$(yq -o json '.' - <<<"${desc}" 2>/dev/null)" \
        || [[ -z "${desc}" ]] || ! echo "${desc}" | jq empty 2>/dev/null; then
       error "kubeone inventory: descriptor ${config_file} is neither valid JSON nor valid YAML (after envsubst) — fix the descriptor before provisioning"
@@ -288,7 +288,7 @@ _append_inventory() {
   # Zero control planes after anchoring = descriptor/provider name mismatch
   # (e.g. envsubst env drift between runs). Fail HERE with the cause instead
   # of handing kubeone an empty controlPlane.hosts and an opaque validation
-  # error (review round 1).
+  # error.
   if [[ "$(echo "${output}" | jq '[.nodes[] | select(.role == "control-plane")] | length')" == "0" ]]; then
     error "kubeone inventory: anchoring left ZERO control-plane hosts — no provider control-plane node matches the descriptor's server[] names (name drift?)"
     return 1
