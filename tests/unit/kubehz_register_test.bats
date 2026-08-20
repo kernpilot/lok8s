@@ -479,6 +479,84 @@ EOF
   assert_output --partial "not registered (access: none)"
 }
 
+# ── status subcommand: reads the ROW, not the envelope ───
+#
+# GET /api/clusters answers the pagination envelope {ok, data: […]} and
+# ignores ?domain=. The old code read `.status` off the ENVELOPE, so every
+# registered cluster printed "Status: unknown". These tests feed the real
+# envelope shape and assert the ROW's fields come out.
+
+_status_yq_mock() {
+  yq() {
+    case "$2" in
+      '.spec.kubehz.hosting // "self"') echo "self" ;;
+      '.spec.kubehz.apiUrl // ""') echo "https://api.kubehz.dev" ;;
+      '.spec.kubehz.access') echo "registered" ;;
+      '.spec.kubehz.connectHcloudToken // false') echo "false" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  touch "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  export domain="test.kubehz.dev"
+  export DOMAIN_NAME="test.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+}
+
+@test "status: prints the row's status + heartbeat from the paginated envelope" {
+  _status_yq_mock
+  curl() {
+    [[ "$*" == *"/api/clusters?perPage=500"* ]] \
+      || { echo "unexpected curl: $*" >&2; return 1; }
+    # Realistic envelope, newest-first; the oldest row for the domain is the
+    # agent-bound one and carries the live status.
+    cat <<'EOF'
+{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","lastHeartbeat":"2026-08-19T10:00:00Z","connected":true,"createdAt":"2026-01-01T00:00:00Z"},
+  {"id":"cl-other","domain":"other.example.com","status":"Error","createdAt":"2026-03-01T00:00:00Z"}
+],"meta":{"page":1,"perPage":500,"total":3}}
+200
+EOF
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  run kubehz::status
+  assert_success
+  assert_output --partial "Status:  Running (id: cl-old)"
+  assert_output --partial "Beat:    2026-08-19T10:00:00Z (connected)"
+  # The envelope has no .status — "unknown" would mean we read the wrong level.
+  refute_output --partial "Status:  unknown"
+}
+
+@test "status: no row for the domain prints not registered" {
+  _status_yq_mock
+  curl() {
+    printf '{"ok":true,"data":[{"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-03-01T00:00:00Z"}]}\n200'
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  run kubehz::status
+  assert_success
+  assert_output --partial "not registered (no cluster for test.kubehz.dev"
+}
+
+@test "status: a non-2xx list answer is reported as unknown with the HTTP status" {
+  _status_yq_mock
+  curl() { printf '{"ok":false}\n401'; }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  run kubehz::status
+  assert_success
+  assert_output --partial "unknown (HTTP 401"
+}
+
 # ── register subcommand: rejects access none ─────────────
 
 @test "register subcommand: rejects when access is none" {
