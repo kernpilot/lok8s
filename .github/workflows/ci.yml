@@ -90,6 +90,14 @@ jobs:
           PATH_BIN: ${{ github.workspace }}/.bin
         run: ./.bin/argsh test tests/unit/
 
+      - name: CRD drift gate (lo crds check)
+        # libs/crds calls itself "the CI drift gate" — this is the workflow
+        # step that runs it. Fails when any operator/crds/*.yaml (or the
+        # .lok8s inventory mirror) is stale against its schema source; the
+        # fix is `lo crds generate` + commit. Needs the b-pinned mikefarah
+        # yq, which `b install` (above) placed in .bin.
+        run: PATH="${GITHUB_WORKSPACE}/.bin:${PATH}" ./.lok8s/lo crds check
+
   operator-tests:
     name: Bats Operator Tests
     runs-on: ubuntu-latest
