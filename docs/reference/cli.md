@@ -9,7 +9,8 @@ The `lo` CLI is an [argsh](https://github.com/arg-sh/argsh) script located at `.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--verbose` | `-v` | Enable verbose/debug logging (sets `DEBUG=1`) |
-| `--force` | `-f` | Force operation without prompts |
+| `--force` | `-f` | Force operation without prompts (also recreates immutable/terminating conflicts, like `--force-recreate`) |
+| `--force-recreate` | | On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer |
 | `--remote` | `-r` | Provision on a remote VM (activates `spec.provider` + `spec.remote`) |
 | `--kubernetes` | | Kubernetes version to use |
 | `--cluster` | `-s` | Cluster name to manage (default: `local`) |
@@ -72,12 +73,17 @@ Stops Tilt, deletes the kind cluster, removes cluster-prefixed Docker volumes, a
 Provision a cluster through the full lifecycle.
 
 ```bash
-lo provision [--domain <domain>] [--remote|-r]
+lo provision [--domain <domain>] [--bootstrap|-b] [--force|-f] [--remote|-r]
 ```
 
 Resolves the cluster spec, sources the driver contract, calls `driver::provision`, then runs `bootstrap::apply` to apply `spec.bootstrap` addons in order with health waits between stages.
 
 With `--remote`: loads `spec.provider`, provisions the cloud VM, then either sets `DOCKER_HOST` to the remote Docker (docker mode) or syncs the repo and runs `lo provision` on the VM (CI mode). See [Remote clusters](#remote-clusters).
+
+| Flag | Description |
+|------|-------------|
+| `--bootstrap`, `-b` | Re-apply `spec.bootstrap` only, on an existing cluster (skip the infra reconcile) |
+| `--force`, `-f` | Global flag: skip the real-infrastructure confirmation prompt (cloud drivers) |
 
 ### lo bootstrap
 
@@ -130,7 +136,7 @@ Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects ca
 Destroy a cluster.
 
 ```bash
-lo destroy [domain]
+lo destroy [--domain <domain>]
 ```
 
 Calls `driver::destroy` from the appropriate driver contract.
@@ -145,11 +151,13 @@ Rebuild a cluster **from bare metal** (disaster recovery). Orchestrates
 [Disaster Recovery](../guide/recover.md) and [Backups](../guide/backups.md).
 
 ```bash
-lo recover <domain>                 # full recovery (prompts once to confirm)
-lo recover <domain> --dry-run       # preview the rebuild plan; change nothing
-lo recover <domain> --skip-rebuild  # re-provision + verify only
-lo recover <domain> --force         # skip the confirmation prompt
+lo recover --domain <domain>                 # full recovery (prompts once to confirm)
+lo recover --domain <domain> --dry-run       # preview the rebuild plan; change nothing
+lo recover --domain <domain> --skip-rebuild  # re-provision + verify only
+lo recover --domain <domain> --force         # skip the confirmation prompt
 ```
+
+The domain comes from `--domain` (default: the active domain) — there is no positional form.
 
 | Flag | Description |
 |------|-------------|
@@ -194,7 +202,7 @@ Without arguments: shows the active domain and lists all available domains with 
 Validate domain structure and specs.
 
 ```bash
-lo lint [domain]
+lo lint [--domain <domain>]
 ```
 
 Checks:
@@ -208,7 +216,7 @@ Checks:
 Check cluster health and status.
 
 ```bash
-lo status [domain]
+lo status [--domain <domain>]
 ```
 
 Delegates to the driver contract's `driver::status` function. For Lo clusters: checks if the kind cluster exists. For Capi clusters: queries the CAPI Cluster resource phase.
@@ -218,8 +226,8 @@ Delegates to the driver contract's `driver::status` function. For Lo clusters: c
 GitOps integration (Flux / Argo). **Deferred.** Both subcommands currently return a deferred-error stub — the integration is being redesigned around the new `services.yaml` targets-map model.
 
 ```bash
-lo gitops flux [domain]    # (deferred)
-lo gitops argo [domain]    # (deferred)
+lo gitops flux [--domain <domain>]    # (deferred)
+lo gitops argo [--domain <domain>]    # (deferred)
 ```
 
 ### Cluster lifecycle (there is no `lo kind`)
@@ -311,6 +319,8 @@ lo secrets set --name <n> <key> --encrypt      # write + SOPS-encrypt this one f
 lo secrets allow                               # approve bash: generators after a change
 lo secrets encrypt                             # write committable Secret.*.enc files
 lo secrets decrypt                             # restore the plaintext cache from .enc
+lo secrets add-key <ssh-pubkey-path|age1…>     # add an age recipient to .sops.yaml + re-key the store (--all: every domain)
+lo secrets env --name <n> [--namespace <ns>]   # emit injection-safe `export KEY=value` lines for a cached secret (for eval)
 lo secrets list | print [pattern...] | path    # inspect the cache
 ```
 
@@ -362,8 +372,8 @@ Configure your AI client using the `.mcp.json` included in the project root.
 Print a domain's kubeconfig on stdout.
 
 ```bash
-lo kubeconfig [domain]        # admin kubeconfig (alias: lo kc)
-lo kubeconfig --oidc          # kubelogin exec-plugin kubeconfig (browser OIDC login)
+lo kubeconfig [--domain <domain>]    # admin kubeconfig (alias: lo kc)
+lo kubeconfig --oidc                 # kubelogin exec-plugin kubeconfig (browser OIDC login)
 lo kubeconfig --cluster-override <domain>   # resolve against another cluster domain
 ```
 
@@ -374,7 +384,7 @@ A deploy domain follows its `spec.clusterRef` to the real cluster. The `--oidc` 
 Static security-posture audit — read-only and cluster-free.
 
 ```bash
-lo audit [domain] [--json]
+lo audit [--domain <domain>] [--json]
 ```
 
 Scans the domain's specs, secrets hygiene, and rendered targets for posture findings. `--json` emits machine-readable output for CI.
@@ -446,6 +456,8 @@ Generate operator CRDs from the schema source.
 lo crds generate
 lo crds check                 # verify the generated CRDs are current
 ```
+
+Framework-internal unless your project adopts the same layout: both subcommands read `operator/crds/schema/*.schema.yaml` and write `operator/crds/*.yaml` relative to `PATH_BASE` (your project root), so without that single-source directory there is nothing for them to act on.
 
 ### lo kustomize
 
