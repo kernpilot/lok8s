@@ -284,19 +284,25 @@ spec:
                       case "${CLAIM_PLACED}" in
                         ''|*[!0-9]*) : ;;
                         *)
-                          # wc -l first: grep -Eq is LINE-based, so a multi-line
-                          # value whose first line matches would pass and break
-                          # the beat JSON — require zero embedded newlines.
-                          if [ $(( NOW_EPOCH - CLAIM_PLACED )) -lt 900 ] \
+                          # Age must sit in [0, 900): a FUTURE stamp (operator
+                          # clock ahead) must not read as live, or a dead nonce
+                          # echoes until time catches up. wc -l: grep -Eq is
+                          # LINE-based, so a multi-line value whose first line
+                          # matches would pass and break the beat JSON.
+                          CLAIM_AGE=$(( NOW_EPOCH - CLAIM_PLACED ))
+                          if [ "${CLAIM_AGE}" -ge 0 ] && [ "${CLAIM_AGE}" -lt 900 ] \
                             && [ "$(printf '%s' "${CLAIM_NONCE}" | wc -l)" -eq 0 ] \
                             && printf '%s' "${CLAIM_NONCE}" | grep -Eq '^khzn_[A-Za-z0-9_-]{15,195}$'; then
                             CLAIM_LIVE=1
                           fi ;;
                       esac
                       if [ -z "${CLAIM_LIVE}" ]; then
-                        kubectl annotate configmap kubehz-agent-config -n kubehz-system \
-                          "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 || true
-                        echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
+                        if kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                          "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1; then
+                          echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
+                        else
+                          echo "kubehz: could not clear the expired/invalid claim nonce (annotate failed); retrying next tick" >&2
+                        fi
                         CLAIM_NONCE=""
                       fi
                     fi
@@ -640,7 +646,10 @@ spec:
                         DES_BODY=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -e '1,/^$/d' -e '/^__code=/d') || DES_BODY=""
                         DES_NEW_ETAG=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1)
                         DES_REV=$(printf '%s' "${DES_BODY}" | jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
-                        if [ -z "${DES_REV}" ]; then
+                        # Missing ETag counts as unparseable too: persisting an
+                        # empty validator would wipe If-None-Match and force a
+                        # full 200 every tick.
+                        if [ -z "${DES_REV}" ] || [ -z "${DES_NEW_ETAG}" ]; then
                           echo "kubehz: desired-state response was unparseable; retrying next tick" >&2
                         else
                           DES_FLAGS=$(printf '%s' "${DES_BODY}" | jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
