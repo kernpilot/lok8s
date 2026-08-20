@@ -580,6 +580,86 @@ spec:
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
                   fi
 
+                  # ── Desired-state poll — REPORT-ONLY (the P0 slice) ───────
+                  # GET /api/clusters/<id>/desired with the SAME identifier and
+                  # agent-token bearer the heartbeat uses. Strong ETag flow:
+                  # the stored validator rides If-None-Match; 304 = unchanged =
+                  # stay silent (the cheap path, every 5-minute tick). This
+                  # slice only REPORTS what the platform declares — revision,
+                  # execution flags, k8s-version skew — and acts on NOTHING:
+                  # the acting pull loop is the P2 Go-agent capability
+                  # (managed-platform-spec §8) and arrives with it. Markers
+                  # persist on the kubehz-agent-config ConfigMap (the same
+                  # annotation pattern + RBAC as the assessment gate):
+                  #   kubehz.cloud/desired-etag      last-seen validator
+                  #                                  (opaque — never parsed)
+                  #   kubehz.cloud/desired-revision  last-seen revision
+                  #   kubehz.cloud/desired-error     last refusal state, so a
+                  #     401/403/404 logs once per state CHANGE — a
+                  #     misconfigured cluster must not crashloop or spam.
+                  DESIRED_ETAG=""
+                  DESIRED_ERR=""
+                  if [ -n "${MARKER_OK}" ]; then
+                    DESIRED_ETAG=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
+                    DESIRED_ERR=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
+                  fi
+                  set -- -H "Authorization: Bearer ${AGENT_TOKEN}"
+                  [ -z "${DESIRED_ETAG}" ] || set -- "$@" -H "If-None-Match: ${DESIRED_ETAG}"
+                  DES_RC=0
+                  DES_OUT=$(curl -sS -D - -w '\n__code=%{http_code}' "$@" \
+                    "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/desired" 2>/dev/null) || DES_RC=$?
+                  if [ "${DES_RC}" -ne 0 ]; then
+                    echo "kubehz: desired-state poll failed (curl rc=${DES_RC}); retrying next tick" >&2
+                  else
+                    DES_CODE=$(printf '%s\n' "${DES_OUT}" | sed -n 's/^__code=//p' | tail -1)
+                    case "${DES_CODE}" in
+                      304)
+                        # Unchanged — silent. Clear a sticky refusal state so a
+                        # later refusal logs again (e.g. after a re-enroll).
+                        if [ -n "${DESIRED_ERR}" ]; then
+                          kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                            "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
+                        fi
+                        ;;
+                      200)
+                        # Body = the one JSON line after the header block; the
+                        # ETag header is stored verbatim (opaque validator).
+                        DES_BODY=$(printf '%s\n' "${DES_OUT}" | grep '^{' | tail -1) || DES_BODY=""
+                        DES_NEW_ETAG=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1)
+                        DES_REV=$(printf '%s' "${DES_BODY}" | jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
+                        if [ -z "${DES_REV}" ]; then
+                          echo "kubehz: desired-state response was unparseable; retrying next tick" >&2
+                        else
+                          DES_FLAGS=$(printf '%s' "${DES_BODY}" | jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
+                          [ -n "${DES_FLAGS}" ] || DES_FLAGS="none"
+                          DES_K8S=$(printf '%s' "${DES_BODY}" | jq -r '.kubernetesVersion // empty' 2>/dev/null) || DES_K8S=""
+                          DES_SKEW=""
+                          if [ -n "${DES_K8S}" ] && [ "${DES_K8S}" != "${KUBE_VERSION}" ]; then
+                            DES_SKEW=" — desired k8s ${DES_K8S}, local ${KUBE_VERSION}"
+                          fi
+                          echo "kubehz: desired state changed — revision ${DES_REV}, execution flags on: ${DES_FLAGS}${DES_SKEW} (report-only; acting arrives with the Go agent)"
+                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                            "kubehz.cloud/desired-etag=${DES_NEW_ETAG}" \
+                            "kubehz.cloud/desired-revision=${DES_REV}" >/dev/null 2>&1 \
+                            || echo "kubehz: could not persist the desired-state marker; the next poll re-reports" >&2
+                          if [ -n "${DESIRED_ERR}" ]; then
+                            kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                              "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
+                          fi
+                        fi
+                        ;;
+                      401|403|404)
+                        if [ "${DESIRED_ERR}" != "${DES_CODE}" ]; then
+                          echo "kubehz: desired-state poll refused (HTTP ${DES_CODE}) — check the cluster's enrollment/claim; identical refusals stay quiet" >&2
+                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                            "kubehz.cloud/desired-error=${DES_CODE}" >/dev/null 2>&1 || true
+                        fi
+                        ;;
+                      *)
+                        echo "kubehz: desired-state poll returned HTTP ${DES_CODE:-<none>}; retrying next tick" >&2
+                        ;;
+                    esac
+                  fi
               envFrom:
                 - configMapRef:
                     name: kubehz-agent-config
