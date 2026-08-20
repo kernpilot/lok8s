@@ -391,13 +391,18 @@ provision::dispatch() {
   # that could not tell a fresh driver-apply from a weeks-old cluster).
   export LOK8S_BOOTSTRAP_ONLY="${bootstrap_only}"
 
-  # kubehz config: read and validate
-  kubehz::read_config "${cluster_yaml}"
-  kubehz::validate_config || return 1
+  # kubehz config + registration. Probe first — tests source this lib
+  # standalone without the kubehz lib loaded (same contract as
+  # inventory::publish below); with the lib present, every step is gated.
+  if declare -f kubehz::read_config &>/dev/null; then
+    kubehz::read_config "${cluster_yaml}" || return 1
+    kubehz::validate_config || return 1
 
-  # kubehz registration: register cluster if access != none
-  if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
-    kubehz::register_cluster "${domain}" "${cluster_yaml}" || return 1
+    # kubehz registration: register cluster if access != none. Unset access
+    # (read_config didn't export it) means no kubehz config — same as none.
+    if [[ "${LOK8S_KUBEHZ_ACCESS:-none}" != "none" ]]; then
+      kubehz::register_cluster "${domain}" "${cluster_yaml}" || return 1
+    fi
   fi
 
   # Bootstrap: apply spec.bootstrap addons (cluster infrastructure —
@@ -407,7 +412,10 @@ provision::dispatch() {
   local cluster_name_for_kc
   cluster_name_for_kc=$(yq -r '.metadata.name' "${cluster_yaml}")
   local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name_for_kc}.yaml"
-  bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}" || return 1
+  # Probe first (standalone-source test contract, as above); gated when present.
+  if declare -f bootstrap::apply &>/dev/null; then
+    bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}" || return 1
+  fi
 
   # Record WHAT was deployed into the cluster itself: the ClusterInventory
   # singleton (lok8s.dev/v1alpha1, name "cluster") — metadata only (versions,
