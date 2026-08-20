@@ -302,3 +302,34 @@ func isURI(h string) bool {
 	u, err := url.Parse(h)
 	return err == nil && u.Scheme != "" && u.Host != ""
 }
+
+// ValidateCAPair confirms certPEM/keyPEM parse, belong together (matching
+// public keys), and that the cert is a CA — the checks a consumer of the pair
+// (e.g. a cert-manager CA issuer) would otherwise fail at issue time, moved to
+// build time. Loud beats late: a hand-edited or mismatched CAROOT surfaces
+// here, not as a cluster-side issuance error.
+func ValidateCAPair(certPEM, keyPEM []byte) error {
+	cert, err := parseCert(certPEM)
+	if err != nil {
+		return fmt.Errorf("CA cert: %w", err)
+	}
+	key, err := parsePKCS8(keyPEM)
+	if err != nil {
+		return fmt.Errorf("CA key: %w", err)
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return fmt.Errorf("CA key: %T cannot sign", key)
+	}
+	pub, ok := signer.Public().(interface{ Equal(x crypto.PublicKey) bool })
+	if !ok {
+		return fmt.Errorf("CA key: unsupported public key type %T", signer.Public())
+	}
+	if !pub.Equal(cert.PublicKey) {
+		return fmt.Errorf("CA cert and key do not match (public keys differ)")
+	}
+	if !cert.IsCA {
+		return fmt.Errorf("certificate is not a CA")
+	}
+	return nil
+}

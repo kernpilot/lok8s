@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
+	"github.com/kernpilot/lok8s/kustomize/pkg/certgen"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
 
 	specpkg "github.com/kernpilot/lok8s/kustomize/plugins/secret/spec"
@@ -202,6 +204,58 @@ func TestCert_CARoot_IncludeKey_EmitsCAKeypairAsTLSPair(t *testing.T) {
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
 		t.Errorf("leaf does not chain to the includeKey-emitted CA: %v", err)
 	}
+	assertPairMatches(t, m["tls.crt"], m["tls.key"])
+}
+
+// assertPairMatches proves tls.key IS the private half of tls.crt directly
+// (public-key equality), not transitively via file layout.
+func assertPairMatches(t *testing.T, certPEM, keyPEM []byte) {
+	t.Helper()
+	blk, _ := pem.Decode(certPEM)
+	cert, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kblk, _ := pem.Decode(keyPEM)
+	key, err := x509.ParsePKCS8PrivateKey(kblk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := key.(crypto.Signer).Public().(interface{ Equal(x crypto.PublicKey) bool })
+	if !pub.Equal(cert.PublicKey) {
+		t.Error("tls.key is not the private half of tls.crt (public keys differ)")
+	}
+}
+
+func TestCert_CARoot_IncludeKey_RejectsMismatchedPair(t *testing.T) {
+	caroot := t.TempDir()
+	t.Setenv("CAROOT", caroot)
+	dir := t.TempDir()
+
+	// Mint the CAROOT CA, then corrupt the key half with a DIFFERENT key —
+	// the hand-edited-CAROOT case. includeKey must fail the build, loud.
+	if _, err := NewCert(&specpkg.CertSpec{CARoot: true}).Generate(certCtx(t, dir, "kube-system", "seed")); err != nil {
+		t.Fatal(err)
+	}
+	other, err := certgen.NewCAKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(caroot, "rootCA-key.pem")
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, other, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewCert(&specpkg.CertSpec{CARoot: true, IncludeKey: true}).
+		Generate(certCtx(t, dir, "cert-manager", "bad-ca"))
+	if err == nil {
+		t.Fatal("mismatched CAROOT pair was emitted — must fail the build")
+	}
+	if !strings.Contains(err.Error(), "do not match") {
+		t.Errorf("error %q does not carry the mismatch reason", err)
+	}
 }
 
 func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
@@ -243,6 +297,7 @@ func TestCert_CA_IncludeKey_OwnStoreCA(t *testing.T) {
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "app.test"}); err != nil {
 		t.Errorf("caRef leaf does not chain to the includeKey own CA: %v", err)
 	}
+	assertPairMatches(t, m["tls.crt"], m["tls.key"])
 }
 
 func TestCert_Validation(t *testing.T) {

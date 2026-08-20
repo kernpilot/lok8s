@@ -54,7 +54,7 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 			return nil, err
 		}
 		if g.spec.IncludeKey {
-			return caIssuerEntries(caCrt, caKey), nil
+			return caIssuerEntries(caCrt, caKey)
 		}
 		return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
 	}
@@ -92,18 +92,23 @@ func caEntries(ctx *plugin.Context, c plugin.CacheStore, includeKey bool) ([]plu
 		return nil, errs.Wrap("ca.crt", err)
 	}
 	if includeKey {
-		return caIssuerEntries(caCrt, caKey), nil
+		return caIssuerEntries(caCrt, caKey)
 	}
 	return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
 }
 
 // caIssuerEntries shapes a CA keypair for a cert-manager CA issuer: a
-// kubernetes.io/tls data map whose tls.crt + tls.key hold the CA itself.
-func caIssuerEntries(caCrt, caKey []byte) []plugin.Entry {
+// kubernetes.io/tls data map whose tls.crt + tls.key hold the CA itself. The
+// pair is validated first (parse + public-key match + IsCA) so a corrupt or
+// mismatched CAROOT fails the BUILD, not cluster-side issuance later.
+func caIssuerEntries(caCrt, caKey []byte) ([]plugin.Entry, error) {
+	if err := certgen.ValidateCAPair(caCrt, caKey); err != nil {
+		return nil, errs.Wrap("includeKey", err)
+	}
 	return []plugin.Entry{
 		{Key: "tls.crt", Value: caCrt},
 		{Key: "tls.key", Value: caKey},
-	}
+	}, nil
 }
 
 // leafEntries signs a leaf for the spec hosts and emits tls.crt + tls.key. The
