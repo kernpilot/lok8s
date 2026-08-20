@@ -293,19 +293,6 @@ lo image clean                           # Drop the cache registry volume
 
 The cache flow runs automatically as part of `lo build` / `lo up` when any service has `build: false` and a resolved `registry.endpoint`. See [Services Configuration → Cache mode](/guide/services#cache-mode-the-lok8scache-registry) for the full pipeline. Parallelism is controlled via `registry.parallel` in `services.yaml` (`0` unlimited, `1` sequential default, `N≥2` bounded).
 
-### lo env
-
-Manage environment and service configuration.
-
-```bash
-lo env services [--only-services|-s] [--only-registry|-r]
-lo env kustomization [--no-build|-n] [--pull|-p]
-```
-
-**services**: Prints merged service config (services.yaml + overrides).
-
-**kustomization**: Generates `kustomization.yaml` with image references from registry config inside `clusters/<domain>/artifacts/`. Writes a `.cache-queue` TSV file alongside listing every `build:false` service that needs a pre-pull. The `--pull` flag drains that queue immediately by invoking `lo image cache --all` (otherwise the queue is just written and a separate consumer drains it later — Tilt does this automatically via `lok8s()`'s `auto_cache_pull` kwarg, CI does it explicitly).
-
 ### lo secrets
 
 Manage the secret cache (`$PATH_SECRETS`) and its optional SOPS/age encryption
@@ -329,16 +316,6 @@ lo secrets list | print [pattern...] | path    # inspect the cache
 round-trip the cache so secrets commit safely as `Secret.*.enc`. Needs `sops`
 and `ssh-to-age` (`b install`).
 
-### lo k8s
-
-Generate and render Kubernetes artifacts.
-
-```bash
-lo k8s capi [--spec path] [--out path]   # Generate CAPI resources
-lo k8s infrastructure                      # Build infrastructure artifacts
-lo k8s platform                            # Build platform artifacts
-```
-
 ### lo mcp
 
 Start an MCP (Model Context Protocol) tool server over stdio.
@@ -347,7 +324,7 @@ Start an MCP (Model Context Protocol) tool server over stdio.
 lo mcp
 ```
 
-Exposes every leaf `lo` subcommand as a callable tool via the [MCP protocol](https://modelcontextprotocol.io/). AI clients (Claude Code, VS Code Copilot, Cursor) connect over stdio and can invoke `up`, `down`, `build`, `deploy`, `status`, and all other commands programmatically. Dispatchers (`tilt`, `env`, `k8s`, `gitops`) are traversed but not exposed -- only their leaf commands appear as tools.
+Exposes every user-facing leaf `lo` subcommand as a callable tool via the [MCP protocol](https://modelcontextprotocol.io/). AI clients (Claude Code, VS Code Copilot, Cursor) connect over stdio and can invoke `up`, `down`, `build`, `deploy`, `status`, and all other commands programmatically. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed but not exposed -- only their leaf commands appear as tools. Framework-internal commands (hidden from `--help`) are not exposed either.
 
 Commands carry tool annotations that inform the client about behavior:
 
@@ -447,17 +424,6 @@ lo kubehz join                # mint a node join ticket (hosting: shared)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
 ```
-
-### lo crds
-
-Generate operator CRDs from the schema source.
-
-```bash
-lo crds generate
-lo crds check                 # verify the generated CRDs are current
-```
-
-Framework-internal unless your project adopts the same layout: both subcommands read `operator/crds/schema/*.schema.yaml` and write `operator/crds/*.yaml` relative to `PATH_BASE` (your project root), so without that single-source directory there is nothing for them to act on.
 
 ### lo kustomize
 
