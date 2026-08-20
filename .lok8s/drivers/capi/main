@@ -453,14 +453,27 @@ capi::bootstrap() {
       ;;
   esac
 
+  # NOTE on gating: bootstrap runs under callers' `|| return 1`, so errexit is
+  # OFF in this body — every step must carry its own gate or a failure is
+  # swallowed and the flow "succeeds" into cleanup. On any failure the
+  # bootstrap kind cluster is KEPT: it may hold the only copy of the CAPI
+  # resources (before a successful move it always does), and keeping it makes
+  # the bootstrap re-entrant (step 1 reuses an existing cluster).
+
   # 1. Create temporary kind bootstrap cluster
   echo "info: creating bootstrap cluster" >&2
   export KIND_EXPERIMENTAL_DOCKER_NETWORK="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s}"
   if ! kind get clusters 2>/dev/null | grep -q "^${bootstrap_name}$"; then
-    kind create cluster --name "${bootstrap_name}"
+    kind create cluster --name "${bootstrap_name}" || {
+      echo "error: bootstrap kind cluster create failed" >&2
+      return 1
+    }
   fi
   mkdir -p "${PATH_BASE}/.kubeconfig"
-  kind get kubeconfig --name "${bootstrap_name}" > "${bootstrap_kubeconfig}"
+  kind get kubeconfig --name "${bootstrap_name}" > "${bootstrap_kubeconfig}" || {
+    echo "error: cannot read bootstrap kubeconfig" >&2
+    return 1
+  }
 
   # 2. Install CAPI core + infrastructure provider on bootstrap
   echo "info: installing CAPI on bootstrap cluster" >&2
@@ -468,27 +481,45 @@ capi::bootstrap() {
     --kubeconfig "${bootstrap_kubeconfig}" \
     --infrastructure "${infra_provider}" \
     --core cluster-api \
-    --wait-providers
+    --wait-providers || {
+    echo "error: clusterctl init on bootstrap cluster failed" >&2
+    return 1
+  }
 
   # 3. Ensure credentials on bootstrap cluster
-  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${bootstrap_kubeconfig}"
+  capi::ensure_credentials "${cluster_yaml}" "${provider}" "${bootstrap_kubeconfig}" || {
+    echo "error: provider credentials setup on bootstrap cluster failed" >&2
+    return 1
+  }
 
   # 4. Generate and apply management cluster CAPI resources
   echo "info: applying management cluster resources" >&2
   local resources
-  resources=$(capi::generate "${cluster_yaml}" "${provider}")
-  kubectl apply --kubeconfig "${bootstrap_kubeconfig}" -f <(echo "${resources}")
+  resources=$(capi::generate "${cluster_yaml}" "${provider}") || {
+    echo "error: CAPI resource generation failed" >&2
+    return 1
+  }
+  kubectl apply --kubeconfig "${bootstrap_kubeconfig}" -f <(echo "${resources}") || {
+    echo "error: applying management cluster resources failed" >&2
+    return 1
+  }
 
   # 5. Wait for management cluster to become ready
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   echo "info: waiting for management cluster to become ready" >&2
-  capi::wait_ready "${bootstrap_kubeconfig}" "${cluster_name}"
+  capi::wait_ready "${bootstrap_kubeconfig}" "${cluster_name}" || {
+    echo "error: management cluster ${cluster_name} did not become ready" >&2
+    return 1
+  }
 
   # 6. Extract management cluster kubeconfig
   clusterctl get kubeconfig "${cluster_name}" \
     --kubeconfig "${bootstrap_kubeconfig}" \
-    > "${mgmt_kubeconfig}"
+    > "${mgmt_kubeconfig}" || {
+    echo "error: cannot extract management cluster kubeconfig" >&2
+    return 1
+  }
 
   # 7. Install lok8s operator on management cluster
   echo "info: installing lok8s operator on management cluster" >&2
@@ -503,15 +534,24 @@ capi::bootstrap() {
     --kubeconfig "${mgmt_kubeconfig}" \
     --infrastructure "${infra_provider}" \
     --core cluster-api \
-    --wait-providers
+    --wait-providers || {
+    echo "error: clusterctl init on management cluster failed" >&2
+    return 1
+  }
 
-  # 9. Move CAPI resources from bootstrap to management cluster
+  # 9. Move CAPI resources from bootstrap to management cluster.
+  # A failed move MUST keep the bootstrap cluster — at this point it still
+  # owns the CAPI resources; deleting it would destroy the only record of
+  # the just-provisioned infrastructure.
   echo "info: moving CAPI resources to management cluster" >&2
   clusterctl move \
     --kubeconfig "${bootstrap_kubeconfig}" \
-    --to-kubeconfig "${mgmt_kubeconfig}"
+    --to-kubeconfig "${mgmt_kubeconfig}" || {
+    echo "error: clusterctl move failed — bootstrap cluster ${bootstrap_name} kept (it still owns the CAPI resources); re-run bootstrap after fixing" >&2
+    return 1
+  }
 
-  # 10. Delete bootstrap cluster
+  # 10. Delete bootstrap cluster (only after a successful move)
   echo "info: cleaning up bootstrap cluster" >&2
   kind delete cluster --name "${bootstrap_name}" 2>/dev/null || true
   rm -f "${bootstrap_kubeconfig}"

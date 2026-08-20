@@ -152,17 +152,17 @@ provider::provision() {
   # re-read the RAW file and threw the expansion away (issue #65).
   CLOUD_HETZNER_JSON="$(template::descriptor_json "${config_file}")" || return 1
 
-  # Run the full provisioning sequence (JSON descriptor loop)
-  hetzner::lookup
-  hetzner::ssh-key
-  hetzner::floating-ip
-  hetzner::network
-  hetzner::load-balancer
-  hetzner::server
-  hetzner::volume
+  # Run the full provisioning sequence (JSON descriptor loop). Each step is
+  # gated explicitly: callers invoke provision under `|| return 1`, which
+  # turns errexit OFF inside this body — unguarded, a failed `hcloud create`
+  # is swallowed and provision reports success.
+  local step
+  for step in lookup ssh-key floating-ip network load-balancer server volume; do
+    "hetzner::${step}" || { error "hetzner ${step} failed"; return 1; }
+  done
 
-  # Dump result state
-  hetzner::json '.' > "${work_dir}/hetzner.dump.json"
+  # Dump result state (destroy's fallback name source — a failed dump is an error)
+  hetzner::json '.' > "${work_dir}/hetzner.dump.json" || { error "hetzner state dump failed"; return 1; }
   debug "hetzner provision complete"
 }
 

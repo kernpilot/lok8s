@@ -115,7 +115,11 @@ tilt::up() {
     return 0
   fi
 
-  tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
+  # error() only logs (returns 0) — the gate needs its own return.
+  tilt doctor | grep 'Env: kind' &>/dev/null || {
+    error "Did not recognize local kind environment."
+    return 1
+  }
   local pid="${PATH_BASE}/.tilt"
   echo "Tilt UI: http://localhost:${port}"
   nohup tilt up --port="${port}" --file="${PATH_BASE}"/Tiltfile > "${pid}.nohup" 2>&1 &
@@ -136,7 +140,11 @@ tilt::ci() {
     "${args[@]:-}"
   )
   :args "Headless tilt build+deploy+wait (tilt ci)" "${@}"
-  tilt doctor | grep 'Env: kind' &>/dev/null || error "Did not recognize local kind environment."
+  # error() only logs (returns 0) — the gate needs its own return.
+  tilt doctor | grep 'Env: kind' &>/dev/null || {
+    error "Did not recognize local kind environment."
+    return 1
+  }
   local port
   port=$(tilt::port)
   export TILT_PORT="${port}"
@@ -151,10 +159,13 @@ tilt::ci() {
 # shellcheck disable=SC2120 # argsh-dispatched; also called arg-less by tilt::restart
 tilt::down() {
   :args "Spin down tilt" "${@}"
+  # Scope the pkill fallback to THIS project's tilt (match its --file=): a
+  # bare `pkill tilt` kills other projects' sessions on the same machine.
+  local match="[t]ilt up.*--file=${PATH_BASE}/Tiltfile"
   if [[ -f "${PATH_BASE}/.tilt.pid" ]]; then
-    kill "$(cat "${PATH_BASE}/.tilt.pid")" 2>/dev/null || pkill tilt || :
+    kill "$(cat "${PATH_BASE}/.tilt.pid")" 2>/dev/null || pkill -f "${match}" || :
   elif (( ${force:-0} )); then
-    pkill tilt || :
+    pkill -f "${match}" || :
   fi
   rm -f "${PATH_BASE}/.tilt.pid"
 }
