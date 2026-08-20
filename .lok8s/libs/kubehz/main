@@ -33,6 +33,7 @@ main::kubehz() {
     'status|s@readonly'         'Check kubehz registration status'
     'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
+    'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
   )
@@ -774,6 +775,66 @@ kubehz::claim-code() {
     echo "Paste this one-time claim code at the dashboard /claim page while signed in"
     echo "to attribute this cluster to your account. It is single-use — do not share it."
   } >&2
+}
+
+# ── Mode-3 claim nonce (challenge-response) ──────────────
+
+# Place a dashboard-minted claim-challenge nonce where the heartbeat agent can
+# echo it, via `lo kubehz claim --nonce <value>`. Mode 3 of the claim flow:
+# the signed-in user mints the nonce (POST /api/claims/challenge), places it
+# here, and the agent echoes it inside its next AUTHENTICATED heartbeat —
+# proving account (the mint) AND cluster access (the bearer beat) in one round
+# trip. On success the heartbeat response carries the additive `claim` key and
+# the agent clears the nonce; a wrong/expired nonce produces no signal (the
+# beat never fails because of it).
+#
+# The nonce persists as annotations on the kubehz-agent-config ConfigMap (the
+# agent's established marker surface): kubehz.cloud/claim-nonce + the
+# …-placed epoch stamp, written in ONE annotate call so the agent never reads
+# a half-written pair. The write runs with the OPERATOR's ambient kubeconfig
+# (exported by main from the active domain — switch clusters with
+# `lo use <domain>` first); the agent's own RBAC stays untouched — its marker
+# Role already grants get/patch on this one ConfigMap, which is exactly what
+# the CronJob needs to read and later clear the nonce.
+#
+# SECURITY: the nonce is a claim ticket — this command never prints it, and no
+# error message may echo it; only its presence/shape is reported.
+kubehz::claim() {
+  local nonce
+  local -a args=(
+    'nonce|n:!'  'Claim-challenge nonce minted in the dashboard (khzn_…)'
+    "${args[@]:-}"
+  )
+  :args "Place a claim-challenge nonce for the heartbeat agent" "${@}"
+
+  # Shape check BEFORE any cluster call: the api mints khzn_ + 43 base64url
+  # chars and its heartbeat schema bounds the whole value at 20..200 chars —
+  # reject anything outside that envelope, without echoing the value.
+  if [[ ! "${nonce}" =~ ^khzn_[A-Za-z0-9_-]{15,195}$ ]]; then
+    error "invalid claim nonce: expected a dashboard-minted khzn_… value (20-200 chars); nothing was placed"
+    return 1
+  fi
+
+  local ns="kubehz-system" cm="kubehz-agent-config"
+  if ! kubectl -n "${ns}" get configmap "${cm}" >/dev/null 2>&1; then
+    error "configmap/${cm} not found in ${ns}. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster."
+    return 1
+  fi
+
+  # One call, both annotations: the value and its placement stamp. The agent
+  # clears a stampless nonce as unsourced, and expires a stamped one after the
+  # api's challenge TTL (15 minutes) so a dead nonce never echoes forever.
+  kubectl -n "${ns}" annotate --overwrite configmap "${cm}" \
+    "kubehz.cloud/claim-nonce=${nonce}" \
+    "kubehz.cloud/claim-nonce-placed=$(date -u +%s)" >/dev/null || {
+    error "could not annotate configmap/${cm} — check your kubeconfig permissions"
+    return 1
+  }
+
+  echo "kubehz: claim nonce placed for the agent."
+  echo "The next heartbeat (within 5 minutes) echoes it to the platform; on success the"
+  echo "dashboard shows the cluster claimed and the agent clears the nonce. The challenge"
+  echo "expires 15 minutes after minting — mint and place a fresh one if it lapses."
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::kubehz "${@}"

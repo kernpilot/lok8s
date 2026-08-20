@@ -245,8 +245,11 @@ spec:
                   NOW_EPOCH=$(date -u +%s)
                   ASSESS_NOW=""
                   ASSESS_REQ=""
+                  MARKER_OK=""
+                  MARKER=""
                   if MARKER=$(kubectl get configmap kubehz-agent-config -n kubehz-system \
                       -o jsonpath='{.metadata.annotations}' --request-timeout=5s 2>/dev/null); then
+                    MARKER_OK=1
                     LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
                     ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
                     case "${LAST_ASSESS}" in
@@ -255,6 +258,47 @@ spec:
                     esac
                     [ "${ASSESS_REQ}" != "true" ] || ASSESS_NOW=1
                   fi
+
+                  # ── Mode-3 claim nonce (challenge-response) ───────────────
+                  # `lo kubehz claim --nonce` places a dashboard-minted khzn_
+                  # nonce + an epoch placement stamp on the marker ConfigMap
+                  # (one annotate call, so the pair is never half-written).
+                  # Echo it as `claim: {nonce}` inside the AUTHENTICATED beat;
+                  # a wrong/expired nonce yields a response byte-identical to
+                  # a nonce-less beat, so echoing is always safe. The nonce is
+                  # a claim ticket: NEVER logged, never printed — only its
+                  # presence is acted on. Clearing (below and on success) uses
+                  # the marker Role's existing get/patch — no new RBAC.
+                  CLAIM_NONCE=""
+                  if [ -n "${MARKER_OK}" ]; then
+                    CLAIM_NONCE=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce" // ""' 2>/dev/null) || CLAIM_NONCE=""
+                    CLAIM_PLACED=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce-placed" // ""' 2>/dev/null) || CLAIM_PLACED=""
+                    if [ -n "${CLAIM_NONCE}" ]; then
+                      # Expire a dead nonce so it never echoes forever: the
+                      # api's challenge TTL is 15 minutes (900s, the server
+                      # default) — past that the echo can never succeed. A
+                      # missing/invalid stamp or a malformed value (not the
+                      # CLI's shape) is cleared the same way: the CLI always
+                      # writes a valid pair, so anything else is unsourced.
+                      CLAIM_LIVE=""
+                      case "${CLAIM_PLACED}" in
+                        ''|*[!0-9]*) : ;;
+                        *)
+                          if [ $(( NOW_EPOCH - CLAIM_PLACED )) -lt 900 ] \
+                            && printf '%s' "${CLAIM_NONCE}" | grep -Eq '^khzn_[A-Za-z0-9_-]{15,195}$'; then
+                            CLAIM_LIVE=1
+                          fi ;;
+                      esac
+                      if [ -z "${CLAIM_LIVE}" ]; then
+                        kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                          "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 || true
+                        echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
+                        CLAIM_NONCE=""
+                      fi
+                    fi
+                  fi
+                  CLAIM_FIELD=""
+                  [ -z "${CLAIM_NONCE}" ] || CLAIM_FIELD='"claim": {"nonce": "'"${CLAIM_NONCE}"'"},'
 
                   ASSESSMENT=""
                   if [ -n "${ASSESS_NOW}" ]; then
@@ -426,6 +470,7 @@ spec:
                     "clusterId": "${CLUSTER_ID}",
                     "timestamp": "${BEAT_TS}",
                     ${ASSESSMENT_FIELD}
+                    ${CLAIM_FIELD}
                     "kubernetes": { "version": "${KUBE_VERSION}" },
                     "nodes": ${NODE_ARRAY},
                     "components": ${COMPONENT_ARRAY},
@@ -466,6 +511,7 @@ spec:
                   {
                     "clusterId": "${CLUSTER_ID}",
                     "timestamp": "${BEAT_TS}",
+                    ${CLAIM_FIELD}
                     "kubernetes": { "version": "${KUBE_VERSION}" },
                     "nodes": ${NODE_ARRAY},
                     "components": ${COMPONENT_ARRAY},
@@ -495,6 +541,20 @@ spec:
                   fi
                   printf '%s\n' "${RESPONSE}"
 
+                  # Claim succeeded → the response carries the additive
+                  # `claim: {verified: true}` key, the platform's cue to clear
+                  # the nonce from the config (it is consumed server-side and
+                  # can never succeed again). A beat whose nonce was wrong or
+                  # expired carries NO cue and clears nothing — the expiry
+                  # window above bounds how long such a nonce keeps echoing.
+                  if [ -n "${CLAIM_NONCE}" ] && printf '%s' "${RESPONSE}" | \
+                      jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
+                    kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                      "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 \
+                      || echo "kubehz: claim verified but the nonce annotation could not be cleared; the next tick will expire it" >&2
+                    echo "kubehz: cluster claim verified by the platform" >&2
+                  fi
+
                   # Assessment handled → move the 24h marker; clear a served
                   # assess request. A failed annotate only risks a RE-send next
                   # tick (idempotent server-side), never a lost heartbeat.
@@ -519,6 +579,7 @@ spec:
                     kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
                   fi
+
               envFrom:
                 - configMapRef:
                     name: kubehz-agent-config

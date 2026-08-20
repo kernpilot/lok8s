@@ -604,3 +604,102 @@ teardown() {
   assert_output --partial "daemonsets"
   assert_output --partial "kubeadm-config"
 }
+
+# ── Mode-3 claim nonce: echo, expiry, success-cue clear ──
+# `lo kubehz claim --nonce` places kubehz.cloud/claim-nonce (+ the -placed
+# epoch stamp) on the marker ConfigMap; the beat echoes it as claim.nonce and
+# clears it on the response's additive claim.verified cue — or after the api's
+# 15-minute challenge TTL, so a dead nonce never echoes forever.
+
+@test "claim: a live placed nonce is echoed as claim.nonce in the beat" {
+  local now nonce
+  now=$(date -u +%s)
+  nonce="khzn_l1vE_p1AcEd_n0ncE_43charsBase64urlValue0"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  # The nonce value never surfaces in stdout/stderr — it is a claim ticket.
+  refute_output --partial "${nonce}"
+
+  run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
+  assert_output "${nonce}"
+  # Not cleared: the stub response carried no claim.verified cue.
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_failure
+}
+
+@test "claim: no nonce annotation means no claim key on the wire" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+}
+
+@test "claim: an expired nonce (past the 15-min TTL) is cleared and NOT echoed" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'"}'
+
+  run bash "${RUNNER}"
+  assert_success
+
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/claim-nonce-placed-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "claim: a stampless/malformed nonce is cleared as unsourced (never echoed)" {
+  # The CLI always writes nonce + stamp in ONE annotate call — a value without
+  # a valid stamp did not come from it and must not echo forever.
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_st4mplEss_n0ncE_43charsBase64urlValue00"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "claim: the response's claim.verified cue clears the nonce annotations" {
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+  export STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}'
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "claim verified"
+
+  run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
+  assert_output "khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000"
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/claim-nonce-placed-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+@test "claim: a cue-less response (wrong/expired nonce server-side) clears nothing" {
+  # Anti-oracle: the response is byte-identical to a nonce-less beat — the
+  # agent keeps echoing until the local TTL window closes.
+  local now
+  now=$(date -u +%s)
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_uNvEr1f1Ed_n0ncE_43charsBase64urlValue0","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+  export STUB_RESPONSE='{"status":"ok"}'
+
+  run bash "${RUNNER}"
+  assert_success
+  run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
+  assert_failure
+}
+
