@@ -183,22 +183,32 @@ image::_cache_queue() {
   total=$(grep -cv '^$' "${queue}" 2>/dev/null || echo 0)
   debug "image cache: processing ${total} entries (parallel=${parallel})"
 
+  # Failures are recorded as marker files, not exit codes: with `wait -n` +
+  # pid-trimming a job's rc is unreliably collectable (a pid already reaped
+  # by `wait -n` reports 127 on a second `wait`), and discarding the rcs made
+  # a run with failed pulls exit 0.
+  local faildir
+  faildir=$(mktemp -d) || return 1
+
   local -a pids=()
-  local active=0
+  local active=0 idx=0
 
   while IFS=$'\t' read -r svc remote branch tag; do
     [[ -z "${svc}" ]] && continue
+    idx=$(( idx + 1 ))
 
     if (( parallel == 1 )); then
       # Sequential — straightforward
-      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}"
+      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" \
+        || echo "${svc}:${tag}" > "${faildir}/${idx}"
     else
       # Background, bounded by `parallel` (0 = unlimited)
-      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" &
+      { image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" \
+          || echo "${svc}:${tag}" > "${faildir}/${idx}"; } &
       pids+=("$!")
       active=$(( active + 1 ))
       if (( parallel > 0 )) && (( active >= parallel )); then
-        wait -n 2>/dev/null || wait "${pids[0]}"
+        wait -n 2>/dev/null || true
         # Trim finished pids (best-effort; harmless if a few stay)
         local -a alive=()
         for p in "${pids[@]}"; do
@@ -210,9 +220,20 @@ image::_cache_queue() {
     fi
   done < "${queue}"
 
-  # Drain remaining background jobs
+  # Drain remaining background jobs (statuses live in faildir markers)
   if (( ${#pids[@]} > 0 )); then
-    for p in "${pids[@]}"; do wait "${p}" || true; done
+    for p in "${pids[@]}"; do wait "${p}" 2>/dev/null || true; done
+  fi
+
+  local -a failures=()
+  local f
+  for f in "${faildir}"/*; do
+    [[ -f "${f}" ]] && failures+=("$(<"${f}")")
+  done
+  rm -rf "${faildir}"
+  if (( ${#failures[@]} > 0 )); then
+    error "image cache: ${#failures[@]}/${total} images failed: ${failures[*]}"
+    return 1
   fi
 }
 
