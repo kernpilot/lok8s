@@ -357,6 +357,124 @@ The `.so` must be discoverable via one of: `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh
 
 Configure your AI client using the `.mcp.json` included in the project root.
 
+### lo kubeconfig
+
+Print a domain's kubeconfig on stdout.
+
+```bash
+lo kubeconfig [domain]        # admin kubeconfig (alias: lo kc)
+lo kubeconfig --oidc          # kubelogin exec-plugin kubeconfig (browser OIDC login)
+lo kubeconfig --cluster-override <domain>   # resolve against another cluster domain
+```
+
+A deploy domain follows its `spec.clusterRef` to the real cluster. The `--oidc` form reuses the same server + CA as the admin kubeconfig but authenticates the user through `spec.oidc`'s IdP via `kubectl oidc-login` — safe to hand to teammates.
+
+### lo audit
+
+Static security-posture audit — read-only and cluster-free.
+
+```bash
+lo audit [domain] [--json]
+```
+
+Scans the domain's specs, secrets hygiene, and rendered targets for posture findings. `--json` emits machine-readable output for CI.
+
+### lo doctor
+
+Diagnose the local environment and toolchain.
+
+```bash
+lo doctor
+```
+
+Checks required binaries, versions, Docker/kind state, and common misconfigurations, with a fix hint per finding.
+
+### lo trust
+
+Install the local dev CA into the OS/browser trust stores (wraps `mkcert -install`, same CAROOT the `cert:` secrets generator uses).
+
+```bash
+lo trust
+```
+
+### lo version
+
+Print lok8s and toolchain versions.
+
+```bash
+lo version
+```
+
+### lo addons
+
+List driver bootstrap addons for the active cluster; name one to inspect it.
+
+```bash
+lo addons [name]
+```
+
+### lo drivers
+
+Driver-specific commands.
+
+```bash
+lo drivers --list             # list available drivers
+lo drivers <name> <args…>     # invoke a driver's own subcommands
+```
+
+### lo kubehz
+
+kubehz platform integration (alias: `lo kh`). Requires `spec.kubehz` in the cluster spec.
+
+```bash
+lo kubehz register            # register the cluster with the platform
+lo kubehz deregister          # remove it
+lo kubehz status              # registration + heartbeat status
+lo kubehz claim-code          # print the one-time claim code for the dashboard
+lo kubehz join                # mint a node join ticket (hosting: shared)
+lo kubehz assess              # platform assessment + handover feasibility
+lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
+```
+
+### lo crds
+
+Generate operator CRDs from the schema source.
+
+```bash
+lo crds generate
+lo crds check                 # verify the generated CRDs are current
+```
+
+### lo kustomize
+
+Manage the Go kustomize plugins (alias: `lo ku`).
+
+```bash
+lo kustomize build            # compile plugin binaries into the plugin home
+lo kustomize test             # plugin unit + integration tests
+lo kustomize list             # list discoverable plugins
+lo kustomize clean            # remove built binaries
+```
+
+### lo chat
+
+Chat with a local AI assistant (transparent, streaming; read-only by default).
+
+```bash
+lo chat
+```
+
+### lo ai
+
+Manage the AI integration behind `lo chat` and the agent skills.
+
+```bash
+lo ai check                   # check the AI setup (runtime + skills)
+lo ai skills                  # list skills + per-assistant delivery
+lo ai link                    # link skills into an assistant skill dir
+lo ai unlink                  # remove linked skills
+```
+
 ## Remote Clusters
 
 The `--remote` flag enables provisioning Lo clusters on remote VMs
@@ -404,7 +522,7 @@ mode is driven by the caller, not the file.
 |----------|---------|-------------|
 | `LOK8S_CLUSTER_NAME` | `local` | Cluster name |
 | `KIND_NODE_VERSION` | `v1.31.12@sha256:...` | Kind node image |
-| `KIND_CONFIG` | `<cluster_path>/config/kind-cluster.yaml` | Kind config file |
+| `KIND_CONFIG` | `.lok8s/drivers/lo/cluster/config.yaml` | Kind config file |
 | `DOMAIN_NAME` | (empty) | Domain override. Full precedence: `--domain` flag > `DOMAIN_NAME` env > `clusters/.active` > `lok8s.dev`. When the env var and `.active` disagree, `lo` prints a one-line notice naming which won |
 | `DOMAIN_SANS` | `*` | Domain SANs |
 | `KIND_EXPERIMENTAL_DOCKER_NETWORK` | `lok8s` | Docker network name |
