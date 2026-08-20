@@ -161,7 +161,11 @@ tilt::down() {
   :args "Spin down tilt" "${@}"
   # Scope the pkill fallback to THIS project's tilt (match its --file=): a
   # bare `pkill tilt` kills other projects' sessions on the same machine.
-  local match="[t]ilt up.*--file=${PATH_BASE}/Tiltfile"
+  # The -f pattern is a REGEX — escape the path's metacharacters ('.', '+',
+  # …) so an unlucky path cannot broaden the match onto unrelated sessions.
+  local esc
+  esc="$(printf '%s' "${PATH_BASE}/Tiltfile" | sed 's/[][\\.*^$()+?{}|]/\\&/g')"
+  local match="[t]ilt up.*--file=${esc}"
   if [[ -f "${PATH_BASE}/.tilt.pid" ]]; then
     kill "$(cat "${PATH_BASE}/.tilt.pid")" 2>/dev/null || pkill -f "${match}" || :
   elif (( ${force:-0} )); then

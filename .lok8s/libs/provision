@@ -250,7 +250,13 @@ provision::load_provider_creds() {
 # (same guard as bootstrap's driver resolution).
 provision::read_kind() {
   local kind
-  kind=$(yq -r '.kind' "${1}" | tr '[:upper:]' '[:lower:]')
+  # `// ""`: a missing .kind must read as empty, not the literal "null"
+  # (which would pass the regex and mis-report as an unknown driver later).
+  kind=$(yq -r '.kind // ""' "${1}" | tr '[:upper:]' '[:lower:]')
+  [[ -n "${kind}" ]] || {
+    error "cluster spec has no .kind: ${1}"
+    return 1
+  }
   [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || {
     error "invalid cluster kind: ${kind}"
     return 1
