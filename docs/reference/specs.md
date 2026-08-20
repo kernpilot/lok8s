@@ -733,7 +733,7 @@ status:
 
 ## services.yaml
 
-Defines services for Tilt local development. Not a CRD -- consumed by `lo env` and the Tilt extension.
+Defines services for Tilt local development. Not a CRD -- consumed by the Tilt extension (through the framework's internal env-render step).
 
 ```yaml
 registry:

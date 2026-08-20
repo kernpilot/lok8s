@@ -286,7 +286,7 @@ Manage the local cache registry — pre-pull private/CI images so kind can fetch
 
 ```bash
 lo image cache <service> [--force|-f]   # Pre-pull a single service's image
-lo image cache --all [--force|-f]       # Drain the queue from `lo env kustomization`
+lo image cache --all [--force|-f]       # Drain the pre-pull queue written at build time
 lo image list                            # Show what's currently in the cache registry
 lo image clean                           # Drop the cache registry volume
 ```

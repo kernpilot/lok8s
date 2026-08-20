@@ -232,7 +232,7 @@ kubehz::destroy_hosted() {
   local cluster_id="" resolve_rc=0
   cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
   if (( resolve_rc == 1 )); then
-    error "kubehz: cannot read the cluster registry at ${api_url} — nothing was deleted for ${domain}. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
+    error "kubehz: cannot read the cluster registry at ${api_url} — nothing was deleted for ${domain} and the local kubeconfigs are kept. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
     return 1
   fi
 

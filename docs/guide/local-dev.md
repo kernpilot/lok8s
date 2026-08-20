@@ -32,10 +32,10 @@ lok8s()
 
 The extension:
 
-1. Runs `lo env kustomization` to generate `kustomization.yaml` and build artifacts
+1. Runs the framework's env-render step to generate `kustomization.yaml` and build artifacts
 2. Runs `kustomize build clusters/<domain>/artifacts/` to produce the full manifest (no repo-root pollution)
 3. Filters system resources (`lok8s.dev/type: system`) and applies them
-4. Discovers services from `lo env services`
+4. Discovers services from the merged `services.yaml` (the extension's env-render step)
 5. For each enabled service with `build: true`:
    - Filters Kubernetes artifacts by `lok8s.dev/name` label
    - Reads the per-service `lok8s.yaml` config

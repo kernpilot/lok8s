@@ -870,6 +870,13 @@ kubehz::resolve_cluster_id() {
   cluster_id=$(jq -r --arg d "${domain}" \
     '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
       | sort_by(.createdAt) | first | .id) // empty' <<<"${response}" 2>/dev/null) || return 1
+  # A >500-cluster tenant pages past the cap; a truncated list must not read
+  # as "not registered" silently.
+  local total
+  total=$(jq -r '.meta.pagination.total // 0' <<<"${response}" 2>/dev/null) || total=0
+  if [[ -z "${cluster_id}" ]] && (( total > 500 )); then
+    warn "kubehz: tenant has ${total} clusters (first 500 checked) — the domain may sit past the page cap"
+  fi
   [[ -n "${cluster_id}" ]] || return 2
   echo "${cluster_id}"
 }
