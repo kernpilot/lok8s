@@ -47,11 +47,14 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	}
 	if g.spec.CARoot {
 		if g.spec.CA || len(g.spec.Hosts) > 0 || g.spec.CARef != "" {
-			return nil, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no other fields")
+			return nil, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no other field except `includeKey`")
 		}
-		caCrt, _, err := caRootCA(ctx) // load-or-create at CAROOT
+		caCrt, caKey, err := caRootCA(ctx) // load-or-create at CAROOT
 		if err != nil {
 			return nil, err
+		}
+		if g.spec.IncludeKey {
+			return caIssuerEntries(caCrt, caKey)
 		}
 		return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
 	}
@@ -63,7 +66,10 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 			return nil, errs.New("cert: `ca: true` and `caRef` are mutually exclusive")
 		}
 		// An own CA, in THIS Secret's store cache.
-		return caEntries(ctx, ctx.Cache)
+		return caEntries(ctx, ctx.Cache, g.spec.IncludeKey)
+	}
+	if g.spec.IncludeKey {
+		return nil, errs.New("cert: `includeKey` is for CA Secrets (`ca: true` or `caRoot: true`) — a leaf always emits its key")
 	}
 	if len(g.spec.Hosts) == 0 {
 		return nil, errs.New("cert: a leaf needs `hosts:` (or set `ca: true`)")
@@ -71,10 +77,12 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	return g.leafEntries(ctx)
 }
 
-// caEntries loads-or-creates a CA (key + self-signed cert) in store c and emits
-// ca.crt only — the CA private key (ca.key) stays cached for signing and is never
-// written into the Kubernetes Secret.
-func caEntries(ctx *plugin.Context, c plugin.CacheStore) ([]plugin.Entry, error) {
+// caEntries loads-or-creates a CA (key + self-signed cert) in store c. By
+// default it emits ca.crt only — the CA private key (ca.key) stays cached for
+// signing and is never written into the Kubernetes Secret. With includeKey the
+// keypair is emitted as tls.crt + tls.key — the shape a cert-manager CA issuer
+// signs with (explicit opt-in; see CertSpec.IncludeKey).
+func caEntries(ctx *plugin.Context, c plugin.CacheStore, includeKey bool) ([]plugin.Entry, error) {
 	caKey, err := c.GetOrCreate("ca.key", func() ([]byte, error) { return certgen.NewCAKey(ctx.Rand) })
 	if err != nil {
 		return nil, errs.Wrap("ca.key", err)
@@ -83,7 +91,24 @@ func caEntries(ctx *plugin.Context, c plugin.CacheStore) ([]plugin.Entry, error)
 	if err != nil {
 		return nil, errs.Wrap("ca.crt", err)
 	}
+	if includeKey {
+		return caIssuerEntries(caCrt, caKey)
+	}
 	return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
+}
+
+// caIssuerEntries shapes a CA keypair for a cert-manager CA issuer: a
+// kubernetes.io/tls data map whose tls.crt + tls.key hold the CA itself. The
+// pair is validated first (parse + public-key match + IsCA) so a corrupt or
+// mismatched CAROOT fails the BUILD, not cluster-side issuance later.
+func caIssuerEntries(caCrt, caKey []byte) ([]plugin.Entry, error) {
+	if err := certgen.ValidateCAPair(caCrt, caKey); err != nil {
+		return nil, errs.Wrap("includeKey", err)
+	}
+	return []plugin.Entry{
+		{Key: "tls.crt", Value: caCrt},
+		{Key: "tls.key", Value: caKey},
+	}, nil
 }
 
 // leafEntries signs a leaf for the spec hosts and emits tls.crt + tls.key. The
