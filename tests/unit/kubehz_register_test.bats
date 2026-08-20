@@ -328,13 +328,41 @@ teardown() {
   assert_output --partial "Could not extract SSH fingerprint"
 }
 
-# ── deregister_cluster: calls DELETE API ─────────────────
+# ── deregister_cluster: resolve-then-delete-by-id ────────
+#
+# The REAL api contract: the list endpoint ignores ?domain= and there is NO
+# DELETE /api/clusters?domain=… route — deregister must resolve the id from
+# the tenant registry (client-side domain filter, oldest-first) and DELETE
+# /api/clusters/<id>. These mocks pin exactly that; a query-string DELETE
+# fails the test. (The previous mocks answered the nonexistent route and
+# pinned the broken contract green.)
 
-@test "deregister_cluster: calls DELETE and succeeds" {
-  local curl_called=""
+# Shared list fixture: newest-first (the api's order), TWO rows for the
+# domain plus an unrelated tenant sibling. Oldest-first resolution must pick
+# cl-old — the row the server binds agent identity to — never .data[0].
+_deregister_list_fixture() {
+  cat <<'EOF'
+{"ok":true,"data":[
+  {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-03-01T00:00:00Z"},
+  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+],"meta":{"page":1,"perPage":500,"total":3}}
+EOF
+}
+
+@test "deregister_cluster: resolves the id and DELETEs /api/clusters/<id> (oldest row)" {
   curl() {
-    # Just succeed silently
-    return 0
+    if [[ " $* " == *" DELETE "* ]]; then
+      [[ "$*" != *"?domain="* ]] \
+        || { echo "query-string DELETE (route does not exist): $*" >&2; return 1; }
+      [[ " $* " == *" https://api.kubehz.dev/api/clusters/cl-old "* ]] \
+        || { echo "DELETE wrong id/path: $*" >&2; return 1; }
+      printf '{"ok":true,"data":{"deleted":true,"id":"cl-old"}}\n200'
+    else
+      [[ "$*" == *"/api/clusters?perPage=500"* ]] \
+        || { echo "unexpected GET: $*" >&2; return 1; }
+      _deregister_list_fixture
+    fi
   }
   export -f curl
 
@@ -345,12 +373,32 @@ teardown() {
 
   run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_success
+  assert_output --partial "removed from the platform"
+  assert_output --partial "cl-old"
 }
 
-# ── deregister_cluster: API failure is silent ────────────
-
-@test "deregister_cluster: API failure still succeeds (non-fatal)" {
+@test "deregister_cluster: no row for the domain reports not-registered (no DELETE)" {
   curl() {
+    [[ " $* " != *" DELETE "* ]] \
+      || { echo "DELETE must not run without a resolved id: $*" >&2; return 1; }
+    echo '{"ok":true,"data":[{"id":"cl-other","domain":"other.example.com","createdAt":"2026-03-01T00:00:00Z"}]}'
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "no cluster is registered for test.kubehz.dev"
+}
+
+@test "deregister_cluster: registry lookup failure returns 1 and never DELETEs" {
+  curl() {
+    [[ " $* " != *" DELETE "* ]] \
+      || { echo "DELETE must not run when the lookup failed: $*" >&2; return 1; }
     return 1
   }
   export -f curl
@@ -358,16 +406,40 @@ teardown() {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
 
   run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
-  assert_success
+  assert_failure
+  assert_output --partial "was not removed"
+}
+
+@test "deregister_cluster: a refused DELETE reports the HTTP status and returns 1" {
+  curl() {
+    if [[ " $* " == *" DELETE "* ]]; then
+      printf '{"ok":false,"data":{"message":"cluster not found"}}\n404'
+    else
+      _deregister_list_fixture
+    fi
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "HTTP 404"
+  assert_output --partial "was not removed"
 }
 
 # ── deregister_cluster: refuses plain-HTTP (no curl) ─────
 
-@test "deregister_cluster: refuses a plain-HTTP apiUrl (no curl)" {
+@test "deregister_cluster: refuses a plain-HTTP apiUrl (no curl, returns 1)" {
   # The KUBEHZ_TOKEN bearer travels on this URL, and deregister skips
   # validate_config (reachable standalone), so it must re-assert HTTPS itself.
+  # The row was not removed, so the function reports failure.
   curl() { echo "curl should not run over plain HTTP" >&2; return 99; }
   export -f curl
 
@@ -377,7 +449,7 @@ teardown() {
   export KUBEHZ_TOKEN="test-token"
 
   run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
-  assert_success
+  assert_failure
   assert_output --partial "must use HTTPS"
 }
 

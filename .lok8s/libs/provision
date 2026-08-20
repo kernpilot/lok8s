@@ -479,10 +479,13 @@ provision::dispatch_destroy() {
     fi
   fi
 
-  # kubehz deregistration: deregister before destroying
+  # kubehz deregistration: deregister before destroying. Best-effort HERE
+  # only — deregister_cluster now returns 1 when the platform row was not
+  # removed, but a dead platform api must not block the driver teardown.
   kubehz::read_config "${cluster_yaml}"
   if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
-    kubehz::deregister_cluster "${domain}" "${cluster_yaml}"
+    kubehz::deregister_cluster "${domain}" "${cluster_yaml}" \
+      || warn "kubehz deregistration failed — the platform registration survives this destroy; run 'lo kubehz deregister' afterwards"
   fi
 
   debug "Destroying ${domain} with kind=${kind}"

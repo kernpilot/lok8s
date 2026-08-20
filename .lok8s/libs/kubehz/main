@@ -410,20 +410,54 @@ kubehz::register_cluster() {
 
 # ── Deregistration ───────────────────────────────────────
 
-# Deregister a cluster from the kubehz API.
-# Called during destroy when access != none.
-# Non-fatal: silently ignores errors.
+# Deregister a cluster from the kubehz API: resolve the platform id for the
+# domain, DELETE /api/clusters/<id>, then retire the hcloud claim key.
+# Called during destroy when access != none, and standalone via
+# `lo kubehz deregister`. Each outcome is reported distinctly — removed /
+# not registered / refused — and the function returns 1 whenever the
+# platform row was NOT removed. (The old form DELETEd
+# /api/clusters?domain=… — a route+method the api does not serve — and
+# `|| true` swallowed the 404, so the row survived every "deregister".)
 # Usage: kubehz::deregister_cluster <domain> <cluster_yaml>
 kubehz::deregister_cluster() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
+  local rc=0
 
   # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
   # validate_config (reachable standalone via `lo kubehz deregister`), so guard
   # each call by its own URL — mirrors register_cluster's standalone re-assert.
-  if http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
-    curl -fsSL -X DELETE "${api_url}/api/clusters?domain=${domain}" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null || true
+  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+    rc=1
+  else
+    local cluster_id="" resolve_rc=0
+    cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
+    if (( resolve_rc == 2 )); then
+      echo "kubehz: no cluster is registered for ${domain} — nothing to remove on the platform."
+    elif (( resolve_rc != 0 )); then
+      error "kubehz: cannot read the cluster registry at ${api_url} — the registration for ${domain} was not removed. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
+      rc=1
+    else
+      # Status + body captured (the re-enroll idiom): a refused delete must
+      # surface with the api's own message, not vanish into `curl -f`.
+      local response http_code
+      if ! response=$(curl -sSL -w $'\n%{http_code}' -X DELETE \
+        "${api_url}/api/clusters/${cluster_id}" \
+        -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}"); then
+        error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
+        rc=1
+      else
+        http_code="${response##*$'\n'}"
+        if [[ "${http_code}" == 2* ]]; then
+          echo "kubehz: cluster ${domain} (${cluster_id}) removed from the platform."
+        else
+          local msg
+          msg=$(jq -r '.data.message // .message // empty' <<<"${response%$'\n'*}" 2>/dev/null) || msg=""
+          error "kubehz: delete refused for ${domain} (${cluster_id}) — HTTP ${http_code}${msg:+: ${msg}}. The registration was not removed."
+          rc=1
+        fi
+      fi
+    fi
   fi
 
   # Best-effort: retire the kubehz claim key from the hcloud account. The name
@@ -439,7 +473,7 @@ kubehz::deregister_cluster() {
     fi
   fi
 
-  debug "Cluster ${domain} deregistered from kubehz"
+  return "${rc}"
 }
 
 # ── Subcommands ──────────────────────────────────────────
@@ -505,8 +539,10 @@ kubehz::deregister() {
     return 1
   fi
 
+  # Outcome reporting (removed / not registered / refused) lives inside
+  # deregister_cluster — no unconditional success line here: the old one
+  # printed "deregistered" over a swallowed 404.
   kubehz::deregister_cluster "${domain}" "${cluster_yaml}"
-  echo "Cluster ${domain} deregistered from kubehz"
 }
 
 # Check kubehz registration status via `lo kubehz status`.
