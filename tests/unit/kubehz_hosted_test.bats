@@ -11,6 +11,9 @@ setup() {
   export -f import
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  # destroy_hosted's HTTPS bearer guard is UNCONDITIONAL (a security gate,
+  # never probe-skipped) — the real helper must be present.
+  source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
 
   # argsh `:args` builtin — stub as no-op
   :args() { :; }

@@ -151,13 +151,13 @@ Rebuild a cluster **from bare metal** (disaster recovery). Orchestrates
 [Disaster Recovery](../guide/recover.md) and [Backups](../guide/backups.md).
 
 ```bash
-lo recover --domain <domain>                 # full recovery (prompts once to confirm)
-lo recover --domain <domain> --dry-run       # preview the rebuild plan; change nothing
-lo recover --domain <domain> --skip-rebuild  # re-provision + verify only
-lo recover --domain <domain> --force         # skip the confirmation prompt
+lo recover <domain>                 # full recovery (prompts once to confirm)
+lo recover <domain> --dry-run       # preview the rebuild plan; change nothing
+lo recover <domain> --skip-rebuild  # re-provision + verify only
+lo recover <domain> --force         # skip the confirmation prompt
 ```
 
-The domain comes from `--domain` (default: the active domain) — there is no positional form.
+Name the target: the positional `<domain>` is the documented form and outranks `--domain` and the active domain — a command that reimages a fleet must not inherit whatever `.active` points at mid-incident. Omitting both falls back to `--domain`, then the active domain.
 
 | Flag | Description |
 |------|-------------|
@@ -361,7 +361,7 @@ A deploy domain follows its `spec.clusterRef` to the real cluster. The `--oidc` 
 Static security-posture audit — read-only and cluster-free.
 
 ```bash
-lo audit [--domain <domain>] [--json]
+lo audit [domain] [--json]
 ```
 
 Scans the domain's specs, secrets hygiene, and rendered targets for posture findings. `--json` emits machine-readable output for CI.

@@ -414,8 +414,9 @@ kubehz::register_cluster() {
 # domain, DELETE /api/clusters/<id>, then retire the hcloud claim key.
 # Called during destroy when access != none, and standalone via
 # `lo kubehz deregister`. Each outcome is reported distinctly — removed /
-# not registered / refused — and the function returns 1 whenever the
-# platform row was NOT removed. (The old form DELETEd
+# not registered / refused — and the function returns 1 whenever REMOVAL
+# FAILED (lookup error, refused delete). An already-absent row is
+# idempotent SUCCESS: the desired end state holds. (The old form DELETEd
 # /api/clusters?domain=… — a route+method the api does not serve — and
 # `|| true` swallowed the 404, so the row survived every "deregister".)
 # Usage: kubehz::deregister_cluster <domain> <cluster_yaml>

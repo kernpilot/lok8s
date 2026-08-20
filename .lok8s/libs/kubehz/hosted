@@ -219,6 +219,10 @@ kubehz::destroy_hosted() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
+  # Same HTTPS guard as every other bearer-carrying kubehz call: a
+  # misconfigured http:// apiUrl must not leak KUBEHZ_TOKEN in clear.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+
   # Resolve through kubehz::resolve_cluster_id (client-side domain filter,
   # oldest-first). The old inline lookup GETed /api/clusters?domain=… — a
   # server filter the api does not guarantee — and took .data[0] from the
