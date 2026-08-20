@@ -76,34 +76,39 @@ EOF
   [ "$status" -ne 0 ] || { echo "garbage parsed as a descriptor: $output" >&2; return 1; }
 }
 
-# ── the hosted-cluster id lookup, per body shape ────────────────────────────
-# The expression lives in .lok8s/libs/kubehz/hosted; it is read from there so the
-# test cannot drift from the code by quietly keeping its own copy.
-_id_expr() {
-  grep -o "jq -r '(\.data?.*empty'" "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted" \
-    | head -1 | sed "s/^jq -r '//; s/'$//"
-}
+# ── the cluster-id lookup, per body shape ───────────────────────────────────
+# The lookup lives in kubehz::resolve_cluster_id (libs/kubehz/main) — hosted
+# destroy and deregister both route through it. Exercised DIRECTLY with a
+# mocked curl per shape, so the test cannot drift from the code by quietly
+# keeping its own copy of the jq expression. A foreign body shape must resolve
+# or report "no row" (rc 2) quietly — never a jq abort ('//' does not rescue a
+# jq ERROR; that abort is how destroy once read a live cluster as "no hosted
+# cluster found").
 
 @test "the cluster-id lookup resolves every body shape without erroring" {
-  local expr; expr="$(_id_expr)"
-  [ -n "${expr}" ] || { echo "could not read the id expression from libs/kubehz/hosted" >&2; return 1; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
   local body want out rc
-  # shape → expected id ('' means "no cluster", which must be quiet, not an error)
+  # shape → expected id ('' means "no row": rc 2 and no output, not an error)
   while IFS='|' read -r body want; do
     [[ -n "${body}" ]] || continue
-    out=$(printf '%s' "${body}" | jq -r "${expr}" 2>&1); rc=$?
-    [ "${rc}" -eq 0 ] || {
-      echo "jq ERRORED (rc=${rc}) on ${body} — '//' does not rescue an error, so" >&2
-      echo "destroy would read this as 'no hosted cluster found':" >&2
-      echo "  ${out}" >&2; return 1; }
-    [ "${out}" = "${want}" ] || {
-      echo "shape ${body}: expected '${want}', got '${out}'" >&2; return 1; }
+    export CURL_BODY="${body}"
+    curl() { printf '%s' "${CURL_BODY}"; }
+    export -f curl
+    rc=0
+    out=$(kubehz::resolve_cluster_id "test.kubehz.dev" "https://api.test") || rc=$?
+    if [[ -n "${want}" ]]; then
+      [ "${rc}" -eq 0 ] || { echo "resolve FAILED (rc=${rc}) on ${body}" >&2; return 1; }
+      [ "${out}" = "${want}" ] || { echo "shape ${body}: expected '${want}', got '${out}'" >&2; return 1; }
+    else
+      [ "${rc}" -eq 2 ] || { echo "shape ${body}: expected rc 2 (no row), got rc=${rc} out='${out}'" >&2; return 1; }
+      [ -z "${out}" ] || { echo "shape ${body}: expected no output, got '${out}'" >&2; return 1; }
+    fi
   done <<'SHAPES'
-{"data":[{"id":"A1"}]}|A1
-{"data":{"id":"B2"}}|B2
-[{"id":"C3"}]|C3
-{"id":"D4"}|D4
+{"data":[{"id":"A1","domain":"test.kubehz.dev"}]}|A1
+{"data":{"id":"B2","domain":"test.kubehz.dev"}}|B2
+[{"id":"C3","domain":"test.kubehz.dev"}]|C3
+{"id":"D4","domain":"test.kubehz.dev"}|D4
 {"data":[]}|
 {}|
 []|

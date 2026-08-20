@@ -602,7 +602,7 @@ kubehz::status() {
   # identity to the OLDEST active row for a domain.
   local row
   row=$(jq -c --arg d "${domain}" \
-    '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
       | sort_by(.createdAt) | first) // empty' <<<"${response}" 2>/dev/null) || row=""
   if [[ -z "${row}" ]]; then
     echo "Status:  not registered (no cluster for ${domain} in this tenant's registry)"
@@ -864,8 +864,11 @@ kubehz::resolve_cluster_id() {
   # desired) to the OLDEST active row for a domain — picking the newest armed
   # the WRONG cluster when a duplicate registration existed (review r1
   # medium). Oldest-first matches the server's binding.
+  # `.data?` (not `.data // .`): `//` does not rescue a jq ERROR, and `.data`
+  # on a bare-list body aborts the whole program before the alternative runs
+  # (the trap the old hosted-destroy lookup documented). `?` suppresses it.
   cluster_id=$(jq -r --arg d "${domain}" \
-    '([.data // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
       | sort_by(.createdAt) | first | .id) // empty' <<<"${response}" 2>/dev/null) || return 1
   [[ -n "${cluster_id}" ]] || return 2
   echo "${cluster_id}"
