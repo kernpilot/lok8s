@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# kubehz LIVE AGENT (the Go agent) — BASE: observe + report only.
+#
+# This is the schema-2 heartbeat producer. It replaces the bash CronJob's beat
+# (never runs alongside it — see the heartbeat-owner interlock below) and adds
+# the live view: sub-minute node/pod/event snapshots from typed informers,
+# plus the desired-state pull loop that makes worker scaling, self-healing and
+# worker upgrades possible when the platform authorizes them.
+#
+# VENDORED from the public kubehz-agent repo's deploy/base, at the digest
+# pinned in deployment.yaml:
+#   https://github.com/kernpilot/kubehz-agent  (deploy/base, deploy/README.md)
+# Vendored, not fetched: `lo` must render and apply without network access to
+# GitHub. When the upstream tree changes, re-vendor this directory and the
+# digest together.
+#
+# TWO DELIBERATE DIFFERENCES from upstream deploy/base:
+#
+#   1. NO namespace.yaml. The `kubehz-system` Namespace and the identity Secret
+#      `kubehz-agent` inside it belong to manifests/agent (the CronJob), which
+#      creates the Namespace and bootstraps the Secret. If this kustomization
+#      owned the Namespace, `kubectl delete -k` — which is exactly how
+#      `lo kubehz deploy` removes the live agent when you switch back to
+#      cronjob mode — would delete the Namespace and take the never-rotated
+#      agent-token with it. Losing that token costs a `lo kubehz re-enroll`.
+#
+#   2. The ConfigMap carries lok8s placeholder tokens (KUBEHZ_API_URL,
+#      CLUSTER_ID) substituted by `lo kubehz deploy`, the same way
+#      manifests/agent/configmap.yaml is.
+#
+# Resource names are kubehz-live-agent*, NOT kubehz-agent*: the CronJob owns
+# the kubehz-agent* SA/RBAC/ConfigMap names with DIFFERENT rules, and reusing
+# them would clobber its identity bootstrap. The only objects the two share are
+# the Namespace and the Secret, and this kustomization writes neither.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - configmap.yaml
+  - deployment.yaml
+
+# IMAGE OVERRIDE. The default is the public GHCR image pinned by digest
+# (deployment.yaml) — nothing to configure for a normal cluster. Override the
+# registry here, keeping the digest, to pull from a mirror or an air-gapped
+# copy:
+#
+# images:
+#   - name: ghcr.io/kernpilot/kubehz-agent
+#     newName: registry.internal.example.com/kubehz-agent
+#     digest: sha256:9aaac7cbba3115d57691767a19bd1aad2695158c192eac8609c5a6e3f809730c

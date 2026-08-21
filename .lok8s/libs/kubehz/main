@@ -10,9 +10,20 @@
 #   libs/kubehz/handover  — control-plane handover, eject target side
 #                           (receive/preseed) + the assess pretty-printer's
 #                           data comes from the api (see kubehz::assess below)
+#   libs/kubehz/deploy    — `lo kubehz deploy`: render + apply the in-cluster
+#                           agent the spec selects, and keep exactly one
+#                           heartbeat producer alive (see its header)
 #
-# The self-hosted heartbeat agent ships as a kustomize dir under
-# libs/kubehz/manifests/agent/ (applied out-of-band — see docs/guide/kubehz.md).
+# TWO in-cluster agents ship as kustomize dirs, and spec.kubehz.agent picks
+# which one owns the heartbeat:
+#   libs/kubehz/manifests/agent/       CronJob kubehz-heartbeat (schema 1) —
+#                                      identity bootstrap + enrollment, always
+#                                      deployed
+#   libs/kubehz/manifests/live-agent/  Deployment kubehz-live-agent (schema 2)
+#                                      — the Go live-view + desired-state agent
+# Deploy them with `lo kubehz deploy`. Never apply both heartbeat producers by
+# hand: the platform stores the snapshot latest-wins, so two producers erase
+# each other (libs/kubehz/deploy explains the interlock).
 # The "managed" access tier is LIVE and subscription-gated (Supporter+): it
 # registers like `registered`, and the kubehz platform's management features
 # (healing policies, capacity watches, desired-state management) activate once
@@ -25,11 +36,13 @@ import ^utils/http
 import ^libs/kubehz/hosted
 import ^libs/kubehz/shared
 import ^libs/kubehz/handover
+import ^libs/kubehz/deploy
 
 main::kubehz() {
   local -a usage=(
     'register|r@destructive'    'Register cluster with kubehz'
     'deregister|d@destructive'  'Remove cluster from kubehz'
+    'deploy@destructive'        'Deploy the in-cluster agent (spec.kubehz.agent)'
     'status|s@readonly'         'Check kubehz registration status'
     'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
@@ -83,7 +96,21 @@ kubehz::read_config() {
   # on when a KUBEHZ_TOKEN identifies the owning tenant (see register_cluster).
   LOK8S_KUBEHZ_CONNECT_TOKEN=$(yq -r '.spec.kubehz.connectHcloudToken // false' "${cluster_yaml}") || return 1
 
+  # Which in-cluster agent owns the heartbeat. Defaults to the bash CronJob —
+  # the agent every existing cluster already runs, so an untouched spec keeps
+  # its current behaviour. `operator` selects the Go live agent instead; the
+  # two never beat together (see libs/kubehz/deploy).
+  # Same shape as `access` above: yq's `//` covers a MISSING key, but a key
+  # written with no value (`agent:`) yields "null", and an empty scalar yields
+  # "". Both mean "not chosen" and must land on the default — otherwise
+  # validate_config refuses a spec whose only sin is a blank line.
+  LOK8S_KUBEHZ_AGENT=$(yq -r '.spec.kubehz.agent // "cronjob"' "${cluster_yaml}") || return 1
+  if [[ "${LOK8S_KUBEHZ_AGENT}" == "null" || -z "${LOK8S_KUBEHZ_AGENT}" ]]; then
+    LOK8S_KUBEHZ_AGENT="cronjob"
+  fi
+
   export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL LOK8S_KUBEHZ_CONNECT_TOKEN
+  export LOK8S_KUBEHZ_AGENT
 }
 
 # ── Validation ───────────────────────────────────────────
@@ -100,6 +127,30 @@ kubehz::validate_config() {
     none|registered|managed) ;;
     *) error "invalid spec.kubehz.access: ${LOK8S_KUBEHZ_ACCESS}"; return 1 ;;
   esac
+  # One value, so a spec can never ask for two heartbeat producers. This is the
+  # first of three interlocks; the other two live in libs/kubehz/deploy (apply
+  # order) and in the CronJob itself (KUBEHZ_HEARTBEAT_OWNER).
+  #
+  # Read through a default: validate_config is reachable without read_config
+  # (callers that set the LOK8S_KUBEHZ_* vars themselves), and an unset agent
+  # means "not chosen", not "invalid" — the same tolerance the shipped default
+  # gives an untouched spec.
+  local agent="${LOK8S_KUBEHZ_AGENT:-cronjob}"
+  case "${agent}" in
+    cronjob|operator) ;;
+    *) error "invalid spec.kubehz.agent: ${agent} (expected cronjob or operator)"; return 1 ;;
+  esac
+  # There is no agent to choose when nothing reports. Refuse the pair up front
+  # rather than deploy an agent that access: none says must not exist.
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" && "${agent}" != "cronjob" ]]; then
+    error "spec.kubehz.agent: ${agent} needs spec.kubehz.access: registered or managed (access: none deploys no agent)"
+    return 1
+  fi
+  # A Space has no cluster of its own, so it has no agent to run in one.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && "${agent}" != "cronjob" ]]; then
+    error "spec.kubehz.agent: ${agent} is not valid with hosting: shared (a Space has no in-cluster agent)"
+    return 1
+  fi
 
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
     error "spec.kubehz.apiUrl is required when hosting: hosted"; return 1
@@ -564,6 +615,14 @@ kubehz::status() {
   echo "Domain:  ${domain}"
   echo "Hosting: ${LOK8S_KUBEHZ_HOSTING}"
   echo "Access:  ${LOK8S_KUBEHZ_ACCESS}"
+  # Which agent the SPEC says owns the heartbeat. `lo kubehz deploy` is what
+  # makes the cluster match it — this line is the intent, not a live probe.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" && "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
+    case "${LOK8S_KUBEHZ_AGENT:-cronjob}" in
+      operator) echo "Agent:   operator (deployment/kubehz-live-agent — live view + desired state)" ;;
+      *)        echo "Agent:   cronjob (cronjob/kubehz-heartbeat — every 5 minutes)" ;;
+    esac
+  fi
   echo "API URL: ${LOK8S_KUBEHZ_API_URL:-<not set>}"
 
   # Space-aware: a shared-hosting domain's status IS its space's status.

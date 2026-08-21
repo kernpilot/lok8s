@@ -1,0 +1,126 @@
+# MANAGED-TIER ACTING RBAC — OPT-IN OVERLAY. Do NOT apply this on a
+# registered-tier (report-only) cluster: it is the permission that lets the
+# agent EDIT MachineDeployment replica counts (worker scaling, P3). Without
+# it the agent still runs fine — the desired-state loop stays report-only and
+# any server-authorized scale attempt fails closed with a Forbidden that is
+# reported (never retried into existence).
+#
+# Scope, deliberately minimal:
+#   - a NAMESPACED Role in kube-system (KubeOne's machine-controller serves
+#     MachineDeployments/Machines only there — spec §3's RBAC delta): if you
+#     move the pools (KUBEHZ_MD_NAMESPACE), move this Role's namespace with
+#     them;
+#   - machinedeployments.cluster.k8s.io (the legacy machine-api group KubeOne
+#     uses, NOT cluster.x-k8s.io): read verbs + patch. Patch covers the two
+#     fields the executors edit — spec.replicas (P3 scaling) and
+#     spec.template.spec.versions.kubelet (P6 worker rolls). No update (patch
+#     is what the executor sends), no create, no delete;
+#   - machines.cluster.k8s.io: read verbs for the machineIssues collector
+#     (surfacing machine-controller provisioning failures on the heartbeat)
+#     and the P5/P6 loops' pool/health/progress reads — PLUS delete, below.
+#     No machinesets;
+#   - ONE ClusterRole at the bottom (pods delete only — the P5 eviction
+#     unwedge; see its own header), the single cluster-scoped write grant in
+#     this overlay. Everything else stays namespaced.
+#
+# ⚠⚠ machines DELETE — the SHARPEST permission this agent holds. ⚠⚠
+# It exists for exactly one purpose: P5 self-healing remediates an unhealthy
+# WORKER machine by deleting its Machine object so machine-controller/
+# MachineSet recreates it (the cluster's own credentials do the actual
+# server churn — the agent still holds no cloud credential). The blast
+# radius is bounded by the executor's hard guardrails (all unit-tested):
+# server-gated (execution.healing + the served policy), never control-plane,
+# storm brake above maxUnhealthy, per-pool cooldown with a fresh-cooldown
+# restart baseline, at most maxUnhealthy disruptions in flight, autoscaler
+# pools refused, unowned machines refused. If you do not want the platform
+# to EVER delete a machine, remove the delete verb below — healing then
+# fails closed with a reported Forbidden and everything else keeps working.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-live-agent-machinedeployments
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups: [cluster.k8s.io]
+    resources: [machinedeployments]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [cluster.k8s.io]
+    resources: [machines]
+    # delete = P5 self-healing ONLY (see the header warning above).
+    verbs: [get, list, watch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-live-agent-machinedeployments
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-live-agent-machinedeployments
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-live-agent
+    namespace: kubehz-system
+---
+# ⚠ pods DELETE (cluster-wide) — the EVICTION UNWEDGE permission. ⚠
+#
+# Exists SOLELY to unwedge evictions of heal-deleted machines' dead nodes:
+# when P5 healing deletes a Machine whose node is truly unreachable (kubelet
+# stopped), machine-controller's eviction retries forever because the pods
+# stuck Terminating on that node can never confirm — the Machine sits
+# deleting indefinitely, i.e. a zombie Hetzner server billing the user. The
+# agent then (executor/unwedge.go) force-deletes EXACTLY those pods so the
+# teardown completes. Hard bounds, all unit-tested:
+#   - only machines the agent ITSELF heal-deleted (in-memory tracking; a
+#     manually-deleted machine is never touched),
+#   - only after KUBEHZ_HEAL_EVICTION_TIMEOUT_SECONDS (default 300) of the
+#     machine sitting in deletion,
+#   - only while the node is still unreachable (Ready Unknown/False) — a
+#     recovered node is left to confirm its own pods,
+#   - only pods ALREADY Terminating on that node (deletionTimestamp set),
+#     each delete guarded by a UID precondition,
+#   - one unwedge attempt per machine, ever.
+#
+# This must be a ClusterRole: the stuck pods span arbitrary namespaces on the
+# dead node, which no namespaced Role can express. It is kept as tight as
+# RBAC allows — delete ONLY (reads come from the base ClusterRole's informer
+# permissions; no create/update/patch, no other resource).
+#
+# Dropping this object (or the verb) disables the unwedge and NOTHING else:
+# healing keeps working, and a wedged teardown is reported (loud warning +
+# heal-action detail) instead of being fixed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubehz-live-agent-eviction-unwedge
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    # delete = P5 eviction unwedge ONLY (see the header warning above).
+    verbs: [delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubehz-live-agent-eviction-unwedge
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubehz-live-agent-eviction-unwedge
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-live-agent
+    namespace: kubehz-system

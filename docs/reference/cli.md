@@ -416,6 +416,8 @@ kubehz platform integration (alias: `lo kh`). Requires `spec.kubehz` in the clus
 ```bash
 lo kubehz register            # register the cluster with the platform
 lo kubehz deregister          # remove it
+lo kubehz deploy              # deploy the in-cluster agent named by spec.kubehz.agent
+lo kubehz deploy --dry-run    # print the rendered manifests, apply nothing
 lo kubehz status              # registration + heartbeat status
 lo kubehz claim-code          # print the one-time claim code for the dashboard
 lo kubehz claim --nonce <v>   # place a dashboard-minted claim nonce for the agent to echo
@@ -424,6 +426,13 @@ lo kubehz join                # mint a node join ticket (hosting: shared)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
 ```
+
+`deploy` renders the agent manifests, substitutes your `apiUrl` and cluster
+domain, and applies them with your current kubeconfig — so point it at the right
+cluster first (`lo use <domain>`). It applies the agent that
+`spec.kubehz.agent` names, and removes the other one, because exactly one agent
+may send heartbeats. Re-run it after you change the value. See the
+[kubehz guide](../guide/kubehz.md#choosing-an-agent).
 
 ### lo kustomize
 
