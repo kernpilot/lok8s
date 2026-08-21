@@ -160,10 +160,11 @@ kubehz::deploy_agent() {
 # ── Render ───────────────────────────────────────────────
 
 # Copy the shipped manifests into <workdir> and substitute the placeholder
-# tokens. Renders the live agent only when the operator agent owns the beat,
-# EXCEPT for teardown: cronjob mode renders the managed overlay too, because
-# `kubectl delete -k` needs the full object set to remove a previous operator
-# install (the managed overlay is a superset of the base).
+# tokens. BOTH trees are always rendered, in either mode: cronjob mode still
+# needs the live-agent tree so `kubectl delete -k` has the full object set to
+# remove a previous operator install. What `access` decides is only WHICH
+# overlay the caller then applies or deletes (base, or managed — a superset).
+# Sets KUBEHZ_LIVE_AGENT_OVERLAY to that path.
 # Usage: kubehz::render_agent <workdir> <domain> <api_url> <owner> <access>
 kubehz::render_agent() {
   local workdir="${1}" domain="${2}" api_url="${3}" owner="${4}" access="${5}"
