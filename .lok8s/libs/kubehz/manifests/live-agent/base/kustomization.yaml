@@ -48,4 +48,4 @@ resources:
 # images:
 #   - name: ghcr.io/kernpilot/kubehz-agent
 #     newName: registry.internal.example.com/kubehz-agent
-#     digest: sha256:9aaac7cbba3115d57691767a19bd1aad2695158c192eac8609c5a6e3f809730c
+#     digest: sha256:5a34f3569671fb2326b4b7e896069947f5680f9bac242e94fc888dc429720873

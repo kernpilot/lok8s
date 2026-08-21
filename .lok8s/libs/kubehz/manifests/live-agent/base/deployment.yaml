@@ -54,7 +54,7 @@ spec:
           # `cosign verify` and a rollback can reason about. Release artifacts
           # (install.yaml on the GitHub Release) carry the released digest;
           # this committed default tracks the last known-good main build.
-          image: ghcr.io/kernpilot/kubehz-agent@sha256:9aaac7cbba3115d57691767a19bd1aad2695158c192eac8609c5a6e3f809730c
+          image: ghcr.io/kernpilot/kubehz-agent@sha256:5a34f3569671fb2326b4b7e896069947f5680f9bac242e94fc888dc429720873
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
