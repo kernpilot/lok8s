@@ -103,6 +103,36 @@ spec:
                   # C stayed in memory only to compute its hash above; drop it now.
                   CLAIM_CODE=""
 
+                  # ── Heartbeat ownership: exactly ONE producer per cluster ──
+                  # Two agents can speak this contract: this CronJob (schema 1)
+                  # and the Go live agent (schema 2, Deployment
+                  # kubehz-live-agent). They must NEVER both beat. The api
+                  # stores lastHeartbeatSnapshot latest-wins, so a schema-1 beat
+                  # lands on top of the live view and blanks every field the
+                  # CronJob does not send — workloads, events, actions,
+                  # machineIssues, inventory, the agent identity — and flips
+                  # expectedIntervalSeconds between 60 s and 300 s, which makes
+                  # `connected` flap. The dashboard would show a live view that
+                  # empties itself every five minutes.
+                  #
+                  # KUBEHZ_HEARTBEAT_OWNER (from kubehz-agent-config, envFrom
+                  # above) is the single in-cluster source of truth for who
+                  # owns the beat. `lo kubehz deploy` writes it from
+                  # spec.kubehz.agent. UNSET means cronjob — an install that
+                  # predates the key keeps beating exactly as before.
+                  #
+                  # When the live agent owns the beat we still do everything
+                  # above this line: the identity Secret bootstrap and the
+                  # agent-register enrollment are THIS agent's job (the Go agent
+                  # only ever reads the Secret, and mints nothing), and they must
+                  # keep running so a lost kubehz-system namespace re-enrolls.
+                  # We stop here, before the snapshot, the heartbeat POST and
+                  # the desired-state poll. Exit 0: this tick did its work.
+                  if [ "${KUBEHZ_HEARTBEAT_OWNER:-cronjob}" = "operator" ]; then
+                    echo "kubehz: identity bootstrapped and enrolled; the live agent (deployment/kubehz-live-agent) owns the heartbeat — this CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator)"
+                    exit 0
+                  fi
+
                   # kubernetesVersion = the SERVER version. The apiserver
                   # /version endpoint returns a single-object JSON with exactly
                   # one "gitVersion", so this extraction is unambiguous. NOTE:

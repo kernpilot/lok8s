@@ -22,6 +22,7 @@ spec:
   kubehz:
     hosting: self                        # self | hosted | shared
     access: registered                   # none | registered | managed
+    agent: cronjob                       # cronjob | operator — which agent beats
     apiUrl: https://api.kubehz.cloud     # required when hosted/shared, or access != none
     connectHcloudToken: false            # opt-in: hand kubehz your HCLOUD_TOKEN (see below)
 ```
@@ -35,12 +36,13 @@ Two independent axes:
 | | `shared` | kubehz runs a control plane shared by many customers and you get namespaces on it, with nodes you register yourself. Requires `apiUrl` and `kind: Kubehz` — see [Spaces](#spaces). |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats — read-only dashboard visibility. |
-| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)** — the platform enforces the tier once the cluster is claimed. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. |
+| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)** — the platform enforces the tier once the cluster is claimed. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. **Acting also needs `agent: operator`** — the default CronJob agent reports, it does not act. |
 
-Plus one opt-in flag:
+Plus two more keys:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
+| `agent` | `cronjob` | Which in-cluster agent sends the heartbeats: the bash **CronJob** or the Go **live agent**. Exactly one of them beats. See [Choosing an agent](#choosing-an-agent). |
 | `connectHcloudToken` | `false` | When `true` **and** a `KUBEHZ_TOKEN` is set, `lo provision` also stores your `HCLOUD_TOKEN` with the platform (encrypted at rest, used only to manage your clusters) so the dashboard can drive provisioning — worker pools, SSH keys. Without it the token is used only locally by `lo` and never sent. A read-only token is stored for account-exact pricing but leaves provisioning locked. |
 
 `apiUrl` is required when `hosting` is `hosted` or `shared`, **or** when
@@ -223,12 +225,139 @@ The **agent-token** — the credential that authenticates heartbeats — never
 leaves the cluster and is never printed by `lo kubehz claim-code` or any other
 command.
 
+## Choosing an agent
+
+Dashboard visibility comes from an in-cluster agent. lok8s ships two, and
+`spec.kubehz.agent` picks which one sends the heartbeats:
+
+| | `cronjob` (default) | `operator` |
+|---|---|---|
+| Workload | CronJob `kubehz-heartbeat` | Deployment `kubehz-live-agent` |
+| What it is | A shell script in a stock `alpine/k8s` image | The Go agent from the public [kubehz-agent](https://github.com/kernpilot/kubehz-agent) repo |
+| Cadence | Every 5 minutes | Within seconds of a change, and at least every minute |
+| Reports | Node status, control-plane component health, certificate expiry, the 24 h [assessment](#assessment-and-handover) | Nodes with capacity and instance type, pod counts by phase, warning events, machine-controller failures, your addon inventory |
+| Can act | No | Yes — worker scaling, self-healing and worker upgrades, when the platform authorizes them |
+| Costs | ~50 m CPU for a few seconds every 5 minutes | ~25 m CPU and 64 Mi resident, always on |
+
+Deploy either one with:
+
+```bash
+lo use my-cluster.example.com   # point the kubeconfig at the cluster
+lo kubehz deploy                # applies the agent your spec names
+lo kubehz deploy --dry-run      # print the manifests instead
+```
+
+Change `spec.kubehz.agent` and re-run `lo kubehz deploy` to switch. The command
+applies the agent you named and stops the other one — differently in each
+direction. Switching to `operator` **keeps** the CronJob and silences it: it
+still bootstraps and enrolls the identity Secret, and it reads the
+`KUBEHZ_HEARTBEAT_OWNER` marker before every beat. Switching to `cronjob`
+**deletes** the live agent's Deployment, because the Go agent reads no marker
+and beats whenever it runs.
+
+::: warning Exactly one agent may beat
+The platform keeps the **latest** heartbeat and nothing older. The two agents
+report different fields, so if both beat, each one erases what the other
+reported: your live view would empty itself every five minutes.
+
+You do not have to police this as long as you switch with `lo kubehz deploy`.
+`spec.kubehz.agent` holds one value, so a spec cannot ask for both; the command
+applies, silences and deletes in an order that leaves no gap in either
+direction, and it stops rather than continues if any step fails; and the
+cluster itself carries the decision as `KUBEHZ_HEARTBEAT_OWNER` in the
+`kubehz-agent-config` ConfigMap, which the CronJob reads before every beat.
+
+That marker is a **one-way** interlock, and it is worth knowing which way. It
+can silence the CronJob lok8s ships — that manifest reads the marker before
+every beat, so applying it by hand while the live agent owns the heartbeat
+starts no second producer. A CronJob you write yourself reads nothing and
+beats. It cannot silence the live agent either: the Go agent has no
+equivalent switch and beats whenever it runs, so what stops it is removing its
+Deployment — which is exactly what `lo kubehz deploy` does before it re-arms
+the CronJob. Apply the live agent's Deployment by hand while the marker says
+`cronjob` and you *will* have two producers. Let the command do the switching.
+:::
+
+### What the live agent gives you
+
+With `agent: operator`, and once you [claim](#claiming) the cluster:
+
+- **Live view.** Node capacity and instance type, pod counts by phase, recent
+  warning events, and machine-controller provisioning failures, pushed within
+  seconds of a change. Pod *names* and namespaces stay in your cluster unless
+  you opt in.
+- **Addon updates in `kubectl`.** The agent reports your lok8s
+  [ClusterInventory](./inventory.md) and writes the platform's answer back onto
+  it, so `kubectl get clusterinventory cluster -o yaml` shows which addons have
+  a newer version. No dashboard needed.
+- **Worker scaling, self-healing and worker upgrades**, when **all** of these
+  hold: your `access` is `managed`, your tenant tier allows acting
+  (Supporter+), and the platform has the feature switched on. The agent asks
+  the platform what it should do and obeys the answer. Nothing local turns
+  acting on — there is no flag for it — and without `access: managed` no acting
+  permission is granted at all.
+
+Acting always runs with **your** cluster's own credentials. kubehz holds no
+credential for your cluster and cannot connect into it; the agent pulls, and
+`kubectl delete namespace kubehz-system` ends it.
+
+::: tip What you give up for now
+While the live agent owns the heartbeat, the platform does not receive
+control-plane component health, certificate expiry, or the 24 h assessment —
+the live agent does not collect them yet, so `lo kubehz assess` will go stale.
+Set `agent: cronjob` and re-run `lo kubehz deploy` to get them back.
+:::
+
+### Permissions the live agent holds
+
+The base install is read-only. It can `get`, `list` and `watch` nodes, pods and
+events, read your `ClusterInventory`, and `get` one Secret by name — its own
+identity Secret. It has one write: `patch` on `clusterinventories/status`, which
+is where the addon-update answer lands. It cannot read pod logs, exec into a
+pod, or read any other Secret.
+
+With `access: managed` it also gets, in `kube-system` only:
+
+- `patch` on `machinedeployments.cluster.k8s.io` — two fields: the replica count
+  (scaling) and the kubelet version (worker upgrades). No `create`, no `delete`.
+- `get`/`list`/`watch` **and `delete`** on `machines.cluster.k8s.io`. The
+  `delete` verb exists for one reason: self-healing removes an unhealthy worker
+  Machine so your MachineSet rebuilds it. It is the sharpest permission the
+  agent holds. Remove that one verb and self-healing fails closed with a
+  reported error, while everything else keeps working.
+- `delete` on pods, cluster-wide. This one exists only to finish a deletion the
+  cluster cannot finish itself: when a healed node is truly dead, the pods stuck
+  `Terminating` on it can never confirm their eviction, so the machine sits in
+  deletion and the server keeps billing you. The agent force-deletes exactly
+  those pods, once per machine, and only while the node is still unreachable.
+
+Every one of these is documented at the rule in
+[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/56ccd9b370066b2b581bd97733e988a856df8857/deploy/managed/rbac-managed.yaml),
+and lok8s ships that file byte-identical to the agent's own repo — the
+permissions you grant are the ones the public source documents. That link
+points at the exact commit lok8s vendored, which is what makes
+"byte-identical" checkable: the SHA-256 of both vendored files is recorded in
+`.lok8s/libs/kubehz/manifests/live-agent/UPSTREAM.sha256`, and
+`sha256sum --check UPSTREAM.sha256` from that directory verifies it.
+
+The image is `ghcr.io/kernpilot/kubehz-agent`, pinned by digest and signed. To
+check what you are about to run:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/kernpilot/kubehz-agent/\.github/workflows/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/kernpilot/kubehz-agent@sha256:<the digest in the manifest>
+```
+
 ## The heartbeat agent
 
-Dashboard visibility comes from a small in-cluster agent: a CronJob
-`kubehz-heartbeat` in the `kubehz-system` namespace that runs **every five
-minutes** and POSTs a status snapshot to
-`/api/clusters/<domain>/heartbeat`. Properties worth knowing:
+The default agent is a CronJob `kubehz-heartbeat` in the `kubehz-system`
+namespace that runs **every five minutes** and POSTs a status snapshot to
+`/api/clusters/<domain>/heartbeat`. It also owns the cluster's identity, which
+is why it stays deployed even when the live agent takes over the heartbeat: it
+creates the identity Secret and enrolls it, and the live agent only reads that
+Secret. Properties worth knowing:
 
 - **Self-bootstrapping identity.** On each run the agent ensures one Secret,
   `kubehz-agent` in `kubehz-system`, holding a self-generated agent-token `A`
@@ -289,21 +418,24 @@ omits its component instead of guessing, a control plane without static
 pods (managed/external) simply reports fewer components, and the heartbeat
 itself never fails because a probe did.
 
-The agent manifests ship with lok8s as a kustomize directory at
-`.lok8s/libs/kubehz/manifests/agent/`. Deploying it is templating two
-values into the ConfigMap and applying:
+Deploy it with `lo kubehz deploy`, which reads `spec.kubehz.agent`, substitutes
+your `apiUrl` and cluster domain, and applies the result with your current
+kubeconfig:
 
 ```bash
-agent=$(mktemp -d)
-cp -r .lok8s/libs/kubehz/manifests/agent/* "$agent"/
-sed -i "s|KUBEHZ_API_URL_PLACEHOLDER|https://api.kubehz.cloud|g" "$agent/configmap.yaml"
-sed -i "s|CLUSTER_ID_PLACEHOLDER|my-cluster.example.com|g" "$agent/configmap.yaml"
-kubectl apply -k "$agent"
+lo use my-cluster.example.com
+lo kubehz deploy
 ```
 
 On its first run the agent creates its identity Secret, self-registers, and
 starts beating. Then read the claim code with `lo kubehz claim-code` and paste
 it into the dashboard to [claim](#claiming) the cluster.
+
+The manifests ship with lok8s as kustomize directories —
+`.lok8s/libs/kubehz/manifests/agent/` (CronJob) and
+`.lok8s/libs/kubehz/manifests/live-agent/` (live agent, base and managed) — so
+you can read exactly what `deploy` applies, or render it first with
+`lo kubehz deploy --dry-run`.
 
 ## Status and deregistration
 
@@ -334,11 +466,31 @@ anonymously and you [claim](#claiming) the cluster afterwards.
 
 Deregistering deletes the platform cluster record and, when `HCLOUD_TOKEN`
 is set, the `kubehz-claim-<domain>` SSH key from your Hetzner Cloud
-account. The in-cluster agent survives — to remove it as well:
+account. The in-cluster agents survive — to remove them as well:
 
 ```bash
 kubectl delete namespace kubehz-system
+kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/part-of=kubehz
+kubectl -n kube-system delete role,rolebinding -l app.kubernetes.io/part-of=kubehz
 ```
+
+All three are needed. Both agents run in `kubehz-system`, but neither keeps all
+of its RBAC there: the cluster-scoped roles go in the second command, and both
+agents also hold a namespaced `Role`/`RoleBinding` in **`kube-system`** — the
+CronJob's pod-list and assessment reads (`kubehz-agent`), and, at
+`access: managed`, the MachineDeployment and Machine grants
+(`kubehz-live-agent-machinedeployments`). Those survive the first two commands.
+
+After the three, nothing labelled `app.kubernetes.io/part-of=kubehz` is left:
+
+```bash
+kubectl get clusterrole,clusterrolebinding -l app.kubernetes.io/part-of=kubehz
+kubectl get role,rolebinding -A -l app.kubernetes.io/part-of=kubehz
+```
+
+Both should print `No resources found`. If you moved the worker pools out of
+`kube-system` with `KUBEHZ_MD_NAMESPACE`, the managed `Role` moved with them —
+the `-A` query above finds it wherever it is.
 
 ## Assessment and handover
 
@@ -397,6 +549,28 @@ A `4xx` from the API in those logs usually means the agent could not register
 or authenticate: a `401` is a missing or rejected agent-token, a `404` means the
 cluster is not registered yet. The agent self-registers on its first run and
 retries every tick, so a transient API outage clears itself.
+
+**No heartbeats, and you set `agent: operator`?** Read the live agent instead:
+
+```bash
+kubectl -n kubehz-system get deploy kubehz-live-agent
+kubectl -n kubehz-system logs deploy/kubehz-live-agent
+```
+
+An `ImagePullBackOff` means the node cannot reach `ghcr.io` — mirror the image
+and override the registry in the manifest, keeping the digest. A `401` means the
+agent-token was rejected: run `lo kubehz re-enroll`. If the Deployment is missing
+entirely, run `lo kubehz deploy` again.
+
+To confirm the CronJob really has stood down:
+
+```bash
+kubectl -n kubehz-system get configmap kubehz-agent-config \
+  -o jsonpath='{.data.KUBEHZ_HEARTBEAT_OWNER}'   # must print: operator
+```
+
+If that prints `cronjob` while the live agent is running, both are beating. Run
+`lo kubehz deploy` to settle it.
 
 **Registration failed during provisioning?** Provisioning no longer depends on
 it — a self-hosted cluster registers from inside, once the agent is deployed.

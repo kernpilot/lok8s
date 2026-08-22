@@ -34,6 +34,7 @@ spec:
   kubehz:                                 # kubehz platform integration (optional)
     hosting: self | hosted | shared       # who runs the control plane
     access: none | registered | managed   # kubehz visibility
+    agent: cronjob | operator             # which in-cluster agent owns the heartbeat
     apiUrl: https://api.kubehz.cloud      # required when hosting=hosted|shared or access!=none
     space:                                # hosting: shared only (kind: Kubehz)
       slug: acme                          # namespace name; defaults to the domain's first label
@@ -65,6 +66,7 @@ spec:
 | `spec.bootstrap` | no | `[cilium]` | Ordered list of infra addons (default applied by framework bootstrap when omitted) |
 | `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it), `hosted` (kubehz runs it; with `kind: Lo` also requires `spec.runner`), or `shared` (a kubehz Space — namespaces on a shared plane, nodes you register; requires `kind: Kubehz`) |
 | `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
+| `spec.kubehz.agent` | no | `cronjob` | Which in-cluster agent owns the heartbeat: `cronjob` (the bash CronJob — node status, control-plane health, certificate expiry, every 5 minutes) or `operator` (the Go live agent — live view within seconds, plus worker scaling, self-healing and worker upgrades where your tier allows). Exactly one of them beats; `lo kubehz deploy` applies the one you name. Needs `access: registered` or `managed`, and is not valid with `hosting: shared`. See the [kubehz guide](../guide/kubehz.md#choosing-an-agent) |
 | `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting` is `hosted` or `shared`, or `access != none`; must be HTTPS |
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
