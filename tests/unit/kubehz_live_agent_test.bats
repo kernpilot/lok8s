@@ -298,6 +298,25 @@ _stub_yq() {
   assert_output --partial "still carry a placeholder"
 }
 
+@test "render: a placeholder scan that ERRORS refuses the render, like one that found something" {
+  # grep exits 1 for "matched nothing" and 2 for "the scan itself failed".
+  # Reading the two the same way turns a check that could not run into a check
+  # that passed — and this is the check that keeps an unsubstituted CLUSTER_ID
+  # out of a customer cluster.
+  _source_deploy
+  local work="${BATS_TEST_TMPDIR}/r7"
+  mkdir -p "${work}"
+
+  grep() { echo "grep: ${work}: Permission denied" >&2; return 2; }
+  export -f grep
+
+  run kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  unset -f grep
+  assert_failure
+  assert_output --partial "could not scan the rendered manifests"
+  assert_output --partial "Permission denied"
+}
+
 @test "render: both rendered trees are valid kustomizations" {
   _source_deploy
   local work="${BATS_TEST_TMPDIR}/r4"
@@ -590,6 +609,53 @@ _stub_kubectl_log() {
   assert_output --partial "apply -k ${work}/live-agent/managed"
 }
 
+# Both drain probes capture stdout AND stderr, because the error text is what
+# makes their messages useful. That makes stderr chatter indistinguishable from
+# a pod unless the capture is parsed: `kubectl get pods -o name` writes one
+# `pod/<name>` line per pod to STDOUT, and an apiserver `Warning:` — a
+# deprecation, a finalizer nudge — to stderr, with exit status 0 either way.
+# One warning line used to read as "a pod is running" in both probes.
+_stub_kubectl_warns() {
+  export STUB_KUBECTL_WARNING="${1}"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) echo "${STUB_KUBECTL_WARNING}" >&2; return 0 ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+  export STUB_SLEEP_LOG="${BATS_TEST_TMPDIR}/slept"
+  : > "${STUB_SLEEP_LOG}"
+  sleep() { echo "slept $*" >> "${STUB_SLEEP_LOG}"; }
+  export -f sleep
+}
+
+@test "waits: an apiserver Warning is not an in-flight heartbeat pod" {
+  # Fail-soft direction. The old parse cost the deploy the whole drain window
+  # and then warned about a heartbeat pod that was never running — a message
+  # that sends an operator looking for a pod that does not exist.
+  _source_deploy
+  _stub_kubectl_warns 'Warning: v1 ComponentStatus is deprecated in v1.19+'
+
+  run kubehz::wait_heartbeat_idle
+  assert_success
+  assert_output ""
+  [ ! -s "${STUB_SLEEP_LOG}" ] || fail "the probe waited on a warning: $(cat "${STUB_SLEEP_LOG}")"
+}
+
+@test "waits: an apiserver Warning is not a live-agent pod that will not terminate" {
+  # Same parse, higher stakes. This wait is FAIL-HARD, so one warning line on
+  # stderr aborted the whole switch and told the operator to force-delete a pod
+  # that had already gone.
+  _source_deploy
+  _stub_kubectl_warns 'Warning: metadata.finalizers: "foregroundDeletion": prefer a domain-qualified finalizer name'
+
+  run kubehz::wait_live_agent_gone
+  assert_success
+  assert_output ""
+  [ ! -s "${STUB_SLEEP_LOG}" ] || fail "the probe waited on a warning: $(cat "${STUB_SLEEP_LOG}")"
+}
+
 @test "deploy_agent: refuses hosting: shared and access: none" {
   _source_deploy
   export LOK8S_KUBEHZ_HOSTING="shared" LOK8S_KUBEHZ_ACCESS="none"
@@ -752,6 +818,66 @@ _bindings() {
   [ "${#lines[@]}" -eq 4 ]
 }
 
+# A `.rules` list is not the only place a ClusterRole's permissions can come
+# from. `aggregationRule` leaves `.rules` exactly as committed and has the RBAC
+# controller FILL IT IN AT RUNTIME from every ClusterRole matching the
+# selector — and `cluster-admin` ships with the label
+# `kubernetes.io/bootstrapping: rbac-defaults` and `*` on apiGroups, resources
+# and verbs, so a four-line selector is total escalation.
+#
+# Every guard above reads the STATIC `.rules`, so an aggregated role is
+# invisible to all of them at once: it adds no rule line, changes no rule
+# count, moves no digest, adds no file, and binds nothing new. The shape of the
+# document is the only thing left that can see it — so pin the shape. A Role or
+# ClusterRole may carry these four keys and no fifth, whatever RBAC grows next.
+@test "rbac: no Role or ClusterRole may carry a field beyond its own rules" {
+  local pair overlay expected line
+  for pair in base:2 managed:4; do
+    overlay="${pair%%:*}"
+    expected="${pair##*:}"
+    run bash -c "command kustomize build '${LIVE_DIR}/${overlay}' | command yq -r 'select(.kind==\"ClusterRole\" or .kind==\"Role\") | .metadata.name + \"|\" + ([keys[]] | sort | join(\",\"))' | command grep -v '^---\$'"
+    assert_success
+    for line in "${lines[@]}"; do
+      [ "${line#*|}" = "apiVersion,kind,metadata,rules" ] || fail \
+        "${overlay}: ${line} — a Role/ClusterRole carries a field beyond apiVersion/kind/metadata/rules. If that field is 'aggregationRule', the RBAC controller fills .rules at runtime from cluster-admin and every rule pin in this file still passes."
+    done
+    # …and the roles counted are the roles that exist, so an overlay that
+    # rendered no role at all could not make the loop above vacuous.
+    [ "${#lines[@]}" -eq "${expected}" ] || fail \
+      "${overlay}: expected ${expected} Role/ClusterRole documents, got ${#lines[@]}"
+  done
+}
+
+@test "rbac: neither live-agent kustomization may PATCH what it renders" {
+  # UPSTREAM.sha256 pins rbac*.yaml; the kustomizations that ASSEMBLE them are
+  # not pinned, and a kustomization can rewrite any field of any resource
+  # downstream of it. `patches:` bolting an aggregationRule onto the ClusterRole
+  # is the sharpest version and touches no pinned byte at all.
+  #
+  # So the two kustomizations are held to the keys that cannot rewrite a
+  # rendered object:
+  #   apiVersion, kind — the header;
+  #   resources        — names files that are either digest-pinned or covered
+  #                      by the file inventory above;
+  #   images           — the one documented override (mirror/air-gap), and the
+  #                      image it can change is pinned by the pod-spec test
+  #                      below, which renders THROUGH kustomize.
+  # patches, patchesStrategicMerge, patchesJson6902, replacements, components,
+  # transformers, the generators and the label/name transformers all fail here.
+  # Widening this list is a review decision, which is exactly the point.
+  local overlay key
+  for overlay in base managed; do
+    run bash -c "command yq -r '[keys[]] | sort | join(\",\")' '${LIVE_DIR}/${overlay}/kustomization.yaml'"
+    assert_success
+    for key in ${output//,/ }; do
+      case "${key}" in
+        apiVersion | kind | resources | images) ;;
+        *) fail "${overlay}/kustomization.yaml carries '${key}' — only apiVersion/kind/resources/images may appear here, because anything else can rewrite a rendered object without touching a digest-pinned file" ;;
+      esac
+    done
+  done
+}
+
 @test "rbac: cross-check the pin against a local upstream checkout, when there is one" {
   local upstream="${_PROJECT_ROOT}/../_standalone/kubehz-agent/deploy"
   [ -d "${upstream}" ] || skip "no kubehz-agent checkout beside lok8s — this is a developer convenience; the always-on digest pin above is the guard"
@@ -780,7 +906,81 @@ _bindings() {
   refute_output --partial ":main"
 }
 
-# ══ 7. The default is robust, not just absent ═════════════════════════════
+# ══ 7. The pod spec (what the agent may do ON THE NODE) ═══════════════════
+
+# Everything above pins what the agent may ask the APISERVER for. None of it
+# says anything about what its pod may do on the NODE, and the two are not the
+# same risk: `privileged: true`, `hostPID: true`, `runAsUser: 0` and a hostPath
+# mount of /etc/kubernetes need no RBAC whatsoever — and on a kubeadm or
+# KubeOne control-plane node that path holds admin.conf, which is cluster-admin
+# in a file. Until this section existed the only assertion about deployment.yaml
+# in this entire file was its image.
+#
+# The pod spec is therefore pinned WHOLE, as flattened `path=value` leaves:
+# every field that is there, with its value, and nothing else. Positive, not a
+# blacklist — the dangerous field that matters next is the one nobody has
+# thought to forbid yet, and a new leaf fails the count below by default.
+_podspec() {
+  local overlay="${1}"
+  command kustomize build "${overlay}" \
+    | command yq -r 'select(.kind=="Deployment") | .spec.template.spec' \
+    | command yq -r '[.. | select(tag!="!!map" and tag!="!!seq")
+        | (path | join(".")) + "=" + (. | tostring)] | sort | .[]'
+}
+
+@test "pod: the rendered pod spec is pinned field for field, in BOTH overlays" {
+  local overlay
+  for overlay in base managed; do
+    run _podspec "${LIVE_DIR}/${overlay}"
+    assert_success
+
+    # Identity, and the one Secret key the agent needs — read-only, by name.
+    assert_line "serviceAccountName=kubehz-live-agent"
+    assert_line "automountServiceAccountToken=true"
+    assert_line "volumes.0.name=agent-token"
+    assert_line "volumes.0.secret.secretName=kubehz-agent"
+    assert_line "volumes.0.secret.items.0.key=agent-token"
+    assert_line "volumes.0.secret.items.0.path=agent-token"
+    assert_line "volumes.0.secret.defaultMode=256" # 0400
+    assert_line "containers.0.volumeMounts.0.name=agent-token"
+    assert_line "containers.0.volumeMounts.0.mountPath=/var/run/secrets/kubehz"
+    assert_line "containers.0.volumeMounts.0.readOnly=true"
+
+    # Pod-level hardening: non-root, and the runtime's seccomp profile.
+    assert_line "securityContext.runAsNonRoot=true"
+    assert_line "securityContext.runAsUser=65532"
+    assert_line "securityContext.runAsGroup=65532"
+    assert_line "securityContext.fsGroup=65532"
+    assert_line "securityContext.seccompProfile.type=RuntimeDefault"
+
+    # Container-level hardening: no escalation, no writable root, no caps.
+    assert_line "containers.0.name=agent"
+    assert_line "containers.0.securityContext.allowPrivilegeEscalation=false"
+    assert_line "containers.0.securityContext.readOnlyRootFilesystem=true"
+    assert_line "containers.0.securityContext.runAsNonRoot=true"
+    assert_line "containers.0.securityContext.runAsUser=65532"
+    assert_line "containers.0.securityContext.capabilities.drop.0=ALL"
+
+    # The rest: config source, image, pull policy, resource envelope.
+    assert_line "containers.0.envFrom.0.configMapRef.name=kubehz-live-agent-config"
+    assert_line --regexp '^containers\.0\.image=ghcr\.io/kernpilot/kubehz-agent@sha256:[0-9a-f]{64}$'
+    assert_line "containers.0.imagePullPolicy=IfNotPresent"
+    assert_line "containers.0.resources.requests.cpu=25m"
+    assert_line "containers.0.resources.requests.memory=64Mi"
+    assert_line "containers.0.resources.limits.cpu=200m"
+    assert_line "containers.0.resources.limits.memory=256Mi"
+
+    # THE GUARD. Twenty-eight leaves, and the twenty-eight above are all of
+    # them. A second container, a second volume, an added env var, `hostPID:
+    # true`, `hostNetwork: true`, `hostIPC: true`, `privileged: true`, a
+    # hostPath — every one of those is a twenty-ninth line, and fails here
+    # without anyone having had to predict which one it would be.
+    [ "${#lines[@]}" -eq 28 ] || fail \
+      "${overlay}: the pod spec has ${#lines[@]} leaf fields, expected 28 — a field was added or removed:"$'\n'"${output}"
+  done
+}
+
+# ══ 8. The default is robust, not just absent ═════════════════════════════
 
 @test "spec: an empty or null spec.kubehz.agent falls back to cronjob" {
   # yq's `//` covers a MISSING key. A key written with no value (`agent:`)

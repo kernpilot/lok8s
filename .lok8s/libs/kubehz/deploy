@@ -238,9 +238,20 @@ kubehz::render_agent() {
   # CLUSTER_ID would beat under a nonexistent cluster id, and an unsubstituted
   # owner would read as neither "cronjob" nor "operator" — which the CronJob's
   # guard treats as cronjob, silently arming a second producer.
-  local leftovers
-  leftovers=$(grep -rl 'PLACEHOLDER' "${workdir}" 2>/dev/null) || leftovers=""
-  if [[ -n "${leftovers}" ]]; then
+  #
+  # grep's three exit statuses have to stay three: 0 matched, 1 matched
+  # nothing, 2-or-more THE SCAN ITSELF FAILED (an unreadable file, a bad
+  # option, a broken locale). Only 1 means clean. Folding the error status into
+  # "no placeholders found" is how an unsubstituted CLUSTER_ID reaches a
+  # cluster — the render would report success on the strength of a check that
+  # never ran, which is the one thing this check exists to make impossible.
+  local leftovers scan_rc=0
+  leftovers=$(grep -rl 'PLACEHOLDER' "${workdir}" 2>&1) || scan_rc=$?
+  if (( scan_rc > 1 )); then
+    error "kubehz: could not scan the rendered manifests for leftover placeholders (grep exited ${scan_rc}: ${leftovers//$'\n'/ }) — refusing to apply, because a scan that FAILED is not a scan that passed"
+    return 1
+  fi
+  if (( scan_rc == 0 )) && [[ -n "${leftovers}" ]]; then
     error "kubehz: rendered manifests still carry a placeholder — refusing to apply:"
     while IFS= read -r file; do
       [[ -z "${file}" ]] || printf '  %s\n' "${file#"${workdir}/"}" >&2
@@ -368,7 +379,7 @@ kubehz::deploy_apply() {
 # schema-1 beat overlapping the live agent's first, which the live agent
 # overwrites within a minute — not a standing second producer.
 kubehz::wait_heartbeat_idle() {
-  local waited=0 out rc
+  local waited=0 out rc running
   while (( waited < KUBEHZ_HEARTBEAT_DRAIN_SECONDS )); do
     out=$(kubectl -n kubehz-system get pods -l app=kubehz-heartbeat \
       --field-selector=status.phase=Running -o name 2>&1); rc=$?
@@ -379,7 +390,14 @@ kubehz::wait_heartbeat_idle() {
       warn "kubehz: could not check for an in-flight heartbeat pod (${out//$'\n'/ }) — continuing; the live agent overwrites a stray schema-1 beat within a minute"
       return 0
     fi
-    [[ -n "${out//[[:space:]]/}" ]] || return 0
+    # Count the POD LINES, not the capture. `-o name` writes one `pod/<name>`
+    # line per running pod to stdout and nothing else, so with rc 0 anything
+    # else in this capture arrived on stderr — apiserver chatter such as a
+    # deprecation `Warning:`, which is not a pod. Reading the raw capture made
+    # one such line cost the whole drain window and then warn, misleadingly,
+    # about a heartbeat pod that was never running.
+    running=$(printf '%s\n' "${out}" | grep '^pod/') || running=""
+    [[ -n "${running}" ]] || return 0
     if (( waited == 0 )); then
       echo "kubehz: waiting for the in-flight heartbeat pod to finish before starting the live agent…"
     fi
@@ -406,13 +424,18 @@ kubehz::wait_heartbeat_idle() {
 # the whole drain window to clear), and if the window ends on a failed probe
 # the command refuses with that reason rather than the timeout one.
 kubehz::wait_live_agent_gone() {
-  local waited=0 out rc probe_error=""
+  local waited=0 out rc running probe_error=""
   while (( waited < KUBEHZ_LIVE_AGENT_DRAIN_SECONDS )); do
     out=$(kubectl -n kubehz-system get pods \
       -l app.kubernetes.io/component=live-view -o name 2>&1); rc=$?
     if (( rc == 0 )); then
       probe_error=""
-      [[ -n "${out//[[:space:]]/}" ]] || return 0
+      # Only the `pod/<name>` lines are pods — see wait_heartbeat_idle. Here
+      # the cost of reading the raw capture is higher than a wasted wait: a
+      # single apiserver `Warning:` on stderr would have failed the deploy
+      # outright, claiming a pod that will not terminate.
+      running=$(printf '%s\n' "${out}" | grep '^pod/') || running=""
+      [[ -n "${running}" ]] || return 0
     else
       # Never read an error as "zero pods". Warn on the first one so a broken
       # kubeconfig is visible immediately instead of after a silent wait.

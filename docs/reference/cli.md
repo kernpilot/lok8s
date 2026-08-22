@@ -430,15 +430,21 @@ lo kubehz handover            # control-plane handover (receive/preseed on the e
 `deploy` renders the agent manifests, substitutes your `apiUrl` and cluster
 domain, and applies them with your current kubeconfig — so point it at the right
 cluster first (`lo use <domain>`). It applies the agent that
-`spec.kubehz.agent` names, and removes the other one, because exactly one agent
-may send heartbeats. Re-run it after you change the value. It waits for the
-switch to be real — for the new agent to be `Ready`, or for the removed one's
-pod to be gone — and fails instead of continuing if a step does not complete,
-or if it cannot see whether the step completed. So it never starts the second
-producer itself: it either finishes the switch or stops with the cluster in the
-single-agent state it was already in. Extend the waits with
-`KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS` and `KUBEHZ_LIVE_AGENT_DRAIN_SECONDS` (both
-120 by default) when a cold image pull or a slow link needs longer. See the
+`spec.kubehz.agent` names and stops the other one, because exactly one agent
+may send heartbeats. The two directions stop it differently: switching to
+`operator` **keeps** the CronJob — it still bootstraps and enrolls the identity
+Secret — and silences it through the `KUBEHZ_HEARTBEAT_OWNER` marker it reads
+before every beat; switching to `cronjob` **deletes** the live agent's
+Deployment, because the Go agent reads no marker and beats whenever it runs.
+Re-run it after you change the value. It waits for the switch to be real — for
+the new agent to be `Ready`, or for the deleted one's pod to be gone — and
+fails instead of continuing if a step does not complete, or if it cannot see
+whether the step completed. So it never starts the second producer itself: it
+either finishes the switch or stops with the cluster in the single-agent state
+it was already in. Extend the waits with `KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS`
+(Ready, 120 s), `KUBEHZ_LIVE_AGENT_DRAIN_SECONDS` (the live agent's pod is
+gone, 120 s) and `KUBEHZ_HEARTBEAT_DRAIN_SECONDS` (an in-flight CronJob pod has
+finished, 130 s) when a cold image pull or a slow link needs longer. See the
 [kubehz guide](../guide/kubehz.md#choosing-an-agent).
 
 ### lo kustomize

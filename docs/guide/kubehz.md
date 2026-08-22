@@ -248,7 +248,12 @@ lo kubehz deploy --dry-run      # print the manifests instead
 ```
 
 Change `spec.kubehz.agent` and re-run `lo kubehz deploy` to switch. The command
-applies the agent you named and removes the other one.
+applies the agent you named and stops the other one — differently in each
+direction. Switching to `operator` **keeps** the CronJob and silences it: it
+still bootstraps and enrolls the identity Secret, and it reads the
+`KUBEHZ_HEARTBEAT_OWNER` marker before every beat. Switching to `cronjob`
+**deletes** the live agent's Deployment, because the Go agent reads no marker
+and beats whenever it runs.
 
 ::: warning Exactly one agent may beat
 The platform keeps the **latest** heartbeat and nothing older. The two agents
@@ -257,10 +262,10 @@ reported: your live view would empty itself every five minutes.
 
 You do not have to police this as long as you switch with `lo kubehz deploy`.
 `spec.kubehz.agent` holds one value, so a spec cannot ask for both; the command
-applies and removes in an order that leaves no gap in either direction, and it
-stops rather than continues if any step fails; and the cluster itself carries
-the decision as `KUBEHZ_HEARTBEAT_OWNER` in the `kubehz-agent-config` ConfigMap,
-which the CronJob reads before every beat.
+applies, silences and deletes in an order that leaves no gap in either
+direction, and it stops rather than continues if any step fails; and the
+cluster itself carries the decision as `KUBEHZ_HEARTBEAT_OWNER` in the
+`kubehz-agent-config` ConfigMap, which the CronJob reads before every beat.
 
 That marker is a **one-way** interlock, and it is worth knowing which way. It
 can silence the CronJob lok8s ships — that manifest reads the marker before
