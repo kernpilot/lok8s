@@ -334,8 +334,9 @@ audit::check_cilium() {
 
 # Publicly-exposed endpoints — NodePort Services (reachable on every node),
 # LoadBalancer Services, and HTTPRoutes without a default-Deny SecurityPolicy
-# (IP-allowlist) carve-out. Scans the cluster's own targets + any `lo build`
-# artifacts. Fail-soft: nothing to scan → unknown.
+# (IP-allowlist) carve-out, plus route-level policies that silently CANCEL such
+# a carve-out (see audit::_secpol_scan). Scans the cluster's own targets + any
+# `lo build` artifacts. Fail-soft: nothing to scan → unknown.
 audit::check_exposed() {
   local domain="${1}" domain_dir="${2}" spec_file="${3}" kind="${4}" provider="${5}"
   local id="exposed-endpoints" title="Publicly-exposed endpoints"
@@ -353,11 +354,37 @@ audit::check_exposed() {
   # word (NodePort, not NodePortXyz) without the GNU-only `\b`, which is
   # undefined under busybox/BSD grep — where a silently-failing pattern would be
   # a security-tool false-pass. See audit::_grep_count.
-  local nodeport lb routes secpol_deny=0
+  local nodeport lb routes deny_policies open_policies detail remedy secpol_deny=0
   nodeport=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*NodePort([^[:alnum:]_]|$)' "${files[@]}")
   lb=$(audit::_grep_count '^[[:space:]]*type:[[:space:]]*LoadBalancer([^[:alnum:]_]|$)' "${files[@]}")
   routes=$(audit::_grep_count '^[[:space:]]*kind:[[:space:]]*HTTPRoute([^[:alnum:]_]|$)' "${files[@]}")
-  grep -qsE 'defaultAction:[[:space:]]*Deny' "${files[@]}" 2>/dev/null && secpol_deny=1
+  read -r deny_policies open_policies < <(audit::_secpol_scan "${files[@]}")
+  (( deny_policies > 0 )) && secpol_deny=1
+
+  # The deny is only a carve-out if nothing quietly cancels it. A route-level
+  # SecurityPolicy without `mergeType` REPLACES the gateway-wide one for every
+  # route it selects, so the allowlist reads fine in the manifests and is gone
+  # at runtime — the exact shape this check used to score as a clean pass.
+  # The finding names its own blind spot (see audit::_secpol_scan): the counts
+  # are not correlated by gateway attachment, so it can over-report.
+  #
+  # A NodePort found at the same time is reported WITH the override, not
+  # swallowed by it. They are independent holes fixed by different edits, and
+  # this branch used to `return 0` straight past the NodePort — the operator
+  # patched the mergeType, re-ran the audit, and only then learnt about the
+  # second hole. One finding per check id is the report's contract (the
+  # renderers and _score walk a flat list, and duplicate ids would double-count
+  # a single check), so the two share one finding rather than one branch.
+  if (( deny_policies > 0 && open_policies > 0 )); then
+    detail="${open_policies} route-level SecurityPolicy(ies) carry no usable mergeType, so each REPLACES the gateway-wide default-Deny for the routes it selects — the allowlist survives in the manifests and is gone at runtime. Not correlated by gateway: confirm the flagged policies select routes attached to the Gateway that carries the deny."
+    remedy="Set 'mergeType: StrategicMerge' (or 'JSONMerge') on every route-level SecurityPolicy (needs Envoy Gateway v1.8+) so it merges into the Gateway's policy instead of replacing it. No other value merges — the CRD has no enum, so a typo is accepted and silently replaces."
+    if (( nodeport > 0 )); then
+      detail+=" SEPARATELY, ${nodeport} manifest(s) declare a NodePort Service, reachable on EVERY node's IP — that one bypasses the gateway and its allowlist outright, so fixing the mergeType does not close it."
+      remedy+=" Then handle the NodePort Service(s) as their own fix: route through the shared LoadBalancer/gateway, or restrict the node ports at the firewall."
+    fi
+    audit::_emit "${id}" "${title}" high fail "${detail}" "${remedy}"
+    return 0
+  fi
 
   if (( nodeport > 0 )); then
     audit::_emit "${id}" "${title}" medium fail \
@@ -689,6 +716,103 @@ audit::_grep_count() {
   local n
   n=$(grep -lsE -- "${ere}" "${@}" 2>/dev/null | wc -l | tr -d ' ') || n=0
   echo "${n:-0}"
+}
+
+# audit::_secpol_scan <file...> → "<deny_policies> <open_policies>"
+#
+# Envoy Gateway SecurityPolicy posture, read per OBJECT rather than per file.
+# The old detector was one `grep -qsE 'defaultAction:[[:space:]]*Deny'` over
+# every rendered file, collapsed into a single global boolean. It could not say
+# WHICH object carried the deny (a ConfigMap quoting the string counted), and —
+# the real hole — it could not see that a route-level SecurityPolicy with no
+# `mergeType` REPLACES that deny wholesale for every route it selects. Envoy
+# Gateway resolves overlapping policies by specificity and the most specific
+# one wins entirely, so the allowlist stays in the manifests and disappears at
+# runtime, and the boolean scored it a clean pass. Two numbers instead:
+#
+#   deny_policies — SecurityPolicies with `authorization.defaultAction: Deny`
+#                   that do NOT target a route (Gateway / Gateway listener /
+#                   ListenerSet, or untargeted) — the gateway-wide carve-out.
+#   open_policies — SecurityPolicies that DO target a route (HTTPRoute,
+#                   GRPCRoute or TCPRoute, via targetRef / targetRefs /
+#                   targetSelectors), do NOT merge, and do NOT re-deny by
+#                   themselves — each one cancels the carve-out for its routes.
+#
+# Two things that look like details and are not:
+#
+#   * `mergeType` is checked against the ALLOWED VALUES, not against presence.
+#     The CRD carries no enum for this field — its only validation is the CEL
+#     rule `self != 'Replace'` — so `mergeType: ""`, `Merge` or `strategicmerge`
+#     all pass admission and all merge NOTHING. Treating any non-empty value as
+#     "merged" is the same fail-open the old grep had, one layer in. Only
+#     `StrategicMerge` and `JSONMerge` count.
+#   * A route policy that carries its OWN `authorization.defaultAction: Deny`
+#     is not counted. It still replaces the gateway-wide policy, but it
+#     replaces a deny-by-default with a deny-by-default, so no route becomes
+#     reachable that was not reachable before — the one thing this check
+#     exists to catch. (Its allow rules may differ, so the two policies are
+#     not equivalent; they are equivalent in POSTURE, which is what is scored.
+#     Flagging it anyway would fire on a safe configuration, and a security
+#     gate that cries wolf gets muted.)
+#
+# The routed set stops at HTTPRoute/GRPCRoute/TCPRoute ON PURPOSE. TLSRoute and
+# UDPRoute read like obvious omissions and are not: a SecurityPolicy cannot
+# produce this bug on either. `mergeType` is admissible only on an xRoute
+# target, so a policy naming TLSRoute never reaches a cluster — Envoy Gateway
+# v1.9.0 rejects it with `mergeType can only be used with xRoute targets`
+# (verified 2026-08-22). And WITHOUT a mergeType such a policy still replaces
+# nothing, because SecurityPolicy attaches only to Gateway, ListenerSet,
+# HTTPRoute, GRPCRoute and TCPRoute — on a TLSRoute there is no merge hierarchy
+# for it to cancel. Counting those kinds would manufacture findings against
+# policies that enforce nothing either way. Widen this set when Envoy Gateway
+# widens its attachment targets, not before.
+#
+# yq is asked for one `action|kinds|mergeType` line per SecurityPolicy, with
+# `-` standing in for absent, and the classification is done here where it can
+# be read. Per-DOCUMENT `yq eval` (not `eval-all`): under eval-all the string
+# concatenation cross-products every document against every other and the
+# counts become nonsense. Unparsable input yields no lines and is counted as
+# neither — a file we cannot read must never manufacture a carve-out.
+#
+# LIMIT: the two counts are not correlated by attachment. A deny on one
+# Gateway plus an unmerged route policy that selects routes bound to a
+# DIFFERENT Gateway is reported as an override it is not. Correlating by
+# namespace would be wrong, not conservative: a Gateway and its routes
+# routinely live in different namespaces (the policy attaches to the Gateway,
+# the route policy to the route), and EG merges along the route's ATTACHMENT
+# hierarchy, not by namespace. Resolving that needs parentRefs, which the
+# scanned manifests may not even contain. So the check over-reports and never
+# under-reports, and says so in the finding.
+audit::_secpol_scan() {
+  (( $# > 0 )) || { echo "0 0"; return 0; }
+  local f action kinds merge routed merges deny=0 open=0
+  for f in "${@}"; do
+    while IFS='|' read -r action kinds merge; do
+      [[ -n "${action}${kinds}${merge}" ]] || continue
+      routed=0
+      case ",${kinds}," in
+        *,HTTPRoute,*|*,GRPCRoute,*|*,TCPRoute,*) routed=1 ;;
+      esac
+      merges=0
+      case "${merge}" in
+        StrategicMerge|JSONMerge) merges=1 ;;
+      esac
+      if (( routed )); then
+        if (( ! merges )) && [[ "${action}" != "Deny" ]]; then
+          open=$(( open + 1 ))
+        fi
+      elif [[ "${action}" == "Deny" ]]; then
+        deny=$(( deny + 1 ))
+      fi
+    done < <(yq eval -N '
+      select(.kind == "SecurityPolicy")
+      | ((.spec.authorization.defaultAction // "-")
+         + "|" + (([.spec.targetRef] + (.spec.targetRefs // []) + (.spec.targetSelectors // []))
+                  | map(select(tag == "!!map") | .kind // "-") | join(","))
+         + "|" + (.spec.mergeType // "-"))
+    ' "${f}" 2>/dev/null)
+  done
+  echo "${deny} ${open}"
 }
 
 # audit::_merge_yaml <file...> → deep-merged YAML (later files win). Empty → {}.

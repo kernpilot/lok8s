@@ -72,6 +72,26 @@ _sev_of() {
   done
   echo "MISSING"
 }
+# _detail_of <id> — the finding's detail text.
+# _count_of <id>  — how many findings carry that id. One check emits ONE
+# finding: _status_of/_sev_of stop at the first match, so a second finding
+# under the same id would hide behind the first and double-count in the score.
+_detail_of() {
+  local want="$1" line id t s st d r
+  for line in "${_AUDIT_FINDINGS[@]}"; do
+    IFS=$'\t' read -r id t s st d r <<< "${line}"
+    [[ "${id}" == "${want}" ]] && { echo "${d}"; return 0; }
+  done
+  echo "MISSING"
+}
+_count_of() {
+  local want="$1" line id rest n=0
+  for line in "${_AUDIT_FINDINGS[@]}"; do
+    IFS=$'\t' read -r id rest <<< "${line}"
+    [[ "${id}" == "${want}" ]] && n=$(( n + 1 ))
+  done
+  echo "${n}"
+}
 
 # =============================================================================
 # Cilium policy enforcement — the headline: audit mode = insecure
@@ -533,6 +553,358 @@ data:
   type: NodePortless
 YAML
   audit::run_domain npn
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
+}
+
+# SECURITYPOLICY MERGE REGRESSION (subagent review round 1, PR #140): the
+# carve-out used to be one `grep 'defaultAction: Deny'` over every rendered
+# file. That boolean could not see WHICH object carried the deny, nor that a
+# route-level policy without `mergeType` REPLACES it wholesale for the routes
+# it selects — so the exact footgun the sso-gate fix is about scored a clean
+# pass. The tests below lock both halves — object scoping, and the override —
+# plus, since round 3, that the override does not swallow a NodePort found with
+# it.
+@test "a route-level SecurityPolicy without mergeType cancels the gateway's deny" {
+  _spec ovr <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target ovr net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels: { "sso.lok8s.dev/protect": "true" }
+  oidc: { clientID: x }
+YAML
+  audit::run_domain ovr
+  assert_equal "$(_status_of exposed-endpoints)" "fail"
+  assert_equal "$(_sev_of exposed-endpoints)" "high"
+}
+
+# MASKED-FINDING REGRESSION (subagent review round 3, PR #140): the override
+# branch above used to `return 0` before the NodePort branch could run, so a
+# cluster with BOTH holes was told about one of them. The operator fixed the
+# mergeType, re-ran the audit, and only then met the node port. Two independent
+# holes must be reported together — and in ONE finding, because the id is the
+# report's key.
+@test "an override and a NodePort found together are BOTH reported" {
+  _spec both <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target both net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata: { name: legacy-admin }
+spec:
+  type: NodePort
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels: { "sso.lok8s.dev/protect": "true" }
+  oidc: { clientID: x }
+YAML
+  audit::run_domain both
+  assert_equal "$(_status_of exposed-endpoints)" "fail"
+  # The override is the graver of the two, so it sets the severity.
+  assert_equal "$(_sev_of exposed-endpoints)" "high"
+  # One finding per check id — merging the two must not fork into two rows.
+  assert_equal "$(_count_of exposed-endpoints)" "1"
+
+  local detail
+  detail="$(_detail_of exposed-endpoints)"
+  [[ "${detail}" == *"mergeType"* ]] \
+    || fail "the override is missing from the finding: ${detail}"
+  [[ "${detail}" == *"NodePort"* ]] \
+    || fail "the NodePort is masked by the override — both holes are real and they are fixed by different edits: ${detail}"
+}
+
+@test "the same route-level SecurityPolicy WITH mergeType keeps the carve-out" {
+  _spec mrg <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target mrg net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  mergeType: StrategicMerge
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels: { "sso.lok8s.dev/protect": "true" }
+  oidc: { clientID: x }
+YAML
+  audit::run_domain mrg
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
+}
+
+@test "a non-SecurityPolicy object quoting defaultAction: Deny is not a carve-out" {
+  _spec deco <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  # The old text-only detector matched this ConfigMap and scored the HTTPRoute
+  # below as allowlisted. Only a real SecurityPolicy may count.
+  _target deco net/route.yaml <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: app }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: docs }
+data:
+  snippet: |
+    authorization:
+      defaultAction: Deny
+YAML
+  audit::run_domain deco
+  assert_equal "$(_status_of exposed-endpoints)" "warn"
+}
+
+@test "an unmerged route-level policy with no gateway-wide deny is not flagged" {
+  _spec solo <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  # Nothing to override: no gateway-wide deny exists, so the missing mergeType
+  # costs nothing and must not manufacture a finding.
+  _target solo net/route.yaml <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: app }
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  oidc: { clientID: x }
+YAML
+  audit::run_domain solo
+  assert_equal "$(_status_of exposed-endpoints)" "warn"
+}
+
+# ROUND 2: the mergeType test above only proved a GOOD value passes. The check
+# read presence, and the CRD has no enum for this field — its only validation
+# is the CEL rule `self != 'Replace'` — so every value below is admitted by the
+# apiserver, merges NOTHING, and used to score a clean pass. One case per shape
+# of the mistake: empty, plausible-but-wrong, wrong case.
+@test "a route-level SecurityPolicy with a non-merging mergeType still cancels the deny" {
+  local bad
+  for bad in '""' 'Merge' 'strategicmerge' 'Replace'; do
+    _spec "badmt" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+    _target "badmt" net/gw.yaml <<YAML
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  mergeType: ${bad}
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  oidc: { clientID: x }
+YAML
+    audit::run_domain "badmt"
+    assert_equal "mergeType=${bad} → $(_status_of exposed-endpoints)" "mergeType=${bad} → fail"
+    assert_equal "mergeType=${bad} → $(_sev_of exposed-endpoints)" "mergeType=${bad} → high"
+  done
+}
+
+@test "JSONMerge is the other real merge value and keeps the carve-out" {
+  _spec jm <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target jm net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  mergeType: JSONMerge
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  oidc: { clientID: x }
+YAML
+  audit::run_domain jm
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
+}
+
+# ROUND 2, false positive: the route policy replaces the gateway's deny with a
+# deny of its own. Nothing became reachable that was not reachable before, and
+# a security gate that fires on a safe configuration teaches people to ignore
+# it. Must not be counted.
+@test "a route-level policy that re-denies by itself is not an override finding" {
+  _spec redeny <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target redeny net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: route-guard }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+        principal: { clientCIDRs: ["10.0.0.0/8"] }
+YAML
+  audit::run_domain redeny
   assert_equal "$(_status_of exposed-endpoints)" "pass"
 }
 

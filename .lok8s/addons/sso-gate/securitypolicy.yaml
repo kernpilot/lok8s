@@ -8,6 +8,19 @@ metadata:
   name: sso-gate
   namespace: default
 spec:
+  # MERGE this policy into the Gateway's, do not REPLACE it. Load-bearing
+  # security field, not a style choice — WITHOUT it, labeling a route for SSO
+  # silently DELETES whatever the Gateway policy enforced on that route (IP
+  # allowlist, `authorization` deny-by-default, JWT, CORS), leaving it MORE
+  # reachable than before it was "protected". WITH it, a labeled route also
+  # inherits those Gateway rules, so a route that answers 200 today can start
+  # answering 403. Both directions, the full reasoning and how to verify the
+  # merge on a live gateway: docs/guide/addons.md, "SSO must ADD to your
+  # gateway's guards". Do not copy this field onto a gateway-wide policy —
+  # Envoy Gateway accepts it only on an xRoute target, which is this addon's
+  # only shape. (`JSONMerge` is the other legal value; "no merge" is spelled by
+  # omitting the field, not by writing `Replace`.)
+  mergeType: StrategicMerge
   targetSelectors:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
