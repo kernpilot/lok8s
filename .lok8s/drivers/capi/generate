@@ -20,7 +20,17 @@ capi::detect_provider() {
 # subshell) the cleanup set. They used to be two hand-maintained copies, and a
 # variable exported but missing from the whitelist ships its `${PLACEHOLDER}`
 # verbatim into an applied manifest.
-_CAPI_TEMPLATE_VARS=(
+#
+# The list is checked BOTH WAYS against the templates capi::generate actually
+# renders — see `tests/unit/capi_test.bats`. Without that the list was only
+# consistent with itself: it named the failure it prevents while never being
+# compared to a single template, and eight placeholders in the tree
+# (`AWS_*`, `HROBOT_SSH_KEY_NAME`, `ROOT_DEVICE_WWN`, `HOST_SERVER_NUMBER`,
+# `MACHINE_TEMPLATE_NAME`) were untracked. Those live in `providers/aws/` and
+# `providers/hetzner/hrobot-machine-template.yaml`, which this driver does not
+# render yet; wiring either one in means adding its variables here, and the
+# gate says so by name.
+CAPI_TEMPLATE_VARS=(
   CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN
   K8S_VERSION K8S_VERSION_TRIMMED K8S_VERSION_MINOR
   CP_REPLICAS CP_TYPE CREDENTIAL_SECRET_NAME
@@ -32,7 +42,7 @@ _CAPI_TEMPLATE_VARS=(
 # '${A} ${B} …', built from the list above.
 capi::_allowed_vars() {
   local out="" v
-  for v in "${_CAPI_TEMPLATE_VARS[@]}"; do
+  for v in "${CAPI_TEMPLATE_VARS[@]}"; do
     out+="\${${v}} "
   done
   echo "${out% }"
@@ -87,7 +97,7 @@ capi::generate() {
   rendered=$(
     # Cluster identity + Kubernetes version (full, trimmed, and minor — the
     # cloud-init needs the trimmed/minor forms for the apt repo + package pins).
-    export "${_CAPI_TEMPLATE_VARS[@]}"
+    export "${CAPI_TEMPLATE_VARS[@]}"
     CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
     CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
     CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")

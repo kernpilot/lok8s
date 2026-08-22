@@ -86,39 +86,40 @@ lo_use_show() {
   assert_output --partial "Domain not found"
 }
 
+# The two discovery tests below call use::_show — the REAL listing that a bare
+# `lo use` prints. They used to re-implement the loop in their own body and
+# assert on that, so they passed with libs/use deleted; the `yq` mock the first
+# one installed was never reached by anything. use::_show was split out of
+# main::use (which goes through argsh's `:args` and cannot be called from bats)
+# for exactly this.
+
 @test "lo use discovers cluster domains" {
-  yq() {
-    case "$2" in
-      '.kind'|'.kind // ""') echo "Lo" ;;
-      '.spec.clusterRef.domain // "?"') echo "test.lok8s.dev" ;;
-      *) echo "" ;;
-    esac
-  }
-  export -f yq
+  source "${_PROJECT_ROOT}/.lok8s/libs/use"
 
-  # List available domains (cluster domains live under PATH_CLUSTERS/)
-  local output=""
-  for spec in "${PATH_CLUSTERS}"/*/cluster.lok8s.yaml; do
-    [[ -f "${spec}" ]] || continue
-    local d
-    d=$(basename "$(dirname "${spec}")")
-    output+="${d} "
-  done
-
-  [[ "${output}" == *"test.lok8s.dev"* ]]
+  run use::_show
+  assert_success
+  # The fixture is `kind: Lo`, so the driver column must be resolved, not
+  # guessed — this is what pins the listing to domain::spec_driver.
+  assert_output --partial "test.lok8s.dev (lo)"
 }
 
 @test "lo use discovers deploy domains" {
-  # List deploy domains
-  local output=""
-  for spec in "${PATH_CLUSTERS}"/*/deploy.lok8s.yaml; do
-    [[ -f "${spec}" ]] || continue
-    local d
-    d=$(basename "$(dirname "${spec}")")
-    output+="${d} "
-  done
+  source "${_PROJECT_ROOT}/.lok8s/libs/use"
 
-  [[ "${output}" == *"staging.lok8s.dev"* ]]
+  run use::_show
+  assert_success
+  assert_output --partial "staging.lok8s.dev (Deploy -> "
+}
+
+@test "lo use lists an unreadable cluster spec as '?' rather than dropping it" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/use"
+
+  mkdir -p "${PATH_CLUSTERS}/broken.lok8s.dev"
+  printf 'kind: ../../evil\n' > "${PATH_CLUSTERS}/broken.lok8s.dev/cluster.lok8s.yaml"
+
+  run use::_show
+  assert_success
+  assert_output --partial "broken.lok8s.dev (?)"
 }
 
 # ── lo up — provision dispatch ───────────────────────

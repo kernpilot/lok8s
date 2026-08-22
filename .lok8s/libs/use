@@ -7,6 +7,7 @@
 # `lo use --domain <d>`     set the active domain (global flag)
 # `lo use`                  show the current active domain + the available ones
 
+import ^utils/domain
 import ^utils/verbose
 
 # use::_set_active <domain> — validate and persist the active domain.
@@ -27,6 +28,37 @@ use::_set_active() {
   mkdir -p "${PATH_CLUSTERS}"
   echo "${target}" > "${PATH_CLUSTERS}/.active"
   echo "Active domain: ${target}"
+}
+
+# use::_show — print the active domain plus every domain under PATH_CLUSTERS,
+# each with what it is. Pure (only reads PATH_CLUSTERS), split out of main::use
+# for the same reason use::_set_active was: main::use goes through argsh's
+# `:args`, so a test cannot call it, and the listing loop was therefore only
+# ever covered by a test that RE-IMPLEMENTED it in its own body — which passed
+# whether or not this code existed at all.
+use::_show() {
+  if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
+    echo "Active: $(cat "${PATH_CLUSTERS}/.active")"
+  else
+    echo "No active domain set."
+  fi
+
+  echo ""
+  echo "Available domains:"
+  local spec d k ref
+  for spec in "${PATH_CLUSTERS}"/*/cluster.lok8s.yaml; do
+    [[ -f "${spec}" ]] || continue
+    d="$(basename "$(dirname "${spec}")")"
+    k="$(domain::spec_driver "${spec}" "?" || echo "?")"
+    echo "  ${d} (${k})"
+  done
+
+  for spec in "${PATH_CLUSTERS}"/*/deploy.lok8s.yaml; do
+    [[ -f "${spec}" ]] || continue
+    d="$(basename "$(dirname "${spec}")")"
+    ref="$(yq -r '.spec.clusterRef.domain // "?"' "${spec}" 2>/dev/null || echo "?")"
+    echo "  ${d} (Deploy -> ${ref})"
+  done
 }
 
 main::use() {
@@ -59,29 +91,7 @@ main::use() {
   [[ -z "${target}" ]] || { use::_set_active "${target}"; return; }
 
   # Show current + available domains
-  if [[ -f "${PATH_CLUSTERS}/.active" ]]; then
-    echo "Active: $(cat "${PATH_CLUSTERS}/.active")"
-  else
-    echo "No active domain set."
-  fi
-
-  echo ""
-  echo "Available domains:"
-  for spec in "${PATH_CLUSTERS}"/*/cluster.lok8s.yaml; do
-    [[ -f "${spec}" ]] || continue
-    local d k
-    d="$(basename "$(dirname "${spec}")")"
-    k="$(domain::spec_driver "${spec}" "?" || echo "?")"
-    echo "  ${d} (${k})"
-  done
-
-  for spec in "${PATH_CLUSTERS}"/*/deploy.lok8s.yaml; do
-    [[ -f "${spec}" ]] || continue
-    local d ref
-    d="$(basename "$(dirname "${spec}")")"
-    ref="$(yq -r '.spec.clusterRef.domain // "?"' "${spec}" 2>/dev/null || echo "?")"
-    echo "  ${d} (Deploy -> ${ref})"
-  done
+  use::_show
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::use "${@}"

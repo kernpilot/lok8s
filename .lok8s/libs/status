@@ -6,6 +6,7 @@
 # and Tilt status for a given domain.
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^libs/provision
 

@@ -33,7 +33,11 @@ teardown() {
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.kind'|'.kind // ""') echo "KubeOne" ;;
+      # BARE '.kind': kubehz::build_cluster_payload reads the WIRE field, which
+      # keeps the spec's original case. Answering '.kind // ""' here would mock
+      # domain::spec_driver's expression instead — a reader this code path never
+      # uses — and the assertion below would be measuring the mock's fallback.
+      '.kind') echo "KubeOne" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "nbg1" ;;
       '.spec.kubernetes.version') echo "v1.31.10" ;;
@@ -67,7 +71,11 @@ teardown() {
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "default.kubehz.dev" ;;
-      '.kind'|'.kind // ""') echo "Capi" ;;
+      # BARE '.kind': kubehz::build_cluster_payload reads the WIRE field, which
+      # keeps the spec's original case. Answering '.kind // ""' here would mock
+      # domain::spec_driver's expression instead — a reader this code path never
+      # uses — and the assertion below would be measuring the mock's fallback.
+      '.kind') echo "Capi" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
       '.spec.kubernetes.version') echo "v1.30.0" ;;
@@ -178,7 +186,11 @@ clusters:
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.kind'|'.kind // ""') echo "KubeOne" ;;
+      # BARE '.kind': kubehz::build_cluster_payload reads the WIRE field, which
+      # keeps the spec's original case. Answering '.kind // ""' here would mock
+      # domain::spec_driver's expression instead — a reader this code path never
+      # uses — and the assertion below would be measuring the mock's fallback.
+      '.kind') echo "KubeOne" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
       '.spec.kubernetes.version') echo "v1.31.10" ;;

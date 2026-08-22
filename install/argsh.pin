@@ -17,6 +17,19 @@
 #   ARGSH_PIN_UPDATE=1 ARGSH_SRC=<argsh> install/build
 #   # then commit install/argsh.pin AND docs/public/lo-up together
 #
+# RISK, known and accepted for now: `ref` below is NOT on argsh's main branch.
+# It sits on `feat/process-trace-phase2`, an unmerged feature branch, so the
+# published installer bundles a runtime built from one. If that branch is
+# force-pushed, rebased or deleted in arg-sh/argsh, the commit becomes
+# unreachable and the loup-bundle CI job fails at the `actions/checkout` step
+# with "Could not find the ref" — NOT at the diff, and nothing about the message
+# will mention this file. That is the symptom; this is the cause.
+#
+# If you are reading this because CI just broke that way: the fix is to pick a
+# reachable argsh revision (main, or a tag) and bump the pin with the procedure
+# below, committing install/argsh.pin and docs/public/lo-up together. Moving the
+# pin onto a merged revision is the real fix and is tracked separately.
+#
 # minifier_release / minifier_sha256 are for CI only — `argsh minify` shells
 # out to the `minifier` binary, which is a Rust crate in the argsh repo and is
 # published as a release asset. install/build uses whatever minifier is on

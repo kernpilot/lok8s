@@ -60,6 +60,68 @@ _argsh_sources() {
   }
 }
 
+# ── the other half: an import that is MISSING, not mis-spelled ───────────────
+#
+# The two gates above only look at the imports a file HAS. Nine libs called
+# domain::spec_driver with no `import ^utils/domain` at all and nothing noticed,
+# because the two ways of noticing were both blind:
+#
+#   - at runtime, `lo` imports utils/domain via utils/types and every lib is
+#     sourced into that one process, so an ambient definition is always there;
+#   - in the suite, tests/test_helper.bash sources utils/spec.sh and
+#     utils/domain.sh globally, so no test can fail on a missing import either.
+#
+# That global sourcing STAYS — a test that sources a lib stubs `import` first,
+# so the lib's own `import ^utils/domain` is a no-op and every driver test would
+# otherwise die on an undefined helper. It is a test-harness convenience, not a
+# statement about the tree. This gate is what makes the statement.
+#
+# Namespace → the import that defines it. Only the shared utils whose helpers
+# are called across libs; a lib calling its own namespace needs no import.
+_util_namespaces() {
+  cat <<'NS'
+domain|utils/domain|utils/domain.sh
+spec|utils/spec|utils/spec.sh
+NS
+}
+
+@test "every lib that calls a shared util's helpers imports it" {
+  local -a missing=()
+  local -a seen=()
+  local ns import_path definer file rel
+  while IFS='|' read -r ns import_path definer; do
+    [[ -n "${ns}" ]] || continue
+    while IFS= read -r file; do
+      rel="${file#"${_PROJECT_ROOT}/"}"
+      # The file that DEFINES the namespace does not import itself.
+      [[ "${rel}" == ".lok8s/${definer}" ]] && continue
+      # Full-line comments are prose, not calls (several libs name
+      # domain::spec_driver in a comment explaining why they do NOT call it).
+      grep -vE '^[[:space:]]*#' "${file}" \
+        | grep -qE "(^|[^[:alnum:]_:])${ns}::[a-z_]" || continue
+      seen+=("${rel}:${ns}")
+      grep -qE "^[[:space:]]*import[[:space:]]+\^${import_path}[[:space:]]*$" "${file}" \
+        || missing+=("${rel} calls ${ns}:: without 'import ^${import_path}'")
+    done < <(_argsh_sources)
+  done < <(_util_namespaces)
+
+  # ANTI-VACUITY: this gate asserts an ABSENCE, so it has to prove it actually
+  # examined callers. Both namespaces are called from more than a handful of
+  # files; a sweep that found nothing would otherwise pass silently.
+  [ "${#seen[@]}" -ge 10 ] || {
+    echo "the sweep found only ${#seen[@]} caller(s) of domain::/spec:: — it is" >&2
+    echo "broken, not the tree." >&2
+    return 1
+  }
+
+  [ "${#missing[@]}" -eq 0 ] || {
+    printf '%s\n' "${missing[@]}" >&2
+    echo "Relying on 'lo' having imported it first works until the lib is" >&2
+    echo "sourced from anywhere else — see AGENTS.md." >&2
+    return 1
+  }
+}
+
 @test "AGENTS.md states the convention this test enforces" {
   # A gate with no written rule is a trap: the next contributor learns the rule
   # from a red CI run instead of the guide.

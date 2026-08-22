@@ -424,3 +424,32 @@ STUB
   run image::_registry_tls
   assert_failure
 }
+
+@test "image::_cache_one PASSES its domain to the TLS check" {
+  # The optional [domain] parameter added for issue #89 was dead at both
+  # production call sites: the behaviour rode entirely on a dynamically scoped
+  # `domain` that image::_cache_one never declared, and _cache_one runs in a
+  # background subshell under `--all`. It takes the domain explicitly now, and
+  # this is what says so.
+  mkdir -p "${PATH_CLUSTERS}/tls.lok8s.dev" "${PATH_CLUSTERS}/plain.lok8s.dev"
+  printf '{"tls":true,"registries":[]}\n'  > "${PATH_CLUSTERS}/tls.lok8s.dev/.registries.json"
+  printf '{"tls":false,"registries":[]}\n' > "${PATH_CLUSTERS}/plain.lok8s.dev/.registries.json"
+
+  ARGSH_SOURCE="" source "${_PROJECT_ROOT}/.lok8s/libs/image" 2>/dev/null || true
+  unset LOK8S_REGISTRY_JSON
+  # Everything ambient says "plain" — only the argument says "tls".
+  export DOMAIN_NAME="plain.lok8s.dev"
+
+  local log="${BATS_TEST_TMPDIR}/docker.log"
+  docker() { echo "$*" >> "${log}"; return 0; }
+
+  image::_cache_one svc registry.example/svc:1 branch 1 10.0.0.1 0 tls.lok8s.dev
+  run cat "${log}"
+  assert_output --partial "manifest inspect"
+  refute_output --partial "--insecure"
+
+  : > "${log}"
+  image::_cache_one svc registry.example/svc:1 branch 1 10.0.0.1 0 plain.lok8s.dev
+  run cat "${log}"
+  assert_output --partial "--insecure"
+}

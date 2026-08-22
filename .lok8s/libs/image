@@ -28,16 +28,20 @@ import ^utils/verbose
 # matching the back-compat default. Safe to call from Tilt's local()
 # subshell where the Lo driver may not be sourced.
 #
-# It resolves the domain the SAME way its callers do — the inherited `domain`
-# first, then the env. It used to read DOMAIN_NAME only, while image::list and
-# image::cache honoured `--domain X`, so `lo image list --domain X` could pair
-# X's cache IP with the OTHER domain's TLS scheme and fail every request
-# (issue #89).
+# It used to read DOMAIN_NAME only, while image::list and image::cache honoured
+# `--domain X`, so `lo image list --domain X` could pair X's cache IP with the
+# OTHER domain's TLS scheme and fail every request (issue #89).
+#
+# Both production callers PASS the domain. The `${domain:-…}` tail is a
+# fallback for Tilt's local() subshell, not the mechanism: an optional
+# parameter that no caller ever supplies is not a fix, it is a comment — the
+# behaviour would still ride entirely on a dynamically scoped `domain` that
+# image::_cache_one never declared.
 image::_registry_tls() {
-  local _domain="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
+  local target="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
   local json="${LOK8S_REGISTRY_JSON:-}"
   if [[ -z "${json}" || ! -f "${json}" ]]; then
-    json="${PATH_CLUSTERS}/${_domain}/.registries.json"
+    json="${PATH_CLUSTERS}/${target}/.registries.json"
   fi
   [[ -f "${json}" ]] || return 1
   jq -e '.tls' "${json}" >/dev/null 2>&1
@@ -141,7 +145,7 @@ image::cache() {
       debug "no cache queue at ${queue_file}; nothing to pre-pull"
       return 0
     }
-    image::_cache_queue "${queue_file}" "${cache_ip}" "${parallel}" "${force:-0}"
+    image::_cache_queue "${queue_file}" "${cache_ip}" "${parallel}" "${force:-0}" "${domain}"
     return $?
   fi
 
@@ -180,13 +184,13 @@ image::cache() {
   fi
 
   local remote_ref="${s_endpoint}/${s_branch}/${svc}:${s_tag}"
-  image::_cache_one "${svc}" "${remote_ref}" "${s_branch}" "${s_tag}" "${cache_ip}" "${force:-0}"
+  image::_cache_one "${svc}" "${remote_ref}" "${s_branch}" "${s_tag}" "${cache_ip}" "${force:-0}" "${domain}"
 }
 
 # image::_cache_queue — process a TSV cache queue with bounded parallelism
 # TSV format: svc \t remote_ref \t branch \t tag
 image::_cache_queue() {
-  local queue="${1}" cache_ip="${2}" parallel="${3}" force="${4}"
+  local queue="${1}" cache_ip="${2}" parallel="${3}" force="${4}" domain="${5}"
   local total
   total=$(grep -cv '^$' "${queue}" 2>/dev/null || echo 0)
   debug "image cache: processing ${total} entries (parallel=${parallel})"
@@ -207,11 +211,11 @@ image::_cache_queue() {
 
     if (( parallel == 1 )); then
       # Sequential — straightforward
-      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" \
+      image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" "${domain}" \
         || echo "${svc}:${tag}" > "${faildir}/${idx}"
     else
       # Background, bounded by `parallel` (0 = unlimited)
-      { image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" \
+      { image::_cache_one "${svc}" "${remote}" "${branch}" "${tag}" "${cache_ip}" "${force}" "${domain}" \
           || echo "${svc}:${tag}" > "${faildir}/${idx}"; } &
       pids+=("$!")
       active=$(( active + 1 ))
@@ -252,6 +256,11 @@ image::_cache_queue() {
 # Idempotent: checks the cache registry's manifest before pulling.
 image::_cache_one() {
   local svc="${1}" remote="${2}" branch="${3}" tag="${4}" cache_ip="${5}" force="${6}"
+  # The domain is PASSED, not inherited. This function runs in a background
+  # subshell under `--all`, and it declared no `domain` of its own, so the TLS
+  # decision below silently depended on a dynamically scoped local three frames
+  # up in image::cache.
+  local domain="${7}"
   local cache_path="${branch}/${svc}:${tag}"
   local cache_ref_local="${cache_ip}/${cache_path}"
 
@@ -268,7 +277,7 @@ image::_cache_one() {
   # without --insecure. In plain mode the registry is raw-IP HTTP, which
   # the docker client only reaches via --insecure (or insecure-registries).
   local -a inspect_flags=()
-  if ! image::_registry_tls; then
+  if ! image::_registry_tls "${domain}"; then
     inspect_flags=(--insecure)
   fi
 
@@ -329,7 +338,7 @@ image::list() {
     return 1
   fi
   local scheme="http"
-  image::_registry_tls && scheme="https"
+  image::_registry_tls "${domain}" && scheme="https"
   local catalog_url="${scheme}://${cache_ip}/v2/_catalog"
   echo ":: cache registry @ ${catalog_url}"
   # In TLS mode the mkcert CA in the host trust store validates the cert.

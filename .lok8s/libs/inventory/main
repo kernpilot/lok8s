@@ -23,6 +23,7 @@
 # missing kubeconfig, a CRD conflict, RBAC — none of it may ever break a
 # provision/bootstrap. It warns and returns 0.
 
+import ^utils/domain
 import ^utils/verbose
 import ^libs/bootstrap
 import ^libs/addons
@@ -68,7 +69,13 @@ inventory::build_json() {
   [[ -f "${cluster_yaml}" ]] || { error "inventory: cluster spec not found: ${cluster_yaml}"; return 1; }
 
   local kind provider k8s_version lok8s_version spec_hash rendered_at
-  kind=$(domain::spec_driver "${cluster_yaml}" lo) || kind="lo"
+  # The fallback covers "no kind declared". It must NOT cover rc 2 — a
+  # malformed kind is reported into the ClusterInventory CR and read back by
+  # the agent, so defaulting it to "lo" would publish a false driver identity.
+  kind=$(domain::spec_driver "${cluster_yaml}" lo) || {
+    error "inventory: cluster spec declares a malformed kind: ${cluster_yaml}"
+    return 1
+  }
   provider=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
   k8s_version=$(yq -r '.spec.kubernetes.version // ""' "${cluster_yaml}")
   k8s_version="${k8s_version%%@*}"   # strip a kindest-node @sha256 digest suffix

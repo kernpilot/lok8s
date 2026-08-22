@@ -41,6 +41,16 @@ unset -f import
 # would otherwise find domain::spec_driver undefined.
 source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
 
+# NOTE on the two global sources above: they make it impossible for any test in
+# this suite to fail on a lib's MISSING `import ^utils/spec` / `import
+# ^utils/domain` — the definitions are already there. That is a real class of
+# bug (nine libs called domain::spec_driver with no import of their own), and
+# it is NOT guarded here. It is guarded by
+# `tests/unit/import_convention_test.bats::every lib that calls a shared util's
+# helpers imports it`, which reads the source instead of running it. Adding a
+# third global source here means adding its namespace to that gate's
+# `_util_namespaces` list in the same commit.
+
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 

@@ -123,14 +123,33 @@ teardown() { teardown_tmpdir; }
 
 # ── the drift gate ────────────────────────────────────────
 
-# Assignments of a bare `.kind` out of a yq read. Anything else — a
-# `select(.kind == …)` over a manifest stream, a `[.kind, …] | @tsv` — is a
-# Kubernetes object kind, not a cluster driver, and is not what this gates.
+# Every yq read whose PROGRAM starts at `.kind` (or `.spec.kind`). Anything
+# else — a `select(.kind == …)` over a manifest stream, a `[.kind, …] | @tsv` —
+# is a Kubernetes object kind, not a cluster driver, and is not what this gates.
+#
+# What the pattern must NOT do is anchor on the assignment. The first version
+# of this sweep required `=$(yq`, so the quoted spelling
+#
+#     k="$(yq -r '.kind' "${spec}")"
+#
+# evaded it — and that is the PRE-FIX spelling of libs/use:74, one of the
+# thirteen sites #89 converged. The gate could not have caught a regression of
+# the very thing it guards. Two allowlist rows proved it independently: the
+# `libs/hooks` row (quoted) and the `libs/lint` spec_runtime row (`.spec.kind`)
+# matched nothing the sweep ever produced, so both sat there dead. Matching on
+# the yq PROGRAM instead of on the shell syntax around it covers every
+# assignment spelling there is — `x=$(…)`, `x="$(…)"`, `local x=$(…)`,
+# backticks, a bare argument, `< <(…)` — and it is the yq program, not the
+# assignment, that says "this is a driver read".
+#
+# Comment lines are dropped: prose that quotes the pattern (utils/domain.sh's
+# own docstring does) is not a read.
 _kind_reads() {
   find "${_PROJECT_ROOT}/.lok8s" -type f ! -path '*/init.d/*' \
     ! -name '*.yaml' ! -name '*.yml' ! -name '*.json' ! -name '*.ts' -print0 \
     | xargs -0 grep -lE '^#!/usr/bin/env (argsh|bash)|^# shellcheck shell=bash' 2>/dev/null \
-    | xargs grep -nE '=\$\(yq [^)]*'"'"'\.kind' 2>/dev/null \
+    | xargs grep -nE 'yq [^)]*'"'"'(\.spec)?\.kind' 2>/dev/null \
+    | grep -vE ':[0-9]+:[[:space:]]*#' \
     | sed "s|^${_PROJECT_ROOT}/||"
 }
 
@@ -156,9 +175,16 @@ ALLOW
 #   libs/crds         — the kind of a CRD SCHEMA source, not a cluster spec.
 #   libs/addons       — a khelm chart.yaml's kind (ChartRenderer), not a driver.
 #   libs/build        — counts documents in a rendered artifact.
-#   libs/hooks        — a Kubernetes manifest document's kind.
+#   libs/hooks        — a Kubernetes manifest document's kind, read per document
+#                       out of a `select(documentIndex == …)` split and handed to
+#                       hooks::_live_images to query the live object. Nothing to
+#                       do with a cluster driver.
 #   libs/lint (×2)    — VALIDATES the kind field, so it must see the raw value
-#                       exactly as written, including a malformed one.
+#                       exactly as written, including a malformed one. lint::schema
+#                       reports a MISSING `kind` / `spec.kind`; routing it through
+#                       domain::spec_driver would collapse "absent" and
+#                       "malformed" into one answer, which is the opposite of
+#                       what a linter is for.
 #   libs/kubehz/hosted — the wire field of the hosted-cluster payload. It goes
 #                       to the kubehz API in the spec's original case
 #                       ("KubeOne", not "kubeone"); lowercasing it here would
@@ -168,11 +194,23 @@ ALLOW
 
 @test "every remaining .kind read is either the shared reader or allowlisted" {
   local hits; hits="$(_kind_reads)"
-  # ANTI-VACUITY: the sweep must find the reader itself, or the pattern is
+  # ANTI-VACUITY 1: the sweep must find the reader itself, or the pattern is
   # broken and this gate is measuring an empty set.
   [[ "${hits}" == *"utils/domain.sh"* ]] || {
     echo "the sweep did not even find domain::spec_driver's own read — the" >&2
     echo "grep in _kind_reads is stale, not the code." >&2
+    echo "${hits}" >&2
+    return 1
+  }
+  # ANTI-VACUITY 2: it must also find the QUOTED spelling. libs/hooks:130 is
+  # `kind="$(yq -r '.kind // ""' …)"` — a `"` between the `=` and the `$(`.
+  # The first version of this sweep required `=$(yq` and so missed exactly
+  # that form, which is how the pre-fix libs/use:74 was written. This keeps a
+  # live canary for it in the tree instead of trusting the pattern by reading.
+  [[ "${hits}" == *"libs/hooks"* ]] || {
+    echo "the sweep missed the QUOTED read in libs/hooks — the pattern is" >&2
+    echo "anchored on the assignment again, so k=\"\$(yq -r '.kind' …)\"" >&2
+    echo "evades it. Match the yq PROGRAM, not the shell syntax." >&2
     echo "${hits}" >&2
     return 1
   }
@@ -206,16 +244,34 @@ ALLOW
 @test "the allowlist has no stale entries" {
   # The other half of the gate. Without this, a converged site could leave its
   # exemption behind and the next copy in that file would sail through.
+  #
+  # The comparison is against the SWEEP OUTPUT, not against the file. An
+  # earlier version grepped the file directly, which let a row survive that the
+  # sweep could never produce: two rows here — libs/hooks (quoted) and
+  # libs/lint's spec_runtime (`.spec.kind`) — matched their files fine while
+  # being invisible to the sweep, so they exempted nothing and hid the fact
+  # that the pattern was too narrow. Matching the sweep makes a row that
+  # exempts nothing fail as loudly as a row whose code is gone.
+  local hits; hits="$(_kind_reads)"
   local -a stale=()
-  local a_path a_frag
+  local a_path a_frag line found
   while IFS='|' read -r a_path a_frag; do
     [[ -n "${a_path}" ]] || continue
-    grep -qF -- "${a_frag}" "${_PROJECT_ROOT}/${a_path}" 2>/dev/null \
-      || stale+=("${a_path} | ${a_frag}")
+    found=0
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      [[ "${line%%:*}" == "${a_path}" ]] || continue
+      [[ "${line}" == *"${a_frag}"* ]] || continue
+      found=1
+      break
+    done <<< "${hits}"
+    (( found )) || stale+=("${a_path} | ${a_frag}")
   done < <(_allowed_kind_reads)
 
   [ "${#stale[@]}" -eq 0 ] || {
-    echo "these allowlist entries no longer match anything — remove them:" >&2
+    echo "these allowlist entries exempt nothing the sweep finds — either the" >&2
+    echo "code is gone (remove the row) or the sweep no longer sees it (fix" >&2
+    echo "the pattern in _kind_reads):" >&2
     printf '  %s\n' "${stale[@]}" >&2
     return 1
   }

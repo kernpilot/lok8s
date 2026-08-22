@@ -6,6 +6,7 @@
 # the PATH_* environment, whether the secrets plugin is built, and the active
 # domain. Exits non-zero when a REQUIRED prerequisite is missing.
 
+import ^utils/domain
 import ^utils/verbose
 import ^utils/provider
 import ^utils/template

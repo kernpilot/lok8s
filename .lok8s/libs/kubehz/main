@@ -20,6 +20,7 @@
 # in-cluster agent fetches desired state and applies it locally — the platform
 # never pushes into the cluster.
 
+import ^utils/domain
 import ^utils/verbose
 import ^utils/http
 import ^libs/kubehz/hosted

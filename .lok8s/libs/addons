@@ -11,6 +11,7 @@
 # values overlay (values.<driver>.yaml) applies at bootstrap time.
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^utils/template
 
@@ -44,11 +45,23 @@ main::addons() {
 
 # Resolve the driver kind for the active domain.
 # Usage: addons::_driver [domain]
-# Echoes lowercase driver name. Falls back to "lo" if no spec found.
+# Echoes lowercase driver name. Falls back to "lo" if no spec found — but NOT
+# if the spec declares a malformed one (domain::spec_driver rc 2). That is the
+# reader's documented contract: rc 1 means "nothing to read" and takes the
+# fallback, rc 2 means "present but not a bare driver name" and is never
+# defaulted, because the value reaches a path we source and quietly replacing a
+# crafted one with "lo" hides the crafting.
 # shellcheck disable=SC2120 # optional [domain] arg; callers invoke it arg-less (active domain)
 addons::_driver() {
-  local _domain="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
-  domain::spec_driver "${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml" lo || echo "lo"
+  local target="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
+  local spec="${PATH_CLUSTERS}/${target}/cluster.lok8s.yaml"
+  local kind rc=0
+  kind=$(domain::spec_driver "${spec}" lo) || rc=$?
+  if (( rc )); then
+    error "cluster spec for '${target}' declares a malformed kind (${spec}) — refusing to assume 'lo'"
+    return 1
+  fi
+  echo "${kind}"
 }
 
 # Resolve the shared addons directory.
@@ -108,7 +121,7 @@ addons::_chart() {
 # addons::list — print a table of addons for the active driver.
 addons::list() {
   local driver addons_dir
-  driver=$(addons::_driver)
+  driver=$(addons::_driver) || return 1
   addons_dir=$(addons::_dir)
 
   if [[ ! -d "${addons_dir}" ]]; then
@@ -149,7 +162,7 @@ addons::show() {
   [[ -n "${name}" ]] || { error "addon name required"; return 1; }
 
   local driver addons_dir
-  driver=$(addons::_driver)
+  driver=$(addons::_driver) || return 1
   addons_dir=$(addons::_dir)
   local dir="${addons_dir}/${name}"
 
@@ -262,8 +275,15 @@ addons::detail() {
     return 1
   fi
 
+  # `|| kind="lo"` here would default on rc 2 as well, which is exactly what
+  # domain::spec_driver promises never to happen — the kind selects the
+  # values.<driver>.yaml overlay and the driver's default entries, so a
+  # malformed one must be reported, not guessed away.
   local kind
-  kind=$(domain::spec_driver "${spec}" lo) || kind="lo"
+  kind=$(domain::spec_driver "${spec}" lo) || {
+    error "cluster spec for '${domain}' declares a malformed kind (${spec})"
+    return 1
+  }
 
   local -a entries=()
   mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)

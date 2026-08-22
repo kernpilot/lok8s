@@ -29,6 +29,7 @@ BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 # stack: base < driver < provider < valueFiles < values:.
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^utils/kapply
 import ^libs/addons
