@@ -33,7 +33,7 @@ teardown() {
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.kind') echo "KubeOne" ;;
+      '.kind'|'.kind // ""') echo "KubeOne" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "nbg1" ;;
       '.spec.kubernetes.version') echo "v1.31.10" ;;
@@ -67,7 +67,7 @@ teardown() {
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "default.kubehz.dev" ;;
-      '.kind') echo "Capi" ;;
+      '.kind'|'.kind // ""') echo "Capi" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
       '.spec.kubernetes.version') echo "v1.30.0" ;;
@@ -178,7 +178,7 @@ clusters:
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.kind') echo "KubeOne" ;;
+      '.kind'|'.kind // ""') echo "KubeOne" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
       '.spec.kubernetes.version') echo "v1.31.10" ;;

@@ -456,8 +456,7 @@ lint::bootstrap() {
   [[ -f "${domain_dir}/cluster.lok8s.yaml" ]] || return 0
 
   local kind
-  kind=$(yq -r '.kind // ""' "${spec_file}" | tr '[:upper:]' '[:lower:]')
-  [[ -n "${kind}" ]] || return 0
+  kind=$(domain::spec_driver "${spec_file}") || return 0
 
   local domain
   domain=$(basename "${domain_dir}")

@@ -139,7 +139,7 @@ audit::run_domain() {
   fi
 
   local kind provider
-  kind=$(yq -r '.kind // ""' "${spec_file}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${spec_file}") || kind=""
   provider=$(yq -r '.spec.provider.name // ""' "${spec_file}" 2>/dev/null || echo "")
 
   audit::check_encryption   "${domain}" "${domain_dir}" "${spec_file}" "${kind}" "${provider}"

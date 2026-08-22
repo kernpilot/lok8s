@@ -71,7 +71,7 @@ main::use() {
     [[ -f "${spec}" ]] || continue
     local d k
     d="$(basename "$(dirname "${spec}")")"
-    k="$(yq -r '.kind' "${spec}" 2>/dev/null || echo "?")"
+    k="$(domain::spec_driver "${spec}" "?" || echo "?")"
     echo "  ${d} (${k})"
   done
 

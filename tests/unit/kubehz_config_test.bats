@@ -272,7 +272,7 @@ teardown() {
 @test "validate_config: Lo kind with hosted requires spec.runner" {
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind'|'.kind // ""') echo "Lo" ;;
       '.spec.runner // ""') echo "" ;;
       *) echo "" ;;
     esac

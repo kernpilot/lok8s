@@ -136,8 +136,7 @@ status::all() {
 
   # Resolve the driver kind so the Tilt section only runs for `lo` clusters.
   local kind=""
-  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
-  [[ -f "${spec}" ]] && kind=$(yq -r '.kind' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml") || kind=""
 
   status::cluster "${domain}"
   status::nodes

@@ -48,12 +48,7 @@ main::addons() {
 # shellcheck disable=SC2120 # optional [domain] arg; callers invoke it arg-less (active domain)
 addons::_driver() {
   local _domain="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
-  local spec="${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml"
-  if [[ -f "${spec}" ]]; then
-    yq -r '.kind // "Lo"' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]'
-  else
-    echo "lo"
-  fi
+  domain::spec_driver "${PATH_CLUSTERS}/${_domain}/cluster.lok8s.yaml" lo || echo "lo"
 }
 
 # Resolve the shared addons directory.
@@ -268,7 +263,7 @@ addons::detail() {
   fi
 
   local kind
-  kind=$(yq -r '.kind // "Lo"' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${spec}" lo) || kind="lo"
 
   local -a entries=()
   mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)

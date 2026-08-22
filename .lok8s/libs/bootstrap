@@ -73,12 +73,11 @@ bootstrap::dispatch() {
 
   # Source the driver (same resolution as provision::dispatch) so its
   # driver::export is available. Guard a missing driver the same way.
+  # domain::spec_driver constrains the value to a bare driver name — it is
+  # untrusted YAML about to be interpolated into a path we `source`.
   local kind
-  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
-  # kind is untrusted YAML interpolated into a path we `source` — constrain it to
-  # a bare driver name so a crafted spec can't traverse / source an arbitrary file.
-  [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || {
-    error "invalid cluster kind: ${kind}"; return 1
+  kind=$(domain::spec_driver "${cluster_yaml}") || {
+    error "invalid cluster kind in ${cluster_yaml}"; return 1
   }
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
   if [[ ! -f "${kind_script}" ]]; then
@@ -1051,7 +1050,7 @@ bootstrap::apply() {
 
   # Detect driver kind and provider for default policy + values resolution
   local kind provider_name hosting
-  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${cluster_yaml}") || kind=""
   provider_name=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
   # Hosted flag for the per-entry subshells (_apply_one): on a hosted cluster
   # the CNI-class addons are platform-owned and must never be bootstrapped.

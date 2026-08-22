@@ -89,7 +89,7 @@ lo_use_show() {
 @test "lo use discovers cluster domains" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind'|'.kind // ""') echo "Lo" ;;
       '.spec.clusterRef.domain // "?"') echo "test.lok8s.dev" ;;
       *) echo "" ;;
     esac

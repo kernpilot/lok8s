@@ -35,6 +35,12 @@ import() { :; }
 source "${_PROJECT_ROOT}/.lok8s/utils/spec.sh"
 unset -f import
 
+# utils/domain.sh — domain::resolve / domain::driver / domain::spec_driver, the
+# single domain-resolution and driver-identity point every lib now reads
+# through. Same reasoning as above: a lib sourced under a stubbed `import`
+# would otherwise find domain::spec_driver undefined.
+source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 

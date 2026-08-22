@@ -395,3 +395,32 @@ STUB
   run image::_registry_tls
   assert_failure
 }
+
+@test "image::_registry_tls follows --domain, not DOMAIN_NAME (issue #89)" {
+  # image::list / image::cache resolve their own `domain` (a `--domain X` sets
+  # it), but this helper keyed off DOMAIN_NAME alone. A `lo image list
+  # --domain X` therefore paired X's cache IP with the OTHER domain's TLS
+  # scheme and every request failed.
+  mkdir -p "${PATH_CLUSTERS}/tls.lok8s.dev" "${PATH_CLUSTERS}/plain.lok8s.dev"
+  printf '{"tls":true,"registries":[]}\n'  > "${PATH_CLUSTERS}/tls.lok8s.dev/.registries.json"
+  printf '{"tls":false,"registries":[]}\n' > "${PATH_CLUSTERS}/plain.lok8s.dev/.registries.json"
+
+  ARGSH_SOURCE="" source "${_PROJECT_ROOT}/.lok8s/libs/image" 2>/dev/null || true
+  unset LOK8S_REGISTRY_JSON
+
+  # The two disagree on purpose: env says plain, the resolved domain says TLS.
+  export DOMAIN_NAME="plain.lok8s.dev"
+  local domain="tls.lok8s.dev"
+
+  run image::_registry_tls
+  assert_success
+
+  # And the explicit argument wins over both.
+  run image::_registry_tls "plain.lok8s.dev"
+  assert_failure
+
+  # With no domain in scope it still falls back to the env, for Tilt's local().
+  unset domain
+  run image::_registry_tls
+  assert_failure
+}

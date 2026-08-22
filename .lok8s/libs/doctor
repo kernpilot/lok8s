@@ -93,7 +93,7 @@ main::doctor() {
     local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
     local deploy_spec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
     if [[ -f "${spec}" ]]; then
-      doctor::_ok "active: ${domain} (kind $(yq -r '.kind // "?"' "${spec}" 2>/dev/null))"
+      doctor::_ok "active: ${domain} (kind $(domain::spec_driver "${spec}" "?" || echo "?"))"
     elif [[ -f "${deploy_spec}" ]]; then
       doctor::_ok "active: ${domain} (Deploy -> $(yq -r '.spec.clusterRef.domain // "?"' "${deploy_spec}" 2>/dev/null))"
     else

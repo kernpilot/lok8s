@@ -22,15 +22,21 @@ import ^utils/types
 import ^utils/domain
 import ^utils/verbose
 
-# image::_registry_tls — is the active cluster's cache registry TLS?
+# image::_registry_tls [domain] — is the domain's cache registry TLS?
 # Reads the generated .registries.json (the source of truth, also used by
 # the driver). Falls back to plain HTTP (false) when the file is absent —
 # matching the back-compat default. Safe to call from Tilt's local()
 # subshell where the Lo driver may not be sourced.
+#
+# It resolves the domain the SAME way its callers do — the inherited `domain`
+# first, then the env. It used to read DOMAIN_NAME only, while image::list and
+# image::cache honoured `--domain X`, so `lo image list --domain X` could pair
+# X's cache IP with the OTHER domain's TLS scheme and fail every request
+# (issue #89).
 image::_registry_tls() {
+  local _domain="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
   local json="${LOK8S_REGISTRY_JSON:-}"
   if [[ -z "${json}" || ! -f "${json}" ]]; then
-    local _domain="${DOMAIN_NAME:-lok8s.dev}"
     json="${PATH_CLUSTERS}/${_domain}/.registries.json"
   fi
   [[ -f "${json}" ]] || return 1
@@ -82,8 +88,10 @@ image::cache() {
   # The cache registry is a Lo-driver (local kind cluster) feature — fail at
   # the door with the driver named, not three layers down on a spec field
   # other drivers never carry (this once ran against a KubeOne spec because
-  # clusters/.active pointed there).
-  domain::require_driver lo "${domain}" "the image cache" || return 1
+  # clusters/.active pointed there). An explicit LOK8S_REGISTRY_IP_CACHE skips
+  # the gate — see image::list for why.
+  [[ -n "${LOK8S_REGISTRY_IP_CACHE:-}" ]] \
+    || domain::require_driver lo "${domain}" "the image cache" || return 1
   # cache_host is framework policy — every Lo cluster uses lok8s.cache
   # as the canonical cache registry hostname. The LO_FRAMEWORK_REGISTRY_HOSTS
   # map exists in drivers/lo/main but may not be loaded yet when this
@@ -298,9 +306,13 @@ image::list() {
   debug "List images in the local cache registry"
   local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
   # Same gate as image::cache: the cache registry only exists on Lo (kind)
-  # clusters — fail with the driver named, not an IP-resolution error.
-  domain::require_driver lo "${domain}" "the image cache" || return 1
+  # clusters — fail with the driver named, not an IP-resolution error. An
+  # explicit LOK8S_REGISTRY_IP_CACHE skips it: the operator has named the
+  # registry, which is the documented escape for a shared cache, and putting
+  # the gate first made that override unreachable (issue #89).
   local cache_ip="${LOK8S_REGISTRY_IP_CACHE:-}"
+  [[ -n "${cache_ip}" ]] \
+    || domain::require_driver lo "${domain}" "the image cache" || return 1
   if [[ -z "${cache_ip}" ]]; then
     local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
     if [[ -f "${cluster_spec}" ]] && ! declare -F lo::read_network_config &>/dev/null; then

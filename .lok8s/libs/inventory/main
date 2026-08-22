@@ -68,7 +68,7 @@ inventory::build_json() {
   [[ -f "${cluster_yaml}" ]] || { error "inventory: cluster spec not found: ${cluster_yaml}"; return 1; }
 
   local kind provider k8s_version lok8s_version spec_hash rendered_at
-  kind=$(yq -r '.kind // "Lo"' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${cluster_yaml}" lo) || kind="lo"
   provider=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
   k8s_version=$(yq -r '.spec.kubernetes.version // ""' "${cluster_yaml}")
   k8s_version="${k8s_version%%@*}"   # strip a kindest-node @sha256 digest suffix

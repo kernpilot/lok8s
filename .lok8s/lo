@@ -209,7 +209,7 @@ _lo_header() {
   local meta="" kind=""
   if command -v yq &>/dev/null && [[ -f "${spec}" ]]; then
     local ver
-    kind=$(yq -r '.kind // ""' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    kind=$(domain::spec_driver "${spec}") || kind=""
     ver=$(yq -r '.spec.kubernetes.version // ""' "${spec}" 2>/dev/null)
     meta="${kind}"
     [[ "${kind}" == "lo" ]] && meta="${meta} · kind"

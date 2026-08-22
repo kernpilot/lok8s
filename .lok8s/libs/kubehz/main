@@ -124,7 +124,7 @@ kubehz::validate_config() {
 
   # Per-kind hosting constraints
   local kind
-  kind=$(yq -r '.kind' "${LOK8S_SPEC_FILE}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${LOK8S_SPEC_FILE}") || kind=""
   if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
     case "${kind}" in
       lo)
@@ -161,7 +161,7 @@ kubehz::validate_config() {
 kubehz::get_ssh_fingerprint() {
   local cluster_yaml="${1}"
   local kind
-  kind=$(yq -r '.kind' "${cluster_yaml}" | tr '[:upper:]' '[:lower:]')
+  kind=$(domain::spec_driver "${cluster_yaml}") || kind=""
 
   case "${kind}" in
     kubeone)
