@@ -338,7 +338,7 @@ service. Works with any spec-compliant OIDC issuer.
 ```yaml
 spec:
   bootstrap:
-    - envoy-gateway            # required: SecurityPolicy is its CRD
+    - envoy-gateway            # required: v1.8.0+ (SecurityPolicy is its CRD)
     - sso-gate: { dependsOn: [envoy-gateway] }
 ```
 
@@ -372,6 +372,95 @@ copy-paste patches):
 One sharp edge: `targetSelectors` only matches routes in the **same
 namespace** as the policy (shipped: `default`). For routes in another
 namespace, layer a second copy with a kustomize `namespace:` transform.
+
+#### SSO must ADD to your gateway's guards, not replace them
+
+::: danger A route-level SecurityPolicy REPLACES the Gateway's one
+Envoy Gateway resolves overlapping `SecurityPolicy` objects by
+**specificity**, and the most specific one wins **entirely**. A policy on
+an `HTTPRoute` therefore replaces the policy on that route's `Gateway` —
+wholesale, not field by field. If your Gateway carries an IP allowlist, an
+`authorization` deny-by-default, JWT or CORS, an unmerged route-level SSO
+policy **deletes all of it** for every route you label. The route ends up
+*more* reachable than before you protected it.
+
+The only signal is an `Overridden` condition on the Gateway policy, which
+names the routes it lost — and which nothing reads unless you look:
+
+```console
+$ kubectl get securitypolicy gateway-guard -o yaml
+...
+    - type: Overridden
+      status: "True"
+      message: 'This policy is being overridden by other securityPolicies
+        for these routes: [default/internal-dashboard]'
+```
+:::
+
+`sso-gate` ships **`mergeType: StrategicMerge`** for exactly this reason,
+so a labeled route **keeps** the gateway-wide guards and **gains** OIDC on
+top. When it takes effect the Gateway policy stops reporting the route
+under `Overridden` and reports it under `Merged` instead:
+
+```console
+    - type: Merged
+      status: "True"
+      message: 'This policy is being merged by other securityPolicies
+        for these routes: [default/internal-dashboard]'
+```
+
+Two consequences:
+
+- **It needs `envoy-gateway` v1.8.0 or later.** `mergeType` arrived in
+  v1.8.0. On an older CRD there is no such field, and how that fails
+  depends on how you apply: a **server-side** apply (`kubectl apply
+  --server-side`, and every GitOps controller) is **rejected** with
+  `.spec.mergeType: field not declared in schema`, while a client-side
+  apply drops the field **silently** and leaves you with the replace
+  behaviour. Check the CRD before trusting the field:
+
+  ```console
+  $ kubectl get crd securitypolicies.gateway.envoyproxy.io \
+      -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.mergeType.type}'
+  string     # empty output = your Envoy Gateway is too old
+  ```
+
+  If you manage the gateway with GitOps, that ordering is load-bearing:
+  **upgrade Envoy Gateway first**, then let the policy carrying
+  `mergeType` reconcile. The other order fails the whole apply set.
+
+- **`mergeType` is legal only on a child target** — `HTTPRoute`,
+  `GRPCRoute` or `TCPRoute`. Envoy Gateway rejects it on a `Gateway`, a
+  Gateway listener or a `ListenerSet`, because there is no parent to merge
+  into. Never copy the field onto a gateway-wide policy.
+
+The trap is not specific to this addon. **Any** route-level
+`SecurityPolicy` you write replaces the Gateway's: set `mergeType` on it,
+or first check what the Gateway policy was doing for that route.
+
+To prove the merge on a running gateway, read the generated Envoy config
+rather than the policy status. The route entries under a protected host's
+virtual host must carry **both** filters:
+
+```console
+$ kubectl -n envoy-gateway-system port-forward <envoy-pod> 19000:19000 &
+$ curl -s 'localhost:19000/config_dump?resource=dynamic_route_configs' \
+  | jq -r '.configs[].route_config.virtual_hosts[]
+           | . as $v
+           | (($v.routes // []) | map((.typed_per_filter_config // {}) | keys)
+              | add // [] | unique) as $f
+           | "\($v.name)\trbac=\($f | any(startswith("envoy.filters.http.rbac")))"
+           + "\toidc=\($f | any(test("oauth2")))"'
+
+default/gw/https/app_example_com      rbac=true   oidc=false
+default/gw/https/internal_example_com rbac=true   oidc=true    # merged
+```
+
+`rbac=false oidc=true` on a protected host is the bug: the login went on
+and the gateway's guard came off. Note the filter order — Envoy runs
+`oauth2` **before** `rbac`, so an unauthenticated request from a blocked
+source is redirected to the issuer first and refused after it returns.
+Access is still gated; the service's existence is no longer hidden.
 
 ## Writing a custom addon
 

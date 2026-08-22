@@ -8,6 +8,38 @@ metadata:
   name: sso-gate
   namespace: default
 spec:
+  # MERGE into the Gateway's policy, do not REPLACE it (Envoy Gateway v1.8+).
+  #
+  # Without this field a route-level SecurityPolicy replaces the Gateway-level
+  # one WHOLESALE for every route it selects. So labelling a route for SSO also
+  # silently drops whatever the Gateway policy enforced on it — an IP
+  # allowlist, an `authorization` deny-by-default, JWT, CORS. The route becomes
+  # MORE reachable than before you protected it, and Envoy Gateway reports the
+  # loss only as an `Overridden: True` condition on the Gateway policy, which
+  # nothing reads. (Measured, not theorised: an unmerged route policy stripped
+  # a Gateway-level IP allowlist from one host and went unnoticed until someone
+  # read the generated Envoy config and saw the RBAC filter missing from that
+  # vhost alone, while every sibling still had it.)
+  #
+  # `StrategicMerge` merges this policy's fields into the parent instead: a
+  # labelled route keeps the Gateway's authorization AND gains OIDC.
+  # `JSONMerge` is the other accepted value (RFC 7386 — a `null` deletes the
+  # parent's field). `Replace` is rejected by the CRD: "no merge" is spelled by
+  # omitting the field, not by naming it.
+  #
+  # CONSTRAINT: mergeType is only legal on a policy targeting a CHILD resource
+  # (HTTPRoute/GRPCRoute/TCPRoute) — there is no parent to merge into
+  # otherwise, and Envoy Gateway rejects it on Gateway / Gateway-listener /
+  # ListenerSet targets. This addon only ever targets HTTPRoutes, so it is
+  # always legal here; do NOT copy the field onto a gateway-wide policy.
+  #
+  # Needs the envoy-gateway addon at v1.8.0 or later. On v1.7.x the field does
+  # not exist in the CRD, and the failure differs by apply mode (measured):
+  # a SERVER-SIDE apply — bootstrap's kapply, and every GitOps controller —
+  # is REJECTED outright with `.spec.mergeType: field not declared in schema`,
+  # while a client-side apply drops the field silently and leaves the replace
+  # behaviour. So upgrade envoy-gateway BEFORE this policy reconciles.
+  mergeType: StrategicMerge
   targetSelectors:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute

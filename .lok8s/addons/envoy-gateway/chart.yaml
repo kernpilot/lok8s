@@ -1,4 +1,42 @@
 # khelm chart spec for Envoy Gateway
+#
+# ── CRDs ride the render; nothing here runs helm ─────────────────────────────
+# The chart carries both Envoy Gateway's own xPolicy CRDs and the upstream
+# Gateway API bundle, and khelm inflates them into the kustomize output. The
+# usual "helm upgrade does not upgrade CRDs" trap therefore does not apply —
+# `kapply` server-side-applies the WHOLE render, CRDs included.
+#
+# State that as a RISK, not a convenience: controller and CRDs land in ONE
+# apply, in no guaranteed order. A controller that starts before its CRDs
+# register logs errors and restarts; bootstrap's CRD/webhook retry loop
+# (.lok8s/libs/bootstrap) absorbs it. v1.8 moved the CRDs into a chart
+# DEPENDENCY (to stay under Helm's 1MB release-secret limit) — khelm resolves
+# that transparently, verified by rendering each pin and diffing the object
+# inventory.
+#
+# ── Gateway API bundle version rides the chart version ───────────────────────
+#   EG v1.7.1 → Gateway API v1.4.1
+#   EG v1.8.3 → Gateway API v1.5.1   (adds the standard ListenerSet CRD;
+#                                     drops the experimental XListenerSet)
+#   EG v1.9.0 → Gateway API v1.6.1   (TCPRoute/UDPRoute/TLSRoute gain v1 and
+#                                     move their storage version to it)
+# Upgrading this pin therefore upgrades Gateway API. Two things to check
+# BEFORE a jump that crosses a Gateway API minor:
+#   1. No CRD's `status.storedVersions` names a version the new bundle stops
+#      serving — the apiserver rejects such an update outright.
+#      kubectl get crd -o json | jq -r '.items[]
+#        | select(.spec.group|test("gateway"))
+#        | "\(.metadata.name) stored=\(.status.storedVersions|join(","))"'
+#   2. Where a storage version MOVES (v1alpha2 → v1), storedVersions
+#      accumulates. Nothing breaks while both are served, but a storage
+#      migration is owed before the old version is finally removed upstream.
+#
+# ── The safe-upgrades ValidatingAdmissionPolicy blocks DOWNGRADES ────────────
+# v1.8.1 moved `ValidatingAdmissionPolicy safe-upgrades.gateway.networking.k8s.io`
+# out of the CRD bundle into the chart TEMPLATES, so this addon now installs it.
+# It rejects any Gateway API CRD annotated with a bundle-version below v1.5.
+# Rolling this pin back to v1.7.x therefore fails at admission until the VAP and
+# its binding are deleted. Rolling back to v1.8.x is unaffected (v1.5.1 passes).
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
@@ -6,6 +44,6 @@ metadata:
   namespace: envoy-gateway-system
 repository: oci://docker.io/envoyproxy
 chart: gateway-helm
-version: v1.7.1
+version: v1.9.0
 valueFiles:
   - values.yaml

@@ -10,8 +10,43 @@
 # Removing the label (or deleting this addon) makes the route public again;
 # the route object itself never changes shape.
 #
+# ── SSO ADDS, it does not REPLACE (mergeType — read this one) ────────────────
+# The shipped policy sets `mergeType: StrategicMerge`, and that single field is
+# the difference between "this route now needs a login" and "this route now
+# needs a login INSTEAD of everything else that guarded it".
+#
+# Envoy Gateway resolves overlapping SecurityPolicies by SPECIFICITY: the most
+# specific one wins ENTIRELY. A policy on an HTTPRoute therefore replaces the
+# policy on that route's Gateway — not field by field, wholesale. If your
+# Gateway carries an IP allowlist, an `authorization` deny-by-default, JWT or
+# CORS, an unmerged sso-gate DELETES all of it for every route you label. The
+# route ends up more reachable than it was before you protected it, and the
+# only signal is an `Overridden: True` status condition on the Gateway policy —
+# listing the routes it lost, where nobody looks.
+#
+# `mergeType: StrategicMerge` merges this policy INTO the Gateway's instead, so
+# a labelled route keeps the gateway-wide guards and gains OIDC on top. It is
+# legal only on a policy targeting a CHILD resource (HTTPRoute/GRPCRoute/
+# TCPRoute) — Envoy Gateway rejects it on a Gateway or listener target — which
+# is exactly this addon's shape.
+#
+# When the merge takes effect, the Gateway policy stops listing the route under
+# `Overridden` and lists it under `Merged` instead — that swap is the cheapest
+# confirmation. (Read the generated Envoy config for the real proof: the route
+# must carry BOTH `envoy.filters.http.rbac` and the oauth2 filter. Envoy runs
+# oauth2 FIRST, so a blocked client is redirected to the issuer and refused
+# after it returns — gated, but no longer hidden.)
+#
+# Requires the `envoy-gateway` addon at **v1.8.0 or later**. Older CRDs have no
+# such field, and the failure differs by apply mode: a SERVER-SIDE apply (this
+# framework's `kapply`, and every GitOps controller) is REJECTED with
+# `.spec.mergeType: field not declared in schema`, while a client-side apply
+# drops it silently and leaves the replace behaviour above. Upgrade
+# envoy-gateway BEFORE this policy reconciles, or the whole apply set fails.
+#
 # ── Requirements ──────────────────────────────────────────────────────────────
-#   - the `envoy-gateway` addon (SecurityPolicy is its CRD; any OIDC issuer works)
+#   - the `envoy-gateway` addon at v1.8.0+ (SecurityPolicy is its CRD, and
+#     `mergeType` needs 1.8; any OIDC issuer works)
 #   - a client registered at your issuer with redirect URI
 #       https://<each-protected-host>/oauth2/callback
 #   - a Secret `sso-gate-client` (key `client-secret`) NEXT TO the policy —
