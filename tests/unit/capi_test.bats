@@ -338,3 +338,80 @@ YAML
   assert_success
   refute_output --partial "HetznerBareMetalMachineTemplate"
 }
+
+# --- template-variable containment (POST-REVIEW finding 6) ---
+
+@test "capi::generate leaves no template variable in the caller's environment" {
+  command -v yq &>/dev/null || skip "yq required"
+  command -v envsubst >/dev/null || skip "envsubst not available"
+
+  # The variables have to be EXPORTED for envsubst's child process, but they
+  # must not outlive the call: CLUSTER_NAME and K8S_VERSION are also read by
+  # the kubeone driver, and a leaked value renders the wrong cluster on the
+  # next call in the same `lo` process.
+  local v
+  for v in "${_CAPI_TEMPLATE_VARS[@]}"; do unset "${v}"; done
+
+  # Called DIRECTLY with a FILE redirect. Neither `run` nor `$( … )` works here:
+  # both put the call in a subshell, so an environment leak is discarded before
+  # the assertions can see it. Two drafts of this test passed against a
+  # deliberately leaking mutant for exactly that reason.
+  local out_file="${BATS_TEST_TMPDIR}/generated.yaml"
+  capi::generate "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" "hetzner" > "${out_file}"
+  local out; out="$(cat "${out_file}")"
+  # Positive control: the render really did use them, so an "all unset" result
+  # below cannot mean "nothing happened".
+  [[ "${out}" == *"name: test-production"* ]] || {
+    echo "the render produced nothing recognisable:" >&2
+    echo "${out}" >&2
+    return 1
+  }
+
+  local -a leaked=()
+  for v in "${_CAPI_TEMPLATE_VARS[@]}"; do
+    [[ -z "${!v+set}" ]] || leaked+=("${v}=${!v}")
+  done
+  [ "${#leaked[@]}" -eq 0 ] || {
+    echo "capi::generate exported these into the caller:" >&2
+    printf '  %s\n' "${leaked[@]}" >&2
+    return 1
+  }
+}
+
+@test "the envsubst whitelist is DERIVED from the variable list" {
+  # The drift gate. The whitelist and the export set were two hand-kept copies;
+  # a variable in one and not the other ships its ${PLACEHOLDER} verbatim into
+  # an applied manifest.
+  local want=""
+  local v
+  for v in "${_CAPI_TEMPLATE_VARS[@]}"; do want+="\${${v}} "; done
+  want="${want% }"
+  [ "$(capi::_allowed_vars)" = "${want}" ]
+
+  # And no hardcoded list survives in the source.
+  local hits
+  hits=$(grep -n 'allowed_vars=.\${CLUSTER_NAME}' \
+    "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate" || true)
+  [ -z "${hits}" ] || {
+    echo "a literal envsubst whitelist is back:" >&2
+    echo "${hits}" >&2
+    echo "Build it from _CAPI_TEMPLATE_VARS instead." >&2
+    return 1
+  }
+}
+
+@test "capi::generate FAILS on a bad pool name instead of emitting a partial stream" {
+  # libs/provision calls the driver as `driver::provision || rc=$?`, which
+  # disables errexit below it, so the unguarded `rendered=$(…)` let a failed
+  # render flow on as a control plane with no workers.
+  command -v yq &>/dev/null || skip "yq required"
+  command -v envsubst >/dev/null || skip "envsubst not available"
+
+  local spec="${BATS_TEST_TMPDIR}/bad-pool.lok8s.yaml"
+  cp "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" "${spec}"
+  yq -i '.spec.workers = {"-nope": {"replicas": 1, "type": "cax11"}}' "${spec}"
+
+  run capi::generate "${spec}" "hetzner"
+  assert_failure
+  refute_output --partial "kind: Cluster"
+}

@@ -15,6 +15,29 @@ capi::detect_provider() {
   provider::detect "${1}"
 }
 
+# The template variables capi::generate feeds to envsubst. ONE list: it is the
+# export set, the envsubst whitelist, and (because they are confined to a
+# subshell) the cleanup set. They used to be two hand-maintained copies, and a
+# variable exported but missing from the whitelist ships its `${PLACEHOLDER}`
+# verbatim into an applied manifest.
+_CAPI_TEMPLATE_VARS=(
+  CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN
+  K8S_VERSION K8S_VERSION_TRIMMED K8S_VERSION_MINOR
+  CP_REPLICAS CP_TYPE CREDENTIAL_SECRET_NAME
+  HCLOUD_REGION HCLOUD_SSH_KEY_NAME HCLOUD_IMAGE_NAME HCLOUD_NETWORK_ENABLED
+  POOL_NAME POOL_REPLICAS POOL_TYPE
+)
+
+# capi::_allowed_vars — the GNU SHELL-FORMAT string envsubst wants,
+# '${A} ${B} …', built from the list above.
+capi::_allowed_vars() {
+  local out="" v
+  for v in "${_CAPI_TEMPLATE_VARS[@]}"; do
+    out+="\${${v}} "
+  done
+  echo "${out% }"
+}
+
 # Generate CAPI resources from templates using values from cluster spec.
 # Usage: capi::generate <cluster_yaml> <provider>
 # Outputs multi-document YAML to stdout.
@@ -39,41 +62,52 @@ capi::generate() {
     return 1
   fi
 
-  # Cluster identity + Kubernetes version (full, trimmed, and minor — the
-  # cloud-init needs the trimmed/minor forms for the apt repo + package pins).
-  export CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN
-  export K8S_VERSION K8S_VERSION_TRIMMED K8S_VERSION_MINOR
-  export CP_REPLICAS CP_TYPE CREDENTIAL_SECRET_NAME
-  export HCLOUD_REGION HCLOUD_SSH_KEY_NAME HCLOUD_IMAGE_NAME HCLOUD_NETWORK_ENABLED
-  CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
-  CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
-  CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
-  K8S_VERSION=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
-  K8S_VERSION_TRIMMED="${K8S_VERSION#v}"        # v1.31.12 -> 1.31.12
-  K8S_VERSION_MINOR="${K8S_VERSION_TRIMMED%.*}" # 1.31.12  -> 1.31
-  CP_REPLICAS=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
-  CP_TYPE=$(yq -r '.spec.controlPlane.type // "cax11"' "${cluster_yaml}")
-  CREDENTIAL_SECRET_NAME=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
-  HCLOUD_REGION=$(yq -r '.spec.provider.config.region // .spec.hcloud.region // "fsn1"' "${cluster_yaml}")
-  HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
-  HCLOUD_IMAGE_NAME=$(yq -r '.spec.provider.config.image // "ubuntu-24.04"' "${cluster_yaml}")
-  HCLOUD_NETWORK_ENABLED=$(yq -r '.spec.provider.config.network.enabled // false' "${cluster_yaml}")
   local pg_enabled
   pg_enabled=$(yq -r '.spec.provider.config.placementGroups // false' "${cluster_yaml}")
 
-  if [[ -z "${HCLOUD_SSH_KEY_NAME}" ]]; then
-    error "spec.provider.config.sshKeyName is required for the hetzner CAPI provider"
-    return 1
-  fi
-
-  # Only these are expanded; everything else (cloud-init shell vars) is literal.
-  # shellcheck disable=SC2016  # a literal ${VAR} list is exactly what envsubst wants
-  local allowed_vars='${CLUSTER_NAME} ${CLUSTER_NAMESPACE} ${CLUSTER_DOMAIN} ${K8S_VERSION} ${K8S_VERSION_TRIMMED} ${K8S_VERSION_MINOR} ${CP_REPLICAS} ${CP_TYPE} ${HCLOUD_REGION} ${HCLOUD_SSH_KEY_NAME} ${HCLOUD_IMAGE_NAME} ${HCLOUD_NETWORK_ENABLED} ${CREDENTIAL_SECRET_NAME} ${POOL_NAME} ${POOL_REPLICAS} ${POOL_TYPE}'
+  # Only the listed variables are expanded; everything else (the cloud-init's
+  # own $ARCH, $RUNC, $KUBERNETES_VERSION …) stays literal.
+  local allowed_vars; allowed_vars="$(capi::_allowed_vars)"
 
   # Render all resources, capturing the stream so optional placement groups can
   # be injected afterward (envsubst can't conditionally include YAML blocks).
+  #
+  # EVERY export lives inside this subshell. They have to be exported —
+  # template::envsubst's GNU path renders in a child process — but they must not
+  # survive the call: CLUSTER_NAME and K8S_VERSION are read by the kubeone driver
+  # too, and a leaked value from an earlier capi::generate would render the wrong
+  # cluster (POST-REVIEW finding 6). This is the idiom template::render already
+  # uses, and it needs no unset list to keep in sync.
+  #
+  # `|| return 1` on the assignment is not decoration: libs/provision runs the
+  # driver as `driver::provision || rc=$?`, which disables errexit for the whole
+  # tree below, so an unguarded assignment let a FAILED render flow on as a
+  # partial manifest stream.
   local rendered
   rendered=$(
+    # Cluster identity + Kubernetes version (full, trimmed, and minor — the
+    # cloud-init needs the trimmed/minor forms for the apt repo + package pins).
+    export "${_CAPI_TEMPLATE_VARS[@]}"
+    CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
+    CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
+    CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
+    K8S_VERSION=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+    K8S_VERSION_TRIMMED="${K8S_VERSION#v}"        # v1.31.12 -> 1.31.12
+    K8S_VERSION_MINOR="${K8S_VERSION_TRIMMED%.*}" # 1.31.12  -> 1.31
+    CP_REPLICAS=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
+    CP_TYPE=$(yq -r '.spec.controlPlane.type // "cax11"' "${cluster_yaml}")
+    CREDENTIAL_SECRET_NAME=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
+    HCLOUD_REGION=$(yq -r '.spec.provider.config.region // .spec.hcloud.region // "fsn1"' "${cluster_yaml}")
+    HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
+    HCLOUD_IMAGE_NAME=$(yq -r '.spec.provider.config.image // "ubuntu-24.04"' "${cluster_yaml}")
+    HCLOUD_NETWORK_ENABLED=$(yq -r '.spec.provider.config.network.enabled // false' "${cluster_yaml}")
+
+    # `exit`, not `return`: this is a subshell, and the caller reads its status.
+    if [[ -z "${HCLOUD_SSH_KEY_NAME}" ]]; then
+      error "spec.provider.config.sshKeyName is required for the hetzner CAPI provider"
+      exit 1
+    fi
+
     first=1
     for tpl in \
       "${core}/cluster.yaml" \
@@ -84,17 +118,16 @@ capi::generate() {
       template::envsubst "${allowed_vars}" < "${tpl}"
     done
     # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
-    export POOL_NAME POOL_REPLICAS POOL_TYPE
     # while-read, not `for … in $(yq …)`: word-splitting would break a
     # whitespace-bearing pool name into fragments BEFORE validation — each
     # fragment could pass the regex and generate manifests for pools that
     # don't exist. read consumes each name exactly as yq emits it.
     while IFS= read -r pool; do
       [[ -n "${pool}" ]] || continue
-      spec::validate_pool_name "${pool}" || return 1
+      spec::validate_pool_name "${pool}" || exit 1
       POOL_NAME="${pool}"
-      POOL_REPLICAS=$(spec::pool_field "${cluster_yaml}" "${pool}" replicas 1) || return 1
-      POOL_TYPE=$(spec::pool_field "${cluster_yaml}" "${pool}" type cax11) || return 1
+      POOL_REPLICAS=$(spec::pool_field "${cluster_yaml}" "${pool}" replicas 1) || exit 1
+      POOL_TYPE=$(spec::pool_field "${cluster_yaml}" "${pool}" type cax11) || exit 1
       for tpl in \
         "${core}/machine-deployment.yaml" \
         "${prov}/kubeadm-config-template.yaml" \
@@ -111,7 +144,11 @@ capi::generate() {
         template::envsubst "${allowed_vars}" < "${tpl}"
       done
     done < <(spec::pool_names "${cluster_yaml}")
-  )
+  ) || return 1
+  [[ -n "${rendered}" ]] || {
+    error "the CAPI manifest stream rendered EMPTY from ${tmpl_dir} — refusing to continue"
+    return 1
+  }
 
   # Optional anti-affinity: opt-in `spread` placement groups (control plane +
   # workers), injected with yq. A spread group caps at 10 servers, so this is OFF
