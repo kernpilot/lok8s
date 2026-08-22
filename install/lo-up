@@ -87,15 +87,22 @@ loup::verify_registered() {
 # the vendored framework, the `lo` entrypoint, and the binaries `lo` shells out
 # to on every command. Anything missing here means a later `lo use` fails with a
 # far less obvious error.
+# The bin directory as the user sees it in a message — ".bin", not the full
+# path. Strip a trailing slash BEFORE taking the basename: with
+# PATH_BIN=".../.bin/" a bare ${PATH_BIN##*/} is EMPTY, so the missing-binary
+# line read "/argsh". One helper because the display was written twice and only
+# one copy had the fix (issue #112 part 4).
+loup::bin_dir() {
+  local dir="${PATH_BIN%/}"
+  echo "${dir##*/}"
+}
+
 loup::verify_materialised() {
   local -a missing=()
   [[ -d "${PWD}/.lok8s" ]] || missing+=(".lok8s/ (vendored framework)")
   [[ -f "${PWD}/.lok8s/lo" ]] || missing+=(".lok8s/lo (CLI entrypoint)")
 
-  # Strip a trailing slash BEFORE taking the basename: with PATH_BIN=".../.bin/"
-  # a bare ${PATH_BIN##*/} is empty, so the missing-binary line read "/argsh".
-  local bin_dir="${PATH_BIN%/}"
-  bin_dir="${bin_dir##*/}"
+  local bin_dir; bin_dir="$(loup::bin_dir)"
 
   # envsubst is in this list because leaving it out made the check LIE: `b
   # install` renders every manifest through it (b.yaml's core group maps
@@ -176,7 +183,7 @@ main() {
   _ok "lok8s env ready"
   _say ""
   _say "  Next:"
-  _say "    \033[2m${PATH_BIN##*/}/lo-up\033[0m   \033[2m# re-run anytime to update\033[0m"
+  _say "    \033[2m$(loup::bin_dir)/lo-up\033[0m   \033[2m# re-run anytime to update\033[0m"
   _say "    \033[2mlo use <domain> && lo up\033[0m"
   _say ""
 }

@@ -26,7 +26,7 @@ setup() {
   mkdir -p "${PATH_BIN}"
 
   # Pull in the two functions without executing the script.
-  eval "$(sed -n '/^loup::verify_registered()/,/^}/p;/^loup::verify_materialised()/,/^}/p' \
+  eval "$(sed -n '/^loup::bin_dir()/,/^}/p;/^loup::verify_registered()/,/^}/p;/^loup::verify_materialised()/,/^}/p' \
     "${_PROJECT_ROOT}/install/lo-up")"
 
   cd "${BATS_TEST_TMPDIR}" || return 1
@@ -101,6 +101,43 @@ materialise() {
   run bare_path loup::verify_materialised
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"argsh"* ]]
+}
+
+@test "the missing-binary line survives a trailing slash on PATH_BIN" {
+  # `${PATH_BIN##*/}` on ".../.bin/" is EMPTY, so the line read "/argsh"
+  # (issue #112 part 4). The basename is computed in one place now —
+  # loup::bin_dir — and both display sites call it.
+  materialise
+  rm -f "${PATH_BIN}/argsh"
+  PATH_BIN="${PATH_BIN}/"
+  run bare_path loup::verify_materialised
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *".bin/argsh"* ]] || {
+    echo "expected '.bin/argsh' in the message, got:" >&2
+    echo "${output}" >&2
+    return 1
+  }
+}
+
+@test "install/lo-up has ONE basename-of-PATH_BIN expression" {
+  # The drift gate for part 4. Two display sites carried the same expression
+  # and only one of them was ever fixed.
+  # loup::bin_dir strips the trailing slash before the basename, so any raw
+  # ${PATH_BIN##*/} left in the file is a second copy with the old bug.
+  # Comment lines are excluded — the fix is explained in one.
+  local hits
+  hits=$(grep -n '\${PATH_BIN##\*/}' "${_PROJECT_ROOT}/install/lo-up" \
+    | grep -v '^[0-9]*:#' || true)
+  [ -z "${hits}" ] || {
+    echo "a raw \${PATH_BIN##*/} is back — it renders empty on a trailing slash:" >&2
+    echo "${hits}" >&2
+    echo "Call loup::bin_dir instead." >&2
+    return 1
+  }
+  grep -q '^loup::bin_dir()' "${_PROJECT_ROOT}/install/lo-up" || {
+    echo "loup::bin_dir is gone — this gate is measuring nothing." >&2
+    return 1
+  }
 }
 
 @test "verify_materialised reports every missing piece at once" {

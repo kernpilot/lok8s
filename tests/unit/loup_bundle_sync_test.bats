@@ -10,18 +10,21 @@
 # entirely. So an edit to install/lo-up that is never rebuilt keeps shipping the
 # OLD script to every new user, indefinitely and silently.
 #
-# The ideal gate is byte-exact — `install/build && git diff --exit-code` — and it
-# is viable: the build is deterministic (verified, two runs, identical sha256).
-# It is not what this file does, because the build needs the arg-sh/argsh
-# checkout AND its `minifier`, which is a Rust crate in that repo. CI has
-# neither, and a gate that skips in CI is the failure mode this repo keeps
-# finding rather than a gate. See the PR for that follow-up.
+# The byte-exact gate NOW EXISTS: the `loup-bundle` job in ci.yml checks
+# arg-sh/argsh out at install/argsh.pin, downloads the pinned `minifier`
+# release asset, runs install/build and diffs. What blocked it was not the
+# toolchain — the minifier ships as a release asset and gettext is one apt
+# package — but the fact that the bundle embeds the runtime's version and
+# commit, so a rebuild from a different argsh revision differs for a reason
+# that has nothing to do with lo-up. install/argsh.pin records that revision.
 #
-# What this pins instead needs nothing but the two files, so it runs everywhere
-# CI already runs bats: the required-binary list is the part of lo-up that
-# actually drifted, and the minifier preserves those names because they are
-# string literals in a `for bin in …` loop. If someone adds a binary to the
-# source list and forgets to rebuild, this goes red.
+# This file is the half that needs NOTHING but the repo, so it runs everywhere
+# bats runs, including on a machine that cannot build. It pins two things: the
+# required-binary list (the part of lo-up that actually drifted), and the
+# agreement between the pin file and the runtime baked into the bundle. The
+# second is what keeps the pin honest — a rebuild from an unpinned argsh, or a
+# pin bump without a rebuild, fails here even when the byte-exact job does not
+# run.
 
 setup() {
   load "../test_helper"
@@ -114,6 +117,95 @@ _bundle_bins() {
   [[ " ${have} " == *" envsubst "* ]] || {
     echo "the published installer's checked list is [${have}] — no envsubst, so a" >&2
     echo "green install can still have broken templating (issue #112 part 1)." >&2
+    return 1
+  }
+}
+
+
+# ── the pin agrees with what is actually in the bundle ────
+
+_pin_value() {
+  sed -n "s/^${1}=//p" "${_PROJECT_ROOT}/install/argsh.pin"
+}
+
+@test "install/argsh.pin records a runtime revision" {
+  # ANTI-VACUITY for the two tests below: both compare against these values, so
+  # an unparseable or empty pin would make them pass over nothing.
+  local ref describe
+  ref="$(_pin_value ref)"
+  describe="$(_pin_value describe)"
+  [[ "${ref}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "install/argsh.pin has no 40-char ref (got '${ref}')" >&2
+    return 1
+  }
+  [ -n "${describe}" ] || { echo "install/argsh.pin has no describe" >&2; return 1; }
+}
+
+@test "the published bundle carries the PINNED argsh runtime" {
+  # The bundle embeds `ARGSH_VERSION="…"` from the argsh checkout install/build
+  # ran against. If it disagrees with the pin, either the bundle was built from
+  # an unpinned runtime or the pin was bumped without rebuilding — and the
+  # byte-exact CI job would then fail for a reason nobody can reproduce.
+  local want; want="$(_pin_value describe)"
+  local have
+  have="$(grep -om1 'ARGSH_VERSION="[^"$]*"' "${BUNDLE}" | sed 's/^ARGSH_VERSION="//; s/"$//')"
+
+  [ -n "${have}" ] || {
+    echo "no ARGSH_VERSION literal in ${BUNDLE} — the bundle is not built from" >&2
+    echo "install/lo-up.min.tmpl, or the template no longer stamps it." >&2
+    return 1
+  }
+  [ "${want}" = "${have}" ] || {
+    echo "the published installer was built from a DIFFERENT argsh runtime:" >&2
+    echo "  install/argsh.pin  : ${want}" >&2
+    echo "  docs/public/lo-up  : ${have}" >&2
+    echo "Rebuild:  ARGSH_SRC=/path/to/arg-sh/argsh install/build" >&2
+    return 1
+  }
+}
+
+@test "the bundle's argsh commit is the pinned one" {
+  local want; want="$(_pin_value ref)"
+  local have
+  have="$(grep -om1 'ARGSH_COMMIT_SHA="[0-9a-f]*"' "${BUNDLE}" \
+    | sed 's/^ARGSH_COMMIT_SHA="//; s/"$//')"
+
+  [ -n "${have}" ] || { echo "no ARGSH_COMMIT_SHA literal in ${BUNDLE}" >&2; return 1; }
+  [[ "${want}" == "${have}"* ]] || {
+    echo "the published installer's argsh commit is not the pinned one:" >&2
+    echo "  install/argsh.pin  : ${want}" >&2
+    echo "  docs/public/lo-up  : ${have}" >&2
+    return 1
+  }
+}
+
+@test "install/build refuses to build from an unpinned argsh revision" {
+  # The pin is only worth something if the build enforces it. Grepping the
+  # source rather than running it: the build needs the argsh checkout and the
+  # minifier, which is exactly what this file cannot assume.
+  local build="${_PROJECT_ROOT}/install/build"
+  grep -q 'argsh.pin' "${build}" || {
+    echo "install/build no longer reads install/argsh.pin — the pin is now" >&2
+    echo "documentation, not a constraint." >&2
+    return 1
+  }
+  grep -q 'argsh revision does not match install/argsh.pin' "${build}" || {
+    echo "install/build no longer FAILS on a pin mismatch." >&2
+    return 1
+  }
+}
+
+@test "CI rebuilds the bundle and diffs it" {
+  # The other half. Without a workflow step, nothing rebuilds and the two tests
+  # above only prove the bundle is self-consistent, not current.
+  local ci="${_PROJECT_ROOT}/.github/workflows/ci.yml"
+  grep -q 'install/build' "${ci}" || {
+    echo "no CI step runs install/build — docs/public/lo-up can drift from" >&2
+    echo "install/lo-up with nothing to notice (issue #112 part 2)." >&2
+    return 1
+  }
+  grep -q 'git diff --exit-code -- docs/public/lo-up' "${ci}" || {
+    echo "CI builds the bundle but never diffs it against the committed one." >&2
     return 1
   }
 }
