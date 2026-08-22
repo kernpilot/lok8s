@@ -434,7 +434,11 @@ cluster first (`lo use <domain>`). It applies the agent that
 may send heartbeats. Re-run it after you change the value. It waits for the
 switch to be real — for the new agent to be `Ready`, or for the removed one's
 pod to be gone — and fails instead of continuing if a step does not complete,
-so it never leaves two agents beating. See the
+or if it cannot see whether the step completed. So it never starts the second
+producer itself: it either finishes the switch or stops with the cluster in the
+single-agent state it was already in. Extend the waits with
+`KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS` and `KUBEHZ_LIVE_AGENT_DRAIN_SECONDS` (both
+120 by default) when a cold image pull or a slow link needs longer. See the
 [kubehz guide](../guide/kubehz.md#choosing-an-agent).
 
 ### lo kustomize

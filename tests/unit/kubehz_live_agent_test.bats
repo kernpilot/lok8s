@@ -267,17 +267,20 @@ _stub_yq() {
   assert_output --partial "operator"
 }
 
-@test "render: access decides the overlay — registered gets base, managed gets managed" {
+@test "overlay: access decides the overlay — registered gets base, managed gets managed" {
   _source_deploy
   local work="${BATS_TEST_TMPDIR}/r1"
-  mkdir -p "${work}"
-  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator registered
-  [ "${KUBEHZ_LIVE_AGENT_OVERLAY}" = "${work}/live-agent/base" ]
 
-  local work2="${BATS_TEST_TMPDIR}/r2"
-  mkdir -p "${work2}"
-  kubehz::render_agent "${work2}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  [ "${KUBEHZ_LIVE_AGENT_OVERLAY}" = "${work2}/live-agent/managed" ]
+  run kubehz::live_agent_overlay "${work}" registered
+  assert_output "${work}/live-agent/base"
+  run kubehz::live_agent_overlay "${work}" managed
+  assert_output "${work}/live-agent/managed"
+  # Anything that is not 'managed' is read-only: an unknown tier must never
+  # fall through to the overlay that grants acting RBAC.
+  run kubehz::live_agent_overlay "${work}" ""
+  assert_output "${work}/live-agent/base"
+  run kubehz::live_agent_overlay "${work}" Managed
+  assert_output "${work}/live-agent/base"
 }
 
 @test "render: a surviving placeholder refuses the whole render" {
@@ -312,6 +315,42 @@ _stub_yq() {
   # a switch back to cronjob mode removes it, and deleting kubehz-system would
   # take the never-rotated identity Secret with it.
   refute_output --partial "kind: Namespace"
+}
+
+@test "dry run: renders with the kustomize the APPLY uses, not the standalone binary" {
+  # The apply is `kubectl apply -k`, so the dry run is `kubectl kustomize`. Two
+  # renderers means two kustomize versions (the embedded one lags the released
+  # one), and a dry run that can differ from the apply is untrustworthy for the
+  # cases you would run it for. A standalone `kustomize` on PATH must not be
+  # what produces this output.
+  _source_deploy
+  local work="${BATS_TEST_TMPDIR}/r5"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  kustomize() { echo "STANDALONE-KUSTOMIZE-RAN $*"; }
+  export -f kustomize
+
+  run kubehz::deploy_print "${work}" operator managed
+  assert_success
+  refute_output --partial "STANDALONE-KUSTOMIZE-RAN"
+  assert_output --partial "kind: CronJob"
+  assert_output --partial "name: kubehz-live-agent"
+  # managed was asked for, so the acting RBAC is what the operator is shown.
+  assert_output --partial "machinedeployments"
+}
+
+@test "dry run: cronjob mode prints the CronJob only, and says the live agent goes" {
+  _source_deploy
+  local work="${BATS_TEST_TMPDIR}/r6"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+
+  run kubehz::deploy_print "${work}" cronjob registered
+  assert_success
+  assert_output --partial "kind: CronJob"
+  refute_output --partial "name: kubehz-live-agent"
+  assert_output --partial "NOT deployed in cronjob mode"
 }
 
 # ══ 4. Apply order (no instant with two producers) ═════════════════════════
@@ -381,6 +420,23 @@ _stub_kubectl_log() {
   # not just report a failed command.
   assert_output --partial "never became Ready"
   assert_output --partial "NOTHING owns the heartbeat"
+}
+
+@test "waits: the rollout timeout comes from the environment, so a slow pull can be given room" {
+  # A fail-hard guard the operator cannot extend turns a cold first image pull
+  # on a slow link into "NOTHING owns the heartbeat" with no way out but a
+  # source edit. The default stays 120s; the override must reach kubectl.
+  export KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS=600
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a8"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_success
+  run grep -F 'rollout status deployment/kubehz-live-agent' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "--timeout=600s"
 }
 
 @test "apply order (to cronjob): the live agent is removed BEFORE the CronJob beats again" {
@@ -469,6 +525,71 @@ _stub_kubectl_log() {
   refute [ "$(grep -c "apply -k ${work}/agent" "${STUB_KUBECTL_LOG}")" != "0" ]
 }
 
+@test "apply order (to cronjob): a pod probe that CANNOT SEE the pods never re-arms the CronJob" {
+  _source_deploy
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${STUB_KUBECTL_LOG}"
+  # The live agent's pod IS still running — but the kubeconfig may delete a
+  # Deployment and not list pods in kubehz-system, which is an ordinary narrow
+  # role. "No pods" and "cannot see pods" print the same empty stdout, so a
+  # probe that reads only the output is blind to the difference and calls a
+  # still-beating cluster drained.
+  kubectl() {
+    case "$*" in
+      *"get pods"*)
+        echo 'Error from server (Forbidden): pods is forbidden: User "deployer" cannot list resource "pods" in API group "" in the namespace "kubehz-system"' >&2
+        return 1
+        ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+  sleep() { :; }
+  export -f sleep
+  KUBEHZ_LIVE_AGENT_DRAIN_SECONDS=10
+
+  local work="${BATS_TEST_TMPDIR}/a6"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+
+  run kubehz::deploy_apply "${work}" cronjob registered
+  assert_failure
+  # Refused, and honest about WHY: unknown, not "gone" and not "still there".
+  assert_output --partial "could not tell whether"
+  assert_output --partial "Forbidden"
+  # THE POINT, again: an unreadable probe must not re-arm the CronJob's beat.
+  refute [ "$(grep -c "apply -k ${work}/agent" "${STUB_KUBECTL_LOG}")" != "0" ]
+}
+
+@test "apply order (to operator): an unreadable heartbeat probe WARNS and continues" {
+  # The mirror image, and deliberately different: the drain wait before the
+  # live agent starts is the one fail-soft step. Its worst case is one stray
+  # schema-1 beat that the live agent overwrites — not a standing second
+  # producer — so it must not block a deploy. It must still SAY so.
+  _source_deploy
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${STUB_KUBECTL_LOG}"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) echo 'Error from server (Forbidden): pods is forbidden' >&2; return 1 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  local work="${BATS_TEST_TMPDIR}/a7"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_success
+  assert_output --partial "could not check for an in-flight heartbeat pod"
+  run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "apply -k ${work}/live-agent/managed"
+}
+
 @test "deploy_agent: refuses hosting: shared and access: none" {
   _source_deploy
   export LOK8S_KUBEHZ_HOSTING="shared" LOK8S_KUBEHZ_ACCESS="none"
@@ -555,14 +676,80 @@ _stub_kubectl_log() {
   assert_success
 }
 
-@test "rbac: the digest pin covers BOTH vendored files and nothing else" {
-  # A pin that lost a line would still pass the check above while guarding
-  # nothing — the same silent-absence failure the pin was written to end.
-  run bash -c "command grep -vE '^[[:space:]]*(#|\$)' '${LIVE_DIR}/UPSTREAM.sha256' | command awk '{print \$2}'"
+@test "rbac: the digest pin covers every RBAC file IN THE TREE, and nothing else" {
+  # `sha256sum --check` only verifies files that are LISTED, so the pin is
+  # blind to an ADDED file by construction: drop a second RBAC document in
+  # beside the vendored ones and the check above still passes, guarding
+  # nothing. So the expected list is derived from the directory itself, not
+  # written out by hand — a new rbac*.yaml must be pinned (and therefore
+  # digest-matched against upstream) before this test can go green again.
+  run bash -c "cd '${LIVE_DIR}' && command find . -type f -name 'rbac*.yaml' | command sed 's|^\\./||' | command sort"
   assert_success
+  local expected="${output}"
+
+  run bash -c "command grep -vE '^[[:space:]]*(#|\$)' '${LIVE_DIR}/UPSTREAM.sha256' | command awk '{print \$2}' | command sort"
+  assert_success
+  [ "${output}" = "${expected}" ]
+  # …and the two we expect are the two that are there.
   assert_line "base/rbac.yaml"
   assert_line "managed/rbac-managed.yaml"
   [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "rbac: the vendored tree holds no file that nobody accounts for" {
+  # The pin covers rbac*.yaml; the rest of the tree is lok8s's own and is
+  # enumerated here. A file in NEITHER set — an extra manifest quietly added
+  # to an overlay, say — fails this test, which is the only place that reads
+  # the directory as a whole.
+  run bash -c "cd '${LIVE_DIR}' && command find . -type f | command sed 's|^\\./||' | command sort"
+  assert_success
+  assert_line "UPSTREAM.sha256"
+  assert_line "base/configmap.yaml"
+  assert_line "base/deployment.yaml"
+  assert_line "base/kustomization.yaml"
+  assert_line "base/rbac.yaml"
+  assert_line "base/serviceaccount.yaml"
+  assert_line "managed/kustomization.yaml"
+  assert_line "managed/rbac-managed.yaml"
+  [ "${#lines[@]}" -eq 8 ]
+}
+
+# A ClusterRole nobody is bound to grants nothing; a BINDING is what turns a
+# rule into a permission. The rule-count guards above select ClusterRole/Role
+# only, so a binding contributes no rule and slips past every one of them —
+# `cluster-admin` bound to the agent's ServiceAccount would have been invisible
+# to this whole file. These two tests pin the bindings themselves: which Role
+# each one names, and who it names as subject.
+_bindings() {
+  local overlay="${1}"
+  command kustomize build "${overlay}" \
+    | command yq -r 'select(.kind=="RoleBinding" or .kind=="ClusterRoleBinding")
+        | .kind + "|" + (.metadata.namespace // "-") + "/" + .metadata.name
+        + "|" + .roleRef.kind + "/" + .roleRef.name
+        + "|" + ([.subjects[] | .kind + "/" + (.namespace // "-") + "/" + .name] | join(","))' \
+    | command grep -v '^---$'
+}
+
+@test "rbac: the BASE binds only its own two Roles, to its own ServiceAccount" {
+  run _bindings "${LIVE_DIR}/base"
+  assert_success
+  assert_line "ClusterRoleBinding|-/kubehz-live-agent|ClusterRole/kubehz-live-agent|ServiceAccount/kubehz-system/kubehz-live-agent"
+  assert_line "RoleBinding|kubehz-system/kubehz-live-agent-secret|Role/kubehz-live-agent-secret|ServiceAccount/kubehz-system/kubehz-live-agent"
+  # Exactly two. A third binding is a permission a customer did not agree to,
+  # however narrow the roleRef looks.
+  [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "rbac: the MANAGED overlay adds exactly two bindings, both to its own Roles" {
+  run _bindings "${LIVE_DIR}/managed"
+  assert_success
+  assert_line "ClusterRoleBinding|-/kubehz-live-agent|ClusterRole/kubehz-live-agent|ServiceAccount/kubehz-system/kubehz-live-agent"
+  assert_line "RoleBinding|kubehz-system/kubehz-live-agent-secret|Role/kubehz-live-agent-secret|ServiceAccount/kubehz-system/kubehz-live-agent"
+  # The acting RBAC. The machinedeployments RoleBinding is namespaced to
+  # kube-system — cluster-wide is a different permission entirely.
+  assert_line "RoleBinding|kube-system/kubehz-live-agent-machinedeployments|Role/kubehz-live-agent-machinedeployments|ServiceAccount/kubehz-system/kubehz-live-agent"
+  assert_line "ClusterRoleBinding|-/kubehz-live-agent-eviction-unwedge|ClusterRole/kubehz-live-agent-eviction-unwedge|ServiceAccount/kubehz-system/kubehz-live-agent"
+  [ "${#lines[@]}" -eq 4 ]
 }
 
 @test "rbac: cross-check the pin against a local upstream checkout, when there is one" {
@@ -584,9 +771,10 @@ _stub_kubectl_log() {
 @test "image: the live agent is pinned to a public GHCR digest, never a tag" {
   run bash -c "command kustomize build '${LIVE_DIR}/base' | command yq -r 'select(.kind==\"Deployment\") | .spec.template.spec.containers[0].image'"
   assert_success
-  # Public registry: a customer cluster cannot pull our private Harbor.
-  assert_output --partial "ghcr.io/kernpilot/kubehz-agent@sha256:"
-  refute_output --partial "docker.kubehz.in.net"
+  # A customer cluster can only pull what it can reach, so the whole ref is
+  # pinned, host included: a build registry or a mirror that reaches only the
+  # developer who set it would install an agent nobody else can start.
+  assert_output --regexp '^ghcr\.io/kernpilot/kubehz-agent@sha256:[0-9a-f]{64}$'
   # A digest is the only ref cosign verification and a rollback can reason about.
   refute_output --partial ":latest"
   refute_output --partial ":main"

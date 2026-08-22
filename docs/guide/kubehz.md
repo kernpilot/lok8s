@@ -263,8 +263,10 @@ the decision as `KUBEHZ_HEARTBEAT_OWNER` in the `kubehz-agent-config` ConfigMap,
 which the CronJob reads before every beat.
 
 That marker is a **one-way** interlock, and it is worth knowing which way. It
-can silence the CronJob, so a hand-applied CronJob manifest cannot start a
-second producer. It cannot silence the live agent: the Go agent has no
+can silence the CronJob lok8s ships — that manifest reads the marker before
+every beat, so applying it by hand while the live agent owns the heartbeat
+starts no second producer. A CronJob you write yourself reads nothing and
+beats. It cannot silence the live agent either: the Go agent has no
 equivalent switch and beats whenever it runs, so what stops it is removing its
 Deployment — which is exactly what `lo kubehz deploy` does before it re-arms
 the CronJob. Apply the live agent's Deployment by hand while the marker says
@@ -325,9 +327,13 @@ With `access: managed` it also gets, in `kube-system` only:
   those pods, once per machine, and only while the node is still unreachable.
 
 Every one of these is documented at the rule in
-[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/main/deploy/managed/rbac-managed.yaml),
+[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/56ccd9b370066b2b581bd97733e988a856df8857/deploy/managed/rbac-managed.yaml),
 and lok8s ships that file byte-identical to the agent's own repo — the
-permissions you grant are the ones the public source documents.
+permissions you grant are the ones the public source documents. That link
+points at the exact commit lok8s vendored, which is what makes
+"byte-identical" checkable: the SHA-256 of both vendored files is recorded in
+`.lok8s/libs/kubehz/manifests/live-agent/UPSTREAM.sha256`, and
+`sha256sum --check UPSTREAM.sha256` from that directory verifies it.
 
 The image is `ghcr.io/kernpilot/kubehz-agent`, pinned by digest and signed. To
 check what you are about to run:

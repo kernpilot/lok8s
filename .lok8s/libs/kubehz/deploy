@@ -64,10 +64,18 @@
 #                returns when the objects are gone, not when the pods are —
 #                then write the marker that lets the CronJob beat again.
 #
-# Every step in both directions FAILS the command rather than continuing. A
-# swallowed failure on the way to cronjob mode would re-arm the CronJob's beat
-# beside a live agent that is still running; refusing instead leaves the cluster
-# in whatever single-producer state it was already in, which is always safe.
+# Every step that could arm a second producer FAILS the command rather than
+# continuing — including a probe that cannot SEE whether the live agent is gone,
+# because "no pods" and "cannot read pods" are the same output and only one of
+# them is safe. A swallowed failure on the way to cronjob mode would re-arm the
+# CronJob's beat beside a live agent that is still running; refusing instead
+# leaves the cluster in whatever single-producer state it was already in, which
+# is always safe.
+#
+# ONE step is deliberately fail-soft, and only one: the drain wait BEFORE the
+# live agent starts (kubehz::wait_heartbeat_idle). Its worst case is one last
+# schema-1 beat that the live agent overwrites within a minute — not a standing
+# second producer — so it warns and continues instead of blocking a deploy.
 
 import ^utils/verbose
 import ^utils/http
@@ -76,23 +84,31 @@ import ^utils/http
 KUBEHZ_AGENT_MANIFESTS="${PATH_LOK8S}/libs/kubehz/manifests/agent"
 KUBEHZ_LIVE_AGENT_MANIFESTS="${PATH_LOK8S}/libs/kubehz/manifests/live-agent"
 
+# The three waits, all in seconds and all overridable from the environment.
+# The defaults suit a warm cluster on a fast link; a first install pulls the
+# agent image cold, and a Recreate rollout cannot start the new pod until the
+# old one is gone, so a slow link can legitimately need longer. These are
+# fail-hard guards (two of the three), and a guard the operator cannot extend
+# turns a slow pull into a frightening "NOTHING owns the heartbeat" — hence the
+# override.
+
 # How long to wait for an in-flight heartbeat pod before starting the live
 # agent. The CronJob's own activeDeadlineSeconds is 120, so a pod that is
 # still running past this is stuck, not busy — we warn and continue rather
 # than block a deploy forever.
-KUBEHZ_HEARTBEAT_DRAIN_SECONDS=130
+KUBEHZ_HEARTBEAT_DRAIN_SECONDS="${KUBEHZ_HEARTBEAT_DRAIN_SECONDS:-130}"
 
 # How long to wait for the live agent's Deployment to report Ready before the
 # summary is allowed to claim it owns the heartbeat. An accepted Deployment is
 # not a running one: an ImagePullBackOff would otherwise be reported as a
 # successful handover while the cluster reports nothing at all.
-KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS=120
+KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS="${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS:-120}"
 
 # How long to wait for the live agent's POD to disappear after its Deployment
 # is deleted, on the way back to cronjob mode. Fail-hard on timeout: re-arming
 # the CronJob beside a pod that is still beating is the one state this whole
 # command exists to prevent.
-KUBEHZ_LIVE_AGENT_DRAIN_SECONDS=120
+KUBEHZ_LIVE_AGENT_DRAIN_SECONDS="${KUBEHZ_LIVE_AGENT_DRAIN_SECONDS:-120}"
 
 # ── Subcommand ───────────────────────────────────────────
 
@@ -187,8 +203,8 @@ kubehz::deploy_agent() {
 # tokens. BOTH trees are always rendered, in either mode: cronjob mode still
 # needs the live-agent tree so `kubectl delete -k` has the full object set to
 # remove a previous operator install. What `access` decides is only WHICH
-# overlay the caller then applies or deletes (base, or managed — a superset).
-# Sets KUBEHZ_LIVE_AGENT_OVERLAY to that path.
+# overlay the caller then applies or deletes (base, or managed — a superset),
+# which every caller resolves for itself with kubehz::live_agent_overlay.
 # Usage: kubehz::render_agent <workdir> <domain> <api_url> <owner> <access>
 kubehz::render_agent() {
   local workdir="${1}" domain="${2}" api_url="${3}" owner="${4}" access="${5}"
@@ -231,25 +247,40 @@ kubehz::render_agent() {
     done <<< "${leftovers}"
     return 1
   fi
+}
 
-  # The overlay the caller will apply/delete, resolved once.
-  KUBEHZ_LIVE_AGENT_OVERLAY="${workdir}/live-agent/base"
-  [[ "${access}" != "managed" ]] || KUBEHZ_LIVE_AGENT_OVERLAY="${workdir}/live-agent/managed"
+# Which rendered live-agent overlay `access` selects: the read-only base, or
+# managed (a superset that adds the acting RBAC). A pure function of the two
+# values every caller already holds, so no rendered state has to travel between
+# functions in a global.
+# Usage: kubehz::live_agent_overlay <workdir> <access>
+kubehz::live_agent_overlay() {
+  local workdir="${1}" access="${2}"
+  if [[ "${access}" == "managed" ]]; then
+    echo "${workdir}/live-agent/managed"
+  else
+    echo "${workdir}/live-agent/base"
+  fi
 }
 
 # ── Dry run ──────────────────────────────────────────────
 
 # Print what would be applied, in apply order, and nothing else.
+#
+# Rendered with `kubectl kustomize`, NOT with the standalone kustomize binary,
+# because the apply below is `kubectl apply -k` — the same embedded kustomize,
+# at the same version. A dry run whose renderer can differ from the applier's
+# is a dry run you cannot trust for exactly the cases you would use it for.
 # Usage: kubehz::deploy_print <workdir> <owner> <access>
 kubehz::deploy_print() {
   local workdir="${1}" owner="${2}" access="${3}"
 
   echo "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: ${owner} ---"
-  kustomize build "${workdir}/agent" || return 1
+  kubectl kustomize "${workdir}/agent" || return 1
   if [[ "${owner}" == "operator" ]]; then
     echo "---"
     echo "# --- Live agent (kubehz-live-agent) — ${access} tier RBAC ---"
-    kustomize build "${KUBEHZ_LIVE_AGENT_OVERLAY}" || return 1
+    kubectl kustomize "$(kubehz::live_agent_overlay "${workdir}" "${access}")" || return 1
   else
     echo "---"
     echo "# The live agent is NOT deployed in cronjob mode; a previous install would be removed."
@@ -261,6 +292,8 @@ kubehz::deploy_print() {
 # Usage: kubehz::deploy_apply <workdir> <owner> <access>
 kubehz::deploy_apply() {
   local workdir="${1}" owner="${2}" access="${3}"
+  local overlay
+  overlay=$(kubehz::live_agent_overlay "${workdir}" "${access}")
 
   if [[ "${owner}" == "operator" ]]; then
     # 1. The marker first. From the CronJob's next tick on it bootstraps and
@@ -275,7 +308,7 @@ kubehz::deploy_apply() {
     #    cannot overlap it.
     kubehz::wait_heartbeat_idle
     # 3. Now the live agent, which becomes the only producer.
-    kubectl apply -k "${KUBEHZ_LIVE_AGENT_OVERLAY}" || {
+    kubectl apply -k "${overlay}" || {
       error "kubehz: could not apply the live agent. The CronJob is no longer beating (KUBEHZ_HEARTBEAT_OWNER=operator), so this cluster is reporting NOTHING until you retry or set spec.kubehz.agent back to cronjob and re-run."
       return 1
     }
@@ -329,15 +362,24 @@ kubehz::deploy_apply() {
 }
 
 # Wait for any in-flight heartbeat pod to finish. Usually returns at once
-# (nothing is running four minutes out of five). Fail-soft: a probe that
-# cannot read pods, or a pod that outlives the CronJob's own 120 s deadline,
-# warns and lets the deploy continue.
+# (nothing is running four minutes out of five). Fail-soft, deliberately: a
+# probe that cannot read pods, or a pod that outlives the CronJob's own 120 s
+# deadline, WARNS and lets the deploy continue. Its worst case is one last
+# schema-1 beat overlapping the live agent's first, which the live agent
+# overwrites within a minute — not a standing second producer.
 kubehz::wait_heartbeat_idle() {
-  local waited=0 running
+  local waited=0 out rc
   while (( waited < KUBEHZ_HEARTBEAT_DRAIN_SECONDS )); do
-    running=$(kubectl -n kubehz-system get pods -l app=kubehz-heartbeat \
-      --field-selector=status.phase=Running -o name 2>/dev/null | grep -c .) || running=0
-    (( running > 0 )) || return 0
+    out=$(kubectl -n kubehz-system get pods -l app=kubehz-heartbeat \
+      --field-selector=status.phase=Running -o name 2>&1); rc=$?
+    # An unreadable probe is NOT an idle cluster. It cannot block this deploy
+    # (see above), but it must not pass silently either — the operator should
+    # know the overlap check did not actually run.
+    if (( rc != 0 )); then
+      warn "kubehz: could not check for an in-flight heartbeat pod (${out//$'\n'/ }) — continuing; the live agent overwrites a stray schema-1 beat within a minute"
+      return 0
+    fi
+    [[ -n "${out//[[:space:]]/}" ]] || return 0
     if (( waited == 0 )); then
       echo "kubehz: waiting for the in-flight heartbeat pod to finish before starting the live agent…"
     fi
@@ -355,18 +397,38 @@ kubehz::wait_heartbeat_idle() {
 # FAIL-HARD, unlike kubehz::wait_heartbeat_idle: continuing past a live agent
 # that is still beating is exactly the double-producer state we are avoiding,
 # while refusing leaves the cluster in the single-producer state it already had.
+#
+# That includes a probe that FAILS. "No pods" and "cannot see pods" produce the
+# same empty output, so the exit status is the only thing that tells them apart
+# — a kubeconfig that may delete a Deployment but not list pods in
+# kubehz-system is an ordinary narrow role, and an apiserver blip is ordinary
+# too. A failing probe therefore counts as STILL RUNNING (transient errors get
+# the whole drain window to clear), and if the window ends on a failed probe
+# the command refuses with that reason rather than the timeout one.
 kubehz::wait_live_agent_gone() {
-  local waited=0 running
+  local waited=0 out rc probe_error=""
   while (( waited < KUBEHZ_LIVE_AGENT_DRAIN_SECONDS )); do
-    running=$(kubectl -n kubehz-system get pods \
-      -l app.kubernetes.io/component=live-view -o name 2>/dev/null | grep -c .) || running=0
-    (( running > 0 )) || return 0
+    out=$(kubectl -n kubehz-system get pods \
+      -l app.kubernetes.io/component=live-view -o name 2>&1); rc=$?
+    if (( rc == 0 )); then
+      probe_error=""
+      [[ -n "${out//[[:space:]]/}" ]] || return 0
+    else
+      # Never read an error as "zero pods". Warn on the first one so a broken
+      # kubeconfig is visible immediately instead of after a silent wait.
+      [[ -n "${probe_error}" ]] || warn "kubehz: cannot list the live agent's pods in kubehz-system (${out//$'\n'/ }) — treating that as STILL RUNNING and retrying; the CronJob's beat stays disarmed until the pod is provably gone"
+      probe_error="${out//$'\n'/ }"
+    fi
     if (( waited == 0 )); then
       echo "kubehz: waiting for the live agent's pod to terminate before the CronJob beats again…"
     fi
     sleep 5
     waited=$(( waited + 5 ))
   done
+  if [[ -n "${probe_error}" ]]; then
+    error "kubehz: could not tell whether the live agent's pod is gone — listing pods in kubehz-system kept failing for ${KUBEHZ_LIVE_AGENT_DRAIN_SECONDS}s: ${probe_error}. The CronJob's beat was NOT re-armed, because re-arming it beside a pod that may still be beating puts two producers on the heartbeat and erases the live view every five minutes. Give the kubeconfig 'list pods' in kubehz-system (or fix the apiserver connection), confirm with 'kubectl -n kubehz-system get pods -l app.kubernetes.io/component=live-view', then re-run 'lo kubehz deploy'."
+    return 1
+  fi
   error "kubehz: the live agent's pod is still running ${KUBEHZ_LIVE_AGENT_DRAIN_SECONDS}s after its Deployment was deleted. The CronJob's beat was NOT re-armed — doing so now would put two producers on the heartbeat, which erases the live view every five minutes. Remove the pod with 'kubectl -n kubehz-system delete pod -l app.kubernetes.io/component=live-view --force', then re-run 'lo kubehz deploy'."
   return 1
 }
