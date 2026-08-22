@@ -22,6 +22,16 @@
 # addon exists to prevent, because the replace bug at least leaves a visible
 # `Overridden` condition. So each of group, kind, match labels and namespace
 # is pinned, and each one is mutation-proven to fail on its own.
+#
+# Reading only the fields this file happens to know about is NOT enough, and
+# that lesson cost three review rounds: each round closed one way to narrow the
+# selector to nothing and left a sibling field wide open. A `targetSelectors`
+# entry has FIVE properties and THREE of them narrow the match — `matchLabels`,
+# `matchExpressions` and `namespaces`. So the selector is read as a WHOLE
+# OBJECT: `_targets` reports every field the target actually SETS, and the test
+# whitelists that key set. A field outside the whitelist fails the test even if
+# nobody here has heard of it — including one a future Envoy Gateway CRD adds.
+# That turns the next new narrowing field from an invisible gap into a red test.
 
 setup() {
   load "../test_helper"
@@ -35,11 +45,16 @@ _render() {
   kustomize build "${_SSO_DIR}" | yq eval -N 'select(.kind == "SecurityPolicy")' -
 }
 
-# _targets → one `group|kind|labels` line per target the policy declares,
-# however it declares it (targetRef, targetRefs, targetSelectors). `-` stands
-# in for an absent field; `labels` is the matchLabels map flattened to
-# key-sorted `k=v` pairs so a single string comparison covers the whole map
+# _targets → one `group|kind|labels|fields` line per target the policy
+# declares, however it declares it (targetRef, targetRefs, targetSelectors).
+# `-` stands in for an absent field; `labels` is the matchLabels map flattened
+# to key-sorted `k=v` pairs so a single string comparison covers the whole map
 # (an EXTRA label narrows the selector just as fatally as a wrong one).
+#
+# `fields` is the sorted set of every key the target OBJECT sets, read off the
+# object itself rather than off a list written here. It is what makes the
+# selector assertion complete instead of merely long: the test does not need to
+# know what a field means to notice it is there.
 _targets() {
   _render | yq eval -N '
     [.spec.targetRef] + (.spec.targetRefs // []) + (.spec.targetSelectors // [])
@@ -47,6 +62,7 @@ _targets() {
     | (.group // "-") + "|" + (.kind // "-") + "|"
       + ((.matchLabels // {}) | to_entries | sort_by(.key)
          | map(.key + "=" + .value) | join(","))
+      + "|" + (keys | sort | join(","))
   ' -
 }
 
@@ -67,17 +83,23 @@ _targets() {
 }
 
 @test "every sso-gate target selects the labeled HTTPRoutes, group and labels included" {
-  local line group kind labels n=0
-  while IFS='|' read -r group kind labels; do
-    [[ -n "${group}${kind}${labels}" ]] || continue
+  local line group kind labels fields n=0
+  while IFS='|' read -r group kind labels fields; do
+    [[ -n "${group}${kind}${labels}${fields}" ]] || continue
     n=$(( n + 1 ))
-    line="group=${group} kind=${kind} labels=${labels:-<none>}"
+    line="group=${group} kind=${kind} labels=${labels:-<none>} fields=${fields:-<none>}"
 
     # The Gateway API group, exactly. `gateway.networking.io`,
-    # `networking.k8s.io` or an empty group are all accepted by kustomize and
-    # by the CRD schema, and all select NOTHING — labeled routes stay public.
+    # `networking.k8s.io` and an empty group all `kustomize build` cleanly, so
+    # a wrong group ships out of this repo unnoticed without this gate. A live
+    # apiserver does reject it — Envoy Gateway v1.9.0 answers a server-side
+    # apply with `spec.targetSelectors[0]: Invalid value: group must be
+    # gateway.networking.k8s.io` (verified 2026-08-22) — but that failure lands
+    # on the USER at apply time, on a cluster, in whatever state the rollout is
+    # in by then. Catching it here moves it to CI, where it is a red test
+    # instead of a broken deploy.
     [ "${group}" = "gateway.networking.k8s.io" ] \
-      || fail "target group is '${group}', expected 'gateway.networking.k8s.io' — any other group matches no route at all, so labeling a route would leave it fully public (${line})"
+      || fail "target group is '${group}', expected 'gateway.networking.k8s.io' — the addon would ship a policy the cluster refuses to admit, and on any build that does admit it the selector matches no route at all, so labeling a route would leave it fully public (${line})"
 
     # Envoy Gateway also accepts mergeType on a TCPRoute target, but OIDC is a
     # redirect-and-cookie HTTP flow: on a TCP stream this policy enforces
@@ -93,6 +115,24 @@ _targets() {
     # or an extra pair ANDed in narrows the selector to zero routes.
     [ "${labels}" = "sso.lok8s.dev/protect=true" ] \
       || fail "target match labels are '${labels:-<none>}', expected exactly 'sso.lok8s.dev/protect=true' — the label documented in docs/guide/addons.md and the one the selector matches must be the same string (${line})"
+
+    # And now the whole object, not just the fields named above. Everything a
+    # target sets is ANDed, so every unchecked field is a way to narrow the
+    # match to zero routes while the three assertions above stay green:
+    #
+    #   matchExpressions: [{key: never.example.com/x, operator: Exists}]
+    #   namespaces: {from: Selector, selector: {matchLabels: {nope: nope}}}
+    #
+    # Both are legal — Envoy Gateway v1.9.0 admits that object on a server-side
+    # apply (verified 2026-08-22) — both select nothing, and neither is visible
+    # to a field-by-field reading. Same fail-open class as a wrong `group`, one
+    # field over. Whitelisting the key set closes the whole class at once and
+    # keeps closing it: a `targetSelectors` property that does not exist yet
+    # still trips this the day someone adds it. When that happens, do not just
+    # append the name — decide whether the new field can narrow the match to
+    # nothing, and only then widen the list.
+    [ "${fields}" = "group,kind,matchLabels" ] \
+      || fail "target sets fields '${fields:-<none>}', expected exactly 'group,kind,matchLabels' — an unexpected field is ANDed into the selector and can narrow it to zero routes, leaving every labeled route fully public; if the extra field is deliberate, prove it cannot empty the match and then add it to this whitelist (${line})"
   done < <(_targets)
 
   # Vacuity guard: no targets at all would pass every loop body above.

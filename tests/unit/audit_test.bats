@@ -72,6 +72,26 @@ _sev_of() {
   done
   echo "MISSING"
 }
+# _detail_of <id> — the finding's detail text.
+# _count_of <id>  — how many findings carry that id. One check emits ONE
+# finding: _status_of/_sev_of stop at the first match, so a second finding
+# under the same id would hide behind the first and double-count in the score.
+_detail_of() {
+  local want="$1" line id t s st d r
+  for line in "${_AUDIT_FINDINGS[@]}"; do
+    IFS=$'\t' read -r id t s st d r <<< "${line}"
+    [[ "${id}" == "${want}" ]] && { echo "${d}"; return 0; }
+  done
+  echo "MISSING"
+}
+_count_of() {
+  local want="$1" line id rest n=0
+  for line in "${_AUDIT_FINDINGS[@]}"; do
+    IFS=$'\t' read -r id rest <<< "${line}"
+    [[ "${id}" == "${want}" ]] && n=$(( n + 1 ))
+  done
+  echo "${n}"
+}
 
 # =============================================================================
 # Cilium policy enforcement — the headline: audit mode = insecure
@@ -541,7 +561,9 @@ YAML
 # file. That boolean could not see WHICH object carried the deny, nor that a
 # route-level policy without `mergeType` REPLACES it wholesale for the routes
 # it selects — so the exact footgun the sso-gate fix is about scored a clean
-# pass. These four lock both halves: object scoping, and the override.
+# pass. The tests below lock both halves — object scoping, and the override —
+# plus, since round 3, that the override does not swallow a NodePort found with
+# it.
 @test "a route-level SecurityPolicy without mergeType cancels the gateway's deny" {
   _spec ovr <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
@@ -582,6 +604,70 @@ YAML
   audit::run_domain ovr
   assert_equal "$(_status_of exposed-endpoints)" "fail"
   assert_equal "$(_sev_of exposed-endpoints)" "high"
+}
+
+# MASKED-FINDING REGRESSION (subagent review round 3, PR #140): the override
+# branch above used to `return 0` before the NodePort branch could run, so a
+# cluster with BOTH holes was told about one of them. The operator fixed the
+# mergeType, re-ran the audit, and only then met the node port. Two independent
+# holes must be reported together — and in ONE finding, because the id is the
+# report's key.
+@test "an override and a NodePort found together are BOTH reported" {
+  _spec both <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target both net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata: { name: legacy-admin }
+spec:
+  type: NodePort
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels: { "sso.lok8s.dev/protect": "true" }
+  oidc: { clientID: x }
+YAML
+  audit::run_domain both
+  assert_equal "$(_status_of exposed-endpoints)" "fail"
+  # The override is the graver of the two, so it sets the severity.
+  assert_equal "$(_sev_of exposed-endpoints)" "high"
+  # One finding per check id — merging the two must not fork into two rows.
+  assert_equal "$(_count_of exposed-endpoints)" "1"
+
+  local detail
+  detail="$(_detail_of exposed-endpoints)"
+  [[ "${detail}" == *"mergeType"* ]] \
+    || fail "the override is missing from the finding: ${detail}"
+  [[ "${detail}" == *"NodePort"* ]] \
+    || fail "the NodePort is masked by the override — both holes are real and they are fixed by different edits: ${detail}"
 }
 
 @test "the same route-level SecurityPolicy WITH mergeType keeps the carve-out" {
