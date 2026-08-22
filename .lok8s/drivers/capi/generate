@@ -6,6 +6,7 @@
 
 import ^utils/verbose
 import ^utils/template
+import ^utils/spec
 
 # Detect the CAPI provider from cluster spec fields.
 # Usage: capi::detect_provider <cluster_yaml>
@@ -90,16 +91,10 @@ capi::generate() {
     # don't exist. read consumes each name exactly as yq emits it.
     while IFS= read -r pool; do
       [[ -n "${pool}" ]] || continue
-      # Validate the name (it lands in template envs), then read via bracket
-      # syntax: pool names contain hyphens, which yq would otherwise parse as
-      # arithmetic (.workers.pool-1 == .workers.pool - 1).
-      if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
-        echo "error: invalid worker pool name: ${pool} (must be alphanumeric with hyphens)" >&2
-        return 1
-      fi
+      spec::validate_pool_name "${pool}" || return 1
       POOL_NAME="${pool}"
-      POOL_REPLICAS=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
-      POOL_TYPE=$(yq -r ".spec.workers.[\"${pool}\"].type // \"cax11\"" "${cluster_yaml}")
+      POOL_REPLICAS=$(spec::pool_field "${cluster_yaml}" "${pool}" replicas 1) || return 1
+      POOL_TYPE=$(spec::pool_field "${cluster_yaml}" "${pool}" type cax11) || return 1
       for tpl in \
         "${core}/machine-deployment.yaml" \
         "${prov}/kubeadm-config-template.yaml" \
@@ -115,7 +110,7 @@ capi::generate() {
         # a control plane and no workers, or fails to apply at all.
         template::envsubst "${allowed_vars}" < "${tpl}"
       done
-    done < <(yq -r '.spec.workers | keys[]?' "${cluster_yaml}")
+    done < <(spec::pool_names "${cluster_yaml}")
   )
 
   # Optional anti-affinity: opt-in `spread` placement groups (control plane +

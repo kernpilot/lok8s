@@ -25,6 +25,16 @@ unset ARGSH_SOURCE
 # Source verbose helpers (debug, error, warn) — these are used by all libs
 source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
 
+# Source utils/spec.sh — the shared spec.workers reader that kkp, kubeone and
+# capi all `import`. Sourced here for the same reason verbose.sh is: a test that
+# sources a driver stubs `import` first, so the driver's own `import ^utils/spec`
+# is a no-op and the helpers would be undefined in every driver test. `import` is
+# stubbed only for the length of this source and then removed, so a test that
+# does NOT stub it still fails loudly on its own missing imports.
+import() { :; }
+source "${_PROJECT_ROOT}/.lok8s/utils/spec.sh"
+unset -f import
+
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 

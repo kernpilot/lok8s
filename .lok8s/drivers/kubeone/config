@@ -12,6 +12,7 @@
 import ^utils/verbose
 import ^utils/template
 import ^utils/oidc
+import ^utils/spec
 
 # ── Provider detection ──────────────────────────────────
 
@@ -258,7 +259,7 @@ kubeone::generate_config() {
 
   # Append dynamicWorkers block if worker pools are defined
   local pool_count
-  pool_count=$(yq -r '.spec.workers | keys | length // 0' "${cluster_yaml}" 2>/dev/null || echo "0")
+  pool_count=$(spec::pool_count "${cluster_yaml}")
 
   if (( pool_count > 0 )); then
     rendered+=$'\n\ndynamicWorkers:'
@@ -269,17 +270,11 @@ kubeone::generate_config() {
     local pool
     while IFS= read -r pool; do
       [[ -n "${pool}" ]] || continue
-      # Validate pool name to prevent yq injection
-      if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
-        error "Invalid worker pool name: ${pool} (must be alphanumeric with hyphens)"
-        return 1
-      fi
+      spec::validate_pool_name "${pool}" || return 1
 
-      # Bracket syntax: pool names contain hyphens, which yq would
-      # otherwise parse as arithmetic (.workers.pool-1 == .workers.pool - 1)
       local replicas pool_type
-      replicas=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
-      pool_type=$(yq -r ".spec.workers.[\"${pool}\"].type" "${cluster_yaml}")
+      replicas=$(spec::pool_field "${cluster_yaml}" "${pool}" replicas 1) || return 1
+      pool_type=$(spec::pool_field "${cluster_yaml}" "${pool}" type) || return 1
       # Spec-controlled values are interpolated into YAML below — validate before
       # use so a value with newlines/quotes/colons can't inject or malform fields.
       [[ "${replicas}" =~ ^[0-9]+$ ]] \
@@ -296,7 +291,7 @@ kubeone::generate_config() {
         hetzner)
           local datacenter image
           datacenter=$(yq -r '.spec.datacenter // "fsn1"' "${cluster_yaml}")
-          image=$(yq -r ".spec.workers.[\"${pool}\"].image // \"ubuntu-22.04\"" "${cluster_yaml}")
+          image=$(spec::pool_field "${cluster_yaml}" "${pool}" image ubuntu-22.04) || return 1
           [[ "${datacenter}" =~ ^[a-zA-Z0-9._-]+$ ]] \
             || { error "Invalid datacenter: ${datacenter}"; return 1; }
           [[ "${image}" =~ ^[a-zA-Z0-9._-]+$ ]] \
@@ -310,7 +305,7 @@ kubeone::generate_config() {
         aws)
           local region ami instance_type
           region=$(yq -r '.spec.aws.region // "eu-central-1"' "${cluster_yaml}")
-          ami=$(yq -r ".spec.workers.${pool}.ami // \"\"" "${cluster_yaml}")
+          ami=$(spec::pool_field "${cluster_yaml}" "${pool}" ami) || return 1
           instance_type="${pool_type}"
           [[ "${region}" =~ ^[a-zA-Z0-9._-]+$ ]] \
             || { error "Invalid region: ${region}"; return 1; }
@@ -327,7 +322,7 @@ kubeone::generate_config() {
           return 1
           ;;
       esac
-    done < <(yq -r '.spec.workers | keys[]' "${cluster_yaml}")
+    done < <(spec::pool_names "${cluster_yaml}")
   fi
 
   echo "${rendered}" > "${output_dir}/kubeone.yaml"

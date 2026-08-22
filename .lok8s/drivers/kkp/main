@@ -15,6 +15,7 @@
 # Optional env vars: HCLOUD_TOKEN (Hetzner), AWS_ACCESS_KEY_ID (AWS)
 
 import ^utils/verbose
+import ^utils/spec
 import ^drivers/kkp/api
 
 # ── CLI dispatch ──────────────────────────────────────────
@@ -314,7 +315,7 @@ _create_worker_pools() {
   local project_id="${1}" cluster_id="${2}" cluster_yaml="${3}" provider="${4}"
 
   local pool_count
-  pool_count=$(yq -r '.spec.workers | keys | length // 0' "${cluster_yaml}" 2>/dev/null || echo "0")
+  pool_count=$(spec::pool_count "${cluster_yaml}")
 
   if (( pool_count == 0 )); then
     debug "No worker pools defined in spec"
@@ -331,35 +332,36 @@ _create_worker_pools() {
   existing_pools=$(kkp::list_machinedeployments "${project_id}" "${cluster_id}" 2>/dev/null \
     | jq -r '.[].name' 2>/dev/null) || existing_pools=""
 
+  # while-read, not `for … in $(yq …)`: word-splitting would break a
+  # whitespace-bearing pool name into fragments BEFORE validation, and each
+  # fragment can pass the name rule on its own. (The other two drivers already
+  # read it this way; this one did not.)
   local pool
-  for pool in $(yq -r '.spec.workers | keys[]' "${cluster_yaml}"); do
-    # Validate pool name
-    if [[ ! "${pool}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
-      error "Invalid worker pool name: ${pool} (must be alphanumeric with hyphens)"
-      return 1
-    fi
+  while IFS= read -r pool; do
+    [[ -n "${pool}" ]] || continue
+    spec::validate_pool_name "${pool}" || return 1
 
     if grep -qx "${pool}" <<< "${existing_pools}"; then
       debug "Worker pool ${pool} already exists — skipping create"
       continue
     fi
 
-    # Bracket syntax: pool names contain hyphens, which yq would
-    # otherwise parse as arithmetic (.workers.pool-1 == .workers.pool - 1)
     local replicas flavor os_name
-    replicas=$(yq -r ".spec.workers.[\"${pool}\"].replicas // 1" "${cluster_yaml}")
-    flavor=$(yq -r ".spec.workers.[\"${pool}\"].flavor // .spec.workers.[\"${pool}\"].type" "${cluster_yaml}")
-    os_name=$(yq -r ".spec.workers.[\"${pool}\"].operatingSystem // \"ubuntu\"" "${cluster_yaml}")
+    replicas=$(spec::pool_field "${cluster_yaml}" "${pool}" replicas 1) || return 1
+    flavor=$(spec::pool_field "${cluster_yaml}" "${pool}" flavor) || return 1
+    [[ -n "${flavor}" ]] \
+      || flavor=$(spec::pool_field "${cluster_yaml}" "${pool}" type) || return 1
+    os_name=$(spec::pool_field "${cluster_yaml}" "${pool}" operatingSystem ubuntu) || return 1
 
-    if [[ -z "${flavor}" || "${flavor}" == "null" ]]; then
+    if [[ -z "${flavor}" ]]; then
       error "Worker pool '${pool}' has no flavor/type set"
       return 1
     fi
 
     # Autoscaler config (optional)
     local autoscaler_min autoscaler_max
-    autoscaler_min=$(yq -r ".spec.workers.[\"${pool}\"].autoscaler.min // 0" "${cluster_yaml}")
-    autoscaler_max=$(yq -r ".spec.workers.[\"${pool}\"].autoscaler.max // 0" "${cluster_yaml}")
+    autoscaler_min=$(spec::pool_field "${cluster_yaml}" "${pool}" autoscaler.min 0) || return 1
+    autoscaler_max=$(spec::pool_field "${cluster_yaml}" "${pool}" autoscaler.max 0) || return 1
 
     local md_json
     md_json=$(_build_machinedeployment_json \
@@ -370,7 +372,7 @@ _create_worker_pools() {
       error "Failed to create machine deployment: ${pool}"
       return 1
     }
-  done
+  done < <(spec::pool_names "${cluster_yaml}")
 }
 
 # Build machine deployment JSON for a worker pool.
