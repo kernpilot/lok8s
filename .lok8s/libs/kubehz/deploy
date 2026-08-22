@@ -36,7 +36,11 @@
 # live view that empties itself every five minutes.
 #
 # The lever is a single in-cluster value: KUBEHZ_HEARTBEAT_OWNER in the
-# ConfigMap kubehz-agent-config, written here from spec.kubehz.agent.
+# ConfigMap kubehz-agent-config, written here from spec.kubehz.agent. It is
+# ONE-DIRECTIONAL: the CronJob reads it, so the marker alone can silence the
+# CronJob; the Go agent reads no such key and beats whenever it runs, so the
+# only thing that silences the live agent is deleting its Deployment. That
+# asymmetry is why the apply order below is not symmetric either.
 #
 #   - "cronjob"  — the CronJob beats. The live agent is not deployed, and this
 #                  command REMOVES it if a previous run installed it.
@@ -52,10 +56,18 @@
 # instant has two live producers:
 #
 #   to operator: write the marker first (the CronJob stops beating), wait for
-#                any in-flight heartbeat pod to finish, then start the live
-#                agent.
-#   to cronjob:  delete the live agent first (its beat stops with the pod),
+#                any in-flight heartbeat pod to finish, start the live agent,
+#                and wait for its Deployment to report Ready before claiming
+#                it owns the beat.
+#   to cronjob:  delete the live agent first and wait for its POD to go — the
+#                Go agent beats until its process exits, and `kubectl delete`
+#                returns when the objects are gone, not when the pods are —
 #                then write the marker that lets the CronJob beat again.
+#
+# Every step in both directions FAILS the command rather than continuing. A
+# swallowed failure on the way to cronjob mode would re-arm the CronJob's beat
+# beside a live agent that is still running; refusing instead leaves the cluster
+# in whatever single-producer state it was already in, which is always safe.
 
 import ^utils/verbose
 import ^utils/http
@@ -69,6 +81,18 @@ KUBEHZ_LIVE_AGENT_MANIFESTS="${PATH_LOK8S}/libs/kubehz/manifests/live-agent"
 # still running past this is stuck, not busy — we warn and continue rather
 # than block a deploy forever.
 KUBEHZ_HEARTBEAT_DRAIN_SECONDS=130
+
+# How long to wait for the live agent's Deployment to report Ready before the
+# summary is allowed to claim it owns the heartbeat. An accepted Deployment is
+# not a running one: an ImagePullBackOff would otherwise be reported as a
+# successful handover while the cluster reports nothing at all.
+KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS=120
+
+# How long to wait for the live agent's POD to disappear after its Deployment
+# is deleted, on the way back to cronjob mode. Fail-hard on timeout: re-arming
+# the CronJob beside a pod that is still beating is the one state this whole
+# command exists to prevent.
+KUBEHZ_LIVE_AGENT_DRAIN_SECONDS=120
 
 # ── Subcommand ───────────────────────────────────────────
 
@@ -255,6 +279,14 @@ kubehz::deploy_apply() {
       error "kubehz: could not apply the live agent. The CronJob is no longer beating (KUBEHZ_HEARTBEAT_OWNER=operator), so this cluster is reporting NOTHING until you retry or set spec.kubehz.agent back to cronjob and re-run."
       return 1
     }
+    # 4. Accepted is not running. Until the Deployment reports Ready, NOTHING
+    #    owns the beat — so wait for it here rather than let the summary claim
+    #    a handover that an ImagePullBackOff quietly never completed.
+    kubectl -n kubehz-system rollout status deployment/kubehz-live-agent \
+      --timeout="${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s" || {
+      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
+      return 1
+    }
     return 0
   fi
 
@@ -264,10 +296,34 @@ kubehz::deploy_apply() {
   # one delete covers an install made at either tier. The rendered live-agent
   # base owns no Namespace and no Secret on purpose, so this can never take the
   # identity Secret with it.
-  kubectl delete -k "${workdir}/live-agent/managed" --ignore-not-found=true 2>/dev/null \
-    || debug "no live agent to remove"
+  #
+  # --ignore-not-found already covers the legitimate "there is nothing to
+  # remove" case, so a non-zero exit here is a REAL failure — RBAC denied, the
+  # apiserver unreachable, a broken kustomization. Swallowing it and running the
+  # apply below would re-arm the CronJob's beat next to a live agent that is
+  # still beating: the double-producer state this command exists to prevent.
+  kubectl delete -k "${workdir}/live-agent/managed" --ignore-not-found=true || {
+    error "kubehz: could not remove the live agent — nothing else was changed. The CronJob's beat was NOT re-armed, so this cluster still has exactly one producer (the live agent, which keeps reporting) and no data was lost. Usual causes: the kubeconfig lacks delete permission in kubehz-system, or the apiserver is unreachable. Fix that and re-run 'lo kubehz deploy'."
+    return 1
+  }
+  # The delete above is NAME-based, from the rendered tree. A Deployment that an
+  # older lok8s installed under a different name is not in that tree, and only a
+  # running pod can beat — so sweep the producing object by its semantic label,
+  # which survives a rename. (Stray SA/RBAC/ConfigMap from such an install are
+  # inert: they grant permissions to a pod that no longer exists. Removing them
+  # is 'kubectl delete namespace kubehz-system' — see the guide's revocation.)
+  kubectl -n kubehz-system delete deployment \
+    -l app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view \
+    --ignore-not-found=true || {
+    error "kubehz: could not sweep live-agent Deployments by label — nothing else was changed. The CronJob's beat was NOT re-armed, so there is still one producer. Fix the delete and re-run 'lo kubehz deploy'."
+    return 1
+  }
+  # kubectl delete returns when the OBJECTS are gone; the pods are reaped in the
+  # background and the Go agent beats until its process exits. Wait it out
+  # before the CronJob is allowed to beat again.
+  kubehz::wait_live_agent_gone || return 1
   kubectl apply -k "${workdir}/agent" || {
-    error "kubehz: could not apply the CronJob agent"
+    error "kubehz: could not apply the CronJob agent. The live agent is gone and the marker was not rewritten, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
     return 1
   }
 }
@@ -291,6 +347,30 @@ kubehz::wait_heartbeat_idle() {
   warn "kubehz: a heartbeat pod is still running after ${KUBEHZ_HEARTBEAT_DRAIN_SECONDS}s — continuing; it may deliver one last schema-1 beat, which the live agent overwrites within a minute"
 }
 
+# Wait until no live-agent pod is left, on the way back to cronjob mode.
+# Selected by the semantic component label, not by name, so a Deployment
+# renamed by a future lok8s version is still caught (the CronJob's own pods
+# carry no component label, so they are never matched).
+#
+# FAIL-HARD, unlike kubehz::wait_heartbeat_idle: continuing past a live agent
+# that is still beating is exactly the double-producer state we are avoiding,
+# while refusing leaves the cluster in the single-producer state it already had.
+kubehz::wait_live_agent_gone() {
+  local waited=0 running
+  while (( waited < KUBEHZ_LIVE_AGENT_DRAIN_SECONDS )); do
+    running=$(kubectl -n kubehz-system get pods \
+      -l app.kubernetes.io/component=live-view -o name 2>/dev/null | grep -c .) || running=0
+    (( running > 0 )) || return 0
+    if (( waited == 0 )); then
+      echo "kubehz: waiting for the live agent's pod to terminate before the CronJob beats again…"
+    fi
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+  error "kubehz: the live agent's pod is still running ${KUBEHZ_LIVE_AGENT_DRAIN_SECONDS}s after its Deployment was deleted. The CronJob's beat was NOT re-armed — doing so now would put two producers on the heartbeat, which erases the live view every five minutes. Remove the pod with 'kubectl -n kubehz-system delete pod -l app.kubernetes.io/component=live-view --force', then re-run 'lo kubehz deploy'."
+  return 1
+}
+
 # ── Summary ──────────────────────────────────────────────
 
 # Say what is now running and what the customer actually gets. Honest about
@@ -301,7 +381,7 @@ kubehz::deploy_summary() {
 
   echo
   if [[ "${owner}" == "operator" ]]; then
-    echo "kubehz: live agent deployed for ${domain} (deployment/kubehz-live-agent, ${access} tier)."
+    echo "kubehz: live agent deployed and Ready for ${domain} (deployment/kubehz-live-agent, ${access} tier)."
     echo "  It owns the heartbeat. The CronJob keeps the identity Secret bootstrapped"
     echo "  and enrolled, and no longer beats — one producer, always."
     echo

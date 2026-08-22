@@ -431,7 +431,10 @@ lo kubehz handover            # control-plane handover (receive/preseed on the e
 domain, and applies them with your current kubeconfig — so point it at the right
 cluster first (`lo use <domain>`). It applies the agent that
 `spec.kubehz.agent` names, and removes the other one, because exactly one agent
-may send heartbeats. Re-run it after you change the value. See the
+may send heartbeats. Re-run it after you change the value. It waits for the
+switch to be real — for the new agent to be `Ready`, or for the removed one's
+pod to be gone — and fails instead of continuing if a step does not complete,
+so it never leaves two agents beating. See the
 [kubehz guide](../guide/kubehz.md#choosing-an-agent).
 
 ### lo kustomize

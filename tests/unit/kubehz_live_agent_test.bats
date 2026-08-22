@@ -15,9 +15,13 @@
 #   1. the spec: ONE enum (spec.kubehz.agent), so a spec cannot ask for two;
 #   2. the cluster: KUBEHZ_HEARTBEAT_OWNER on kubehz-agent-config — the CronJob
 #      reads it and refuses to beat when the live agent owns the heartbeat.
-#      This is the load-bearing one: it holds even for a hand-applied manifest;
+#      ONE-DIRECTIONAL: it can silence the CronJob (even a hand-applied one),
+#      but the Go agent has no equivalent switch and beats whenever it runs, so
+#      what silences the live agent is deleting its Deployment;
 #   3. the deploy: the apply ORDER, which differs per direction so that no
-#      instant has two live producers.
+#      instant has two live producers — and which FAILS rather than continues
+#      at every step, because continuing past a failed live-agent delete is how
+#      you get the two producers back.
 
 setup() {
   load "../test_helper"
@@ -344,6 +348,39 @@ _stub_kubectl_log() {
   assert_output --partial "apply -k ${work}/agent"
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
+  # Line 3 waits for the Deployment to be Ready. Accepted is not running, and
+  # between the marker and Ready NOTHING owns the beat — so the command may not
+  # report a successful handover until this returns.
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "rollout status deployment/kubehz-live-agent"
+}
+
+@test "apply order (to operator): a live agent that never becomes Ready FAILS the deploy" {
+  _source_deploy
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${STUB_KUBECTL_LOG}"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      # ImagePullBackOff, as the apiserver reports it: the object was accepted,
+      # the pod never came up.
+      *"rollout status"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; return 1 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  local work="${BATS_TEST_TMPDIR}/a3"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_failure
+  # The message must name the state the operator is now in — nothing beating —
+  # not just report a failed command.
+  assert_output --partial "never became Ready"
+  assert_output --partial "NOTHING owns the heartbeat"
 }
 
 @test "apply order (to cronjob): the live agent is removed BEFORE the CronJob beats again" {
@@ -360,11 +397,76 @@ _stub_kubectl_log() {
   # one delete removes an install made at either tier.
   run head -1 "${STUB_KUBECTL_LOG}"
   assert_output --partial "delete -k ${work}/live-agent/managed"
+  # Then the label sweep, which catches a Deployment an older lok8s installed
+  # under a different NAME — the rendered tree above cannot name it.
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "delete deployment -l app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view"
+  # Only once the pods are gone (the stub reports an empty namespace) may the
+  # CronJob's marker be rewritten.
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
 
   # And nothing re-applies the live agent in cronjob mode.
   refute [ "$(grep -c "apply -k ${work}/live-agent" "${STUB_KUBECTL_LOG}")" != "0" ]
+}
+
+@test "apply order (to cronjob): a FAILED live-agent delete never re-arms the CronJob" {
+  _source_deploy
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${STUB_KUBECTL_LOG}"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      # RBAC denied / apiserver down. --ignore-not-found already covers the
+      # legitimate "nothing to delete" case, so this can only be a real failure.
+      *"delete -k"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; return 1 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  local work="${BATS_TEST_TMPDIR}/a4"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+
+  run kubehz::deploy_apply "${work}" cronjob registered
+  assert_failure
+  assert_output --partial "could not remove the live agent"
+
+  # THE POINT: the CronJob's beat must not be re-armed beside a live agent that
+  # is still running. Swallowing the delete failure and applying anyway is the
+  # double-producer state this whole command exists to prevent.
+  refute [ "$(grep -c "apply -k ${work}/agent" "${STUB_KUBECTL_LOG}")" != "0" ]
+}
+
+@test "apply order (to cronjob): a live-agent pod that will not terminate blocks the re-arm" {
+  _source_deploy
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${STUB_KUBECTL_LOG}"
+  # The Deployment deletes fine, but its pod hangs around — kubectl delete
+  # returns when the OBJECTS are gone, not when the pods are, and the Go agent
+  # beats until its process exits.
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf 'pod/kubehz-live-agent-abc123\n'; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+  sleep() { :; }
+  export -f sleep
+  KUBEHZ_LIVE_AGENT_DRAIN_SECONDS=10
+
+  local work="${BATS_TEST_TMPDIR}/a5"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+
+  run kubehz::deploy_apply "${work}" cronjob registered
+  assert_failure
+  assert_output --partial "still running"
+  refute [ "$(grep -c "apply -k ${work}/agent" "${STUB_KUBECTL_LOG}")" != "0" ]
 }
 
 @test "deploy_agent: refuses hosting: shared and access: none" {
@@ -440,16 +542,40 @@ _stub_kubectl_log() {
   assert_output "kubehz-agent"
 }
 
-@test "rbac: the vendored copies are byte-identical to the upstream kubehz-agent repo when it is present" {
-  local upstream="${_PROJECT_ROOT}/../_standalone/kubehz-agent/deploy"
-  [ -d "${upstream}" ] || skip "kubehz-agent checkout not present next to lok8s"
+# Vendored VERBATIM on purpose: the permissions a customer grants must be the
+# ones the agent's own public, auditable repo documents — with nothing added on
+# the way through lok8s.
+#
+# That claim used to be checked ONLY by diffing against a sibling kubehz-agent
+# checkout, which CI does not have — so the check skipped everywhere it
+# mattered and the claim was never evaluated. The guard is now the committed
+# digest pin, which needs no checkout and therefore cannot go quiet.
+@test "rbac: the vendored copies match the committed upstream digest pin" {
+  run bash -c "cd '${LIVE_DIR}' && command sha256sum --check --strict --quiet UPSTREAM.sha256"
+  assert_success
+}
 
-  # Vendored VERBATIM on purpose: the permissions a customer grants must be the
-  # ones the agent's own public, auditable repo documents — with nothing added
-  # on the way through lok8s.
+@test "rbac: the digest pin covers BOTH vendored files and nothing else" {
+  # A pin that lost a line would still pass the check above while guarding
+  # nothing — the same silent-absence failure the pin was written to end.
+  run bash -c "command grep -vE '^[[:space:]]*(#|\$)' '${LIVE_DIR}/UPSTREAM.sha256' | command awk '{print \$2}'"
+  assert_success
+  assert_line "base/rbac.yaml"
+  assert_line "managed/rbac-managed.yaml"
+  [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "rbac: cross-check the pin against a local upstream checkout, when there is one" {
+  local upstream="${_PROJECT_ROOT}/../_standalone/kubehz-agent/deploy"
+  [ -d "${upstream}" ] || skip "no kubehz-agent checkout beside lok8s — this is a developer convenience; the always-on digest pin above is the guard"
+
+  # Catches a pin regenerated from a locally-edited vendored file: the digests
+  # must describe UPSTREAM's bytes, not just our own.
   run diff -u "${upstream}/base/rbac.yaml" "${LIVE_DIR}/base/rbac.yaml"
   assert_success
   run diff -u "${upstream}/managed/rbac-managed.yaml" "${LIVE_DIR}/managed/rbac-managed.yaml"
+  assert_success
+  run bash -c "cd '${upstream}' && command sha256sum --check --strict --quiet '${LIVE_DIR}/UPSTREAM.sha256'"
   assert_success
 }
 

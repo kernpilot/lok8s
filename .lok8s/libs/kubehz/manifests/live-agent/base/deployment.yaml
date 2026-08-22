@@ -1,5 +1,6 @@
 # Named kubehz-live-agent: coexists with the bash heartbeat CronJob
-# (kubehz-heartbeat) — see rbac.yaml and deploy/README.md for the naming rule.
+# (kubehz-heartbeat) — see rbac.yaml here, and the upstream naming rule in
+# https://github.com/kernpilot/kubehz-agent (deploy/README.md).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,8 +12,9 @@ metadata:
     app.kubernetes.io/component: live-view
 spec:
   # Single replica for the pilot. HA (multiple replicas with a leader-elected
-  # Lease in kubehz-system) is a follow-up — see README "Follow-ups". Strategy
-  # Recreate avoids two agents briefly double-reporting during a rollout.
+  # Lease in kubehz-system) is a follow-up tracked in the upstream kubehz-agent
+  # repo. Strategy Recreate avoids two agents briefly double-reporting during a
+  # rollout.
   replicas: 1
   strategy:
     type: Recreate
@@ -38,22 +40,24 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          # PINNED BY DIGEST (multi-arch index: linux/amd64 + linux/arm64) on
-          # the PUBLIC, anonymously-pullable GHCR package — the ref a customer
-          # cluster can actually resolve. It used to default to the kubehz
-          # Harbor mirror (docker.kubehz.in.net), which no customer can pull:
-          # Harbor is private and IP-allowlisted, so the shipped default was a
-          # guaranteed ImagePullBackOff outside our own pilot.
+          # PINNED BY DIGEST (multi-arch index: linux/amd64 + linux/arm64) on a
+          # PUBLIC, anonymously-pullable registry — the only kind of ref every
+          # cluster can resolve. A default that points at a private or
+          # network-restricted registry is a guaranteed ImagePullBackOff for
+          # anyone outside that network, so the shipped default never does.
           #
-          # Dogfood / private-registry users override the REGISTRY, never this
-          # line — see the `images:` block in kustomization.yaml. The digest is
-          # the same in both registries (one build, mirrored by digest), so an
-          # override changes where the bytes come from, not which bytes.
+          # To pull from a mirror or an air-gapped copy, override the REGISTRY
+          # and keep this digest — see the `images:` block in
+          # kustomization.yaml. Mirroring by digest means an override changes
+          # where the bytes come from, not which bytes.
           #
           # Never a moving tag (`latest`, `main`): a digest is the only ref
           # `cosign verify` and a rollback can reason about. Release artifacts
           # (install.yaml on the GitHub Release) carry the released digest;
           # this committed default tracks the last known-good main build.
+          #
+          # THE SINGLE SOURCE OF TRUTH for the digest. Nothing else in this
+          # kustomization repeats it.
           image: ghcr.io/kernpilot/kubehz-agent@sha256:5a34f3569671fb2326b4b7e896069947f5680f9bac242e94fc888dc429720873
           imagePullPolicy: IfNotPresent
           envFrom:

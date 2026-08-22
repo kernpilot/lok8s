@@ -12,9 +12,11 @@ kind: Kustomization
 # overlay a (mis)authorized acting attempt fails closed as a reported Forbidden.
 #
 # VENDORED from the public kubehz-agent repo's deploy/managed. rbac-managed.yaml
-# is copied VERBATIM so it can be diffed against upstream — the permissions a
-# customer grants are exactly the ones the agent's own repo documents and
-# audits, with nothing added on the way through lok8s.
+# is copied BYTE-FOR-BYTE — comments and all, so a path it mentions
+# (deploy/README.md) is an upstream path — and its digest is pinned in
+# ../UPSTREAM.sha256. The permissions a customer grants are exactly the ones the
+# agent's own public repo documents and audits, with nothing added on the way
+# through lok8s, and the pin is what proves it on every test run.
 resources:
   - ../base
   - rbac-managed.yaml

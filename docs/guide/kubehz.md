@@ -255,11 +255,20 @@ The platform keeps the **latest** heartbeat and nothing older. The two agents
 report different fields, so if both beat, each one erases what the other
 reported: your live view would empty itself every five minutes.
 
-You do not have to police this. `spec.kubehz.agent` holds one value, so a spec
-cannot ask for both; `lo kubehz deploy` applies them in an order that leaves no
-gap; and the cluster itself carries the decision as `KUBEHZ_HEARTBEAT_OWNER` in
-the `kubehz-agent-config` ConfigMap, which the CronJob reads before it beats. Even
-a hand-applied manifest cannot start a second producer.
+You do not have to police this as long as you switch with `lo kubehz deploy`.
+`spec.kubehz.agent` holds one value, so a spec cannot ask for both; the command
+applies and removes in an order that leaves no gap in either direction, and it
+stops rather than continues if any step fails; and the cluster itself carries
+the decision as `KUBEHZ_HEARTBEAT_OWNER` in the `kubehz-agent-config` ConfigMap,
+which the CronJob reads before every beat.
+
+That marker is a **one-way** interlock, and it is worth knowing which way. It
+can silence the CronJob, so a hand-applied CronJob manifest cannot start a
+second producer. It cannot silence the live agent: the Go agent has no
+equivalent switch and beats whenever it runs, so what stops it is removing its
+Deployment — which is exactly what `lo kubehz deploy` does before it re-arms
+the CronJob. Apply the live agent's Deployment by hand while the marker says
+`cronjob` and you *will* have two producers. Let the command do the switching.
 :::
 
 ### What the live agent gives you
@@ -451,10 +460,26 @@ account. The in-cluster agents survive — to remove them as well:
 ```bash
 kubectl delete namespace kubehz-system
 kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/part-of=kubehz
+kubectl -n kube-system delete role,rolebinding -l app.kubernetes.io/part-of=kubehz
 ```
 
-That is the whole revocation. Both agents live in that one namespace, and the
-cluster-scoped RBAC in the second command is all either of them ever held.
+All three are needed. Both agents run in `kubehz-system`, but neither keeps all
+of its RBAC there: the cluster-scoped roles go in the second command, and both
+agents also hold a namespaced `Role`/`RoleBinding` in **`kube-system`** — the
+CronJob's pod-list and assessment reads (`kubehz-agent`), and, at
+`access: managed`, the MachineDeployment and Machine grants
+(`kubehz-live-agent-machinedeployments`). Those survive the first two commands.
+
+After the three, nothing labelled `app.kubernetes.io/part-of=kubehz` is left:
+
+```bash
+kubectl get clusterrole,clusterrolebinding -l app.kubernetes.io/part-of=kubehz
+kubectl get role,rolebinding -A -l app.kubernetes.io/part-of=kubehz
+```
+
+Both should print `No resources found`. If you moved the worker pools out of
+`kube-system` with `KUBEHZ_MD_NAMESPACE`, the managed `Role` moved with them —
+the `-A` query above finds it wherever it is.
 
 ## Assessment and handover
 
