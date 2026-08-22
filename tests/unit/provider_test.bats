@@ -253,7 +253,7 @@ SCRIPT
   # Mock yq for .kind resolution
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.gitops.provider // empty') echo "" ;;
       *) command yq "$@" ;;
     esac
@@ -304,7 +304,7 @@ SCRIPT
 
   yq() {
     case "$2" in
-      .kind) echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.gitops.provider // empty') echo "" ;;
       *) command yq "$@" ;;
     esac

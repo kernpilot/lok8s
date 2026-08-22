@@ -66,7 +66,7 @@ yq_space_defaults() {
 @test "validate_config: accepts hosting=shared with apiUrl and kind Kubehz" {
   yq() {
     case "$2" in
-      '.kind') echo "Kubehz" ;;
+      '.kind // ""') echo "Kubehz" ;;
       *) echo "" ;;
     esac
   }
@@ -91,7 +91,7 @@ yq_space_defaults() {
 @test "validate_config: rejects hosting=shared with a non-Kubehz kind" {
   yq() {
     case "$2" in
-      '.kind') echo "KubeOne" ;;
+      '.kind // ""') echo "KubeOne" ;;
       *) echo "" ;;
     esac
   }
@@ -108,7 +108,7 @@ yq_space_defaults() {
 @test "validate_config: rejects kind Kubehz without hosting=shared" {
   yq() {
     case "$2" in
-      '.kind') echo "Kubehz" ;;
+      '.kind // ""') echo "Kubehz" ;;
       *) echo "" ;;
     esac
   }

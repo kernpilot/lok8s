@@ -60,6 +60,45 @@ domain::resolve() {
   echo "${active:-lok8s.dev}"
 }
 
+# domain::spec_driver <cluster_spec> [fallback]
+#
+# THE reader for "which driver does this cluster spec declare". Thirteen sites
+# used to run their own `yq -r '.kind' | tr`, and the private copies disagreed
+# on all three of the things that matter (issue #89):
+#
+#   - the missing-key coercion. Without `// ""` yq prints the literal string
+#     "null", which is non-empty and passes any `[[ -n … ]]` test. That is how
+#     `lo down` routed a kind-less spec to driver-destroy.
+#   - the shape guard. The value is interpolated into `drivers/<kind>/main`,
+#     which is then sourced. Two sites checked `^[a-z][a-z0-9]*$`; the rest
+#     took whatever the file said.
+#   - the failure mode. `yq | tr` has no pipefail here, so tr's rc 0 masks an
+#     unreadable spec and the caller reads an empty driver instead of an error.
+#
+# Echoes the lowercased kind and returns 0. Otherwise:
+#   rc 1 — nothing to read: no file, unreadable file, key absent or empty.
+#          With a fallback given, the fallback is echoed and the rc is 0.
+#   rc 2 — `.kind` is present but is not a bare driver name. NEVER defaulted:
+#          the value reaches a path we source, and quietly replacing a crafted
+#          one with "lo" would hide the crafting.
+domain::spec_driver() {
+  local spec="${1}" fallback="${2-}"
+  # No `-f` pre-check: a missing file and an unreadable one are the same answer
+  # (rc 1, or the fallback), and yq already reports both. No `yq | tr` pipeline
+  # either — without pipefail a yq failure would be masked by tr's rc 0 and
+  # "succeed" with an empty driver. Bash's `,,` lowercases in-process.
+  local kind
+  kind=$(yq -r '.kind // ""' "${spec}" 2>/dev/null) || kind=""
+  kind="${kind,,}"
+  if [[ -z "${kind}" ]]; then
+    [[ -n "${fallback}" ]] || return 1
+    echo "${fallback}"
+    return 0
+  fi
+  [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || return 2
+  echo "${kind}"
+}
+
 # domain::driver — the driver a domain's cluster spec declares, lowercased
 # (`kind: Lo` → lo, `kind: KubeOne` → kubeone …). Deploy-only domains
 # (deploy.lok8s.yaml, no cluster spec) print "deploy"; a missing domain dir
@@ -76,15 +115,9 @@ domain::driver() {
     echo ""
     return 1
   fi
-  # No `yq | tr` pipeline: without pipefail a yq failure (unreadable spec,
-  # invalid YAML, missing yq) would be masked by tr's rc 0 and "succeed"
-  # with an empty driver — confusing every downstream consumer.
   local kind
-  kind=$(yq -r '.kind // ""' "${cluster_yaml}") || kind=""
-  if [[ -z "${kind}" ]]; then
-    echo "" && return 1
-  fi
-  echo "${kind,,}"
+  kind=$(domain::spec_driver "${cluster_yaml}") || { echo ""; return 1; }
+  echo "${kind}"
 }
 
 # domain::require_driver — gate a driver-specific operation on the resolved

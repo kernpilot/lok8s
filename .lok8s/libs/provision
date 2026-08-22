@@ -6,6 +6,7 @@
 # implementation from .scripts/provider/<kind>/main, and calls the contract functions.
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^libs/deploy
 import ^libs/build
@@ -244,24 +245,17 @@ provision::load_provider_creds() {
   return 0
 }
 
-# provision::read_kind <cluster_yaml> — read + validate .kind. The value is
-# untrusted YAML interpolated into a path we `source`; constrain it to a bare
-# driver name so a crafted spec can't traverse / source an arbitrary file
-# (same guard as bootstrap's driver resolution).
+# provision::read_kind <cluster_yaml> — the driver name for the dispatch, with
+# the errors dispatch wants to print. The reading, the coercion and the shape
+# guard live in domain::spec_driver; this is the message layer over it.
 provision::read_kind() {
-  local kind
-  # `// ""`: a missing .kind must read as empty, not the literal "null"
-  # (which would pass the regex and mis-report as an unknown driver later).
-  kind=$(yq -r '.kind // ""' "${1}" | tr '[:upper:]' '[:lower:]')
-  [[ -n "${kind}" ]] || {
-    error "cluster spec has no .kind: ${1}"
-    return 1
-  }
-  [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || {
-    error "invalid cluster kind: ${kind}"
-    return 1
-  }
-  echo "${kind}"
+  local kind rc=0
+  kind=$(domain::spec_driver "${1}") || rc=$?
+  case "${rc}" in
+    0) echo "${kind}" ;;
+    2) error "invalid cluster kind in ${1} (not a bare driver name)"; return 1 ;;
+    *) error "cluster spec has no .kind: ${1}"; return 1 ;;
+  esac
 }
 
 # Dispatch provisioning to the appropriate kind contract implementation.

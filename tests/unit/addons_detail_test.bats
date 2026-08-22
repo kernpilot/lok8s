@@ -184,3 +184,48 @@ YAML
 @test "an unknown addon name has no curated hint (empty)" {
   assert_equal "$(addons::_config_hint definitely-not-an-addon)" ""
 }
+
+# =============================================================================
+# the rc 2 contract — a malformed kind is never defaulted to "lo"
+# =============================================================================
+#
+# domain::spec_driver separates "nothing to read" (rc 1, or the fallback) from
+# "present but not a bare driver name" (rc 2, never defaulted) precisely so a
+# crafted kind cannot be laundered into a valid one. Both addons call sites
+# used to write `|| kind="lo"`, which defaults on BOTH — the contract said one
+# thing and the callers did another.
+
+@test "addons::_driver refuses a malformed kind instead of assuming lo" {
+  _spec bad <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: ../../evil
+metadata: { name: bad }
+YAML
+  run addons::_driver bad
+  assert_failure
+  # refute_LINE, not --partial: the refusal message names 'lo' in its own text.
+  # What must not happen is _driver EMITTING lo as the answer.
+  refute_line "lo"
+}
+
+@test "addons::_driver still falls back to lo when there is no spec at all" {
+  mkdir -p "${PATH_CLUSTERS}/nospec"
+  run addons::_driver nospec
+  assert_success
+  assert_output "lo"
+}
+
+@test "addons::detail refuses a malformed kind instead of assuming lo" {
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  _spec bad2 <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: "a b"
+metadata: { name: bad2 }
+spec:
+  bootstrap:
+    - cilium
+YAML
+  run addons::detail bad2
+  assert_failure
+  refute_output --partial "kind=lo"
+}

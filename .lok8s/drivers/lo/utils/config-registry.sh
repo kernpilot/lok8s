@@ -25,6 +25,8 @@
 
 # Static mappings — baked into each registry entry at generation time
 
+import ^utils/ip
+
 # Path to the generated JSON. Set by registry::config_generate.
 LOK8S_REGISTRY_JSON=""
 

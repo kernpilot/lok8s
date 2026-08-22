@@ -35,7 +35,7 @@ teardown() {
 @test "get_ssh_fingerprint: Lo kind returns lo:<domain>" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -54,7 +54,7 @@ teardown() {
 @test "get_ssh_fingerprint: KubeOne reads ssh key file" {
   yq() {
     case "$2" in
-      '.kind') echo "KubeOne" ;;
+      '.kind // ""') echo "KubeOne" ;;
       '.spec.hcloud.sshPublicKeyFile // .spec.ssh.publicKeyFile // "~/.ssh/id_ed25519.pub"')
         echo "${BATS_TEST_TMPDIR}/test_key.pub" ;;
       *) echo "" ;;
@@ -81,7 +81,7 @@ teardown() {
 @test "get_ssh_fingerprint: Capi queries hcloud for ssh key" {
   yq() {
     case "$2" in
-      '.kind') echo "Capi" ;;
+      '.kind // ""') echo "Capi" ;;
       '.spec.hcloud.sshKeyName // ""') echo "my-key" ;;
       *) echo "" ;;
     esac
@@ -116,7 +116,7 @@ teardown() {
 @test "get_ssh_fingerprint: unknown kind returns error" {
   yq() {
     case "$2" in
-      '.kind') echo "UnknownKind" ;;
+      '.kind // ""') echo "UnknownKind" ;;
       *) echo "" ;;
     esac
   }
@@ -134,7 +134,7 @@ teardown() {
 @test "register_cluster: posts to /api/clusters/register and prints the claim fingerprint" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -173,7 +173,7 @@ teardown() {
 @test "register_cluster: access managed notes the Supporter+ gate and still registers" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -228,7 +228,7 @@ teardown() {
 @test "register_cluster: refuses a plain-HTTP apiUrl (no curl)" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -253,7 +253,7 @@ teardown() {
 @test "register_cluster: empty cluster id warns but returns 0" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -287,7 +287,7 @@ teardown() {
 @test "register_cluster: API unreachable warns but returns 0" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -313,7 +313,7 @@ teardown() {
 @test "register_cluster: fingerprint failure warns but returns 0" {
   yq() {
     case "$2" in
-      '.kind') echo "UnknownKind" ;;
+      '.kind // ""') echo "UnknownKind" ;;
       *) echo "" ;;
     esac
   }
@@ -614,7 +614,7 @@ EOF
 @test "direct_claim: registers with the bearer and reports the claimed cluster" {
   yq() {
     case "$2" in
-      '.kind') echo "Lo" ;;
+      '.kind // ""') echo "Lo" ;;
       '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
       *) echo "" ;;
     esac
@@ -650,7 +650,7 @@ EOF
 }
 
 @test "direct_claim: a non-claimed response fails (falls back)" {
-  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  yq() { case "$2" in '.kind // ""') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
   export -f yq
   curl() { echo '{"id":"cl-1","claimed":false}'; }
   export -f curl
@@ -665,7 +665,7 @@ EOF
 }
 
 @test "direct_claim: connectHcloudToken connects the hcloud token when writable" {
-  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  yq() { case "$2" in '.kind // ""') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
   export -f yq
 
   # Register → claimed; credentials POST → writable token.
@@ -699,7 +699,7 @@ EOF
 }
 
 @test "direct_claim: connectHcloudToken warns when a read-only token is connected" {
-  yq() { case "$2" in '.kind') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
+  yq() { case "$2" in '.kind // ""') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
   export -f yq
   curl() {
     if [[ " $* " == *"/api/credentials"* ]]; then

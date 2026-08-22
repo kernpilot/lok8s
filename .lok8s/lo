@@ -209,7 +209,7 @@ _lo_header() {
   local meta="" kind=""
   if command -v yq &>/dev/null && [[ -f "${spec}" ]]; then
     local ver
-    kind=$(yq -r '.kind // ""' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    kind=$(domain::spec_driver "${spec}") || kind=""
     ver=$(yq -r '.spec.kubernetes.version // ""' "${spec}" 2>/dev/null)
     meta="${kind}"
     [[ "${kind}" == "lo" ]] && meta="${meta} · kind"
@@ -291,8 +291,28 @@ main::down() {
   # infrastructure and must be deprovisioned via the driver's destroy contract;
   # only the local kind driver (lo) is torn down by deleting the kind cluster +
   # Tilt + registries below.
+  #
+  # provision::read_kind is the ONE reader of `.kind` — it coerces a missing key
+  # to empty (`// ""`), rejects empty, and constrains the value to a bare driver
+  # name. The private copy that used to live here read `.kind` raw, so a spec
+  # WITHOUT one yielded yq's literal string "null": non-empty, not "lo", and the
+  # branch below routed a malformed spec to driver-destroy. A destructive path
+  # must not be reachable by a missing key.
+  #
+  # No spec file at all still means the local path: an unprovisioned or
+  # deploy-only domain has nothing but a kind cluster to remove. That is why
+  # this reads the kind rather than calling domain::driver, which answers
+  # "deploy" there and would send those domains down the driver branch.
   local spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/cluster.lok8s.yaml" kind=""
-  [[ -f "${spec}" ]] && kind=$(yq -r '.kind' "${spec}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  if [[ -f "${spec}" ]]; then
+    kind=$(provision::read_kind "${spec}") || {
+      # provision::read_kind has already said WHICH way it is wrong (absent vs
+      # malformed) one frame up. This frame says what to do about it.
+      printf '  \033[31m✗ cannot read the driver from %s — refusing to tear down\033[0m\n' "${spec}"
+      printf '  \033[2m  set .kind to a bare driver name (a directory under .lok8s/drivers), then run lo down again\033[0m\n'
+      return 1
+    }
+  fi
   if [[ -n "${kind}" && "${kind}" != "lo" ]]; then
     printf '  \033[2m• destroying %s cluster via its driver (deprovisions infrastructure)\033[0m\n' "${kind}"
     # A failed driver destroy means infrastructure may be ORPHANED (and billed)

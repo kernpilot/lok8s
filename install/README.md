@@ -36,6 +36,34 @@ binary — the sibling `arg-sh/argsh` checkout provides both, or set
 `ARGSH_SRC=/path/to/arg-sh/argsh`. The bundle (`docs/public/lo-up`) is committed
 because it is the published artifact; rebuild after every edit to `lo-up`.
 
+### The runtime is pinned
+
+The bundle embeds argsh's version and commit, so it is only reproducible
+against one runtime revision. `install/argsh.pin` records it and `build`
+refuses any other checkout. That is what lets CI rebuild and diff: the
+`loup-bundle` job checks argsh out at the pin, downloads the pinned `minifier`
+release asset, runs `install/build`, and fails on
+`git diff --exit-code -- docs/public/lo-up`. Before the pin existed nothing in
+CI noticed a stale bundle, and every `curl … | sh` user kept getting the old
+script.
+
+The pinned commit is on argsh's `feat/process-trace-phase2` branch, not on
+`main`. A force-push or a deletion of that branch makes the commit unreachable
+and the `loup-bundle` job then fails while CHECKING OUT argsh, before it builds
+anything — a "could not find the ref" error that says nothing about this pin.
+`install/argsh.pin` repeats the warning next to the value.
+
+To move to a newer argsh:
+
+```sh
+git -C /path/to/arg-sh/argsh checkout <new-ref>
+ARGSH_PIN_UPDATE=1 ARGSH_SRC=/path/to/arg-sh/argsh ./install/build
+```
+
+Commit `install/argsh.pin` and `docs/public/lo-up` together — a unit test
+compares the pin against the runtime baked into the bundle, so a bump without a
+rebuild fails even where the byte-exact job does not run.
+
 ## How the bundle works
 
 `install/lo-up.min.tmpl` wraps the minified `argsh runtime + lo-up` with a POSIX

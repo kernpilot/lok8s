@@ -36,6 +36,21 @@ Security applies to every change — features, fixes, refactors, tests.
 | docs | TS / Markdown | `docs/`, `ARCHITECTURE.md` |
 | ci | YAML | `.github/workflows/` |
 
+### Imports
+
+Every argsh import carries the `^` prefix — `import ^libs/deploy`,
+`import ^utils/domain`. The prefix resolves against `PATH_SCRIPTS`; a bare path
+resolves against the importing file, and the two differ as soon as something is
+sourced from outside the `lo` entrypoint. A driver's `main` must import all of
+its own siblings (see `.lok8s/drivers/README.md`) — do not rely on `lo`
+pre-importing them. The same holds for the shared utils: a lib that calls
+`domain::…` or `spec::…` imports `^utils/domain` / `^utils/spec` itself, even
+though `lo` already pulled them in. `tests/unit/import_convention_test.bats`
+fails on a non-prefixed import and on a missing one.
+
+The TypeScript under `.lok8s/libs/init.d/test/` is Playwright scaffolding for a
+user's project, not framework code. Its imports are ESM and stay relative.
+
 ## Building & testing
 
 ```bash

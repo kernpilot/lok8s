@@ -18,6 +18,9 @@
 #   LOK8S_REMOTE_MODE, LOK8S_REMOTE_EXPOSE, LOK8S_REMOTE_SYNC_*
 #   LOK8S_REMOTE_TILT
 
+import ^utils/ip
+import ^utils/oidc
+
 # ── Validation ────────────────────────────────────────────
 
 lo::validate_mirror_name() {

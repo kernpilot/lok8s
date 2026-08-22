@@ -25,6 +25,87 @@ unset ARGSH_SOURCE
 # Source verbose helpers (debug, error, warn) — these are used by all libs
 source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
 
+# Source utils/spec.sh — the shared spec.workers reader that kkp, kubeone and
+# capi all `import`. Sourced here for the same reason verbose.sh is: a test that
+# sources a driver stubs `import` first, so the driver's own `import ^utils/spec`
+# is a no-op and the helpers would be undefined in every driver test. `import` is
+# stubbed only for the length of this source and then removed, so a test that
+# does NOT stub it still fails loudly on its own missing imports.
+import() { :; }
+source "${_PROJECT_ROOT}/.lok8s/utils/spec.sh"
+unset -f import
+
+# utils/domain.sh — domain::resolve / domain::driver / domain::spec_driver, the
+# single domain-resolution and driver-identity point every lib now reads
+# through. Same reasoning as above: a lib sourced under a stubbed `import`
+# would otherwise find domain::spec_driver undefined.
+source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+
+# NOTE on the two global sources above: they make it impossible for any test in
+# this suite to fail on a lib's MISSING `import ^utils/spec` / `import
+# ^utils/domain` — the definitions are already there. That is a real class of
+# bug (nine libs called domain::spec_driver with no import of their own), and
+# it is NOT guarded here. It is guarded by
+# `tests/unit/import_convention_test.bats::every lib that calls a shared util's
+# helpers imports it`, which reads the source instead of running it. That gate
+# no longer needs updating when a global source is added: it DERIVES the
+# namespaces it checks from `.lok8s/utils/*.sh`, so a new util is covered the
+# day it lands. (It used to carry a hand-kept list here, which is the same
+# class of defect the gate exists to catch.)
+
+# ── shared sweep primitives ──────────────────────────────────────────────────
+#
+# Several gates sweep the shell tree for a forbidden spelling. Both halves of
+# such a gate — WHICH files it reads, and WHETHER its pattern still matches the
+# thing it forbids — are silent when broken: an absence assertion over an empty
+# file list, or with a stale regex, passes. Both live here so the gates cannot
+# derive them independently and drift (they did: three copies in two spellings,
+# with differing exclusions).
+
+# shell_sources — every bash/argsh source under .lok8s, one path per line.
+#
+# `init.d` is excluded by name: it is the scaffolding lok8s writes into a
+# user's project, not framework code, and it is TypeScript. The extension
+# exclusions drop data files that the header grep would otherwise have to read.
+#
+# Fails loudly on a near-empty result — a broken predicate must not read as
+# "nothing to find".
+shell_sources() {
+  local -a files=()
+  mapfile -t files < <(
+    find "${_PROJECT_ROOT}/.lok8s" -type f \
+      ! -path '*/init.d/*' \
+      ! -name '*.yaml' ! -name '*.yml' ! -name '*.json' ! -name '*.ts' \
+      -print0 \
+      | xargs -0 grep -lE '^#!/usr/bin/env (argsh|bash)|^# shellcheck shell=bash' 2>/dev/null
+  )
+  # 67 today. The floor only has to be high enough that a predicate which
+  # matches almost nothing cannot pass for a tree that has almost nothing.
+  (( ${#files[@]} >= 50 )) || {
+    echo "shell_sources found only ${#files[@]} bash/argsh file(s) under .lok8s" >&2
+    echo "— the discovery predicate is broken, not the tree." >&2
+    return 1
+  }
+  printf '%s\n' "${files[@]}"
+}
+
+# assert_pattern_matches <label> <ere> <sample> — the anti-vacuity half of an
+# absence gate.
+#
+# A gate that asserts "this spelling appears nowhere" is green both when the
+# spelling is gone and when the pattern stopped recognising it. Feeding the
+# pattern a canary line that MUST match separates the two without needing a
+# live specimen of the forbidden form to sit in the tree.
+assert_pattern_matches() {
+  local label="$1" ere="$2" sample="$3"
+  printf '%s\n' "${sample}" | grep -qE "${ere}" && return 0
+  echo "${label}: the pattern no longer matches its own canary, so the gate" >&2
+  echo "below is measuring nothing. Fix the pattern, not the tree." >&2
+  echo "  pattern: ${ere}" >&2
+  echo "  canary:  ${sample}" >&2
+  return 1
+}
+
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 

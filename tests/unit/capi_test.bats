@@ -338,3 +338,176 @@ YAML
   assert_success
   refute_output --partial "HetznerBareMetalMachineTemplate"
 }
+
+# --- template-variable containment (POST-REVIEW finding 6) ---
+
+@test "capi::generate leaves no template variable in the caller's environment" {
+  command -v yq &>/dev/null || skip "yq required"
+  command -v envsubst >/dev/null || skip "envsubst not available"
+
+  # The variables have to be EXPORTED for envsubst's child process, but they
+  # must not outlive the call: CLUSTER_NAME and K8S_VERSION are also read by
+  # the kubeone driver, and a leaked value renders the wrong cluster on the
+  # next call in the same `lo` process.
+  local v
+  for v in "${CAPI_TEMPLATE_VARS[@]}"; do unset "${v}"; done
+
+  # Called DIRECTLY with a FILE redirect. Neither `run` nor `$( … )` works here:
+  # both put the call in a subshell, so an environment leak is discarded before
+  # the assertions can see it. Two drafts of this test passed against a
+  # deliberately leaking mutant for exactly that reason.
+  local out_file="${BATS_TEST_TMPDIR}/generated.yaml"
+  capi::generate "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" "hetzner" > "${out_file}"
+  local out; out="$(cat "${out_file}")"
+  # Positive control: the render really did use them, so an "all unset" result
+  # below cannot mean "nothing happened".
+  [[ "${out}" == *"name: test-production"* ]] || {
+    echo "the render produced nothing recognisable:" >&2
+    echo "${out}" >&2
+    return 1
+  }
+
+  local -a leaked=()
+  for v in "${CAPI_TEMPLATE_VARS[@]}"; do
+    [[ -z "${!v+set}" ]] || leaked+=("${v}=${!v}")
+  done
+  [ "${#leaked[@]}" -eq 0 ] || {
+    echo "capi::generate exported these into the caller:" >&2
+    printf '  %s\n' "${leaked[@]}" >&2
+    return 1
+  }
+}
+
+@test "the envsubst whitelist is DERIVED from the variable list" {
+  # The drift gate. The whitelist and the export set were two hand-kept copies;
+  # a variable in one and not the other ships its ${PLACEHOLDER} verbatim into
+  # an applied manifest.
+  local want=""
+  local v
+  for v in "${CAPI_TEMPLATE_VARS[@]}"; do want+="\${${v}} "; done
+  want="${want% }"
+  [ "$(capi::_allowed_vars)" = "${want}" ]
+
+  # And no hardcoded list survives in the source.
+  local hits
+  hits=$(grep -n 'allowed_vars=.\${CLUSTER_NAME}' \
+    "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate" || true)
+  [ -z "${hits}" ] || {
+    echo "a literal envsubst whitelist is back:" >&2
+    echo "${hits}" >&2
+    echo "Build it from CAPI_TEMPLATE_VARS instead." >&2
+    return 1
+  }
+}
+
+# _capi_rendered_templates — the template files capi::generate actually feeds to
+# envsubst, read out of the driver source rather than restated here (restating
+# them would be a third copy of the same fact). capi::generate names each one as
+# "${core}/x.yaml" or "${prov}/y.yaml"; `prov` is the provider subdirectory it
+# picks, and it supports exactly one provider.
+_capi_rendered_templates() {
+  local src="${_PROJECT_ROOT}/.lok8s/drivers/capi/generate"
+  local root="${_PROJECT_ROOT}/.lok8s/drivers/capi/cluster"
+  local provider
+  provider=$(grep -oE 'prov="\$\{tmpl_dir\}/providers/[a-z0-9]+"' "${src}" \
+    | head -1 | sed -E 's|.*/providers/([a-z0-9]+)"$|\1|')
+  [[ -n "${provider}" ]] || return 1
+  grep -oE '\$\{(core|prov)\}/[A-Za-z0-9._-]+\.yaml' "${src}" \
+    | sed -e "s|\${core}|${root}/core|" \
+          -e "s|\${prov}|${root}/providers/${provider}|" \
+    | LC_ALL=C sort -u
+}
+
+# Every ${VAR} placeholder in those templates. The cloud-init's own variables
+# are written UNBRACED ($ARCH, $RUNC, $CONTAINERD, $KUBERNETES_VERSION) exactly
+# so envsubst's whitelist can pass them through, which is what makes the braced
+# form a reliable marker for "a lok8s template variable".
+_capi_template_placeholders() {
+  local -a tpls=()
+  mapfile -t tpls < <(_capi_rendered_templates)
+  [[ ${#tpls[@]} -gt 0 ]] || return 1
+  grep -hoE '\$\{[A-Z_][A-Z0-9_]*\}' "${tpls[@]}" \
+    | tr -d '${}' | LC_ALL=C sort -u
+}
+
+@test "the rendered CAPI templates are discoverable from the driver source" {
+  # ANTI-VACUITY for the two gates below: both compare a list against a set
+  # derived from these files, and both pass trivially if the set is empty.
+  local -a tpls=()
+  mapfile -t tpls < <(_capi_rendered_templates)
+  [ "${#tpls[@]}" -ge 7 ] || {
+    echo "found only ${#tpls[@]} rendered template(s) in the driver source —" >&2
+    echo "the extraction in _capi_rendered_templates is stale." >&2
+    printf '  %s\n' "${tpls[@]+"${tpls[@]}"}" >&2
+    return 1
+  }
+  local t
+  for t in "${tpls[@]}"; do
+    [ -f "${t}" ] || { echo "extracted a path that is not a template: ${t}" >&2; return 1; }
+  done
+
+  local -a phs=()
+  mapfile -t phs < <(_capi_template_placeholders)
+  [ "${#phs[@]}" -ge 10 ] || {
+    echo "only ${#phs[@]} placeholder(s) across ${#tpls[@]} templates — the" >&2
+    echo "placeholder sweep is broken." >&2
+    return 1
+  }
+}
+
+@test "every placeholder in a rendered CAPI template is in CAPI_TEMPLATE_VARS" {
+  # THE gate the list's own comment promised and never had. A placeholder that
+  # is not on the whitelist is not substituted, so its literal ${NAME} is
+  # applied to the management cluster — which is the exact failure the list
+  # exists to prevent, and nothing compared the two.
+  local -a untracked=()
+  local ph v found
+  while IFS= read -r ph; do
+    [[ -n "${ph}" ]] || continue
+    found=0
+    for v in "${CAPI_TEMPLATE_VARS[@]}"; do
+      [[ "${v}" == "${ph}" ]] && { found=1; break; }
+    done
+    (( found )) || untracked+=("${ph}")
+  done < <(_capi_template_placeholders)
+
+  [ "${#untracked[@]}" -eq 0 ] || {
+    echo "these placeholders are rendered but not in CAPI_TEMPLATE_VARS:" >&2
+    printf '  ${%s}\n' "${untracked[@]}" >&2
+    echo "envsubst will not substitute them — the literal text is applied." >&2
+    return 1
+  }
+}
+
+@test "every CAPI_TEMPLATE_VARS entry is used by a rendered template" {
+  # The other direction. A name left behind after a template drops it is
+  # exported for nothing and reads as a live contract to the next author.
+  local placeholders; placeholders="$(_capi_template_placeholders)"
+  local -a dead=()
+  local v
+  for v in "${CAPI_TEMPLATE_VARS[@]}"; do
+    grep -qxF -- "${v}" <<< "${placeholders}" || dead+=("${v}")
+  done
+
+  [ "${#dead[@]}" -eq 0 ] || {
+    echo "these CAPI_TEMPLATE_VARS entries appear in no rendered template:" >&2
+    printf '  %s\n' "${dead[@]}" >&2
+    return 1
+  }
+}
+
+@test "capi::generate FAILS on a bad pool name instead of emitting a partial stream" {
+  # libs/provision calls the driver as `driver::provision || rc=$?`, which
+  # disables errexit below it, so the unguarded `rendered=$(…)` let a failed
+  # render flow on as a control plane with no workers.
+  command -v yq &>/dev/null || skip "yq required"
+  command -v envsubst >/dev/null || skip "envsubst not available"
+
+  local spec="${BATS_TEST_TMPDIR}/bad-pool.lok8s.yaml"
+  cp "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" "${spec}"
+  yq -i '.spec.workers = {"-nope": {"replicas": 1, "type": "cax11"}}' "${spec}"
+
+  run capi::generate "${spec}" "hetzner"
+  assert_failure
+  refute_output --partial "kind: Cluster"
+}

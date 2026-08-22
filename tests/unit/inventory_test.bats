@@ -268,3 +268,34 @@ YAML
   assert_success
   assert_output "${PATH_LOK8S}/libs/inventory/manifests/clusterinventory.crd.yaml"
 }
+
+@test "build_json refuses a malformed kind instead of defaulting it to lo" {
+  # rc 2 from domain::spec_driver is "present but not a bare driver name" and
+  # is never defaulted. The inventory publishes `kind` into the
+  # ClusterInventory CR, so laundering "../../evil" into "lo" would put a false
+  # driver identity on the cluster and in the agent's heartbeat.
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  _spec bad <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: ../../evil
+metadata: { name: bad }
+spec:
+  kubernetes: { version: "v1.31.10" }
+YAML
+  run inventory::build_json bad "${PATH_CLUSTERS}/bad/cluster.lok8s.yaml"
+  assert_failure
+  refute_output --partial '"kind": "lo"'
+}
+
+@test "build_json still defaults to lo when the spec declares no kind" {
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  _spec nokind <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+metadata: { name: nokind }
+spec:
+  kubernetes: { version: "v1.31.10" }
+YAML
+  run inventory::build_json nokind "${PATH_CLUSTERS}/nokind/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial '"kind": "lo"'
+}

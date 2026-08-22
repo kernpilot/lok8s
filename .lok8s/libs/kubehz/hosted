@@ -8,6 +8,7 @@
 # libs/kubehz/main; not directly executable.
 
 import ^utils/verbose
+import ^utils/http
 
 # ── Hosted provisioning ──────────────────────────────────
 
@@ -18,6 +19,9 @@ kubehz::build_cluster_payload() {
   local cluster_yaml="${1}"
   local domain kind provider region k8s_version cp_replicas hosting access
   domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
+  # NOT domain::spec_driver: this is a wire field, not a driver lookup. The
+  # kubehz API receives the spec's kind in its ORIGINAL case ("KubeOne"), and
+  # lowercasing it here would change a cross-repo contract (issue #89).
   kind=$(yq -r '.kind' "${cluster_yaml}")
   provider=$(yq -r '.spec.provider // "hetzner"' "${cluster_yaml}")
   region=$(yq -r '.spec.hcloud.region // .spec.aws.region // "fsn1"' "${cluster_yaml}")
