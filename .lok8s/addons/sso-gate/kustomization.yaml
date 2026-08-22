@@ -37,10 +37,12 @@
 #       env: { client-secret: SSO_GATE_CLIENT_SECRET }
 #
 # ── Namespacing (the one sharp edge) ─────────────────────────────────────────
-# `targetSelectors` only matches HTTPRoutes in the SAME namespace as the
-# SecurityPolicy. This addon ships the policy in `default` (where a stock
-# lok8s gateway target puts its routes). Routes in another namespace need
-# their own copy — layer it from a target:
+# `targetSelectors` matches HTTPRoutes in the SAME namespace as the
+# SecurityPolicy — Envoy Gateway can widen that with
+# `targetSelectors[].namespaces`, but only with a ReferenceGrant in every
+# target namespace, so treat same-namespace as the shape. This addon ships the
+# policy in `default` (where a stock lok8s gateway target puts its routes).
+# Routes in another namespace need their own copy — layer it from a target:
 #
 #   apiVersion: kustomize.config.k8s.io/v1beta1
 #   kind: Kustomization

@@ -371,9 +371,25 @@ soon as v1.9.0 has reconciled once**:
    ```
 
    A CRD update may not drop a version still listed in
-   `status.storedVersions`. The Gateway API v1.5.1 bundle does not serve
-   `v1` for those three kinds, so applying it is **rejected** — which
-   blocks the v1.8.x rung too, not only v1.7.x.
+   `status.storedVersions`. **Which of the three actually blocks you
+   depends on the rung** — the older bundle only has to keep serving
+   `v1`, and v1.5.1 already does for `TLSRoute`:
+
+   | kind | stored after v1.9.0 | v1.5.1 serves (the v1.8.x rung) | v1.4.1 serves (the v1.7.x rung) |
+   |---|---|---|---|
+   | `tcproutes` | `v1alpha2`, `v1` | `v1alpha2` → **blocks** | `v1alpha2` → **blocks** |
+   | `udproutes` | `v1alpha2`, `v1` | `v1alpha2` → **blocks** | `v1alpha2` → **blocks** |
+   | `tlsroutes` | `v1alpha3`, `v1` | `v1`, `v1alpha2`, `v1alpha3` → passes | `v1alpha2`, `v1alpha3` → **blocks** |
+
+   So a rollback to **v1.8.x** is blocked by `tcproutes` and `udproutes`
+   only, and a rollback to **v1.7.x** is blocked by all three.
+
+   These three kinds exist **only on the experimental channel** of the
+   Gateway API, which is the channel this addon installs — check yours
+   with `kubectl get crd tcproutes.gateway.networking.k8s.io -o
+   jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/channel}'`.
+   On a standard-channel install the CRDs are absent and this block
+   cannot arise at all.
 
 2. **The `safe-upgrades` ValidatingAdmissionPolicy.** v1.8.1 moved
    `ValidatingAdmissionPolicy safe-upgrades.gateway.networking.k8s.io`
@@ -384,31 +400,40 @@ soon as v1.9.0 has reconciled once**:
    (v1.5.1) passes this one.
 :::
 
-Block 1 has a cheap escape hatch, and it is cheap **only** because those
-three kinds usually have no objects — most clusters route HTTP and never
-create a `TCPRoute`, `UDPRoute` or `TLSRoute`. Deleting a CRD deletes
-every object of that kind, so **check first**:
+Block 1 has an escape hatch, and it is cheap **only** because these kinds
+usually have no objects — most clusters route HTTP and never create a
+`TCPRoute`, `UDPRoute` or `TLSRoute`. Deleting a CRD deletes every object
+of that kind, so **delete the fewest CRDs the rung needs**, and **check
+each one first**.
+
+Rolling back to **v1.8.x** — two CRDs, `TLSRoute` untouched:
+
+```console
+$ kubectl get tcproutes,udproutes -A
+No resources found
+$ kubectl delete crd tcproutes.gateway.networking.k8s.io \
+                     udproutes.gateway.networking.k8s.io
+```
+
+Rolling back to **v1.7.x** — all three, plus the admission policy:
 
 ```console
 $ kubectl get tcproutes,udproutes,tlsroutes -A
 No resources found
-```
-
-If that prints any object, **stop** — export it, or stay on v1.9.x.
-Only on a clean `No resources found` is the downgrade step safe:
-
-```console
 $ kubectl delete crd tcproutes.gateway.networking.k8s.io \
                      udproutes.gateway.networking.k8s.io \
                      tlsroutes.gateway.networking.k8s.io
 $ kubectl delete validatingadmissionpolicybinding \
-      safe-upgrades.gateway.networking.k8s.io          # only for a v1.7.x rollback
+      safe-upgrades.gateway.networking.k8s.io
 $ kubectl delete validatingadmissionpolicy \
-      safe-upgrades.gateway.networking.k8s.io          # only for a v1.7.x rollback
+      safe-upgrades.gateway.networking.k8s.io
 ```
 
+If either `kubectl get` prints an object, **stop** — export it, or stay on
+v1.9.x. Only a clean `No resources found` makes the delete safe.
+
 Then re-pin `chart.yaml` and run `lo up` — the older bundle recreates the
-three CRDs at its own versions.
+CRDs you deleted at its own versions.
 
 #### v1.9.0 behaviour changes that no diff shows
 
@@ -428,11 +453,27 @@ gateway does without changing anything you wrote:
   ```yaml
   apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: EnvoyProxy
+  metadata:
+    name: tracing-opt-in
+    namespace: envoy-gateway-system
   spec:
     telemetry:
       tracing:
-        clientSamplingFraction: 100    # v1.9.0+; pre-1.9 behaviour
+        # a FRACTION, not a percentage: numerator is required,
+        # denominator defaults to 100. 100/100 = the pre-1.9 behaviour.
+        clientSamplingFraction:
+          numerator: 100
+        # `tracing` requires a provider — point this at your own collector.
+        provider:
+          type: OpenTelemetry
+          backendRefs:
+            - name: otel-collector
+              namespace: monitoring
+              port: 4317
   ```
+
+  Reference the `EnvoyProxy` from your `GatewayClass`
+  (`spec.parametersRef`) for it to take effect.
 
 - **`clientIPDetection: {}` is now rejected.** A `ClientTrafficPolicy` with
   an empty `spec.clientIPDetection` used to be accepted; CEL validation now
@@ -490,9 +531,16 @@ copy-paste patches):
 3. **Redirect URI** — register `https://<each-protected-host>/oauth2/callback`
    at your issuer.
 
-One sharp edge: `targetSelectors` only matches routes in the **same
-namespace** as the policy (shipped: `default`). For routes in another
-namespace, layer a second copy with a kustomize `namespace:` transform.
+One sharp edge: `targetSelectors` matches routes in the **same namespace**
+as the policy (shipped: `default`) — that is the default and what this
+addon ships. Envoy Gateway can widen it with
+`targetSelectors[].namespaces`, but that needs a `ReferenceGrant` in every
+target namespace; for routes elsewhere it is simpler to layer a second
+copy with a kustomize `namespace:` transform.
+
+Note this is about the **policy and the routes it selects**. The Gateway
+those routes attach to may sit in a third namespace — merging follows the
+route's attachment hierarchy, not namespaces.
 
 #### SSO must ADD to your gateway's guards, not replace them
 

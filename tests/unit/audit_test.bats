@@ -683,6 +683,145 @@ YAML
   assert_equal "$(_status_of exposed-endpoints)" "warn"
 }
 
+# ROUND 2: the mergeType test above only proved a GOOD value passes. The check
+# read presence, and the CRD has no enum for this field — its only validation
+# is the CEL rule `self != 'Replace'` — so every value below is admitted by the
+# apiserver, merges NOTHING, and used to score a clean pass. One case per shape
+# of the mistake: empty, plausible-but-wrong, wrong case.
+@test "a route-level SecurityPolicy with a non-merging mergeType still cancels the deny" {
+  local bad
+  for bad in '""' 'Merge' 'strategicmerge' 'Replace'; do
+    _spec "badmt" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+    _target "badmt" net/gw.yaml <<YAML
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  mergeType: ${bad}
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  oidc: { clientID: x }
+YAML
+    audit::run_domain "badmt"
+    assert_equal "mergeType=${bad} → $(_status_of exposed-endpoints)" "mergeType=${bad} → fail"
+    assert_equal "mergeType=${bad} → $(_sev_of exposed-endpoints)" "mergeType=${bad} → high"
+  done
+}
+
+@test "JSONMerge is the other real merge value and keeps the carve-out" {
+  _spec jm <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target jm net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  mergeType: JSONMerge
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  oidc: { clientID: x }
+YAML
+  audit::run_domain jm
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
+}
+
+# ROUND 2, false positive: the route policy replaces the gateway's deny with a
+# deny of its own. Nothing became reachable that was not reachable before, and
+# a security gate that fires on a safe configuration teaches people to ignore
+# it. Must not be counted.
+@test "a route-level policy that re-denies by itself is not an override finding" {
+  _spec redeny <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target redeny net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: route-guard }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+        principal: { clientCIDRs: ["10.0.0.0/8"] }
+YAML
+  audit::run_domain redeny
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
+}
+
 # =============================================================================
 # Kubernetes version support (EOL)
 # =============================================================================

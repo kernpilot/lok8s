@@ -40,13 +40,19 @@
 #   1. storedVersions. After v1.9.0 has reconciled once, tcproutes/udproutes
 #      list `v1` in storedVersions (alongside v1alpha2) and tlsroutes lists
 #      `v1` alongside v1alpha3 — measured, not predicted. A CRD update may not
-#      drop a version still in storedVersions, so applying the Gateway API
-#      v1.5.1 bundle (it does not serve `v1` for those three kinds) is
-#      REJECTED. This blocks the v1.8.x rung too. Escape hatch, and it is only
-#      safe while ZERO TCPRoute/UDPRoute/TLSRoute objects exist anywhere in the
-#      cluster: delete those three CRDs, then apply the older bundle, which
-#      recreates them. Deleting a CRD deletes its objects — check, do not
-#      assume. See the docs for the check and the delete.
+#      drop a version still in storedVersions, so an older bundle that stops
+#      serving `v1` for one of those kinds is REJECTED. WHICH kinds block
+#      depends on the rung, and getting this wrong destroys data:
+#        - to v1.8.x (GWAPI v1.5.1): tcproutes + udproutes block. v1.5.1 DOES
+#          serve tlsroutes v1, so TLSRoute is fine — leave it alone.
+#        - to v1.7.x (GWAPI v1.4.1): all three block.
+#      Escape hatch: delete the blocking CRDs, then apply the older bundle,
+#      which recreates them. It is only safe while ZERO objects of those kinds
+#      exist anywhere — deleting a CRD deletes its objects, so check, do not
+#      assume, and delete no more kinds than the rung needs. (These three
+#      kinds only exist on the Gateway API EXPERIMENTAL channel, which is what
+#      this chart installs; a standard-channel install has none of them.) See
+#      the docs for the per-rung check and delete.
 #
 #   2. The safe-upgrades ValidatingAdmissionPolicy. v1.8.1 moved
 #      `ValidatingAdmissionPolicy safe-upgrades.gateway.networking.k8s.io` out
