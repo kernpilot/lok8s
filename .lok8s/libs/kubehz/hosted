@@ -8,6 +8,7 @@
 # libs/kubehz/main; not directly executable.
 
 import ^utils/verbose
+import ^utils/http
 
 # ── Hosted provisioning ──────────────────────────────────
 

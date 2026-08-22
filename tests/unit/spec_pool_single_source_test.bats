@@ -52,16 +52,21 @@ YAML
 
 teardown() { teardown_tmpdir; }
 
-# Everything under .lok8s that is shell, minus the util itself. Templates and
-# YAML are excluded — they hold no reader.
-_shell_sources() {
-  find "${_PROJECT_ROOT}/.lok8s" -type f \
-    ! -path '*/utils/spec.sh' \
-    ! -path '*/init.d/*' \
-    ! -name '*.yaml' ! -name '*.yml' ! -name '*.json' ! -name '*.ts' \
-    -print0 \
-    | xargs -0 grep -l '^#!/usr/bin/env \(argsh\|bash\)\|^# shellcheck shell=bash' 2>/dev/null
+# Everything under .lok8s that is shell, minus the util itself. The file
+# predicate is shell_sources from tests/test_helper.bash — this file used to
+# carry its own BRE copy of it while two other test files carried ERE copies
+# with different exclusions, which is not what a change about single-sourcing
+# facts should leave behind.
+_adopters() {
+  shell_sources | grep -v '/utils/spec\.sh$'
 }
+
+# The bracket read, in both spellings yq accepts: `.spec.workers.["x"]` (what
+# the util writes) and `.spec.workers["x"]` (no dot — equally valid, and the
+# hole round 2 found in the first version of this gate, which required the
+# dot). Escaped quotes count too, because the util's own read is inside a
+# double-quoted program.
+_bracket_read_re='spec\.workers\.?\['
 
 # ── the drift gate ────────────────────────────────────────
 
@@ -74,8 +79,9 @@ _shell_sources() {
     return 1
   }
 
+  shell_sources >/dev/null   # `|| true` below would swallow an empty sweep
   local hits
-  hits=$(_shell_sources | xargs grep -n '\[a-zA-Z0-9\]\[a-zA-Z0-9-\]\*\$' 2>/dev/null || true)
+  hits=$(_adopters | xargs grep -nE '\[a-zA-Z0-9\]\[a-zA-Z0-9-\]\*\$' 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "a second copy of the pool-name regex reappeared:" >&2
     echo "${hits}" >&2
@@ -87,13 +93,21 @@ _shell_sources() {
 @test "no driver reads a pool field on its own" {
   # The bracket form. Its only correct home is the shared reader; a copy
   # elsewhere is a place the next hyphen bug can land.
-  grep -q 'spec.workers.\["' "${UTIL}" || {
+  grep -qE "${_bracket_read_re}" "${UTIL}" || {
     echo "the bracket read is no longer in ${UTIL} — repoint this gate." >&2
     return 1
   }
+  # ANTI-VACUITY: the dot is OPTIONAL. `.spec.workers["x"]` is valid yq and the
+  # first version of this pattern required the dot, so it matched the util and
+  # nothing else — a private copy written the other way sailed through.
+  assert_pattern_matches "pool bracket-read gate (no dot)" "${_bracket_read_re}" \
+    '  ami=$(yq -r ".spec.workers[\"${pool}\"].ami" "${cluster_yaml}")'
+  assert_pattern_matches "pool bracket-read gate (dotted bracket)" "${_bracket_read_re}" \
+    '  ami=$(yq -r ".spec.workers.[\"${pool}\"].ami" "${cluster_yaml}")'
 
+  shell_sources >/dev/null   # `|| true` below would swallow an empty sweep
   local hits
-  hits=$(_shell_sources | xargs grep -n 'spec\.workers\.\[' 2>/dev/null || true)
+  hits=$(_adopters | xargs grep -nE "${_bracket_read_re}" 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "a private bracket read of spec.workers reappeared:" >&2
     echo "${hits}" >&2
@@ -105,9 +119,16 @@ _shell_sources() {
 @test "no dotted read of a pool field survives anywhere" {
   # The bug itself, not the duplication: `.spec.workers.${pool}.x` parses the
   # hyphen as subtraction. It must not exist in any file, util included.
+  local re='spec\.workers\.\$\{'
+  # ANTI-VACUITY: an absence gate with a broken pattern is indistinguishable
+  # from a clean tree. Break the escape and this canary goes red first.
+  assert_pattern_matches "dotted pool-read gate" "${re}" \
+    '  ami=$(yq -r ".spec.workers.${pool}.ami" "${cluster_yaml}")'
+
+  shell_sources >/dev/null   # `|| true` below would swallow an empty sweep
   local hits
   hits=$(find "${_PROJECT_ROOT}/.lok8s" -type f ! -path '*/init.d/*' -print0 \
-    | xargs -0 grep -n 'spec\.workers\.\${' 2>/dev/null || true)
+    | xargs -0 grep -nE "${re}" 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "a dotted read of a pool field is back — yq parses a hyphenated pool" >&2
     echo "name as arithmetic and it silently reads nothing:" >&2
@@ -122,8 +143,9 @@ _shell_sources() {
     return 1
   }
 
+  shell_sources >/dev/null   # `|| true` below would swallow an empty sweep
   local hits
-  hits=$(_shell_sources | xargs grep -n 'spec\.workers[^"]*keys' 2>/dev/null || true)
+  hits=$(_adopters | xargs grep -nE 'spec\.workers[^"]*keys' 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "a private iteration of spec.workers reappeared:" >&2
     echo "${hits}" >&2
@@ -136,8 +158,15 @@ _shell_sources() {
   # `for pool in $(spec::pool_names …)` word-splits before the name is
   # validated, which is what kkp did. The helper's docstring says so; this
   # makes it enforceable.
+  local re='for .* in \$\(spec::pool_names'
+  # ANTI-VACUITY: same reason as above — this gate found nothing on the day it
+  # was written, so nothing but a canary distinguishes it from a dead pattern.
+  assert_pattern_matches "pool for-in gate" "${re}" \
+    '  for pool in $(spec::pool_names "${cluster_yaml}"); do'
+
+  shell_sources >/dev/null   # `|| true` below would swallow an empty sweep
   local hits
-  hits=$(_shell_sources | xargs grep -n 'for .* in \$(spec::pool_names' 2>/dev/null || true)
+  hits=$(_adopters | xargs grep -nE "${re}" 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "a pool loop word-splits the name list before validating it:" >&2
     echo "${hits}" >&2

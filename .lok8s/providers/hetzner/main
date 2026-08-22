@@ -9,6 +9,7 @@ PATH_SCRIPTS="${PATH_LOK8S}"
 import ^utils/verbose
 import ^utils/types
 import ^utils/template
+import ^utils/credentials
 
 : "${CLOUD_HETZNER_JSON:=""}"
 : "${CLOUD_DRY_RUN:=""}"

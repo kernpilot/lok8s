@@ -57,6 +57,12 @@ node_conf()  { echo "${BATS_TEST_TMPDIR}/root.${1}/etc/kubernetes/kubelet.conf";
 
 _load() {
   warn() { echo "warn: ${*}" >&2; }
+  # network.sh declares `import ^utils/ip`. Outside `lo` there is no argsh
+  # runtime to provide `import`, and PATH then resolves it to ImageMagick's
+  # `import(1)` — which fails on "unable to open X server", from a line that
+  # has nothing to do with anything under test. Every other suite that sources
+  # a lib directly stubs it for the same reason.
+  import() { :; }
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/network.sh"
 
   local node

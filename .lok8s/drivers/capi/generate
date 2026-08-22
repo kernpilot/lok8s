@@ -7,6 +7,7 @@
 import ^utils/verbose
 import ^utils/template
 import ^utils/spec
+import ^utils/credentials
 
 # Detect the CAPI provider from cluster spec fields.
 # Usage: capi::detect_provider <cluster_yaml>

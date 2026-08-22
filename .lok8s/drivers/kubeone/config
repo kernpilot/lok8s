@@ -13,6 +13,7 @@ import ^utils/verbose
 import ^utils/template
 import ^utils/oidc
 import ^utils/spec
+import ^utils/credentials
 
 # ── Provider detection ──────────────────────────────────
 

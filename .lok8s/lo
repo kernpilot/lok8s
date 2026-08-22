@@ -306,7 +306,10 @@ main::down() {
   local spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/cluster.lok8s.yaml" kind=""
   if [[ -f "${spec}" ]]; then
     kind=$(provision::read_kind "${spec}") || {
+      # provision::read_kind has already said WHICH way it is wrong (absent vs
+      # malformed) one frame up. This frame says what to do about it.
       printf '  \033[31m✗ cannot read the driver from %s — refusing to tear down\033[0m\n' "${spec}"
+      printf '  \033[2m  set .kind to a bare driver name (a directory under .lok8s/drivers), then run lo down again\033[0m\n'
       return 1
     }
   fi

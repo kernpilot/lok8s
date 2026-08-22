@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # network.sh — Docker network lifecycle for Lo clusters
 
+import ^utils/ip
+
 lo::network() {
   local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}"
   local subnet="${LOK8S_NETWORK_SUBNET:-}"

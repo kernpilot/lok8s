@@ -123,34 +123,89 @@ teardown() { teardown_tmpdir; }
 
 # ── the drift gate ────────────────────────────────────────
 
-# Every yq read whose PROGRAM starts at `.kind` (or `.spec.kind`). Anything
-# else — a `select(.kind == …)` over a manifest stream, a `[.kind, …] | @tsv` —
-# is a Kubernetes object kind, not a cluster driver, and is not what this gates.
+# Every yq read of a `.kind`-rooted accessor. Two rounds of review went into
+# this pattern and the lesson of both is the same: STOP ANCHORING ON HOW THE
+# CALL IS WRITTEN.
 #
-# What the pattern must NOT do is anchor on the assignment. The first version
-# of this sweep required `=$(yq`, so the quoted spelling
+#   round 1 anchored on the shell ASSIGNMENT (`=$(yq`), so `k="$(yq -r '.kind'
+#           …)"` — the pre-fix spelling of libs/use:74, one of the thirteen
+#           sites #89 converged — walked straight through it;
+#   round 2 anchored on the QUOTING (a literal `'` before `.kind`), so
+#           `kind=$(yq -r ".kind // \"\"" "${spec}")` walked through instead.
+#           Not an exotic spelling: .lok8s holds dozens of double-quoted yq
+#           programs, and this PR's own new reader (utils/spec.sh) is one.
 #
-#     k="$(yq -r '.kind' "${spec}")"
+# Both anchors were incidental syntax. What identifies a driver read is the
+# ACCESSOR — a path expression rooted at the document's `kind` — so that is
+# what the pattern matches, in whatever notation:
 #
-# evaded it — and that is the PRE-FIX spelling of libs/use:74, one of the
-# thirteen sites #89 converged. The gate could not have caught a regression of
-# the very thing it guards. Two allowlist rows proved it independently: the
-# `libs/hooks` row (quoted) and the `libs/lint` spec_runtime row (`.spec.kind`)
-# matched nothing the sweep ever produced, so both sat there dead. Matching on
-# the yq PROGRAM instead of on the shell syntax around it covers every
-# assignment spelling there is — `x=$(…)`, `x="$(…)"`, `local x=$(…)`,
-# backticks, a bare argument, `< <(…)` — and it is the yq program, not the
-# assignment, that says "this is a driver read".
+#   '.kind'   ".kind"   .kind   '.spec.kind'   '.["kind"]'   ".[\"kind\"]"
+#   '.spec["kind"]'     '.["spec"].kind'       "${root}.kind"
+#
+# and, separately, the same accessor written into a VARIABLE that is handed to
+# yq later (`q='.kind'; yq -r "${q}" …`) — caught where the program is written
+# rather than where it is run, because that is the only place it exists as text.
+#
+# The leading-delimiter class (quote, whitespace, `}`) is what keeps `.kind` at
+# the ROOT: `.metadata.kind` and `.items[].kind` are preceded by a word
+# character or `]` and do not match. `(` is deliberately NOT in the class, so a
+# bare `select(.kind == …)` — a Kubernetes object kind, not a driver — stays
+# out. Flags no longer break the match either: round 2's `yq [^)]*` span was
+# defeated by any `)` in between, e.g. `yq --arg d "$(date)" -r '.kind'`.
+#
+# WHAT THIS PATTERN CANNOT CATCH — the honest boundary, because a third false
+# anchor dressed up as completeness would be worse than a named gap:
+#
+#   1. a yq call whose program sits on a DIFFERENT LINE (backslash
+#      continuation, or a heredoc body), unless that program is also written as
+#      a quoted assignment somewhere;
+#   2. a program in which the word `kind` itself is interpolated —
+#      `f=kind; yq -r ".${f}"`, `yq -r ".$(echo kind)"`;
+#   3. a program assembled by printf/concatenation into a variable that is not
+#      a single quoted literal — `q="."; q+="kind"`;
+#   4. yq reached through an alias or a variable rather than the literal token
+#      (`${YQ} -r '.kind'`, a `_yq()` wrapper) — Part A keys on `yq`;
+#   5. a driver read that never uses yq at all: `grep '^kind:' | cut -d: -f2`,
+#      jq over converted JSON, python;
+#   6. a root `kind` reached indirectly — `.. | select(…)`, `to_entries`,
+#      `with(.; .kind)`;
+#   7. anything outside `.lok8s`, or in a file without a bash/argsh header
+#      (see shell_sources in tests/test_helper.bash).
+#
+# 1–3 and 6 are reachable by a determined author. None of them is the shape a
+# fourteenth copy actually takes — every one of the thirteen #89 converged was
+# a plain one-line quoted read — so the gate is aimed at drift, not at an
+# adversary. The anti-vacuity canaries below are what keep it aimed at all.
 #
 # Comment lines are dropped: prose that quotes the pattern (utils/domain.sh's
 # own docstring does) is not a read.
+_kind_accessor_re() {
+  printf '%s' '\.(spec|\[[^]]*spec[^]]*\])?\.?(\[[^]]*kind[^]]*\]|kind([^[:alnum:]_]|$))'
+}
+
+# Part A — the accessor handed to yq on the same line.
+_kind_read_re() {
+  local q=\'
+  printf '%s' "yq.*[[:space:]\"${q}}]$(_kind_accessor_re)"
+}
+
+# Part B — the accessor written into a variable, for a yq call further down.
+_kind_query_re() {
+  local q=\'
+  printf '%s' "=[\"${q}]$(_kind_accessor_re)"
+}
+
 _kind_reads() {
-  find "${_PROJECT_ROOT}/.lok8s" -type f ! -path '*/init.d/*' \
-    ! -name '*.yaml' ! -name '*.yml' ! -name '*.json' ! -name '*.ts' -print0 \
-    | xargs -0 grep -lE '^#!/usr/bin/env (argsh|bash)|^# shellcheck shell=bash' 2>/dev/null \
-    | xargs grep -nE 'yq [^)]*'"'"'(\.spec)?\.kind' 2>/dev/null \
-    | grep -vE ':[0-9]+:[[:space:]]*#' \
-    | sed "s|^${_PROJECT_ROOT}/||"
+  local -a files=()
+  mapfile -t files < <(shell_sources)
+  # shell_sources has already said why on stderr. Returning early matters:
+  # `grep` with no file arguments would read stdin and hang the suite.
+  (( ${#files[@]} )) || return 1
+  { grep -nE "$(_kind_read_re)"  "${files[@]}" 2>/dev/null
+    grep -nE "$(_kind_query_re)" "${files[@]}" 2>/dev/null
+  } | grep -vE ':[0-9]+:[[:space:]]*#' \
+    | sed "s|^${_PROJECT_ROOT}/||" \
+    | sort -u
 }
 
 # Every read that is NOT a cluster-driver read, with the reason. One entry per
@@ -168,6 +223,7 @@ _allowed_kind_reads() {
 .lok8s/libs/lint|spec_kind=$(yq -r '.kind // ""' "${spec_file}")
 .lok8s/libs/lint|spec_runtime=$(yq -r '.spec.kind // .kind // ""' "${spec_file}")
 .lok8s/libs/kubehz/hosted|kind=$(yq -r '.kind' "${cluster_yaml}")
+.lok8s/utils/kapply.sh|yq -r 'select(.kind == "Deployment"
 ALLOW
 }
 # Reasons, in the same order:
@@ -191,26 +247,81 @@ ALLOW
 #                       change a cross-repo contract, so it stays until the API
 #                       side is checked. This is the one item of #89 that this
 #                       change does not close.
+#   utils/kapply.sh   — `select(.kind == "Deployment" or .kind == …)` over a
+#                       manifest stream: a Kubernetes object kind. It is listed
+#                       because the widened accessor class matches the SECOND
+#                       and third `.kind` in that select (each preceded by a
+#                       space, not by `(`). The row is the price of catching
+#                       `yq -r .kind` and `| .kind`, and it is a cheap one.
+
+# Every spelling the sweep is claimed to cover, as a line it must match. This
+# is the gate's real anti-vacuity check: it does not depend on any particular
+# file still being written a particular way.
+#
+# Round 2's canary pinned the FILE (libs/hooks) rather than the FORM, so it
+# only worked while libs/hooks:130 happened to be the sole quoted read in the
+# tree. Re-spell that one line and the canary stays green while it stops
+# measuring anything. These do not rot: each row IS the spelling.
+_kind_read_canaries() {
+  cat <<'CANARY'
+single-quoted|  kind=$(yq -r '.kind // ""' "${spec}")
+double-quoted|  kind=$(yq -r ".kind // \"\"" "${spec}")
+quoted assignment|  kind="$(yq -r '.kind' "${spec}")"
+bare program|  kind=$(yq -r .kind "${spec}")
+flag with a subshell|  kind=$(yq --arg d "$(date)" -r '.kind' "${spec}")
+bracket accessor|  kind=$(yq -r '.["kind"]' "${spec}")
+escaped bracket accessor|  kind=$(yq -r ".[\"kind\"]" "${spec}")
+spec-rooted|  kind=$(yq -r '.spec.kind' "${spec}")
+spec-rooted bracket|  kind=$(yq -r '.spec["kind"]' "${spec}")
+interpolated prefix|  kind=$(yq -r "${root}.kind" "${spec}")
+program held in a variable|  local q='.kind'
+CANARY
+}
+
+# ...and the spellings it must NOT match, so widening the accessor class does
+# not quietly turn every Kubernetes object-kind read into an allowlist chore.
+_kind_read_non_canaries() {
+  cat <<'NOPE'
+select over a manifest stream|  k=$(yq -r 'select(.kind == "Deployment")' "${f}")
+a nested kind|  n=$(yq -r '.metadata.kind' "${f}")
+a kind inside a list|  r=$(yq -r '[.kind, .metadata.name] | @tsv' "${f}")
+NOPE
+}
+
+@test "the .kind sweep still recognises every spelling it claims to cover" {
+  # ANTI-VACUITY for the two gates below, both of which assert an ABSENCE and
+  # are therefore green when the pattern is broken.
+  local re_a re_b label line
+  re_a="$(_kind_read_re)"; re_b="$(_kind_query_re)"
+  while IFS='|' read -r label line; do
+    [[ -n "${label}" ]] || continue
+    printf '%s\n' "${line}" | grep -qE "${re_a}|${re_b}" || {
+      echo "the sweep no longer matches the ${label} form:" >&2
+      echo "  ${line}" >&2
+      echo "Part A: ${re_a}" >&2
+      echo "Part B: ${re_b}" >&2
+      return 1
+    }
+  done < <(_kind_read_canaries)
+
+  while IFS='|' read -r label line; do
+    [[ -n "${label}" ]] || continue
+    if printf '%s\n' "${line}" | grep -qE "${re_a}|${re_b}"; then
+      echo "the sweep now matches ${label}, which is a Kubernetes object kind" >&2
+      echo "and not a driver read:" >&2
+      echo "  ${line}" >&2
+      return 1
+    fi
+  done < <(_kind_read_non_canaries)
+}
 
 @test "every remaining .kind read is either the shared reader or allowlisted" {
   local hits; hits="$(_kind_reads)"
-  # ANTI-VACUITY 1: the sweep must find the reader itself, or the pattern is
-  # broken and this gate is measuring an empty set.
+  # ANTI-VACUITY: the sweep must find the reader itself. The canary test above
+  # proves the PATTERN; this proves it is still being pointed at the tree.
   [[ "${hits}" == *"utils/domain.sh"* ]] || {
     echo "the sweep did not even find domain::spec_driver's own read — the" >&2
     echo "grep in _kind_reads is stale, not the code." >&2
-    echo "${hits}" >&2
-    return 1
-  }
-  # ANTI-VACUITY 2: it must also find the QUOTED spelling. libs/hooks:130 is
-  # `kind="$(yq -r '.kind // ""' …)"` — a `"` between the `=` and the `$(`.
-  # The first version of this sweep required `=$(yq` and so missed exactly
-  # that form, which is how the pre-fix libs/use:74 was written. This keeps a
-  # live canary for it in the tree instead of trusting the pattern by reading.
-  [[ "${hits}" == *"libs/hooks"* ]] || {
-    echo "the sweep missed the QUOTED read in libs/hooks — the pattern is" >&2
-    echo "anchored on the assignment again, so k=\"\$(yq -r '.kind' …)\"" >&2
-    echo "evades it. Match the yq PROGRAM, not the shell syntax." >&2
     echo "${hits}" >&2
     return 1
   }
@@ -280,9 +391,19 @@ ALLOW
 @test "no lib lowercases a driver with the maskable yq-into-tr pipeline" {
   # The third disagreement. `yq … | tr` cannot fail: tr returns 0 and the
   # caller reads an empty driver. domain::spec_driver uses bash's `,,`.
+  #
+  # Built from the same accessor as the sweep above, so the two cannot drift —
+  # this gate used to carry its own `yq [^)]*\.kind` copy and inherited every
+  # evasion the sweep had.
+  local re; re="$(_kind_read_re).*\| *tr "
+  assert_pattern_matches "yq-into-tr gate" "${re}" \
+    'd=$(yq -r ".kind" "${f}" | tr "[:upper:]" "[:lower:]")'
+  # ...and that the file sweep still has a tree to look at. `|| true` below
+  # would otherwise swallow shell_sources' own failure.
+  shell_sources >/dev/null
+
   local hits
-  hits=$(find "${_PROJECT_ROOT}/.lok8s" -type f ! -path '*/init.d/*' -print0 \
-    | xargs -0 grep -nE "yq [^)]*\.kind.*\| *tr " 2>/dev/null || true)
+  hits=$(shell_sources | xargs grep -nE "${re}" 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "a yq-into-tr driver read reappeared:" >&2
     echo "${hits}" >&2

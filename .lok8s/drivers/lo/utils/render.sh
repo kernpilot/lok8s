@@ -1,6 +1,8 @@
 # shellcheck shell=bash disable=SC2034
 # render.sh — Kind config rendering (YAML/TOML generation)
 
+import ^utils/oidc
+
 lo::render_kind_config() {
   local cluster_name="${1}" k8s_version="${2}" network="${3}" cluster_yaml="${4:-}"
 

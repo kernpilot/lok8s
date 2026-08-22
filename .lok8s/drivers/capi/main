@@ -11,6 +11,7 @@
 # CONTRACT). Do NOT rely on `lo` pre-importing it.
 
 import ^utils/verbose
+import ^utils/credentials
 import ^drivers/capi/generate
 
 # ── CLI dispatch ──────────────────────────────────────────

@@ -22,21 +22,17 @@ setup() {
   load "../test_helper"
 }
 
-# Bash/argsh sources under .lok8s. init.d is excluded by name: it is scaffolding
-# for a user's project, not framework code, and it is TypeScript.
-_argsh_sources() {
-  find "${_PROJECT_ROOT}/.lok8s" -type f \
-    ! -path '*/init.d/*' \
-    ! -name '*.yaml' ! -name '*.yml' ! -name '*.json' ! -name '*.ts' \
-    -print0 \
-    | xargs -0 grep -lE '^#!/usr/bin/env (argsh|bash)|^# shellcheck shell=bash' 2>/dev/null
-}
+# Bash/argsh sources under .lok8s come from shell_sources in
+# tests/test_helper.bash — the one copy of that predicate. Three test files
+# each carried their own before, in two regex dialects and with differing
+# exclusions, which is the wrong direction for a change about single-sourcing
+# facts.
 
 @test "the framework really does use argsh imports" {
   # ANTI-VACUITY. The gate below asserts an ABSENCE; without this it would pass
   # just as happily over a tree with no imports at all, or a broken file sweep.
   local count
-  count=$(_argsh_sources | xargs grep -c '^import \^' 2>/dev/null \
+  count=$(shell_sources | xargs grep -c '^import \^' 2>/dev/null \
     | awk -F: '{ n += $NF } END { print n + 0 }')
   [ "${count}" -ge 100 ] || {
     echo "only ${count} '^'-prefixed imports found — the sweep is broken, not" >&2
@@ -49,8 +45,9 @@ _argsh_sources() {
   # `^` resolves against PATH_SCRIPTS; a bare path resolves against the
   # importing file. Both work from `lo`, which is why a mixed tree goes
   # unnoticed until something is sourced from elsewhere.
+  shell_sources >/dev/null   # `|| true` below would swallow an empty sweep
   local hits
-  hits=$(_argsh_sources | xargs grep -nE '^[[:space:]]*import[[:space:]]+[^^[:space:]]' 2>/dev/null || true)
+  hits=$(shell_sources | xargs grep -nE '^[[:space:]]*import[[:space:]]+[^^[:space:]]' 2>/dev/null || true)
   [ -z "${hits}" ] || {
     echo "these imports are not '^'-prefixed:" >&2
     echo "${hits}" >&2
@@ -76,13 +73,58 @@ _argsh_sources() {
 # otherwise die on an undefined helper. It is a test-harness convenience, not a
 # statement about the tree. This gate is what makes the statement.
 #
-# Namespace → the import that defines it. Only the shared utils whose helpers
-# are called across libs; a lib calling its own namespace needs no import.
+# The namespaces this gate covers are DERIVED from `.lok8s/utils/*.sh`, not
+# listed. The first version listed two of them — domain and spec — which made
+# the gate a hand-kept promise about which facts are single-sourced: exactly the
+# defect class the change it belongs to exists to remove. Sweeping the other
+# nine namespaces turned up eleven real callers with no declaration of their
+# own, in capi, kubeone, the lo driver's utils, libs/status, libs/kubehz/hosted
+# and providers/hetzner.
+#
+# Derivation, per `utils/<base>.sh`: the namespaces it DEFINES (`^ns::fn()`) map
+# to `import ^utils/<base>`. Reading the definitions rather than the filename is
+# what makes `utils/types.sh` (which defines `to::`) come out right, and what
+# makes `utils/verbose.sh` (which defines plain `error`/`warn`/`debug`, no
+# namespace) drop out on its own.
 _util_namespaces() {
-  cat <<'NS'
-domain|utils/domain|utils/domain.sh
-spec|utils/spec|utils/spec.sh
-NS
+  local file base ns
+  for file in "${_PROJECT_ROOT}"/.lok8s/utils/*.sh; do
+    base="$(basename "${file}" .sh)"
+    while IFS= read -r ns; do
+      [[ -n "${ns}" ]] || continue
+      _is_interface_namespace "${ns}" && continue
+      printf '%s|utils/%s|utils/%s.sh\n' "${ns}" "${base}" "${base}"
+    done < <(grep -oE '^[a-zA-Z0-9_]+::[a-zA-Z0-9_]+\(\)' "${file}" \
+      | sed 's/::.*//' | sort -u)
+  done
+}
+
+# A namespace that is a PLUGIN INTERFACE rather than a single-sourced util.
+# `provider::` is declared partly in `utils/provider.sh` (detect/load/…) and
+# implemented per backend in `providers/<name>/main`, which `provider::detect`
+# sources at run time. Callers guard with `declare -F provider::provision`
+# precisely because no static import can promise the symbol. Requiring one
+# would be wrong, not merely noisy.
+#
+# The exemption is asserted below, so it cannot rot into a way of quietly
+# dropping a namespace from the gate.
+_is_interface_namespace() {
+  [[ "${1}" == provider ]]
+}
+
+@test "the declared interface namespaces really are implemented outside their util" {
+  # Guards the exemption above. If provider:: ever became an ordinary util —
+  # defined only in utils/provider.sh — this exemption would be silently
+  # excusing every caller of it.
+  local ns=provider hits
+  hits=$(shell_sources | xargs grep -lE "^${ns}::[a-zA-Z0-9_]+\(\)" 2>/dev/null \
+    | grep -v "utils/${ns}.sh" || true)
+  [ -n "${hits}" ] || {
+    echo "'${ns}' is exempted from the missing-import gate as a plugin" >&2
+    echo "interface, but nothing outside utils/${ns}.sh implements it any" >&2
+    echo "more. Drop the exemption in _is_interface_namespace." >&2
+    return 1
+  }
 }
 
 @test "every lib that calls a shared util's helpers imports it" {
@@ -93,24 +135,40 @@ NS
     [[ -n "${ns}" ]] || continue
     while IFS= read -r file; do
       rel="${file#"${_PROJECT_ROOT}/"}"
-      # The file that DEFINES the namespace does not import itself.
-      [[ "${rel}" == ".lok8s/${definer}" ]] && continue
+      # A file that DEFINES the namespace does not import it — that covers the
+      # util itself and any file extending the same namespace.
+      grep -qE "^${ns}::[a-zA-Z0-9_]+\(\)" "${file}" && continue
       # Full-line comments are prose, not calls (several libs name
       # domain::spec_driver in a comment explaining why they do NOT call it).
       grep -vE '^[[:space:]]*#' "${file}" \
         | grep -qE "(^|[^[:alnum:]_:])${ns}::[a-z_]" || continue
       seen+=("${rel}:${ns}")
       grep -qE "^[[:space:]]*import[[:space:]]+\^${import_path}[[:space:]]*$" "${file}" \
-        || missing+=("${rel} calls ${ns}:: without 'import ^${import_path}'")
-    done < <(_argsh_sources)
+        && continue
+      # A direct `source "${PATH_LOK8S}/utils/<base>.sh"` satisfies the rule
+      # too, and is what drivers/lo/main and drivers/lo/libs/registry do (they
+      # carry a `# shellcheck source=` line with it, which `import` would lose).
+      # The defect is depending on SOMEONE ELSE having loaded the util; naming
+      # the file yourself is not that.
+      grep -qE "^[[:space:]]*source[[:space:]].*${definer//./\\.}" "${file}" \
+        && continue
+      missing+=("${rel} calls ${ns}:: without 'import ^${import_path}'")
+    done < <(shell_sources)
   done < <(_util_namespaces)
 
   # ANTI-VACUITY: this gate asserts an ABSENCE, so it has to prove it actually
-  # examined callers. Both namespaces are called from more than a handful of
-  # files; a sweep that found nothing would otherwise pass silently.
-  [ "${#seen[@]}" -ge 10 ] || {
-    echo "the sweep found only ${#seen[@]} caller(s) of domain::/spec:: — it is" >&2
-    echo "broken, not the tree." >&2
+  # examined callers, over more than one namespace. 100 pairs today across 11
+  # namespaces; a derivation that collapsed to one util would trip this.
+  local -a namespaces=()
+  mapfile -t namespaces < <(_util_namespaces | cut -d'|' -f1 | sort -u)
+  [ "${#namespaces[@]}" -ge 8 ] || {
+    echo "only ${#namespaces[@]} util namespace(s) derived from .lok8s/utils —" >&2
+    echo "the derivation in _util_namespaces is broken, not the tree." >&2
+    return 1
+  }
+  [ "${#seen[@]}" -ge 40 ] || {
+    echo "the sweep found only ${#seen[@]} caller(s) across ${#namespaces[@]}" >&2
+    echo "namespaces — it is broken, not the tree." >&2
     return 1
   }
 
