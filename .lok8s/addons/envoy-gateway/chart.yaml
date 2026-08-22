@@ -1,5 +1,11 @@
 # khelm chart spec for Envoy Gateway
 #
+# Bumping this pin is NOT routine. The user-facing procedure — hazards, the
+# rollback that is BLOCKED, and the behaviour changes that never show up in a
+# diff — lives in docs/guide/addons.md, section "envoy-gateway — upgrading in
+# place". Read it before you change `version:`. Only what a reader OF THIS FILE
+# needs is repeated here.
+#
 # ── CRDs ride the render; nothing here runs helm ─────────────────────────────
 # The chart carries both Envoy Gateway's own xPolicy CRDs and the upstream
 # Gateway API bundle, and khelm inflates them into the kustomize output. The
@@ -14,29 +20,57 @@
 # that transparently, verified by rendering each pin and diffing the object
 # inventory.
 #
-# ── Gateway API bundle version rides the chart version ───────────────────────
+# ── The Gateway API bundle version rides the chart version ───────────────────
 #   EG v1.7.1 → Gateway API v1.4.1
 #   EG v1.8.3 → Gateway API v1.5.1   (adds the standard ListenerSet CRD;
 #                                     drops the experimental XListenerSet)
 #   EG v1.9.0 → Gateway API v1.6.1   (TCPRoute/UDPRoute/TLSRoute gain v1 and
-#                                     move their storage version to it)
-# Upgrading this pin therefore upgrades Gateway API. Two things to check
-# BEFORE a jump that crosses a Gateway API minor:
-#   1. No CRD's `status.storedVersions` names a version the new bundle stops
-#      serving — the apiserver rejects such an update outright.
-#      kubectl get crd -o json | jq -r '.items[]
-#        | select(.spec.group|test("gateway"))
-#        | "\(.metadata.name) stored=\(.status.storedVersions|join(","))"'
-#   2. Where a storage version MOVES (v1alpha2 → v1), storedVersions
-#      accumulates. Nothing breaks while both are served, but a storage
-#      migration is owed before the old version is finally removed upstream.
+#                                     move their STORAGE version to it)
+# So bumping this pin bumps Gateway API. Before a jump that crosses a Gateway
+# API minor, confirm no CRD's `status.storedVersions` names a version the new
+# bundle stops serving — the apiserver rejects such an update outright:
+#   kubectl get crd -o json | jq -r '.items[]
+#     | select(.spec.group|test("gateway"))
+#     | "\(.metadata.name) stored=\(.status.storedVersions|join(","))"'
 #
-# ── The safe-upgrades ValidatingAdmissionPolicy blocks DOWNGRADES ────────────
-# v1.8.1 moved `ValidatingAdmissionPolicy safe-upgrades.gateway.networking.k8s.io`
-# out of the CRD bundle into the chart TEMPLATES, so this addon now installs it.
-# It rejects any Gateway API CRD annotated with a bundle-version below v1.5.
-# Rolling this pin back to v1.7.x therefore fails at admission until the VAP and
-# its binding are deleted. Rolling back to v1.8.x is unaffected (v1.5.1 passes).
+# ── ROLLING BACK FROM v1.9.0 IS BLOCKED — two independent blocks ─────────────
+# Both are real; neither is a caveat. The full procedure (with the safety check
+# that has to pass first) is in docs/guide/addons.md.
+#
+#   1. storedVersions. After v1.9.0 has reconciled once, tcproutes/udproutes
+#      list `v1` in storedVersions (alongside v1alpha2) and tlsroutes lists
+#      `v1` alongside v1alpha3 — measured, not predicted. A CRD update may not
+#      drop a version still in storedVersions, so applying the Gateway API
+#      v1.5.1 bundle (it does not serve `v1` for those three kinds) is
+#      REJECTED. This blocks the v1.8.x rung too. Escape hatch, and it is only
+#      safe while ZERO TCPRoute/UDPRoute/TLSRoute objects exist anywhere in the
+#      cluster: delete those three CRDs, then apply the older bundle, which
+#      recreates them. Deleting a CRD deletes its objects — check, do not
+#      assume. See the docs for the check and the delete.
+#
+#   2. The safe-upgrades ValidatingAdmissionPolicy. v1.8.1 moved
+#      `ValidatingAdmissionPolicy safe-upgrades.gateway.networking.k8s.io` out
+#      of the CRD bundle into the chart TEMPLATES, so this addon now installs
+#      it. It rejects any Gateway API CRD annotated with a bundle version below
+#      v1.5, so a rollback to v1.7.x also fails at admission until the VAP and
+#      its binding are deleted. The v1.8.x rung (v1.5.1) passes this one.
+#
+# ── v1.9.0 changes nothing in this render but changes behaviour ──────────────
+#   - Client-forced tracing now defaults to OFF. Upstream dropped
+#     `clientSamplingFraction` from 100% to 0%, so a client's `x-client-trace-id`
+#     no longer forces a trace unless you opt in. This is NOT ordinary sampling
+#     — `samplingRate` still defaults to 100 and unforced traces are unaffected.
+#     Deliberately NOT pinned in values.yaml: the knob lives on the consumer's
+#     own EnvoyProxy/BackendTrafficPolicy, this addon ships no tracing config at
+#     all, and letting any caller force a full trace through a shared gateway is
+#     not the prod-grade default this base is supposed to hold. Opt-in snippet
+#     in docs/guide/addons.md.
+#   - `ClientTrafficPolicy.spec.clientIPDetection: {}` (empty) is now rejected
+#     by CEL — name exactly one of xForwardedFor/customHeader/directSourceIP.
+#   - Lua EnvoyExtensionPolicies are off until `extensionApis.enableLua` is set.
+#   - `SecurityPolicy.spec.mergeType` validation got stricter: xRoute targets
+#     only (HTTPRoute/GRPCRoute/TCPRoute), rejected on Gateway / Gateway
+#     listener / ListenerSet. That is exactly the sso-gate addon's shape.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:

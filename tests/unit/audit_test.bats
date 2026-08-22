@@ -536,6 +536,153 @@ YAML
   assert_equal "$(_status_of exposed-endpoints)" "pass"
 }
 
+# SECURITYPOLICY MERGE REGRESSION (subagent review round 1, PR #140): the
+# carve-out used to be one `grep 'defaultAction: Deny'` over every rendered
+# file. That boolean could not see WHICH object carried the deny, nor that a
+# route-level policy without `mergeType` REPLACES it wholesale for the routes
+# it selects — so the exact footgun the sso-gate fix is about scored a clean
+# pass. These four lock both halves: object scoping, and the override.
+@test "a route-level SecurityPolicy without mergeType cancels the gateway's deny" {
+  _spec ovr <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target ovr net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels: { "sso.lok8s.dev/protect": "true" }
+  oidc: { clientID: x }
+YAML
+  audit::run_domain ovr
+  assert_equal "$(_status_of exposed-endpoints)" "fail"
+  assert_equal "$(_sev_of exposed-endpoints)" "high"
+}
+
+@test "the same route-level SecurityPolicy WITH mergeType keeps the carve-out" {
+  _spec mrg <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target mrg net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  mergeType: StrategicMerge
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels: { "sso.lok8s.dev/protect": "true" }
+  oidc: { clientID: x }
+YAML
+  audit::run_domain mrg
+  assert_equal "$(_status_of exposed-endpoints)" "pass"
+}
+
+@test "a non-SecurityPolicy object quoting defaultAction: Deny is not a carve-out" {
+  _spec deco <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  # The old text-only detector matched this ConfigMap and scored the HTTPRoute
+  # below as allowlisted. Only a real SecurityPolicy may count.
+  _target deco net/route.yaml <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: app }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: docs }
+data:
+  snippet: |
+    authorization:
+      defaultAction: Deny
+YAML
+  audit::run_domain deco
+  assert_equal "$(_status_of exposed-endpoints)" "warn"
+}
+
+@test "an unmerged route-level policy with no gateway-wide deny is not flagged" {
+  _spec solo <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  # Nothing to override: no gateway-wide deny exists, so the missing mergeType
+  # costs nothing and must not manufacture a finding.
+  _target solo net/route.yaml <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: app }
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: sso-gate }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  oidc: { clientID: x }
+YAML
+  audit::run_domain solo
+  assert_equal "$(_status_of exposed-endpoints)" "warn"
+}
+
 # =============================================================================
 # Kubernetes version support (EOL)
 # =============================================================================

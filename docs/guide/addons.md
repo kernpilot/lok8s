@@ -308,6 +308,7 @@ cause is fixed.
 | `metallb` | MetalLB L2 load balancer | `metallb/metallb` v0.15.3 |
 | `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.20.1 |
 | `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook — **opt-in**; bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
+| `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle** — see [upgrading in place](#envoy-gateway-upgrading-in-place) before bumping the pin | `envoyproxy/gateway-helm` v1.9.0 |
 
 ### Cilium driver-specific behavior
 
@@ -325,7 +326,127 @@ MetalLB uses the `${LOK8S_SPEC_LOADBALANCER_POOL}` envsubst variable
 from `spec.loadBalancer.pool` in the cluster spec. The pool range
 defines the IP addresses MetalLB can assign to LoadBalancer services.
 
-### sso-gate — OIDC login in front of any service
+### envoy-gateway — upgrading in place {#envoy-gateway-upgrading-in-place}
+
+The `envoy-gateway` addon installs the Envoy Gateway controller **and the
+upstream Gateway API CRD bundle**, because that bundle ships inside the
+chart. khelm inflates chart CRDs into the kustomize output, so the usual
+"`helm upgrade` skips CRDs" escape hatch does not apply here: bumping the
+chart pin **applies new Gateway API CRDs to your cluster**, in the same
+apply as the controller.
+
+That makes the pin in `.lok8s/addons/envoy-gateway/chart.yaml` a
+cluster-wide change, not an image bump. The versions move together:
+
+| envoy-gateway | Gateway API | notes |
+|---|---|---|
+| v1.7.1 | v1.4.1 | no `SecurityPolicy.mergeType` |
+| v1.8.3 | v1.5.1 | `mergeType` added; standard `ListenerSet`, experimental `XListenerSet` dropped |
+| v1.9.0 | v1.6.1 | `TCPRoute`/`UDPRoute`/`TLSRoute` gain `v1` **and move their storage version to it** |
+
+Before any jump that crosses a Gateway API minor, check that no CRD's
+`status.storedVersions` names a version the incoming bundle stops
+serving — the apiserver rejects such an update outright:
+
+```console
+$ kubectl get crd -o json | jq -r '.items[]
+    | select(.spec.group|test("gateway"))
+    | "\(.metadata.name) stored=\(.status.storedVersions|join(","))"'
+```
+
+#### Rolling back from v1.9.0 is blocked
+
+::: danger You cannot simply re-pin an older version
+Two independent blocks stop a downgrade, and the first one applies **as
+soon as v1.9.0 has reconciled once**:
+
+1. **`storedVersions`.** v1.9.0 moves the storage version of `TCPRoute`,
+   `UDPRoute` and `TLSRoute` to `v1`, so the apiserver starts recording
+   `v1` alongside the old version:
+
+   ```
+   tcproutes  storedVersions ["v1alpha2","v1"]
+   udproutes  storedVersions ["v1alpha2","v1"]
+   tlsroutes  storedVersions ["v1alpha3","v1"]
+   ```
+
+   A CRD update may not drop a version still listed in
+   `status.storedVersions`. The Gateway API v1.5.1 bundle does not serve
+   `v1` for those three kinds, so applying it is **rejected** — which
+   blocks the v1.8.x rung too, not only v1.7.x.
+
+2. **The `safe-upgrades` ValidatingAdmissionPolicy.** v1.8.1 moved
+   `ValidatingAdmissionPolicy safe-upgrades.gateway.networking.k8s.io`
+   out of the CRD bundle into the chart *templates*, so the addon now
+   installs it. It rejects any Gateway API CRD annotated with a bundle
+   version below **v1.5**, so a rollback to v1.7.x fails at admission
+   until that policy and its binding are deleted. The v1.8.x rung
+   (v1.5.1) passes this one.
+:::
+
+Block 1 has a cheap escape hatch, and it is cheap **only** because those
+three kinds usually have no objects — most clusters route HTTP and never
+create a `TCPRoute`, `UDPRoute` or `TLSRoute`. Deleting a CRD deletes
+every object of that kind, so **check first**:
+
+```console
+$ kubectl get tcproutes,udproutes,tlsroutes -A
+No resources found
+```
+
+If that prints any object, **stop** — export it, or stay on v1.9.x.
+Only on a clean `No resources found` is the downgrade step safe:
+
+```console
+$ kubectl delete crd tcproutes.gateway.networking.k8s.io \
+                     udproutes.gateway.networking.k8s.io \
+                     tlsroutes.gateway.networking.k8s.io
+$ kubectl delete validatingadmissionpolicybinding \
+      safe-upgrades.gateway.networking.k8s.io          # only for a v1.7.x rollback
+$ kubectl delete validatingadmissionpolicy \
+      safe-upgrades.gateway.networking.k8s.io          # only for a v1.7.x rollback
+```
+
+Then re-pin `chart.yaml` and run `lo up` — the older bundle recreates the
+three CRDs at its own versions.
+
+#### v1.9.0 behaviour changes that no diff shows
+
+Upgrading in place is more than the CRD jump. These change what a running
+gateway does without changing anything you wrote:
+
+- **Client-forced tracing is off by default.** Upstream dropped the client
+  sampling fraction from **100% to 0%**, so Envoy Gateway no longer honours
+  a caller's `x-client-trace-id` forced trace. This is *not* ordinary
+  sampling — `samplingRate` still defaults to 100, and traces you sample
+  yourself are unaffected. Only client-*forced* traces stop. The addon
+  deliberately does **not** pin this: the knob belongs to your own
+  `EnvoyProxy`, the addon ships no tracing config at all, and a shared
+  gateway that lets any caller force a full trace is not a default worth
+  restoring for everyone. If you relied on it, opt back in explicitly:
+
+  ```yaml
+  apiVersion: gateway.envoyproxy.io/v1alpha1
+  kind: EnvoyProxy
+  spec:
+    telemetry:
+      tracing:
+        clientSamplingFraction: 100    # v1.9.0+; pre-1.9 behaviour
+  ```
+
+- **`clientIPDetection: {}` is now rejected.** A `ClientTrafficPolicy` with
+  an empty `spec.clientIPDetection` used to be accepted; CEL validation now
+  requires exactly one of `xForwardedFor`, `customHeader` or
+  `directSourceIP`.
+- **Lua `EnvoyExtensionPolicy` is opt-in**, via `extensionApis.enableLua`.
+- **`SecurityPolicy.spec.mergeType` validation got stricter** — xRoute
+  targets only (`HTTPRoute`, `GRPCRoute`, `TCPRoute`), rejected on a
+  `Gateway`, a Gateway listener or a `ListenerSet`. That is exactly the
+  shape [`sso-gate`](#sso-gate) ships, so the addon is unaffected — but a
+  hand-written gateway-wide policy carrying `mergeType` must drop the
+  field before it can be updated again.
+
+### sso-gate — OIDC login in front of any service {#sso-gate}
 
 `sso-gate` puts any HTTP service behind OIDC single sign-on **at the
 gateway** — no sidecar, no change to the app. It ships one Envoy Gateway
@@ -409,10 +530,29 @@ under `Overridden` and reports it under `Merged` instead:
         for these routes: [default/internal-dashboard]'
 ```
 
-Two consequences:
+::: warning The merge cuts BOTH ways
+Merging is not only "the route keeps what it had". A labeled route now
+**inherits the Gateway policy's rules as well**, and those rules did not
+apply to it before.
 
-- **It needs `envoy-gateway` v1.8.0 or later.** `mergeType` arrived in
-  v1.8.0. On an older CRD there is no such field, and how that fails
+So the breaking direction is real: if your Gateway policy carries an IP
+allowlist, or `authorization.defaultAction: Deny` with allow rules that
+never mentioned this route, then a route that serves fine today over SSO
+starts returning **403** the moment it is labeled — the login succeeds and
+the inherited authorization refuses the request afterwards. Nothing is
+misconfigured; the route is simply subject to gateway-wide rules for the
+first time.
+
+Before labeling a route on a gateway that has its own `SecurityPolicy`,
+read that policy and confirm the route's callers are inside whatever it
+allows. `Merged: True` on the Gateway policy means the inheritance is
+live, not that it is harmless.
+:::
+
+Three consequences:
+
+- **It needs `envoy-gateway` v1.8.0 or later**, the release that added
+  `mergeType`. On an older CRD there is no such field, and how that fails
   depends on how you apply: a **server-side** apply (`kubectl apply
   --server-side`, and every GitOps controller) is **rejected** with
   `.spec.mergeType: field not declared in schema`, while a client-side
@@ -420,14 +560,24 @@ Two consequences:
   behaviour. Check the CRD before trusting the field:
 
   ```console
-  $ kubectl get crd securitypolicies.gateway.envoyproxy.io \
-      -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.mergeType.type}'
+  $ JP='{.spec.versions[?(@.name=="v1alpha1")]'
+  $ JP="${JP}.schema.openAPIV3Schema.properties.spec.properties.mergeType.type}"
+  $ kubectl get crd securitypolicies.gateway.envoyproxy.io -o jsonpath="${JP}"
   string     # empty output = your Envoy Gateway is too old
   ```
 
-  If you manage the gateway with GitOps, that ordering is load-bearing:
-  **upgrade Envoy Gateway first**, then let the policy carrying
-  `mergeType` reconcile. The other order fails the whole apply set.
+  (Select the version by name, not by `versions[0]` — the order of that
+  list is not a contract. Running this for you from `lo doctor` is
+  [kernpilot/lok8s#141](https://github.com/kernpilot/lok8s/issues/141).)
+
+- **Upgrade Envoy Gateway before the policy reconciles.** Under `lo up`
+  that ordering comes free from `dependsOn: [envoy-gateway]`, and a
+  rejected `sso-gate` would only skip *its own* dependents — a failing
+  addon never stops unrelated ones (see [Failure
+  handling](#failure-handling)). Under **GitOps** it is different: Flux
+  and Argo reconcile the rendered set as a unit, so one object rejected
+  for `.spec.mergeType: field not declared in schema` fails the whole
+  sync. Sequence the gateway upgrade ahead of it there.
 
 - **`mergeType` is legal only on a child target** — `HTTPRoute`,
   `GRPCRoute` or `TCPRoute`. Envoy Gateway rejects it on a `Gateway`, a
@@ -436,14 +586,18 @@ Two consequences:
 
 The trap is not specific to this addon. **Any** route-level
 `SecurityPolicy` you write replaces the Gateway's: set `mergeType` on it,
-or first check what the Gateway policy was doing for that route.
+or first check what the Gateway policy was doing for that route. `lo
+audit` flags the combination — a gateway-wide default-Deny plus a
+route-level policy with no `mergeType` — under `exposed-endpoints`.
 
 To prove the merge on a running gateway, read the generated Envoy config
 rather than the policy status. The route entries under a protected host's
 virtual host must carry **both** filters:
 
 ```console
-$ kubectl -n envoy-gateway-system port-forward <envoy-pod> 19000:19000 &
+$ POD=$(kubectl -n envoy-gateway-system get pod -o name \
+    -l gateway.envoyproxy.io/owning-gateway-name=<your-gateway> | head -n1)
+$ kubectl -n envoy-gateway-system port-forward "${POD}" 19000:19000 & PF=$!
 $ curl -s 'localhost:19000/config_dump?resource=dynamic_route_configs' \
   | jq -r '.configs[].route_config.virtual_hosts[]
            | . as $v
@@ -454,6 +608,8 @@ $ curl -s 'localhost:19000/config_dump?resource=dynamic_route_configs' \
 
 default/gw/https/app_example_com      rbac=true   oidc=false
 default/gw/https/internal_example_com rbac=true   oidc=true    # merged
+
+$ kill "${PF}"
 ```
 
 `rbac=false oidc=true` on a protected host is the bug: the login went on
