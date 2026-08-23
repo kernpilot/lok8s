@@ -1,7 +1,7 @@
 # cert-manager — framework addon.
 #
 # A generic, reusable atom: bootstrap `cert-manager` by name to get the
-# cert-manager controller + CRDs (jetstack v1.20.1) in the cert-manager
+# cert-manager controller + CRDs (jetstack v1.21.1) in the cert-manager
 # namespace. That alone satisfies the ClusterIssuer/Certificate CRDs that KKP
 # and the networking target's CRs reference.
 #

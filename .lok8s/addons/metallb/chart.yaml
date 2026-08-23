@@ -6,6 +6,6 @@ metadata:
 kubeVersion: "1.31.4"
 repository: https://metallb.github.io/metallb
 chart: metallb
-version: 0.15.3
+version: 0.16.1
 valueFiles:
   - values.yaml

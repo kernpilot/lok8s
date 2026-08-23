@@ -9,6 +9,6 @@ metadata:
 kubeVersion: "1.31.4"
 repository: https://charts.hetzner.cloud
 chart: hcloud-cloud-controller-manager
-version: 1.33.0
+version: 1.35.0
 valueFiles:
   - values.yaml

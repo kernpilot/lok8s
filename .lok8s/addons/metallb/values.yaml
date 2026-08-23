@@ -4,3 +4,33 @@ controller:
   enabled: true
 speaker:
   enabled: true
+  # BGP backend — PINNED, not inherited (chart 0.16.0 flipped the default).
+  # Up to 0.15.x the default was the in-speaker FRR sidecars
+  # (speaker.frr.enabled: true); 0.16.0 made the standalone frr-k8s DaemonSet
+  # the default instead (frrk8s.enabled: true) and started deprecating FRR mode.
+  # This addon advertises over L2 ONLY — pool.yaml ships an IPAddressPool + an
+  # L2Advertisement and never a BGPPeer/BGPAdvertisement — so either backend is
+  # dead weight. Inheriting the new default would add a DaemonSet, a
+  # status-cleaner Deployment, four frrk8s.metallb.io CRDs and a
+  # `failurePolicy: Fail` validating webhook on FRRConfiguration: one more
+  # webhook that must be serving before the addon's readiness gate can clear.
+  # Both off = the plain L2 speaker (ARP/NDP), the smallest thing that answers
+  # for a pool address.
+  # A consumer that needs BGP sets `frrk8s: {enabled: true}` in its inline
+  # values — frr-k8s is the backend upstream develops; speaker.frr is the
+  # deprecated one, so do NOT re-enable that side instead.
+  frr:
+    enabled: false
+frrk8s:
+  enabled: false
+# Metrics TLS floor — RESTORED under its new key. 0.16.0 dropped
+# kube-rbac-proxy and serves /metrics from the controller and speaker
+# themselves over HTTPS, and in the same move renamed
+# `controller.tlsMinVersion` (chart default "VersionTLS12") to `tls.minVersion`
+# (chart default "", i.e. the flag is omitted and the Go library floor
+# applies). A renamed key is not an error — it is silently ignored — so a bare
+# pin bump would have quietly lowered the floor on an endpoint that is now the
+# TLS server. Set it back, and on both components: the speaker serves metrics
+# over TLS now too, which it did not before.
+tls:
+  minVersion: "VersionTLS12"

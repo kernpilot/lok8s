@@ -152,8 +152,8 @@ Addons deployed by my-cluster.example.com (kind=kubeone)
 NAME          CATEGORY        TYPE   VERSION   CONFIGURE
 ----          --------        ----   -------   ---------
 cilium        networking      khelm  1.19.2    encryption + policy mode (policyAuditMode) in cilium inline values / values.<driver>.yaml
-ccm           networking      khelm  1.33.0    spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)
-cert-manager  infrastructure  khelm  v1.20.1   issue TLS via ClusterIssuer/Certificate CRs in a networking target
+ccm           networking      khelm  1.35.0    spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)
+cert-manager  infrastructure  khelm  v1.21.1   issue TLS via ClusterIssuer/Certificate CRs in a networking target
 networking    target          target -         per-cluster glue in clusters/my-cluster.example.com/targets/networking
 ```
 

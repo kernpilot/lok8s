@@ -7,6 +7,6 @@ metadata:
 kubeVersion: "1.31.12"
 repository: https://cloudnative-pg.io/charts/
 chart: cloudnative-pg
-version: 0.28.0
+version: 0.29.0
 valueFiles:
   - values.yaml
