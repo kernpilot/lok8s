@@ -9,8 +9,12 @@
 # CSIDriver exists, and every ceph PVC stays Pending. (Root-caused on the kubehz
 # pilot 2026-07-02; verified against ceph-csi-operator v1.0.1.)
 #
-# Version tracks the ceph-csi-operator subchart that rook-ceph @v1.20.1 installs
-# (1.0.1) — keep drivers and operator in lockstep.
+# Version tracks the ceph-csi-operator subchart that rook-ceph @v1.20.6 installs
+# (1.0.4, per its Chart.lock) — keep drivers and operator in lockstep.
+# Default changes 1.0.1 → 1.0.4 that touch our render: only log-rotation
+# maxLogSize "10Gi" → "10G" (unit fix; logrotate sizes are SI). The cephfs/nfs
+# fsGroupPolicy default flip (None → File) does not reach us — both drivers are
+# disabled below, and rbd was "File" in both versions (render-diff verified).
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
@@ -21,7 +25,7 @@ metadata:
 kubeVersion: "1.35.5"
 repository: https://ceph.github.io/ceph-csi-operator
 chart: ceph-csi-drivers
-version: 1.0.1
+version: 1.0.4
 values:
   drivers:
     # rbd only. The CSIDriver is named metadata.name VERBATIM (the operator's

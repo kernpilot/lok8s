@@ -3,16 +3,12 @@ crds:
   enabled: true
 
 # CSI: RBD only for Phase 1. Enable CephFS later if RWX/shared storage is needed.
-# Rook deploys the ceph-csi driver (ctrlplugin/nodeplugin) and registers
-# rook-ceph.rbd.csi.ceph.com (verified end-to-end: PVC Bound + RBD r/w mount).
-csi:
-  enableRbdDriver: true
-  enableCephfsDriver: false
-  enableNFSDriver: false
-  # Only the worker is schedulable (CPs are tainted NoSchedule), so a 2nd
-  # provisioner replica would sit Pending on anti-affinity. One until the CP
-  # tier lands (Phase 2), then bump back to 2 for provisioner HA.
-  provisionerReplicas: 1
+# NOTE — driver selection does NOT live here: the rook-ceph chart's 1.20 `csi`
+# block only carries sidecar image pins + installCsiOperator (the pre-1.20
+# enable*Driver / provisionerReplicas keys are GONE — grep-verified against the
+# v1.20.1 AND v1.20.6 chart values; helm silently ignored them). Which drivers
+# exist (rbd on, cephfs/nfs/nvmeof off) and the plugin topology are set in
+# csi-drivers.yaml (`drivers.*`), rendered by the ceph-csi-operator.
 
 # We pin devices via per-node deviceFilter in cluster.yaml — no discovery daemon.
 enableDiscoveryDaemon: false
