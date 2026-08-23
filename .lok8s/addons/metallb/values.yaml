@@ -4,6 +4,12 @@ controller:
   enabled: true
 speaker:
   enabled: true
+  # HOST PORTS (hostNetwork: true) — 0.16 moved the speaker's metrics/health
+  # off 7472/7473 to 9120 (metrics) and 17472 (health, bound but not declared
+  # as a containerPort). These bind on every node's host netns, so a port
+  # collision crashloops the speaker on that node and its LB addresses go dark
+  # — one node down looks like a partial outage, not a bad rollout. Before an
+  # upgrade, check the target nodes: `ss -lntp | grep -E '9120|17472'`.
   # BGP backend — PINNED, not inherited (chart 0.16.0 flipped the default).
   # Up to 0.15.x the default was the in-speaker FRR sidecars
   # (speaker.frr.enabled: true); 0.16.0 made the standalone frr-k8s DaemonSet
