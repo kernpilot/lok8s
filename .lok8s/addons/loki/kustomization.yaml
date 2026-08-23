@@ -1,5 +1,5 @@
 # loki — Grafana Loki single-binary log store. A generic, reusable atom:
-# bootstrap `loki` by name to get the cluster log backend (chart loki @7.1.0).
+# bootstrap `loki` by name to get the cluster log backend (chart loki @7.3.0).
 #
 # Installs into the existing `monitoring` namespace, which is OWNED by the
 # monitoring target — we do NOT ship a namespace.yaml here (same reason tempo

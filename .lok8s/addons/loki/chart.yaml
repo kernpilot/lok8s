@@ -11,6 +11,14 @@
 # name. We pin it to `loki` so the Service is deterministically
 # `loki.monitoring:3100` (the Grafana datasource URL and promtail's push
 # target). Do not rename without updating both consumers.
+#
+# UPSTREAM OWNERSHIP (chart 7.0.0, 2026-03-16): this chart line is now
+# maintained for Grafana Enterprise Logs. The OSS chart was forked to
+# grafana-community/helm-charts at chart 6.55.0, and OSS users are told to
+# migrate there. The 7.x releases still ship the SingleBinary templates we
+# use and still bump the OSS `loki.image.tag`, so the pin stays valid — but
+# a move to the community chart is a decision we owe this addon. Track it
+# before the next MINOR bump, not in a routine pin bump.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
@@ -24,6 +32,6 @@ apiVersions:
   - monitoring.coreos.com/v1/ServiceMonitor
 repository: https://grafana.github.io/helm-charts
 chart: loki
-version: 7.1.0
+version: 7.3.0
 valueFiles:
   - values.yaml

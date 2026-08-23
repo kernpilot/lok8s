@@ -47,7 +47,11 @@ rbac:
   # scale on machinedeployments/machinesets/machines — but ONLY for the
   # cluster.x-k8s.io group. Because we run with CAPI_GROUP=cluster.k8s.io we
   # must grant the SAME access on the cluster.k8s.io group machine-controller
-  # actually serves. (additionalRules is appended to the generated ClusterRole.)
+  # actually serves. (additionalRules is appended to the generated ClusterRole.
+  # Since chart 9.59.0 it is ALSO appended to the namespaced Role, regardless of
+  # rbac.clusterScoped — so these rules now render twice. The Role copy is
+  # redundant, not extra privilege: it is namespace-scoped and the ClusterRole
+  # already grants the same verbs cluster-wide.)
   additionalRules:
     - apiGroups:
         - cluster.k8s.io
@@ -73,6 +77,10 @@ rbac:
 # Autoscaler behaviour. extraArgs is a map; each key becomes a --<key>=<value>
 # flag (the chart already injects logtostderr/stderrthreshold/v).
 extraArgs:
+  # DEPRECATED upstream in cluster-autoscaler 1.35 (autoscaler#9060). It still
+  # works at 1.35.x and true is the default, so the flag is kept for explicit
+  # intent. Drop it before moving to 1.36 — an unknown flag stops the
+  # controller at startup.
   scale-down-enabled: true
   scale-down-delay-after-add: 10m
   scale-down-unneeded-time: 10m

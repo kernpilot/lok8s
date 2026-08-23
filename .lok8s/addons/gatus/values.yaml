@@ -1,4 +1,4 @@
-# gatus (twin/gatus chart 1.4.4, appVersion v5.27.2) — generic, portable
+# gatus (twin/gatus chart 1.5.0, appVersion v5.34.0) — generic, portable
 # framework-addon values.
 #
 # This file carries ONLY decisions sane for ANY cluster. Everything
@@ -15,7 +15,7 @@
 # TLS is terminated at the consumer's gateway (route), so the chart Ingress
 # stays off here.
 
-# Chart default image for 1.4.4 (kept explicit for clarity / pinning intent).
+# Chart default image for 1.5.0 (kept explicit for clarity / pinning intent).
 image:
   repository: twinproduction/gatus
 
