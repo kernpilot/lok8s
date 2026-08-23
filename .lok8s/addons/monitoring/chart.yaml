@@ -24,6 +24,6 @@ metadata:
 kubeVersion: "1.35.5"
 repository: https://prometheus-community.github.io/helm-charts
 chart: kube-prometheus-stack
-version: 80.2.0
+version: 88.5.3
 valueFiles:
   - values.yaml
