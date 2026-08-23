@@ -10,11 +10,17 @@ metadata:
   namespace: rook-ceph
 kubeVersion: "1.35.5"
 repository: https://charts.rook.io/release
-# Rook-Ceph operator v1.20.1. Set the Ceph image in the cluster's CephCluster CR
-# (not here) — the latest Ceph, kept in step with this operator. Bare-metal OSD
-# gotcha: MBR trips ceph-volume's no-arg `raw list` (rook#17716) → every OSD hidden;
-# force GPT in installimage. See docs/guide/bare-metal.md.
+# Rook-Ceph operator v1.20.6 (≥v1.20.5 is the floor Rook's advisory sets for
+# Ceph CVE-2025-30156 — cephx key-type support). Set the Ceph image in the
+# cluster's CephCluster CR (not here) — the latest Ceph, kept in step with this
+# operator; the advisory pairs this operator with Ceph ≥v20.2.4 / ≥v19.2.6,
+# and its remediation ends with a CephX key rotation AFTER both are upgraded
+# (CephCluster spec.security.cephx) — the version bumps alone do not close it.
+# Bare-metal OSD gotcha: MBR trips ceph-volume's no-arg `raw list` (rook#17716)
+# → every OSD hidden; force GPT in installimage (v1.20.2/.4 ship raw-list
+# fallback fixes #17724/#18006, but GPT stays the belt-and-braces default).
+# See docs/guide/bare-metal.md.
 chart: rook-ceph
-version: v1.20.1
+version: v1.20.6
 valueFiles:
   - values.yaml
