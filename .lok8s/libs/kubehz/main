@@ -113,7 +113,8 @@ kubehz::read_config() {
   fi
 
   # Upgrade policy + maintenance window are declarative passthrough — the
-  # platform validates the full block at registration/intake. lo shape-checks
+  # consumed hosted-side by the platform API (its own payload validation) and
+  # self-hosted-side by the in-cluster agent, which reads it locally. lo shape-checks
   # only what a typo would silently break: the two enums and the exclusion
   # dates (validate_config). Same null/empty tolerance as `agent` above.
   LOK8S_KUBEHZ_UPGRADES_CHANNEL=$(yq -r '.spec.kubehz.upgrades.channel // "none"' "${cluster_yaml}") || return 1
@@ -125,7 +126,10 @@ kubehz::read_config() {
     LOK8S_KUBEHZ_UPGRADES_DEFER="window"
   fi
   # Maintenance-window freeze entries, one per line (empty when absent).
-  LOK8S_KUBEHZ_MW_EXCLUSIONS=$(yq -r '(.spec.kubehz.maintenanceWindow.exclusions // [])[]' "${cluster_yaml}") || return 1
+  # `... // []` then splat: a SCALAR here (exclusions: "2026-01-01") would make
+  # the splat abort with yq's raw error — coerce non-arrays to a single-entry
+  # list so validate_config rejects the CONTENT with our message, not yq's.
+  LOK8S_KUBEHZ_MW_EXCLUSIONS=$(yq -r '(.spec.kubehz.maintenanceWindow.exclusions // []) | (select(type == "!!seq") // [.]) | .[]' "${cluster_yaml}") || return 1
   [[ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" != "null" ]] || LOK8S_KUBEHZ_MW_EXCLUSIONS=""
 
   export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL LOK8S_KUBEHZ_CONNECT_TOKEN
@@ -160,10 +164,11 @@ kubehz::validate_config() {
     cronjob|operator) ;;
     *) error "invalid spec.kubehz.agent: ${agent} (expected cronjob or operator)"; return 1 ;;
   esac
-  # The upgrade policy is passthrough — the platform owns full validation at
-  # registration/intake — but a typo'd enum or a malformed freeze date should
-  # fail here, at the machine that wrote it, not at intake. Same read-through
-  # defaults as `agent`: unset means "not chosen", never "invalid".
+  # The upgrade policy's consumers validate semantics where they run (the
+  # platform API for hosted payloads; the in-cluster agent for self-hosted) —
+  # but a typo'd enum or a malformed freeze date should fail HERE, at the
+  # machine that wrote it. Same read-through defaults as `agent`: unset means
+  # "not chosen", never "invalid".
   local channel="${LOK8S_KUBEHZ_UPGRADES_CHANNEL:-none}"
   case "${channel}" in
     none|patch|minor) ;;

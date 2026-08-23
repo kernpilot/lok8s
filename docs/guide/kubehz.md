@@ -94,9 +94,13 @@ How an upgrade lands depends on who owns the machines:
   size and the like) rides the pool definition on the platform side, not this
   file.
 
-Both blocks are declarative passthrough: the platform validates them fully at
-registration. `lo` checks only the shape — the two enums, and that every
-exclusion is a `YYYY-MM-DD` date or `from/to` range.
+`lo` checks the shape — the two enums, and that every exclusion is a
+`YYYY-MM-DD` date or `from/to` range. Full semantic validation happens where
+each block is consumed: for **hosted** clusters and pools, the platform API
+validates its own payloads; for **self-hosted** clusters the block configures
+the in-cluster agent (managed tier), which reads it locally — your cluster's
+upgrade behavior never depends on the platform being reachable. Calendar
+validity beyond the shape (a February 30th) is not caught by `lo` today.
 
 ## Spaces
 

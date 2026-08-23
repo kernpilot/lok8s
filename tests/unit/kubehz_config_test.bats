@@ -388,7 +388,7 @@ teardown() {
       '.spec.kubehz.access') echo "null" ;;
       '.spec.kubehz.upgrades.channel // "none"') echo "minor" ;;
       '.spec.kubehz.upgrades.defer // "window"') echo "immediate" ;;
-      '(.spec.kubehz.maintenanceWindow.exclusions // [])[]') printf '%s\n' "2026-12-20/2027-01-06" "2027-04-03" ;;
+      '(.spec.kubehz.maintenanceWindow.exclusions // []) | (select(type == "!!seq") // [.]) | .[]') printf '%s\n' "2026-12-20/2027-01-06" "2027-04-03" ;;
       *) echo "" ;;
     esac
   }
@@ -491,4 +491,40 @@ christmas week"
   run kubehz::validate_config
   assert_failure
   assert_output --partial "invalid spec.kubehz.maintenanceWindow.exclusions entry: christmas week"
+}
+
+# ── exclusions against REAL yq (no stub): fixture-driven shapes ──────────
+
+@test "read_config: real-yq fixture — list, scalar coercion, and absent exclusions" {
+  # No yq stub here on purpose: the round-1 review found the parsing was never
+  # exercised against the real binary. Three shapes, one contract:
+  #   list   → entries verbatim
+  #   scalar → coerced to a single entry (validate rejects CONTENT with our
+  #            message — the splat must not abort with yq's raw error)
+  #   absent → empty
+  local f="${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+
+  printf 'spec:\n  kubehz:\n    maintenanceWindow:\n      exclusions: ["2026-01-01", "2026-02-01/2026-02-03"]\n' > "${f}"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  kubehz::read_config "${f}"
+  [ "$(printf '%s\n' "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" | wc -l)" -eq 2 ]
+
+  printf 'spec:\n  kubehz:\n    maintenanceWindow:\n      exclusions: "2026-01-01"\n' > "${f}"
+  kubehz::read_config "${f}"
+  [ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" = "2026-01-01" ]
+
+  printf 'spec: {}\n' > "${f}"
+  kubehz::read_config "${f}"
+  [ -z "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" ]
+}
+
+@test "validate_config: real-yq fixture — scalar-coerced INVALID exclusion fails with our message" {
+  local f="${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  printf 'spec:\n  kubehz:\n    maintenanceWindow:\n      exclusions: "not-a-date"\n' > "${f}"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  kubehz::read_config "${f}"
+  export LOK8S_SPEC_FILE="${f}"
+  run kubehz::validate_config
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"maintenanceWindow.exclusions entry: not-a-date"* ]]
 }
