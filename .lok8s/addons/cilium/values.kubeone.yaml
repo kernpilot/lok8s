@@ -15,7 +15,10 @@ routingMode: tunnel
 tunnelProtocol: vxlan
 
 # MTU — measured semantics at cilium 1.19.2 (live ladder-test, 2026-07-15;
-# the naive reading cost a prod blackhole window):
+# the naive reading cost a prod blackhole window). The MTU knob is unchanged
+# in the 1.20.1 values schema and no 1.20 upgrade note touches MTU handling;
+# the arithmetic below has NOT been re-measured on 1.20 — re-run the ladder
+# test if cross-node UDP anomalies appear after a bump. Measured semantics:
 #   * pod veth MTU     = THIS VALUE, RAW (no overhead subtraction!)
 #   * cilium_wg0       = value − 80   (WireGuard overhead)
 #   * node route MTU   = value − 130  (vxlan 50 + WireGuard 80)
@@ -108,8 +111,9 @@ resources:
     memory: 3Gi
 
 # Production log volume; hubble carries the observability. (`logOptions`
-# is the chart's real knob at 1.19.x — a bare `logLevel:` key is silently
-# ignored by the schema.)
+# is the chart's real knob — a bare `logLevel:` key is silently ignored by
+# the schema; re-verified against the 1.20.1 chart: the configmap template
+# still reads `.Values.logOptions` into `log-opt` unchanged.)
 logOptions:
   level: warning
 

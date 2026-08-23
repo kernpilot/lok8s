@@ -11,7 +11,11 @@ ipam:
   operator:
     clusterPoolIPv4PodCIDRList:
       - 10.244.0.0/16
-    clusterPoolIPv4ServiceCIDR: 10.96.0.0/12
+    # The service CIDR (10.96.0.0/12, kind's serviceSubnet) is the
+    # apiserver's, not a cilium knob — a `clusterPoolIPv4ServiceCIDR` key
+    # sat here until the 1.20.1 bump audit found it absent from BOTH the
+    # 1.19.2 and 1.20.1 chart schemas: helm ignores unknown keys, so it
+    # never rendered anything. Removed as a no-op.
     # /24 (~254 pod IPs/node) is intentional dev drift from prod's /23
     # (values.hetzner.yaml): kind/dev runs a handful of pods on 1-2 nodes with
     # no hosted-CP density pressure, so the extra IPs the /23 buys on Hetzner

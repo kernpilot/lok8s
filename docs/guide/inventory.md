@@ -80,7 +80,7 @@ re-running `lo up` / `lo bootstrap` simply refreshes `spec` in place.
   specHash:   3fb0c5e02a41…
   renderedAt: 2026-07-06T10:12:03Z
   addons:     4
-    cilium 1.19.2 (networking)
+    cilium 1.20.1 (networking)
     cert-manager v1.21.1 (infrastructure)
     ...
 ```
@@ -105,7 +105,7 @@ https://lok8s.io/addons-index.json
 {
   "generatedAt": "2026-07-06T10:00:00Z",
   "addons": [
-    { "name": "cilium", "chartVersion": "1.19.2", "category": "networking" },
+    { "name": "cilium", "chartVersion": "1.20.1", "category": "networking" },
     { "name": "cert-manager", "chartVersion": "v1.21.1", "category": "infrastructure" }
   ]
 }

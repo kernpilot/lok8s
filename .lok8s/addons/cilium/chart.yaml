@@ -6,12 +6,17 @@ metadata:
   name: cilium
   namespace: kube-system
 # kubeVersion must be set explicitly so khelm passes it to helm — otherwise
-# helm defaults to v1.20.0 and modern Cilium chart releases reject it.
-# Track the kindest/node version we provision against (.spec.kubernetes.version
-# in the cluster spec).
-kubeVersion: "1.31.4"
+# helm defaults to v1.20.0 and the chart's `kubeVersion: '>= 1.21.0-0'` floor
+# (unchanged between cilium chart 1.19.2 and 1.20.1) rejects it.
+# The value also drives the chart's Capabilities gates: >= 1.27 (policy/v1
+# PodDisruptionBudget) and >= 1.33 (explicit `hostUsers: true` on host-network
+# pods — matches the apiserver default; the field is accepted from k8s 1.30).
+# Track the kindest/node line current clusters run (.spec.kubernetes.version
+# in the cluster spec); a cluster older than this pin only gains the explicit
+# hostUsers field, a cluster newer than it only loses it — both harmless.
+kubeVersion: "1.35.5"
 repository: https://helm.cilium.io/
 chart: cilium
-version: 1.19.2
+version: 1.20.1
 valueFiles:
   - values.yaml

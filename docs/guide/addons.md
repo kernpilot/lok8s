@@ -304,7 +304,7 @@ cause is fixed.
 
 | Addon | What it installs | Chart |
 |-------|-----------------|-------|
-| `cilium` | Cilium CNI | `cilium/cilium` v1.19.2 |
+| `cilium` | Cilium CNI | `cilium/cilium` v1.20.1 |
 | `metallb` | MetalLB L2 load balancer | `metallb/metallb` v0.16.1 |
 | `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.21.1 |
 | `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook — **opt-in**; bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
@@ -318,7 +318,7 @@ set in `values.lo.yaml` and `values.kubeone.yaml`:
 | Driver | IPAM | Routing | Encryption | Why |
 |--------|------|---------|------------|-----|
 | Lo (kind) | `cluster-pool` | `tunnel` | off | Kind nodes are containers on ONE host kernel — no L3 routing, and encrypting loopback-adjacent traffic buys nothing |
-| KubeOne | `kubernetes` (driver) → `cluster-pool` effective on Hetzner (the provider layer wins the merge) | `tunnel` (vxlan) | **WireGuard** (pod + node) | Nodes span subnets/locations (cloud subnet + bare-metal vSwitch) — native routing needs one L2 segment; traffic crosses shared infrastructure, so it ships encrypted. Mind the MTU: at cilium 1.19 the `MTU` value is the RAW pod MTU and the max wire frame equals the value — so set it ≤ the smallest underlay link; the effective inner ceiling is value − 130 (see the knob's comment); running pods keep their old veth MTU until restarted |
+| KubeOne | `kubernetes` (driver) → `cluster-pool` effective on Hetzner (the provider layer wins the merge) | `tunnel` (vxlan) | **WireGuard** (pod + node) | Nodes span subnets/locations (cloud subnet + bare-metal vSwitch) — native routing needs one L2 segment; traffic crosses shared infrastructure, so it ships encrypted. Mind the MTU: the `MTU` value is the RAW pod MTU and the max wire frame equals the value (measured on cilium 1.19.2; the knob is unchanged in the 1.20 chart) — so set it ≤ the smallest underlay link; the effective inner ceiling is value − 130 (see the knob's comment); running pods keep their old veth MTU until restarted |
 
 ### MetalLB
 
