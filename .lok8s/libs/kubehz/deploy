@@ -180,6 +180,15 @@ kubehz::deploy_agent() {
     error "refusing to template an implausible spec.kubehz.apiUrl: ${api_url}"
     return 1
   fi
+  # `owner` is an enum, so pin it as one. Everything that is not "operator"
+  # BEHAVES as cronjob (the marker is one-directional — see the header), but
+  # the raw value is still baked into a double-quoted YAML scalar, where a
+  # quote or a backslash rewrites the manifest even after sed-escaping. Two
+  # legal values need no character-class reasoning at all.
+  if [[ "${owner}" != "cronjob" && "${owner}" != "operator" ]]; then
+    error "refusing to template spec.kubehz.agent '${owner}' — must be 'cronjob' or 'operator'"
+    return 1
+  fi
 
   local workdir
   workdir=$(mktemp -d) || { error "could not create a render directory"; return 1; }
@@ -205,6 +214,41 @@ kubehz::deploy_agent() {
 # remove a previous operator install. What `access` decides is only WHICH
 # overlay the caller then applies or deletes (base, or managed — a superset),
 # which every caller resolves for itself with kubehz::live_agent_overlay.
+
+# kubehz::sed_replacement <value> → <value>, safe to paste into the right-hand
+# side of a `sed 's|…|…|'`.
+#
+# Escapes the four characters sed reads as instructions in a REPLACEMENT:
+#
+#   \  starts an escape (`\1`, `\n`, `\&`)
+#   &  expands to the ENTIRE matched text — here, the placeholder token itself
+#   |  ends the replacement, because `|` is this call site's s-delimiter
+#   ↵  a raw newline ends the `s` command itself — sed aborts the whole render
+#      with "unterminated `s' command"
+#
+# Backslash goes FIRST: escaping it after `&` would go back over the
+# backslashes this function had just added and turn `\&` into `\\&`, which
+# renders a literal backslash followed by the match — the original bug with an
+# extra character in front of it. Newline goes LAST for the same reason in
+# reverse: it becomes `\n`, and the backslash pass must not double the one
+# this rewrite adds. GNU and busybox sed render `\n` back to a newline; BSD
+# sed renders a literal `n` — but no caller can reach this with a newline:
+# every input is shape-checked in kubehz::deploy_agent first (domain and
+# apiUrl by regex, owner as an enum). The escape stays as defense in depth
+# for the caller that forgets.
+#
+# Pure parameter expansion, no nested sed: a `sed` that escapes sed input has
+# to be read through two layers of quoting to check, and this needs to be
+# checkable at a glance.
+kubehz::sed_replacement() {
+  local value="${1}"
+  value="${value//\\/\\\\}"
+  value="${value//&/\\&}"
+  value="${value//|/\\|}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "${value}"
+}
+
 # Usage: kubehz::render_agent <workdir> <domain> <api_url> <owner> <access>
 kubehz::render_agent() {
   local workdir="${1}" domain="${2}" api_url="${3}" owner="${4}" access="${5}"
@@ -225,12 +269,28 @@ kubehz::render_agent() {
 
   # One substitution pass over every rendered file: the two agents deliberately
   # share the placeholder vocabulary so one pass feeds both.
+  #
+  # Every value goes through kubehz::sed_replacement first. sed's REPLACEMENT
+  # half has its own metacharacters, and `&` — "insert the whole match here" —
+  # is a legal character in a query string that the apiUrl validator above
+  # deliberately admits. Pasted raw, `…/heartbeat?a=1&b=2` renders as
+  # `…/heartbeat?a=1KUBEHZ_API_URL_PLACEHOLDERb=2`: the placeholder scan below
+  # then refuses the render and tells the operator their manifests "still carry
+  # a placeholder", which sends them looking at the manifests instead of at the
+  # one URL that is actually fine. `owner` gets the same treatment as defense
+  # in depth — deploy_agent pins it to the cronjob/operator enum above, so a
+  # metacharacter can only reach here through a caller that skipped the check.
+  local api_url_sed domain_sed owner_sed
+  api_url_sed="$(kubehz::sed_replacement "${api_url}")"
+  domain_sed="$(kubehz::sed_replacement "${domain}")"
+  owner_sed="$(kubehz::sed_replacement "${owner}")"
+
   local file
   while IFS= read -r -d '' file; do
     sed -i \
-      -e "s|KUBEHZ_API_URL_PLACEHOLDER|${api_url}|g" \
-      -e "s|CLUSTER_ID_PLACEHOLDER|${domain}|g" \
-      -e "s|HEARTBEAT_OWNER_PLACEHOLDER|${owner}|g" \
+      -e "s|KUBEHZ_API_URL_PLACEHOLDER|${api_url_sed}|g" \
+      -e "s|CLUSTER_ID_PLACEHOLDER|${domain_sed}|g" \
+      -e "s|HEARTBEAT_OWNER_PLACEHOLDER|${owner_sed}|g" \
       "${file}" || return 1
   done < <(find "${workdir}" -type f -name '*.yaml' -print0)
 
