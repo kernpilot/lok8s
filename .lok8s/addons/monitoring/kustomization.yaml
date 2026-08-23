@@ -1,7 +1,7 @@
 # monitoring — kube-prometheus-stack (Prometheus + Grafana + Alertmanager +
 # node-exporter + kube-state-metrics). A generic, reusable atom: bootstrap
 # `monitoring` by name to get the metrics/alerting/dashboards stack (chart
-# kube-prometheus-stack @80.2.0).
+# kube-prometheus-stack @88.5.3).
 #
 # This addon is the generic CONTROLLER/chart with PORTABLE defaults only (split
 # from a composite target the same way cert-manager was). The kubehz-specific
