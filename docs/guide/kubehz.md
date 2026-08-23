@@ -88,7 +88,8 @@ How an upgrade lands depends on who owns the machines:
 - **Nodes you own** — self-hosted clusters, and machines you registered
   yourself — are upgraded **in place**: the kubelet is swapped underneath the
   running workloads, which the swap itself does not restart. On the managed
-  tier, the live agent walks the nodes one at a time.
+  tier, the live agent will walk the nodes one at a time once upgrade
+  execution ships.
 - **Hosted worker pools** are **replaced, surge-first**: new nodes join on
   the target version before old ones drain and leave. Per-pool tuning (surge
   size and the like) rides the pool definition on the platform side, not this
