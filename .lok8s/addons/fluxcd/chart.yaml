@@ -17,15 +17,15 @@
 # reject (the flux2 chart itself declares no such constraint, but we pin anyway
 # for parity with the other addons and to feed helm a real version). Tracks the
 # kindest/node version we provision against (.spec.kubernetes.version in the
-# cluster spec), same pin as cilium.
+# cluster spec), same pin as cilium — keep the two in step on every bump.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
   name: flux2
   namespace: flux-system
-kubeVersion: "1.31.4"
+kubeVersion: "1.35.5"
 repository: https://fluxcd-community.github.io/helm-charts
 chart: flux2
-version: 2.18.4
+version: 2.19.0
 valueFiles:
   - values.yaml

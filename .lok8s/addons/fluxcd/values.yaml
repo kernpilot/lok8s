@@ -1,4 +1,4 @@
-# Flux CD (fluxcd-community/flux2 chart 2.18.4, appVersion 2.8.8) — generic,
+# Flux CD (fluxcd-community/flux2 chart 2.19.0, appVersion 2.9.1) — generic,
 # portable framework-addon values.
 #
 # This file carries ONLY decisions sane for ANY cluster. Everything
@@ -9,6 +9,17 @@
 #     Kustomization that reconciles a repo path. Supply them via the chart's
 #     `extraObjects` inline, or in a dedicated flux-system target. Flux is happy
 #     with zero sources installed, so this base is valid as-is.
+#
+# UPGRADE PRECONDITION (chart >= 2.19.0 / Flux 2.9): the CRDs stop SERVING
+# notification.toolkit.fluxcd.io/v1beta2 and image.toolkit.fluxcd.io/v1beta2.
+# Before the bump reaches a cluster: (1) no manifest may still say v1beta2;
+# (2) `kubectl get crd -o custom-columns=N:.metadata.name,S:.status.storedVersions`
+# must not list v1beta2 for those groups — a stale storedVersion makes the
+# apiserver REJECT the trimmed CRD and the addon apply fails while the old
+# CRD keeps serving. The rejection text depends on the apiserver: k8s >= 1.33
+# says "missing from spec.versions; v1beta2 was previously a storage version,
+# and must remain in spec.versions until a storage migration ...", older
+# apiservers say "must appear in spec.versions" — grep for "spec.versions".
 #
 # The chart installs the Flux CRDs and the controllers selected below; it does
 # NOT create any GitRepository/Kustomization by itself.

@@ -22,6 +22,6 @@ metadata:
 kubeVersion: "1.35.5"
 repository: https://charts.rancher.io
 chart: system-upgrade-controller
-version: 108.0.0
+version: 110.0.0
 valueFiles:
   - values.yaml
