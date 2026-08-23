@@ -17,9 +17,11 @@
 # all: the directory was wiped down to a README pointing at
 # grafana-community/helm-charts (same as `charts/tempo/`). What still
 # publishes under 7.x is the Grafana Enterprise Logs line. The OSS chart
-# forked to the community repo at 6.55.0 and renumbered from there — it is
-# past 18.x now, so the two lines' version strings COLLIDE and "bump loki"
-# is ambiguous between two different charts.
+# forked to the community repo at 6.55.0 and renumbered from there (past
+# 18.x now). "bump loki" is ambiguous between two different charts: both
+# indexes carry the whole shared history up to 6.55.0, and both lines even
+# published their own 7.0.0. Only `repository:` disambiguates — which is
+# why migrating is a repository + version switch, never a version edit.
 #
 # The pin renders correctly today: 7.x still ships the SingleBinary
 # templates we use, and still moves the OSS image incidentally. But it moves
