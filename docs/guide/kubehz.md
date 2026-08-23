@@ -60,7 +60,7 @@ run:
 spec:
   kubehz:
     upgrades:
-      channel: patch            # none | patch | minor — absent = none
+      channel: patch            # none | patch | minor — absent = patch
       defer: window             # window | immediate — absent = window
     maintenanceWindow:
       enabled: true
@@ -72,10 +72,13 @@ spec:
         - "2026-12-20/2027-01-06"
 ```
 
-- **`channel`** is consent, not a schedule: `none` (the default) means the
-  platform upgrades only when you ask; `patch` allows patch releases;
-  `minor` allows minor releases too. Upgrades forced by a security fix or an
-  end-of-life version override `none` — you are notified, but they happen.
+- **`channel`** is consent, not a schedule: `patch` (the default) allows
+  patch releases; `minor` allows minor releases too. `none` disables
+  automatic upgrades entirely. **Not recommended**: you forgo automatic
+  security patches, and it does not exempt the cluster from the
+  end-of-support floor — clusters running releases that fall too far behind
+  are upgraded by the platform regardless of channel. You are notified, but
+  they happen.
 - **`defer`** decides when an allowed upgrade starts: `window` (the default)
   waits for the next maintenance window; `immediate` starts as soon as the
   upgrade is available.
@@ -161,6 +164,12 @@ A few things worth knowing before you reach for it:
 - **Machines are yours.** lok8s does not provision them and kubehz does not
   bill for them. Deregistering a node withdraws its credentials; shutting the
   machine down is still your call.
+- **The shard is the upgrade unit.** The shared control plane is upgraded as
+  a whole, on the platform's schedule, and old versions are retired on that
+  schedule too. Here `upgrades.channel` is a preference, not consent: an
+  eager channel moves your space early in a shard's upgrade window, a
+  conservative one later — but every space is migrated by the deadline.
+  There is no opting out.
 
 ### Limits, and whose problem each one is
 

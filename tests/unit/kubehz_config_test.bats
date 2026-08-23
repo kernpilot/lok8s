@@ -355,10 +355,11 @@ teardown() {
 
 # ── read_config: upgrade policy defaults ─────────────────
 # The upgrades/maintenanceWindow blocks are declarative passthrough — read_config
-# only needs the defaults right (channel=none, defer=window, no exclusions) and
-# the same null/empty tolerance the other keys get.
+# only needs the defaults right (channel=patch, defer=window, no exclusions) and
+# the same null/empty tolerance the other keys get. patch is the shipped
+# default — automatic security patching unless a spec explicitly opts out.
 
-@test "read_config: upgrades default to channel=none, defer=window, no exclusions" {
+@test "read_config: upgrades default to channel=patch, defer=window, no exclusions" {
   yq() {
     case "$2" in
       '.spec.kubehz.hosting // "self"') echo "self" ;;
@@ -373,7 +374,7 @@ teardown() {
 
   kubehz::read_config "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
 
-  [ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" = "none" ]
+  [ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" = "patch" ]
   [ "${LOK8S_KUBEHZ_UPGRADES_DEFER}" = "window" ]
   [ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" = "" ]
 }
@@ -386,7 +387,7 @@ teardown() {
       '.spec.kubehz.hosting // "self"') echo "self" ;;
       '.spec.kubehz.apiUrl // ""') echo "" ;;
       '.spec.kubehz.access') echo "null" ;;
-      '.spec.kubehz.upgrades.channel // "none"') echo "minor" ;;
+      '.spec.kubehz.upgrades.channel // "patch"') echo "minor" ;;
       '.spec.kubehz.upgrades.defer // "window"') echo "immediate" ;;
       '(.spec.kubehz.maintenanceWindow.exclusions // []) | (select(type == "!!seq") // [.]) | .[]') printf '%s\n' "2026-12-20/2027-01-06" "2027-04-03" ;;
       *) echo "" ;;
@@ -456,6 +457,25 @@ teardown() {
   run kubehz::validate_config
   assert_failure
   assert_output --partial "invalid spec.kubehz.upgrades.channel: major"
+  assert_output --partial "expected none, patch or minor"
+}
+
+# ── validate_config: channel none is a valid opt-out ─────
+# The default flipped to patch, but `none` stays a valid explicit opt-out
+# (discouraged in the docs, not rejected by the machine).
+
+@test "validate_config: upgrades.channel none stays a valid explicit opt-out" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_HOSTING="self"
+  export LOK8S_KUBEHZ_ACCESS="none"
+  export LOK8S_KUBEHZ_API_URL=""
+  export LOK8S_SPEC_KIND="KubeOne"
+  export LOK8S_SPEC_FILE="${BATS_TEST_TMPDIR}/dummy.yaml"
+  export LOK8S_KUBEHZ_UPGRADES_CHANNEL="none"
+
+  run kubehz::validate_config
+  assert_success
 }
 
 # ── validate_config: invalid upgrades.defer ──────────────
