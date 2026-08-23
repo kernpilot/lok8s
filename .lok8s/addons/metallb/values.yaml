@@ -8,16 +8,34 @@ speaker:
   # Up to 0.15.x the default was the in-speaker FRR sidecars
   # (speaker.frr.enabled: true); 0.16.0 made the standalone frr-k8s DaemonSet
   # the default instead (frrk8s.enabled: true) and started deprecating FRR mode.
-  # This addon advertises over L2 ONLY — pool.yaml ships an IPAddressPool + an
-  # L2Advertisement and never a BGPPeer/BGPAdvertisement — so either backend is
-  # dead weight. Inheriting the new default would add a DaemonSet, a
-  # status-cleaner Deployment, four frrk8s.metallb.io CRDs and a
-  # `failurePolicy: Fail` validating webhook on FRRConfiguration: one more
-  # webhook that must be serving before the addon's readiness gate can clear.
-  # Both off = the plain L2 speaker (ARP/NDP), the smallest thing that answers
-  # for a pool address.
-  # A consumer that needs BGP sets `frrk8s: {enabled: true}` in its inline
-  # values — frr-k8s is the backend upstream develops; speaker.frr is the
+  # Inheriting that default adds a DaemonSet, a status-cleaner Deployment, four
+  # frrk8s.metallb.io CRDs and a `failurePolicy: Fail` validating webhook on
+  # FRRConfiguration — one more webhook that must be serving before the addon's
+  # readiness gate can clear. This addon's own pool.yaml ships an IPAddressPool
+  # + an L2Advertisement and never a BGPPeer/BGPAdvertisement, so none of it is
+  # used by the default it ships with.
+  #
+  # Both off does NOT mean "L2 only" — it selects MetalLB's NATIVE BGP backend.
+  # The speaker falls back to bgpType "native" when METALLB_BGP_TYPE is absent,
+  # and with both backends off the chart stops emitting that variable: in the
+  # render the speaker goes from four containers with METALLB_BGP_TYPE=frr down
+  # to one container with no METALLB_BGP_TYPE at all. All nine metallb.io CRDs
+  # stay, so BGPPeer/BGPAdvertisement still apply and native BGP sessions still
+  # come up. L2 only is what THIS addon's default consumer does, not what the
+  # setting means.
+  #
+  # What native gives up is the FRR-only feature set: BFDProfile, per-peer VRF,
+  # dualStackAddressFamily, graceful restart, keepaliveTime/connectTime,
+  # dynamicASN, localASN, interface (unnumbered) peers, IPv6 BGP
+  # advertisements and non-legacy communities. Native mode validates with
+  # DiscardFRROnly, so CREATING or UPDATING an object that uses one is denied by
+  # the metallb validating webhook — loud. Objects that ALREADY exist are never
+  # re-admitted, so flipping the backend under a live FRR config is the quiet
+  # case: nothing is rejected at the API, and the speaker drops the whole
+  # configuration at runtime instead.
+  #
+  # A consumer that needs any of that sets `frrk8s: {enabled: true}` in its
+  # inline values — frr-k8s is the backend upstream develops; speaker.frr is the
   # deprecated one, so do NOT re-enable that side instead.
   frr:
     enabled: false
