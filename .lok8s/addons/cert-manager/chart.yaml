@@ -6,6 +6,6 @@ metadata:
 kubeVersion: "1.31.12"
 repository: https://charts.jetstack.io
 chart: cert-manager
-version: v1.20.1
+version: v1.21.1
 valueFiles:
   - values.yaml

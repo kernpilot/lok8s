@@ -1,6 +1,20 @@
+# CRDs ship WITH the chart and are kept on uninstall: dropping them would take
+# every Issuer/Certificate in the cluster with them.
 crds:
   enabled: true
   keep: true
 global:
   leaderElection:
     namespace: cert-manager
+# NOT SET, on purpose — two notes for anyone about to add a key here:
+#
+#  · `prometheus.servicemonitor.targetPort`, `prometheus.servicemonitor.path`
+#    and `prometheus.podmonitor.path` were REMOVED in chart v1.21.0. The
+#    controller metrics port is `http-metrics`. Setting any of the three now
+#    does nothing (helm does not reject unknown keys).
+#  · v1.21.0 also stopped shipping the `cert-manager-tokenrequest` Role and
+#    RoleBinding, which let the controller mint tokens for its OWN
+#    ServiceAccount. Only an Issuer that points `serviceAccountRef.name` at the
+#    cert-manager ServiceAccount needs them (Vault / Kubernetes-auth issuers);
+#    such a cluster must ship that RBAC itself, or — better — give the issuer a
+#    dedicated ServiceAccount. Nothing in this addon uses serviceAccountRef.

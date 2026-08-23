@@ -434,7 +434,7 @@ The `spec.loadBalancer` section installs and configures MetalLB for LoadBalancer
 
 The pool range must be within `spec.network.cidr`. IP validation is performed at provisioning time.
 
-MetalLB is pinned to Helm chart version `0.15.3`. An `IPAddressPool` and `L2Advertisement` are created automatically.
+MetalLB is pinned to Helm chart version `0.16.1`. An `IPAddressPool` and `L2Advertisement` are created automatically.
 
 #### Custom DNS (`spec.coredns`)
 

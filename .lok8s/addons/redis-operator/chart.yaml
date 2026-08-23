@@ -10,6 +10,6 @@ metadata:
 kubeVersion: "1.31.12"
 repository: https://ot-container-kit.github.io/helm-charts/
 chart: redis-operator
-version: 0.24.0
+version: 0.26.1
 valueFiles:
   - values.yaml
