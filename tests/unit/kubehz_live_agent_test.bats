@@ -723,6 +723,22 @@ _stub_kubectl_warns() {
   assert_failure
 }
 
+@test "deploy_agent: refuses a spec.kubehz.agent outside the enum before templating" {
+  _source_deploy
+  export LOK8S_KUBEHZ_HOSTING="self" LOK8S_KUBEHZ_ACCESS="registered"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.cloud"
+  # sed-escaping keeps these out of the s-command, but the value also lands in
+  # a double-quoted YAML scalar, where a quote or backslash rewrites the
+  # manifest. The enum check refuses BEFORE any of that can matter.
+  local bad
+  for bad in 'Operator' 'cronjob"extra' $'operator\nbeats'; do
+    export LOK8S_KUBEHZ_AGENT="${bad}"
+    run kubehz::deploy_agent "acme.example.com"
+    assert_failure
+    assert_output --partial "must be 'cronjob' or 'operator'"
+  done
+}
+
 # ══ 5. The vendored RBAC (least privilege, verbatim from kubehz-agent) ═════
 
 @test "rbac: the live-agent BASE grants no acting permission" {

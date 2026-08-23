@@ -1025,7 +1025,6 @@ YAML
 # gateway, and a security gate that cries wolf gets muted.
 @test "an Allow rule narrowed by JWT or by operation is not an allow-all" {
   local label spec_snippet
-  # shellcheck disable=SC2043
   for label in jwt operation; do
     case "${label}" in
       jwt)       spec_snippet='        principal:
