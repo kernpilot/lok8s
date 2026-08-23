@@ -82,8 +82,7 @@ spec:
 > **Changed default.** An absent `channel` previously meant "no automatic
 > upgrades"; it now means `patch`. A spec without a `channel` receives
 > automatic patch upgrades once upgrade execution ships — set
-> `channel: none` explicitly if you want the old behavior. You are notified, but
-  they happen.
+> `channel: none` explicitly if you want the old behavior.
 - **`defer`** decides when an allowed upgrade starts: `window` (the default)
   waits for the next maintenance window; `immediate` starts as soon as the
   upgrade is available.
