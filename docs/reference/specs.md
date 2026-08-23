@@ -40,6 +40,17 @@ spec:
       slug: acme                          # namespace name; defaults to the domain's first label
       name: Acme Prod                     # display name; defaults to the slug
       nodes: [worker-1]                   # join tickets minted for these names on provision
+    upgrades:                             # platform-driven upgrade policy (optional)
+      channel: none | patch | minor       # how far the platform may upgrade unasked
+      defer: window | immediate           # when an allowed upgrade may start
+    maintenanceWindow:                    # when platform-driven work may run (optional)
+      enabled: true
+      daysOfWeek: [Sat]
+      startTime: "02:00"                  # HH:MM in the window's timezone
+      durationMinutes: 240
+      timezone: Europe/Berlin
+      exclusions:                         # absolute freezes — a date or a from/to range
+        - "2026-12-20/2027-01-06"
   build:                                  # build output shape (optional)
     artifacts: single | split             # split = per-resource files under artifacts/
     encrypt:                              # Secret-encryption policy for split mode
@@ -71,6 +82,9 @@ spec:
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
 | `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — node names to mint a single-use join ticket for during `lo provision` |
+| `spec.kubehz.upgrades.channel` | no | `none` | How far the platform may upgrade the cluster unasked: `none` (only upgrades you ask for), `patch` (patch releases), or `minor` (minor releases too). Security- or EOL-forced upgrades override `none`, with notice. See the [kubehz guide](../guide/kubehz.md#upgrades-and-maintenance-windows) |
+| `spec.kubehz.upgrades.defer` | no | `window` | When an allowed upgrade may start: `window` (wait for the next maintenance window) or `immediate` (as soon as it is available) |
+| `spec.kubehz.maintenanceWindow` | no | — | When platform-driven work may run: `enabled`, `daysOfWeek`, `startTime` (`HH:MM`), `durationMinutes`, `timezone` (IANA name), `exclusions` (absolute freezes — a `YYYY-MM-DD` date or `from/to` range). `lo` shape-checks the two `upgrades` enums and the exclusion dates; full semantics are validated where the block is consumed — the platform API for hosted payloads, the managed-tier agent for self-hosted (once upgrade execution ships) |
 | `spec.build.artifacts` | no | `single` | `split` additionally emits per-resource files under `clusters/<domain>/artifacts/` — `<Kind>.<namespace>.<name>.yaml`, Secrets as sops-encrypted `Secret.<ns>.<name>.sops.yaml` (committable; per-object git history for GitOps) |
 | `spec.build.encrypt.type` | no | `sops` | How split-mode Secrets are encrypted. `sops` is the only supported value today; anything else is a hard build error (decoupled from the split trigger — `artifacts: split` shapes every resource, `encrypt` governs only the Secret twins) |
 | `spec.build.encrypt.on` | no | `change` | When a Secret's committed `Secret.*.sops.yaml` is re-encrypted. `change` (default) keeps the existing ciphertext byte-for-byte when the prior decrypts to the same (canonical) plaintext — killing the per-build churn from sops's fresh-per-encrypt data key. `always` re-encrypts every Secret every build (the original behavior). See the [build guide](../guide/deployment.md#split-output). |

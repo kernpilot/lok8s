@@ -61,7 +61,9 @@ main::kubehz() {
 # Read spec.kubehz from a cluster.lok8s.yaml and export env vars.
 # Usage: kubehz::read_config <cluster_yaml>
 # Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL,
-#       LOK8S_KUBEHZ_CONNECT_TOKEN
+#       LOK8S_KUBEHZ_CONNECT_TOKEN, LOK8S_KUBEHZ_AGENT,
+#       LOK8S_KUBEHZ_UPGRADES_CHANNEL, LOK8S_KUBEHZ_UPGRADES_DEFER,
+#       LOK8S_KUBEHZ_MW_EXCLUSIONS
 kubehz::read_config() {
   local cluster_yaml="${1}"
 
@@ -110,8 +112,30 @@ kubehz::read_config() {
     LOK8S_KUBEHZ_AGENT="cronjob"
   fi
 
+  # Upgrade policy + maintenance window are declarative passthrough —
+  # consumed hosted-side by the platform API (its own payload validation) and,
+  # once upgrade execution ships, self-hosted-side by the in-cluster agent
+  # reading it locally. lo shape-checks
+  # only what a typo would silently break: the two enums and the exclusion
+  # dates (validate_config). Same null/empty tolerance as `agent` above.
+  LOK8S_KUBEHZ_UPGRADES_CHANNEL=$(yq -r '.spec.kubehz.upgrades.channel // "none"' "${cluster_yaml}") || return 1
+  if [[ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" == "null" || -z "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" ]]; then
+    LOK8S_KUBEHZ_UPGRADES_CHANNEL="none"
+  fi
+  LOK8S_KUBEHZ_UPGRADES_DEFER=$(yq -r '.spec.kubehz.upgrades.defer // "window"' "${cluster_yaml}") || return 1
+  if [[ "${LOK8S_KUBEHZ_UPGRADES_DEFER}" == "null" || -z "${LOK8S_KUBEHZ_UPGRADES_DEFER}" ]]; then
+    LOK8S_KUBEHZ_UPGRADES_DEFER="window"
+  fi
+  # Maintenance-window freeze entries, one per line (empty when absent).
+  # `... // []` then splat: a SCALAR here (exclusions: "2026-01-01") would make
+  # the splat abort with yq's raw error — coerce non-arrays to a single-entry
+  # list so validate_config rejects the CONTENT with our message, not yq's.
+  LOK8S_KUBEHZ_MW_EXCLUSIONS=$(yq -r '(.spec.kubehz.maintenanceWindow.exclusions // []) | (select(type == "!!seq") // [.]) | .[]' "${cluster_yaml}") || return 1
+  [[ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" != "null" ]] || LOK8S_KUBEHZ_MW_EXCLUSIONS=""
+
   export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL LOK8S_KUBEHZ_CONNECT_TOKEN
   export LOK8S_KUBEHZ_AGENT
+  export LOK8S_KUBEHZ_UPGRADES_CHANNEL LOK8S_KUBEHZ_UPGRADES_DEFER LOK8S_KUBEHZ_MW_EXCLUSIONS
 }
 
 # ── Validation ───────────────────────────────────────────
@@ -141,6 +165,31 @@ kubehz::validate_config() {
     cronjob|operator) ;;
     *) error "invalid spec.kubehz.agent: ${agent} (expected cronjob or operator)"; return 1 ;;
   esac
+  # The upgrade policy's consumers validate semantics where they run (the
+  # platform API for hosted payloads; the in-cluster agent for self-hosted) —
+  # but a typo'd enum or a malformed freeze date should fail HERE, at the
+  # machine that wrote it. Same read-through defaults as `agent`: unset means
+  # "not chosen", never "invalid".
+  local channel="${LOK8S_KUBEHZ_UPGRADES_CHANNEL:-none}"
+  case "${channel}" in
+    none|patch|minor) ;;
+    *) error "invalid spec.kubehz.upgrades.channel: ${channel} (expected none, patch or minor)"; return 1 ;;
+  esac
+  local defer="${LOK8S_KUBEHZ_UPGRADES_DEFER:-window}"
+  case "${defer}" in
+    window|immediate) ;;
+    *) error "invalid spec.kubehz.upgrades.defer: ${defer} (expected window or immediate)"; return 1 ;;
+  esac
+  # Shape only — a date or an inclusive from/to range. Whether the dates are
+  # real calendar days, ordered, or sane in length is the platform's call.
+  local exclusion date_re='[0-9]{4}-[0-9]{2}-[0-9]{2}'
+  while IFS= read -r exclusion; do
+    [[ -n "${exclusion}" ]] || continue
+    if ! [[ "${exclusion}" =~ ^${date_re}(/${date_re})?$ ]]; then
+      error "invalid spec.kubehz.maintenanceWindow.exclusions entry: ${exclusion} (expected YYYY-MM-DD or YYYY-MM-DD/YYYY-MM-DD)"
+      return 1
+    fi
+  done <<< "${LOK8S_KUBEHZ_MW_EXCLUSIONS:-}"
   # There is no agent to choose when nothing reports. Refuse the pair up front
   # rather than deploy an agent that access: none says must not exist.
   if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" && "${agent}" != "cronjob" ]]; then
