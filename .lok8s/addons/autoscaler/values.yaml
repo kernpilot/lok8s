@@ -77,11 +77,17 @@ rbac:
 # Autoscaler behaviour. extraArgs is a map; each key becomes a --<key>=<value>
 # flag (the chart already injects logtostderr/stderrthreshold/v).
 extraArgs:
-  # DEPRECATED upstream in cluster-autoscaler 1.35 (autoscaler#9060). It still
-  # works at 1.35.x and true is the default, so the flag is kept for explicit
-  # intent. Drop it before moving to 1.36 — an unknown flag stops the
-  # controller at startup.
-  scale-down-enabled: true
+  # scale-down-enabled was DROPPED here (previously set to true "for explicit
+  # intent"). Timeline, verified against upstream tagged source: deprecated in
+  # 1.35.0 (autoscaler#9060; `flag.Bool("scale-down-enabled", true, ...)` —
+  # default true); removed for 1.36 (autoscaler#9412) then REVERTED
+  # (autoscaler#9749, k8s 3-release deprecation policy), so released 1.36.x and
+  # the release-1.37 branch still accept it — but removal WILL re-land (earliest
+  # 1.38), and an unknown flag stops the controller at startup. Dropping it is a
+  # no-op: the compiled default is true (FAQ flag table: `scale-down-enabled |
+  # [Deprecated] | true`), so scale-down stays enabled. Per-node opt-out, if
+  # ever needed, is the `cluster-autoscaler.kubernetes.io/scale-down-disabled`
+  # annotation — not a flag.
   scale-down-delay-after-add: 10m
   scale-down-unneeded-time: 10m
   expander: least-waste
