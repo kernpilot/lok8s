@@ -23,6 +23,22 @@
 # `Overridden` condition. So each of group, kind, match labels and namespace
 # is pinned, and each one is mutation-proven to fail on its own.
 #
+# One more way this file failed OPEN, and it is the reason `_render` no longer
+# passes `-N`. Every assertion here reads ONE object. Nothing made that true.
+# `yq eval -N 'select(.kind == "SecurityPolicy")'` printed every match with the
+# `---` separators SUPPRESSED, so a second `yq` down the pipe re-parsed two
+# policies as one pseudo-document and merged them last-key-wins. A shadow
+# `SecurityPolicy` added to this addon — say `aaa-shadow`, sorting first, no
+# `mergeType`, `authorization.defaultAction: Allow` — therefore shipped with all
+# five tests green: the shadow's keys were overwritten by sso-gate's before any
+# assertion saw them, and on a real gateway the more specific of two policies
+# wins ENTIRELY, so the guards this addon exists to preserve were gone anyway.
+# The fix is two-part and both parts matter. `_render` KEEPS the separators, so
+# every consumer sees N documents instead of one merged one; and the count is
+# asserted directly, off a separate `eval-all` read of the raw build, because a
+# gate that only checks the fields of "the" policy has no way to say how many
+# "the" refers to.
+#
 # Reading only the fields this file happens to know about is NOT enough, and
 # that lesson cost three review rounds: each round closed one way to narrow the
 # selector to nothing and left a sibling field wide open. A `targetSelectors`
@@ -40,13 +56,34 @@ setup() {
   _SSO_DIR="${_PROJECT_ROOT}/.lok8s/addons/sso-gate"
 }
 
-# _render → the sso-gate SecurityPolicy as rendered by kustomize.
+# _render → every SecurityPolicy document the addon renders, `---` separators
+# PRESERVED. Do NOT add `-N` here. `-N` suppresses the separators, and a second
+# `yq` reading a separator-less stream of two mappings parses them as ONE
+# document, merging them last-key-wins — which is how a shadow policy used to
+# ship past all five tests (see the header). With the separators kept, every
+# consumer below reports one value PER DOCUMENT, so a second policy turns each
+# single-value comparison into a two-line mismatch instead of vanishing.
 _render() {
-  kustomize build "${_SSO_DIR}" | yq eval -N 'select(.kind == "SecurityPolicy")' -
+  kustomize build "${_SSO_DIR}" | yq eval 'select(.kind == "SecurityPolicy")' -
 }
 
-# _targets → one `group|kind|labels|fields` line per target the policy
-# declares, however it declares it (targetRef, targetRefs, targetSelectors).
+# _policy_count → how many SecurityPolicy documents the addon renders.
+# Deliberately NOT built on `_render`: it re-reads the raw `kustomize build`
+# with `eval-all`, which collects the whole stream into one array before
+# counting. That keeps the count honest even if `_render`'s own document
+# handling regresses — the two readings would have to break the same way.
+_policy_count() {
+  kustomize build "${_SSO_DIR}" | yq eval-all -N '[select(.kind == "SecurityPolicy")] | length' -
+}
+
+# _targets → one `policy|group|kind|labels|fields` line per target declared by
+# each rendered policy, however it declares it (targetRef, targetRefs,
+# targetSelectors). Reads the raw build in a SINGLE yq pass, so the per-document
+# iteration happens inside the parser and there is no separator-less
+# intermediate stream to collapse. `policy` is the owning object's name: with
+# more than one policy in the stream every line stays attributable, and the
+# failure names the document it came from instead of a merged phantom.
+#
 # `-` stands in for an absent field; `labels` is the matchLabels map flattened
 # to key-sorted `k=v` pairs so a single string comparison covers the whole map
 # (an EXTRA label narrows the selector just as fatally as a wrong one).
@@ -56,10 +93,12 @@ _render() {
 # selector assertion complete instead of merely long: the test does not need to
 # know what a field means to notice it is there.
 _targets() {
-  _render | yq eval -N '
-    [.spec.targetRef] + (.spec.targetRefs // []) + (.spec.targetSelectors // [])
+  kustomize build "${_SSO_DIR}" | yq eval -N '
+    select(.kind == "SecurityPolicy")
+    | (.metadata.name // "-") as $policy
+    | [.spec.targetRef] + (.spec.targetRefs // []) + (.spec.targetSelectors // [])
     | .[] | select(tag == "!!map")
-    | (.group // "-") + "|" + (.kind // "-") + "|"
+    | $policy + "|" + (.group // "-") + "|" + (.kind // "-") + "|"
       + ((.matchLabels // {}) | to_entries | sort_by(.key)
          | map(.key + "=" + .value) | join(","))
       + "|" + (keys | sort | join(","))
@@ -67,7 +106,26 @@ _targets() {
 }
 
 @test "sso-gate renders exactly one SecurityPolicy" {
-  local names
+  local n names
+  # COUNT first, as its own assertion. Every other test in this file reads
+  # "the" policy; this is the only line that establishes there is exactly one
+  # for "the" to refer to. A second SecurityPolicy in this addon needs no bug
+  # in any other gate to be dangerous — Envoy Gateway resolves overlap by
+  # specificity and awards the whole route to one policy, so a sibling that is
+  # more specific silently supersedes sso-gate's merge.
+  #
+  # WHAT THIS CANNOT SEE, stated plainly rather than implied: it counts the
+  # documents THIS addon's `kustomize build` emits, and nothing else. A shadow
+  # SecurityPolicy that lives in a DIFFERENT addon, is layered in by a
+  # consuming target, is applied straight to the cluster, or sits in another
+  # namespace is entirely outside this reading and stays invisible here. This
+  # gate closes "sso-gate ships its own shadow"; it does not and cannot close
+  # "something else in the cluster shadows sso-gate". That one needs a live
+  # check against the gateway (docs/guide/addons.md → verifying the merge).
+  n="$(_policy_count)"
+  [ "${n}" = "1" ] \
+    || fail "the sso-gate addon renders ${n} SecurityPolicy documents, expected exactly 1 — every other assertion in this file reads a single policy, and a sibling policy that out-specifies sso-gate takes the whole route, mergeType and all"
+
   names="$(_render | yq eval -N '.metadata.name' -)"
   [ "${names}" = "sso-gate" ] \
     || fail "expected exactly one SecurityPolicy named 'sso-gate', got: ${names:-<none>}"
@@ -83,11 +141,11 @@ _targets() {
 }
 
 @test "every sso-gate target selects the labeled HTTPRoutes, group and labels included" {
-  local line group kind labels fields n=0
-  while IFS='|' read -r group kind labels fields; do
-    [[ -n "${group}${kind}${labels}${fields}" ]] || continue
+  local line policy group kind labels fields n=0
+  while IFS='|' read -r policy group kind labels fields; do
+    [[ -n "${policy}${group}${kind}${labels}${fields}" ]] || continue
     n=$(( n + 1 ))
-    line="group=${group} kind=${kind} labels=${labels:-<none>} fields=${fields:-<none>}"
+    line="policy=${policy} group=${group} kind=${kind} labels=${labels:-<none>} fields=${fields:-<none>}"
 
     # The Gateway API group, exactly. `gateway.networking.io`,
     # `networking.k8s.io` and an empty group all `kustomize build` cleanly, so
