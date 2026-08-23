@@ -21,6 +21,6 @@ metadata:
 kubeVersion: "1.35.5"
 repository: https://twin.github.io/helm-charts
 chart: gatus
-version: 1.4.4
+version: 1.5.0
 valueFiles:
   - values.yaml

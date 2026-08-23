@@ -1,4 +1,4 @@
-# Grafana Loki (chart 7.1.0, app 3.6.x) — SingleBinary, portable defaults.
+# Grafana Loki (chart 7.3.0, app 3.6.x) — SingleBinary, portable defaults.
 #
 # Defaults are kept wherever sane; this file only carries the decisions that
 # differ. Loki is INTERNAL-ONLY: no chart Ingress/gateway route — reached in

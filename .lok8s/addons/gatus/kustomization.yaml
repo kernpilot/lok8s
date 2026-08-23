@@ -1,5 +1,5 @@
 # gatus — uptime / status-page dashboard. A generic, reusable atom: bootstrap
-# `gatus` by name to get the poller (chart gatus @1.4.4, appVersion v5.27.2).
+# `gatus` by name to get the poller (chart gatus @1.5.0, appVersion v5.34.0).
 #
 # This addon is the generic chart with PORTABLE defaults only. The
 # kubehz-specific GLUE stays with the consuming cluster:

@@ -1,5 +1,12 @@
-# gatus (twin/gatus chart 1.4.4, appVersion v5.27.2) — generic, portable
-# framework-addon values.
+# gatus — generic, portable framework-addon values.
+#
+# CHART VERSION: the chart.yaml next to this file pins twin/gatus 1.5.0
+# (appVersion v5.34.0). That pin is NOT binding on every reader of this file.
+# A consumer may keep its own chart.yaml and pull these values in across trees
+# by `valueFiles`; then the consumer's pin is what renders, and this file is
+# applied to whatever version IT names. So keep every key here valid across
+# the versions consumers pin, and never read the version above as proof of
+# what rendered a given cluster.
 #
 # This file carries ONLY decisions sane for ANY cluster. Everything
 # cluster-specific is GLUE supplied by the consuming cluster as inline
@@ -15,7 +22,9 @@
 # TLS is terminated at the consumer's gateway (route), so the chart Ingress
 # stays off here.
 
-# Chart default image for 1.4.4 (kept explicit for clarity / pinning intent).
+# The chart's own default repository, restated for clarity / pinning intent.
+# No tag: the chart version in force supplies it, so this stays correct
+# whichever pin loads this file.
 image:
   repository: twinproduction/gatus
 

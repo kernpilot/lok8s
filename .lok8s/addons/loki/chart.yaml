@@ -11,6 +11,26 @@
 # name. We pin it to `loki` so the Service is deterministically
 # `loki.monitoring:3100` (the Grafana datasource URL and promtail's push
 # target). Do not rename without updating both consumers.
+#
+# TERMINAL LINEAGE — this pin is on a chart line we are not the audience for.
+# As of 2026-03-16 `charts/loki/` in grafana/helm-charts holds no chart at
+# all: the directory was wiped down to a README pointing at
+# grafana-community/helm-charts (same as `charts/tempo/`). What still
+# publishes under 7.x is the Grafana Enterprise Logs line. The OSS chart
+# forked to the community repo at 6.55.0 and renumbered from there (past
+# 18.x now). "bump loki" is ambiguous between two different charts: both
+# indexes carry the whole shared history up to 6.55.0, and both lines even
+# published their own 7.0.0. Only `repository:` disambiguates — which is
+# why migrating is a repository + version switch, never a version edit.
+#
+# The pin renders correctly today: 7.x still ships the SingleBinary
+# templates we use, and still moves the OSS image incidentally. But it moves
+# it late — this pin renders loki 3.6.11 while the community chart is on
+# 3.7.6 — and it will keep drifting, because bumping OSS is not that line's
+# purpose. Migrating is an explicit repository + version switch with a
+# re-validation of every value we set, so it cannot ride along in a pin
+# bump. Tracked in kernpilot/lok8s#146 — do not bump this pin again without
+# reading it.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
@@ -24,6 +44,6 @@ apiVersions:
   - monitoring.coreos.com/v1/ServiceMonitor
 repository: https://grafana.github.io/helm-charts
 chart: loki
-version: 7.1.0
+version: 7.3.0
 valueFiles:
   - values.yaml
