@@ -118,9 +118,11 @@ kubehz::read_config() {
   # reading it locally. lo shape-checks
   # only what a typo would silently break: the two enums and the exclusion
   # dates (validate_config). Same null/empty tolerance as `agent` above.
-  LOK8S_KUBEHZ_UPGRADES_CHANNEL=$(yq -r '.spec.kubehz.upgrades.channel // "none"' "${cluster_yaml}") || return 1
+  # Absent = patch: automatic patch upgrades are the shipped default.
+  # `none` stays a valid, explicit opt-out (discouraged — see the docs).
+  LOK8S_KUBEHZ_UPGRADES_CHANNEL=$(yq -r '.spec.kubehz.upgrades.channel // "patch"' "${cluster_yaml}") || return 1
   if [[ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" == "null" || -z "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" ]]; then
-    LOK8S_KUBEHZ_UPGRADES_CHANNEL="none"
+    LOK8S_KUBEHZ_UPGRADES_CHANNEL="patch"
   fi
   LOK8S_KUBEHZ_UPGRADES_DEFER=$(yq -r '.spec.kubehz.upgrades.defer // "window"' "${cluster_yaml}") || return 1
   if [[ "${LOK8S_KUBEHZ_UPGRADES_DEFER}" == "null" || -z "${LOK8S_KUBEHZ_UPGRADES_DEFER}" ]]; then
@@ -170,7 +172,7 @@ kubehz::validate_config() {
   # but a typo'd enum or a malformed freeze date should fail HERE, at the
   # machine that wrote it. Same read-through defaults as `agent`: unset means
   # "not chosen", never "invalid".
-  local channel="${LOK8S_KUBEHZ_UPGRADES_CHANNEL:-none}"
+  local channel="${LOK8S_KUBEHZ_UPGRADES_CHANNEL:-patch}"
   case "${channel}" in
     none|patch|minor) ;;
     *) error "invalid spec.kubehz.upgrades.channel: ${channel} (expected none, patch or minor)"; return 1 ;;
