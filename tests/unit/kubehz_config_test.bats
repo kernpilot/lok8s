@@ -352,3 +352,143 @@ teardown() {
   run kubehz::validate_config
   assert_success
 }
+
+# ── read_config: upgrade policy defaults ─────────────────
+# The upgrades/maintenanceWindow blocks are declarative passthrough — read_config
+# only needs the defaults right (channel=none, defer=window, no exclusions) and
+# the same null/empty tolerance the other keys get.
+
+@test "read_config: upgrades default to channel=none, defer=window, no exclusions" {
+  yq() {
+    case "$2" in
+      '.spec.kubehz.hosting // "self"') echo "self" ;;
+      '.spec.kubehz.apiUrl // ""') echo "" ;;
+      '.spec.kubehz.access') echo "null" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  kubehz::read_config "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+
+  [ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" = "none" ]
+  [ "${LOK8S_KUBEHZ_UPGRADES_DEFER}" = "window" ]
+  [ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" = "" ]
+}
+
+# ── read_config: upgrade policy explicit values ──────────
+
+@test "read_config: reads explicit upgrades channel, defer and exclusions" {
+  yq() {
+    case "$2" in
+      '.spec.kubehz.hosting // "self"') echo "self" ;;
+      '.spec.kubehz.apiUrl // ""') echo "" ;;
+      '.spec.kubehz.access') echo "null" ;;
+      '.spec.kubehz.upgrades.channel // "none"') echo "minor" ;;
+      '.spec.kubehz.upgrades.defer // "window"') echo "immediate" ;;
+      '(.spec.kubehz.maintenanceWindow.exclusions // [])[]') printf '%s\n' "2026-12-20/2027-01-06" "2027-04-03" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  kubehz::read_config "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+
+  [ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" = "minor" ]
+  [ "${LOK8S_KUBEHZ_UPGRADES_DEFER}" = "immediate" ]
+  [ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" = "2026-12-20/2027-01-06
+2027-04-03" ]
+}
+
+# ── validate_config: valid upgrade policy passes ─────────
+
+@test "validate_config: valid upgrades channel/defer and exclusions pass" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_HOSTING="self"
+  export LOK8S_KUBEHZ_ACCESS="none"
+  export LOK8S_KUBEHZ_API_URL=""
+  export LOK8S_SPEC_KIND="KubeOne"
+  export LOK8S_SPEC_FILE="${BATS_TEST_TMPDIR}/dummy.yaml"
+  export LOK8S_KUBEHZ_UPGRADES_CHANNEL="patch"
+  export LOK8S_KUBEHZ_UPGRADES_DEFER="immediate"
+  export LOK8S_KUBEHZ_MW_EXCLUSIONS="2026-12-20/2027-01-06
+2027-04-03"
+
+  run kubehz::validate_config
+  assert_success
+}
+
+# ── validate_config: unset upgrade vars use defaults ─────
+# validate_config is reachable without read_config; an unset policy means
+# "not chosen", never "invalid" — the same tolerance `agent` gets.
+
+@test "validate_config: unset upgrade policy vars pass through defaults" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_HOSTING="self"
+  export LOK8S_KUBEHZ_ACCESS="none"
+  export LOK8S_KUBEHZ_API_URL=""
+  export LOK8S_SPEC_KIND="KubeOne"
+  export LOK8S_SPEC_FILE="${BATS_TEST_TMPDIR}/dummy.yaml"
+  unset LOK8S_KUBEHZ_UPGRADES_CHANNEL LOK8S_KUBEHZ_UPGRADES_DEFER LOK8S_KUBEHZ_MW_EXCLUSIONS
+
+  run kubehz::validate_config
+  assert_success
+}
+
+# ── validate_config: invalid upgrades.channel ────────────
+
+@test "validate_config: rejects invalid upgrades.channel" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_HOSTING="self"
+  export LOK8S_KUBEHZ_ACCESS="none"
+  export LOK8S_KUBEHZ_API_URL=""
+  export LOK8S_SPEC_KIND="KubeOne"
+  export LOK8S_SPEC_FILE="${BATS_TEST_TMPDIR}/dummy.yaml"
+  export LOK8S_KUBEHZ_UPGRADES_CHANNEL="major"
+
+  run kubehz::validate_config
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.upgrades.channel: major"
+}
+
+# ── validate_config: invalid upgrades.defer ──────────────
+
+@test "validate_config: rejects invalid upgrades.defer" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_HOSTING="self"
+  export LOK8S_KUBEHZ_ACCESS="none"
+  export LOK8S_KUBEHZ_API_URL=""
+  export LOK8S_SPEC_KIND="KubeOne"
+  export LOK8S_SPEC_FILE="${BATS_TEST_TMPDIR}/dummy.yaml"
+  export LOK8S_KUBEHZ_UPGRADES_DEFER="later"
+
+  run kubehz::validate_config
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.upgrades.defer: later"
+}
+
+# ── validate_config: malformed exclusion entry ───────────
+
+@test "validate_config: rejects a malformed maintenanceWindow exclusion" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_HOSTING="self"
+  export LOK8S_KUBEHZ_ACCESS="none"
+  export LOK8S_KUBEHZ_API_URL=""
+  export LOK8S_SPEC_KIND="KubeOne"
+  export LOK8S_SPEC_FILE="${BATS_TEST_TMPDIR}/dummy.yaml"
+  export LOK8S_KUBEHZ_MW_EXCLUSIONS="2026-12-20/2027-01-06
+christmas week"
+
+  run kubehz::validate_config
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.maintenanceWindow.exclusions entry: christmas week"
+}

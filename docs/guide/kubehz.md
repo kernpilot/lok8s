@@ -50,6 +50,54 @@ Plus two more keys:
 must be **HTTPS** — the agent's bearer token travels on this URL, so `lo`
 refuses plain-HTTP endpoints outright.
 
+## Upgrades and maintenance windows
+
+Two more optional blocks under `spec.kubehz` tell the platform how far it may
+upgrade your cluster without being asked, and when that work is allowed to
+run:
+
+```yaml
+spec:
+  kubehz:
+    upgrades:
+      channel: patch            # none | patch | minor — absent = none
+      defer: window             # window | immediate — absent = window
+    maintenanceWindow:
+      enabled: true
+      daysOfWeek: [Sat]
+      startTime: "02:00"        # HH:MM, in the window's timezone
+      durationMinutes: 240
+      timezone: Europe/Berlin
+      exclusions:               # absolute freezes — a date, or a from/to range
+        - "2026-12-20/2027-01-06"
+```
+
+- **`channel`** is consent, not a schedule: `none` (the default) means the
+  platform upgrades only when you ask; `patch` allows patch releases;
+  `minor` allows minor releases too. Upgrades forced by a security fix or an
+  end-of-life version override `none` — you are notified, but they happen.
+- **`defer`** decides when an allowed upgrade starts: `window` (the default)
+  waits for the next maintenance window; `immediate` starts as soon as the
+  upgrade is available.
+- **`maintenanceWindow`** bounds platform-driven work generally, not just
+  upgrades. `exclusions` are absolute freezes — nothing platform-driven runs
+  inside one, except forced security/EOL upgrades.
+
+How an upgrade lands depends on who owns the machines:
+
+- **Nodes you own** — self-hosted clusters, and machines you registered
+  yourself — are upgraded **in place**: the kubelet is swapped underneath the
+  running workloads, which the swap itself does not restart. On the managed
+  tier, the live agent walks the nodes one at a time.
+- **Hosted worker pools** are **replaced, surge-first**: new nodes join on
+  the target version before old ones drain and leave. Per-pool tuning (surge
+  size and the like) rides the pool definition on the platform side, not this
+  file.
+
+Both blocks are declarative passthrough: the platform validates them fully at
+registration. `lo` checks only the shape — the two enums, and that every
+exclusion is a `YYYY-MM-DD` date or `from/to` range.
+
 ## Spaces
 
 `hosting: shared` is the third shape: kubehz runs a control plane shared by
