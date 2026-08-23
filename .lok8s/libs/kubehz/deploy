@@ -205,19 +205,24 @@ kubehz::deploy_agent() {
 # remove a previous operator install. What `access` decides is only WHICH
 # overlay the caller then applies or deletes (base, or managed — a superset),
 # which every caller resolves for itself with kubehz::live_agent_overlay.
+
 # kubehz::sed_replacement <value> → <value>, safe to paste into the right-hand
 # side of a `sed 's|…|…|'`.
 #
-# Escapes the three characters sed reads as instructions in a REPLACEMENT:
+# Escapes the four characters sed reads as instructions in a REPLACEMENT:
 #
 #   \  starts an escape (`\1`, `\n`, `\&`)
 #   &  expands to the ENTIRE matched text — here, the placeholder token itself
 #   |  ends the replacement, because `|` is this call site's s-delimiter
+#   ↵  a raw newline ends the `s` command itself — sed aborts the whole render
+#      with "unterminated `s' command"
 #
 # Backslash goes FIRST: escaping it after `&` would go back over the
 # backslashes this function had just added and turn `\&` into `\\&`, which
 # renders a literal backslash followed by the match — the original bug with an
-# extra character in front of it.
+# extra character in front of it. Newline goes LAST for the same reason in
+# reverse: it becomes `\n` (GNU sed renders that back to a newline), and the
+# backslash pass must not double the one this rewrite adds.
 #
 # Pure parameter expansion, no nested sed: a `sed` that escapes sed input has
 # to be read through two layers of quoting to check, and this needs to be
@@ -227,6 +232,7 @@ kubehz::sed_replacement() {
   value="${value//\\/\\\\}"
   value="${value//&/\\&}"
   value="${value//|/\\|}"
+  value="${value//$'\n'/\\n}"
   printf '%s' "${value}"
 }
 

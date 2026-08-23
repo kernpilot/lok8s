@@ -298,12 +298,15 @@ _stub_yq() {
   assert_equal "$(kubehz::sed_replacement 'a\b')"   'a\\b'
   assert_equal "$(kubehz::sed_replacement 'a\&b')"  'a\\\&b'
   assert_equal "$(kubehz::sed_replacement 'plain')" 'plain'
+  # A raw newline would end the `s` command itself — sed aborts the render
+  # with "unterminated `s'". `owner` has no shape check, so it CAN carry one.
+  assert_equal "$(kubehz::sed_replacement $'a\nb')" 'a\nb'
 
   # And the escaping is correct where it is USED, which is the claim that
   # matters: feed each value through the real substitution shape and get the
   # input back out, character for character.
   local v out
-  for v in 'a&b' 'a|b' 'a\b' 'a\&b' '?x=1&y=2' 'plain'; do
+  for v in 'a&b' 'a|b' 'a\b' 'a\&b' '?x=1&y=2' 'plain' $'a\nb'; do
     out="$(printf 'TOK\n' | sed -e "s|TOK|$(kubehz::sed_replacement "${v}")|g")"
     assert_equal "${v} → ${out}" "${v} → ${v}"
   done
