@@ -299,7 +299,8 @@ _stub_yq() {
   assert_equal "$(kubehz::sed_replacement 'a\&b')"  'a\\\&b'
   assert_equal "$(kubehz::sed_replacement 'plain')" 'plain'
   # A raw newline would end the `s` command itself — sed aborts the render
-  # with "unterminated `s'". `owner` has no shape check, so it CAN carry one.
+  # with "unterminated `s'". deploy_agent's shape checks keep one out in
+  # production; the escape is the layer below, so it is tested on its own.
   assert_equal "$(kubehz::sed_replacement $'a\nb')" 'a\nb'
 
   # And the escaping is correct where it is USED, which is the claim that

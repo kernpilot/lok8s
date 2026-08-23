@@ -277,9 +277,9 @@ kubehz::render_agent() {
   # `…/heartbeat?a=1KUBEHZ_API_URL_PLACEHOLDERb=2`: the placeholder scan below
   # then refuses the render and tells the operator their manifests "still carry
   # a placeholder", which sends them looking at the manifests instead of at the
-  # one URL that is actually fine. `owner` needs the same treatment for a
-  # different reason — it is `.spec.kubehz.agent` straight out of the cluster
-  # spec, with no shape check anywhere.
+  # one URL that is actually fine. `owner` gets the same treatment as defense
+  # in depth — deploy_agent pins it to the cronjob/operator enum above, so a
+  # metacharacter can only reach here through a caller that skipped the check.
   local api_url_sed domain_sed owner_sed
   api_url_sed="$(kubehz::sed_replacement "${api_url}")"
   domain_sed="$(kubehz::sed_replacement "${domain}")"
