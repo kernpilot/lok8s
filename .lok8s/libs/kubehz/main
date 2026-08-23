@@ -112,9 +112,10 @@ kubehz::read_config() {
     LOK8S_KUBEHZ_AGENT="cronjob"
   fi
 
-  # Upgrade policy + maintenance window are declarative passthrough — the
-  # consumed hosted-side by the platform API (its own payload validation) and
-  # self-hosted-side by the in-cluster agent, which reads it locally. lo shape-checks
+  # Upgrade policy + maintenance window are declarative passthrough —
+  # consumed hosted-side by the platform API (its own payload validation) and,
+  # once upgrade execution ships, self-hosted-side by the in-cluster agent
+  # reading it locally. lo shape-checks
   # only what a typo would silently break: the two enums and the exclusion
   # dates (validate_config). Same null/empty tolerance as `agent` above.
   LOK8S_KUBEHZ_UPGRADES_CHANNEL=$(yq -r '.spec.kubehz.upgrades.channel // "none"' "${cluster_yaml}") || return 1

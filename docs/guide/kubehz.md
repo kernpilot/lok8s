@@ -97,9 +97,11 @@ How an upgrade lands depends on who owns the machines:
 `lo` checks the shape — the two enums, and that every exclusion is a
 `YYYY-MM-DD` date or `from/to` range. Full semantic validation happens where
 each block is consumed: for **hosted** clusters and pools, the platform API
-validates its own payloads; for **self-hosted** clusters the block configures
-the in-cluster agent (managed tier), which reads it locally — your cluster's
-upgrade behavior never depends on the platform being reachable. Calendar
+validates its own payloads; for **self-hosted** clusters the block is the
+declared input for the managed-tier agent's upgrade walk — the agent will
+read it locally once upgrade execution ships, so your cluster's upgrade
+behavior will never depend on the platform being reachable. Until then the
+block is declarative only. Calendar
 validity beyond the shape (a February 30th) is not caught by `lo` today.
 
 ## Spaces
