@@ -756,6 +756,16 @@ audit::_grep_count() {
 #     Flagging it anyway would fire on a safe configuration, and a security
 #     gate that cries wolf gets muted.)
 #
+#     But POSTURE is the rules, not the declaration — and reading only
+#     `defaultAction` was this exemption's own fail-open. `defaultAction: Deny`
+#     with `rules: [{action: Allow, principal: {clientCIDRs: ["0.0.0.0/0"]}}]`
+#     denies nothing: it replaces the gateway's allowlist with an allow-all and
+#     scored a clean pass, because the DECLARED action said Deny and nobody
+#     looked further. Same shape as the old grep, one field in. So a Deny is
+#     honoured only if no Allow rule re-opens everything — see
+#     audit::_authz_allow_all_expr for what "everything" means and, just as
+#     importantly, what it deliberately does not mean.
+#
 # The routed set stops at HTTPRoute/GRPCRoute/TCPRoute ON PURPOSE. TLSRoute and
 # UDPRoute read like obvious omissions and are not: a SecurityPolicy cannot
 # produce this bug on either. `mergeType` is admissible only on an xRoute
@@ -784,12 +794,48 @@ audit::_grep_count() {
 # hierarchy, not by namespace. Resolving that needs parentRefs, which the
 # scanned manifests may not even contain. So the check over-reports and never
 # under-reports, and says so in the finding.
+# audit::_authz_allow_all_expr → the yq sub-expression counting the Allow rules
+# in `.spec.authorization.rules` that re-open the policy to EVERY client.
+#
+# "Re-opens to everything" is deliberately narrow, because this predicate's job
+# is to cancel a Deny and a wrong cancellation invents a finding against a safe
+# cluster. A rule counts only when ALL of these hold:
+#
+#   * `action: Allow`.
+#   * The rule narrows by nothing but its principal — its key set is a subset of
+#     {name, action, principal}. An `operation` (methods/paths) scopes the rule
+#     to part of the surface, so it is not an allow-all, and the subset test
+#     keeps that true for any narrowing key a later CRD adds: an unknown key
+#     means NOT counted, so the failure direction is a missed finding rather
+#     than a false alarm on a shape this code has never seen.
+#   * The principal narrows by nothing but CIDR — its key set is exactly
+#     {clientCIDRs}. `clientCIDRs: ["0.0.0.0/0"]` beside a `jwt` or `headers`
+#     principal reads "any IP, but only with this token/header", which is a
+#     real guard, ANDed; flagging it would fire on a perfectly good gateway.
+#   * Some CIDR has a ZERO prefix length (`/0`). Matching the prefix rather
+#     than the literals `0.0.0.0/0` / `::/0` is not pedantry: a /0 ignores the
+#     address part entirely, so `10.0.0.0/0` is every IPv4 address while
+#     reading like an RFC1918 range — the most plausible way this hole gets
+#     written by accident, and the most plausible way it gets written on
+#     purpose.
+audit::_authz_allow_all_expr() {
+  cat <<'YQ'
+[.spec.authorization.rules[]?
+ | select(.action == "Allow")
+ | select((((keys | sort) - ["action", "name", "principal"]) | length) == 0)
+ | select(((.principal // {}) | keys | sort | join(",")) == "clientCIDRs")
+ | .principal.clientCIDRs[]? | select(test("/0$"))] | length
+YQ
+}
+
 audit::_secpol_scan() {
   (( $# > 0 )) || { echo "0 0"; return 0; }
-  local f action kinds merge routed merges deny=0 open=0
+  local f action kinds merge allow_all routed merges denies deny=0 open=0
+  local allow_all_expr
+  allow_all_expr="$(audit::_authz_allow_all_expr)"
   for f in "${@}"; do
-    while IFS='|' read -r action kinds merge; do
-      [[ -n "${action}${kinds}${merge}" ]] || continue
+    while IFS='|' read -r action kinds merge allow_all; do
+      [[ -n "${action}${kinds}${merge}${allow_all}" ]] || continue
       routed=0
       case ",${kinds}," in
         *,HTTPRoute,*|*,GRPCRoute,*|*,TCPRoute,*) routed=1 ;;
@@ -798,11 +844,26 @@ audit::_secpol_scan() {
       case "${merge}" in
         StrategicMerge|JSONMerge) merges=1 ;;
       esac
+      # Does this policy actually deny by default? Declaring `Deny` is not
+      # enough — an Allow rule for every client makes the declaration cosmetic.
+      # One definition of "denies", used for BOTH counts on purpose: a Deny
+      # that allow-alls is no more a gateway-wide carve-out than it is a safe
+      # route policy, and two different readings of the same field inside one
+      # function is how the next fail-open gets written. A non-numeric or empty
+      # count (yq produced nothing usable) is read as allow-all, which drops a
+      # carve-out rather than inventing one.
+      denies=0
+      if [[ "${action}" == "Deny" && "${allow_all}" == "0" ]]; then
+        denies=1
+      fi
       if (( routed )); then
-        if (( ! merges )) && [[ "${action}" != "Deny" ]]; then
+        # No usable mergeType means this policy REPLACES the gateway-wide one
+        # for the routes it selects, whatever it declares. It is safe only if
+        # what replaces the carve-out is itself a real deny.
+        if (( ! merges && ! denies )); then
           open=$(( open + 1 ))
         fi
-      elif [[ "${action}" == "Deny" ]]; then
+      elif (( denies )); then
         deny=$(( deny + 1 ))
       fi
     done < <(yq eval -N '
@@ -810,7 +871,8 @@ audit::_secpol_scan() {
       | ((.spec.authorization.defaultAction // "-")
          + "|" + (([.spec.targetRef] + (.spec.targetRefs // []) + (.spec.targetSelectors // []))
                   | map(select(tag == "!!map") | .kind // "-") | join(","))
-         + "|" + (.spec.mergeType // "-"))
+         + "|" + (.spec.mergeType // "-")
+         + "|" + ('"${allow_all_expr}"' | tostring))
     ' "${f}" 2>/dev/null)
   done
   echo "${deny} ${open}"

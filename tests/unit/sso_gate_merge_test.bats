@@ -32,17 +32,68 @@
 # whitelists that key set. A field outside the whitelist fails the test even if
 # nobody here has heard of it — including one a future Envoy Gateway CRD adds.
 # That turns the next new narrowing field from an invisible gap into a red test.
+#
+# ── And the gate must not be blind to a SECOND policy ────────────────────────
+# Every assertion below reads ONE object. That is only sound while the render
+# emits one, and the reader — not the addon — is what used to guarantee it:
+# `yq eval -N` (`--no-doc`) STRIPS the `---` separator, so two SecurityPolicy
+# documents came out as one pseudo-document whose duplicate keys yq resolves
+# LAST-KEY-WINS. A second policy sorting BEFORE `sso-gate` (kustomize orders
+# same-kind objects by name) was therefore invisible: `sso-gate`'s own fields
+# overwrote it key by key and all five tests stayed green while a policy with
+# `defaultAction: Allow` and NO `mergeType` shipped beside the gate — a policy
+# that REPLACES the Gateway's guards for exactly the routes this addon claims
+# to protect. The same vacuous-guard class this file exists to close, turned on
+# the file itself.
+#
+# So the COUNT is asserted first and separately, and `_render` refuses to hand
+# any test a stream it cannot honestly describe as one object: on any count but
+# the expected one it says so on stderr and emits NOTHING, which fails every
+# downstream assertion loudly instead of collapsing them into a green.
+# Extraction uses `eval-all … | .[0]` so a single document is structurally
+# guaranteed rather than merely hoped for.
 
 setup() {
   load "../test_helper"
   command -v kustomize &>/dev/null || skip "kustomize required"
   command -v yq &>/dev/null || skip "yq required"
   _SSO_DIR="${_PROJECT_ROOT}/.lok8s/addons/sso-gate"
+
+  # How many SecurityPolicy documents this addon is SUPPOSED to emit. One — and
+  # that is the addon's own stated design, not a count scraped from its
+  # sources: securitypolicy.yaml opens with "The single enforcement object: one
+  # SecurityPolicy per namespace", and kustomization.yaml documents serving a
+  # second namespace by LAYERING a copy, which leaves this base at one.
+  # Deriving the number from the addon's files instead would be worthless — the
+  # shadow policy that motivated this guard would raise the expected count
+  # along with the actual one and pass. Raising it is a deliberate review
+  # decision: a second policy in this base needs its own reason, and every
+  # assertion below needs to be told which object it is reading.
+  _SSO_POLICY_COUNT=1
 }
 
-# _render → the sso-gate SecurityPolicy as rendered by kustomize.
+# _policy_count → how many SecurityPolicy documents the addon actually renders.
+# `eval-all` and a collect-then-length, so documents are COUNTED as documents
+# rather than folded together by `-N`.
+_policy_count() {
+  kustomize build "${_SSO_DIR}" \
+    | yq eval-all -N '[select(.kind == "SecurityPolicy")] | length' -
+}
+
+# _render → the sso-gate SecurityPolicy as rendered by kustomize, or nothing at
+# all if the render does not contain exactly the expected number of them.
+# Emitting nothing is the point: every caller compares the result against an
+# expected value, so an empty stream fails each of them with its own message,
+# and the reason is on stderr. Never emit a merged-by-accident object.
 _render() {
-  kustomize build "${_SSO_DIR}" | yq eval -N 'select(.kind == "SecurityPolicy")' -
+  local n
+  n="$(_policy_count)"
+  if [[ "${n}" != "${_SSO_POLICY_COUNT}" ]]; then
+    echo "_render: refusing to describe a render of ${n} SecurityPolicy document(s) as one object (expected ${_SSO_POLICY_COUNT}); see the count test" >&2
+    return 1
+  fi
+  kustomize build "${_SSO_DIR}" \
+    | yq eval-all -N '[select(.kind == "SecurityPolicy")] | .[0]' -
 }
 
 # _targets → one `group|kind|labels|fields` line per target the policy
@@ -67,10 +118,74 @@ _targets() {
 }
 
 @test "sso-gate renders exactly one SecurityPolicy" {
+  # COUNT first, on the raw multi-document render. This test used to read only
+  # `.metadata.name` through a `-N` pipeline, which cannot count: two policies
+  # concatenated into one pseudo-document and the last `name:` key won, so the
+  # test whose NAME is "exactly one" passed on two. Assert the number itself.
+  local n
+  n="$(_policy_count)"
+  [ "${n}" = "${_SSO_POLICY_COUNT}" ] \
+    || fail "the addon renders ${n} SecurityPolicy document(s), expected exactly ${_SSO_POLICY_COUNT} — every other test in this file describes ONE object, and a second policy is not a second opinion: Envoy Gateway resolves overlapping policies by specificity, so a sibling that also selects the labeled routes and omits 'mergeType' REPLACES the Gateway's guards for them, whatever this base's own policy says. If the extra document is deliberate, say why here and give each object its own assertions"
+
+  # Then the identity, now that "one object" is established rather than assumed.
   local names
   names="$(_render | yq eval -N '.metadata.name' -)"
   [ "${names}" = "sso-gate" ] \
     || fail "expected exactly one SecurityPolicy named 'sso-gate', got: ${names:-<none>}"
+}
+
+@test "the count guard is not itself vacuous: a second SecurityPolicy is caught" {
+  # The guard above is only worth its lines if it FAILS on the shape it exists
+  # to catch, so prove that here rather than in a reviewer's scratch directory.
+  # Layer the real addon under a shadow policy named to sort BEFORE 'sso-gate'
+  # — that ordering is what made the old `-N` reader hand `sso-gate`'s own
+  # fields to every assertion as the last-key-wins survivor, so the shadow is
+  # the adversarial case, not just any second object.
+  # Copy rather than reference: kustomize refuses an absolute path in
+  # `resources`, and a relative one computed from BATS_TEST_TMPDIR back to the
+  # repo would be arithmetic this test has no reason to own. The copy is the
+  # real addon's files, which is what the assertion is about.
+  local layer="${BATS_TEST_TMPDIR}/shadowed"
+  mkdir -p "${layer}/base"
+  cp "${_SSO_DIR}"/*.yaml "${layer}/base/"
+  cat >"${layer}/shadow.yaml" <<'YAML'
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: aaa-shadow
+  namespace: default
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels:
+        sso.lok8s.dev/protect: "true"
+  authorization:
+    defaultAction: Allow
+YAML
+  cat >"${layer}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base
+  - shadow.yaml
+YAML
+
+  _SSO_DIR="${layer}"
+  run _policy_count
+  assert_success
+  assert_output "2"
+
+  # And the refusal reaches the tests: _render hands back nothing, so every
+  # assertion downstream of it fails on its own terms instead of reading the
+  # collapsed object and passing.
+  run _render
+  assert_failure
+  assert_output --partial "refusing to describe a render of 2 SecurityPolicy document(s) as one object"
+  local emitted
+  emitted="$(_render 2>/dev/null || true)"
+  [ -z "${emitted}" ] \
+    || fail "_render emitted an object for a two-policy render instead of nothing — the downstream assertions would read it and pass: ${emitted}"
 }
 
 @test "the rendered sso-gate SecurityPolicy carries mergeType: StrategicMerge" {

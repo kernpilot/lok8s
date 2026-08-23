@@ -908,6 +908,220 @@ YAML
   assert_equal "$(_status_of exposed-endpoints)" "pass"
 }
 
+# The exemption directly above, taken at its word, WAS the next fail-open: it
+# honoured the DECLARED `defaultAction` and never read the rules underneath.
+# `Deny` plus `Allow 0.0.0.0/0` is a deny-by-default that admits the entire
+# internet, and with no mergeType it replaces the gateway's real allowlist with
+# exactly that — while the audit printed "external exposure is IP-allowlisted".
+# The manifests still read locked down; the cluster is open. Same class as the
+# grep this scan replaced, one field deeper.
+@test "a route-level Deny that allows every client still cancels the carve-out" {
+  _spec dinamo <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target dinamo net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+        principal: { clientCIDRs: ["203.0.113.0/24"] }
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: deny-in-name-only }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+        principal: { clientCIDRs: ["0.0.0.0/0"] }
+YAML
+  audit::run_domain dinamo
+  # Before this fix the scan scored `deny=1 open=0` and the check fell through
+  # to the LoadBalancer+carve-out branch: status pass, severity low, detail
+  # "external exposure is IP-allowlisted".
+  assert_equal "$(_status_of exposed-endpoints)" "fail"
+  assert_equal "$(_sev_of exposed-endpoints)" "high"
+}
+
+# A zero prefix length ignores the address, so `10.0.0.0/0` is every IPv4
+# address wearing an RFC1918 costume. It is both the likeliest typo and the
+# likeliest deliberate dodge, and matching the literal strings `0.0.0.0/0` and
+# `::/0` would miss it.
+@test "an allow-all is read from the /0 prefix, not from the address in front of it" {
+  local cidr
+  for cidr in '0.0.0.0/0' '::/0' '10.0.0.0/0'; do
+    _spec zeropfx <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+    _target zeropfx net/gw.yaml <<YAML
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: deny-in-name-only }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+        principal: { clientCIDRs: ["${cidr}"] }
+YAML
+    audit::run_domain zeropfx
+    assert_equal "${cidr} → $(_status_of exposed-endpoints)" "${cidr} → fail"
+  done
+}
+
+# The other half of the same fix, and the half that decides whether anyone
+# leaves the check switched on. A principal ANDs its fields, so
+# `clientCIDRs: ["0.0.0.0/0"]` next to a `jwt` principal means "any IP, but
+# only with this token" — a real guard. So does an `operation` that scopes the
+# rule to some methods. Reading either as an allow-all would fire on a correct
+# gateway, and a security gate that cries wolf gets muted.
+@test "an Allow rule narrowed by JWT or by operation is not an allow-all" {
+  local label spec_snippet
+  # shellcheck disable=SC2043
+  for label in jwt operation; do
+    case "${label}" in
+      jwt)       spec_snippet='        principal:
+          clientCIDRs: ["0.0.0.0/0"]
+          jwt: { scopes: ["admin"] }' ;;
+      operation) spec_snippet='        operation: { methods: ["GET"] }
+        principal: { clientCIDRs: ["0.0.0.0/0"] }' ;;
+    esac
+    _spec narrowed <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+    _target narrowed net/gw.yaml <<YAML
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: route-guard }
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+${spec_snippet}
+YAML
+    audit::run_domain narrowed
+    assert_equal "${label} → $(_status_of exposed-endpoints)" "${label} → pass"
+  done
+}
+
+# One reading of "denies", used for both counts. A gateway-wide Deny that
+# admits every client is not a carve-out either, and scoring it as one is the
+# same false "external exposure is IP-allowlisted" the route-level case
+# produced — there is no allowlist to be behind.
+@test "a gateway-wide Deny that allows every client is not a carve-out" {
+  _spec gwopen <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: []
+YAML
+  _target gwopen net/gw.yaml <<'YAML'
+apiVersion: v1
+kind: Service
+metadata: { name: envoy }
+spec:
+  type: LoadBalancer
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: { name: ip-allowlist }
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw
+  authorization:
+    defaultAction: Deny
+    rules:
+      - action: Allow
+        principal: { clientCIDRs: ["0.0.0.0/0"] }
+YAML
+  audit::run_domain gwopen
+  # No real carve-out exists, so the LoadBalancer is simply unguarded: the
+  # honest verdict is the no-allowlist warn, never the allowlisted pass.
+  assert_equal "$(_status_of exposed-endpoints)" "warn"
+  local detail
+  detail="$(_detail_of exposed-endpoints)"
+  [[ "${detail}" != *"IP-allowlisted"* ]] \
+    || fail "the audit still calls an allow-all Deny an IP allowlist: ${detail}"
+}
+
 # =============================================================================
 # Kubernetes version support (EOL)
 # =============================================================================

@@ -267,6 +267,48 @@ _stub_yq() {
   assert_output --partial "operator"
 }
 
+@test "render: an apiUrl with '&' lands verbatim, not expanded by sed" {
+  # `&` in a sed REPLACEMENT means "the whole matched text", and the apiUrl
+  # validator admits `&` on purpose — a query string is a legal API URL. So
+  # `?a=1&b=2` used to render as `?a=1KUBEHZ_API_URL_PLACEHOLDERb=2`. It failed
+  # CLOSED, which is the right direction, but on the wrong message: the
+  # placeholder scan told the operator the MANIFESTS still carried a
+  # placeholder, pointing them at the one place the problem was not.
+  _source_deploy
+  local work="${BATS_TEST_TMPDIR}/amp"
+  mkdir -p "${work}"
+  local url="https://api.example.com/heartbeat?cluster=a&mode=push"
+
+  run kubehz::render_agent "${work}" "acme.example.com" "${url}" operator managed
+  assert_success
+
+  run grep -h 'KUBEHZ_API_URL:' "${work}/agent/configmap.yaml" "${work}/live-agent/base/configmap.yaml"
+  assert_output --partial "${url}"
+  refute_output --partial "PLACEHOLDER"
+}
+
+@test "sed_replacement: escapes every character sed reads as an instruction" {
+  _source_deploy
+  # Backslash, ampersand and the s-delimiter, each alone and then together in
+  # the order that catches a wrong escaping ORDER: escaping '&' before '\'
+  # would re-escape the backslashes just added and emit a literal '\' before
+  # the match.
+  assert_equal "$(kubehz::sed_replacement 'a&b')"   'a\&b'
+  assert_equal "$(kubehz::sed_replacement 'a|b')"   'a\|b'
+  assert_equal "$(kubehz::sed_replacement 'a\b')"   'a\\b'
+  assert_equal "$(kubehz::sed_replacement 'a\&b')"  'a\\\&b'
+  assert_equal "$(kubehz::sed_replacement 'plain')" 'plain'
+
+  # And the escaping is correct where it is USED, which is the claim that
+  # matters: feed each value through the real substitution shape and get the
+  # input back out, character for character.
+  local v out
+  for v in 'a&b' 'a|b' 'a\b' 'a\&b' '?x=1&y=2' 'plain'; do
+    out="$(printf 'TOK\n' | sed -e "s|TOK|$(kubehz::sed_replacement "${v}")|g")"
+    assert_equal "${v} → ${out}" "${v} → ${v}"
+  done
+}
+
 @test "overlay: access decides the overlay — registered gets base, managed gets managed" {
   _source_deploy
   local work="${BATS_TEST_TMPDIR}/r1"

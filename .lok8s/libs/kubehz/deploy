@@ -205,6 +205,31 @@ kubehz::deploy_agent() {
 # remove a previous operator install. What `access` decides is only WHICH
 # overlay the caller then applies or deletes (base, or managed — a superset),
 # which every caller resolves for itself with kubehz::live_agent_overlay.
+# kubehz::sed_replacement <value> → <value>, safe to paste into the right-hand
+# side of a `sed 's|…|…|'`.
+#
+# Escapes the three characters sed reads as instructions in a REPLACEMENT:
+#
+#   \  starts an escape (`\1`, `\n`, `\&`)
+#   &  expands to the ENTIRE matched text — here, the placeholder token itself
+#   |  ends the replacement, because `|` is this call site's s-delimiter
+#
+# Backslash goes FIRST: escaping it after `&` would go back over the
+# backslashes this function had just added and turn `\&` into `\\&`, which
+# renders a literal backslash followed by the match — the original bug with an
+# extra character in front of it.
+#
+# Pure parameter expansion, no nested sed: a `sed` that escapes sed input has
+# to be read through two layers of quoting to check, and this needs to be
+# checkable at a glance.
+kubehz::sed_replacement() {
+  local value="${1}"
+  value="${value//\\/\\\\}"
+  value="${value//&/\\&}"
+  value="${value//|/\\|}"
+  printf '%s' "${value}"
+}
+
 # Usage: kubehz::render_agent <workdir> <domain> <api_url> <owner> <access>
 kubehz::render_agent() {
   local workdir="${1}" domain="${2}" api_url="${3}" owner="${4}" access="${5}"
@@ -225,12 +250,28 @@ kubehz::render_agent() {
 
   # One substitution pass over every rendered file: the two agents deliberately
   # share the placeholder vocabulary so one pass feeds both.
+  #
+  # Every value goes through kubehz::sed_replacement first. sed's REPLACEMENT
+  # half has its own metacharacters, and `&` — "insert the whole match here" —
+  # is a legal character in a query string that the apiUrl validator above
+  # deliberately admits. Pasted raw, `…/heartbeat?a=1&b=2` renders as
+  # `…/heartbeat?a=1KUBEHZ_API_URL_PLACEHOLDERb=2`: the placeholder scan below
+  # then refuses the render and tells the operator their manifests "still carry
+  # a placeholder", which sends them looking at the manifests instead of at the
+  # one URL that is actually fine. `owner` needs the same treatment for a
+  # different reason — it is `.spec.kubehz.agent` straight out of the cluster
+  # spec, with no shape check anywhere.
+  local api_url_sed domain_sed owner_sed
+  api_url_sed="$(kubehz::sed_replacement "${api_url}")"
+  domain_sed="$(kubehz::sed_replacement "${domain}")"
+  owner_sed="$(kubehz::sed_replacement "${owner}")"
+
   local file
   while IFS= read -r -d '' file; do
     sed -i \
-      -e "s|KUBEHZ_API_URL_PLACEHOLDER|${api_url}|g" \
-      -e "s|CLUSTER_ID_PLACEHOLDER|${domain}|g" \
-      -e "s|HEARTBEAT_OWNER_PLACEHOLDER|${owner}|g" \
+      -e "s|KUBEHZ_API_URL_PLACEHOLDER|${api_url_sed}|g" \
+      -e "s|CLUSTER_ID_PLACEHOLDER|${domain_sed}|g" \
+      -e "s|HEARTBEAT_OWNER_PLACEHOLDER|${owner_sed}|g" \
       "${file}" || return 1
   done < <(find "${workdir}" -type f -name '*.yaml' -print0)
 
