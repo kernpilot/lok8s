@@ -536,6 +536,10 @@ christmas week"
   printf 'spec: {}\n' > "${f}"
   kubehz::read_config "${f}"
   [ -z "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" ]
+  # Real-yq default pin (review r1): the stubbed default test is satisfied by
+  # the null/empty FALLBACK, so a typo'd yq path or default literal slips it —
+  # this line pins the real expression's own default.
+  [ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" = "patch" ]
 }
 
 @test "validate_config: real-yq fixture — scalar-coerced INVALID exclusion fails with our message" {
