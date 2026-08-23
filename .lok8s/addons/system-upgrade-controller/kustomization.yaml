@@ -1,6 +1,6 @@
 # system-upgrade-controller — Rancher's in-cluster OS patcher. A generic,
 # reusable atom: bootstrap `system-upgrade-controller` by name to get the
-# controller + its upgrade.cattle.io/v1 CRD (chart @108.0.0).
+# controller + its upgrade.cattle.io/v1 CRD (chart @110.0.0).
 #
 # This addon is the generic CONTROLLER only (split the same way cnpg-operator is
 # operator+CRD here, CRs in the consumer). The cluster GLUE stays behind in the
