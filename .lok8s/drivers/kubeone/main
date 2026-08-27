@@ -87,7 +87,7 @@ driver::provision() {
   # failed apply was masked by a stale kubeconfig and reported as success. It
   # only failed correctly on a first-ever provision, which is why a
   # fresh-install test would never have caught it.
-  kubeone::apply "${work_dir}" || return 1
+  kubeone::apply "${work_dir}" "${cluster_yaml}" || return 1
 
   # 6. Copy kubeconfig to standard location
   local cluster_name

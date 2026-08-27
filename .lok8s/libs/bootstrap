@@ -455,6 +455,31 @@ bootstrap::_parse_entry() {
 # whitelist (template::envsubst_whitelist → ${LOK8S_USER_*}/${LOK8S_SPEC_*}) picks
 # it up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
 # convention the addons reference; other names are exported but not whitelisted.
+# bootstrap::inline_values — the cluster spec's merged inline values for ONE
+# addon, by the SAME semantics the bootstrap applies (_parse_entry: both entry
+# shapes, `values:` + `valueFiles:` pre-merge, cluster-dir resolution). Prints
+# the merged YAML, or nothing when the spec has no entry for the addon or the
+# entry carries no values. The kubeone driver's render_addons reads this so an
+# addon it renders for `kubeone apply` carries the SAME values the bootstrap
+# would overlay — before this, an inline-only value (issue #157: the cilium
+# kube-proxy-replacement flip) silently reverted at upgrade time and landed
+# mid-node-walk. A parse error is a hard error, never a silent empty.
+#
+# Usage: bootstrap::inline_values <domain> <cluster_yaml> <addon-name>
+bootstrap::inline_values() {
+  local domain="${1}" cluster_yaml="${2}" addon="${3}"
+  [[ -f "${cluster_yaml}" ]] || { error "inline_values: cluster yaml not found: ${cluster_yaml}"; return 1; }
+  local entry name dir inline env wait deps
+  while IFS= read -r entry; do
+    bootstrap::_parse_entry "${domain}" "${entry}" name dir inline env wait deps || return 1
+    if [[ "${name}" == "${addon}" ]]; then
+      [[ -z "${inline}" || "${inline}" == "null" ]] || printf '%s\n' "${inline}"
+      return 0
+    fi
+  done < <(yq -o=json -I=0 '.spec.bootstrap[]?' "${cluster_yaml}")
+  return 0
+}
+
 bootstrap::_apply_one() {
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
