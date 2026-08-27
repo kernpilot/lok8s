@@ -72,8 +72,12 @@ _cluster_yaml() {
 
 _inline_of() {
   # Decode the recorded inline arg of the call whose addon dir ends in $1.
-  grep "addons/${1}|" "${BATS_TEST_TMPDIR}/render.calls" | head -1 \
-    | awk -F'|' '{print $4}' | base64 -d
+  # The call line MUST exist — "never rendered" and "rendered with empty
+  # inline" are different verdicts, and a silent grep-miss would green both.
+  local line
+  line=$(grep "addons/${1}|" "${BATS_TEST_TMPDIR}/render.calls" | head -1)
+  [[ -n "${line}" ]] || { echo "NO-RENDER-CALL-FOR-${1}" >&2; return 1; }
+  awk -F'|' '{print $4}' <<<"${line}" | base64 -d
 }
 
 @test "render_addons: the cluster's inline cilium values ride the kubeone render (issue #157)" {
@@ -95,8 +99,13 @@ _inline_of() {
   [ -z "$(_inline_of cilium)" ]
 }
 
-@test "render_addons: no cluster yaml at all (legacy call shape) still renders" {
-  run kubeone::render_addons "${work_dir}"
+@test "render_addons: no cluster yaml at all (legacy call shape) still renders — under set -u like the argsh runtime" {
+  # bats does not run `set -u`, the argsh entrypoint DOES — a bare "${2}"
+  # in the signature would pass here and crash in production (review find).
+  # A shell FUNCTION wrapper keeps the sourced definitions in scope (a
+  # `bash -c` child would see none of them).
+  _legacy_call() { set -u; kubeone::render_addons "${1}"; }
+  run _legacy_call "${work_dir}"
   [ "${status}" -eq 0 ]
   [ -z "$(_inline_of cilium)" ]
 }
@@ -116,6 +125,32 @@ _inline_of() {
   [ "$(yq -r '.env.HCLOUD_NETWORK.value' <<<"${inline}")" = "net-1" ]
   # …and the cluster's explicit intent lands on top.
   [ "$(yq -r '.env.HCLOUD_LOAD_BALANCERS_ENABLED.value' <<<"${inline}")" = "false" ]
+}
+
+@test "render_addons: on a COLLIDING key the cluster's ccm value wins (precedence, not just merge)" {
+  # Non-colliding keys green under either operand order — this collision is
+  # the only assertion that pins 'explicit cluster intent beats derived
+  # facts' (swap the merge operands and it fails).
+  export HROBOT_USER="u" HROBOT_PASSWORD="p"
+  local cy; cy=$(_cluster_yaml '    - ccm:
+        values:
+          env:
+            HCLOUD_NETWORK_ROUTES_ENABLED: {value: "true"}')
+  run kubeone::render_addons "${work_dir}" "${cy}"
+  [ "${status}" -eq 0 ]
+  local inline; inline=$(_inline_of ccm)
+  [ "$(yq -r '.env.HCLOUD_NETWORK_ROUTES_ENABLED.value' <<<"${inline}")" = "true" ]
+}
+
+@test "bootstrap::inline_values: a same-named ./targets entry does not shadow the framework addon" {
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/targets/cilium"
+  local cy; cy=$(_cluster_yaml '    - ./targets/cilium
+    - cilium:
+        values:
+          kubeProxyReplacement: false')
+  run bootstrap::inline_values "test.lok8s.dev" "${cy}" cilium
+  [ "${status}" -eq 0 ]
+  [ "$(yq -r '.kubeProxyReplacement' <<<"${output}")" = "false" ]
 }
 
 @test "bootstrap::inline_values: legacy whole-map form extracts too" {

@@ -343,7 +343,7 @@ kubeone::generate_config() {
 # Usage: kubeone::apply <work_dir>
 # Expects: kubeone.yaml + output.json in work_dir
 kubeone::apply() {
-  local work_dir="${1}" cluster_yaml="${2}"
+  local work_dir="${1}" cluster_yaml="${2:-}"
 
   if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
     error "kubeone.yaml not found in ${work_dir}"
@@ -451,7 +451,7 @@ kubeone::_clean_reinstalled_workers() {
 # envsubst) — so what kubeone applies == what bootstrap later reconciles.
 # Usage: kubeone::render_addons <work_dir>
 kubeone::render_addons() {
-  local work_dir="${1}" cluster_yaml="${2}"
+  local work_dir="${1}" cluster_yaml="${2:-}"
   local manifest="${work_dir}/kubeone.yaml"
   # The cluster's OWN inline bootstrap values must ride every addon we render
   # here (issue #157): kubeone applies these manifests during the node walk,
