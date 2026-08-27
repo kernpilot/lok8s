@@ -14,6 +14,7 @@ import ^utils/template
 import ^utils/oidc
 import ^utils/spec
 import ^utils/credentials
+import ^libs/bootstrap
 
 # ── Provider detection ──────────────────────────────────
 
@@ -339,10 +340,12 @@ kubeone::generate_config() {
 # ── KubeOne CLI operations ──────────────────────────────
 
 # Run kubeone apply (install or reconcile cluster).
-# Usage: kubeone::apply <work_dir>
+# Usage: kubeone::apply <work_dir> [cluster_yaml]
+# cluster_yaml (optional): the cluster's lok8s spec — its inline bootstrap
+# values ride the rendered addons (issue #157); omitted = framework stack only.
 # Expects: kubeone.yaml + output.json in work_dir
 kubeone::apply() {
-  local work_dir="${1}"
+  local work_dir="${1}" cluster_yaml="${2:-}"
 
   if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
     error "kubeone.yaml not found in ${work_dir}"
@@ -378,7 +381,7 @@ kubeone::apply() {
   # robot-aware CCM. Name the Robot servers first so the CCM matches the
   # bare-metal worker by hostname.
   kubeone::_name_robot_workers "${work_dir}/kubeone.yaml" || return 1
-  kubeone::render_addons "${work_dir}" || return 1
+  kubeone::render_addons "${work_dir}" "${cluster_yaml}" || return 1
 
   debug "Running (in ${work_dir}): kubeone ${kubeone_args[*]}"
   # Subshell cd: kubeone writes <cluster>-kubeconfig into the CWD (no output
@@ -448,10 +451,18 @@ kubeone::_clean_reinstalled_workers() {
 # background apply / apiserver polling. Renders through addons::render — the SAME
 # canonical khelm path the bootstrap engine uses (value stack + kustomize build +
 # envsubst) — so what kubeone applies == what bootstrap later reconciles.
-# Usage: kubeone::render_addons <work_dir>
+# Usage: kubeone::render_addons <work_dir> [cluster_yaml]
 kubeone::render_addons() {
-  local work_dir="${1}"
+  local work_dir="${1}" cluster_yaml="${2:-}"
   local manifest="${work_dir}/kubeone.yaml"
+  # The cluster's OWN inline bootstrap values must ride every addon we render
+  # here (issue #157): kubeone applies these manifests during the node walk,
+  # and a render WITHOUT the cluster's `values:`/`valueFiles:` overlay
+  # reverted an inline-only cilium setting mid-roll — the datapath stayed up,
+  # the service path went inconsistent, and a hosted etcd hit zero ready
+  # members. Same extraction semantics as the bootstrap (_parse_entry).
+  local bootstrap_domain=""
+  [[ -z "${cluster_yaml}" ]] || bootstrap_domain="$(basename "$(dirname "${cluster_yaml}")")"
   local addons_dir="${work_dir}/addons"
   # This addon set is Hetzner-specific (cilium values.hetzner, the robot-aware
   # hcloud CCM, the hcloud Secret) and render_addons is called unconditionally
@@ -503,7 +514,12 @@ kubeone::render_addons() {
   # cilium values.kubeone.yaml — addons::render's envsubst fills them from the env
   # we export here. Same driver/provider value stack the bootstrap would apply.
   export LOK8S_USER_API_HOST="${api_host}" LOK8S_USER_API_PORT="6443"
-  addons::render "${PATH_LOK8S}/addons/cilium" kubeone hetzner "" \
+  local cilium_user_values=""
+  if [[ -n "${cluster_yaml}" ]]; then
+    cilium_user_values="$(bootstrap::inline_values "${bootstrap_domain}" "${cluster_yaml}" cilium)" \
+      || { error "render_addons: reading cilium bootstrap values failed"; return 1; }
+  fi
+  addons::render "${PATH_LOK8S}/addons/cilium" kubeone hetzner "${cilium_user_values}" \
     > "${addons_dir}/cilium/cilium.yaml" || { error "render cilium addon failed"; return 1; }
 
   # Context validation (BEFORE rendering the CCM): a bare-metal (static) worker
@@ -538,6 +554,23 @@ kubeone::render_addons() {
   # loud here rather than emit a Secret with an empty token the CCM can't auth with.
   [[ -n "${HCLOUD_TOKEN:-}" ]] \
     || { error "render_addons: HCLOUD_TOKEN not set (required for hcloud CCM credentials)"; return 1; }
+  # The cluster's ccm bootstrap values merge ON TOP of the driver-derived
+  # inline (explicit cluster intent beats derived facts — the same precedence
+  # addons::render applies to its whole stack).
+  if [[ -n "${cluster_yaml}" ]]; then
+    local ccm_user_values
+    ccm_user_values="$(bootstrap::inline_values "${bootstrap_domain}" "${cluster_yaml}" ccm)" \
+      || { error "render_addons: reading ccm bootstrap values failed"; return 1; }
+    if [[ -n "${ccm_user_values}" ]]; then
+      if [[ -n "${inline}" ]]; then
+        inline="$(yq eval-all '. as $item ireduce ({}; . * $item)' \
+            <(printf '%s\n' "${inline}") <(printf '%s\n' "${ccm_user_values}"))" \
+          || { error "render_addons: merging ccm bootstrap values failed"; return 1; }
+      else
+        inline="${ccm_user_values}"
+      fi
+    fi
+  fi
   addons::render "${PATH_LOK8S}/addons/ccm" kubeone hetzner "${inline}" \
     > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
 
