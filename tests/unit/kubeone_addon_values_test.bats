@@ -25,7 +25,7 @@ setup() {
   addons::render() {
     # Record every call: dir|kind|provider|inline (inline may be multi-line —
     # record it base64'd so one line = one call).
-    printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$(printf '%s' "${4:-}" | base64 -w0)" \
+    printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$(printf '%s' "${4:-}" | base64 | tr -d '\n' )" \
       >> "${BATS_TEST_TMPDIR}/render.calls"
     echo "# stub addon"
   }
