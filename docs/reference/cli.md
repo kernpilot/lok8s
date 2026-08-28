@@ -361,10 +361,10 @@ A deploy domain follows its `spec.clusterRef` to the real cluster. The `--oidc` 
 Static security-posture audit — read-only and cluster-free.
 
 ```bash
-lo audit [domain] [--json]
+lo audit [domain] [--json | --sarif]
 ```
 
-Scans the domain's specs, secrets hygiene, and rendered targets for posture findings. `--json` emits machine-readable output for CI.
+Scans the domain's specs, secrets hygiene, and rendered targets for posture findings. `--json` emits machine-readable output for CI. `--sarif` emits SARIF 2.1.0 for GitHub code-scanning upload (see the [audit guide](/guide/audit)).
 
 ### lo doctor
 

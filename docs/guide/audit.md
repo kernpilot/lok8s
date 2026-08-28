@@ -10,6 +10,7 @@ no kubeconfig, so it runs offline and in CI.
 lo audit                 # audit the active domain (lo use <domain>)
 lo audit my-cluster.example.com   # audit a specific cluster
 lo audit --json          # machine-readable output (stable schema, see below)
+lo audit --sarif         # SARIF 2.1.0 for GitHub code scanning (see below)
 ```
 
 ## What it checks
@@ -118,6 +119,48 @@ Field contract:
 - `status` ∈ `pass` | `warn` | `fail` | `unknown`
 - every `checks[]` entry always carries `id`, `title`, `severity`, `status`,
   `detail`, `remediation`.
+
+## SARIF output (GitHub code scanning)
+
+`--sarif` emits a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/)
+document on stdout. Upload it to GitHub code scanning and findings show up as
+alerts on the Security tab, with file annotations where the audit can point at
+one.
+
+How findings map:
+
+- One SARIF run; the tool is `lo-audit`. Each check id becomes a rule.
+- `status` sets the alert level: `fail` → `error`, `warn` → `warning`,
+  `unknown` → `note`. Unknown is uploaded on purpose — "could not check" is a
+  finding, not a confirmation.
+- `pass` findings are **not** uploaded. A clean audit produces `results: []`,
+  so zero alerts.
+- Every result carries a location, because code scanning discards a result
+  without one. A finding keyed to one spec value (an EOL
+  `spec.kubernetes.version`, a plaintext `spec.oidc.issuer`) points at that
+  file and line. An aggregate finding (a scan over many manifests) points at
+  the domain spec with no line, since that file is what the check is about.
+- Alert severity comes from `security-severity` on the rule, derived from the
+  worst audit severity that rule reports, and every rule is tagged `security`.
+  GitHub ignores a result property bag for this. The result message is the
+  finding detail plus its remediation, and `severity`, `status` and domain
+  also ride in each result `properties` bag for other tools.
+- `--sarif` and `--json` are mutually exclusive. The exit code stays the same
+  as every other mode: non-zero **iff** a finding fails.
+
+CI example:
+
+```yaml
+- name: Security audit
+  run: lo audit --sarif > audit.sarif
+  # non-zero exit when a finding fails — still upload the report
+  continue-on-error: true
+
+- name: Upload to code scanning
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: audit.sarif
+```
 
 ## Kubernetes version support list
 
