@@ -150,7 +150,9 @@ teardown() { teardown_tmpdir; }
 # `.kind` at the ROOT: `.metadata.kind` and `.items[].kind` are preceded by a
 # word character or `]` and do not match. `|` is in the class (#143): a
 # pipeline stage — `select(documentIndex == 0)|.kind` — starts a new
-# expression, so its `.kind` is root-anchored too. `(` is deliberately NOT in
+# expression. (Its `.kind` is root-anchored when the stage input is the
+# document root; `.items[]|.kind` also matches, which is deliberate parity
+# with the spaced `.items[] | .kind` the class already caught.) `(` is deliberately NOT in
 # the class, so a bare `select(.kind == …)` — a Kubernetes object kind, not a
 # driver — stays out; the grouping shape that costs is item 8 below. Flags no
 # longer break the match either: round 2's `yq [^)]*` span was defeated by any
@@ -176,9 +178,14 @@ teardown() { teardown_tmpdir; }
 #      (see shell_sources in tests/test_helper.bash);
 #   8. a grouped root read — `kind=$(yq -r '(.kind) // ""' …)` — because
 #      admitting `(` to the delimiter class would also match
-#      `select(.kind == …)`, a Kubernetes object kind (#143).
+#      `select(.kind == …)`, a Kubernetes object kind (#143);
+#   9. no-space operator siblings of the pipe shape whose leading char is not
+#      in the class — `//.kind` (alternative), `,.kind` (comma sequence) —
+#      and quoted/indirect spellings: `."kind"`, `getpath(["kind"])`,
+#      `.[$k]`. Same trade as item 8: each candidate delimiter (`/`, `,`)
+#      also appears mid-expression in non-driver programs.
 #
-# 1–3, 6 and 8 are reachable by a determined author. None of them is the shape a
+# 1–3, 6, 8 and 9 are reachable by a determined author. None of them is the shape a
 # fourteenth copy actually takes — every one of the thirteen #89 converged was
 # a plain one-line quoted read — so the gate is aimed at drift, not at an
 # adversary. The anti-vacuity canaries below are what keep it aimed at all.
@@ -198,7 +205,7 @@ _kind_read_re() {
 # Part B — the accessor written into a variable, for a yq call further down.
 _kind_query_re() {
   local q=\'
-  printf '%s' "=[\"${q}]$(_kind_accessor_re)"
+  printf '%s' "=[\"${q}|]$(_kind_accessor_re)"
 }
 
 _kind_reads() {
