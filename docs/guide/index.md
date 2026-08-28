@@ -16,7 +16,8 @@ and the rest of your profile's toolchain — ships **pinned inside the lok8s
 environment** and lands in your project's `.bin/` with a single command
 (`b install`; see [Installation](#installation) below). Nothing touches
 your system, versions are locked per project, and teammates get the
-identical toolchain from the committed `b.yaml`/`b.lock`.
+identical toolchain from the committed `b.yaml`/`b.lock` — see
+[The Toolchain](/guide/toolchain) for the file's schema.
 
 ## Installation
 

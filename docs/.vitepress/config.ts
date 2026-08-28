@@ -12,9 +12,9 @@ export default defineConfig({
   sitemap: {
     hostname: 'https://lok8s.io/',
   },
-  // Internal/planning docs now live in the PRIVATE kubehz-cluster repo
-  // (docs/internal/). lok8s is public — keep only this defensive exclude so a
-  // stray internal/** file can never ship to the public site by accident.
+  // Defensive net: nothing under docs/internal/ is part of this site.
+  // Keep this exclude so a stray internal/** file can never ship to the
+  // public site by accident.
   srcExclude: ['internal/**'],
   head: [
     ['meta', { name: 'theme-color', content: '#89DCEB' }],
@@ -48,6 +48,7 @@ export default defineConfig({
           items: [
             { text: 'Getting Started', link: '/guide/' },
             { text: 'Concepts', link: '/guide/concepts' },
+            { text: 'The Toolchain (b.yaml)', link: '/guide/toolchain' },
             { text: 'Addons', link: '/guide/addons' },
           ],
         },

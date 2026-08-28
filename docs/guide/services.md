@@ -28,6 +28,17 @@ This guide covers:
 where their source is. `lok8s.yaml` is the **how**: Dockerfile path,
 live-update sync rules, port forwards, Tilt resource config.
 
+::: warning Service names and target names are different namespaces
+A **service name** is a key under `services:` in `services.yaml`. It names
+the image (`lok8s.local/<service>`) and claims manifests through the
+`lok8s.dev/name=<service>` label — Tilt resources and this page use it.
+A **target name** is a directory under `clusters/<domain>/targets/` — the
+[domain kustomization](/guide/concepts#plane-b-—-workloads-targets) and
+`lo build` use it. The two can share a string, but nothing connects them
+except the labels you put on the target's manifests. `lo deploy -l
+lok8s.dev/name=<x>` selects by **label value**, not by target directory.
+:::
+
 `services.<config>.yaml` files are **workflow profiles** — see the
 [Workflow profiles](#workflow-profiles) section for the full pattern.
 
