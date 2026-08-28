@@ -10,6 +10,13 @@ This page documents what `b` does in a lok8s project and the `b.yaml`
 fields lok8s actually uses. For the full `b` feature set, see the
 [upstream docs](https://binary.help).
 
+::: info Documented against `b` v4.18.x
+`b` ignores keys it does not know, so a field name from a different
+version fails silently: the binary still installs, just with default
+behavior. If something here does not match what you see, check
+[binary.help](https://binary.help) for your version.
+:::
+
 ## How `b` fits the `lo` workflow
 
 `b` owns two things in a lok8s project:
@@ -44,10 +51,12 @@ so teammates and CI get the identical toolchain. The
 `curl -fsSL https://get.lok8s.io | sh` bootstrap from
 [Getting Started](/guide/#installation) runs these same commands for you.
 
-`b` finds the install directory through `PATH_BIN`, or `PATH_BASE`
-(binaries go to `$PATH_BASE/.bin`), or the git repo root. The `.envrc`
-that ships with every profile exports these for
-[direnv](https://direnv.net/) users.
+`b` picks the install directory from the first of these that is set:
+`PATH_BIN`, then `PATH_BASE`, then `<git-root>/.bin`, then `<cwd>/.bin`.
+Note that `PATH_BIN` and `PATH_BASE` are used **verbatim** — `b` does not
+append `.bin` to them, it only does that for the git-root and working-
+directory fallbacks. The `.envrc` that ships with every profile exports
+these for [direnv](https://direnv.net/) users.
 
 ::: tip Authentication
 Public sources need no token. Set `GITHUB_TOKEN` only for private repos
@@ -98,9 +107,9 @@ file sets, and consumers subscribe with
 
 | Profile | Includes | Adds |
 |---|---|---|
-| `core` | — | `.lok8s/**`, `.envrc`, skills, and the `core`-tagged binaries |
+| `core` | — | `.lok8s/**`, `.envrc`, `.gitignore`, `.mcp.json`, skills, and the `core`-tagged binaries |
 | `kustomize` | — | `.kustomize/**` plugins and their binaries |
-| `local` | core + kustomize | `Tiltfile`, `services.yaml`, kind/Tilt/mkcert |
+| `local` | core + kustomize | `Tiltfile`, `services.yaml`, kind/Tilt/mkcert/bats |
 | `capi` | local | `clusterctl`, `hcloud` |
 | `kubeone` | local | `kubeone`, `hcloud` |
 
