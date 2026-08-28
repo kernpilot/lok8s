@@ -135,12 +135,16 @@ How findings map:
   finding, not a confirmation.
 - `pass` findings are **not** uploaded. A clean audit produces `results: []`,
   so zero alerts.
-- A finding keyed to one spec value (an EOL `spec.kubernetes.version`, a
-  plaintext `spec.oidc.issuer`) carries a repo-relative file location and line.
-  Aggregate findings (a scan over many manifests) carry no location.
-- The result message is the finding's detail plus its remediation. The
-  finding's own `severity`, `status`, and domain ride in each result's
-  `properties` bag.
+- Every result carries a location, because code scanning discards a result
+  without one. A finding keyed to one spec value (an EOL
+  `spec.kubernetes.version`, a plaintext `spec.oidc.issuer`) points at that
+  file and line. An aggregate finding (a scan over many manifests) points at
+  the domain spec with no line, since that file is what the check is about.
+- Alert severity comes from `security-severity` on the rule, derived from the
+  worst audit severity that rule reports, and every rule is tagged `security`.
+  GitHub ignores a result property bag for this. The result message is the
+  finding detail plus its remediation, and `severity`, `status` and domain
+  also ride in each result `properties` bag for other tools.
 - `--sarif` and `--json` are mutually exclusive. The exit code stays the same
   as every other mode: non-zero **iff** a finding fails.
 

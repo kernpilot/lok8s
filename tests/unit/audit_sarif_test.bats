@@ -136,10 +136,12 @@ YAML
   echo "${result}" | jq -e '.locations[0].physicalLocation.region.startLine == 6'
 }
 
-@test "an aggregate finding (no single source file) omits locations entirely" {
-  # The cilium verdict merges base/driver/provider/inline values — there is no
-  # one file to point at, so the result must carry NO locations key (an empty
-  # or fabricated location would put the alert on the wrong file).
+@test "an aggregate finding falls back to the domain spec, with no line" {
+  # The cilium verdict merges base/driver/provider/inline values, so there is
+  # no one LINE to point at — but code scanning DROPS a result that carries no
+  # location at all, which silently lost most findings. The domain spec is the
+  # honest subject of every check, so it is the fallback uri; startLine is
+  # omitted rather than fabricated.
   _cilium_values kubeone <<'YAML'
 policyAuditMode: true
 YAML
@@ -155,7 +157,46 @@ YAML
   assert_success
   echo "${output}" | jq -e '
     .runs[0].results[] | select(.ruleId == "cilium-policy-enforcement")
-    | (has("locations") | not)'
+    | .locations[0].physicalLocation
+    | (.artifactLocation.uri | endswith("clusters/noloc/cluster.lok8s.yaml"))
+      and (has("region") | not)'
+}
+
+@test "every result carries a location — code scanning drops the ones that do not" {
+  # The whole-envelope invariant behind the fallback above: not one result may
+  # be location-less, or that finding never becomes an alert.
+  _spec everyloc <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: [ cilium ]
+YAML
+  run _sarif everyloc
+  assert_success
+  echo "${output}" | jq -e '
+    (.runs[0].results | length) > 0
+    and all(.runs[0].results[]; .locations[0].physicalLocation.artifactLocation.uri != null)'
+}
+
+@test "rules carry a security-severity from the worst severity, tagged security" {
+  # GitHub derives alert severity from the RULE property, not the result bag —
+  # without the tag + score every alert lands at the tool default.
+  _spec sev <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.35.5" }
+  bootstrap: [ cilium ]
+YAML
+  run _sarif sev
+  assert_success
+  echo "${output}" | jq -e '
+    all(.runs[0].tool.driver.rules[];
+        (.properties.tags | index("security"))
+        and (.properties."security-severity" | tonumber) > 0)'
 }
 
 # =============================================================================

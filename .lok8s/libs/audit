@@ -652,8 +652,15 @@ audit::render_json() {
 # normalizes to 0 ("no line").
 audit::_sarif_findings() {
   local domain="${1}"
+  # Every finding is ABOUT this domain's spec, so that file is the honest
+  # fallback location for the aggregate checks (a scan over many manifests
+  # has no single line, but it does have a subject). Code scanning drops a
+  # result that carries no location at all, which silently lost 26 of 31
+  # findings before this.
+  local default_uri
+  default_uri=$(audit::_rel_uri "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
   printf '%s\n' "${_AUDIT_FINDINGS[@]+"${_AUDIT_FINDINGS[@]}"}" \
-    | jq -Rcn --arg domain "${domain}" '
+    | jq -Rcn --arg domain "${domain}" --arg default_uri "${default_uri}" '
         [inputs
          | select(length > 0)
          | split("\t")
@@ -661,6 +668,7 @@ audit::_sarif_findings() {
             id: .[0], title: .[1], severity: .[2], status: .[3],
             detail: .[4], remediation: (.[5] // ""),
             file: (.[6] // ""),
+            defaultUri: $default_uri,
             lineno: ((.[7] // "") | if test("^[1-9][0-9]*$") then tonumber else 0 end)}]'
 }
 
@@ -670,10 +678,15 @@ audit::_sarif_findings() {
 # warn → warning, unknown → note (unknown IS surfaced: "couldn't check" is a
 # finding, not a confirmation). Pass findings are omitted: code scanning
 # tracks problems, and an all-pass audit must upload as zero alerts, not six.
-# rules[] carries exactly the ruleIds the results reference. A finding with a
-# source file gets a physicalLocation (repo-relative uri; startLine only when
-# a line is known); an aggregate finding carries no locations. severity/status/
-# domain ride in each result's property bag for downstream tooling.
+# rules[] carries exactly the ruleIds the results reference, each tagged
+# security with a security-severity derived from the audit severity (the WORST
+# per id) — that rule property is what GitHub turns into alert severity; a
+# result-level property bag is ignored. EVERY result carries a location: the
+# finding's own spec key when it has one (uri + startLine), otherwise the
+# domain's cluster.lok8s.yaml (uri only). Code scanning drops a location-less
+# result, so an aggregate finding without this fallback never becomes an alert.
+# severity/status/domain also ride in each result's property bag for
+# downstream tooling.
 audit::render_sarif() {
   local findings="${1}"
   jq -n --argjson findings "${findings}" '
@@ -685,8 +698,22 @@ audit::render_sarif() {
            name: "lo-audit",
            informationUri: "https://lok8s.io/guide/audit",
            rules: ($results
-                   | map({id, title}) | unique_by(.id)
-                   | map({id: .id, shortDescription: {text: .title}}))
+                   | group_by(.id)
+                   | map({id: .[0].id,
+                          shortDescription: {text: .[0].title},
+                          # GitHub reads alert severity from security-severity
+                          # on the RULE (a result-level property bag is
+                          # ignored), and only for rules tagged security. One
+                          # id can emit different severities on different
+                          # paths, so take the worst.
+                          properties: {
+                            "security-severity": (
+                              [.[] | (if .severity == "critical" then 9.5
+                                      elif .severity == "high" then 8.0
+                                      elif .severity == "medium" then 5.0
+                                      else 2.0 end)] | max | tostring),
+                            tags: ["security"]
+                          }}))
          }},
          results: ($results | map(
            {ruleId: .id,
@@ -695,12 +722,10 @@ audit::render_sarif() {
                     else "note" end),
             message: {text: (if .remediation == "" then .detail
                              else .detail + " Remediation: " + .remediation end)},
-            properties: {domain: .domain, severity: .severity, status: .status}}
-           + (if .file == "" then {}
-              else {locations: [{physicalLocation:
-                     ({artifactLocation: {uri: .file}}
-                      + (if .lineno > 0 then {region: {startLine: .lineno}} else {} end))}]}
-              end)))
+            properties: {domain: .domain, severity: .severity, status: .status},
+            locations: [{physicalLocation:
+                     ({artifactLocation: {uri: (if .file == "" then .defaultUri else .file end)}}
+                      + (if .file != "" and .lineno > 0 then {region: {startLine: .lineno}} else {} end))}]}))
        }]}'
 }
 
