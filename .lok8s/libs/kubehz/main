@@ -13,6 +13,10 @@
 #   libs/kubehz/deploy    — `lo kubehz deploy`: render + apply the in-cluster
 #                           agent the spec selects, and keep exactly one
 #                           heartbeat producer alive (see its header)
+#   libs/kubehz/node      — `lo kubehz node join|remove|status`: the machines a
+#                           tenant brings to a kubehz-HOSTED control plane
+#                           (static pools). The CLUSTER-level join/deregister
+#                           above keep their own meaning.
 #
 # TWO in-cluster agents ship as kustomize dirs, and spec.kubehz.agent picks
 # which one owns the heartbeat:
@@ -38,6 +42,7 @@ import ^libs/kubehz/hosted
 import ^libs/kubehz/shared
 import ^libs/kubehz/handover
 import ^libs/kubehz/deploy
+import ^libs/kubehz/node
 
 main::kubehz() {
   local -a usage=(
@@ -46,6 +51,7 @@ main::kubehz() {
     'deploy@destructive'        'Deploy the in-cluster agent (spec.kubehz.agent)'
     'status|s@readonly'         'Check kubehz registration status'
     'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
+    'node|n'                    'Nodes you bring to a hosted control plane (join/remove/status)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
     'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
     're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
