@@ -801,6 +801,15 @@ _refuse_flag() {
   assert_output --partial "--cluster-id cl-xxxxxxxx"
 }
 
+@test "join: the attached short-flag form -s<value> is refused (argsh parses it as --cluster)" {
+  _stub_all
+
+  run node::join -scl-wrong --pool metal --print-only
+  assert_failure
+  assert_output --partial "--cluster/-s names the kind cluster"
+  assert_output --partial "--cluster-id cl-xxxxxxxx"
+}
+
 @test "remove: the inherited --cluster is refused" {
   _stub_all
 

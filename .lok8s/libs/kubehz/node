@@ -211,7 +211,11 @@ node::reject_global_cluster_flag() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      --cluster|--cluster=*|-s)
+      # -s?* catches argsh's ATTACHED short-flag form: argsh parses `-scl-x`
+      # as `--cluster=cl-x`, so without it a value bound to the global
+      # kind-cluster flag is silently dropped (review round 2, L1). No node
+      # short flag starts with `s`, so this cannot swallow a real one.
+      --cluster|--cluster=*|-s|-s?*)
         error "kubehz: --cluster/-s names the kind cluster lo manages, not the target here."
         echo "  Name the platform cluster with:  --cluster-id cl-xxxxxxxx" >&2
         return 1 ;;
