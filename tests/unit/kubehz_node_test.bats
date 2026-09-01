@@ -500,13 +500,116 @@ _stub_all() {
   [ ! -f "${KUBEADM_LOG}" ]
 }
 
-@test "join: a mint that returns no command runs nothing and says so" {
+# ── F1: the STRUCTURAL join gate (allowlist, not alphabet) ──
+#
+# Every dangerous kubeadm flag below is built from the SAME innocent characters
+# the alphabet gate accepts, so only a flag-level allowlist can stop it. Each
+# crafted line is otherwise legit — it carries a CA pin — so the ONLY reason it
+# is refused is the offending flag, which the error must NAME. Remove the
+# allowlist loop in node::assert_join_command and every one of these reddens
+# (the line then passes the CA-present check and is accepted).
+
+# One helper: assert node::assert_join_command refuses <line>, naming <flag>.
+_refuse_flag() {
+  local flag="${1}" line="${2}"
+  run node::assert_join_command "${line}"
+  assert_failure
+  assert_output --partial "join flag this CLI will not run: ${flag}"
+}
+
+@test "join gate: --discovery-file is refused by name" {
+  _refuse_flag "--discovery-file" \
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-file https://evil.test/kubeconfig --node-name box-1"
+}
+
+@test "join gate: --config is refused by name" {
+  _refuse_flag "--config" \
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --config=/tmp/kubeadm.conf --node-name box-1"
+}
+
+@test "join gate: --control-plane is refused by name" {
+  _refuse_flag "--control-plane" \
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --control-plane --node-name box-1"
+}
+
+@test "join gate: --certificate-key is refused by name" {
+  _refuse_flag "--certificate-key" \
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --certificate-key deadbeef --node-name box-1"
+}
+
+@test "join gate: --discovery-token-unsafe-skip-ca-verification is refused by name" {
+  _refuse_flag "--discovery-token-unsafe-skip-ca-verification" \
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-unsafe-skip-ca-verification --node-name box-1"
+}
+
+@test "join gate: --ignore-preflight-errors is refused by name" {
+  _refuse_flag "--ignore-preflight-errors" \
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --ignore-preflight-errors=all --node-name box-1"
+}
+
+@test "join gate: the legit api shape with one CA hash is accepted" {
+  node::assert_join_command \
+    "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1"
+}
+
+@test "join gate: the legit api shape with two CA hashes is accepted" {
+  node::assert_join_command \
+    "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-ca-cert-hash sha256:2222 --node-name box-1"
+}
+
+@test "join gate: a line with no CA fingerprint is refused" {
+  run node::assert_join_command \
+    "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --node-name box-1"
+  assert_failure
+  assert_output --partial "pins no CA fingerprint"
+}
+
+@test "join gate: a server address that is not host:port is refused" {
+  run node::assert_join_command \
+    "kubeadm join not-an-endpoint --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1"
+  assert_failure
+  assert_output --partial "not a host:port"
+}
+
+@test "join gate: a dangerous flag reaches nothing through the full join path" {
+  _stub_all
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-unsafe-skip-ca-verification --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "join flag this CLI will not run: --discovery-token-unsafe-skip-ca-verification"
+  [ ! -f "${KUBEADM_LOG}" ]
+}
+
+@test "join: a mint that returns no command runs nothing and names the held slot" {
   _stub_all
   STUB_MINT_BODY='{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"2026-09-01T12:00:00Z"}}'
 
   run node::join --name box-1 --pool metal
   assert_failure
   assert_output --partial "returned no join command"
+  # F3: the empty-command path names the held slot, like the kubeadm-failed one.
+  assert_output --partial "holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  [ ! -f "${KUBEADM_LOG}" ]
+}
+
+# F2: a 2xx body is not a promise of JSON. A non-JSON mint body must not crash
+# `lo` with a raw jq error AFTER the ticket was minted — it must reach the
+# held-slot error. Under errexit (lo's runtime), the UNGUARDED `$(jq …)` aborts
+# node::join at the assignment and this message never prints — mutation-check.
+@test "join: a non-JSON 2xx mint body errors about the held ticket, not a jq crash" {
+  _stub_all
+  STUB_MINT_CODE="200"
+  STUB_MINT_BODY='<html><body>502 Bad Gateway</body></html>'
+
+  _join_under_errexit() { set -eo pipefail; node::join --name box-1 --pool metal; }
+  run _join_under_errexit
+
+  assert_failure
+  assert_output --partial "returned no join command"
+  assert_output --partial "holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
   [ ! -f "${KUBEADM_LOG}" ]
 }
 
@@ -679,10 +782,65 @@ _stub_all() {
   refute_output --partial "has not published its join address"
 }
 
+# ── F5: the global --cluster/-s collision ────────────────
+
+@test "join: the inherited --cluster is refused and points at --cluster-id" {
+  _stub_all
+
+  run node::join --cluster cl-wrong --pool metal --print-only
+  assert_failure
+  assert_output --partial "--cluster/-s names the kind cluster"
+  assert_output --partial "--cluster-id cl-xxxxxxxx"
+}
+
+@test "join: the short -s is refused the same way" {
+  _stub_all
+
+  run node::join -s cl-wrong --pool metal --print-only
+  assert_failure
+  assert_output --partial "--cluster-id cl-xxxxxxxx"
+}
+
+@test "remove: the inherited --cluster is refused" {
+  _stub_all
+
+  run node::remove --name box-1 --cluster cl-wrong
+  assert_failure
+  assert_output --partial "--cluster-id cl-xxxxxxxx"
+  [ ! -f "${CURL_LOG}" ]
+}
+
+@test "status: the inherited --cluster is refused" {
+  _stub_all
+
+  run node::status --cluster cl-wrong
+  assert_failure
+  assert_output --partial "--cluster-id cl-xxxxxxxx"
+}
+
+@test "join: --cluster-id is NOT mistaken for the global --cluster" {
+  _stub_all
+
+  run node::join --cluster-id cl-1234abcd --name box-1 --pool metal --print-only
+  assert_success
+  assert_output --partial "cluster cl-1234abcd"
+}
+
 # ── dispatch ─────────────────────────────────────────────
 
 @test "the node group is registered on lo kubehz" {
   run grep -c "'node|n'" "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  assert_success
+  assert_output "1"
+}
+
+# F6: the group is registered above, but a registered group with no import is
+# dead on dispatch. Pin the import line itself — the unit harness stubs
+# `import` to a no-op (it sources node directly), so runtime cannot see the
+# import; this grep is the deterministic equivalent, and it reddens the moment
+# `import ^libs/kubehz/node` is dropped from main.
+@test "lo kubehz imports the node lib (dispatch is dead without it)" {
+  run grep -c '^import \^libs/kubehz/node$' "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   assert_success
   assert_output "1"
 }

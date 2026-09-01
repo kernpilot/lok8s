@@ -274,6 +274,14 @@ The command refuses before it mints anything when `kubeadm` is absent, or when
 the shell is not root. Use `--print-only` to mint on one machine and join on
 another.
 
+::: warning Re-run with `sudo -E`, not plain `sudo`
+`kubeadm join` must run as root, but the join reads `KUBEHZ_TOKEN` and the
+`PATH_*` lo environment first. Plain `sudo` starts a clean environment and
+drops both, so the mint would fail to authenticate. Use `sudo -E lo kubehz node
+join …` to carry your environment through, or mint with `--print-only` as your
+own user and run the printed `kubeadm join` line under root separately.
+:::
+
 **Requirements on the machine:** a container runtime, plus `kubelet`,
 `kubeadm` and `kubectl` from a supported Kubernetes release. The machine must
 reach the join endpoint on TCP 6443 and the node tunnel on TCP 8088. A machine

@@ -200,6 +200,25 @@ node::assert_node_name() {
   fi
 }
 
+# `lo` owns --cluster/-s globally (the kind cluster to manage), and argsh
+# inherits it into every subcommand — so on a `node` verb it parses silently
+# and is then ignored, because the target here is --cluster-id. That is exactly
+# the two-names-one-meaning trap this file's header refuses. Catch it by name
+# from the raw argv, the same precedent .lok8s/lo uses to spot an explicit
+# --domain. --cluster-id is untouched: it matches neither arm.
+# Usage: node::reject_global_cluster_flag "$@"
+node::reject_global_cluster_flag() {
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --cluster|--cluster=*|-s)
+        error "kubehz: --cluster/-s names the kind cluster lo manages, not the target here."
+        echo "  Name the platform cluster with:  --cluster-id cl-xxxxxxxx" >&2
+        return 1 ;;
+    esac
+  done
+}
+
 # The node name kubeadm would choose: the short hostname, lowercased.
 node::default_name() {
   local name
@@ -234,10 +253,23 @@ node::infer_pool() {
 
 # ── Join ─────────────────────────────────────────────────
 
-# Refuse a join line this CLI does not recognise. The line is split into an
-# argv array and never reaches a shell, so a metacharacter has nothing to
-# escape into; the check stands because a command we cannot read is a command
-# we must not run as root.
+# The join flags this CLI will run, and no others. The api composes EXACTLY
+#   kubeadm join <endpoint> --token <t> [--discovery-token-ca-cert-hash <h>]... --node-name <n>
+# (kubehz-api server/utils/static-pools.ts::composeJoinCommand). A flag outside
+# this set — --discovery-file, --config, --control-plane, --certificate-key,
+# --ignore-preflight-errors, --discovery-token-unsafe-skip-ca-verification — is
+# built from the SAME innocent characters yet hands the machine to whoever
+# composed the line. So the gate is the grammar, not the alphabet.
+readonly -a NODE_JOIN_ALLOWED_FLAGS=(
+  --token
+  --discovery-token-ca-cert-hash
+  --node-name
+)
+
+# Refuse a join line whose SEMANTICS this CLI does not recognise. The alphabet
+# check keeps a shell metacharacter out (nothing can escape into a shell); the
+# structural check keeps a dangerous kubeadm FLAG out (nothing can escape into
+# root on this machine). A command we cannot read is a command we must not run.
 # Usage: node::assert_join_command <line>
 node::assert_join_command() {
   local line="${1}"
@@ -249,9 +281,52 @@ node::assert_join_command() {
   fi
   # Word characters, dots, colons, slashes, equals, plus and dash — the whole
   # alphabet of an address, a bootstrap token, a sha256 pin and a DNS label.
+  # This is the shell-injection guard, and it MUST stand before `read -ra`
+  # splits the line: a token this alphabet rejects never reaches the argv.
   if [[ ! "${line}" =~ ^[A-Za-z0-9._:/=+-]+([[:blank:]][A-Za-z0-9._:/=+-]+)*$ ]]; then
     error "kubehz: the join command carries characters this CLI does not run."
     echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
+    return 1
+  fi
+
+  # Structural allowlist. Split the line and walk it: `kubeadm` `join`, then the
+  # endpoint (host:port), then a run of flags. EVERY token that begins with `--`
+  # must be one of NODE_JOIN_ALLOWED_FLAGS — a dangerous flag can never hide as
+  # a flag's value, because a value the api emits (an endpoint, a token, a
+  # sha256 pin, a DNS label) never begins with `--`. At least one CA fingerprint
+  # is REQUIRED: without it a node would trust whatever apiserver answers.
+  local -a tok
+  read -ra tok <<<"${line}"
+
+  local endpoint_re='^[A-Za-z0-9.-]+:[0-9]{1,5}$'
+  if [[ ! "${tok[2]:-}" =~ ${endpoint_re} ]]; then
+    error "kubehz: the join command's server address is not a host:port."
+    echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
+    return 1
+  fi
+
+  local i flag seen_ca=0 allowed
+  for (( i = 3; i < ${#tok[@]}; i++ )); do
+    [[ "${tok[i]}" == --* ]] || continue   # a value following an allowed flag
+    flag="${tok[i]%%=*}"                    # tolerate --flag=value as well as --flag value
+    allowed=0
+    local candidate
+    for candidate in "${NODE_JOIN_ALLOWED_FLAGS[@]}"; do
+      [[ "${flag}" == "${candidate}" ]] && { allowed=1; break; }
+    done
+    if (( ! allowed )); then
+      error "kubehz: the platform sent a join flag this CLI will not run: ${flag}"
+      echo "  Nothing ran on this machine. This CLI runs only the join, token, CA-pin" >&2
+      echo "  and node-name flags. Print the command and read it:  --print-only" >&2
+      return 1
+    fi
+    [[ "${flag}" == "--discovery-token-ca-cert-hash" ]] && seen_ca=1
+  done
+
+  if (( ! seen_ca )); then
+    error "kubehz: the join command pins no CA fingerprint, so a node could not verify the control plane."
+    echo "  Nothing ran on this machine. A safe join carries at least one" >&2
+    echo "  --discovery-token-ca-cert-hash. Print the command and read it:  --print-only" >&2
     return 1
   fi
 }
@@ -260,6 +335,17 @@ node::assert_join_command() {
 # suite can walk the join path without running as root.
 node::is_root() {
   [[ "${EUID}" -eq 0 ]]
+}
+
+# Printed when a join is interrupted (Ctrl-C) after the ticket is minted but
+# before kubeadm finishes: the ticket already holds a node slot for about ten
+# minutes, so name the way to free it — the same note the kubeadm-failed branch
+# carries. `node_name` is read from the interrupted node::join through dynamic
+# scope (the trap handler runs while node::join is still on the stack).
+node::interrupted_slot_note() {
+  echo "" >&2
+  warn "kubehz: interrupted after the ticket was minted — it holds a node slot for about ten minutes."
+  warn "Free the slot if you are not retrying:  lo kubehz node remove --name ${node_name}"
 }
 
 # Join THIS machine to a hosted cluster.
@@ -276,6 +362,7 @@ node::join() {
     'domain|:^~domain'  'Domain to use'
     "${args[@]:-}"
   )
+  node::reject_global_cluster_flag "${@}" || return 1
   :args "Join this machine to a kubehz-hosted cluster" "${@}"
 
   node::preflight "${domain}" "join a node" || return 1
@@ -305,8 +392,9 @@ node::join() {
   fi
   if (( ! print_only )) && ! node::is_root; then
     error "kubehz: kubeadm join writes to /etc/kubernetes, so it must run as root."
-    echo "  Run this command again with sudo, or add --print-only and run the" >&2
-    echo "  printed command as root yourself." >&2
+    echo "  Run it again with 'sudo -E' — the -E keeps KUBEHZ_TOKEN and the PATH_*" >&2
+    echo "  lo environment, which plain sudo would strip." >&2
+    echo "  Or add --print-only and run the printed command as root yourself." >&2
     return 1
   fi
 
@@ -328,17 +416,24 @@ node::join() {
     return 1
   fi
 
+  # Guard every read: the mint returned 2xx, but a 2xx body is not a promise of
+  # JSON. Under errexit a bare `$(jq …)` on a non-JSON body would kill `lo` with
+  # a raw parse error AFTER the ticket was minted — and that ticket holds a
+  # slot. Fall back to empty and let the empty-join_command branch below say so.
   local join_command expires ready
-  join_command=$(jq -r '(.data? // .) | .joinCommand // empty' <<<"${KUBEHZ_SPACE_API_BODY}")
-  expires=$(jq -r '(.data? // .) | .expiresAt // empty' <<<"${KUBEHZ_SPACE_API_BODY}")
+  join_command=$(jq -r '(.data? // .) | .joinCommand // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || join_command=""
+  expires=$(jq -r '(.data? // .) | .expiresAt // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || expires=""
   # `.ready` WITHOUT a `//` alternative: jq's `//` takes the right side when
   # the left is null OR FALSE, so `.ready // empty` erases the one value this
   # warning exists to catch. An absent key reads "null" here and warns about
   # nothing, which is the honest answer for an api that did not say.
-  ready=$(jq -r '(.data? // .) | .ready' <<<"${KUBEHZ_SPACE_API_BODY}")
+  ready=$(jq -r '(.data? // .) | .ready' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || ready=""
   if [[ -z "${join_command}" ]]; then
-    error "kubehz: the platform minted a ticket but returned no join command."
-    echo "  Nothing ran on this machine. Contact kubehz support." >&2
+    error "kubehz: the platform accepted the mint but returned no join command this CLI could read."
+    echo "  A ticket may have been minted — if so it holds a node slot for about ten" >&2
+    echo "  minutes. Check for it and free the slot if it is there:" >&2
+    echo "    lo kubehz node status" >&2
+    echo "    lo kubehz node remove --name ${node_name}" >&2
     return 1
   fi
   node::assert_join_command "${join_command}" || return 1
@@ -368,14 +463,19 @@ node::join() {
   fi
 
   echo "kubehz: joining '${node_name}' to pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}"
+  # The ticket is live and holds a slot from here until the join lands. A
+  # Ctrl-C mid-join would otherwise leave the caller unaware the slot is held.
+  trap 'node::interrupted_slot_note' INT TERM
   # argv, never a shell: the line was checked above and is passed word by word.
   if ! "${join_argv[@]}"; then
+    trap - INT TERM
     error "kubehz: kubeadm join failed — read its output above."
     echo "  The node keeps its slot until you remove it:" >&2
     echo "    lo kubehz node remove --name ${node_name}" >&2
     echo "  Run 'kubeadm reset' on this machine before you join it again." >&2
     return 1
   fi
+  trap - INT TERM
   echo ""
   echo "kubehz: node '${node_name}' joined cluster ${NODE_CLUSTER_ID}."
   echo "  It reports Ready within a few minutes. Watch it with:"
@@ -394,6 +494,7 @@ node::remove() {
     'domain|:^~domain'  'Domain to use'
     "${args[@]:-}"
   )
+  node::reject_global_cluster_flag "${@}" || return 1
   :args "Remove a node from a kubehz-hosted cluster" "${@}"
 
   node::assert_node_name "${name}" || return 1
@@ -411,8 +512,11 @@ node::remove() {
     return 1
   fi
 
+  # Guard the read: a 2xx body is not a promise of JSON, and under errexit a
+  # bare `$(jq …)` on a non-JSON body would kill `lo` after the delete landed.
+  # The pool name is cosmetic; its absence just drops the parenthetical.
   local removed_pool
-  removed_pool=$(jq -r '(.data? // .) | .pool // empty' <<<"${KUBEHZ_SPACE_API_BODY}")
+  removed_pool=$(jq -r '(.data? // .) | .pool // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || removed_pool=""
   echo "kubehz: node '${name}' is draining${removed_pool:+ (pool ${removed_pool})}."
   echo "  The platform cordons the node, then deletes it from the cluster."
   echo "  Its slot is free now, so another machine can take it."
@@ -432,6 +536,7 @@ node::status() {
     'domain|:^~domain'  'Domain to use'
     "${args[@]:-}"
   )
+  node::reject_global_cluster_flag "${@}" || return 1
   :args "List the nodes you brought to a kubehz-hosted cluster" "${@}"
 
   node::preflight "${domain}" "list nodes" || return 1
