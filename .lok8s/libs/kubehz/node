@@ -1,0 +1,477 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz-node — machines you bring, joined to a kubehz-HOSTED control plane
+#
+# A static pool is a worker pool whose machines you own: bare metal, a second
+# cloud, a virtual machine that already runs. kubehz operates the control
+# plane; nothing provisions or rotates these machines. You install a kubelet,
+# run one join command, and the node appears in your own cluster.
+#
+# Three subcommands, all against `hosting: hosted`:
+#   join    mint a ticket and run the kubeadm join flow on THIS machine
+#   remove  take one node out of the cluster and free its slot
+#   status  list the nodes you brought, with the slot count
+#
+# The CLUSTER-level `lo kubehz join` and `lo kubehz deregister` keep their own
+# meaning: they are about a cluster, not a node.
+#
+# The platform composes the whole `kubeadm join` line — the join address and
+# the CA fingerprints are properties of a control plane you do not run, so you
+# cannot compute them. This file mints the ticket, checks the line, and runs
+# it. It never builds a join command of its own.
+#
+# The ticket is bound to ONE node name and to ten minutes. Its plaintext
+# arrives once and is stored nowhere: a lost ticket is minted again, never
+# recovered.
+#
+# LIBRARY-ONLY: loaded through libs/kubehz/main; not directly executable.
+
+import ^utils/verbose
+import ^utils/http
+import ^libs/kubehz/shared
+
+kubehz::node() {
+  local -a usage=(
+    'join|j@destructive'    'Join THIS machine to a hosted cluster (runs kubeadm join)'
+    'remove|r@destructive'  'Remove one node from a hosted cluster and free its slot'
+    'status|s@readonly'     'List the nodes you brought to a hosted cluster'
+  )
+  :usage "Nodes you bring to a kubehz-hosted control plane" "${@}"
+  "${usage[@]}"
+}
+
+# ── Preflight ────────────────────────────────────────────
+
+# Everything the three subcommands need before they touch the api: the active
+# domain's kubehz block, the api URL, the tenant token, and the platform
+# cluster id.
+#
+# `cluster_id` is the caller's own local, read here through dynamic scope the
+# way `domain` is: an explicit --cluster-id wins, and without it the id comes
+# from the tenant registry for the active domain. The flag is NOT called
+# --cluster: `lo` already owns that name globally for the kind cluster to
+# manage, and two flags with one name is a trap, not a shorthand.
+# Usage: node::preflight <domain> <action>
+# Sets: NODE_CLUSTER_ID (and the LOK8S_KUBEHZ_* block through read_config)
+node::preflight() {
+  local domain="${1}" action="${2}"
+  NODE_CLUSTER_ID=""
+
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  # || return: an unread config must not flow into the hosting check as an
+  # empty string — the same guard the cluster-level subcommands carry.
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  # Static pools sit on a control plane the platform runs. A self-hosted
+  # cluster owns its own apiserver, and a Space is a slice of a SHARED plane
+  # whose nodes carry their own verb (`lo kubehz join`).
+  case "${LOK8S_KUBEHZ_HOSTING}" in
+    hosted) ;;
+    shared)
+      error "kubehz: '${domain}' is hosting: shared — its nodes join a Space."
+      echo "  Mint a Space join ticket with:  lo kubehz join <node-name>" >&2
+      return 1 ;;
+    *)
+      error "kubehz: '${domain}' is hosting: ${LOK8S_KUBEHZ_HOSTING} — it runs its own control plane."
+      echo "  Join nodes with kubeadm against your own API server." >&2
+      return 1 ;;
+  esac
+
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
+  # The tenant bearer and a bootstrap token travel on this URL — never over
+  # plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+
+  [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
+    error "KUBEHZ_TOKEN is required to ${action}."
+    echo "  Mint a clusters:write API token in the dashboard (Access -> API Tokens)." >&2
+    return 1
+  }
+
+  # An explicit --cluster-id wins; it is also the only way to reach a cluster
+  # the local specs do not describe. The value is pasted into a URL PATH, so
+  # its shape is checked here — a `../` in it would address a different route.
+  if [[ -n "${cluster_id:-}" ]]; then
+    if [[ ! "${cluster_id}" =~ ^[A-Za-z0-9-]+$ ]]; then
+      error "kubehz: '${cluster_id}' is not a cluster id."
+      echo "  A cluster id looks like cl-xxxxxxxx. Read yours in the dashboard." >&2
+      return 1
+    fi
+    NODE_CLUSTER_ID="${cluster_id}"
+    return 0
+  fi
+
+  local resolve_rc=0
+  NODE_CLUSTER_ID=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
+  case "${resolve_rc}" in
+    0) ;;
+    2)
+      error "kubehz: the registry holds no cluster for ${domain}."
+      echo "  Name the cluster directly with:  --cluster-id cl-xxxxxxxx" >&2
+      return 1 ;;
+    *)
+      error "kubehz: the cluster registry did not answer (${api_url})."
+      echo "  Check KUBEHZ_TOKEN and the network, then try again." >&2
+      return 1 ;;
+  esac
+}
+
+# ── Error vocabulary ─────────────────────────────────────
+
+# Turn the api's refusal codes into an instruction. Every branch says what to
+# do next; the fall-through prints the api's own words, which are almost
+# always the actionable ones.
+# Usage: node::api_error <context>
+node::api_error() {
+  local context="${1}" code msg
+  code=$(jq -r '.data.code // .code // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || code=""
+  msg=$(jq -r '.data.message // .message // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || msg=""
+
+  case "${code}" in
+    STATIC_POOLS_NOT_ENABLED)
+      error "kubehz: your account may not use static pools yet."
+      echo "  Static pools roll out account by account. Ask kubehz support to set" >&2
+      echo "  the staticPoolsEnabled flag, then run this command again." >&2 ;;
+    KUBELET_BELOW_FLOOR)
+      error "kubehz: the kubelet on this machine is too old${msg:+ — ${msg}}"
+      echo "  A node must run a kubelet no more than two minor versions below the" >&2
+      echo "  control plane. Upgrade the kubelet, then run this command again." >&2 ;;
+    QUOTA_EXCEEDED)
+      error "kubehz: this cluster has no free slot for another node${msg:+ — ${msg}}"
+      echo "  Free a slot:  lo kubehz node remove --name <node-name>" >&2
+      echo "  Or ask kubehz support to raise the limit." >&2 ;;
+    CONTROL_PLANE_NOT_READY)
+      error "kubehz: the control plane has not published its join address yet."
+      echo "  The platform publishes the address and the CA fingerprints after the" >&2
+      echo "  cluster declares its first pool with kind: static." >&2
+      echo "  Check with:  lo kubehz node status" >&2 ;;
+    NODE_EXISTS)
+      error "kubehz: this cluster already holds a node with that name${msg:+ — ${msg}}"
+      echo "  Choose another name with --name, or remove the old node first:" >&2
+      echo "    lo kubehz node remove --name <node-name>" >&2 ;;
+    POOL_NOT_STATIC)
+      error "kubehz: kubehz provisions the machines in that pool${msg:+ — ${msg}}"
+      echo "  A machine you bring joins a pool with kind: static. Declare one in the" >&2
+      echo "  dashboard, then join." >&2 ;;
+    WORKER_POOL_NOT_FOUND)
+      error "kubehz: this cluster has no such pool${msg:+ — ${msg}}"
+      echo "  Declare a pool with kind: static in the dashboard, then join." >&2 ;;
+    NOT_HOSTED)
+      error "kubehz: this cluster runs its own control plane${msg:+ — ${msg}}"
+      echo "  Join nodes with kubeadm against your own API server." >&2 ;;
+    TENANT_SUSPENDED)
+      error "kubehz: your account is suspended, so it may not add nodes."
+      echo "  Contact kubehz support." >&2 ;;
+    TOKEN_SCOPE_MISSING)
+      error "kubehz: KUBEHZ_TOKEN does not carry the clusters:write scope."
+      echo "  Mint a token with clusters:write in the dashboard (Access -> API Tokens)." >&2 ;;
+    STEP_UP_REQUIRED|STEP_UP_MFA_REQUIRED)
+      error "kubehz: the platform asks for a fresh, two-factor sign-in."
+      echo "  A browser sign-in cannot happen here. Put a clusters:write API token in" >&2
+      echo "  KUBEHZ_TOKEN instead — minting that token IS the approval." >&2 ;;
+    HOSTED_BACKEND_ERROR)
+      error "kubehz: the hosted control-plane backend did not answer${msg:+ — ${msg}}"
+      echo "  Nothing changed. Try again shortly, or contact kubehz support." >&2 ;;
+    *)
+      kubehz::space_api_error "${context}" ;;
+  esac
+  return 0
+}
+
+# ── Local facts + shape checks ───────────────────────────
+
+# Refuse a node name the platform would refuse anyway, and — for `remove` —
+# a name that is not a name at all: the value is pasted into a URL PATH, so a
+# `../` in it would address a different route.
+# Usage: node::assert_node_name <name>
+node::assert_node_name() {
+  local name="${1}"
+  if [[ ! "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || "${#name}" -gt 63 ]]; then
+    error "kubehz: '${name}' is not a node name the platform accepts."
+    echo "  A node name is a DNS label: lowercase letters, digits and dashes, 63 at most." >&2
+    echo "  Give one with:  --name <node-name>" >&2
+    return 1
+  fi
+}
+
+# The node name kubeadm would choose: the short hostname, lowercased.
+node::default_name() {
+  local name
+  name=$(hostname -s 2>/dev/null) || true
+  [[ -n "${name}" ]] || name="${HOSTNAME:-}"
+  echo "${name%%.*}" | tr '[:upper:]' '[:lower:]'
+}
+
+# The kubelet version on THIS machine, empty when there is no kubelet to ask.
+# Sent with the mint so the platform refuses a machine that is too far behind
+# BEFORE the join touches it. `kubelet --version` prints "Kubernetes v1.33.4".
+node::kubelet_version() {
+  command -v kubelet >/dev/null 2>&1 || return 0
+  local out
+  out=$(kubelet --version 2>/dev/null) || return 0
+  [[ "${out}" =~ (v[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*) ]] || return 0
+  echo "${BASH_REMATCH[1]}"
+}
+
+# The pool to join when --pool is absent: the one pool every node on this
+# cluster already sits in. A first node cannot be inferred — the tenant names
+# its pool. Prints the pool name, or nothing.
+# Usage: node::infer_pool <cluster_id>
+node::infer_pool() {
+  local cluster_id="${1}" pools
+  kubehz::space_api GET "/api/clusters/${cluster_id}/nodes" >/dev/null 2>&1 || return 0
+  pools=$(jq -r '(.data? // .) | [.nodes[]?.pool] | unique | .[]' \
+    <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || return 0
+  (( $(grep -c . <<<"${pools}") == 1 )) || return 0
+  echo "${pools}"
+}
+
+# ── Join ─────────────────────────────────────────────────
+
+# Refuse a join line this CLI does not recognise. The line is split into an
+# argv array and never reaches a shell, so a metacharacter has nothing to
+# escape into; the check stands because a command we cannot read is a command
+# we must not run as root.
+# Usage: node::assert_join_command <line>
+node::assert_join_command() {
+  local line="${1}"
+  if [[ "${line}" != "kubeadm join "* ]]; then
+    error "kubehz: the platform returned a command this CLI does not run."
+    echo "  Expected a 'kubeadm join' line. Nothing ran on this machine." >&2
+    echo "  Print the command instead and read it:  --print-only" >&2
+    return 1
+  fi
+  # Word characters, dots, colons, slashes, equals, plus and dash — the whole
+  # alphabet of an address, a bootstrap token, a sha256 pin and a DNS label.
+  if [[ ! "${line}" =~ ^[A-Za-z0-9._:/=+-]+([[:blank:]][A-Za-z0-9._:/=+-]+)*$ ]]; then
+    error "kubehz: the join command carries characters this CLI does not run."
+    echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
+    return 1
+  fi
+}
+
+# Whether this process may write /etc/kubernetes. Its own function so the unit
+# suite can walk the join path without running as root.
+node::is_root() {
+  [[ "${EUID}" -eq 0 ]]
+}
+
+# Join THIS machine to a hosted cluster.
+node::join() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local cluster_id="" pool="" name="" node_ip="" kubelet_version="" print_only=0
+  local -a args=(
+    'cluster-id|c'      'Cluster id (cl-xxxxxxxx); default: the cluster of the active domain'
+    'pool|p'            'Static pool to join; default: the one pool every node of the cluster is in'
+    'name|n'            'Node name; default: the short hostname of this machine'
+    'node-ip|'          'Address other nodes reach this machine on (needed behind NAT)'
+    'kubelet-version|'  'Kubelet version to declare; default: read from this machine'
+    'print-only|:+'     'Print the join command and run nothing'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Join this machine to a kubehz-hosted cluster" "${@}"
+
+  node::preflight "${domain}" "join a node" || return 1
+
+  local node_name="${name}"
+  [[ -n "${node_name}" ]] || node_name=$(node::default_name)
+  node::assert_node_name "${node_name}" || return 1
+
+  local node_pool="${pool}"
+  [[ -n "${node_pool}" ]] || node_pool=$(node::infer_pool "${NODE_CLUSTER_ID}")
+  if [[ -z "${node_pool}" ]]; then
+    error "kubehz: name the static pool this machine joins."
+    echo "  Add:  --pool <pool-name>" >&2
+    echo "  The CLI infers the pool only when every node of the cluster shares one." >&2
+    return 1
+  fi
+
+  # A machine with no kubeadm cannot complete a join. Say so BEFORE minting a
+  # ticket that would hold a slot for ten minutes for nothing. --print-only is
+  # exempt: printing a command to run elsewhere is the point of that flag.
+  if (( ! print_only )) && ! command -v kubeadm >/dev/null 2>&1; then
+    error "kubehz: kubeadm is not on this machine, so the join cannot run."
+    echo "  Install kubeadm, kubelet and a container runtime first — see the" >&2
+    echo "  Kubernetes install guide for your distribution." >&2
+    echo "  To mint the ticket here and join elsewhere, add:  --print-only" >&2
+    return 1
+  fi
+  if (( ! print_only )) && ! node::is_root; then
+    error "kubehz: kubeadm join writes to /etc/kubernetes, so it must run as root."
+    echo "  Run this command again with sudo, or add --print-only and run the" >&2
+    echo "  printed command as root yourself." >&2
+    return 1
+  fi
+
+  local declared="${kubelet_version}"
+  [[ -n "${declared}" ]] || declared=$(node::kubelet_version)
+
+  local payload
+  payload=$(jq -n \
+    --arg nodeName "${node_name}" \
+    --arg pool "${node_pool}" \
+    --arg kubeletVersion "${declared}" \
+    '{nodeName: $nodeName, pool: $pool}
+      + (if $kubeletVersion != "" then {kubeletVersion: $kubeletVersion} else {} end)')
+
+  local rc=0
+  kubehz::space_api POST "/api/clusters/${NODE_CLUSTER_ID}/nodes/join-token" "${payload}" || rc=$?
+  if (( rc != 0 )); then
+    (( rc == 2 )) && node::api_error "Failed to mint a join ticket for '${node_name}'"
+    return 1
+  fi
+
+  local join_command expires ready
+  join_command=$(jq -r '(.data? // .) | .joinCommand // empty' <<<"${KUBEHZ_SPACE_API_BODY}")
+  expires=$(jq -r '(.data? // .) | .expiresAt // empty' <<<"${KUBEHZ_SPACE_API_BODY}")
+  # `.ready` WITHOUT a `//` alternative: jq's `//` takes the right side when
+  # the left is null OR FALSE, so `.ready // empty` erases the one value this
+  # warning exists to catch. An absent key reads "null" here and warns about
+  # nothing, which is the honest answer for an api that did not say.
+  ready=$(jq -r '(.data? // .) | .ready' <<<"${KUBEHZ_SPACE_API_BODY}")
+  if [[ -z "${join_command}" ]]; then
+    error "kubehz: the platform minted a ticket but returned no join command."
+    echo "  Nothing ran on this machine. Contact kubehz support." >&2
+    return 1
+  fi
+  node::assert_join_command "${join_command}" || return 1
+
+  # `ready: false` means the ticket exists and holds a slot, but the platform
+  # has not handed the cluster the matching request yet — the kubelet would
+  # wait for a credential that is not installed.
+  if [[ "${ready}" == "false" ]]; then
+    warn "kubehz: the platform has not armed this ticket yet — the join may time out."
+    warn "Mint again in a minute if it does."
+  fi
+
+  local -a join_argv
+  read -ra join_argv <<<"${join_command}"
+  [[ -n "${node_ip}" ]] && join_argv+=(--node-ip "${node_ip}")
+
+  if (( print_only )); then
+    echo ""
+    echo "  Node '${node_name}' joins pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}."
+    echo "  Run this as root on that machine before ${expires:-the ticket expires}:"
+    echo ""
+    echo "    ${join_argv[*]}"
+    echo ""
+    echo "  The ticket is single use and lasts ten minutes. It already holds a node"
+    echo "  slot. Mint a fresh one with the same command when it expires."
+    return 0
+  fi
+
+  echo "kubehz: joining '${node_name}' to pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}"
+  # argv, never a shell: the line was checked above and is passed word by word.
+  if ! "${join_argv[@]}"; then
+    error "kubehz: kubeadm join failed — read its output above."
+    echo "  The node keeps its slot until you remove it:" >&2
+    echo "    lo kubehz node remove --name ${node_name}" >&2
+    echo "  Run 'kubeadm reset' on this machine before you join it again." >&2
+    return 1
+  fi
+  echo ""
+  echo "kubehz: node '${node_name}' joined cluster ${NODE_CLUSTER_ID}."
+  echo "  It reports Ready within a few minutes. Watch it with:"
+  echo "    lo kubehz node status"
+}
+
+# ── Remove ───────────────────────────────────────────────
+
+# Take one node out of a hosted cluster.
+node::remove() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local cluster_id="" name=""
+  local -a args=(
+    'name|n:!'          'Node name to remove'
+    'cluster-id|c'      'Cluster id (cl-xxxxxxxx); default: the cluster of the active domain'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Remove a node from a kubehz-hosted cluster" "${@}"
+
+  node::assert_node_name "${name}" || return 1
+  node::preflight "${domain}" "remove a node" || return 1
+
+  local rc=0
+  kubehz::space_api DELETE "/api/clusters/${NODE_CLUSTER_ID}/nodes/${name}" || rc=$?
+  if (( rc != 0 )); then
+    if (( rc == 2 )) && [[ "${KUBEHZ_SPACE_API_STATUS}" == "404" ]]; then
+      error "kubehz: cluster ${NODE_CLUSTER_ID} holds no node named '${name}'."
+      echo "  List the nodes with:  lo kubehz node status" >&2
+      return 1
+    fi
+    (( rc == 2 )) && node::api_error "Failed to remove node '${name}'"
+    return 1
+  fi
+
+  local removed_pool
+  removed_pool=$(jq -r '(.data? // .) | .pool // empty' <<<"${KUBEHZ_SPACE_API_BODY}")
+  echo "kubehz: node '${name}' is draining${removed_pool:+ (pool ${removed_pool})}."
+  echo "  The platform cordons the node, then deletes it from the cluster."
+  echo "  Its slot is free now, so another machine can take it."
+  echo "  Pods on the machine are NOT evicted first — the machine is yours, and"
+  echo "  kubehz takes the membership, never the hardware."
+  echo "  Run 'kubeadm reset' on the machine before you join it anywhere again."
+}
+
+# ── Status ───────────────────────────────────────────────
+
+# List the nodes brought to a hosted cluster.
+node::status() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local cluster_id=""
+  local -a args=(
+    'cluster-id|c'      'Cluster id (cl-xxxxxxxx); default: the cluster of the active domain'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "List the nodes you brought to a kubehz-hosted cluster" "${@}"
+
+  node::preflight "${domain}" "list nodes" || return 1
+
+  local rc=0
+  kubehz::space_api GET "/api/clusters/${NODE_CLUSTER_ID}/nodes" || rc=$?
+  if (( rc != 0 )); then
+    (( rc == 2 )) && node::api_error "Failed to list the nodes of ${NODE_CLUSTER_ID}"
+    return 1
+  fi
+
+  local used max discovery_ready
+  used=$(jq -r '(.data? // .) | .usage.nodes // 0' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || used=0
+  max=$(jq -r '(.data? // .) | .usage.maxStaticNodes // "-"' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || max='-'
+  discovery_ready=$(jq -r '(.data? // .) | .discoveryReady // false' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || discovery_ready="false"
+
+  echo "Cluster: ${NODE_CLUSTER_ID} (${domain})"
+  echo "Nodes:   ${used}/${max}"
+
+  local rows
+  rows=$(jq -r '(.data? // .) | .nodes[]? | [.name, (.pool // "-"), (.status // "-"), (.joinedAt // "-")] | @tsv' \
+    <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || rows=""
+  if [[ -n "${rows}" ]]; then
+    echo ""
+    printf '  %-24s %-16s %-10s %s\n' "NAME" "POOL" "STATUS" "JOINED"
+    local row_name row_pool row_status row_joined
+    while IFS=$'\t' read -r row_name row_pool row_status row_joined; do
+      [[ -n "${row_name}" ]] || continue
+      printf '  %-24s %-16s %-10s %s\n' "${row_name}" "${row_pool}" "${row_status}" "${row_joined}"
+    done <<<"${rows}"
+  else
+    echo ""
+    echo "  No nodes yet. Join this machine with:  lo kubehz node join --pool <pool-name>"
+  fi
+
+  # The one warning this endpoint can carry: without a published join address
+  # and CA fingerprints, every mint is refused.
+  if [[ "${discovery_ready}" != "true" ]]; then
+    echo ""
+    warn "The control plane has not published its join address yet — a join is refused until it does."
+    warn "The platform publishes it after the cluster declares its first pool with kind: static."
+  fi
+}

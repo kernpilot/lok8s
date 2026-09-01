@@ -425,7 +425,17 @@ lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats 
 lo kubehz join                # mint a node join ticket (hosting: shared)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
+lo kubehz node join           # join THIS machine to a hosted cluster (static pool)
+lo kubehz node status         # the nodes you brought, and the slot count
+lo kubehz node remove --name <n>  # remove one node and free its slot
 ```
+
+The `node` group is the node-level surface of a **hosted** control plane: the
+machines you bring yourself (`kind: static` worker pools). `node join` mints a
+ticket and runs the `kubeadm join` line the platform composes, so run it as
+root on the machine you are adding; `--print-only` prints the line instead.
+Cluster-level `join` and `deregister` above keep their own meaning. See the
+[kubehz guide](../guide/kubehz.md#nodes-you-bring-static-pools).
 
 `deploy` renders the agent manifests, substitutes your `apiUrl` and cluster
 domain, and applies them with your current kubeconfig — so point it at the right

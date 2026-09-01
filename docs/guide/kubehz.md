@@ -230,6 +230,106 @@ hosted-specific rules:
   bootstrap with a notice and you re-run once workers have joined. The
   apply is idempotent.
 
+## Nodes you bring (static pools)
+
+On a `hosting: hosted` cluster, kubehz normally provisions the workers for
+you on your own Hetzner account. A **static pool** is the other option: a
+worker pool whose machines are yours — bare metal, a second cloud, a virtual
+machine that already runs. Nothing provisions them and nothing rotates them.
+You install a kubelet, run one join command, and the node appears in your
+cluster next to the pools kubehz manages. One cluster can hold both kinds.
+
+Declare the pool with `kind: static` in the dashboard, then work from the
+machine itself:
+
+```bash
+lo kubehz node join --pool metal      # mint a ticket and join THIS machine
+lo kubehz node status                 # the nodes you brought, and the slot count
+lo kubehz node remove --name box-1    # take a node out and free its slot
+```
+
+::: tip Cluster-level commands are unchanged
+`lo kubehz join` mints a join ticket for a **Space** (`hosting: shared`), and
+`lo kubehz deregister` removes a whole cluster. The `node` group is the
+node-level surface, so a verb never touches more than its name says.
+:::
+
+### `lo kubehz node join`
+
+Run it **as root on the machine you are adding**. It mints a join ticket from
+the platform, then runs the `kubeadm join` line the platform composes. The
+platform composes that line because the join address and the CA fingerprints
+are properties of a control plane you do not run.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--pool` | the one pool this cluster's nodes share | The `kind: static` pool to join. Name it for the first node of a pool, or when the cluster holds more than one. |
+| `--name` | this machine's short hostname, lowercased | The node name. A DNS label: lowercase letters, digits and dashes. |
+| `--cluster-id` | the active domain's cluster | The platform cluster id (`cl-…`). Set it to reach a cluster your local specs do not describe. |
+| `--node-ip` | — | The address other nodes reach this machine on. Add it when the machine's default-route address is not the one the cluster can dial. |
+| `--kubelet-version` | read from this machine | The kubelet version to declare. The platform refuses a version more than two minors behind the control plane. |
+| `--print-only` | off | Mint the ticket, print the command, and run nothing. |
+
+The command refuses before it mints anything when `kubeadm` is absent, or when
+the shell is not root. Use `--print-only` to mint on one machine and join on
+another.
+
+**Requirements on the machine:** a container runtime, plus `kubelet`,
+`kubeadm` and `kubectl` from a supported Kubernetes release. The machine must
+reach the join endpoint on TCP 6443 and the node tunnel on TCP 8088. A machine
+behind NAT or CGNAT needs `--node-ip` with an address the cluster can reach.
+
+**The ticket is a credential.** It is bound to one node name and to ten
+minutes, it works once, and its plaintext exists only in that one response —
+a lost ticket is minted again, never recovered. A second mint for the same
+name revokes the first.
+
+### `lo kubehz node status`
+
+Lists the nodes you brought, with the slot count against the cluster's
+static-node limit:
+
+```
+Cluster: cl-1234abcd (acme.example.org)
+Nodes:   2/20
+
+  NAME                     POOL             STATUS     JOINED
+  box-1                    metal            Ready      2026-08-30T10:00:00Z
+  box-2                    metal            Joining    -
+```
+
+Nodes in kubehz-provisioned pools are not listed here — those appear as pool
+counts on the cluster itself. A warning appears while the control plane has
+published no join address: a mint is refused until it does.
+
+### `lo kubehz node remove`
+
+Removes one node from the cluster and frees its slot at once. The platform
+cordons the node, then deletes it from your cluster.
+
+Removal takes the **membership**, never the hardware. Pods on the machine are
+not evicted first, because the machine is yours and asking for it back is not
+a reason for the platform to move your workloads. Drain the node yourself when
+you want a clean handover. Run `kubeadm reset` on the machine before you join
+it anywhere again.
+
+::: warning A dark node still holds its slot
+A node that stops reporting keeps its slot until it is removed. The platform
+notifies you, and removes an unacknowledged dark node after 30 days. Use
+`lo kubehz node remove` when you already know the machine is gone.
+:::
+
+### When a join is refused
+
+Every refusal names what to do next. The four you are most likely to meet:
+
+| Refusal | What it means |
+|---------|---------------|
+| Static pools not enabled | The feature rolls out account by account. Ask kubehz support to enable it. |
+| The kubelet is too old | A node must run a kubelet no more than two minor versions below the control plane. Upgrade the kubelet. |
+| No free slot | The cluster is at its static-node limit. Remove a node you no longer use, or ask support to raise the limit. |
+| No join address yet | The control plane publishes its join address and CA fingerprints after the cluster declares its first `kind: static` pool. Check `lo kubehz node status`, then try again. |
+
 ## Registration
 
 When `access` is `registered` or `managed`, the cluster registers itself
