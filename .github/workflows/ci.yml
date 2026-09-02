@@ -150,6 +150,7 @@ jobs:
           bash hack/parity-audit.sh
           bash hack/parity-loop.sh
           bash hack/parity-leaves.sh
+          bash hack/parity-ops.sh
 
   operator-tests:
     name: Bats Operator Tests
