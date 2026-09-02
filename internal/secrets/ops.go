@@ -60,6 +60,13 @@ func (c *Context) Init(sshKey string) error {
 		return nil
 	}
 
+	// A non-ed25519 key derives NOTHING (the skip note above); bash still
+	// wrote `age: ''` and exited 0, leaving a .sops.yaml no encrypt can use.
+	if !agePubkeyRe.MatchString(agePubkey) {
+		ui.Errorf(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
+		return ErrPrinted
+	}
+
 	content := `# SOPS encryption config for lok8s secret cache files.
 # Recipients are age public keys derived from SSH keys via ssh-to-age.
 # Add team members with: lo secrets add-key <ssh-pubkey-path|age1…>

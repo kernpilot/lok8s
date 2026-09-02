@@ -129,6 +129,12 @@ jobs:
       - name: Install toolchain (b → argsh, yq; parity needs the bash lo)
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # `argsh builtins install` drops argsh.so into PATH_BIN; without it
+          # the .so landed in the workspace root, .lok8s/lo (PATH_BIN=.bin)
+          # never found it, and the parity run used the pure-bash argsh —
+          # which cannot resolve a middle alias like 'encrypt|enc|e:+', so
+          # `lo secrets set --enc` returned rc 2 on the bash side only.
+          PATH_BIN: ${{ github.workspace }}/.bin
         run: |
           # Same pinned-b install as the Bats job (see its comment for why the
           # binary is pinned rather than resolved via releases/latest).
@@ -144,6 +150,10 @@ jobs:
       - name: Parity (Go lo vs argsh lo)
         # Differential run of every ported command against both
         # implementations — stdout, stderr, and exit codes must match.
+        env:
+          # Same as the install step: the bash side must load the native
+          # builtin from .bin/argsh.so, exactly like a developer shell.
+          PATH_BIN: ${{ github.workspace }}/.bin
         run: |
           make build
           bash hack/parity-test.sh
@@ -158,19 +168,28 @@ jobs:
           bash hack/parity-orchestrate.sh
 
   release-config:
-    name: goreleaser check
+    name: goreleaser snapshot
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # The release config only ran on tag push before, so a schema error
-      # surfaced when it was already blocking a release. Same pinned
-      # goreleaser as .github/workflows/release.yml.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The release pipeline only ran on tag push before, so a broken hook,
+      # a module that no longer cross-compiles, or a missing archive file
+      # surfaced when it was already blocking a release. A snapshot run
+      # exercises the whole .goreleaser.yaml (check + before hooks + all
+      # twelve builds + archives + checksums) without publishing. Same
+      # pinned goreleaser as .github/workflows/release.yml.
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: v2.18.0
-          args: check
+          args: release --snapshot --clean --skip=publish
 
   operator-tests:
     name: Bats Operator Tests

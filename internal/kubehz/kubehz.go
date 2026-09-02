@@ -146,10 +146,16 @@ func (c *Context) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
+	// Bound the HANG, not the transfer: http.Client.Timeout would cap the
+	// whole body, and the same client downloads the etcd snapshot during a
+	// handover (handover.go fetchSnapshot), which can legitimately take
+	// longer than any fixed cap. The default transport's dial timeout plus
+	// a response-header deadline cover a platform API that never answers.
+	// bash curl had no --max-time either; this is a deliberate divergence.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 2 * time.Minute
 	return &http.Client{
-		// A hung platform API must not hang `lo` forever (bash curl had no
-		// --max-time either; this is the one deliberate divergence).
-		Timeout: 2 * time.Minute,
+		Transport: transport,
 		// Requests carry KUBEHZ_TOKEN as a bearer. net/http drops the header
 		// on a cross-host redirect but not on a same-host https→http
 		// downgrade — refuse any redirect that leaves https.

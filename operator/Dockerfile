@@ -2,7 +2,7 @@
 # The hooks under /hooks are shims that exec `lo operator <hook>`; the hook
 # bodies are Go (internal/operator). Built here from the same tree the image
 # copies, stamped with .lok8s/VERSION like `make build`.
-FROM golang:1.25-alpine AS lo-build
+FROM golang:1.25.8-alpine AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

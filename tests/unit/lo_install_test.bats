@@ -92,6 +92,18 @@ teardown() { teardown_tmpdir; }
   [[ "${output}" == *"/releases/download/${TAG}/${ASSET}"* ]]
 }
 
+@test "a plain-http release URL is refused before anything is written" {
+  # The installer pins curl to https (and file:// for this fixture). A
+  # regression to plain http must fail at the download, not silently
+  # fetch an unverified archive over the network.
+  LO_INSTALL_BASE_URL="http://127.0.0.1:9/lok8s" run bash "${INSTALLER}" --version "${TAG}" --dir "${DEST}"
+  [ "${status}" -ne 0 ]
+  # The scheme guard, not a connection error: port 9 refuses connections
+  # too, and "download failed" would pass with the guard deleted.
+  [[ "${output}" == *"must be https://"* ]]
+  [ ! -e "${DEST}/lo" ]
+}
+
 @test "an unknown argument exits non-zero with usage" {
   run bash "${INSTALLER}" --bogus
   [ "${status}" -ne 0 ]

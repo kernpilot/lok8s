@@ -127,6 +127,12 @@ main() {
 
   command -v curl >/dev/null 2>&1 || die "curl is required"
   command -v tar  >/dev/null 2>&1 || die "tar is required"
+  # Refuse a plain-http base up front (curl's --proto pin is the second
+  # line of defence): an unverified archive must never travel unencrypted.
+  case "${LO_INSTALL_BASE_URL}" in
+    https://*|file://*) ;;
+    *) die "LO_INSTALL_BASE_URL must be https:// (got ${LO_INSTALL_BASE_URL})" ;;
+  esac
 
   local os arch
   os="$(detect_os)"; arch="$(detect_arch)"
