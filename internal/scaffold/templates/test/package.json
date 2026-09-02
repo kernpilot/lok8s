@@ -1,0 +1,23 @@
+{
+  "name": "lok8s-integration-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright integration suite for a lok8s project. Domain-parameterized via LOK8S_TEST_DOMAIN / LOK8S_TEST_*_URL (see utils/config.ts). Scaffolded by `lo init test`.",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "test:list": "playwright test --list",
+    "test:headed": "playwright test --headed",
+    "test:dev": "LOK8S_TEST_ENV=dev playwright test",
+    "test:staging": "LOK8S_TEST_ENV=staging playwright test",
+    "test:prod": "LOK8S_TEST_ENV=production playwright test --grep @smoke",
+    "typecheck": "tsc --noEmit",
+    "report": "playwright show-report test-results/html-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.52.0",
+    "@types/node": "22.15.3",
+    "typescript": "5.8.3"
+  }
+}
