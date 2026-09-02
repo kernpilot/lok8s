@@ -46,13 +46,13 @@ Stop the cluster and Tilt.
 lo down
 ```
 
-Stops Tilt and deletes the kind cluster. Registries are handled by their sharing
-mode: a **non-shared** setup (the default) is project-local with nothing to
-reuse, so its registry containers are torn down (the named volumes — and thus
-the build cache — are kept); a **shared** setup (opt-in) is left running — the
-pull-through mirrors are reused across clusters and a warm `build`/`cache`
-speeds up the next `lo up` (remove them with `lo registry down`, or
-`lo registry clean --shared` to drop volumes too).
+Stops Tilt and deletes the kind cluster. The sharing mode decides what happens
+to the registries. A **non-shared** setup (the default) is project-local with
+nothing to reuse, so `lo down` tears down its registry containers (the named
+volumes, and thus the build cache, stay). A **shared** setup (opt-in) stays
+running: the pull-through mirrors get reused across clusters, and a warm
+`build`/`cache` speeds up the next `lo up` (remove them with `lo registry down`,
+or `lo registry clean --shared` to drop volumes too).
 
 ### lo clean
 
@@ -103,7 +103,7 @@ Render the domain kustomization into one artifact.
 lo build [--domain <domain>] [--cluster-override <domain>]
 ```
 
-Runs `kustomize build --enable-alpha-plugins` on the domain's own kustomization (`clusters/<domain>/kustomization.yaml`) and writes ONE `clusters/<domain>/artifacts.yaml`. The domain kustomization composes the targets it wants, in order — local and shared:
+Runs `kustomize build --enable-alpha-plugins` on the domain's own kustomization (`clusters/<domain>/kustomization.yaml`) and writes ONE `clusters/<domain>/artifacts.yaml`. The domain kustomization composes the targets it wants, in order (local and shared):
 
 ```yaml
 # clusters/<domain>/kustomization.yaml
@@ -112,7 +112,7 @@ resources:
   - ../../.targets/monitoring  # shared target
 ```
 
-A referenced target that does not exist is a clear `kustomize build` error. There is no per-target loop and no `artifacts/<target>/` output — target selection and ordering live in the kustomization you author.
+A referenced target that does not exist is a clear `kustomize build` error. There is no per-target loop and no `artifacts/<target>/` output: target selection and ordering live in the kustomization you author.
 
 ### lo deploy
 
@@ -124,7 +124,7 @@ lo deploy [--domain <domain>] [--cluster-override <domain>] [-l|--label key=valu
 
 Applies the single `clusters/<domain>/artifacts.yaml`: CRDs first (server-side apply + wait for Established), then the rest (server-side apply + a scoped wait for the manifest's own workloads to become ready). Run `lo build` first.
 
-Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects carrying that label — e.g. `lo deploy -l lok8s.dev/name=zitadel`. It requires you to have labelled the targets you want to address (kustomize `labels:` or `metadata.labels`); without a match it is a graceful no-op. The key may be a bare key or a namespaced one (`lok8s.dev/name`).
+Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects carrying that label, e.g. `lo deploy -l lok8s.dev/name=zitadel`. It requires you to have labelled the targets you want to address (kustomize `labels:` or `metadata.labels`); without a match it is a graceful no-op. The key may be a bare key or a namespaced one (`lok8s.dev/name`).
 
 | Flag | Description |
 |------|-------------|
@@ -147,7 +147,7 @@ Rebuild a cluster **from bare metal** (disaster recovery). Orchestrates
 `resolve → doctor → consent → rebuild → provision → verify`, reusing the provider's
 `provider::rebuild` node reset and a fresh `lo provision` (incl. the bare-metal
 `#wipe-devices` wipe). Requires a **cluster** domain whose provider implements
-`provider::rebuild`. Restores the cluster, not application data — see
+`provider::rebuild`. Restores the cluster, not application data. See
 [Disaster Recovery](../guide/recover.md) and [Backups](../guide/backups.md).
 
 ```bash
@@ -157,12 +157,12 @@ lo recover <domain> --skip-rebuild  # re-provision + verify only
 lo recover <domain> --force         # skip the confirmation prompt
 ```
 
-Name the target: the positional `<domain>` is the documented form and outranks `--domain` and the active domain — a command that reimages a fleet must not inherit whatever `.active` points at mid-incident. Omitting both falls back to `--domain`, then the active domain.
+Name the target: the positional `<domain>` is the documented form and outranks `--domain` and the active domain. A command that reimages a fleet must not inherit whatever `.active` points at mid-incident. Omitting both falls back to `--domain`, then the active domain.
 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Run doctor + the `provider::rebuild` plan under `CLOUD_DRY_RUN` (reimages nothing), then stop before provision. |
-| `--skip-rebuild` | Skip the node rebuild — run `lo provision` + verify only. |
+| `--skip-rebuild` | Skip the node rebuild: run `lo provision` + verify only. |
 | `--force`, `-f` | Global flag: skip the destructive-consent prompt (also honored via `LOK8S_NONINTERACTIVE=1`). |
 
 The destructive-consent prompt is **the** guard and lives in the command;
@@ -223,7 +223,7 @@ Delegates to the driver contract's `driver::status` function. For Lo clusters: c
 
 ### lo gitops
 
-GitOps integration (Flux / Argo). **Deferred.** Both subcommands currently return a deferred-error stub — the integration is being redesigned around the new `services.yaml` targets-map model.
+GitOps integration (Flux / Argo). **Deferred.** Both subcommands currently return a deferred-error stub: the integration is under redesign around the new `services.yaml` targets-map model.
 
 ```bash
 lo gitops flux [--domain <domain>]    # (deferred)
@@ -232,7 +232,7 @@ lo gitops argo [--domain <domain>]    # (deferred)
 
 ### Cluster lifecycle (there is no `lo kind`)
 
-The kind cluster is managed by the lifecycle commands — there is no `lo kind`
+The lifecycle commands manage the kind cluster: there is no `lo kind`
 command. Use `lo up` / `lo down` / `lo clean` (create + teardown), `lo provision`
 / `lo destroy` (provision without starting Tilt), and `lo kubeconfig` (extract
 the kubeconfig). The Docker bridge network is created automatically from
@@ -260,7 +260,7 @@ lo registry status [--shared|-S]
 lo registry clean [--shared|-S]   # --shared also clears the shared mirror network
 ```
 
-Registries are derived entirely from `spec.registries` (the `mirrors[]` plus the framework-private `build` and `cache` registries) — there are no per-registry flags; the only flag is `--shared`/`-S`, which includes the shared `lok8s-registries` network for `status`/`clean`. Registries run on the configured Docker bridge network (default: `lok8s` at `10.125.125.0/24` for slot 125); IPs are computed automatically by the driver from `spec.network.cidr` and `spec.registries.shared.network.cidr`. See [Specs reference](specs#registries-configuration).
+Registries derive entirely from `spec.registries` (the `mirrors[]` plus the framework-private `build` and `cache` registries): there are no per-registry flags; the only flag is `--shared`/`-S`, which includes the shared `lok8s-registries` network for `status`/`clean`. Registries run on the configured Docker bridge network (default: `lok8s` at `10.125.125.0/24` for slot 125); the driver computes IPs automatically from `spec.network.cidr` and `spec.registries.shared.network.cidr`. See [Specs reference](specs#registries-configuration).
 
 The default 6-registry set:
 
@@ -277,12 +277,12 @@ The default 6-registry set:
 and by default the mirrors do too (`.103`+). With
 `spec.registries.shared.enabled: true` (opt-in) the mirrors move to the
 shared `lok8s-registries` network (`10.125.200.2`+) so multiple projects
-reuse one cache — see
+reuse one cache. See
 [Shared registries](/guide/shared-registries) for the trade-off.
 
 ### lo image
 
-Manage the local cache registry — pre-pull private/CI images so kind can fetch them without upstream credentials.
+Manage the local cache registry: pre-pull private/CI images so kind can fetch them without upstream credentials.
 
 ```bash
 lo image cache <service> [--force|-f]   # Pre-pull a single service's image
@@ -291,7 +291,7 @@ lo image list                            # Show what's currently in the cache re
 lo image clean                           # Drop the cache registry volume
 ```
 
-The cache flow runs automatically as part of `lo build` / `lo up` when any service has `build: false` and a resolved `registry.endpoint`. See [Services Configuration → Cache mode](/guide/services#cache-mode-the-lok8scache-registry) for the full pipeline. Parallelism is controlled via `registry.parallel` in `services.yaml` (`0` unlimited, `1` sequential default, `N≥2` bounded).
+The cache flow runs automatically as part of `lo build` / `lo up` when any service has `build: false` and a resolved `registry.endpoint`. See [Services Configuration → Cache mode](/guide/services#cache-mode-the-lok8scache-registry) for the full pipeline. `registry.parallel` in `services.yaml` controls parallelism (`0` unlimited, `1` sequential default, `N≥2` bounded).
 
 ### lo secrets
 
@@ -354,11 +354,11 @@ lo kubeconfig --oidc                 # kubelogin exec-plugin kubeconfig (browser
 lo kubeconfig --cluster-override <domain>   # resolve against another cluster domain
 ```
 
-A deploy domain follows its `spec.clusterRef` to the real cluster. The `--oidc` form reuses the same server + CA as the admin kubeconfig but authenticates the user through `spec.oidc`'s IdP via `kubectl oidc-login` — safe to hand to teammates.
+A deploy domain follows its `spec.clusterRef` to the real cluster. The `--oidc` form reuses the same server + CA as the admin kubeconfig but authenticates the user through `spec.oidc`'s IdP via `kubectl oidc-login`: safe to hand to teammates.
 
 ### lo audit
 
-Static security-posture audit — read-only and cluster-free.
+Static security-posture audit: read-only and cluster-free.
 
 ```bash
 lo audit [domain] [--json | --sarif]
@@ -438,16 +438,16 @@ Cluster-level `join` and `deregister` above keep their own meaning. See the
 [kubehz guide](../guide/kubehz.md#nodes-you-bring-static-pools).
 
 `deploy` renders the agent manifests, substitutes your `apiUrl` and cluster
-domain, and applies them with your current kubeconfig — so point it at the right
+domain, and applies them with your current kubeconfig, so point it at the right
 cluster first (`lo use <domain>`). It applies the agent that
 `spec.kubehz.agent` names and stops the other one, because exactly one agent
 may send heartbeats. The two directions stop it differently: switching to
-`operator` **keeps** the CronJob — it still bootstraps and enrolls the identity
-Secret — and silences it through the `KUBEHZ_HEARTBEAT_OWNER` marker it reads
+`operator` **keeps** the CronJob (it still bootstraps and enrolls the identity
+Secret) and silences it through the `KUBEHZ_HEARTBEAT_OWNER` marker it reads
 before every beat; switching to `cronjob` **deletes** the live agent's
 Deployment, because the Go agent reads no marker and beats whenever it runs.
-Re-run it after you change the value. It waits for the switch to be real — for
-the new agent to be `Ready`, or for the deleted one's pod to be gone — and
+Re-run it after you change the value. It waits for the switch to be real (for
+the new agent to be `Ready`, or for the deleted one's pod to be gone) and
 fails instead of continuing if a step does not complete, or if it cannot see
 whether the step completed. So it never starts the second producer itself: it
 either finishes the switch or stops with the cluster in the single-agent state
@@ -495,8 +495,8 @@ optionally `spec.remote` in the cluster spec.
 
 ### Two modes
 
-**Docker mode** (default): The local machine orchestrates everything —
-kind, registries, bootstrap — but Docker commands target the remote VM
+**Docker mode** (default): The local machine orchestrates everything
+(kind, registries, bootstrap), but Docker commands target the remote VM
 via `DOCKER_HOST=ssh://<ip>`. The API is accessed through an SSH tunnel.
 
 ```bash
@@ -520,13 +520,13 @@ lo up --remote --domain ci.lok8s.dev   # spec.remote.mode: ci
 5. **CI mode**: rsyncs the repo, runs `lo provision` on the VM via SSH,
    optionally starts Tilt, sets up nginx expose + kubeconfig tunnel
 6. In CI mode, `driver::provision` returns exit code 100 to signal that
-   the remote handled everything — `libs/provision` skips local bootstrap
+   the remote handled everything, so `libs/provision` skips local bootstrap
 
 ### Without `--remote`
 
 Without `--remote`, `spec.provider` and `spec.remote` are ignored. The
-same cluster spec works for both local and remote provisioning — the
-mode is driven by the caller, not the file.
+same cluster spec works for both local and remote provisioning: the
+caller drives the mode, not the file.
 
 ## Environment Variables
 
@@ -538,7 +538,7 @@ mode is driven by the caller, not the file.
 | `DOMAIN_NAME` | (empty) | Domain override. Full precedence: `--domain` flag > `DOMAIN_NAME` env > `clusters/.active` > `lok8s.dev`. When the env var and `.active` disagree, `lo` prints a one-line notice naming which won |
 | `DOMAIN_SANS` | `*` | Domain SANs |
 | `KIND_EXPERIMENTAL_DOCKER_NETWORK` | `lok8s` | Docker network name |
-| `PATH_SECRETS` | `.secrets` | Active domain's store — `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
+| `PATH_SECRETS` | `.secrets` | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
 | `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` for MCP support |

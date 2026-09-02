@@ -5,9 +5,8 @@ remote VMs before Docker and kind run on them. The Hetzner provider
 generates cloud-init user-data from a config directory and passes it
 to `hcloud server create --user-data-from-file`.
 
-Cloud-init is used by Lo remote clusters (`lo up --remote`) and by
-production drivers (CAPI, KubeOne) that provision via the Hetzner
-provider. See [CLI reference — Remote clusters](../reference/cli.md#remote-clusters)
+Lo remote clusters (`lo up --remote`) and production drivers (CAPI,
+KubeOne) that provision via the Hetzner provider use cloud-init. See [CLI reference — Remote clusters](../reference/cli.md#remote-clusters)
 and [Specs — Provider and remote mode](../reference/specs.md#provider-and-remote-mode).
 
 ## How it works
@@ -17,22 +16,22 @@ When the Hetzner provider creates a server, it:
 1. Reads `provider.config.cloudInit` from the cluster spec
 2. Sources the cloud-config generator at `.lok8s/providers/hetzner/cloud-config`
 3. Renders the config directory into a `#cloud-config` YAML
-4. Passes it to hcloud — the VM boots with everything pre-installed
+4. Passes it to hcloud: the VM boots with everything pre-installed
 
 The VM is ready when it comes up. No SSH-based post-boot installation.
 
 ### Where it's applied: cloud VM vs bare metal
 
-The **same** generated `#cloud-config` user-data is applied two ways:
+The **same** generated `#cloud-config` user-data applies in two ways:
 
-- **Cloud VMs** — passed to `hcloud server create --user-data-from-file`.
+- **Cloud VMs**: passed to `hcloud server create --user-data-from-file`.
   Hetzner's image ships cloud-init, so it runs natively on first boot.
-- **Bare metal (Robot)** — the installimage base image has **no cloud-init**,
+- **Bare metal (Robot)**: the installimage base image has **no cloud-init**,
   so the provider's `installimage -x` post-install installs cloud-init and
   seeds the same user-data into the [NoCloud datasource](https://cloudinit.readthedocs.io/en/latest/reference/datasources/nocloud.html).
   The node then self-bootstraps on first boot, exactly like a cloud VM.
 
-The design principle: **cloud-init everywhere, bare metal included** — one
+The design principle: **cloud-init everywhere, bare metal included**. One
 config, one mechanism, whether the node is a cloud VM or a dedicated server.
 See [Bare Metal Servers](./bare-metal.md) for the full flow.
 
@@ -51,11 +50,11 @@ at `.lok8s/providers/hetzner/cloud-init/`:
         └── daemon.json.stat  # file permissions
 ```
 
-This is enough for Lo remote clusters — Docker is installed and
+This is enough for Lo remote clusters: Docker gets installed and
 configured for the lok8s registry bridge at boot time.
 
 The same directory also ships reusable **`cloud.d/` modules** (e.g. `ceph-osd`)
-that a cluster can compose from a custom `cloudInit.path` without copying — see
+that a cluster can compose from a custom `cloudInit.path` without copying. See
 [Framework module library](#framework-module-library) below.
 
 ## Custom cloud-init
@@ -121,8 +120,8 @@ runcmd: true                # execute the file on first boot (must be executable
 
 ### `execute: true` vs `execute: remote`
 
-Both treat the file as a **script whose stdout becomes the file content** —
-the difference is *where and when* it runs:
+Both treat the file as a **script whose stdout becomes the file content**.
+The difference is *where and when* it runs:
 
 | Directive | Runs | Sees |
 |-----------|------|------|
@@ -130,7 +129,7 @@ the difference is *where and when* it runs:
 | `execute: remote` | on the **target node**, during cloud-init `runcmd` (after the `CLOUD_ENV_*` exports, before `runcmd: true` scripts) | the node's actual runtime state (interface names, disks, the live `CLOUD_ENV_*`) |
 
 Use `execute: remote` when the content depends on facts only known **on the
-node** — the classic case is a netplan whose VLAN parent interface name can
+node**. The classic case is a netplan whose VLAN parent interface name can
 change between hardware or boots:
 
 ```bash
@@ -151,7 +150,7 @@ network:
 EOF
 ```
 
-**How it works under the hood:** an `execute: remote` file is written to the
+**How it works under the hood:** lok8s writes an `execute: remote` file to the
 node under a `<path>.lok8s-gen` name (so e.g. netplan, which only reads
 `*.yaml`, ignores the staged script at boot). A generated `runcmd` entry then
 runs the script and writes its stdout to the real `<path>`, applying the
@@ -169,7 +168,7 @@ cloudInit:
 ```
 
 The generator walks each module's directory first, then the root
-config. First occurrence of a file wins — modules can override the
+config. First occurrence of a file wins: modules can override the
 default.
 
 ### Framework module library
@@ -178,7 +177,7 @@ The built-in default dir doubles as a **module library**: framework-shipped
 `cloud.d/` modules (`ceph-osd`, …) are reachable from a **custom `cloudInit.path`
 without copying them**. Select a module (via `cloudInit.modules` or a server's
 `#cloud.d`) and the generator resolves it **your cluster first, then the
-framework** — first match wins. The root/base config comes from your dir alone.
+framework**: first match wins. The root/base config comes from your dir alone.
 
 ```text
 #cloud.d: node:ceph-osd            cloudInit.path: ./cloud-init
@@ -195,7 +194,7 @@ framework** — first match wins. The root/base config comes from your dir alone
 ```
 
 So a cluster ships only what it **owns or overrides** (`node`, and its base) and
-borrows the rest (`ceph-osd`) from the framework — which keeps that module
+borrows the rest (`ceph-osd`) from the framework. That keeps the module
 maintained in **one place**, so a fix reaches every cluster on the next
 provision. No per-cluster copy to drift.
 
@@ -203,18 +202,18 @@ provision. No per-cluster copy to drift.
 
 | Content | Rule |
 |---------|------|
-| a module's `write_files` / `.stat` | **first match wins** — your file shadows the library's; library-only files in the same module still apply (per-file overlay) |
-| `packages` / `nameservers` | **union** of all sources (concatenated; `uniq` only drops *adjacent* repeats — a package listed by two sources is harmless) |
-| root config (top-level `packages` / `write_files` / `nameservers`) | **cluster only** — the built-in default's base is never mixed into a custom path |
+| a module's `write_files` / `.stat` | **first match wins**: your file shadows the library's; library-only files in the same module still apply (per-file overlay) |
+| `packages` / `nameservers` | **union** of all sources (concatenated; `uniq` only drops *adjacent* repeats, so a package listed by two sources is harmless) |
+| root config (top-level `packages` / `write_files` / `nameservers`) | **cluster only**: the built-in default's base is never mixed into a custom path |
 
 **Notes**
 
-- Want the default's Docker base on a custom path? By design it's cluster-only —
-  reference it as a module, or copy just the files you need.
+- Want the default's Docker base on a custom path? By design it's cluster-only.
+  Reference it as a module, or copy just the files you need.
 - Selecting the `ceph-osd` module auto-sets `growpart: off` so it can reclaim the
   disk and size root itself.
 - With **no** custom `cloudInit.path`, `CLOUD_PATH` *is* the framework dir, so the
-  fallback is a no-op — you get the built-in default unchanged.
+  fallback is a no-op: you get the built-in default unchanged.
 
 ## Full cloudInit config
 

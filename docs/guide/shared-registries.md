@@ -4,9 +4,9 @@
 
 By default, each lok8s project provisions its own set of Docker registry pull-through mirrors (docker.io, ghcr.io, quay.io, registry.k8s.io) on the project's own network. When multiple projects run on the same machine, this duplicates cached layers across containers, which costs disk space and network bandwidth.
 
-Shared registries remove that duplication. The pull-through mirrors move to a dedicated Docker network (`lok8s-registries`) that kind nodes from any project connect to. Each project keeps its own **build** and **cache** registries for locally-built and credentialed content — only the read-only public mirrors are shared.
+Shared registries remove that duplication. The pull-through mirrors move to a dedicated Docker network (`lok8s-registries`) that kind nodes from any project connect to. Each project keeps its own **build** and **cache** registries for locally-built and credentialed content: only the read-only public mirrors are shared.
 
-Shared mode is **opt-in** (`spec.registries.shared.enabled: true`; the default is `false` since v0.x, 2026-08). The reason for the flip: shared mode attaches a second network interface to every kind node, and a node with two interfaces can register the wrong one as its node IP after a Docker endpoint re-attach. The node then stays `Ready` while every route into it is dead — see [Node-IP drift](#node-ip-drift) below. lok8s heals this automatically on each `lo up`, but a topology that cannot drift is the safer default.
+Shared mode is **opt-in** (`spec.registries.shared.enabled: true`; the default is `false` since v0.x, 2026-08). The reason for the flip: shared mode attaches a second network interface to every kind node, and a node with two interfaces can register the wrong one as its node IP after a Docker endpoint re-attach. The node then stays `Ready` while every route into it is dead. See [Node-IP drift](#node-ip-drift) below. lok8s heals this automatically on each `lo up`, but a topology that cannot drift is the safer default.
 
 ## How it works
 
@@ -39,7 +39,7 @@ Shared mode is **opt-in** (`spec.registries.shared.enabled: true`; the default i
 ```
 
 - **Shared mirrors** run on the `lok8s-registries` network. Container names use the prefix `lok8s-registry-` (for example, `lok8s-registry-io-docker`). IPs are assigned sequentially starting at `.2`.
-- **Build and cache registries** run on each project's own Docker network, on the project's `/24` slot at fixed offsets `.101` and `.102`. These are framework-private — they hold credentialed or locally-built content that should never leak across kind clusters, and they ship implicitly (don't list them in `mirrors`).
+- **Build and cache registries** run on each project's own Docker network, on the project's `/24` slot at fixed offsets `.101` and `.102`. These are framework-private: they hold credentialed or locally-built content that should never leak across kind clusters, and they ship implicitly (don't list them in `mirrors`).
 - Kind nodes are connected to **both** networks via `docker network connect`, so they can reach shared mirrors and the project-specific build/cache registries.
 
 ## Configuration
@@ -82,7 +82,7 @@ spec:
 | `mirrors[].name` | required | Mirror identifier (must not be `build` or `cache`) |
 | `mirrors[].url` | required | Upstream registry URL |
 
-You never specify registry IPs — the framework computes them:
+You never specify registry IPs. The framework computes them:
 
 - `build` → `<project subnet>.101`, `cache` → `<project subnet>.102` (always on the project subnet, even in shared mode)
 - Mirrors in shared mode → `.2`, `.3`, `.4`, ... on the shared network
@@ -103,30 +103,30 @@ spec:
       # ...
 ```
 
-`build` (`.101`) and `cache` (`.102`) are unaffected — they live on the project subnet in both modes.
+`build` (`.101`) and `cache` (`.102`) are unaffected: they live on the project subnet in both modes.
 
 ## Node-IP drift
 
 Why shared mode is opt-in. In shared mode every kind node is attached to two Docker networks: the cluster network and `lok8s-registries`. Docker resolves a dual-homed container's address by an undefined preference, so a node's registry endpoint can win after endpoint churn (a daemon restart, a manual re-attach). On the next container restart, kind's entrypoint derives kubelet's `--node-ip` from the first interface, and the node registers on the registry network.
 
-The failure is silent: the node lease keeps renewing, so the node reports `Ready` — but kubelet rejects every node-status update (`failed to validate nodeIP`), and no traffic reaches the node from the apiserver or from pods on other nodes. Webhooks that run on the drifted node time out cluster-wide.
+The failure is silent: the node lease keeps renewing, so the node reports `Ready`, but kubelet rejects every node-status update (`failed to validate nodeIP`), and no traffic reaches the node from the apiserver or from pods on other nodes. Webhooks that run on the drifted node time out cluster-wide.
 
-Since 2026-08 the shared network reserves its upper half (`10.125.200.128/25`) as the only range Docker hands to dynamic attachers. Mirrors keep static addresses below it, so a node can never squat a mirror's IP. A network created before this reservation is recreated automatically on the next `lo up`. The running project's mirrors are rebuilt at the same addresses in the same run. The pull-through cache lives in named volumes and survives. Detached kind nodes (and another project's mirrors) come back on that project's next `lo up`. Until then those nodes pull from upstream directly. The detach is endpoint churn — the node-IP check above guards against its side effects.
+Since 2026-08 the shared network reserves its upper half (`10.125.200.128/25`) as the only range Docker hands to dynamic attachers. Mirrors keep static addresses below it, so a node can never squat a mirror's IP. A network created before this reservation is recreated automatically on the next `lo up`. The running project's mirrors are rebuilt at the same addresses in the same run. The pull-through cache lives in named volumes and survives. Detached kind nodes (and another project's mirrors) come back on that project's next `lo up`. Until then those nodes pull from upstream directly. The detach is endpoint churn: the node-IP check above guards against its side effects.
 
-`lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment — so a cluster provisioned under the old shared default is healed too. Per-project clusters have one network per node, so they cannot drift.
+`lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment, so a cluster provisioned under the old shared default gets healed too. Per-project clusters have one network per node, so they cannot drift.
 
 ## Migrating from the old shared default
 
 Before 2026-08, `shared.enabled` defaulted to `true`. If your spec omits the key, the next `lo up` provisions per-project mirrors at `.103+` on the project subnet. Two consequences:
 
-1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless — the node-IP check above still guards them.
+1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless: the node-IP check above still guards them.
 2. The old shared mirror containers (`lok8s-registry-io-*`) and their volumes stay behind. Remove them with `lo registry clean --shared` when no other project uses them.
 
 To keep the old behavior, set `spec.registries.shared.enabled: true` explicitly.
 
 ## TLS registries (default)
 
-Registries serve **HTTPS** on port `:443` **by default** (`spec.registries.tls: true`). The cert is minted by the [Secret plugin](/reference/kustomize-plugins#development-certificates-cert) — the same `cert:` generator used for application TLS — signed by your shared dev CA at `CAROOT`, with **no `mkcert` binary** to mint (the CA is created on demand). This avoids the fragile `insecure-registries` daemon edit that plain HTTP otherwise needs (a single CIDR typo there silently breaks every cluster's push).
+Registries serve **HTTPS** on port `:443` **by default** (`spec.registries.tls: true`). The [Secret plugin](/reference/kustomize-plugins#development-certificates-cert) mints the cert (the same `cert:` generator used for application TLS), signed by your shared dev CA at `CAROOT`, with **no `mkcert` binary** to mint (the CA is created on demand). This avoids the fragile `insecure-registries` daemon edit that plain HTTP otherwise needs (a single CIDR typo there silently breaks every cluster's push).
 
 Opt out for plain **HTTP** on `:80` (addressed by raw IP, with the registry IP range listed in `/etc/docker/daemon.json` under `insecure-registries`):
 
@@ -139,24 +139,24 @@ spec:
 What this does (in the default TLS mode):
 
 - **One cert for all registries.** At provision time `lo provision` drives the [Secret plugin](/reference/kustomize-plugins#development-certificates-cert) to mint a single certificate into `.secrets/tls/registries/` whose Subject Alternative Names cover every registry's IP plus the framework hostnames `lok8s.local` and `lok8s.cache`. It is re-minted automatically if the IP/hostname set changes (e.g. you add a mirror or change the subnet).
-- **Registries listen on `:443`.** TLS mode moves the listen port from `:80` to `:443` so that a bare-IP `docker push <ip>/...` — which the Docker client resolves to the HTTPS default port — reaches the registry with no explicit port in the ref.
-- **Containerd in the kind nodes trusts the cert directly.** Each `hosts.toml` is written with `server = "https://<ip>"` and `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` — a copy of the dev root CA (`CAROOT`) placed in the bind-mounted `certs.d` tree. This works **without** `mkcert -install`: containerd verifies against the explicit CA file, so in-cluster pulls trust the registries out of the box. No `skip_verify`.
-- **Host `docker push` needs the CA trusted** (in-cluster pulls don't). Run [`lo trust`](/guide/secrets) once — or pick another option in [Host push trust options](#host-push-trust-options) below. Then `docker push` (and `curl`) trust the registries with **no `insecure-registries` entry**.
+- **Registries listen on `:443`.** TLS mode moves the listen port from `:80` to `:443` so that a bare-IP `docker push <ip>/...` (which the Docker client resolves to the HTTPS default port) reaches the registry with no explicit port in the ref.
+- **Containerd in the kind nodes trusts the cert directly.** Each `hosts.toml` is written with `server = "https://<ip>"` and `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"`: a copy of the dev root CA (`CAROOT`) placed in the bind-mounted `certs.d` tree. This works **without** `mkcert -install`: containerd verifies against the explicit CA file, so in-cluster pulls trust the registries out of the box. No `skip_verify`.
+- **Host `docker push` needs the CA trusted** (in-cluster pulls don't). Run [`lo trust`](/guide/secrets) once, or pick another option in [Host push trust options](#host-push-trust-options) below. Then `docker push` (and `curl`) trust the registries with **no `insecure-registries` entry**.
 
 ### Host push trust options {#host-push-trust-options}
 
-In-cluster pulls work out of the box — containerd trusts the cert via the explicit `certs.d` CA file. Only the **host** `docker push` (Tilt's build loop) must trust the registry cert, because the host Docker daemon validates against its own trust store. `lo provision` mints the cert regardless; you make the host trust it once, by **one** of these:
+In-cluster pulls work out of the box: containerd trusts the cert via the explicit `certs.d` CA file. Only the **host** `docker push` (Tilt's build loop) must trust the registry cert, because the host Docker daemon validates against its own trust store. `lo provision` mints the cert regardless; you make the host trust it once, by **one** of these:
 
-1. **Trust the dev CA — recommended.**
+1. **Trust the dev CA (recommended).**
    ```bash
    b install mkcert     # one-time, if not already managed by b
    lo trust             # wraps `mkcert -install`: installs the dev CA system + browser-wide
    ```
-   The same CA also makes browsers and `curl` trust your application `*.<domain>` TLS, so this is the one step that covers everything. Needs `sudo` once — see [Trusting the dev CA](/guide/secrets#trusting-the-dev-ca-lo-trust).
+   The same CA also makes browsers and `curl` trust your application `*.<domain>` TLS, so this is the one step that covers everything. Needs `sudo` once. See [Trusting the dev CA](/guide/secrets#trusting-the-dev-ca-lo-trust).
 
-2. **Skip verification with `insecure-registries`.** Add the registry IP range to `/etc/docker/daemon.json` under `insecure-registries` and restart Docker. No CA install, but pushes are **unverified** (the fragility TLS is meant to avoid) — least preferred.
+2. **Skip verification with `insecure-registries`.** Add the registry IP range to `/etc/docker/daemon.json` under `insecure-registries` and restart Docker. No CA install, but pushes are **unverified** (the fragility TLS is meant to avoid). Least preferred.
 
-3. **Per-registry CA, or a rootless runtime.** Trust just this registry (no system-wide change) by dropping `$CAROOT/rootCA.pem` at the daemon's per-registry path: rootful Docker reads `/etc/docker/certs.d/<registry>/ca.crt` (still `sudo`); **rootless Docker / Podman** keep that tree under your home — e.g. Podman reads `~/.config/containers/certs.d/<registry>/ca.crt` — so you can add it **without `sudo`**.
+3. **Per-registry CA, or a rootless runtime.** Trust just this registry (no system-wide change) by dropping `$CAROOT/rootCA.pem` at the daemon's per-registry path: rootful Docker reads `/etc/docker/certs.d/<registry>/ca.crt` (still `sudo`); **rootless Docker / Podman** keep that tree under your home (e.g. Podman reads `~/.config/containers/certs.d/<registry>/ca.crt`), so you can add it **without `sudo`**.
 
 > Installing a CA (option 1 or 3) needs your own privileges/consent, so lok8s can't fully automate it. If the CA isn't trusted, the cluster still comes up but host `docker push` fails verification until you pick one of the above; `lo up` nudges you. (If `tls: true` but the Secret plugin isn't built, `lo provision` fails fast.)
 

@@ -13,7 +13,7 @@ lo use lok8s.dev
 lo up
 ```
 
-This provisions a local kind cluster with registry mirrors, then starts Tilt in the background. The Tilt UI is available at the URL it prints — a per-domain port in the `10351`–`10499` range (10350, Tilt's default, is deliberately avoided so parallel lok8s projects don't collide).
+This provisions a local kind cluster with registry mirrors, then starts Tilt in the background. The Tilt UI is available at the URL it prints: a per-domain port in the `10351`–`10499` range (the framework deliberately avoids 10350, Tilt's default, so parallel lok8s projects don't collide).
 
 To also open the Tilt UI automatically:
 
@@ -117,7 +117,7 @@ tilt:
 Not every dev task is a hot-reload. A **seed/bootstrap Job** (provisioning OIDC
 clients, DB roles, …) needs to *re-run* when you edit its script, and a workload
 sometimes needs a *restart* to pick up what an upstream just produced. `tilt.hooks`
-automates both — without leaving your editor and **without touching the deployed
+automates both, without leaving your editor and **without touching the deployed
 manifests**: the Job/Deployment stays a plain prod object; the hook just acts on
 it *by label* in dev.
 
@@ -139,13 +139,13 @@ tilt:
 
 `do:` maps to a hidden `lo hooks` action that filters the **rendered artifacts**
 by the `targets` labels, then `kubectl delete`+apply (`recreate`) / `rollout
-restart` (`restart`). Hooks are **change-only** — they fire on a `deps` edit,
-never at startup — and any `local_resource` keyword (`env`, `trigger_mode`,
+restart` (`restart`). Hooks are **change-only** (they fire on a `deps` edit,
+never at startup), and any `local_resource` keyword (`env`, `trigger_mode`,
 `ignore`, …) passes straight through. Full field reference:
 [schema → tilt.hooks](/reference/schema#tilt-hooks).
 
 > Tag the target with a **distinct label** (e.g. `lok8s.dev/role: seed`) so the
-> selector hits only it — sibling Jobs usually share `lok8s.dev/name`.
+> selector hits only it: sibling Jobs usually share `lok8s.dev/name`.
 
 ## Dockerfile Convention
 
@@ -153,10 +153,10 @@ Each service should have two Dockerfiles:
 
 | File | Purpose | Used by |
 |------|---------|---------|
-| `lok8s.Dockerfile` | Development — hot-reload enabled | Tilt (via `lok8s.yaml`) |
-| `Dockerfile` | Production — optimized build | CI/CD, `lo deploy` |
+| `lok8s.Dockerfile` | Development: hot-reload enabled | Tilt (via `lok8s.yaml`) |
+| `Dockerfile` | Production: optimized build | CI/CD, `lo deploy` |
 
-The dev Dockerfile uses the runtime's native hot-reload mechanism. Tilt syncs files via `live_update`, and the process inside the container detects changes and reloads automatically — no container restarts needed.
+The dev Dockerfile uses the runtime's native hot-reload mechanism. Tilt syncs files via `live_update`, and the process inside the container detects changes and reloads automatically: no container restarts needed.
 
 ### Hot-reload by runtime
 
@@ -197,25 +197,25 @@ fall_back_on:
 When `lo up` runs, the Lo driver performs these steps:
 
 1. **Read config** from `cluster.lok8s.yaml` (applying defaults for
-   `*.lok8s.dev` domains — see [Specs reference](/reference/specs#default-resolution))
-2. **Validate IPs** — all registry IPs and MetalLB pool must be within their subnets
+   `*.lok8s.dev` domains, see [Specs reference](/reference/specs#default-resolution))
+2. **Validate IPs**: all registry IPs and MetalLB pool must be within their subnets
 3. **Create docker network** with the configured CIDR
-4. **Start registry containers** — the framework always ships `build` and `cache` on the project subnet, plus the configured pull-through mirrors on the project subnet (default) or the shared network (opt-in)
-5. **Render kind config** — nodes and containerd patches generated from spec
+4. **Start registry containers**: the framework always ships `build` and `cache` on the project subnet, plus the configured pull-through mirrors on the project subnet (default) or the shared network (opt-in)
+5. **Render kind config**: nodes and containerd patches generated from spec
 6. **Create kind cluster** with rendered config
 7. **Create registry ConfigMap** (`lok8s-registries` in `kube-system`)
-8. **Apply CoreDNS** config and patches — plus any `spec.coredns` from the
+8. **Apply CoreDNS** config and patches, plus any `spec.coredns` from the
    cluster spec (see [Custom in-cluster DNS](#custom-in-cluster-dns))
-9. **Apply bootstrap addons** — framework runs `.lok8s/libs/bootstrap` to apply `spec.bootstrap` addons in order (default: `[cilium]`), waits for health between each
+9. **Apply bootstrap addons**: framework runs `.lok8s/libs/bootstrap` to apply `spec.bootstrap` addons in order (default: `[cilium]`), waits for health between each
 10. **Start Tilt** for live development
 
-> **TLS** is not minted by the driver. The gateway serves a
+> The driver does not mint **TLS**. The gateway serves a
 > [`cert:` Secret](/reference/kustomize-plugins#development-certificates-cert)
-> you declare in your targets — a leaf signed by your shared dev CA at
+> you declare in your targets: a leaf signed by your shared dev CA at
 > `CAROOT`, created on first build. Trust it once per machine with
 > [`lo trust`](/guide/secrets) so browsers and `curl` accept `*.<domain>`.
-> (Registry TLS, when `spec.registries.tls` is set, is minted the same way at
-> provision time — see the [kind contract](/reference/kind-contract).)
+> (When you set `spec.registries.tls`, registry TLS gets minted the same way
+> at provision time. See the [kind contract](/reference/kind-contract).)
 
 ## Registry Mirrors
 
@@ -258,7 +258,7 @@ spec:
 
 Declare custom CoreDNS in the cluster spec; `lo up` renders it into a
 `coredns-custom` ConfigMap that the base Corefile imports from
-`/etc/coredns/custom`. **Declarative and committed** — it survives a recreate,
+`/etc/coredns/custom`. **Declarative and committed**: it survives a recreate,
 unlike a runtime `kubectl patch` of the `coredns` ConfigMap (which `lo up`
 regenerates). A cluster with no `spec.coredns` is unaffected.
 
@@ -278,14 +278,14 @@ spec:
         target: gateway       # = the first loadBalancer.pool IP; or a literal IP
 ```
 
-`target: gateway` resolves to the first `spec.loadBalancer.pool` IP — where the
-Envoy gateway pins via `metallb.universe.tf/loadBalancerIPs` — so there is no IP
+`target: gateway` resolves to the first `spec.loadBalancer.pool` IP (where the
+Envoy gateway pins via `metallb.universe.tf/loadBalancerIPs`), so there is no IP
 to keep in sync by hand. Resolution is self-contained (no dependency on public
 DNS).
 
 ### Raw escape hatches
 
-For anything the structured form doesn't cover, supply raw CoreDNS — inline or
+For anything the structured form doesn't cover, supply raw CoreDNS, inline or
 from files. All inputs compose:
 
 ```yaml
@@ -301,12 +301,12 @@ spec:
 
 | Input | Becomes | Use for |
 |---|---|---|
-| `hosts[]` `{name,target}` | a generated `name:53 { … }` block | the friendly path — driver writes the template |
+| `hosts[]` `{name,target}` | a generated `name:53 { … }` block | the friendly path: driver writes the template |
 | `servers` | a `*.server` file (own server blocks) | raw zones |
 | `overrides` | a `*.override` file (merged into `.:53`) | extra `hosts`/`rewrite`/`forward` |
 | `import` | raw `*.server`/`*.override` from a path | many/large snippets |
 
-Don't define the same zone via both `hosts` and a raw `servers`/`import` block —
+Don't define the same zone via both `hosts` and a raw `servers`/`import` block:
 CoreDNS rejects duplicate zone definitions.
 
 ## Multi-Node Clusters

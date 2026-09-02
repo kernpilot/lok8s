@@ -2,7 +2,7 @@
 
 `lo chat` is a **fully local**, transparent, streaming assistant for your cluster.
 It talks to your project through the same `lo mcp` tool surface the editor agents
-use, runs **read-only by default**, and streams every step — which tool it calls,
+use, runs **read-only by default**, and streams every step: which tool it calls,
 what came back, then the answer. No data leaves your machine unless you explicitly
 switch to a frontier CLI.
 
@@ -18,13 +18,13 @@ The assistant is a small **conductor** model that routes your question through `
 tools (a flat, "dieted" subset of the full CLI), gathers facts, then streams an
 answer. Three properties keep it safe and useful on small local models:
 
-- **Transparent** — every route, every gate decision, and every tool's output is
-  printed as it happens. Nothing is hidden.
-- **Deterministic safety gate** — the *posture* (not the model) decides what may
-  run. In `read-only` (the default) only `[read]` tools execute; write tools are
-  blocked before they reach the cluster. Models can't talk their way past it.
-- **Schema-in-context** — when you ask it to author config (a `cluster.lok8s.yaml`,
-  an addon chart), the relevant lok8s schema is injected so the output follows the
+- **Transparent**: it prints every route, every gate decision, and every tool's
+  output as it happens. Nothing is hidden.
+- **Deterministic safety gate**: the *posture* (not the model) decides what may
+  run. In `read-only` (the default) only `[read]` tools execute; the gate blocks
+  write tools before they reach the cluster. Models can't talk their way past it.
+- **Schema-in-context**: when you ask it to author config (a `cluster.lok8s.yaml`,
+  an addon chart), it injects the relevant lok8s schema so the output follows the
   real patterns.
 
 ## First run: `lo chat --check`
@@ -48,14 +48,14 @@ llamafile engine via `b` (on confirm), or to `ollama pull` your preferred model.
 
 ## Choosing a model
 
-`lo chat` needs one local runtime. Pick whichever you prefer — all are local and
+`lo chat` needs one local runtime. Pick whichever you prefer: all are local and
 private.
 
 ### Ollama (recommended)
 
 The default conductor (`local-e2b` → `gemma4:e2b`) talks to Ollama at
-`http://localhost:11434`. Ollama has its **own model registry** — digest-verified,
-and it handles chat templates for you — so you just pull by name:
+`http://localhost:11434`. Ollama has its **own model registry** (digest-verified,
+and it handles chat templates for you), so you just pull by name:
 
 ```bash
 ollama pull gemma4:e2b          # fast default (~8GB VRAM)
@@ -72,7 +72,7 @@ Prefer one executable and no background daemon? Run any server that exposes an
 **OpenAI-compatible API on `:8080`** and use `lo chat --model local-llamafile`.
 Two good options:
 
-- **`llama-server`** (from [llama.cpp](https://github.com/ggml-org/llama.cpp)) —
+- **`llama-server`** (from [llama.cpp](https://github.com/ggml-org/llama.cpp))
   **auto-pulls a GGUF straight from Hugging Face** and serves it, in one command.
   This is the simplest way to run an HF model like Gemma 4 E4B:
 
@@ -81,7 +81,7 @@ Two good options:
   lo chat --model local-llamafile
   ```
 
-- **[llamafile](https://github.com/Mozilla-Ocho/llamafile)** — a single portable
+- **[llamafile](https://github.com/Mozilla-Ocho/llamafile)**: a single portable
   APE (the llama.cpp engine), offline, auto-detects CUDA/Metal/ROCm. The engine is
   a perfect fit for `b`, the lok8s toolchain manager; you bring your own `.gguf`:
 
@@ -92,12 +92,12 @@ Two good options:
   ```
 
 > **Why these aren't auto-pulled.** `llama-server -hf` does its own HF download, and
-> a pre-packaged `*.llamafile` is a **remote executable** — neither is digest-checked
+> a pre-packaged `*.llamafile` is a **remote executable**: neither is digest-checked
 > the way `ollama pull` is. `lo chat` shows the command; you fetch (and verify) it
 > yourself. Ollama models *are* digest-verified, so `lo chat` will pull those for you.
 
 > **Which `:8080` server?** `local-llamafile` is just an OpenAI-compatible backend
-> pointed at `http://localhost:8080` — `llama-server`, `llamafile`, vLLM, or
+> pointed at `http://localhost:8080`: `llama-server`, `llamafile`, vLLM, or
 > LM Studio all satisfy it.
 
 ## Shortcuts (in the REPL)
@@ -121,7 +121,7 @@ to a file keeps the raw markdown with no escape codes.
 
 | Posture | What runs |
 | --- | --- |
-| `read-only` (default) | only `[read]` tools — status, doctor, lint, kubeconfig, … |
+| `read-only` (default) | only `[read]` tools: status, doctor, lint, kubeconfig, … |
 | `open` | all tools, including writes |
 
 Switch per session with `--posture`, or live with `/posture`. The gate is enforced
@@ -130,7 +130,7 @@ in code, independent of the model.
 ## Frontier handoff (optional)
 
 If you have a frontier CLI installed (`claude`, `gemini`, `codex`), you can hand a
-turn to it with `/model claude`. This **sends data off-machine** — `lo chat` keeps
+turn to it with `/model claude`. This **sends data off-machine**. `lo chat` keeps
 it strictly opt-in and never routes there automatically, even if your configured
 local model is unavailable.
 
@@ -159,5 +159,5 @@ defaults), or the path in `$LO_CHAT_CONFIG`. Backends are conductor brains:
 - `type: "cli"` is a frontier handoff.
 
 > `lo chat` is a single static Go binary managed by `b`. It requires the `lo mcp`
-> bridge, which is an `argsh.so` builtin — if a fresh checkout reports
+> bridge, which is an `argsh.so` builtin. If a fresh checkout reports
 > *"Invalid command: mcp"*, run `argsh builtins install`.

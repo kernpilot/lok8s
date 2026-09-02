@@ -1,6 +1,6 @@
 # Concepts
 
-lok8s is built around a small set of core concepts that remain consistent from local development to production.
+lok8s rests on a small set of core concepts that stay consistent from local development to production.
 
 ## Two Concerns
 
@@ -19,16 +19,16 @@ Everything in lok8s is keyed by FQDN (Fully Qualified Domain Name). There are tw
 
 ### The default `lok8s.dev` domain
 
-Every lok8s install ships with `clusters/lok8s.dev/` — a preconfigured
+Every lok8s install ships with `clusters/lok8s.dev/`, a preconfigured
 cluster domain that runs on a local Docker bridge with valid TLS out of
-the box. **You don't need to bring your own domain to get started**:
+the box. **You do not need your own domain to get started**:
 
 ```bash
 lo use lok8s.dev
 lo up    # kind cluster on bridge 10.125.0.0/16, *.lok8s.dev dev TLS (cert: generator)
 ```
 
-`lok8s.dev` is a real DNS zone owned by the lok8s project — it resolves
+`lok8s.dev` is a real DNS zone owned by the lok8s project. It resolves
 to the local bridge subnet, so `*.lok8s.dev` works across machines
 without `/etc/hosts` edits. The dev TLS is a [`cert:` Secret](/reference/kustomize-plugins#development-certificates-cert)
 signed by your local CA; trust it once per machine with `lo trust`.
@@ -38,13 +38,13 @@ subdomain shards: `*.1.lok8s.dev`, `*.2.lok8s.dev`, ..., `*.100.lok8s.dev`.
 Each shard maps to a distinct bridge subnet so projects don't collide.
 
 You can always **bring your own FQDN** alongside (or instead of)
-`lok8s.dev` — see the FQDN convention below.
+`lok8s.dev`. See the FQDN convention below.
 
 ### Cluster Domains
 
 A cluster domain has a `cluster.lok8s.yaml` spec. **One cluster = one
 FQDN = one folder.** The folder name under `clusters/` MUST match the
-`spec.cluster.domain` field — that's how lok8s identifies the cluster.
+`spec.cluster.domain` field: that is how lok8s identifies the cluster.
 
 The cluster's `spec.cluster.domain` should be the **k8s API endpoint
 hostname**, not the user-facing brand domain. For example:
@@ -55,11 +55,12 @@ hostname**, not the user-facing brand domain. For example:
   but which serves public traffic on `app.example.com`, `api.example.com` →
   folder `cluster.example.in.net/`, `domain: cluster.example.in.net`
 
-The user-facing service hostnames (`app.*`, `api.*`, etc.) are declared
-**explicitly per service** in your Envoy/Ingress routes, not derived
-from `spec.cluster.domain`. This separation lets you have multiple
-clusters serving the same brand domain in different environments
-(local dev vs staging vs production) without folder collisions.
+You declare the user-facing service hostnames (`app.*`, `api.*`, etc.)
+**explicitly per service** in your Envoy/Ingress routes. lok8s does not
+derive them from `spec.cluster.domain`. This separation lets you run
+multiple clusters that serve the same brand domain in different
+environments (local dev vs staging vs production) without folder
+collisions.
 
 This convention falls out naturally:
 
@@ -71,11 +72,11 @@ clusters/
     └── cluster.lok8s.yaml        #   spec.cluster.domain: cluster.example.in.net
 ```
 
-Both clusters can run identical workloads exposing identical service
-hostnames — the cluster identity stays distinct, the served domains
+Both clusters can run identical workloads that expose identical service
+hostnames. The cluster identity stays distinct, and the served domains
 are routing concerns.
 
-The canonical "minimal" Lo cluster spec is just a kind and a domain —
+The canonical "minimal" Lo cluster spec is just a kind and a domain:
 the framework derives network, registries, nodes, loadBalancer,
 runtime, and bootstrap from the domain (slot-derived for `*.lok8s.dev`)
 and from domain-independent defaults. See the
@@ -92,16 +93,16 @@ spec:
     domain: lok8s.dev
 ```
 
-Override any field explicitly when you want to — the defaults only
-fill in what's missing.
+Override any field explicitly when you want to. The defaults only
+fill in what is missing.
 
 ### One cluster per plane — NOT per subdomain or service
 
 A `cluster.lok8s.yaml` is **one physical cluster**, normally **one per
 plane** (local dev, staging, production). It is *not* one-per-subdomain
-and *not* one-per-service. The hostnames a plane serves —
-`app.example.com`, `api.example.com`, `auth.example.com`, even a platform
-UI like `kkp.example.com` — are **routing + `targets/` inside that one
+and *not* one-per-service. The hostnames a plane serves
+(`app.example.com`, `api.example.com`, `auth.example.com`, even a platform
+UI like `kkp.example.com`) are **routing + `targets/` inside that one
 cluster** (Envoy/HTTPRoutes), never their own `cluster.lok8s.yaml`.
 
 ```
@@ -114,28 +115,28 @@ clusters/
 ```
 
 If a plane needs a platform (KKP, a registry, monitoring), add it as a
-**target** in that plane's `spec.bootstrap` (`./targets/kkp`) — not a
+**target** in that plane's `spec.bootstrap` (`./targets/kkp`), not a
 second cluster. The *only* place a separate spec is legitimate is
 provisioning a **managed/tenant** cluster as a product output (a
-`kind: Kkp`/`kind: Capi` spec representing a **customer's** cluster) —
-that is a different concern from your own platform plane, and it is never
+`kind: Kkp`/`kind: Capi` spec that represents a **customer's** cluster).
+That is a different concern from your own platform plane, and it is never
 a per-subdomain folder of your own apex domain.
 
 > Recurring trap: agents/tools "tidying" sometimes invent
-> `clusters/<sub>.<apex>/cluster.lok8s.yaml` per subdomain. They don't
-> belong — consolidate to the one apex-domain cluster and express the rest
+> `clusters/<sub>.<apex>/cluster.lok8s.yaml` per subdomain. They do not
+> belong. Consolidate to the one apex-domain cluster and express the rest
 > as targets/routing. (`lo lint` should flag >1 cluster spec per apex.)
 
 ### Dev mirrors prod
 
-A dev cluster should mirror its production counterpart's spec — **same
-`spec.kubernetes.version`**, same bootstrap/targets — differing **only**
+A dev cluster should mirror its production counterpart's spec: **same
+`spec.kubernetes.version`**, same bootstrap/targets. It differs **only**
 where the infrastructure genuinely must (single control-plane node,
 MetalLB vs a cloud LB, mkcert vs ACME, PROXY-protocol optional). A drifted
 field like a different K8s version is a bug, not a convenience: dev then
-isn't validating what prod runs. (Concretely: a platform that requires
-K8s ≥ 1.32 silently can't run on a dev cluster pinned to 1.31 — so dev
-must be bumped to the prod version, which for a kind cluster means a
+does not validate what prod runs. (Concretely: a platform that requires
+K8s ≥ 1.32 silently cannot run on a dev cluster pinned to 1.31. So you
+must bump dev to the prod version, which for a kind cluster means a
 recreate.)
 
 ### Deployment Domains
@@ -153,13 +154,13 @@ spec:
     domain: example.com
 ```
 
-> **Note:** Deploy CRD workload selection is being reworked — target
+> **Note:** Deploy CRD workload selection is under rework: target
 > selection will land alongside the `services.yaml` targets-map
 > design. For now, a Deploy spec only carries a `clusterRef`.
 
 ### Active Domain
 
-The `lo use` command sets the active domain, stored in `clusters/.active`. Most commands default to the active domain when no domain argument is provided.
+The `lo use` command sets the active domain, stored in `clusters/.active`. Most commands default to the active domain when you pass no domain argument.
 
 ```bash
 lo use lok8s.dev        # set active domain
@@ -169,12 +170,12 @@ lo use                  # show active domain and list all domains
 The full resolution order for every command is `--domain` flag > `DOMAIN_NAME`
 environment variable > `clusters/.active` > `lok8s.dev`. The env var outranks
 `.active` (the same layering as `KUBECONFIG` vs a kubectl context: an exported
-variable is a more explicit act than previously persisted state) — when both
-are set and disagree, `lo` prints a one-line notice naming which one won.
+variable is a more explicit act than previously persisted state). If you set
+both and they disagree, `lo` prints a one-line notice that names which one won.
 
 ## Directory Layout
 
-Framework and user content are separated at the top level: `.lok8s/`
+The top level separates framework and user content: `.lok8s/`
 holds framework code, `clusters/` holds user cluster definitions.
 Override `PATH_CLUSTERS` to point at a different directory (e.g. a
 parallel project tree) without touching the framework.
@@ -226,12 +227,12 @@ clusters/               # user cluster definitions
 lok8s splits the deployment model into two layers, like React's atoms
 and molecules:
 
-- **Addons (atoms)** — reusable third-party artifacts (charts, raw
+- **Addons (atoms)**: reusable third-party artifacts (charts, raw
   manifests, kustomize bases). Framework addons live at
   `.lok8s/addons/<name>/` and work across all drivers/providers.
-  Cilium, MetalLB, cert-manager, storage drivers — the building blocks.
+  Cilium, MetalLB, cert-manager, storage drivers: the building blocks.
   See [Addons](/guide/addons) for the full handbook.
-- **Targets (molecules)** — user-named kustomize directories that
+- **Targets (molecules)**: user-named kustomize directories that
   compose one or more addons plus domain-specific resources. Targets
   can reference any kustomize base: a framework addon, a local service,
   or a remote repo. They're the unit of "what runs on this cluster."
@@ -247,9 +248,9 @@ mechanisms:
 ### Plane A — Cluster Infrastructure (`spec.bootstrap`)
 
 Things the cluster itself needs to be usable: CNI, CSI, CCM, MetalLB,
-cert-manager CRDs. Expressed in the cluster spec as an ordered list of
-addons, applied by the framework (`.lok8s/libs/bootstrap`) during
-provisioning — the **same code path for every driver**, **before**
+cert-manager CRDs. You express them in the cluster spec as an ordered
+list of addons. The framework (`.lok8s/libs/bootstrap`) applies them
+during provisioning: the **same code path for every driver**, **before**
 Tilt starts and **before** any workloads land.
 
 ```yaml
@@ -269,32 +270,32 @@ Entry resolution:
 Entries form a **dependency DAG**, not a strict sequence: an entry
 waits for its `dependsOn:` targets (and its own `wait:` health gates)
 and otherwise applies in parallel with its siblings. List order is only
-the default edge when no `dependsOn:` is given. This is where "deploy
-order" earns its keep — you can't safely apply MetalLB before CNI is
-running — without serializing the independent addons.
+the default edge for entries without a `dependsOn:`. This is where "deploy
+order" earns its keep (you cannot safely apply MetalLB before the CNI
+runs) without serializing the independent addons.
 
-If `spec.bootstrap` is omitted, the framework defaults to `[cilium]`
+If you omit `spec.bootstrap`, the framework defaults to `[cilium]`
 (every cluster needs a CNI). Framework addons support driver- and
-provider-specific values files plus inline overrides — see
+provider-specific values files plus inline overrides. See
 [Addons](/guide/addons) for the full precedence chain.
 
 ### Plane B — Workloads (`targets/`)
 
 Everything else: your applications, platform services, monitoring, etc.
 Lives under `clusters/<domain>/targets/` with one kustomization per
-target. **No framework-level ordering primitive** — kubectl handles
+target. **There is no framework-level ordering primitive**: kubectl handles
 in-manifest ordering, Tilt handles live runtime dependencies at the
 resource level via `resource_deps`, and GitOps engines translate their
 own ordering primitives.
 
 The domain kustomization composes its targets into ONE
-`clusters/<domain>/artifacts.yaml` (`lo build`); deploy everything
+`clusters/<domain>/artifacts.yaml` (`lo build`). Deploy everything
 (`lo deploy`) or a labelled subset (`lo deploy -l lok8s.dev/name=<target>`).
 
 ## Cluster Kinds (Drivers)
 
-The cluster kind determines how a cluster is created. Each kind is
-implemented as a **driver** at `.lok8s/drivers/<kind>/main` following
+The cluster kind determines how lok8s creates a cluster. Each kind is
+a **driver** at `.lok8s/drivers/<kind>/main` that follows
 the [driver contract](/reference/kind-contract).
 
 | Kind | Purpose | Runtime |
@@ -316,7 +317,7 @@ kind: KubeOne   # sources .lok8s/drivers/kubeone/main
 
 Drivers that provision cloud infrastructure delegate to a **provider**
 at `.lok8s/providers/<name>/main`. The provider handles VMs, networks,
-load balancers, firewalls — everything the driver needs to install
+load balancers, firewalls: everything the driver needs to install
 Kubernetes on.
 
 ```yaml
@@ -329,11 +330,12 @@ spec:
 ```
 
 The relationship is **many-to-many** in principle, but today **Hetzner** is
-the implemented provider — CAPI via CAPH, KubeOne natively (AWS is planned, see
-the table below). Lo can optionally use a provider for remote clusters
-(`lo up --remote`) — without `--remote`, Lo runs locally with no provider.
+the implemented provider: CAPI via CAPH, KubeOne natively (see the table
+below for the planned AWS provider). Lo can optionally use a provider for
+remote clusters (`lo up --remote`). Without `--remote`, Lo runs locally
+with no provider.
 
-Every provider produces a **standard output** after provisioning —
+Every provider produces a **standard output** after provisioning:
 a JSON inventory of servers, API endpoint, and network info. Drivers
 read this inventory to build their own config (KubeOne → tfjson,
 CAPI → Machine templates). The standard output is the contract that
@@ -368,7 +370,7 @@ lo deploy [-l key=value]     domain artifact apply
 ```
 
 - `lo up` is the one-shot dev flow: provision + bootstrap + tilt.
-- `lo build` and `lo deploy` are the headless primitives — CI uses them
+- `lo build` and `lo deploy` are the headless primitives: CI uses them
   directly, Tilt wraps them with live-reload.
 - No ordering between targets: if you need it, express it in Tilt
   (`resource_deps=`) or in the resources themselves. Cluster-infra
@@ -376,9 +378,9 @@ lo deploy [-l key=value]     domain artifact apply
 
 ## Service Configuration
 
-For local development with Tilt, services are configured in two layers:
+For local development with Tilt, you configure services in two layers:
 
-- `services.yaml` — committed base config (which services exist, registry config)
-- `services.<config>.yaml` — personal overrides (gitignored, enable/disable services)
+- `services.yaml`: committed base config (which services exist, registry config)
+- `services.<config>.yaml`: personal overrides (gitignored, enable/disable services)
 
 Each service has a `lok8s.yaml` in its directory that defines how to build it (Dockerfile, live_update, ports).

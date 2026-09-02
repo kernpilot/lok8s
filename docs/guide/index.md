@@ -1,23 +1,24 @@
 # Getting Started
 
-lok8s is a Kubernetes deployment framework distributed as a [b](https://github.com/fentas/b) environment. It provides a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
+lok8s is a Kubernetes deployment framework distributed as a [b](https://github.com/fentas/b) environment. It gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
 
 ## Prerequisites
 
-**[Docker](https://docs.docker.com/get-docker/) — that's it.** It is the
-only tool you install yourself.
+**[Docker](https://docs.docker.com/get-docker/) is the only tool you
+install yourself.**
 
-Everything else the framework needs — [kind](https://kind.sigs.k8s.io/),
+Every other tool the framework needs ships **pinned inside the lok8s
+environment**: [kind](https://kind.sigs.k8s.io/),
 [kubectl](https://kubernetes.io/docs/tasks/tools/),
 [kustomize](https://kubectl.docs.kubernetes.io/installation/kustomize/),
 [yq](https://github.com/mikefarah/yq), [Tilt](https://tilt.dev/),
 [mkcert](https://github.com/FiloSottile/mkcert), [Helm](https://helm.sh/),
-and the rest of your profile's toolchain — ships **pinned inside the lok8s
-environment** and lands in your project's `.bin/` with a single command
-(`b install`; see [Installation](#installation) below). Nothing touches
-your system, versions are locked per project, and teammates get the
-identical toolchain from the committed `b.yaml`/`b.lock` — see
-[The Toolchain](/guide/toolchain) for the file's schema.
+and the rest of your profile's toolchain. A single command
+(`b install`; see [Installation](#installation) below) lands them in your
+project's `.bin/`. Nothing touches your system, and each project pins its
+own versions. Teammates get the identical toolchain from the committed
+`b.yaml`/`b.lock`. See [The Toolchain](/guide/toolchain) for the file's
+schema.
 
 ## Installation
 
@@ -25,13 +26,13 @@ lok8s is distributed as a `b` environment with five profiles. Pick the one that 
 
 | Profile | Includes | Use case |
 |---------|----------|----------|
-| `core` | — | Remote deploy only (framework + `lok8s.dev` default domain, no kind/Tilt) |
-| `kustomize` | — | Kustomize plugins only (standalone build artifacts) |
-| `local` | core + kustomize | **Local dev** — kind + Tilt + mkcert on top of core |
+| `core` | (none) | Remote deploy only (framework + `lok8s.dev` default domain, no kind/Tilt) |
+| `kustomize` | (none) | Kustomize plugins only (standalone build artifacts) |
+| `local` | core + kustomize | **Local dev**: kind + Tilt + mkcert on top of core |
 | `capi` | local | Cluster API provisioning (adds `clusterctl`, `hcloud`) |
 | `kubeone` | local | KubeOne provisioning (adds `kubeone`, `hcloud`) |
 
-The quickest path — one command bootstraps a lok8s project in the current directory (installs [`b`](https://github.com/fentas/b), pulls the framework plus your profile's pinned toolchain into `.bin/`, and drops a `lo-up` you can re-run to update):
+The quickest path is one command that bootstraps a lok8s project in the current directory. It installs [`b`](https://github.com/fentas/b), pulls the framework plus your profile's pinned toolchain into `.bin/`, and drops a `lo-up` you can re-run to update:
 
 ```bash
 curl -fsSL https://get.lok8s.io | sh
@@ -44,7 +45,7 @@ curl -fsSL https://get.lok8s.io | sh -s -- -y               # no prompts (CI)
 curl -fsSL https://get.lok8s.io | sh -s -- -p kubeone -y    # a specific profile
 ```
 
-Under the hood that is just `b` — do it by hand if you prefer:
+Under the hood that is just `b`. Do it by hand if you prefer:
 
 ```bash
 # Install b if you haven't already
@@ -57,8 +58,8 @@ b install
 
 Either way this copies the CLI, libraries, driver contracts, kustomize plugins, templates, and (for `local`+) the Tilt extension into your project. Each profile ships only the binaries it actually needs.
 
-Joining a project that already uses lok8s? Then the toolchain is already
-declared — clone and run a single command:
+If you join a project that already uses lok8s, the toolchain declaration
+is already in the repo. Clone and run a single command:
 
 ```bash
 b install   # exact pinned toolchain from the committed b.yaml / b.lock
@@ -66,13 +67,13 @@ b install   # exact pinned toolchain from the committed b.yaml / b.lock
 
 ### The default `lok8s.dev` domain
 
-Every profile includes `clusters/lok8s.dev/` — a preconfigured cluster domain that works **out of the box** on a local Docker bridge with TLS. You don't need to bring your own domain to get started; just `lo use lok8s.dev && lo up`.
+Every profile includes `clusters/lok8s.dev/`, a preconfigured cluster domain that works **out of the box** on a local Docker bridge with TLS. You do not need your own domain to get started: just `lo use lok8s.dev && lo up`.
 
 You can also bring your own FQDN (`example.com`, `infra.example.net`, etc.) as an additional domain, or run multiple projects on `*.[1-100].lok8s.dev` subdomains. See [Concepts](/guide/concepts) for the FQDN convention.
 
 ## Project Structure After Sync
 
-Everything lok8s ships lives under `.lok8s/` — a flat, framework-owned
+Everything lok8s ships lives under `.lok8s/`, a flat framework-owned
 tree synced from upstream. Your cluster definitions live under
 `clusters/`, one folder per FQDN. Your project's own files live at the
 repo root alongside `Tiltfile` and `services.yaml`.
@@ -99,11 +100,11 @@ your-project/
   .envrc                       # direnv: PATH_BASE, PATH_LOK8S, PATH_CLUSTERS, ...
 ```
 
-The `.lok8s/` and `.lok8s/tilt/` directories are framework code
-synced from upstream by `b env-sync`. To override or extend behavior,
-prefer `services.local.yaml` (gitignored) or wrapping the CLI in your
-own script — modifying the synced files directly will be overwritten on
-the next sync.
+The `.lok8s/` and `.lok8s/tilt/` directories are framework code that
+`b env-sync` syncs from upstream. To override or extend behavior,
+prefer `services.local.yaml` (gitignored) or wrap the CLI in your
+own script. If you modify the synced files directly, the next sync
+overwrites your changes.
 
 ## Your First Cluster
 
@@ -119,7 +120,7 @@ lo use lok8s.dev
 lo up
 ```
 
-This provisions a kind cluster — registry mirrors, CoreDNS, TLS certificates, and the `spec.bootstrap` addons (Cilium by default) — then starts Tilt for live service development. Workload targets are built and deployed with `lo build` and `lo deploy`.
+This provisions a kind cluster with registry mirrors, CoreDNS, TLS certificates, and the `spec.bootstrap` addons (Cilium by default). Then it starts Tilt for live service development. You build and deploy workload targets with `lo build` and `lo deploy`.
 
 ### 3. Check status
 
@@ -135,8 +136,8 @@ lo down
 
 ## What's Next
 
-- [Examples](https://github.com/kernpilot/lok8s/tree/main/examples) — runnable, end-to-end-tested projects per driver (`lo`, `capi`, `capi-ha`, …) you can copy as a starting point
-- [Concepts](/guide/concepts) — domains, targets, bootstrap addons, the driver contract
-- [Addons](/guide/addons) — write and reference framework-local addons
-- [Local Dev with Tilt](/guide/local-dev) — configure services for live reload
-- [CLI Reference](/reference/cli) — all `lo` subcommands
+- [Examples](https://github.com/kernpilot/lok8s/tree/main/examples): runnable, end-to-end-tested projects per driver (`lo`, `capi`, `capi-ha`, …) you can copy as a starting point
+- [Concepts](/guide/concepts): domains, targets, bootstrap addons, the driver contract
+- [Addons](/guide/addons): write and reference framework-local addons
+- [Local Dev with Tilt](/guide/local-dev): configure services for live reload
+- [CLI Reference](/reference/cli): all `lo` subcommands

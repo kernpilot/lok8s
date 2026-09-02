@@ -7,28 +7,29 @@ The `Capi` driver renders CAPI/CAPH manifests from your cluster spec, applies
 them to a management cluster, waits for the workload cluster, and then applies
 the CNI + cloud-controller-manager.
 
-> **Hetzner Cloud only.** Manifest generation targets hcloud (CAPH); other
-> providers (AWS, Hetzner bare-metal/robot) are **not** generated — `capi::generate`
-> errors for them. The cheapest, fully-working path is what this guide describes.
+> **Hetzner Cloud only.** Manifest generation targets hcloud (CAPH); the driver
+> does **not** generate other providers (AWS, Hetzner bare-metal/robot):
+> `capi::generate` errors for them. The cheapest, fully-working path is what
+> this guide describes.
 
-The two reference specs in the repo are validated end-to-end and are the
-canonical examples — copy from them:
+The two reference specs in the repo pass end-to-end validation and are the
+canonical examples. Copy from them:
 
-- [`examples/capi`](https://github.com/kernpilot/lok8s/tree/main/examples/capi) — a minimal 1 control-plane + 1 worker cluster.
-- [`examples/capi-ha`](https://github.com/kernpilot/lok8s/tree/main/examples/capi-ha) — HA (3 control-plane) + private network + two worker pools.
+- [`examples/capi`](https://github.com/kernpilot/lok8s/tree/main/examples/capi): a minimal 1 control-plane + 1 worker cluster.
+- [`examples/capi-ha`](https://github.com/kernpilot/lok8s/tree/main/examples/capi-ha): HA (3 control-plane) + private network + two worker pools.
 
 ## How it works
 
 - **Management cluster.** With `managementCluster.local: true` the driver creates
-  a local **kind** cluster as the CAPI management cluster (`clusterctl init` —
+  a local **kind** cluster as the CAPI management cluster (`clusterctl init`:
   CAPI `v1.13.2` + CAPH `v1.1.7`, pinned for reproducibility), so the only billed
   infrastructure is the workload cluster. Alternatively point
   `managementCluster.domain` at a cluster you already provisioned.
 - **Node image.** Nodes boot a **stock `ubuntu-24.04`** image and install
-  containerd + the kubeadm stack via cloud-init (`preKubeadmCommands`) — no
+  containerd + the kubeadm stack via cloud-init (`preKubeadmCommands`): no
   pre-baked image to build.
-- **Networking.** The CNI (cilium) and Hetzner CCM are applied as `spec.bootstrap`
-  addons on the workload cluster after it provisions.
+- **Networking.** The framework applies the CNI (cilium) and Hetzner CCM as
+  `spec.bootstrap` addons on the workload cluster after it provisions.
 
 ## Cluster Spec
 
@@ -98,7 +99,7 @@ Opt in to spread the control plane and workers across physical hosts:
       placementGroups: true   # spread CP + workers (anti-affinity)
 ```
 
-Off by default — a Hetzner `spread` group caps at **10 servers**, so always-on
+Off by default: a Hetzner `spread` group caps at **10 servers**, so always-on
 would make larger clusters fail. When on, all worker pools share one spread group
 and the control plane has its own, so keep the **total** worker count and the
 control-plane count each ≤ 10.
@@ -131,8 +132,8 @@ The `Capi` driver (`.lok8s/drivers/capi/main`) then:
 
 1. Ensures a management cluster (local kind + `clusterctl init`, or an existing one).
 2. Creates the credential `Secret` on the management cluster.
-3. Generates the CAPI/CAPH manifests (`capi::generate`) and applies them — retrying
-   while the CAPH admission webhooks finish starting on a fresh mgmt cluster.
+3. Generates the CAPI/CAPH manifests (`capi::generate`) and applies them, with
+   retries while the CAPH admission webhooks finish starting on a fresh mgmt cluster.
 4. Waits for the workload `Cluster` to reach `Provisioned` (`capi::wait_ready`).
 5. Extracts the workload kubeconfig and waits for its API server.
 6. Creates the workload `hcloud` token secret (`driver::post_provision`), then the
@@ -140,11 +141,11 @@ The `Capi` driver (`.lok8s/drivers/capi/main`) then:
 
 `lo down` deletes the workload `Cluster` and **blocks until CAPH has deprovisioned
 the servers + load balancer** before removing the local kind management cluster, so
-nothing is left billed.
+nothing stays billed.
 
 ## Credentials
 
-Provide your Hetzner token via the environment; the driver stores it as a Secret
+Pass your Hetzner token via the environment. The driver stores it as a Secret
 on the management cluster:
 
 ```bash

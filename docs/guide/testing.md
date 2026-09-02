@@ -61,7 +61,7 @@ test('homepage serves', async ({ page, config }) => {
 
 `utils/config.ts` resolves everything from `LOK8S_TEST_DOMAIN`:
 
-1. **Service URLs** are derived from the **`SERVICES`** map (`app` → `app.<domain>`,
+1. **Service URLs** derive from the **`SERVICES`** map (`app` → `app.<domain>`,
    `''` → the apex). Edit that map for your stack; override any single URL with
    `LOK8S_TEST_<ROLE>_URL`.
 2. **The environment** (`dev` / `staging` / `production`) is detected from the
@@ -108,7 +108,7 @@ Flags (`config/<env>.ts`, overridable by env):
 
 `setup/auth.setup.ts` logs in **once** and saves the session as a `storageState`
 file; the authed projects reuse it so each authed spec starts already logged in.
-It's gated on `caps.canAuth` — when login isn't usable it writes an empty state
+It's gated on `caps.canAuth`: when login isn't usable it writes an empty state
 and the authed specs skip cleanly.
 
 ## Local-cluster networking
