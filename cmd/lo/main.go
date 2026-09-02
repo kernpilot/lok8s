@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -33,6 +34,11 @@ func main() {
 
 	root := cli.NewRoot(paths)
 	if err := root.Execute(); err != nil {
+		// cli.ErrHandled means the command already printed its own message in
+		// the bash implementation's format; everything else prints here.
+		if !errors.Is(err, cli.ErrHandled) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }

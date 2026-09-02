@@ -124,6 +124,28 @@ jobs:
         with:
           version: latest
 
+      - name: Install toolchain (b → argsh, yq; parity needs the bash lo)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Same pinned-b install as the Bats job (see its comment for why the
+          # binary is pinned rather than resolved via releases/latest).
+          B_VERSION=4.18.6
+          curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
+          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+          ./.bin/argsh builtins install
+
+      - name: Parity (Go lo vs argsh lo)
+        # Differential run of every ported command against both
+        # implementations — stdout, stderr, and exit codes must match.
+        run: |
+          make build
+          bash hack/parity-test.sh
+
   operator-tests:
     name: Bats Operator Tests
     runs-on: ubuntu-latest

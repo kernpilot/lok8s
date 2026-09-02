@@ -2,12 +2,25 @@
 package cli
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
 )
+
+// ErrHandled marks an error whose message was already printed in the bash
+// implementation's own format ([error] … on stderr). The caller exits
+// non-zero without printing anything further.
+var ErrHandled = errors.New("handled")
+
+// portedCommands maps command names to their Go implementations. Anything
+// absent here still shims to the argsh implementation.
+var portedCommands = map[string]func(*config.Paths, commandSpec) *cobra.Command{
+	"use":     newUseCommand,
+	"version": newVersionCommand,
+}
 
 // NewRoot builds the full lo command tree. Commands without a Go
 // implementation yet are registered as passthroughs to the argsh
@@ -18,7 +31,7 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 		Short:         "lok8s - local dev orchestration",
 		Version:       version,
 		SilenceUsage:  true,
-		SilenceErrors: false,
+		SilenceErrors: true,
 	}
 
 	// Global flags, verbatim from the argsh entrypoint. Shim commands disable
@@ -43,6 +56,10 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 	)
 
 	for _, spec := range commandTree {
+		if build, ok := portedCommands[spec.use]; ok {
+			root.AddCommand(build(paths, spec))
+			continue
+		}
 		root.AddCommand(newShimCommand(paths, spec))
 	}
 	return root
