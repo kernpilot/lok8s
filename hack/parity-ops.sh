@@ -177,7 +177,7 @@ check() {
 
   # The recover phase timer prints wall-clock seconds; a run that straddles a
   # second boundary differs by one — normalize before diffing.
-  sed -i -E 's/took [0-9]+m [0-9]+s/took Nm Ns/' "${WORK}"/go.out "${WORK}"/go.err "${WORK}"/bash.out "${WORK}"/bash.err
+  sed -i -E 's/took [0-9]+m [0-9]+s/took Nm Ns/; s/DONE in [0-9]+m [0-9]+s/DONE in Nm Ns/; s/=[0-9]+m[0-9]+s/=NmNs/g' "${WORK}"/go.out "${WORK}"/go.err "${WORK}"/bash.out "${WORK}"/bash.err
   local ok=1
   if (( go_rc != bash_rc )); then
     # The one documented rc divergence: argsh exits 2 on its own parse
