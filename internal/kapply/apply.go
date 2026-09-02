@@ -198,7 +198,9 @@ func (a *Applier) applyPass(ctx context.Context, label, manifest string, kubectl
 	out, rc := a.kubectl(ctx, manifest, args...)
 
 	if !ttyUI() {
-		fmt.Fprintf(a.Stdout, "%s\n", out)
+		// bash: out=$(kubectl … 2>&1); printf '%s\n' "${out}" — the command
+		// substitution strips trailing newlines, so exactly ONE follows.
+		fmt.Fprintf(a.Stdout, "%s\n", strings.TrimRight(out, "\n"))
 		return out, rc
 	}
 	// tty: render the FINAL collapsed state (documented simplification — no
