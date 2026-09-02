@@ -24,6 +24,14 @@ func Debug(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, green+"[debug]"+reset+" "+format+"\n", a...)
 }
 
+// Debugf writes a [debug] line to w when DEBUG is set.
+func Debugf(w io.Writer, format string, a ...any) {
+	if os.Getenv("DEBUG") == "" {
+		return
+	}
+	fmt.Fprintf(w, green+"[debug]"+reset+" "+format+"\n", a...)
+}
+
 // Error writes an [error] line to stderr (bash: error()).
 func Error(format string, a ...any) {
 	Errorf(os.Stderr, format, a...)
