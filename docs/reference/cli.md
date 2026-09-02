@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `lo` CLI is an [argsh](https://github.com/arg-sh/argsh) script located at `.lok8s/lo`.
+The `lo` CLI is a single static Go binary. Every command below runs natively in it; the [argsh](https://github.com/arg-sh/argsh) implementation it was ported from stays in every project at `.lok8s/lo` as a frozen reference and runs the same command line when you set `LO_IMPL=bash` (see [The Go `lo` binary](go-migration.md) for what still calls into that tree, and the catalogue of the few places the two deliberately differ — for example, argument-parse errors exit `1` in the binary where argsh exits `2`, with the same message).
 
 `lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
@@ -318,31 +318,31 @@ and `ssh-to-age` (`b install`).
 
 ### lo mcp
 
-Start an MCP (Model Context Protocol) tool server over stdio.
+Serve the `lo` commands as MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) tools.
 
 ```bash
-lo mcp
+lo mcp start [--allow-mutating] [--allow-destructive] [--log-level <l>]   # stdio — what editors and agents launch
+lo mcp serve [--host 127.0.0.1] [--port 8080] [...]                        # streamable HTTP (loopback; no auth)
+lo mcp tools [--allow-mutating] [--allow-destructive]                      # print what a server would expose
+lo mcp claude|vscode|cursor enable [--env LO_MCP_ALLOW=…]                  # write the editor's MCP config
 ```
 
-Exposes every user-facing leaf `lo` subcommand as a callable tool via the [MCP protocol](https://modelcontextprotocol.io/). AI clients (Claude Code, VS Code Copilot, Cursor) connect over stdio and can invoke `up`, `down`, `build`, `deploy`, `status`, and all other commands programmatically. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed but not exposed -- only their leaf commands appear as tools. Framework-internal commands (hidden from `--help`) are not exposed either.
+Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_status`, `lo_build`, `lo_secrets_encrypt`, `lo_kubehz_join`, …) — the same scheme the former argsh builtin used. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed, not exposed; framework-internal commands (hidden from `--help`) are never tools, and neither are `mcp` and `operator` themselves.
 
-Commands carry tool annotations that inform the client about behavior:
+**Exposure is structural**: a tool that is not exposed is not registered, so it cannot be called by name either. The tiers follow the usage markers:
 
-| Annotation | MCP hint | Effect |
+| Marker | MCP hint | Exposed |
 |-----------|----------|--------|
-| `@readonly` | `readOnlyHint: true` | Client may auto-run without confirmation |
-| `@destructive` | `destructiveHint: true` | Client shows confirmation dialog |
-| `@idempotent` | `idempotentHint: true` | Client knows retries are safe |
+| `@readonly` | `readOnlyHint: true` | by default |
+| _(none)_ | — | with `--allow-mutating` (a command without a marker counts as mutating — it is not known to be safe) |
+| `@destructive` | `destructiveHint: true` | with `--allow-destructive` (implies `--allow-mutating`) |
+| `@idempotent` | `idempotentHint: true` | informational |
 
-**Requires** the argsh native builtin (`argsh.so`). Install it with:
+Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
-```bash
-argsh builtins install
-```
-
-The `.so` must be discoverable via one of: `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH`, or `LD_LIBRARY_PATH`.
-
-Configure your AI client using the `.mcp.json` included in the project root.
+::: info The shipped `.mcp.json` still launches the argsh builtin
+The `.mcp.json` at the project root points at `.lok8s/lo mcp` — the previous, argsh-native server, which needs `argsh.so` (`argsh builtins install`; discoverable via `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`). It keeps working. To use the binary's server instead, run `lo mcp <editor> enable` or point your client at `lo mcp start`; the switch of the shipped file is a deliberate, separate change.
+:::
 
 ### lo kubeconfig
 
@@ -408,6 +408,8 @@ Driver-specific commands.
 lo drivers --list             # list available drivers
 lo drivers <name> <args…>     # invoke a driver's own subcommands
 ```
+
+`--list` prints the union of the Go driver registry (`lo`, `capi`, `kubeone`, `kkp`, `kubehz`) and the driver directories under `.lok8s/drivers/`. A name that exists only as a bash driver is handed to the argsh implementation with the arguments untouched; `--help` after a nested command (`lo drivers lo status --help`) reaches that command, where argsh printed the `drivers` usage instead.
 
 ### lo kubehz
 
@@ -541,4 +543,7 @@ caller drives the mode, not the file.
 | `PATH_SECRETS` | `.secrets` | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
-| `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` for MCP support |
+| `LO_IMPL` | (empty) | `bash` runs the frozen argsh implementation (`.lok8s/lo`) for this invocation instead of the binary — see [The Go `lo` binary](go-migration.md#lo-impl-bash-the-escape-hatch) |
+| `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |
+| `LOK8S_NONINTERACTIVE` | (empty) | `1` disables prompts (consent gates refuse) and the collapsing progress UI |
+| `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` — needed only by the argsh `mcp` builtin the shipped `.mcp.json` launches |

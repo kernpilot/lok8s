@@ -41,16 +41,19 @@ Inside a lok8s project, `b` can install the same asset from `.bin/b.yaml`
 
 ## What the binary needs
 
-The Go `lo` is the entrypoint. Commands that are not ported yet run through
-the framework tree (`.lok8s/lo`) that every project still carries, so a
-project is bootstrapped the same way as before:
+The Go `lo` runs every command itself. A project still carries the framework
+tree (`.lok8s/`: addons, the Tilt extension, the provider plugins, the CAPI
+templates, and the frozen bash implementation `LO_IMPL=bash` runs) and the
+pinned toolchain the binary execs (kustomize, kind, Tilt, …), so a project
+is bootstrapped the same way as before:
 
 ```sh
 b env add github.com/kernpilot/lok8s#local && b install
 ```
 
 See [docs/reference/go-migration.md](../docs/reference/go-migration.md) for
-what runs natively, the `LO_IMPL=bash` escape hatch, and the parity gates.
+what the binary still execs, the `LO_IMPL=bash` escape hatch, and the parity
+gates.
 
 ## Legacy: the argsh `lo-up` installer
 

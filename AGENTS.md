@@ -18,25 +18,84 @@ Security applies to every change — features, fixes, refactors, tests.
 - **Plain HTTP is a red flag** — prefer HTTPS; call out any non-TLS use.
 - Stop and flag anything suspicious; don't fetch or execute it.
 
+## Two implementations
+
+`lo` is a Go binary (`cmd/lo`, `internal/**`). **Go is canonical**: every
+command runs natively and every change lands there first. The argsh tree
+under `.lok8s/` is the **frozen reference** the binary was ported from —
+bugfix-only, never deleted, still runnable in full via `LO_IMPL=bash lo …`
+(the binary execs `bash .lok8s/lo` with argv untouched). The two are held
+together by ten differential parity harnesses (`hack/parity-*.sh`) and a
+tree-drift `go test`; **they must stay green**. Full map, seams and the
+deviations catalogue: [docs/reference/go-migration.md](docs/reference/go-migration.md).
+
+Three seams still run bash from the frozen tree on purpose: provider plugins
+(`.lok8s/providers/<name>/main`, via `internal/provider/bridge`), `lo drivers
+<name>` for a driver without a Go twin, and `LO_IMPL=bash`. Renderers stay
+subprocesses (`kustomize`, `yq`, `sops`, the exec plugins) until byte-parity
+with the pinned tool is proven for committed domains, not just fixtures.
+
+How to change or port behaviour (mirror the pattern of any `internal/`
+package):
+
+1. **Read the bash first.** `.lok8s/libs/<name>` (or the driver/util) is the
+   spec: exact strings, exit paths, ordering. "Bash wins" on any divergence;
+   a deliberate deviation gets a comment at the spot *and* a row in the
+   catalogue.
+2. **Hermetic tests via `execx.Runner`.** Every external tool call goes
+   through the `Runner` seam; tests install a fake that records the
+   `execx.Cmd` and answers scripted output. The recorded argv is the
+   assertion. Nothing under `go test` reaches docker/kind/tilt/kubectl/network.
+3. **Parity script.** Add the invocation(s) to the matching
+   `hack/parity-*.sh` so CI diffs both implementations (stub binaries in the
+   synthetic `.bin` for cluster-touching verbs; closed stdin for consent gates).
+4. **Mutation-check.** Revert the change, watch the test and the harness go
+   red, then restore. Verify artifacts (files, argv logs), not exit codes.
+5. Touch `.lok8s/**` only when a harness would otherwise go red, in the same
+   change. A file retired from outside `.lok8s/` moves under
+   `.lok8s/legacy/` — **move, never delete**.
+
+Rules that came from incidents:
+
+- **Never run a destructive `lo`/`kind`/`docker`/`tilt` verb in a test or
+  harness against ambient state.** Dev machines carry live kind clusters,
+  Tilt sessions and registry containers. Stub the tool, or follow
+  `hack/e2e-go-roundtrip.sh`'s naming + snapshot discipline.
+- **Unset `PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS`** before
+  any harness or ad-hoc comparison (the preamble every `hack/parity-*.sh`
+  starts with). Inherited, they redirect both implementations' writes into
+  the live project.
+- **Prose goes through a file, not a shell argument.** Backticks in a
+  double-quoted `gh --body` / `git -m` string are command-substituted; use
+  `--body-file` / `-F`.
+- **Move, never delete** (above).
+
 ## Project structure
 
-| Area | Language | Path |
-|------|----------|------|
-| cli | Bash / argsh | `.lok8s/lo`, `.lok8s/libs/` |
-| utils | Bash | `.lok8s/utils/` (ip, http, credentials, targets, template, verbose, types) |
-| drivers | Bash / argsh | `.lok8s/drivers/{lo,capi,kubeone,kkp}/` — each exposes `main::driver` |
-| providers | Bash | `.lok8s/providers/hetzner/` (`main` + `utils/`) |
-| kubehz | Bash / YAML | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
-| tilt | Starlark | `.lok8s/tilt/`, `Tiltfile` |
-| kubernetes | Bash / YAML | `.lok8s/libs/k8s`, `.lok8s/libs/deploy` |
-| infra | YAML / Kustomize | `clusters/`, `.kustomize/` |
-| kustomize-plugins | Go | `kustomize/` (source) → `.kustomize/<group>/<version>/<kind>/<Kind>` (built) |
-| operator | Bash / YAML | `operator/` (shell-operator hooks + CRDs) |
-| e2e | Bash / bats | `tests/e2e/` |
-| docs | TS / Markdown | `docs/`, `ARCHITECTURE.md` |
-| ci | YAML | `.github/workflows/` |
+| Area | Go (canonical) | Frozen bash reference |
+|------|----------------|-----------------------|
+| cli | `cmd/lo`, `internal/cli/` (cobra tree, one `cmd_<name>.go` per command, `shim.go`, `dispatch.go`) | `.lok8s/lo`, `.lok8s/libs/` (argsh) |
+| utils | `internal/{config,domain,execx,ui,kapply,oidc,env,hooks}` | `.lok8s/utils/` (ip, http, credentials, targets, template, verbose, types, kapply, oidc, spec, domain) |
+| drivers | `internal/driver/{lo,capi,kubeone,kkp,kubehz}` (registry in `internal/driver`, linked from `internal/cli/drivers.go`) | `.lok8s/drivers/{lo,capi,kubeone,kkp}/` — each exposes `main::driver` |
+| providers | `internal/provider/bridge` (runs the bash plugins as `bash -c` children) | `.lok8s/providers/hetzner/` (`main` + `utils/`) — **still the live implementation** |
+| provisioning | `internal/provision` (dispatch, gates, spec), `internal/bootstrap` (the addon DAG), `internal/inventory`, `internal/recover` | `.lok8s/libs/{provision,bootstrap,inventory,recover}` |
+| build / deploy | `internal/build`, `internal/deploy`, `internal/image`, `internal/gitops` | `.lok8s/libs/{build,deploy,image,gitops}` |
+| kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
+| secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
+| scaffolding | `internal/scaffold` (+ `templates/`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
+| tilt | `internal/tilt` (`lo tilt`, port slots) | `.lok8s/tilt/Tiltfile` (Starlark — still the live extension), `Tiltfile` |
+| mcp | `internal/cli/cmd_mcp.go` (ophis) | the argsh `mcp` builtin (`.mcp.json` still points here) |
+| operator | `internal/operator` (hook bodies), `operator/hooks/*.sh` (two-line shims), `operator/crds`, `operator/deploy` | `.lok8s/legacy/operator/hooks/` |
+| installer | `install/lo-install.sh`, `.goreleaser.yaml`, `hack/release-tarball.sh` | `.lok8s/legacy/install/` (`lo-up`) |
+| addons | — (kustomize-buildable dirs, shared by both) | `.lok8s/addons/` |
+| infra | `clusters/`, `.kustomize/` (YAML / Kustomize) | |
+| kustomize-plugins | `kustomize/` (own Go module) → `.kustomize/<group>/<version>/<kind>/<Kind>` (built) | |
+| lo chat engine | `ai/lochat/` (own Go module) | |
+| tests | `internal/**/*_test.go`, `hack/parity-*.sh`, `hack/e2e-go-roundtrip.sh` | `tests/unit/`, `tests/operator/`, `tests/e2e/` (bats) |
+| docs | `docs/` (VitePress), `ARCHITECTURE.md`, `TESTING.md` | |
+| ci | `.github/workflows/` | |
 
-### Imports
+### Imports (frozen tree)
 
 Every argsh import carries the `^` prefix — `import ^libs/deploy`,
 `import ^utils/domain`. The prefix resolves against `PATH_SCRIPTS`; a bare path
@@ -48,16 +107,24 @@ pre-importing them. The same holds for the shared utils: a lib that calls
 though `lo` already pulled them in. `tests/unit/import_convention_test.bats`
 fails on a non-prefixed import and on a missing one.
 
-The TypeScript under `.lok8s/libs/init.d/test/` is Playwright scaffolding for a
-user's project, not framework code. Its imports are ESM and stay relative.
+The TypeScript under `internal/scaffold/templates/test/` (and its frozen twin
+`.lok8s/libs/init.d/test/`) is Playwright scaffolding for a user's project,
+not framework code. Its imports are ESM and stay relative.
 
 ## Building & testing
 
 ```bash
-GITHUB_TOKEN=$(gh auth token) ./.bin/b install   # pinned toolchain (argsh, kustomize, yq, …)
-./.bin/argsh test tests/unit/ tests/operator/    # bats suites
-npm run lint                                     # argsh lint (shellcheck + argsh-lint) via hack/lint-shell.sh
+make build                                       # bin/lo (stamps .lok8s/VERSION)
+go test ./... && go vet ./... && make lint       # Go unit + tree-drift gate, vet, golangci-lint
+bash hack/parity-test.sh                         # one parity harness (ten exist; see TESTING.md)
+./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …) — the bash side needs it
+./.bin/argsh test tests/unit/ tests/operator/    # bats suites for the frozen tree
+npm run lint                                     # shellcheck + argsh-lint via hack/lint-shell.sh (covers .lok8s/legacy too)
 ```
 
+The full matrix — including the manual `hack/e2e-go-roundtrip.sh` gate —
+is in [TESTING.md](TESTING.md).
+
 Use conventional commits (`feat:`, `fix:`, `docs:`, `chore:`, …). Keep CI green —
-no new shellcheck warnings (fix them, or add a justified `# shellcheck disable=`).
+no new lint findings (Go: fix them; shell: fix them, or add a justified
+`# shellcheck disable=`).

@@ -21,9 +21,11 @@ behavior. If something here does not match what you see, check
 
 `b` owns two things in a lok8s project:
 
-1. **Binaries**: kubectl, kustomize, sops, tilt, kind, and the rest land
-   in `.bin/`, pinned per project. Nothing touches your system.
-2. **Framework files**: `.lok8s/**`, the Tilt extension, the kustomize
+1. **Binaries**: the `lo` release binary, kubectl, kustomize, sops, tilt,
+   kind, and the rest land in `.bin/`, pinned per project. Nothing touches
+   your system.
+2. **Framework files**: `.lok8s/**` (addons, driver templates, provider
+   plugins, the frozen argsh CLI), the Tilt extension, the kustomize
    plugins, and `.bin/b.yaml` itself sync from the upstream lok8s repo.
 
 The commands you run:
@@ -52,6 +54,42 @@ so teammates and CI get the identical toolchain.
 after installing the `lo` release binary; the `core` profile's `b.yaml`
 declares that binary too (`github.com/kernpilot/lok8s`, asset
 `lo-*.tar.gz`, alias `lo`), so `b install` fetches it into `.bin/`.
+
+## What `b` manages today, and what it will
+
+Since `lo` became a single Go binary, less of the toolchain is needed *by
+the binary* than the profiles still ship. This is the current state — the
+profile membership below is what `.bin/b.yaml` declares today; it shrinks
+in deliberate steps, not as a side effect of a port.
+
+| Binary (group) | Today | Who needs it |
+|---|---|---|
+| `lo` (`core`) | the release binary | everyone — the entrypoint |
+| `kubectl`, `jq`, `yq`, `sops`, `ssh-to-age`, `envsubst` (`core`) | still shipped | `lo` execs `kubectl` for apply/wait, `yq` for `lo build` split mode and the `lo env services` merge, `envsubst` for provider/CAPI templates. `jq`, `sops` (as a CLI) and `ssh-to-age` are used by the frozen argsh tree and the provider plugins; the binary links `sops`/`ssh-to-age` as libraries. |
+| `argsh` (`core`) | still shipped | the frozen `.lok8s/lo` (`LO_IMPL=bash`), the provider plugins (they source the argsh runtime), the argsh `mcp` builtin the shipped `.mcp.json` launches, `argsh test` for the bats suites |
+| `bats` (`core`, `local`) | still shipped | contributors running `tests/` |
+| `kustomize`, `khelm` (`kustomize`) | still shipped | `lo build` — kustomize is the renderer and khelm inflates charts; not going in-process |
+| `kind`, `tilt`, `mkcert` (`local`) | still shipped | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
+| `clusterctl`, `hcloud` (`capi`); `kubeone`, `hcloud` (`kubeone`) | still shipped | the provisioning drivers exec them |
+| `docker` (`oci://docker`) | still shipped | the Lo driver and Tilt |
+
+**For a consumer of the binary** the practical minimum is: `lo`, plus
+`docker`, `kind` and `tilt` for the dev loop, plus `kustomize` + `khelm`
+for `lo build`, plus whatever the driver you use execs. **For a
+contributor** everything above is needed, because the parity harnesses and
+the bats suites really run the argsh side.
+
+**Intended end state** (each step is an owner decision, sequenced
+separately): `argsh`, `jq` and `bats` leave the `core` group once the
+provider plugins have Go twins and the shipped `.mcp.json` targets `lo mcp`;
+`sops` and `ssh-to-age` follow once `lo build` split mode encrypts through
+the library; `yq` stays until the renderer-drift rule in
+[The Go `lo` binary](/reference/go-migration#external-tools-still-exec-d)
+is satisfied. `kustomize`, `khelm`, `kind`, `tilt`, `mkcert`, `kubectl` and
+the driver CLIs stay: they are the tools lok8s orchestrates, not
+implementation details.
+
+## Install directory
 
 `b` picks the install directory from the first of these that is set:
 `PATH_BIN`, then `PATH_BASE`, then `<git-root>/.bin`, then `<cwd>/.bin`.

@@ -26,13 +26,15 @@ binaries:
     onPost: "${B_BIN} builtin ${B_EVENT}"
   # The Go `lo` binary — the single-binary distribution path (release asset
   # lo-<os>-<arch>.tar.gz, built by goreleaser; see .goreleaser.yaml and
-  # install/README.md). MIGRATION STATE: added so `b install` can fetch the Go
-  # lo in consumer projects. Nothing else shrinks yet (owner sequencing): the
-  # framework tree (.lok8s/**) and argsh still ship with every profile because
-  # commands that are not ported pass through to .lok8s/lo, and the parity
-  # gates (hack/parity-*.sh) need both implementations. PINNED to the first
-  # tag that carries lo-* assets; until that tag exists `b install` skips the
-  # entry non-fatally (same pattern kubehz-cluster used for kustomize-secret).
+  # install/README.md). Every lo command runs natively in it. Nothing else
+  # shrinks yet (owner sequencing): the framework tree (.lok8s/**) and argsh
+  # still ship with every profile because the provider plugins and the
+  # frozen reference implementation (LO_IMPL=bash) source the argsh runtime,
+  # the shipped .mcp.json still launches the argsh mcp builtin, and the
+  # parity gates (hack/parity-*.sh) need both implementations. The intended
+  # end state per group is documented in docs/guide/toolchain.md. PINNED to
+  # the first tag that carries lo-* assets; until that tag exists `b install`
+  # skips the entry non-fatally.
   github.com/kernpilot/lok8s:
     alias: lo
     asset: lo-*.tar.gz

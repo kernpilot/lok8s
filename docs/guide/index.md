@@ -63,11 +63,13 @@ tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 
 ### 2. The project environment
 
-`lo` is the entrypoint, but a lok8s project still carries the framework
-tree (`.lok8s/`) and its pinned toolchain in `.bin/`: commands that are not
-ported to Go yet pass through to it (the
-[Go migration reference](/reference/go-migration) lists which). `b` puts
-both there:
+`lo` is the entrypoint, and every command runs inside the binary. A lok8s
+project still carries the framework tree (`.lok8s/`) and its pinned
+toolchain in `.bin/`: the bootstrap addons, the Tilt extension, the provider
+plugins and the tools `lo` orchestrates (kustomize, kind, Tilt, …) live
+there, as does the frozen argsh implementation the binary is diffed against
+(the [Go migration reference](/reference/go-migration) has the map). `b`
+puts both there:
 
 ```bash
 # Install b if you haven't already — download, read, run
@@ -80,7 +82,7 @@ b env add github.com/kernpilot/lok8s#local
 b install
 ```
 
-This copies the CLI tree, libraries, driver contracts, kustomize plugins, templates, and (for `local`+) the Tilt extension into your project, and installs each profile's binaries — the `lo` release binary among them (`core` declares it, so `b install` fetches the same `lo-<os>-<arch>.tar.gz` asset into `.bin/`). Each profile ships only the binaries it actually needs.
+This copies the framework tree (addons, driver templates, provider plugins, the frozen argsh CLI), the kustomize plugins, and (for `local`+) the Tilt extension into your project, and installs each profile's binaries — the `lo` release binary among them (`core` declares it, so `b install` fetches the same `lo-<os>-<arch>.tar.gz` asset into `.bin/`). Each profile ships only the binaries it actually needs; [The Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) lists what that is today and what it will shrink to.
 
 If you join a project that already uses lok8s, the toolchain declaration
 is already in the repo. Clone and run a single command:
@@ -119,13 +121,15 @@ repo root alongside `Tiltfile` and `services.yaml`.
 
 ```
 your-project/
+  .bin/                        # pinned toolchain (b) — incl. the lo binary
   .lok8s/                      # framework (synced via b — don't edit)
-    lo                         # CLI entrypoint (argsh script)
-    libs/                      # shared bash libraries
-    utils/                     # shared helpers
+    VERSION                    # what `lo --version` reports
+    lo                         # frozen argsh CLI (LO_IMPL=bash runs it; the binary is the entrypoint)
+    libs/, utils/              # frozen bash libraries (the reference the binary was ported from)
+    legacy/                    # retired code (the argsh installer, the bash operator hooks)
     addons/                    # bootstrap addons (cilium, metallb, ...)
-    drivers/                   # cluster drivers (lo, capi, kubeone, kkp)
-    providers/                 # infra providers (hetzner, ...)
+    drivers/                   # driver templates (kind config, CAPI templates) + frozen bash drivers
+    providers/                 # infra providers (hetzner, ...) — bash plugins the binary runs
     tilt/                      # Tilt extension
       Tiltfile                 # the lok8s() extension function
   clusters/                    # your cluster definitions
