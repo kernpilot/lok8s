@@ -1,0 +1,18 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+controlPlaneEndpoint: "cl-001.kubermatic.kkp.kubehz.in.net:6443"
+etcd:
+  local:
+    imageTag: "3.5.21-0"
+apiServer:
+  certSANs:
+    - "cl-001.kubermatic.kkp.kubehz.in.net"
+  extraArgs:
+    - name: encryption-provider-config
+      value: /etc/kubernetes/kubehz-encryption-config.yaml
+  extraVolumes:
+    - name: kubehz-encryption-config
+      hostPath: /etc/kubernetes/kubehz-encryption-config.yaml
+      mountPath: /etc/kubernetes/kubehz-encryption-config.yaml
+      readOnly: true
+      pathType: File

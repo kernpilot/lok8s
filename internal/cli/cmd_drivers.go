@@ -102,6 +102,10 @@ var driverUsages = map[string]driverUsage{
 		title: "KKP driver", provision: "Provision a KKP cluster", destroy: "Destroy a KKP cluster",
 		status: "Check cluster status", kubeconfig: "Extract kubeconfig path", kubeconfigReadonly: true,
 	},
+	"kubehz": {
+		title: "kubehz space driver", provision: "Create/adopt the space + mint node join tickets", destroy: "Remove the space from kubehz",
+		status: "Show space + node status", kubeconfig: "Explain how space access works (no kubeconfig download)", kubeconfigReadonly: true,
+	},
 }
 
 func usageFor(name string) driverUsage {
