@@ -153,6 +153,7 @@ jobs:
           bash hack/parity-ops.sh
           bash hack/parity-kubehz.sh
           bash hack/parity-operator.sh
+          bash hack/parity-orchestrate.sh
 
   operator-tests:
     name: Bats Operator Tests
