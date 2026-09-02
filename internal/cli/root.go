@@ -47,6 +47,11 @@ var goOnlyCommands = []goOnlyCommand{
 		why:   "native MCP server (ophis); bash `lo mcp` is an argsh.so builtin dispatched implicitly, not a usage entry",
 		build: newMcpCommand,
 	},
+	{
+		name:  "operator",
+		why:   "shell-operator hook bodies (internal/operator); the operator/hooks/*.sh shims exec `lo operator <hook>` — shell-operator discovers hooks by path, there was never a usage entry",
+		build: newOperatorCommand,
+	},
 }
 
 // NewRoot builds the full lo command tree: the usage-mirrored tree plus the

@@ -1,0 +1,9 @@
+configVersion: v1
+kubernetes:
+  - apiVersion: cluster.x-k8s.io/v1beta1
+    kind: Cluster
+    executeHookOnEvent: ["Modified"]
+    jqFilter: ".status"
+    labelSelector:
+      matchLabels:
+        lok8s.dev/managed: "true"
