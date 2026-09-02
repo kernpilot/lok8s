@@ -1,7 +1,6 @@
 package build
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -38,30 +38,12 @@ func AmbientKubeconfig(p *config.Paths, domain, clusterFlag string) string {
 }
 
 // resolveClusterRef resolves the clusterRef from a deploy.lok8s.yaml to its
-// cluster domain (spec.clusterRef.domain), validating that the referenced
-// cluster domain exists and carries a cluster spec. Error strings verbatim
-// from bash (provision::resolve_clusterref), including the historical
-// `.lok8s/` path spelling.
+// cluster domain. The canonical implementation (verbatim bash error
+// strings, including the historical `.lok8s/` path spelling) now lives with
+// the rest of the dispatch layer as provision.ResolveClusterRef; this
+// delegate keeps build's call sites and tests unchanged.
 func resolveClusterRef(p *config.Paths, domain string, stderr io.Writer) (string, error) {
-	specFile := filepath.Join(p.Clusters, domain, "deploy.lok8s.yaml")
-	if _, err := os.Stat(specFile); err != nil {
-		ui.Errorf(stderr, "No deploy.lok8s.yaml found for %s", domain)
-		return "", fmt.Errorf("no deploy spec for %s", domain)
-	}
-	ref := readSpec(specFile).Spec.ClusterRef.Domain
-	if ref == "" {
-		ui.Errorf(stderr, "deploy.lok8s.yaml for %s missing spec.clusterRef.domain", domain)
-		return "", fmt.Errorf("missing clusterRef for %s", domain)
-	}
-	if info, err := os.Stat(filepath.Join(p.Clusters, ref)); err != nil || !info.IsDir() {
-		ui.Errorf(stderr, "clusterRef domain not found: .lok8s/%s/", ref)
-		return "", fmt.Errorf("clusterRef domain not found: %s", ref)
-	}
-	if _, err := os.Stat(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")); err != nil {
-		ui.Errorf(stderr, "clusterRef domain %s has no cluster.lok8s.yaml", ref)
-		return "", fmt.Errorf("clusterRef domain %s has no cluster spec", ref)
-	}
-	return ref, nil
+	return provision.ResolveClusterRef(p, domain, stderr)
 }
 
 // ResolveKubeconfigForDomain is kubeconfig pass A (bash:
