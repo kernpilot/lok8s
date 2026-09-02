@@ -161,9 +161,12 @@ _stub_curl() {
   export -f curl
 }
 
-# A kubeadm on PATH that records its argv instead of touching the machine.
+# A kubeadm on PATH that records its argv instead of touching the machine —
+# ONE ARGV WORD PER LINE. Under the old `"$*"` logging, three words and one
+# space-joined word wrote the same line, so a word-merge or word-split
+# regression in the argv was invisible to every assertion that read the log.
 _stub_kubeadm() {
-  kubeadm() { printf '%s\n' "$*" >> "${KUBEADM_LOG}"; }
+  kubeadm() { printf '%s\n' "$@" >> "${KUBEADM_LOG}"; }
   export -f kubeadm
 }
 
@@ -446,15 +449,36 @@ _stub_all() {
   run node::join --name box-1 --pool metal
   assert_success
   assert_output --partial "node 'box-1' joined cluster cl-1234abcd"
-  [ "$(cat "${KUBEADM_LOG}")" = "join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1" ]
+  # One argv word per line, compared whole: a word too many, too few, merged
+  # or split writes a different log than this exact one.
+  [ "$(cat "${KUBEADM_LOG}")" = "$(printf '%s\n' \
+    join cp.example.test:6443 \
+    --token a1b2c3.d4e5f6g7h8i9j0k1 \
+    --discovery-token-ca-cert-hash sha256:1111 \
+    --node-name box-1)" ]
 }
 
-@test "join: --node-ip reaches the kubeadm argv" {
+@test "join: --node-ip reaches the kubeadm argv as two words" {
   _stub_all
 
   run node::join --name box-1 --pool metal --node-ip 203.0.113.7
   assert_success
-  grep -q -- "--node-ip 203.0.113.7" "${KUBEADM_LOG}"
+  [ "$(tail -n 2 "${KUBEADM_LOG}")" = "$(printf '%s\n' --node-ip 203.0.113.7)" ]
+}
+
+# The property the per-line mock buys: one argv word that CARRIES a space and
+# two separate words now write DIFFERENT logs. A joinCommand value that
+# smuggled a space into a single argv word would therefore fail the exact
+# whole-log comparisons above instead of matching them.
+@test "kubeadm mock: a spaced value and two separate words are told apart" {
+  _stub_kubeadm
+
+  kubeadm --node-name "box-1 --control-plane"
+  [ "$(cat "${KUBEADM_LOG}")" = "$(printf '%s\n' --node-name 'box-1 --control-plane')" ]
+
+  rm "${KUBEADM_LOG}"
+  kubeadm --node-name box-1 --control-plane
+  [ "$(cat "${KUBEADM_LOG}")" != "$(printf '%s\n' --node-name 'box-1 --control-plane')" ]
 }
 
 @test "join: a failing kubeadm names the slot the node still holds" {
@@ -578,6 +602,34 @@ _refuse_flag() {
   run node::join --name box-1 --pool metal
   assert_failure
   assert_output --partial "join flag this CLI will not run: --discovery-token-unsafe-skip-ca-verification"
+  [ ! -f "${KUBEADM_LOG}" ]
+}
+
+# M1 (round 3): a refusal AFTER the mint — here the disallowed flag — must say
+# the mint succeeded and a node slot is held, exactly as the empty-command and
+# kubeadm-failed branches already do. The gate text alone reads as "nothing
+# happened", and a slot stays held server-side for about ten minutes.
+@test "join gate: a disallowed-flag refusal names the slot the mint holds" {
+  _stub_all
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --control-plane --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "join flag this CLI will not run: --control-plane"
+  assert_output --partial "holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  [ ! -f "${KUBEADM_LOG}" ]
+}
+
+@test "join gate: a missing CA fingerprint also names the held slot" {
+  _stub_all
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "pins no CA fingerprint"
+  assert_output --partial "holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
   [ ! -f "${KUBEADM_LOG}" ]
 }
 
@@ -780,6 +832,60 @@ _refuse_flag() {
   run node::status
   assert_success
   refute_output --partial "has not published its join address"
+}
+
+# ── L1: server strings on the terminal ───────────────────
+#
+# Every server-supplied string that lands on the terminal is scrubbed of
+# control characters first — a compromised api could hide ANSI escapes in a
+# timestamp, a message or a node row and redraw the output (worst under
+# --print-only). jq decodes the \u001b escapes below into a raw ESC byte, so
+# each test feeds the real thing.
+
+@test "join --print-only: an ANSI escape in expiresAt is stripped" {
+  _stub_all
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned","ready":true}}'
+
+  run node::join --name box-1 --pool metal --print-only
+  assert_success
+  assert_output --partial "2026-09-01T12:00:00Z"
+  [[ "${output}" != *$'\033'* ]]
+}
+
+@test "error: an ANSI escape in the api's message is stripped" {
+  _stub_all
+  STUB_MINT_CODE="400"
+  STUB_MINT_BODY='{"ok":false,"data":{"code":"KUBELET_BELOW_FLOOR","message":"v1.29.0 is below\u001b[31m the floor"}}'
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "v1.29.0 is below"
+  # error() colors its own [error] prefix (its ESC is \033[0;31m), so pin the
+  # absence of the INJECTED sequence — without its ESC byte the "[31m"
+  # remainder is inert text.
+  [[ "${output}" != *$'\033[31m'* ]]
+}
+
+@test "remove: an ANSI escape in the returned pool name is stripped" {
+  _stub_all
+  STUB_REMOVE_BODY='{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J","status":"Draining"}}'
+
+  run node::remove --name box-1
+  assert_success
+  assert_output --partial "pool metal"
+  [[ "${output}" != *$'\033'* ]]
+}
+
+@test "status: an ANSI escape in a node row is stripped, the table survives" {
+  _stub_all
+  STUB_NODES_BODY='{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"}],"usage":{"nodes":1,"maxStaticNodes":20},"discoveryReady":true}}'
+
+  run node::status
+  assert_success
+  assert_output --partial "box-"
+  assert_output --partial "metal"
+  assert_output --partial "Ready"
+  [[ "${output}" != *$'\033'* ]]
 }
 
 # ── F5: the global --cluster/-s collision ────────────────
