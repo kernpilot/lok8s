@@ -1,0 +1,60 @@
+=== cluster hetzner ===
+{
+  "cluster": {
+    "name": "test-kkp-cluster",
+    "spec": {
+      "version": "v1.29.2",
+      "cloud": {
+        "dc": "hetzner-fsn1",
+        "hetzner": {
+          "token": "tok-abc"
+        }
+      }
+    }
+  }
+}
+=== cloud byo ===
+{
+  "bringyourown": {}
+}
+=== cloud preset ===
+{
+  "hetzner": {},
+  "presetName": "my-preset"
+}
+=== md hetzner autoscaled ===
+{
+  "name": "pool-1",
+  "spec": {
+    "replicas": 3,
+    "template": {
+      "cloud": {
+        "hetzner": {
+          "type": "cpx31"
+        }
+      },
+      "operatingSystem": {
+        "ubuntu": {}
+      }
+    },
+    "minReplicas": 1,
+    "maxReplicas": 10
+  }
+}
+=== md aws plain ===
+{
+  "name": "pool-a",
+  "spec": {
+    "replicas": 2,
+    "template": {
+      "cloud": {
+        "aws": {
+          "instanceType": "t3.large"
+        }
+      },
+      "operatingSystem": {
+        "flatcar": {}
+      }
+    }
+  }
+}
