@@ -533,7 +533,8 @@ copy-paste patches):
    at your issuer.
 
 One sharp edge: `targetSelectors` matches routes in the **same namespace**
-as the policy (shipped: `default`). Envoy Gateway can widen it with
+as the policy. That is the selector's default behavior, and this addon ships
+it with the `default` namespace. Envoy Gateway can widen it with
 `targetSelectors[].namespaces`, but that needs a `ReferenceGrant` in every
 target namespace. For routes elsewhere it is simpler to layer a second
 copy with a kustomize `namespace:` transform.

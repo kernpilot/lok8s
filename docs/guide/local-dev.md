@@ -13,7 +13,7 @@ lo use lok8s.dev
 lo up
 ```
 
-This provisions a local kind cluster with registry mirrors, then starts Tilt in the background. The Tilt UI is available at the URL it prints: a per-domain port in the `10351`-`10499` range (the framework deliberately avoids 10350, Tilt's default, so parallel lok8s projects don't collide).
+This provisions a local kind cluster with registry mirrors, then starts Tilt in the background. The Tilt UI is available at the URL it prints: a per-domain port in the `10351`–`10499` range (the framework deliberately avoids 10350, Tilt's default, so parallel lok8s projects don't collide).
 
 To also open the Tilt UI automatically:
 

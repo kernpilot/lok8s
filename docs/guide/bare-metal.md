@@ -344,7 +344,7 @@ diagnosis (it never changes anything and never fails the command) covering:
 - hcloud token present + API reachable; Robot creds present + API reachable
   (a Robot API error reports as **unreachable**, never mistaken for a
   missing key)
-- the **rescue SSH key** exists in Robot: without it a bare-metal
+- the **rescue SSH key** is registered in Robot: without it a bare-metal
   reinstall would lock you out (the report tells you to add it)
 - per node: resolvable/reachable, and for each bare-metal node whether it is
   **installed** or **in rescue**
