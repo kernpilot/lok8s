@@ -43,6 +43,15 @@ func Envsubst(data []byte, names []string) []byte {
 	return envsubst(data, names, lookup)
 }
 
+// EnvsubstWith is Envsubst with an explicit lookup instead of the process
+// env. The bootstrap addon render needs it: per-entry `env:` overrides are
+// scoped to ONE entry (bash exports them in the entry's subshell only), and
+// concurrent DAG entries must not race on os.Setenv — so the overrides ride
+// a lookup closure instead of the environment.
+func EnvsubstWith(data []byte, names []string, lookup func(string) string) []byte {
+	return envsubst(data, names, lookup)
+}
+
 // envsubst is the testable core: single-pass GNU SHELL-FORMAT substitution
 // restricted to names, with values from lookup (listed-but-unset → "").
 func envsubst(data []byte, names []string, lookup func(string) string) []byte {

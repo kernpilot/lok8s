@@ -100,6 +100,18 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 	return nil
 }
 
+// DecryptYAMLFile decrypts a sops-encrypted YAML file (a
+// restore.d/*.sops.yaml manifest) IN MEMORY and returns the plaintext. The
+// counterpart of the bash `sops -d "${f}"` in bootstrap::_restore_d — key
+// discovery is ambient (SOPS_AGE_KEY / SOPS_AGE_KEY_FILE / the age keys
+// dir), exactly like the CLI. Capturing the plaintext in memory (instead of
+// a sops|kubectl pipe) is deliberate: piping sops's 2>&1 into kubectl once
+// corrupted the YAML stream with sops warnings — see the bash comment at
+// the bootstrap::_restore_d call site.
+func DecryptYAMLFile(path string) ([]byte, error) {
+	return decrypt.File(path, "yaml")
+}
+
 // sopsDecryptData decrypts a binary-mode .enc payload with the given age
 // identity. The identity travels via SOPS_AGE_KEY for the duration of the
 // call — the same channel the bash implementation uses
