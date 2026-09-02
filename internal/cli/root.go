@@ -28,10 +28,42 @@ func registerPorted(name string, build func(*config.Paths, commandSpec) *cobra.C
 	portedCommands[name] = build
 }
 
-// NewRoot builds the full lo command tree. Commands without a Go
-// implementation yet are registered as passthroughs to the argsh
-// implementation via Shim.
+// goOnlyCommand is a command that exists ONLY in the Go binary. It has no
+// entry in the argsh usage array, so it lives outside commandTree (which
+// mirrors that array verbatim) and TestCommandTreeMatchesArgshUsage
+// allowlists it by name instead of flagging it as drift. Every entry states
+// why the bash tree has no twin.
+type goOnlyCommand struct {
+	name  string
+	why   string
+	build func(*config.Paths) *cobra.Command
+}
+
+// goOnlyCommands is the additive, Go-only part of the tree. Keep it short:
+// anything that CAN mirror a usage entry belongs in commandTree instead.
+var goOnlyCommands = []goOnlyCommand{
+	{
+		name:  "mcp",
+		why:   "native MCP server (ophis); bash `lo mcp` is an argsh.so builtin dispatched implicitly, not a usage entry",
+		build: newMcpCommand,
+	},
+}
+
+// NewRoot builds the full lo command tree: the usage-mirrored tree plus the
+// Go-only commands.
 func NewRoot(paths *config.Paths) *cobra.Command {
+	root := newUsageTree(paths)
+	for _, g := range goOnlyCommands {
+		root.AddCommand(g.build(paths))
+	}
+	return root
+}
+
+// newUsageTree builds the part of the tree that mirrors the argsh usage
+// array one-to-one. Commands without a Go implementation yet are registered
+// as passthroughs to the argsh implementation via Shim. The MCP server
+// projects THIS tree (never the Go-only additions) into tools.
+func newUsageTree(paths *config.Paths) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "lo",
 		Short:         "lok8s - local dev orchestration",

@@ -268,7 +268,7 @@ run_pair "${AD}" "${AD}" drivers
 run_pair "${AD}" "${AD}" drivers ../x
 run_pair "${AD}" "${AD}" drivers 'bad name'
 run_pair "${AD}" "${AD}" drivers bogus
-run_pair "${AD}" "${AD}" drivers kubehz                        # bash-only driver → shim (its argsh help)
+expect_rc 0 "${AD}" drivers kubehz                             # Go driver since the kubehz port: cobra help vs argsh usage (documented), rc parity only
 run_pair "${AD}" "${AD}" drivers lo status alpha.dev           # read-only `kind get clusters`, absent name
 run_pair "${AD}" "${AD}" drivers lo s alpha.dev
 run_pair "${AD}" "${AD}" drivers kubeone status beta.cloud     # NotProvisioned (no work dir)

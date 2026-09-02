@@ -88,11 +88,43 @@ func TestCommandTreeMatchesArgshUsage(t *testing.T) {
 			t.Errorf("command %q exists in the Go tree but not in .lok8s/lo", name)
 		}
 	}
+
+	// The assembled root may carry more than commandTree: the Go-only
+	// commands. Each one must be allowlisted in goOnlyCommands with a reason,
+	// and must NOT exist in the bash tree (once it does, it belongs in
+	// commandTree so the mirror stays one-to-one).
+	goOnly := map[string]goOnlyCommand{}
+	for _, g := range goOnlyCommands {
+		if g.why == "" || g.build == nil {
+			t.Errorf("goOnlyCommands[%q]: needs both a reason and a builder", g.name)
+		}
+		if _, inBash := want[g.name]; inBash {
+			t.Errorf("Go-only command %q now exists in .lok8s/lo: move it into commandTree", g.name)
+		}
+		goOnly[g.name] = g
+	}
+	root := NewRoot(&config.Paths{Base: t.TempDir()})
+	for _, cmd := range root.Commands() {
+		name := cmd.Name()
+		if _, ok := want[name]; ok {
+			continue
+		}
+		if _, ok := goOnly[name]; ok {
+			continue
+		}
+		t.Errorf("command %q is in the Go root but neither in .lok8s/lo nor allowlisted in goOnlyCommands", name)
+	}
 }
 
 func TestNewRootRegistersEveryCommand(t *testing.T) {
 	paths := &config.Paths{Base: t.TempDir()}
 	root := NewRoot(paths)
+	for _, g := range goOnlyCommands {
+		cmd, _, err := root.Find([]string{g.name})
+		if err != nil || cmd.Name() != g.name {
+			t.Errorf("Go-only command %q not resolvable: %v", g.name, err)
+		}
+	}
 	for _, spec := range commandTree {
 		cmd, _, err := root.Find([]string{spec.use})
 		if err != nil || cmd.Name() != spec.use {
