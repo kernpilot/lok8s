@@ -145,6 +145,7 @@ jobs:
         run: |
           make build
           bash hack/parity-test.sh
+          bash hack/parity-build.sh
 
   operator-tests:
     name: Bats Operator Tests
