@@ -26,5 +26,7 @@ rm -f "${out_dir}"/lok8s-*.tar.gz
 paths=(.lok8s/ operator/crds/ operator/deploy/)
 [[ -d .kustomize ]] && paths+=(.kustomize/)
 
+# --transform is GNU tar: the release runs on ubuntu; a local `make snapshot`
+# on macOS needs gnu-tar (gtar) on PATH ahead of bsdtar.
 tar -czf "${out}" "${paths[@]}" --transform "s,^,lok8s-${version}/,"
 echo "release-tarball: ${out} ($(wc -c <"${out}") bytes)"

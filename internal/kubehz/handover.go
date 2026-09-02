@@ -196,12 +196,24 @@ func (c *Context) placePKI(bundle, k8sDir string) error {
 	return nil
 }
 
+// copyFile writes dst private (0600) from the first byte: the PKI copies
+// include CA and service-account KEYS, and a 0644 create followed by a
+// chmod leaves a readable window. placePKI widens the public halves after.
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	return os.WriteFile(dst, data, 0o600)
+}
+
+// stripQuery drops everything from '?' on — for URLs that carry a credential
+// (presigned object-store links) and must not be echoed whole.
+func stripQuery(u string) string {
+	if i := strings.IndexByte(u, '?'); i >= 0 {
+		return u[:i]
+	}
+	return u
 }
 
 // fetchSnapshot ports handover::fetch_snapshot: an explicit --snapshot wins;
@@ -252,7 +264,9 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 		}
 		data, err := c.fetch(ctx, "GET", location, bearer{}, nil)
 		if err != nil {
-			c.errorf("handover: downloading the snapshot from %s failed — download it yourself and re-run with --snapshot <file>", location)
+			// A presigned URL carries its credential in the query string —
+			// name the object, not the token.
+			c.errorf("handover: downloading the snapshot from %s failed — download it yourself and re-run with --snapshot <file>", stripQuery(location))
 			return "", ErrHandled
 		}
 		if err := os.WriteFile(out, data, 0o600); err != nil {

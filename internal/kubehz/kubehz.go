@@ -146,7 +146,23 @@ func (c *Context) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{}
+	return &http.Client{
+		// A hung platform API must not hang `lo` forever (bash curl had no
+		// --max-time either; this is the one deliberate divergence).
+		Timeout: 2 * time.Minute,
+		// Requests carry KUBEHZ_TOKEN as a bearer. net/http drops the header
+		// on a cross-host redirect but not on a same-host https→http
+		// downgrade — refuse any redirect that leaves https.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("refusing redirect to non-https URL %s://%s", req.URL.Scheme, req.URL.Host)
+			}
+			return nil
+		},
+	}
 }
 
 // ── verbose.sh helpers, bound to the context's stderr ────

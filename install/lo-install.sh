@@ -150,10 +150,13 @@ main() {
     return 0
   fi
 
-  local tmp
+  local tmp stage
   tmp="$(mktemp -d)"
-  # shellcheck disable=SC2064  # expand now: tmp is gone from scope at exit
-  trap "rm -rf '${tmp}'" EXIT
+  stage="${dest}.tmp.$$"
+  # Expand now (SC2064): both paths are gone from scope at exit. The staging
+  # file lives next to the destination, so it needs its own rm.
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'; rm -f '${stage}'" EXIT
 
   info "downloading ${asset}"
   fetch "${release_url}/${asset}" "${tmp}/${asset}" \
@@ -181,8 +184,7 @@ main() {
   mkdir -p "${dir}" || die "cannot create ${dir}"
   # Stage next to the destination and rename: an interrupted copy never leaves
   # a half-written `lo` on PATH.
-  if ! { cp "${tmp}/lo" "${dest}.tmp.$$" && chmod 0755 "${dest}.tmp.$$" && mv -f "${dest}.tmp.$$" "${dest}"; }; then
-    rm -f "${dest}.tmp.$$"
+  if ! { cp "${tmp}/lo" "${stage}" && chmod 0755 "${stage}" && mv -f "${stage}" "${dest}"; }; then
     die "cannot write ${dest}"
   fi
   ok "installed ${dest}"

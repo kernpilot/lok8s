@@ -36,10 +36,18 @@ func (d *Driver) kubeconfigTunnel(ctx context.Context, kubeconfigPath, remoteUse
 		currentServer = serverNode.Value
 	}
 
+	// bash sliced the server with ${var##*:} / ${var%:*} and would run ssh
+	// with "-L ::" on a missing or malformed value, then rewrite the
+	// kubeconfig to "https://127.0.0.1:". Refuse instead: a kubeconfig
+	// without an https://host:port server has nothing to tunnel.
 	port := currentServer[strings.LastIndex(currentServer, ":")+1:]
 	remoteHost := strings.TrimPrefix(currentServer, "https://")
 	if i := strings.LastIndex(remoteHost, ":"); i >= 0 {
 		remoteHost = remoteHost[:i]
+	}
+	if serverNode == nil || !strings.HasPrefix(currentServer, "https://") || port == "" || remoteHost == "" || strings.ContainsAny(port, "/:") {
+		ui.Warnf(errOut, "kubeconfig %s has no clusters[0].cluster.server in https://host:port form — skipping the API tunnel", kubeconfigPath)
+		return nil
 	}
 
 	if err := d.runQuiet(ctx, "ssh", "-fN",

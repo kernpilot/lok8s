@@ -122,7 +122,9 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          # Pinned (verified on GitHub releases); `latest` moved the gate
+          # under us once already. Bump deliberately with .golangci.yml.
+          version: v2.13.2
 
       - name: Install toolchain (b → argsh, yq; parity needs the bash lo)
         env:
@@ -154,6 +156,21 @@ jobs:
           bash hack/parity-kubehz.sh
           bash hack/parity-operator.sh
           bash hack/parity-orchestrate.sh
+
+  release-config:
+    name: goreleaser check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The release config only ran on tag push before, so a schema error
+      # surfaced when it was already blocking a release. Same pinned
+      # goreleaser as .github/workflows/release.yml.
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.0
+          args: check
 
   operator-tests:
     name: Bats Operator Tests

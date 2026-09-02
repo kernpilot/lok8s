@@ -164,11 +164,12 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 	kc, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		// bash: the `>` redirection creates the file before curl fails.
-		_ = os.WriteFile(kubeconfigPath, nil, 0o644)
+		// 0600, not bash's umask default: the file holds a credential.
+		_ = os.WriteFile(kubeconfigPath, nil, 0o600)
 		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
 		return ErrHandled
 	}
-	if err := os.WriteFile(kubeconfigPath, kc, 0o644); err != nil {
+	if err := os.WriteFile(kubeconfigPath, kc, 0o600); err != nil {
 		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
 		return ErrHandled
 	}
