@@ -124,6 +124,18 @@ node::preflight() {
 
 # ── Error vocabulary ─────────────────────────────────────
 
+# Strip terminal control characters from a server string before it is shown.
+# A compromised api could hide ANSI escapes in a message, a timestamp or a
+# node row and redraw the caller's terminal — worst under --print-only, where
+# the printed output is read as truth. Tab and newline survive (the status
+# rows travel as TSV); every other character below 0x20, and DEL, is dropped.
+# Values that become argv are NOT routed through here: the join-line alphabet
+# gate guards that side, and display is the only concern of this one.
+# Usage: node::scrub <string>
+node::scrub() {
+  tr -d '\000-\010\013-\037\177' <<<"${1}"
+}
+
 # Turn the api's refusal codes into an instruction. Every branch says what to
 # do next; the fall-through prints the api's own words, which are almost
 # always the actionable ones.
@@ -132,6 +144,7 @@ node::api_error() {
   local context="${1}" code msg
   code=$(jq -r '.data.code // .code // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || code=""
   msg=$(jq -r '.data.message // .message // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || msg=""
+  msg=$(node::scrub "${msg}")
 
   case "${code}" in
     STATIC_POOLS_NOT_ENABLED)
@@ -352,6 +365,18 @@ node::interrupted_slot_note() {
   warn "Free the slot if you are not retrying:  lo kubehz node remove --name ${node_name}"
 }
 
+# Printed when a post-mint gate refuses the returned join line: nothing ran on
+# this machine, but the mint itself succeeded — the ticket holds a node slot
+# server-side until it expires. One message, one place: every refusal between
+# the mint and the join carries it. `node_name` is read from node::join
+# through dynamic scope, the same way the interrupt note above reads it.
+node::minted_slot_note() {
+  echo "" >&2
+  echo "  The mint succeeded, so this attempt holds a node slot until the ticket" >&2
+  echo "  expires (about ten minutes). Free the slot now with:" >&2
+  echo "    lo kubehz node remove --name ${node_name}" >&2
+}
+
 # Join THIS machine to a hosted cluster.
 node::join() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -427,6 +452,7 @@ node::join() {
   local join_command expires ready
   join_command=$(jq -r '(.data? // .) | .joinCommand // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || join_command=""
   expires=$(jq -r '(.data? // .) | .expiresAt // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || expires=""
+  expires=$(node::scrub "${expires}")
   # `.ready` WITHOUT a `//` alternative: jq's `//` takes the right side when
   # the left is null OR FALSE, so `.ready // empty` erases the one value this
   # warning exists to catch. An absent key reads "null" here and warns about
@@ -440,7 +466,7 @@ node::join() {
     echo "    lo kubehz node remove --name ${node_name}" >&2
     return 1
   fi
-  node::assert_join_command "${join_command}" || return 1
+  node::assert_join_command "${join_command}" || { node::minted_slot_note; return 1; }
 
   # `ready: false` means the ticket exists and holds a slot, but the platform
   # has not handed the cluster the matching request yet — the kubelet would
@@ -521,6 +547,7 @@ node::remove() {
   # The pool name is cosmetic; its absence just drops the parenthetical.
   local removed_pool
   removed_pool=$(jq -r '(.data? // .) | .pool // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || removed_pool=""
+  removed_pool=$(node::scrub "${removed_pool}")
   echo "kubehz: node '${name}' is draining${removed_pool:+ (pool ${removed_pool})}."
   echo "  The platform cordons the node, then deletes it from the cluster."
   echo "  Its slot is free now, so another machine can take it."
@@ -556,6 +583,8 @@ node::status() {
   used=$(jq -r '(.data? // .) | .usage.nodes // 0' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || used=0
   max=$(jq -r '(.data? // .) | .usage.maxStaticNodes // "-"' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || max='-'
   discovery_ready=$(jq -r '(.data? // .) | .discoveryReady // false' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || discovery_ready="false"
+  used=$(node::scrub "${used}")
+  max=$(node::scrub "${max}")
 
   echo "Cluster: ${NODE_CLUSTER_ID} (${domain})"
   echo "Nodes:   ${used}/${max}"
@@ -563,6 +592,9 @@ node::status() {
   local rows
   rows=$(jq -r '(.data? // .) | .nodes[]? | [.name, (.pool // "-"), (.status // "-"), (.joinedAt // "-")] | @tsv' \
     <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || rows=""
+  # Scrubbed as one block: tab and newline survive the scrub, so the TSV
+  # structure the read loop below walks is intact.
+  rows=$(node::scrub "${rows}")
   if [[ -n "${rows}" ]]; then
     echo ""
     printf '  %-24s %-16s %-10s %s\n' "NAME" "POOL" "STATUS" "JOINED"
