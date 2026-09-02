@@ -281,8 +281,11 @@ check - recover --domain mock.cloud --dry-run
 check "  yes  " recover mock.cloud --skip-rebuild --dry-run   # dry-run never prompts
 # The work dir both implementations create.
 for impl_dir in mock.cloud nope.dom; do
-  [[ -d "${PROJ}/clusters/${impl_dir}/.provider" ]] && echo "ok: workdir clusters/${impl_dir}/.provider" \
-    || { echo "FAIL: workdir clusters/${impl_dir}/.provider missing"; failures=$((failures + 1)); }
+  if [[ -d "${PROJ}/clusters/${impl_dir}/.provider" ]]; then
+    echo "ok: workdir clusters/${impl_dir}/.provider"
+  else
+    echo "FAIL: workdir clusters/${impl_dir}/.provider missing"; failures=$((failures + 1))
+  fi
 done
 
 if (( failures )); then

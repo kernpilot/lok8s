@@ -25,6 +25,10 @@
 # Usage: hack/e2e-go-roundtrip.sh [path-to-go-lo]   (default: bin/lo)
 set -euo pipefail
 
+# indent — prefix every line on stdin with two spaces (a per-line anchor is
+# not expressible as a parameter expansion, so no sed; keeps SC2001 quiet).
+indent() { while IFS= read -r line; do printf '  %s\n' "${line}"; done; }
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LO_BIN="${1:-${ROOT}/bin/lo}"
 [[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
@@ -72,7 +76,7 @@ export LO_REGISTRY_STATE_DIR="${WORK}/registry-state"
 # ── the pre-existing world, snapshotted ──────────────────────────────────────
 BEFORE="$(kind get clusters 2>/dev/null | sort)"
 echo "kind get clusters (before):"
-sed 's/^/  /' <<<"${BEFORE}"
+indent <<<"${BEFORE}"
 if ! grep -qx "${NAME}" <<<"${BEFORE}"; then :; else echo "error: ${NAME} already exists?!" >&2; exit 2; fi
 
 # ── teardown on ANY exit ─────────────────────────────────────────────────────
@@ -104,7 +108,7 @@ teardown() {
   local after
   after="$(kind get clusters 2>/dev/null | sort)"
   echo "kind get clusters (after):"
-  sed 's/^/  /' <<<"${after}"
+  indent <<<"${after}"
   if [[ "${after}" != "${BEFORE}" ]]; then
     echo "FAIL: pre-existing kind clusters changed" >&2
     diff <(echo "${BEFORE}") <(echo "${after}") >&2 || true
@@ -155,8 +159,8 @@ assert_clusters() {
   local want="${1}" got
   got="$(kind get clusters 2>/dev/null | sort)"
   if [[ "${got}" != "${want}" ]]; then
-    echo "FAIL: kind get clusters =" >&2; sed 's/^/  /' <<<"${got}" >&2
-    echo "want:" >&2; sed 's/^/  /' <<<"${want}" >&2
+    echo "FAIL: kind get clusters =" >&2; indent <<<"${got}" >&2
+    echo "want:" >&2; indent <<<"${want}" >&2
     return 1
   fi
 }
@@ -170,7 +174,7 @@ assert_clusters "${WITH}"
 echo "ok: kind get clusters gained exactly ${NAME} (pre-existing clusters intact)"
 [[ -f "${PROJ}/.kubeconfig/${NAME}.yaml" ]] || { echo "FAIL: no .kubeconfig/${NAME}.yaml" >&2; exit 1; }
 regs="$(docker ps --format '{{.Names}}' --filter "name=^${NET}-registry-" | sort)"
-echo "registry containers:"; sed 's/^/  /' <<<"${regs}"
+echo "registry containers:"; indent <<<"${regs}"
 [[ -n "${regs}" ]] || { echo "FAIL: no ${NET}-registry-* containers" >&2; exit 1; }
 docker network inspect "${NET}" --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}' | sed 's/^/network: /'
 

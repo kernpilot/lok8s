@@ -19,6 +19,10 @@
 # Usage: hack/parity-loop.sh [path-to-go-lo]   (default: bin/lo)
 set -euo pipefail
 
+# indent — prefix every line on stdin with two spaces (a per-line anchor is
+# not expressible as a parameter expansion, so no sed; keeps SC2001 quiet).
+indent() { while IFS= read -r line; do printf '  %s\n' "${line}"; done; }
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LO_BIN="${1:-${ROOT}/bin/lo}"
 [[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
@@ -263,7 +267,7 @@ for impl in go bash; do
   [[ ${rc} -eq 0 && -f "${WORK}/proj/.tilt.pid" ]] || { echo "FAIL: tilt up (${impl}): rc=${rc} pidfile=$([[ -f ${WORK}/proj/.tilt.pid ]] && echo yes || echo no)"; tiltup_ok=0; }
 done
 d="$(diff "${WORK}/up-bash.out" "${WORK}/up-go.out" || true)"
-[[ -z "${d}" ]] || { echo "FAIL: tilt up stdout differs:"; echo "${d}" | sed 's/^/  /'; tiltup_ok=0; }
+[[ -z "${d}" ]] || { echo "FAIL: tilt up stdout differs:"; indent <<<"${d}"; tiltup_ok=0; }
 if (( tiltup_ok )); then echo "ok: lo tilt up (stub spawn + pid file)"; else failures=$((failures + 1)); fi
 rm -f "${WORK}/proj/.tilt.pid" "${WORK}/proj/.tilt.nohup"
 
