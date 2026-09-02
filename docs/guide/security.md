@@ -2,17 +2,17 @@
 
 ## Encryption at rest (etcd)
 
-Kubernetes Secrets are stored in etcd. By default they're **base64, not
-encrypted** — anyone with the etcd data (a disk image, a backup, a node
+Kubernetes Secrets live in etcd. By default they're **base64, not
+encrypted**: anyone with the etcd data (a disk image, a backup, a node
 breach) can read them. lok8s turns on at-rest encryption so the apiserver
 encrypts Secrets before writing them to etcd.
 
 ### Where it's configured — the driver, not a cluster resource
 
-This is a control-plane setting: the apiserver has to be told to encrypt
+This is a control-plane setting: you must tell the apiserver to encrypt
 *before* it writes anything, via the `--encryption-provider-config` flag and
 an `EncryptionConfiguration` file **on the control-plane hosts**. You can't
-`kubectl apply` your way to it — so it lives in the **KubeOne driver**, not in
+`kubectl apply` your way to it, so it lives in the **KubeOne driver**, not in
 a bootstrap target:
 
 ```yaml
@@ -35,7 +35,7 @@ apiserver / control-plane process settings → **driver** (KubeOne).
 Anything an in-cluster controller reconciles → **cluster resources**.
 :::
 
-(For KKP *user* clusters — hosted control planes — at-rest encryption is set
+(For KKP *user* clusters (hosted control planes), you set at-rest encryption
 per-cluster through KKP, which owns those apiservers. The above is for the
 seed cluster that KubeOne builds.)
 
@@ -57,10 +57,10 @@ to rotate up later.
 
 ## Host firewall
 
-The other major hardening layer — a default-deny host firewall — is the
+The other major hardening layer (a default-deny host firewall) is the
 opposite: it's **cluster resources**, Cilium `CiliumClusterwideNetworkPolicy`
 objects that select the host endpoint. Always roll it out in **audit mode**
 first (`policyAuditMode: true`), confirm with `hubble observe --verdict AUDIT`
 that nothing critical (etcd 2379/2380, apiserver 6443, kubelet 10250, vxlan
-8472) is being denied, *then* flip to enforce — going straight to enforce
+8472) gets denied, *then* flip to enforce. Going straight to enforce
 without a complete allow set will deadlock the cluster.

@@ -1,9 +1,9 @@
 # Services
 
 `services.yaml` is the heart of the lok8s development workflow. It declares
-which services exist in your project, where their source lives, and how they
-should be built and deployed in local dev — and it ties them to a CI-built
-Docker registry so large multi-service projects don't have to rebuild
+which services exist in your project, where their source lives, and how to
+build and deploy them in local dev. It also ties them to a CI-built
+Docker registry, so large multi-service projects don't have to rebuild
 everything on every developer's laptop.
 
 This guide covers:
@@ -20,7 +20,7 @@ This guide covers:
 | File | Location | Committed? | Purpose |
 |------|----------|-----------|---------|
 | `services.yaml` | repo root | ✅ Yes | Project-wide service catalog and registry config |
-| `services.<config>.yaml` | repo root | depends | **Workflow profiles** — named combinations of services/flags loaded via `LOK8S_SERVICE_CONFIG=<config>` |
+| `services.<config>.yaml` | repo root | depends | **Workflow profiles**: named combinations of services/flags loaded via `LOK8S_SERVICE_CONFIG=<config>` |
 | `services.local.yaml` | repo root | ❌ Gitignored | Personal per-developer overrides (one specific workflow profile) |
 | `lok8s.yaml` | per service dir | ✅ Yes | How Tilt should build & live-reload **this** service |
 
@@ -31,18 +31,18 @@ live-update sync rules, port forwards, Tilt resource config.
 ::: warning Service names and target names are different namespaces
 A **service name** is a key under `services:` in `services.yaml`. It names
 the image (`lok8s.local/<service>`) and claims manifests through the
-`lok8s.dev/name=<service>` label — Tilt resources and this page use it.
-A **target name** is a directory under `clusters/<domain>/targets/` — the
+`lok8s.dev/name=<service>` label. Tilt resources and this page use it.
+A **target name** is a directory under `clusters/<domain>/targets/`. The
 [domain kustomization](/guide/concepts#plane-b-—-workloads-targets) and
 `lo build` use it. The two can share a string, but nothing connects them
 except the labels you put on the target's manifests. `lo deploy -l
 lok8s.dev/name=<x>` selects by **label value**, not by target directory.
 :::
 
-`services.<config>.yaml` files are **workflow profiles** — see the
+`services.<config>.yaml` files are **workflow profiles**. See the
 [Workflow profiles](#workflow-profiles) section for the full pattern.
 
-All of these are merged at runtime via yq's deep-merge strategy
+lok8s merges all of these at runtime via yq's deep-merge strategy
 (`. * $item`). An override only needs to specify the keys it wants to
 change; everything else inherits from `services.yaml`. Resolution order:
 
@@ -104,7 +104,7 @@ a **two-tier model**:
 2. **Local devs only build the services they're actively working on.**
    Everything else gets pulled from the registry as a pre-built image.
 
-The flag that controls this is `build:` — per-service or per-defaults.
+The flag that controls this is `build:`, per-service or per-defaults.
 
 ### Setting it up
 
@@ -131,8 +131,8 @@ services:
   # ...10 more...
 ```
 
-`DOCKER_REGISTRY`, `DOCKER_PROJECT`, and `DOCKER_TAG` are typically exported
-by `direnv` based on the current branch — for example, `DOCKER_PROJECT=$(git
+`direnv` typically exports `DOCKER_REGISTRY`, `DOCKER_PROJECT`, and
+`DOCKER_TAG` based on the current branch: for example, `DOCKER_PROJECT=$(git
 branch --show-current)` and `DOCKER_TAG=$(git rev-parse HEAD)`. The exact
 mechanism is up to your CI setup.
 
@@ -166,7 +166,7 @@ This means:
 `services.local.yaml` is the simplest case of a more general pattern: any
 file matching `services.<config>.yaml` is loaded when
 `LOK8S_SERVICE_CONFIG=<config>` is set. You can use this to define **named
-workflow profiles** — committed combinations of services that match how
+workflow profiles**: committed combinations of services that match how
 people actually work.
 
 Real-world combinations from a 10+ service project:
@@ -227,7 +227,7 @@ The merge is plain deep-merge, so a developer can layer
 `services.local.yaml` on top of a committed profile to add their own
 tweaks. Resolution order is: `services.yaml` → committed profile →
 `services.local.yaml` last (if you have both, just be aware that the
-machinery picks **one** `LOK8S_SERVICE_CONFIG` at a time — for
+machinery picks **one** `LOK8S_SERVICE_CONFIG` at a time. For
 multi-layer overrides, see the upstream doc on the merge mechanics).
 
 ### Why default `build: true` then?
@@ -271,8 +271,8 @@ inherited.
 
 ## Pinning to a specific image
 
-If you need to bypass the lok8s naming convention entirely — for example,
-to use an image from a totally unrelated source — set `image:` on the
+If you need to bypass the lok8s naming convention entirely (for example,
+to use an image from a totally unrelated source), set `image:` on the
 service:
 
 ```yaml
@@ -290,7 +290,7 @@ services:
 - A digest pin (e.g. `myimage@sha256:abc...`)
 - A bare name with no tag (rare; defaults to `:latest` per Docker)
 
-`image:` is **mutually exclusive with `registry:`** — pinning a full ref
+`image:` is **mutually exclusive with `registry:`**: pinning a full ref
 implies you've decided exactly what to use, no further substitution needed.
 Setting both is a validation error.
 
@@ -301,7 +301,7 @@ When `image:` is set, the service is **never built locally** even if
 
 When you run `lo up` (or `lo build`), lok8s generates a
 `kustomization.yaml` at `clusters/<domain>/artifacts/kustomization.yaml`
-containing an `images:` block. Nothing is written at the repo root — all
+containing an `images:` block. lok8s writes nothing at the repo root: all
 lok8s-generated files live inside the domain's artifacts directory next
 to the rendered `.artifacts.yaml`:
 
@@ -326,9 +326,9 @@ rules say it should be:
 | Service config | Result |
 |---|---|
 | `build: true` (or default) | **Local build.** No swap. Manifests use `${prefix}/<service>`, Tilt builds + tags exactly that and pushes to the build registry. Kind pulls via the `lok8s.local` containerd mirror. |
-| `build: false` + registry endpoint resolves | **Cache mode.** Swap to `lok8s.cache/${branch}/<service>:${tag}`. `lo image cache` pre-pulls `${endpoint}/${branch}/<service>:${tag}` from the dev's docker host (using local credentials), retags, pushes to the cache registry. Kind pulls from the cache registry — no upstream credentials needed inside the cluster. |
+| `build: false` + registry endpoint resolves | **Cache mode.** Swap to `lok8s.cache/${branch}/<service>:${tag}`. `lo image cache` pre-pulls `${endpoint}/${branch}/<service>:${tag}` from the dev's docker host (using local credentials), retags, pushes to the cache registry. Kind pulls from the cache registry: no upstream credentials needed inside the cluster. |
 | `build: false` + NO registry endpoint | **Warning.** No swap emitted. The service's manifests are still applied to the cluster but pods will fail to pull at runtime (which makes the misconfiguration loud). Fix: define `registry.endpoint`, set `image:`, or flip to `build: true`. |
-| Any `image:` pin | **Direct pin.** Swap to the pinned `newName` (+ `newTag` or `digest`) regardless of build flag. No cache layer — kind pulls the pinned ref directly (works for public images via the io-* mirrors transparently; private images need kind credentials). |
+| Any `image:` pin | **Direct pin.** Swap to the pinned `newName` (+ `newTag` or `digest`) regardless of build flag. No cache layer: kind pulls the pinned ref directly (works for public images via the io-* mirrors transparently; private images need kind credentials). |
 
 ## Cache mode (the `lok8s.cache` registry)
 
@@ -339,12 +339,12 @@ When a service has `build: false` AND a `registry.endpoint` resolves
    service in `clusters/<domain>/artifacts/.cache-queue` (a TSV file with
    one row per service: `<svc>\t<remote_ref>\t<branch>\t<tag>`).
 2. The kustomize image swap rewrites the manifest reference from
-   `${prefix}/<service>` to **`lok8s.cache/${branch}/<service>:${tag}`** —
-   pointing at the **local cache registry**, NOT the remote endpoint.
+   `${prefix}/<service>` to **`lok8s.cache/${branch}/<service>:${tag}`**,
+   which points at the **local cache registry**, NOT the remote endpoint.
 3. **Cache pre-pull runs automatically in Tilt** (controlled by the `auto_cache_pull`
    kwarg on `lok8s()`, default `True`). For each queue entry the puller:
    - Checks if the cache registry already has a manifest matching the
-     ref. **Skips if present** (idempotent — reload cycles are cheap).
+     ref. **Skips if present** (idempotent: reload cycles are cheap).
    - Otherwise: `docker pull <remote>` (using the dev's docker
      credentials), `docker tag <remote> <cache_ip>/<branch>/<svc>:<tag>`,
      `docker push <cache_ip>/<branch>/<svc>:<tag>`.
@@ -399,7 +399,7 @@ cache registry holds **production images pulled from upstream**. They
 can have the same image name and tag but completely different content,
 which is confusing during debugging. Keeping them in separate registries
 prevents that ambiguity. Both are framework-private and live on the
-project subnet — they never leak across kind clusters.
+project subnet: they never leak across kind clusters.
 
 ### Manual cache control
 
@@ -442,7 +442,7 @@ registry:
 | `1` | **Sequential** (default). One pull at a time. Easiest to debug. |
 | `N ≥ 2` | **Bounded.** Up to N concurrent pulls. |
 
-Bounded is the right choice for medium-sized service repos — it speeds
+Bounded is the right choice for medium-sized service repos: it speeds
 up cold cache fills (10s of services) without hammering the upstream
 registry. Unlimited is fastest but may hit upstream rate limits or
 saturate the dev's network.
@@ -454,15 +454,15 @@ is per-service: a failed pull on one service doesn't block another.
 
 | Hostname | Purpose | When manifests reference it |
 |---|---|---|
-| **`lok8s.local`** | Build registry — Tilt push target for locally-built images. | Whenever `build: true` (the default). |
-| **`lok8s.cache`** | Cache registry — pre-pull target for build:false services with a configured remote registry. | When the service is in cache mode. |
-| _remote endpoint_ | The actual upstream (`ghcr.io/myorg`, etc.). Resolved per-service or globally via `registry.endpoint`. | Never directly — only used by `lo image cache` to fetch from. |
+| **`lok8s.local`** | Build registry: Tilt push target for locally-built images. | Whenever `build: true` (the default). |
+| **`lok8s.cache`** | Cache registry: pre-pull target for build:false services with a configured remote registry. | When the service is in cache mode. |
+| _remote endpoint_ | The actual upstream (`ghcr.io/myorg`, etc.). Resolved per-service or globally via `registry.endpoint`. | Never directly: only `lo image cache` fetches from it. |
 
 `lok8s.local` and `lok8s.cache` are wired into kind's containerd at
 provision time (`lo::write_certs_d`) with their respective registry
 container IPs. The KEP-1755 `local-registry-hosting` ConfigMap publishes
 `lok8s.local` to Tilt so `docker_build('foo', ...)` auto-resolves to the
-build registry — no per-user `default_registry()` setup.
+build registry: no per-user `default_registry()` setup.
 
 Your kustomize manifests should always reference services as
 `${prefix}/<service>` (e.g. `lok8s.local/api`). That's the canonical
@@ -480,13 +480,13 @@ without the prefix.
 |----------|-----------------|---------|
 | `lok8s.Dockerfile` | `Dockerfile` | Dev image (live-reload, debug tools) vs production image |
 | `lok8s.entrypoint.sh` | `entrypoint.sh` | Dev startup (e.g. dev server, file watcher) vs production startup |
-| `lok8s.yaml` | _(none)_ | Tilt build/sync config — there is no production counterpart, the file is dev-only |
+| `lok8s.yaml` | _(none)_ | Tilt build/sync config: there is no production counterpart, the file is dev-only |
 
 **How the swap works:** when a service sets `dockerfile: production` (or
 `defaults.dockerfile: production`), Tilt does a literal string replace of
 `lok8s.Dockerfile` → `Dockerfile` on the build's `dockerfile:` field. The
 same convention is meant to apply to any other per-service files you
-maintain in two variants — keep the dev version under `lok8s.<name>` and
+maintain in two variants: keep the dev version under `lok8s.<name>` and
 your production file at `<name>`, and the relationship is obvious from
 the filename alone.
 
@@ -514,8 +514,8 @@ treat it. This file is read **only when the service is being built locally**
 (i.e. when the swap above is a no-op).
 
 A service is one of two shapes: **single-image** (a top-level `build:`, the
-common case, shown below) or **multi-image** (a top-level `components:` list
-— see [Multi-image services](#multi-image-services-components)). The two are
+common case, shown below) or **multi-image** (a top-level `components:` list,
+see [Multi-image services](#multi-image-services-components)). The two are
 mutually exclusive.
 
 Full schema (single-image form):
@@ -573,27 +573,27 @@ directory**, not the repo root. So `dockerfile: lok8s.Dockerfile` means
 
 ### The `build:` block is a Tilt pass-through
 
-The `build:` block under a per-service `lok8s.yaml` is **forwarded
-verbatim to Tilt's [`docker_build()`](https://docs.tilt.dev/api.html#api.docker_build)** —
+The `build:` block under a per-service `lok8s.yaml` goes **verbatim
+to Tilt's [`docker_build()`](https://docs.tilt.dev/api.html#api.docker_build)**:
 any field that function accepts, you can put in `build:`. lok8s only
 validates and interprets the subset it acts on directly:
 
-- `dockerfile` — relative path, resolved against service dir, swapped
+- `dockerfile`: relative path, resolved against service dir, swapped
   to production variant when `dockerfile: production` is set
-- `context` — relative path, resolved against service dir
-- `build_args` — list of env var names, resolved at build time
-- `live_update` — the four known step types (`sync`, `run`, `fall_back_on`,
-  `restart_container`) are passed through to their Tilt counterparts,
+- `context`: relative path, resolved against service dir
+- `build_args`: list of env var names, resolved at build time
+- `live_update`: the four known step types (`sync`, `run`, `fall_back_on`,
+  `restart_container`) pass through to their Tilt counterparts,
   with paths inside them resolved the same way
 
 **Everything else is handed to Tilt as-is.** If Tilt adds a new
-`docker_build()` kwarg next release, it just works — no lok8s update
+`docker_build()` kwarg next release, it just works: no lok8s update
 required. If you misspell a Tilt field, Tilt itself will report the
 error (not lok8s), which is the correct layer.
 
-The shape of validated fields is enforced at the boundary by
-`_validate_service`, so the rest of the code path can trust them. Fields
-lok8s doesn't interpret are not shape-checked — use them at Tilt's
+`_validate_service` enforces the shape of validated fields at the
+boundary, so the rest of the code path can trust them. Fields
+lok8s doesn't interpret are not shape-checked. Use them at Tilt's
 discretion.
 
 ### Resolving paths in custom `build:` fields
@@ -620,7 +620,7 @@ the `lok8s()` call.
 
 ### Multi-image services (`components`)
 
-Some repos build **more than one image** from a single source tree — for
+Some repos build **more than one image** from a single source tree: for
 example, `kubehz-core` ships a Nuxt/Nitro API (`Dockerfile.api`) and a Go
 operator (`Dockerfile.operator`) from the same checkout. Rather than split
 them into two `services.yaml` entries with a `context: ..` subdirectory
@@ -659,7 +659,7 @@ Each component is an independent build target:
 - The image is `lok8s.local/<name>` (`lok8s.local/kubehz-api`,
   `lok8s.local/kubehz-operator`).
 - Its `build:` block has the **same shape and validation** as a single-image
-  `build:` — a pass-through to `docker_build()`, with `dockerfile`/`context`/
+  `build:`: a pass-through to `docker_build()`, with `dockerfile`/`context`/
   `live_update` paths resolved against the **service `path:`** (the one
   source dir). Components differ only by Dockerfile/context/build kwargs.
 - Its `ports`, `links`, and `workloads` wire to **its own** Tilt
@@ -800,7 +800,7 @@ Use it with `LOK8S_SERVICE_CONFIG=frontend lo up`.
 ## Validation and error messages
 
 `lo` validates `services.yaml` and per-service `lok8s.yaml` files at the
-boundary — when they're loaded, before any cluster operations happen.
+boundary: when they load, before any cluster operations happen.
 Invalid files fail fast with a clear error pointing at the specific field.
 Examples:
 
@@ -812,17 +812,17 @@ services.yaml: services.worker: 'image' and 'registry' are mutually exclusive
 [ api ] required build_arg env var not set: API_KEY
 ```
 
-If you see one of these, fix the YAML — the framework won't paper over it
+If you see one of these, fix the YAML: the framework won't paper over it
 with silent fallbacks.
 
 ## Unlabeled resources
 
 The Tilt extension routes manifests to services using two labels:
 
-- `lok8s.dev/type=system` — applied as cluster infrastructure (CNI, ingress, CRDs, etc.)
-- `lok8s.dev/name=<service>` — claimed by the matching service in `services.yaml`
+- `lok8s.dev/type=system`: applied as cluster infrastructure (CNI, ingress, CRDs, etc.)
+- `lok8s.dev/name=<service>`: claimed by the matching service in `services.yaml`
 
-A resource that has **neither** label after both filter passes is considered
+A resource that has **neither** label after both filter passes counts as
 unlabeled. By default, lok8s prints a per-resource breakdown and **drops**
 the unlabeled resources:
 
@@ -840,8 +840,8 @@ default:
 | `strict_unlabeled` | `False` | When `True`, replace the warning with `fail()`. Use in CI. |
 | `apply_unlabeled` | `False` | When `True`, apply the unlabeled resources via `k8s_yaml(...)` anyway, after printing the breakdown. Escape hatch. |
 
-The two are **mutually exclusive** — combining them is rejected at the top
-of `lok8s()`. Pick one, not both.
+The two are **mutually exclusive**: `lok8s()` rejects the combination at
+the top. Pick one, not both.
 
 ```python
 # Tiltfile (CI)
@@ -863,7 +863,7 @@ upstream by kustomize because no kustomize target references them).
 
 ## See also
 
-- [Local Dev with Tilt](/guide/local-dev) — the broader Tilt workflow
-- [Concepts](/guide/concepts) — domains, targets, and the FQDN convention
-- [CLI Reference](/reference/cli) — `lo build`, `lo image cache`
-- [Schema Reference](/reference/schema) — exhaustive field-by-field tables for `services.yaml` and `lok8s.yaml`
+- [Local Dev with Tilt](/guide/local-dev): the broader Tilt workflow
+- [Concepts](/guide/concepts): domains, targets, and the FQDN convention
+- [CLI Reference](/reference/cli): `lo build`, `lo image cache`
+- [Schema Reference](/reference/schema): exhaustive field-by-field tables for `services.yaml` and `lok8s.yaml`

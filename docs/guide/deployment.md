@@ -12,17 +12,17 @@ kustomization into ONE artifact, then **deploy** that artifact to a cluster.
 > is no per-target `lo build <target>`. Domains with
 > `spec.build.artifacts: split` (or a `spec.gitops.provider`) additionally
 > emit committable
-> per-resource files under `clusters/<domain>/artifacts/` — Secrets
-> sops-encrypted — for GitOps consumers (see the
+> per-resource files under `clusters/<domain>/artifacts/` (Secrets
+> sops-encrypted) for GitOps consumers (see the
 > [spec reference](../reference/specs.md)); `lo deploy` always applies the
 > single `artifacts.yaml`.
 
-The active domain is selected with `lo use <domain>` (or per-command with
+Select the active domain with `lo use <domain>` (or per-command with
 `--domain <domain>`); the examples below assume it is set.
 
 ## Compose the domain
 
-Author `clusters/<domain>/kustomization.yaml` — a normal kustomization whose
+Author `clusters/<domain>/kustomization.yaml`, a normal kustomization whose
 `resources:` list the targets you want in this domain. Targets may be **local**
 (under the domain's own `targets/`) or **shared** (a repo-level tree such as
 `.targets/`, referenced with a relative path):
@@ -40,7 +40,7 @@ resources:
 Each entry is a directory with its own `kustomization.yaml` (a kustomize base),
 so ordering and composition are entirely under your control. Cluster-infrastructure
 ordering still lives in `spec.bootstrap` and runs during `lo up`/`lo provision`
-before workloads — see the [Addons guide](./addons.md).
+before workloads. See the [Addons guide](./addons.md).
 
 ## Build
 
@@ -68,7 +68,7 @@ e.g. resources: [./targets/foo, ../../.targets/bar]
 ### Split output (GitOps) {#split-output}
 
 A domain with `spec.build.artifacts: split` (or a `spec.gitops.provider`) also
-emits committable **per-resource** files under `clusters/<domain>/artifacts/` —
+emits committable **per-resource** files under `clusters/<domain>/artifacts/`:
 `<Kind>.<namespace>.<name>.yaml`, and Secrets as sops-encrypted
 `Secret.<ns>.<name>.sops.yaml` (data/stringData encrypted to the
 `spec.gitops.age` recipients). This is the layout a reconciler (Flux
@@ -93,15 +93,15 @@ spec:
   committed twin (with the ambient age key `lo build` already uses to read the
   store) and, if it **canonically** matches the fresh render (key order /
   formatting don't count), keeps the existing file byte-for-byte. If the prior
-  can't be decrypted — no key, corrupt, missing — it re-encrypts (fail safe: it
-  can't prove "unchanged"). A Secret that vanished from the render is still
+  can't be decrypted (no key, corrupt, missing), it re-encrypts (fail safe: it
+  can't prove "unchanged"). A Secret that vanished from the render still gets
   pruned (present-in-render decides pruning, not whether it was re-encrypted).
 - `encrypt.on: always` re-encrypts every Secret every build (the original
   behavior; no compare).
 
 > Chart-minted random secrets still need pinning (chart `existingSecret` hooks +
 > the secrets plugin). `on: change` only suppresses churn when the **rendered**
-> value is stable — a value that changes every render is a real change and gets
+> value is stable: a value that changes every render is a real change and gets
 > re-encrypted. Verify with a double-build diff before pointing a reconciler at
 > the output.
 
@@ -109,10 +109,10 @@ spec:
 
 `lo build --no-secrets` splits **only** non-Secret resources. It never renders,
 re-encrypts, prunes, or even reads a committed `Secret.*.sops.yaml`, and it does
-**not** invoke the secret generators — so it needs no secrets store and no age
+**not** invoke the secret generators, so it needs no secrets store and no age
 key. This is the CI render path: regenerate the non-secret artifacts (e.g. after
 an image-automation pin bump) on a runner that has neither the store nor the key,
-without touching — or accidentally deleting — the committed encrypted Secrets.
+without touching (or accidentally deleting) the committed encrypted Secrets.
 
 ```bash
 lo build --no-secrets --domain example.com   # CI: non-secret artifacts only
@@ -120,8 +120,8 @@ lo build --no-secrets --domain example.com   # CI: non-secret artifacts only
 
 **Store-free render.** `--no-secrets` exports `LOK8S_SECRETS_DISABLE=1` to the
 underlying `kustomize build`, which makes the `secrets.lok8s.dev` exec generator
-emit nothing and never read `$PATH_SECRETS`. This — not the split shaping alone
-— is what makes the render truly store-free: without it the `kustomize build`
+emit nothing and never read `$PATH_SECRETS`. This, not the split shaping alone,
+is what makes the render truly store-free: without it the `kustomize build`
 step would still invoke the generator and mint/read the store, even though the
 split later leaves the committed encrypted Secrets inert. See
 [`LOK8S_SECRETS_DISABLE`](../reference/kustomize-plugins.md#env-contract).
@@ -141,19 +141,19 @@ lo deploy --domain example.com
 
 Applies the single `clusters/<domain>/artifacts.yaml` to the cluster in two phases:
 
-1. **CRDs first** — `CustomResourceDefinition` resources are extracted and applied
-   server-side, then the deploy waits for them to become Established.
-2. **Apply the rest + wait** — the whole artifact is applied server-side
-   (re-applying the CRDs is a no-op), then the deploy waits for the artifact's own
+1. **CRDs first**: the deploy extracts `CustomResourceDefinition` resources and
+   applies them server-side, then waits for them to become Established.
+2. **Apply the rest + wait**: the deploy applies the whole artifact server-side
+   (re-applying the CRDs is a no-op), then waits for the artifact's own
    Deployments/DaemonSets/StatefulSets to become ready (best-effort, 120s).
 
-Workload-plane ordering is intentionally not a framework primitive — kubectl
+Workload-plane ordering is intentionally not a framework primitive: kubectl
 handles in-manifest order; Tilt handles runtime deps via `resource_deps`;
 cluster-infra ordering lives in `spec.bootstrap`.
 
 ### Selective deploy (`-l` / `--label`)
 
-Deploy only the resources carrying a given label with `-l key=value` (optional —
+Deploy only the resources carrying a given label with `-l key=value` (optional;
 omit it to apply everything):
 
 ```bash
@@ -183,7 +183,7 @@ resources:
 
 With that, `lo deploy -l lok8s.dev/name=zitadel` applies exactly that target's
 objects out of the composed artifact. lok8s does **not** require or lint these
-labels — add them only for the subsets you want to address individually.
+labels. Add them only for the subsets you want to address individually.
 
 ## Deployment Domains
 
@@ -202,7 +202,7 @@ spec:
 
 A deploy domain composes its own targets in its own
 `clusters/api.example.com/kustomization.yaml`, exactly like a cluster domain.
-Build and deploy work the same way — they just apply to the referenced cluster's
+Build and deploy work the same way. They just apply to the referenced cluster's
 kubeconfig:
 
 ```bash
@@ -224,12 +224,12 @@ lo provision example.com
 2. Applies `spec.bootstrap` addons via the framework bootstrap
 3. Registers with kubehz (if `spec.kubehz.access` is set)
 
-Workload deployment is handled separately by `lo deploy` (headless/CI) or Tilt (local dev) — it is not part of `provision`.
+`lo deploy` (headless/CI) or Tilt (local dev) handles workload deployment separately: it is not part of `provision`.
 
 ### Re-applying bootstrap only (`-b`)
 
-`spec.bootstrap` addons (Cilium, cert-manager, Rook, …) are applied — in
-`dependsOn` order with `wait:` health gates — as the last step of `lo provision`.
+The last step of `lo provision` applies the `spec.bootstrap` addons (Cilium,
+cert-manager, Rook, …) in `dependsOn` order with `wait:` health gates.
 To **re-apply that bootstrap graph on an already-provisioned cluster** without the
 infrastructure reconcile (no `hcloud`/`kubeone` calls, no Hetzner API check), pass
 `-b` / `--bootstrap`:
@@ -246,7 +246,7 @@ the addon's pinned version (the Rook operator chart, a `cephVersion`, …), then
 applies the target directly and **bypasses** the dependency graph and its health
 gates.
 
-Requires a cluster that has already been provisioned (an existing
+It requires an already-provisioned cluster (an existing
 `.kubeconfig/<cluster-name>.yaml`); otherwise it errors and changes nothing.
 
 ## Provisioning from CI
@@ -275,7 +275,7 @@ When a cluster opts into kubehz dashboard visibility (`spec.kubehz.access` is se
 to `registered` or `managed`), `lo provision` registers it as **pending** and
 prints its SSH-key **MD5 fingerprint**. You then claim the cluster in the
 dashboard with that fingerprint plus your own Hetzner Cloud token (used once as
-ownership proof, never stored) — no platform token is needed in CI.
+ownership proof, never stored). CI needs no platform token.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.

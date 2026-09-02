@@ -1,8 +1,8 @@
 # Secrets
 
 lok8s manages secrets through a small, deterministic cache plus a kustomize
-generator — with optional SOPS/age encryption so secrets can be committed to git
-safely. No external secret store is required to get started.
+generator, with optional SOPS/age encryption so you can commit secrets to git
+safely. You need no external secret store to get started.
 
 ## The model
 
@@ -13,15 +13,15 @@ safely. No external secret store is required to get started.
   `secretRef`, `cert`, …). `template:` composes multi-part secrets from typed
   sub-sections + a pattern; `key:` mints RSA/Ed25519 private keys as PKCS#8 PEM
   (no `openssl`, no approval gate).
-- Generated values are cached one file per key —
-  `Secret.<name>.<namespace>.<key>` — in a **per-domain store**,
-  `clusters/<domain>/secrets/`. **The store is the source of truth** — first
+- The cache holds generated values one file per key
+  (`Secret.<name>.<namespace>.<key>`) in a **per-domain store**,
+  `clusters/<domain>/secrets/`. **The store is the source of truth**: first
   build generates, later builds reuse, so output is stable. Each domain has its
   **own** store, so environments never share a secret (see
   [Per-environment isolation](#per-environment-isolation)).
 - **`$PATH_SECRETS` is the active domain's store.** `lo build` and `lo deploy`
   export `PATH_SECRETS=clusters/<domain>/secrets` for the selected domain (set
-  with `lo use`, recorded in `clusters/.active`) — so every generator, and every
+  with `lo use`, recorded in `clusters/.active`), so every generator, and every
   `secretRef:` that reads another secret, resolves *within that cluster*. Only a
   project with **no** domain context falls back to one flat store
   (`$PATH_SECRETS`, default `.secrets/`).
@@ -80,27 +80,27 @@ To store the literal string `-` as a value, use the pipe form:
 It's then cached like any generated value and can be encrypted + committed.
 
 Pass **`--encrypt`** (short `-e`; the alias `--enc` also works) to SOPS-encrypt the
-value in the same step — it writes the plaintext cache **and** its `.enc` in one go,
+value in the same step: it writes the plaintext cache **and** its `.enc` in one go,
 so you never leave a fresh value lying unencrypted:
 
 ```bash
 printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp API_TOKEN --encrypt
 ```
 
-`--encrypt` encrypts **only** the file it just wrote (not a whole-store sweep — see the
+`--encrypt` encrypts **only** the file it just wrote (not a whole-store sweep; see the
 staging note under [Committing secrets](#committing-secrets-sops-age)) and needs
 encryption already set up (`.sops.yaml` present, via `lo secrets init`); without it the
 set fails. When encryption **is** configured but you write plaintext-only (no
-`--encrypt`), `set` warns that this value has no matching `.enc` yet — whether that's a
-first write (none exists) or an edit (the committed one is now stale) — so re-run with
+`--encrypt`), `set` warns that this value has no matching `.enc` yet, whether that's a
+first write (none exists) or an edit (the committed one is now stale). Re-run with
 `--encrypt` or `lo secrets encrypt` before committing.
 
 ## Provision-time credentials (shell env)
 
-Some secrets are consumed by the **CLI / provisioner** as shell environment
-variables — *before* a cluster (or any Kubernetes `Secret`) exists: a cloud API
-token, bare-metal credentials. Keep those in the managed store too — named after
-the env vars you need — and load them with `lo secrets env` instead of a loose
+The **CLI / provisioner** consumes some secrets as shell environment
+variables, *before* a cluster (or any Kubernetes `Secret`) exists: a cloud API
+token, bare-metal credentials. Keep those in the managed store too, named after
+the env vars you need, and load them with `lo secrets env` instead of a loose
 `.env` file:
 
 ```bash
@@ -111,7 +111,7 @@ eval "$(lo secrets --domain prod env --name hetzner --namespace provisioning)"  
 
 `env` emits an `export <key>=<value>` line per key of the named secret, with the
 value shell-quoted (`%q`) so the `eval` is injection-safe. The creds get SOPS
-encryption + per-domain isolation like everything else — no plaintext `.env`
+encryption + per-domain isolation like everything else: no plaintext `.env`
 sitting outside the model.
 
 ## No literals in the spec — generate, or pin once
@@ -119,16 +119,16 @@ sitting outside the model.
 The Secret spec has **no literal/static value field**, by design: a plaintext
 value must never be baked into a committed `Secret.*.yaml`. The rule:
 
-- **Default — generate it.** Every key comes from a generator (`passwd`, `bash`,
-  …) and is cached. This holds even for values you might be tempted to fix by
+- **Default: generate it.** Every key comes from a generator (`passwd`, `bash`,
+  …) and gets cached. This holds even for values you might be tempted to fix by
   hand (a password, an HMAC key): let it be random.
 - **Need a *specific* value?** (a chosen password, or one value two components
-  must share.) Still declare the generator — so the key always exists and a build
-  never fails — then pin the exact value **once** with `lo secrets set` (above).
+  must share.) Still declare the generator (so the key always exists and a build
+  never fails), then pin the exact value **once** with `lo secrets set` (above).
   The cache is the source of truth, so the set value sticks; the operator does it
   a single time per environment, and it encrypts + commits like any other key.
-- **Not actually a secret?** An *identifier* — an OIDC `client_id`, a username, a
-  hostname, a public URL — does not belong in a `Secret` at all. Put it in plain
+- **Not actually a secret?** An *identifier* (an OIDC `client_id`, a username, a
+  hostname, a public URL) does not belong in a `Secret` at all. Put it in plain
   config (Helm values / a `ConfigMap`), where a literal is fine and reviewable in
   the diff. (Don't smuggle an identifier through a Secret just to colocate it.)
 
@@ -146,7 +146,7 @@ Until then the build refuses to execute them.
 ## Committing secrets (SOPS/age)
 
 The cache is gitignored by default. To share secrets across machines or
-teammates, commit them **encrypted** — no separate key ceremony, your SSH key
+teammates, commit them **encrypted**: no separate key ceremony, your SSH key
 *is* your encryption identity (via `ssh-to-age`; ed25519 only).
 
 ```bash
@@ -162,26 +162,26 @@ lo secrets --domain app.example.com decrypt     # restore plaintext from the .en
 
 Add teammates by putting their age public keys (derived from their SSH keys)
 into `.sops.yaml`'s `creation_rules`, then re-`encrypt`. Scope those rules by
-path to give each environment **different** recipients — see below.
+path to give each environment **different** recipients. See below.
 
 ## Per-environment isolation
 
-The per-domain store isn't just organisation — it's the security boundary. A repo
+The per-domain store isn't just organisation: it's the security boundary. A repo
 driving more than one instance (dev and prod, or several tenants) must never let
 them share a store:
 
 - **No silent sharing.** Cache keys are `Secret.<name>.<ns>.<key>` with no
   environment in them, so a *single* flat store hands dev and prod the same value
-  for a colliding (name, namespace) — including the same *generated* password or
+  for a colliding (name, namespace), including the same *generated* password or
   master key, which nobody chose. Per-domain stores make that impossible.
 - **No shared tier, on purpose.** There is no fallback from a domain's store to a
   shared one. A value genuinely needed in two instances is a deliberate manual
-  copy — the operator consenting to that exposure — never something a default did
+  copy (the operator consents to that exposure), never something a default did
   quietly. Prefer issuing a *separate* credential per instance: most providers
   can (a per-instance registry robot account, a project-scoped API token, …).
 - **The real boundary is the decrypt key, not the folder.** Folders alone are
   cosmetic if one age key decrypts everything. Scope SOPS `creation_rules` by
-  path so each environment encrypts to its **own** recipients — then a dev/CI key
+  path so each environment encrypts to its **own** recipients. Then a dev/CI key
   cannot decrypt prod:
 
 ```yaml
@@ -210,27 +210,27 @@ go-live: create the per-domain stores, drop the old flat cache, scope the
 isolated values.
 
 `lo lint` helps enforce the split: it warns when a `Secret.*` cache entry exists
-in **both** a domain's store and the flat `.secrets/` store — a deprecated
+in **both** a domain's store and the flat `.secrets/` store, a deprecated
 shadow. Identical copies are a stale duplicate to delete; **differing** copies
-are active drift — different tools then read different stores, which can re-key a
+are active drift: different tools then read different stores, which can re-key a
 live cluster from the wrong one. Keep domain secrets in the per-domain store
 only; leave in flat `.secrets/` just the global, non-domain material (a shared
 registry/expose TLS cert).
 
 ## Using a secret
 
-Mount the `Secret` as a **file** rather than injecting it via an env var — a
+Mount the `Secret` as a **file** rather than injecting it via an env var: a
 mounted file isn't exposed through `/proc`, crash dumps, or child processes, and
 rotates without a pod restart. The mounted file contains exactly the generated
 bytes.
 
 ## Sealing crown jewels (`immutable: true`)
 
-For secrets whose **silent rotation would orphan stateful data** — an encryption
-masterkey, a database password, a signing key — add `immutable: true` to the
+For secrets whose **silent rotation would orphan stateful data** (an encryption
+masterkey, a database password, a signing key), add `immutable: true` to the
 spec. It passes through to the k8s Secret's native `immutable` field (stable
-since 1.21), so any apply that would *change* the live value is rejected by the
-apiserver instead of quietly re-keying a running system. Rotation then requires
+since 1.21), so the apiserver rejects any apply that would *change* the live
+value instead of quietly re-keying a running system. Rotation then requires
 an explicit delete + re-apply. See
 [Sealing a secret](/reference/kustomize-plugins#sealing-a-secret-immutable) for
 the full semantics and trade-offs.
@@ -240,14 +240,14 @@ the full semantics and trade-offs.
 The [`cert:` generator](/reference/kustomize-plugins#development-certificates-cert)
 signs development leaf certs (the app wildcard, registry TLS) with a local CA at
 `$CAROOT` (default `~/.local/share/mkcert`), created on first use. Nothing trusts
-that CA until you install it into your system + browser trust stores — once per
+that CA until you install it into your system + browser trust stores, once per
 machine:
 
 ```bash
 lo trust        # wraps `mkcert -install` (needs mkcert: b install mkcert)
 ```
 
-`lo trust` is the **only** step that needs the `mkcert` binary — minting never
+`lo trust` is the **only** step that needs the `mkcert` binary: minting never
 does. After it, browsers accept `https://*.<domain>` and the host Docker daemon
 accepts pushes to TLS registries. `lo doctor` reports whether the CA is trusted.
 
@@ -259,10 +259,10 @@ lo secrets --domain <domain> print [pattern]   # show value(s)
 lo secrets --domain <domain> path              # the resolved store path for the context
 ```
 
-(Omit `--domain` to act on the flat `$PATH_SECRETS` store — single-instance
+(Omit `--domain` to act on the flat `$PATH_SECRETS` store: single-instance
 projects, or anything not scoped to a domain.)
 
 ## See also
 
-- [Kustomize Plugins → Secrets Generator](/reference/kustomize-plugins#secrets-generator)
-  — every generator type, charsets, cryptographic-key guidance.
+- [Kustomize Plugins → Secrets Generator](/reference/kustomize-plugins#secrets-generator):
+  every generator type, charsets, cryptographic-key guidance.

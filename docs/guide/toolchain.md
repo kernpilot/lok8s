@@ -1,8 +1,8 @@
 # The Toolchain (`.bin/b.yaml`)
 
 Every lok8s project carries a pinned toolchain in `.bin/`. The file that
-declares it is `.bin/b.yaml`, managed by [`b`](https://github.com/fentas/b)
-— a binary manager and env-file syncer ([binary.help](https://binary.help)).
+declares it is `.bin/b.yaml`, managed by [`b`](https://github.com/fentas/b),
+a binary manager and env-file syncer ([binary.help](https://binary.help)).
 lok8s itself is distributed as a `b` environment: `b` installs the `lo` CLI,
 the `.lok8s/` framework tree, and every tool the framework calls.
 
@@ -21,9 +21,9 @@ behavior. If something here does not match what you see, check
 
 `b` owns two things in a lok8s project:
 
-1. **Binaries** — kubectl, kustomize, sops, tilt, kind, and the rest land
+1. **Binaries**: kubectl, kustomize, sops, tilt, kind, and the rest land
    in `.bin/`, pinned per project. Nothing touches your system.
-2. **Framework files** — `.lok8s/**`, the Tilt extension, the kustomize
+2. **Framework files**: `.lok8s/**`, the Tilt extension, the kustomize
    plugins, and `.bin/b.yaml` itself sync from the upstream lok8s repo.
 
 The commands you run:
@@ -53,7 +53,7 @@ so teammates and CI get the identical toolchain. The
 
 `b` picks the install directory from the first of these that is set:
 `PATH_BIN`, then `PATH_BASE`, then `<git-root>/.bin`, then `<cwd>/.bin`.
-Note that `PATH_BIN` and `PATH_BASE` are used **verbatim** — `b` does not
+Note that `b` uses `PATH_BIN` and `PATH_BASE` **verbatim**: it does not
 append `.bin` to them, it only does that for the git-root and working-
 directory fallbacks. The `.envrc` that ships with every profile exports
 these for [direnv](https://direnv.net/) users.
@@ -66,7 +66,7 @@ or to raise GitHub API rate limits.
 ## The `binaries` section
 
 `binaries` is a map. Each key is either a **pre-packaged name** (`kubectl`,
-`jq`, `sops`, …— `b search <name>` lists them) or a **provider ref**
+`jq`, `sops`, …: `b search <name>` lists them) or a **provider ref**
 (`github.com/arg-sh/argsh`, `oci://docker`, `go://…`, `git://…`). An empty
 value `{}` means "latest, defaults".
 
@@ -107,15 +107,15 @@ file sets, and consumers subscribe with
 
 | Profile | Includes | Adds |
 |---|---|---|
-| `core` | — | `.lok8s/**`, `.envrc`, `.gitignore`, `.mcp.json`, skills, and the `core`-tagged binaries |
-| `kustomize` | — | `.kustomize/**` plugins and their binaries |
+| `core` | (none) | `.lok8s/**`, `.envrc`, `.gitignore`, `.mcp.json`, skills, and the `core`-tagged binaries |
+| `kustomize` | (none) | `.kustomize/**` plugins and their binaries |
 | `local` | core + kustomize | `Tiltfile`, `services.yaml`, kind/Tilt/mkcert/bats |
 | `capi` | local | `clusterctl`, `hcloud` |
 | `kubeone` | local | `kubeone`, `hcloud` |
 
 Each profile entry has a `description`, optional `includes` (compose from
 other profiles), and a `files` map of glob patterns to sync. One pattern
-deserves a note — the profile syncs a **filtered** `b.yaml`:
+deserves a note. The profile syncs a **filtered** `b.yaml`:
 
 ```yaml
 profiles:
@@ -130,7 +130,7 @@ profiles:
 `select` extracts keys from a YAML file instead of syncing it whole; a
 [JMESPath](https://jmespath.org/) expression here keeps only the binaries
 tagged with the profile's group. The effect: a `core` consumer's
-`.bin/b.yaml` lists only the `core` binaries — each profile ships the
+`.bin/b.yaml` lists only the `core` binaries. Each profile ships the
 tools it needs and nothing else.
 
 You rarely touch `profiles` as a consumer. `b env add` copies the resolved
@@ -150,5 +150,5 @@ Or edit `.bin/b.yaml` directly and run `b install`. Commit `b.yaml` and
 
 ## See also
 
-- [Getting Started](/guide/) — profiles and the bootstrap path
-- [`b` on GitHub](https://github.com/fentas/b) · [binary.help](https://binary.help) — the full manual: providers, env-sync strategies, Docker usage
+- [Getting Started](/guide/): profiles and the bootstrap path
+- [`b` on GitHub](https://github.com/fentas/b) · [binary.help](https://binary.help): the full manual (providers, env-sync strategies, Docker usage)

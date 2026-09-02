@@ -3,7 +3,7 @@
 The lok8s operator runs on a management cluster and watches lok8s custom resources. It uses [shell-operator](https://github.com/flant/shell-operator) with bash hooks that reuse the same library code as the CLI.
 
 ::: warning Alpha
-The `Lo` lifecycle is complete — creation, drift detection, kubeconfig publication, and finalizer-guarded teardown. `Capi` covers creation and status sync only: **deleting a `Capi` resource does not tear down the cluster** ([#6](https://github.com/kernpilot/lok8s/issues/6)). Don't point the Capi path at production credentials yet.
+The `Lo` lifecycle is complete: creation, drift detection, kubeconfig publication, and finalizer-guarded teardown. `Capi` covers creation and status sync only: **deleting a `Capi` resource does not tear down the cluster** ([#6](https://github.com/kernpilot/lok8s/issues/6)). Don't point the Capi path at production credentials yet.
 :::
 
 ## Architecture
@@ -109,7 +109,7 @@ spec:
     domain: prod.example.com
 ```
 
-> **Note:** Deploy CRD workload selection is being reworked — target
+> **Note:** Deploy CRD workload selection is under rework: target
 > selection will land alongside the `services.yaml` targets-map
 > redesign. For now, a Deploy spec only carries `clusterRef`.
 
@@ -123,20 +123,20 @@ kubectl get deploys.cluster.lok8s.dev
 
 ### lo-reconcile.sh
 
-Full lifecycle for `Lo` resources — the same driver contract as the CLI:
+Full lifecycle for `Lo` resources, with the same driver contract as the CLI:
 
 1. **Create/Modify**: adds a `lok8s.dev/lo-teardown` finalizer, checks
-   `driver::status` first (idempotent — a `Running` cluster is never
+   `driver::status` first (idempotent: a `Running` cluster never gets
    re-provisioned), then `driver::provision` + framework bootstrap
    (`spec.bootstrap` addons), publishes the kubeconfig as Secret
    `<name>-kubeconfig`, and sets `status.kubeconfig.secretRef`.
 2. **Delete**: the finalizer holds the object while `driver::destroy`
-   tears the cluster down; on success the finalizer is removed and the
-   kubeconfig Secret deleted. A failed teardown keeps the finalizer and
-   is retried.
-3. **Drift**: a `*/3` schedule re-lists every `Lo` and converges — a
-   cluster deleted out-of-band is re-provisioned, a finished manual
-   teardown is detected.
+   tears the cluster down; on success the hook removes the finalizer and
+   deletes the kubeconfig Secret. A failed teardown keeps the finalizer
+   and gets retried.
+3. **Drift**: a `*/3` schedule re-lists every `Lo` and converges. A
+   cluster deleted out-of-band gets re-provisioned; a finished manual
+   teardown gets detected.
 
 ### capi-reconcile.sh
 
@@ -172,7 +172,7 @@ kubectl apply -k operator/deploy/lo/
 The operator runs in the `lok8s-system` namespace with a dedicated service account and RBAC rules.
 
 The `lo/` overlay mounts the node's Docker socket, enables host
-networking (kind kubeconfigs point at host ports), and runs as root —
+networking (kind kubeconfigs point at host ports), and runs as root:
 a deliberate trade-off for CI and single-node management hosts. Do not
 apply it on multi-tenant clusters.
 

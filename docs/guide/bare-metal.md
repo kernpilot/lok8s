@@ -6,8 +6,8 @@ cloud VMs via the Hetzner provider. Bare metal servers use the
 
 ## How it works
 
-Cloud VMs are created by `hcloud server create`. Bare metal servers
-**already exist** — they're ordered via Hetzner Robot and provisioned
+`hcloud server create` creates cloud VMs. Bare metal servers
+**already exist**: you order them via Hetzner Robot and provision them
 via `installimage` in rescue mode.
 
 The provider handles both types in the same JSON descriptor:
@@ -32,8 +32,8 @@ The provider handles both types in the same JSON descriptor:
 
 ### `#`-prefixed fields
 
-Fields starting with `#` are **metadata** — they're not passed to
-`hcloud` CLI as flags. Instead, they're consumed by the provider hooks:
+Fields that start with `#` are **metadata**: they do not pass to the
+`hcloud` CLI as flags. Instead, the provider hooks consume them:
 
 | Field | Purpose |
 |-------|---------|
@@ -42,28 +42,28 @@ Fields starting with `#` are **metadata** — they're not passed to
 | `#internal-ip` | Server's private/vSwitch IP |
 | `#installimage` | Path to Hetzner installimage config file |
 | `#cloud.d` | Cloud-init module directory to apply |
-| `#labels` | Comma-separated `k=v` node labels — carried through the provider output into the host's `labels:` in the generated kubeone.yaml, so KubeOne's `labelNodes` task syncs them onto the Node on every apply (suffix a key with `-` to remove a label). `role=control-plane` selects the role; the `lok8s.dev/*` and bare `role` orchestration keys are consumed as selectors, never synced to the Node |
+| `#labels` | Comma-separated `k=v` node labels, carried through the provider output into the host's `labels:` in the generated kubeone.yaml, so KubeOne's `labelNodes` task syncs them onto the Node on every apply (suffix a key with `-` to remove a label). `role=control-plane` selects the role; the `lok8s.dev/*` and bare `role` orchestration keys act as selectors, never synced to the Node |
 | `#floating-ip` | Index into the `floating-ip` array to assign |
 | `#wipe-devices` | Data devices to full-wipe on a **fresh** install ([details](#wiping-data-devices)) |
 
 The generated kubeone.yaml host inventory is **descriptor-anchored**: only
 servers declared in `server[]` become `controlPlane.hosts` /
-`staticWorkers.hosts`. Cloud VMs that merely carry the cluster label but are
-not declared — e.g. workers created at runtime by KubeOne's machine-controller
-from `spec.workers` — are skipped with a warning, never adopted as static
-hosts.
+`staticWorkers.hosts`. Cloud VMs that merely carry the cluster label but do
+not appear in `server[]` (e.g. workers created at runtime by KubeOne's
+machine-controller from `spec.workers`) get skipped with a warning, never
+adopted as static hosts.
 
 ## Provisioning flow
 
 A bare metal node **self-bootstraps via cloud-init**, exactly like a cloud
-VM — the only extra step is installing cloud-init, because the Hetzner
+VM. The only extra step is to install cloud-init, because the Hetzner
 installimage base image doesn't ship it.
 
 ### First time (rescue mode)
 
 1. Order the dedicated server via [Hetzner Robot](https://robot.hetzner.com)
-2. Activate rescue mode (Robot console, or the Robot API — see [Limitations](#limitations))
-3. Run `lo provision` — the provider detects rescue mode and:
+2. Activate rescue mode (Robot console, or the Robot API; see [Limitations](#limitations))
+3. Run `lo provision`. The provider detects rescue mode and:
    - SCPs the installimage config to the server
    - Generates an installimage **post-install** script and SCPs it
    - Runs `installimage -a -c /tmp/installimage.conf -x /tmp/lok8s-post-install`
@@ -74,8 +74,8 @@ installimage base image doesn't ship it.
 ### Why cloud-init on bare metal {#self-bootstrap}
 
 The Hetzner installimage `*-base` images have **no cloud-init**. So the
-generated `-x` post-install script — which runs inside the freshly installed
-system's chroot, *before* any firewall exists (apt egress is unrestricted) —
+generated `-x` post-install script, which runs inside the freshly installed
+system's chroot *before* any firewall exists (apt egress is unrestricted),
 does two things:
 
 1. `apt-get install cloud-init`
@@ -84,7 +84,7 @@ does two things:
    `cloud-config::generate` output a cloud VM gets, pins the datasource, and
    disables cloud-init network rendering (installimage owns the base network).
 
-On first boot cloud-init runs `write_files` + `runcmd` natively — vSwitch
+On first boot cloud-init runs `write_files` + `runcmd` natively: vSwitch
 netplan, sysctls, kernel modules, packages. One config, one mechanism, cloud
 and bare metal alike. (If cloud-init is somehow absent or errors, the
 provider falls back to applying the same config directly over SSH.)
@@ -102,7 +102,7 @@ CLOUD_PATH=clusters/<domain>/cloud-init CLOUD_PATHD="node:worker" \
 The bare metal bootstrap is gated **solely** on rescue mode + a fresh
 installimage run. A server that is **not** in rescue mode (already installed)
 already self-bootstrapped on its own first boot, so the provider leaves it
-untouched — it does not re-apply config on every run.
+untouched: it does not re-apply config on every run.
 
 ### Rescue mode detection
 
@@ -138,9 +138,9 @@ See [Hetzner installimage docs](https://docs.hetzner.com/robot/dedicated-server/
 Bare-metal `installimage` defaults to an **MBR** partition table. A typical
 Kubernetes disk layout has more than four partitions (`/boot`, `/`,
 `/var/lib/containerd`, …), so MBR must wrap the extras in an **extended
-partition** — and its ~1 KiB marker is what `ceph-volume raw list` (Rook's no-arg
+partition**. Its ~1 KiB marker is what `ceph-volume raw list` (Rook's no-arg
 OSD scan) chokes on: `ceph-bluestore-tool`'s `is_valid_io` asserts, the scan
-returns `{}`, and **every OSD on the node is hidden** — the node provisions fine
+returns `{}`, and **every OSD on the node is hidden**. The node provisions fine
 but Ceph shows zero OSDs ([rook#17716](https://github.com/rook/rook/issues/17716);
 fixed upstream in [ceph#69812](https://github.com/ceph/ceph/pull/69812)).
 
@@ -152,27 +152,27 @@ FORCE_GPT 2
 ```
 
 ::: warning The ceph-osd carve also triggers this on MBR
-Its MBR path (`parted mkpart logical …`) creates a logical → extended partition —
+Its MBR path (`parted mkpart logical …`) creates a logical → extended partition:
 the exact ~1 KiB trigger. On bare-metal Ceph nodes, **always `FORCE_GPT`**.
 :::
 
-For the OSD storage itself, prefer a **dedicated raw disk** — leave a drive
+For the OSD storage itself, prefer a **dedicated raw disk**: leave a drive
 unpartitioned (comment out its `DRIVE`, omit its `PART` lines) and point Rook at
-it via `deviceFilter` (e.g. `^nvme[12]n1$`) or `useAllDevices`; the layout example
+it via `deviceFilter` (e.g. `^nvme[12]n1$`) or `useAllDevices`. The layout example
 above uses exactly this approach. The single-disk `ceph-osd` carve also works, but
-only if installimage leaves a free tail — on a full OS disk it has nothing to claim.
+only if installimage leaves a free tail: on a full OS disk it has nothing to claim.
 
 ## Wiping data devices {#wiping-data-devices}
 
 Reinstalling the OS with `installimage` only touches the OS disk. Extra data
-drives — the raw disks you hand to Rook-Ceph, a database, etc. — keep whatever
+drives (the raw disks you hand to Rook-Ceph, a database, etc.) keep whatever
 was on them from a previous life. For storage systems that write metadata
 **across the whole disk** that stale data is not harmless: it makes a "fresh"
 disk look half-initialised.
 
 `#wipe-devices` declares, per server, which data devices to fully erase when
 that server is being **freshly installed**. The provider honors it
-transparently as part of the normal `lo provision` bare-metal path — there is
+transparently as part of the normal `lo provision` bare-metal path: there is
 no separate command to run.
 
 ### Rescue-mode gating — a live node is never touched
@@ -181,30 +181,30 @@ The wipe is gated on **two** conditions, both of which must hold: the server is
 in Hetzner **rescue mode** (RAM-booted, before `installimage` runs) **and** an
 `#installimage` config is actually present, so the OS disk **will** be
 reinstalled immediately afterwards. This co-gate means a wipe can never run
-unless a fresh install is about to follow — a rescue node with no installimage
-config is left untouched, exactly like an already-installed one. This is the
+unless a fresh install is about to follow: a rescue node with no installimage
+config stays untouched, exactly like an already-installed one. This is the
 same fresh-install gate described in [Subsequent runs](#subsequent-runs): a
 server that is **not** in rescue mode (already installed and running) is never
 reached by this code path, so its disks are never touched. Wiping in rescue mode
-is safe — nothing on the target disks is in use yet, and `installimage`
+is safe: nothing on the target disks is in use yet, and `installimage`
 reinstalls the OS disk right afterwards.
 
 If a declared device fails its identity check (below), the wipe **aborts the
-install** with a non-zero status and touches nothing — the framework fails
+install** with a non-zero status and touches nothing: the framework fails
 loudly rather than installing over disks it could not positively identify.
 
 ::: warning A mid-wipe abort can leave a node partially wiped
 The guards run per device, in order, so if wiping several devices aborts partway
 (e.g. an unexpected device fails its identity check after an earlier one was
-already discarded), the node may be left **partially wiped**. This is loud — the
-install stops with a non-zero status — and recoverable: fix the offending
+already discarded), the node may be left **partially wiped**. This is loud (the
+install stops with a non-zero status) and recoverable: fix the offending
 descriptor entry and re-run `lo provision` (the node is still in rescue mode, so
 the wipe simply runs again from the top).
 :::
 
 ### Two forms
 
-**Wipe every physical disk** — `true`:
+**Wipe every physical disk** with `true`:
 
 ```json
 { "name": "worker-0", "#cloud.root": "true",
@@ -213,11 +213,11 @@ the wipe simply runs again from the top).
   "#wipe-devices": true }
 ```
 
-Every physical disk (`lsblk` type `disk`) is wiped. Simple and safe on a
-dedicated node whose disks you fully own — `installimage` re-partitions and
+This wipes every physical disk (`lsblk` type `disk`). Simple and safe on a
+dedicated node whose disks you fully own: `installimage` re-partitions and
 reinstalls the OS disk immediately after.
 
-**Wipe specific devices, with sanity guards** — a list:
+**Wipe specific devices, with sanity guards** via a list:
 
 ```json
 { "name": "worker-0", "#cloud.root": "true",
@@ -238,11 +238,11 @@ Each entry:
 |-----|---------|
 | `device` | Device path to wipe, e.g. `/dev/nvme1n1`. |
 | `model` | *Sanity guard.* Assert udev `ID_MODEL` equals this **before** wiping. |
-| `id` | *Sanity guard.* Assert a stable id — udev `ID_SERIAL` or `ID_WWN`, or a `/dev/disk/by-id/<id>` match — equals this before wiping. |
+| `id` | *Sanity guard.* Assert a stable id (udev `ID_SERIAL` or `ID_WWN`, or a `/dev/disk/by-id/<id>` match) equals this before wiping. |
 
 ::: warning `model` must be the exact udev `ID_MODEL`, not the marketing name
 The guard is a **whole-line exact** match against udev's `ID_MODEL` property,
-which is device-dependent — some device classes replace spaces with
+which is device-dependent: some device classes replace spaces with
 underscores. Read the exact string off the target node (in rescue mode) rather
 than copying a datasheet name:
 
@@ -256,13 +256,13 @@ MZQL21T9HCJR-00A07`) is illustrative; the exact form on your hardware may differ
 
 `model` and `id` are optional guards. When present, they must match: **any
 declared mismatch aborts the install** and wipes nothing. This is the
-recommended form for nodes where you must not risk erasing the wrong drive —
+recommended form for nodes where you must not risk erasing the wrong drive:
 declare the model and/or serial you expect, and the install refuses to proceed
 if the hardware doesn't line up (drives were reordered, a disk was swapped,
-etc.). If an entry omits `device` but gives `id`, the device is resolved via
-`/dev/disk/by-id/<id>`.
+etc.). If an entry omits `device` but gives `id`, the provider resolves the
+device via `/dev/disk/by-id/<id>`.
 
-Omitting `#wipe-devices` entirely (or setting it to `false`) means **no wipe** —
+Omitting `#wipe-devices` entirely (or setting it to `false`) means **no wipe**:
 the safe default.
 
 ### Why a full wipe, not just the partition table
@@ -278,7 +278,7 @@ full device avoids that class of "the disk looks half-initialised" failure.
 There is **no partial fallback**: if a device does not support discard, the
 install **aborts** rather than falling back to a bounded `dd` zero-fill. A
 head-or-first-few-GiB zero would leave those far-offset labels intact yet still
-report success — a silent false-green. So a device is either fully discarded or
+report success: a silent false-green. So a device is either fully discarded or
 the install stops loudly.
 
 ## vSwitch networking
@@ -328,7 +328,7 @@ EOF
 ```
 
 ::: warning vSwitch route propagation
-After `netplan apply`, the vSwitch route can take **~1 minute** to converge —
+After `netplan apply`, the vSwitch route can take **~1 minute** to converge:
 node→cloud-subnet traffic fails immediately after, then works. Don't conclude
 "broken" without waiting, and test reachability with TCP (`nc`) not `ping`
 (the gateway forwards but doesn't answer ICMP).
@@ -342,15 +342,15 @@ node→cloud-subnet traffic fails immediately after, then works. Don't conclude
 diagnosis (it never changes anything and never fails the command) covering:
 
 - hcloud token present + API reachable; Robot creds present + API reachable
-  (a Robot API error is reported as **unreachable**, never mistaken for a
+  (a Robot API error reports as **unreachable**, never mistaken for a
   missing key)
-- the **rescue SSH key** is registered in Robot — without it a bare-metal
+- the **rescue SSH key** exists in Robot: without it a bare-metal
   reinstall would lock you out (the report tells you to add it)
 - per node: resolvable/reachable, and for each bare-metal node whether it is
   **installed** or **in rescue**
 - inventory sanity (control-plane count; each worker resolves to exactly one
-  Robot server **by its IP** — the Robot `server_name` is free-text and
-  non-unique, so it is never used to identify a machine)
+  Robot server **by its IP**: the Robot `server_name` is free-text and
+  non-unique, so it never identifies a machine)
 
 Each not-ready item comes with actionable advice, e.g. *"worker X is installed,
 not in rescue — set `HROBOT_USER`/`HROBOT_PASSWORD` to reset it automatically,
@@ -359,29 +359,29 @@ a glance, whether the infrastructure is ready.
 
 ::: tip Resetting nodes in place
 The Hetzner provider can reset the cluster's **existing** nodes back to a
-fresh-install state — cloud VMs reimaged with `hcloud server rebuild`,
-bare-metal nodes booted into rescue via the Robot API — **without** recreating
+fresh-install state (cloud VMs reimaged with `hcloud server rebuild`,
+bare-metal nodes booted into rescue via the Robot API) **without** recreating
 them (IPs, network, and load-balancer are preserved). This is the optional
-`provider::rebuild` hook; data disks are left untouched (that is
+`provider::rebuild` hook; data disks stay untouched (that is
 [`#wipe-devices`](#ceph-osds-on-bare-metal-force-gpt), applied during
-`lo provision`). It is DESTRUCTIVE and drives the recovery flow, so it is
-invoked with explicit consent — not on its own.
+`lo provision`). It is DESTRUCTIVE and drives the recovery flow, so it runs
+only with explicit consent, never on its own.
 
-It resolves and validates **every** declared node up front — cloud VMs must
+It resolves and validates **every** declared node up front (cloud VMs must
 match exactly one server carrying the cluster label; bare-metal nodes exactly
-one Robot server whose IP equals the descriptor `#external-ip` — and aborts
-touching *nothing* if any node fails that preflight, so a name collision or a
+one Robot server whose IP equals the descriptor `#external-ip`) and aborts,
+touching *nothing*, if any node fails that preflight. So a name collision or a
 partial descriptor can never reimage the wrong (or only some of the) machines.
 
 Set `CLOUD_DRY_RUN=1` to **preview** the reset: it runs the read-only preflight,
 prints the exact per-node reimage / rescue+reset plan (never the Robot
-credentials), and reimages **nothing** — the readiness barrier is skipped since
-no node changed state.
+credentials), and reimages **nothing**. It also skips the readiness barrier,
+since no node changed state.
 :::
 
 ## Logging
 
-All provider operations are logged to `<work_dir>/hetzner-provision.log`.
+The provider logs all operations to `<work_dir>/hetzner-provision.log`.
 Set `CLOUD_QUIET=1` to suppress console output (log-only mode).
 
 ## Limitations
@@ -391,4 +391,4 @@ Set `CLOUD_QUIET=1` to suppress console output (log-only mode).
   `HROBOT_PASSWORD`) is available for **resetting existing nodes** through the
   optional `provider::rebuild` hook (see [Diagnose infrastructure](#diagnose-infrastructure-lo-doctor)).
 - The provider does not manage the dedicated server lifecycle (ordering,
-  cancellation) — only provisioning via installimage.
+  cancellation): only provisioning via installimage.
