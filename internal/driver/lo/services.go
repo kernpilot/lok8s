@@ -32,8 +32,8 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 	}
 	kubeconfig := filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml")
 
-	d.runOut(ctx, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "corefile.yaml"))
-	d.runOut(ctx, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "expose.yaml"))
+	_ = d.runOut(ctx, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "corefile.yaml"))
+	_ = d.runOut(ctx, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "expose.yaml"))
 
 	// Pin coredns-external to the LAST loadBalancer.pool IP so it does not
 	// race the ingress/Envoy gateway for pool[0]. coredns-external is
@@ -47,7 +47,7 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 	pool := yqOr(root, "", "spec", "loadBalancer", "pool")
 	if strings.Contains(pool, "-") {
 		last := pool[strings.LastIndex(pool, "-")+1:]
-		d.runOut(ctx, out, errOut, "kubectl", "annotate", "svc", "coredns-external", "-n", "kube-system",
+		_ = d.runOut(ctx, out, errOut, "kubectl", "annotate", "svc", "coredns-external", "-n", "kube-system",
 			"--kubeconfig", kubeconfig,
 			"metallb.universe.tf/loadBalancerIPs="+last, "--overwrite")
 	}
@@ -59,7 +59,7 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 	d.corednsCustom(ctx, out, errOut, domain, clusterYAML, kubeconfig)
 
 	// Tolerated-failure patch (bash: 2>/dev/null || true).
-	d.runQuiet(ctx, "kubectl", "patch", "deployment", "coredns", "-n", "kube-system",
+	_ = d.runQuiet(ctx, "kubectl", "patch", "deployment", "coredns", "-n", "kube-system",
 		"--kubeconfig", kubeconfig, "--type", "json",
 		"--patch-file", filepath.Join(corednsDir, "patch.json"))
 
@@ -91,7 +91,7 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	if err != nil {
 		return
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	root := loadYAML(clusterYAML)
 
@@ -123,15 +123,15 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
     cache 30
 }
 `, name, target)
-		os.WriteFile(filepath.Join(tmp, fmt.Sprintf("host-%d.server", i)), []byte(block), 0o644)
+		_ = os.WriteFile(filepath.Join(tmp, fmt.Sprintf("host-%d.server", i)), []byte(block), 0o644)
 	}
 
 	// (2) raw inline servers / overrides.
 	if servers := yqOr(root, "", "spec", "coredns", "servers"); servers != "" {
-		os.WriteFile(filepath.Join(tmp, "inline.server"), []byte(servers+"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(tmp, "inline.server"), []byte(servers+"\n"), 0o644)
 	}
 	if overrides := yqOr(root, "", "spec", "coredns", "overrides"); overrides != "" {
-		os.WriteFile(filepath.Join(tmp, "inline.override"), []byte(overrides+"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(tmp, "inline.override"), []byte(overrides+"\n"), 0o644)
 	}
 
 	// (3) raw files from the import path (default ./coredns, relative to
@@ -145,7 +145,7 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 			matches, _ := filepath.Glob(filepath.Join(importPath, glob))
 			for _, m := range matches {
 				if raw, err := os.ReadFile(m); err == nil {
-					os.WriteFile(filepath.Join(tmp, filepath.Base(m)), raw, 0o644)
+					_ = os.WriteFile(filepath.Join(tmp, filepath.Base(m)), raw, 0o644)
 				}
 			}
 		}
@@ -163,7 +163,7 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	if err != nil {
 		return
 	}
-	d.runInput(ctx, rendered+"\n", out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
+	_ = d.runInput(ctx, rendered+"\n", out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
 }
 
 // runOut runs a tool with the caller's writers (progress phases capture

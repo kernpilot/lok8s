@@ -177,16 +177,6 @@ func (a *Applier) kubectlQuiet(ctx context.Context, stdin string, args ...string
 	return exitCode(a.Runner.Run(ctx, c))
 }
 
-// tty is the per-applier UI gate: NonInteractive (bash: the exported
-// LOK8S_NONINTERACTIVE the bootstrap scheduler sets on its background
-// subshells) forces the off-tty passthrough regardless of the process env.
-func (a *Applier) tty() bool {
-	if a.NonInteractive {
-		return false
-	}
-	return ttyUI()
-}
-
 // applyPass is one server-side apply (bash: kapply::_apply_pass): collapse
 // the output on a tty (full off-tty), surface ONLY error lines on failure,
 // and return (raw output, kubectl's exit). Used for BOTH the initial apply
@@ -284,7 +274,7 @@ func (a *Applier) interactive() bool {
 	if err != nil {
 		return false
 	}
-	f.Close()
+	_ = f.Close()
 	return true
 }
 
@@ -306,7 +296,7 @@ func (a *Applier) ask(prompt string) bool {
 	if err != nil {
 		return false
 	}
-	defer tty.Close()
+	defer func() { _ = tty.Close() }()
 	fmt.Fprint(tty, prompt)
 	buf := make([]byte, 64)
 	n, err := tty.Read(buf)
@@ -436,7 +426,7 @@ func marshalDoc(d manifestDoc) string {
 	if err := enc.Encode(d.node); err != nil {
 		return ""
 	}
-	enc.Close()
+	_ = enc.Close()
 	return buf.String()
 }
 

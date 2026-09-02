@@ -183,15 +183,16 @@ func runDoctor(paths *config.Paths, d string, out, stderr io.Writer) error {
 	if d != "" {
 		spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
 		deploySpec := filepath.Join(paths.Clusters, d, "deploy.lok8s.yaml")
-		if fileExists(spec) {
+		switch {
+		case fileExists(spec):
 			kind, err := domain.SpecDriver(spec, "?")
 			if err != nil {
 				kind = "?"
 			}
 			doctorOK(out, "active: "+d+" (kind "+kind+")")
-		} else if fileExists(deploySpec) {
+		case fileExists(deploySpec):
 			doctorOK(out, "active: "+d+" (Deploy -> "+deployClusterRef(deploySpec)+")")
-		} else {
+		default:
 			doctorWarn(out, "active domain '"+d+"' has no cluster.lok8s.yaml / deploy.lok8s.yaml")
 		}
 	} else {

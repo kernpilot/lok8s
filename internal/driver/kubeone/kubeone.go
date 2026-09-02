@@ -143,7 +143,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// 4. Append the host inventory to the manifest itself (manifest fields
 	// are versioned + strictly validated by kubeone — unlike the legacy
 	// tfjson envelope, whose schema drifted under us).
-	os.Remove(filepath.Join(workDir, "output.json"))
+	_ = os.Remove(filepath.Join(workDir, "output.json"))
 	if d.Hooks.AppendInventory != nil {
 		if err := d.Hooks.AppendInventory(ctx, d.deps.ProviderConfigFile, filepath.Join(workDir, "kubeone.yaml")); err != nil {
 			return err
@@ -232,7 +232,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	}
 
 	// 3. Clean up the kubeconfig (named by metadata.name).
-	os.Remove(filepath.Join(d.deps.Paths.Base, ".kubeconfig", metadataName(cy)+".yaml"))
+	_ = os.Remove(filepath.Join(d.deps.Paths.Base, ".kubeconfig", metadataName(cy)+".yaml"))
 	return nil
 }
 

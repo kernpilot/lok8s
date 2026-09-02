@@ -37,11 +37,11 @@ func saveYAMLDoc(path string, root *yaml.Node) error {
 	enc := yaml.NewEncoder(f)
 	enc.SetIndent(2)
 	if err := enc.Encode(root); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := enc.Close(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	return f.Close()

@@ -71,23 +71,28 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	if err != nil {
 		return err
 	}
-	tmpConf.Write(rendered)
-	tmpConf.Close()
-	defer os.Remove(tmpConf.Name())
+	defer func() { _ = os.Remove(tmpConf.Name()) }()
+	if _, err := tmpConf.Write(rendered); err != nil {
+		_ = tmpConf.Close()
+		return err
+	}
+	if err := tmpConf.Close(); err != nil {
+		return err
+	}
 
-	d.runQuiet(ctx, "docker", "rm", "-f", proxyName)
+	_ = d.runQuiet(ctx, "docker", "rm", "-f", proxyName)
 
 	// Start container with default nginx config, then overwrite it.
 	// docker cp streams file content over the Docker connection (works with
 	// DOCKER_HOST=ssh:// where -v mounts can't reach local paths).
-	d.runOut(ctx, out, errOut, "docker", "run", "-d", "--restart=always",
+	_ = d.runOut(ctx, out, errOut, "docker", "run", "-d", "--restart=always",
 		"--name", proxyName,
 		"--network", network,
 		"-p", "80:80", "-p", "443:443",
 		"nginx:alpine")
 
 	// Copy rendered config + optional TLS certs into the running container.
-	d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf")
+	_ = d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf")
 
 	if fileExists(certPath) && fileExists(keyPath) {
 		// KNOWN DEFECT, PRESERVED ON PURPOSE: the shipped nginx.conf
@@ -98,14 +103,14 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 		// side is a user-visible behavior change (the proxy suddenly serves
 		// TLS) that belongs to its own change, not this port. Do NOT
 		// silently align the paths.
-		d.runOut(ctx, out, errOut, "docker", "cp", certPath, proxyName+":/tls.crt")
-		d.runOut(ctx, out, errOut, "docker", "cp", keyPath, proxyName+":/tls.key")
+		_ = d.runOut(ctx, out, errOut, "docker", "cp", certPath, proxyName+":/tls.crt")
+		_ = d.runOut(ctx, out, errOut, "docker", "cp", keyPath, proxyName+":/tls.key")
 	} else {
 		ui.Warnf(errOut, "expose: TLS certs not found at %s — proxy will run without TLS", certPath)
 	}
 
 	// Reload nginx with the new config.
-	d.runOut(ctx, out, errOut, "docker", "exec", proxyName, "nginx", "-s", "reload")
+	_ = d.runOut(ctx, out, errOut, "docker", "exec", proxyName, "nginx", "-s", "reload")
 
 	accessIP := envOr("LOK8S_REMOTE_IP", "localhost")
 	ui.Debugf(errOut, "expose: nginx proxy %s running on %s:443 → %s", proxyName, accessIP, backendIP)

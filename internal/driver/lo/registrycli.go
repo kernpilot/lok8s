@@ -61,7 +61,7 @@ func (d *Driver) RegistryDown(ctx context.Context, domain string, errOut io.Writ
 	}
 	for _, r := range rf.Registries {
 		regName, _ := rf.containerFor(r.Name)
-		d.runQuiet(ctx, "docker", "rm", "-f", regName)
+		_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
 	}
 	return nil
 }
@@ -92,8 +92,8 @@ func (d *Driver) RegistryClean(ctx context.Context, domain string, shared bool, 
 			continue
 		}
 		regName := SharedRegistryPrefix + r.Name
-		d.runQuiet(ctx, "docker", "rm", "-f", regName)
-		d.runQuiet(ctx, "docker", "volume", "rm", "-f", regName)
+		_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
+		_ = d.runQuiet(ctx, "docker", "volume", "rm", "-f", regName)
 		removeStateFiles(regName)
 	}
 
@@ -102,7 +102,7 @@ func (d *Driver) RegistryClean(ctx context.Context, domain string, shared bool, 
 		"-f", `{{range .Containers}}{{.Name}}{{"\n"}}{{end}}`)
 	for _, member := range strings.Fields(members) {
 		ui.Warnf(errOut, "registry clean: detaching '%s' from %s (re-attaches on its cluster's next 'lo up')", member, net)
-		d.runQuiet(ctx, "docker", "network", "disconnect", "-f", net, member)
+		_ = d.runQuiet(ctx, "docker", "network", "disconnect", "-f", net, member)
 	}
 	if d.networkExists(ctx, net) {
 		if err := d.runQuiet(ctx, "docker", "network", "rm", net); err != nil {

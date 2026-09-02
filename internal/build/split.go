@@ -196,13 +196,13 @@ func Split(o Options) error {
 		ui.Errorf(stderr, "split: failed to shape %s", artifact)
 		return ErrHandled
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 	stage, err := os.MkdirTemp(domainDir, ".artifacts-stage.")
 	if err != nil {
 		ui.Errorf(stderr, "split: failed to shape %s", artifact)
 		return ErrHandled
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = os.RemoveAll(stage) }()
 
 	// sops discovers a repo-level .sops.yaml from cwd and then REQUIRES a
 	// matching creation rule even when recipients are passed — give it a
@@ -239,12 +239,12 @@ func Split(o Options) error {
 		cmd.Stdin = streamFile
 		cmd.Stderr = stderr
 		runErr := cmd.Run()
-		streamFile.Close()
+		_ = streamFile.Close()
 		if runErr != nil {
 			ui.Errorf(stderr, "split: failed to split %s", artifact)
 			return ErrHandled
 		}
-		os.Remove(streamPath)
+		_ = os.Remove(streamPath)
 	}
 
 	// Same kind+namespace+name across different API groups would silently
@@ -394,7 +394,7 @@ func Split(o Options) error {
 		if noSecrets && strings.HasSuffix(name, ".sops.yaml") && strings.HasPrefix(name, "Secret.") {
 			continue
 		}
-		os.Remove(filepath.Join(outDir, name))
+		_ = os.Remove(filepath.Join(outDir, name))
 	}
 	// bash: `for f in "${stage}"/.gitignore "${stage}"/*` — the shell glob
 	// skips dotfiles, so .gitignore is named explicitly.
@@ -585,12 +585,17 @@ func execToFile(path string, args []string, dir, outPath string, stderr io.Write
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	cmd := exec.Command(path, args...)
 	cmd.Dir = dir
 	cmd.Stdout = out
 	cmd.Stderr = stderr
-	return cmd.Run()
+	runErr := cmd.Run()
+	// A close error on the written file is a lost write; report it when the
+	// command itself succeeded.
+	if err := out.Close(); err != nil && runErr == nil {
+		return err
+	}
+	return runErr
 }
 
 // copyPreserving copies src to dst keeping mode and timestamps (bash: cp -p).

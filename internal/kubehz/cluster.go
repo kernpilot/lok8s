@@ -484,8 +484,8 @@ func (c *Context) ReEnroll(ctx context.Context, domain string) error {
 		return ErrHandled
 	}
 	// sha256, lowercase hex — the exact verifier shape the route stores.
+	// Only the hash leaves this function; the token string is not reused.
 	sum := sha256.Sum256([]byte(agentToken))
-	agentToken = ""
 	tokenHash := hex.EncodeToString(sum[:])
 	if !sha256HexRe.MatchString(tokenHash) {
 		c.errorf("could not hash the agent token (need sha256sum or openssl)")

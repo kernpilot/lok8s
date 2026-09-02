@@ -234,8 +234,8 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 
 	// Clean up local state (kubeconfig is named by metadata.name).
 	clusterName := spec.raw("metadata", "name")
-	os.Remove(filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml"))
-	os.RemoveAll(workDir)
+	_ = os.Remove(filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml"))
+	_ = os.RemoveAll(workDir)
 
 	ui.Debugf(stderr, "KKP cluster %s destroyed and local state cleaned", clusterID)
 	return nil

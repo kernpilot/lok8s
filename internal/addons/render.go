@@ -65,7 +65,7 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 				return "", fmt.Errorf("addons render: temp dir: %w", err)
 			}
 			buildDir = tmp
-			defer os.RemoveAll(tmp)
+			defer func() { _ = os.RemoveAll(tmp) }()
 			// Dotfiles too (bash: `cp -r dir/.`) — a glob drops them and a
 			// chart referencing a dotfile would fail to render.
 			if err := copyTree(addonDir, tmp); err != nil {

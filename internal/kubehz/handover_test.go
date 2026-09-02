@@ -183,7 +183,7 @@ func TestHandoverReceiveRunsInOrder(t *testing.T) {
 		t.Fatalf("verify probe missing:\n%s", strings.Join(ho.calls, "\n"))
 	}
 	restore, init, verify := ho.lineIndex("etcdutl snapshot restore"), ho.lineIndex("kubeadm init"), ho.lineIndex("kubectl --kubeconfig")
-	if restore < 0 || init < 0 || verify < 0 || !(restore < init && init < verify) {
+	if restore < 0 || init < 0 || verify < 0 || restore >= init || init >= verify {
 		t.Fatalf("order restore=%d init=%d verify=%d", restore, init, verify)
 	}
 	if ho.lineIndex("etcdutl snapshot restore "+ho.snapshot+" --data-dir "+ho.etcdDir) < 0 {

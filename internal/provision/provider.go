@@ -77,16 +77,16 @@ func WriteProviderConfig(specFile string, stderr io.Writer) (configFile string, 
 		}
 	}
 	if _, err := f.Write(content); err != nil {
-		f.Close()
-		os.Remove(f.Name())
+		_ = f.Close()
+		_ = os.Remove(f.Name())
 		return "", nil, err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
+		_ = os.Remove(f.Name())
 		return "", nil, err
 	}
 	os.Setenv("PROVIDER_CONFIG_FILE", f.Name())
 	ui.Debugf(stderr, "provider config written to %s", f.Name())
 	name := f.Name()
-	return name, func() { os.Remove(name) }, nil
+	return name, func() { _ = os.Remove(name) }, nil
 }

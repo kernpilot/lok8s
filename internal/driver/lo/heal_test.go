@@ -155,9 +155,7 @@ func newHealFixture(t *testing.T) *healFixture {
 func (h *healFixture) restarts() []string {
 	var out []string
 	if raw, err := os.ReadFile(filepath.Join(h.rootDir, "restarts")); err == nil {
-		for _, l := range strings.Fields(string(raw)) {
-			out = append(out, l)
-		}
+		out = append(out, strings.Fields(string(raw))...)
 	}
 	for _, c := range h.calls {
 		if strings.HasPrefix(c, "kubelet-restart:") {

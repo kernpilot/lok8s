@@ -190,7 +190,7 @@ func marshalDocs(docs []doc) string {
 		enc := yaml.NewEncoder(&one)
 		enc.SetIndent(2)
 		if enc.Encode(d.node) == nil {
-			enc.Close()
+			_ = enc.Close()
 			buf.WriteString(one.String())
 		}
 	}

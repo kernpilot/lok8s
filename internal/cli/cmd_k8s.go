@@ -142,11 +142,11 @@ func k8sCapi(paths *config.Paths, d, specPath, outPath string, stderr io.Writer)
 	}
 	rendered, err := drv.Generate(specPath, provider)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return ErrHandled
 	}
 	if _, err := f.WriteString(rendered); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

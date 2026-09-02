@@ -220,7 +220,7 @@ func (h *LoHook) teardown(ctx context.Context, name, namespace, domain string) {
 
 	if destroyed {
 		_ = k.run(ctx, nil, io.Discard, io.Discard, "delete", "secret", name+"-kubeconfig", "-n", namespace, "--ignore-not-found=true")
-		os.RemoveAll(filepath.Join(h.Paths.Clusters, domain))
+		_ = os.RemoveAll(filepath.Join(h.Paths.Clusters, domain))
 		k.removeFinalizer(ctx, "lo", "Lo", name, namespace, LoFinalizer)
 		fmt.Fprintf(stderr, "info: Lo %s/%s torn down\n", namespace, name)
 		return

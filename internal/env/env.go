@@ -275,7 +275,6 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 	if err != nil {
 		return "", err
 	}
-	defer queue.Close()
 
 	var out strings.Builder
 	for i := 0; i+1 < len(services.Content); i += 2 {
@@ -338,6 +337,10 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 		fmt.Fprintf(queue, "%s\t%s\t%s\t%s\n", svc, remoteRef, sBranch, sTag)
 
 		fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s/%s/%s\n    newTag: \"%s\"\n", gPrefix, svc, gCache, sBranch, svc, sTag)
+	}
+	// The queue was appended to above; a close error is a lost entry.
+	if err := queue.Close(); err != nil {
+		return "", err
 	}
 	// Command substitution stripped the trailing newline in bash.
 	return strings.TrimRight(out.String(), "\n"), nil

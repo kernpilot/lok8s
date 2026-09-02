@@ -80,7 +80,7 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 		[]keyservice.KeyServiceClient{keyservice.NewLocalClient()},
 	)
 	if len(errs) > 0 {
-		return fmt.Errorf("Could not generate data key: %s", errs)
+		return fmt.Errorf("could not generate data key: %s", errs)
 	}
 	if err := common.EncryptTree(common.EncryptTreeOpts{
 		DataKey: dataKey,

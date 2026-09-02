@@ -186,7 +186,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 
 	if d.deps.Paths.Clusters != repoRoot+"/clusters" && dirExists(d.deps.Paths.Clusters) {
 		// Best-effort: an external clusters dir rides along, failure tolerated.
-		d.runOut(ctx, out, errOut, "rsync", "-az", d.deps.Paths.Clusters+"/", remote+":"+dest+"/clusters/")
+		_ = d.runOut(ctx, out, errOut, "rsync", "-az", d.deps.Paths.Clusters+"/", remote+":"+dest+"/clusters/")
 	}
 
 	ui.Debugf(errOut, "repo synced to %s:%s", remote, dest)
@@ -221,7 +221,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		// prefix on a function — temporary in default bash mode).
 		prev, had := os.LookupEnv("DOCKER_HOST")
 		os.Setenv("DOCKER_HOST", "ssh://"+remote)
-		d.expose(ctx, clusterName, clusterYAML, out, errOut)
+		_ = d.expose(ctx, clusterName, clusterYAML, out, errOut)
 		if had {
 			os.Setenv("DOCKER_HOST", prev)
 		} else {
@@ -232,12 +232,12 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	// Set up kubeconfig + SSH tunnel.
 	kubeconfigPath := filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml")
 	if !fileExists(kubeconfigPath) {
-		os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755)
-		d.runQuiet(ctx, "scp", remote+":"+dest+"/.kubeconfig/"+clusterName+".yaml", kubeconfigPath)
+		_ = os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755)
+		_ = d.runQuiet(ctx, "scp", remote+":"+dest+"/.kubeconfig/"+clusterName+".yaml", kubeconfigPath)
 	}
 
 	if fileExists(kubeconfigPath) {
-		d.kubeconfigTunnel(ctx, kubeconfigPath, getenv("LOK8S_REMOTE_USER"), getenv("LOK8S_REMOTE_IP"), errOut)
+		_ = d.kubeconfigTunnel(ctx, kubeconfigPath, getenv("LOK8S_REMOTE_USER"), getenv("LOK8S_REMOTE_IP"), errOut)
 	}
 
 	accessIP := getenv("LOK8S_REMOTE_IP")

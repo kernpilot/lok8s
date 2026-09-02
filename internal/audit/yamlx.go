@@ -41,7 +41,7 @@ func decodeDocs(path string, partial bool) ([]*yaml.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	dec := yaml.NewDecoder(f)
 	var docs []*yaml.Node
 	for {

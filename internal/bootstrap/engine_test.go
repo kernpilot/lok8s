@@ -235,15 +235,15 @@ func TestSchedulerBarrierSerializesWaitTrue(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	// a and b overlap: each STARTED before the other ENDED.
-	if !(log.pos("START a") < log.pos("END b") && log.pos("START b") < log.pos("END a")) {
+	if log.pos("START a") >= log.pos("END b") || log.pos("START b") >= log.pos("END a") {
 		t.Errorf("a/b did not overlap: %v", log.events)
 	}
 	// Barrier c STARTS only after BOTH a and b have ENDED.
-	if !(log.pos("START c") > log.pos("END a") && log.pos("START c") > log.pos("END b")) {
+	if log.pos("START c") <= log.pos("END a") || log.pos("START c") <= log.pos("END b") {
 		t.Errorf("barrier c started early: %v", log.events)
 	}
 	// d and e START only after c has ENDED.
-	if !(log.pos("START d") > log.pos("END c") && log.pos("START e") > log.pos("END c")) {
+	if log.pos("START d") <= log.pos("END c") || log.pos("START e") <= log.pos("END c") {
 		t.Errorf("post-barrier entries started early: %v", log.events)
 	}
 }
@@ -322,7 +322,7 @@ func TestSchedulerDependsOnGatesDependentOnly(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	// a and c overlap (c is NOT gated behind a).
-	if !(log.pos("START a") < log.pos("END c") && log.pos("START c") < log.pos("END a")) {
+	if log.pos("START a") >= log.pos("END c") || log.pos("START c") >= log.pos("END a") {
 		t.Errorf("a/c did not overlap: %v", log.events)
 	}
 	// b (dependsOn a) starts only after a has ENDED.
@@ -337,7 +337,7 @@ func TestSchedulerGatePlusDependsOn(t *testing.T) {
 	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if !(log.pos("START y") > log.pos("END g") && log.pos("START x") > log.pos("END g")) {
+	if log.pos("START y") <= log.pos("END g") || log.pos("START x") <= log.pos("END g") {
 		t.Errorf("gate did not gate: %v", log.events)
 	}
 	if log.pos("START x") <= log.pos("END y") {
@@ -448,7 +448,7 @@ func TestSchedulerNameOverrideIsTheDependsOnTarget(t *testing.T) {
 	if log.pos("START c") <= log.pos("END bar") {
 		t.Errorf("c started before bar ended: %v", log.events)
 	}
-	if !(log.pos("START foo") < log.pos("END bar") && log.pos("START bar") < log.pos("END foo")) {
+	if log.pos("START foo") >= log.pos("END bar") || log.pos("START bar") >= log.pos("END foo") {
 		t.Errorf("foo did not overlap bar: %v", log.events)
 	}
 }

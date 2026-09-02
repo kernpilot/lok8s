@@ -478,7 +478,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 			Args:   []string{"delete", "cluster", "--name", kindName},
 			Stderr: io.Discard, // bash: 2>/dev/null || true
 		})
-		os.Remove(mgmtKubeconfig)
+		_ = os.Remove(mgmtKubeconfig)
 	}
 
 	// A failed teardown must not report success, and must not delete any
@@ -499,7 +499,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 		return fmt.Errorf("capi: workload cluster delete did not complete: %w", delErr)
 	}
 
-	os.Remove(workloadKubeconfig)
+	_ = os.Remove(workloadKubeconfig)
 	return nil
 }
 
@@ -838,7 +838,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		Args:   []string{"delete", "cluster", "--name", bootstrapName},
 		Stderr: io.Discard, // bash: 2>/dev/null || true
 	})
-	os.Remove(bootstrapKubeconfig)
+	_ = os.Remove(bootstrapKubeconfig)
 
 	d.infoLine("management cluster %s bootstrapped successfully", domain)
 	return nil

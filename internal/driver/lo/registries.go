@@ -182,8 +182,8 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	// any stale cache entry first to force a fresh signature for the new SAN
 	// set.
 	name, ns := "registries-tls", "lok8s-system"
-	os.Remove(filepath.Join(pathSecrets, fmt.Sprintf("Secret.%s.%s.tls.crt", name, ns)))
-	os.Remove(filepath.Join(pathSecrets, fmt.Sprintf("Secret.%s.%s.tls.key", name, ns)))
+	_ = os.Remove(filepath.Join(pathSecrets, fmt.Sprintf("Secret.%s.%s.tls.crt", name, ns)))
+	_ = os.Remove(filepath.Join(pathSecrets, fmt.Sprintf("Secret.%s.%s.tls.key", name, ns)))
 
 	// JSON array of SANs (compact, jq -c shape); YAML accepts it inline.
 	var hostsJSON strings.Builder
@@ -437,8 +437,8 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 		return fmt.Errorf("cannot write registry config %s", configPath)
 	}
 
-	d.runQuiet(ctx, "docker", "volume", "create", regName)
-	d.runQuiet(ctx, "docker", "rm", "-f", regName)
+	_ = d.runQuiet(ctx, "docker", "volume", "create", regName)
+	_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
 
 	runErr := ""
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -463,7 +463,7 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 		// Don't leave a half-created container behind — `docker run`
 		// creates it even when the start fails, and a stuck-Created
 		// container shadows the name on the next attempt.
-		d.runQuiet(ctx, "docker", "rm", "-f", regName)
+		_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
 		if attempt == 2 {
 			break
 		}
@@ -562,8 +562,8 @@ func (d *Driver) cleanupRegistries(ctx context.Context, clusterName string) {
 			continue
 		}
 		regName, _ := rf.containerFor(r.Name)
-		d.runQuiet(ctx, "docker", "rm", "-f", regName)
-		d.runQuiet(ctx, "docker", "volume", "rm", "-f", regName)
+		_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
+		_ = d.runQuiet(ctx, "docker", "volume", "rm", "-f", regName)
 		removeStateFiles(regName)
 	}
 }
@@ -571,8 +571,8 @@ func (d *Driver) cleanupRegistries(ctx context.Context, clusterName string) {
 // removeStateFiles drops a registry's durable config + lock file (the same
 // paths the bash rm -f'd).
 func removeStateFiles(regName string) {
-	os.Remove(filepath.Join(registryStateDir(), regName+".yaml"))
-	os.Remove(filepath.Join(registryStateDir(), regName+".yaml.lock"))
+	_ = os.Remove(filepath.Join(registryStateDir(), regName+".yaml"))
+	_ = os.Remove(filepath.Join(registryStateDir(), regName+".yaml.lock"))
 }
 
 // registryConfigmap applies the lok8s-registries ConfigMap consumed

@@ -105,7 +105,7 @@ func yamlString(n *yaml.Node) string {
 	if err := enc.Encode(n); err != nil {
 		return ""
 	}
-	enc.Close()
+	_ = enc.Close()
 	return strings.TrimRight(buf.String(), "\n")
 }
 

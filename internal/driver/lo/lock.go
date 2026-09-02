@@ -28,13 +28,13 @@ func acquireLock(path string, sleep func(time.Duration)) (release func(), locked
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return func() {
-				syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-				f.Close()
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
 			}, true
 		}
 		if time.Now().After(deadline) {
 			// Lock wait timed out — proceed unlocked (bash: debug + continue).
-			f.Close()
+			_ = f.Close()
 			return nil, false
 		}
 		sleep(200 * time.Millisecond)

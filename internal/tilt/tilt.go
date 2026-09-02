@@ -227,7 +227,7 @@ func (c *Context) startDetached(port string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer nohup.Close()
+	defer func() { _ = nohup.Close() }()
 	cmd := exec.Command(tiltPath, "up", "--port="+port, "--file="+c.tiltfilePath())
 	cmd.Stdout = nohup
 	cmd.Stderr = nohup

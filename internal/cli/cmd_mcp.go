@@ -307,12 +307,12 @@ func mcpListTools(ctx context.Context, paths *config.Paths, x mcpExposure) ([]*m
 	var tools []*mcp.Tool
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
-			session.Close()
+			_ = session.Close()
 			return nil, err
 		}
 		tools = append(tools, tool)
 	}
-	session.Close()
+	_ = session.Close()
 	cancel()
 	if err := <-served; err != nil && !errors.Is(err, context.Canceled) {
 		return nil, err

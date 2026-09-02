@@ -7,6 +7,7 @@ package kubehz
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -86,7 +87,7 @@ func (c *Context) nodePreflight(ctx context.Context, domain, action, clusterIDFl
 	switch {
 	case err == nil:
 		return cfg, id, nil
-	case err == errNotRegistered:
+	case errors.Is(err, errNotRegistered):
 		c.errorf("kubehz: the registry holds no cluster for %s.", domain)
 		c.echoErr("  Name the cluster directly with:  --cluster-id cl-xxxxxxxx")
 		return nil, "", ErrHandled

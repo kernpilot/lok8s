@@ -20,7 +20,7 @@ import (
 
 // fakeDriver implements the Driver contract; withExport adds the optional
 // Exporter hook (the bats fake driver wrote driver::export into main).
-type fakeDriver struct{ exported *string }
+type fakeDriver struct{}
 
 func (d *fakeDriver) Provision(ctx context.Context, domain string) error { return nil }
 func (d *fakeDriver) Destroy(ctx context.Context, domain string) error   { return nil }

@@ -218,9 +218,14 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		if err != nil {
 			return err
 		}
-		tmp.WriteString(renderedConfig)
-		tmp.Close()
-		defer os.Remove(tmp.Name())
+		defer func() { _ = os.Remove(tmp.Name()) }()
+		if _, err := tmp.WriteString(renderedConfig); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
 		if err := d.runOut(ctx, stdout, stderr, "kind", "create", "cluster",
 			"--name", clusterName, "--config", tmp.Name()); err != nil {
 			return err
@@ -346,7 +351,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// own "Deleting cluster …" line) passes through, stderr is dropped.
 	_ = d.runOut(ctx, d.out(), io.Discard, "kind", "delete", "cluster", "--name", clusterName)
 	d.cleanupRegistries(ctx, clusterName)
-	d.runQuiet(ctx, "docker", "rm", "-f", clusterName+"-proxy")
+	_ = d.runQuiet(ctx, "docker", "rm", "-f", clusterName+"-proxy")
 
 	// Destroy the cloud VM after the cluster is gone.
 	if d.deps.ProviderName != "" && d.deps.Provider != nil {

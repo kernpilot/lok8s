@@ -112,17 +112,17 @@ func Artifacts(o Options) error {
 		return ErrHandled
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
+	_ = tmp.Close()
 
 	rendered, err := runKustomize(o, domainDir, kubeconfig, stderr)
 	if err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
 		return ErrHandled
 	}
 	rendered = Envsubst(rendered, whitelist)
 	if err := os.WriteFile(tmpPath, rendered, 0o600); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
 		return ErrHandled
 	}
@@ -161,7 +161,7 @@ func Artifacts(o Options) error {
 		}
 	}
 	if docs == 0 && prior > 0 {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		ui.Errorf(stderr, "refusing to overwrite %s's rendered output (%d existing document(s)/file(s)) with an EMPTY render", o.Domain, prior)
 		ui.Errorf(stderr, "  kustomize succeeded but produced nothing — check %s resources:", filepath.Join(domainDir, "kustomization.yaml"))
 		ui.Errorf(stderr, "  applying an empty artifact would prune everything it manages (Flux prune: true)")
@@ -178,11 +178,11 @@ func Artifacts(o Options) error {
 	// loop that starved every queued build for hours (2026-08-07). An
 	// unchanged render is a no-op and the watch stays quiet.
 	if existingErr == nil && bytes.Equal(existing, rendered) {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		ui.Debugf(stderr, "%s: render unchanged (%d document(s)) — artifacts.yaml left untouched", o.Domain, docs)
 	} else {
 		if err := os.Rename(tmpPath, artifactPath); err != nil {
-			os.Remove(tmpPath)
+			_ = os.Remove(tmpPath)
 			ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
 			return ErrHandled
 		}
@@ -241,7 +241,7 @@ func pruneStaleArtifactDirs(artifactsDir string) {
 		}
 		sub := filepath.Join(artifactsDir, e.Name())
 		if fileExists(filepath.Join(sub, "artifacts.yaml")) {
-			os.RemoveAll(sub)
+			_ = os.RemoveAll(sub)
 		}
 	}
 }

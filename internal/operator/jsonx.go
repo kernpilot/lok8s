@@ -123,12 +123,6 @@ func pretty(v any) string {
 	return string(b)
 }
 
-// quote renders a string as a JSON string literal.
-func quote(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
-
 // errorf formats a plain error (no stderr side effect).
 func errorf(format string, a ...any) error {
 	return fmt.Errorf(format, a...)

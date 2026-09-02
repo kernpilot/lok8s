@@ -33,7 +33,7 @@ func (d *Driver) network(ctx context.Context, errOut io.Writer) error {
 		currentSubnet, _ := d.output(ctx, "docker", "network", "inspect", network,
 			"--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}")
 		if currentSubnet != subnet {
-			d.runQuiet(ctx, "docker", "network", "rm", "-f", network)
+			_ = d.runQuiet(ctx, "docker", "network", "rm", "-f", network)
 		}
 	}
 
@@ -172,7 +172,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 		// network is host-global). Best-effort, same pattern as the registry
 		// reconcile: without the lock a loser can rm the WINNER's
 		// freshly-created network.
-		os.MkdirAll(registryStateDir(), 0o755)
+		_ = os.MkdirAll(registryStateDir(), 0o755)
 		release, locked := acquireLock(filepath.Join(registryStateDir(), network+".netlock"), d.sleep)
 		if locked {
 			// The winner may have finished the recreate while we waited —
@@ -206,13 +206,13 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 					// Removed, not detached: a running mirror with a matching
 					// config-hash would reconcile "unchanged" while
 					// off-network. Cache volumes survive.
-					d.runQuiet(ctx, "docker", "rm", "-f", name)
+					_ = d.runQuiet(ctx, "docker", "rm", "-f", name)
 				} else {
 					// `docker network rm` REFUSES a network with active
 					// endpoints (even with -f, which only suppresses the
 					// not-found error — verified live) — every remaining
 					// member must be detached explicitly.
-					d.runQuiet(ctx, "docker", "network", "disconnect", "-f", network, name)
+					_ = d.runQuiet(ctx, "docker", "network", "disconnect", "-f", network, name)
 				}
 			}
 			// A just-removed container's endpoint can lag its release (the
@@ -267,7 +267,7 @@ func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName 
 		if strings.Contains(memberSet, " "+node+" ") {
 			continue
 		}
-		d.runQuiet(ctx, "docker", "network", "connect", rf.Network.Name, node)
+		_ = d.runQuiet(ctx, "docker", "network", "connect", rf.Network.Name, node)
 	}
 	return nil
 }

@@ -211,7 +211,7 @@ var categoryRe = regexp.MustCompile(`lok8s\.dev/category:[[:space:]]*[a-zA-Z0-9-
 // the category feeds deterministic artifacts. "-" when unlabelled.
 func Category(dir string) string {
 	var matches []string
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !info.Mode().IsRegular() {
 			return nil
 		}

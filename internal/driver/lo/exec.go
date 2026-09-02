@@ -55,15 +55,3 @@ func (d *Driver) runInput(ctx context.Context, stdin string, stdout, stderr io.W
 func cmdWith(name string, args []string, stdout, stderr io.Writer) execx.Cmd {
 	return execx.Cmd{Name: name, Args: args, Stdout: stdout, Stderr: stderr}
 }
-
-// outputInput captures stdout of a tool fed with stdin (bash:
-// $(printf … | cmd)).
-func (d *Driver) outputInput(ctx context.Context, stdin, name string, args ...string) (string, error) {
-	var out strings.Builder
-	err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name: name, Args: args,
-		Stdin:  strings.NewReader(stdin),
-		Stdout: &out, Stderr: io.Discard,
-	})
-	return strings.TrimRight(out.String(), "\n"), err
-}

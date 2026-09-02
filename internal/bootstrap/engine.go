@@ -470,7 +470,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		// everything, don't aggregate" contract — still de-interleaved,
 		// but verbatim.
 		if debug {
-			io.Copy(e.stdout(), strings.NewReader(out))
+			_, _ = io.Copy(e.stdout(), strings.NewReader(out))
 		} else {
 			kapply.RenderCaptured(e.stdout(), nd.entry.Name, jrc, strings.NewReader(out))
 		}
@@ -559,7 +559,7 @@ func (e *Engine) interactive() bool {
 	if err != nil {
 		return false
 	}
-	tty.Close()
+	_ = tty.Close()
 	return true
 }
 
@@ -571,7 +571,7 @@ func (e *Engine) askPrompt(prompt string) bool {
 	if err != nil {
 		return false
 	}
-	defer tty.Close()
+	defer func() { _ = tty.Close() }()
 	fmt.Fprint(tty, prompt)
 	buf := make([]byte, 64)
 	nRead, err := tty.Read(buf)

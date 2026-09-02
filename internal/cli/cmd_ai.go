@@ -51,8 +51,7 @@ func aiSkillsSrc(paths *config.Paths) string { return filepath.Join(paths.Base, 
 // aiAgentSkillDir is the dir an assistant loads project skills from; false
 // for agents with no native skill dir (they get instant injection).
 func aiAgentSkillDir(paths *config.Paths, agent string) (string, bool) {
-	switch agent {
-	case "claude":
+	if agent == "claude" {
 		return filepath.Join(paths.Base, ".claude", "skills"), true
 	}
 	return "", false
@@ -273,13 +272,13 @@ func aiUnlink(paths *config.Paths, who string, out, stderr io.Writer) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(entry)
 			if err == nil && strings.HasPrefix(link, src+"/") {
-				os.RemoveAll(entry)
+				_ = os.RemoveAll(entry)
 				n++
 			}
 			continue
 		}
 		if dirExists(filepath.Join(src, e.Name())) {
-			os.RemoveAll(entry)
+			_ = os.RemoveAll(entry)
 			n++
 		}
 	}

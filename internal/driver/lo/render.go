@@ -188,7 +188,7 @@ func (d *Driver) writeCertsD(errOut io.Writer) error {
 	// find "${certs_d}" -mindepth 1 -delete — clear entries, keep the dir.
 	if entries, err := os.ReadDir(certsD); err == nil {
 		for _, e := range entries {
-			os.RemoveAll(filepath.Join(certsD, e.Name()))
+			_ = os.RemoveAll(filepath.Join(certsD, e.Name()))
 		}
 	}
 

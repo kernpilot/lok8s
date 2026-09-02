@@ -39,7 +39,7 @@ func EnvsubstWhitelist() []string {
 // env). An empty list replaces NOTHING (GNU semantics). Bash:
 // template::envsubst.
 func Envsubst(data []byte, names []string) []byte {
-	lookup := func(name string) string { return os.Getenv(name) }
+	lookup := os.Getenv
 	return envsubst(data, names, lookup)
 }
 

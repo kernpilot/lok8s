@@ -107,7 +107,7 @@ func (c *Context) DeployAgent(ctx context.Context, cfg *Config, domain string, d
 		c.errorf("could not create a render directory")
 		return ErrHandled
 	}
-	defer os.RemoveAll(workdir)
+	defer func() { _ = os.RemoveAll(workdir) }()
 
 	if err := c.RenderAgent(workdir, domain, apiURL, owner, access); err != nil {
 		return err

@@ -78,7 +78,7 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 		}
 		_ = os.Chmod(dir, 0o700)
 		if err := c.extractBundle(bundle, dir); err != nil {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 			return "", err
 		}
 		return dir, nil
@@ -106,7 +106,7 @@ func (c *Context) extractBundle(bundle, dir string) error {
 	if err != nil {
 		return c.notArchive(bundle)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return c.notArchive(bundle)
@@ -585,7 +585,7 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 		return err
 	}
 	_ = os.Chmod(workdir, 0o700)
-	defer os.RemoveAll(workdir)
+	defer func() { _ = os.RemoveAll(workdir) }()
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
 	if err != nil {
@@ -610,7 +610,7 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	}
 	if entries, err := os.ReadDir(etcdDir); err == nil && len(entries) > 0 {
 		if o.Force {
-			os.RemoveAll(etcdDir)
+			_ = os.RemoveAll(etcdDir)
 		} else {
 			c.errorf("handover: %s is not empty — refusing to restore over existing etcd data (re-run with --force to overwrite).", etcdDir)
 			return ErrHandled
@@ -704,7 +704,7 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		return err
 	}
 	_ = os.Chmod(workdir, 0o700)
-	defer os.RemoveAll(workdir)
+	defer func() { _ = os.RemoveAll(workdir) }()
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
 	if err != nil {

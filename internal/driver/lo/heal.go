@@ -136,7 +136,7 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 		return nil
 	}
 	for _, node := range healed {
-		d.runQuiet(ctx, "kubectl", "--kubeconfig", kubeconfig, "-n", "kube-system", "delete", "pod",
+		_ = d.runQuiet(ctx, "kubectl", "--kubeconfig", kubeconfig, "-n", "kube-system", "delete", "pod",
 			"-l", "k8s-app=cilium", "--field-selector", "spec.nodeName="+node)
 	}
 	return nil

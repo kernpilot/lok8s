@@ -26,9 +26,7 @@ func init() { registerPorted("chat", newChatCommand) }
 
 // execProcess replaces the current process (bash: exec). Tests swap it to
 // capture the exact argv.
-var execProcess = func(bin string, argv, env []string) error {
-	return syscall.Exec(bin, argv, env)
-}
+var execProcess = syscall.Exec
 
 func newChatCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	return &cobra.Command{

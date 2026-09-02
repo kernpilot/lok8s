@@ -256,12 +256,13 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 			// Status + body captured: a refused delete must surface with the
 			// api's own message, not vanish into `curl -f`.
 			res, err := c.fetchStatus(ctx, "DELETE", apiURL+"/api/clusters/"+clusterID, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
-			if err != nil {
+			switch {
+			case err != nil:
 				c.errorf("kubehz: DELETE /api/clusters/%s failed (network) — the registration for %s was not removed. Retry when %s is reachable.", clusterID, domain, apiURL)
 				rc = ErrHandled
-			} else if is2xx(res.Status) {
+			case is2xx(res.Status):
 				c.echo("kubehz: cluster %s (%s) removed from the platform.", domain, clusterID)
-			} else {
+			default:
 				msg := apiMessage(res.Body)
 				c.errorf("kubehz: delete refused for %s (%s) — HTTP %d%s. The registration was not removed.", domain, clusterID, res.Status, optSuffix(": ", msg))
 				rc = ErrHandled
