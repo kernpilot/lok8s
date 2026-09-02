@@ -18,6 +18,8 @@ import (
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
+func init() { registerPorted("use", newUseCommand) }
+
 func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "use [domain]",

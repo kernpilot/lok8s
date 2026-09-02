@@ -34,6 +34,8 @@ var versionTools = []struct {
 	{"docker", []string{"--version"}, regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`)},
 }
 
+func init() { registerPorted("version", newVersionCommand) }
+
 func newVersionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	return &cobra.Command{
 		Use:          spec.use,

@@ -16,10 +16,16 @@ import (
 var ErrHandled = errors.New("handled")
 
 // portedCommands maps command names to their Go implementations. Anything
-// absent here still shims to the argsh implementation.
-var portedCommands = map[string]func(*config.Paths, commandSpec) *cobra.Command{
-	"use":     newUseCommand,
-	"version": newVersionCommand,
+// absent here still shims to the argsh implementation. Entries register
+// themselves via registerPorted from each command file's init(), so adding a
+// port never touches this file.
+var portedCommands = map[string]func(*config.Paths, commandSpec) *cobra.Command{}
+
+func registerPorted(name string, build func(*config.Paths, commandSpec) *cobra.Command) {
+	if _, dup := portedCommands[name]; dup {
+		panic("duplicate ported command: " + name)
+	}
+	portedCommands[name] = build
 }
 
 // NewRoot builds the full lo command tree. Commands without a Go
