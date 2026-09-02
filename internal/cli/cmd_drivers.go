@@ -36,14 +36,8 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
-
-	// The Go drivers register themselves in init(); the binary must link
-	// them for `lo drivers` to find them (the provision port will import
-	// them too — the registry dedups nothing, so keep the set here in sync).
-	_ "github.com/kernpilot/lok8s/internal/driver/capi"
-	_ "github.com/kernpilot/lok8s/internal/driver/kkp"
-	_ "github.com/kernpilot/lok8s/internal/driver/kubeone"
-	_ "github.com/kernpilot/lok8s/internal/driver/lo"
+	// The Go drivers register themselves in init(); drivers.go is the ONE
+	// place the binary links them (shared with the provision dispatch).
 )
 
 func init() {

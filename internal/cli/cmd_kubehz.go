@@ -18,7 +18,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/kernpilot/lok8s/internal/config"
-	_ "github.com/kernpilot/lok8s/internal/driver/kubehz" // register the space driver
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kubehz"
 )

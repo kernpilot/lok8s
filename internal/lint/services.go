@@ -38,11 +38,11 @@ import (
 
 // services.yaml — top-level + sub-block allow-lists.
 var (
-	lintServicesTop           = []string{"apiVersion", "kind", "metadata", "registry", "defaults", "services"}
-	lintServicesRegistry      = []string{"endpoint", "branch", "tag", "prefix", "parallel"}
-	lintServicesDefaults      = []string{"build", "dockerfile"}
-	lintServiceEntry          = []string{"enabled", "build", "path", "namespace", "dockerfile", "watch", "registry", "image"}
-	lintServiceEntryRegistry  = []string{"endpoint", "branch", "tag", "prefix"}
+	lintServicesTop          = []string{"apiVersion", "kind", "metadata", "registry", "defaults", "services"}
+	lintServicesRegistry     = []string{"endpoint", "branch", "tag", "prefix", "parallel"}
+	lintServicesDefaults     = []string{"build", "dockerfile"}
+	lintServiceEntry         = []string{"enabled", "build", "path", "namespace", "dockerfile", "watch", "registry", "image"}
+	lintServiceEntryRegistry = []string{"endpoint", "branch", "tag", "prefix"}
 
 	// per-service lok8s.yaml — top-level + components-entry allow-lists.
 	lintLok8sTop       = []string{"build", "ports", "links", "workloads", "tilt", "components"}

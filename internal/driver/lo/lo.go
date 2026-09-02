@@ -342,7 +342,9 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// bash: 2>/dev/null || true).
 	_ = readNetworkConfig(cy, io.Discard)
 
-	d.runQuiet(ctx, "kind", "delete", "cluster", "--name", clusterName)
+	// bash: `kind delete cluster … 2>/dev/null || true` — stdout (kind's
+	// own "Deleting cluster …" line) passes through, stderr is dropped.
+	_ = d.runOut(ctx, d.out(), io.Discard, "kind", "delete", "cluster", "--name", clusterName)
 	d.cleanupRegistries(ctx, clusterName)
 	d.runQuiet(ctx, "docker", "rm", "-f", clusterName+"-proxy")
 

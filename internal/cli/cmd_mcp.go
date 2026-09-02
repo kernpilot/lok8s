@@ -196,14 +196,7 @@ func mcpAnnotate(cmd *cobra.Command) {
 // the dispatcher's usage array (markers included — bash declares none for
 // registry). TestMcpShimLeavesMatchArgshUsage guards the drift and
 // TestMcpShimLeavesAreNotPorted fails once the dispatcher gets a Go port.
-var shimLeaves = map[string][]commandSpec{
-	"registry": {
-		{use: "up", aliases: []string{"u"}, short: "Spin up registries"},
-		{use: "down", aliases: []string{"d"}, short: "Spin down registries"},
-		{use: "status", aliases: []string{"s"}, short: "Check registry status"},
-		{use: "clean", aliases: []string{"c"}, short: "Clean up registries"},
-	},
-}
+var shimLeaves = map[string][]commandSpec{}
 
 // newMCPTree builds the tree the MCP server projects into tools: the
 // usage-mirrored tree, the shim dispatchers' leaves, and the MCP hints.
