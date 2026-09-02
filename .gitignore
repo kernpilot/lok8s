@@ -71,6 +71,10 @@ docs/.vitepress/cache/
 lint.log
 tests/e2e/*/.secrets/
 
+# Go build output (make build)
+/bin/
+coverage.out
+
 # argsh native builtin — `argsh builtins install` / some `lo` runs drop this
 # binary in the cwd. It belongs in .bin/ (fetched by `b`); never commit a stray.
 argsh.so

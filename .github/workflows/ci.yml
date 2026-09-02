@@ -98,6 +98,32 @@ jobs:
         # yq, which `b install` (above) placed in .bin.
         run: PATH="${GITHUB_WORKSPACE}/.bin:${PATH}" ./.lok8s/lo crds check
 
+  go-tests:
+    name: Go Build + Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        # Includes the tree-drift gate: the cobra command tree must match the
+        # argsh usage list in .lok8s/lo while both implementations exist.
+        run: go test ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
   operator-tests:
     name: Bats Operator Tests
     runs-on: ubuntu-latest
