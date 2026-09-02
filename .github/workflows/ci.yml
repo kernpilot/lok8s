@@ -152,6 +152,7 @@ jobs:
           bash hack/parity-leaves.sh
           bash hack/parity-ops.sh
           bash hack/parity-kubehz.sh
+          bash hack/parity-operator.sh
 
   operator-tests:
     name: Bats Operator Tests
@@ -180,6 +181,13 @@ jobs:
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build lo (the hook shims exec the Go binary; bats test 37 skips without it)
+        run: make build
 
       - name: Run operator tests
         env:
