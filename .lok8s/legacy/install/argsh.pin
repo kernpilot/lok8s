@@ -1,21 +1,21 @@
-# install/argsh.pin — which argsh runtime is bundled into docs/public/lo-up.
+# .lok8s/legacy/install/argsh.pin — which argsh runtime is bundled into docs/public/lo-up.
 #
-# The bundle is a build product of install/lo-up PLUS the argsh runtime
+# The bundle is a build product of .lok8s/legacy/install/lo-up PLUS the argsh runtime
 # sources, and it embeds the runtime's version and commit. Until this file
 # existed the runtime revision was whatever the last person to run
-# install/build happened to have checked out, which made "rebuild and diff"
+# .lok8s/legacy/install/build happened to have checked out, which made "rebuild and diff"
 # impossible to run anywhere else — the one gate that would catch a stale
 # published installer.
 #
-# Read by install/build (which refuses to build from any other revision) and
+# Read by .lok8s/legacy/install/build (which refuses to build from any other revision) and
 # by the loup-bundle job in .github/workflows/ci.yml (which checks argsh out
 # at `ref`, downloads the pinned minifier, rebuilds, and diffs). The rebuild
 # is byte-exact: verified from a clean checkout with the released minifier.
 #
 # To bump the runtime:
 #   git -C <argsh> checkout <new-ref>
-#   ARGSH_PIN_UPDATE=1 ARGSH_SRC=<argsh> install/build
-#   # then commit install/argsh.pin AND docs/public/lo-up together
+#   ARGSH_PIN_UPDATE=1 ARGSH_SRC=<argsh> .lok8s/legacy/install/build
+#   # then commit .lok8s/legacy/install/argsh.pin AND docs/public/lo-up together
 #
 # RISK, known and accepted for now: `ref` below is NOT on argsh's main branch.
 # It sits on `feat/process-trace-phase2`, an unmerged feature branch, so the
@@ -27,12 +27,12 @@
 #
 # If you are reading this because CI just broke that way: the fix is to pick a
 # reachable argsh revision (main, or a tag) and bump the pin with the procedure
-# below, committing install/argsh.pin and docs/public/lo-up together. Moving the
+# below, committing .lok8s/legacy/install/argsh.pin and docs/public/lo-up together. Moving the
 # pin onto a merged revision is the real fix and is tracked separately.
 #
 # minifier_release / minifier_sha256 are for CI only — `argsh minify` shells
 # out to the `minifier` binary, which is a Rust crate in the argsh repo and is
-# published as a release asset. install/build uses whatever minifier is on
+# published as a release asset. .lok8s/legacy/install/build uses whatever minifier is on
 # PATH; CI pins the asset so the rebuild is reproducible there.
 
 ref=a7b0295e62c708d7fe237252f8422576233cc8fa

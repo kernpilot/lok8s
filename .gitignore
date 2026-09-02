@@ -71,8 +71,10 @@ docs/.vitepress/cache/
 lint.log
 tests/e2e/*/.secrets/
 
-# Go build output (make build)
+# Go build output (make build) + goreleaser (make snapshot / release)
 /bin/
+/dist/
+/.release/
 coverage.out
 
 # argsh native builtin — `argsh builtins install` / some `lo` runs drop this

@@ -1,0 +1,117 @@
+# .goreleaser.yaml — the lok8s release: the `lo` binary plus the assets the
+# previous hand-rolled release.yml already shipped, under the SAME names.
+#
+#   lo-<os>-<arch>.tar.gz          the Go `lo` CLI (install/lo-install.sh, b)
+#   kustomize-secret-<os>-<arch>   secrets.lok8s.dev/v1/Secret exec plugin
+#                                  — ASSET-NAME CONTRACT: consumed by
+#                                  kubehz-cluster/.bin/b.yaml (asset:
+#                                  kustomize-secret-*); see kustomize/Makefile
+#   lochat-<os>-<arch>             the `lo chat` engine (ai/lochat)
+#   lok8s-<tag>.tar.gz             framework tree (.lok8s/, operator/crds+deploy,
+#                                  .kustomize/) — hack/release-tarball.sh
+#   lo-install.sh                  the installer, so it can be verified against
+#   checksums.txt                  SHA-256 of every asset above
+#
+# Matrix: linux/darwin × amd64/arm64, CGO_ENABLED=0, -trimpath, stripped.
+# Version stamping: the git tag (goreleaser's {{ .Version }} = tag without the
+# leading v) into internal/cli.version; a local `make snapshot` stamps
+# .lok8s/VERSION instead (Makefile exports LOK8S_VERSION).
+#
+# Validate: `goreleaser check`; dry run: `make snapshot` (dist/, no publish).
+version: 2
+
+project_name: lok8s
+
+before:
+  hooks:
+    # Host-platform plugin build so the framework tarball carries .kustomize/
+    # (the per-platform kustomize-secret-* assets below are what `b` installs).
+    - make -C kustomize build
+    # NOT into dist/ — goreleaser requires dist/ to be empty after the hooks.
+    - hack/release-tarball.sh v{{ .Version }}
+
+builds:
+  - id: lo
+    main: ./cmd/lo
+    binary: lo
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/kernpilot/lok8s/internal/cli.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: kustomize-secret
+    # Separate Go module (kustomize/go.mod); goreleaser runs `go build` there.
+    dir: kustomize
+    main: ./cmd/secret
+    binary: kustomize-secret
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/kernpilot/lok8s/kustomize/internal/version.Version=v{{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: lochat
+    # Separate, stdlib-only module (ai/lochat/go.mod).
+    dir: ai/lochat
+    main: .
+    binary: lochat
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: lo
+    ids: [lo]
+    formats: [tar.gz]
+    name_template: "lo-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+  # Raw binaries, no archive: the names are the contract `b` addresses.
+  - id: kustomize-secret
+    ids: [kustomize-secret]
+    formats: [binary]
+    name_template: "kustomize-secret-{{ .Os }}-{{ .Arch }}"
+  - id: lochat
+    ids: [lochat]
+    formats: [binary]
+    name_template: "lochat-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+  extra_files:
+    - glob: .release/lok8s-*.tar.gz
+    - glob: install/lo-install.sh
+
+snapshot:
+  # `make snapshot` exports LOK8S_VERSION from .lok8s/VERSION; without it the
+  # last tag is the base, as goreleaser does by default.
+  version_template: '{{ envOrDefault "LOK8S_VERSION" .Version }}-snapshot-{{ .ShortCommit }}'
+
+changelog:
+  # Same notes the previous workflow produced (generate_release_notes: true).
+  use: github-native
+
+release:
+  github:
+    owner: kernpilot
+    name: lok8s
+  prerelease: auto
+  extra_files:
+    - glob: .release/lok8s-*.tar.gz
+    - glob: install/lo-install.sh

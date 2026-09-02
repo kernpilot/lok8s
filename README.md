@@ -86,42 +86,59 @@ Honesty up front — lok8s is opinionated, and that won't fit everyone.
 
 ### 📦 Install
 
-One command bootstraps a lok8s project in the current directory — it installs
-[`b`](https://github.com/fentas/b) (the environment manager) if missing, pulls the framework plus your
-profile's pinned toolchain into `.bin/`, and drops a re-runnable `lo-up`:
+`lo` is a single static binary (linux/darwin × amd64/arm64), attached to every
+[GitHub release](https://github.com/kernpilot/lok8s/releases) with a
+`checksums.txt`. Download, verify, then run — nothing here is piped into a shell:
 
 ```bash
-curl -fsSL https://get.lok8s.io | sh
+curl -fsSLO https://github.com/kernpilot/lok8s/releases/latest/download/lo-install.sh
+curl -fsSLO https://github.com/kernpilot/lok8s/releases/latest/download/checksums.txt
+sha256sum --ignore-missing -c checksums.txt   # macOS: shasum -a 256 --ignore-missing -c checksums.txt
+less lo-install.sh                            # read it first
+bash lo-install.sh                            # → ~/.local/bin/lo  (--dir, --version, --dry-run)
 ```
 
-It prompts when a terminal is attached and runs unattended otherwise:
+The installer fetches `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
+release, refuses to extract anything whose SHA-256 does not match, and only
+then installs `lo`. Prefer no script at all? The same four steps by hand:
 
 ```bash
-curl -fsSL https://get.lok8s.io | sh -s -- -y               # no prompts (CI)
-curl -fsSL https://get.lok8s.io | sh -s -- -p kubeone -y    # a specific profile
+V=v0.3.0; A=lo-linux-amd64.tar.gz             # your tag and platform
+curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
+curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
+sha256sum --ignore-missing -c checksums.txt
+tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 ```
 
-> **Rather inspect before running?** Good instinct.
-> `curl -fsSL https://get.lok8s.io -o lo-up`, read it, then `sh lo-up`. The
-> script is self-contained (the argsh runtime is bundled) and also published at
-> [lok8s.io/lo-up](https://lok8s.io/lo-up).
+Then bootstrap a project. `lo` is the entrypoint, but a project still carries
+the framework tree (`.lok8s/`) and its pinned toolchain — commands that are
+not ported to Go yet pass through to it (see the
+[Go migration reference](docs/reference/go-migration.md)):
+
+```bash
+curl -fsSL https://get.binary.help -o b-install.sh && less b-install.sh && sh b-install.sh   # b, if missing
+b env add github.com/kernpilot/lok8s#local       # add a profile (local dev)
+b install                                         # framework + pinned toolchain into .bin/ (incl. lo)
+```
 
 <details>
-<summary>Other ways to install (drive <code>b</code> yourself, or use <code>mise</code>)</summary>
-
-```bash
-# Drive b directly
-curl -fsSL https://get.binary.help | sh          # install b
-b env add github.com/kernpilot/lok8s#local       # add a profile (local dev)
-b install                                         # pull it into the project
-```
+<summary>Other ways (use <code>mise</code>, clone the repo) · legacy (argsh) install</summary>
 
 **Prefer [mise](https://mise.jdx.dev)?** A `mise.toml` ships at the repo root —
 `mise install && mise activate` provisions the same toolchain. Then `lo doctor` to verify.
 
 **Cloning the repo directly?** The `argsh` runtime is vendored in `.bin/`, so
 `lo doctor` runs immediately and tells you which tools are still missing — no
-`b install` needed just to diagnose the environment.
+`b install` needed just to diagnose the environment. `make build` produces the
+Go binary at `bin/lo`.
+
+**Legacy (argsh) install.** Before the Go binary, a self-contained argsh
+script (`lo-up`) bootstrapped a project — installing `b`, the profile and the
+toolchain in one go. It is retired, not removed: the source and build live
+under [`.lok8s/legacy/install/`](.lok8s/legacy/install/README.md) and the
+published bundle stays at [lok8s.io/lo-up](https://lok8s.io/lo-up) for
+existing users. Download and read it before running it:
+`curl -fsSL https://lok8s.io/lo-up -o lo-up && less lo-up && sh lo-up`.
 </details>
 
 **Profiles** — each ships only the binaries it needs:

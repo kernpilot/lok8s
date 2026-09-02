@@ -47,9 +47,11 @@ b verify
 ```
 
 `b install` reads `.bin/b.yaml` and writes `b.lock` (versions + SHA256),
-so teammates and CI get the identical toolchain. The
-`curl -fsSL https://get.lok8s.io | sh` bootstrap from
-[Getting Started](/guide/#installation) runs these same commands for you.
+so teammates and CI get the identical toolchain.
+[Getting Started](/guide/#installation) walks through the same commands,
+after installing the `lo` release binary; the `core` profile's `b.yaml`
+declares that binary too (`github.com/kernpilot/lok8s`, asset
+`lo-*.tar.gz`, alias `lo`), so `b install` fetches it into `.bin/`.
 
 `b` picks the install directory from the first of these that is set:
 `PATH_BIN`, then `PATH_BASE`, then `<git-root>/.bin`, then `<cwd>/.bin`.

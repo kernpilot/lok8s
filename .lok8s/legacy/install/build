@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# install/build — bundle install/lo-up + the argsh runtime into the single,
+# .lok8s/legacy/install/build — bundle .lok8s/legacy/install/lo-up + the argsh runtime into the single,
 # self-contained docs/public/lo-up (published at https://lok8s.io/lo-up, behind
-# the get.lok8s.io → lok8s.io/lo-up redirect). Re-run after editing install/lo-up.
+# the get.lok8s.io → lok8s.io/lo-up redirect). Re-run after editing .lok8s/legacy/install/lo-up.
 #
 # Needs the argsh runtime sources (libraries/*.sh) + the `minifier` binary: the
 # sibling arg-sh/argsh checkout satisfies both. Override with ARGSH_SRC=<path>.
@@ -10,7 +10,7 @@ set -euo pipefail
 die() { echo "build: ${*}" >&2; exit 1; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "${here}/.." && pwd)"
+root="$(cd "${here}/../../.." && pwd)"   # .lok8s/legacy/install → repo root
 out="${root}/docs/public/lo-up"
 
 # Resolve the argsh runtime source tree.
@@ -26,7 +26,7 @@ fi
 # The runtime revision is PINNED. The bundle embeds argsh's version and commit,
 # so a build from a different revision produces a different file — which made
 # "rebuild and diff" impossible to run in CI, and that diff is the only thing
-# that catches a stale published installer. install/argsh.pin is the record;
+# that catches a stale published installer. .lok8s/legacy/install/argsh.pin is the record;
 # ARGSH_PIN_UPDATE=1 rewrites it from the checkout in hand.
 pin_file="${here}/argsh.pin"
 [[ -f "${pin_file}" ]] || die "missing ${pin_file}"
@@ -50,10 +50,10 @@ if [[ -n "${ARGSH_PIN_UPDATE:-}" ]]; then
   echo "build: pin updated → ${got_describe} (${got_ref})"
 elif [[ "${got_ref}" != "${pin_ref}" ]]; then
   echo "build: ${argsh_src} is at ${got_describe} (${got_ref})" >&2
-  echo "build: install/argsh.pin says ${pin_describe} (${pin_ref})" >&2
+  echo "build: .lok8s/legacy/install/argsh.pin says ${pin_describe} (${pin_ref})" >&2
   echo "build: the published bundle must be reproducible, so build only from the pin:" >&2
   echo "         git -C ${argsh_src} checkout ${pin_ref}" >&2
-  die "argsh revision does not match install/argsh.pin"
+  die "argsh revision does not match .lok8s/legacy/install/argsh.pin"
 fi
 
 # argsh + its minifier on PATH (minifier ships in the argsh checkout's .bin).

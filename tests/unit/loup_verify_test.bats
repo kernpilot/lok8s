@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# loup_verify_test.bats — unit tests for install/lo-up's post-step verification
+# loup_verify_test.bats — unit tests for .lok8s/legacy/install/lo-up's post-step verification
 #
 # lo-up used to trust `b`'s exit code. `b` has shipped more than one silent
 # rc-0 no-op (fentas/b#180, #184), each of which left a fresh machine with an
@@ -27,7 +27,7 @@ setup() {
 
   # Pull in the two functions without executing the script.
   eval "$(sed -n '/^loup::bin_dir()/,/^}/p;/^loup::verify_registered()/,/^}/p;/^loup::verify_materialised()/,/^}/p' \
-    "${_PROJECT_ROOT}/install/lo-up")"
+    "${_PROJECT_ROOT}/.lok8s/legacy/install/lo-up")"
 
   cd "${BATS_TEST_TMPDIR}" || return 1
 }
@@ -119,14 +119,14 @@ materialise() {
   }
 }
 
-@test "install/lo-up has ONE basename-of-PATH_BIN expression" {
+@test ".lok8s/legacy/install/lo-up has ONE basename-of-PATH_BIN expression" {
   # The drift gate for part 4. Two display sites carried the same expression
   # and only one of them was ever fixed.
   # loup::bin_dir strips the trailing slash before the basename, so any raw
   # ${PATH_BIN##*/} left in the file is a second copy with the old bug.
   # Comment lines are excluded — the fix is explained in one.
   local hits
-  hits=$(grep -n '\${PATH_BIN##\*/}' "${_PROJECT_ROOT}/install/lo-up" \
+  hits=$(grep -n '\${PATH_BIN##\*/}' "${_PROJECT_ROOT}/.lok8s/legacy/install/lo-up" \
     | grep -v '^[0-9]*:#' || true)
   [ -z "${hits}" ] || {
     echo "a raw \${PATH_BIN##*/} is back — it renders empty on a trailing slash:" >&2
@@ -134,7 +134,7 @@ materialise() {
     echo "Call loup::bin_dir instead." >&2
     return 1
   }
-  grep -q '^loup::bin_dir()' "${_PROJECT_ROOT}/install/lo-up" || {
+  grep -q '^loup::bin_dir()' "${_PROJECT_ROOT}/.lok8s/legacy/install/lo-up" || {
     echo "loup::bin_dir is gone — this gate is measuring nothing." >&2
     return 1
   }
@@ -176,24 +176,24 @@ materialise() {
 # main() stops calling them. Pin the call sites too.
 
 @test "lo-up calls verify_registered outside the bootstrap branch" {
-  local src="${_PROJECT_ROOT}/install/lo-up"
+  local src="${_PROJECT_ROOT}/.lok8s/legacy/install/lo-up"
   grep -q '^  loup::verify_registered$' "${src}" \
     || fail "loup::verify_registered is not called at main()'s top level — an env with a vendored .lok8s but no b.yaml entry would report ready"
 }
 
 @test "lo-up calls verify_materialised after b install" {
-  local src="${_PROJECT_ROOT}/install/lo-up"
+  local src="${_PROJECT_ROOT}/.lok8s/legacy/install/lo-up"
   grep -A 1 '^  b install' "${src}" | grep -q 'loup::verify_materialised' \
     || fail "loup::verify_materialised does not follow 'b install' — a no-op install would report ready"
 }
 
-@test "the published bundle is in sync with install/lo-up" {
+@test "the published bundle is in sync with .lok8s/legacy/install/lo-up" {
   # docs/public/lo-up is a generated artifact served to `curl … | sh`. A stale
   # bundle means the guards exist in the repo but not in what users run.
   local bundle="${_PROJECT_ROOT}/docs/public/lo-up"
   [ -s "${bundle}" ] || fail "docs/public/lo-up is missing or empty"
   grep -q 'registered no lok8s env' "${bundle}" \
-    || fail "docs/public/lo-up predates the verification guards — re-run install/build"
+    || fail "docs/public/lo-up predates the verification guards — re-run .lok8s/legacy/install/build"
   grep -q '</dev/tty' "${bundle}" \
     || fail "docs/public/lo-up lost the </dev/tty redirect — the confirm prompt would silently auto-yes"
 }

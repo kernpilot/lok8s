@@ -1,81 +1,69 @@
-# lo-up — the lok8s installer
+# install/ — the `lo` binary installer
 
-A single, self-contained script (the argsh runtime is bundled) that bootstraps
-or updates a lok8s project's environment. Published at
-**https://lok8s.io/lo-up**, behind the `get.lok8s.io` redirect.
+`lo` ships as a single static Go binary per platform (linux/darwin ×
+amd64/arm64), built and attached to every GitHub release by goreleaser
+(`.goreleaser.yaml`, `.github/workflows/release.yml`). Every release carries a
+`checksums.txt` (SHA-256) covering all assets, including this installer.
 
-## Use
+## Install
 
-```sh
-curl -fsSL https://get.lok8s.io | sh            # interactive when a TTY is present
-curl -fsSL https://get.lok8s.io | sh -s -- -y   # unattended (CI)
-```
-
-It auto-detects where it runs:
-
-- **bootstrap** (fresh directory): installs `b` if missing, runs
-  `b env add github.com/kernpilot/lok8s#<profile> --version <ref>`, then `b install`.
-- **update** (a `.lok8s/` is already present): `b install`.
-
-It also copies itself into the project's `.bin` (`PATH_BIN`), so a later
-`.bin/lo-up` updates in place.
-
-Flags: `-y`/`--non-interactive`, `-p`/`--profile` (`core|kustomize|local|capi|kubeone`,
-default `local`), `-r`/`--git-ref` (default `main`), `-d`/`--dir`.
-
-## Build
-
-Edit `install/lo-up`, then rebuild the published bundle:
+Download, verify, then run. Nothing here is meant to be piped into a shell.
 
 ```sh
-./install/build          # → docs/public/lo-up
+curl -fsSLO https://github.com/kernpilot/lok8s/releases/latest/download/lo-install.sh
+curl -fsSLO https://github.com/kernpilot/lok8s/releases/latest/download/checksums.txt
+sha256sum --ignore-missing -c checksums.txt     # macOS: shasum -a 256 --ignore-missing -c checksums.txt
+less lo-install.sh                              # read what it does
+bash lo-install.sh                              # → ~/.local/bin/lo
 ```
 
-`build` needs the argsh runtime (`libraries/*.sh`) **and** the `minifier`
-binary — the sibling `arg-sh/argsh` checkout provides both, or set
-`ARGSH_SRC=/path/to/arg-sh/argsh`. The bundle (`docs/public/lo-up`) is committed
-because it is the published artifact; rebuild after every edit to `lo-up`.
+Flags: `--version <tag>` (default: latest release), `--dir <path>` (default
+`~/.local/bin`), `--dry-run` (resolve and print, touch nothing). Environment:
+`LO_VERSION`, `LO_INSTALL_DIR`, `LO_INSTALL_REPO`, `LO_INSTALL_BASE_URL`.
 
-### The runtime is pinned
+The script downloads `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
+chosen release, refuses to extract anything whose SHA-256 does not match, and
+only then copies `lo` into place.
 
-The bundle embeds argsh's version and commit, so it is only reproducible
-against one runtime revision. `install/argsh.pin` records it and `build`
-refuses any other checkout. That is what lets CI rebuild and diff: the
-`loup-bundle` job checks argsh out at the pin, downloads the pinned `minifier`
-release asset, runs `install/build`, and fails on
-`git diff --exit-code -- docs/public/lo-up`. Before the pin existed nothing in
-CI noticed a stale bundle, and every `curl … | sh` user kept getting the old
-script.
-
-The pinned commit is on argsh's `feat/process-trace-phase2` branch, not on
-`main`. A force-push or a deletion of that branch makes the commit unreachable
-and the `loup-bundle` job then fails while CHECKING OUT argsh, before it builds
-anything — a "could not find the ref" error that says nothing about this pin.
-`install/argsh.pin` repeats the warning next to the value.
-
-To move to a newer argsh:
+Without the script — the same four steps by hand:
 
 ```sh
-git -C /path/to/arg-sh/argsh checkout <new-ref>
-ARGSH_PIN_UPDATE=1 ARGSH_SRC=/path/to/arg-sh/argsh ./install/build
+V=v0.3.0; A=lo-linux-amd64.tar.gz        # pick your tag and platform
+curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
+curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
+sha256sum --ignore-missing -c checksums.txt
+tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 ```
 
-Commit `install/argsh.pin` and `docs/public/lo-up` together — a unit test
-compares the pin against the runtime baked into the bundle, so a bump without a
-rebuild fails even where the byte-exact job does not run.
+Inside a lok8s project, `b` can install the same asset from `.bin/b.yaml`
+(`github.com/kernpilot/lok8s` with `asset: lo-*.tar.gz`, alias `lo`) — the
+`core` profile already declares it.
 
-## How the bundle works
+## What the binary needs
 
-`install/lo-up.min.tmpl` wraps the minified `argsh runtime + lo-up` with a POSIX
-`/bin/sh` preamble that re-execs under bash from a real file — so `curl … | sh`
-works even where `/bin/sh` is dash, or when the script arrives on a stdin pipe
-(where `${BASH_SOURCE[0]}` is unset under `set -u`). Two gotchas the build
-handles:
+The Go `lo` is the entrypoint. Commands that are not ported yet run through
+the framework tree (`.lok8s/lo`) that every project still carries, so a
+project is bootstrapped the same way as before:
 
-- **Dispatch** is lo-up's own `… || main "$@"` tail; the template does *not*
-  append `argsh::shebang` (that re-dispatches after `main` returns and trips on
-  an obfuscated unbound under `set -u`).
-- **Obfuscation** must skip the variables `:args` addresses by literal name —
-  the spec array `args` and each flag's destination var — via the build's `-i`
-  list. Note `ref` is a reserved argsh nameref, so the flag's variable is
-  `git_ref` (`--git-ref`).
+```sh
+b env add github.com/kernpilot/lok8s#local && b install
+```
+
+See [docs/reference/go-migration.md](../docs/reference/go-migration.md) for
+what runs natively, the `LO_IMPL=bash` escape hatch, and the parity gates.
+
+## Legacy: the argsh `lo-up` installer
+
+The previous installer (`lo-up`, an argsh script bundled with its runtime and
+published at `https://lok8s.io/lo-up`) is retired but not deleted: its source,
+build script and runtime pin moved to
+[`.lok8s/legacy/install/`](../.lok8s/legacy/install/README.md), and the
+published bundle at `docs/public/lo-up` stays served for existing users. The
+`loup-bundle` CI job still rebuilds and diffs it from the legacy path.
+
+## Tests
+
+`tests/unit/lo_install_test.bats` drives the script against a `file://`
+fixture release (a fake `lo` archive + `checksums.txt`): a clean install, a
+checksum mismatch (must install nothing), `--dry-run` (must fetch nothing),
+and argument handling. `hack/lint-shell.sh` shellchecks `install/`.

@@ -340,26 +340,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read install/argsh.pin
+      - name: Read .lok8s/legacy/install/argsh.pin
         id: pin
         run: |
           set -euo pipefail
           # The published bundle embeds the argsh runtime's version and commit,
           # so the rebuild below is only comparable when it runs against the
-          # SAME revision. install/argsh.pin is that record; install/build
-          # refuses to build from anything else.
+          # SAME revision. .lok8s/legacy/install/argsh.pin is that record;
+          # .lok8s/legacy/install/build refuses to build from anything else.
+          # (The argsh installer retired to .lok8s/legacy/ when the Go `lo`
+          # binary became the distribution path — see install/README.md. The
+          # bundle at docs/public/lo-up stays published for the legacy path,
+          # so this gate stays.)
           while IFS='=' read -r k v; do
             case "${k}" in
               ref|describe|minifier_release|minifier_sha256)
                 echo "${k}=${v}" >> "${GITHUB_OUTPUT}" ;;
             esac
-          done < install/argsh.pin
+          done < .lok8s/legacy/install/argsh.pin
 
       - uses: actions/checkout@v4
         with:
           repository: arg-sh/argsh
           ref: ${{ steps.pin.outputs.ref }}
-          # install/build runs `git describe --tags` in this checkout and the
+          # .lok8s/legacy/install/build runs `git describe --tags` in this checkout and the
           # result is stamped into the bundle — a shallow clone has no tags and
           # would stamp "unknown".
           fetch-depth: 0
@@ -369,7 +373,7 @@ jobs:
         run: |
           set -euo pipefail
           # GNU envsubst specifically: `argsh minify` renders its template with
-          # a SHELL-FORMAT whitelist, which renvsubst rejects (see install/build).
+          # a SHELL-FORMAT whitelist, which renvsubst rejects (see .lok8s/legacy/install/build).
           sudo apt-get update && sudo apt-get install -y gettext-base
           # `argsh minify` shells out to `minifier`, a Rust crate in the argsh
           # repo, published as a release asset. Pinned + checksummed, same rule
@@ -380,15 +384,15 @@ jobs:
           echo "${{ steps.pin.outputs.minifier_sha256 }}  .argsh-src/.bin/minifier" | sha256sum -c -
           chmod +x .argsh-src/.bin/minifier
 
-      - name: Rebuild docs/public/lo-up from install/lo-up
-        run: ARGSH_SRC="${GITHUB_WORKSPACE}/.argsh-src" install/build
+      - name: Rebuild docs/public/lo-up from .lok8s/legacy/install/lo-up
+        run: ARGSH_SRC="${GITHUB_WORKSPACE}/.argsh-src" .lok8s/legacy/install/build
 
       - name: The published installer is not stale
         run: |
           git diff --exit-code -- docs/public/lo-up || {
-            echo "::error::docs/public/lo-up does not match a rebuild from install/lo-up."
-            echo "::error::Every 'curl … | sh' user is being served the old script."
-            echo "::error::Fix: ARGSH_SRC=/path/to/arg-sh/argsh install/build, then commit the bundle."
+            echo "::error::docs/public/lo-up does not match a rebuild from .lok8s/legacy/install/lo-up."
+            echo "::error::Every legacy 'lo-up' user is being served the old script."
+            echo "::error::Fix: ARGSH_SRC=/path/to/arg-sh/argsh .lok8s/legacy/install/build, then commit the bundle."
             exit 1
           }
 
