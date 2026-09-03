@@ -159,7 +159,9 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 
 // Join is `lo kubehz join <node>`: mint a node join ticket for the active
 // domain's space (hosting: shared). The ticket is single-node, single-use
-// and short-lived; the plaintext is printed exactly once and never stored.
+// and short-lived; the plaintext is printed exactly once and kept nowhere
+// but the api-shipped join script under TMPDIR (owner-only, see
+// writeJoinScript) — never in the project tree.
 func (c *Context) Join(ctx context.Context, domain, node string) error {
 	if domain == "" {
 		c.errorf("No active domain. Use: lo use <domain>")

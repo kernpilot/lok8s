@@ -155,6 +155,13 @@ A few things worth knowing before you reach for it:
 - **`KUBEHZ_TOKEN` is required**, not optional as it is elsewhere: a space
   belongs to your account from the moment it exists, so there is no anonymous
   path and no claim step.
+- **The join script comes with the ticket.** The platform ships the recipe
+  the docs describe (containerd, kubelet, the cluster CA verified against the
+  ticket, bootstrap config) and `lo` writes it to `$TMPDIR/kubehz-join-<node>.sh`,
+  owner-only, and prints the `scp`/`ssh` line — it runs nothing itself. The
+  file carries the ticket: read it, copy it to the machine, run it there as
+  root, delete it once the node has joined. Older platforms without the
+  script print a pointer to the node-join guide instead.
 - **A join ticket is shown once**, is bound to one node name, and expires
   quickly. Nothing stores the plaintext: a lost ticket gets re-minted, never
   recovered.

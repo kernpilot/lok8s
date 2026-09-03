@@ -7,6 +7,7 @@ package kubehz
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -237,6 +238,9 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	// copy it to the machine, run it as root there.
 	if script != "" {
 		path, err := c.writeJoinScript(nodeName, script)
+		if errors.Is(err, ErrHandled) {
+			return err
+		}
 		if err != nil {
 			c.errorf("could not write the join script for '%s': %v", nodeName, err)
 			return ErrHandled
@@ -246,8 +250,9 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		if endpoint != "" {
 			c.echo("  It bootstraps the kubelet against %s.", endpoint)
 		}
-		c.echo("  Copy it to the machine and run it there as root:")
+		c.echo("  Read it, then copy it to the machine and run it there as root:")
 		c.echo("    scp %s root@<machine>:/root/ && ssh root@<machine> bash /root/%s", path, filepath.Base(path))
+		c.echo("  Delete it once the node has joined.")
 	} else {
 		c.echo("  On the machine, follow the node-join guide for your platform")
 		c.echo("  (kubehz docs: Spaces → Joining nodes).")
@@ -261,14 +266,34 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 // writeJoinScript stores the api's join recipe under the user's temp dir
 // (TMPDIR, else the OS default), owner-only, named after the node:
 // <tmp>/kubehz-join-<node>.sh. Overwritten on every mint — a fresh ticket
-// supersedes the old one.
+// supersedes the old one. The name is predictable and the directory is
+// usually shared, so the stale name is removed and the new file created
+// exclusively: a symlink or a foreign file planted under that name fails
+// the mint instead of receiving the ticket. The node name is part of the
+// path, so it is validated here (the api's DNS-label rule) as well.
 func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
+	if err := c.assertNodeName(nodeName); err != nil {
+		return "", err
+	}
 	dir := c.getenv("TMPDIR")
 	if dir == "" {
 		dir = os.TempDir()
 	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
 	path := filepath.Join(dir, "kubehz-join-"+nodeName+".sh")
-	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+	_ = os.Remove(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
 		return "", err
 	}
 	return path, nil
