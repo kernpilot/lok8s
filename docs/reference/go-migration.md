@@ -19,8 +19,10 @@ for the download-verify-run steps, or use `install/lo-install.sh` from the
 same release (it verifies the archive against `checksums.txt` before
 extracting; `--dry-run` shows the plan).
 
-Local builds (`make build` → `bin/lo`) stamp `.lok8s/VERSION`; release builds
-stamp the git tag (`lo --version`).
+Local builds (`make build` → `bin/lo`) stamp the embedded
+`internal/assets/lok8s/VERSION` (its synced twin is `.lok8s/VERSION`);
+release builds stamp the git tag (`lo --version`). The binary never reads a
+VERSION file from the project tree.
 
 ## What runs where
 
@@ -36,7 +38,7 @@ $ lo <command>
 
 All of these are native. The tree mirrors the argsh usage list in `.lok8s/lo`
 one-to-one (a `go test` gate enforces it — see [Parity gates](#parity-gates)),
-plus two commands that exist only in the binary.
+plus three commands that exist only in the binary.
 
 | Group | Commands | Go packages behind them |
 |---|---|---|
@@ -45,11 +47,13 @@ plus two commands that exist only in the binary.
 | Integrations | `chat`, `ai`, `gitops`, `kubehz`, `tilt` | `internal/gitops`, `internal/kubehz`, `internal/tilt` |
 | Components | `kustomize`, `registry`, `image`, `addons`, `secrets`, `drivers` | `internal/driver/lo` (registries), `internal/image`, `internal/addons`, `internal/secrets` |
 | Internal (hidden from `--help`) | `hooks`, `env`, `k8s`, `crds` | `internal/hooks`, `internal/env`, `internal/crds` |
-| Go-only | `mcp` (native MCP server), `operator` (the shell-operator hook bodies) | `internal/cli/cmd_mcp.go`, `internal/operator` |
+| Go-only | `mcp` (native MCP server), `operator` (the shell-operator hook bodies), `assets` (the embedded framework assets: list, eject, diff, update) | `internal/cli/cmd_mcp.go`, `internal/operator`, `internal/assets` |
 
-`mcp` and `operator` have no twin in the argsh usage list, so they are
-allow-listed by name in `internal/cli/root.go` (`goOnlyCommands`) with a
-reason each. `lo mcp` replaces the argsh `mcp` builtin; the shipped
+`mcp`, `operator` and `assets` have no twin in the argsh usage list, so they
+are allow-listed by name in `internal/cli/root.go` (`goOnlyCommands`) with a
+reason each. The same holds for the Go-only additions to existing commands:
+`lo init project`, `lo addons --origin`, `lo drivers --list --origin`, the
+global `--no-eject` flag — see [Embedded assets](#embedded-assets-the-eject-model). `lo mcp` replaces the argsh `mcp` builtin; the shipped
 `.mcp.json` still launches the builtin (`.lok8s/lo mcp`) until that switch is
 made deliberately — see [`lo mcp`](/reference/cli#lo-mcp).
 
@@ -98,16 +102,102 @@ fixtures (`internal/build/split.go` carries the TODO). The CRD render
 output is byte-identical to the former `yq eval` render, with the committed
 CRDs as the parity fixture.
 
+## Embedded assets: the eject model
+
+Phase 7 / WP1 (done). The framework's first-party **data** ships inside
+the binary; a project no longer needs a synced `.lok8s/` tree for it.
+
+**What is embedded** — `internal/assets` embeds a committed mirror,
+`internal/assets/lok8s/**` (113 files, ~168 KB):
+
+| Mirror path | Content | Materialization unit |
+|---|---|---|
+| `addons/**` | all 24 bootstrap addons, byte-identical, vendored `chart/` dirs included | one unit per addon (`addons/<name>`) |
+| `drivers/lo/cluster/**` | kind config, CoreDNS, registry and expose templates | `drivers/lo/cluster` |
+| `drivers/kubeone/cluster/**` | the KubeOne core template | `drivers/kubeone/cluster` |
+| `drivers/capi/cluster/**` | the CAPI core + provider templates | `drivers/capi/cluster` |
+| `libs/inventory/manifests/` | the ClusterInventory CRD mirror | `libs/inventory/manifests` |
+| `chat/` | `lo chat` defaults | `chat` |
+| `VERSION` | the fallback for an unstamped build | — (never ejected) |
+
+The embedded copy is canonical. The repo's `.lok8s/**` twin stays (the
+frozen bash implementation and the parity harnesses read it) and is held
+byte-identical by `hack/sync-legacy-assets.sh` (mirror → `.lok8s`;
+`--from-legacy` the other way; `--check` diffs) and the Go test
+`TestEmbeddedMirrorMatchesLegacyTree`, which fails on any divergence in
+either direction.
+
+**Resolver and precedence** — `assets.Resolve(paths, rel)` returns the
+on-disk path for a rel like `addons/cilium` or
+`drivers/lo/cluster/registry`: the project's `.lok8s/<rel>` when it
+exists (whatever its content), else the embedded copy. `assets.Peek` is the
+same lookup without side effects. `lo` never overwrites an existing local
+file; the only writer of existing files is `lo assets update`. Every
+runtime read of the framework tree in the binary goes through the
+resolver: the bootstrap entry parser (`internal/bootstrap`, and the
+twin parsers in `internal/lint` and `internal/audit`, which peek), the
+`lo` driver's CoreDNS/registry/expose templates, the KubeOne core
+template, the CAPI templates, the inventory CRD, the chat defaults, and
+the version (`assets.Version()`: ldflags, else the embedded `VERSION`).
+What does NOT go through it, on purpose: the bash seams (`.lok8s/lo`,
+`.lok8s/drivers/<name>/main`, `.lok8s/providers/*`) — those are the frozen
+implementation, not assets — and `lo crds generate`'s write of the
+`.lok8s` CRD mirror, which is a generator output in this repo.
+
+**Eject on first use** (the default) — when a consumer needs an asset and
+the project holds no copy, the whole unit is written into `.lok8s/<unit>/`
+(atomically: a sibling temp dir renamed into place) with a `.lo-origin`
+marker and one `[assets] ejected <rel> -> .lok8s/<rel>` line on stderr.
+Read-only commands (`lint`, `audit`, the `addons` listing, `assets`
+itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
+(the embedded copy is served from a per-run temp dir, nothing is written);
+`lo assets eject --check` and `lo assets diff --check` for CI. The
+`.lo-origin` marker:
+
+```yaml
+# .lo-origin — written by lo when it ejected this asset. Do not edit.
+lo: 0.1.0
+ejectedAt: 2026-09-03T10:00:00Z
+files:
+  chart.yaml: sha256:…
+  values.yaml: sha256:…
+```
+
+**Three-way diff** — `lo assets diff` classifies every file of a unit
+from ORIGIN (marker) vs LOCAL vs EMBEDDED: `unchanged`, `local modified`,
+`lo updated`, `both` (conflict), `local-only`, `builtin-only`; a copy with
+no marker (a tree vendored by `b env sync`) classifies its differences as
+`local modified` because nothing proves otherwise. `lo assets update`
+applies the embedded copy only when local == origin for every file (else
+`--force`). The full surface, the state table and the JSON shape are in
+the [CLI reference](/reference/cli#lo-assets).
+
+**Project marker** — `config.ResolvePaths` recognizes a project by
+`clusters/` or `lok8s.yaml` (what `lo init project` writes); `.lok8s/lo`
+stays a fallback marker during the coexistence with the frozen tree.
+
+**Parity** — the bash implementation reads `.lok8s/**` from disk and has
+no embedded copy, so `lo assets` has no twin and no parity harness (its
+gate is `go test ./internal/assets/ ./internal/cli/`). Every harness
+gives its synthetic project a full `.lok8s` tree, so precedence picks the
+local copy there and every existing harness stays green unchanged. Two
+Go-only affordances are opt-in for exactly that reason: the origin column
+of `lo addons` / `lo drivers --list` is behind `--origin`, and the doctor
+summary line is omitted for a complete vendored tree with no ejected unit
+and no drift (the one layout the bash implementation also runs in), so
+`hack/parity-configure.sh`'s strict doctor diff holds.
+
 ## The framework tree still ships
 
-A project still carries `.lok8s/` and the pinned toolchain in `.bin/` —
-exactly what `b env add github.com/kernpilot/lok8s#<profile> && b install`
-has always put there. The binary needs it for the bootstrap addons
-(`.lok8s/addons/`), the Tilt extension (`.lok8s/tilt/`), the provider
-plugins, the CAPI templates, and it reads `.lok8s/VERSION` from it. The
-argsh entrypoint and libraries inside it are the frozen reference the
-parity gates and `LO_IMPL=bash` run. What changed is only the entrypoint:
-`lo` on your `PATH` is the binary instead of `.lok8s/lo`.
+A project synced with `b env add github.com/kernpilot/lok8s#<profile> &&
+b install` still carries `.lok8s/` and the pinned toolchain in `.bin/`,
+and the binary honors that tree first (precedence above). What the binary
+still needs from it is the bash that has no Go twin yet: the Tilt
+extension (`.lok8s/tilt/`), the provider plugins, and the frozen
+entrypoint + libraries the parity gates and `LO_IMPL=bash` run. The data
+files it used to need (addons, driver templates, the CRD mirror, the chat
+defaults, `VERSION`) are embedded now. What changed for the user is only
+the entrypoint: `lo` on your `PATH` is the binary instead of `.lok8s/lo`.
 
 The `core` profile's `.bin/b.yaml` declares the binary
 (`github.com/kernpilot/lok8s`, asset `lo-*.tar.gz`, alias `lo`), so `b

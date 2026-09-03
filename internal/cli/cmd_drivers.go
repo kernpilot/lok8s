@@ -32,6 +32,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -114,6 +115,7 @@ func usageFor(name string) driverUsage {
 
 func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) *cobra.Command {
 	var list int
+	var origin bool
 	cmd := &cobra.Command{
 		Use:          "drivers [name] [args...]",
 		Aliases:      spec.aliases,
@@ -127,6 +129,10 @@ func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) 
 			if list > 0 {
 				fmt.Fprint(out, "Available drivers:\n\n")
 				for _, d := range driversList(paths, deps) {
+					if origin {
+						fmt.Fprintf(out, "- %-12s %s\n", d, driverOrigin(paths, deps, d))
+						continue
+					}
 					fmt.Fprintf(out, "- %s\n", d)
 				}
 				return nil
@@ -153,11 +159,31 @@ func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) 
 		},
 	}
 	cmd.Flags().CountVarP(&list, "list", "l", "List available drivers")
+	cmd.Flags().BoolVar(&origin, "origin", false, "With --list: add the origin of each driver's cluster templates (builtin · local · local (modified) · local-only)")
 
 	for _, name := range deps.names() {
 		cmd.AddCommand(newDriverSubcommand(paths, deps, name))
 	}
 	return cmd
+}
+
+// driverOrigin is the `--list --origin` column: the eject-model verdict on
+// the driver's cluster templates (drivers/<name>/cluster) when the binary
+// ships some, "builtin" for a Go driver without templates, "local-only" for
+// a bash-only driver directory.
+func driverOrigin(paths *config.Paths, deps driversDeps, name string) string {
+	if _, ok := assets.UnitFor("drivers/" + name + "/cluster"); ok {
+		reports, err := assets.Report(paths, []string{"drivers/" + name + "/cluster"})
+		if err == nil && len(reports) == 1 {
+			return reports[0].Origin
+		}
+	}
+	for _, n := range deps.names() {
+		if n == name {
+			return assets.OriginColBuiltin
+		}
+	}
+	return assets.OriginColLocalOnly
 }
 
 // driversList is the union of the Go registry and the bash driver

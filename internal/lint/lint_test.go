@@ -81,7 +81,9 @@ func TestBootstrapEntryNotFound(t *testing.T) {
 	l, base, _, errOut := newLinter(t)
 	dir := filepath.Join(base, "clusters", "a.dev")
 	spec := filepath.Join(dir, "cluster.lok8s.yaml")
-	writeFile(t, spec, "kind: Lo\nspec:\n  bootstrap:\n    - nope\n    - ccm:\n        wait: true\n")
+	// Neither name is an addon the binary ships (a shipped one — ccm,
+	// cilium — is always found now: the embedded copy serves it).
+	writeFile(t, spec, "kind: Lo\nspec:\n  bootstrap:\n    - nope\n    - gone:\n        wait: true\n")
 
 	if got := l.bootstrap(dir, spec, "a.dev"); got != 2 {
 		t.Fatalf("bootstrap errors = %d, want 2\nstderr:\n%s", got, errOut.String())
@@ -90,7 +92,7 @@ func TestBootstrapEntryNotFound(t *testing.T) {
 	// entry as compact JSON — both with the verbatim resolved dir.
 	for _, want := range []string{
 		`spec.bootstrap entry not found: "nope" (resolved to ` + l.Paths.Lok8s + "/addons/nope)",
-		`spec.bootstrap entry not found: {"ccm":{"wait":true}} (resolved to ` + l.Paths.Lok8s + "/addons/ccm)",
+		`spec.bootstrap entry not found: {"gone":{"wait":true}} (resolved to ` + l.Paths.Lok8s + "/addons/gone)",
 	} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("stderr missing %q; got:\n%s", want, errOut.String())
@@ -106,12 +108,14 @@ func TestBootstrapDefaultCilium(t *testing.T) {
 	// "cilium" (BARE, not JSON-quoted — it comes from an echo, not yq).
 	writeFile(t, spec, "kind: Lo\n")
 
-	if got := l.bootstrap(dir, spec, "a.dev"); got != 1 {
-		t.Fatalf("bootstrap errors = %d, want 1", got)
+	// The default resolves to the embedded cilium (the binary ships it), so
+	// a project without a local copy lints clean — and lint, being
+	// read-only, ejects nothing.
+	if got := l.bootstrap(dir, spec, "a.dev"); got != 0 {
+		t.Fatalf("bootstrap errors = %d, want 0\nstderr:\n%s", got, errOut.String())
 	}
-	want := "spec.bootstrap entry not found: cilium (resolved to " + l.Paths.Lok8s + "/addons/cilium)"
-	if !strings.Contains(errOut.String(), want) {
-		t.Errorf("stderr missing %q; got:\n%s", want, errOut.String())
+	if _, err := os.Stat(filepath.Join(l.Paths.Lok8s, "addons", "cilium")); err == nil {
+		t.Error("lint ejected cilium into the project")
 	}
 
 	// Explicit empty list = authoritative opt-out: no default, no error.

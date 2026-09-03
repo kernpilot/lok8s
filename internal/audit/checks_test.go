@@ -115,6 +115,10 @@ resources:
 		t.Run(tc.name, func(t *testing.T) {
 			a := newFixtureAuditor(t)
 			dir := setupDomain(t, a, "d.dev", "kind: KubeOne\n")
+			// The binary ships the kubeone core template (which enables
+			// encryption); a local copy WITHOUT the feature wins over it,
+			// so the artifacts fallback is what decides here.
+			writeFileT(t, filepath.Join(a.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"), "features: {}\n")
 			writeFileT(t, filepath.Join(dir, "artifacts.yaml"), tc.artifacts)
 			f := findingByID(t, a.RunDomain("d.dev"), "encryption-at-rest")
 			if f.Status != tc.wantStatus {

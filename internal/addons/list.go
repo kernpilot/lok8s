@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -25,8 +26,40 @@ import (
 // format ([error] … on stderr).
 var ErrHandled = errors.New("addons: handled")
 
-// Dir is the shared addons directory (bash: addons::_dir).
+// Dir is the project's addons directory (bash: addons::_dir). Since the
+// eject model it is only half the picture: a framework addon the project
+// holds no copy of is served from the binary (internal/assets) and listed
+// with origin "builtin"; `lo addons <name>` ejects it there on first use.
 func Dir(p *config.Paths) string { return p.Lok8s + "/addons" }
+
+// Names is the union of the embedded addon names and the project's own
+// addon dirs, in bash `*/` glob order.
+func Names(p *config.Paths) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, n := range assets.AddonNames() {
+		seen[n] = true
+		names = append(names, n)
+	}
+	for _, dir := range addonDirs(Dir(p)) {
+		if n := filepath.Base(dir); !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i]+"/" < names[j]+"/" })
+	return names
+}
+
+// OriginOf is the origin column for one addon: builtin · local · local
+// (modified) · local-only (assets.Report's unit verdict).
+func OriginOf(p *config.Paths, name string) string {
+	reports, err := assets.Report(p, []string{"addons/" + name})
+	if err != nil || len(reports) == 0 {
+		return "-"
+	}
+	return reports[0].Origin
+}
 
 // Driver resolves the driver kind for a domain (bash: addons::_driver).
 // Falls back to "lo" when no spec is found — but NOT when the spec declares
@@ -131,36 +164,69 @@ func sortGlobDirs(dirs []string) {
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i]+"/" < dirs[j]+"/" })
 }
 
-// List prints the table of framework addons (bash: addons::list).
+// List prints the table of framework addons (bash: addons::list): the
+// union of the embedded set and the project's own dirs. The table is
+// byte-identical to the bash output; ListOrigin adds the ORIGIN column.
 func List(p *config.Paths, d string, out, stderr io.Writer) error {
+	return list(p, d, out, stderr, false)
+}
+
+// ListOrigin is List with the origin column (`lo addons --origin`).
+func ListOrigin(p *config.Paths, d string, out, stderr io.Writer) error {
+	return list(p, d, out, stderr, true)
+}
+
+func list(p *config.Paths, d string, out, stderr io.Writer, withOrigin bool) error {
 	if _, err := Driver(p, d, stderr); err != nil {
 		return err
 	}
-	root := Dir(p)
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		ui.Warnf(stderr, "No addons directory (%s)", root)
+	names := Names(p)
+	if len(names) == 0 {
+		ui.Warnf(stderr, "No addons directory (%s)", Dir(p))
 		return nil
 	}
-	fmt.Fprintf(out, "%-20s  %-8s  %-12s  %s\n", "NAME", "TYPE", "VERSION", "CHART/REPO")
-	fmt.Fprintf(out, "%-20s  %-8s  %-12s  %s\n", "----", "----", "-------", "----------")
-	had := false
-	for _, dir := range addonDirs(root) {
+	row := func(name, typ, version, origin, detail string) {
+		if withOrigin {
+			fmt.Fprintf(out, "%-20s  %-8s  %-12s  %-18s  %s\n", name, typ, version, origin, detail)
+			return
+		}
+		fmt.Fprintf(out, "%-20s  %-8s  %-12s  %s\n", name, typ, version, detail)
+	}
+	row("NAME", "TYPE", "VERSION", "ORIGIN", "CHART/REPO")
+	row("----", "----", "-------", "------", "----------")
+	for _, name := range names {
+		// Peek: a listing never ejects.
+		dir, _, err := assets.Peek(p, "addons/"+name)
+		if err != nil {
+			continue
+		}
 		m := readChart(dir)
 		detail := "-"
 		if m.chart != "-" {
 			detail = m.chart + " (" + m.repository + ")"
 		}
-		fmt.Fprintf(out, "%-20s  %-8s  %-12s  %s\n", filepath.Base(dir), Type(dir), m.version, detail)
-		had = true
-	}
-	if !had {
-		fmt.Fprintln(out, "  (no addons available)")
+		origin := ""
+		if withOrigin {
+			origin = OriginOf(p, name)
+		}
+		row(name, Type(dir), m.version, origin, detail)
 	}
 	return nil
 }
 
-// Show prints the detail of one addon (bash: addons::show).
+// Show prints the detail of one addon (bash: addons::show). A framework
+// addon the project holds no copy of is ejected first (default policy), so
+// `path:` names the project's copy; ShowOrigin adds an `origin:` line.
 func Show(p *config.Paths, d, name string, out, stderr io.Writer) error {
+	return show(p, d, name, out, stderr, false)
+}
+
+// ShowOrigin is Show with the origin line (`lo addons <name> --origin`).
+func ShowOrigin(p *config.Paths, d, name string, out, stderr io.Writer) error {
+	return show(p, d, name, out, stderr, true)
+}
+
+func show(p *config.Paths, d, name string, out, stderr io.Writer, withOrigin bool) error {
 	if name == "" {
 		ui.Errorf(stderr, "addon name required")
 		return ErrHandled
@@ -169,7 +235,10 @@ func Show(p *config.Paths, d, name string, out, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir := Dir(p) + "/" + name
+	dir, origin, err := assets.Resolve(p, "addons/"+name)
+	if err != nil || origin == assets.OriginNone {
+		dir = Dir(p) + "/" + name
+	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		ui.Errorf(stderr, "addon '%s' not found (%s)", name, dir)
 		return ErrHandled
@@ -177,6 +246,9 @@ func Show(p *config.Paths, d, name string, out, stderr io.Writer) error {
 	fmt.Fprintf(out, "name:    %s\n", name)
 	fmt.Fprintf(out, "driver:  %s\n", driver)
 	fmt.Fprintf(out, "path:    %s\n", dir)
+	if withOrigin {
+		fmt.Fprintf(out, "origin:  %s\n", OriginOf(p, name))
+	}
 	fmt.Fprintf(out, "type:    %s\n", Type(dir))
 	m := readChart(dir)
 	if m.chart != "-" {
@@ -281,6 +353,9 @@ func ConfigHint(name string) string { return configHints[name] }
 type Resolved struct {
 	Name string
 	Dir  string
+	// Builtin marks a framework addon (bootstrap.Entry.Builtin) as opposed
+	// to a per-cluster target.
+	Builtin bool
 }
 
 // EntryResolver reads a cluster spec's bootstrap entries for a driver kind
@@ -296,6 +371,16 @@ type EntryResolver func(spec, kind, domain string) []Resolved
 // `./targets/*` (and absolute-path) entries are listed as per-cluster
 // targets (glue), not framework addons.
 func Detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResolver) error {
+	return detail(p, d, out, stderr, resolve, false)
+}
+
+// DetailOrigin is Detail with the origin column (`lo addons --detail
+// --origin`).
+func DetailOrigin(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResolver) error {
+	return detail(p, d, out, stderr, resolve, true)
+}
+
+func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResolver, withOrigin bool) error {
 	// Reject a path-traversal / injected domain BEFORE it builds any
 	// filesystem path (same guard as bootstrap::dispatch /
 	// provision::resolve_spec / audit::run_domain).
@@ -304,7 +389,6 @@ func Detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 		return nil
 	}
 	spec := p.Clusters + "/" + d + "/cluster.lok8s.yaml"
-	root := Dir(p)
 	if !fileExists(spec) {
 		ui.Warnf(stderr, "No cluster spec for '%s' (%s) — nothing to inventory", d, spec)
 		return nil
@@ -319,24 +403,39 @@ func Detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 	entries := resolve(spec, kind, d)
 
 	fmt.Fprintf(out, "Addons deployed by %s (kind=%s)\n\n", d, kind)
-	fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %s\n", "NAME", "CATEGORY", "TYPE", "VERSION", "CONFIGURE")
-	fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %s\n", "----", "--------", "----", "-------", "---------")
+	row := func(name, category, typ, version, origin, configure string) {
+		if withOrigin {
+			fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %-18s  %s\n", name, category, typ, version, origin, configure)
+			return
+		}
+		fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %s\n", name, category, typ, version, configure)
+	}
+	row("NAME", "CATEGORY", "TYPE", "VERSION", "ORIGIN", "CONFIGURE")
+	row("----", "--------", "----", "-------", "------", "---------")
 
 	count := 0
 	for _, e := range entries {
 		count++
-		if strings.HasPrefix(e.Dir, root+"/") {
+		if e.Builtin {
 			hint := ConfigHint(filepath.Base(e.Dir))
 			if hint == "" {
 				hint = "see docs/guide/addons.md"
 			}
-			fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %s\n", e.Name, Category(e.Dir), Type(e.Dir), Version(e.Dir), hint)
+			origin := ""
+			if withOrigin {
+				origin = OriginOf(p, filepath.Base(e.Dir))
+			}
+			row(e.Name, Category(e.Dir), Type(e.Dir), Version(e.Dir), origin, hint)
 			continue
 		}
 		// Per-cluster target (glue) — a ./targets/* or /abs path entry.
 		tpath := strings.ReplaceAll(e.Dir, "/./", "/")
 		tpath = strings.TrimPrefix(tpath, p.Base+"/")
-		fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %s\n", e.Name, "target", "target", "-", "per-cluster glue in "+tpath)
+		origin := ""
+		if withOrigin {
+			origin = "target"
+		}
+		row(e.Name, "target", "target", "-", origin, "per-cluster glue in "+tpath)
 	}
 	if count == 0 {
 		fmt.Fprintln(out, "  (spec.bootstrap is empty — this cluster deploys no addons)")

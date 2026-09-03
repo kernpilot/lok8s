@@ -76,7 +76,27 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	}
 	test.Flags().StringVarP(&testPath, "path", "p", "", "Directory for the suite (default: ./tests)")
 
-	cmd.AddCommand(service, test)
+	// Go-only (no twin in .lok8s/libs/init): the eject model's project
+	// scaffold — no .lok8s/ tree, assets are ejected on first use.
+	var projectPath string
+	project := &cobra.Command{
+		Use:          "project [name]",
+		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml) — no .lok8s/",
+		Args:         cobra.MaximumNArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			setDebugFromVerbose(cmd)
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			force, _ := cmd.Flags().GetBool("force")
+			return scaffoldRun(scaffold.Project(paths.Base, name, projectPath, force, cmd.OutOrStdout(), cmd.ErrOrStderr()))
+		},
+	}
+	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the current project root)")
+
+	cmd.AddCommand(service, test, project)
 	return cmd
 }
 

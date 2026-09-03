@@ -41,10 +41,19 @@ func newAddonsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			flag, _ := cmd.Flags().GetString("domain")
 			d := domain.Resolve(flag, paths.Clusters, stderr)
 
+			// --origin (Go-only): the eject-model column — builtin · local ·
+			// local (modified) · local-only. Opt-in so the default table
+			// stays byte-identical to the frozen implementation.
+			origin, _ := cmd.Flags().GetBool("origin")
+			show, detailFn, list := addons.Show, addons.Detail, addons.List
+			if origin {
+				show, detailFn, list = addons.ShowOrigin, addons.DetailOrigin, addons.ListOrigin
+			}
+
 			// Named addons win over --detail (bash: is::set addons first).
 			if len(args) > 0 {
 				for i, name := range args {
-					if err := addonsRun(addons.Show(paths, d, name, out, stderr)); err != nil {
+					if err := addonsRun(show(paths, d, name, out, stderr)); err != nil {
 						return err
 					}
 					if i < len(args)-1 {
@@ -54,13 +63,14 @@ func newAddonsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				return nil
 			}
 			if detail, _ := cmd.Flags().GetCount("detail"); detail > 0 {
-				return addonsRun(addons.Detail(paths, d, out, stderr, bootstrapEntries(paths)))
+				return addonsRun(detailFn(paths, d, out, stderr, bootstrapEntries(paths)))
 			}
-			return addonsRun(addons.List(paths, d, out, stderr))
+			return addonsRun(list(paths, d, out, stderr))
 		},
 	}
 	// argsh 'detail|:+' is a counting flag.
 	cmd.Flags().Count("detail", "Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure")
+	cmd.Flags().Bool("origin", false, "Add the ORIGIN column: builtin (served from the binary) · local · local (modified) · local-only (see: lo assets)")
 	return cmd
 }
 
@@ -79,7 +89,7 @@ func bootstrapEntries(paths *config.Paths) addons.EntryResolver {
 			if err != nil {
 				continue
 			}
-			out = append(out, addons.Resolved{Name: e.Name, Dir: e.Dir})
+			out = append(out, addons.Resolved{Name: e.Name, Dir: e.Dir, Builtin: e.Builtin})
 		}
 		return out
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -159,6 +160,7 @@ func runDoctor(paths *config.Paths, d string, out, stderr io.Writer) error {
 	} else {
 		doctorWarn(out, "secrets.lok8s.dev plugin not built (run: lo kustomize build)")
 	}
+	doctorAssets(out, paths)
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
@@ -210,6 +212,36 @@ func runDoctor(paths *config.Paths, d string, out, stderr io.Writer) error {
 	}
 	fmt.Fprintln(out, "doctor: all required checks passed.")
 	return nil
+}
+
+// doctorAssets is the eject-model summary line (Go-only): drift count,
+// "all in sync", or "none ejected". It is OMITTED for the one layout the
+// frozen implementation can also run in — a complete vendored .lok8s tree
+// with no ejected units and no drift (what `b env sync` produces) — so the
+// doctor output stays byte-identical to bash there (parity-configure diffs
+// it strictly). Any ejected unit, any drift, or a project without a local
+// tree prints the line.
+func doctorAssets(w io.Writer, paths *config.Paths) {
+	reports, err := assets.Report(paths, nil)
+	if err != nil {
+		doctorWarn(w, "assets: "+err.Error())
+		return
+	}
+	ejected := false
+	for _, r := range reports {
+		if r.Marker != nil {
+			ejected = true
+		}
+	}
+	line, warn := assets.DoctorLine(paths)
+	if !warn && !ejected && strings.HasSuffix(line, "all in sync with the binary") {
+		return
+	}
+	if warn {
+		doctorWarn(w, line)
+		return
+	}
+	doctorOK(w, line)
 }
 
 func doctorOK(w io.Writer, msg string)   { fmt.Fprintf(w, "  \033[32m✓\033[0m %s\n", msg) }

@@ -17,6 +17,7 @@ The `lo` CLI is a single static Go binary. Every command below runs natively in 
 | `--config` | | Kind config file path |
 | `--domain` | | Domain name override |
 | `--domain-sans` | | Domain SANs override |
+| `--no-eject` | | Never write embedded framework assets into the project; serve them from a temp dir (env form: `LO_ASSETS_EJECT=never`). See [`lo assets`](#lo-assets) |
 
 ## Commands
 
@@ -174,9 +175,12 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
+lo init project [name] [--path <dir>] [--force]
 lo init service <name> [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
 ```
+
+**`lo init project [name]`** scaffolds the smallest project the binary needs: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (the project marker `lo` resolves the root from), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and a minimal `.bin/b.yaml` (the `lo` binary plus the third-party tools it execs). It writes **no `.lok8s/` tree**: the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use — see [`lo assets`](#lo-assets). Existing files are kept (`--force` overwrites; `.gitignore` is only appended to). `name` defaults to the directory name.
 
 **`lo init service <name>`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader.
 
@@ -184,7 +188,7 @@ lo init test [--path <dir>] [--force]
 
 | Flag | Description |
 |------|-------------|
-| `--path`, `-p` | Target directory (service dir / `tests/` dir) |
+| `--path`, `-p` | Target directory (project dir / service dir / `tests/` dir) |
 | `--force`, `-f` | Overwrite existing files / non-empty target |
 
 ### lo use
@@ -397,19 +401,59 @@ lo version
 List driver bootstrap addons for the active cluster; name one to inspect it.
 
 ```bash
-lo addons [name]
+lo addons [name...] [--detail] [--origin]
 ```
+
+The list is the union of the addons embedded in the binary and the project's own `.lok8s/addons/*` directories. `--origin` adds an `ORIGIN` column — `builtin` (served from the binary, not ejected), `local` (the project's copy, identical to what the binary ships), `local (modified)` (the project's copy differs — `lo assets diff addons/<name>` shows how), `local-only` (an addon the binary does not ship). Without `--origin` the table is the classic four-column one. Naming an addon that the project holds no copy of ejects it first (see [`lo assets`](#lo-assets)), so `path:` always points into the project; `--no-eject` serves it from a temp dir instead.
 
 ### lo drivers
 
 Driver-specific commands.
 
 ```bash
-lo drivers --list             # list available drivers
+lo drivers --list [--origin]  # list available drivers
 lo drivers <name> <args…>     # invoke a driver's own subcommands
 ```
 
-`--list` prints the union of the Go driver registry (`lo`, `capi`, `kubeone`, `kkp`, `kubehz`) and the driver directories under `.lok8s/drivers/`. A name that exists only as a bash driver is handed to the argsh implementation with the arguments untouched; `--help` after a nested command (`lo drivers lo status --help`) reaches that command, where argsh printed the `drivers` usage instead.
+`--list` prints the union of the Go driver registry (`lo`, `capi`, `kubeone`, `kkp`, `kubehz`) and the driver directories under `.lok8s/drivers/`; `--origin` adds the origin of each driver's cluster templates (`drivers/<name>/cluster` — `builtin`, `local`, `local (modified)`, or `local-only` for a bash-only driver directory). A name that exists only as a bash driver is handed to the argsh implementation with the arguments untouched; `--help` after a nested command (`lo drivers lo status --help`) reaches that command, where argsh printed the `drivers` usage instead.
+
+### lo assets
+
+The framework's data files — every bootstrap addon, the driver cluster templates (`drivers/{lo,kubeone,capi}/cluster`), the ClusterInventory CRD mirror and the `lo chat` defaults — ship **inside the binary**. A project needs no synced `.lok8s/` tree for them. The rules:
+
+- **Precedence** — a copy under the project's `.lok8s/<rel>` always wins over the embedded one, whatever its content.
+- **Eject on first use** (the default) — when a cluster references an asset (an addon in `spec.bootstrap`, a driver's templates, the CRD at publish time) and the project holds no copy, `lo` writes the embedded one into `.lok8s/<rel>/` together with a `.lo-origin` marker (the `lo` version, a timestamp, one sha256 per file) and prints one `[assets] ejected …` line. Commit the ejected files: from then on a `lo` upgrade can never silently change what that cluster applies — the diff below shows it and you choose.
+- **Never overwrite** — `lo` never touches an existing local file. The one writer of existing files is `lo assets update`.
+- **Read-only commands never eject** — `lo lint`, `lo audit`, `lo addons` (the list) and `lo assets` itself serve a missing copy from a temp dir.
+
+```bash
+lo assets list [--json]                 # every asset with its origin and chart version (local vs embedded)
+lo assets show <rel>                    # one asset: path, marker, per-file state
+lo assets eject [rel...] [--all] [--check]
+lo assets diff [rel...] [--json] [--check]
+lo assets update <rel> [--force]
+```
+
+`<rel>` is the path below `.lok8s/`: `addons/cilium`, `drivers/lo/cluster`, `drivers/kubeone/cluster`, `drivers/capi/cluster`, `libs/inventory/manifests`, `chat`.
+
+**`eject`** without arguments materializes what this project's cluster specs reference (each spec's builtin `spec.bootstrap` addons, its driver's templates, the inventory CRD); `--all` takes every embedded asset. `--check` writes nothing and exits `1` if any of that set would be ejected — the CI gate for "this repository pins what it applies".
+
+**`diff`** is a three-way comparison per file, by content hash: ORIGIN (the `.lo-origin` hashes — what was ejected) vs LOCAL (the project's file) vs EMBEDDED (what this `lo` ships). The headline per addon is the chart version, local vs embedded. Per file:
+
+| State | Meaning |
+|---|---|
+| `unchanged` | local == embedded |
+| `local modified` | you edited it (origin == embedded, local differs) — also the verdict for a copy with no marker (a vendored tree), where local is authoritative |
+| `lo updated` | this `lo` ships a newer file and yours is untouched (origin == local) |
+| `both` | conflict: all three differ |
+| `local-only` | exists only in the project |
+| `builtin-only` | exists only in the binary (lo added it, or it was deleted locally) |
+
+`--check` exits `1` on any drift (anything but `unchanged`/`local-only`). `--json` is a stable shape (`{"lo": "<version>", "assets": [{rel, kind, origin, drifted, version:{local,embedded}, marker:{lo,ejectedAt}, files:[{path,state,origin,local,embedded}], path}]}`).
+
+**`update <rel>`** applies the embedded copy over the local one only when every file is provably untouched (`unchanged` or `lo updated`) and a marker exists; otherwise it prints the classification and stops — `--force` applies anyway. It shows the diff first, keeps local-only files, and rewrites the marker.
+
+Opt-outs: the global `--no-eject` flag or `LO_ASSETS_EJECT=never` serve every missing asset from a per-run temp dir and write nothing into the project. `lo doctor` reports a one-line summary (`N of M local assets drifted` / `all in sync` / `none ejected`).
 
 ### lo kubehz
 
@@ -545,5 +589,6 @@ caller drives the mode, not the file.
 | `DEBUG` | (empty) | Enable debug output when non-empty |
 | `LO_IMPL` | (empty) | `bash` runs the frozen argsh implementation (`.lok8s/lo`) for this invocation instead of the binary — see [The Go `lo` binary](go-migration.md#lo-impl-bash-the-escape-hatch) |
 | `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |
+| `LO_ASSETS_EJECT` | (empty) | `never`: the environment form of `--no-eject` — embedded framework assets are served from a temp dir, never written into the project (see [`lo assets`](#lo-assets)) |
 | `LOK8S_NONINTERACTIVE` | (empty) | `1` disables prompts (consent gates refuse) and the collapsing progress UI |
 | `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` — needed only by the argsh `mcp` builtin the shipped `.mcp.json` launches |

@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -311,7 +312,10 @@ func (d *Driver) registryIPHolder(ctx context.Context, network, ip string) strin
 // collapsing services-style UI. One registry failing does NOT abort the
 // rest — errors are surfaced and the function returns non-nil at the end.
 func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, clusterYAML string) error {
-	registryConfigDir := filepath.Join(d.deps.Paths.Lok8s, "drivers", "lo", "cluster", "registry")
+	registryConfigDir, _, err := assets.Resolve(d.deps.Paths, "drivers/lo/cluster/registry")
+	if err != nil {
+		return err
+	}
 
 	rf, err := regFile()
 	if err != nil {

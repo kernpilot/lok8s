@@ -1,0 +1,13 @@
+# khelm chart spec for ExternalDNS with Hetzner webhook sidecar.
+# Manages DNS records from k8s Gateway/HTTPRoute resources.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: external-dns
+  namespace: external-dns
+kubeVersion: "1.31.12"
+repository: https://kubernetes-sigs.github.io/external-dns/
+chart: external-dns
+version: 1.21.1
+valueFiles:
+  - values.yaml

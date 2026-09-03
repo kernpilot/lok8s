@@ -148,11 +148,32 @@ func mustFail(t *testing.T, p *config.Paths, entry, wantMsg string) {
 func TestParseEntryBareName(t *testing.T) {
 	p := testPaths(t)
 	e := mustParse(t, p, `"cilium"`)
-	if e.Name != "cilium" || e.Dir != p.Lok8s+"/addons/cilium" {
-		t.Errorf("name/dir = %q/%q", e.Name, e.Dir)
+	// The fixture holds no cilium: the parser peeks at the embedded copy
+	// (temp dir, nothing written into the project) and flags it builtin.
+	if e.Name != "cilium" || !e.Builtin || filepath.Base(e.Dir) != "cilium" || !dirExists(e.Dir) || strings.HasPrefix(e.Dir, p.Lok8s) {
+		t.Errorf("name/dir/builtin = %q/%q/%v", e.Name, e.Dir, e.Builtin)
+	}
+	if dirExists(p.Lok8s + "/addons/cilium") {
+		t.Error("ParseEntry ejected into the project")
 	}
 	if e.Inline != "" || e.EnvLines != "" || e.Wait || len(e.Deps) != 0 || e.Explicit {
 		t.Errorf("unexpected fields: %+v", e)
+	}
+	// A name the binary does not ship resolves to its would-be local dir
+	// (the bash path), so "not found" keeps its wording.
+	e = mustParse(t, p, `"nope"`)
+	if !e.Builtin || e.Dir != p.Lok8s+"/addons/nope" {
+		t.Errorf("unknown addon dir = %q builtin=%v", e.Dir, e.Builtin)
+	}
+}
+
+func TestParseEntryBareNameLocalCopyWins(t *testing.T) {
+	p := testPaths(t)
+	os.MkdirAll(p.Lok8s+"/addons/cilium", 0o755)
+	os.WriteFile(p.Lok8s+"/addons/cilium/chart.yaml", []byte("kind: ChartRenderer\n"), 0o644)
+	e := mustParse(t, p, `"cilium"`)
+	if e.Dir != p.Lok8s+"/addons/cilium" || !e.Builtin {
+		t.Errorf("local copy did not win: %q builtin=%v", e.Dir, e.Builtin)
 	}
 }
 
@@ -161,7 +182,7 @@ func TestParseEntryDefaultBareWordEntry(t *testing.T) {
 	// quoting) — the parser must treat it identically to "cilium".
 	p := testPaths(t)
 	e := mustParse(t, p, "cilium")
-	if e.Name != "cilium" || e.Dir != p.Lok8s+"/addons/cilium" {
+	if e.Name != "cilium" || !e.Builtin || filepath.Base(e.Dir) != "cilium" || !dirExists(e.Dir) {
 		t.Errorf("name/dir = %q/%q", e.Name, e.Dir)
 	}
 }

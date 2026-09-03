@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/addons"
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"gopkg.in/yaml.v3"
@@ -38,6 +39,11 @@ type Entry struct {
 	// Explicit reports whether Name came from an explicit `name:` override
 	// (a name collision on it is a hard error, not a tolerated clash).
 	Explicit bool
+	// Builtin reports a bare framework-addon entry (Dir resolved through
+	// internal/assets: the project's .lok8s/addons/<name> when present, else
+	// the copy embedded in the binary) as opposed to a cluster-local target
+	// or an absolute path.
+	Builtin bool
 }
 
 var (
@@ -190,7 +196,17 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		e.Name = filepath.Base(raw)
 	default:
 		e.Name = raw
-		e.Dir = p.Lok8s + "/addons/" + raw
+		e.Builtin = true
+		// Peek never writes into the project: a parse is not a use. The
+		// apply path (engine.go) re-resolves builtin entries with
+		// assets.Resolve, which ejects on first use. A name the binary does
+		// not ship resolves to its would-be local dir, so the "addon not
+		// found" report keeps the bash wording and path.
+		dir, _, err := assets.Peek(p, "addons/"+raw)
+		if err != nil {
+			return nil, parseError(stderr, "bootstrap: failed to parse addon name from %s", entry)
+		}
+		e.Dir = dir
 	}
 
 	// Scalar entry (or a map with an empty/null value): nothing more to parse.
@@ -429,7 +445,7 @@ func InlineValues(p *config.Paths, stderr io.Writer, domain, clusterYAML, addon 
 		// that happens to share the basename (`./targets/cilium`) must not
 		// shadow the framework entry's values — keep scanning past a
 		// same-name target.
-		if e.Name == addon && e.Dir == p.Lok8s+"/addons/"+addon {
+		if e.Name == addon && e.Builtin && filepath.Base(e.Dir) == addon {
 			if e.Inline == "" || e.Inline == "null" {
 				return "", nil
 			}

@@ -11,15 +11,24 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/cli"
 	"github.com/kernpilot/lok8s/internal/config"
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run is main without os.Exit, so the deferred cleanup of the per-run
+// assets temp dir (embedded assets served under --no-eject) runs on every
+// exit path.
+func run() int {
+	defer assets.Cleanup()
 	paths, err := config.ResolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lo: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// LO_IMPL=bash bypasses the Go implementation entirely — the per-command
@@ -27,9 +36,9 @@ func main() {
 	if os.Getenv("LO_IMPL") == "bash" {
 		if err := cli.Shim(paths, os.Args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "lo: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	root := cli.NewRoot(paths)
@@ -39,6 +48,7 @@ func main() {
 		if !errors.Is(err, cli.ErrHandled) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

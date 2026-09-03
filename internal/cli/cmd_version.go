@@ -7,13 +7,12 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 
 	"github.com/spf13/cobra"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
@@ -60,14 +59,12 @@ func newVersionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	}
 }
 
-// lok8sVersion prefers the framework tree's VERSION file (the source of truth
-// while the argsh implementation ships alongside), then the ldflags-stamped
-// binary version.
-func lok8sVersion(paths *config.Paths) string {
-	if raw, err := os.ReadFile(filepath.Join(paths.Lok8s, "VERSION")); err == nil {
-		return trimTrailingNewline(string(raw))
-	}
-	return version
+// lok8sVersion is the binary's version: ldflags-stamped, else the embedded
+// VERSION file. The bash implementation read .lok8s/VERSION from disk; the
+// binary no longer does (the frozen tree and the embedded copy are held
+// identical by the assets drift test, so the two implementations agree).
+func lok8sVersion(*config.Paths) string {
+	return assets.Version()
 }
 
 // toolVersion runs the tool and extracts a best-effort version string,

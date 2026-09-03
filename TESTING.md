@@ -12,6 +12,7 @@ lok8s itself.
 |---|---|---|---|
 | Go unit tests | every `internal/**` package in isolation; external tools replaced by a fake `execx.Runner` | `go-tests` | `go test ./...` |
 | Tree-drift gate | the cobra command tree matches the argsh usage array in `.lok8s/lo` (names, aliases, hidden, markers, short text) | `go-tests` (part of `go test`) | `go test ./internal/cli/ -run TestCommandTreeMatchesArgshUsage` |
+| Assets-drift gate | the embedded mirror `internal/assets/lok8s/**` (canonical) is byte-identical to its `.lok8s/**` twin in both directions — addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `VERSION`; resync with `hack/sync-legacy-assets.sh` (`--from-legacy`, `--check`) | `go-tests` (part of `go test`) | `go test ./internal/assets/ -run TestEmbeddedMirrorMatchesLegacyTree` · `bash hack/sync-legacy-assets.sh --check` |
 | CRD render fixture | `lo crds` output is byte-identical to the committed `operator/crds/*.yaml` | `go-tests` (part of `go test`); `unit-tests` (`lo crds check`) | `go test ./internal/crds/` · `bin/lo crds check` |
 | Parity harnesses (10) | the binary and `LO_IMPL=bash` agree byte-for-byte on stdout, stderr, rc (and written trees) for every covered invocation | `go-tests` | `make build && bash hack/parity-<name>.sh` |
 | golangci-lint | `.golangci.yml` (standard set + misspell, unconvert, unparam, gocritic, revive) | `go-tests` | `make lint` |
@@ -97,6 +98,15 @@ bash side really runs. `PARITY_KEEP=1` leaves a harness's work directory
 behind for a post-mortem where supported. What each one covers, and the
 divergences it allow-lists, is in
 [docs/reference/go-migration.md](docs/reference/go-migration.md#parity-gates).
+
+The Go-only eject-model surface (`lo assets`, `lo init project`, `--origin`,
+`--no-eject`) has no bash twin and therefore no harness: its gate is
+`go test ./internal/assets/ ./internal/cli/` (precedence, never-overwrite,
+eject + marker, the six-way classification, update refusal, `--check` exit
+codes, the scaffold). Every harness hands its synthetic project a full
+`.lok8s` tree, so the resolver's precedence picks the local copy and the
+harnesses are unaffected — keep it that way: a harness project WITHOUT a
+`.lok8s` tree would eject into its work dir on the Go side only.
 
 ### The ambient-env hazard (read this once)
 

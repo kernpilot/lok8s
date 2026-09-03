@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -97,7 +98,10 @@ func credentialSecretName(spec specDoc) string {
 // pass through untouched — only the TemplateVars above are expanded.
 func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 	stderr := d.stderr()
-	tmplDir := filepath.Join(d.deps.Paths.Lok8s, "drivers", "capi", "cluster")
+	tmplDir, _, err := assets.Resolve(d.deps.Paths, "drivers/capi/cluster")
+	if err != nil {
+		return "", err
+	}
 	core := filepath.Join(tmplDir, "core")
 	prov := filepath.Join(tmplDir, "providers", "hetzner")
 

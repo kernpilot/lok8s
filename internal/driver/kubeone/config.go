@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -39,7 +40,12 @@ var (
 // <outputDir>/kubeone.yaml.
 func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outputDir string) error {
 	stderr := d.stderr()
-	coreTmpl := filepath.Join(d.deps.Paths.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml")
+	// The project's copy wins; else the embedded template (ejected on first
+	// use into .lok8s/drivers/kubeone/cluster/).
+	coreTmpl, _, err := assets.Resolve(d.deps.Paths, "drivers/kubeone/cluster/core/kubeone.yaml")
+	if err != nil {
+		return err
+	}
 	if !fileExists(coreTmpl) {
 		ui.Errorf(stderr, "KubeOne core template not found: %s", coreTmpl)
 		return fmt.Errorf("kubeone: core template not found: %s", coreTmpl)

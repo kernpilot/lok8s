@@ -82,12 +82,13 @@ Rules that came from incidents:
 | build / deploy | `internal/build`, `internal/deploy`, `internal/image`, `internal/gitops` | `.lok8s/libs/{build,deploy,image,gitops}` |
 | kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
 | secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
-| scaffolding | `internal/scaffold` (+ `templates/`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
+| scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
+| assets (eject model) | `internal/assets` — the embedded mirror `internal/assets/lok8s/**` (**canonical**: addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `VERSION`), `Resolve`/`Peek`, eject + `.lo-origin`, the three-way diff, `update`; `internal/cli/cmd_assets.go` | `.lok8s/{addons,drivers/*/cluster,libs/inventory/manifests,chat,VERSION}` — the synced twin (`hack/sync-legacy-assets.sh`; drift-gated by `go test ./internal/assets/`). Edit the mirror, then sync — never only one side |
 | tilt | `internal/tilt` (`lo tilt`, port slots) | `.lok8s/tilt/Tiltfile` (Starlark — still the live extension), `Tiltfile` |
 | mcp | `internal/cli/cmd_mcp.go` (ophis) | the argsh `mcp` builtin (`.mcp.json` still points here) |
 | operator | `internal/operator` (hook bodies), `operator/hooks/*.sh` (two-line shims), `operator/crds`, `operator/deploy` | `.lok8s/legacy/operator/hooks/` |
 | installer | `install/lo-install.sh`, `.goreleaser.yaml`, `hack/release-tarball.sh` | `.lok8s/legacy/install/` (`lo-up`) |
-| addons | — (kustomize-buildable dirs, shared by both) | `.lok8s/addons/` |
+| addons | `internal/assets/lok8s/addons/` (embedded, kustomize-buildable dirs; ejected into a project's `.lok8s/addons/<name>` on first use) | `.lok8s/addons/` (synced twin) |
 | infra | `clusters/`, `.kustomize/` (YAML / Kustomize) | |
 | kustomize-plugins | `kustomize/` (own Go module) → `.kustomize/<group>/<version>/<kind>/<Kind>` (built) | |
 | lo chat engine | `ai/lochat/` (own Go module) | |
@@ -114,8 +115,9 @@ not framework code. Its imports are ESM and stay relative.
 ## Building & testing
 
 ```bash
-make build                                       # bin/lo (stamps .lok8s/VERSION)
-go test ./... && go vet ./... && make lint       # Go unit + tree-drift gate, vet, golangci-lint
+make build                                       # bin/lo (stamps internal/assets/lok8s/VERSION)
+go test ./... && go vet ./... && make lint       # Go unit + tree-drift + assets-drift gates, vet, golangci-lint
+bash hack/sync-legacy-assets.sh                  # after editing internal/assets/lok8s/**: resync the .lok8s twin
 bash hack/parity-test.sh                         # one parity harness (ten exist; see TESTING.md)
 ./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …) — the bash side needs it
 ./.bin/argsh test tests/unit/ tests/operator/    # bats suites for the frozen tree

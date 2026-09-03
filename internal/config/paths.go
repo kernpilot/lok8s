@@ -3,8 +3,9 @@
 // This is THE single resolution point for the paths the bash implementation
 // derived via `: "${PATH_BASE:=...}"` chains. Precedence for every path:
 // explicit env var > derivation from the project base. The base itself is
-// env PATH_BASE > nearest ancestor of the working directory that contains
-// `.lok8s/lo` > the working directory.
+// env PATH_BASE > nearest ancestor of the working directory that carries a
+// project marker (`clusters/`, `lok8s.yaml`, or — during the coexistence
+// with the frozen tree — `.lok8s/lo`) > the working directory.
 package config
 
 import (
@@ -60,11 +61,11 @@ func ResolvePaths() (*Paths, error) {
 	return p, nil
 }
 
-// findBase walks up from dir looking for a directory that contains the
-// framework tree (`.lok8s/lo`). Falls back to dir itself.
+// findBase walks up from dir looking for a directory that carries a
+// project marker. Falls back to dir itself.
 func findBase(dir string) string {
 	for d := dir; ; {
-		if _, err := os.Stat(filepath.Join(d, ".lok8s", "lo")); err == nil {
+		if isProjectRoot(d) {
 			return d
 		}
 		parent := filepath.Dir(d)
@@ -73,6 +74,22 @@ func findBase(dir string) string {
 		}
 		d = parent
 	}
+}
+
+// isProjectRoot recognizes a lok8s project by `clusters/` (a directory) or
+// `lok8s.yaml` (the project file `lo init project` writes) — a project no
+// longer needs a synced .lok8s tree since the eject model. `.lok8s/lo`
+// stays a marker for the coexistence period (a project that vendors the
+// frozen tree but keeps its clusters elsewhere via PATH_CLUSTERS).
+func isProjectRoot(d string) bool {
+	if info, err := os.Stat(filepath.Join(d, "clusters")); err == nil && info.IsDir() {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(d, "lok8s.yaml")); err == nil && !info.IsDir() {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(d, ".lok8s", "lo"))
+	return err == nil
 }
 
 func envOr(key, fallback string) string {

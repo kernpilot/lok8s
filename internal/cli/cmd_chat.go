@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -74,7 +75,12 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 		cfgProject = filepath.Join(paths.Base, "lo-chat.json")
 	}
 	cfg := cfgProject
-	defaults := filepath.Join(paths.Lok8s, "chat", "defaults.json")
+	// The project's .lok8s/chat/defaults.json wins; else the embedded
+	// defaults (ejected on first use).
+	defaults, _, err := assets.Resolve(paths, "chat/defaults.json")
+	if err != nil {
+		return "", nil, err
+	}
 	if !fileExists(cfg) {
 		cfg = defaults
 	}

@@ -18,12 +18,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/assets"
 )
 
 // coredns applies the CoreDNS base config, service pin, custom ConfigMap,
 // deployment patch and rollout restart (bash: lo::coredns).
 func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain string) error {
-	corednsDir := filepath.Join(d.deps.Paths.Lok8s, "drivers", "lo", "cluster", "coredns")
+	corednsDir, _, err := assets.Resolve(d.deps.Paths, "drivers/lo/cluster/coredns")
+	if err != nil {
+		return err
+	}
 	clusterYAML := filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
 	root := loadYAML(clusterYAML)
 	clusterName := yqRaw(root, "metadata", "name")

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/assets"
 )
 
 var minorRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)`)
@@ -51,7 +53,7 @@ func (a *Auditor) checkEncryption(r *run, domainName, domainDir, specFile, kind 
 
 	// 2. KubeOne driver default — the authoritative static signal for kubeone.
 	driverEnable := ""
-	koCore := filepath.Join(a.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml")
+	koCore, _, _ := assets.Peek(a.paths(), "drivers/kubeone/cluster/core/kubeone.yaml")
 	if kind == "kubeone" && isFile(koCore) {
 		driverEnable = yqRenderNode(lookupFile(koCore, "features", "encryptionProviders", "enable"))
 		if driverEnable == "null" {

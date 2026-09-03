@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/bootstrap"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -305,18 +307,21 @@ func TestBuildLok8sVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The version is the binary's (assets.Version: ldflags, else the
+	// embedded VERSION — held identical to .lok8s/VERSION by the assets
+	// drift test), never read from the project tree.
 	raw, err := os.ReadFile(filepath.Join(p.Lok8s, "VERSION"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := fieldString(t, out, "spec.lok8sVersion"), strings.TrimRight(string(raw), "\n"); got != want {
-		t.Errorf("lok8sVersion = %q, want %q", got, want)
+	if got, want := fieldString(t, out, "spec.lok8sVersion"), strings.TrimRight(string(raw), "\n"); got != want || got != assets.Version() {
+		t.Errorf("lok8sVersion = %q, want %q (assets.Version %q)", got, want, assets.Version())
 	}
-	// No VERSION file → "dev".
+	// No .lok8s tree at all → still the binary's version, not "dev".
 	p2 := &config.Paths{Base: t.TempDir(), Lok8s: filepath.Join(t.TempDir(), ".lok8s"), Clusters: p.Clusters}
 	out2, _ := BuildJSON(p2, io.Discard, "ver", spec)
-	if got := fieldString(t, out2, "spec.lok8sVersion"); got != "dev" {
-		t.Errorf("lok8sVersion without VERSION = %q, want dev", got)
+	if got := fieldString(t, out2, "spec.lok8sVersion"); got != assets.Version() {
+		t.Errorf("lok8sVersion without a .lok8s tree = %q, want %q", got, assets.Version())
 	}
 }
 
@@ -507,7 +512,9 @@ func TestCRDManifestPrefersLok8sMirror(t *testing.T) {
 	if !ok || got != mirror {
 		t.Errorf("CRDManifest = %q, %v", got, ok)
 	}
-	// No manifest anywhere → publish warns and skips.
+	// No local mirror → the embedded CRD is ejected into the project (with
+	// its marker) and publish applies THAT; the "manifest not found" skip
+	// is unreachable with the CRD in the binary.
 	p2 := &config.Paths{Base: t.TempDir(), Lok8s: filepath.Join(t.TempDir(), ".lok8s"), Clusters: filepath.Join(base, "clusters")}
 	spec := writeSpec(t, p2, "nocrd", "kind: KubeOne\nmetadata: { name: nocrd }\n")
 	kc := filepath.Join(p2.Base, "kc.yaml")
@@ -515,8 +522,17 @@ func TestCRDManifestPrefersLok8sMirror(t *testing.T) {
 	var errBuf bytes.Buffer
 	f := &fakeRunner{}
 	Publish(context.Background(), p2, f, &errBuf, "nocrd", spec, kc)
-	if want := "\033[0;33m[warn]\033[0m inventory: ClusterInventory CRD manifest not found — skipping publish\n"; errBuf.String() != want || len(f.calls) != 0 {
+	ejected := filepath.Join(p2.Lok8s, "libs", "inventory", "manifests", "clusterinventory.crd.yaml")
+	if errBuf.Len() != 0 || len(f.calls) == 0 || !strings.Contains(f.calls[0], "apply --server-side --field-manager=lok8s -f "+ejected) {
 		t.Errorf("stderr=%q calls=%v", errBuf.String(), f.calls)
+	}
+	raw, _ := os.ReadFile(ejected)
+	emb, _ := fs.ReadFile(assets.FS(), "libs/inventory/manifests/clusterinventory.crd.yaml")
+	if !bytes.Equal(raw, emb) {
+		t.Error("ejected CRD differs from the embedded copy")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ejected), assets.MarkerFile)); err != nil {
+		t.Error("no .lo-origin marker next to the ejected CRD")
 	}
 }
 

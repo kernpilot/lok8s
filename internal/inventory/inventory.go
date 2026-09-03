@@ -40,6 +40,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/bootstrap"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
@@ -99,13 +100,13 @@ type Addon struct {
 // .lok8s is the one guaranteed present; the lok8s repo itself additionally
 // has operator/crds/.
 func CRDManifest(p *config.Paths) (string, bool) {
-	for _, c := range []string{
-		filepath.Join(p.Lok8s, "libs", "inventory", "manifests", "clusterinventory.crd.yaml"),
-		filepath.Join(p.Base, "operator", "crds", "clusterinventory.yaml"),
-	} {
-		if fileExists(c) {
-			return c, true
-		}
+	// The .lok8s mirror resolves through the asset resolver: the project's
+	// copy when present, else the embedded CRD (ejected on first use).
+	if c, _, err := assets.Resolve(p, "libs/inventory/manifests/clusterinventory.crd.yaml"); err == nil && fileExists(c) {
+		return c, true
+	}
+	if c := filepath.Join(p.Base, "operator", "crds", "clusterinventory.yaml"); fileExists(c) {
+		return c, true
 	}
 	return "", false
 }
@@ -160,10 +161,9 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 	// Strip a kindest-node @sha256 digest suffix (bash: ${k8s_version%%@*}).
 	k8sVersion, _, _ = strings.Cut(k8sVersion, "@")
 
-	lok8sVersion := "dev"
-	if v, err := os.ReadFile(filepath.Join(p.Lok8s, "VERSION")); err == nil {
-		lok8sVersion = strings.TrimRight(string(v), "\n")
-	}
+	// The version is the binary's (ldflags, else the embedded VERSION) —
+	// nothing reads .lok8s/VERSION from disk any more.
+	lok8sVersion := assets.Version()
 	sum := sha256.Sum256(raw)
 
 	cr := &CR{
@@ -184,7 +184,6 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 	// bash: mapfile < <(bootstrap::_resolve_entries … 2>/dev/null) — a
 	// failed resolve is an empty entry list.
 	entries, _ := bootstrap.ResolveEntries(clusterYAML, kind)
-	addonsDir := p.Lok8s + "/addons/"
 	for _, e := range entries {
 		if e == "" {
 			continue
@@ -200,7 +199,7 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 			continue
 		}
 		a := Addon{Name: parsed.Name, Source: "target"}
-		if strings.HasPrefix(parsed.Dir, addonsDir) {
+		if parsed.Builtin {
 			a.Source = "addon"
 		}
 		if v := chartVersion(parsed.Dir); v != "-" {

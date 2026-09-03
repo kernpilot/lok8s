@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 )
 
@@ -52,6 +53,11 @@ var goOnlyCommands = []goOnlyCommand{
 		why:   "shell-operator hook bodies (internal/operator); the operator/hooks/*.sh shims exec `lo operator <hook>` — shell-operator discovers hooks by path, there was never a usage entry",
 		build: newOperatorCommand,
 	},
+	{
+		name:  "assets",
+		why:   "the eject model (internal/assets): list/show/eject/diff/update the framework assets embedded in the binary; bash reads .lok8s/** from disk and has no embedded copy to compare against",
+		build: newAssetsCommand,
+	},
 }
 
 // NewRoot builds the full lo command tree: the usage-mirrored tree plus the
@@ -75,6 +81,15 @@ func newUsageTree(paths *config.Paths) *cobra.Command {
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// The eject policy is process-wide (every consumer of an embedded
+		// asset reads it); set it once before any command body runs.
+		// Shim commands disable flag parsing, so for them only the
+		// environment form (LO_ASSETS_EJECT=never) applies — and they read
+		// .lok8s from disk anyway.
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			noEject, _ := cmd.Flags().GetBool("no-eject")
+			assets.Configure(noEject)
+		},
 	}
 
 	// Global flags, verbatim from the argsh entrypoint. Shim commands disable
@@ -90,6 +105,8 @@ func newUsageTree(paths *config.Paths) *cobra.Command {
 	pf.String("config", "", "Kind config to use")
 	pf.String("domain", "", "Domain to use")
 	pf.String("domain-sans", "", "Domain sans to use")
+	// Go-only: the eject model's opt-out (env form: LO_ASSETS_EJECT=never).
+	pf.Bool("no-eject", false, "Never write embedded framework assets into the project (.lok8s/…); serve them from a temp dir instead")
 
 	root.AddGroup(
 		&cobra.Group{ID: groupLifecycle, Title: "Cluster lifecycle:"},

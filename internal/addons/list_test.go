@@ -9,9 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 )
 
@@ -113,34 +116,121 @@ func TestListAndShow(t *testing.T) {
 	if err := List(p, "any.dev", &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	want := "NAME                  TYPE      VERSION       CHART/REPO\n" +
-		"----                  ----      -------       ----------\n" +
-		"empty-one             empty     -             -\n" +
-		"khelm-one             khelm     1.2.3         thing (https://example.test)\n" +
-		"raw-one               raw       -             -\n"
-	if out.String() != want {
-		t.Errorf("list:\n%s\nwant:\n%s", out.String(), want)
+	// The listing is the UNION of the embedded addons (served from the
+	// binary) and the project's own dirs, in glob order, same row format.
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if lines[0] != "NAME                  TYPE      VERSION       CHART/REPO" || lines[1] != "----                  ----      -------       ----------" {
+		t.Errorf("header:\n%s", out.String())
+	}
+	for _, want := range []string{
+		"empty-one             empty     -             -",
+		"khelm-one             khelm     1.2.3         thing (https://example.test)",
+		"raw-one               raw       -             -",
+	} {
+		if !strings.Contains(out.String(), want+"\n") {
+			t.Errorf("list missing %q:\n%s", want, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "\ncilium                khelm     ") {
+		t.Errorf("builtin cilium missing from the union:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), ".hidden") {
+		t.Error("dotdir listed")
+	}
+	var names []string
+	for _, l := range lines[2:] {
+		names = append(names, strings.Fields(l)[0])
+	}
+	if !sort.SliceIsSorted(names, func(i, j int) bool { return names[i]+"/" < names[j]+"/" }) {
+		t.Errorf("not in glob order: %v", names)
+	}
+	// A listing never ejects.
+	if _, err := os.Stat(filepath.Join(root, "cilium")); err == nil {
+		t.Error("List ejected cilium into the project")
 	}
 
 	out.Reset()
 	if err := Show(p, "any.dev", "khelm-one", &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	want = "name:    khelm-one\ndriver:  lo\npath:    " + root + "/khelm-one\ntype:    khelm\n" +
+	want := "name:    khelm-one\ndriver:  lo\npath:    " + root + "/khelm-one\ntype:    khelm\n" +
 		"chart:   thing\nversion: 1.2.3\nrepo:    https://example.test\n\nfiles:\n  - chart.yaml\n  - values.yaml\n"
 	if out.String() != want {
 		t.Errorf("show:\n%s\nwant:\n%s", out.String(), want)
 	}
 
 	var stderr bytes.Buffer
-	if err := Show(p, "any.dev", "nope", io.Discard, &stderr); err == nil || !strings.Contains(stderr.String(), "addon 'nope' not found") {
+	if err := Show(p, "any.dev", "nope", io.Discard, &stderr); err == nil || !strings.Contains(stderr.String(), "addon 'nope' not found ("+root+"/nope)") {
 		t.Errorf("missing addon: err=%v stderr=%s", err, stderr.String())
 	}
+	stderr.Reset()
+	if err := Show(p, "any.dev", "../x", io.Discard, &stderr); err == nil || !strings.Contains(stderr.String(), "addon '../x' not found") {
+		t.Errorf("traversal: err=%v stderr=%s", err, stderr.String())
+	}
 
-	// No addons directory at all → warning, rc 0.
+	// No addons directory at all → the embedded set, no warning.
 	p2 := &config.Paths{Base: t.TempDir(), Lok8s: t.TempDir() + "/none", Clusters: t.TempDir()}
 	stderr.Reset()
-	if err := List(p2, "x", io.Discard, &stderr); err != nil || !strings.Contains(stderr.String(), "No addons directory") {
-		t.Errorf("err=%v stderr=%s", err, stderr.String())
+	out.Reset()
+	if err := List(p2, "x", &out, &stderr); err != nil || stderr.Len() != 0 || !strings.Contains(out.String(), "\nmetallb               khelm     ") {
+		t.Errorf("err=%v stderr=%s out=%s", err, stderr.String(), out.String())
+	}
+}
+
+// Show on a builtin addon ejects it (default policy) so `path:` names the
+// project's copy; --origin adds the column with the eject-model verdict.
+func TestShowEjectsAndOriginColumn(t *testing.T) {
+	p := sandbox(t, "")
+	root := Dir(p)
+	os.MkdirAll(filepath.Join(root, "khelm-one"), 0o755)
+	os.WriteFile(filepath.Join(root, "khelm-one", "chart.yaml"), []byte("kind: ChartRenderer\nchart: thing\nversion: 1.2.3\n"), 0o644)
+	assets.SetPolicy(assets.PolicyEject)
+	t.Cleanup(func() { assets.SetPolicy(assets.PolicyEject); assets.Cleanup() })
+	prev := assets.Stderr
+	assets.Stderr = io.Discard
+	t.Cleanup(func() { assets.Stderr = prev })
+
+	var out bytes.Buffer
+	if err := ShowOrigin(p, "any.dev", "metallb", &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "path:    "+root+"/metallb\norigin:  local\n") {
+		t.Errorf("show:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "metallb", assets.MarkerFile)); err != nil {
+		t.Error("show did not eject metallb with its marker")
+	}
+	os.WriteFile(filepath.Join(root, "metallb", "chart.yaml"), []byte("edited\n"), 0o644)
+
+	out.Reset()
+	if err := ListOrigin(p, "any.dev", &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "NAME                  TYPE      VERSION       ORIGIN              CHART/REPO\n") {
+		t.Errorf("header:\n%s", out.String())
+	}
+	for _, want := range []string{
+		"khelm-one             khelm     1.2.3         local-only          thing (-)",
+		"metallb               raw       -             local (modified)    -",
+		"cilium                khelm     ",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("list --origin missing %q:\n%s", want, out.String())
+		}
+	}
+	if !regexp.MustCompile(`\ncilium +khelm +[^ ]+ +builtin +cilium`).MatchString(out.String()) {
+		t.Errorf("cilium row is not builtin:\n%s", out.String())
+	}
+	// --no-eject: show serves the embedded copy from a temp dir.
+	assets.SetPolicy(assets.PolicyNever)
+	out.Reset()
+	if err := Show(p, "any.dev", "ccm", &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "path:    "+root) {
+		t.Errorf("--no-eject show still points into the project:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "ccm")); err == nil {
+		t.Error("--no-eject ejected ccm")
 	}
 }

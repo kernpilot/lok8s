@@ -1,6 +1,8 @@
 GO      ?= go
 BINARY  ?= bin/lo
-LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/cli.version=$(shell cat .lok8s/VERSION)
+# The version stamp reads the embedded mirror's VERSION (canonical since the
+# eject model; .lok8s/VERSION is its synced twin — see hack/sync-legacy-assets.sh).
+LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/cli.version=$(shell cat internal/assets/lok8s/VERSION)
 
 .PHONY: build test vet lint clean release-check snapshot
 
@@ -28,4 +30,4 @@ release-check:
 	goreleaser check
 
 snapshot:
-	LOK8S_VERSION=$$(cat .lok8s/VERSION) goreleaser release --snapshot --clean
+	LOK8S_VERSION=$$(cat internal/assets/lok8s/VERSION) goreleaser release --snapshot --clean

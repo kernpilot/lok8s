@@ -1,0 +1,59 @@
+# Mailpit deployment. In-memory store (default) is fine for a dev mail catcher —
+# messages need not survive a pod restart. Image tag is set in values.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mailpit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailpit
+  template:
+    metadata:
+      labels:
+        app: mailpit
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: mailpit
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          env:
+            # Bind the UI/API and SMTP listeners on all interfaces inside the pod.
+            - name: MP_UI_BIND_ADDR
+              value: "0.0.0.0:8025"
+            - name: MP_SMTP_BIND_ADDR
+              value: "0.0.0.0:1025"
+          ports:
+            - name: http
+              containerPort: 8025
+              protocol: TCP
+            - name: smtp
+              containerPort: 1025
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8025
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8025
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]

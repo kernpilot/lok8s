@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
@@ -233,6 +235,18 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		parsed, err := ParseEntry(e.Paths, stderr, domain, entry)
 		if err != nil {
 			return err
+		}
+		if parsed.Builtin {
+			// First use of a framework addon: eject it into the project
+			// (default policy) so what this cluster applies is pinned on
+			// disk, or serve the embedded copy under --no-eject.
+			// The unit is the addon DIR's name, not parsed.Name (an
+			// explicit `name:` override renames the entry, not the addon).
+			dir, _, err := assets.Resolve(e.Paths, "addons/"+filepath.Base(parsed.Dir))
+			if err != nil {
+				return e.errorf("bootstrap: %v", err)
+			}
+			parsed.Dir = dir
 		}
 		if !dirExists(parsed.Dir) {
 			return e.errorf("bootstrap: addon not found: %s (resolved to %s)", entry, parsed.Dir)

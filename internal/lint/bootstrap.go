@@ -28,6 +28,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -169,7 +170,9 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		name = baseName(raw)
 	default:
 		name = raw
-		dir = l.Paths.Lok8s + "/addons/" + raw
+		// Read-only: the project's copy when present, else the embedded one
+		// from a temp dir — lint never ejects.
+		dir, _, _ = assets.Peek(l.Paths, "addons/"+raw)
 	}
 
 	// Scalar entry (or a map with an empty/null value): nothing more to parse.

@@ -1,0 +1,24 @@
+# Mailpit addon values — the override surface. Bootstrap stacks these as
+#   base (this file) < values.<driver>.yaml < values.<provider>.yaml < inline
+# (see docs/guide/addons.md), so a consumer flips the route or retargets its
+# host INLINE in the cluster spec's bootstrap list, e.g.:
+#   - mailpit: { route: { host: mail.example.dev } }   # different subdomain
+#   - mailpit: { route: { enabled: false } }            # SMTP sink only, no UI route
+route:
+  # Expose the UI by default — if you bootstrap mailpit you usually want to see
+  # the captured mail. Set enabled:false inline for an SMTP-only sink.
+  enabled: true
+  # Default host = mailpit.<cluster-domain>. ${LOK8S_SPEC_CLUSTER_DOMAIN} is the
+  # cluster's spec.cluster.domain, exported + envsubst-whitelisted by both the lo
+  # and kubeone drivers; it is resolved post-render in the bootstrap envsubst
+  # pass. Override inline for a different subdomain.
+  host: "mailpit.${LOK8S_SPEC_CLUSTER_DOMAIN}"
+  # The HTTPRoute lives here (must match the Gateway's allowedRoutes — `default`
+  # for a from:Same listener).
+  namespace: default
+  gateway:
+    # The shared Envoy Gateway. `kubehz` is this workspace's gateway name (set in
+    # the networking target); override inline on clusters that name it otherwise.
+    name: kubehz
+    namespace: default
+    sectionName: https

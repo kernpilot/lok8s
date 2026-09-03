@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -562,15 +564,36 @@ func TestChatPreflightErrors(t *testing.T) {
 
 	writeFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\n")
 	os.Chmod(filepath.Join(p.Bin, "lochat"), 0o755)
-	_, stderr, err = runLo(t, NewRoot(p), "chat")
-	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "no chat config (looked for "+p.Base+"/lo-chat.json or "+p.Lok8s+"/chat/defaults.json)") {
-		t.Errorf("missing config: err=%v stderr=%q", err, stderr)
-	}
-
-	writeFile(t, filepath.Join(p.Lok8s, "chat", "defaults.json"), "{}\n")
+	// No project config and no local .lok8s/chat: the embedded defaults are
+	// ejected on first use (the "no chat config" error is unreachable now),
+	// and the preflight moves on to the argsh.so check.
 	_, stderr, err = runLo(t, NewRoot(p), "chat")
 	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "argsh.so is missing") || !strings.Contains(stderr, "  argsh builtins install") {
 		t.Errorf("missing argsh.so: err=%v stderr=%q", err, stderr)
+	}
+	ejected, err := os.ReadFile(filepath.Join(p.Lok8s, "chat", "defaults.json"))
+	if err != nil {
+		t.Fatalf("chat defaults not ejected: %v", err)
+	}
+	embedded, _ := fs.ReadFile(assets.FS(), "chat/defaults.json")
+	if !bytes.Equal(ejected, embedded) {
+		t.Error("ejected defaults.json differs from the embedded copy")
+	}
+	if _, err := os.Stat(filepath.Join(p.Lok8s, "chat", assets.MarkerFile)); err != nil {
+		t.Error("no .lo-origin marker next to the ejected defaults")
+	}
+
+	// LO_ASSETS_EJECT=never: a fresh project stays untouched. (chat passes
+	// its argv through unparsed, so the env form is the one that reaches
+	// it; the --no-eject flag is covered on a flag-parsing command in
+	// cmd_assets_test.go.)
+	t.Setenv(assets.EnvEject, "never")
+	p2 := synthProject(t)
+	writeFile(t, filepath.Join(p2.Bin, "lochat"), "#!/bin/sh\n")
+	os.Chmod(filepath.Join(p2.Bin, "lochat"), 0o755)
+	_, _, _ = runLo(t, NewRoot(p2), "chat")
+	if _, err := os.Stat(filepath.Join(p2.Lok8s, "chat")); err == nil {
+		t.Error("LO_ASSETS_EJECT=never still wrote .lok8s/chat")
 	}
 }
 

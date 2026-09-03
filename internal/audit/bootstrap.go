@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/assets"
 )
 
 var (
@@ -104,7 +106,13 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 	case strings.HasPrefix(raw, "./") || strings.HasPrefix(raw, "../"):
 		e.dir = a.Clusters + "/" + domainName + "/" + raw
 	default:
-		e.dir = a.Lok8s + "/addons/" + raw
+		// Read-only: the project's copy when present, else the embedded one
+		// from a temp dir — the audit never ejects.
+		dir, _, err := assets.Peek(a.paths(), "addons/"+raw)
+		if err != nil {
+			return e, false
+		}
+		e.dir = dir
 	}
 
 	// Scalar entry (or a map with an empty/null value): nothing more to parse.

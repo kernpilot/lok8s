@@ -27,6 +27,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
@@ -151,14 +152,32 @@ func TestGenerateLeavesProcessEnvUntouched(t *testing.T) {
 	}
 }
 
-func TestGenerateFailsForMissingTemplateDir(t *testing.T) {
+// Without a local template tree the embedded templates are ejected into
+// the project on first use (the "template directory not found" path is
+// unreachable with the templates in the binary) and the render is the same.
+func TestGenerateEjectsTemplatesOnFirstUse(t *testing.T) {
 	d, _, stderr := testDriver(t)
 	d.deps.Paths.Lok8s = filepath.Join(t.TempDir(), "nolok8s")
-	if _, err := d.Generate(hetznerFixture(t), "hetzner"); err == nil {
-		t.Fatal("expected error")
+	out, err := d.Generate(hetznerFixture(t), "hetzner")
+	if err != nil {
+		t.Fatalf("Generate: %v\n%s", err, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "CAPI template directory not found") {
-		t.Fatalf("stderr = %q", stderr.String())
+	tmpl := filepath.Join(d.deps.Paths.Lok8s, "drivers", "capi", "cluster")
+	if _, err := os.Stat(filepath.Join(tmpl, "core", "cluster.yaml")); err != nil {
+		t.Fatalf("templates not ejected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpl, assets.MarkerFile)); err != nil {
+		t.Fatal("no .lo-origin marker on the ejected template tree")
+	}
+	// Same bytes as a render over the repo's own tree.
+	d2, _, _ := testDriver(t)
+	d2.deps.Paths.Lok8s = repoLok8s(t)
+	want, err := d2.Generate(hetznerFixture(t), "hetzner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != want {
+		t.Fatal("render from the ejected templates differs from the repo tree's")
 	}
 }
 

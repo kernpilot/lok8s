@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -47,7 +48,10 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	certPath := filepath.Join(d.deps.Paths.Base, ".secrets", "tls", "tls.crt")
 	keyPath := filepath.Join(d.deps.Paths.Base, ".secrets", "tls", "tls.key")
 
-	nginxTemplate := filepath.Join(d.deps.Paths.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf")
+	nginxTemplate, _, err := assets.Resolve(d.deps.Paths, "drivers/lo/cluster/expose/nginx.conf")
+	if err != nil {
+		return err
+	}
 	if !fileExists(nginxTemplate) {
 		ui.Errorf(errOut, "expose: nginx template not found at %s", nginxTemplate)
 		return fmt.Errorf("nginx template not found at %s", nginxTemplate)

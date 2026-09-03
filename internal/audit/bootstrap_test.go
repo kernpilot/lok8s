@@ -31,8 +31,14 @@ spec:
 	if len(entries) != 3 {
 		t.Fatalf("want 3 entries, got %d", len(entries))
 	}
-	if entries[0].dir != a.Lok8s+"/addons/cilium" {
-		t.Errorf("bare name dir = %s", entries[0].dir)
+	// A bare name resolves through the asset resolver: the fixture holds no
+	// cilium, so the embedded copy (read-only, temp dir — the audit never
+	// ejects) is what the check reads.
+	if filepath.Base(entries[0].dir) != "cilium" || !isDir(entries[0].dir) || strings.HasPrefix(entries[0].dir, a.Lok8s) {
+		t.Errorf("bare name dir = %s (want the embedded copy)", entries[0].dir)
+	}
+	if isDir(a.Lok8s + "/addons/cilium") {
+		t.Error("the audit ejected cilium into the project")
 	}
 	if entries[1].dir != a.Clusters+"/d.dev/./targets/x" {
 		t.Errorf("relative dir = %s (must resolve against the cluster dir, uncleaned)", entries[1].dir)
@@ -41,6 +47,16 @@ spec:
 	// `${PATH_BASE}${_raw}` contract, not filepath.Join.
 	if entries[2].dir != a.Base+"/abs/y" {
 		t.Errorf("absolute dir = %s", entries[2].dir)
+	}
+}
+
+// A local copy of a shipped addon wins over the embedded one.
+func TestBootstrapEntryLocalCopyWins(t *testing.T) {
+	a := newFixtureAuditor(t)
+	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "kind: ChartRenderer\n")
+	entries := entriesFor(t, a, "kind: Lo\nspec:\n  bootstrap:\n    - cilium\n", "lo")
+	if len(entries) != 1 || entries[0].dir != a.Lok8s+"/addons/cilium" {
+		t.Errorf("local copy did not win: %+v", entries)
 	}
 }
 

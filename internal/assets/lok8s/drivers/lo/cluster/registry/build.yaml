@@ -1,0 +1,24 @@
+# Local build registry — push target for Tilt's docker_build.
+# Lives at offset .101 inside the project's /24 slot subnet
+# (e.g. 10.125.125.101 for the default cluster slot 125).
+# Hostname (containerd mirror): lok8s.local
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+  cache:
+    blobdescriptor: inmemory
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: :80
+  headers:
+    X-Content-Type-Options: [nosniff]
+delete:
+  enabled: true
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3

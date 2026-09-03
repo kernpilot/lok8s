@@ -1,0 +1,13 @@
+# Hetzner DNS-01 ACME webhook for cert-manager (solverName: hetzner). Split out
+# of the `cert-manager` addon so it is OPT-IN: only clusters that issue certs via
+# Hetzner DNS-01 (prod) bootstrap it. The webhook is useless without cert-manager,
+# so bootstrap `cert-manager` first (it provides the CRDs + the namespace).
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: cert-manager-webhook-hetzner
+  namespace: cert-manager
+kubeVersion: "1.31.12"
+repository: https://charts.hetzner.cloud
+chart: cert-manager-webhook-hetzner
+version: 0.7.0

@@ -64,11 +64,25 @@ type Auditor struct {
 	Base     string // repo root (bash: PATH_BASE) — SARIF uris are relative to it
 	Clusters string // clusters/ dir (bash: PATH_CLUSTERS)
 	Lok8s    string // framework tree (bash: PATH_LOK8S)
+	// Paths is the full layout, for the embedded-asset resolver (the
+	// addon dirs and the kubeone core template read through assets.Peek —
+	// read-only, so the audit never ejects anything).
+	Paths *config.Paths
 }
 
 // New builds an Auditor from the resolved project paths.
 func New(paths *config.Paths) *Auditor {
-	return &Auditor{Base: paths.Base, Clusters: paths.Clusters, Lok8s: paths.Lok8s}
+	return &Auditor{Base: paths.Base, Clusters: paths.Clusters, Lok8s: paths.Lok8s, Paths: paths}
+}
+
+// paths returns the layout for the asset resolver, derived from the three
+// strings when an Auditor was built by hand (tests, the bash-shaped
+// constructor).
+func (a *Auditor) paths() *config.Paths {
+	if a.Paths != nil {
+		return a.Paths
+	}
+	return &config.Paths{Base: a.Base, Clusters: a.Clusters, Lok8s: a.Lok8s}
 }
 
 // run accumulates findings for one domain (bash: _AUDIT_FINDINGS).

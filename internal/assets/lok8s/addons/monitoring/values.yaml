@@ -1,0 +1,91 @@
+# kube-prometheus-stack — generic, portable framework-addon values.
+#
+# This file carries ONLY decisions that are sane for ANY cluster. Everything
+# cluster-specific is GLUE supplied by the consuming cluster as inline
+# `bootstrap:` overrides (deep-merged on top of this file — see
+# docs/guide/addons.md#inline-overrides), namely:
+#   - storage: PVC storageClassName / sizes for Prometheus, Alertmanager,
+#     Grafana (storage class names are cluster infra, e.g. ceph-bulk/local-path).
+#   - grafana: OIDC/SSO wiring (auth.generic_oauth, envValueFrom, root_url),
+#     additionalDataSources (e.g. Tempo), admin.existingSecret, persistence.
+#   - alertmanager.config.receivers: real notification targets (the base ships
+#     only the inert `null` receiver so the rendered config is valid as-is).
+# The gateway HTTPRoute + break-glass Grafana Secret are kustomize RESOURCES and
+# live in the consuming cluster's monitoring glue target, not in Helm values.
+#
+# TLS is terminated at the consumer's gateway (no chart Ingress here).
+
+# ─────────────────────────────────────────────────────────────────────────
+# Prometheus
+# ─────────────────────────────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    # Sensible default retention; bump per-cluster inline if more is wanted.
+    retention: 15d
+
+    # Accept remote_write pushes so a tracing backend's metrics-generator (e.g.
+    # Tempo) or any other producer can write span metrics/exemplars into this
+    # Prometheus. Harmless when unused.
+    enableRemoteWriteReceiver: true
+
+    # Scrape ALL ServiceMonitors / PodMonitors / PrometheusRules in the cluster,
+    # not just those labelled with this release. Setting the *NilUsesHelmValues
+    # flags to false makes the (unset) selectors mean "match everything" instead
+    # of "match this release's label" — the behaviour an operator-wide stack
+    # wants so addons/apps get scraped without a per-release label.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    # No storageSpec here — a PVC volumeClaimTemplate (storageClassName + size)
+    # is cluster infra, supplied inline by the consumer. Without it Prometheus
+    # uses emptyDir (fine for ephemeral/dev; prod consumers MUST set storage).
+
+# ─────────────────────────────────────────────────────────────────────────
+# Alertmanager
+# ─────────────────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: true
+  alertmanagerSpec: {}
+  # Storage (volumeClaimTemplate) is cluster infra — supplied inline by the
+  # consumer, same as Prometheus above.
+
+  # The chart deep-merges this over its defaults (inhibit_rules etc. are kept).
+  # Default receiver stays "null" so the config is valid even before a real
+  # notification target is wired; the Watchdog alert is routed to "null". A
+  # consumer adds real receivers + routes inline.
+  config:
+    route:
+      group_by: ["namespace"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: "null"
+      routes:
+        - receiver: "null"
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: "null"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Grafana
+# ─────────────────────────────────────────────────────────────────────────
+# Only generic deployment hygiene here. SSO/OIDC, datasources, persistence,
+# admin secret and root_url are cluster GLUE (inline). The data dir is a single
+# RWO PVC once a consumer enables persistence, so a Recreate strategy is the
+# safe default (a second pod cannot mount the RWO PVC during a RollingUpdate).
+grafana:
+  deploymentStrategy:
+    type: Recreate
+
+# ─────────────────────────────────────────────────────────────────────────
+# Control-plane component scraping
+# ─────────────────────────────────────────────────────────────────────────
+# Defaults are left ON for kubeEtcd / kubeControllerManager / kubeScheduler. On
+# self-managed control planes (e.g. KubeOne) these components may bind to
+# localhost or expose metrics on non-default ports/auth, so the auto-created
+# Endpoints may not be scrapeable out of the box (targets show DOWN). If so, set
+# per-component `endpoints` / `service.port` (and for etcd, client-cert auth)
+# inline on the consumer — do NOT disable them outright, as that loses real CP
+# visibility. Validate the Prometheus targets page after the first rollout.
