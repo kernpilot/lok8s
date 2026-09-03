@@ -197,3 +197,130 @@ func TestJoinSubcommandMintsTicket(t *testing.T) {
 	mustErr(t, h.ctx.Join(context.Background(), "acme.example.org", "worker-9"))
 	mustContain(t, h.output(), "No space 'acme' found — run 'lo provision' first")
 }
+
+// The api ships the join recipe with the ticket: it carries the ticket, so
+// it lands in a private file under TMPDIR, never in the project tree, and
+// nothing is executed. Without a script (an older api, or a plane without
+// an endpoint yet) the old guide pointer stays.
+const joinTicketJSON = `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z","endpoint":"https://kkp1.kubermatic.kkp.example:6443","script":"#!/bin/bash\nset -euo pipefail\nTICKET='a1b2c3.d4e5f6g7h8i9j0k1'\n"}}`
+
+func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
+	h := newHarness(t)
+	tmp := filepath.Join(h.base, "tmp")
+	_ = os.MkdirAll(tmp, 0o755)
+	h.env["TMPDIR"] = tmp
+	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	path := filepath.Join(tmp, "kubehz-join-worker-1.sh")
+	mustContain(t, h.output(), path)
+	mustContain(t, h.output(), "https://kkp1.kubermatic.kkp.example:6443")
+	mustContain(t, h.output(), "Read it, then copy it")
+	mustContain(t, h.output(), "scp "+path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("script not written: %v", err)
+	}
+	if !strings.Contains(string(raw), "TICKET='a1b2c3.d4e5f6g7h8i9j0k1'") {
+		t.Fatalf("script content: %q", raw)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("script mode %v, want 0600 — it carries the ticket", st.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(h.base, "kubehz-join-worker-1.sh")); err == nil {
+		t.Fatal("script written into the project tree")
+	}
+	if len(h.runner.calls) != 0 {
+		t.Fatalf("something was executed: %+v", h.runner.calls)
+	}
+
+	// A re-mint supersedes the file: whatever sat under the name (here a
+	// world-readable leftover) is replaced by a fresh owner-only file.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.handle("POST /api/spaces/sp-123/join-token", 201, strings.Replace(joinTicketJSON, "TICKET='a1b2c3.d4e5f6g7h8i9j0k1'", "TICKET='f6f6f6.remintedremintd'", 1))
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	raw, _ = os.ReadFile(path)
+	if !strings.Contains(string(raw), "TICKET='f6f6f6.remintedremintd'") {
+		t.Fatalf("re-mint did not replace the script: %q", raw)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("re-minted script mode want 0600: %v %v", st, err)
+	}
+}
+
+// Without TMPDIR the OS default is used — pinned through the real
+// environment, which os.TempDir reads, pointed at the harness tree.
+func TestSpaceMintJoinFallsBackToTheOSTempDir(t *testing.T) {
+	h := newHarness(t)
+	tmp := filepath.Join(h.base, "os-tmp")
+	_ = os.MkdirAll(tmp, 0o755)
+	delete(h.env, "TMPDIR")
+	t.Setenv("TMPDIR", tmp)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	if _, err := os.Stat(filepath.Join(tmp, "kubehz-join-worker-1.sh")); err != nil {
+		t.Fatalf("script not under os.TempDir(): %v", err)
+	}
+}
+
+// The file is created exclusively after the stale name is removed: a
+// symlink planted under the predictable name must never carry the ticket
+// to its target.
+func TestSpaceMintJoinNeverWritesThroughAPlantedSymlink(t *testing.T) {
+	h := newHarness(t)
+	tmp := filepath.Join(h.base, "tmp")
+	_ = os.MkdirAll(tmp, 0o755)
+	h.env["TMPDIR"] = tmp
+	target := filepath.Join(h.base, "victim")
+	if err := os.WriteFile(target, []byte("untouched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(tmp, "kubehz-join-worker-1.sh")); err != nil {
+		t.Fatal(err)
+	}
+	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	if raw, _ := os.ReadFile(target); string(raw) != "untouched\n" {
+		t.Fatalf("ticket written through the planted symlink: %q", raw)
+	}
+	if st, err := os.Lstat(filepath.Join(tmp, "kubehz-join-worker-1.sh")); err != nil || st.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected a fresh regular file, got %v %v", st, err)
+	}
+}
+
+func TestSpaceMintJoinReportsAnUnwritableTempDir(t *testing.T) {
+	h := newHarness(t)
+	h.env["TMPDIR"] = filepath.Join(h.base, "does-not-exist")
+	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
+	mustErr(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"))
+	mustContain(t, h.output(), "could not write the join script for 'worker-1'")
+}
+
+// The node name becomes part of a filesystem path; the CLI validates it at
+// the boundary (the same DNS-label rule the api enforces) instead of
+// trusting the caller.
+func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
+	h := newHarness(t)
+	h.env["TMPDIR"] = h.base
+	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
+	mustErr(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "../escaped"))
+	mustContain(t, h.output(), "is not a node name the platform accepts")
+	if _, err := os.Stat(filepath.Join(filepath.Dir(h.base), "kubehz-join-escaped.sh")); err == nil {
+		t.Fatal("script escaped the temp dir")
+	}
+}
+
+func TestSpaceMintJoinWithoutScriptKeepsTheGuidePointer(t *testing.T) {
+	h := newHarness(t)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z"}}`)
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	mustContain(t, h.output(), "Spaces → Joining nodes")
+	if strings.Contains(h.output(), "Join script") {
+		t.Fatalf("script block without a script:\n%s", h.output())
+	}
+}
