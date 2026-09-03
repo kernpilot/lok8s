@@ -14,17 +14,28 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/cli"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 func main() {
+	// Self-exec plugin mode: an in-process `lo build` renders through the
+	// kustomize API and serves its exec generators (secrets.lok8s.dev
+	// Secret, khelm ChartRenderer) by re-executing THIS binary under the
+	// plugin's name from a temp plugin home. Dispatched before anything
+	// else — no project paths, no cobra — because the plugin runs in the
+	// kustomization directory, not in a project.
+	if handled, rc := render.DispatchPlugin(os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
+		os.Exit(rc)
+	}
 	os.Exit(run())
 }
 
 // run is main without os.Exit, so the deferred cleanup of the per-run
-// assets temp dir (embedded assets served under --no-eject) runs on every
-// exit path.
+// assets temp dir (embedded assets served under --no-eject) and of the
+// self-exec plugin home runs on every exit path.
 func run() int {
 	defer assets.Cleanup()
+	defer render.Cleanup()
 	paths, err := config.ResolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lo: %v\n", err)

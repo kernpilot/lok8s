@@ -41,6 +41,12 @@ binaries:
     version: v0.3.0
     groups: [core]
 
+  # kustomize + khelm: the Go `lo` binary does NOT need either — it renders
+  # in-process (sigs.k8s.io/kustomize/api pinned to the same release as the
+  # binary here, khelm v2.8.0 as a library) and serves the Secret/khelm exec
+  # generators itself (internal/render). They stay in the profile for the
+  # frozen bash implementation (LO_IMPL=bash), the parity harnesses, and
+  # the LO_RENDER=exec escape hatch. Keep the pins in step with go.mod.
   kustomize:
     groups: [kustomize]
   # khelm: kustomize exec plugin discovered via KUSTOMIZE_PLUGIN_HOME.

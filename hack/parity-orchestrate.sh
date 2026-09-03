@@ -58,6 +58,14 @@ export XDG_STATE_HOME="${WORK}/xdg-state" XDG_CACHE_HOME="${WORK}/xdg-cache"
 # tests and the bats. The consent gates refuse under it exactly as they do
 # on a closed stdin.
 export LOK8S_NONINTERACTIVE=1
+# Like with like on the registry TLS mint: the frozen tree needs the Secret
+# plugin BINARY under .kustomize (absent in the synthetic project, so its
+# `lo up` fails on "the Secret plugin is not built"), while the Go binary
+# serves the generator in-process and would fail later, on the missing
+# store. LO_RENDER=exec pins the Go side to the same subprocess pipeline the
+# bash runs (docs/reference/go-migration.md, D19); the in-process mint has
+# its own gate in internal/driver/lo (TestRegistriesTLSCertMintsInProcess).
+export LO_RENDER=exec
 
 PROJ="${WORK}/proj"
 

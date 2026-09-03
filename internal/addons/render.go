@@ -21,6 +21,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"gopkg.in/yaml.v3"
 )
@@ -28,14 +29,17 @@ import (
 // Render renders a framework addon via the canonical khelm path (bash:
 // addons::render). Stacks values base < driver(kind) < provider < inline
 // (later wins), rewrites the chart's valueFiles to the merged set, then
-// `kustomize build --enable-alpha-plugins --enable-exec` + envsubst
+// `kustomize build --enable-alpha-plugins --enable-exec` (internal/render:
+// in-process, or the pinned binary under LO_RENDER=exec) + envsubst
 // (LOK8S_USER_*/LOK8S_SPEC_* placeholders) + the container-env tostring
 // coercion.
 //
 // env carries the per-entry `env:` overrides (bash exports them in the
 // entry's subshell before render): they join the kustomize process env AND
-// the envsubst whitelist/lookup, without ever touching the shared process
-// environment (concurrent DAG entries would race on it).
+// the envsubst whitelist/lookup. In exec mode they ride the child's
+// environment; in-process, render.Build installs them for the duration of
+// the render under its mutex and restores them (concurrent DAG entries
+// serialize on the render, never on each other's values).
 func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
 	buildDir := addonDir
 	if fileExists(filepath.Join(addonDir, "chart.yaml")) {
@@ -110,13 +114,14 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 	for _, k := range envNames {
 		cmdEnv = append(cmdEnv, k+"="+env[k])
 	}
-	var out strings.Builder
-	err := runner.Run(ctx, execx.Cmd{
-		Name:   "kustomize",
-		Args:   []string{"build", "--enable-alpha-plugins", "--enable-exec", buildDir},
-		Env:    cmdEnv,
-		Stdout: &out,
-		Stderr: stderr,
+	// The render goes through internal/render: in-process by default, the
+	// pinned kustomize binary via the runner seam under LO_RENDER=exec
+	// (which is also how the hermetic tests stub it).
+	out, err := render.Build(ctx, buildDir, render.Options{
+		Runner:     runner,
+		EnableExec: true,
+		Env:        cmdEnv,
+		Stderr:     stderr,
 	})
 	if err != nil {
 		return "", fmt.Errorf("addons render: kustomize build %s: %w", addonDir, err)
@@ -130,7 +135,7 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 			names = append(names, k)
 		}
 	}
-	substituted := build.EnvsubstWith([]byte(out.String()), names, func(name string) string {
+	substituted := build.EnvsubstWith(out, names, func(name string) string {
 		if v, ok := env[name]; ok {
 			return v
 		}

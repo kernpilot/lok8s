@@ -148,8 +148,13 @@ func runDoctor(paths *config.Paths, d string, out, stderr io.Writer) error {
 		secretsVal = filepath.Join(paths.Base, ".secrets")
 	}
 	doctorDir(out, "PATH_SECRETS", secretsVal)
-	// KUSTOMIZE_PLUGIN_HOME: this binary defaults it for every child (shimEnv)
-	// — doctor reports the environment as prepared, not the raw shell's.
+	// KUSTOMIZE_PLUGIN_HOME: this binary defaults it for every bash child
+	// (shimEnv) — doctor reports the environment as prepared, not the raw
+	// shell's. The binary's OWN renders no longer need it (internal/render
+	// runs kustomize in-process and serves the Secret/khelm generators
+	// itself); the lines below still matter for LO_IMPL=bash, the provider
+	// plugins and LO_RENDER=exec, and their text is unchanged so
+	// hack/parity-configure.sh keeps diffing doctor byte-for-byte.
 	pluginHome := os.Getenv("KUSTOMIZE_PLUGIN_HOME")
 	if pluginHome == "" {
 		pluginHome = filepath.Join(paths.Base, ".kustomize")

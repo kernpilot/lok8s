@@ -110,10 +110,13 @@ sha256sum --ignore-missing -c checksums.txt
 tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 ```
 
-Then bootstrap a project. `lo` runs every command itself, but a project still
-carries the framework tree (`.lok8s/` — addons, Tilt extension, provider
-plugins, and the frozen bash reference implementation) and its pinned
-toolchain (kustomize, kind, Tilt, … — see the
+Then bootstrap a project. `lo` runs every command itself — including the
+manifest render: kustomize and the khelm/secrets generators run *inside* the
+binary, so no `kustomize`, `khelm` or `.kustomize/` plugin directory is
+needed for `lo build` — but a project still carries the framework tree
+(`.lok8s/` — addons, Tilt extension, provider plugins, and the frozen bash
+reference implementation) and its pinned toolchain (kind, Tilt, kubectl, …;
+kustomize/khelm remain in the profiles for the bash implementation — see the
 [Go migration reference](docs/reference/go-migration.md) for what the
 binary still execs):
 

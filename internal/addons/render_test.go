@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,7 +65,10 @@ spec:
 
 // fakeKustomize records the build invocation, copies the staged
 // values.merged.yaml out of the temp build dir (the render deletes it), and
-// emits the canned manifest — mirroring the bats kustomize stub.
+// emits the canned manifest — mirroring the bats kustomize stub. It is the
+// exec-pipeline seam: newFakeKustomize pins LO_RENDER=exec so the render
+// goes through the runner. TestRenderInProcess covers the default
+// in-process pipeline over a real kustomization.
 type fakeKustomize struct {
 	t         *testing.T
 	calls     [][]string
@@ -73,6 +77,12 @@ type fakeKustomize struct {
 	buildDirs []string
 	manifest  string
 	fail      bool
+}
+
+func newFakeKustomize(t *testing.T, manifest string) *fakeKustomize {
+	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	return &fakeKustomize{t: t, manifest: manifest}
 }
 
 func (f *fakeKustomize) Run(ctx context.Context, c execx.Cmd) error {
@@ -141,7 +151,7 @@ func yqr(t *testing.T, doc, path string) string {
 
 func TestRenderStacksBaseDriverProviderInline(t *testing.T) {
 	dir := writeAddon(t)
-	f := &fakeKustomize{t: t, manifest: kustomizeManifest}
+	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
 	t.Setenv("LOK8S_USER_API_HOST", "10.0.0.1")
 
@@ -242,7 +252,7 @@ func parseStream(t *testing.T, s string) []any {
 func TestRenderFallsBackToDriverWithoutProviderValues(t *testing.T) {
 	dir := writeAddon(t)
 	os.Remove(filepath.Join(dir, "values.hetzner.yaml"))
-	f := &fakeKustomize{t: t, manifest: kustomizeManifest}
+	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
 	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
@@ -259,7 +269,7 @@ func TestRenderBaseOnlyWhenNoOverlays(t *testing.T) {
 	dir := writeAddon(t)
 	os.Remove(filepath.Join(dir, "values.lo.yaml"))
 	os.Remove(filepath.Join(dir, "values.hetzner.yaml"))
-	f := &fakeKustomize{t: t, manifest: kustomizeManifest}
+	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
 	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
@@ -277,7 +287,7 @@ func TestRenderInPlaceWhenNothingToStack(t *testing.T) {
 	os.MkdirAll(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, "chart.yaml"),
 		[]byte("kind: ChartRenderer\nvalueFiles:\n  - ../../../../.lok8s/addons/x/values.yaml\n"), 0o644)
-	f := &fakeKustomize{t: t, manifest: kustomizeManifest}
+	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
 	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
@@ -299,6 +309,7 @@ func TestRenderDotfilesSurviveTheCopy(t *testing.T) {
 	// mid-flight.
 	dir := writeAddon(t)
 	os.WriteFile(filepath.Join(dir, ".helmignore"), []byte("*.md\n"), 0o644)
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
 	var errBuf strings.Builder
 	probe := &probeRunner{t: t, check: func(buildDir string) {
 		if _, err := os.Stat(filepath.Join(buildDir, ".helmignore")); err != nil {
@@ -329,7 +340,7 @@ func TestRenderEmptyOutputIsAnError(t *testing.T) {
 	// resources — almost always a misconfig. Fail loud rather than report
 	// success for an empty apply.
 	dir := writeAddon(t)
-	f := &fakeKustomize{t: t, manifest: ""}
+	f := newFakeKustomize(t, "")
 	var errBuf strings.Builder
 	_, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil)
 	if err == nil {
@@ -342,7 +353,8 @@ func TestRenderEmptyOutputIsAnError(t *testing.T) {
 
 func TestRenderBuildFailurePropagates(t *testing.T) {
 	dir := writeAddon(t)
-	f := &fakeKustomize{t: t, fail: true}
+	f := newFakeKustomize(t, "")
+	f.fail = true
 	var errBuf strings.Builder
 	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil); err == nil {
 		t.Fatal("build failure must propagate")
@@ -354,7 +366,7 @@ func TestRenderPerEntryEnvReachesProcessAndEnvsubst(t *testing.T) {
 	// envsubst lookup — without touching the shared process environment.
 	dir := writeAddon(t)
 	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  v: \"${LOK8S_USER_TESTVAR}\"\n"
-	f := &fakeKustomize{t: t, manifest: manifest}
+	f := newFakeKustomize(t, manifest)
 	var errBuf strings.Builder
 	out, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "",
 		map[string]string{"LOK8S_USER_TESTVAR": "hello"})
@@ -393,5 +405,32 @@ func TestMergeNodesListsReplace(t *testing.T) {
 	}
 	if m["keep"] != "x" {
 		t.Errorf("unrelated key lost: %v", m)
+	}
+}
+
+// TestRenderInProcess: the default pipeline over a real (plugin-free)
+// addon — no runner is consulted; the in-process kustomize API renders the
+// manifest and the envsubst + env-coercion passes run over its bytes.
+func TestRenderInProcess(t *testing.T) {
+	t.Setenv(render.ModeEnv, "")
+	dir := filepath.Join(t.TempDir(), "addon")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte("resources:\n  - manifest.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.yaml"), []byte(kustomizeManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var errBuf strings.Builder
+	got, err := Render(context.Background(), nil, &errBuf, dir, "lo", "", "", map[string]string{"LOK8S_USER_API_HOST": "api.example"})
+	if err != nil {
+		t.Fatalf("Render: %v\n%s", err, errBuf.String())
+	}
+	for _, want := range []string{"host: api.example", "untouched: $HOME and ${NOT_LISTED} stay", `value: "6443"`, `value: "true"`, "fieldPath: status.hostIP"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }

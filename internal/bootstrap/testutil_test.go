@@ -18,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 	"gopkg.in/yaml.v3"
 )
 
@@ -81,9 +82,13 @@ func (f *fakeRunner) log() string {
 }
 
 // testEngine builds an Engine over a temp project tree + fake runner, with
-// buffered stdout/stderr and instant sleeps.
+// buffered stdout/stderr and instant sleeps. The addon render is pinned to
+// the exec pipeline (LO_RENDER=exec) so the fake runner is the kustomize
+// seam; the in-process pipeline itself is covered by internal/render and
+// internal/addons.
 func testEngine(t *testing.T) (*Engine, *fakeRunner, *bytes.Buffer, *bytes.Buffer, *config.Paths) {
 	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
 	p := testPaths(t)
 	f := &fakeRunner{}
 	var out, errOut bytes.Buffer

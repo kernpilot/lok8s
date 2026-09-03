@@ -10,12 +10,15 @@ package lo
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 func writeTLSSpec(t *testing.T, clustersDir, tls string) string {
@@ -170,9 +173,13 @@ func TestRenderRegistryConfigMirrorKeepsRemoteURLUnderTLS(t *testing.T) {
 
 // stubSecretPlugin creates the plugin binary path on disk (executable — the
 // mint stats it) and wires the fake runner to answer its exec: capture the
-// manifest from stdin, emit a k8s Secret with base64 FAKECRT/FAKEKEY.
+// manifest from stdin, emit a k8s Secret with base64 FAKECRT/FAKEKEY. This
+// is the LO_RENDER=exec pipeline; the default in-process mint (the
+// generator imported as a package) is covered by
+// TestRegistriesTLSCertMintsInProcess.
 func stubSecretPlugin(t *testing.T, runner *fakeRunner, base string) (pluginBin string, gotManifest *string) {
 	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
 	pluginHome := filepath.Join(base, ".kustomize")
 	pluginBin = filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
 	writeFile(t, pluginBin, "#!/bin/sh\nexit 1\n") // never actually executed
@@ -268,6 +275,7 @@ func TestRegistriesTLSCertFailsFastWhenPluginMissing(t *testing.T) {
 	if err := readNetworkConfig(cy, errBuf); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv(render.ModeEnv, string(render.ModeExec)) // only the exec pipeline needs the binary
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize-empty"))
 	t.Setenv("PATH_SECRETS", filepath.Join(p.Base, ".secrets-store"))
 
@@ -277,6 +285,103 @@ func TestRegistriesTLSCertFailsFastWhenPluginMissing(t *testing.T) {
 	}
 	if !strings.Contains(vErr.String(), "Secret plugin is not built") {
 		t.Fatalf("wrong error:\n%s", vErr.String())
+	}
+}
+
+// TestRegistriesTLSCertMintsInProcess drives the DEFAULT pipeline: no
+// plugin binary, no KUSTOMIZE_PLUGIN_HOME, no runner call — the imported
+// secrets.lok8s.dev generator mints the leaf against a throwaway CAROOT
+// (created on demand, like the dev CA) into a throwaway PATH_SECRETS store.
+// The extracted tls.crt/tls.key must be a real pair: a leaf signed by that
+// CA whose SANs are exactly the registry hostnames + IPs the exec path
+// handed to the plugin, with the key matching the cert.
+func TestRegistriesTLSCertMintsInProcess(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(render.ModeEnv, "")
+	t.Setenv("CAROOT", filepath.Join(p.Base, "caroot"))
+	t.Setenv("PATH_SECRETS", filepath.Join(p.Base, ".secrets-store"))
+	os.MkdirAll(filepath.Join(p.Base, ".secrets-store"), 0o755)
+	runner.handler = func(c execx.Cmd) error {
+		t.Fatalf("in-process mint must not exec anything, ran %s %v", c.Name, c.Args)
+		return nil
+	}
+
+	if err := d.registriesTLSCert(context.Background(), errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+
+	tlsDir := filepath.Join(p.Base, ".secrets", "tls", "registries")
+	crtPEM, err := os.ReadFile(filepath.Join(tlsDir, "tls.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(tlsDir, "tls.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(crtPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("tls.crt/tls.key are not a matching pair: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.IsCA {
+		t.Fatal("minted a CA, not a leaf")
+	}
+	// The same SAN set the exec path put into cert.hosts (see
+	// TestRegistriesTLSCertBuildsSANsAndDrivesThePlugin): hostnames as DNS
+	// SANs, addresses as IP SANs.
+	for _, want := range []string{"lok8s.local", "lok8s.cache", "docker.io"} {
+		found := false
+		for _, dns := range leaf.DNSNames {
+			found = found || dns == want
+		}
+		if !found {
+			t.Errorf("DNS SAN %q missing (have %v)", want, leaf.DNSNames)
+		}
+	}
+	for _, want := range []string{"10.125.50.101", "10.125.50.102"} {
+		found := false
+		for _, ip := range leaf.IPAddresses {
+			found = found || ip.String() == want
+		}
+		if !found {
+			t.Errorf("IP SAN %q missing (have %v)", want, leaf.IPAddresses)
+		}
+	}
+	// Signed by the throwaway CA the mint created at CAROOT.
+	caPEM, err := os.ReadFile(filepath.Join(p.Base, "caroot", "rootCA.pem"))
+	if err != nil {
+		t.Fatalf("CAROOT CA not created: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		t.Fatal("rootCA.pem unparsable")
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "lok8s.local",
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Fatalf("leaf does not verify against the CAROOT CA: %v", err)
+	}
+	// The generator's cache is the source of truth: the store now holds
+	// the leaf under the Secret's name, and the .sans key makes the next
+	// call a no-op (idempotence shared with the exec path).
+	if !fileExists(filepath.Join(p.Base, ".secrets-store", "Secret.registries-tls.lok8s-system.tls.crt")) {
+		t.Fatal("leaf not cached in PATH_SECRETS")
+	}
+	if got := readFileT(t, filepath.Join(tlsDir, ".sans")); !strings.Contains(got, "lok8s.local") {
+		t.Fatalf(".sans = %q", got)
+	}
+	if err := d.registriesTLSCert(context.Background(), errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(filepath.Join(tlsDir, "tls.crt")); !bytes.Equal(again, crtPEM) {
+		t.Fatal("unchanged SAN set re-minted the cert")
 	}
 }
 

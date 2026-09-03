@@ -21,6 +21,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/driver/capi"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -177,7 +178,8 @@ func specClusterDomain(specPath string) string {
 
 // k8sKustomizeArtifact is the shared body of k8s::infrastructure /
 // k8s::platform: `KUBECONFIG=<base>/.kubeconfig/secret.<domain>.yaml
-// kustomize build --enable-alpha-plugins <src> > <outDir>/<file>` plus a
+// kustomize build --enable-alpha-plugins <src> > <outDir>/<file>` (via
+// internal/render) plus a
 // kustomization.yaml listing the artifact when absent.
 func k8sKustomizeArtifact(paths *config.Paths, d, src, outDir, file string, stderr io.Writer) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -187,13 +189,17 @@ func k8sKustomizeArtifact(paths *config.Paths, d, src, outDir, file string, stde
 	if err != nil {
 		return err
 	}
-	runErr := execx.NewRunner(paths).Run(context.Background(), execx.Cmd{
-		Name:   "kustomize",
-		Args:   []string{"build", "--enable-alpha-plugins", src},
+	// internal/render: in-process by default, the pinned kustomize binary
+	// under LO_RENDER=exec. The file is created (truncated) before the
+	// render, as the redirect did.
+	out, runErr := render.Build(context.Background(), src, render.Options{
+		Paths:  paths,
 		Env:    []string{"KUBECONFIG=" + paths.Base + "/.kubeconfig/secret." + d + ".yaml"},
-		Stdout: f,
 		Stderr: stderr,
 	})
+	if runErr == nil {
+		_, runErr = f.Write(out)
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}

@@ -8,13 +8,18 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 // stubKustomize installs a fake kustomize into p.Bin that cats the file
 // named by KUSTOMIZE_STUB_OUTPUT (empty output when unset) and exits with
-// KUSTOMIZE_STUB_RC.
+// KUSTOMIZE_STUB_RC — and pins the render to the exec pipeline
+// (LO_RENDER=exec) so the stub is what runs. The promote/guard logic under
+// test is pipeline-agnostic; TestArtifactsInProcessRender covers the
+// default in-process pipeline over a real kustomization.
 func stubKustomize(t *testing.T, p *config.Paths) {
 	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
 	if err := os.MkdirAll(p.Bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -256,5 +261,36 @@ func TestCountKindLines(t *testing.T) {
 	in := []byte("kind: A\nfoo: 1\n  kind: nested-not-counted\n---\nkind: B\nunkind: x\n")
 	if got := countKindLines(in); got != 2 {
 		t.Errorf("countKindLines = %d, want 2", got)
+	}
+}
+
+// TestArtifactsInProcessRender: the default pipeline — no kustomize binary
+// anywhere (p.Bin is empty), the domain rendered by the in-process
+// kustomize API, then the envsubst pass and the promote.
+func TestArtifactsInProcessRender(t *testing.T) {
+	p := testPaths(t)
+	t.Setenv(render.ModeEnv, "")
+	t.Setenv("KUBECONFIG", filepath.Join(p.Base, "no-such-kubeconfig.yaml"))
+	t.Setenv("LOK8S_SPEC_INPROC", "sub-ok")
+	domainDir := filepath.Join(p.Clusters, "d.dev")
+	writeFileT(t, filepath.Join(domainDir, "kustomization.yaml"), "resources:\n  - cm.yaml\n")
+	writeFileT(t, filepath.Join(domainDir, "cm.yaml"),
+		"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: z\n  namespace: demo\ndata:\n  v: \"${LOK8S_SPEC_INPROC}\"\n  keep: \"${NOT_LISTED}\"\n")
+
+	stderr, err := runArtifacts(t, p)
+	if err != nil {
+		t.Fatalf("Artifacts: %v\n%s", err, stderr)
+	}
+	raw, err := os.ReadFile(filepath.Join(domainDir, "artifacts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	want := "apiVersion: v1\ndata:\n  keep: ${NOT_LISTED}\n  v: sub-ok\nkind: ConfigMap\nmetadata:\n  name: z\n  namespace: demo\n"
+	if got != want {
+		t.Fatalf("artifacts.yaml = %q, want %q", got, want)
+	}
+	if !strings.Contains(stderr, "lo build: d.dev rendered 1 document(s)") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 }

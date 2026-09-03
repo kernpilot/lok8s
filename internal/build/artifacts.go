@@ -3,16 +3,16 @@ package build
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
-	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -53,8 +53,10 @@ func (o *Options) stderr() io.Writer {
 // ../../.targets/bar]; local + shared) — into ONE file
 // clusters/<domain>/artifacts.yaml.
 //
-// Same pipeline the CLI has always used: --enable-alpha-plugins with
-// $KUSTOMIZE_PLUGIN_HOME (secrets/khelm), KHELM_TRUST_ANY_REPO=true,
+// Same pipeline the CLI has always used — `kustomize build
+// --enable-alpha-plugins` with the secrets/khelm exec generators, now run
+// in-process by internal/render (LO_RENDER=exec is the binary pipeline) —
+// with KHELM_TRUST_ANY_REPO=true,
 // per-domain secret isolation (exportSecretsPath), API-endpoint resolution
 // (resolveAPI), kubeconfig resolution for cluster-aware plugins (the khelm
 // ChartRenderer kubeVersion check), and the LOK8S_* envsubst pass.
@@ -114,7 +116,7 @@ func Artifacts(o Options) error {
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 
-	rendered, err := runKustomize(o, domainDir, kubeconfig, stderr)
+	rendered, err := runKustomize(context.Background(), o, domainDir, kubeconfig, stderr)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
@@ -246,9 +248,10 @@ func pruneStaleArtifactDirs(artifactsDir string) {
 	}
 }
 
-// runKustomize execs `kustomize build --enable-alpha-plugins <domainDir>`
-// with the exact env the bash pipeline set: KUBECONFIG (pass B),
-// KHELM_TRUST_ANY_REPO=true, and LOK8S_SECRETS_DISABLE.
+// runKustomize renders `kustomize build --enable-alpha-plugins <domainDir>`
+// through internal/render (in-process by default, the pinned binary under
+// LO_RENDER=exec) with the exact env the bash pipeline set: KUBECONFIG
+// (pass B), KHELM_TRUST_ANY_REPO=true, and LOK8S_SECRETS_DISABLE.
 //
 // --no-secrets store-free wiring: in no-secrets mode the render itself must
 // not touch the secrets store. The split-side guards leave the committed
@@ -258,45 +261,37 @@ func pruneStaleArtifactDirs(artifactsDir string) {
 // nothing and never read the store, so the whole render needs no store or
 // key (this — not the split shaping alone — is what makes --no-secrets truly
 // store-free). Explicit 0 otherwise (unambiguous off).
-func runKustomize(o Options, domainDir, kubeconfig string, stderr io.Writer) ([]byte, error) {
-	kustomizePath, ok := execx.Look(o.Paths, "kustomize")
-	if !ok {
-		return nil, errors.New("kustomize not found")
-	}
+func runKustomize(ctx context.Context, o Options, domainDir, kubeconfig string, stderr io.Writer) ([]byte, error) {
 	secretsDisable := "0"
 	if o.NoSecrets {
 		secretsDisable = "1"
 	}
-	cmd := exec.Command(kustomizePath, "build", "--enable-alpha-plugins", domainDir)
-	cmd.Env = kustomizeEnv(o.Paths, kubeconfig, secretsDisable)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+	return render.Build(ctx, domainDir, render.Options{
+		Paths:  o.Paths,
+		Env:    kustomizeEnv(o.Paths, kubeconfig, secretsDisable),
+		Stderr: stderr,
+	})
 }
 
-// kustomizeEnv prepares the kustomize child's environment the way the argsh
-// runtime had it: the toolchain on PATH, KUSTOMIZE_PLUGIN_HOME defaulted to
-// $PATH_BASE/.kustomize when unset, and the per-render overrides.
+// kustomizeEnv is the per-render environment overlay, the way the argsh
+// runtime had it for the kustomize child: the toolchain on PATH (the
+// Secret generator's `bash:` scripts and any KRM exec function inherit
+// it) and the per-render overrides. KUSTOMIZE_PLUGIN_HOME is the render
+// package's business: the self-exec home in-process, the
+// $PATH_BASE/.kustomize default in exec mode.
 func kustomizeEnv(p *config.Paths, kubeconfig, secretsDisable string) []string {
-	env := os.Environ()
 	path := os.Getenv("PATH")
 	for _, dir := range []string{p.Lok8s, p.Bin} {
 		if !containsPathEntry(path, dir) {
 			path = dir + string(os.PathListSeparator) + path
 		}
 	}
-	env = setEnv(env, "PATH", path)
-	if os.Getenv("KUSTOMIZE_PLUGIN_HOME") == "" {
-		env = setEnv(env, "KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize"))
+	return []string{
+		"PATH=" + path,
+		"KUBECONFIG=" + kubeconfig,
+		"KHELM_TRUST_ANY_REPO=true",
+		"LOK8S_SECRETS_DISABLE=" + secretsDisable,
 	}
-	env = setEnv(env, "KUBECONFIG", kubeconfig)
-	env = setEnv(env, "KHELM_TRUST_ANY_REPO", "true")
-	env = setEnv(env, "LOK8S_SECRETS_DISABLE", secretsDisable)
-	return env
 }
 
 // countKindLines counts lines starting with "kind:" — the same literal
@@ -344,13 +339,3 @@ func containsPathEntry(path, dir string) bool {
 	return false
 }
 
-func setEnv(env []string, key, value string) []string {
-	prefix := key + "="
-	for i, kv := range env {
-		if strings.HasPrefix(kv, prefix) {
-			env[i] = prefix + value
-			return env
-		}
-	}
-	return append(env, prefix+value)
-}

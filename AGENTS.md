@@ -31,9 +31,12 @@ deviations catalogue: [docs/reference/go-migration.md](docs/reference/go-migrati
 
 Three seams still run bash from the frozen tree on purpose: provider plugins
 (`.lok8s/providers/<name>/main`, via `internal/provider/bridge`), `lo drivers
-<name>` for a driver without a Go twin, and `LO_IMPL=bash`. Renderers stay
-subprocesses (`kustomize`, `yq`, `sops`, the exec plugins) until byte-parity
-with the pinned tool is proven for committed domains, not just fixtures.
+<name>` for a driver without a Go twin, and `LO_IMPL=bash`. The kustomize
+render is in-process (`internal/render`: the pinned kustomize API plus the
+Secret and khelm generators served by the binary itself — byte-parity proven
+on the committed kubehz.dev domain; `LO_RENDER=exec` restores the
+subprocess pipeline). `yq` and `sops` stay subprocesses until the same proof
+exists for them.
 
 How to change or port behaviour (mirror the pattern of any `internal/`
 package):
@@ -80,6 +83,7 @@ Rules that came from incidents:
 | providers | `internal/provider/bridge` (runs the bash plugins as `bash -c` children) | `.lok8s/providers/hetzner/` (`main` + `utils/`) — **still the live implementation** |
 | provisioning | `internal/provision` (dispatch, gates, spec), `internal/bootstrap` (the addon DAG), `internal/inventory`, `internal/recover` | `.lok8s/libs/{provision,bootstrap,inventory,recover}` |
 | build / deploy | `internal/build`, `internal/deploy`, `internal/image`, `internal/gitops` | `.lok8s/libs/{build,deploy,image,gitops}` |
+| render | `internal/render` — `kustomize build` in-process (sigs.k8s.io/kustomize/api, pinned to the binary's release), the self-exec plugin home, the plugin dispatch (`Secret` → `kustomize/plugins/secret` imported; `ChartRenderer` → khelm v2.8.0 as a library), `LO_RENDER=exec` | the pinned `kustomize` + `.kustomize/` exec plugins (what `LO_IMPL=bash` and `LO_RENDER=exec` run) |
 | kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
 | secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
 | scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
@@ -90,7 +94,7 @@ Rules that came from incidents:
 | installer | `install/lo-install.sh`, `.goreleaser.yaml`, `hack/release-tarball.sh` | `.lok8s/legacy/install/` (`lo-up`) |
 | addons | `internal/assets/lok8s/addons/` (embedded, kustomize-buildable dirs; ejected into a project's `.lok8s/addons/<name>` on first use) | `.lok8s/addons/` (synced twin) |
 | infra | `clusters/`, `.kustomize/` (YAML / Kustomize) | |
-| kustomize-plugins | `kustomize/` (own Go module) → `.kustomize/<group>/<version>/<kind>/<Kind>` (built) | |
+| kustomize-plugins | `kustomize/` (own Go module, ALSO imported by the root module via the `replace` in go.mod — the binary serves it in-process) → `.kustomize/<group>/<version>/<kind>/<Kind>` (built standalone for the bash path + releases) | |
 | lo chat engine | `ai/lochat/` (own Go module) | |
 | tests | `internal/**/*_test.go`, `hack/parity-*.sh`, `hack/e2e-go-roundtrip.sh` | `tests/unit/`, `tests/operator/`, `tests/e2e/` (bats) |
 | docs | `docs/` (VitePress), `ARCHITECTURE.md`, `TESTING.md` | |

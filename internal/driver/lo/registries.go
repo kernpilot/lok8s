@@ -18,7 +18,10 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // registryHTTPBlock emits the registry `http:` stanza for the active mode
@@ -83,17 +86,20 @@ func renderRegistryConfig(configFile, url string, tls bool) (string, error) {
 }
 
 // registriesTLSCert mints the TLS cert the registries serve in TLS mode by
-// driving the secrets.lok8s.dev Secret plugin — the BINARY lok8s already
-// ships and requires (bash: lo::registries_tls_cert). The cert is a `cert:`
-// leaf whose SANs are built from .registries.json so it covers every
-// registry IP plus the framework hostnames; the plugin signs it with the
-// shared dev CA at CAROOT (created on demand) and tls.crt/tls.key are
-// extracted to .secrets/tls/registries/ for the container mounts.
+// driving the secrets.lok8s.dev Secret generator (bash:
+// lo::registries_tls_cert). The cert is a `cert:` leaf whose SANs are built
+// from .registries.json so it covers every registry IP plus the framework
+// hostnames; the generator signs it with the shared dev CA at CAROOT
+// (created on demand) and tls.crt/tls.key are extracted to
+// .secrets/tls/registries/ for the container mounts.
 //
-// TODO(go-port): internal/secrets exists, but the plugin binary IS the
-// source of the cert: generator (leaf cache, CA handling) — this stays an
-// exec of the same binary until the generator itself is unified into
-// internal/secrets. Do not inline a second cert mint path.
+// The generator is the ONE cert: implementation (leaf cache, CA handling)
+// — kustomize/plugins/secret, imported as a package (WP3): the manifest
+// below is handed to secret.Run in-process exactly as it used to go to the
+// plugin binary's stdin, and the Secret it emits is parsed the same way.
+// Under LO_RENDER=exec the binary at KUSTOMIZE_PLUGIN_HOME is exec'd as
+// before (built on demand through the KustomizeBuild hook). Do not inline a
+// second cert mint path.
 //
 // Idempotent: re-minted only when missing or when the SAN set changed (IPs
 // shifted, a mirror added/removed). The host Docker client + containerd
@@ -107,21 +113,29 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 		return nil
 	}
 
-	pluginHome := envOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
-	pluginBin := filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
-	// The Secret plugin mints the cert. It's needed across the lok8s flow
-	// anyway, so build it on demand if it's missing and we can (bash probed
-	// `declare -F kustomize::build`; the Go seam is the injectable hook);
-	// otherwise fail with guidance.
-	if !isExecutable(pluginBin) && d.Hooks.KustomizeBuild != nil {
-		ui.Debugf(errOut, "registry TLS: Secret plugin missing — building it (lo kustomize build)")
-		_ = d.Hooks.KustomizeBuild(ctx)
+	mode, err := render.CurrentMode()
+	if err != nil {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return err
 	}
-	if !isExecutable(pluginBin) {
-		fmt.Fprintln(errOut, "error: spec.registries.tls is true (default) but the Secret plugin is not built at")
-		fmt.Fprintf(errOut, "       %s. Build it with 'lo kustomize build' (needs go), or set\n", pluginBin)
-		fmt.Fprintln(errOut, "       spec.registries.tls: false for plain-HTTP registries. Then retry.")
-		return fmt.Errorf("secret plugin not built at %s", pluginBin)
+	var pluginBin string
+	if mode == render.ModeExec {
+		pluginHome := envOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
+		pluginBin = filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
+		// The Secret plugin mints the cert. It's needed across the lok8s
+		// flow anyway, so build it on demand if it's missing and we can
+		// (bash probed `declare -F kustomize::build`; the Go seam is the
+		// injectable hook); otherwise fail with guidance.
+		if !isExecutable(pluginBin) && d.Hooks.KustomizeBuild != nil {
+			ui.Debugf(errOut, "registry TLS: Secret plugin missing — building it (lo kustomize build)")
+			_ = d.Hooks.KustomizeBuild(ctx)
+		}
+		if !isExecutable(pluginBin) {
+			fmt.Fprintln(errOut, "error: spec.registries.tls is true (default) but the Secret plugin is not built at")
+			fmt.Fprintf(errOut, "       %s. Build it with 'lo kustomize build' (needs go), or set\n", pluginBin)
+			fmt.Fprintln(errOut, "       spec.registries.tls: false for plain-HTTP registries. Then retry.")
+			return fmt.Errorf("secret plugin not built at %s", pluginBin)
+		}
 	}
 	pathSecrets := getenv("PATH_SECRETS")
 	if pathSecrets == "" {
@@ -208,12 +222,25 @@ cert:
 `, name, ns, hostsJSON.String())
 
 	var out strings.Builder
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name:   pluginBin, // absolute path — used as-is by the runner
-		Stdin:  strings.NewReader(manifest),
-		Stdout: &out,
-		Stderr: d.stderr(),
-	}); err != nil {
+	if mode == render.ModeExec {
+		err = d.deps.Runner.Run(ctx, execx.Cmd{
+			Name:   pluginBin, // absolute path — used as-is by the runner
+			Stdin:  strings.NewReader(manifest),
+			Stdout: &out,
+			Stderr: d.stderr(),
+		})
+	} else {
+		// In-process: no argv config path, so the generator reads the
+		// manifest from stdin — the same protocol the exec above uses.
+		// PATH_SECRETS/CAROOT come from the process environment, as they
+		// did for the child. A failure is reported the way the plugin
+		// binary's main did (plugin.Fail) on the same stream.
+		err = secret.Run([]string{"Secret"}, strings.NewReader(manifest), &out, plugin.DefaultEnv)
+		if err != nil {
+			fmt.Fprintln(d.stderr(), "secret plugin:", err)
+		}
+	}
+	if err != nil {
 		fmt.Fprintln(errOut, "error: the Secret plugin failed to mint the registry TLS cert")
 		return fmt.Errorf("secret plugin failed: %w", err)
 	}

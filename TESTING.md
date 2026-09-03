@@ -14,6 +14,7 @@ lok8s itself.
 | Tree-drift gate | the cobra command tree matches the argsh usage array in `.lok8s/lo` (names, aliases, hidden, markers, short text) | `go-tests` (part of `go test`) | `go test ./internal/cli/ -run TestCommandTreeMatchesArgshUsage` |
 | Assets-drift gate | the embedded mirror `internal/assets/lok8s/**` (canonical) is byte-identical to its `.lok8s/**` twin in both directions — addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `VERSION`; resync with `hack/sync-legacy-assets.sh` (`--from-legacy`, `--check`) | `go-tests` (part of `go test`) | `go test ./internal/assets/ -run TestEmbeddedMirrorMatchesLegacyTree` · `bash hack/sync-legacy-assets.sh --check` |
 | CRD render fixture | `lo crds` output is byte-identical to the committed `operator/crds/*.yaml` | `go-tests` (part of `go test`); `unit-tests` (`lo crds check`) | `go test ./internal/crds/` · `bin/lo crds check` |
+| Render gate | the in-process kustomize render (`internal/render`) is byte-identical to the pinned exec pipeline: `go test ./internal/render/` byte-compares plain, Secret-generator and khelm local-chart fixtures against `.bin/kustomize` + `.kustomize/*` (skips without them); `hack/parity-build.sh` diffs `lo build` in-process against the bash exec pipeline; the committed kubehz.dev domain must report `render unchanged` under the default and `LO_RENDER=exec` | `go-tests` (`go test`, `parity-build`); the committed-domain run is manual (see below) | `go test ./internal/render/` · `bash hack/parity-build.sh` · `DEBUG=1 lo build --domain <d>` twice, once with `LO_RENDER=exec` |
 | Parity harnesses (10) | the binary and `LO_IMPL=bash` agree byte-for-byte on stdout, stderr, rc (and written trees) for every covered invocation | `go-tests` | `make build && bash hack/parity-<name>.sh` |
 | golangci-lint | `.golangci.yml` (standard set + misspell, unconvert, unparam, gocritic, revive) | `go-tests` | `make lint` |
 | bats unit suite | the frozen bash libraries, function by function (88 files under `tests/unit/`) | `unit-tests` | `./.bin/argsh test tests/unit/` |
@@ -44,8 +45,16 @@ go test ./internal/secrets/ -run TestEncrypt -v    # one package / one test
 Packages with tests: `internal/{addons,audit,bootstrap,build,cli,config,
 crds,deploy,domain,driver,driver/capi,driver/kkp,driver/kubehz,
 driver/kubeone,driver/lo,env,gitops,hooks,image,inventory,kapply,kubehz,
-lint,oidc,operator,provider/bridge,provision,recover,scaffold,secrets,tilt}`.
+lint,oidc,operator,provider/bridge,provision,recover,render,scaffold,secrets,tilt}`.
 Only `internal/execx` (the runner itself) and `internal/ui` have none.
+
+The kustomize render is in-process (`internal/render`), so a test that
+needs the fake-runner seam for `kustomize` pins `LO_RENDER=exec` first
+(`t.Setenv(render.ModeEnv, string(render.ModeExec))` — the build, addons,
+bootstrap and registry-TLS fakes do). `internal/render`'s own tests serve
+the exec generators from the test binary: its `TestMain` calls
+`render.DispatchPlugin` exactly like `cmd/lo`, which is what lets the
+Secret/khelm fixtures run the real plugin protocol hermetically.
 
 Two Go modules ship alongside the root module and have their own tests:
 

@@ -83,24 +83,106 @@ contract is not published yet.
 
 ### External tools still exec'd
 
-The port swapped shell for Go but did **not** swap the renderers. The
+The port swapped shell for Go and, since phase 7, the kustomize renderer
+too (see [In-process rendering](#in-process-rendering) below). The
 following remain subprocesses, resolved through the project's `.bin/` first
 and `PATH` second (`internal/execx.Look`):
 
 | Tool | Used by | Why not in-process |
 |---|---|---|
-| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | `lo build`, the Lo driver's kustomize build hook, `lo kustomize` | The rendered `artifacts.yaml` is the product; only the pinned binary guarantees byte-identical output. |
+| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **only** `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and `LO_IMPL=bash` | Not needed by the binary any more — kept so the frozen bash tree and the parity harnesses can run, and so a render can be A/B'd against the pinned binary. |
 | `yq` | `lo build` split mode (the YAML stream transforms and per-Secret re-renders), `lo env services` (the deep-merge the Tiltfile consumes) | yq's emitter has opinions (`---` on every non-first document, sequence-dash indentation) that `gopkg.in/yaml.v3` does not reproduce byte-for-byte. Field *extraction* from YAML is native everywhere. |
 | `sops` | `lo build` split-mode Secret twins | The `.enc` files must stay interoperable with the sops CLI. (`lo secrets` itself uses the sops **library** in binary mode; the files it writes are the same format.) |
 | `kubectl`, `kind`, `docker`, `tilt`, `clusterctl`, `kubeone`, `hcloud`, `mkcert`, `envsubst` | drivers, deploy, registries, tilt, trust | These are the tools lok8s orchestrates; calling them as-is keeps "what lok8s runs is what you'd run by hand" true. |
 
-**Renderer-swap roadmap.** Moving kustomize/yq/sops in-process is deferred by
-the *renderer-drift rule*: a swap is allowed only once byte-parity with the
+**Renderer-swap roadmap.** Moving yq/sops in-process is deferred by the
+*renderer-drift rule*: a swap is allowed only once byte-parity with the
 pinned tool's output is proven for the committed domains, not just the parity
 fixtures (`internal/build/split.go` carries the TODO). The CRD render
-(`lo crds`) is the precedent — it is a native `yaml.Node` transform whose
+(`lo crds`) was the first precedent — a native `yaml.Node` transform whose
 output is byte-identical to the former `yq eval` render, with the committed
-CRDs as the parity fixture.
+CRDs as the parity fixture. The kustomize render is the second (below).
+
+### In-process rendering
+
+Phase 7 (WP3 + WP4) moved `kustomize build` — and both exec generators every
+lok8s render depends on — into the binary. `lo build`, the bootstrap
+engine's addon render (`internal/addons`), the KubeOne driver's addon
+staging, the legacy `lo k8s` paths and the Lo driver's registry TLS mint no
+longer exec `kustomize`, `khelm` or the `Secret` plugin, and need neither a
+`.kustomize/` directory nor `KUSTOMIZE_PLUGIN_HOME`. The output is
+byte-identical to the exec pipeline's — that was the gate, not a goal.
+
+**What runs where** (`internal/render`):
+
+| Piece | In the binary | Pinned to |
+|---|---|---|
+| `kustomize build --enable-alpha-plugins [--enable-exec] <dir>` | `sigs.k8s.io/kustomize/api/krusty`, driven option-for-option like the kustomize CLI's build command (`Reorder` unspecified, `EnabledPluginConfig(BploUseStaticallyLinked)`, the builtin helm inflator enabled with the default `helm` command, `KUSTOMIZE_ENABLE_MANAGEDBY_LABEL` honoured, `ResMap.AsYaml()` as the bytes) | `api v0.21.1` + `kyaml v0.21.1` — the modules behind the **kustomize v5.8.1** binary the repo pins in `.bin/b.yaml` (kubehz-cluster pins `v5.8.1` explicitly) |
+| `secrets.lok8s.dev/v1/Secret` | `kustomize/plugins/secret` **imported** (go.mod: `replace github.com/kernpilot/lok8s/kustomize => ./kustomize`) — the same `secret.Run` the standalone `kustomize-secret` binary's `main` calls; the nested module keeps building on its own for the release assets and the bash path | the repo's own module, one source tree |
+| `khelm.mgoltzsche.github.com/v2/ChartRenderer` | `github.com/mgoltzsche/khelm/v2/pkg/{config,helm}` as a **library**, replicating khelm's kustomize-plugin `main` (config from `KUSTOMIZE_PLUGIN_CONFIG_STRING`, `helm.NewHelm()` from the helm `cli.New()` settings, `KHELM_TRUST_ANY_REPO`/`KHELM_DEBUG`/`HELM_DEBUG`, `ReadGeneratorConfig`, `Render`, then khelm's `output.Marshal` — the kyaml encoder, one `Encode` per RNode document — repeated verbatim because that package is internal to khelm) | **khelm v2.8.0** — the exact release the repo pins as the `ChartRenderer` binary (kubehz-cluster: "the pair PROVEN to reproduce the committed artifacts byte-for-byte"); its go.mod requires **helm.sh/helm/v3 v3.21.2**, pinned in the root go.mod as well, so the chart inflation is the same helm code the binary was built from |
+
+**The self-exec plugin home.** kustomize's exec-plugin protocol is a
+subprocess: `<pluginhome>/<group>/<version>/<kind>/<Kind> <cfgfile>` run in
+the kustomization directory with `KUSTOMIZE_PLUGIN_CONFIG_STRING` in the
+environment. The binary keeps that protocol — nothing in the kustomize API
+is patched — and points it at itself: on the first render of a process
+`internal/render` creates a temp plugin home holding the two plugin paths
+as symlinks to `os.Executable()` (a copy where symlinks are unavailable),
+sets `KUSTOMIZE_PLUGIN_HOME` to it for the duration of the run, and
+`main` dispatches on `argv[0]` **before anything else** (`render.DispatchPlugin`:
+`…/secret/Secret` → the imported generator, `…/chartrenderer/ChartRenderer`
+→ the khelm library). The child is therefore `lo` again, started under the
+plugin's name; a non-zero exit fails the build with the child's stderr in
+the message exactly as before (`secret plugin: …`, `khelm: …`). The home is
+removed on exit (`render.Cleanup`).
+
+The per-render environment the exec pipeline handed to the kustomize child
+(`KUBECONFIG`, `KHELM_TRUST_ANY_REPO=true`, `LOK8S_SECRETS_DISABLE`, the
+toolchain on `PATH`, an addon entry's `env:` overrides) is `render.Options.Env`.
+The plugin children inherit the process environment, so the overlay is
+installed in it for the duration of the run and restored afterwards, under
+a package mutex — concurrent renders (the bootstrap DAG) serialize on the
+render only; the apply and wait phases stay parallel.
+
+**Chart cache.** `helm.NewHelm()` reads the same `HELM_*` environment the
+khelm binary read, so chart downloads and repository indexes land in the
+same helm cache (`$HELM_REPOSITORY_CACHE`, else `$XDG_CACHE_HOME/helm/
+repository`, else `~/.cache/helm/repository`) and a warm cache stays warm
+across the switch. The `KHELM_TRUST_ANY_REPO=true` the pipeline always set
+still decides whether an undeclared repository is trusted.
+
+**`LO_RENDER=exec`** restores the subprocess pipeline everywhere
+(`internal/render` execs the pinned `kustomize` from `.bin` with
+`KUSTOMIZE_PLUGIN_HOME` defaulted to `<project>/.kustomize` for `lo build`,
+and the registry TLS mint execs the built `Secret` plugin as before). Use
+it to A/B a render: `lo build` promotes `artifacts.yaml` only when the bytes
+change, so a `DEBUG=1 lo build` that reports `render unchanged` under both
+settings is the proof. An unknown value is rejected (`LO_RENDER: unknown
+value`).
+
+**The gate** (all held at the switch, 2026-09-03): `hack/parity-build.sh`
+green (bash exec vs Go in-process, byte-diffed); kubehz-cluster's committed
+`kubehz.dev` — 244 documents, the Secret generator cache-first, 20+ khelm
+charts, envsubst — `render unchanged` with identical SHA-256 under the
+default and under `LO_RENDER=exec`, and still `render unchanged` with
+`KUSTOMIZE_PLUGIN_HOME=/nonexistent` (where the exec pipeline fails to find
+its plugins — the proof the in-process dispatch was taken);
+`internal/render`'s tests byte-compare the in-process render with the
+pinned binaries in the repo's `.bin`/`.kustomize` for a plain
+kustomization, the Secret generator and a local-chart `ChartRenderer`;
+`internal/driver/lo`'s in-process mint test verifies the leaf (SANs, CA
+signature, key match) against a throwaway CAROOT.
+
+What did **not** move: `yq` (split-mode transforms, `lo env services`) and
+`sops` — WP5. `lo kustomize {build,test,clean,list}` still manages the
+standalone plugin under `.kustomize/` for the frozen tree, and `lo doctor`
+still reports `KUSTOMIZE_PLUGIN_HOME` / the built plugin because
+`LO_IMPL=bash`, the provider plugins and `LO_RENDER=exec` need them (its
+text is unchanged; `hack/parity-configure.sh` diffs it). `kubectl
+kustomize` in `lo kubehz deploy` is kubectl's embedded kustomize, not the
+pinned one, in both implementations. The binary grew from 49 MB to 123 MB
+(helm + client-go + the kustomize API); the root module's `go` directive is
+`1.26.0` because khelm v2.8.0 requires it.
 
 ## Embedded assets: the eject model
 
@@ -242,7 +324,7 @@ trees.
 | `hack/parity-ops.sh` | `deploy`, `recover`, `gitops` | cluster-free paths; stub `kubectl`, a scripted `mock` provider whose rebuild refuses outside `CLOUD_DRY_RUN` |
 | `hack/parity-kubehz.sh` | `lo kubehz` | config validation, usage errors, hosting-axis routing, handover bundle checks; no api tokens set |
 | `hack/parity-operator.sh` | `lo operator <hook>` vs the frozen bash hooks | `--config` bytes and stubbed `kubectl`/`clusterctl` call logs |
-| `hack/parity-orchestrate.sh` | `up`, `down`, `clean`, `provision`, `destroy`, `bootstrap`, `status`, `registry` | stub `tilt`/`kind`/`docker`/`kubectl`; consent gates driven with closed stdin |
+| `hack/parity-orchestrate.sh` | `up`, `down`, `clean`, `provision`, `destroy`, `bootstrap`, `status`, `registry` | stub `tilt`/`kind`/`docker`/`kubectl`; consent gates driven with closed stdin; `LO_RENDER=exec` pinned so the registry TLS mint fails on the missing plugin binary in both (D19) |
 
 All ten run in CI on every push (`go-tests` job), after `go build`, `go
 vet`, `go test` and golangci-lint. Deliberate divergences are allow-listed
@@ -302,6 +384,7 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D16 | **SOPS output is not byte-compared.** Encryption is nondeterministic; cross-tool decrypt is the contract. | `internal/secrets/sops.go`, `hack/parity-build.sh` |
 | D17 | **The kind config is a temp file, not a process substitution.** One `kind create cluster … --config <path>` argv line differs. | `hack/parity-orchestrate.sh` |
 | D18 | **Operator hooks: `set -u` abort text.** An unset `BINDING_CONTEXT_PATH` exits 1 in both; the bash message names the script line, the binary prints `error: BINDING_CONTEXT_PATH: unbound variable`. | `internal/operator/operator.go`, `hack/parity-operator.sh` |
+| D19 | **The render needs no `kustomize`/`khelm`/`.kustomize/` and no `KUSTOMIZE_PLUGIN_HOME`.** `lo build`, the addon render and the registry TLS mint run in-process ([In-process rendering](#in-process-rendering)); the bash tree execs the pinned binary and the built plugins. Output bytes are identical; the *failure* modes differ where a plugin binary is missing: bash's `lo up` stops on `the Secret plugin is not built at …`, the binary mints in-process and proceeds. `LO_RENDER=exec` reproduces the bash behaviour (the orchestrate harness pins it). | `internal/render`, `internal/driver/lo/registries.go`, `hack/parity-orchestrate.sh` |
 
 ### Reproduced on purpose (so nobody "fixes" them in one implementation only)
 
@@ -360,7 +443,10 @@ Every tag publishes, via goreleaser (`.goreleaser.yaml`,
 | `checksums.txt` | SHA-256 of all of the above |
 
 The `kustomize-secret-*` names are a contract other projects' `b.yaml` files
-address; they do not change. `make release-check` validates the goreleaser
+address; they do not change. The same generator source now also ships
+*inside* `lo` (the root module imports `./kustomize`), so the standalone
+asset serves the frozen bash tree and the render CI of projects that still
+run the exec pipeline. `make release-check` validates the goreleaser
 config; `make snapshot` runs the whole pipeline locally without publishing.
 
 ## Legacy: what moved under `.lok8s/legacy/`
