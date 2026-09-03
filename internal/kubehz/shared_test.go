@@ -197,3 +197,46 @@ func TestJoinSubcommandMintsTicket(t *testing.T) {
 	mustErr(t, h.ctx.Join(context.Background(), "acme.example.org", "worker-9"))
 	mustContain(t, h.output(), "No space 'acme' found — run 'lo provision' first")
 }
+
+// The api ships the join recipe with the ticket (kubehz-api #69): it carries
+// the ticket, so it lands in a private file under TMPDIR, never in the
+// project tree, and nothing is executed. Without a script (an older api, or
+// a plane without an endpoint yet) the old guide pointer stays.
+func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
+	h := newHarness(t)
+	tmp := filepath.Join(h.base, "tmp")
+	_ = os.MkdirAll(tmp, 0o755)
+	h.env["TMPDIR"] = tmp
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z","endpoint":"https://kkp1.kubermatic.kkp.example:6443","script":"#!/bin/bash\nset -euo pipefail\nTICKET='a1b2c3.d4e5f6g7h8i9j0k1'\n"}}`)
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	path := filepath.Join(tmp, "kubehz-join-worker-1.sh")
+	mustContain(t, h.output(), path)
+	mustContain(t, h.output(), "https://kkp1.kubermatic.kkp.example:6443")
+	mustContain(t, h.output(), "scp "+path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("script not written: %v", err)
+	}
+	if !strings.Contains(string(raw), "TICKET='a1b2c3.d4e5f6g7h8i9j0k1'") {
+		t.Fatalf("script content: %q", raw)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Fatalf("script mode %v, want 0600 — it carries the ticket", st.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(h.base, "kubehz-join-worker-1.sh")); err == nil {
+		t.Fatal("script written into the project tree")
+	}
+	if len(h.runner.calls) != 0 {
+		t.Fatalf("something was executed: %+v", h.runner.calls)
+	}
+}
+
+func TestSpaceMintJoinWithoutScriptKeepsTheGuidePointer(t *testing.T) {
+	h := newHarness(t)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z"}}`)
+	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1"), h.output())
+	mustContain(t, h.output(), "Spaces → Joining nodes")
+	if strings.Contains(h.output(), "Join script") {
+		t.Fatalf("script block without a script:\n%s", h.output())
+	}
+}

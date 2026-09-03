@@ -7,6 +7,8 @@ package kubehz
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -214,6 +216,8 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	v, _ := parseJSON(res.Body)
 	token := jstr(jalt("", jget(v, "data", "token"), jget(v, "token")))
 	expires := jstr(jalt("", jget(v, "data", "expiresAt"), jget(v, "expiresAt")))
+	script := jstr(jalt("", jget(v, "data", "script"), jget(v, "script")))
+	endpoint := jstr(jalt("", jget(v, "data", "endpoint"), jget(v, "endpoint")))
 	if token == "" {
 		c.errorf("kubehz API did not return a join token for '%s'", nodeName)
 		return ErrHandled
@@ -224,11 +228,50 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	c.echo("")
 	c.echo("  Node '%s' — join ticket (valid until %s, single use):", nodeName, expires)
 	c.echo("    %s", token)
-	c.echo("  On the machine, follow the node-join guide for your platform")
-	c.echo("  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this")
-	c.echo("  node name and expires quickly — mint a fresh one with:")
+	// The api ships the join recipe with the ticket (the script the docs
+	// point at: containerd + kubelet, the cluster CA read from the control
+	// plane and verified against the ticket, bootstrap config, kubelet
+	// restart). It carries the ticket, so it goes to a private file, never
+	// into the project tree — a script next to cluster.lok8s.yaml is one
+	// `git add .` away from a public secret. Nothing runs here: read it,
+	// copy it to the machine, run it as root there.
+	if script != "" {
+		path, err := c.writeJoinScript(nodeName, script)
+		if err != nil {
+			c.errorf("could not write the join script for '%s': %v", nodeName, err)
+			return ErrHandled
+		}
+		c.echo("  Join script (the ticket is inside; expires with it):")
+		c.echo("    %s", path)
+		if endpoint != "" {
+			c.echo("  It bootstraps the kubelet against %s.", endpoint)
+		}
+		c.echo("  Copy it to the machine and run it there as root:")
+		c.echo("    scp %s root@<machine>:/root/ && ssh root@<machine> bash /root/%s", path, filepath.Base(path))
+	} else {
+		c.echo("  On the machine, follow the node-join guide for your platform")
+		c.echo("  (kubehz docs: Spaces → Joining nodes).")
+	}
+	c.echo("  The ticket is bound to this node name and expires quickly — mint a")
+	c.echo("  fresh one with:")
 	c.echo("    lo kubehz join %s", nodeName)
 	return nil
+}
+
+// writeJoinScript stores the api's join recipe under the user's temp dir
+// (TMPDIR, else the OS default), owner-only, named after the node:
+// <tmp>/kubehz-join-<node>.sh. Overwritten on every mint — a fresh ticket
+// supersedes the old one.
+func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
+	dir := c.getenv("TMPDIR")
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	path := filepath.Join(dir, "kubehz-join-"+nodeName+".sh")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // ProvisionShared ports kubehz::provision_shared: the full provision arc for
