@@ -149,6 +149,7 @@ func (c *Context) extractBundle(bundle, dir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
+			// #nosec G115 -- masked to the permission bits before the conversion.
 			if err := os.WriteFile(target, e.data, fs.FileMode(e.hdr.Mode)&0o777|0o600); err != nil {
 				return err
 			}

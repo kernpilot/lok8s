@@ -1,0 +1,33 @@
+# Dependabot: keeps the SHA-pinned actions and the Go module graphs current.
+#
+# Every `uses:` in .github/workflows/ is pinned by commit SHA with the tag in
+# a trailing comment; dependabot bumps the SHA and rewrites the comment, so a
+# review sees both. A tag alone can be moved to arbitrary code — a SHA cannot.
+#
+# Three Go modules ship from this tree: the root module (`lo`), kustomize/
+# (the exec plugins, also linked into `lo-full`) and ai/lochat/. The release
+# builds all three with the ROOT go.mod toolchain (release.yml: setup-go with
+# go-version-file: go.mod), so a stdlib fix reaches the released binaries only
+# when the root `go` directive moves — that bump stays a deliberate change
+# (govulncheck in security.yml tells you when it is due).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: gomod
+    directories:
+      - /
+      - /kustomize
+      - /ai/lochat
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    # Note for the reviewer of a kustomize / khelm / helm bump: those pins
+    # are drift-tested in internal/toolchain/pins.go against go.mod and the
+    # .bin/b.yaml template, so CI goes red until all three move together.

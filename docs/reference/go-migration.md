@@ -429,6 +429,17 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D18 | **Operator hooks: `set -u` abort text.** An unset `BINDING_CONTEXT_PATH` exits 1 in both; the bash message names the script line, the binary prints `error: BINDING_CONTEXT_PATH: unbound variable`. | `internal/operator/operator.go`, `hack/parity-operator.sh` |
 | D19 | **The render needs no `kustomize`/`khelm`/`.kustomize/` and no `KUSTOMIZE_PLUGIN_HOME`.** `lo build`, the addon render and the registry TLS mint run in-process ([In-process rendering](#in-process-rendering)); the bash tree execs the pinned binary and the built plugins. Output bytes are identical; the *failure* modes differ where a plugin binary is missing: bash's `lo up` stops on `the Secret plugin is not built at …`, the binary mints in-process and proceeds. `LO_RENDER=exec` reproduces the bash behaviour (the orchestrate harness pins it). | `internal/render`, `internal/driver/lo/registries.go`, `hack/parity-orchestrate.sh` |
 
+### Credentials on disk and on the terminal
+
+Go-only hardening. The bash tree keeps its behaviour; the harnesses never
+reach these paths (they stop at the local refusals, tokens unset).
+
+| # | Deviation | Where |
+|---|---|---|
+| D20 | **CAPI and KKP kubeconfigs are written 0600.** The bash drivers' `> "${kc}"` redirects left cluster-admin kubeconfigs at the umask default (0644), readable by every local user. The binary writes them owner-only and tightens a file that already exists (`os.Chmod`), as the kind and hosted paths already did. | `internal/driver/capi/capi.go` (`writeKubeconfigFile`), `internal/driver/kkp/api.go` (`getKubeconfig`) |
+| D21 | **`lo kubehz join` (hosting: shared): the join script is private and the ticket is not echoed.** The api-shipped script lands in a fresh `os.MkdirTemp` directory — `<TMPDIR>/kubehz-join-<random>/kubehz-join-<node>.sh`, 0700 over 0600 — so a shared `/tmp` offers no name to pre-plant. The terminal repeats the plaintext ticket only on `--print-token`, or when no script came (the terminal is the only channel then). A write failure after the mint prints the live-ticket note. Server strings go through `scrub` and the ticket must match the bootstrap-token shape (`[a-z0-9]{6}.[a-z0-9]{16}`) or the mint is refused. The bash lib prints the ticket and writes no script. | `internal/kubehz/shared.go` (`spaceMintJoin`, `writeJoinScript`), `internal/cli/cmd_kubehz.go` |
+| D22 | **`lo kubehz claim` reads the nonce from stdin (`--nonce -`) or `KUBEHZ_CLAIM_NONCE`.** The flag form stays for parity and the refusal text is unchanged; the two additions keep the claim ticket out of shell history and `/proc/*/cmdline`. | `internal/kubehz/cluster.go` (`ClaimNonce`), `internal/cli/cmd_kubehz.go` |
+
 ### Reproduced on purpose (so nobody "fixes" them in one implementation only)
 
 These are behaviours the binary mirrors exactly because the bash has them.

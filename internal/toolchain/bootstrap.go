@@ -178,7 +178,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 	}
 	token := ""
 	if os.Getenv("GITHUB_TOKEN") != "" {
-		token = " (GITHUB_TOKEN set — passed through)"
+		token = " (GITHUB_TOKEN set — passed through)" // #nosec G101 -- a status suffix, not the token
 	}
 	if o.DryRun {
 		fmt.Fprintf(out, "  would run      %s install  [PATH_BIN=%s]%s\n", relOrAbs(o.Base, bPath), relOrAbs(o.Base, o.Bin), token)

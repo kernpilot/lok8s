@@ -14,7 +14,7 @@ import (
 // kustomize resolves them under a plugin home:
 // <group>/<version>/<lowercase kind>/<Kind>.
 const (
-	secretPluginRel        = "secrets.lok8s.dev/v1/secret/Secret"
+	secretPluginRel        = "secrets.lok8s.dev/v1/secret/Secret" // #nosec G101 -- a plugin path, not a credential
 	chartRendererPluginRel = "khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
 )
 

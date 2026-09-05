@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'feat/**']
   schedule:
     - cron: '0 6 * * 1'
 
@@ -13,14 +13,102 @@ permissions:
   security-events: write
 
 jobs:
+  govulncheck:
+    name: govulncheck (Go stdlib + modules)
+    runs-on: ubuntu-latest
+    # Runs on every PR and weekly (the schedule above): the vulnerability
+    # database moves without a commit, so a green PR run can turn red a week
+    # later — that is the finding this job exists for. Every module is
+    # scanned with the ROOT go.mod toolchain because that is what the release
+    # builds all three with (release.yml); a stdlib fix reaches the released
+    # `lo` only when the root `go` directive moves.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install govulncheck (pinned)
+        # Pinned, not @latest: the scanner is part of the supply chain too.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+
+      - name: Scan the root module (core + inprocess) and the two side modules
+        run: |
+          set -euo pipefail
+          echo "::group::govulncheck . (core)"
+          govulncheck ./...
+          echo "::endgroup::"
+          echo "::group::govulncheck . (-tags inprocess)"
+          govulncheck -tags inprocess ./...
+          echo "::endgroup::"
+          for dir in kustomize ai/lochat; do
+            echo "::group::govulncheck ${dir}"
+            (cd "${dir}" && govulncheck ./...)
+            echo "::endgroup::"
+          done
+
+  gosec:
+    name: gosec (Go SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # Rules excluded for the whole tree, each with the reason. Everything
+      # else is on; the handful of remaining sites carry a `#nosec Gxxx --
+      # reason` next to the code, so a reviewer sees the argument in place.
+      #
+      #   G104  unhandled errors — golangci-lint's errcheck is the gate; the
+      #         `_ =` discards that remain are deliberate (bash-faithful
+      #         `|| true` paths and best-effort cleanups).
+      #   G122  filepath.Walk TOCTOU — every walk covers the user's own
+      #         project tree or a bundle already filtered at the boundary
+      #         (handover: `..` and symlink entries dropped before extraction).
+      #   G204  subprocess with a variable — lo drives external tools; every
+      #         call is argv through the execx.Runner seam, never a shell.
+      #   G301  G302  G306  directory/file modes — rendered manifests, the
+      #         scaffold and the ejected asset tree are world-readable on
+      #         purpose; credential-bearing files (kubeconfigs, join scripts,
+      #         sops output, PKI) are 0600 and pinned by unit tests.
+      #   G304  G703  file inclusion / path taint — paths come from the
+      #         user's spec and argv by design; the untrusted inputs
+      #         (handover bundle members, node names) are validated first.
+      GOSEC_EXCLUDE: G104,G122,G204,G301,G302,G304,G306,G703
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install gosec (pinned)
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+
+      - name: Scan the root module (core + inprocess) and the two side modules
+        run: |
+          set -euo pipefail
+          echo "::group::gosec . (core)"
+          gosec -exclude="${GOSEC_EXCLUDE}" ./...
+          echo "::endgroup::"
+          echo "::group::gosec . (-tags inprocess)"
+          gosec -tags inprocess -exclude="${GOSEC_EXCLUDE}" ./...
+          echo "::endgroup::"
+          for dir in kustomize ai/lochat; do
+            echo "::group::gosec ${dir}"
+            (cd "${dir}" && gosec -exclude="${GOSEC_EXCLUDE}" ./...)
+            echo "::endgroup::"
+          done
+
   trivy-dockerfile:
     name: Trivy Vulnerability Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run Trivy on Dockerfile
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: operator/Dockerfile
@@ -31,7 +119,7 @@ jobs:
         # Code scanning needs GHAS, unavailable on this private repo — tolerate
         # upload failure until the repo goes public (GOLIVE-TODO 6.1).
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
         with:
           sarif_file: trivy-results.sarif
@@ -41,14 +129,14 @@ jobs:
     name: Trivy Image Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Build operator image for scanning
         run: |
           docker build -t lok8s-operator:scan -f operator/Dockerfile .
 
       - name: Run Trivy on built image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lok8s-operator:scan
           format: sarif
@@ -58,7 +146,7 @@ jobs:
         # Code scanning needs GHAS, unavailable on this private repo — tolerate
         # upload failure until the repo goes public (GOLIVE-TODO 6.1).
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
         with:
           sarif_file: trivy-image-results.sarif
@@ -68,7 +156,7 @@ jobs:
     name: ShellCheck (SARIF)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
@@ -126,7 +214,7 @@ jobs:
         # Code scanning needs GHAS, unavailable on this private repo — tolerate
         # upload failure until the repo goes public (GOLIVE-TODO 6.1).
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
         with:
           sarif_file: shellcheck-results.sarif

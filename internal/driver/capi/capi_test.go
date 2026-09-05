@@ -38,6 +38,11 @@ func TestProvisionHappyPath(t *testing.T) {
 	// ANTI-VACUITY for the guards below: without this, 'fixing' them by
 	// making provision always fail would look like a pass.
 	d, runner, _ := provisionSetup(t)
+	// A stale world-readable kubeconfig from an older lo under the same
+	// name: the rewrite must tighten it (D20), not inherit its mode.
+	if err := os.WriteFile(d.kubeconfigPath("provtest"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.Provision(context.Background(), "test.dev"); err != nil {
 		t.Fatalf("happy path regressed: %v", err)
 	}
@@ -45,9 +50,13 @@ func TestProvisionHappyPath(t *testing.T) {
 	if !runner.anyCall("kubectl apply --kubeconfig " + d.kubeconfigPath("mgmt.dev") + " -f -") {
 		t.Error("no kubectl apply against the management cluster")
 	}
-	// …and the workload kubeconfig was extracted under metadata.name.
+	// …and the workload kubeconfig was extracted under metadata.name,
+	// owner-only: it is cluster-admin.
 	if !fileNonEmpty(d.kubeconfigPath("provtest")) {
 		t.Error("workload kubeconfig missing after a successful provision")
+	}
+	if st, err := os.Stat(d.kubeconfigPath("provtest")); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("workload kubeconfig mode = %v, %v; want 0600", st.Mode().Perm(), err)
 	}
 }
 

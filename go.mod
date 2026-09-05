@@ -1,6 +1,6 @@
 module github.com/kernpilot/lok8s
 
-go 1.26.0
+go 1.26.8
 
 require (
 	filippo.io/age v1.3.1

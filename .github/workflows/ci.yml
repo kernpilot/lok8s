@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # feat/**: long-lived integration branches (the Go migration lives on
+    # feat/go-single-binary) take PRs of their own. Without this entry those
+    # PRs ran no CI at all and "run it locally" was the only gate.
+    branches: [main, 'feat/**']
 
 permissions:
   contents: read
@@ -14,7 +17,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Lint shell (shellcheck + argsh-lint)
         # `argsh lint` = full shellcheck (with .shellcheckrc: SC2250 braces +
@@ -28,10 +31,10 @@ jobs:
     name: YAML Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run yamllint
-        uses: ibiqlik/action-yamllint@v3
+        uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
         with:
           file_or_dir: '.lok8s/ operator/ .github/'
           config_data: |
@@ -49,7 +52,7 @@ jobs:
     name: Bats Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install toolchain (b → argsh, yq)
         env:
@@ -102,9 +105,9 @@ jobs:
     name: Go Build + Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -133,14 +136,14 @@ jobs:
           go test -tags inprocess ./...
 
       - name: Lint (core)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
         with:
           # Pinned (verified on GitHub releases); `latest` moved the gate
           # under us once already. Bump deliberately with .golangci.yml.
           version: v2.13.2
 
       - name: Lint (full)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
         with:
           version: v2.13.2
           args: --build-tags inprocess
@@ -200,11 +203,11 @@ jobs:
     name: goreleaser snapshot
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -243,7 +246,7 @@ jobs:
     name: Bats Operator Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install toolchain (b → argsh, yq)
         env:
@@ -267,7 +270,7 @@ jobs:
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -281,16 +284,34 @@ jobs:
         run: ./.bin/argsh test tests/operator/
 
   e2e-lo-up:
-    name: E2E (lo up --ci)
+    name: E2E (lo up --ci, ${{ matrix.lo_impl }})
     runs-on: ubuntu-latest
     needs: [shellcheck, unit-tests, operator-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Which `lo` orchestrates the run. `go`: bin/lo, the canonical
+        # implementation — this leg is its only real-cluster proof in CI.
+        # `bash`: the same binary with LO_IMPL=bash, which execs the frozen
+        # argsh tree (.lok8s/lo) with argv untouched, so the reference
+        # keeps its own proof and the shim is exercised on the way. Before
+        # the matrix existed the job put .lok8s first on PATH and never
+        # built the binary: it proved the frozen tree only.
+        lo_impl: [go, bash]
     # Bounded outer budget: provision (kind create + cilium bootstrap) runs
     # BEFORE `tilt ci` and is NOT covered by the tilt --timeout below, so a
     # hung provision must be killed by the job. ~18min ceiling; a healthy run
     # is well under that (see LOK8S_TILT_TIMEOUT + the outer `timeout` wrap).
     timeout-minutes: 18
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build lo (the binary under test; LO_IMPL=bash routes through it too)
+        run: make build
 
       - name: Trust the plain-HTTP dev registries (10.125.0.0/16)
         # `lo up` stands up plain-HTTP registry containers on the project
@@ -360,6 +381,9 @@ jobs:
           # so a hung kind-create / cilium-wait fails in minutes, not at the
           # job's 18min ceiling.
           LOK8S_UP_TIMEOUT: 720
+          # Only the value `bash` means anything to the binary (cmd/lo/main.go):
+          # it execs the frozen tree. Anything else runs the Go implementation.
+          LO_IMPL: ${{ matrix.lo_impl }}
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}"
@@ -383,7 +407,16 @@ jobs:
           # Deterministic Tilt port (slot 127 -> 10427), matching the e2e helpers.
           export TILT_PORT=10427
           # Expose lo + the b toolchain to Tilt's local()/docker_build subprocesses.
-          export PATH="${PATH_LOK8S}:${PATH_BIN}:${PATH}"
+          # bin/ FIRST: `lo` must resolve to the Go binary built above, never to
+          # the argsh entrypoint in .lok8s/ (which stays on PATH for the
+          # frozen tree's own helpers and for the LO_IMPL=bash leg's exec).
+          export PATH="${ROOT}/bin:${PATH_LOK8S}:${PATH_BIN}:${PATH}"
+
+          echo "::group::which lo"
+          # Fail loud when PATH does not resolve to the binary under test.
+          test "$(command -v lo)" = "${ROOT}/bin/lo"
+          lo --version
+          echo "::endgroup::"
 
           echo "::group::lo doctor"
           lo doctor || true
@@ -432,7 +465,7 @@ jobs:
     name: lo-up Bundle (byte-exact)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Read .lok8s/legacy/install/argsh.pin
         id: pin
@@ -453,7 +486,7 @@ jobs:
             esac
           done < .lok8s/legacy/install/argsh.pin
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: arg-sh/argsh
           ref: ${{ steps.pin.outputs.ref }}
@@ -496,10 +529,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [shellcheck, unit-tests, operator-tests]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
           cluster_name: lok8s-test
 

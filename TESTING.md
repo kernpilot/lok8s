@@ -23,15 +23,36 @@ lok8s itself.
 | ShellCheck + argsh-lint | every shell file under `.lok8s/` (**including `.lok8s/legacy/`**), `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` | `shellcheck` | `bash hack/lint-shell.sh` (= `npm run lint`) |
 | yamllint | `.lok8s/`, `operator/`, `.github/` | `yamllint` | — (CI action) |
 | `lo-up` bundle | `docs/public/lo-up` is a byte-exact rebuild of `.lok8s/legacy/install/lo-up` at the pinned argsh revision | `loup-bundle` | `ARGSH_SRC=… .lok8s/legacy/install/build && git diff --exit-code docs/public/lo-up` |
-| E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready | `e2e-lo-up` (needs shellcheck, unit, operator green) | see [E2E](#e2e-lo-up-ci) |
+| E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready — once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once with `LO_IMPL=bash` (the binary execs the frozen tree) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`; needs shellcheck, unit, operator green) | see [E2E](#e2e-lo-up-ci) |
 | Integration (Kind) | CRD install, schema rejection, `ClusterInventory` SSA round-trip, every kind served under `cluster.lok8s.dev` | `integration-tests` (push to `main` only) | — (workflow only) |
 | bats e2e scenarios | the scenario dirs under `tests/e2e/` (`no-services`, `single-local-build`, `cache-mode`, `remote-lo`, `remote-ci`), each on its own `10.125.<slot>.0/24` | no (opt-in) | `ARGSH_ENV_E2E=1 ./.bin/argsh test tests/e2e/<scenario>/test.bats` |
 | Go round-trip | ONE real provision → status → down → destroy with the **Go** orchestration against a synthetic kind cluster | **no — manual gate** | `bash hack/e2e-go-roundtrip.sh` |
 
 The CI job set lives in `.github/workflows/ci.yml`: `shellcheck`, `yamllint`,
-`unit-tests`, `go-tests`, `operator-tests`, `e2e-lo-up`, `loup-bundle`,
-`integration-tests`. `hack/e2e-go-roundtrip.sh` is deliberately not wired
+`unit-tests`, `go-tests`, `operator-tests`, `e2e-lo-up` (× 2),
+`loup-bundle`, `integration-tests`. `.github/workflows/security.yml` adds
+`govulncheck` and `gosec` (every PR, and weekly, over all three Go modules
+with the root toolchain — the one the release builds with), plus the trivy
+and ShellCheck-SARIF scans. Both files run on pull requests into `main`
+and into `feat/**`. `hack/e2e-go-roundtrip.sh` is deliberately not wired
 in.
+
+### Which implementation each row proves
+
+Two implementations exist ([AGENTS.md](AGENTS.md)); a green row says
+nothing about the other one unless it names it.
+
+| Row | Go `lo` (`bin/lo`, canonical) | frozen bash tree (`.lok8s/`) |
+|---|---|---|
+| Go unit tests, drift gates, render gate, golangci, govulncheck, gosec | yes | no |
+| Parity harnesses | yes — diffed against | yes — the oracle |
+| bats unit suite | no | yes |
+| bats operator suite | yes (the `operator/hooks/*.sh` shims exec the binary) | yes (the bash bodies) |
+| ShellCheck + argsh-lint, yamllint, `lo-up` bundle | no | yes |
+| E2E `lo up --ci` | yes — the `go` matrix leg | yes — the `bash` leg (`LO_IMPL=bash` through the binary's shim) |
+| Integration (Kind) | neither — `kubectl` against the CRDs only | neither |
+| bats e2e scenarios (opt-in) | no — `tests/e2e/lib/helpers.bash` puts `.lok8s` first on PATH | yes |
+| Go round-trip (manual) | yes | no |
 
 ## Go
 
@@ -190,8 +211,12 @@ a green lint you did not watch install its tools.
 ## E2E (`lo up --ci`)
 
 The CI job (`e2e-lo-up`) runs the `single-local-build` fixture end to end
-on a GitHub runner: trusts the plain-HTTP `10.125.0.0/16` registries in the
-docker daemon, `b install`s the full toolchain, then
+on a GitHub runner, twice (matrix `lo_impl: go, bash`): trusts the
+plain-HTTP `10.125.0.0/16` registries in the docker daemon, `b install`s
+the full toolchain, builds `bin/lo` and puts it FIRST on PATH (the step
+asserts `command -v lo` resolves to it), sets `LO_IMPL` to the matrix
+value (only `bash` means anything to the binary: it execs `.lok8s/lo`),
+then
 
 ```bash
 # from tests/e2e/single-local-build, PATH_BASE = the fixture, PATH_LOK8S/PATH_BIN = the repo

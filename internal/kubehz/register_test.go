@@ -478,6 +478,40 @@ func TestClaimPlacesNonceInOneAnnotateCall(t *testing.T) {
 	}
 }
 
+// ClaimNonce keeps the ticket off argv: `-` reads one line from stdin,
+// an empty flag falls back to KUBEHZ_CLAIM_NONCE, and nothing supplied is
+// reported as "" (the caller prints the argsh missing-flag refusal).
+func TestClaimNonceFlagStdinAndEnv(t *testing.T) {
+	h := newHarness(t)
+	got, err := h.ctx.ClaimNonce("khzn_fromflag_000000000000000000", strings.NewReader("khzn_ignored_stdin_0000000000000\n"))
+	if err != nil || got != "khzn_fromflag_000000000000000000" {
+		t.Fatalf("flag: %q %v", got, err)
+	}
+	got, err = h.ctx.ClaimNonce("-", strings.NewReader("  khzn_fromstdin_00000000000000000  \nsecond line\n"))
+	if err != nil || got != "khzn_fromstdin_00000000000000000" {
+		t.Fatalf("stdin: %q %v", got, err)
+	}
+	got, err = h.ctx.ClaimNonce("-", strings.NewReader("khzn_noNewline_000000000000000000"))
+	if err != nil || got != "khzn_noNewline_000000000000000000" {
+		t.Fatalf("stdin without newline: %q %v", got, err)
+	}
+	h.env[ClaimNonceEnv] = "khzn_fromenv_0000000000000000000"
+	got, err = h.ctx.ClaimNonce("", strings.NewReader("khzn_ignored_stdin_0000000000000\n"))
+	if err != nil || got != "khzn_fromenv_0000000000000000000" {
+		t.Fatalf("env: %q %v", got, err)
+	}
+	delete(h.env, ClaimNonceEnv)
+	got, err = h.ctx.ClaimNonce("", strings.NewReader(""))
+	if err != nil || got != "" {
+		t.Fatalf("nothing supplied: %q %v", got, err)
+	}
+	// `-` with nothing on stdin is an error, and it names the cause.
+	h.reset()
+	_, err = h.ctx.ClaimNonce("-", strings.NewReader("\n"))
+	mustErr(t, err)
+	mustContain(t, h.output(), "no claim nonce on stdin")
+}
+
 func TestClaimMissingConfigMap(t *testing.T) {
 	h := newHarness(t)
 	kubectlStub(h, true, false)

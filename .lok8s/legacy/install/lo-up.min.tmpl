@@ -1,7 +1,14 @@
 #!/bin/sh
 # lo-up — self-contained lok8s installer (argsh runtime bundled).
+#
+# DEPRECATED: this is the legacy installer, kept for projects that already
+# use it. New setups install the `lo` binary with install/lo-install.sh from
+# https://github.com/kernpilot/lok8s (download, checksum-verified, then run
+# — never `curl | sh`). Prefer the same for this file: download it, read it,
+# then run it. It prints this notice on every run.
 #   curl -fsSL https://get.lok8s.io | sh
-# Built from install/lo-up via `install/build` (argsh minify). Do not edit by hand.
+# Built from .lok8s/legacy/install/lo-up via .lok8s/legacy/install/build
+# (argsh minify). Do not edit by hand.
 #
 # POSIX preamble: the bundle below is bash. Re-exec it under bash from a real
 # FILE whenever we're not already running bash-on-a-file — i.e. under a POSIX

@@ -1,6 +1,11 @@
 #!/usr/bin/env argsh
 # shellcheck shell=bash disable=SC2034
-# lo-up — the lok8s installer. Bootstraps or updates a project's lok8s env.
+# lo-up — the LEGACY lok8s installer. Bootstraps or updates a project's lok8s env.
+#
+# DEPRECATED: the Go `lo` binary is the distribution path now; its installer
+# is install/lo-install.sh (download, checksum, then run). lo-up stays
+# published for projects that already use it and prints a notice on every
+# run (see main). Bug fixes only.
 #
 #   curl -fsSL https://get.lok8s.io | sh           # interactive if a TTY is present
 #   curl -fsSL https://get.lok8s.io | sh -s -- -y  # unattended (CI)
@@ -157,6 +162,10 @@ main() {
   local mode; mode="$(loup::detect_mode "${PWD}")"
   _say ""
   _say "  \033[1;36mlo-up\033[0m  \033[2m${mode} · ${PWD}\033[0m"
+  # Deprecation notice, every run: the Go `lo` binary replaced this path.
+  _warn "lo-up is the legacy installer and gets bug fixes only."
+  _warn "New setups: install the lo binary with install/lo-install.sh"
+  _warn "(https://github.com/kernpilot/lok8s — download, verify, then run)."
 
   loup::ensure_b
 
