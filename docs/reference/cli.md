@@ -175,13 +175,15 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
-lo init project [name] [--path <dir>] [--force] [--groups core,local[,cloud]] [--no-toolchain]
+lo init project [name] [--path <dir>] [--force] [--groups core,local[,cloud]] [--no-toolchain] [--env mise|direnv|both|none]
 lo init toolchain [--path <dir>] [--groups core,local[,cloud]] [--dry-run]
 lo init service <name> [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
 ```
 
 **`lo init project [name]`** scaffolds the smallest project the binary needs: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (the project marker `lo` resolves the root from), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and `.bin/b.yaml` from the pinned template (below) — then runs the same steps as `lo init toolchain` unless `--no-toolchain`. It writes **no `.lok8s/` tree**: the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use — see [`lo assets`](#lo-assets). Existing files are kept (`--force` overwrites; `.gitignore` is only appended to; `.bin/b.yaml` is never overwritten). `name` defaults to the directory name.
+
+`--env` also scaffolds the shell environment: `mise` (default) writes a `mise.toml` whose `[env]` puts `.bin` on `PATH` via `mise activate` (and shows how to let mise bootstrap `b` itself); `direnv` writes an `.envrc` with `PATH_add .bin`; `both` writes both; `none` skips them. Neither file pins any `PATH_*` variable on purpose — the binary resolves the project from `lok8s.yaml`, and an ambient `PATH_BASE` redirects runs into whatever project it points at. After `mise trust` / `direnv allow`, `lo` and the b-managed tools are on `PATH`.
 
 **`lo init toolchain`** (Go-only) provisions the project's toolchain with [`b`](https://github.com/fentas/b), in four steps:
 

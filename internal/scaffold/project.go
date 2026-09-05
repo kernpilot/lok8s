@@ -40,6 +40,10 @@ type ProjectToolchain struct {
 	Template func(name string) string
 	// Bootstrap installs b into <dir>/.bin and runs `b install` there.
 	Bootstrap func(dir string) error
+	// Env selects the shell-environment files (see EnvFiles); "" = mise.
+	Env string
+	// BVersion is the b release the bootstrap pins (shown in mise.toml).
+	BVersion string
 }
 
 // bYAML is the fallback b.yaml when no ProjectToolchain.Template is
@@ -59,6 +63,61 @@ func bYAML(name string) string {
 		"  yq: {}\n" +
 		"  kind: {}\n" +
 		"  tilt: {}\n"
+}
+
+// EnvFiles selects the shell-environment files `lo init project` writes:
+// "mise" (mise.toml, the default), "direnv" (.envrc), "both", or "none".
+// The binary needs nothing exported — it resolves the project from
+// lok8s.yaml — so both files only put the b-managed toolchain on PATH
+// and deliberately pin no PATH_* variable: an ambient PATH_BASE once
+// redirected a run (and a test harness) into the wrong project.
+var EnvFiles = []string{"mise", "direnv", "both", "none"}
+
+// miseTOML is the project mise.toml: PATH via mise's env activation, no
+// tool pins (those live in .bin/b.yaml; b can be bootstrapped by mise).
+func miseTOML(name, bVersion string) string {
+	return "# mise.toml — " + name + ": the lok8s project environment (https://mise.jdx.dev).\n" +
+		"#   mise trust    # once per checkout; `mise activate` in your shell puts .bin on PATH\n" +
+		"# `lo` needs nothing exported — it resolves the project from lok8s.yaml — so this\n" +
+		"# only puts the b-managed toolchain on PATH. No PATH_* pins on purpose.\n" +
+		"[env]\n" +
+		"_.path = [\"{{config_root}}/.bin\"]\n" +
+		"# KUBECONFIG = \"{{config_root}}/.kubeconfig/<cluster>.yaml\"   # lo sets it per domain; `lo kubeconfig` prints it\n" +
+		"\n" +
+		"[tools]\n" +
+		"# Tools are pinned in .bin/b.yaml (`b install`). To let mise bootstrap b itself:\n" +
+		"# \"github:fentas/b\" = \"" + bVersion + "\"\n"
+}
+
+// envrc is the project .envrc for direnv: PATH only (see EnvFiles).
+func envrc(name string) string {
+	return "# .envrc — " + name + ": direnv puts the b-managed toolchain on PATH.\n" +
+		"# `lo` needs nothing exported (it resolves the project from lok8s.yaml);\n" +
+		"# no PATH_* pins on purpose — an ambient PATH_BASE redirects runs elsewhere.\n" +
+		"PATH_add .bin\n" +
+		"# export KUBECONFIG=\"${PWD}/.kubeconfig/<cluster>.yaml\"   # lo sets it per domain; `lo kubeconfig` prints it\n"
+}
+
+// writeEnvFiles writes the selected environment files (kept unless force).
+func writeEnvFiles(dir, name, env, bVersion string, force bool, out io.Writer) error {
+	switch env {
+	case "none":
+		return nil
+	case "mise", "direnv", "both":
+	default:
+		return fmt.Errorf("--env must be one of %s, got %q", strings.Join(EnvFiles, "|"), env)
+	}
+	if env == "mise" || env == "both" {
+		if err := writeUnlessPresent(filepath.Join(dir, "mise.toml"), miseTOML(name, bVersion), force, out); err != nil {
+			return err
+		}
+	}
+	if env == "direnv" || env == "both" {
+		if err := writeUnlessPresent(filepath.Join(dir, ".envrc"), envrc(name), force, out); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // gitignoreEntries are appended to .gitignore when absent (each with the
@@ -114,6 +173,13 @@ func Project(base, name, dir string, force bool, out, stderr io.Writer, tc Proje
 	if err := appendGitignore(filepath.Join(dir, ".gitignore"), out); err != nil {
 		return err
 	}
+	env := tc.Env
+	if env == "" {
+		env = "mise"
+	}
+	if err := writeEnvFiles(dir, name, env, tc.BVersion, force, out); err != nil {
+		return err
+	}
 	if tc.Bootstrap != nil {
 		fmt.Fprintln(out, "Toolchain (b → .bin/):")
 		if err := tc.Bootstrap(dir); err != nil {
@@ -125,6 +191,12 @@ func Project(base, name, dir string, force bool, out, stderr io.Writer, tc Proje
 		fmt.Fprintf(out, "  cd %s && lo init toolchain   # b + the pinned toolchain into .bin/ (skipped: --no-toolchain)\n", dir)
 	} else {
 		fmt.Fprintln(out, "  lo doctor               # verify the toolchain landed")
+	}
+	switch env {
+	case "mise", "both":
+		fmt.Fprintln(out, "  mise trust              # then `mise activate` in your shell — .bin lands on PATH")
+	case "direnv":
+		fmt.Fprintln(out, "  direnv allow            # .bin lands on PATH")
 	}
 	fmt.Fprintln(out, "  lo use <domain>         # after adding clusters/<domain>/cluster.lok8s.yaml")
 	fmt.Fprintln(out, "  lo assets eject         # optional: pin the referenced framework assets now")
@@ -187,18 +259,25 @@ func appendGitignore(path string, out io.Writer) error {
 			existing[strings.TrimSpace(line)] = true
 		}
 	}
+	// A comment header is emitted only when a missing entry follows it —
+	// otherwise a re-run keeps appending headers with nothing under them.
 	var add []string
-	for _, e := range gitignoreEntries {
-		if strings.HasPrefix(e, "#") || !existing[e] {
-			add = append(add, e)
-		}
-	}
-	// Only comments left → nothing real to add.
+	var pending string
 	real := 0
-	for _, e := range add {
-		if !strings.HasPrefix(e, "#") {
-			real++
+	for _, e := range gitignoreEntries {
+		if strings.HasPrefix(e, "#") {
+			pending = e
+			continue
 		}
+		if existing[e] {
+			continue
+		}
+		if pending != "" {
+			add = append(add, pending)
+			pending = ""
+		}
+		add = append(add, e)
+		real++
 	}
 	if real == 0 {
 		fmt.Fprintf(out, "Kept %s (entries present)\n", path)

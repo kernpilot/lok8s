@@ -81,7 +81,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 	// Go-only (no twin in .lok8s/libs/init): the eject model's project
 	// scaffold — no .lok8s/ tree, assets are ejected on first use.
-	var projectPath, projectGroups string
+	var projectPath, projectGroups, projectEnv string
 	var noToolchain bool
 	project := &cobra.Command{
 		Use:          "project [name]",
@@ -102,6 +102,8 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			tc := scaffold.ProjectToolchain{
 				Template: func(n string) string { return toolchainTemplate(n, groups) },
+				Env:      projectEnv,
+				BVersion: toolchain.BRelease.Version,
 			}
 			if !noToolchain {
 				tc.Bootstrap = func(dir string) error {
@@ -110,12 +112,21 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					})
 				}
 			}
-			return scaffoldRun(scaffold.Project(paths.Base, name, projectPath, force, out, stderr, tc))
+			// A NEW project is scaffolded where the user stands, never into the
+			// ambient project: with PATH_BASE exported (direnv/mise shells), the
+			// resolved base is whatever project that variable points at — a
+			// smoke run once wrote mise.toml into a live repo this way.
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			return scaffoldRun(scaffold.Project(cwd, name, projectPath, force, out, stderr, tc))
 		},
 	}
 	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the current project root)")
 	project.Flags().StringVar(&projectGroups, "groups", strings.Join(toolchain.DefaultGroups, ","), "Toolchain groups to activate in .bin/b.yaml (core,local,cloud; core is implied)")
 	project.Flags().BoolVar(&noToolchain, "no-toolchain", false, "Write .bin/b.yaml but do not install b / run b install (no network)")
+	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file(s) to scaffold: mise (mise.toml), direnv (.envrc), both, none — PATH only, no PATH_* pins")
 
 	cmd.AddCommand(service, test, project, newInitToolchainCommand(paths))
 	return cmd
