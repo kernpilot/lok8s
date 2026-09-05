@@ -11,17 +11,20 @@
 #
 # What it does, in order:
 #   1. picks the release (--version, LO_VERSION, or the latest published tag),
-#   2. downloads lo-<os>-<arch>.tar.gz AND checksums.txt from that release,
+#   2. downloads lo-<os>-<arch>.tar.gz (or lo-full-<os>-<arch>.tar.gz with
+#      --full) AND checksums.txt from that release,
 #   3. verifies the archive's SHA-256 against checksums.txt — a mismatch aborts
 #      before anything is extracted,
-#   4. extracts `lo` and installs it to ~/.local/bin (or --dir),
+#   4. extracts the binary and installs it as `lo` to ~/.local/bin (or --dir),
 #   5. prints the next steps.
 #
 # `--dry-run` performs step 1 and prints what steps 2–4 WOULD do, then exits.
 #
-# The Go `lo` is the single entrypoint of a lok8s project. Commands that are
-# not ported yet pass through to the framework tree (.lok8s/lo), which each
-# project still carries — see docs/reference/go-migration.md.
+# Two builds exist (see docs/reference/go-migration.md): `lo` (core, the
+# default) renders through the pinned kustomize binary and the exec plugins
+# `lo init toolchain` installs with b; `lo-full` (--full) links the kustomize
+# API and khelm and renders in-process. Both install as `lo`; `lo --version`
+# names the build.
 
 set -euo pipefail
 
@@ -43,16 +46,18 @@ usage() {
   cat <<EOF
 lo-install.sh — install the lok8s \`lo\` binary from a GitHub release
 
-Usage: bash lo-install.sh [--version <tag>] [--dir <path>] [--dry-run]
+Usage: bash lo-install.sh [--version <tag>] [--dir <path>] [--full] [--dry-run]
 
   -v, --version <tag>   Release tag to install (e.g. v0.3.0). Default: latest.
   -d, --dir <path>      Install directory. Default: ${LO_INSTALL_DIR}
+  -F, --full            Install the lo-full build (kustomize + khelm linked in,
+                        in-process render) instead of core. Both land as \`lo\`.
   -n, --dry-run         Resolve the release and print what would be fetched
                         and installed, without downloading or writing anything.
   -h, --help            This text.
 
 Environment: LO_VERSION, LO_INSTALL_DIR, LO_INSTALL_REPO (owner/repo),
-             LO_INSTALL_BASE_URL (forks / mirrors / tests).
+             LO_INSTALL_BASE_URL (forks / mirrors / tests), LO_INSTALL_FULL=1.
 
 Every download is verified against the release's checksums.txt before use.
 EOF
@@ -114,11 +119,12 @@ expected_sum() {
 }
 
 main() {
-  local version="${LO_VERSION}" dir="${LO_INSTALL_DIR}" dry_run=0
+  local version="${LO_VERSION}" dir="${LO_INSTALL_DIR}" dry_run=0 full="${LO_INSTALL_FULL:-0}"
   while (( $# )); do
     case "${1}" in
       -v|--version) [[ -n "${2:-}" ]] || die "--version needs a tag"; version="${2}"; shift 2 ;;
       -d|--dir)     [[ -n "${2:-}" ]] || die "--dir needs a path"; dir="${2}"; shift 2 ;;
+      -F|--full)    full=1; shift ;;
       -n|--dry-run) dry_run=1; shift ;;
       -h|--help)    usage; exit 0 ;;
       *)            usage >&2; die "unknown argument: ${1}" ;;
@@ -140,12 +146,18 @@ main() {
   [[ -n "${version}" ]] || version="$(resolve_latest)"
   [[ "${version}" == v* ]] || version="v${version}"
 
-  local asset="lo-${os}-${arch}.tar.gz"
+  # The archive member is named like the build (goreleaser `binary:`); both
+  # builds install as `lo`.
+  local member="lo" flavor="core"
+  if (( full )); then
+    member="lo-full"; flavor="full"
+  fi
+  local asset="${member}-${os}-${arch}.tar.gz"
   local release_url="${LO_INSTALL_BASE_URL}/releases/download/${version}"
   local dest="${dir}/lo"
 
   say ""
-  say "  \033[1;36mlo-install\033[0m  \033[2m${LO_INSTALL_REPO} ${version} · ${os}/${arch}\033[0m"
+  say "  \033[1;36mlo-install\033[0m  \033[2m${LO_INSTALL_REPO} ${version} · ${os}/${arch} · ${flavor}\033[0m"
   if (( dry_run )); then
     info "would download  ${release_url}/${asset}"
     info "would download  ${release_url}/checksums.txt"
@@ -183,17 +195,17 @@ main() {
     The download is corrupt or tampered with — nothing was installed."
   ok "checksum verified (sha256 ${have:0:12}…)"
 
-  tar -xzf "${tmp}/${asset}" -C "${tmp}" lo \
-    || die "${asset} does not contain a 'lo' binary"
-  [[ -f "${tmp}/lo" ]] || die "${asset} does not contain a 'lo' binary"
+  tar -xzf "${tmp}/${asset}" -C "${tmp}" "${member}" \
+    || die "${asset} does not contain a '${member}' binary"
+  [[ -f "${tmp}/${member}" ]] || die "${asset} does not contain a '${member}' binary"
 
   mkdir -p "${dir}" || die "cannot create ${dir}"
   # Stage next to the destination and rename: an interrupted copy never leaves
   # a half-written `lo` on PATH.
-  if ! { cp "${tmp}/lo" "${stage}" && chmod 0755 "${stage}" && mv -f "${stage}" "${dest}"; }; then
+  if ! { cp "${tmp}/${member}" "${stage}" && chmod 0755 "${stage}" && mv -f "${stage}" "${dest}"; }; then
     die "cannot write ${dest}"
   fi
-  ok "installed ${dest}"
+  ok "installed ${dest} (${flavor})"
 
   local reported
   reported="$("${dest}" --version 2>/dev/null || true)"
@@ -206,11 +218,17 @@ main() {
     *) say "    \033[2mexport PATH=\"${dir}:\${PATH}\"\033[0m   \033[2m# ${dir} is not on your PATH yet\033[0m" ;;
   esac
   say "    \033[2mlo --help\033[0m"
+  say "    \033[2mmkdir my-project && cd my-project && lo init project\033[0m   \033[2m# scaffold + the pinned toolchain via b\033[0m"
   say "    \033[2mcd <your-project> && lo use <domain> && lo up\033[0m"
   say ""
-  say "  A project still carries the framework tree (.lok8s/) — bootstrap a new"
-  say "  one with 'b env add github.com/kernpilot/lok8s#local && b install'."
-  say "  Details: https://lok8s.io/reference/go-migration"
+  if (( full )); then
+    say "  lo-full renders in-process; the toolchain (kubectl, kind, tilt, …) still"
+    say "  comes from 'lo init toolchain'. Details: https://lok8s.io/reference/go-migration"
+  else
+    say "  lo (core) renders through the pinned kustomize + plugins that"
+    say "  'lo init toolchain' installs with b — run it in every project."
+    say "  Prefer everything linked in? Re-run with --full. Details: https://lok8s.io/reference/go-migration"
+  fi
   say ""
 }
 

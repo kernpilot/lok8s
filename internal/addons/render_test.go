@@ -412,6 +412,9 @@ func TestMergeNodesListsReplace(t *testing.T) {
 // addon — no runner is consulted; the in-process kustomize API renders the
 // manifest and the envsubst + env-coercion passes run over its bytes.
 func TestRenderInProcess(t *testing.T) {
+	if !render.InProcessAvailable() {
+		t.Skip("lo core: no in-process renderer (go test -tags inprocess)")
+	}
 	t.Setenv(render.ModeEnv, "")
 	dir := filepath.Join(t.TempDir(), "addon")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

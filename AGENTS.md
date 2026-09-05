@@ -31,12 +31,23 @@ deviations catalogue: [docs/reference/go-migration.md](docs/reference/go-migrati
 
 Three seams still run bash from the frozen tree on purpose: provider plugins
 (`.lok8s/providers/<name>/main`, via `internal/provider/bridge`), `lo drivers
-<name>` for a driver without a Go twin, and `LO_IMPL=bash`. The kustomize
-render is in-process (`internal/render`: the pinned kustomize API plus the
-Secret and khelm generators served by the binary itself — byte-parity proven
-on the committed kubehz.dev domain; `LO_RENDER=exec` restores the
-subprocess pipeline). `yq` and `sops` stay subprocesses until the same proof
-exists for them.
+<name>` for a driver without a Go twin, and `LO_IMPL=bash`.
+
+**Two builds from one tree** (`internal/render`, build tag `inprocess`):
+`lo` — *core*, the default `make build` — renders through the pinned
+`kustomize` binary and the two b-installed exec plugins under `.kustomize/`
+(khelm `ChartRenderer`, the `Secret` plugin), which `lo init toolchain`
+provisions via `b`; `lo-full` (`make build-full`) links the kustomize API and
+khelm and renders in-process, serving both generators itself (byte-parity
+proven on the committed kubehz.dev domain; `LO_RENDER=exec` restores the
+subprocess pipeline there). Core keeps the imported Secret generator for the
+registry TLS mint only. The pins that hold the two together live in
+`internal/toolchain/pins.go` and are drift-tested against `go.mod` and the
+`.bin/b.yaml` template — bump them together. Every gate (build, vet, test,
+lint, all ten parity harnesses) runs against BOTH builds; the in-process
+render tests are tag-gated (`render_inprocess_test.go`) or skip via
+`render.InProcessAvailable()`. `yq` and `sops` stay subprocesses until the
+same proof exists for them.
 
 How to change or port behaviour (mirror the pattern of any `internal/`
 package):
@@ -83,7 +94,8 @@ Rules that came from incidents:
 | providers | `internal/provider/bridge` (runs the bash plugins as `bash -c` children) | `.lok8s/providers/hetzner/` (`main` + `utils/`) — **still the live implementation** |
 | provisioning | `internal/provision` (dispatch, gates, spec), `internal/bootstrap` (the addon DAG), `internal/inventory`, `internal/recover` | `.lok8s/libs/{provision,bootstrap,inventory,recover}` |
 | build / deploy | `internal/build`, `internal/deploy`, `internal/image`, `internal/gitops` | `.lok8s/libs/{build,deploy,image,gitops}` |
-| render | `internal/render` — `kustomize build` in-process (sigs.k8s.io/kustomize/api, pinned to the binary's release), the self-exec plugin home, the plugin dispatch (`Secret` → `kustomize/plugins/secret` imported; `ChartRenderer` → khelm v2.8.0 as a library), `LO_RENDER=exec` | the pinned `kustomize` + `.kustomize/` exec plugins (what `LO_IMPL=bash` and `LO_RENDER=exec` run) |
+| render | `internal/render` — `render.go` (both builds: `LO_RENDER`, the exec pipeline), `core.go` (`!inprocess`: exec only, `DispatchPlugin` a no-op), `inprocess.go` + `dispatch.go` + `pluginhome.go` + `khelm.go` (`inprocess`: `kustomize build` via sigs.k8s.io/kustomize/api, the self-exec plugin home, `Secret` → `kustomize/plugins/secret` imported; `ChartRenderer` → khelm as a library) | the pinned `kustomize` + `.kustomize/` exec plugins (what `LO_IMPL=bash`, lo core and `LO_RENDER=exec` run) |
+| toolchain | `internal/toolchain` — `pins.go` (kustomize API↔CLI, khelm, helm; drift-tested), `template.go` (the consumer `.bin/b.yaml`, never overwritten), `bootstrap.go` (b's pinned release tarball, sha256-verified, then `b install`), `doctor.go`; `internal/cli/cmd_init_toolchain.go` | `.bin/b.yaml` (the contributor profile file) |
 | kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
 | secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
 | scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
@@ -119,10 +131,11 @@ not framework code. Its imports are ESM and stay relative.
 ## Building & testing
 
 ```bash
-make build                                       # bin/lo (stamps internal/assets/lok8s/VERSION)
-go test ./... && go vet ./... && make lint       # Go unit + tree-drift + assets-drift gates, vet, golangci-lint
+make build                                       # bin/lo — core (stamps internal/assets/lok8s/VERSION)
+make build-full                                  # bin/lo-full — -tags inprocess
+make test test-full vet vet-full lint lint-full  # Go unit + tree-/assets-/pin-drift gates, vet, golangci — BOTH builds
 bash hack/sync-legacy-assets.sh                  # after editing internal/assets/lok8s/**: resync the .lok8s twin
-bash hack/parity-test.sh                         # one parity harness (ten exist; see TESTING.md)
+bash hack/parity-test.sh "$PWD/bin/lo"           # one parity harness (ten exist; run each against bin/lo AND bin/lo-full — absolute path)
 ./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …) — the bash side needs it
 ./.bin/argsh test tests/unit/ tests/operator/    # bats suites for the frozen tree
 npm run lint                                     # shellcheck + argsh-lint via hack/lint-shell.sh (covers .lok8s/legacy too)

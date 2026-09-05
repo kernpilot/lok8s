@@ -7,11 +7,14 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/scaffold"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 func init() { registerPorted("init", newInitCommand) }
@@ -78,10 +81,11 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 	// Go-only (no twin in .lok8s/libs/init): the eject model's project
 	// scaffold — no .lok8s/ tree, assets are ejected on first use.
-	var projectPath string
+	var projectPath, projectGroups string
+	var noToolchain bool
 	project := &cobra.Command{
 		Use:          "project [name]",
-		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml) — no .lok8s/",
+		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml) — no .lok8s/ — and install the toolchain",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -91,12 +95,29 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				name = args[0]
 			}
 			force, _ := cmd.Flags().GetBool("force")
-			return scaffoldRun(scaffold.Project(paths.Base, name, projectPath, force, cmd.OutOrStdout(), cmd.ErrOrStderr()))
+			groups, err := toolchain.NormalizeGroups(strings.Split(projectGroups, ","))
+			if err != nil {
+				return err
+			}
+			out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+			tc := scaffold.ProjectToolchain{
+				Template: func(n string) string { return toolchainTemplate(n, groups) },
+			}
+			if !noToolchain {
+				tc.Bootstrap = func(dir string) error {
+					return toolchain.Bootstrap(cmd.Context(), toolchain.BootstrapOptions{
+						Base: dir, Bin: filepath.Join(dir, ".bin"), Out: out, Stderr: stderr,
+					})
+				}
+			}
+			return scaffoldRun(scaffold.Project(paths.Base, name, projectPath, force, out, stderr, tc))
 		},
 	}
 	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the current project root)")
+	project.Flags().StringVar(&projectGroups, "groups", strings.Join(toolchain.DefaultGroups, ","), "Toolchain groups to activate in .bin/b.yaml (core,local,cloud; core is implied)")
+	project.Flags().BoolVar(&noToolchain, "no-toolchain", false, "Write .bin/b.yaml but do not install b / run b install (no network)")
 
-	cmd.AddCommand(service, test, project)
+	cmd.AddCommand(service, test, project, newInitToolchainCommand(paths))
 	return cmd
 }
 

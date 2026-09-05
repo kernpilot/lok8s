@@ -31,7 +31,13 @@ setup() {
   chmod +x "${BATS_TEST_TMPDIR}/pack/lo"
   echo "MIT" > "${BATS_TEST_TMPDIR}/pack/LICENSE"
   tar -czf "${RELEASE}/${ASSET}" -C "${BATS_TEST_TMPDIR}/pack" lo LICENSE
-  ( cd "${RELEASE}" && sha256sum "${ASSET}" > checksums.txt )
+  # The lo-full archive: same layout, the member is named after the build
+  # (goreleaser `binary: lo-full`); the installer renames it to `lo`.
+  FULL_ASSET="lo-full-${OS}-${ARCH}.tar.gz"
+  printf '#!/bin/sh\necho "lo version %s (full fixture)"\n' "${TAG}" > "${BATS_TEST_TMPDIR}/pack/lo-full"
+  chmod +x "${BATS_TEST_TMPDIR}/pack/lo-full"
+  tar -czf "${RELEASE}/${FULL_ASSET}" -C "${BATS_TEST_TMPDIR}/pack" lo-full LICENSE
+  ( cd "${RELEASE}" && sha256sum "${ASSET}" "${FULL_ASSET}" > checksums.txt )
 
   export LO_INSTALL_BASE_URL="file://${BATS_TEST_TMPDIR}/repo"
   export LO_INSTALL_REPO="fixture/lok8s"
@@ -53,6 +59,28 @@ teardown() { teardown_tmpdir; }
   [[ "${output}" == *"checksum verified"* ]]
   run "${DEST}/lo" --version
   [ "${output}" = "lo version ${TAG} (fixture)" ]
+}
+
+@test "--full installs the lo-full build as lo, verified against its own checksum" {
+  run bash "${INSTALLER}" --version "${TAG}" --dir "${DEST}" --full
+  echo "${output}"
+  [ "${status}" -eq 0 ]
+  [ -x "${DEST}/lo" ]
+  [ ! -e "${DEST}/lo-full" ]
+  [[ "${output}" == *"checksum verified"* ]]
+  [[ "${output}" == *"installed ${DEST}/lo (full)"* ]]
+  run "${DEST}/lo" --version
+  [ "${output}" = "lo version ${TAG} (full fixture)" ]
+  # A corrupt lo-full sum must abort the --full install, while the core
+  # archive's sum is untouched — verification is per asset.
+  sed -i "s/^[0-9a-f]\{8\}\(.*${FULL_ASSET}\)$/00000000\1/" "${RELEASE}/checksums.txt"
+  rm -f "${DEST}/lo"
+  run bash "${INSTALLER}" --version "${TAG}" --dir "${DEST}" --full
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"MISMATCH"* ]]
+  [ ! -e "${DEST}/lo" ]
+  run bash "${INSTALLER}" --version "${TAG}" --dir "${DEST}"
+  [ "${status}" -eq 0 ]
 }
 
 @test "a checksum mismatch aborts and installs nothing" {

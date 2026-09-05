@@ -1,3 +1,5 @@
+//go:build inprocess
+
 package render
 
 import (

@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 // projectFile is the project-root lok8s.yaml (also the project marker
@@ -28,8 +30,21 @@ func projectFile(name string) string {
 		"  name: " + name + "\n"
 }
 
-// bYAML is the minimal b-managed toolchain: the lo binary plus the
-// third-party tools every `lo up` execs. See https://github.com/fentas/b.
+// ProjectToolchain is how `lo init project` provisions the toolchain:
+// the .bin/b.yaml template (internal/toolchain.Template with the pins of
+// the running lo; the cli supplies it) and the bootstrap that installs b
+// and runs `b install` (nil = --no-toolchain: the file is written, the
+// network step is skipped and the hint printed instead).
+type ProjectToolchain struct {
+	// Template renders the b.yaml for the project name.
+	Template func(name string) string
+	// Bootstrap installs b into <dir>/.bin and runs `b install` there.
+	Bootstrap func(dir string) error
+}
+
+// bYAML is the fallback b.yaml when no ProjectToolchain.Template is
+// supplied (library callers): the lo binary plus the third-party tools
+// every `lo up` execs. The cli always supplies the pinned template.
 func bYAML(name string) string {
 	return "# " + name + " — managed by b (github.com/fentas/b). Run `b install`.\n" +
 		"# The lo binary plus the third-party tools it execs for a local\n" +
@@ -61,9 +76,12 @@ var gitignoreEntries = []string{
 }
 
 // Project scaffolds a project into dir (default: base): clusters/,
-// lok8s.yaml, .gitignore entries, .bin/b.yaml. Existing files are kept
-// unless force; .gitignore is only ever appended to.
-func Project(base, name, dir string, force bool, out, stderr io.Writer) error {
+// lok8s.yaml, .gitignore entries, .bin/b.yaml, then the toolchain
+// (tc.Bootstrap: b into .bin/ + `b install`) unless tc.Bootstrap is nil.
+// Existing files are kept unless force — except .bin/b.yaml, which is
+// NEVER overwritten (a differing one is diffed against the template);
+// .gitignore is only ever appended to.
+func Project(base, name, dir string, force bool, out, stderr io.Writer, tc ProjectToolchain) error {
 	if dir == "" {
 		dir = base
 	}
@@ -86,20 +104,63 @@ func Project(base, name, dir string, force bool, out, stderr io.Writer) error {
 	if err := writeUnlessPresent(filepath.Join(dir, "lok8s.yaml"), projectFile(name), force, out); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".bin"), 0o755); err != nil {
-		return err
+	content := bYAML(name)
+	if tc.Template != nil {
+		content = tc.Template(name)
 	}
-	if err := writeUnlessPresent(filepath.Join(dir, ".bin", "b.yaml"), bYAML(name), force, out); err != nil {
+	if err := WriteBYAML(filepath.Join(dir, ".bin"), content, false, out); err != nil {
 		return err
 	}
 	if err := appendGitignore(filepath.Join(dir, ".gitignore"), out); err != nil {
 		return err
 	}
+	if tc.Bootstrap != nil {
+		fmt.Fprintln(out, "Toolchain (b → .bin/):")
+		if err := tc.Bootstrap(dir); err != nil {
+			return err
+		}
+	}
 	fmt.Fprintln(out, "Done. Next:")
-	fmt.Fprintf(out, "  cd %s && b install\n", dir)
+	if tc.Bootstrap == nil {
+		fmt.Fprintf(out, "  cd %s && lo init toolchain   # b + the pinned toolchain into .bin/ (skipped: --no-toolchain)\n", dir)
+	} else {
+		fmt.Fprintln(out, "  lo doctor               # verify the toolchain landed")
+	}
 	fmt.Fprintln(out, "  lo use <domain>         # after adding clusters/<domain>/cluster.lok8s.yaml")
 	fmt.Fprintln(out, "  lo assets eject         # optional: pin the referenced framework assets now")
 	return nil
+}
+
+// WriteBYAML places content at <bin>/b.yaml unless it exists — never
+// overwriting (the rule ejected assets follow): an existing, differing
+// file is reported with a unified diff against the template and the
+// instructions; an identical one as kept. dryRun reports without writing.
+func WriteBYAML(bin, content string, dryRun bool, out io.Writer) error {
+	res, err := toolchain.Write(bin, content, dryRun)
+	if err != nil {
+		return err
+	}
+	switch {
+	case res.Written:
+		fmt.Fprintf(out, "Scaffolded %s\n", res.Path)
+	case res.Same:
+		fmt.Fprintf(out, "Kept %s (exists; matches the template)\n", res.Path)
+	case res.Diff != "":
+		fmt.Fprintf(out, "Kept %s (exists; never overwritten). It differs from the template this lo would write:\n", res.Path)
+		for _, line := range strings.Split(strings.TrimRight(res.Diff, "\n"), "\n") {
+			fmt.Fprintf(out, "    %s\n", line)
+		}
+		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo init toolchain`.")
+		fmt.Fprintln(out, "  To keep yours: merge the pins by hand — `lo doctor` reports what differs from the pins.")
+	case dryRun:
+		fmt.Fprintf(out, "would write %s\n", res.Path)
+	}
+	return nil
+}
+
+// EnsureGitignore appends the lok8s .gitignore entries (idempotent).
+func EnsureGitignore(dir string, out io.Writer) error {
+	return appendGitignore(filepath.Join(dir, ".gitignore"), out)
 }
 
 // writeUnlessPresent writes content to path unless it exists (force

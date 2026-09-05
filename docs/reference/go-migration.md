@@ -81,16 +81,51 @@ describes the bash contract that the frozen tree honours; a Go driver
 contract is not published yet.
 :::
 
+### Core and full
+
+The binary ships in **two builds from one tree**, selected by the
+`inprocess` build tag (`internal/render/core.go` vs `inprocess.go`):
+
+| | `lo` — **core** (the default: `make build`, `lo-<os>-<arch>.tar.gz`) | `lo-full` (`make build-full` = `-tags inprocess`, `lo-full-<os>-<arch>.tar.gz`, `lo-install.sh --full`) |
+|---|---|---|
+| The render | **execs** the pinned `kustomize` binary (`.bin` first, then `PATH`) with `KUSTOMIZE_PLUGIN_HOME` defaulted to `<project>/.kustomize`, where the two exec generators live as b-installed binaries: khelm's `ChartRenderer` and the `kustomize-secret` `Secret` plugin | the kustomize API (`krusty`) **in-process**, both generators served by the binary itself through the self-exec plugin home ([below](#in-process-rendering)) |
+| Linked in | all first-party logic, the `secrets.lok8s.dev` generator (imported — the registry TLS mint runs it in-process on both builds; it is ours and small) | the same, plus `sigs.k8s.io/kustomize/api`, khelm v2 and helm v3 |
+| Size (linux/amd64, stripped) | **49.8 MB** | **123.1 MB** |
+| `LO_RENDER` | unset/`exec` = the exec pipeline (the only one); `inprocess` is an **error** naming lo-full (`LO_RENDER=inprocess: this is lo core … install lo-full`) | unset/`inprocess` = in-process; `exec` = the subprocess pipeline for an A/B |
+| Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo init toolchain`](cli.md#lo-init) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
+| `lo --version` | `lo version 0.3.0 (core)` | `lo version 0.3.0 (full)` |
+
+Everything else — every command, the parity harnesses, the tests — is the
+same code. `go.mod` keeps khelm and the kustomize API for both; only the
+tag-gated imports decide what is linked. The pins that keep the two
+byte-identical live in **`internal/toolchain/pins.go`**: `KustomizeAPI`
+(`v0.21.1`, what lo-full links) ↔ `KustomizeCLI` (`v5.8.1`, what core execs
+and the b.yaml template pins — the `kustomizeAPIToCLI` table encodes the
+release pairing), `KhelmVersion` (`2.8.0`: the library and the
+`ChartRenderer` binary) and `HelmVersion` (`3.21.2`). `go test
+./internal/toolchain/` fails when `go.mod`'s kustomize/api, khelm or helm
+version moves without the pins, when the API↔CLI table lacks the pinned
+API, or when the generated `.bin/b.yaml` template stops carrying the pins —
+bumping any one side alone is a red build.
+
+CI runs every gate against both builds (`go build`/`vet`/`test`/golangci
+with and without `-tags inprocess`; all ten parity harnesses against
+`bin/lo` — the exec path, i.e. the same pinned kustomize + plugins the bash
+side runs — and against `bin/lo-full`; the goreleaser snapshot asserts both
+archives). Locally: `make build build-full test test-full vet vet-full lint
+lint-full`.
+
 ### External tools still exec'd
 
 The port swapped shell for Go and, since phase 7, the kustomize renderer
-too (see [In-process rendering](#in-process-rendering) below). The
-following remain subprocesses, resolved through the project's `.bin/` first
-and `PATH` second (`internal/execx.Look`):
+too — on the lo-full build (see [In-process rendering](#in-process-rendering)
+below); lo core keeps kustomize as a subprocess by design. The following
+remain subprocesses, resolved through the project's `.bin/` first and `PATH`
+second (`internal/execx.Look`):
 
 | Tool | Used by | Why not in-process |
 |---|---|---|
-| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **only** `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and `LO_IMPL=bash` | Not needed by the binary any more — kept so the frozen bash tree and the parity harnesses can run, and so a render can be A/B'd against the pinned binary. |
+| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **lo core: every render** (`lo build`, the addon render, the KubeOne addon staging) — the pinned binary and the two b-installed plugins `lo init toolchain` provisions. lo-full: only `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and `LO_IMPL=bash` | Core stays small and exec-only on purpose (the owner decision behind the two builds); lo-full links the same releases. Both are byte-identical — the pins are drift-tested. |
 | `yq` | `lo build` split mode (the YAML stream transforms and per-Secret re-renders), `lo env services` (the deep-merge the Tiltfile consumes) | yq's emitter has opinions (`---` on every non-first document, sequence-dash indentation) that `gopkg.in/yaml.v3` does not reproduce byte-for-byte. Field *extraction* from YAML is native everywhere. |
 | `sops` | `lo build` split-mode Secret twins | The `.enc` files must stay interoperable with the sops CLI. (`lo secrets` itself uses the sops **library** in binary mode; the files it writes are the same format.) |
 | `kubectl`, `kind`, `docker`, `tilt`, `clusterctl`, `kubeone`, `hcloud`, `mkcert`, `envsubst` | drivers, deploy, registries, tilt, trust | These are the tools lok8s orchestrates; calling them as-is keeps "what lok8s runs is what you'd run by hand" true. |
@@ -106,12 +141,16 @@ CRDs as the parity fixture. The kustomize render is the second (below).
 ### In-process rendering
 
 Phase 7 (WP3 + WP4) moved `kustomize build` — and both exec generators every
-lok8s render depends on — into the binary. `lo build`, the bootstrap
-engine's addon render (`internal/addons`), the KubeOne driver's addon
-staging, the legacy `lo k8s` paths and the Lo driver's registry TLS mint no
-longer exec `kustomize`, `khelm` or the `Secret` plugin, and need neither a
-`.kustomize/` directory nor `KUSTOMIZE_PLUGIN_HOME`. The output is
-byte-identical to the exec pipeline's — that was the gate, not a goal.
+lok8s render depends on — into the binary; since the core/full split this
+is the **lo-full** build (`-tags inprocess`). There, `lo build`, the
+bootstrap engine's addon render (`internal/addons`), the KubeOne driver's
+addon staging, the legacy `lo k8s` paths and the Lo driver's registry TLS
+mint no longer exec `kustomize`, `khelm` or the `Secret` plugin, and need
+neither a `.kustomize/` directory nor `KUSTOMIZE_PLUGIN_HOME`. (On lo core
+the registry TLS mint is the one piece that stays in-process — the imported
+generator — while every kustomize render execs the pinned binary.) The
+output is byte-identical to the exec pipeline's — that was the gate, not a
+goal.
 
 **What runs where** (`internal/render`):
 
@@ -175,14 +214,18 @@ signature, key match) against a throwaway CAROOT.
 
 What did **not** move: `yq` (split-mode transforms, `lo env services`) and
 `sops` — WP5. `lo kustomize {build,test,clean,list}` still manages the
-standalone plugin under `.kustomize/` for the frozen tree, and `lo doctor`
-still reports `KUSTOMIZE_PLUGIN_HOME` / the built plugin because
-`LO_IMPL=bash`, the provider plugins and `LO_RENDER=exec` need them (its
-text is unchanged; `hack/parity-configure.sh` diffs it). `kubectl
-kustomize` in `lo kubehz deploy` is kubectl's embedded kustomize, not the
-pinned one, in both implementations. The binary grew from 49 MB to 123 MB
-(helm + client-go + the kustomize API); the root module's `go` directive is
-`1.26.0` because khelm v2.8.0 requires it.
+standalone plugin under `.kustomize/` for the frozen tree (and for a core
+build without `b`), and `lo doctor` still reports `KUSTOMIZE_PLUGIN_HOME` /
+the built plugin because `LO_IMPL=bash`, the provider plugins, lo core and
+`LO_RENDER=exec` need them (that text is unchanged; `hack/parity-configure.sh`
+diffs it — the pinned-toolchain section doctor adds is gated on the
+`lo init toolchain` marker or `--toolchain`, so the diff stays strict).
+`kubectl kustomize` in `lo kubehz deploy` is kubectl's embedded kustomize,
+not the pinned one, in both implementations. The in-process render grew the
+binary from 49 MB to 123 MB (helm + client-go + the kustomize API) — which
+is why it is the `lo-full` build and `lo` core stays at ~50 MB with the
+exec pipeline; the root module's `go` directive is `1.26.0` because khelm
+v2.8.0 requires it.
 
 ## Embedded assets: the eject model
 

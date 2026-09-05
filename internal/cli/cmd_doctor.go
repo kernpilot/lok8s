@@ -29,6 +29,8 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -65,7 +67,8 @@ var doctorToolsPost = []struct {
 }
 
 func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
-	return &cobra.Command{
+	var toolchainFlag bool
+	cmd := &cobra.Command{
 		Use:          "doctor",
 		Aliases:      spec.aliases,
 		Short:        spec.short,
@@ -83,12 +86,18 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			}
 			domainFlag, _ := cmd.Flags().GetString("domain")
 			d := domain.Resolve(domainFlag, paths.Clusters, stderr)
-			return runDoctor(paths, d, cmd.OutOrStdout(), stderr)
+			return runDoctor(paths, d, toolchainFlag, cmd.OutOrStdout(), stderr)
 		},
 	}
+	// Go-only: the pinned-toolchain section (b, kustomize, the khelm and
+	// Secret plugins at the pins). Shown by default only in a project whose
+	// .bin/b.yaml was written by `lo init toolchain` (the marker line); the
+	// flag forces it anywhere.
+	cmd.Flags().BoolVar(&toolchainFlag, "toolchain", false, "Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo init toolchain)")
+	return cmd
 }
 
-func runDoctor(paths *config.Paths, d string, out, stderr io.Writer) error {
+func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io.Writer) error {
 	path := doctorPATH(paths)
 	fail := false
 
@@ -166,6 +175,12 @@ func runDoctor(paths *config.Paths, d string, out, stderr io.Writer) error {
 		doctorWarn(out, "secrets.lok8s.dev plugin not built (run: lo kustomize build)")
 	}
 	doctorAssets(out, paths)
+
+	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
+		if !doctorToolchain(out, paths, pluginHome, path) {
+			fail = true
+		}
+	}
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
@@ -247,6 +262,37 @@ func doctorAssets(w io.Writer, paths *config.Paths) {
 		return
 	}
 	doctorOK(w, line)
+}
+
+// doctorToolchain is the pinned-toolchain section (Go-only): b under .bin,
+// kustomize, the khelm ChartRenderer and the secrets.lok8s.dev Secret
+// plugin at the paths the exec render resolves, each at the pin lo was
+// built against (internal/toolchain). Printed only when .bin/b.yaml
+// carries the `lo init toolchain` marker or --toolchain is given, so a
+// vendored/profile-synced project's doctor output stays byte-identical to
+// the bash implementation (hack/parity-configure.sh diffs it strictly).
+// Returns false when a required tool is missing (lo core execs them;
+// lo-full only warns).
+func doctorToolchain(out io.Writer, paths *config.Paths, pluginHome, path string) bool {
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "--- toolchain (lo %s; pins: kustomize %s, khelm v%s, Secret %s) ---\n",
+		render.Variant(), toolchain.KustomizeCLI, toolchain.KhelmVersion, "v"+strings.TrimPrefix(assets.Version(), "v"))
+	ok := true
+	for _, c := range toolchain.Doctor(toolchain.DoctorOptions{
+		Base: paths.Base, Bin: paths.Bin, PluginHome: pluginHome, PATH: path,
+		LoVersion: assets.Version(), Full: render.InProcessAvailable(),
+	}) {
+		switch c.Status {
+		case toolchain.OK:
+			doctorOK(out, c.Msg)
+		case toolchain.Warn:
+			doctorWarn(out, c.Msg)
+		default:
+			doctorBad(out, c.Msg)
+			ok = false
+		}
+	}
+	return ok
 }
 
 func doctorOK(w io.Writer, msg string)   { fmt.Fprintf(w, "  \033[32m✓\033[0m %s\n", msg) }

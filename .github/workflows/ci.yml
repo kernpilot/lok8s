@@ -108,23 +108,42 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build
-        run: go build ./...
+      # Two builds from one tree (internal/render): `lo` (core, the default
+      # tag set — the render execs the pinned kustomize + plugins) and
+      # `lo-full` (-tags inprocess — kustomize API + khelm linked in). Every
+      # gate below runs against BOTH.
+      - name: Build (core + full)
+        run: |
+          go build ./...
+          go build -tags inprocess ./...
 
-      - name: Vet
-        run: go vet ./...
+      - name: Vet (core + full)
+        run: |
+          go vet ./...
+          go vet -tags inprocess ./...
 
-      - name: Test
+      - name: Test (core + full)
         # Includes the tree-drift gate: the cobra command tree must match the
-        # argsh usage list in .lok8s/lo while both implementations exist.
-        run: go test ./...
+        # argsh usage list in .lok8s/lo while both implementations exist —
+        # and the toolchain pin-drift gate (internal/toolchain: pins.go vs
+        # go.mod vs the generated .bin/b.yaml). The in-process render tests
+        # only run under the tag; core skips them and exercises the exec seam.
+        run: |
+          go test ./...
+          go test -tags inprocess ./...
 
-      - name: Lint
+      - name: Lint (core)
         uses: golangci/golangci-lint-action@v8
         with:
           # Pinned (verified on GitHub releases); `latest` moved the gate
           # under us once already. Bump deliberately with .golangci.yml.
           version: v2.13.2
+
+      - name: Lint (full)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+          args: --build-tags inprocess
 
       - name: Install toolchain (b → argsh, yq; parity needs the bash lo)
         env:
@@ -147,25 +166,35 @@ jobs:
           b install
           ./.bin/argsh builtins install
 
-      - name: Parity (Go lo vs argsh lo)
+      - name: Parity (Go lo vs argsh lo) — core and full
         # Differential run of every ported command against both
-        # implementations — stdout, stderr, and exit codes must match.
+        # implementations — stdout, stderr, and exit codes must match — for
+        # BOTH builds: bin/lo (core: the exec render, the same pinned
+        # kustomize + plugins the bash side runs) and bin/lo-full (the
+        # in-process render). Every harness takes the binary as $1.
         env:
           # Same as the install step: the bash side must load the native
           # builtin from .bin/argsh.so, exactly like a developer shell.
           PATH_BIN: ${{ github.workspace }}/.bin
         run: |
           make build
-          bash hack/parity-test.sh
-          bash hack/parity-build.sh
-          bash hack/parity-configure.sh
-          bash hack/parity-audit.sh
-          bash hack/parity-loop.sh
-          bash hack/parity-leaves.sh
-          bash hack/parity-ops.sh
-          bash hack/parity-kubehz.sh
-          bash hack/parity-operator.sh
-          bash hack/parity-orchestrate.sh
+          make build-full
+          # Absolute paths: every harness cd's into its synthetic project
+          # before invoking the binary, so a relative bin/lo would not resolve.
+          for lo in "${PWD}/bin/lo" "${PWD}/bin/lo-full"; do
+            echo "::group::parity — ${lo} ($("${lo}" --version))"
+            bash hack/parity-test.sh "${lo}"
+            bash hack/parity-build.sh "${lo}"
+            bash hack/parity-configure.sh "${lo}"
+            bash hack/parity-audit.sh "${lo}"
+            bash hack/parity-loop.sh "${lo}"
+            bash hack/parity-leaves.sh "${lo}"
+            bash hack/parity-ops.sh "${lo}"
+            bash hack/parity-kubehz.sh "${lo}"
+            bash hack/parity-operator.sh "${lo}"
+            bash hack/parity-orchestrate.sh "${lo}"
+            echo "::endgroup::"
+          done
 
   release-config:
     name: goreleaser snapshot
@@ -183,13 +212,32 @@ jobs:
       # a module that no longer cross-compiles, or a missing archive file
       # surfaced when it was already blocking a release. A snapshot run
       # exercises the whole .goreleaser.yaml (check + before hooks + all
-      # twelve builds + archives + checksums) without publishing. Same
-      # pinned goreleaser as .github/workflows/release.yml.
+      # sixteen builds — lo, lo-full, kustomize-secret, lochat × 4 platforms
+      # — + archives + checksums) without publishing. Same pinned goreleaser
+      # as .github/workflows/release.yml.
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: v2.18.0
           args: release --snapshot --clean --skip=publish
+
+      - name: Both lo builds are in the snapshot
+        # The installer's asset-name contract: lo-<os>-<arch>.tar.gz (core)
+        # and lo-full-<os>-<arch>.tar.gz (--full), each carrying a binary
+        # named after the build, and both listed in checksums.txt.
+        run: |
+          set -euo pipefail
+          for os in linux darwin; do for arch in amd64 arm64; do
+            for flavor in lo lo-full; do
+              a="dist/${flavor}-${os}-${arch}.tar.gz"
+              test -f "${a}" || { echo "::error::missing ${a}"; exit 1; }
+              tar -tzf "${a}" | grep -qx "${flavor}" || { echo "::error::${a} has no '${flavor}' member"; exit 1; }
+              grep -q " ${flavor}-${os}-${arch}.tar.gz$" dist/checksums.txt || { echo "::error::${flavor}-${os}-${arch}.tar.gz not in checksums.txt"; exit 1; }
+            done
+          done; done
+          # The host-platform snapshot binaries name their build.
+          dist/lo_linux_amd64_v1/lo --version | grep -q '(core)'
+          dist/lo-full_linux_amd64_v1/lo-full --version | grep -q '(full)'
 
   operator-tests:
     name: Bats Operator Tests

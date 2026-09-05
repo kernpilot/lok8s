@@ -1,7 +1,11 @@
 # .goreleaser.yaml — the lok8s release: the `lo` binary plus the assets the
 # previous hand-rolled release.yml already shipped, under the SAME names.
 #
-#   lo-<os>-<arch>.tar.gz          the Go `lo` CLI (install/lo-install.sh, b)
+#   lo-<os>-<arch>.tar.gz          the Go `lo` CLI, CORE build: renders through
+#                                  the pinned kustomize binary + the exec
+#                                  plugins b installs (install/lo-install.sh, b)
+#   lo-full-<os>-<arch>.tar.gz     the `inprocess` build: kustomize API + khelm
+#                                  linked in (lo-install.sh --full)
 #   kustomize-secret-<os>-<arch>   secrets.lok8s.dev/v1/Secret exec plugin
 #                                  — ASSET-NAME CONTRACT: consumed by
 #                                  kubehz-cluster/.bin/b.yaml (asset:
@@ -44,6 +48,24 @@ builds:
       - -s -w -X github.com/kernpilot/lok8s/internal/cli.version={{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  - id: lo-full
+    # The same tree with the `inprocess` build tag: the kustomize API and
+    # khelm linked in, the render in-process (internal/render/inprocess.go).
+    # Install with `lo-install.sh --full`.
+    main: ./cmd/lo
+    binary: lo-full
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    tags:
+      - inprocess
+    ldflags:
+      - -s -w -X github.com/kernpilot/lok8s/internal/cli.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
   - id: kustomize-secret
     # Separate Go module (kustomize/go.mod); goreleaser runs `go build` there.
     dir: kustomize
@@ -79,6 +101,12 @@ archives:
     ids: [lo]
     formats: [tar.gz]
     name_template: "lo-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+  - id: lo-full
+    ids: [lo-full]
+    formats: [tar.gz]
+    name_template: "lo-full-{{ .Os }}-{{ .Arch }}"
     files:
       - LICENSE
   # Raw binaries, no archive: the names are the contract `b` addresses.

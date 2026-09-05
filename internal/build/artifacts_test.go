@@ -268,6 +268,9 @@ func TestCountKindLines(t *testing.T) {
 // anywhere (p.Bin is empty), the domain rendered by the in-process
 // kustomize API, then the envsubst pass and the promote.
 func TestArtifactsInProcessRender(t *testing.T) {
+	if !render.InProcessAvailable() {
+		t.Skip("lo core: no in-process renderer (go test -tags inprocess)")
+	}
 	p := testPaths(t)
 	t.Setenv(render.ModeEnv, "")
 	t.Setenv("KUBECONFIG", filepath.Join(p.Base, "no-such-kubeconfig.yaml"))

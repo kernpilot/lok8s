@@ -234,7 +234,7 @@ func assetsErr(stderr io.Writer, err error) error {
 
 // assetsJSON is the stable --json shape.
 type assetsJSON struct {
-	Lo     string             `json:"lo"`
+	Lo     string              `json:"lo"`
 	Assets []assets.UnitReport `json:"assets"`
 }
 

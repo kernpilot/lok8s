@@ -9,6 +9,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 // ErrHandled marks an error whose message was already printed in the bash
@@ -75,10 +76,13 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 // as passthroughs to the argsh implementation via Shim. The MCP server
 // projects THIS tree (never the Go-only additions) into tools.
 func newUsageTree(paths *config.Paths) *cobra.Command {
+	// `lo --version` names the build too: "lo version 0.3.0 (core)" /
+	// "(full)". `lo version` (the command) stays byte-identical to the bash
+	// implementation (parity-test diffs it).
 	root := &cobra.Command{
 		Use:           "lo",
 		Short:         "lok8s - local dev orchestration",
-		Version:       version,
+		Version:       version + " (" + render.Variant() + ")",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// The eject policy is process-wide (every consumer of an embedded

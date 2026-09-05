@@ -175,12 +175,22 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
-lo init project [name] [--path <dir>] [--force]
+lo init project [name] [--path <dir>] [--force] [--groups core,local[,cloud]] [--no-toolchain]
+lo init toolchain [--path <dir>] [--groups core,local[,cloud]] [--dry-run]
 lo init service <name> [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
 ```
 
-**`lo init project [name]`** scaffolds the smallest project the binary needs: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (the project marker `lo` resolves the root from), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and a minimal `.bin/b.yaml` (the `lo` binary plus the third-party tools it execs). It writes **no `.lok8s/` tree**: the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use — see [`lo assets`](#lo-assets). Existing files are kept (`--force` overwrites; `.gitignore` is only appended to). `name` defaults to the directory name.
+**`lo init project [name]`** scaffolds the smallest project the binary needs: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (the project marker `lo` resolves the root from), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and `.bin/b.yaml` from the pinned template (below) — then runs the same steps as `lo init toolchain` unless `--no-toolchain`. It writes **no `.lok8s/` tree**: the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use — see [`lo assets`](#lo-assets). Existing files are kept (`--force` overwrites; `.gitignore` is only appended to; `.bin/b.yaml` is never overwritten). `name` defaults to the directory name.
+
+**`lo init toolchain`** (Go-only) provisions the project's toolchain with [`b`](https://github.com/fentas/b), in four steps:
+
+1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against — `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin — plus `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (`local`, on by default) and `kubeone`/`hcloud` (`cloud`, opt-in). Entries outside the selected `--groups` are emitted commented out. The pins are drift-tested in `go test` against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. Not in the template: `argsh`, `yq`, `jq`, `envsubst`, `sops`, `ssh-to-age` — the binary links or reimplements them; the header of the generated file shows how to add them for `LO_IMPL=bash`. **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand — `lo doctor` reports what differs).
+2. The `.gitignore` entries (`.bin/*` with `b.yaml`/`b.lock` kept, `.kustomize/`, …).
+3. `b` itself into `.bin/b` when absent — b's own release tarball (`b-<os>-<arch>.tar.gz`, the same asset b's installer and `b install b` resolve), pinned to a release whose SHA-256 sums are recorded in the binary from that release's published `checksums.txt`; downloaded over https to a temp file, verified, and only then extracted. Never `curl | sh`. `GITHUB_TOKEN` is passed through when set (b works token-free for public sources). b publishes no darwin build: on macOS the command stops with the manual-install pointer ([binary.help](https://binary.help)); put `b` on `PATH` or at `.bin/b` and re-run.
+4. `.bin/b install` in the project (`PATH_BIN=.bin`), so every binary lands in `.bin/` and the two plugins under `.kustomize/`.
+
+`--dry-run` prints each step (the diff, the download URL and expected sum, the install command) and touches neither the tree nor the network. Verify the result with `lo doctor`.
 
 **`lo init service <name>`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader.
 
@@ -375,10 +385,12 @@ Scans the domain's specs, secrets hygiene, and rendered targets for posture find
 Diagnose the local environment and toolchain.
 
 ```bash
-lo doctor
+lo doctor [--toolchain]
 ```
 
 Checks required binaries, versions, Docker/kind state, and common misconfigurations, with a fix hint per finding.
+
+The **toolchain section** (Go-only) verifies what [`lo init toolchain`](#lo-init) installed against the pins: `.bin/b` (with its version), `kustomize` (`.bin` first, then `PATH`) at the pinned release, the khelm `ChartRenderer` and the `secrets.lok8s.dev` `Secret` exec plugins at the paths the render resolves under `.kustomize/` (`KUSTOMIZE_PLUGIN_HOME`), each at its pin — the Secret plugin at this `lo`'s own version (`<plugin> --version`; a plugin built before that flag existed reports "version unknown"). A mismatch is a warning; a missing tool is a failure on `lo` (core, which execs them) and a warning on `lo-full` (in-process render; the binaries only serve `LO_RENDER=exec`). The fix is always `lo init toolchain`. The section is printed when `.bin/b.yaml` carries the `lo init toolchain` marker line, or on `--toolchain`; a profile-synced or hand-written `b.yaml` is not checked unless asked, which keeps the default output byte-identical to the bash implementation.
 
 ### lo trust
 

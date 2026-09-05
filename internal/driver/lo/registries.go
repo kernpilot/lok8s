@@ -113,13 +113,17 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 		return nil
 	}
 
-	mode, err := render.CurrentMode()
-	if err != nil {
+	// The mode is validated (an unknown LO_RENDER fails closed here as it
+	// does in the render); which path mints is SecretInProcess: the
+	// imported generator on both builds unless LO_RENDER=exec asks for the
+	// plugin binary explicitly.
+	if _, err := render.CurrentMode(); err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return err
 	}
+	execPlugin := !render.SecretInProcess()
 	var pluginBin string
-	if mode == render.ModeExec {
+	if execPlugin {
 		pluginHome := envOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
 		pluginBin = filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
 		// The Secret plugin mints the cert. It's needed across the lok8s
@@ -222,7 +226,7 @@ cert:
 `, name, ns, hostsJSON.String())
 
 	var out strings.Builder
-	if mode == render.ModeExec {
+	if execPlugin {
 		err = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name:   pluginBin, // absolute path — used as-is by the runner
 			Stdin:  strings.NewReader(manifest),

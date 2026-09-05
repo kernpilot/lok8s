@@ -338,4 +338,3 @@ func containsPathEntry(path, dir string) bool {
 	}
 	return false
 }
-

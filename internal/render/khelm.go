@@ -1,3 +1,5 @@
+//go:build inprocess
+
 package render
 
 import (
@@ -15,19 +17,22 @@ import (
 	"github.com/mgoltzsche/khelm/v2/pkg/config"
 	"github.com/mgoltzsche/khelm/v2/pkg/helm"
 	"sigs.k8s.io/kustomize/kyaml/yaml"
+
+	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 // The khelm pin. github.com/mgoltzsche/khelm/v2 v2.8.0 is the SAME release
-// the repo pins as the ChartRenderer binary (.bin/b.yaml; kubehz-cluster
-// pins v2.8.0 explicitly — "the pair PROVEN to reproduce the committed
-// artifacts byte-for-byte"). Its go.mod requires helm.sh/helm/v3 v3.21.2,
-// which the root go.mod pins as well: the chart inflation is the same
-// helm code the binary was built from. The version strings only feed the
-// "Running khelm …" log line the binary prints (stderr, swallowed by
-// kustomize unless the plugin fails).
+// the toolchain pins as the ChartRenderer binary (internal/toolchain
+// pins.go — drift-tested against go.mod and the generated .bin/b.yaml;
+// kubehz-cluster pins v2.8.0 explicitly — "the pair PROVEN to reproduce
+// the committed artifacts byte-for-byte"). Its go.mod requires
+// helm.sh/helm/v3 v3.21.2, which the root go.mod pins as well: the chart
+// inflation is the same helm code the binary was built from. The version
+// strings only feed the "Running khelm …" log line the binary prints
+// (stderr, swallowed by kustomize unless the plugin fails).
 const (
-	khelmVersion = "2.8.0"
-	helmVersion  = "3.21.2"
+	khelmVersion = toolchain.KhelmVersion
+	helmVersion  = toolchain.HelmVersion
 )
 
 // khelm's environment contract (cmd/khelm/root.go at v2.8.0).

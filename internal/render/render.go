@@ -1,24 +1,33 @@
 // Package render is the single kustomize entry point for the Go binary.
 //
 // Build renders a kustomization directory the way `kustomize build
-// --enable-alpha-plugins [--enable-exec] <dir>` did, but IN-PROCESS: the
-// pinned kustomize API (sigs.k8s.io/kustomize/api — the module behind the
-// kustomize v5.8.1 binary the repo pins in .bin/b.yaml) runs inside `lo`,
-// and the two exec generators every lok8s render depends on —
-// secrets.lok8s.dev/v1/Secret and khelm.mgoltzsche.github.com/v2/
-// ChartRenderer — are served by `lo` ITSELF: a per-process plugin home
-// holds symlinks named like the plugins that point at the running binary,
-// and main dispatches on argv[0] (see dispatch.go). No kustomize binary, no
-// khelm binary, no .kustomize/ directory and no KUSTOMIZE_PLUGIN_HOME are
-// needed by the binary. The frozen bash tree (LO_IMPL=bash) keeps using all
-// of them.
+// --enable-alpha-plugins [--enable-exec] <dir>` does. Two builds of the
+// binary exist, selected by the `inprocess` build tag (see core.go and
+// inprocess.go):
 //
-// Byte parity is the contract: the in-process render must produce the same
-// bytes the exec pipeline produced. The pins that make that true — the
-// kustomize API version, the khelm library version (+ its helm), and the
-// generator package imported from ./kustomize — are listed in
-// docs/reference/go-migration.md. LO_RENDER=exec restores the exec
-// pipeline for an A/B comparison.
+//   - lo (CORE, the default build): the render EXECS the pinned kustomize
+//     binary from the project's toolchain (.bin first, then PATH) with
+//     KUSTOMIZE_PLUGIN_HOME defaulted to <project>/.kustomize, where the
+//     b-managed exec generators live — khelm's ChartRenderer and the
+//     kustomize-secret Secret plugin (`lo init toolchain` installs all
+//     three, pinned). No kustomize API, no khelm, no helm are linked in.
+//     The secrets.lok8s.dev generator itself IS still part of core
+//     (kustomize/plugins/secret, imported) — the registry TLS mint calls
+//     it in-process, it is ours and small.
+//   - lo-full (build tag `inprocess`): the pinned kustomize API
+//     (sigs.k8s.io/kustomize/api — the module behind the kustomize
+//     binary the toolchain pins) runs inside the binary, and both exec
+//     generators are served by the binary ITSELF through a per-process
+//     plugin home of symlinks pointing at the running executable
+//     (DispatchPlugin routes argv[0]). No kustomize, khelm or .kustomize/
+//     is needed. LO_RENDER=exec restores the subprocess pipeline for an
+//     A/B comparison.
+//
+// Byte parity is the contract: both pipelines produce the same bytes. The
+// pins that make that true — the kustomize API version and the kustomize
+// CLI release it corresponds to, the khelm library/binary version (+ its
+// helm) — live in internal/toolchain (pins.go) and are drift-tested
+// against go.mod and the generated .bin/b.yaml template.
 package render
 
 import (
@@ -30,45 +39,89 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-
-	"sigs.k8s.io/kustomize/api/konfig"
-	"sigs.k8s.io/kustomize/api/krusty"
-	"sigs.k8s.io/kustomize/api/types"
-	"sigs.k8s.io/kustomize/kyaml/filesys"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
-// ModeEnv selects the render pipeline: unset/"inprocess" (the default) runs
-// kustomize in-process; "exec" restores the subprocess pipeline (the
-// pinned kustomize binary + the exec plugins under KUSTOMIZE_PLUGIN_HOME)
-// for an A/B comparison. Any other value is rejected (fail closed).
+// ModeEnv selects the render pipeline. lo-full: unset/"inprocess" (the
+// default) runs kustomize in-process, "exec" restores the subprocess
+// pipeline. lo core: unset/"exec" run the subprocess pipeline (the only
+// one it has) and "inprocess" is rejected with a pointer to lo-full. Any
+// other value is rejected (fail closed).
 const ModeEnv = "LO_RENDER"
 
 // Mode is the resolved value of ModeEnv.
 type Mode string
 
 const (
-	// ModeInProcess runs the kustomize API inside lo (default).
+	// ModeInProcess runs the kustomize API inside lo (lo-full's default).
 	ModeInProcess Mode = "inprocess"
-	// ModeExec execs the pinned kustomize binary (escape hatch).
+	// ModeExec execs the pinned kustomize binary (core's only mode;
+	// lo-full's escape hatch).
 	ModeExec Mode = "exec"
 )
 
+// kustomizePluginHomeEnv is kustomize's plugin-home variable
+// (konfig.KustomizePluginHomeEnv), spelled out so core does not link the
+// kustomize API for one string.
+const kustomizePluginHomeEnv = "KUSTOMIZE_PLUGIN_HOME"
+
+// Variant names the build: "core" (exec render) or "full" (in-process).
+func Variant() string { return variantName }
+
+// InProcessAvailable reports whether this build links the in-process
+// renderer (lo-full). Tests use it to skip in-process assertions on core.
+func InProcessAvailable() bool { return inProcessAvailable }
+
 // CurrentMode reads LO_RENDER. An unknown value is an error so a typo can
-// never silently pick a pipeline.
+// never silently pick a pipeline; on core an explicit "inprocess" is an
+// error too, naming the build that has it.
 func CurrentMode() (Mode, error) {
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(ModeEnv))); v {
-	case "", string(ModeInProcess):
-		return ModeInProcess, nil
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(ModeEnv)))
+	switch v {
+	case "":
+		if inProcessAvailable {
+			return ModeInProcess, nil
+		}
+		return ModeExec, nil
 	case string(ModeExec):
 		return ModeExec, nil
+	case string(ModeInProcess):
+		if inProcessAvailable {
+			return ModeInProcess, nil
+		}
+		return "", fmt.Errorf("%s=inprocess: this is lo core (the render execs the pinned kustomize; only \"exec\" or unset is valid) — install lo-full for the in-process renderer", ModeEnv)
 	default:
-		return "", fmt.Errorf("%s: unknown value %q (want \"exec\" or unset)", ModeEnv, v)
+		if inProcessAvailable {
+			return "", fmt.Errorf("%s: unknown value %q (want \"exec\" or unset)", ModeEnv, v)
+		}
+		return "", fmt.Errorf("%s: unknown value %q (want \"exec\" or unset; this is lo core)", ModeEnv, v)
 	}
 }
+
+// SecretInProcess reports whether the imported secrets.lok8s.dev generator
+// runs inside this process for the registry TLS mint: true unless
+// LO_RENDER=exec asks for the subprocess pipeline explicitly. Independent
+// of the build variant — the generator is linked into core as well — so
+// core mints the dev registry cert without the plugin binary, exactly like
+// lo-full, and only the explicit escape hatch reproduces the bash
+// behaviour (exec the built plugin, fail when it is missing).
+func SecretInProcess() bool {
+	return strings.ToLower(strings.TrimSpace(os.Getenv(ModeEnv))) != string(ModeExec)
+}
+
+// LoadRestrictions is `--load-restrictor`: RootOnly (the default, like the
+// CLI) or None. Declared here rather than borrowed from the kustomize API
+// so core does not link it.
+type LoadRestrictions int
+
+const (
+	// LoadRestrictionsRootOnly forbids files outside the kustomization root.
+	LoadRestrictionsRootOnly LoadRestrictions = iota
+	// LoadRestrictionsNone allows them.
+	LoadRestrictionsNone
+)
 
 // Options shapes one render.
 type Options struct {
@@ -88,7 +141,7 @@ type Options struct {
 	EnableExec bool
 	// LoadRestrictions is `--load-restrictor` (default RootOnly, like the
 	// CLI).
-	LoadRestrictions types.LoadRestrictions
+	LoadRestrictions LoadRestrictions
 	// Env is the per-render environment overlay (KEY=VALUE), the entries
 	// the exec pipeline handed to the kustomize child on top of its own
 	// environment: KUBECONFIG, KHELM_TRUST_ANY_REPO, LOK8S_SECRETS_DISABLE,
@@ -119,10 +172,13 @@ func (o *Options) stderr() io.Writer {
 func Build(ctx context.Context, dir string, o Options) ([]byte, error) {
 	mode, err := CurrentMode()
 	if err != nil {
+		// Callers report a failed render generically ("kustomize build
+		// failed for <domain>") and rely on this stream for the cause —
+		// the same way the kustomize child's `Error:` line reaches it — so
+		// a rejected LO_RENDER (an unknown value, or "inprocess" on lo
+		// core) is spelled out here.
+		fmt.Fprintf(o.stderr(), "Error: %v\n", err)
 		return nil, err
-	}
-	if o.LoadRestrictions == types.LoadRestrictionsUnknown {
-		o.LoadRestrictions = types.LoadRestrictionsRootOnly
 	}
 	if mode == ModeExec {
 		return buildExec(ctx, dir, o)
@@ -130,98 +186,11 @@ func Build(ctx context.Context, dir string, o Options) ([]byte, error) {
 	return buildInProcess(ctx, dir, o)
 }
 
-// runMu serializes in-process renders: the plugin children read the
-// process environment, so the per-render overlay (Options.Env) has to be
-// installed in it for the duration of a run.
-var runMu sync.Mutex
-
-// buildInProcess is `kustomize build --enable-alpha-plugins [--enable-exec]
-// [--load-restrictor …] <dir>` via krusty, option for option what the
-// kustomize v5.8.1 build command derives from those flags
-// (commands/build/build.go: HonorKustomizeFlags):
-//
-//   - Reorder: the flag is not passed → ReorderOptionUnspecified (the
-//     kustomization's sortOptions decide, else legacy).
-//   - PluginConfig: EnabledPluginConfig(BploUseStaticallyLinked) —
-//     PluginRestrictionsNone + the builtin helm inflator enabled with the
-//     default `helm` command; FnpLoadingOptions from --enable-exec.
-//   - AddManagedbyLabel: only via KUSTOMIZE_ENABLE_MANAGEDBY_LABEL=on.
-//
-// The output is ResMap.AsYaml(), the exact bytes the CLI writes.
-func buildInProcess(ctx context.Context, dir string, o Options) ([]byte, error) {
-	home, err := selfExecPluginHome()
-	if err != nil {
-		return nil, err
-	}
-	kOpts := krusty.MakeDefaultOptions()
-	kOpts.Reorder = krusty.ReorderOptionUnspecified
-	kOpts.LoadRestrictions = o.LoadRestrictions
-	pc := types.EnabledPluginConfig(types.BploUseStaticallyLinked)
-	pc.FnpLoadingOptions = types.FnPluginLoadingOptions{EnableExec: o.EnableExec}
-	pc.HelmConfig.Command = "helm"
-	pc.HelmConfig.ApiVersions = []string{}
-	kOpts.PluginConfig = pc
-
-	overlay := append(append([]string{}, o.Env...), konfig.KustomizePluginHomeEnv+"="+home)
-
-	var out []byte
-	err = withEnv(overlay, func() error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		// The managed-by label switch is read from the environment the
-		// same way the CLI reads it, after the overlay is in place.
-		kOpts.AddManagedbyLabel = os.Getenv(konfig.EnableManagedbyLabelEnv) == "on"
-		m, err := krusty.MakeKustomizer(kOpts).Run(filesys.MakeFsOnDisk(), dir)
-		if err != nil {
-			return err
-		}
-		out, err = m.AsYaml()
-		return err
-	})
-	if err != nil {
-		// cobra's error line, as the kustomize CLI child printed it.
-		fmt.Fprintf(o.stderr(), "Error: %v\n", err)
-		return nil, err
-	}
-	return out, nil
-}
-
-// withEnv installs overlay (KEY=VALUE) in the process environment, runs
-// fn, and restores every touched key — under runMu.
-func withEnv(overlay []string, fn func() error) error {
-	runMu.Lock()
-	defer runMu.Unlock()
-	type saved struct {
-		value string
-		set   bool
-	}
-	prior := map[string]saved{}
-	for _, kv := range overlay {
-		k, v, _ := strings.Cut(kv, "=")
-		if _, seen := prior[k]; !seen {
-			old, ok := os.LookupEnv(k)
-			prior[k] = saved{old, ok}
-		}
-		os.Setenv(k, v)
-	}
-	defer func() {
-		for k, s := range prior {
-			if s.set {
-				os.Setenv(k, s.value)
-			} else {
-				os.Unsetenv(k)
-			}
-		}
-	}()
-	return fn()
-}
-
-// buildExec is the pre-WP4 pipeline, kept verbatim behind LO_RENDER=exec:
-// the pinned kustomize binary (.bin first, then PATH) with the overlay
-// appended to its environment and, when Paths is known and the caller's
-// environment has no plugin home, KUSTOMIZE_PLUGIN_HOME defaulted to
-// <Base>/.kustomize.
+// buildExec is the subprocess pipeline (core's only one; lo-full's
+// LO_RENDER=exec): the pinned kustomize binary (.bin first, then PATH)
+// with the overlay appended to its environment and, when Paths is known
+// and the caller's environment has no plugin home, KUSTOMIZE_PLUGIN_HOME
+// defaulted to <Base>/.kustomize.
 func buildExec(ctx context.Context, dir string, o Options) ([]byte, error) {
 	runner := o.Runner
 	if runner == nil {
@@ -234,13 +203,13 @@ func buildExec(ctx context.Context, dir string, o Options) ([]byte, error) {
 	if o.EnableExec {
 		args = append(args, "--enable-exec")
 	}
-	if o.LoadRestrictions == types.LoadRestrictionsNone {
-		args = append(args, "--load-restrictor", types.LoadRestrictionsNone.String())
+	if o.LoadRestrictions == LoadRestrictionsNone {
+		args = append(args, "--load-restrictor", "LoadRestrictionsNone")
 	}
 	args = append(args, dir)
 	env := append([]string{}, o.Env...)
-	if o.Paths != nil && os.Getenv(konfig.KustomizePluginHomeEnv) == "" && !hasKey(env, konfig.KustomizePluginHomeEnv) {
-		env = append(env, konfig.KustomizePluginHomeEnv+"="+filepath.Join(o.Paths.Base, ".kustomize"))
+	if o.Paths != nil && os.Getenv(kustomizePluginHomeEnv) == "" && !hasKey(env, kustomizePluginHomeEnv) {
+		env = append(env, kustomizePluginHomeEnv+"="+filepath.Join(o.Paths.Base, ".kustomize"))
 	}
 	var out bytes.Buffer
 	err := runner.Run(ctx, execx.Cmd{
