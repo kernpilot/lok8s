@@ -254,7 +254,7 @@ func Write(bin string, content string, dryRun bool) (WriteResult, error) {
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return res, err
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- .bin/b.yaml is the pin profile, not a secret
 		return res, err
 	}
 	res.Written = true

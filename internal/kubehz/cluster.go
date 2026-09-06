@@ -429,6 +429,9 @@ const ClaimNonceEnv = "KUBEHZ_CLAIM_NONCE"
 func (c *Context) ClaimNonce(flag string, stdin io.Reader) (string, error) {
 	switch flag {
 	case "-":
+		if c.IsTTY != nil && c.IsTTY() {
+			c.echoErr("reading the claim nonce from stdin (one line, then Enter)…")
+		}
 		// Bounded: a nonce is at most 200 bytes; nobody needs more of stdin.
 		line, err := bufio.NewReader(io.LimitReader(stdin, 4096)).ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -442,7 +445,9 @@ func (c *Context) ClaimNonce(flag string, stdin io.Reader) (string, error) {
 		}
 		return nonce, nil
 	case "":
-		return c.getenv(ClaimNonceEnv), nil
+		// Trimmed like stdin: a trailing newline from `export X=$(…)` is
+		// not a reason to refuse the nonce.
+		return strings.TrimSpace(c.getenv(ClaimNonceEnv)), nil
 	}
 	return flag, nil
 }

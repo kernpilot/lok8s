@@ -146,7 +146,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	}
 
 	manifest := filepath.Join(outputDir, "kubeone.yaml")
-	if err := os.WriteFile(manifest, []byte(out+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(manifest, []byte(out+"\n"), 0o644); err != nil { // #nosec G306 -- the kubeone manifest; credentials reach kubeone through the environment
 		return err
 	}
 
@@ -238,7 +238,7 @@ func (d *Driver) injectOIDC(manifest string) error {
 			return err
 		}
 		caFile := filepath.Join(caDir, "oidc-ca.pem")
-		if err := os.WriteFile(caFile, []byte(ca+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(caFile, []byte(ca+"\n"), 0o644); err != nil { // #nosec G306 -- a public CA certificate
 			ui.Errorf(stderr, "OIDC: failed to set caFile")
 			return fmt.Errorf("kubeone: OIDC caFile write failed: %w", err)
 		}

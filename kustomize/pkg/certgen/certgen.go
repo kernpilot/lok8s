@@ -262,7 +262,7 @@ func LoadOrCreateCARoot(randr io.Reader) (cert, key []byte, err error) {
 	if err = os.WriteFile(keyPath, key, 0o400); err != nil {
 		return nil, nil, fmt.Errorf("write CA key: %w", err)
 	}
-	if err = os.WriteFile(certPath, cert, 0o644); err != nil {
+	if err = os.WriteFile(certPath, cert, 0o644); err != nil { // #nosec G306 -- the public CA certificate; the key above is 0400
 		return nil, nil, fmt.Errorf("write CA cert: %w", err)
 	}
 	return cert, key, nil

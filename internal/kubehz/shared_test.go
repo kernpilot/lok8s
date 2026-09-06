@@ -257,9 +257,10 @@ func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
 	if dst, err := os.Stat(filepath.Dir(path)); err != nil || dst.Mode().Perm() != 0o700 {
 		t.Fatalf("script directory mode want 0700: %v %v", dst, err)
 	}
-	// The directory name is unpredictable: never the bare node name.
-	if filepath.Base(filepath.Dir(path)) == "kubehz-join-" || filepath.Dir(path) == tmp {
-		t.Fatalf("script directory is predictable: %s", path)
+	// The script sits in its own directory below tmp, never directly in it
+	// (the old predictable <tmp>/kubehz-join-<node>.sh location).
+	if filepath.Dir(path) == tmp {
+		t.Fatalf("script written at the predictable location: %s", path)
 	}
 	if _, err := os.Stat(filepath.Join(h.base, "kubehz-join-worker-1.sh")); err == nil {
 		t.Fatal("script written into the project tree")

@@ -130,7 +130,7 @@ func ensureGitignore(dir string) error {
 	if raw, err := os.ReadFile(gitignore); err == nil && strings.Contains(string(raw), "!Secret.*.enc") {
 		return nil
 	}
-	if err := os.WriteFile(gitignore, []byte(gitignoreContent), 0o644); err != nil {
+	if err := os.WriteFile(gitignore, []byte(gitignoreContent), 0o644); err != nil { // #nosec G306 -- the store's .gitignore
 		return err
 	}
 	ui.Debug("Created %s", gitignore)

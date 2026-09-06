@@ -156,10 +156,10 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 
 		// Persist cluster ID for later operations (bash: echo > file — one
 		// trailing newline).
-		if err := os.WriteFile(filepath.Join(workDir, "cluster_id"), []byte(clusterID+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(workDir, "cluster_id"), []byte(clusterID+"\n"), 0o644); err != nil { // #nosec G306 -- an identifier, not a credential
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(workDir, "project_id"), []byte(projectID+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(workDir, "project_id"), []byte(projectID+"\n"), 0o644); err != nil { // #nosec G306 -- an identifier, not a credential
 			return err
 		}
 		ui.Debugf(stderr, "KKP cluster ID %s saved to %s/cluster_id", clusterID, workDir)

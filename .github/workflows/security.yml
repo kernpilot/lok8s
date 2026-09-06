@@ -36,19 +36,12 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
 
       - name: Scan the root module (core + inprocess) and the two side modules
-        run: |
-          set -euo pipefail
-          echo "::group::govulncheck . (core)"
-          govulncheck ./...
-          echo "::endgroup::"
-          echo "::group::govulncheck . (-tags inprocess)"
-          govulncheck -tags inprocess ./...
-          echo "::endgroup::"
-          for dir in kustomize ai/lochat; do
-            echo "::group::govulncheck ${dir}"
-            (cd "${dir}" && govulncheck ./...)
-            echo "::endgroup::"
-          done
+        # hack/govulncheck.sh runs all four scans before the verdict and
+        # fails on any reachable finding that is not in
+        # .github/govulncheck-ignore.json (entries carry a reason and a
+        # review_by date; an expired entry fails the job too). Findings with
+        # a fixed version are never allowlisted — bump the module.
+        run: bash hack/govulncheck.sh
 
   gosec:
     name: gosec (Go SAST)
@@ -68,14 +61,22 @@ jobs:
       #         (handover: `..` and symlink entries dropped before extraction).
       #   G204  subprocess with a variable — lo drives external tools; every
       #         call is argv through the execx.Runner seam, never a shell.
-      #   G301  G302  G306  directory/file modes — rendered manifests, the
-      #         scaffold and the ejected asset tree are world-readable on
-      #         purpose; credential-bearing files (kubeconfigs, join scripts,
-      #         sops output, PKI) are 0600 and pinned by unit tests.
+      #   G301  directory modes — project directories are 0755 by design;
+      #         the files inside carry the sensitive modes, and those rules
+      #         (G302, G306) stay ON — see GOSEC_EXCLUDE_RULES.
       #   G304  G703  file inclusion / path taint — paths come from the
       #         user's spec and argv by design; the untrusted inputs
       #         (handover bundle members, node names) are validated first.
-      GOSEC_EXCLUDE: G104,G122,G204,G301,G302,G304,G306,G703
+      GOSEC_EXCLUDE: G104,G122,G204,G301,G304,G703
+      # File-mode rules (G302 chmod, G306 WriteFile) are excluded ONLY for
+      # the packages whose output is world-readable on purpose: rendered
+      # manifests and kind configs (driver/lo), the scaffold, the ejected
+      # asset tree, addons, CRDs, env/tilt/operator state files, the plugin
+      # home, the cli's project-local files. Everywhere credentials live
+      # (kubehz, secrets, driver/{capi,kkp,kubeone}, toolchain, …) the rules
+      # apply and each 0644/0755 site carries a `#nosec G30x -- reason`, so
+      # a new `WriteFile(kubeconfig, …, 0o644)` is a red build.
+      GOSEC_EXCLUDE_RULES: "internal/driver/lo/.*:G302,G306;internal/scaffold/.*:G302,G306;internal/assets/.*:G302,G306;internal/addons/.*:G302,G306;internal/crds/.*:G302,G306;internal/env/.*:G302,G306;internal/tilt/.*:G302,G306;internal/operator/.*:G302,G306;internal/render/.*:G302,G306;internal/cli/.*:G302,G306"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -90,10 +91,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::gosec . (core)"
-          gosec -exclude="${GOSEC_EXCLUDE}" ./...
+          gosec -exclude="${GOSEC_EXCLUDE}" -exclude-rules="${GOSEC_EXCLUDE_RULES}" ./...
           echo "::endgroup::"
           echo "::group::gosec . (-tags inprocess)"
-          gosec -tags inprocess -exclude="${GOSEC_EXCLUDE}" ./...
+          gosec -tags inprocess -exclude="${GOSEC_EXCLUDE}" -exclude-rules="${GOSEC_EXCLUDE_RULES}" ./...
           echo "::endgroup::"
           for dir in kustomize ai/lochat; do
             echo "::group::gosec ${dir}"
@@ -116,8 +117,8 @@ jobs:
           output: trivy-results.sarif
 
       - name: Upload Trivy results to Security tab
-        # Code scanning needs GHAS, unavailable on this private repo — tolerate
-        # upload failure until the repo goes public (GOLIVE-TODO 6.1).
+        # Code scanning uploads need the Security tab enabled for the repo;
+        # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
@@ -143,8 +144,8 @@ jobs:
           output: trivy-image-results.sarif
 
       - name: Upload Trivy image results to Security tab
-        # Code scanning needs GHAS, unavailable on this private repo — tolerate
-        # upload failure until the repo goes public (GOLIVE-TODO 6.1).
+        # Code scanning uploads need the Security tab enabled for the repo;
+        # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
@@ -211,8 +212,8 @@ jobs:
               }' > shellcheck-results.sarif || true
 
       - name: Upload ShellCheck results to Security tab
-        # Code scanning needs GHAS, unavailable on this private repo — tolerate
-        # upload failure until the repo goes public (GOLIVE-TODO 6.1).
+        # Code scanning uploads need the Security tab enabled for the repo;
+        # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()

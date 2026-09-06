@@ -76,7 +76,7 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 			}
 			dir = d
 		}
-		_ = os.Chmod(dir, 0o700)
+		_ = os.Chmod(dir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
 		if err := c.extractBundle(bundle, dir); err != nil {
 			_ = os.RemoveAll(dir)
 			return "", err
@@ -149,7 +149,8 @@ func (c *Context) extractBundle(bundle, dir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
-			// #nosec G115 -- masked to the permission bits before the conversion.
+			// #nosec G115 -- the conversion happens first; only the low 9 bits
+			// survive the &0o777 mask, so a wrapped value cannot widen the mode.
 			if err := os.WriteFile(target, e.data, fs.FileMode(e.hdr.Mode)&0o777|0o600); err != nil {
 				return err
 			}
@@ -189,7 +190,7 @@ func (c *Context) placePKI(bundle, k8sDir string) error {
 		}
 	}
 	for _, f := range []string{"ca.crt", "front-proxy-ca.crt", "sa.pub"} {
-		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o644)
+		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o644) // #nosec G302 -- the PUBLIC halves (certs, sa.pub); the keys stay 0600
 	}
 	for _, f := range []string{"ca.key", "front-proxy-ca.key", "sa.key"} {
 		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o600)
@@ -233,7 +234,7 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 		if err != nil {
 			return "", err
 		}
-		_ = os.Chmod(d, 0o700)
+		_ = os.Chmod(d, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
 		workdir = d
 	}
 	out := filepath.Join(workdir, "kubehz-handover-snapshot.db")
@@ -501,7 +502,7 @@ func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error 
 		"      mountPath: " + enc + "\n" +
 		"      readOnly: true\n" +
 		"      pathType: File\n"
-	return os.WriteFile(out, []byte(content), 0o644)
+	return os.WriteFile(out, []byte(content), 0o644) // #nosec G306 -- a static-pod manifest; the secret it mounts is its own 0600 file
 }
 
 // kubeadmInit ports handover::kubeadm_init.
@@ -599,7 +600,7 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(workdir, 0o700)
+	_ = os.Chmod(workdir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
 	defer func() { _ = os.RemoveAll(workdir) }()
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
@@ -718,7 +719,7 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(workdir, 0o700)
+	_ = os.Chmod(workdir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
 	defer func() { _ = os.RemoveAll(workdir) }()
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)

@@ -204,6 +204,17 @@ func (c *Context) spaceWaitActive(ctx context.Context, cfg *Config, spaceID stri
 	return ErrHandled
 }
 
+// clip bounds a server string headed for one terminal line: a timestamp or
+// an endpoint is a few dozen runes; past 256 the rest is not information.
+func clip(s string) string {
+	const max = 256
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
 // joinTokenRe is the kubeadm bootstrap-token shape the platform mints
 // (`<6 id>.<16 secret>`, lowercase alphanumerics). Anything else is not a
 // ticket this CLI hands to a machine — and, as a server string headed for
@@ -227,13 +238,13 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		c.spaceAPIError("Failed to mint a join ticket for '"+nodeName+"'", res)
 		return ErrHandled
 	}
-	// Every string below comes from the server: scrubbed (or shape-checked)
-	// before it reaches the terminal.
+	// Every string below comes from the server: scrubbed and bounded (or
+	// shape-checked) before it reaches the terminal.
 	v, _ := parseJSON(res.Body)
 	token := jstr(jalt("", jget(v, "data", "token"), jget(v, "token")))
-	expires := scrub(jstr(jalt("", jget(v, "data", "expiresAt"), jget(v, "expiresAt"))))
+	expires := clip(scrub(jstr(jalt("", jget(v, "data", "expiresAt"), jget(v, "expiresAt")))))
 	script := jstr(jalt("", jget(v, "data", "script"), jget(v, "script")))
-	endpoint := scrub(jstr(jalt("", jget(v, "data", "endpoint"), jget(v, "endpoint"))))
+	endpoint := clip(scrub(jstr(jalt("", jget(v, "data", "endpoint"), jget(v, "endpoint")))))
 	if token == "" {
 		c.errorf("kubehz API did not return a join token for '%s'", nodeName)
 		return ErrHandled
