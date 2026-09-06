@@ -5,7 +5,12 @@
 FROM golang:1.26.8-alpine AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
+# The root module replaces github.com/kernpilot/lok8s/kustomize with the
+# local ./kustomize tree, so `go mod download` needs that module's go.mod
+# (and the build its sources: internal/render + driver/lo import it).
+COPY kustomize/go.mod kustomize/go.sum kustomize/
 RUN go mod download
+COPY kustomize/ kustomize/
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY .lok8s/VERSION .lok8s/VERSION

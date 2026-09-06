@@ -76,7 +76,17 @@ jobs:
       # (kubehz, secrets, driver/{capi,kkp,kubeone}, toolchain, …) the rules
       # apply and each 0644/0755 site carries a `#nosec G30x -- reason`, so
       # a new `WriteFile(kubeconfig, …, 0o644)` is a red build.
-      GOSEC_EXCLUDE_RULES: "internal/driver/lo/.*:G302,G306;internal/scaffold/.*:G302,G306;internal/assets/.*:G302,G306;internal/addons/.*:G302,G306;internal/crds/.*:G302,G306;internal/env/.*:G302,G306;internal/tilt/.*:G302,G306;internal/operator/.*:G302,G306;internal/render/.*:G302,G306;internal/cli/.*:G302,G306"
+      GOSEC_EXCLUDE_RULES: >-
+        internal/driver/lo/.*:G302,G306;
+        internal/scaffold/.*:G302,G306;
+        internal/assets/.*:G302,G306;
+        internal/addons/.*:G302,G306;
+        internal/crds/.*:G302,G306;
+        internal/env/.*:G302,G306;
+        internal/tilt/.*:G302,G306;
+        internal/operator/.*:G302,G306;
+        internal/render/.*:G302,G306;
+        internal/cli/.*:G302,G306
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
