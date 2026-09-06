@@ -218,7 +218,7 @@ func ipAdd(ip string, offset int) (string, bool) {
 		}
 		n = n<<8 | uint32(v)
 	}
-	n += uint32(offset)
+	n += uint32(offset) // #nosec G115 -- negative offsets wrap to the intended modular add; masked to four octets below
 	return fmt.Sprintf("%d.%d.%d.%d", n>>24, n>>16&0xff, n>>8&0xff, n&0xff), true
 }
 

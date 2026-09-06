@@ -178,7 +178,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 	}
 	token := ""
 	if os.Getenv("GITHUB_TOKEN") != "" {
-		token = " (GITHUB_TOKEN set — passed through)"
+		token = " (GITHUB_TOKEN set — passed through)" // #nosec G101 -- a status suffix, not the token
 	}
 	if o.DryRun {
 		fmt.Fprintf(out, "  would run      %s install  [PATH_BIN=%s]%s\n", relOrAbs(o.Base, bPath), relOrAbs(o.Base, o.Bin), token)
@@ -296,7 +296,7 @@ func extractB(archive, dst string) error {
 			continue
 		}
 		stage := dst + ".tmp"
-		w, err := os.OpenFile(stage, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		w, err := os.OpenFile(stage, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) // #nosec G302 -- the b binary must be executable
 		if err != nil {
 			return err
 		}
@@ -309,7 +309,7 @@ func extractB(archive, dst string) error {
 			_ = os.Remove(stage)
 			return err
 		}
-		if err := os.Chmod(stage, 0o755); err != nil {
+		if err := os.Chmod(stage, 0o755); err != nil { // #nosec G302 -- the b binary must be executable
 			_ = os.Remove(stage)
 			return err
 		}

@@ -83,6 +83,15 @@ func TestProvisionHappyPath(t *testing.T) {
 	writeSpec(t, d, "test.dev", string(raw))
 	api := &kkpAPI{t: t}
 	runner.handler = api.handler
+	// A stale world-readable kubeconfig under the same name: the write
+	// must tighten it, not keep its mode.
+	stale := filepath.Join(d.deps.Paths.Base, ".kubeconfig", "test-kkp-cluster.yaml")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := d.Provision(context.Background(), "test.dev"); err != nil {
 		t.Fatal(err)
@@ -96,10 +105,14 @@ func TestProvisionHappyPath(t *testing.T) {
 			t.Errorf("%s = %q, %v; want %q", file, got, err, want)
 		}
 	}
-	// Kubeconfig under metadata.name.
+	// Kubeconfig under metadata.name, owner-only (D20) — even when a
+	// world-readable file already sat there (planted above).
 	kc := filepath.Join(d.deps.Paths.Base, ".kubeconfig", "test-kkp-cluster.yaml")
 	if raw, err := os.ReadFile(kc); err != nil || string(raw) != "apiVersion: v1\nkind: Config\n" {
 		t.Errorf("kubeconfig = %q, %v", raw, err)
+	}
+	if st, err := os.Stat(kc); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("kubeconfig mode = %v, %v; want 0600", st.Mode().Perm(), err)
 	}
 	// The worker pool MD payload is exactly the jq golden (pool-1 from the
 	// fixture: 3× cpx31 ubuntu, autoscaler 1..10).

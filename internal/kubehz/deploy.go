@@ -155,7 +155,7 @@ func (c *Context) RenderAgent(workdir, domain, apiURL, owner, access string) err
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(path, []byte(rep.Replace(string(raw))), 0o644)
+		return os.WriteFile(path, []byte(rep.Replace(string(raw))), 0o644) // #nosec G306 -- rendered agent manifests; no secret material
 	})
 	if err != nil {
 		return err
@@ -212,7 +212,7 @@ func copyFS(src fs.FS, root, dst string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, raw, 0o644)
+		return os.WriteFile(target, raw, 0o644) // #nosec G306 -- a copied agent manifest; no secret material
 	})
 }
 

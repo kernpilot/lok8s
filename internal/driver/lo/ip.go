@@ -47,7 +47,7 @@ func ipToInt(ip string) (uint32, bool) {
 		if v > 255 {
 			return 0, false
 		}
-		n = n<<8 + uint32(v)
+		n = n<<8 + uint32(v) // #nosec G115 -- the regex admits digits only; 0..255 checked above
 	}
 	return n, true
 }
@@ -64,6 +64,8 @@ func ipAdd(ip string, offset int) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	// #nosec G115 -- a negative offset wraps to the modular add the bash
+	// arithmetic performs; the result is masked to four octets.
 	return ipFromInt(n + uint32(offset)), true
 }
 

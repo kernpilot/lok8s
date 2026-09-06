@@ -7,6 +7,7 @@ package kresource
 // Reference:
 // https://kubernetes.io/docs/concepts/configuration/secret/#secret-types
 
+// #nosec G101 -- Kubernetes Secret TYPE names, not credentials.
 const (
 	SecretTypeOpaque               = "Opaque"
 	SecretTypeServiceAccountToken  = "kubernetes.io/service-account-token"

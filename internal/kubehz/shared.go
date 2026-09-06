@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -80,10 +81,11 @@ func (c *Context) spaceAPIQuiet(ctx context.Context, cfg *Config, method, path s
 }
 
 // spaceAPIError ports kubehz::space_api_error: the message + help halves of
-// a non-2xx envelope.
+// a non-2xx envelope. Both are server strings: scrubbed before they reach
+// the terminal (node.go does the same for every api string it shows).
 func (c *Context) spaceAPIError(context string, res *httpResult) {
-	msg := apiMessage(res.Body)
-	help := apiHelp(res.Body)
+	msg := scrub(apiMessage(res.Body))
+	help := scrub(apiHelp(res.Body))
 	c.errorf("%s (HTTP %d)%s", context, res.Status, optSuffix(": ", msg))
 	if help != "" {
 		c.echoErr("  %s", help)
@@ -202,10 +204,32 @@ func (c *Context) spaceWaitActive(ctx context.Context, cfg *Config, spaceID stri
 	return ErrHandled
 }
 
+// clip bounds a server string headed for one terminal line: a timestamp or
+// an endpoint is a few dozen runes; past 256 the rest is not information.
+func clip(s string) string {
+	const max = 256
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
+// joinTokenRe is the kubeadm bootstrap-token shape the platform mints
+// (`<6 id>.<16 secret>`, lowercase alphanumerics). Anything else is not a
+// ticket this CLI hands to a machine — and, as a server string headed for
+// the terminal, would be an injection vector.
+var joinTokenRe = regexp.MustCompile(`^[a-z0-9]{6}\.[a-z0-9]{16}$`)
+
 // spaceMintJoin ports kubehz::space_mint_join: mint a single-node join
 // ticket and print the join block. The plaintext token is returned exactly
-// once by the api and never persisted.
-func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeName string) error {
+// once by the api and never persisted beyond the join script. Deviation
+// D21 (Go-only): when the api ships a join script the ticket is NOT echoed
+// to the terminal unless printToken is set — the script carries it, and a
+// terminal (scrollback, CI logs, a shared screen) is a second copy nobody
+// asked for. Without a script the terminal is the only channel, so the
+// ticket is printed as before.
+func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeName string, printToken bool) error {
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/spaces/"+spaceID+"/join-token", compactJSON(jsonPair{"nodeName", nodeName}))
 	if err != nil {
 		return err
@@ -214,13 +238,19 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		c.spaceAPIError("Failed to mint a join ticket for '"+nodeName+"'", res)
 		return ErrHandled
 	}
+	// Every string below comes from the server: scrubbed and bounded (or
+	// shape-checked) before it reaches the terminal.
 	v, _ := parseJSON(res.Body)
 	token := jstr(jalt("", jget(v, "data", "token"), jget(v, "token")))
-	expires := jstr(jalt("", jget(v, "data", "expiresAt"), jget(v, "expiresAt")))
+	expires := clip(scrub(jstr(jalt("", jget(v, "data", "expiresAt"), jget(v, "expiresAt")))))
 	script := jstr(jalt("", jget(v, "data", "script"), jget(v, "script")))
-	endpoint := jstr(jalt("", jget(v, "data", "endpoint"), jget(v, "endpoint")))
+	endpoint := clip(scrub(jstr(jalt("", jget(v, "data", "endpoint"), jget(v, "endpoint")))))
 	if token == "" {
 		c.errorf("kubehz API did not return a join token for '%s'", nodeName)
+		return ErrHandled
+	}
+	if !joinTokenRe.MatchString(token) {
+		c.errorf("kubehz API returned a join ticket for '%s' in a shape this CLI does not recognise; nothing was written", nodeName)
 		return ErrHandled
 	}
 	if expires == "" {
@@ -228,7 +258,11 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	}
 	c.echo("")
 	c.echo("  Node '%s' — join ticket (valid until %s, single use):", nodeName, expires)
-	c.echo("    %s", token)
+	if script == "" || printToken {
+		c.echo("    %s", token)
+	} else {
+		c.echo("    (inside the join script below; --print-token shows it here)")
+	}
 	// The api ships the join recipe with the ticket (the script the docs
 	// point at: containerd + kubelet, the cluster CA read from the control
 	// plane and verified against the ticket, bootstrap config, kubelet
@@ -243,6 +277,13 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		}
 		if err != nil {
 			c.errorf("could not write the join script for '%s': %v", nodeName, err)
+			// The mint already happened server-side; the ticket is live
+			// with no local copy (node.go's mintedSlotNote, for spaces).
+			c.echoErr("")
+			c.echoErr("  The ticket was minted before the write failed. It stays valid until %s,", expires)
+			c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
+			c.echoErr("  (TMPDIR) is writable:")
+			c.echoErr("    lo kubehz join %s", nodeName)
 			return ErrHandled
 		}
 		c.echo("  Join script (the ticket is inside; expires with it):")
@@ -252,7 +293,7 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		}
 		c.echo("  Read it, then copy it to the machine and run it there as root:")
 		c.echo("    scp %s root@<machine>:/root/ && ssh root@<machine> bash /root/%s", path, filepath.Base(path))
-		c.echo("  Delete it once the node has joined.")
+		c.echo("  Delete it (and its directory) once the node has joined.")
 	} else {
 		c.echo("  On the machine, follow the node-join guide for your platform")
 		c.echo("  (kubehz docs: Spaces → Joining nodes).")
@@ -264,13 +305,15 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 }
 
 // writeJoinScript stores the api's join recipe under the user's temp dir
-// (TMPDIR, else the OS default), owner-only, named after the node:
-// <tmp>/kubehz-join-<node>.sh. Overwritten on every mint — a fresh ticket
-// supersedes the old one. The name is predictable and the directory is
-// usually shared, so the stale name is removed and the new file created
-// exclusively: a symlink or a foreign file planted under that name fails
-// the mint instead of receiving the ticket. The node name is part of the
-// path, so it is validated here (the api's DNS-label rule) as well.
+// (TMPDIR, else the OS default) in a FRESH private directory:
+// <tmp>/kubehz-join-<random>/kubehz-join-<node>.sh. The directory comes
+// from os.MkdirTemp (0700, unpredictable name), so there is no name to
+// pre-plant in a shared /tmp: nothing a foreign user creates can collide
+// with it, and the O_EXCL create inside is belt and braces. Every mint
+// makes a new directory — a fresh ticket does not overwrite an old file;
+// the old one expires with its ticket and the user deletes it. The node
+// name is part of the path, so it is validated here (the api's DNS-label
+// rule) as well.
 func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
 	if err := c.assertNodeName(nodeName); err != nil {
 		return "", err
@@ -283,17 +326,23 @@ func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "kubehz-join-"+nodeName+".sh")
-	_ = os.Remove(path)
+	priv, err := os.MkdirTemp(dir, "kubehz-join-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(priv, "kubehz-join-"+nodeName+".sh")
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		_ = os.RemoveAll(priv)
 		return "", err
 	}
 	if _, err := f.WriteString(script); err != nil {
 		_ = f.Close()
+		_ = os.RemoveAll(priv)
 		return "", err
 	}
 	if err := f.Close(); err != nil {
+		_ = os.RemoveAll(priv)
 		return "", err
 	}
 	return path, nil
@@ -326,7 +375,7 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 	c.echo("  Access: sign in with your kubehz account (OIDC) — the control plane")
 	c.echo("  itself is operated by the platform and is not directly accessible.")
 	for _, node := range sp.Nodes {
-		if err := c.spaceMintJoin(ctx, cfg, spaceID, node); err != nil {
+		if err := c.spaceMintJoin(ctx, cfg, spaceID, node, false); err != nil {
 			return err
 		}
 	}

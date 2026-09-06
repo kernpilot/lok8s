@@ -100,6 +100,19 @@ func (d *Driver) kubeconfigPath(name string) string {
 	return filepath.Join(d.deps.Paths.Base, ".kubeconfig", name+".yaml")
 }
 
+// writeKubeconfigFile writes a cluster-admin kubeconfig owner-only. Deviation
+// D20: the bash driver's `… > "${kc}"` redirect left the file at the umask
+// default (0644), readable by every local user; the hosted and kind paths
+// already wrote 0600. WriteFile sets the mode on a NEW file only, so the
+// Chmod tightens one that already exists (the bash-faithful "the redirect
+// truncates on every attempt" call sites rewrite the same path).
+func writeKubeconfigFile(path, content string) error {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
 // readHosting evaluates kubehz::read_config through the hook. nil hook =
 // hosting unknown ("") — the self-hosted branches fire, matching the bash
 // tests' no-op stub.
@@ -299,7 +312,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		})
 		// bash: `clusterctl … > "${kc}"` — the redirect truncates/writes the
 		// file on EVERY attempt, whatever the exit status.
-		if werr := os.WriteFile(kc, []byte(out.String()), 0o644); werr != nil {
+		if werr := writeKubeconfigFile(kc, out.String()); werr != nil {
 			return werr
 		}
 		if err == nil && out.Len() > 0 {
@@ -416,7 +429,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 				Args:   []string{"get", "kubeconfig", "--name", kindCluster},
 				Stdout: &out, Stderr: io.Discard,
 			})
-			_ = os.WriteFile(mgmtKubeconfig, []byte(out.String()), 0o644)
+			_ = writeKubeconfigFile(mgmtKubeconfig, out.String())
 		}
 	}
 
@@ -625,7 +638,7 @@ func (d *Driver) ensureLocalMgmt(ctx context.Context, mgmtDomain, provider strin
 		Args:   []string{"get", "kubeconfig", "--name", kindName},
 		Stdout: &kc,
 	})
-	if err := os.WriteFile(mgmtKubeconfig, []byte(kc.String()), 0o644); err != nil {
+	if err := writeKubeconfigFile(mgmtKubeconfig, kc.String()); err != nil {
 		return err
 	}
 
@@ -714,7 +727,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		Stdout: &bkc,
 	})
 	// The redirect writes the file whatever the exit status (bash).
-	if werr := os.WriteFile(bootstrapKubeconfig, []byte(bkc.String()), 0o644); werr != nil {
+	if werr := writeKubeconfigFile(bootstrapKubeconfig, bkc.String()); werr != nil {
 		return werr
 	}
 	if err != nil {
@@ -779,7 +792,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		},
 		Stdout: &mkc,
 	})
-	if werr := os.WriteFile(mgmtKubeconfig, []byte(mkc.String()), 0o644); werr != nil {
+	if werr := writeKubeconfigFile(mgmtKubeconfig, mkc.String()); werr != nil {
 		return werr
 	}
 	if err != nil {

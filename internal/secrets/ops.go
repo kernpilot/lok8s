@@ -74,7 +74,7 @@ creation_rules:
   - path_regex: 'Secret\..*'
     age: '` + agePubkey + `'
 `
-	if err := os.WriteFile(sopsConfig, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(sopsConfig, []byte(content), 0o644); err != nil { // #nosec G306 -- .sops.yaml holds public age recipients only
 		return err
 	}
 
@@ -178,7 +178,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// format).
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
-	if err := os.WriteFile(sopsConfig, []byte(edited), 0o644); err != nil {
+	if err := os.WriteFile(sopsConfig, []byte(edited), 0o644); err != nil { // #nosec G306 -- .sops.yaml holds public age recipients only
 		return err
 	}
 	if after < 1 {

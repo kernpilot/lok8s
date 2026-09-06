@@ -1,10 +1,22 @@
-# lo-up — the lok8s installer
+# lo-up — the LEGACY lok8s installer
+
+> **Deprecated.** `lo-up` is the installer from before the Go binary. Use
+> [`install/lo-install.sh`](../../../install/lo-install.sh) instead: it
+> downloads a release archive over HTTPS, verifies its checksum and only then
+> installs `lo` — nothing remote is piped into a shell. `lo-up` stays
+> published at https://lok8s.io/lo-up for projects that already use it and
+> prints this notice when it runs; it gets bug fixes only.
+>
+> The `curl … | sh` lines below document what existing users run. New
+> setups must not adopt them (AGENTS.md: never pipe remote content into a
+> shell). If you still need `lo-up`, download it, read it, then run it:
+> `curl -fsSL https://lok8s.io/lo-up -o lo-up && less lo-up && sh lo-up`.
 
 A single, self-contained script (the argsh runtime is bundled) that bootstraps
 or updates a lok8s project's environment. Published at
 **https://lok8s.io/lo-up**, behind the `get.lok8s.io` redirect.
 
-## Use
+## Use (legacy)
 
 ```sh
 curl -fsSL https://get.lok8s.io | sh            # interactive when a TTY is present

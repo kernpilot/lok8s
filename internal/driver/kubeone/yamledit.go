@@ -30,7 +30,7 @@ func loadYAMLDoc(path string) (*yaml.Node, error) {
 
 // saveYAMLDoc writes the mapping node back with 2-space indentation.
 func saveYAMLDoc(path string, root *yaml.Node) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) // #nosec G302 -- rewrites a spec/values YAML in place; no secret material
 	if err != nil {
 		return err
 	}

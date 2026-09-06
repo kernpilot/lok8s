@@ -29,6 +29,8 @@ func Shim(p *config.Paths, argv []string) error {
 	}
 
 	args := append([]string{bash, script}, argv...)
+	// #nosec G702 -- LO_IMPL=bash by design: argv reaches the frozen tree
+	// untouched as exec arguments; no shell parses it.
 	return syscall.Exec(bash, args, shimEnv(p))
 }
 

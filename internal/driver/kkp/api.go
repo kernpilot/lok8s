@@ -219,8 +219,14 @@ func (d *Driver) getKubeconfig(ctx context.Context, projectID, clusterID, output
 	if err := os.MkdirAll(filepath.Dir(outputFile), 0o755); err != nil {
 		return err
 	}
-	// bash: echo "${kubeconfig}" > file — one trailing newline.
-	if err := os.WriteFile(outputFile, []byte(kubeconfig+"\n"), 0o644); err != nil {
+	// bash: echo "${kubeconfig}" > file — one trailing newline. Owner-only
+	// (deviation D20): the bash redirect left the cluster-admin kubeconfig
+	// at the umask default, readable by every local user. WriteFile only
+	// sets the mode on a NEW file, so the Chmod tightens an existing one.
+	if err := os.WriteFile(outputFile, []byte(kubeconfig+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(outputFile, 0o600); err != nil {
 		return err
 	}
 	ui.Debugf(stderr, "KKP kubeconfig written to %s", outputFile)

@@ -6,11 +6,14 @@ package kubehz
 // re-enroll (agent-identity contract R2).
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -159,10 +162,10 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 
 // Join is `lo kubehz join <node>`: mint a node join ticket for the active
 // domain's space (hosting: shared). The ticket is single-node, single-use
-// and short-lived; the plaintext is printed exactly once and kept nowhere
-// but the api-shipped join script under TMPDIR (owner-only, see
-// writeJoinScript) — never in the project tree.
-func (c *Context) Join(ctx context.Context, domain, node string) error {
+// and short-lived; it is kept nowhere but the api-shipped join script under
+// TMPDIR (owner-only, see writeJoinScript) — never in the project tree —
+// and echoed to the terminal only when no script came, or on --print-token.
+func (c *Context) Join(ctx context.Context, domain, node string, printToken bool) error {
 	if domain == "" {
 		c.errorf("No active domain. Use: lo use <domain>")
 		return ErrHandled
@@ -208,7 +211,7 @@ func (c *Context) Join(ctx context.Context, domain, node string) error {
 		c.errorf("space row carries no id — refusing to mint a ticket")
 		return ErrHandled
 	}
-	return c.spaceMintJoin(ctx, cfg, spaceID, node)
+	return c.spaceMintJoin(ctx, cfg, spaceID, node, printToken)
 }
 
 // Assess is `lo kubehz assess`: GET /api/clusters/<id>/assessment with the
@@ -368,7 +371,7 @@ func sortedKeys(m map[string]any) []string {
 
 const (
 	agentNamespace  = "kubehz-system"
-	agentSecret     = "kubehz-agent"
+	agentSecret     = "kubehz-agent" // #nosec G101 -- the Secret's NAME; its content never leaves the cluster
 	agentConfigName = "kubehz-agent-config"
 )
 
@@ -410,6 +413,44 @@ func base64Decode(s string) string {
 }
 
 var claimNonceRe = regexp.MustCompile(`^khzn_[A-Za-z0-9_-]{15,195}$`)
+
+// ClaimNonceEnv is the environment fallback for `lo kubehz claim`. The
+// nonce is a claim ticket: a value on argv sits in shell history and in
+// /proc/*/cmdline for its 15-minute life, where every local user can read
+// it. `--nonce -` (stdin) and this variable keep it off the command line.
+// Go-only (deviation D22): the bash twin takes the flag only.
+const ClaimNonceEnv = "KUBEHZ_CLAIM_NONCE"
+
+// ClaimNonce resolves the nonce Claim gets, in order: the flag value as
+// given; stdin when the flag is "-" (the first line, surrounding whitespace
+// dropped); KUBEHZ_CLAIM_NONCE when the flag is empty. An empty result with
+// a nil error means nothing was supplied — the caller keeps the argsh
+// "missing required flag" refusal so the parity harness sees one message.
+func (c *Context) ClaimNonce(flag string, stdin io.Reader) (string, error) {
+	switch flag {
+	case "-":
+		if c.IsTTY != nil && c.IsTTY() {
+			c.echoErr("reading the claim nonce from stdin (one line, then Enter)…")
+		}
+		// Bounded: a nonce is at most 200 bytes; nobody needs more of stdin.
+		line, err := bufio.NewReader(io.LimitReader(stdin, 4096)).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			c.errorf("could not read the claim nonce from stdin: %v", err)
+			return "", ErrHandled
+		}
+		nonce := strings.TrimSpace(line)
+		if nonce == "" {
+			c.errorf("no claim nonce on stdin (--nonce - reads one line)")
+			return "", ErrHandled
+		}
+		return nonce, nil
+	case "":
+		// Trimmed like stdin: a trailing newline from `export X=$(…)` is
+		// not a reason to refuse the nonce.
+		return strings.TrimSpace(c.getenv(ClaimNonceEnv)), nil
+	}
+	return flag, nil
+}
 
 // Claim is `lo kubehz claim --nonce <value>`: place a dashboard-minted
 // claim-challenge nonce where the heartbeat agent can echo it (mode 3).

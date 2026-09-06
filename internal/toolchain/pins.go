@@ -46,6 +46,6 @@ var kustomizeAPIToCLI = map[string]string{
 // exec generators. The b.yaml template installs the binaries there via
 // `file:` (relative to .bin/, hence the ../).
 const (
-	SecretPluginRel        = "secrets.lok8s.dev/v1/secret/Secret"
+	SecretPluginRel        = "secrets.lok8s.dev/v1/secret/Secret" // #nosec G101 -- a plugin path, not a credential
 	ChartRendererPluginRel = "khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
 )

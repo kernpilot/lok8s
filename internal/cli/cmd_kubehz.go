@@ -130,7 +130,7 @@ func newKubehzDeploy(paths *config.Paths) *cobra.Command {
 }
 
 func newKubehzJoin(paths *config.Paths) *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:          "join <node>",
 		Aliases:      []string{"j"},
 		Short:        "Mint a node join ticket (hosting: shared)",
@@ -138,10 +138,15 @@ func newKubehzJoin(paths *config.Paths) *cobra.Command {
 		Args:         secretsArgs(1, 1, "node"),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			printToken, _ := cmd.Flags().GetBool("print-token")
 			d := ambientMainEnv(cmd, paths)
-			return kubehzRun(kubehzContext(cmd, paths).Join(cmd.Context(), d, args[0]))
+			return kubehzRun(kubehzContext(cmd, paths).Join(cmd.Context(), d, args[0], printToken))
 		},
 	}
+	// Go-only (deviation D21): the ticket travels inside the join script;
+	// the terminal shows it only on request.
+	c.Flags().Bool("print-token", false, "Also print the plaintext ticket when a join script was written")
+	return c
 }
 
 func newKubehzClaimCode(paths *config.Paths) *cobra.Command {
@@ -169,15 +174,23 @@ func newKubehzClaim(paths *config.Paths) *cobra.Command {
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			nonce, _ := cmd.Flags().GetString("nonce")
+			flag, _ := cmd.Flags().GetString("nonce")
+			kc := kubehzContext(cmd, paths)
+			// Flag as given, `-` = stdin, else KUBEHZ_CLAIM_NONCE (D22) — the
+			// refusal below is the bash one, so it stays in front of the
+			// run header ambientMainEnv prints.
+			nonce, err := kc.ClaimNonce(flag, cmd.InOrStdin())
+			if err != nil {
+				return kubehzRun(err)
+			}
 			if nonce == "" {
 				return argshErrorf(cmd.ErrOrStderr(), "missing required flag: nonce")
 			}
 			ambientMainEnv(cmd, paths)
-			return kubehzRun(kubehzContext(cmd, paths).Claim(cmd.Context(), nonce))
+			return kubehzRun(kc.Claim(cmd.Context(), nonce))
 		},
 	}
-	c.Flags().StringP("nonce", "n", "", "Claim-challenge nonce minted in the dashboard (khzn_…)")
+	c.Flags().StringP("nonce", "n", "", "Claim-challenge nonce minted in the dashboard (khzn_…); '-' reads it from stdin, or set KUBEHZ_CLAIM_NONCE")
 	return c
 }
 
