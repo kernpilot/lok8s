@@ -20,13 +20,25 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
+	"github.com/kernpilot/lok8s/kustomize/internal/version"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
 	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 func main() {
+	// `Secret --version` prints the stamped version (ldflags; "dev" for a
+	// plain go build) so `lo doctor` can verify the installed plugin against
+	// the pin in .bin/b.yaml. Only the exact flag is special: kustomize
+	// passes its generator config as argv[1] (a temp file path), never a
+	// flag, and the pre-flag builds that fail this call are reported by
+	// doctor as "version unknown".
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(version.Version)
+		return
+	}
 	if err := secret.Run(os.Args, os.Stdin, os.Stdout, plugin.DefaultEnv); err != nil {
 		plugin.Fail(err)
 	}

@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `lo` CLI is an [argsh](https://github.com/arg-sh/argsh) script located at `.lok8s/lo`.
+The `lo` CLI is a single static Go binary. Every command below runs natively in it; the [argsh](https://github.com/arg-sh/argsh) implementation it was ported from stays in every project at `.lok8s/lo` as a frozen reference and runs the same command line when you set `LO_IMPL=bash` (see [The Go `lo` binary](go-migration.md) for what still calls into that tree, and the catalogue of the few places the two deliberately differ — for example, argument-parse errors exit `1` in the binary where argsh exits `2`, with the same message).
 
 `lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
@@ -17,6 +17,7 @@ The `lo` CLI is an [argsh](https://github.com/arg-sh/argsh) script located at `.
 | `--config` | | Kind config file path |
 | `--domain` | | Domain name override |
 | `--domain-sans` | | Domain SANs override |
+| `--no-eject` | | Never write embedded framework assets into the project; serve them from a temp dir (env form: `LO_ASSETS_EJECT=never`). See [`lo assets`](#lo-assets) |
 
 ## Commands
 
@@ -26,9 +27,10 @@ Start a cluster with Tilt.
 
 ```bash
 lo up [--open-tilt|-o] [--remote|-r]
+lo up --ci [--timeout|-t <duration>]     # headless: build + deploy + wait, real exit status
 ```
 
-If `clusters/<domain>/cluster.lok8s.yaml` exists, uses the provision dispatch system. Otherwise falls back to legacy direct kind/registry calls.
+Needs `clusters/<domain>/cluster.lok8s.yaml` (or a `deploy.lok8s.yaml` with a `clusterRef`): the provision dispatch reads the spec first and stops with `No cluster.lok8s.yaml or deploy.lok8s.yaml found` when neither exists. There is no spec-less fallback.
 
 Steps: provision cluster, apply `spec.bootstrap` addons in order via the framework bootstrap (`.lok8s/libs/bootstrap`), start Tilt.
 
@@ -37,6 +39,8 @@ With `--remote`: provisions a VM via `spec.provider`, then runs kind on the remo
 | Flag | Description |
 |------|-------------|
 | `--open-tilt`, `-o` | Open the Tilt UI in a browser after startup |
+| `--ci` | Headless: after provisioning, run `tilt ci` in the foreground (build + deploy + wait for Ready) instead of a backgrounded `tilt up`. No TTY, no browser. `lo up` exits with `tilt ci`'s status, so a non-zero exit means the stack did not converge |
+| `--timeout`, `-t` | Readiness timeout for `--ci` (e.g. `300s`, `10m`); passed to `tilt ci --timeout` |
 
 ### lo down
 
@@ -174,9 +178,24 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
+lo init project [name] [--path <dir>] [--force] [--groups core,local[,cloud]] [--no-toolchain] [--env mise|direnv|both|none]
+lo init toolchain [--path <dir>] [--groups core,local[,cloud]] [--dry-run]
 lo init service <name> [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
 ```
+
+**`lo init project [name]`** scaffolds the smallest project the binary needs: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (the project marker `lo` resolves the root from), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and `.bin/b.yaml` from the pinned template (below) — then runs the same steps as `lo init toolchain` unless `--no-toolchain`. It writes **no `.lok8s/` tree**: the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use — see [`lo assets`](#lo-assets). Existing files are kept (`--force` overwrites; `.gitignore` is only appended to; `.bin/b.yaml` is never overwritten). `name` defaults to the directory name.
+
+`--env` also scaffolds the shell environment: `mise` (default) writes a `mise.toml` whose `[env]` puts `.bin` on `PATH` via `mise activate` (and shows how to let mise bootstrap `b` itself); `direnv` writes an `.envrc` with `PATH_add .bin`; `both` writes both; `none` skips them. Neither file pins any `PATH_*` variable on purpose — the binary resolves the project from `lok8s.yaml`, and an ambient `PATH_BASE` redirects runs into whatever project it points at. After `mise trust` / `direnv allow`, `lo` and the b-managed tools are on `PATH`.
+
+**`lo init toolchain`** (Go-only) provisions the project's toolchain with [`b`](https://github.com/fentas/b), in four steps:
+
+1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against — `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin — plus `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (`local`, on by default) and `kubeone`/`hcloud` (`cloud`, opt-in). Entries outside the selected `--groups` are emitted commented out. The pins are drift-tested in `go test` against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. Not in the template: `argsh`, `yq`, `jq`, `envsubst`, `sops`, `ssh-to-age` — the binary links or reimplements them; the header of the generated file shows how to add them for `LO_IMPL=bash`. **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand — `lo doctor` reports what differs).
+2. The `.gitignore` entries (`.bin/*` with `b.yaml`/`b.lock` kept, `.kustomize/`, …).
+3. `b` itself into `.bin/b` when absent — b's own release tarball (`b-<os>-<arch>.tar.gz`, the same asset b's installer and `b install b` resolve), pinned to a release whose SHA-256 sums are recorded in the binary from that release's published `checksums.txt`; downloaded over https to a temp file, verified, and only then extracted. Never `curl | sh`. `GITHUB_TOKEN` is passed through when set (b works token-free for public sources). b publishes no darwin build: on macOS the command stops with the manual-install pointer ([binary.help](https://binary.help)); put `b` on `PATH` or at `.bin/b` and re-run.
+4. `.bin/b install` in the project (`PATH_BIN=.bin`), so every binary lands in `.bin/` and the two plugins under `.kustomize/`.
+
+`--dry-run` prints each step (the diff, the download URL and expected sum, the install command) and touches neither the tree nor the network. Verify the result with `lo doctor`.
 
 **`lo init service <name>`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader.
 
@@ -184,7 +203,7 @@ lo init test [--path <dir>] [--force]
 
 | Flag | Description |
 |------|-------------|
-| `--path`, `-p` | Target directory (service dir / `tests/` dir) |
+| `--path`, `-p` | Target directory (project dir / service dir / `tests/` dir) |
 | `--force`, `-f` | Overwrite existing files / non-empty target |
 
 ### lo use
@@ -247,6 +266,10 @@ lo tilt up        # Start Tilt in background
 lo tilt down      # Stop Tilt
 lo tilt status    # Run tilt doctor
 lo tilt restart   # Stop + start
+lo tilt ci [--timeout|-t <duration>]    # Headless build + deploy + wait-ready (tilt ci); exits with its status
+lo tilt preflight [--age|-a <seconds>] [--crds|-c drain|skip|force] [--crd-allow <names>]
+                  # Force-clear stuck-Terminating objects in the manifest read from stdin
+                  # (what the Tiltfile runs before an apply; LOK8S_PREFLIGHT=0 disables it)
 ```
 
 ### lo registry
@@ -301,7 +324,7 @@ for the full workflow.
 
 ```bash
 lo secrets init                                # set up SOPS/age from your SSH key
-lo secrets set --name <n> --namespace <ns> <key> [value]   # write a value (omitted: tty prompt / piped stdin; `-`: stdin, needs argsh with arg-sh/argsh#176)
+lo secrets set --name <n> --namespace <ns> <key> [value]   # write a value (omitted: tty prompt / piped stdin; `-`: read the value from stdin)
 lo secrets set --name <n> <key> --encrypt      # write + SOPS-encrypt this one file (-e/--enc; needs .sops.yaml)
 lo secrets allow                               # approve bash: generators after a change
 lo secrets encrypt                             # write committable Secret.*.enc files
@@ -318,31 +341,31 @@ and `ssh-to-age` (`b install`).
 
 ### lo mcp
 
-Start an MCP (Model Context Protocol) tool server over stdio.
+Serve the `lo` commands as MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) tools.
 
 ```bash
-lo mcp
+lo mcp start [--allow-mutating] [--allow-destructive] [--log-level <l>]   # stdio — what editors and agents launch
+lo mcp serve [--host 127.0.0.1] [--port 8080] [...]                        # streamable HTTP (loopback; no auth)
+lo mcp tools [--allow-mutating] [--allow-destructive]                      # print what a server would expose
+lo mcp claude|vscode|cursor enable [--env LO_MCP_ALLOW=…]                  # write the editor's MCP config
 ```
 
-Exposes every user-facing leaf `lo` subcommand as a callable tool via the [MCP protocol](https://modelcontextprotocol.io/). AI clients (Claude Code, VS Code Copilot, Cursor) connect over stdio and can invoke `up`, `down`, `build`, `deploy`, `status`, and all other commands programmatically. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed but not exposed -- only their leaf commands appear as tools. Framework-internal commands (hidden from `--help`) are not exposed either.
+Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_status`, `lo_build`, `lo_secrets_encrypt`, `lo_kubehz_join`, …) — the same scheme the former argsh builtin used. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed, not exposed; framework-internal commands (hidden from `--help`) are never tools, and neither are `mcp` and `operator` themselves.
 
-Commands carry tool annotations that inform the client about behavior:
+**Exposure is structural**: a tool that is not exposed is not registered, so it cannot be called by name either. The tiers follow the usage markers:
 
-| Annotation | MCP hint | Effect |
+| Marker | MCP hint | Exposed |
 |-----------|----------|--------|
-| `@readonly` | `readOnlyHint: true` | Client may auto-run without confirmation |
-| `@destructive` | `destructiveHint: true` | Client shows confirmation dialog |
-| `@idempotent` | `idempotentHint: true` | Client knows retries are safe |
+| `@readonly` | `readOnlyHint: true` | by default |
+| _(none)_ | — | with `--allow-mutating` (a command without a marker counts as mutating — it is not known to be safe) |
+| `@destructive` | `destructiveHint: true` | with `--allow-destructive` (implies `--allow-mutating`) |
+| `@idempotent` | `idempotentHint: true` | informational |
 
-**Requires** the argsh native builtin (`argsh.so`). Install it with:
+Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
-```bash
-argsh builtins install
-```
-
-The `.so` must be discoverable via one of: `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH`, or `LD_LIBRARY_PATH`.
-
-Configure your AI client using the `.mcp.json` included in the project root.
+::: info The shipped `.mcp.json` still launches the argsh builtin
+The `.mcp.json` at the project root points at `.lok8s/lo mcp` — the previous, argsh-native server, which needs `argsh.so` (`argsh builtins install`; discoverable via `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`). It keeps working. To use the binary's server instead, run `lo mcp <editor> enable` or point your client at `lo mcp start`; the switch of the shipped file is a deliberate, separate change.
+:::
 
 ### lo kubeconfig
 
@@ -371,10 +394,12 @@ Scans the domain's specs, secrets hygiene, and rendered targets for posture find
 Diagnose the local environment and toolchain.
 
 ```bash
-lo doctor
+lo doctor [--toolchain]
 ```
 
 Checks required binaries, versions, Docker/kind state, and common misconfigurations, with a fix hint per finding.
+
+The **toolchain section** (Go-only) verifies what [`lo init toolchain`](#lo-init) installed against the pins: `.bin/b` (with its version), `kustomize` (`.bin` first, then `PATH`) at the pinned release, the khelm `ChartRenderer` and the `secrets.lok8s.dev` `Secret` exec plugins at the paths the render resolves under `.kustomize/` (`KUSTOMIZE_PLUGIN_HOME`), each at its pin — the Secret plugin at this `lo`'s own version (`<plugin> --version`; a plugin built before that flag existed reports "version unknown"). A mismatch is a warning; a missing tool is a failure on `lo` (core, which execs them) and a warning on `lo-full` (in-process render; the binaries only serve `LO_RENDER=exec`). The fix is always `lo init toolchain`. The section is printed when `.bin/b.yaml` carries the `lo init toolchain` marker line, or on `--toolchain`; a profile-synced or hand-written `b.yaml` is not checked unless asked, which keeps the default output byte-identical to the bash implementation.
 
 ### lo trust
 
@@ -397,17 +422,59 @@ lo version
 List driver bootstrap addons for the active cluster; name one to inspect it.
 
 ```bash
-lo addons [name]
+lo addons [name...] [--detail] [--origin]
 ```
+
+The list is the union of the addons embedded in the binary and the project's own `.lok8s/addons/*` directories. `--origin` adds an `ORIGIN` column — `builtin` (served from the binary, not ejected), `local` (the project's copy, identical to what the binary ships), `local (modified)` (the project's copy differs — `lo assets diff addons/<name>` shows how), `local-only` (an addon the binary does not ship). Without `--origin` the table is the classic four-column one. Naming an addon that the project holds no copy of ejects it first (see [`lo assets`](#lo-assets)), so `path:` always points into the project; `--no-eject` serves it from a temp dir instead.
 
 ### lo drivers
 
 Driver-specific commands.
 
 ```bash
-lo drivers --list             # list available drivers
+lo drivers --list [--origin]  # list available drivers
 lo drivers <name> <args…>     # invoke a driver's own subcommands
 ```
+
+`--list` prints the union of the Go driver registry (`lo`, `capi`, `kubeone`, `kkp`, `kubehz`) and the driver directories under `.lok8s/drivers/`; `--origin` adds the origin of each driver's cluster templates (`drivers/<name>/cluster` — `builtin`, `local`, `local (modified)`, or `local-only` for a bash-only driver directory). A name that exists only as a bash driver is handed to the argsh implementation with the arguments untouched; `--help` after a nested command (`lo drivers lo status --help`) reaches that command, where argsh printed the `drivers` usage instead.
+
+### lo assets
+
+The framework's data files — every bootstrap addon, the driver cluster templates (`drivers/{lo,kubeone,capi}/cluster`), the ClusterInventory CRD mirror and the `lo chat` defaults — ship **inside the binary**. A project needs no synced `.lok8s/` tree for them. The rules:
+
+- **Precedence** — a copy under the project's `.lok8s/<rel>` always wins over the embedded one, whatever its content.
+- **Eject on first use** (the default) — when a cluster references an asset (an addon in `spec.bootstrap`, a driver's templates, the CRD at publish time) and the project holds no copy, `lo` writes the embedded one into `.lok8s/<rel>/` together with a `.lo-origin` marker (the `lo` version, a timestamp, one sha256 per file) and prints one `[assets] ejected …` line. Commit the ejected files: from then on a `lo` upgrade can never silently change what that cluster applies — the diff below shows it and you choose.
+- **Never overwrite** — `lo` never touches an existing local file. The one writer of existing files is `lo assets update`.
+- **Read-only commands never eject** — `lo lint`, `lo audit`, `lo addons` (the list) and `lo assets` itself serve a missing copy from a temp dir.
+
+```bash
+lo assets list [--json]                 # every asset with its origin and chart version (local vs embedded)
+lo assets show <rel>                    # one asset: path, marker, per-file state
+lo assets eject [rel...] [--all] [--check]
+lo assets diff [rel...] [--json] [--check]
+lo assets update <rel> [--force]
+```
+
+`<rel>` is the path below `.lok8s/`: `addons/cilium`, `drivers/lo/cluster`, `drivers/kubeone/cluster`, `drivers/capi/cluster`, `libs/inventory/manifests`, `chat`.
+
+**`eject`** without arguments materializes what this project's cluster specs reference (each spec's builtin `spec.bootstrap` addons, its driver's templates, the inventory CRD); `--all` takes every embedded asset. `--check` writes nothing and exits `1` if any of that set would be ejected — the CI gate for "this repository pins what it applies".
+
+**`diff`** is a three-way comparison per file, by content hash: ORIGIN (the `.lo-origin` hashes — what was ejected) vs LOCAL (the project's file) vs EMBEDDED (what this `lo` ships). The headline per addon is the chart version, local vs embedded. Per file:
+
+| State | Meaning |
+|---|---|
+| `unchanged` | local == embedded |
+| `local modified` | you edited it (origin == embedded, local differs) — also the verdict for a copy with no marker (a vendored tree), where local is authoritative |
+| `lo updated` | this `lo` ships a newer file and yours is untouched (origin == local) |
+| `both` | conflict: all three differ |
+| `local-only` | exists only in the project |
+| `builtin-only` | exists only in the binary (lo added it, or it was deleted locally) |
+
+`--check` exits `1` on any drift (anything but `unchanged`/`local-only`). `--json` is a stable shape (`{"lo": "<version>", "assets": [{rel, kind, origin, drifted, version:{local,embedded}, marker:{lo,ejectedAt}, files:[{path,state,origin,local,embedded}], path}]}`).
+
+**`update <rel>`** applies the embedded copy over the local one only when every file is provably untouched (`unchanged` or `lo updated`) and a marker exists; otherwise it prints the classification and stops — `--force` applies anyway. It shows the diff first, keeps local-only files, and rewrites the marker.
+
+Opt-outs: the global `--no-eject` flag or `LO_ASSETS_EJECT=never` serve every missing asset from a per-run temp dir and write nothing into the project. `lo doctor` reports a one-line summary (`N of M local assets drifted` / `all in sync` / `none ejected`).
 
 ### lo kubehz
 
@@ -421,8 +488,9 @@ lo kubehz deploy --dry-run    # print the rendered manifests, apply nothing
 lo kubehz status              # registration + heartbeat status
 lo kubehz claim-code          # print the one-time claim code for the dashboard
 lo kubehz claim --nonce <v>   # place a dashboard-minted claim nonce for the agent to echo
+                              # (`--nonce -` reads it from stdin; KUBEHZ_CLAIM_NONCE is the env fallback — keeps it out of shell history)
 lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats resume)
-lo kubehz join                # mint a node join ticket (hosting: shared)
+lo kubehz join <node>         # mint a node join ticket (hosting: shared); --print-token also prints the plaintext ticket (when a join script was written)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
 lo kubehz node join           # join THIS machine to a hosted cluster (static pool)
@@ -463,7 +531,7 @@ Manage the Go kustomize plugins (alias: `lo ku`).
 
 ```bash
 lo kustomize build            # compile plugin binaries into the plugin home
-lo kustomize test             # plugin unit + integration tests
+lo kustomize test             # plugin unit + integration tests (runs `make test` in kustomize/: needs make + a Go toolchain)
 lo kustomize list             # list discoverable plugins
 lo kustomize clean            # remove built binaries
 ```
@@ -541,4 +609,8 @@ caller drives the mode, not the file.
 | `PATH_SECRETS` | `.secrets` | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
-| `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` for MCP support |
+| `LO_IMPL` | (empty) | `bash` runs the frozen argsh implementation (`.lok8s/lo`) for this invocation instead of the binary — see [The Go `lo` binary](go-migration.md#lo-impl-bash-the-escape-hatch) |
+| `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |
+| `LO_ASSETS_EJECT` | (empty) | `never`: the environment form of `--no-eject` — embedded framework assets are served from a temp dir, never written into the project (see [`lo assets`](#lo-assets)) |
+| `LOK8S_NONINTERACTIVE` | (empty) | `1` disables prompts (consent gates refuse) and the collapsing progress UI |
+| `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` — needed only by the argsh `mcp` builtin the shipped `.mcp.json` launches |

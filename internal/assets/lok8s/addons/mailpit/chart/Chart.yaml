@@ -1,0 +1,13 @@
+apiVersion: v2
+name: mailpit
+description: >-
+  Mailpit dev/test mail catcher — workload (namespace + deployment + service)
+  plus an OPTIONAL HTTPRoute exposing the web UI/API through a shared Gateway.
+  Apps deliver outbound mail over SMTP to mailpit.<ns>.svc:1025; captured mail
+  is browsable on the HTTP UI/API (:8025). The route is gated by values
+  (route.enabled) and its host/gateway are values — so the same addon serves any
+  cluster: the default host is mailpit.${LOK8S_SPEC_CLUSTER_DOMAIN} (resolved
+  from spec.cluster.domain at bootstrap), overridable inline.
+type: application
+version: 0.1.0
+appVersion: "v1.30.1"

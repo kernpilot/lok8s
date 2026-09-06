@@ -19,7 +19,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- SubjectKeyId per RFC 5280 4.2.1.2 method 1; a key identifier, not a security hash
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -142,7 +142,7 @@ func SelfSignCA(randr io.Reader, caKeyPEM []byte) ([]byte, error) {
 	if _, err := asn1.Unmarshal(spkiASN1, &spki); err != nil {
 		return nil, fmt.Errorf("decode public key: %w", err)
 	}
-	skid := sha1.Sum(spki.SubjectPublicKey.Bytes)
+	skid := sha1.Sum(spki.SubjectPublicKey.Bytes) // #nosec G401 -- see the import note: SKID, not a signature
 
 	serial, err := randomSerial(randr)
 	if err != nil {
@@ -262,7 +262,7 @@ func LoadOrCreateCARoot(randr io.Reader) (cert, key []byte, err error) {
 	if err = os.WriteFile(keyPath, key, 0o400); err != nil {
 		return nil, nil, fmt.Errorf("write CA key: %w", err)
 	}
-	if err = os.WriteFile(certPath, cert, 0o644); err != nil {
+	if err = os.WriteFile(certPath, cert, 0o644); err != nil { // #nosec G306 -- the public CA certificate; the key above is 0400
 		return nil, nil, fmt.Errorf("write CA cert: %w", err)
 	}
 	return cert, key, nil

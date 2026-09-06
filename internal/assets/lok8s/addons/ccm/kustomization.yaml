@@ -1,0 +1,38 @@
+# Hetzner cloud-controller-manager addon (framework-level).
+#
+# Inflated at `kustomize build` time via khelm and applied by the bootstrap
+# engine when a cluster spec lists "ccm" in spec.bootstrap. On Cluster-API
+# Hetzner clusters the kubelet runs with `cloud-provider: external`, so nodes
+# come up tainted `node.cloudprovider.kubernetes.io/uninitialized`; the CCM
+# clears that taint and sets each node's providerID + addresses.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Metadata-only labels (the chart owns its immutable Deployment selectors);
+# picked up by the lok8s tilt extension's system_types loop.
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: ccm
+      lok8s.dev/type: system
+      lok8s.dev/category: networking
+
+# The chart only sets `hostNetwork: true` when networking.enabled=true — which we
+# can't use (it also forces --allocate-node-cidrs, conflicting with Cilium). Force
+# it on here so the CCM's network-attachment probe (169.254.169.254) resolves from
+# the host netns instead of CrashLooping. dnsPolicy comes from values.yaml.
+patches:
+  - target:
+      kind: Deployment
+      name: hcloud-cloud-controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+
+generators:
+  - chart.yaml
+  # The `hcloud` secret the CCM mounts — ONE place, every driver. Sourced from
+  # the env each provider loads (HCLOUD_TOKEN required; HROBOT_* optional → the
+  # keys are simply omitted on clusters without a bare-metal worker).
+  - Secret.hcloud.kube-system.yaml

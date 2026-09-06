@@ -1,6 +1,6 @@
 # The Operator
 
-The lok8s operator runs on a management cluster and watches lok8s custom resources. It uses [shell-operator](https://github.com/flant/shell-operator) with bash hooks that reuse the same library code as the CLI.
+The lok8s operator runs on a management cluster and watches lok8s custom resources. It uses [shell-operator](https://github.com/flant/shell-operator); the hooks are the `lo` binary itself (`lo operator <hook>`, package `internal/operator`) behind two-line shims under `operator/hooks/`, so the operator shares the exact Go packages the CLI runs (drivers, bootstrap, gitops, deploy).
 
 ::: warning Alpha
 The `Lo` lifecycle is complete: creation, drift detection, kubeconfig publication, and finalizer-guarded teardown. `Capi` covers creation and status sync only: **deleting a `Capi` resource does not tear down the cluster** ([#6](https://github.com/kernpilot/lok8s/issues/6)). Don't point the Capi path at production credentials yet.
@@ -15,12 +15,12 @@ CLI mode (lo)                    Operator mode (shell-operator)
   one-shot                         reconciliation loop
        \                          /
         \                        /
-     Shared bash libraries
-     .lok8s/libs/*
-     .lok8s/drivers/*/main
+        the same lo binary
+     internal/driver/*  internal/bootstrap
+     internal/operator (the hook bodies)
 ```
 
-The operator container bundles the same libraries and driver contracts as the CLI. Hooks source the libraries with an `import() { :; }` shim (since `import` is an argsh builtin that doesn't exist in plain bash).
+The operator container ships the `lo` binary and the framework tree. shell-operator discovers hooks by path, so `operator/hooks/<name>.sh` keeps its name and simply runs `exec lo operator <name> "$@"` — `--config` and the binding context pass straight through. The original bash hook bodies are frozen at `.lok8s/legacy/operator/hooks/` and are the oracle `hack/parity-operator.sh` diffs the Go hooks against (binding configuration bytes and the recorded `kubectl`/`clusterctl` argv).
 
 ## Custom Resource Definitions
 

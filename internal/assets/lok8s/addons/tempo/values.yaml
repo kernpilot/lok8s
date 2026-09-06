@@ -1,0 +1,127 @@
+# Grafana Tempo (single-binary `tempo` chart, v1.24.1) — pruned, kubehz values.
+#
+# Defaults are kept wherever sane; this file only carries the decisions that
+# differ. Tempo is INTERNAL-ONLY: no chart Ingress, no gateway HTTPRoute. It is
+# reached in cluster at:
+#   - tempo.monitoring:3200          Tempo HTTP / query API (Grafana datasource)
+#   - tempo.monitoring:4317          OTLP gRPC receiver  (trace senders)
+#   - tempo.monitoring:4318          OTLP HTTP receiver  (trace senders)
+#
+# Storage: `local-path` (the rancher local-path provisioner on the single FSN1
+# worker — see clusters/.targets/storage). The cluster default class is
+# `kubermatic-fast`, but we pin `local-path` explicitly so this PVC is not
+# silently re-homed if the default class changes. Single-node pilot: one
+# StatefulSet, one local PVC, no replication. Accepted SPOF for the pilot.
+#
+# ── Grafana datasource (ACTION REQUIRED, handled outside this target) ────────
+# Grafana queries Tempo DIRECTLY via a Tempo datasource — there is no
+# tempo-query/Jaeger UI here (tempoQuery.enabled: false below). The
+# kube-prometheus-stack Grafana (monitoring target) does NOT yet declare a
+# Tempo datasource. Add one to clusters/.targets/monitoring/values.yaml under
+# `grafana.additionalDataSources`, e.g.:
+#
+#   grafana:
+#     additionalDataSources:
+#       - name: Tempo
+#         type: tempo
+#         uid: tempo
+#         access: proxy
+#         url: http://tempo.monitoring:3200
+#         jsonData:
+#           # Correlate trace span-metrics/service-graphs with the in-cluster
+#           # Prometheus (Tempo's metrics-generator remote-writes into it).
+#           tracesToMetrics:
+#             datasourceUid: prometheus
+#           serviceMap:
+#             datasourceUid: prometheus
+#
+# This file intentionally does NOT edit the monitoring target — see the target
+# README/report. Until that datasource exists, traces are ingested but not
+# queryable from Grafana.
+
+tempo:
+  # Compactor block retention — how long traces are kept before compaction
+  # drops them. 72h is a sensible pilot window on a 20Gi local PVC.
+  retention: 72h
+
+  # OTLP is the receiver we actually want. Bind on all interfaces so in-cluster
+  # senders (and the OTel collector, if added later) can push over gRPC/HTTP.
+  # The other default receivers (jaeger/zipkin/opencensus) stay enabled by the
+  # chart default; they are harmless and only listen in cluster.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  # Metrics-generator: derive RED metrics (span-metrics) and service-graph
+  # metrics from incoming spans and remote_write them into the in-cluster
+  # Prometheus. The monitoring target's kube-prometheus-stack enables
+  # `enableRemoteWriteReceiver: true` for exactly this. The Prometheus Service
+  # is `kube-prometheus-stack-prometheus` (release name `kube-prometheus-stack`)
+  # in the `monitoring` namespace, port 9090 — confirmed against the monitoring
+  # target (route.yaml backendRef sketch + values.yaml).
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: http://kube-prometheus-stack-prometheus.monitoring:9090/api/v1/write
+
+  # Turn the generator processors on for ALL tenants. `local-blocks` is also
+  # required for TraceQL metrics queries. (Rendered into the Tempo config under
+  # `overrides.defaults.metrics_generator.processors`.)
+  overrides:
+    defaults:
+      metrics_generator:
+        processors:
+          - service-graphs
+          - span-metrics
+          - local-blocks
+
+  # Trace storage: local filesystem on the persistent volume mounted at
+  # /var/tempo (see persistence below). WAL lives on the same PVC.
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Single-binary, single small worker. Memory limit gives headroom for the
+  # metrics-generator without an OOM-prone cap.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# Persist trace blocks + WAL across pod restarts. Mounts at /var/tempo, which is
+# where storage.trace.local.path / wal.path point. (The metrics-generator keeps
+# its own scratch WAL on an ephemeral /tmp emptyDir — acceptable for the pilot.)
+persistence:
+  enabled: true
+  storageClassName: ceph-bulk
+  size: 20Gi
+
+# Scrape Tempo's own /metrics via a Prometheus Operator ServiceMonitor. The
+# monitoring stack scrapes ALL ServiceMonitors cluster-wide
+# (serviceMonitorSelectorNilUsesHelmValues: false in the monitoring target), so
+# no `release` label is needed for selection — enabling it is sufficient.
+serviceMonitor:
+  enabled: true
+
+# Grafana talks to Tempo directly through the Tempo datasource (see header
+# note), so the legacy tempo-query / Jaeger UI sidecar is not deployed.
+tempoQuery:
+  enabled: false
+
+# ── NetworkPolicy ────────────────────────────────────────────────────────────
+# Left OFF for the pilot (chart default). The reference monitoring stack does
+# not lock Tempo down at L3, and the in.net `kubehz` gateway is already
+# IP-allowlisted. A standard networking.k8s.io/v1 NetworkPolicy can be added
+# later to restrict ingress to the OTLP receiver ports (4317/4318) and the query
+# port (3200) — we deliberately do NOT use Cilium CRDs (the cluster CNI is not
+# Cilium). If/when wanted, set the chart's `networkPolicy.enabled: true` (it
+# emits a standard NetworkPolicy) rather than hand-rolling one.

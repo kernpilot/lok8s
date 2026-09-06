@@ -37,6 +37,8 @@ PATH_BASE             = "{{config_root}}"
 PATH_BIN              = "{{config_root}}/.bin"
 PATH_LOK8S            = "{{config_root}}/.lok8s"
 PATH_CLUSTERS         = "{{config_root}}/clusters"
-PATH_SECRETS          = "{{config_root}}/.secrets"
+# PATH_SECRETS is not exported: the flat .secrets/ store is deprecated and
+# `lo` resolves the per-domain store (clusters/<domain>/secrets/) itself.
+# Set it only to point a raw `kustomize build` at a specific store.
 KUSTOMIZE_PLUGIN_HOME = "{{config_root}}/.kustomize"
 _.path = ["{{config_root}}/.bin", "{{config_root}}/.lok8s"]

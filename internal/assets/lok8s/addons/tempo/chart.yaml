@@ -1,0 +1,24 @@
+# khelm chart spec for Grafana Tempo (single-binary distributed tracing
+# backend), inflated via khelm at kustomize build time.
+#
+# This is the SINGLE-BINARY `tempo` chart (appVersion 2.9.0 at this pin) — NOT
+# `tempo-distributed`. One StatefulSet, local filesystem trace storage on a
+# local-path PVC. Sized for the single-node pilot worker.
+#
+# The ChartRenderer `metadata.name` is used by khelm as the Helm RELEASE name,
+# so it prefixes every generated resource and is also the Service name. We pin
+# it to `tempo` so the Service is deterministically `tempo` — i.e. reachable in
+# cluster at `tempo.monitoring:3200` (Tempo HTTP/query API) and on the OTLP
+# receiver ports `:4317` (gRPC) / `:4318` (HTTP). Do not rename without updating
+# any Grafana datasource / trace-sender config that points at `tempo.monitoring`.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: tempo
+  namespace: monitoring
+kubeVersion: "1.35.5"
+repository: https://grafana.github.io/helm-charts
+chart: tempo
+version: 1.24.1
+valueFiles:
+  - values.yaml

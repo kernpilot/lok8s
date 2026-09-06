@@ -1,0 +1,45 @@
+# 3-tier OIDC group → built-in ClusterRole bindings. NO aggregate-to-admin: each
+# binding references a stock Kubernetes ClusterRole (cluster-admin / edit / view)
+# directly. The `oidc:` subject prefix MUST match spec.oidc.groupsPrefix.
+#
+# Group subjects (apiGroup rbac.authorization.k8s.io, kind Group) are illustrative
+# defaults under the "kubehz" namespace — override per kustomization.yaml's notes.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-oidc-cluster-admins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: "oidc:kubehz:cluster-admins"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-oidc-editors
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: "oidc:kubehz:editors"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-oidc-viewers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: "oidc:kubehz:viewers"

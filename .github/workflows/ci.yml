@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # feat/**: long-lived integration branches (the Go migration lives on
+    # feat/go-single-binary) take PRs of their own. Without this entry those
+    # PRs ran no CI at all and "run it locally" was the only gate.
+    branches: [main, 'feat/**']
 
 permissions:
   contents: read
@@ -14,7 +17,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Lint shell (shellcheck + argsh-lint)
         # `argsh lint` = full shellcheck (with .shellcheckrc: SC2250 braces +
@@ -28,10 +31,10 @@ jobs:
     name: YAML Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run yamllint
-        uses: ibiqlik/action-yamllint@v3
+        uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
         with:
           file_or_dir: '.lok8s/ operator/ .github/'
           config_data: |
@@ -49,7 +52,7 @@ jobs:
     name: Bats Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install toolchain (b → argsh, yq)
         env:
@@ -98,11 +101,152 @@ jobs:
         # yq, which `b install` (above) placed in .bin.
         run: PATH="${GITHUB_WORKSPACE}/.bin:${PATH}" ./.lok8s/lo crds check
 
+  go-tests:
+    name: Go Build + Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      # Two builds from one tree (internal/render): `lo` (core, the default
+      # tag set — the render execs the pinned kustomize + plugins) and
+      # `lo-full` (-tags inprocess — kustomize API + khelm linked in). Every
+      # gate below runs against BOTH.
+      - name: Build (core + full)
+        run: |
+          go build ./...
+          go build -tags inprocess ./...
+
+      - name: Vet (core + full)
+        run: |
+          go vet ./...
+          go vet -tags inprocess ./...
+
+      - name: Test (core + full)
+        # Includes the tree-drift gate: the cobra command tree must match the
+        # argsh usage list in .lok8s/lo while both implementations exist —
+        # and the toolchain pin-drift gate (internal/toolchain: pins.go vs
+        # go.mod vs the generated .bin/b.yaml). The in-process render tests
+        # only run under the tag; core skips them and exercises the exec seam.
+        run: |
+          go test ./...
+          go test -tags inprocess ./...
+
+      - name: Lint (core)
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        with:
+          # Pinned (verified on GitHub releases); `latest` moved the gate
+          # under us once already. Bump deliberately with .golangci.yml.
+          version: v2.13.2
+
+      - name: Lint (full)
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        with:
+          version: v2.13.2
+          args: --build-tags inprocess
+
+      - name: Install toolchain (b → argsh, yq; parity needs the bash lo)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # `argsh builtins install` drops argsh.so into PATH_BIN; without it
+          # the .so landed in the workspace root, .lok8s/lo (PATH_BIN=.bin)
+          # never found it, and the parity run used the pure-bash argsh —
+          # which cannot resolve a middle alias like 'encrypt|enc|e:+', so
+          # `lo secrets set --enc` returned rc 2 on the bash side only.
+          PATH_BIN: ${{ github.workspace }}/.bin
+        run: |
+          # Same pinned-b install as the Bats job (see its comment for why the
+          # binary is pinned rather than resolved via releases/latest).
+          B_VERSION=4.18.6
+          curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
+          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+          ./.bin/argsh builtins install
+
+      - name: Parity (Go lo vs argsh lo) — core and full
+        # Differential run of every ported command against both
+        # implementations — stdout, stderr, and exit codes must match — for
+        # BOTH builds: bin/lo (core: the exec render, the same pinned
+        # kustomize + plugins the bash side runs) and bin/lo-full (the
+        # in-process render). Every harness takes the binary as $1.
+        env:
+          # Same as the install step: the bash side must load the native
+          # builtin from .bin/argsh.so, exactly like a developer shell.
+          PATH_BIN: ${{ github.workspace }}/.bin
+        run: |
+          make build
+          make build-full
+          # Absolute paths: every harness cd's into its synthetic project
+          # before invoking the binary, so a relative bin/lo would not resolve.
+          for lo in "${PWD}/bin/lo" "${PWD}/bin/lo-full"; do
+            echo "::group::parity — ${lo} ($("${lo}" --version))"
+            bash hack/parity-test.sh "${lo}"
+            bash hack/parity-build.sh "${lo}"
+            bash hack/parity-configure.sh "${lo}"
+            bash hack/parity-audit.sh "${lo}"
+            bash hack/parity-loop.sh "${lo}"
+            bash hack/parity-leaves.sh "${lo}"
+            bash hack/parity-ops.sh "${lo}"
+            bash hack/parity-kubehz.sh "${lo}"
+            bash hack/parity-operator.sh "${lo}"
+            bash hack/parity-orchestrate.sh "${lo}"
+            echo "::endgroup::"
+          done
+
+  release-config:
+    name: goreleaser snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      # The release pipeline only ran on tag push before, so a broken hook,
+      # a module that no longer cross-compiles, or a missing archive file
+      # surfaced when it was already blocking a release. A snapshot run
+      # exercises the whole .goreleaser.yaml (check + before hooks + all
+      # sixteen builds — lo, lo-full, kustomize-secret, lochat × 4 platforms
+      # — + archives + checksums) without publishing. Same pinned goreleaser
+      # as .github/workflows/release.yml.
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.0
+          args: release --snapshot --clean --skip=publish
+
+      - name: Both lo builds are in the snapshot
+        # The installer's asset-name contract: lo-<os>-<arch>.tar.gz (core)
+        # and lo-full-<os>-<arch>.tar.gz (--full), each carrying a binary
+        # named after the build, and both listed in checksums.txt.
+        run: |
+          set -euo pipefail
+          for os in linux darwin; do for arch in amd64 arm64; do
+            for flavor in lo lo-full; do
+              a="dist/${flavor}-${os}-${arch}.tar.gz"
+              test -f "${a}" || { echo "::error::missing ${a}"; exit 1; }
+              tar -tzf "${a}" | grep -qx "${flavor}" || { echo "::error::${a} has no '${flavor}' member"; exit 1; }
+              grep -q " ${flavor}-${os}-${arch}.tar.gz$" dist/checksums.txt || { echo "::error::${flavor}-${os}-${arch}.tar.gz not in checksums.txt"; exit 1; }
+            done
+          done; done
+          # The host-platform snapshot binaries name their build.
+          dist/lo_linux_amd64_v1/lo --version | grep -q '(core)'
+          dist/lo-full_linux_amd64_v1/lo-full --version | grep -q '(full)'
+
   operator-tests:
     name: Bats Operator Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install toolchain (b → argsh, yq)
         env:
@@ -126,6 +270,13 @@ jobs:
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build lo (the hook shims exec the Go binary; bats test 37 skips without it)
+        run: make build
+
       - name: Run operator tests
         env:
           # Same .bin mount as the unit-tests job (see comment there).
@@ -133,16 +284,34 @@ jobs:
         run: ./.bin/argsh test tests/operator/
 
   e2e-lo-up:
-    name: E2E (lo up --ci)
+    name: E2E (lo up --ci, ${{ matrix.lo_impl }})
     runs-on: ubuntu-latest
     needs: [shellcheck, unit-tests, operator-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Which `lo` orchestrates the run. `go`: bin/lo, the canonical
+        # implementation — this leg is its only real-cluster proof in CI.
+        # `bash`: the same binary with LO_IMPL=bash, which execs the frozen
+        # argsh tree (.lok8s/lo) with argv untouched, so the reference
+        # keeps its own proof and the shim is exercised on the way. Before
+        # the matrix existed the job put .lok8s first on PATH and never
+        # built the binary: it proved the frozen tree only.
+        lo_impl: [go, bash]
     # Bounded outer budget: provision (kind create + cilium bootstrap) runs
     # BEFORE `tilt ci` and is NOT covered by the tilt --timeout below, so a
     # hung provision must be killed by the job. ~18min ceiling; a healthy run
     # is well under that (see LOK8S_TILT_TIMEOUT + the outer `timeout` wrap).
     timeout-minutes: 18
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build lo (the binary under test; LO_IMPL=bash routes through it too)
+        run: make build
 
       - name: Trust the plain-HTTP dev registries (10.125.0.0/16)
         # `lo up` stands up plain-HTTP registry containers on the project
@@ -212,6 +381,9 @@ jobs:
           # so a hung kind-create / cilium-wait fails in minutes, not at the
           # job's 18min ceiling.
           LOK8S_UP_TIMEOUT: 720
+          # Only the value `bash` means anything to the binary (cmd/lo/main.go):
+          # it execs the frozen tree. Anything else runs the Go implementation.
+          LO_IMPL: ${{ matrix.lo_impl }}
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}"
@@ -235,7 +407,16 @@ jobs:
           # Deterministic Tilt port (slot 127 -> 10427), matching the e2e helpers.
           export TILT_PORT=10427
           # Expose lo + the b toolchain to Tilt's local()/docker_build subprocesses.
-          export PATH="${PATH_LOK8S}:${PATH_BIN}:${PATH}"
+          # bin/ FIRST: `lo` must resolve to the Go binary built above, never to
+          # the argsh entrypoint in .lok8s/ (which stays on PATH for the
+          # frozen tree's own helpers and for the LO_IMPL=bash leg's exec).
+          export PATH="${ROOT}/bin:${PATH_LOK8S}:${PATH_BIN}:${PATH}"
+
+          echo "::group::which lo"
+          # Fail loud when PATH does not resolve to the binary under test.
+          test "$(command -v lo)" = "${ROOT}/bin/lo"
+          lo --version
+          echo "::endgroup::"
 
           echo "::group::lo doctor"
           lo doctor || true
@@ -284,28 +465,32 @@ jobs:
     name: lo-up Bundle (byte-exact)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Read install/argsh.pin
+      - name: Read .lok8s/legacy/install/argsh.pin
         id: pin
         run: |
           set -euo pipefail
           # The published bundle embeds the argsh runtime's version and commit,
           # so the rebuild below is only comparable when it runs against the
-          # SAME revision. install/argsh.pin is that record; install/build
-          # refuses to build from anything else.
+          # SAME revision. .lok8s/legacy/install/argsh.pin is that record;
+          # .lok8s/legacy/install/build refuses to build from anything else.
+          # (The argsh installer retired to .lok8s/legacy/ when the Go `lo`
+          # binary became the distribution path — see install/README.md. The
+          # bundle at docs/public/lo-up stays published for the legacy path,
+          # so this gate stays.)
           while IFS='=' read -r k v; do
             case "${k}" in
               ref|describe|minifier_release|minifier_sha256)
                 echo "${k}=${v}" >> "${GITHUB_OUTPUT}" ;;
             esac
-          done < install/argsh.pin
+          done < .lok8s/legacy/install/argsh.pin
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: arg-sh/argsh
           ref: ${{ steps.pin.outputs.ref }}
-          # install/build runs `git describe --tags` in this checkout and the
+          # .lok8s/legacy/install/build runs `git describe --tags` in this checkout and the
           # result is stamped into the bundle — a shallow clone has no tags and
           # would stamp "unknown".
           fetch-depth: 0
@@ -315,7 +500,7 @@ jobs:
         run: |
           set -euo pipefail
           # GNU envsubst specifically: `argsh minify` renders its template with
-          # a SHELL-FORMAT whitelist, which renvsubst rejects (see install/build).
+          # a SHELL-FORMAT whitelist, which renvsubst rejects (see .lok8s/legacy/install/build).
           sudo apt-get update && sudo apt-get install -y gettext-base
           # `argsh minify` shells out to `minifier`, a Rust crate in the argsh
           # repo, published as a release asset. Pinned + checksummed, same rule
@@ -326,15 +511,15 @@ jobs:
           echo "${{ steps.pin.outputs.minifier_sha256 }}  .argsh-src/.bin/minifier" | sha256sum -c -
           chmod +x .argsh-src/.bin/minifier
 
-      - name: Rebuild docs/public/lo-up from install/lo-up
-        run: ARGSH_SRC="${GITHUB_WORKSPACE}/.argsh-src" install/build
+      - name: Rebuild docs/public/lo-up from .lok8s/legacy/install/lo-up
+        run: ARGSH_SRC="${GITHUB_WORKSPACE}/.argsh-src" .lok8s/legacy/install/build
 
       - name: The published installer is not stale
         run: |
           git diff --exit-code -- docs/public/lo-up || {
-            echo "::error::docs/public/lo-up does not match a rebuild from install/lo-up."
-            echo "::error::Every 'curl … | sh' user is being served the old script."
-            echo "::error::Fix: ARGSH_SRC=/path/to/arg-sh/argsh install/build, then commit the bundle."
+            echo "::error::docs/public/lo-up does not match a rebuild from .lok8s/legacy/install/lo-up."
+            echo "::error::Every legacy 'lo-up' user is being served the old script."
+            echo "::error::Fix: ARGSH_SRC=/path/to/arg-sh/argsh .lok8s/legacy/install/build, then commit the bundle."
             exit 1
           }
 
@@ -344,10 +529,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [shellcheck, unit-tests, operator-tests]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
           cluster_name: lok8s-test
 

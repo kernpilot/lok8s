@@ -1,0 +1,27 @@
+# Reflector — emberstack/reflector controller (cross-namespace ConfigMap/Secret
+# replication via annotations). A generic, reusable atom: bootstrap `reflector`
+# by name to get the controller. The reflection *annotations* live on the
+# consumer ConfigMaps/Secrets in the consuming cluster (NOT here) — e.g. a CNPG
+# app secret mirrored into another namespace — so this addon is pure controller,
+# no cluster-specific config.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: reflector
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: reflector
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml

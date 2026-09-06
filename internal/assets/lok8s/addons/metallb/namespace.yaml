@@ -1,0 +1,8 @@
+# MetalLB chart resources reference namespace: metallb-system but the
+# chart doesn't create the namespace itself (helm convention is "use
+# --create-namespace at install time"). khelm doesn't have an
+# equivalent flag, so we ship the namespace as a static resource.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system

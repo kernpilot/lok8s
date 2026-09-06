@@ -1,0 +1,41 @@
+# external-dns (+ the Hetzner DNS webhook sidecar) — framework addon.
+#
+# A generic, reusable atom: bootstrap `external-dns` by name to sync DNS records
+# from Gateway API resources (Gateway/HTTPRoute) to Hetzner DNS. The Hetzner
+# webhook runs as a SIDECAR IMAGE inside the external-dns chart
+# (docker.io/hetzner/external-dns-hetzner-webhook), so the whole solver ships in
+# this one chart.
+#
+# CLUSTER GLUE stays behind (NOT in this addon): the `external-dns` Namespace and
+# the hetzner-dns API-token Secret — those are per-cluster (a real Hetzner DNS
+# token + the decision to run external-dns at all) and live in the consuming
+# cluster's networking target. external-dns is PROD-only: dev must NOT run it (a
+# dev external-dns clobbers the live production DNS zone), and dev does
+# not ship the ns/Secret, so this addon is bootstrapped only on prod.
+#
+# The zone allowlist (INCLUDE_DOMAIN_FILTER) is per-cluster GLUE too: it comes
+# from spec.dns.domainFilter via ${LOK8S_SPEC_DNS_DOMAINFILTER} (envsubst at
+# bootstrap). It MUST NOT contain kubehz.dev — see values.yaml.
+#
+# No namespace.yaml here (the namespace is glue, created by the networking
+# target before this addon — same reason metrics-server omits one for
+# kube-system). The `namespace:` transformer still pins every rendered object to
+# external-dns.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: external-dns
+      lok8s.dev/type: system
+      lok8s.dev/category: networking
+
+namespace: external-dns
+
+generators:
+  - chart.yaml

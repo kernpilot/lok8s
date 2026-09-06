@@ -1,0 +1,62 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# kubehz LIVE AGENT (the Go agent) — BASE: observe + report only.
+#
+# This is the schema-2 heartbeat producer. It replaces the bash CronJob's beat
+# (never runs alongside it — see the heartbeat-owner interlock below) and adds
+# the live view: sub-minute node/pod/event snapshots from typed informers,
+# plus the desired-state pull loop that makes worker scaling, self-healing and
+# worker upgrades possible when the platform authorizes them.
+#
+# VENDORED from the public kubehz-agent repo's deploy/base, at the digest
+# pinned in deployment.yaml. Upstream, including the deploy/README.md that some
+# of the vendored comments refer to, is:
+#   https://github.com/kernpilot/kubehz-agent/tree/main/deploy
+# Vendored, not fetched: `lo` must render and apply without network access to
+# GitHub. When the upstream tree changes, re-vendor this directory, refresh
+# ../UPSTREAM.sha256, and move the digest together with it.
+#
+# rbac.yaml and ../managed/rbac-managed.yaml are copied BYTE-FOR-BYTE and are
+# digest-pinned in ../UPSTREAM.sha256 — including their comments, so a path
+# they mention (deploy/README.md) is an UPSTREAM path, not a lok8s one. Do not
+# "fix" those references here: the pin exists so a customer can prove the
+# permissions lok8s grants are the ones the public agent repo documents.
+#
+# TWO DELIBERATE DIFFERENCES from upstream deploy/base:
+#
+#   1. NO namespace.yaml. The `kubehz-system` Namespace and the identity Secret
+#      `kubehz-agent` inside it belong to manifests/agent (the CronJob), which
+#      creates the Namespace and bootstraps the Secret. If this kustomization
+#      owned the Namespace, `kubectl delete -k` — which is exactly how
+#      `lo kubehz deploy` removes the live agent when you switch back to
+#      cronjob mode — would delete the Namespace and take the never-rotated
+#      agent-token with it. Losing that token costs a `lo kubehz re-enroll`.
+#
+#   2. The ConfigMap carries lok8s placeholder tokens (KUBEHZ_API_URL,
+#      CLUSTER_ID) substituted by `lo kubehz deploy`, the same way
+#      manifests/agent/configmap.yaml is.
+#
+# Resource names are kubehz-live-agent*, NOT kubehz-agent*: the CronJob owns
+# the kubehz-agent* SA/RBAC/ConfigMap names with DIFFERENT rules, and reusing
+# them would clobber its identity bootstrap. The only objects the two share are
+# the Namespace and the Secret, and this kustomization writes neither.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - configmap.yaml
+  - deployment.yaml
+
+# IMAGE OVERRIDE. The default is the public GHCR image pinned by digest in
+# deployment.yaml — nothing to configure for a normal cluster. To pull the same
+# bytes from a mirror or an air-gapped copy, override only the registry and
+# repository:
+#
+# images:
+#   - name: ghcr.io/kernpilot/kubehz-agent
+#     newName: registry.internal.example.com/kubehz-agent
+#
+# `newName` alone keeps the digest from deployment.yaml, which is deliberate:
+# deployment.yaml is the ONE place the digest is written, so a re-pin cannot
+# leave a second, stale copy behind here. Only add an explicit `digest:` if you
+# really mean to run different bytes from the ones the base pins.
