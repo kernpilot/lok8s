@@ -4,6 +4,7 @@ package cli
 // (main::image); the operations live in internal/image.
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -30,7 +31,7 @@ func imageContext(cmd *cobra.Command, paths *config.Paths, d string) *image.Cont
 
 // imageRun maps the image package's already-printed sentinel onto the cli one.
 func imageRun(err error) error {
-	if err == image.ErrHandled {
+	if errors.Is(err, image.ErrHandled) {
 		return ErrHandled
 	}
 	return err

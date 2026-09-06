@@ -13,7 +13,6 @@ package env
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +28,7 @@ import (
 
 // ErrHandled marks a failure whose message was already printed in the bash
 // format; callers exit non-zero without printing anything further.
-var ErrHandled = errors.New("env: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Context carries one env-command invocation.
 type Context struct {

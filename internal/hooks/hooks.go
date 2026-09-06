@@ -18,7 +18,6 @@ package hooks
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"regexp"
@@ -35,7 +34,7 @@ import (
 
 // ErrHandled marks a failure whose message was already printed in the bash
 // [error] format; callers exit non-zero without printing anything further.
-var ErrHandled = errors.New("hooks: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Context carries one hooks-command invocation. LOK8S_NONINTERACTIVE=1 is
 // exported by the command layer before anything runs (bash: main::hooks) —

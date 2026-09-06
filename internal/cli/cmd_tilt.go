@@ -9,6 +9,7 @@ package cli
 // tilt/image/env/hooks ports all rely on.
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -114,7 +115,7 @@ func tiltRun(err error) error {
 	if err == nil {
 		return nil
 	}
-	if err == tilt.ErrHandled {
+	if errors.Is(err, tilt.ErrHandled) {
 		return ErrHandled
 	}
 	return err

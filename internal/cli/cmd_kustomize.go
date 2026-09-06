@@ -24,10 +24,19 @@ func newKustomizeCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          spec.use,
 		Aliases:      spec.aliases,
-		Short:        "Manage kustomize plugins (Go-based exec generators)",
+		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
+		// An unknown subcommand is a parse error in argsh (`Invalid
+		// command: x`, rc 2); without a RunE cobra printed the group help
+		// and exited 0. Same message, rc 1 (D1) — the `ai` group's shape.
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
+			}
+			return cmd.Help()
+		},
 	}
 	cmd.AddCommand(
 		&cobra.Command{

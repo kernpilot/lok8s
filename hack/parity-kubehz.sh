@@ -278,6 +278,7 @@ check "${UNBOUND}" kubehz j n1 --domain shared-reg.dev
 check_parse - kubehz claim
 check - kubehz claim --nonce bad
 check - kubehz claim -n khzn_short
+check - kubehz claim-code                                # no cluster reachable → local refusal
 
 # ── node: the hosting gate, the https gate, the global --cluster trap ───────
 check - kubehz node join

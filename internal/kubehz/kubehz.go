@@ -40,7 +40,7 @@ import (
 // ErrHandled marks a failure whose message was already printed in the bash
 // implementation's own format ([error] … on stderr, or a plain echo). The
 // caller exits non-zero without printing anything further.
-var ErrHandled = errors.New("kubehz: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Context binds the library to its streams, paths, and seams.
 type Context struct {

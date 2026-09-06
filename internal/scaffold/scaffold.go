@@ -34,7 +34,7 @@ import (
 
 // ErrHandled marks an error whose message was already printed in the bash
 // format ([error] … on stderr).
-var ErrHandled = fmt.Errorf("scaffold: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // templates is the vendored test scaffold tree. `all:` keeps the dotfiles
 // (.gitignore) the bash `cp -R src/.` copied too.

@@ -23,18 +23,18 @@ package operator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // ErrHandled marks a failure whose message was already printed on stderr
 // (the CLI exits 1 without printing more).
-var ErrHandled = errors.New("operator: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // ExitError carries the process exit status a bash hook would have ended
 // with (its message is already on stderr): the `set -u` abort is 1, a jq

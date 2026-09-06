@@ -271,6 +271,24 @@ d="$(diff "${WORK}/up-bash.out" "${WORK}/up-go.out" || true)"
 if (( tiltup_ok )); then echo "ok: lo tilt up (stub spawn + pid file)"; else failures=$((failures + 1)); fi
 rm -f "${WORK}/proj/.tilt.pid" "${WORK}/proj/.tilt.nohup"
 
+# tilt restart: down (no pid file → no-op) then up — the same spawn + pid
+# contract as tilt up.
+tiltrs_ok=1
+for impl in go bash; do
+  rm -f "${WORK}/proj/.tilt.pid" "${WORK}/proj/.tilt.nohup"
+  rc=0
+  if [[ "${impl}" == go ]]; then
+    (cd "${WORK}/proj" && "${LO_BIN}" tilt restart >"${WORK}/rs-${impl}.out" 2>"${WORK}/rs-${impl}.err") || rc=$?
+  else
+    (cd "${WORK}/proj" && LO_IMPL=bash "${LO_BIN}" tilt restart >"${WORK}/rs-${impl}.out" 2>"${WORK}/rs-${impl}.err") || rc=$?
+  fi
+  [[ ${rc} -eq 0 && -f "${WORK}/proj/.tilt.pid" ]] || { echo "FAIL: tilt restart (${impl}): rc=${rc} pidfile=$([[ -f ${WORK}/proj/.tilt.pid ]] && echo yes || echo no)"; tiltrs_ok=0; }
+done
+d="$(diff "${WORK}/rs-bash.out" "${WORK}/rs-go.out" || true)"
+[[ -z "${d}" ]] || { echo "FAIL: tilt restart stdout differs:"; indent <<<"${d}"; tiltrs_ok=0; }
+if (( tiltrs_ok )); then echo "ok: lo tilt restart (down no-op + stub spawn + pid file)"; else failures=$((failures + 1)); fi
+rm -f "${WORK}/proj/.tilt.pid" "${WORK}/proj/.tilt.nohup"
+
 # preflight gates (manifest on stdin; kubectl is the failing stub, so the Lo
 # path reports "nothing stuck").
 check_stdin 'kind: ConfigMap' tilt preflight --domain beta.cloud   # non-kind refusal
@@ -288,6 +306,12 @@ check - image cache pinned --domain alpha.dev           # explicit image: pin
 check - image cache --domain alpha.dev                  # no service, no --all
 rm -f "${WORK}/proj/services.yaml" "${WORK}/proj/services.local.yaml"
 check - image cache svc --domain alpha.dev              # no endpoint configured
+# The registry NAME is allow-listed: bash derives it from
+# KIND_EXPERIMENTAL_DOCKER_NETWORK alone (lok8s-registry-cache here), the
+# binary layers spec.network.name first (paritynet-registry-cache) — an
+# unaligned divergence, recorded as B6 in go-migration.md. Everything else
+# on the line, and the stub-docker silence, is diffed.
+check 'registry-cache' image clean --domain alpha.dev   # stub docker: rm + volume rm fail, both silent
 
 # Unresolvable IP: a Lo spec without spec.network on a non-slot domain.
 mkdir -p "${WORK}/proj/clusters/bare.dev"

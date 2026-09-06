@@ -68,8 +68,11 @@ go test ./internal/secrets/ -run TestEncrypt -v    # one package / one test
 Packages with tests: `internal/{addons,audit,bootstrap,build,cli,config,
 crds,deploy,domain,driver,driver/capi,driver/kkp,driver/kubehz,
 driver/kubeone,driver/lo,env,gitops,hooks,image,inventory,kapply,kubehz,
-lint,oidc,operator,provider/bridge,provision,recover,render,scaffold,secrets,tilt,toolchain}`.
-Only `internal/execx` (the runner itself) and `internal/ui` have none.
+execx,lint,oidc,operator,provider/bridge,provision,recover,render,scaffold,secrets,tilt,toolchain}`.
+Only `internal/ui` has none. `internal/execx` pins the runner every fake
+stands in for: `Look` prefers `.bin` over `PATH` and skips non-executables,
+`Run` appends `Env` to the inherited environment, honours `Dir`, and uses a
+name with a path separator as-is.
 
 Two builds, one tree: `lo` (core) renders through the exec pipeline, `lo-full`
 (`-tags inprocess`) through the kustomize API in-process. A test that needs

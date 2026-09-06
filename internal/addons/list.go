@@ -5,7 +5,6 @@ package addons
 // cluster-free. Output is byte-identical to the bash implementation.
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +23,7 @@ import (
 
 // ErrHandled marks an error whose message was already printed in the bash
 // format ([error] … on stderr).
-var ErrHandled = errors.New("addons: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Dir is the project's addons directory (bash: addons::_dir). Since the
 // eject model it is only half the picture: a framework addon the project

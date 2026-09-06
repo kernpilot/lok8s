@@ -7,7 +7,6 @@ package lint
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,7 +21,7 @@ import (
 
 // ErrPrinted marks an error whose message was already printed in the bash
 // implementation's own format ([error] … on stderr).
-var ErrPrinted = errors.New("lint: error already printed")
+var ErrPrinted = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Linter runs the lint checks against a resolved project layout.
 type Linter struct {
