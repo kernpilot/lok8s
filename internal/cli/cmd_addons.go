@@ -6,6 +6,7 @@ package cli
 // Read-only, cluster-free; output is byte-identical.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -20,7 +21,7 @@ import (
 func init() { registerPorted("addons", newAddonsCommand) }
 
 func addonsRun(err error) error {
-	if err == addons.ErrHandled {
+	if errors.Is(err, addons.ErrHandled) {
 		return ErrHandled
 	}
 	return err
@@ -30,7 +31,7 @@ func newAddonsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "addons [addon...]",
 		Aliases:      spec.aliases,
-		Short:        "Manage cluster addons",
+		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		Args:         cobra.ArbitraryArgs,

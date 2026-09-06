@@ -4,18 +4,16 @@ package cli
 // Go port of .lok8s/libs/secrets; output is byte-identical (see
 // internal/secrets for the operations).
 //
-// `set` and `env` disable cobra flag parsing and hand-parse argsh-style: the
-// bash spec gives -s to --namespace inside those subcommands, shadowing the
-// global --cluster shorthand — cobra cannot express a shadowed inherited
-// shorthand (the merged flag set panics on the redefinition), the hand parser
-// can.
+// `set` and `env` give -s to --namespace (the bash spec), which shadows the
+// global --cluster shorthand. cobra panics when a merged flag set redefines a
+// shorthand, so the two declare their own `cluster` flag (same name, no
+// shorthand): the inherited one is then skipped by name and -s is free. The
+// local flag is what secretsContext reads.
 
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -35,14 +33,6 @@ func defaultSSHKey() string {
 		return v
 	}
 	return os.Getenv("HOME") + "/.ssh/id_ed25519"
-}
-
-// argshErrorf prints a parse error in the argsh entrypoint's format. (The
-// argsh implementation exits 2 on parse errors; the Go binary exits 1 — the
-// message is what scripts and humans match on.)
-func argshErrorf(errOut io.Writer, format string, a ...any) error {
-	fmt.Fprintf(errOut, "Error: "+format+"\n\n  Run \"lo -h\" for more information.\n", a...)
-	return ErrHandled
 }
 
 // secretsRun maps the secrets package's already-printed sentinel onto the cli
@@ -115,8 +105,9 @@ func specClusterName(specPath string) string {
 	return doc.Metadata.Name
 }
 
-// exactArgs returns an argsh-shaped arity validator: at least min positionals
-// (naming the first missing one) and at most max.
+// secretsArgs returns an argsh-shaped arity validator, shared by every leaf
+// that mirrors an argsh `:args` spec: at least min positionals (naming the
+// first missing one) and at most max.
 func secretsArgs(min, max int, names ...string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if len(args) < min {
@@ -301,157 +292,66 @@ func newSecretsPath(paths *config.Paths) *cobra.Command {
 	}
 }
 
-// ── set / env: argsh-style hand parsing ──────────────────
+// ── set / env ─────────────────────────────────────────────
 
-// setEnvFlags is the parse result for the hand-parsed subcommands. The
-// grammar is the subcommand's own spec plus everything it inherits in bash
-// (the parent's domain flag and main's global flags) — first-match-wins on
-// shorthands, which is how -s means --namespace here while it means --cluster
-// everywhere else.
-type setEnvFlags struct {
-	name, namespace, domain, cluster string
-	encrypt                          bool
-	help                             bool
-	positionals                      []string
-}
-
-// parseSetEnv hand-parses argv for `secrets set` (withEncrypt) and
-// `secrets env`. Unknown flags produce the argsh error shape.
-func parseSetEnv(errOut io.Writer, args []string, withEncrypt bool) (*setEnvFlags, error) {
-	p := &setEnvFlags{namespace: "default"}
-	// value-taking global flags that are accepted (and inherited) in bash but
-	// have no effect at this level; their values must still be consumed.
-	valueFlag := func(long string) bool {
-		switch long {
-		case "name", "namespace", "domain", "kubernetes", "cluster", "config", "domain-sans":
-			return true
-		}
-		return false
+// setEnvFlags declares the flag spec `set` and `env` share. -s is
+// --namespace here; the local `cluster` keeps cobra from merging the
+// inherited global (same name), so the shorthand is not redefined.
+func setEnvFlags(c *cobra.Command, withEncrypt bool) {
+	f := c.Flags()
+	f.StringP("name", "n", "", "Secret name")
+	f.StringP("namespace", "s", "default", "Namespace")
+	f.String("cluster", "", "Cluster name to manage")
+	if withEncrypt {
+		f.BoolP("encrypt", "e", false, "SOPS-encrypt this one file after writing (needs .sops.yaml)")
+		f.Bool("enc", false, "Alias of --encrypt")
+		_ = f.MarkHidden("enc")
 	}
-	setValue := func(long, val string) {
-		switch long {
-		case "name":
-			p.name = val
-		case "namespace":
-			p.namespace = val
-		case "domain":
-			p.domain = val
-		case "cluster":
-			p.cluster = val
-		}
-	}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "-" || !strings.HasPrefix(a, "-"):
-			p.positionals = append(p.positionals, a)
-		case strings.HasPrefix(a, "--"):
-			long, val, hasVal := strings.Cut(a[2:], "=")
-			switch {
-			case valueFlag(long):
-				if !hasVal {
-					i++
-					if i >= len(args) {
-						return nil, argshErrorf(errOut, "flag needs an argument: %s", a)
-					}
-					val = args[i]
-				}
-				setValue(long, val)
-			case withEncrypt && (long == "encrypt" || long == "enc"):
-				p.encrypt = true
-			case long == "verbose" || long == "force" || long == "force-recreate" || long == "remote":
-				// consumed, no effect at subcommand level (matches bash:
-				// main's DEBUG/FORCE exports happen before dispatch)
-			case long == "help":
-				p.help = true
-			default:
-				return nil, argshErrorf(errOut, "unknown flag: %s", a)
-			}
-		default:
-			if len(a) != 2 {
-				return nil, argshErrorf(errOut, "unknown flag: %s", a)
-			}
-			switch a[1] {
-			case 'n', 's':
-				long := "name"
-				if a[1] == 's' {
-					long = "namespace"
-				}
-				i++
-				if i >= len(args) {
-					return nil, argshErrorf(errOut, "flag needs an argument: %s", a)
-				}
-				setValue(long, args[i])
-			case 'e':
-				if !withEncrypt {
-					return nil, argshErrorf(errOut, "unknown flag: %s", a)
-				}
-				p.encrypt = true
-			case 'v', 'f', 'r':
-				// global booleans, consumed (see above)
-			case 'h':
-				p.help = true
-			default:
-				return nil, argshErrorf(errOut, "unknown flag: %s", a)
-			}
-		}
-	}
-	return p, nil
 }
 
 func newSecretsSet(paths *config.Paths) *cobra.Command {
-	return &cobra.Command{
-		Use:                "set [--name N] [--namespace NS] [--encrypt] <key> [value]",
-		Aliases:            []string{"s"},
-		Short:              "Write a literal value into the secret cache",
-		Annotations:        commandSpec{destructive: true}.annotations(),
-		DisableFlagParsing: true,
-		SilenceUsage:       true,
+	c := &cobra.Command{
+		Use:          "set [--name N] [--namespace NS] [--encrypt] <key> [value]",
+		Aliases:      []string{"s"},
+		Short:        "Write a literal value into the secret cache",
+		Annotations:  commandSpec{destructive: true}.annotations(),
+		Args:         secretsArgs(1, 2, "key"),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := parseSetEnv(cmd.ErrOrStderr(), args, true)
-			if err != nil {
-				return err
-			}
-			if p.help {
-				return cmd.Help()
-			}
-			if len(p.positionals) < 1 {
-				return argshErrorf(cmd.ErrOrStderr(), "missing required argument: key")
-			}
-			if len(p.positionals) > 2 {
-				return argshErrorf(cmd.ErrOrStderr(), "unexpected argument: %s", p.positionals[2])
-			}
-			key := p.positionals[0]
+			f := cmd.Flags()
+			name, _ := f.GetString("name")
+			namespace, _ := f.GetString("namespace")
+			cluster, _ := f.GetString("cluster")
+			encrypt, _ := f.GetBool("encrypt")
+			enc, _ := f.GetBool("enc")
 			value := ""
-			if len(p.positionals) == 2 {
-				value = p.positionals[1]
+			if len(args) == 2 {
+				value = args[1]
 			}
-			ctx := secretsContext(cmd, paths, p.domain, p.cluster)
-			return secretsRun(ctx.Set(p.name, p.namespace, key, value, p.encrypt))
+			ctx := secretsContext(cmd, paths, "", cluster)
+			return secretsRun(ctx.Set(name, namespace, args[0], value, encrypt || enc))
 		},
 	}
+	setEnvFlags(c, true)
+	return argshFlagErrors(c)
 }
 
 func newSecretsEnv(paths *config.Paths) *cobra.Command {
-	return &cobra.Command{
-		Use:                "env --name N [--namespace NS]",
-		Short:              "Emit export KEY=value lines for a cached secret",
-		Annotations:        commandSpec{readonly: true}.annotations(),
-		DisableFlagParsing: true,
-		SilenceUsage:       true,
+	c := &cobra.Command{
+		Use:          "env --name N [--namespace NS]",
+		Short:        "Emit export KEY=value lines for a cached secret",
+		Annotations:  commandSpec{readonly: true}.annotations(),
+		Args:         secretsArgs(0, 0),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := parseSetEnv(cmd.ErrOrStderr(), args, false)
-			if err != nil {
-				return err
-			}
-			if p.help {
-				return cmd.Help()
-			}
-			if len(p.positionals) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "unexpected argument: %s", p.positionals[0])
-			}
-			ctx := secretsContext(cmd, paths, p.domain, p.cluster)
-			return secretsRun(ctx.Env(p.name, p.namespace))
+			f := cmd.Flags()
+			name, _ := f.GetString("name")
+			namespace, _ := f.GetString("namespace")
+			cluster, _ := f.GetString("cluster")
+			ctx := secretsContext(cmd, paths, "", cluster)
+			return secretsRun(ctx.Env(name, namespace))
 		},
 	}
+	setEnvFlags(c, false)
+	return argshFlagErrors(c)
 }

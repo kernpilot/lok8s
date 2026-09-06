@@ -28,7 +28,7 @@ import (
 // ErrHandled marks a failure whose message was already printed in the bash
 // implementation's own [error] format; callers exit non-zero without
 // printing anything further.
-var ErrHandled = errors.New("tilt: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Context carries one tilt-command invocation.
 type Context struct {

@@ -27,9 +27,10 @@ Start a cluster with Tilt.
 
 ```bash
 lo up [--open-tilt|-o] [--remote|-r]
+lo up --ci [--timeout|-t <duration>]     # headless: build + deploy + wait, real exit status
 ```
 
-If `clusters/<domain>/cluster.lok8s.yaml` exists, uses the provision dispatch system. Otherwise falls back to legacy direct kind/registry calls.
+Needs `clusters/<domain>/cluster.lok8s.yaml` (or a `deploy.lok8s.yaml` with a `clusterRef`): the provision dispatch reads the spec first and stops with `No cluster.lok8s.yaml or deploy.lok8s.yaml found` when neither exists. There is no spec-less fallback.
 
 Steps: provision cluster, apply `spec.bootstrap` addons in order via the framework bootstrap (`.lok8s/libs/bootstrap`), start Tilt.
 
@@ -38,6 +39,8 @@ With `--remote`: provisions a VM via `spec.provider`, then runs kind on the remo
 | Flag | Description |
 |------|-------------|
 | `--open-tilt`, `-o` | Open the Tilt UI in a browser after startup |
+| `--ci` | Headless: after provisioning, run `tilt ci` in the foreground (build + deploy + wait for Ready) instead of a backgrounded `tilt up`. No TTY, no browser. `lo up` exits with `tilt ci`'s status, so a non-zero exit means the stack did not converge |
+| `--timeout`, `-t` | Readiness timeout for `--ci` (e.g. `300s`, `10m`); passed to `tilt ci --timeout` |
 
 ### lo down
 
@@ -263,6 +266,10 @@ lo tilt up        # Start Tilt in background
 lo tilt down      # Stop Tilt
 lo tilt status    # Run tilt doctor
 lo tilt restart   # Stop + start
+lo tilt ci [--timeout|-t <duration>]    # Headless build + deploy + wait-ready (tilt ci); exits with its status
+lo tilt preflight [--age|-a <seconds>] [--crds|-c drain|skip|force] [--crd-allow <names>]
+                  # Force-clear stuck-Terminating objects in the manifest read from stdin
+                  # (what the Tiltfile runs before an apply; LOK8S_PREFLIGHT=0 disables it)
 ```
 
 ### lo registry
@@ -317,7 +324,7 @@ for the full workflow.
 
 ```bash
 lo secrets init                                # set up SOPS/age from your SSH key
-lo secrets set --name <n> --namespace <ns> <key> [value]   # write a value (omitted: tty prompt / piped stdin; `-`: stdin, needs argsh with arg-sh/argsh#176)
+lo secrets set --name <n> --namespace <ns> <key> [value]   # write a value (omitted: tty prompt / piped stdin; `-`: read the value from stdin)
 lo secrets set --name <n> <key> --encrypt      # write + SOPS-encrypt this one file (-e/--enc; needs .sops.yaml)
 lo secrets allow                               # approve bash: generators after a change
 lo secrets encrypt                             # write committable Secret.*.enc files
@@ -481,8 +488,9 @@ lo kubehz deploy --dry-run    # print the rendered manifests, apply nothing
 lo kubehz status              # registration + heartbeat status
 lo kubehz claim-code          # print the one-time claim code for the dashboard
 lo kubehz claim --nonce <v>   # place a dashboard-minted claim nonce for the agent to echo
+                              # (`--nonce -` reads it from stdin; KUBEHZ_CLAIM_NONCE is the env fallback — keeps it out of shell history)
 lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats resume)
-lo kubehz join                # mint a node join ticket (hosting: shared)
+lo kubehz join <node>         # mint a node join ticket (hosting: shared); --print-token also prints the plaintext ticket (when a join script was written)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
 lo kubehz node join           # join THIS machine to a hosted cluster (static pool)
@@ -523,7 +531,7 @@ Manage the Go kustomize plugins (alias: `lo ku`).
 
 ```bash
 lo kustomize build            # compile plugin binaries into the plugin home
-lo kustomize test             # plugin unit + integration tests
+lo kustomize test             # plugin unit + integration tests (runs `make test` in kustomize/: needs make + a Go toolchain)
 lo kustomize list             # list discoverable plugins
 lo kustomize clean            # remove built binaries
 ```

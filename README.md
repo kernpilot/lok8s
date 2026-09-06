@@ -310,7 +310,7 @@ The optional **operator** ([shell-operator](https://github.com/flant/shell-opera
 lok8s treats AI as a first-class, **local-first** capability — not a cloud dependency.
 
 - **`lo chat` — an on-device cluster assistant.** Ask "why won't this deploy?" or "what's the LB IP?" and it routes through `lo` tools, gathers facts, and streams a markdown answer in your terminal. It runs **read-only by default**, enforced in *code* (not by trusting the model), so it can't mutate your cluster unless you switch posture with `/posture open`. Backends are local: [Ollama](https://ollama.com) or any OpenAI-compatible server (llama-server, [llamafile](https://github.com/Mozilla-Ocho/llamafile), vLLM). Frontier CLIs (claude/gemini/codex) are strictly opt-in handoffs. Run `lo chat --check` for a guided setup. ([Local AI guide](docs/guide/lo-chat.md))
-- **`lo mcp` — your CLI as agent tools.** Every leaf `lo` command is exposed as an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio, so agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root.
+- **`lo mcp` — your CLI as agent tools.** Every leaf `lo` command is exposed as an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio, so agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root (it still launches the argsh-builtin server; `lo mcp` is the native one — see below).
 - **`lo ai` — wire skills into your assistant.** The repo ships curated [skills](skills/) (cluster specs, services, addons, secrets, the dev loop, troubleshooting…). `lo ai link claude` symlinks them into `.claude/skills/` for native loading; other agents get them by injection. `lo ai check` reports the whole setup at a glance.
 
 Try it in two commands:
@@ -351,25 +351,25 @@ argsh is still in the toolchain: the Hetzner provider plugin and the frozen tree
 | Command | Description |
 |---------|-------------|
 | `lo use [domain]` | Set / show the active domain |
-| `lo up [--open-tilt]` | Provision cluster + bootstrap + start Tilt |
+| `lo up [--open-tilt]` | Provision cluster + bootstrap + start Tilt (`--ci [--timeout <d>]`: headless `tilt ci`, real exit status) |
 | `lo down` | Stop Tilt + delete the cluster |
-| `lo status` | Cluster health + per-target build state |
+| `lo status` | Cluster health (the driver's status check) |
 | `lo provision` | Provision cluster infra + apply `spec.bootstrap` addons (no Tilt, no `targets/` deploy) |
 | `lo build` | Render the domain kustomization → `clusters/<domain>/artifacts.yaml` |
 | `lo deploy [-l k=v]` | Apply the domain artifact (CRDs → resources → health) |
 | `lo lint` | Validate specs, bootstrap entries, target refs |
 | `lo doctor` | Diagnose the local environment / toolchain |
-| `lo addons [name]` | List / inspect framework bootstrap addons |
+| `lo addons [name...] [--detail]` | List / inspect framework bootstrap addons (`--detail`: the ones this cluster deploys, with category + configuration hints) |
 | `lo kubeconfig` | Print the domain's kubeconfig (`--oidc` for the kubelogin exec-plugin) |
 | `lo destroy` | Tear down a cluster |
 | `lo clean [--all]` | Clean volumes; optionally prune Docker |
 | `lo chat` | Local AI assistant (read-only by default) |
 | `lo ai check\|skills\|link\|unlink` | Manage AI skills + integration |
 | `lo mcp` | Start the MCP tool server (stdio) |
-| `lo tilt up\|down\|status\|restart` | Manage the Tilt environment |
+| `lo tilt up\|down\|status\|restart\|ci\|preflight` | Manage the Tilt environment (`ci`: headless build + deploy + wait; `preflight`: clear stuck-Terminating objects) |
 | `lo registry up\|down\|status\|clean` | Manage registry mirrors |
 
-Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>` — in this table only `lo use [domain]` and `lo addons [name]` take a positional. `lo build` and `lo deploy` take none: both act on the whole domain kustomization (deploy narrows via `-l key=value`, not targets). Global flags: `--verbose|-v`, `--force|-f`, `--force-recreate`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
+Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>` — in this table only `lo use [domain]` and `lo addons [name...]` take a positional. `lo build` and `lo deploy` take none: both act on the whole domain kustomization (deploy narrows via `-l key=value`, not targets). Global flags: `--verbose|-v`, `--force|-f`, `--force-recreate`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
 
 &nbsp;
 

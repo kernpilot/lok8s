@@ -5,6 +5,7 @@ package cli
 // actions live in internal/hooks.
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -19,7 +20,7 @@ func init() { registerPorted("hooks", newHooksCommand) }
 
 // hooksRun maps the hooks package's already-printed sentinel onto the cli one.
 func hooksRun(err error) error {
-	if err == hooks.ErrHandled {
+	if errors.Is(err, hooks.ErrHandled) {
 		return ErrHandled
 	}
 	return err

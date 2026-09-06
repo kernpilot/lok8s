@@ -105,25 +105,45 @@ func TestKubehzTreeMatchesArgshUsage(t *testing.T) {
 	}
 }
 
-func TestParseReceive(t *testing.T) {
-	var errOut bytes.Buffer
-	p, err := parseReceive(&errOut, []string{"--bundle", "/b", "-s", "/snap", "--single-node", "-f", "--domain=x.dev", "-v"})
+// The receive flags are real cobra flags now (help, completion and the MCP
+// schema see them); -s must still mean --snapshot, not the global --cluster.
+func TestHandoverReceiveFlagsBindLikeTheBashSpec(t *testing.T) {
+	root := NewRoot(&config.Paths{Base: t.TempDir()})
+	cmd, _, err := root.Find([]string{"kubehz", "handover", "receive"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.bundle != "/b" || p.snapshot != "/snap" || !p.singleNode || !p.force || p.domain != "x.dev" || !p.domainChanged || !p.verbose {
-		t.Fatalf("%+v", p)
+	if err := cmd.ParseFlags([]string{"--bundle", "/b", "-s", "/snap", "--single-node", "-f", "--domain=x.dev", "-v"}); err != nil {
+		t.Fatal(err)
+	}
+	f := cmd.Flags()
+	bundle, _ := f.GetString("bundle")
+	snapshot, _ := f.GetString("snapshot")
+	single, _ := f.GetBool("single-node")
+	force, _ := f.GetBool("force")
+	domain, _ := f.GetString("domain")
+	verbose, _ := f.GetCount("verbose")
+	if bundle != "/b" || snapshot != "/snap" || !single || !force || domain != "x.dev" || verbose != 1 {
+		t.Fatalf("bundle=%q snapshot=%q single=%v force=%v domain=%q verbose=%d", bundle, snapshot, single, force, domain, verbose)
 	}
 	// -s means --snapshot here, shadowing the global --cluster shorthand.
-	if p.cluster != "" {
+	if cluster, _ := f.GetString("cluster"); cluster != "" {
 		t.Fatal("-s must not bind to --cluster")
 	}
-	if _, err := parseReceive(&errOut, []string{"--bundle"}); err == nil || !strings.Contains(errOut.String(), "flag needs an argument: --bundle") {
-		t.Fatalf("%v %s", err, errOut.String())
-	}
-	errOut.Reset()
-	if _, err := parseReceive(&errOut, []string{"--nope"}); err == nil || !strings.Contains(errOut.String(), "unknown flag: --nope") {
-		t.Fatalf("%v %s", err, errOut.String())
+	// Parse failures keep the argsh error shape.
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"kubehz", "handover", "receive", "--bundle"}, "flag needs an argument: --bundle"},
+		{[]string{"kubehz", "handover", "receive", "--nope"}, "unknown flag: --nope"},
+		{[]string{"kubehz", "handover", "receive", "-b"}, "missing value for flag: bundle"},
+		{[]string{"kubehz", "handover", "receive"}, "missing required flag: bundle"},
+	} {
+		_, stderr, err := runLo(t, NewRoot(&config.Paths{Base: t.TempDir()}), tc.args...)
+		if err == nil || !strings.Contains(stderr, "Error: "+tc.want) {
+			t.Errorf("%v: err=%v stderr=%q", tc.args, err, stderr)
+		}
 	}
 }
 

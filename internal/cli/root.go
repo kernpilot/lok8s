@@ -2,7 +2,8 @@
 package cli
 
 import (
-	"errors"
+	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -10,12 +11,21 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // ErrHandled marks an error whose message was already printed in the bash
 // implementation's own format ([error] … on stderr). The caller exits
 // non-zero without printing anything further.
-var ErrHandled = errors.New("handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
+
+// argshErrorf prints a parse error in the argsh entrypoint's format. (The
+// argsh implementation exits 2 on parse errors; the Go binary exits 1 — the
+// message is what scripts and humans match on.)
+func argshErrorf(errOut io.Writer, format string, a ...any) error {
+	fmt.Fprintf(errOut, "Error: "+format+"\n\n  Run \"lo -h\" for more information.\n", a...)
+	return ErrHandled
+}
 
 // portedCommands maps command names to their Go implementations. Anything
 // absent here still shims to the argsh implementation. Entries register

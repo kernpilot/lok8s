@@ -20,7 +20,6 @@
 package oidc
 
 import (
-	"errors"
 	"io"
 	"os"
 	"strings"
@@ -32,7 +31,7 @@ import (
 
 // ErrPrinted marks an error whose message was already printed in the bash
 // implementation's own format ([error] … on stderr).
-var ErrPrinted = errors.New("oidc: error already printed")
+var ErrPrinted = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Env var names — exact spelling shared with the bash drivers' spec readers.
 const (

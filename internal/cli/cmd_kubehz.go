@@ -4,15 +4,13 @@ package cli
 // main (main::kubehz + the node and handover groups); the bodies live in
 // internal/kubehz.
 //
-// `handover receive` disables cobra flag parsing and hand-parses argsh-style:
-// its spec gives -s to --snapshot, shadowing the global --cluster shorthand,
-// which cobra cannot express (the cmd_secrets precedent).
+// `handover receive` gives -s to --snapshot (the bash spec), shadowing the
+// global --cluster shorthand; it declares its own `cluster` flag so cobra
+// does not merge the inherited one (the cmd_secrets precedent).
 
 import (
 	"errors"
-	"io"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -326,131 +324,36 @@ func newKubehzHandover(paths *config.Paths) *cobra.Command {
 	return cmd
 }
 
-// receiveFlags is the hand-parse result for `handover receive`: the
-// subcommand's spec plus everything it inherits (main's global flags) —
-// first-match-wins on shorthands, which is how -s means --snapshot here.
-type receiveFlags struct {
-	bundle, snapshot        string
-	singleNode, force, help bool
-	verbose, remote         bool
-	forceRecreate           bool
-	domain, cluster         string
-	domainChanged           bool
-	positionals             []string
-}
-
-func parseReceive(errOut io.Writer, args []string) (*receiveFlags, error) {
-	p := &receiveFlags{}
-	valueFlag := func(long string) bool {
-		switch long {
-		case "bundle", "snapshot", "domain", "kubernetes", "cluster", "config", "domain-sans":
-			return true
-		}
-		return false
-	}
-	setValue := func(long, val string) {
-		switch long {
-		case "bundle":
-			p.bundle = val
-		case "snapshot":
-			p.snapshot = val
-		case "domain":
-			p.domain, p.domainChanged = val, true
-		case "cluster":
-			p.cluster = val
-		}
-	}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "-" || !strings.HasPrefix(a, "-"):
-			p.positionals = append(p.positionals, a)
-		case strings.HasPrefix(a, "--"):
-			long, val, hasVal := strings.Cut(a[2:], "=")
-			switch {
-			case valueFlag(long):
-				if !hasVal {
-					i++
-					if i >= len(args) {
-						return nil, argshErrorf(errOut, "flag needs an argument: %s", a)
-					}
-					val = args[i]
-				}
-				setValue(long, val)
-			case long == "single-node":
-				p.singleNode = true
-			case long == "force":
-				p.force = true
-			case long == "force-recreate":
-				p.forceRecreate = true
-			case long == "verbose":
-				p.verbose = true
-			case long == "remote":
-				p.remote = true
-			case long == "help":
-				p.help = true
-			default:
-				return nil, argshErrorf(errOut, "unknown flag: %s", a)
-			}
-		default:
-			if len(a) != 2 {
-				return nil, argshErrorf(errOut, "unknown flag: %s", a)
-			}
-			switch a[1] {
-			case 'b', 's':
-				long := "bundle"
-				if a[1] == 's' {
-					long = "snapshot"
-				}
-				i++
-				if i >= len(args) {
-					return nil, argshErrorf(errOut, "flag needs an argument: %s", a)
-				}
-				setValue(long, args[i])
-			case 'f':
-				p.force = true
-			case 'v':
-				p.verbose = true
-			case 'r':
-				p.remote = true
-			case 'h':
-				p.help = true
-			default:
-				return nil, argshErrorf(errOut, "unknown flag: %s", a)
-			}
-		}
-	}
-	return p, nil
-}
-
 func newKubehzHandoverReceive(paths *config.Paths) *cobra.Command {
-	return &cobra.Command{
-		Use:                "receive --bundle <path> [--snapshot <file>] [--single-node] [--force]",
-		Aliases:            []string{"r"},
-		Short:              "Restore an exported control plane onto THIS node (kubeadm path)",
-		Annotations:        commandSpec{destructive: true}.annotations(),
-		DisableFlagParsing: true,
-		SilenceUsage:       true,
+	c := &cobra.Command{
+		Use:          "receive --bundle <path> [--snapshot <file>] [--single-node] [--force]",
+		Aliases:      []string{"r"},
+		Short:        "Restore an exported control plane onto THIS node (kubeadm path)",
+		Annotations:  commandSpec{destructive: true}.annotations(),
+		Args:         secretsArgs(0, 0),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := parseReceive(cmd.ErrOrStderr(), args)
-			if err != nil {
-				return err
-			}
-			if p.help {
-				return cmd.Help()
-			}
-			if len(p.positionals) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "unexpected argument: %s", p.positionals[0])
-			}
-			if p.bundle == "" {
+			f := cmd.Flags()
+			bundle, _ := f.GetString("bundle")
+			snapshot, _ := f.GetString("snapshot")
+			singleNode, _ := f.GetBool("single-node")
+			force, _ := f.GetBool("force")
+			if bundle == "" {
 				return argshErrorf(cmd.ErrOrStderr(), "missing required flag: bundle")
 			}
-			applyMainEnv(paths, cmd.ErrOrStderr(), p.verbose, p.force || p.forceRecreate, p.remote, p.domain, p.domainChanged, p.cluster)
+			ambientMainEnv(cmd, paths)
 			return kubehzRun(kubehzContext(cmd, paths).HandoverReceive(cmd.Context(), kubehz.ReceiveOpts{
-				Bundle: p.bundle, Snapshot: p.snapshot, SingleNode: p.singleNode, Force: p.force,
+				Bundle: bundle, Snapshot: snapshot, SingleNode: singleNode, Force: force,
 			}))
 		},
 	}
+	f := c.Flags()
+	f.StringP("bundle", "b", "", "Exported control-plane bundle (tar or directory)")
+	f.StringP("snapshot", "s", "", "etcd snapshot file to restore (default: the bundle's snapshot-location)")
+	f.Bool("single-node", false, "Restore as a single control-plane node")
+	// -s is --snapshot here; the local `cluster` shadows the global by name.
+	f.String("cluster", "", "Cluster name to manage")
+	return argshFlagErrors(c)
 }
 
 func newKubehzHandoverPreseed(paths *config.Paths) *cobra.Command {

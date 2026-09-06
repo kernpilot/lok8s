@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"os"
+	"regexp"
 
 	"github.com/spf13/cobra"
 
@@ -135,9 +136,30 @@ func wiredDrivers(paths *config.Paths, kc *kubehz.Context, loader *bridge.Loader
 // Subcommands inherit it (cobra walks parents for the flag-error func).
 func argshFlagErrors(cmd *cobra.Command) *cobra.Command {
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
-		return argshErrorf(c.ErrOrStderr(), "%v", err)
+		return argshErrorf(c.ErrOrStderr(), "%s", argshFlagError(c, err.Error()))
 	})
 	return cmd
+}
+
+var (
+	pflagUnknownShorthandRe  = regexp.MustCompile(`^unknown shorthand flag: '(.)' in -\S+$`)
+	pflagNeedsArgShorthandRe = regexp.MustCompile(`^flag needs an argument: '(.)' in -\S+$`)
+)
+
+// argshFlagError rewrites pflag's SHORTHAND messages into argsh's: `unknown
+// shorthand flag: 'x' in -x` → `unknown flag: -x`, `flag needs an argument:
+// 'n' in -n` → `missing value for flag: <long name>`. The long-form messages
+// already match, so they pass through.
+func argshFlagError(c *cobra.Command, msg string) string {
+	if m := pflagUnknownShorthandRe.FindStringSubmatch(msg); m != nil {
+		return "unknown flag: -" + m[1]
+	}
+	if m := pflagNeedsArgShorthandRe.FindStringSubmatch(msg); m != nil {
+		if f := c.Flags().ShorthandLookup(m[1]); f != nil {
+			return "missing value for flag: " + f.Name
+		}
+	}
+	return msg
 }
 
 // dispatchExit maps a dispatch/driver error onto the process contract the

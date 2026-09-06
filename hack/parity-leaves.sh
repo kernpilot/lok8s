@@ -323,6 +323,41 @@ else
   expect_rc 1 "${AG}" ai bogus
 fi
 
+# ── lo trust ─────────────────────────────────────────────────────────────────
+# mkcert is STUBBED: the real one installs a CA into the ambient trust store.
+# The project gets its own .bin (toolchain by symlink, mkcert replaced); the
+# Go side resolves .bin first, the bash side gets it through the shim's PATH.
+TR="${WORK}/trust"
+mkdir -p "${TR}/clusters" "${TR}/.bin"
+ln -s "${ROOT}/.lok8s" "${TR}/.lok8s"
+for entry in "${ROOT}"/.bin/*; do ln -s "${entry}" "${TR}/.bin/$(basename "${entry}")"; done
+rm -f "${TR}/.bin/mkcert"
+cat > "${TR}/.bin/mkcert" <<'SH'
+#!/usr/bin/env bash
+# Parity stub: never touches a trust store.
+case "${1:-}" in
+  -CAROOT)  echo "/stub/caroot" ;;
+  -install) echo "stub: CA installed" ;;
+  *)        echo "parity stub: unexpected mkcert ${*}" >&2; exit 1 ;;
+esac
+SH
+chmod +x "${TR}/.bin/mkcert"
+run_pair "${TR}" "${TR}" trust
+expect_rc 1 "${TR}" trust extra                                 # no positionals (argsh: 2)
+
+# ── lo kustomize (list / clean; build + test need a Go toolchain → not here) ──
+KU="${WORK}/ku"
+new_project "${KU}"
+run_pair "${KU}" "${KU}" kustomize list                         # no plugin home yet
+run_pair "${KU}" "${KU}" kustomize clean                        # no sources beside a linked framework → no-op
+mkdir -p "${KU}/.kustomize/example.dev/v1/thing/Thing"
+printf '#!/bin/sh\n' > "${KU}/.kustomize/example.dev/v1/thing/Thing/Thing"
+chmod +x "${KU}/.kustomize/example.dev/v1/thing/Thing/Thing"
+run_pair "${KU}" "${KU}" kustomize list
+run_pair "${KU}" "${KU}" ku l
+expect_rc 1 "${KU}" kustomize bogus
+expect_rc 0 "${KU}" kustomize                                   # group help: cobra vs argsh usage (D2), rc only
+
 if (( failures )); then
   echo; echo "${failures} parity failure(s)"
   exit 1

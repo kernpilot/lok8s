@@ -19,7 +19,6 @@ package deploy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,7 +35,7 @@ import (
 )
 
 // ErrHandled marks a failure whose [error] line was already printed.
-var ErrHandled = errors.New("deploy: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // ExitError carries a kubectl apply's exit status out of the unfiltered
 // apply — bash's `set -e` exited the whole `lo` with that status.

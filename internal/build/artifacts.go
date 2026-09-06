@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +18,7 @@ import (
 // ErrHandled marks a build failure whose message was already printed in the
 // bash implementation's own [error] format; callers exit non-zero without
 // printing anything further.
-var ErrHandled = errors.New("build: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Options carries one build invocation's inputs.
 type Options struct {

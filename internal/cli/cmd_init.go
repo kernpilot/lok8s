@@ -6,6 +6,7 @@ package cli
 // implementation.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ func init() { registerPorted("init", newInitCommand) }
 // scaffoldRun maps the scaffold package's already-printed sentinel onto the
 // cli one.
 func scaffoldRun(err error) error {
-	if err == scaffold.ErrHandled {
+	if errors.Is(err, scaffold.ErrHandled) {
 		return ErrHandled
 	}
 	return err

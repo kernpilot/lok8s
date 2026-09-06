@@ -4,10 +4,19 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 )
+
+// ErrHandled marks an error whose message was already printed in the bash
+// implementation's own format ([error] … on stderr). It is the ONE sentinel:
+// every package's name for it (cli.ErrHandled, kubehz.ErrHandled,
+// secrets.ErrPrinted, …) is this value, so errors.Is holds across package
+// boundaries and a %w wrap anywhere still reads as handled. The caller
+// exits non-zero without printing anything further.
+var ErrHandled = errors.New("handled")
 
 const (
 	green  = "\033[0;32m"

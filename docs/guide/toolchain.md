@@ -160,8 +160,7 @@ you when a pin is missing or off. **For a contributor** everything in the
 right column is needed, because the parity harnesses and the bats suites
 really run the argsh side — `b install` in a clone of the repo gets it.
 
-**Intended end state** (each step is an owner decision, sequenced
-separately): `argsh`, `jq` and `bats` leave the contributor `core` group
+**Intended end state** (planned; each step is sequenced separately): `argsh`, `jq` and `bats` leave the contributor `core` group
 once the provider plugins have Go twins and the shipped `.mcp.json` targets
 `lo mcp`; `sops` and `ssh-to-age` follow once `lo build` split mode
 encrypts through the library; `yq` stays until the renderer-drift rule in

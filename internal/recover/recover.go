@@ -43,7 +43,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,7 +62,7 @@ import (
 )
 
 // ErrHandled marks a failure whose diagnostic was already printed.
-var ErrHandled = errors.New("recover: handled")
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Provider is the slice of the provider contract recover consumes
 // (utils/provider.sh): the OPTIONAL rebuild + doctor hooks and the
