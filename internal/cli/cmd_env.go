@@ -4,11 +4,8 @@ package cli
 // extension). Go port of .lok8s/libs/env (main::env); the rendering lives in
 // internal/env.
 //
-// `services` disables cobra flag parsing and hand-parses argsh-style: the
-// bash spec gives -s to --only-services and -r to --only-registry inside the
-// subcommand, shadowing the global --cluster/-s and --remote/-r shorthands —
-// cobra cannot express a shadowed inherited shorthand (the merged flag set
-// panics on the redefinition), the hand parser can.
+// `services` takes real cobra flags; its two switches have no shorthands
+// because in bash the inherited globals win the -s/-r collision there.
 
 import (
 	"errors"

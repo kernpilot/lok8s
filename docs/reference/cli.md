@@ -490,7 +490,7 @@ lo kubehz claim-code          # print the one-time claim code for the dashboard
 lo kubehz claim --nonce <v>   # place a dashboard-minted claim nonce for the agent to echo
                               # (`--nonce -` reads it from stdin; KUBEHZ_CLAIM_NONCE is the env fallback — keeps it out of shell history)
 lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats resume)
-lo kubehz join <node>         # mint a node join ticket (hosting: shared); --print-token also echoes the ticket
+lo kubehz join <node>         # mint a node join ticket (hosting: shared); --print-token also prints the plaintext ticket (when a join script was written)
 lo kubehz assess              # platform assessment + handover feasibility
 lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
 lo kubehz node join           # join THIS machine to a hosted cluster (static pool)

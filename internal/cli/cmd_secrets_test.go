@@ -160,3 +160,54 @@ func TestSecretsSubcommandAnnotations(t *testing.T) {
 		}
 	}
 }
+
+// `secrets set` / `env`: -s is --namespace (the bash spec), -e/--enc are
+// --encrypt; the global --cluster is reachable by its long name only.
+func TestSecretsSetEnvFlagsBindLikeTheBashSpec(t *testing.T) {
+	root := NewRoot(&config.Paths{Base: t.TempDir()})
+	set, _, err := root.Find([]string{"secrets", "set"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := set.ParseFlags([]string{"-n", "app", "-s", "myns", "--enc", "--cluster", "c1", "--domain", "a.dev"}); err != nil {
+		t.Fatal(err)
+	}
+	f := set.Flags()
+	name, _ := f.GetString("name")
+	ns, _ := f.GetString("namespace")
+	enc, _ := f.GetBool("enc")
+	encrypt, _ := f.GetBool("encrypt")
+	cluster, _ := f.GetString("cluster")
+	if name != "app" || ns != "myns" || !enc || encrypt || cluster != "c1" {
+		t.Fatalf("name=%q ns=%q enc=%v encrypt=%v cluster=%q", name, ns, enc, encrypt, cluster)
+	}
+	env, _, err := root.Find([]string{"secrets", "env"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.ParseFlags([]string{"--name", "app", "-s", "other"}); err != nil {
+		t.Fatal(err)
+	}
+	if ns, _ := env.Flags().GetString("namespace"); ns != "other" {
+		t.Fatalf("env -s bound to %q, want namespace", ns)
+	}
+	if env.Flags().Lookup("encrypt") != nil {
+		t.Fatal("env must not take --encrypt")
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"secrets", "set", "-n"}, "missing value for flag: name"},
+		{[]string{"secrets", "set", "-x", "k"}, "unknown flag: -x"},
+		{[]string{"secrets", "set", "--nope", "k"}, "unknown flag: --nope"},
+		{[]string{"secrets", "set"}, "missing required argument: key"},
+		{[]string{"secrets", "env", "extra"}, "unexpected argument: extra"},
+		{[]string{"env", "services", "--nope"}, "unknown flag: --nope"},
+	} {
+		_, stderr, err := runLo(t, NewRoot(&config.Paths{Base: t.TempDir()}), tc.args...)
+		if err == nil || !strings.Contains(stderr, "Error: "+tc.want) {
+			t.Errorf("%v: err=%v stderr=%q", tc.args, err, stderr)
+		}
+	}
+}

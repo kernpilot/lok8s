@@ -408,6 +408,7 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D7 | **Spec parse errors carry the binary's own message.** An unparsable `cluster.lok8s.yaml` surfaces yq's `Error: bad file …` line in bash and `[error] cannot parse cluster spec: …` in Go; same rc. | `internal/kubehz`, `hack/parity-kubehz.sh` |
 | D8 | **`lo status` on a domain without a spec.** The bash `dispatch_status` ignores `resolve_spec`'s return and dies on an unbound variable (`set -u`); the binary prints the invalid-domain error and continues with the cluster-free sections. A bash defect, not a parity target. | `hack/parity-orchestrate.sh` |
 | D9 | **`lo kubehz register` / `join` do not print `LOK8S_SPEC_FILE: unbound variable`.** See defect B3 below; the binary passes the spec path. | `hack/parity-kubehz.sh` |
+| D23 | **A `-s` placed before the subcommand binds to the leaf's own `-s` on `secrets set`, `secrets env` and `kubehz handover receive`.** Those leaves give `-s` to `--namespace` / `--snapshot` (the bash spec); cobra hands the leaf every flag on the line regardless of position, so `lo -s myns secrets set …` reads `myns` as the namespace, where argsh's main consumed it as `--cluster` first. After the subcommand both agree. The harnesses place `-s` after the verb. | `internal/cli/cmd_secrets.go`, `cmd_kubehz.go` |
 
 ### Fail-loud instead of fail-silent
 
@@ -481,7 +482,6 @@ harness in the same change.
 | B3 | **`lo kubehz register` / `join` read `LOK8S_SPEC_FILE` before it is set.** `validate_config` reads a variable only `provision::resolve_spec` sets, and `register` calls it after `validate`, so bash prints a spurious `unbound variable` line and the per-kind validation rules are dead on those two verbs (kind reads as `""`). The binary passes the spec path (D9); the kind rules are exercised through `deploy`, where the bash sets the variable itself. | `hack/parity-kubehz.sh`, `.lok8s/libs/kubehz/` |
 | B4 | **`lo kubehz node … --cluster` guard is dead on dispatch** in bash (D6). | `hack/parity-kubehz.sh` |
 | B5 | **`lo status` on a domain without a spec crashes on an unbound variable** in bash (D8): `dispatch_status` ignores `resolve_spec`'s return and dies on `LOK8S_SPEC_KIND` under `set -u`. A traversal-shaped domain (`../evil`) takes the same path. | `hack/parity-orchestrate.sh` |
-| B6 | **`lo image clean` names the cache registry differently.** bash reads `KIND_EXPERIMENTAL_DOCKER_NETWORK` alone (default `lok8s`), so on a domain with `spec.network.name` set it drops `lok8s-registry-cache` — a container of another project, or nothing — while the binary layers `spec.network.name` first and drops `<name>-registry-cache`. Neither side has been changed yet; the loop harness allow-lists the name and diffs the rest of the line. Align both in one change. | `internal/cli/cmd_image.go`, `.lok8s/libs/image`, `hack/parity-loop.sh` |
 
 ## Release artifacts
 

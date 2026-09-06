@@ -109,8 +109,9 @@ func TestCommandTreeMatchesArgshUsage(t *testing.T) {
 		if w, ok := want[name]; ok {
 			// commandTree mirrors the usage array, but a builder may still
 			// hard-code its own Short; the ASSEMBLED tree is what `lo --help`
-			// prints, so it is compared too. (Flags, arg arity and long help
-			// are outside this gate.)
+			// prints, so it is compared too — top-level commands only.
+			// (Subgroup leaves, flags, arg arity and long help are outside
+			// this gate.)
 			if cmd.Short != w.short {
 				t.Errorf("command %q: assembled Short drifts from .lok8s/lo:\n  bash: %s\n  go:   %s", name, w.short, cmd.Short)
 			}

@@ -105,8 +105,9 @@ func specClusterName(specPath string) string {
 	return doc.Metadata.Name
 }
 
-// exactArgs returns an argsh-shaped arity validator: at least min positionals
-// (naming the first missing one) and at most max.
+// secretsArgs returns an argsh-shaped arity validator, shared by every leaf
+// that mirrors an argsh `:args` spec: at least min positionals (naming the
+// first missing one) and at most max.
 func secretsArgs(min, max int, names ...string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if len(args) < min {

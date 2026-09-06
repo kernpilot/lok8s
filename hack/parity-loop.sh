@@ -306,12 +306,11 @@ check - image cache pinned --domain alpha.dev           # explicit image: pin
 check - image cache --domain alpha.dev                  # no service, no --all
 rm -f "${WORK}/proj/services.yaml" "${WORK}/proj/services.local.yaml"
 check - image cache svc --domain alpha.dev              # no endpoint configured
-# The registry NAME is allow-listed: bash derives it from
-# KIND_EXPERIMENTAL_DOCKER_NETWORK alone (lok8s-registry-cache here), the
-# binary layers spec.network.name first (paritynet-registry-cache) — an
-# unaligned divergence, recorded as B6 in go-migration.md. Everything else
-# on the line, and the stub-docker silence, is diffed.
-check 'registry-cache' image clean --domain alpha.dev   # stub docker: rm + volume rm fail, both silent
+# --domain BEFORE the verb (D3): bash main resolves the spec — and with it
+# KIND_EXPERIMENTAL_DOCKER_NETWORK, hence the registry name — from the
+# domain it parsed before dispatch, so a trailing --domain is invisible to
+# that lookup in bash only. Placed first, both name paritynet-registry-cache.
+check - --domain alpha.dev image clean                  # stub docker: rm + volume rm fail, both silent
 
 # Unresolvable IP: a Lo spec without spec.network on a non-slot domain.
 mkdir -p "${WORK}/proj/clusters/bare.dev"
