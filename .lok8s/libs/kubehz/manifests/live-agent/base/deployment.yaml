@@ -58,7 +58,7 @@ spec:
           #
           # THE SINGLE SOURCE OF TRUTH for the digest. Nothing else in this
           # kustomization repeats it.
-          image: ghcr.io/kernpilot/kubehz-agent@sha256:5a34f3569671fb2326b4b7e896069947f5680f9bac242e94fc888dc429720873
+          image: ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

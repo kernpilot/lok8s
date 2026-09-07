@@ -411,7 +411,7 @@ Dashboard visibility comes from an in-cluster agent. lok8s ships two, and
 | Workload | CronJob `kubehz-heartbeat` | Deployment `kubehz-live-agent` |
 | What it is | A shell script in a stock `alpine/k8s` image | The Go agent from the public [kubehz-agent](https://github.com/kernpilot/kubehz-agent) repo |
 | Cadence | Every 5 minutes | Within seconds of a change, and at least every minute |
-| Reports | Node status, control-plane component health, certificate expiry, the 24 h [assessment](#assessment-and-handover) | Nodes with capacity and instance type, pod counts by phase, warning events, machine-controller failures, your addon inventory |
+| Reports | Node status, control-plane component health, certificate expiry, the 24 h [assessment](#assessment-and-handover) | Node status with capacity and instance type, control-plane component health, certificate expiry, pod counts by phase, warning events, machine-controller failures, your addon inventory |
 | Can act | No | Yes: worker scaling, self-healing and worker upgrades, when the platform authorizes them |
 | Costs | ~50 m CPU for a few seconds every 5 minutes | ~25 m CPU and 64 Mi resident, always on |
 
@@ -487,10 +487,12 @@ Set `agent: cronjob` and re-run `lo kubehz deploy` to get them back.
 ### Permissions the live agent holds
 
 The base install is read-only. It can `get`, `list` and `watch` nodes, pods and
-events, read your `ClusterInventory`, and `get` one Secret by name: its own
-identity Secret. It has one write: `patch` on `clusterinventories/status`, which
-is where the addon-update answer lands. It cannot read pod logs, exec into a
-pod, or read any other Secret.
+events, and read your `ClusterInventory`. It can `list`
+CertificateSigningRequests (for the certificate-expiry field) and `get` the
+`/readyz` and `/version` API paths (for component health). It can `get` one
+Secret by name: its own identity Secret. It has one write: `patch` on
+`clusterinventories/status`, which is where the addon-update answer lands. It
+cannot read pod logs, exec into a pod, or read any other Secret.
 
 With `access: managed` it also gets, in `kube-system` only:
 
@@ -509,10 +511,10 @@ With `access: managed` it also gets, in `kube-system` only:
   those pods, once per machine, and only while the node is still unreachable.
 
 Every one of these is documented at the rule in
-[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/56ccd9b370066b2b581bd97733e988a856df8857/deploy/managed/rbac-managed.yaml),
+[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/v0.1.0/deploy/managed/rbac-managed.yaml),
 and lok8s ships that file byte-identical to the agent's own repo: the
 permissions you grant are the ones the public source documents. That link
-points at the exact commit lok8s vendored, which is what makes
+points at the exact release tag lok8s vendored, which is what makes
 "byte-identical" checkable: the SHA-256 of both vendored files is recorded in
 `.lok8s/libs/kubehz/manifests/live-agent/UPSTREAM.sha256`, and
 `sha256sum --check UPSTREAM.sha256` from that directory verifies it.
@@ -522,7 +524,7 @@ check what you are about to run:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/kernpilot/kubehz-agent/\.github/workflows/' \
+  --certificate-identity-regexp '^https://github\.com/kernpilot/kubehz-agent/\.github/workflows/release\.yaml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/kernpilot/kubehz-agent@sha256:<the digest in the manifest>
 ```
