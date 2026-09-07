@@ -759,20 +759,25 @@ _stub_kubectl_warns() {
 }
 
 @test "rbac: the base never grants delete, create, update or patch on core resources" {
-  run bash -c "command kustomize build '${LIVE_DIR}/base' | command yq -r 'select(.kind==\"ClusterRole\" or .kind==\"Role\") | .rules[] | (.apiGroups|join(\",\")) + \"|\" + (.resources|join(\",\")) + \"|\" + (.verbs|join(\",\"))' | command grep -v '^---$'"
+  run bash -c "command kustomize build '${LIVE_DIR}/base' | command yq -r 'select(.kind==\"ClusterRole\" or .kind==\"Role\") | .rules[] | ((.apiGroups // [])|join(\",\")) + \"|\" + ((.resources // .nonResourceURLs)|join(\",\")) + \"|\" + (.verbs|join(\",\"))' | command grep -v '^---$'"
   assert_success
   # The exact rule set, pinned. A new line here is a permission a customer did
   # not agree to, so this test is meant to fail on any widening.
   assert_line "|nodes,pods,events|get,list,watch"
   assert_line "lok8s.dev|clusterinventories|get,list,watch"
   assert_line "lok8s.dev|clusterinventories/status|patch"
+  # v0.1.0: the CronJob's certificate-expiry and component-health reads,
+  # ported. CSRs are list-only; the health URLs are get-only (non-resource
+  # URLs have no apiGroups/resources, so the column carries the URL list).
+  assert_line "certificates.k8s.io|certificatesigningrequests|list"
+  assert_line "|/readyz,/version|get"
   assert_line "|secrets|get"
-  # Exactly four rules — a fifth line is a permission a customer did not agree to.
-  [ "${#lines[@]}" -eq 4 ]
+  # Exactly six rules — a seventh line is a permission a customer did not agree to.
+  [ "${#lines[@]}" -eq 6 ]
 }
 
 @test "rbac: the machines DELETE verb exists ONLY in the managed overlay" {
-  run bash -c "command kustomize build '${LIVE_DIR}/managed' | command yq -r 'select(.kind==\"ClusterRole\" or .kind==\"Role\") | .rules[] | (.apiGroups|join(\",\")) + \"|\" + (.resources|join(\",\")) + \"|\" + (.verbs|join(\",\"))' | command grep -v '^---$'"
+  run bash -c "command kustomize build '${LIVE_DIR}/managed' | command yq -r 'select(.kind==\"ClusterRole\" or .kind==\"Role\") | .rules[] | ((.apiGroups // [])|join(\",\")) + \"|\" + ((.resources // .nonResourceURLs)|join(\",\")) + \"|\" + (.verbs|join(\",\"))' | command grep -v '^---$'"
   assert_success
   # Self-healing deletes a Machine and lets the MachineSet rebuild it — the
   # sharpest permission the agent holds, and the reason the overlay is opt-in.
@@ -781,8 +786,8 @@ _stub_kubectl_warns() {
   assert_line "cluster.k8s.io|machinedeployments|get,list,watch,patch"
   # The eviction unwedge: pods DELETE only, no other verb, no other resource.
   assert_line "|pods|delete"
-  # Base rules ride along unchanged; the overlay adds exactly three.
-  [ "${#lines[@]}" -eq 7 ]
+  # The six base rules ride along unchanged; the overlay adds exactly three.
+  [ "${#lines[@]}" -eq 9 ]
 }
 
 @test "rbac: the Secret read is scoped by name to the agent's own identity Secret" {
