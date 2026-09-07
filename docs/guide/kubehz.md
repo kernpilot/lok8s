@@ -487,12 +487,12 @@ Set `agent: cronjob` and re-run `lo kubehz deploy` to get them back.
 ### Permissions the live agent holds
 
 The base install is read-only. It can `get`, `list` and `watch` nodes, pods and
-events, read your `ClusterInventory`, `list` CertificateSigningRequests (for
-the certificate-expiry field), `get` the `/readyz` and `/version` API paths
-(for component health), and `get` one Secret by name: its own identity Secret.
-It has one write: `patch` on `clusterinventories/status`, which is where the
-addon-update answer lands. It cannot read pod logs, exec into a pod, or read
-any other Secret.
+events, and read your `ClusterInventory`. It can `list`
+CertificateSigningRequests (for the certificate-expiry field) and `get` the
+`/readyz` and `/version` API paths (for component health). It can `get` one
+Secret by name: its own identity Secret. It has one write: `patch` on
+`clusterinventories/status`, which is where the addon-update answer lands. It
+cannot read pod logs, exec into a pod, or read any other Secret.
 
 With `access: managed` it also gets, in `kube-system` only:
 

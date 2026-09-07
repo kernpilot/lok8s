@@ -772,7 +772,7 @@ _stub_kubectl_warns() {
   assert_line "certificates.k8s.io|certificatesigningrequests|list"
   assert_line "|/readyz,/version|get"
   assert_line "|secrets|get"
-  # Exactly six rules — a seventh line is a permission a customer did not agree to.
+  # Exactly six rules. A seventh line is a permission a customer did not agree to.
   [ "${#lines[@]}" -eq 6 ]
 }
 
@@ -971,6 +971,12 @@ _bindings() {
   # A digest is the only ref cosign verification and a rollback can reason about.
   refute_output --partial ":latest"
   refute_output --partial ":main"
+  # The exact digest, pinned: the kubehz-agent v0.1.0 release (digest.txt at
+  # https://github.com/kernpilot/kubehz-agent/releases/tag/v0.1.0). The RBAC
+  # above is pinned rule for rule; the image the RBAC was reviewed against is
+  # pinned the same way, so a digest bump and its RBAC re-read land together.
+  # A re-pin updates this line in the same change as deployment.yaml.
+  assert_output 'ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa'
 }
 
 # ══ 7. The pod spec (what the agent may do ON THE NODE) ═══════════════════
