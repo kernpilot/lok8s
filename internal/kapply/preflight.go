@@ -303,7 +303,9 @@ func (a *Applier) preflightCRD(ctx context.Context, name, mode, allow string, ku
 			gone = true
 			break
 		}
-		a.sleep(a.pollInterval())
+		if a.sleep(ctx, a.pollInterval()) != nil {
+			break
+		}
 	}
 	if !gone {
 		probe := append(append([]string{}, kubectlFlags...), "get", "crd", name)

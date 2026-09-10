@@ -39,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -80,8 +81,9 @@ type Applier struct {
 	NsWait int
 	// PollInterval is the poll sleep (KAPPLY_POLL_INTERVAL, default 1s).
 	PollInterval time.Duration
-	// Sleep is the sleep seam (tests make waits instant).
-	Sleep func(time.Duration)
+	// Sleep is the sleep seam (tests install clock.NoSleep). nil =
+	// clock.Sleep, which ends with the context.
+	Sleep clock.SleepFunc
 }
 
 // NewApplier builds an Applier over the runner, reading the decision env
@@ -123,12 +125,11 @@ func envInterval() time.Duration {
 	return time.Duration(f * float64(time.Second))
 }
 
-func (a *Applier) sleep(d time.Duration) {
+func (a *Applier) sleep(ctx context.Context, d time.Duration) error {
 	if a.Sleep != nil {
-		a.Sleep(d)
-		return
+		return a.Sleep(ctx, d)
 	}
-	time.Sleep(d)
+	return clock.Sleep(ctx, d)
 }
 
 func (a *Applier) pollInterval() time.Duration {
@@ -472,7 +473,9 @@ func (a *Applier) finalizeNamespace(ctx context.Context, name string, kubectlFla
 		if rc := a.kubectlQuiet(ctx, "", probe...); rc != 0 {
 			return
 		}
-		a.sleep(a.pollInterval())
+		if a.sleep(ctx, a.pollInterval()) != nil {
+			return
+		}
 	}
 }
 

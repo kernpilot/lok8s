@@ -173,7 +173,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 		// reconcile: without the lock a loser can rm the WINNER's
 		// freshly-created network.
 		_ = os.MkdirAll(registryStateDir(), 0o755)
-		release, locked := acquireLock(filepath.Join(registryStateDir(), network+".netlock"), d.sleep)
+		release, locked := acquireLock(ctx, filepath.Join(registryStateDir(), network+".netlock"), d.sleep)
 		if locked {
 			// The winner may have finished the recreate while we waited —
 			// re-check against the SAME equality as above, not mere
@@ -229,8 +229,8 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 					break
 				}
 				rmErr = out
-				if attempt == 1 {
-					d.sleepSeconds(1)
+				if attempt == 1 && d.sleepSeconds(ctx, 1) != nil {
+					break
 				}
 			}
 			if !rmOK && rmErr != "" {

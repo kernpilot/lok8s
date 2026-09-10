@@ -135,7 +135,9 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		if httpCode == "429" {
 			delay := kkpRetryDelay() * attempt
 			ui.Warnf(stderr, "KKP API rate limited (429), retrying in %ds (attempt %d/%d)", delay, attempt, maxRetries)
-			d.sleepSeconds(delay)
+			if err := d.sleepSeconds(ctx, delay); err != nil {
+				return "", err
+			}
 			continue
 		}
 
@@ -342,7 +344,9 @@ func (d *Driver) waitComponents(ctx context.Context, projectID, clusterID string
 			ui.Debugf(stderr, "KKP cluster %s waiting on %s (elapsed=%ds)", clusterID, lastComponent, elapsed)
 		}
 
-		d.sleepSeconds(kkpWaitInterval())
+		if err := d.sleepSeconds(ctx, kkpWaitInterval()); err != nil {
+			return err
+		}
 	}
 }
 
@@ -382,7 +386,9 @@ func (d *Driver) waitReady(ctx context.Context, projectID, clusterID string, tim
 			ui.Warnf(stderr, "KKP cluster health check failed, retrying...")
 		}
 
-		d.sleepSeconds(interval)
+		if err := d.sleepSeconds(ctx, interval); err != nil {
+			return err
+		}
 
 		// Exponential backoff (cap at 60s).
 		interval *= 2

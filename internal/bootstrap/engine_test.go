@@ -9,6 +9,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1038,5 +1039,31 @@ func TestKubeOneUnsetGateDefaultsToDefer(t *testing.T) {
 	}
 	if len(f.buildDirs) != 0 {
 		t.Errorf("render ran: %v", f.buildDirs)
+	}
+}
+
+// A cancelled context ends the DAG run: the reap loop returns the context
+// error instead of waiting for entries that stop only when the context
+// does.
+func TestApplyReturnsWhenTheContextEnds(t *testing.T) {
+	e, _, _, _, p := testEngine(t)
+	writeStackAddon(t, p)
+	spec := writeClusterSpec(t, p, "testcni")
+	kc := writeKubeconfig(t, p)
+	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
+		<-ctx.Done()
+		return 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- e.Apply(ctx, "test.lok8s.dev", spec, kc) }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Apply returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Apply did not return after the cancel")
 	}
 }

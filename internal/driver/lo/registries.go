@@ -420,7 +420,7 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 		// lock, two simultaneous runs can race rm/run on the same container
 		// — the loser's in-flight container may be removed, healed by the
 		// next run.
-		release, locked := acquireLock(configPath+".lock", d.sleep)
+		release, locked := acquireLock(ctx, configPath+".lock", d.sleep)
 		if !locked {
 			ui.Debugf(errOut, "registry %s: lock wait timed out, proceeding unlocked", regName)
 		}
@@ -533,7 +533,9 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 				}
 				return ui.Handled(fmt.Errorf("registry %s address %s squatted by %s", regName, ip, holder))
 			}
-			d.sleepSeconds(1)
+			if err := d.sleepSeconds(ctx, 1); err != nil {
+				return err
+			}
 		} else {
 			break
 		}

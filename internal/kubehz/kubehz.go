@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -60,9 +61,10 @@ type Context struct {
 	// nil = os.Getenv. A key present with "" reads as unset, like bash.
 	Env map[string]string
 
-	// Sleep is the wait seam (nil = time.Sleep): the hosted/space wait loops
-	// and the deploy drains all wait through it.
-	Sleep func(time.Duration)
+	// Sleep is the wait seam (nil = clock.Sleep, which ends with the
+	// context): the hosted/space wait loops and the deploy drains all wait
+	// through it.
+	Sleep clock.SleepFunc
 	// Now is the clock seam (nil = time.Now) — the claim-nonce stamp.
 	Now func() time.Time
 	// Hostname is `hostname` (nil = os.Hostname).
@@ -102,12 +104,11 @@ func (c *Context) getenv(key string) string {
 	return os.Getenv(key)
 }
 
-func (c *Context) sleep(d time.Duration) {
+func (c *Context) sleep(ctx context.Context, d time.Duration) error {
 	if c.Sleep != nil {
-		c.Sleep(d)
-		return
+		return c.Sleep(ctx, d)
 	}
-	time.Sleep(d)
+	return clock.Sleep(ctx, d)
 }
 
 func (c *Context) now() time.Time {

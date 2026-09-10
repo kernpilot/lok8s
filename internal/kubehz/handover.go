@@ -540,7 +540,9 @@ func (c *Context) verify(ctx context.Context, bundle, k8sDir string) error {
 			c.errorf("handover: the apiserver did not become ready within %ds (kubectl --kubeconfig %s --server %s --tls-server-name %s get ns kube-system kept failing) — state left behind: %s/pki holds the bundle PKI and the restored etcd data dir may be corrupt (a truncated snapshot restores 'successfully' under --skip-hash-check and only fails here). Clean up ('kubeadm reset') before retrying.", timeout, kubeconfig, localAPI, serverName, k8sDir)
 			return ErrHandled
 		}
-		c.sleep(5 * time.Second)
+		if err := c.sleep(ctx, 5*time.Second); err != nil {
+			return err
+		}
 		waited += 5
 	}
 	want, err := fileSHA256(filepath.Join(bundle, "ca.crt"))

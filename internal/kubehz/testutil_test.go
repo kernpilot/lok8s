@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
@@ -142,7 +143,7 @@ func newHarness(t *testing.T) *harness {
 		ErrOut:   &h.errOut,
 		HTTP:     h.srv.Client(),
 		Env:      h.env,
-		Sleep:    func(time.Duration) {},
+		Sleep:    clock.NoSleep,
 		Now:      func() time.Time { return time.Unix(1700000000, 0) },
 		Hostname: func() (string, error) { return "BOX-1.lan", nil },
 		IsRoot:   func() bool { return false },

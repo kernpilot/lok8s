@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -47,7 +47,7 @@ func newFixture(t *testing.T) *fixture {
 	f.d.Out = &f.out
 	f.d.Lib = &platform.Context{
 		Paths: paths, Runner: nopRunner{}, ErrOut: &f.stderr, HTTP: f.srv.Client(),
-		Env: map[string]string{"KUBEHZ_TOKEN": "khz_test"}, Sleep: func(time.Duration) {},
+		Env: map[string]string{"KUBEHZ_TOKEN": "khz_test"}, Sleep: clock.NoSleep,
 	}
 	return f
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/clock"
 )
 
 const waitManifest = `apiVersion: apps/v1
@@ -23,7 +25,7 @@ func waitApplier(getOut string) (*Applier, *fakeKubectl, *bytes.Buffer) {
 	f := &fakeKubectl{getOut: getOut}
 	var errOut bytes.Buffer
 	a := &Applier{Runner: f, Stdout: &bytes.Buffer{}, Stderr: &errOut,
-		NonInteractive: true, Sleep: func(time.Duration) {}, PollInterval: time.Nanosecond}
+		NonInteractive: true, Sleep: clock.NoSleep, PollInterval: time.Nanosecond}
 	return a, f, &errOut
 }
 

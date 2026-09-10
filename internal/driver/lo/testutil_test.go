@@ -21,8 +21,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -81,7 +81,7 @@ func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer, *config.Path
 	runner := &fakeRunner{t: t}
 	var errBuf bytes.Buffer
 	d := New(&driver.Deps{Paths: p, Runner: runner, Stderr: &errBuf})
-	d.sleep = func(time.Duration) {}
+	d.sleep = clock.NoSleep
 	d.SetOutput(io.Discard)
 
 	// Env hygiene: the driver communicates through process env exactly like

@@ -78,7 +78,7 @@ func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer) {
 	// same arithmetic without the waiting).
 	clock := time.Unix(0, 0)
 	d.now = func() time.Time { return clock }
-	d.sleep = func(dur time.Duration) { clock = clock.Add(dur) }
+	d.sleep = func(_ context.Context, dur time.Duration) error { clock = clock.Add(dur); return nil }
 	return d, runner, &stderr
 }
 

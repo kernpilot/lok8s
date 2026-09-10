@@ -67,7 +67,9 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 			return ErrHandled
 		}
 		c.debugf("Cluster %s status: %s (%ds / %ds)", clusterID, statusVal, elapsed, timeout)
-		c.sleep(10 * time.Second)
+		if err := c.sleep(ctx, 10*time.Second); err != nil {
+			return err
+		}
 	}
 	c.errorf("Timed out waiting for hosted cluster %s after %ds", clusterID, timeout)
 	return ErrHandled

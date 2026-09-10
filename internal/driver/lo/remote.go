@@ -60,7 +60,9 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 			ui.Debugf(errOut, "SSH ready on %s (after %ds)", remoteIP, attempts*2)
 			break
 		}
-		d.sleepSeconds(2)
+		if err := d.sleepSeconds(ctx, 2); err != nil {
+			return err
+		}
 	}
 	if !sshOK {
 		ui.Errorf(errOut, "SSH not reachable on %s after 60s", remoteIP)
@@ -78,7 +80,9 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 			ui.Debugf(errOut, "cloud-init finished on %s (after %ds)", remoteIP, attempts*3)
 			break
 		}
-		d.sleepSeconds(3)
+		if err := d.sleepSeconds(ctx, 3); err != nil {
+			return err
+		}
 	}
 	if !ciDone {
 		ui.Warnf(errOut, "cloud-init did not finish within 270s — proceeding anyway")
@@ -93,7 +97,9 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 			ui.Debugf(errOut, "Docker ready on %s (after %ds)", remoteIP, attempts*3)
 			break
 		}
-		d.sleepSeconds(3)
+		if err := d.sleepSeconds(ctx, 3); err != nil {
+			return err
+		}
 	}
 	if !dockerOK {
 		ui.Errorf(errOut, "Docker not available on %s after 180s. Check cloud-init logs: ssh %s@%s cat /var/log/cloud-init-output.log", remoteIP, remoteUser, remoteIP)
@@ -112,7 +118,9 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 			ui.Debugf(errOut, "DOCKER_HOST verified (attempt %d)", attempts)
 			return nil
 		}
-		d.sleepSeconds(3)
+		if err := d.sleepSeconds(ctx, 3); err != nil {
+			return err
+		}
 	}
 	ui.Errorf(errOut, "Docker not reachable via DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
 	return ui.Handled(fmt.Errorf("docker not reachable via DOCKER_HOST"))

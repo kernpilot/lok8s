@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -74,15 +75,15 @@ type Driver struct {
 	deps  *driver.Deps
 	Hooks Hooks
 
-	// sleep is the wait seam (tests stub it; prod = time.Sleep) — the
+	// sleep is the wait seam (tests install clock.NoSleep) — the
 	// apply-retry, kubeconfig-extraction, readyz and wait_ready loops all
-	// wait through it.
-	sleep func(time.Duration)
+	// wait through it; a cancelled context ends them.
+	sleep clock.SleepFunc
 }
 
 // New builds the driver over its dispatch-provided dependencies.
 func New(deps *driver.Deps) *Driver {
-	return &Driver{deps: deps, sleep: time.Sleep}
+	return &Driver{deps: deps, sleep: clock.Sleep}
 }
 
 func (d *Driver) stderr() io.Writer {
@@ -92,7 +93,9 @@ func (d *Driver) stderr() io.Writer {
 	return os.Stderr
 }
 
-func (d *Driver) sleepSeconds(n int) { d.sleep(time.Duration(n) * time.Second) }
+func (d *Driver) sleepSeconds(ctx context.Context, n int) error {
+	return d.sleep(ctx, time.Duration(n)*time.Second)
+}
 
 func (d *Driver) clusterYAML(domain string) string {
 	return filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
@@ -273,7 +276,9 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 			return ui.Handled(fmt.Errorf("capi: failed to apply CAPI resources after %d attempts", applyTry))
 		}
 		d.infoLine("apply failed — provider webhooks may still be starting; retry %d/10 in 15s", applyTry)
-		d.sleepSeconds(15)
+		if err := d.sleepSeconds(ctx, 15); err != nil {
+			return err
+		}
 	}
 
 	// 6. Wait for the workload cluster to provision. Cloud nodes install
@@ -320,7 +325,9 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		if err == nil && out.Len() > 0 {
 			break
 		}
-		d.sleepSeconds(10)
+		if err := d.sleepSeconds(ctx, 10); err != nil {
+			return err
+		}
 	}
 	if !fileNonEmpty(kc) {
 		ui.Errorf(stderr, "could not extract workload kubeconfig for %s", clusterName)
@@ -343,7 +350,9 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 			reachable = true
 			break
 		}
-		d.sleepSeconds(10)
+		if err := d.sleepSeconds(ctx, 10); err != nil {
+			return err
+		}
 	}
 	if !reachable {
 		ui.Errorf(stderr, "workload API server for %s did not become reachable", clusterName)

@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -71,7 +71,7 @@ func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer) {
 		Clusters: filepath.Join(base, "clusters"),
 	}
 	d := New(&driver.Deps{Paths: paths, Runner: runner, Stderr: &stderr})
-	d.sleep = func(time.Duration) {}
+	d.sleep = clock.NoSleep
 	return d, runner, &stderr
 }
 

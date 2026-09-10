@@ -253,7 +253,7 @@ func TestWaitsIgnoreApiserverWarnings(t *testing.T) {
 	} {
 		h := newHarness(t)
 		slept := 0
-		h.ctx.Sleep = func(time.Duration) { slept++ }
+		h.ctx.Sleep = func(context.Context, time.Duration) error { slept++; return nil }
 		h.runner.handler = func(c execx.Cmd, _ string) error {
 			io.WriteString(c.Stderr, warning+"\n")
 			return nil

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
@@ -109,7 +110,7 @@ func preflightApplier(f *preflightStub) (*Applier, *bytes.Buffer) {
 	var out bytes.Buffer
 	a := &Applier{Runner: f, Stdout: &out, Stderr: &out,
 		NonInteractive: true, NsWait: 0,
-		Sleep: func(time.Duration) {}, PollInterval: time.Nanosecond}
+		Sleep: clock.NoSleep, PollInterval: time.Nanosecond}
 	return a, &out
 }
 

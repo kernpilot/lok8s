@@ -110,7 +110,9 @@ func (a *Applier) WaitReady(ctx context.Context, label string, timeoutSec int, m
 			return nil
 		}
 		ui.Debugf(a.Stderr, "%s: waiting on %d: %s", label, len(pending), strings.Join(pending, " "))
-		a.sleep(a.pollInterval())
+		if err := a.sleep(ctx, a.pollInterval()); err != nil {
+			return err
+		}
 	}
 }
 

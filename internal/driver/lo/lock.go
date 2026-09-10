@@ -6,9 +6,12 @@ package lo
 // on one host still exclude each other.
 
 import (
+	"context"
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/clock"
 )
 
 // flockTimeout mirrors `flock -w 60`.
@@ -17,8 +20,9 @@ const flockTimeout = 60 * time.Second
 // acquireLock opens (creating) path and takes an exclusive flock, waiting up
 // to flockTimeout. Best-effort like the bash: returns a nil release func
 // (proceed unlocked) when the file cannot be opened, and proceeds unlocked
-// after the wait times out — the bash debug'd and continued too.
-func acquireLock(path string, sleep func(time.Duration)) (release func(), locked bool) {
+// after the wait times out — the bash debug'd and continued too. A
+// cancelled context ends the wait the same way.
+func acquireLock(ctx context.Context, path string, sleep clock.SleepFunc) (release func(), locked bool) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, false
@@ -37,6 +41,9 @@ func acquireLock(path string, sleep func(time.Duration)) (release func(), locked
 			_ = f.Close()
 			return nil, false
 		}
-		sleep(200 * time.Millisecond)
+		if sleep(ctx, 200*time.Millisecond) != nil {
+			_ = f.Close()
+			return nil, false
+		}
 	}
 }

@@ -326,7 +326,9 @@ func (c *Context) waitHeartbeatIdle(ctx context.Context) {
 		if waited == 0 {
 			c.echo("kubehz: waiting for the in-flight heartbeat pod to finish before starting the live agent…")
 		}
-		c.sleep(5 * time.Second)
+		if c.sleep(ctx, 5*time.Second) != nil {
+			return
+		}
 	}
 	c.warnf("kubehz: a heartbeat pod is still running after %ds — continuing; it may deliver one last schema-1 beat, which the live agent overwrites within a minute", drain)
 }
@@ -354,7 +356,9 @@ func (c *Context) waitLiveAgentGone(ctx context.Context) error {
 		if waited == 0 {
 			c.echo("kubehz: waiting for the live agent's pod to terminate before the CronJob beats again…")
 		}
-		c.sleep(5 * time.Second)
+		if err := c.sleep(ctx, 5*time.Second); err != nil {
+			return err
+		}
 	}
 	if probeError != "" {
 		c.errorf("kubehz: could not tell whether the live agent's pod is gone — listing pods in kubehz-system kept failing for %ds: %s. The CronJob's beat was NOT re-armed, because re-arming it beside a pod that may still be beating puts two producers on the heartbeat and erases the live view every five minutes. Give the kubeconfig 'list pods' in kubehz-system (or fix the apiserver connection), confirm with 'kubectl -n kubehz-system get pods -l app.kubernetes.io/component=live-view', then re-run 'lo kubehz deploy'.", drain, probeError)

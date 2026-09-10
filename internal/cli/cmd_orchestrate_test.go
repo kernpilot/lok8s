@@ -8,6 +8,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -244,6 +245,10 @@ func TestDispatchExitMapping(t *testing.T) {
 	}
 	if err := dispatchExit(&stderr, fmt.Errorf("kubectl: %w", childErr)); !errors.Is(err, ErrHandled) {
 		t.Errorf("child: err=%v", err)
+	}
+	// The interrupt's own trace: main exits 128+n for it, nothing to print.
+	if err := dispatchExit(&stderr, fmt.Errorf("wait: %w", context.Canceled)); !errors.Is(err, ErrHandled) {
+		t.Errorf("cancel: err=%v", err)
 	}
 	if stderr.Len() != 0 || len(exits) != 0 {
 		t.Errorf("printed errors must stay silent: stderr=%q exits=%v", stderr.String(), exits)

@@ -368,7 +368,9 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 			phase = "Unknown"
 		}
 		ui.Debugf(stderr, "Cluster %s phase: %s (%d/%ds)", clusterName, phase, elapsed, timeoutSeconds)
-		d.sleepSeconds(interval)
+		if err := d.sleepSeconds(ctx, interval); err != nil {
+			return err
+		}
 	}
 
 	ui.Errorf(stderr, "Timed out waiting for cluster %s (%ds)", clusterName, timeoutSeconds)

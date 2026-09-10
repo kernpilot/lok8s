@@ -176,7 +176,9 @@ func argshFlagError(c *cobra.Command, msg string) string {
 // and a failed child carries its *exec.ExitError with its stderr already
 // streamed. An error without either mark was never printed (a Go-only
 // path: a YAML decode, an os error, a missing tool), so it is printed here
-// as the [error] line the bash would have shown for it. A carried rc (gate
+// as the [error] line the bash would have shown for it. A cancelled
+// context is the interrupt's own trace (main exits 128+n for it), so it
+// prints nothing either. A carried rc (gate
 // decline 3, remote-CI 100, an explicit ExitError, a subprocess status)
 // passes through — the `lo drivers` precedent.
 func dispatchExit(stderr io.Writer, err error) error {
@@ -187,7 +189,7 @@ func dispatchExit(stderr io.Writer, err error) error {
 		exitNow(rc)
 		return ErrHandled
 	}
-	if !errors.Is(err, ErrHandled) && !isChildExit(err) {
+	if !errors.Is(err, ErrHandled) && !isChildExit(err) && !errors.Is(err, context.Canceled) {
 		if stderr == nil {
 			stderr = os.Stderr
 		}

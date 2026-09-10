@@ -18,6 +18,7 @@ package capi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -548,5 +549,29 @@ func TestWaitReadyTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Timed out waiting for cluster test-cluster (1s)") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// A cancelled context ends the wait loop through the sleep seam: no
+// remaining polls, no timeout line, the context error comes back.
+func TestWaitReadyStopsOnCancel(t *testing.T) {
+	d, runner, stderr := testDriver(t)
+	runner.handler = func(c execx.Cmd, stdin string) error {
+		if c.Stdout != nil {
+			c.Stdout.Write([]byte("Pending"))
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := d.WaitReady(ctx, "/tmp/kubeconfig.yaml", "test-cluster", "", 600)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Errorf("polls after the cancel: %d calls, want 1", len(runner.calls))
+	}
+	if strings.Contains(stderr.String(), "Timed out") {
+		t.Errorf("a cancel is not a timeout: %q", stderr.String())
 	}
 }

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
@@ -95,7 +95,7 @@ func testEngine(t *testing.T) (*Engine, *fakeRunner, *bytes.Buffer, *bytes.Buffe
 	var out, errOut bytes.Buffer
 	e := &Engine{
 		Paths: p, Runner: f, Stdout: &out, Stderr: &errOut,
-		Sleep: func(time.Duration) {},
+		Sleep: clock.NoSleep,
 		SopsDecrypt: func(path string) ([]byte, error) {
 			return nil, fmt.Errorf("no sops in tests")
 		},

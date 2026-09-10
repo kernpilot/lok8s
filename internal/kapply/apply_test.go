@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
@@ -95,7 +96,7 @@ func testApplier(f *fakeKubectl) (*Applier, *bytes.Buffer, *bytes.Buffer) {
 		Runner: f, Stdout: &out, Stderr: &errOut,
 		NonInteractive: true, // the bats setup exports LOK8S_NONINTERACTIVE=1
 		NsWait:         0,
-		Sleep:          func(time.Duration) {},
+		Sleep:          clock.NoSleep,
 		PollInterval:   time.Nanosecond,
 	}
 	return a, &out, &errOut

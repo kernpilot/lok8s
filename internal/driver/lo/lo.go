@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -52,9 +53,10 @@ type Driver struct {
 	deps  *driver.Deps
 	Hooks Hooks
 
-	// sleep is the wait seam (tests stub it; prod = time.Sleep). The remote
-	// waits and the registry retries depend on it.
-	sleep func(time.Duration)
+	// sleep is the wait seam (tests install clock.NoSleep). The remote
+	// waits and the registry retries depend on it; a cancelled context ends
+	// them.
+	sleep clock.SleepFunc
 
 	// stdout is where progress phases print off-capture; defaults to
 	// os.Stdout.
@@ -63,7 +65,7 @@ type Driver struct {
 
 // New builds the driver over its dispatch-provided dependencies.
 func New(deps *driver.Deps) *Driver {
-	return &Driver{deps: deps, sleep: time.Sleep}
+	return &Driver{deps: deps, sleep: clock.Sleep}
 }
 
 func (d *Driver) stderr() io.Writer {
@@ -83,7 +85,9 @@ func (d *Driver) out() io.Writer {
 // SetOutput redirects the driver's progress stdout (tests).
 func (d *Driver) SetOutput(w io.Writer) { d.stdout = w }
 
-func (d *Driver) sleepSeconds(n int) { d.sleep(time.Duration(n) * time.Second) }
+func (d *Driver) sleepSeconds(ctx context.Context, n int) error {
+	return d.sleep(ctx, time.Duration(n)*time.Second)
+}
 
 func (d *Driver) clusterYAML(domain string) string {
 	return filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")

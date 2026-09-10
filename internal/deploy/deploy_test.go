@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
@@ -105,7 +105,7 @@ func newDeployer(t *testing.T, f *fakeRunner, artifact string) (*Deployer, *byte
 	}
 	var out, errBuf bytes.Buffer
 	a := kapply.NewApplier(f, &out, &errBuf)
-	a.Sleep = func(time.Duration) {}
+	a.Sleep = clock.NoSleep
 	return &Deployer{Paths: p, Applier: a, Stderr: &errBuf}, &out, &errBuf, domainDir
 }
 

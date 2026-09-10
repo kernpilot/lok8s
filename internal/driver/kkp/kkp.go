@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -43,16 +44,17 @@ func init() {
 type Driver struct {
 	deps *driver.Deps
 
-	// sleep/now are the wait seams (tests stub them; prod = time.Sleep /
+	// sleep/now are the wait seams (tests stub them; prod = clock.Sleep /
 	// time.Now). The bash wait loops measure elapsed wall time via
-	// `date +%s`, so the clock is a seam too.
-	sleep func(time.Duration)
+	// `date +%s`, so the clock is a seam too. A cancelled context ends the
+	// waits.
+	sleep clock.SleepFunc
 	now   func() time.Time
 }
 
 // New builds the driver over its dispatch-provided dependencies.
 func New(deps *driver.Deps) *Driver {
-	return &Driver{deps: deps, sleep: time.Sleep, now: time.Now}
+	return &Driver{deps: deps, sleep: clock.Sleep, now: time.Now}
 }
 
 func (d *Driver) stderr() io.Writer {
@@ -62,7 +64,9 @@ func (d *Driver) stderr() io.Writer {
 	return os.Stderr
 }
 
-func (d *Driver) sleepSeconds(n int) { d.sleep(time.Duration(n) * time.Second) }
+func (d *Driver) sleepSeconds(ctx context.Context, n int) error {
+	return d.sleep(ctx, time.Duration(n)*time.Second)
+}
 
 func (d *Driver) clusterYAML(domain string) string {
 	return filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")

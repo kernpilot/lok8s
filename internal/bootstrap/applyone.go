@@ -147,7 +147,9 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 			if retryRC == 0 && !raceRe.MatchString(out) {
 				break
 			}
-			e.sleep(time.Duration(delay) * time.Second)
+			if e.sleep(ctx, time.Duration(delay)*time.Second) != nil {
+				return 1
+			}
 			if delay < 15 {
 				delay += 3
 			}

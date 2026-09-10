@@ -198,7 +198,9 @@ func (c *Context) spaceWaitActive(ctx context.Context, cfg *Config, spaceID stri
 			return ErrHandled
 		}
 		c.debugf("Space %s phase: %s (%ds / %ds)", spaceID, phase, elapsed, timeout)
-		c.sleep(5 * time.Second)
+		if err := c.sleep(ctx, 5*time.Second); err != nil {
+			return err
+		}
 	}
 	c.errorf("Timed out waiting for space %s to become Active after %ds", spaceID, timeout)
 	return ErrHandled

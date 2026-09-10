@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -69,8 +70,9 @@ type Engine struct {
 	Interactive func() bool
 	Ask         func(prompt string) bool
 
-	// Sleep is the retry/backoff seam (tests make waits instant).
-	Sleep func(time.Duration)
+	// Sleep is the retry/backoff seam (tests install clock.NoSleep). nil =
+	// clock.Sleep, which ends with the context.
+	Sleep clock.SleepFunc
 
 	// SopsDecrypt decrypts one restore.d/*.sops.yaml in memory (nil → the
 	// secrets package's sops library decrypt — NEVER a sops|kubectl pipe).
@@ -97,12 +99,11 @@ func (e *Engine) stderr() io.Writer {
 	return os.Stderr
 }
 
-func (e *Engine) sleep(d time.Duration) {
+func (e *Engine) sleep(ctx context.Context, d time.Duration) error {
 	if e.Sleep != nil {
-		e.Sleep(d)
-		return
+		return e.Sleep(ctx, d)
 	}
-	time.Sleep(d)
+	return clock.Sleep(ctx, d)
 }
 
 func (e *Engine) applyOneFn() func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
@@ -462,7 +463,15 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			continue
 		}
 
-		f := <-done
+		// A cancelled context (SIGINT) ends the run here; the in-flight
+		// applies stop on their own through the same context, and the
+		// buffered channel lets their goroutines finish.
+		var f finished
+		select {
+		case f = <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		inflight--
 		nd := nodes[f.idx]
 		out := nd.buf.String()
