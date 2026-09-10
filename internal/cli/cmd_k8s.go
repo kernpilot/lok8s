@@ -77,7 +77,7 @@ func newK8sCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				d := resolveDomain(cmd)
 				outDir := paths.Clusters + "/" + d + "/artifacts"
-				return k8sKustomizeArtifact(paths, d, paths.Clusters+"/"+d+"/targets", outDir, "infrastructure.yaml", cmd.ErrOrStderr())
+				return k8sKustomizeArtifact(cmd.Context(), paths, d, paths.Clusters+"/"+d+"/targets", outDir, "infrastructure.yaml", cmd.ErrOrStderr())
 			},
 		},
 		&cobra.Command{
@@ -95,7 +95,7 @@ func newK8sCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					ui.Errorf(stderr, "Overlay not found: %s", overlay)
 					return ErrHandled
 				}
-				return k8sKustomizeArtifact(paths, d, overlay, overlay+"/artifacts", "platform.yaml", stderr)
+				return k8sKustomizeArtifact(cmd.Context(), paths, d, overlay, overlay+"/artifacts", "platform.yaml", stderr)
 			},
 		},
 	)
@@ -182,7 +182,7 @@ func specClusterDomain(specPath string) string {
 // kustomize build --enable-alpha-plugins <src> > <outDir>/<file>` (via
 // internal/render) plus a
 // kustomization.yaml listing the artifact when absent.
-func k8sKustomizeArtifact(paths *config.Paths, d, src, outDir, file string, stderr io.Writer) error {
+func k8sKustomizeArtifact(ctx context.Context, paths *config.Paths, d, src, outDir, file string, stderr io.Writer) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -191,10 +191,11 @@ func k8sKustomizeArtifact(paths *config.Paths, d, src, outDir, file string, stde
 		return err
 	}
 	// internal/render: in-process by default, the pinned kustomize binary
-	// under LO_RENDER=exec. The file is created (truncated) before the
-	// render, as the redirect did.
-	out, runErr := render.Build(context.Background(), src, render.Options{
+	// under LO_RENDER=exec (through the command's Runner seam). The file is
+	// created (truncated) before the render, as the redirect did.
+	out, runErr := render.Build(ctx, src, render.Options{
 		Paths:  paths,
+		Runner: newRunner(paths),
 		Env:    []string{"KUBECONFIG=" + paths.Base + "/.kubeconfig/secret." + d + ".yaml"},
 		Stderr: stderr,
 	})
