@@ -48,12 +48,12 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 	// No active domain → actionable error instead of a cryptic empty path.
 	if domainName == "" {
 		ui.Errorf(stderr, "no active domain — set one with 'lo use <domain>' or pass --domain <domain>")
-		return nil, errors.New("no active domain")
+		return nil, ui.Handled(errors.New("no active domain"))
 	}
 	// Validate domain name to prevent path traversal and injection.
 	if !domainpkg.NameRe.MatchString(domainName) {
 		fmt.Fprintf(stderr, "error: invalid domain name: %s\n", domainName)
-		return nil, fmt.Errorf("invalid domain name: %s", domainName)
+		return nil, ui.Handled(fmt.Errorf("invalid domain name: %s", domainName))
 	}
 	base := filepath.Join(p.Clusters, domainName)
 	if fsutil.FileExists(filepath.Join(base, "cluster.lok8s.yaml")) {
@@ -63,7 +63,7 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 		return &Spec{Domain: domainName, File: filepath.Join(base, "deploy.lok8s.yaml"), Kind: SpecKindDeploy}, nil
 	}
 	ui.Errorf(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/%s/", domainName)
-	return nil, fmt.Errorf("no spec for domain %s", domainName)
+	return nil, ui.Handled(fmt.Errorf("no spec for domain %s", domainName))
 }
 
 // ResolveClusterRef resolves the clusterRef of a deploy.lok8s.yaml to its
@@ -75,21 +75,21 @@ func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (st
 	specFile := filepath.Join(p.Clusters, domainName, "deploy.lok8s.yaml")
 	if !fsutil.FileExists(specFile) {
 		ui.Errorf(stderr, "No deploy.lok8s.yaml found for %s", domainName)
-		return "", fmt.Errorf("no deploy spec for %s", domainName)
+		return "", ui.Handled(fmt.Errorf("no deploy spec for %s", domainName))
 	}
 	info, _ := readSpecInfo(specFile)
 	ref := info.Spec.ClusterRef.Domain
 	if ref == "" {
 		ui.Errorf(stderr, "deploy.lok8s.yaml for %s missing spec.clusterRef.domain", domainName)
-		return "", fmt.Errorf("missing clusterRef for %s", domainName)
+		return "", ui.Handled(fmt.Errorf("missing clusterRef for %s", domainName))
 	}
 	if info, err := os.Stat(filepath.Join(p.Clusters, ref)); err != nil || !info.IsDir() {
 		ui.Errorf(stderr, "clusterRef domain not found: .lok8s/%s/", ref)
-		return "", fmt.Errorf("clusterRef domain not found: %s", ref)
+		return "", ui.Handled(fmt.Errorf("clusterRef domain not found: %s", ref))
 	}
 	if !fsutil.FileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {
 		ui.Errorf(stderr, "clusterRef domain %s has no cluster.lok8s.yaml", ref)
-		return "", fmt.Errorf("clusterRef domain %s has no cluster spec", ref)
+		return "", ui.Handled(fmt.Errorf("clusterRef domain %s has no cluster spec", ref))
 	}
 	return ref, nil
 }
@@ -109,7 +109,7 @@ func ReadKind(clusterYAML string, stderr io.Writer) (string, error) {
 	default:
 		ui.Errorf(stderr, "cluster spec has no .kind: %s", clusterYAML)
 	}
-	return "", err
+	return "", ui.Handled(err)
 }
 
 // specInfo is the subset of a cluster/deploy spec the dispatch layer reads.

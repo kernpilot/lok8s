@@ -198,7 +198,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	if !okC || !okP {
 		ui.Errorf(stderr, "No saved cluster ID found in %s/cluster_id", workDir)
 		ui.Errorf(stderr, "Cannot destroy cluster without a cluster ID")
-		return fmt.Errorf("kkp: no saved cluster ID in %s", workDir)
+		return ui.Handled(fmt.Errorf("kkp: no saved cluster ID in %s", workDir))
 	}
 
 	// Set API URL if not in environment.
@@ -229,7 +229,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 		ui.Errorf(stderr, "  the cluster is still running and still billing")
 		ui.Errorf(stderr, "  KEEPING %s — cluster_id there is the only handle a retry has", workDir)
 		ui.Errorf(stderr, "  retry with 'lo down', or delete the cluster in the KKP UI")
-		return fmt.Errorf("kkp: cluster delete failed: %w", err)
+		return ui.Handled(fmt.Errorf("kkp: cluster delete failed: %w", err))
 	}
 
 	// Clean up local state (kubeconfig is named by metadata.name).
@@ -398,7 +398,7 @@ func buildCloudSpec(provider, preset string, stderr io.Writer) (*jsonObj, error)
 		return obj("bringyourown", obj()), nil
 	default:
 		ui.Errorf(stderr, "Unsupported KKP provider: %s", provider)
-		return nil, fmt.Errorf("kkp: unsupported provider: %s", provider)
+		return nil, ui.Handled(fmt.Errorf("kkp: unsupported provider: %s", provider))
 	}
 }
 
@@ -442,7 +442,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 			continue
 		}
 		if !validatePoolName(pool, stderr) {
-			return fmt.Errorf("kkp: invalid pool name %q", pool)
+			return ui.Handled(fmt.Errorf("kkp: invalid pool name %q", pool))
 		}
 
 		if existing[pool] {
@@ -459,7 +459,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 
 		if flavor == "" {
 			ui.Errorf(stderr, "Worker pool '%s' has no flavor/type set", pool)
-			return fmt.Errorf("kkp: worker pool %q has no flavor/type set", pool)
+			return ui.Handled(fmt.Errorf("kkp: worker pool %q has no flavor/type set", pool))
 		}
 
 		// Autoscaler config (optional).
@@ -474,7 +474,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 
 		if _, err := d.createMachineDeployment(ctx, projectID, clusterID, mdJSON); err != nil {
 			ui.Errorf(stderr, "Failed to create machine deployment: %s", pool)
-			return fmt.Errorf("kkp: failed to create machine deployment %s: %w", pool, err)
+			return ui.Handled(fmt.Errorf("kkp: failed to create machine deployment %s: %w", pool, err))
 		}
 	}
 	return nil
@@ -494,7 +494,7 @@ func buildMachineDeploymentJSON(name, replicas, flavor, osName, provider,
 		cloudSpec = obj("aws", obj("instanceType", flavor))
 	default:
 		ui.Errorf(stderr, "Unsupported provider for machine deployment: %s", provider)
-		return "", fmt.Errorf("kkp: unsupported provider for machine deployment: %s", provider)
+		return "", ui.Handled(fmt.Errorf("kkp: unsupported provider for machine deployment: %s", provider))
 	}
 
 	// jq --argjson replicas: the spec value is spliced as a JSON NUMBER; a
@@ -504,7 +504,7 @@ func buildMachineDeploymentJSON(name, replicas, flavor, osName, provider,
 	replicasNum, err := strconv.Atoi(replicas)
 	if err != nil {
 		ui.Errorf(stderr, "Invalid replicas for pool %s: %s (must be numeric)", name, replicas)
-		return "", fmt.Errorf("kkp: invalid replicas for pool %s: %s", name, replicas)
+		return "", ui.Handled(fmt.Errorf("kkp: invalid replicas for pool %s: %s", name, replicas))
 	}
 
 	mdSpec := obj(

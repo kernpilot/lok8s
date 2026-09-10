@@ -99,7 +99,7 @@ func validateIPs(subnet, metallbPool string, errOut io.Writer) error {
 
 	if errors > 0 {
 		fmt.Fprintf(errOut, "error: %d IP validation error(s). Aborting.\n", errors)
-		return fmt.Errorf("%d IP validation error(s)", errors)
+		return ui.Handled(fmt.Errorf("%d IP validation error(s)", errors))
 	}
 	return nil
 }
@@ -141,7 +141,7 @@ func readNetworkConfig(clusterYAML string, errOut io.Writer) error {
 	// intended message could ever print.
 	if !fsutil.FileExists(clusterYAML) {
 		fmt.Fprintf(errOut, "error: cluster spec not found: %s\n", clusterYAML)
-		return fmt.Errorf("cluster spec not found: %s", clusterYAML)
+		return ui.Handled(fmt.Errorf("cluster spec not found: %s", clusterYAML))
 	}
 
 	root := yqsem.LoadNode(clusterYAML)
@@ -165,11 +165,11 @@ func readNetworkConfig(clusterYAML string, errOut io.Writer) error {
 	// wrong file.
 	if netName == "" {
 		fmt.Fprintf(errOut, "error: %s: spec.network.name is missing (slot defaults only apply to *.lok8s.dev domains). Is this a Lo (kind) cluster spec?\n", clusterYAML)
-		return fmt.Errorf("spec.network.name missing in %s", clusterYAML)
+		return ui.Handled(fmt.Errorf("spec.network.name missing in %s", clusterYAML))
 	}
 	if netCIDR == "" {
 		fmt.Fprintf(errOut, "error: %s: spec.network.cidr is required (e.g. \"10.125.50.0/24\" for slot 50; defaults only apply to *.lok8s.dev domains)\n", clusterYAML)
-		return fmt.Errorf("spec.network.cidr missing in %s", clusterYAML)
+		return ui.Handled(fmt.Errorf("spec.network.cidr missing in %s", clusterYAML))
 	}
 
 	baseIP, _, _ := strings.Cut(netCIDR, "/")
@@ -209,7 +209,7 @@ func readNodeConfig(clusterYAML string, errOut io.Writer) error {
 		maxDownloads = "3"
 	} else if !regexp.MustCompile(`^[1-9][0-9]*$`).MatchString(maxDownloads) {
 		fmt.Fprintf(errOut, "error: spec.nodes.maxConcurrentDownloads must be a positive integer, got '%s'\n", maxDownloads)
-		return fmt.Errorf("invalid spec.nodes.maxConcurrentDownloads: %s", maxDownloads)
+		return ui.Handled(fmt.Errorf("invalid spec.nodes.maxConcurrentDownloads: %s", maxDownloads))
 	}
 
 	os.Setenv("LOK8S_CP_COUNT", cpCount)
@@ -264,7 +264,7 @@ func readRemoteConfig(clusterYAML string, deps remoteDeps, errOut io.Writer) err
 	// fail at runtime).
 	if !syncDestRe.MatchString(syncDest) {
 		ui.Errorf(errOut, "spec.remote.sync.dest must be a plain absolute/relative path ([A-Za-z0-9_./+-], no ~), got: %s", syncDest)
-		return fmt.Errorf("invalid spec.remote.sync.dest: %s", syncDest)
+		return ui.Handled(fmt.Errorf("invalid spec.remote.sync.dest: %s", syncDest))
 	}
 
 	exclude := []string{".git", "node_modules", ".secrets", ".kubeconfig", "clusters/.active"}

@@ -61,7 +61,7 @@ func WriteProviderConfig(specFile string, stderr io.Writer) (configFile string, 
 		refPath := filepath.Join(filepath.Dir(specFile), ref)
 		if !fsutil.FileExists(refPath) {
 			ui.Errorf(stderr, "provider.configRef '%s' not found at %s", ref, refPath)
-			return "", nil, fmt.Errorf("provider configRef not found: %s", ref)
+			return "", nil, ui.Handled(fmt.Errorf("provider configRef not found: %s", ref))
 		}
 		os.Setenv("PROVIDER_CONFIG_FILE", refPath)
 		ui.Debugf(stderr, "provider config from configRef: %s", refPath)

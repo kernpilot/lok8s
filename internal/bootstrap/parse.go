@@ -56,7 +56,7 @@ var (
 // parseError prints the bash error() line and returns it as the error.
 func parseError(stderr io.Writer, format string, a ...any) error {
 	ui.Errorf(stderr, format, a...)
-	return fmt.Errorf(format, a...)
+	return ui.Handled(fmt.Errorf(format, a...))
 }
 
 func nodeTag(n *yaml.Node) string {

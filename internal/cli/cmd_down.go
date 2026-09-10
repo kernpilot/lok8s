@@ -238,7 +238,7 @@ func runClean(ctx context.Context, deps cleanDeps, domainName, cluster string, a
 	}
 	if all {
 		if err := deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"system", "prune", "-f"}, Stdout: deps.out, Stderr: deps.stderr}); err != nil {
-			return dispatchExit(err)
+			return dispatchExit(deps.stderr, err)
 		}
 		return nil
 	}
@@ -246,7 +246,7 @@ func runClean(ctx context.Context, deps cleanDeps, domainName, cluster string, a
 	_ = deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"volume", "ls", "--filter", "name=^" + cluster + "-", "-q"}, Stdout: &vols, Stderr: deps.stderr})
 	for v := range strings.FieldsSeq(vols.String()) {
 		if err := deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"volume", "rm", "-f", v}, Stdout: deps.out, Stderr: deps.stderr}); err != nil {
-			return dispatchExit(err)
+			return dispatchExit(deps.stderr, err)
 		}
 	}
 	driverOf := deps.driverOf
@@ -255,7 +255,7 @@ func runClean(ctx context.Context, deps cleanDeps, domainName, cluster string, a
 	}
 	if got, err := driverOf(domainName); err == nil && got == "lo" {
 		if err := deps.registryClean(ctx, domainName); err != nil {
-			return dispatchExit(err)
+			return dispatchExit(deps.stderr, err)
 		}
 		return nil
 	}

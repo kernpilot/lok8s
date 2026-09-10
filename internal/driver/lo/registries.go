@@ -110,7 +110,9 @@ func renderRegistryConfig(configFile, url string, tls bool) (string, error) {
 func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error {
 	rf, err := regFile()
 	if err != nil {
-		return err
+		// bash: registry::each prints the raw "error: …" line, then returns 1.
+		fmt.Fprintln(errOut, err)
+		return ui.Handled(err)
 	}
 	if !rf.TLS {
 		return nil
@@ -122,7 +124,7 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	// plugin binary explicitly.
 	if _, err := render.CurrentMode(); err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
-		return err
+		return ui.Handled(err)
 	}
 	execPlugin := !render.SecretInProcess()
 	var pluginBin string
@@ -141,13 +143,13 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 			fmt.Fprintln(errOut, "error: spec.registries.tls is true (default) but the Secret plugin is not built at")
 			fmt.Fprintf(errOut, "       %s. Build it with 'lo kustomize build' (needs go), or set\n", pluginBin)
 			fmt.Fprintln(errOut, "       spec.registries.tls: false for plain-HTTP registries. Then retry.")
-			return fmt.Errorf("secret plugin not built at %s", pluginBin)
+			return ui.Handled(fmt.Errorf("secret plugin not built at %s", pluginBin))
 		}
 	}
 	pathSecrets := getenv("PATH_SECRETS")
 	if pathSecrets == "" {
 		fmt.Fprintln(errOut, "error: PATH_SECRETS is not set — cannot mint the registry TLS cert")
-		return fmt.Errorf("PATH_SECRETS not set")
+		return ui.Handled(fmt.Errorf("PATH_SECRETS not set"))
 	}
 
 	tlsDir := filepath.Join(d.deps.Paths.Base, ".secrets", "tls", "registries")
@@ -175,7 +177,7 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	}
 	if len(sans) == 0 {
 		fmt.Fprintln(errOut, "error: no registry SANs resolved — cannot mint registry TLS cert")
-		return fmt.Errorf("no registry SANs")
+		return ui.Handled(fmt.Errorf("no registry SANs"))
 	}
 
 	// Deduplicate while preserving order.
@@ -249,7 +251,7 @@ cert:
 	}
 	if err != nil {
 		fmt.Fprintln(errOut, "error: the Secret plugin failed to mint the registry TLS cert")
-		return fmt.Errorf("secret plugin failed: %w", err)
+		return ui.Handled(fmt.Errorf("secret plugin failed: %w", err))
 	}
 
 	var secretOut struct {
@@ -260,17 +262,17 @@ cert:
 	keyB64 := secretOut.Data["tls.key"]
 	if crtB64 == "" || keyB64 == "" {
 		fmt.Fprintln(errOut, "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)")
-		return fmt.Errorf("secret plugin output missing tls.crt/tls.key")
+		return ui.Handled(fmt.Errorf("secret plugin output missing tls.crt/tls.key"))
 	}
 	crtRaw, err := base64.StdEncoding.DecodeString(crtB64)
 	if err != nil {
 		fmt.Fprintln(errOut, "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)")
-		return err
+		return ui.Handled(err)
 	}
 	keyRaw, err := base64.StdEncoding.DecodeString(keyB64)
 	if err != nil {
 		fmt.Fprintln(errOut, "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)")
-		return err
+		return ui.Handled(err)
 	}
 	if err := os.WriteFile(crt, crtRaw, 0o644); err != nil {
 		return err
@@ -369,7 +371,7 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 			fmt.Fprintf(errOut, "error: spec.registries.tls is enabled but no cert at %s\n", certDir)
 			fmt.Fprintln(errOut, "       lo::registries_tls_cert must run before lo::registries (ensure the")
 			fmt.Fprintln(errOut, "       Secret plugin is built: lo kustomize build).")
-			return fmt.Errorf("registry TLS cert missing at %s", certDir)
+			return ui.Handled(fmt.Errorf("registry TLS cert missing at %s", certDir))
 		}
 		tlsMountArgs = []string{"--volume", certDir + ":" + RegistryTLSMount + ":ro"}
 		raw, err := os.ReadFile(filepath.Join(certDir, "tls.crt"))
@@ -432,7 +434,7 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 	}
 
 	if failed {
-		return fmt.Errorf("registry reconcile failed")
+		return ui.Handled(fmt.Errorf("registry reconcile failed"))
 	}
 	return nil
 }
@@ -472,7 +474,7 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 	// container that would then restart against a stale or missing config.
 	if err := os.WriteFile(configPath, []byte(rendered+"\n"), 0o644); err != nil {
 		fmt.Fprintf(errOut, "error: registry/%s: cannot write config at %s\n", regName, configPath)
-		return fmt.Errorf("cannot write registry config %s", configPath)
+		return ui.Handled(fmt.Errorf("cannot write registry config %s", configPath))
 	}
 
 	_ = d.runQuiet(ctx, "docker", "volume", "create", regName)
@@ -529,7 +531,7 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 					fmt.Fprintf(errOut, "error: a kind node likely grabbed this address after a reboot — run: docker network disconnect -f %s %s && lo up\n", regNetwork, holder)
 					fmt.Fprintf(errOut, "error: (or recreate the cluster — 'lo down && lo up' — to rebuild '%s' with its reserved dynamic range)\n", regNetwork)
 				}
-				return fmt.Errorf("registry %s address %s squatted by %s", regName, ip, holder)
+				return ui.Handled(fmt.Errorf("registry %s address %s squatted by %s", regName, ip, holder))
 			}
 			d.sleepSeconds(1)
 		} else {
@@ -538,7 +540,7 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 	}
 
 	fmt.Fprintf(errOut, "error: registry/%s: %s\n", regName, runErr)
-	return fmt.Errorf("registry %s failed to start", regName)
+	return ui.Handled(fmt.Errorf("registry %s failed to start", regName))
 }
 
 // applyLocalRegistryHosting applies the KEP-1755 local-registry-hosting

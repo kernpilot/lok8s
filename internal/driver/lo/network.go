@@ -22,11 +22,11 @@ func (d *Driver) network(ctx context.Context, errOut io.Writer) error {
 	subnet := getenv("LOK8S_NETWORK_SUBNET")
 	if network == "" {
 		fmt.Fprintln(errOut, "error: KIND_EXPERIMENTAL_DOCKER_NETWORK not set (call lo::read_network_config first)")
-		return fmt.Errorf("network name not set")
+		return ui.Handled(fmt.Errorf("network name not set"))
 	}
 	if subnet == "" {
 		fmt.Fprintln(errOut, "error: LOK8S_NETWORK_SUBNET not set (call lo::read_network_config first)")
-		return fmt.Errorf("network subnet not set")
+		return ui.Handled(fmt.Errorf("network subnet not set"))
 	}
 
 	if d.networkExists(ctx, network) {
@@ -145,7 +145,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 		if currentSubnet != subnet {
 			fmt.Fprintf(errOut, "error: registry network '%s' exists with subnet %s, expected %s\n", network, currentSubnet, subnet)
 			fmt.Fprintln(errOut, "error: run 'lo registry clean --shared' to recreate, or adjust spec.registries.shared.network.cidr")
-			return fmt.Errorf("registry network %s has wrong subnet", network)
+			return ui.Handled(fmt.Errorf("registry network %s has wrong subnet", network))
 		}
 
 		// THE reserved range — nothing to do. A non-empty range that differs
@@ -241,7 +241,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 		// it — fall through and create.
 
 		if !rmOK {
-			return fmt.Errorf("could not remove registry network %s", network)
+			return ui.Handled(fmt.Errorf("could not remove registry network %s", network))
 		}
 		return d.registryNetworkCreate(ctx, network, subnet, dynamicRange)
 	}

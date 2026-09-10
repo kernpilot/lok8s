@@ -34,6 +34,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -86,7 +87,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	projectSubnet := getenv("LOK8S_NETWORK_BASE_IP")
 	if projectSubnet == "" {
 		fmt.Fprintln(errOut, "error: lo::read_network_config must run before registry::config_generate")
-		return "", fmt.Errorf("registry config: network config not read")
+		return "", ui.Handled(fmt.Errorf("registry config: network config not read"))
 	}
 
 	root := yqsem.LoadNode(clusterYAML)
@@ -115,7 +116,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 		tlsEnabled = "true"
 	default:
 		fmt.Fprintf(errOut, "error: spec.registries.tls must be true or false, got '%s'\n", tlsEnabled)
-		return "", fmt.Errorf("invalid spec.registries.tls: %s", tlsEnabled)
+		return "", ui.Handled(fmt.Errorf("invalid spec.registries.tls: %s", tlsEnabled))
 	}
 
 	// Listen/connect port is TLS-mode-dependent (see defaults.go).
@@ -160,15 +161,15 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 			url := yqsem.Or(yqsem.Lookup(m, "url"), "")
 
 			if !validateMirrorName(name, errOut) {
-				return "", fmt.Errorf("invalid mirror name %q", name)
+				return "", ui.Handled(fmt.Errorf("invalid mirror name %q", name))
 			}
 			if name == "build" || name == "cache" {
 				fmt.Fprintf(errOut, "error: spec.registries.mirrors: '%s' is reserved for the framework\n", name)
-				return "", fmt.Errorf("reserved mirror name %q", name)
+				return "", ui.Handled(fmt.Errorf("reserved mirror name %q", name))
 			}
 			if url == "" {
 				fmt.Fprintf(errOut, "error: spec.registries.mirrors[%d] (%s): url is required\n", i, name)
-				return "", fmt.Errorf("mirror %q missing url", name)
+				return "", ui.Handled(fmt.Errorf("mirror %q missing url", name))
 			}
 			mirrors = append(mirrors, mirror{name, url})
 		}

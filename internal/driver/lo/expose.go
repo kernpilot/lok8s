@@ -56,7 +56,7 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	}
 	if !fsutil.FileExists(nginxTemplate) {
 		ui.Errorf(errOut, "expose: nginx template not found at %s", nginxTemplate)
-		return fmt.Errorf("nginx template not found at %s", nginxTemplate)
+		return ui.Handled(fmt.Errorf("nginx template not found at %s", nginxTemplate))
 	}
 
 	// Render the nginx config — envsubst restricted to EXACTLY the two-var

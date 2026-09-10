@@ -109,7 +109,7 @@ func (d *Driver) RegistryClean(ctx context.Context, domain string, shared bool, 
 	if d.networkExists(ctx, net) {
 		if err := d.runQuiet(ctx, "docker", "network", "rm", net); err != nil {
 			ui.Warnf(errOut, "registry clean: could not remove %s — it still has attached containers (docker network inspect %s)", net, net)
-			return fmt.Errorf("could not remove registry network %s", net)
+			return ui.Handled(fmt.Errorf("could not remove registry network %s", net))
 		}
 		ui.Debugf(errOut, "Removed registry network %s", net)
 	}

@@ -124,7 +124,7 @@ func (d *Dispatcher) loadProvider(ctx context.Context, name string) (driver.Prov
 	if d.Providers == nil {
 		ui.Errorf(d.errWriter(), "provider '%s' not found at %s", name,
 			filepath.Join(d.Paths.Lok8s, "providers", name, "main"))
-		return nil, fmt.Errorf("provider %s not found", name)
+		return nil, ui.Handled(fmt.Errorf("provider %s not found", name))
 	}
 	return d.Providers.Load(ctx, name)
 }
@@ -158,7 +158,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 	if spec.Kind == SpecKindDeploy {
 		ui.Errorf(stderr, "Cannot provision a deployment domain. Use 'lo deploy %s' instead.", domainName)
 		ui.Errorf(stderr, "Deployment domains reference a cluster via spec.clusterRef.domain.")
-		return fmt.Errorf("cannot provision deploy domain %s", domainName)
+		return ui.Handled(fmt.Errorf("cannot provision deploy domain %s", domainName))
 	}
 
 	clusterYAML := spec.File
@@ -171,7 +171,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 	if !ok {
 		ui.Errorf(stderr, "Unknown cluster kind: %s (missing %s)", kind,
 			filepath.Join(d.Paths.Lok8s, "drivers", kind, "main"))
-		return fmt.Errorf("unknown cluster kind %s", kind)
+		return ui.Handled(fmt.Errorf("unknown cluster kind %s", kind))
 	}
 
 	// Real-infrastructure gate: summary + confirmation BEFORE the provider
@@ -198,11 +198,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 		bkc := specMetadataName(clusterYAML)
 		if bkc == "" {
 			ui.Errorf(stderr, "--bootstrap: cluster spec has no metadata.name (%s)", clusterYAML)
-			return fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML)
+			return ui.Handled(fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML))
 		}
 		if !fsutil.FileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
 			ui.Errorf(stderr, "--bootstrap needs an existing cluster (no .kubeconfig/%s.yaml — run a full 'lo provision' first)", bkc)
-			return fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc)
+			return ui.Handled(fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc))
 		}
 		ui.Debugf(stderr, "Re-applying spec.bootstrap on %s (skipping infra reconcile)", domainName)
 	} else {
@@ -228,7 +228,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 				}
 				if err := prov.Validate(ctx, cfg); err != nil {
 					ui.Errorf(stderr, "Provider '%s' validation failed", name)
-					return fmt.Errorf("provider %s validation failed: %w", name, err)
+					return ui.Handled(fmt.Errorf("provider %s validation failed: %w", name, err))
 				}
 				deps.Provider, deps.ProviderName, deps.ProviderConfigFile = prov, name, cfg
 				ui.Debugf(stderr, "Provider '%s' loaded and validated", name)
@@ -316,7 +316,7 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 
 	if spec.Kind == SpecKindDeploy {
 		ui.Errorf(stderr, "Cannot destroy a deployment domain. Destroy the cluster domain instead.")
-		return fmt.Errorf("cannot destroy deploy domain %s", domainName)
+		return ui.Handled(fmt.Errorf("cannot destroy deploy domain %s", domainName))
 	}
 
 	clusterYAML := spec.File
@@ -328,7 +328,7 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 	factory, ok := d.driverFactory(kind)
 	if !ok {
 		ui.Errorf(stderr, "Unknown cluster kind: %s", kind)
-		return fmt.Errorf("unknown cluster kind %s", kind)
+		return ui.Handled(fmt.Errorf("unknown cluster kind %s", kind))
 	}
 
 	// Real-infrastructure gate — destroying a cloud cluster deprovisions
@@ -397,7 +397,7 @@ func (d *Dispatcher) DispatchStatus(ctx context.Context, domainName string) erro
 		ref := info.Spec.ClusterRef.Domain
 		if ref == "" {
 			ui.Errorf(stderr, "Deployment domain missing spec.clusterRef.domain")
-			return fmt.Errorf("deploy domain %s missing clusterRef", domainName)
+			return ui.Handled(fmt.Errorf("deploy domain %s missing clusterRef", domainName))
 		}
 		ui.Debugf(stderr, "Deployment domain %s references cluster %s", domainName, ref)
 		return d.DispatchStatus(ctx, ref)
@@ -411,7 +411,7 @@ func (d *Dispatcher) DispatchStatus(ctx context.Context, domainName string) erro
 	factory, ok := d.driverFactory(kind)
 	if !ok {
 		ui.Errorf(stderr, "Unknown cluster kind: %s", kind)
-		return fmt.Errorf("unknown cluster kind %s", kind)
+		return ui.Handled(fmt.Errorf("unknown cluster kind %s", kind))
 	}
 	drv, err := factory(d.newDeps())
 	if err != nil {

@@ -7,8 +7,11 @@ package cli
 // for every test — nothing here may reach docker/kind/tilt/bash.
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +23,7 @@ import (
 	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // orchestrateProject is a synthetic project with the routing-axis domains
@@ -211,17 +215,47 @@ func TestDispatchExitMapping(t *testing.T) {
 	prev := osExit
 	osExit = func(code int) { exits = append(exits, code) }
 	t.Cleanup(func() { osExit = prev })
+	var stderr bytes.Buffer
 
-	if err := dispatchExit(nil); err != nil {
+	if err := dispatchExit(&stderr, nil); err != nil {
 		t.Error(err)
 	}
-	if err := dispatchExit(errors.New("plain")); !errors.Is(err, ErrHandled) || len(exits) != 0 {
+	// An error nobody printed: the mapping prints it as the [error] line
+	// the bash would have shown, then exits 1.
+	if err := dispatchExit(&stderr, errors.New("plain")); !errors.Is(err, ErrHandled) || len(exits) != 0 {
 		t.Errorf("plain: err=%v exits=%v", err, exits)
 	}
-	dispatchExit(driver.ErrDeclined)
-	dispatchExit(driver.ErrFullLifecycle)
-	dispatchExit(&driver.ExitError{Code: 42})
+	if got, want := stderr.String(), "\033[0;31m[error]\033[0m plain\n"; got != want {
+		t.Errorf("unprinted error: stderr = %q, want %q", got, want)
+	}
+	// Already printed where it happened (ui.Handled, or the sentinel
+	// itself): silent.
+	stderr.Reset()
+	if err := dispatchExit(&stderr, ui.Handled(errors.New("printed"))); !errors.Is(err, ErrHandled) {
+		t.Errorf("handled: err=%v", err)
+	}
+	if err := dispatchExit(&stderr, fmt.Errorf("wrap: %w", ErrHandled)); !errors.Is(err, ErrHandled) {
+		t.Errorf("sentinel: err=%v", err)
+	}
+	// A failed child streamed its own stderr: silent too.
+	childErr := exec.Command("sh", "-c", "exit 1").Run()
+	if _, ok := errors.AsType[*exec.ExitError](childErr); !ok {
+		t.Fatalf("want an *exec.ExitError, got %v", childErr)
+	}
+	if err := dispatchExit(&stderr, fmt.Errorf("kubectl: %w", childErr)); !errors.Is(err, ErrHandled) {
+		t.Errorf("child: err=%v", err)
+	}
+	if stderr.Len() != 0 || len(exits) != 0 {
+		t.Errorf("printed errors must stay silent: stderr=%q exits=%v", stderr.String(), exits)
+	}
+
+	dispatchExit(&stderr, driver.ErrDeclined)
+	dispatchExit(&stderr, driver.ErrFullLifecycle)
+	dispatchExit(&stderr, &driver.ExitError{Code: 42})
 	if len(exits) != 3 || exits[0] != 3 || exits[1] != 100 || exits[2] != 42 {
 		t.Errorf("exits = %v", exits)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("rc passthroughs print nothing: %q", stderr.String())
 	}
 }

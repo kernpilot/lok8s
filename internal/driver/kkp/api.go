@@ -58,7 +58,7 @@ func requireHTTPS(url, label string, stderr io.Writer) error {
 	if !strings.HasPrefix(url, "https://") {
 		ui.Errorf(stderr, "%s must use HTTPS: %s", label, url)
 		ui.Errorf(stderr, "Plain HTTP is not allowed for security reasons")
-		return fmt.Errorf("kkp: %s must use HTTPS: %s", label, url)
+		return ui.Handled(fmt.Errorf("kkp: %s must use HTTPS: %s", label, url))
 	}
 	return nil
 }
@@ -71,12 +71,12 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 	token := os.Getenv("KKP_TOKEN")
 	if token == "" {
 		ui.Errorf(stderr, "KKP_TOKEN is not set")
-		return "", fmt.Errorf("kkp: KKP_TOKEN is not set")
+		return "", ui.Handled(fmt.Errorf("kkp: KKP_TOKEN is not set"))
 	}
 	apiURL := os.Getenv("KKP_API_URL")
 	if apiURL == "" {
 		ui.Errorf(stderr, "KKP_API_URL is not set")
-		return "", fmt.Errorf("kkp: KKP_API_URL is not set")
+		return "", ui.Handled(fmt.Errorf("kkp: KKP_API_URL is not set"))
 	}
 	if err := d.validateURL(apiURL, stderr); err != nil {
 		return "", err
@@ -107,7 +107,7 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 			curlArgs = append(curlArgs, "--cacert", ca)
 		} else {
 			ui.Errorf(stderr, "KKP_CA_CERT set but not a readable file: %s", ca)
-			return "", fmt.Errorf("kkp: KKP_CA_CERT not a readable file: %s", ca)
+			return "", ui.Handled(fmt.Errorf("kkp: KKP_CA_CERT not a readable file: %s", ca))
 		}
 	}
 
@@ -144,11 +144,11 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		if response != "" {
 			ui.Errorf(stderr, "Response: %s", response)
 		}
-		return "", fmt.Errorf("kkp: API error: %s %s -> HTTP %s", method, path, httpCode)
+		return "", ui.Handled(fmt.Errorf("kkp: API error: %s %s -> HTTP %s", method, path, httpCode))
 	}
 
 	ui.Errorf(stderr, "KKP API: max retries (%d) exhausted for %s %s", maxRetries, method, path)
-	return "", fmt.Errorf("kkp: max retries (%d) exhausted for %s %s", maxRetries, method, path)
+	return "", ui.Handled(fmt.Errorf("kkp: max retries (%d) exhausted for %s %s", maxRetries, method, path))
 }
 
 // splitHTTPCode mirrors the bash split of curl's output: the LAST line is
@@ -188,7 +188,7 @@ func (d *Driver) createCluster(ctx context.Context, projectID, clusterJSON strin
 	if clusterID == "" {
 		ui.Errorf(stderr, "KKP create_cluster: no cluster ID in response")
 		ui.Errorf(stderr, "Response: %s", response)
-		return "", fmt.Errorf("kkp: create_cluster: no cluster ID in response")
+		return "", ui.Handled(fmt.Errorf("kkp: create_cluster: no cluster ID in response"))
 	}
 	ui.Debugf(stderr, "KKP cluster created: %s", clusterID)
 	return clusterID, nil
@@ -246,7 +246,7 @@ func (d *Driver) createMachineDeployment(ctx context.Context, projectID, cluster
 	mdID := jsonStringField(response, "id")
 	if mdID == "" {
 		ui.Errorf(stderr, "KKP create_machinedeployment: no ID in response")
-		return "", fmt.Errorf("kkp: create_machinedeployment: no ID in response")
+		return "", ui.Handled(fmt.Errorf("kkp: create_machinedeployment: no ID in response"))
 	}
 	ui.Debugf(stderr, "KKP machine deployment created: %s", mdID)
 	return mdID, nil
@@ -320,7 +320,7 @@ func (d *Driver) waitComponents(ctx context.Context, projectID, clusterID string
 		elapsed := int(d.now().Sub(start).Seconds())
 		if elapsed >= timeout {
 			ui.Errorf(stderr, "Timed out waiting for KKP cluster %s components (%s) after %ds", clusterID, strings.Join(components, " "), timeout)
-			return fmt.Errorf("kkp: timed out waiting for cluster %s components", clusterID)
+			return ui.Handled(fmt.Errorf("kkp: timed out waiting for cluster %s components", clusterID))
 		}
 
 		// bash: health=$(kkp::health … 2>/dev/null) — diagnostics suppressed.
@@ -368,7 +368,7 @@ func (d *Driver) waitReady(ctx context.Context, projectID, clusterID string, tim
 				health = "unknown" // bash: ${health:-unknown}
 			}
 			ui.Errorf(stderr, "Timed out waiting for KKP cluster %s to become healthy after %ds (last health: %s)", clusterID, timeout, health)
-			return fmt.Errorf("kkp: timed out waiting for cluster %s to become healthy", clusterID)
+			return ui.Handled(fmt.Errorf("kkp: timed out waiting for cluster %s to become healthy", clusterID))
 		}
 
 		if healthJSON, err := d.health(ctx, projectID, clusterID, io.Discard); err == nil {
@@ -465,7 +465,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 
 	if errors > 0 {
 		ui.Errorf(stderr, "%d credential validation error(s)", errors)
-		return fmt.Errorf("kkp: %d credential validation error(s)", errors)
+		return ui.Handled(fmt.Errorf("kkp: %d credential validation error(s)", errors))
 	}
 
 	ui.Debugf(stderr, "KKP credentials validated")
@@ -489,13 +489,13 @@ func requireCredentials(provider string, stderr io.Writer) error {
 		}
 	default:
 		ui.Errorf(stderr, "unknown provider '%s' for credential check", provider)
-		return fmt.Errorf("kkp: unknown provider %q for credential check", provider)
+		return ui.Handled(fmt.Errorf("kkp: unknown provider %q for credential check", provider))
 	}
 	if len(missing) > 0 {
 		for _, v := range missing {
 			ui.Errorf(stderr, "required environment variable %s is not set", v)
 		}
-		return fmt.Errorf("kkp: missing credentials: %s", strings.Join(missing, ", "))
+		return ui.Handled(fmt.Errorf("kkp: missing credentials: %s", strings.Join(missing, ", ")))
 	}
 	return nil
 }

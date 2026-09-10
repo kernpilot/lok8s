@@ -18,6 +18,30 @@ import (
 // exits non-zero without printing anything further.
 var ErrHandled = errors.New("handled")
 
+// Handled marks err as already printed: the returned error reads as
+// ErrHandled to errors.Is, keeps err's text, and unwraps to err so any
+// sentinel or type inside it still matches. A site that prints its own
+// [error] line and then returns an error wraps it here, and the exit
+// mapping at the top (cli dispatchExit) prints nothing more. An error
+// that reaches the top WITHOUT this mark was never printed, so the mapping
+// prints it. nil stays nil.
+func Handled(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &handledError{err: err}
+}
+
+type handledError struct{ err error }
+
+func (e *handledError) Error() string { return e.err.Error() }
+
+func (e *handledError) Unwrap() error { return e.err }
+
+// Is answers errors.Is(err, ErrHandled) for the mark itself; everything
+// else is answered through Unwrap.
+func (e *handledError) Is(target error) bool { return target == ErrHandled }
+
 const (
 	green  = "\033[0;32m"
 	red    = "\033[0;31m"

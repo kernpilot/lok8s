@@ -125,7 +125,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// 1. The provider is loaded + validated by the dispatch.
 	if d.deps.Provider == nil {
 		ui.Errorf(d.stderr(), "KubeOne driver requires spec.provider (no provider loaded)")
-		return errors.New("kubeone: no provider loaded")
+		return ui.Handled(errors.New("kubeone: no provider loaded"))
 	}
 
 	// 2. Provision infrastructure via the provider contract. Guarded:
@@ -165,7 +165,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	src := KubeconfigPath(workDir, clusterName)
 	if !fsutil.FileExists(src) {
 		ui.Errorf(d.stderr(), "Kubeconfig not found at %s after kubeone apply", src)
-		return fmt.Errorf("kubeone: kubeconfig not found at %s", src)
+		return ui.Handled(fmt.Errorf("kubeone: kubeconfig not found at %s", src))
 	}
 	dstDir := filepath.Join(d.deps.Paths.Base, ".kubeconfig")
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
@@ -268,7 +268,7 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	if !fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
 		ui.Errorf(d.stderr(), "kubeone.yaml not found in %s", workDir)
-		return fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir)
+		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
 	args := []string{"apply", "--manifest", "kubeone.yaml", "--auto-approve"}
 	if fsutil.FileExists(filepath.Join(workDir, "output.json")) {
@@ -298,7 +298,7 @@ func (d *Driver) Reset(ctx context.Context, workDir string) error {
 	manifest := filepath.Join(workDir, "kubeone.yaml")
 	if !fsutil.FileExists(manifest) {
 		ui.Errorf(d.stderr(), "kubeone.yaml not found in %s", workDir)
-		return fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir)
+		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
 	args := []string{"reset", "--manifest", manifest, "--auto-approve"}
 	if tf := filepath.Join(workDir, "output.json"); fsutil.FileExists(tf) {

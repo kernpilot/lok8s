@@ -360,7 +360,7 @@ func (d *Driver) writeOIDCAuthConfig(domain string, errOut io.Writer) error {
 	rendered, err := renderAuthConfig(errOut)
 	if err != nil {
 		ui.Errorf(errOut, "failed to render apiserver authentication config from spec.oidc")
-		return err
+		return ui.Handled(err)
 	}
 	// os.WriteFile opens O_TRUNC on the existing file — truncate-then-write
 	// keeps the file's inode stable for a live node mount.
@@ -437,7 +437,7 @@ func renderAuthConfig(errOut io.Writer) (string, error) {
 	clientID := getenv(oidc.EnvClientID)
 	if clientID == "" {
 		ui.Errorf(errOut, "spec.oidc.clientID is required when spec.oidc is set")
-		return "", fmt.Errorf("oidc: no clientID configured")
+		return "", ui.Handled(fmt.Errorf("oidc: no clientID configured"))
 	}
 
 	usernameClaim := envOr(oidc.EnvUsernameClaim, "sub")
@@ -452,7 +452,7 @@ func renderAuthConfig(errOut io.Writer) (string, error) {
 	// must not ride plain HTTP).
 	if !strings.HasPrefix(issuer, "https://") {
 		ui.Errorf(errOut, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
-		return "", fmt.Errorf("oidc: non-https issuer")
+		return "", ui.Handled(fmt.Errorf("oidc: non-https issuer"))
 	}
 
 	var b strings.Builder

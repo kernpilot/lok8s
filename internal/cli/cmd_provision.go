@@ -45,7 +45,7 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			// kind path is deliberately frictionless and would otherwise
 			// never say which domain it acted on.
 			fmt.Fprintf(stderr, "lo provision: domain %s\n", d)
-			return dispatchExit(newDispatcher(cmd, paths).Dispatch(cmd.Context(), d, bootstrapOnly))
+			return dispatchExit(cmd.ErrOrStderr(), newDispatcher(cmd, paths).Dispatch(cmd.Context(), d, bootstrapOnly))
 		},
 	}
 	cmd.Flags().BoolVarP(&bootstrapOnly, "bootstrap", "b", false, "Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)")
@@ -66,7 +66,7 @@ func newDestroyCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				return argshErrorf(cmd.ErrOrStderr(), "too many arguments: %s", args[0])
 			}
 			d := ambientMainEnv(cmd, paths)
-			return dispatchExit(newDispatcher(cmd, paths).DispatchDestroy(cmd.Context(), d))
+			return dispatchExit(cmd.ErrOrStderr(), newDispatcher(cmd, paths).DispatchDestroy(cmd.Context(), d))
 		},
 	})
 }
@@ -93,7 +93,7 @@ func newBootstrapCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				Drivers:          disp.Drivers,
 				InventoryPublish: inventory.PublishHook(paths, runner, stderr),
 			}
-			return dispatchExit(bd.Dispatch(cmd.Context(), d))
+			return dispatchExit(cmd.ErrOrStderr(), bd.Dispatch(cmd.Context(), d))
 		},
 	})
 }

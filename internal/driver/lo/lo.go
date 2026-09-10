@@ -106,7 +106,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		// here with an EMPTY runtime, exactly like the bash under a failed
 		// yq capture (errexit suppressed by the dispatch guard).
 		fmt.Fprintf(stderr, "error: unsupported Lo runtime: %s\n", runtime)
-		return fmt.Errorf("unsupported Lo runtime: %s", runtime)
+		return ui.Handled(fmt.Errorf("unsupported Lo runtime: %s", runtime))
 	}
 
 	clusterName := yqsem.Raw(yqsem.Lookup(root, "metadata", "name"))
@@ -123,7 +123,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		// "running kind locally" — that intentional fallback is unaffected.)
 		if err := d.provisionRemote(ctx, domain, cy, stderr); err != nil {
 			ui.Errorf(stderr, "remote provision via provider '%s' failed — refusing to fall back to a local kind cluster", d.deps.ProviderName)
-			return fmt.Errorf("remote provision failed: %w", err)
+			return ui.Handled(fmt.Errorf("remote provision failed: %w", err))
 		}
 	}
 
@@ -210,7 +210,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	renderedConfig := d.renderKindConfig(clusterName, k8sVersion, network, cy)
 	if strings.TrimSpace(renderedConfig) == "" {
 		ui.Errorf(stderr, "the kind config for %s rendered EMPTY — refusing to create a cluster from it", clusterName)
-		return fmt.Errorf("kind config rendered empty for %s", clusterName)
+		return ui.Handled(fmt.Errorf("kind config rendered empty for %s", clusterName))
 	}
 	os.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", network)
 	if !d.kindClusterExists(ctx, clusterName) {

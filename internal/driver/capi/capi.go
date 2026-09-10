@@ -160,7 +160,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		if hosting != "hosted" {
 			ui.Errorf(stderr, "spec.managementCluster.domain is required for self-hosted CAPI")
 			ui.Errorf(stderr, "set spec.kubehz.hosting: hosted to use the kubehz seed cluster")
-			return fmt.Errorf("capi: spec.managementCluster.domain is required for self-hosted CAPI")
+			return ui.Handled(fmt.Errorf("capi: spec.managementCluster.domain is required for self-hosted CAPI"))
 		}
 		if d.Hooks.ProvisionHosted == nil {
 			return errors.New("capi: hosted provisioning is not wired (Hooks.ProvisionHosted)")
@@ -196,7 +196,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		} else {
 			ui.Errorf(stderr, "management cluster kubeconfig not found: %s", mgmtKubeconfig)
 			ui.Errorf(stderr, "provision it first ('lo provision %s'), or set spec.managementCluster.local: true", mgmtDomain)
-			return fmt.Errorf("capi: management cluster kubeconfig not found: %s", mgmtKubeconfig)
+			return ui.Handled(fmt.Errorf("capi: management cluster kubeconfig not found: %s", mgmtKubeconfig))
 		}
 	}
 
@@ -220,7 +220,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// the incident record and stays.)
 	if provider == "" {
 		ui.Errorf(stderr, "could not detect the infrastructure provider from %s", cy)
-		return fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy)
+		return ui.Handled(fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy))
 	}
 
 	var nsManifest strings.Builder
@@ -270,7 +270,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		}
 		if applyTry == 10 {
 			ui.Errorf(stderr, "failed to apply CAPI resources after %d attempts (provider webhooks not ready?)", applyTry)
-			return fmt.Errorf("capi: failed to apply CAPI resources after %d attempts", applyTry)
+			return ui.Handled(fmt.Errorf("capi: failed to apply CAPI resources after %d attempts", applyTry))
 		}
 		d.infoLine("apply failed — provider webhooks may still be starting; retry %d/10 in 15s", applyTry)
 		d.sleepSeconds(15)
@@ -289,7 +289,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	if err := d.WaitReady(ctx, mgmtKubeconfig, clusterName, namespace, 900); err != nil {
 		ui.Errorf(stderr, "CAPI resources were applied — Hetzner servers and a load balancer may exist and keep billing")
 		ui.Errorf(stderr, "  run 'lo down' to tear down, or inspect: kubectl --kubeconfig %s get cluster,machine -n %s", mgmtKubeconfig, namespace)
-		return err
+		return ui.Handled(err)
 	}
 
 	// 7. Extract the workload kubeconfig under the cluster's metadata.name
@@ -324,7 +324,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	}
 	if !fileNonEmpty(kc) {
 		ui.Errorf(stderr, "could not extract workload kubeconfig for %s", clusterName)
-		return fmt.Errorf("capi: could not extract workload kubeconfig for %s", clusterName)
+		return ui.Handled(fmt.Errorf("capi: could not extract workload kubeconfig for %s", clusterName))
 	}
 
 	// 8. Wait for the workload API server to answer before the framework
@@ -347,7 +347,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	}
 	if !reachable {
 		ui.Errorf(stderr, "workload API server for %s did not become reachable", clusterName)
-		return fmt.Errorf("capi: workload API server for %s did not become reachable", clusterName)
+		return ui.Handled(fmt.Errorf("capi: workload API server for %s did not become reachable", clusterName))
 	}
 	return nil
 }
@@ -408,7 +408,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 			return d.Hooks.DestroyHosted(ctx, domain, cy)
 		}
 		ui.Errorf(stderr, "spec.managementCluster.domain is required for self-hosted CAPI destroy")
-		return fmt.Errorf("capi: spec.managementCluster.domain is required for self-hosted CAPI destroy")
+		return ui.Handled(fmt.Errorf("capi: spec.managementCluster.domain is required for self-hosted CAPI destroy"))
 	}
 
 	mgmtKubeconfig := d.kubeconfigPath(mgmtDomain)
@@ -452,12 +452,12 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 			ui.Errorf(stderr, "management kubeconfig %s not found — cannot reach management cluster %s to delete workload cluster %s", mgmtKubeconfig, mgmtDomain, clusterName)
 			ui.Errorf(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
 			ui.Errorf(stderr, "  restore the management cluster kubeconfig, then re-run 'lo down'")
-			return fmt.Errorf("capi: management kubeconfig %s not found", mgmtKubeconfig)
+			return ui.Handled(fmt.Errorf("capi: management kubeconfig %s not found", mgmtKubeconfig))
 		} else if fsutil.FileExists(workloadKubeconfig) {
 			ui.Errorf(stderr, "local management kubeconfig is gone but workload cluster %s still has a kubeconfig — the previous destroy never completed", clusterName)
 			ui.Errorf(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
 			ui.Errorf(stderr, "  recreate the management cluster ('lo up' on %s) and re-run 'lo down', or clean up via 'hcloud server list'", mgmtDomain)
-			return fmt.Errorf("capi: previous destroy of %s never completed", clusterName)
+			return ui.Handled(fmt.Errorf("capi: previous destroy of %s never completed", clusterName))
 		}
 	}
 
@@ -511,7 +511,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 			ui.Errorf(stderr, "  KEEPING the local kind management cluster so CAPH can finish deprovisioning")
 		}
 		ui.Errorf(stderr, "  check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig %s get cluster,machine -A", mgmtKubeconfig)
-		return fmt.Errorf("capi: workload cluster delete did not complete: %w", delErr)
+		return ui.Handled(fmt.Errorf("capi: workload cluster delete did not complete: %w", delErr))
 	}
 
 	_ = os.Remove(workloadKubeconfig)
@@ -607,7 +607,7 @@ func (d *Driver) ensureLocalMgmt(ctx context.Context, mgmtDomain, provider strin
 		infra, infraVersion = "hetzner", localMgmtHetznerVersion
 	default:
 		ui.Errorf(stderr, "local management cluster: unsupported provider '%s'", provider)
-		return fmt.Errorf("capi: local management cluster: unsupported provider %q", provider)
+		return ui.Handled(fmt.Errorf("capi: local management cluster: unsupported provider %q", provider))
 	}
 
 	d.infoLine("creating local kind management cluster '%s'", kindName)
@@ -700,7 +700,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		infraProvider = "aws"
 	default:
 		d.rawErrorLine("unsupported provider for bootstrap: %s", provider)
-		return fmt.Errorf("capi: unsupported provider for bootstrap: %s", provider)
+		return ui.Handled(fmt.Errorf("capi: unsupported provider for bootstrap: %s", provider))
 	}
 
 	// 1. Create temporary kind bootstrap cluster.
@@ -711,7 +711,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 			Name: "kind", Args: []string{"create", "cluster", "--name", bootstrapName},
 		}); err != nil {
 			d.rawErrorLine("bootstrap kind cluster create failed")
-			return fmt.Errorf("capi: bootstrap kind cluster create failed: %w", err)
+			return ui.Handled(fmt.Errorf("capi: bootstrap kind cluster create failed: %w", err))
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {
@@ -729,7 +729,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	}
 	if err != nil {
 		d.rawErrorLine("cannot read bootstrap kubeconfig")
-		return fmt.Errorf("capi: cannot read bootstrap kubeconfig: %w", err)
+		return ui.Handled(fmt.Errorf("capi: cannot read bootstrap kubeconfig: %w", err))
 	}
 
 	// 2. Install CAPI core + infrastructure provider on bootstrap.
@@ -745,13 +745,13 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		},
 	}); err != nil {
 		d.rawErrorLine("clusterctl init on bootstrap cluster failed")
-		return fmt.Errorf("capi: clusterctl init on bootstrap cluster failed: %w", err)
+		return ui.Handled(fmt.Errorf("capi: clusterctl init on bootstrap cluster failed: %w", err))
 	}
 
 	// 3. Ensure credentials on bootstrap cluster.
 	if err := d.EnsureCredentialsSecret(ctx, cy, provider, bootstrapKubeconfig); err != nil {
 		d.rawErrorLine("provider credentials setup on bootstrap cluster failed")
-		return fmt.Errorf("capi: provider credentials setup on bootstrap cluster failed: %w", err)
+		return ui.Handled(fmt.Errorf("capi: provider credentials setup on bootstrap cluster failed: %w", err))
 	}
 
 	// 4. Generate and apply management cluster CAPI resources.
@@ -759,7 +759,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	resources, err := d.Generate(cy, provider)
 	if err != nil {
 		d.rawErrorLine("CAPI resource generation failed")
-		return fmt.Errorf("capi: CAPI resource generation failed: %w", err)
+		return ui.Handled(fmt.Errorf("capi: CAPI resource generation failed: %w", err))
 	}
 	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:  "kubectl",
@@ -767,7 +767,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		Stdin: strings.NewReader(resources),
 	}); err != nil {
 		d.rawErrorLine("applying management cluster resources failed")
-		return fmt.Errorf("capi: applying management cluster resources failed: %w", err)
+		return ui.Handled(fmt.Errorf("capi: applying management cluster resources failed: %w", err))
 	}
 
 	// 5. Wait for management cluster to become ready.
@@ -776,7 +776,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	d.infoLine("waiting for management cluster to become ready")
 	if err := d.WaitReady(ctx, bootstrapKubeconfig, clusterName, "", 0); err != nil {
 		d.rawErrorLine("management cluster %s did not become ready", clusterName)
-		return fmt.Errorf("capi: management cluster %s did not become ready: %w", clusterName, err)
+		return ui.Handled(fmt.Errorf("capi: management cluster %s did not become ready: %w", clusterName, err))
 	}
 
 	// 6. Extract management cluster kubeconfig.
@@ -794,7 +794,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	}
 	if err != nil {
 		d.rawErrorLine("cannot extract management cluster kubeconfig")
-		return fmt.Errorf("capi: cannot extract management cluster kubeconfig: %w", err)
+		return ui.Handled(fmt.Errorf("capi: cannot extract management cluster kubeconfig: %w", err))
 	}
 
 	// 7. Install lok8s operator on management cluster (best-effort:
@@ -821,7 +821,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		},
 	}); err != nil {
 		d.rawErrorLine("clusterctl init on management cluster failed")
-		return fmt.Errorf("capi: clusterctl init on management cluster failed: %w", err)
+		return ui.Handled(fmt.Errorf("capi: clusterctl init on management cluster failed: %w", err))
 	}
 
 	// 9. Move CAPI resources from bootstrap to management cluster. A failed
@@ -838,7 +838,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		},
 	}); err != nil {
 		d.rawErrorLine("clusterctl move failed — bootstrap cluster %s kept (it still owns the CAPI resources); re-run bootstrap after fixing", bootstrapName)
-		return fmt.Errorf("capi: clusterctl move failed: %w", err)
+		return ui.Handled(fmt.Errorf("capi: clusterctl move failed: %w", err))
 	}
 
 	// 10. Delete bootstrap cluster (only after a successful move).

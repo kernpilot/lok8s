@@ -139,5 +139,5 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 	ui.Errorf(d.stderr(), "A space has no downloadable kubeconfig — the control plane is platform-operated.")
 	io.WriteString(d.stderr(), "  Access your namespaces with your kubehz account (OIDC): the dashboard's\n")
 	io.WriteString(d.stderr(), "  space page provides a ready-made kubeconfig snippet for 'kubectl oidc-login'.\n")
-	return "", errors.New("kubehz: a space has no downloadable kubeconfig")
+	return "", ui.Handled(errors.New("kubehz: a space has no downloadable kubeconfig"))
 }

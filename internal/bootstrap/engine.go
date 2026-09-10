@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -114,7 +115,7 @@ func (e *Engine) applyOneFn() func(ctx context.Context, job Job, stdout, stderr 
 // engineError prints the bash error() line and returns it as the error.
 func (e *Engine) errorf(format string, a ...any) error {
 	ui.Errorf(e.stderr(), format, a...)
-	return fmt.Errorf(format, a...)
+	return ui.Handled(fmt.Errorf(format, a...))
 }
 
 var parallelRe = regexp.MustCompile(`^[0-9]+$`)
@@ -531,7 +532,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 
 // ErrEntriesFailed is Apply's bare non-zero exit (bash: `return 1` at the
 // bottom of bootstrap::apply — the per-entry errors were already printed).
-var ErrEntriesFailed = fmt.Errorf("bootstrap: one or more entries failed or were skipped")
+var ErrEntriesFailed = ui.Handled(errors.New("bootstrap: one or more entries failed or were skipped"))
 
 // schedule is the run-scoped scheduler state (bash: the _BS_* globals,
 // reset at the top of every run — Go scopes them per call instead).

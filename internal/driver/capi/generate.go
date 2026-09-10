@@ -71,7 +71,7 @@ func (d *Driver) DetectProvider(clusterYAML string) (string, error) {
 		return "aws", nil
 	}
 	ui.Errorf(d.stderr(), "No provider found in cluster spec: %s", clusterYAML)
-	return "", fmt.Errorf("capi: no provider in %s", clusterYAML)
+	return "", ui.Handled(fmt.Errorf("capi: no provider in %s", clusterYAML))
 }
 
 // credentialSecretName is the chained default the bash read in one yq call:
@@ -107,12 +107,12 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 
 	if info, err := os.Stat(tmplDir); err != nil || !info.IsDir() {
 		ui.Errorf(stderr, "CAPI template directory not found: %s", tmplDir)
-		return "", fmt.Errorf("capi: template directory not found: %s", tmplDir)
+		return "", ui.Handled(fmt.Errorf("capi: template directory not found: %s", tmplDir))
 	}
 
 	if provider != "hetzner" {
 		ui.Errorf(stderr, "CAPI provider '%s' is not supported yet (only 'hetzner').", provider)
-		return "", fmt.Errorf("capi: provider %q not supported", provider)
+		return "", ui.Handled(fmt.Errorf("capi: provider %q not supported", provider))
 	}
 
 	spec := loadSpec(clusterYAML)
@@ -155,7 +155,7 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 
 	if vars["HCLOUD_SSH_KEY_NAME"] == "" {
 		ui.Errorf(stderr, "spec.provider.config.sshKeyName is required for the hetzner CAPI provider")
-		return "", fmt.Errorf("capi: spec.provider.config.sshKeyName is required")
+		return "", ui.Handled(fmt.Errorf("capi: spec.provider.config.sshKeyName is required"))
 	}
 
 	renderOne := func(path string) (string, error) {
@@ -198,7 +198,7 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 		// errexit, so an unguarded render once flowed on as a control plane
 		// with no workers (capi_test.bats pins this).
 		if !validatePoolName(pool, stderr) {
-			return "", fmt.Errorf("capi: invalid pool name %q", pool)
+			return "", ui.Handled(fmt.Errorf("capi: invalid pool name %q", pool))
 		}
 		vars["POOL_NAME"] = pool
 		vars["POOL_REPLICAS"] = spec.poolField(pool, "replicas", "1")
@@ -222,7 +222,7 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 	rendered := strings.TrimRight(b.String(), "\n")
 	if rendered == "" {
 		ui.Errorf(stderr, "the CAPI manifest stream rendered EMPTY from %s — refusing to continue", tmplDir)
-		return "", fmt.Errorf("capi: manifest stream rendered empty from %s", tmplDir)
+		return "", ui.Handled(fmt.Errorf("capi: manifest stream rendered empty from %s", tmplDir))
 	}
 
 	// Optional anti-affinity: opt-in `spread` placement groups (control
@@ -268,7 +268,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 		// the ${:?} expansion aborts the shell; here it is a plain error.
 		if os.Getenv("AWS_REGION") == "" {
 			ui.Errorf(stderr, "AWS_REGION required for AWS provider")
-			return fmt.Errorf("capi: AWS_REGION required for AWS provider")
+			return ui.Handled(fmt.Errorf("capi: AWS_REGION required for AWS provider"))
 		}
 		createArgs = []string{
 			"create", "secret", "generic", secretName,
@@ -281,7 +281,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 		}
 	default:
 		ui.Errorf(stderr, "Unsupported provider for credentials: %s", provider)
-		return fmt.Errorf("capi: unsupported provider for credentials: %s", provider)
+		return ui.Handled(fmt.Errorf("capi: unsupported provider for credentials: %s", provider))
 	}
 
 	// bash: `kubectl create … | kubectl apply -f -` — a PIPELINE, so only
@@ -317,13 +317,13 @@ func requireCredentials(provider string, stderr io.Writer) error {
 		}
 	default:
 		ui.Errorf(stderr, "unknown provider '%s' for credential check", provider)
-		return fmt.Errorf("capi: unknown provider %q for credential check", provider)
+		return ui.Handled(fmt.Errorf("capi: unknown provider %q for credential check", provider))
 	}
 	if len(missing) > 0 {
 		for _, v := range missing {
 			ui.Errorf(stderr, "required environment variable %s is not set", v)
 		}
-		return fmt.Errorf("capi: missing credentials: %s", strings.Join(missing, ", "))
+		return ui.Handled(fmt.Errorf("capi: missing credentials: %s", strings.Join(missing, ", ")))
 	}
 	return nil
 }
@@ -372,5 +372,5 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 	}
 
 	ui.Errorf(stderr, "Timed out waiting for cluster %s (%ds)", clusterName, timeoutSeconds)
-	return fmt.Errorf("capi: timed out waiting for cluster %s", clusterName)
+	return ui.Handled(fmt.Errorf("capi: timed out waiting for cluster %s", clusterName))
 }

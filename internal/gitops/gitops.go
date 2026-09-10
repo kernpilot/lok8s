@@ -21,7 +21,7 @@ import (
 
 // ErrDeferred is the non-zero exit of the deferred subcommands (bash:
 // `error …; return 1`) — the message was already printed.
-var ErrDeferred = errors.New("gitops: deferred")
+var ErrDeferred = ui.Handled(errors.New("gitops: deferred"))
 
 // Bootstrap is gitops::bootstrap, the provision-dispatch tail hook called
 // when spec.gitops.provider is set: a warn-only no-op that always succeeds.

@@ -18,7 +18,10 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"regexp"
 
 	"github.com/spf13/cobra"
@@ -36,6 +39,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/kubehz"
 	"github.com/kernpilot/lok8s/internal/provider/bridge"
 	"github.com/kernpilot/lok8s/internal/provision"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // newRunner is the exec seam of the orchestration commands (tests swap in a
@@ -163,17 +167,37 @@ func argshFlagError(c *cobra.Command, msg string) string {
 }
 
 // dispatchExit maps a dispatch/driver error onto the process contract the
-// bash produced: every diagnostic was already printed where it happened
-// (the dispatcher, the driver, or the failing tool's own stderr — the bash
-// never added a line on top), so a plain failure exits 1 silently; a
-// carried rc (gate decline 3, remote-CI 100, an explicit ExitError, a
-// subprocess status) passes through — the `lo drivers` precedent.
-func dispatchExit(err error) error {
+// bash produced. In bash every diagnostic was printed where it happened
+// (the dispatcher, the driver, or the failing tool's own stderr) and the
+// entrypoint added no line on top, so a plain failure exits 1 silently.
+// The Go ports mark such an error with ui.Handled (or return ErrHandled),
+// and a failed child carries its *exec.ExitError with its stderr already
+// streamed. An error without either mark was never printed (a Go-only
+// path: a YAML decode, an os error, a missing tool), so it is printed here
+// as the [error] line the bash would have shown for it. A carried rc (gate
+// decline 3, remote-CI 100, an explicit ExitError, a subprocess status)
+// passes through — the `lo drivers` precedent.
+func dispatchExit(stderr io.Writer, err error) error {
 	if err == nil {
 		return nil
 	}
 	if rc := driver.ExitCode(err); rc != 1 {
 		osExit(rc)
+		return ErrHandled
+	}
+	if !errors.Is(err, ErrHandled) && !isChildExit(err) {
+		if stderr == nil {
+			stderr = os.Stderr
+		}
+		ui.Errorf(stderr, "%v", err)
 	}
 	return ErrHandled
+}
+
+// isChildExit reports a failed child process: its own stderr already
+// reached the user, so nothing is printed on top (bash: the tool's
+// message, then `|| return 1`).
+func isChildExit(err error) bool {
+	_, ok := errors.AsType[*exec.ExitError](err)
+	return ok
 }

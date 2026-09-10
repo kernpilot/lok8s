@@ -34,13 +34,13 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	// would fall through with empty output and masquerade as no-nodes.
 	if err := d.deps.Provider.Provision(ctx, d.deps.ProviderConfigFile, workDir); err != nil {
 		ui.Errorf(errOut, "provider provision failed — refusing to treat it as 'no nodes'")
-		return fmt.Errorf("provider provision failed: %w", err)
+		return ui.Handled(fmt.Errorf("provider provision failed: %w", err))
 	}
 
 	providerOutput, err := d.deps.Provider.Output(ctx, d.deps.ProviderConfigFile)
 	if err != nil {
 		ui.Errorf(errOut, "provider output failed — refusing to treat it as 'no nodes'")
-		return fmt.Errorf("provider output failed: %w", err)
+		return ui.Handled(fmt.Errorf("provider output failed: %w", err))
 	}
 
 	remoteIP, remoteUser := providerNode0(providerOutput)
@@ -64,7 +64,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	}
 	if !sshOK {
 		ui.Errorf(errOut, "SSH not reachable on %s after 60s", remoteIP)
-		return fmt.Errorf("ssh not reachable on %s", remoteIP)
+		return ui.Handled(fmt.Errorf("ssh not reachable on %s", remoteIP))
 	}
 
 	// Wait for cloud-init: 90 × 3s — a timeout WARNS and proceeds (cloud-init
@@ -97,7 +97,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	}
 	if !dockerOK {
 		ui.Errorf(errOut, "Docker not available on %s after 180s. Check cloud-init logs: ssh %s@%s cat /var/log/cloud-init-output.log", remoteIP, remoteUser, remoteIP)
-		return fmt.Errorf("docker not available on %s", remoteIP)
+		return ui.Handled(fmt.Errorf("docker not available on %s", remoteIP))
 	}
 
 	os.Setenv("LOK8S_REMOTE_IP", remoteIP)
@@ -115,7 +115,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 		d.sleepSeconds(3)
 	}
 	ui.Errorf(errOut, "Docker not reachable via DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
-	return fmt.Errorf("docker not reachable via DOCKER_HOST")
+	return ui.Handled(fmt.Errorf("docker not reachable via DOCKER_HOST"))
 }
 
 // providerNode0 extracts nodes[0].{public_ip,ssh_user} from the provider's
@@ -158,7 +158,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	// what makes the single-quoted interpolation safe.
 	if err := d.runOut(ctx, out, errOut, "ssh", remote, fmt.Sprintf("mkdir -p '%s'", dest)); err != nil {
 		ui.Errorf(errOut, "failed to create %s on %s", dest, remote)
-		return fmt.Errorf("remote mkdir failed: %w", err)
+		return ui.Handled(fmt.Errorf("remote mkdir failed: %w", err))
 	}
 
 	rsyncArgs := []string{"-az", "--delete", "--info=progress2"}
@@ -183,7 +183,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	if err := d.runOut(ctx, out, errOut, "rsync",
 		append(append([]string{}, rsyncArgs...), syncSrc, remote+":"+dest+"/")...); err != nil {
 		ui.Errorf(errOut, "rsync failed")
-		return fmt.Errorf("rsync failed: %w", err)
+		return ui.Handled(fmt.Errorf("rsync failed: %w", err))
 	}
 
 	if d.deps.Paths.Clusters != repoRoot+"/clusters" && fsutil.DirExists(d.deps.Paths.Clusters) {
@@ -199,7 +199,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		dest, domain, dest, dest, dest, dest, dest, dest, dest, domain)
 	if err := d.runOut(ctx, out, errOut, "ssh", remote, provisionCmd); err != nil {
 		ui.Errorf(errOut, "remote lo provision failed")
-		return fmt.Errorf("remote lo provision failed: %w", err)
+		return ui.Handled(fmt.Errorf("remote lo provision failed: %w", err))
 	}
 
 	// Start Tilt if enabled.

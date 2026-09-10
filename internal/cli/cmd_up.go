@@ -84,7 +84,7 @@ func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps,
 	// Reconcile infra first regardless of mode (kind cluster, registries,
 	// bootstrap addons) — only the post-reconcile Tilt step differs.
 	if err := deps.dispatch(ctx, domainName); err != nil {
-		return dispatchExit(err)
+		return dispatchExit(deps.tilt.ErrOut, err)
 	}
 
 	// Headless mode: foreground `tilt ci` (build + deploy + wait + exit
