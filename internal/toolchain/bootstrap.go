@@ -64,9 +64,9 @@ func (r Release) Asset(goos, goarch string) (name, sum string, err error) {
 	sum, ok := r.Assets[name]
 	if !ok {
 		if goos == "darwin" {
-			return "", "", fmt.Errorf("b v%s publishes no darwin build (linux, freebsd and windows only) — install b by hand from https://binary.help (or `brew install fentas/tap/b` if offered), put it on PATH or copy it to .bin/b, then re-run lo init toolchain", r.Version)
+			return "", "", fmt.Errorf("b v%s has no darwin build (linux, freebsd and windows only). Install b by hand from https://binary.help (brew install fentas/tap/b if offered), put it on PATH or copy it to .bin/b, then re-run lo init toolchain", r.Version)
 		}
-		return "", "", fmt.Errorf("b v%s has no pinned asset for %s/%s (%s)", r.Version, goos, goarch, name)
+		return "", "", fmt.Errorf("b v%s has no pinned asset for %s/%s (%s). Add the asset to the pinned release in internal/toolchain/pins.go", r.Version, goos, goarch, name)
 	}
 	return name, sum, nil
 }
@@ -270,7 +270,7 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, 
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if got != want {
-		return fmt.Errorf("checksum MISMATCH for %s\n      expected %s\n      got      %s\n    The download is corrupt or tampered with — nothing was installed", url, want, got)
+		return fmt.Errorf("checksum MISMATCH for %s: expected %s, got %s. The download is corrupt or tampered with; nothing was installed", url, want, got)
 	}
 	return extractB(tmpName, dst)
 }

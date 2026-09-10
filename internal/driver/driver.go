@@ -78,8 +78,8 @@ type PostProvisioner interface {
 
 // Provider is the infrastructure-provider contract
 // (.lok8s/utils/provider.sh): the seam between drivers and clouds. The
-// actual hetzner provider port comes later; until then implementations are
-// test fakes or exec wrappers.
+// hetzner provider is still the bash plugin; internal/provider/bridge runs
+// it as a child process behind this interface, and tests install fakes.
 //
 // Output returns the standard inventory JSON (api/access/nodes/network —
 // see the schema in utils/provider.sh); every provider produces the same

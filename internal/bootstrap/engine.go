@@ -112,7 +112,7 @@ func (e *Engine) applyOneFn() func(ctx context.Context, job Job, stdout, stderr 
 	return e.applyOne
 }
 
-// engineError prints the bash error() line and returns it as the error.
+// errorf prints the bash error() line and returns it as a handled error.
 func (e *Engine) errorf(format string, a ...any) error {
 	ui.ErrorTo(e.stderr(), format, a...)
 	return ui.Handled(fmt.Errorf(format, a...))

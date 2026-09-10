@@ -435,7 +435,7 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 	}
 
 	if failed {
-		return ui.Handled(fmt.Errorf("registry reconcile failed"))
+		return ui.Handled(fmt.Errorf("registry reconcile failed for at least one registry; see the errors above"))
 	}
 	return nil
 }

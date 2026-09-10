@@ -46,7 +46,7 @@ func Get(name string) (Factory, bool) {
 }
 
 // Names returns the registered driver names, sorted (the `lo drivers --list`
-// source once that command ports).
+// source).
 func Names() []string {
 	regMu.RLock()
 	defer regMu.RUnlock()

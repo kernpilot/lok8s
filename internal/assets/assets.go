@@ -1,6 +1,5 @@
 // Package assets ships the framework's first-party data inside the binary
-// and materializes it into a project on first use — the "eject model" of
-// the Go migration's Phase 7 (WP1).
+// and materializes it into a project on first use (the "eject model").
 //
 // What is embedded: a committed mirror of the framework tree under
 // internal/assets/lok8s/ — every bootstrap addon (addons/**), the driver

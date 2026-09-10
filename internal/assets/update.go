@@ -49,10 +49,10 @@ func Update(p *config.Paths, rel string, force bool, out io.Writer) (UnitReport,
 	conflicts := c[StateLocalModified] + c[StateBoth]
 	if !force {
 		if r.Marker == nil {
-			return r, fmt.Errorf("%w: %s has no %s marker, so local edits cannot be told apart from lo updates (re-run with --force to replace it with the binary's copy)", ErrConflict, r.Rel, MarkerFile)
+			return r, fmt.Errorf("%w: %s has no %s marker, so local edits cannot be told apart from lo updates. Re-run with --force to replace it with the binary's copy", ErrConflict, r.Rel, MarkerFile)
 		}
 		if conflicts > 0 {
-			return r, fmt.Errorf("%w: %s has %d locally modified file(s); resolve them or re-run with --force", ErrConflict, r.Rel, conflicts)
+			return r, fmt.Errorf("%w: %s has %d locally modified file(s). Resolve them or re-run with --force", ErrConflict, r.Rel, conflicts)
 		}
 	}
 	u, _ := UnitFor(r.Rel)

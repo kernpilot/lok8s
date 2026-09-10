@@ -91,12 +91,12 @@ func CurrentMode() (Mode, error) {
 		if inProcessAvailable {
 			return ModeInProcess, nil
 		}
-		return "", fmt.Errorf("%s=inprocess: this is lo core (the render execs the pinned kustomize; only \"exec\" or unset is valid) — install lo-full for the in-process renderer", ModeEnv)
+		return "", fmt.Errorf("%s=inprocess: this is lo core, which renders with the pinned kustomize. Set %s=exec or unset it, or install lo-full for the in-process renderer", ModeEnv, ModeEnv)
 	default:
 		if inProcessAvailable {
-			return "", fmt.Errorf("%s: unknown value %q (want \"exec\" or unset)", ModeEnv, v)
+			return "", fmt.Errorf("%s: unknown value %q. Set it to exec or inprocess, or unset it", ModeEnv, v)
 		}
-		return "", fmt.Errorf("%s: unknown value %q (want \"exec\" or unset; this is lo core)", ModeEnv, v)
+		return "", fmt.Errorf("%s: unknown value %q. Set it to exec or unset it; this is lo core", ModeEnv, v)
 	}
 }
 

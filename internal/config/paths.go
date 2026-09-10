@@ -38,9 +38,10 @@ type Paths struct {
 	SecretsEnvSet bool
 }
 
-// ResolvePaths resolves the project layout for the current process.
-// It never fails: outside a lok8s project the paths point below the working
-// directory and commands that need the project report that themselves.
+// ResolvePaths resolves the project layout for the current process. It
+// fails only when the working directory cannot be read. Outside a lok8s
+// project the paths point below the working directory, and the commands
+// that need the project report that themselves.
 func ResolvePaths() (*Paths, error) {
 	base := os.Getenv("PATH_BASE")
 	if base == "" {

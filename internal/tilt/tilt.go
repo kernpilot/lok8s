@@ -365,15 +365,15 @@ func (c *Context) PreflightConfig(domainName string) (enabled, age, crds, allow 
 	return
 }
 
-// scalarIsFalse mirrors the bash `grep -cx false` over yq -r output: only a
-// node rendering as the bare line "false" counts.
+// scalarIsFalse is the bash `grep -cx false` over the yq -r output: only a
+// scalar whose value is the bare word false counts.
 func scalarIsFalse(n *yaml.Node) bool {
 	return n != nil && n.Kind == yaml.ScalarNode && n.Value == "false"
 }
 
-// scalarValue is the yq `// "-"` read: "" for missing/null/false and for
-// non-scalar shapes (which yq would render multi-line and the TSV read
-// would truncate anyway).
+// scalarValue is the yq `// "-"` read: "" for a missing, null or false
+// value and for a non-scalar node (yq renders those over several lines,
+// and the TSV read kept only the first).
 func scalarValue(n *yaml.Node) string {
 	if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
 		return ""

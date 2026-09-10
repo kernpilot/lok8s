@@ -23,7 +23,7 @@ const (
 // ModeInProcess here. Kept as a guard so a future call site fails loudly
 // instead of silently rendering nothing.
 func buildInProcess(_ context.Context, _ string, _ Options) ([]byte, error) {
-	return nil, errors.New("render: in-process renderer not linked (this is lo core; install lo-full)")
+	return nil, errors.New("render: the in-process renderer is not linked into lo core. Install lo-full")
 }
 
 // DispatchPlugin is a no-op on core: kustomize runs as a child process
