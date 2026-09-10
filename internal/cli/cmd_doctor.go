@@ -76,16 +76,11 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stderr := cmd.ErrOrStderr()
-			if len(args) > 0 {
-				return argshErrorf(stderr, "too many arguments: %s", args[0])
-			}
-			if v, _ := cmd.Flags().GetCount("verbose"); v > 0 {
-				os.Setenv("DEBUG", "1")
-			}
+			setDebugFromVerbose(cmd)
 			domainFlag, _ := cmd.Flags().GetString("domain")
 			d := domain.Resolve(domainFlag, paths.Clusters, stderr)
 			return runDoctor(cmd.Context(), paths, d, toolchainFlag, cmd.OutOrStdout(), stderr)
@@ -124,7 +119,7 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 
 	fmt.Fprintln(out)
 	if fail {
-		ui.Errorf(stderr, "doctor: missing required prerequisites (see ✗ above)")
+		ui.ErrorTo(stderr, "doctor: missing required prerequisites (see ✗ above)")
 		return ErrHandled
 	}
 	fmt.Fprintln(out, "doctor: all required checks passed.")

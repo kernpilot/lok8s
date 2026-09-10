@@ -114,7 +114,7 @@ func (e *Engine) applyOneFn() func(ctx context.Context, job Job, stdout, stderr 
 
 // engineError prints the bash error() line and returns it as the error.
 func (e *Engine) errorf(format string, a ...any) error {
-	ui.Errorf(e.stderr(), format, a...)
+	ui.ErrorTo(e.stderr(), format, a...)
 	return ui.Handled(fmt.Errorf(format, a...))
 }
 
@@ -198,7 +198,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		return err
 	}
 	if len(entries) == 0 {
-		ui.Debugf(stderr, "%s", nothingToApplyDebug(domain, kind))
+		ui.DebugTo(stderr, "%s", nothingToApplyDebug(domain, kind))
 		return nil
 	}
 
@@ -270,7 +270,7 @@ func (e *Engine) loadNodes(stderr io.Writer, domain, kind string, entries []stri
 		nodes = append(nodes, &node{entry: parsed, deps: map[int]bool{}})
 	}
 	if len(nodes) == 0 {
-		ui.Debugf(stderr, "%s", nothingToApplyDebug(domain, kind))
+		ui.DebugTo(stderr, "%s", nothingToApplyDebug(domain, kind))
 	}
 	return nodes, nil
 }
@@ -337,7 +337,7 @@ func planDAG(stderr io.Writer, nodes []*node) error {
 	// barrier-only config that happens to reuse a basename.
 	for _, cn := range nameOrder {
 		if ids := name2idxs[cn]; len(ids) > 1 {
-			ui.Warnf(stderr, "bootstrap: duplicate entry name '%s' — %d entries share it; a dependsOn on it would be ambiguous (set an explicit name:)", cn, len(ids))
+			ui.WarnTo(stderr, "bootstrap: duplicate entry name '%s' — %d entries share it; a dependsOn on it would be ambiguous (set an explicit name:)", cn, len(ids))
 		}
 	}
 
@@ -392,7 +392,7 @@ func checkCycle(stderr io.Writer, nodes []*node, indeg []int) error {
 
 // planError is Engine.errorf for the plan (no engine state needed).
 func planError(stderr io.Writer, format string, a ...any) error {
-	ui.Errorf(stderr, format, a...)
+	ui.ErrorTo(stderr, format, a...)
 	return ui.Handled(fmt.Errorf(format, a...))
 }
 
@@ -600,7 +600,7 @@ func (e *Engine) skipDependents(nodes []*node, failed int) {
 				continue
 			}
 			nodes[c].skipped = true
-			ui.Warnf(e.stderr(), "bootstrap: skipping '%s' — a dependency failed (%s)", nodes[c].entry.Name, cause)
+			ui.WarnTo(e.stderr(), "bootstrap: skipping '%s' — a dependency failed (%s)", nodes[c].entry.Name, cause)
 			queue = append(queue, c)
 		}
 	}
@@ -740,7 +740,7 @@ func (e *Engine) resolveParked(ctx context.Context, s *schedule, nodes []*node, 
 			nd.completed = true
 			s.done++
 			s.overallRC = 1
-			ui.Errorf(e.stderr(), "bootstrap: %s needs recreate (immutable/terminating) — re-run with --force (or --force-recreate) to auto-recreate, or resolve by hand", nd.entry.Name)
+			ui.ErrorTo(e.stderr(), "bootstrap: %s needs recreate (immutable/terminating) — re-run with --force (or --force-recreate) to auto-recreate, or resolve by hand", nd.entry.Name)
 			e.skipDependents(nodes, pi)
 		}
 	}
@@ -874,5 +874,5 @@ func exportAPIEndpoint(stderr io.Writer, kubeconfig string) {
 	}
 	os.Setenv("LOK8S_USER_API_HOST", host)
 	os.Setenv("LOK8S_USER_API_PORT", port)
-	ui.Debugf(stderr, "bootstrap: API endpoint %s:%s (for addon envsubst)", host, port)
+	ui.DebugTo(stderr, "bootstrap: API endpoint %s:%s (for addon envsubst)", host, port)
 }

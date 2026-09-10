@@ -161,8 +161,8 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 			return err
 		}
 		if hosting != "hosted" {
-			ui.Errorf(stderr, "spec.managementCluster.domain is required for self-hosted CAPI")
-			ui.Errorf(stderr, "set spec.kubehz.hosting: hosted to use the kubehz seed cluster")
+			ui.ErrorTo(stderr, "spec.managementCluster.domain is required for self-hosted CAPI")
+			ui.ErrorTo(stderr, "set spec.kubehz.hosting: hosted to use the kubehz seed cluster")
 			return ui.Handled(fmt.Errorf("capi: spec.managementCluster.domain is required for self-hosted CAPI"))
 		}
 		if d.Hooks.ProvisionHosted == nil {
@@ -209,8 +209,8 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// instead of leaving the operator to guess whether anything is billing.
 	clusterName := spec.Raw("metadata", "name")
 	if err := d.WaitReady(ctx, mgmtKubeconfig, clusterName, namespace, 900); err != nil {
-		ui.Errorf(stderr, "CAPI resources were applied — Hetzner servers and a load balancer may exist and keep billing")
-		ui.Errorf(stderr, "  run 'lo down' to tear down, or inspect: kubectl --kubeconfig %s get cluster,machine -n %s", mgmtKubeconfig, namespace)
+		ui.ErrorTo(stderr, "CAPI resources were applied — Hetzner servers and a load balancer may exist and keep billing")
+		ui.ErrorTo(stderr, "  run 'lo down' to tear down, or inspect: kubectl --kubeconfig %s get cluster,machine -n %s", mgmtKubeconfig, namespace)
 		return ui.Handled(err)
 	}
 
@@ -280,7 +280,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 			}
 			return d.Hooks.DestroyHosted(ctx, domain, cy)
 		}
-		ui.Errorf(stderr, "spec.managementCluster.domain is required for self-hosted CAPI destroy")
+		ui.ErrorTo(stderr, "spec.managementCluster.domain is required for self-hosted CAPI destroy")
 		return ui.Handled(fmt.Errorf("capi: spec.managementCluster.domain is required for self-hosted CAPI destroy"))
 	}
 
@@ -322,14 +322,14 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// billing.
 	if !fsutil.FileExists(mgmtKubeconfig) {
 		if mgmtLocal != "true" {
-			ui.Errorf(stderr, "management kubeconfig %s not found — cannot reach management cluster %s to delete workload cluster %s", mgmtKubeconfig, mgmtDomain, clusterName)
-			ui.Errorf(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
-			ui.Errorf(stderr, "  restore the management cluster kubeconfig, then re-run 'lo down'")
+			ui.ErrorTo(stderr, "management kubeconfig %s not found — cannot reach management cluster %s to delete workload cluster %s", mgmtKubeconfig, mgmtDomain, clusterName)
+			ui.ErrorTo(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
+			ui.ErrorTo(stderr, "  restore the management cluster kubeconfig, then re-run 'lo down'")
 			return ui.Handled(fmt.Errorf("capi: management kubeconfig %s not found", mgmtKubeconfig))
 		} else if fsutil.FileExists(workloadKubeconfig) {
-			ui.Errorf(stderr, "local management kubeconfig is gone but workload cluster %s still has a kubeconfig — the previous destroy never completed", clusterName)
-			ui.Errorf(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
-			ui.Errorf(stderr, "  recreate the management cluster ('lo up' on %s) and re-run 'lo down', or clean up via 'hcloud server list'", mgmtDomain)
+			ui.ErrorTo(stderr, "local management kubeconfig is gone but workload cluster %s still has a kubeconfig — the previous destroy never completed", clusterName)
+			ui.ErrorTo(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
+			ui.ErrorTo(stderr, "  recreate the management cluster ('lo up' on %s) and re-run 'lo down', or clean up via 'hcloud server list'", mgmtDomain)
 			return ui.Handled(fmt.Errorf("capi: previous destroy of %s never completed", clusterName))
 		}
 	}
@@ -378,12 +378,12 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// that could reach them was gone. This is the ONE place that reports
 	// the failure — mgmt-local only adds its extra line here.
 	if delErr != nil {
-		ui.Errorf(stderr, "workload cluster delete did not complete (rc=%d) — Hetzner servers and load balancer may still be running and billing", driver.ExitCode(delErr))
-		ui.Errorf(stderr, "  KEEPING %s so the cluster stays reachable", workloadKubeconfig)
+		ui.ErrorTo(stderr, "workload cluster delete did not complete (rc=%d) — Hetzner servers and load balancer may still be running and billing", driver.ExitCode(delErr))
+		ui.ErrorTo(stderr, "  KEEPING %s so the cluster stays reachable", workloadKubeconfig)
 		if mgmtLocal == "true" {
-			ui.Errorf(stderr, "  KEEPING the local kind management cluster so CAPH can finish deprovisioning")
+			ui.ErrorTo(stderr, "  KEEPING the local kind management cluster so CAPH can finish deprovisioning")
 		}
-		ui.Errorf(stderr, "  check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig %s get cluster,machine -A", mgmtKubeconfig)
+		ui.ErrorTo(stderr, "  check 'hcloud server list' and re-run 'lo down', or inspect: kubectl --kubeconfig %s get cluster,machine -A", mgmtKubeconfig)
 		return ui.Handled(fmt.Errorf("capi: workload cluster delete did not complete: %w", delErr))
 	}
 
@@ -479,8 +479,8 @@ func (d *Driver) ensureMgmt(ctx context.Context, mgmtDomain, mgmtKubeconfig, mgm
 		return d.ensureLocalMgmt(ctx, mgmtDomain, provider)
 	}
 	stderr := d.stderr()
-	ui.Errorf(stderr, "management cluster kubeconfig not found: %s", mgmtKubeconfig)
-	ui.Errorf(stderr, "provision it first ('lo provision %s'), or set spec.managementCluster.local: true", mgmtDomain)
+	ui.ErrorTo(stderr, "management cluster kubeconfig not found: %s", mgmtKubeconfig)
+	ui.ErrorTo(stderr, "provision it first ('lo provision %s'), or set spec.managementCluster.local: true", mgmtDomain)
 	return ui.Handled(fmt.Errorf("capi: management cluster kubeconfig not found: %s", mgmtKubeconfig))
 }
 
@@ -512,7 +512,7 @@ func (d *Driver) ensureMgmt(ctx context.Context, mgmtDomain, mgmtKubeconfig, mgm
 func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfig, namespace string) error {
 	stderr := d.stderr()
 	if provider == "" {
-		ui.Errorf(stderr, "could not detect the infrastructure provider from %s", cy)
+		ui.ErrorTo(stderr, "could not detect the infrastructure provider from %s", cy)
 		return ui.Handled(fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy))
 	}
 
@@ -556,7 +556,7 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 			return nil
 		}
 		if applyTry == 10 {
-			ui.Errorf(stderr, "failed to apply CAPI resources after %d attempts (provider webhooks not ready?)", applyTry)
+			ui.ErrorTo(stderr, "failed to apply CAPI resources after %d attempts (provider webhooks not ready?)", applyTry)
 			return ui.Handled(fmt.Errorf("capi: failed to apply CAPI resources after %d attempts", applyTry))
 		}
 		d.infoLine("apply failed — provider webhooks may still be starting; retry %d/10 in 15s", applyTry)
@@ -600,7 +600,7 @@ func (d *Driver) extractWorkloadKubeconfig(ctx context.Context, mgmtKubeconfig, 
 		}
 	}
 	if !fileNonEmpty(kc) {
-		ui.Errorf(d.stderr(), "could not extract workload kubeconfig for %s", clusterName)
+		ui.ErrorTo(d.stderr(), "could not extract workload kubeconfig for %s", clusterName)
 		return "", ui.Handled(fmt.Errorf("capi: could not extract workload kubeconfig for %s", clusterName))
 	}
 	return kc, nil
@@ -625,7 +625,7 @@ func (d *Driver) waitReachable(ctx context.Context, kc, clusterName string) erro
 			return err
 		}
 	}
-	ui.Errorf(d.stderr(), "workload API server for %s did not become reachable", clusterName)
+	ui.ErrorTo(d.stderr(), "workload API server for %s did not become reachable", clusterName)
 	return ui.Handled(fmt.Errorf("capi: workload API server for %s did not become reachable", clusterName))
 }
 
@@ -644,7 +644,7 @@ func (d *Driver) ensureLocalMgmt(ctx context.Context, mgmtDomain, provider strin
 	case "hetzner":
 		infra, infraVersion = "hetzner", localMgmtHetznerVersion
 	default:
-		ui.Errorf(stderr, "local management cluster: unsupported provider '%s'", provider)
+		ui.ErrorTo(stderr, "local management cluster: unsupported provider '%s'", provider)
 		return ui.Handled(fmt.Errorf("capi: local management cluster: unsupported provider %q", provider))
 	}
 
@@ -659,7 +659,7 @@ func (d *Driver) ensureLocalMgmt(ctx context.Context, mgmtDomain, provider strin
 			// bash: unguarded under the caller's disabled errexit — the
 			// create failure flows on; the kubeconfig read below then
 			// captures nothing and clusterctl init reports the real state.
-			ui.Debugf(stderr, "kind create cluster failed: %v", err)
+			ui.DebugTo(stderr, "kind create cluster failed: %v", err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {

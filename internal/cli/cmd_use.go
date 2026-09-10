@@ -58,12 +58,12 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // (path-traversal guard) or that don't resolve to a real domain directory.
 func useSetActive(paths *config.Paths, target string, out, errOut io.Writer) error {
 	if !domain.NameRe.MatchString(target) {
-		ui.Errorf(errOut, "invalid domain name: %s", target)
+		ui.ErrorTo(errOut, "invalid domain name: %s", target)
 		return ErrHandled
 	}
 	base := filepath.Join(paths.Clusters, target)
 	if !fsutil.FileExists(filepath.Join(base, "cluster.lok8s.yaml")) && !fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
-		ui.Errorf(errOut, "domain not found: clusters/%s/ (no cluster.lok8s.yaml or deploy.lok8s.yaml)", target)
+		ui.ErrorTo(errOut, "domain not found: clusters/%s/ (no cluster.lok8s.yaml or deploy.lok8s.yaml)", target)
 		return ErrHandled
 	}
 	if err := os.MkdirAll(paths.Clusters, 0o755); err != nil {

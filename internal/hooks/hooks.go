@@ -84,24 +84,24 @@ type selectorPair struct{ key, val string }
 // the native filter keeps it as the shared contract).
 func (c *Context) parseSelector(selector string) ([]selectorPair, error) {
 	if selector == "" {
-		ui.Errorf(c.ErrOut, "hooks: --selector is required")
+		ui.ErrorTo(c.ErrOut, "hooks: --selector is required")
 		return nil, ErrHandled
 	}
 	var pairs []selectorPair
 	for clause := range strings.SplitSeq(selector, ",") {
 		if !strings.Contains(clause, "=") {
-			ui.Errorf(c.ErrOut, "hooks: selector clause '%s' must be key=value", clause)
+			ui.ErrorTo(c.ErrOut, "hooks: selector clause '%s' must be key=value", clause)
 			return nil, ErrHandled
 		}
 		key, val, _ := strings.Cut(clause, "=")
 		if !selClauseRe.MatchString(key) || !selClauseRe.MatchString(val) {
-			ui.Errorf(c.ErrOut, "hooks: invalid selector clause '%s' (key/value must be [a-zA-Z0-9._/-])", clause)
+			ui.ErrorTo(c.ErrOut, "hooks: invalid selector clause '%s' (key/value must be [a-zA-Z0-9._/-])", clause)
 			return nil, ErrHandled
 		}
 		pairs = append(pairs, selectorPair{key, val})
 	}
 	if len(pairs) == 0 {
-		ui.Errorf(c.ErrOut, "hooks: empty --selector")
+		ui.ErrorTo(c.ErrOut, "hooks: empty --selector")
 		return nil, ErrHandled
 	}
 	return pairs, nil
@@ -335,7 +335,7 @@ func (c *Context) Recreate(ctx context.Context, selector string) error {
 	}
 	objs := marshalDocs(docs)
 	if !kindLineRe.MatchString(objs) {
-		ui.Warnf(c.ErrOut, "hooks recreate: no objects match '%s'", selector)
+		ui.WarnTo(c.ErrOut, "hooks recreate: no objects match '%s'", selector)
 		return nil
 	}
 	// UNDER TILT, LET TILT DO IT. The rendered artifact carries the DECLARED
@@ -352,10 +352,10 @@ func (c *Context) Recreate(ctx context.Context, selector string) error {
 	if tc.Running(ctx, port) && c.tiltCanRecreate(ctx, docs, port) {
 		for _, name := range objectNames(docs) {
 			if err := tc.TriggerResource(ctx, name, port); err != nil {
-				ui.Errorf(c.ErrOut, "hooks recreate: tilt trigger failed for '%s'", name)
+				ui.ErrorTo(c.ErrOut, "hooks recreate: tilt trigger failed for '%s'", name)
 				return ErrHandled
 			}
-			ui.Debugf(c.ErrOut, "hooks: recreated '%s' through Tilt (image injection preserved)", name)
+			ui.DebugTo(c.ErrOut, "hooks: recreated '%s' through Tilt (image injection preserved)", name)
 		}
 		return nil
 	}
@@ -378,7 +378,7 @@ func (c *Context) Recreate(ctx context.Context, selector string) error {
 	if _, rc := c.applier().Apply(ctx, "hook recreate "+selector, applied+"\n"); rc != 0 {
 		return ErrHandled
 	}
-	ui.Debugf(c.ErrOut, "hooks: recreated objects matching '%s'", selector)
+	ui.DebugTo(c.ErrOut, "hooks: recreated objects matching '%s'", selector)
 	return nil
 }
 
@@ -390,13 +390,13 @@ func (c *Context) Apply(ctx context.Context, selector string) error {
 	}
 	objs := marshalDocs(docs)
 	if !kindLineRe.MatchString(objs) {
-		ui.Warnf(c.ErrOut, "hooks apply: no objects match '%s'", selector)
+		ui.WarnTo(c.ErrOut, "hooks apply: no objects match '%s'", selector)
 		return nil
 	}
 	if _, rc := c.applier().Apply(ctx, "hook apply "+selector, objs+"\n"); rc != 0 {
 		return ErrHandled
 	}
-	ui.Debugf(c.ErrOut, "hooks: applied objects matching '%s'", selector)
+	ui.DebugTo(c.ErrOut, "hooks: applied objects matching '%s'", selector)
 	return nil
 }
 
@@ -408,7 +408,7 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 	}
 	objs := marshalDocs(docs)
 	if !kindLineRe.MatchString(objs) {
-		ui.Warnf(c.ErrOut, "hooks restart: no workloads match '%s'", selector)
+		ui.WarnTo(c.ErrOut, "hooks restart: no workloads match '%s'", selector)
 		return nil
 	}
 	// Rollout-restart each matched Deployment/StatefulSet/DaemonSet by
@@ -427,7 +427,7 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 		if ns == "" {
 			ns = "default"
 		}
-		ui.Debugf(c.ErrOut, "rollout restart %s/%s -n %s", kind, name, ns)
+		ui.DebugTo(c.ErrOut, "rollout restart %s/%s -n %s", kind, name, ns)
 		err := c.Runner.Run(ctx, execx.Cmd{
 			Name: "kubectl", Args: []string{"-n", ns, "rollout", "restart", strings.ToLower(kind) + "/" + name},
 			Stdout: c.Out, Stderr: io.Discard,
@@ -435,13 +435,13 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 		if err == nil {
 			n++
 		} else {
-			ui.Warnf(c.ErrOut, "hooks restart: %s/%s (-n %s) failed", kind, name, ns)
+			ui.WarnTo(c.ErrOut, "hooks restart: %s/%s (-n %s) failed", kind, name, ns)
 		}
 	}
 	if n > 0 {
-		ui.Debugf(c.ErrOut, "hooks: restarted %d workload(s) matching '%s'", n, selector)
+		ui.DebugTo(c.ErrOut, "hooks: restarted %d workload(s) matching '%s'", n, selector)
 	} else {
-		ui.Warnf(c.ErrOut, "hooks restart: matched objects but none are restartable (Deployment/StatefulSet/DaemonSet) for '%s'", selector)
+		ui.WarnTo(c.ErrOut, "hooks restart: matched objects but none are restartable (Deployment/StatefulSet/DaemonSet) for '%s'", selector)
 	}
 	return nil
 }

@@ -129,7 +129,7 @@ func detectProvider(spec *clusterSpec, clusterYAML string, stderr io.Writer) (st
 	if spec.awsPresent {
 		return "aws", nil
 	}
-	ui.Errorf(stderr, "No provider found in cluster spec: %s", clusterYAML)
+	ui.ErrorTo(stderr, "No provider found in cluster spec: %s", clusterYAML)
 	return "", ui.Handled(fmt.Errorf("kubeone: no provider in %s", clusterYAML))
 }
 
@@ -185,7 +185,7 @@ func (d *Driver) ExtractVars(ctx context.Context, clusterYAML string) error {
 	case "disabled":
 		os.Setenv("KUBE_PROXY_SKIP", "true")
 	default:
-		ui.Errorf(stderr, "extract_vars: invalid spec.network.kubeProxy '%s' (expected 'enabled' or 'disabled')", kubeProxy)
+		ui.ErrorTo(stderr, "extract_vars: invalid spec.network.kubeProxy '%s' (expected 'enabled' or 'disabled')", kubeProxy)
 		return ui.Handled(fmt.Errorf("kubeone: invalid spec.network.kubeProxy %q", kubeProxy))
 	}
 

@@ -299,7 +299,7 @@ server = "%s://%s"
 		}
 	}
 
-	ui.Debugf(errOut, "wrote containerd certs.d at %s (tls=%d)", certsD, tls)
+	ui.DebugTo(errOut, "wrote containerd certs.d at %s (tls=%d)", certsD, tls)
 	return nil
 }
 
@@ -359,7 +359,7 @@ func (d *Driver) writeOIDCAuthConfig(domain string, errOut io.Writer) error {
 	}
 	rendered, err := renderAuthConfig(errOut)
 	if err != nil {
-		ui.Errorf(errOut, "failed to render apiserver authentication config from spec.oidc")
+		ui.ErrorTo(errOut, "failed to render apiserver authentication config from spec.oidc")
 		return ui.Handled(err)
 	}
 	// os.WriteFile opens O_TRUNC on the existing file — truncate-then-write
@@ -367,7 +367,7 @@ func (d *Driver) writeOIDCAuthConfig(domain string, errOut io.Writer) error {
 	if err := os.WriteFile(authConfig, []byte(rendered+"\n"), 0o644); err != nil {
 		return err
 	}
-	ui.Debugf(errOut, "wrote apiserver authentication config at %s", authConfig)
+	ui.DebugTo(errOut, "wrote apiserver authentication config at %s", authConfig)
 	return nil
 }
 
@@ -436,7 +436,7 @@ func renderAuthConfig(errOut io.Writer) (string, error) {
 	}
 	clientID := getenv(oidc.EnvClientID)
 	if clientID == "" {
-		ui.Errorf(errOut, "spec.oidc.clientID is required when spec.oidc is set")
+		ui.ErrorTo(errOut, "spec.oidc.clientID is required when spec.oidc is set")
 		return "", ui.Handled(fmt.Errorf("oidc: no clientID configured"))
 	}
 
@@ -451,7 +451,7 @@ func renderAuthConfig(errOut io.Writer) (string, error) {
 	// apiserver trusts. Require https (OIDC discovery + token verification
 	// must not ride plain HTTP).
 	if !strings.HasPrefix(issuer, "https://") {
-		ui.Errorf(errOut, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
+		ui.ErrorTo(errOut, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
 		return "", ui.Handled(fmt.Errorf("oidc: non-https issuer"))
 	}
 

@@ -81,7 +81,7 @@ func (c *Context) liveDrift(ctx context.Context, name, namespace, key, value str
 		return
 	}
 
-	ui.Warnf(c.ErrOut, "live Secret %s/%s key %s on context '%s' still holds the PREVIOUS value — the store is updated, the workload is NOT; run 'lo build' + apply (GitOps planes: commit and let Flux reconcile)", namespace, name, key, kctx)
+	ui.WarnTo(c.ErrOut, "live Secret %s/%s key %s on context '%s' still holds the PREVIOUS value — the store is updated, the workload is NOT; run 'lo build' + apply (GitOps planes: commit and let Flux reconcile)", namespace, name, key, kctx)
 }
 
 // kubectlOutput runs kubectl with stderr discarded (bash: 2>/dev/null) and

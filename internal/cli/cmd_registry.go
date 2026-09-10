@@ -45,12 +45,7 @@ func newRegistryCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	cmd.PersistentFlags().BoolVarP(&shared, "shared", "S", false, "Include shared mirrors (for clean/status)")
 	argshFlagErrors(cmd)

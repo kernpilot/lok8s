@@ -46,12 +46,9 @@ func newStatusCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "too many arguments: %s", args[0])
-			}
 			d := ambientMainEnv(cmd, paths)
 			disp := newDispatcher(cmd, paths)
 			deps := statusDeps{

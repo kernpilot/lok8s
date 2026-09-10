@@ -39,7 +39,7 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.W
 	d := domain.Resolve(o.domainFlag, paths.Clusters, stderr)
 
 	if o.split && o.single {
-		ui.Errorf(stderr, "--split and --single are mutually exclusive")
+		ui.ErrorTo(stderr, "--split and --single are mutually exclusive")
 		return ErrHandled
 	}
 	// --no-secrets is a split-time modifier: it only makes sense when a
@@ -47,7 +47,7 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.W
 	// shape, so the flag would be a silent no-op — reject the
 	// contradiction loudly.
 	if o.noSecrets && o.single {
-		ui.Errorf(stderr, "--no-secrets and --single are mutually exclusive (--no-secrets shapes the split emit)")
+		ui.ErrorTo(stderr, "--no-secrets and --single are mutually exclusive (--no-secrets shapes the split emit)")
 		return ErrHandled
 	}
 
@@ -60,12 +60,12 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.W
 	override := ""
 	if o.single {
 		if mode == "split" {
-			ui.Warnf(stderr, "--single overrides spec.build.artifacts=split — the committed artifacts/ dir is now STALE for %s", d)
+			ui.WarnTo(stderr, "--single overrides spec.build.artifacts=split — the committed artifacts/ dir is now STALE for %s", d)
 		}
 		override = "0"
 	} else if o.split {
 		if mode != "split" {
-			ui.Warnf(stderr, "--split without spec.build.artifacts=split — one-off output; declare it in the spec so every build (CI, recovery) matches")
+			ui.WarnTo(stderr, "--split without spec.build.artifacts=split — one-off output; declare it in the spec so every build (CI, recovery) matches")
 		}
 		override = "1"
 	}
@@ -125,9 +125,7 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// -v/--verbose → DEBUG, like the argsh entrypoint.
-			if v, _ := cmd.Flags().GetCount("verbose"); v > 0 {
-				os.Setenv("DEBUG", "1")
-			}
+			setDebugFromVerbose(cmd)
 			domainFlag, _ := cmd.Flags().GetString("domain")
 			clusterFlag, _ := cmd.Flags().GetString("cluster")
 			return runBuild(cmd.Context(), paths, buildOpts{

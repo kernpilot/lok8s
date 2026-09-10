@@ -38,10 +38,6 @@ var runProcess = func(bin string, argv, env []string) int {
 	return execx.ExitCode(c.Run())
 }
 
-// exitProcess is the process exit behind a seam for the rc passthroughs
-// (exitNow: the per-run temp dirs are dropped first).
-var exitProcess = exitNow
-
 // aiSkillsSrc is where the skills live — the source of truth.
 func aiSkillsSrc(paths *config.Paths) string { return filepath.Join(paths.Base, "skills") }
 
@@ -62,12 +58,7 @@ func newAiCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 
 	link := &cobra.Command{
@@ -147,7 +138,7 @@ func aiCheck(paths *config.Paths, out, stderr io.Writer) error {
 		return nil
 	}
 	if rc != 1 {
-		exitProcess(rc)
+		exitNow(rc)
 	}
 	return ErrHandled
 }
@@ -181,7 +172,7 @@ func skillDirs(src string) []string {
 func aiSkills(paths *config.Paths, out, stderr io.Writer) error {
 	src := aiSkillsSrc(paths)
 	if !fsutil.DirExists(src) {
-		ui.Errorf(stderr, "no skills dir: %s", src)
+		ui.ErrorTo(stderr, "no skills dir: %s", src)
 		return ErrHandled
 	}
 	claudeDir, _ := aiAgentSkillDir(paths, "claude")
@@ -205,12 +196,12 @@ func aiSkills(paths *config.Paths, out, stderr io.Writer) error {
 func aiLink(paths *config.Paths, who string, copyMode bool, out, stderr io.Writer) error {
 	dst, ok := aiAgentSkillDir(paths, who)
 	if !ok {
-		ui.Errorf(stderr, "%s has no native skill dir — it gets skills by injection from `lo chat`, nothing to link.", who)
+		ui.ErrorTo(stderr, "%s has no native skill dir — it gets skills by injection from `lo chat`, nothing to link.", who)
 		return ErrHandled
 	}
 	src := aiSkillsSrc(paths)
 	if !fsutil.DirExists(src) {
-		ui.Errorf(stderr, "no skills dir: %s", src)
+		ui.ErrorTo(stderr, "no skills dir: %s", src)
 		return ErrHandled
 	}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -247,7 +238,7 @@ func aiLink(paths *config.Paths, who string, copyMode bool, out, stderr io.Write
 func aiUnlink(paths *config.Paths, who string, out, stderr io.Writer) error {
 	dst, ok := aiAgentSkillDir(paths, who)
 	if !ok {
-		ui.Errorf(stderr, "%s: no skill dir", who)
+		ui.ErrorTo(stderr, "%s: no skill dir", who)
 		return ErrHandled
 	}
 	if !fsutil.DirExists(dst) {

@@ -23,12 +23,7 @@ func newCrdsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Hidden:       spec.hidden,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	cmd.AddCommand(
 		&cobra.Command{

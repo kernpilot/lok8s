@@ -219,7 +219,7 @@ func dispatchExit(stderr io.Writer, err error) error {
 		if stderr == nil {
 			stderr = os.Stderr
 		}
-		ui.Errorf(stderr, "%v", err)
+		ui.ErrorTo(stderr, "%v", err)
 	}
 	return ErrHandled
 }

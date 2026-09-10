@@ -44,7 +44,7 @@ func newKubeconfigCommand(paths *config.Paths, spec commandSpec) *cobra.Command 
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stderr := cmd.ErrOrStderr()
@@ -52,15 +52,10 @@ func newKubeconfigCommand(paths *config.Paths, spec commandSpec) *cobra.Command 
 			// The argsh spec has NO positional (the domain rides the --domain
 			// flag); a stray positional is a parse error there (rc 2, message
 			// below). Same message here, exit 1 — the version/use precedent.
-			if len(args) > 0 {
-				return argshErrorf(stderr, "too many arguments: %s", args[0])
-			}
 
 			// -v/--verbose → DEBUG, like the argsh entrypoint (the deploy-
 			// domain resolution emits a debug line).
-			if v, _ := cmd.Flags().GetCount("verbose"); v > 0 {
-				os.Setenv("DEBUG", "1")
-			}
+			setDebugFromVerbose(cmd)
 
 			// Domain: the canonical precedence chain (--domain flag >
 			// DOMAIN_NAME env > clusters/.active > lok8s.dev). The argsh
@@ -89,13 +84,13 @@ func newKubeconfigCommand(paths *config.Paths, spec commandSpec) *cobra.Command 
 			if kubeconfig == "" || !fsutil.FileExists(kubeconfig) {
 				adminPath, ok := kubeconfigAdminPath(paths, d)
 				if !ok {
-					ui.Errorf(stderr, "could not resolve a kubeconfig for %s (is the cluster provisioned?)", d)
+					ui.ErrorTo(stderr, "could not resolve a kubeconfig for %s (is the cluster provisioned?)", d)
 					return ErrHandled
 				}
 				kubeconfig = adminPath
 			}
 			if !fsutil.FileExists(kubeconfig) {
-				ui.Errorf(stderr, "kubeconfig not found: %s (provision the cluster first)", kubeconfig)
+				ui.ErrorTo(stderr, "kubeconfig not found: %s (provision the cluster first)", kubeconfig)
 				return ErrHandled
 			}
 
@@ -199,7 +194,7 @@ func kubeconfigEmitOIDC(p *config.Paths, d, src string, out, stderr io.Writer) e
 	if !oidc.Enabled() {
 		clusterYAML, ok := kubeconfigClusterYAML(p, d)
 		if !ok {
-			ui.Errorf(stderr, "could not resolve a cluster spec for '%s' — cannot read spec.oidc", d)
+			ui.ErrorTo(stderr, "could not resolve a cluster spec for '%s' — cannot read spec.oidc", d)
 			return ErrHandled
 		}
 		if err := oidc.LoadSpec(clusterYAML, stderr); err != nil {
@@ -209,7 +204,7 @@ func kubeconfigEmitOIDC(p *config.Paths, d, src string, out, stderr io.Writer) e
 
 	// spec.oidc must be present to build an exec-plugin user.
 	if !oidc.Enabled() {
-		ui.Errorf(stderr, "domain '%s' has no usable spec.oidc (issuer + clientID required) — cannot emit an OIDC kubeconfig", d)
+		ui.ErrorTo(stderr, "domain '%s' has no usable spec.oidc (issuer + clientID required) — cannot emit an OIDC kubeconfig", d)
 		return ErrHandled
 	}
 	issuer := os.Getenv(oidc.EnvIssuer)
@@ -218,13 +213,13 @@ func kubeconfigEmitOIDC(p *config.Paths, d, src string, out, stderr io.Writer) e
 	// issuer lands in a kubeconfig users will authenticate against — never
 	// plain HTTP.
 	if !strings.HasPrefix(issuer, "https://") {
-		ui.Errorf(stderr, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
+		ui.ErrorTo(stderr, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
 		return ErrHandled
 	}
 
 	cluster, ok := kubeconfigSourceCluster(src)
 	if !ok {
-		ui.Errorf(stderr, "could not read cluster server/name from %s", src)
+		ui.ErrorTo(stderr, "could not read cluster server/name from %s", src)
 		return ErrHandled
 	}
 	writeOIDCKubeconfig(out, cluster, issuer, clientID)

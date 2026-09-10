@@ -328,7 +328,6 @@ func (r *fakeRunner) Run(_ context.Context, c execx.Cmd) error {
 type driversHarness struct {
 	calls  []string
 	shimed [][]string
-	exits  []int
 	err    error
 }
 
@@ -346,7 +345,6 @@ func (h *driversHarness) deps() driversDeps {
 		},
 		runner: &fakeRunner{},
 		shim:   func(argv []string) error { h.shimed = append(h.shimed, argv); return nil },
-		exit:   func(code int) { h.exits = append(h.exits, code) },
 	}
 }
 
@@ -437,6 +435,7 @@ func TestDriversErrorPaths(t *testing.T) {
 func TestDriversDispatchToGoDriver(t *testing.T) {
 	p := synthProject(t)
 	h := &driversHarness{}
+	exits := captureExits(t)
 
 	stdout, _, err := runLo(t, driversRoot(p, h.deps()), "drivers", "fakedrv", "status", "a.dev")
 	if err != nil || stdout != "Fake\n" {
@@ -456,16 +455,16 @@ func TestDriversDispatchToGoDriver(t *testing.T) {
 	if got := strings.Join(h.calls, " "); got != want {
 		t.Errorf("calls = %q, want %q", got, want)
 	}
-	if len(h.shimed) != 0 || len(h.exits) != 0 {
-		t.Errorf("unexpected shim/exit: %v %v", h.shimed, h.exits)
+	if len(h.shimed) != 0 || len(*exits) != 0 {
+		t.Errorf("unexpected shim/exit: %v %v", h.shimed, *exits)
 	}
 
 	// The driver's own rc passes through (gate decline sentinel 3); a plain
 	// error is a plain exit 1.
 	h.err = driver.ErrDeclined
 	_, _, err = runLo(t, driversRoot(p, h.deps()), "drivers", "fakedrv", "provision", "c.dev")
-	if !errors.Is(err, ErrHandled) || len(h.exits) != 1 || h.exits[0] != 3 {
-		t.Errorf("rc 3 passthrough: err=%v exits=%v", err, h.exits)
+	if !errors.Is(err, ErrHandled) || len(*exits) != 1 || (*exits)[0] != 3 {
+		t.Errorf("rc 3 passthrough: err=%v exits=%v", err, *exits)
 	}
 	h.err = errors.New("boom")
 	_, _, err = runLo(t, driversRoot(p, h.deps()), "drivers", "fakedrv", "status", "c.dev")
@@ -701,11 +700,10 @@ func TestAiCheckRunsRuntimeCheckThenSkills(t *testing.T) {
 
 	var gotArgv []string
 	rc := 0
-	savedRun, savedExit := runProcess, exitProcess
-	var exits []int
+	savedRun := runProcess
 	runProcess = func(bin string, argv, env []string) int { gotArgv = argv; return rc }
-	exitProcess = func(code int) { exits = append(exits, code) }
-	defer func() { runProcess, exitProcess = savedRun, savedExit }()
+	defer func() { runProcess = savedRun }()
+	exits := captureExits(t)
 
 	stdout, _, err := runLo(t, NewRoot(p), "ai", "check")
 	if err != nil {
@@ -724,8 +722,8 @@ func TestAiCheckRunsRuntimeCheckThenSkills(t *testing.T) {
 	}
 	rc = 7
 	runLo(t, NewRoot(p), "ai", "check")
-	if len(exits) != 1 || exits[0] != 7 {
-		t.Errorf("rc passthrough: %v", exits)
+	if len(*exits) != 1 || (*exits)[0] != 7 {
+		t.Errorf("rc passthrough: %v", *exits)
 	}
 
 	// Missing runtime: the chat error prints, then the skills still show.

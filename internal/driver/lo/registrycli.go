@@ -103,15 +103,15 @@ func (d *Driver) RegistryClean(ctx context.Context, domain string, shared bool, 
 	members, _ := d.output(ctx, "docker", "network", "inspect", net,
 		"-f", `{{range .Containers}}{{.Name}}{{"\n"}}{{end}}`)
 	for member := range strings.FieldsSeq(members) {
-		ui.Warnf(errOut, "registry clean: detaching '%s' from %s (re-attaches on its cluster's next 'lo up')", member, net)
+		ui.WarnTo(errOut, "registry clean: detaching '%s' from %s (re-attaches on its cluster's next 'lo up')", member, net)
 		_ = d.runQuiet(ctx, "docker", "network", "disconnect", "-f", net, member)
 	}
 	if d.networkExists(ctx, net) {
 		if err := d.runQuiet(ctx, "docker", "network", "rm", net); err != nil {
-			ui.Warnf(errOut, "registry clean: could not remove %s — it still has attached containers (docker network inspect %s)", net, net)
+			ui.WarnTo(errOut, "registry clean: could not remove %s — it still has attached containers (docker network inspect %s)", net, net)
 			return ui.Handled(fmt.Errorf("could not remove registry network %s", net))
 		}
-		ui.Debugf(errOut, "Removed registry network %s", net)
+		ui.DebugTo(errOut, "Removed registry network %s", net)
 	}
 	return nil
 }

@@ -135,9 +135,9 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		clusterID = saved
 		// bash: kkp::get_cluster … >/dev/null 2>&1 — fully suppressed probe.
 		if _, err := d.getCluster(ctx, projectID, clusterID, io.Discard); err == nil {
-			ui.Debugf(stderr, "KKP cluster %s already exists — skipping create", clusterID)
+			ui.DebugTo(stderr, "KKP cluster %s already exists — skipping create", clusterID)
 		} else {
-			ui.Warnf(stderr, "Saved cluster ID %s no longer exists in KKP — creating a new cluster", clusterID)
+			ui.WarnTo(stderr, "Saved cluster ID %s no longer exists in KKP — creating a new cluster", clusterID)
 			clusterID = ""
 		}
 	}
@@ -166,7 +166,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		if err := os.WriteFile(filepath.Join(workDir, "project_id"), []byte(projectID+"\n"), 0o644); err != nil { // #nosec G306 -- an identifier, not a credential
 			return err
 		}
-		ui.Debugf(stderr, "KKP cluster ID %s saved to %s/cluster_id", clusterID, workDir)
+		ui.DebugTo(stderr, "KKP cluster ID %s saved to %s/cluster_id", clusterID, workDir)
 	}
 
 	// 5. Wait for cluster to reach Running phase.
@@ -186,7 +186,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return err
 	}
 
-	ui.Debugf(stderr, "KKP cluster %s provisioned successfully", clusterName)
+	ui.DebugTo(stderr, "KKP cluster %s provisioned successfully", clusterName)
 	return nil
 }
 
@@ -200,8 +200,8 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	clusterID, okC := readIDFile(filepath.Join(workDir, "cluster_id"))
 	projectID, okP := readIDFile(filepath.Join(workDir, "project_id"))
 	if !okC || !okP {
-		ui.Errorf(stderr, "No saved cluster ID found in %s/cluster_id", workDir)
-		ui.Errorf(stderr, "Cannot destroy cluster without a cluster ID")
+		ui.ErrorTo(stderr, "No saved cluster ID found in %s/cluster_id", workDir)
+		ui.ErrorTo(stderr, "Cannot destroy cluster without a cluster ID")
 		return ui.Handled(fmt.Errorf("kkp: no saved cluster ID in %s", workDir))
 	}
 
@@ -229,10 +229,10 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// — it just may not happen after one, and may not claim success it did
 	// not have.
 	if err := d.deleteCluster(ctx, projectID, clusterID); err != nil {
-		ui.Errorf(stderr, "KKP cluster delete FAILED (cluster %s, project %s)", clusterID, projectID)
-		ui.Errorf(stderr, "  the cluster is still running and still billing")
-		ui.Errorf(stderr, "  KEEPING %s — cluster_id there is the only handle a retry has", workDir)
-		ui.Errorf(stderr, "  retry with 'lo down', or delete the cluster in the KKP UI")
+		ui.ErrorTo(stderr, "KKP cluster delete FAILED (cluster %s, project %s)", clusterID, projectID)
+		ui.ErrorTo(stderr, "  the cluster is still running and still billing")
+		ui.ErrorTo(stderr, "  KEEPING %s — cluster_id there is the only handle a retry has", workDir)
+		ui.ErrorTo(stderr, "  retry with 'lo down', or delete the cluster in the KKP UI")
 		return ui.Handled(fmt.Errorf("kkp: cluster delete failed: %w", err))
 	}
 
@@ -241,7 +241,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	_ = os.Remove(filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml"))
 	_ = os.RemoveAll(workDir)
 
-	ui.Debugf(stderr, "KKP cluster %s destroyed and local state cleaned", clusterID)
+	ui.DebugTo(stderr, "KKP cluster %s destroyed and local state cleaned", clusterID)
 	return nil
 }
 
@@ -401,7 +401,7 @@ func buildCloudSpec(provider, preset string, stderr io.Writer) (*jsonObj, error)
 		// `bringyourown` datacenter in the Seed.
 		return obj("bringyourown", obj()), nil
 	default:
-		ui.Errorf(stderr, "Unsupported KKP provider: %s", provider)
+		ui.ErrorTo(stderr, "Unsupported KKP provider: %s", provider)
 		return nil, ui.Handled(fmt.Errorf("kkp: unsupported provider: %s", provider))
 	}
 }
@@ -412,7 +412,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 	stderr := d.stderr()
 
 	if spec.poolCount() == 0 {
-		ui.Debugf(stderr, "No worker pools defined in spec")
+		ui.DebugTo(stderr, "No worker pools defined in spec")
 		return nil
 	}
 
@@ -450,7 +450,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 		}
 
 		if existing[pool] {
-			ui.Debugf(stderr, "Worker pool %s already exists — skipping create", pool)
+			ui.DebugTo(stderr, "Worker pool %s already exists — skipping create", pool)
 			continue
 		}
 
@@ -462,7 +462,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 		osName := spec.poolField(pool, "operatingSystem", "ubuntu")
 
 		if flavor == "" {
-			ui.Errorf(stderr, "Worker pool '%s' has no flavor/type set", pool)
+			ui.ErrorTo(stderr, "Worker pool '%s' has no flavor/type set", pool)
 			return ui.Handled(fmt.Errorf("kkp: worker pool %q has no flavor/type set", pool))
 		}
 
@@ -477,7 +477,7 @@ func (d *Driver) createWorkerPools(ctx context.Context, projectID, clusterID str
 		}
 
 		if _, err := d.createMachineDeployment(ctx, projectID, clusterID, mdJSON); err != nil {
-			ui.Errorf(stderr, "Failed to create machine deployment: %s", pool)
+			ui.ErrorTo(stderr, "Failed to create machine deployment: %s", pool)
 			return ui.Handled(fmt.Errorf("kkp: failed to create machine deployment %s: %w", pool, err))
 		}
 	}
@@ -497,7 +497,7 @@ func buildMachineDeploymentJSON(name, replicas, flavor, osName, provider,
 	case "aws":
 		cloudSpec = obj("aws", obj("instanceType", flavor))
 	default:
-		ui.Errorf(stderr, "Unsupported provider for machine deployment: %s", provider)
+		ui.ErrorTo(stderr, "Unsupported provider for machine deployment: %s", provider)
 		return "", ui.Handled(fmt.Errorf("kkp: unsupported provider for machine deployment: %s", provider))
 	}
 
@@ -507,7 +507,7 @@ func buildMachineDeploymentJSON(name, replicas, flavor, osName, provider,
 	// buildClusterJSON's.
 	replicasNum, err := strconv.Atoi(replicas)
 	if err != nil {
-		ui.Errorf(stderr, "Invalid replicas for pool %s: %s (must be numeric)", name, replicas)
+		ui.ErrorTo(stderr, "Invalid replicas for pool %s: %s (must be numeric)", name, replicas)
 		return "", ui.Handled(fmt.Errorf("kkp: invalid replicas for pool %s: %s", name, replicas))
 	}
 

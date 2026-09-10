@@ -166,7 +166,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 		if has == "" {
 			has = "none"
 		}
-		ui.Warnf(errOut, "lo: registry network '%s' lacks the reserved dynamic range (has '%s') — recreating it with %s (mirrors + nodes re-attach via the normal reconcile)", network, has, dynamicRange)
+		ui.WarnTo(errOut, "lo: registry network '%s' lacks the reserved dynamic range (has '%s') — recreating it with %s (mirrors + nodes re-attach via the normal reconcile)", network, has, dynamicRange)
 
 		// Serialize the recreate across concurrent `lo` runs (the shared
 		// network is host-global). Best-effort, same pattern as the registry
@@ -185,7 +185,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 				return nil
 			}
 		} else {
-			ui.Debugf(errOut, "registry network %s: lock wait timed out, proceeding unlocked", network)
+			ui.DebugTo(errOut, "registry network %s: lock wait timed out, proceeding unlocked", network)
 		}
 		// From here to the create the lock must stay HELD: releasing it
 		// between the rm and the create re-opens the exact window it exists

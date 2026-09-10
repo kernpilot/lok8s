@@ -27,6 +27,41 @@ func argshErrorf(errOut io.Writer, format string, a ...any) error {
 	return ErrHandled
 }
 
+// argshNoArgs is the Args validator of a command whose argsh spec declares
+// no positional. A stray positional is a parse error there (rc 2, this
+// message). Same message here, exit 1.
+func argshNoArgs(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return argshErrorf(cmd.ErrOrStderr(), "too many arguments: %s", args[0])
+	}
+	return nil
+}
+
+// argshGroupRunE is the RunE of a command group. An unknown subcommand is
+// a parse error in argsh (`Invalid command: x`, rc 2); without a RunE
+// cobra printed the group help and exited 0. Same message, exit 1. A bare
+// group prints its help.
+func argshGroupRunE(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
+	}
+	return cmd.Help()
+}
+
+// setDebugFromVerbose exports DEBUG=1 for -v/--verbose, like the argsh
+// entrypoint (the debug() lines depend on it).
+func setDebugFromVerbose(cmd *cobra.Command) {
+	v, _ := cmd.Flags().GetCount("verbose")
+	setDebug(v > 0)
+}
+
+// setDebug exports DEBUG=1 when verbose is set.
+func setDebug(verbose bool) {
+	if verbose {
+		os.Setenv("DEBUG", "1")
+	}
+}
+
 // portedCommands maps command names to their Go implementations. Anything
 // absent here still shims to the argsh implementation. Entries register
 // themselves via registerPorted from each command file's init(), so adding a

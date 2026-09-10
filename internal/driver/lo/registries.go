@@ -136,7 +136,7 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 		// (bash probed `declare -F kustomize::build`; the Go seam is the
 		// injectable hook); otherwise fail with guidance.
 		if !isExecutable(pluginBin) && d.Hooks.KustomizeBuild != nil {
-			ui.Debugf(errOut, "registry TLS: Secret plugin missing — building it (lo kustomize build)")
+			ui.DebugTo(errOut, "registry TLS: Secret plugin missing — building it (lo kustomize build)")
 			_ = d.Hooks.KustomizeBuild(ctx)
 		}
 		if !isExecutable(pluginBin) {
@@ -197,7 +197,7 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	if fsutil.FileExists(crt) && fsutil.FileExists(key) && fsutil.FileExists(sansFile) {
 		if prev, err := os.ReadFile(sansFile); err == nil &&
 			strings.TrimRight(string(prev), "\n") == sansRepr {
-			ui.Debugf(errOut, "registry TLS cert up to date (%d SANs)", len(uniq))
+			ui.DebugTo(errOut, "registry TLS cert up to date (%d SANs)", len(uniq))
 			return nil
 		}
 	}
@@ -283,7 +283,7 @@ cert:
 	if err := os.WriteFile(sansFile, []byte(sansRepr+"\n"), 0o644); err != nil {
 		return err
 	}
-	ui.Debugf(errOut, "minted registry TLS cert with SANs: %s", strings.Join(uniq, " "))
+	ui.DebugTo(errOut, "minted registry TLS cert with SANs: %s", strings.Join(uniq, " "))
 	return nil
 }
 
@@ -319,10 +319,10 @@ func (d *Driver) registriesTLSNudge(ctx context.Context, errOut io.Writer) {
 		return // CA is in the host trust store → host pushes will verify
 	}
 
-	ui.Warnf(errOut, "Registry TLS is on, but this machine doesn't trust the dev CA yet —")
-	ui.Warnf(errOut, "  in-cluster pulls work, but 'docker push' to the build registry will fail.")
-	ui.Warnf(errOut, "  Fix it once:  lo trust   (or insecure-registries / a rootless runtime)")
-	ui.Warnf(errOut, "  How: https://lok8s.io/guide/shared-registries#host-push-trust-options")
+	ui.WarnTo(errOut, "Registry TLS is on, but this machine doesn't trust the dev CA yet —")
+	ui.WarnTo(errOut, "  in-cluster pulls work, but 'docker push' to the build registry will fail.")
+	ui.WarnTo(errOut, "  Fix it once:  lo trust   (or insecure-registries / a rootless runtime)")
+	ui.WarnTo(errOut, "  How: https://lok8s.io/guide/shared-registries#host-push-trust-options")
 }
 
 // registryIPHolder returns the name of the container currently holding ip on
@@ -422,7 +422,7 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 		// next run.
 		release, locked := acquireLock(ctx, configPath+".lock", d.sleep)
 		if !locked {
-			ui.Debugf(errOut, "registry %s: lock wait timed out, proceeding unlocked", regName)
+			ui.DebugTo(errOut, "registry %s: lock wait timed out, proceeding unlocked", regName)
 		}
 		if err := d.registryReconcile(ctx, out, errOut, regName, regNetwork, r.IP,
 			configPath, rendered, desiredHash, tlsMountArgs, rf); err != nil {

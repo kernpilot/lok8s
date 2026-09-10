@@ -56,8 +56,8 @@ func (d *Driver) validateURL(url string, stderr io.Writer) error {
 // requireHTTPS ports http::require_https.
 func requireHTTPS(url, label string, stderr io.Writer) error {
 	if !strings.HasPrefix(url, "https://") {
-		ui.Errorf(stderr, "%s must use HTTPS: %s", label, url)
-		ui.Errorf(stderr, "Plain HTTP is not allowed for security reasons")
+		ui.ErrorTo(stderr, "%s must use HTTPS: %s", label, url)
+		ui.ErrorTo(stderr, "Plain HTTP is not allowed for security reasons")
 		return ui.Handled(fmt.Errorf("kkp: %s must use HTTPS: %s", label, url))
 	}
 	return nil
@@ -70,12 +70,12 @@ func requireHTTPS(url, label string, stderr io.Writer) error {
 func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.Writer) (string, error) {
 	token := os.Getenv("KKP_TOKEN")
 	if token == "" {
-		ui.Errorf(stderr, "KKP_TOKEN is not set")
+		ui.ErrorTo(stderr, "KKP_TOKEN is not set")
 		return "", ui.Handled(fmt.Errorf("kkp: KKP_TOKEN is not set"))
 	}
 	apiURL := os.Getenv("KKP_API_URL")
 	if apiURL == "" {
-		ui.Errorf(stderr, "KKP_API_URL is not set")
+		ui.ErrorTo(stderr, "KKP_API_URL is not set")
 		return "", ui.Handled(fmt.Errorf("kkp: KKP_API_URL is not set"))
 	}
 	if err := d.validateURL(apiURL, stderr); err != nil {
@@ -106,13 +106,13 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		if fsutil.FileExists(ca) {
 			curlArgs = append(curlArgs, "--cacert", ca)
 		} else {
-			ui.Errorf(stderr, "KKP_CA_CERT set but not a readable file: %s", ca)
+			ui.ErrorTo(stderr, "KKP_CA_CERT set but not a readable file: %s", ca)
 			return "", ui.Handled(fmt.Errorf("kkp: KKP_CA_CERT not a readable file: %s", ca))
 		}
 	}
 
 	// Redact token from debug output.
-	ui.Debugf(stderr, "KKP API: %s %s (token=<redacted>)", method, url)
+	ui.DebugTo(stderr, "KKP API: %s %s (token=<redacted>)", method, url)
 
 	maxRetries := kkpMaxRetries()
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -127,14 +127,14 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		response, httpCode := splitHTTPCode(buf.String())
 
 		if len(httpCode) == 3 && httpCode[0] == '2' && isDigits(httpCode) {
-			ui.Debugf(stderr, "KKP API: %s %s -> %s", method, path, httpCode)
+			ui.DebugTo(stderr, "KKP API: %s %s -> %s", method, path, httpCode)
 			return response, nil
 		}
 
 		// Rate limited — retry with backoff.
 		if httpCode == "429" {
 			delay := kkpRetryDelay() * attempt
-			ui.Warnf(stderr, "KKP API rate limited (429), retrying in %ds (attempt %d/%d)", delay, attempt, maxRetries)
+			ui.WarnTo(stderr, "KKP API rate limited (429), retrying in %ds (attempt %d/%d)", delay, attempt, maxRetries)
 			if err := d.sleepSeconds(ctx, delay); err != nil {
 				return "", err
 			}
@@ -142,14 +142,14 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		}
 
 		// Client/server errors — no retry.
-		ui.Errorf(stderr, "KKP API error: %s %s -> HTTP %s", method, path, httpCode)
+		ui.ErrorTo(stderr, "KKP API error: %s %s -> HTTP %s", method, path, httpCode)
 		if response != "" {
-			ui.Errorf(stderr, "Response: %s", response)
+			ui.ErrorTo(stderr, "Response: %s", response)
 		}
 		return "", ui.Handled(fmt.Errorf("kkp: API error: %s %s -> HTTP %s", method, path, httpCode))
 	}
 
-	ui.Errorf(stderr, "KKP API: max retries (%d) exhausted for %s %s", maxRetries, method, path)
+	ui.ErrorTo(stderr, "KKP API: max retries (%d) exhausted for %s %s", maxRetries, method, path)
 	return "", ui.Handled(fmt.Errorf("kkp: max retries (%d) exhausted for %s %s", maxRetries, method, path))
 }
 
@@ -188,11 +188,11 @@ func (d *Driver) createCluster(ctx context.Context, projectID, clusterJSON strin
 	}
 	clusterID := jsonStringField(response, "id")
 	if clusterID == "" {
-		ui.Errorf(stderr, "KKP create_cluster: no cluster ID in response")
-		ui.Errorf(stderr, "Response: %s", response)
+		ui.ErrorTo(stderr, "KKP create_cluster: no cluster ID in response")
+		ui.ErrorTo(stderr, "Response: %s", response)
 		return "", ui.Handled(fmt.Errorf("kkp: create_cluster: no cluster ID in response"))
 	}
-	ui.Debugf(stderr, "KKP cluster created: %s", clusterID)
+	ui.DebugTo(stderr, "KKP cluster created: %s", clusterID)
 	return clusterID, nil
 }
 
@@ -202,7 +202,7 @@ func (d *Driver) deleteCluster(ctx context.Context, projectID, clusterID string)
 	if _, err := d.api(ctx, "DELETE", "/api/v2/projects/"+projectID+"/clusters/"+clusterID, "", stderr); err != nil {
 		return err
 	}
-	ui.Debugf(stderr, "KKP cluster deleted: %s", clusterID)
+	ui.DebugTo(stderr, "KKP cluster deleted: %s", clusterID)
 	return nil
 }
 
@@ -232,7 +232,7 @@ func (d *Driver) getKubeconfig(ctx context.Context, projectID, clusterID, output
 	if err := os.Chmod(outputFile, 0o600); err != nil {
 		return err
 	}
-	ui.Debugf(stderr, "KKP kubeconfig written to %s", outputFile)
+	ui.DebugTo(stderr, "KKP kubeconfig written to %s", outputFile)
 	return nil
 }
 
@@ -247,10 +247,10 @@ func (d *Driver) createMachineDeployment(ctx context.Context, projectID, cluster
 	}
 	mdID := jsonStringField(response, "id")
 	if mdID == "" {
-		ui.Errorf(stderr, "KKP create_machinedeployment: no ID in response")
+		ui.ErrorTo(stderr, "KKP create_machinedeployment: no ID in response")
 		return "", ui.Handled(fmt.Errorf("kkp: create_machinedeployment: no ID in response"))
 	}
-	ui.Debugf(stderr, "KKP machine deployment created: %s", mdID)
+	ui.DebugTo(stderr, "KKP machine deployment created: %s", mdID)
 	return mdID, nil
 }
 
@@ -316,12 +316,12 @@ func (d *Driver) waitComponents(ctx context.Context, projectID, clusterID string
 	stderr := d.stderr()
 	start := d.now()
 
-	ui.Debugf(stderr, "Waiting for KKP cluster %s components: %s (timeout=%ds)", clusterID, strings.Join(components, " "), timeout)
+	ui.DebugTo(stderr, "Waiting for KKP cluster %s components: %s (timeout=%ds)", clusterID, strings.Join(components, " "), timeout)
 
 	for {
 		elapsed := int(d.now().Sub(start).Seconds())
 		if elapsed >= timeout {
-			ui.Errorf(stderr, "Timed out waiting for KKP cluster %s components (%s) after %ds", clusterID, strings.Join(components, " "), timeout)
+			ui.ErrorTo(stderr, "Timed out waiting for KKP cluster %s components (%s) after %ds", clusterID, strings.Join(components, " "), timeout)
 			return ui.Handled(fmt.Errorf("kkp: timed out waiting for cluster %s components", clusterID))
 		}
 
@@ -341,7 +341,7 @@ func (d *Driver) waitComponents(ctx context.Context, projectID, clusterID string
 			if allUp {
 				return nil
 			}
-			ui.Debugf(stderr, "KKP cluster %s waiting on %s (elapsed=%ds)", clusterID, lastComponent, elapsed)
+			ui.DebugTo(stderr, "KKP cluster %s waiting on %s (elapsed=%ds)", clusterID, lastComponent, elapsed)
 		}
 
 		if err := d.sleepSeconds(ctx, kkpWaitInterval()); err != nil {
@@ -362,7 +362,7 @@ func (d *Driver) waitReady(ctx context.Context, projectID, clusterID string, tim
 	interval := kkpWaitInterval()
 	lastHealth := ""
 
-	ui.Debugf(stderr, "Waiting for KKP cluster %s control plane to become healthy (timeout=%ds)", clusterID, timeout)
+	ui.DebugTo(stderr, "Waiting for KKP cluster %s control plane to become healthy (timeout=%ds)", clusterID, timeout)
 
 	for {
 		elapsed := int(d.now().Sub(start).Seconds())
@@ -371,19 +371,19 @@ func (d *Driver) waitReady(ctx context.Context, projectID, clusterID string, tim
 			if health == "" {
 				health = "unknown" // bash: ${health:-unknown}
 			}
-			ui.Errorf(stderr, "Timed out waiting for KKP cluster %s to become healthy after %ds (last health: %s)", clusterID, timeout, health)
+			ui.ErrorTo(stderr, "Timed out waiting for KKP cluster %s to become healthy after %ds (last health: %s)", clusterID, timeout, health)
 			return ui.Handled(fmt.Errorf("kkp: timed out waiting for cluster %s to become healthy", clusterID))
 		}
 
 		if healthJSON, err := d.health(ctx, projectID, clusterID, io.Discard); err == nil {
 			lastHealth = healthJSON
 			if coreHealthy(healthJSON) {
-				ui.Debugf(stderr, "KKP cluster %s control plane is healthy", clusterID)
+				ui.DebugTo(stderr, "KKP cluster %s control plane is healthy", clusterID)
 				return nil
 			}
-			ui.Debugf(stderr, "KKP cluster %s health: %s (elapsed=%ds)", clusterID, healthJSON, elapsed)
+			ui.DebugTo(stderr, "KKP cluster %s health: %s (elapsed=%ds)", clusterID, healthJSON, elapsed)
 		} else {
-			ui.Warnf(stderr, "KKP cluster health check failed, retrying...")
+			ui.WarnTo(stderr, "KKP cluster health check failed, retrying...")
 		}
 
 		if err := d.sleepSeconds(ctx, interval); err != nil {
@@ -410,14 +410,14 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 
 	// KKP API token is always required.
 	if os.Getenv("KKP_TOKEN") == "" {
-		ui.Errorf(stderr, "KKP_TOKEN env var is required for KKP API authentication")
+		ui.ErrorTo(stderr, "KKP_TOKEN env var is required for KKP API authentication")
 		errors++
 	}
 
 	// KKP API URL is always required.
 	if os.Getenv("KKP_API_URL") == "" {
 		if spec.Or("", "spec", "kkp", "apiUrl") == "" {
-			ui.Errorf(stderr, "KKP_API_URL env var or spec.kkp.apiUrl is required")
+			ui.ErrorTo(stderr, "KKP_API_URL env var or spec.kkp.apiUrl is required")
 			errors++
 		}
 	}
@@ -444,9 +444,9 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 			}
 			if fsutil.FileExists(specCA) {
 				os.Setenv("KKP_CA_CERT", specCA)
-				ui.Debugf(stderr, "KKP CA cert from spec.kkp.caCert: %s", specCA)
+				ui.DebugTo(stderr, "KKP CA cert from spec.kkp.caCert: %s", specCA)
 			} else {
-				ui.Errorf(stderr, "spec.kkp.caCert points to a missing file: %s", specCA)
+				ui.ErrorTo(stderr, "spec.kkp.caCert points to a missing file: %s", specCA)
 				errors++
 			}
 		}
@@ -457,24 +457,24 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 		provider := spec.providerName("")
 		switch {
 		case provider == "byo" || provider == "bringyourown":
-			ui.Debugf(stderr, "bringyourown provider — no cloud credentials required")
+			ui.DebugTo(stderr, "bringyourown provider — no cloud credentials required")
 		case provider != "":
 			if err := requireCredentials(provider, stderr); err != nil {
 				errors++
 			}
 		default:
-			ui.Debugf(stderr, "No provider specified in spec — skipping provider credential check")
+			ui.DebugTo(stderr, "No provider specified in spec — skipping provider credential check")
 		}
 	} else {
-		ui.Debugf(stderr, "Using KKP preset '%s' — skipping provider credential check", preset)
+		ui.DebugTo(stderr, "Using KKP preset '%s' — skipping provider credential check", preset)
 	}
 
 	if errors > 0 {
-		ui.Errorf(stderr, "%d credential validation error(s)", errors)
+		ui.ErrorTo(stderr, "%d credential validation error(s)", errors)
 		return ui.Handled(fmt.Errorf("kkp: %d credential validation error(s)", errors))
 	}
 
-	ui.Debugf(stderr, "KKP credentials validated")
+	ui.DebugTo(stderr, "KKP credentials validated")
 	return nil
 }
 
@@ -494,12 +494,12 @@ func requireCredentials(provider string, stderr io.Writer) error {
 			missing = append(missing, "AWS_SECRET_ACCESS_KEY")
 		}
 	default:
-		ui.Errorf(stderr, "unknown provider '%s' for credential check", provider)
+		ui.ErrorTo(stderr, "unknown provider '%s' for credential check", provider)
 		return ui.Handled(fmt.Errorf("kkp: unknown provider %q for credential check", provider))
 	}
 	if len(missing) > 0 {
 		for _, v := range missing {
-			ui.Errorf(stderr, "required environment variable %s is not set", v)
+			ui.ErrorTo(stderr, "required environment variable %s is not set", v)
 		}
 		return ui.Handled(fmt.Errorf("kkp: missing credentials: %s", strings.Join(missing, ", ")))
 	}

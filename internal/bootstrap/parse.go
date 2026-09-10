@@ -50,7 +50,7 @@ type Entry struct {
 // parseError prints the bash error() line and returns the same text as an
 // error marked handled (ui.Handled).
 func parseError(stderr io.Writer, format string, a ...any) error {
-	ui.Errorf(stderr, format, a...)
+	ui.ErrorTo(stderr, format, a...)
 	return ui.Handled(fmt.Errorf(format, a...))
 }
 

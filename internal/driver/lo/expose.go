@@ -55,7 +55,7 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 		return err
 	}
 	if !fsutil.FileExists(nginxTemplate) {
-		ui.Errorf(errOut, "expose: nginx template not found at %s", nginxTemplate)
+		ui.ErrorTo(errOut, "expose: nginx template not found at %s", nginxTemplate)
 		return ui.Handled(fmt.Errorf("nginx template not found at %s", nginxTemplate))
 	}
 
@@ -112,14 +112,14 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 		_ = d.runOut(ctx, out, errOut, "docker", "cp", certPath, proxyName+":/tls.crt")
 		_ = d.runOut(ctx, out, errOut, "docker", "cp", keyPath, proxyName+":/tls.key")
 	} else {
-		ui.Warnf(errOut, "expose: TLS certs not found at %s — proxy will run without TLS", certPath)
+		ui.WarnTo(errOut, "expose: TLS certs not found at %s — proxy will run without TLS", certPath)
 	}
 
 	// Reload nginx with the new config.
 	_ = d.runOut(ctx, out, errOut, "docker", "exec", proxyName, "nginx", "-s", "reload")
 
 	accessIP := envOr("LOK8S_REMOTE_IP", "localhost")
-	ui.Debugf(errOut, "expose: nginx proxy %s running on %s:443 → %s", proxyName, accessIP, backendIP)
+	ui.DebugTo(errOut, "expose: nginx proxy %s running on %s:443 → %s", proxyName, accessIP, backendIP)
 	fmt.Fprintf(out, ":: cluster exposed at https://*.%s (via %s:443)\n", domain, accessIP)
 	return nil
 }

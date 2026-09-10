@@ -30,13 +30,10 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stderr := cmd.ErrOrStderr()
-			if len(args) > 0 {
-				return argshErrorf(stderr, "too many arguments: %s", args[0])
-			}
 			d := ambientMainEnv(cmd, paths)
 			// Same reason as `lo build`: the domain can come from
 			// clusters/.active — state a `lo use` persisted hours ago — and
@@ -59,12 +56,9 @@ func newDestroyCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "too many arguments: %s", args[0])
-			}
 			d := ambientMainEnv(cmd, paths)
 			return dispatchExit(cmd.ErrOrStderr(), newDispatcher(cmd, paths).DispatchDestroy(cmd.Context(), d))
 		},
@@ -78,13 +72,10 @@ func newBootstrapCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
-			if len(args) > 0 {
-				return argshErrorf(stderr, "too many arguments: %s", args[0])
-			}
 			d := ambientMainEnv(cmd, paths)
 			runner := newRunner(paths)
 			disp := newDispatcher(cmd, paths)

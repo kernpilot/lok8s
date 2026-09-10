@@ -72,7 +72,7 @@ func Driver(p *config.Paths, target string, stderr io.Writer) (string, error) {
 	spec := p.Clusters + "/" + target + "/cluster.lok8s.yaml"
 	kind, err := domain.SpecDriver(spec, "lo")
 	if err != nil {
-		ui.Errorf(stderr, "cluster spec for '%s' declares a malformed kind (%s) — refusing to assume 'lo'", target, spec)
+		ui.ErrorTo(stderr, "cluster spec for '%s' declares a malformed kind (%s) — refusing to assume 'lo'", target, spec)
 		return "", ErrHandled
 	}
 	return kind, nil
@@ -183,7 +183,7 @@ func list(p *config.Paths, d string, out, stderr io.Writer, withOrigin bool) err
 	}
 	names := Names(p)
 	if len(names) == 0 {
-		ui.Warnf(stderr, "No addons directory (%s)", Dir(p))
+		ui.WarnTo(stderr, "No addons directory (%s)", Dir(p))
 		return nil
 	}
 	row := func(name, typ, version, origin, detail string) {
@@ -229,7 +229,7 @@ func ShowOrigin(p *config.Paths, d, name string, out, stderr io.Writer) error {
 
 func show(p *config.Paths, d, name string, out, stderr io.Writer, withOrigin bool) error {
 	if name == "" {
-		ui.Errorf(stderr, "addon name required")
+		ui.ErrorTo(stderr, "addon name required")
 		return ErrHandled
 	}
 	driver, err := Driver(p, d, stderr)
@@ -241,7 +241,7 @@ func show(p *config.Paths, d, name string, out, stderr io.Writer, withOrigin boo
 		dir = Dir(p) + "/" + name
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		ui.Errorf(stderr, "addon '%s' not found (%s)", name, dir)
+		ui.ErrorTo(stderr, "addon '%s' not found (%s)", name, dir)
 		return ErrHandled
 	}
 	fmt.Fprintf(out, "name:    %s\n", name)
@@ -386,19 +386,19 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 	// filesystem path (same guard as bootstrap::dispatch /
 	// provision::resolve_spec / audit::run_domain).
 	if !domain.NameRe.MatchString(d) {
-		ui.Warnf(stderr, "Invalid domain name '%s' — nothing to inventory", d)
+		ui.WarnTo(stderr, "Invalid domain name '%s' — nothing to inventory", d)
 		return nil
 	}
 	spec := p.Clusters + "/" + d + "/cluster.lok8s.yaml"
 	if !fsutil.FileExists(spec) {
-		ui.Warnf(stderr, "No cluster spec for '%s' (%s) — nothing to inventory", d, spec)
+		ui.WarnTo(stderr, "No cluster spec for '%s' (%s) — nothing to inventory", d, spec)
 		return nil
 	}
 	// A malformed kind is reported, never guessed away: it selects the
 	// values.<driver>.yaml overlay and the driver's default entries.
 	kind, err := domain.SpecDriver(spec, "lo")
 	if err != nil {
-		ui.Errorf(stderr, "cluster spec for '%s' declares a malformed kind (%s)", d, spec)
+		ui.ErrorTo(stderr, "cluster spec for '%s' declares a malformed kind (%s)", d, spec)
 		return ErrHandled
 	}
 	entries := resolve(spec, kind, d)

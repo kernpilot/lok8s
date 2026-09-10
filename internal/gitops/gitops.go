@@ -26,7 +26,7 @@ var ErrDeferred = ui.Handled(errors.New("gitops: deferred"))
 // Bootstrap is gitops::bootstrap, the provision-dispatch tail hook called
 // when spec.gitops.provider is set: a warn-only no-op that always succeeds.
 func Bootstrap(stderr io.Writer, domain, provider string) error {
-	ui.Warnf(stderr, "lo gitops is being redesigned post-refactor; no-op for now")
+	ui.WarnTo(stderr, "lo gitops is being redesigned post-refactor; no-op for now")
 	return nil
 }
 
@@ -40,12 +40,12 @@ func BootstrapHook(stderr io.Writer) func(ctx context.Context, domain, provider 
 
 // Flux is gitops::flux (deferred): prints the error, returns ErrDeferred.
 func Flux(stderr io.Writer) error {
-	ui.Errorf(stderr, "lo gitops flux is deferred (redesign after services.yaml targets lands)")
+	ui.ErrorTo(stderr, "lo gitops flux is deferred (redesign after services.yaml targets lands)")
 	return ErrDeferred
 }
 
 // Argo is gitops::argo (deferred): prints the error, returns ErrDeferred.
 func Argo(stderr io.Writer) error {
-	ui.Errorf(stderr, "lo gitops argo is deferred (redesign after services.yaml targets lands)")
+	ui.ErrorTo(stderr, "lo gitops argo is deferred (redesign after services.yaml targets lands)")
 	return ErrDeferred
 }

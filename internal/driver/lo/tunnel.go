@@ -47,7 +47,7 @@ func (d *Driver) kubeconfigTunnel(ctx context.Context, kubeconfigPath, remoteUse
 		remoteHost = remoteHost[:i]
 	}
 	if serverNode == nil || !strings.HasPrefix(currentServer, "https://") || port == "" || remoteHost == "" || strings.ContainsAny(port, "/:") {
-		ui.Warnf(errOut, "kubeconfig %s has no clusters[0].cluster.server in https://host:port form — skipping the API tunnel", kubeconfigPath)
+		ui.WarnTo(errOut, "kubeconfig %s has no clusters[0].cluster.server in https://host:port form — skipping the API tunnel", kubeconfigPath)
 		return nil
 	}
 
@@ -55,7 +55,7 @@ func (d *Driver) kubeconfigTunnel(ctx context.Context, kubeconfigPath, remoteUse
 		"-o", "ServerAliveInterval=15",
 		"-L", fmt.Sprintf("%s:%s:%s", port, remoteHost, port),
 		remoteUser+"@"+remoteIP); err != nil {
-		ui.Warnf(errOut, "SSH port-forward for API failed — kubeconfig may not be reachable locally")
+		ui.WarnTo(errOut, "SSH port-forward for API failed — kubeconfig may not be reachable locally")
 	}
 
 	if serverNode != nil {
@@ -69,7 +69,7 @@ func (d *Driver) kubeconfigTunnel(ctx context.Context, kubeconfigPath, remoteUse
 			return err
 		}
 	}
-	ui.Debugf(errOut, "API tunnel: localhost:%s → %s:%s", port, remoteHost, port)
+	ui.DebugTo(errOut, "API tunnel: localhost:%s → %s:%s", port, remoteHost, port)
 	return nil
 }
 

@@ -48,7 +48,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 		return err
 	}
 	if !fsutil.FileExists(coreTmpl) {
-		ui.Errorf(stderr, "KubeOne core template not found: %s", coreTmpl)
+		ui.ErrorTo(stderr, "KubeOne core template not found: %s", coreTmpl)
 		return ui.Handled(fmt.Errorf("kubeone: core template not found: %s", coreTmpl))
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -68,7 +68,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	}
 	rendered := build.Envsubst(raw, coreTemplateVars)
 	if len(bytes.TrimSpace(rendered)) == 0 {
-		ui.Errorf(stderr, "the KubeOne manifest rendered EMPTY from %s — refusing to continue", coreTmpl)
+		ui.ErrorTo(stderr, "the KubeOne manifest rendered EMPTY from %s — refusing to continue", coreTmpl)
 		return ui.Handled(fmt.Errorf("kubeone: manifest rendered empty from %s", coreTmpl))
 	}
 	var out strings.Builder
@@ -86,7 +86,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 			// rendered YAML, so it is constrained to what a Kubernetes
 			// object name can hold anyway.
 			if !poolNameRe.MatchString(pool.name) {
-				ui.Errorf(stderr, "Invalid worker pool name: %s (must be alphanumeric with hyphens)", pool.name)
+				ui.ErrorTo(stderr, "Invalid worker pool name: %s (must be alphanumeric with hyphens)", pool.name)
 				return ui.Handled(fmt.Errorf("kubeone: invalid pool name %q", pool.name))
 			}
 			replicas := pool.field("replicas", "1")
@@ -94,11 +94,11 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 			// Spec-controlled values are interpolated into YAML — validate
 			// before use so newlines/quotes/colons can't inject fields.
 			if !numericRe.MatchString(replicas) {
-				ui.Errorf(stderr, "Invalid replicas for pool %s: %s (must be numeric)", pool.name, replicas)
+				ui.ErrorTo(stderr, "Invalid replicas for pool %s: %s (must be numeric)", pool.name, replicas)
 				return ui.Handled(fmt.Errorf("kubeone: invalid replicas for pool %s", pool.name))
 			}
 			if !safeTokenRe.MatchString(poolType) {
-				ui.Errorf(stderr, "Invalid server/instance type for pool %s: %s", pool.name, poolType)
+				ui.ErrorTo(stderr, "Invalid server/instance type for pool %s: %s", pool.name, poolType)
 				return ui.Handled(fmt.Errorf("kubeone: invalid type for pool %s", pool.name))
 			}
 
@@ -112,11 +112,11 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 				datacenter := defaultStr(spec.Spec.Datacenter, "fsn1")
 				image := pool.field("image", "ubuntu-22.04")
 				if !safeTokenRe.MatchString(datacenter) {
-					ui.Errorf(stderr, "Invalid datacenter: %s", datacenter)
+					ui.ErrorTo(stderr, "Invalid datacenter: %s", datacenter)
 					return ui.Handled(fmt.Errorf("kubeone: invalid datacenter %q", datacenter))
 				}
 				if !safeTokenRe.MatchString(image) {
-					ui.Errorf(stderr, "Invalid image for pool %s: %s", pool.name, image)
+					ui.ErrorTo(stderr, "Invalid image for pool %s: %s", pool.name, image)
 					return ui.Handled(fmt.Errorf("kubeone: invalid image for pool %s", pool.name))
 				}
 				out.WriteString("\n      serverType: \"" + poolType + "\"")
@@ -128,11 +128,11 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 				region := defaultStr(spec.Spec.AWS.Region, "eu-central-1")
 				ami := pool.field("ami", "")
 				if !safeTokenRe.MatchString(region) {
-					ui.Errorf(stderr, "Invalid region: %s", region)
+					ui.ErrorTo(stderr, "Invalid region: %s", region)
 					return ui.Handled(fmt.Errorf("kubeone: invalid region %q", region))
 				}
 				if ami != "" && !safeTokenRe.MatchString(ami) {
-					ui.Errorf(stderr, "Invalid ami for pool %s: %s", pool.name, ami)
+					ui.ErrorTo(stderr, "Invalid ami for pool %s: %s", pool.name, ami)
 					return ui.Handled(fmt.Errorf("kubeone: invalid ami for pool %s", pool.name))
 				}
 				out.WriteString("\n      instanceType: \"" + poolType + "\"")
@@ -141,7 +141,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 					out.WriteString("\n      ami: \"" + ami + "\"")
 				}
 			default:
-				ui.Errorf(stderr, "Unsupported provider for dynamic workers: %s", provider)
+				ui.ErrorTo(stderr, "Unsupported provider for dynamic workers: %s", provider)
 				return ui.Handled(fmt.Errorf("kubeone: unsupported provider %q for dynamic workers", provider))
 			}
 		}
@@ -162,7 +162,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	if err := d.injectRegistryAuth(manifest, clusterYAML); err != nil {
 		return err
 	}
-	ui.Debugf(stderr, "Generated kubeone.yaml at %s", manifest)
+	ui.DebugTo(stderr, "Generated kubeone.yaml at %s", manifest)
 	return nil
 }
 
@@ -214,12 +214,12 @@ func (d *Driver) injectOIDC(manifest string) error {
 		return nil
 	}
 	if !fsutil.FileExists(manifest) {
-		ui.Errorf(stderr, "OIDC: manifest not found: %s", manifest)
+		ui.ErrorTo(stderr, "OIDC: manifest not found: %s", manifest)
 		return ui.Handled(fmt.Errorf("kubeone: OIDC manifest not found: %s", manifest))
 	}
 	doc, err := loadYAMLDoc(manifest)
 	if err != nil {
-		ui.Errorf(stderr, "OIDC: failed to inject features.openidConnect")
+		ui.ErrorTo(stderr, "OIDC: failed to inject features.openidConnect")
 		return ui.Handled(fmt.Errorf("kubeone: OIDC injection failed: %w", err))
 	}
 	oc := ensureMapPath(doc, "features", "openidConnect")
@@ -241,16 +241,16 @@ func (d *Driver) injectOIDC(manifest string) error {
 		}
 		caFile := filepath.Join(caDir, "oidc-ca.pem")
 		if err := os.WriteFile(caFile, []byte(ca+"\n"), 0o644); err != nil { // #nosec G306 -- a public CA certificate
-			ui.Errorf(stderr, "OIDC: failed to set caFile")
+			ui.ErrorTo(stderr, "OIDC: failed to set caFile")
 			return ui.Handled(fmt.Errorf("kubeone: OIDC caFile write failed: %w", err))
 		}
 		setKey(cfg, "caFile", strNode(caFile))
 	}
 	if err := saveYAMLDoc(manifest, doc); err != nil {
-		ui.Errorf(stderr, "OIDC: failed to inject features.openidConnect")
+		ui.ErrorTo(stderr, "OIDC: failed to inject features.openidConnect")
 		return ui.Handled(fmt.Errorf("kubeone: OIDC injection failed: %w", err))
 	}
-	ui.Debugf(stderr, "OIDC: features.openidConnect injected (issuer %s)", os.Getenv(oidc.EnvIssuer))
+	ui.DebugTo(stderr, "OIDC: features.openidConnect injected (issuer %s)", os.Getenv(oidc.EnvIssuer))
 	return nil
 }
 
@@ -278,7 +278,7 @@ func (d *Driver) injectRegistryAuth(manifest, clusterYAML string) error {
 	// secretRefs would resolve under the wrong store — fail loud instead.
 	domainName := os.Getenv("DOMAIN_NAME")
 	if domainName == "" {
-		ui.Errorf(stderr, "registry auth: DOMAIN_NAME not exported; cannot resolve registry secrets")
+		ui.ErrorTo(stderr, "registry auth: DOMAIN_NAME not exported; cannot resolve registry secrets")
 		return ui.Handled(fmt.Errorf("kubeone: registry auth without DOMAIN_NAME"))
 	}
 	secretsDir := filepath.Join(d.deps.Paths.Clusters, domainName, "secrets")
@@ -294,32 +294,32 @@ func (d *Driver) injectRegistryAuth(manifest, clusterYAML string) error {
 		}
 		nSpecified++
 		if !regHostRe.MatchString(e.host) {
-			ui.Warnf(stderr, "registry auth: skipping invalid host '%s'", e.host)
+			ui.WarnTo(stderr, "registry auth: skipping invalid host '%s'", e.host)
 			continue
 		}
 		if !secretNameRe.MatchString(e.secretName) {
-			ui.Warnf(stderr, "registry auth: skipping invalid secret name '%s'", e.secretName)
+			ui.WarnTo(stderr, "registry auth: skipping invalid secret name '%s'", e.secretName)
 			continue
 		}
 		if e.namespace != "" && !secretNameRe.MatchString(e.namespace) {
-			ui.Warnf(stderr, "registry auth: skipping invalid namespace '%s'", e.namespace)
+			ui.WarnTo(stderr, "registry auth: skipping invalid namespace '%s'", e.namespace)
 			continue
 		}
 		ns := defaultStr(e.namespace, "provisioning")
 		username := readSecretFile(filepath.Join(secretsDir, "Secret."+e.secretName+"."+ns+".username"))
 		password := readSecretFile(filepath.Join(secretsDir, "Secret."+e.secretName+"."+ns+".password"))
 		if username == "" || password == "" {
-			ui.Warnf(stderr, "registry auth: secret %s/%s lacks username/password — '%s' left anonymous", ns, e.secretName, e.host)
+			ui.WarnTo(stderr, "registry auth: secret %s/%s lacks username/password — '%s' left anonymous", ns, e.secretName, e.host)
 			continue
 		}
 		auth := ensureMapPath(doc, "containerRuntime", "containerd", "registries", e.host, "auth")
 		setKey(auth, "username", strNode(username))
 		setKey(auth, "password", strNode(password))
 		nConfigured++
-		ui.Debugf(stderr, "registry auth: %s ← %s/%s", e.host, ns, e.secretName)
+		ui.DebugTo(stderr, "registry auth: %s ← %s/%s", e.host, ns, e.secretName)
 	}
 	if nSpecified > 0 && nConfigured == 0 {
-		ui.Errorf(stderr, "registry auth: %d registry(ies) declared in spec.registries but none could be configured (missing/invalid secretRef creds) — populate the secret(s) or remove spec.registries", nSpecified)
+		ui.ErrorTo(stderr, "registry auth: %d registry(ies) declared in spec.registries but none could be configured (missing/invalid secretRef creds) — populate the secret(s) or remove spec.registries", nSpecified)
 		return ui.Handled(fmt.Errorf("kubeone: registry auth configured nothing"))
 	}
 	if nConfigured > 0 {

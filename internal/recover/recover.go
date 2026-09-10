@@ -231,24 +231,24 @@ func (r *Runner) Run(ctx context.Context, domainName string, skipRebuild, dryRun
 	// LOK8S_NONINTERACTIVE). Decline → abort, touch nothing. skipRebuild
 	// shapes the prompt wording to what actually happens.
 	if !r.confirm(ctx, skipRebuild) {
-		ui.Warnf(stderr, "recover: aborted by operator — nothing was changed")
+		ui.WarnTo(stderr, "recover: aborted by operator — nothing was changed")
 		return ErrHandled
 	}
 
 	// 4. rebuild — DESTRUCTIVE node reset. On failure, do NOT continue to
 	//    provision on a half-reset cluster.
 	if skipRebuild {
-		ui.Warnf(stderr, "recover: --skip-rebuild — skipping the node rebuild (provision + verify only)")
+		ui.WarnTo(stderr, "recover: --skip-rebuild — skipping the node rebuild (provision + verify only)")
 		r.timings = append(r.timings, "rebuild=skipped")
 	} else if err := r.timed("rebuild", func() error { return r.rebuild(ctx) }); err != nil {
-		ui.Errorf(stderr, "recover: rebuild failed — NOT provisioning on a half-reset cluster")
+		ui.ErrorTo(stderr, "recover: rebuild failed — NOT provisioning on a half-reset cluster")
 		return ErrHandled
 	}
 
 	// 5. provision — fresh install (`lo provision`; the bare-metal path
 	//    applies #wipe-devices). On failure, stop.
 	if err := r.timed("provision", func() error { return r.provision(ctx) }); err != nil {
-		ui.Errorf(stderr, "recover: provision failed")
+		ui.ErrorTo(stderr, "recover: provision failed")
 		return ErrHandled
 	}
 
@@ -287,7 +287,7 @@ func (r *Runner) resolve(ctx context.Context) error {
 		if kind == "" {
 			kind = "none"
 		}
-		ui.Errorf(stderr, "recover: '%s' is not a cluster domain (kind=%s) — recover rebuilds a cluster from bare metal; a deploy domain has nothing to reset", r.domain, kind)
+		ui.ErrorTo(stderr, "recover: '%s' is not a cluster domain (kind=%s) — recover rebuilds a cluster from bare metal; a deploy domain has nothing to reset", r.domain, kind)
 		return ErrHandled
 	}
 	r.spec = spec.File
@@ -301,12 +301,12 @@ func (r *Runner) resolve(ctx context.Context) error {
 		if name == "" {
 			name = "unknown"
 		}
-		ui.Errorf(stderr, "provider '%s' does not support recover (no provider::rebuild)", name)
+		ui.ErrorTo(stderr, "provider '%s' does not support recover (no provider::rebuild)", name)
 		return ErrHandled
 	}
 
 	r.clusterName = r.resolveClusterName()
-	ui.Debugf(stderr, "recover: resolved %s → provider=%s cluster=%s", r.domain, r.provider, r.clusterName)
+	ui.DebugTo(stderr, "recover: resolved %s → provider=%s cluster=%s", r.domain, r.provider, r.clusterName)
 	return nil
 }
 
@@ -334,7 +334,7 @@ func readProviderName(stderr io.Writer, specFile string) (string, bool) {
 		return "", false
 	}
 	if !providerNameRe.MatchString(name) {
-		ui.Errorf(stderr, "provider name '%s' is invalid (must be alphanumeric + hyphens/underscores)", name)
+		ui.ErrorTo(stderr, "provider name '%s' is invalid (must be alphanumeric + hyphens/underscores)", name)
 		return "", false
 	}
 	return name, true
@@ -356,12 +356,12 @@ func (r *Runner) loadProvider(ctx context.Context) error {
 
 	pname, ok := readProviderName(stderr, r.spec)
 	if !ok {
-		ui.Errorf(stderr, "recover: cluster '%s' has no usable spec.provider (recover needs a provider that supports rebuild)", r.domain)
+		ui.ErrorTo(stderr, "recover: cluster '%s' has no usable spec.provider (recover needs a provider that supports rebuild)", r.domain)
 		return ErrHandled
 	}
 	cfg, cleanup, err := provision.WriteProviderConfig(r.spec, stderr)
 	if err != nil {
-		ui.Errorf(stderr, "recover: could not resolve provider config for '%s'", pname)
+		ui.ErrorTo(stderr, "recover: could not resolve provider config for '%s'", pname)
 		return ErrHandled
 	}
 	// bash: the inline temp config lives until process exit (EXIT trap) —
@@ -373,7 +373,7 @@ func (r *Runner) loadProvider(ctx context.Context) error {
 	}
 	prov, err := newProv(ctx, pname)
 	if err != nil {
-		ui.Errorf(stderr, "recover: provider '%s' failed to load", pname)
+		ui.ErrorTo(stderr, "recover: provider '%s' failed to load", pname)
 		return ErrHandled
 	}
 	r.provider, r.config, r.prov = pname, cfg, prov
@@ -615,7 +615,7 @@ func (r *Runner) workdir(domainName string) (string, error) {
 	}
 	tmp, err := os.MkdirTemp("", "tmp.")
 	if err != nil {
-		ui.Errorf(r.errOut(), "recover: could not create a work directory (mktemp failed)")
+		ui.ErrorTo(r.errOut(), "recover: could not create a work directory (mktemp failed)")
 		return "", ErrHandled
 	}
 	return tmp, nil
@@ -702,7 +702,7 @@ func (r *Runner) summary(t0 time.Time) {
 // swallowed. An empty positional falls through to the fallback.
 func PickDomain(stderr io.Writer, fallback string, positionals []string) (string, error) {
 	if len(positionals) > 1 {
-		ui.Errorf(stderr, "too many arguments: %s", strings.Join(positionals[1:], " "))
+		ui.ErrorTo(stderr, "too many arguments: %s", strings.Join(positionals[1:], " "))
 		return "", ErrHandled
 	}
 	if len(positionals) == 1 && positionals[0] != "" {

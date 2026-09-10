@@ -49,12 +49,9 @@ func newUpCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "too many arguments: %s", args[0])
-			}
 			d := ambientMainEnv(cmd, paths)
 			disp := newDispatcher(cmd, paths)
 			deps := upDeps{
@@ -67,7 +64,9 @@ func newUpCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					Stdin:  cmd.InOrStdin(),
 				},
 			}
-			return runUp(cmd.Context(), paths, cmd.OutOrStdout(), deps, d, ci, timeout, openTilt)
+			return runUp(cmd.Context(), paths, cmd.OutOrStdout(), deps, upOptions{
+				domain: d, ci: ci, timeout: timeout, openTilt: openTilt,
+			})
 		},
 	}
 	f := cmd.Flags()
@@ -77,21 +76,33 @@ func newUpCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	return argshFlagErrors(cmd)
 }
 
+// upOptions are `lo up`'s inputs after the flag parse.
+type upOptions struct {
+	// domain is the resolved domain name.
+	domain string
+	// ci runs the headless `tilt ci` instead of a backgrounded `tilt up`.
+	ci bool
+	// timeout is the readiness timeout `tilt ci` gets ("" = none).
+	timeout string
+	// openTilt opens the Tilt UI in a browser (interactive mode only).
+	openTilt bool
+}
+
 // runUp is main::up after the flag parse.
-func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps, domainName string, ci bool, timeout string, openTilt bool) error {
-	writeRunHeader(out, paths, domainName, os.Getenv("KUBECONFIG"))
+func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps, o upOptions) error {
+	writeRunHeader(out, paths, o.domain, os.Getenv("KUBECONFIG"))
 
 	// Reconcile infra first regardless of mode (kind cluster, registries,
 	// bootstrap addons) — only the post-reconcile Tilt step differs.
-	if err := deps.dispatch(ctx, domainName); err != nil {
+	if err := deps.dispatch(ctx, o.domain); err != nil {
 		return dispatchExit(deps.tilt.ErrOut, err)
 	}
 
 	// Headless mode: foreground `tilt ci` (build + deploy + wait + exit
 	// status). No backgrounded `tilt up`, no browser. Its exit code is
 	// main::up's.
-	if ci {
-		rc, err := deps.tilt.CI(ctx, timeout)
+	if o.ci {
+		rc, err := deps.tilt.CI(ctx, o.timeout)
 		if err != nil {
 			return tiltRun(err)
 		}
@@ -105,7 +116,7 @@ func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps,
 	if err := deps.tilt.Up(ctx); err != nil {
 		return tiltRun(err)
 	}
-	if openTilt {
+	if o.openTilt {
 		port := deps.tilt.Port()
 		url := "http://localhost:" + port
 		lookPath := deps.lookPath

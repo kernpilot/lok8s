@@ -142,7 +142,7 @@ it applies".`,
 				for _, rel := range pending {
 					fmt.Fprintf(out, "would eject %s\n", rel)
 				}
-				ui.Errorf(stderr, "assets: %d asset(s) would be ejected (run: lo assets eject)", len(pending))
+				ui.ErrorTo(stderr, "assets: %d asset(s) would be ejected (run: lo assets eject)", len(pending))
 				return ErrCheckFailed
 			}
 			if len(pending) == 0 {
@@ -193,7 +193,7 @@ local-only · builtin-only. The headline per addon is the chart version
 						n++
 					}
 				}
-				ui.Errorf(stderr, "assets: %d asset(s) drifted from the binary's copy (lo assets diff <rel> for the files)", n)
+				ui.ErrorTo(stderr, "assets: %d asset(s) drifted from the binary's copy (lo assets diff <rel> for the files)", n)
 				return ErrCheckFailed
 			}
 			return nil
@@ -226,7 +226,7 @@ func assetsErr(stderr io.Writer, err error) error {
 		return nil
 	case errors.Is(err, assets.ErrNotAsset), errors.Is(err, assets.ErrInvalidRel),
 		errors.Is(err, assets.ErrExists), errors.Is(err, assets.ErrConflict):
-		ui.Errorf(stderr, "%v", err)
+		ui.ErrorTo(stderr, "%v", err)
 		return ErrHandled
 	}
 	return err

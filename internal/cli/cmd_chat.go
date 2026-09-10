@@ -65,8 +65,8 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 		}
 	}
 	if bin == "" {
-		ui.Errorf(stderr, "lochat binary not found. Build it once:")
-		ui.Errorf(stderr, `  go build -C ai/lochat -o "${PATH_BIN}/lochat" .`)
+		ui.ErrorTo(stderr, "lochat binary not found. Build it once:")
+		ui.ErrorTo(stderr, `  go build -C ai/lochat -o "${PATH_BIN}/lochat" .`)
 		return "", nil, ErrHandled
 	}
 
@@ -86,7 +86,7 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 		cfg = defaults
 	}
 	if !fsutil.FileExists(cfg) {
-		ui.Errorf(stderr, "no chat config (looked for %s or %s)", cfgProject, defaults)
+		ui.ErrorTo(stderr, "no chat config (looked for %s or %s)", cfgProject, defaults)
 		return "", nil, ErrHandled
 	}
 
@@ -96,9 +96,9 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	// "Invalid command: mcp" and the binary would just wait out its
 	// timeout — fail loudly and point at the fix.
 	if !argshBuiltinPresent(paths) {
-		ui.Errorf(stderr, "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it.")
-		ui.Errorf(stderr, "Install the matching builtin next to argsh, then retry:")
-		ui.Errorf(stderr, "  argsh builtins install")
+		ui.ErrorTo(stderr, "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it.")
+		ui.ErrorTo(stderr, "Install the matching builtin next to argsh, then retry:")
+		ui.ErrorTo(stderr, "  argsh builtins install")
 		return "", nil, ErrHandled
 	}
 

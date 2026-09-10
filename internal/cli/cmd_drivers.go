@@ -60,8 +60,6 @@ type driversDeps struct {
 	runner execx.Runner
 	// shim passes argv to the argsh implementation (Shim).
 	shim func(argv []string) error
-	// exit ends the process with a driver's own exit code (os.Exit).
-	exit func(code int)
 }
 
 func defaultDriversDeps(paths *config.Paths) driversDeps {
@@ -70,7 +68,6 @@ func defaultDriversDeps(paths *config.Paths) driversDeps {
 		lookup: driver.Get,
 		runner: execx.NewRunner(paths),
 		shim:   func(argv []string) error { return Shim(paths, argv) },
-		exit:   exitNow,
 	}
 }
 
@@ -142,13 +139,13 @@ func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) 
 			// No driver named: a bare call gets a pointer to --list instead
 			// of the misleading "Driver '' not found".
 			if len(args) == 0 || args[0] == "" {
-				ui.Errorf(stderr, "Driver name required — try: lo drivers --list")
+				ui.ErrorTo(stderr, "Driver name required — try: lo drivers --list")
 				return ErrHandled
 			}
 			name := args[0]
 			// The name lands in a path the bash sourced — same allowlist.
 			if !driver.NameRe.MatchString(name) {
-				ui.Errorf(stderr, "Invalid driver name: %s", name)
+				ui.ErrorTo(stderr, "Invalid driver name: %s", name)
 				return ErrHandled
 			}
 			// A Go driver never reaches here (its subcommand resolves first);
@@ -156,7 +153,7 @@ func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) 
 			if fsutil.FileExists(filepath.Join(paths.Lok8s, "drivers", name, "main")) {
 				return deps.shim(os.Args[1:])
 			}
-			ui.Errorf(stderr, "Driver '%s' not found", name)
+			ui.ErrorTo(stderr, "Driver '%s' not found", name)
 			return ErrHandled
 		},
 	}
@@ -219,12 +216,7 @@ func newDriverSubcommand(paths *config.Paths, deps driversDeps, name string) *co
 		Use:          name,
 		Short:        u.title,
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	op := func(use, alias, short string, annotations map[string]string, run func(ctx context.Context, drv driver.Driver, domain string, cmd *cobra.Command) error) *cobra.Command {
 		return &cobra.Command{
@@ -244,14 +236,14 @@ func newDriverSubcommand(paths *config.Paths, deps driversDeps, name string) *co
 				setDebugFromVerbose(cmd)
 				factory, ok := deps.lookup(name)
 				if !ok {
-					ui.Errorf(stderr, "Driver '%s' not found", name)
+					ui.ErrorTo(stderr, "Driver '%s' not found", name)
 					return ErrHandled
 				}
 				drv, err := factory(&driver.Deps{Paths: paths, Runner: deps.runner, Stderr: stderr})
 				if err != nil {
 					return err
 				}
-				return driverExit(deps, run(cmd.Context(), drv, args[0], cmd))
+				return driverExit(run(cmd.Context(), drv, args[0], cmd))
 			},
 		}
 	}
@@ -292,12 +284,12 @@ func newDriverSubcommand(paths *config.Paths, deps driversDeps, name string) *co
 // the driver's own rc passes through (a gate-decline sentinel 3, the
 // remote-CI 100, a subprocess status — all already reported by whoever
 // produced them); a plain error exits 1 with its message.
-func driverExit(deps driversDeps, err error) error {
+func driverExit(err error) error {
 	if err == nil {
 		return nil
 	}
 	if rc := driver.ExitCode(err); rc != 1 {
-		deps.exit(rc)
+		exitNow(rc)
 		return ErrHandled
 	}
 	return err

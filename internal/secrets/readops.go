@@ -33,7 +33,7 @@ const (
 func (c *Context) Allow() error {
 	secretsDir := c.StorePath()
 	if !fsutil.DirExists(secretsDir) {
-		ui.Warnf(c.ErrOut, "No secrets directory: %s", secretsDir)
+		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
 
@@ -96,7 +96,7 @@ func stripSpace(s string) string {
 func (c *Context) List() error {
 	secretsDir := c.StorePath()
 	if !fsutil.DirExists(secretsDir) {
-		ui.Warnf(c.ErrOut, "Secrets directory not found: %s", secretsDir)
+		ui.WarnTo(c.ErrOut, "Secrets directory not found: %s", secretsDir)
 		return nil
 	}
 	for _, base := range storeEntries(secretsDir, "Secret.") {
@@ -160,7 +160,7 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 	// Quirk preserved from bash: with onlyOne, ZERO matches also takes this
 	// branch and prints an empty "Multiple matches found:" list.
 	if onlyOne && len(matches) != 1 {
-		ui.Errorf(c.ErrOut, "Multiple matches found:")
+		ui.ErrorTo(c.ErrOut, "Multiple matches found:")
 		for _, match := range matches {
 			fmt.Fprintf(c.Out, "%s%s%s\n", green, match, reset)
 		}
@@ -168,7 +168,7 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 	}
 
 	if len(matches) == 0 {
-		ui.Errorf(c.ErrOut, "No matches found")
+		ui.ErrorTo(c.ErrOut, "No matches found")
 		return ErrHandled
 	}
 
@@ -192,7 +192,7 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 				Stdin: strings.NewReader(string(raw)), Stdout: c.Out, Stderr: c.ErrOut,
 			})
 		}
-		ui.Errorf(c.ErrOut, "No clipboard tool found")
+		ui.ErrorTo(c.ErrOut, "No clipboard tool found")
 		return ErrHandled
 	}
 
@@ -226,7 +226,7 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 // Read-only; values are shell-quoted with %q so the eval is injection-safe.
 func (c *Context) Env(name, namespace string) error {
 	if name == "" {
-		ui.Errorf(c.ErrOut, "Secret --name is required")
+		ui.ErrorTo(c.ErrOut, "Secret --name is required")
 		return ErrHandled
 	}
 
@@ -247,7 +247,7 @@ func (c *Context) Env(name, namespace string) error {
 		found = true
 	}
 	if !found {
-		ui.Errorf(c.ErrOut, "No cached keys for %s/%s in %s", name, namespace, secretsDir)
+		ui.ErrorTo(c.ErrOut, "No cached keys for %s/%s in %s", name, namespace, secretsDir)
 		return ErrHandled
 	}
 	return nil

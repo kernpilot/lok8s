@@ -92,7 +92,7 @@ func HasObjects(stream string) bool {
 func ParseLabel(stderr io.Writer, label string) (key, value string, err error) {
 	key, value, found := strings.Cut(label, "=")
 	if !found || key == "" || value == "" {
-		ui.Errorf(stderr, "invalid --label '%s' — expected key=value (e.g. lok8s.dev/name=zitadel)", label)
+		ui.ErrorTo(stderr, "invalid --label '%s' — expected key=value (e.g. lok8s.dev/name=zitadel)", label)
 		return "", "", ErrHandled
 	}
 	return key, value, nil
@@ -110,10 +110,10 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 	}
 	artifact := filepath.Join(d.Paths.Clusters, domain, "artifacts.yaml")
 	if !fsutil.FileExists(artifact) {
-		ui.Errorf(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
+		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
-	ui.Debugf(d.stderr(), "Deploying %s from %s", domain, artifact)
+	ui.DebugTo(d.stderr(), "Deploying %s from %s", domain, artifact)
 	return d.applyFile(ctx, domain, artifact, true)
 }
 
@@ -131,12 +131,12 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelValue string) error {
 	// Validate key/value (the bash interpolated them into a yq expression).
 	if !labelKeyRe.MatchString(labelKey) || !labelValueRe.MatchString(labelValue) {
-		ui.Errorf(d.stderr(), "Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)")
+		ui.ErrorTo(d.stderr(), "Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)")
 		return ErrHandled
 	}
 	artifact := filepath.Join(d.Paths.Clusters, domain, "artifacts.yaml")
 	if !fsutil.FileExists(artifact) {
-		ui.Errorf(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
+		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
 
@@ -145,7 +145,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 	// large. Cleanup on every return path.
 	raw, err := os.ReadFile(artifact)
 	if err != nil {
-		ui.Warnf(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
+		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
 		return nil
 	}
 	subset := selectDocs(string(raw), func(doc *yaml.Node) bool {
@@ -155,7 +155,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		return lbl != nil && lbl.Kind == yaml.ScalarNode && lbl.Tag != "!!null" && lbl.Value == labelValue
 	})
 	if !HasObjects(subset) {
-		ui.Warnf(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
+		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
 		return nil
 	}
 	tmp, err := os.CreateTemp("", "lok8s-deploy-")
@@ -171,7 +171,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		return err
 	}
 
-	ui.Debugf(d.stderr(), "Deploying %s subset (%s=%s)", domain, labelKey, labelValue)
+	ui.DebugTo(d.stderr(), "Deploying %s subset (%s=%s)", domain, labelKey, labelValue)
 	return d.applyFile(ctx, fmt.Sprintf("%s (%s=%s)", domain, labelKey, labelValue), tmp.Name(), false)
 }
 
@@ -196,7 +196,7 @@ func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnErr
 	}
 	manifest := string(raw)
 	if !HasObjects(manifest) {
-		ui.Debugf(d.stderr(), "No objects for %s, skipping apply", label)
+		ui.DebugTo(d.stderr(), "No objects for %s, skipping apply", label)
 		return nil
 	}
 
@@ -205,7 +205,7 @@ func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnErr
 		return yqsem.OrNull(yqsem.MapGet(doc, "kind"), "") == "CustomResourceDefinition"
 	})
 	if HasObjects(crds) {
-		ui.Debugf(d.stderr(), "Applying CRDs for %s", label)
+		ui.DebugTo(d.stderr(), "Applying CRDs for %s", label)
 		// bash: `echo "${crds}" | kapply::apply` — echo appends a newline.
 		if _, rc := d.Applier.Apply(ctx, label+" crds", crds+"\n"); rc != 0 && abortOnError {
 			return &ExitError{Code: rc}
@@ -214,7 +214,7 @@ func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnErr
 	}
 
 	// Phase 2: apply the rest + scoped wait-ready — both from the file.
-	ui.Debugf(d.stderr(), "Applying resources for %s", label)
+	ui.DebugTo(d.stderr(), "Applying resources for %s", label)
 	if _, rc := d.Applier.Apply(ctx, label, manifest); rc != 0 && abortOnError {
 		return &ExitError{Code: rc}
 	}
@@ -236,7 +236,7 @@ func (d *Deployer) waitCRDs(ctx context.Context, crds string) {
 		if name == "" {
 			continue
 		}
-		ui.Debugf(d.stderr(), "Waiting for CRD: %s", name)
+		ui.DebugTo(d.stderr(), "Waiting for CRD: %s", name)
 		err := d.Applier.Runner.Run(ctx, execx.Cmd{
 			Name:   "kubectl",
 			Args:   []string{"wait", "--for=condition=Established", "crd/" + name, "--timeout=60s"},
@@ -244,7 +244,7 @@ func (d *Deployer) waitCRDs(ctx context.Context, crds string) {
 			Stderr: io.Discard,
 		})
 		if err != nil {
-			ui.Warnf(d.stderr(), "CRD %s not established within timeout", name)
+			ui.WarnTo(d.stderr(), "CRD %s not established within timeout", name)
 		}
 	}
 }

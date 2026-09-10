@@ -222,10 +222,10 @@ func CheckUnencrypted(dir string, warnTo io.Writer) bool {
 			continue
 		}
 		if !fsutil.IsRegular(plaintext + ".enc") {
-			ui.Warnf(warnTo, "Unencrypted secret: %s — run: lo secrets encrypt", name)
+			ui.WarnTo(warnTo, "Unencrypted secret: %s — run: lo secrets encrypt", name)
 			ok = false
 		} else if newerThan(plaintext, plaintext+".enc") {
-			ui.Warnf(warnTo, "Secret changed since last encrypt: %s — run: lo secrets encrypt", name)
+			ui.WarnTo(warnTo, "Secret changed since last encrypt: %s — run: lo secrets encrypt", name)
 			ok = false
 		}
 	}

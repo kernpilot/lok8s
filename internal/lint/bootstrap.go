@@ -43,7 +43,7 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 	// its own parse error to stderr — an unexercised cosmetic difference.)
 	parser := &bootstrapspec.Parser{
 		Paths:  l.Paths,
-		Report: func(format string, a ...any) { ui.Errorf(l.ErrOut, format, a...) },
+		Report: func(format string, a ...any) { ui.ErrorTo(l.ErrOut, format, a...) },
 		MergeValueFiles: func(files []string, _ *yaml.Node) error {
 			for _, vf := range files {
 				raw, err := os.ReadFile(vf)
@@ -70,7 +70,7 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 			// Report the ORIGINAL entry (matches the apply path's
 			// addon-not-found error) — the parsed name alone hides which YAML
 			// entry failed for the path/name: forms.
-			ui.Errorf(l.ErrOut, "  spec.bootstrap entry not found: %s (resolved to %s)", item.Raw, e.Dir)
+			ui.ErrorTo(l.ErrOut, "  spec.bootstrap entry not found: %s (resolved to %s)", item.Raw, e.Dir)
 			errs++
 		}
 	}

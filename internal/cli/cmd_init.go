@@ -39,12 +39,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 
 	var svcPath string
@@ -146,12 +141,4 @@ func runInitProject(ctx context.Context, o initProjectOpts, out, stderr io.Write
 		return err
 	}
 	return scaffoldRun(scaffold.Project(cwd, o.name, o.path, o.force, out, stderr, tc))
-}
-
-// setDebugFromVerbose exports DEBUG=1 for -v/--verbose, like the argsh
-// entrypoint (the debug() lines depend on it).
-func setDebugFromVerbose(cmd *cobra.Command) {
-	if v, _ := cmd.Flags().GetCount("verbose"); v > 0 {
-		os.Setenv("DEBUG", "1")
-	}
 }

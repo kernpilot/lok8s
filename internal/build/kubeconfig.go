@@ -78,7 +78,7 @@ func ResolveKubeconfigForDomain(p *config.Paths, domain, clusterOverride string,
 			}
 			refCluster = ref
 		}
-		ui.Debugf(stderr, "Deploy domain %s -> cluster %s", domain, refCluster)
+		ui.DebugTo(stderr, "Deploy domain %s -> cluster %s", domain, refCluster)
 	} else if clusterOverride != "" {
 		refCluster = clusterOverride
 	}

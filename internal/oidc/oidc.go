@@ -60,7 +60,7 @@ func Enabled() bool {
 func LoadSpec(clusterYAML string, errOut io.Writer) error {
 	raw, err := os.ReadFile(clusterYAML)
 	if err != nil {
-		ui.Errorf(errOut, "oidc: cluster spec not found: %s", clusterYAML)
+		ui.ErrorTo(errOut, "oidc: cluster spec not found: %s", clusterYAML)
 		return ErrHandled
 	}
 
@@ -70,7 +70,7 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 	// defaults; only a real parse error must fail.
 	var root yaml.Node
 	if err := yaml.Unmarshal(raw, &root); err != nil {
-		ui.Errorf(errOut, "oidc: could not parse cluster spec: %s", clusterYAML)
+		ui.ErrorTo(errOut, "oidc: could not parse cluster spec: %s", clusterYAML)
 		return ErrHandled
 	}
 	oidcNode := yqsem.Lookup(&root, "spec", "oidc")
@@ -91,7 +91,7 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 	// render_auth_config checked, so the kubeone manifest path could inject a
 	// plain-http issuer silently.
 	if issuer := os.Getenv(EnvIssuer); issuer != "" && !strings.HasPrefix(issuer, "https://") {
-		ui.Errorf(errOut, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
+		ui.ErrorTo(errOut, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
 		return ErrHandled
 	}
 	return nil

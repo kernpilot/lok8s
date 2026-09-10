@@ -90,9 +90,9 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 			observed, _ := d.output(ctx, "kubectl", "--kubeconfig", kubeconfig, "get", "node", node,
 				"-o", `jsonpath={.status.addresses[?(@.type=="InternalIP")].address}`)
 			if observed != "" && observed != want {
-				ui.Warnf(errOut, "lo: %s flag already repaired but the node still reports %s — restarting kubelet", node, observed)
+				ui.WarnTo(errOut, "lo: %s flag already repaired but the node still reports %s — restarting kubelet", node, observed)
 				if err := d.runQuiet(ctx, "docker", "exec", node, "systemctl", "restart", "kubelet"); err != nil {
-					ui.Warnf(errOut, "lo: could not restart kubelet on %s", node)
+					ui.WarnTo(errOut, "lo: could not restart kubelet on %s", node)
 				}
 				healed = append(healed, node)
 			}
@@ -103,7 +103,7 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 		// this heals — a naive rewrite would silently drop the v6 half.
 		// Warn, don't touch.
 		if strings.Contains(have, ",") {
-			ui.Warnf(errOut, "lo: %s has a dual-stack --node-ip=%s — not healing (expected %s on %s)", node, have, want, network)
+			ui.WarnTo(errOut, "lo: %s has a dual-stack --node-ip=%s — not healing (expected %s on %s)", node, have, want, network)
 			continue
 		}
 
@@ -111,13 +111,13 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 		// (manifests only exist on control-plane nodes —
 		// existence-guarded). \b-anchored like the entrypoint's own sed, so
 		// 10.125.200.2 can't match inside .200.20.
-		ui.Warnf(errOut, "lo: %s registered --node-ip=%s (wrong network) — repointing to %s on %s", node, have, want, network)
+		ui.WarnTo(errOut, "lo: %s registered --node-ip=%s (wrong network) — repointing to %s on %s", node, have, want, network)
 		script := healScript(have, want)
 		if err := d.deps.Runner.Run(ctx, execx.Cmd{
 			Name: "docker", Args: []string{"exec", node, "bash", "-c", script},
 			Stdout: io.Discard, Stderr: io.Discard,
 		}); err != nil {
-			ui.Warnf(errOut, "lo: could not repair %s — see 'docker exec %s systemctl status kubelet'", node, node)
+			ui.WarnTo(errOut, "lo: could not repair %s — see 'docker exec %s systemctl status kubelet'", node, node)
 			continue
 		}
 		healed = append(healed, node)

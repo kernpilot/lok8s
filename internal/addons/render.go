@@ -68,7 +68,7 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 		if inlineValues != "" || len(valueFiles) > 0 {
 			tmp, err := os.MkdirTemp("", "lok8s-addon-")
 			if err != nil {
-				ui.Errorf(stderr, "addons::render: failed to create temp dir for %s", addonDir)
+				ui.ErrorTo(stderr, "addons::render: failed to create temp dir for %s", addonDir)
 				return "", fmt.Errorf("addons render: temp dir: %w", err)
 			}
 			buildDir = tmp
@@ -76,28 +76,28 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 			// Dotfiles too (bash: `cp -r dir/.`) — a glob drops them and a
 			// chart referencing a dotfile would fail to render.
 			if err := copyTree(addonDir, tmp); err != nil {
-				ui.Errorf(stderr, "addons::render: failed to copy %s to temp dir", addonDir)
+				ui.ErrorTo(stderr, "addons::render: failed to copy %s to temp dir", addonDir)
 				return "", fmt.Errorf("addons render: copy: %w", err)
 			}
 			if inlineValues != "" {
 				inline := filepath.Join(tmp, "values.inline.yaml")
 				if err := os.WriteFile(inline, []byte(inlineValues+"\n"), 0o644); err != nil {
-					ui.Errorf(stderr, "addons::render: failed to merge values for %s", addonDir)
+					ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
 					return "", fmt.Errorf("addons render: write inline values: %w", err)
 				}
 				valueFiles = append(valueFiles, inline)
 			}
 			merged, err := MergeValueFiles(valueFiles...)
 			if err != nil {
-				ui.Errorf(stderr, "addons::render: failed to merge values for %s", addonDir)
+				ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
 				return "", fmt.Errorf("addons render: merge values: %w", err)
 			}
 			if err := os.WriteFile(filepath.Join(tmp, "values.merged.yaml"), merged, 0o644); err != nil {
-				ui.Errorf(stderr, "addons::render: failed to merge values for %s", addonDir)
+				ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
 				return "", fmt.Errorf("addons render: write merged values: %w", err)
 			}
 			if err := setChartValueFiles(filepath.Join(tmp, "chart.yaml")); err != nil {
-				ui.Errorf(stderr, "addons::render: failed to set valueFiles in chart.yaml for %s", addonDir)
+				ui.ErrorTo(stderr, "addons::render: failed to set valueFiles in chart.yaml for %s", addonDir)
 				return "", fmt.Errorf("addons render: chart.yaml valueFiles: %w", err)
 			}
 		}
@@ -159,7 +159,7 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 	// resources — almost always a misconfig. Fail loud rather than report
 	// success for an empty apply.
 	if strings.TrimSpace(string(coerced)) == "" {
-		ui.Errorf(stderr, "addons::render: empty output for %s (no resources rendered)", addonDir)
+		ui.ErrorTo(stderr, "addons::render: empty output for %s (no resources rendered)", addonDir)
 		return "", fmt.Errorf("addons render: empty output for %s", addonDir)
 	}
 	return string(coerced), nil

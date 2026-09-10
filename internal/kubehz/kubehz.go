@@ -175,9 +175,9 @@ func (c *Context) httpClient() *http.Client {
 
 // ── verbose.sh helpers, bound to the context's stderr ────
 
-func (c *Context) errorf(format string, a ...any) { ui.Errorf(c.errOut(), format, a...) }
-func (c *Context) warnf(format string, a ...any)  { ui.Warnf(c.errOut(), format, a...) }
-func (c *Context) debugf(format string, a ...any) { ui.Debugf(c.errOut(), format, a...) }
+func (c *Context) errorf(format string, a ...any) { ui.ErrorTo(c.errOut(), format, a...) }
+func (c *Context) warnf(format string, a ...any)  { ui.WarnTo(c.errOut(), format, a...) }
+func (c *Context) debugf(format string, a ...any) { ui.DebugTo(c.errOut(), format, a...) }
 
 // echo writes one stdout line (bash `echo`).
 func (c *Context) echo(format string, a ...any) {

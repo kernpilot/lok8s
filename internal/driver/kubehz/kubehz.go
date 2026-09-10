@@ -78,7 +78,7 @@ func (d *Driver) lib(out io.Writer) *platform.Context {
 func (d *Driver) ensureSharedConfig(c *platform.Context, domain string) (*platform.Config, string, error) {
 	cy := filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
 	if info, err := os.Stat(cy); err != nil || info.IsDir() {
-		ui.Errorf(d.stderr(), "No cluster.lok8s.yaml for domain: %s", domain)
+		ui.ErrorTo(d.stderr(), "No cluster.lok8s.yaml for domain: %s", domain)
 		return nil, "", platform.ErrHandled
 	}
 	cfg, err := c.ReadConfig(cy)
@@ -89,7 +89,7 @@ func (d *Driver) ensureSharedConfig(c *platform.Context, domain string) (*platfo
 		return nil, "", err
 	}
 	if cfg.Hosting != "shared" {
-		ui.Errorf(d.stderr(), "kind: Kubehz requires spec.kubehz.hosting: shared (got: %s)", cfg.Hosting)
+		ui.ErrorTo(d.stderr(), "kind: Kubehz requires spec.kubehz.hosting: shared (got: %s)", cfg.Hosting)
 		return nil, "", platform.ErrHandled
 	}
 	return cfg, cy, nil
@@ -136,7 +136,7 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 
 // Kubeconfig explains how space access works — there is no download.
 func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) {
-	ui.Errorf(d.stderr(), "A space has no downloadable kubeconfig — the control plane is platform-operated.")
+	ui.ErrorTo(d.stderr(), "A space has no downloadable kubeconfig — the control plane is platform-operated.")
 	io.WriteString(d.stderr(), "  Access your namespaces with your kubehz account (OIDC): the dashboard's\n")
 	io.WriteString(d.stderr(), "  space page provides a ready-made kubeconfig snippet for 'kubectl oidc-login'.\n")
 	return "", ui.Handled(errors.New("kubehz: a space has no downloadable kubeconfig"))

@@ -93,7 +93,7 @@ type upHarness struct {
 	errOut  *bytes.Buffer
 	runner  *scriptRunner
 	deps    upDeps
-	exits   []int
+	exits   *[]int
 	started []string
 }
 
@@ -125,17 +125,15 @@ func newUpHarness(t *testing.T, dispatch error) *upHarness {
 		},
 		lookPath: func(string) bool { return false },
 	}
-	prev := osExit
-	osExit = func(code int) { h.exits = append(h.exits, code) }
-	t.Cleanup(func() { osExit = prev })
+	h.exits = captureExits(t)
 	return h
 }
 
 func TestUpDispatchFailureStopsBeforeTilt(t *testing.T) {
 	h := newUpHarness(t, errors.New("provision failed"))
-	err := runUp(context.Background(), h.p, h.out, h.deps, "lo.dev", false, "", false)
-	if !errors.Is(err, ErrHandled) || len(h.exits) != 0 {
-		t.Fatalf("err=%v exits=%v", err, h.exits)
+	err := runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev"})
+	if !errors.Is(err, ErrHandled) || len(*h.exits) != 0 {
+		t.Fatalf("err=%v exits=%v", err, *h.exits)
 	}
 	if !strings.HasPrefix(h.out.String(), "\n  \033[1;36mlo.dev\033[0m") {
 		t.Errorf("header missing: %q", h.out.String())
@@ -147,17 +145,17 @@ func TestUpDispatchFailureStopsBeforeTilt(t *testing.T) {
 
 func TestUpGateDeclinePassesRc3(t *testing.T) {
 	h := newUpHarness(t, driver.ErrDeclined)
-	_ = runUp(context.Background(), h.p, h.out, h.deps, "lo.dev", false, "", false)
-	if len(h.exits) != 1 || h.exits[0] != 3 {
-		t.Errorf("exits = %v", h.exits)
+	_ = runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev"})
+	if len(*h.exits) != 1 || (*h.exits)[0] != 3 {
+		t.Errorf("exits = %v", *h.exits)
 	}
 }
 
 func TestUpCIPassesTiltStatusThrough(t *testing.T) {
 	h := newUpHarness(t, nil)
-	_ = runUp(context.Background(), h.p, h.out, h.deps, "lo.dev", true, "10m", false)
-	if len(h.exits) != 1 || h.exits[0] != 7 {
-		t.Errorf("exits = %v (tilt ci's own status is the contract)", h.exits)
+	_ = runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", ci: true, timeout: "10m"})
+	if len(*h.exits) != 1 || (*h.exits)[0] != 7 {
+		t.Errorf("exits = %v (tilt ci's own status is the contract)", *h.exits)
 	}
 	if !h.runner.has("tilt ci --port=") || !h.runner.has("--timeout 10m") || len(h.started) != 0 {
 		t.Errorf("calls=%v started=%v", h.runner.calls, h.started)
@@ -169,11 +167,11 @@ func TestUpCIPassesTiltStatusThrough(t *testing.T) {
 
 func TestUpInteractiveStartsTiltAndOpensBrowserFallback(t *testing.T) {
 	h := newUpHarness(t, nil)
-	if err := runUp(context.Background(), h.p, h.out, h.deps, "lo.dev", false, "", true); err != nil {
+	if err := runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", openTilt: true}); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.started) != 1 || len(h.exits) != 0 {
-		t.Fatalf("started=%v exits=%v", h.started, h.exits)
+	if len(h.started) != 1 || len(*h.exits) != 0 {
+		t.Fatalf("started=%v exits=%v", h.started, *h.exits)
 	}
 	port := h.started[0]
 	if !strings.Contains(h.out.String(), "Tilt UI: http://localhost:"+port+"\n") {
@@ -194,7 +192,7 @@ func TestUpOpenTiltUsesOpener(t *testing.T) {
 	var opened []string
 	h.deps.lookPath = func(tool string) bool { return tool == "open" }
 	h.deps.open = func(tool, url string) error { opened = append(opened, tool+" "+url); return nil }
-	if err := runUp(context.Background(), h.p, h.out, h.deps, "lo.dev", false, "", true); err != nil {
+	if err := runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", openTilt: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(opened) != 1 || !strings.HasPrefix(opened[0], "open http://localhost:") {

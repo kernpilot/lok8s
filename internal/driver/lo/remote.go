@@ -33,31 +33,31 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	// under the dispatch's suppressed-errexit equivalent, an unguarded call
 	// would fall through with empty output and masquerade as no-nodes.
 	if err := d.deps.Provider.Provision(ctx, d.deps.ProviderConfigFile, workDir); err != nil {
-		ui.Errorf(errOut, "provider provision failed — refusing to treat it as 'no nodes'")
+		ui.ErrorTo(errOut, "provider provision failed — refusing to treat it as 'no nodes'")
 		return ui.Handled(fmt.Errorf("provider provision failed: %w", err))
 	}
 
 	providerOutput, err := d.deps.Provider.Output(ctx, d.deps.ProviderConfigFile)
 	if err != nil {
-		ui.Errorf(errOut, "provider output failed — refusing to treat it as 'no nodes'")
+		ui.ErrorTo(errOut, "provider output failed — refusing to treat it as 'no nodes'")
 		return ui.Handled(fmt.Errorf("provider output failed: %w", err))
 	}
 
 	remoteIP, remoteUser := providerNode0(providerOutput)
 
 	if remoteIP == "" {
-		ui.Warnf(errOut, "provider loaded but no nodes in output — running kind locally")
+		ui.WarnTo(errOut, "provider loaded but no nodes in output — running kind locally")
 		return nil
 	}
 
 	// Wait for SSH: 30 × 2s.
-	ui.Debugf(errOut, "waiting for SSH on %s...", remoteIP)
+	ui.DebugTo(errOut, "waiting for SSH on %s...", remoteIP)
 	sshOK := false
 	for attempts := range 30 {
 		if d.runQuiet(ctx, "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
 			remoteUser+"@"+remoteIP, "true") == nil {
 			sshOK = true
-			ui.Debugf(errOut, "SSH ready on %s (after %ds)", remoteIP, attempts*2)
+			ui.DebugTo(errOut, "SSH ready on %s (after %ds)", remoteIP, attempts*2)
 			break
 		}
 		if err := d.sleepSeconds(ctx, 2); err != nil {
@@ -65,19 +65,19 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 		}
 	}
 	if !sshOK {
-		ui.Errorf(errOut, "SSH not reachable on %s after 60s", remoteIP)
+		ui.ErrorTo(errOut, "SSH not reachable on %s after 60s", remoteIP)
 		return ui.Handled(fmt.Errorf("ssh not reachable on %s", remoteIP))
 	}
 
 	// Wait for cloud-init: 90 × 3s — a timeout WARNS and proceeds (cloud-init
 	// completion is best-effort; Docker readiness below is the hard gate).
-	ui.Debugf(errOut, "waiting for cloud-init to finish on %s...", remoteIP)
+	ui.DebugTo(errOut, "waiting for cloud-init to finish on %s...", remoteIP)
 	ciDone := false
 	for attempts := range 90 {
 		if d.runQuiet(ctx, "ssh", remoteUser+"@"+remoteIP,
 			"test -f /var/lib/cloud/instance/boot-finished") == nil {
 			ciDone = true
-			ui.Debugf(errOut, "cloud-init finished on %s (after %ds)", remoteIP, attempts*3)
+			ui.DebugTo(errOut, "cloud-init finished on %s (after %ds)", remoteIP, attempts*3)
 			break
 		}
 		if err := d.sleepSeconds(ctx, 3); err != nil {
@@ -85,16 +85,16 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 		}
 	}
 	if !ciDone {
-		ui.Warnf(errOut, "cloud-init did not finish within 270s — proceeding anyway")
+		ui.WarnTo(errOut, "cloud-init did not finish within 270s — proceeding anyway")
 	}
 
 	// Wait for Docker: 60 × 3s.
-	ui.Debugf(errOut, "waiting for Docker on %s...", remoteIP)
+	ui.DebugTo(errOut, "waiting for Docker on %s...", remoteIP)
 	dockerOK := false
 	for attempts := range 60 {
 		if d.runQuiet(ctx, "ssh", remoteUser+"@"+remoteIP, "command -v docker && docker info") == nil {
 			dockerOK = true
-			ui.Debugf(errOut, "Docker ready on %s (after %ds)", remoteIP, attempts*3)
+			ui.DebugTo(errOut, "Docker ready on %s (after %ds)", remoteIP, attempts*3)
 			break
 		}
 		if err := d.sleepSeconds(ctx, 3); err != nil {
@@ -102,7 +102,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 		}
 	}
 	if !dockerOK {
-		ui.Errorf(errOut, "Docker not available on %s after 180s. Check cloud-init logs: ssh %s@%s cat /var/log/cloud-init-output.log", remoteIP, remoteUser, remoteIP)
+		ui.ErrorTo(errOut, "Docker not available on %s after 180s. Check cloud-init logs: ssh %s@%s cat /var/log/cloud-init-output.log", remoteIP, remoteUser, remoteIP)
 		return ui.Handled(fmt.Errorf("docker not available on %s", remoteIP))
 	}
 
@@ -110,19 +110,19 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	os.Setenv("LOK8S_REMOTE_USER", remoteUser)
 
 	os.Setenv("DOCKER_HOST", "ssh://"+remoteUser+"@"+remoteIP)
-	ui.Debugf(errOut, "remote Docker: DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
+	ui.DebugTo(errOut, "remote Docker: DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
 
 	// Verify Docker is reachable via DOCKER_HOST: 10 × 3s.
 	for attempts := range 10 {
 		if d.runQuiet(ctx, "docker", "info") == nil {
-			ui.Debugf(errOut, "DOCKER_HOST verified (attempt %d)", attempts)
+			ui.DebugTo(errOut, "DOCKER_HOST verified (attempt %d)", attempts)
 			return nil
 		}
 		if err := d.sleepSeconds(ctx, 3); err != nil {
 			return err
 		}
 	}
-	ui.Errorf(errOut, "Docker not reachable via DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
+	ui.ErrorTo(errOut, "Docker not reachable via DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
 	return ui.Handled(fmt.Errorf("docker not reachable via DOCKER_HOST"))
 }
 
@@ -159,13 +159,13 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		clusterName = ""
 	}
 
-	ui.Debugf(errOut, "CI mode: syncing repo to %s:%s", remote, dest)
+	ui.DebugTo(errOut, "CI mode: syncing repo to %s:%s", remote, dest)
 
 	// dest expands CLIENT-side by design — it composes the remote command.
 	// Its charset was validated at read time (readRemoteConfig), which is
 	// what makes the single-quoted interpolation safe.
 	if err := d.runOut(ctx, out, errOut, "ssh", remote, fmt.Sprintf("mkdir -p '%s'", dest)); err != nil {
-		ui.Errorf(errOut, "failed to create %s on %s", dest, remote)
+		ui.ErrorTo(errOut, "failed to create %s on %s", dest, remote)
 		return ui.Handled(fmt.Errorf("remote mkdir failed: %w", err))
 	}
 
@@ -190,7 +190,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 
 	if err := d.runOut(ctx, out, errOut, "rsync",
 		append(append([]string{}, rsyncArgs...), syncSrc, remote+":"+dest+"/")...); err != nil {
-		ui.Errorf(errOut, "rsync failed")
+		ui.ErrorTo(errOut, "rsync failed")
 		return ui.Handled(fmt.Errorf("rsync failed: %w", err))
 	}
 
@@ -199,26 +199,26 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		_ = d.runOut(ctx, out, errOut, "rsync", "-az", d.deps.Paths.Clusters+"/", remote+":"+dest+"/clusters/")
 	}
 
-	ui.Debugf(errOut, "repo synced to %s:%s", remote, dest)
+	ui.DebugTo(errOut, "repo synced to %s:%s", remote, dest)
 
 	// Run lo provision on the remote VM (without --remote).
-	ui.Debugf(errOut, "starting lo provision on %s", remote)
+	ui.DebugTo(errOut, "starting lo provision on %s", remote)
 	provisionCmd := fmt.Sprintf("cd '%s' &&     export DOMAIN_NAME='%s' &&     export PATH_BASE='%s' &&     export PATH_LOK8S='%s/.lok8s' &&     export PATH_CLUSTERS='%s/clusters' &&     export PATH_BIN='%s/.bin' &&     export KUSTOMIZE_PLUGIN_HOME='%s/.kustomize' &&     export PATH=\"%s/.lok8s:%s/.bin:${PATH}\" &&     .lok8s/lo provision --domain '%s'",
 		dest, domain, dest, dest, dest, dest, dest, dest, dest, domain)
 	if err := d.runOut(ctx, out, errOut, "ssh", remote, provisionCmd); err != nil {
-		ui.Errorf(errOut, "remote lo provision failed")
+		ui.ErrorTo(errOut, "remote lo provision failed")
 		return ui.Handled(fmt.Errorf("remote lo provision failed: %w", err))
 	}
 
 	// Start Tilt if enabled.
 	if getenv("LOK8S_REMOTE_TILT") == "true" {
-		ui.Debugf(errOut, "starting Tilt on %s", remote)
+		ui.DebugTo(errOut, "starting Tilt on %s", remote)
 		tiltCmd := fmt.Sprintf("cd '%s' &&     export DOMAIN_NAME='%s' &&     export PATH_BASE='%s' &&     export PATH_LOK8S='%s/.lok8s' &&     export PATH_CLUSTERS='%s/clusters' &&     nohup .lok8s/lo tilt up > /tmp/lok8s-tilt.log 2>&1 &",
 			dest, domain, dest, dest, dest)
 		if err := d.runOut(ctx, out, errOut, "ssh", remote, tiltCmd); err != nil {
-			ui.Warnf(errOut, "remote Tilt start failed — cluster is provisioned but Tilt isn't running")
+			ui.WarnTo(errOut, "remote Tilt start failed — cluster is provisioned but Tilt isn't running")
 		}
-		ui.Debugf(errOut, "Tilt started on %s (log: /tmp/lok8s-tilt.log)", remote)
+		ui.DebugTo(errOut, "Tilt started on %s (log: /tmp/lok8s-tilt.log)", remote)
 	}
 
 	// Expose if enabled. The config reads are best-effort here like the

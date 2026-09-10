@@ -49,12 +49,7 @@ func newKubehzCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	cmd.AddCommand(
 		newKubehzRegister(paths),
@@ -200,12 +195,7 @@ func newKubehzNode(paths *config.Paths) *cobra.Command {
 		Aliases:      []string{"n"},
 		Short:        "Nodes you bring to a hosted control plane (join/remove/status)",
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	cmd.AddCommand(newKubehzNodeJoin(paths), newKubehzNodeRemove(paths), newKubehzNodeStatus(paths))
 	return cmd
@@ -313,12 +303,7 @@ func newKubehzHandover(paths *config.Paths) *cobra.Command {
 		Aliases:      []string{"h"},
 		Short:        "Control-plane handover (receive/preseed on the eject target)",
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	cmd.AddCommand(newKubehzHandoverReceive(paths), newKubehzHandoverPreseed(paths))
 	return cmd

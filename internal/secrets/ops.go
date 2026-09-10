@@ -28,15 +28,15 @@ import (
 // both are libraries in the Go build.
 func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
-		ui.Errorf(c.ErrOut, "SSH public key not found: %s", sshKey)
-		ui.Errorf(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
+		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", sshKey)
+		ui.ErrorTo(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
 		return ErrHandled
 	}
 
 	agePubkey, skipNote, err := deriveAgePublicKey(sshKey)
 	if err != nil && !errors.Is(err, errUnsupportedKey) {
-		ui.Errorf(c.ErrOut, "Failed to derive age public key from %s", sshKey)
-		ui.Errorf(c.ErrOut, "Only ed25519 SSH keys are supported")
+		ui.ErrorTo(c.ErrOut, "Failed to derive age public key from %s", sshKey)
+		ui.ErrorTo(c.ErrOut, "Only ed25519 SSH keys are supported")
 		return ErrHandled
 	}
 	// bash leaves ssh-to-age's stderr uncontained here (public keys only —
@@ -56,8 +56,8 @@ func (c *Context) Init(sshKey string) error {
 			fmt.Fprintln(c.Out, "age key already configured in .sops.yaml")
 			return nil
 		}
-		ui.Warnf(c.ErrOut, ".sops.yaml exists but doesn't contain this key")
-		ui.Warnf(c.ErrOut, "Add it with: lo secrets add-key %s", sshKey)
+		ui.WarnTo(c.ErrOut, ".sops.yaml exists but doesn't contain this key")
+		ui.WarnTo(c.ErrOut, "Add it with: lo secrets add-key %s", sshKey)
 		fmt.Fprintf(c.Out, "Your age public key: %s\n", agePubkey)
 		return nil
 	}
@@ -65,7 +65,7 @@ func (c *Context) Init(sshKey string) error {
 	// A non-ed25519 key derives NOTHING (the skip note above); bash still
 	// wrote `age: ''` and exited 0, leaving a .sops.yaml no encrypt can use.
 	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.Errorf(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
+		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
 		return ErrHandled
 	}
 
@@ -132,8 +132,8 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		agePubkey = key
 	} else {
 		if !fsutil.IsRegular(key) {
-			ui.Errorf(c.ErrOut, "not an age key and not a readable file: %s", key)
-			ui.Errorf(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
+			ui.ErrorTo(c.ErrOut, "not an age key and not a readable file: %s", key)
+			ui.ErrorTo(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
 			return ErrHandled
 		}
 		// Contained (bash: 2>/dev/null): the ssh-to-age binary echoes its
@@ -143,8 +143,8 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		// error is likewise never surfaced.
 		derived, _, err := deriveAgePublicKey(key)
 		if err != nil && !errors.Is(err, errUnsupportedKey) {
-			ui.Errorf(c.ErrOut, "could not derive an age key from %s", key)
-			ui.Errorf(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
+			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", key)
+			ui.ErrorTo(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
 			return ErrHandled
 		}
 		// A parseable non-ed25519 key derives to "" (the binary's rc-0 skip)
@@ -156,13 +156,13 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// accepts the config and every later encrypt writes a recipient nobody
 	// holds.
 	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.Errorf(c.ErrOut, "not a valid age public key: %s", agePubkey)
+		ui.ErrorTo(c.ErrOut, "not a valid age public key: %s", agePubkey)
 		return ErrHandled
 	}
 
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
-		ui.Errorf(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
+		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
 
@@ -184,7 +184,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return err
 	}
 	if after < 1 {
-		ui.Errorf(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
+		ui.ErrorTo(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
 		return ErrHandled
 	}
 	fmt.Fprintf(c.Out, "added recipient to .sops.yaml (%d creation rule(s))\n", before)
@@ -209,7 +209,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		stores = append(stores, c.StorePath())
 	}
 	if len(stores) == 0 {
-		ui.Errorf(c.ErrOut, "no secret store found to re-key")
+		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
 		return ErrHandled
 	}
 
@@ -224,15 +224,15 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 				continue
 			}
 			if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
-				ui.Warnf(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", strings.TrimPrefix(enc, c.Paths.Base+"/"))
+				ui.WarnTo(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", strings.TrimPrefix(enc, c.Paths.Base+"/"))
 				orphans++
 			}
 		}
 	}
 	if orphans > 0 && !skipOrphans {
-		ui.Errorf(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
-		ui.Errorf(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
-		ui.Errorf(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
+		ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
+		ui.ErrorTo(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
+		ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
 		return ErrHandled
 	}
 
@@ -301,11 +301,11 @@ func appendRecipient(content, agePubkey string, before *int) (string, int) {
 // (command-substitution semantics: trailing newlines stripped).
 func (c *Context) Set(ctx context.Context, name, namespace, key, value string, doEncrypt bool) error {
 	if name == "" {
-		ui.Errorf(c.ErrOut, "Secret --name is required")
+		ui.ErrorTo(c.ErrOut, "Secret --name is required")
 		return ErrHandled
 	}
 	if key == "" {
-		ui.Errorf(c.ErrOut, "Key argument is required")
+		ui.ErrorTo(c.ErrOut, "Key argument is required")
 		return ErrHandled
 	}
 
@@ -337,7 +337,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	}
 
 	if value == "" {
-		ui.Errorf(c.ErrOut, "Empty value")
+		ui.ErrorTo(c.ErrOut, "Empty value")
 		return ErrHandled
 	}
 
@@ -379,7 +379,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	// (encryption isn't set up). The wording covers both cases (missing vs.
 	// stale) without asserting which.
 	if fsutil.IsRegular(c.sopsConfigPath()) {
-		ui.Warnf(c.ErrOut, "wrote plaintext cache only — no matching .enc for this value (missing or now stale); run 'lo secrets encrypt' or re-run with --encrypt/-e before committing")
+		ui.WarnTo(c.ErrOut, "wrote plaintext cache only — no matching .enc for this value (missing or now stale); run 'lo secrets encrypt' or re-run with --encrypt/-e before committing")
 	}
 	c.liveDrift(ctx, name, namespace, key, value)
 	fmt.Fprintf(c.Out, "Set %s/%s/%s\n", name, namespace, key)
@@ -402,7 +402,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 func (c *Context) encryptFile(plaintext string) error {
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
-		ui.Errorf(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
+		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
 		return ErrHandled
 	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))
@@ -410,7 +410,7 @@ func (c *Context) encryptFile(plaintext string) error {
 		// The bash path surfaces the sops CLI's own stderr before the [error]
 		// line; the library error stands in for it here.
 		fmt.Fprintln(c.ErrOut, err)
-		ui.Errorf(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
+		ui.ErrorTo(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
 		return ErrHandled
 	}
 	return nil
@@ -432,13 +432,13 @@ func (c *Context) Encrypt(name string) error {
 	// it address files outside the store. Same charset the domain resolver
 	// enforces.
 	if name != "" && !nameRe.MatchString(name) {
-		ui.Errorf(c.ErrOut, "invalid --name '%s' — a Secret name is [a-zA-Z0-9][a-zA-Z0-9._-]*", name)
+		ui.ErrorTo(c.ErrOut, "invalid --name '%s' — a Secret name is [a-zA-Z0-9][a-zA-Z0-9._-]*", name)
 		return ErrHandled
 	}
 
 	secretsDir := c.StorePath()
 	if !fsutil.DirExists(secretsDir) {
-		ui.Warnf(c.ErrOut, "No secrets directory: %s", secretsDir)
+		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
 
@@ -448,7 +448,7 @@ func (c *Context) Encrypt(name string) error {
 	}
 
 	if !fsutil.IsRegular(c.sopsConfigPath()) {
-		ui.Errorf(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
+		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
 		return ErrHandled
 	}
 
@@ -496,8 +496,8 @@ func (c *Context) Encrypt(name string) error {
 		// stale .enc is already on disk. Without a name an empty store is
 		// genuinely nothing to do.
 		if name != "" {
-			ui.Errorf(c.ErrOut, "no cache files for Secret '%s' in %s", name, secretsDir)
-			ui.Errorf(c.ErrOut, "  expected %s/Secret.%s.<namespace>.<key>; check the name or run without --name to see the store", secretsDir, name)
+			ui.ErrorTo(c.ErrOut, "no cache files for Secret '%s' in %s", name, secretsDir)
+			ui.ErrorTo(c.ErrOut, "  expected %s/Secret.%s.<namespace>.<key>; check the name or run without --name to see the store", secretsDir, name)
 			return ErrHandled
 		}
 		fmt.Fprintf(c.Out, "No plaintext secrets found in %s\n", secretsDir)
@@ -512,7 +512,7 @@ func (c *Context) Encrypt(name string) error {
 func (c *Context) Decrypt(sshKey string) error {
 	secretsDir := c.StorePath()
 	if !fsutil.DirExists(secretsDir) {
-		ui.Warnf(c.ErrOut, "No secrets directory: %s", secretsDir)
+		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
 
@@ -528,19 +528,19 @@ func (c *Context) Decrypt(sshKey string) error {
 	}
 	if ageKey == "" {
 		if !fsutil.IsRegular(sshKey) {
-			ui.Errorf(c.ErrOut, "SSH private key not found: %s", sshKey)
+			ui.ErrorTo(c.ErrOut, "SSH private key not found: %s", sshKey)
 			return ErrHandled
 		}
 		derived, err := deriveAgePrivateKey(sshKey)
 		if err != nil {
 			// Contained: the library error (like the binary's stderr) can
 			// carry input material for a private key — never surface it.
-			ui.Errorf(c.ErrOut, "Failed to derive age key from %s", sshKey)
-			ui.Errorf(c.ErrOut, "If your SSH key is passphrase-protected, derive once:")
-			ui.Errorf(c.ErrOut, "  mkdir -p ~/.config/sops/age")
-			ui.Errorf(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", sshKey)
-			ui.Errorf(c.ErrOut, "  chmod 600 ~/.config/sops/age/keys.txt")
-			ui.Errorf(c.ErrOut, "(you'll be prompted for the passphrase once)")
+			ui.ErrorTo(c.ErrOut, "Failed to derive age key from %s", sshKey)
+			ui.ErrorTo(c.ErrOut, "If your SSH key is passphrase-protected, derive once:")
+			ui.ErrorTo(c.ErrOut, "  mkdir -p ~/.config/sops/age")
+			ui.ErrorTo(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", sshKey)
+			ui.ErrorTo(c.ErrOut, "  chmod 600 ~/.config/sops/age/keys.txt")
+			ui.ErrorTo(c.ErrOut, "(you'll be prompted for the passphrase once)")
 			return ErrHandled
 		}
 		ageKey = derived
@@ -576,7 +576,7 @@ func (c *Context) Decrypt(sshKey string) error {
 			// [error] line; the library error stands in for it. It never
 			// carries key material.
 			fmt.Fprintln(c.ErrOut, err)
-			ui.Errorf(c.ErrOut, "Failed to decrypt %s", base)
+			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
 			return ErrHandled
 		}
 		if err := os.Chmod(plaintext, 0o600); err != nil {

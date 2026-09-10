@@ -5,8 +5,6 @@ package cli
 // internal/audit. Output (human, --json, --sarif) is byte-identical.
 
 import (
-	"os"
-
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/audit"
@@ -35,12 +33,10 @@ func newAuditCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			stderr := cmd.ErrOrStderr()
 
 			// -v/--verbose → DEBUG, like the argsh entrypoint.
-			if v, _ := cmd.Flags().GetCount("verbose"); v > 0 {
-				os.Setenv("DEBUG", "1")
-			}
+			setDebugFromVerbose(cmd)
 
 			if jsonFlag && sarifFlag {
-				ui.Errorf(stderr, "--json and --sarif are mutually exclusive")
+				ui.ErrorTo(stderr, "--json and --sarif are mutually exclusive")
 				return ErrHandled
 			}
 

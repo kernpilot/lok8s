@@ -79,12 +79,12 @@ func Artifacts(ctx context.Context, o Options) error {
 	stderr := o.stderr()
 	domainDir := filepath.Join(o.Paths.Clusters, o.Domain)
 
-	ui.Debugf(stderr, "Build artifacts via kustomize alpha plugins for %s", o.Domain)
+	ui.DebugTo(stderr, "Build artifacts via kustomize alpha plugins for %s", o.Domain)
 
 	// The domain composes its targets in its own kustomization.yaml. Without
 	// it there is nothing to build — fail clearly with the fix.
 	if !hasKustomization(domainDir) {
-		ui.Errorf(stderr, "domain %s has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]", o.Domain)
+		ui.ErrorTo(stderr, "domain %s has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]", o.Domain)
 		return ErrHandled
 	}
 
@@ -110,7 +110,7 @@ func Artifacts(ctx context.Context, o Options) error {
 	// under artifacts/ and are preserved.
 	pruneStaleArtifactDirs(filepath.Join(domainDir, "artifacts"))
 
-	ui.Debugf(stderr, "Building domain kustomization: %s", filepath.Join(domainDir, "kustomization.yaml"))
+	ui.DebugTo(stderr, "Building domain kustomization: %s", filepath.Join(domainDir, "kustomization.yaml"))
 
 	// Render to a temp file first, then promote on success. A direct write
 	// to artifacts.yaml would truncate the target BEFORE the render runs, so
@@ -122,7 +122,7 @@ func Artifacts(ctx context.Context, o Options) error {
 	// interrupted one can leave a partial artifacts.yaml).
 	tmp, err := os.CreateTemp(domainDir, "tmp.")
 	if err != nil {
-		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
+		ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
 		return ErrHandled
 	}
 	tmpPath := tmp.Name()
@@ -131,13 +131,13 @@ func Artifacts(ctx context.Context, o Options) error {
 	rendered, err := runKustomize(ctx, o, domainDir, kubeconfig, stderr)
 	if err != nil {
 		_ = os.Remove(tmpPath)
-		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
+		ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
 		return ErrHandled
 	}
 	rendered = Envsubst(rendered, whitelist)
 	if err := os.WriteFile(tmpPath, rendered, 0o600); err != nil {
 		_ = os.Remove(tmpPath)
-		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
+		ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
 		return ErrHandled
 	}
 
@@ -176,13 +176,13 @@ func Artifacts(ctx context.Context, o Options) error {
 	}
 	if docs == 0 && prior > 0 {
 		_ = os.Remove(tmpPath)
-		ui.Errorf(stderr, "refusing to overwrite %s's rendered output (%d existing document(s)/file(s)) with an EMPTY render", o.Domain, prior)
-		ui.Errorf(stderr, "  kustomize succeeded but produced nothing — check %s resources:", filepath.Join(domainDir, "kustomization.yaml"))
-		ui.Errorf(stderr, "  applying an empty artifact would prune everything it manages (Flux prune: true)")
+		ui.ErrorTo(stderr, "refusing to overwrite %s's rendered output (%d existing document(s)/file(s)) with an EMPTY render", o.Domain, prior)
+		ui.ErrorTo(stderr, "  kustomize succeeded but produced nothing — check %s resources:", filepath.Join(domainDir, "kustomization.yaml"))
+		ui.ErrorTo(stderr, "  applying an empty artifact would prune everything it manages (Flux prune: true)")
 		return ErrHandled
 	}
 	if docs == 0 {
-		ui.Warnf(stderr, "%s rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?", o.Domain)
+		ui.WarnTo(stderr, "%s rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?", o.Domain)
 	}
 
 	// Promote ONLY when the content changed. An unconditional move refreshes
@@ -193,11 +193,11 @@ func Artifacts(ctx context.Context, o Options) error {
 	// unchanged render is a no-op and the watch stays quiet.
 	if existingErr == nil && bytes.Equal(existing, rendered) {
 		_ = os.Remove(tmpPath)
-		ui.Debugf(stderr, "%s: render unchanged (%d document(s)) — artifacts.yaml left untouched", o.Domain, docs)
+		ui.DebugTo(stderr, "%s: render unchanged (%d document(s)) — artifacts.yaml left untouched", o.Domain, docs)
 	} else {
 		if err := os.Rename(tmpPath, artifactPath); err != nil {
 			_ = os.Remove(tmpPath)
-			ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
+			ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
 			return ErrHandled
 		}
 		// Say what was produced. A silent success cannot distinguish a full

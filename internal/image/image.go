@@ -246,7 +246,7 @@ func (c *Context) mergedServices(ctx context.Context) (*yaml.Node, error) {
 // Idempotent: skips if the cache registry already has a manifest matching
 // the requested ref. force overrides the skip.
 func (c *Context) Cache(ctx context.Context, service string, force, all bool) error {
-	ui.Debugf(c.ErrOut, "Pre-pull images into the local cache registry")
+	ui.DebugTo(c.ErrOut, "Pre-pull images into the local cache registry")
 
 	// The cache registry is a Lo-driver (local kind cluster) feature — fail
 	// at the door with the driver named, not three layers down on a spec
@@ -262,7 +262,7 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 	// No guessed fallback: a wrong IP burns a connect-timeout per layer and
 	// reads as a network problem; an error names itself.
 	if net.ip == "" {
-		ui.Errorf(c.ErrOut, "cannot resolve the cache registry IP for domain '%s' (spec.network unreadable?) — export LOK8S_REGISTRY_IP_CACHE=<ip> to override", c.Domain)
+		ui.ErrorTo(c.ErrOut, "cannot resolve the cache registry IP for domain '%s' (spec.network unreadable?) — export LOK8S_REGISTRY_IP_CACHE=<ip> to override", c.Domain)
 		return ErrHandled
 	}
 
@@ -278,14 +278,14 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 		parallel = "1"
 	}
 	if !digitsRe.MatchString(parallel) {
-		ui.Errorf(c.ErrOut, "registry.parallel must be a non-negative integer, got: %s", parallel)
+		ui.ErrorTo(c.ErrOut, "registry.parallel must be a non-negative integer, got: %s", parallel)
 		return ErrHandled
 	}
 
 	if all {
 		info, err := os.Stat(queueFile)
 		if err != nil || info.Size() == 0 {
-			ui.Debugf(c.ErrOut, "no cache queue at %s; nothing to pre-pull", queueFile)
+			ui.DebugTo(c.ErrOut, "no cache queue at %s; nothing to pre-pull", queueFile)
 			return nil
 		}
 		return c.cacheQueue(ctx, queueFile, net, parallel, force)
@@ -294,13 +294,13 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 	// Single-service mode: look the service up in the merged services env to
 	// resolve its remote ref.
 	if service == "" {
-		ui.Errorf(c.ErrOut, "image cache: provide a service name or use --all")
+		ui.ErrorTo(c.ErrOut, "image cache: provide a service name or use --all")
 		return ErrHandled
 	}
 
 	pinned := yqsem.OrLiteralFalse(yqsem.Lookup(merged, "services", service, "image"), "")
 	if pinned != "" {
-		ui.Errorf(c.ErrOut, "service '%s' has an explicit 'image:' pin — there is nothing to cache, kind pulls it directly", service)
+		ui.ErrorTo(c.ErrOut, "service '%s' has an explicit 'image:' pin — there is nothing to cache, kind pulls it directly", service)
 		return ErrHandled
 	}
 
@@ -314,7 +314,7 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 	sTag := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "services", service, "registry", "tag"), gTag))
 
 	if sEndpoint == "" {
-		ui.Errorf(c.ErrOut, "service '%s' has no registry.endpoint configured (set spec.registries.endpoint or services.%s.registry.endpoint)", service, service)
+		ui.ErrorTo(c.ErrOut, "service '%s' has no registry.endpoint configured (set spec.registries.endpoint or services.%s.registry.endpoint)", service, service)
 		return ErrHandled
 	}
 
@@ -346,7 +346,7 @@ func (c *Context) cacheQueue(ctx context.Context, queue string, net cacheNet, pa
 	work := lines[:len(lines)-1]
 
 	parallel, _ := strconv.Atoi(parallelStr)
-	ui.Debugf(c.ErrOut, "image cache: processing %d entries (parallel=%s)", total, parallelStr)
+	ui.DebugTo(c.ErrOut, "image cache: processing %d entries (parallel=%s)", total, parallelStr)
 
 	// Failures are recorded per entry index, not exit codes (the bash used
 	// marker files because `wait -n` made job rcs unreliably collectable);
@@ -414,7 +414,7 @@ func (c *Context) cacheQueue(ctx context.Context, queue string, net cacheNet, pa
 		for _, k := range keys {
 			parts = append(parts, failures[k])
 		}
-		ui.Errorf(c.ErrOut, "image cache: %d/%d images failed: %s", len(failures), total, strings.Join(parts, " "))
+		ui.ErrorTo(c.ErrOut, "image cache: %d/%d images failed: %s", len(failures), total, strings.Join(parts, " "))
 		return ErrHandled
 	}
 	return nil
@@ -446,7 +446,7 @@ func (c *Context) cacheOne(ctx context.Context, svc, remote, branch, tag string,
 		args := append([]string{"manifest", "inspect"}, inspectFlags...)
 		args = append(args, cacheRefLocal)
 		if c.docker(ctx, io.Discard, io.Discard, args...) == nil {
-			ui.Debugf(c.ErrOut, "[ %s ] already in cache (%s)", svc, cacheRefLocal)
+			ui.DebugTo(c.ErrOut, "[ %s ] already in cache (%s)", svc, cacheRefLocal)
 			return true
 		}
 	}
@@ -454,15 +454,15 @@ func (c *Context) cacheOne(ctx context.Context, svc, remote, branch, tag string,
 	fmt.Fprintf(c.Out, ":: [ %s ] caching %s -> %s\n", svc, remoteRef, cacheRefLocal)
 
 	if c.docker(ctx, c.Out, c.ErrOut, "pull", remoteRef) != nil {
-		ui.Errorf(c.ErrOut, "[ %s ] failed to pull %s (check upstream credentials)", svc, remoteRef)
+		ui.ErrorTo(c.ErrOut, "[ %s ] failed to pull %s (check upstream credentials)", svc, remoteRef)
 		return false
 	}
 	if c.docker(ctx, c.Out, c.ErrOut, "tag", remoteRef, cacheRefLocal) != nil {
-		ui.Errorf(c.ErrOut, "[ %s ] failed to tag %s as %s", svc, remoteRef, cacheRefLocal)
+		ui.ErrorTo(c.ErrOut, "[ %s ] failed to tag %s as %s", svc, remoteRef, cacheRefLocal)
 		return false
 	}
 	if c.docker(ctx, c.Out, c.ErrOut, "push", cacheRefLocal) != nil {
-		ui.Errorf(c.ErrOut, "[ %s ] failed to push to cache registry at %s", svc, net.ip)
+		ui.ErrorTo(c.ErrOut, "[ %s ] failed to push to cache registry at %s", svc, net.ip)
 		return false
 	}
 	return true
@@ -477,7 +477,7 @@ func (c *Context) docker(ctx context.Context, stdout, stderr io.Writer, args ...
 // own code (7 on connection-refused) when the endpoint is unreachable, which
 // pipefail propagated through `curl -s | jq .` and the raw re-fetch alike.
 func (c *Context) List(ctx context.Context) (int, error) {
-	ui.Debugf(c.ErrOut, "List images in the local cache registry")
+	ui.DebugTo(c.ErrOut, "List images in the local cache registry")
 	// Same gate as Cache: the cache registry only exists on Lo (kind)
 	// clusters — fail with the driver named, not an IP-resolution error. An
 	// explicit LOK8S_REGISTRY_IP_CACHE skips it: the operator has named the
@@ -490,7 +490,7 @@ func (c *Context) List(ctx context.Context) (int, error) {
 	}
 	net := c.resolveCacheNet()
 	if net.ip == "" {
-		ui.Errorf(c.ErrOut, "cannot resolve the cache registry IP for domain '%s' — export LOK8S_REGISTRY_IP_CACHE=<ip> to override", c.Domain)
+		ui.ErrorTo(c.ErrOut, "cannot resolve the cache registry IP for domain '%s' — export LOK8S_REGISTRY_IP_CACHE=<ip> to override", c.Domain)
 		return 1, ErrHandled
 	}
 	scheme := "http"
@@ -526,7 +526,7 @@ func (c *Context) List(ctx context.Context) (int, error) {
 // KIND_EXPERIMENTAL_DOCKER_NETWORK (spec.network.name > env > "lok8s" — the
 // entrypoint's ambient export).
 func (c *Context) Clean(ctx context.Context, network string) error {
-	ui.Debugf(c.ErrOut, "Clean the local cache registry")
+	ui.DebugTo(c.ErrOut, "Clean the local cache registry")
 	if network == "" {
 		network = "lok8s"
 	}

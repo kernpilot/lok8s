@@ -132,7 +132,7 @@ func Split(ctx context.Context, o Options) error {
 	if r.noSecrets {
 		suffix = ", --no-secrets: committed Secrets left inert"
 	}
-	ui.Debugf(r.stderr, "split: %d file(s) → %s (%d sops Secret(s)%s)", r.emitted, r.outDir, r.secrets, suffix)
+	ui.DebugTo(r.stderr, "split: %d file(s) → %s (%d sops Secret(s)%s)", r.emitted, r.outDir, r.secrets, suffix)
 	return nil
 }
 
@@ -174,7 +174,7 @@ func newSplitRun(o Options) (*splitRun, error) {
 	r.outDir = filepath.Join(domainDir, "artifacts")
 
 	if info, err := os.Stat(r.artifact); err != nil || info.Size() == 0 {
-		ui.Errorf(r.stderr, "no %s to split — build first", r.artifact)
+		ui.ErrorTo(r.stderr, "no %s to split — build first", r.artifact)
 		return nil, ErrHandled
 	}
 
@@ -206,7 +206,7 @@ func newSplitRun(o Options) (*splitRun, error) {
 	if !r.noSecrets {
 		_, on, err := EncryptMode(domainDir)
 		if err != nil {
-			ui.Errorf(r.stderr, "%s", err.Error())
+			ui.ErrorTo(r.stderr, "%s", err.Error())
 			return nil, ErrHandled
 		}
 		r.encryptOn = on
@@ -223,18 +223,18 @@ func newSplitRun(o Options) (*splitRun, error) {
 			recipients = gitopsAgeRecipients(specFile)
 		}
 		if recipients == "" {
-			ui.Errorf(r.stderr, "split: %d Secret(s) in the render but no spec.gitops.age recipients — refusing to write plaintext Secrets. Declare the age public keys (reconciler key + break-glass) in the spec.", r.secretCount)
+			ui.ErrorTo(r.stderr, "split: %d Secret(s) in the render but no spec.gitops.age recipients — refusing to write plaintext Secrets. Declare the age public keys (reconciler key + break-glass) in the spec.", r.secretCount)
 			return nil, ErrHandled
 		}
 		for rec := range strings.SplitSeq(recipients, ",") {
 			if !ageKeyRe.MatchString(rec) {
-				ui.Errorf(r.stderr, "split: '%s' is not an age public key (spec.gitops.age)", rec)
+				ui.ErrorTo(r.stderr, "split: '%s' is not an age public key (spec.gitops.age)", rec)
 				return nil, ErrHandled
 			}
 		}
 		path, ok := execx.Look(o.Paths, "sops")
 		if !ok {
-			ui.Errorf(r.stderr, "split: sops not found (required to encrypt Secrets) — install it (b install) or skip the split for this run with LOK8S_BUILD_SPLIT=0 / lo build --single")
+			ui.ErrorTo(r.stderr, "split: sops not found (required to encrypt Secrets) — install it (b install) or skip the split for this run with LOK8S_BUILD_SPLIT=0 / lo build --single")
 			return nil, ErrHandled
 		}
 		r.sopsPath = path
@@ -248,14 +248,14 @@ func newSplitRun(o Options) (*splitRun, error) {
 	// so the final moves stay on one filesystem.
 	tmpDir, err := os.MkdirTemp("", "tmp.")
 	if err != nil {
-		ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
 		return nil, ErrHandled
 	}
 	r.tmpDir = tmpDir
 	stage, err := os.MkdirTemp(domainDir, ".artifacts-stage.")
 	if err != nil {
 		r.cleanup()
-		ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
 		return nil, ErrHandled
 	}
 	r.stage = stage
@@ -269,7 +269,7 @@ func newSplitRun(o Options) (*splitRun, error) {
 		content := "creation_rules:\n  - age: '" + recipients + "'\n"
 		if err := os.WriteFile(r.sopsConfig, []byte(content), 0o600); err != nil {
 			r.cleanup()
-			ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
 			return nil, ErrHandled
 		}
 	}
@@ -295,7 +295,7 @@ func (r *splitRun) cleanup() {
 func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	streamPath := filepath.Join(r.tmpDir, "nonsecret.stream")
 	if !r.yqOK || execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr) != nil {
-		ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
 		return ErrHandled
 	}
 	// Guard the empty stream (a Secrets-only render): yq -s on empty stdin
@@ -303,7 +303,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	if info, err := os.Stat(streamPath); err == nil && info.Size() > 0 {
 		streamFile, err := os.Open(streamPath)
 		if err != nil {
-			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
 		runErr := r.o.runner().Run(ctx, execx.Cmd{
@@ -312,7 +312,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 		})
 		_ = streamFile.Close()
 		if runErr != nil {
-			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
 		_ = os.Remove(streamPath)
@@ -327,13 +327,13 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	// mode where secretCount is forced to 0 for the emit path.
 	ymlFiles := globSorted(filepath.Join(r.tmpDir, "*.yml"))
 	if r.docCount-r.actualSecretCount != len(ymlFiles) {
-		ui.Errorf(r.stderr, "split: %d non-Secret documents rendered but %d files emitted — kind/namespace/name collision across API groups; not supported", r.docCount-r.actualSecretCount, len(ymlFiles))
+		ui.ErrorTo(r.stderr, "split: %d non-Secret documents rendered but %d files emitted — kind/namespace/name collision across API groups; not supported", r.docCount-r.actualSecretCount, len(ymlFiles))
 		return ErrHandled
 	}
 	for _, f := range ymlFiles {
 		base := filepath.Base(f)
 		if err := os.Rename(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
-			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
 		r.emitted++
@@ -366,7 +366,7 @@ func (r *splitRun) emitSecrets(ctx context.Context) error {
 	// the committed layout (and via a pruning reconciler, from the
 	// CLUSTER). Fail instead.
 	if r.secrets != r.secretCount {
-		ui.Errorf(r.stderr, "split: rendered %d Secret(s) but emitted %d — refusing the swap (listing failure?)", r.secretCount, r.secrets)
+		ui.ErrorTo(r.stderr, "split: rendered %d Secret(s) but emitted %d — refusing the swap (listing failure?)", r.secretCount, r.secrets)
 		return ErrHandled
 	}
 	return nil
@@ -378,7 +378,7 @@ func (r *splitRun) emitSecrets(ctx context.Context) error {
 func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
 	ns, name := ref.ns, ref.name
 	if !secretNameRe.MatchString(name) || (ns != "" && !secretNsRe.MatchString(ns)) {
-		ui.Errorf(r.stderr, "split: refusing Secret with non-RFC1123 metadata: ns='%s' name='%s'", ns, name)
+		ui.ErrorTo(r.stderr, "split: refusing Secret with non-RFC1123 metadata: ns='%s' name='%s'", ns, name)
 		return ErrHandled
 	}
 	nsSeg := ""
@@ -393,7 +393,7 @@ func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
 	selectExpr := fmt.Sprintf(`select(.kind == "Secret" and .metadata.name == "%s" and (.metadata.namespace // "") == "%s")`, name, ns)
 	freshOut, err := execCapture(ctx, r.o.runner(), r.yqPath, []string{"eval", selectExpr, r.artifact}, nil, r.stderr)
 	if err != nil {
-		ui.Errorf(r.stderr, "split: failed to select Secret %s/%s", ns, name)
+		ui.ErrorTo(r.stderr, "split: failed to select Secret %s/%s", ns, name)
 		return ErrHandled
 	}
 	// Command-substitution semantics: strip trailing newlines.
@@ -405,10 +405,10 @@ func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
 	// prior falls through to encrypt.
 	if r.encryptOn == "change" && secretUnchanged(ctx, r.o.runner(), r.sopsPath, prior, fresh) {
 		if err := copyPreserving(prior, outfile); err != nil {
-			ui.Errorf(r.stderr, "split: failed to carry forward unchanged Secret %s/%s", ns, name)
+			ui.ErrorTo(r.stderr, "split: failed to carry forward unchanged Secret %s/%s", ns, name)
 			return ErrHandled
 		}
-		ui.Debugf(r.stderr, "split: Secret %s/%s unchanged — kept existing ciphertext (encrypt.on=change)", ns, name)
+		ui.DebugTo(r.stderr, "split: Secret %s/%s unchanged — kept existing ciphertext (encrypt.on=change)", ns, name)
 	} else {
 		encrypt := execx.Cmd{
 			Name: r.sopsPath,
@@ -420,7 +420,7 @@ func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
 			Stdin: strings.NewReader(fresh), Stdout: io.Discard, Stderr: r.stderr,
 		}
 		if err := r.o.runner().Run(ctx, encrypt); err != nil {
-			ui.Errorf(r.stderr, "split: sops encrypt failed for Secret %s/%s", ns, name)
+			ui.ErrorTo(r.stderr, "split: sops encrypt failed for Secret %s/%s", ns, name)
 			return ErrHandled
 		}
 	}
@@ -428,7 +428,7 @@ func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
 	// masked encrypt failure (exit 0, no/plain output) must not reach
 	// the swap.
 	if !fileNonEmpty(outfile) || !fileHasLinePrefix(outfile, "sops:") {
-		ui.Errorf(r.stderr, "split: %s missing or not sops-encrypted — aborting", filepath.Base(outfile))
+		ui.ErrorTo(r.stderr, "split: %s missing or not sops-encrypted — aborting", filepath.Base(outfile))
 		return ErrHandled
 	}
 	return nil
@@ -440,19 +440,19 @@ func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
 func (r *splitRun) verifyStage() error {
 	for _, f := range globSorted(filepath.Join(r.stage, "Secret.*.yaml")) {
 		if !strings.HasSuffix(f, ".sops.yaml") {
-			ui.Errorf(r.stderr, "split: plaintext Secret file(s) present in the staged output — aborting")
+			ui.ErrorTo(r.stderr, "split: plaintext Secret file(s) present in the staged output — aborting")
 			return ErrHandled
 		}
 	}
 	for _, f := range globSorted(filepath.Join(r.stage, "*.yaml")) {
 		raw, err := os.ReadFile(f)
 		if err == nil && bytes.Contains(raw, []byte("${LOK8S_")) {
-			ui.Errorf(r.stderr, "split: unrendered ${LOK8S_*} residue in the staged output — check the envsubst whitelist/env")
+			ui.ErrorTo(r.stderr, "split: unrendered ${LOK8S_*} residue in the staged output — check the envsubst whitelist/env")
 			return ErrHandled
 		}
 	}
 	if err := os.WriteFile(filepath.Join(r.stage, ".gitignore"), []byte(gitignoreContent), 0o600); err != nil {
-		ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 		return ErrHandled
 	}
 	return nil
@@ -474,7 +474,7 @@ func (r *splitRun) verifyStage() error {
 // there is correct.
 func (r *splitRun) swapStage() error {
 	if err := os.MkdirAll(r.outDir, 0o755); err != nil {
-		ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 		return ErrHandled
 	}
 	for _, name := range generatedFiles(r.outDir) {
@@ -497,7 +497,7 @@ func (r *splitRun) swapStage() error {
 			continue
 		}
 		if err := os.Rename(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
-			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
 	}

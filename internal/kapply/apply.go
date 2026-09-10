@@ -227,7 +227,7 @@ func (a *Applier) Apply(ctx context.Context, label, manifest string, kubectlFlag
 		return out, rc
 	}
 
-	ui.Warnf(a.Stderr, "healing blocked objects, then re-applying once")
+	ui.WarnTo(a.Stderr, "healing blocked objects, then re-applying once")
 	if immutable {
 		a.healImmutable(ctx, manifest, out, kubectlFlags)
 	}
@@ -297,9 +297,9 @@ func (a *Applier) confirmHeal() bool {
 		return true
 	}
 	if !a.interactive() {
-		ui.Errorf(a.Stderr, "apply blocked by an unrecoverable state (immutable field / stuck Terminating).")
-		ui.Errorf(a.Stderr, "  re-run with --force-recreate to recreate the affected objects (restarts their pods),")
-		ui.Errorf(a.Stderr, "  or resolve the conflict by hand. Not retrying — that would loop.")
+		ui.ErrorTo(a.Stderr, "apply blocked by an unrecoverable state (immutable field / stuck Terminating).")
+		ui.ErrorTo(a.Stderr, "  re-run with --force-recreate to recreate the affected objects (restarts their pods),")
+		ui.ErrorTo(a.Stderr, "  or resolve the conflict by hand. Not retrying — that would loop.")
 		return false
 	}
 	return a.ask("\033[33m?\033[0m kapply: recreate the blocked object(s) above to recover? this deletes + recreates them (restarts their pods); a one-time fix. [y/N] ")
@@ -312,7 +312,7 @@ func (a *Applier) confirmHeal() bool {
 // a pointed warning per Secret instead of recreating silently.
 func (a *Applier) confirmSecretRecreate(name string) bool {
 	if a.ForceRecreate {
-		ui.Warnf(a.Stderr, "  RE-KEYING sealed Secret/%s (--force-recreate): pods keep the old value until restarted; state encrypted under it may be orphaned", name)
+		ui.WarnTo(a.Stderr, "  RE-KEYING sealed Secret/%s (--force-recreate): pods keep the old value until restarted; state encrypted under it may be orphaned", name)
 		return true
 	}
 	if !a.interactive() {
@@ -416,11 +416,11 @@ func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubec
 				}
 			}
 			if sealed && !a.confirmSecretRecreate(o.name) {
-				ui.Warnf(a.Stderr, "  keeping sealed Secret/%s (re-key declined)", o.name)
+				ui.WarnTo(a.Stderr, "  keeping sealed Secret/%s (re-key declined)", o.name)
 				continue
 			}
 		}
-		ui.Warnf(a.Stderr, "  recreating immutable %s/%s", o.kind, o.name)
+		ui.WarnTo(a.Stderr, "  recreating immutable %s/%s", o.kind, o.name)
 		var sel strings.Builder
 		for _, d := range docs {
 			if d.kind == o.kind && d.name == o.name {
@@ -430,7 +430,7 @@ func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubec
 		}
 		args := append(append([]string{}, kubectlFlags...), "replace", "--force", "-f", "-")
 		if rc := a.kubectlQuiet(ctx, sel.String(), args...); rc != 0 {
-			ui.Warnf(a.Stderr, "  could not recreate %s/%s", o.kind, o.name)
+			ui.WarnTo(a.Stderr, "  could not recreate %s/%s", o.kind, o.name)
 		}
 	}
 }
@@ -450,21 +450,21 @@ func (a *Applier) finalizeNamespace(ctx context.Context, name string, kubectlFla
 		return
 	}
 	if !a.confirmNsFinalize(name) {
-		ui.Warnf(a.Stderr, "  skipped namespace/%s — force-finalize declined (re-apply will retry)", name)
+		ui.WarnTo(a.Stderr, "  skipped namespace/%s — force-finalize declined (re-apply will retry)", name)
 		return
 	}
-	ui.Warnf(a.Stderr, "  force-finalizing stuck-terminating namespace/%s", name)
+	ui.WarnTo(a.Stderr, "  force-finalizing stuck-terminating namespace/%s", name)
 	getArgs := append(append([]string{}, kubectlFlags...), "get", "ns", name, "-o", "json")
 	var nsJSON strings.Builder
 	if err := a.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: getArgs, Stdout: &nsJSON, Stderr: io.Discard}); err != nil {
-		ui.Warnf(a.Stderr, "  could not finalize namespace/%s", name)
+		ui.WarnTo(a.Stderr, "  could not finalize namespace/%s", name)
 		return
 	}
 	payload := deleteSpecFinalizers(nsJSON.String())
 	repArgs := append(append([]string{}, kubectlFlags...),
 		"replace", "--raw", "/api/v1/namespaces/"+name+"/finalize", "-f", "-")
 	if rc := a.kubectlQuiet(ctx, payload, repArgs...); rc != 0 {
-		ui.Warnf(a.Stderr, "  could not finalize namespace/%s", name)
+		ui.WarnTo(a.Stderr, "  could not finalize namespace/%s", name)
 		return
 	}
 	waitN := a.NsWait
@@ -543,14 +543,14 @@ func (a *Applier) healTerminating(ctx context.Context, manifest, out string, kub
 		if strings.TrimSpace(buf.String()) == "" {
 			continue
 		}
-		ui.Warnf(a.Stderr, "  clearing finalizers on stuck-terminating %s/%s", d.kind, d.name)
+		ui.WarnTo(a.Stderr, "  clearing finalizers on stuck-terminating %s/%s", d.kind, d.name)
 		patch := append(append([]string{}, kubectlFlags...), "patch", d.kind, d.name)
 		if d.namespace != "" {
 			patch = append(patch, "-n", d.namespace)
 		}
 		patch = append(patch, "--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
 		if rc := a.kubectlQuiet(ctx, "", patch...); rc != 0 {
-			ui.Warnf(a.Stderr, "  could not clear finalizers on %s/%s", d.kind, d.name)
+			ui.WarnTo(a.Stderr, "  could not clear finalizers on %s/%s", d.kind, d.name)
 		}
 	}
 }

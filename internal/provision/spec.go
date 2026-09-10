@@ -47,7 +47,7 @@ type Spec struct {
 func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, error) {
 	// No active domain → actionable error instead of a cryptic empty path.
 	if domainName == "" {
-		ui.Errorf(stderr, "no active domain — set one with 'lo use <domain>' or pass --domain <domain>")
+		ui.ErrorTo(stderr, "no active domain — set one with 'lo use <domain>' or pass --domain <domain>")
 		return nil, ui.Handled(errors.New("no active domain"))
 	}
 	// Validate domain name to prevent path traversal and injection.
@@ -62,7 +62,7 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 	if fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
 		return &Spec{Domain: domainName, File: filepath.Join(base, "deploy.lok8s.yaml"), Kind: SpecKindDeploy}, nil
 	}
-	ui.Errorf(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/%s/", domainName)
+	ui.ErrorTo(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/%s/", domainName)
 	return nil, ui.Handled(fmt.Errorf("no spec for domain %s", domainName))
 }
 
@@ -74,21 +74,21 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (string, error) {
 	specFile := filepath.Join(p.Clusters, domainName, "deploy.lok8s.yaml")
 	if !fsutil.FileExists(specFile) {
-		ui.Errorf(stderr, "No deploy.lok8s.yaml found for %s", domainName)
+		ui.ErrorTo(stderr, "No deploy.lok8s.yaml found for %s", domainName)
 		return "", ui.Handled(fmt.Errorf("no deploy spec for %s", domainName))
 	}
 	info, _ := readSpecInfo(specFile)
 	ref := info.Spec.ClusterRef.Domain
 	if ref == "" {
-		ui.Errorf(stderr, "deploy.lok8s.yaml for %s missing spec.clusterRef.domain", domainName)
+		ui.ErrorTo(stderr, "deploy.lok8s.yaml for %s missing spec.clusterRef.domain", domainName)
 		return "", ui.Handled(fmt.Errorf("missing clusterRef for %s", domainName))
 	}
 	if info, err := os.Stat(filepath.Join(p.Clusters, ref)); err != nil || !info.IsDir() {
-		ui.Errorf(stderr, "clusterRef domain not found: .lok8s/%s/", ref)
+		ui.ErrorTo(stderr, "clusterRef domain not found: .lok8s/%s/", ref)
 		return "", ui.Handled(fmt.Errorf("clusterRef domain not found: %s", ref))
 	}
 	if !fsutil.FileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {
-		ui.Errorf(stderr, "clusterRef domain %s has no cluster.lok8s.yaml", ref)
+		ui.ErrorTo(stderr, "clusterRef domain %s has no cluster.lok8s.yaml", ref)
 		return "", ui.Handled(fmt.Errorf("clusterRef domain %s has no cluster spec", ref))
 	}
 	return ref, nil
@@ -105,9 +105,9 @@ func ReadKind(clusterYAML string, stderr io.Writer) (string, error) {
 		return kind, nil
 	case errors.Is(err, domainpkg.ErrMalformedDriver):
 		// rc 2 = malformed — NEVER defaulted.
-		ui.Errorf(stderr, "invalid cluster kind in %s (not a bare driver name)", clusterYAML)
+		ui.ErrorTo(stderr, "invalid cluster kind in %s (not a bare driver name)", clusterYAML)
 	default:
-		ui.Errorf(stderr, "cluster spec has no .kind: %s", clusterYAML)
+		ui.ErrorTo(stderr, "cluster spec has no .kind: %s", clusterYAML)
 	}
 	return "", ui.Handled(err)
 }

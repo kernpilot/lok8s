@@ -179,13 +179,13 @@ func (c *Context) Up(ctx context.Context) error {
 	if c.Running(ctx, port) {
 		fmt.Fprintf(c.Out, "Tilt already running on http://localhost:%s — reloading Tiltfile\n", port)
 		if err := c.Reload(ctx, port); err != nil {
-			ui.Warnf(c.ErrOut, "Tiltfile reload trigger failed (Tilt still running on :%s)", port)
+			ui.WarnTo(c.ErrOut, "Tiltfile reload trigger failed (Tilt still running on :%s)", port)
 		}
 		return nil
 	}
 
 	if !c.doctorKind(ctx) {
-		ui.Errorf(c.ErrOut, "Did not recognize local kind environment.")
+		ui.ErrorTo(c.ErrOut, "Did not recognize local kind environment.")
 		return ErrHandled
 	}
 	pid := c.Paths.Base + "/.tilt"
@@ -234,7 +234,7 @@ func (c *Context) startDetached(port string) (int, error) {
 // through to `tilt ci` (tilt's default is 30m).
 func (c *Context) CI(ctx context.Context, timeout string) (int, error) {
 	if !c.doctorKind(ctx) {
-		ui.Errorf(c.ErrOut, "Did not recognize local kind environment.")
+		ui.ErrorTo(c.ErrOut, "Did not recognize local kind environment.")
 		return 1, ErrHandled
 	}
 	port := c.Port()
@@ -420,7 +420,7 @@ func (c *Context) Preflight(ctx context.Context, domainArg, age, crds, crdAllow 
 		if label == "" {
 			label = "unknown"
 		}
-		ui.Warnf(c.ErrOut, "preflight: '%s' uses the '%s' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)", resolved, label)
+		ui.WarnTo(c.ErrOut, "preflight: '%s' uses the '%s' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)", resolved, label)
 		drain()
 		return nil
 	}

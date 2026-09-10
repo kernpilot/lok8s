@@ -105,11 +105,11 @@ func (a *Applier) WaitReady(ctx context.Context, label string, timeoutSec int, m
 				fmt.Fprintf(a.Stdout, "\033[33m⚠\033[0m %s · timed out after %ds, %d not ready: \033[2m%.50s\033[0m\n",
 					label, timeoutSec, len(pending), strings.Join(pending, " "))
 			} else {
-				ui.Warnf(a.Stderr, "%s: timed out after %ds; not ready: %s", label, timeoutSec, strings.Join(pending, " "))
+				ui.WarnTo(a.Stderr, "%s: timed out after %ds; not ready: %s", label, timeoutSec, strings.Join(pending, " "))
 			}
 			return nil
 		}
-		ui.Debugf(a.Stderr, "%s: waiting on %d: %s", label, len(pending), strings.Join(pending, " "))
+		ui.DebugTo(a.Stderr, "%s: waiting on %d: %s", label, len(pending), strings.Join(pending, " "))
 		if err := a.sleep(ctx, a.pollInterval()); err != nil {
 			return err
 		}

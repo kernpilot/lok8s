@@ -50,10 +50,10 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 			errOut, rc := e.restoreApply(ctx, kubeconfig, "", plain)
 			if rc == 0 {
 				applied++
-				ui.Debugf(stderr, "bootstrap: restore.d applied %s (store working copy)", base)
+				ui.DebugTo(stderr, "bootstrap: restore.d applied %s (store working copy)", base)
 				continue
 			}
-			ui.Debugf(stderr, "bootstrap: restore.d %s store-copy apply failed: %s", base, firstLine(errOut))
+			ui.DebugTo(stderr, "bootstrap: restore.d %s store-copy apply failed: %s", base, firstLine(errOut))
 		}
 		// Decrypt and apply as SEPARATE steps with separate stderr: piping
 		// `sops 2>&1 | kubectl` would inject sops warnings into kubectl's
@@ -62,19 +62,19 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 		dec, err := e.sopsDecrypt(f)
 		if err != nil {
 			skipped++
-			ui.Debugf(stderr, "bootstrap: restore.d %s decrypt failed: %s", base, firstLine(err.Error()))
-			ui.Warnf(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
+			ui.DebugTo(stderr, "bootstrap: restore.d %s decrypt failed: %s", base, firstLine(err.Error()))
+			ui.WarnTo(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
 			continue
 		}
 		errOut, rc := e.restoreApply(ctx, kubeconfig, string(dec)+"\n", "-")
 		if rc == 0 {
 			applied++
-			ui.Debugf(stderr, "bootstrap: restore.d applied %s (sops)", base)
+			ui.DebugTo(stderr, "bootstrap: restore.d applied %s (sops)", base)
 		} else {
 			skipped++
 			// First line only — kubectl errors can quote input fragments.
-			ui.Debugf(stderr, "bootstrap: restore.d %s apply failed: %s", base, firstLine(errOut))
-			ui.Warnf(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
+			ui.DebugTo(stderr, "bootstrap: restore.d %s apply failed: %s", base, firstLine(errOut))
+			ui.WarnTo(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
 		}
 	}
 	if applied != 0 || skipped != 0 {

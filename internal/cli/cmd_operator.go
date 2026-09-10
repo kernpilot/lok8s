@@ -47,12 +47,7 @@ func newOperatorCommand(paths *config.Paths) *cobra.Command {
 		Short:        "shell-operator hook implementations (internal; exec'd by operator/hooks/*.sh)",
 		Hidden:       true,
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	for _, h := range operatorHooks {
 		name := h.name
@@ -136,10 +131,6 @@ func runOperatorHook(cmd *cobra.Command, name string, args []string) error {
 	return operatorExit(hook.Trigger(cmd.Context(), events))
 }
 
-// operatorExitProcess is the process exit behind a seam (tests); exitNow
-// drops the per-run temp dirs first.
-var operatorExitProcess = exitNow
-
 // operatorExit maps a hook error to the process outcome: an ExitError
 // whose status is not 1 ends the process with that status (the bash hook's
 // own jq status — shell-operator logs it), everything else is the plain
@@ -150,7 +141,7 @@ func operatorExit(err error) error {
 	}
 	var ee *operator.ExitError
 	if errors.As(err, &ee) && ee.Code != 1 {
-		operatorExitProcess(ee.Code)
+		exitNow(ee.Code)
 		return ErrHandled
 	}
 	if errors.As(err, &ee) || errors.Is(err, operator.ErrHandled) {

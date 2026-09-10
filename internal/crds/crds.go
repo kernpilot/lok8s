@@ -249,14 +249,14 @@ func Check(l Layout, out, stderr io.Writer) error {
 			return err
 		}
 		if !sameBytes(rendered, filepath.Join(l.OutDir, kind+".yaml")) {
-			ui.Errorf(stderr, "  operator/crds/%s.yaml is STALE — run 'lo crds generate'", kind)
+			ui.ErrorTo(stderr, "  operator/crds/%s.yaml is STALE — run 'lo crds generate'", kind)
 			stale = true
 		}
 		// The clusterinventory CRD has a second generated artifact — the
 		// .lok8s mirror the publish path applies on consumer repos. Gate it
 		// too.
 		if kind == "clusterinventory" && !sameBytes(rendered, l.InventoryMirror) {
-			ui.Errorf(stderr, "  %s is STALE — run 'lo crds generate'", l.mirrorRel())
+			ui.ErrorTo(stderr, "  %s is STALE — run 'lo crds generate'", l.mirrorRel())
 			stale = true
 		}
 	}

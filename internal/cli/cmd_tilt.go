@@ -54,9 +54,7 @@ func ambientMainEnv(cmd *cobra.Command, paths *config.Paths) string {
 // applyMainEnv performs the exports themselves — shared with the
 // hand-parsed subcommands, which extract the globals without cobra.
 func applyMainEnv(paths *config.Paths, errOut io.Writer, verbose, forceRecreate, remote bool, domainFlag string, domainChanged bool, clusterFlag string) string {
-	if verbose {
-		os.Setenv("DEBUG", "1")
-	}
+	setDebug(verbose)
 	if forceRecreate {
 		os.Setenv("LOK8S_FORCE_RECREATE", "1")
 	}
@@ -129,12 +127,7 @@ func newTiltCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 	cmd.AddCommand(
 		newTiltUp(paths),

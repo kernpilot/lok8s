@@ -63,7 +63,7 @@ func (l *Linter) Run(domain string) error {
 	l.drift() // warnings only — never bumps the error count
 
 	if errorCount != 0 {
-		ui.Errorf(l.ErrOut, "%d validation error(s)", errorCount)
+		ui.ErrorTo(l.ErrOut, "%d validation error(s)", errorCount)
 		return ErrHandled
 	}
 	return nil
@@ -86,7 +86,7 @@ func (l *Linter) all(domain string) bool {
 	clusterSpec := domainDir + "/cluster.lok8s.yaml"
 	deploySpec := domainDir + "/deploy.lok8s.yaml"
 	if !fsutil.IsRegular(clusterSpec) && !fsutil.IsRegular(deploySpec) {
-		ui.Errorf(l.ErrOut, "  Missing cluster.lok8s.yaml or deploy.lok8s.yaml")
+		ui.ErrorTo(l.ErrOut, "  Missing cluster.lok8s.yaml or deploy.lok8s.yaml")
 		return false
 	}
 
@@ -111,7 +111,7 @@ func (l *Linter) all(domain string) bool {
 	// error(s)" — the exit code was right, but the per-domain line an
 	// operator scans was not.
 	if errs != 0 {
-		ui.Errorf(l.ErrOut, "%d validation error(s)", errs)
+		ui.ErrorTo(l.ErrOut, "%d validation error(s)", errs)
 		return false
 	}
 
@@ -126,15 +126,15 @@ func (l *Linter) schema(domainDir, specFile string) int {
 	errs := 0
 
 	if valueOr(yqsem.Lookup(root, "kind"), "") == "" {
-		ui.Errorf(l.ErrOut, "  Missing required field: kind")
+		ui.ErrorTo(l.ErrOut, "  Missing required field: kind")
 		errs++
 	}
 	if valueOr(yqsem.Lookup(root, "apiVersion"), "") == "" {
-		ui.Errorf(l.ErrOut, "  Missing required field: apiVersion")
+		ui.ErrorTo(l.ErrOut, "  Missing required field: apiVersion")
 		errs++
 	}
 	if valueOr(yqsem.Lookup(root, "metadata", "name"), "") == "" {
-		ui.Errorf(l.ErrOut, "  Missing required field: metadata.name")
+		ui.ErrorTo(l.ErrOut, "  Missing required field: metadata.name")
 		errs++
 	}
 
@@ -145,7 +145,7 @@ func (l *Linter) schema(domainDir, specFile string) int {
 			specRuntime = valueOr(yqsem.Lookup(root, "kind"), "")
 		}
 		if specRuntime == "" || specRuntime == "null" {
-			ui.Warnf(l.ErrOut, "  Missing spec.kind (cluster runtime type)")
+			ui.WarnTo(l.ErrOut, "  Missing spec.kind (cluster runtime type)")
 		}
 	}
 	return errs
@@ -162,7 +162,7 @@ func (l *Linter) clusterref(domainDir, specFile string) int {
 
 	clusterRef := valueOr(yqsem.Lookup(root, "spec", "clusterRef"), "")
 	if clusterRef == "" || clusterRef == "null" {
-		ui.Errorf(l.ErrOut, "  Missing required field: spec.clusterRef")
+		ui.ErrorTo(l.ErrOut, "  Missing required field: spec.clusterRef")
 		errs++
 		return errs
 	}
@@ -170,10 +170,10 @@ func (l *Linter) clusterref(domainDir, specFile string) int {
 	refDomain := valueOr(yqsem.Lookup(root, "spec", "clusterRef", "domain"), "")
 	if refDomain != "" {
 		if !fsutil.DirExists(l.Paths.Clusters + "/" + refDomain) {
-			ui.Errorf(l.ErrOut, "  clusterRef.domain '%s' not found in .lok8s/", refDomain)
+			ui.ErrorTo(l.ErrOut, "  clusterRef.domain '%s' not found in .lok8s/", refDomain)
 			errs++
 		} else if !fsutil.IsRegular(l.Paths.Clusters + "/" + refDomain + "/cluster.lok8s.yaml") {
-			ui.Errorf(l.ErrOut, "  clusterRef.domain '%s' has no cluster.lok8s.yaml", refDomain)
+			ui.ErrorTo(l.ErrOut, "  clusterRef.domain '%s' has no cluster.lok8s.yaml", refDomain)
 			errs++
 		}
 	}
@@ -193,7 +193,7 @@ func (l *Linter) kustomization(domainDir string) int {
 		tdir := targetsDir + "/" + tname + "/"
 		kustfile := tdir + "kustomization.yaml"
 		if !fsutil.IsRegular(kustfile) {
-			ui.Warnf(l.ErrOut, "  Target %s/ missing kustomization.yaml", tname)
+			ui.WarnTo(l.ErrOut, "  Target %s/ missing kustomization.yaml", tname)
 			continue
 		}
 		for _, item := range yqsem.SeqItems(yqsem.Lookup(firstDoc(kustfile), "resources")) {
@@ -210,7 +210,7 @@ func (l *Linter) kustomization(domainDir string) int {
 			}
 			// Resources may be files or directories (bases)
 			if !fsutil.Exists(tdir + res) {
-				ui.Errorf(l.ErrOut, "  Target %s/: kustomization.yaml references missing path: %s", tname, res)
+				ui.ErrorTo(l.ErrOut, "  Target %s/: kustomization.yaml references missing path: %s", tname, res)
 				errs++
 			}
 		}
@@ -234,7 +234,7 @@ func (l *Linter) labels(domainDir string) {
 				continue
 			}
 			if labelsQuery(tdir+mbase) == "0" {
-				ui.Warnf(l.ErrOut, "  %s/%s: missing lok8s.dev/* label", tname, mbase)
+				ui.WarnTo(l.ErrOut, "  %s/%s: missing lok8s.dev/* label", tname, mbase)
 			}
 		}
 	}
@@ -294,7 +294,7 @@ func (l *Linter) secrets(domainDir, domain string) {
 			}
 			raw, err := os.ReadFile(secretsDir + "/" + sbase)
 			if err == nil && secretDataRe.Match(raw) {
-				ui.Warnf(l.ErrOut, "  secrets/%s: appears unencrypted (contains data/stringData)", sbase)
+				ui.WarnTo(l.ErrOut, "  secrets/%s: appears unencrypted (contains data/stringData)", sbase)
 			}
 		}
 	}
@@ -307,7 +307,7 @@ func (l *Linter) secrets(domainDir, domain string) {
 	var buf bytes.Buffer
 	secrets.CheckUnencrypted(ctx.StorePath(), &buf)
 	for _, line := range bufLines(&buf) {
-		ui.Warnf(l.ErrOut, "  %s", line)
+		ui.WarnTo(l.ErrOut, "  %s", line)
 	}
 
 	// Deprecated flat-store shadows: a per-domain secret ALSO present in the
@@ -322,7 +322,7 @@ func (l *Linter) secrets(domainDir, domain string) {
 	buf.Reset()
 	secrets.CheckFlatShadows(flat, domainDir, &buf)
 	for _, line := range bufLines(&buf) {
-		ui.Warnf(l.ErrOut, "  %s", line)
+		ui.WarnTo(l.ErrOut, "  %s", line)
 	}
 }
 
@@ -350,7 +350,7 @@ func (l *Linter) apex() bool {
 			}
 			// a is a strict subdomain of b (a ends with ".b")
 			if strings.HasSuffix(a, "."+b) {
-				ui.Errorf(l.ErrOut, "  cluster '%s' is a subdomain of cluster '%s' — one cluster per plane: express '%s' as a target/HTTPRoute inside clusters/%s/, not a separate cluster.lok8s.yaml (docs/guide/concepts: 'One cluster per plane')", a, b, a, b)
+				ui.ErrorTo(l.ErrOut, "  cluster '%s' is a subdomain of cluster '%s' — one cluster per plane: express '%s' as a target/HTTPRoute inside clusters/%s/, not a separate cluster.lok8s.yaml (docs/guide/concepts: 'One cluster per plane')", a, b, a, b)
 				ok = false
 			}
 		}

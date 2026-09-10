@@ -99,7 +99,7 @@ func (l *Linter) services() bool {
 			continue
 		}
 		if !inList(k, lintServicesTop) {
-			ui.Errorf(l.ErrOut, "  services.yaml: unknown top-level key '%s' — allowed: %s", k, allowedHint(lintServicesTop))
+			ui.ErrorTo(l.ErrOut, "  services.yaml: unknown top-level key '%s' — allowed: %s", k, allowedHint(lintServicesTop))
 			errs++
 		}
 	}
@@ -112,7 +112,7 @@ func (l *Linter) services() bool {
 				continue
 			}
 			if !inList(k, lintServicesRegistry) {
-				ui.Errorf(l.ErrOut, "  services.yaml: unknown key 'registry.%s' — allowed: %s", k, allowedHint(lintServicesRegistry))
+				ui.ErrorTo(l.ErrOut, "  services.yaml: unknown key 'registry.%s' — allowed: %s", k, allowedHint(lintServicesRegistry))
 				errs++
 			}
 		}
@@ -126,13 +126,13 @@ func (l *Linter) services() bool {
 				continue
 			}
 			if !inList(k, lintServicesDefaults) {
-				ui.Errorf(l.ErrOut, "  services.yaml: unknown key 'defaults.%s' — allowed: %s", k, allowedHint(lintServicesDefaults))
+				ui.ErrorTo(l.ErrOut, "  services.yaml: unknown key 'defaults.%s' — allowed: %s", k, allowedHint(lintServicesDefaults))
 				errs++
 			}
 		}
 		df := valueOr(yqsem.Lookup(root, "defaults", "dockerfile"), "")
 		if df != "" && df != "service" && df != "production" {
-			ui.Errorf(l.ErrOut, "  services.yaml: defaults.dockerfile must be 'service' or 'production', got '%s'", df)
+			ui.ErrorTo(l.ErrOut, "  services.yaml: defaults.dockerfile must be 'service' or 'production', got '%s'", df)
 			errs++
 		}
 	}
@@ -150,7 +150,7 @@ func (l *Linter) services() bool {
 				continue
 			}
 			if !inList(k, lintServiceEntry) {
-				ui.Errorf(l.ErrOut, "  services.yaml: unknown key 'services.%s.%s' — allowed: %s", name, k, allowedHint(lintServiceEntry))
+				ui.ErrorTo(l.ErrOut, "  services.yaml: unknown key 'services.%s.%s' — allowed: %s", name, k, allowedHint(lintServiceEntry))
 				errs++
 			}
 		}
@@ -159,7 +159,7 @@ func (l *Linter) services() bool {
 		hasImage := inList("image", entryKeys)
 		hasRegistry := inList("registry", entryKeys)
 		if hasImage && hasRegistry {
-			ui.Errorf(l.ErrOut, "  services.yaml: services.%s: 'image' and 'registry' are mutually exclusive", name)
+			ui.ErrorTo(l.ErrOut, "  services.yaml: services.%s: 'image' and 'registry' are mutually exclusive", name)
 			errs++
 		}
 
@@ -171,7 +171,7 @@ func (l *Linter) services() bool {
 					continue
 				}
 				if !inList(k, lintServiceEntryRegistry) {
-					ui.Errorf(l.ErrOut, "  services.yaml: unknown key 'services.%s.registry.%s' — allowed: %s", name, k, allowedHint(lintServiceEntryRegistry))
+					ui.ErrorTo(l.ErrOut, "  services.yaml: unknown key 'services.%s.registry.%s' — allowed: %s", name, k, allowedHint(lintServiceEntryRegistry))
 					errs++
 				}
 			}
@@ -189,7 +189,7 @@ func (l *Linter) services() bool {
 		fmt.Fprintln(l.Out, "  OK")
 		return true
 	}
-	ui.Errorf(l.ErrOut, "  %d services.yaml/lok8s.yaml validation error(s)", errs)
+	ui.ErrorTo(l.ErrOut, "  %d services.yaml/lok8s.yaml validation error(s)", errs)
 	return false
 }
 
@@ -217,7 +217,7 @@ func (l *Linter) lok8sYAML(name, file string) int {
 			continue
 		}
 		if !inList(k, lintLok8sTop) {
-			ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): unknown key '%s' — allowed: %s", name, k, allowedHint(lintLok8sTop))
+			ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): unknown key '%s' — allowed: %s", name, k, allowedHint(lintLok8sTop))
 			errs++
 		}
 	}
@@ -227,10 +227,10 @@ func (l *Linter) lok8sYAML(name, file string) int {
 
 	// build and components are mutually exclusive; exactly one must be present.
 	if hasBuild && hasComponents {
-		ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): 'build' and 'components' are mutually exclusive", name)
+		ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): 'build' and 'components' are mutually exclusive", name)
 		errs++
 	} else if !hasBuild && !hasComponents {
-		ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): 'build' is required (or use 'components')", name)
+		ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): 'build' is required (or use 'components')", name)
 		errs++
 	}
 
@@ -240,20 +240,20 @@ func (l *Linter) lok8sYAML(name, file string) int {
 		// mikefarah yq emits '!!seq' for lists; the bash tolerates a bare
 		// 'seq' too — moot here, the tag reader always yields the !! form.
 		if normTag(comps) != "!!seq" {
-			ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): 'components' must be a list", name)
+			ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): 'components' must be a list", name)
 			errs++
 		} else {
 			for i, comp := range yqsem.SeqItems(comps) {
 				cname := valueOr(yqsem.Lookup(comp, "name"), "")
 				if cname == "" || cname == "null" {
-					ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): components[%d] is missing required 'name'", name, i)
+					ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): components[%d] is missing required 'name'", name, i)
 					errs++
 					cname = fmt.Sprintf("[%d]", i)
 				}
 				// build required on each component.
 				cbuild := valueOr(yqsem.Lookup(comp, "build"), "")
 				if cbuild == "" || cbuild == "null" {
-					ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): components[%s] is missing required 'build'", name, cname)
+					ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): components[%s] is missing required 'build'", name, cname)
 					errs++
 				}
 				// component entry keys.
@@ -263,7 +263,7 @@ func (l *Linter) lok8sYAML(name, file string) int {
 						continue
 					}
 					if !inList(k, lintLok8sComponent) {
-						ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): components[%s].%s unknown — allowed: %s", name, cname, k, allowedHint(lintLok8sComponent))
+						ui.ErrorTo(l.ErrOut, "  lok8s.yaml (%s): components[%s].%s unknown — allowed: %s", name, cname, k, allowedHint(lintLok8sComponent))
 						errs++
 					}
 				}
@@ -300,7 +300,7 @@ func (l *Linter) drift() {
 	tiltfile := l.Paths.Base + "/Tiltfile"
 	if svcCount > 0 && fsutil.IsRegular(tiltfile) {
 		if raw, err := os.ReadFile(tiltfile); err == nil && driftTiltRe.Match(raw) {
-			ui.Warnf(l.ErrOut, "  Tiltfile: contains docker_build()/k8s_yaml() while services.yaml declares %d service(s) — prefer the 2-line form: load('./.lok8s/tilt/Tiltfile','lok8s'); lok8s()", svcCount)
+			ui.WarnTo(l.ErrOut, "  Tiltfile: contains docker_build()/k8s_yaml() while services.yaml declares %d service(s) — prefer the 2-line form: load('./.lok8s/tilt/Tiltfile','lok8s'); lok8s()", svcCount)
 		}
 	}
 
@@ -314,7 +314,7 @@ func (l *Linter) drift() {
 
 		// (b) redundant per-submodule Tiltfile.
 		if fsutil.IsRegular(sdir + "/Tiltfile") {
-			ui.Warnf(l.ErrOut, "  %s: %s/Tiltfile is redundant — lok8s() reads %s/lok8s.yaml directly (remove the per-service Tiltfile)", name, spath, spath)
+			ui.WarnTo(l.ErrOut, "  %s: %s/Tiltfile is redundant — lok8s() reads %s/lok8s.yaml directly (remove the per-service Tiltfile)", name, spath, spath)
 		}
 
 		// (c) deploy manifests missing the lok8s.dev/name routing label.
@@ -345,7 +345,7 @@ func (l *Linter) drift() {
 				continue
 			}
 			if !grepDirMatches(ddir, `lok8s\.dev/name:[[:space:]]*`+rname+`([[:space:]]|$|")`) {
-				ui.Warnf(l.ErrOut, "  %s: no 'lok8s.dev/name: %s' label found in %s/deploy — lok8s() will silently drop these manifests", name, rname, spath)
+				ui.WarnTo(l.ErrOut, "  %s: no 'lok8s.dev/name: %s' label found in %s/deploy — lok8s() will silently drop these manifests", name, rname, spath)
 			}
 		}
 	}

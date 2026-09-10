@@ -70,7 +70,7 @@ func (d *Driver) DetectProvider(clusterYAML string) (string, error) {
 	if spec.Present("spec", "aws") {
 		return "aws", nil
 	}
-	ui.Errorf(d.stderr(), "No provider found in cluster spec: %s", clusterYAML)
+	ui.ErrorTo(d.stderr(), "No provider found in cluster spec: %s", clusterYAML)
 	return "", ui.Handled(fmt.Errorf("capi: no provider in %s", clusterYAML))
 }
 
@@ -106,12 +106,12 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 	prov := filepath.Join(tmplDir, "providers", "hetzner")
 
 	if info, err := os.Stat(tmplDir); err != nil || !info.IsDir() {
-		ui.Errorf(stderr, "CAPI template directory not found: %s", tmplDir)
+		ui.ErrorTo(stderr, "CAPI template directory not found: %s", tmplDir)
 		return "", ui.Handled(fmt.Errorf("capi: template directory not found: %s", tmplDir))
 	}
 
 	if provider != "hetzner" {
-		ui.Errorf(stderr, "CAPI provider '%s' is not supported yet (only 'hetzner').", provider)
+		ui.ErrorTo(stderr, "CAPI provider '%s' is not supported yet (only 'hetzner').", provider)
 		return "", ui.Handled(fmt.Errorf("capi: provider %q not supported", provider))
 	}
 
@@ -154,7 +154,7 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 	}
 
 	if vars["HCLOUD_SSH_KEY_NAME"] == "" {
-		ui.Errorf(stderr, "spec.provider.config.sshKeyName is required for the hetzner CAPI provider")
+		ui.ErrorTo(stderr, "spec.provider.config.sshKeyName is required for the hetzner CAPI provider")
 		return "", ui.Handled(fmt.Errorf("capi: spec.provider.config.sshKeyName is required"))
 	}
 
@@ -221,7 +221,7 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 	// newlines, then printed it back with one `printf '%s\n'`.
 	rendered := strings.TrimRight(b.String(), "\n")
 	if rendered == "" {
-		ui.Errorf(stderr, "the CAPI manifest stream rendered EMPTY from %s — refusing to continue", tmplDir)
+		ui.ErrorTo(stderr, "the CAPI manifest stream rendered EMPTY from %s — refusing to continue", tmplDir)
 		return "", ui.Handled(fmt.Errorf("capi: manifest stream rendered empty from %s", tmplDir))
 	}
 
@@ -267,7 +267,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 		// bash: `: "${AWS_REGION:?AWS_REGION required for AWS provider}"` —
 		// the ${:?} expansion aborts the shell; here it is a plain error.
 		if os.Getenv("AWS_REGION") == "" {
-			ui.Errorf(stderr, "AWS_REGION required for AWS provider")
+			ui.ErrorTo(stderr, "AWS_REGION required for AWS provider")
 			return ui.Handled(fmt.Errorf("capi: AWS_REGION required for AWS provider"))
 		}
 		createArgs = []string{
@@ -280,7 +280,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 			"--dry-run=client", "-o", "yaml",
 		}
 	default:
-		ui.Errorf(stderr, "Unsupported provider for credentials: %s", provider)
+		ui.ErrorTo(stderr, "Unsupported provider for credentials: %s", provider)
 		return ui.Handled(fmt.Errorf("capi: unsupported provider for credentials: %s", provider))
 	}
 
@@ -316,12 +316,12 @@ func requireCredentials(provider string, stderr io.Writer) error {
 			missing = append(missing, "AWS_SECRET_ACCESS_KEY")
 		}
 	default:
-		ui.Errorf(stderr, "unknown provider '%s' for credential check", provider)
+		ui.ErrorTo(stderr, "unknown provider '%s' for credential check", provider)
 		return ui.Handled(fmt.Errorf("capi: unknown provider %q for credential check", provider))
 	}
 	if len(missing) > 0 {
 		for _, v := range missing {
-			ui.Errorf(stderr, "required environment variable %s is not set", v)
+			ui.ErrorTo(stderr, "required environment variable %s is not set", v)
 		}
 		return ui.Handled(fmt.Errorf("capi: missing credentials: %s", strings.Join(missing, ", ")))
 	}
@@ -341,7 +341,7 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 	}
 	const interval = 10
 
-	ui.Debugf(stderr, "Waiting for CAPI cluster %s to become ready (timeout: %ds)", clusterName, timeoutSeconds)
+	ui.DebugTo(stderr, "Waiting for CAPI cluster %s to become ready (timeout: %ds)", clusterName, timeoutSeconds)
 
 	for elapsed := 0; elapsed < timeoutSeconds; elapsed += interval {
 		var out strings.Builder
@@ -361,18 +361,18 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 			phase = ""
 		}
 		if phase == "Provisioned" {
-			ui.Debugf(stderr, "Cluster %s is Provisioned", clusterName)
+			ui.DebugTo(stderr, "Cluster %s is Provisioned", clusterName)
 			return nil
 		}
 		if phase == "" {
 			phase = "Unknown"
 		}
-		ui.Debugf(stderr, "Cluster %s phase: %s (%d/%ds)", clusterName, phase, elapsed, timeoutSeconds)
+		ui.DebugTo(stderr, "Cluster %s phase: %s (%d/%ds)", clusterName, phase, elapsed, timeoutSeconds)
 		if err := d.sleepSeconds(ctx, interval); err != nil {
 			return err
 		}
 	}
 
-	ui.Errorf(stderr, "Timed out waiting for cluster %s (%ds)", clusterName, timeoutSeconds)
+	ui.ErrorTo(stderr, "Timed out waiting for cluster %s (%ds)", clusterName, timeoutSeconds)
 	return ui.Handled(fmt.Errorf("capi: timed out waiting for cluster %s", clusterName))
 }

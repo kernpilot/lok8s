@@ -60,7 +60,7 @@ func validatePoolName(pool string, stderr io.Writer) bool {
 	if poolNameRe.MatchString(pool) {
 		return true
 	}
-	ui.Errorf(stderr, "Invalid worker pool name: %s (must be alphanumeric with hyphens)", pool)
+	ui.ErrorTo(stderr, "Invalid worker pool name: %s (must be alphanumeric with hyphens)", pool)
 	return false
 }
 

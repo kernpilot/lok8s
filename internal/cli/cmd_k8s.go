@@ -36,12 +36,7 @@ func newK8sCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Hidden:       spec.hidden,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "Invalid command: %s", args[0])
-			}
-			return cmd.Help()
-		},
+		RunE:         argshGroupRunE,
 	}
 
 	// The domain: --domain flag > DOMAIN_NAME > clusters/.active > lok8s.dev
@@ -89,10 +84,10 @@ func newK8sCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				d := resolveDomain(cmd)
 				stderr := cmd.ErrOrStderr()
-				ui.Warnf(stderr, "k8s::platform uses legacy overlay paths; consider migrating to targets/")
+				ui.WarnTo(stderr, "k8s::platform uses legacy overlay paths; consider migrating to targets/")
 				overlay := paths.Base + "/.k8s/overlays/" + d
 				if info, err := os.Stat(overlay); err != nil || !info.IsDir() {
-					ui.Errorf(stderr, "Overlay not found: %s", overlay)
+					ui.ErrorTo(stderr, "Overlay not found: %s", overlay)
 					return ErrHandled
 				}
 				return k8sKustomizeArtifact(cmd.Context(), paths, d, overlay, overlay+"/artifacts", "platform.yaml", stderr)
@@ -116,7 +111,7 @@ func k8sCapi(paths *config.Paths, d, specPath, outPath string, stderr io.Writer)
 		}
 	}
 	if !fsutil.FileExists(specPath) {
-		ui.Errorf(stderr, "Spec not found: %s", specPath)
+		ui.ErrorTo(stderr, "Spec not found: %s", specPath)
 		return ErrHandled
 	}
 	if outPath == "" {
@@ -135,7 +130,7 @@ func k8sCapi(paths *config.Paths, d, specPath, outPath string, stderr io.Writer)
 	if err != nil {
 		return ErrHandled
 	}
-	ui.Debugf(stderr, "Generating CAPI resources for provider: %s", provider)
+	ui.DebugTo(stderr, "Generating CAPI resources for provider: %s", provider)
 	// bash: `capi::generate … > "${out}"` — the redirect truncates the
 	// target before the render runs.
 	f, err := os.Create(outPath)
@@ -157,7 +152,7 @@ func k8sCapi(paths *config.Paths, d, specPath, outPath string, stderr io.Writer)
 	if err := writeKustomizationIfAbsent(filepath.Dir(outPath), filepath.Base(outPath)); err != nil {
 		return err
 	}
-	ui.Debugf(stderr, "Generated CAPI resources: %s", outPath)
+	ui.DebugTo(stderr, "Generated CAPI resources: %s", outPath)
 	return nil
 }
 

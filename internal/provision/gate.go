@@ -109,12 +109,12 @@ func (d *Dispatcher) ConfirmInfra(domainName, clusterYAML, kind, action string) 
 	}
 
 	if !d.interactive() {
-		ui.Errorf(w, "refusing to %s '%s' non-interactively — re-run with --force", action, domainName)
+		ui.ErrorTo(w, "refusing to %s '%s' non-interactively — re-run with --force", action, domainName)
 		return driver.ErrDeclined
 	}
 
 	abort := func() error {
-		ui.Errorf(w, "aborted — '%s' left untouched", domainName)
+		ui.ErrorTo(w, "aborted — '%s' left untouched", domainName)
 		return driver.ErrDeclined
 	}
 	if action == ActionDestroy {

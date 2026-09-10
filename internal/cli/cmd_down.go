@@ -206,12 +206,9 @@ func newCleanCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return argshErrorf(cmd.ErrOrStderr(), "too many arguments: %s", args[0])
-			}
 			d, cluster := ambientMain(cmd, paths)
 			dd := defaultDownDeps(cmd, paths)
 			deps := cleanDeps{
@@ -261,6 +258,6 @@ func runClean(ctx context.Context, deps cleanDeps, domainName, cluster string, a
 	}
 	// Visible, not debug: on a migrated/deleted domain this leaves any
 	// lok8s-registry-* containers behind — say so instead of hiding it.
-	ui.Warnf(deps.stderr, "skipping registry cleanup — domain '%s' is not a Lo cluster (leftover registries: docker rm -f $(docker ps -aq --filter name=-registry-))", domainName)
+	ui.WarnTo(deps.stderr, "skipping registry cleanup — domain '%s' is not a Lo cluster (leftover registries: docker rm -f $(docker ps -aq --filter name=-registry-))", domainName)
 	return nil
 }

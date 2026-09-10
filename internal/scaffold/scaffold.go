@@ -62,7 +62,7 @@ var serviceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 // ValidateName is init::_validate_name.
 func ValidateName(name string, stderr io.Writer) error {
 	if !serviceNameRe.MatchString(name) {
-		ui.Errorf(stderr, "invalid service name: '%s' (must match ^[a-z0-9][a-z0-9._-]*$)", name)
+		ui.ErrorTo(stderr, "invalid service name: '%s' (must match ^[a-z0-9][a-z0-9._-]*$)", name)
 		return ErrHandled
 	}
 	return nil
@@ -83,7 +83,7 @@ func ValidateName(name string, stderr io.Writer) error {
 func ScaffoldLokYAML(path, name string, force bool, out, stderr io.Writer) error {
 	file := path + "/lok8s.yaml"
 	if _, err := os.Stat(file); err == nil && !force {
-		ui.Warnf(stderr, "exists, not overwriting: %s (re-run with --force to replace)", file)
+		ui.WarnTo(stderr, "exists, not overwriting: %s (re-run with --force to replace)", file)
 		return nil
 	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
@@ -151,7 +151,7 @@ func MergeServices(servicesFile, name, path string, out, stderr io.Writer) error
 		if err := os.WriteFile(servicesFile, []byte(servicesTemplate), 0o644); err != nil {
 			return err
 		}
-		ui.Debugf(stderr, "created services.yaml from template: %s", servicesFile)
+		ui.DebugTo(stderr, "created services.yaml from template: %s", servicesFile)
 	}
 	if err := setServicePath(servicesFile, name, path); err != nil {
 		return err
@@ -252,22 +252,22 @@ func EnsureTiltfile(tiltfile string, out, stderr io.Writer) error {
 	}
 	body := string(raw)
 	if strings.Contains(body, "load('./.lok8s/tilt/Tiltfile', 'lok8s')") {
-		ui.Debugf(stderr, "Tiltfile already loads the lok8s extension: %s", tiltfile)
+		ui.DebugTo(stderr, "Tiltfile already loads the lok8s extension: %s", tiltfile)
 		return nil
 	}
 	if dockerBuildRe.MatchString(body) {
-		ui.Warnf(stderr, "Tiltfile %s hardcodes docker_build — NOT overwriting.", tiltfile)
-		ui.Warnf(stderr, "Replace its body with the canonical 2-line form so the lok8s extension owns builds:")
-		ui.Warnf(stderr, "    load('./.lok8s/tilt/Tiltfile', 'lok8s')")
-		ui.Warnf(stderr, "    lok8s()")
+		ui.WarnTo(stderr, "Tiltfile %s hardcodes docker_build — NOT overwriting.", tiltfile)
+		ui.WarnTo(stderr, "Replace its body with the canonical 2-line form so the lok8s extension owns builds:")
+		ui.WarnTo(stderr, "    load('./.lok8s/tilt/Tiltfile', 'lok8s')")
+		ui.WarnTo(stderr, "    lok8s()")
 		return nil
 	}
 	// Exists, no docker_build, but also no extension load — unknown custom
 	// form.
-	ui.Warnf(stderr, "Tiltfile %s exists but does not load the lok8s extension.", tiltfile)
-	ui.Warnf(stderr, "Add the canonical 2-line form so services are picked up:")
-	ui.Warnf(stderr, "    load('./.lok8s/tilt/Tiltfile', 'lok8s')")
-	ui.Warnf(stderr, "    lok8s()")
+	ui.WarnTo(stderr, "Tiltfile %s exists but does not load the lok8s extension.", tiltfile)
+	ui.WarnTo(stderr, "Add the canonical 2-line form so services are picked up:")
+	ui.WarnTo(stderr, "    load('./.lok8s/tilt/Tiltfile', 'lok8s')")
+	ui.WarnTo(stderr, "    lok8s()")
 	return nil
 }
 
@@ -275,7 +275,7 @@ func EnsureTiltfile(tiltfile string, out, stderr io.Writer) error {
 // the project root (PATH_BASE); path defaults to ./<name>.
 func Service(base, name, path string, force bool, out, stderr io.Writer) error {
 	if name == "" {
-		ui.Errorf(stderr, "service name is required: lo init service <name>")
+		ui.ErrorTo(stderr, "service name is required: lo init service <name>")
 		return ErrHandled
 	}
 	if err := ValidateName(name, stderr); err != nil {
@@ -312,14 +312,14 @@ func Service(base, name, path string, force bool, out, stderr io.Writer) error {
 func ScaffoldTests(src fs.FS, dest string, force bool, out, stderr io.Writer) error {
 	if info, err := os.Stat(dest); err == nil {
 		if !info.IsDir() {
-			ui.Errorf(stderr, "destination exists and is not a directory: %s", dest)
+			ui.ErrorTo(stderr, "destination exists and is not a directory: %s", dest)
 			return ErrHandled
 		}
 		// Non-empty (any content counts, dotfiles included) and not forced
 		// -> refuse, to protect an existing suite.
 		entries, _ := os.ReadDir(dest)
 		if len(entries) > 0 && !force {
-			ui.Warnf(stderr, "exists and is not empty, not overwriting: %s (re-run with --force)", dest)
+			ui.WarnTo(stderr, "exists and is not empty, not overwriting: %s (re-run with --force)", dest)
 			return nil
 		}
 	}

@@ -74,7 +74,7 @@ func (c *Context) ServicesRaw(ctx context.Context) ([]byte, error) {
 // and the debug lines (env::kustomization calls it as `env::services
 // 2>/dev/null`, i.e. with a discard writer).
 func (c *Context) servicesYAML(ctx context.Context, onlyServices, onlyRegistry bool, errOut io.Writer) ([]byte, error) {
-	ui.Debugf(errOut, "Print services")
+	ui.DebugTo(errOut, "Print services")
 
 	baseFile := c.Paths.Base + "/services.yaml"
 	if !fsutil.FileExists(baseFile) {
@@ -82,7 +82,7 @@ func (c *Context) servicesYAML(ctx context.Context, onlyServices, onlyRegistry b
 		baseFile = c.Paths.Base + "/services.base.yaml"
 		if !fsutil.FileExists(baseFile) {
 			// No services config at all — return empty YAML.
-			ui.Debugf(errOut, "No services.yaml found; returning empty config")
+			ui.DebugTo(errOut, "No services.yaml found; returning empty config")
 			return []byte("{}\n"), nil
 		}
 	}
@@ -143,7 +143,7 @@ func (c *Context) yq(ctx context.Context, stdin string, errOut io.Writer, args .
 // live as files directly under artifacts/ — see build.Artifacts'
 // pruneStaleArtifactDirs).
 func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
-	ui.Debugf(c.ErrOut, "Generate kustomization.yaml")
+	ui.DebugTo(c.ErrOut, "Generate kustomization.yaml")
 
 	if !noBuild {
 		if err := c.buildArtifacts(ctx); err != nil {
@@ -167,11 +167,13 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	//   endpoint = remote registry target (ghcr.io/org, etc.) — only used
 	//              when pre-pulling a non-built service into the cache.
 	// branch/tag are the path components of both the remote and the cache ref.
-	gPrefix := yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "prefix"), "lok8s.local")
-	gCache := "lok8s.cache"
-	gEndpoint := subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "endpoint"), "${DOCKER_REGISTRY}"))
-	gBranch := subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "branch"), "${DOCKER_PROJECT}"))
-	gTag := subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "tag"), "${DOCKER_TAG}"))
+	reg := imageRegistry{
+		prefix:   yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "prefix"), "lok8s.local"),
+		cache:    "lok8s.cache",
+		endpoint: subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "endpoint"), "${DOCKER_REGISTRY}")),
+		branch:   subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "branch"), "${DOCKER_PROJECT}")),
+		tag:      subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "tag"), "${DOCKER_TAG}")),
+	}
 
 	// Default for the per-service `build:` field. Mirrors Tiltfile resolution:
 	// per-service > defaults.build > true.
@@ -179,9 +181,9 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	// swallows legitimate `false` values. The only reliable way to
 	// distinguish "missing" from "present and false" is `| tostring`,
 	// which emits "null" for missing keys and "false"/"true" for bools.
-	defaultBuild := yqsem.ToString(yqsem.Lookup(&doc, "defaults", "build"))
-	if defaultBuild == "null" {
-		defaultBuild = "true"
+	reg.defaultBuild = yqsem.ToString(yqsem.Lookup(&doc, "defaults", "build"))
+	if reg.defaultBuild == "null" {
+		reg.defaultBuild = "true"
 	}
 
 	// Cache pre-pull queue: services that need a remote image fetched and
@@ -195,8 +197,9 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	if err := os.WriteFile(cacheQueue, nil, 0o644); err != nil {
 		return err
 	}
+	reg.cacheQueue = cacheQueue
 
-	images, err := c.generateImages(&doc, defaultBuild, gPrefix, gCache, gEndpoint, gBranch, gTag, cacheQueue)
+	images, err := c.generateImages(&doc, reg)
 	if err != nil {
 		return err
 	}
@@ -235,14 +238,14 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 		if c.Pull == nil {
 			// Unreachable through the CLI (which always wires Pull); kept for
 			// the bash contract's sake.
-			ui.Errorf(c.ErrOut, "--pull requires the image lib (run via 'lo env kustomization --pull', not by sourcing env standalone)")
+			ui.ErrorTo(c.ErrOut, "--pull requires the image lib (run via 'lo env kustomization --pull', not by sourcing env standalone)")
 			return ErrHandled
 		}
 		if info, err := os.Stat(cacheQueue); err == nil && info.Size() > 0 {
 			raw, _ := os.ReadFile(cacheQueue)
-			ui.Debugf(c.ErrOut, "draining %d cache queue entries", strings.Count(string(raw), "\n"))
+			ui.DebugTo(c.ErrOut, "draining %d cache queue entries", strings.Count(string(raw), "\n"))
 			if err := c.Pull(); err != nil {
-				ui.Errorf(c.ErrOut, "image::cache --all failed; check upstream credentials and network")
+				ui.ErrorTo(c.ErrOut, "image::cache --all failed; check upstream credentials and network")
 				return ErrHandled
 			}
 		}
@@ -263,16 +266,33 @@ func (c *Context) buildArtifacts(ctx context.Context) error {
 	})
 }
 
+// imageRegistry is the global registry config the image override lines
+// derive from (the `registry:` block of the merged services env plus the
+// build default).
+type imageRegistry struct {
+	// prefix is the canonical local image name (lok8s.local). Never remote.
+	prefix string
+	// cache is the on-cluster cache hostname (lok8s.cache).
+	cache string
+	// endpoint, branch, tag are the remote registry target and the path
+	// components of both the remote and the cache ref.
+	endpoint, branch, tag string
+	// defaultBuild is the per-service `build:` default ("true"/"false").
+	defaultBuild string
+	// cacheQueue is the TSV file the pre-pull entries are appended to.
+	cacheQueue string
+}
+
 // generateImages generates the image override lines for kustomization.yaml
 // from the merged services config (bash: env::generate_images). Also writes
 // the cache queue entries as a side effect.
-func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, gEndpoint, gBranch, gTag, cacheQueue string) (string, error) {
+func (c *Context) generateImages(doc *yaml.Node, g imageRegistry) (string, error) {
 	services := yqsem.Lookup(doc, "services")
 	if services == nil || services.Kind != yaml.MappingNode {
 		return "", nil
 	}
 
-	queue, err := os.OpenFile(cacheQueue, os.O_APPEND|os.O_WRONLY, 0o644)
+	queue, err := os.OpenFile(g.cacheQueue, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return "", err
 	}
@@ -297,7 +317,7 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 		// Resolve effective build (per-service > defaults > true).
 		svcBuild := yqsem.ToString(yqsem.MapGet(svcNode, "build"))
 		if svcBuild == "null" {
-			svcBuild = defaultBuild
+			svcBuild = g.defaultBuild
 		}
 
 		// Pinned image (mutually exclusive with registry per validator).
@@ -306,11 +326,11 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 			if strings.Contains(pinned, "@sha256:") {
 				// bash: ${pinned%@*} / ${pinned##*@} — split on the LAST @.
 				at := strings.LastIndex(pinned, "@")
-				fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s\n    digest: \"%s\"\n", gPrefix, svc, pinned[:at], pinned[at+1:])
+				fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s\n    digest: \"%s\"\n", g.prefix, svc, pinned[:at], pinned[at+1:])
 			} else if colon := strings.LastIndex(pinned, ":"); colon >= 0 {
-				fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s\n    newTag: \"%s\"\n", gPrefix, svc, pinned[:colon], pinned[colon+1:])
+				fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s\n    newTag: \"%s\"\n", g.prefix, svc, pinned[:colon], pinned[colon+1:])
 			} else {
-				fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s\n", gPrefix, svc, pinned)
+				fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s\n", g.prefix, svc, pinned)
 			}
 			continue
 		}
@@ -323,9 +343,9 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 		// build:false branch on registry-presence:
 		//   per-service.registry.endpoint > global.registry.endpoint > skip+warn
 		reg := yqsem.MapGet(svcNode, "registry")
-		sEndpoint := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "endpoint"), gEndpoint))
-		sBranch := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "branch"), gBranch))
-		sTag := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "tag"), gTag))
+		sEndpoint := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "endpoint"), g.endpoint))
+		sBranch := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "branch"), g.branch))
+		sTag := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "tag"), g.tag))
 
 		if sEndpoint == "" {
 			fmt.Fprintf(c.ErrOut, "warn: service '%s' has build:false but no registry.endpoint configured — skipping image swap (define registry.endpoint, set image:, or set build:true)\n", svc)
@@ -337,7 +357,7 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 		remoteRef := sEndpoint + "/" + sBranch + "/" + svc + ":" + sTag
 		fmt.Fprintf(queue, "%s\t%s\t%s\t%s\n", svc, remoteRef, sBranch, sTag)
 
-		fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s/%s/%s\n    newTag: \"%s\"\n", gPrefix, svc, gCache, sBranch, svc, sTag)
+		fmt.Fprintf(&out, "  - name: %s/%s\n    newName: %s/%s/%s\n    newTag: \"%s\"\n", g.prefix, svc, g.cache, sBranch, svc, sTag)
 	}
 	// The queue was appended to above; a close error is a lost entry.
 	if err := queue.Close(); err != nil {

@@ -126,7 +126,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		// provider that yields no nodes returns nil with an explicit
 		// "running kind locally" — that intentional fallback is unaffected.)
 		if err := d.provisionRemote(ctx, domain, cy, stderr); err != nil {
-			ui.Errorf(stderr, "remote provision via provider '%s' failed — refusing to fall back to a local kind cluster", d.deps.ProviderName)
+			ui.ErrorTo(stderr, "remote provision via provider '%s' failed — refusing to fall back to a local kind cluster", d.deps.ProviderName)
 			return ui.Handled(fmt.Errorf("remote provision failed: %w", err))
 		}
 	}
@@ -233,7 +233,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion, network, cy string, stdout, stderr io.Writer) error {
 	renderedConfig := d.renderKindConfig(clusterName, k8sVersion, network, cy)
 	if strings.TrimSpace(renderedConfig) == "" {
-		ui.Errorf(stderr, "the kind config for %s rendered EMPTY — refusing to create a cluster from it", clusterName)
+		ui.ErrorTo(stderr, "the kind config for %s rendered EMPTY — refusing to create a cluster from it", clusterName)
 		return ui.Handled(fmt.Errorf("kind config rendered empty for %s", clusterName))
 	}
 	os.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", network)

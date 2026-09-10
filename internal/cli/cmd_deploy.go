@@ -38,15 +38,12 @@ func newDeployCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Short:        spec.short,
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
-		Args:         cobra.ArbitraryArgs,
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stderr := cmd.ErrOrStderr()
 			// No positional in the argsh spec: a stray one is a parse error
 			// there ("too many arguments", rc 2); same message, exit 1.
-			if len(args) > 0 {
-				return argshErrorf(stderr, "too many arguments: %s", args[0])
-			}
 			// The entrypoint's pre-dispatch exports (DEBUG, LOK8S_FORCE_RECREATE,
 			// DOMAIN_NAME, the ambient KUBECONFIG …) — kapply reads
 			// LOK8S_FORCE_RECREATE at construction, so this runs first.

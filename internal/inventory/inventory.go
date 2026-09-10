@@ -136,7 +136,7 @@ func now() string {
 // this function. Errors are printed (bash error()) and returned.
 func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*CR, error) {
 	if !fsutil.FileExists(clusterYAML) {
-		ui.Errorf(stderr, "inventory: cluster spec not found: %s", clusterYAML)
+		ui.ErrorTo(stderr, "inventory: cluster spec not found: %s", clusterYAML)
 		return nil, fmt.Errorf("inventory: cluster spec not found: %s", clusterYAML)
 	}
 
@@ -146,13 +146,13 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 	// identity.
 	kind, err := domain.SpecDriver(clusterYAML, "lo")
 	if err != nil {
-		ui.Errorf(stderr, "inventory: cluster spec declares a malformed kind: %s", clusterYAML)
+		ui.ErrorTo(stderr, "inventory: cluster spec declares a malformed kind: %s", clusterYAML)
 		return nil, fmt.Errorf("inventory: malformed kind in %s: %w", clusterYAML, err)
 	}
 
 	raw, err := os.ReadFile(clusterYAML)
 	if err != nil {
-		ui.Errorf(stderr, "inventory: cluster spec not found: %s", clusterYAML)
+		ui.ErrorTo(stderr, "inventory: cluster spec not found: %s", clusterYAML)
 		return nil, err
 	}
 	var root yaml.Node
@@ -197,7 +197,7 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 			// Say so instead of silently thinning the inventory. Log only the
 			// entry's NAME/key: map-form entries carry inline values/env, which
 			// must not reach (CI-captured) logs from this path.
-			ui.Warnf(stderr, "inventory: skipping unparseable bootstrap entry '%s'", entryKey(e))
+			ui.WarnTo(stderr, "inventory: skipping unparseable bootstrap entry '%s'", entryKey(e))
 			continue
 		}
 		a := Addon{Name: parsed.Name, Source: "target"}
@@ -346,17 +346,17 @@ func Publish(ctx context.Context, p *config.Paths, r execx.Runner, stderr io.Wri
 	// have no inventory of their own — the referenced cluster's inventory is
 	// written when THAT cluster provisions/bootstraps.
 	if !fsutil.FileExists(clusterYAML) {
-		ui.Debugf(stderr, "inventory: no cluster spec at %s — nothing to publish", clusterYAML)
+		ui.DebugTo(stderr, "inventory: no cluster spec at %s — nothing to publish", clusterYAML)
 		return
 	}
 	if !fsutil.FileExists(kubeconfig) {
-		ui.Warnf(stderr, "inventory: kubeconfig not found (%s) — skipping ClusterInventory publish", kubeconfig)
+		ui.WarnTo(stderr, "inventory: kubeconfig not found (%s) — skipping ClusterInventory publish", kubeconfig)
 		return
 	}
 
 	crd, ok := CRDManifest(p)
 	if !ok {
-		ui.Warnf(stderr, "inventory: ClusterInventory CRD manifest not found — skipping publish")
+		ui.WarnTo(stderr, "inventory: ClusterInventory CRD manifest not found — skipping publish")
 		return
 	}
 	quiet := func(stdin string, args ...string) error {
@@ -367,7 +367,7 @@ func Publish(ctx context.Context, p *config.Paths, r execx.Runner, stderr io.Wri
 		return r.Run(ctx, c)
 	}
 	if err := quiet("", "--kubeconfig", kubeconfig, "apply", "--server-side", "--field-manager=lok8s", "-f", crd); err != nil {
-		ui.Warnf(stderr, "inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish")
+		ui.WarnTo(stderr, "inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish")
 		return
 	}
 	// Best-effort: a fresh CRD needs a moment to be Established before its
@@ -376,15 +376,15 @@ func Publish(ctx context.Context, p *config.Paths, r execx.Runner, stderr io.Wri
 
 	cr, err := BuildJSON(p, stderr, domainName, clusterYAML)
 	if err != nil {
-		ui.Warnf(stderr, "inventory: failed to build the ClusterInventory for %s — skipping publish", domainName)
+		ui.WarnTo(stderr, "inventory: failed to build the ClusterInventory for %s — skipping publish", domainName)
 		return
 	}
 	// bash: kubectl … -f - <<< "${cr}" — a here-string appends a newline.
 	if err := quiet(cr+"\n", "--kubeconfig", kubeconfig, "apply", "--server-side", "--field-manager=lok8s", "-f", "-"); err != nil {
-		ui.Warnf(stderr, "inventory: failed to publish the ClusterInventory for %s (provision/deploy unaffected)", domainName)
+		ui.WarnTo(stderr, "inventory: failed to publish the ClusterInventory for %s (provision/deploy unaffected)", domainName)
 		return
 	}
-	ui.Debugf(stderr, "inventory: published ClusterInventory 'cluster' for %s", domainName)
+	ui.DebugTo(stderr, "inventory: published ClusterInventory 'cluster' for %s", domainName)
 }
 
 // PublishHook returns Publish bound to its dependencies, in the shape of

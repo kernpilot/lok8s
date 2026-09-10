@@ -43,10 +43,8 @@ func orchestrateProject(t *testing.T) (*config.Paths, *scriptRunner, *[]int) {
 	}}
 	prevRunner := newRunner
 	newRunner = func(*config.Paths) execx.Runner { return r }
-	exits := &[]int{}
-	prevExit := osExit
-	osExit = func(code int) { *exits = append(*exits, code) }
-	t.Cleanup(func() { newRunner = prevRunner; osExit = prevExit })
+	exits := captureExits(t)
+	t.Cleanup(func() { newRunner = prevRunner })
 
 	t.Setenv("DOMAIN_NAME", "")
 	os.Unsetenv("DOMAIN_NAME")
@@ -212,10 +210,7 @@ func TestNewDispatcherWiresEverySeam(t *testing.T) {
 }
 
 func TestDispatchExitMapping(t *testing.T) {
-	var exits []int
-	prev := osExit
-	osExit = func(code int) { exits = append(exits, code) }
-	t.Cleanup(func() { osExit = prev })
+	exits := captureExits(t)
 	var stderr bytes.Buffer
 
 	if err := dispatchExit(&stderr, nil); err != nil {
@@ -223,8 +218,8 @@ func TestDispatchExitMapping(t *testing.T) {
 	}
 	// An error nobody printed: the mapping prints it as the [error] line
 	// the bash would have shown, then exits 1.
-	if err := dispatchExit(&stderr, errors.New("plain")); !errors.Is(err, ErrHandled) || len(exits) != 0 {
-		t.Errorf("plain: err=%v exits=%v", err, exits)
+	if err := dispatchExit(&stderr, errors.New("plain")); !errors.Is(err, ErrHandled) || len(*exits) != 0 {
+		t.Errorf("plain: err=%v exits=%v", err, *exits)
 	}
 	if got, want := stderr.String(), "\033[0;31m[error]\033[0m plain\n"; got != want {
 		t.Errorf("unprinted error: stderr = %q, want %q", got, want)
@@ -250,15 +245,15 @@ func TestDispatchExitMapping(t *testing.T) {
 	if err := dispatchExit(&stderr, fmt.Errorf("wait: %w", context.Canceled)); !errors.Is(err, ErrHandled) {
 		t.Errorf("cancel: err=%v", err)
 	}
-	if stderr.Len() != 0 || len(exits) != 0 {
-		t.Errorf("printed errors must stay silent: stderr=%q exits=%v", stderr.String(), exits)
+	if stderr.Len() != 0 || len(*exits) != 0 {
+		t.Errorf("printed errors must stay silent: stderr=%q exits=%v", stderr.String(), *exits)
 	}
 
 	dispatchExit(&stderr, driver.ErrDeclined)
 	dispatchExit(&stderr, driver.ErrFullLifecycle)
 	dispatchExit(&stderr, &driver.ExitError{Code: 42})
-	if len(exits) != 3 || exits[0] != 3 || exits[1] != 100 || exits[2] != 42 {
-		t.Errorf("exits = %v", exits)
+	if len(*exits) != 3 || (*exits)[0] != 3 || (*exits)[1] != 100 || (*exits)[2] != 42 {
+		t.Errorf("exits = %v", *exits)
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("rc passthroughs print nothing: %q", stderr.String())

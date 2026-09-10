@@ -86,10 +86,10 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// Render via the canonical khelm path (value-stacking + kustomize build
 	// + envsubst) — the SAME addons.Render the KubeOne driver stages addons
 	// with.
-	ui.Debugf(stderr, "bootstrap: rendering %s", job.Name)
+	ui.DebugTo(stderr, "bootstrap: rendering %s", job.Name)
 	rendered, err := addons.Render(ctx, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env)
 	if err != nil {
-		ui.Errorf(stderr, "bootstrap: render failed for %s", job.Name)
+		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
 		return 1
 	}
 
@@ -107,7 +107,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// "succeeding" and letting the next `lo up` / Tilt loop hit the same
 	// wall.
 	if rc != 0 && (kapply.ImmutableRe.MatchString(out) || kapply.TerminatingRe.MatchString(out)) {
-		ui.Errorf(stderr, "bootstrap: %s has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)", job.Name)
+		ui.ErrorTo(stderr, "bootstrap: %s has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)", job.Name)
 		return 1
 	}
 
@@ -116,12 +116,12 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// CRD/webhook race (retried below). Fail rather than silently
 	// "succeeding".
 	if rc != 0 && !raceRe.MatchString(out) {
-		ui.Errorf(stderr, "bootstrap: %s apply failed (rc=%d) — see above", job.Name, rc)
+		ui.ErrorTo(stderr, "bootstrap: %s apply failed (rc=%d) — see above", job.Name, rc)
 		return 1
 	}
 
 	if raceRe.MatchString(out) {
-		ui.Debugf(stderr, "bootstrap: %s hit a CRD/webhook race — settling deps before retry", job.Name)
+		ui.DebugTo(stderr, "bootstrap: %s hit a CRD/webhook race — settling deps before retry", job.Name)
 		// (1) CRDs must be Established before their CRs resolve.
 		_ = kapply.Run("CRDs established", stdout, stderr, func(o, eo io.Writer) error {
 			return e.Runner.Run(ctx, execx.Cmd{
@@ -155,7 +155,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 			}
 		}
 		if retryRC != 0 || raceRe.MatchString(out) {
-			ui.Errorf(stderr, "bootstrap: %s still failing after %d retries — CRDs/webhook not ready (see above)", job.Name, max)
+			ui.ErrorTo(stderr, "bootstrap: %s still failing after %d retries — CRDs/webhook not ready (see above)", job.Name, max)
 			return 1
 		}
 	}
@@ -166,7 +166,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// serial wait was the whole point of the refactor). Best-effort: a
 	// timeout is a ⚠, not fatal — the caller decides whether to care.
 	if job.WaitFlag != "" {
-		ui.Debugf(stderr, "bootstrap: waiting for %s workloads to become ready", job.Name)
+		ui.DebugTo(stderr, "bootstrap: waiting for %s workloads to become ready", job.Name)
 		_ = applier.WaitReady(ctx, job.Name, 180, rendered, kcFlags...)
 	}
 	return 0

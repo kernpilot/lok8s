@@ -263,7 +263,7 @@ func readRemoteConfig(clusterYAML string, deps remoteDeps, errOut io.Writer) err
 	// expansion on the remote (a '~/x' dest would be taken literally and
 	// fail at runtime).
 	if !syncDestRe.MatchString(syncDest) {
-		ui.Errorf(errOut, "spec.remote.sync.dest must be a plain absolute/relative path ([A-Za-z0-9_./+-], no ~), got: %s", syncDest)
+		ui.ErrorTo(errOut, "spec.remote.sync.dest must be a plain absolute/relative path ([A-Za-z0-9_./+-], no ~), got: %s", syncDest)
 		return ui.Handled(fmt.Errorf("invalid spec.remote.sync.dest: %s", syncDest))
 	}
 
