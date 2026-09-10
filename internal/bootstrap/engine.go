@@ -229,9 +229,20 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// clear of the Let's Encrypt duplicate-cert limit).
 	e.restoreD(ctx, domain, kubeconfig)
 
-	// ── Plan the DAG: parse every entry, resolve edges, detect cycles ──
-	cap_ := maxParallel()
+	nodes, err := e.loadNodes(stderr, domain, kind, entries)
+	if err != nil || len(nodes) == 0 {
+		return err
+	}
+	if err := planDAG(stderr, nodes); err != nil {
+		return err
+	}
+	return e.runDAG(ctx, stderr, nodes, kind, providerName, kubeconfig)
+}
 
+// loadNodes parses every entry and resolves its addon dir (ejecting a
+// framework addon on first use). An empty result (every entry blank) is
+// the "nothing to apply" debug line, like the empty-entries return above.
+func (e *Engine) loadNodes(stderr io.Writer, domain, kind string, entries []string) ([]*node, error) {
 	var nodes []*node
 	for _, entry := range entries {
 		if entry == "" {
@@ -239,7 +250,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		}
 		parsed, err := ParseEntry(e.Paths, stderr, domain, entry)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if parsed.Builtin {
 			// First use of a framework addon: eject it into the project
@@ -249,21 +260,24 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			// explicit `name:` override renames the entry, not the addon).
 			dir, _, err := assets.Resolve(e.Paths, "addons/"+filepath.Base(parsed.Dir))
 			if err != nil {
-				return e.errorf("bootstrap: %v", err)
+				return nil, e.errorf("bootstrap: %v", err)
 			}
 			parsed.Dir = dir
 		}
 		if !fsutil.DirExists(parsed.Dir) {
-			return e.errorf("bootstrap: addon not found: %s (resolved to %s)", entry, parsed.Dir)
+			return nil, e.errorf("bootstrap: addon not found: %s (resolved to %s)", entry, parsed.Dir)
 		}
 		nodes = append(nodes, &node{entry: parsed, deps: map[int]bool{}})
 	}
-	n := len(nodes)
-	if n == 0 {
+	if len(nodes) == 0 {
 		ui.Debugf(stderr, "%s", nothingToApplyDebug(domain, kind))
-		return nil
 	}
+	return nodes, nil
+}
 
+// planDAG resolves the entries' names and edges in place and rejects a
+// cycle (bash: the name index, edge and Kahn blocks of bootstrap::apply).
+func planDAG(stderr io.Writer, nodes []*node) error {
 	// name → indices sharing it (a multimap). Handling depends on WHY it
 	// collides and whether anything references it:
 	//   • an explicit name: on a colliding entry               → hard error
@@ -284,7 +298,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			continue
 		}
 		if share := name2idxs[nd.entry.Name]; len(share) > 1 {
-			return e.errorf("bootstrap: duplicate entry name '%s' — name: must be unique (%d entries share it)", nd.entry.Name, len(share))
+			return planError(stderr, "bootstrap: duplicate entry name '%s' — name: must be unique (%d entries share it)", nd.entry.Name, len(share))
 		}
 	}
 
@@ -298,13 +312,13 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			}
 			cand := name2idxs[dname]
 			if len(cand) == 0 {
-				return e.errorf("bootstrap: '%s': dependsOn: unknown entry '%s'", nd.entry.Name, dname)
+				return planError(stderr, "bootstrap: '%s': dependsOn: unknown entry '%s'", nd.entry.Name, dname)
 			}
 			// A reference that resolves to a COLLIDED name is ambiguous —
 			// error (the warn-only path is reserved for collisions nobody
 			// dependsOn).
 			if len(cand) > 1 {
-				return e.errorf("bootstrap: '%s': dependsOn: ambiguous entry '%s' (%d entries share it — set an explicit name:)", nd.entry.Name, dname, len(cand))
+				return planError(stderr, "bootstrap: '%s': dependsOn: ambiguous entry '%s' (%d entries share it — set an explicit name:)", nd.entry.Name, dname, len(cand))
 			}
 			nd.deps[cand[0]] = true
 		}
@@ -329,7 +343,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 
 	// Derive per-entry effective deps, the dep-target flag, in-degree and
 	// reverse adjacency — used by cycle-check + runner.
-	indeg := make([]int, n)
+	indeg := make([]int, len(nodes))
 	for i, nd := range nodes {
 		for pi := range nd.deps {
 			nd.edeps = append(nd.edeps, pi)
@@ -338,10 +352,14 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			indeg[i]++
 		}
 	}
+	return checkCycle(stderr, nodes, indeg)
+}
 
-	// Cycle detection (Kahn): peel off in-degree-0 nodes; anything left
-	// sits in (or behind) a cycle — which would deadlock the runner. Fail
-	// fast with the offending names.
+// checkCycle is the cycle detection (Kahn): peel off in-degree-0 nodes;
+// anything left sits in (or behind) a cycle — which would deadlock the
+// runner. Fail fast with the offending names.
+func checkCycle(stderr io.Writer, nodes []*node, indeg []int) error {
+	n := len(nodes)
 	kahn := append([]int{}, indeg...)
 	var queue []int
 	for i := range n {
@@ -367,62 +385,66 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 				cyc = append(cyc, nodes[i].entry.Name)
 			}
 		}
-		return e.errorf("bootstrap: dependsOn: cycle detected (%s)", strings.Join(cyc, " "))
+		return planError(stderr, "bootstrap: dependsOn: cycle detected (%s)", strings.Join(cyc, " "))
 	}
+	return nil
+}
 
-	// ── Run the DAG: launch every entry whose deps are done, up to the cap ──
-	// TERMINATION: every iteration either launches an entry, reaps an
-	// in-flight one, resolves the parked set, or (nothing in flight after a
-	// full launch pass, nothing parked) breaks — so it can't hang.
+// planError is Engine.errorf for the plan (no engine state needed).
+func planError(stderr io.Writer, format string, a ...any) error {
+	ui.Errorf(stderr, format, a...)
+	return ui.Handled(fmt.Errorf(format, a...))
+}
+
+// finished is one reaped background apply.
+type finished struct {
+	idx int
+	rc  int
+}
+
+// runDAG launches every entry whose deps are done, up to the cap, and
+// reaps them (bash: the runner loop of bootstrap::apply).
+//
+// TERMINATION: every iteration either launches an entry, reaps an
+// in-flight one, resolves the parked set, or (nothing in flight after a
+// full launch pass, nothing parked) breaks — so it can't hang.
+func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, kind, providerName, kubeconfig string) error {
 	sched := &schedule{nodes: nodes, forceEnv: os.Getenv("LOK8S_FORCE_RECREATE") != ""}
-	type finished struct {
-		idx int
-		rc  int
-	}
-	done := make(chan finished, n)
+	done := make(chan finished, len(nodes))
 	inflight := 0
 	apply := e.applyOneFn()
-	debug := os.Getenv("DEBUG") != ""
+	launch := func(i int) {
+		nd := nodes[i]
+		nd.started = true
+		nd.buf = &bytes.Buffer{}
+		// wait: true GATES run through the SAME background path as
+		// everything else — the barrier is enforced by DAG edges, NOT
+		// by foreground execution. Immutable/terminating heal is
+		// uniform: kapply errors under the non-interactive job, the
+		// reap PARKS the entry, and the drain point batch-heals.
+		job := Job{
+			Name: nd.entry.Name, Dir: nd.entry.Dir, Kind: kind,
+			Provider: providerName, Kubeconfig: kubeconfig,
+			Inline: nd.entry.Inline, WaitFlag: sched.waitFlag(nodes, i),
+			EnvLines: nd.entry.EnvLines, Force: sched.forceEnv,
+			NonInteractive: true,
+		}
+		buf := nd.buf
+		go func() {
+			rc := apply(ctx, job, buf, buf)
+			done <- finished{i, rc}
+		}()
+		inflight++
+	}
 
 	for {
 		// Launch phase: every not-yet-started, not-skipped entry whose
-		// effective deps have all COMPLETED, capped at cap_ concurrent.
-		for i := 0; i < n && inflight < cap_; i++ {
-			nd := nodes[i]
-			if nd.started || nd.skipped {
-				continue
+		// effective deps have all COMPLETED, capped at maxParallel
+		// concurrent.
+		for i := 0; i < len(nodes) && inflight < maxParallel(); i++ {
+			if nodes[i].ready(nodes) {
+				launch(i)
 			}
-			ready := true
-			for _, d := range nd.edeps {
-				if !nodes[d].completed {
-					ready = false
-					break
-				}
-			}
-			if !ready {
-				continue
-			}
-			nd.started = true
-			nd.buf = &bytes.Buffer{}
-			// wait: true GATES run through the SAME background path as
-			// everything else — the barrier is enforced by DAG edges, NOT
-			// by foreground execution. Immutable/terminating heal is
-			// uniform: kapply errors under the non-interactive job, the
-			// reap PARKS the entry, and the drain point batch-heals.
-			job := Job{
-				Name: nd.entry.Name, Dir: nd.entry.Dir, Kind: kind,
-				Provider: providerName, Kubeconfig: kubeconfig,
-				Inline: nd.entry.Inline, WaitFlag: sched.waitFlag(nodes, i),
-				EnvLines: nd.entry.EnvLines, Force: sched.forceEnv,
-				NonInteractive: true,
-			}
-			idx := i
-			buf := nd.buf
-			go func() {
-				rc := apply(ctx, job, buf, buf)
-				done <- finished{idx, rc}
-			}()
-			inflight++
 		}
 
 		// Nothing in flight after a full launch pass → everything left is
@@ -449,59 +471,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			return ctx.Err()
 		}
 		inflight--
-		nd := nodes[f.idx]
-		out := nd.buf.String()
-		// PARK check FIRST. A background kapply runs non-interactive, so on
-		// an immutable/terminating conflict it can't prompt — it errors and
-		// the buffered output names the conflict. Detect that pair and PARK
-		// the entry: record it for the drain-point batch heal and DON'T
-		// complete it / DON'T OR overall rc.
-		if f.rc != 0 && (kapply.ImmutableRe.MatchString(out) || kapply.TerminatingRe.MatchString(out)) {
-			sched.parked = append(sched.parked, f.idx)
-			// Harvest the namespaces this conflict would force-finalize
-			// BEFORE the buffered output is discarded — the drain prompt
-			// has to name them. Same extractor the terminating heal acts
-			// on, so the prompt cannot name a different set than the heal
-			// destroys.
-			for _, ns := range kapply.TerminatingNamespaces(out) {
-				seen := slices.Contains(sched.parkedNS, ns)
-				if !seen {
-					sched.parkedNS = append(sched.parkedNS, ns)
-				}
-			}
-			// Surface the conflict detail NOW (we own the foreground):
-			// parking would otherwise discard the buffered kubectl error,
-			// and on a fail-fast / declined heal the user needs to see
-			// WHICH object/field is blocked to resolve by hand.
-			kapply.RenderCaptured(e.stdout(), nd.entry.Name, 1, strings.NewReader(out))
-			fmt.Fprintf(stderr, "\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n", nd.entry.Name)
-			nd.buf = nil
-			continue
-		}
-		nd.completed = true
-		sched.done++
-		jrc := 0
-		if f.rc != 0 {
-			sched.overallRC = 1
-			jrc = 1
-		}
-		// Flush this entry's buffered output as ONE de-interleaved block,
-		// now that we own the foreground: collapsed on success, errors
-		// surfaced on failure. Under DEBUG (lo -v): honor kapply's "print
-		// everything, don't aggregate" contract — still de-interleaved,
-		// but verbatim.
-		if debug {
-			_, _ = io.Copy(e.stdout(), strings.NewReader(out))
-		} else {
-			kapply.RenderCaptured(e.stdout(), nd.entry.Name, jrc, strings.NewReader(out))
-		}
-		nd.buf = nil
-		// iff this entry FAILED, skip only its transitive dependents (they
-		// would fail behind the broken dep). A failure no longer stops the
-		// world.
-		if jrc != 0 {
-			e.skipDependents(nodes, f.idx)
-		}
+		e.reap(stderr, sched, nodes, f)
 	}
 
 	// Non-zero if anything failed OR was skipped behind a failure; 0 only
@@ -513,6 +483,78 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		return ErrEntriesFailed
 	}
 	return nil
+}
+
+// ready reports a not-yet-started, not-skipped entry whose effective deps
+// have all COMPLETED.
+func (nd *node) ready(nodes []*node) bool {
+	if nd.started || nd.skipped {
+		return false
+	}
+	for _, d := range nd.edeps {
+		if !nodes[d].completed {
+			return false
+		}
+	}
+	return true
+}
+
+// reap accounts one finished background apply: parks it on an
+// immutable/terminating conflict, else completes it and flushes its
+// buffered output, skipping its dependents when it failed.
+func (e *Engine) reap(stderr io.Writer, sched *schedule, nodes []*node, f finished) {
+	nd := nodes[f.idx]
+	out := nd.buf.String()
+	// PARK check FIRST. A background kapply runs non-interactive, so on
+	// an immutable/terminating conflict it can't prompt — it errors and
+	// the buffered output names the conflict. Detect that pair and PARK
+	// the entry: record it for the drain-point batch heal and DON'T
+	// complete it / DON'T OR overall rc.
+	if f.rc != 0 && (kapply.ImmutableRe.MatchString(out) || kapply.TerminatingRe.MatchString(out)) {
+		sched.parked = append(sched.parked, f.idx)
+		// Harvest the namespaces this conflict would force-finalize
+		// BEFORE the buffered output is discarded — the drain prompt
+		// has to name them. Same extractor the terminating heal acts
+		// on, so the prompt cannot name a different set than the heal
+		// destroys.
+		for _, ns := range kapply.TerminatingNamespaces(out) {
+			if !slices.Contains(sched.parkedNS, ns) {
+				sched.parkedNS = append(sched.parkedNS, ns)
+			}
+		}
+		// Surface the conflict detail NOW (we own the foreground):
+		// parking would otherwise discard the buffered kubectl error,
+		// and on a fail-fast / declined heal the user needs to see
+		// WHICH object/field is blocked to resolve by hand.
+		kapply.RenderCaptured(e.stdout(), nd.entry.Name, 1, strings.NewReader(out))
+		fmt.Fprintf(stderr, "\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n", nd.entry.Name)
+		nd.buf = nil
+		return
+	}
+	nd.completed = true
+	sched.done++
+	jrc := 0
+	if f.rc != 0 {
+		sched.overallRC = 1
+		jrc = 1
+	}
+	// Flush this entry's buffered output as ONE de-interleaved block,
+	// now that we own the foreground: collapsed on success, errors
+	// surfaced on failure. Under DEBUG (lo -v): honor kapply's "print
+	// everything, don't aggregate" contract — still de-interleaved,
+	// but verbatim.
+	if os.Getenv("DEBUG") != "" {
+		_, _ = io.Copy(e.stdout(), strings.NewReader(out))
+	} else {
+		kapply.RenderCaptured(e.stdout(), nd.entry.Name, jrc, strings.NewReader(out))
+	}
+	nd.buf = nil
+	// iff this entry FAILED, skip only its transitive dependents (they
+	// would fail behind the broken dep). A failure no longer stops the
+	// world.
+	if jrc != 0 {
+		e.skipDependents(nodes, f.idx)
+	}
 }
 
 // ErrEntriesFailed is Apply's bare non-zero exit (bash: `return 1` at the
