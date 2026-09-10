@@ -21,31 +21,16 @@
 # cluster, opt-in).
 #
 # Usage: hack/parity-orchestrate.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-# The harness must run against its synthetic project ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they silently redirect BOTH implementations into that live repo instead of
-# ${WORK}. KUBECONFIG/creds/CI-ish toggles would change what a child sees.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG \
-  KUBECONFIG KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE LOK8S_REMOTE \
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
+# KUBECONFIG/creds/CI-ish toggles would change what a child sees.
+unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE LOK8S_REMOTE \
   CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD \
   KAPPLY_TTY KAPPLY_POLL_INTERVAL SOURCE_DATE_EPOCH CI TILT_PORT \
   LOK8S_REGISTRY_IP_CACHE LOK8S_REGISTRY_JSON KIND_EXPERIMENTAL_DOCKER_NETWORK \
   KIND_CONFIG KIND_NODE_VERSION LOK8S_BOOTSTRAP_ONLY LOK8S_BOOTSTRAP_PARALLEL \
   KUBEHZ_TOKEN LOK8S_DOMAIN_EXPLICIT
 
-# Pin the C locale: bash glob expansion sorts by LC_COLLATE, and the Go port
-# lists in byte order (= C collation).
-export LC_ALL=C
 # Registry state (durable configs + locks) must land under ${WORK}, never
 # in the operator's real state dir.
 export LO_REGISTRY_STATE_DIR="${WORK}/registry-state"
@@ -67,11 +52,8 @@ export LOK8S_NONINTERACTIVE=1
 # its own gate in internal/driver/lo (TestRegistriesTLSCertMintsInProcess).
 export LO_RENDER=exec
 
-PROJ="${WORK}/proj"
-
 # ── synthetic project ────────────────────────────────────────────────────────
-mkdir -p "${PROJ}/clusters" "${PROJ}/.bin"
-ln -s "${ROOT}/.lok8s" "${PROJ}/.lok8s"
+parity::new_project "${PROJ}"
 printf 'Tiltfile\n' > "${PROJ}/Tiltfile"
 
 # Domains, one per routing axis:
@@ -140,13 +122,9 @@ printf 'kind: Deploy\nspec: {}\n' > "${PROJ}/clusters/delta.app/deploy.lok8s.yam
 printf 'metadata:\n  name: prod\nspec:\n  kubernetes:\n    version: "1.31.0"\n' > "${PROJ}/clusters/nokind.dev/cluster.lok8s.yaml"
 printf 'kind: ../../evil\nmetadata:\n  name: prod\n' > "${PROJ}/clusters/evil.dev/cluster.lok8s.yaml"
 
-# Real toolchain by symlink…
-for entry in "${ROOT}"/.bin/*; do
-  ln -s "${entry}" "${PROJ}/.bin/$(basename "${entry}")"
-done
-# …with every live-state tool REPLACED by a stub (rm the symlink first).
-rm -f "${PROJ}/.bin/tilt" "${PROJ}/.bin/kubectl" "${PROJ}/.bin/docker" "${PROJ}/.bin/kind" "${PROJ}/.bin/kubeone"
-cat > "${PROJ}/.bin/tilt" <<'SH'
+# The project's own .bin, with every live-state tool REPLACED by a stub.
+parity::own_bin "${PROJ}"
+parity::stub "${PROJ}" tilt <<'SH'
 #!/usr/bin/env bash
 # Parity stub. doctor: a kind env; get session: no apiserver; ci: fail 7
 # (the rc-passthrough probe); everything else: succeed silently.
@@ -157,12 +135,8 @@ case "${1:-}" in
 esac
 exit 0
 SH
-cat > "${PROJ}/.bin/kubectl" <<'SH'
-#!/usr/bin/env bash
-# Parity stub: every kubectl fails silently (no live cluster may be reached).
-exit 1
-SH
-cat > "${PROJ}/.bin/kind" <<'SH'
+parity::stub_kubectl_fail "${PROJ}"
+parity::stub "${PROJ}" kind <<'SH'
 #!/usr/bin/env bash
 # Parity stub: ONE synthetic cluster "alpha" exists; delete is a no-op.
 case "${1:-} ${2:-}" in
@@ -172,7 +146,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-cat > "${PROJ}/.bin/docker" <<'SH'
+parity::stub "${PROJ}" docker <<'SH'
 #!/usr/bin/env bash
 # Parity stub: a docker that owns nothing. rm/prune succeed; listings are
 # empty except the cluster's two named volumes; inspects fail (absent).
@@ -185,14 +159,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-cat > "${PROJ}/.bin/kubeone" <<'SH'
-#!/usr/bin/env bash
-echo "parity stub: kubeone must not be reached" >&2
-exit 1
-SH
-chmod +x "${PROJ}/.bin/tilt" "${PROJ}/.bin/kubectl" "${PROJ}/.bin/docker" "${PROJ}/.bin/kind" "${PROJ}/.bin/kubeone"
-
-failures=0
+parity::stub_refuse "${PROJ}" kubeone
 
 # reset_fixtures — the driver REGENERATES clusters/<d>/.registries.json on
 # every read of the network config (registry/up/clean/down paths), so a
@@ -209,85 +176,19 @@ JSON
   rm -rf "${PROJ}/clusters"/*/.containerd "${LO_REGISTRY_STATE_DIR}"
 }
 
-# check <allow-diff-regex|-> <argv...> — run in the project, closed stdin,
-# diff rc/stdout/stderr with the project path normalized.
-# pre_each runs before EACH implementation's run (stateful checks restore
-# the fixtures there — the first implementation's side effects must not
-# leak into what the second one sees).
-pre_each() { :; }
-
-check() {
-  local allow="${1}"; shift
-  local go_rc=0 bash_rc=0
-  pre_each
-  (cd "${PROJ}" && "${LO_BIN}" "$@" </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  pre_each
-  (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" </dev/null >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  sed -i "s|${PROJ}|PROJ|g" "${WORK}/go.out" "${WORK}/go.err" "${WORK}/bash.out" "${WORK}/bash.err"
-
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-    ok=0
-  fi
-  local stream diff_out
-  for stream in out err; do
-    if [[ "${allow}" == "-" ]]; then
-      diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    else
-      diff_out="$(diff <(grep -vE "${allow}" "${WORK}/bash.${stream}") \
-                       <(grep -vE "${allow}" "${WORK}/go.${stream}") || true)"
-    fi
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
-}
-
 # check_parse <argv...> — an argsh PARSE error (stray positional, unknown
 # flag): message identical, but argsh exits 2 where cobra exits 1 — the
 # documented divergence every ported command shares (cmd_deploy.go). Only
 # the rc pair (bash 2, go 1) is tolerated; the streams must still match.
 check_parse() {
-  local go_rc=0 bash_rc=0
-  (cd "${PROJ}" && "${LO_BIN}" "$@" </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" </dev/null >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  local ok=1
-  if ! { (( go_rc == bash_rc )) || (( bash_rc == 2 && go_rc == 1 )); }; then
-    echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-    ok=0
-  fi
-  local stream diff_out
-  for stream in out err; do
-    diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $* (parse error, rc 2→1)"
-  else
-    failures=$((failures + 1))
-  fi
+  parity::run_pair "$@"
+  PARITY_PARSE_RC=1 parity::finish "lo $*" - "lo $* (parse error, rc 2→1)"
 }
 
-# stateful [allow] <argv...> — check with the fixtures restored before each
-# implementation's run.
-stateful() {
-  local allow="${1}"; shift
-  pre_each() { reset_fixtures; }
-  check "${allow}" "$@"
-  pre_each() { :; }
-}
+# stateful [allow] <argv...>: check with the fixtures restored before EACH
+# implementation's run (the first implementation's side effects must not
+# leak into what the second one sees).
+stateful() { PARITY_PRE_EACH=reset_fixtures check "$@"; }
 
 # ── lo status ────────────────────────────────────────────────────────────────
 check - status --domain alpha.dev                  # lo: Running (stub lists alpha), no kubeconfig → no nodes, no targets, tilt not running
@@ -409,8 +310,4 @@ stateful "${KIND_CFG}" up --domain alpha.dev
 stateful "${KIND_CFG}" up --domain shared.dev
 stateful "${KIND_CFG}" up --domain tls.dev
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

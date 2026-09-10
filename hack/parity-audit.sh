@@ -12,30 +12,9 @@
 # normalized to PROJ (some findings embed them).
 #
 # Usage: hack/parity-audit.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-# The harness must run against its synthetic project ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they silently redirect BOTH implementations into that live repo instead of
-# ${WORK}.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG
-
-# Pin the C locale: bash glob/sort ordering is LC_COLLATE-dependent and the Go
-# port walks files in byte order (= C collation).
-export LC_ALL=C
-
-PROJ="${WORK}/proj"
-mkdir -p "${PROJ}/clusters"
-ln -s "${ROOT}/.lok8s" "${PROJ}/.lok8s"
-ln -s "${ROOT}/.bin" "${PROJ}/.bin"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
+parity::new_project "${PROJ}"
 
 # ── clean.dev — kind=lo, everything as shipped (default bootstrap → the real
 # framework cilium addon), supported k8s, https issuer, no targets.
@@ -206,72 +185,30 @@ mkdir -p "${PROJ}/clusters/gamma.app"
 printf 'kind: Deploy\nspec:\n  clusterRef:\n    domain: identity.net\n' \
   > "${PROJ}/clusters/gamma.app/deploy.lok8s.yaml"
 
-failures=0
-
-# check <argv...> — run both implementations, diff rc/stdout/stderr with the
-# project dir normalized to PROJ (findings embed absolute paths).
-check() {
-  local go_rc=0 bash_rc=0
-  (cd "${PROJ}" && "${LO_BIN}" "$@" >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  sed -i "s|${PROJ}|PROJ|g" "${WORK}/go.out" "${WORK}/go.err" "${WORK}/bash.out" "${WORK}/bash.err"
-
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-    ok=0
-  fi
-  local stream diff_out
-  for stream in out err; do
-    diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
-}
-
-# expect_rc <rc> <argv...> — the CONTRACT check on the Go binary alone: parity
-# would also pass if both implementations drifted together, so pin the
-# documented exit codes explicitly.
-expect_rc() {
-  local want="${1}"; shift
-  local rc=0
-  (cd "${PROJ}" && "${LO_BIN}" "$@" >/dev/null 2>&1) || rc=$?
-  if (( rc == want )); then
-    echo "ok: rc ${want}: lo $*"
-  else
-    echo "FAIL: lo $* — rc=${rc}, want ${want}"
-    failures=$((failures + 1))
-  fi
-}
+# Every case diffs rc/stdout/stderr with the project dir normalized to PROJ
+# (findings embed absolute paths); expect_rc pins the exit-code contract on
+# the Go binary alone.
 
 # Every domain × every output mode.
 for d in clean.dev viol.cloud secpol.app identity.net gamma.app; do
-  check audit "${d}"
-  check audit "${d}" --json
-  check audit "${d}" --sarif
+  check - audit "${d}"
+  check - audit "${d}" --json
+  check - audit "${d}" --sarif
 done
 
 # Domain resolution forms + the alias.
-check au viol.cloud
-check audit --domain viol.cloud
-check audit --json viol.cloud
+check - au viol.cloud
+check - audit --domain viol.cloud
+check - audit --json viol.cloud
 printf 'clean.dev\n' > "${PROJ}/clusters/.active"
-check audit                        # bare → active domain
-check audit viol.cloud extra.arg   # extra positionals ignored (argsh array)
+check - audit                        # bare → active domain
+check - audit viol.cloud extra.arg   # extra positionals ignored (argsh array)
 rm -f "${PROJ}/clusters/.active"
-check audit                        # no active → default lok8s.dev (missing → unknown, rc 0)
+check - audit                        # no active → default lok8s.dev (missing → unknown, rc 0)
 
 # Guards.
-check audit '../evil'              # traversal → unknown finding, rc 0
-check audit viol.cloud --json --sarif   # mutually exclusive → error, rc 1
+check - audit '../evil'              # traversal → unknown finding, rc 0
+check - audit viol.cloud --json --sarif   # mutually exclusive → error, rc 1
 
 # Exit-code contract, pinned (fail → 1; warn/unknown-only → 0).
 expect_rc 1 audit viol.cloud
@@ -280,8 +217,4 @@ expect_rc 0 audit gamma.app
 expect_rc 0 audit '../evil'
 expect_rc 1 audit viol.cloud --json --sarif
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

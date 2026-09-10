@@ -16,31 +16,10 @@
 #      driver.
 #
 # Usage: hack/parity-operator.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-for tool in jq yq; do
-  command -v "${tool}" >/dev/null 2>&1 || { echo "error: ${tool} required (the bash hooks use it)" >&2; exit 2; }
-done
-
-WORK="$(mktemp -d)"
-# PARITY_KEEP=1 leaves the work dir behind for a post-mortem.
-if [[ -z "${PARITY_KEEP:-}" ]]; then
-  trap 'rm -rf "${WORK}"' EXIT
-else
-  echo "work dir: ${WORK}"
-fi
-
-# The harness must run against its synthetic layout ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they would redirect the Go runtime's layout resolution (PATH_LOK8S) and
-# the bash libs into that live repo.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_STATE_DIR BINDING_CONTEXT_PATH \
-  KUBECONFIG DEBUG LOK8S_NONINTERACTIVE
-export LC_ALL=C
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
+parity::require_tools jq yq
+unset LOK8S_STATE_DIR BINDING_CONTEXT_PATH KUBECONFIG LOK8S_NONINTERACTIVE
 
 # Hook tree: the frozen bash hooks + the CAPI templates where both
 # implementations look for them (${HOOK_DIR}/capi-templates for bash,
@@ -88,8 +67,6 @@ printf 'apiVersion: v1\nkind: Config\n'
 EOF
 chmod +x "${STUBS}"/*
 export PATH="${STUBS}:${PATH}"
-
-failures=0
 
 # Lines allowed to differ on stderr: the bash `set -u` abort names the
 # script line; a bash `command not found` for a lib function the Go side
@@ -159,7 +136,7 @@ expect_klog() {
   if grep -qF -- "${1}" "${WORK}/go.klog"; then
     echo "ok:   klog has $(printf '%q' "${1}")"
   else
-    echo "FAIL: klog lacks $(printf '%q' "${1}")"; failures=$((failures + 1))
+    fail "klog lacks $(printf '%q' "${1}")"
   fi
 }
 
@@ -177,7 +154,7 @@ for hook in lo-reconcile capi-reconcile capi-status-sync; do
   if [[ "${shim_out}" == "$(cat "${WORK}/go.out")" ]]; then
     echo "ok: ${hook} shim --config == lo operator ${hook} --config"
   else
-    echo "FAIL: ${hook} shim --config differs from the Go binary"; failures=$((failures + 1))
+    fail "${hook} shim --config differs from the Go binary"
   fi
   # trigger without a binding context: exit 1 in both (message allowed to differ)
   check "no BINDING_CONTEXT_PATH" "${hook}" -
@@ -252,12 +229,7 @@ if diff <(grep -v '"gitops":{"provider":"flux"' "${WORK}/go.klog") "${WORK}/bash
   && grep -q 'bootstrapping GitOps (flux) for prod.example.com' "${WORK}/bash.err"; then
   echo "ok: capi-status-sync provisioned + gitops (Go stamps the gitops status; bash lacks the lib)"
 else
-  echo "FAIL: capi-status-sync provisioned + gitops"; diff "${WORK}/bash.klog" "${WORK}/go.klog" | head -20 | sed 's/^/  /' || true
-  failures=$((failures + 1))
+  fail "capi-status-sync provisioned + gitops"; diff "${WORK}/bash.klog" "${WORK}/go.klog" | head -20 | sed 's/^/  /' || true
 fi
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

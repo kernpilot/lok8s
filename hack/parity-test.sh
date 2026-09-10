@@ -8,71 +8,15 @@
 # `lo version` no longer reporting a bash version).
 #
 # Usage: hack/parity-test.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-# The harness must run against its synthetic project ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they silently redirect BOTH implementations — and the secrets section's
-# WRITES — into that live repo instead of ${WORK}.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG
-
-# Pin the C locale: bash glob expansion sorts by LC_COLLATE, and the Go port
-# lists stores in byte order (= C collation). Under e.g. en_US.UTF-8 the two
-# orderings differ for mixed-case names — a cosmetic listing-order divergence
-# this differential harness must not trip over.
-export LC_ALL=C
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
 
 # Synthetic project: three domains covering the driver/deploy/malformed axes.
-mkdir -p "${WORK}/proj/clusters/alpha.dev" "${WORK}/proj/clusters/beta.cloud" "${WORK}/proj/clusters/gamma.app"
-printf 'kind: Lo\nmetadata:\n  name: alpha\n' > "${WORK}/proj/clusters/alpha.dev/cluster.lok8s.yaml"
-printf 'kind: KubeOne\nmetadata:\n  name: beta\n' > "${WORK}/proj/clusters/beta.cloud/cluster.lok8s.yaml"
-printf 'kind: Deploy\nspec:\n  clusterRef:\n    domain: beta.cloud\n' > "${WORK}/proj/clusters/gamma.app/deploy.lok8s.yaml"
-ln -s "${ROOT}/.lok8s" "${WORK}/proj/.lok8s"
-ln -s "${ROOT}/.bin" "${WORK}/proj/.bin"
-
-failures=0
-
-# check <allow-diff-regex|-> <argv...>
-check() {
-  local allow="${1}"; shift
-  local go_rc=0 bash_rc=0
-  (cd "${WORK}/proj" && "${LO_BIN}" "$@" >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  (cd "${WORK}/proj" && LO_IMPL=bash "${LO_BIN}" "$@" >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-    ok=0
-  fi
-  local stream
-  for stream in out err; do
-    local diff_out
-    if [[ "${allow}" == "-" ]]; then
-      diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    else
-      diff_out="$(diff <(grep -vE "${allow}" "${WORK}/bash.${stream}") \
-                       <(grep -vE "${allow}" "${WORK}/go.${stream}") || true)"
-    fi
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
-}
+parity::new_project "${PROJ}"
+mkdir -p "${PROJ}/clusters/alpha.dev" "${PROJ}/clusters/beta.cloud" "${PROJ}/clusters/gamma.app"
+printf 'kind: Lo\nmetadata:\n  name: alpha\n' > "${PROJ}/clusters/alpha.dev/cluster.lok8s.yaml"
+printf 'kind: KubeOne\nmetadata:\n  name: beta\n' > "${PROJ}/clusters/beta.cloud/cluster.lok8s.yaml"
+printf 'kind: Deploy\nspec:\n  clusterRef:\n    domain: beta.cloud\n' > "${PROJ}/clusters/gamma.app/deploy.lok8s.yaml"
 
 # lo use — full surface.
 check - use
@@ -101,50 +45,19 @@ export LOK8S_SSH_KEY="${WORK}/home/key"   # private key (decrypt derivation)
 unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE || true
 
 for impl in go bash; do
+  parity::new_project "${WORK}/sec-${impl}"
   mkdir -p "${WORK}/sec-${impl}/clusters/alpha.dev/secrets"
   printf 'kind: Lo\nmetadata:\n  name: alpha\n' > "${WORK}/sec-${impl}/clusters/alpha.dev/cluster.lok8s.yaml"
-  ln -s "${ROOT}/.lok8s" "${WORK}/sec-${impl}/.lok8s"
-  ln -s "${ROOT}/.bin" "${WORK}/sec-${impl}/.bin"
 done
 
 # sec_check <argv...> — run in both secrets clones, diff rc/stdout/stderr.
 sec_check() {
-  local go_rc=0 bash_rc=0
-  (cd "${WORK}/sec-go" && "${LO_BIN}" "$@" </dev/null >"${WORK}/sgo.out" 2>"${WORK}/sgo.err") || go_rc=$?
-  (cd "${WORK}/sec-bash" && LO_IMPL=bash "${LO_BIN}" "$@" </dev/null >"${WORK}/sbash.out" 2>"${WORK}/sbash.err") || bash_rc=$?
-  sed -i "s|${WORK}/sec-go|PROJ|g" "${WORK}/sgo.out" "${WORK}/sgo.err"
-  sed -i "s|${WORK}/sec-bash|PROJ|g" "${WORK}/sbash.out" "${WORK}/sbash.err"
-
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-    ok=0
-  fi
-  local stream diff_out
-  for stream in out err; do
-    diff_out="$(diff "${WORK}/sbash.${stream}" "${WORK}/sgo.${stream}" || true)"
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
+  PARITY_DIR_GO="${WORK}/sec-go" PARITY_DIR_BASH="${WORK}/sec-bash" check - "$@"
 }
 
 # sec_state <relpath> — the file must be byte-identical across the two clones.
 sec_state() {
-  if diff -q "${WORK}/sec-bash/$1" "${WORK}/sec-go/$1" >/dev/null 2>&1; then
-    echo "ok: state $1"
-  else
-    echo "FAIL: state $1 differs between implementations"
-    diff "${WORK}/sec-bash/$1" "${WORK}/sec-go/$1" | head -10 | sed 's/^/  /' || true
-    failures=$((failures + 1))
-  fi
+  parity::state_same "${WORK}/sec-bash/${1}" "${WORK}/sec-go/${1}" "${1}" || failures=$((failures + 1))
 }
 
 sec_check secrets path
@@ -203,13 +116,8 @@ if (( cross_rc == 0 )) \
   && [[ "$(cat "${WORK}/sec-bash/.secrets/Secret.app.default.JWT_SECRET")" == "s3cr3t2" ]]; then
   echo "ok: secrets cross-decrypt (bash⇄go interoperability)"
 else
-  echo "FAIL: secrets cross-decrypt"
-  failures=$((failures + 1))
+  fail "secrets cross-decrypt"
 fi
 sec_check secrets decrypt                                 # freshness skip → silent
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

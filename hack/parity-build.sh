@@ -19,24 +19,17 @@
 # stderr/behavior).
 #
 # Usage: hack/parity-build.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
 [[ -x "${ROOT}/.bin/kustomize" && -x "${ROOT}/.bin/yq" && -x "${ROOT}/.bin/sops" ]] \
   || { echo "error: pinned toolchain missing under ${ROOT}/.bin (b install)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-PROJ="${WORK}/proj"
 
 # ── env hygiene ──────────────────────────────────────────────────────────────
 # The caller's shell often carries a foreign PATH_BASE / LOK8S_* / DOMAIN_NAME
 # (this repo's memory has the scars) — build parity needs a clean slate plus
 # ONE whitelisted spec var to prove the envsubst pass.
 while read -r v; do unset "${v}"; done < <(compgen -e | grep -E '^(LOK8S|KIND)_' || true)
-unset DOMAIN_NAME KUBECONFIG DEBUG PATH_SECRETS KUSTOMIZE_PLUGIN_HOME || true
+unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME || true
 export PATH_BASE="${PROJ}" PATH_BIN="${PROJ}/.bin" PATH_LOK8S="${PROJ}/.lok8s" PATH_CLUSTERS="${PROJ}/clusters"
 export LOK8S_SPEC_PARITY_VALUE="rendered-ok"
 
@@ -45,9 +38,8 @@ export LOK8S_SPEC_PARITY_VALUE="rendered-ok"
 AGE_KEY="age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj"
 
 # ── synthetic project ────────────────────────────────────────────────────────
+parity::new_project "${PROJ}"
 mkdir -p "${PROJ}/clusters/split.dev" "${PROJ}/clusters/single.dev"
-ln -s "${ROOT}/.lok8s" "${PROJ}/.lok8s"
-ln -s "${ROOT}/.bin" "${PROJ}/.bin"
 echo "split.dev" > "${PROJ}/clusters/.active"
 
 cat > "${PROJ}/clusters/split.dev/cluster.lok8s.yaml" <<EOF
@@ -159,9 +151,6 @@ restore_kustomization() {
 }
 
 # ── runner ───────────────────────────────────────────────────────────────────
-failures=0
-fail() { echo "FAIL: ${*}"; failures=$((failures + 1)); }
-
 capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
   local impl="${1}" sdir="${WORK}/state.${1}"
   rm -rf "${sdir}"
@@ -192,36 +181,19 @@ capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
   done
 }
 
-check() { # <name> <prep-fn> <argv...>
+# check <name> <prep-fn> <argv...>: the prep runs before EACH implementation,
+# the state snapshot after it; streams, rc and the snapshots must match.
+check() {
   local name="${1}" prep="${2}"; shift 2
-  local go_rc=0 bash_rc=0
-
-  "${prep}"
-  (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  capture_state bash
-
-  "${prep}"
-  (cd "${PROJ}" && "${LO_BIN}" "$@" >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  capture_state go
-
+  PARITY_PRE_EACH="${prep}" PARITY_POST_EACH=capture_state parity::run_pair "$@"
   local ok=1
-  if (( go_rc != bash_rc )); then
-    fail "${name} — rc: bash=${bash_rc} go=${go_rc}"; ok=0
-  fi
-  local stream
-  for stream in out err; do
-    if ! diff -q "${WORK}/bash.${stream}" "${WORK}/go.${stream}" >/dev/null; then
-      fail "${name} — std${stream} differs:"
-      diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
+  parity::compare "${name}" - || ok=0
   if ! diff -rq "${WORK}/state.bash" "${WORK}/state.go" >/dev/null 2>&1; then
-    fail "${name} — generated state differs:"
+    echo "FAIL: ${name} — generated state differs:"
     diff -r "${WORK}/state.bash" "${WORK}/state.go" 2>&1 | head -20 | sed 's/^/  /'
     ok=0
   fi
-  (( ok )) && echo "ok: ${name}"
+  parity::record "${ok}" "${name}"
 }
 
 # ── cases ────────────────────────────────────────────────────────────────────
@@ -255,8 +227,4 @@ restore_kustomization
 # does NOT fire here — pre-set local — verified against the bash impl).
 check "unknown domain"                       prep_clean build --domain bogus.dev
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

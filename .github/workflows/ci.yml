@@ -197,7 +197,9 @@ jobs:
         # implementations — stdout, stderr, and exit codes must match — for
         # BOTH builds: bin/lo (core: the exec render, the same pinned
         # kustomize + plugins the bash side runs) and bin/lo-full (the
-        # in-process render). Every harness takes the binary as $1.
+        # in-process render). hack/parity.sh runs all ten harnesses against
+        # the binary it is given, prints one summary line per harness (the
+        # full log of a failing one) and exits non-zero on any failure.
         env:
           # Same as the install step: the bash side must load the native
           # builtin from .bin/argsh.so, exactly like a developer shell.
@@ -209,16 +211,7 @@ jobs:
           # before invoking the binary, so a relative bin/lo would not resolve.
           for lo in "${PWD}/bin/lo" "${PWD}/bin/lo-full"; do
             echo "::group::parity — ${lo} ($("${lo}" --version))"
-            bash hack/parity-test.sh "${lo}"
-            bash hack/parity-build.sh "${lo}"
-            bash hack/parity-configure.sh "${lo}"
-            bash hack/parity-audit.sh "${lo}"
-            bash hack/parity-loop.sh "${lo}"
-            bash hack/parity-leaves.sh "${lo}"
-            bash hack/parity-ops.sh "${lo}"
-            bash hack/parity-kubehz.sh "${lo}"
-            bash hack/parity-operator.sh "${lo}"
-            bash hack/parity-orchestrate.sh "${lo}"
+            bash hack/parity.sh "${lo}"
             echo "::endgroup::"
           done
 

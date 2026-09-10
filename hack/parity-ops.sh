@@ -18,35 +18,17 @@
 # piped "no" / closed stdin; provision is never reached.
 #
 # Usage: hack/parity-ops.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-# The harness must run against its synthetic project ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they silently redirect BOTH implementations into that live repo instead of
-# ${WORK}. KUBECONFIG/creds/CI-ish toggles would change what a child sees.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG \
-  KUBECONFIG KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE LOK8S_REMOTE \
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
+# KUBECONFIG/creds/CI-ish toggles would change what a child sees.
+unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE LOK8S_REMOTE \
   CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD \
   KAPPLY_TTY KAPPLY_POLL_INTERVAL SOURCE_DATE_EPOCH CI
-
-# Pin the C locale: bash glob expansion sorts by LC_COLLATE, and the Go port
-# lists in byte order (= C collation).
-export LC_ALL=C
-
-PROJ="${WORK}/proj"
 
 # ── synthetic project ────────────────────────────────────────────────────────
 # .lok8s is a REAL dir of symlinks so `providers/` can carry the mock; .bin
 # likewise so kubectl can be the stub.
-mkdir -p "${PROJ}/clusters" "${PROJ}/.lok8s/providers" "${PROJ}/.bin"
+mkdir -p "${PROJ}/clusters" "${PROJ}/.lok8s/providers"
 for entry in "${ROOT}"/.lok8s/* "${ROOT}"/.lok8s/.[!.]*; do
   [[ -e "${entry}" ]] || continue
   name="$(basename "${entry}")"
@@ -56,11 +38,8 @@ done
 for entry in "${ROOT}"/.lok8s/providers/*; do
   ln -s "${entry}" "${PROJ}/.lok8s/providers/$(basename "${entry}")"
 done
-for entry in "${ROOT}"/.bin/*; do
-  ln -s "${entry}" "${PROJ}/.bin/$(basename "${entry}")"
-done
-rm -f "${PROJ}/.bin/kubectl"
-cat > "${PROJ}/.bin/kubectl" <<'SH'
+parity::own_bin "${PROJ}"
+parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
 # Parity stub kubectl: no live cluster may be reached.
 #   apply  — consume the manifest; succeed (server-side verbs per kind) unless
@@ -84,7 +63,6 @@ case "${*}" in
 esac
 exit 0
 SH
-chmod +x "${PROJ}/.bin/kubectl"
 
 mkdir -p "${PROJ}/.lok8s/providers/mock"
 cat > "${PROJ}/.lok8s/providers/mock/main" <<'SH'
@@ -160,50 +138,20 @@ YAML
 artifact_empty() { printf '# just a comment\n---\n' > "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
 artifact_none()  { rm -f "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
 
-failures=0
-
 # check <stdin|-> <argv...> — run both impls in the shared project, diff.
+# The recover phase timer prints wall-clock seconds; a run that straddles a
+# second boundary differs by one — normalize before diffing. argsh exits 2 on
+# its own parse errors ("Error: too many arguments: …") where the Go binary
+# exits 1 with the identical message (cli.argshErrorf): tolerated when the
+# bash stderr carries that line (PARITY_PARSE_RC=auto).
+parity_normalize() {
+  sed -i -E 's/took [0-9]+m [0-9]+s/took Nm Ns/; s/DONE in [0-9]+m [0-9]+s/DONE in Nm Ns/; s/=[0-9]+m[0-9]+s/=NmNs/g' "$@"
+}
 check() {
   local stdin="${1}"; shift
-  local go_rc=0 bash_rc=0
-  if [[ "${stdin}" == "-" ]]; then
-    (cd "${PROJ}" && "${LO_BIN}" "$@" </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-    (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" </dev/null >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  else
-    (cd "${PROJ}" && "${LO_BIN}" "$@" <<<"${stdin}" >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-    (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" <<<"${stdin}" >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  fi
-  sed -i "s|${PROJ}|PROJ|g" "${WORK}/go.out" "${WORK}/go.err" "${WORK}/bash.out" "${WORK}/bash.err"
-
-  # The recover phase timer prints wall-clock seconds; a run that straddles a
-  # second boundary differs by one — normalize before diffing.
-  sed -i -E 's/took [0-9]+m [0-9]+s/took Nm Ns/; s/DONE in [0-9]+m [0-9]+s/DONE in Nm Ns/; s/=[0-9]+m[0-9]+s/=NmNs/g' "${WORK}"/go.out "${WORK}"/go.err "${WORK}"/bash.out "${WORK}"/bash.err
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    # The one documented rc divergence: argsh exits 2 on its own parse
-    # errors ("Error: too many arguments: …"), the Go binary exits 1 with the
-    # identical message (cli.argshErrorf; same as every ported command).
-    if (( bash_rc == 2 && go_rc == 1 )) && grep -q '^Error: ' "${WORK}/bash.err"; then
-      :
-    else
-      echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-      ok=0
-    fi
-  fi
-  local stream diff_out
-  for stream in out err; do
-    diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
+  [[ "${stdin}" != "-" ]] || stdin=""
+  PARITY_STDIN="${stdin}" parity::run_pair "$@"
+  PARITY_PARSE_RC=auto parity::finish "lo $*"
 }
 
 # ── lo deploy ────────────────────────────────────────────────────────────────
@@ -284,12 +232,8 @@ for impl_dir in mock.cloud nope.dom; do
   if [[ -d "${PROJ}/clusters/${impl_dir}/.provider" ]]; then
     echo "ok: workdir clusters/${impl_dir}/.provider"
   else
-    echo "FAIL: workdir clusters/${impl_dir}/.provider missing"; failures=$((failures + 1))
+    fail "workdir clusters/${impl_dir}/.provider missing"
   fi
 done
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

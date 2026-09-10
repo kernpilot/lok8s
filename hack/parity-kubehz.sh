@@ -32,37 +32,18 @@
 #     case.
 #
 # Usage: hack/parity-kubehz.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-# The harness must run against its synthetic project ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they silently redirect BOTH implementations into that live repo instead of
-# ${WORK}. The kubehz tokens are unset so no path can reach a real api.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG \
-  KUBECONFIG KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE \
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
+# The kubehz tokens are unset so no path can reach a real api.
+unset KUBECONFIG KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE \
   KUBEHZ_HANDOVER_K8S_DIR KUBEHZ_HANDOVER_ETCD_DIR KUBEHZ_HANDOVER_ETCD_IMAGE_TAG
-
-# Pin the C locale: bash glob expansion sorts by LC_COLLATE, and the Go port
-# lists in byte order (= C collation).
-export LC_ALL=C
 
 # Isolated HOME so neither implementation can find a real ~/.kube/config.
 export HOME="${WORK}/home"
 mkdir -p "${HOME}"
 
-PROJ="${WORK}/proj"
 CL="${PROJ}/clusters"
-mkdir -p "${CL}"
-ln -s "${ROOT}/.lok8s" "${PROJ}/.lok8s"
-ln -s "${ROOT}/.bin" "${PROJ}/.bin"
+parity::new_project "${PROJ}"
 echo "alpha.dev" > "${CL}/.active"
 
 # ── Synthetic domains ────────────────────────────────────────────────────────
@@ -184,49 +165,8 @@ for k in ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key encry
 done
 printf 'not an archive\n' > "${WORK}/notarchive"
 
-failures=0
-
-# check <allow-diff-regex|-> <argv...>
-check() {
-  local allow="${1}"; shift
-  local go_rc=0 bash_rc=0
-  (cd "${PROJ}" && "${LO_BIN}" "$@" </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  (cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" "$@" </dev/null >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  sed -i "s|${WORK}|WORK|g" "${WORK}/go.out" "${WORK}/go.err" "${WORK}/bash.out" "${WORK}/bash.err"
-
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    # Parse errors: argsh exits 2, the Go binary 1 (cli-wide convention).
-    if [[ "${PARSE_CASE:-0}" == 1 && ${bash_rc} -eq 2 && ${go_rc} -eq 1 ]]; then
-      :
-    else
-      echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-      ok=0
-    fi
-  fi
-  local stream diff_out
-  for stream in out err; do
-    if [[ "${allow}" == "-" ]]; then
-      diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    else
-      diff_out="$(diff <(grep -vE "${allow}" "${WORK}/bash.${stream}") \
-                       <(grep -vE "${allow}" "${WORK}/go.${stream}") || true)"
-    fi
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
-}
-
 # check_parse — an argsh parse error (rc 2 there, rc 1 here; message equal).
-check_parse() { PARSE_CASE=1 check "$@"; }
+check_parse() { PARITY_PARSE_RC=1 check "$@"; }
 
 UNBOUND='LOK8S_SPEC_FILE: unbound variable'
 PARSEERR='bad file|cannot parse cluster spec'
@@ -306,8 +246,4 @@ check_parse - kubehz bogus
 check_parse - kubehz node bogus
 check_parse - kubehz handover bogus
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report

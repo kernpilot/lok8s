@@ -15,125 +15,22 @@
 # clusters` (read-only) on a name that does not exist.
 #
 # Usage: hack/parity-leaves.sh [path-to-go-lo]   (default: bin/lo)
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LO_BIN="${1:-${ROOT}/bin/lo}"
-[[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-# The harness must run against its synthetic projects ONLY. Dev shells export
-# PATH_BASE and friends pointing at a real lok8s project (direnv); inherited,
-# they silently redirect BOTH implementations — and this harness's WRITES
-# (init scaffolds, crds generate, ai link) — into that live repo.
-unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
-  DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG \
-  LO_CHAT_CONFIG
-
-# Pin the C locale: bash glob expansion sorts by LC_COLLATE, and the Go port
-# lists directories in byte order (= C collation).
-export LC_ALL=C
-
-failures=0
+source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
+parity::init "${1:-}"
+unset LO_CHAT_CONFIG
 
 # run_pair <dir-go> <dir-bash> <argv...> — run both implementations in their
 # own project dir, diff rc/stdout/stderr with the work dir normalized.
-run_pair() {
-  local dgo="${1}" dbash="${2}"; shift 2
-  local go_rc=0 bash_rc=0
-  (cd "${dgo}" && "${LO_BIN}" "$@" </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || go_rc=$?
-  (cd "${dbash}" && LO_IMPL=bash "${LO_BIN}" "$@" </dev/null >"${WORK}/bash.out" 2>"${WORK}/bash.err") || bash_rc=$?
-  sed -i "s|${dgo}|PROJ|g" "${WORK}/go.out" "${WORK}/go.err"
-  sed -i "s|${dbash}|PROJ|g" "${WORK}/bash.out" "${WORK}/bash.err"
-
-  local ok=1
-  if (( go_rc != bash_rc )); then
-    echo "FAIL: lo $* — rc: bash=${bash_rc} go=${go_rc}"
-    ok=0
-  fi
-  local stream diff_out
-  for stream in out err; do
-    diff_out="$(diff "${WORK}/bash.${stream}" "${WORK}/go.${stream}" || true)"
-    if [[ -n "${diff_out}" ]]; then
-      echo "FAIL: lo $* — std${stream} differs:"
-      echo "${diff_out}" | head -20 | sed 's/^/  /'
-      ok=0
-    fi
-  done
-  if (( ok )); then
-    echo "ok: lo $*"
-  else
-    failures=$((failures + 1))
-  fi
-}
-
-# tree_check <dir-go> <dir-bash> <label> — every file under the two clones
-# (symlinked framework/toolchain dirs excluded) must be byte-identical, and
-# the file LISTS must match. Symlinks are compared by target.
-tree_check() {
-  local dgo="${1}" dbash="${2}" label="${3}"
-  local list_go list_bash
-  list_go="$(cd "${dgo}" && find . -path ./.lok8s -prune -o -path ./.bin -prune -o \( -type f -o -type l \) -print | sort)"
-  list_bash="$(cd "${dbash}" && find . -path ./.lok8s -prune -o -path ./.bin -prune -o \( -type f -o -type l \) -print | sort)"
-  if [[ "${list_go}" != "${list_bash}" ]]; then
-    echo "FAIL: tree ${label} — file lists differ:"
-    diff <(echo "${list_bash}") <(echo "${list_go}") | head -20 | sed 's/^/  /' || true
-    failures=$((failures + 1))
-    return
-  fi
-  local f bad=0
-  while IFS= read -r f; do
-    [[ -n "${f}" ]] || continue
-    if [[ -L "${dgo}/${f}" || -L "${dbash}/${f}" ]]; then
-      local tgo tbash
-      tgo="$(readlink "${dgo}/${f}" | sed "s|${dgo}|PROJ|")"
-      tbash="$(readlink "${dbash}/${f}" | sed "s|${dbash}|PROJ|")"
-      if [[ "${tgo}" != "${tbash}" ]]; then
-        echo "FAIL: tree ${label} — symlink ${f}: bash=${tbash} go=${tgo}"
-        bad=1
-      fi
-    elif ! cmp -s "${dbash}/${f}" "${dgo}/${f}"; then
-      echo "FAIL: tree ${label} — ${f} differs between implementations:"
-      diff "${dbash}/${f}" "${dgo}/${f}" | head -10 | sed 's/^/  /' || true
-      bad=1
-    fi
-  done <<< "${list_go}"
-  if (( bad )); then
-    failures=$((failures + 1))
-  else
-    echo "ok: tree ${label} ($(echo "${list_go}" | grep -c . ) files identical)"
-  fi
-}
+run_pair() { PARITY_DIR_GO="${1}" PARITY_DIR_BASH="${2}" check - "${@:3}"; }
 
 # expect_rc <rc> <dir> <argv...> — the CONTRACT check on the Go binary alone
 # (argsh usage errors exit 2 in bash; the Go tree exits 1 — the documented
 # use/version precedent — so those cases are pinned here, not diffed).
-expect_rc() {
-  local want="${1}" dir="${2}"; shift 2
-  local rc=0
-  (cd "${dir}" && "${LO_BIN}" "$@" </dev/null >/dev/null 2>&1) || rc=$?
-  if (( rc == want )); then
-    echo "ok: rc ${want}: lo $*"
-  else
-    echo "FAIL: lo $* — rc=${rc}, want ${want}"
-    failures=$((failures + 1))
-  fi
-}
+expect_rc() { PARITY_DIR="${2}" parity::expect_rc "${1}" "${@:3}"; }
 
 # new_project <dir> [copy-lok8s] — a synthetic project: framework tree +
 # toolchain linked (or the framework COPIED when the section writes into it).
-new_project() {
-  local dir="${1}" copy="${2:-0}"
-  mkdir -p "${dir}/clusters"
-  if (( copy )); then
-    cp -R "${ROOT}/.lok8s" "${dir}/.lok8s"
-  else
-    ln -s "${ROOT}/.lok8s" "${dir}/.lok8s"
-  fi
-  ln -s "${ROOT}/.bin" "${dir}/.bin"
-}
+new_project() { parity::new_project "$@"; }
 
 # ── lo init ──────────────────────────────────────────────────────────────────
 # Scaffolds into the project (services.yaml, Tiltfile, ./<svc>/lok8s.yaml,
@@ -328,11 +225,9 @@ fi
 # The project gets its own .bin (toolchain by symlink, mkcert replaced); the
 # Go side resolves .bin first, the bash side gets it through the shim's PATH.
 TR="${WORK}/trust"
-mkdir -p "${TR}/clusters" "${TR}/.bin"
-ln -s "${ROOT}/.lok8s" "${TR}/.lok8s"
-for entry in "${ROOT}"/.bin/*; do ln -s "${entry}" "${TR}/.bin/$(basename "${entry}")"; done
-rm -f "${TR}/.bin/mkcert"
-cat > "${TR}/.bin/mkcert" <<'SH'
+new_project "${TR}"
+parity::own_bin "${TR}"
+parity::stub "${TR}" mkcert <<'SH'
 #!/usr/bin/env bash
 # Parity stub: never touches a trust store.
 case "${1:-}" in
@@ -341,7 +236,6 @@ case "${1:-}" in
   *)        echo "parity stub: unexpected mkcert ${*}" >&2; exit 1 ;;
 esac
 SH
-chmod +x "${TR}/.bin/mkcert"
 run_pair "${TR}" "${TR}" trust
 expect_rc 1 "${TR}" trust extra                                 # no positionals (argsh: 2)
 
@@ -358,8 +252,4 @@ run_pair "${KU}" "${KU}" ku l
 expect_rc 1 "${KU}" kustomize bogus
 expect_rc 0 "${KU}" kustomize                                   # group help: cobra vs argsh usage (D2), rc only
 
-if (( failures )); then
-  echo; echo "${failures} parity failure(s)"
-  exit 1
-fi
-echo; echo "parity: all checks passed"
+report
