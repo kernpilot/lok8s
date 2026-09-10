@@ -96,7 +96,7 @@ func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps,
 			return tiltRun(err)
 		}
 		if rc != 0 {
-			osExit(rc)
+			exitNow(rc)
 			return ErrHandled
 		}
 		return nil

@@ -46,8 +46,10 @@ import (
 // fake; nothing under test may reach docker/kind/tilt).
 var newRunner = execx.NewRunner
 
-// osExit is the process-exit seam for the rc passthroughs (a gate decline's
-// 3, `tilt ci`'s own status, a subprocess code).
+// osExit is the process-exit seam behind exitNow (exit.go). Tests swap it;
+// production code calls exitNow, never osExit, so the per-run temp dirs are
+// dropped on every passthrough (a gate decline's 3, `tilt ci`'s own status,
+// a subprocess code).
 var osExit = os.Exit
 
 // ambientMain replays the entrypoint's pre-dispatch exports (ambientMainEnv)
@@ -182,7 +184,7 @@ func dispatchExit(stderr io.Writer, err error) error {
 		return nil
 	}
 	if rc := driver.ExitCode(err); rc != 1 {
-		osExit(rc)
+		exitNow(rc)
 		return ErrHandled
 	}
 	if !errors.Is(err, ErrHandled) && !isChildExit(err) {
