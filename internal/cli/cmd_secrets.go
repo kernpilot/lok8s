@@ -106,15 +106,15 @@ func specClusterName(specPath string) string {
 }
 
 // secretsArgs returns an argsh-shaped arity validator, shared by every leaf
-// that mirrors an argsh `:args` spec: at least min positionals (naming the
-// first missing one) and at most max.
-func secretsArgs(min, max int, names ...string) cobra.PositionalArgs {
+// that mirrors an argsh `:args` spec: at least minArgs positionals (naming
+// the first missing one) and at most maxArgs.
+func secretsArgs(minArgs, maxArgs int, names ...string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
-		if len(args) < min {
+		if len(args) < minArgs {
 			return argshErrorf(cmd.ErrOrStderr(), "missing required argument: %s", names[len(args)])
 		}
-		if len(args) > max {
-			return argshErrorf(cmd.ErrOrStderr(), "unexpected argument: %s", args[max])
+		if len(args) > maxArgs {
+			return argshErrorf(cmd.ErrOrStderr(), "unexpected argument: %s", args[maxArgs])
 		}
 		return nil
 	}

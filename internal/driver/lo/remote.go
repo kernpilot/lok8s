@@ -203,8 +203,17 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 
 	// Run lo provision on the remote VM (without --remote).
 	ui.DebugTo(errOut, "starting lo provision on %s", remote)
-	provisionCmd := fmt.Sprintf("cd '%s' &&     export DOMAIN_NAME='%s' &&     export PATH_BASE='%s' &&     export PATH_LOK8S='%s/.lok8s' &&     export PATH_CLUSTERS='%s/clusters' &&     export PATH_BIN='%s/.bin' &&     export KUSTOMIZE_PLUGIN_HOME='%s/.kustomize' &&     export PATH=\"%s/.lok8s:%s/.bin:${PATH}\" &&     .lok8s/lo provision --domain '%s'",
-		dest, domain, dest, dest, dest, dest, dest, dest, dest, domain)
+	provisionCmd := remoteShell(
+		"cd '"+dest+"'",
+		"export DOMAIN_NAME='"+domain+"'",
+		"export PATH_BASE='"+dest+"'",
+		"export PATH_LOK8S='"+dest+"/.lok8s'",
+		"export PATH_CLUSTERS='"+dest+"/clusters'",
+		"export PATH_BIN='"+dest+"/.bin'",
+		"export KUSTOMIZE_PLUGIN_HOME='"+dest+"/.kustomize'",
+		`export PATH="`+dest+`/.lok8s:`+dest+`/.bin:${PATH}"`,
+		".lok8s/lo provision --domain '"+domain+"'",
+	)
 	if err := d.runOut(ctx, out, errOut, "ssh", remote, provisionCmd); err != nil {
 		ui.ErrorTo(errOut, "remote lo provision failed")
 		return ui.Handled(fmt.Errorf("remote lo provision failed: %w", err))
@@ -213,8 +222,14 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	// Start Tilt if enabled.
 	if getenv("LOK8S_REMOTE_TILT") == "true" {
 		ui.DebugTo(errOut, "starting Tilt on %s", remote)
-		tiltCmd := fmt.Sprintf("cd '%s' &&     export DOMAIN_NAME='%s' &&     export PATH_BASE='%s' &&     export PATH_LOK8S='%s/.lok8s' &&     export PATH_CLUSTERS='%s/clusters' &&     nohup .lok8s/lo tilt up > /tmp/lok8s-tilt.log 2>&1 &",
-			dest, domain, dest, dest, dest)
+		tiltCmd := remoteShell(
+			"cd '"+dest+"'",
+			"export DOMAIN_NAME='"+domain+"'",
+			"export PATH_BASE='"+dest+"'",
+			"export PATH_LOK8S='"+dest+"/.lok8s'",
+			"export PATH_CLUSTERS='"+dest+"/clusters'",
+			"nohup .lok8s/lo tilt up > /tmp/lok8s-tilt.log 2>&1 &",
+		)
 		if err := d.runOut(ctx, out, errOut, "ssh", remote, tiltCmd); err != nil {
 			ui.WarnTo(errOut, "remote Tilt start failed — cluster is provisioned but Tilt isn't running")
 		}
@@ -264,3 +279,8 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	fmt.Fprintf(out, "   Sync:       rsync -az %s %s:%s/\n", syncSrc, remote, dest)
 	return nil
 }
+
+// remoteShell joins the steps of a remote command with the `&&` chain the
+// bash sent over ssh, five-space indent included (the multi-line string
+// it built), so the argv stays byte-identical.
+func remoteShell(steps ...string) string { return strings.Join(steps, " &&     ") }

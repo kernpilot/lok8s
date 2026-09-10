@@ -36,9 +36,15 @@ type Job struct {
 	Kubeconfig string
 	// Inline is the merged inline helm values ("" when none).
 	Inline string
-	// WaitFlag is non-empty ("wait") when the scheduler wants the post-apply
-	// readiness wait: a dep-target or a wait-gate. A pure leaf gets "".
-	WaitFlag string
+	// Wait is set when the scheduler wants the post-apply readiness wait:
+	// a dep-target or a wait-gate. A pure leaf runs without it.
+	Wait bool
+	// Hosted marks a hosted cluster: the platform owns the CNI and the
+	// cloud integration, so those addons are skipped.
+	Hosted bool
+	// BootstrapOnly is LOK8S_BOOTSTRAP_ONLY=1: the KubeOne driver did not
+	// apply cilium/ccm on this run, so the engine reconciles them.
+	BootstrapOnly bool
 	// EnvLines is the newline-separated KEY=value envsubst overrides.
 	EnvLines string
 	// Force re-applies under LOK8S_FORCE_RECREATE=1 semantics (the
@@ -76,12 +82,6 @@ type Engine struct {
 	// SopsDecrypt decrypts one restore.d/*.sops.yaml in memory (nil → the
 	// secrets package's sops library decrypt — NEVER a sops|kubectl pipe).
 	SopsDecrypt func(path string) ([]byte, error)
-
-	// hosted/bootstrapOnly are resolved per Apply run (also settable
-	// directly when tests drive applyOne standalone, mirroring the bats
-	// exports of LOK8S_BOOTSTRAP_HOSTED / LOK8S_BOOTSTRAP_ONLY).
-	Hosted        bool
-	BootstrapOnly string
 }
 
 func (e *Engine) stdout() io.Writer {
@@ -180,18 +180,23 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// Detect driver kind and provider for default policy + values resolution.
 	kind := specDriverOrEmpty(clusterYAML)
 	providerName, hosting := readProviderHosting(clusterYAML)
-	e.Hosted = hosting == "hosted"
 
 	// LOK8S_BOOTSTRAP_ONLY gates the KubeOne cilium/ccm skip in applyOne.
 	// Both entry points set it EXPLICITLY before calling us; the default
 	// here is a pure safety floor for a direct caller that sets nothing:
 	// 0 (defer to the driver) so it can never trigger a spurious re-apply
 	// that races `kubeone apply` for SSA field ownership.
-	e.BootstrapOnly = os.Getenv("LOK8S_BOOTSTRAP_ONLY")
-	if e.BootstrapOnly == "" {
-		e.BootstrapOnly = "0"
+	bootstrapOnly := os.Getenv("LOK8S_BOOTSTRAP_ONLY")
+	if bootstrapOnly == "" {
+		bootstrapOnly = "0"
 	}
-	os.Setenv("LOK8S_BOOTSTRAP_ONLY", e.BootstrapOnly)
+	os.Setenv("LOK8S_BOOTSTRAP_ONLY", bootstrapOnly)
+	// base is what every Job of this run shares; the launch sites add the
+	// entry's own fields.
+	base := Job{
+		Kind: kind, Provider: providerName, Kubeconfig: kubeconfig,
+		Hosted: hosting == "hosted", BootstrapOnly: bootstrapOnly == "1",
+	}
 
 	entries, err := ResolveEntries(clusterYAML, kind)
 	if err != nil {
@@ -207,7 +212,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// entries must not probe the cluster at all. Both skip WITHOUT failing
 	// the provision (the cluster itself is fine); re-running later is
 	// idempotent.
-	if e.Hosted {
+	if base.Hosted {
 		proceed, err := e.hostedGate(ctx, domain, kubeconfig)
 		if err != nil || !proceed {
 			return err
@@ -236,7 +241,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	if err := planDAG(stderr, nodes); err != nil {
 		return err
 	}
-	return e.runDAG(ctx, stderr, nodes, kind, providerName, kubeconfig)
+	return e.runDAG(ctx, stderr, nodes, base)
 }
 
 // loadNodes parses every entry and resolves its addon dir (ejecting a
@@ -408,7 +413,7 @@ type finished struct {
 // TERMINATION: every iteration either launches an entry, reaps an
 // in-flight one, resolves the parked set, or (nothing in flight after a
 // full launch pass, nothing parked) breaks — so it can't hang.
-func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, kind, providerName, kubeconfig string) error {
+func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, base Job) error {
 	sched := &schedule{nodes: nodes, forceEnv: os.Getenv("LOK8S_FORCE_RECREATE") != ""}
 	done := make(chan finished, len(nodes))
 	inflight := 0
@@ -422,13 +427,10 @@ func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, ki
 		// by foreground execution. Immutable/terminating heal is
 		// uniform: kapply errors under the non-interactive job, the
 		// reap PARKS the entry, and the drain point batch-heals.
-		job := Job{
-			Name: nd.entry.Name, Dir: nd.entry.Dir, Kind: kind,
-			Provider: providerName, Kubeconfig: kubeconfig,
-			Inline: nd.entry.Inline, WaitFlag: sched.waitFlag(nodes, i),
-			EnvLines: nd.entry.EnvLines, Force: sched.forceEnv,
-			NonInteractive: true,
-		}
+		job := base
+		job.Name, job.Dir, job.Inline, job.EnvLines = nd.entry.Name, nd.entry.Dir, nd.entry.Inline, nd.entry.EnvLines
+		job.Wait = sched.wait(nodes, i)
+		job.Force, job.NonInteractive = sched.forceEnv, true
 		buf := nd.buf
 		go func() {
 			rc := apply(ctx, job, buf, buf)
@@ -457,7 +459,7 @@ func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, ki
 			if len(sched.parked) == 0 {
 				break
 			}
-			e.resolveParked(ctx, sched, nodes, kind, providerName, kubeconfig)
+			e.resolveParked(ctx, sched, nodes, base)
 			continue
 		}
 
@@ -572,14 +574,11 @@ type schedule struct {
 	forceEnv  bool
 }
 
-// waitFlag: readiness wait IFF something needs this entry Ready — a
-// dep-target or a wait-gate. A pure leaf passes "" → applyOne skips
+// wait: readiness wait IFF something needs this entry Ready — a
+// dep-target or a wait-gate. A pure leaf gets false → applyOne skips
 // WaitReady (the point of the scheduler refactor).
-func (s *schedule) waitFlag(nodes []*node, i int) string {
-	if nodes[i].isTarget || nodes[i].entry.Wait {
-		return "wait"
-	}
-	return ""
+func (s *schedule) wait(nodes []*node, i int) bool {
+	return nodes[i].isTarget || nodes[i].entry.Wait
 }
 
 // skipDependents BFSes the reverse-adjacency (parent → children) from the
@@ -690,7 +689,7 @@ func RecreatePrompt(count int, list string, stuckNS []string) string {
 // recreates the blocked object; each is then marked completed (unblocking
 // dependents on the next launch pass) or, on failure, fails + skips its
 // dependents.
-func (e *Engine) resolveParked(ctx context.Context, s *schedule, nodes []*node, kind, providerName, kubeconfig string) {
+func (e *Engine) resolveParked(ctx context.Context, s *schedule, nodes []*node, base Job) {
 	parked := s.parked
 	stuckNS := s.parkedNS
 	s.parked = nil
@@ -711,19 +710,13 @@ func (e *Engine) resolveParked(ctx context.Context, s *schedule, nodes []*node, 
 	apply := e.applyOneFn()
 	for _, pi := range parked {
 		nd := nodes[pi]
-		// Same readiness rule as the launch loop: wait IFF a dep-target or
-		// a wait-gate.
-		wflag := ""
-		if nd.isTarget || nd.entry.Wait {
-			wflag = "wait"
-		}
 		if accept {
-			job := Job{
-				Name: nd.entry.Name, Dir: nd.entry.Dir, Kind: kind,
-				Provider: providerName, Kubeconfig: kubeconfig,
-				Inline: nd.entry.Inline, WaitFlag: wflag,
-				EnvLines: nd.entry.EnvLines, Force: true,
-			}
+			job := base
+			job.Name, job.Dir, job.Inline, job.EnvLines = nd.entry.Name, nd.entry.Dir, nd.entry.Inline, nd.entry.EnvLines
+			// Same readiness rule as the launch loop: wait IFF a dep-target
+			// or a wait-gate.
+			job.Wait = nd.isTarget || nd.entry.Wait
+			job.Force = true
 			rc := apply(ctx, job, e.stdout(), e.stderr())
 			nd.completed = true
 			s.done++

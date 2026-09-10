@@ -246,6 +246,32 @@ func TestHealLatchUpRestartsKubeletOnly(t *testing.T) {
 	}
 }
 
+func TestHealNonIPAddressNeverReachesTheNode(t *testing.T) {
+	// The docker inspect answer is spliced into the repair script. A value
+	// that is not an IP address must not be written anywhere.
+	h := newHealFixture(t)
+	orig := h.runner.handler
+	h.runner.handler = func(c execx.Cmd) error {
+		if c.Name == "docker" && len(c.Args) > 1 && c.Args[0] == "inspect" && c.Args[1] == "bad" {
+			writeOut(c, "10.9.0.3'; touch /tmp/pwned; echo '\n")
+			return nil
+		}
+		return orig(c)
+	}
+	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if h.called("repair:bad") {
+		t.Fatal("a non-IP docker answer was spliced into the repair script")
+	}
+	if !strings.Contains(readFileT(t, h.flagPath("bad")), "--node-ip=172.31.0.2") {
+		t.Fatal("kubeadm-flags.env was rewritten with a non-IP value")
+	}
+	if !strings.Contains(h.errBuf.String(), "not an IP address") {
+		t.Fatalf("the skip must be reported:\n%s", h.errBuf.String())
+	}
+}
+
 func TestHealDualStackWarnedNeverRewritten(t *testing.T) {
 	// --node-ip=v4,v6 is a deliberate config, not the drift this heals. A
 	// naive rewrite would silently drop the v6 half and break dual-stack

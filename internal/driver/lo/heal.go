@@ -37,6 +37,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
 	"strings"
 
@@ -64,6 +65,12 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 		want, _ := d.output(ctx, "docker", "inspect", node,
 			"--format", fmt.Sprintf(`{{with index .NetworkSettings.Networks "%s"}}{{.IPAddress}}{{end}}`, network))
 		if want == "" {
+			continue
+		}
+		// The address is spliced into the repair script (sed, printf), so
+		// only a real IP may reach the node.
+		if net.ParseIP(want) == nil {
+			ui.WarnTo(errOut, "lo: %s: docker reports %q on %s, not an IP address — not healing", node, want, network)
 			continue
 		}
 

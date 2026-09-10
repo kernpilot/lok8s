@@ -11,7 +11,7 @@ import (
 
 func entriesFor(t *testing.T, a *Auditor, spec, kind string) []bootstrapEntry {
 	t.Helper()
-	specFile := filepath.Join(a.Clusters, "d.dev", "cluster.lok8s.yaml")
+	specFile := filepath.Join(a.Paths.Clusters, "d.dev", "cluster.lok8s.yaml")
 	writeFileT(t, specFile, spec)
 	var out []bootstrapEntry
 	for _, n := range resolveBootstrapEntries(specFile, kind) {
@@ -37,18 +37,18 @@ spec:
 	// A bare name resolves through the asset resolver: the fixture holds no
 	// cilium, so the embedded copy (read-only, temp dir — the audit never
 	// ejects) is what the check reads.
-	if filepath.Base(entries[0].dir) != "cilium" || !fsutil.DirExists(entries[0].dir) || strings.HasPrefix(entries[0].dir, a.Lok8s) {
+	if filepath.Base(entries[0].dir) != "cilium" || !fsutil.DirExists(entries[0].dir) || strings.HasPrefix(entries[0].dir, a.Paths.Lok8s) {
 		t.Errorf("bare name dir = %s (want the embedded copy)", entries[0].dir)
 	}
-	if fsutil.DirExists(a.Lok8s + "/addons/cilium") {
+	if fsutil.DirExists(a.Paths.Lok8s + "/addons/cilium") {
 		t.Error("the audit ejected cilium into the project")
 	}
-	if entries[1].dir != a.Clusters+"/d.dev/./targets/x" {
+	if entries[1].dir != a.Paths.Clusters+"/d.dev/./targets/x" {
 		t.Errorf("relative dir = %s (must resolve against the cluster dir, uncleaned)", entries[1].dir)
 	}
 	// Absolute entries CONCATENATE onto the base — the bash
 	// `${PATH_BASE}${_raw}` contract, not filepath.Join.
-	if entries[2].dir != a.Base+"/abs/y" {
+	if entries[2].dir != a.Paths.Base+"/abs/y" {
 		t.Errorf("absolute dir = %s", entries[2].dir)
 	}
 }
@@ -56,9 +56,9 @@ spec:
 // A local copy of a shipped addon wins over the embedded one.
 func TestBootstrapEntryLocalCopyWins(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "kind: ChartRenderer\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "kind: ChartRenderer\n")
 	entries := entriesFor(t, a, "kind: Lo\nspec:\n  bootstrap:\n    - cilium\n", "lo")
-	if len(entries) != 1 || entries[0].dir != a.Lok8s+"/addons/cilium" {
+	if len(entries) != 1 || entries[0].dir != a.Paths.Lok8s+"/addons/cilium" {
 		t.Errorf("local copy did not win: %+v", entries)
 	}
 }
@@ -97,7 +97,7 @@ spec:
 func TestBootstrapNewSchemaValues(t *testing.T) {
 	a := newFixtureAuditor(t)
 	// values: against a chart addon works…
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
 	entries := entriesFor(t, a, `kind: Lo
 spec:
   bootstrap:
@@ -118,7 +118,7 @@ func TestBootstrapValuesOnKustomizeTargetSkipped(t *testing.T) {
 	a := newFixtureAuditor(t)
 	// The dir EXISTS but has no chart.yaml → `values:` is helm-only → the
 	// entry errors in bash and is SKIPPED by the audit's `|| continue`.
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "kustomization.yaml"), "resources: []\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "kustomization.yaml"), "resources: []\n")
 	entries := entriesFor(t, a, `kind: Lo
 spec:
   bootstrap:
@@ -133,8 +133,8 @@ spec:
 
 func TestBootstrapValueFilesMerge(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
-	writeFileT(t, filepath.Join(a.Clusters, "d.dev", "vf.yaml"), "policyAuditMode: true\nkeep: 1\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Clusters, "d.dev", "vf.yaml"), "policyAuditMode: true\nkeep: 1\n")
 	entries := entriesFor(t, a, `kind: Lo
 spec:
   bootstrap:
@@ -158,7 +158,7 @@ spec:
 
 func TestBootstrapValueFilesMissingFileSkips(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
 	entries := entriesFor(t, a, `kind: Lo
 spec:
   bootstrap:
@@ -173,7 +173,7 @@ spec:
 
 func TestBootstrapValidationRejects(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
 	cases := []struct{ name, entry string }{
 		{"non-map non-null value", "    - cilium: true\n"},
 		{"non-boolean wait", "    - cilium:\n        wait: yes\n"},
@@ -199,7 +199,7 @@ func TestBootstrapValidationRejects(t *testing.T) {
 
 func TestBootstrapWaitStringTrueAccepted(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
 	// Preserved quirk: a QUOTED "true" renders "true" and passes the bash
 	// string compare even though the schema says boolean.
 	entries := entriesFor(t, a, "kind: Lo\nspec:\n  bootstrap:\n    - cilium:\n        wait: \"true\"\n", "lo")
@@ -212,7 +212,7 @@ func TestInlineIncludedGate(t *testing.T) {
 	a := newFixtureAuditor(t)
 	// values: "" and values: null render "" / "null" → excluded; {} → "{}"
 	// → included (the bash `-n && != null` gate on the rendered string).
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
 	empty := entriesFor(t, a, "kind: Lo\nspec:\n  bootstrap:\n    - cilium:\n        values: \"\"\n", "lo")
 	if len(empty) != 1 || empty[0].inlineInclude {
 		t.Errorf("empty-string values must not join the stack: %+v", empty)

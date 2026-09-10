@@ -28,7 +28,7 @@ var raceRe = regexp.MustCompile(`ensure CRDs are installed first|failed calling 
 // bootstrap::_apply_one): the hosted platform-owned skip, the KubeOne
 // cilium/ccm skip, addons.Render (value-stacking + kustomize build +
 // envsubst), the kapply apply, the immutable/terminating fail-fast, the
-// CRD/webhook race-retry (the 6-retry class), and — only when job.WaitFlag
+// CRD/webhook race-retry (the 6-retry class), and — only when job.Wait
 // is non-empty — the post-apply WaitReady. Returns 0 on success, 1 on an
 // unrecoverable render/apply error.
 //
@@ -58,7 +58,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// our own copy would fight the platform for ownership of the datapath.
 	// The list lives in PlatformOwned — one place to extend.
 	adBase := filepath.Base(job.Dir)
-	if e.Hosted {
+	if job.Hosted {
 		if slices.Contains(PlatformOwned, adBase) {
 			fmt.Fprintf(stderr, "[bootstrap] %s is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping\n", adBase)
 			return 0
@@ -78,7 +78,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// Keyed on the addon DIRECTORY basename: a `name:` override changes
 	// job.Name, not job.Dir, so a renamed cilium/ccm can't defeat the skip
 	// and double-apply the driver's own.
-	if job.Kind == "kubeone" && e.BootstrapOnly != "1" && (adBase == "cilium" || adBase == "ccm") {
+	if job.Kind == "kubeone" && !job.BootstrapOnly && (adBase == "cilium" || adBase == "ccm") {
 		fmt.Fprintf(stderr, "[bootstrap] %s is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)\n", adBase)
 		return 0
 	}
@@ -138,11 +138,11 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 		_ = applier.WaitReady(ctx, job.Name, 120, rendered, kcFlags...)
 		// (3) Retry with backoff to absorb the brief gap between a webhook
 		// Deployment going Available and its Service endpoints being Ready.
-		const max = 6
+		const maxRetries = 6
 		delay := 3
 		retryRC := 1
-		for attempt := 1; attempt <= max; attempt++ {
-			label := fmt.Sprintf("%s (retry %d/%d)", job.Name, attempt, max)
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			label := fmt.Sprintf("%s (retry %d/%d)", job.Name, attempt, maxRetries)
 			out, retryRC = applier.Apply(ctx, label, rendered, kcFlags...)
 			if retryRC == 0 && !raceRe.MatchString(out) {
 				break
@@ -155,17 +155,17 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 			}
 		}
 		if retryRC != 0 || raceRe.MatchString(out) {
-			ui.ErrorTo(stderr, "bootstrap: %s still failing after %d retries — CRDs/webhook not ready (see above)", job.Name, max)
+			ui.ErrorTo(stderr, "bootstrap: %s still failing after %d retries — CRDs/webhook not ready (see above)", job.Name, maxRetries)
 			return 1
 		}
 	}
 
 	// Post-apply health wait — run it only when the scheduler asks
-	// (WaitFlag set), i.e. when something depends on THIS entry being
+	// (Wait set), i.e. when something depends on THIS entry being
 	// Ready: a dep-target or a wait-gate. A pure leaf skips it (that
 	// serial wait was the whole point of the refactor). Best-effort: a
 	// timeout is a ⚠, not fatal — the caller decides whether to care.
-	if job.WaitFlag != "" {
+	if job.Wait {
 		ui.DebugTo(stderr, "bootstrap: waiting for %s workloads to become ready", job.Name)
 		_ = applier.WaitReady(ctx, job.Name, 180, rendered, kcFlags...)
 	}

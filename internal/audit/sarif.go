@@ -41,7 +41,7 @@ type SarifFinding struct {
 // the aggregate checks (a scan over many manifests has no single line, but it
 // does have a subject).
 func (a *Auditor) SarifFindings(domainName string, findings []Finding) []SarifFinding {
-	defaultURI := a.relURI(filepath.Join(a.Clusters, domainName, "cluster.lok8s.yaml"))
+	defaultURI := a.relURI(filepath.Join(a.Paths.Clusters, domainName, "cluster.lok8s.yaml"))
 	out := make([]SarifFinding, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, SarifFinding{Finding: f, Domain: domainName, DefaultURI: defaultURI})

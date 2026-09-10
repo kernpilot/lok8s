@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"github.com/kernpilot/lok8s/internal/config"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,11 +23,11 @@ func writeFileT(t *testing.T, path, content string) {
 func newFixtureAuditor(t *testing.T) *Auditor {
 	t.Helper()
 	base := t.TempDir()
-	return &Auditor{
+	return &Auditor{Paths: &config.Paths{
 		Base:     base,
 		Clusters: filepath.Join(base, "clusters"),
 		Lok8s:    filepath.Join(base, ".lok8s"),
-	}
+	}}
 }
 
 func findingByID(t *testing.T, findings []Finding, id string) Finding {
@@ -108,7 +109,7 @@ func TestRunDomainMissingSpec(t *testing.T) {
 	if len(findings) != 1 || findings[0].ID != "cluster-spec" || findings[0].Status != "unknown" {
 		t.Fatalf("want single cluster-spec unknown, got %+v", findings)
 	}
-	wantDetail := "No cluster.lok8s.yaml under " + filepath.Join(a.Clusters, "ghost.dev") +
+	wantDetail := "No cluster.lok8s.yaml under " + filepath.Join(a.Paths.Clusters, "ghost.dev") +
 		" (deploy-only or missing domain)."
 	if findings[0].Detail != wantDetail {
 		t.Errorf("detail = %q, want %q", findings[0].Detail, wantDetail)
@@ -117,7 +118,7 @@ func TestRunDomainMissingSpec(t *testing.T) {
 
 func TestRunDomainOrderAndCount(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Clusters, "d.dev", "cluster.lok8s.yaml"),
+	writeFileT(t, filepath.Join(a.Paths.Clusters, "d.dev", "cluster.lok8s.yaml"),
 		"kind: KubeOne\nspec:\n  kubernetes:\n    version: v1.35.0\n")
 	findings := a.RunDomain("d.dev")
 	wantOrder := []string{
@@ -144,7 +145,7 @@ func TestEmitStripsTabsAndNewlines(t *testing.T) {
 }
 
 func TestRelURI(t *testing.T) {
-	a := &Auditor{Base: "/repo"}
+	a := &Auditor{Paths: &config.Paths{Base: "/repo"}}
 	if got := a.relURI("/repo/clusters/x/cluster.lok8s.yaml"); got != "clusters/x/cluster.lok8s.yaml" {
 		t.Errorf("relURI inside repo = %q", got)
 	}

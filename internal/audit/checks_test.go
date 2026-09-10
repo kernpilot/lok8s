@@ -10,7 +10,7 @@ import (
 // specWith builds a minimal cluster spec with extra spec-level YAML appended.
 func setupDomain(t *testing.T, a *Auditor, name, spec string) string {
 	t.Helper()
-	dir := filepath.Join(a.Clusters, name)
+	dir := filepath.Join(a.Paths.Clusters, name)
 	writeFileT(t, filepath.Join(dir, "cluster.lok8s.yaml"), spec)
 	return dir
 }
@@ -58,7 +58,7 @@ func TestCheckEncryptionSpecFlag(t *testing.T) {
 func TestCheckEncryptionDriverDefault(t *testing.T) {
 	a := newFixtureAuditor(t)
 	setupDomain(t, a, "d.dev", "kind: KubeOne\n")
-	writeFileT(t, filepath.Join(a.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"),
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"),
 		"features:\n  encryptionProviders:\n    enable: true\n")
 	f := findingByID(t, a.RunDomain("d.dev"), "encryption-at-rest")
 	if f.Status != "pass" {
@@ -118,7 +118,7 @@ resources:
 			// The binary ships the kubeone core template (which enables
 			// encryption); a local copy WITHOUT the feature wins over it,
 			// so the artifacts fallback is what decides here.
-			writeFileT(t, filepath.Join(a.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"), "features: {}\n")
+			writeFileT(t, filepath.Join(a.Paths.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"), "features: {}\n")
 			writeFileT(t, filepath.Join(dir, "artifacts.yaml"), tc.artifacts)
 			f := findingByID(t, a.RunDomain("d.dev"), "encryption-at-rest")
 			if f.Status != tc.wantStatus {
@@ -148,7 +148,7 @@ func TestCheckEncryptionUnknown(t *testing.T) {
 // ciliumAddon writes a chart-shaped cilium addon with the given values files.
 func ciliumAddon(t *testing.T, a *Auditor, values map[string]string) {
 	t.Helper()
-	dir := filepath.Join(a.Lok8s, "addons", "cilium")
+	dir := filepath.Join(a.Paths.Lok8s, "addons", "cilium")
 	writeFileT(t, filepath.Join(dir, "chart.yaml"), "name: cilium\n")
 	for name, content := range values {
 		writeFileT(t, filepath.Join(dir, name), content)
@@ -256,7 +256,7 @@ func TestCheckCiliumNonBooleanAuditModeIsUnknown(t *testing.T) {
 
 func TestCheckCiliumNoValuesAtAll(t *testing.T) {
 	a := newFixtureAuditor(t)
-	writeFileT(t, filepath.Join(a.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
+	writeFileT(t, filepath.Join(a.Paths.Lok8s, "addons", "cilium", "chart.yaml"), "name: cilium\n")
 	setupDomain(t, a, "d.dev", "kind: Lo\n")
 	f := findingByID(t, a.RunDomain("d.dev"), "cilium-policy-enforcement")
 	if f.Status != "unknown" || !strings.Contains(f.Detail, "Could not read Cilium values under ") {

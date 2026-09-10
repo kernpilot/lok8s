@@ -373,13 +373,13 @@ func TestSchedulerGatePlusDependsOn(t *testing.T) {
 }
 
 func TestSchedulerOnlyDepTargetsGetTheReadinessWait(t *testing.T) {
-	// Job.WaitFlag non-empty ⇔ the post-apply readiness wait runs. The
+	// Job.Wait ⇔ the post-apply readiness wait runs. The
 	// scheduler must set it for a dep-target and leave it empty for a pure
 	// leaf.
 	e, _, spec, kc, _ := schedEngine(t, "a", "b:\n      dependsOn: [a]", "c")
 	waited := &eventLog{}
 	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
-		if job.WaitFlag != "" {
+		if job.Wait {
 			waited.add(job.Name)
 		}
 		return 0
@@ -795,8 +795,7 @@ func applyOneDirect(t *testing.T, e *Engine, job Job) (int, string) {
 
 func TestHostedApplyOneSkipsCilium(t *testing.T) {
 	e, _, _, _, _ := testEngine(t)
-	e.Hosted = true
-	rc, out := applyOneDirect(t, e, Job{Name: "cilium", Dir: "/nonexistent/addons/cilium", Kind: "kubeone", Provider: "hetzner", Kubeconfig: "/kc"})
+	rc, out := applyOneDirect(t, e, Job{Name: "cilium", Dir: "/nonexistent/addons/cilium", Kind: "kubeone", Provider: "hetzner", Kubeconfig: "/kc", Hosted: true})
 	if rc != 0 || !strings.Contains(out, "platform-owned on a hosted cluster") {
 		t.Errorf("rc=%d out=%q", rc, out)
 	}
@@ -804,8 +803,7 @@ func TestHostedApplyOneSkipsCilium(t *testing.T) {
 
 func TestHostedApplyOneSkipsCCM(t *testing.T) {
 	e, _, _, _, _ := testEngine(t)
-	e.Hosted = true
-	rc, out := applyOneDirect(t, e, Job{Name: "ccm", Dir: "/nonexistent/addons/ccm", Kind: "capi", Provider: "hetzner", Kubeconfig: "/kc"})
+	rc, out := applyOneDirect(t, e, Job{Name: "ccm", Dir: "/nonexistent/addons/ccm", Kind: "capi", Provider: "hetzner", Kubeconfig: "/kc", Hosted: true})
 	if rc != 0 || !strings.Contains(out, "platform-owned on a hosted cluster") {
 		t.Errorf("rc=%d out=%q", rc, out)
 	}
@@ -814,8 +812,7 @@ func TestHostedApplyOneSkipsCCM(t *testing.T) {
 func TestHostedRenamedCiliumStillSkips(t *testing.T) {
 	// Anchored on the addon DIR: a name: override can't defeat the skip.
 	e, _, _, _, _ := testEngine(t)
-	e.Hosted = true
-	rc, out := applyOneDirect(t, e, Job{Name: "my-cni", Dir: "/nonexistent/addons/cilium", Kind: "kubeone", Provider: "hetzner", Kubeconfig: "/kc"})
+	rc, out := applyOneDirect(t, e, Job{Name: "my-cni", Dir: "/nonexistent/addons/cilium", Kind: "kubeone", Provider: "hetzner", Kubeconfig: "/kc", Hosted: true})
 	if rc != 0 || !strings.Contains(out, "platform-owned on a hosted cluster") {
 		t.Errorf("rc=%d out=%q", rc, out)
 	}
@@ -825,7 +822,6 @@ func TestSelfHostedDoesNotTriggerHostedSkip(t *testing.T) {
 	// Non-kubeone kind so the driver skip does not fire either; prove the
 	// call REACHES the render step by making it fail loudly.
 	e, _, _, _, _ := testEngine(t)
-	e.Hosted = false
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error {
 		if c.Name == "kustomize" {
 			return fmt.Errorf("RENDER_CALLED")

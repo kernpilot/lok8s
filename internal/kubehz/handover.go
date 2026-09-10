@@ -103,8 +103,49 @@ func bundleEntryEscapes(entry string) bool {
 }
 
 // extractBundle lists, guards, then extracts a .tar.gz (bash: `tar -tzf`
-// over every entry, then `tar -xzf`).
+// over every entry, then `tar -xzf`). Two passes over the file: the first
+// reads headers only, the second streams each file to disk, so the
+// archive is never held in memory.
 func (c *Context) extractBundle(bundle, dir string) error {
+	guard := func(_ *tar.Reader, hdr *tar.Header) error {
+		if bundleEntryEscapes(hdr.Name) {
+			c.errorf("handover: refusing %s — archive entry escapes the bundle dir: %s", bundle, hdr.Name)
+			return ErrHandled
+		}
+		return nil
+	}
+	if err := c.walkBundle(bundle, guard); err != nil {
+		return err
+	}
+	extract := func(tr *tar.Reader, hdr *tar.Header) error {
+		target := filepath.Join(dir, filepath.Clean("/"+hdr.Name))
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			return os.MkdirAll(target, 0o700)
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				return err
+			}
+			// #nosec G115 -- the conversion happens first; only the low 9 bits
+			// survive the &0o777 mask, so a wrapped value cannot widen the mode.
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fs.FileMode(hdr.Mode)&0o777|0o600)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, tr); err != nil {
+				_ = out.Close()
+				return c.notArchive(bundle)
+			}
+			return out.Close()
+		}
+		return nil
+	}
+	return c.walkBundle(bundle, extract)
+}
+
+// walkBundle opens the .tar.gz and calls visit for every entry, in order.
+// A file that is not a gzip tar is reported as notArchive.
+func (c *Context) walkBundle(bundle string, visit func(*tar.Reader, *tar.Header) error) error {
 	f, err := os.Open(bundle)
 	if err != nil {
 		return c.notArchive(bundle)
@@ -115,51 +156,18 @@ func (c *Context) extractBundle(bundle, dir string) error {
 		return c.notArchive(bundle)
 	}
 	tr := tar.NewReader(gz)
-	type entry struct {
-		hdr  *tar.Header
-		data []byte
-	}
-	var entries []entry
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			return nil
 		}
 		if err != nil {
 			return c.notArchive(bundle)
 		}
-		if bundleEntryEscapes(hdr.Name) {
-			c.errorf("handover: refusing %s — archive entry escapes the bundle dir: %s", bundle, hdr.Name)
-			return ErrHandled
-		}
-		var data []byte
-		if hdr.Typeflag == tar.TypeReg {
-			data, err = io.ReadAll(tr)
-			if err != nil {
-				return c.notArchive(bundle)
-			}
-		}
-		entries = append(entries, entry{hdr, data})
-	}
-	for _, e := range entries {
-		target := filepath.Join(dir, filepath.Clean("/"+e.hdr.Name))
-		switch e.hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o700); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-				return err
-			}
-			// #nosec G115 -- the conversion happens first; only the low 9 bits
-			// survive the &0o777 mask, so a wrapped value cannot widen the mode.
-			if err := os.WriteFile(target, e.data, fs.FileMode(e.hdr.Mode)&0o777|0o600); err != nil {
-				return err
-			}
+		if err := visit(tr, hdr); err != nil {
+			return err
 		}
 	}
-	return nil
 }
 
 func (c *Context) notArchive(bundle string) error {

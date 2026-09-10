@@ -56,7 +56,7 @@ func (a *Auditor) checkEncryption(r *run, domainName, domainDir, specFile, kind 
 
 	// 2. KubeOne driver default — the authoritative static signal for kubeone.
 	driverEnable := ""
-	koCore, _, _ := assets.Peek(a.paths(), "drivers/kubeone/cluster/core/kubeone.yaml")
+	koCore, _, _ := assets.Peek(a.Paths, "drivers/kubeone/cluster/core/kubeone.yaml")
 	if kind == "kubeone" && fsutil.FileExists(koCore) {
 		driverEnable = yqRenderNode(lookupFile(koCore, "features", "encryptionProviders", "enable"))
 		if driverEnable == "null" {
@@ -335,8 +335,8 @@ func minorRank(v string) int {
 	if m == nil {
 		return 0
 	}
-	maj, min := atoi(m[1]), atoi(m[2])
-	return maj*1000 + min
+	major, minor := atoi(m[1]), atoi(m[2])
+	return major*1000 + minor
 }
 
 func atoi(s string) int {

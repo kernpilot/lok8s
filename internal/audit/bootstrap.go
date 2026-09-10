@@ -37,7 +37,7 @@ func resolveBootstrapEntries(specFile, kind string) []bootstrapspec.Item {
 func (a *Auditor) parseBootstrapEntry(domainName string, item bootstrapspec.Item) (e bootstrapEntry, ok bool) {
 	var merged *yaml.Node
 	parser := &bootstrapspec.Parser{
-		Paths: a.paths(),
+		Paths: a.Paths,
 		MergeValueFiles: func(files []string, values *yaml.Node) error {
 			var extra *yaml.Node
 			if values != nil && inlineIncluded(values) {

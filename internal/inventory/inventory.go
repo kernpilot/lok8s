@@ -26,7 +26,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -396,7 +395,3 @@ func PublishHook(p *config.Paths, r execx.Runner, stderr io.Writer) func(ctx con
 		Publish(ctx, p, r, stderr, domainName, clusterYAML, kubeconfig)
 	}
 }
-
-// ErrMalformedKind reports a spec whose .kind is present but not a bare
-// driver name (never defaulted).
-var ErrMalformedKind = errors.New("inventory: malformed kind")
