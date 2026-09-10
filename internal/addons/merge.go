@@ -48,10 +48,12 @@ func MergeYAML(docs ...string) ([]byte, error) {
 // MergeNodes is yq's `*` operator over two nodes: two mappings merge
 // key-wise (right side deep-merged in, left order preserved, new keys
 // appended); anything else — sequences, scalars, a nil/null right side over
-// a map — takes the RIGHT side.
+// a map — takes the RIGHT side. An absent right side (nil, or the zero
+// node an empty or comment-only document decodes to) leaves the left side
+// as it is: yq reads no document from such a file, so nothing merges.
 func MergeNodes(left, right *yaml.Node) *yaml.Node {
 	left, right = yqsem.Deref(left), yqsem.Deref(right)
-	if right == nil {
+	if right == nil || right.Kind == 0 {
 		return left
 	}
 	if left == nil || left.Kind != yaml.MappingNode || right.Kind != yaml.MappingNode {
