@@ -9,10 +9,8 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/mgoltzsche/khelm/v2/pkg/config"
 	"github.com/mgoltzsche/khelm/v2/pkg/helm"
@@ -59,12 +57,13 @@ const (
 //     applied as the release name/namespace, defaults (namespace
 //     "default", helm's default kubeVersion, keyring).
 //  4. h.Render with the cwd as BaseDir (kustomize runs the plugin in the
-//     kustomization root), cancelled on SIGINT/SIGTERM.
+//     kustomization root), cancelled through ctx (main's SIGINT/SIGTERM
+//     watch).
 //  5. The resources written as khelm's internal/output.Marshal does: the
 //     kyaml encoder (2-space indent), one Encode per RNode document, Close.
 //     That package is internal to khelm, so the four lines are repeated
 //     here verbatim.
-func runChartRenderer(args []string, stdout, stderr io.Writer) error {
+func runChartRenderer(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	log.SetFlags(0)
 	log.SetOutput(stderr)
 	debug, _ := strconv.ParseBool(os.Getenv(envKhelmDebug))
@@ -94,8 +93,6 @@ func runChartRenderer(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	resources, err := h.Render(ctx, &req.ChartConfig)
 	if helm.IsUntrustedRepository(err) {
 		log.Printf("HINT: access to untrusted repositories can be enabled using env var %s=true or option --%s", envTrustAnyRepo, flagTrustAnyRepo)

@@ -3,6 +3,7 @@
 package render
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -37,21 +38,25 @@ import (
 //
 // The match is on the LAST TWO path elements (…/secret/Secret,
 // …/chartrenderer/ChartRenderer) so a stray binary merely named Secret
-// is not mistaken for a plugin invocation.
-func DispatchPlugin(args []string, stdin io.Reader, stdout, stderr io.Writer) (handled bool, rc int) {
+// is not mistaken for a plugin invocation. Before the generator runs, the
+// overlay of the render that started this child is installed in the
+// child's environment (renderenv.go). ctx cancels the chart render.
+func DispatchPlugin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (handled bool, rc int) {
 	if len(args) == 0 {
 		return false, 0
 	}
 	argv0 := filepath.ToSlash(args[0])
 	switch {
 	case strings.HasSuffix(argv0, "/secret/Secret"):
+		applyPluginEnv(args[0], secretPluginRel)
 		if err := secret.Run(args, stdin, stdout, plugin.DefaultEnv); err != nil {
 			fmt.Fprintln(stderr, "secret plugin:", err)
 			return true, 1
 		}
 		return true, 0
 	case strings.HasSuffix(argv0, "/chartrenderer/ChartRenderer"):
-		if err := runChartRenderer(args, stdout, stderr); err != nil {
+		applyPluginEnv(args[0], chartRendererPluginRel)
+		if err := runChartRenderer(ctx, args, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "khelm: %s\n", err)
 			return true, 1
 		}

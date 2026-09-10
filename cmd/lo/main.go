@@ -24,17 +24,24 @@ func main() {
 	// Secret, khelm ChartRenderer) by re-executing THIS binary under the
 	// plugin's name from a temp plugin home. Dispatched before anything
 	// else — no project paths, no cobra — because the plugin runs in the
-	// kustomization directory, not in a project.
-	if handled, rc := render.DispatchPlugin(os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
+	// kustomization directory, not in a project. The same interrupt watch
+	// as the command tree cancels a chart render and maps the exit code.
+	ctx, interrupted := cli.WatchInterrupt(context.Background())
+	if handled, rc := render.DispatchPlugin(ctx, os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
+		if irc := interrupted(); irc != 0 {
+			rc = irc
+		}
 		os.Exit(rc)
 	}
-	os.Exit(run())
+	os.Exit(run(ctx, interrupted))
 }
 
 // run is main without os.Exit, so the deferred cleanup of the per-run
 // assets temp dir (embedded assets served under --no-eject) and of the
-// self-exec plugin home runs on every exit path.
-func run() int {
+// self-exec plugin home runs on every exit path. ctx is cancelled by the
+// interrupt watch; interrupted reports its exit code (128+n) once one
+// arrived.
+func run(ctx context.Context, interrupted func() int) int {
 	defer assets.Cleanup()
 	defer render.Cleanup()
 	paths, err := config.ResolvePaths()
@@ -56,7 +63,6 @@ func run() int {
 	// SIGINT/SIGTERM cancel the command context (every Runner child and
 	// wait loop reads it) and map to the exit code the bash entrypoint
 	// died with, 128+n, with nothing printed on top.
-	ctx, interrupted := cli.WatchInterrupt(context.Background())
 	root := cli.NewRoot(paths)
 	err = root.ExecuteContext(ctx)
 	if rc := interrupted(); rc != 0 {

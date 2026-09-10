@@ -22,7 +22,7 @@ func TestMain(m *testing.M) {
 	// kustomize execs …/secret/Secret or …/chartrenderer/ChartRenderer,
 	// the test binary must behave as the plugin, exactly like `lo` does.
 	// lo core: DispatchPlugin is a no-op and the call falls through.
-	if handled, rc := DispatchPlugin(os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
+	if handled, rc := DispatchPlugin(context.Background(), os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
 		os.Exit(rc)
 	}
 	rc := m.Run()

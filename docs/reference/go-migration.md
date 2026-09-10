@@ -186,15 +186,20 @@ removed on exit (`render.Cleanup`, which also restores the caller's
 The per-render environment the exec pipeline handed to the kustomize child
 (`KUBECONFIG`, `KHELM_TRUST_ANY_REPO=true`, `LOK8S_SECRETS_DISABLE`, the
 toolchain on `PATH`, an addon entry's `env:` overrides) is `render.Options.Env`.
-The plugin children inherit the process environment, so the overlay is
-installed in it for the duration of the run and restored afterwards, under
-a package mutex. The mutex serializes renders only: a goroutine that reads
-the environment or starts a child (kubectl via `execx`) while a render is
-in flight would inherit that render's overlay. The bootstrap DAG therefore
-applies entries one at a time when the in-process renderer is active
-(`render.InProcessActive`; `LOK8S_BOOTSTRAP_PARALLEL` is ignored with a
-debug line saying so); `LO_RENDER=exec` and lo core keep the parallel DAG,
-because there the overlay rides the kustomize child's own environment.
+The plugin children are children of the lo process itself, so the overlay
+does not go through the process environment: the render writes it to a
+per-render file under the self-exec plugin home (`env/<hash of the render
+dir>.env`) for the duration of the run, and the plugin child installs it in
+its own environment before it serves the generator, matched by the
+kustomization root kustomize runs it in (`KUSTOMIZE_PLUGIN_CONFIG_ROOT`).
+Renders of different directories run in parallel; two renders of the same
+directory are serialized. A goroutine that reads the environment or starts
+a child (kubectl via `execx`) while a render is in flight sees nothing of
+the overlay, so the bootstrap DAG keeps `LOK8S_BOOTSTRAP_PARALLEL` on
+lo-full as well. The two values the kustomize API reads from the
+environment itself (`KUSTOMIZE_ENABLE_MANAGEDBY_LABEL`, the `helm` command
+for the builtin inflator, resolved through the overlay's `PATH`) are taken
+from the overlay first.
 
 **Chart cache.** `helm.NewHelm()` reads the same `HELM_*` environment the
 khelm binary read, so chart downloads and repository indexes land in the

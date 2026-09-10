@@ -29,7 +29,7 @@ func buildInProcess(_ context.Context, _ string, _ Options) ([]byte, error) {
 // DispatchPlugin is a no-op on core: kustomize runs as a child process
 // and execs the plugin BINARIES under KUSTOMIZE_PLUGIN_HOME, never this
 // executable. main still calls it first so both builds share one entry.
-func DispatchPlugin(_ []string, _ io.Reader, _, _ io.Writer) (handled bool, rc int) {
+func DispatchPlugin(_ context.Context, _ []string, _ io.Reader, _, _ io.Writer) (handled bool, rc int) {
 	return false, 0
 }
 

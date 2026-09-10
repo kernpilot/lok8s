@@ -20,7 +20,6 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
-	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
@@ -131,28 +130,6 @@ func maxParallel() int {
 	return 8
 }
 
-// renderSerial reports whether the render pipeline needs the DAG to apply
-// one entry at a time. True for the in-process renderer (lo-full, LO_RENDER
-// unset): its per-entry env overlay (LOK8S_USER_*/LOK8S_SPEC_*, the PATH
-// with the toolchain) lives in the PROCESS environment while an entry
-// renders, and a concurrent entry's envsubst (os.Getenv) or kubectl child
-// (execx snapshots os.Environ) would inherit it. The exec pipeline hands
-// the overlay to the kustomize child's own environment, so it keeps
-// LOK8S_BOOTSTRAP_PARALLEL. A var so the scheduler tests can pin the
-// serial path on either build.
-var renderSerial = render.InProcessActive
-
-// effectiveParallel is LOK8S_BOOTSTRAP_PARALLEL, forced to 1 while the
-// in-process renderer is active (see renderSerial).
-func effectiveParallel(stderr io.Writer) int {
-	n := maxParallel()
-	if n > 1 && renderSerial() {
-		ui.Debugf(stderr, "bootstrap: in-process render — entries apply one at a time (LOK8S_BOOTSTRAP_PARALLEL=%d ignored; LO_RENDER=exec restores it)", n)
-		return 1
-	}
-	return n
-}
-
 // node is one DAG entry's scheduler state.
 type node struct {
 	entry      *Entry
@@ -167,9 +144,8 @@ type node struct {
 }
 
 // Apply reads spec.bootstrap from the cluster YAML and runs the entries as
-// a topological-parallel DAG capped at LOK8S_BOOTSTRAP_PARALLEL (default 8;
-// 1 while the in-process renderer is active — renderSerial) — bash:
-// bootstrap::apply. Edge semantics:
+// a topological-parallel DAG capped at LOK8S_BOOTSTRAP_PARALLEL (default 8)
+// — bash: bootstrap::apply. Edge semantics:
 //
 //   - `dependsOn: [name, …]` — an explicit edge: wait for those entries'
 //     READINESS.
@@ -254,7 +230,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	e.restoreD(ctx, domain, kubeconfig)
 
 	// ── Plan the DAG: parse every entry, resolve edges, detect cycles ──
-	cap_ := effectiveParallel(stderr)
+	cap_ := maxParallel()
 
 	var nodes []*node
 	for _, entry := range entries {

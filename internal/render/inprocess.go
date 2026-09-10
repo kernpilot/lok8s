@@ -11,6 +11,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -25,15 +27,28 @@ const (
 	variantName        = "full"
 )
 
-// runMu serializes in-process renders: the plugin children read the
-// process environment, so the per-render overlay (Options.Env) has to be
-// installed in it for the duration of a run. The mutex keeps two RENDERS
-// from interleaving their overlays; it cannot stop an unrelated goroutine
-// from reading the environment mid-render (os.Getenv, or execx snapshotting
-// os.Environ for a child). Callers that fan out around Build — the
-// bootstrap DAG — therefore run their entries serially when the in-process
-// renderer is active (InProcessActive); see internal/bootstrap.
-var runMu sync.Mutex
+// dirLocks serializes renders of the SAME directory: their overlay files
+// share a name (renderenv.go), so two of them at once would read each
+// other's variables. Renders of different directories run in parallel.
+var dirLocks struct {
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
+}
+
+func lockDir(dir string) func() {
+	dirLocks.mu.Lock()
+	if dirLocks.m == nil {
+		dirLocks.m = map[string]*sync.Mutex{}
+	}
+	l, ok := dirLocks.m[dir]
+	if !ok {
+		l = &sync.Mutex{}
+		dirLocks.m[dir] = l
+	}
+	dirLocks.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
 
 // buildInProcess is `kustomize build --enable-alpha-plugins [--enable-exec]
 // [--load-restrictor …] <dir>` via krusty, option for option what the
@@ -46,6 +61,15 @@ var runMu sync.Mutex
 //     PluginRestrictionsNone + the builtin helm inflator enabled with the
 //     default `helm` command; FnpLoadingOptions from --enable-exec.
 //   - AddManagedbyLabel: only via KUSTOMIZE_ENABLE_MANAGEDBY_LABEL=on.
+//
+// The per-render overlay (Options.Env) never touches the process
+// environment. The exec pipeline handed it to the kustomize child, whose
+// plugin children inherited it; here the plugin children are children of
+// THIS process, so the overlay is written to a file under the self-exec
+// plugin home for the duration of the run (renderenv.go) and the child
+// reads it before it serves a generator (dispatch.go). The two values the
+// kustomize API itself reads from the environment (the managed-by label
+// switch, the helm command's PATH) are taken from the overlay first.
 //
 // The output is ResMap.AsYaml(), the exact bytes the CLI writes.
 func buildInProcess(ctx context.Context, dir string, o Options) ([]byte, error) {
@@ -61,20 +85,22 @@ func buildInProcess(ctx context.Context, dir string, o Options) ([]byte, error) 
 	}
 	pc := types.EnabledPluginConfig(types.BploUseStaticallyLinked)
 	pc.FnpLoadingOptions = types.FnPluginLoadingOptions{EnableExec: o.EnableExec}
-	pc.HelmConfig.Command = "helm"
+	pc.HelmConfig.Command = helmCommand(o.Env)
 	pc.HelmConfig.ApiVersions = []string{}
 	kOpts.PluginConfig = pc
+	kOpts.AddManagedbyLabel = overlayOrEnv(o.Env, konfig.EnableManagedbyLabelEnv) == "on"
 
-	// KUSTOMIZE_PLUGIN_HOME is NOT part of the overlay: selfExecPluginHome
-	// set it once for the process. Only the caller's per-render variables
-	// go in (and come out again).
-	overlay := append([]string{}, o.Env...)
-
-	var out []byte
-	err = withEnv(overlay, func() error {
+	out, err := func() ([]byte, error) {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
+		unlock := lockDir(dir)
+		defer unlock()
+		remove, err := writeRenderEnv(home, dir, o.Env)
+		if err != nil {
+			return nil, err
+		}
+		defer remove()
 		if os.Getenv(konfig.KustomizePluginHomeEnv) != home {
 			// Something re-pointed the plugin home after the first render
 			// (a caller's own Setenv). The self-exec symlinks are the only
@@ -82,16 +108,12 @@ func buildInProcess(ctx context.Context, dir string, o Options) ([]byte, error) 
 			// process-wide value again, not a per-render one.
 			os.Setenv(konfig.KustomizePluginHomeEnv, home)
 		}
-		// The managed-by label switch is read from the environment the
-		// same way the CLI reads it, after the overlay is in place.
-		kOpts.AddManagedbyLabel = os.Getenv(konfig.EnableManagedbyLabelEnv) == "on"
 		m, err := krusty.MakeKustomizer(kOpts).Run(filesys.MakeFsOnDisk(), dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		out, err = m.AsYaml()
-		return err
-	})
+		return m.AsYaml()
+	}()
 	if err != nil {
 		// cobra's error line, as the kustomize CLI child printed it.
 		fmt.Fprintf(o.stderr(), "Error: %v\n", err)
@@ -100,32 +122,38 @@ func buildInProcess(ctx context.Context, dir string, o Options) ([]byte, error) 
 	return out, nil
 }
 
-// withEnv installs overlay (KEY=VALUE) in the process environment, runs
-// fn, and restores every touched key — under runMu.
-func withEnv(overlay []string, fn func() error) error {
-	runMu.Lock()
-	defer runMu.Unlock()
-	type saved struct {
-		value string
-		set   bool
-	}
-	prior := map[string]saved{}
+// overlayOrEnv reads key from the overlay (last entry wins), else from the
+// process environment: what a kustomize child with the overlay appended
+// to its environment would have seen.
+func overlayOrEnv(overlay []string, key string) string {
+	val, ok := os.LookupEnv(key)
 	for _, kv := range overlay {
-		k, v, _ := strings.Cut(kv, "=")
-		if _, seen := prior[k]; !seen {
-			old, ok := os.LookupEnv(k)
-			prior[k] = saved{old, ok}
+		if k, v, found := strings.Cut(kv, "="); found && k == key {
+			val, ok = v, true
 		}
-		os.Setenv(k, v)
 	}
-	defer func() {
-		for k, s := range prior {
-			if s.set {
-				os.Setenv(k, s.value)
-			} else {
-				os.Unsetenv(k)
-			}
+	if !ok {
+		return ""
+	}
+	return val
+}
+
+// helmCommand resolves the builtin inflator's `helm` the way the kustomize
+// child resolved it: through the overlay's PATH when the overlay carries
+// one (the toolchain's .bin first), else the plain name for the process
+// PATH.
+func helmCommand(overlay []string) string {
+	for _, dir := range filepath.SplitList(overlayOrEnv(overlay, "PATH")) {
+		if dir == "" {
+			continue
 		}
-	}()
-	return fn()
+		candidate := filepath.Join(dir, "helm")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	if p, err := exec.LookPath("helm"); err == nil {
+		return p
+	}
+	return "helm"
 }

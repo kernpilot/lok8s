@@ -48,11 +48,11 @@ lint, all ten parity harnesses) runs against BOTH builds; the in-process
 render tests are tag-gated (`render_inprocess_test.go`) or skip via
 `render.InProcessAvailable()`. The byte-parity tests need the pinned
 `.bin/kustomize` + `.kustomize/` plugins (`b install`, `make -C kustomize
-build`); without them they skip locally and FAIL under `CI=true`. On lo-full
-the bootstrap DAG applies entries one at a time (the in-process render puts
-each entry's env overlay in the process environment; `LO_RENDER=exec`
-restores `LOK8S_BOOTSTRAP_PARALLEL`). `yq` and `sops` stay subprocesses
-until the same proof exists for them.
+build`); without them they skip locally and FAIL under `CI=true`. The
+in-process render hands each render's env overlay to its plugin children
+through a per-render file under the self-exec plugin home, never through
+the process environment, so the bootstrap DAG stays parallel on lo-full.
+`yq` and `sops` stay subprocesses until the same proof exists for them.
 
 How to change or port behaviour (mirror the pattern of any `internal/`
 package):

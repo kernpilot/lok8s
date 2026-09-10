@@ -33,8 +33,9 @@ var (
 
 // selfExecPluginHome returns the per-process plugin home: a temp directory
 // holding the two plugin paths as symlinks to the running executable (a
-// copy where symlinks are unavailable). Created once, on first render;
-// Cleanup removes it.
+// copy where symlinks are unavailable) and the env/ directory of the
+// in-flight renders' overlay files (renderenv.go). Created once, on first
+// render; Cleanup removes it.
 //
 // KUSTOMIZE_PLUGIN_HOME is set to the home ONCE, here, for the rest of the
 // process — not per render. The kustomize API resolves the plugin root
@@ -71,6 +72,10 @@ func makeSelfExecPluginHome() (string, error) {
 	}
 	dir, err := os.MkdirTemp("", "lo-plugins-")
 	if err != nil {
+		return "", fmt.Errorf("render: plugin home: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, renderEnvDirName), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
 		return "", fmt.Errorf("render: plugin home: %w", err)
 	}
 	for _, rel := range []string{secretPluginRel, chartRendererPluginRel} {

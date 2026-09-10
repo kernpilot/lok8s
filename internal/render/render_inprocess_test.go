@@ -16,10 +16,13 @@ package render
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -501,5 +504,71 @@ func TestBuildLoadRestrictionsNoneIsHonoured(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "name: outside") {
 		t.Fatalf("LoadRestrictionsNone render:\n%s", out)
+	}
+}
+
+// Concurrent renders of different directories each reach their own
+// plugin child with their own overlay, and nothing of any overlay lands
+// in the process environment meanwhile.
+func TestBuildConcurrentRendersKeepTheirOwnOverlay(t *testing.T) {
+	t.Setenv(ModeEnv, "")
+	t.Setenv("PATH_SECRETS", t.TempDir())
+	t.Setenv("LOK8S_USER_TAG", "")
+	os.Unsetenv("LOK8S_USER_TAG")
+	const n = 6
+	dirs := make([]string, n)
+	for i := range dirs {
+		dirs[i] = t.TempDir()
+		writeFiles(t, dirs[i], map[string]string{
+			"kustomization.yaml": "generators:\n  - secret.yaml\n",
+			"secret.yaml": `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: tag
+  namespace: demo
+env:
+  TAG:
+    var: LOK8S_USER_TAG
+    optional: true
+    update: true
+`,
+		})
+	}
+	type result struct {
+		out string
+		err error
+	}
+	results := make([]result, n)
+	var wg sync.WaitGroup
+	leaked := make(chan string, n*8)
+	for i := range dirs {
+		wg.Go(func() {
+			var stderr bytes.Buffer
+			out, err := Build(context.Background(), dirs[i], Options{Env: []string{fmt.Sprintf("LOK8S_USER_TAG=tag-%d", i)}, Stderr: &stderr})
+			if err != nil {
+				err = fmt.Errorf("%w\n%s", err, stderr.String())
+			}
+			results[i] = result{string(out), err}
+			if v, set := os.LookupEnv("LOK8S_USER_TAG"); set {
+				leaked <- v
+			}
+		})
+	}
+	wg.Wait()
+	close(leaked)
+	for v := range leaked {
+		t.Errorf("an overlay reached the process environment during a concurrent render: LOK8S_USER_TAG=%q", v)
+	}
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("render %d: %v", i, r.err)
+		}
+		want := "TAG: " + base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("tag-%d", i)))
+		if !strings.Contains(r.out, want) {
+			t.Errorf("render %d did not get its own overlay:\n%s", i, r.out)
+		}
+	}
+	if _, set := os.LookupEnv("LOK8S_USER_TAG"); set {
+		t.Error("overlay left in the process environment")
 	}
 }
