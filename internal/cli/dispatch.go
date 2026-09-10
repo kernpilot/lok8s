@@ -11,8 +11,8 @@ package cli
 //	BootstrapApply             internal/bootstrap (bootstrap::apply)
 //	InventoryPublish           internal/inventory (inventory::publish, fail-soft)
 //	GitopsBootstrap            internal/gitops    (gitops::bootstrap, warn-only)
-//	kubeone/capi Hooks         kubehz.KubeoneHooks()/CapiHooks() + the bridged
-//	                           hetzner-inventory seams (provider/bridge)
+//	kubeone/capi Hooks         kubeoneHooks/capiHooks (the kubehz seams) + the
+//	                           bridged hetzner-inventory seams (provider/bridge)
 //	lo Hooks.KustomizeBuild    kustomizeBuild (kustomize::build)
 //	Providers                  provider/bridge.Loader (the bash plugins)
 
@@ -118,16 +118,35 @@ func wiredDrivers(paths *config.Paths, kc *kubehz.Context, loader *bridge.Loader
 			kc.ProviderOutput = providerOutput(deps)
 			switch d := drv.(type) {
 			case *kubeone.Driver:
-				d.Hooks = kc.KubeoneHooks()
+				d.Hooks = kubeoneHooks(kc)
 				d.Hooks.AppendInventory = loader.KubeoneAppendInventory(deps)
 				d.Hooks.PrepareApply = loader.KubeonePrepareApply(deps)
 			case *capi.Driver:
-				d.Hooks = kc.CapiHooks()
+				d.Hooks = capiHooks(kc)
 			case *lodriver.Driver:
 				d.Hooks.KustomizeBuild = func(ctx context.Context) error { return kustomizeBuild(ctx, deps.Runner, paths) }
 			}
 			return drv, nil
 		}, true
+	}
+}
+
+// kubeoneHooks composes the kubeone driver's kubehz seams (the inventory /
+// pre-apply seams stay nil here — the bridged hetzner provider owns them).
+func kubeoneHooks(kc *kubehz.Context) kubeone.Hooks {
+	return kubeone.Hooks{
+		ReadKubehzConfig: kc.ReadConfigHook(),
+		ProvisionHosted:  kc.ProvisionHostedHook(),
+		DestroyHosted:    kc.DestroyHostedHook(),
+	}
+}
+
+// capiHooks composes the capi driver's kubehz seams.
+func capiHooks(kc *kubehz.Context) capi.Hooks {
+	return capi.Hooks{
+		ReadKubehzConfig: kc.ReadConfigHook(),
+		ProvisionHosted:  kc.ProvisionHostedHook(),
+		DestroyHosted:    kc.DestroyHostedHook(),
 	}
 }
 

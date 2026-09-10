@@ -2,8 +2,9 @@ package kubehz
 
 // hooks.go — the constructors that satisfy the dispatch/driver seams:
 // provision.Hooks.{KubehzRegister,KubehzDeregister} and the kubeone/capi
-// drivers' Hooks.{ReadKubehzConfig,ProvisionHosted,DestroyHosted}. The
-// hook bodies are the bash tails verbatim:
+// drivers' Hooks.{ReadKubehzConfig,ProvisionHosted,DestroyHosted} (the
+// cli composes those into each driver's Hooks value; this package imports
+// no driver). The hook bodies are the bash tails verbatim:
 //
 //	register   read_config → validate_config → (access != none) → register_cluster
 //	deregister read_config → (access != none) → deregister_cluster
@@ -12,8 +13,6 @@ package kubehz
 import (
 	"context"
 
-	"github.com/kernpilot/lok8s/internal/driver/capi"
-	"github.com/kernpilot/lok8s/internal/driver/kubeone"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/provision"
 )
@@ -96,25 +95,6 @@ func (c *Context) ProvisionHooks() provision.Hooks {
 	return provision.Hooks{
 		KubehzRegister:   c.RegisterHook(),
 		KubehzDeregister: c.DeregisterHook(),
-	}
-}
-
-// KubeoneHooks returns the kubeone driver's kubehz seams (the inventory /
-// pre-apply seams stay nil — the hetzner provider port owns them).
-func (c *Context) KubeoneHooks() kubeone.Hooks {
-	return kubeone.Hooks{
-		ReadKubehzConfig: c.ReadConfigHook(),
-		ProvisionHosted:  c.ProvisionHostedHook(),
-		DestroyHosted:    c.DestroyHostedHook(),
-	}
-}
-
-// CapiHooks returns the capi driver's kubehz seams.
-func (c *Context) CapiHooks() capi.Hooks {
-	return capi.Hooks{
-		ReadKubehzConfig: c.ReadConfigHook(),
-		ProvisionHosted:  c.ProvisionHostedHook(),
-		DestroyHosted:    c.DestroyHostedHook(),
 	}
 }
 

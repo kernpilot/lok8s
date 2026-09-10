@@ -4,7 +4,9 @@ package kubehz
 // stop compiling if either side's signature drifts) plus behaviour tests
 // for the bash tails the hooks reproduce. The kubeone/capi driver packages'
 // files are NOT edited; the drivers are exercised through their exported
-// Hooks fields exactly as the dispatch would wire them.
+// Hooks fields exactly as the cli wires them (cli/dispatch.go
+// kubeoneHooks/capiHooks; the production package imports no driver, the
+// test composes the same values).
 
 import (
 	"context"
@@ -35,9 +37,16 @@ var (
 		DestroyHosted:    (*Context)(nil).DestroyHostedHook(),
 	}
 	_ provision.Hooks = (*Context)(nil).ProvisionHooks()
-	_ kubeone.Hooks   = (*Context)(nil).KubeoneHooks()
-	_ capi.Hooks      = (*Context)(nil).CapiHooks()
 )
+
+// kubeoneHooks/capiHooks compose the driver Hooks the way the cli does.
+func kubeoneHooks(c *Context) kubeone.Hooks {
+	return kubeone.Hooks{ReadKubehzConfig: c.ReadConfigHook(), ProvisionHosted: c.ProvisionHostedHook(), DestroyHosted: c.DestroyHostedHook()}
+}
+
+func capiHooks(c *Context) capi.Hooks {
+	return capi.Hooks{ReadKubehzConfig: c.ReadConfigHook(), ProvisionHosted: c.ProvisionHostedHook(), DestroyHosted: c.DestroyHostedHook()}
+}
 
 func TestReadConfigHookReportsHostingAndGuards(t *testing.T) {
 	h := newHarness(t)
@@ -98,7 +107,7 @@ func TestKubeoneDriverBranchesToHostedThroughHooks(t *testing.T) {
 	h.handle("GET /api/clusters/cl-h", 200, `{"data":{"status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-h/kubeconfig", 200, "kc\n")
 	d := kubeone.New(&driver.Deps{Paths: h.ctx.Paths, Runner: h.runner, Stderr: &h.errOut})
-	d.Hooks = h.ctx.KubeoneHooks()
+	d.Hooks = kubeoneHooks(h.ctx)
 	mustOK(t, d.Provision(context.Background(), "test.kubehz.dev"), h.output())
 	if _, err := os.Stat(filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")); err != nil {
 		t.Fatal("hosted provision did not land the kubeconfig")
@@ -124,7 +133,7 @@ func TestCapiDriverBranchesThroughHooks(t *testing.T) {
 	h.handle("GET /api/clusters/cl-c", 200, `{"data":{"status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-c/kubeconfig", 200, "kc\n")
 	d := capi.New(&driver.Deps{Paths: h.ctx.Paths, Runner: h.runner, Stderr: &h.errOut})
-	d.Hooks = h.ctx.CapiHooks()
+	d.Hooks = capiHooks(h.ctx)
 	mustOK(t, d.Provision(context.Background(), "test.kubehz.dev"), h.output())
 	if !h.anyReq("POST", "/api/clusters") {
 		t.Fatal("hosted create not called")
@@ -134,7 +143,7 @@ func TestCapiDriverBranchesThroughHooks(t *testing.T) {
 	h2 := newHarness(t)
 	h2.writeSpec("self.dev", "kind: Capi\nspec:\n  kubehz:\n    hosting: self\n")
 	d2 := capi.New(&driver.Deps{Paths: h2.ctx.Paths, Runner: h2.runner, Stderr: &h2.errOut})
-	d2.Hooks = h2.ctx.CapiHooks()
+	d2.Hooks = capiHooks(h2.ctx)
 	mustErr(t, d2.Provision(context.Background(), "self.dev"))
 	mustContain(t, h2.output(), "spec.managementCluster.domain is required for self-hosted CAPI")
 }
