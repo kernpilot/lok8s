@@ -252,18 +252,27 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 		return err
 	}
 
+	// The credentials reach kubectl as an env file on stdin
+	// (`--from-env-file=/dev/stdin`), never as arguments: argv is readable
+	// by every process on the host (ps, /proc). The bash passed
+	// `--from-literal=hcloud-token="${HCLOUD_TOKEN}"` and friends; this is
+	// a deliberate deviation. One stdin carries every key of the Secret.
 	var createArgs []string
+	var envFile string
 	switch provider {
 	case "hetzner":
 		createArgs = []string{
 			"create", "secret", "generic", secretName,
 			"--namespace", namespace,
 			"--kubeconfig", kubeconfig,
-			"--from-literal=hcloud-token=" + os.Getenv("HCLOUD_TOKEN"),
-			"--from-literal=robot-user=" + os.Getenv("HROBOT_USER"),
-			"--from-literal=robot-password=" + os.Getenv("HROBOT_PASSWORD"),
+			"--from-env-file=/dev/stdin",
 			"--dry-run=client", "-o", "yaml",
 		}
+		envFile = envFileLines(
+			"hcloud-token", os.Getenv("HCLOUD_TOKEN"),
+			"robot-user", os.Getenv("HROBOT_USER"),
+			"robot-password", os.Getenv("HROBOT_PASSWORD"),
+		)
 	case "aws":
 		// bash: `: "${AWS_REGION:?AWS_REGION required for AWS provider}"` —
 		// the ${:?} expansion aborts the shell; here it is a plain error.
@@ -275,11 +284,14 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 			"create", "secret", "generic", secretName,
 			"--namespace", namespace,
 			"--kubeconfig", kubeconfig,
-			"--from-literal=access-key-id=" + os.Getenv("AWS_ACCESS_KEY_ID"),
-			"--from-literal=secret-access-key=" + os.Getenv("AWS_SECRET_ACCESS_KEY"),
-			"--from-literal=region=" + os.Getenv("AWS_REGION"),
+			"--from-env-file=/dev/stdin",
 			"--dry-run=client", "-o", "yaml",
 		}
+		envFile = envFileLines(
+			"access-key-id", os.Getenv("AWS_ACCESS_KEY_ID"),
+			"secret-access-key", os.Getenv("AWS_SECRET_ACCESS_KEY"),
+			"region", os.Getenv("AWS_REGION"),
+		)
 	default:
 		ui.ErrorTo(stderr, "Unsupported provider for credentials: %s", provider)
 		return ui.Handled(fmt.Errorf("capi: unsupported provider for credentials: %s", provider))
@@ -292,7 +304,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	// apply's own failure is what surfaces). The create's error is ignored
 	// here for the same reason.
 	var manifest strings.Builder
-	_ = d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdout: &manifest})
+	_ = d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
 	return d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", kubeconfig, "-f", "-"},
@@ -347,4 +359,15 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 
 	ui.ErrorTo(stderr, "Timed out waiting for cluster %s (%ds)", clusterName, timeoutSeconds)
 	return ui.Handled(fmt.Errorf("capi: timed out waiting for cluster %s", clusterName))
+}
+
+// envFileLines renders key/value pairs as the `key=value` lines kubectl's
+// --from-env-file reads. A value must not contain a newline; the
+// credentials this feeds are tokens and names, which never do.
+func envFileLines(kv ...string) string {
+	var b strings.Builder
+	for i := 0; i+1 < len(kv); i += 2 {
+		b.WriteString(kv[i] + "=" + kv[i+1] + "\n")
+	}
+	return b.String()
 }

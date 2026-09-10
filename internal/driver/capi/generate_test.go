@@ -458,14 +458,19 @@ func TestEnsureCredentialsHetznerSecret(t *testing.T) {
 		"kubectl create secret generic test-production-credentials",
 		"--namespace capi-system",
 		"--kubeconfig /tmp/kubeconfig.yaml",
-		"--from-literal=hcloud-token=test-token",
-		"--from-literal=robot-user=",
-		"--from-literal=robot-password=",
+		"--from-env-file=/dev/stdin",
 		"--dry-run=client -o yaml",
 	} {
 		if !strings.Contains(create, want) {
 			t.Errorf("create argv missing %q:\n%s", want, create)
 		}
+	}
+	// The token travels on stdin, never on argv.
+	if strings.Contains(create, "test-token") || strings.Contains(create, "--from-literal") {
+		t.Errorf("credentials on argv:\n%s", create)
+	}
+	if want := "hcloud-token=test-token\nrobot-user=\nrobot-password=\n"; runner.stdins[0] != want {
+		t.Errorf("env file on stdin = %q, want %q", runner.stdins[0], want)
 	}
 	if got := argvLine(runner.calls[1]); got != "kubectl apply --kubeconfig /tmp/kubeconfig.yaml -f -" {
 		t.Errorf("apply argv = %q", got)
@@ -494,13 +499,11 @@ func TestEnsureCredentialsAWSSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	create := argvLine(runner.calls[0])
-	for _, want := range []string{
-		"--from-literal=access-key-id=AKIAIOSFODNN7EXAMPLE",
-		"--from-literal=region=eu-central-1",
-	} {
-		if !strings.Contains(create, want) {
-			t.Errorf("create argv missing %q", want)
-		}
+	if !strings.Contains(create, "--from-env-file=/dev/stdin") || strings.Contains(create, "AKIAIOSFODNN7EXAMPLE") || strings.Contains(create, "wJalrXUtnFEMI") {
+		t.Errorf("credentials must travel on stdin, not argv:\n%s", create)
+	}
+	if want := "access-key-id=AKIAIOSFODNN7EXAMPLE\nsecret-access-key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nregion=eu-central-1\n"; runner.stdins[0] != want {
+		t.Errorf("env file on stdin = %q, want %q", runner.stdins[0], want)
 	}
 }
 

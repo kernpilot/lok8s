@@ -74,12 +74,18 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 	}
 
 	url := apiURL + path
+	// The bearer token reaches curl through its config file on stdin
+	// (`--config -`), never as an argument: argv is readable by every
+	// process on the host (ps, /proc). The bash passed
+	// `--header "Authorization: Bearer ${KKP_TOKEN}"`; this is a deliberate
+	// deviation.
+	curlConfig := "header = " + curlConfigQuote("Authorization: Bearer "+token) + "\n"
 	curlArgs := []string{
 		"--silent",
 		"--show-error",
 		"--fail-with-body",
 		"--location",
-		"--header", "Authorization: Bearer " + token,
+		"--config", "-",
 		"--header", "Content-Type: application/json",
 		"--header", "Accept: application/json",
 		"--write-out", "\n%{http_code}",
@@ -113,6 +119,7 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		var buf strings.Builder
 		_ = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name: "curl", Args: append(append([]string{}, curlArgs...), url),
+			Stdin:  strings.NewReader(curlConfig),
 			Stdout: &buf, Stderr: &buf,
 		})
 		response, httpCode := splitHTTPCode(buf.String())
@@ -142,6 +149,12 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 
 	ui.ErrorTo(stderr, "KKP API: max retries (%d) exhausted for %s %s", maxRetries, method, path)
 	return "", ui.Handled(fmt.Errorf("kkp: max retries (%d) exhausted for %s %s", maxRetries, method, path))
+}
+
+// curlConfigQuote renders s as a double-quoted curl config value: a
+// backslash and a double quote are the two characters the parser unescapes.
+func curlConfigQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
 // splitHTTPCode mirrors the bash split of curl's output: the LAST line is

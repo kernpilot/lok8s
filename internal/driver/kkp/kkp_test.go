@@ -39,11 +39,19 @@ import (
 
 type fakeRunner struct {
 	calls   []execx.Cmd
+	stdins  []string
 	handler func(c execx.Cmd) error
 }
 
 func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
+	stdin := ""
+	if c.Stdin != nil {
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(c.Stdin)
+		stdin = b.String()
+	}
 	r.calls = append(r.calls, c)
+	r.stdins = append(r.stdins, stdin)
 	if r.handler != nil {
 		return r.handler(c)
 	}
@@ -340,7 +348,7 @@ func TestAPICurlArgvExact(t *testing.T) {
 	}
 	want := []string{
 		"--silent", "--show-error", "--fail-with-body", "--location",
-		"--header", "Authorization: Bearer test-kkp-token-abc123",
+		"--config", "-",
 		"--header", "Content-Type: application/json",
 		"--header", "Accept: application/json",
 		"--write-out", "\n%{http_code}",
@@ -353,6 +361,19 @@ func TestAPICurlArgvExact(t *testing.T) {
 	}
 	if strings.Join(got.Args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("curl argv:\n got %q\nwant %q", got.Args, want)
+	}
+	// The token travels in the config on stdin, never on argv.
+	if strings.Contains(strings.Join(got.Args, " "), "test-kkp-token-abc123") {
+		t.Fatalf("token on argv: %q", got.Args)
+	}
+	if want := "header = \"Authorization: Bearer test-kkp-token-abc123\"\n"; runner.stdins[0] != want {
+		t.Fatalf("curl config on stdin = %q, want %q", runner.stdins[0], want)
+	}
+}
+
+func TestCurlConfigQuoteEscapes(t *testing.T) {
+	if got, want := curlConfigQuote(`a"b\c`), `"a\"b\\c"`; got != want {
+		t.Fatalf("got %s, want %s", got, want)
 	}
 }
 
