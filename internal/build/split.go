@@ -106,39 +106,95 @@ type secretRef struct {
 }
 
 // Split splits the built artifacts.yaml per-resource (bash: build::split;
-// honors Options.NoSecrets).
+// honors Options.NoSecrets). The steps run in the bash order: the Secret
+// policy and recipients (fail closed before any file is written), the
+// staged non-Secret emit, the Secret emit, the stage post-conditions, the
+// swap.
 func Split(ctx context.Context, o Options) error {
-	stderr := o.stderr()
-	domainDir := filepath.Join(o.Paths.Clusters, o.Domain)
-	artifact := filepath.Join(domainDir, "artifacts.yaml")
-	outDir := filepath.Join(domainDir, "artifacts")
+	r, err := newSplitRun(o)
+	if err != nil {
+		return err
+	}
+	defer r.cleanup()
+	if err := r.emitNonSecrets(ctx); err != nil {
+		return err
+	}
+	if err := r.emitSecrets(ctx); err != nil {
+		return err
+	}
+	if err := r.verifyStage(); err != nil {
+		return err
+	}
+	if err := r.swapStage(); err != nil {
+		return err
+	}
+	suffix := ""
+	if r.noSecrets {
+		suffix = ", --no-secrets: committed Secrets left inert"
+	}
+	ui.Debugf(r.stderr, "split: %d file(s) → %s (%d sops Secret(s)%s)", r.emitted, r.outDir, r.secrets, suffix)
+	return nil
+}
 
-	if info, err := os.Stat(artifact); err != nil || info.Size() == 0 {
-		ui.Errorf(stderr, "no %s to split — build first", artifact)
-		return ErrHandled
+// splitRun is the state of one split: the paths, the Secret policy, the
+// scratch dirs and the counters the post-conditions check.
+type splitRun struct {
+	o         Options
+	stderr    io.Writer
+	artifact  string
+	outDir    string
+	noSecrets bool
+
+	docCount          int
+	secretRefs        []secretRef
+	actualSecretCount int
+	// secretCount is the number of Secrets to EMIT: the real count, or 0
+	// under --no-secrets.
+	secretCount int
+	encryptOn   string
+	sopsPath    string
+	sopsConfig  string
+	yqPath      string
+	yqOK        bool
+
+	tmpDir string
+	stage  string
+
+	emitted int
+	secrets int
+}
+
+// newSplitRun checks the artifact, resolves the Secret policy and the
+// recipients, and creates the scratch dirs (nothing under outDir is
+// touched until swapStage).
+func newSplitRun(o Options) (*splitRun, error) {
+	r := &splitRun{o: o, stderr: o.stderr()}
+	domainDir := filepath.Join(o.Paths.Clusters, o.Domain)
+	r.artifact = filepath.Join(domainDir, "artifacts.yaml")
+	r.outDir = filepath.Join(domainDir, "artifacts")
+
+	if info, err := os.Stat(r.artifact); err != nil || info.Size() == 0 {
+		ui.Errorf(r.stderr, "no %s to split — build first", r.artifact)
+		return nil, ErrHandled
 	}
 
 	// --no-secrets: the CI render path. CI has no secrets store and no age
 	// key, so it must NOT render, encrypt, prune, or even READ a Secret —
 	// yet it must still regenerate the non-Secret artifacts (e.g. after an
 	// image-automation pin bump). We therefore treat the render as having
-	// ZERO Secrets to emit (secretCount forced to 0 below → no recipient
-	// check, no sops config, no Secret loop, no secret-count
-	// post-condition), while keeping the ACTUAL count for the
-	// collision-check arithmetic (non-Secret docs = docCount - actual).
-	// Committed Secret.*.sops.yaml files stay wholly inert: never created,
-	// never re-encrypted, and — critically — EXCLUDED from the swap's prune
-	// (see the guard at the prune loop, the single dangerous edge this mode
-	// has to defend).
-	noSecrets := o.NoSecrets
-
-	docCount, secretRefs := scanArtifact(artifact)
-	actualSecretCount := len(secretRefs)
-	// In --no-secrets mode the Secret path is fully bypassed → treat as 0
-	// to emit.
-	secretCount := actualSecretCount
-	if noSecrets {
-		secretCount = 0
+	// ZERO Secrets to emit (secretCount forced to 0 → no recipient check,
+	// no sops config, no Secret loop, no secret-count post-condition),
+	// while keeping the ACTUAL count for the collision-check arithmetic
+	// (non-Secret docs = docCount - actual). Committed Secret.*.sops.yaml
+	// files stay wholly inert: never created, never re-encrypted, and —
+	// critically — EXCLUDED from the swap's prune (see the guard in
+	// swapStage, the single dangerous edge this mode has to defend).
+	r.noSecrets = o.NoSecrets
+	r.docCount, r.secretRefs = scanArtifact(r.artifact)
+	r.actualSecretCount = len(r.secretRefs)
+	r.secretCount = r.actualSecretCount
+	if r.noSecrets {
+		r.secretCount = 0
 	}
 
 	// Secret encryption policy (decoupled from the split trigger). Resolved
@@ -146,14 +202,14 @@ func Split(ctx context.Context, o Options) error {
 	// spec.build.encrypt.type still fails the build loudly. In --no-secrets
 	// mode it is irrelevant (no Secret is touched) — skip the read so a CI
 	// build never needs the encrypt spec valid.
-	encryptOn := "change"
-	if !noSecrets {
+	r.encryptOn = "change"
+	if !r.noSecrets {
 		_, on, err := EncryptMode(domainDir)
 		if err != nil {
-			ui.Errorf(stderr, "%s", err.Error())
-			return ErrHandled
+			ui.Errorf(r.stderr, "%s", err.Error())
+			return nil, ErrHandled
 		}
-		encryptOn = on
+		r.encryptOn = on
 	}
 
 	// Secrets in the render require declared recipients BEFORE any file is
@@ -162,27 +218,26 @@ func Split(ctx context.Context, o Options) error {
 	// format is validated (bech32 age public keys only — convert SSH keys
 	// with ssh-to-age first) before it is interpolated anywhere.
 	recipients := ""
-	sopsPath := ""
-	if secretCount > 0 {
+	if r.secretCount > 0 {
 		if specFile := SpecFile(domainDir); specFile != "" {
 			recipients = gitopsAgeRecipients(specFile)
 		}
 		if recipients == "" {
-			ui.Errorf(stderr, "split: %d Secret(s) in the render but no spec.gitops.age recipients — refusing to write plaintext Secrets. Declare the age public keys (reconciler key + break-glass) in the spec.", secretCount)
-			return ErrHandled
+			ui.Errorf(r.stderr, "split: %d Secret(s) in the render but no spec.gitops.age recipients — refusing to write plaintext Secrets. Declare the age public keys (reconciler key + break-glass) in the spec.", r.secretCount)
+			return nil, ErrHandled
 		}
-		for r := range strings.SplitSeq(recipients, ",") {
-			if !ageKeyRe.MatchString(r) {
-				ui.Errorf(stderr, "split: '%s' is not an age public key (spec.gitops.age)", r)
-				return ErrHandled
+		for rec := range strings.SplitSeq(recipients, ",") {
+			if !ageKeyRe.MatchString(rec) {
+				ui.Errorf(r.stderr, "split: '%s' is not an age public key (spec.gitops.age)", rec)
+				return nil, ErrHandled
 			}
 		}
 		path, ok := execx.Look(o.Paths, "sops")
 		if !ok {
-			ui.Errorf(stderr, "split: sops not found (required to encrypt Secrets) — install it (b install) or skip the split for this run with LOK8S_BUILD_SPLIT=0 / lo build --single")
-			return ErrHandled
+			ui.Errorf(r.stderr, "split: sops not found (required to encrypt Secrets) — install it (b install) or skip the split for this run with LOK8S_BUILD_SPLIT=0 / lo build --single")
+			return nil, ErrHandled
 		}
-		sopsPath = path
+		r.sopsPath = path
 	}
 
 	// Everything is assembled in temp dirs first; outDir is only touched in
@@ -193,37 +248,54 @@ func Split(ctx context.Context, o Options) error {
 	// so the final moves stay on one filesystem.
 	tmpDir, err := os.MkdirTemp("", "tmp.")
 	if err != nil {
-		ui.Errorf(stderr, "split: failed to shape %s", artifact)
-		return ErrHandled
+		ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+		return nil, ErrHandled
 	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	r.tmpDir = tmpDir
 	stage, err := os.MkdirTemp(domainDir, ".artifacts-stage.")
 	if err != nil {
-		ui.Errorf(stderr, "split: failed to shape %s", artifact)
-		return ErrHandled
+		r.cleanup()
+		ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+		return nil, ErrHandled
 	}
-	defer func() { _ = os.RemoveAll(stage) }()
+	r.stage = stage
 
 	// sops discovers a repo-level .sops.yaml from cwd and then REQUIRES a
 	// matching creation rule even when recipients are passed — give it a
 	// dedicated config (global --config flag; it is not accepted after the
 	// subcommand) whose catch-all rule carries the gitops recipients.
-	sopsConfig := filepath.Join(tmpDir, "sops-gitops.yaml")
-	if secretCount > 0 {
+	r.sopsConfig = filepath.Join(tmpDir, "sops-gitops.yaml")
+	if r.secretCount > 0 {
 		content := "creation_rules:\n  - age: '" + recipients + "'\n"
-		if err := os.WriteFile(sopsConfig, []byte(content), 0o600); err != nil {
-			ui.Errorf(stderr, "split: failed to shape %s", artifact)
-			return ErrHandled
+		if err := os.WriteFile(r.sopsConfig, []byte(content), 0o600); err != nil {
+			r.cleanup()
+			ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
+			return nil, ErrHandled
 		}
 	}
+	r.yqPath, r.yqOK = execx.Look(o.Paths, "yq")
+	return r, nil
+}
 
-	yqPath, yqOK := execx.Look(o.Paths, "yq")
+// cleanup drops the scratch dirs (idempotent).
+func (r *splitRun) cleanup() {
+	if r.tmpDir != "" {
+		_ = os.RemoveAll(r.tmpDir)
+		r.tmpDir = ""
+	}
+	if r.stage != "" {
+		_ = os.RemoveAll(r.stage)
+		r.stage = ""
+	}
+}
 
-	// NON-Secret documents: one yq pass shapes Jobs + filters Secrets OUT, a
-	// second splits into <Kind>.<namespace>.<name>.yml under the tmp dir.
-	streamPath := filepath.Join(tmpDir, "nonsecret.stream")
-	if !yqOK || execToFile(ctx, o.runner(), yqPath, []string{"eval", shapeExpr, artifact}, "", streamPath, stderr) != nil {
-		ui.Errorf(stderr, "split: failed to shape %s", artifact)
+// emitNonSecrets shapes the NON-Secret documents: one yq pass shapes Jobs
+// + filters Secrets OUT, a second splits into <Kind>.<namespace>.<name>.yml
+// under the tmp dir, then the files move into the stage as .yaml.
+func (r *splitRun) emitNonSecrets(ctx context.Context) error {
+	streamPath := filepath.Join(r.tmpDir, "nonsecret.stream")
+	if !r.yqOK || execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr) != nil {
+		ui.Errorf(r.stderr, "split: failed to shape %s", r.artifact)
 		return ErrHandled
 	}
 	// Guard the empty stream (a Secrets-only render): yq -s on empty stdin
@@ -231,16 +303,16 @@ func Split(ctx context.Context, o Options) error {
 	if info, err := os.Stat(streamPath); err == nil && info.Size() > 0 {
 		streamFile, err := os.Open(streamPath)
 		if err != nil {
-			ui.Errorf(stderr, "split: failed to split %s", artifact)
+			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
-		runErr := o.runner().Run(ctx, execx.Cmd{
-			Name: yqPath, Args: []string{"-s", splitExpr, "-"}, Dir: tmpDir,
-			Stdin: streamFile, Stdout: io.Discard, Stderr: stderr,
+		runErr := r.o.runner().Run(ctx, execx.Cmd{
+			Name: r.yqPath, Args: []string{"-s", splitExpr, "-"}, Dir: r.tmpDir,
+			Stdin: streamFile, Stdout: io.Discard, Stderr: r.stderr,
 		})
 		_ = streamFile.Close()
 		if runErr != nil {
-			ui.Errorf(stderr, "split: failed to split %s", artifact)
+			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
 		_ = os.Remove(streamPath)
@@ -253,154 +325,169 @@ func Split(ctx context.Context, o Options) error {
 	// excludes EVERY Secret in the render, so the expected non-Secret file
 	// count is docCount minus the REAL Secret count — even in --no-secrets
 	// mode where secretCount is forced to 0 for the emit path.
-	ymlFiles := globSorted(filepath.Join(tmpDir, "*.yml"))
-	if docCount-actualSecretCount != len(ymlFiles) {
-		ui.Errorf(stderr, "split: %d non-Secret documents rendered but %d files emitted — kind/namespace/name collision across API groups; not supported", docCount-actualSecretCount, len(ymlFiles))
+	ymlFiles := globSorted(filepath.Join(r.tmpDir, "*.yml"))
+	if r.docCount-r.actualSecretCount != len(ymlFiles) {
+		ui.Errorf(r.stderr, "split: %d non-Secret documents rendered but %d files emitted — kind/namespace/name collision across API groups; not supported", r.docCount-r.actualSecretCount, len(ymlFiles))
 		return ErrHandled
 	}
-
-	emitted := 0
 	for _, f := range ymlFiles {
 		base := filepath.Base(f)
-		if err := os.Rename(f, filepath.Join(stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
-			ui.Errorf(stderr, "split: failed to split %s", artifact)
+		if err := os.Rename(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
+			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
-		emitted++
+		r.emitted++
 	}
+	return nil
+}
 
-	// Secret documents: plaintext NEVER touches disk — each is streamed from
-	// the artifact straight into sops via stdin (--filename-override gives
-	// sops its input type hint). Selector inputs are guarded even though
-	// kustomize already validated them (defense against a crafted
-	// artifacts.yaml). (In --no-secrets mode the loop is skipped entirely
-	// and no Secret is read, decrypted, or written.)
-	secrets := 0
-	if !noSecrets {
-		for _, ref := range secretRefs {
-			ns, name := ref.ns, ref.name
-			if name == "" {
+// emitSecrets writes every Secret's sops twin into the stage: plaintext
+// NEVER touches disk — each is streamed from the artifact straight into
+// sops via stdin (--filename-override gives sops its input type hint).
+// Selector inputs are guarded even though kustomize already validated them
+// (defense against a crafted artifacts.yaml). In --no-secrets mode the
+// loop is skipped entirely and no Secret is read, decrypted, or written.
+func (r *splitRun) emitSecrets(ctx context.Context) error {
+	if !r.noSecrets {
+		for _, ref := range r.secretRefs {
+			if ref.name == "" {
 				continue
 			}
-			if !secretNameRe.MatchString(name) || (ns != "" && !secretNsRe.MatchString(ns)) {
-				ui.Errorf(stderr, "split: refusing Secret with non-RFC1123 metadata: ns='%s' name='%s'", ns, name)
-				return ErrHandled
+			if err := r.emitSecret(ctx, ref); err != nil {
+				return err
 			}
-			nsSeg := ""
-			if ns != "" {
-				nsSeg = "." + ns
-			}
-			outfile := filepath.Join(stage, "Secret"+nsSeg+"."+name+".sops.yaml")
-			prior := filepath.Join(outDir, "Secret"+nsSeg+"."+name+".sops.yaml")
-
-			// Capture the fresh render into memory (never a plaintext file).
-			// Feeds both the change-detection compare and the encrypt.
-			selectExpr := fmt.Sprintf(`select(.kind == "Secret" and .metadata.name == "%s" and (.metadata.namespace // "") == "%s")`, name, ns)
-			freshOut, err := execCapture(ctx, o.runner(), yqPath, []string{"eval", selectExpr, artifact}, nil, stderr)
-			if err != nil {
-				ui.Errorf(stderr, "split: failed to select Secret %s/%s", ns, name)
-				return ErrHandled
-			}
-			// Command-substitution semantics: strip trailing newlines.
-			fresh := strings.TrimRight(string(freshOut), "\n")
-
-			// encrypt.on: change — keep the committed twin byte-for-byte when
-			// it already decrypts to this canonical plaintext (rationale in
-			// secretUnchanged); any decrypt failure / mismatch / missing
-			// prior falls through to encrypt.
-			if encryptOn == "change" && secretUnchanged(ctx, o.runner(), sopsPath, prior, fresh) {
-				if err := copyPreserving(prior, outfile); err != nil {
-					ui.Errorf(stderr, "split: failed to carry forward unchanged Secret %s/%s", ns, name)
-					return ErrHandled
-				}
-				ui.Debugf(stderr, "split: Secret %s/%s unchanged — kept existing ciphertext (encrypt.on=change)", ns, name)
-			} else {
-				encrypt := execx.Cmd{
-					Name: sopsPath,
-					Args: []string{"--config", sopsConfig, "encrypt",
-						"--input-type", "yaml", "--output-type", "yaml",
-						"--encrypted-regex", `^(data|stringData)$`,
-						"--filename-override", "secret.yaml",
-						"--output", outfile, "/dev/stdin"},
-					Stdin: strings.NewReader(fresh), Stdout: io.Discard, Stderr: stderr,
-				}
-				if err := o.runner().Run(ctx, encrypt); err != nil {
-					ui.Errorf(stderr, "split: sops encrypt failed for Secret %s/%s", ns, name)
-					return ErrHandled
-				}
-			}
-			// Trust nothing: the file must exist AND carry sops metadata — a
-			// masked encrypt failure (exit 0, no/plain output) must not reach
-			// the swap.
-			if !fileNonEmpty(outfile) || !fileHasLinePrefix(outfile, "sops:") {
-				ui.Errorf(stderr, "split: %s missing or not sops-encrypted — aborting", filepath.Base(outfile))
-				return ErrHandled
-			}
-			secrets++
-			emitted++
+			r.secrets++
+			r.emitted++
 		}
 	}
-
 	// Count post-condition: a partial Secret listing (the bash process
 	// substitution could fail SILENTLY mid-list) would emit fewer Secrets
 	// than rendered and the swap below would prune the missing ones from
 	// the committed layout (and via a pruning reconciler, from the
 	// CLUSTER). Fail instead.
-	if secrets != secretCount {
-		ui.Errorf(stderr, "split: rendered %d Secret(s) but emitted %d — refusing the swap (listing failure?)", secretCount, secrets)
+	if r.secrets != r.secretCount {
+		ui.Errorf(r.stderr, "split: rendered %d Secret(s) but emitted %d — refusing the swap (listing failure?)", r.secretCount, r.secrets)
 		return ErrHandled
 	}
+	return nil
+}
 
-	// Post-conditions on the STAGE, before anything replaces the live dir:
-	// no plaintext Secret escaped, no unrendered template residue.
-	for _, f := range globSorted(filepath.Join(stage, "Secret.*.yaml")) {
-		if !strings.HasSuffix(f, ".sops.yaml") {
-			ui.Errorf(stderr, "split: plaintext Secret file(s) present in the staged output — aborting")
+// emitSecret stages one Secret's sops twin: kept byte-for-byte when the
+// committed twin already decrypts to the fresh render (encrypt.on=change),
+// else freshly encrypted; verified to be sops-encrypted either way.
+func (r *splitRun) emitSecret(ctx context.Context, ref secretRef) error {
+	ns, name := ref.ns, ref.name
+	if !secretNameRe.MatchString(name) || (ns != "" && !secretNsRe.MatchString(ns)) {
+		ui.Errorf(r.stderr, "split: refusing Secret with non-RFC1123 metadata: ns='%s' name='%s'", ns, name)
+		return ErrHandled
+	}
+	nsSeg := ""
+	if ns != "" {
+		nsSeg = "." + ns
+	}
+	outfile := filepath.Join(r.stage, "Secret"+nsSeg+"."+name+".sops.yaml")
+	prior := filepath.Join(r.outDir, "Secret"+nsSeg+"."+name+".sops.yaml")
+
+	// Capture the fresh render into memory (never a plaintext file).
+	// Feeds both the change-detection compare and the encrypt.
+	selectExpr := fmt.Sprintf(`select(.kind == "Secret" and .metadata.name == "%s" and (.metadata.namespace // "") == "%s")`, name, ns)
+	freshOut, err := execCapture(ctx, r.o.runner(), r.yqPath, []string{"eval", selectExpr, r.artifact}, nil, r.stderr)
+	if err != nil {
+		ui.Errorf(r.stderr, "split: failed to select Secret %s/%s", ns, name)
+		return ErrHandled
+	}
+	// Command-substitution semantics: strip trailing newlines.
+	fresh := strings.TrimRight(string(freshOut), "\n")
+
+	// encrypt.on: change — keep the committed twin byte-for-byte when
+	// it already decrypts to this canonical plaintext (rationale in
+	// secretUnchanged); any decrypt failure / mismatch / missing
+	// prior falls through to encrypt.
+	if r.encryptOn == "change" && secretUnchanged(ctx, r.o.runner(), r.sopsPath, prior, fresh) {
+		if err := copyPreserving(prior, outfile); err != nil {
+			ui.Errorf(r.stderr, "split: failed to carry forward unchanged Secret %s/%s", ns, name)
+			return ErrHandled
+		}
+		ui.Debugf(r.stderr, "split: Secret %s/%s unchanged — kept existing ciphertext (encrypt.on=change)", ns, name)
+	} else {
+		encrypt := execx.Cmd{
+			Name: r.sopsPath,
+			Args: []string{"--config", r.sopsConfig, "encrypt",
+				"--input-type", "yaml", "--output-type", "yaml",
+				"--encrypted-regex", `^(data|stringData)$`,
+				"--filename-override", "secret.yaml",
+				"--output", outfile, "/dev/stdin"},
+			Stdin: strings.NewReader(fresh), Stdout: io.Discard, Stderr: r.stderr,
+		}
+		if err := r.o.runner().Run(ctx, encrypt); err != nil {
+			ui.Errorf(r.stderr, "split: sops encrypt failed for Secret %s/%s", ns, name)
 			return ErrHandled
 		}
 	}
-	for _, f := range globSorted(filepath.Join(stage, "*.yaml")) {
+	// Trust nothing: the file must exist AND carry sops metadata — a
+	// masked encrypt failure (exit 0, no/plain output) must not reach
+	// the swap.
+	if !fileNonEmpty(outfile) || !fileHasLinePrefix(outfile, "sops:") {
+		ui.Errorf(r.stderr, "split: %s missing or not sops-encrypted — aborting", filepath.Base(outfile))
+		return ErrHandled
+	}
+	return nil
+}
+
+// verifyStage checks the post-conditions on the STAGE, before anything
+// replaces the live dir: no plaintext Secret escaped, no unrendered
+// template residue; then writes the .gitignore guard.
+func (r *splitRun) verifyStage() error {
+	for _, f := range globSorted(filepath.Join(r.stage, "Secret.*.yaml")) {
+		if !strings.HasSuffix(f, ".sops.yaml") {
+			ui.Errorf(r.stderr, "split: plaintext Secret file(s) present in the staged output — aborting")
+			return ErrHandled
+		}
+	}
+	for _, f := range globSorted(filepath.Join(r.stage, "*.yaml")) {
 		raw, err := os.ReadFile(f)
 		if err == nil && bytes.Contains(raw, []byte("${LOK8S_")) {
-			ui.Errorf(stderr, "split: unrendered ${LOK8S_*} residue in the staged output — check the envsubst whitelist/env")
+			ui.Errorf(r.stderr, "split: unrendered ${LOK8S_*} residue in the staged output — check the envsubst whitelist/env")
 			return ErrHandled
 		}
 	}
-
-	if err := os.WriteFile(filepath.Join(stage, ".gitignore"), []byte(gitignoreContent), 0o600); err != nil {
-		ui.Errorf(stderr, "split: failed to split %s", artifact)
+	if err := os.WriteFile(filepath.Join(r.stage, ".gitignore"), []byte(gitignoreContent), 0o600); err != nil {
+		ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
 		return ErrHandled
 	}
+	return nil
+}
 
-	// SWAP: prune previously generated files (uppercase-Kind ownership rule
-	// — env-owned lowercase files like kustomization.yaml/capi.yaml survive)
-	// so objects dropped from the render disappear from git (the
-	// reconciler's prune signal), then move the verified stage into place.
-	//
-	// --no-secrets GUARD: exclude committed Secret.*.sops.yaml from the
-	// prune. This mode's stage has NO Secrets (the loop above was skipped),
-	// so an unguarded [A-Z]*.yaml sweep would delete every committed
-	// encrypted Secret — and a pruning reconciler would then delete them
-	// from the CLUSTER. The whole point of --no-secrets is that committed
-	// Secrets stay INERT (never created, re-encrypted, or deleted), so keep
-	// them out of the sweep. In a normal build secretCount>0 emits fresh
-	// Secret twins into the stage and they replace the pruned ones, so the
-	// (unguarded) sweep there is correct.
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		ui.Errorf(stderr, "split: failed to split %s", artifact)
+// swapStage prunes previously generated files (uppercase-Kind ownership
+// rule — env-owned lowercase files like kustomization.yaml/capi.yaml
+// survive) so objects dropped from the render disappear from git (the
+// reconciler's prune signal), then moves the verified stage into place.
+//
+// --no-secrets GUARD: exclude committed Secret.*.sops.yaml from the
+// prune. This mode's stage has NO Secrets (the loop was skipped), so an
+// unguarded [A-Z]*.yaml sweep would delete every committed encrypted
+// Secret — and a pruning reconciler would then delete them from the
+// CLUSTER. The whole point of --no-secrets is that committed Secrets stay
+// INERT (never created, re-encrypted, or deleted), so keep them out of
+// the sweep. In a normal build secretCount>0 emits fresh Secret twins into
+// the stage and they replace the pruned ones, so the (unguarded) sweep
+// there is correct.
+func (r *splitRun) swapStage() error {
+	if err := os.MkdirAll(r.outDir, 0o755); err != nil {
+		ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
 		return ErrHandled
 	}
-	for _, name := range generatedFiles(outDir) {
+	for _, name := range generatedFiles(r.outDir) {
 		// In --no-secrets mode, never prune an encrypted Secret twin.
-		if noSecrets && strings.HasSuffix(name, ".sops.yaml") && strings.HasPrefix(name, "Secret.") {
+		if r.noSecrets && strings.HasSuffix(name, ".sops.yaml") && strings.HasPrefix(name, "Secret.") {
 			continue
 		}
-		_ = os.Remove(filepath.Join(outDir, name))
+		_ = os.Remove(filepath.Join(r.outDir, name))
 	}
 	// bash: `for f in "${stage}"/.gitignore "${stage}"/*` — the shell glob
 	// skips dotfiles, so .gitignore is named explicitly.
-	moves := []string{filepath.Join(stage, ".gitignore")}
-	for _, f := range globSorted(filepath.Join(stage, "*")) {
+	moves := []string{filepath.Join(r.stage, ".gitignore")}
+	for _, f := range globSorted(filepath.Join(r.stage, "*")) {
 		if !strings.HasPrefix(filepath.Base(f), ".") {
 			moves = append(moves, f)
 		}
@@ -409,17 +496,11 @@ func Split(ctx context.Context, o Options) error {
 		if _, err := os.Stat(f); err != nil {
 			continue
 		}
-		if err := os.Rename(f, filepath.Join(outDir, filepath.Base(f))); err != nil {
-			ui.Errorf(stderr, "split: failed to split %s", artifact)
+		if err := os.Rename(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
+			ui.Errorf(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
 	}
-
-	suffix := ""
-	if noSecrets {
-		suffix = ", --no-secrets: committed Secrets left inert"
-	}
-	ui.Debugf(stderr, "split: %d file(s) → %s (%d sops Secret(s)%s)", emitted, outDir, secrets, suffix)
 	return nil
 }
 
