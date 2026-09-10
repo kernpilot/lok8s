@@ -29,11 +29,10 @@ package bootstrap
 import (
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/bootstrapspec"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -46,17 +45,8 @@ var PlatformOwned = []string{"cilium", "ccm"}
 // compact-JSON string per element (bash: bootstrap::_resolve_entries — the
 // exact `yq -o=json -I=0 '.spec.bootstrap[]?'` stream shape, so map entries
 // stay one element and YAML comments are gone). Pure (no cluster access).
-// Three cases:
-//   - explicit non-empty spec.bootstrap → exactly those entries, in order
-//   - explicit empty `bootstrap: []`    → nothing (authoritative opt-out)
-//   - absent spec.bootstrap             → per-driver default
-//
-// The default is per-driver, NOT one-size-fits-all: only `lo` (kind) ships
-// without a CNI and must have one bootstrapped. KubeOne deploys its own
-// cilium during `kubeone apply`; Capi/Kkp clusters bring their CNI from the
-// management cluster / addon set. Defaulting those to [cilium] caused a
-// stray cilium apply on managed clusters. (The lo default is emitted as the
-// bare word `cilium`, matching the bash `echo "cilium"`.)
+// The cases and the per-driver default are bootstrapspec.Resolve's; the lo
+// default is the bare word `cilium`, matching the bash `echo "cilium"`.
 func ResolveEntries(clusterYAML, kind string) ([]string, error) {
 	raw, err := os.ReadFile(clusterYAML)
 	if err != nil {
@@ -66,74 +56,15 @@ func ResolveEntries(clusterYAML, kind string) ([]string, error) {
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return nil, err
 	}
-	spec := yqsem.MapGet(yqsem.Deref(&root), "spec")
-	bootstrapNode := yqsem.MapGet(spec, "bootstrap")
-	if bootstrapNode != nil && bootstrapNode.Kind == yaml.SequenceNode && len(bootstrapNode.Content) > 0 {
-		entries := make([]string, 0, len(bootstrapNode.Content))
-		for _, el := range bootstrapNode.Content {
-			entries = append(entries, compactJSON(yqsem.Deref(el)))
-		}
-		return entries, nil
-	}
-	// Empty result — distinguish a *defined* empty list (opt out) from an
-	// *absent* key (fall back to the per-driver default).
-	if yqsem.HasKey(spec, "bootstrap") {
+	items := bootstrapspec.Resolve(yqsem.Deref(&root), kind)
+	if len(items) == 0 {
 		return nil, nil
 	}
-	if kind == "lo" {
-		return []string{"cilium"}, nil
+	entries := make([]string, 0, len(items))
+	for _, it := range items {
+		entries = append(entries, it.Raw)
 	}
-	return nil, nil
-}
-
-// compactJSON renders a YAML node as compact single-line JSON, preserving
-// map key order — the `yq -o=json -I=0` shape the bash entry stream carries.
-func compactJSON(n *yaml.Node) string {
-	n = yqsem.Deref(n)
-	if n == nil {
-		return "null"
-	}
-	switch n.Kind {
-	case yaml.MappingNode:
-		var b strings.Builder
-		b.WriteByte('{')
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(jsonString(n.Content[i].Value))
-			b.WriteByte(':')
-			b.WriteString(compactJSON(n.Content[i+1]))
-		}
-		b.WriteByte('}')
-		return b.String()
-	case yaml.SequenceNode:
-		var b strings.Builder
-		b.WriteByte('[')
-		for i, el := range n.Content {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(compactJSON(el))
-		}
-		b.WriteByte(']')
-		return b.String()
-	case yaml.ScalarNode:
-		switch n.Tag {
-		case "!!null":
-			return "null"
-		case "!!bool", "!!int", "!!float":
-			return n.Value
-		default:
-			return jsonString(n.Value)
-		}
-	}
-	return "null"
-}
-
-func jsonString(s string) string {
-	q := strconv.Quote(s)
-	return q
+	return entries, nil
 }
 
 // nothingToApplyDebug is the shared debug line both empty-entry exits print

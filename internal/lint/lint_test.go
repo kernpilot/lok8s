@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/bootstrapspec"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -175,8 +176,8 @@ func TestCompactJSONMatchesYq(t *testing.T) {
 		`{"ccm":{"wait":true,"dependsOn":["a","b"]}}`,
 		`{"x":{"n":1.5,"s":"q<&>"}}`,
 	} {
-		if got := compactJSON(items[i]); got != want {
-			t.Errorf("compactJSON[%d] = %s, want %s", i, got, want)
+		if got := bootstrapspec.CompactJSON(items[i]); got != want {
+			t.Errorf("CompactJSON[%d] = %s, want %s", i, got, want)
 		}
 	}
 }
