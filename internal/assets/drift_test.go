@@ -126,7 +126,7 @@ func TestMirroredListMatchesSyncScript(t *testing.T) {
 	}
 	var inScript []string
 	inBlock := false
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "SUBTREES=("):

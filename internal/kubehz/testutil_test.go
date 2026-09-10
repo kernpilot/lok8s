@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -199,9 +200,9 @@ func (h *harness) anyReq(method, pathSubstr string) bool {
 
 func (h *harness) lastReq(method, pathSubstr string) *recordedReq {
 	rs := h.reqs()
-	for i := len(rs) - 1; i >= 0; i-- {
-		if rs[i].Method == method && (rs[i].Path == pathSubstr || strings.HasSuffix(rs[i].Path, pathSubstr)) {
-			return &rs[i]
+	for _, v := range slices.Backward(rs) {
+		if v.Method == method && (v.Path == pathSubstr || strings.HasSuffix(v.Path, pathSubstr)) {
+			return &v
 		}
 	}
 	return nil

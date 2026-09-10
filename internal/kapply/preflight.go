@@ -297,7 +297,7 @@ func (a *Applier) preflightCRD(ctx context.Context, name, mode, allow string, ku
 	// With the instances gone, customresourcecleanup completes near-instantly.
 	crdWait := envInt("KAPPLY_CRD_WAIT", 20)
 	gone := false
-	for i := 0; i < crdWait; i++ {
+	for range crdWait {
 		probe := append(append([]string{}, kubectlFlags...), "get", "crd", name)
 		if a.kubectlQuiet(ctx, "", probe...) != 0 {
 			gone = true

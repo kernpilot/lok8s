@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,7 +42,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// the render process but not envsubst-whitelisted.
 	env := map[string]string{}
 	if job.EnvLines != "" {
-		for _, kv := range strings.Split(job.EnvLines, "\n") {
+		for kv := range strings.SplitSeq(job.EnvLines, "\n") {
 			if kv == "" {
 				continue
 			}
@@ -58,11 +59,9 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// The list lives in PlatformOwned — one place to extend.
 	adBase := filepath.Base(job.Dir)
 	if e.Hosted {
-		for _, po := range PlatformOwned {
-			if adBase == po {
-				fmt.Fprintf(stderr, "[bootstrap] %s is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping\n", adBase)
-				return 0
-			}
+		if slices.Contains(PlatformOwned, adBase) {
+			fmt.Fprintf(stderr, "[bootstrap] %s is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping\n", adBase)
+			return 0
 		}
 	}
 

@@ -170,7 +170,7 @@ func Template(o TemplateOptions) string {
 				prefix = "  # "
 			}
 			if e.comment != "" {
-				for _, line := range strings.Split(e.comment, "\n") {
+				for line := range strings.SplitSeq(e.comment, "\n") {
 					b.WriteString(prefix + "# " + line + "\n")
 				}
 			}
@@ -198,7 +198,7 @@ func HasMarker(path string) bool {
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.TrimSpace(line) == Marker {
 			return true
 		}

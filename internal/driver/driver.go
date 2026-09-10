@@ -145,8 +145,7 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var ee *ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*ExitError](err); ok {
 		return ee.Code
 	}
 	if errors.Is(err, ErrDeclined) {
@@ -155,8 +154,7 @@ func ExitCode(err error) int {
 	if errors.Is(err, ErrFullLifecycle) {
 		return 100
 	}
-	var xe *exec.ExitError
-	if errors.As(err, &xe) {
+	if xe, ok := errors.AsType[*exec.ExitError](err); ok {
 		return xe.ExitCode()
 	}
 	return 1

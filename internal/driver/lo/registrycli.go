@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -101,7 +102,7 @@ func (d *Driver) RegistryClean(ctx context.Context, domain string, shared bool, 
 	net := rf.Network.Name
 	members, _ := d.output(ctx, "docker", "network", "inspect", net,
 		"-f", `{{range .Containers}}{{.Name}}{{"\n"}}{{end}}`)
-	for _, member := range strings.Fields(members) {
+	for member := range strings.FieldsSeq(members) {
 		ui.Warnf(errOut, "registry clean: detaching '%s' from %s (re-attaches on its cluster's next 'lo up')", member, net)
 		_ = d.runQuiet(ctx, "docker", "network", "disconnect", "-f", net, member)
 	}
@@ -152,13 +153,7 @@ func (d *Driver) RegistryStatus(ctx context.Context, domain string, shared, tty 
 		// Look up container by network — avoids name collisions across
 		// clusters.
 		psNames, _ := d.output(ctx, "docker", "ps", "--filter", "network="+regNetwork, "--format", "{{.Names}}")
-		onNetwork := false
-		for _, n := range strings.Split(psNames, "\n") {
-			if n == regName {
-				onNetwork = true
-				break
-			}
-		}
+		onNetwork := slices.Contains(strings.Split(psNames, "\n"), regName)
 
 		endpoint := rf.url(r.IP)
 
@@ -189,7 +184,7 @@ func (d *Driver) RegistryStatus(ctx context.Context, domain string, shared, tty 
 
 		fmt.Fprintf(out, "%s %-10s %-9s %s → %s · %s\n", marker, r.Name, label, regName, endpoint, state)
 		if getenv("DEBUG") != "" && repos != "" {
-			for _, repo := range strings.Split(repos, "\n") {
+			for repo := range strings.SplitSeq(repos, "\n") {
 				fmt.Fprintf(out, "      %s%s%s\n", cDim, repo, cOff)
 			}
 		}

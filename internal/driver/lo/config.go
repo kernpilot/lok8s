@@ -42,7 +42,7 @@ import (
 func validateIPs(subnet, metallbPool string, errOut io.Writer) error {
 	errors := 0
 
-	subnetIP := strings.SplitN(subnet, "/", 2)[0]
+	subnetIP, _, _ := strings.Cut(subnet, "/")
 	if !ipValidateFormat(subnetIP, errOut) {
 		errors++
 	}
@@ -74,8 +74,8 @@ func validateIPs(subnet, metallbPool string, errOut io.Writer) error {
 			poolStart = metallbPool[:i]
 		}
 		poolEnd := metallbPool
-		if i := strings.Index(metallbPool, "-"); i >= 0 {
-			poolEnd = metallbPool[i+1:]
+		if _, after, ok := strings.Cut(metallbPool, "-"); ok {
+			poolEnd = after
 		}
 		if !ipValidateFormat(poolStart, errOut) {
 			errors++
@@ -172,7 +172,7 @@ func readNetworkConfig(clusterYAML string, errOut io.Writer) error {
 		return fmt.Errorf("spec.network.cidr missing in %s", clusterYAML)
 	}
 
-	baseIP := strings.SplitN(netCIDR, "/", 2)[0]
+	baseIP, _, _ := strings.Cut(netCIDR, "/")
 
 	os.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", netName)
 	os.Setenv("LOK8S_NETWORK_CIDR", netCIDR)

@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -53,12 +54,7 @@ var (
 
 // inList is a membership test (bash: _lint_in_list).
 func inList(needle string, haystack []string) bool {
-	for _, item := range haystack {
-		if item == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 // allowedHint formats an allow-list as a comma-separated hint string
@@ -370,11 +366,9 @@ func grepDirMatches(dir, pattern string) bool {
 		if err != nil {
 			return true
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if re.MatchString(line) {
-				found = true
-				return false
-			}
+		if slices.ContainsFunc(strings.Split(string(raw), "\n"), re.MatchString) {
+			found = true
+			return false
 		}
 		return true
 	})

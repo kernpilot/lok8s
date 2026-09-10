@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -52,12 +53,7 @@ func shimEnv(p *config.Paths) []string {
 }
 
 func containsPathEntry(path, dir string) bool {
-	for _, entry := range strings.Split(path, string(os.PathListSeparator)) {
-		if entry == dir {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
 }
 
 func setEnv(env []string, key, value string) []string {

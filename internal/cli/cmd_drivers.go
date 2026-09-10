@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -179,10 +180,8 @@ func driverOrigin(paths *config.Paths, deps driversDeps, name string) string {
 			return reports[0].Origin
 		}
 	}
-	for _, n := range deps.names() {
-		if n == name {
-			return assets.OriginColBuiltin
-		}
+	if slices.Contains(deps.names(), name) {
+		return assets.OriginColBuiltin
 	}
 	return assets.OriginColLocalOnly
 }

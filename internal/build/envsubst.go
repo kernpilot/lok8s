@@ -23,11 +23,11 @@ import (
 func EnvsubstWhitelist() []string {
 	var names []string
 	for _, kv := range os.Environ() {
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
+		before, _, ok := strings.Cut(kv, "=")
+		if !ok {
 			continue
 		}
-		name := kv[:eq]
+		name := before
 		if strings.HasPrefix(name, "LOK8S_SPEC_") || strings.HasPrefix(name, "LOK8S_USER_") {
 			names = append(names, name)
 		}

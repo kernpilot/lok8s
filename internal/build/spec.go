@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -139,14 +140,14 @@ func specMetadataName(specFile string) string {
 // yq -r '(.spec.gitops.age // []) | join(",")').
 func gitopsAgeRecipients(specFile string) string {
 	entries := readSpec(specFile).Spec.Gitops.Age
-	out := ""
+	var out strings.Builder
 	for i, e := range entries {
 		if i > 0 {
-			out += ","
+			out.WriteString(",")
 		}
-		out += yqToString(e)
+		out.WriteString(yqToString(e))
 	}
-	return out
+	return out.String()
 }
 
 // yqToString mirrors yq's `tostring` scalar rendering for the values the

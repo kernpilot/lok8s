@@ -29,7 +29,7 @@ func parseArgshUsage(t *testing.T) map[string]commandSpec {
 	}
 
 	specs := map[string]commandSpec{}
-	for _, line := range strings.Split(text[start:], "\n") {
+	for line := range strings.SplitSeq(text[start:], "\n") {
 		if strings.TrimSpace(line) == ")" {
 			break
 		}

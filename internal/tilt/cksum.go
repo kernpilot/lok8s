@@ -11,7 +11,7 @@ func posixCksum(data []byte) uint32 {
 	var crc uint32
 	step := func(b byte) {
 		crc ^= uint32(b) << 24
-		for i := 0; i < 8; i++ {
+		for range 8 {
 			if crc&0x8000_0000 != 0 {
 				crc = (crc << 1) ^ 0x04C11DB7
 			} else {

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -167,12 +168,7 @@ func (h *healFixture) restarts() []string {
 }
 
 func (h *healFixture) called(marker string) bool {
-	for _, c := range h.calls {
-		if c == marker {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.calls, marker)
 }
 
 func TestHealRepairsOnlyTheDriftedNode(t *testing.T) {

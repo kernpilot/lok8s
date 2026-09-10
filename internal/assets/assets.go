@@ -36,6 +36,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -240,10 +241,8 @@ func cleanRel(rel string) (string, error) {
 	if c == "." || c == ".." || strings.HasPrefix(c, "../") {
 		return "", ErrInvalidRel
 	}
-	for _, seg := range strings.Split(c, "/") {
-		if seg == ".." {
-			return "", ErrInvalidRel
-		}
+	if slices.Contains(strings.Split(c, "/"), "..") {
+		return "", ErrInvalidRel
 	}
 	return c, nil
 }
@@ -551,7 +550,7 @@ func ReadMarker(file string) (*Marker, error) {
 	}
 	m := &Marker{Files: map[string]string{}}
 	inFiles := false
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}

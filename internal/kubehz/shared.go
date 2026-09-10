@@ -35,8 +35,8 @@ func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) 
 		return nil, ErrHandled
 	}
 	defaultSlug := domain
-	if i := strings.IndexByte(domain, '.'); i >= 0 {
-		defaultSlug = domain[:i]
+	if before, _, ok := strings.Cut(domain, "."); ok {
+		defaultSlug = before
 	}
 	sp := &SpaceConfig{
 		Slug:   doc.Or("", "spec", "kubehz", "space", "slug"),

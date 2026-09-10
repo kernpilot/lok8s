@@ -201,7 +201,7 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 		if d.networkExists(ctx, network) {
 			members, _ := d.output(ctx, "docker", "network", "inspect", network,
 				"-f", `{{range .Containers}}{{.Name}}{{"\n"}}{{end}}`)
-			for _, name := range strings.Fields(members) {
+			for name := range strings.FieldsSeq(members) {
 				if strings.HasPrefix(name, SharedRegistryPrefix) {
 					// Removed, not detached: a running mirror with a matching
 					// config-hash would reconcile "unchanged" while
@@ -263,7 +263,7 @@ func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName 
 
 	nodes, _ := d.output(ctx, "kind", "get", "nodes", "--name", clusterName)
 	memberSet := " " + members + " "
-	for _, node := range strings.Fields(nodes) {
+	for node := range strings.FieldsSeq(nodes) {
 		if strings.Contains(memberSet, " "+node+" ") {
 			continue
 		}
@@ -292,7 +292,7 @@ func (d *Driver) nodesOnRegistryNetwork(ctx context.Context, clusterName string)
 	}
 	nodes, _ := d.output(ctx, "kind", "get", "nodes", "--name", clusterName)
 	memberSet := " " + members + " "
-	for _, node := range strings.Fields(nodes) {
+	for node := range strings.FieldsSeq(nodes) {
 		if strings.Contains(memberSet, " "+node+" ") {
 			return true
 		}

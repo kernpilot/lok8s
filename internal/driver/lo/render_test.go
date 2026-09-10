@@ -214,7 +214,7 @@ func TestWriteCertsDSelfProtectingGitignore(t *testing.T) {
 	gi := filepath.Join(filepath.Dir(certsD), ".gitignore")
 	content := readFileT(t, gi)
 	hasStar, hasSentinel := false, false
-	for _, line := range bytes.Split([]byte(content), []byte("\n")) {
+	for line := range bytes.SplitSeq([]byte(content), []byte("\n")) {
 		if string(line) == "*" {
 			hasStar = true
 		}

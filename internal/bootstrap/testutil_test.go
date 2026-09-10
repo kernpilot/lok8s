@@ -178,7 +178,7 @@ func yqLike(t *testing.T, doc, path string) string {
 		t.Fatalf("parse: %v\n%s", err, doc)
 	}
 	cur := any(m)
-	for _, key := range strings.Split(path, ".") {
+	for key := range strings.SplitSeq(path, ".") {
 		mm, ok := cur.(map[string]any)
 		if !ok {
 			return "missing"

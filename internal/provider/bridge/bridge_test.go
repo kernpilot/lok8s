@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,12 +38,7 @@ func testLoader(t *testing.T) (*Loader, *fakeRunner, *strings.Builder) {
 }
 
 func hasEnv(c execx.Cmd, kv string) bool {
-	for _, e := range c.Env {
-		if e == kv {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Env, kv)
 }
 
 func TestLoadProbesThenCallsThroughBash(t *testing.T) {

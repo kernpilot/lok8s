@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
@@ -304,14 +305,12 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 	rank := minorRank(minor)
 	oldest := k8sSupportedMinors[0]
 
-	for _, s := range k8sSupportedMinors {
-		if s == minor {
-			r.emit(Finding{ID: id, Title: title, Severity: "high", Status: "pass",
-				Detail:      "Kubernetes " + minor + " is within the supported window (" + supported + ").",
-				Remediation: "Keep upgrading within the window; plan the next minor before this one reaches EOL.",
-				File:        specURI, Line: specLineno})
-			return
-		}
+	if slices.Contains(k8sSupportedMinors, minor) {
+		r.emit(Finding{ID: id, Title: title, Severity: "high", Status: "pass",
+			Detail:      "Kubernetes " + minor + " is within the supported window (" + supported + ").",
+			Remediation: "Keep upgrading within the window; plan the next minor before this one reaches EOL.",
+			File:        specURI, Line: specLineno})
+		return
 	}
 	if rank > minorRank(k8sLatestMinor) {
 		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "warn",

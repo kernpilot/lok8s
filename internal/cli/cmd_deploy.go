@@ -96,8 +96,7 @@ func deployRun(err error) error {
 	if errors.Is(err, deploy.ErrHandled) {
 		return ErrHandled
 	}
-	var ee *deploy.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*deploy.ExitError](err); ok {
 		exitNow(ee.Code)
 	}
 	return err

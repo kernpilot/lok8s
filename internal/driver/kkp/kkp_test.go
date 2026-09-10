@@ -613,10 +613,10 @@ func goldenSection(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parts := strings.Split(string(raw), "=== ")
-	for _, p := range parts {
-		if strings.HasPrefix(p, name+" ===\n") {
-			body := strings.TrimPrefix(p, name+" ===\n")
+	parts := strings.SplitSeq(string(raw), "=== ")
+	for p := range parts {
+		if after, ok := strings.CutPrefix(p, name+" ===\n"); ok {
+			body := after
 			return strings.TrimRight(body, "\n")
 		}
 	}

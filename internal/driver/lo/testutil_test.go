@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -257,7 +258,7 @@ func (f *fakeDocker) removeMember(network, name string) {
 		return
 	}
 	var kept []string
-	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(raw), "\n"), "\n") {
 		if line == "" || strings.HasSuffix(line, " "+name) {
 			continue
 		}
@@ -276,7 +277,7 @@ func (f *fakeDocker) members(network string) []string {
 		return nil
 	}
 	var out []string
-	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(raw), "\n"), "\n") {
 		if line != "" {
 			out = append(out, line)
 		}
@@ -285,12 +286,7 @@ func (f *fakeDocker) members(network string) []string {
 }
 
 func (f *fakeDocker) hasMemberIP(network, ipWithPrefix, name string) bool {
-	for _, m := range f.members(network) {
-		if m == ipWithPrefix+" "+name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(f.members(network), ipWithPrefix+" "+name)
 }
 
 // handle answers a docker execx.Cmd against the file-backed state.
@@ -346,7 +342,7 @@ func (f *fakeDocker) handle(c execx.Cmd) error {
 		return nil
 	case "run":
 		var name, ip, net, hash string
-		for i := 0; i < len(args); i++ {
+		for i := range args {
 			switch {
 			case args[i] == "--name" && i+1 < len(args):
 				name = args[i+1]
@@ -433,7 +429,7 @@ func (f *fakeDocker) handle(c execx.Cmd) error {
 		case "create":
 			var subnet, ipRange string
 			name := rest[len(rest)-1]
-			for i := 0; i < len(rest); i++ {
+			for i := range rest {
 				switch rest[i] {
 				case "--subnet":
 					subnet = rest[i+1]

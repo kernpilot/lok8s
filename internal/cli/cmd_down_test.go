@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -70,12 +71,7 @@ func newDownHarness(t *testing.T) *downHarness {
 }
 
 func (h *downHarness) acted_(s string) bool {
-	for _, a := range h.acted {
-		if a == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.acted, s)
 }
 
 func (h *downHarness) spec(t *testing.T, body string) {

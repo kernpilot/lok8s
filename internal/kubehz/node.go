@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -303,13 +304,7 @@ func (c *Context) AssertJoinCommand(line string) error {
 		if j := strings.IndexByte(flag, '='); j >= 0 {
 			flag = flag[:j]
 		}
-		allowed := false
-		for _, cand := range nodeJoinAllowedFlags {
-			if flag == cand {
-				allowed = true
-				break
-			}
-		}
+		allowed := slices.Contains(nodeJoinAllowedFlags, flag)
 		if !allowed {
 			c.errorf("kubehz: the platform sent a join flag this CLI will not run: %s", flag)
 			c.echoErr("  Nothing ran on this machine. This CLI runs only the join, token, CA-pin")

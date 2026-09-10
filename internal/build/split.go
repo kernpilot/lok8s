@@ -171,7 +171,7 @@ func Split(ctx context.Context, o Options) error {
 			ui.Errorf(stderr, "split: %d Secret(s) in the render but no spec.gitops.age recipients — refusing to write plaintext Secrets. Declare the age public keys (reconciler key + break-glass) in the spec.", secretCount)
 			return ErrHandled
 		}
-		for _, r := range strings.Split(recipients, ",") {
+		for r := range strings.SplitSeq(recipients, ",") {
 			if !ageKeyRe.MatchString(r) {
 				ui.Errorf(stderr, "split: '%s' is not an age public key (spec.gitops.age)", r)
 				return ErrHandled
@@ -623,7 +623,7 @@ func fileHasLinePrefix(path, prefix string) bool {
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.HasPrefix(line, prefix) {
 			return true
 		}

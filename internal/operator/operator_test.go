@@ -31,8 +31,7 @@ func TestConfigGoldens(t *testing.T) {
 func TestReadBindingContext(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := func(err error) int {
-		var ee *ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*ExitError](err); ok {
 			return ee.Code
 		}
 		return -1

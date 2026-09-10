@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -342,10 +343,5 @@ func generatedFiles(dir string) []string {
 }
 
 func containsPathEntry(path, dir string) bool {
-	for _, entry := range strings.Split(path, string(os.PathListSeparator)) {
-		if entry == dir {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
 }

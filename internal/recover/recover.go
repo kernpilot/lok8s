@@ -393,7 +393,7 @@ func (r *Runner) doctor(ctx context.Context) {
 		return
 	}
 	report := r.prov.Doctor(ctx, r.config)
-	for _, line := range strings.Split(strings.TrimSuffix(report, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(report, "\n"), "\n") {
 		// bash: IFS=$'\t' read -r status msg — tab-split; leading/trailing
 		// tabs are IFS whitespace and stripped from both fields.
 		line = strings.Trim(line, "\t")
@@ -521,7 +521,7 @@ func (r *Runner) readyNodes(ctx context.Context, kubeconfig string) int {
 	}
 	stderr := r.errOut()
 	count := 0
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for line := range strings.SplitSeq(buf.String(), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue

@@ -116,7 +116,7 @@ var mcpDestructiveOnlyFlags = map[string]bool{"force": true, "force-recreate": t
 var mcpNeverFlags = map[string]bool{"verbose": true, "help": true}
 
 func mcpSensitiveFlag(name string) bool {
-	for _, word := range strings.Split(strings.ToLower(name), "-") {
+	for word := range strings.SplitSeq(strings.ToLower(name), "-") {
 		if mcpSensitiveFlagWords[word] {
 			return true
 		}

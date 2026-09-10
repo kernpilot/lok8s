@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -108,10 +109,8 @@ func TestProvisionFailedNamespaceApplyDoesNotReportSuccess(t *testing.T) {
 	// that).
 	d, runner, _ := provisionSetup(t)
 	runner.handler = func(c execx.Cmd, stdin string) error {
-		for _, a := range c.Args {
-			if a == "namespace" {
-				return errors.New("namespace refused")
-			}
+		if slices.Contains(c.Args, "namespace") {
+			return errors.New("namespace refused")
 		}
 		return happyHandler(c, stdin)
 	}

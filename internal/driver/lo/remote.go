@@ -53,7 +53,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	// Wait for SSH: 30 × 2s.
 	ui.Debugf(errOut, "waiting for SSH on %s...", remoteIP)
 	sshOK := false
-	for attempts := 0; attempts < 30; attempts++ {
+	for attempts := range 30 {
 		if d.runQuiet(ctx, "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
 			remoteUser+"@"+remoteIP, "true") == nil {
 			sshOK = true
@@ -71,7 +71,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	// completion is best-effort; Docker readiness below is the hard gate).
 	ui.Debugf(errOut, "waiting for cloud-init to finish on %s...", remoteIP)
 	ciDone := false
-	for attempts := 0; attempts < 90; attempts++ {
+	for attempts := range 90 {
 		if d.runQuiet(ctx, "ssh", remoteUser+"@"+remoteIP,
 			"test -f /var/lib/cloud/instance/boot-finished") == nil {
 			ciDone = true
@@ -87,7 +87,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	// Wait for Docker: 60 × 3s.
 	ui.Debugf(errOut, "waiting for Docker on %s...", remoteIP)
 	dockerOK := false
-	for attempts := 0; attempts < 60; attempts++ {
+	for attempts := range 60 {
 		if d.runQuiet(ctx, "ssh", remoteUser+"@"+remoteIP, "command -v docker && docker info") == nil {
 			dockerOK = true
 			ui.Debugf(errOut, "Docker ready on %s (after %ds)", remoteIP, attempts*3)
@@ -107,7 +107,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 	ui.Debugf(errOut, "remote Docker: DOCKER_HOST=%s", os.Getenv("DOCKER_HOST"))
 
 	// Verify Docker is reachable via DOCKER_HOST: 10 × 3s.
-	for attempts := 0; attempts < 10; attempts++ {
+	for attempts := range 10 {
 		if d.runQuiet(ctx, "docker", "info") == nil {
 			ui.Debugf(errOut, "DOCKER_HOST verified (attempt %d)", attempts)
 			return nil
@@ -162,7 +162,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	}
 
 	rsyncArgs := []string{"-az", "--delete", "--info=progress2"}
-	for _, excl := range strings.Split(getenv("LOK8S_REMOTE_SYNC_EXCLUDE"), "\n") {
+	for excl := range strings.SplitSeq(getenv("LOK8S_REMOTE_SYNC_EXCLUDE"), "\n") {
 		if excl != "" {
 			rsyncArgs = append(rsyncArgs, "--exclude="+excl)
 		}

@@ -183,7 +183,7 @@ func firstField(s string) string {
 // doctor commands share it: they diagnose the PATH an operator's shell
 // resolves, not execx.Look's .bin-first lookup.
 func LookPath(path, tool string) (string, bool) {
-	for _, dir := range strings.Split(path, string(os.PathListSeparator)) {
+	for dir := range strings.SplitSeq(path, string(os.PathListSeparator)) {
 		if dir == "" {
 			dir = "."
 		}

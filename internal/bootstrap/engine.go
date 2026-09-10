@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -329,7 +330,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			}
 			nd.deps[cand[0]] = true
 		}
-		for g := 0; g < i; g++ {
+		for g := range i {
 			if nodes[g].entry.Wait {
 				nd.deps[g] = true
 			}
@@ -365,7 +366,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// fast with the offending names.
 	kahn := append([]int{}, indeg...)
 	var queue []int
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if kahn[i] == 0 {
 			queue = append(queue, i)
 		}
@@ -383,7 +384,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	}
 	if processed < n {
 		var cyc []string
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if kahn[i] > 0 {
 				cyc = append(cyc, nodes[i].entry.Name)
 			}
@@ -477,13 +478,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			// on, so the prompt cannot name a different set than the heal
 			// destroys.
 			for _, ns := range kapply.TerminatingNamespaces(out) {
-				seen := false
-				for _, known := range sched.parkedNS {
-					if known == ns {
-						seen = true
-						break
-					}
-				}
+				seen := slices.Contains(sched.parkedNS, ns)
 				if !seen {
 					sched.parkedNS = append(sched.parkedNS, ns)
 				}
@@ -756,7 +751,7 @@ func (e *Engine) hostedGate(ctx context.Context, domain, kubeconfig string) (boo
 	// user clusters register none — the CP runs as pods on the platform
 	// seed — but other hosted shapes might, and the message says "workers").
 	ready := 0
-	for _, line := range strings.Split(out.String(), "\n") {
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			continue

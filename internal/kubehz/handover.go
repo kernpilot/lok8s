@@ -214,8 +214,8 @@ func copyFile(src, dst string) error {
 // stripQuery drops everything from '?' on — for URLs that carry a credential
 // (presigned object-store links) and must not be echoed whole.
 func stripQuery(u string) string {
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		return u[:i]
+	if before, _, ok := strings.Cut(u, "?"); ok {
+		return before
 	}
 	return u
 }
@@ -330,7 +330,7 @@ func (c *Context) memberIdentity(ctx context.Context) (string, string, error) {
 
 // routeSrc is `awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}'`.
 func routeSrc(out string) string {
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		f := strings.Fields(line)
 		for i := 0; i+1 < len(f); i++ {
 			if f[i] == "src" {

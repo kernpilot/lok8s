@@ -58,7 +58,7 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 
 	var healed []string
 	nodes, _ := d.output(ctx, "kind", "get", "nodes", "--name", clusterName)
-	for _, node := range strings.Fields(nodes) {
+	for node := range strings.FieldsSeq(nodes) {
 		// The node's address on the CLUSTER network — the only correct
 		// --node-ip.
 		want, _ := d.output(ctx, "docker", "inspect", node,

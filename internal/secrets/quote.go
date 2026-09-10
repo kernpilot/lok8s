@@ -105,7 +105,7 @@ func ansicQuote(s string) string {
 			b.WriteString(`\\`)
 		default:
 			if r < 0x20 || r == 0x7f || (r > 0x7f && !unicode.IsPrint(r)) {
-				for j := 0; j < size; j++ {
+				for j := range size {
 					writeOctal(&b, s[i+j])
 				}
 			} else {

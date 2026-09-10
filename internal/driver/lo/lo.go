@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -302,12 +303,7 @@ func (d *Driver) isShared() bool {
 
 func (d *Driver) kindClusterExists(ctx context.Context, clusterName string) bool {
 	clusters, _ := d.output(ctx, "kind", "get", "clusters")
-	for _, line := range strings.Split(clusters, "\n") {
-		if line == clusterName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(clusters, "\n"), clusterName)
 }
 
 // Export is driver::export — spec-derived env consumed by spec.bootstrap

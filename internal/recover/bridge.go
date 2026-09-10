@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -24,13 +25,7 @@ import (
 func bridgePATH(p *config.Paths) string {
 	path := os.Getenv("PATH")
 	for _, dir := range []string{p.Lok8s, p.Bin} {
-		found := false
-		for _, entry := range strings.Split(path, string(os.PathListSeparator)) {
-			if entry == dir {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
 		if !found {
 			path = dir + string(os.PathListSeparator) + path
 		}
@@ -113,7 +108,7 @@ func (r *Runner) bashProvider(ctx context.Context, name string) (Provider, error
 		return nil, err
 	}
 	p := &bashProviderImpl{r: r, name: name}
-	for _, line := range strings.Split(out.String(), "\n") {
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		switch strings.TrimSpace(line) {
 		case "rebuild":
 			p.rebuild = true

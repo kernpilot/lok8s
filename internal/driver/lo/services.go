@@ -104,8 +104,8 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	// gateway shorthand = first IP of the LB pool ("a-b" → "a").
 	pool := yqsem.Or(yqsem.Lookup(root, "spec", "loadBalancer", "pool"), "")
 	gatewayIP := pool
-	if i := strings.Index(pool, "-"); i >= 0 {
-		gatewayIP = pool[:i]
+	if before, _, ok := strings.Cut(pool, "-"); ok {
+		gatewayIP = before
 	}
 
 	// (1) structured hosts → generated server blocks.

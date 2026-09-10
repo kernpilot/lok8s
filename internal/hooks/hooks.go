@@ -88,7 +88,7 @@ func (c *Context) parseSelector(selector string) ([]selectorPair, error) {
 		return nil, ErrHandled
 	}
 	var pairs []selectorPair
-	for _, clause := range strings.Split(selector, ",") {
+	for clause := range strings.SplitSeq(selector, ",") {
 		if !strings.Contains(clause, "=") {
 			ui.Errorf(c.ErrOut, "hooks: selector clause '%s' must be key=value", clause)
 			return nil, ErrHandled

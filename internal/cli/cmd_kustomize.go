@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 
 	"github.com/spf13/cobra"
 
@@ -189,12 +190,7 @@ func runMake(ctx context.Context, r execx.Runner, dir string, env []string, targ
 }
 
 func contains(list []string, v string) bool {
-	for _, s := range list {
-		if s == v {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, v)
 }
 
 func countSeparators(rel string) int {

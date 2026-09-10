@@ -37,7 +37,7 @@ func parseUsageArray(t *testing.T, file, fn string) map[string]commandSpec {
 		t.Fatalf("usage array not found for %s", fn)
 	}
 	specs := map[string]commandSpec{}
-	for _, line := range strings.Split(text[start:], "\n") {
+	for line := range strings.SplitSeq(text[start:], "\n") {
 		if strings.TrimSpace(line) == ")" {
 			break
 		}

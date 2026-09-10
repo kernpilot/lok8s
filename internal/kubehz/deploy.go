@@ -299,7 +299,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, owner, access string
 // podLines keeps only the `pod/<name>` lines of a merged capture — an
 // apiserver `Warning:` on stderr is not a pod.
 func podLines(out string) bool {
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(line, "pod/") {
 			return true
 		}

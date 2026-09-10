@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -75,7 +76,7 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 
 	root := yqsem.LoadNode(clusterYAML)
 
-	for i := 0; i < cpCount; i++ {
+	for i := range cpCount {
 		fmt.Fprintf(&b, "\n  - role: control-plane\n    image: \"kindest/node:%s\"", k8sVersion)
 		if i == 0 {
 			b.WriteString(`
@@ -135,7 +136,7 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 		}
 	}
 
-	for i := 0; i < workerCount; i++ {
+	for range workerCount {
 		fmt.Fprintf(&b, "\n  - role: worker\n    image: \"kindest/node:%s\"\n    extraMounts:\n%s",
 			k8sVersion, renderCertsDMount(certsDHost))
 	}
@@ -311,12 +312,7 @@ func gitignoreConforming(path string) bool {
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if line == "!.gitignore" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(string(raw), "\n"), "!.gitignore")
 }
 
 // OIDCAuthConfigNodePath is the fixed node path the apiserver
@@ -473,7 +469,7 @@ func renderAuthConfig(errOut io.Writer) (string, error) {
 	// emitted when a caBundle was supplied; otherwise system trust.
 	if caBundle != "" {
 		b.WriteString("      certificateAuthority: |\n")
-		for _, line := range strings.Split(caBundle, "\n") {
+		for line := range strings.SplitSeq(caBundle, "\n") {
 			fmt.Fprintf(&b, "        %s\n", line)
 		}
 	}

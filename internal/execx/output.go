@@ -33,8 +33,7 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var xe *exec.ExitError
-	if errors.As(err, &xe) {
+	if xe, ok := errors.AsType[*exec.ExitError](err); ok {
 		return xe.ExitCode()
 	}
 	var ce interface{ ExitCode() int }

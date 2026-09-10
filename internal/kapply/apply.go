@@ -467,7 +467,7 @@ func (a *Applier) finalizeNamespace(ctx context.Context, name string, kubectlFla
 		return
 	}
 	waitN := a.NsWait
-	for i := 0; i < waitN; i++ {
+	for range waitN {
 		probe := append(append([]string{}, kubectlFlags...), "get", "ns", name)
 		if rc := a.kubectlQuiet(ctx, "", probe...); rc != 0 {
 			return

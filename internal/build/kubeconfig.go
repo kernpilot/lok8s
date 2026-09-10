@@ -152,8 +152,8 @@ func resolveAPI(p *config.Paths, domainDir string) {
 	}
 	if api != "" {
 		host := api
-		if idx := strings.IndexByte(api, ':'); idx >= 0 {
-			host = api[:idx]
+		if before, _, ok := strings.Cut(api, ":"); ok {
+			host = before
 		}
 		port := "6443"
 		if idx := strings.LastIndexByte(api, ':'); idx >= 0 && api[idx+1:] != "" {

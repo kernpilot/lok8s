@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -184,12 +185,7 @@ func kindClusterListed(ctx context.Context, runner execx.Runner, cluster string)
 			return false
 		}
 	}
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if line == cluster {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(buf.String(), "\n"), cluster)
 }
 
 // cleanDeps extend downDeps with main::clean's own seams.
@@ -248,7 +244,7 @@ func runClean(ctx context.Context, deps cleanDeps, domainName, cluster string, a
 	}
 	var vols strings.Builder
 	_ = deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"volume", "ls", "--filter", "name=^" + cluster + "-", "-q"}, Stdout: &vols, Stderr: deps.stderr})
-	for _, v := range strings.Fields(vols.String()) {
+	for v := range strings.FieldsSeq(vols.String()) {
 		if err := deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"volume", "rm", "-f", v}, Stdout: deps.out, Stderr: deps.stderr}); err != nil {
 			return dispatchExit(err)
 		}

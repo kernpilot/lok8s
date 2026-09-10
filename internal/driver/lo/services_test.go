@@ -70,8 +70,8 @@ func TestCorednsCustomHostsBlockBytes(t *testing.T) {
 		joined := strings.Join(c.Args, " ")
 		if c.Name == "kubectl" && strings.Contains(joined, "create configmap coredns-custom") {
 			for _, a := range c.Args {
-				if strings.HasPrefix(a, "--from-file=") {
-					fromFileDir = strings.TrimPrefix(a, "--from-file=")
+				if after, ok := strings.CutPrefix(a, "--from-file="); ok {
+					fromFileDir = after
 				}
 			}
 			// Inspect the assembled dir NOW — coredns removes it afterwards.

@@ -71,7 +71,8 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 		ui.Errorf(stderr, "the KubeOne manifest rendered EMPTY from %s — refusing to continue", coreTmpl)
 		return fmt.Errorf("kubeone: manifest rendered empty from %s", coreTmpl)
 	}
-	out := strings.TrimRight(string(rendered), "\n")
+	var out strings.Builder
+	out.WriteString(strings.TrimRight(string(rendered), "\n"))
 
 	spec, err := loadClusterSpec(clusterYAML)
 	if err != nil {
@@ -79,7 +80,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	}
 	pools := workerPools(&spec.Spec.Workers)
 	if len(pools) > 0 {
-		out += "\n\ndynamicWorkers:"
+		out.WriteString("\n\ndynamicWorkers:")
 		for _, pool := range pools {
 			// The ONE pool-name rule (utils/spec.sh): the name lands in
 			// rendered YAML, so it is constrained to what a Kubernetes
@@ -101,10 +102,10 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 				return fmt.Errorf("kubeone: invalid type for pool %s", pool.name)
 			}
 
-			out += "\n- name: " + pool.name
-			out += "\n  replicas: " + replicas
-			out += "\n  providerSpec:"
-			out += "\n    cloudProviderSpec:"
+			out.WriteString("\n- name: " + pool.name)
+			out.WriteString("\n  replicas: " + replicas)
+			out.WriteString("\n  providerSpec:")
+			out.WriteString("\n    cloudProviderSpec:")
 
 			switch provider {
 			case "hetzner":
@@ -118,11 +119,11 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 					ui.Errorf(stderr, "Invalid image for pool %s: %s", pool.name, image)
 					return fmt.Errorf("kubeone: invalid image for pool %s", pool.name)
 				}
-				out += "\n      serverType: \"" + poolType + "\""
-				out += "\n      location: \"" + datacenter + "\""
-				out += "\n      image: \"" + image + "\""
-				out += "\n      networks:"
-				out += "\n        - \"" + os.Getenv("CLUSTER_NAME") + "\""
+				out.WriteString("\n      serverType: \"" + poolType + "\"")
+				out.WriteString("\n      location: \"" + datacenter + "\"")
+				out.WriteString("\n      image: \"" + image + "\"")
+				out.WriteString("\n      networks:")
+				out.WriteString("\n        - \"" + os.Getenv("CLUSTER_NAME") + "\"")
 			case "aws":
 				region := defaultStr(spec.Spec.AWS.Region, "eu-central-1")
 				ami := pool.field("ami", "")
@@ -134,10 +135,10 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 					ui.Errorf(stderr, "Invalid ami for pool %s: %s", pool.name, ami)
 					return fmt.Errorf("kubeone: invalid ami for pool %s", pool.name)
 				}
-				out += "\n      instanceType: \"" + poolType + "\""
-				out += "\n      region: \"" + region + "\""
+				out.WriteString("\n      instanceType: \"" + poolType + "\"")
+				out.WriteString("\n      region: \"" + region + "\"")
 				if ami != "" {
-					out += "\n      ami: \"" + ami + "\""
+					out.WriteString("\n      ami: \"" + ami + "\"")
 				}
 			default:
 				ui.Errorf(stderr, "Unsupported provider for dynamic workers: %s", provider)
@@ -147,7 +148,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	}
 
 	manifest := filepath.Join(outputDir, "kubeone.yaml")
-	if err := os.WriteFile(manifest, []byte(out+"\n"), 0o644); err != nil { // #nosec G306 -- the kubeone manifest; credentials reach kubeone through the environment
+	if err := os.WriteFile(manifest, []byte(out.String()+"\n"), 0o644); err != nil { // #nosec G306 -- the kubeone manifest; credentials reach kubeone through the environment
 		return err
 	}
 

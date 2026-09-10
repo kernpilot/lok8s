@@ -102,27 +102,13 @@ func TestGenerateMatchesBashGolden(t *testing.T) {
 }
 
 func firstDiff(a, b string) string {
-	max := len(a)
-	if len(b) < max {
-		max = len(b)
-	}
-	for i := 0; i < max; i++ {
+	for i := range min(len(a), len(b)) {
 		if a[i] != b[i] {
-			start := i - 40
-			if start < 0 {
-				start = 0
-			}
+			start := max(i-40, 0)
 			return "byte " + strings.TrimSpace(a[start:i]) + " ⇒ got " + a[i:min(i+40, len(a))] + " | want " + b[i:min(i+40, len(b))]
 		}
 	}
 	return "length mismatch"
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func TestGenerateLeavesProcessEnvUntouched(t *testing.T) {

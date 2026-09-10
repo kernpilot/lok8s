@@ -127,7 +127,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	netName := yqsem.Or(yqsem.Lookup(root, "spec", "registries", "shared", "network", "name"), SharedRegistryNetwork)
 	netCIDR := yqsem.Or(yqsem.Lookup(root, "spec", "registries", "shared", "network", "cidr"), SharedRegistryCIDR)
 
-	sharedBase := strings.SplitN(netCIDR, "/", 2)[0]
+	sharedBase, _, _ := strings.Cut(netCIDR, "/")
 	projectNetwork := envOr("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
 
 	// Framework-private registries (always on project subnet).

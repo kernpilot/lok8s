@@ -6,7 +6,8 @@ run:
 # The gate for a 65k-line port from bash. `standard` (errcheck, govet,
 # ineffassign, staticcheck, unused) plus the checks that catch real defects
 # in a port (misspell, unconvert, gocritic, errorlint — every sentinel
-# comparison goes through errors.Is so a %w wrap anywhere still matches). revive and unparam are OFF:
+# comparison goes through errors.Is so a %w wrap anywhere still matches;
+# modernize: the stdlib idioms the fixer already applied stay applied). revive and unparam are OFF:
 # revive's naming/comment rules and unparam's "always receives X" produce
 # hundreds of findings against code that mirrors bash function signatures
 # on purpose (the parity harnesses pin the behaviour, not the shape).
@@ -14,6 +15,7 @@ linters:
   default: standard
   enable:
     - errorlint
+    - modernize
     - misspell
     - unconvert
     - gocritic

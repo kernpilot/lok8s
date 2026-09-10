@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -587,12 +588,7 @@ func (d *Driver) kindClusterExists(ctx context.Context, name string) bool {
 	}); err != nil {
 		return false
 	}
-	for _, line := range strings.Split(out.String(), "\n") {
-		if line == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(out.String(), "\n"), name)
 }
 
 // ensureLocalMgmt ports capi::ensure_local_mgmt: create (or reuse) a LOCAL

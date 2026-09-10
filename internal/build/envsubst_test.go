@@ -1,6 +1,7 @@
 package build
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -58,12 +59,7 @@ func TestEnvsubstWhitelist(t *testing.T) {
 	t.Setenv("NOT_LOK8S_SPEC_X", "4")
 	names := EnvsubstWhitelist()
 	has := func(want string) bool {
-		for _, n := range names {
-			if n == want {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(names, want)
 	}
 	if !has("LOK8S_SPEC_WLTEST") || !has("LOK8S_USER_WLTEST") {
 		t.Errorf("whitelist missing LOK8S_(SPEC|USER)_ vars: %v", names)

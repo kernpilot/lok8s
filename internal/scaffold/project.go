@@ -220,7 +220,7 @@ func WriteBYAML(bin, content string, dryRun bool, out io.Writer) error {
 		fmt.Fprintf(out, "Kept %s (exists; matches the template)\n", res.Path)
 	case res.Diff != "":
 		fmt.Fprintf(out, "Kept %s (exists; never overwritten). It differs from the template this lo would write:\n", res.Path)
-		for _, line := range strings.Split(strings.TrimRight(res.Diff, "\n"), "\n") {
+		for line := range strings.SplitSeq(strings.TrimRight(res.Diff, "\n"), "\n") {
 			fmt.Fprintf(out, "    %s\n", line)
 		}
 		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo init toolchain`.")
@@ -256,7 +256,7 @@ func appendGitignore(path string, out io.Writer) error {
 	existing := map[string]bool{}
 	raw, err := os.ReadFile(path)
 	if err == nil {
-		for _, line := range strings.Split(string(raw), "\n") {
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			existing[strings.TrimSpace(line)] = true
 		}
 	}

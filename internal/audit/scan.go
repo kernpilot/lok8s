@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -74,11 +75,8 @@ func grepCountFiles(re *regexp.Regexp, files []string) int {
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if re.MatchString(line) {
-				n++
-				break
-			}
+		if slices.ContainsFunc(strings.Split(string(raw), "\n"), re.MatchString) {
+			n++
 		}
 	}
 	return n
@@ -109,7 +107,7 @@ func plaintextHits(files []string) int {
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			for _, m := range reHTTPURL.FindAllString(line, -1) {
 				if reHTTPExclude.MatchString(m) {
 					continue

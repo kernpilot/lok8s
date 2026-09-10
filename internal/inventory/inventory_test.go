@@ -69,7 +69,7 @@ func fieldString(t *testing.T, out, path string) string {
 		t.Fatalf("not JSON: %v\n%s", err, out)
 	}
 	var cur any = doc
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, ok := cur.(map[string]any)
 		if !ok {
 			t.Fatalf("path %s: not an object at %s", path, seg)

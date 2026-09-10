@@ -69,7 +69,7 @@ func renderRegistryConfig(configFile, url string, tls bool) (string, error) {
 	// (child) lines until the next top-level key.
 	var kept []string
 	skip := false
-	for _, line := range strings.Split(base, "\n") {
+	for line := range strings.SplitSeq(base, "\n") {
 		if strings.HasPrefix(line, "http:") {
 			skip = true
 			continue
@@ -329,7 +329,7 @@ func (d *Driver) registriesTLSNudge(ctx context.Context, errOut io.Writer) {
 func (d *Driver) registryIPHolder(ctx context.Context, network, ip string) string {
 	out, _ := d.output(ctx, "docker", "network", "inspect", network,
 		"-f", `{{range .Containers}}{{.IPv4Address}} {{.Name}}{{"\n"}}{{end}}`)
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && strings.HasPrefix(fields[0], ip+"/") {
 			return fields[1]

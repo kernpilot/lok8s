@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -79,13 +80,7 @@ func (l *Loader) runner() execx.Runner {
 func PathEnv(p *config.Paths) string {
 	path := os.Getenv("PATH")
 	for _, dir := range []string{p.Lok8s, p.Bin} {
-		found := false
-		for _, entry := range strings.Split(path, string(os.PathListSeparator)) {
-			if entry == dir {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
 		if !found {
 			path = dir + string(os.PathListSeparator) + path
 		}
@@ -215,7 +210,7 @@ func (p *Provider) CredentialData(ctx context.Context, configFile string) (map[s
 		return nil, err
 	}
 	data := map[string]string{}
-	for _, line := range strings.Split(out.String(), "\n") {
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		k, v, ok := strings.Cut(line, "=")
 		if !ok || k == "" {
 			continue

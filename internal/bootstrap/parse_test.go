@@ -226,7 +226,7 @@ func TestParseEntryValuesEnvWait(t *testing.T) {
 	}
 	for _, want := range []string{"LOK8S_USER_FOO=bar", "LOK8S_USER_BAZ=qux"} {
 		found := false
-		for _, l := range strings.Split(e.EnvLines, "\n") {
+		for l := range strings.SplitSeq(e.EnvLines, "\n") {
 			if l == want {
 				found = true
 			}
