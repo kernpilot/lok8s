@@ -20,12 +20,13 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // expose starts the nginx proxy container in front of the cluster (bash:
 // lo::expose).
 func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, out, errOut io.Writer) error {
-	domain := yqRaw(loadYAML(clusterYAML), "spec", "cluster", "domain")
+	domain := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(clusterYAML), "spec", "cluster", "domain"))
 
 	proxyName := clusterName + "-proxy"
 	network := getenv("KIND_EXPERIMENTAL_DOCKER_NETWORK")

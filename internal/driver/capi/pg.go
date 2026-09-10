@@ -25,6 +25,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // injectPlacementGroups applies the opt-in spread placement groups to the
@@ -37,7 +39,7 @@ func injectPlacementGroups(rendered string) (string, error) {
 		if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
 			return "", fmt.Errorf("capi: placement-group injection: %w", err)
 		}
-		m := yderef(&root)
+		m := yqsem.Deref(&root)
 		if m == nil || m.Kind != yaml.MappingNode {
 			continue
 		}
@@ -92,7 +94,7 @@ func pgList() *yaml.Node {
 // ── yaml.Node edit helpers (the kubeone yamledit idiom) ────
 
 func mapValue(m *yaml.Node, key string) *yaml.Node {
-	m = yderef(m)
+	m = yqsem.Deref(m)
 	if m == nil || m.Kind != yaml.MappingNode {
 		return nil
 	}
@@ -105,7 +107,7 @@ func mapValue(m *yaml.Node, key string) *yaml.Node {
 }
 
 func mapScalar(m *yaml.Node, key string) string {
-	v := yderef(mapValue(m, key))
+	v := yqsem.Deref(mapValue(m, key))
 	if v == nil || v.Kind != yaml.ScalarNode {
 		return ""
 	}
@@ -115,7 +117,7 @@ func mapScalar(m *yaml.Node, key string) string {
 func ensureMapPath(root *yaml.Node, keys ...string) *yaml.Node {
 	cur := root
 	for _, key := range keys {
-		next := yderef(mapValue(cur, key))
+		next := yqsem.Deref(mapValue(cur, key))
 		if next == nil || next.Kind != yaml.MappingNode {
 			next = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			setKey(cur, key, next)

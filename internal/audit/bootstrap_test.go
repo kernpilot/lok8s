@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 func entriesFor(t *testing.T, a *Auditor, spec, kind string) []bootstrapEntry {
@@ -86,7 +88,7 @@ spec:
 	if len(entries) != 1 || !entries[0].inlineInclude {
 		t.Fatalf("%+v", entries)
 	}
-	if v := yqRenderNode(lookupPath(entries[0].inline, "encryption", "enabled")); v != "true" {
+	if v := yqRenderNode(yqsem.Lookup(entries[0].inline, "encryption", "enabled")); v != "true" {
 		t.Errorf("legacy inline values lost: %q", v)
 	}
 }
@@ -106,7 +108,7 @@ spec:
 	if len(entries) != 1 || !entries[0].inlineInclude {
 		t.Fatalf("%+v", entries)
 	}
-	if v := yqRenderNode(lookupPath(entries[0].inline, "policyAuditMode")); v != "false" {
+	if v := yqRenderNode(yqsem.Lookup(entries[0].inline, "policyAuditMode")); v != "false" {
 		t.Errorf("values not extracted: %q", v)
 	}
 }
@@ -145,10 +147,10 @@ spec:
 		t.Fatalf("%+v", entries)
 	}
 	// Files pre-merge in list order with inline values: ON TOP.
-	if v := yqRenderNode(lookupPath(entries[0].inline, "policyAuditMode")); v != "false" {
+	if v := yqRenderNode(yqsem.Lookup(entries[0].inline, "policyAuditMode")); v != "false" {
 		t.Errorf("inline must override valueFiles: %q", v)
 	}
-	if v := yqRenderNode(lookupPath(entries[0].inline, "keep")); v != "1" {
+	if v := yqRenderNode(yqsem.Lookup(entries[0].inline, "keep")); v != "1" {
 		t.Errorf("valueFiles content lost: %q", v)
 	}
 }
@@ -230,16 +232,16 @@ func TestMergeYAMLDocsSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v := yqRenderNode(lookupPath(merged, "a")); v != "false" {
+	if v := yqRenderNode(yqsem.Lookup(merged, "a")); v != "false" {
 		t.Errorf("scalar replace: %q", v)
 	}
-	if v := yqRenderNode(lookupPath(merged, "m", "x")); v != "1" {
+	if v := yqRenderNode(yqsem.Lookup(merged, "m", "x")); v != "1" {
 		t.Errorf("maps must deep-merge: %q", v)
 	}
-	if v := yqRenderNode(lookupPath(merged, "m", "y")); v != "2" {
+	if v := yqRenderNode(yqsem.Lookup(merged, "m", "y")); v != "2" {
 		t.Errorf("maps must deep-merge: %q", v)
 	}
-	if n := lookupPath(merged, "list"); n == nil || len(n.Content) != 1 {
+	if n := yqsem.Lookup(merged, "list"); n == nil || len(n.Content) != 1 {
 		t.Errorf("lists must REPLACE, not concatenate")
 	}
 
@@ -255,7 +257,7 @@ func TestMergeYAMLDocsSemantics(t *testing.T) {
 	f4 := filepath.Join(dir, "4.yaml")
 	writeFileT(t, f4, "null\n")
 	merged, err = mergeYAMLDocs([]string{f1, f4}, nil)
-	if err != nil || yqRenderNode(lookupPath(merged, "a")) != "true" {
+	if err != nil || yqRenderNode(yqsem.Lookup(merged, "a")) != "true" {
 		t.Errorf("null doc must be a no-op (err=%v)", err)
 	}
 }
@@ -266,14 +268,14 @@ func TestYqRenderPreservesLiterals(t *testing.T) {
 	writeFileT(t, f, "a: ~\nb: True\nc: \"true\"\nd: 1.0\n")
 	doc := firstDocNode(f)
 	for k, want := range map[string]string{"a": "~", "b": "True", "c": "true", "d": "1.0"} {
-		if got := yqRenderNode(lookupPath(doc, k)); got != want {
+		if got := yqRenderNode(yqsem.Lookup(doc, k)); got != want {
 			t.Errorf("%s renders %q, want %q (yq preserves scalar style)", k, got, want)
 		}
 	}
-	if got := yqRenderNode(lookupPath(doc, "missing")); got != "null" {
+	if got := yqRenderNode(yqsem.Lookup(doc, "missing")); got != "null" {
 		t.Errorf("absent key renders %q, want null", got)
 	}
-	if strings.TrimSpace(altNode(lookupPath(doc, "a"), "def")) != "def" {
+	if strings.TrimSpace(altNode(yqsem.Lookup(doc, "a"), "def")) != "def" {
 		t.Errorf("`//` must treat null as empty")
 	}
 }

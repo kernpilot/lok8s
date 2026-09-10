@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // kubeconfigTunnel opens an SSH tunnel for the k8s API and rewrites the
@@ -75,9 +76,9 @@ func (d *Driver) kubeconfigTunnel(ctx context.Context, kubeconfigPath, remoteUse
 // kubeconfigServerNode finds .clusters[0].cluster.server in a kubeconfig
 // document (the same path the bash yq expressions addressed).
 func kubeconfigServerNode(root *yaml.Node) *yaml.Node {
-	clusters := ylookup(root, "clusters")
+	clusters := yqsem.Lookup(root, "clusters")
 	if clusters == nil || clusters.Kind != yaml.SequenceNode || len(clusters.Content) == 0 {
 		return nil
 	}
-	return ylookup(clusters.Content[0], "cluster", "server")
+	return yqsem.Lookup(clusters.Content[0], "cluster", "server")
 }

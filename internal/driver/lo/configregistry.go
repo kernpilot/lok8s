@@ -33,6 +33,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // Registry is one entry of .registries.json. Field order = JSON key order =
@@ -87,7 +89,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 		return "", fmt.Errorf("registry config: network config not read")
 	}
 
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
 	// Read shared settings from spec. Default: NOT shared (flipped 2026-08-17,
 	// was true). Shared mode dual-homes every kind node onto the registry
@@ -96,7 +98,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	// --node-ip to the registry network, silently black-holing every route
 	// INTO the node (observed live; see HealNodeIPs). Cross-project mirror
 	// sharing is worth opting into, not a topology to impose by default.
-	sharedEnabled := yqRaw(root, "spec", "registries", "shared", "enabled")
+	sharedEnabled := yqsem.Raw(yqsem.Lookup(root, "spec", "registries", "shared", "enabled"))
 	if sharedEnabled == "null" || sharedEnabled == "" {
 		sharedEnabled = "false"
 	}
@@ -106,7 +108,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	// by the dev CA at CAROOT — no `insecure-registries` needed. Opt out with
 	// `tls: false` (plain HTTP on :80, requires the registry IP range in
 	// `insecure-registries`).
-	tlsEnabled := yqRaw(root, "spec", "registries", "tls")
+	tlsEnabled := yqsem.Raw(yqsem.Lookup(root, "spec", "registries", "tls"))
 	switch tlsEnabled {
 	case "false":
 	case "true", "null", "":
@@ -122,8 +124,8 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 		regPort = RegistryPortTLS
 	}
 
-	netName := yqOr(root, SharedRegistryNetwork, "spec", "registries", "shared", "network", "name")
-	netCIDR := yqOr(root, SharedRegistryCIDR, "spec", "registries", "shared", "network", "cidr")
+	netName := yqsem.Or(yqsem.Lookup(root, "spec", "registries", "shared", "network", "name"), SharedRegistryNetwork)
+	netCIDR := yqsem.Or(yqsem.Lookup(root, "spec", "registries", "shared", "network", "cidr"), SharedRegistryCIDR)
 
 	sharedBase := strings.SplitN(netCIDR, "/", 2)[0]
 	projectNetwork := envOr("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
@@ -140,7 +142,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	// Collect mirrors (user-defined or defaults).
 	type mirror struct{ name, url string }
 	var mirrors []mirror
-	specMirrors := yqSeq(root, "spec", "registries", "mirrors")
+	specMirrors := yqsem.SeqItems(yqsem.Lookup(root, "spec", "registries", "mirrors"))
 	if len(specMirrors) == 0 {
 		mirrors = []mirror{
 			{"io-docker", "https://registry-1.docker.io"},
@@ -154,8 +156,8 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 			// "null" PASSES the mirror-name regex, so the bash accepted it and
 			// failed later on the url check (or created a mirror named
 			// "null"). Kept as-is: bash wins over tidiness.
-			name := yqRaw(m, "name")
-			url := yqOr(m, "", "url")
+			name := yqsem.Raw(yqsem.Lookup(m, "name"))
+			url := yqsem.Or(yqsem.Lookup(m, "url"), "")
 
 			if !validateMirrorName(name, errOut) {
 				return "", fmt.Errorf("invalid mirror name %q", name)

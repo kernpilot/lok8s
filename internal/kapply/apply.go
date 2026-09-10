@@ -43,6 +43,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
 )
 
@@ -370,53 +371,12 @@ func parseManifestDocs(manifest string) []manifestDoc {
 			break
 		}
 		d := manifestDoc{node: &n}
-		d.kind = docScalar(&n, "kind")
-		d.name = docScalar(&n, "metadata", "name")
-		d.namespace = docScalar(&n, "metadata", "namespace")
+		d.kind = yqsem.Scalar(yqsem.Lookup(&n, "kind"))
+		d.name = yqsem.Scalar(yqsem.Lookup(&n, "metadata", "name"))
+		d.namespace = yqsem.Scalar(yqsem.Lookup(&n, "metadata", "namespace"))
 		docs = append(docs, d)
 	}
 	return docs
-}
-
-func deref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-func mapGet(n *yaml.Node, key string) *yaml.Node {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return deref(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
-func docScalar(n *yaml.Node, path ...string) string {
-	cur := deref(n)
-	for _, key := range path {
-		cur = mapGet(cur, key)
-		if cur == nil {
-			return ""
-		}
-	}
-	if cur.Kind != yaml.ScalarNode {
-		return ""
-	}
-	return cur.Value
 }
 
 func marshalDoc(d manifestDoc) string {
@@ -468,7 +428,7 @@ func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubec
 			sealed := false
 			for _, d := range docs {
 				if d.kind == "Secret" && d.name == o.name {
-					if imm := docScalar(d.node, "immutable"); imm == "true" {
+					if imm := yqsem.Scalar(yqsem.Lookup(d.node, "immutable")); imm == "true" {
 						sealed = true
 					}
 				}
@@ -543,8 +503,8 @@ func deleteSpecFinalizers(nsJSON string) string {
 	if err := yaml.Unmarshal([]byte(nsJSON), &n); err != nil {
 		return nsJSON
 	}
-	root := deref(&n)
-	if spec := mapGet(root, "spec"); spec != nil && spec.Kind == yaml.MappingNode {
+	root := yqsem.Deref(&n)
+	if spec := yqsem.MapGet(root, "spec"); spec != nil && spec.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(spec.Content); i += 2 {
 			if spec.Content[i].Value == "finalizers" {
 				spec.Content = append(spec.Content[:i], spec.Content[i+2:]...)

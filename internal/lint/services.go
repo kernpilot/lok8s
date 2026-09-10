@@ -34,6 +34,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // services.yaml — top-level + sub-block allow-lists.
@@ -95,7 +96,7 @@ func (l *Linter) services() bool {
 	root := firstDoc(svcFile)
 
 	// -- top-level keys --
-	topKeys, _ := mapKeys(root)
+	topKeys, _ := yqsem.MapKeys(root)
 	for _, k := range topKeys {
 		if k == "" {
 			continue
@@ -108,7 +109,7 @@ func (l *Linter) services() bool {
 
 	// -- registry block --
 	if inList("registry", topKeys) {
-		regKeys, _ := mapKeys(nodeAt(root, "registry"))
+		regKeys, _ := yqsem.MapKeys(yqsem.Lookup(root, "registry"))
 		for _, k := range regKeys {
 			if k == "" {
 				continue
@@ -122,7 +123,7 @@ func (l *Linter) services() bool {
 
 	// -- defaults block --
 	if inList("defaults", topKeys) {
-		defKeys, _ := mapKeys(nodeAt(root, "defaults"))
+		defKeys, _ := yqsem.MapKeys(yqsem.Lookup(root, "defaults"))
 		for _, k := range defKeys {
 			if k == "" {
 				continue
@@ -132,7 +133,7 @@ func (l *Linter) services() bool {
 				errs++
 			}
 		}
-		df := valueOr(nodeAt(root, "defaults", "dockerfile"), "")
+		df := valueOr(yqsem.Lookup(root, "defaults", "dockerfile"), "")
 		if df != "" && df != "service" && df != "production" {
 			ui.Errorf(l.ErrOut, "  services.yaml: defaults.dockerfile must be 'service' or 'production', got '%s'", df)
 			errs++
@@ -140,13 +141,13 @@ func (l *Linter) services() bool {
 	}
 
 	// -- per-service entries --
-	svcNames, _ := mapKeys(nodeAt(root, "services"))
+	svcNames, _ := yqsem.MapKeys(yqsem.Lookup(root, "services"))
 	for _, name := range svcNames {
 		if name == "" {
 			continue
 		}
-		entry := nodeAt(root, "services", name)
-		entryKeys, _ := mapKeys(entry)
+		entry := yqsem.Lookup(root, "services", name)
+		entryKeys, _ := yqsem.MapKeys(entry)
 		for _, k := range entryKeys {
 			if k == "" {
 				continue
@@ -167,7 +168,7 @@ func (l *Linter) services() bool {
 
 		// per-service registry sub-keys.
 		if hasRegistry {
-			sregKeys, _ := mapKeys(nodeAt(entry, "registry"))
+			sregKeys, _ := yqsem.MapKeys(yqsem.Lookup(entry, "registry"))
 			for _, k := range sregKeys {
 				if k == "" {
 					continue
@@ -198,7 +199,7 @@ func (l *Linter) services() bool {
 // servicePath resolves a service's path: (bash: yq -r '.services."<n>".path
 // // "./<n>"', with the extra empty/"null" belt-and-braces re-default).
 func servicePath(root *yaml.Node, name string) string {
-	spath := valueOr(nodeAt(root, "services", name, "path"), "./"+name)
+	spath := valueOr(yqsem.Lookup(root, "services", name, "path"), "./"+name)
 	if spath == "" || spath == "null" {
 		spath = "./" + name
 	}
@@ -213,7 +214,7 @@ func (l *Linter) lok8sYAML(name, file string) int {
 	errs := 0
 	root := firstDoc(file)
 
-	keys, _ := mapKeys(root)
+	keys, _ := yqsem.MapKeys(root)
 	for _, k := range keys {
 		if k == "" {
 			continue
@@ -238,28 +239,28 @@ func (l *Linter) lok8sYAML(name, file string) int {
 
 	// Validate each components[] entry: name + build required.
 	if hasComponents {
-		comps := nodeAt(root, "components")
+		comps := yqsem.Lookup(root, "components")
 		// mikefarah yq emits '!!seq' for lists; the bash tolerates a bare
 		// 'seq' too — moot here, the tag reader always yields the !! form.
 		if normTag(comps) != "!!seq" {
 			ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): 'components' must be a list", name)
 			errs++
 		} else {
-			for i, comp := range seqItems(comps) {
-				cname := valueOr(nodeAt(comp, "name"), "")
+			for i, comp := range yqsem.SeqItems(comps) {
+				cname := valueOr(yqsem.Lookup(comp, "name"), "")
 				if cname == "" || cname == "null" {
 					ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): components[%d] is missing required 'name'", name, i)
 					errs++
 					cname = fmt.Sprintf("[%d]", i)
 				}
 				// build required on each component.
-				cbuild := valueOr(nodeAt(comp, "build"), "")
+				cbuild := valueOr(yqsem.Lookup(comp, "build"), "")
 				if cbuild == "" || cbuild == "null" {
 					ui.Errorf(l.ErrOut, "  lok8s.yaml (%s): components[%s] is missing required 'build'", name, cname)
 					errs++
 				}
 				// component entry keys.
-				ckeys, _ := mapKeys(comp)
+				ckeys, _ := yqsem.MapKeys(comp)
 				for _, k := range ckeys {
 					if k == "" {
 						continue
@@ -295,7 +296,7 @@ func (l *Linter) drift() {
 	root := firstDoc(svcFile)
 
 	// Does services.yaml actually declare any services?
-	svcNames, _ := mapKeys(nodeAt(root, "services"))
+	svcNames, _ := yqsem.MapKeys(yqsem.Lookup(root, "services"))
 	svcCount := len(svcNames)
 
 	// (a) root Tiltfile hardcodes builds/manifests alongside a populated catalog.
@@ -331,14 +332,14 @@ func (l *Linter) drift() {
 		routeNames := []string{name}
 		lokfile := sdir + "/lok8s.yaml"
 		if isFile(lokfile) {
-			comps := seqItems(nodeAt(firstDoc(lokfile), "components"))
+			comps := yqsem.SeqItems(yqsem.Lookup(firstDoc(lokfile), "components"))
 			if len(comps) > 0 {
 				routeNames = routeNames[:0]
 				for _, comp := range comps {
 					// yq -r '.components[].name' prints "null" for a missing
 					// name — that string then drives the (futile) label grep,
 					// exactly like bash.
-					routeNames = append(routeNames, scalarText(nodeAt(comp, "name")))
+					routeNames = append(routeNames, scalarText(yqsem.Lookup(comp, "name")))
 				}
 			}
 		}

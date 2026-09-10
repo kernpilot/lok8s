@@ -21,7 +21,7 @@ import (
 // bash; mirrored here as nil.
 func buildClusterPayload(clusterYAML string) []byte {
 	doc := loadSpec(clusterYAML)
-	replicas := doc.or("1", "spec", "controlPlane", "replicas")
+	replicas := doc.Or("1", "spec", "controlPlane", "replicas")
 	if replicas == "" {
 		// Unreadable file: every yq read is "" → --argjson "" → jq error.
 		return nil
@@ -33,14 +33,14 @@ func buildClusterPayload(clusterYAML string) []byte {
 		return nil
 	}
 	return compactJSON(
-		jsonPair{"domain", doc.raw("spec", "cluster", "domain")},
-		jsonPair{"kind", doc.raw("kind")},
-		jsonPair{"provider", doc.or("hetzner", "spec", "provider")},
-		jsonPair{"region", doc.orChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
-		jsonPair{"kubernetesVersion", doc.raw("spec", "kubernetes", "version")},
+		jsonPair{"domain", doc.Raw("spec", "cluster", "domain")},
+		jsonPair{"kind", doc.Raw("kind")},
+		jsonPair{"provider", doc.Or("hetzner", "spec", "provider")},
+		jsonPair{"region", doc.OrChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
+		jsonPair{"kubernetesVersion", doc.Raw("spec", "kubernetes", "version")},
 		jsonPair{"controlPlaneReplicas", replicasJSON},
-		jsonPair{"hosting", doc.or("self", "spec", "kubehz", "hosting")},
-		jsonPair{"access", doc.or("none", "spec", "kubehz", "access")},
+		jsonPair{"hosting", doc.Or("self", "spec", "kubehz", "hosting")},
+		jsonPair{"access", doc.Or("none", "spec", "kubehz", "access")},
 	)
 }
 
@@ -176,7 +176,7 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 	c.debugf("Hosted cluster %s ready, kubeconfig at %s", domain, kubeconfigPath)
 
 	_ = os.Chmod(kubeconfigPath, 0o600)
-	clusterName := loadSpec(clusterYAML).raw("metadata", "name")
+	clusterName := loadSpec(clusterYAML).Raw("metadata", "name")
 	if clusterName != "" && clusterName != "null" && clusterName != domain {
 		mirror := filepath.Join(c.Paths.Base, ".kubeconfig", clusterName+".yaml")
 		if err := os.WriteFile(mirror, kc, 0o600); err == nil {
@@ -220,7 +220,7 @@ func (c *Context) DestroyHosted(ctx context.Context, cfg *Config, domain, cluste
 	}
 
 	_ = os.Remove(filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml"))
-	mirrorName := loadSpec(clusterYAML).or("", "metadata", "name")
+	mirrorName := loadSpec(clusterYAML).Or("", "metadata", "name")
 	if mirrorName != "" && mirrorName != "null" && mirrorName != domain {
 		_ = os.Remove(filepath.Join(c.Paths.Base, ".kubeconfig", mirrorName+".yaml"))
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // newLinter builds a Linter over a synthetic project root with capture
@@ -177,7 +178,7 @@ func TestCompactJSONMatchesYq(t *testing.T) {
 	if len(docs) != 1 {
 		t.Fatal("fixture parse failed")
 	}
-	items := seqItems(docs[0])
+	items := yqsem.SeqItems(docs[0])
 	for i, want := range []string{
 		`"cilium"`,
 		`{"ccm":{"wait":true,"dependsOn":["a","b"]}}`,

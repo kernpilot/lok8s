@@ -409,7 +409,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 
 	// KKP API URL is always required.
 	if os.Getenv("KKP_API_URL") == "" {
-		if spec.or("", "spec", "kkp", "apiUrl") == "" {
+		if spec.Or("", "spec", "kkp", "apiUrl") == "" {
 			ui.Errorf(stderr, "KKP_API_URL env var or spec.kkp.apiUrl is required")
 			errors++
 		}
@@ -418,7 +418,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 	// Validate HTTPS on the API URL if set.
 	apiURL := os.Getenv("KKP_API_URL")
 	if apiURL == "" {
-		apiURL = spec.or("", "spec", "kkp", "apiUrl")
+		apiURL = spec.Or("", "spec", "kkp", "apiUrl")
 	}
 	if apiURL != "" {
 		if err := d.validateURL(apiURL, stderr); err != nil {
@@ -431,7 +431,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 	// endpoint (local mkcert, CI) without trusting it system-wide. Relative
 	// paths resolve against the cluster spec's directory.
 	if os.Getenv("KKP_CA_CERT") == "" {
-		if specCA := spec.or("", "spec", "kkp", "caCert"); specCA != "" {
+		if specCA := spec.Or("", "spec", "kkp", "caCert"); specCA != "" {
 			if !strings.HasPrefix(specCA, "/") {
 				specCA = filepath.Join(filepath.Dir(clusterYAML), specCA)
 			}
@@ -446,7 +446,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 	}
 
 	// Provider-specific credential checks (unless using a KKP preset).
-	if preset := spec.or("", "spec", "kkp", "preset"); preset == "" {
+	if preset := spec.Or("", "spec", "kkp", "preset"); preset == "" {
 		provider := spec.providerName("")
 		switch {
 		case provider == "byo" || provider == "bringyourown":

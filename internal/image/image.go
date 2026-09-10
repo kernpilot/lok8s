@@ -33,6 +33,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/env"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks a failure whose message was already printed in the bash
@@ -119,12 +120,12 @@ func (c *Context) resolveCacheNet() cacheNet {
 		return cacheNet{}
 	}
 
-	netName := env.ScalarOr(&root, "", "spec", "network", "name")
-	netCIDR := env.ScalarOr(&root, "", "spec", "network", "cidr")
+	netName := yqsem.OrLiteralFalse(yqsem.Lookup(&root, "spec", "network", "name"), "")
+	netCIDR := yqsem.OrLiteralFalse(yqsem.Lookup(&root, "spec", "network", "cidr"), "")
 	if netName == "" || netCIDR == "" {
 		if slot := slotFromSpec(&root); slot != "" {
 			if netName == "" {
-				netName = env.ScalarOr(&root, "", "metadata", "name")
+				netName = yqsem.OrLiteralFalse(yqsem.Lookup(&root, "metadata", "name"), "")
 			}
 			if netCIDR == "" {
 				netCIDR = "10.125." + slot + ".0/24"
@@ -138,7 +139,7 @@ func (c *Context) resolveCacheNet() cacheNet {
 	// spec.registries.tls must be true/false (default true) — an invalid
 	// value failed the bash config generation, and with it the whole IP
 	// resolution.
-	tlsRaw := env.ToString(&root, "spec", "registries", "tls")
+	tlsRaw := yqsem.ToString(yqsem.Lookup(&root, "spec", "registries", "tls"))
 	tls := true
 	switch tlsRaw {
 	case "false":
@@ -166,7 +167,7 @@ var mirrorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 // slotFromSpec mirrors lo::slot_from_domain: spec.cluster.domain
 // "lok8s.dev" → 125, "<n>.lok8s.dev" (2..199) → n, else "".
 func slotFromSpec(root *yaml.Node) string {
-	d := env.ScalarOr(root, "", "spec", "cluster", "domain")
+	d := yqsem.OrLiteralFalse(yqsem.Lookup(root, "spec", "cluster", "domain"), "")
 	if d == "" {
 		return ""
 	}
@@ -185,13 +186,13 @@ func slotFromSpec(root *yaml.Node) string {
 // applied (name shape, reserved names, url presence) — a spec they reject
 // left the bash cache-IP resolution empty.
 func mirrorsValid(root *yaml.Node) bool {
-	mirrors := env.Path(root, "spec", "registries", "mirrors")
+	mirrors := yqsem.Lookup(root, "spec", "registries", "mirrors")
 	if mirrors == nil || mirrors.Kind != yaml.SequenceNode {
 		return true
 	}
 	for _, m := range mirrors.Content {
-		name := env.ToString(m, "name")
-		url := env.ScalarOr(m, "", "url")
+		name := yqsem.ToString(yqsem.Lookup(m, "name"))
+		url := yqsem.OrLiteralFalse(yqsem.Lookup(m, "url"), "")
 		if !mirrorNameRe.MatchString(name) {
 			return false
 		}
@@ -270,7 +271,7 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 	if err != nil {
 		return err
 	}
-	parallel := env.ToString(merged, "registry", "parallel")
+	parallel := yqsem.ToString(yqsem.Lookup(merged, "registry", "parallel"))
 	if parallel == "null" {
 		parallel = "1"
 	}
@@ -295,20 +296,20 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 		return ErrHandled
 	}
 
-	pinned := env.ScalarOr(merged, "", "services", service, "image")
+	pinned := yqsem.OrLiteralFalse(yqsem.Lookup(merged, "services", service, "image"), "")
 	if pinned != "" {
 		ui.Errorf(c.ErrOut, "service '%s' has an explicit 'image:' pin — there is nothing to cache, kind pulls it directly", service)
 		return ErrHandled
 	}
 
 	// Resolve effective registry coordinates for this service.
-	gEndpoint := subst(env.ScalarOr(merged, "${DOCKER_REGISTRY}", "registry", "endpoint"))
-	gBranch := subst(env.ScalarOr(merged, "${DOCKER_PROJECT}", "registry", "branch"))
-	gTag := subst(env.ScalarOr(merged, "${DOCKER_TAG}", "registry", "tag"))
+	gEndpoint := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "registry", "endpoint"), "${DOCKER_REGISTRY}"))
+	gBranch := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "registry", "branch"), "${DOCKER_PROJECT}"))
+	gTag := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "registry", "tag"), "${DOCKER_TAG}"))
 
-	sEndpoint := subst(env.ScalarOr(merged, gEndpoint, "services", service, "registry", "endpoint"))
-	sBranch := subst(env.ScalarOr(merged, gBranch, "services", service, "registry", "branch"))
-	sTag := subst(env.ScalarOr(merged, gTag, "services", service, "registry", "tag"))
+	sEndpoint := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "services", service, "registry", "endpoint"), gEndpoint))
+	sBranch := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "services", service, "registry", "branch"), gBranch))
+	sTag := subst(yqsem.OrLiteralFalse(yqsem.Lookup(merged, "services", service, "registry", "tag"), gTag))
 
 	if sEndpoint == "" {
 		ui.Errorf(c.ErrOut, "service '%s' has no registry.endpoint configured (set spec.registries.endpoint or services.%s.registry.endpoint)", service, service)

@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // coredns applies the CoreDNS base config, service pin, custom ConfigMap,
@@ -30,8 +31,8 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 		return err
 	}
 	clusterYAML := filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
-	root := loadYAML(clusterYAML)
-	clusterName := yqRaw(root, "metadata", "name")
+	root := yqsem.LoadNode(clusterYAML)
+	clusterName := yqsem.Raw(yqsem.Lookup(root, "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}
@@ -49,7 +50,7 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 	// already in use by coredns-external") → gateway stuck <pending> →
 	// nothing serves. Setting the annotation now (pre-metallb) makes metallb
 	// honor it on first allocation. Only meaningful for a range pool.
-	pool := yqOr(root, "", "spec", "loadBalancer", "pool")
+	pool := yqsem.Or(yqsem.Lookup(root, "spec", "loadBalancer", "pool"), "")
 	if strings.Contains(pool, "-") {
 		last := pool[strings.LastIndex(pool, "-")+1:]
 		_ = d.runOut(ctx, out, errOut, "kubectl", "annotate", "svc", "coredns-external", "-n", "kube-system",
@@ -98,19 +99,19 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
 	// gateway shorthand = first IP of the LB pool ("a-b" → "a").
-	pool := yqOr(root, "", "spec", "loadBalancer", "pool")
+	pool := yqsem.Or(yqsem.Lookup(root, "spec", "loadBalancer", "pool"), "")
 	gatewayIP := pool
 	if i := strings.Index(pool, "-"); i >= 0 {
 		gatewayIP = pool[:i]
 	}
 
 	// (1) structured hosts → generated server blocks.
-	for i, h := range yqSeq(root, "spec", "coredns", "hosts") {
-		name := yqRaw(h, "name")
-		target := yqRaw(h, "target")
+	for i, h := range yqsem.SeqItems(yqsem.Lookup(root, "spec", "coredns", "hosts")) {
+		name := yqsem.Raw(yqsem.Lookup(h, "name"))
+		target := yqsem.Raw(yqsem.Lookup(h, "target"))
 		if target == "gateway" {
 			target = gatewayIP
 		}
@@ -132,16 +133,16 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	}
 
 	// (2) raw inline servers / overrides.
-	if servers := yqOr(root, "", "spec", "coredns", "servers"); servers != "" {
+	if servers := yqsem.Or(yqsem.Lookup(root, "spec", "coredns", "servers"), ""); servers != "" {
 		_ = os.WriteFile(filepath.Join(tmp, "inline.server"), []byte(servers+"\n"), 0o644)
 	}
-	if overrides := yqOr(root, "", "spec", "coredns", "overrides"); overrides != "" {
+	if overrides := yqsem.Or(yqsem.Lookup(root, "spec", "coredns", "overrides"), ""); overrides != "" {
 		_ = os.WriteFile(filepath.Join(tmp, "inline.override"), []byte(overrides+"\n"), 0o644)
 	}
 
 	// (3) raw files from the import path (default ./coredns, relative to
 	// the cluster dir).
-	importPath := yqOr(root, "./coredns", "spec", "coredns", "import")
+	importPath := yqsem.Or(yqsem.Lookup(root, "spec", "coredns", "import"), "./coredns")
 	if !strings.HasPrefix(importPath, "/") {
 		importPath = filepath.Join(d.deps.Paths.Clusters, domain, strings.TrimPrefix(importPath, "./"))
 	}

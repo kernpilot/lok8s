@@ -31,6 +31,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 type bootstrapEntry struct {
@@ -85,7 +86,7 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 // cilium apply on managed clusters.
 func (l *Linter) resolveEntries(specFile, kind string) []bootstrapEntry {
 	root := firstDoc(specFile)
-	items := seqItems(nodeAt(root, "spec", "bootstrap"))
+	items := yqsem.SeqItems(yqsem.Lookup(root, "spec", "bootstrap"))
 	if len(items) > 0 {
 		entries := make([]bootstrapEntry, 0, len(items))
 		for _, item := range items {
@@ -95,7 +96,7 @@ func (l *Linter) resolveEntries(specFile, kind string) []bootstrapEntry {
 	}
 	// Empty result — distinguish a *defined* empty list (opt out) from an
 	// *absent* key (fall back to the per-driver default).
-	if hasKey(nodeAt(root, "spec"), "bootstrap") {
+	if yqsem.HasKey(yqsem.Lookup(root, "spec"), "bootstrap") {
 		return nil
 	}
 	if kind == "lo" {
@@ -130,7 +131,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		// Map entry {"<name-or-path>": <value>} — must have EXACTLY one key.
 		// A multi-key map is a config mistake (and iterating values would
 		// silently mix them).
-		n := deref(entry.node)
+		n := yqsem.Deref(entry.node)
 		nkeys := 0
 		if n != nil && n.Kind == yaml.MappingNode {
 			nkeys = len(n.Content) / 2
@@ -140,7 +141,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 			return "", "", false
 		}
 		raw = n.Content[0].Value
-		val = deref(n.Content[1])
+		val = yqsem.Deref(n.Content[1])
 		// The map VALUE must itself be a map (the {values,env,wait} schema,
 		// or the legacy whole-map-is-helm-values form) or null/empty. A
 		// scalar or sequence value — e.g. `- addon: true` → {"addon":true},
@@ -176,12 +177,12 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 	}
 
 	// Scalar entry (or a map with an empty/null value): nothing more to parse.
-	if isNull(val) {
+	if yqsem.IsNull(val) {
 		return name, dir, true
 	}
 
-	hasReserved := hasKey(val, "values") || hasKey(val, "valueFiles") || hasKey(val, "env") ||
-		hasKey(val, "wait") || hasKey(val, "dependsOn") || hasKey(val, "name")
+	hasReserved := yqsem.HasKey(val, "values") || yqsem.HasKey(val, "valueFiles") || yqsem.HasKey(val, "env") ||
+		yqsem.HasKey(val, "wait") || yqsem.HasKey(val, "dependsOn") || yqsem.HasKey(val, "name")
 	if !hasReserved {
 		// LEGACY shim: the whole value map is the inline helm values.
 		return name, dir, true
@@ -191,8 +192,8 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 	// unquoted YAML bool/int (name: true, name: 123) coerces to "true"/"123"
 	// and would slip past the charset check below — almost certainly a
 	// mistake, so require quoting. A QUOTED "true"/"123" is !!str and passes.
-	if hasKey(val, "name") {
-		nameNode := nodeAt(val, "name")
+	if yqsem.HasKey(val, "name") {
+		nameNode := yqsem.Lookup(val, "name")
 		if normTag(nameNode) != "!!str" {
 			ui.Errorf(l.ErrOut, "bootstrap: '%s' name: must be a non-empty scalar entry name (got %s)", raw, strings.TrimPrefix(normTag(nameNode), "!!"))
 			return "", "", false
@@ -213,7 +214,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 	// would silently parse as a non-barrier — reject it. Only "true"/"false"
 	// (a real YAML/JSON bool) is accepted.
 	wait := "false"
-	if w := nodeAt(val, "wait"); !isNull(w) {
+	if w := yqsem.Lookup(val, "wait"); !yqsem.IsNull(w) {
 		wait = scalarText(w)
 		if wait == "" {
 			wait = compactJSON(w) // non-scalar wait: render like yq would try
@@ -224,7 +225,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		return "", "", false
 	}
 
-	if hasKey(val, "values") {
+	if yqsem.HasKey(val, "values") {
 		// Only flag a non-chart target when the dir EXISTS but lacks
 		// chart.yaml. If the dir is missing entirely, stay silent here and
 		// let the apply path surface the authoritative "addon not found" —
@@ -236,14 +237,14 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		}
 	}
 
-	if hasKey(val, "valueFiles") {
+	if yqsem.HasKey(val, "valueFiles") {
 		// valueFiles: same helm-only rule as `values:` (a kustomize target
 		// has no chart to feed); same missing-dir leniency.
 		if isDir(dir) && !isFile(dir+"/chart.yaml") {
 			ui.Errorf(l.ErrOut, "bootstrap: '%s' sets 'valueFiles:' but is not a chart addon (no chart.yaml under %s); 'valueFiles:' is helm-only", raw, dir)
 			return "", "", false
 		}
-		vfNode := nodeAt(val, "valueFiles")
+		vfNode := yqsem.Lookup(val, "valueFiles")
 		// The container must be a SEQUENCE of file paths. A scalar
 		// (`valueFiles: ./x.yaml`) or a map is a config mistake — reject it
 		// up front (same fail-fast spirit as the env/dependsOn container
@@ -255,7 +256,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		// Every element must be a STRING scalar — an unquoted bool/int, a
 		// null element (`[~]` / a bare `-`), or a nested map/list is not a
 		// path (same strictness as the name: tag check).
-		for _, el := range seqItems(vfNode) {
+		for _, el := range yqsem.SeqItems(vfNode) {
 			if tag := normTag(el); tag != "!!str" {
 				ui.Errorf(l.ErrOut, "bootstrap: '%s' valueFiles: each element must be a file path string (got %s)", raw, strings.TrimPrefix(tag, "!!"))
 				return "", "", false
@@ -267,7 +268,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		// hard error: silently skipping it would render the addon with half
 		// its values.
 		var vfFiles []string
-		for _, el := range seqItems(vfNode) {
+		for _, el := range yqsem.SeqItems(vfNode) {
 			vf := el.Value
 			// An empty-string element ("") is !!str, so it survives the tag
 			// check above — but it is not a path. Hard error (NOT a silent
@@ -299,8 +300,8 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		}
 	}
 
-	if hasKey(val, "env") {
-		envNode := nodeAt(val, "env")
+	if yqsem.HasKey(val, "env") {
+		envNode := yqsem.Lookup(val, "env")
 		// The env CONTAINER must itself be a map of KEY: scalar. (A
 		// null/empty `env:` is a harmless no-op.)
 		if tag := normTag(envNode); tag != "!!map" && tag != "!!null" {
@@ -311,10 +312,10 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		// tostring-flatten to a bogus string (e.g. the ccm chart-value `env:`
 		// map mistakenly placed at the reserved-key level instead of under
 		// values:) — reject it so the mistake is loud, not silent.
-		envKeys, _ := mapKeys(envNode)
+		envKeys, _ := yqsem.MapKeys(envNode)
 		var badEnv []string
 		for _, k := range envKeys {
-			if tag := normTag(nodeAt(envNode, k)); tag == "!!map" || tag == "!!seq" {
+			if tag := normTag(yqsem.Lookup(envNode, k)); tag == "!!map" || tag == "!!seq" {
 				badEnv = append(badEnv, k)
 			}
 		}
@@ -336,8 +337,8 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		}
 	}
 
-	if hasKey(val, "dependsOn") {
-		depNode := nodeAt(val, "dependsOn")
+	if yqsem.HasKey(val, "dependsOn") {
+		depNode := yqsem.Lookup(val, "dependsOn")
 		// dependsOn: resolved/edge-built/cycle-checked by the apply path;
 		// validate only the SHAPE here: a sequence container, every element a
 		// scalar name.
@@ -350,13 +351,13 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		// downstream as a confusing "unknown entry 'null'". Reject it right
 		// here with a clear message — BEFORE the map/seq element check, like
 		// the bash.
-		for _, el := range seqItems(depNode) {
+		for _, el := range yqsem.SeqItems(depNode) {
 			if normTag(el) == "!!null" {
 				ui.Errorf(l.ErrOut, "bootstrap: '%s' dependsOn: null element — must be a list of entry names", raw)
 				return "", "", false
 			}
 		}
-		for _, el := range seqItems(depNode) {
+		for _, el := range yqsem.SeqItems(depNode) {
 			if tag := normTag(el); tag == "!!map" || tag == "!!seq" {
 				ui.Errorf(l.ErrOut, "bootstrap: '%s' dependsOn: each element must be a scalar entry name (got a map/list element)", raw)
 				return "", "", false
@@ -385,7 +386,7 @@ func baseName(path string) string {
 // contract (the entry JSON appears in "entry not found" / "single-key map"
 // messages).
 func compactJSON(n *yaml.Node) string {
-	n = deref(n)
+	n = yqsem.Deref(n)
 	if n == nil {
 		return "null"
 	}

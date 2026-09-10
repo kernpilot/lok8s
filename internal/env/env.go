@@ -24,6 +24,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks a failure whose message was already printed in the bash
@@ -165,11 +166,11 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	//   endpoint = remote registry target (ghcr.io/org, etc.) — only used
 	//              when pre-pulling a non-built service into the cache.
 	// branch/tag are the path components of both the remote and the cache ref.
-	gPrefix := ScalarOr(&doc, "lok8s.local", "registry", "prefix")
+	gPrefix := yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "prefix"), "lok8s.local")
 	gCache := "lok8s.cache"
-	gEndpoint := subst(ScalarOr(&doc, "${DOCKER_REGISTRY}", "registry", "endpoint"))
-	gBranch := subst(ScalarOr(&doc, "${DOCKER_PROJECT}", "registry", "branch"))
-	gTag := subst(ScalarOr(&doc, "${DOCKER_TAG}", "registry", "tag"))
+	gEndpoint := subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "endpoint"), "${DOCKER_REGISTRY}"))
+	gBranch := subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "branch"), "${DOCKER_PROJECT}"))
+	gTag := subst(yqsem.OrLiteralFalse(yqsem.Lookup(&doc, "registry", "tag"), "${DOCKER_TAG}"))
 
 	// Default for the per-service `build:` field. Mirrors Tiltfile resolution:
 	// per-service > defaults.build > true.
@@ -177,7 +178,7 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	// swallows legitimate `false` values. The only reliable way to
 	// distinguish "missing" from "present and false" is `| tostring`,
 	// which emits "null" for missing keys and "false"/"true" for bools.
-	defaultBuild := ToString(&doc, "defaults", "build")
+	defaultBuild := yqsem.ToString(yqsem.Lookup(&doc, "defaults", "build"))
 	if defaultBuild == "null" {
 		defaultBuild = "true"
 	}
@@ -265,7 +266,7 @@ func (c *Context) buildArtifacts() error {
 // from the merged services config (bash: env::generate_images). Also writes
 // the cache queue entries as a side effect.
 func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, gEndpoint, gBranch, gTag, cacheQueue string) (string, error) {
-	services := Path(doc, "services")
+	services := yqsem.Lookup(doc, "services")
 	if services == nil || services.Kind != yaml.MappingNode {
 		return "", nil
 	}
@@ -281,10 +282,10 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 		if svc == "" {
 			continue
 		}
-		svcNode := deref(services.Content[i+1])
+		svcNode := yqsem.Deref(services.Content[i+1])
 
 		// Skip disabled services (tostring-sentinel because // swallows false).
-		enabled := toStringNode(mapGet(svcNode, "enabled"))
+		enabled := yqsem.ToString(yqsem.MapGet(svcNode, "enabled"))
 		if enabled == "null" {
 			enabled = "true"
 		}
@@ -293,13 +294,13 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 		}
 
 		// Resolve effective build (per-service > defaults > true).
-		svcBuild := toStringNode(mapGet(svcNode, "build"))
+		svcBuild := yqsem.ToString(yqsem.MapGet(svcNode, "build"))
 		if svcBuild == "null" {
 			svcBuild = defaultBuild
 		}
 
 		// Pinned image (mutually exclusive with registry per validator).
-		pinned := scalarOrNode(mapGet(svcNode, "image"), "")
+		pinned := yqsem.OrLiteralFalse(yqsem.MapGet(svcNode, "image"), "")
 		if pinned != "" {
 			if strings.Contains(pinned, "@sha256:") {
 				// bash: ${pinned%@*} / ${pinned##*@} — split on the LAST @.
@@ -320,10 +321,10 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 
 		// build:false branch on registry-presence:
 		//   per-service.registry.endpoint > global.registry.endpoint > skip+warn
-		reg := mapGet(svcNode, "registry")
-		sEndpoint := subst(scalarOrNode(mapGet(reg, "endpoint"), gEndpoint))
-		sBranch := subst(scalarOrNode(mapGet(reg, "branch"), gBranch))
-		sTag := subst(scalarOrNode(mapGet(reg, "tag"), gTag))
+		reg := yqsem.MapGet(svcNode, "registry")
+		sEndpoint := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "endpoint"), gEndpoint))
+		sBranch := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "branch"), gBranch))
+		sTag := subst(yqsem.OrLiteralFalse(yqsem.MapGet(reg, "tag"), gTag))
 
 		if sEndpoint == "" {
 			fmt.Fprintf(c.ErrOut, "warn: service '%s' has build:false but no registry.endpoint configured — skipping image swap (define registry.endpoint, set image:, or set build:true)\n", svc)

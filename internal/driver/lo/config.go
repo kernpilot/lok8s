@@ -28,6 +28,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ── Validation ────────────────────────────────────────────
@@ -110,8 +111,8 @@ var slotDomainRe = regexp.MustCompile(`^([0-9]+)\.lok8s\.dev$`)
 // lo::slot_from_domain). "" for non-*.lok8s.dev domains and out-of-range
 // slots (valid: 2..199; 200 is the shared-registry net, 125 the default).
 func slotFromDomain(clusterYAML string) string {
-	root := loadYAML(clusterYAML)
-	domain := yqOr(root, "", "spec", "cluster", "domain")
+	root := yqsem.LoadNode(clusterYAML)
+	domain := yqsem.Or(yqsem.Lookup(root, "spec", "cluster", "domain"), "")
 	if domain == "" {
 		return ""
 	}
@@ -142,14 +143,14 @@ func readNetworkConfig(clusterYAML string, errOut io.Writer) error {
 		return fmt.Errorf("cluster spec not found: %s", clusterYAML)
 	}
 
-	root := loadYAML(clusterYAML)
-	netName := yqOr(root, "", "spec", "network", "name")
-	netCIDR := yqOr(root, "", "spec", "network", "cidr")
+	root := yqsem.LoadNode(clusterYAML)
+	netName := yqsem.Or(yqsem.Lookup(root, "spec", "network", "name"), "")
+	netCIDR := yqsem.Or(yqsem.Lookup(root, "spec", "network", "cidr"), "")
 
 	if netName == "" || netCIDR == "" {
 		if slot := slotFromDomain(clusterYAML); slot != "" {
 			if netName == "" {
-				netName = yqOr(root, "", "metadata", "name")
+				netName = yqsem.Or(yqsem.Lookup(root, "metadata", "name"), "")
 			}
 			if netCIDR == "" {
 				netCIDR = "10.125." + slot + ".0/24"
@@ -188,21 +189,21 @@ func readNodeConfig(clusterYAML string, errOut io.Writer) error {
 		defaultHostPorts = "true"
 	}
 
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
 	cpCount, workerCount, hostPorts := "1", "0", defaultHostPorts
-	if yqPresent(root, "spec", "nodes") {
-		cpCount = yqOr(root, "1", "spec", "nodes", "controlPlane")
-		workerCount = yqOr(root, "0", "spec", "nodes", "workers")
-		hp := yqRaw(root, "spec", "nodes", "hostPorts")
+	if !yqsem.IsNull(yqsem.Lookup(root, "spec", "nodes")) {
+		cpCount = yqsem.Or(yqsem.Lookup(root, "spec", "nodes", "controlPlane"), "1")
+		workerCount = yqsem.Or(yqsem.Lookup(root, "spec", "nodes", "workers"), "0")
+		hp := yqsem.Raw(yqsem.Lookup(root, "spec", "nodes", "hostPorts"))
 		if hp != "null" && hp != "" {
 			hostPorts = hp
 		}
 	}
 
-	extraMounts := len(yqSeq(root, "spec", "nodes", "extraMounts"))
+	extraMounts := len(yqsem.SeqItems(yqsem.Lookup(root, "spec", "nodes", "extraMounts")))
 
-	maxDownloads := yqRaw(root, "spec", "nodes", "maxConcurrentDownloads")
+	maxDownloads := yqsem.Raw(yqsem.Lookup(root, "spec", "nodes", "maxConcurrentDownloads"))
 	if maxDownloads == "null" || maxDownloads == "" {
 		maxDownloads = "3"
 	} else if !regexp.MustCompile(`^[1-9][0-9]*$`).MatchString(maxDownloads) {
@@ -221,11 +222,11 @@ func readNodeConfig(clusterYAML string, errOut io.Writer) error {
 // readLBConfig resolves spec.loadBalancer.pool with the *.lok8s.dev slot
 // default (bash: lo::read_lb_config).
 func readLBConfig(clusterYAML string) {
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
 	pool := ""
-	if yqPresent(root, "spec", "loadBalancer") {
-		pool = yqOr(root, "", "spec", "loadBalancer", "pool")
+	if !yqsem.IsNull(yqsem.Lookup(root, "spec", "loadBalancer")) {
+		pool = yqsem.Or(yqsem.Lookup(root, "spec", "loadBalancer", "pool"), "")
 	}
 	if pool == "" {
 		if slot := slotFromDomain(clusterYAML); slot != "" {
@@ -239,11 +240,11 @@ var syncDestRe = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
 
 // readRemoteConfig resolves spec.remote (bash: lo::read_remote_config).
 func readRemoteConfig(clusterYAML string, deps remoteDeps, errOut io.Writer) error {
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
-	mode := yqOr(root, "docker", "spec", "remote", "mode")
+	mode := yqsem.Or(yqsem.Lookup(root, "spec", "remote", "mode"), "docker")
 
-	expose := yqRaw(root, "spec", "remote", "expose")
+	expose := yqsem.Raw(yqsem.Lookup(root, "spec", "remote", "expose"))
 	if expose == "null" || expose == "" {
 		if deps.providerName != "" {
 			expose = "true"
@@ -252,8 +253,8 @@ func readRemoteConfig(clusterYAML string, deps remoteDeps, errOut io.Writer) err
 		}
 	}
 
-	syncPath := yqOr(root, ".", "spec", "remote", "sync", "path")
-	syncDest := yqOr(root, "/workspace", "spec", "remote", "sync", "dest")
+	syncPath := yqsem.Or(yqsem.Lookup(root, "spec", "remote", "sync", "path"), ".")
+	syncDest := yqsem.Or(yqsem.Lookup(root, "spec", "remote", "sync", "dest"), "/workspace")
 	// Boundary validation: dest is interpolated into single-quoted REMOTE
 	// shell commands (remote.go ssh mkdir/cd) — a quote or metacharacter in
 	// it would break out of the quoting on the remote host. Plain path
@@ -266,16 +267,16 @@ func readRemoteConfig(clusterYAML string, deps remoteDeps, errOut io.Writer) err
 	}
 
 	exclude := []string{".git", "node_modules", ".secrets", ".kubeconfig", "clusters/.active"}
-	if yqPresent(root, "spec", "remote", "sync", "exclude") {
+	if !yqsem.IsNull(yqsem.Lookup(root, "spec", "remote", "sync", "exclude")) {
 		exclude = nil
-		for _, e := range yqSeq(root, "spec", "remote", "sync", "exclude") {
+		for _, e := range yqsem.SeqItems(yqsem.Lookup(root, "spec", "remote", "sync", "exclude")) {
 			if e.Value != "" {
 				exclude = append(exclude, e.Value)
 			}
 		}
 	}
 
-	tilt := yqOr(root, "true", "spec", "remote", "tilt")
+	tilt := yqsem.Or(yqsem.Lookup(root, "spec", "remote", "tilt"), "true")
 
 	os.Setenv("LOK8S_REMOTE_MODE", mode)
 	os.Setenv("LOK8S_REMOTE_EXPOSE", expose)
@@ -310,13 +311,13 @@ func readConfig(clusterYAML string, errOut io.Writer) error {
 // exportSpecEnvs exports the LOK8S_SPEC_* env consumed by spec.bootstrap
 // addon renders (bash: lo::export_spec_envs).
 func exportSpecEnvs(clusterYAML string, errOut io.Writer) error {
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
-	os.Setenv("LOK8S_SPEC_CLUSTER_NAME", yqOr(root, "", "metadata", "name"))
-	os.Setenv("LOK8S_SPEC_CLUSTER_DOMAIN", yqOr(root, "", "spec", "cluster", "domain"))
-	os.Setenv("LOK8S_SPEC_CLUSTER_NAMESPACE", yqOr(root, "default", "spec", "cluster", "namespace"))
-	os.Setenv("LOK8S_SPEC_KUBERNETES_VERSION", yqOr(root, "", "spec", "kubernetes", "version"))
-	os.Setenv("LOK8S_SPEC_DNS_DOMAINFILTER", yqOr(root, "", "spec", "dns", "domainFilter"))
+	os.Setenv("LOK8S_SPEC_CLUSTER_NAME", yqsem.Or(yqsem.Lookup(root, "metadata", "name"), ""))
+	os.Setenv("LOK8S_SPEC_CLUSTER_DOMAIN", yqsem.Or(yqsem.Lookup(root, "spec", "cluster", "domain"), ""))
+	os.Setenv("LOK8S_SPEC_CLUSTER_NAMESPACE", yqsem.Or(yqsem.Lookup(root, "spec", "cluster", "namespace"), "default"))
+	os.Setenv("LOK8S_SPEC_KUBERNETES_VERSION", yqsem.Or(yqsem.Lookup(root, "spec", "kubernetes", "version"), ""))
+	os.Setenv("LOK8S_SPEC_DNS_DOMAINFILTER", yqsem.Or(yqsem.Lookup(root, "spec", "dns", "domainFilter"), ""))
 
 	// spec.oidc — apiserver StructuredAuthenticationConfiguration inputs
 	// (consumed by renderAuthConfig and the kind render). Absent spec.oidc ⇒
@@ -331,7 +332,7 @@ func exportSpecEnvs(clusterYAML string, errOut io.Writer) error {
 	os.Setenv("LOK8S_SPEC_NETWORK_SUBNET", getenv("LOK8S_NETWORK_SUBNET"))
 	os.Setenv("LOK8S_SPEC_NETWORK_BASE_IP", getenv("LOK8S_NETWORK_BASE_IP"))
 
-	os.Setenv("LOK8S_SPEC_REGISTRY_PREFIX", yqOr(root, "lok8s.local", "spec", "registries", "prefix"))
+	os.Setenv("LOK8S_SPEC_REGISTRY_PREFIX", yqsem.Or(yqsem.Lookup(root, "spec", "registries", "prefix"), "lok8s.local"))
 	buildHost, cacheHost := "", ""
 	if rf, err := regFile(); err == nil {
 		buildHost = rf.get("build", "host")

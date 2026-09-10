@@ -19,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/tilt"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 func init() { registerPorted("up", newUpCommand) }
@@ -139,6 +140,18 @@ func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps,
 // The registry summary (kind clusters only) reads mode/scheme from the SPEC
 // with yq's `//` semantics — see yqScalar for the `tls: false` quirk — and
 // the count from the last-generated .registries.json.
+//
+// yqScalar reads one scalar out of a YAML file with `yq -r '.a.b // "alt"'`
+// semantics: a missing/unreadable file, an absent key, a null OR a boolean
+// false all yield alt (jq's `//` treats false like null — a quirk the run
+// header inherits: `.spec.registries.tls // true` reads "true" for
+// `tls: false`); any other scalar yields its ORIGINAL text (yq prints a
+// float `1.30` as written, not re-formatted). The literal-false flavour is
+// the one this header shipped with.
+func yqScalar(file, alt string, keys ...string) string {
+	return yqsem.OrLiteralFalse(yqsem.Lookup(yqsem.LoadNode(file), keys...), alt)
+}
+
 func writeRunHeader(out io.Writer, paths *config.Paths, domainName, kubeconfig string) {
 	spec := filepath.Join(paths.Clusters, domainName, "cluster.lok8s.yaml")
 	deploySpec := filepath.Join(paths.Clusters, domainName, "deploy.lok8s.yaml")

@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // MergeValueFiles deep-merges YAML files left to right (later wins) with the
@@ -24,7 +26,7 @@ func MergeValueFiles(paths ...string) ([]byte, error) {
 		if err := yaml.Unmarshal(raw, &doc); err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
-		acc = MergeNodes(acc, derefNode(&doc))
+		acc = MergeNodes(acc, yqsem.Deref(&doc))
 	}
 	return marshalNode(acc)
 }
@@ -38,7 +40,7 @@ func MergeYAML(docs ...string) ([]byte, error) {
 		if err := yaml.Unmarshal([]byte(d), &doc); err != nil {
 			return nil, err
 		}
-		acc = MergeNodes(acc, derefNode(&doc))
+		acc = MergeNodes(acc, yqsem.Deref(&doc))
 	}
 	return marshalNode(acc)
 }
@@ -48,7 +50,7 @@ func MergeYAML(docs ...string) ([]byte, error) {
 // appended); anything else — sequences, scalars, a nil/null right side over
 // a map — takes the RIGHT side.
 func MergeNodes(left, right *yaml.Node) *yaml.Node {
-	left, right = derefNode(left), derefNode(right)
+	left, right = yqsem.Deref(left), yqsem.Deref(right)
 	if right == nil {
 		return left
 	}

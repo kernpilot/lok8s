@@ -18,6 +18,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
 )
 
@@ -810,11 +811,11 @@ func readProviderHosting(clusterYAML string) (provider, hosting string) {
 	if yaml.Unmarshal(raw, &root) != nil {
 		return "", hosting
 	}
-	spec := lookupMap(derefNode(&root), "spec")
-	if pn := lookupMap(lookupMap(spec, "provider"), "name"); pn != nil && pn.Kind == yaml.ScalarNode && pn.Tag != "!!null" {
+	spec := yqsem.MapGet(yqsem.Deref(&root), "spec")
+	if pn := yqsem.MapGet(yqsem.MapGet(spec, "provider"), "name"); pn != nil && pn.Kind == yaml.ScalarNode && pn.Tag != "!!null" {
 		provider = pn.Value
 	}
-	if hn := lookupMap(lookupMap(spec, "kubehz"), "hosting"); hn != nil && hn.Kind == yaml.ScalarNode && hn.Tag != "!!null" && hn.Value != "" {
+	if hn := yqsem.MapGet(yqsem.MapGet(spec, "kubehz"), "hosting"); hn != nil && hn.Kind == yaml.ScalarNode && hn.Tag != "!!null" && hn.Value != "" {
 		hosting = hn.Value
 	}
 	return provider, hosting

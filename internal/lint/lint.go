@@ -17,6 +17,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/secrets"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrPrinted marks an error whose message was already printed in the bash
@@ -123,24 +124,24 @@ func (l *Linter) schema(domainDir, specFile string) int {
 	root := firstDoc(specFile)
 	errs := 0
 
-	if valueOr(nodeAt(root, "kind"), "") == "" {
+	if valueOr(yqsem.Lookup(root, "kind"), "") == "" {
 		ui.Errorf(l.ErrOut, "  Missing required field: kind")
 		errs++
 	}
-	if valueOr(nodeAt(root, "apiVersion"), "") == "" {
+	if valueOr(yqsem.Lookup(root, "apiVersion"), "") == "" {
 		ui.Errorf(l.ErrOut, "  Missing required field: apiVersion")
 		errs++
 	}
-	if valueOr(nodeAt(root, "metadata", "name"), "") == "" {
+	if valueOr(yqsem.Lookup(root, "metadata", "name"), "") == "" {
 		ui.Errorf(l.ErrOut, "  Missing required field: metadata.name")
 		errs++
 	}
 
 	if isFile(domainDir + "/cluster.lok8s.yaml") {
 		// yq: `.spec.kind // .kind // ""`
-		specRuntime := valueOr(nodeAt(root, "spec", "kind"), "")
+		specRuntime := valueOr(yqsem.Lookup(root, "spec", "kind"), "")
 		if specRuntime == "" {
-			specRuntime = valueOr(nodeAt(root, "kind"), "")
+			specRuntime = valueOr(yqsem.Lookup(root, "kind"), "")
 		}
 		if specRuntime == "" || specRuntime == "null" {
 			ui.Warnf(l.ErrOut, "  Missing spec.kind (cluster runtime type)")
@@ -158,14 +159,14 @@ func (l *Linter) clusterref(domainDir, specFile string) int {
 	root := firstDoc(specFile)
 	errs := 0
 
-	clusterRef := valueOr(nodeAt(root, "spec", "clusterRef"), "")
+	clusterRef := valueOr(yqsem.Lookup(root, "spec", "clusterRef"), "")
 	if clusterRef == "" || clusterRef == "null" {
 		ui.Errorf(l.ErrOut, "  Missing required field: spec.clusterRef")
 		errs++
 		return errs
 	}
 	// Validate clusterRef.domain points to a valid cluster domain
-	refDomain := valueOr(nodeAt(root, "spec", "clusterRef", "domain"), "")
+	refDomain := valueOr(yqsem.Lookup(root, "spec", "clusterRef", "domain"), "")
 	if refDomain != "" {
 		if !isDir(l.Paths.Clusters + "/" + refDomain) {
 			ui.Errorf(l.ErrOut, "  clusterRef.domain '%s' not found in .lok8s/", refDomain)
@@ -194,7 +195,7 @@ func (l *Linter) kustomization(domainDir string) int {
 			ui.Warnf(l.ErrOut, "  Target %s/ missing kustomization.yaml", tname)
 			continue
 		}
-		for _, item := range seqItems(nodeAt(firstDoc(kustfile), "resources")) {
+		for _, item := range yqsem.SeqItems(yqsem.Lookup(firstDoc(kustfile), "resources")) {
 			// yq -r renders a null element as the literal "null" (which then
 			// fails the existence check, like bash); a map/seq element would
 			// render as multi-line YAML — not a path, skipped here.
@@ -258,8 +259,8 @@ func labelsQuery(path string) string {
 	}
 	var outputs []string
 	for _, doc := range docs {
-		labels := nodeAt(doc, "metadata", "labels")
-		if keys, ok := mapKeys(labels); ok {
+		labels := yqsem.Lookup(doc, "metadata", "labels")
+		if keys, ok := yqsem.MapKeys(labels); ok {
 			count := 0
 			for _, k := range keys {
 				if lok8sLabelRe.MatchString(k) {

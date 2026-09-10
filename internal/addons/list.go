@@ -19,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks an error whose message was already printed in the bash
@@ -95,14 +96,14 @@ func readChart(dir string) chartMeta {
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return m
 	}
-	doc := derefNode(&root)
+	doc := yqsem.Deref(&root)
 	if doc == nil || doc.Kind != yaml.MappingNode {
 		return m
 	}
 	get := func(key, fallback string) string {
 		for i := 0; i+1 < len(doc.Content); i += 2 {
 			if doc.Content[i].Value == key {
-				v := derefNode(doc.Content[i+1])
+				v := yqsem.Deref(doc.Content[i+1])
 				if v == nil || v.Kind != yaml.ScalarNode || v.Tag == "!!null" {
 					return fallback
 				}

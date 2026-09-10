@@ -33,6 +33,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // PlatformOwned lists the addon DIRS that must never bootstrap onto a
@@ -64,18 +66,18 @@ func ResolveEntries(clusterYAML, kind string) ([]string, error) {
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return nil, err
 	}
-	spec := lookupMap(derefNode(&root), "spec")
-	bootstrapNode := lookupMap(spec, "bootstrap")
+	spec := yqsem.MapGet(yqsem.Deref(&root), "spec")
+	bootstrapNode := yqsem.MapGet(spec, "bootstrap")
 	if bootstrapNode != nil && bootstrapNode.Kind == yaml.SequenceNode && len(bootstrapNode.Content) > 0 {
 		entries := make([]string, 0, len(bootstrapNode.Content))
 		for _, el := range bootstrapNode.Content {
-			entries = append(entries, compactJSON(derefNode(el)))
+			entries = append(entries, compactJSON(yqsem.Deref(el)))
 		}
 		return entries, nil
 	}
 	// Empty result — distinguish a *defined* empty list (opt out) from an
 	// *absent* key (fall back to the per-driver default).
-	if hasKey(spec, "bootstrap") {
+	if yqsem.HasKey(spec, "bootstrap") {
 		return nil, nil
 	}
 	if kind == "lo" {
@@ -84,50 +86,10 @@ func ResolveEntries(clusterYAML, kind string) ([]string, error) {
 	return nil, nil
 }
 
-func hasKey(n *yaml.Node, key string) bool {
-	n = derefNode(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return true
-		}
-	}
-	return false
-}
-
-func lookupMap(n *yaml.Node, key string) *yaml.Node {
-	n = derefNode(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return derefNode(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
-func derefNode(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
 // compactJSON renders a YAML node as compact single-line JSON, preserving
 // map key order — the `yq -o=json -I=0` shape the bash entry stream carries.
 func compactJSON(n *yaml.Node) string {
-	n = derefNode(n)
+	n = yqsem.Deref(n)
 	if n == nil {
 		return "null"
 	}

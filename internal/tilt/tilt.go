@@ -23,6 +23,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks a failure whose message was already printed in the bash
@@ -115,7 +116,7 @@ func specTiltPort(specPath string) string {
 	if yaml.Unmarshal(raw, &n) != nil {
 		return ""
 	}
-	node := yamlPath(&n, "spec", "tilt", "port")
+	node := yqsem.Lookup(&n, "spec", "tilt", "port")
 	if node == nil || node.Kind != yaml.ScalarNode || node.Tag == "!!null" {
 		return ""
 	}
@@ -329,45 +330,6 @@ func (c *Context) Restart(ctx context.Context, force bool) error {
 	return c.Up(ctx)
 }
 
-// yamlPath walks nested mapping keys, nil when absent.
-func yamlPath(n *yaml.Node, keys ...string) *yaml.Node {
-	cur := yamlDeref(n)
-	for _, key := range keys {
-		cur = yamlMapGet(cur, key)
-		if cur == nil {
-			return nil
-		}
-	}
-	return cur
-}
-
-func yamlDeref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-func yamlMapGet(n *yaml.Node, key string) *yaml.Node {
-	n = yamlDeref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return yamlDeref(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
 // defaultPreflighter builds the kapply sweep bound to this context.
 func (c *Context) preflight(ctx context.Context, manifest string, args ...string) error {
 	if c.Preflighter != nil {
@@ -395,21 +357,21 @@ func (c *Context) PreflightConfig(domainName string) (enabled, age, crds, allow 
 	// NOT a `// true` alternative: yq's operator treats an explicit `false`
 	// as empty and would read a disable as true. Only a literal false
 	// disables — on .enabled, or the scalar shorthand `preflight: false`.
-	pf := yamlPath(&n, "spec", "tilt", "preflight")
-	en := yamlMapGet(pf, "enabled")
+	pf := yqsem.Lookup(&n, "spec", "tilt", "preflight")
+	en := yqsem.MapGet(pf, "enabled")
 	if scalarIsFalse(en) || scalarIsFalse(pf) {
 		enabled = "false"
 	}
-	if v := scalarValue(yamlMapGet(pf, "age")); v != "" {
+	if v := scalarValue(yqsem.MapGet(pf, "age")); v != "" {
 		age = v
 	}
-	if v := scalarValue(yamlMapGet(pf, "crds")); v != "" {
+	if v := scalarValue(yqsem.MapGet(pf, "crds")); v != "" {
 		crds = v
 	}
-	if list := yamlMapGet(pf, "crdForceAllow"); list != nil && list.Kind == yaml.SequenceNode {
+	if list := yqsem.MapGet(pf, "crdForceAllow"); list != nil && list.Kind == yaml.SequenceNode {
 		var items []string
 		for _, item := range list.Content {
-			it := yamlDeref(item)
+			it := yqsem.Deref(item)
 			if it != nil && it.Kind == yaml.ScalarNode {
 				items = append(items, it.Value)
 			}

@@ -30,8 +30,8 @@ type SpaceConfig struct {
 // would target the WRONG space).
 func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) {
 	doc := loadSpec(clusterYAML)
-	if doc.err != nil {
-		c.errorf("cannot parse cluster spec: %s: %v", clusterYAML, doc.err)
+	if doc.Err != nil {
+		c.errorf("cannot parse cluster spec: %s: %v", clusterYAML, doc.Err)
 		return nil, ErrHandled
 	}
 	defaultSlug := domain
@@ -39,10 +39,10 @@ func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) 
 		defaultSlug = domain[:i]
 	}
 	sp := &SpaceConfig{
-		Slug:   doc.or("", "spec", "kubehz", "space", "slug"),
-		Name:   doc.or("", "spec", "kubehz", "space", "name"),
-		Plan:   doc.or("", "spec", "kubehz", "space", "plan"),
-		Region: doc.or("", "spec", "kubehz", "space", "region"),
+		Slug:   doc.Or("", "spec", "kubehz", "space", "slug"),
+		Name:   doc.Or("", "spec", "kubehz", "space", "name"),
+		Plan:   doc.Or("", "spec", "kubehz", "space", "plan"),
+		Region: doc.Or("", "spec", "kubehz", "space", "region"),
 	}
 	if sp.Slug == "" {
 		sp.Slug = defaultSlug

@@ -36,6 +36,8 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 var reZeroPrefix = regexp.MustCompile(`/0$`)
@@ -52,11 +54,11 @@ func secpolScan(files []string) (denyPolicies, openPolicies int) {
 			continue
 		}
 		for _, doc := range docs {
-			if yqRenderNode(mapValue(doc, "kind")) != "SecurityPolicy" {
+			if yqRenderNode(yqsem.MapGet(doc, "kind")) != "SecurityPolicy" {
 				continue
 			}
-			action := altNode(lookupPath(doc, "spec", "authorization", "defaultAction"), "-")
-			merge := altNode(lookupPath(doc, "spec", "mergeType"), "-")
+			action := altNode(yqsem.Lookup(doc, "spec", "authorization", "defaultAction"), "-")
+			merge := altNode(yqsem.Lookup(doc, "spec", "mergeType"), "-")
 			routed := false
 			for _, k := range targetKinds(doc) {
 				if k == "HTTPRoute" || k == "GRPCRoute" || k == "TCPRoute" {
@@ -91,11 +93,11 @@ func secpolScan(files []string) (denyPolicies, openPolicies int) {
 // == "!!map") | .kind // "-")`).
 func targetKinds(doc *yaml.Node) []string {
 	var candidates []*yaml.Node
-	candidates = append(candidates, lookupPath(doc, "spec", "targetRef"))
+	candidates = append(candidates, yqsem.Lookup(doc, "spec", "targetRef"))
 	for _, key := range []string{"targetRefs", "targetSelectors"} {
-		if seq := lookupPath(doc, "spec", key); seq != nil && seq.Kind == yaml.SequenceNode {
+		if seq := yqsem.Lookup(doc, "spec", key); seq != nil && seq.Kind == yaml.SequenceNode {
 			for _, item := range seq.Content {
-				candidates = append(candidates, resolveNode(item))
+				candidates = append(candidates, yqsem.Deref(item))
 			}
 		}
 	}
@@ -104,7 +106,7 @@ func targetKinds(doc *yaml.Node) []string {
 		if c == nil || c.Kind != yaml.MappingNode {
 			continue
 		}
-		kinds = append(kinds, altNode(mapValue(c, "kind"), "-"))
+		kinds = append(kinds, altNode(yqsem.MapGet(c, "kind"), "-"))
 	}
 	return kinds
 }
@@ -116,22 +118,22 @@ func targetKinds(doc *yaml.Node) []string {
 // false alarm), principal keys exactly {clientCIDRs}, and some CIDR with a
 // ZERO prefix length.
 func allowAllRules(doc *yaml.Node) int {
-	rules := lookupPath(doc, "spec", "authorization", "rules")
+	rules := yqsem.Lookup(doc, "spec", "authorization", "rules")
 	if rules == nil || rules.Kind != yaml.SequenceNode {
 		return 0
 	}
 	n := 0
 	for _, item := range rules.Content {
-		rule := resolveNode(item)
+		rule := yqsem.Deref(item)
 		if rule == nil || rule.Kind != yaml.MappingNode {
 			continue
 		}
-		if yqRenderNode(mapValue(rule, "action")) != "Allow" {
+		if yqRenderNode(yqsem.MapGet(rule, "action")) != "Allow" {
 			continue
 		}
 		subset := true
 		for i := 0; i+1 < len(rule.Content); i += 2 {
-			k := resolveNode(rule.Content[i])
+			k := yqsem.Deref(rule.Content[i])
 			if k == nil {
 				continue
 			}
@@ -143,13 +145,13 @@ func allowAllRules(doc *yaml.Node) int {
 		if !subset {
 			continue
 		}
-		principal := mapValue(rule, "principal")
+		principal := yqsem.MapGet(rule, "principal")
 		if principal == nil || principal.Kind != yaml.MappingNode {
 			continue
 		}
 		var keys []string
 		for i := 0; i+1 < len(principal.Content); i += 2 {
-			if k := resolveNode(principal.Content[i]); k != nil {
+			if k := yqsem.Deref(principal.Content[i]); k != nil {
 				keys = append(keys, k.Value)
 			}
 		}
@@ -157,12 +159,12 @@ func allowAllRules(doc *yaml.Node) int {
 		if len(keys) != 1 || keys[0] != "clientCIDRs" {
 			continue
 		}
-		cidrs := mapValue(principal, "clientCIDRs")
+		cidrs := yqsem.MapGet(principal, "clientCIDRs")
 		if cidrs == nil || cidrs.Kind != yaml.SequenceNode {
 			continue
 		}
 		for _, c := range cidrs.Content {
-			cn := resolveNode(c)
+			cn := yqsem.Deref(c)
 			if cn != nil && cn.Kind == yaml.ScalarNode && reZeroPrefix.MatchString(cn.Value) {
 				n++
 			}
@@ -191,15 +193,15 @@ func encryptionEncryptsSecrets(files []string) bool {
 		}
 		var group *yaml.Node
 		for _, doc := range docs {
-			if yqRenderNode(mapValue(doc, "kind")) != "EncryptionConfiguration" {
+			if yqRenderNode(yqsem.MapGet(doc, "kind")) != "EncryptionConfiguration" {
 				continue
 			}
-			resources := mapValue(doc, "resources")
+			resources := yqsem.MapGet(doc, "resources")
 			if resources == nil || resources.Kind != yaml.SequenceNode {
 				continue
 			}
 			for _, g := range resources.Content {
-				gn := resolveNode(g)
+				gn := yqsem.Deref(g)
 				if coversSecrets(gn) {
 					group = gn
 					break
@@ -212,15 +214,15 @@ func encryptionEncryptsSecrets(files []string) bool {
 		if group == nil {
 			continue
 		}
-		providers := mapValue(group, "providers")
+		providers := yqsem.MapGet(group, "providers")
 		if providers == nil || providers.Kind != yaml.SequenceNode || len(providers.Content) == 0 {
 			continue
 		}
-		first := resolveNode(providers.Content[0])
+		first := yqsem.Deref(providers.Content[0])
 		if first == nil || first.Kind != yaml.MappingNode || len(first.Content) < 2 {
 			continue
 		}
-		writer := resolveNode(first.Content[0])
+		writer := yqsem.Deref(first.Content[0])
 		if writer == nil {
 			continue
 		}
@@ -235,12 +237,12 @@ func encryptionEncryptsSecrets(files []string) bool {
 // coversSecrets reports whether a resource group's `resources:` list names
 // secrets or a covering wildcard.
 func coversSecrets(group *yaml.Node) bool {
-	rs := mapValue(group, "resources")
+	rs := yqsem.MapGet(group, "resources")
 	if rs == nil || rs.Kind != yaml.SequenceNode {
 		return false
 	}
 	for _, r := range rs.Content {
-		rn := resolveNode(r)
+		rn := yqsem.Deref(r)
 		if rn == nil || rn.Kind != yaml.ScalarNode {
 			continue
 		}

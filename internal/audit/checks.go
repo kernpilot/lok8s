@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 var minorRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)`)
@@ -43,9 +44,9 @@ func (a *Auditor) checkEncryption(r *run, domainName, domainDir, specFile, kind 
 	// absent), so ONLY an exact true/false counts — the same strictness as
 	// the bash string compare.
 	specDoc := firstDocNode(specFile)
-	specEnable := yqRenderNode(lookupPath(specDoc, "spec", "features", "encryptionProviders", "enable"))
+	specEnable := yqRenderNode(yqsem.Lookup(specDoc, "spec", "features", "encryptionProviders", "enable"))
 	if specEnable == "null" {
-		specEnable = yqRenderNode(lookupPath(specDoc, "spec", "encryption", "atRest"))
+		specEnable = yqRenderNode(yqsem.Lookup(specDoc, "spec", "encryption", "atRest"))
 	}
 	if specEnable == "null" {
 		specEnable = ""
@@ -164,8 +165,8 @@ func (a *Auditor) checkCilium(r *run, domainName, specFile, kind, provider strin
 	}
 	auditMode, enforceMode := "", ""
 	if merged, err := mergeYAMLDocs(vfiles, inline); err == nil {
-		auditMode = altNode(mapValue(merged, "policyAuditMode"), "false")
-		enforceMode = altNode(mapValue(merged, "policyEnforcementMode"), "")
+		auditMode = altNode(yqsem.MapGet(merged, "policyAuditMode"), "false")
+		enforceMode = altNode(yqsem.MapGet(merged, "policyEnforcementMode"), "")
 	}
 	// Merge/parse failure (e.g. an unparseable inline override in
 	// spec.bootstrap) → UNKNOWN, never a fall-through pass and never a crash:

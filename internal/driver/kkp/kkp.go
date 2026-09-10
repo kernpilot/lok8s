@@ -89,7 +89,7 @@ func readIDFile(path string) (string, bool) {
 // empty string).
 func exportAPIURLFromSpec(spec specDoc) {
 	if os.Getenv("KKP_API_URL") == "" {
-		os.Setenv("KKP_API_URL", spec.raw("spec", "kkp", "apiUrl"))
+		os.Setenv("KKP_API_URL", spec.Raw("spec", "kkp", "apiUrl"))
 	}
 }
 
@@ -111,10 +111,10 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 
 	// 2. Extract config from cluster spec.
 	spec := loadSpec(cy)
-	clusterName := spec.raw("metadata", "name")
-	projectID := spec.raw("spec", "kkp", "projectId")
-	datacenter := spec.raw("spec", "kkp", "datacenter")
-	k8sVersion := spec.raw("spec", "kubernetes", "version")
+	clusterName := spec.Raw("metadata", "name")
+	projectID := spec.Raw("spec", "kkp", "projectId")
+	datacenter := spec.Raw("spec", "kkp", "datacenter")
+	k8sVersion := spec.Raw("spec", "kubernetes", "version")
 	// provider may be an object ({name: hetzner}) or a bare scalar.
 	provider := spec.providerName("hetzner")
 
@@ -233,7 +233,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	}
 
 	// Clean up local state (kubeconfig is named by metadata.name).
-	clusterName := spec.raw("metadata", "name")
+	clusterName := spec.Raw("metadata", "name")
 	_ = os.Remove(filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml"))
 	_ = os.RemoveAll(workDir)
 
@@ -278,7 +278,7 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 // driver::kubeconfig).
 func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) {
 	spec := loadSpec(d.clusterYAML(domain))
-	return filepath.Join(d.deps.Paths.Base, ".kubeconfig", spec.raw("metadata", "name")+".yaml"), nil
+	return filepath.Join(d.deps.Paths.Base, ".kubeconfig", spec.Raw("metadata", "name")+".yaml"), nil
 }
 
 // EnsureCredentials is the optional bash contract function
@@ -287,7 +287,7 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 // TOLERANT `// ""` read here, unlike provision's bare one).
 func (d *Driver) EnsureCredentials(ctx context.Context, clusterYAML string) error {
 	if os.Getenv("KKP_API_URL") == "" {
-		if apiURL := loadSpec(clusterYAML).or("", "spec", "kkp", "apiUrl"); apiURL != "" {
+		if apiURL := loadSpec(clusterYAML).Or("", "spec", "kkp", "apiUrl"); apiURL != "" {
 			os.Setenv("KKP_API_URL", apiURL)
 		}
 	}
@@ -355,7 +355,7 @@ func marshalJQ(v any) (string, error) {
 
 // buildClusterJSON ports _build_cluster_json: the cluster creation payload.
 func buildClusterJSON(name, version, datacenter, provider string, spec specDoc, stderr io.Writer) (string, error) {
-	preset := spec.or("", "spec", "kkp", "preset")
+	preset := spec.Or("", "spec", "kkp", "preset")
 
 	cloudSpec, err := buildCloudSpec(provider, preset, stderr)
 	if err != nil {

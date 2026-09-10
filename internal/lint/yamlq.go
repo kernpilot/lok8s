@@ -20,6 +20,8 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // fileDocs parses every YAML document in path. nil on read or parse error
@@ -47,7 +49,7 @@ func parseDocs(raw []byte) []*yaml.Node {
 		if err != nil {
 			return nil
 		}
-		docs = append(docs, deref(&doc))
+		docs = append(docs, yqsem.Deref(&doc))
 	}
 }
 
@@ -61,93 +63,22 @@ func firstDoc(path string) *yaml.Node {
 	return docs[0]
 }
 
-// deref unwraps document and alias nodes.
-func deref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-// nodeAt walks a mapping path, nil when any hop is missing or not a mapping.
-func nodeAt(n *yaml.Node, path ...string) *yaml.Node {
-	n = deref(n)
-	for _, key := range path {
-		if n == nil || n.Kind != yaml.MappingNode {
-			return nil
-		}
-		var next *yaml.Node
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if n.Content[i].Value == key {
-				next = n.Content[i+1]
-				break
-			}
-		}
-		n = deref(next)
-	}
-	return n
-}
-
-// mapKeys returns a mapping's keys in document order; ok=false when n is not
-// a mapping (bash: `keys` errors and the capture stops).
-func mapKeys(n *yaml.Node) ([]string, bool) {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil, false
-	}
-	keys := make([]string, 0, len(n.Content)/2)
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		keys = append(keys, n.Content[i].Value)
-	}
-	return keys, true
-}
-
-func hasKey(n *yaml.Node, key string) bool {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return true
-		}
-	}
-	return false
-}
-
-// isNull reports a missing or !!null node.
-func isNull(n *yaml.Node) bool {
-	n = deref(n)
-	return n == nil || n.Tag == "!!null"
-}
-
 // valueOr renders a scalar the way `yq -r '<expr> // "<def>"'` does: missing
 // or null → def; scalar → its value. A non-scalar returns the placeholder —
 // callers only test the result for emptiness/equality, never print it (yq
 // would render the whole map/seq as YAML there; no lint message does).
 func valueOr(n *yaml.Node, def string) string {
-	n = deref(n)
-	if isNull(n) {
-		return def
-	}
-	if n.Kind != yaml.ScalarNode {
+	if n = yqsem.Deref(n); n != nil && n.Kind != yaml.ScalarNode {
 		return "<non-scalar>"
 	}
-	return n.Value
+	return yqsem.OrNull(n, def) // null only: an explicit false stays "false"
 }
 
 // scalarText renders a scalar the way `yq -r` prints it: the value for a
 // string/number/bool, the literal "null" for a null node, "" for a missing or
 // non-scalar node (yq would render a map/seq as YAML there; callers skip).
 func scalarText(n *yaml.Node) string {
-	n = deref(n)
+	n = yqsem.Deref(n)
 	if n == nil || n.Tag == "!!null" {
 		if n != nil {
 			return "null"
@@ -165,7 +96,7 @@ func scalarText(n *yaml.Node) string {
 // exotic (!!timestamp, !!binary, custom) serializes to a JSON string and
 // re-reads as !!str. nil reads as !!null.
 func normTag(n *yaml.Node) string {
-	n = deref(n)
+	n = yqsem.Deref(n)
 	if n == nil {
 		return "!!null"
 	}
@@ -174,19 +105,6 @@ func normTag(n *yaml.Node) string {
 		return n.Tag
 	}
 	return "!!str"
-}
-
-// seqItems returns a sequence's element nodes (nil when not a sequence).
-func seqItems(n *yaml.Node) []*yaml.Node {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.SequenceNode {
-		return nil
-	}
-	items := make([]*yaml.Node, 0, len(n.Content))
-	for _, c := range n.Content {
-		items = append(items, deref(c))
-	}
-	return items
 }
 
 // sortedDirNames lists dir's subdirectory names in byte order (bash: a `*/`

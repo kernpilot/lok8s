@@ -10,6 +10,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
 )
 
@@ -118,7 +119,7 @@ func specMetadataName(clusterYAML string) string {
 	if yaml.Unmarshal(raw, &root) != nil {
 		return "null"
 	}
-	n := lookupMap(lookupMap(derefNode(&root), "metadata"), "name")
+	n := yqsem.MapGet(yqsem.MapGet(yqsem.Deref(&root), "metadata"), "name")
 	if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
 		return "null"
 	}

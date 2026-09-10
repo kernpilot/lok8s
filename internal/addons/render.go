@@ -23,6 +23,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
 )
 
@@ -211,7 +212,7 @@ func setChartValueFiles(chartPath string) error {
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return err
 	}
-	doc := derefNode(&root)
+	doc := yqsem.Deref(&root)
 	if doc == nil || doc.Kind != yaml.MappingNode {
 		return fmt.Errorf("chart.yaml is not a mapping")
 	}
@@ -255,7 +256,7 @@ func coerceEnvValues(data []byte) ([]byte, error) {
 			}
 			return nil, err
 		}
-		walkCoerce(derefNode(&doc))
+		walkCoerce(yqsem.Deref(&doc))
 		out, err := marshalNode(&doc)
 		if err != nil {
 			return nil, err
@@ -272,10 +273,10 @@ func walkCoerce(n *yaml.Node) {
 	switch n.Kind {
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			key, val := n.Content[i], derefNode(n.Content[i+1])
+			key, val := n.Content[i], yqsem.Deref(n.Content[i+1])
 			if key.Value == "env" && val != nil && val.Kind == yaml.SequenceNode {
 				for _, el := range val.Content {
-					el = derefNode(el)
+					el = yqsem.Deref(el)
 					if el == nil || el.Kind != yaml.MappingNode {
 						continue
 					}
@@ -290,7 +291,7 @@ func walkCoerce(n *yaml.Node) {
 		}
 	case yaml.SequenceNode:
 		for _, c := range n.Content {
-			walkCoerce(derefNode(c))
+			walkCoerce(yqsem.Deref(c))
 		}
 	}
 }
@@ -303,20 +304,6 @@ func coerceToString(n *yaml.Node) {
 	}
 	n.Tag = "!!str"
 	n.Style = yaml.DoubleQuotedStyle
-}
-
-func derefNode(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
 }
 
 func marshalNode(n *yaml.Node) ([]byte, error) {

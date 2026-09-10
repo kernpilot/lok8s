@@ -1,147 +1,36 @@
 package capi
 
-// yamlspec.go — yq-semantics YAML readers over cluster.lok8s.yaml, plus the
-// whitelist envsubst the generator renders with. The bash read the spec with
-// `yq -r '<path> // <default>'` per field; these helpers replicate that
-// contract exactly, INCLUDING:
-//
-//   - yq's `//` alternative firing on null AND false (not just missing);
-//   - a bare `yq -r '<path>'` printing the literal word "null" for a
-//     missing path;
-//   - `$(yq … missing-file)` collapsing to the EMPTY string when the file
-//     itself cannot be read (yq fails, the command substitution captures
-//     nothing) — driver::provision depends on that: a missing spec makes
-//     mgmt_domain "" and routes to the kubehz::read_config guard, never to
-//     a "null" management domain.
+// yamlspec.go — the cluster.lok8s.yaml reader (internal/yqsem's Doc, which
+// keeps yq's `//` firing on null AND false, the literal "null" for a bare
+// missing path, and the "" every read yields when the file itself cannot be
+// read — driver::provision depends on that: a missing spec makes mgmt_domain
+// "" and routes to the kubehz::read_config guard, never to a "null"
+// management domain), plus the pool helpers and the whitelist envsubst the
+// generator renders with.
 
 import (
 	"io"
-	"os"
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
-// specDoc is one loaded cluster spec. ok=false = the file was missing or
-// unparsable (the bash "yq failed" state: every read yields "").
-type specDoc struct {
-	root *yaml.Node
-	ok   bool
-}
+// specDoc is one loaded cluster spec.
+type specDoc struct{ yqsem.Doc }
 
 // loadSpec parses a YAML file; a missing or unparsable file loads as the
-// not-ok document.
+// not-ok document (every read yields "").
 func loadSpec(path string) specDoc {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return specDoc{}
-	}
-	var root yaml.Node
-	if yaml.Unmarshal(raw, &root) != nil {
-		return specDoc{}
-	}
-	return specDoc{root: &root, ok: true}
-}
-
-// yderef unwraps document/alias nodes.
-func yderef(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-// lookup walks a mapping path, nil when any hop is missing or not a map.
-func (d specDoc) lookup(path ...string) *yaml.Node {
-	if !d.ok {
-		return nil
-	}
-	n := yderef(d.root)
-	for _, key := range path {
-		if n == nil || n.Kind != yaml.MappingNode {
-			return nil
-		}
-		var next *yaml.Node
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if n.Content[i].Value == key {
-				next = n.Content[i+1]
-				break
-			}
-		}
-		n = yderef(next)
-	}
-	return n
-}
-
-func isNull(n *yaml.Node) bool {
-	return n == nil || n.Tag == "!!null"
-}
-
-func isFalse(n *yaml.Node) bool {
-	return n != nil && n.Tag == "!!bool" &&
-		(n.Value == "false" || n.Value == "False" || n.Value == "FALSE")
-}
-
-// raw mirrors `yq -r '<path>'`: the scalar's string value, the literal word
-// "null" when the path is missing or null, "" on an unreadable file (the
-// whole yq call failed) or a non-scalar node.
-func (d specDoc) raw(path ...string) string {
-	if !d.ok {
-		return ""
-	}
-	n := d.lookup(path...)
-	if isNull(n) {
-		return "null"
-	}
-	if n.Kind != yaml.ScalarNode {
-		return ""
-	}
-	return n.Value
-}
-
-// or mirrors `yq -r '<path> // "<def>"'`: def fires when the path is
-// missing, null, or FALSE (yq's alternative-operator falsiness); "" on an
-// unreadable file.
-func (d specDoc) or(def string, path ...string) string {
-	if !d.ok {
-		return ""
-	}
-	n := d.lookup(path...)
-	if isNull(n) || isFalse(n) || n.Kind != yaml.ScalarNode {
-		return def
-	}
-	return n.Value
-}
-
-// present mirrors `yq -e '<path>'` succeeding: the node exists and is
-// neither null nor false (yq -e fails on falsy results).
-func (d specDoc) present(path ...string) bool {
-	n := d.lookup(path...)
-	return !isNull(n) && !isFalse(n)
+	return specDoc{yqsem.Load(path)}
 }
 
 // poolNames mirrors spec::pool_names: the keys of spec.workers in DOCUMENT
 // ORDER (mikefarah yq preserves map order), unvalidated — validation is the
 // caller's next step, per name.
 func (d specDoc) poolNames() []string {
-	n := d.lookup("spec", "workers")
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	var names []string
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		names = append(names, n.Content[i].Value)
-	}
+	names, _ := yqsem.MapKeys(d.Lookup("spec", "workers"))
 	return names
 }
 
@@ -165,14 +54,10 @@ func validatePoolName(pool string, stderr io.Writer) bool {
 // and not "null", so the default does NOT fire.
 func (d specDoc) poolField(pool, field, def string) string {
 	path := append([]string{"spec", "workers", pool}, strings.Split(field, ".")...)
-	n := d.lookup(path...)
-	if isNull(n) || n.Kind != yaml.ScalarNode {
-		return def
+	if v := yqsem.OrNull(d.Lookup(path...), ""); v != "" {
+		return v
 	}
-	if n.Value == "" {
-		return def
-	}
-	return n.Value
+	return def
 }
 
 // envsubstMap is template::envsubst with the values held in a LOCAL map

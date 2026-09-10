@@ -27,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrPrinted marks an error whose message was already printed in the bash
@@ -72,18 +73,18 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 		ui.Errorf(errOut, "oidc: could not parse cluster spec: %s", clusterYAML)
 		return ErrPrinted
 	}
-	oidcNode := lookup(&root, "spec", "oidc")
+	oidcNode := yqsem.Lookup(&root, "spec", "oidc")
 
 	// yq `// "default"` semantics: the default fires on a MISSING or null key,
 	// never on an explicit empty string (an explicit `usernamePrefix: ""` is a
 	// deliberate "no prefix" and must survive the load).
-	os.Setenv(EnvIssuer, scalarOr(lookup(oidcNode, "issuer"), ""))
-	os.Setenv(EnvClientID, scalarOr(lookup(oidcNode, "clientID"), ""))
-	os.Setenv(EnvUsernameClaim, scalarOr(lookup(oidcNode, "usernameClaim"), "sub"))
-	os.Setenv(EnvUsernamePrefix, scalarOr(lookup(oidcNode, "usernamePrefix"), "oidc:"))
-	os.Setenv(EnvGroupsClaim, scalarOr(lookup(oidcNode, "groupsClaim"), "groups"))
-	os.Setenv(EnvGroupsPrefix, scalarOr(lookup(oidcNode, "groupsPrefix"), "oidc:"))
-	os.Setenv(EnvCABundle, scalarOr(lookup(oidcNode, "caBundle"), ""))
+	os.Setenv(EnvIssuer, yqsem.OrNull(yqsem.Lookup(oidcNode, "issuer"), ""))
+	os.Setenv(EnvClientID, yqsem.OrNull(yqsem.Lookup(oidcNode, "clientID"), ""))
+	os.Setenv(EnvUsernameClaim, yqsem.OrNull(yqsem.Lookup(oidcNode, "usernameClaim"), "sub"))
+	os.Setenv(EnvUsernamePrefix, yqsem.OrNull(yqsem.Lookup(oidcNode, "usernamePrefix"), "oidc:"))
+	os.Setenv(EnvGroupsClaim, yqsem.OrNull(yqsem.Lookup(oidcNode, "groupsClaim"), "groups"))
+	os.Setenv(EnvGroupsPrefix, yqsem.OrNull(yqsem.Lookup(oidcNode, "groupsPrefix"), "oidc:"))
+	os.Setenv(EnvCABundle, yqsem.OrNull(yqsem.Lookup(oidcNode, "caBundle"), ""))
 
 	// Boundary rule enforced ONCE for every consumer (both drivers + the OIDC
 	// kubeconfig): a configured issuer must be https — previously only
@@ -94,48 +95,4 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 		return ErrPrinted
 	}
 	return nil
-}
-
-// lookup walks a mapping path from a node (dereferencing document/alias
-// wrappers), nil when any hop is missing or not a mapping.
-func lookup(n *yaml.Node, path ...string) *yaml.Node {
-	n = deref(n)
-	for _, key := range path {
-		if n == nil || n.Kind != yaml.MappingNode {
-			return nil
-		}
-		var next *yaml.Node
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if n.Content[i].Value == key {
-				next = n.Content[i+1]
-				break
-			}
-		}
-		n = deref(next)
-	}
-	return n
-}
-
-func deref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-// scalarOr returns the scalar value of n, or fallback when n is missing,
-// null, or not a scalar (a non-scalar spec.oidc field is nonsense; treating
-// it as unset routes it to the "no usable spec.oidc" error).
-func scalarOr(n *yaml.Node, fallback string) string {
-	if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
-		return fallback
-	}
-	return n.Value
 }

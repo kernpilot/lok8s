@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // firstDocNode parses the FIRST document of path, nil on any read/parse
@@ -29,7 +31,7 @@ func firstDocNode(path string) *yaml.Node {
 	if yaml.Unmarshal(raw, &doc) != nil {
 		return nil
 	}
-	return resolveNode(&doc)
+	return yqsem.Deref(&doc)
 }
 
 // decodeDocs parses every document of path. partial=true keeps the documents
@@ -56,77 +58,20 @@ func decodeDocs(path string, partial bool) ([]*yaml.Node, error) {
 			}
 			return nil, err
 		}
-		docs = append(docs, resolveNode(&n))
+		docs = append(docs, yqsem.Deref(&n))
 	}
 	return docs, nil
 }
 
-// resolveNode unwraps document and alias nodes to the underlying value node.
-func resolveNode(n *yaml.Node) *yaml.Node {
-	for n != nil {
-		switch {
-		case n.Kind == yaml.DocumentNode && len(n.Content) > 0:
-			n = n.Content[0]
-		case n.Kind == yaml.AliasNode && n.Alias != nil:
-			n = n.Alias
-		default:
-			return n
-		}
-	}
-	return nil
-}
-
-// mapValue returns the value node for key in a mapping node (first match),
-// nil when absent or when n is not a mapping.
-func mapValue(n *yaml.Node, key string) *yaml.Node {
-	n = resolveNode(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k := resolveNode(n.Content[i])
-		if k != nil && k.Value == key {
-			return resolveNode(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
-// hasKey reports whether a mapping node carries the key (yq: has("k")).
-func hasKey(n *yaml.Node, key string) bool {
-	n = resolveNode(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k := resolveNode(n.Content[i])
-		if k != nil && k.Value == key {
-			return true
-		}
-	}
-	return false
-}
-
-// lookupPath walks nested mapping keys; nil as soon as one is absent.
-func lookupPath(n *yaml.Node, keys ...string) *yaml.Node {
-	for _, k := range keys {
-		n = mapValue(n, k)
-		if n == nil {
-			return nil
-		}
-	}
-	return n
-}
-
-// lookupFile is lookupPath over a file's first document.
+// lookupFile is yqsem.Lookup over a file's first document.
 func lookupFile(path string, keys ...string) *yaml.Node {
-	return lookupPath(firstDocNode(path), keys...)
+	return yqsem.Lookup(firstDocNode(path), keys...)
 }
 
-// isNullNode reports a YAML null (absent nodes are handled by callers).
+// isNullNode reports a PRESENT YAML null (absent nodes are handled by
+// callers — yqsem.IsNull would fold the two).
 func isNullNode(n *yaml.Node) bool {
-	n = resolveNode(n)
-	return n != nil && n.Kind == yaml.ScalarNode && n.Tag == "!!null"
+	return n != nil && yqsem.IsNull(n)
 }
 
 // yqRenderNode mirrors `yq -r` output for a node: an absent node renders as
@@ -135,7 +80,7 @@ func isNullNode(n *yaml.Node) bool {
 // map/sequence renders as YAML with the trailing newline trimmed (bash `$()`
 // strips it).
 func yqRenderNode(n *yaml.Node) string {
-	n = resolveNode(n)
+	n = yqsem.Deref(n)
 	if n == nil {
 		return "null"
 	}
@@ -156,11 +101,7 @@ func yqRenderNode(n *yaml.Node) string {
 // absent, null, or boolean false yields def; anything else its rendering
 // (`//` treats ONLY null and false as empty — an empty string is kept).
 func altNode(n *yaml.Node, def string) string {
-	n = resolveNode(n)
-	if n == nil || isNullNode(n) {
-		return def
-	}
-	if n.Kind == yaml.ScalarNode && n.Tag == "!!bool" && strings.EqualFold(n.Value, "false") {
+	if !yqsem.Present(n) { // yq flavour: null and false/False/FALSE
 		return def
 	}
 	return yqRenderNode(n)
@@ -207,7 +148,7 @@ func mergeYAMLDocs(files []string, extra *yaml.Node) (*yaml.Node, error) {
 }
 
 func mergeDoc(acc *yaml.Node, doc *yaml.Node) error {
-	doc = resolveNode(doc)
+	doc = yqsem.Deref(doc)
 	if doc == nil || isNullNode(doc) {
 		return nil
 	}
@@ -223,14 +164,14 @@ func mergeDoc(acc *yaml.Node, doc *yaml.Node) error {
 // (including an explicit null — yq replaces at key level).
 func mergeMap(dst, src *yaml.Node) {
 	for i := 0; i+1 < len(src.Content); i += 2 {
-		key := resolveNode(src.Content[i])
-		val := resolveNode(src.Content[i+1])
+		key := yqsem.Deref(src.Content[i])
+		val := yqsem.Deref(src.Content[i+1])
 		if key == nil {
 			continue
 		}
 		existing := -1
 		for j := 0; j+1 < len(dst.Content); j += 2 {
-			k := resolveNode(dst.Content[j])
+			k := yqsem.Deref(dst.Content[j])
 			if k != nil && k.Value == key.Value {
 				existing = j
 				break
@@ -240,7 +181,7 @@ func mergeMap(dst, src *yaml.Node) {
 			dst.Content = append(dst.Content, key, val)
 			continue
 		}
-		cur := resolveNode(dst.Content[existing+1])
+		cur := yqsem.Deref(dst.Content[existing+1])
 		if cur != nil && cur.Kind == yaml.MappingNode && val != nil && val.Kind == yaml.MappingNode {
 			mergeMap(cur, val)
 			continue

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // provisionRemote waits for SSH, cloud-init, and Docker on a freshly
@@ -144,7 +145,7 @@ func providerNode0(out []byte) (ip, user string) {
 func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, errOut io.Writer) error {
 	remote := getenv("LOK8S_REMOTE_USER") + "@" + getenv("LOK8S_REMOTE_IP")
 	dest := getenv("LOK8S_REMOTE_SYNC_DEST")
-	clusterName := yqRaw(loadYAML(clusterYAML), "metadata", "name")
+	clusterName := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(clusterYAML), "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}

@@ -32,6 +32,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks a failure whose [error] line was already printed.
@@ -147,7 +148,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		return nil
 	}
 	subset := selectDocs(string(raw), func(doc *yaml.Node) bool {
-		lbl := lookup(lookup(lookup(doc, "metadata"), "labels"), labelKey)
+		lbl := yqsem.MapGet(yqsem.MapGet(yqsem.MapGet(doc, "metadata"), "labels"), labelKey)
 		// yq `==` compares a scalar's TEXT: an unquoted `true` or `1` label
 		// matches "true"/"1" (verified against yq v4.53).
 		return lbl != nil && lbl.Kind == yaml.ScalarNode && lbl.Tag != "!!null" && lbl.Value == labelValue
@@ -200,7 +201,7 @@ func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnErr
 
 	// Phase 1: CRDs first (subset small enough to stay a string).
 	crds := selectDocs(manifest, func(doc *yaml.Node) bool {
-		return scalar(lookup(doc, "kind")) == "CustomResourceDefinition"
+		return yqsem.OrNull(yqsem.MapGet(doc, "kind"), "") == "CustomResourceDefinition"
 	})
 	if HasObjects(crds) {
 		ui.Debugf(d.stderr(), "Applying CRDs for %s", label)
@@ -230,7 +231,7 @@ func (d *Deployer) waitCRDs(ctx context.Context, crds string) {
 		if yaml.Unmarshal([]byte(doc), &n) != nil {
 			continue
 		}
-		name := scalar(lookup(lookup(deref(&n), "metadata"), "name"))
+		name := yqsem.OrNull(yqsem.Lookup(&n, "metadata", "name"), "")
 		if name == "" {
 			continue
 		}
@@ -270,7 +271,7 @@ func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
 		if yaml.Unmarshal([]byte(doc), &n) != nil {
 			continue
 		}
-		root := deref(&n)
+		root := yqsem.Deref(&n)
 		if root == nil || !pred(root) {
 			continue
 		}
@@ -285,38 +286,4 @@ func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-func deref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-func lookup(n *yaml.Node, key string) *yaml.Node {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return deref(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
-func scalar(n *yaml.Node) string {
-	if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
-		return ""
-	}
-	return n.Value
 }

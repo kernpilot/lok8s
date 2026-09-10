@@ -24,6 +24,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // Name is the driver's registry name (spec `kind: Lo`).
@@ -93,10 +94,10 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	stdout := d.out()
 	cy := d.clusterYAML(domain)
 
-	root := loadYAML(cy)
+	root := yqsem.LoadNode(cy)
 	runtime := ""
 	if root != nil {
-		runtime = yqOr(root, "kind", "spec", "runtime")
+		runtime = yqsem.Or(yqsem.Lookup(root, "spec", "runtime"), "kind")
 	}
 
 	if runtime != "kind" {
@@ -107,8 +108,8 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return fmt.Errorf("unsupported Lo runtime: %s", runtime)
 	}
 
-	clusterName := yqRaw(root, "metadata", "name")
-	k8sVersion := yqRaw(root, "spec", "kubernetes", "version")
+	clusterName := yqsem.Raw(yqsem.Lookup(root, "metadata", "name"))
+	k8sVersion := yqsem.Raw(yqsem.Lookup(root, "spec", "kubernetes", "version"))
 
 	// Remote: provision VM, wait for SSH/Docker, set DOCKER_HOST.
 	if d.deps.ProviderName != "" && d.deps.Provider != nil {
@@ -329,7 +330,7 @@ func (d *Driver) Export(ctx context.Context, domain string) error {
 // Destroy tears down a Lo cluster (bash: driver::destroy).
 func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	cy := d.clusterYAML(domain)
-	clusterName := yqRaw(loadYAML(cy), "metadata", "name")
+	clusterName := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(cy), "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}
@@ -366,7 +367,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 
 // Status reports "Running"/"NotFound" (bash: driver::status).
 func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
-	clusterName := yqRaw(loadYAML(d.clusterYAML(domain)), "metadata", "name")
+	clusterName := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(d.clusterYAML(domain)), "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}
@@ -379,7 +380,7 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 // extractKubeconfig writes .kubeconfig/<name>.yaml from kind and optionally
 // tunnels it (bash: _lo_extract_kubeconfig). Returns the path.
 func (d *Driver) extractKubeconfig(ctx context.Context, domain string, errOut io.Writer) (string, error) {
-	clusterName := yqRaw(loadYAML(d.clusterYAML(domain)), "metadata", "name")
+	clusterName := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(d.clusterYAML(domain)), "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}
@@ -415,3 +416,12 @@ var (
 	_ driver.Driver   = (*Driver)(nil)
 	_ driver.Exporter = (*Driver)(nil)
 )
+
+func getenv(key string) string { return os.Getenv(key) }
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
 	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
@@ -544,7 +545,7 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 // are WARNINGS, never failures — the cluster works without the hint CM.
 func (d *Driver) applyLocalRegistryHosting(ctx context.Context, out, errOut io.Writer, domain string) error {
 	clusterYAML := filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
-	clusterName := yqRaw(loadYAML(clusterYAML), "metadata", "name")
+	clusterName := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(clusterYAML), "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}
@@ -614,7 +615,7 @@ func removeStateFiles(regName string) {
 // registryConfigmap applies the lok8s-registries ConfigMap consumed
 // in-cluster (bash: lo::registry_configmap).
 func (d *Driver) registryConfigmap(ctx context.Context, out, errOut io.Writer, domain, clusterYAML string) error {
-	clusterName := yqRaw(loadYAML(clusterYAML), "metadata", "name")
+	clusterName := yqsem.Raw(yqsem.Lookup(yqsem.LoadNode(clusterYAML), "metadata", "name"))
 	if clusterName == "null" {
 		clusterName = ""
 	}

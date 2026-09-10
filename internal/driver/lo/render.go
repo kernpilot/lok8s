@@ -21,6 +21,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // renderKindConfig renders the full kind Cluster config (bash:
@@ -71,7 +72,7 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 	workerCount := atoiOr(getenv("LOK8S_WORKER_COUNT"), 0)
 	extraMounts := atoiOr(getenv("LOK8S_EXTRA_MOUNTS_COUNT"), 0)
 
-	root := loadYAML(clusterYAML)
+	root := yqsem.LoadNode(clusterYAML)
 
 	for i := 0; i < cpCount; i++ {
 		fmt.Fprintf(&b, "\n  - role: control-plane\n    image: \"kindest/node:%s\"", k8sVersion)
@@ -117,11 +118,11 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 			}
 			// Append user-defined extraMounts from spec.nodes.extraMounts[].
 			if extraMounts > 0 && clusterYAML != "" {
-				mounts := yqSeq(root, "spec", "nodes", "extraMounts")
+				mounts := yqsem.SeqItems(yqsem.Lookup(root, "spec", "nodes", "extraMounts"))
 				for m := 0; m < extraMounts && m < len(mounts); m++ {
-					emHost := yqRaw(mounts[m], "hostPath")
-					emContainer := yqRaw(mounts[m], "containerPath")
-					emReadonly := yqOr(mounts[m], "false", "readOnly")
+					emHost := yqsem.Raw(yqsem.Lookup(mounts[m], "hostPath"))
+					emContainer := yqsem.Raw(yqsem.Lookup(mounts[m], "containerPath"))
+					emReadonly := yqsem.Or(yqsem.Lookup(mounts[m], "readOnly"), "false")
 					fmt.Fprintf(&b, "\n      - hostPath: %s\n        containerPath: %s", emHost, emContainer)
 					if emReadonly == "true" {
 						b.WriteString("\n        readOnly: true")

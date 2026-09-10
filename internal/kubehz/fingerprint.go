@@ -39,7 +39,7 @@ func (c *Context) SSHFingerprint(ctx context.Context, clusterYAML string) (strin
 			}
 		}
 		if keyFile == "" {
-			keyFile = doc.or("~/.ssh/id_ed25519.pub", "spec", "hcloud", "sshPublicKeyFile")
+			keyFile = doc.Or("~/.ssh/id_ed25519.pub", "spec", "hcloud", "sshPublicKeyFile")
 		}
 		if strings.HasPrefix(keyFile, "~") {
 			keyFile = os.Getenv("HOME") + keyFile[1:]
@@ -50,7 +50,7 @@ func (c *Context) SSHFingerprint(ctx context.Context, clusterYAML string) (strin
 		}
 		return awkField(out, 2), nil
 	case "capi":
-		keyName := doc.or("", "spec", "hcloud", "sshKeyName")
+		keyName := doc.Or("", "spec", "hcloud", "sshKeyName")
 		if keyName == "" {
 			// bash: the case arm runs nothing and returns 0 — an empty
 			// fingerprint.
@@ -70,7 +70,7 @@ func (c *Context) SSHFingerprint(ctx context.Context, clusterYAML string) (strin
 	case "lo":
 		// Lo clusters don't have SSH keys — use the cluster domain as
 		// identifier.
-		return "lo:" + doc.or("", "spec", "cluster", "domain"), nil
+		return "lo:" + doc.Or("", "spec", "cluster", "domain"), nil
 	default:
 		c.warnf("Cannot extract SSH fingerprint for kind=%s", kind)
 		return "", ErrHandled

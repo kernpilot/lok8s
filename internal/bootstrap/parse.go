@@ -12,6 +12,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,7 +59,7 @@ func parseError(stderr io.Writer, format string, a ...any) error {
 }
 
 func nodeTag(n *yaml.Node) string {
-	n = derefNode(n)
+	n = yqsem.Deref(n)
 	if n == nil {
 		return "!!null"
 	}
@@ -81,7 +82,7 @@ func tagWord(n *yaml.Node) string { return strings.TrimPrefix(nodeTag(n), "!!") 
 // raw value otherwise). Non-scalars fall back to their YAML rendering
 // (trimmed) — only reachable in error-message paths.
 func scalarString(n *yaml.Node) string {
-	n = derefNode(n)
+	n = yqsem.Deref(n)
 	if n == nil || nodeTag(n) == "!!null" {
 		return "null"
 	}
@@ -100,7 +101,7 @@ func scalarString(n *yaml.Node) string {
 // JSON, whose flow/quoting styles would otherwise stick to the nodes —
 // clear them so the output is the block YAML yq emitted.
 func yamlString(n *yaml.Node) string {
-	n = derefNode(n)
+	n = yqsem.Deref(n)
 	if n == nil || nodeTag(n) == "!!null" {
 		return "null"
 	}
@@ -157,7 +158,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		if err := yaml.Unmarshal([]byte(entry), &parsed); err != nil {
 			return nil, parseError(stderr, "bootstrap: failed to parse addon name from %s", entry)
 		}
-		m := derefNode(&parsed)
+		m := yqsem.Deref(&parsed)
 		if m == nil || m.Kind != yaml.MappingNode {
 			return nil, parseError(stderr, "bootstrap: failed to parse addon name from %s", entry)
 		}
@@ -166,7 +167,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 			return nil, parseError(stderr, "bootstrap: entry must be a single-key map, got %d keys: %s", nkeys, entry)
 		}
 		raw = m.Content[0].Value
-		val = derefNode(m.Content[1])
+		val = yqsem.Deref(m.Content[1])
 		// The map VALUE must itself be a map (the {values,env,wait} schema,
 		// or the legacy whole-map-is-helm-values form) or null/empty. A
 		// scalar or sequence value would let the reserved-key / legacy
@@ -179,7 +180,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		if err := yaml.Unmarshal([]byte(entry), &parsed); err != nil {
 			return nil, parseError(stderr, "bootstrap: failed to parse entry %s", entry)
 		}
-		raw = scalarString(derefNode(&parsed))
+		raw = scalarString(yqsem.Deref(&parsed))
 	}
 
 	// Resolve <name-or-path> → addon name + dir. Identical rules for a
@@ -216,7 +217,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 
 	reserved := false
 	for _, k := range []string{"values", "valueFiles", "env", "wait", "dependsOn", "name"} {
-		if hasKey(val, k) {
+		if yqsem.HasKey(val, k) {
 			reserved = true
 			break
 		}
@@ -228,8 +229,8 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 	}
 
 	// NEW schema.
-	if hasKey(val, "name") {
-		nameNode := lookupMap(val, "name")
+	if yqsem.HasKey(val, "name") {
+		nameNode := yqsem.MapGet(val, "name")
 		// name: must be a STRING scalar — reject any other tag (!!bool,
 		// !!int, !!float, !!null, !!map, !!seq). An unquoted YAML bool/int
 		// coerces to "true"/"123" and would slip past the charset check —
@@ -252,7 +253,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 	// `wait:` must be a real boolean. A non-boolean scalar (yes/on/1, …)
 	// would silently parse as a non-barrier — reject it.
 	waitStr := "false"
-	if wn := lookupMap(val, "wait"); wn != nil && nodeTag(wn) != "!!null" {
+	if wn := yqsem.MapGet(val, "wait"); wn != nil && nodeTag(wn) != "!!null" {
 		waitStr = scalarString(wn)
 	}
 	switch waitStr {
@@ -264,23 +265,23 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		return nil, parseError(stderr, "bootstrap: '%s' has a non-boolean wait: '%s' (use true or false)", raw, waitStr)
 	}
 
-	if hasKey(val, "values") {
+	if yqsem.HasKey(val, "values") {
 		// Only flag a non-chart target when the dir EXISTS but lacks
 		// chart.yaml. If the dir is missing entirely, stay silent here and
 		// let Engine.Apply surface the authoritative "addon not found".
 		if dirExists(e.Dir) && !fileExists(filepath.Join(e.Dir, "chart.yaml")) {
 			return nil, parseError(stderr, "bootstrap: '%s' sets 'values:' but is not a chart addon (no chart.yaml under %s); 'values:' is helm-only", raw, e.Dir)
 		}
-		e.Inline = yamlString(lookupMap(val, "values"))
+		e.Inline = yamlString(yqsem.MapGet(val, "values"))
 	}
 
-	if hasKey(val, "valueFiles") {
+	if yqsem.HasKey(val, "valueFiles") {
 		// valueFiles: same helm-only rule as `values:` (a kustomize target
 		// has no chart to feed); same missing-dir leniency.
 		if dirExists(e.Dir) && !fileExists(filepath.Join(e.Dir, "chart.yaml")) {
 			return nil, parseError(stderr, "bootstrap: '%s' sets 'valueFiles:' but is not a chart addon (no chart.yaml under %s); 'valueFiles:' is helm-only", raw, e.Dir)
 		}
-		vf := lookupMap(val, "valueFiles")
+		vf := yqsem.MapGet(val, "valueFiles")
 		// The container must be a SEQUENCE of file paths. A scalar or a map
 		// is a config mistake — reject it up front.
 		if nodeTag(vf) != "!!seq" {
@@ -301,7 +302,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		// half its values.
 		var files []string
 		for _, el := range vf.Content {
-			v := derefNode(el).Value
+			v := yqsem.Deref(el).Value
 			// An empty-string element ("") is !!str, so it survives the tag
 			// check above — but it is not a path. Hard error (NOT a silent
 			// skip): the fail-fast contract is "never render with half the
@@ -341,8 +342,8 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		}
 	}
 
-	if hasKey(val, "env") {
-		envNode := lookupMap(val, "env")
+	if yqsem.HasKey(val, "env") {
+		envNode := yqsem.MapGet(val, "env")
 		// The env CONTAINER must itself be a map of KEY: scalar. (A
 		// null/empty `env:` is a harmless no-op.)
 		if t := nodeTag(envNode); t != "!!map" && t != "!!null" {
@@ -375,17 +376,17 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 				if !shellVarRe.MatchString(k) {
 					return nil, parseError(stderr, "bootstrap: '%s' env: key '%s' is not a valid shell variable name (must match [A-Za-z_][A-Za-z0-9_]*)", raw, k)
 				}
-				lines = append(lines, k+"="+tostring(derefNode(envNode.Content[i+1])))
+				lines = append(lines, k+"="+tostring(yqsem.Deref(envNode.Content[i+1])))
 			}
 			e.EnvLines = strings.Join(lines, "\n")
 		}
 	}
 
-	if hasKey(val, "dependsOn") {
+	if yqsem.HasKey(val, "dependsOn") {
 		// dependsOn: resolved to indices, edge-built, and cycle-checked in
 		// Engine.Apply (which alone knows every entry's name). Validate
 		// only the SHAPE here, fail-fast at parse time.
-		depNode := lookupMap(val, "dependsOn")
+		depNode := yqsem.MapGet(val, "dependsOn")
 		if nodeTag(depNode) != "!!seq" {
 			return nil, parseError(stderr, "bootstrap: '%s' dependsOn: must be a list of entry names (got %s)", raw, tagWord(depNode))
 		}
@@ -404,7 +405,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 			}
 		}
 		for _, el := range depNode.Content {
-			e.Deps = append(e.Deps, tostring(derefNode(el)))
+			e.Deps = append(e.Deps, tostring(yqsem.Deref(el)))
 		}
 	}
 
@@ -432,12 +433,12 @@ func InlineValues(p *config.Paths, stderr io.Writer, domain, clusterYAML, addon 
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return "", err
 	}
-	bootstrapNode := lookupMap(lookupMap(derefNode(&root), "spec"), "bootstrap")
+	bootstrapNode := yqsem.MapGet(yqsem.MapGet(yqsem.Deref(&root), "spec"), "bootstrap")
 	if bootstrapNode == nil || bootstrapNode.Kind != yaml.SequenceNode {
 		return "", nil
 	}
 	for _, el := range bootstrapNode.Content {
-		e, err := ParseEntry(p, stderr, domain, compactJSON(derefNode(el)))
+		e, err := ParseEntry(p, stderr, domain, compactJSON(yqsem.Deref(el)))
 		if err != nil {
 			return "", err
 		}

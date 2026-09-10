@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 var (
@@ -38,18 +39,18 @@ type bootstrapEntry struct {
 // single-key map), matching the compact-JSON lines the bash emits.
 func resolveBootstrapEntries(specFile, kind string) []*yaml.Node {
 	doc := firstDocNode(specFile)
-	bs := lookupPath(doc, "spec", "bootstrap")
+	bs := yqsem.Lookup(doc, "spec", "bootstrap")
 	var entries []*yaml.Node
 	if bs != nil {
 		switch bs.Kind {
 		case yaml.SequenceNode:
 			for _, item := range bs.Content {
-				entries = append(entries, resolveNode(item))
+				entries = append(entries, yqsem.Deref(item))
 			}
 		case yaml.MappingNode:
 			// yq's `.spec.bootstrap[]?` iterates a mapping's VALUES.
 			for i := 1; i < len(bs.Content); i += 2 {
-				entries = append(entries, resolveNode(bs.Content[i]))
+				entries = append(entries, yqsem.Deref(bs.Content[i]))
 			}
 		}
 	}
@@ -58,7 +59,7 @@ func resolveBootstrapEntries(specFile, kind string) []*yaml.Node {
 	}
 	// Distinguish a *defined* empty list (opt out) from an *absent* key
 	// (per-driver default).
-	if spec := lookupPath(doc, "spec"); spec != nil && hasKey(spec, "bootstrap") {
+	if spec := yqsem.Lookup(doc, "spec"); spec != nil && yqsem.HasKey(spec, "bootstrap") {
 		return nil
 	}
 	if kind == "lo" {
@@ -73,7 +74,7 @@ func resolveBootstrapEntries(specFile, kind string) []*yaml.Node {
 // fields the audit ignores (env/wait/dependsOn/name), because a violation in
 // ANY of them skips the entry in bash too.
 func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bootstrapEntry, ok bool) {
-	entry = resolveNode(entry)
+	entry = yqsem.Deref(entry)
 	if entry == nil {
 		return e, false
 	}
@@ -86,7 +87,7 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 			return e, false
 		}
 		raw = yqRenderNode(entry.Content[0])
-		val = resolveNode(entry.Content[1])
+		val = yqsem.Deref(entry.Content[1])
 		// The map VALUE must itself be a map or null/empty; a scalar or
 		// sequence value is rejected up front.
 		if val != nil && !isNullNode(val) && val.Kind != yaml.MappingNode {
@@ -122,7 +123,7 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 
 	reserved := false
 	for _, k := range []string{"values", "valueFiles", "env", "wait", "dependsOn", "name"} {
-		if hasKey(val, k) {
+		if yqsem.HasKey(val, k) {
 			reserved = true
 			break
 		}
@@ -136,36 +137,36 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 
 	// NEW schema — validations in the bash order; any violation skips the
 	// entry (errors are suppressed by the audit caller).
-	if hasKey(val, "name") {
-		n := mapValue(val, "name")
+	if yqsem.HasKey(val, "name") {
+		n := yqsem.MapGet(val, "name")
 		if n == nil || n.Kind != yaml.ScalarNode || n.Tag != "!!str" ||
 			n.Value == "" || !entryNameRe.MatchString(n.Value) {
 			return e, false
 		}
 	}
-	if w := altNode(mapValue(val, "wait"), "false"); w != "true" && w != "false" {
+	if w := altNode(yqsem.MapGet(val, "wait"), "false"); w != "true" && w != "false" {
 		return e, false
 	}
-	if hasKey(val, "values") {
+	if yqsem.HasKey(val, "values") {
 		// `values:` is helm-only: flag a non-chart target only when the dir
 		// EXISTS but lacks chart.yaml (a missing dir is bootstrap::apply's
 		// error to surface).
 		if isDir(e.dir) && !isFile(filepath.Join(e.dir, "chart.yaml")) {
 			return e, false
 		}
-		e.inline = mapValue(val, "values")
+		e.inline = yqsem.MapGet(val, "values")
 	}
-	if hasKey(val, "valueFiles") {
+	if yqsem.HasKey(val, "valueFiles") {
 		if isDir(e.dir) && !isFile(filepath.Join(e.dir, "chart.yaml")) {
 			return e, false
 		}
-		vf := mapValue(val, "valueFiles")
+		vf := yqsem.MapGet(val, "valueFiles")
 		if vf == nil || vf.Kind != yaml.SequenceNode {
 			return e, false
 		}
 		var files []string
 		for _, item := range vf.Content {
-			it := resolveNode(item)
+			it := yqsem.Deref(item)
 			if it == nil || it.Kind != yaml.ScalarNode || it.Tag != "!!str" {
 				return e, false
 			}
@@ -195,15 +196,15 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 			e.inline = merged
 		}
 	}
-	if hasKey(val, "env") {
-		env := mapValue(val, "env")
+	if yqsem.HasKey(val, "env") {
+		env := yqsem.MapGet(val, "env")
 		if env != nil && !isNullNode(env) {
 			if env.Kind != yaml.MappingNode {
 				return e, false
 			}
 			for i := 0; i+1 < len(env.Content); i += 2 {
-				k := resolveNode(env.Content[i])
-				v := resolveNode(env.Content[i+1])
+				k := yqsem.Deref(env.Content[i])
+				v := yqsem.Deref(env.Content[i+1])
 				if v != nil && (v.Kind == yaml.MappingNode || v.Kind == yaml.SequenceNode) {
 					return e, false
 				}
@@ -213,13 +214,13 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 			}
 		}
 	}
-	if hasKey(val, "dependsOn") {
-		deps := mapValue(val, "dependsOn")
+	if yqsem.HasKey(val, "dependsOn") {
+		deps := yqsem.MapGet(val, "dependsOn")
 		if deps == nil || deps.Kind != yaml.SequenceNode {
 			return e, false
 		}
 		for _, item := range deps.Content {
-			it := resolveNode(item)
+			it := yqsem.Deref(item)
 			if it == nil || isNullNode(it) ||
 				it.Kind == yaml.MappingNode || it.Kind == yaml.SequenceNode {
 				return e, false

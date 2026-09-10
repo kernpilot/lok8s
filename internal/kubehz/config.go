@@ -48,38 +48,38 @@ func (c *Context) ReadConfig(clusterYAML string) (*Config, error) {
 		return nil, ErrHandled
 	}
 	doc := loadSpec(clusterYAML)
-	if doc.err != nil {
+	if doc.Err != nil {
 		// bash: yq's own parse error reaches stderr, then `|| return 1`.
-		c.errorf("cannot parse cluster spec: %s: %v", clusterYAML, doc.err)
+		c.errorf("cannot parse cluster spec: %s: %v", clusterYAML, doc.Err)
 		return nil, ErrHandled
 	}
 
 	cfg := &Config{
-		Hosting: doc.or("self", "spec", "kubehz", "hosting"),
-		APIURL:  doc.or("", "spec", "kubehz", "apiUrl"),
+		Hosting: doc.Or("self", "spec", "kubehz", "hosting"),
+		APIURL:  doc.Or("", "spec", "kubehz", "apiUrl"),
 	}
 
 	// yq boolean/null handling: a missing key reads "null" and an empty
 	// scalar "", both meaning "not chosen".
-	access := doc.raw("spec", "kubehz", "access")
+	access := doc.Raw("spec", "kubehz", "access")
 	if access == "null" || access == "" {
 		cfg.Access = "none"
 	} else {
 		cfg.Access = access
 	}
 
-	cfg.ConnectToken = doc.or("false", "spec", "kubehz", "connectHcloudToken")
+	cfg.ConnectToken = doc.Or("false", "spec", "kubehz", "connectHcloudToken")
 
-	cfg.Agent = doc.or("cronjob", "spec", "kubehz", "agent")
+	cfg.Agent = doc.Or("cronjob", "spec", "kubehz", "agent")
 	if cfg.Agent == "null" || cfg.Agent == "" {
 		cfg.Agent = "cronjob"
 	}
 
-	cfg.UpgradesChannel = doc.or("patch", "spec", "kubehz", "upgrades", "channel")
+	cfg.UpgradesChannel = doc.Or("patch", "spec", "kubehz", "upgrades", "channel")
 	if cfg.UpgradesChannel == "null" || cfg.UpgradesChannel == "" {
 		cfg.UpgradesChannel = "patch"
 	}
-	cfg.UpgradesDefer = doc.or("window", "spec", "kubehz", "upgrades", "defer")
+	cfg.UpgradesDefer = doc.Or("window", "spec", "kubehz", "upgrades", "defer")
 	if cfg.UpgradesDefer == "null" || cfg.UpgradesDefer == "" {
 		cfg.UpgradesDefer = "window"
 	}
@@ -195,7 +195,7 @@ func (c *Context) Validate(cfg *Config, specFile string) error {
 		kind, _ = domain.SpecDriver(specFile, "")
 	}
 	if cfg.Hosting == "hosted" && kind == "lo" {
-		if loadSpec(specFile).or("", "spec", "runner") == "" {
+		if loadSpec(specFile).Or("", "spec", "runner") == "" {
 			c.errorf("hosting: hosted with kind: Lo requires spec.runner configuration")
 			return ErrHandled
 		}

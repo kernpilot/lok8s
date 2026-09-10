@@ -28,6 +28,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // Banner is the generated-file header (bash: CRD_BANNER); the kind's schema
@@ -128,7 +129,7 @@ func renderBody(schemaPath string) ([]byte, error) {
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return nil, fmt.Errorf("%s: %w", schemaPath, err)
 	}
-	schema := docContent(&root)
+	schema := yqsem.Deref(&root)
 	if schema == nil || schema.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s: schema is not a mapping", schemaPath)
 	}
@@ -274,16 +275,6 @@ func sameBytes(want []byte, path string) bool {
 }
 
 // ── yaml.Node helpers ────────────────────────────────────────────────────
-
-func docContent(n *yaml.Node) *yaml.Node {
-	if n.Kind == yaml.DocumentNode {
-		if len(n.Content) == 0 {
-			return nil
-		}
-		return n.Content[0]
-	}
-	return n
-}
 
 func lookup(m *yaml.Node, key string) *yaml.Node {
 	if m == nil || m.Kind != yaml.MappingNode {

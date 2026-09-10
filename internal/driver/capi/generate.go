@@ -61,13 +61,13 @@ func whitelisted(vars map[string]string) map[string]string {
 // spec.aws (`yq -e` presence: exists and not null/false).
 func (d *Driver) DetectProvider(clusterYAML string) (string, error) {
 	spec := loadSpec(clusterYAML)
-	if name := spec.or("", "spec", "provider", "name"); name != "" {
+	if name := spec.Or("", "spec", "provider", "name"); name != "" {
 		return name, nil
 	}
-	if spec.present("spec", "hcloud") {
+	if spec.Present("spec", "hcloud") {
 		return "hetzner", nil
 	}
-	if spec.present("spec", "aws") {
+	if spec.Present("spec", "aws") {
 		return "aws", nil
 	}
 	ui.Errorf(d.stderr(), "No provider found in cluster spec: %s", clusterYAML)
@@ -78,13 +78,13 @@ func (d *Driver) DetectProvider(clusterYAML string) (string, error) {
 // `.spec.credentials.secretName // .spec.provider.credentials.secretRef //
 // (.metadata.name + "-credentials")`.
 func credentialSecretName(spec specDoc) string {
-	if v := spec.or("", "spec", "credentials", "secretName"); v != "" {
+	if v := spec.Or("", "spec", "credentials", "secretName"); v != "" {
 		return v
 	}
-	if v := spec.or("", "spec", "provider", "credentials", "secretRef"); v != "" {
+	if v := spec.Or("", "spec", "provider", "credentials", "secretRef"); v != "" {
 		return v
 	}
-	return spec.raw("metadata", "name") + "-credentials"
+	return spec.Raw("metadata", "name") + "-credentials"
 }
 
 // Generate ports capi::generate: render the CAPI resources from the
@@ -116,41 +116,41 @@ func (d *Driver) Generate(clusterYAML, provider string) (string, error) {
 	}
 
 	spec := loadSpec(clusterYAML)
-	pgEnabled := spec.or("false", "spec", "provider", "config", "placementGroups")
+	pgEnabled := spec.Or("false", "spec", "provider", "config", "placementGroups")
 
 	// Cluster identity + Kubernetes version (full, trimmed, and minor — the
 	// cloud-init needs the trimmed/minor forms for the apt repo + package
 	// pins). Held in a LOCAL map, never the process env — see envsubstMap.
-	k8sVersion := spec.raw("spec", "kubernetes", "version")
+	k8sVersion := spec.Raw("spec", "kubernetes", "version")
 	trimmed := strings.TrimPrefix(k8sVersion, "v") // v1.31.12 -> 1.31.12
 	minor := trimmed                               // 1.31.12  -> 1.31
 	if i := strings.LastIndex(trimmed, "."); i >= 0 {
 		minor = trimmed[:i]
 	}
 	vars := map[string]string{
-		"CLUSTER_NAME":           spec.raw("metadata", "name"),
-		"CLUSTER_NAMESPACE":      spec.or("default", "spec", "cluster", "namespace"),
-		"CLUSTER_DOMAIN":         spec.raw("spec", "cluster", "domain"),
+		"CLUSTER_NAME":           spec.Raw("metadata", "name"),
+		"CLUSTER_NAMESPACE":      spec.Or("default", "spec", "cluster", "namespace"),
+		"CLUSTER_DOMAIN":         spec.Raw("spec", "cluster", "domain"),
 		"K8S_VERSION":            k8sVersion,
 		"K8S_VERSION_TRIMMED":    trimmed,
 		"K8S_VERSION_MINOR":      minor,
-		"CP_REPLICAS":            spec.or("1", "spec", "controlPlane", "replicas"),
-		"CP_TYPE":                spec.or("cax11", "spec", "controlPlane", "type"),
+		"CP_REPLICAS":            spec.Or("1", "spec", "controlPlane", "replicas"),
+		"CP_TYPE":                spec.Or("cax11", "spec", "controlPlane", "type"),
 		"CREDENTIAL_SECRET_NAME": credentialSecretName(spec),
 		"HCLOUD_REGION": func() string {
-			if v := spec.or("", "spec", "provider", "config", "region"); v != "" {
+			if v := spec.Or("", "spec", "provider", "config", "region"); v != "" {
 				return v
 			}
-			return spec.or("fsn1", "spec", "hcloud", "region")
+			return spec.Or("fsn1", "spec", "hcloud", "region")
 		}(),
 		"HCLOUD_SSH_KEY_NAME": func() string {
-			if v := spec.or("", "spec", "provider", "config", "sshKeyName"); v != "" {
+			if v := spec.Or("", "spec", "provider", "config", "sshKeyName"); v != "" {
 				return v
 			}
-			return spec.or("", "spec", "hcloud", "sshKeyName")
+			return spec.Or("", "spec", "hcloud", "sshKeyName")
 		}(),
-		"HCLOUD_IMAGE_NAME":      spec.or("ubuntu-24.04", "spec", "provider", "config", "image"),
-		"HCLOUD_NETWORK_ENABLED": spec.or("false", "spec", "provider", "config", "network", "enabled"),
+		"HCLOUD_IMAGE_NAME":      spec.Or("ubuntu-24.04", "spec", "provider", "config", "image"),
+		"HCLOUD_NETWORK_ENABLED": spec.Or("false", "spec", "provider", "config", "network", "enabled"),
 	}
 
 	if vars["HCLOUD_SSH_KEY_NAME"] == "" {
@@ -245,7 +245,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	stderr := d.stderr()
 	spec := loadSpec(clusterYAML)
 	secretName := credentialSecretName(spec)
-	namespace := spec.or("default", "spec", "cluster", "namespace")
+	namespace := spec.Or("default", "spec", "cluster", "namespace")
 
 	if err := requireCredentials(provider, stderr); err != nil {
 		return err

@@ -46,6 +46,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 const (
@@ -155,9 +156,9 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 	}
 	var root yaml.Node
 	_ = yaml.Unmarshal(raw, &root) // an unparsable spec reads as empty (yq // "")
-	spec := lookup(deref(&root), "spec")
-	provider := scalarOrEmpty(lookup(lookup(spec, "provider"), "name"))
-	k8sVersion := scalarOrEmpty(lookup(lookup(spec, "kubernetes"), "version"))
+	spec := yqsem.Lookup(&root, "spec")
+	provider := yqsem.OrLiteralFalse(yqsem.MapGet(yqsem.MapGet(spec, "provider"), "name"), "")
+	k8sVersion := yqsem.OrLiteralFalse(yqsem.MapGet(yqsem.MapGet(spec, "kubernetes"), "version"), "")
 	// Strip a kindest-node @sha256 digest suffix (bash: ${k8s_version%%@*}).
 	k8sVersion, _, _ = strings.Cut(k8sVersion, "@")
 
@@ -243,7 +244,7 @@ func entryKey(entry string) string {
 	if err := yaml.Unmarshal([]byte(entry), &n); err != nil {
 		return "?"
 	}
-	v := deref(&n)
+	v := yqsem.Deref(&n)
 	if v == nil {
 		return "?"
 	}
@@ -285,7 +286,7 @@ func chartVersion(dir string) string {
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return ""
 	}
-	v := lookup(deref(&root), "version")
+	v := yqsem.Lookup(&root, "version")
 	if v == nil || v.Kind != yaml.ScalarNode || v.Tag == "!!null" || (v.Tag == "!!bool" && v.Value == "false") {
 		return "-"
 	}
@@ -402,43 +403,4 @@ var ErrMalformedKind = errors.New("inventory: malformed kind")
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-func deref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-func lookup(n *yaml.Node, key string) *yaml.Node {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return deref(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
-// scalarOrEmpty is `yq -r '<path> // ""'` on a scalar: the raw scalar text,
-// "" for a missing/null/false value or a non-scalar.
-func scalarOrEmpty(n *yaml.Node) string {
-	if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
-		return ""
-	}
-	if n.Tag == "!!bool" && n.Value == "false" {
-		return ""
-	}
-	return n.Value
 }

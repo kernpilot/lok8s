@@ -30,6 +30,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks a failure whose message was already printed in the bash
@@ -112,9 +113,9 @@ type doc struct {
 }
 
 func (d doc) scalar(path ...string) string {
-	cur := deref(d.node)
+	cur := yqsem.Deref(d.node)
 	for _, key := range path {
-		cur = mapGet(cur, key)
+		cur = yqsem.MapGet(cur, key)
 		if cur == nil {
 			return ""
 		}
@@ -142,9 +143,9 @@ func parseDocs(data []byte) []doc {
 // be a string scalar equal to the value (an unquoted `count: 5` int label
 // never equals the string "5", exactly as in yq).
 func (d doc) matches(pairs []selectorPair) bool {
-	labels := mapGetPath(d.node, "metadata", "labels")
+	labels := yqsem.Lookup(d.node, "metadata", "labels")
 	for _, p := range pairs {
-		v := mapGet(labels, p.key)
+		v := yqsem.MapGet(labels, p.key)
 		if v == nil || v.Kind != yaml.ScalarNode || v.Tag != "!!str" || v.Value != p.val {
 			return false
 		}
@@ -244,8 +245,8 @@ func (c *Context) liveImages(ctx context.Context, kind, name, ns string) []liveI
 	var out []liveImage
 	for _, cn := range containerNodes(&n) {
 		out = append(out, liveImage{
-			name:  scalarOf(mapGet(cn, "name")),
-			image: scalarOf(mapGet(cn, "image")),
+			name:  yqsem.Scalar(yqsem.MapGet(cn, "name")),
+			image: yqsem.Scalar(yqsem.MapGet(cn, "image")),
 		})
 	}
 	return out
@@ -254,15 +255,15 @@ func (c *Context) liveImages(ctx context.Context, kind, name, ns string) []liveI
 // containerNodes yields .spec.template.spec.containers[] +
 // .spec.template.spec.initContainers[].
 func containerNodes(root *yaml.Node) []*yaml.Node {
-	spec := mapGetPath(root, "spec", "template", "spec")
+	spec := yqsem.Lookup(root, "spec", "template", "spec")
 	var out []*yaml.Node
 	for _, key := range []string{"containers", "initContainers"} {
-		list := mapGet(spec, key)
+		list := yqsem.MapGet(spec, key)
 		if list == nil || list.Kind != yaml.SequenceNode {
 			continue
 		}
 		for _, item := range list.Content {
-			out = append(out, deref(item))
+			out = append(out, yqsem.Deref(item))
 		}
 	}
 	return out
@@ -282,10 +283,10 @@ func containerNodes(root *yaml.Node) []*yaml.Node {
 // measured on a migrate Job whose DB migration sat blocked exactly this way.
 func overlayImages(d doc, live []liveImage) {
 	for _, cn := range containerNodes(d.node) {
-		cname := scalarOf(mapGet(cn, "name"))
+		cname := yqsem.Scalar(yqsem.MapGet(cn, "name"))
 		for _, l := range live {
 			if l.name == cname {
-				if img := mapGet(cn, "image"); img != nil {
+				if img := yqsem.MapGet(cn, "image"); img != nil {
 					img.Value = l.image
 					img.Tag = "!!str"
 					img.Style = 0
@@ -446,51 +447,6 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 }
 
 // ── yaml.Node helpers ────────────────────────────────────
-
-func deref(n *yaml.Node) *yaml.Node {
-	for n != nil && (n.Kind == yaml.DocumentNode || n.Kind == yaml.AliasNode) {
-		if n.Kind == yaml.DocumentNode {
-			if len(n.Content) == 0 {
-				return nil
-			}
-			n = n.Content[0]
-			continue
-		}
-		n = n.Alias
-	}
-	return n
-}
-
-func mapGet(n *yaml.Node, key string) *yaml.Node {
-	n = deref(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return deref(n.Content[i+1])
-		}
-	}
-	return nil
-}
-
-func mapGetPath(n *yaml.Node, keys ...string) *yaml.Node {
-	cur := deref(n)
-	for _, key := range keys {
-		cur = mapGet(cur, key)
-		if cur == nil {
-			return nil
-		}
-	}
-	return cur
-}
-
-func scalarOf(n *yaml.Node) string {
-	if n == nil || n.Kind != yaml.ScalarNode {
-		return ""
-	}
-	return n.Value
-}
 
 func readFile(path string) ([]byte, error) {
 	return os.ReadFile(path)

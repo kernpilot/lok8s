@@ -144,9 +144,9 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	spec := loadSpec(cy)
 
 	// 1. Determine management cluster.
-	mgmtDomain := spec.or("", "spec", "managementCluster", "domain")
-	mgmtLocal := spec.or("false", "spec", "managementCluster", "local")
-	namespace := spec.or("default", "spec", "cluster", "namespace")
+	mgmtDomain := spec.Or("", "spec", "managementCluster", "domain")
+	mgmtLocal := spec.Or("false", "spec", "managementCluster", "local")
+	namespace := spec.Or("default", "spec", "cluster", "namespace")
 
 	if mgmtDomain == "" {
 		// Guarded read (see Hooks.ReadKubehzConfig): a failed read must
@@ -283,7 +283,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// resources were already applied above, so CAPH may have created real
 	// Hetzner resources by now — say so, like the destroy path does,
 	// instead of leaving the operator to guess whether anything is billing.
-	clusterName := spec.raw("metadata", "name")
+	clusterName := spec.Raw("metadata", "name")
 	if err := d.WaitReady(ctx, mgmtKubeconfig, clusterName, namespace, 900); err != nil {
 		ui.Errorf(stderr, "CAPI resources were applied — Hetzner servers and a load balancer may exist and keep billing")
 		ui.Errorf(stderr, "  run 'lo down' to tear down, or inspect: kubectl --kubeconfig %s get cluster,machine -n %s", mgmtKubeconfig, namespace)
@@ -364,11 +364,11 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 func (d *Driver) Export(ctx context.Context, domain string) error {
 	cy := d.clusterYAML(domain)
 	spec := loadSpec(cy)
-	clusterName := spec.raw("metadata", "name")
+	clusterName := spec.Raw("metadata", "name")
 	// Best-effort (the bash call was unguarded under a disabled errexit): a
 	// failed detection prints its diagnostic and leaves the provider empty.
 	provider, _ := d.DetectProvider(cy)
-	netEnabled := spec.or("false", "spec", "provider", "config", "network", "enabled")
+	netEnabled := spec.Or("false", "spec", "provider", "config", "network", "enabled")
 
 	// The CCM reads the private network from the hcloud secret's `network`
 	// key in networking mode; the addon generator picks it up from this env
@@ -385,10 +385,10 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	cy := d.clusterYAML(domain)
 	spec := loadSpec(cy)
 
-	mgmtDomain := spec.or("", "spec", "managementCluster", "domain")
-	clusterName := spec.raw("metadata", "name")
-	namespace := spec.or("default", "spec", "cluster", "namespace")
-	mgmtLocal := spec.or("false", "spec", "managementCluster", "local")
+	mgmtDomain := spec.Or("", "spec", "managementCluster", "domain")
+	clusterName := spec.Raw("metadata", "name")
+	namespace := spec.Or("default", "spec", "cluster", "namespace")
+	mgmtLocal := spec.Or("false", "spec", "managementCluster", "local")
 
 	if mgmtDomain == "" {
 		// Guarded read — same reason as Provision's: without it a failed
@@ -519,8 +519,8 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 // Status reports the cluster status word (bash: driver::status).
 func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 	spec := loadSpec(d.clusterYAML(domain))
-	mgmtDomain := spec.or("", "spec", "managementCluster", "domain")
-	clusterName := spec.raw("metadata", "name")
+	mgmtDomain := spec.Or("", "spec", "managementCluster", "domain")
+	clusterName := spec.Raw("metadata", "name")
 
 	if mgmtDomain == "" {
 		return "Unknown", nil
@@ -548,7 +548,7 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 // (see Provision).
 func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) {
 	spec := loadSpec(d.clusterYAML(domain))
-	return d.kubeconfigPath(spec.raw("metadata", "name")), nil
+	return d.kubeconfigPath(spec.Raw("metadata", "name")), nil
 }
 
 // EnsureCredentials is the optional bash contract function
@@ -775,7 +775,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 
 	// 5. Wait for management cluster to become ready.
 	spec := loadSpec(cy)
-	clusterName := spec.raw("metadata", "name")
+	clusterName := spec.Raw("metadata", "name")
 	d.infoLine("waiting for management cluster to become ready")
 	if err := d.WaitReady(ctx, bootstrapKubeconfig, clusterName, "", 0); err != nil {
 		d.rawErrorLine("management cluster %s did not become ready", clusterName)
