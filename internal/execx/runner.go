@@ -55,6 +55,13 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 		path = resolved
 	}
 	cmd := exec.CommandContext(ctx, path, c.Args...)
+	// On a cancelled context the child gets SIGINT, not the SIGKILL
+	// exec.CommandContext sends by default: a Ctrl-C already delivered it
+	// to the whole foreground process group, and the child (kubeone,
+	// terraform, kubectl) finishes its own cleanup the way it did under
+	// the bash entrypoint, which waited for it. No WaitDelay: like bash,
+	// the parent waits for the child to end.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.Dir = c.Dir
 	if len(c.Env) > 0 {
 		cmd.Env = append(os.Environ(), c.Env...)

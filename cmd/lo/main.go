@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -52,8 +53,16 @@ func run() int {
 		return 0
 	}
 
+	// SIGINT/SIGTERM cancel the command context (every Runner child and
+	// wait loop reads it) and map to the exit code the bash entrypoint
+	// died with, 128+n, with nothing printed on top.
+	ctx, interrupted := cli.WatchInterrupt(context.Background())
 	root := cli.NewRoot(paths)
-	if err := root.Execute(); err != nil {
+	err = root.ExecuteContext(ctx)
+	if rc := interrupted(); rc != 0 {
+		return rc
+	}
+	if err != nil {
 		// cli.ErrHandled means the command already printed its own message in
 		// the bash implementation's format; everything else prints here.
 		if !errors.Is(err, cli.ErrHandled) {

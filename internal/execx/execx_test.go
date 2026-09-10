@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 )
@@ -112,4 +113,37 @@ func mustEval(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// A cancelled context stops the child with SIGINT so it can clean up and
+// report its own exit code; the default SIGKILL would end it at once.
+func TestRunCancelSendsInterruptToTheChild(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := NewRunner(nil)
+	var out bytes.Buffer
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- r.Run(ctx, Cmd{
+			Name:   "/bin/sh",
+			Args:   []string{"-c", `trap 'echo caught; exit 3' INT; echo up; while :; do sleep 0.05; done`},
+			Stdout: &out,
+			Stderr: &out,
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "up") {
+		if time.Now().After(deadline) {
+			t.Fatal("child did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if ExitCode(err) != 3 || !strings.Contains(out.String(), "caught") {
+			t.Errorf("child was not interrupted gracefully: rc=%d err=%v out=%q", ExitCode(err), err, out.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not stop after the cancel")
+	}
 }
