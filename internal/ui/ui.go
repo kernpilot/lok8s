@@ -1,0 +1,83 @@
+// Package ui carries the CLI's output conventions, matching the bash
+// implementation's verbose.sh helpers byte for byte so ported commands stay
+// indistinguishable from their argsh originals.
+package ui
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+)
+
+// ErrHandled marks an error whose message was already printed in the bash
+// implementation's own format ([error] … on stderr). It is the ONE sentinel:
+// every package's name for it (cli.ErrHandled, kubehz.ErrHandled,
+// secrets.ErrHandled, …) is this value, so errors.Is holds across package
+// boundaries and a %w wrap anywhere still reads as handled. The caller
+// exits non-zero without printing anything further.
+var ErrHandled = errors.New("handled")
+
+// Handled marks err as already printed: the returned error reads as
+// ErrHandled to errors.Is, keeps err's text, and unwraps to err so any
+// sentinel or type inside it still matches. A site that prints its own
+// [error] line and then returns an error wraps it here, and the exit
+// mapping at the top (cli dispatchExit) prints nothing more. An error
+// that reaches the top WITHOUT this mark was never printed, so the mapping
+// prints it. nil stays nil.
+func Handled(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &handledError{err: err}
+}
+
+type handledError struct{ err error }
+
+func (e *handledError) Error() string { return e.err.Error() }
+
+func (e *handledError) Unwrap() error { return e.err }
+
+// Is answers errors.Is(err, ErrHandled) for the mark itself; everything
+// else is answered through Unwrap.
+func (e *handledError) Is(target error) bool { return target == ErrHandled }
+
+const (
+	green  = "\033[0;32m"
+	red    = "\033[0;31m"
+	yellow = "\033[0;33m"
+	reset  = "\033[0m"
+)
+
+// Debug writes a [debug] line to stderr when DEBUG is set (bash: debug()).
+func Debug(format string, a ...any) {
+	DebugTo(os.Stderr, format, a...)
+}
+
+// DebugTo writes a [debug] line to w when DEBUG is set.
+func DebugTo(w io.Writer, format string, a ...any) {
+	if os.Getenv("DEBUG") == "" {
+		return
+	}
+	fmt.Fprintf(w, green+"[debug]"+reset+" "+format+"\n", a...)
+}
+
+// Error writes an [error] line to stderr (bash: error()).
+func Error(format string, a ...any) {
+	ErrorTo(os.Stderr, format, a...)
+}
+
+// ErrorTo writes an [error] line to w.
+func ErrorTo(w io.Writer, format string, a ...any) {
+	fmt.Fprintf(w, red+"[error]"+reset+" "+format+"\n", a...)
+}
+
+// Warn writes a [warn] line to stderr (bash: warn()).
+func Warn(format string, a ...any) {
+	WarnTo(os.Stderr, format, a...)
+}
+
+// WarnTo writes a [warn] line to w.
+func WarnTo(w io.Writer, format string, a ...any) {
+	fmt.Fprintf(w, yellow+"[warn]"+reset+" "+format+"\n", a...)
+}

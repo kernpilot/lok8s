@@ -50,7 +50,7 @@ jobs:
   spinup:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Install `b` (the binary/env manager). Supply-chain rule: never pipe a
       # remote script straight into a shell — download to a file, pin the ref,

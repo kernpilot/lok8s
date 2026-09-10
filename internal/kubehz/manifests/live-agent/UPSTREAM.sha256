@@ -1,0 +1,26 @@
+# Vendoring pin for the RBAC that lok8s copies BYTE-FOR-BYTE out of the public
+# kubehz-agent repo. The permissions a customer grants must be exactly the ones
+# that repo documents and audits, with nothing added on the way through lok8s —
+# these digests are how that claim is checked.
+#
+#   upstream: https://github.com/kernpilot/kubehz-agent/tree/main/deploy
+#   commit:   56ccd9b370066b2b581bd97733e988a856df8857
+#
+# Verified by tests/unit/kubehz_live_agent_test.bats on every run, with NO
+# upstream checkout required — that is the point. The older test could only
+# diff against a sibling clone, so in CI it skipped and the claim was never
+# evaluated at all.
+#
+# Check by hand from this directory:
+#
+#   sha256sum --check --strict UPSTREAM.sha256
+#
+# RE-VENDORING. Copy the upstream files in, then regenerate from this directory:
+#
+#   sha256sum base/rbac.yaml managed/rbac-managed.yaml
+#
+# and update the commit above. Regenerating the digests without re-reading the
+# upstream diff defeats the pin: the digests record what was reviewed, not
+# whatever happens to be on disk.
+2dcaa61d4e21621c5c1aa2377742a0fa0fa19a26852f413677c12385fbaa4fee  base/rbac.yaml
+47542081c1b1f875870470b0f4b4962e85b2833735aab5a860fc790ea41992e4  managed/rbac-managed.yaml

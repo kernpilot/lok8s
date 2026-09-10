@@ -1,0 +1,36 @@
+# fluxcd — Flux CD GitOps toolkit (the source/kustomize/helm controllers + CRDs).
+# A generic, reusable atom: bootstrap `fluxcd` by name to get the controllers +
+# CRDs installed into the flux-system namespace.
+#
+# This addon is the generic chart with PORTABLE defaults only. The per-cluster
+# GitOps GLUE stays with the consuming cluster:
+#   - The GitRepository source + the Kustomization that reconciles a repo path
+#     are cluster-specific (which repo, which branch, which path) — supply them
+#     inline via `bootstrap:` values (extraObjects) or in a dedicated
+#     flux-system target (./targets/flux-system). NOT here.
+#
+# Namespace: installs into `flux-system` (the Flux convention). No other addon
+# owns it, so we ship a namespace.yaml here (like cnpg-operator/redis-operator).
+# The `namespace:` transformer also pins every rendered object to flux-system
+# (chart.yaml also pins it).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# controller Deployments carry immutable selectors, so the transformer must not
+# touch them (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: fluxcd
+      lok8s.dev/type: system
+      lok8s.dev/category: gitops
+
+namespace: flux-system
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml

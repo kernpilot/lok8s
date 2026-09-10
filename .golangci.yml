@@ -1,0 +1,58 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+# The gate for a 65k-line port from bash. `standard` (errcheck, govet,
+# ineffassign, staticcheck, unused) plus the checks that catch real defects
+# in a port (misspell, unconvert, gocritic, errorlint — every sentinel
+# comparison goes through errors.Is so a %w wrap anywhere still matches;
+# modernize: the stdlib idioms the fixer already applied stay applied;
+# gocognit at 60: the god functions were split in the quality pass and
+# nothing in production code is above 59, so a new one cannot land;
+# test fakes and fixtures are exempt). revive and unparam are OFF:
+# revive's naming/comment rules and unparam's "always receives X" produce
+# hundreds of findings against code that mirrors bash function signatures
+# on purpose (the parity harnesses pin the behaviour, not the shape).
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gocognit
+    - modernize
+    - misspell
+    - unconvert
+    - gocritic
+  settings:
+    gocognit:
+      min-complexity: 60
+    errcheck:
+      # Diagnostics are written unchecked on purpose — the ports print to
+      # stdout/stderr the way the bash implementation does, and there is
+      # nothing to do when a terminal write fails. Every other dropped
+      # error (Close on writes, Remove, Chmod, …) stays gated.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (io.Writer).Write
+        - (io.Writer).WriteString
+        - (io.StringWriter).WriteString
+        - io.WriteString
+        # The bash ports `export`/`unset` process variables the way the
+        # argsh entrypoint does (PATH_*, DOMAIN_NAME, DEBUG, …). Setenv only
+        # fails on an invalid name or ENOMEM, and every name is a literal.
+        - os.Setenv
+        - os.Unsetenv
+  exclusions:
+    rules:
+      # Test scaffolding: fixture writes and cleanup whose failure surfaces
+      # as the test's own assertion failing. Production code stays gated.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocognit
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

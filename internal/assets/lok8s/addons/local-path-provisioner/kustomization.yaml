@@ -1,0 +1,24 @@
+# local-path-provisioner — rancher local-path-provisioner: the default dynamic
+# PV provisioner for single-node / dev / bare-metal. A generic, reusable install
+# (controller + RBAC + the `local-path` StorageClass). Per-cluster glue — e.g. a
+# renamed default StorageClass — stays in the consumer's storage target.
+#
+# Vendored manifest is upstream v0.0.36, byte-for-byte:
+#   https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.36/deploy/local-path-storage.yaml
+#   sha256 a5b4b057e4e400a2ca7188b03dc11303f874bfe600fc837d5446d86b3d13e26c
+# Refresh: re-download that tag, verify the sha, replace local-path-storage.yaml.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false) so the transformer
+# never touches the provisioner Deployment's immutable selector.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: local-path-provisioner
+      lok8s.dev/type: system
+      lok8s.dev/category: storage
+
+resources:
+  - local-path-storage.yaml

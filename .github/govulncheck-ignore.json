@@ -1,0 +1,29 @@
+{
+  "_comment": "Reachable govulncheck findings that have NO fixed version and are accepted for now. hack/govulncheck.sh fails on any reachable finding not listed here, and on a listed one once its review_by date has passed. Each entry names the path by which lo reaches the code and why that path is not exploitable in lo. Remove an entry as soon as a fixed version exists (govulncheck prints 'Fixed in').",
+  "ignore": [
+    {
+      "id": "GO-2026-5932",
+      "module": "golang.org/x/crypto",
+      "reason": "openpgp is unmaintained by design (no fix will ship). Reached only in the lo-full build through khelm -> helm's chart provenance verifier (armor.Decode). lo never verifies chart provenance files; the charts it renders are pinned by digest in spec.bootstrap.",
+      "review_by": "2026-12-01"
+    },
+    {
+      "id": "GO-2026-5622",
+      "module": "github.com/containerd/containerd",
+      "reason": "CRI checkpoint import/restore paths. lo-full links containerd v1.7 only as helm's OCI registry client (module import graph, init-time symbols); lo never runs a CRI service, never imports checkpoints. No fix in the 1.7 line.",
+      "review_by": "2026-12-01"
+    },
+    {
+      "id": "GO-2026-5338",
+      "module": "github.com/containerd/containerd",
+      "reason": "CRI checkpoint import (image tag poisoning). Same path as GO-2026-5622: init-time reachability through helm's OCI client only; no CRI service in lo.",
+      "review_by": "2026-12-01"
+    },
+    {
+      "id": "GO-2026-5064",
+      "module": "github.com/containerd/containerd",
+      "reason": "CRI checkpoint restore (CDI annotation smuggling). Same path as GO-2026-5622; no CRI service in lo.",
+      "review_by": "2026-12-01"
+    }
+  ]
+}

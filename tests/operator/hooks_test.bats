@@ -1,11 +1,21 @@
 #!/usr/bin/env bats
 # hooks_test.bats — unit tests for operator shell-operator hooks
+#
+# The hooks under operator/hooks/ are shims that exec `lo operator <hook>`
+# (Go, internal/operator — its own hermetic tests replicate every case
+# below). The bash bodies they replaced are frozen at
+# .lok8s/legacy/operator/hooks/ and stay the pinned reference: the sourced
+# tests below run against THAT tree; the shim section at the end pins the
+# shims themselves (passthrough argv, `--config` byte-parity with the frozen
+# reference through the built Go binary).
 
 setup() {
   load "../test_helper"
   setup_tmpdir
 
   export PATH_BASE="$BATS_TEST_TMPDIR"
+  LEGACY_HOOKS="${_PROJECT_ROOT}/.lok8s/legacy/operator/hooks"
+  SHIM_HOOKS="${_PROJECT_ROOT}/operator/hooks"
 
   # We need jq for hook tests
   command -v jq &>/dev/null || skip "jq required for hook tests"
@@ -24,7 +34,7 @@ lo_hook_load() {
   export LOK8S_STATE_DIR="${BATS_TEST_TMPDIR}/state"
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"
   : > "${KLOG}"
-  source "${_PROJECT_ROOT}/operator/hooks/lo-reconcile.sh"
+  source "${LEGACY_HOOKS}/lo-reconcile.sh"
   set +e +u
   set +o pipefail
 
@@ -232,7 +242,7 @@ EOF
 capi_hook_load() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"
   : > "${KLOG}"
-  source "${_PROJECT_ROOT}/operator/hooks/capi-reconcile.sh"
+  source "${LEGACY_HOOKS}/capi-reconcile.sh"
   set +e +u
   set +o pipefail
 
@@ -399,4 +409,58 @@ JSON
 
   run dispatch ""
   assert_output "trigger_called"
+}
+
+# --- the shims (operator/hooks/*.sh → `lo operator <hook>`) ---
+
+# A fake `lo` on PATH records the argv the shim hands over: the shim's only
+# job is the name mapping + verbatim passthrough (shell-operator's --config
+# and the trigger call both ride "$@").
+shim_fake_lo() {
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  cat > "${BATS_TEST_TMPDIR}/bin/lo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "lo $*"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/bin/lo"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+}
+
+@test "shims exec lo operator <hook> with the arguments passed through" {
+  shim_fake_lo
+  local hook
+  for hook in lo-reconcile capi-reconcile capi-status-sync; do
+    run "${SHIM_HOOKS}/${hook}.sh" --config
+    assert_success
+    assert_output "lo operator ${hook} --config"
+    run "${SHIM_HOOKS}/${hook}.sh"
+    assert_success
+    assert_output "lo operator ${hook}"
+  done
+}
+
+@test "shims are executable, the retired runtime.sh is not" {
+  local hook
+  for hook in lo-reconcile capi-reconcile capi-status-sync; do
+    [[ -x "${SHIM_HOOKS}/${hook}.sh" ]] || fail "${hook}.sh must stay executable (shell-operator discovers it by that)"
+  done
+  [[ ! -x "${SHIM_HOOKS}/runtime.sh" ]] || fail "runtime.sh must not be executable (shell-operator would run it as a hook)"
+}
+
+# Byte-parity of `--config` between the frozen bash reference and the Go
+# port THROUGH the shim. Needs the built binary (make build) — skipped
+# otherwise (the Go golden test in internal/operator pins the same bytes
+# against testdata generated from the bash hooks).
+@test "shim --config output is byte-identical to the frozen bash hook" {
+  [[ -x "${_PROJECT_ROOT}/bin/lo" ]] || skip "bin/lo not built (make build)"
+  command -v yq &>/dev/null || skip "yq required (the legacy lo hook sources runtime.sh)"
+  export PATH="${_PROJECT_ROOT}/bin:${PATH}"
+  export LOK8S_STATE_DIR="${BATS_TEST_TMPDIR}/state"
+  local hook
+  for hook in lo-reconcile capi-reconcile capi-status-sync; do
+    bash "${LEGACY_HOOKS}/${hook}.sh" --config > "${BATS_TEST_TMPDIR}/${hook}.bash"
+    "${SHIM_HOOKS}/${hook}.sh" --config > "${BATS_TEST_TMPDIR}/${hook}.go"
+    run diff "${BATS_TEST_TMPDIR}/${hook}.bash" "${BATS_TEST_TMPDIR}/${hook}.go"
+    assert_success
+  done
 }

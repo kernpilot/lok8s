@@ -1,0 +1,103 @@
+# Named kubehz-live-agent: coexists with the bash heartbeat CronJob
+# (kubehz-heartbeat) — see rbac.yaml here, and the upstream naming rule in
+# https://github.com/kernpilot/kubehz-agent (deploy/README.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubehz-live-agent
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+    app.kubernetes.io/component: live-view
+spec:
+  # Single replica for the pilot. HA (multiple replicas with a leader-elected
+  # Lease in kubehz-system) is a follow-up tracked in the upstream kubehz-agent
+  # repo. Strategy Recreate avoids two agents briefly double-reporting during a
+  # rollout.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubehz-live-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubehz-live-agent
+        app.kubernetes.io/part-of: kubehz
+        app.kubernetes.io/component: live-view
+    spec:
+      serviceAccountName: kubehz-live-agent
+      # The agent needs the SA token to talk to the apiserver (informers).
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # distroless "nonroot"
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          # PINNED BY DIGEST (multi-arch index: linux/amd64 + linux/arm64) on a
+          # PUBLIC, anonymously-pullable registry — the only kind of ref every
+          # cluster can resolve. A default that points at a private or
+          # network-restricted registry is a guaranteed ImagePullBackOff for
+          # anyone outside that network, so the shipped default never does.
+          #
+          # To pull from a mirror or an air-gapped copy, override the REGISTRY
+          # and keep this digest — see the `images:` block in
+          # kustomization.yaml. Mirroring by digest means an override changes
+          # where the bytes come from, not which bytes.
+          #
+          # Never a moving tag (`latest`, `main`): a digest is the only ref
+          # `cosign verify` and a rollback can reason about. Release artifacts
+          # (install.yaml on the GitHub Release) carry the released digest;
+          # this committed default tracks the last known-good main build.
+          #
+          # THE SINGLE SOURCE OF TRUTH for the digest. Nothing else in this
+          # kustomization repeats it.
+          image: ghcr.io/kernpilot/kubehz-agent@sha256:5a34f3569671fb2326b4b7e896069947f5680f9bac242e94fc888dc429720873
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: kubehz-live-agent-config
+          # No ports: the agent is OUTBOUND-ONLY. It opens connections to the
+          # apiserver (watch) and kubehz-api (heartbeat POST); nothing dials in,
+          # so there is no containerPort and no readiness/liveness HTTP probe.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              # Memory scales with the informer cache (nodes+pods+events). 256Mi
+              # is ample for the pilot; raise for very pod-dense clusters.
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # static binary; nothing writes to disk
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: agent-token
+              mountPath: /var/run/secrets/kubehz
+              readOnly: true
+      volumes:
+        # Mount ONLY the agent-token key of the kubehz-agent Secret, read-only.
+        # secretName MUST stay `kubehz-agent`: it is the SHARED identity Secret
+        # bootstrapped by the bash CronJob / lok8s plumbing (never rotated) —
+        # only the agent's own resources carry the kubehz-live-agent prefix.
+        # This is why the pod needs no Secret GET RBAC by default (the kubelet
+        # projects the file); the claim-code (C) is deliberately NOT mounted —
+        # the agent never needs it.
+        - name: agent-token
+          secret:
+            secretName: kubehz-agent
+            items:
+              - key: agent-token
+                path: agent-token
+            defaultMode: 0400

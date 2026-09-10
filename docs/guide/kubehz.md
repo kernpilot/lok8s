@@ -155,9 +155,19 @@ A few things worth knowing before you reach for it:
 - **`KUBEHZ_TOKEN` is required**, not optional as it is elsewhere: a space
   belongs to your account from the moment it exists, so there is no anonymous
   path and no claim step.
-- **A join ticket is shown once**, is bound to one node name, and expires
-  quickly. Nothing stores the plaintext: a lost ticket gets re-minted, never
-  recovered.
+- **The join script comes with the ticket.** The platform ships the recipe
+  the docs describe (containerd, kubelet, the cluster CA verified against the
+  ticket, bootstrap config) and `lo` writes it to a fresh private directory,
+  `$TMPDIR/kubehz-join-<random>/kubehz-join-<node>.sh` (0700 over 0600), and
+  prints the `scp`/`ssh` line — it runs nothing itself. The file carries the
+  ticket: read it, copy it to the machine, run it there as root, delete it
+  (and its directory) once the node has joined. The terminal does not repeat
+  the ticket; `lo kubehz join <node> --print-token` shows it when you need it
+  in the open. Older platforms without the script print the ticket and a
+  pointer to the node-join guide instead.
+- **A join ticket is minted once**, is bound to one node name, and expires
+  quickly. Nothing stores the plaintext outside the script: a lost ticket
+  gets re-minted, never recovered.
 - **There is no kubeconfig to download.** The control plane is
   platform-operated and is not handed out; you reach your namespaces with
   your kubehz account (OIDC). `lo kubeconfig` on a space says exactly that

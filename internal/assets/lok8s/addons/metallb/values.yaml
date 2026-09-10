@@ -1,0 +1,71 @@
+# MetalLB chart values — keep defaults; the framework only customizes
+# the IPAddressPool/L2Advertisement (in pool.yaml), not the chart itself.
+controller:
+  enabled: true
+speaker:
+  enabled: true
+  # HOST PORTS (hostNetwork: true) — 0.16 moved the speaker's metrics/health
+  # off 7472/7473 to 9120 (metrics) and 17472 (health, bound but not declared
+  # as a containerPort). These bind on every node's host netns, so a port
+  # collision crashloops the speaker on that node and its LB addresses go dark
+  # — one node down looks like a partial outage, not a bad rollout. Before an
+  # upgrade, check the target nodes: `ss -lntp | grep -E '9120|17472'`.
+  # BGP backend — PINNED, not inherited (chart 0.16.0 flipped the default).
+  # Up to 0.15.x the default was the in-speaker FRR sidecars
+  # (speaker.frr.enabled: true); 0.16.0 made the standalone frr-k8s DaemonSet
+  # the default instead (frrk8s.enabled: true) and started deprecating FRR mode.
+  # Inheriting that default adds a DaemonSet, a status-cleaner Deployment, four
+  # frrk8s.metallb.io CRDs and a `failurePolicy: Fail` validating webhook on
+  # FRRConfiguration — one more webhook that must be serving before the addon's
+  # readiness gate can clear. This addon's own pool.yaml ships an IPAddressPool
+  # + an L2Advertisement and never a BGPPeer/BGPAdvertisement, so none of it is
+  # used by the default it ships with.
+  #
+  # Both off does NOT mean "L2 only" — it selects MetalLB's NATIVE BGP backend.
+  # The speaker falls back to bgpType "native" when METALLB_BGP_TYPE is absent,
+  # and with both backends off the chart stops emitting that variable: in the
+  # render the speaker goes from four containers with METALLB_BGP_TYPE=frr down
+  # to one container with no METALLB_BGP_TYPE at all. All nine metallb.io CRDs
+  # stay, so BGPPeer/BGPAdvertisement still apply and native BGP sessions still
+  # come up. L2 only is what THIS addon's default consumer does, not what the
+  # setting means.
+  #
+  # What native gives up is the FRR-only feature set: BFDProfile, per-peer VRF,
+  # dualStackAddressFamily, graceful restart, keepaliveTime/connectTime,
+  # dynamicASN, localASN, disableMP (itself deprecated in favour of
+  # dualStackAddressFamily), interface (unnumbered) peers, IPv6 BGP
+  # advertisements and non-legacy communities. Native mode validates with
+  # DiscardFRROnly, so the metallb validating webhook denies an object that uses
+  # one — loud, but only on the operations each webhook actually registers:
+  # CREATE and UPDATE on bgppeers, bgpadvertisements and communities, CREATE and
+  # DELETE — never UPDATE — on bfdprofiles. Objects that ALREADY exist are never
+  # re-admitted, so flipping the backend under a live FRR config is the quiet
+  # case: nothing is rejected at the API, and the speaker drops the whole
+  # configuration at runtime instead.
+  #
+  # A consumer that needs any of that sets `frrk8s: {enabled: true}` in its
+  # inline values — frr-k8s is the backend upstream develops; speaker.frr is the
+  # deprecated one, so do NOT re-enable that side instead.
+  frr:
+    enabled: false
+frrk8s:
+  enabled: false
+# TLS floor — INHERITED from 0.16.x, deliberately not pinned. 0.16.0 dropped
+# kube-rbac-proxy and serves /metrics from the controller and the speaker
+# themselves over HTTPS, and in the same move renamed `controller.tlsMinVersion`
+# to `tls.minVersion` and changed its default from "VersionTLS12" to "".
+#
+# Empty does NOT mean "no floor". The chart omits --tls-min-version when the
+# value is empty, and metallb's own default for the absent flag is TLS 1.3:
+# parseTLSVersion("") returns tls.VersionTLS13 and OptFor assigns it to
+# cfg.MinVersion unconditionally (internal/tlsconfig/tlsopt.go), which the flag's
+# own help text states — "If empty, defaults to VersionTLS13." That config backs
+# the metrics server on both workloads and the controller's admission-webhook
+# server. So the 0.16.x default RAISES the floor from 1.2 to 1.3, and setting
+# `tls.minVersion: "VersionTLS12"` here would lower it back down.
+#
+# A consumer whose scraper cannot speak TLS 1.3 can set
+# `tls: {minVersion: "VersionTLS12"}` in its inline values, knowingly. The same
+# applies to `tls.cipherSuites`, which TLS 1.3 forbids: OptFor errors out on
+# cipher suites at 1.3, so a consumer that sets them must lower the floor in the
+# same edit. Nothing here sets either.

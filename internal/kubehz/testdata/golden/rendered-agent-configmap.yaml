@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubehz-agent-config
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+data:
+  KUBEHZ_API_URL: "https://api.example.com/heartbeat?cluster=a&mode=push"
+  CLUSTER_ID: "acme.example.com"
+  # Which agent owns the heartbeat for this cluster — "cronjob" (this agent) or
+  # "operator" (the Go live agent, deployment/kubehz-live-agent). Exactly one
+  # producer may beat: the platform stores the snapshot latest-wins, so two
+  # producers overwrite each other and the live view empties every five minutes.
+  # `lo kubehz deploy` writes this from spec.kubehz.agent. When it is "operator"
+  # this CronJob still bootstraps the identity Secret and enrolls it with the
+  # platform, then exits without beating. An unset key means "cronjob", so an
+  # install made before this key existed keeps working unchanged.
+  KUBEHZ_HEARTBEAT_OWNER: "operator"

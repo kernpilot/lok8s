@@ -1,0 +1,86 @@
+# Flux CD (fluxcd-community/flux2 chart 2.19.0, appVersion 2.9.1) — generic,
+# portable framework-addon values.
+#
+# This file carries ONLY decisions sane for ANY cluster. Everything
+# cluster-specific is GLUE supplied by the consuming cluster as inline
+# `bootstrap:` overrides (deep-merged on top of this file — see
+# docs/guide/addons.md#inline-overrides), namely:
+#   - the GitRepository source (repo URL / branch / secretRef) and the
+#     Kustomization that reconciles a repo path. Supply them via the chart's
+#     `extraObjects` inline, or in a dedicated flux-system target. Flux is happy
+#     with zero sources installed, so this base is valid as-is.
+#
+# UPGRADE PRECONDITION (chart >= 2.19.0 / Flux 2.9): the CRDs stop SERVING
+# notification.toolkit.fluxcd.io/v1beta2 and image.toolkit.fluxcd.io/v1beta2.
+# Before the bump reaches a cluster: (1) no manifest may still say v1beta2;
+# (2) `kubectl get crd -o custom-columns=N:.metadata.name,S:.status.storedVersions`
+# must not list v1beta2 for those groups — a stale storedVersion makes the
+# apiserver REJECT the trimmed CRD and the addon apply fails while the old
+# CRD keeps serving. The rejection text depends on the apiserver: k8s >= 1.33
+# says "missing from spec.versions; v1beta2 was previously a storage version,
+# and must remain in spec.versions until a storage migration ...", older
+# apiservers say "must appear in spec.versions" — grep for "spec.versions".
+#
+# The chart installs the Flux CRDs and the controllers selected below; it does
+# NOT create any GitRepository/Kustomization by itself.
+
+# Install the Flux CRDs alongside the controllers (single declarative apply).
+installCRDs: true
+
+# Reconcile sources/Kustomizations/HelmReleases in every namespace (the standard
+# Flux default). Set watchAllNamespaces:false + a namespace list in inline glue
+# for a multi-tenant lock-down.
+watchAllNamespaces: true
+
+logLevel: info
+
+# Core GitOps controllers — enabled by default so `bootstrap: [fluxcd]` yields a
+# working GitOps engine (a Git source can be reconciled into applied manifests
+# and Helm releases with no further controllers).
+sourceController:
+  create: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+kustomizeController:
+  create: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+helmController:
+  create: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# Notification controller: receives events + serves the receiver webhook
+# endpoint (alerts/notifications, and inbound webhooks that trigger a
+# reconcile). Kept on — it is lightweight and commonly relied on — but flip to
+# create:false inline for a truly minimal footprint.
+notificationController:
+  create: true
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# Image-automation controllers (scan registries + write image bumps back to
+# Git): off by default. They need registry credentials + write access to the
+# source repo, which is opt-in per cluster — enable inline when wanted.
+imageAutomationController:
+  create: false
+imageReflectionController:
+  create: false

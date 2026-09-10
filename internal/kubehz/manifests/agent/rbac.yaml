@@ -1,0 +1,248 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubehz-agent
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+      - componentstatuses
+      - namespaces
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - certificates.k8s.io
+    resources:
+      - certificatesigningrequests
+    verbs:
+      - get
+      - list
+  # Assessment probes (handover contract §1) — read-only, list/get only:
+  #   storageclasses          → storageClasses[] (name/provisioner/isDefault)
+  #   persistentvolumes       → pvSummary (count + Gi grouped by provisioner)
+  #   services (cluster-wide) → loadBalancers count (type=LoadBalancer)
+  #   webhookconfigurations   → webhooks.validating/mutating counts
+  #   the CAPI CRD            → capiManaged presence probe; `get` is
+  #     resourceNames-scoped to clusters.cluster.x-k8s.io — the agent can
+  #     read no other CRD and cannot enumerate them.
+  # nodes list (cpUsage counts) is already granted above.
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - list
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs:
+      - list
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    resourceNames:
+      - clusters.cluster.x-k8s.io
+    verbs:
+      - get
+  # Heartbeat components[]: apiserver/etcd health via
+  # `kubectl get --raw /readyz?verbose` (+ /version as the reachability
+  # fallback). Read-only, and normally already granted by the default
+  # system:public-info-viewer binding — declared explicitly so the probes
+  # keep working on hardened clusters that prune the default bindings.
+  - nonResourceURLs:
+      - /readyz
+      - /version
+    verbs:
+      - get
+---
+# Heartbeat components[]: scheduler/controller-manager health is derived from
+# the static pods' Ready condition. Namespaced Role (not ClusterRole): the
+# agent only ever reads pods in kube-system — no cluster-wide pod access.
+# `list` only: the probe is a label-selector `kubectl get pods -l …`, which is
+# a LIST call — the agent never GETs a pod by name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-agent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - list
+  # Assessment probes (handover contract §1), kube-system only:
+  #   daemonsets       → CNI guess (cilium/calico/flannel/kube-proxy-only)
+  #   kubeadm-config   → pod/service CIDR; `get` is resourceNames-scoped to
+  #     that ONE ConfigMap — no other kube-system ConfigMap is readable.
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+    verbs:
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - kubeadm-config
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubehz-agent
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubehz-agent
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-agent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-agent
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system
+---
+# Agent-identity bootstrap (P0 self-hosted claim). The heartbeat CronJob
+# generates the agent-token (A) + claim-code (C) into Secret kubehz-agent and
+# reads A back to authenticate its heartbeat. Namespaced Role in kubehz-system,
+# scoped to that one Secret's lifecycle. Two rules, least privilege:
+#   (a) `get` is scoped by resourceNames to the single kubehz-agent Secret —
+#       the agent reads A/C back but CANNOT read any OTHER Secret in the
+#       namespace (Kubernetes RBAC honors resourceNames for get).
+#   (b) `create` cannot be name-restricted (a resource has no name until it is
+#       created, so resourceNames never matches a create) — this rule is
+#       unavoidably namespace-wide; it only grants create (bootstrap the Secret
+#       when absent), never read.
+# Deliberately NO update/patch/delete — the Secret is generated once and NEVER
+# rotated, so the agent must not be able to change it. Least privilege that also
+# enforces the never-rotate invariant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-agent-secret
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - kubehz-agent
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-agent-secret
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-agent-secret
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system
+---
+# Assessment gate marker (handover contract §1). The CronJob pod is ephemeral,
+# so the "sent at most once per 24h / send-on-request" gate persists as
+# annotations on the kubehz-agent-config ConfigMap
+# (kubehz.cloud/last-assessment + kubehz.cloud/assess-requested). get+patch
+# only, BOTH resourceNames-scoped to that single ConfigMap (both verbs honor
+# resourceNames) — the agent can annotate nothing else and still cannot
+# create/update/delete any ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-agent-marker
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - kubehz-agent-config
+    verbs:
+      - get
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-agent-marker
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-agent-marker
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-agent
+    namespace: kubehz-system

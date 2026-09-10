@@ -1,5 +1,8 @@
 name: Release
 
+# Tag-triggered. goreleaser (.goreleaser.yaml) builds the `lo` binary, the
+# kustomize-secret-* exec plugin, lochat, the framework tarball, attaches
+# install/lo-install.sh, and publishes checksums.txt for all of them.
 on:
   push:
     tags:
@@ -10,70 +13,24 @@ permissions:
 
 jobs:
   release:
-    name: Create Release
+    name: goreleaser
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # goreleaser derives the version and the changelog from tags.
           fetch-depth: 0
 
-      # Go for both the kustomize plugins (go 1.25) and the lochat binaries (1.22);
-      # the kustomize module needs the higher version, which also builds lochat.
-      - uses: actions/setup-go@v5
+      # The root module (go 1.25.x) also builds the kustomize (1.25) and
+      # lochat (1.22) modules; goreleaser runs `go build` in each `dir`.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: kustomize/go.mod
+          go-version-file: go.mod
 
-      - name: Build kustomize plugins
-        run: make -C kustomize build   # → .kustomize/<group>/<version>/<kind>/<Kind>
-
-      - name: Create distributable tarball
-        run: |
-          VERSION="${GITHUB_REF_NAME}"
-          # .kustomize/ holds the just-built plugins; include it only if present so
-          # a clean checkout never fails the tar on a missing path.
-          paths=(.lok8s/ operator/crds/ operator/deploy/)
-          if [ -d .kustomize ]; then paths+=(.kustomize/); fi
-          tar -czf "lok8s-${VERSION}.tar.gz" "${paths[@]}" \
-            --transform "s,^,lok8s-${VERSION}/,"
-
-      - name: Build lo chat (lochat) binaries
-        run: |
-          # `lo chat` engine — a single static, stdlib-only Go binary. Cross-compile
-          # for the common dev platforms so `b` / users can fetch it from the release
-          # instead of building from source.
-          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            os="${platform%/*}"; arch="${platform#*/}"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-              go build -C ai/lochat -trimpath -ldflags="-s -w" \
-                -o "${GITHUB_WORKSPACE}/lochat-${os}-${arch}" .
-            echo "built lochat-${os}-${arch}"
-          done
-
-      - name: Build kustomize plugin release binaries
-        run: |
-          # Standalone per-platform binaries of the secrets.lok8s.dev/v1/Secret
-          # exec plugin (asset contract: kustomize-secret-<os>-<arch>, same
-          # matrix as lochat) so consumers install it via `b` instead of
-          # building from source, e.g. in .bin/b.yaml:
-          #   github.com/kernpilot/lok8s:
-          #     asset: kustomize-secret-*
-          #     file: ../.kustomize/secrets.lok8s.dev/v1/secret/Secret
-          # (The tarball's .kustomize/ copy above only covers the build host's
-          # os/arch; these assets are what b's os/arch matching addresses.)
-          make -C kustomize dist
-          cp kustomize/dist/kustomize-secret-* "${GITHUB_WORKSPACE}/"
-
-      - name: Checksums
-        run: sha256sum lok8s-*.tar.gz lochat-* kustomize-secret-* | tee SHA256SUMS.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          generate_release_notes: true
-          files: |
-            lok8s-*.tar.gz
-            lochat-*
-            kustomize-secret-*
-            SHA256SUMS.txt
+          distribution: goreleaser
+          version: v2.18.0
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

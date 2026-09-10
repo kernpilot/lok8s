@@ -1,0 +1,15 @@
+# HCloudMachineTemplate for a worker pool (referenced by the pool's
+# MachineDeployment). Rendered once per pool by capi::generate().
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: HCloudMachineTemplate
+metadata:
+  name: ${CLUSTER_NAME}-${POOL_NAME}
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  template:
+    spec:
+      type: ${POOL_TYPE}
+      imageName: ${HCLOUD_IMAGE_NAME}

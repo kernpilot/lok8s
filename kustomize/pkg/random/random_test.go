@@ -80,7 +80,7 @@ func TestUsername_StartsWithLetter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !((got[0] >= 'a' && got[0] <= 'z')) {
+		if !(got[0] >= 'a' && got[0] <= 'z') {
 			t.Errorf("username[0] = %q, want lowercase letter", got[0])
 		}
 	}

@@ -108,8 +108,13 @@ non-empty dir).
 
 ## 5. Testing the framework itself (contributors)
 
-The lok8s codebase uses bats (not Playwright):
+The lok8s codebase is a Go binary plus a frozen bash reference (not Playwright):
 ```bash
-./.bin/argsh test tests/unit/ tests/operator/   # the lo CLI / operator
-./.bin/argsh lint '.lok8s/**/*.sh'              # shellcheck + argsh-lint
+make build && go test ./...                     # the lo binary: unit tests + the tree-drift gate
+bash hack/parity-test.sh                        # binary vs `LO_IMPL=bash`, byte-for-byte (ten harnesses)
+./.bin/argsh test tests/unit/ tests/operator/   # bats: the frozen bash tree + operator hooks
+bash hack/lint-shell.sh                         # shellcheck + argsh-lint (= npm run lint)
 ```
+Unset `PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS` before a
+parity harness — inherited, they redirect it into the live project. The
+full matrix is in the repo's `TESTING.md`.

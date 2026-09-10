@@ -1,0 +1,10 @@
+configVersion: v1
+kubernetes:
+  - apiVersion: cluster.lok8s.dev/v1beta1
+    kind: Capi
+    executeHookOnEvent: ["Added", "Modified"]
+    executeHookOnSynchronization: true
+    jqFilter: "{spec: .spec, metadata: {name: .metadata.name, namespace: .metadata.namespace, deletionTimestamp: .metadata.deletionTimestamp, finalizers: .metadata.finalizers}}"
+schedule:
+  - name: capi-drift
+    crontab: "*/3 * * * *"

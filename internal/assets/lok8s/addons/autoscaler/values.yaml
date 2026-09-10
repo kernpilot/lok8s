@@ -1,0 +1,102 @@
+# cluster-autoscaler — Cluster API (clusterapi) provider, targeting KubeOne's
+# machine-controller.
+#
+# WHY clusterapi (and NOT hetzner): the target is a KubeOne cluster, and
+# KubeOne deploys Kubermatic's **machine-controller** (kube-system) which owns
+# the Cluster-API CRDs `machinedeployments`/`machinesets`/`machines` in the
+# LEGACY group **cluster.k8s.io** (v1alpha1). machine-controller PROVISIONS the
+# Hetzner servers AND joins them itself — so the autoscaler must NOT talk to the
+# Hetzner API directly (the old `cloudProvider: hetzner` path needed a
+# hand-built cloud-init carrying a short-lived kubeadm join token — the blocker).
+# Instead it scales a MachineDeployment up/down and machine-controller does the
+# rest (no join token, no hand-built cloud-init). The worker pool MachineDeployment
+# lives in the sibling `machinedeployment` target.
+#
+# CAPI_GROUP: the clusterapi provider defaults to the upstream Cluster-API group
+# `cluster.x-k8s.io`. KubeOne's machine-controller uses the OLDER `cluster.k8s.io`
+# group, so we set CAPI_GROUP=cluster.k8s.io (extraEnv below). This ALSO rewrites
+# the scale annotation prefix the autoscaler looks for — it then discovers node
+# groups via `cluster.k8s.io/cluster-api-autoscaler-node-group-{min,max}-size`
+# annotations on the MachineDeployment (set in the machinedeployment target).
+#
+# clusterAPIMode incluster-incluster (chart default): the autoscaler runs in the
+# SAME cluster as the machine-controller CRDs and the workload nodes — no external
+# management-cluster kubeconfig needed.
+#
+# Docs: https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/clusterapi/README.md
+cloudProvider: clusterapi
+
+# Keep resource names = "cluster-autoscaler" (matches chart.yaml metadata.name).
+fullnameOverride: cluster-autoscaler
+
+# Point the clusterapi provider at KubeOne's machine-controller CRD group.
+# (Also flips the min/max-size annotation prefix the autoscaler scans for.)
+extraEnv:
+  CAPI_GROUP: cluster.k8s.io
+
+# Node-group auto-discovery: scan kube-system (where machine-controller's
+# MachineDeployments live) for pools carrying the min/max-size annotations.
+# Renders --node-group-auto-discovery=clusterapi:namespace=kube-system. (This
+# also un-gates the chart's Deployment, which requires an autoDiscovery field
+# or autoscalingGroups to be set.)
+autoDiscovery:
+  namespace: kube-system
+
+rbac:
+  # The chart's built-in clusterapi rules grant get/list/update/watch +
+  # scale on machinedeployments/machinesets/machines — but ONLY for the
+  # cluster.x-k8s.io group. Because we run with CAPI_GROUP=cluster.k8s.io we
+  # must grant the SAME access on the cluster.k8s.io group machine-controller
+  # actually serves. (additionalRules is appended to the generated ClusterRole.
+  # Since chart 9.59.0 it is ALSO appended to the namespaced Role, regardless of
+  # rbac.clusterScoped — so these rules now render twice. The Role copy is
+  # redundant, not extra privilege: it is namespace-scoped and the ClusterRole
+  # already grants the same verbs cluster-wide.)
+  additionalRules:
+    - apiGroups:
+        - cluster.k8s.io
+      resources:
+        - machinedeployments
+        - machinesets
+        - machines
+      verbs:
+        - get
+        - list
+        - update
+        - watch
+    - apiGroups:
+        - cluster.k8s.io
+      resources:
+        - machinedeployments/scale
+        - machinesets/scale
+      verbs:
+        - get
+        - patch
+        - update
+
+# Autoscaler behaviour. extraArgs is a map; each key becomes a --<key>=<value>
+# flag (the chart already injects logtostderr/stderrthreshold/v).
+extraArgs:
+  # scale-down-enabled was DROPPED here (previously set to true "for explicit
+  # intent"). Timeline, verified against upstream tagged source: deprecated in
+  # 1.35.0 (autoscaler#9060; `flag.Bool("scale-down-enabled", true, ...)` —
+  # default true); removed for 1.36 (autoscaler#9412) then REVERTED
+  # (autoscaler#9749, k8s 3-release deprecation policy), so released 1.36.x and
+  # the release-1.37 branch still accept it — but removal WILL re-land (earliest
+  # 1.38), and an unknown flag stops the controller at startup. Dropping it is a
+  # no-op: the compiled default is true (FAQ flag table: `scale-down-enabled |
+  # [Deprecated] | true`), so scale-down stays enabled. Per-node opt-out, if
+  # ever needed, is the `cluster-autoscaler.kubernetes.io/scale-down-disabled`
+  # annotation — not a flag.
+  scale-down-delay-after-add: 10m
+  scale-down-unneeded-time: 10m
+  expander: least-waste
+  balance-similar-node-groups: true
+
+# Modest footprint — the autoscaler is a single lightweight controller.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi

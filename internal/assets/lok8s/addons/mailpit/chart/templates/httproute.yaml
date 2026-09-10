@@ -1,0 +1,51 @@
+{{- /*
+OPTIONAL Mailpit UI/API route (port 8025) through a shared Gateway.
+
+Gated by route.enabled. Exposing the UI is cluster-specific — it depends on the
+cluster's Gateway name + the public domain — so it ships in the chart as VALUES
+(route.host, route.gateway.*) rather than as hard-coded glue: the default host
+is mailpit.${LOK8S_SPEC_CLUSTER_DOMAIN} (the cluster's spec.cluster.domain,
+resolved by envsubst at bootstrap), and everything is overridable inline, e.g.
+  - mailpit: { route: { host: mail.example.dev, gateway: { name: gw } } }
+
+The HTTPRoute lives in route.namespace (must satisfy the Gateway's
+allowedRoutes; default `default` to match a from:Same listener) while the
+backend Service is in the release namespace, so a ReferenceGrant in the release
+namespace authorises the cross-namespace backendRef. The apex/wildcard TLS cert
+covers *.<domain>, so no per-host cert.
+*/ -}}
+{{- if .Values.route.enabled }}
+{{- $routeNs := .Values.route.namespace | default "default" }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mailpit
+  namespace: {{ $routeNs }}
+spec:
+  parentRefs:
+    - name: {{ required "route.gateway.name is required when route.enabled" .Values.route.gateway.name }}
+      namespace: {{ .Values.route.gateway.namespace | default "default" }}
+      sectionName: {{ .Values.route.gateway.sectionName | default "https" }}
+  hostnames:
+    - {{ required "route.host is required when route.enabled" .Values.route.host | quote }}
+  rules:
+    - backendRefs:
+        - name: mailpit
+          namespace: {{ .Release.Namespace }}
+          port: 8025
+---
+# Allow HTTPRoutes in {{ $routeNs }} to reference the Mailpit Service in {{ .Release.Namespace }}.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-{{ $routeNs }}-to-mailpit
+  namespace: {{ .Release.Namespace }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $routeNs }}
+  to:
+    - group: ""
+      kind: Service
+{{- end }}

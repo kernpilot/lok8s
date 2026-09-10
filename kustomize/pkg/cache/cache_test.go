@@ -12,8 +12,8 @@ func TestFormatName(t *testing.T) {
 		secret, ns, key, want string
 	}{
 		{"ut-user", "default", "PASSWORD", "Secret.ut-user.default.PASSWORD"},
-		{"db", "", "user", "Secret.db.default.user"},  // empty ns → "default"
-		{"a", "b", "c.d.e", "Secret.a.b.c.d.e"},       // dotted keys allowed
+		{"db", "", "user", "Secret.db.default.user"}, // empty ns → "default"
+		{"a", "b", "c.d.e", "Secret.a.b.c.d.e"},      // dotted keys allowed
 	}
 	for _, c := range cases {
 		if got := FormatName(c.secret, c.ns, c.key); got != c.want {
@@ -24,9 +24,9 @@ func TestFormatName(t *testing.T) {
 
 func TestParseRef(t *testing.T) {
 	cases := []struct {
-		in, defaultNS string
+		in, defaultNS   string
 		secret, ns, key string
-		ok bool
+		ok              bool
 	}{
 		{"db/password", "myns", "db", "myns", "password", true},
 		{"db/other-ns/password", "myns", "db", "other-ns", "password", true},

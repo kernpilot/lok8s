@@ -2,6 +2,10 @@
 
 The driver contract is lok8s's extensibility mechanism for cluster backends. Each cluster kind is implemented in `.lok8s/drivers/<kind>/main` that exports a set of required functions.
 
+::: warning This page describes the bash contract
+The built-in drivers (`Lo`, `Capi`, `KubeOne`, `Kkp`, `Kubehz`) are Go packages under `internal/driver/` in the `lo` binary; their bash twins under `.lok8s/drivers/` are frozen. The bash contract below is still honoured — by `LO_IMPL=bash lo provision …` and by `lo drivers <kind> …` — but the binary's own provision dispatch (`lo up` / `provision` / `destroy` / `status`) resolves `kind:` against the Go registry only and reports a bash-only kind as `Unknown cluster kind`. A Go driver contract is not published yet. See [The Go `lo` binary](/reference/go-migration#what-still-calls-bash).
+:::
+
 ## Contract Functions
 
 Every driver implementation must provide these four functions:

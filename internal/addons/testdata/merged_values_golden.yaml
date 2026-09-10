@@ -1,0 +1,8 @@
+only_base: "base"
+shared_all: "inline"
+nested:
+  overridden: "inline"
+  from_base: true
+only_driver: "driver"
+only_provider: "provider"
+inline_marker: "inline"

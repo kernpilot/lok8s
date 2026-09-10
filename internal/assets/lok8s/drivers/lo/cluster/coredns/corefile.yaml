@@ -1,0 +1,41 @@
+# CoreDNS ConfigMap — base Corefile for Lo (kind) clusters.
+# Applied after kind cluster creation to enable domain resolution.
+#
+# Extensible: the two `import custom/*` lines pull in per-cluster CoreDNS
+# snippets mounted at /etc/coredns/custom from the (optional) `coredns-custom`
+# ConfigMap (see patch.json for the volume mount, lo::coredns for population
+# from clusters/<domain>/coredns/). This is the standard coredns-custom pattern:
+#   *.override -> extra directives merged INTO this default `.:53` server block
+#   *.server   -> additional, self-contained server blocks (e.g. a zone that
+#                 resolves *.<domain> to the gateway LB for in-cluster clients)
+# Globs that match nothing are a no-op, so a cluster with no coredns/ dir is
+# unaffected. `reload` below makes coredns pick up changes without a restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+            lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+            pods insecure
+            fallthrough in-addr.arpa ip6.arpa
+            ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+            max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+        import custom/*.override
+    }
+    import custom/*.server

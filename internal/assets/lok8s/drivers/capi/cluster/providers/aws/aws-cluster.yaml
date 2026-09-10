@@ -1,0 +1,15 @@
+# AWS infrastructure cluster template
+# Rendered by capi::generate() when provider=aws
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: AWSCluster
+metadata:
+  name: ${CLUSTER_NAME}
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  region: ${AWS_REGION}
+  sshKeyName: ${AWS_SSH_KEY_NAME}
+  controlPlaneLoadBalancer:
+    scheme: internet-facing

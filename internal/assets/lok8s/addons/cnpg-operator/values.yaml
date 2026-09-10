@@ -1,0 +1,3 @@
+# Install CRDs with the operator
+crds:
+  create: true

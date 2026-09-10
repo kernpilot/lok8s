@@ -1,0 +1,55 @@
+# Rendered kind config for test-shared
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: test-shared
+networking:
+  disableDefaultCNI: true
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+nodes:
+  - role: control-plane
+    image: "kindest/node:v1.31.4"
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+      - |
+        kind: ClusterConfiguration
+        apiVersion: kubeadm.k8s.io/v1beta4
+        apiServer:
+          extraArgs:
+            - name: authentication-config
+              value: /etc/kubernetes/oidc/auth-config.yaml
+          extraVolumes:
+            - name: oidc-auth-config
+              hostPath: /etc/kubernetes/oidc/auth-config.yaml
+              mountPath: /etc/kubernetes/oidc/auth-config.yaml
+              readOnly: true
+              pathType: File
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+      - containerPort: 8080
+        hostPort: 8080
+        protocol: TCP
+    extraMounts:
+      - hostPath: /var/run/docker.sock
+        containerPath: /var/run/docker.sock
+      - hostPath: /test/clusters/test.lok8s.dev/.containerd/certs.d
+        containerPath: /etc/containerd/certs.d
+        readOnly: true
+      - hostPath: /test/clusters/test.lok8s.dev/.oidc/auth-config.yaml
+        containerPath: /etc/kubernetes/oidc/auth-config.yaml
+        readOnly: true
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      max_concurrent_downloads = 3

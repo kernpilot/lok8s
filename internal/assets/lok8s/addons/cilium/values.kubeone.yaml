@@ -1,0 +1,140 @@
+# Cilium values for KubeOne (bare metal / cloud VM) clusters.
+#
+# Tuned for the Hetzner private-network topology (validated on a live
+# KubeOne management cluster).
+#
+# IPAM via Kubernetes (kubeadm allocates per-node PodCIDRs).
+ipam:
+  mode: kubernetes
+
+# Tunnel (vxlan): KubeOne nodes span subnets/locations (CPs on an nbg1
+# cloud subnet at 1450 MTU, bare-metal worker on an fsn1 vswitch subnet
+# at 1400 MTU) — native routing needs one L2 segment and silently breaks
+# pod-to-pod across subnets.
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+# MTU — measured semantics at cilium 1.19.2 (live ladder-test, 2026-07-15;
+# the naive reading cost a prod blackhole window). The MTU knob is unchanged
+# in the 1.20.1 values schema and no 1.20 upgrade note touches MTU handling;
+# the arithmetic below has NOT been re-measured on 1.20 — re-run the ladder
+# test if cross-node UDP anomalies appear after a bump. Measured semantics:
+#   * pod veth MTU     = THIS VALUE, RAW (no overhead subtraction!)
+#   * cilium_wg0       = value − 80   (WireGuard overhead)
+#   * node route MTU   = value − 130  (vxlan 50 + WireGuard 80)
+#   * effective inner ceiling = value − 130 (measured: inner traffic
+#     passes at exactly value−130 and blackholes one byte above; whether
+#     wg0 = value−80 binding the vxlan'd packet or the value−130 node
+#     routes pin it is indistinguishable from outside — the arithmetic
+#     is the same either way).
+# So pods BELIEVE the raw value but can only push value−130 cross-node:
+# TCP survives via PMTUD/MSS; UDP/ICMP above the ceiling silently drop.
+# Pick the value so that:
+#   1. ceiling (value−130) ≥ 1232 (EDNS default — DNS must never truncate
+#      into the blackhole), and
+#   2. the max wire frame (= ceiling + 130 = value) ≤ the SMALLEST
+#      underlay link on any node path. The fsn1 vSwitch is 1400 (also in
+#      docs/guide/cloud-init.md + bare-metal.md netplan — change together);
+#      cloud subnets are 1450.
+# 1380 → ceiling 1250, wire ≤ 1380, margin 20 to the vSwitch. ⚠ On any
+# change: running pods keep their old veth until restarted; a value
+# LOWERING shrinks the ceiling under running pods' veth and their large
+# packets blackhole — roll workloads promptly. A RAISE never introduces
+# new blackholing for existing pods (the ceiling only moves up); at
+# Δ >= 130 the raise additionally ELIMINATES the old blackhole class for
+# already-running pods without restarting them (their old veth = old
+# value lands at or under the new ceiling; equal is safe — traffic
+# passes AT value−130).
+MTU: 1380
+
+# kube-proxy stays (KubeOne deploys it); cilium does NOT replace it.
+kubeProxyReplacement: false
+
+# CRITICAL: point the cilium agent at the API server's LOAD BALANCER
+# endpoint, not the in-cluster ClusterIP (10.96.0.1). The ClusterIP path
+# goes through kube-proxy DNAT onto the private network; for the
+# bare-metal worker that crosses the 1400-MTU vSwitch and large API
+# responses are dropped, so the agent's init container hangs forever
+# ("Establishing connection to apiserver" on 10.96.0.1) and the node
+# never gets a working CNI. The LB is a public IP reached over the node's
+# main NIC (1500 MTU), no vswitch, no kube-proxy dependency.
+# Must be an IP/host present in the apiserver cert SANs.
+# Templated from the kubeconfig's API endpoint, exported by libs/bootstrap
+# as LOK8S_USER_API_HOST/PORT (the KubeOne driver writes the LB endpoint
+# into the kubeconfig server URL, which is always in the apiserver cert
+# SANs). envsubst fills these from the whitelist at render time.
+k8sServiceHost: "${LOK8S_USER_API_HOST}"
+k8sServicePort: "${LOK8S_USER_API_PORT}"
+
+endpointRoutes:
+  enabled: true
+
+# ── Encryption (WireGuard) — lives in the PROVIDER layer ───────────────
+# encryption.{enabled,type,nodeEncryption} moved to values.hetzner.yaml
+# (merged ON TOP of this file for any Hetzner cluster): the rationale —
+# node traffic crossing shared Hetzner infrastructure — is a property of
+# the PROVIDER, not this driver, and the provider layer also covers
+# CAPI/CAPH clusters. The MTU above still assumes the WireGuard overhead
+# (the value−130 ceiling): a KubeOne cluster on a provider WITHOUT an
+# encryption layer just gains 80 bytes of unused headroom — safe, never
+# a blackhole.
+# ── Bandwidth manager + BBR ────────────────────────────────────────────
+# eBPF-based egress shaping (per-pod limits via the
+# kubernetes.io/egress-bandwidth annotation) + BBR congestion control
+# for pod traffic (kernel >= 5.18 — see the WireGuard note; same fleet).
+# CAVEAT: BBR pacing across the encap+WireGuard async-crypto path depends
+# on skb-timestamp survival (fine on this fleet's 6.x kernels, but verify
+# throughput after enabling — BBR+WireGuard has known rough edges).
+# NOTE: nothing gates this FILE (chart addons skip the render test and the
+# chart schema allows unknown keys) — typos ship silently; review hard.
+bandwidthManager:
+  enabled: true
+  bbr: true
+
+# ── Operator HA ────────────────────────────────────────────────────────
+# Two operators on distinct nodes: IPAM/identity GC must survive a node
+# loss on a real multi-node cluster (kind keeps the base single replica).
+# The chart's DEFAULT podAntiAffinity already requires distinct hosts —
+# not restated here. On a single-node cluster the second replica stays
+# Pending (degraded, not deadlocked).
+operator:
+  replicas: 2
+  rollOutPods: true
+
+# Agent memory bounds (no CPU limit — throttling the datapath agent under
+# load hurts more than it protects).
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 3Gi
+
+# Production log volume; hubble carries the observability. (`logOptions`
+# is the chart's real knob — a bare `logLevel:` key is silently ignored by
+# the schema; re-verified against the 1.20.1 chart: the configmap template
+# still reads `.Values.logOptions` into `log-opt` unchanged.)
+logOptions:
+  level: warning
+
+# Hubble on every agent (listenAddress :4244) so `hubble observe` works
+# per-node; relay aggregates cluster-wide for policy development.
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+
+# ── Host firewall ──────────────────────────────────────────────────────
+# Enabling the FEATURE is safe on its own: the host endpoint only goes to
+# default-deny once a CiliumClusterwideNetworkPolicy selects it. We ship
+# it ON but in AUDIT mode so host policies LOG (never drop) what they
+# would block — develop the allow set with `hubble observe --verdict
+# AUDIT`, confirm nothing critical (etcd 2379/2380, apiserver 6443,
+# kubelet 10250, vxlan 8472) is audited, THEN flip policyAuditMode off to
+# enforce. Flipping straight to enforce without a complete allow set
+# deadlocked the cluster twice on 2026-06-12 (default-deny cut etcd peer
+# traffic → quorum loss → apiserver down → unrecoverable without a node
+# reboot + direct-etcd ccnp delete). NEVER enforce blind.
+hostFirewall:
+  enabled: true
+policyAuditMode: true

@@ -1,0 +1,27 @@
+# redis-operator — ot-container-kit Redis operator (manages Redis /
+# RedisReplication / RedisSentinel via the redis.redis.opstreelabs.in CRDs). A
+# generic, reusable atom: bootstrap `redis-operator` by name to get the operator
+# + CRDs. The actual Redis CRs live in the consuming cluster (NOT here) — so this
+# addon is pure operator, no instance config.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: redis-operator
+      lok8s.dev/type: system
+      # Tilt UI group (read by the lok8s Tiltfile); falls back to type if absent.
+      lok8s.dev/category: infrastructure
+
+namespace: redis-operator
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'feat/**']
   schedule:
     - cron: '0 6 * * 1'
 
@@ -13,14 +13,113 @@ permissions:
   security-events: write
 
 jobs:
+  govulncheck:
+    name: govulncheck (Go stdlib + modules)
+    runs-on: ubuntu-latest
+    # Runs on every PR and weekly (the schedule above): the vulnerability
+    # database moves without a commit, so a green PR run can turn red a week
+    # later — that is the finding this job exists for. Every module is
+    # scanned with the ROOT go.mod toolchain because that is what the release
+    # builds all three with (release.yml); a stdlib fix reaches the released
+    # `lo` only when the root `go` directive moves.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install govulncheck (pinned)
+        # Pinned, not @latest: the scanner is part of the supply chain too.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+
+      - name: Scan the root module (core + inprocess) and the two side modules
+        # hack/govulncheck.sh runs all four scans before the verdict and
+        # fails on any reachable finding that is not in
+        # .github/govulncheck-ignore.json (entries carry a reason and a
+        # review_by date; an expired entry fails the job too). Findings with
+        # a fixed version are never allowlisted — bump the module.
+        run: bash hack/govulncheck.sh
+
+  gosec:
+    name: gosec (Go SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # Rules excluded for the whole tree, each with the reason. Everything
+      # else is on; the handful of remaining sites carry a `#nosec Gxxx --
+      # reason` next to the code, so a reviewer sees the argument in place.
+      #
+      #   G104  unhandled errors — golangci-lint's errcheck is the gate; the
+      #         `_ =` discards that remain are deliberate (bash-faithful
+      #         `|| true` paths and best-effort cleanups).
+      #   G122  filepath.Walk TOCTOU — every walk covers the user's own
+      #         project tree or a bundle already filtered at the boundary
+      #         (handover: `..` and symlink entries dropped before extraction).
+      #   G204  subprocess with a variable — lo drives external tools; every
+      #         call is argv through the execx.Runner seam, never a shell.
+      #   G301  directory modes — project directories are 0755 by design;
+      #         the files inside carry the sensitive modes, and those rules
+      #         (G302, G306) stay ON — see GOSEC_EXCLUDE_RULES.
+      #   G304  G703  file inclusion / path taint — paths come from the
+      #         user's spec and argv by design; the untrusted inputs
+      #         (handover bundle members, node names) are validated first.
+      GOSEC_EXCLUDE: G104,G122,G204,G301,G304,G703
+      # File-mode rules (G302 chmod, G306 WriteFile) are excluded ONLY for
+      # the packages whose output is world-readable on purpose: rendered
+      # manifests and kind configs (driver/lo), the scaffold, the ejected
+      # asset tree, addons, CRDs, env/tilt/operator state files, the plugin
+      # home, the cli's project-local files. Everywhere credentials live
+      # (kubehz, secrets, driver/{capi,kkp,kubeone}, toolchain, …) the rules
+      # apply and each 0644/0755 site carries a `#nosec G30x -- reason`, so
+      # a new `WriteFile(kubeconfig, …, 0o644)` is a red build.
+      GOSEC_EXCLUDE_RULES: >-
+        internal/driver/lo/.*:G302,G306;
+        internal/scaffold/.*:G302,G306;
+        internal/assets/.*:G302,G306;
+        internal/addons/.*:G302,G306;
+        internal/crds/.*:G302,G306;
+        internal/env/.*:G302,G306;
+        internal/tilt/.*:G302,G306;
+        internal/operator/.*:G302,G306;
+        internal/render/.*:G302,G306;
+        internal/cli/.*:G302,G306
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install gosec (pinned)
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+
+      - name: Scan the root module (core + inprocess) and the two side modules
+        run: |
+          set -euo pipefail
+          echo "::group::gosec . (core)"
+          gosec -exclude="${GOSEC_EXCLUDE}" -exclude-rules="${GOSEC_EXCLUDE_RULES}" ./...
+          echo "::endgroup::"
+          echo "::group::gosec . (-tags inprocess)"
+          gosec -tags inprocess -exclude="${GOSEC_EXCLUDE}" -exclude-rules="${GOSEC_EXCLUDE_RULES}" ./...
+          echo "::endgroup::"
+          for dir in kustomize ai/lochat; do
+            echo "::group::gosec ${dir}"
+            (cd "${dir}" && gosec -exclude="${GOSEC_EXCLUDE}" ./...)
+            echo "::endgroup::"
+          done
+
   trivy-dockerfile:
     name: Trivy Vulnerability Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run Trivy on Dockerfile
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: operator/Dockerfile
@@ -28,10 +127,10 @@ jobs:
           output: trivy-results.sarif
 
       - name: Upload Trivy results to Security tab
-        # Code scanning needs GHAS, unavailable on this private repo — tolerate
-        # upload failure until the repo goes public (GOLIVE-TODO 6.1).
+        # Code scanning uploads need the Security tab enabled for the repo;
+        # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
         with:
           sarif_file: trivy-results.sarif
@@ -41,24 +140,24 @@ jobs:
     name: Trivy Image Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Build operator image for scanning
         run: |
           docker build -t lok8s-operator:scan -f operator/Dockerfile .
 
       - name: Run Trivy on built image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lok8s-operator:scan
           format: sarif
           output: trivy-image-results.sarif
 
       - name: Upload Trivy image results to Security tab
-        # Code scanning needs GHAS, unavailable on this private repo — tolerate
-        # upload failure until the repo goes public (GOLIVE-TODO 6.1).
+        # Code scanning uploads need the Security tab enabled for the repo;
+        # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
         with:
           sarif_file: trivy-image-results.sarif
@@ -68,7 +167,7 @@ jobs:
     name: ShellCheck (SARIF)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
@@ -123,10 +222,10 @@ jobs:
               }' > shellcheck-results.sarif || true
 
       - name: Upload ShellCheck results to Security tab
-        # Code scanning needs GHAS, unavailable on this private repo — tolerate
-        # upload failure until the repo goes public (GOLIVE-TODO 6.1).
+        # Code scanning uploads need the Security tab enabled for the repo;
+        # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         if: always()
         with:
           sarif_file: shellcheck-results.sarif

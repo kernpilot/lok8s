@@ -1,0 +1,60 @@
+{
+  "shared": true,
+  "tls": true,
+  "port": 443,
+  "network": {
+    "name": "lok8s-registries",
+    "cidr": "10.125.200.0/24"
+  },
+  "project_network": "lok8s",
+  "registries": [
+    {
+      "name": "build",
+      "ip": "10.125.125.101",
+      "url": "",
+      "domain": "",
+      "host": "lok8s.local",
+      "type": "framework"
+    },
+    {
+      "name": "cache",
+      "ip": "10.125.125.102",
+      "url": "",
+      "domain": "",
+      "host": "lok8s.cache",
+      "type": "framework"
+    },
+    {
+      "name": "io-docker",
+      "ip": "10.125.200.2",
+      "url": "https://registry-1.docker.io",
+      "domain": "docker.io",
+      "host": "",
+      "type": "mirror"
+    },
+    {
+      "name": "io-quay",
+      "ip": "10.125.200.3",
+      "url": "https://quay.io",
+      "domain": "quay.io",
+      "host": "",
+      "type": "mirror"
+    },
+    {
+      "name": "io-k8s",
+      "ip": "10.125.200.4",
+      "url": "https://registry.k8s.io",
+      "domain": "registry.k8s.io",
+      "host": "",
+      "type": "mirror"
+    },
+    {
+      "name": "io-ghcr",
+      "ip": "10.125.200.5",
+      "url": "https://ghcr.io",
+      "domain": "ghcr.io",
+      "host": "",
+      "type": "mirror"
+    }
+  ]
+}

@@ -278,6 +278,9 @@ acyclic (a cycle is an error because it would deadlock).
 
 The concurrency cap defaults to 8 and is tunable with
 `LOK8S_BOOTSTRAP_PARALLEL` (set it to `1` for clean, one-at-a-time output).
+On `lo-full` the entries apply one at a time regardless (the in-process
+render puts each entry's `env:` overlay in the process environment while it
+renders; `lo -v` says so); `LO_RENDER=exec` restores the parallel run.
 
 ### Failure handling
 

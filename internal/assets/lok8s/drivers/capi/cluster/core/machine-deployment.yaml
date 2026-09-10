@@ -1,0 +1,34 @@
+# MachineDeployment (cluster.x-k8s.io/v1beta2), one per worker pool.
+# Rendered by capi::generate() in the per-pool loop.
+# Variables set per pool: ${POOL_NAME}, ${POOL_REPLICAS}, ${POOL_TYPE}.
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: ${CLUSTER_NAME}-${POOL_NAME}
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+    nodepool: ${CLUSTER_NAME}-${POOL_NAME}
+spec:
+  clusterName: ${CLUSTER_NAME}
+  replicas: ${POOL_REPLICAS}
+  selector:
+    matchLabels: null
+  template:
+    metadata:
+      labels:
+        nodepool: ${CLUSTER_NAME}-${POOL_NAME}
+    spec:
+      clusterName: ${CLUSTER_NAME}
+      failureDomain: ${HCLOUD_REGION}
+      version: "${K8S_VERSION}"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: ${CLUSTER_NAME}-${POOL_NAME}
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: HCloudMachineTemplate
+        name: ${CLUSTER_NAME}-${POOL_NAME}

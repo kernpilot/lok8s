@@ -1,8 +1,10 @@
 # lok8s Operator
 
 A Kubernetes operator that manages cluster lifecycle declaratively via CRDs.
-Built on [shell-operator](https://github.com/flant/shell-operator) with bash
-hooks that share the same library code as the `lo` CLI.
+Built on [shell-operator](https://github.com/flant/shell-operator); the
+hooks are the `lo` binary itself (`lo operator <hook>`, package
+`internal/operator`) behind two-line shims, sharing the same Go packages
+as the `lo` CLI (drivers, bootstrap, gitops, deploy).
 
 > **Status: alpha.** The `Lo` lifecycle is complete: creation, idempotent
 > convergence with drift detection (3-minute schedule), kubeconfig
@@ -25,9 +27,9 @@ CLI (lo provision)              Operator (shell-operator)
   one-shot, synchronous           reconciliation loop
   runs from your machine          runs in lok8s-system namespace
        \                         /
-        ── shared bash libs ──
-        .lok8s/libs/*
-        .lok8s/drivers/*/main
+        ── the same lo binary ──
+        internal/driver/*  internal/bootstrap
+        internal/operator (the hook bodies)
 ```
 
 The typical flow:
@@ -170,17 +172,37 @@ spec:
 
 All hooks live in `operator/hooks/` and follow the
 [shell-operator hook contract](https://github.com/flant/shell-operator/blob/main/docs/src/HOOKS.md)
-(`--config` returns the binding config, otherwise the hook runs).
+(`--config` returns the binding config, otherwise the hook runs against
+`$BINDING_CONTEXT_PATH`).
 
-| Hook | Watches | Events | Purpose |
-|------|---------|--------|---------|
-| `lo-reconcile.sh` | `Lo` CRDs | Added, Modified | Provisions local clusters via kind driver |
-| `capi-reconcile.sh` | `Capi` CRDs | Added, Modified | Generates and applies CAPI manifests |
-| `capi-status-sync.sh` | CAPI `Cluster` objects | Modified | Syncs CAPI status -> lok8s Capi CR, triggers post-provision |
+| Hook | Implementation | Watches | Events | Purpose |
+|------|----------------|---------|--------|---------|
+| `lo-reconcile.sh` | `lo operator lo-reconcile` (`internal/operator/lo.go`) | `Lo` CRDs | Added, Modified, schedule `*/3` | Provisions local clusters via the lo (kind) driver, publishes the kubeconfig, finalizer-guarded teardown |
+| `capi-reconcile.sh` | `lo operator capi-reconcile` (`internal/operator/capi.go`) | `Capi` CRDs | Added, Modified, schedule `*/3` | Generates and applies CAPI manifests, finalizer-guarded teardown |
+| `capi-status-sync.sh` | `lo operator capi-status-sync` (`internal/operator/capistatus.go`) | CAPI `Cluster` objects | Modified | Syncs CAPI status -> lok8s Capi CR, triggers post-provision |
 
-Each hook sources the shared libraries from `/hooks/lib/` with an
-`import() { :; }` shim (since `import` is an argsh builtin that doesn't
-exist in plain bash).
+Each file under `operator/hooks/` is a shim — `exec lo operator <hook> "$@"`
+— because shell-operator discovers hooks by executable path. The hook
+bodies are Go: `lo operator <hook> --config` prints the binding
+configuration (byte-identical to the bash heredocs it replaced, pinned by
+`internal/operator/testdata/*.config.yaml`), otherwise the hook reads the
+binding context and reconciles through the ported packages
+(`internal/driver/lo`, `internal/bootstrap`, `internal/gitops`,
+`internal/deploy`) with the same kubectl calls, status patches and log
+lines the bash produced.
+
+The bash hooks they replaced are frozen at
+`.lok8s/legacy/operator/hooks/` (with their `runtime.sh`) — the reference
+`hack/parity-operator.sh` measures the Go port against, and what the bats
+suite still sources.
+
+Runtime layout (`internal/operator.Env`, the port of `runtime.sh`): the
+state volume `LOK8S_STATE_DIR` (default `/var/lib/lok8s`) is `PATH_BASE`,
+laid out like a lok8s project (`clusters/<domain>/cluster.lok8s.yaml`,
+`.kubeconfig/<cluster>.yaml`); the hook tree `PATH_LOK8S` (default
+`/hooks`) carries the framework pieces (`addons/`, `drivers/`,
+`capi-templates/`); `KUSTOMIZE_PLUGIN_HOME` defaults to
+`/usr/local/kustomize-plugins`.
 
 ### capi-reconcile.sh flow
 
@@ -266,18 +288,24 @@ Built from the project root:
 docker build -t ghcr.io/kernpilot/lok8s-operator:0.1.0 -f operator/Dockerfile .
 ```
 
-Base image: `ghcr.io/flant/shell-operator:v1.14.0`
+Base image: `ghcr.io/flant/shell-operator:v1.19.5`; a `golang:1.25-alpine`
+build stage compiles the `lo` binary from the same tree.
 
-Bundled tools: kubectl, kustomize, yq, jq, clusterctl, flux, git, openssh-client, envsubst
+Bundled tools: lo, kubectl, kustomize, yq, jq, clusterctl, flux, kind, docker-cli, git, openssh-client, envsubst, khelm
 
 What gets copied into the container:
 
 | Source | Destination | Purpose |
 |--------|-------------|---------|
-| `operator/hooks/` | `/hooks/` | shell-operator hook scripts |
-| `.lok8s/drivers/` | `/hooks/provider/` | Driver contracts (lo, capi, kubeone) |
+| build stage `/out/lo` | `/usr/local/bin/lo` | The hook bodies (`lo operator <hook>`) |
+| `operator/hooks/` | `/hooks/` | shell-operator hook shims |
+| `.lok8s/legacy/operator/hooks/` | `/hooks/legacy/` | Frozen bash hooks (reference / manual fallback; not executable) |
+| `.lok8s/drivers/` | `/hooks/drivers/` | Bash driver contracts (used by the legacy hooks) |
+| `.lok8s/providers/` | `/hooks/providers/` | Physical infra providers (hcloud, ...) |
 | `.lok8s/utils/` | `/hooks/utils/` | IP arithmetic, shared utilities |
-| `.lok8s/libs/` | `/hooks/lib/` | Shared libraries (provision, deploy, gitops) |
+| `.lok8s/libs/` | `/hooks/lib/` | Shared bash libraries (used by the legacy hooks) |
+| `.lok8s/addons/` | `/hooks/addons/` | Bootstrap addons (the Go bootstrap engine resolves `PATH_LOK8S/addons`) |
+| `.lok8s/drivers/capi/cluster/` | `/hooks/capi-templates/` | CAPI templates rendered by `capi-reconcile` |
 | `operator/crds/` | `/crds/` | CRD definitions (applied on startup) |
 
 ## Deployment details
@@ -313,8 +341,17 @@ The operator ClusterRole grants access to:
 ## Testing
 
 ```bash
-# Run operator hook unit tests
-bats tests/operator/hooks_test.bats
+# The hook bodies: hermetic Go tests (fake kubectl/clusterctl runner, fake
+# lo driver) replicating every bats case + the --config goldens
+go test ./internal/operator/
+
+# The frozen bash reference + the shims (passthrough, --config parity
+# through the built binary)
+make build && bats tests/operator/hooks_test.bats
+
+# Differential: Go hooks vs the frozen bash hooks against stubbed
+# kubectl/clusterctl (call logs, patch bodies, exit codes)
+make build && bash hack/parity-operator.sh
 ```
 
 ## File structure
@@ -334,9 +371,17 @@ operator/
 │   ├── rbac.yaml               # ClusterRole + ClusterRoleBinding
 │   └── deployment.yaml         # Operator Deployment
 └── hooks/
-    ├── lo-reconcile.sh         # Lo CRD reconciler
-    ├── capi-reconcile.sh       # Capi CRD reconciler
-    └── capi-status-sync.sh     # CAPI Cluster -> lok8s status bridge
+    ├── lo-reconcile.sh         # shim → lo operator lo-reconcile
+    ├── capi-reconcile.sh       # shim → lo operator capi-reconcile
+    ├── capi-status-sync.sh     # shim → lo operator capi-status-sync
+    └── runtime.sh              # retired pointer (the bash runtime moved with the legacy hooks)
+
+internal/operator/              # the hook bodies (Go)
+├── operator.go                 # runtime layout (Env), binding context, Hook interface
+├── lo.go / capi.go / capistatus.go
+└── testdata/*.config.yaml      # --config goldens, generated once from the bash hooks
+
+.lok8s/legacy/operator/hooks/   # the frozen bash hooks + runtime.sh (reference)
 ```
 
 ## Current limitations
