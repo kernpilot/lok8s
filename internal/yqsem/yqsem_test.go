@@ -42,6 +42,7 @@ func parse(t *testing.T) *yaml.Node {
 // call site migrates to is the behaviour it shipped with, so this table is
 // the contract every port reads through.
 func TestAlternativeFlavoursPinned(t *testing.T) {
+	t.Parallel()
 	root := parse(t)
 	rows := []struct {
 		key                        string
@@ -78,6 +79,7 @@ func TestAlternativeFlavoursPinned(t *testing.T) {
 }
 
 func TestRawScalarToStringAndPredicates(t *testing.T) {
+	t.Parallel()
 	root := parse(t)
 	rows := []struct {
 		key                      string
@@ -117,6 +119,7 @@ func TestRawScalarToStringAndPredicates(t *testing.T) {
 }
 
 func TestWalkers(t *testing.T) {
+	t.Parallel()
 	root := parse(t)
 	if got := Scalar(Lookup(root, "map", "k")); got != "v" {
 		t.Errorf("Lookup map.k = %q", got)
@@ -162,6 +165,7 @@ func TestWalkers(t *testing.T) {
 // Doc keeps the bash `$(yq … file)` split: a file that does not load reads
 // "" everywhere (the yq call failed), a missing path reads "null"/default.
 func TestDocLoadStates(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yaml")
 	if err := os.WriteFile(good, []byte("spec:\n  a: x\n  off: false\n"), 0o644); err != nil {

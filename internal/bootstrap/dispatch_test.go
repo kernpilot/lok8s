@@ -75,7 +75,7 @@ func TestDispatchRunsDriverExportBeforeApply(t *testing.T) {
 		seenGate = os.Getenv("LOK8S_BOOTSTRAP_ONLY")
 		return 0
 	}
-	if err := d.Dispatch(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	if seenDomain != "test.lok8s.dev" {
@@ -95,7 +95,7 @@ func TestDispatchToleratesDriverWithoutExport(t *testing.T) {
 		applied = true
 		return 0
 	}
-	if err := d.Dispatch(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	if !applied {
@@ -111,7 +111,7 @@ func TestDispatchFailsOnUnknownDriverKind(t *testing.T) {
 		t.Error("apply must not run")
 		return 0
 	}
-	if err := d.Dispatch(context.Background(), "test.lok8s.dev"); err == nil {
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "Unknown cluster kind: bogus") {
@@ -121,7 +121,7 @@ func TestDispatchFailsOnUnknownDriverKind(t *testing.T) {
 
 func TestDispatchRejectsPathTraversalDomain(t *testing.T) {
 	d, _, errBuf := dispatcherFixture(t, &fakeDriver{}, "lo")
-	if err := d.Dispatch(context.Background(), "../../../etc"); err == nil {
+	if err := d.Dispatch(t.Context(), "../../../etc"); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "invalid domain name") {
@@ -139,7 +139,7 @@ func TestDispatchRejectsMaliciousClusterKind(t *testing.T) {
 		t.Error("apply must not run")
 		return 0
 	}
-	if err := d.Dispatch(context.Background(), "test.lok8s.dev"); err == nil {
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "invalid cluster kind") {
@@ -149,7 +149,7 @@ func TestDispatchRejectsMaliciousClusterKind(t *testing.T) {
 
 func TestDispatchMissingSpecFails(t *testing.T) {
 	d, _, errBuf := dispatcherFixture(t, &fakeDriver{}, "lo")
-	if err := d.Dispatch(context.Background(), "no-such.domain"); err == nil {
+	if err := d.Dispatch(t.Context(), "no-such.domain"); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "cluster spec not found") {
@@ -167,7 +167,7 @@ func TestDispatchInventoryPublishRunsAfterApply(t *testing.T) {
 	d.InventoryPublish = func(ctx context.Context, domain, clusterYAML, kubeconfig string) {
 		order.add("inventory " + domain)
 	}
-	if err := d.Dispatch(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	if order.pos("apply") == 0 || order.pos("inventory test.lok8s.dev") < order.pos("apply") {
@@ -190,13 +190,13 @@ func TestApplyHookSatisfiesProvisionHooksSeam(t *testing.T) {
 	// the bash error path).
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
 	testutil.WriteFile(t, spec, "kind: Lo\nmetadata:\n  name: x\nspec:\n  bootstrap: []\n")
-	if err := hooks.BootstrapApply(context.Background(), "test.lok8s.dev", spec, "/nope/kubeconfig.yaml"); err == nil {
+	if err := hooks.BootstrapApply(t.Context(), "test.lok8s.dev", spec, "/nope/kubeconfig.yaml"); err == nil {
 		t.Fatal("missing kubeconfig must error through the hook")
 	}
 	// And the no-op path succeeds (empty bootstrap, kubeconfig present).
 	kc := filepath.Join(p.Base, ".kubeconfig", "x.yaml")
 	testutil.WriteFile(t, kc, "")
-	if err := hooks.BootstrapApply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := hooks.BootstrapApply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("hook no-op failed: %v", err)
 	}
 }

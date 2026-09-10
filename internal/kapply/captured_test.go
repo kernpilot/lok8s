@@ -18,6 +18,7 @@ func render(t *testing.T, label string, rc int, in string) string {
 }
 
 func TestRenderCapturedCollapsesRoutineLines(t *testing.T) {
+	t.Parallel()
 	out := render(t, "cert-manager", 0, `namespace/cert-manager serverside-applied
 deployment.apps/cert-manager serverside-applied
 customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io condition met
@@ -32,6 +33,7 @@ customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io condi
 }
 
 func TestRenderCapturedFailureSurfacesDedupedErrors(t *testing.T) {
+	t.Parallel()
 	out := render(t, "networking", 1, `secret/kubehz-tls serverside-applied
 no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
 no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
@@ -45,6 +47,7 @@ no matches for kind "GatewayClass" in version "gateway.networking.k8s.io/v1"
 }
 
 func TestRenderCapturedKeepsFinalLineWithoutNewline(t *testing.T) {
+	t.Parallel()
 	// a killed job's buffer can end mid-write; a plain line-read would drop it
 	out := render(t, "broken", 1, "secret/x serverside-applied\npartial error, no newline")
 	if !strings.Contains(out, "partial error, no newline") {
@@ -53,6 +56,7 @@ func TestRenderCapturedKeepsFinalLineWithoutNewline(t *testing.T) {
 }
 
 func TestRenderCapturedZeroResourcesBareHeader(t *testing.T) {
+	t.Parallel()
 	out := render(t, "cilium", 0, "[bootstrap] cilium already deployed by the KubeOne driver — skipping\n")
 	if !strings.Contains(out, "✓") || !strings.Contains(out, "cilium") {
 		t.Errorf("bad header: %q", out)
@@ -66,6 +70,7 @@ func TestRenderCapturedZeroResourcesBareHeader(t *testing.T) {
 }
 
 func TestRenderCapturedRetryPassesCountOnce(t *testing.T) {
+	t.Parallel()
 	// the CRD-race retry re-applies the whole manifest — the summary must
 	// count distinct resources, not lines-per-pass
 	out := render(t, "cnpg", 0, `namespace/cnpg-system serverside-applied
@@ -80,6 +85,7 @@ customresourcedefinition.apiextensions.k8s.io/clusters.cnpg.io condition met
 }
 
 func TestRenderCapturedOffTTYIsPlain(t *testing.T) {
+	t.Parallel()
 	out := render(t, "networking", 1, "secret/x serverside-applied\n\033[31mcolored controller error\033[0m\n")
 	if strings.Contains(out, "\033") {
 		t.Errorf("escape sequences leaked: %q", out)
@@ -93,6 +99,7 @@ func TestRenderCapturedOffTTYIsPlain(t *testing.T) {
 }
 
 func TestRenderCapturedIndentedOKVerbSurfaces(t *testing.T) {
+	t.Parallel()
 	// an empty first token was a FATAL bad-subscript in bash — here it must
 	// surface as a message, never count
 	out := render(t, "weird", 0, "secret/x serverside-applied\n    patched\n")
@@ -105,6 +112,7 @@ func TestRenderCapturedIndentedOKVerbSurfaces(t *testing.T) {
 }
 
 func TestRenderCapturedProseEndingInOKVerbSurfaces(t *testing.T) {
+	t.Parallel()
 	out := render(t, "warn", 0, `namespace/x serverside-applied
 Warning: resource configmaps/y lacks the last-applied annotation and was configured
 `)
@@ -117,6 +125,7 @@ Warning: resource configmaps/y lacks the last-applied annotation and was configu
 }
 
 func TestRenderCapturedStripsCarriageReturns(t *testing.T) {
+	t.Parallel()
 	out := render(t, "cr-test", 1, "secret/x serverside-applied\nprogress line\rovertyped error\n")
 	if strings.Contains(out, "\r") {
 		t.Errorf("carriage return leaked: %q", out)

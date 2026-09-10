@@ -44,6 +44,7 @@ func writeSpec(t *testing.T, p *config.Paths, d, body string) {
 }
 
 func TestCategoryReadsLabel(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "ns.yaml"), []byte("metadata:\n  labels:\n    lok8s.dev/category: storage\n"), 0o644)
 	if got := Category(dir); got != "storage" {
@@ -61,6 +62,7 @@ func TestCategoryReadsLabel(t *testing.T) {
 
 // Every .lok8s/addons/ dir has a config-help entry (parity, fails on drift).
 func TestEveryAddonHasConfigHint(t *testing.T) {
+	t.Parallel()
 	fw := frameworkLok8s(t)
 	var missing []string
 	for _, dir := range addonDirs(filepath.Join(fw, "addons")) {
@@ -83,6 +85,7 @@ func TestEveryAddonHasConfigHint(t *testing.T) {
 
 // The rc 2 contract — a malformed kind is never defaulted to "lo".
 func TestDriverRefusesMalformedKind(t *testing.T) {
+	t.Parallel()
 	p := sandbox(t, "")
 	writeSpec(t, p, "bad", "kind: ../../evil\nmetadata: { name: bad }\n")
 	var stderr bytes.Buffer

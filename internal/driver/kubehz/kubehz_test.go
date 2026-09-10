@@ -70,14 +70,16 @@ func (f *fixture) handle(route string, status int, body string) {
 }
 
 func TestDriverIsRegistered(t *testing.T) {
+	t.Parallel()
 	if _, ok := driver.Get(Name); !ok {
 		t.Fatal("kubehz driver not registered")
 	}
 }
 
 func TestEnsureSharedConfigGuards(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
-	if err := f.d.Destroy(context.Background(), "nowhere.dev"); err == nil {
+	if err := f.d.Destroy(t.Context(), "nowhere.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(f.stderr.String(), "No cluster.lok8s.yaml for domain: nowhere.dev") {
@@ -86,7 +88,7 @@ func TestEnsureSharedConfigGuards(t *testing.T) {
 
 	f = newFixture(t)
 	f.spec("broken.dev", "{{ not yaml")
-	if err := f.d.Destroy(context.Background(), "broken.dev"); err == nil {
+	if err := f.d.Destroy(t.Context(), "broken.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	// The guard's whole point: the READ error, not the empty-var misdiagnosis.
@@ -96,7 +98,7 @@ func TestEnsureSharedConfigGuards(t *testing.T) {
 
 	f = newFixture(t)
 	f.spec("self.dev", "kind: Kubehz\nspec:\n  kubehz:\n    hosting: self\n")
-	if err := f.d.Destroy(context.Background(), "self.dev"); err == nil {
+	if err := f.d.Destroy(t.Context(), "self.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(f.stderr.String(), "kind: Kubehz requires spec.kubehz.hosting: shared (got: self)") {
@@ -105,11 +107,12 @@ func TestEnsureSharedConfigGuards(t *testing.T) {
 }
 
 func TestProvisionReturnsFullLifecycle(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	f.sharedSpec("acme.example.org")
 	f.handle("GET /api/spaces", 200, `{"data":[{"id":"sp-1","slug":"acme","status":"Active"}]}`)
 	f.handle("GET /api/spaces/sp-1", 200, `{"data":{"status":"Active"}}`)
-	err := f.d.Provision(context.Background(), "acme.example.org")
+	err := f.d.Provision(t.Context(), "acme.example.org")
 	if !errors.Is(err, driver.ErrFullLifecycle) {
 		t.Fatalf("err = %v (stderr %s)", err, f.stderr.String())
 	}
@@ -122,18 +125,19 @@ func TestProvisionReturnsFullLifecycle(t *testing.T) {
 }
 
 func TestDestroyAndStatus(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	f.sharedSpec("acme.example.org")
 	f.handle("GET /api/spaces", 200, `{"data":[{"id":"sp-9","slug":"acme","status":"Active","planId":"shared-free"}]}`)
 	f.handle("DELETE /api/spaces/sp-9", 200, `{}`)
 	f.handle("GET /api/spaces/sp-9/nodes", 200, `{"data":{"nodes":[{"name":"worker-1","status":"Ready","lane":"hcloud"}],"usage":{"nodes":1,"maxNodes":2}}}`)
-	if err := f.d.Destroy(context.Background(), "acme.example.org"); err != nil {
+	if err := f.d.Destroy(t.Context(), "acme.example.org"); err != nil {
 		t.Fatalf("%v: %s", err, f.stderr.String())
 	}
 	if !strings.Contains(f.out.String(), "Space 'acme' removed (id: sp-9)") {
 		t.Fatalf("stdout: %s", f.out.String())
 	}
-	status, err := f.d.Status(context.Background(), "acme.example.org")
+	status, err := f.d.Status(t.Context(), "acme.example.org")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +148,9 @@ func TestDestroyAndStatus(t *testing.T) {
 }
 
 func TestKubeconfigRefuses(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
-	if _, err := f.d.Kubeconfig(context.Background(), "acme.example.org"); err == nil {
+	if _, err := f.d.Kubeconfig(t.Context(), "acme.example.org"); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(f.stderr.String(), "A space has no downloadable kubeconfig") ||

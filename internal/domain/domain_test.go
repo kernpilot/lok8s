@@ -61,6 +61,7 @@ func TestResolveInvalidActiveWarnsAndFallsBack(t *testing.T) {
 }
 
 func TestSpecDriver(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Lowercased happy path.
@@ -92,6 +93,7 @@ func TestSpecDriver(t *testing.T) {
 }
 
 func TestDriver(t *testing.T) {
+	t.Parallel()
 	clusters := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(clusters, "a.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
 	testutil.WriteFile(t, filepath.Join(clusters, "d.app", "deploy.lok8s.yaml"), "kind: Deploy\n")
@@ -108,6 +110,7 @@ func TestDriver(t *testing.T) {
 }
 
 func TestRequireDriverMismatchMessage(t *testing.T) {
+	t.Parallel()
 	clusters := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(clusters, "b.cloud", "cluster.lok8s.yaml"), "kind: KubeOne\n")
 

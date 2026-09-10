@@ -63,7 +63,12 @@ make test test-full   # go test ./...  ·  go test -tags inprocess ./...
 make vet vet-full     # go vet, both tag sets
 make lint lint-full   # golangci-lint run (needs golangci-lint on PATH), both tag sets
 go test ./internal/secrets/ -run TestEncrypt -v    # one package / one test
+go test ./internal/inventory/ -update              # rewrite that package's goldens
 ```
+
+Run `go test ./internal/<pkg>/ -update` to rewrite a package's golden files
+under `testdata/` from the current output, then review the diff before you
+commit it.
 
 Packages with tests: `internal/{addons,audit,bootstrap,build,cli,config,
 crds,deploy,domain,driver,driver/capi,driver/kkp,driver/kubehz,
@@ -81,7 +86,7 @@ the fake-runner seam for `kustomize` pins `LO_RENDER=exec` first
 bootstrap and registry-TLS fakes do) and therefore passes on both builds; a
 test that asserts the in-process render guards itself with
 `render.InProcessAvailable()` (skips on core) or lives in a
-`//go:build inprocess` file (`internal/render/render_inprocess_test.go`).
+`//go:build inprocess` file (`internal/render/inprocess_test.go`).
 `internal/render`'s own tests serve the exec generators from the test
 binary: its `TestMain` calls `render.DispatchPlugin` exactly like `cmd/lo`
 (a no-op on core), which is what lets the Secret/khelm fixtures run the real

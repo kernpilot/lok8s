@@ -7,10 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kernpilot/lok8s/internal/bootstrapspec"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/testutil"
-	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // newLinter builds a Linter over a synthetic project root with capture
@@ -37,6 +35,7 @@ func newLinter(t *testing.T) (*Linter, string, *bytes.Buffer, *bytes.Buffer) {
 }
 
 func TestSchemaMissingFields(t *testing.T) {
+	t.Parallel()
 	l, base, _, errOut := newLinter(t)
 	dir := filepath.Join(base, "clusters", "a.dev")
 	testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "spec: {}\n")
@@ -57,6 +56,7 @@ func TestSchemaMissingFields(t *testing.T) {
 }
 
 func TestApexSubdomainViolation(t *testing.T) {
+	t.Parallel()
 	l, base, _, errOut := newLinter(t)
 	testutil.WriteFile(t, filepath.Join(base, "clusters", "apex.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
 	testutil.WriteFile(t, filepath.Join(base, "clusters", "sub.apex.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
@@ -70,55 +70,8 @@ func TestApexSubdomainViolation(t *testing.T) {
 	}
 }
 
-func TestBootstrapEntryNotFound(t *testing.T) {
-	l, base, _, errOut := newLinter(t)
-	dir := filepath.Join(base, "clusters", "a.dev")
-	spec := filepath.Join(dir, "cluster.lok8s.yaml")
-	// Neither name is an addon the binary ships (a shipped one — ccm,
-	// cilium — is always found now: the embedded copy serves it).
-	testutil.WriteFile(t, spec, "kind: Lo\nspec:\n  bootstrap:\n    - nope\n    - gone:\n        wait: true\n")
-
-	if got := l.bootstrap(dir, spec, "a.dev"); got != 2 {
-		t.Fatalf("bootstrap errors = %d, want 2\nstderr:\n%s", got, errOut.String())
-	}
-	// The scalar entry is reported in its yq-JSON form (quoted), the map
-	// entry as compact JSON — both with the verbatim resolved dir.
-	for _, want := range []string{
-		`spec.bootstrap entry not found: "nope" (resolved to ` + l.Paths.Lok8s + "/addons/nope)",
-		`spec.bootstrap entry not found: {"gone":{"wait":true}} (resolved to ` + l.Paths.Lok8s + "/addons/gone)",
-	} {
-		if !strings.Contains(errOut.String(), want) {
-			t.Errorf("stderr missing %q; got:\n%s", want, errOut.String())
-		}
-	}
-}
-
-func TestBootstrapDefaultCilium(t *testing.T) {
-	l, base, _, errOut := newLinter(t)
-	dir := filepath.Join(base, "clusters", "a.dev")
-	spec := filepath.Join(dir, "cluster.lok8s.yaml")
-	// Absent spec.bootstrap on a Lo cluster → the per-driver default entry
-	// "cilium" (BARE, not JSON-quoted — it comes from an echo, not yq).
-	testutil.WriteFile(t, spec, "kind: Lo\n")
-
-	// The default resolves to the embedded cilium (the binary ships it), so
-	// a project without a local copy lints clean — and lint, being
-	// read-only, ejects nothing.
-	if got := l.bootstrap(dir, spec, "a.dev"); got != 0 {
-		t.Fatalf("bootstrap errors = %d, want 0\nstderr:\n%s", got, errOut.String())
-	}
-	if _, err := os.Stat(filepath.Join(l.Paths.Lok8s, "addons", "cilium")); err == nil {
-		t.Error("lint ejected cilium into the project")
-	}
-
-	// Explicit empty list = authoritative opt-out: no default, no error.
-	testutil.WriteFile(t, spec, "kind: Lo\nspec:\n  bootstrap: []\n")
-	if got := l.bootstrap(dir, spec, "a.dev"); got != 0 {
-		t.Fatalf("bootstrap errors with empty list = %d, want 0", got)
-	}
-}
-
 func TestLabelsQueryMultiDocQuirk(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Single unlabelled doc → "0" → warns.
@@ -142,42 +95,5 @@ func TestLabelsQueryMultiDocQuirk(t *testing.T) {
 	testutil.WriteFile(t, labelled, "metadata:\n  labels:\n    lok8s.dev/name: x\n")
 	if got := labelsQuery(labelled); got != "1" {
 		t.Fatalf("labelsQuery(labelled) = %q, want \"1\"", got)
-	}
-}
-
-func TestServicesImageRegistryExclusive(t *testing.T) {
-	l, base, _, errOut := newLinter(t)
-	testutil.WriteFile(t, filepath.Join(base, "services.yaml"),
-		"services:\n  app:\n    image: pinned:1\n    registry:\n      endpoint: r\n")
-
-	if l.services() {
-		t.Fatal("services() = ok, want error")
-	}
-	want := "  services.yaml: services.app: 'image' and 'registry' are mutually exclusive"
-	if !strings.Contains(errOut.String(), want) {
-		t.Errorf("stderr missing %q; got:\n%s", want, errOut.String())
-	}
-}
-
-func TestCompactJSONMatchesYq(t *testing.T) {
-	// Rendering contract spots that appear in error messages.
-	docs := parseDocs([]byte(`- cilium
-- ccm:
-    wait: true
-    dependsOn: [a, b]
-- x: {n: 1.5, s: "q<&>"}
-`))
-	if len(docs) != 1 {
-		t.Fatal("fixture parse failed")
-	}
-	items := yqsem.SeqItems(docs[0])
-	for i, want := range []string{
-		`"cilium"`,
-		`{"ccm":{"wait":true,"dependsOn":["a","b"]}}`,
-		`{"x":{"n":1.5,"s":"q<&>"}}`,
-	} {
-		if got := bootstrapspec.CompactJSON(items[i]); got != want {
-			t.Errorf("CompactJSON[%d] = %s, want %s", i, got, want)
-		}
 	}
 }

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 
+	"flag"
+
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/bootstrap"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -24,6 +26,10 @@ import (
 	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
+
+// update rewrites the golden files with the current output:
+// go test ./internal/inventory/ -update
+var update = flag.Bool("update", false, "rewrite the golden files")
 
 // The compile-time pins: Publish's shape IS the no-error hook contract of
 // both dispatchers. A signature drift fails the build, not a test.
@@ -121,13 +127,8 @@ spec:
 	if err != nil {
 		t.Fatal(err)
 	}
-	golden, err := os.ReadFile(filepath.Join("testdata", "build_golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := strings.TrimSuffix(string(golden), "\n"); out != want {
-		t.Errorf("golden mismatch\n--- want ---\n%s\n--- got ---\n%s", want, out)
-	}
+	// The golden carries a trailing newline; BuildJSON does not.
+	testutil.Golden(t, filepath.Join("testdata", "build_golden.json"), out+"\n", *update)
 	if want := "\033[0;33m[warn]\033[0m inventory: skipping unparseable bootstrap entry 'bad'\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
@@ -396,7 +397,7 @@ func TestPublishWithoutKubeconfigWarns(t *testing.T) {
 	spec := softSpec(t, p, "soft")
 	f := &fakeRunner{}
 	var errBuf bytes.Buffer
-	Publish(context.Background(), p, f, &errBuf, "soft", spec, filepath.Join(p.Base, ".kubeconfig", "nonexistent.yaml"))
+	Publish(t.Context(), p, f, &errBuf, "soft", spec, filepath.Join(p.Base, ".kubeconfig", "nonexistent.yaml"))
 	if want := "\033[0;33m[warn]\033[0m inventory: kubeconfig not found (" + filepath.Join(p.Base, ".kubeconfig", "nonexistent.yaml") + ") — skipping ClusterInventory publish\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
@@ -410,7 +411,7 @@ func TestPublishSkipsWithoutSpec(t *testing.T) {
 	p := realPaths(t)
 	f := &fakeRunner{}
 	var errBuf bytes.Buffer
-	Publish(context.Background(), p, f, &errBuf, "dep", filepath.Join(p.Clusters, "dep", "cluster.lok8s.yaml"), filepath.Join(p.Base, "kc.yaml"))
+	Publish(t.Context(), p, f, &errBuf, "dep", filepath.Join(p.Clusters, "dep", "cluster.lok8s.yaml"), filepath.Join(p.Base, "kc.yaml"))
 	if strings.Contains(errBuf.String(), "error") || len(f.calls) != 0 {
 		t.Errorf("stderr=%q calls=%v", errBuf.String(), f.calls)
 	}
@@ -427,7 +428,7 @@ func TestPublishUnreachableClusterWarns(t *testing.T) {
 	}
 	f := &fakeRunner{fail: true}
 	var errBuf bytes.Buffer
-	Publish(context.Background(), p, f, &errBuf, "unreach", spec, kc)
+	Publish(t.Context(), p, f, &errBuf, "unreach", spec, kc)
 	if want := "\033[0;33m[warn]\033[0m inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
@@ -447,7 +448,7 @@ func TestPublishHappyPathArgv(t *testing.T) {
 	}
 	f := &fakeRunner{}
 	var errBuf bytes.Buffer
-	Publish(context.Background(), p, f, &errBuf, "happy", spec, kc)
+	Publish(t.Context(), p, f, &errBuf, "happy", spec, kc)
 	crd := filepath.Join(p.Lok8s, "libs", "inventory", "manifests", "clusterinventory.crd.yaml")
 	want := []string{
 		"kubectl --kubeconfig " + kc + " apply --server-side --field-manager=lok8s -f " + crd,
@@ -476,7 +477,7 @@ func TestPublishCRApplyFailureWarns(t *testing.T) {
 	}
 	f := &crFailRunner{}
 	var errBuf bytes.Buffer
-	Publish(context.Background(), p, f, &errBuf, "crfail", spec, kc)
+	Publish(t.Context(), p, f, &errBuf, "crfail", spec, kc)
 	if want := "\033[0;33m[warn]\033[0m inventory: failed to publish the ClusterInventory for crfail (provision/deploy unaffected)\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
@@ -517,7 +518,7 @@ func TestCRDManifestPrefersLok8sMirror(t *testing.T) {
 	_ = os.WriteFile(kc, nil, 0o644)
 	var errBuf bytes.Buffer
 	f := &fakeRunner{}
-	Publish(context.Background(), p2, f, &errBuf, "nocrd", spec, kc)
+	Publish(t.Context(), p2, f, &errBuf, "nocrd", spec, kc)
 	ejected := filepath.Join(p2.Lok8s, "libs", "inventory", "manifests", "clusterinventory.crd.yaml")
 	if errBuf.Len() != 0 || len(f.calls) == 0 || !strings.Contains(f.calls[0], "apply --server-side --field-manager=lok8s -f "+ejected) {
 		t.Errorf("stderr=%q calls=%v", errBuf.String(), f.calls)
@@ -535,6 +536,7 @@ func TestCRDManifestPrefersLok8sMirror(t *testing.T) {
 // addons::_category picks the LC_ALL=C-smallest match and strips the
 // prefix + whitespace; symlinks below the dir are not followed.
 func TestCategoryHelper(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "b.yaml"), []byte("labels:\n  lok8s.dev/category: zeta\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "a.yaml"), []byte("x: lok8s.dev/category:\talpha-1 trailing\n"), 0o644)

@@ -22,10 +22,17 @@ import (
 	"testing"
 	"time"
 
+	"flag"
+
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
+
+// update rewrites the golden files with the current output:
+// go test ./internal/kubehz/ -update
+var update = flag.Bool("update", false, "rewrite the golden files")
 
 type fakeRunner struct {
 	mu      sync.Mutex
@@ -270,3 +277,18 @@ func readFile(t *testing.T, path string) string {
 type exitErr int
 
 func (e exitErr) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+
+func loSpec(h *harness) string {
+	return h.writeSpec("test.kubehz.dev", "kind: Lo\nspec:\n  cluster:\n    domain: test.kubehz.dev\n")
+}
+
+// golden returns the golden file under testdata/golden. With -update it
+// first rewrites the file with got.
+func golden(t *testing.T, name, got string) string {
+	t.Helper()
+	path := filepath.Join("testdata", "golden", name)
+	if *update {
+		testutil.WriteFile(t, path, got)
+	}
+	return readFile(t, path)
+}

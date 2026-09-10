@@ -56,7 +56,7 @@ var argshMcpRenames = map[string][]string{
 func mcpToolNames(t *testing.T, x mcpExposure) map[string]*mcp.Tool {
 	t.Helper()
 	p := synthProject(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	tools, err := mcpListTools(ctx, p, x)
 	if err != nil {
@@ -95,6 +95,7 @@ func flagNames(t *testing.T, tool *mcp.Tool) map[string]bool {
 // ── classification ─────────────────────────────────────────────────────
 
 func TestMcpTierClassification(t *testing.T) {
+	t.Parallel()
 	ann := func(spec commandSpec) map[string]string { return spec.annotations() }
 	root := &cobra.Command{Use: "lo"}
 	ro := &cobra.Command{Use: "ro", Annotations: ann(commandSpec{readonly: true})}
@@ -349,6 +350,7 @@ func parseShimUsage(t *testing.T, file, anchor string) map[string]commandSpec {
 }
 
 func TestMcpShimLeavesMatchArgshUsage(t *testing.T) {
+	t.Parallel()
 	root := repoRootDir(t)
 	for name, leaves := range shimLeaves {
 		src, ok := shimLeafSources[name]
@@ -383,6 +385,7 @@ func TestMcpShimLeavesMatchArgshUsage(t *testing.T) {
 }
 
 func TestMcpShimLeavesAreNotPorted(t *testing.T) {
+	t.Parallel()
 	for name := range shimLeaves {
 		if _, ported := portedCommands[name]; ported {
 			t.Errorf("%q is ported to Go: drop its shimLeaves entry, the Go subcommands are the tools now", name)
@@ -443,7 +446,7 @@ func TestMcpStdioSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	served := make(chan error, 1)
 	go func() {

@@ -33,6 +33,7 @@ func testPaths(t *testing.T) *config.Paths {
 // valid JSON: control characters go out as \u00xx (strconv.Quote wrote
 // \x01, which no JSON reader accepts), <,>,& stay raw.
 func TestCompactJSONWritesValidJSON(t *testing.T) {
+	t.Parallel()
 	doc := parseDoc(t, "- {\"k\": \"ab\\tc<&>\", n: 1.5, b: true, z: ~}\n")
 	// YAML source cannot carry a raw control character; the value node can
 	// (a JSON-quoted "\\u0001" arrives that way).
@@ -52,6 +53,7 @@ func TestCompactJSONWritesValidJSON(t *testing.T) {
 }
 
 func TestResolveCases(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		spec string
 		kind string

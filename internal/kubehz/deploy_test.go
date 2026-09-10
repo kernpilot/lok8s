@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func renderInto(t *testing.T, h *harness, owner, access string) string {
@@ -26,6 +27,7 @@ func renderInto(t *testing.T, h *harness, owner, access string) string {
 }
 
 func TestRenderAgentSubstitutesBothTrees(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
 	var leftovers []string
@@ -48,6 +50,7 @@ func TestRenderAgentSubstitutesBothTrees(t *testing.T) {
 }
 
 func TestRenderAgentMatchesBashGoldens(t *testing.T) {
+	t.Parallel()
 	// The golden was rendered by the bash with an apiUrl carrying `&` — the
 	// value sed would have expanded — so this pins both the byte-for-byte
 	// render and the verbatim ampersand.
@@ -56,18 +59,17 @@ func TestRenderAgentMatchesBashGoldens(t *testing.T) {
 	_ = os.MkdirAll(work, 0o755)
 	url := "https://api.example.com/heartbeat?cluster=a&mode=push"
 	mustOK(t, h.ctx.RenderAgent(work, "acme.example.com", url, "operator", "managed"), h.output())
-	for got, golden := range map[string]string{
+	for got, name := range map[string]string{
 		filepath.Join(work, "agent", "configmap.yaml"):              "rendered-agent-configmap.yaml",
 		filepath.Join(work, "live-agent", "base", "configmap.yaml"): "rendered-live-agent-configmap.yaml",
 	} {
-		if readFile(t, got) != readFile(t, filepath.Join("testdata", "golden", golden)) {
-			t.Fatalf("%s drifted from the bash render", golden)
-		}
+		testutil.Golden(t, filepath.Join("testdata", "golden", name), readFile(t, got), *update)
 	}
 	mustContain(t, readFile(t, filepath.Join(work, "agent", "configmap.yaml")), url)
 }
 
 func TestLiveAgentOverlay(t *testing.T) {
+	t.Parallel()
 	work := "/w"
 	if liveAgentOverlay(work, "registered") != "/w/live-agent/base" || liveAgentOverlay(work, "managed") != "/w/live-agent/managed" {
 		t.Fatal("overlay")
@@ -79,6 +81,7 @@ func TestLiveAgentOverlay(t *testing.T) {
 }
 
 func TestRenderAgentRefusesSurvivingPlaceholder(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	work := filepath.Join(h.base, "r3")
 	_ = os.MkdirAll(work, 0o755)
@@ -116,13 +119,13 @@ func TestDeployPrint(t *testing.T) {
 		io.WriteString(c.Stdout, "kind: Rendered\ndir: "+c.Args[1]+"\n")
 		return nil
 	}
-	mustOK(t, h.ctx.deployPrint(context.Background(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "operator", "managed"), h.output())
 	mustContain(t, h.output(), "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: operator ---")
 	mustContain(t, h.output(), "# --- Live agent (kubehz-live-agent) — managed tier RBAC ---")
 	mustContain(t, h.output(), "dir: "+filepath.Join(work, "live-agent", "managed"))
 
 	h.reset()
-	mustOK(t, h.ctx.deployPrint(context.Background(), work, "cronjob", "registered"), h.output())
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "cronjob", "registered"), h.output())
 	mustContain(t, h.output(), "# The live agent is NOT deployed in cronjob mode; a previous install would be removed.")
 	mustNotContain(t, h.output(), "live-agent")
 }
@@ -131,7 +134,7 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
 	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(context.Background(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
 	if len(*log) != 3 {
 		t.Fatalf("calls: %v", *log)
 	}
@@ -150,7 +153,7 @@ func TestDeployApplyNeverReadyFails(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(context.Background(), work, "operator", "managed"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
 	mustContain(t, h.output(), "never became Ready")
 	mustContain(t, h.output(), "NOTHING owns the heartbeat")
 }
@@ -160,7 +163,7 @@ func TestDeployApplyRolloutTimeoutFromEnv(t *testing.T) {
 	h.env["KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS"] = "600"
 	work := renderInto(t, h, "operator", "managed")
 	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(context.Background(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
 	mustContain(t, strings.Join(*log, "\n"), "--timeout=600s")
 }
 
@@ -168,7 +171,7 @@ func TestDeployApplyToCronjobOrder(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "cronjob", "registered")
 	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(context.Background(), work, "cronjob", "registered"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"), h.output())
 	if len(*log) != 3 {
 		t.Fatalf("calls: %v", *log)
 	}
@@ -187,7 +190,7 @@ func TestDeployApplyFailedDeleteNeverRearms(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(context.Background(), work, "cronjob", "registered"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"))
 	mustContain(t, h.output(), "could not remove the live agent")
 	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "agent"))
 }
@@ -205,7 +208,7 @@ func TestDeployApplyPodWontTerminateBlocks(t *testing.T) {
 		log = append(log, argvLine(c))
 		return nil
 	}
-	mustErr(t, h.ctx.deployApply(context.Background(), work, "cronjob", "registered"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"))
 	mustContain(t, h.output(), "still running")
 	mustNotContain(t, strings.Join(log, "\n"), "apply -k "+filepath.Join(work, "agent"))
 }
@@ -223,7 +226,7 @@ func TestDeployApplyBlindProbeNeverRearms(t *testing.T) {
 		log = append(log, argvLine(c))
 		return nil
 	}
-	mustErr(t, h.ctx.deployApply(context.Background(), work, "cronjob", "registered"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"))
 	mustContain(t, h.output(), "could not tell whether")
 	mustContain(t, h.output(), "Forbidden")
 	mustNotContain(t, strings.Join(log, "\n"), "apply -k "+filepath.Join(work, "agent"))
@@ -241,7 +244,7 @@ func TestDeployApplyUnreadableHeartbeatProbeWarnsAndContinues(t *testing.T) {
 		log = append(log, argvLine(c))
 		return nil
 	}
-	mustOK(t, h.ctx.deployApply(context.Background(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
 	mustContain(t, h.output(), "could not check for an in-flight heartbeat pod")
 	mustContain(t, log[1], "apply -k "+filepath.Join(work, "live-agent", "managed"))
 }
@@ -258,11 +261,11 @@ func TestWaitsIgnoreApiserverWarnings(t *testing.T) {
 			io.WriteString(c.Stderr, warning+"\n")
 			return nil
 		}
-		h.ctx.waitHeartbeatIdle(context.Background())
+		h.ctx.waitHeartbeatIdle(t.Context())
 		if h.output() != "" || slept != 0 {
 			t.Fatalf("heartbeat wait tripped on a warning: %q slept=%d", h.output(), slept)
 		}
-		mustOK(t, h.ctx.waitLiveAgentGone(context.Background()), h.output())
+		mustOK(t, h.ctx.waitLiveAgentGone(t.Context()), h.output())
 		if h.output() != "" || slept != 0 {
 			t.Fatalf("live-agent wait tripped on a warning: %q slept=%d", h.output(), slept)
 		}
@@ -271,17 +274,17 @@ func TestWaitsIgnoreApiserverWarnings(t *testing.T) {
 
 func TestDeployAgentRefusals(t *testing.T) {
 	h := newHarness(t)
-	mustErr(t, h.ctx.DeployAgent(context.Background(), &Config{Hosting: "shared", Access: "none", APIURL: "https://api.kubehz.cloud", Agent: "cronjob"}, "acme.example.com", false))
+	mustErr(t, h.ctx.DeployAgent(t.Context(), &Config{Hosting: "shared", Access: "none", APIURL: "https://api.kubehz.cloud", Agent: "cronjob"}, "acme.example.com", false))
 	mustContain(t, h.output(), "no in-cluster agent to deploy")
 	h.reset()
-	mustErr(t, h.ctx.DeployAgent(context.Background(), &Config{Hosting: "self", Access: "none", APIURL: "https://api.kubehz.cloud", Agent: "cronjob"}, "acme.example.com", false))
+	mustErr(t, h.ctx.DeployAgent(t.Context(), &Config{Hosting: "self", Access: "none", APIURL: "https://api.kubehz.cloud", Agent: "cronjob"}, "acme.example.com", false))
 	mustContain(t, h.output(), "access is 'none'")
 	h.reset()
-	mustErr(t, h.ctx.DeployAgent(context.Background(), &Config{Hosting: "self", Access: "registered", APIURL: "http://api.kubehz.cloud", Agent: "cronjob"}, "acme.example.com", false))
+	mustErr(t, h.ctx.DeployAgent(t.Context(), &Config{Hosting: "self", Access: "registered", APIURL: "http://api.kubehz.cloud", Agent: "cronjob"}, "acme.example.com", false))
 	mustContain(t, h.output(), "must use HTTPS")
 	for _, bad := range []string{"Operator", "cronjob\"extra", "operator\nbeats"} {
 		h.reset()
-		mustErr(t, h.ctx.DeployAgent(context.Background(), &Config{Hosting: "self", Access: "registered", APIURL: "https://api.kubehz.cloud", Agent: bad}, "acme.example.com", false))
+		mustErr(t, h.ctx.DeployAgent(t.Context(), &Config{Hosting: "self", Access: "registered", APIURL: "https://api.kubehz.cloud", Agent: bad}, "acme.example.com", false))
 		mustContain(t, h.output(), "must be 'cronjob' or 'operator'")
 	}
 	if len(h.runner.calls) != 0 {
@@ -290,6 +293,7 @@ func TestDeployAgentRefusals(t *testing.T) {
 }
 
 func TestDeploySummary(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.ctx.deploySummary("acme.example.com", "operator", "managed")
 	mustContain(t, h.output(), "live agent deployed and Ready for acme.example.com (deployment/kubehz-live-agent, managed tier).")
@@ -310,7 +314,7 @@ func TestDeploySubcommandDryRun(t *testing.T) {
 		io.WriteString(c.Stdout, "kind: CronJob\n")
 		return nil
 	}
-	mustOK(t, h.ctx.Deploy(context.Background(), "acme.example.com", true), h.output())
+	mustOK(t, h.ctx.Deploy(t.Context(), "acme.example.com", true), h.output())
 	mustContain(t, h.output(), "kind: CronJob")
 	for _, l := range h.runner.lines() {
 		if !strings.HasPrefix(l, "kubectl kustomize ") {

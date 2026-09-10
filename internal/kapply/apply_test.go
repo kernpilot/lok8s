@@ -105,7 +105,7 @@ func testApplier(f *fakeKubectl) (*Applier, *bytes.Buffer, *bytes.Buffer) {
 func TestCleanApplyNoHealing(t *testing.T) {
 	f := &fakeKubectl{}
 	a, _, _ := testApplier(f)
-	_, rc := a.Apply(context.Background(), "resources", deployManifest)
+	_, rc := a.Apply(t.Context(), "resources", deployManifest)
 	if rc != 0 {
 		t.Fatalf("rc = %d, want 0", rc)
 	}
@@ -121,7 +121,7 @@ func TestImmutableWithoutForceFailsFastWithHint(t *testing.T) {
 	f := &fakeKubectl{applyRC: 1,
 		applyOut: `Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable`}
 	a, _, errOut := testApplier(f)
-	_, rc := a.Apply(context.Background(), "resources", deployManifest)
+	_, rc := a.Apply(t.Context(), "resources", deployManifest)
 	if rc == 0 {
 		t.Fatal("expected failure")
 	}
@@ -138,7 +138,7 @@ func TestImmutableWithForceRecreatesAndReapplies(t *testing.T) {
 		applyOut: `Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable`}
 	a, _, _ := testApplier(f)
 	a.ForceRecreate = true
-	a.Apply(context.Background(), "resources", deployManifest)
+	a.Apply(t.Context(), "resources", deployManifest)
 	if !strings.Contains(f.log(), "replace --force") {
 		t.Fatalf("no recreate in log:\n%s", f.log())
 	}
@@ -153,7 +153,7 @@ func TestSealedSecretForceRecreateWarnsReKey(t *testing.T) {
 		applyOut: "Error from server (Invalid): Secret \"zitadel-credentials\" is invalid: data: Forbidden: field is immutable when `immutable` is set"}
 	a, _, errOut := testApplier(f)
 	a.ForceRecreate = true
-	a.Apply(context.Background(), "resources", secretManifest)
+	a.Apply(t.Context(), "resources", secretManifest)
 	if !strings.Contains(errOut.String(), "RE-KEYING sealed Secret/zitadel-credentials") {
 		t.Errorf("missing RE-KEY warning:\n%s", errOut.String())
 	}
@@ -168,7 +168,7 @@ func TestSealedSecretDeclinedNonInteractiveKept(t *testing.T) {
 	f := &fakeKubectl{}
 	a, _, errOut := testApplier(f)
 	err := `Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable`
-	a.healImmutable(context.Background(), secretManifest, err, nil)
+	a.healImmutable(t.Context(), secretManifest, err, nil)
 	if !strings.Contains(errOut.String(), "keeping sealed Secret/zitadel-credentials") {
 		t.Errorf("missing keep notice:\n%s", errOut.String())
 	}
@@ -186,7 +186,7 @@ func TestUnsealedSecretGenericHealNoReKeyPrompt(t *testing.T) {
 	a, _, errOut := testApplier(f)
 	a.ForceRecreate = true
 	plain := "apiVersion: v1\nkind: Secret\nmetadata:\n  name: plain-creds\n  namespace: default\ndata: {}"
-	a.Apply(context.Background(), "resources", plain)
+	a.Apply(t.Context(), "resources", plain)
 	if strings.Contains(errOut.String(), "RE-KEYING") {
 		t.Errorf("unexpected re-key drama:\n%s", errOut.String())
 	}
@@ -203,7 +203,7 @@ func TestSealedSecretInteractiveDeclineKeeps(t *testing.T) {
 	a.Interactive = func() bool { return true }
 	a.Ask = func(string) bool { return false } // operator answers "n"
 	err := `Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable`
-	a.healImmutable(context.Background(), secretManifest, err, nil)
+	a.healImmutable(t.Context(), secretManifest, err, nil)
 	if !strings.Contains(errOut.String(), "keeping sealed Secret/zitadel-credentials") {
 		t.Errorf("missing keep notice:\n%s", errOut.String())
 	}
@@ -218,7 +218,7 @@ func TestSealedSecretInteractiveAcceptRecreates(t *testing.T) {
 	a.Interactive = func() bool { return true }
 	a.Ask = func(string) bool { return true } // operator answers "y"
 	err := `Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable`
-	a.healImmutable(context.Background(), secretManifest, err, nil)
+	a.healImmutable(t.Context(), secretManifest, err, nil)
 	if !strings.Contains(errOut.String(), "recreating immutable Secret/zitadel-credentials") {
 		t.Errorf("missing recreate notice:\n%s", errOut.String())
 	}
@@ -233,7 +233,7 @@ func TestStuckTerminatingForceClearsCRFinalizers(t *testing.T) {
 		getOut:   "2026-01-01T00:00:00Z"} // non-empty deletionTimestamp
 	a, _, _ := testApplier(f)
 	a.ForceRecreate = true
-	a.Apply(context.Background(), "resources", crManifest)
+	a.Apply(t.Context(), "resources", crManifest)
 	if !strings.Contains(f.log(), "patch Cluster db") {
 		t.Errorf("no CR patch:\n%s", f.log())
 	}
@@ -252,7 +252,7 @@ func TestStuckTerminatingNamespace403ForceFinalizesAndReapplies(t *testing.T) {
 	a, _, _ := testApplier(f)
 	a.ForceRecreate = true
 	a.NsWait = 0 // don't poll-wait in the unit test
-	a.Apply(context.Background(), "resources", deployManifest)
+	a.Apply(t.Context(), "resources", deployManifest)
 	if !strings.Contains(f.log(), "replace --raw /api/v1/namespaces/kubermatic/finalize") {
 		t.Fatalf("no /finalize call:\n%s", f.log())
 	}
@@ -266,7 +266,7 @@ func TestFinalizeNamespaceDeclinedNeverCallsFinalize(t *testing.T) {
 	// NOT nuke the namespace — the extra confirm refuses, heal skipped.
 	f := &fakeKubectl{getOut: "2026-01-01T00:00:00Z"} // ns is terminating
 	a, _, _ := testApplier(f)
-	a.finalizeNamespace(context.Background(), "kubermatic", nil)
+	a.finalizeNamespace(t.Context(), "kubermatic", nil)
 	if strings.Contains(f.log(), "finalize") {
 		t.Errorf("destructive /finalize call happened:\n%s", f.log())
 	}
@@ -277,40 +277,11 @@ func TestUnknownErrorPassedThroughNoHealing(t *testing.T) {
 		applyOut: "error: unable to connect to the server: connection refused"}
 	a, _, _ := testApplier(f)
 	a.ForceRecreate = true
-	_, rc := a.Apply(context.Background(), "resources", deployManifest)
+	_, rc := a.Apply(t.Context(), "resources", deployManifest)
 	if rc == 0 {
 		t.Fatal("expected failure")
 	}
 	if strings.Contains(f.log(), "replace --force") || strings.Contains(f.log(), "patch") {
 		t.Errorf("unexpected healing:\n%s", f.log())
-	}
-}
-
-func TestAggregateCollapsesDuplicates(t *testing.T) {
-	out := Aggregate([]string{"webhook refused", "webhook refused", "webhook refused", "immutable: foo"})
-	if len(out) != 2 {
-		t.Fatalf("got %d lines: %q", len(out), out)
-	}
-	if !strings.Contains(out[0], "webhook refused") || !strings.Contains(out[0], "×3") {
-		t.Errorf("dupes not collapsed: %q", out[0])
-	}
-	if out[1] != "immutable: foo" {
-		t.Errorf("distinct line mangled: %q", out[1])
-	}
-}
-
-func TestTerminatingNamespacesExtraction(t *testing.T) {
-	out := `Error from server (Forbidden): secrets "s" is forbidden: unable to create new content in namespace kubehz-system because it is being terminated
-unable to create new content in namespace mla because it is being terminated
-unable to create new content in namespace kubehz-system because it is being terminated`
-	got := TerminatingNamespaces(out)
-	want := []string{"kubehz-system", "mla"}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got %v, want %v", got, want)
-		}
 	}
 }

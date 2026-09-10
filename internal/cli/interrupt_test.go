@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"os"
 	"syscall"
 	"testing"
@@ -11,7 +10,7 @@ import (
 // A SIGINT cancels the command context and maps to the exit code the bash
 // entrypoint died with (128+2); no signal maps to 0.
 func TestWatchInterruptCancelsAndMapsTheExitCode(t *testing.T) {
-	ctx, exitCode := WatchInterrupt(context.Background())
+	ctx, exitCode := WatchInterrupt(t.Context())
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +23,7 @@ func TestWatchInterruptCancelsAndMapsTheExitCode(t *testing.T) {
 		t.Errorf("exit code = %d, want 130", got)
 	}
 
-	quiet, exitCode := WatchInterrupt(context.Background())
+	quiet, exitCode := WatchInterrupt(t.Context())
 	if quiet.Err() != nil {
 		t.Errorf("context cancelled before any signal: %v", quiet.Err())
 	}

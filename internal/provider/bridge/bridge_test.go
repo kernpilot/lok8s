@@ -59,7 +59,7 @@ func TestLoadProbesThenCallsThroughBash(t *testing.T) {
 		}
 	}
 
-	if err := prov.Provision(context.Background(), "/cfg.yaml", "/work"); err != nil {
+	if err := prov.Provision(t.Context(), "/cfg.yaml", "/work"); err != nil {
 		t.Fatal(err)
 	}
 	c := r.calls[1]
@@ -98,18 +98,18 @@ func TestCredentialDataAndOutputCaptureStdout(t *testing.T) {
 		return nil
 	}
 	p := &Provider{l: l, name: "hetzner"}
-	creds, err := p.CredentialData(context.Background(), "/cfg")
+	creds, err := p.CredentialData(t.Context(), "/cfg")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if creds["hcloud-token"] != "tok" || creds["robot-user"] != "u" || len(creds) != 2 {
 		t.Errorf("creds = %v", creds)
 	}
-	out, err := p.Output(context.Background(), "/cfg")
+	out, err := p.Output(t.Context(), "/cfg")
 	if err != nil || string(out) != `{"nodes":[]}` {
 		t.Errorf("output = %q err=%v", out, err)
 	}
-	st, err := p.ProviderStatus(context.Background(), "/cfg")
+	st, err := p.ProviderStatus(t.Context(), "/cfg")
 	if err != nil || st != "Running" {
 		t.Errorf("status = %q err=%v", st, err)
 	}
@@ -124,12 +124,12 @@ func TestKubeoneSeamsBindTheProviderAtConstruction(t *testing.T) {
 	bare := &driver.Deps{Paths: l.Paths}
 	noProv := l.KubeoneAppendInventory(bare)
 	bare.Provider, bare.ProviderName = &Provider{l: l, name: "hetzner"}, "hetzner"
-	if err := noProv(context.Background(), "/cfg", "/work/kubeone.yaml"); !errors.Is(err, ErrNoProvider) {
+	if err := noProv(t.Context(), "/cfg", "/work/kubeone.yaml"); !errors.Is(err, ErrNoProvider) {
 		t.Fatalf("expected ErrNoProvider for a driver built without a provider, got %v", err)
 	}
 	deps := &driver.Deps{Paths: l.Paths, Provider: &Provider{l: l, name: "hetzner"}, ProviderName: "hetzner"}
 	appendInv := l.KubeoneAppendInventory(deps)
-	if err := appendInv(context.Background(), "/cfg", "/work/kubeone.yaml"); err != nil {
+	if err := appendInv(t.Context(), "/cfg", "/work/kubeone.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	c := r.calls[len(r.calls)-1]
@@ -141,7 +141,7 @@ func TestKubeoneSeamsBindTheProviderAtConstruction(t *testing.T) {
 	}
 
 	prep := l.KubeonePrepareApply(deps)
-	if err := prep(context.Background(), "/work", "/spec.yaml"); err != nil {
+	if err := prep(t.Context(), "/work", "/spec.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	c = r.calls[len(r.calls)-1]

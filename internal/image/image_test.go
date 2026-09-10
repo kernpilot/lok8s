@@ -187,7 +187,7 @@ func TestResolveCacheNetInvalidTLSFailsLikeConfigGenerate(t *testing.T) {
 func TestCacheRefusesNonLoDriver(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeSpec(t, c, "kind: KubeOne\n")
-	err := c.Cache(context.Background(), "svc", false, false)
+	err := c.Cache(t.Context(), "svc", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -201,7 +201,7 @@ func TestCacheEnvOverrideSkipsTheDriverGate(t *testing.T) {
 	writeSpec(t, c, "kind: KubeOne\n")
 	runner.handler = yqPassthrough
 	t.Setenv("LOK8S_REGISTRY_IP_CACHE", "127.0.0.1:5001")
-	err := c.Cache(context.Background(), "", false, false)
+	err := c.Cache(t.Context(), "", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -215,7 +215,7 @@ func TestCacheEnvOverrideSkipsTheDriverGate(t *testing.T) {
 func TestCacheUnresolvableIPNamesTheEscapeHatch(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeSpec(t, c, "kind: Lo\n")
-	err := c.Cache(context.Background(), "svc", false, false)
+	err := c.Cache(t.Context(), "svc", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -229,7 +229,7 @@ func TestCachePinnedServiceErrors(t *testing.T) {
 	writeSpec(t, c, loSpec)
 	writeServices(t, c, "services:\n  svc:\n    image: busybox:1.36\n")
 	runner.handler = yqPassthrough
-	err := c.Cache(context.Background(), "svc", false, false)
+	err := c.Cache(t.Context(), "svc", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -246,7 +246,7 @@ func TestCacheMissingEndpointErrors(t *testing.T) {
 	writeSpec(t, c, loSpec)
 	writeServices(t, c, "services:\n  svc:\n    build: false\n")
 	runner.handler = yqPassthrough
-	err := c.Cache(context.Background(), "svc", false, false)
+	err := c.Cache(t.Context(), "svc", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -260,7 +260,7 @@ func TestCacheInvalidParallelErrors(t *testing.T) {
 	writeSpec(t, c, loSpec)
 	writeServices(t, c, "registry:\n  parallel: many\n")
 	runner.handler = yqPassthrough
-	err := c.Cache(context.Background(), "svc", false, false)
+	err := c.Cache(t.Context(), "svc", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -273,7 +273,7 @@ func TestCacheAllWithNoQueueIsANoop(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	writeSpec(t, c, loSpec)
 	runner.handler = yqPassthrough
-	if err := c.Cache(context.Background(), "", false, true); err != nil {
+	if err := c.Cache(t.Context(), "", false, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("docker"); len(got) != 0 {
@@ -303,7 +303,7 @@ func TestCacheAllPullsTagsAndPushes(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Cache(context.Background(), "", false, true); err != nil {
+	if err := c.Cache(t.Context(), "", false, true); err != nil {
 		t.Fatal(err)
 	}
 	// The scheme is stripped before docker sees the ref.
@@ -327,7 +327,7 @@ func TestCacheOneInsecureInspectWhenPlainHTTP(t *testing.T) {
 	writeSpec(t, c, loSpec+"  registries:\n    tls: false\n")
 	seedQueue(t, c, "svc\tghcr.io/org/proj/svc:v1\tproj\tv1\n")
 	runner.handler = yqPassthrough
-	if err := c.Cache(context.Background(), "", false, true); err != nil {
+	if err := c.Cache(t.Context(), "", false, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("manifest inspect"); len(got) != 1 || got[0] != "docker manifest inspect --insecure 10.99.7.102/proj/svc:v1" {
@@ -340,7 +340,7 @@ func TestCacheOneSkipsWhenAlreadyCached(t *testing.T) {
 	writeSpec(t, c, loSpec)
 	seedQueue(t, c, "svc\tghcr.io/org/proj/svc:v1\tproj\tv1\n")
 	runner.handler = yqPassthrough // manifest inspect succeeds → cached
-	if err := c.Cache(context.Background(), "", false, true); err != nil {
+	if err := c.Cache(t.Context(), "", false, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("docker pull"); len(got) != 0 {
@@ -353,7 +353,7 @@ func TestCacheOneForceRepullsDespiteCache(t *testing.T) {
 	writeSpec(t, c, loSpec)
 	seedQueue(t, c, "svc\tghcr.io/org/proj/svc:v1\tproj\tv1\n")
 	runner.handler = yqPassthrough
-	if err := c.Cache(context.Background(), "", true, true); err != nil {
+	if err := c.Cache(t.Context(), "", true, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("manifest inspect"); len(got) != 0 {
@@ -380,7 +380,7 @@ func TestCacheQueueFailureAggregation(t *testing.T) {
 		}
 		return nil
 	}
-	err := c.Cache(context.Background(), "", false, true)
+	err := c.Cache(t.Context(), "", false, true)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v (a failed pull must fail the run)", err)
 	}
@@ -407,7 +407,7 @@ func TestCacheQueueDropsUnterminatedFinalLine(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Cache(context.Background(), "", false, true); err != nil {
+	if err := c.Cache(t.Context(), "", false, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("docker pull"); len(got) != 1 || got[0] != "docker pull r/p/one:v1" {
@@ -440,7 +440,7 @@ func TestListRunsTheCurlJqPipeline(t *testing.T) {
 		}
 		return nil
 	}
-	rc, err := c.List(context.Background())
+	rc, err := c.List(t.Context())
 	if err != nil || rc != 0 {
 		t.Fatalf("rc=%d err=%v", rc, err)
 	}
@@ -457,7 +457,7 @@ func TestListRunsTheCurlJqPipeline(t *testing.T) {
 func TestListPlainHTTPWithoutTLS(t *testing.T) {
 	c, runner, out, _ := testCtx(t)
 	writeSpec(t, c, loSpec+"  registries:\n    tls: false\n")
-	if _, err := c.List(context.Background()); err != nil {
+	if _, err := c.List(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), ":: cache registry @ http://10.99.7.102/v2/_catalog") {
@@ -480,7 +480,7 @@ func TestListDeadEndpointReturnsCurlsCode(t *testing.T) {
 		}
 		return nil // jq on the empty stream succeeds
 	}
-	rc, err := c.List(context.Background())
+	rc, err := c.List(t.Context())
 	if err != nil || rc != 7 {
 		t.Fatalf("rc=%d err=%v, want curl's 7", rc, err)
 	}
@@ -505,7 +505,7 @@ func TestListNonJSONBodyRefetchesAndPrintsRaw(t *testing.T) {
 		}
 		return nil
 	}
-	rc, err := c.List(context.Background())
+	rc, err := c.List(t.Context())
 	if err != nil || rc != 0 {
 		t.Fatalf("rc=%d err=%v (the re-fetch succeeded)", rc, err)
 	}
@@ -520,7 +520,7 @@ func TestListNonJSONBodyRefetchesAndPrintsRaw(t *testing.T) {
 func TestListRefusesNonLoDriverUnlessOverridden(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeSpec(t, c, "kind: KubeOne\n")
-	if _, err := c.List(context.Background()); !errors.Is(err, ErrHandled) {
+	if _, err := c.List(t.Context()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "the image cache is a 'lo'-driver (local cluster) feature.") {
@@ -530,7 +530,7 @@ func TestListRefusesNonLoDriverUnlessOverridden(t *testing.T) {
 	c2, _, out2, _ := testCtx(t)
 	writeSpec(t, c2, "kind: KubeOne\n")
 	t.Setenv("LOK8S_REGISTRY_IP_CACHE", "127.0.0.1:5001")
-	if _, err := c2.List(context.Background()); err != nil {
+	if _, err := c2.List(t.Context()); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(out2.String(), ":: cache registry @ http://127.0.0.1:5001/v2/_catalog") {
@@ -542,7 +542,7 @@ func TestListRefusesNonLoDriverUnlessOverridden(t *testing.T) {
 
 func TestCleanDropsContainerAndVolume(t *testing.T) {
 	c, runner, out, _ := testCtx(t)
-	if err := c.Clean(context.Background(), "devnet"); err != nil {
+	if err := c.Clean(t.Context(), "devnet"); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -565,7 +565,7 @@ func TestCleanDropsContainerAndVolume(t *testing.T) {
 func TestCleanFailuresAreTolerated(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	runner.handler = func(execx.Cmd) error { return &fakeExit{1} }
-	if err := c.Clean(context.Background(), ""); err != nil {
+	if err := c.Clean(t.Context(), ""); err != nil {
 		t.Fatalf("err = %v (bash: `|| true`)", err)
 	}
 	if runner.calls[0] != "docker rm -f lok8s-registry-cache" {

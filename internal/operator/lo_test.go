@@ -24,6 +24,7 @@ const loDeletingCR = `{"metadata":{"name":"test-lo","namespace":"default","delet
 
 // bats: "lo-reconcile hook::config: events, synchronization, drift schedule"
 func TestLoConfigPins(t *testing.T) {
+	t.Parallel()
 	cfg := (&LoHook{}).Config()
 	for _, want := range []string{
 		"kind: Lo", `"Added", "Modified"`, "executeHookOnSynchronization: true",
@@ -38,7 +39,7 @@ func TestLoConfigPins(t *testing.T) {
 // bats: "lo-reconcile: missing domain marks Failed"
 func TestLoMissingDomainMarksFailed(t *testing.T) {
 	f := newLoFixture(t)
-	if err := f.hook.Reconcile(context.Background(), []byte(`{"metadata":{"name":"bad","namespace":"default"},"spec":{}}`)); err != nil {
+	if err := f.hook.Reconcile(t.Context(), []byte(`{"metadata":{"name":"bad","namespace":"default"},"spec":{}}`)); err != nil {
 		t.Fatal(err)
 	}
 	assertHas(t, f.log, "MissingDomain")
@@ -54,7 +55,7 @@ func TestLoMissingDomainMarksFailed(t *testing.T) {
 // kubeconfig, Provisioned"
 func TestLoFreshCRProvisions(t *testing.T) {
 	f := newLoFixture(t)
-	if err := f.hook.Reconcile(context.Background(), []byte(loCR)); err != nil {
+	if err := f.hook.Reconcile(t.Context(), []byte(loCR)); err != nil {
 		t.Fatal(err)
 	}
 	assertHas(t, f.log,
@@ -109,7 +110,7 @@ func TestLoEnsureFinalizerFallsBack(t *testing.T) {
 		}
 		return loKubectl(c)
 	}
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	assertHas(t, f.log, `--type json -p [{"op":"add","path":"/metadata/finalizers","value":["lok8s.dev/lo-teardown"]}]`)
 	if strings.Contains(f.stderr.String(), "warn: failed to add finalizer") {
 		t.Error("fallback succeeded; no warn expected")
@@ -122,7 +123,7 @@ func TestLoEnsureFinalizerFallsBack(t *testing.T) {
 		}
 		return loKubectl(c)
 	}
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	assertStderr(t, f.stderr, "warn: failed to add finalizer to Lo default/test-lo\n")
 }
 
@@ -130,7 +131,7 @@ func TestLoEnsureFinalizerFallsBack(t *testing.T) {
 func TestLoFinalizerPresentSkipsPatch(t *testing.T) {
 	f := newLoFixture(t)
 	cr := `{"metadata":{"name":"test-lo","namespace":"default","finalizers":["lok8s.dev/lo-teardown"]},"spec":{"cluster":{"domain":"test.lok8s.dev"}}}`
-	f.hook.Reconcile(context.Background(), []byte(cr))
+	f.hook.Reconcile(t.Context(), []byte(cr))
 	refuteHas(t, f.log, "--type json")
 }
 
@@ -138,7 +139,7 @@ func TestLoFinalizerPresentSkipsPatch(t *testing.T) {
 func TestLoRunningClusterSkipsProvision(t *testing.T) {
 	f := newLoFixture(t)
 	f.drv.status = "Running"
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	refuteHas(t, f.log, "driver::provision")
 	assertHas(t, f.log, `"phase":"Provisioned"`, "create secret generic test-lo-kubeconfig")
 }
@@ -148,7 +149,7 @@ func TestLoPublishReusesExistingKubeconfig(t *testing.T) {
 	f := newLoFixture(t)
 	f.drv.status = "Running"
 	testutil.WriteFile(t, filepath.Join(f.paths.Base, ".kubeconfig", "test-lo.yaml"), "kc\n")
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	refuteHas(t, f.log, "driver::kubeconfig")
 	assertHas(t, f.log, "create secret generic test-lo-kubeconfig")
 }
@@ -156,7 +157,7 @@ func TestLoPublishReusesExistingKubeconfig(t *testing.T) {
 // bats: "lo-reconcile: deletion runs teardown and removes finalizer"
 func TestLoDeletionTearsDown(t *testing.T) {
 	f := newLoFixture(t)
-	f.hook.Reconcile(context.Background(), []byte(loDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(loDeletingCR))
 	assertHas(t, f.log,
 		`"phase":"Terminating"`,
 		"driver::destroy test.lok8s.dev",
@@ -175,7 +176,7 @@ func TestLoDeletionTearsDown(t *testing.T) {
 func TestLoFailedTeardownKeepsFinalizer(t *testing.T) {
 	f := newLoFixture(t)
 	f.drv.destroy = errors.New("boom")
-	f.hook.Reconcile(context.Background(), []byte(loDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(loDeletingCR))
 	assertHas(t, f.log, "DestroyFailed")
 	refuteHas(t, f.log, `{"metadata":{"finalizers":[]}}`, "delete secret")
 	assertStderr(t, f.stderr, "error: Lo default/test-lo teardown failed (will retry)\n")
@@ -188,7 +189,7 @@ func TestLoFailedTeardownKeepsFinalizer(t *testing.T) {
 func TestLoDeletionWithoutFinalizerIsNoop(t *testing.T) {
 	f := newLoFixture(t)
 	cr := `{"metadata":{"name":"test-lo","namespace":"default","deletionTimestamp":"2026-01-01T00:00:00Z","finalizers":["other"]},"spec":{"cluster":{"domain":"test.lok8s.dev"}}}`
-	f.hook.Reconcile(context.Background(), []byte(cr))
+	f.hook.Reconcile(t.Context(), []byte(cr))
 	refuteHas(t, f.log, "kubectl", "driver::")
 }
 
@@ -202,7 +203,7 @@ func TestLoRemoveFinalizerPipelineSemantics(t *testing.T) {
 		}
 		return nil
 	}
-	f.hook.Reconcile(context.Background(), []byte(loDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(loDeletingCR))
 	assertHas(t, f.log, `--type merge -p {"metadata":{"finalizers":[]}}`)
 
 	f = newLoFixture(t)
@@ -212,7 +213,7 @@ func TestLoRemoveFinalizerPipelineSemantics(t *testing.T) {
 		}
 		return nil
 	}
-	f.hook.Reconcile(context.Background(), []byte(loDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(loDeletingCR))
 	assertHas(t, f.log, `--type merge -p {"metadata":{"finalizers":["keep"]}}`)
 
 	f = newLoFixture(t)
@@ -222,7 +223,7 @@ func TestLoRemoveFinalizerPipelineSemantics(t *testing.T) {
 		}
 		return nil // jsonpath: success, EMPTY output
 	}
-	f.hook.Reconcile(context.Background(), []byte(loDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(loDeletingCR))
 	assertHas(t, f.log, `--type merge -p {"metadata":{"finalizers":}}`)
 	assertStderr(t, f.stderr, "warn: failed to remove finalizer from Lo default/test-lo\n")
 }
@@ -231,7 +232,7 @@ func TestLoRemoveFinalizerPipelineSemantics(t *testing.T) {
 func TestLoProvisionFailures(t *testing.T) {
 	f := newLoFixture(t)
 	f.drv.provision = errors.New("kind exploded")
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	assertHas(t, f.log, "ProvisionFailed")
 	refuteHas(t, f.log, "bootstrap::apply", `"phase":"Provisioned"`, "create secret")
 	assertStderr(t, f.stderr, "error: Lo default/test-lo provisioning failed\n")
@@ -240,14 +241,14 @@ func TestLoProvisionFailures(t *testing.T) {
 	f.hook.BootstrapApply = func(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
 		return errors.New("cilium failed")
 	}
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	assertHas(t, f.log, "driver::provision test.lok8s.dev", "ProvisionFailed")
 	refuteHas(t, f.log, `"phase":"Provisioned"`)
 
 	// No bootstrap lib wired = the bash "command not found" → failed.
 	f = newLoFixture(t)
 	f.hook.BootstrapApply = nil
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	assertHas(t, f.log, "ProvisionFailed")
 	assertStderr(t, f.stderr, "bootstrap::apply: command not found")
 }
@@ -261,7 +262,7 @@ func TestLoPatchStatusWarns(t *testing.T) {
 		}
 		return loKubectl(c)
 	}
-	f.hook.Reconcile(context.Background(), []byte(loCR))
+	f.hook.Reconcile(t.Context(), []byte(loCR))
 	assertStderr(t, f.stderr, "warn: failed to patch lo default/test-lo status\n")
 	// … and the flow continues to the end regardless.
 	assertHas(t, f.log, `"phase":"Provisioned"`)
@@ -271,7 +272,7 @@ func TestLoPatchStatusWarns(t *testing.T) {
 func TestLoScheduleRelists(t *testing.T) {
 	f := newLoFixture(t)
 	events := mustEvents(t, `[{"type": "Schedule", "binding": "lo-drift"}]`)
-	if err := f.hook.Trigger(context.Background(), events); err != nil {
+	if err := f.hook.Trigger(t.Context(), events); err != nil {
 		t.Fatal(err)
 	}
 	assertHas(t, f.log, "kubectl get lo -A -o json")
@@ -290,7 +291,7 @@ func TestLoTriggerRoutes(t *testing.T) {
 		return loKubectl(c)
 	}
 	events := mustEvents(t, `[{"type":"Synchronization"},{"type":"Event","object":{"metadata":{"name":"evt","namespace":"default"},"spec":{}}},{"object":`+loCR+`}]`)
-	if err := f.hook.Trigger(context.Background(), events); err != nil {
+	if err := f.hook.Trigger(t.Context(), events); err != nil {
 		t.Fatal(err)
 	}
 	assertHas(t, f.log,
@@ -307,7 +308,7 @@ func TestLoTriggerRoutes(t *testing.T) {
 func TestLoRelistFailureIsQuiet(t *testing.T) {
 	f := newLoFixture(t)
 	f.runner.handler = func(c execx.Cmd) error { return errors.New("api down") }
-	f.hook.Trigger(context.Background(), mustEvents(t, `[{"type":"Schedule"}]`))
+	f.hook.Trigger(t.Context(), mustEvents(t, `[{"type":"Schedule"}]`))
 	if len(f.log.lines) != 1 {
 		t.Errorf("calls = %q, want only the re-list", f.log.lines)
 	}

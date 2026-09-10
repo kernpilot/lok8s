@@ -21,6 +21,7 @@ func readCfg(t *testing.T, h *harness, yaml string) *Config {
 }
 
 func TestReadConfigDefaultsWhenBlockAbsent(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	cfg := readCfg(t, h, "kind: KubeOne\nspec: {}\n")
 	if cfg.Hosting != "self" || cfg.Access != "none" || cfg.APIURL != "" {
@@ -35,6 +36,7 @@ func TestReadConfigDefaultsWhenBlockAbsent(t *testing.T) {
 }
 
 func TestReadConfigHostedManaged(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	cfg := readCfg(t, h, specYAML("KubeOne", "    hosting: hosted\n    access: managed\n    apiUrl: https://api.kubehz.dev\n"))
 	if cfg.Hosting != "hosted" || cfg.Access != "managed" || cfg.APIURL != "https://api.kubehz.dev" {
@@ -43,6 +45,7 @@ func TestReadConfigHostedManaged(t *testing.T) {
 }
 
 func TestReadConfigSelfRegistered(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	cfg := readCfg(t, h, specYAML("KubeOne", "    access: registered\n    apiUrl: https://api.kubehz.dev\n"))
 	if cfg.Hosting != "self" || cfg.Access != "registered" {
@@ -51,6 +54,7 @@ func TestReadConfigSelfRegistered(t *testing.T) {
 }
 
 func TestReadConfigEmptyAccessIsNone(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	if cfg := readCfg(t, h, specYAML("KubeOne", "    access: \"\"\n")); cfg.Access != "none" {
 		t.Fatalf("access = %q", cfg.Access)
@@ -61,6 +65,7 @@ func TestReadConfigEmptyAccessIsNone(t *testing.T) {
 }
 
 func TestReadConfigFailsOnMissingSpec(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	_, err := h.ctx.ReadConfig(filepath.Join(h.base, "does-not-exist.yaml"))
 	mustErr(t, err)
@@ -68,6 +73,7 @@ func TestReadConfigFailsOnMissingSpec(t *testing.T) {
 }
 
 func TestReadConfigPropagatesParseFailure(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	p := h.writeSpec("test.kubehz.dev", "{{ not yaml")
 	_, err := h.ctx.ReadConfig(p)
@@ -83,16 +89,19 @@ func validate(t *testing.T, cfg *Config, specFile string) (string, error) {
 }
 
 func TestValidateSelfNonePasses(t *testing.T) {
+	t.Parallel()
 	out, err := validate(t, &Config{Hosting: "self", Access: "none"}, "")
 	mustOK(t, err, out)
 }
 
 func TestValidateHostedManagedPasses(t *testing.T) {
+	t.Parallel()
 	out, err := validate(t, &Config{Hosting: "hosted", Access: "managed", APIURL: "https://api.kubehz.dev"}, "")
 	mustOK(t, err, out)
 }
 
 func TestValidateRejects(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		cfg  Config
@@ -124,6 +133,7 @@ func TestValidateRejects(t *testing.T) {
 }
 
 func TestValidateAccepts(t *testing.T) {
+	t.Parallel()
 	cases := []Config{
 		{Hosting: "self", Access: "none", APIURL: "https://api.kubehz.dev"},
 		{Hosting: "self", Access: "none", UpgradesChannel: "patch", UpgradesDefer: "immediate", MWExclusions: []string{"2026-12-20/2027-01-06", "2027-04-03"}},
@@ -140,6 +150,7 @@ func TestValidateAccepts(t *testing.T) {
 }
 
 func TestValidatePerKindRules(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	lo := h.writeSpec("lo.dev", "kind: Lo\nspec: {}\n")
 	err := h.ctx.Validate(&Config{Hosting: "hosted", Access: "none", APIURL: "https://api.kubehz.dev"}, lo)
@@ -166,6 +177,7 @@ func TestValidatePerKindRules(t *testing.T) {
 }
 
 func TestReadConfigUpgradesExplicit(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	cfg := readCfg(t, h, specYAML("KubeOne", "    upgrades:\n      channel: minor\n      defer: immediate\n    maintenanceWindow:\n      exclusions: [\"2026-12-20/2027-01-06\", \"2027-04-03\"]\n"))
 	if cfg.UpgradesChannel != "minor" || cfg.UpgradesDefer != "immediate" {
@@ -177,6 +189,7 @@ func TestReadConfigUpgradesExplicit(t *testing.T) {
 }
 
 func TestReadConfigExclusionShapes(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	f := filepath.Join(h.base, "clusters", "test.kubehz.dev", "cluster.lok8s.yaml")
 	cfg := readCfg(t, h, "spec:\n  kubehz:\n    maintenanceWindow:\n      exclusions: [\"2026-01-01\", \"2026-02-01/2026-02-03\"]\n")
@@ -200,6 +213,7 @@ func TestReadConfigExclusionShapes(t *testing.T) {
 }
 
 func TestReadConfigAgentKnob(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	if cfg := readCfg(t, h, specYAML("KubeOne", "    access: registered\n    apiUrl: https://api.kubehz.dev\n")); cfg.Agent != "cronjob" {
 		t.Fatalf("default agent %q", cfg.Agent)

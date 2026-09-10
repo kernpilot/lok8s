@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"io"
 	"os"
 	"testing"
@@ -74,7 +73,7 @@ func TestRcPassthroughsCleanUpBeforeExiting(t *testing.T) {
 
 	dir = materialize()
 	h := newUpHarness(t, nil)
-	_ = runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", ci: true, timeout: "10m"})
+	_ = runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", ci: true, timeout: "10m"})
 	if _, err := os.Stat(dir); err == nil {
 		t.Fatalf("lo up --ci: temp assets dir survived the exit: %s", dir)
 	}

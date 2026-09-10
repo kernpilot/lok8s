@@ -10,18 +10,17 @@ package scaffold
 import (
 	"bytes"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/testutil"
 	"gopkg.in/yaml.v3"
-
-	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 func TestValidateName(t *testing.T) {
+	t.Parallel()
 	for _, ok := range []string{"api", "my-svc.2"} {
 		if err := ValidateName(ok, io.Discard); err != nil {
 			t.Errorf("%q: unexpected reject", ok)
@@ -41,6 +40,7 @@ func TestValidateName(t *testing.T) {
 // key active (comments are not parsed), build a mapping with string
 // context/dockerfile.
 func TestScaffoldLokYAMLSatisfiesValidator(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := ScaffoldLokYAML(dir+"/foo", "foo", false, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
@@ -73,6 +73,7 @@ func TestScaffoldLokYAMLSatisfiesValidator(t *testing.T) {
 }
 
 func TestScaffoldLokYAMLNoClobberWithoutForce(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	os.MkdirAll(dir+"/foo", 0o755)
 	os.WriteFile(dir+"/foo/lok8s.yaml", []byte("build: { context: ., dockerfile: Keep }\n"), 0o644)
@@ -119,6 +120,7 @@ services:
 `
 
 func TestMergeServicesCreatesTemplateAndMatchesYq(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s := dir + "/services.yaml"
 	if err := MergeServices(s, "foo", "./foo", io.Discard, io.Discard); err != nil {
@@ -162,6 +164,7 @@ func TestMergeServicesCreatesTemplateAndMatchesYq(t *testing.T) {
 }
 
 func TestMergeServicesRewritesExistingEntry(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s := dir + "/services.yaml"
 	os.WriteFile(s, []byte("services:\n  foo:\n    path: ./old\n    build: false\n"), 0o644)
@@ -175,6 +178,7 @@ func TestMergeServicesRewritesExistingEntry(t *testing.T) {
 }
 
 func TestEnsureTiltfile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	tf := dir + "/Tiltfile"
 
@@ -227,6 +231,7 @@ func TestEnsureTiltfile(t *testing.T) {
 }
 
 func TestServiceEndToEnd(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	var out bytes.Buffer
 	if err := Service(base, "foo", base+"/foo", false, &out, io.Discard); err != nil {
@@ -288,6 +293,7 @@ func TestServiceDefaultsPathAndIdempotency(t *testing.T) {
 }
 
 func TestServiceGuards(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	var stderr bytes.Buffer
 	if err := Service(base, "../evil", "", false, io.Discard, &stderr); err == nil {
@@ -311,6 +317,7 @@ func TestServiceGuards(t *testing.T) {
 // ── lo init test (Playwright scaffold) ─────────────────────────────────
 
 func TestScaffoldTestsCopiesTheGenericSuite(t *testing.T) {
+	t.Parallel()
 	dest := t.TempDir() + "/tests"
 	if err := ScaffoldTests(TestTemplate(), dest, false, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
@@ -342,6 +349,7 @@ func TestScaffoldTestsCopiesTheGenericSuite(t *testing.T) {
 }
 
 func TestScaffoldTestsNoClobberAndForce(t *testing.T) {
+	t.Parallel()
 	dest := t.TempDir() + "/tests"
 	os.MkdirAll(dest, 0o755)
 	os.WriteFile(dest+"/MINE.txt", []byte("keep me\n"), 0o644)
@@ -380,6 +388,7 @@ func TestScaffoldTestsNoClobberAndForce(t *testing.T) {
 }
 
 func TestTestsDefaultsDestination(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	var out bytes.Buffer
 	if err := Tests(TestTemplate(), base, "", false, &out, io.Discard); err != nil {
@@ -397,6 +406,7 @@ func TestTestsDefaultsDestination(t *testing.T) {
 // tree the bash implementation copies at runtime. Both must stay identical:
 // same file set, same bytes.
 func TestEmbeddedTemplateMatchesFrameworkTree(t *testing.T) {
+	t.Parallel()
 	fw, err := filepath.Abs(filepath.Join("..", "..", ".lok8s", "libs", "init.d", "test"))
 	if err != nil {
 		t.Fatal(err)
@@ -404,107 +414,13 @@ func TestEmbeddedTemplateMatchesFrameworkTree(t *testing.T) {
 	if info, err := os.Stat(fw); err != nil || !info.IsDir() {
 		t.Skip("framework template tree not available")
 	}
-	embedded, err := TemplateFiles(TestTemplate())
-	if err != nil {
-		t.Fatal(err)
+	embedded := testutil.ReadFS(t, "internal/scaffold/templates/test", TestTemplate(), nil)
+	if len(embedded.Files) < 10 {
+		t.Fatalf("embedded template suspiciously small: %v", embedded.Files)
 	}
-	if len(embedded) < 10 {
-		t.Fatalf("embedded template suspiciously small: %v", embedded)
-	}
-	var onDisk []string
-	filepath.Walk(fw, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
-		}
-		rel, _ := filepath.Rel(fw, path)
-		onDisk = append(onDisk, filepath.ToSlash(rel))
-		return nil
-	})
-	if strings.Join(embedded, "\n") != strings.Join(sorted(onDisk), "\n") {
-		t.Fatalf("file set drift\nembedded: %v\non disk:  %v", embedded, onDisk)
-	}
-	for _, f := range embedded {
-		want, _ := os.ReadFile(filepath.Join(fw, filepath.FromSlash(f)))
-		got, _ := fs.ReadFile(TestTemplate(), f)
-		if !bytes.Equal(want, got) {
-			t.Errorf("%s: embedded bytes differ from .lok8s/libs/init.d/test", f)
-		}
-	}
-}
-
-func sorted(s []string) []string {
-	out := append([]string(nil), s...)
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
-	return out
-}
-
-func TestProjectEnvFiles(t *testing.T) {
-	cases := []struct {
-		env       string
-		wantMise  bool
-		wantEnvrc bool
-		wantErr   bool
-	}{
-		{"", true, false, false},
-		{"mise", true, false, false},
-		{"direnv", false, true, false},
-		{"both", true, true, false},
-		{"none", false, false, false},
-		{"fish", false, false, true},
-	}
-	for _, c := range cases {
-		t.Run("env="+c.env, func(t *testing.T) {
-			dir := t.TempDir()
-			var out, errOut bytes.Buffer
-			err := Project(dir, "demo", dir, false, &out, &errOut, ProjectToolchain{Env: c.env, BVersion: "4.18.7"})
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("expected an error for --env %q", c.env)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			mise, envrc := fsutil.FileExists(filepath.Join(dir, "mise.toml")), fsutil.FileExists(filepath.Join(dir, ".envrc"))
-			if mise != c.wantMise || envrc != c.wantEnvrc {
-				t.Fatalf("env=%q: mise.toml=%v .envrc=%v, want %v/%v", c.env, mise, envrc, c.wantMise, c.wantEnvrc)
-			}
-			if c.wantMise {
-				raw, _ := os.ReadFile(filepath.Join(dir, "mise.toml"))
-				s := string(raw)
-				for _, want := range []string{`_.path = ["{{config_root}}/.bin"]`, `"github:fentas/b" = "4.18.7"`} {
-					if !strings.Contains(s, want) {
-						t.Errorf("mise.toml missing %q", want)
-					}
-				}
-				if strings.Contains(s, "PATH_BASE") {
-					t.Error("mise.toml must not pin PATH_* variables")
-				}
-			}
-			if c.wantEnvrc {
-				raw, _ := os.ReadFile(filepath.Join(dir, ".envrc"))
-				if !strings.Contains(string(raw), "PATH_add .bin") || strings.Contains(string(raw), "export PATH_BASE") {
-					t.Errorf(".envrc content unexpected:\n%s", raw)
-				}
-			}
-		})
-	}
-
-	// Existing env files are kept (never overwritten without --force).
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "mise.toml"), []byte("mine\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var out, errOut bytes.Buffer
-	if err := Project(dir, "demo", dir, false, &out, &errOut, ProjectToolchain{}); err != nil {
-		t.Fatal(err)
-	}
-	if raw, _ := os.ReadFile(filepath.Join(dir, "mise.toml")); string(raw) != "mine\n" {
-		t.Fatalf("existing mise.toml was overwritten: %q", raw)
-	}
+	testutil.Drift{
+		Want: embedded,
+		Got:  testutil.ReadDir(t, ".lok8s/libs/init.d/test", fw, nil),
+		Sync: "copy the file to the other side; the embedded template is the vendored copy of .lok8s/libs/init.d/test",
+	}.Check(t)
 }

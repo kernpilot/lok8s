@@ -14,6 +14,7 @@ func scanFixture(t *testing.T, content string) (deny, open int) {
 }
 
 func TestSecpolGatewayDenyCounts(t *testing.T) {
+	t.Parallel()
 	deny, open := scanFixture(t, gatewayDeny)
 	if deny != 1 || open != 0 {
 		t.Errorf("deny/open = %d/%d, want 1/0", deny, open)
@@ -21,6 +22,7 @@ func TestSecpolGatewayDenyCounts(t *testing.T) {
 }
 
 func TestSecpolUntargetedDenyCounts(t *testing.T) {
+	t.Parallel()
 	deny, open := scanFixture(t, "kind: SecurityPolicy\nspec:\n  authorization:\n    defaultAction: Deny\n")
 	if deny != 1 || open != 0 {
 		t.Errorf("deny/open = %d/%d, want 1/0", deny, open)
@@ -28,6 +30,7 @@ func TestSecpolUntargetedDenyCounts(t *testing.T) {
 }
 
 func TestSecpolRoutePolicyWithoutMergeIsOpen(t *testing.T) {
+	t.Parallel()
 	deny, open := scanFixture(t, `kind: SecurityPolicy
 spec:
   targetRef:
@@ -42,6 +45,7 @@ spec:
 }
 
 func TestSecpolMergeTypeIsValueChecked(t *testing.T) {
+	t.Parallel()
 	// The CRD has no enum for mergeType — its only validation is
 	// `self != 'Replace'` — so `Merge`, `strategicmerge`, or "" pass
 	// admission and merge NOTHING. Only StrategicMerge and JSONMerge count.
@@ -68,6 +72,7 @@ spec:
 }
 
 func TestSecpolRoutePolicyWithOwnDenyNotCounted(t *testing.T) {
+	t.Parallel()
 	// A route policy that re-denies replaces a deny-by-default with a
 	// deny-by-default — equivalent in POSTURE, so not counted.
 	deny, open := scanFixture(t, `kind: SecurityPolicy
@@ -88,6 +93,7 @@ spec:
 }
 
 func TestSecpolAllowAllCancelsDeny(t *testing.T) {
+	t.Parallel()
 	// defaultAction: Deny + allow-all rule = the declaration is cosmetic; the
 	// same predicate serves BOTH counts.
 	gatewayAllowAll := `kind: SecurityPolicy
@@ -127,6 +133,7 @@ spec:
 }
 
 func TestSecpolAllowAllPredicateIsNarrow(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		rule string
@@ -177,6 +184,7 @@ spec:
 }
 
 func TestSecpolTLSRouteNotRouted(t *testing.T) {
+	t.Parallel()
 	// TLSRoute/UDPRoute are excluded ON PURPOSE — a SecurityPolicy cannot
 	// produce the replace bug on either (no attachment, no merge hierarchy).
 	deny, open := scanFixture(t, `kind: SecurityPolicy
@@ -193,6 +201,7 @@ spec:
 }
 
 func TestSecpolNonPolicyDocsIgnored(t *testing.T) {
+	t.Parallel()
 	// A ConfigMap quoting the strings must not count (the per-object reader
 	// replaced the old file-global grep exactly because of this).
 	deny, open := scanFixture(t, "kind: ConfigMap\ndata:\n  x: |\n    defaultAction: Deny\n")
@@ -202,6 +211,7 @@ func TestSecpolNonPolicyDocsIgnored(t *testing.T) {
 }
 
 func TestSecpolUnparsableFileCountsNothing(t *testing.T) {
+	t.Parallel()
 	deny, open := scanFixture(t, gatewayDeny+"---\n[broken\n")
 	// Streaming: the document BEFORE the syntax error still counts (yq
 	// prints per document); the broken tail contributes nothing.
@@ -211,6 +221,7 @@ func TestSecpolUnparsableFileCountsNothing(t *testing.T) {
 }
 
 func TestEncryptionEncryptsSecretsMultiDoc(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	f := filepath.Join(dir, "a.yaml")
 	writeFileT(t, f, "kind: ConfigMap\n---\nkind: EncryptionConfiguration\nresources:\n  - resources: [secrets]\n    providers:\n      - kmsv2:\n          name: k\n")

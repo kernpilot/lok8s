@@ -9,7 +9,6 @@ package kubehz
 // test composes the same values).
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,6 +48,7 @@ func capiHooks(c *Context) capi.Hooks {
 }
 
 func TestReadConfigHookReportsHostingAndGuards(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := h.writeSpec("hosted.dev", specYAML("KubeOne", "    hosting: hosted\n    apiUrl: https://api.kubehz.dev\n"))
 	hosting, err := h.ctx.ReadConfigHook()(spec)
@@ -66,32 +66,33 @@ func TestRegisterHookTail(t *testing.T) {
 	delete(h.env, "KUBEHZ_TOKEN")
 	// access: none → no registration, no request.
 	spec := h.writeSpec("none.dev", "kind: Lo\nspec:\n  kubehz:\n    access: none\n")
-	mustOK(t, h.ctx.RegisterHook()(context.Background(), "none.dev", spec), h.output())
+	mustOK(t, h.ctx.RegisterHook()(t.Context(), "none.dev", spec), h.output())
 	if len(h.reqs()) != 0 {
 		t.Fatal("access none must not register")
 	}
 	// invalid config aborts the dispatch.
 	spec = h.writeSpec("bad.dev", "kind: Lo\nspec:\n  kubehz:\n    access: weird\n")
-	mustErr(t, h.ctx.RegisterHook()(context.Background(), "bad.dev", spec))
+	mustErr(t, h.ctx.RegisterHook()(t.Context(), "bad.dev", spec))
 	mustContain(t, h.output(), "invalid spec.kubehz.access: weird")
 	// registered → the announce runs (non-fatal by contract).
 	h.reset()
 	h.handle("POST /api/clusters/register", 200, `{"id":"cl-1"}`)
 	spec = h.writeSpec("reg.dev", "kind: Lo\nspec:\n  cluster:\n    domain: reg.dev\n  kubehz:\n    access: registered\n    apiUrl: "+h.apiURL()+"\n")
-	mustOK(t, h.ctx.RegisterHook()(context.Background(), "reg.dev", spec), h.output())
+	mustOK(t, h.ctx.RegisterHook()(t.Context(), "reg.dev", spec), h.output())
 	mustContain(t, h.output(), "cluster 'reg.dev' registered (pending)")
 }
 
 func TestDeregisterHookTail(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := h.writeSpec("reg.dev", specYAML("KubeOne", "    access: registered\n    apiUrl: "+h.apiURL()+"\n"))
 	h.handle("GET /api/clusters", 200, `{"data":[{"id":"cl-1","domain":"reg.dev"}]}`)
 	h.handle("DELETE /api/clusters/cl-1", 200, `{}`)
-	mustOK(t, h.ctx.DeregisterHook()(context.Background(), "reg.dev", spec), h.output())
+	mustOK(t, h.ctx.DeregisterHook()(t.Context(), "reg.dev", spec), h.output())
 	mustContain(t, h.output(), "removed from the platform")
 	none := h.writeSpec("none.dev", "kind: Lo\n")
 	h.reset()
-	mustOK(t, h.ctx.DeregisterHook()(context.Background(), "none.dev", none), h.output())
+	mustOK(t, h.ctx.DeregisterHook()(t.Context(), "none.dev", none), h.output())
 	if len(h.reqs()) != 0 {
 		t.Fatal("access none must not deregister")
 	}
@@ -108,7 +109,7 @@ func TestKubeoneDriverBranchesToHostedThroughHooks(t *testing.T) {
 	h.handle("GET /api/clusters/cl-h/kubeconfig", 200, "kc\n")
 	d := kubeone.New(&driver.Deps{Paths: h.ctx.Paths, Runner: h.runner, Stderr: &h.errOut})
 	d.Hooks = kubeoneHooks(h.ctx)
-	mustOK(t, d.Provision(context.Background(), "test.kubehz.dev"), h.output())
+	mustOK(t, d.Provision(t.Context(), "test.kubehz.dev"), h.output())
 	if _, err := os.Stat(filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")); err != nil {
 		t.Fatal("hosted provision did not land the kubeconfig")
 	}
@@ -120,7 +121,7 @@ func TestKubeoneDriverBranchesToHostedThroughHooks(t *testing.T) {
 	h.reset()
 	h.handle("GET /api/clusters", 200, `{"data":[{"id":"cl-h","domain":"test.kubehz.dev"}]}`)
 	h.handle("DELETE /api/clusters/cl-h", 200, `{}`)
-	mustOK(t, d.Destroy(context.Background(), "test.kubehz.dev"), h.output())
+	mustOK(t, d.Destroy(t.Context(), "test.kubehz.dev"), h.output())
 	if h.runner.anyCall("kubeone") {
 		t.Fatal("the self-hosted teardown ran")
 	}
@@ -134,7 +135,7 @@ func TestCapiDriverBranchesThroughHooks(t *testing.T) {
 	h.handle("GET /api/clusters/cl-c/kubeconfig", 200, "kc\n")
 	d := capi.New(&driver.Deps{Paths: h.ctx.Paths, Runner: h.runner, Stderr: &h.errOut})
 	d.Hooks = capiHooks(h.ctx)
-	mustOK(t, d.Provision(context.Background(), "test.kubehz.dev"), h.output())
+	mustOK(t, d.Provision(t.Context(), "test.kubehz.dev"), h.output())
 	if !h.anyReq("POST", "/api/clusters") {
 		t.Fatal("hosted create not called")
 	}
@@ -144,6 +145,6 @@ func TestCapiDriverBranchesThroughHooks(t *testing.T) {
 	h2.writeSpec("self.dev", "kind: Capi\nspec:\n  kubehz:\n    hosting: self\n")
 	d2 := capi.New(&driver.Deps{Paths: h2.ctx.Paths, Runner: h2.runner, Stderr: &h2.errOut})
 	d2.Hooks = capiHooks(h2.ctx)
-	mustErr(t, d2.Provision(context.Background(), "self.dev"))
+	mustErr(t, d2.Provision(t.Context(), "self.dev"))
 	mustContain(t, h2.output(), "spec.managementCluster.domain is required for self-hosted CAPI")
 }

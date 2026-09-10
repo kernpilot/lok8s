@@ -3,7 +3,6 @@ package kubehz
 // shared_test.go ports tests/unit/kubehz_shared_test.bats.
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"os"
@@ -18,6 +17,7 @@ func spaceSpec(h *harness, block string) string {
 }
 
 func TestSpaceConfigDefaults(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	sp, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, ""))
 	mustOK(t, err, h.output())
@@ -27,6 +27,7 @@ func TestSpaceConfigDefaults(t *testing.T) {
 }
 
 func TestSpaceConfigParseFailureNeverDefaultsSlug(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	broken := filepath.Join(h.base, "broken.yaml")
 	_ = os.WriteFile(broken, []byte("{{ not yaml"), 0o644)
@@ -37,6 +38,7 @@ func TestSpaceConfigParseFailureNeverDefaultsSlug(t *testing.T) {
 const spaceBlock = "    space:\n      slug: acme\n      name: Acme Prod\n      plan: shared-s\n      nodes: [worker-1, worker-2]\n"
 
 func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, spaceBlock)
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
@@ -44,7 +46,7 @@ func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
 	h.handle("GET /api/spaces/sp-123", 200, `{"ok":true,"data":{"id":"sp-123","status":"Active"}}`)
 	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}`)
 	cfg := &Config{APIURL: h.apiURL(), Hosting: "shared"}
-	mustOK(t, h.ctx.ProvisionShared(context.Background(), cfg, "acme.example.org", spec), h.output())
+	mustOK(t, h.ctx.ProvisionShared(t.Context(), cfg, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Space 'acme' is Active (id: sp-123)")
 	mustContain(t, h.output(), "worker-1")
 	mustContain(t, h.output(), "worker-2")
@@ -57,11 +59,12 @@ func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
 }
 
 func TestProvisionSharedAdoptsExisting(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, "")
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-777","slug":"acme","status":"Active"}]}`)
 	h.handle("GET /api/spaces/sp-777", 200, `{"ok":true,"data":{"id":"sp-777","status":"Active"}}`)
-	mustOK(t, h.ctx.ProvisionShared(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
+	mustOK(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Space 'acme' is Active (id: sp-777)")
 	mustContain(t, h.output(), "No nodes declared under spec.kubehz.space.nodes")
 	for _, r := range h.reqs() {
@@ -72,16 +75,18 @@ func TestProvisionSharedAdoptsExisting(t *testing.T) {
 }
 
 func TestProvisionSharedNoShardAvailable(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, "")
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
 	h.handle("POST /api/spaces", 409, `{"ok":false,"data":{"code":"NO_SHARD_AVAILABLE","message":"no capacity"}}`)
-	mustErr(t, h.ctx.ProvisionShared(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
 	mustContain(t, h.output(), "no shared control plane has room")
 	mustContain(t, h.output(), "hosting: self")
 }
 
 func TestProvisionSharedLostRaceAdopts(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, "")
 	posted := false
@@ -98,37 +103,40 @@ func TestProvisionSharedLostRaceAdopts(t *testing.T) {
 		io.WriteString(w, `{"ok":false,"data":{"code":"CONFLICT","message":"slug exists"}}`)
 	})
 	h.handle("GET /api/spaces/sp-race", 200, `{"ok":true,"data":{"id":"sp-race","status":"Active"}}`)
-	mustOK(t, h.ctx.ProvisionShared(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
+	mustOK(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Space 'acme' is Active (id: sp-race)")
 }
 
 func TestProvisionSharedRequiresToken(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	delete(h.env, "KUBEHZ_TOKEN")
-	mustErr(t, h.ctx.ProvisionShared(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spaceSpec(h, "")))
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spaceSpec(h, "")))
 	mustContain(t, h.output(), "KUBEHZ_TOKEN is required")
 }
 
 func TestDestroyShared(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, "")
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-9","slug":"acme","status":"Active"}]}`)
 	h.handle("DELETE /api/spaces/sp-9", 200, `{"ok":true}`)
-	mustOK(t, h.ctx.DestroyShared(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
+	mustOK(t, h.ctx.DestroyShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Space 'acme' removed (id: sp-9)")
 
 	h.reset()
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
-	mustOK(t, h.ctx.DestroyShared(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
+	mustOK(t, h.ctx.DestroyShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "nothing to destroy")
 }
 
 func TestSpaceStatusRendersTable(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, "")
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-5","slug":"acme","status":"Active","planId":"shared-free"}]}`)
 	h.handle("GET /api/spaces/sp-5/nodes", 200, `{"ok":true,"data":{"nodes":[{"name":"worker-1","status":"Ready","lane":"hcloud"}],"usage":{"nodes":1,"maxNodes":2}}}`)
-	mustOK(t, h.ctx.SpaceStatus(context.Background(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
+	mustOK(t, h.ctx.SpaceStatus(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Phase:   Active")
 	mustContain(t, h.output(), "Plan:    shared-free")
 	mustContain(t, h.output(), "Nodes:   1/2")
@@ -136,6 +144,7 @@ func TestSpaceStatusRendersTable(t *testing.T) {
 }
 
 func TestSpaceAPICarriesTheBearer(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.handleFunc("GET /api/spaces/sp-auth", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer khz_test_token" {
@@ -146,14 +155,14 @@ func TestSpaceAPICarriesTheBearer(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"data":{"id":"sp-auth"}}`)
 	})
 	cfg := &Config{APIURL: h.apiURL()}
-	res, err := h.ctx.spaceAPI(context.Background(), cfg, "GET", "/api/spaces/sp-auth", nil)
+	res, err := h.ctx.spaceAPI(t.Context(), cfg, "GET", "/api/spaces/sp-auth", nil)
 	mustOK(t, err, h.output())
 	if !is2xx(res.Status) {
 		t.Fatalf("status %d", res.Status)
 	}
 	// An empty token env sends "Bearer " and the api answers 401 → non-2xx.
 	h.env["KUBEHZ_TOKEN"] = ""
-	res, err = h.ctx.spaceAPI(context.Background(), cfg, "GET", "/api/spaces/sp-auth", nil)
+	res, err = h.ctx.spaceAPI(t.Context(), cfg, "GET", "/api/spaces/sp-auth", nil)
 	mustOK(t, err, h.output())
 	if is2xx(res.Status) {
 		t.Fatal("an empty bearer must not pass")
@@ -164,6 +173,7 @@ func TestSpaceAPICarriesTheBearer(t *testing.T) {
 }
 
 func TestSpaceWaitActiveFailsFast(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	polls := 0
 	h.handleFunc("GET /api/spaces/sp-x", func(w http.ResponseWriter, r *http.Request) {
@@ -171,23 +181,24 @@ func TestSpaceWaitActiveFailsFast(t *testing.T) {
 		w.WriteHeader(401)
 		io.WriteString(w, `{"error":"unauthorized"}`)
 	})
-	mustErr(t, h.ctx.spaceWaitActive(context.Background(), &Config{APIURL: h.apiURL()}, "sp-x", 60))
+	mustErr(t, h.ctx.spaceWaitActive(t.Context(), &Config{APIURL: h.apiURL()}, "sp-x", 60))
 	mustContain(t, h.output(), "refused the token")
 	if polls != 1 {
 		t.Fatalf("polled %d times (must fail fast)", polls)
 	}
 	h.reset()
 	h.handle("GET /api/spaces/sp-y", 404, `{"error":"gone"}`)
-	mustErr(t, h.ctx.spaceWaitActive(context.Background(), &Config{APIURL: h.apiURL()}, "sp-y", 60))
+	mustErr(t, h.ctx.spaceWaitActive(t.Context(), &Config{APIURL: h.apiURL()}, "sp-y", 60))
 	mustContain(t, h.output(), "vanished")
 }
 
 func TestJoinSubcommandMintsTicket(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	spaceSpec(h, "")
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-1","slug":"acme"}]}`)
 	h.handle("POST /api/spaces/sp-1/join-token", 201, `{"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"soon"}}`)
-	mustOK(t, h.ctx.Join(context.Background(), "acme.example.org", "worker-9", false), h.output())
+	mustOK(t, h.ctx.Join(t.Context(), "acme.example.org", "worker-9", false), h.output())
 	mustContain(t, h.output(), "Node 'worker-9' — join ticket (valid until soon, single use):")
 	mustContain(t, h.output(), "    a1b2c3.d4e5f6g7h8i9j0k1")
 	if r := h.lastReq("POST", "/join-token"); r.Body != `{"nodeName":"worker-9"}` {
@@ -195,7 +206,7 @@ func TestJoinSubcommandMintsTicket(t *testing.T) {
 	}
 	h.reset()
 	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
-	mustErr(t, h.ctx.Join(context.Background(), "acme.example.org", "worker-9", false))
+	mustErr(t, h.ctx.Join(t.Context(), "acme.example.org", "worker-9", false))
 	mustContain(t, h.output(), "No space 'acme' found — run 'lo provision' first")
 }
 
@@ -222,12 +233,13 @@ func joinScripts(t *testing.T, tmp, node string) []string {
 }
 
 func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	tmp := filepath.Join(h.base, "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
 	h.env["TMPDIR"] = tmp
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	paths := joinScripts(t, tmp, "worker-1")
 	if len(paths) != 1 {
 		t.Fatalf("scripts written: %v", paths)
@@ -272,7 +284,7 @@ func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
 	// A re-mint gets its own directory: the first script is left as it
 	// was (it expires with its ticket), the new one is owner-only again.
 	h.handle("POST /api/spaces/sp-123/join-token", 201, strings.Replace(joinTicketJSON, "TICKET='"+joinTicket+"'", "TICKET='f6f6f6.remintedremintd'", 1))
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	paths = joinScripts(t, tmp, "worker-1")
 	if len(paths) != 2 {
 		t.Fatalf("re-mint did not write a second script: %v", paths)
@@ -298,12 +310,13 @@ func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
 
 // --print-token: the ticket is shown on the terminal as well.
 func TestSpaceMintJoinPrintTokenEchoesTheTicket(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	tmp := filepath.Join(h.base, "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
 	h.env["TMPDIR"] = tmp
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", true), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", true), h.output())
 	mustContain(t, h.output(), "    "+joinTicket)
 	mustNotContain(t, h.output(), "--print-token")
 	if len(joinScripts(t, tmp, "worker-1")) != 1 {
@@ -320,7 +333,7 @@ func TestSpaceMintJoinFallsBackToTheOSTempDir(t *testing.T) {
 	delete(h.env, "TMPDIR")
 	t.Setenv("TMPDIR", tmp)
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	if len(joinScripts(t, tmp, "worker-1")) != 1 {
 		t.Fatal("script not under os.TempDir()")
 	}
@@ -331,6 +344,7 @@ func TestSpaceMintJoinFallsBackToTheOSTempDir(t *testing.T) {
 // foreign file. Neither is touched and neither receives the ticket: the
 // script lands in a directory nobody could name in advance.
 func TestSpaceMintJoinIgnoresPlantedNames(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	tmp := filepath.Join(h.base, "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
@@ -349,7 +363,7 @@ func TestSpaceMintJoinIgnoresPlantedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	if raw, _ := os.ReadFile(victim); string(raw) != "untouched\n" {
 		t.Fatalf("ticket written through the planted symlink: %q", raw)
 	}
@@ -365,10 +379,11 @@ func TestSpaceMintJoinIgnoresPlantedNames(t *testing.T) {
 // The mint has already happened when the write fails: the user is told the
 // ticket is live and how to get a usable one, and nothing is echoed.
 func TestSpaceMintJoinReportsAnUnwritableTempDir(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.env["TMPDIR"] = filepath.Join(h.base, "does-not-exist")
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
-	mustErr(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
 	mustContain(t, h.output(), "could not write the join script for 'worker-1'")
 	mustContain(t, h.output(), "The ticket was minted before the write failed")
 	mustContain(t, h.output(), "valid until 2026-08-07T20:00:00Z")
@@ -380,10 +395,11 @@ func TestSpaceMintJoinReportsAnUnwritableTempDir(t *testing.T) {
 // the boundary (the same DNS-label rule the api enforces) instead of
 // trusting the caller — before any directory is created.
 func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.env["TMPDIR"] = h.base
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
-	mustErr(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "../escaped", false))
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "../escaped", false))
 	mustContain(t, h.output(), "is not a node name the platform accepts")
 	if _, err := os.Stat(filepath.Join(filepath.Dir(h.base), "kubehz-join-escaped.sh")); err == nil {
 		t.Fatal("script escaped the temp dir")
@@ -394,9 +410,10 @@ func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
 }
 
 func TestSpaceMintJoinWithoutScriptKeepsTheGuidePointer(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z"}}`)
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	mustContain(t, h.output(), "Spaces → Joining nodes")
 	// No script: the terminal is the only channel, so the ticket is shown.
 	mustContain(t, h.output(), "    "+joinTicket)
@@ -409,12 +426,13 @@ func TestSpaceMintJoinWithoutScriptKeepsTheGuidePointer(t *testing.T) {
 // they are shown, and a ticket outside the bootstrap-token shape is
 // refused rather than handed to a machine or a terminal.
 func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	tmp := filepath.Join(h.base, "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
 	h.env["TMPDIR"] = tmp
 	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"2026\u001b[2J-08-07","endpoint":"https://kkp1\u001b[31m.example:6443","script":"#!/bin/bash\n"}}`)
-	mustOK(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	mustNotContain(t, h.output(), "\x1b[2J")
 	mustNotContain(t, h.output(), "\x1b[31m")
 	mustContain(t, h.output(), "valid until 2026[2J-08-07")
@@ -422,7 +440,7 @@ func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
 
 	h.reset()
 	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"evil\u001b[2Jtoken","expiresAt":"2026-08-07T20:00:00Z","script":"#!/bin/bash\n"}}`)
-	mustErr(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-2", false))
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-2", false))
 	mustContain(t, h.output(), "shape this CLI does not recognise")
 	mustNotContain(t, h.output(), "\x1b[2J")
 	mustNotContain(t, h.output(), "evil")
@@ -433,7 +451,7 @@ func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
 	// A non-2xx envelope's message and help are scrubbed on the way out.
 	h.reset()
 	h.handle("POST /api/spaces/sp-123/join-token", 422, `{"ok":false,"message":"bad\u001b[2Jnode","help":"try\u0007again"}`)
-	mustErr(t, h.ctx.spaceMintJoin(context.Background(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-3", false))
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-3", false))
 	mustNotContain(t, h.output(), "\x1b[2J")
 	mustNotContain(t, h.output(), "\x07")
 	mustContain(t, h.output(), "bad[2Jnode")

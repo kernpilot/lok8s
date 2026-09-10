@@ -14,7 +14,6 @@ package lo
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -173,7 +172,7 @@ func (h *healFixture) called(marker string) bool {
 
 func TestHealRepairsOnlyTheDriftedNode(t *testing.T) {
 	h := newHealFixture(t)
-	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
 	}
 
@@ -215,7 +214,7 @@ func TestHealHealthyClusterIsSilentNoop(t *testing.T) {
 	// Repair the drifted node up front, so nothing needs healing.
 	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
 
-	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.calls) != 0 || len(h.restarts()) != 0 {
@@ -232,7 +231,7 @@ func TestHealLatchUpRestartsKubeletOnly(t *testing.T) {
 	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
 	h.observed["bad"] = "172.31.0.2"
 
-	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if !h.called("kubelet-restart:bad") {
@@ -258,7 +257,7 @@ func TestHealNonIPAddressNeverReachesTheNode(t *testing.T) {
 		}
 		return orig(c)
 	}
-	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if h.called("repair:bad") {
@@ -279,7 +278,7 @@ func TestHealDualStackWarnedNeverRewritten(t *testing.T) {
 	h := newHealFixture(t)
 	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.2,fd00::2 --node-labels="`+"\n")
 
-	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if h.called("repair:bad") {
@@ -296,7 +295,7 @@ func TestHealSkipsCNINudgeWithoutKubeconfig(t *testing.T) {
 	// exists — kubectl must NOT be invoked, or it would talk to whatever
 	// $KUBECONFIG/current-context happens to point at: the WRONG cluster.
 	h := newHealFixture(t)
-	if err := h.d.healNodeIPs(context.Background(), "lotest", "", h.errBuf); err != nil {
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "", h.errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if !h.called("repair:bad") {
@@ -329,12 +328,12 @@ func TestNodesOnRegistryNetworkGate(t *testing.T) {
 		return nil
 	}
 
-	if !d.nodesOnRegistryNetwork(context.Background(), "lotest") {
+	if !d.nodesOnRegistryNetwork(t.Context(), "lotest") {
 		t.Fatal("node 'bad' is attached to the registry network but the gate said no — an already-drifted pre-flip cluster would never be healed")
 	}
 
 	members = "lok8s-registry-io-docker "
-	if d.nodesOnRegistryNetwork(context.Background(), "lotest") {
+	if d.nodesOnRegistryNetwork(t.Context(), "lotest") {
 		t.Fatal("no cluster node is on the registry network, yet the gate fired")
 	}
 }

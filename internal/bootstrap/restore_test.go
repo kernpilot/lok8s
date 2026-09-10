@@ -20,7 +20,7 @@ import (
 
 func TestRestoreDNoDirIsSilentNoop(t *testing.T) {
 	e, f, _, errOut, _ := testEngine(t)
-	e.restoreD(context.Background(), "test.lok8s.dev", "/kc")
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
 	if len(f.calls) != 0 {
 		t.Errorf("kubectl called with no restore.d: %v", f.calls)
 	}
@@ -42,7 +42,7 @@ func TestRestoreDPlaintextStoreCopyWins(t *testing.T) {
 		sopsCalled = true
 		return nil, fmt.Errorf("must not be called")
 	}
-	e.restoreD(context.Background(), "test.lok8s.dev", "/kc/kubeconfig")
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc/kubeconfig")
 	if !strings.Contains(errOut.String(), "restore.d — 1 applied, 0 skipped") {
 		t.Errorf("missing summary: %s", errOut.String())
 	}
@@ -78,7 +78,7 @@ func TestRestoreDSopsFallbackDecryptsInMemory(t *testing.T) {
 		}
 		return nil
 	})
-	e.restoreD(context.Background(), "test.lok8s.dev", "/kc/kubeconfig")
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc/kubeconfig")
 	if !strings.HasSuffix(decrypted, "restore.d/tls-b.sops.yaml") {
 		t.Errorf("decrypted wrong file: %q", decrypted)
 	}
@@ -101,7 +101,7 @@ func TestRestoreDDecryptFailureWarnsAndContinues(t *testing.T) {
 	e.SopsDecrypt = func(path string) ([]byte, error) { return nil, fmt.Errorf("no key") }
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error { return &rcError{1} })
 	// Never fatal — DR must not wedge on a missing age key.
-	e.restoreD(context.Background(), "test.lok8s.dev", "/kc")
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
 	if !strings.Contains(errOut.String(), "could not decrypt/apply tls-c") {
 		t.Errorf("missing warn: %s", errOut.String())
 	}
@@ -126,7 +126,7 @@ func TestRestoreDApplyFailureFallsThroughStoreCopyToSops(t *testing.T) {
 		}
 		return nil // the sops-path apply succeeds
 	})
-	e.restoreD(context.Background(), "test.lok8s.dev", "/kc")
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
 	if call != 2 {
 		t.Fatalf("kubectl calls = %d, want 2 (store copy, then sops)", call)
 	}

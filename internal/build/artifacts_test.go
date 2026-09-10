@@ -258,6 +258,7 @@ func TestArtifactsExportsSecretsPath(t *testing.T) {
 }
 
 func TestCountKindLines(t *testing.T) {
+	t.Parallel()
 	in := []byte("kind: A\nfoo: 1\n  kind: nested-not-counted\n---\nkind: B\nunkind: x\n")
 	if got := countKindLines(in); got != 2 {
 		t.Errorf("countKindLines = %d, want 2", got)

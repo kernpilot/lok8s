@@ -22,12 +22,18 @@ import (
 	"strings"
 	"testing"
 
+	"flag"
+
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
+
+// update rewrites the golden files with the current output:
+// go test ./internal/driver/lo/ -update
+var update = flag.Bool("update", false, "rewrite the golden files")
 
 type fakeRunner struct {
 	t *testing.T
@@ -289,6 +295,24 @@ func (f *fakeDocker) hasMemberIP(network, ipWithPrefix, name string) bool {
 	return slices.Contains(f.members(network), ipWithPrefix+" "+name)
 }
 
+// dockerVerb answers one docker verb. rest holds the argv after the matched
+// prefix.
+type dockerVerb func(f *fakeDocker, c execx.Cmd, rest []string) error
+
+// dockerVerbs routes a docker argv by its longest matching prefix (two
+// words for the network subcommands, one otherwise). A verb absent from the
+// table succeeds silently, like `docker volume …` does here.
+var dockerVerbs = map[string]dockerVerb{
+	"inspect":            (*fakeDocker).inspectContainer,
+	"rm":                 (*fakeDocker).removeContainer,
+	"run":                (*fakeDocker).runContainer,
+	"network inspect":    (*fakeDocker).inspectNetwork,
+	"network disconnect": (*fakeDocker).disconnectNetwork,
+	"network connect":    (*fakeDocker).connectNetwork,
+	"network create":     (*fakeDocker).createNetworkVerb,
+	"network rm":         (*fakeDocker).removeNetwork,
+}
+
 // handle answers a docker execx.Cmd against the file-backed state.
 func (f *fakeDocker) handle(c execx.Cmd) error {
 	if c.Name != "docker" {
@@ -301,164 +325,185 @@ func (f *fakeDocker) handle(c execx.Cmd) error {
 		}
 	}
 	args := c.Args
-	if len(args) == 0 {
-		return nil
-	}
-	switch args[0] {
-	case "inspect":
-		format := ""
-		rest := args[1:]
-		if len(rest) >= 2 && rest[0] == "-f" {
-			format = rest[1]
-			rest = rest[2:]
-		}
-		if len(rest) == 0 {
-			return fmt.Errorf("no target")
-		}
-		target := rest[0]
-		status, hash, ok := f.containerStatus(target)
-		if !ok {
-			return fmt.Errorf("no such container")
-		}
-		if strings.Contains(format, "State.Status") {
-			writeOut(c, status+"\n")
-		} else if strings.Contains(format, "config-hash") {
-			writeOut(c, hash+"\n")
-		}
-		return nil
-	case "volume":
-		return nil
-	case "rm":
-		target := args[len(args)-1]
-		os.Remove(f.containerPath(target))
-		// docker rm -f releases the container's endpoints — mirror that.
-		nets, _ := os.ReadDir(filepath.Join(f.dir, "networks"))
-		for _, n := range nets {
-			if strings.HasSuffix(n.Name(), ".meta") {
-				continue
-			}
-			f.removeMember(n.Name(), target)
-		}
-		return nil
-	case "run":
-		var name, ip, net, hash string
-		for i := range args {
-			switch {
-			case args[i] == "--name" && i+1 < len(args):
-				name = args[i+1]
-			case args[i] == "--ip" && i+1 < len(args):
-				ip = args[i+1]
-			case strings.HasPrefix(args[i], "--net="):
-				net = strings.TrimPrefix(args[i], "--net=")
-			case args[i] == "--label" && i+1 < len(args):
-				hash = strings.TrimPrefix(args[i+1], "lok8s.dev/config-hash=")
-			}
-		}
-		for _, m := range f.members(net) {
-			if strings.HasPrefix(m, ip+"/") {
-				// Real docker leaves the container behind in Created state.
-				f.setContainer(name, "created", hash)
-				writeErr(c, "docker: failed to set up container networking: Address already in use\n")
-				return fmt.Errorf("exit 125")
-			}
-		}
-		f.setContainer(name, "running", hash)
-		f.addMember(net, ip+"/24", name)
-		writeOut(c, "cid-"+name+"\n")
-		return nil
-	case "network":
-		sub := args[1]
-		rest := args[2:]
-		switch sub {
-		case "inspect":
-			var format, netName string
-			for i := 0; i < len(rest); i++ {
-				switch {
-				case rest[i] == "--format" || rest[i] == "-f":
-					if i+1 < len(rest) {
-						format = rest[i+1]
-						i++
-					}
-				case netName == "":
-					netName = rest[i]
-				}
-			}
-			if _, err := os.Stat(f.networkPath(netName)); err != nil {
-				return fmt.Errorf("no such network")
-			}
-			subnet, ipRange := f.networkMeta(netName)
-			switch {
-			case strings.Contains(format, "Subnet"):
-				writeOut(c, subnet+"\n")
-			case strings.Contains(format, "IPRange"):
-				writeOut(c, ipRange+"\n")
-			case strings.Contains(format, "IPv4Address"):
-				// ORDER MATTERS (mirrors the bats fake): the holder lookup's
-				// template contains IPv4Address AND Containers/Name — this
-				// branch must win.
-				for _, m := range f.members(netName) {
-					writeOut(c, m+"\n")
-				}
-			case strings.Contains(format, "Containers") && strings.Contains(format, "Name"):
-				for _, m := range f.members(netName) {
-					fields := strings.Fields(m)
-					if len(fields) >= 2 {
-						writeOut(c, fields[1]+"\n")
-					}
-				}
-			default:
-				for _, m := range f.members(netName) {
-					writeOut(c, m+"\n")
-				}
-			}
-			return nil
-		case "disconnect":
-			r := rest
-			if len(r) > 0 && r[0] == "-f" {
-				r = r[1:]
-			}
-			if len(r) >= 2 {
-				f.removeMember(r[0], r[1])
-			}
-			return nil
-		case "connect":
-			if len(rest) >= 2 {
-				f.addMember(rest[0], "10.125.200.240/24", rest[1])
-			}
-			return nil
-		case "create":
-			var subnet, ipRange string
-			name := rest[len(rest)-1]
-			for i := range rest {
-				switch rest[i] {
-				case "--subnet":
-					subnet = rest[i+1]
-				case "--ip-range":
-					ipRange = rest[i+1]
-				}
-			}
-			f.createNetwork(name, subnet, ipRange)
-			return nil
-		case "rm":
-			r := rest
-			// Real docker: rm REFUSES a network with active endpoints; -f
-			// only suppresses the not-found error (verified live
-			// 2026-08-18).
-			if len(r) > 0 && r[0] == "-f" {
-				r = r[1:]
-			}
-			if len(r) == 0 {
-				return nil
-			}
-			if len(f.members(r[0])) > 0 {
-				writeErr(c, fmt.Sprintf("Error response from daemon: error while removing network: network %s has active endpoints\n", r[0]))
-				return fmt.Errorf("exit 1")
-			}
-			os.Remove(f.networkPath(r[0]))
-			os.Remove(f.networkPath(r[0]) + ".meta")
-			return nil
+	for n := min(2, len(args)); n > 0; n-- {
+		if verb, ok := dockerVerbs[strings.Join(args[:n], " ")]; ok {
+			return verb(f, c, args[n:])
 		}
 	}
+	return nil
+}
+
+// inspectContainer answers `docker inspect [-f FORMAT] NAME`: the status
+// for a State.Status template, the config hash for a config-hash one.
+func (f *fakeDocker) inspectContainer(c execx.Cmd, rest []string) error {
+	format := ""
+	if len(rest) >= 2 && rest[0] == "-f" {
+		format = rest[1]
+		rest = rest[2:]
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("no target")
+	}
+	status, hash, ok := f.containerStatus(rest[0])
+	if !ok {
+		return fmt.Errorf("no such container")
+	}
+	if strings.Contains(format, "State.Status") {
+		writeOut(c, status+"\n")
+	} else if strings.Contains(format, "config-hash") {
+		writeOut(c, hash+"\n")
+	}
+	return nil
+}
+
+// removeContainer answers `docker rm [-f] NAME`. docker rm -f releases the
+// container's endpoints; the fake mirrors that.
+func (f *fakeDocker) removeContainer(_ execx.Cmd, rest []string) error {
+	if len(rest) == 0 {
+		return nil
+	}
+	target := rest[len(rest)-1]
+	os.Remove(f.containerPath(target))
+	nets, _ := os.ReadDir(filepath.Join(f.dir, "networks"))
+	for _, n := range nets {
+		if strings.HasSuffix(n.Name(), ".meta") {
+			continue
+		}
+		f.removeMember(n.Name(), target)
+	}
+	return nil
+}
+
+// runContainer answers `docker run … --name N --ip IP --net=NET --label
+// lok8s.dev/config-hash=H …`. A taken address fails like the daemon does
+// and leaves the container behind in Created state.
+func (f *fakeDocker) runContainer(c execx.Cmd, rest []string) error {
+	var name, ip, net, hash string
+	for i := range rest {
+		switch {
+		case rest[i] == "--name" && i+1 < len(rest):
+			name = rest[i+1]
+		case rest[i] == "--ip" && i+1 < len(rest):
+			ip = rest[i+1]
+		case strings.HasPrefix(rest[i], "--net="):
+			net = strings.TrimPrefix(rest[i], "--net=")
+		case rest[i] == "--label" && i+1 < len(rest):
+			hash = strings.TrimPrefix(rest[i+1], "lok8s.dev/config-hash=")
+		}
+	}
+	for _, m := range f.members(net) {
+		if strings.HasPrefix(m, ip+"/") {
+			f.setContainer(name, "created", hash)
+			writeErr(c, "docker: failed to set up container networking: Address already in use\n")
+			return fmt.Errorf("exit 125")
+		}
+	}
+	f.setContainer(name, "running", hash)
+	f.addMember(net, ip+"/24", name)
+	writeOut(c, "cid-"+name+"\n")
+	return nil
+}
+
+// inspectNetwork answers `docker network inspect [-f|--format FORMAT] NET`.
+// The template decides the answer: Subnet, IPRange, the member lines for
+// an IPv4Address template, the member names for a Containers/Name one.
+func (f *fakeDocker) inspectNetwork(c execx.Cmd, rest []string) error {
+	var format, netName string
+	for i := 0; i < len(rest); i++ {
+		switch {
+		case rest[i] == "--format" || rest[i] == "-f":
+			if i+1 < len(rest) {
+				format = rest[i+1]
+				i++
+			}
+		case netName == "":
+			netName = rest[i]
+		}
+	}
+	if _, err := os.Stat(f.networkPath(netName)); err != nil {
+		return fmt.Errorf("no such network")
+	}
+	subnet, ipRange := f.networkMeta(netName)
+	switch {
+	case strings.Contains(format, "Subnet"):
+		writeOut(c, subnet+"\n")
+	case strings.Contains(format, "IPRange"):
+		writeOut(c, ipRange+"\n")
+	case strings.Contains(format, "IPv4Address"):
+		// ORDER MATTERS (mirrors the bats fake): the holder lookup's
+		// template contains IPv4Address AND Containers/Name. This branch
+		// must win.
+		for _, m := range f.members(netName) {
+			writeOut(c, m+"\n")
+		}
+	case strings.Contains(format, "Containers") && strings.Contains(format, "Name"):
+		for _, m := range f.members(netName) {
+			fields := strings.Fields(m)
+			if len(fields) >= 2 {
+				writeOut(c, fields[1]+"\n")
+			}
+		}
+	default:
+		for _, m := range f.members(netName) {
+			writeOut(c, m+"\n")
+		}
+	}
+	return nil
+}
+
+// disconnectNetwork answers `docker network disconnect [-f] NET NAME`.
+func (f *fakeDocker) disconnectNetwork(_ execx.Cmd, rest []string) error {
+	if len(rest) > 0 && rest[0] == "-f" {
+		rest = rest[1:]
+	}
+	if len(rest) >= 2 {
+		f.removeMember(rest[0], rest[1])
+	}
+	return nil
+}
+
+// connectNetwork answers `docker network connect NET NAME` with a fixed
+// address in the dynamic range.
+func (f *fakeDocker) connectNetwork(_ execx.Cmd, rest []string) error {
+	if len(rest) >= 2 {
+		f.addMember(rest[0], "10.125.200.240/24", rest[1])
+	}
+	return nil
+}
+
+// createNetworkVerb answers `docker network create --subnet S --ip-range R
+// … NET`.
+func (f *fakeDocker) createNetworkVerb(_ execx.Cmd, rest []string) error {
+	var subnet, ipRange string
+	name := rest[len(rest)-1]
+	for i := range rest {
+		switch rest[i] {
+		case "--subnet":
+			subnet = rest[i+1]
+		case "--ip-range":
+			ipRange = rest[i+1]
+		}
+	}
+	f.createNetwork(name, subnet, ipRange)
+	return nil
+}
+
+// removeNetwork answers `docker network rm [-f] NET`. Real docker REFUSES a
+// network with active endpoints; -f only suppresses the not-found error
+// (verified live 2026-08-18).
+func (f *fakeDocker) removeNetwork(c execx.Cmd, rest []string) error {
+	if len(rest) > 0 && rest[0] == "-f" {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return nil
+	}
+	if len(f.members(rest[0])) > 0 {
+		writeErr(c, fmt.Sprintf("Error response from daemon: error while removing network: network %s has active endpoints\n", rest[0]))
+		return fmt.Errorf("exit 1")
+	}
+	os.Remove(f.networkPath(rest[0]))
+	os.Remove(f.networkPath(rest[0]) + ".meta")
 	return nil
 }
 

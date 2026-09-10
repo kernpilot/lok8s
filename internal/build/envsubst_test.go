@@ -6,6 +6,7 @@ import (
 )
 
 func TestEnvsubst(t *testing.T) {
+	t.Parallel()
 	vals := map[string]string{
 		"LOK8S_SPEC_FOO":   "foo-val",
 		"LOK8S_USER_HOST":  "1.2.3.4",
@@ -45,6 +46,7 @@ func TestEnvsubst(t *testing.T) {
 }
 
 func TestEnvsubstEmptyWhitelistReplacesNothing(t *testing.T) {
+	t.Parallel()
 	in := "a=${LOK8S_SPEC_FOO} b=$LOK8S_SPEC_FOO"
 	got := string(envsubst([]byte(in), nil, func(string) string { return "boom" }))
 	if got != in {

@@ -114,7 +114,7 @@ func newDeployer(t *testing.T, f *fakeRunner, artifact string) (*Deployer, *byte
 func TestApplyAppliesCRDsFirst(t *testing.T) {
 	f := &fakeRunner{}
 	d, out, _, _ := newDeployer(t, f, artifactYAML)
-	if err := d.Apply(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "applied") {
@@ -142,7 +142,7 @@ func TestApplyAppliesCRDsFirst(t *testing.T) {
 func TestApplyMissingArtifact(t *testing.T) {
 	f := &fakeRunner{}
 	d, _, errBuf, domainDir := newDeployer(t, f, "")
-	err := d.Apply(context.Background(), "test.lok8s.dev")
+	err := d.Apply(t.Context(), "test.lok8s.dev")
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -159,7 +159,7 @@ func TestApplyMissingArtifact(t *testing.T) {
 func TestApplyEmptyArtifactNoOp(t *testing.T) {
 	f := &fakeRunner{}
 	d, out, _, _ := newDeployer(t, f, "# just a comment\n---\n")
-	if err := d.Apply(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "applied") || len(f.calls) != 0 {
@@ -171,7 +171,7 @@ func TestApplyEmptyArtifactNoOp(t *testing.T) {
 func TestApplyFailurePropagatesExitCode(t *testing.T) {
 	f := &fakeRunner{applyRC: 3}
 	d, _, _, _ := newDeployer(t, f, artifactYAML)
-	err := d.Apply(context.Background(), "test.lok8s.dev")
+	err := d.Apply(t.Context(), "test.lok8s.dev")
 	var ee *ExitError
 	if !errors.As(err, &ee) || ee.Code != 3 {
 		t.Fatalf("err = %v, want ExitError{3}", err)
@@ -186,7 +186,7 @@ func TestApplyFailurePropagatesExitCode(t *testing.T) {
 func TestApplyFilteredSubset(t *testing.T) {
 	f := &fakeRunner{}
 	d, _, _, _ := newDeployer(t, f, artifactYAML)
-	if err := d.ApplyFiltered(context.Background(), "test.lok8s.dev", "lok8s.dev/type", "platform"); err != nil {
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform"); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.applied) != 1 {
@@ -202,7 +202,7 @@ func TestApplyFilteredSubset(t *testing.T) {
 func TestApplyFilteredUnquotedScalarMatches(t *testing.T) {
 	f := &fakeRunner{}
 	d, _, _, _ := newDeployer(t, f, artifactYAML)
-	if err := d.ApplyFiltered(context.Background(), "test.lok8s.dev", "flag", "true"); err != nil {
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "flag", "true"); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.applied) != 1 || !strings.Contains(f.applied[0], "kind: Namespace") {
@@ -214,7 +214,7 @@ func TestApplyFilteredUnquotedScalarMatches(t *testing.T) {
 func TestApplyFilteredNoMatchWarns(t *testing.T) {
 	f := &fakeRunner{}
 	d, _, errBuf, domainDir := newDeployer(t, f, artifactYAML)
-	if err := d.ApplyFiltered(context.Background(), "test.lok8s.dev", "lok8s.dev/type", "nonexistent"); err != nil {
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "nonexistent"); err != nil {
 		t.Fatal(err)
 	}
 	want := "\033[0;33m[warn]\033[0m no objects match lok8s.dev/type=nonexistent in " + filepath.Join(domainDir, "artifacts.yaml") + "\n"
@@ -230,7 +230,7 @@ func TestApplyFilteredNoMatchWarns(t *testing.T) {
 func TestApplyFilteredMissingArtifact(t *testing.T) {
 	f := &fakeRunner{}
 	d, _, errBuf, _ := newDeployer(t, f, "")
-	if err := d.ApplyFiltered(context.Background(), "test.lok8s.dev", "lok8s.dev/type", "system"); !errors.Is(err, ErrHandled) {
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "system"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "run 'lo build' first") {
@@ -243,7 +243,7 @@ func TestApplyFilteredRejectsInjection(t *testing.T) {
 	for _, tc := range [][2]string{{"key; rm -rf /", "value"}, {"type", "value; echo pwned"}} {
 		f := &fakeRunner{}
 		d, _, errBuf, _ := newDeployer(t, f, "")
-		if err := d.ApplyFiltered(context.Background(), "test.lok8s.dev", tc[0], tc[1]); !errors.Is(err, ErrHandled) {
+		if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", tc[0], tc[1]); !errors.Is(err, ErrHandled) {
 			t.Fatalf("%v: err = %v", tc, err)
 		}
 		want := "\033[0;31m[error]\033[0m Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)\n"
@@ -258,7 +258,7 @@ func TestApplyFilteredRejectsInjection(t *testing.T) {
 func TestApplyFilteredSwallowsApplyFailure(t *testing.T) {
 	f := &fakeRunner{applyRC: 1, waitFail: true}
 	d, _, errBuf, _ := newDeployer(t, f, artifactYAML)
-	if err := d.ApplyFiltered(context.Background(), "test.lok8s.dev", "lok8s.dev/type", "platform"); err != nil {
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform"); err != nil {
 		t.Fatalf("filtered apply must not fail (bash parity), got %v", err)
 	}
 	// Both phases still ran (no CRD in the subset → one apply + the wait).
@@ -272,13 +272,13 @@ func TestApplyFilteredSwallowsApplyFailure(t *testing.T) {
 func TestWaitCRDs(t *testing.T) {
 	f := &fakeRunner{}
 	d, out, _, _ := newDeployer(t, f, "")
-	d.waitCRDs(context.Background(), "apiVersion: v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n")
+	d.waitCRDs(t.Context(), "apiVersion: v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n")
 	if !strings.Contains(out.String(), "waited: wait --for=condition=Established crd/widgets.test.lok8s.dev --timeout=60s") {
 		t.Errorf("stdout = %q", out.String())
 	}
 	f2 := &fakeRunner{waitFail: true}
 	d2, _, errBuf, _ := newDeployer(t, f2, "")
-	d2.waitCRDs(context.Background(), "kind: CustomResourceDefinition\nmetadata:\n  name: x.y\n")
+	d2.waitCRDs(t.Context(), "kind: CustomResourceDefinition\nmetadata:\n  name: x.y\n")
 	if want := "\033[0;33m[warn]\033[0m CRD x.y not established within timeout\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
@@ -286,6 +286,7 @@ func TestWaitCRDs(t *testing.T) {
 
 // bats: main::deploy -l parsing (key=value guard) — the three rejects.
 func TestParseLabel(t *testing.T) {
+	t.Parallel()
 	for _, bad := range []string{"=value", "foo", "foo="} {
 		var errBuf bytes.Buffer
 		if _, _, err := ParseLabel(&errBuf, bad); !errors.Is(err, ErrHandled) {
@@ -308,6 +309,7 @@ func TestParseLabel(t *testing.T) {
 }
 
 func TestHasObjects(t *testing.T) {
+	t.Parallel()
 	for s, want := range map[string]bool{
 		"":                           false,
 		"# c\n---\n":                 false,

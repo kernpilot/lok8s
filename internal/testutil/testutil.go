@@ -1,7 +1,8 @@
 // Package testutil holds the fixture helpers the package tests share: the
-// repo root (for tests that read the checked-in tree) and the
-// mkdir-then-write fixture writer. Test-only by convention — nothing outside
-// *_test.go imports it.
+// repo root (for tests that read the checked-in tree), the mkdir-then-write
+// fixture writer, the drift gate (drift.go) and the golden compare with its
+// -update rewrite. Test-only by convention: nothing outside *_test.go
+// imports it.
 package testutil
 
 import (

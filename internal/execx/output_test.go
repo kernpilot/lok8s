@@ -14,6 +14,7 @@ func (e codeErr) Error() string { return fmt.Sprintf("rc %d", e.code) }
 func (e codeErr) ExitCode() int { return e.code }
 
 func TestExitCode(t *testing.T) {
+	t.Parallel()
 	if got := ExitCode(nil); got != 0 {
 		t.Errorf("nil = %d", got)
 	}
@@ -44,7 +45,7 @@ func (r *recordingRunner) Run(_ context.Context, c Cmd) error {
 // `$(cmd 2>/dev/null)` contract every capture site relies on.
 func TestOutputShape(t *testing.T) {
 	r := &recordingRunner{stdout: "v1.2.3\n", err: errors.New("rc")}
-	out, err := Output(context.Background(), r, Cmd{Name: "tool", Args: []string{"--version"}})
+	out, err := Output(t.Context(), r, Cmd{Name: "tool", Args: []string{"--version"}})
 	if string(out) != "v1.2.3\n" || err == nil {
 		t.Fatalf("Output = %q, %v", out, err)
 	}
@@ -59,7 +60,7 @@ func TestOutputShape(t *testing.T) {
 	}
 	own := &recordingRunner{}
 	sink := io.Discard
-	if _, err := Output(context.Background(), own, Cmd{Name: "t", Stderr: sink}); err != nil || own.got.Stderr != sink {
+	if _, err := Output(t.Context(), own, Cmd{Name: "t", Stderr: sink}); err != nil || own.got.Stderr != sink {
 		t.Error("an explicit stderr is kept")
 	}
 }

@@ -3,14 +3,16 @@ package assets
 import (
 	"bytes"
 	"errors"
-	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
+	"io/fs"
+	"path"
+
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // project is a fresh, empty lok8s project (no .lok8s at all).
@@ -199,170 +201,11 @@ func TestResolveUnknownAndInvalid(t *testing.T) {
 	}
 }
 
-// TestClassificationMatrix drives every one of the six classes through a
-// real ejected unit.
-func TestClassificationMatrix(t *testing.T) {
-	withPolicy(t, PolicyEject)
-	quiet(t)
-	p := project(t)
-	if _, _, err := Resolve(p, "addons/cilium"); err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(p.Lok8s, "addons", "cilium")
-	embedded, _ := EmbeddedFiles(Unit{Rel: "addons/cilium", Kind: "addon"})
-	files := slices.Sorted(maps.Keys(embedded))
-	if len(files) < 4 {
-		t.Fatalf("cilium ships only %d files; the matrix needs 4", len(files))
-	}
-	// local modified: edit one file.
-	os.WriteFile(filepath.Join(dir, files[0]), []byte("edited locally\n"), 0o644)
-	// lo updated: pretend lo ships a new copy of files[1] by rewriting the
-	// marker's hash for it to what is on disk AND changing the local file to
-	// match the marker — i.e. origin == local != embedded.
-	m, _ := ReadMarker(filepath.Join(dir, MarkerFile))
-	os.WriteFile(filepath.Join(dir, files[1]), []byte("older shipped copy\n"), 0o644)
-	m.Files[files[1]] = hashBytes([]byte("older shipped copy\n"))
-	// both: origin, local and embedded all differ.
-	os.WriteFile(filepath.Join(dir, files[2]), []byte("local edit of an old copy\n"), 0o644)
-	m.Files[files[2]] = hashBytes([]byte("some other old copy\n"))
-	// builtin-only: delete a shipped file. local-only: add one.
-	os.Remove(filepath.Join(dir, files[3]))
-	os.WriteFile(filepath.Join(dir, "my-extra.yaml"), []byte("x: 1\n"), 0o644)
-	if err := m.write(filepath.Join(dir, MarkerFile)); err != nil {
-		t.Fatal(err)
-	}
-
-	reports, err := Report(p, []string{"addons/cilium"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := reports[0]
-	got := map[string]FileState{}
-	for _, f := range r.Files {
-		got[f.Path] = f.State
-	}
-	want := map[string]FileState{
-		files[0]:        StateLocalModified,
-		files[1]:        StateLoUpdated,
-		files[2]:        StateBoth,
-		files[3]:        StateBuiltinOnly,
-		"my-extra.yaml": StateLocalOnly,
-	}
-	for f, s := range want {
-		if got[f] != s {
-			t.Errorf("%s: %s, want %s", f, got[f], s)
-		}
-	}
-	unchanged := 0
-	for _, f := range r.Files {
-		if f.State == StateUnchanged {
-			unchanged++
-		}
-	}
-	if unchanged != len(files)-4 {
-		t.Errorf("unchanged = %d, want %d", unchanged, len(files)-4)
-	}
-	if !r.Drifted || r.Origin != OriginColLocalModified {
-		t.Errorf("unit verdict: drifted=%v origin=%s", r.Drifted, r.Origin)
-	}
-	if !strings.Contains(r.Summary(), "1 lo updated") || !strings.Contains(r.Summary(), "1 local modified") || !strings.Contains(r.Summary(), "1 both") {
-		t.Errorf("summary: %s", r.Summary())
-	}
-	if r.Marker == nil || r.Version.Embedded == "-" {
-		t.Errorf("report header: marker=%v version=%+v", r.Marker, r.Version)
-	}
-
-	// Update refuses on the conflicts, writes nothing.
-	var out bytes.Buffer
-	before, _ := os.ReadFile(filepath.Join(dir, files[0]))
-	if _, err := Update(p, "addons/cilium", false, &out); !errors.Is(err, ErrConflict) {
-		t.Fatalf("update on conflict: %v", err)
-	}
-	after, _ := os.ReadFile(filepath.Join(dir, files[0]))
-	if !bytes.Equal(before, after) {
-		t.Fatal("update wrote despite the conflict")
-	}
-	if !strings.Contains(out.String(), string(StateBoth)) {
-		t.Errorf("update did not show the diff first: %s", out.String())
-	}
-	// --force applies the embed, keeps the local-only file, rewrites the marker.
-	out.Reset()
-	if _, err := Update(p, "addons/cilium", true, &out); err != nil {
-		t.Fatal(err)
-	}
-	reports, _ = Report(p, []string{"addons/cilium"})
-	if reports[0].Drifted {
-		t.Errorf("after --force: %s", reports[0].Summary())
-	}
-	if _, err := os.Stat(filepath.Join(dir, "my-extra.yaml")); err != nil {
-		t.Error("--force removed the local-only file")
-	}
-	if _, err := os.Stat(filepath.Join(dir, files[3])); err != nil {
-		t.Error("--force did not restore the builtin-only file")
-	}
-}
-
-func TestUpdateAppliesCleanLoUpdate(t *testing.T) {
-	withPolicy(t, PolicyEject)
-	quiet(t)
-	p := project(t)
-	Resolve(p, "addons/metallb")
-	dir := filepath.Join(p.Lok8s, "addons", "metallb")
-	// Simulate "lo shipped a new chart.yaml": local == origin != embedded.
-	m, _ := ReadMarker(filepath.Join(dir, MarkerFile))
-	old := []byte("kind: ChartRenderer\nversion: 0.0.0-old\n")
-	os.WriteFile(filepath.Join(dir, "chart.yaml"), old, 0o644)
-	m.Files["chart.yaml"] = hashBytes(old)
-	m.write(filepath.Join(dir, MarkerFile))
-
-	reports, _ := Report(p, []string{"addons/metallb"})
-	if reports[0].Version.Local != "0.0.0-old" || reports[0].Version.Embedded == "0.0.0-old" {
-		t.Fatalf("headline: %+v", reports[0].Version)
-	}
-	var out bytes.Buffer
-	if _, err := Update(p, "addons/metallb", false, &out); err != nil {
-		t.Fatalf("clean update refused: %v", err)
-	}
-	got, _ := os.ReadFile(filepath.Join(dir, "chart.yaml"))
-	emb, _ := readEmbedded("addons/metallb/chart.yaml")
-	if !bytes.Equal(got, emb) {
-		t.Fatal("update did not apply the embedded copy")
-	}
-	m2, _ := ReadMarker(filepath.Join(dir, MarkerFile))
-	if m2.Files["chart.yaml"] != hashBytes(emb) {
-		t.Fatal("marker not rewritten")
-	}
-}
-
-// A vendored copy with no marker that is byte-identical to the embedded
-// unit is already up to date: no --force demanded, nothing written.
-func TestUpdateIdenticalVendoredCopyIsInSync(t *testing.T) {
-	withPolicy(t, PolicyEject)
-	p := project(t)
-	dir := filepath.Join(p.Lok8s, "addons", "metallb")
-	if err := writeUnit(Unit{Rel: "addons/metallb", Kind: "addon"}, dir); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	r, err := Update(p, "addons/metallb", false, &out)
-	if err != nil {
-		t.Fatalf("identical vendored copy refused: %v", err)
-	}
-	if r.Marker != nil || r.Drifted {
-		t.Fatalf("report: marker=%v drifted=%v", r.Marker, r.Drifted)
-	}
-	if !strings.Contains(out.String(), "addons/metallb: already in sync") {
-		t.Fatalf("output: %s", out.String())
-	}
-	if _, err := os.Stat(filepath.Join(dir, MarkerFile)); err == nil {
-		t.Fatal("an in-sync report must not write a marker")
-	}
-}
-
 // Two processes ejecting the same unit: the loser's rename lands on a
 // populated directory (EEXIST/ENOTEMPTY) and must be a no-op success, not
 // an error — the unit is there, precedence holds.
 func TestEjectRenameRaceLoserIsANoop(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	dest := filepath.Join(parent, "cilium")
 	os.MkdirAll(dest, 0o755)
@@ -393,79 +236,8 @@ func TestEjectRenameRaceLoserIsANoop(t *testing.T) {
 	}
 }
 
-func TestUpdateRefusesWithoutMarker(t *testing.T) {
-	withPolicy(t, PolicyEject)
-	p := project(t)
-	dir := filepath.Join(p.Lok8s, "addons", "metallb")
-	os.MkdirAll(dir, 0o755)
-	os.WriteFile(filepath.Join(dir, "chart.yaml"), []byte("vendored\n"), 0o644)
-	var out bytes.Buffer
-	if _, err := Update(p, "addons/metallb", false, &out); !errors.Is(err, ErrConflict) {
-		t.Fatalf("update without marker: %v", err)
-	}
-	got, _ := os.ReadFile(filepath.Join(dir, "chart.yaml"))
-	if string(got) != "vendored\n" {
-		t.Fatal("update overwrote a vendored copy without --force")
-	}
-}
-
-func TestReportOriginsAndDoctorLine(t *testing.T) {
-	withPolicy(t, PolicyEject)
-	quiet(t)
-	p := project(t)
-	line, warn := DoctorLine(p)
-	if warn || !strings.Contains(line, "none ejected") {
-		t.Errorf("empty project: %q %v", line, warn)
-	}
-	Resolve(p, "addons/cilium")
-	Resolve(p, "drivers/kubeone/cluster")
-	os.MkdirAll(filepath.Join(p.Lok8s, "addons", "mine"), 0o755)
-	os.WriteFile(filepath.Join(p.Lok8s, "addons", "mine", "kustomization.yaml"), []byte("resources: []\n"), 0o644)
-
-	reports, err := Report(p, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	origins := map[string]string{}
-	for _, r := range reports {
-		origins[r.Rel] = r.Origin
-	}
-	for rel, want := range map[string]string{
-		"addons/cilium":           OriginColLocal,
-		"addons/metallb":          OriginColBuiltin,
-		"drivers/kubeone/cluster": OriginColLocal,
-		"drivers/capi/cluster":    OriginColBuiltin,
-		"addons/mine":             OriginColLocalOnly,
-	} {
-		if origins[rel] != want {
-			t.Errorf("%s: origin %q, want %q", rel, origins[rel], want)
-		}
-	}
-	if reports[len(reports)-1].Rel != "addons/mine" {
-		t.Errorf("local-only unit not listed last: %s", reports[len(reports)-1].Rel)
-	}
-	line, warn = DoctorLine(p)
-	if warn || line != "assets: 2 local, all in sync with the binary" {
-		t.Errorf("in sync: %q %v", line, warn)
-	}
-	os.WriteFile(filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml"), []byte("edited\n"), 0o644)
-	line, warn = DoctorLine(p)
-	if !warn || line != "assets: 1 of 2 local assets drifted (lo assets diff)" {
-		t.Errorf("drift: %q %v", line, warn)
-	}
-	reports, _ = Report(p, nil)
-	if !AnyDrift(reports) {
-		t.Error("AnyDrift missed the edit")
-	}
-
-	var table bytes.Buffer
-	WriteTable(&table, reports, false)
-	if !strings.Contains(table.String(), "addons/cilium                   addon       local (modified)") {
-		t.Errorf("table:\n%s", table.String())
-	}
-}
-
 func TestMarkerRoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	m := &Marker{Lo: "1.2.3", EjectedAt: "2026-09-03T00:00:00Z", Files: map[string]string{
 		"chart.yaml":         "sha256:aa",
@@ -493,16 +265,109 @@ func TestMarkerRoundTrip(t *testing.T) {
 	}
 }
 
-func TestVersionFallsBackToEmbedded(t *testing.T) {
-	prev := BuildVersion
-	t.Cleanup(func() { BuildVersion = prev })
-	BuildVersion = ""
-	emb, _ := readEmbedded("VERSION")
-	if Version() != strings.TrimSpace(string(emb)) {
-		t.Errorf("Version() = %q, embedded VERSION = %q", Version(), emb)
+// The mirror gate pins the embedded mirror (internal/assets/lok8s/**) to
+// the frozen bash tree (.lok8s/**) byte for byte, in BOTH directions. It is
+// the same gate internal/kubehz/manifests_test.go and the scaffold template
+// test apply to their embeds. The embedded copy is canonical; a file edited
+// on either side without hack/sync-legacy-assets.sh fails here.
+
+// mirrored lists the .lok8s subtrees the mirror carries (the sync script's
+// list — keep the two in step).
+var mirrored = []string{
+	"addons",
+	"drivers/lo/cluster",
+	"drivers/kubeone/cluster",
+	"drivers/capi/cluster",
+	"libs/inventory/manifests",
+	"chat",
+	"VERSION",
+}
+
+func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
+	t.Parallel()
+	legacy := filepath.Join(testutil.RepoRoot(t), ".lok8s")
+	if _, err := os.Stat(filepath.Join(legacy, "lo")); err != nil {
+		t.Skipf("frozen tree not present: %v", err)
 	}
-	BuildVersion = "9.9.9"
-	if Version() != "9.9.9" {
-		t.Errorf("stamped version ignored: %s", Version())
+	embedded := testutil.ReadFS(t, "internal/assets/lok8s", FS(), nil)
+	onDisk := testutil.Tree{Name: ".lok8s", Files: map[string]string{}}
+	for _, sub := range mirrored {
+		root := filepath.Join(legacy, filepath.FromSlash(sub))
+		info, err := os.Stat(root)
+		if err != nil {
+			t.Fatalf("%s: missing from .lok8s: %v", sub, err)
+		}
+		if !info.IsDir() {
+			data, _ := os.ReadFile(root)
+			onDisk.Files[sub] = string(data)
+			continue
+		}
+		// An ejected marker never belongs to the frozen tree; ignore one
+		// left behind by a local experiment rather than fail on it.
+		tree := testutil.ReadDir(t, ".lok8s", root, func(rel string) bool { return path.Base(rel) == MarkerFile })
+		for rel, data := range tree.Files {
+			onDisk.Files[sub+"/"+rel] = data
+		}
+	}
+	testutil.Drift{
+		Want:     embedded,
+		Got:      onDisk,
+		Sync:     "hack/sync-legacy-assets.sh",
+		SyncBack: "hack/sync-legacy-assets.sh --from-legacy",
+	}.Check(t)
+	if len(embedded.Files) < 100 {
+		t.Fatalf("embedded mirror suspiciously small: %d files", len(embedded.Files))
+	}
+	for _, must := range []string{"addons/cilium/chart.yaml", "drivers/lo/cluster/registry/mirror.yaml", "drivers/kubeone/cluster/core/kubeone.yaml", "drivers/capi/cluster/core/cluster.yaml", "libs/inventory/manifests/clusterinventory.crd.yaml", "chat/defaults.json", "VERSION"} {
+		if _, ok := embedded.Files[must]; !ok {
+			t.Errorf("%s missing from the embed", must)
+		}
+	}
+}
+
+// `mirrored` above and SUBTREES in hack/sync-legacy-assets.sh are the same
+// list kept in two places (Go cannot import a bash array); this pins them
+// to each other so a subtree added on one side fails here.
+func TestMirroredListMatchesSyncScript(t *testing.T) {
+	t.Parallel()
+	script := filepath.Join(testutil.RepoRoot(t), "hack", "sync-legacy-assets.sh")
+	raw, err := os.ReadFile(script)
+	if err != nil {
+		t.Skipf("sync script not present: %v", err)
+	}
+	var inScript []string
+	inBlock := false
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "SUBTREES=("):
+			inBlock = true
+		case inBlock && trimmed == ")":
+			inBlock = false
+		case inBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#"):
+			inScript = append(inScript, trimmed)
+		}
+	}
+	if strings.Join(inScript, "\n") != strings.Join(mirrored, "\n") {
+		t.Fatalf("hack/sync-legacy-assets.sh SUBTREES and assets_test.go `mirrored` differ:\nscript: %v\ngo:     %v", inScript, mirrored)
+	}
+}
+
+func TestUnitsCoverEveryEmbeddedFile(t *testing.T) {
+	t.Parallel()
+	err := fs.WalkDir(FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || p == "VERSION" {
+			return err
+		}
+		if _, ok := UnitFor(p); !ok {
+			t.Errorf("%s: embedded but no unit covers it", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(AddonNames()); n < 20 {
+		t.Fatalf("only %d embedded addons", n)
 	}
 }

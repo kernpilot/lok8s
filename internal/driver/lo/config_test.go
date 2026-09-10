@@ -391,10 +391,7 @@ func TestRegistriesJSONMatchesBashGolden(t *testing.T) {
 				t.Fatalf("readNetworkConfig: %v\n%s", err, errBuf.String())
 			}
 			got := readFileT(t, filepath.Join(filepath.Dir(cy), ".registries.json"))
-			want := readFileT(t, filepath.Join("testdata", tc.golden))
-			if got != want {
-				t.Errorf(".registries.json diverges from the bash jq output.\n--- bash\n%s\n--- go\n%s", want, got)
-			}
+			testutil.Golden(t, filepath.Join("testdata", tc.golden), got, *update)
 		})
 	}
 }
@@ -491,5 +488,92 @@ func TestValidateIPsCountsAllErrorsAndPrintsAborting(t *testing.T) {
 	// the first error hides the rest of a broken layout.
 	if !strings.Contains(vErr.String(), "error: 2 IP validation error(s). Aborting.") {
 		t.Fatalf("count-all summary missing:\n%s", vErr.String())
+	}
+}
+
+func writeTLSSpec(t *testing.T, clustersDir, tls string) string {
+	t.Helper()
+	cy := filepath.Join(clustersDir, "test.lok8s.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: test-tls
+spec:
+  cluster:
+    domain: test.lok8s.dev
+  network:
+    name: lok8s
+    cidr: "10.125.50.0/24"
+  registries:
+    tls: `+tls+`
+    shared:
+      enabled: true
+      network:
+        name: lok8s-registries
+        cidr: "10.125.200.0/24"
+    mirrors:
+      - name: io-docker
+        url: https://registry-1.docker.io
+  runtime: kind
+  bootstrap: []
+`)
+	return cy
+}
+
+func TestTLSDefaultsTrueWhenAbsent(t *testing.T) {
+	_, _, errBuf, p := testDriver(t)
+	cy := loadFixture(t, p.Clusters, "lo-cluster-shared.lok8s.yaml")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("LOK8S_REGISTRY_TLS") != "true" || os.Getenv("LOK8S_REGISTRY_PORT") != "443" {
+		t.Fatalf("tls default wrong: TLS=%s PORT=%s",
+			os.Getenv("LOK8S_REGISTRY_TLS"), os.Getenv("LOK8S_REGISTRY_PORT"))
+	}
+}
+
+func TestTLSExplicitTrueAndFalse(t *testing.T) {
+	_, _, errBuf, p := testDriver(t)
+
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("LOK8S_REGISTRY_TLS") != "true" || os.Getenv("LOK8S_REGISTRY_PORT") != "443" {
+		t.Fatal("tls: true must set port 443")
+	}
+	rf, err := regFile()
+	if err != nil || !rf.TLS || rf.Port != 443 {
+		t.Fatalf("json tls/port wrong: %+v", rf)
+	}
+	if rf.url("10.125.50.101") != "https://10.125.50.101" {
+		t.Fatal("registry url must be https in TLS mode")
+	}
+
+	cy = writeTLSSpec(t, p.Clusters, "false")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("LOK8S_REGISTRY_TLS") != "false" || os.Getenv("LOK8S_REGISTRY_PORT") != "80" {
+		t.Fatal("tls: false must keep port 80")
+	}
+	rf, err = regFile()
+	if err != nil || rf.TLS || rf.Port != 80 {
+		t.Fatalf("json tls/port wrong: %+v", rf)
+	}
+	if rf.url("10.125.50.101") != "http://10.125.50.101" {
+		t.Fatal("registry url must be http in plain mode")
+	}
+}
+
+func TestTLSNonBooleanRejected(t *testing.T) {
+	_, _, _, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, `"maybe"`)
+	var errBuf bytes.Buffer
+	if err := readNetworkConfig(cy, &errBuf); err == nil {
+		t.Fatal("non-boolean tls accepted")
+	}
+	if !strings.Contains(errBuf.String(), "spec.registries.tls must be true or false") {
+		t.Fatalf("wrong error:\n%s", errBuf.String())
 	}
 }

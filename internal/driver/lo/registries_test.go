@@ -5,25 +5,33 @@ package lo
 // via the config-hash label, durable config files under the state dir, the
 // loud squatted-IP failure, portable ${REMOTE_URL} rendering) and the
 // reserved dynamic range for the shared network — including the recreate of
-// a legacy network that predates the reservation.
+// a legacy network that predates the reservation. The TLS half ports
+// tests/unit/registry_tls_test.bats: registry-config http-block rendering,
+// the Secret-plugin-driven cert mint (SAN list, extraction, remint skip)
+// and the untrusted-CA nudge. The Secret plugin is a fake exec through the
+// runner seam. The network reconcile lives in network_test.go, the `lo
+// registry` verbs in registrycli_test.go.
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"crypto/tls"
+	"crypto/x509"
+
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func runRegistries(t *testing.T, d *Driver, cy string) (string, string, error) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	err := d.registries(context.Background(), &out, &errOut, "test.lok8s.dev", cy)
+	err := d.registries(t.Context(), &out, &errOut, "test.lok8s.dev", cy)
 	return out.String(), errOut.String(), err
 }
 
@@ -47,153 +55,6 @@ func TestRenderSubstitutesRemoteURLWithoutEnvsubst(t *testing.T) {
 	}
 }
 
-// ── Shared-network dynamic range ─────────────────────────
-
-func TestRegistryDynamicRange(t *testing.T) {
-	cases := []struct {
-		cidr, want string
-		ok         bool
-	}{
-		{"10.125.200.0/24", "10.125.200.128/25", true}, // /24 → upper /25
-		{"10.60.0.0/16", "10.60.128.0/17", true},       // /16 → upper /17
-		{"10.0.0.0/31", "", false},                     // /31 has no room to split
-	}
-	for _, tc := range cases {
-		got, ok := registryDynamicRange(tc.cidr)
-		if ok != tc.ok || got != tc.want {
-			t.Errorf("registryDynamicRange(%s) = %q,%v want %q,%v", tc.cidr, got, ok, tc.want, tc.ok)
-		}
-	}
-}
-
-func TestNetworkDynamicRange(t *testing.T) {
-	// .192+ — ABOVE the registries (.101-.110) and the default MetalLB pool
-	// (.125-.150): a dynamically-attached node can collide with neither.
-	got, ok := networkDynamicRange("10.125.125.0/24")
-	if !ok || got != "10.125.125.192/26" {
-		t.Fatalf("networkDynamicRange(/24) = %q,%v want 10.125.125.192/26", got, ok)
-	}
-}
-
-func TestNetworkFreshCreateReservesNodeRange(t *testing.T) {
-	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
-	os.Remove(fd.networkPath("lok8s"))
-	os.Remove(fd.networkPath("lok8s") + ".meta")
-
-	if err := d.network(context.Background(), errBuf); err != nil {
-		t.Fatalf("network: %v\n%s", err, errBuf.String())
-	}
-	joined := strings.Join(fd.log, "\n")
-	if strings.Contains(joined, "--ip-range 10.125.50.0/24") {
-		t.Fatal("the FULL subnet was passed as --ip-range")
-	}
-	if !strings.Contains(joined, "--ip-range 10.125.50.192/26") {
-		t.Fatalf("the project network was created WITHOUT its reserved node range — a rebooting node can squat build/cache (.101/.102) or a MetalLB pool address again.\nlog:\n%s", joined)
-	}
-}
-
-func TestRegistryNetworkFreshCreateReservesDynamicRange(t *testing.T) {
-	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
-	os.Remove(fd.networkPath("lok8s-registries"))
-	os.Remove(fd.networkPath("lok8s-registries") + ".meta")
-
-	if err := d.registryNetwork(context.Background(), errBuf); err != nil {
-		t.Fatalf("registryNetwork: %v", err)
-	}
-	if _, ipRange := fd.networkMeta("lok8s-registries"); ipRange != "10.125.200.128/25" {
-		t.Fatalf("network created WITHOUT the reserved range (got %q) — dynamic attachers can squat the mirrors' static IPs again", ipRange)
-	}
-}
-
-func TestRegistryNetworkWrongRangeRecreated(t *testing.T) {
-	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
-	// A range that differs from the derived one (older tooling, a hand-made
-	// network) can still let dynamic allocation overlap the statics — mere
-	// non-emptiness must not pass for "reserved".
-	fd.setNetworkMeta("lok8s-registries", "10.125.200.0/24", "10.125.200.64/26")
-
-	if err := d.registryNetwork(context.Background(), errBuf); err != nil {
-		t.Fatalf("registryNetwork: %v", err)
-	}
-	if _, ipRange := fd.networkMeta("lok8s-registries"); ipRange != "10.125.200.128/25" {
-		t.Fatalf("a mismatched --ip-range (10.125.200.64/26) was accepted as reserved (now %q)", ipRange)
-	}
-}
-
-func TestRegistryNetworkReservedIsUntouched(t *testing.T) {
-	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
-	fd.setNetworkMeta("lok8s-registries", "10.125.200.0/24", "10.125.200.128/25")
-	fd.log = nil
-
-	if err := d.registryNetwork(context.Background(), errBuf); err != nil {
-		t.Fatalf("registryNetwork: %v", err)
-	}
-	for _, l := range fd.log {
-		if strings.HasPrefix(l, "docker network rm") || strings.HasPrefix(l, "docker network create") {
-			t.Fatalf("a correctly-configured network was churned: %s", l)
-		}
-	}
-}
-
-func TestRegistryNetworkLegacyRecreatedMirrorsRemoved(t *testing.T) {
-	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
-	// Pre-reservation network: subnet only, a mirror + a kind node attached.
-	fd.setNetworkMeta("lok8s-registries", "10.125.200.0/24", "")
-	fd.setContainer("lok8s-registry-io-docker", "running", "some-hash")
-	fd.setContainer("test-node", "running", "")
-	fd.addMember("lok8s-registries", "10.125.200.2/24", "lok8s-registry-io-docker")
-	fd.addMember("lok8s-registries", "10.125.200.7/24", "test-node")
-
-	if err := d.registryNetwork(context.Background(), errBuf); err != nil {
-		t.Fatalf("registryNetwork: %v\nstderr: %s", err, errBuf.String())
-	}
-
-	// Recreated with the range.
-	if _, ipRange := fd.networkMeta("lok8s-registries"); ipRange != "10.125.200.128/25" {
-		t.Fatalf("legacy network not recreated with range (got %q)", ipRange)
-	}
-	// The mirror container was REMOVED — a running mirror with a matching
-	// config-hash would otherwise reconcile "unchanged" while detached from
-	// the new network, silently breaking every pull.
-	if _, _, ok := fd.containerStatus("lok8s-registry-io-docker"); ok {
-		t.Fatal("the mirror survived the recreate — the reconcile will report it unchanged and never re-attach it")
-	}
-	// The kind node is detached but NOT removed — it re-attaches via
-	// connectNodesToRegistryNetwork on its cluster's next lo up.
-	if _, _, ok := fd.containerStatus("test-node"); !ok {
-		t.Fatal("the kind node container was removed, not just detached")
-	}
-	for _, l := range fd.log {
-		if l == "docker rm -f test-node" {
-			t.Fatal("docker rm -f was invoked on the kind node")
-		}
-	}
-}
-
-func TestRegistryNetworkLegacyRecreateThenReconcileRestoresMirror(t *testing.T) {
-	d, _, fd, errBuf, _, cy := lifecycleDriver(t)
-	// End-to-end: the recreate followed by the normal reconcile must land
-	// the mirror back on .2 on the NEW network — the property the whole
-	// recreate design leans on.
-	fd.setNetworkMeta("lok8s-registries", "10.125.200.0/24", "")
-	fd.setContainer("lok8s-registry-io-docker", "running", "some-hash")
-	fd.addMember("lok8s-registries", "10.125.200.2/24", "lok8s-registry-io-docker")
-
-	if err := d.registryNetwork(context.Background(), errBuf); err != nil {
-		t.Fatalf("registryNetwork: %v", err)
-	}
-	out, errText, err := runRegistries(t, d, cy)
-	if err != nil {
-		t.Fatalf("registries: %v\nstderr: %s", err, errText)
-	}
-	if !strings.Contains(out, "registry/lok8s-registry-io-docker created") {
-		t.Fatalf("mirror not recreated:\n%s", out)
-	}
-	if !fd.hasMemberIP("lok8s-registries", "10.125.200.2/24", "lok8s-registry-io-docker") {
-		t.Fatal("mirror did not land back on its static .2 on the new network")
-	}
-}
-
 // ── IP holder lookup ─────────────────────────────────────
 
 func TestRegistryIPHolderExactPrefixMatch(t *testing.T) {
@@ -202,10 +63,10 @@ func TestRegistryIPHolderExactPrefixMatch(t *testing.T) {
 
 	// .2 must NOT match inside .20 — IPv4Address carries the /prefix, so
 	// the match is "<ip>/" as a prefix.
-	if got := d.registryIPHolder(context.Background(), "lok8s-registries", "10.125.200.2"); got != "" {
+	if got := d.registryIPHolder(t.Context(), "lok8s-registries", "10.125.200.2"); got != "" {
 		t.Fatalf("holder(.2) = %q, want empty — .2 matched inside .20", got)
 	}
-	if got := d.registryIPHolder(context.Background(), "lok8s-registries", "10.125.200.20"); got != "other-node" {
+	if got := d.registryIPHolder(t.Context(), "lok8s-registries", "10.125.200.20"); got != "other-node" {
 		t.Fatalf("holder(.20) = %q, want other-node", got)
 	}
 }
@@ -402,34 +263,6 @@ func TestRegistriesTransientlyHeldAddressRetries(t *testing.T) {
 	}
 }
 
-func TestRegistryNetworkLegacyRecreateSurvivesLaggingEndpointRelease(t *testing.T) {
-	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
-	// First `docker network rm` fails (a just-removed mirror's endpoint
-	// lags its release), the retry succeeds. Without the bounded retry the
-	// recreate dies here transiently.
-	fd.setNetworkMeta("lok8s-registries", "10.125.200.0/24", "")
-	fd.setContainer("lok8s-registry-io-docker", "running", "some-hash")
-	fd.addMember("lok8s-registries", "10.125.200.2/24", "lok8s-registry-io-docker")
-
-	lagged := false
-	fd.wrap = func(c execx.Cmd) (bool, error) {
-		if len(c.Args) >= 3 && c.Args[0] == "network" && c.Args[1] == "rm" &&
-			c.Args[2] == "lok8s-registries" && !lagged {
-			lagged = true
-			writeErr(c, "Error response from daemon: error while removing network: network lok8s-registries has active endpoints\n")
-			return true, os.ErrPermission
-		}
-		return false, nil
-	}
-
-	if err := d.registryNetwork(context.Background(), errBuf); err != nil {
-		t.Fatalf("recreate did not survive the lagging release: %v", err)
-	}
-	if _, ipRange := fd.networkMeta("lok8s-registries"); ipRange != "10.125.200.128/25" {
-		t.Fatalf("network not recreated with range (got %q)", ipRange)
-	}
-}
-
 func TestRegistriesProjectNetworkSquatGetsNodeRebootRemediation(t *testing.T) {
 	d, _, fd, _, _, cy := lifecycleDriver(t)
 	// Same persistent-holder failure, but on the PROJECT network
@@ -506,7 +339,7 @@ func TestRegistryConfigmapManifestBytes(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	if err := d.registryConfigmap(context.Background(), &out, &errOut, "test.lok8s.dev", cy); err != nil {
+	if err := d.registryConfigmap(t.Context(), &out, &errOut, "test.lok8s.dev", cy); err != nil {
 		t.Fatal(err)
 	}
 	want := `apiVersion: v1
@@ -541,7 +374,7 @@ func TestCleanupKeepsSharedMirrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.cleanupRegistries(context.Background(), "test-lifecycle")
+	d.cleanupRegistries(t.Context(), "test-lifecycle")
 
 	if _, _, ok := fd.containerStatus("lok8s-registry-build"); ok {
 		t.Fatal("project registry container survived cleanup")
@@ -561,22 +394,309 @@ func TestCleanupKeepsSharedMirrors(t *testing.T) {
 	}
 }
 
-func TestRegistryCleanSharedDetachesHolders(t *testing.T) {
-	d, _, fd, _, _, _ := lifecycleDriver(t)
-	// A foreign holder is attached — exactly the state the
-	// squatted-registry error sends the operator here to fix. Keeping the
-	// network would send the next lo up straight back into the same error.
-	fd.setNetworkMeta("lok8s-registries", "10.125.200.0/24", "")
-	fd.addMember("lok8s-registries", "10.125.200.2/24", "foreign-node")
+func TestRenderRegistryConfigTLSSwapsHTTPBlock(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	buildYAML := filepath.Join(tmp, "build.yaml")
+	testutil.WriteFile(t, buildYAML, realRegistryTemplate(t, "build.yaml"))
 
-	var errBuf bytes.Buffer
-	if err := d.RegistryClean(context.Background(), "test.lok8s.dev", true, &errBuf); err != nil {
-		t.Fatalf("RegistryClean: %v\n%s", err, errBuf.String())
+	out, err := renderRegistryConfig(buildYAML, "", true)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(errBuf.String(), "detaching 'foreign-node'") {
-		t.Fatalf("detach not announced:\n%s", errBuf.String())
+	for _, want := range []string{
+		"addr: :443",
+		"certificate: /etc/registry/certs/tls.crt",
+		"key: /etc/registry/certs/tls.key",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
 	}
-	if _, err := os.Stat(fd.networkPath("lok8s-registries")); err == nil {
-		t.Fatal("the network survived clean --shared — the recommended remediation loops back into the same squatted-IP failure forever")
+	// The original :80 listener must be gone.
+	if strings.Contains(out, "addr: :80") {
+		t.Fatalf(":80 listener survived the swap:\n%s", out)
+	}
+}
+
+func TestRenderRegistryConfigPlainKeeps80(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	buildYAML := filepath.Join(tmp, "build.yaml")
+	testutil.WriteFile(t, buildYAML, realRegistryTemplate(t, "build.yaml"))
+
+	out, err := renderRegistryConfig(buildYAML, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "addr: :80") {
+		t.Fatalf(":80 missing:\n%s", out)
+	}
+	if strings.Contains(out, "tls:") || strings.Contains(out, "addr: :443") {
+		t.Fatalf("plain mode grew a TLS block:\n%s", out)
+	}
+}
+
+func TestRenderRegistryConfigMirrorKeepsRemoteURLUnderTLS(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	mirrorYAML := filepath.Join(tmp, "mirror.yaml")
+	testutil.WriteFile(t, mirrorYAML, realRegistryTemplate(t, "mirror.yaml"))
+
+	out, err := renderRegistryConfig(mirrorYAML, "https://registry-1.docker.io", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "remoteurl: https://registry-1.docker.io") ||
+		!strings.Contains(out, "addr: :443") {
+		t.Fatalf("mirror TLS render wrong:\n%s", out)
+	}
+}
+
+// stubSecretPlugin creates the plugin binary path on disk (executable — the
+// mint stats it) and wires the fake runner to answer its exec: capture the
+// manifest from stdin, emit a k8s Secret with base64 FAKECRT/FAKEKEY. This
+// is the LO_RENDER=exec pipeline; the default in-process mint (the
+// generator imported as a package) is covered by
+// TestRegistriesTLSCertMintsInProcess.
+func stubSecretPlugin(t *testing.T, runner *fakeRunner, base string) (pluginBin string, gotManifest *string) {
+	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	pluginHome := filepath.Join(base, ".kustomize")
+	pluginBin = filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
+	testutil.WriteFile(t, pluginBin, "#!/bin/sh\nexit 1\n") // never actually executed
+	os.Chmod(pluginBin, 0o755)
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", pluginHome)
+	t.Setenv("PATH_SECRETS", filepath.Join(base, ".secrets-store"))
+	os.MkdirAll(filepath.Join(base, ".secrets-store"), 0o755)
+
+	manifest := new(string)
+	runner.handler = func(c execx.Cmd) error {
+		if c.Name != pluginBin {
+			return nil
+		}
+		var buf bytes.Buffer
+		if c.Stdin != nil {
+			buf.ReadFrom(c.Stdin)
+		}
+		*manifest = buf.String()
+		// base64(FAKECRT) = RkFLRUNSVA==, base64(FAKEKEY) = RkFLRUtFWQ==
+		writeOut(c, "apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: RkFLRUNSVA==\n  tls.key: RkFLRUtFWQ==\n")
+		return nil
+	}
+	return pluginBin, manifest
+}
+
+func TestRegistriesTLSCertBuildsSANsAndDrivesThePlugin(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	_, manifest := stubSecretPlugin(t, runner, p.Base)
+
+	if err := d.registriesTLSCert(t.Context(), errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+
+	// Cert material extracted (base64-decoded) from the plugin's Secret.
+	if got := readFileT(t, filepath.Join(p.Base, ".secrets", "tls", "registries", "tls.crt")); got != "FAKECRT" {
+		t.Fatalf("tls.crt = %q", got)
+	}
+	if got := readFileT(t, filepath.Join(p.Base, ".secrets", "tls", "registries", "tls.key")); got != "FAKEKEY" {
+		t.Fatalf("tls.key = %q", got)
+	}
+
+	// SANs handed to the plugin as cert.hosts: framework hostnames, mirror
+	// domain, IPs.
+	for _, want := range []string{"lok8s.local", "lok8s.cache", "docker.io", "10.125.50.101", "10.125.50.102"} {
+		if !strings.Contains(*manifest, want) {
+			t.Errorf("SAN %q missing from plugin manifest:\n%s", want, *manifest)
+		}
+	}
+}
+
+func TestRegistriesTLSCertRemintSkippedWhenSANsUnchanged(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	_, manifest := stubSecretPlugin(t, runner, p.Base)
+
+	if err := d.registriesTLSCert(t.Context(), errBuf); err != nil {
+		t.Fatal(err)
+	}
+	*manifest = "" // detector: did the plugin run again?
+
+	if err := d.registriesTLSCert(t.Context(), errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if *manifest != "" {
+		t.Fatal("plugin re-invoked although the SAN set was unchanged")
+	}
+}
+
+func TestRegistriesTLSCertNoopWhenTLSDisabled(t *testing.T) {
+	d, _, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "false")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.registriesTLSCert(t.Context(), errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if fsutil.FileExists(filepath.Join(p.Base, ".secrets", "tls", "registries", "tls.crt")) {
+		t.Fatal("plain mode minted a cert")
+	}
+}
+
+func TestRegistriesTLSCertFailsFastWhenPluginMissing(t *testing.T) {
+	d, _, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(render.ModeEnv, string(render.ModeExec)) // only the exec pipeline needs the binary
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize-empty"))
+	t.Setenv("PATH_SECRETS", filepath.Join(p.Base, ".secrets-store"))
+
+	var vErr bytes.Buffer
+	if err := d.registriesTLSCert(t.Context(), &vErr); err == nil {
+		t.Fatal("missing plugin reconciled as success")
+	}
+	if !strings.Contains(vErr.String(), "Secret plugin is not built") {
+		t.Fatalf("wrong error:\n%s", vErr.String())
+	}
+}
+
+// TestRegistriesTLSCertMintsInProcess drives the DEFAULT pipeline: no
+// plugin binary, no KUSTOMIZE_PLUGIN_HOME, no runner call — the imported
+// secrets.lok8s.dev generator mints the leaf against a throwaway CAROOT
+// (created on demand, like the dev CA) into a throwaway PATH_SECRETS store.
+// The extracted tls.crt/tls.key must be a real pair: a leaf signed by that
+// CA whose SANs are exactly the registry hostnames + IPs the exec path
+// handed to the plugin, with the key matching the cert.
+func TestRegistriesTLSCertMintsInProcess(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(render.ModeEnv, "")
+	t.Setenv("CAROOT", filepath.Join(p.Base, "caroot"))
+	t.Setenv("PATH_SECRETS", filepath.Join(p.Base, ".secrets-store"))
+	os.MkdirAll(filepath.Join(p.Base, ".secrets-store"), 0o755)
+	runner.handler = func(c execx.Cmd) error {
+		t.Fatalf("in-process mint must not exec anything, ran %s %v", c.Name, c.Args)
+		return nil
+	}
+
+	if err := d.registriesTLSCert(t.Context(), errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+
+	tlsDir := filepath.Join(p.Base, ".secrets", "tls", "registries")
+	crtPEM, err := os.ReadFile(filepath.Join(tlsDir, "tls.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(tlsDir, "tls.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(crtPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("tls.crt/tls.key are not a matching pair: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.IsCA {
+		t.Fatal("minted a CA, not a leaf")
+	}
+	// The same SAN set the exec path put into cert.hosts (see
+	// TestRegistriesTLSCertBuildsSANsAndDrivesThePlugin): hostnames as DNS
+	// SANs, addresses as IP SANs.
+	for _, want := range []string{"lok8s.local", "lok8s.cache", "docker.io"} {
+		found := false
+		for _, dns := range leaf.DNSNames {
+			found = found || dns == want
+		}
+		if !found {
+			t.Errorf("DNS SAN %q missing (have %v)", want, leaf.DNSNames)
+		}
+	}
+	for _, want := range []string{"10.125.50.101", "10.125.50.102"} {
+		found := false
+		for _, ip := range leaf.IPAddresses {
+			found = found || ip.String() == want
+		}
+		if !found {
+			t.Errorf("IP SAN %q missing (have %v)", want, leaf.IPAddresses)
+		}
+	}
+	// Signed by the throwaway CA the mint created at CAROOT.
+	caPEM, err := os.ReadFile(filepath.Join(p.Base, "caroot", "rootCA.pem"))
+	if err != nil {
+		t.Fatalf("CAROOT CA not created: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		t.Fatal("rootCA.pem unparsable")
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "lok8s.local",
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Fatalf("leaf does not verify against the CAROOT CA: %v", err)
+	}
+	// The generator's cache is the source of truth: the store now holds
+	// the leaf under the Secret's name, and the .sans key makes the next
+	// call a no-op (idempotence shared with the exec path).
+	if !fsutil.FileExists(filepath.Join(p.Base, ".secrets-store", "Secret.registries-tls.lok8s-system.tls.crt")) {
+		t.Fatal("leaf not cached in PATH_SECRETS")
+	}
+	if got := readFileT(t, filepath.Join(tlsDir, ".sans")); !strings.Contains(got, "lok8s.local") {
+		t.Fatalf(".sans = %q", got)
+	}
+	if err := d.registriesTLSCert(t.Context(), errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(filepath.Join(tlsDir, "tls.crt")); !bytes.Equal(again, crtPEM) {
+		t.Fatal("unchanged SAN set re-minted the cert")
+	}
+}
+
+func TestRegistriesTLSNudgeWarnsWhenCAUntrusted(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "true")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CAROOT", t.TempDir()) // no rootCA.pem → untrusted
+	// The nudge probes for openssl via Look — plant a fake in the project
+	// .bin so the probe finds it; the verify itself goes through the fake
+	// runner (never invoked here since the CA file is absent).
+	testutil.WriteFile(t, filepath.Join(p.Bin, "openssl"), "#!/bin/sh\nexit 1\n")
+	os.Chmod(filepath.Join(p.Bin, "openssl"), 0o755)
+	_ = runner
+
+	var vErr bytes.Buffer
+	d.registriesTLSNudge(t.Context(), &vErr)
+	if !strings.Contains(vErr.String(), "lo trust") {
+		t.Fatalf("nudge missing:\n%s", vErr.String())
+	}
+}
+
+func TestRegistriesTLSNudgeSilentWhenTLSDisabled(t *testing.T) {
+	d, _, errBuf, p := testDriver(t)
+	cy := writeTLSSpec(t, p.Clusters, "false")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	var vErr bytes.Buffer
+	d.registriesTLSNudge(t.Context(), &vErr)
+	if vErr.Len() != 0 {
+		t.Fatalf("plain mode nudged:\n%s", vErr.String())
 	}
 }

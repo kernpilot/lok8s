@@ -11,57 +11,22 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestEmbeddedManifestsMatchBashTree(t *testing.T) {
+	t.Parallel()
 	bashTree := filepath.Join(testutil.RepoRoot(t), ".lok8s", "libs", "kubehz", "manifests")
 	if _, err := os.Stat(bashTree); err != nil {
 		t.Skipf("bash tree not present: %v", err)
 	}
-	var embedded []string
-	if err := fs.WalkDir(Manifests(), ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			embedded = append(embedded, path)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var onDisk []string
-	if err := filepath.WalkDir(bashTree, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			rel, _ := filepath.Rel(bashTree, path)
-			onDisk = append(onDisk, filepath.ToSlash(rel))
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	sort.Strings(embedded)
-	sort.Strings(onDisk)
-	if len(embedded) != len(onDisk) {
-		t.Fatalf("file lists differ:\n embedded %v\n on disk  %v", embedded, onDisk)
-	}
-	for i := range embedded {
-		if embedded[i] != onDisk[i] {
-			t.Fatalf("file lists differ at %d: %s vs %s", i, embedded[i], onDisk[i])
-		}
-		got, _ := fs.ReadFile(Manifests(), embedded[i])
-		want, _ := os.ReadFile(filepath.Join(bashTree, filepath.FromSlash(onDisk[i])))
-		if string(got) != string(want) {
-			t.Fatalf("%s: embedded bytes differ from .lok8s/libs/kubehz/manifests", embedded[i])
-		}
-	}
+	testutil.Drift{
+		Want: testutil.ReadFS(t, "internal/kubehz/manifests", Manifests(), nil),
+		Got:  testutil.ReadDir(t, ".lok8s/libs/kubehz/manifests", bashTree, nil),
+		Sync: "copy the file to the other side; there is no sync script for the kubehz manifests",
+	}.Check(t)
 	for _, must := range []string{"agent/cronjob.yaml", "live-agent/UPSTREAM.sha256", "live-agent/managed/rbac-managed.yaml"} {
 		if _, err := fs.Stat(Manifests(), must); err != nil {
 			t.Fatalf("%s missing from the embed", must)
@@ -70,6 +35,7 @@ func TestEmbeddedManifestsMatchBashTree(t *testing.T) {
 }
 
 func TestEmbeddedManifestsCarryOnlyTheThreePlaceholders(t *testing.T) {
+	t.Parallel()
 	want := map[string]int{"KUBEHZ_API_URL_PLACEHOLDER": 2, "CLUSTER_ID_PLACEHOLDER": 2, "HEARTBEAT_OWNER_PLACEHOLDER": 1}
 	got := map[string]int{}
 	_ = fs.WalkDir(Manifests(), ".", func(path string, d fs.DirEntry, err error) error {

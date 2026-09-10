@@ -6,7 +6,6 @@ package lo
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,7 +21,7 @@ func TestProvisionRemoteNoNodesFallsBackWithWarning(t *testing.T) {
 	d.deps.Provider = &fakeLoProvider{output: []byte(`{"nodes":[]}`)}
 	d.deps.ProviderName = "hetzner"
 
-	if err := d.provisionRemote(context.Background(), "test.lok8s.dev", "spec.yaml", errBuf); err != nil {
+	if err := d.provisionRemote(t.Context(), "test.lok8s.dev", "spec.yaml", errBuf); err != nil {
 		t.Fatalf("no-nodes fallback errored: %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "provider loaded but no nodes in output — running kind locally") {
@@ -45,7 +44,7 @@ func TestProvisionRemoteSSHNeverComesUp(t *testing.T) {
 		return nil
 	}
 
-	err := d.provisionRemote(context.Background(), "test.lok8s.dev", "spec.yaml", errBuf)
+	err := d.provisionRemote(t.Context(), "test.lok8s.dev", "spec.yaml", errBuf)
 	if err == nil {
 		t.Fatal("unreachable SSH reported success")
 	}
@@ -74,7 +73,7 @@ func TestProvisionRemoteDockerNeverComesUp(t *testing.T) {
 		return nil
 	}
 
-	err := d.provisionRemote(context.Background(), "test.lok8s.dev", "spec.yaml", errBuf)
+	err := d.provisionRemote(t.Context(), "test.lok8s.dev", "spec.yaml", errBuf)
 	if err == nil {
 		t.Fatal("missing docker reported success")
 	}
@@ -90,7 +89,7 @@ func TestProvisionRemoteHappyPathSetsDockerHost(t *testing.T) {
 	d.deps.Provider = &fakeLoProvider{output: []byte(`{"nodes":[{"public_ip":"203.0.113.7","ssh_user":"ci"}]}`)}
 	d.deps.ProviderName = "hetzner"
 
-	if err := d.provisionRemote(context.Background(), "test.lok8s.dev", "spec.yaml", errBuf); err != nil {
+	if err := d.provisionRemote(t.Context(), "test.lok8s.dev", "spec.yaml", errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if os.Getenv("LOK8S_REMOTE_IP") != "203.0.113.7" || os.Getenv("LOK8S_REMOTE_USER") != "ci" {
@@ -121,7 +120,7 @@ func TestRemoteCICommandLinesAndSummary(t *testing.T) {
 	}
 
 	var out, errBuf bytes.Buffer
-	if err := d.remoteCI(context.Background(), "test.lok8s.dev", d.clusterYAML("test.lok8s.dev"), &out, &errBuf); err != nil {
+	if err := d.remoteCI(t.Context(), "test.lok8s.dev", d.clusterYAML("test.lok8s.dev"), &out, &errBuf); err != nil {
 		t.Fatalf("remoteCI: %v\n%s", err, errBuf.String())
 	}
 

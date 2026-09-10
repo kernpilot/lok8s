@@ -28,7 +28,7 @@ func (r *routeRecorder) ApplyFiltered(ctx context.Context, domain, key, value st
 // bats: "main::deploy -l key=value routes to apply_filtered"
 func TestDeployLabelRoutesToFiltered(t *testing.T) {
 	r := &routeRecorder{}
-	if err := runDeploy(context.Background(), r, &bytes.Buffer{}, "test.lok8s.dev", "lok8s.dev/name=zitadel"); err != nil {
+	if err := runDeploy(t.Context(), r, &bytes.Buffer{}, "test.lok8s.dev", "lok8s.dev/name=zitadel"); err != nil {
 		t.Fatal(err)
 	}
 	if r.route != "route=filtered domain=test.lok8s.dev key=lok8s.dev/name val=zitadel" {
@@ -39,7 +39,7 @@ func TestDeployLabelRoutesToFiltered(t *testing.T) {
 // bats: "main::deploy without -l routes to apply (full artifact)"
 func TestDeployNoLabelRoutesToApply(t *testing.T) {
 	r := &routeRecorder{}
-	if err := runDeploy(context.Background(), r, &bytes.Buffer{}, "test.lok8s.dev", ""); err != nil {
+	if err := runDeploy(t.Context(), r, &bytes.Buffer{}, "test.lok8s.dev", ""); err != nil {
 		t.Fatal(err)
 	}
 	if r.route != "route=apply domain=test.lok8s.dev" {
@@ -52,7 +52,7 @@ func TestDeployBadLabelErrors(t *testing.T) {
 	for _, bad := range []string{"=value", "foo", "foo="} {
 		r := &routeRecorder{}
 		var errBuf bytes.Buffer
-		err := runDeploy(context.Background(), r, &errBuf, "test.lok8s.dev", bad)
+		err := runDeploy(t.Context(), r, &errBuf, "test.lok8s.dev", bad)
 		if !errors.Is(err, ErrHandled) {
 			t.Errorf("%q: err = %v", bad, err)
 		}

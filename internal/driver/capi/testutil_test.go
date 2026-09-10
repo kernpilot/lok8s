@@ -14,12 +14,18 @@ import (
 	"strings"
 	"testing"
 
+	"flag"
+
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
+
+// update rewrites the golden files with the current output:
+// go test ./internal/driver/capi/ -update
+var update = flag.Bool("update", false, "rewrite the golden files")
 
 type fakeRunner struct {
 	calls   []execx.Cmd

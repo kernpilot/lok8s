@@ -322,6 +322,7 @@ func TestSplitSecretsOnlyRender(t *testing.T) {
 }
 
 func TestCanonicalYAMLSortsAndNormalizes(t *testing.T) {
+	t.Parallel()
 	a, err := canonicalYAML([]byte("b: 2\na: {z: 9, y: 8}\n"))
 	if err != nil {
 		t.Fatal(err)

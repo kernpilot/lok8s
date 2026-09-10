@@ -58,6 +58,7 @@ func resolveFromSpec(t *testing.T, spec, kind string) []string {
 }
 
 func TestResolveEntriesExplicitListInOrder(t *testing.T) {
+	t.Parallel()
 	got := resolveFromSpec(t, "kind: Lo\nspec:\n  bootstrap: [cilium, ./targets/foo, /abs/bar]\n", "lo")
 	want := []string{`"cilium"`, `"./targets/foo"`, `"/abs/bar"`}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -66,6 +67,7 @@ func TestResolveEntriesExplicitListInOrder(t *testing.T) {
 }
 
 func TestResolveEntriesDropsCommentsKeepsBlockMaps(t *testing.T) {
+	t.Parallel()
 	// Comments must not become bogus addon names; a BLOCK-style map entry
 	// must survive as ONE compact-JSON element.
 	got := resolveFromSpec(t, `kind: Capi
@@ -90,12 +92,14 @@ spec:
 }
 
 func TestResolveEntriesExplicitEmptyOptsOut(t *testing.T) {
+	t.Parallel()
 	if got := resolveFromSpec(t, "kind: Lo\nspec:\n  bootstrap: []\n", "lo"); len(got) != 0 {
 		t.Errorf("explicit [] must opt out, got %v", got)
 	}
 }
 
 func TestResolveEntriesAbsentDefaultsToCiliumForLo(t *testing.T) {
+	t.Parallel()
 	got := resolveFromSpec(t, "kind: Lo\nspec:\n  network: {cidr: 10.0.0.0/16}\n", "lo")
 	if len(got) != 1 || got[0] != "cilium" {
 		t.Errorf("got %v, want [cilium]", got)
@@ -103,6 +107,7 @@ func TestResolveEntriesAbsentDefaultsToCiliumForLo(t *testing.T) {
 }
 
 func TestResolveEntriesAbsentIsEmptyForManagedDrivers(t *testing.T) {
+	t.Parallel()
 	// KubeOne deploys its own cilium during apply; Capi/Kkp bring their CNI
 	// from the management cluster (FRICTION 2026-06-12: the blanket default
 	// caused stray cilium applies on managed clusters).

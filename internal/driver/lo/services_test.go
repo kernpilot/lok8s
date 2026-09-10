@@ -7,7 +7,6 @@ package lo
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,7 +41,7 @@ spec:
 func TestCorednsPinsExternalSvcToLastPoolIP(t *testing.T) {
 	d, runner, _ := corednsFixture(t, "")
 	var out, errBuf bytes.Buffer
-	if err := d.coredns(context.Background(), &out, &errBuf, "test.lok8s.dev"); err != nil {
+	if err := d.coredns(t.Context(), &out, &errBuf, "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	// Pinned to the LAST pool IP so coredns-external (created pre-metallb)
@@ -101,7 +100,7 @@ func TestCorednsCustomHostsBlockBytes(t *testing.T) {
 	}
 
 	var out, errBuf bytes.Buffer
-	if err := d.coredns(context.Background(), &out, &errBuf, "test.lok8s.dev"); err != nil {
+	if err := d.coredns(t.Context(), &out, &errBuf, "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if fromFileDir == "" {
@@ -123,7 +122,7 @@ func TestCorednsPatchFailureIsToleratedRolloutDecides(t *testing.T) {
 		return nil
 	}
 	var out, errBuf bytes.Buffer
-	if err := d.coredns(context.Background(), &out, &errBuf, "test.lok8s.dev"); err != nil {
+	if err := d.coredns(t.Context(), &out, &errBuf, "test.lok8s.dev"); err != nil {
 		t.Fatalf("a tolerated patch failure decided the phase verdict: %v", err)
 	}
 
@@ -134,7 +133,7 @@ func TestCorednsPatchFailureIsToleratedRolloutDecides(t *testing.T) {
 		}
 		return nil
 	}
-	if err := d.coredns(context.Background(), &out, &errBuf, "test.lok8s.dev"); err == nil {
+	if err := d.coredns(t.Context(), &out, &errBuf, "test.lok8s.dev"); err == nil {
 		t.Fatal("a failed rollout restart did not fail the phase")
 	}
 }
@@ -167,7 +166,7 @@ func TestExposeEnvsubstTwoVarWhitelist(t *testing.T) {
 	}
 
 	var out, errBuf bytes.Buffer
-	if err := d.expose(context.Background(), "test-dns", cy, &out, &errBuf); err != nil {
+	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if rendered == "" {
@@ -197,7 +196,7 @@ func TestExposeTLSCertDefectPreserved(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
 
 	var out, errBuf bytes.Buffer
-	if err := d.expose(context.Background(), "test-dns", cy, &out, &errBuf); err != nil {
+	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
 		t.Fatal(err)
 	}
 	copiedCrt := false
@@ -222,7 +221,7 @@ func TestExposeMissingTemplateFails(t *testing.T) {
 	d, _, p, cy := exposeFixture(t)
 	os.Remove(filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
 	var out, errBuf bytes.Buffer
-	if err := d.expose(context.Background(), "test-dns", cy, &out, &errBuf); err == nil {
+	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err == nil {
 		t.Fatal("missing template accepted")
 	}
 	if !strings.Contains(errBuf.String(), "expose: nginx template not found") {
@@ -249,7 +248,7 @@ clusters:
 	}
 
 	var errBuf bytes.Buffer
-	if err := d.kubeconfigTunnel(context.Background(), kc, "root", "203.0.113.7", &errBuf); err != nil {
+	if err := d.kubeconfigTunnel(t.Context(), kc, "root", "203.0.113.7", &errBuf); err != nil {
 		t.Fatal(err)
 	}
 	// The rewrite happens REGARDLESS of tunnel success (the bash behavior).

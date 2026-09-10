@@ -125,7 +125,7 @@ func stuckCRDFixture(f *preflightStub) {
 func TestPreflightNothingTerminating(t *testing.T) {
 	f := &preflightStub{getOut: `{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app"}}`}
 	a, out := preflightApplier(f)
-	if err := a.Preflight(context.Background(), deployManifest); err != nil {
+	if err := a.Preflight(t.Context(), deployManifest); err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
 	if !strings.Contains(out.String(), "nothing stuck") {
@@ -139,7 +139,7 @@ func TestPreflightNothingTerminating(t *testing.T) {
 func TestPreflightClearsStuckObjectWithQualifiedType(t *testing.T) {
 	f := &preflightStub{getOut: `{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}`}
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest)
+	_ = a.Preflight(t.Context(), crManifest)
 	if !strings.Contains(out.String(), "cnpg.io/deleteDatabase") {
 		t.Errorf("finalizer not reported: %q", out.String())
 	}
@@ -157,7 +157,7 @@ func TestPreflightYoungDeletionLeftToDrain(t *testing.T) {
 	fresh := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	f := &preflightStub{getOut: `{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"` + fresh + `","finalizers":["kubernetes.io/pvc-protection"]}}`}
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), deployManifest)
+	_ = a.Preflight(t.Context(), deployManifest)
 	if !strings.Contains(out.String(), "letting it drain") {
 		t.Errorf("young deletion not drained: %q", out.String())
 	}
@@ -169,7 +169,7 @@ func TestPreflightYoungDeletionLeftToDrain(t *testing.T) {
 func TestPreflightUnparseableTimestampSkipped(t *testing.T) {
 	f := &preflightStub{getOut: `{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"data","namespace":"app","deletionTimestamp":"not-a-time","finalizers":["kubernetes.io/pvc-protection"]}}`}
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), deployManifest)
+	_ = a.Preflight(t.Context(), deployManifest)
 	if !strings.Contains(out.String(), "unparseable deletionTimestamp") {
 		t.Errorf("missing skip report: %q", out.String())
 	}
@@ -185,7 +185,7 @@ func TestPreflightReferencedNamespaceStillWedgedReported(t *testing.T) {
 	// honesty re-check must report the wedge, not "patched".
 	f := &preflightStub{nsGetOut: `{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"mla","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["kubernetes"]}}`}
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), deployManifest)
+	_ = a.Preflight(t.Context(), deployManifest)
 	if !strings.Contains(out.String(), "could not finalize namespace/mla") {
 		t.Errorf("wedge not reported honestly: %q", out.String())
 	}
@@ -200,7 +200,7 @@ func TestPreflightFinalizedNamespaceReportsSuccess(t *testing.T) {
 		nsFinalizeOK: true,
 	}
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), deployManifest)
+	_ = a.Preflight(t.Context(), deployManifest)
 	if !strings.Contains(out.String(), "force-finalized Namespace/mla") {
 		t.Errorf("success not reported: %q", out.String())
 	}
@@ -213,7 +213,7 @@ func TestPreflightCRDDrainsInstancesNeverTouchesCRDFinalizer(t *testing.T) {
 	f := &preflightStub{}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest)
+	_ = a.Preflight(t.Context(), crManifest)
 	if !strings.Contains(out.String(), "drained 2 instance(s) of CustomResourceDefinition/kubehzclusters.kubehz.dev") {
 		t.Errorf("drain not reported: %q", out.String())
 	}
@@ -230,7 +230,7 @@ func TestPreflightCRDSkipPolicyRefuses(t *testing.T) {
 	f := &preflightStub{}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest, "--crds", "skip")
+	_ = a.Preflight(t.Context(), crManifest, "--crds", "skip")
 	if !strings.Contains(out.String(), "refusing to force stuck CustomResourceDefinition/kubehzclusters.kubehz.dev") {
 		t.Errorf("skip policy not honored: %q", out.String())
 	}
@@ -243,7 +243,7 @@ func TestPreflightCRDDrainStillWedgedDoesNotEscalate(t *testing.T) {
 	f := &preflightStub{crdStays: true}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest)
+	_ = a.Preflight(t.Context(), crManifest)
 	if !strings.Contains(out.String(), "still terminating after draining 2 instance(s)") {
 		t.Errorf("wedge not reported: %q", out.String())
 	}
@@ -256,7 +256,7 @@ func TestPreflightCRDForceEscalates(t *testing.T) {
 	f := &preflightStub{crdStays: true}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest, "--crds", "force")
+	_ = a.Preflight(t.Context(), crManifest, "--crds", "force")
 	if !strings.Contains(out.String(), "FORCED CustomResourceDefinition/kubehzclusters.kubehz.dev") {
 		t.Errorf("force not reported: %q", out.String())
 	}
@@ -269,7 +269,7 @@ func TestPreflightCRDForceAllowlistWhitespace(t *testing.T) {
 	f := &preflightStub{crdStays: true}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest, "--crds", "force",
+	_ = a.Preflight(t.Context(), crManifest, "--crds", "force",
 		"--crd-allow", "other.example.com, kubehzclusters.kubehz.dev")
 	if !strings.Contains(out.String(), "FORCED CustomResourceDefinition/kubehzclusters.kubehz.dev") {
 		t.Errorf("csv whitespace not tolerated: %q", out.String())
@@ -280,7 +280,7 @@ func TestPreflightCRDForceRespectsAllowlist(t *testing.T) {
 	f := &preflightStub{crdStays: true}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest, "--crds", "force",
+	_ = a.Preflight(t.Context(), crManifest, "--crds", "force",
 		"--crd-allow", "other.example.com")
 	if !strings.Contains(out.String(), "not forcing its finalizer") {
 		t.Errorf("allowlist ignored: %q", out.String())
@@ -295,7 +295,7 @@ func TestPreflightNonNumericCRDWaitFallsBack(t *testing.T) {
 	f := &preflightStub{}
 	stuckCRDFixture(f)
 	a, out := preflightApplier(f)
-	_ = a.Preflight(context.Background(), crManifest)
+	_ = a.Preflight(t.Context(), crManifest)
 	if !strings.Contains(out.String(), "drained 2 instance(s)") {
 		t.Errorf("non-numeric wait aborted the report: %q", out.String())
 	}
@@ -307,7 +307,7 @@ func TestPreflightFailedPatchReportsAndExitsZero(t *testing.T) {
 		patchRC: 1,
 	}
 	a, out := preflightApplier(f)
-	if err := a.Preflight(context.Background(), deployManifest); err != nil {
+	if err := a.Preflight(t.Context(), deployManifest); err != nil {
 		t.Fatalf("preflight must never fail the deploy it protects: %v", err)
 	}
 	if !strings.Contains(out.String(), "could not clear finalizers on PersistentVolumeClaim/data") {

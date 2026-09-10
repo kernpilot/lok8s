@@ -1,13 +1,12 @@
 package kubeone
 
-// config_test.go pins kubeone::generate_config + kubeone::extract_vars
-// against drivers/kubeone/config: the whitelisted core-template render, the
-// dynamicWorkers block, the spec defaults (csi "external", the kubeProxy
-// STRING enum), the OIDC injection (env names + https boundary rule), and
-// the registry-auth secretRef resolution.
+// config_test.go pins kubeone::generate_config against
+// drivers/kubeone/config: the whitelisted core-template render, the
+// dynamicWorkers block, the OIDC injection and the registry-auth secretRef
+// resolution. The spec defaults and the https boundary rule of
+// kubeone::extract_vars live in vars_test.go.
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,105 +22,6 @@ func writeSpec(t *testing.T, d *Driver, content string) string {
 	path := filepath.Join(d.deps.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
 	testutil.WriteFile(t, path, content)
 	return path
-}
-
-// ── ExtractVars ───────────────────────────────────────────
-
-func TestExtractVarsDefaults(t *testing.T) {
-	clearVarEnv(t)
-	d, _, _, _ := testDriver(t, nil)
-	cy := writeSpec(t, d, testSpecYAML)
-
-	if err := d.ExtractVars(context.Background(), cy); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"CLUSTER_NAME":                   "test-prod",
-		"K8S_VERSION":                    "v1.35.5",
-		"POD_SUBNET":                     "10.244.0.0/16",
-		"SERVICE_SUBNET":                 "10.96.0.0/12",
-		"CP_REPLICAS":                    "1",
-		"CNI_PLUGIN":                     "canal",
-		"CSI_PLUGIN":                     "external", // Ceph-first default (BREAKING vs old specs)
-		"KUBE_PROXY_SKIP":                "false",
-		"CLOUD_PROVIDER":                 "hetzner",
-		"SSH_USER":                       "root",
-		"SSH_PORT":                       "22",
-		"ADDONS_ENABLED":                 "false",
-		"ADDONS_PATH":                    "./addons",
-		"LOK8S_SPEC_OIDC_USERNAMECLAIM":  "sub",
-		"LOK8S_SPEC_OIDC_USERNAMEPREFIX": "oidc:",
-		"LOK8S_SPEC_OIDC_GROUPSCLAIM":    "groups",
-		"LOK8S_SPEC_OIDC_GROUPSPREFIX":   "oidc:",
-		"LOK8S_SPEC_OIDC_ISSUER":         "",
-		"LOK8S_SPEC_OIDC_CLIENTID":       "",
-	}
-	for k, v := range want {
-		if got := os.Getenv(k); got != v {
-			t.Errorf("%s = %q, want %q", k, got, v)
-		}
-	}
-}
-
-func TestExtractVarsKubeProxyEnum(t *testing.T) {
-	clearVarEnv(t)
-	d, _, errBuf, _ := testDriver(t, nil)
-
-	cy := writeSpec(t, d, testSpecYAML+"  network:\n    kubeProxy: disabled\n")
-	if err := d.ExtractVars(context.Background(), cy); err != nil {
-		t.Fatal(err)
-	}
-	if os.Getenv("KUBE_PROXY_SKIP") != "true" {
-		t.Fatalf("disabled → KUBE_PROXY_SKIP = %q, want true", os.Getenv("KUBE_PROXY_SKIP"))
-	}
-
-	// A YAML bool `kubeProxy: false` is NOT recognized as disable — yq's
-	// `// "enabled"` treats false as falsy and yields the default.
-	cy = writeSpec(t, d, testSpecYAML+"  network:\n    kubeProxy: false\n")
-	if err := d.ExtractVars(context.Background(), cy); err != nil {
-		t.Fatal(err)
-	}
-	if os.Getenv("KUBE_PROXY_SKIP") != "false" {
-		t.Fatalf("bool false must read as the default 'enabled'")
-	}
-
-	// The string enum rejects anything else, verbatim message.
-	cy = writeSpec(t, d, testSpecYAML+"  network:\n    kubeProxy: nope\n")
-	if err := d.ExtractVars(context.Background(), cy); err == nil {
-		t.Fatal("expected failure")
-	}
-	if !strings.Contains(errBuf.String(), "extract_vars: invalid spec.network.kubeProxy 'nope' (expected 'enabled' or 'disabled')") {
-		t.Errorf("stderr = %q", errBuf.String())
-	}
-}
-
-func TestExtractVarsSSHFromProviderOutput(t *testing.T) {
-	clearVarEnv(t)
-	prov := &fakeProvider{output: []byte(`{"access":[{"user":"admin","port":2222,"privateKey":"~/.ssh/k","publicKey":"~/.ssh/k.pub"}]}`)}
-	d, _, _, _ := testDriver(t, prov)
-	cy := writeSpec(t, d, testSpecYAML)
-
-	if err := d.ExtractVars(context.Background(), cy); err != nil {
-		t.Fatal(err)
-	}
-	if os.Getenv("SSH_USER") != "admin" || os.Getenv("SSH_PORT") != "2222" {
-		t.Fatalf("SSH from provider output: user=%q port=%q", os.Getenv("SSH_USER"), os.Getenv("SSH_PORT"))
-	}
-	if os.Getenv("SSH_PRIVATE_KEY") != "~/.ssh/k" {
-		t.Fatalf("SSH_PRIVATE_KEY = %q", os.Getenv("SSH_PRIVATE_KEY"))
-	}
-}
-
-func TestOIDCHTTPSBoundary(t *testing.T) {
-	clearVarEnv(t)
-	d, _, errBuf, _ := testDriver(t, nil)
-	cy := writeSpec(t, d, testSpecYAML+"  oidc:\n    issuer: http://id.example.com\n    clientID: kubectl\n")
-	if err := d.ExtractVars(context.Background(), cy); err == nil {
-		t.Fatal("expected failure — plain-http issuer must not pass the boundary")
-	}
-	if !strings.Contains(errBuf.String(), "spec.oidc.issuer must be an https:// URL, got 'http://id.example.com'") {
-		t.Errorf("stderr = %q", errBuf.String())
-	}
 }
 
 // ── GenerateConfig ────────────────────────────────────────
@@ -163,7 +63,7 @@ func dig(t *testing.T, m map[string]any, keys ...string) any {
 
 func TestGenerateConfigRendersCoreTemplate(t *testing.T) {
 	d, cy, outDir := genDriver(t)
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err != nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err != nil {
 		t.Fatal(err)
 	}
 	doc := parseManifest(t, filepath.Join(outDir, "kubeone.yaml"))
@@ -196,7 +96,7 @@ func TestGenerateConfigDynamicWorkersHetzner(t *testing.T) {
       type: cx52
       image: debian-12
 `)
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err != nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(outDir, "kubeone.yaml"))
@@ -264,7 +164,7 @@ func TestGenerateConfigRejectsBadPools(t *testing.T) {
 			d, cy, outDir := genDriver(t)
 			errBuf := d.deps.Stderr.(interface{ String() string })
 			testutil.WriteFile(t, cy, testSpecYAML+tc.workers)
-			if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err == nil {
+			if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err == nil {
 				t.Fatal("expected failure")
 			}
 			if !strings.Contains(errBuf.String(), tc.wantErr) {
@@ -277,7 +177,7 @@ func TestGenerateConfigRejectsBadPools(t *testing.T) {
 func TestGenerateConfigUnsupportedWorkerProvider(t *testing.T) {
 	d, cy, outDir := genDriver(t)
 	testutil.WriteFile(t, cy, testSpecYAML+"  workers:\n    pool-a:\n      type: t3.large\n")
-	if err := d.GenerateConfig(context.Background(), cy, "gcp", outDir); err == nil {
+	if err := d.GenerateConfig(t.Context(), cy, "gcp", outDir); err == nil {
 		t.Fatal("expected failure")
 	}
 }
@@ -288,7 +188,7 @@ func TestGenerateConfigInjectsOIDC(t *testing.T) {
     issuer: https://id.kubehz.dev
     clientID: kubectl
 `)
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err != nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err != nil {
 		t.Fatal(err)
 	}
 	doc := parseManifest(t, filepath.Join(outDir, "kubeone.yaml"))
@@ -317,7 +217,7 @@ func TestGenerateConfigInjectsOIDC(t *testing.T) {
 
 func TestGenerateConfigOIDCAbsentLeavesManifestUntouched(t *testing.T) {
 	d, cy, outDir := genDriver(t)
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err != nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err != nil {
 		t.Fatal(err)
 	}
 	doc := parseManifest(t, filepath.Join(outDir, "kubeone.yaml"))
@@ -340,7 +240,7 @@ func TestRegistryAuthNeedsDomainName(t *testing.T) {
 	d, cy, outDir := genDriver(t)
 	errBuf := d.deps.Stderr.(interface{ String() string })
 	testutil.WriteFile(t, cy, registriesSpec)
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err == nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "registry auth: DOMAIN_NAME not exported; cannot resolve registry secrets") {
@@ -356,7 +256,7 @@ func TestRegistryAuthInjectsResolvedCreds(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(secd, "Secret.dockerio.provisioning.username"), "user1\n")
 	testutil.WriteFile(t, filepath.Join(secd, "Secret.dockerio.provisioning.password"), "pass1\n")
 
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err != nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err != nil {
 		t.Fatal(err)
 	}
 	doc := parseManifest(t, filepath.Join(outDir, "kubeone.yaml"))
@@ -372,7 +272,7 @@ func TestRegistryAuthAllUnconfiguredIsError(t *testing.T) {
 	t.Setenv("DOMAIN_NAME", "test.lok8s.dev")
 	testutil.WriteFile(t, cy, registriesSpec) // no secret files → nothing configurable
 
-	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err == nil {
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err == nil {
 		t.Fatal("declared-but-unconfigurable registries are a breaking misconfig, not a silent anonymous fallback")
 	}
 	if !strings.Contains(errBuf.String(), "registry auth: secret provisioning/dockerio lacks username/password — 'registry-1.docker.io' left anonymous") {

@@ -119,6 +119,7 @@ func TestResolveKubeconfigForDomainBadRef(t *testing.T) {
 }
 
 func TestRenderKubeconfigPassB(t *testing.T) {
+	t.Parallel()
 	p := testPaths(t)
 	writeFileT(t, filepath.Join(p.Clusters, "d", "cluster.lok8s.yaml"), "metadata:\n  name: named\n")
 

@@ -5,7 +5,6 @@ package gitops
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"testing"
@@ -18,6 +17,7 @@ var _ = provision.Hooks{GitopsBootstrap: BootstrapHook(io.Discard)}
 
 // bats: "gitops::flux is deferred and returns error"
 func TestFluxDeferred(t *testing.T) {
+	t.Parallel()
 	var errBuf bytes.Buffer
 	if err := Flux(&errBuf); !errors.Is(err, ErrDeferred) {
 		t.Fatalf("err = %v", err)
@@ -29,6 +29,7 @@ func TestFluxDeferred(t *testing.T) {
 
 // bats: "gitops::argo is deferred and returns error"
 func TestArgoDeferred(t *testing.T) {
+	t.Parallel()
 	var errBuf bytes.Buffer
 	if err := Argo(&errBuf); !errors.Is(err, ErrDeferred) {
 		t.Fatalf("err = %v", err)
@@ -40,8 +41,9 @@ func TestArgoDeferred(t *testing.T) {
 
 // bats: "gitops::bootstrap is a no-op stub" (+ the hook shape the dispatch calls)
 func TestBootstrapNoOp(t *testing.T) {
+	t.Parallel()
 	var errBuf bytes.Buffer
-	if err := BootstrapHook(&errBuf)(context.Background(), "test.lok8s.dev", "flux"); err != nil {
+	if err := BootstrapHook(&errBuf)(t.Context(), "test.lok8s.dev", "flux"); err != nil {
 		t.Fatal(err)
 	}
 	if want := "\033[0;33m[warn]\033[0m lo gitops is being redesigned post-refactor; no-op for now\n"; errBuf.String() != want {

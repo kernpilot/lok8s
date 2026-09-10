@@ -9,6 +9,7 @@ import (
 // TestBashQuote pins the %q quoting table (derived empirically from GNU bash
 // 5.3 `printf %q`) that `lo secrets env` depends on for injection-safe eval.
 func TestBashQuote(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"", "''"},
 		{"plain", "plain"},
@@ -68,6 +69,7 @@ func TestBashQuote(t *testing.T) {
 // TestBashQuoteAgainstBash cross-checks against a real bash when one is on
 // PATH — the ground truth the table above was derived from.
 func TestBashQuoteAgainstBash(t *testing.T) {
+	t.Parallel()
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not on PATH")

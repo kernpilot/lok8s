@@ -44,7 +44,7 @@ func TestStatusTiltSectionOnlyForLo(t *testing.T) {
 		if kind != "" {
 			testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: "+kind+"\n")
 		}
-		runStatus(context.Background(), out, deps, "x.dev")
+		runStatus(t.Context(), out, deps, "x.dev")
 		if strings.Contains(out.String(), "--- Tilt ---") {
 			t.Errorf("kind %q: Tilt section printed:\n%s", kind, out.String())
 		}
@@ -68,7 +68,7 @@ func TestStatusTiltLiveness(t *testing.T) {
 			if tc.name != "no pidfile" {
 				testutil.WriteFile(t, filepath.Join(deps.paths.Base, ".tilt.pid"), tc.pid)
 			}
-			runStatus(context.Background(), out, deps, "x.dev")
+			runStatus(t.Context(), out, deps, "x.dev")
 			if !strings.HasSuffix(out.String(), "--- Tilt ---\n"+tc.want) {
 				t.Errorf("tail = %q", out.String())
 			}
@@ -98,7 +98,7 @@ func TestStatusSectionsByteExact(t *testing.T) {
 		}
 		return errors.New("unexpected")
 	}
-	runStatus(context.Background(), out, deps, "x.dev")
+	runStatus(t.Context(), out, deps, "x.dev")
 	want := `=== Domain: x.dev ===
 
 --- Cluster ---
@@ -139,7 +139,7 @@ func TestStatusNodesUnreachableAndNoTargets(t *testing.T) {
 	testutil.WriteFile(t, kc, "")
 	t.Setenv("KUBECONFIG", kc)
 	r.handler = func(c execx.Cmd) error { return errors.New("connection refused") }
-	runStatus(context.Background(), out, deps, "x.dev")
+	runStatus(t.Context(), out, deps, "x.dev")
 	want := "=== Domain: x.dev ===\n\n--- Cluster ---\nRunning\n\n--- Nodes ---\n  (not reachable)\n\n--- Targets ---\n  No targets directory\n  artifacts.yaml: not built (run 'lo build')\n\n"
 	if out.String() != want {
 		t.Errorf("status output:\n%q\nwant:\n%q", out.String(), want)
@@ -151,13 +151,14 @@ func TestStatusNodesUnreachableAndNoTargets(t *testing.T) {
 func TestStatusSkipsKubectlWithoutKubeconfig(t *testing.T) {
 	deps, r, out := statusHarness(t, true, nil)
 	t.Setenv("KUBECONFIG", filepath.Join(deps.paths.Base, ".kubeconfig", "missing.yaml"))
-	runStatus(context.Background(), out, deps, "x.dev")
+	runStatus(t.Context(), out, deps, "x.dev")
 	if len(r.calls) != 0 || strings.Contains(out.String(), "--- Nodes ---") {
 		t.Errorf("calls=%v out=%q", r.calls, out.String())
 	}
 }
 
 func TestRenderInventoryJqSemantics(t *testing.T) {
+	t.Parallel()
 	// Missing everything: the `// "?"` fallbacks, `null | length` = 0, the
 	// conditional lines absent.
 	lines, ok := renderInventory(`{"spec":{}}`)

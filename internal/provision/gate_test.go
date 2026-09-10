@@ -82,6 +82,7 @@ func refuteContains(t *testing.T, out, avoid string) {
 
 // bats: "gate: local kind driver (lo) passes without prompt or output"
 func TestGateLocalLoDriverExempt(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "", false)
 	if err := d.ConfirmInfra("test.dev", spec, "lo", ActionReconcile); err != nil {
 		t.Fatalf("expected exemption, got %v", err)
@@ -93,6 +94,7 @@ func TestGateLocalLoDriverExempt(t *testing.T) {
 
 // bats: "gate: --force (inherited via dynamic scoping) bypasses silently"
 func TestGateForceBypassesSilently(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "", false)
 	d.Force = true
 	if err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionReconcile); err != nil {
@@ -105,6 +107,7 @@ func TestGateForceBypassesSilently(t *testing.T) {
 
 // bats: "gate: remote-mode lo driver is NOT exempt (cloud VM)"
 func TestGateRemoteLoNotExempt(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "", false)
 	d.Remote = true
 	err := d.ConfirmInfra("test.dev", spec, "lo", ActionReconcile)
@@ -117,6 +120,7 @@ func TestGateRemoteLoNotExempt(t *testing.T) {
 
 // bats: "gate: non-interactive reconcile refuses with summary + hint"
 func TestGateNonInteractiveRefusal(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "", false)
 	err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionReconcile)
 	if !errors.Is(err, driver.ErrDeclined) {
@@ -144,6 +148,7 @@ func TestGateLok8sNoninteractiveEnv(t *testing.T) {
 
 // bats: "gate: reconcile accepts y and yes"
 func TestGateReconcileAcceptsYAndYes(t *testing.T) {
+	t.Parallel()
 	for _, answer := range []string{"y\n", "yes\n", "Y\n", "YES\n"} {
 		d, errBuf, spec := gateDispatcher(t, answer, true)
 		if err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionReconcile); err != nil {
@@ -155,6 +160,7 @@ func TestGateReconcileAcceptsYAndYes(t *testing.T) {
 
 // bats: "gate: reconcile aborts on n / empty answer with sentinel rc 3"
 func TestGateReconcileAbortsOnDecline(t *testing.T) {
+	t.Parallel()
 	for _, answer := range []string{"n\n", "\n", ""} {
 		d, errBuf, spec := gateDispatcher(t, answer, true)
 		err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionReconcile)
@@ -170,6 +176,7 @@ func TestGateReconcileAbortsOnDecline(t *testing.T) {
 
 // bats: "gate: bootstrap action names the addon re-apply"
 func TestGateBootstrapActionNamesReapply(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "y\n", true)
 	if err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionBootstrap); err != nil {
 		t.Fatalf("expected accept, got %v", err)
@@ -179,6 +186,7 @@ func TestGateBootstrapActionNamesReapply(t *testing.T) {
 
 // bats: "gate: destroy rejects a mere y"
 func TestGateDestroyRejectsMereY(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "y\n", true)
 	err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionDestroy)
 	if !errors.Is(err, driver.ErrDeclined) {
@@ -190,6 +198,7 @@ func TestGateDestroyRejectsMereY(t *testing.T) {
 
 // bats: "gate: destroy accepts a literal yes"
 func TestGateDestroyAcceptsLiteralYes(t *testing.T) {
+	t.Parallel()
 	d, errBuf, spec := gateDispatcher(t, "yes\n", true)
 	if err := d.ConfirmInfra("test.prod", spec, "kubeone", ActionDestroy); err != nil {
 		t.Fatalf("expected accept, got %v", err)
@@ -234,7 +243,7 @@ func dispatchHarness(t *testing.T, input string) (*Dispatcher, *bytes.Buffer, *[
 // bats: "dispatch_destroy: decline stops before deregistration and the driver"
 func TestDispatchDestroyDeclineStopsEverything(t *testing.T) {
 	d, _, log := dispatchHarness(t, "no\n")
-	err := d.DispatchDestroy(context.Background(), "test.prod")
+	err := d.DispatchDestroy(t.Context(), "test.prod")
 	if !errors.Is(err, driver.ErrDeclined) || driver.ExitCode(err) != 3 {
 		t.Fatalf("expected decline rc 3, got %v", err)
 	}
@@ -246,7 +255,7 @@ func TestDispatchDestroyDeclineStopsEverything(t *testing.T) {
 // bats: "dispatch_destroy: accept runs deregistration then the driver"
 func TestDispatchDestroyAcceptRunsDeregThenDriver(t *testing.T) {
 	d, _, log := dispatchHarness(t, "yes\n")
-	if err := d.DispatchDestroy(context.Background(), "test.prod"); err != nil {
+	if err := d.DispatchDestroy(t.Context(), "test.prod"); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if len(*log) != 2 || (*log)[0] != "DEREGISTERED" || (*log)[1] != "destroy:test.prod" {
@@ -257,7 +266,7 @@ func TestDispatchDestroyAcceptRunsDeregThenDriver(t *testing.T) {
 // bats: "dispatch: bootstrap_only maps to the bootstrap gate action"
 func TestDispatchBootstrapOnlyGateAction(t *testing.T) {
 	d, errBuf, log := dispatchHarness(t, "n\n")
-	err := d.Dispatch(context.Background(), "test.prod", true)
+	err := d.Dispatch(t.Context(), "test.prod", true)
 	if !errors.Is(err, driver.ErrDeclined) || driver.ExitCode(err) != 3 {
 		t.Fatalf("expected decline rc 3, got %v", err)
 	}
@@ -275,7 +284,7 @@ func TestDispatchDestroyRemapsDriverRc3(t *testing.T) {
 		fd := &fakeDriver{log: &[]string{}, destroyErr: &driver.ExitError{Code: 3, Err: errors.New("curl exited 3")}}
 		return func(deps *driver.Deps) (driver.Driver, error) { return fd, nil }, true
 	}
-	err := d.DispatchDestroy(context.Background(), "test.prod")
+	err := d.DispatchDestroy(t.Context(), "test.prod")
 	if err == nil {
 		t.Fatal("expected error")
 	}

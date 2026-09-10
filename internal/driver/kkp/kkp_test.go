@@ -1,9 +1,11 @@
 package kkp
 
-// kkp_test.go — the port of tests/unit/kkp_test.bats (URL validation,
-// credential validation, the api client incl. CA/redaction/429, the
-// health-derived status words, the payload builders pinned against the
-// jq-built goldens) and the kkp half of kkp_capi_destroy_guards_test.bats.
+// kkp_test.go covers kkp.go: the payload builders pinned against the
+// jq-built goldens, the health-derived status words, the kubeconfig path,
+// the credential gate, and provision and destroy end to end over a
+// scripted curl (the kkp half of kkp_capi_destroy_guards_test.bats: a
+// FAILED remote delete must not report success and must KEEP cluster_id,
+// the only handle a retry has).
 //
 // GOLDEN PROVENANCE: testdata/kkp_payloads.golden is the byte-exact stdout
 // of the BASH payload builders,
@@ -17,632 +19,49 @@ package kkp
 //	_build_machinedeployment_json pool-1 3 cpx31 ubuntu hetzner 1 10
 //	_build_machinedeployment_json pool-a 2 t3.large flatcar aws 0 0
 //
-// captured read-only. Regenerate only from the bash — bash wins.
+// captured read-only. Regenerate from the bash (bash wins); -update rewrites
+// a section from the Go output for a reviewed, deliberate change.
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/kernpilot/lok8s/internal/config"
-	"github.com/kernpilot/lok8s/internal/driver"
+	"errors"
+
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
-// ── harness ───────────────────────────────────────────────
-
-type fakeRunner struct {
-	calls   []execx.Cmd
-	stdins  []string
-	handler func(c execx.Cmd) error
-}
-
-func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
-	stdin := ""
-	if c.Stdin != nil {
-		var b bytes.Buffer
-		_, _ = b.ReadFrom(c.Stdin)
-		stdin = b.String()
-	}
-	r.calls = append(r.calls, c)
-	r.stdins = append(r.stdins, stdin)
-	if r.handler != nil {
-		return r.handler(c)
-	}
-	return nil
-}
-
-func argvLine(c execx.Cmd) string { return c.Name + " " + strings.Join(c.Args, " ") }
-
-// curlRespond scripts curl's captured stream: body then the write-out line
-// (`\n%{http_code}`), both into the shared 2>&1 buffer.
-func curlRespond(body string, code string) func(c execx.Cmd) error {
-	return func(c execx.Cmd) error {
-		fmt.Fprintf(c.Stdout, "%s\n%s", body, code)
-		return nil
-	}
-}
-
-func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer) {
+// goldenSection returns one `=== name ===` block of the payloads golden.
+// With -update it first rewrites that block with got.
+func goldenSection(t *testing.T, name, got string) string {
 	t.Helper()
-	base := t.TempDir()
-	runner := &fakeRunner{}
-	var stderr bytes.Buffer
-	paths := &config.Paths{
-		Base:     base,
-		Bin:      filepath.Join(base, ".bin"),
-		Lok8s:    filepath.Join(base, ".lok8s"),
-		Clusters: filepath.Join(base, "clusters"),
-	}
-	d := New(&driver.Deps{Paths: paths, Runner: runner, Stderr: &stderr})
-	// Deterministic clock: the wall advances only through the sleep seam
-	// (the bash loops measured `date +%s` in real time; the fake keeps the
-	// same arithmetic without the waiting).
-	clock := time.Unix(0, 0)
-	d.now = func() time.Time { return clock }
-	d.sleep = func(_ context.Context, dur time.Duration) error { clock = clock.Add(dur); return nil }
-	return d, runner, &stderr
-}
-
-func writeSpec(t *testing.T, d *Driver, domain, yaml string) string {
-	t.Helper()
-	path := filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
-	testutil.WriteFile(t, path, yaml)
-	return path
-}
-
-func kkpFixture(t *testing.T) string {
-	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "..", "..", "tests", "fixtures", "kkp-cluster.lok8s.yaml"))
+	path := filepath.Join("testdata", "kkp_payloads.golden")
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p
-}
-
-func setKKPEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv("KKP_TOKEN", "test-kkp-token-abc123")
-	t.Setenv("KKP_API_URL", "https://kkp.test.example.com")
-	t.Setenv("KKP_CA_CERT", "")
-	os.Unsetenv("KKP_CA_CERT")
-	t.Setenv("KKP_RETRY_DELAY", "0")
-	t.Setenv("KKP_WAIT_INTERVAL", "1")
-}
-
-const allUpHealth = `{"apiserver":"HealthStatusUp","etcd":"HealthStatusUp","controller":"HealthStatusUp","scheduler":"HealthStatusUp","machineController":"HealthStatusDown"}`
-
-// ── validate_url ──────────────────────────────────────────
-
-func TestValidateURL(t *testing.T) {
-	d, _, stderr := testDriver(t)
-	if err := d.validateURL("https://kkp.example.com", stderr); err != nil {
-		t.Fatal(err)
-	}
-	for _, bad := range []string{"http://kkp.example.com", "ftp://kkp.example.com", ""} {
-		stderr.Reset()
-		if err := d.validateURL(bad, stderr); err == nil {
-			t.Fatalf("%q accepted", bad)
-		}
-		if !strings.Contains(stderr.String(), "must use HTTPS") {
-			t.Fatalf("stderr = %q", stderr.String())
-		}
-	}
-}
-
-// ── validate_credentials ──────────────────────────────────
-
-func TestValidateCredentialsHappy(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("HCLOUD_TOKEN", "test-hcloud-token")
-	d, _, _ := testDriver(t)
-	if err := d.validateCredentials(kkpFixture(t)); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestValidateCredentialsMissingToken(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("KKP_TOKEN", "")
-	t.Setenv("HCLOUD_TOKEN", "test-hcloud-token")
-	d, _, stderr := testDriver(t)
-	if err := d.validateCredentials(kkpFixture(t)); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "KKP_TOKEN env var is required for KKP API authentication") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestValidateCredentialsMissingHcloudToken(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("HCLOUD_TOKEN", "")
-	d, _, stderr := testDriver(t)
-	if err := d.validateCredentials(kkpFixture(t)); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "required environment variable HCLOUD_TOKEN is not set") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestValidateCredentialsPresetSkipsProviderCheck(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("HCLOUD_TOKEN", "")
-	d, _, _ := testDriver(t)
-	spec := writeSpec(t, d, "test.dev", `kind: Kkp
-metadata: {name: test-kkp-preset}
-spec:
-  kkp:
-    apiUrl: "https://kkp.test.example.com"
-    projectId: "test-project-123"
-    datacenter: "hetzner-fsn1"
-    preset: "hetzner-default"
-  provider: hetzner
-`)
-	if err := d.validateCredentials(spec); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestValidateCredentialsRejectsHTTPURL(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("KKP_API_URL", "http://kkp.insecure.example.com")
-	t.Setenv("HCLOUD_TOKEN", "x")
-	d, _, stderr := testDriver(t)
-	if err := d.validateCredentials(kkpFixture(t)); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "HTTPS") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestValidateCredentialsByoNeedsNoCloudCreds(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("HCLOUD_TOKEN", "")
-	d, _, _ := testDriver(t)
-	spec := writeSpec(t, d, "test.dev", `kind: Kkp
-metadata: {name: test-kkp-byo}
-spec:
-  kkp:
-    apiUrl: "https://kkp.test.example.com"
-    projectId: "test-project-123"
-    datacenter: "byo-local"
-  provider: {name: byo}
-`)
-	if err := d.validateCredentials(spec); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestValidateCredentialsScalarProviderShape(t *testing.T) {
-	// `provider: hetzner` (bare scalar) must behave like
-	// `provider.name: hetzner`.
-	setKKPEnv(t)
-	t.Setenv("HCLOUD_TOKEN", "")
-	d, _, stderr := testDriver(t)
-	spec := writeSpec(t, d, "test.dev", `kind: Kkp
-metadata: {name: test-kkp-scalar}
-spec:
-  kkp:
-    apiUrl: "https://kkp.test.example.com"
-    projectId: "test-project-123"
-    datacenter: "hetzner-fsn1"
-  provider: hetzner
-`)
-	if err := d.validateCredentials(spec); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "HCLOUD_TOKEN") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestValidateCredentialsExportsCACertFromSpec(t *testing.T) {
-	setKKPEnv(t)
-	d, _, _ := testDriver(t)
-	dir := filepath.Join(d.deps.Paths.Clusters, "test.dev")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ca := filepath.Join(dir, "myca.crt")
-	if err := os.WriteFile(ca, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	spec := writeSpec(t, d, "test.dev", `kind: Kkp
-metadata: {name: t}
-spec:
-  kkp:
-    apiUrl: https://kkp.test.example.com
-    caCert: myca.crt
-  provider: {name: byo}
-`)
-	if err := d.validateCredentials(spec); err != nil {
-		t.Fatal(err)
-	}
-	if got := os.Getenv("KKP_CA_CERT"); got != ca {
-		t.Fatalf("KKP_CA_CERT = %q, want %q", got, ca)
-	}
-}
-
-func TestValidateCredentialsRejectsMissingCACertFile(t *testing.T) {
-	setKKPEnv(t)
-	d, _, stderr := testDriver(t)
-	spec := writeSpec(t, d, "test.dev", `kind: Kkp
-metadata: {name: t}
-spec:
-  kkp:
-    apiUrl: https://kkp.test.example.com
-    caCert: /nope/missing-ca.crt
-  provider: {name: byo}
-`)
-	if err := d.validateCredentials(spec); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "spec.kkp.caCert points to a missing file: /nope/missing-ca.crt") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-// ── api client ────────────────────────────────────────────
-
-func TestAPIFailsWithoutToken(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("KKP_TOKEN", "")
-	d, runner, stderr := testDriver(t)
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "KKP_TOKEN is not set") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if len(runner.calls) != 0 {
-		t.Fatal("curl must never run without a token")
-	}
-}
-
-func TestAPIFailsWithoutURL(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("KKP_API_URL", "")
-	d, _, stderr := testDriver(t)
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "KKP_API_URL is not set") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestAPIRejectsHTTPURL(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("KKP_API_URL", "http://kkp.insecure.example.com")
-	d, runner, stderr := testDriver(t)
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "must use HTTPS") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if len(runner.calls) != 0 {
-		t.Fatal("curl must never run against a plain-http URL")
-	}
-}
-
-func TestAPICurlArgvExact(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{"ok": true}`, "200")
-	body, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if body != `{"ok": true}` {
-		t.Fatalf("body = %q", body)
-	}
-	want := []string{
-		"--silent", "--show-error", "--fail-with-body", "--location",
-		"--config", "-",
-		"--header", "Content-Type: application/json",
-		"--header", "Accept: application/json",
-		"--write-out", "\n%{http_code}",
-		"--request", "GET",
-		"https://kkp.test.example.com/api/v2/dc",
-	}
-	got := runner.calls[0]
-	if got.Name != "curl" {
-		t.Fatalf("name = %q", got.Name)
-	}
-	if strings.Join(got.Args, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("curl argv:\n got %q\nwant %q", got.Args, want)
-	}
-	// The token travels in the config on stdin, never on argv.
-	if strings.Contains(strings.Join(got.Args, " "), "test-kkp-token-abc123") {
-		t.Fatalf("token on argv: %q", got.Args)
-	}
-	if want := "header = \"Authorization: Bearer test-kkp-token-abc123\"\n"; runner.stdins[0] != want {
-		t.Fatalf("curl config on stdin = %q, want %q", runner.stdins[0], want)
-	}
-}
-
-func TestCurlConfigQuoteEscapes(t *testing.T) {
-	if got, want := curlConfigQuote(`a"b\c`), `"a\"b\\c"`; got != want {
-		t.Fatalf("got %s, want %s", got, want)
-	}
-}
-
-func TestAPIPassesCACert(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	ca := filepath.Join(t.TempDir(), "ca.crt")
-	if err := os.WriteFile(ca, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KKP_CA_CERT", ca)
-	runner.handler = curlRespond(`{"ok": true}`, "200")
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(argvLine(runner.calls[0]), "--cacert "+ca) {
-		t.Fatalf("argv = %q", argvLine(runner.calls[0]))
-	}
-}
-
-func TestAPIRejectsMissingCACertFile(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	t.Setenv("KKP_CA_CERT", filepath.Join(t.TempDir(), "does-not-exist.crt"))
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "not a readable file") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if len(runner.calls) != 0 {
-		t.Fatal("curl must never be reached with a bogus KKP_CA_CERT")
-	}
-}
-
-func TestAPIDebugRedactsToken(t *testing.T) {
-	setKKPEnv(t)
-	t.Setenv("DEBUG", "1")
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{"ok": true}`, "200")
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err != nil {
-		t.Fatal(err)
-	}
-	out := stderr.String()
-	if strings.Contains(out, "test-kkp-token-abc123") {
-		t.Fatal("token leaked into debug output")
-	}
-	if !strings.Contains(out, "<redacted>") {
-		t.Fatalf("stderr = %q", out)
-	}
-}
-
-func TestAPIRetriesOn429(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	count := 0
-	runner.handler = func(c execx.Cmd) error {
-		count++
-		if count < 2 {
-			return curlRespond(`{"error": "rate limited"}`, "429")(c)
-		}
-		return curlRespond(`{"ok": true}`, "200")(c)
-	}
-	body, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if body != `{"ok": true}` {
-		t.Fatalf("body = %q", body)
-	}
-	if !strings.Contains(stderr.String(), "KKP API rate limited (429), retrying") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestAPIRateLimitExhaustsRetries(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{"error": "rate limited"}`, "429")
-	if _, err := d.api(context.Background(), "GET", "/api/v2/dc", "", stderr); err == nil {
-		t.Fatal("expected error")
-	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("curl ran %d times, want KKP_MAX_RETRIES=3", len(runner.calls))
-	}
-	if !strings.Contains(stderr.String(), "KKP API: max retries (3) exhausted for GET /api/v2/dc") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestAPIErrorsOn4xx(t *testing.T) {
-	setKKPEnv(t)
-	d, _, stderr := testDriver(t)
-	dRunner := d.deps.Runner.(*fakeRunner)
-	dRunner.handler = curlRespond(`{"error": "not found"}`, "404")
-	if _, err := d.api(context.Background(), "GET", "/api/v2/projects/bad/clusters/bad", "", stderr); err == nil {
-		t.Fatal("expected error")
-	}
-	out := stderr.String()
-	if !strings.Contains(out, "KKP API error: GET /api/v2/projects/bad/clusters/bad -> HTTP 404") {
-		t.Fatalf("stderr = %q", out)
-	}
-	if !strings.Contains(out, `Response: {"error": "not found"}`) {
-		t.Fatalf("stderr = %q", out)
-	}
-	if len(dRunner.calls) != 1 {
-		t.Fatalf("4xx must not be retried (curl ran %d times)", len(dRunner.calls))
-	}
-}
-
-// ── create/delete/kubeconfig/md ───────────────────────────
-
-func TestCreateClusterReturnsID(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, _ := testDriver(t)
-	runner.handler = curlRespond(`{"id": "abc123cluster"}`, "200")
-	id, err := d.createCluster(context.Background(), "project-1", `{"cluster":{"name":"test"}}`)
-	if err != nil || id != "abc123cluster" {
-		t.Fatalf("got %q, %v", id, err)
-	}
-	line := argvLine(runner.calls[0])
-	if !strings.Contains(line, "--request POST") ||
-		!strings.Contains(line, "https://kkp.test.example.com/api/v2/projects/project-1/clusters") ||
-		!strings.Contains(line, `--data {"cluster":{"name":"test"}}`) {
-		t.Fatalf("argv = %q", line)
-	}
-}
-
-func TestCreateClusterFailsWithoutID(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{}`, "200")
-	if _, err := d.createCluster(context.Background(), "project-1", `{}`); err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(stderr.String(), "no cluster ID") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestDeleteClusterSucceeds(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, _ := testDriver(t)
-	runner.handler = curlRespond("", "200")
-	if err := d.deleteCluster(context.Background(), "project-1", "cluster-abc"); err != nil {
-		t.Fatal(err)
-	}
-	line := argvLine(runner.calls[0])
-	if !strings.Contains(line, "--request DELETE") ||
-		!strings.Contains(line, "/api/v2/projects/project-1/clusters/cluster-abc") {
-		t.Fatalf("argv = %q", line)
-	}
-}
-
-func TestGetKubeconfigWritesFile(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, _ := testDriver(t)
-	runner.handler = curlRespond("apiVersion: v1\nkind: Config\nclusters: []", "200")
-	out := filepath.Join(t.TempDir(), "sub", "kubeconfig.yaml")
-	if err := d.getKubeconfig(context.Background(), "project-1", "cluster-abc", out); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != "apiVersion: v1\nkind: Config\nclusters: []\n" {
-		t.Fatalf("kubeconfig = %q", raw)
-	}
-}
-
-func TestCreateMachineDeploymentReturnsID(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, _ := testDriver(t)
-	runner.handler = curlRespond(`{"id": "md-pool1-xyz"}`, "200")
-	id, err := d.createMachineDeployment(context.Background(), "proj-1", "cluster-1", `{"name":"pool-1"}`)
-	if err != nil || id != "md-pool1-xyz" {
-		t.Fatalf("got %q, %v", id, err)
-	}
-	if !strings.Contains(argvLine(runner.calls[0]), "/api/v2/projects/proj-1/clusters/cluster-1/machinedeployments") {
-		t.Fatalf("argv = %q", argvLine(runner.calls[0]))
-	}
-}
-
-// ── core_healthy ──────────────────────────────────────────
-
-func TestCoreHealthy(t *testing.T) {
-	cases := []struct {
-		name   string
-		health string
-		want   bool
-	}{
-		{"core up, provider-dependent down ignored", allUpHealth, true},
-		{"etcd provisioning", `{"apiserver":"HealthStatusUp","etcd":"HealthStatusProvisioning","controller":"HealthStatusUp","scheduler":"HealthStatusUp"}`, false},
-		{"core component missing", `{"apiserver":"HealthStatusUp"}`, false},
-		{"legacy numeric health", `{"apiserver":1,"etcd":1,"controller":1,"scheduler":1}`, true},
-		{"invalid json", `nope`, false},
-	}
-	for _, tc := range cases {
-		if got := coreHealthy(tc.health); got != tc.want {
-			t.Errorf("%s: coreHealthy = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-// ── wait_ready / wait_components ──────────────────────────
-
-func TestWaitReadyHealthy(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, _ := testDriver(t)
-	runner.handler = curlRespond(allUpHealth, "200")
-	if err := d.waitReady(context.Background(), "project-1", "cluster-abc", 5); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWaitReadyTimesOut(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{"apiserver":"HealthStatusProvisioning","etcd":"HealthStatusProvisioning","controller":"HealthStatusProvisioning","scheduler":"HealthStatusProvisioning"}`, "200")
-	if err := d.waitReady(context.Background(), "project-1", "cluster-abc", 1); err == nil {
-		t.Fatal("expected timeout")
-	}
-	if !strings.Contains(stderr.String(), "Timed out waiting for KKP cluster cluster-abc to become healthy after 1s") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestWaitComponentsUp(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, _ := testDriver(t)
-	runner.handler = curlRespond(`{"machineController":"HealthStatusUp","operatingSystemManager":"HealthStatusUp"}`, "200")
-	if err := d.waitComponents(context.Background(), "project-1", "cluster-abc", 5,
-		"machineController", "operatingSystemManager"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWaitComponentsTimesOut(t *testing.T) {
-	setKKPEnv(t)
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{"machineController":"HealthStatusUp","operatingSystemManager":"HealthStatusProvisioning"}`, "200")
-	if err := d.waitComponents(context.Background(), "project-1", "cluster-abc", 1,
-		"machineController", "operatingSystemManager"); err == nil {
-		t.Fatal("expected timeout")
-	}
-	if !strings.Contains(stderr.String(), "Timed out waiting for KKP cluster cluster-abc components (machineController operatingSystemManager) after 1s") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-// ── payload builders (jq goldens) ─────────────────────────
-
-// goldenSection extracts one `=== name ===` block from the payloads golden.
-func goldenSection(t *testing.T, name string) string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "kkp_payloads.golden"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	parts := strings.SplitSeq(string(raw), "=== ")
-	for p := range parts {
-		if after, ok := strings.CutPrefix(p, name+" ===\n"); ok {
-			body := after
-			return strings.TrimRight(body, "\n")
-		}
-	}
-	t.Fatalf("golden section %q not found", name)
-	return ""
+	head := "=== " + name + " ===\n"
+	start := strings.Index(string(raw), head)
+	if start < 0 {
+		t.Fatalf("golden section %q not found", name)
+	}
+	bodyStart := start + len(head)
+	end := strings.Index(string(raw[bodyStart:]), "\n=== ")
+	if end < 0 {
+		end = len(raw)
+	} else {
+		end += bodyStart + 1
+	}
+	if *update {
+		testutil.WriteFile(t, path, string(raw[:bodyStart])+got+"\n"+string(raw[end:]))
+		return got
+	}
+	return strings.TrimRight(string(raw[bodyStart:end]), "\n")
 }
 
 func TestBuildClusterJSONMatchesJQGolden(t *testing.T) {
@@ -653,12 +72,13 @@ func TestBuildClusterJSONMatchesJQGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := goldenSection(t, "cluster hetzner"); got != want {
+	if want := goldenSection(t, "cluster hetzner", got); got != want {
 		t.Fatalf("cluster JSON diverges from the jq golden:\n got: %s\nwant: %s", got, want)
 	}
 }
 
 func TestBuildCloudSpecByo(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	cs, err := buildCloudSpec("byo", "", &stderr)
 	if err != nil {
@@ -668,12 +88,13 @@ func TestBuildCloudSpecByo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := goldenSection(t, "cloud byo"); got != want {
+	if want := goldenSection(t, "cloud byo", got); got != want {
 		t.Fatalf("byo cloud spec:\n got: %s\nwant: %s", got, want)
 	}
 }
 
 func TestBuildCloudSpecPreset(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	cs, err := buildCloudSpec("hetzner", "my-preset", &stderr)
 	if err != nil {
@@ -683,12 +104,13 @@ func TestBuildCloudSpecPreset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := goldenSection(t, "cloud preset"); got != want {
+	if want := goldenSection(t, "cloud preset", got); got != want {
 		t.Fatalf("preset cloud spec:\n got: %s\nwant: %s", got, want)
 	}
 }
 
 func TestBuildCloudSpecUnsupported(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	if _, err := buildCloudSpec("gcp", "", &stderr); err == nil {
 		t.Fatal("expected error")
@@ -699,12 +121,13 @@ func TestBuildCloudSpecUnsupported(t *testing.T) {
 }
 
 func TestBuildMachineDeploymentJSONHetznerAutoscaled(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	got, err := buildMachineDeploymentJSON("pool-1", "3", "cpx31", "ubuntu", "hetzner", "1", "10", &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := goldenSection(t, "md hetzner autoscaled"); got != want {
+	if want := goldenSection(t, "md hetzner autoscaled", got); got != want {
 		t.Fatalf("md JSON diverges from the jq golden:\n got: %s\nwant: %s", got, want)
 	}
 	// REST HetznerNodeSpec field is `type` (machine-controller's rawConfig
@@ -715,20 +138,19 @@ func TestBuildMachineDeploymentJSONHetznerAutoscaled(t *testing.T) {
 }
 
 func TestBuildMachineDeploymentJSONAWSPlain(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	got, err := buildMachineDeploymentJSON("pool-a", "2", "t3.large", "flatcar", "aws", "0", "0", &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := goldenSection(t, "md aws plain"); got != want {
+	if want := goldenSection(t, "md aws plain", got); got != want {
 		t.Fatalf("md JSON:\n got: %s\nwant: %s", got, want)
 	}
 	if strings.Contains(got, "minReplicas") {
 		t.Fatal("autoscaler bounds added without configuration")
 	}
 }
-
-// ── driver::status ────────────────────────────────────────
 
 func statusState(t *testing.T, d *Driver) {
 	t.Helper()
@@ -754,7 +176,7 @@ func TestStatusNotFoundWithoutClusterID(t *testing.T) {
 	d, _, _ := testDriver(t)
 	raw, _ := os.ReadFile(kkpFixture(t))
 	writeSpec(t, d, "test-domain", string(raw))
-	got, err := d.Status(context.Background(), "test-domain")
+	got, err := d.Status(t.Context(), "test-domain")
 	if err != nil || got != "NotFound" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -765,7 +187,7 @@ func TestStatusRunningWhenCoreHealthy(t *testing.T) {
 	d, runner, _ := testDriver(t)
 	statusState(t, d)
 	runner.handler = curlRespond(allUpHealth, "200")
-	got, err := d.Status(context.Background(), "test-domain")
+	got, err := d.Status(t.Context(), "test-domain")
 	if err != nil || got != "Running" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -776,7 +198,7 @@ func TestStatusProvisioningWhenNotYetHealthy(t *testing.T) {
 	d, runner, _ := testDriver(t)
 	statusState(t, d)
 	runner.handler = curlRespond(`{"apiserver":"HealthStatusProvisioning","etcd":"HealthStatusProvisioning","controller":"HealthStatusProvisioning","scheduler":"HealthStatusProvisioning"}`, "200")
-	got, err := d.Status(context.Background(), "test-domain")
+	got, err := d.Status(t.Context(), "test-domain")
 	if err != nil || got != "Provisioning" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -787,7 +209,7 @@ func TestStatusUnknownWhenAPIErrors(t *testing.T) {
 	d, runner, stderr := testDriver(t)
 	statusState(t, d)
 	runner.handler = curlRespond(`{"error":"boom"}`, "500")
-	got, err := d.Status(context.Background(), "test-domain")
+	got, err := d.Status(t.Context(), "test-domain")
 	if err != nil || got != "Unknown" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -797,13 +219,12 @@ func TestStatusUnknownWhenAPIErrors(t *testing.T) {
 	}
 }
 
-// ── driver::kubeconfig / ensure_credentials ───────────────
-
 func TestKubeconfigUsesMetadataName(t *testing.T) {
+	t.Parallel()
 	d, _, _ := testDriver(t)
 	raw, _ := os.ReadFile(kkpFixture(t))
 	writeSpec(t, d, "test-domain", string(raw))
-	got, err := d.Kubeconfig(context.Background(), "test-domain")
+	got, err := d.Kubeconfig(t.Context(), "test-domain")
 	want := filepath.Join(d.deps.Paths.Base, ".kubeconfig", "test-kkp-cluster.yaml")
 	if err != nil || got != want {
 		t.Fatalf("got %q, %v; want %q", got, err, want)
@@ -824,10 +245,382 @@ spec:
     datacenter: "hetzner-fsn1"
   provider: hetzner
 `)
-	if err := d.EnsureCredentials(context.Background(), spec); err == nil {
+	if err := d.EnsureCredentials(t.Context(), spec); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(stderr.String(), "HTTPS") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// kkpAPI routes a fake curl call by method+path suffix.
+type kkpAPI struct {
+	t       *testing.T
+	created []string // POST bodies seen
+	deleted int
+	// respond overrides per (method, path-contains) — return handled=true
+	// to short-circuit.
+	respond func(method, url string, c execx.Cmd) bool
+}
+
+func (a *kkpAPI) handler(c execx.Cmd) error {
+	if c.Name != "curl" {
+		a.t.Fatalf("unexpected exec: %s", argvLine(c))
+	}
+	method, url, body := "", "", ""
+	for i, arg := range c.Args {
+		switch arg {
+		case "--request":
+			method = c.Args[i+1]
+		case "--data":
+			body = c.Args[i+1]
+		}
+	}
+	url = c.Args[len(c.Args)-1]
+	if a.respond != nil && a.respond(method, url, c) {
+		return nil
+	}
+	switch {
+	case method == "POST" && strings.HasSuffix(url, "/machinedeployments"):
+		a.created = append(a.created, body)
+		fmt.Fprint(c.Stdout, `{"id": "md-xyz"}`+"\n200")
+	case method == "POST" && strings.HasSuffix(url, "/clusters"):
+		a.created = append(a.created, body)
+		fmt.Fprint(c.Stdout, `{"id": "new-cluster-id"}`+"\n200")
+	case method == "DELETE":
+		a.deleted++
+		fmt.Fprint(c.Stdout, "\n200")
+	case strings.HasSuffix(url, "/health"):
+		fmt.Fprint(c.Stdout, `{"apiserver":"HealthStatusUp","etcd":"HealthStatusUp","controller":"HealthStatusUp","scheduler":"HealthStatusUp","machineController":"HealthStatusUp","operatingSystemManager":"HealthStatusUp"}`+"\n200")
+	case strings.HasSuffix(url, "/kubeconfig"):
+		fmt.Fprint(c.Stdout, "apiVersion: v1\nkind: Config"+"\n200")
+	case strings.HasSuffix(url, "/machinedeployments"):
+		fmt.Fprint(c.Stdout, "[]\n200")
+	default: // get_cluster & friends
+		fmt.Fprint(c.Stdout, `{"id": "cluster-abc"}`+"\n200")
+	}
+	return nil
+}
+
+func provisionEnv(t *testing.T) {
+	t.Helper()
+	setKKPEnv(t)
+	t.Setenv("HCLOUD_TOKEN", "tok-abc")
+}
+
+func TestProvisionHappyPath(t *testing.T) {
+	provisionEnv(t)
+	d, runner, _ := testDriver(t)
+	raw, _ := os.ReadFile(kkpFixture(t))
+	writeSpec(t, d, "test.dev", string(raw))
+	api := &kkpAPI{t: t}
+	runner.handler = api.handler
+	// A stale world-readable kubeconfig under the same name: the write
+	// must tighten it, not keep its mode.
+	stale := filepath.Join(d.deps.Paths.Base, ".kubeconfig", "test-kkp-cluster.yaml")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
+		t.Fatal(err)
+	}
+
+	// cluster_id/project_id persisted with the bash trailing newline.
+	work := d.workDir("test.dev")
+	for file, want := range map[string]string{"cluster_id": "new-cluster-id\n", "project_id": "test-project-123\n"} {
+		got, err := os.ReadFile(filepath.Join(work, file))
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want %q", file, got, err, want)
+		}
+	}
+	// Kubeconfig under metadata.name, owner-only (D20) — even when a
+	// world-readable file already sat there (planted above).
+	kc := filepath.Join(d.deps.Paths.Base, ".kubeconfig", "test-kkp-cluster.yaml")
+	if raw, err := os.ReadFile(kc); err != nil || string(raw) != "apiVersion: v1\nkind: Config\n" {
+		t.Errorf("kubeconfig = %q, %v", raw, err)
+	}
+	if st, err := os.Stat(kc); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("kubeconfig mode = %v, %v; want 0600", st.Mode().Perm(), err)
+	}
+	// The worker pool MD payload is exactly the jq golden (pool-1 from the
+	// fixture: 3× cpx31 ubuntu, autoscaler 1..10).
+	if len(api.created) != 2 {
+		t.Fatalf("created payloads = %d, want cluster + one MD", len(api.created))
+	}
+	if want := goldenSection(t, "md hetzner autoscaled", api.created[1]); api.created[1] != want {
+		t.Errorf("MD payload diverges from the jq golden:\n got: %s\nwant: %s", api.created[1], want)
+	}
+	// And the cluster payload is the golden too.
+	if want := goldenSection(t, "cluster hetzner", api.created[0]); api.created[0] != want {
+		t.Errorf("cluster payload diverges from the jq golden:\n got: %s\nwant: %s", api.created[0], want)
+	}
+}
+
+func TestProvisionIdempotentReusesExistingCluster(t *testing.T) {
+	provisionEnv(t)
+	d, runner, _ := testDriver(t)
+	raw, _ := os.ReadFile(kkpFixture(t))
+	writeSpec(t, d, "test.dev", string(raw))
+	work := d.workDir("test.dev")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "cluster_id"), []byte("cl-123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &kkpAPI{t: t}
+	runner.handler = api.handler
+
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range api.created {
+		if strings.Contains(body, `"cluster"`) {
+			t.Fatal("a cluster create was POSTed although cl-123 still exists")
+		}
+	}
+	// The saved ID stays.
+	if got, _ := os.ReadFile(filepath.Join(work, "cluster_id")); string(got) != "cl-123\n" {
+		t.Fatalf("cluster_id = %q", got)
+	}
+}
+
+func TestProvisionStaleClusterIDCreatesNew(t *testing.T) {
+	provisionEnv(t)
+	d, runner, stderr := testDriver(t)
+	raw, _ := os.ReadFile(kkpFixture(t))
+	writeSpec(t, d, "test.dev", string(raw))
+	work := d.workDir("test.dev")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "cluster_id"), []byte("gone-123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &kkpAPI{t: t}
+	api.respond = func(method, url string, c execx.Cmd) bool {
+		if method == "GET" && strings.HasSuffix(url, "/clusters/gone-123") {
+			fmt.Fprint(c.Stdout, `{"error":"not found"}`+"\n404")
+			return true
+		}
+		return false
+	}
+	runner.handler = api.handler
+
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "Saved cluster ID gone-123 no longer exists in KKP — creating a new cluster") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got, _ := os.ReadFile(filepath.Join(work, "cluster_id")); string(got) != "new-cluster-id\n" {
+		t.Fatalf("cluster_id = %q", got)
+	}
+}
+
+func TestProvisionByoSkipsComponentGate(t *testing.T) {
+	// byo clusters have no pools — the machineController/OSM gate (which
+	// they never satisfy) must not run.
+	provisionEnv(t)
+	d, runner, _ := testDriver(t)
+	writeSpec(t, d, "test.dev", `kind: Kkp
+metadata: {name: byo-cluster}
+spec:
+  kubernetes: {version: "1.35.5"}
+  kkp:
+    apiUrl: "https://kkp.test.example.com"
+    projectId: "proj-1"
+    datacenter: "byo-local"
+  provider: {name: byo}
+`)
+	api := &kkpAPI{t: t}
+	runner.handler = api.handler
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range runner.calls {
+		if strings.Contains(argvLine(c), "/machinedeployments") {
+			t.Fatal("machinedeployments touched for a pool-less byo cluster")
+		}
+	}
+	// The byo cloud spec went over the wire.
+	if len(api.created) != 1 || !strings.Contains(api.created[0], `"bringyourown": {}`) {
+		t.Fatalf("created = %v", api.created)
+	}
+}
+
+func TestProvisionSkipsExistingPool(t *testing.T) {
+	provisionEnv(t)
+	d, runner, stderr := testDriver(t)
+	raw, _ := os.ReadFile(kkpFixture(t))
+	writeSpec(t, d, "test.dev", string(raw))
+	api := &kkpAPI{t: t}
+	api.respond = func(method, url string, c execx.Cmd) bool {
+		if method == "GET" && strings.HasSuffix(url, "/machinedeployments") {
+			fmt.Fprint(c.Stdout, `[{"name":"pool-1"}]`+"\n200")
+			return true
+		}
+		return false
+	}
+	runner.handler = api.handler
+	t.Setenv("DEBUG", "1")
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.created) != 1 { // only the cluster create
+		t.Fatalf("created = %v", api.created)
+	}
+	if !strings.Contains(stderr.String(), "Worker pool pool-1 already exists — skipping create") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestProvisionPoolWithoutFlavorFails(t *testing.T) {
+	provisionEnv(t)
+	d, runner, stderr := testDriver(t)
+	writeSpec(t, d, "test.dev", `kind: Kkp
+metadata: {name: noflavor}
+spec:
+  kubernetes: {version: v1.29.2}
+  kkp:
+    apiUrl: "https://kkp.test.example.com"
+    projectId: "proj-1"
+    datacenter: "hetzner-fsn1"
+  provider: {name: hetzner}
+  workers:
+    bare-pool:
+      replicas: 1
+`)
+	api := &kkpAPI{t: t}
+	runner.handler = api.handler
+	if err := d.Provision(t.Context(), "test.dev"); err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(stderr.String(), "Worker pool 'bare-pool' has no flavor/type set") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestProvisionExportsNullSpecURLQuirk(t *testing.T) {
+	// The bash read spec.kkp.apiUrl BARE for the export, so a spec without
+	// it exported the literal "null" — which validate_credentials had
+	// already caught… unless KKP_API_URL validation is reached first with
+	// the exported value. Pin the quirk at its observable edge: env unset +
+	// spec without apiUrl fails validation before any curl runs.
+	setKKPEnv(t)
+	t.Setenv("KKP_API_URL", "")
+	os.Unsetenv("KKP_API_URL")
+	t.Setenv("HCLOUD_TOKEN", "tok")
+	d, runner, stderr := testDriver(t)
+	writeSpec(t, d, "test.dev", `kind: Kkp
+metadata: {name: nourl}
+spec:
+  kkp: {projectId: p, datacenter: dc}
+  provider: {name: hetzner}
+`)
+	if err := d.Provision(t.Context(), "test.dev"); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("curl must not run without an API URL")
+	}
+	if !strings.Contains(stderr.String(), "KKP_API_URL env var or spec.kkp.apiUrl is required") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func destroySetup(t *testing.T) (*Driver, *fakeRunner, string) {
+	t.Helper()
+	setKKPEnv(t)
+	d, runner, _ := testDriver(t)
+	writeSpec(t, d, "test.dev", `kind: Kkp
+metadata: {name: destroytest}
+spec:
+  kkp:
+    apiUrl: https://kkp.example.test
+    projectId: proj-abc
+`)
+	work := d.workDir("test.dev")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "cluster_id"), []byte("cl-123"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "project_id"), []byte("proj-abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d.deps.Paths.Base, ".kubeconfig", "destroytest.yaml"),
+		[]byte("apiVersion: v1\nkind: Config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return d, runner, work
+}
+
+func TestDestroyFailedDeleteDoesNotReportSuccess(t *testing.T) {
+	d, runner, _ := destroySetup(t)
+	runner.handler = curlRespond(`{"error":"boom"}`, "500")
+	if err := d.Destroy(t.Context(), "test.dev"); err == nil {
+		t.Fatal("destroy returned success although the KKP delete FAILED — " +
+			"the user cluster is still running and still billing (issue #91's class)")
+	}
+}
+
+func TestDestroyFailedDeleteKeepsClusterID(t *testing.T) {
+	// Returning an error is not sufficient. The driver refuses to destroy
+	// without a saved cluster_id, so wiping the work dir on a failed delete
+	// makes the orphan PERMANENTLY unreachable. The surviving file is the
+	// property that can only mean one thing.
+	d, runner, work := destroySetup(t)
+	runner.handler = curlRespond(`{"error":"boom"}`, "500")
+	_ = d.Destroy(t.Context(), "test.dev")
+	if _, err := os.Stat(filepath.Join(work, "cluster_id")); err != nil {
+		t.Fatal("cluster_id was deleted after a FAILED KKP delete — nothing left can clean this up")
+	}
+	if _, err := os.Stat(filepath.Join(d.deps.Paths.Base, ".kubeconfig", "destroytest.yaml")); err != nil {
+		t.Fatal("the kubeconfig was deleted after a FAILED delete")
+	}
+}
+
+func TestDestroyHappyPathCleansLocalState(t *testing.T) {
+	// Guards against 'fixing' the above by making destroy always fail.
+	d, runner, work := destroySetup(t)
+	api := &kkpAPI{t: t}
+	runner.handler = api.handler
+	if err := d.Destroy(t.Context(), "test.dev"); err != nil {
+		t.Fatalf("kkp happy path regressed: %v", err)
+	}
+	if api.deleted != 1 {
+		t.Fatalf("DELETE issued %d times", api.deleted)
+	}
+	if _, err := os.Stat(work); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a SUCCESSFUL destroy left the work dir behind — stale cluster_id " +
+			"would make the next destroy address a cluster that no longer exists")
+	}
+	if _, err := os.Stat(filepath.Join(d.deps.Paths.Base, ".kubeconfig", "destroytest.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("kubeconfig survived a successful destroy")
+	}
+}
+
+func TestDestroyWithoutSavedIDRefuses(t *testing.T) {
+	setKKPEnv(t)
+	d, runner, stderr := testDriver(t)
+	writeSpec(t, d, "test.dev", "kind: Kkp\nmetadata: {name: x}\nspec:\n  kkp: {apiUrl: https://kkp.example.test}\n")
+	if err := d.Destroy(t.Context(), "test.dev"); err == nil {
+		t.Fatal("expected error")
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "No saved cluster ID found in") || !strings.Contains(out, "Cannot destroy cluster without a cluster ID") {
+		t.Fatalf("stderr = %q", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("no curl may run without a cluster ID")
 	}
 }

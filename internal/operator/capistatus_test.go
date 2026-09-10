@@ -34,6 +34,7 @@ func newStatusFixture(t *testing.T) *statusFixture {
 
 // bats: "capi-status-sync hook::config watches CAPI Clusters with lok8s label"
 func TestCapiStatusConfigPins(t *testing.T) {
+	t.Parallel()
 	cfg := (&CapiStatusSyncHook{}).Config()
 	for _, want := range []string{"cluster.x-k8s.io/v1beta1", "kind: Cluster", "lok8s.dev/managed"} {
 		if !strings.Contains(cfg, want) {
@@ -44,6 +45,7 @@ func TestCapiStatusConfigPins(t *testing.T) {
 
 // bats: "capi-status-sync maps CAPI phases to lok8s phases"
 func TestMapPhase(t *testing.T) {
+	t.Parallel()
 	for in, want := range map[string]string{
 		"Provisioned": "Provisioned", "Provisioning": "Provisioning", "Pending": "Provisioning",
 		"Failed": "Failed", "Deleting": "Failed", "Unknown": "Provisioning", "": "Provisioning",
@@ -57,6 +59,7 @@ func TestMapPhase(t *testing.T) {
 // bats: "capi-status-sync builds correct status patch JSON" + "adds
 // controlPlaneEndpoint to patch when available" — as jq prints them.
 func TestBuildStatusPatch(t *testing.T) {
+	t.Parallel()
 	status, _ := decode([]byte(`{"phase":"Provisioned","controlPlaneReady":true}`))
 	got, err := BuildStatusPatch(status)
 	if err != nil {
@@ -129,7 +132,7 @@ func TestCapiStatusProvisionedFlow(t *testing.T) {
 		return nil
 	}
 	events := mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1))
-	if err := f.hook.Trigger(context.Background(), events); err != nil {
+	if err := f.hook.Trigger(t.Context(), events); err != nil {
 		t.Fatal(err)
 	}
 	patch := "{\n  \"status\": {\n    \"phase\": \"Provisioned\",\n    \"ready\": true,\n    \"controlPlaneEndpoint\": {\n      \"host\": \"10.0.0.1\",\n      \"port\": 6443\n    }\n  }\n}"
@@ -173,7 +176,7 @@ func TestCapiStatusDirectDeployAndWarnings(t *testing.T) {
 		return nil // clusterctl: empty kubeconfig → no Secret
 	}
 	f.hook.DeployApply = func(ctx context.Context, domain string) error { return errors.New("no artifact") }
-	f.hook.Trigger(context.Background(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
+	f.hook.Trigger(t.Context(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
 	refuteHas(t, f.log, "create secret", "secretRef", `"gitops"`)
 	assertHas(t, f.log, "InfrastructureReady")
 	assertStderr(t, f.stderr,
@@ -193,7 +196,7 @@ func TestCapiStatusDirectDeployAndWarnings(t *testing.T) {
 		return nil
 	}
 	f.hook.GitopsBootstrap = func(ctx context.Context, domain, provider string) error { return errors.New("nope") }
-	f.hook.Trigger(context.Background(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
+	f.hook.Trigger(t.Context(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
 	assertStderr(t, f.stderr, "warn: GitOps bootstrap failed for d\n")
 	assertHas(t, f.log, `{"status":{"gitops":{"provider":"argo","status":"Bootstrapped"}}}`)
 
@@ -206,7 +209,7 @@ func TestCapiStatusDirectDeployAndWarnings(t *testing.T) {
 		}
 		return nil
 	}
-	f.hook.Trigger(context.Background(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
+	f.hook.Trigger(t.Context(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
 	refuteHas(t, f.log, `"gitops"`)
 	assertHas(t, f.log, "InfrastructureReady")
 }
@@ -215,21 +218,21 @@ func TestCapiStatusDirectDeployAndWarnings(t *testing.T) {
 // an unpatchable CR warns and moves on.
 func TestCapiStatusNonProvisionedAndSkips(t *testing.T) {
 	f := newStatusFixture(t)
-	f.hook.Trigger(context.Background(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Pending", 1)))
+	f.hook.Trigger(t.Context(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Pending", 1)))
 	if len(f.log.lines) != 1 || !strings.Contains(f.log.lines[0], `"phase": "Provisioning"`) {
 		t.Errorf("calls = %q, want the single status patch", f.log.lines)
 	}
 	refuteHas(t, f.log, "clusterctl", "InfrastructureReady")
 
 	f = newStatusFixture(t)
-	f.hook.Trigger(context.Background(), mustEvents(t, `[{"type":"Synchronization","objects":[]}]`))
+	f.hook.Trigger(t.Context(), mustEvents(t, `[{"type":"Synchronization","objects":[]}]`))
 	if len(f.log.lines) != 0 {
 		t.Errorf("Synchronization must be skipped, got %q", f.log.lines)
 	}
 
 	f = newStatusFixture(t)
 	f.runner.handler = func(c execx.Cmd) error { return errors.New("no CR") }
-	f.hook.Trigger(context.Background(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
+	f.hook.Trigger(t.Context(), mustEvents(t, strings.Replace(clusterEvent, "%s", "Provisioned", 1)))
 	if len(f.log.lines) != 1 {
 		t.Errorf("a failed patch must `continue`, got %q", f.log.lines)
 	}
@@ -237,7 +240,7 @@ func TestCapiStatusNonProvisionedAndSkips(t *testing.T) {
 
 	// Deleting → Failed, ready mirrors controlPlaneReady (`// false`).
 	f = newStatusFixture(t)
-	f.hook.Trigger(context.Background(), mustEvents(t, `[{"object":{"metadata":{"name":"x"}},"filterResult":{"phase":"Deleting"}}]`))
+	f.hook.Trigger(t.Context(), mustEvents(t, `[{"object":{"metadata":{"name":"x"}},"filterResult":{"phase":"Deleting"}}]`))
 	assertHas(t, f.log, "kubectl patch capi x -n default --type merge --subresource status -p {\n  \"status\": {\n    \"phase\": \"Failed\",\n    \"ready\": false\n  }\n}")
 	assertStderr(t, f.stderr, "info: syncing CAPI Cluster status for default/x: phase=Deleting\n")
 }
@@ -245,7 +248,7 @@ func TestCapiStatusNonProvisionedAndSkips(t *testing.T) {
 // A non-JSON endpoint port aborts the run (bash: jq --argjson under set -e).
 func TestCapiStatusArgjsonAbort(t *testing.T) {
 	f := newStatusFixture(t)
-	err := f.hook.Trigger(context.Background(), mustEvents(t, `[{"object":{"metadata":{"name":"x"}},"filterResult":{"phase":"Provisioned","controlPlaneEndpoint":{"host":"h","port":"abc"}}}]`))
+	err := f.hook.Trigger(t.Context(), mustEvents(t, `[{"object":{"metadata":{"name":"x"}},"filterResult":{"phase":"Provisioned","controlPlaneEndpoint":{"host":"h","port":"abc"}}}]`))
 	var ee *ExitError
 	if !errors.As(err, &ee) || ee.Code != 2 {
 		t.Errorf("err = %v, want ExitError{2} (jq --argjson usage error)", err)

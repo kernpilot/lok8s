@@ -1,10 +1,11 @@
 package audit
 
 import (
-	"github.com/kernpilot/lok8s/internal/config"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/config"
 )
 
 // writeFileT writes a fixture file, creating parents.
@@ -42,6 +43,7 @@ func findingByID(t *testing.T, findings []Finding, id string) Finding {
 }
 
 func TestScoreWeightsAndGrades(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		findings  []Finding
@@ -75,6 +77,7 @@ func TestScoreWeightsAndGrades(t *testing.T) {
 }
 
 func TestHasFail(t *testing.T) {
+	t.Parallel()
 	if HasFail([]Finding{{Status: "warn"}, {Status: "unknown"}, {Status: "pass"}}) {
 		t.Error("warn/unknown/pass must not count as fail (exit-code contract)")
 	}
@@ -136,6 +139,7 @@ func TestRunDomainOrderAndCount(t *testing.T) {
 }
 
 func TestEmitStripsTabsAndNewlines(t *testing.T) {
+	t.Parallel()
 	r := &run{}
 	r.emit(Finding{ID: "x", Detail: "a\tb\nc", Remediation: "d\ne", File: "f\tg"})
 	f := r.findings[0]
@@ -145,6 +149,7 @@ func TestEmitStripsTabsAndNewlines(t *testing.T) {
 }
 
 func TestRelURI(t *testing.T) {
+	t.Parallel()
 	a := &Auditor{Paths: &config.Paths{Base: "/repo"}}
 	if got := a.relURI("/repo/clusters/x/cluster.lok8s.yaml"); got != "clusters/x/cluster.lok8s.yaml" {
 		t.Errorf("relURI inside repo = %q", got)

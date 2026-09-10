@@ -42,7 +42,7 @@ func TestApplyMergesBaseDriverProvider(t *testing.T) {
 	spec := writeClusterSpec(t, p, "testcni")
 	kc := writeKubeconfig(t, p)
 
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	merged := f.mergedOut
@@ -68,7 +68,7 @@ func TestApplyInlineBeatsAllLayers(t *testing.T) {
 	spec := writeClusterSpec(t, p, "testcni: {shared_all: inline, nested: {overridden: inline, from_inline: true}}")
 	kc := writeKubeconfig(t, p)
 
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for path, want := range map[string]string{
@@ -93,7 +93,7 @@ func TestApplyValueFilesBeatProviderLoseToInline(t *testing.T) {
 	spec := writeClusterSpec(t, p, "testcni: {valueFiles: [./values/testcni.dev.yaml], values: {shared_all: inline, nested: {overridden: inline}}}")
 	kc := writeKubeconfig(t, p)
 
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for path, want := range map[string]string{
@@ -118,7 +118,7 @@ func TestApplyDefaultsToCiliumWhenBootstrapAbsent(t *testing.T) {
 	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n")
 	kc := writeKubeconfig(t, p)
 
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if len(f.buildDirs) != 1 {
@@ -134,7 +134,7 @@ func TestApplySkipsOnExplicitEmptyList(t *testing.T) {
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
 	testutil.WriteFile(t, spec, "kind: Kkp\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n  bootstrap: []\n")
 	kc := writeKubeconfig(t, p)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if len(f.buildDirs) != 0 {
@@ -146,7 +146,7 @@ func TestApplyFailsWhenKubeconfigMissing(t *testing.T) {
 	e, _, _, errOut, p := testEngine(t)
 	writeStackAddon(t, p)
 	spec := writeClusterSpec(t, p, "testcni")
-	err := e.Apply(context.Background(), "test.lok8s.dev", spec, p.Base+"/.kubeconfig/does-not-exist.yaml")
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, p.Base+"/.kubeconfig/does-not-exist.yaml")
 	if err == nil {
 		t.Fatal("expected failure")
 	}
@@ -159,7 +159,7 @@ func TestApplyFailsWhenAddonDirMissing(t *testing.T) {
 	e, _, _, errOut, p := testEngine(t)
 	spec := writeClusterSpec(t, p, "doesnotexist")
 	kc := writeKubeconfig(t, p)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "addon not found") {
@@ -174,7 +174,7 @@ func TestApplyEnvOverridesReachTheRender(t *testing.T) {
 	mkChartAddon(t, p, "testcni")
 	spec := writeClusterSpec(t, p, "testcni:\n      env:\n        LOK8S_USER_TESTVAR: hello")
 	kc := writeKubeconfig(t, p)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if len(f.kustomizeEnvs) != 1 {
@@ -234,7 +234,7 @@ func TestSchedulerBarrierSerializesWaitTrue(t *testing.T) {
 	t.Setenv("LOK8S_BOOTSTRAP_PARALLEL", "8")
 	e, log, spec, kc, _ := schedEngine(t, "a", "b", "c: { wait: true }", "d", "e")
 	e.ApplyOne = stubApply(log, 60*time.Millisecond)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	// a and b overlap: each STARTED before the other ENDED.
@@ -264,7 +264,7 @@ func TestSchedulerParallelCapHoldsOnEveryBuild(t *testing.T) {
 	}
 	e, log, spec, kc, _ := schedEngine(t, "a", "b", "c")
 	e.ApplyOne = stubApply(log, 40*time.Millisecond)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	// Independent entries overlap: every START precedes the first END.
@@ -283,7 +283,7 @@ func TestSchedulerFailedLeafSkipsNothing(t *testing.T) {
 	e, log, spec, kc, _ := schedEngine(t, "a", "b", "c")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(log, 10*time.Millisecond, "b")
-	err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc)
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
 	if err == nil {
 		t.Fatal("expected non-zero (b failed)")
 	}
@@ -305,7 +305,7 @@ func TestSchedulerParallel1AntiStarvation(t *testing.T) {
 	e, log, spec, kc, _ := schedEngine(t, "a", "b")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(log, 10*time.Millisecond, "a")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected non-zero (a failed)")
 	}
 	if !log.has("END a") || !log.has("END b") {
@@ -330,7 +330,7 @@ func TestSchedulerThrottleFreesAnySlot(t *testing.T) {
 		log.add(job.Name)
 		return 0
 	}
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if log.count() != 4 {
@@ -345,7 +345,7 @@ func TestSchedulerDependsOnGatesDependentOnly(t *testing.T) {
 	t.Setenv("LOK8S_BOOTSTRAP_PARALLEL", "8")
 	e, log, spec, kc, _ := schedEngine(t, "a", "b:\n      dependsOn: [a]", "c")
 	e.ApplyOne = stubApply(log, 60*time.Millisecond)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	// a and c overlap (c is NOT gated behind a).
@@ -361,7 +361,7 @@ func TestSchedulerDependsOnGatesDependentOnly(t *testing.T) {
 func TestSchedulerGatePlusDependsOn(t *testing.T) {
 	e, log, spec, kc, _ := schedEngine(t, "g:\n      wait: true", "y", "x:\n      dependsOn: [y]")
 	e.ApplyOne = stubApply(log, 40*time.Millisecond)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if log.pos("START y") <= log.pos("END g") || log.pos("START x") <= log.pos("END g") {
@@ -384,7 +384,7 @@ func TestSchedulerOnlyDepTargetsGetTheReadinessWait(t *testing.T) {
 		}
 		return 0
 	}
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !waited.has("a") {
@@ -400,7 +400,7 @@ func TestSchedulerFailedDependencySkipsDependentNotSiblings(t *testing.T) {
 	e, log, spec, kc, _ := schedEngine(t, "a", "b:\n      dependsOn: [a]", "c")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(log, 10*time.Millisecond, "a")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected non-zero")
 	}
 	if !log.has("END a") || !log.has("END c") {
@@ -419,7 +419,7 @@ func TestSchedulerTransitiveDependentsAllSkipped(t *testing.T) {
 	e, log, spec, kc, _ := schedEngine(t, "a", "b:\n      dependsOn: [a]", "c:\n      dependsOn: [b]")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(log, 10*time.Millisecond, "a")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected non-zero")
 	}
 	if log.has("START b") || log.has("START c") {
@@ -440,7 +440,7 @@ func TestSchedulerFailedGateSkipsAllAfter(t *testing.T) {
 	e, log, spec, kc, _ := schedEngine(t, "g:\n      wait: true", "x", "y")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(log, 10*time.Millisecond, "g")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected non-zero")
 	}
 	if log.has("START x") || log.has("START y") {
@@ -464,7 +464,7 @@ func TestSchedulerNameOverrideIsTheDependsOnTarget(t *testing.T) {
 	os.MkdirAll(filepath.Join(p.Clusters, "test.lok8s.dev", "x"), 0o755)
 	_ = spec
 	e.ApplyOne = stubApply(log, 60*time.Millisecond)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	// The ./x entry is keyed by its OVERRIDE name "bar".
@@ -485,7 +485,7 @@ func TestSchedulerNameOverrideReplacesBasename(t *testing.T) {
 	os.MkdirAll(filepath.Join(p.Clusters, "test.lok8s.dev", "x"), 0o755)
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "unknown entry 'x'") {
@@ -498,7 +498,7 @@ func TestSchedulerAmbiguousCollisionReferencedIsError(t *testing.T) {
 	os.MkdirAll(filepath.Join(p.Clusters, "test.lok8s.dev", "targets", "rook-ceph"), 0o755)
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "ambiguous entry 'rook-ceph'") {
@@ -513,7 +513,7 @@ func TestSchedulerUnreferencedCollisionWarnsOnly(t *testing.T) {
 	os.MkdirAll(filepath.Join(p.Clusters, "test.lok8s.dev", "targets", "rook-ceph"), 0o755)
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !strings.Contains(errOut.String(), "duplicate entry name 'rook-ceph'") {
@@ -525,7 +525,7 @@ func TestSchedulerDuplicateExplicitNameIsError(t *testing.T) {
 	e, _, spec, kc, _ := schedEngine(t, "a:\n      name: dup", "b:\n      name: dup")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "name: must be unique") {
@@ -537,7 +537,7 @@ func TestSchedulerExplicitNameCollidingWithResolvedIsError(t *testing.T) {
 	e, _, spec, kc, _ := schedEngine(t, "dup", "b:\n      name: dup")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "name: must be unique") {
@@ -549,7 +549,7 @@ func TestSchedulerUnknownDependsOnIsError(t *testing.T) {
 	e, _, spec, kc, _ := schedEngine(t, "a", "b:\n      dependsOn: [nope]")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "unknown entry 'nope'") {
@@ -561,7 +561,7 @@ func TestSchedulerCycleIsError(t *testing.T) {
 	e, _, spec, kc, _ := schedEngine(t, "a:\n      dependsOn: [b]", "b:\n      dependsOn: [a]")
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = stubApply(&eventLog{}, 0)
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errOut.String(), "cycle detected") {
@@ -591,7 +591,7 @@ func TestParkThenFailFastNonInteractive(t *testing.T) {
 	e.ApplyOne = immutableStub("b")
 	// Force must NOT ride in from the ambient env of the dev shell.
 	t.Setenv("LOK8S_FORCE_RECREATE", "")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected non-zero (parked heal failed)")
 	}
 	combined := out.String() + errOut.String()
@@ -621,7 +621,7 @@ func TestParkedInteractiveAcceptRecreatesAndUnblocks(t *testing.T) {
 	e.Interactive = func() bool { return true }
 	e.Ask = func(string) bool { return true }
 	t.Setenv("LOK8S_FORCE_RECREATE", "")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !strings.Contains(errOut.String(), "· recreated") {
@@ -639,6 +639,7 @@ func TestParkedInteractiveAcceptRecreatesAndUnblocks(t *testing.T) {
 }
 
 func TestRecreatePromptNamesEveryNamespace(t *testing.T) {
+	t.Parallel()
 	// The prompt IS the safety control: accepting re-applies under force,
 	// which silences kapply's pointed per-namespace confirm — whatever this
 	// prompt does not say is not said at all. (2026-07-30: a prompt that
@@ -657,6 +658,7 @@ func TestRecreatePromptNamesEveryNamespace(t *testing.T) {
 }
 
 func TestRecreatePromptNoNamespaceNoWarning(t *testing.T) {
+	t.Parallel()
 	// A warning printed on every heal is one nobody reads by the third
 	// time — with nothing to force-finalize the destructive block is absent.
 	p := RecreatePrompt(1, " addonA", nil)
@@ -688,7 +690,7 @@ func TestTerminating403ReachesThePromptFromRealApplyOutput(t *testing.T) {
 	e.Interactive = func() bool { return true }
 	e.Ask = func(p string) bool { prompt = p; return false }
 	t.Setenv("LOK8S_FORCE_RECREATE", "")
-	_ = e.Apply(context.Background(), "test.lok8s.dev", spec, kc)
+	_ = e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
 	if prompt == "" {
 		t.Fatal("the prompt was never composed and offered")
 	}
@@ -706,7 +708,7 @@ func TestForceHealsInlineNeverParks(t *testing.T) {
 	out := e.Stdout.(interface{ String() string })
 	errOut := e.Stderr.(interface{ String() string })
 	e.ApplyOne = immutableStub("b")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	combined := out.String() + errOut.String()
@@ -727,7 +729,7 @@ func TestFlushCollapsedBlocksNoRawInterleaving(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		return 0
 	}
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for _, want := range []string{"a ", "b ", "· 2 resources"} {
@@ -753,7 +755,7 @@ func TestFlushFailedEntryMarkedWithSurfacedErrors(t *testing.T) {
 		}
 		return 0
 	}
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err == nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 		t.Fatal("expected non-zero")
 	}
 	for _, want := range []string{"✗", "b", "· 1 resource", "admission webhook denied", "×2", "✓"} {
@@ -773,7 +775,7 @@ func TestFlushDebugVerbatimNeverCollapsed(t *testing.T) {
 		fmt.Fprintf(stdout, "configmap/%s-one serverside-applied\n", job.Name)
 		return 0
 	}
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !strings.Contains(out.String(), "configmap/a-one serverside-applied") {
@@ -789,7 +791,7 @@ func TestFlushDebugVerbatimNeverCollapsed(t *testing.T) {
 func applyOneDirect(t *testing.T, e *Engine, job Job) (int, string) {
 	t.Helper()
 	var buf strings.Builder
-	rc := e.applyOne(context.Background(), job, &buf, &buf)
+	rc := e.applyOne(t.Context(), job, &buf, &buf)
 	return rc, buf.String()
 }
 
@@ -872,7 +874,7 @@ func TestHostedGateUnreachableWarnsOIDCAndSkips(t *testing.T) {
 		fmt.Fprintln(c.Stderr, "error: You must be logged in")
 		return &rcError{1}
 	}
-	if err := e.Apply(context.Background(), "h.test", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "h.test", spec, kc); err != nil {
 		t.Fatalf("hosted skip must not fail the provision: %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "cannot reach the cluster") || !strings.Contains(errBuf.String(), "kubelogin") {
@@ -889,7 +891,7 @@ func TestHostedGateZeroWorkersSkips(t *testing.T) {
 		fmt.Fprintln(c.Stdout, "cp1 NotReady control-plane 1d v1.33")
 		return nil
 	}
-	if err := e.Apply(context.Background(), "h.test", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "h.test", spec, kc); err != nil {
 		t.Fatalf("hosted skip must not fail: %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "no Ready workers yet") {
@@ -906,7 +908,7 @@ func TestHostedGateSchedulingDisabledCounts(t *testing.T) {
 		fmt.Fprintln(c.Stdout, "w1 Ready,SchedulingDisabled worker 1d v1.33")
 		return nil
 	}
-	if err := e.Apply(context.Background(), "h.test", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "h.test", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "1 Ready worker(s)") {
@@ -924,7 +926,7 @@ func TestHostedGateControlPlaneNodesDoNotCount(t *testing.T) {
 		fmt.Fprintln(c.Stdout, "cp2 Ready master 1d v1.33")
 		return nil
 	}
-	if err := e.Apply(context.Background(), "h.test", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "h.test", spec, kc); err != nil {
 		t.Fatalf("hosted skip must not fail: %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "no Ready workers yet") {
@@ -944,7 +946,7 @@ spec:
 		t.Errorf("PROBE_MUST_NOT_RUN: kubectl %v", c.Args)
 		return &rcError{1}
 	}
-	if err := e.Apply(context.Background(), "h.test", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "h.test", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 }
@@ -966,7 +968,7 @@ func TestKubeOneDefersCiliumOnFullProvision(t *testing.T) {
 			t.Setenv("LOK8S_BOOTSTRAP_ONLY", "0")
 			e, f, out, _, p := testEngine(t)
 			spec, kc := kubeoneAddonSpec(t, p, name)
-			if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+			if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
 			if !strings.Contains(out.String(), "applied by the KubeOne driver on a full provision") {
@@ -984,7 +986,7 @@ func TestKubeOneReconcilesCiliumOnBootstrapOnly(t *testing.T) {
 	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "1")
 	e, f, out, _, p := testEngine(t)
 	spec, kc := kubeoneAddonSpec(t, p, "cilium")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if strings.Contains(out.String(), "applied by the KubeOne driver on a full provision") {
@@ -1001,7 +1003,7 @@ func TestKubeOneUnsetGateDefaultsToDefer(t *testing.T) {
 	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
 	e, f, out, _, p := testEngine(t)
 	spec, kc := kubeoneAddonSpec(t, p, "cilium")
-	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !strings.Contains(out.String(), "applied by the KubeOne driver on a full provision") {
@@ -1024,7 +1026,7 @@ func TestApplyReturnsWhenTheContextEnds(t *testing.T) {
 		<-ctx.Done()
 		return 1
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- e.Apply(ctx, "test.lok8s.dev", spec, kc) }()
 	cancel()

@@ -1,10 +1,8 @@
 package crds
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -25,11 +23,13 @@ func repoLayout(t *testing.T) Layout {
 // The committed CRDs are the parity fixture: they were rendered by the bash
 // `yq eval` implementation, so a byte-identical Go render IS the gate.
 func TestRenderMatchesCommittedCRDs(t *testing.T) {
+	t.Parallel()
 	l := repoLayout(t)
 	schemas := l.Schemas()
 	if len(schemas) < 5 {
 		t.Fatalf("expected the repo's schema set, got %v", schemas)
 	}
+	rendered := testutil.Tree{Name: "lo crds render", Files: map[string]string{}}
 	for _, schema := range schemas {
 		kind, err := Kind(schema)
 		if err != nil {
@@ -39,29 +39,11 @@ func TestRenderMatchesCommittedCRDs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", schema, err)
 		}
-		want, err := os.ReadFile(filepath.Join(l.OutDir, kind+".yaml"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s: render differs from committed operator/crds/%s.yaml\n%s", kind, kind, firstDiff(string(want), string(got)))
-		}
+		rendered.Files[kind+".yaml"] = string(got)
 	}
-}
-
-func firstDiff(want, got string) string {
-	wl, gl := strings.Split(want, "\n"), strings.Split(got, "\n")
-	for i := 0; i < len(wl) || i < len(gl); i++ {
-		var w, g string
-		if i < len(wl) {
-			w = wl[i]
-		}
-		if i < len(gl) {
-			g = gl[i]
-		}
-		if w != g {
-			return "line " + strconv.Itoa(i+1) + ":\n  want: " + w + "\n  got:  " + g
-		}
-	}
-	return "(identical?)"
+	testutil.Drift{
+		Want: rendered,
+		Got:  testutil.ReadDir(t, "operator/crds", l.OutDir, func(rel string) bool { return !strings.HasSuffix(rel, ".yaml") || strings.Contains(rel, "/") }),
+		Sync: "bin/lo crds",
+	}.Check(t)
 }

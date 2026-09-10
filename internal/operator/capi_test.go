@@ -8,7 +8,6 @@ package operator
 // one is on PATH).
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -33,6 +32,7 @@ func (f *capiFixture) stubTemplates(t *testing.T) {
 // bats: "capi-reconcile hook::config: events, synchronization, drift
 // schedule, deletion" (+ the older "returns valid JSON" partials)
 func TestCapiConfigPins(t *testing.T) {
+	t.Parallel()
 	cfg := (&CapiHook{}).Config()
 	for _, want := range []string{
 		"configVersion: v1", "kind: Capi", `"Added", "Modified"`,
@@ -47,6 +47,7 @@ func TestCapiConfigPins(t *testing.T) {
 // bats: "capi-reconcile detects hetzner/aws provider from spec", "fails for
 // unknown provider"
 func TestCapiDetectProvider(t *testing.T) {
+	t.Parallel()
 	f := newCapiFixture(t)
 	spec := func(s string) any {
 		v, err := decode([]byte(s))
@@ -75,7 +76,7 @@ func TestCapiDetectProvider(t *testing.T) {
 func TestCapiFreshCRProvisions(t *testing.T) {
 	f := newCapiFixture(t)
 	f.stubTemplates(t)
-	f.hook.Reconcile(context.Background(), []byte(capiCR))
+	f.hook.Reconcile(t.Context(), []byte(capiCR))
 	assertHas(t, f.log, "/metadata/finalizers", `"phase":"Provisioning"`, "apply -f -")
 	assertStderr(t, f.stderr, "info: reconciling Capi default/prod\n", "info: CAPI resources applied for prod\n")
 
@@ -97,7 +98,7 @@ func TestCapiFreshCRProvisions(t *testing.T) {
 func TestCapiUnknownProviderFails(t *testing.T) {
 	f := newCapiFixture(t)
 	f.stubTemplates(t)
-	f.hook.Reconcile(context.Background(), []byte(`{"metadata":{"name":"gcp"},"spec":{"cluster":{"domain":"gcp.lok8s.dev"}}}`))
+	f.hook.Reconcile(t.Context(), []byte(`{"metadata":{"name":"gcp"},"spec":{"cluster":{"domain":"gcp.lok8s.dev"}}}`))
 	assertHas(t, f.log, "UnknownProvider")
 	refuteHas(t, f.log, "apply -f -", `"provider":`)
 }
@@ -106,7 +107,7 @@ func TestCapiUnknownProviderFails(t *testing.T) {
 // capi-templates; only the image does).
 func TestCapiMissingTemplatesFails(t *testing.T) {
 	f := newCapiFixture(t)
-	f.hook.Reconcile(context.Background(), []byte(capiCR))
+	f.hook.Reconcile(t.Context(), []byte(capiCR))
 	assertHas(t, f.log, `"provider":"hetzner"`, "GenerationFailed")
 	refuteHas(t, f.log, "apply -f -")
 	assertStderr(t, f.stderr, "error: CAPI template directory not found: "+f.tmpl+"\n")
@@ -122,7 +123,7 @@ func TestCapiApplyFailure(t *testing.T) {
 		}
 		return capiKubectl(c)
 	}
-	f.hook.Reconcile(context.Background(), []byte(capiCR))
+	f.hook.Reconcile(t.Context(), []byte(capiCR))
 	assertHas(t, f.log, "ApplyFailed")
 	assertStderr(t, f.stderr, "error: failed to apply CAPI resources for prod\n")
 }
@@ -132,7 +133,7 @@ func TestCapiApplyFailure(t *testing.T) {
 func TestCapiDeletionTearsDown(t *testing.T) {
 	f := newCapiFixture(t)
 	f.stubTemplates(t)
-	f.hook.Reconcile(context.Background(), []byte(capiDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(capiDeletingCR))
 	assertHas(t, f.log,
 		`"phase":"Terminating"`,
 		// the anti-leak action: delete the CAPI Cluster in spec.cluster.namespace
@@ -157,7 +158,7 @@ func TestCapiFailedDeleteKeepsFinalizer(t *testing.T) {
 		}
 		return capiKubectl(c)
 	}
-	f.hook.Reconcile(context.Background(), []byte(capiDeletingCR))
+	f.hook.Reconcile(t.Context(), []byte(capiDeletingCR))
 	assertHas(t, f.log, "DestroyFailed")
 	refuteHas(t, f.log, `{"metadata":{"finalizers":[]}}`)
 	assertStderr(t, f.stderr, "error: Capi default/prod teardown failed (will retry)\n")
@@ -166,7 +167,7 @@ func TestCapiFailedDeleteKeepsFinalizer(t *testing.T) {
 // bats: "capi-reconcile: schedule event re-lists all Capi resources"
 func TestCapiScheduleRelists(t *testing.T) {
 	f := newCapiFixture(t)
-	if err := f.hook.Trigger(context.Background(), mustEvents(t, `[{"type": "Schedule", "binding": "capi-drift"}]`)); err != nil {
+	if err := f.hook.Trigger(t.Context(), mustEvents(t, `[{"type": "Schedule", "binding": "capi-drift"}]`)); err != nil {
 		t.Fatal(err)
 	}
 	assertHas(t, f.log, "get capi -A -o json")
@@ -234,6 +235,7 @@ func TestCapiGenerateRender(t *testing.T) {
 // Unsupported provider name (unreachable from detect, pinned anyway) and a
 // missing `.workers` entry field (`.type` → "null").
 func TestCapiGenerateEdges(t *testing.T) {
+	t.Parallel()
 	f := newCapiFixture(t)
 	f.writeTemplates(t, map[string]string{"core/machine-deployment.yaml": "${POOL_NAME}/${POOL_REPLICAS}/${POOL_TYPE}\n"})
 	spec, _ := decode([]byte(`{"workers":{"w":{}}}`))
@@ -258,6 +260,7 @@ func TestCapiGenerateEdges(t *testing.T) {
 // real binary is around, diff against it on the repo's actual CAPI
 // templates and on a stress line.
 func TestEnvsubstAllMatchesGNU(t *testing.T) {
+	t.Parallel()
 	bin, err := exec.LookPath("envsubst")
 	if err != nil {
 		t.Skip("no envsubst on PATH")

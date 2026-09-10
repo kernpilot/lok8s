@@ -139,6 +139,7 @@ func clearVarEnv(t *testing.T) {
 // ── Registry ──────────────────────────────────────────────
 
 func TestDriverRegistered(t *testing.T) {
+	t.Parallel()
 	if _, ok := driver.Get(Name); !ok {
 		t.Fatal("kubeone driver not registered")
 	}
@@ -152,7 +153,7 @@ func TestApplyRunsInWorkDirWithRelativeManifest(t *testing.T) {
 	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
 	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), "name: test-prod\n")
 
-	if err := d.Apply(context.Background(), wd, ""); err != nil {
+	if err := d.Apply(t.Context(), wd, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -180,7 +181,7 @@ func TestApplyAddsTfjsonWhenPresent(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), "name: test-prod\n")
 	testutil.WriteFile(t, filepath.Join(wd, "output.json"), "{}")
 
-	if err := d.Apply(context.Background(), wd, ""); err != nil {
+	if err := d.Apply(t.Context(), wd, ""); err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Join(runner.calls[0].Args, " ")
@@ -197,7 +198,7 @@ func TestApplyCarriesRobotEnvAliases(t *testing.T) {
 	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
 	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), "name: test-prod\n")
 
-	if err := d.Apply(context.Background(), wd, ""); err != nil {
+	if err := d.Apply(t.Context(), wd, ""); err != nil {
 		t.Fatal(err)
 	}
 	env := strings.Join(runner.calls[0].Env, ",")
@@ -212,7 +213,7 @@ func TestApplyMissingManifestFails(t *testing.T) {
 	clearVarEnv(t)
 	d, runner, errBuf, p := testDriver(t, nil)
 	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
-	if err := d.Apply(context.Background(), wd, ""); err == nil {
+	if err := d.Apply(t.Context(), wd, ""); err == nil {
 		t.Fatal("expected failure")
 	}
 	if len(runner.calls) != 0 {
@@ -232,7 +233,7 @@ func TestResetUsesAbsolutePaths(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), "name: test-prod\n")
 	testutil.WriteFile(t, filepath.Join(wd, "output.json"), "{}")
 
-	if err := d.Reset(context.Background(), wd); err != nil {
+	if err := d.Reset(t.Context(), wd); err != nil {
 		t.Fatal(err)
 	}
 	c := runner.calls[0]
@@ -279,7 +280,7 @@ func TestStatusWordMapping(t *testing.T) {
 				fmt.Fprint(c.Stdout, tc.output)
 				return tc.err
 			}
-			got, err := d.Status(context.Background(), "test.lok8s.dev")
+			got, err := d.Status(t.Context(), "test.lok8s.dev")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -293,7 +294,7 @@ func TestStatusWordMapping(t *testing.T) {
 func TestStatusNotProvisionedWithoutManifest(t *testing.T) {
 	clearVarEnv(t)
 	d, _, _, _ := testDriver(t, nil)
-	got, err := d.Status(context.Background(), "test.lok8s.dev")
+	got, err := d.Status(t.Context(), "test.lok8s.dev")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +308,7 @@ func TestStatusDelegatesToProviderWithoutManifest(t *testing.T) {
 	prov := &statusFakeProvider{}
 	prov.status = "Partial"
 	d, _, _, _ := testDriver(t, prov)
-	got, err := d.Status(context.Background(), "test.lok8s.dev")
+	got, err := d.Status(t.Context(), "test.lok8s.dev")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestDestroyResetFailureWarnsAndContinues(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), "name: test-prod\n")
 	runner.handler = func(c execx.Cmd) error { return errors.New("reset boom") }
 
-	if err := d.Destroy(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatalf("reset failure must not fail the destroy, got %v", err)
 	}
 	if !strings.Contains(errBuf.String(), "kubeone reset failed — continuing with infrastructure destroy") {
@@ -345,7 +346,7 @@ func TestDestroyProviderFailureKeepsKubeconfig(t *testing.T) {
 	kc := filepath.Join(p.Base, ".kubeconfig", "test-prod.yaml")
 	testutil.WriteFile(t, kc, "apiVersion: v1\n")
 
-	err := d.Destroy(context.Background(), "test.lok8s.dev")
+	err := d.Destroy(t.Context(), "test.lok8s.dev")
 	if err == nil {
 		t.Fatal("a failed infrastructure destroy must RETURN AN ERROR")
 	}
@@ -361,7 +362,7 @@ func TestDestroySuccessRemovesKubeconfig(t *testing.T) {
 	kc := filepath.Join(p.Base, ".kubeconfig", "test-prod.yaml")
 	testutil.WriteFile(t, kc, "apiVersion: v1\n")
 
-	if err := d.Destroy(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if _, statErr := os.Stat(kc); statErr == nil {
@@ -375,7 +376,7 @@ func TestDestroyWithoutProviderWarns(t *testing.T) {
 	kc := filepath.Join(p.Base, ".kubeconfig", "test-prod.yaml")
 	testutil.WriteFile(t, kc, "apiVersion: v1\n")
 
-	if err := d.Destroy(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(errBuf.String(), "no provider loaded — cannot destroy infrastructure") {
@@ -394,7 +395,7 @@ func TestHostedProvisionDelegates(t *testing.T) {
 		called = domain
 		return nil
 	}
-	if err := d.Provision(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Provision(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if called != "test.lok8s.dev" {
@@ -410,7 +411,7 @@ func TestHostedDestroyRequiresHook(t *testing.T) {
 	d, _, _, _ := testDriver(t, nil)
 	d.Hooks.ReadKubehzConfig = func(clusterYAML string) (string, error) { return "hosted", nil }
 	// A HOSTED cluster must never get the self-hosted teardown.
-	if err := d.Destroy(context.Background(), "test.lok8s.dev"); err == nil {
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err == nil {
 		t.Fatal("hosted destroy without a wired hook must error, not fall through")
 	}
 }
@@ -449,7 +450,7 @@ func TestProvisionFullFlow(t *testing.T) {
 		return nil
 	}
 
-	if err := d.Provision(context.Background(), "test.lok8s.dev"); err != nil {
+	if err := d.Provision(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if len(prov.log) == 0 || prov.log[0] != "provision:"+wd {
@@ -476,7 +477,7 @@ func TestProvisionFullFlow(t *testing.T) {
 func TestProvisionRequiresProvider(t *testing.T) {
 	clearVarEnv(t)
 	d, _, errBuf, _ := testDriver(t, nil)
-	if err := d.Provision(context.Background(), "test.lok8s.dev"); err == nil {
+	if err := d.Provision(t.Context(), "test.lok8s.dev"); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "KubeOne driver requires spec.provider (no provider loaded)") {
@@ -491,7 +492,7 @@ func TestProvisionFailsWhenKubeconfigMissingAfterApply(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"), realCoreTemplate(t))
 	// Runner default: succeeds but writes nothing — the stale-kubeconfig
 	// masking scenario of issue #91 inverted (fresh provision, no file).
-	if err := d.Provision(context.Background(), "test.lok8s.dev"); err == nil {
+	if err := d.Provision(t.Context(), "test.lok8s.dev"); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(errBuf.String(), "after kubeone apply") {
@@ -504,7 +505,7 @@ func TestProvisionFailsWhenKubeconfigMissingAfterApply(t *testing.T) {
 func TestKubeconfigPath(t *testing.T) {
 	clearVarEnv(t)
 	d, _, _, p := testDriver(t, nil)
-	got, err := d.Kubeconfig(context.Background(), "test.lok8s.dev")
+	got, err := d.Kubeconfig(t.Context(), "test.lok8s.dev")
 	if err != nil {
 		t.Fatal(err)
 	}

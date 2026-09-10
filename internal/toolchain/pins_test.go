@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // goModRequire reads the version go.mod requires for module (direct or
@@ -34,18 +36,24 @@ func goModRequire(t *testing.T, module string) string {
 }
 
 func TestPinsMatchGoMod(t *testing.T) {
-	if got := goModRequire(t, "sigs.k8s.io/kustomize/api"); got != KustomizeAPI {
-		t.Errorf("go.mod sigs.k8s.io/kustomize/api = %s, pins.go KustomizeAPI = %s — bump both (and kustomizeAPIToCLI + the b.yaml template)", got, KustomizeAPI)
-	}
-	if got := goModRequire(t, "github.com/mgoltzsche/khelm/v2"); got != "v"+KhelmVersion {
-		t.Errorf("go.mod github.com/mgoltzsche/khelm/v2 = %s, pins.go KhelmVersion = v%s — bump both (the ChartRenderer binary the template pins must be the library release)", got, KhelmVersion)
-	}
-	if got := goModRequire(t, "helm.sh/helm/v3"); got != "v"+HelmVersion {
-		t.Errorf("go.mod helm.sh/helm/v3 = %s, pins.go HelmVersion = v%s (khelm v%s's requirement)", got, HelmVersion, KhelmVersion)
-	}
+	t.Parallel()
+	testutil.Drift{
+		Want: testutil.Tree{Name: "go.mod", Files: map[string]string{
+			"sigs.k8s.io/kustomize/api":      goModRequire(t, "sigs.k8s.io/kustomize/api"),
+			"github.com/mgoltzsche/khelm/v2": goModRequire(t, "github.com/mgoltzsche/khelm/v2"),
+			"helm.sh/helm/v3":                goModRequire(t, "helm.sh/helm/v3"),
+		}},
+		Got: testutil.Tree{Name: "pins.go", Files: map[string]string{
+			"sigs.k8s.io/kustomize/api":      KustomizeAPI,
+			"github.com/mgoltzsche/khelm/v2": "v" + KhelmVersion,
+			"helm.sh/helm/v3":                "v" + HelmVersion,
+		}},
+		Sync: "bump go.mod and internal/toolchain/pins.go together: kustomizeAPIToCLI and the b.yaml template follow KustomizeAPI, the khelm ChartRenderer binary must be the library release, HelmVersion is khelm's requirement",
+	}.Check(t)
 }
 
 func TestKustomizeCLIMatchesAPIMapping(t *testing.T) {
+	t.Parallel()
 	cli, ok := kustomizeAPIToCLI[KustomizeAPI]
 	if !ok {
 		t.Fatalf("kustomizeAPIToCLI has no entry for api %s — add the CLI release built from it", KustomizeAPI)
@@ -58,18 +66,18 @@ func TestKustomizeCLIMatchesAPIMapping(t *testing.T) {
 // TestTemplateCarriesThePins: the generated b.yaml installs exactly the
 // pinned releases, at the plugin paths the exec render resolves.
 func TestTemplateCarriesThePins(t *testing.T) {
+	t.Parallel()
 	tpl := mustTemplate(t, TemplateOptions{Name: "t", LoVersion: "0.3.0", Variant: "core"})
-	pins := PinnedEntries("0.3.0")
-	want := map[string]string{
-		"kustomize":                   KustomizeCLI,
-		"github.com/mgoltzsche/khelm": "v" + KhelmVersion,
-		"github.com/kernpilot/lok8s":  "v0.3.0",
-	}
-	for k, v := range want {
-		if pins[k] != v {
-			t.Errorf("template pins %s = %q, want %q", k, pins[k], v)
-		}
-	}
+	testutil.Drift{
+		Want: testutil.Tree{Name: "pins.go", Files: map[string]string{
+			"kustomize":                   KustomizeCLI,
+			"github.com/mgoltzsche/khelm": "v" + KhelmVersion,
+			"github.com/kernpilot/lok8s":  "v0.3.0",
+		}},
+		Got:    testutil.Tree{Name: "the b.yaml template", Files: PinnedEntries("0.3.0")},
+		Sync:   "bump internal/toolchain/pins.go and template.go together",
+		Subset: true,
+	}.Check(t)
 	for _, s := range []string{
 		"  kustomize:\n    version: " + KustomizeCLI + "\n",
 		"  github.com/mgoltzsche/khelm:\n    version: v" + KhelmVersion + "\n    file: ../.kustomize/" + ChartRendererPluginRel + "\n",

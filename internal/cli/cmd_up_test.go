@@ -32,6 +32,7 @@ func headerOf(t *testing.T, p *config.Paths, d string) string {
 }
 
 func TestRunHeaderShapes(t *testing.T) {
+	t.Parallel()
 	p := synthProject(t)
 	testutil.WriteFile(t, filepath.Join(p.Clusters, "lo.dev", "cluster.lok8s.yaml"),
 		"kind: Lo\nmetadata:\n  name: clu\nspec:\n  kubernetes:\n    version: v1.31.12@sha256:0f5cc49c\n")
@@ -131,7 +132,7 @@ func newUpHarness(t *testing.T, dispatch error) *upHarness {
 
 func TestUpDispatchFailureStopsBeforeTilt(t *testing.T) {
 	h := newUpHarness(t, errors.New("provision failed"))
-	err := runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev"})
+	err := runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev"})
 	if !errors.Is(err, ErrHandled) || len(*h.exits) != 0 {
 		t.Fatalf("err=%v exits=%v", err, *h.exits)
 	}
@@ -145,7 +146,7 @@ func TestUpDispatchFailureStopsBeforeTilt(t *testing.T) {
 
 func TestUpGateDeclinePassesRc3(t *testing.T) {
 	h := newUpHarness(t, driver.ErrDeclined)
-	_ = runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev"})
+	_ = runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev"})
 	if len(*h.exits) != 1 || (*h.exits)[0] != 3 {
 		t.Errorf("exits = %v", *h.exits)
 	}
@@ -153,7 +154,7 @@ func TestUpGateDeclinePassesRc3(t *testing.T) {
 
 func TestUpCIPassesTiltStatusThrough(t *testing.T) {
 	h := newUpHarness(t, nil)
-	_ = runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", ci: true, timeout: "10m"})
+	_ = runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", ci: true, timeout: "10m"})
 	if len(*h.exits) != 1 || (*h.exits)[0] != 7 {
 		t.Errorf("exits = %v (tilt ci's own status is the contract)", *h.exits)
 	}
@@ -167,7 +168,7 @@ func TestUpCIPassesTiltStatusThrough(t *testing.T) {
 
 func TestUpInteractiveStartsTiltAndOpensBrowserFallback(t *testing.T) {
 	h := newUpHarness(t, nil)
-	if err := runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", openTilt: true}); err != nil {
+	if err := runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", openTilt: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.started) != 1 || len(*h.exits) != 0 {
@@ -192,7 +193,7 @@ func TestUpOpenTiltUsesOpener(t *testing.T) {
 	var opened []string
 	h.deps.lookPath = func(tool string) bool { return tool == "open" }
 	h.deps.open = func(tool, url string) error { opened = append(opened, tool+" "+url); return nil }
-	if err := runUp(context.Background(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", openTilt: true}); err != nil {
+	if err := runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", openTilt: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(opened) != 1 || !strings.HasPrefix(opened[0], "open http://localhost:") {

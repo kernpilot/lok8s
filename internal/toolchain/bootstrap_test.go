@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/kernpilot/lok8s/internal/fsutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // fakeTarball builds a b-style release tarball: LICENSE + a `b` script.
@@ -88,7 +88,7 @@ func TestBootstrapDownloadsVerifiesExtractsAndInstalls(t *testing.T) {
 	bin := filepath.Join(base, ".bin")
 	var out bytes.Buffer
 	r := &recRunner{}
-	err := Bootstrap(context.Background(), BootstrapOptions{
+	err := Bootstrap(t.Context(), BootstrapOptions{
 		Base: base, Bin: bin, Out: &out, Stderr: &out, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64",
 	})
 	if err != nil {
@@ -122,7 +122,7 @@ func TestBootstrapDownloadsVerifiesExtractsAndInstalls(t *testing.T) {
 	hits = 0
 	r = &recRunner{}
 	out.Reset()
-	if err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: bin, Out: &out, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64"}); err != nil {
+	if err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: bin, Out: &out, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64"}); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&hits) != 0 {
@@ -142,7 +142,7 @@ func TestBootstrapChecksumMismatchInstallsNothing(t *testing.T) {
 	bin := filepath.Join(base, ".bin")
 	r := &recRunner{}
 	var out bytes.Buffer
-	err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: bin, Out: &out, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "arm64"})
+	err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: bin, Out: &out, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "arm64"})
 	if err == nil || !strings.Contains(err.Error(), "checksum MISMATCH") {
 		t.Fatalf("mismatch not reported: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestBootstrapTarballWithoutBFails(t *testing.T) {
 	srv := server(t, "b-linux-amd64.tar.gz", tb, &hits)
 	rel := &Release{Version: "1.0.0", BaseURL: srv.URL, Assets: map[string]string{"b-linux-amd64.tar.gz": sha256hex(tb)}}
 	base := t.TempDir()
-	err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Runner: &recRunner{}, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64"})
+	err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Runner: &recRunner{}, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64"})
 	if err == nil || !strings.Contains(err.Error(), "no `b` member") {
 		t.Fatalf("want member error, got %v", err)
 	}
@@ -177,7 +177,7 @@ func TestBootstrapDryRunTouchesNothing(t *testing.T) {
 	bin := filepath.Join(base, ".bin")
 	r := &recRunner{}
 	var out bytes.Buffer
-	if err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: bin, Out: &out, DryRun: true, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64"}); err != nil {
+	if err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: bin, Out: &out, DryRun: true, Runner: r, Client: srv.Client(), Release: rel, GOOS: "linux", GOARCH: "amd64"}); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&hits) != 0 || len(r.cmds) != 0 {
@@ -195,7 +195,7 @@ func TestBootstrapDryRunTouchesNothing(t *testing.T) {
 
 func TestBootstrapDarwinPointsAtManualInstall(t *testing.T) {
 	base := t.TempDir()
-	err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Runner: &recRunner{}, GOOS: "darwin", GOARCH: "arm64"})
+	err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Runner: &recRunner{}, GOOS: "darwin", GOARCH: "arm64"})
 	if err == nil || !strings.Contains(err.Error(), "binary.help") || !strings.Contains(err.Error(), "no darwin build") {
 		t.Fatalf("darwin: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestBootstrapDarwinPointsAtManualInstall(t *testing.T) {
 func TestBootstrapRefusesPlainHTTP(t *testing.T) {
 	rel := &Release{Version: "1.0.0", BaseURL: "http://example.invalid", Assets: map[string]string{"b-linux-amd64.tar.gz": strings.Repeat("a", 64)}}
 	base := t.TempDir()
-	err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Runner: &recRunner{}, Release: rel, GOOS: "linux", GOARCH: "amd64"})
+	err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Runner: &recRunner{}, Release: rel, GOOS: "linux", GOARCH: "amd64"})
 	if err == nil || !strings.Contains(err.Error(), "non-https") {
 		t.Fatalf("plain http accepted: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestBootstrapRefusesRedirectDowngradeToHTTP(t *testing.T) {
 	bin := filepath.Join(base, ".bin")
 	r := &recRunner{}
 	client := &http.Client{Transport: srv.Client().Transport, CheckRedirect: refuseNonHTTPSRedirect}
-	err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: bin, Out: &bytes.Buffer{}, Runner: r, Client: client, Release: rel, GOOS: "linux", GOARCH: "amd64"})
+	err := Bootstrap(t.Context(), BootstrapOptions{Base: base, Bin: bin, Out: &bytes.Buffer{}, Runner: r, Client: client, Release: rel, GOOS: "linux", GOARCH: "amd64"})
 	if err == nil || !strings.Contains(err.Error(), "non-https URL refused") {
 		t.Fatalf("downgrade redirect followed: %v", err)
 	}
@@ -290,6 +290,7 @@ func TestExtractBRefusesOversizedMember(t *testing.T) {
 // TestPinnedReleaseShape: the production pin is well-formed — a version,
 // an https base, 64-hex sums for both linux architectures lo ships.
 func TestPinnedReleaseShape(t *testing.T) {
+	t.Parallel()
 	if !strings.HasPrefix(BRelease.BaseURL, "https://github.com/fentas/b/") {
 		t.Fatalf("BaseURL = %s", BRelease.BaseURL)
 	}

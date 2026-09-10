@@ -18,12 +18,14 @@ func mustTemplate(t *testing.T, o TemplateOptions) string {
 }
 
 func TestTemplateRejectsUnknownGroup(t *testing.T) {
+	t.Parallel()
 	if _, err := Template(TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"kustomize"}}); err == nil {
 		t.Fatal("an unknown group rendered a template instead of failing")
 	}
 }
 
 func TestTemplateGroupsAndMarker(t *testing.T) {
+	t.Parallel()
 	tpl := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "v0.3.0", Variant: "core"})
 	if !strings.Contains(tpl, Marker+"\n") {
 		t.Fatal("marker line missing")
@@ -61,6 +63,7 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 }
 
 func TestNormalizeGroups(t *testing.T) {
+	t.Parallel()
 	g, err := NormalizeGroups([]string{"cloud", " LOCAL ", ""})
 	if err != nil || strings.Join(g, ",") != "core,local,cloud" {
 		t.Fatalf("got %v, %v", g, err)
@@ -71,6 +74,7 @@ func TestNormalizeGroups(t *testing.T) {
 }
 
 func TestWriteNeverOverwrites(t *testing.T) {
+	t.Parallel()
 	bin := filepath.Join(t.TempDir(), ".bin")
 	content := mustTemplate(t, TemplateOptions{Name: "p", LoVersion: "0.3.0", Variant: "core"})
 
@@ -116,6 +120,7 @@ func TestWriteNeverOverwrites(t *testing.T) {
 }
 
 func TestUnifiedDiffShape(t *testing.T) {
+	t.Parallel()
 	d := unifiedDiff("a", "b", "x\ny\nz\n", "x\nY\nz\nw\n")
 	want := "--- a\n+++ b\n x\n-y\n+Y\n z\n+w\n"
 	if d != want {

@@ -227,6 +227,7 @@ spec:
 `
 
 func TestOverlayImagesReplacesByContainerName(t *testing.T) {
+	t.Parallel()
 	docs := parseDocs([]byte(renderedJob))
 	overlayImages(docs[0], []liveImage{{name: "migrate", image: "reg/lok8s.local_kubehz-api-migrate:tilt-abc"}})
 	out := marshalDocs(docs)
@@ -237,6 +238,7 @@ func TestOverlayImagesReplacesByContainerName(t *testing.T) {
 }
 
 func TestOverlayImagesKeepsContainersAbsentFromLive(t *testing.T) {
+	t.Parallel()
 	docs := parseDocs([]byte(`kind: Job
 metadata:
   name: mig
@@ -257,6 +259,7 @@ spec:
 }
 
 func TestOverlayImagesCoversInitContainers(t *testing.T) {
+	t.Parallel()
 	docs := parseDocs([]byte(`kind: Deployment
 metadata:
   name: d
@@ -278,6 +281,7 @@ spec:
 }
 
 func TestOverlayImagesEmptyLiveListIsANoop(t *testing.T) {
+	t.Parallel()
 	docs := parseDocs([]byte(renderedJob))
 	overlayImages(docs[0], nil)
 	if !strings.Contains(marshalDocs(docs), "lok8s.local/kubehz-api-migrate") {
@@ -288,7 +292,7 @@ func TestOverlayImagesEmptyLiveListIsANoop(t *testing.T) {
 func TestLiveImagesMissingObjectYieldsEmpty(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	runner.handler = func(execx.Cmd, string) error { return &fakeExit{1} }
-	if imgs := c.liveImages(context.Background(), "Job", "nope", "ns"); len(imgs) != 0 {
+	if imgs := c.liveImages(t.Context(), "Job", "nope", "ns"); len(imgs) != 0 {
 		t.Errorf("imgs = %v", imgs)
 	}
 }
@@ -296,6 +300,7 @@ func TestLiveImagesMissingObjectYieldsEmpty(t *testing.T) {
 // ── object names + Tilt ownership ────────────────────────
 
 func TestObjectNamesOnePerDocument(t *testing.T) {
+	t.Parallel()
 	docs := parseDocs([]byte("kind: Job\nmetadata:\n  name: mig-a\n---\nkind: Job\nmetadata:\n  name: mig-b\n"))
 	names := objectNames(docs)
 	if len(names) != 2 || names[0] != "mig-a" || names[1] != "mig-b" {
@@ -315,14 +320,14 @@ func TestTiltCanRecreateAllOrNothing(t *testing.T) {
 		return nil
 	}
 	known := parseDocs([]byte("kind: Job\nmetadata:\n  name: known\n"))
-	if !c.tiltCanRecreate(context.Background(), known, "14242") {
+	if !c.tiltCanRecreate(t.Context(), known, "14242") {
 		t.Error("single known object must recreate through Tilt")
 	}
 	mixed := parseDocs([]byte("kind: Job\nmetadata:\n  name: known\n---\nkind: Job\nmetadata:\n  name: other\n"))
-	if c.tiltCanRecreate(context.Background(), mixed, "14242") {
+	if c.tiltCanRecreate(t.Context(), mixed, "14242") {
 		t.Error("Tilt must own EVERY object (all-or-nothing)")
 	}
-	if c.tiltCanRecreate(context.Background(), nil, "14242") {
+	if c.tiltCanRecreate(t.Context(), nil, "14242") {
 		t.Error("an empty selection is not Tilt-recreatable")
 	}
 }
@@ -332,7 +337,7 @@ func TestTiltCanRecreateAllOrNothing(t *testing.T) {
 func TestRecreateNoMatchWarnsAndSucceeds(t *testing.T) {
 	c, runner, _, errOut := testCtx(t)
 	writeArtifact(t, c, twoJobs)
-	if err := c.Recreate(context.Background(), "lok8s.dev/role=ghost"); err != nil {
+	if err := c.Recreate(t.Context(), "lok8s.dev/role=ghost"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(errOut.String(), "hooks recreate: no objects match 'lok8s.dev/role=ghost'") {
@@ -352,7 +357,7 @@ func TestRecreateThroughTiltWhenSessionOwnsObjects(t *testing.T) {
 		}
 		return nil // session up, uiresources known, triggers succeed
 	}
-	if err := c.Recreate(context.Background(), "lok8s.dev/name=zitadel"); err != nil {
+	if err := c.Recreate(t.Context(), "lok8s.dev/name=zitadel"); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -374,7 +379,7 @@ func TestRecreateTiltTriggerFailureIsLoud(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Recreate(context.Background(), "lok8s.dev/role=seed"); !errors.Is(err, ErrHandled) {
+	if err := c.Recreate(t.Context(), "lok8s.dev/role=seed"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "hooks recreate: tilt trigger failed for 'zitadel-provision'") {
@@ -403,7 +408,7 @@ metadata:
 		}
 		return nil
 	}
-	if err := c.Recreate(context.Background(), "run=mig"); err != nil {
+	if err := c.Recreate(t.Context(), "run=mig"); err != nil {
 		t.Fatal(err)
 	}
 	// delete streams the RENDERED objects; apply streams the OVERLAID ones.
@@ -427,7 +432,7 @@ metadata:
 func TestApplyNoDeleteJustKapply(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	writeArtifact(t, c, twoJobs)
-	if err := c.Apply(context.Background(), "lok8s.dev/role=seed"); err != nil {
+	if err := c.Apply(t.Context(), "lok8s.dev/role=seed"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("delete"); len(got) != 0 {
@@ -449,7 +454,7 @@ func TestApplyFailureWithoutForceFailsFast(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Apply(context.Background(), "lok8s.dev/role=seed"); !errors.Is(err, ErrHandled) {
+	if err := c.Apply(t.Context(), "lok8s.dev/role=seed"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	// Non-interactive without --force-recreate → the remediation hint, no
@@ -475,7 +480,7 @@ metadata:
   name: not-restartable
   labels: {app: web}
 `)
-	if err := c.Restart(context.Background(), "app=web"); err != nil {
+	if err := c.Restart(t.Context(), "app=web"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("rollout restart"); len(got) != 1 || got[0] != "kubectl -n apps rollout restart deployment/web" {
@@ -486,7 +491,7 @@ metadata:
 func TestRestartNamespaceDefaultsToDefault(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	writeArtifact(t, c, "kind: StatefulSet\nmetadata:\n  name: db\n  labels: {app: db}\n")
-	if err := c.Restart(context.Background(), "app=db"); err != nil {
+	if err := c.Restart(t.Context(), "app=db"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("rollout restart"); len(got) != 1 || got[0] != "kubectl -n default rollout restart statefulset/db" {
@@ -497,7 +502,7 @@ func TestRestartNamespaceDefaultsToDefault(t *testing.T) {
 func TestRestartNoneRestartableWarns(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeArtifact(t, c, "kind: Job\nmetadata:\n  name: j\n  labels: {app: j}\n")
-	if err := c.Restart(context.Background(), "app=j"); err != nil {
+	if err := c.Restart(t.Context(), "app=j"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(errOut.String(), "hooks restart: matched objects but none are restartable (Deployment/StatefulSet/DaemonSet) for 'app=j'") {
@@ -523,7 +528,7 @@ metadata:
 		}
 		return nil
 	}
-	if err := c.Restart(context.Background(), "app=x"); err != nil {
+	if err := c.Restart(t.Context(), "app=x"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(errOut.String(), "hooks restart: broken") &&

@@ -45,7 +45,7 @@ func TestProvisionHappyPath(t *testing.T) {
 	if err := os.WriteFile(d.kubeconfigPath("provtest"), []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Provision(context.Background(), "test.dev"); err != nil {
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
 		t.Fatalf("happy path regressed: %v", err)
 	}
 	// The CAPI resources were applied to the management cluster…
@@ -69,7 +69,7 @@ func TestProvisionFailedCredentialSetupDoesNotReportSuccess(t *testing.T) {
 	// cluster.
 	d, runner, _ := provisionSetup(t)
 	t.Setenv("HCLOUD_TOKEN", "") // break exactly the credential collaborator
-	if err := d.Provision(context.Background(), "test.dev"); err == nil {
+	if err := d.Provision(t.Context(), "test.dev"); err == nil {
 		t.Fatal("provision returned success although the credential setup FAILED")
 	}
 	for i, c := range runner.calls {
@@ -93,7 +93,7 @@ spec:
 `)
 	writeKubeconfig(t, d, "mgmt.dev")
 	runner.handler = happyHandler
-	if err := d.Provision(context.Background(), "test.dev"); err == nil {
+	if err := d.Provision(t.Context(), "test.dev"); err == nil {
 		t.Fatal("provision returned success although provider detection FAILED")
 	}
 	if !strings.Contains(stderr.String(), "No provider found in cluster spec") {
@@ -114,7 +114,7 @@ func TestProvisionFailedNamespaceApplyDoesNotReportSuccess(t *testing.T) {
 		}
 		return happyHandler(c, stdin)
 	}
-	if err := d.Provision(context.Background(), "test.dev"); err == nil {
+	if err := d.Provision(t.Context(), "test.dev"); err == nil {
 		t.Fatal("provision returned success although the namespace apply FAILED")
 	}
 }
@@ -130,7 +130,7 @@ func TestProvisionFailedConfigReadDoesNotMisdiagnoseHosted(t *testing.T) {
 	d.Hooks.ReadKubehzConfig = func(clusterYAML string) (string, error) {
 		return "", errors.New("cannot read cluster spec")
 	}
-	err := d.Provision(context.Background(), "test.dev")
+	err := d.Provision(t.Context(), "test.dev")
 	if err == nil {
 		t.Fatal("provision returned success although the cluster spec could not be read")
 	}
@@ -154,7 +154,7 @@ spec:
   managementCluster: {domain: mgmt.dev}
   provider: {name: hetzner}
 `)
-	if err := d.Provision(context.Background(), "prod.dev"); err == nil {
+	if err := d.Provision(t.Context(), "prod.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	out := stderr.String()
@@ -175,7 +175,7 @@ metadata: {name: test-saas}
 spec:
   kubernetes: {version: v1.31.10}
 `)
-	if err := d.Provision(context.Background(), "test.dev"); err == nil {
+	if err := d.Provision(t.Context(), "test.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	out := stderr.String()
@@ -199,7 +199,7 @@ func TestProvisionHostedDelegates(t *testing.T) {
 		}
 		return nil
 	}
-	if err := d.Provision(context.Background(), "test.dev"); err != nil {
+	if err := d.Provision(t.Context(), "test.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
@@ -234,7 +234,7 @@ func TestDestroyFailedDeleteDoesNotReportSuccess(t *testing.T) {
 		}
 		return nil
 	}
-	if err := d.Destroy(context.Background(), "test.dev"); err == nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err == nil {
 		t.Fatal("destroy returned success although the workload cluster delete FAILED")
 	}
 	// Same reasoning as the kubeone guard: the failed teardown leaves live
@@ -251,7 +251,7 @@ func TestDestroyMissingRemoteMgmtKubeconfigFails(t *testing.T) {
 	// kubeconfig, and returned success.
 	d, _, stderr := destroySetup(t, "false")
 	os.Remove(d.kubeconfigPath("mgmt.dev"))
-	if err := d.Destroy(context.Background(), "test.dev"); err == nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err == nil {
 		t.Fatal("destroy returned success although no delete was ever attempted")
 	}
 	if !fsutil.FileExists(d.kubeconfigPath("destroytest")) {
@@ -270,7 +270,7 @@ func TestDestroyLocalMgmtGoneWorkloadPresentFails(t *testing.T) {
 	os.Remove(d.kubeconfigPath("mgmt.dev"))
 	// kind get clusters (the recovery probe) reports nothing — default
 	// handler output is empty.
-	if err := d.Destroy(context.Background(), "test.dev"); err == nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err == nil {
 		t.Fatal("an incomplete destroy was reported as a completed one")
 	}
 	if !fsutil.FileExists(d.kubeconfigPath("destroytest")) {
@@ -284,14 +284,14 @@ func TestDestroyLocalMgmtBothGoneStaysIdempotent(t *testing.T) {
 	d, _, _ := destroySetup(t, "true")
 	os.Remove(d.kubeconfigPath("mgmt.dev"))
 	os.Remove(d.kubeconfigPath("destroytest"))
-	if err := d.Destroy(context.Background(), "test.dev"); err != nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err != nil {
 		t.Fatalf("a re-run of 'lo down' after a completed destroy now FAILS: %v", err)
 	}
 }
 
 func TestDestroyHappyPathRemovesKubeconfig(t *testing.T) {
 	d, runner, _ := destroySetup(t, "false")
-	if err := d.Destroy(context.Background(), "test.dev"); err != nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err != nil {
 		t.Fatalf("capi destroy happy path regressed: %v", err)
 	}
 	if fsutil.FileExists(d.kubeconfigPath("destroytest")) {
@@ -320,7 +320,7 @@ func TestDestroyHostedDelegates(t *testing.T) {
 		called = true
 		return nil
 	}
-	if err := d.Destroy(context.Background(), "test.dev"); err != nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
@@ -331,7 +331,7 @@ func TestDestroyHostedDelegates(t *testing.T) {
 func TestDestroySelfHostedWithoutMgmtDomainRefuses(t *testing.T) {
 	d, _, stderr := testDriver(t)
 	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: x}\nspec: {}\n")
-	if err := d.Destroy(context.Background(), "test.dev"); err == nil {
+	if err := d.Destroy(t.Context(), "test.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(stderr.String(), "spec.managementCluster.domain is required for self-hosted CAPI destroy") {
@@ -352,7 +352,7 @@ func callDump(r *fakeRunner) string {
 func TestStatusUnknownWithoutMgmtDomain(t *testing.T) {
 	d, _, _ := testDriver(t)
 	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: x}\nspec: {}\n")
-	got, err := d.Status(context.Background(), "test.dev")
+	got, err := d.Status(t.Context(), "test.dev")
 	if err != nil || got != "Unknown" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -362,7 +362,7 @@ func TestStatusNotFoundWhenKubectlFails(t *testing.T) {
 	d, runner, _ := testDriver(t)
 	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: test-prod}\nspec:\n  managementCluster: {domain: mgmt.dev}\n")
 	runner.handler = func(c execx.Cmd, stdin string) error { return errors.New("no cluster") }
-	got, err := d.Status(context.Background(), "test.dev")
+	got, err := d.Status(t.Context(), "test.dev")
 	if err != nil || got != "NotFound" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -375,16 +375,17 @@ func TestStatusPassesPhaseThrough(t *testing.T) {
 		c.Stdout.Write([]byte("Provisioned"))
 		return nil
 	}
-	got, err := d.Status(context.Background(), "test.dev")
+	got, err := d.Status(t.Context(), "test.dev")
 	if err != nil || got != "Provisioned" {
 		t.Fatalf("got %q, %v", got, err)
 	}
 }
 
 func TestKubeconfigPathUsesMetadataName(t *testing.T) {
+	t.Parallel()
 	d, _, _ := testDriver(t)
 	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: test-prod}\nspec: {}\n")
-	got, err := d.Kubeconfig(context.Background(), "test.dev")
+	got, err := d.Kubeconfig(t.Context(), "test.dev")
 	if err != nil || got != d.kubeconfigPath("test-prod") {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -402,7 +403,7 @@ spec:
     config:
       network: {enabled: true}
 `)
-	if err := d.Export(context.Background(), "test.dev"); err != nil {
+	if err := d.Export(t.Context(), "test.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("HCLOUD_CCM_NETWORK"); got != "netcluster" {
@@ -415,7 +416,7 @@ func TestExportLeavesEnvAloneWithoutNetworking(t *testing.T) {
 	os.Unsetenv("HCLOUD_CCM_NETWORK")
 	d, _, _ := testDriver(t)
 	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: x}\nspec:\n  provider: {name: hetzner}\n")
-	if err := d.Export(context.Background(), "test.dev"); err != nil {
+	if err := d.Export(t.Context(), "test.dev"); err != nil {
 		t.Fatal(err)
 	}
 	if _, set := os.LookupEnv("HCLOUD_CCM_NETWORK"); set {
@@ -448,7 +449,7 @@ func TestBootstrapRunsClusterctlInitWithProvider(t *testing.T) {
 	d, runner, stderr := testDriver(t)
 	bootstrapSpec(t, d)
 	runner.handler = happyHandler
-	if err := d.Bootstrap(context.Background(), "mgmt.lok8s.dev"); err != nil {
+	if err := d.Bootstrap(t.Context(), "mgmt.lok8s.dev"); err != nil {
 		t.Fatalf("bootstrap failed: %v\nstderr:\n%s", err, stderr.String())
 	}
 	out := stderr.String()
@@ -496,7 +497,7 @@ func TestBootstrapReusesExistingKindCluster(t *testing.T) {
 		}
 		return happyHandler(c, stdin)
 	}
-	if err := d.Bootstrap(context.Background(), "mgmt.lok8s.dev"); err != nil {
+	if err := d.Bootstrap(t.Context(), "mgmt.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -511,7 +512,7 @@ spec:
   managementCluster: {domain: gcp.lok8s.dev}
   gcp: {region: us-central1}
 `)
-	if err := d.Bootstrap(context.Background(), "gcp.lok8s.dev"); err == nil {
+	if err := d.Bootstrap(t.Context(), "gcp.lok8s.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	// The RAW `error:` family (echo >&2), not the colored [error] helper.
@@ -533,7 +534,7 @@ func TestBootstrapKeepsBootstrapClusterOnFailedMove(t *testing.T) {
 		}
 		return happyHandler(c, stdin)
 	}
-	if err := d.Bootstrap(context.Background(), "mgmt.lok8s.dev"); err == nil {
+	if err := d.Bootstrap(t.Context(), "mgmt.lok8s.dev"); err == nil {
 		t.Fatal("expected error")
 	}
 	if runner.anyCall("kind delete cluster --name lok8s-bootstrap") {
@@ -551,7 +552,7 @@ func TestProvisionTriggersBootstrapWhenSelfManaging(t *testing.T) {
 	d, runner, stderr := testDriver(t)
 	bootstrapSpec(t, d)
 	runner.handler = happyHandler
-	if err := d.Provision(context.Background(), "mgmt.lok8s.dev"); err != nil {
+	if err := d.Provision(t.Context(), "mgmt.lok8s.dev"); err != nil {
 		t.Fatalf("provision failed: %v\nstderr:\n%s", err, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "info: bootstrapping management cluster mgmt.lok8s.dev") {
@@ -565,6 +566,7 @@ func TestProvisionTriggersBootstrapWhenSelfManaging(t *testing.T) {
 // ── mgmt kind name ────────────────────────────────────────
 
 func TestMgmtKindName(t *testing.T) {
+	t.Parallel()
 	if got := MgmtKindName("capi-mgmt.lok8s.dev"); got != "capi-mgmt-lok8s-dev" {
 		t.Fatalf("got %q", got)
 	}

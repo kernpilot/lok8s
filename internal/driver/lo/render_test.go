@@ -45,10 +45,7 @@ func setNodeEnv(t *testing.T, cp, workers, hostPorts, mounts string) {
 
 func assertGolden(t *testing.T, got, goldenName string) {
 	t.Helper()
-	want := readFileT(t, filepath.Join("testdata", goldenName))
-	if got != want {
-		t.Errorf("render diverges from the bash golden %s.\n--- bash\n%s\n--- go\n%s", goldenName, want, got)
-	}
+	testutil.Golden(t, filepath.Join("testdata", goldenName), got, *update)
 }
 
 func TestRenderKindConfigDefaultMatchesBashByteForByte(t *testing.T) {

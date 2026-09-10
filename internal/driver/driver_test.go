@@ -50,6 +50,7 @@ func TestRegisterPanics(t *testing.T) {
 }
 
 func TestExitCode(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -71,6 +72,7 @@ func TestExitCode(t *testing.T) {
 }
 
 func TestExitCodeSubprocess(t *testing.T) {
+	t.Parallel()
 	// A subprocess exit code rides through (dispatch_destroy's remap
 	// depends on telling a driver-subprocess rc 3 apart from the gate's).
 	err := exec.Command("sh", "-c", "exit 3").Run()

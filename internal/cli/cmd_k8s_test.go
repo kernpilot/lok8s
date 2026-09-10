@@ -30,7 +30,7 @@ func TestK8sArtifactRendersUnderTheCommandContext(t *testing.T) {
 	newRunner = func(*config.Paths) execx.Runner { return r }
 	t.Cleanup(func() { newRunner = prev })
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	err := k8sKustomizeArtifact(ctx, p, "alpha.dev", filepath.Join(p.Clusters, "alpha.dev", "targets"), t.TempDir(), "infrastructure.yaml", io.Discard)
 	if !errors.Is(err, ErrHandled) {

@@ -45,7 +45,7 @@ registry TLS mint only. The pins that hold the two together live in
 `internal/toolchain/pins.go` and are drift-tested against `go.mod` and the
 `.bin/b.yaml` template: bump them together. Every gate (build, vet, test,
 lint, all ten parity harnesses) runs against BOTH builds; the in-process
-render tests are tag-gated (`render_inprocess_test.go`) or skip via
+render tests are tag-gated (`inprocess_test.go`) or skip via
 `render.InProcessAvailable()`. The byte-parity tests need the pinned
 `.bin/kustomize` + `.kustomize/` plugins (`b install`, `make -C kustomize
 build`); without them they skip locally and FAIL under `CI=true`. The

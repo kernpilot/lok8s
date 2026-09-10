@@ -5,7 +5,6 @@ package kapply
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +30,7 @@ func waitApplier(getOut string) (*Applier, *fakeKubectl, *bytes.Buffer) {
 
 func TestWaitReadyReadyDeploymentReturnsPromptly(t *testing.T) {
 	a, _, errOut := waitApplier(`{"items":[{"kind":"Deployment","metadata":{"namespace":"default","name":"web"},"spec":{"replicas":1},"status":{"availableReplicas":1}}]}`)
-	if err := a.WaitReady(context.Background(), "platform", 30, waitManifest); err != nil {
+	if err := a.WaitReady(t.Context(), "platform", 30, waitManifest); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
 	if strings.Contains(errOut.String(), "timed out") {
@@ -42,7 +41,7 @@ func TestWaitReadyReadyDeploymentReturnsPromptly(t *testing.T) {
 func TestWaitReadyTimeoutWarnsAndNamesPending(t *testing.T) {
 	a, _, errOut := waitApplier(`{"items":[{"kind":"Deployment","metadata":{"namespace":"default","name":"web"},"spec":{"replicas":1},"status":{"availableReplicas":0}}]}`)
 	// timeout 0 → immediate ⚠, no sleep; best-effort: never fatal.
-	if err := a.WaitReady(context.Background(), "platform", 0, waitManifest); err != nil {
+	if err := a.WaitReady(t.Context(), "platform", 0, waitManifest); err != nil {
 		t.Fatalf("WaitReady must be best-effort, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "platform: timed out after 0s; not ready: web") {
@@ -53,7 +52,7 @@ func TestWaitReadyTimeoutWarnsAndNamesPending(t *testing.T) {
 func TestWaitReadyNoWorkloadsIsNoop(t *testing.T) {
 	a, f, errOut := waitApplier("")
 	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: default}"
-	if err := a.WaitReady(context.Background(), "networking", 30, manifest); err != nil {
+	if err := a.WaitReady(t.Context(), "networking", 30, manifest); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
 	if len(f.calls) != 0 {
@@ -69,13 +68,13 @@ func TestWaitReadyDaemonSetSemantics(t *testing.T) {
 	// gates readiness) — pins the ds-specific readiness branch.
 	dsManifest := "apiVersion: apps/v1\nkind: DaemonSet\nmetadata:\n  name: cilium\n  namespace: kube-system"
 	a, _, errOut := waitApplier(`{"items":[{"kind":"DaemonSet","metadata":{"namespace":"kube-system","name":"cilium"},"status":{"desiredNumberScheduled":0,"numberReady":0}}]}`)
-	_ = a.WaitReady(context.Background(), "cilium", 0, dsManifest)
+	_ = a.WaitReady(t.Context(), "cilium", 0, dsManifest)
 	if !strings.Contains(errOut.String(), "timed out") || !strings.Contains(errOut.String(), "cilium") {
 		t.Errorf("zero-desired daemonset counted ready: %s", errOut.String())
 	}
 
 	a2, _, errOut2 := waitApplier(`{"items":[{"kind":"DaemonSet","metadata":{"namespace":"kube-system","name":"cilium"},"status":{"desiredNumberScheduled":3,"numberReady":3}}]}`)
-	if err := a2.WaitReady(context.Background(), "cilium", 30, dsManifest); err != nil {
+	if err := a2.WaitReady(t.Context(), "cilium", 30, dsManifest); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
 	if strings.Contains(errOut2.String(), "timed out") {

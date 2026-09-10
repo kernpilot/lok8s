@@ -140,7 +140,7 @@ func (h *harness) recorded() string { return strings.Join(h.record, "\n") }
 func TestRunPhaseOrderAndSummary(t *testing.T) {
 	h := newHarness(t)
 	h.r.Force = true
-	if err := h.r.Run(context.Background(), "test.dom", false, false); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
 		t.Fatal(err)
 	}
 	all := h.all()
@@ -167,7 +167,7 @@ func TestRunPhaseOrderAndSummary(t *testing.T) {
 func TestRunVerify(t *testing.T) {
 	h := newHarness(t)
 	h.r.Force = true
-	if err := h.r.Run(context.Background(), "test.dom", false, false); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"--- verify ---", "  nodes Ready: 3/3\n", "  \033[32m✓\033[0m all 3 node(s) Ready — cluster back from bare metal\n"} {
@@ -182,7 +182,7 @@ func TestVerifyCordonedCountsReady(t *testing.T) {
 	h := newHarness(t)
 	h.r.Exec = &fakeKubectl{nodes: "cp1  Ready                     control-plane  10d  v1.30.0\ncp2  Ready,SchedulingDisabled  control-plane  10d  v1.30.0\nw1   Ready                     <none>         10d  v1.30.0\nw2   NotReady                  <none>         10d  v1.30.0\n"}
 	h.r.domain, h.r.clusterName, h.r.spec, h.r.prov, h.r.config = "test.dom", "test.dom", h.spec, h.prov, h.cfg
-	h.r.verify(context.Background())
+	h.r.verify(t.Context())
 	for _, want := range []string{"nodes Ready: 3/3", "all 3 node(s) Ready"} {
 		if !strings.Contains(h.out.String(), want) {
 			t.Errorf("missing %q:\n%s", want, h.out.String())
@@ -207,7 +207,7 @@ func TestVerifyMissingKubeconfigNeverFallsBack(t *testing.T) {
 	kc := &fakeKubectl{nodes: "x Ready a b c\ny Ready a b c\nz Ready a b c\n"}
 	h.r.Exec = kc
 	h.r.domain, h.r.clusterName, h.r.spec, h.r.prov, h.r.config = "test.dom", "test.dom", h.spec, h.prov, h.cfg
-	h.r.verify(context.Background())
+	h.r.verify(t.Context())
 	if !strings.Contains(h.errBuf.String(), "recovered kubeconfig not found") {
 		t.Errorf("stderr = %q", h.errBuf.String())
 	}
@@ -225,19 +225,19 @@ func TestInventoryCountSentinel(t *testing.T) {
 	h := newHarness(t)
 	h.r.prov = h.prov
 	h.prov.outputErr = errors.New("no creds")
-	if _, ok := h.r.inventoryCount(context.Background()); ok {
+	if _, ok := h.r.inventoryCount(t.Context()); ok {
 		t.Error("failed output must be the sentinel")
 	}
 	h.prov.outputErr = nil
-	if n, ok := h.r.inventoryCount(context.Background()); !ok || n != 3 {
+	if n, ok := h.r.inventoryCount(t.Context()); !ok || n != 3 {
 		t.Errorf("got %d %v", n, ok)
 	}
 	h.prov.output = "not json"
-	if _, ok := h.r.inventoryCount(context.Background()); ok {
+	if _, ok := h.r.inventoryCount(t.Context()); ok {
 		t.Error("non-JSON must be the sentinel")
 	}
 	h.prov.output = `{"api":{}}`
-	if n, ok := h.r.inventoryCount(context.Background()); !ok || n != 0 {
+	if n, ok := h.r.inventoryCount(t.Context()); !ok || n != 0 {
 		t.Errorf("missing nodes = genuine 0, got %d %v", n, ok)
 	}
 }
@@ -247,7 +247,7 @@ func TestVerifyUnknownInventory(t *testing.T) {
 	h := newHarness(t)
 	h.prov.outputErr = errors.New("api error")
 	h.r.domain, h.r.clusterName, h.r.spec, h.r.prov, h.r.config = "test.dom", "test.dom", h.spec, h.prov, h.cfg
-	h.r.verify(context.Background())
+	h.r.verify(t.Context())
 	if !strings.Contains(h.out.String(), "nodes Ready: 3/unknown") || strings.Contains(h.out.String(), "back from bare metal") {
 		t.Errorf("stdout = %q", h.out.String())
 	}
@@ -259,11 +259,11 @@ func TestKubeconfigPath(t *testing.T) {
 	h := newHarness(t)
 	h.r.domain, h.r.clusterName, h.r.spec = "test.dom", "test.dom", h.spec
 	h.r.DriverKubeconfig = func(ctx context.Context, d string) (string, error) { return "/from/driver/" + d + ".yaml", nil }
-	if got := h.r.kubeconfigPath(context.Background()); got != "/from/driver/test.dom.yaml" {
+	if got := h.r.kubeconfigPath(t.Context()); got != "/from/driver/test.dom.yaml" {
 		t.Errorf("got %q", got)
 	}
 	h.r.DriverKubeconfig = func(ctx context.Context, d string) (string, error) { return "", errors.New("none") }
-	if got, want := h.r.kubeconfigPath(context.Background()), filepath.Join(h.r.Paths.Base, ".kubeconfig", "test.dom.yaml"); got != want {
+	if got, want := h.r.kubeconfigPath(t.Context()), filepath.Join(h.r.Paths.Base, ".kubeconfig", "test.dom.yaml"); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
@@ -272,7 +272,7 @@ func TestKubeconfigPath(t *testing.T) {
 func TestRunSkipRebuild(t *testing.T) {
 	h := newHarness(t)
 	h.r.Force = true
-	if err := h.r.Run(context.Background(), "test.dom", true, false); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", true, false); err != nil {
 		t.Fatal(err)
 	}
 	all := h.all()
@@ -292,7 +292,7 @@ func TestRunDryRun(t *testing.T) {
 	h := newHarness(t)
 	h.r.Force = false
 	h.r.In = strings.NewReader("") // a prompt would hit EOF → abort; it must not prompt
-	if err := h.r.Run(context.Background(), "test.dom", false, true); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", false, true); err != nil {
 		t.Fatal(err)
 	}
 	all := h.all()
@@ -316,7 +316,7 @@ func TestConfirmDeclines(t *testing.T) {
 	for _, in := range []string{"no\n", "\n", "", "   \n"} {
 		h := newHarness(t)
 		h.r.In = strings.NewReader(in)
-		err := h.r.Run(context.Background(), "test.dom", false, false)
+		err := h.r.Run(t.Context(), "test.dom", false, false)
 		if !errors.Is(err, ErrHandled) {
 			t.Errorf("%q: err = %v", in, err)
 		}
@@ -333,7 +333,7 @@ func TestConfirmDeclines(t *testing.T) {
 func TestConfirmAcceptsPaddedYes(t *testing.T) {
 	h := newHarness(t)
 	h.r.In = strings.NewReader("  yes  \n")
-	if err := h.r.Run(context.Background(), "test.dom", false, false); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(h.recorded(), "provision test.dom") {
@@ -346,7 +346,7 @@ func TestRunForceNoPrompt(t *testing.T) {
 	h := newHarness(t)
 	h.r.Force = true
 	h.r.In = strings.NewReader("") // must not be read
-	if err := h.r.Run(context.Background(), "test.dom", false, false); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(h.errBuf.String(), "continue? [type yes") {
@@ -365,7 +365,7 @@ func TestRunNonInteractiveIsConsent(t *testing.T) {
 	t.Setenv("LOK8S_NONINTERACTIVE", "1")
 	h.r.Force = false
 	h.r.In = strings.NewReader("no\n") // would decline if it were read
-	if err := h.r.Run(context.Background(), "test.dom", false, false); err != nil {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
 		t.Fatalf("LOK8S_NONINTERACTIVE must consent, got %v", err)
 	}
 	if !strings.Contains(h.recorded(), "rebuild cfg=") {
@@ -380,7 +380,7 @@ func TestConfirmWording(t *testing.T) {
 	h.r.prov = h.prov
 	h.prov.outputErr = errors.New("api error")
 	h.r.In = strings.NewReader("no\n")
-	if h.r.confirm(context.Background(), false) {
+	if h.r.confirm(t.Context(), false) {
 		t.Fatal("no must decline")
 	}
 	if !strings.Contains(h.errBuf.String(), "unknown number of nodes") || strings.Contains(h.errBuf.String(), "reset 0 node(s)") {
@@ -390,7 +390,7 @@ func TestConfirmWording(t *testing.T) {
 	h = newHarness(t)
 	h.r.clusterName, h.r.prov = "test.dom", h.prov
 	h.r.In = strings.NewReader("no\n")
-	h.r.confirm(context.Background(), true)
+	h.r.confirm(t.Context(), true)
 	if want := "\033[31m!\033[0m recover: this will re-provision 3 node(s) of cluster test.dom (reinstalling Kubernetes, may wipe data disks) — the bare-metal node reset is SKIPPED — continue? [type yes to continue] "; h.errBuf.String() != want {
 		t.Errorf("prompt = %q", h.errBuf.String())
 	}
@@ -398,7 +398,7 @@ func TestConfirmWording(t *testing.T) {
 	h = newHarness(t)
 	h.r.clusterName, h.r.prov = "test.dom", h.prov
 	h.r.In = strings.NewReader("no\n")
-	h.r.confirm(context.Background(), false)
+	h.r.confirm(t.Context(), false)
 	if want := "\033[31m!\033[0m recover: this will reset 3 node(s) of cluster test.dom from bare metal and reinstall them — continue? [type yes to continue] "; h.errBuf.String() != want {
 		t.Errorf("prompt = %q", h.errBuf.String())
 	}
@@ -409,7 +409,7 @@ func TestRunRebuildFailureStops(t *testing.T) {
 	h := newHarness(t)
 	h.r.Force = true
 	h.prov.rebuildFail = true
-	if err := h.r.Run(context.Background(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(h.errBuf.String(), "\033[0;31m[error]\033[0m recover: rebuild failed — NOT provisioning on a half-reset cluster\n") {
@@ -427,7 +427,7 @@ func TestResolveNoRebuildHook(t *testing.T) {
 	h.r.LoadProvider = func(ctx context.Context, spec string) (string, string, func(), Provider, error) {
 		return "norebuild", "", nil, h.prov, nil
 	}
-	if err := h.r.Run(context.Background(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(h.errBuf.String(), "provider 'norebuild' does not support recover (no provider::rebuild)") {
@@ -447,7 +447,7 @@ func TestLoadProviderInvalidNameSurfacesDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.r.domain, h.r.spec = "test.dom", spec
-	if err := h.r.loadProvider(context.Background()); !errors.Is(err, ErrHandled) {
+	if err := h.r.loadProvider(t.Context()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	got := h.errBuf.String()
@@ -470,7 +470,7 @@ func TestLoadProviderRealPath(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "provider.yaml"), []byte("cluster_name: mocky\n"), 0o644)
 	h.r.domain, h.r.spec = "mock.cloud", spec
 	h.r.NewProvider = func(ctx context.Context, name string) (Provider, error) { return h.prov, nil }
-	if err := h.r.loadProvider(context.Background()); err != nil {
+	if err := h.r.loadProvider(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if h.r.provider != "mock" || h.r.config != filepath.Join(dir, "provider.yaml") {
@@ -480,7 +480,7 @@ func TestLoadProviderRealPath(t *testing.T) {
 		t.Errorf("cluster name = %q", got)
 	}
 	h.r.NewProvider = func(ctx context.Context, name string) (Provider, error) { return nil, errors.New("not found") }
-	if err := h.r.loadProvider(context.Background()); !errors.Is(err, ErrHandled) {
+	if err := h.r.loadProvider(t.Context()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(h.errBuf.String(), "\033[0;31m[error]\033[0m recover: provider 'mock' failed to load\n") {
@@ -500,7 +500,7 @@ func TestWorkdirFallbackAndFailure(t *testing.T) {
 	// Make the temp fallback fail (TMPDIR unwritable) — no shared /tmp last resort.
 	t.Setenv("TMPDIR", filepath.Join(h.r.Paths.Base, "nope", "deeper"))
 	h.r.Force = true
-	err = h.r.Run(context.Background(), "../bad", false, false)
+	err = h.r.Run(t.Context(), "../bad", false, false)
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -524,7 +524,7 @@ func TestRunRejectsDeployDomain(t *testing.T) {
 		loaded = true
 		return "", "", nil, nil, nil
 	}
-	if err := h.r.Run(context.Background(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(h.errBuf.String(), "recover: 'test.dom' is not a cluster domain (kind=deploy) — recover rebuilds a cluster from bare metal; a deploy domain has nothing to reset") {
@@ -542,7 +542,7 @@ func TestRunResolveFailure(t *testing.T) {
 		h.record = append(h.record, "resolve")
 		return nil, errors.New("no spec")
 	}
-	if err := h.r.Run(context.Background(), "nope.dom", false, false); !errors.Is(err, ErrHandled) {
+	if err := h.r.Run(t.Context(), "nope.dom", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if h.recorded() != "resolve" {
@@ -552,6 +552,7 @@ func TestRunResolveFailure(t *testing.T) {
 
 // bats: the three _pick_domain cases.
 func TestPickDomain(t *testing.T) {
+	t.Parallel()
 	if d, err := PickDomain(io.Discard, "active.dom", []string{"explicit.dom"}); err != nil || d != "explicit.dom" {
 		t.Errorf("got %q %v", d, err)
 	}
@@ -575,14 +576,14 @@ func TestPickDomain(t *testing.T) {
 func TestDoctorRendering(t *testing.T) {
 	h := newHarness(t)
 	h.r.provider, h.r.prov, h.r.config = "mock", h.prov, h.cfg
-	h.r.doctor(context.Background())
+	h.r.doctor(t.Context())
 	want := "\n--- provider / infrastructure (mock) ---\n  \033[32m✓\033[0m hcloud API reachable\n  \033[33m!\033[0m Robot creds unset\n    1 ok, 1 warn\n"
 	if h.out.String() != want {
 		t.Errorf("stdout = %q, want %q", h.out.String(), want)
 	}
 	h.out.Reset()
 	h.prov.noDoctor = true
-	h.r.doctor(context.Background())
+	h.r.doctor(t.Context())
 	if !strings.Contains(h.out.String(), "  \033[33m!\033[0m provider has no doctor hook — infrastructure diagnosis unavailable\n") {
 		t.Errorf("stdout = %q", h.out.String())
 	}
@@ -605,67 +606,4 @@ func (a *argvRecorder) Run(ctx context.Context, c execx.Cmd) error {
 		fmt.Fprint(c.Stdout, a.probe)
 	}
 	return nil
-}
-
-func TestBashBridgeArgv(t *testing.T) {
-	h := newHarness(t)
-	rec := &argvRecorder{probe: "rebuild\ndoctor\n"}
-	h.r.Exec = rec
-	prov, err := h.r.bashProvider(context.Background(), "hetzner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !prov.HasRebuild() || !prov.HasDoctor() {
-		t.Error("probe not parsed")
-	}
-	_ = prov.Doctor(context.Background(), "/cfg")
-	_ = prov.Rebuild(context.Background(), "/cfg", "/wd")
-	_, _ = prov.Output(context.Background(), "/cfg")
-	_ = h.r.bashProvision(context.Background(), "test.dom")
-
-	wantArgs := [][]string{
-		{"-c", providerProbeScript, "lo-recover-provider", "hetzner"},
-		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "provider::doctor", "/cfg"},
-		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "provider::rebuild", "/cfg", "/wd"},
-		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "provider::output", "/cfg"},
-		{"-c", provisionScript, "lo-recover-provision", "test.dom"},
-	}
-	if len(rec.cmds) != len(wantArgs) {
-		t.Fatalf("%d children, want %d", len(rec.cmds), len(wantArgs))
-	}
-	p := h.r.Paths
-	for i, c := range rec.cmds {
-		if c.Name != "bash" || strings.Join(c.Args, "\x00") != strings.Join(wantArgs[i], "\x00") {
-			t.Errorf("child %d: %s %q", i, c.Name, c.Args)
-		}
-		if c.Dir != p.Base {
-			t.Errorf("child %d: dir = %q", i, c.Dir)
-		}
-		env := strings.Join(c.Env, "\n")
-		for _, want := range []string{"PATH_BASE=" + p.Base, "PATH_BIN=" + p.Bin, "PATH_LOK8S=" + p.Lok8s, "PATH_CLUSTERS=" + p.Clusters, "PATH_SCRIPTS=" + p.Lok8s, "PATH_SECRETS=" + filepath.Join(p.Base, ".secrets")} {
-			if !strings.Contains(env, want) {
-				t.Errorf("child %d: env missing %q", i, want)
-			}
-		}
-		// shimEnv order: .bin ends up first, then .lok8s, then the inherited PATH.
-		if !strings.HasPrefix(c.Env[0], "PATH="+p.Bin+string(os.PathListSeparator)+p.Lok8s+string(os.PathListSeparator)) {
-			t.Errorf("child %d: PATH = %q", i, c.Env[0])
-		}
-	}
-	// The scripts hold the load-bearing pieces verbatim.
-	for _, want := range []string{`provider::load "${1}" >/dev/null`, "declare -F provider::rebuild", "declare -F provider::doctor"} {
-		if !strings.Contains(providerProbeScript, want) {
-			t.Errorf("probe script missing %q", want)
-		}
-	}
-	for _, want := range []string{"import ^libs/provision", "import ^libs/bootstrap", "import ^libs/kubehz/main", "import ^libs/inventory/main", "import ^libs/gitops", "force=1\nprovision::dispatch \"${1}\""} {
-		if !strings.Contains(provisionScript, want) {
-			t.Errorf("provision script missing %q", want)
-		}
-	}
-	// A failing probe is a failed load.
-	h.r.Exec = &argvRecorder{fail: true}
-	if _, err := h.r.bashProvider(context.Background(), "nosuch"); err == nil {
-		t.Error("failed probe must fail the load")
-	}
 }

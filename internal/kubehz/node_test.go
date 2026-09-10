@@ -3,7 +3,6 @@ package kubehz
 // node_test.go ports tests/unit/kubehz_node_test.bats.
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -67,22 +66,24 @@ func mintBody(t *testing.T, h *harness) map[string]any {
 // ── preflight ────────────────────────────────────────────
 
 func TestNodePreflightHostingGate(t *testing.T) {
+	t.Parallel()
 	h := nodeHarness(t, defaultNodeStubs(), "self", "")
-	_, _, err := h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "")
+	_, _, err := h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "runs its own control plane")
 	mustContain(t, h.output(), "your own API server")
 
 	h = nodeHarness(t, defaultNodeStubs(), "shared", "")
-	_, _, err = h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "")
+	_, _, err = h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "hosting: shared")
 	mustContain(t, h.output(), "lo kubehz join <node-name>")
 }
 
 func TestNodePreflightHTTPSAndToken(t *testing.T) {
+	t.Parallel()
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "http://api.example.test")
-	_, _, err := h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "")
+	_, _, err := h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "must use HTTPS")
 	if len(h.reqs()) != 0 {
@@ -91,33 +92,34 @@ func TestNodePreflightHTTPSAndToken(t *testing.T) {
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	delete(h.env, "KUBEHZ_TOKEN")
-	_, _, err = h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "")
+	_, _, err = h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "KUBEHZ_TOKEN is required to join a node")
 	mustContain(t, h.output(), "clusters:write")
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	_, _, err = h.ctx.nodePreflight(context.Background(), "", "join a node", "")
+	_, _, err = h.ctx.nodePreflight(t.Context(), "", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "No active domain")
 }
 
 func TestNodePreflightClusterID(t *testing.T) {
+	t.Parallel()
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	_, _, err := h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "../../admin/tenants")
+	_, _, err := h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "../../admin/tenants")
 	mustErr(t, err)
 	mustContain(t, h.output(), "is not a cluster id")
 	if len(h.reqs()) != 0 {
 		t.Fatal("a traversal must not travel")
 	}
 
-	_, id, err := h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "cl-explicit")
+	_, id, err := h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "cl-explicit")
 	mustOK(t, err, h.output())
 	if id != "cl-explicit" || len(h.reqs()) != 0 {
 		t.Fatalf("--cluster-id must win without asking the registry: %s %v", id, h.reqs())
 	}
 
-	_, id, err = h.ctx.nodePreflight(context.Background(), "acme.example.org", "join a node", "")
+	_, id, err = h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "")
 	mustOK(t, err, h.output())
 	if id != "cl-1234abcd" {
 		t.Fatalf("id = %s", id)
@@ -125,13 +127,13 @@ func TestNodePreflightClusterID(t *testing.T) {
 
 	h.writeSpec("other.example.org", specYAML("KubeOne", "    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n"))
 	h.reset()
-	_, _, err = h.ctx.nodePreflight(context.Background(), "other.example.org", "join a node", "")
+	_, _, err = h.ctx.nodePreflight(t.Context(), "other.example.org", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "holds no cluster for other.example.org")
 	mustContain(t, h.output(), "--cluster-id cl-xxxxxxxx")
 
 	h.reset()
-	_, _, err = h.ctx.nodePreflight(context.Background(), "nowhere.example.org", "join a node", "")
+	_, _, err = h.ctx.nodePreflight(t.Context(), "nowhere.example.org", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "No cluster.lok8s.yaml for domain: nowhere.example.org")
 }
@@ -140,7 +142,7 @@ func TestNodePreflightClusterID(t *testing.T) {
 
 func TestNodeJoinDefaultsNameToShortHostname(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Pool: "metal", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Pool: "metal", PrintOnly: true}), h.output())
 	mustContain(t, h.output(), "Node 'box-1' joins pool 'metal'")
 	if mintBody(t, h)["nodeName"] != "box-1" {
 		t.Fatal("nodeName")
@@ -149,7 +151,7 @@ func TestNodeJoinDefaultsNameToShortHostname(t *testing.T) {
 
 func TestNodeJoinRefusesBadName(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "Box_1", Pool: "metal", PrintOnly: true}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "Box_1", Pool: "metal", PrintOnly: true}))
 	mustContain(t, h.output(), "is not a node name the platform accepts")
 	mustContain(t, h.output(), "DNS label")
 	if h.anyReq("POST", "/join-token") {
@@ -161,7 +163,7 @@ func TestNodeJoinPoolInference(t *testing.T) {
 	s := defaultNodeStubs()
 	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-0","pool":"metal","status":"Ready"}],"usage":{"nodes":1,"maxStaticNodes":20},"discoveryReady":true}}`
 	h := nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", PrintOnly: true}), h.output())
 	mustContain(t, h.output(), "joins pool 'metal'")
 	if mintBody(t, h)["pool"] != "metal" {
 		t.Fatal("pool")
@@ -169,19 +171,19 @@ func TestNodeJoinPoolInference(t *testing.T) {
 
 	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"a","pool":"metal"},{"name":"b","pool":"edge"}],"usage":{"nodes":2,"maxStaticNodes":20},"discoveryReady":true}}`
 	h = nodeHarness(t, s, "hosted", "")
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", PrintOnly: true}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", PrintOnly: true}))
 	mustContain(t, h.output(), "name the static pool")
 	mustContain(t, h.output(), "--pool <pool-name>")
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", PrintOnly: true}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", PrintOnly: true}))
 	mustContain(t, h.output(), "--pool <pool-name>")
 }
 
 func TestNodeJoinPreconditionsBeforeMint(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	h.ctx.LookPath = func(string) bool { return false }
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "kubeadm is not on this machine")
 	mustContain(t, h.output(), "--print-only")
 	if h.anyReq("POST", "/join-token") {
@@ -190,7 +192,7 @@ func TestNodeJoinPreconditionsBeforeMint(t *testing.T) {
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	h.ctx.IsRoot = func() bool { return false }
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "must run as root")
 	if h.anyReq("POST", "/join-token") {
 		t.Fatal("minted as non-root")
@@ -199,7 +201,7 @@ func TestNodeJoinPreconditionsBeforeMint(t *testing.T) {
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	h.ctx.IsRoot = func() bool { return false }
 	h.ctx.LookPath = func(string) bool { return false }
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
 	mustContain(t, h.output(), "kubeadm join cp.example.test:6443")
 }
 
@@ -212,20 +214,20 @@ func TestNodeJoinKubeletVersionRidesWithMint(t *testing.T) {
 		}
 		return nil
 	}
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
 	if mintBody(t, h)["kubeletVersion"] != "v1.33.4" {
 		t.Fatalf("%v", mintBody(t, h))
 	}
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
 	if _, has := mintBody(t, h)["kubeletVersion"]; has {
 		t.Fatal("no kubelet → no version key")
 	}
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	h.ctx.LookPath = func(tool string) bool { return true }
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", KubeletVersion: "v1.31.0", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", KubeletVersion: "v1.31.0", PrintOnly: true}), h.output())
 	if mintBody(t, h)["kubeletVersion"] != "v1.31.0" {
 		t.Fatal("override")
 	}
@@ -233,7 +235,7 @@ func TestNodeJoinKubeletVersionRidesWithMint(t *testing.T) {
 
 func TestNodeJoinPrintOnly(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7", PrintOnly: true}), h.output())
 	mustContain(t, h.output(), "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1")
 	mustContain(t, h.output(), "2026-09-01T12:00:00Z")
 	mustContain(t, h.output(), "single use")
@@ -245,7 +247,7 @@ func TestNodeJoinPrintOnly(t *testing.T) {
 
 func TestNodeJoinRunsExactArgv(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
 	mustContain(t, h.output(), "node 'box-1' joined cluster cl-1234abcd")
 	want := []string{"join", "cp.example.test:6443", "--token", "a1b2c3.d4e5f6g7h8i9j0k1", "--discovery-token-ca-cert-hash", "sha256:1111", "--node-name", "box-1"}
 	if got := kubeadmArgv(h); strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -253,7 +255,7 @@ func TestNodeJoinRunsExactArgv(t *testing.T) {
 	}
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7"}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7"}), h.output())
 	got := kubeadmArgv(h)
 	if strings.Join(got[len(got)-2:], "\n") != "--node-ip\n203.0.113.7" {
 		t.Fatalf("node-ip tail: %v", got)
@@ -269,7 +271,7 @@ func TestNodeJoinFailingKubeadm(t *testing.T) {
 		}
 		return nil
 	}
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "kubeadm join failed")
 	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
 	mustContain(t, h.output(), "kubeadm reset")
@@ -279,7 +281,7 @@ func TestNodeJoinUnarmedTicketWarns(t *testing.T) {
 	s := defaultNodeStubs()
 	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":false}}`
 	h := nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
 	mustContain(t, h.output(), "has not armed this ticket yet")
 }
 
@@ -289,7 +291,7 @@ func joinWithMint(t *testing.T, mint string) *harness {
 	s := defaultNodeStubs()
 	s.mintBody = mint
 	h := nodeHarness(t, s, "hosted", "")
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	if kubeadmArgv(h) != nil {
 		t.Fatal("nothing may run")
 	}
@@ -367,7 +369,7 @@ func TestNodeErrorVocabulary(t *testing.T) {
 		s := defaultNodeStubs()
 		s.mintCode, s.mintBody = tc.code, tc.body
 		h := nodeHarness(t, s, "hosted", "")
-		mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+		mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 		for _, w := range tc.wants {
 			mustContain(t, h.output(), w)
 		}
@@ -377,8 +379,9 @@ func TestNodeErrorVocabulary(t *testing.T) {
 // ── remove ───────────────────────────────────────────────
 
 func TestNodeRemove(t *testing.T) {
+	t.Parallel()
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeRemove(context.Background(), "acme.example.org", NodeOpts{Name: "box-1"}), h.output())
+	mustOK(t, h.ctx.NodeRemove(t.Context(), "acme.example.org", NodeOpts{Name: "box-1"}), h.output())
 	for _, w := range []string{"node 'box-1' is draining (pool metal).", "slot is free", "never the hardware", "kubeadm reset"} {
 		mustContain(t, h.output(), w)
 	}
@@ -387,7 +390,7 @@ func TestNodeRemove(t *testing.T) {
 	}
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustErr(t, h.ctx.NodeRemove(context.Background(), "acme.example.org", NodeOpts{Name: "../../clusters"}))
+	mustErr(t, h.ctx.NodeRemove(t.Context(), "acme.example.org", NodeOpts{Name: "../../clusters"}))
 	mustContain(t, h.output(), "is not a node name the platform accepts")
 	if len(h.reqs()) != 0 {
 		t.Fatal("no request for a bad name")
@@ -396,7 +399,7 @@ func TestNodeRemove(t *testing.T) {
 	s := defaultNodeStubs()
 	s.removeCode, s.removeBody = 404, `{"ok":false,"data":{"code":"NOT_FOUND","message":"Node not found on this cluster"}}`
 	h = nodeHarness(t, s, "hosted", "")
-	mustErr(t, h.ctx.NodeRemove(context.Background(), "acme.example.org", NodeOpts{Name: "box-1"}))
+	mustErr(t, h.ctx.NodeRemove(t.Context(), "acme.example.org", NodeOpts{Name: "box-1"}))
 	mustContain(t, h.output(), "holds no node named 'box-1'")
 	mustContain(t, h.output(), "lo kubehz node status")
 }
@@ -404,10 +407,11 @@ func TestNodeRemove(t *testing.T) {
 // ── status ───────────────────────────────────────────────
 
 func TestNodeStatus(t *testing.T) {
+	t.Parallel()
 	s := defaultNodeStubs()
 	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal","status":"Joining","joinedAt":null}],"usage":{"nodes":2,"maxStaticNodes":20},"discoveryReady":true}}`
 	h := nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeStatus(context.Background(), "acme.example.org", NodeOpts{}), h.output())
+	mustOK(t, h.ctx.NodeStatus(t.Context(), "acme.example.org", NodeOpts{}), h.output())
 	for _, w := range []string{"Cluster: cl-1234abcd (acme.example.org)", "Nodes:   2/20", "NAME", "box-1", "Ready", "2026-08-30T10:00:00Z", "box-2", "Joining"} {
 		mustContain(t, h.output(), w)
 	}
@@ -415,13 +419,13 @@ func TestNodeStatus(t *testing.T) {
 	mustNotContain(t, h.output(), "has not published its join address")
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeStatus(context.Background(), "acme.example.org", NodeOpts{}), h.output())
+	mustOK(t, h.ctx.NodeStatus(t.Context(), "acme.example.org", NodeOpts{}), h.output())
 	mustContain(t, h.output(), "No nodes yet")
 	mustContain(t, h.output(), "lo kubehz node join --pool")
 
 	s.nodesBody = `{"ok":true,"data":{"nodes":[],"usage":{"nodes":0,"maxStaticNodes":20},"discoveryReady":false}}`
 	h = nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeStatus(context.Background(), "acme.example.org", NodeOpts{}), h.output())
+	mustOK(t, h.ctx.NodeStatus(t.Context(), "acme.example.org", NodeOpts{}), h.output())
 	mustContain(t, h.output(), "has not published its join address")
 }
 
@@ -431,33 +435,34 @@ func TestNodeScrubsANSI(t *testing.T) {
 	s := defaultNodeStubs()
 	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned","ready":true}}`
 	h := nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
 	mustContain(t, h.output(), "2026-09-01T12:00:00Z")
 	mustNotContain(t, h.output(), "\033")
 
 	s = defaultNodeStubs()
 	s.mintCode, s.mintBody = 400, `{"ok":false,"data":{"code":"KUBELET_BELOW_FLOOR","message":"v1.29.0 is below\u001b[31m the floor"}}`
 	h = nodeHarness(t, s, "hosted", "")
-	mustErr(t, h.ctx.NodeJoin(context.Background(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "v1.29.0 is below")
 	mustNotContain(t, h.output(), "\033[31m")
 
 	s = defaultNodeStubs()
 	s.removeBody = `{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J","status":"Draining"}}`
 	h = nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeRemove(context.Background(), "acme.example.org", NodeOpts{Name: "box-1"}), h.output())
+	mustOK(t, h.ctx.NodeRemove(t.Context(), "acme.example.org", NodeOpts{Name: "box-1"}), h.output())
 	mustContain(t, h.output(), "pool metal")
 	mustNotContain(t, h.output(), "\033")
 
 	s = defaultNodeStubs()
 	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"}],"usage":{"nodes":1,"maxStaticNodes":20},"discoveryReady":true}}`
 	h = nodeHarness(t, s, "hosted", "")
-	mustOK(t, h.ctx.NodeStatus(context.Background(), "acme.example.org", NodeOpts{}), h.output())
+	mustOK(t, h.ctx.NodeStatus(t.Context(), "acme.example.org", NodeOpts{}), h.output())
 	mustContain(t, h.output(), "box-")
 	mustNotContain(t, h.output(), "\033")
 }
 
 func TestRejectGlobalClusterFlag(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	mustErr(t, h.ctx.RejectGlobalClusterFlag())
 	mustContain(t, h.output(), "--cluster/-s names the kind cluster")

@@ -17,6 +17,7 @@ func writeFileT(t *testing.T, path, content string) {
 }
 
 func TestArtifactsMode(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		spec string // "" = no spec file
@@ -45,6 +46,7 @@ func TestArtifactsMode(t *testing.T) {
 }
 
 func TestArtifactsModeDeploySpec(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFileT(t, filepath.Join(dir, "deploy.lok8s.yaml"), "spec:\n  gitops:\n    provider: flux\n")
 	if got := ArtifactsMode(dir); got != "split" {
@@ -53,6 +55,7 @@ func TestArtifactsModeDeploySpec(t *testing.T) {
 }
 
 func TestEncryptMode(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		spec     string
@@ -120,6 +123,7 @@ func TestNoSecretsEffective(t *testing.T) {
 }
 
 func TestGitopsAgeRecipients(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	spec := filepath.Join(dir, "cluster.lok8s.yaml")
 	writeFileT(t, spec, "spec:\n  gitops:\n    age:\n      - age1aaa\n      - age1bbb\n")

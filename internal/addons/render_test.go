@@ -25,10 +25,17 @@ import (
 	"strings"
 	"testing"
 
+	"flag"
+
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
+
+// update rewrites the golden files with the current output:
+// go test ./internal/addons/ -update
+var update = flag.Bool("update", false, "rewrite the golden files")
 
 // kustomizeManifest is the canned build output the golden was generated
 // from (the fake kustomize in the bash golden-gen run emitted exactly this).
@@ -155,7 +162,7 @@ func TestRenderStacksBaseDriverProviderInline(t *testing.T) {
 	var errBuf strings.Builder
 	t.Setenv("LOK8S_USER_API_HOST", "10.0.0.1")
 
-	out, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", inlineValues, nil)
+	out, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", inlineValues, nil)
 	if err != nil {
 		t.Fatalf("Render: %v (stderr: %s)", err, errBuf.String())
 	}
@@ -174,13 +181,7 @@ func TestRenderStacksBaseDriverProviderInline(t *testing.T) {
 	}
 	// Byte-parity with the yq merge the bash staged (golden generated once
 	// from bash — see testdata/merged_values_golden.yaml).
-	golden, err := os.ReadFile("testdata/merged_values_golden.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if merged != string(golden) {
-		t.Errorf("merged values diverge from the bash golden:\n--- got ---\n%s--- want ---\n%s", merged, golden)
-	}
+	testutil.Golden(t, filepath.Join("testdata", "merged_values_golden.yaml"), merged, *update)
 
 	// khelm/kustomize was invoked exactly once, with the plugin flags, on a
 	// STAGED COPY (never the source addon dir), with KHELM_TRUST_ANY_REPO.
@@ -221,12 +222,18 @@ func TestRenderStacksBaseDriverProviderInline(t *testing.T) {
 
 	// Semantic equality with the bash golden (formatting normalization is
 	// the documented deviation; the MEANING must be identical).
+	// The compare is semantic, so -update rewrites the file (with the Go
+	// formatting) only when the meaning changed.
 	golden2, err := os.ReadFile("testdata/render_golden.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !yamlStreamEqual(t, out, string(golden2)) {
-		t.Errorf("render output semantically diverges from the bash golden:\n--- got ---\n%s\n--- want ---\n%s", out, golden2)
+		if *update {
+			testutil.WriteFile(t, filepath.Join("testdata", "render_golden.yaml"), out)
+		} else {
+			t.Errorf("render output semantically diverges from the bash golden (run: go test ./internal/addons/ -update):\n--- got ---\n%s\n--- want ---\n%s", out, golden2)
+		}
 	}
 }
 
@@ -254,7 +261,7 @@ func TestRenderFallsBackToDriverWithoutProviderValues(t *testing.T) {
 	os.Remove(filepath.Join(dir, "values.hetzner.yaml"))
 	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
-	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if got := yqr(t, f.mergedOut, "shared_all"); got != "driver" {
@@ -271,7 +278,7 @@ func TestRenderBaseOnlyWhenNoOverlays(t *testing.T) {
 	os.Remove(filepath.Join(dir, "values.hetzner.yaml"))
 	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
-	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if got := yqr(t, f.mergedOut, "shared_all"); got != "base" {
@@ -289,7 +296,7 @@ func TestRenderInPlaceWhenNothingToStack(t *testing.T) {
 		[]byte("kind: ChartRenderer\nvalueFiles:\n  - ../../../../.lok8s/addons/x/values.yaml\n"), 0o644)
 	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
-	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "", "", nil); err != nil {
+	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if f.buildDirs[0] != dir {
@@ -316,7 +323,7 @@ func TestRenderDotfilesSurviveTheCopy(t *testing.T) {
 			t.Errorf(".helmignore missing from staged copy %s", buildDir)
 		}
 	}, manifest: kustomizeManifest}
-	if _, err := Render(context.Background(), probe, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+	if _, err := Render(t.Context(), probe, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 }
@@ -342,7 +349,7 @@ func TestRenderEmptyOutputIsAnError(t *testing.T) {
 	dir := writeAddon(t)
 	f := newFakeKustomize(t, "")
 	var errBuf strings.Builder
-	_, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil)
+	_, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil)
 	if err == nil {
 		t.Fatal("empty render must fail")
 	}
@@ -356,7 +363,7 @@ func TestRenderBuildFailurePropagates(t *testing.T) {
 	f := newFakeKustomize(t, "")
 	f.fail = true
 	var errBuf strings.Builder
-	if _, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "", nil); err == nil {
+	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil); err == nil {
 		t.Fatal("build failure must propagate")
 	}
 }
@@ -368,7 +375,7 @@ func TestRenderPerEntryEnvReachesProcessAndEnvsubst(t *testing.T) {
 	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  v: \"${LOK8S_USER_TESTVAR}\"\n"
 	f := newFakeKustomize(t, manifest)
 	var errBuf strings.Builder
-	out, err := Render(context.Background(), f, &errBuf, dir, "lo", "hetzner", "",
+	out, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "",
 		map[string]string{"LOK8S_USER_TESTVAR": "hello"})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
@@ -387,69 +394,6 @@ func TestRenderPerEntryEnvReachesProcessAndEnvsubst(t *testing.T) {
 	}
 	if os.Getenv("LOK8S_USER_TESTVAR") != "" {
 		t.Errorf("override leaked into the process environment")
-	}
-}
-
-func TestMergeNodesListsReplace(t *testing.T) {
-	// yq `*`: maps deep-merge, LISTS REPLACE (right wins) — the semantics
-	// every value stack in the pipeline depends on.
-	out, err := MergeYAML("a:\n  - 1\n  - 2\nkeep: x\n", "a:\n  - 3\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	yaml.Unmarshal(out, &m)
-	list, _ := m["a"].([]any)
-	if len(list) != 1 || fmt.Sprint(list[0]) != "3" {
-		t.Errorf("list did not replace: %v", m["a"])
-	}
-	if m["keep"] != "x" {
-		t.Errorf("unrelated key lost: %v", m)
-	}
-}
-
-// TestMergeNodesEmptyOverlayKeepsBase: an empty or comment-only overlay
-// file decodes to a zero node. yq reads no document from it, so the value
-// stack must come through unchanged instead of collapsing to nothing.
-func TestMergeNodesEmptyOverlayKeepsBase(t *testing.T) {
-	for name, overlay := range map[string]string{
-		"empty":        "",
-		"comment-only": "# nothing here\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			out, err := MergeYAML("a:\n  b: 1\nkeep: x\n", overlay)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var m map[string]any
-			if err := yaml.Unmarshal(out, &m); err != nil {
-				t.Fatal(err)
-			}
-			if m["keep"] != "x" {
-				t.Errorf("base lost after an empty overlay: %q", out)
-			}
-			inner, _ := m["a"].(map[string]any)
-			if fmt.Sprint(inner["b"]) != "1" {
-				t.Errorf("nested base lost after an empty overlay: %q", out)
-			}
-		})
-	}
-	// The same through the file path the addon value stack takes.
-	dir := t.TempDir()
-	base := filepath.Join(dir, "values.yaml")
-	empty := filepath.Join(dir, "values.lo.yaml")
-	if err := os.WriteFile(base, []byte("a: 1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(empty, []byte("# overlay left empty on purpose\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	out, err := MergeValueFiles(base, empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(out), "a: 1") {
-		t.Errorf("MergeValueFiles lost the base behind an empty overlay: %q", out)
 	}
 }
 
@@ -472,7 +416,7 @@ func TestRenderInProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	var errBuf strings.Builder
-	got, err := Render(context.Background(), nil, &errBuf, dir, "lo", "", "", map[string]string{"LOK8S_USER_API_HOST": "api.example"})
+	got, err := Render(t.Context(), nil, &errBuf, dir, "lo", "", "", map[string]string{"LOK8S_USER_API_HOST": "api.example"})
 	if err != nil {
 		t.Fatalf("Render: %v\n%s", err, errBuf.String())
 	}

@@ -83,7 +83,7 @@ services:
 func TestServicesReadsBaseServicesYAML(t *testing.T) {
 	c, _, out, _ := testCtx(t)
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.yaml"), []byte(servicesFixture), 0o644)
-	if err := c.Services(context.Background(), false, false); err != nil {
+	if err := c.Services(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"registry:", "services:"} {
@@ -98,7 +98,7 @@ func TestServicesMergesConfigSpecificOverride(t *testing.T) {
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.yaml"), []byte(servicesFixture), 0o644)
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.local.yaml"), []byte("services:\n  api:\n    build: false\n"), 0o644)
 	t.Setenv("LOK8S_SERVICE_CONFIG", "local")
-	if err := c.Services(context.Background(), false, false); err != nil {
+	if err := c.Services(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	// Passthrough yq shows both parts plus the separator the merge input
@@ -111,7 +111,7 @@ func TestServicesMergesConfigSpecificOverride(t *testing.T) {
 func TestServicesFallsBackToLegacyBaseFile(t *testing.T) {
 	c, _, out, _ := testCtx(t)
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.base.yaml"), []byte(servicesFixture), 0o644)
-	if err := c.Services(context.Background(), false, false); err != nil {
+	if err := c.Services(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "services:") {
@@ -121,7 +121,7 @@ func TestServicesFallsBackToLegacyBaseFile(t *testing.T) {
 
 func TestServicesEmptyConfigWhenNoFileExists(t *testing.T) {
 	c, runner, out, _ := testCtx(t)
-	if err := c.Services(context.Background(), false, false); err != nil {
+	if err := c.Services(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "{}\n" {
@@ -137,7 +137,7 @@ func TestServicesMergesLegacyDefaultFile(t *testing.T) {
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.yaml"), []byte(servicesFixture), 0o644)
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.default.yaml"),
 		[]byte("services:\n  default-svc:\n    enabled: true\n    build: false\n"), 0o644)
-	if err := c.Services(context.Background(), false, false); err != nil {
+	if err := c.Services(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "---") || !strings.Contains(out.String(), "default-svc") {
@@ -148,14 +148,14 @@ func TestServicesMergesLegacyDefaultFile(t *testing.T) {
 func TestServicesOnlyFlagsRunTheExtractionStage(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.yaml"), []byte(servicesFixture), 0o644)
-	if err := c.Services(context.Background(), true, false); err != nil {
+	if err := c.Services(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 || runner.calls[1] != "yq .services" {
 		t.Errorf("calls = %v", runner.calls)
 	}
 	runner.calls = nil
-	if err := c.Services(context.Background(), false, true); err != nil {
+	if err := c.Services(t.Context(), false, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 || runner.calls[1] != "yq .registry" {
@@ -168,7 +168,7 @@ func TestServicesAppliesBareEnvsubst(t *testing.T) {
 	os.WriteFile(filepath.Join(c.Paths.Base, "services.yaml"),
 		[]byte("registry:\n  endpoint: ${MY_REG}/x\n  tag: $UNSET_VAR\n"), 0o644)
 	t.Setenv("MY_REG", "ghcr.io/acme")
-	if err := c.Services(context.Background(), false, false); err != nil {
+	if err := c.Services(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "endpoint: ghcr.io/acme/x") {
@@ -224,7 +224,7 @@ func kustomizationCtx(t *testing.T, merged string) (*Context, string) {
 
 func TestKustomizationWritesOverlayWithImageSwaps(t *testing.T) {
 	c, domainDir := kustomizationCtx(t, kustomizationFixture)
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
@@ -269,7 +269,7 @@ services:
   api: {}
   web: {}
 `)
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
@@ -285,7 +285,7 @@ services:
 func TestKustomizationEmptyResourcesWithoutDomainArtifact(t *testing.T) {
 	c, domainDir := kustomizationCtx(t, kustomizationFixture)
 	os.Remove(filepath.Join(domainDir, "artifacts.yaml"))
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
@@ -306,7 +306,7 @@ services:
     enabled: false
   on: {}
 `)
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
@@ -323,7 +323,7 @@ func TestKustomizationDigestPin(t *testing.T) {
   pinned:
     image: ghcr.io/x/y@sha256:abcdef
 `)
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
@@ -335,7 +335,7 @@ func TestKustomizationDigestPin(t *testing.T) {
 
 func TestKustomizationBarePinEmitsNewNameOnly(t *testing.T) {
 	c, domainDir := kustomizationCtx(t, "services:\n  pinned:\n    image: busybox\n")
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
@@ -349,7 +349,7 @@ func TestKustomizationMissingEndpointWarnsAndSkips(t *testing.T) {
 	c, domainDir := kustomizationCtx(t, "services:\n  lost:\n    build: false\n")
 	var errOut bytes.Buffer
 	c.ErrOut = &errOut
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	want := "warn: service 'lost' has build:false but no registry.endpoint configured — skipping image swap (define registry.endpoint, set image:, or set build:true)\n"
@@ -367,7 +367,7 @@ func TestKustomizationEndpointDefaultsSubstituteFromEnv(t *testing.T) {
 	t.Setenv("DOCKER_REGISTRY", "reg.example")
 	t.Setenv("DOCKER_PROJECT", "proj")
 	t.Setenv("DOCKER_TAG", "v9")
-	if err := c.Kustomization(context.Background(), true, false); err != nil {
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	queue, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", ".cache-queue"))
@@ -380,7 +380,7 @@ func TestKustomizationPullDrainsNonEmptyQueue(t *testing.T) {
 	c, _ := kustomizationCtx(t, kustomizationFixture)
 	pulled := 0
 	c.Pull = func() error { pulled++; return nil }
-	if err := c.Kustomization(context.Background(), true, true); err != nil {
+	if err := c.Kustomization(t.Context(), true, true); err != nil {
 		t.Fatal(err)
 	}
 	if pulled != 1 {
@@ -394,7 +394,7 @@ func TestKustomizationPullSkipsEmptyQueue(t *testing.T) {
 		t.Fatal("Pull must not run for an empty queue")
 		return nil
 	}
-	if err := c.Kustomization(context.Background(), true, true); err != nil {
+	if err := c.Kustomization(t.Context(), true, true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -404,7 +404,7 @@ func TestKustomizationPullFailureIsLoud(t *testing.T) {
 	var errOut bytes.Buffer
 	c.ErrOut = &errOut
 	c.Pull = func() error { return fmt.Errorf("boom") }
-	if err := c.Kustomization(context.Background(), true, true); !errors.Is(err, ErrHandled) {
+	if err := c.Kustomization(t.Context(), true, true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
 	if !strings.Contains(errOut.String(), "image::cache --all failed; check upstream credentials and network") {
@@ -415,7 +415,7 @@ func TestKustomizationPullFailureIsLoud(t *testing.T) {
 func TestKustomizationBuildFailureAborts(t *testing.T) {
 	c, domainDir := kustomizationCtx(t, kustomizationFixture)
 	c.BuildArtifacts = func() error { return fmt.Errorf("render failed") }
-	if err := c.Kustomization(context.Background(), false, false); err == nil {
+	if err := c.Kustomization(t.Context(), false, false); err == nil {
 		t.Fatal("expected the build failure to abort")
 	}
 	if _, err := os.Stat(filepath.Join(domainDir, "artifacts", "kustomization.yaml")); !os.IsNotExist(err) {

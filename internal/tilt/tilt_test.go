@@ -4,7 +4,11 @@ package tilt
 // processes (tilt, kill, pkill, kubectl) run through the fake runner; no
 // real tilt/pkill is EVER invoked (a live Tilt session for another project
 // runs on this machine — hermeticity is a safety property, not just speed).
-// Mirrors tests/unit/tilt_ci_test.bats + tilt_preflight_test.bats.
+// Mirrors tests/unit/tilt_ci_test.bats + tilt_preflight_test.bats. The
+// preflight tests cover the GATE in tilt::preflight: the kill switch, the
+// non-kind driver refusal, the LOK8S_FORCE_CLEAR_TERMINATING override and
+// the flag/spec precedence. The sweep itself (kapply.Preflight) is a
+// recorder, so these tests never touch kubectl.
 
 import (
 	"bytes"
@@ -159,18 +163,18 @@ func TestPortSpecNullFallsThroughToHash(t *testing.T) {
 func TestRunningReflectsApiserver(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	runner.handler = doctorKindHandler(false)
-	if c.Running(context.Background(), "14242") {
+	if c.Running(t.Context(), "14242") {
 		t.Error("Running = true with the apiserver down")
 	}
 	runner.handler = doctorKindHandler(true)
-	if !c.Running(context.Background(), "14242") {
+	if !c.Running(t.Context(), "14242") {
 		t.Error("Running = false with the apiserver up")
 	}
 }
 
 func TestReloadTriggersTiltfileResource(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
-	if err := c.Reload(context.Background(), "14242"); err != nil {
+	if err := c.Reload(t.Context(), "14242"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.calls; len(got) != 1 || got[0] != "tilt trigger (Tiltfile) --port 14242" {
@@ -187,7 +191,7 @@ func TestUpSpawnsDetachedAndWritesPidFile(t *testing.T) {
 	started := ""
 	c.StartDetached = func(port string) (int, error) { started = port; return 4242, nil }
 
-	if err := c.Up(context.Background()); err != nil {
+	if err := c.Up(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if started != "14242" {
@@ -218,7 +222,7 @@ func TestUpGateFailsWithoutKindEnv(t *testing.T) {
 		t.Fatal("StartDetached must not run when the gate fails")
 		return 0, nil
 	}
-	if err := c.Up(context.Background()); !errors.Is(err, ErrHandled) {
+	if err := c.Up(t.Context()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
 	if !strings.Contains(errOut.String(), "Did not recognize local kind environment.") {
@@ -234,7 +238,7 @@ func TestUpReloadsWhenAlreadyRunning(t *testing.T) {
 		t.Fatal("must not background a second instance")
 		return 0, nil
 	}
-	if err := c.Up(context.Background()); err != nil {
+	if err := c.Up(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Tilt already running on http://localhost:14242 — reloading Tiltfile") {
@@ -257,7 +261,7 @@ func TestUpReloadFailureWarnsButSucceeds(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Up(context.Background()); err != nil {
+	if err := c.Up(t.Context()); err != nil {
 		t.Fatalf("err = %v, want nil (reload failure is a warn)", err)
 	}
 	if !strings.Contains(errOut.String(), "Tiltfile reload trigger failed (Tilt still running on :14242)") {
@@ -271,7 +275,7 @@ func TestCIInvokesTiltCIWithPortAndFile(t *testing.T) {
 	c, runner, out, _ := testCtx(t)
 	t.Setenv("TILT_PORT", "14242")
 	runner.handler = doctorKindHandler(false)
-	rc, err := c.CI(context.Background(), "")
+	rc, err := c.CI(t.Context(), "")
 	if err != nil || rc != 0 {
 		t.Fatalf("rc=%d err=%v", rc, err)
 	}
@@ -292,7 +296,7 @@ func TestCIPassesTimeoutThrough(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	t.Setenv("TILT_PORT", "14242")
 	runner.handler = doctorKindHandler(false)
-	if _, err := c.CI(context.Background(), "90s"); err != nil {
+	if _, err := c.CI(t.Context(), "90s"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("tilt ci"); len(got) != 1 || !strings.HasSuffix(got[0], "--timeout 90s") {
@@ -303,7 +307,7 @@ func TestCIPassesTimeoutThrough(t *testing.T) {
 func TestCIOmitsTimeoutWhenNoneGiven(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	runner.handler = doctorKindHandler(false)
-	if _, err := c.CI(context.Background(), ""); err != nil {
+	if _, err := c.CI(t.Context(), ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range runner.matching("tilt ci") {
@@ -325,7 +329,7 @@ func TestCIReturnsRealExitStatus(t *testing.T) {
 		}
 		return nil
 	}
-	rc, err := c.CI(context.Background(), "")
+	rc, err := c.CI(t.Context(), "")
 	if err != nil || rc != 7 {
 		t.Fatalf("rc=%d err=%v, want rc=7", rc, err)
 	}
@@ -340,7 +344,7 @@ func TestCIGateFailsWithoutKindEnv(t *testing.T) {
 		t.Fatalf("unexpected call after failed gate: %v", cmd.Args)
 		return nil
 	}
-	rc, err := c.CI(context.Background(), "")
+	rc, err := c.CI(t.Context(), "")
 	if rc != 1 || !errors.Is(err, ErrHandled) {
 		t.Fatalf("rc=%d err=%v", rc, err)
 	}
@@ -355,7 +359,7 @@ func TestCIGateFailsWithoutKindEnv(t *testing.T) {
 func TestDownKillsPidFromFileAndRemovesIt(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	os.WriteFile(c.Paths.Base+"/.tilt.pid", []byte("31337\n"), 0o644)
-	if err := c.Down(context.Background(), false); err != nil {
+	if err := c.Down(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.calls; len(got) != 1 || got[0] != "kill 31337" {
@@ -375,7 +379,7 @@ func TestDownFallsBackToScopedPkillWhenKillFails(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Down(context.Background(), false); err != nil {
+	if err := c.Down(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	want := "pkill -f [t]ilt up.*--file=" + pkillEscape(c.Paths.Base+"/Tiltfile")
@@ -386,7 +390,7 @@ func TestDownFallsBackToScopedPkillWhenKillFails(t *testing.T) {
 
 func TestDownNoPidNoForceIsANoop(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
-	if err := c.Down(context.Background(), false); err != nil {
+	if err := c.Down(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 0 {
@@ -396,7 +400,7 @@ func TestDownNoPidNoForceIsANoop(t *testing.T) {
 
 func TestDownForceWithoutPidUsesScopedPkill(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
-	if err := c.Down(context.Background(), true); err != nil {
+	if err := c.Down(t.Context(), true); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("pkill"); len(got) != 1 {
@@ -412,7 +416,7 @@ func TestDownForceWithoutPidUsesScopedPkill(t *testing.T) {
 func TestDownEmptyPidFileFallsBackToPkill(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	os.WriteFile(c.Paths.Base+"/.tilt.pid", nil, 0o644)
-	if err := c.Down(context.Background(), false); err != nil {
+	if err := c.Down(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 || !strings.HasPrefix(runner.calls[0], "pkill -f ") {
@@ -436,7 +440,7 @@ func TestStatusRunsTiltDoctorAndPassesRC(t *testing.T) {
 		writeOut(cmd, "Tilt: v0.33\nEnv: kind\n")
 		return &fakeExit{3}
 	}
-	if rc := c.Status(context.Background()); rc != 3 {
+	if rc := c.Status(t.Context()); rc != 3 {
 		t.Errorf("rc = %d, want 3", rc)
 	}
 	if !strings.Contains(out.String(), "Env: kind") {
@@ -449,7 +453,7 @@ func TestRestartDownsThenUps(t *testing.T) {
 	os.WriteFile(c.Paths.Base+"/.tilt.pid", []byte("31337\n"), 0o644)
 	runner.handler = doctorKindHandler(false)
 	c.StartDetached = func(string) (int, error) { return 777, nil }
-	if err := c.Restart(context.Background(), false); err != nil {
+	if err := c.Restart(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.matching("kill "); len(got) != 1 {
@@ -458,5 +462,177 @@ func TestRestartDownsThenUps(t *testing.T) {
 	pid, _ := os.ReadFile(c.Paths.Base + "/.tilt.pid")
 	if string(pid) != "777\n" {
 		t.Errorf(".tilt.pid = %q", pid)
+	}
+}
+
+type sweepRecorder struct {
+	calls []string
+}
+
+func (s *sweepRecorder) preflight(_ context.Context, manifest string, args ...string) error {
+	s.calls = append(s.calls, strings.Join(append([]string{"kapply::preflight"}, args...), " "))
+	return nil
+}
+
+func preflightCtx(t *testing.T) (*Context, *sweepRecorder, *strings.Builder) {
+	t.Helper()
+	c, _, _, _ := testCtx(t)
+	rec := &sweepRecorder{}
+	c.Preflighter = rec.preflight
+	var errOut strings.Builder
+	c.ErrOut = &errOut
+	c.Stdin = strings.NewReader("kind: ConfigMap")
+
+	os.MkdirAll(filepath.Join(c.Paths.Clusters, "dev.test"), 0o755)
+	os.MkdirAll(filepath.Join(c.Paths.Clusters, "prod.test"), 0o755)
+	os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"), []byte("kind: Lo\n"), 0o644)
+	os.WriteFile(filepath.Join(c.Paths.Clusters, "prod.test", "cluster.lok8s.yaml"), []byte("kind: KubeOne\n"), 0o644)
+	return c, rec, &errOut
+}
+
+func TestPreflightKillSwitchZeroDisables(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	t.Setenv("LOK8S_PREFLIGHT", "0")
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("sweep ran: %v", rec.calls)
+	}
+}
+
+func TestPreflightKillSwitchFalseDisablesToo(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	t.Setenv("LOK8S_PREFLIGHT", "false")
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("sweep ran: %v", rec.calls)
+	}
+}
+
+func TestPreflightNonKindDriverRefusesWithoutOverride(t *testing.T) {
+	c, rec, errOut := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "prod.test")
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	want := "preflight: 'prod.test' uses the 'kubeone' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)"
+	if !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("sweep ran: %v", rec.calls)
+	}
+}
+
+func TestPreflightForceClearOverridesDriverRefusal(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "prod.test")
+	t.Setenv("LOK8S_FORCE_CLEAR_TERMINATING", "1")
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("sweep calls = %v", rec.calls)
+	}
+}
+
+func TestPreflightLoDriverSweepsAndAgePassesThrough(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	if err := c.Preflight(t.Context(), "", "120", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 || !strings.Contains(rec.calls[0], "--age 120") {
+		t.Errorf("sweep calls = %v", rec.calls)
+	}
+}
+
+func TestPreflightNoSpecSectionPassesNoFlags(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 || strings.Contains(rec.calls[0], " --") {
+		t.Errorf("sweep calls = %v (kapply owns the defaults)", rec.calls)
+	}
+}
+
+func TestPreflightSpecEnabledFalseDisables(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"),
+		[]byte("kind: Lo\nspec:\n  tilt:\n    preflight:\n      enabled: false\n"), 0o644)
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("sweep ran: %v", rec.calls)
+	}
+}
+
+func TestPreflightScalarShorthandFalseDisables(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"),
+		[]byte("kind: Lo\nspec:\n  tilt:\n    preflight: false\n"), 0o644)
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("sweep ran: %v", rec.calls)
+	}
+}
+
+func TestPreflightSpecPolicyFlowsThrough(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"),
+		[]byte(`kind: Lo
+spec:
+  tilt:
+    preflight:
+      age: 60
+      crds: force
+      crdForceAllow:
+        - kubehzclusters.kubehz.dev
+        - kubehzmigrations.kubehz.dev
+`), 0o644)
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("sweep calls = %v", rec.calls)
+	}
+	for _, want := range []string{"--age 60", "--crds force", "--crd-allow kubehzclusters.kubehz.dev,kubehzmigrations.kubehz.dev"} {
+		if !strings.Contains(rec.calls[0], want) {
+			t.Errorf("sweep call %q missing %q", rec.calls[0], want)
+		}
+	}
+}
+
+func TestPreflightCLIFlagOutranksSpec(t *testing.T) {
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"),
+		[]byte("kind: Lo\nspec:\n  tilt:\n    preflight:\n      crds: skip\n"), 0o644)
+	if err := c.Preflight(t.Context(), "", "", "drain", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 || !strings.Contains(rec.calls[0], "--crds drain") || strings.Contains(rec.calls[0], "--crds skip") {
+		t.Errorf("sweep calls = %v", rec.calls)
+	}
+}
+
+func TestPreflightConfigDefaultsWhenSpecMissing(t *testing.T) {
+	c, _, _, _ := testCtx(t)
+	enabled, age, crds, allow := c.PreflightConfig("ghost.test")
+	if enabled != "true" || age != "-" || crds != "-" || allow != "-" {
+		t.Errorf("got %q %q %q %q", enabled, age, crds, allow)
 	}
 }

@@ -2,29 +2,33 @@ package operator
 
 // operator_test.go — the `--config` goldens (generated once from the bash
 // hooks: `LOK8S_STATE_DIR=$tmp bash operator/hooks/<hook>.sh --config >
-// testdata/<hook>.config.yaml`, read-only since), the binding-context
+// testdata/<hook>.config.yaml`; -update rewrites them), the binding-context
 // reader's exit paths, and the runtime env layout.
 
 import (
 	"bytes"
-	"context"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
+// update rewrites the golden files with the current output:
+// go test ./internal/operator/ -update
+var update = flag.Bool("update", false, "rewrite the golden files")
+
 func TestConfigGoldens(t *testing.T) {
+	t.Parallel()
 	for name, hook := range map[string]Hook{
 		"lo-reconcile":     &LoHook{},
 		"capi-reconcile":   &CapiHook{},
 		"capi-status-sync": &CapiStatusSyncHook{},
 	} {
-		want := readFileT(t, filepath.Join("testdata", name+".config.yaml"))
-		if got := hook.Config(); got != want {
-			t.Errorf("%s --config drifted from the bash golden:\n got: %q\nwant: %q", name, got, want)
-		}
+		testutil.Golden(t, filepath.Join("testdata", name+".config.yaml"), hook.Config(), *update)
 	}
 }
 
@@ -70,7 +74,7 @@ func TestReadBindingContext(t *testing.T) {
 	// An empty batch is a no-op for every hook.
 	empty := mustEvents(t, `[]`)
 	for _, h := range []Hook{&LoHook{}, &CapiHook{}, &CapiStatusSyncHook{}} {
-		if err := h.Trigger(context.Background(), empty); err != nil {
+		if err := h.Trigger(t.Context(), empty); err != nil {
 			t.Errorf("%T: empty batch: %v", h, err)
 		}
 	}
@@ -114,37 +118,5 @@ func TestEnvLayout(t *testing.T) {
 		if info, err := os.Stat(filepath.Join(state, dir)); err != nil || !info.IsDir() {
 			t.Errorf("%s not created", dir)
 		}
-	}
-}
-
-func TestJqIdioms(t *testing.T) {
-	v, _ := decode([]byte(`{"n":3,"f":1.0,"s":"x","b":false,"z":null,"o":{"k":"v"},"a":["p"]}`))
-	cases := map[string]string{
-		jqR(get(v, "n")):                   "3",
-		jqR(get(v, "f")):                   "1.0",
-		jqR(get(v, "s")):                   "x",
-		jqR(get(v, "b")):                   "false",
-		jqR(get(v, "z")):                   "null",
-		jqR(get(v, "missing")):             "null",
-		jqR(get(v, "s", "deeper")):         "null",
-		jqR(get(v, "o")):                   `{"k":"v"}`,
-		jqR(alt(get(v, "b"), "d")):         "d",
-		jqR(alt(get(v, "z"), "d")):         "d",
-		jqEmpty(get(v, "z")):               "",
-		jqEmpty(get(v, "b")):               "",
-		jqEmpty(get(v, "n")):               "3",
-		compact(alt(get(v, "z"), []any{})): "[]",
-		compact(alt(get(v, "a"), []any{})): `["p"]`,
-	}
-	for got, want := range cases {
-		if got != want {
-			t.Errorf("got %q, want %q", got, want)
-		}
-	}
-	if present(get(v, "z")) || present(get(v, "b")) || !present(get(v, "o")) || !present(get(v, "n")) {
-		t.Error("present (jq -e) semantics")
-	}
-	if !contains(get(v, "a"), "p") || contains(get(v, "o"), "v") || contains(nil, "x") {
-		t.Error("contains semantics")
 	}
 }

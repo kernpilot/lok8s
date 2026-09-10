@@ -30,6 +30,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func hetznerFixture(t *testing.T) string { return fixturePath(t, "capi-cluster.lok8s.yaml") }
@@ -37,6 +38,7 @@ func hetznerFixture(t *testing.T) string { return fixturePath(t, "capi-cluster.l
 // ── DetectProvider ────────────────────────────────────────
 
 func TestDetectProviderExplicitName(t *testing.T) {
+	t.Parallel()
 	d, _, _ := testDriver(t)
 	got, err := d.DetectProvider(hetznerFixture(t))
 	if err != nil || got != "hetzner" {
@@ -45,6 +47,7 @@ func TestDetectProviderExplicitName(t *testing.T) {
 }
 
 func TestDetectProviderLegacyHcloud(t *testing.T) {
+	t.Parallel()
 	d, _, _ := testDriver(t)
 	spec := writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: x}\nspec:\n  hcloud:\n    region: fsn1\n")
 	got, err := d.DetectProvider(spec)
@@ -54,6 +57,7 @@ func TestDetectProviderLegacyHcloud(t *testing.T) {
 }
 
 func TestDetectProviderLegacyAWS(t *testing.T) {
+	t.Parallel()
 	d, _, _ := testDriver(t)
 	spec := writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: x}\nspec:\n  aws:\n    region: eu-central-1\n")
 	got, err := d.DetectProvider(spec)
@@ -63,6 +67,7 @@ func TestDetectProviderLegacyAWS(t *testing.T) {
 }
 
 func TestDetectProviderFailsForUnknown(t *testing.T) {
+	t.Parallel()
 	d, _, stderr := testDriver(t)
 	spec := writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: x}\nspec:\n  kubernetes:\n    version: v1.31.10\n")
 	if _, err := d.DetectProvider(spec); err == nil {
@@ -81,13 +86,9 @@ func TestGenerateMatchesBashGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	golden, err := os.ReadFile(filepath.Join("testdata", "generate_hetzner.golden"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != string(golden) {
-		t.Fatalf("rendered stream diverges from the bash golden.\nGot %d bytes, want %d.\nFirst divergence: %s",
-			len(got), len(golden), firstDiff(got, string(golden)))
+	testutil.Golden(t, filepath.Join("testdata", "generate_hetzner.golden"), got, *update)
+	if t.Failed() {
+		t.FailNow()
 	}
 	// The bats content pins, kept as belt-and-braces over the byte pin.
 	for _, want := range []string{"kind: Cluster", "kind: KubeadmControlPlane", "kind: HetznerCluster", "kind: MachineDeployment"} {
@@ -100,16 +101,6 @@ func TestGenerateMatchesBashGolden(t *testing.T) {
 	if strings.Contains(got, "HetznerBareMetalMachineTemplate") {
 		t.Error("hrobot template rendered (hcloud only)")
 	}
-}
-
-func firstDiff(a, b string) string {
-	for i := range min(len(a), len(b)) {
-		if a[i] != b[i] {
-			start := max(i-40, 0)
-			return "byte " + strings.TrimSpace(a[start:i]) + " ⇒ got " + a[i:min(i+40, len(a))] + " | want " + b[i:min(i+40, len(b))]
-		}
-	}
-	return "length mismatch"
 }
 
 func TestGenerateLeavesProcessEnvUntouched(t *testing.T) {
@@ -389,6 +380,7 @@ func templatePlaceholders(t *testing.T, tpls []string) []string {
 }
 
 func TestRenderedTemplatesAreDiscoverable(t *testing.T) {
+	t.Parallel()
 	// ANTI-VACUITY for the two gates below: both compare a list against a
 	// set derived from these files, and both pass trivially if the set is
 	// empty.
@@ -403,6 +395,7 @@ func TestRenderedTemplatesAreDiscoverable(t *testing.T) {
 }
 
 func TestEveryPlaceholderIsInTemplateVars(t *testing.T) {
+	t.Parallel()
 	// THE gate the list's own comment promises. A placeholder that is not
 	// on the whitelist is not substituted, so its literal ${NAME} is
 	// applied to the management cluster — the exact failure the list exists
@@ -423,6 +416,7 @@ func TestEveryPlaceholderIsInTemplateVars(t *testing.T) {
 }
 
 func TestEveryTemplateVarIsUsed(t *testing.T) {
+	t.Parallel()
 	// The other direction. A name left behind after a template drops it is
 	// carried for nothing and reads as a live contract to the next author.
 	used := map[string]bool{}
@@ -447,7 +441,7 @@ func TestEnsureCredentialsHetznerSecret(t *testing.T) {
 	t.Setenv("HROBOT_USER", "")
 	t.Setenv("HROBOT_PASSWORD", "")
 	d, runner, _ := testDriver(t)
-	if err := d.EnsureCredentialsSecret(context.Background(), hetznerFixture(t), "hetzner", "/tmp/kubeconfig.yaml"); err != nil {
+	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "hetzner", "/tmp/kubeconfig.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 {
@@ -479,7 +473,7 @@ func TestEnsureCredentialsHetznerSecret(t *testing.T) {
 
 func TestEnsureCredentialsUnknownProvider(t *testing.T) {
 	d, runner, stderr := testDriver(t)
-	if err := d.EnsureCredentialsSecret(context.Background(), hetznerFixture(t), "gcp", "/tmp/kubeconfig.yaml"); err == nil {
+	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "gcp", "/tmp/kubeconfig.yaml"); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(stderr.String(), "unknown provider 'gcp' for credential check") {
@@ -495,7 +489,7 @@ func TestEnsureCredentialsAWSSecret(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
 	t.Setenv("AWS_REGION", "eu-central-1")
 	d, runner, _ := testDriver(t)
-	if err := d.EnsureCredentialsSecret(context.Background(), hetznerFixture(t), "aws", "/tmp/kubeconfig.yaml"); err != nil {
+	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "aws", "/tmp/kubeconfig.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	create := argvLine(runner.calls[0])
@@ -512,7 +506,7 @@ func TestEnsureCredentialsAWSMissingKey(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	t.Setenv("AWS_REGION", "")
 	d, _, stderr := testDriver(t)
-	if err := d.EnsureCredentialsSecret(context.Background(), hetznerFixture(t), "aws", "/tmp/kubeconfig.yaml"); err == nil {
+	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "aws", "/tmp/kubeconfig.yaml"); err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(stderr.String(), "AWS_ACCESS_KEY_ID") {
@@ -530,7 +524,7 @@ func TestWaitReadyProvisioned(t *testing.T) {
 		}
 		return nil
 	}
-	if err := d.WaitReady(context.Background(), "/tmp/kubeconfig.yaml", "test-cluster", "", 5); err != nil {
+	if err := d.WaitReady(t.Context(), "/tmp/kubeconfig.yaml", "test-cluster", "", 5); err != nil {
 		t.Fatal(err)
 	}
 	want := "kubectl get cluster test-cluster --namespace default --kubeconfig /tmp/kubeconfig.yaml -o jsonpath={.status.phase}"
@@ -547,7 +541,7 @@ func TestWaitReadyTimesOut(t *testing.T) {
 		}
 		return nil
 	}
-	if err := d.WaitReady(context.Background(), "/tmp/kubeconfig.yaml", "test-cluster", "", 1); err == nil {
+	if err := d.WaitReady(t.Context(), "/tmp/kubeconfig.yaml", "test-cluster", "", 1); err == nil {
 		t.Fatal("expected timeout error")
 	}
 	if !strings.Contains(stderr.String(), "Timed out waiting for cluster test-cluster (1s)") {
@@ -565,7 +559,7 @@ func TestWaitReadyStopsOnCancel(t *testing.T) {
 		}
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	err := d.WaitReady(ctx, "/tmp/kubeconfig.yaml", "test-cluster", "", 600)
 	if !errors.Is(err, context.Canceled) {

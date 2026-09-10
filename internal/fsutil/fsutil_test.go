@@ -8,6 +8,7 @@ import (
 )
 
 func TestPredicates(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "f")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {

@@ -86,6 +86,7 @@ func TestRunTTYNoProgressLinesShownAsIs(t *testing.T) {
 }
 
 func TestOKReMatchesTheVerbList(t *testing.T) {
+	t.Parallel()
 	for _, ok := range []string{
 		"configmap/x serverside-applied", "pod/y created", "svc/z configured",
 		"cm/a unchanged", "x applied", "y deleted", "svc/s annotated",
@@ -100,5 +101,19 @@ func TestOKReMatchesTheVerbList(t *testing.T) {
 		if OKRe.MatchString(notOK) {
 			t.Errorf("non-verb matched: %q", notOK)
 		}
+	}
+}
+
+func TestAggregateCollapsesDuplicates(t *testing.T) {
+	t.Parallel()
+	out := Aggregate([]string{"webhook refused", "webhook refused", "webhook refused", "immutable: foo"})
+	if len(out) != 2 {
+		t.Fatalf("got %d lines: %q", len(out), out)
+	}
+	if !strings.Contains(out[0], "webhook refused") || !strings.Contains(out[0], "×3") {
+		t.Errorf("dupes not collapsed: %q", out[0])
+	}
+	if out[1] != "immutable: foo" {
+		t.Errorf("distinct line mangled: %q", out[1])
 	}
 }

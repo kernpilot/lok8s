@@ -3,7 +3,7 @@ package render
 // render_test.go — the variant-independent surface: LO_RENDER parsing on
 // both builds, the exec pipeline through the Runner seam, and the
 // SecretInProcess switch. The in-process assertions (lo-full only) are in
-// render_inprocess_test.go behind the `inprocess` tag; `go test ./...`
+// inprocess_test.go behind the `inprocess` tag; `go test ./...`
 // runs this file on core, `go test -tags inprocess ./...` runs both.
 
 import (
@@ -66,7 +66,7 @@ func TestCurrentModePerVariant(t *testing.T) {
 	// Build spells the rejection out on the render's stderr stream: the
 	// callers only print "kustomize build failed for <domain>".
 	var stderr strings.Builder
-	if _, err := Build(context.Background(), t.TempDir(), Options{Runner: &recordingRunner{}, Stderr: &stderr}); err == nil {
+	if _, err := Build(t.Context(), t.TempDir(), Options{Runner: &recordingRunner{}, Stderr: &stderr}); err == nil {
 		t.Fatal("lo core: Build under LO_RENDER=inprocess rendered")
 	}
 	if !strings.Contains(stderr.String(), "Error: LO_RENDER=inprocess: this is lo core") || !strings.Contains(stderr.String(), "lo-full") {
@@ -106,7 +106,7 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	base := t.TempDir()
 	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
 	r := &recordingRunner{}
-	out, err := Build(context.Background(), "/some/dir", Options{
+	out, err := Build(t.Context(), "/some/dir", Options{
 		Paths: p, Runner: r, EnableExec: true, Env: []string{"KHELM_TRUST_ANY_REPO=true"},
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	// No Paths (the addon call shape): the plugin home is left to the
 	// environment, exactly as before.
 	r = &recordingRunner{}
-	if _, err := Build(context.Background(), "/d", Options{Runner: r}); err != nil {
+	if _, err := Build(t.Context(), "/d", Options{Runner: r}); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.cmd.Env) != 0 || strings.Join(r.cmd.Args, " ") != "build --enable-alpha-plugins /d" {
@@ -135,7 +135,7 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 
 	// --load-restrictor is passed through as the CLI flag.
 	r = &recordingRunner{}
-	if _, err := Build(context.Background(), "/d", Options{Runner: r, LoadRestrictions: LoadRestrictionsNone}); err != nil {
+	if _, err := Build(t.Context(), "/d", Options{Runner: r, LoadRestrictions: LoadRestrictionsNone}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(r.cmd.Args, " ") != "build --enable-alpha-plugins --load-restrictor LoadRestrictionsNone /d" {
@@ -151,7 +151,7 @@ func TestBuildCoreDefaultIsExec(t *testing.T) {
 	}
 	t.Setenv(ModeEnv, "")
 	r := &recordingRunner{}
-	out, err := Build(context.Background(), "/d", Options{Runner: r})
+	out, err := Build(t.Context(), "/d", Options{Runner: r})
 	if err != nil {
 		t.Fatal(err)
 	}

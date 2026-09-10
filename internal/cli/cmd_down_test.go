@@ -83,7 +83,7 @@ func (h *downHarness) spec(t *testing.T, body string) {
 func TestDownCloudSpecReachesDriverDestroy(t *testing.T) {
 	h := newDownHarness(t)
 	h.spec(t, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: prod\n")
-	if err := runDown(context.Background(), h.deps, "test.dev", "test-down"); err != nil {
+	if err := runDown(t.Context(), h.deps, "test.dev", "test-down"); err != nil {
 		t.Fatal(err)
 	}
 	if !h.acted_("driver-destroy test.dev") || h.acted_("tilt-down") {
@@ -106,7 +106,7 @@ func TestDownSpecWithoutKindRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newDownHarness(t)
 			h.spec(t, body)
-			err := runDown(context.Background(), h.deps, "test.dev", "test-down")
+			err := runDown(t.Context(), h.deps, "test.dev", "test-down")
 			if !errors.Is(err, ErrHandled) {
 				t.Fatalf("err = %v", err)
 			}
@@ -140,7 +140,7 @@ func TestDownLoSpecLocalTeardown(t *testing.T) {
 		}
 		return nil
 	}
-	if err := runDown(context.Background(), h.deps, "test.dev", "dev"); err != nil {
+	if err := runDown(t.Context(), h.deps, "test.dev", "dev"); err != nil {
 		t.Fatal(err)
 	}
 	if !h.acted_("tilt-down") || h.acted_("driver-destroy test.dev") {
@@ -165,7 +165,7 @@ func TestDownSharedRegistriesLeftUp(t *testing.T) {
 	h.spec(t, "kind: Lo\nmetadata:\n  name: dev\n")
 	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", ".registries.json"),
 		`{"shared": true, "project_network": "devnet", "registries": [{"name": "build"}, {"name": "io-docker"}]}`)
-	if err := runDown(context.Background(), h.deps, "test.dev", "dev"); err != nil {
+	if err := runDown(t.Context(), h.deps, "test.dev", "dev"); err != nil {
 		t.Fatal(err)
 	}
 	if h.runner.has("docker rm") {
@@ -184,7 +184,7 @@ func TestDownSharedRegistriesLeftUp(t *testing.T) {
 func TestDownNoSpecTakesLocalPath(t *testing.T) {
 	h := newDownHarness(t)
 	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: other\n")
-	if err := runDown(context.Background(), h.deps, "test.dev", "local"); err != nil {
+	if err := runDown(t.Context(), h.deps, "test.dev", "local"); err != nil {
 		t.Fatal(err)
 	}
 	if !h.acted_("tilt-down") || h.acted_("driver-destroy test.dev") {
@@ -201,7 +201,7 @@ func TestDownDriverDestroyOutcomes(t *testing.T) {
 	h := newDownHarness(t)
 	h.spec(t, "kind: Kkp\nmetadata:\n  name: prod\n")
 	h.destroy = driver.ErrDeclined
-	if err := runDown(context.Background(), h.deps, "test.dev", "prod"); !errors.Is(err, ErrHandled) {
+	if err := runDown(t.Context(), h.deps, "test.dev", "prod"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("decline: err = %v", err)
 	}
 	if strings.Contains(h.out.String(), "driver destroy failed") {
@@ -211,7 +211,7 @@ func TestDownDriverDestroyOutcomes(t *testing.T) {
 	h = newDownHarness(t)
 	h.spec(t, "kind: Kkp\nmetadata:\n  name: prod\n")
 	h.destroy = &driver.ExitError{Code: 1, Err: errors.New("curl exit 3, remapped")}
-	if err := runDown(context.Background(), h.deps, "test.dev", "prod"); !errors.Is(err, ErrHandled) {
+	if err := runDown(t.Context(), h.deps, "test.dev", "prod"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("failure: err = %v", err)
 	}
 	if !strings.Contains(h.out.String(), "✗ driver destroy failed — infrastructure may still exist; inspect and re-run") {
@@ -237,7 +237,7 @@ func TestCleanAllPrunes(t *testing.T) {
 	h := newDownHarness(t)
 	h.spec(t, "kind: Lo\nmetadata:\n  name: dev\n")
 	deps, acted := cleanHarness(t, h)
-	if err := runClean(context.Background(), deps, "test.dev", "dev", true); err != nil {
+	if err := runClean(t.Context(), deps, "test.dev", "dev", true); err != nil {
 		t.Fatal(err)
 	}
 	if !h.runner.has("docker system prune -f") || h.runner.has("docker volume") || len(*acted) != 0 {
@@ -255,7 +255,7 @@ func TestCleanVolumesAndRegistriesOnLoDomain(t *testing.T) {
 		return nil
 	}
 	deps, acted := cleanHarness(t, h)
-	if err := runClean(context.Background(), deps, "test.dev", "dev", false); err != nil {
+	if err := runClean(t.Context(), deps, "test.dev", "dev", false); err != nil {
 		t.Fatal(err)
 	}
 	if !h.runner.has("docker volume ls --filter name=^dev- -q") || !h.runner.has("docker volume rm -f dev-data") || !h.runner.has("docker volume rm -f dev-cache") {
@@ -273,7 +273,7 @@ func TestCleanSkipsRegistriesOffLoDomains(t *testing.T) {
 	h := newDownHarness(t)
 	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "deploy.lok8s.yaml"), "kind: Deploy\n")
 	deps, acted := cleanHarness(t, h)
-	if err := runClean(context.Background(), deps, "test.dev", "local", false); err != nil {
+	if err := runClean(t.Context(), deps, "test.dev", "local", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(*acted) != 0 {
@@ -288,7 +288,7 @@ func TestCleanStopsWhenDownRefuses(t *testing.T) {
 	h := newDownHarness(t)
 	h.spec(t, "metadata:\n  name: prod\n")
 	deps, acted := cleanHarness(t, h)
-	if err := runClean(context.Background(), deps, "test.dev", "prod", true); !errors.Is(err, ErrHandled) {
+	if err := runClean(t.Context(), deps, "test.dev", "prod", true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(h.runner.calls) != 0 || len(*acted) != 0 {
@@ -301,11 +301,11 @@ func TestKindClusterListedExactMatch(t *testing.T) {
 		c.Stdout.Write([]byte("kubehz-dev\nlocal\n"))
 		return nil
 	}}
-	if !kindClusterListed(context.Background(), r, "local") || kindClusterListed(context.Background(), r, "loc") || kindClusterListed(context.Background(), r, "kubehz") {
+	if !kindClusterListed(t.Context(), r, "local") || kindClusterListed(t.Context(), r, "loc") || kindClusterListed(t.Context(), r, "kubehz") {
 		t.Error("grep -qx semantics: whole-line match only")
 	}
 	r = &scriptRunner{handler: func(c execx.Cmd) error { return errors.New("kind: not found") }}
-	if kindClusterListed(context.Background(), r, "local") {
+	if kindClusterListed(t.Context(), r, "local") {
 		t.Error("a failed kind lists nothing")
 	}
 }

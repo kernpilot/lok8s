@@ -112,6 +112,7 @@ func tarBundle(t *testing.T, dir, out string) {
 // ── bundle validation ────────────────────────────────────
 
 func TestHandoverValidateBundle(t *testing.T) {
+	t.Parallel()
 	ho := newHandover(t)
 	mustOK(t, ho.ctx.validateBundle(ho.bundle), ho.output())
 	_ = os.Remove(filepath.Join(ho.bundle, "sa.key"))
@@ -125,6 +126,7 @@ func TestHandoverValidateBundle(t *testing.T) {
 }
 
 func TestHandoverResolveBundleUnpacksTarball(t *testing.T) {
+	t.Parallel()
 	ho := newHandover(t)
 	tarball := filepath.Join(ho.base, "bundle.tar.gz")
 	tarBundle(t, ho.bundle, tarball)
@@ -139,6 +141,7 @@ func TestHandoverResolveBundleUnpacksTarball(t *testing.T) {
 }
 
 func TestHandoverResolveBundleTraversalGuard(t *testing.T) {
+	t.Parallel()
 	for _, entry := range []string{"/abs/path", "..", "../x", "a/../b", "a/..", "./../x", "./..", "x/../"} {
 		if !bundleEntryEscapes(entry) {
 			t.Fatalf("%q must be refused", entry)
@@ -206,13 +209,14 @@ func TestHandoverReceiveGeneratedConfigsMatchBashGoldens(t *testing.T) {
 	ho.mockNodeBinaries(nil)
 	mustOK(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}), ho.output())
 	cfg := readFile(t, filepath.Join(ho.k8sDir, "kubehz-handover-kubeadm.yaml"))
-	golden := strings.ReplaceAll(readFile(t, filepath.Join("testdata", "golden", "kubeadm-config.yaml")), "/etc/kubernetes", ho.k8sDir)
-	if cfg != golden {
-		t.Fatalf("kubeadm config drift:\n%s\nwant:\n%s", cfg, golden)
+	// The golden holds the real /etc/kubernetes; the test dir stands in.
+	want := strings.ReplaceAll(golden(t, "kubeadm-config.yaml", strings.ReplaceAll(cfg, ho.k8sDir, "/etc/kubernetes")), "/etc/kubernetes", ho.k8sDir)
+	if cfg != want {
+		t.Fatalf("kubeadm config drift (run: go test ./internal/kubehz/ -update):\n%s\nwant:\n%s", cfg, want)
 	}
 	enc := filepath.Join(ho.k8sDir, "kubehz-encryption-config.yaml")
-	if readFile(t, enc) != readFile(t, filepath.Join("testdata", "golden", "encryption-config.yaml")) {
-		t.Fatalf("encryption config drift:\n%s", readFile(t, enc))
+	if readFile(t, enc) != golden(t, "encryption-config.yaml", readFile(t, enc)) {
+		t.Fatalf("encryption config drift (run: go test ./internal/kubehz/ -update):\n%s", readFile(t, enc))
 	}
 	if info, _ := os.Stat(enc); info.Mode().Perm() != 0o600 {
 		t.Fatal("encryption config mode")
@@ -298,6 +302,7 @@ func TestHandoverReceiveBundleCarriedProviderAndKeyName(t *testing.T) {
 }
 
 func TestHandoverBundleValue(t *testing.T) {
+	t.Parallel()
 	ho := newHandover(t)
 	_ = os.WriteFile(filepath.Join(ho.bundle, "encryption-provider"), []byte("aes cbc\n"), 0o644)
 	if v := bundleValue(ho.bundle, "encryption-provider", "secretbox"); v != "aes cbc" {
@@ -471,7 +476,7 @@ func TestHandoverFetchSnapshotHTTPSLands0600(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(ho.bundle, "snapshot-location"), []byte(ho.apiURL()+"/snap.db"), 0o644)
 	work := filepath.Join(ho.base, "work")
 	_ = os.MkdirAll(work, 0o700)
-	out, err := ho.ctx.fetchSnapshot(context.Background(), ho.bundle, "", work)
+	out, err := ho.ctx.fetchSnapshot(t.Context(), ho.bundle, "", work)
 	mustOK(t, err, ho.output())
 	if out != filepath.Join(work, "kubehz-handover-snapshot.db") || readFile(t, out) != "snapshot-bytes" {
 		t.Fatalf("out=%s", out)
@@ -516,6 +521,7 @@ func TestHandoverReceiveScrubsScratch(t *testing.T) {
 }
 
 func TestHandoverWritersRejectInjection(t *testing.T) {
+	t.Parallel()
 	ho := newHandover(t)
 	_ = os.WriteFile(filepath.Join(ho.bundle, "endpoint-dns"), []byte("evil.example.com\"\n  extraArgs:\n    - name: pwn"), 0o644)
 	out := filepath.Join(ho.base, "out.yaml")
@@ -570,7 +576,7 @@ func TestHandoverPreseedVerifiesTheHostKey(t *testing.T) {
 func TestHandoverPreseedTransfersSixFilesWithImmediateChmod(t *testing.T) {
 	ho := newHandover(t)
 	ho.mockNodeBinaries(nil)
-	mustOK(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}), ho.output())
+	mustOK(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}), ho.output())
 	mustContain(t, ho.output(), "PKI pre-seeded on 203.0.113.7")
 	if ho.lineIndex("ssh ") < 0 || !strings.Contains(ho.calls[ho.lineIndex("ssh ")], "umask 077 && mkdir -p /etc/kubernetes/pki") {
 		t.Fatalf("mkdir: %v", ho.calls)
@@ -624,7 +630,7 @@ func TestHandoverPreseedMidTransferFailure(t *testing.T) {
 			return nil
 		},
 	})
-	mustErr(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
+	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
 	mustContain(t, ho.output(), "copying sa.key")
 	if !ho.runner.anyCall("chmod 600 /etc/kubernetes/pki/ca.key") {
 		t.Fatal("ca.key was not tightened before the failure")
@@ -637,7 +643,7 @@ func TestHandoverPreseedMidTransferFailure(t *testing.T) {
 func TestHandoverPreseedUnreachableNode(t *testing.T) {
 	ho := newHandover(t)
 	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh": func(c execx.Cmd) error { return exitErr(255) }})
-	mustErr(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
+	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
 	mustContain(t, ho.output(), "cannot reach")
 	if ho.runner.anyCall("scp ") {
 		t.Fatal("scp ran")

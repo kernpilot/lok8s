@@ -2,7 +2,7 @@
 
 package render
 
-// render_inprocess_test.go — the in-process kustomize render (lo-full)
+// inprocess_test.go — the in-process kustomize render (lo-full)
 // against the exec pipeline it replaced. Where the pinned binaries are
 // present in the repo's .bin/.kustomize (b install), the in-process bytes
 // are compared with the binary's bytes for the same fixture: plain
@@ -15,7 +15,6 @@ package render
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -166,7 +165,7 @@ func TestBuildInProcessPlainKustomization(t *testing.T) {
 	t.Setenv(ModeEnv, "")
 	dir := plainFixture(t)
 	var stderr bytes.Buffer
-	out, err := Build(context.Background(), dir, Options{Stderr: &stderr})
+	out, err := Build(t.Context(), dir, Options{Stderr: &stderr})
 	if err != nil {
 		t.Fatalf("Build: %v\n%s", err, stderr.String())
 	}
@@ -191,7 +190,7 @@ func TestBuildInProcessMatchesPinnedBinaryPlain(t *testing.T) {
 	t.Setenv(ModeEnv, "")
 	dir := plainFixture(t)
 	want := execKustomize(t, dir, false, nil)
-	got, err := Build(context.Background(), dir, Options{})
+	got, err := Build(t.Context(), dir, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +228,7 @@ func TestBuildInProcessSecretGeneratorViaSelfExec(t *testing.T) {
 	t.Setenv("RENDER_TEST_VALUE", "from-parent-env")
 	dir := secretFixture(t)
 	var stderr bytes.Buffer
-	out, err := Build(context.Background(), dir, Options{Stderr: &stderr})
+	out, err := Build(t.Context(), dir, Options{Stderr: &stderr})
 	if err != nil {
 		t.Fatalf("Build: %v\n%s", err, stderr.String())
 	}
@@ -247,7 +246,7 @@ func TestBuildInProcessMatchesPinnedBinarySecret(t *testing.T) {
 	t.Setenv("RENDER_TEST_VALUE", "same-in-both")
 	dir := secretFixture(t)
 	want := execKustomize(t, dir, false, nil, secretPluginRel)
-	got, err := Build(context.Background(), dir, Options{})
+	got, err := Build(t.Context(), dir, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +266,7 @@ func TestBuildEnvOverlayReachesPluginAndIsRestored(t *testing.T) {
 	// The overlay reaches the plugin child: the store-free switch makes
 	// the generator emit nothing, and an env override wins over the
 	// parent's value.
-	out, err := Build(context.Background(), dir, Options{Env: []string{"LOK8S_SECRETS_DISABLE=1"}})
+	out, err := Build(t.Context(), dir, Options{Env: []string{"LOK8S_SECRETS_DISABLE=1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +276,7 @@ func TestBuildEnvOverlayReachesPluginAndIsRestored(t *testing.T) {
 	if _, set := os.LookupEnv("LOK8S_SECRETS_DISABLE"); set {
 		t.Fatal("overlay leaked into the process environment after the run")
 	}
-	out, err = Build(context.Background(), dir, Options{Env: []string{"RENDER_TEST_VALUE=overlay"}})
+	out, err = Build(t.Context(), dir, Options{Env: []string{"RENDER_TEST_VALUE=overlay"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +300,7 @@ func TestBuildPluginHomeIsSetOnceForTheProcess(t *testing.T) {
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/nowhere/.kustomize")
 	dir := secretFixture(t)
 	for i := range 2 {
-		if _, err := Build(context.Background(), dir, Options{}); err != nil {
+		if _, err := Build(t.Context(), dir, Options{}); err != nil {
 			t.Fatalf("render %d: %v", i, err)
 		}
 		home, err := selfExecPluginHome()
@@ -348,7 +347,7 @@ env:
 		t.Helper()
 		t.Setenv("PATH_SECRETS", t.TempDir())
 		var stderr bytes.Buffer
-		out, err := Build(context.Background(), dir, Options{Env: overlay, Stderr: &stderr})
+		out, err := Build(t.Context(), dir, Options{Env: overlay, Stderr: &stderr})
 		if err != nil {
 			t.Fatalf("Build: %v\n%s", err, stderr.String())
 		}
@@ -381,7 +380,7 @@ func TestBuildInProcessFailurePrintsCobraErrorLine(t *testing.T) {
 	t.Setenv(ModeEnv, "")
 	dir := t.TempDir() // no kustomization.yaml
 	var stderr bytes.Buffer
-	if _, err := Build(context.Background(), dir, Options{Stderr: &stderr}); err == nil {
+	if _, err := Build(t.Context(), dir, Options{Stderr: &stderr}); err == nil {
 		t.Fatal("missing kustomization rendered")
 	}
 	if !strings.HasPrefix(stderr.String(), "Error: unable to find one of 'kustomization.yaml'") {
@@ -461,7 +460,7 @@ func TestBuildInProcessChartRendererViaSelfExec(t *testing.T) {
 	t.Setenv(ModeEnv, "")
 	dir := chartFixture(t)
 	var stderr bytes.Buffer
-	out, err := Build(context.Background(), dir, Options{Stderr: &stderr, Env: []string{"KHELM_TRUST_ANY_REPO=true"}})
+	out, err := Build(t.Context(), dir, Options{Stderr: &stderr, Env: []string{"KHELM_TRUST_ANY_REPO=true"}})
 	if err != nil {
 		t.Fatalf("Build: %v\n%s", err, stderr.String())
 	}
@@ -477,7 +476,7 @@ func TestBuildInProcessMatchesPinnedBinaryChart(t *testing.T) {
 	dir := chartFixture(t)
 	overlay := []string{"KHELM_TRUST_ANY_REPO=true"}
 	want := execKustomize(t, dir, true, overlay, chartRendererPluginRel)
-	got, err := Build(context.Background(), dir, Options{EnableExec: true, Env: overlay})
+	got, err := Build(t.Context(), dir, Options{EnableExec: true, Env: overlay})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,10 +494,10 @@ func TestBuildLoadRestrictionsNoneIsHonoured(t *testing.T) {
 	})
 	dir := filepath.Join(root, "kust")
 	var stderr bytes.Buffer
-	if _, err := Build(context.Background(), dir, Options{Stderr: &stderr}); err == nil {
+	if _, err := Build(t.Context(), dir, Options{Stderr: &stderr}); err == nil {
 		t.Fatal("RootOnly (the default) accepted a file outside the root")
 	}
-	out, err := Build(context.Background(), dir, Options{LoadRestrictions: LoadRestrictionsNone})
+	out, err := Build(t.Context(), dir, Options{LoadRestrictions: LoadRestrictionsNone})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +543,7 @@ env:
 	for i := range dirs {
 		wg.Go(func() {
 			var stderr bytes.Buffer
-			out, err := Build(context.Background(), dirs[i], Options{Env: []string{fmt.Sprintf("LOK8S_USER_TAG=tag-%d", i)}, Stderr: &stderr})
+			out, err := Build(t.Context(), dirs[i], Options{Env: []string{fmt.Sprintf("LOK8S_USER_TAG=tag-%d", i)}, Stderr: &stderr})
 			if err != nil {
 				err = fmt.Errorf("%w\n%s", err, stderr.String())
 			}
