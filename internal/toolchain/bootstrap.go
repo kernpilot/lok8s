@@ -289,7 +289,7 @@ func extractB(archive, dst string) error {
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return errors.New("b tarball: no `b` member found")
 		}
 		if err != nil {

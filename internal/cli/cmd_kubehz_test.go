@@ -8,6 +8,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,43 +177,43 @@ func TestKubehzCommandsClusterFreePaths(t *testing.T) {
 		t.Fatalf("status: %v\n%s", err, out)
 	}
 	_, errOut, err := runKubehzLo(t, base, "kubehz", "register")
-	if err != ErrHandled || !strings.Contains(errOut, "spec.kubehz.access is 'none' — nothing to register") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "spec.kubehz.access is 'none' — nothing to register") {
 		t.Fatalf("register: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "join")
-	if err != ErrHandled || !strings.Contains(errOut, "Error: missing required argument: node") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required argument: node") {
 		t.Fatalf("join: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "join", "n1", "--domain", "shared.dev")
-	if err != ErrHandled || !strings.Contains(errOut, "KUBEHZ_TOKEN is required to mint a join ticket") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "KUBEHZ_TOKEN is required to mint a join ticket") {
 		t.Fatalf("join shared: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "claim")
-	if err != ErrHandled || !strings.Contains(errOut, "Error: missing required flag: nonce") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required flag: nonce") {
 		t.Fatalf("claim: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "node", "join", "--cluster", "x")
-	if err != ErrHandled || !strings.Contains(errOut, "--cluster/-s names the kind cluster") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "--cluster/-s names the kind cluster") {
 		t.Fatalf("node join --cluster: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "node", "join", "-scl-x")
-	if err != ErrHandled || !strings.Contains(errOut, "--cluster-id cl-xxxxxxxx") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "--cluster-id cl-xxxxxxxx") {
 		t.Fatalf("node join -scl-x: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "node", "remove")
-	if err != ErrHandled || !strings.Contains(errOut, "Error: missing required flag: name") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required flag: name") {
 		t.Fatalf("node remove: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "handover", "receive")
-	if err != ErrHandled || !strings.Contains(errOut, "Error: missing required flag: bundle") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required flag: bundle") {
 		t.Fatalf("receive: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "handover", "preseed", "--bundle", "/nonexistent")
-	if err != ErrHandled || !strings.Contains(errOut, "Error: missing required flag: node") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required flag: node") {
 		t.Fatalf("preseed: %v %s", err, errOut)
 	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "bogus")
-	if err != ErrHandled || !strings.Contains(errOut, "Error: Invalid command: bogus") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: Invalid command: bogus") {
 		t.Fatalf("bogus: %v %s", err, errOut)
 	}
 }

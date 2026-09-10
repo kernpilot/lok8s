@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -339,7 +340,7 @@ func TestResolveClusterIDPageCapWarning(t *testing.T) {
 	h := newHarness(t)
 	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[],"meta":{"pagination":{"total":600}}}`)
 	_, err := h.ctx.ResolveClusterID(context.Background(), "test.kubehz.dev", h.apiURL())
-	if err != errNotRegistered {
+	if !errors.Is(err, errNotRegistered) {
 		t.Fatalf("err = %v", err)
 	}
 	mustContain(t, h.output(), "tenant has 600 clusters (first 500 checked)")

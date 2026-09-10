@@ -111,7 +111,7 @@ func marshalResources(resources []*yaml.RNode, w io.Writer) error {
 	enc := yaml.NewEncoder(w)
 	for i, r := range resources {
 		if err := enc.Encode(r.Document()); err != nil {
-			return fmt.Errorf("marshal resource %d: %s", i, err)
+			return fmt.Errorf("marshal resource %d: %w", i, err)
 		}
 	}
 	if err := enc.Close(); err != nil {

@@ -126,7 +126,7 @@ func newHealFixture(t *testing.T) *healFixture {
 					node, filepath.Join(h.rootDir, "restarts"), script)
 				out, err := exec.Command("bash", "-c", wrapped).CombinedOutput()
 				if err != nil {
-					return fmt.Errorf("repair script failed: %v\n%s", err, out)
+					return fmt.Errorf("repair script failed: %w\n%s", err, out)
 				}
 				return nil
 			}

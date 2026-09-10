@@ -9,6 +9,7 @@ package hooks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,7 +121,7 @@ func TestSelectorMultiLabelANDs(t *testing.T) {
 
 func TestSelectorRejectsInjection(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
-	if _, err := c.parseSelector("a=b;rm -rf /"); err != ErrHandled {
+	if _, err := c.parseSelector("a=b;rm -rf /"); !errors.Is(err, ErrHandled) {
 		t.Fatal("injection must be rejected")
 	}
 	if !strings.Contains(errOut.String(), "hooks: invalid selector clause 'a=b;rm -rf /' (key/value must be [a-zA-Z0-9._/-])") {
@@ -130,7 +131,7 @@ func TestSelectorRejectsInjection(t *testing.T) {
 
 func TestSelectorRejectsClauseWithoutEquals(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
-	if _, err := c.parseSelector("noequalshere"); err != ErrHandled {
+	if _, err := c.parseSelector("noequalshere"); !errors.Is(err, ErrHandled) {
 		t.Fatal("clause without '=' must be rejected")
 	}
 	if !strings.Contains(errOut.String(), "hooks: selector clause 'noequalshere' must be key=value") {
@@ -140,7 +141,7 @@ func TestSelectorRejectsClauseWithoutEquals(t *testing.T) {
 
 func TestSelectorRejectsEmpty(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
-	if _, err := c.parseSelector(""); err != ErrHandled {
+	if _, err := c.parseSelector(""); !errors.Is(err, ErrHandled) {
 		t.Fatal("empty selector must be rejected")
 	}
 	if !strings.Contains(errOut.String(), "hooks: --selector is required") {
@@ -159,7 +160,7 @@ func TestSelectorAcceptsSlashInValue(t *testing.T) {
 
 func TestSelectorRejectsSpaceInValue(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
-	if _, err := c.parseSelector("role=a b"); err != ErrHandled {
+	if _, err := c.parseSelector("role=a b"); !errors.Is(err, ErrHandled) {
 		t.Fatal("space must be rejected (arg-split / injection)")
 	}
 	if !strings.Contains(errOut.String(), "invalid selector clause") {
@@ -373,7 +374,7 @@ func TestRecreateTiltTriggerFailureIsLoud(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Recreate(context.Background(), "lok8s.dev/role=seed"); err != ErrHandled {
+	if err := c.Recreate(context.Background(), "lok8s.dev/role=seed"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "hooks recreate: tilt trigger failed for 'zitadel-provision'") {
@@ -448,7 +449,7 @@ func TestApplyFailureWithoutForceFailsFast(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Apply(context.Background(), "lok8s.dev/role=seed"); err != ErrHandled {
+	if err := c.Apply(context.Background(), "lok8s.dev/role=seed"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	// Non-interactive without --force-recreate → the remediation hint, no

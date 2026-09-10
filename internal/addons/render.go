@@ -12,6 +12,7 @@ package addons
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -247,7 +248,7 @@ func coerceEnvValues(data []byte) ([]byte, error) {
 	for {
 		var doc yaml.Node
 		if err := dec.Decode(&doc); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return nil, err

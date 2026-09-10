@@ -8,6 +8,7 @@ package env
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -403,7 +404,7 @@ func TestKustomizationPullFailureIsLoud(t *testing.T) {
 	var errOut bytes.Buffer
 	c.ErrOut = &errOut
 	c.Pull = func() error { return fmt.Errorf("boom") }
-	if err := c.Kustomization(context.Background(), true, true); err != ErrHandled {
+	if err := c.Kustomization(context.Background(), true, true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
 	if !strings.Contains(errOut.String(), "image::cache --all failed; check upstream credentials and network") {

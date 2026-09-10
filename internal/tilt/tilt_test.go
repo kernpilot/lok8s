@@ -9,6 +9,7 @@ package tilt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,7 +218,7 @@ func TestUpGateFailsWithoutKindEnv(t *testing.T) {
 		t.Fatal("StartDetached must not run when the gate fails")
 		return 0, nil
 	}
-	if err := c.Up(context.Background()); err != ErrHandled {
+	if err := c.Up(context.Background()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
 	if !strings.Contains(errOut.String(), "Did not recognize local kind environment.") {
@@ -340,7 +341,7 @@ func TestCIGateFailsWithoutKindEnv(t *testing.T) {
 		return nil
 	}
 	rc, err := c.CI(context.Background(), "")
-	if rc != 1 || err != ErrHandled {
+	if rc != 1 || !errors.Is(err, ErrHandled) {
 		t.Fatalf("rc=%d err=%v", rc, err)
 	}
 	if !strings.Contains(errOut.String(), "Did not recognize local kind environment.") {

@@ -7,6 +7,7 @@ package kubehz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -199,11 +200,11 @@ func (c *Context) DestroyHosted(ctx context.Context, cfg *Config, domain, cluste
 	}
 
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
-	if err != nil && err != errNotRegistered {
+	if err != nil && !errors.Is(err, errNotRegistered) {
 		c.errorf("kubehz: cannot read the cluster registry at %s — nothing was deleted for %s and the local kubeconfigs are kept. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry.", apiURL, domain)
 		return ErrHandled
 	}
-	if err == errNotRegistered {
+	if errors.Is(err, errNotRegistered) {
 		c.echo("kubehz: no hosted cluster is registered for %s — nothing to destroy on the platform.", domain)
 	} else {
 		res, err := c.fetchStatus(ctx, "DELETE", apiURL+"/api/clusters/"+clusterID, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)

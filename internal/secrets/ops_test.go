@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,7 +198,7 @@ func TestInitGolden(t *testing.T) {
 
 func TestInitMissingKey(t *testing.T) {
 	c, _, errOut := testEnv(t)
-	if err := c.Init(c.Paths.Base + "/nope"); err != ErrHandled {
+	if err := c.Init(c.Paths.Base + "/nope"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "SSH public key not found:") ||
@@ -254,7 +255,7 @@ func TestAddKeyRejectsMalformed(t *testing.T) {
 	c, _, errOut := testEnv(t)
 	sopsYAMLWith(t, c, keyA)
 	before, _ := os.ReadFile(c.sopsConfigPath())
-	if err := c.AddKey("age1nope", false, false); err != ErrHandled {
+	if err := c.AddKey("age1nope", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "not a valid age public key: age1nope") {
@@ -272,7 +273,7 @@ func TestAddKeyOrphanFailsClosed(t *testing.T) {
 	sopsYAMLWith(t, c, keyA)
 	write(t, c.Paths.Clusters+"/a.dev/secrets/Secret.orphan.default.K.enc", "enc")
 
-	if err := c.AddKey(keyB, false, false); err != ErrHandled {
+	if err := c.AddKey(keyB, false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "no decrypted twin") {
@@ -363,7 +364,7 @@ func TestSetStdinAndErrors(t *testing.T) {
 	// Empty everything → Empty value.
 	c.Stdin = strings.NewReader("")
 	errOut.Reset()
-	if err := c.Set(t.Context(), "app", "default", "E", "", false); err != ErrHandled {
+	if err := c.Set(t.Context(), "app", "default", "E", "", false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "Empty value") {
@@ -371,11 +372,11 @@ func TestSetStdinAndErrors(t *testing.T) {
 	}
 
 	errOut.Reset()
-	if err := c.Set(t.Context(), "", "default", "K", "v", false); err != ErrHandled || !strings.Contains(errOut.String(), "Secret --name is required") {
+	if err := c.Set(t.Context(), "", "default", "K", "v", false); !errors.Is(err, ErrHandled) || !strings.Contains(errOut.String(), "Secret --name is required") {
 		t.Fatalf("name check: %v %s", err, errOut.String())
 	}
 	errOut.Reset()
-	if err := c.Set(t.Context(), "app", "default", "", "v", false); err != ErrHandled || !strings.Contains(errOut.String(), "Key argument is required") {
+	if err := c.Set(t.Context(), "app", "default", "", "v", false); !errors.Is(err, ErrHandled) || !strings.Contains(errOut.String(), "Key argument is required") {
 		t.Fatalf("key check: %v %s", err, errOut.String())
 	}
 }
@@ -429,7 +430,7 @@ func TestSetEncryptOnlyThatFile(t *testing.T) {
 
 func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 	c, _, errOut := testEnv(t)
-	if err := c.Set(t.Context(), "app", "default", "KEY", "v", true); err != ErrHandled {
+	if err := c.Set(t.Context(), "app", "default", "KEY", "v", true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "No .sops.yaml found — run: lo secrets init") {
@@ -544,7 +545,7 @@ func TestEncryptNameFilter(t *testing.T) {
 
 	// A name that matches NOTHING fails loudly.
 	errOut.Reset()
-	if err := c.Encrypt("alphaa"); err != ErrHandled {
+	if err := c.Encrypt("alphaa"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "no cache files for Secret 'alphaa' in") {
@@ -553,7 +554,7 @@ func TestEncryptNameFilter(t *testing.T) {
 
 	// A name that could escape the store is rejected.
 	errOut.Reset()
-	if err := c.Encrypt("../../etc"); err != ErrHandled {
+	if err := c.Encrypt("../../etc"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "invalid --name '../../etc' — a Secret name is [a-zA-Z0-9][a-zA-Z0-9._-]*") {
@@ -595,7 +596,7 @@ func TestDecryptIdentityErrors(t *testing.T) {
 	os.MkdirAll(c.Paths.Base+"/.secrets", 0o755)
 
 	// Missing SSH key.
-	if err := c.Decrypt(c.Paths.Base + "/no-key"); err != ErrHandled {
+	if err := c.Decrypt(c.Paths.Base + "/no-key"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "SSH private key not found: "+c.Paths.Base+"/no-key") {
@@ -607,7 +608,7 @@ func TestDecryptIdentityErrors(t *testing.T) {
 	canary := "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
 	badKey := c.Paths.Base + "/bad_key"
 	write(t, badKey, "-----BEGIN OPENSSH PRIVATE KEY-----\n"+canary+"\n-----END OPENSSH PRIVATE KEY-----\n")
-	if err := c.Decrypt(badKey); err != ErrHandled {
+	if err := c.Decrypt(badKey); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	// Exact stderr: the six ported [error] lines and nothing else (same
@@ -637,7 +638,7 @@ func TestAddKeyContainment(t *testing.T) {
 	keyPath := c.Paths.Base + "/private"
 	write(t, keyPath, "-----BEGIN OPENSSH PRIVATE KEY-----\n"+canary+"\n-----END OPENSSH PRIVATE KEY-----\n")
 
-	if err := c.AddKey(keyPath, false, false); err != ErrHandled {
+	if err := c.AddKey(keyPath, false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	combined := out.String() + errOut.String()
@@ -755,7 +756,7 @@ func TestPrintGolden(t *testing.T) {
 	// only-one with multiple → error to stderr, green FULL paths to stdout.
 	out.Reset()
 	errOut.Reset()
-	if err := c.Print(t.Context(), []string{"app"}, true, false); err != ErrHandled {
+	if err := c.Print(t.Context(), []string{"app"}, true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "Multiple matches found:") {
@@ -769,7 +770,7 @@ func TestPrintGolden(t *testing.T) {
 	// from bash.
 	out.Reset()
 	errOut.Reset()
-	if err := c.Print(t.Context(), []string{"zzz"}, true, false); err != ErrHandled {
+	if err := c.Print(t.Context(), []string{"zzz"}, true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "Multiple matches found:") || out.String() != "" {
@@ -778,7 +779,7 @@ func TestPrintGolden(t *testing.T) {
 
 	// Zero matches → No matches found.
 	errOut.Reset()
-	if err := c.Print(t.Context(), []string{"zzz"}, false, false); err != ErrHandled {
+	if err := c.Print(t.Context(), []string{"zzz"}, false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "No matches found") {
@@ -813,7 +814,7 @@ func TestEnvGolden(t *testing.T) {
 	}
 
 	errOut.Reset()
-	if err := c.Env("nope", "default"); err != ErrHandled {
+	if err := c.Env("nope", "default"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "No cached keys for nope/default in "+store) {
@@ -821,7 +822,7 @@ func TestEnvGolden(t *testing.T) {
 	}
 
 	errOut.Reset()
-	if err := c.Env("", "default"); err != ErrHandled || !strings.Contains(errOut.String(), "Secret --name is required") {
+	if err := c.Env("", "default"); !errors.Is(err, ErrHandled) || !strings.Contains(errOut.String(), "Secret --name is required") {
 		t.Fatalf("name check: %v %s", err, errOut.String())
 	}
 }

@@ -8,6 +8,7 @@ package image
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -187,7 +188,7 @@ func TestCacheRefusesNonLoDriver(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeSpec(t, c, "kind: KubeOne\n")
 	err := c.Cache(context.Background(), "svc", false, false)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "error: domain 'dev.test' uses the 'kubeone' driver — the image cache is a 'lo'-driver (local cluster) feature.") {
@@ -201,7 +202,7 @@ func TestCacheEnvOverrideSkipsTheDriverGate(t *testing.T) {
 	runner.handler = yqPassthrough
 	t.Setenv("LOK8S_REGISTRY_IP_CACHE", "127.0.0.1:5001")
 	err := c.Cache(context.Background(), "", false, false)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	// Reaches the missing-service error, NOT the driver gate (issue #89's
@@ -215,7 +216,7 @@ func TestCacheUnresolvableIPNamesTheEscapeHatch(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeSpec(t, c, "kind: Lo\n")
 	err := c.Cache(context.Background(), "svc", false, false)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "cannot resolve the cache registry IP for domain 'dev.test' (spec.network unreadable?) — export LOK8S_REGISTRY_IP_CACHE=<ip> to override") {
@@ -229,7 +230,7 @@ func TestCachePinnedServiceErrors(t *testing.T) {
 	writeServices(t, c, "services:\n  svc:\n    image: busybox:1.36\n")
 	runner.handler = yqPassthrough
 	err := c.Cache(context.Background(), "svc", false, false)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "service 'svc' has an explicit 'image:' pin — there is nothing to cache, kind pulls it directly") {
@@ -246,7 +247,7 @@ func TestCacheMissingEndpointErrors(t *testing.T) {
 	writeServices(t, c, "services:\n  svc:\n    build: false\n")
 	runner.handler = yqPassthrough
 	err := c.Cache(context.Background(), "svc", false, false)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "service 'svc' has no registry.endpoint configured (set spec.registries.endpoint or services.svc.registry.endpoint)") {
@@ -260,7 +261,7 @@ func TestCacheInvalidParallelErrors(t *testing.T) {
 	writeServices(t, c, "registry:\n  parallel: many\n")
 	runner.handler = yqPassthrough
 	err := c.Cache(context.Background(), "svc", false, false)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "registry.parallel must be a non-negative integer, got: many") {
@@ -380,7 +381,7 @@ func TestCacheQueueFailureAggregation(t *testing.T) {
 		return nil
 	}
 	err := c.Cache(context.Background(), "", false, true)
-	if err != ErrHandled {
+	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v (a failed pull must fail the run)", err)
 	}
 	if !strings.Contains(errOut.String(), "image cache: 1/2 images failed: bad:v1") {
@@ -519,7 +520,7 @@ func TestListNonJSONBodyRefetchesAndPrintsRaw(t *testing.T) {
 func TestListRefusesNonLoDriverUnlessOverridden(t *testing.T) {
 	c, _, _, errOut := testCtx(t)
 	writeSpec(t, c, "kind: KubeOne\n")
-	if _, err := c.List(context.Background()); err != ErrHandled {
+	if _, err := c.List(context.Background()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(errOut.String(), "the image cache is a 'lo'-driver (local cluster) feature.") {
