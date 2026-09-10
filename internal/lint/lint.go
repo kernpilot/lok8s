@@ -21,9 +21,9 @@ import (
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
-// ErrPrinted marks an error whose message was already printed in the bash
+// ErrHandled marks an error whose message was already printed in the bash
 // implementation's own format ([error] … on stderr).
-var ErrPrinted = ui.ErrHandled // one sentinel for every package; see internal/ui
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Linter runs the lint checks against a resolved project layout.
 type Linter struct {
@@ -64,7 +64,7 @@ func (l *Linter) Run(domain string) error {
 
 	if errorCount != 0 {
 		ui.Errorf(l.ErrOut, "%d validation error(s)", errorCount)
-		return ErrPrinted
+		return ErrHandled
 	}
 	return nil
 }

@@ -30,14 +30,14 @@ func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
 		ui.Errorf(c.ErrOut, "SSH public key not found: %s", sshKey)
 		ui.Errorf(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	agePubkey, skipNote, err := deriveAgePublicKey(sshKey)
 	if err != nil && !errors.Is(err, errUnsupportedKey) {
 		ui.Errorf(c.ErrOut, "Failed to derive age public key from %s", sshKey)
 		ui.Errorf(c.ErrOut, "Only ed25519 SSH keys are supported")
-		return ErrPrinted
+		return ErrHandled
 	}
 	// bash leaves ssh-to-age's stderr uncontained here (public keys only —
 	// leaking a public key is not a leak); the CLI's "skipped key: …" note for
@@ -66,7 +66,7 @@ func (c *Context) Init(sshKey string) error {
 	// wrote `age: ''` and exited 0, leaving a .sops.yaml no encrypt can use.
 	if !agePubkeyRe.MatchString(agePubkey) {
 		ui.Errorf(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	content := `# SOPS encryption config for lok8s secret cache files.
@@ -134,7 +134,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		if !fsutil.IsRegular(key) {
 			ui.Errorf(c.ErrOut, "not an age key and not a readable file: %s", key)
 			ui.Errorf(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
-			return ErrPrinted
+			return ErrHandled
 		}
 		// Contained (bash: 2>/dev/null): the ssh-to-age binary echoes its
 		// ENTIRE input on failure, which for a mistakenly-passed PRIVATE key
@@ -145,7 +145,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		if err != nil && !errors.Is(err, errUnsupportedKey) {
 			ui.Errorf(c.ErrOut, "could not derive an age key from %s", key)
 			ui.Errorf(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
-			return ErrPrinted
+			return ErrHandled
 		}
 		// A parseable non-ed25519 key derives to "" (the binary's rc-0 skip)
 		// and is caught by the shape check below, matching bash.
@@ -157,13 +157,13 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// holds.
 	if !agePubkeyRe.MatchString(agePubkey) {
 		ui.Errorf(c.ErrOut, "not a valid age public key: %s", agePubkey)
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
 		ui.Errorf(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	raw, err := os.ReadFile(sopsConfig)
@@ -185,7 +185,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	}
 	if after < 1 {
 		ui.Errorf(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
-		return ErrPrinted
+		return ErrHandled
 	}
 	fmt.Fprintf(c.Out, "added recipient to .sops.yaml (%d creation rule(s))\n", before)
 	fmt.Fprintf(c.Out, "  %s\n", agePubkey)
@@ -210,7 +210,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	}
 	if len(stores) == 0 {
 		ui.Errorf(c.ErrOut, "no secret store found to re-key")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	orphans := 0
@@ -233,7 +233,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		ui.Errorf(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
 		ui.Errorf(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
 		ui.Errorf(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	rekeyed := 0
@@ -302,11 +302,11 @@ func appendRecipient(content, agePubkey string, before *int) (string, int) {
 func (c *Context) Set(ctx context.Context, name, namespace, key, value string, doEncrypt bool) error {
 	if name == "" {
 		ui.Errorf(c.ErrOut, "Secret --name is required")
-		return ErrPrinted
+		return ErrHandled
 	}
 	if key == "" {
 		ui.Errorf(c.ErrOut, "Key argument is required")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	if value == "-" {
@@ -338,7 +338,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 
 	if value == "" {
 		ui.Errorf(c.ErrOut, "Empty value")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	if err := c.ensureStore(); err != nil {
@@ -403,7 +403,7 @@ func (c *Context) encryptFile(plaintext string) error {
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
 		ui.Errorf(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
-		return ErrPrinted
+		return ErrHandled
 	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))
 	if err := sopsEncryptFile(sopsConfig, plaintext, plaintext+".enc"); err != nil {
@@ -411,7 +411,7 @@ func (c *Context) encryptFile(plaintext string) error {
 		// line; the library error stands in for it here.
 		fmt.Fprintln(c.ErrOut, err)
 		ui.Errorf(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
-		return ErrPrinted
+		return ErrHandled
 	}
 	return nil
 }
@@ -433,7 +433,7 @@ func (c *Context) Encrypt(name string) error {
 	// enforces.
 	if name != "" && !nameRe.MatchString(name) {
 		ui.Errorf(c.ErrOut, "invalid --name '%s' — a Secret name is [a-zA-Z0-9][a-zA-Z0-9._-]*", name)
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	secretsDir := c.StorePath()
@@ -449,7 +449,7 @@ func (c *Context) Encrypt(name string) error {
 
 	if !fsutil.IsRegular(c.sopsConfigPath()) {
 		ui.Errorf(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	// Cache files are Secret.<name>.<namespace>.<key>, so name anchors on the
@@ -498,7 +498,7 @@ func (c *Context) Encrypt(name string) error {
 		if name != "" {
 			ui.Errorf(c.ErrOut, "no cache files for Secret '%s' in %s", name, secretsDir)
 			ui.Errorf(c.ErrOut, "  expected %s/Secret.%s.<namespace>.<key>; check the name or run without --name to see the store", secretsDir, name)
-			return ErrPrinted
+			return ErrHandled
 		}
 		fmt.Fprintf(c.Out, "No plaintext secrets found in %s\n", secretsDir)
 	}
@@ -529,7 +529,7 @@ func (c *Context) Decrypt(sshKey string) error {
 	if ageKey == "" {
 		if !fsutil.IsRegular(sshKey) {
 			ui.Errorf(c.ErrOut, "SSH private key not found: %s", sshKey)
-			return ErrPrinted
+			return ErrHandled
 		}
 		derived, err := deriveAgePrivateKey(sshKey)
 		if err != nil {
@@ -541,7 +541,7 @@ func (c *Context) Decrypt(sshKey string) error {
 			ui.Errorf(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", sshKey)
 			ui.Errorf(c.ErrOut, "  chmod 600 ~/.config/sops/age/keys.txt")
 			ui.Errorf(c.ErrOut, "(you'll be prompted for the passphrase once)")
-			return ErrPrinted
+			return ErrHandled
 		}
 		ageKey = derived
 	}
@@ -577,7 +577,7 @@ func (c *Context) Decrypt(sshKey string) error {
 			// carries key material.
 			fmt.Fprintln(c.ErrOut, err)
 			ui.Errorf(c.ErrOut, "Failed to decrypt %s", base)
-			return ErrPrinted
+			return ErrHandled
 		}
 		if err := os.Chmod(plaintext, 0o600); err != nil {
 			return err

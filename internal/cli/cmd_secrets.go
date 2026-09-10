@@ -38,7 +38,7 @@ func defaultSSHKey() string {
 // secretsRun maps the secrets package's already-printed sentinel onto the cli
 // one.
 func secretsRun(err error) error {
-	if errors.Is(err, secrets.ErrPrinted) {
+	if errors.Is(err, secrets.ErrHandled) {
 		return ErrHandled
 	}
 	return err

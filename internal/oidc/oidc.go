@@ -30,9 +30,9 @@ import (
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
-// ErrPrinted marks an error whose message was already printed in the bash
+// ErrHandled marks an error whose message was already printed in the bash
 // implementation's own format ([error] … on stderr).
-var ErrPrinted = ui.ErrHandled // one sentinel for every package; see internal/ui
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // Env var names — exact spelling shared with the bash drivers' spec readers.
 const (
@@ -61,7 +61,7 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 	raw, err := os.ReadFile(clusterYAML)
 	if err != nil {
 		ui.Errorf(errOut, "oidc: cluster spec not found: %s", clusterYAML)
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	// Fail loud on a malformed spec here, instead of surfacing a raw parse
@@ -71,7 +71,7 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 	var root yaml.Node
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		ui.Errorf(errOut, "oidc: could not parse cluster spec: %s", clusterYAML)
-		return ErrPrinted
+		return ErrHandled
 	}
 	oidcNode := yqsem.Lookup(&root, "spec", "oidc")
 
@@ -92,7 +92,7 @@ func LoadSpec(clusterYAML string, errOut io.Writer) error {
 	// plain-http issuer silently.
 	if issuer := os.Getenv(EnvIssuer); issuer != "" && !strings.HasPrefix(issuer, "https://") {
 		ui.Errorf(errOut, "spec.oidc.issuer must be an https:// URL, got '%s'", issuer)
-		return ErrPrinted
+		return ErrHandled
 	}
 	return nil
 }

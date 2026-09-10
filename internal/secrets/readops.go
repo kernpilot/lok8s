@@ -164,12 +164,12 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 		for _, match := range matches {
 			fmt.Fprintf(c.Out, "%s%s%s\n", green, match, reset)
 		}
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	if len(matches) == 0 {
 		ui.Errorf(c.ErrOut, "No matches found")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	if toClipboard {
@@ -193,7 +193,7 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 			})
 		}
 		ui.Errorf(c.ErrOut, "No clipboard tool found")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	if len(matches) == 1 {
@@ -227,7 +227,7 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 func (c *Context) Env(name, namespace string) error {
 	if name == "" {
 		ui.Errorf(c.ErrOut, "Secret --name is required")
-		return ErrPrinted
+		return ErrHandled
 	}
 
 	secretsDir := c.StorePath()
@@ -248,7 +248,7 @@ func (c *Context) Env(name, namespace string) error {
 	}
 	if !found {
 		ui.Errorf(c.ErrOut, "No cached keys for %s/%s in %s", name, namespace, secretsDir)
-		return ErrPrinted
+		return ErrHandled
 	}
 	return nil
 }

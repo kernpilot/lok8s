@@ -40,10 +40,10 @@ import (
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// ErrPrinted marks an error whose message was already printed in the bash
+// ErrHandled marks an error whose message was already printed in the bash
 // implementation's own format ([error] … on stderr). Callers exit non-zero
-// without printing anything further (the cli layer maps it to ErrHandled).
-var ErrPrinted = ui.ErrHandled // one sentinel for every package; see internal/ui
+// without printing anything further.
+var ErrHandled = ui.ErrHandled // one sentinel for every package; see internal/ui
 
 // nameRe is the Secret --name allowlist. The name lands in a glob under the
 // store dir; a slash or .. would let it address files outside the store. Same
