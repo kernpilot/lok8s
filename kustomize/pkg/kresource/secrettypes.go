@@ -22,13 +22,13 @@ const (
 // requiredKeys maps each Secret type to the set of keys k8s requires
 // for that type. Opaque has no required keys (anything goes).
 var requiredKeys = map[string][]string{
-	SecretTypeOpaque:              nil,
-	SecretTypeServiceAccountToken: nil, // server-managed
-	SecretTypeDockerCfg:           {".dockercfg"},
-	SecretTypeDockerConfigJSON:    {".dockerconfigjson"},
-	SecretTypeBasicAuth:           {"username", "password"},
-	SecretTypeSSHAuth:             {"ssh-privatekey"},
-	SecretTypeTLS:                 {"tls.crt", "tls.key"},
+	SecretTypeOpaque:               nil,
+	SecretTypeServiceAccountToken:  nil, // server-managed
+	SecretTypeDockerCfg:            {".dockercfg"},
+	SecretTypeDockerConfigJSON:     {".dockerconfigjson"},
+	SecretTypeBasicAuth:            {"username", "password"},
+	SecretTypeSSHAuth:              {"ssh-privatekey"},
+	SecretTypeTLS:                  {"tls.crt", "tls.key"},
 	SecretTypeBootstrapTokenSecret: nil, // many optional fields
 }
 
