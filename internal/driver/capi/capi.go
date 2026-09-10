@@ -188,97 +188,14 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		d.infoLine("bootstrapping management cluster %s", mgmtDomain)
 		return d.Bootstrap(ctx, domain)
 	}
-	if !fsutil.FileExists(mgmtKubeconfig) {
-		if mgmtLocal == "true" {
-			// Cheap, self-contained model: a local kind cluster as the CAPI
-			// management cluster (real workload nodes still on the cloud
-			// provider).
-			if err := d.ensureLocalMgmt(ctx, mgmtDomain, provider); err != nil {
-				return err
-			}
-		} else {
-			ui.Errorf(stderr, "management cluster kubeconfig not found: %s", mgmtKubeconfig)
-			ui.Errorf(stderr, "provision it first ('lo provision %s'), or set spec.managementCluster.local: true", mgmtDomain)
-			return ui.Handled(fmt.Errorf("capi: management cluster kubeconfig not found: %s", mgmtKubeconfig))
-		}
-	}
-
-	// 4. Ensure the cluster namespace + credential Secret exist on the mgmt
-	// cluster. Guarded on BOTH: without the namespace the credential Secret
-	// and the CAPI resources land nowhere; without the credentials the
-	// apply below still SUCCEEDS — applying CAPI custom resources is only
-	// writing CRs — and then CAPH cannot authenticate to the provider, so
-	// no Machine is ever created. That failure surfaces, if at all, fifteen
-	// minutes later in WaitReady and is attributed to the wrong thing, on a
-	// cluster the operator was told was being provisioned.
-	//
-	// The namespace manifest is rendered into a variable rather than piped,
-	// so BOTH halves are checked: a `create … | apply` pipeline reports
-	// only the LAST command's status (the bash could not assume pipefail).
-	// Provider emptiness is checked HERE, not at detection: this is the
-	// first place an empty provider does damage, and checking earlier would
-	// pre-empt the "management cluster kubeconfig not found" diagnosis
-	// kind_contract_test.bats pins as the intended message. (The Go
-	// DetectProvider can no longer return empty-and-nil, but the guard is
-	// the incident record and stays.)
-	if provider == "" {
-		ui.Errorf(stderr, "could not detect the infrastructure provider from %s", cy)
-		return ui.Handled(fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy))
-	}
-
-	var nsManifest strings.Builder
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name: "kubectl",
-		Args: []string{
-			"--kubeconfig", mgmtKubeconfig, "create", "namespace", namespace,
-			"--dry-run=client", "-o", "yaml",
-		},
-		Stdout: &nsManifest,
-	}); err != nil {
-		return err
-	}
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name:   "kubectl",
-		Args:   []string{"--kubeconfig", mgmtKubeconfig, "apply", "-f", "-"},
-		Stdin:  strings.NewReader(nsManifest.String() + "\n"),
-		Stdout: stderr, // bash: … | kubectl apply -f - >&2
-	}); err != nil {
-		return err
-	}
-	if err := d.EnsureCredentialsSecret(ctx, cy, provider, mgmtKubeconfig); err != nil {
+	if err := d.ensureMgmt(ctx, mgmtDomain, mgmtKubeconfig, mgmtLocal, provider); err != nil {
 		return err
 	}
 
-	// 5. Generate + apply the CAPI resources. On a freshly-initialized
-	// management cluster the provider (CAPH) admission webhooks may still
-	// be wiring up cert injection when clusterctl init returns, so the
-	// first apply can fail with "connection refused" to the webhook
-	// service. Retry with backoff until they serve (apply is idempotent, so
-	// already-created objects are unchanged).
-	resources, err := d.Generate(cy, provider)
-	if err != nil {
+	// 4. + 5. The namespace, the credential Secret and the CAPI resources
+	// on the management cluster.
+	if err := d.applyResources(ctx, cy, provider, mgmtKubeconfig, namespace); err != nil {
 		return err
-	}
-	for applyTry := 1; ; applyTry++ {
-		err := d.deps.Runner.Run(ctx, execx.Cmd{
-			Name: "kubectl",
-			Args: []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", "-"},
-			// bash: -f <(echo "${resources}") — a process substitution; the
-			// Go port feeds stdin, same stream.
-			Stdin:  strings.NewReader(resources),
-			Stdout: stderr, // bash: >&2
-		})
-		if err == nil {
-			break
-		}
-		if applyTry == 10 {
-			ui.Errorf(stderr, "failed to apply CAPI resources after %d attempts (provider webhooks not ready?)", applyTry)
-			return ui.Handled(fmt.Errorf("capi: failed to apply CAPI resources after %d attempts", applyTry))
-		}
-		d.infoLine("apply failed — provider webhooks may still be starting; retry %d/10 in 15s", applyTry)
-		if err := d.sleepSeconds(ctx, 15); err != nil {
-			return err
-		}
 	}
 
 	// 6. Wait for the workload cluster to provision. Cloud nodes install
@@ -297,66 +214,13 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return ui.Handled(err)
 	}
 
-	// 7. Extract the workload kubeconfig under the cluster's metadata.name
-	// — the path the framework's bootstrap step (CNI + CCM) and the harness
-	// expect. The kubeconfig secret appears once the control plane is
-	// initialized, so retry briefly.
-	if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {
+	// 7. + 8. The workload kubeconfig, and its API server answering.
+	kc, err := d.extractWorkloadKubeconfig(ctx, mgmtKubeconfig, clusterName, namespace)
+	if err != nil {
 		return err
 	}
-	kc := d.kubeconfigPath(clusterName)
-	for i := 1; i <= 30; i++ {
-		var out strings.Builder
-		err := d.deps.Runner.Run(ctx, execx.Cmd{
-			Name: "clusterctl",
-			Args: []string{
-				"get", "kubeconfig", clusterName,
-				"--namespace", namespace,
-				"--kubeconfig", mgmtKubeconfig,
-			},
-			Stdout: &out,
-			Stderr: io.Discard, // bash: 2>/dev/null
-		})
-		// bash: `clusterctl … > "${kc}"` — the redirect truncates/writes the
-		// file on EVERY attempt, whatever the exit status.
-		if werr := writeKubeconfigFile(kc, out.String()); werr != nil {
-			return werr
-		}
-		if err == nil && out.Len() > 0 {
-			break
-		}
-		if err := d.sleepSeconds(ctx, 10); err != nil {
-			return err
-		}
-	}
-	if !fileNonEmpty(kc) {
-		ui.Errorf(stderr, "could not extract workload kubeconfig for %s", clusterName)
-		return ui.Handled(fmt.Errorf("capi: could not extract workload kubeconfig for %s", clusterName))
-	}
-
-	// 8. Wait for the workload API server to answer before the framework
-	// applies the CNI + CCM (the control-plane node still has to finish
-	// kubeadm init). Fail (so the harness tears down) if it never comes up
-	// — otherwise the framework would apply bootstrap addons against a dead
-	// cluster.
-	d.infoLine("waiting for the workload API server to become reachable")
-	reachable := false
-	for i := 1; i <= 60; i++ {
-		if err := d.deps.Runner.Run(ctx, execx.Cmd{
-			Name:   "kubectl",
-			Args:   []string{"--kubeconfig", kc, "get", "--raw=/readyz"},
-			Stdout: io.Discard, Stderr: io.Discard, // bash: &>/dev/null
-		}); err == nil {
-			reachable = true
-			break
-		}
-		if err := d.sleepSeconds(ctx, 10); err != nil {
-			return err
-		}
-	}
-	if !reachable {
-		ui.Errorf(stderr, "workload API server for %s did not become reachable", clusterName)
-		return ui.Handled(fmt.Errorf("capi: workload API server for %s did not become reachable", clusterName))
+	if err := d.waitReachable(ctx, kc, clusterName); err != nil {
+		return err
 	}
 	return nil
 }
@@ -598,6 +462,171 @@ func (d *Driver) kindClusterExists(ctx context.Context, name string) bool {
 		return false
 	}
 	return slices.Contains(strings.Split(out.String(), "\n"), name)
+}
+
+// ensureMgmt makes sure the management cluster's kubeconfig exists: a
+// local kind management cluster is created on demand
+// (spec.managementCluster.local), anything else must be provisioned
+// first.
+func (d *Driver) ensureMgmt(ctx context.Context, mgmtDomain, mgmtKubeconfig, mgmtLocal, provider string) error {
+	if fsutil.FileExists(mgmtKubeconfig) {
+		return nil
+	}
+	if mgmtLocal == "true" {
+		// Cheap, self-contained model: a local kind cluster as the CAPI
+		// management cluster (real workload nodes still on the cloud
+		// provider).
+		return d.ensureLocalMgmt(ctx, mgmtDomain, provider)
+	}
+	stderr := d.stderr()
+	ui.Errorf(stderr, "management cluster kubeconfig not found: %s", mgmtKubeconfig)
+	ui.Errorf(stderr, "provision it first ('lo provision %s'), or set spec.managementCluster.local: true", mgmtDomain)
+	return ui.Handled(fmt.Errorf("capi: management cluster kubeconfig not found: %s", mgmtKubeconfig))
+}
+
+// applyResources ensures the cluster namespace + credential Secret exist
+// on the management cluster, then generates and applies the CAPI
+// resources. Guarded on ALL of them: without the namespace the credential
+// Secret and the CAPI resources land nowhere; without the credentials the
+// apply still SUCCEEDS — applying CAPI custom resources is only writing
+// CRs — and then CAPH cannot authenticate to the provider, so no Machine
+// is ever created. That failure surfaces, if at all, fifteen minutes later
+// in WaitReady and is attributed to the wrong thing, on a cluster the
+// operator was told was being provisioned.
+//
+// The namespace manifest is rendered into a variable rather than piped,
+// so BOTH halves are checked: a `create … | apply` pipeline reports only
+// the LAST command's status (the bash could not assume pipefail).
+// Provider emptiness is checked HERE, not at detection: this is the first
+// place an empty provider does damage, and checking earlier would pre-empt
+// the "management cluster kubeconfig not found" diagnosis
+// kind_contract_test.bats pins as the intended message. (The Go
+// DetectProvider can no longer return empty-and-nil, but the guard is the
+// incident record and stays.)
+//
+// On a freshly-initialized management cluster the provider (CAPH)
+// admission webhooks may still be wiring up cert injection when
+// clusterctl init returns, so the first apply can fail with "connection
+// refused" to the webhook service. Retry with backoff until they serve
+// (apply is idempotent, so already-created objects are unchanged).
+func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfig, namespace string) error {
+	stderr := d.stderr()
+	if provider == "" {
+		ui.Errorf(stderr, "could not detect the infrastructure provider from %s", cy)
+		return ui.Handled(fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy))
+	}
+
+	var nsManifest strings.Builder
+	if err := d.deps.Runner.Run(ctx, execx.Cmd{
+		Name: "kubectl",
+		Args: []string{
+			"--kubeconfig", mgmtKubeconfig, "create", "namespace", namespace,
+			"--dry-run=client", "-o", "yaml",
+		},
+		Stdout: &nsManifest,
+	}); err != nil {
+		return err
+	}
+	if err := d.deps.Runner.Run(ctx, execx.Cmd{
+		Name:   "kubectl",
+		Args:   []string{"--kubeconfig", mgmtKubeconfig, "apply", "-f", "-"},
+		Stdin:  strings.NewReader(nsManifest.String() + "\n"),
+		Stdout: stderr, // bash: … | kubectl apply -f - >&2
+	}); err != nil {
+		return err
+	}
+	if err := d.EnsureCredentialsSecret(ctx, cy, provider, mgmtKubeconfig); err != nil {
+		return err
+	}
+
+	resources, err := d.Generate(cy, provider)
+	if err != nil {
+		return err
+	}
+	for applyTry := 1; ; applyTry++ {
+		err := d.deps.Runner.Run(ctx, execx.Cmd{
+			Name: "kubectl",
+			Args: []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", "-"},
+			// bash: -f <(echo "${resources}") — a process substitution; the
+			// Go port feeds stdin, same stream.
+			Stdin:  strings.NewReader(resources),
+			Stdout: stderr, // bash: >&2
+		})
+		if err == nil {
+			return nil
+		}
+		if applyTry == 10 {
+			ui.Errorf(stderr, "failed to apply CAPI resources after %d attempts (provider webhooks not ready?)", applyTry)
+			return ui.Handled(fmt.Errorf("capi: failed to apply CAPI resources after %d attempts", applyTry))
+		}
+		d.infoLine("apply failed — provider webhooks may still be starting; retry %d/10 in 15s", applyTry)
+		if err := d.sleepSeconds(ctx, 15); err != nil {
+			return err
+		}
+	}
+}
+
+// extractWorkloadKubeconfig writes the workload kubeconfig under the
+// cluster's metadata.name — the path the framework's bootstrap step (CNI +
+// CCM) and the harness expect. The kubeconfig secret appears once the
+// control plane is initialized, so it retries briefly.
+func (d *Driver) extractWorkloadKubeconfig(ctx context.Context, mgmtKubeconfig, clusterName, namespace string) (string, error) {
+	if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {
+		return "", err
+	}
+	kc := d.kubeconfigPath(clusterName)
+	for i := 1; i <= 30; i++ {
+		var out strings.Builder
+		err := d.deps.Runner.Run(ctx, execx.Cmd{
+			Name: "clusterctl",
+			Args: []string{
+				"get", "kubeconfig", clusterName,
+				"--namespace", namespace,
+				"--kubeconfig", mgmtKubeconfig,
+			},
+			Stdout: &out,
+			Stderr: io.Discard, // bash: 2>/dev/null
+		})
+		// bash: `clusterctl … > "${kc}"` — the redirect truncates/writes the
+		// file on EVERY attempt, whatever the exit status.
+		if werr := writeKubeconfigFile(kc, out.String()); werr != nil {
+			return "", werr
+		}
+		if err == nil && out.Len() > 0 {
+			break
+		}
+		if err := d.sleepSeconds(ctx, 10); err != nil {
+			return "", err
+		}
+	}
+	if !fileNonEmpty(kc) {
+		ui.Errorf(d.stderr(), "could not extract workload kubeconfig for %s", clusterName)
+		return "", ui.Handled(fmt.Errorf("capi: could not extract workload kubeconfig for %s", clusterName))
+	}
+	return kc, nil
+}
+
+// waitReachable waits for the workload API server to answer before the
+// framework applies the CNI + CCM (the control-plane node still has to
+// finish kubeadm init). Fails (so the harness tears down) if it never
+// comes up — otherwise the framework would apply bootstrap addons against
+// a dead cluster.
+func (d *Driver) waitReachable(ctx context.Context, kc, clusterName string) error {
+	d.infoLine("waiting for the workload API server to become reachable")
+	for i := 1; i <= 60; i++ {
+		if err := d.deps.Runner.Run(ctx, execx.Cmd{
+			Name:   "kubectl",
+			Args:   []string{"--kubeconfig", kc, "get", "--raw=/readyz"},
+			Stdout: io.Discard, Stderr: io.Discard, // bash: &>/dev/null
+		}); err == nil {
+			return nil
+		}
+		if err := d.sleepSeconds(ctx, 10); err != nil {
+			return err
+		}
+	}
+	ui.Errorf(d.stderr(), "workload API server for %s did not become reachable", clusterName)
+	return ui.Handled(fmt.Errorf("capi: workload API server for %s did not become reachable", clusterName))
 }
 
 // ensureLocalMgmt ports capi::ensure_local_mgmt: create (or reuse) a LOCAL

@@ -207,10 +207,30 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return err
 	}
 
-	// Kind cluster.
-	// Guarded AND checked for emptiness: this is issue #91's own shape — an
-	// unguarded assignment whose failure leaves the variable empty, and the
-	// empty value then flows into `kind create --config <(echo "")`.
+	if err := d.createKindCluster(ctx, clusterName, k8sVersion, network, cy, stdout, stderr); err != nil {
+		return err
+	}
+	if err := d.clusterServices(ctx, domain, clusterName, cy, stdout, stderr); err != nil {
+		return err
+	}
+
+	// If registry TLS is on (default) but the dev CA isn't trusted yet,
+	// nudge the user to `lo trust` — host `docker push` validates against
+	// it. Advisory only — deliberately NOT able to fail the provision: not
+	// trusting the dev CA is a host-setup nag, not a failed provision. The
+	// explicit `return nil` below is the Go spelling of the bash `return 0`
+	// that stops the nudge's status from becoming this function's verdict.
+	d.registriesTLSNudge(ctx, stderr)
+	return nil
+}
+
+// createKindCluster renders the kind config and creates the cluster when
+// it does not exist yet, then attaches the nodes to the registry network
+// on a shared cluster. Guarded AND checked for emptiness: this is issue
+// #91's own shape — an unguarded assignment whose failure leaves the
+// variable empty, and the empty value then flows into `kind create
+// --config <(echo "")`.
+func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion, network, cy string, stdout, stderr io.Writer) error {
 	renderedConfig := d.renderKindConfig(clusterName, k8sVersion, network, cy)
 	if strings.TrimSpace(renderedConfig) == "" {
 		ui.Errorf(stderr, "the kind config for %s rendered EMPTY — refusing to create a cluster from it", clusterName)
@@ -237,15 +257,18 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 			return err
 		}
 	}
-
 	if d.isShared() {
-		if err := d.connectNodesToRegistryNetwork(ctx, clusterName); err != nil {
-			return err
-		}
+		return d.connectNodesToRegistryNetwork(ctx, clusterName)
 	}
+	return nil
+}
 
-	// Cluster services — each wrapped in a named, collapsing progress
-	// phase. (Called for its side effect — writing the kubeconfig file; the
+// clusterServices runs the post-create steps on the cluster: the
+// kubeconfig extraction, the node-ip heal, the registry hosting and
+// configmap, coredns, and the remote expose — each wrapped in a named,
+// collapsing progress phase.
+func (d *Driver) clusterServices(ctx context.Context, domain, clusterName, cy string, stdout, stderr io.Writer) error {
+	// (Called for its side effect — writing the kubeconfig file; the
 	// returned path is the return value for Kubeconfig, discarded here.)
 	nodeKubeconfig, err := d.extractKubeconfig(ctx, domain, stderr)
 	if err != nil {
@@ -283,18 +306,8 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	}
 
 	if getenv("LOK8S_REMOTE_EXPOSE") == "true" {
-		if err := d.expose(ctx, clusterName, cy, stdout, stderr); err != nil {
-			return err
-		}
+		return d.expose(ctx, clusterName, cy, stdout, stderr)
 	}
-
-	// If registry TLS is on (default) but the dev CA isn't trusted yet,
-	// nudge the user to `lo trust` — host `docker push` validates against
-	// it. Advisory only — deliberately NOT able to fail the provision: not
-	// trusting the dev CA is a host-setup nag, not a failed provision. The
-	// explicit `return nil` below is the Go spelling of the bash `return 0`
-	// that stops the nudge's status from becoming this function's verdict.
-	d.registriesTLSNudge(ctx, stderr)
 	return nil
 }
 

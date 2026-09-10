@@ -189,33 +189,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 
 	deps := d.newDeps()
 	if !bootstrapOnly {
-		// Provider loading rules (review A1: provider loading belongs to
-		// the dispatch, not behind --remote):
-		//   - lo: only relevant with --remote (provision a cloud VM that
-		//     runs kind); plain local runs ignore it.
-		//   - every other driver (kubeone, capi, kkp): load whenever
-		//     spec.provider.name is set — these target real infrastructure.
-		loadProvider := kind != "lo" || d.Remote
-		if loadProvider {
-			if name := ReadProviderName(clusterYAML); name != "" {
-				cfg, cleanup, err := WriteProviderConfig(clusterYAML, stderr)
-				if err != nil {
-					return err
-				}
-				if cleanup != nil {
-					defer cleanup()
-				}
-				prov, err := d.loadProvider(ctx, name)
-				if err != nil {
-					return err
-				}
-				if err := prov.Validate(ctx, cfg); err != nil {
-					ui.Errorf(stderr, "Provider '%s' validation failed", name)
-					return ui.Handled(fmt.Errorf("provider %s validation failed: %w", name, err))
-				}
-				deps.Provider, deps.ProviderName, deps.ProviderConfigFile = prov, name, cfg
-				ui.Debugf(stderr, "Provider '%s' loaded and validated", name)
-			}
+		cleanup, err := d.loadSpecProvider(ctx, kind, clusterYAML, deps)
+		if err != nil {
+			return err
+		}
+		if cleanup != nil {
+			defer cleanup()
 		}
 	}
 
@@ -226,19 +205,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 	}
 
 	if bootstrapOnly {
-		// Re-apply spec.bootstrap on an ALREADY-provisioned cluster: skip
-		// the provider reconcile + driver provision, fall through to the
-		// shared bootstrap tail.
-		bkc := specMetadataName(clusterYAML)
-		if bkc == "" {
-			ui.Errorf(stderr, "--bootstrap: cluster spec has no metadata.name (%s)", clusterYAML)
-			return ui.Handled(fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML))
+		if err := d.bootstrapOnlyGuard(clusterYAML, domainName); err != nil {
+			return err
 		}
-		if !fsutil.FileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
-			ui.Errorf(stderr, "--bootstrap needs an existing cluster (no .kubeconfig/%s.yaml — run a full 'lo provision' first)", bkc)
-			return ui.Handled(fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc))
-		}
-		ui.Debugf(stderr, "Re-applying spec.bootstrap on %s (skipping infra reconcile)", domainName)
 	} else {
 		ui.Debugf(stderr, "Provisioning %s with kind=%s", domainName, kind)
 		if err := drv.Provision(ctx, domainName); err != nil {
@@ -259,6 +228,66 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 			}
 		}
 	}
+	return d.runTail(ctx, drv, domainName, clusterYAML, bootstrapOnly)
+}
+
+// loadSpecProvider loads and validates the spec's provider into deps for
+// the provision path. Provider loading rules (review A1: provider loading
+// belongs to the dispatch, not behind --remote):
+//   - lo: only relevant with --remote (provision a cloud VM that runs
+//     kind); plain local runs ignore it.
+//   - every other driver (kubeone, capi, kkp): load whenever
+//     spec.provider.name is set — these target real infrastructure.
+//
+// cleanup removes an inline-config temp file (nil otherwise).
+func (d *Dispatcher) loadSpecProvider(ctx context.Context, kind, clusterYAML string, deps *driver.Deps) (cleanup func(), err error) {
+	stderr := d.errWriter()
+	if kind == "lo" && !d.Remote {
+		return nil, nil
+	}
+	name := ReadProviderName(clusterYAML)
+	if name == "" {
+		return nil, nil
+	}
+	cfg, cleanup, err := WriteProviderConfig(clusterYAML, stderr)
+	if err != nil {
+		return nil, err
+	}
+	prov, err := d.loadProvider(ctx, name)
+	if err != nil {
+		return cleanup, err
+	}
+	if err := prov.Validate(ctx, cfg); err != nil {
+		ui.Errorf(stderr, "Provider '%s' validation failed", name)
+		return cleanup, ui.Handled(fmt.Errorf("provider %s validation failed: %w", name, err))
+	}
+	deps.Provider, deps.ProviderName, deps.ProviderConfigFile = prov, name, cfg
+	ui.Debugf(stderr, "Provider '%s' loaded and validated", name)
+	return cleanup, nil
+}
+
+// bootstrapOnlyGuard is the --bootstrap precondition: re-apply
+// spec.bootstrap on an ALREADY-provisioned cluster, skipping the provider
+// reconcile + driver provision, then fall through to the shared tail.
+func (d *Dispatcher) bootstrapOnlyGuard(clusterYAML, domainName string) error {
+	stderr := d.errWriter()
+	bkc := specMetadataName(clusterYAML)
+	if bkc == "" {
+		ui.Errorf(stderr, "--bootstrap: cluster spec has no metadata.name (%s)", clusterYAML)
+		return ui.Handled(fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML))
+	}
+	if !fsutil.FileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
+		ui.Errorf(stderr, "--bootstrap needs an existing cluster (no .kubeconfig/%s.yaml — run a full 'lo provision' first)", bkc)
+		return ui.Handled(fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc))
+	}
+	ui.Debugf(stderr, "Re-applying spec.bootstrap on %s (skipping infra reconcile)", domainName)
+	return nil
+}
+
+// runTail is the shared post-provision tail: Export → LOK8S_BOOTSTRAP_ONLY
+// → kubehz registration → bootstrap → inventory (fail-soft) → gitops.
+func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName, clusterYAML string, bootstrapOnly bool) error {
+	stderr := d.errWriter()
 
 	// Export: spec-derived env for spec.bootstrap addons. Runs on BOTH
 	// paths — full provision AND --bootstrap — so a re-applied bootstrap

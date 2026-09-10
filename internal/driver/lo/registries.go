@@ -479,7 +479,18 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 
 	_ = d.runQuiet(ctx, "docker", "volume", "create", regName)
 	_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
+	return d.startRegistry(ctx, out, errOut, regName, regNetwork, ip, configPath, desiredHash, verb, tlsMountArgs, rf)
+}
 
+// startRegistry runs the registry container, with one bounded retry for
+// a transiently-held address: the endpoint of the container just removed
+// can lag its release. A PERSISTENT holder should be impossible on a
+// range-reserved network (registryNetwork recreates legacy ones) — if one
+// appears anyway, fail loudly with the holder named rather than shuffling
+// someone else's container.
+func (d *Driver) startRegistry(ctx context.Context, out, errOut io.Writer,
+	regName, regNetwork, ip, configPath, desiredHash, verb string,
+	tlsMountArgs []string, rf *RegistryFile) error {
 	runErr := ""
 	for attempt := 1; attempt <= 2; attempt++ {
 		args := []string{"run", "-d", "--restart=always", "--name", regName,
@@ -504,45 +515,40 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 		// creates it even when the start fails, and a stuck-Created
 		// container shadows the name on the next attempt.
 		_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
-		if attempt == 2 {
+		if attempt == 2 || !strings.Contains(strings.ToLower(runErr), "address already in use") {
 			break
 		}
-		// One bounded retry for a transiently-held address: the endpoint of
-		// the container we just removed can lag its release. A PERSISTENT
-		// holder should be impossible on a range-reserved network
-		// (registryNetwork recreates legacy ones) — if one appears anyway,
-		// fail loudly with the holder named rather than shuffling someone
-		// else's container.
-		if strings.Contains(strings.ToLower(runErr), "address already in use") {
-			holder := d.registryIPHolder(ctx, regNetwork, ip)
-			if holder != "" {
-				fmt.Fprintf(errOut, "error: registry/%s: %s is held by '%s' on '%s'.\n", regName, ip, holder, regNetwork)
-				if regNetwork == rf.Network.Name {
-					// Shared net: recreating it (which reserves the dynamic
-					// range) is always the fix — clean detaches any holder.
-					fmt.Fprintln(errOut, "error: recreate the shared network: lo registry clean --shared && lo up")
-				} else {
-					// Project net (legacy, created before its reserved
-					// range): the holder is almost always a kind node that
-					// grabbed the address after a host reboot. Detaching a
-					// live node changes its address (lo up heals the node-ip
-					// afterwards); recreating the cluster rebuilds the
-					// network WITH the range.
-					fmt.Fprintf(errOut, "error: a kind node likely grabbed this address after a reboot — run: docker network disconnect -f %s %s && lo up\n", regNetwork, holder)
-					fmt.Fprintf(errOut, "error: (or recreate the cluster — 'lo down && lo up' — to rebuild '%s' with its reserved dynamic range)\n", regNetwork)
-				}
-				return ui.Handled(fmt.Errorf("registry %s address %s squatted by %s", regName, ip, holder))
-			}
-			if err := d.sleepSeconds(ctx, 1); err != nil {
-				return err
-			}
-		} else {
-			break
+		if holder := d.registryIPHolder(ctx, regNetwork, ip); holder != "" {
+			return d.squattedAddress(errOut, regName, regNetwork, ip, holder, rf)
+		}
+		if err := d.sleepSeconds(ctx, 1); err != nil {
+			return err
 		}
 	}
 
 	fmt.Fprintf(errOut, "error: registry/%s: %s\n", regName, runErr)
 	return ui.Handled(fmt.Errorf("registry %s failed to start", regName))
+}
+
+// squattedAddress reports a registry address held by another container,
+// with the fix for the network it sits on.
+func (d *Driver) squattedAddress(errOut io.Writer, regName, regNetwork, ip, holder string, rf *RegistryFile) error {
+	fmt.Fprintf(errOut, "error: registry/%s: %s is held by '%s' on '%s'.\n", regName, ip, holder, regNetwork)
+	if regNetwork == rf.Network.Name {
+		// Shared net: recreating it (which reserves the dynamic
+		// range) is always the fix — clean detaches any holder.
+		fmt.Fprintln(errOut, "error: recreate the shared network: lo registry clean --shared && lo up")
+	} else {
+		// Project net (legacy, created before its reserved
+		// range): the holder is almost always a kind node that
+		// grabbed the address after a host reboot. Detaching a
+		// live node changes its address (lo up heals the node-ip
+		// afterwards); recreating the cluster rebuilds the
+		// network WITH the range.
+		fmt.Fprintf(errOut, "error: a kind node likely grabbed this address after a reboot — run: docker network disconnect -f %s %s && lo up\n", regNetwork, holder)
+		fmt.Fprintf(errOut, "error: (or recreate the cluster — 'lo down && lo up' — to rebuild '%s' with its reserved dynamic range)\n", regNetwork)
+	}
+	return ui.Handled(fmt.Errorf("registry %s address %s squatted by %s", regName, ip, holder))
 }
 
 // applyLocalRegistryHosting applies the KEP-1755 local-registry-hosting
