@@ -538,6 +538,35 @@ func TestHandoverWritersRejectInjection(t *testing.T) {
 
 // ── preseed ──────────────────────────────────────────────
 
+func TestHandoverPreseedVerifiesTheHostKey(t *testing.T) {
+	// The PKI must never go to a host whose key is unverified: every ssh
+	// and scp runs with StrictHostKeyChecking=accept-new and a real
+	// known_hosts file, never /dev/null.
+	ho := newHandover(t)
+	ho.mockNodeBinaries(nil)
+	mustOK(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: "/tmp/kh"}), ho.output())
+	for _, l := range ho.calls {
+		if !strings.HasPrefix(l, "ssh ") && !strings.HasPrefix(l, "scp ") {
+			continue
+		}
+		if !strings.Contains(l, "StrictHostKeyChecking=accept-new") || strings.Contains(l, "UserKnownHostsFile=/dev/null") {
+			t.Fatalf("host key not verified: %s", l)
+		}
+		if !strings.Contains(l, "UserKnownHostsFile=/tmp/kh") {
+			t.Fatalf("--known-hosts not passed: %s", l)
+		}
+	}
+	// Without the flag ssh's own known_hosts is used: no UserKnownHostsFile at all.
+	ho = newHandover(t)
+	ho.mockNodeBinaries(nil)
+	mustOK(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}), ho.output())
+	for _, l := range ho.calls {
+		if (strings.HasPrefix(l, "ssh ") || strings.HasPrefix(l, "scp ")) && strings.Contains(l, "UserKnownHostsFile") {
+			t.Fatalf("default run must leave the known_hosts file to ssh: %s", l)
+		}
+	}
+}
+
 func TestHandoverPreseedTransfersSixFilesWithImmediateChmod(t *testing.T) {
 	ho := newHandover(t)
 	ho.mockNodeBinaries(nil)

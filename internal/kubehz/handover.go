@@ -55,6 +55,11 @@ type PreseedOpts struct {
 	User   string
 	Port   int
 	SSHKey string
+	// KnownHosts is the known_hosts file ssh and scp verify the node's
+	// host key against ("" = ssh's default, ~/.ssh/known_hosts). A node
+	// seen for the first time is recorded (StrictHostKeyChecking
+	// accept-new); a changed key fails the transfer.
+	KnownHosts string
 }
 
 // resolveBundle ports handover::resolve_bundle: a directory is used as-is;
@@ -764,9 +769,17 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		return err
 	}
 
+	// The bash sent the PKI with `StrictHostKeyChecking=no` and
+	// `UserKnownHostsFile=/dev/null`: any host that answered on the address
+	// got the CA private keys. This is a deliberate deviation: the host key
+	// is recorded on first contact and verified after that, against a real
+	// known_hosts file.
 	sshOpts := []string{
-		"-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
 		"-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+	}
+	if o.KnownHosts != "" {
+		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts)
 	}
 	if o.SSHKey != "" {
 		sshOpts = append(sshOpts, "-i", o.SSHKey)
@@ -781,6 +794,7 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	// umask 077 → the pki dir is 0700 from the start.
 	if err := ssh("umask 077 && mkdir -p /etc/kubernetes/pki"); err != nil {
 		c.errorf("handover: cannot reach %s over SSH", target)
+		c.errorf("handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
 		return ErrHandled
 	}
 	// Per-file transfer with an IMMEDIATE per-key chmod.

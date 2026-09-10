@@ -361,9 +361,10 @@ func newKubehzHandoverPreseed(paths *config.Paths) *cobra.Command {
 			user, _ := cmd.Flags().GetString("user")
 			port, _ := cmd.Flags().GetInt("port")
 			sshKey, _ := cmd.Flags().GetString("ssh-key")
+			knownHosts, _ := cmd.Flags().GetString("known-hosts")
 			ambientMainEnv(cmd, paths)
 			return kubehzRun(kubehzContext(cmd, paths).HandoverPreseed(cmd.Context(), kubehz.PreseedOpts{
-				Bundle: bundle, Node: node, User: user, Port: port, SSHKey: sshKey,
+				Bundle: bundle, Node: node, User: user, Port: port, SSHKey: sshKey, KnownHosts: knownHosts,
 			}))
 		},
 	}
@@ -373,5 +374,6 @@ func newKubehzHandoverPreseed(paths *config.Paths) *cobra.Command {
 	f.StringP("user", "u", "root", "SSH user")
 	f.IntP("port", "p", 22, "SSH port")
 	f.StringP("ssh-key", "i", "", "SSH private key file")
+	f.String("known-hosts", "", "known_hosts file for the node's host key (default: ssh's own); a new host is recorded, a changed key fails")
 	return c
 }
