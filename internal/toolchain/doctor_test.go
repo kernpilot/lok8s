@@ -1,6 +1,7 @@
 package toolchain
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -50,7 +51,7 @@ func TestDoctorFullyProvisionedCore(t *testing.T) {
 		}
 		return v, nil
 	}
-	checks := Doctor(DoctorOptions{Base: base, Bin: bin, PluginHome: home, LoVersion: "0.3.0", Probe: probe})
+	checks := Doctor(context.Background(), DoctorOptions{Base: base, Bin: bin, PluginHome: home, LoVersion: "0.3.0", Probe: probe})
 	if got := statuses(checks); got != "ok ok ok ok" {
 		t.Fatalf("statuses = %s\n%+v", got, checks)
 	}
@@ -83,7 +84,7 @@ func TestDoctorMismatchAndMissing(t *testing.T) {
 		return "", errors.New("unexpected")
 	}
 	// core: missing tools are fatal.
-	checks := Doctor(DoctorOptions{Base: base, Bin: bin, PluginHome: home, LoVersion: "0.3.0", Probe: probe, PATH: "/nonexistent"})
+	checks := Doctor(context.Background(), DoctorOptions{Base: base, Bin: bin, PluginHome: home, LoVersion: "0.3.0", Probe: probe, PATH: "/nonexistent"})
 	if got := statuses(checks); got != "bad warn bad warn" {
 		t.Fatalf("core statuses = %s\n%+v", got, checks)
 	}
@@ -100,7 +101,7 @@ func TestDoctorMismatchAndMissing(t *testing.T) {
 		t.Errorf("secret line: %s", checks[3].Msg)
 	}
 	// lo-full: the render tools are optional → warnings only.
-	checks = Doctor(DoctorOptions{Base: base, Bin: bin, PluginHome: home, LoVersion: "0.3.0", Probe: probe, PATH: "/nonexistent", Full: true})
+	checks = Doctor(context.Background(), DoctorOptions{Base: base, Bin: bin, PluginHome: home, LoVersion: "0.3.0", Probe: probe, PATH: "/nonexistent", Full: true})
 	if got := statuses(checks); got != "bad warn warn warn" {
 		t.Fatalf("full statuses = %s\n%+v", got, checks)
 	}
@@ -115,7 +116,7 @@ func TestDoctorFindsKustomizeOnPATH(t *testing.T) {
 	elsewhere := filepath.Join(t.TempDir(), "tools")
 	fakeTool(t, filepath.Join(elsewhere, "kustomize"))
 	probe := func(path string, args ...string) (string, error) { return KustomizeCLI, nil }
-	checks := Doctor(DoctorOptions{Base: base, Bin: bin, PluginHome: filepath.Join(base, ".kustomize"), LoVersion: "0.3.0", Probe: probe, PATH: elsewhere})
+	checks := Doctor(context.Background(), DoctorOptions{Base: base, Bin: bin, PluginHome: filepath.Join(base, ".kustomize"), LoVersion: "0.3.0", Probe: probe, PATH: elsewhere})
 	if checks[1].Status != OK || !strings.Contains(checks[1].Msg, elsewhere) {
 		t.Fatalf("PATH kustomize: %+v", checks[1])
 	}

@@ -102,35 +102,65 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag bool, out, stderr io.Writer) error {
 	r := execx.NewRunner(paths)
 	path := doctorPATH(paths)
-	fail := false
 
 	fmt.Fprintln(out, "=== lok8s doctor ===")
 	fmt.Fprintln(out)
 
+	// Each section reports whether a REQUIRED check failed; every failure
+	// keeps printing so the report is complete.
+	fail := !doctorRuntimeSection(ctx, r, path, out)
+	if !doctorToolsSection(ctx, r, path, out) {
+		fail = true
+	}
+	if !doctorEnvironmentSection(ctx, paths, path, toolchainFlag, out) {
+		fail = true
+	}
+	doctorTLSSection(ctx, r, path, d, out)
+	doctorDomainSection(paths, d, out)
+
+	// Provider / infrastructure diagnosis — advisory, never affects the exit
+	// code.
+	doctorProviderSection(ctx, r, paths, d, path, out, stderr)
+
+	fmt.Fprintln(out)
+	if fail {
+		ui.Errorf(stderr, "doctor: missing required prerequisites (see ✗ above)")
+		return ErrHandled
+	}
+	fmt.Fprintln(out, "doctor: all required checks passed.")
+	return nil
+}
+
+// doctorRuntimeSection is `--- runtime ---`. The bash doctor reports ITS
+// interpreter's BASH_VERSINFO. The Go binary has none, but the argsh side
+// of the toolchain still runs bash — report the bash the prepared PATH
+// resolves (the one the shim executes).
+func doctorRuntimeSection(ctx context.Context, r execx.Runner, path string, out io.Writer) bool {
 	fmt.Fprintln(out, "--- runtime ---")
-	// The bash doctor reports ITS interpreter's BASH_VERSINFO. The Go binary
-	// has none, but the argsh side of the toolchain still runs bash — report
-	// the bash the prepared PATH resolves (the one the shim executes).
-	if major, minor, ok := doctorBashVersion(ctx, r, path); ok {
-		bv := fmt.Sprintf("%d.%d", major, minor)
-		if major > 4 || (major == 4 && minor >= 3) {
-			doctorOK(out, "bash "+bv)
-		} else {
-			doctorBad(out, "bash "+bv+" — argsh needs >= 4.3 (macOS ships 3.2: brew install bash)")
-			fail = true
-		}
-	} else {
+	major, minor, ok := doctorBashVersion(ctx, r, path)
+	if !ok {
 		// Unreachable through the bash implementation (it IS bash); the Go
 		// binary can still diagnose the absence.
 		doctorBad(out, "bash MISSING (required) — argsh needs >= 4.3 (macOS ships 3.2: brew install bash)")
-		fail = true
+		return false
 	}
+	bv := fmt.Sprintf("%d.%d", major, minor)
+	if major > 4 || (major == 4 && minor >= 3) {
+		doctorOK(out, "bash "+bv)
+		return true
+	}
+	doctorBad(out, "bash "+bv+" — argsh needs >= 4.3 (macOS ships 3.2: brew install bash)")
+	return false
+}
 
+// doctorToolsSection is `--- tools ---`.
+func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io.Writer) bool {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- tools ---")
+	ok := true
 	for _, t := range doctorToolsPre {
 		if !doctorTool(out, path, t.name, t.required, t.purpose) {
-			fail = true
+			ok = false
 		}
 	}
 	if doctorTool(out, path, "envsubst", true, "variable substitution") {
@@ -140,14 +170,19 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 		// glance.
 		doctorOK(out, "envsubst flavor: "+doctorEnvsubstFlavor(ctx, r, path))
 	} else {
-		fail = true
+		ok = false
 	}
 	for _, t := range doctorToolsPost {
 		if !doctorTool(out, path, t.name, t.required, t.purpose) {
-			fail = true
+			ok = false
 		}
 	}
+	return ok
+}
 
+// doctorEnvironmentSection is `--- environment ---` plus the toolchain
+// section it decides on.
+func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path string, toolchainFlag bool, out io.Writer) bool {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- environment ---")
 	doctorDir(out, "PATH_BASE", paths.Base)
@@ -180,61 +215,55 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	doctorAssets(out, paths)
 
 	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
-		if !doctorToolchain(out, paths, pluginHome, path) {
-			fail = true
-		}
+		return doctorToolchain(ctx, out, paths, pluginHome, path)
 	}
+	return true
+}
 
+// doctorTLSSection is `--- dev TLS (cert: CA) ---` (advisory).
+func doctorTLSSection(ctx context.Context, r execx.Runner, path, d string, out io.Writer) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
-	if mkcert, ok := toolchain.LookPath(path, "mkcert"); ok {
-		caroot := doctorCommandOutput(ctx, r, mkcert, "-CAROOT")
-		if caroot != "" && fsutil.FileExists(filepath.Join(caroot, "rootCA.pem")) {
-			doctorOK(out, "local CA present ("+caroot+")")
-			dd := d
-			if dd == "" {
-				dd = "<domain>"
-			}
-			fmt.Fprintf(out, "    if *.%s TLS is rejected by your browser/curl, run: lo trust\n", dd)
-		} else {
-			doctorWarn(out, "no local CA yet — created on first cert: build, then trust it: lo trust")
-		}
-	} else {
+	mkcert, ok := toolchain.LookPath(path, "mkcert")
+	if !ok {
 		doctorWarn(out, "mkcert absent — only needed to TRUST the dev CA (lo trust), never to build")
+		return
 	}
+	caroot := doctorCommandOutput(ctx, r, mkcert, "-CAROOT")
+	if caroot == "" || !fsutil.FileExists(filepath.Join(caroot, "rootCA.pem")) {
+		doctorWarn(out, "no local CA yet — created on first cert: build, then trust it: lo trust")
+		return
+	}
+	doctorOK(out, "local CA present ("+caroot+")")
+	dd := d
+	if dd == "" {
+		dd = "<domain>"
+	}
+	fmt.Fprintf(out, "    if *.%s TLS is rejected by your browser/curl, run: lo trust\n", dd)
+}
 
+// doctorDomainSection is `--- domain ---` (advisory).
+func doctorDomainSection(paths *config.Paths, d string, out io.Writer) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- domain ---")
-	if d != "" {
-		spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
-		deploySpec := filepath.Join(paths.Clusters, d, "deploy.lok8s.yaml")
-		switch {
-		case fsutil.FileExists(spec):
-			kind, err := domain.SpecDriver(spec, "?")
-			if err != nil {
-				kind = "?"
-			}
-			doctorOK(out, "active: "+d+" (kind "+kind+")")
-		case fsutil.FileExists(deploySpec):
-			doctorOK(out, "active: "+d+" (Deploy -> "+deployClusterRef(deploySpec)+")")
-		default:
-			doctorWarn(out, "active domain '"+d+"' has no cluster.lok8s.yaml / deploy.lok8s.yaml")
-		}
-	} else {
+	if d == "" {
 		doctorWarn(out, "no active domain (run: lo use <domain>)")
+		return
 	}
-
-	// Provider / infrastructure diagnosis — advisory, never affects the exit
-	// code.
-	doctorProviderSection(ctx, r, paths, d, path, out, stderr)
-
-	fmt.Fprintln(out)
-	if fail {
-		ui.Errorf(stderr, "doctor: missing required prerequisites (see ✗ above)")
-		return ErrHandled
+	spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
+	deploySpec := filepath.Join(paths.Clusters, d, "deploy.lok8s.yaml")
+	switch {
+	case fsutil.FileExists(spec):
+		kind, err := domain.SpecDriver(spec, "?")
+		if err != nil {
+			kind = "?"
+		}
+		doctorOK(out, "active: "+d+" (kind "+kind+")")
+	case fsutil.FileExists(deploySpec):
+		doctorOK(out, "active: "+d+" (Deploy -> "+deployClusterRef(deploySpec)+")")
+	default:
+		doctorWarn(out, "active domain '"+d+"' has no cluster.lok8s.yaml / deploy.lok8s.yaml")
 	}
-	fmt.Fprintln(out, "doctor: all required checks passed.")
-	return nil
 }
 
 // doctorAssets is the eject-model summary line (Go-only): drift count,
@@ -276,12 +305,12 @@ func doctorAssets(w io.Writer, paths *config.Paths) {
 // the bash implementation (hack/parity-configure.sh diffs it strictly).
 // Returns false when a required tool is missing (lo core execs them;
 // lo-full only warns).
-func doctorToolchain(out io.Writer, paths *config.Paths, pluginHome, path string) bool {
+func doctorToolchain(ctx context.Context, out io.Writer, paths *config.Paths, pluginHome, path string) bool {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "--- toolchain (lo %s; pins: kustomize %s, khelm v%s, Secret %s) ---\n",
 		render.Variant(), toolchain.KustomizeCLI, toolchain.KhelmVersion, "v"+strings.TrimPrefix(assets.Version(), "v"))
 	ok := true
-	for _, c := range toolchain.Doctor(toolchain.DoctorOptions{
+	for _, c := range toolchain.Doctor(ctx, toolchain.DoctorOptions{
 		Base: paths.Base, Bin: paths.Bin, PluginHome: pluginHome, PATH: path,
 		LoVersion: assets.Version(), Full: render.InProcessAvailable(),
 	}) {

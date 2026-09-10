@@ -54,7 +54,7 @@ type DoctorOptions struct {
 	// (LO_RENDER=exec only), so their absence is a warning, not a failure.
 	Full bool
 	// Probe runs a tool and returns its stdout (the hermetic seam). Nil =
-	// Runner with a short timeout.
+	// Runner with a short timeout under the caller's context.
 	Probe func(path string, args ...string) (string, error)
 	// Runner runs the probes when Probe is nil. Nil = execx.NewRunner(nil)
 	// (the tools are probed at the resolved paths, never looked up).
@@ -64,52 +64,33 @@ type DoctorOptions struct {
 // Fix is the remedy every failed check names.
 const Fix = "fix: lo init toolchain"
 
-// Doctor runs the checks.
-func Doctor(o DoctorOptions) []Check {
-	prb := o.Probe
-	if prb == nil {
+// Doctor runs the checks. ctx bounds the probes (each gets ten seconds
+// under it).
+func Doctor(ctx context.Context, o DoctorOptions) []Check {
+	d := &doctor{o: o, probe: o.Probe}
+	if d.probe == nil {
 		r := o.Runner
 		if r == nil {
 			r = execx.NewRunner(nil)
 		}
-		prb = func(path string, args ...string) (string, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		d.probe = func(path string, args ...string) (string, error) {
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			return probe(ctx, r, path, args...)
 		}
-	}
-	var checks []Check
-	add := func(s Status, format string, a ...any) {
-		checks = append(checks, Check{Status: s, Msg: fmt.Sprintf(format, a...)})
-	}
-	// Absence of a render tool: fatal on core (it execs them), advisory on
-	// lo-full (in-process; the binaries only serve LO_RENDER=exec).
-	missing := func(what, path, note string) {
-		if o.Full {
-			add(Warn, "%s missing at %s (optional on lo-full: in-process render; LO_RENDER=exec needs it) — %s", what, config.RelTo(o.Base, path), Fix)
-			return
-		}
-		add(Bad, "%s missing at %s%s — %s", what, config.RelTo(o.Base, path), note, Fix)
-	}
-	versioned := func(what, path, got, want string) {
-		if got == want {
-			add(OK, "%s %s (%s)", what, got, config.RelTo(o.Base, path))
-			return
-		}
-		add(Warn, "%s %s at %s — expected %s (%s, then .bin/b install)", what, got, config.RelTo(o.Base, path), want, Fix)
 	}
 
 	// b itself.
 	bPath := filepath.Join(o.Bin, "b")
 	if isExecutable(bPath) {
-		v, err := prb(bPath, "--version")
+		v, err := d.probe(bPath, "--version")
 		if err != nil {
-			add(Warn, "b at %s (version unknown: %v)", config.RelTo(o.Base, bPath), err)
+			d.add(Warn, "b at %s (version unknown: %v)", config.RelTo(o.Base, bPath), err)
 		} else {
-			add(OK, "b %s (%s)", firstField(v), config.RelTo(o.Base, bPath))
+			d.add(OK, "b %s (%s)", firstField(v), config.RelTo(o.Base, bPath))
 		}
 	} else {
-		add(Bad, "b missing at %s — %s", config.RelTo(o.Base, bPath), Fix)
+		d.add(Bad, "b missing at %s — %s", config.RelTo(o.Base, bPath), Fix)
 	}
 
 	// kustomize: .bin first, then PATH — the exec render's own lookup.
@@ -121,37 +102,92 @@ func Doctor(o DoctorOptions) []Check {
 			kPath = ""
 		}
 	}
-	if kPath == "" {
-		missing("kustomize", filepath.Join(o.Bin, "kustomize"), " (lo core execs it for every render)")
-	} else if v, err := prb(kPath, "version"); err != nil {
-		add(Warn, "kustomize at %s (version unknown: %v)", config.RelTo(o.Base, kPath), err)
-	} else {
-		versioned("kustomize", kPath, firstField(v), KustomizeCLI)
-	}
+	d.checkTool(tool{
+		what: "kustomize", path: kPath, missingAt: filepath.Join(o.Bin, "kustomize"),
+		note: " (lo core execs it for every render)", versionArg: "version",
+		want: KustomizeCLI, version: firstField,
+	})
 
 	// khelm ChartRenderer: `<plugin> version` prints "2.8.0 (helm 3.21.2)".
 	crPath := filepath.Join(o.PluginHome, filepath.FromSlash(ChartRendererPluginRel))
-	if !isExecutable(crPath) {
-		missing("khelm ChartRenderer", crPath, " (the addons' Helm charts inflate through it)")
-	} else if v, err := prb(crPath, "version"); err != nil {
-		add(Warn, "khelm ChartRenderer at %s (version unknown: %v)", config.RelTo(o.Base, crPath), err)
-	} else {
-		versioned("khelm ChartRenderer", crPath, strings.TrimPrefix(firstField(v), "v"), KhelmVersion)
-	}
+	d.checkTool(tool{
+		what: "khelm ChartRenderer", path: crPath, missingAt: crPath,
+		note: " (the addons' Helm charts inflate through it)", versionArg: "version",
+		want: KhelmVersion, version: func(v string) string { return strings.TrimPrefix(firstField(v), "v") },
+	})
 
 	// The Secret generator: `<plugin> --version` prints the stamped
 	// version (lok8s ≥ the release that added the flag; older plugin
 	// builds treat the flag as a config path and fail).
 	sPath := filepath.Join(o.PluginHome, filepath.FromSlash(SecretPluginRel))
 	want := vPrefixed(o.LoVersion)
-	if !isExecutable(sPath) {
-		missing("secrets.lok8s.dev Secret", sPath, " (the Secret generator every render runs)")
-	} else if v, err := prb(sPath, "--version"); err != nil {
-		add(Warn, "secrets.lok8s.dev Secret at %s: version unknown (built before --version; expected %s) — %s", config.RelTo(o.Base, sPath), want, Fix)
-	} else {
-		versioned("secrets.lok8s.dev Secret", sPath, vPrefixed(firstField(v)), want)
+	d.checkTool(tool{
+		what: "secrets.lok8s.dev Secret", path: sPath, missingAt: sPath,
+		note: " (the Secret generator every render runs)", versionArg: "--version",
+		want: want, version: func(v string) string { return vPrefixed(firstField(v)) },
+		unknown: fmt.Sprintf("secrets.lok8s.dev Secret at %s: version unknown (built before --version; expected %s) — %s", config.RelTo(o.Base, sPath), want, Fix),
+	})
+	return d.checks
+}
+
+// doctor collects the checks of one run.
+type doctor struct {
+	o      DoctorOptions
+	probe  func(path string, args ...string) (string, error)
+	checks []Check
+}
+
+func (d *doctor) add(s Status, format string, a ...any) {
+	d.checks = append(d.checks, Check{Status: s, Msg: fmt.Sprintf(format, a...)})
+}
+
+// tool is one render tool to verify against its pin.
+type tool struct {
+	what string
+	// path is where the tool resolved ("" = not found); missingAt names
+	// the path the "missing" line reports.
+	path, missingAt string
+	// note is the core-only reason it is needed.
+	note string
+	// versionArg prints the version; version extracts the comparable
+	// version from that output.
+	versionArg string
+	version    func(out string) string
+	want       string
+	// unknown is the line for a failed version probe ("" = the generic
+	// "version unknown" line).
+	unknown string
+}
+
+// checkTool is the one check every render tool gets: absent → the missing
+// line (fatal on core, which execs them; advisory on lo-full, where the
+// binaries only serve LO_RENDER=exec); a failed probe → version unknown;
+// else the version against its pin.
+func (d *doctor) checkTool(t tool) {
+	rel := config.RelTo(d.o.Base, t.path)
+	if t.path == "" || !isExecutable(t.path) {
+		if d.o.Full {
+			d.add(Warn, "%s missing at %s (optional on lo-full: in-process render; LO_RENDER=exec needs it) — %s", t.what, config.RelTo(d.o.Base, t.missingAt), Fix)
+			return
+		}
+		d.add(Bad, "%s missing at %s%s — %s", t.what, config.RelTo(d.o.Base, t.missingAt), t.note, Fix)
+		return
 	}
-	return checks
+	v, err := d.probe(t.path, t.versionArg)
+	if err != nil {
+		if t.unknown != "" {
+			d.add(Warn, "%s", t.unknown)
+			return
+		}
+		d.add(Warn, "%s at %s (version unknown: %v)", t.what, rel, err)
+		return
+	}
+	got := t.version(v)
+	if got == t.want {
+		d.add(OK, "%s %s (%s)", t.what, got, rel)
+		return
+	}
+	d.add(Warn, "%s %s at %s — expected %s (%s, then .bin/b install)", t.what, got, rel, t.want, Fix)
 }
 
 func (o *DoctorOptions) path() string {

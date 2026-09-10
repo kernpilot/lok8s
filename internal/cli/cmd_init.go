@@ -6,7 +6,9 @@ package cli
 // implementation.
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,32 +98,10 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				name = args[0]
 			}
 			force, _ := cmd.Flags().GetBool("force")
-			groups, err := toolchain.NormalizeGroups(strings.Split(projectGroups, ","))
-			if err != nil {
-				return err
-			}
-			out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
-			tc := scaffold.ProjectToolchain{
-				Template: func(n string) string { return toolchainTemplate(n, groups) },
-				Env:      projectEnv,
-				BVersion: toolchain.BRelease.Version,
-			}
-			if !noToolchain {
-				tc.Bootstrap = func(dir string) error {
-					return toolchain.Bootstrap(cmd.Context(), toolchain.BootstrapOptions{
-						Base: dir, Bin: filepath.Join(dir, ".bin"), Out: out, Stderr: stderr,
-					})
-				}
-			}
-			// A NEW project is scaffolded where the user stands, never into the
-			// ambient project: with PATH_BASE exported (direnv/mise shells), the
-			// resolved base is whatever project that variable points at — a
-			// smoke run once wrote mise.toml into a live repo this way.
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			return scaffoldRun(scaffold.Project(cwd, name, projectPath, force, out, stderr, tc))
+			return runInitProject(cmd.Context(), initProjectOpts{
+				name: name, path: projectPath, groups: projectGroups, env: projectEnv,
+				force: force, noToolchain: noToolchain,
+			}, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the current project root)")
@@ -131,6 +111,41 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 	cmd.AddCommand(service, test, project, newInitToolchainCommand(paths))
 	return cmd
+}
+
+// initProjectOpts are `lo init project`'s flags after the parse.
+type initProjectOpts struct {
+	name, path, groups, env string
+	force, noToolchain      bool
+}
+
+// runInitProject scaffolds a project and installs its toolchain.
+func runInitProject(ctx context.Context, o initProjectOpts, out, stderr io.Writer) error {
+	groups, err := toolchain.NormalizeGroups(strings.Split(o.groups, ","))
+	if err != nil {
+		return err
+	}
+	tc := scaffold.ProjectToolchain{
+		Template: func(n string) string { return toolchainTemplate(n, groups) },
+		Env:      o.env,
+		BVersion: toolchain.BRelease.Version,
+	}
+	if !o.noToolchain {
+		tc.Bootstrap = func(dir string) error {
+			return toolchain.Bootstrap(ctx, toolchain.BootstrapOptions{
+				Base: dir, Bin: filepath.Join(dir, ".bin"), Out: out, Stderr: stderr,
+			})
+		}
+	}
+	// A NEW project is scaffolded where the user stands, never into the
+	// ambient project: with PATH_BASE exported (direnv/mise shells), the
+	// resolved base is whatever project that variable points at — a smoke
+	// run once wrote mise.toml into a live repo this way.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	return scaffoldRun(scaffold.Project(cwd, o.name, o.path, o.force, out, stderr, tc))
 }
 
 // setDebugFromVerbose exports DEBUG=1 for -v/--verbose, like the argsh

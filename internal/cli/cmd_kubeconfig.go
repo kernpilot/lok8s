@@ -222,10 +222,26 @@ func kubeconfigEmitOIDC(p *config.Paths, d, src string, out, stderr io.Writer) e
 		return ErrHandled
 	}
 
-	// Pull the cluster stanza from the source kubeconfig — reuse its server +
-	// CA verbatim so the OIDC kubeconfig talks to the exact same apiserver
-	// endpoint (bash: four independent `yq -r … // "" 2>/dev/null` reads; a
-	// parse failure reads as all-empty here as there).
+	cluster, ok := kubeconfigSourceCluster(src)
+	if !ok {
+		ui.Errorf(stderr, "could not read cluster server/name from %s", src)
+		return ErrHandled
+	}
+	writeOIDCKubeconfig(out, cluster, issuer, clientID)
+	return nil
+}
+
+// sourceCluster is the cluster stanza of the source kubeconfig.
+type sourceCluster struct {
+	name, server, caData, caFile string
+}
+
+// kubeconfigSourceCluster pulls the cluster stanza from the source
+// kubeconfig — its server + CA are reused verbatim so the OIDC kubeconfig
+// talks to the exact same apiserver endpoint (bash: four independent `yq
+// -r … // "" 2>/dev/null` reads; a parse failure reads as all-empty here
+// as there). ok=false without a name or a server.
+func kubeconfigSourceCluster(src string) (sourceCluster, bool) {
 	var doc struct {
 		Clusters []struct {
 			Name    string `yaml:"name"`
@@ -239,38 +255,38 @@ func kubeconfigEmitOIDC(p *config.Paths, d, src string, out, stderr io.Writer) e
 	if raw, err := os.ReadFile(src); err == nil {
 		_ = yaml.Unmarshal(raw, &doc)
 	}
-	var clusterName, server, caData, caFile string
+	var c sourceCluster
 	if len(doc.Clusters) > 0 {
-		clusterName = doc.Clusters[0].Name
-		server = doc.Clusters[0].Cluster.Server
-		caData = doc.Clusters[0].Cluster.CAData
-		caFile = doc.Clusters[0].Cluster.CAFile
+		c.name = doc.Clusters[0].Name
+		c.server = doc.Clusters[0].Cluster.Server
+		c.caData = doc.Clusters[0].Cluster.CAData
+		c.caFile = doc.Clusters[0].Cluster.CAFile
 	}
-	if clusterName == "" || server == "" {
-		ui.Errorf(stderr, "could not read cluster server/name from %s", src)
-		return ErrHandled
-	}
+	return c, c.name != "" && c.server != ""
+}
 
-	contextName := clusterName + "-oidc"
+// writeOIDCKubeconfig writes the OIDC kubeconfig: the cluster stanza
+// (inline CA data preferred, a CA file path as the fallback), the context,
+// and the kubelogin exec user.
+func writeOIDCKubeconfig(out io.Writer, c sourceCluster, issuer, clientID string) {
+	contextName := c.name + "-oidc"
 	const userName = "oidc"
 
-	// Header + cluster stanza. Prefer inline CA data; fall back to a CA file
-	// path.
 	fmt.Fprintln(out, "apiVersion: v1")
 	fmt.Fprintln(out, "kind: Config")
 	fmt.Fprintln(out, "clusters:")
-	fmt.Fprintf(out, "  - name: %s\n", clusterName)
+	fmt.Fprintf(out, "  - name: %s\n", c.name)
 	fmt.Fprintln(out, "    cluster:")
-	fmt.Fprintf(out, "      server: %s\n", server)
-	if caData != "" {
-		fmt.Fprintf(out, "      certificate-authority-data: %s\n", caData)
-	} else if caFile != "" {
-		fmt.Fprintf(out, "      certificate-authority: %s\n", caFile)
+	fmt.Fprintf(out, "      server: %s\n", c.server)
+	if c.caData != "" {
+		fmt.Fprintf(out, "      certificate-authority-data: %s\n", c.caData)
+	} else if c.caFile != "" {
+		fmt.Fprintf(out, "      certificate-authority: %s\n", c.caFile)
 	}
 	fmt.Fprintln(out, "contexts:")
 	fmt.Fprintf(out, "  - name: %s\n", contextName)
 	fmt.Fprintln(out, "    context:")
-	fmt.Fprintf(out, "      cluster: %s\n", clusterName)
+	fmt.Fprintf(out, "      cluster: %s\n", c.name)
 	fmt.Fprintf(out, "      user: %s\n", userName)
 	fmt.Fprintf(out, "current-context: %s\n", contextName)
 
@@ -299,5 +315,4 @@ func kubeconfigEmitOIDC(p *config.Paths, d, src string, out, stderr io.Writer) e
 	// a human-driven login. provideClusterInfo not needed (no cluster-info
 	// reliance).
 	fmt.Fprintln(out, "        interactiveMode: IfAvailable")
-	return nil
 }
