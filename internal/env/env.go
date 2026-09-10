@@ -146,7 +146,7 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	ui.Debugf(c.ErrOut, "Generate kustomization.yaml")
 
 	if !noBuild {
-		if err := c.buildArtifacts(); err != nil {
+		if err := c.buildArtifacts(ctx); err != nil {
 			return err
 		}
 	}
@@ -250,11 +250,11 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	return nil
 }
 
-func (c *Context) buildArtifacts() error {
+func (c *Context) buildArtifacts(ctx context.Context) error {
 	if c.BuildArtifacts != nil {
 		return c.BuildArtifacts()
 	}
-	return build.Artifacts(build.Options{
+	return build.Artifacts(ctx, build.Options{
 		Paths:         c.Paths,
 		Domain:        c.Domain,
 		SplitOverride: os.Getenv("LOK8S_BUILD_SPLIT"),

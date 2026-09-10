@@ -114,7 +114,7 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 			// --no-secrets rides through independent of the split trigger —
 			// it only shapes WHAT a split emits.
-			err := build.Artifacts(build.Options{
+			err := build.Artifacts(cmd.Context(), build.Options{
 				Paths:         paths,
 				Domain:        d,
 				SplitOverride: override,

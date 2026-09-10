@@ -9,12 +9,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 )
 
 // Status of one check.
@@ -54,8 +54,11 @@ type DoctorOptions struct {
 	// (LO_RENDER=exec only), so their absence is a warning, not a failure.
 	Full bool
 	// Probe runs a tool and returns its stdout (the hermetic seam). Nil =
-	// exec with a short timeout.
+	// Runner with a short timeout.
 	Probe func(path string, args ...string) (string, error)
+	// Runner runs the probes when Probe is nil. Nil = execx.NewRunner(nil)
+	// (the tools are probed at the resolved paths, never looked up).
+	Runner execx.Runner
 }
 
 // Fix is the remedy every failed check names.
@@ -65,10 +68,14 @@ const Fix = "fix: lo init toolchain"
 func Doctor(o DoctorOptions) []Check {
 	prb := o.Probe
 	if prb == nil {
+		r := o.Runner
+		if r == nil {
+			r = execx.NewRunner(nil)
+		}
 		prb = func(path string, args ...string) (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			return probe(ctx, path, args...)
+			return probe(ctx, r, path, args...)
 		}
 	}
 	var checks []Check
@@ -155,8 +162,8 @@ func (o *DoctorOptions) path() string {
 }
 
 // probe runs path args… and returns its trimmed stdout.
-func probe(ctx context.Context, path string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, path, args...).Output()
+func probe(ctx context.Context, r execx.Runner, path string, args ...string) (string, error) {
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: path, Args: args})
 	if err != nil {
 		return "", err
 	}

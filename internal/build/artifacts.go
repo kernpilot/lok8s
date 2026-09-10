@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -36,6 +37,9 @@ type Options struct {
 	// Stderr receives the human-facing stream (banner, [error]/[warn]/
 	// [debug] lines). Defaults to os.Stderr.
 	Stderr io.Writer
+	// Runner runs the split's yq and sops subprocesses. nil =
+	// execx.NewRunner(Paths); tests install a fake.
+	Runner execx.Runner
 }
 
 func (o *Options) stderr() io.Writer {
@@ -43,6 +47,13 @@ func (o *Options) stderr() io.Writer {
 		return o.Stderr
 	}
 	return os.Stderr
+}
+
+func (o *Options) runner() execx.Runner {
+	if o.Runner != nil {
+		return o.Runner
+	}
+	return execx.NewRunner(o.Paths)
 }
 
 // Artifacts builds the domain's composed artifact via kustomize alpha
@@ -63,7 +74,7 @@ func (o *Options) stderr() io.Writer {
 //
 // There is no per-target loop and no artifacts/<target>/ output: target
 // ordering and selection live in the domain kustomization the user authors.
-func Artifacts(o Options) error {
+func Artifacts(ctx context.Context, o Options) error {
 	stderr := o.stderr()
 	domainDir := filepath.Join(o.Paths.Clusters, o.Domain)
 
@@ -116,7 +127,7 @@ func Artifacts(o Options) error {
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 
-	rendered, err := runKustomize(context.Background(), o, domainDir, kubeconfig, stderr)
+	rendered, err := runKustomize(ctx, o, domainDir, kubeconfig, stderr)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		ui.Errorf(stderr, "kustomize build failed for %s", o.Domain)
@@ -209,7 +220,7 @@ func Artifacts(o Options) error {
 		}
 	}
 	if splitMode == "1" {
-		return Split(o)
+		return Split(ctx, o)
 	}
 	return nil
 }

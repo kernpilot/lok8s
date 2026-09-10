@@ -55,11 +55,11 @@ package build
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -107,7 +107,7 @@ type secretRef struct {
 
 // Split splits the built artifacts.yaml per-resource (bash: build::split;
 // honors Options.NoSecrets).
-func Split(o Options) error {
+func Split(ctx context.Context, o Options) error {
 	stderr := o.stderr()
 	domainDir := filepath.Join(o.Paths.Clusters, o.Domain)
 	artifact := filepath.Join(domainDir, "artifacts.yaml")
@@ -222,7 +222,7 @@ func Split(o Options) error {
 	// NON-Secret documents: one yq pass shapes Jobs + filters Secrets OUT, a
 	// second splits into <Kind>.<namespace>.<name>.yml under the tmp dir.
 	streamPath := filepath.Join(tmpDir, "nonsecret.stream")
-	if !yqOK || execToFile(yqPath, []string{"eval", shapeExpr, artifact}, "", streamPath, stderr) != nil {
+	if !yqOK || execToFile(ctx, o.runner(), yqPath, []string{"eval", shapeExpr, artifact}, "", streamPath, stderr) != nil {
 		ui.Errorf(stderr, "split: failed to shape %s", artifact)
 		return ErrHandled
 	}
@@ -234,11 +234,10 @@ func Split(o Options) error {
 			ui.Errorf(stderr, "split: failed to split %s", artifact)
 			return ErrHandled
 		}
-		cmd := exec.Command(yqPath, "-s", splitExpr, "-")
-		cmd.Dir = tmpDir
-		cmd.Stdin = streamFile
-		cmd.Stderr = stderr
-		runErr := cmd.Run()
+		runErr := o.runner().Run(ctx, execx.Cmd{
+			Name: yqPath, Args: []string{"-s", splitExpr, "-"}, Dir: tmpDir,
+			Stdin: streamFile, Stdout: io.Discard, Stderr: stderr,
+		})
 		_ = streamFile.Close()
 		if runErr != nil {
 			ui.Errorf(stderr, "split: failed to split %s", artifact)
@@ -297,7 +296,7 @@ func Split(o Options) error {
 			// Capture the fresh render into memory (never a plaintext file).
 			// Feeds both the change-detection compare and the encrypt.
 			selectExpr := fmt.Sprintf(`select(.kind == "Secret" and .metadata.name == "%s" and (.metadata.namespace // "") == "%s")`, name, ns)
-			freshOut, err := execCapture(yqPath, []string{"eval", selectExpr, artifact}, nil, stderr)
+			freshOut, err := execCapture(ctx, o.runner(), yqPath, []string{"eval", selectExpr, artifact}, nil, stderr)
 			if err != nil {
 				ui.Errorf(stderr, "split: failed to select Secret %s/%s", ns, name)
 				return ErrHandled
@@ -309,21 +308,23 @@ func Split(o Options) error {
 			// it already decrypts to this canonical plaintext (rationale in
 			// secretUnchanged); any decrypt failure / mismatch / missing
 			// prior falls through to encrypt.
-			if encryptOn == "change" && secretUnchanged(sopsPath, prior, fresh) {
+			if encryptOn == "change" && secretUnchanged(ctx, o.runner(), sopsPath, prior, fresh) {
 				if err := copyPreserving(prior, outfile); err != nil {
 					ui.Errorf(stderr, "split: failed to carry forward unchanged Secret %s/%s", ns, name)
 					return ErrHandled
 				}
 				ui.Debugf(stderr, "split: Secret %s/%s unchanged — kept existing ciphertext (encrypt.on=change)", ns, name)
 			} else {
-				cmd := exec.Command(sopsPath, "--config", sopsConfig, "encrypt",
-					"--input-type", "yaml", "--output-type", "yaml",
-					"--encrypted-regex", `^(data|stringData)$`,
-					"--filename-override", "secret.yaml",
-					"--output", outfile, "/dev/stdin")
-				cmd.Stdin = strings.NewReader(fresh)
-				cmd.Stderr = stderr
-				if err := cmd.Run(); err != nil {
+				encrypt := execx.Cmd{
+					Name: sopsPath,
+					Args: []string{"--config", sopsConfig, "encrypt",
+						"--input-type", "yaml", "--output-type", "yaml",
+						"--encrypted-regex", `^(data|stringData)$`,
+						"--filename-override", "secret.yaml",
+						"--output", outfile, "/dev/stdin"},
+					Stdin: strings.NewReader(fresh), Stdout: io.Discard, Stderr: stderr,
+				}
+				if err := o.runner().Run(ctx, encrypt); err != nil {
 					ui.Errorf(stderr, "split: sops encrypt failed for Secret %s/%s", ns, name)
 					return ErrHandled
 				}
@@ -488,7 +489,7 @@ func scanArtifact(artifact string) (int, []secretRef) {
 // not a formatting wobble). Decryption is decrypt-to-stdout only — plaintext
 // never touches disk (same guarantee as the encrypt path); the fresh render
 // stays in memory. Bash: build::_secret_unchanged.
-func secretUnchanged(sopsPath, priorFile, fresh string) bool {
+func secretUnchanged(ctx context.Context, r execx.Runner, sopsPath, priorFile, fresh string) bool {
 	// No prior, empty, or not sops-encrypted ⇒ cannot be "unchanged".
 	if !fileNonEmpty(priorFile) || !fileHasLinePrefix(priorFile, "sops:") {
 		return false
@@ -497,7 +498,7 @@ func secretUnchanged(sopsPath, priorFile, fresh string) bool {
 	// failure (missing key, wrong recipients, corrupt file) ⇒ fall back to
 	// encrypt. Stderr discarded: a decrypt error is EXPECTED in CI-like envs
 	// without the key — it's a signal to re-encrypt, not a build error.
-	decrypted, err := execCapture(sopsPath, []string{"decrypt", "--input-type", "yaml", "--output-type", "yaml", priorFile}, nil, io.Discard)
+	decrypted, err := execCapture(ctx, r, sopsPath, []string{"decrypt", "--input-type", "yaml", "--output-type", "yaml", priorFile}, nil, io.Discard)
 	if err != nil || len(decrypted) == 0 {
 		return false
 	}
@@ -565,31 +566,24 @@ func sortNode(n *yaml.Node) {
 }
 
 // execCapture runs a command, returning stdout; stderr goes to w.
-func execCapture(path string, args []string, stdin io.Reader, w io.Writer) ([]byte, error) {
-	cmd := exec.Command(path, args...)
-	if stdin != nil {
-		cmd.Stdin = stdin
-	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
+func execCapture(ctx context.Context, r execx.Runner, path string, args []string, stdin io.Reader, w io.Writer) ([]byte, error) {
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: path, Args: args, Stdin: stdin, Stderr: w})
+	if err != nil {
 		return nil, err
 	}
-	return out.Bytes(), nil
+	return out, nil
 }
 
 // execToFile runs a command with stdout redirected to outPath.
-func execToFile(path string, args []string, dir, outPath string, stderr io.Writer) error {
+func execToFile(ctx context.Context, r execx.Runner, path string, args []string, dir, outPath string, stderr io.Writer) error {
 	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(path, args...)
-	cmd.Dir = dir
-	cmd.Stdout = out
-	cmd.Stderr = stderr
-	runErr := cmd.Run()
+	runErr := r.Run(ctx, execx.Cmd{
+		Name: path, Args: args, Dir: dir,
+		Stdin: strings.NewReader(""), Stdout: out, Stderr: stderr,
+	})
 	// A close error on the written file is a lost write; report it when the
 	// command itself succeeded.
 	if err := out.Close(); err != nil && runErr == nil {

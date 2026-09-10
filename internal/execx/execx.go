@@ -13,10 +13,14 @@ import (
 
 // Look resolves tool to an executable path: $PATH_BIN/<tool> when present and
 // executable, else the first PATH hit. ok is false when the tool is nowhere.
+// A nil p skips the .bin step (PATH only — the runner for code that has no
+// project, like the toolchain doctor).
 func Look(p *config.Paths, tool string) (string, bool) {
-	candidate := filepath.Join(p.Bin, tool)
-	if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-		return candidate, true
+	if p != nil {
+		candidate := filepath.Join(p.Bin, tool)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, true
+		}
 	}
 	path, err := exec.LookPath(tool)
 	if err != nil {

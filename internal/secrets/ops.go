@@ -6,6 +6,7 @@ package secrets
 // (sops/ssh-to-age are libraries here) and are commented where they occur.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -298,7 +299,7 @@ func appendRecipient(content, agePubkey string, before *int) (string, int) {
 // value semantics mirror the argsh spec: a bare "-" reads stdin, an
 // empty/omitted value falls back to a silent tty prompt or piped stdin
 // (command-substitution semantics: trailing newlines stripped).
-func (c *Context) Set(name, namespace, key, value string, doEncrypt bool) error {
+func (c *Context) Set(ctx context.Context, name, namespace, key, value string, doEncrypt bool) error {
 	if name == "" {
 		ui.Errorf(c.ErrOut, "Secret --name is required")
 		return ErrPrinted
@@ -365,7 +366,7 @@ func (c *Context) Set(name, namespace, key, value string, doEncrypt bool) error 
 		if err := c.encryptFile(cacheFile); err != nil {
 			return err
 		}
-		c.liveDrift(name, namespace, key, value)
+		c.liveDrift(ctx, name, namespace, key, value)
 		fmt.Fprintf(c.Out, "Set + encrypted %s/%s/%s\n", name, namespace, key)
 		return nil
 	}
@@ -380,7 +381,7 @@ func (c *Context) Set(name, namespace, key, value string, doEncrypt bool) error 
 	if fsutil.IsRegular(c.sopsConfigPath()) {
 		ui.Warnf(c.ErrOut, "wrote plaintext cache only — no matching .enc for this value (missing or now stale); run 'lo secrets encrypt' or re-run with --encrypt/-e before committing")
 	}
-	c.liveDrift(name, namespace, key, value)
+	c.liveDrift(ctx, name, namespace, key, value)
 	fmt.Fprintf(c.Out, "Set %s/%s/%s\n", name, namespace, key)
 	return nil
 }

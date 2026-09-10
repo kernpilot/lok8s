@@ -6,8 +6,8 @@ package cli
 // version extraction, "present" when unparsable.
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
 	"regexp"
 
 	"github.com/spf13/cobra"
@@ -47,12 +47,13 @@ func newVersionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "%-11s %s\n", "lok8s", lok8sVersion(paths))
+			r := execx.NewRunner(paths)
 			for _, tool := range versionTools {
 				path, ok := execx.Look(paths, tool.name)
 				if !ok {
 					continue
 				}
-				fmt.Fprintf(out, "%-11s %s\n", tool.name, toolVersion(path, tool.args, tool.re))
+				fmt.Fprintf(out, "%-11s %s\n", tool.name, toolVersion(cmd.Context(), r, path, tool.args, tool.re))
 			}
 			return nil
 		},
@@ -69,8 +70,8 @@ func lok8sVersion(*config.Paths) string {
 
 // toolVersion runs the tool and extracts a best-effort version string,
 // "present" when unparsable (bash: version::_of).
-func toolVersion(path string, args []string, re *regexp.Regexp) string {
-	out, err := exec.Command(path, args...).Output()
+func toolVersion(ctx context.Context, r execx.Runner, path string, args []string, re *regexp.Regexp) string {
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: path, Args: args})
 	if err != nil && len(out) == 0 {
 		return "present"
 	}

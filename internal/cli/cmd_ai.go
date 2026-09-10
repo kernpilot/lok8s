@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -34,13 +35,7 @@ var runProcess = func(bin string, argv, env []string) int {
 	c := exec.Command(bin, argv[1:]...)
 	c.Env = env
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := c.Run(); err != nil {
-		if xe, ok := err.(*exec.ExitError); ok {
-			return xe.ExitCode()
-		}
-		return 1
-	}
-	return 0
+	return execx.ExitCode(c.Run())
 }
 
 // exitProcess is the process exit behind a seam for the rc passthroughs

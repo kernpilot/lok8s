@@ -15,11 +15,9 @@ package image
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -471,23 +469,6 @@ func (c *Context) docker(ctx context.Context, stdout, stderr io.Writer, args ...
 	return c.Runner.Run(ctx, execx.Cmd{Name: "docker", Args: args, Stdout: stdout, Stderr: stderr})
 }
 
-// exitCode maps a Runner error to the subprocess exit code (nil → 0, an
-// *exec.ExitError or anything with ExitCode() → its code, else 1).
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var xe *exec.ExitError
-	if errors.As(err, &xe) {
-		return xe.ExitCode()
-	}
-	var ce interface{ ExitCode() int }
-	if errors.As(err, &ce) {
-		return ce.ExitCode()
-	}
-	return 1
-}
-
 // List shows what's currently in the cache registry (bash: image::list).
 // The returned rc mirrors the bash function's exit status — notably curl's
 // own code (7 on connection-refused) when the endpoint is unreachable, which
@@ -532,7 +513,7 @@ func (c *Context) List(ctx context.Context) (int, error) {
 	if curlErr != nil || jqErr != nil {
 		refetchErr := c.Runner.Run(ctx, execx.Cmd{Name: "curl", Args: []string{"-s", catalogURL},
 			Stdout: c.Out, Stderr: c.ErrOut})
-		return exitCode(refetchErr), nil
+		return execx.ExitCode(refetchErr), nil
 	}
 	return 0, nil
 }

@@ -270,7 +270,7 @@ func newSecretsPrint(paths *config.Paths) *cobra.Command {
 			onlyOne, _ := cmd.Flags().GetBool("only-one")
 			copyFlag, _ := cmd.Flags().GetBool("copy")
 			ctx := secretsContext(cmd, paths, "", "")
-			return secretsRun(ctx.Print(args, onlyOne, copyFlag))
+			return secretsRun(ctx.Print(cmd.Context(), args, onlyOne, copyFlag))
 		},
 	}
 	c.Flags().BoolP("only-one", "o", false, "Only print one secret (error if multiple matches)")
@@ -329,7 +329,7 @@ func newSecretsSet(paths *config.Paths) *cobra.Command {
 				value = args[1]
 			}
 			ctx := secretsContext(cmd, paths, "", cluster)
-			return secretsRun(ctx.Set(name, namespace, args[0], value, encrypt || enc))
+			return secretsRun(ctx.Set(cmd.Context(), name, namespace, args[0], value, encrypt || enc))
 		},
 	}
 	setEnvFlags(c, true)

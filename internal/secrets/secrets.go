@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -67,6 +68,18 @@ type Context struct {
 	// (PATH_BASE/.kubeconfig/<cluster>.yaml) — the live-drift check's kubectl
 	// runs against exactly that file, never the caller's ambient KUBECONFIG.
 	Kubeconfig string
+
+	// Runner runs the two external tools this package still shells out to
+	// (kubectl for the live-drift check, the clipboard tool for print
+	// --copy). nil = execx.NewRunner(Paths); tests install a fake.
+	Runner execx.Runner
+}
+
+func (c *Context) runner() execx.Runner {
+	if c.Runner != nil {
+		return c.Runner
+	}
+	return execx.NewRunner(c.Paths)
 }
 
 // flatStore resolves the deprecated flat store the way bash does:

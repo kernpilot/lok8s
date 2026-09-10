@@ -30,11 +30,9 @@ package kapply
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -140,23 +138,6 @@ func (a *Applier) pollInterval() time.Duration {
 	return time.Second
 }
 
-// exitCode maps a Runner error to the subprocess exit code (nil → 0, an
-// *exec.ExitError or anything with ExitCode() → its code, else 1).
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var xe *exec.ExitError
-	if errors.As(err, &xe) {
-		return xe.ExitCode()
-	}
-	var ce interface{ ExitCode() int }
-	if errors.As(err, &ce) {
-		return ce.ExitCode()
-	}
-	return 1
-}
-
 // kubectl runs one kubectl invocation with combined stdout+stderr captured
 // (bash: `kubectl … 2>&1`), returning the output and the exit code.
 func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (string, int) {
@@ -166,7 +147,7 @@ func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (st
 		c.Stdin = strings.NewReader(stdin)
 	}
 	err := a.Runner.Run(ctx, c)
-	return buf.String(), exitCode(err)
+	return buf.String(), execx.ExitCode(err)
 }
 
 // kubectlQuiet runs kubectl with all output discarded (bash: &>/dev/null).
@@ -175,7 +156,7 @@ func (a *Applier) kubectlQuiet(ctx context.Context, stdin string, args ...string
 	if stdin != "" {
 		c.Stdin = strings.NewReader(stdin)
 	}
-	return exitCode(a.Runner.Run(ctx, c))
+	return execx.ExitCode(a.Runner.Run(ctx, c))
 }
 
 // applyPass is one server-side apply (bash: kapply::_apply_pass): collapse

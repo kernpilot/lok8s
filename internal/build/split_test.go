@@ -94,7 +94,7 @@ stringData:
 func runSplit(t *testing.T, p *config.Paths, noSecrets bool) (string, error) {
 	t.Helper()
 	var errBuf bytes.Buffer
-	err := Split(Options{Paths: p, Domain: "s.dev", NoSecrets: noSecrets, Stderr: &errBuf})
+	err := Split(t.Context(), Options{Paths: p, Domain: "s.dev", NoSecrets: noSecrets, Stderr: &errBuf})
 	return errBuf.String(), err
 }
 

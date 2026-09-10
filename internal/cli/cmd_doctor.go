@@ -14,10 +14,10 @@ package cli
 // through `lo`, so both implementations diagnose the same world.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -29,6 +29,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
@@ -87,7 +88,7 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			}
 			domainFlag, _ := cmd.Flags().GetString("domain")
 			d := domain.Resolve(domainFlag, paths.Clusters, stderr)
-			return runDoctor(paths, d, toolchainFlag, cmd.OutOrStdout(), stderr)
+			return runDoctor(cmd.Context(), paths, d, toolchainFlag, cmd.OutOrStdout(), stderr)
 		},
 	}
 	// Go-only: the pinned-toolchain section (b, kustomize, the khelm and
@@ -98,7 +99,8 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	return cmd
 }
 
-func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io.Writer) error {
+func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag bool, out, stderr io.Writer) error {
+	r := execx.NewRunner(paths)
 	path := doctorPATH(paths)
 	fail := false
 
@@ -109,7 +111,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 	// The bash doctor reports ITS interpreter's BASH_VERSINFO. The Go binary
 	// has none, but the argsh side of the toolchain still runs bash — report
 	// the bash the prepared PATH resolves (the one the shim executes).
-	if major, minor, ok := doctorBashVersion(path); ok {
+	if major, minor, ok := doctorBashVersion(ctx, r, path); ok {
 		bv := fmt.Sprintf("%d.%d", major, minor)
 		if major > 4 || (major == 4 && minor >= 3) {
 			doctorOK(out, "bash "+bv)
@@ -136,7 +138,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 		// what is on PATH and a native jq pass otherwise (template::envsubst)
 		// — report the flavor so a substitution surprise is diagnosable at a
 		// glance.
-		doctorOK(out, "envsubst flavor: "+doctorEnvsubstFlavor(path))
+		doctorOK(out, "envsubst flavor: "+doctorEnvsubstFlavor(ctx, r, path))
 	} else {
 		fail = true
 	}
@@ -186,7 +188,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
 	if mkcert, ok := toolchain.LookPath(path, "mkcert"); ok {
-		caroot := doctorCommandOutput(mkcert, "-CAROOT")
+		caroot := doctorCommandOutput(ctx, r, mkcert, "-CAROOT")
 		if caroot != "" && fsutil.FileExists(filepath.Join(caroot, "rootCA.pem")) {
 			doctorOK(out, "local CA present ("+caroot+")")
 			dd := d
@@ -224,7 +226,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit
 	// code.
-	doctorProviderSection(paths, d, path, out, stderr)
+	doctorProviderSection(ctx, r, paths, d, path, out, stderr)
 
 	fmt.Fprintln(out)
 	if fail {
@@ -347,12 +349,12 @@ var bashVersionRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)`)
 
 // doctorBashVersion reports the major.minor of the bash the prepared PATH
 // resolves (bash: BASH_VERSINFO of the running interpreter — same binary).
-func doctorBashVersion(path string) (int, int, bool) {
+func doctorBashVersion(ctx context.Context, r execx.Runner, path string) (int, int, bool) {
 	bash, ok := toolchain.LookPath(path, "bash")
 	if !ok {
 		return 0, 0, false
 	}
-	out, err := exec.Command(bash, "-c", `echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"`).Output()
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: bash, Args: []string{"-c", `echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"`}})
 	if err != nil {
 		return 0, 0, false
 	}
@@ -367,12 +369,12 @@ func doctorBashVersion(path string) (int, int, bool) {
 
 // doctorEnvsubstFlavor mirrors template::envsubst_flavor: "gnu" when
 // `envsubst --version` mentions GNU gettext, else "other".
-func doctorEnvsubstFlavor(path string) string {
+func doctorEnvsubstFlavor(ctx context.Context, r execx.Runner, path string) string {
 	envsubst, ok := toolchain.LookPath(path, "envsubst")
 	if !ok {
 		return "other"
 	}
-	out, _ := exec.Command(envsubst, "--version").Output()
+	out, _ := execx.Output(ctx, r, execx.Cmd{Name: envsubst, Args: []string{"--version"}})
 	if strings.Contains(string(out), "GNU gettext") {
 		return "gnu"
 	}
@@ -381,8 +383,8 @@ func doctorEnvsubstFlavor(path string) string {
 
 // doctorCommandOutput runs a command discarding stderr and trims trailing
 // newlines like a bash command substitution.
-func doctorCommandOutput(cmd string, args ...string) string {
-	out, err := exec.Command(cmd, args...).Output()
+func doctorCommandOutput(ctx context.Context, r execx.Runner, cmd string, args ...string) string {
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: cmd, Args: args})
 	if err != nil {
 		return ""
 	}
@@ -402,7 +404,7 @@ var providerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 // three commands that stays on the bash side by design. The Go side only
 // mirrors the bash short-circuits (spec present, spec.provider.name valid) so
 // the common no-provider case never spawns a shell.
-func doctorProviderSection(paths *config.Paths, d, path string, out, stderr io.Writer) {
+func doctorProviderSection(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, out, stderr io.Writer) {
 	if d == "" {
 		return
 	}
@@ -425,24 +427,27 @@ func doctorProviderSection(paths *config.Paths, d, path string, out, stderr io.W
 source "${PATH_BIN}/argsh"
 import ^libs/doctor
 doctor::_provider_section "${1}"`
-	cmd := exec.Command(bash, "-c", script, "lo-doctor-provider", d)
-	cmd.Dir = paths.Base
 	secretsVal := paths.SecretsEnv
 	if secretsVal == "" {
 		secretsVal = filepath.Join(paths.Base, ".secrets")
 	}
-	cmd.Env = append(os.Environ(),
-		"PATH="+path,
-		"PATH_BASE="+paths.Base,
-		"PATH_BIN="+paths.Bin,
-		"PATH_LOK8S="+paths.Lok8s,
-		"PATH_CLUSTERS="+paths.Clusters,
-		"PATH_SECRETS="+secretsVal,
-		"PATH_SCRIPTS="+paths.Lok8s,
-	)
-	cmd.Stdout = out
-	cmd.Stderr = stderr
-	_ = cmd.Run() // advisory: the bash section always returns 0 itself
+	// Advisory: the bash section always returns 0 itself. Stdin is closed
+	// (the child is a diagnosis, never a prompt).
+	_ = r.Run(ctx, execx.Cmd{
+		Name: bash,
+		Args: []string{"-c", script, "lo-doctor-provider", d},
+		Dir:  paths.Base,
+		Env: []string{
+			"PATH=" + path,
+			"PATH_BASE=" + paths.Base,
+			"PATH_BIN=" + paths.Bin,
+			"PATH_LOK8S=" + paths.Lok8s,
+			"PATH_CLUSTERS=" + paths.Clusters,
+			"PATH_SECRETS=" + secretsVal,
+			"PATH_SCRIPTS=" + paths.Lok8s,
+		},
+		Stdin: strings.NewReader(""), Stdout: out, Stderr: stderr,
+	})
 }
 
 // specProviderName reads .spec.provider.name from a cluster spec, "" when

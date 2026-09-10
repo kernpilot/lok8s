@@ -12,7 +12,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -43,8 +42,9 @@ func newTrustCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
+			r := execx.NewRunner(paths)
 			caroot := ""
-			if raw, err := exec.Command(mkcert, "-CAROOT").Output(); err == nil {
+			if raw, err := execx.Output(cmd.Context(), r, execx.Cmd{Name: mkcert, Args: []string{"-CAROOT"}}); err == nil {
 				caroot = strings.TrimRight(string(raw), "\n")
 			}
 			fmt.Fprintln(out, "Installing the local development CA into your system + browser trust stores.")
@@ -57,11 +57,11 @@ func newTrustCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			// `mkcert -install` creates the CA at CAROOT if absent, then installs
 			// it — the SAME CAROOT the cert: generator load-or-creates, so the two
 			// share one CA.
-			install := exec.Command(mkcert, "-install")
-			install.Stdout = out
-			install.Stderr = cmd.ErrOrStderr()
-			install.Stdin = os.Stdin
-			if err := install.Run(); err != nil {
+			install := execx.Cmd{
+				Name: mkcert, Args: []string{"-install"},
+				Stdin: os.Stdin, Stdout: out, Stderr: cmd.ErrOrStderr(),
+			}
+			if err := r.Run(cmd.Context(), install); err != nil {
 				ui.Error("mkcert -install failed")
 				return ErrHandled
 			}

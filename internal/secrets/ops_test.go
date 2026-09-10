@@ -317,7 +317,7 @@ func TestAddKeySkipOrphansRekeys(t *testing.T) {
 
 func TestSetWritesCache(t *testing.T) {
 	c, out, errOut := testEnv(t)
-	if err := c.Set("app", "default", "KEY", "literal-v", false); err != nil {
+	if err := c.Set(t.Context(), "app", "default", "KEY", "literal-v", false); err != nil {
 		t.Fatal(err)
 	}
 	cache := c.Paths.Base + "/.secrets/Secret.app.default.KEY"
@@ -341,7 +341,7 @@ func TestSetWritesCache(t *testing.T) {
 func TestSetStdinAndErrors(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	c.Stdin = strings.NewReader("piped-value\n\n")
-	if err := c.Set("app", "default", "P", "", false); err != nil {
+	if err := c.Set(t.Context(), "app", "default", "P", "", false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(c.Paths.Base + "/.secrets/Secret.app.default.P")
@@ -352,7 +352,7 @@ func TestSetStdinAndErrors(t *testing.T) {
 
 	// "-" reads stdin too (argsh :~stdin).
 	c.Stdin = strings.NewReader("dash-v\n")
-	if err := c.Set("app", "default", "D", "-", false); err != nil {
+	if err := c.Set(t.Context(), "app", "default", "D", "-", false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ = os.ReadFile(c.Paths.Base + "/.secrets/Secret.app.default.D")
@@ -363,7 +363,7 @@ func TestSetStdinAndErrors(t *testing.T) {
 	// Empty everything → Empty value.
 	c.Stdin = strings.NewReader("")
 	errOut.Reset()
-	if err := c.Set("app", "default", "E", "", false); err != ErrPrinted {
+	if err := c.Set(t.Context(), "app", "default", "E", "", false); err != ErrPrinted {
 		t.Fatalf("want ErrPrinted, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "Empty value") {
@@ -371,11 +371,11 @@ func TestSetStdinAndErrors(t *testing.T) {
 	}
 
 	errOut.Reset()
-	if err := c.Set("", "default", "K", "v", false); err != ErrPrinted || !strings.Contains(errOut.String(), "Secret --name is required") {
+	if err := c.Set(t.Context(), "", "default", "K", "v", false); err != ErrPrinted || !strings.Contains(errOut.String(), "Secret --name is required") {
 		t.Fatalf("name check: %v %s", err, errOut.String())
 	}
 	errOut.Reset()
-	if err := c.Set("app", "default", "", "v", false); err != ErrPrinted || !strings.Contains(errOut.String(), "Key argument is required") {
+	if err := c.Set(t.Context(), "app", "default", "", "v", false); err != ErrPrinted || !strings.Contains(errOut.String(), "Key argument is required") {
 		t.Fatalf("key check: %v %s", err, errOut.String())
 	}
 }
@@ -383,7 +383,7 @@ func TestSetStdinAndErrors(t *testing.T) {
 func TestSetWarnsWhenSopsConfigured(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	write(t, c.sopsConfigPath(), "")
-	if err := c.Set("app", "default", "KEY", "v", false); err != nil {
+	if err := c.Set(t.Context(), "app", "default", "KEY", "v", false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(errOut.String(), "wrote plaintext cache only — no matching .enc for this value (missing or now stale); run 'lo secrets encrypt' or re-run with --encrypt/-e before committing") {
@@ -401,7 +401,7 @@ func TestSetEncryptOnlyThatFile(t *testing.T) {
 	// plaintext-only (never a whole-store sweep).
 	write(t, c.Paths.Base+"/.secrets/Secret.other.default.SIB", "sib")
 
-	if err := c.Set("app", "default", "KEY", "round-trip-me", true); err != nil {
+	if err := c.Set(t.Context(), "app", "default", "KEY", "round-trip-me", true); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Set + encrypted app/default/KEY") {
@@ -429,7 +429,7 @@ func TestSetEncryptOnlyThatFile(t *testing.T) {
 
 func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 	c, _, errOut := testEnv(t)
-	if err := c.Set("app", "default", "KEY", "v", true); err != ErrPrinted {
+	if err := c.Set(t.Context(), "app", "default", "KEY", "v", true); err != ErrPrinted {
 		t.Fatalf("want ErrPrinted, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "No .sops.yaml found — run: lo secrets init") {
@@ -734,7 +734,7 @@ func TestPrintGolden(t *testing.T) {
 	write(t, store+"/Secret.app.default.ONE.enc", "x")
 
 	// Single match → raw cat, no decoration.
-	if err := c.Print([]string{"ONE"}, false, false); err != nil {
+	if err := c.Print(t.Context(), []string{"ONE"}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "raw-value" {
@@ -743,7 +743,7 @@ func TestPrintGolden(t *testing.T) {
 
 	// Multiple matches → green basename + content + two newlines each.
 	out.Reset()
-	if err := c.Print([]string{"app"}, false, false); err != nil {
+	if err := c.Print(t.Context(), []string{"app"}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	want := "\033[0;32mSecret.app.default.ML\033[0m\nline1\nline2\n\n" +
@@ -755,7 +755,7 @@ func TestPrintGolden(t *testing.T) {
 	// only-one with multiple → error to stderr, green FULL paths to stdout.
 	out.Reset()
 	errOut.Reset()
-	if err := c.Print([]string{"app"}, true, false); err != ErrPrinted {
+	if err := c.Print(t.Context(), []string{"app"}, true, false); err != ErrPrinted {
 		t.Fatalf("want ErrPrinted, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "Multiple matches found:") {
@@ -769,7 +769,7 @@ func TestPrintGolden(t *testing.T) {
 	// from bash.
 	out.Reset()
 	errOut.Reset()
-	if err := c.Print([]string{"zzz"}, true, false); err != ErrPrinted {
+	if err := c.Print(t.Context(), []string{"zzz"}, true, false); err != ErrPrinted {
 		t.Fatalf("want ErrPrinted, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "Multiple matches found:") || out.String() != "" {
@@ -778,7 +778,7 @@ func TestPrintGolden(t *testing.T) {
 
 	// Zero matches → No matches found.
 	errOut.Reset()
-	if err := c.Print([]string{"zzz"}, false, false); err != ErrPrinted {
+	if err := c.Print(t.Context(), []string{"zzz"}, false, false); err != ErrPrinted {
 		t.Fatalf("want ErrPrinted, got %v", err)
 	}
 	if !strings.Contains(errOut.String(), "No matches found") {
@@ -787,7 +787,7 @@ func TestPrintGolden(t *testing.T) {
 
 	// Patterns AND-match case-insensitively.
 	out.Reset()
-	if err := c.Print([]string{"ml", "APP"}, false, false); err != nil {
+	if err := c.Print(t.Context(), []string{"ml", "APP"}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "line1\nline2" {

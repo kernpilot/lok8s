@@ -6,6 +6,7 @@ package cli
 // generator, plus any project-local plugins under ./kustomize/).
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -46,14 +48,18 @@ func newKustomizeCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			Annotations:  map[string]string{AnnotationIdempotent: "true"},
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
-			RunE:         func(cmd *cobra.Command, _ []string) error { return kustomizeBuild(paths) },
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return kustomizeBuild(cmd.Context(), execx.NewRunner(paths), paths)
+			},
 		},
 		&cobra.Command{
 			Use: "test", Aliases: []string{"t"},
 			Short:        "Run plugin unit + integration tests",
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
-			RunE:         func(cmd *cobra.Command, _ []string) error { return kustomizeTest(paths) },
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return kustomizeTest(cmd.Context(), execx.NewRunner(paths), paths)
+			},
 		},
 		&cobra.Command{
 			Use:          "clean",
@@ -61,7 +67,9 @@ func newKustomizeCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			Annotations:  map[string]string{AnnotationDestructive: "true"},
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
-			RunE:         func(cmd *cobra.Command, _ []string) error { return kustomizeClean(paths) },
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return kustomizeClean(cmd.Context(), execx.NewRunner(paths), paths)
+			},
 		},
 		&cobra.Command{
 			Use: "list", Aliases: []string{"l"},
@@ -91,7 +99,7 @@ func kustomizeSources(paths *config.Paths) []string {
 	return sources
 }
 
-func kustomizeBuild(paths *config.Paths) error {
+func kustomizeBuild(ctx context.Context, r execx.Runner, paths *config.Paths) error {
 	if _, err := exec.LookPath("go"); err != nil {
 		ui.Error("go is not installed (run 'b install go' or use goenv)")
 		return ErrHandled
@@ -103,21 +111,21 @@ func kustomizeBuild(paths *config.Paths) error {
 	}
 	for _, s := range sources {
 		ui.Debug("kustomize: building %s -> %s/.kustomize", s, paths.Base)
-		if err := runMake(s, []string{"BIN_ROOT=" + filepath.Join(paths.Base, ".kustomize")}, "build"); err != nil {
+		if err := runMake(ctx, r, s, []string{"BIN_ROOT=" + filepath.Join(paths.Base, ".kustomize")}, "build"); err != nil {
 			return ErrHandled
 		}
 	}
 	return nil
 }
 
-func kustomizeTest(paths *config.Paths) error {
+func kustomizeTest(ctx context.Context, r execx.Runner, paths *config.Paths) error {
 	if _, err := exec.LookPath("go"); err != nil {
 		ui.Error("go is not installed")
 		return ErrHandled
 	}
 	failed := false
 	for _, s := range kustomizeSources(paths) {
-		if err := runMake(s, nil, "test"); err != nil {
+		if err := runMake(ctx, r, s, nil, "test"); err != nil {
 			failed = true
 		}
 	}
@@ -127,10 +135,10 @@ func kustomizeTest(paths *config.Paths) error {
 	return nil
 }
 
-func kustomizeClean(paths *config.Paths) error {
+func kustomizeClean(ctx context.Context, r execx.Runner, paths *config.Paths) error {
 	for _, s := range kustomizeSources(paths) {
 		// Best-effort, like the bash `|| true`.
-		_ = runMake(s, []string{"BIN_ROOT=" + filepath.Join(paths.Base, ".kustomize")}, "clean")
+		_ = runMake(ctx, r, s, []string{"BIN_ROOT=" + filepath.Join(paths.Base, ".kustomize")}, "clean")
 	}
 	return nil
 }
@@ -173,13 +181,11 @@ func kustomizeList(paths *config.Paths, cmd *cobra.Command) error {
 	return nil
 }
 
-func runMake(dir string, env []string, target string) error {
-	c := exec.Command("make", target)
-	c.Dir = dir
-	c.Env = append(os.Environ(), env...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
+func runMake(ctx context.Context, r execx.Runner, dir string, env []string, target string) error {
+	return r.Run(ctx, execx.Cmd{
+		Name: "make", Args: []string{target}, Dir: dir, Env: env,
+		Stdout: os.Stdout, Stderr: os.Stderr,
+	})
 }
 
 func contains(list []string, v string) bool {

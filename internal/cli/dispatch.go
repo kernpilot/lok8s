@@ -122,7 +122,7 @@ func wiredDrivers(paths *config.Paths, kc *kubehz.Context, loader *bridge.Loader
 			case *capi.Driver:
 				d.Hooks = kc.CapiHooks()
 			case *lodriver.Driver:
-				d.Hooks.KustomizeBuild = func(context.Context) error { return kustomizeBuild(paths) }
+				d.Hooks.KustomizeBuild = func(ctx context.Context) error { return kustomizeBuild(ctx, deps.Runner, paths) }
 			}
 			return drv, nil
 		}, true

@@ -8,12 +8,15 @@ package secrets
 // decrypt is).
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	sops "github.com/getsops/sops/v3"
 	"github.com/getsops/sops/v3/aes"
+	"github.com/getsops/sops/v3/age"
 	"github.com/getsops/sops/v3/cmd/sops/common"
 	sopsconfig "github.com/getsops/sops/v3/config"
 	"github.com/getsops/sops/v3/decrypt"
@@ -112,23 +115,62 @@ func DecryptYAMLFile(path string) ([]byte, error) {
 	return decrypt.File(path, "yaml")
 }
 
-// sopsDecryptData decrypts a binary-mode .enc payload with the given age
-// identity. The identity travels via SOPS_AGE_KEY for the duration of the
-// call — the same channel the bash implementation uses
-// (`SOPS_AGE_KEY=… sops decrypt …`), and the one the sops age keysource
-// checks first. Decrypt does NOT consult .sops.yaml (recipients live in the
-// file's own metadata).
-func sopsDecryptData(encBytes []byte, ageKey string) ([]byte, error) {
-	prev, had := os.LookupEnv("SOPS_AGE_KEY")
-	if err := os.Setenv("SOPS_AGE_KEY", ageKey); err != nil {
+// ageDecryptor is a local sops key service that decrypts age-wrapped data
+// keys with identities handed to it directly — the library's own channel
+// for injected identities (age.ParsedIdentities.ApplyToMasterKey), which
+// keeps the private key out of the process environment. The bash
+// implementation passed it as `SOPS_AGE_KEY=… sops decrypt …`; the stock
+// key service would read that same variable, so every other key type
+// falls through to it untouched.
+type ageDecryptor struct {
+	keyservice.Server
+	identities age.ParsedIdentities
+}
+
+func (d ageDecryptor) Decrypt(ctx context.Context, req *keyservice.DecryptRequest) (*keyservice.DecryptResponse, error) {
+	k, ok := req.Key.KeyType.(*keyservice.Key_AgeKey)
+	if !ok {
+		return d.Server.Decrypt(ctx, req)
+	}
+	key := age.MasterKey{Recipient: k.AgeKey.Recipient, EncryptedKey: string(req.Ciphertext)}
+	d.identities.ApplyToMasterKey(&key)
+	plaintext, err := key.Decrypt()
+	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if had {
-			os.Setenv("SOPS_AGE_KEY", prev)
-		} else {
-			os.Unsetenv("SOPS_AGE_KEY")
-		}
-	}()
-	return decrypt.Data(encBytes, "binary")
+	return &keyservice.DecryptResponse{Plaintext: plaintext}, nil
+}
+
+// sopsDecryptData decrypts a binary-mode .enc payload with the given age
+// identity (decrypt.Data with the identity injected instead of read from
+// SOPS_AGE_KEY). Decrypt does NOT consult .sops.yaml (recipients live in
+// the file's own metadata).
+func sopsDecryptData(encBytes []byte, ageKey string) ([]byte, error) {
+	var ids age.ParsedIdentities
+	if err := ids.Import(ageKey); err != nil {
+		return nil, err
+	}
+	store := binaryStore()
+	tree, err := store.LoadEncryptedFile(encBytes)
+	if err != nil {
+		return nil, err
+	}
+	svc := keyservice.NewCustomLocalClient(ageDecryptor{identities: ids})
+	dataKey, err := tree.Metadata.GetDataKeyWithKeyServices([]keyservice.KeyServiceClient{svc}, nil)
+	if err != nil {
+		return nil, err
+	}
+	cipher := aes.NewCipher()
+	mac, err := tree.Decrypt(dataKey, cipher)
+	if err != nil {
+		return nil, err
+	}
+	originalMac, err := cipher.Decrypt(tree.Metadata.MessageAuthenticationCode, dataKey, tree.Metadata.LastModified.Format(time.RFC3339))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt original mac: %w", err)
+	}
+	if originalMac != mac {
+		return nil, fmt.Errorf("failed to verify data integrity. expected mac %q, got %q", originalMac, mac)
+	}
+	return store.EmitPlainFile(tree.Branches)
 }

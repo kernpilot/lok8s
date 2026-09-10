@@ -148,7 +148,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 	rel := o.release()
 
 	if isExecutable(bPath) {
-		v, _ := probe(ctx, bPath, "--version")
+		v, _ := probe(ctx, execx.NewRunner(nil), bPath, "--version")
 		fmt.Fprintf(out, "  b present: %s %s\n", relOrAbs(o.Base, bPath), strings.TrimSpace(v))
 	} else {
 		goos, goarch := o.platform()

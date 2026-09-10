@@ -4,9 +4,9 @@ package secrets
 // secrets::allow/list/print/env).
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -127,9 +127,10 @@ func (c *Context) List() error {
 }
 
 // Print prints secret(s) whose basenames match every pattern
-// (case-insensitive, regex) (bash: secrets::print). copy implies onlyOne.
-func (c *Context) Print(patterns []string, onlyOne, copy bool) error {
-	if copy {
+// (case-insensitive, regex) (bash: secrets::print). toClipboard implies
+// onlyOne.
+func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipboard bool) error {
+	if toClipboard {
 		onlyOne = true
 	}
 
@@ -171,7 +172,7 @@ func (c *Context) Print(patterns []string, onlyOne, copy bool) error {
 		return ErrPrinted
 	}
 
-	if copy {
+	if toClipboard {
 		for _, tool := range [][]string{
 			{"pbcopy"},
 			{"xclip", "-selection", "clipboard"},
@@ -186,11 +187,10 @@ func (c *Context) Print(patterns []string, onlyOne, copy bool) error {
 			if err != nil {
 				return err
 			}
-			cmd := exec.Command(path, tool[1:]...)
-			cmd.Stdin = strings.NewReader(string(raw))
-			cmd.Stdout = c.Out
-			cmd.Stderr = c.ErrOut
-			return cmd.Run()
+			return c.runner().Run(ctx, execx.Cmd{
+				Name: path, Args: tool[1:],
+				Stdin: strings.NewReader(string(raw)), Stdout: c.Out, Stderr: c.ErrOut,
+			})
 		}
 		ui.Errorf(c.ErrOut, "No clipboard tool found")
 		return ErrPrinted

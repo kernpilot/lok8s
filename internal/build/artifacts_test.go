@@ -56,7 +56,7 @@ const twoDocRender = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n---
 func runArtifacts(t *testing.T, p *config.Paths) (string, error) {
 	t.Helper()
 	var errBuf bytes.Buffer
-	err := Artifacts(Options{Paths: p, Domain: "d.dev", SplitOverride: "0", Stderr: &errBuf})
+	err := Artifacts(t.Context(), Options{Paths: p, Domain: "d.dev", SplitOverride: "0", Stderr: &errBuf})
 	return errBuf.String(), err
 }
 

@@ -7,7 +7,6 @@ package tilt
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,23 +50,6 @@ type Context struct {
 	// nil → kapply.NewApplier(...).Preflight. Tests inject a recorder,
 	// mirroring the kapply::preflight stub in tilt_preflight_test.bats.
 	Preflighter func(ctx context.Context, manifest string, args ...string) error
-}
-
-// exitCode maps a Runner error to the subprocess exit code (nil → 0, an
-// *exec.ExitError or anything with ExitCode() → its code, else 1).
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var xe *exec.ExitError
-	if errors.As(err, &xe) {
-		return xe.ExitCode()
-	}
-	var ce interface{ ExitCode() int }
-	if errors.As(err, &ce) {
-		return ce.ExitCode()
-	}
-	return 1
 }
 
 // tiltfilePath is "${PATH_BASE}/Tiltfile" — plain concatenation, NOT a
@@ -265,7 +247,7 @@ func (c *Context) CI(ctx context.Context, timeout string) (int, error) {
 	// Foreground: tilt ci exits 0 only once all resources are ready,
 	// non-zero otherwise. Returning its status lets callers gate on it.
 	err := c.Runner.Run(ctx, execx.Cmd{Name: "tilt", Args: args, Stdout: c.Out, Stderr: c.ErrOut})
-	return exitCode(err), nil
+	return execx.ExitCode(err), nil
 }
 
 // pkillEscape escapes the path's regex metacharacters exactly like the bash
@@ -319,7 +301,7 @@ func (c *Context) Down(ctx context.Context, force bool) error {
 func (c *Context) Status(ctx context.Context) int {
 	err := c.Runner.Run(ctx, execx.Cmd{Name: "tilt", Args: []string{"doctor"},
 		Stdout: c.Out, Stderr: c.ErrOut})
-	return exitCode(err)
+	return execx.ExitCode(err)
 }
 
 // Restart restarts tilt (bash: tilt::restart — tilt::down; tilt::up).

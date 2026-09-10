@@ -36,27 +36,26 @@ package secrets
 // exported.
 
 import (
+	"context"
 	"encoding/base64"
-	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-func (c *Context) liveDrift(name, namespace, key, value string) {
+func (c *Context) liveDrift(ctx context.Context, name, namespace, key, value string) {
 	kubectl, ok := execx.Look(c.Paths, "kubectl")
 	if !ok {
 		return
 	}
 
-	ctx, err := c.kubectlOutput(kubectl, "config", "current-context")
+	kctx, err := c.kubectlOutput(ctx, kubectl, "config", "current-context")
 	if err != nil {
 		return
 	}
-	ctx = trimTrailingNewlines(ctx)
-	if ctx == "" {
+	kctx = trimTrailingNewlines(kctx)
+	if kctx == "" {
 		return
 	}
 
@@ -64,35 +63,35 @@ func (c *Context) liveDrift(name, namespace, key, value string) {
 	// `{.data.tls.crt}` form and would silently return empty — i.e. "no
 	// drift".
 	escaped := strings.ReplaceAll(key, ".", `\.`)
-	live, err := c.kubectlOutput(kubectl, "--request-timeout=5s", "get", "secret", name,
+	live, err := c.kubectlOutput(ctx, kubectl, "--request-timeout=5s", "get", "secret", name,
 		"--namespace", namespace,
 		"-o", "jsonpath={.data['"+escaped+"']}")
 	if err != nil {
 		return
 	}
 	if live == "" {
-		ui.Debug("no live %s/%s key %s on %s — nothing to compare", namespace, name, key, ctx)
+		ui.Debug("no live %s/%s key %s on %s — nothing to compare", namespace, name, key, kctx)
 		return
 	}
 
 	want := base64.StdEncoding.EncodeToString([]byte(value))
 
 	if live == want {
-		ui.Debug("live %s/%s key %s on %s already matches the store", namespace, name, key, ctx)
+		ui.Debug("live %s/%s key %s on %s already matches the store", namespace, name, key, kctx)
 		return
 	}
 
-	ui.Warnf(c.ErrOut, "live Secret %s/%s key %s on context '%s' still holds the PREVIOUS value — the store is updated, the workload is NOT; run 'lo build' + apply (GitOps planes: commit and let Flux reconcile)", namespace, name, key, ctx)
+	ui.Warnf(c.ErrOut, "live Secret %s/%s key %s on context '%s' still holds the PREVIOUS value — the store is updated, the workload is NOT; run 'lo build' + apply (GitOps planes: commit and let Flux reconcile)", namespace, name, key, kctx)
 }
 
 // kubectlOutput runs kubectl with stderr discarded (bash: 2>/dev/null) and
 // KUBECONFIG pinned to the entrypoint-derived path, mirroring the bash
 // `export KUBECONFIG=…` that precedes every subcommand.
-func (c *Context) kubectlOutput(kubectl string, args ...string) (string, error) {
-	cmd := exec.Command(kubectl, args...)
+func (c *Context) kubectlOutput(ctx context.Context, kubectl string, args ...string) (string, error) {
+	cmd := execx.Cmd{Name: kubectl, Args: args}
 	if c.Kubeconfig != "" {
-		cmd.Env = append(os.Environ(), "KUBECONFIG="+c.Kubeconfig)
+		cmd.Env = []string{"KUBECONFIG=" + c.Kubeconfig}
 	}
-	out, err := cmd.Output()
+	out, err := execx.Output(ctx, c.runner(), cmd)
 	return string(out), err
 }

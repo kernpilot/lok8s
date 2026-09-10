@@ -18,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -114,9 +115,9 @@ func runUp(ctx context.Context, paths *config.Paths, out io.Writer, deps upDeps,
 		open := deps.open
 		if open == nil {
 			open = func(tool, url string) error {
-				c := exec.Command(tool, url)
-				c.Stdout, c.Stderr = os.Stdout, os.Stderr
-				return c.Run()
+				return deps.tilt.Runner.Run(ctx, execx.Cmd{
+					Name: tool, Args: []string{url}, Stdout: os.Stdout, Stderr: os.Stderr,
+				})
 			}
 		}
 		switch {
