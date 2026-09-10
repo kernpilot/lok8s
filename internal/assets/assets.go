@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"io"
 	"io/fs"
 	"os"
@@ -167,17 +168,31 @@ type Unit struct {
 	// Rel is the unit's path below .lok8s/ ("addons/cilium",
 	// "drivers/lo/cluster", …).
 	Rel string
-	// Kind classifies the unit: addon | driver | inventory | chat.
-	Kind string
+	// Kind classifies the unit.
+	Kind UnitKind
 }
+
+// UnitKind is the class of an asset unit, as `lo assets list` prints it.
+type UnitKind string
+
+const (
+	// KindAddon is a bootstrap addon under addons/<name>.
+	KindAddon UnitKind = "addon"
+	// KindDriver is a driver's cluster template tree.
+	KindDriver UnitKind = "driver"
+	// KindInventory is the ClusterInventory CRD mirror.
+	KindInventory UnitKind = "inventory"
+	// KindChat is the lo chat defaults.
+	KindChat UnitKind = "chat"
+)
 
 // treeUnits are the non-addon units, in display order.
 var treeUnits = []Unit{
-	{Rel: "drivers/lo/cluster", Kind: "driver"},
-	{Rel: "drivers/kubeone/cluster", Kind: "driver"},
-	{Rel: "drivers/capi/cluster", Kind: "driver"},
-	{Rel: "libs/inventory/manifests", Kind: "inventory"},
-	{Rel: "chat", Kind: "chat"},
+	{Rel: "drivers/lo/cluster", Kind: KindDriver},
+	{Rel: "drivers/kubeone/cluster", Kind: KindDriver},
+	{Rel: "drivers/capi/cluster", Kind: KindDriver},
+	{Rel: "libs/inventory/manifests", Kind: KindInventory},
+	{Rel: "chat", Kind: KindChat},
 }
 
 var (
@@ -198,7 +213,7 @@ func Units() []Unit {
 		}
 		sort.Slice(names, func(i, j int) bool { return names[i]+"/" < names[j]+"/" })
 		for _, n := range names {
-			unitList = append(unitList, Unit{Rel: "addons/" + n, Kind: "addon"})
+			unitList = append(unitList, Unit{Rel: "addons/" + n, Kind: KindAddon})
 		}
 		unitList = append(unitList, treeUnits...)
 	})
@@ -209,7 +224,7 @@ func Units() []Unit {
 func AddonNames() []string {
 	var names []string
 	for _, u := range Units() {
-		if u.Kind == "addon" {
+		if u.Kind == KindAddon {
 			names = append(names, strings.TrimPrefix(u.Rel, "addons/"))
 		}
 	}
@@ -493,11 +508,11 @@ func hashBytes(b []byte) string {
 // every file it wrote. `lo assets diff` reads it as the ORIGIN side.
 type Marker struct {
 	// Lo is the lo version that ejected the unit.
-	Lo string
+	Lo string `yaml:"lo"`
 	// EjectedAt is the RFC-3339 UTC timestamp.
-	EjectedAt string
+	EjectedAt string `yaml:"ejectedAt"`
 	// Files maps the unit-relative slash path to "sha256:<hex>".
-	Files map[string]string
+	Files map[string]string `yaml:"files"`
 }
 
 func markerFor(u Unit) (*Marker, error) {
@@ -508,9 +523,10 @@ func markerFor(u Unit) (*Marker, error) {
 	return &Marker{Lo: Version(), EjectedAt: Now(), Files: files}, nil
 }
 
-// write serializes the marker as a small, stable YAML document (keys
-// sorted; no library needed, nothing to quote — hashes and paths are plain
-// scalars, paths that need quoting are double-quoted).
+// write serializes the marker as a small, stable YAML document with a
+// comment header (keys sorted; hashes are plain scalars, a path that needs
+// quoting is double-quoted). The hand-written form keeps the bytes stable
+// across lo versions; ReadMarker parses it with the YAML library.
 func (m *Marker) write(file string) error {
 	var b strings.Builder
 	b.WriteString("# .lo-origin — written by lo when it ejected this asset. Do not edit.\n")
@@ -548,61 +564,14 @@ func ReadMarker(file string) (*Marker, error) {
 		}
 		return nil, err
 	}
-	m := &Marker{Files: map[string]string{}}
-	inFiles := false
-	for line := range strings.SplitSeq(string(raw), "\n") {
-		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "  ") && inFiles {
-			k, v, ok := splitMarkerEntry(strings.TrimSpace(line))
-			if !ok {
-				return nil, fmt.Errorf("assets: malformed marker line in %s: %q", file, line)
-			}
-			m.Files[k] = v
-			continue
-		}
-		inFiles = false
-		k, v, _ := strings.Cut(line, ":")
-		v = strings.TrimSpace(v)
-		switch strings.TrimSpace(k) {
-		case "lo":
-			m.Lo = unquote(v)
-		case "ejectedAt":
-			m.EjectedAt = unquote(v)
-		case "files":
-			inFiles = true
-		}
+	m := &Marker{}
+	if err := yaml.Unmarshal(raw, m); err != nil {
+		return nil, fmt.Errorf("assets: malformed marker %s: %w", file, err)
+	}
+	if m.Files == nil {
+		m.Files = map[string]string{}
 	}
 	return m, nil
-}
-
-// splitMarkerEntry parses `key: value` where key may be double-quoted (and
-// then may itself contain ": ").
-func splitMarkerEntry(line string) (string, string, bool) {
-	if strings.HasPrefix(line, `"`) {
-		q, err := strconv.QuotedPrefix(line)
-		if err != nil {
-			return "", "", false
-		}
-		k, err := strconv.Unquote(q)
-		if err != nil {
-			return "", "", false
-		}
-		rest := strings.TrimPrefix(line[len(q):], ":")
-		return k, strings.TrimSpace(rest), strings.HasPrefix(line[len(q):], ":")
-	}
-	k, v, ok := strings.Cut(line, ": ")
-	return k, strings.TrimSpace(v), ok
-}
-
-func unquote(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		if u, err := strconv.Unquote(s); err == nil {
-			return u
-		}
-	}
-	return s
 }
 
 // now is the marker timestamp (bash inventory::_now's contract: RFC-3339

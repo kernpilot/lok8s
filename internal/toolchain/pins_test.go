@@ -58,7 +58,7 @@ func TestKustomizeCLIMatchesAPIMapping(t *testing.T) {
 // TestTemplateCarriesThePins: the generated b.yaml installs exactly the
 // pinned releases, at the plugin paths the exec render resolves.
 func TestTemplateCarriesThePins(t *testing.T) {
-	tpl := Template(TemplateOptions{Name: "t", LoVersion: "0.3.0", Variant: "core"})
+	tpl := mustTemplate(t, TemplateOptions{Name: "t", LoVersion: "0.3.0", Variant: "core"})
 	pins := PinnedEntries("0.3.0")
 	want := map[string]string{
 		"kustomize":                   KustomizeCLI,

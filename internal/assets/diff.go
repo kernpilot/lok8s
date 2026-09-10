@@ -141,7 +141,7 @@ func Report(p *config.Paths, rels []string) ([]UnitReport, error) {
 			u, ok := UnitFor(rel)
 			if !ok {
 				if strings.HasPrefix(rel, "addons/") && fsutil.DirExists(localPath(p, rel)) {
-					u = Unit{Rel: rel, Kind: "addon"}
+					u = Unit{Rel: rel, Kind: KindAddon}
 				} else {
 					return nil, fmt.Errorf("%w: %s", ErrNotAsset, rel)
 				}
@@ -177,7 +177,7 @@ func localOnlyAddons(p *config.Paths) []Unit {
 			continue
 		}
 		if info, err := os.Stat(filepath.Join(p.Lok8s, "addons", e.Name())); err == nil && info.IsDir() {
-			units = append(units, Unit{Rel: "addons/" + e.Name(), Kind: "addon"})
+			units = append(units, Unit{Rel: "addons/" + e.Name(), Kind: KindAddon})
 		}
 	}
 	sort.Slice(units, func(i, j int) bool { return units[i].Rel+"/" < units[j].Rel+"/" })
@@ -186,7 +186,7 @@ func localOnlyAddons(p *config.Paths) []Unit {
 
 func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
 	dir := localPath(p, u.Rel)
-	r := UnitReport{Rel: u.Rel, Kind: u.Kind, Path: dir, Version: VersionPair{Local: "-", Embedded: "-"}}
+	r := UnitReport{Rel: u.Rel, Kind: string(u.Kind), Path: dir, Version: VersionPair{Local: "-", Embedded: "-"}}
 	_, isEmbedded := UnitFor(u.Rel)
 	local, err := LocalFiles(dir)
 	if err != nil {
@@ -198,7 +198,7 @@ func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
 		if err != nil {
 			return r, err
 		}
-		if u.Kind == "addon" {
+		if u.Kind == KindAddon {
 			r.Version.Embedded = chartVersionFS(u.Rel + "/chart.yaml")
 		}
 	}
@@ -206,7 +206,7 @@ func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
 		r.Origin = OriginColBuiltin
 		return r, nil
 	}
-	if u.Kind == "addon" {
+	if u.Kind == KindAddon {
 		r.Version.Local = chartVersionFile(filepath.Join(dir, "chart.yaml"))
 	}
 	marker, err := ReadMarker(filepath.Join(dir, MarkerFile))
@@ -333,7 +333,7 @@ func WriteShow(w io.Writer, r UnitReport) {
 	fmt.Fprintf(w, "kind:     %s\n", r.Kind)
 	fmt.Fprintf(w, "origin:   %s\n", r.Origin)
 	fmt.Fprintf(w, "path:     %s\n", r.Path)
-	if r.Kind == "addon" {
+	if r.Kind == string(KindAddon) {
 		fmt.Fprintf(w, "version:  local %s, embedded %s\n", r.Version.Local, r.Version.Embedded)
 	}
 	if r.Marker != nil {

@@ -27,7 +27,7 @@ import (
 
 // toolchainTemplate renders the b.yaml for this binary: its own version
 // pins the Secret plugin asset, its variant is named in the header.
-func toolchainTemplate(name string, groups []string) string {
+func toolchainTemplate(name string, groups []string) (string, error) {
 	return toolchain.Template(toolchain.TemplateOptions{
 		Name:      name,
 		LoVersion: assets.Version(),
@@ -109,7 +109,11 @@ func runInitToolchain(cmd *cobra.Command, base string, groups []string, dryRun b
 	bin := filepath.Join(base, ".bin")
 	name := projectName(base)
 	fmt.Fprintf(out, "lo init toolchain — %s (lo %s, %s; groups: %s)\n", base, assets.Version(), render.Variant(), strings.Join(groups, ","))
-	if err := scaffold.WriteBYAML(bin, toolchainTemplate(name, groups), dryRun, out); err != nil {
+	content, err := toolchainTemplate(name, groups)
+	if err != nil {
+		return err
+	}
+	if err := scaffold.WriteBYAML(bin, content, dryRun, out); err != nil {
 		return err
 	}
 	if dryRun {

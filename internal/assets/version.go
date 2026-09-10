@@ -5,9 +5,8 @@ import (
 	"strings"
 )
 
-// BuildVersion is the ldflags-stamped release version (the cli copies its
-// own stamped variable here at init; the Makefile and goreleaser stamp
-// internal/cli.version). Empty or "dev" means "not stamped".
+// BuildVersion is the release version the Makefile and goreleaser stamp
+// with -ldflags -X. Empty or "dev" means "not stamped".
 var BuildVersion string
 
 // Version is the lok8s version the binary reports: the stamped build

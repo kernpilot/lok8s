@@ -127,7 +127,7 @@ func newUsageTree(paths *config.Paths) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "lo",
 		Short:         "lok8s - local dev orchestration",
-		Version:       version + " (" + render.Variant() + ")",
+		Version:       assets.Version() + " (" + render.Variant() + ")",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// The eject policy is process-wide (every consumer of an embedded

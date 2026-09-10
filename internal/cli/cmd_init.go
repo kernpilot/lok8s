@@ -121,7 +121,7 @@ func runInitProject(ctx context.Context, o initProjectOpts, out, stderr io.Write
 		return err
 	}
 	tc := scaffold.ProjectToolchain{
-		Template: func(n string) string { return toolchainTemplate(n, groups) },
+		Template: func(n string) (string, error) { return toolchainTemplate(n, groups) },
 		Env:      o.env,
 		BVersion: toolchain.BRelease.Version,
 	}

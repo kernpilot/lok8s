@@ -38,7 +38,7 @@ func projectFile(name string) string {
 // network step is skipped and the hint printed instead).
 type ProjectToolchain struct {
 	// Template renders the b.yaml for the project name.
-	Template func(name string) string
+	Template func(name string) (string, error)
 	// Bootstrap installs b into <dir>/.bin and runs `b install` there.
 	Bootstrap func(dir string) error
 	// Env selects the shell-environment files (see EnvFiles); "" = mise.
@@ -166,7 +166,10 @@ func Project(base, name, dir string, force bool, out, stderr io.Writer, tc Proje
 	}
 	content := bYAML(name)
 	if tc.Template != nil {
-		content = tc.Template(name)
+		var err error
+		if content, err = tc.Template(name); err != nil {
+			return err
+		}
 	}
 	if err := WriteBYAML(filepath.Join(dir, ".bin"), content, false, out); err != nil {
 		return err

@@ -118,13 +118,16 @@ func NormalizeGroups(groups []string) ([]string, error) {
 	return out, nil
 }
 
-// Template renders the b.yaml.
-func Template(o TemplateOptions) string {
+// Template renders the b.yaml. An unknown group name in o.Groups is an
+// error (NormalizeGroups); an empty selection means DefaultGroups.
+func Template(o TemplateOptions) (string, error) {
 	groups := DefaultGroups
 	if len(o.Groups) > 0 {
-		if g, err := NormalizeGroups(o.Groups); err == nil {
-			groups = g
+		g, err := NormalizeGroups(o.Groups)
+		if err != nil {
+			return "", err
 		}
+		groups = g
 	}
 	active := map[string]bool{}
 	for _, g := range groups {
@@ -189,7 +192,7 @@ func Template(o TemplateOptions) string {
 			b.WriteString("\n")
 		}
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // HasMarker reports whether a b.yaml carries the lo toolchain marker.

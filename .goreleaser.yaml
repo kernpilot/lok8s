@@ -18,7 +18,7 @@
 #
 # Matrix: linux/darwin × amd64/arm64, CGO_ENABLED=0, -trimpath, stripped.
 # Version stamping: the git tag (goreleaser's {{ .Version }} = tag without the
-# leading v) into internal/cli.version; a local `make snapshot` stamps
+# leading v) into internal/assets.BuildVersion; a local `make snapshot` stamps
 # .lok8s/VERSION instead (Makefile exports LOK8S_VERSION).
 #
 # Validate: `goreleaser check`; dry run: `make snapshot` (dist/, no publish).
@@ -45,7 +45,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X github.com/kernpilot/lok8s/internal/cli.version={{ .Version }}
+      - -s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion={{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: lo-full
@@ -63,7 +63,7 @@ builds:
     tags:
       - inprocess
     ldflags:
-      - -s -w -X github.com/kernpilot/lok8s/internal/cli.version={{ .Version }}
+      - -s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion={{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: kustomize-secret

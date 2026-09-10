@@ -3,7 +3,7 @@ BINARY  ?= bin/lo
 FULL    ?= bin/lo-full
 # The version stamp reads the embedded mirror's VERSION (canonical since the
 # eject model; .lok8s/VERSION is its synced twin — see hack/sync-legacy-assets.sh).
-LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/cli.version=$(shell cat internal/assets/lok8s/VERSION)
+LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion=$(shell cat internal/assets/lok8s/VERSION)
 
 # Two builds from one tree (internal/render):
 #   lo       (core, the default) — the render execs the pinned kustomize +

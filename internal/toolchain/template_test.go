@@ -7,8 +7,24 @@ import (
 	"testing"
 )
 
+// mustTemplate renders a template the test expects to be valid.
+func mustTemplate(t *testing.T, o TemplateOptions) string {
+	t.Helper()
+	tpl, err := Template(o)
+	if err != nil {
+		t.Fatalf("Template(%+v): %v", o, err)
+	}
+	return tpl
+}
+
+func TestTemplateRejectsUnknownGroup(t *testing.T) {
+	if _, err := Template(TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"kustomize"}}); err == nil {
+		t.Fatal("an unknown group rendered a template instead of failing")
+	}
+}
+
 func TestTemplateGroupsAndMarker(t *testing.T) {
-	tpl := Template(TemplateOptions{Name: "demo", LoVersion: "v0.3.0", Variant: "core"})
+	tpl := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "v0.3.0", Variant: "core"})
 	if !strings.Contains(tpl, Marker+"\n") {
 		t.Fatal("marker line missing")
 	}
@@ -34,11 +50,11 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 		}
 	}
 
-	cloud := Template(TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "full", Groups: []string{"core", "local", "cloud"}})
+	cloud := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "full", Groups: []string{"core", "local", "cloud"}})
 	if !strings.Contains(cloud, "  github.com/kubermatic/kubeone:\n    groups: [cloud]\n") || !strings.Contains(cloud, "  hcloud:\n    groups: [cloud]\n") {
 		t.Fatalf("--groups cloud did not activate the cloud entries:\n%s", cloud)
 	}
-	coreOnly := Template(TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"core"}})
+	coreOnly := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"core"}})
 	if !strings.Contains(coreOnly, "  # kind:\n  #   groups: [local]\n") {
 		t.Fatalf("--groups core left local active:\n%s", coreOnly)
 	}
@@ -56,7 +72,7 @@ func TestNormalizeGroups(t *testing.T) {
 
 func TestWriteNeverOverwrites(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), ".bin")
-	content := Template(TemplateOptions{Name: "p", LoVersion: "0.3.0", Variant: "core"})
+	content := mustTemplate(t, TemplateOptions{Name: "p", LoVersion: "0.3.0", Variant: "core"})
 
 	// Dry run creates nothing.
 	res, err := Write(bin, content, true)

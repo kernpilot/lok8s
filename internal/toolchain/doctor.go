@@ -22,8 +22,11 @@ import (
 type Status int
 
 const (
+	// The zero value is not a result: a Check built without a Status
+	// reads as Bad in the report, never as OK.
+	_ Status = iota
 	// OK — present at the pinned version.
-	OK Status = iota
+	OK
 	// Warn — present but not at the pin, or absent where this build does
 	// not strictly need it.
 	Warn

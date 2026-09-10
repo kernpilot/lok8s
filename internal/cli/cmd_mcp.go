@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/assets"
 	"io"
 	"log/slog"
 	"maps"
@@ -299,7 +300,7 @@ func mcpListTools(ctx context.Context, paths *config.Paths, x mcpExposure) ([]*m
 		served <- mcpRun(ctx, paths, x, serverT, true, io.Discard, io.Discard, "start")
 	}()
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "lo-mcp-tools", Version: version}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "lo-mcp-tools", Version: assets.Version()}, nil)
 	session, err := client.Connect(ctx, clientT, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the in-memory server: %w", err)
