@@ -332,6 +332,65 @@ func TestUpdateAppliesCleanLoUpdate(t *testing.T) {
 	}
 }
 
+// A vendored copy with no marker that is byte-identical to the embedded
+// unit is already up to date: no --force demanded, nothing written.
+func TestUpdateIdenticalVendoredCopyIsInSync(t *testing.T) {
+	withPolicy(t, PolicyEject)
+	p := project(t)
+	dir := filepath.Join(p.Lok8s, "addons", "metallb")
+	if err := writeUnit(Unit{Rel: "addons/metallb", Kind: "addon"}, dir); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	r, err := Update(p, "addons/metallb", false, &out)
+	if err != nil {
+		t.Fatalf("identical vendored copy refused: %v", err)
+	}
+	if r.Marker != nil || r.Drifted {
+		t.Fatalf("report: marker=%v drifted=%v", r.Marker, r.Drifted)
+	}
+	if !strings.Contains(out.String(), "addons/metallb: already in sync") {
+		t.Fatalf("output: %s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, MarkerFile)); err == nil {
+		t.Fatal("an in-sync report must not write a marker")
+	}
+}
+
+// Two processes ejecting the same unit: the loser's rename lands on a
+// populated directory (EEXIST/ENOTEMPTY) and must be a no-op success, not
+// an error — the unit is there, precedence holds.
+func TestEjectRenameRaceLoserIsANoop(t *testing.T) {
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "cilium")
+	os.MkdirAll(dest, 0o755)
+	os.WriteFile(filepath.Join(dest, "chart.yaml"), []byte("winner\n"), 0o644)
+	tmp := filepath.Join(parent, ".cilium.lo-eject-loser")
+	os.MkdirAll(tmp, 0o755)
+	os.WriteFile(filepath.Join(tmp, "chart.yaml"), []byte("loser\n"), 0o644)
+
+	won, err := renameInto(tmp, dest)
+	if err != nil || won {
+		t.Fatalf("raced rename: won=%v err=%v", won, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dest, "chart.yaml")); string(got) != "winner\n" {
+		t.Fatalf("the loser overwrote the winner: %q", got)
+	}
+	if _, err := os.Stat(tmp); err == nil {
+		t.Fatal("the loser's stage was not removed")
+	}
+	// A rename that fails for another reason is still an error.
+	if _, err := renameInto(filepath.Join(parent, "never-staged"), filepath.Join(parent, "x")); err == nil {
+		t.Fatal("a missing stage must fail")
+	}
+	// The winner's path: an absent dest is claimed.
+	stage := filepath.Join(parent, ".fresh.lo-eject-")
+	os.MkdirAll(stage, 0o755)
+	if won, err := renameInto(stage, filepath.Join(parent, "fresh")); err != nil || !won {
+		t.Fatalf("fresh rename: won=%v err=%v", won, err)
+	}
+}
+
 func TestUpdateRefusesWithoutMarker(t *testing.T) {
 	withPolicy(t, PolicyEject)
 	p := project(t)

@@ -42,8 +42,9 @@ var runProcess = func(bin string, argv, env []string) int {
 	return 0
 }
 
-// exitProcess is os.Exit behind a seam for the rc passthroughs.
-var exitProcess = os.Exit
+// exitProcess is the process exit behind a seam for the rc passthroughs
+// (exitNow: the per-run temp dirs are dropped first).
+var exitProcess = exitNow
 
 // aiSkillsSrc is where the skills live — the source of truth.
 func aiSkillsSrc(paths *config.Paths) string { return filepath.Join(paths.Base, "skills") }

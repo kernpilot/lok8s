@@ -27,7 +27,12 @@ const (
 
 // runMu serializes in-process renders: the plugin children read the
 // process environment, so the per-render overlay (Options.Env) has to be
-// installed in it for the duration of a run.
+// installed in it for the duration of a run. The mutex keeps two RENDERS
+// from interleaving their overlays; it cannot stop an unrelated goroutine
+// from reading the environment mid-render (os.Getenv, or execx snapshotting
+// os.Environ for a child). Callers that fan out around Build — the
+// bootstrap DAG — therefore run their entries serially when the in-process
+// renderer is active (InProcessActive); see internal/bootstrap.
 var runMu sync.Mutex
 
 // buildInProcess is `kustomize build --enable-alpha-plugins [--enable-exec]
@@ -60,12 +65,22 @@ func buildInProcess(ctx context.Context, dir string, o Options) ([]byte, error) 
 	pc.HelmConfig.ApiVersions = []string{}
 	kOpts.PluginConfig = pc
 
-	overlay := append(append([]string{}, o.Env...), konfig.KustomizePluginHomeEnv+"="+home)
+	// KUSTOMIZE_PLUGIN_HOME is NOT part of the overlay: selfExecPluginHome
+	// set it once for the process. Only the caller's per-render variables
+	// go in (and come out again).
+	overlay := append([]string{}, o.Env...)
 
 	var out []byte
 	err = withEnv(overlay, func() error {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if os.Getenv(konfig.KustomizePluginHomeEnv) != home {
+			// Something re-pointed the plugin home after the first render
+			// (a caller's own Setenv). The self-exec symlinks are the only
+			// plugins this build can serve, so put the constant back — a
+			// process-wide value again, not a per-render one.
+			os.Setenv(konfig.KustomizePluginHomeEnv, home)
 		}
 		// The managed-by label switch is read from the environment the
 		// same way the CLI reads it, after the overlay is in place.

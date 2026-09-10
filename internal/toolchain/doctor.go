@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/config"
 )
 
 // Status of one check.
@@ -77,17 +79,17 @@ func Doctor(o DoctorOptions) []Check {
 	// lo-full (in-process; the binaries only serve LO_RENDER=exec).
 	missing := func(what, path, note string) {
 		if o.Full {
-			add(Warn, "%s missing at %s (optional on lo-full: in-process render; LO_RENDER=exec needs it) — %s", what, relOrAbs(o.Base, path), Fix)
+			add(Warn, "%s missing at %s (optional on lo-full: in-process render; LO_RENDER=exec needs it) — %s", what, config.RelTo(o.Base, path), Fix)
 			return
 		}
-		add(Bad, "%s missing at %s%s — %s", what, relOrAbs(o.Base, path), note, Fix)
+		add(Bad, "%s missing at %s%s — %s", what, config.RelTo(o.Base, path), note, Fix)
 	}
 	versioned := func(what, path, got, want string) {
 		if got == want {
-			add(OK, "%s %s (%s)", what, got, relOrAbs(o.Base, path))
+			add(OK, "%s %s (%s)", what, got, config.RelTo(o.Base, path))
 			return
 		}
-		add(Warn, "%s %s at %s — expected %s (%s, then .bin/b install)", what, got, relOrAbs(o.Base, path), want, Fix)
+		add(Warn, "%s %s at %s — expected %s (%s, then .bin/b install)", what, got, config.RelTo(o.Base, path), want, Fix)
 	}
 
 	// b itself.
@@ -95,18 +97,18 @@ func Doctor(o DoctorOptions) []Check {
 	if isExecutable(bPath) {
 		v, err := prb(bPath, "--version")
 		if err != nil {
-			add(Warn, "b at %s (version unknown: %v)", relOrAbs(o.Base, bPath), err)
+			add(Warn, "b at %s (version unknown: %v)", config.RelTo(o.Base, bPath), err)
 		} else {
-			add(OK, "b %s (%s)", firstField(v), relOrAbs(o.Base, bPath))
+			add(OK, "b %s (%s)", firstField(v), config.RelTo(o.Base, bPath))
 		}
 	} else {
-		add(Bad, "b missing at %s — %s", relOrAbs(o.Base, bPath), Fix)
+		add(Bad, "b missing at %s — %s", config.RelTo(o.Base, bPath), Fix)
 	}
 
 	// kustomize: .bin first, then PATH — the exec render's own lookup.
 	kPath := filepath.Join(o.Bin, "kustomize")
 	if !isExecutable(kPath) {
-		if p, ok := lookPath(o.path(), "kustomize"); ok {
+		if p, ok := LookPath(o.path(), "kustomize"); ok {
 			kPath = p
 		} else {
 			kPath = ""
@@ -115,7 +117,7 @@ func Doctor(o DoctorOptions) []Check {
 	if kPath == "" {
 		missing("kustomize", filepath.Join(o.Bin, "kustomize"), " (lo core execs it for every render)")
 	} else if v, err := prb(kPath, "version"); err != nil {
-		add(Warn, "kustomize at %s (version unknown: %v)", relOrAbs(o.Base, kPath), err)
+		add(Warn, "kustomize at %s (version unknown: %v)", config.RelTo(o.Base, kPath), err)
 	} else {
 		versioned("kustomize", kPath, firstField(v), KustomizeCLI)
 	}
@@ -125,7 +127,7 @@ func Doctor(o DoctorOptions) []Check {
 	if !isExecutable(crPath) {
 		missing("khelm ChartRenderer", crPath, " (the addons' Helm charts inflate through it)")
 	} else if v, err := prb(crPath, "version"); err != nil {
-		add(Warn, "khelm ChartRenderer at %s (version unknown: %v)", relOrAbs(o.Base, crPath), err)
+		add(Warn, "khelm ChartRenderer at %s (version unknown: %v)", config.RelTo(o.Base, crPath), err)
 	} else {
 		versioned("khelm ChartRenderer", crPath, strings.TrimPrefix(firstField(v), "v"), KhelmVersion)
 	}
@@ -138,7 +140,7 @@ func Doctor(o DoctorOptions) []Check {
 	if !isExecutable(sPath) {
 		missing("secrets.lok8s.dev Secret", sPath, " (the Secret generator every render runs)")
 	} else if v, err := prb(sPath, "--version"); err != nil {
-		add(Warn, "secrets.lok8s.dev Secret at %s: version unknown (built before --version; expected %s) — %s", relOrAbs(o.Base, sPath), want, Fix)
+		add(Warn, "secrets.lok8s.dev Secret at %s: version unknown (built before --version; expected %s) — %s", config.RelTo(o.Base, sPath), want, Fix)
 	} else {
 		versioned("secrets.lok8s.dev Secret", sPath, vPrefixed(firstField(v)), want)
 	}
@@ -169,9 +171,11 @@ func firstField(s string) string {
 	return f[0]
 }
 
-// lookPath resolves a tool on an explicit PATH value (`command -v`
-// semantics).
-func lookPath(path, tool string) (string, bool) {
+// LookPath resolves a tool on an explicit PATH value (`command -v`
+// semantics: the first executable file wins; an empty entry is "."). The
+// doctor commands share it: they diagnose the PATH an operator's shell
+// resolves, not execx.Look's .bin-first lookup.
+func LookPath(path, tool string) (string, bool) {
 	for _, dir := range strings.Split(path, string(os.PathListSeparator)) {
 		if dir == "" {
 			dir = "."

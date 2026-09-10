@@ -19,6 +19,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 // writeStackAddon lays down the bats three-layer testcni fixture.
@@ -245,6 +246,56 @@ func TestSchedulerBarrierSerializesWaitTrue(t *testing.T) {
 	// d and e START only after c has ENDED.
 	if log.pos("START d") <= log.pos("END c") || log.pos("START e") <= log.pos("END c") {
 		t.Errorf("post-barrier entries started early: %v", log.events)
+	}
+}
+
+// The in-process renderer (lo-full) installs each entry's env overlay in
+// the PROCESS environment while it renders, so the DAG must not overlap
+// entries there: with the serial seam engaged, independent entries run one
+// at a time even under LOK8S_BOOTSTRAP_PARALLEL=8 — and the debug line
+// says why.
+func TestSchedulerInProcessRenderSerializesIndependentEntries(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_PARALLEL", "8")
+	t.Setenv("DEBUG", "1")
+	prev := renderSerial
+	renderSerial = func() bool { return true }
+	t.Cleanup(func() { renderSerial = prev })
+
+	e, log, spec, kc, _ := schedEngine(t, "a", "b", "c")
+	errOut := e.Stderr.(interface{ String() string })
+	e.ApplyOne = stubApply(log, 40*time.Millisecond)
+	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// No two entries overlap: each STARTS only after the previous ENDED.
+	for _, pair := range [][2]string{{"a", "b"}, {"b", "c"}} {
+		if log.pos("START "+pair[1]) <= log.pos("END "+pair[0]) {
+			t.Errorf("%s started before %s ended (in-process render must serialize): %v", pair[1], pair[0], log.events)
+		}
+	}
+	if !strings.Contains(errOut.String(), "in-process render — entries apply one at a time") {
+		t.Errorf("no serial-mode debug line:\n%s", errOut.String())
+	}
+}
+
+// The seam follows the build and LO_RENDER: serial only when the
+// in-process renderer is what Build would use (lo-full, LO_RENDER unset);
+// never under LO_RENDER=exec, never on core.
+func TestRenderSerialFollowsBuildAndMode(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_PARALLEL", "8")
+	t.Setenv(render.ModeEnv, "")
+	if got := renderSerial(); got != render.InProcessAvailable() {
+		t.Errorf("LO_RENDER unset: serial=%v, want %v (InProcessAvailable)", got, render.InProcessAvailable())
+	}
+	if n := effectiveParallel(io.Discard); render.InProcessAvailable() && n != 1 {
+		t.Errorf("in-process cap = %d, want 1", n)
+	}
+	t.Setenv(render.ModeEnv, "exec")
+	if renderSerial() {
+		t.Error("LO_RENDER=exec must keep the parallel DAG")
+	}
+	if n := effectiveParallel(io.Discard); n != 8 {
+		t.Errorf("exec-mode cap = %d, want LOK8S_BOOTSTRAP_PARALLEL", n)
 	}
 }
 

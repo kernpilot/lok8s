@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -154,7 +153,7 @@ it applies".`,
 					return assetsErr(stderr, err)
 				}
 			}
-			fmt.Fprintf(out, "assets: ejected %d asset(s) into %s\n", len(pending), relOrAbs(paths, paths.Lok8s))
+			fmt.Fprintf(out, "assets: ejected %d asset(s) into %s\n", len(pending), config.RelTo(paths.Base, paths.Lok8s))
 			return nil
 		},
 	}
@@ -299,11 +298,4 @@ func dedupe(s []string) []string {
 		}
 	}
 	return out
-}
-
-func relOrAbs(paths *config.Paths, p string) string {
-	if rel, err := filepath.Rel(paths.Base, p); err == nil && !strings.HasPrefix(rel, "..") {
-		return rel
-	}
-	return p
 }

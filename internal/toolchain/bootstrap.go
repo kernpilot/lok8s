@@ -208,22 +208,27 @@ func (o *BootstrapOptions) client() *http.Client {
 		return o.Client
 	}
 	return &http.Client{
-		Timeout: 5 * time.Minute,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("too many redirects")
-			}
-			if req.URL.Scheme != "https" {
-				return fmt.Errorf("redirect to a non-https URL refused: %s", req.URL)
-			}
-			return nil
-		},
+		Timeout:       5 * time.Minute,
+		CheckRedirect: refuseNonHTTPSRedirect,
 	}
 }
 
-// maxTarballBytes bounds the download (b's tarball is ~5 MB; the binary
-// inside ~15 MB).
-const maxTarballBytes = 256 << 20
+// refuseNonHTTPSRedirect is the download client's redirect policy: a hop
+// off https (a downgrade to plain http) is refused, and so is a chain of
+// ten or more redirects. Named so the guard is testable on its own.
+func refuseNonHTTPSRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect to a non-https URL refused: %s", req.URL)
+	}
+	return nil
+}
+
+// maxTarballBytes bounds the download and the extracted `b` member (b's
+// tarball is ~5 MB; the binary inside ~15 MB). A var so a test can lower it.
+var maxTarballBytes int64 = 256 << 20
 
 // downloadVerifyExtract fetches url into a temp file under bin, checks its
 // sha256 against want BEFORE reading it as an archive, then extracts the
@@ -295,15 +300,27 @@ func extractB(archive, dst string) error {
 		if filepath.Clean(hdr.Name) != "b" || hdr.Typeflag != tar.TypeReg {
 			continue
 		}
+		// The member is bounded like the download: a header claiming more,
+		// or a body that keeps going past the cap, is refused outright — a
+		// silently truncated binary would be a broken b, not a safe one.
+		if hdr.Size > maxTarballBytes {
+			return fmt.Errorf("b tarball: `b` member is %d bytes, larger than the %d-byte cap, refusing", hdr.Size, maxTarballBytes)
+		}
 		stage := dst + ".tmp"
 		w, err := os.OpenFile(stage, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) // #nosec G302 -- the b binary must be executable
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(w, io.LimitReader(tr, maxTarballBytes)); err != nil {
+		n, err := io.Copy(w, io.LimitReader(tr, maxTarballBytes+1))
+		if err != nil {
 			_ = w.Close()
 			_ = os.Remove(stage)
 			return fmt.Errorf("b tarball: %w", err)
+		}
+		if n > maxTarballBytes {
+			_ = w.Close()
+			_ = os.Remove(stage)
+			return fmt.Errorf("b tarball: `b` member larger than the %d-byte cap, refusing", maxTarballBytes)
 		}
 		if err := w.Close(); err != nil {
 			_ = os.Remove(stage)
@@ -322,10 +339,5 @@ func isExecutable(path string) bool {
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
-// relOrAbs prints p relative to base when it is inside it.
-func relOrAbs(base, p string) string {
-	if rel, err := filepath.Rel(base, p); err == nil && !strings.HasPrefix(rel, "..") {
-		return rel
-	}
-	return p
-}
+// relOrAbs prints p relative to base when it is inside it (config.RelTo).
+func relOrAbs(base, p string) string { return config.RelTo(base, p) }

@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +119,33 @@ func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
 		if _, ok := embedded[must]; !ok {
 			t.Errorf("%s missing from the embed", must)
 		}
+	}
+}
+
+// `mirrored` above and SUBTREES in hack/sync-legacy-assets.sh are the same
+// list kept in two places (Go cannot import a bash array); this pins them
+// to each other so a subtree added on one side fails here.
+func TestMirroredListMatchesSyncScript(t *testing.T) {
+	script := filepath.Join(repoRoot(t), "hack", "sync-legacy-assets.sh")
+	raw, err := os.ReadFile(script)
+	if err != nil {
+		t.Skipf("sync script not present: %v", err)
+	}
+	var inScript []string
+	inBlock := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "SUBTREES=("):
+			inBlock = true
+		case inBlock && trimmed == ")":
+			inBlock = false
+		case inBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#"):
+			inScript = append(inScript, trimmed)
+		}
+	}
+	if strings.Join(inScript, "\n") != strings.Join(mirrored, "\n") {
+		t.Fatalf("hack/sync-legacy-assets.sh SUBTREES and drift_test.go `mirrored` differ:\nscript: %v\ngo:     %v", inScript, mirrored)
 	}
 }
 

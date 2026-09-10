@@ -34,7 +34,7 @@ Three seams still run bash from the frozen tree on purpose: provider plugins
 <name>` for a driver without a Go twin, and `LO_IMPL=bash`.
 
 **Two builds from one tree** (`internal/render`, build tag `inprocess`):
-`lo` — *core*, the default `make build` — renders through the pinned
+`lo` (*core*, the default `make build`) renders through the pinned
 `kustomize` binary and the two b-installed exec plugins under `.kustomize/`
 (khelm `ChartRenderer`, the `Secret` plugin), which `lo init toolchain`
 provisions via `b`; `lo-full` (`make build-full`) links the kustomize API and
@@ -43,11 +43,16 @@ proven on the committed kubehz.dev domain; `LO_RENDER=exec` restores the
 subprocess pipeline there). Core keeps the imported Secret generator for the
 registry TLS mint only. The pins that hold the two together live in
 `internal/toolchain/pins.go` and are drift-tested against `go.mod` and the
-`.bin/b.yaml` template — bump them together. Every gate (build, vet, test,
+`.bin/b.yaml` template: bump them together. Every gate (build, vet, test,
 lint, all ten parity harnesses) runs against BOTH builds; the in-process
 render tests are tag-gated (`render_inprocess_test.go`) or skip via
-`render.InProcessAvailable()`. `yq` and `sops` stay subprocesses until the
-same proof exists for them.
+`render.InProcessAvailable()`. The byte-parity tests need the pinned
+`.bin/kustomize` + `.kustomize/` plugins (`b install`, `make -C kustomize
+build`); without them they skip locally and FAIL under `CI=true`. On lo-full
+the bootstrap DAG applies entries one at a time (the in-process render puts
+each entry's env overlay in the process environment; `LO_RENDER=exec`
+restores `LOK8S_BOOTSTRAP_PARALLEL`). `yq` and `sops` stay subprocesses
+until the same proof exists for them.
 
 How to change or port behaviour (mirror the pattern of any `internal/`
 package):
@@ -131,12 +136,12 @@ not framework code. Its imports are ESM and stay relative.
 ## Building & testing
 
 ```bash
-make build                                       # bin/lo — core (stamps internal/assets/lok8s/VERSION)
-make build-full                                  # bin/lo-full — -tags inprocess
-make test test-full vet vet-full lint lint-full  # Go unit + tree-/assets-/pin-drift gates, vet, golangci — BOTH builds
+make build                                       # bin/lo: core (stamps internal/assets/lok8s/VERSION)
+make build-full                                  # bin/lo-full: -tags inprocess
+make test test-full vet vet-full lint lint-full  # Go unit + tree-/assets-/pin-drift gates, vet, golangci, for BOTH builds
 bash hack/sync-legacy-assets.sh                  # after editing internal/assets/lok8s/**: resync the .lok8s twin
-bash hack/parity-test.sh "$PWD/bin/lo"           # one parity harness (ten exist; run each against bin/lo AND bin/lo-full — absolute path)
-./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …) — the bash side needs it
+bash hack/parity-test.sh "$PWD/bin/lo"           # one parity harness (ten exist; run each against bin/lo AND bin/lo-full, absolute path)
+./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …); the bash side needs it
 ./.bin/argsh test tests/unit/ tests/operator/    # bats suites for the frozen tree
 npm run lint                                     # shellcheck + argsh-lint via hack/lint-shell.sh (covers .lok8s/legacy too)
 ```

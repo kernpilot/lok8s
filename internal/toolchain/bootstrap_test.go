@@ -209,6 +209,83 @@ func TestBootstrapRefusesPlainHTTP(t *testing.T) {
 	}
 }
 
+// The redirect guard, end to end: an https server that answers the asset
+// with a redirect to plain http. The default client refuses the hop
+// (refuseNonHTTPSRedirect) and nothing is installed. The test client only
+// swaps the transport (the httptest CA) — the policy under test is the
+// production one.
+func TestBootstrapRefusesRedirectDowngradeToHTTP(t *testing.T) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Redirect(w, r, "http://127.0.0.1:9/b-linux-amd64.tar.gz", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	rel := &Release{Version: "1.0.0", BaseURL: srv.URL, Assets: map[string]string{"b-linux-amd64.tar.gz": strings.Repeat("a", 64)}}
+	base := t.TempDir()
+	bin := filepath.Join(base, ".bin")
+	r := &recRunner{}
+	client := &http.Client{Transport: srv.Client().Transport, CheckRedirect: refuseNonHTTPSRedirect}
+	err := Bootstrap(context.Background(), BootstrapOptions{Base: base, Bin: bin, Out: &bytes.Buffer{}, Runner: r, Client: client, Release: rel, GOOS: "linux", GOARCH: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "non-https URL refused") {
+		t.Fatalf("downgrade redirect followed: %v", err)
+	}
+	if atomic.LoadInt32(&hits) != 1 {
+		t.Fatalf("expected exactly the first (https) request, got %d", hits)
+	}
+	if _, statErr := os.Stat(filepath.Join(bin, "b")); statErr == nil {
+		t.Fatal("b installed despite the refused redirect")
+	}
+	if len(r.cmds) != 0 {
+		t.Fatal("b install ran after a refused download")
+	}
+	// The policy on its own: https hops pass, a ten-deep chain does not.
+	okReq, _ := http.NewRequest(http.MethodGet, "https://example.invalid/x", nil)
+	if err := refuseNonHTTPSRedirect(okReq, nil); err != nil {
+		t.Fatalf("https redirect refused: %v", err)
+	}
+	if err := refuseNonHTTPSRedirect(okReq, make([]*http.Request, 10)); err == nil {
+		t.Fatal("ten redirects accepted")
+	}
+	// And the production client is wired to it.
+	if (&BootstrapOptions{}).client().CheckRedirect == nil {
+		t.Fatal("default client has no redirect policy")
+	}
+}
+
+// An oversized `b` member is refused, never silently truncated into a
+// broken binary: both the header's claim and the actual body are checked
+// against the cap.
+func TestExtractBRefusesOversizedMember(t *testing.T) {
+	saved := maxTarballBytes
+	maxTarballBytes = 16
+	t.Cleanup(func() { maxTarballBytes = saved })
+	tb := fakeTarball(t, map[string]string{"b": strings.Repeat("x", 32)})
+	archive := filepath.Join(t.TempDir(), "b.tar.gz")
+	if err := os.WriteFile(archive, tb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "b")
+	err := extractB(archive, dst)
+	if err == nil || !strings.Contains(err.Error(), "larger than the 16-byte cap") {
+		t.Fatalf("oversized member accepted: %v", err)
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		t.Fatal("a truncated b was installed")
+	}
+	if _, statErr := os.Stat(dst + ".tmp"); statErr == nil {
+		t.Fatal("stage left behind")
+	}
+	// Under the cap it still extracts.
+	small := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n"})
+	if err := os.WriteFile(archive, small, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractB(archive, dst); err != nil || !isExecutable(dst) {
+		t.Fatalf("small member: %v", err)
+	}
+}
+
 // TestPinnedReleaseShape: the production pin is well-formed — a version,
 // an https base, 64-hex sums for both linux architectures lo ships.
 func TestPinnedReleaseShape(t *testing.T) {

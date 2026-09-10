@@ -107,13 +107,13 @@ binaries:
   binary `lo` core execs; the `secrets.lok8s.dev` Secret plugin is the
   `kustomize-secret-<os>-<arch>` asset of **this `lo`'s own release**. All
   three live in `internal/toolchain/pins.go` and `go test` fails when
-  `go.mod` or the template disagrees — the exec render (core) and the
+  `go.mod` or the template disagrees. The exec render (core) and the
   in-process render (full) stay byte-identical because the numbers cannot
   drift apart.
 - **Groups** are a lok8s convention (`b` ignores the key): `core` is always
   on, `local` by default, `cloud` (kubeone + hcloud) on
   `--groups core,local,cloud`. Entries outside the selection are emitted
-  commented out — uncomment and `.bin/b install`.
+  commented out: uncomment and `.bin/b install`.
 - **Never overwritten.** An existing `.bin/b.yaml` stays byte-for-byte;
   `lo init toolchain` prints a unified diff against the template and the
   instructions, and `lo doctor` reports which installed tool differs from a
@@ -122,13 +122,13 @@ binaries:
   `ssh-to-age`. The Go binary links or reimplements them (sops and
   ssh-to-age as libraries; the split-mode `yq`/`sops` subprocesses are
   contributor/`LO_IMPL=bash` territory today). To run the frozen bash
-  implementation in a consumer project, add — as the file's header
-  says —
+  implementation in a consumer project, add (as the file's header
+  says)
   `github.com/arg-sh/argsh: {asset: argsh, onPost: "${B_BIN} builtin ${B_EVENT}"}`,
   `yq: {}`, `jq: {}`, `renvsubst: {alias: envsubst}`, `sops: {}`,
   `ssh-to-age: {}` and run `.bin/b install`.
 - **`b` itself** is installed into `.bin/b` from its pinned release tarball
-  (`b-<os>-<arch>.tar.gz` — the asset b's own installer resolves), verified
+  (`b-<os>-<arch>.tar.gz`, the asset b's own installer resolves), verified
   against the SHA-256 recorded from that release's `checksums.txt` before
   extraction. No `curl | sh`. `--dry-run` shows the URL and the sum.
   `GITHUB_TOKEN` is passed through when set (public sources need none). b
@@ -158,7 +158,7 @@ side.
 **For a consumer** the file above is the whole toolchain; `lo doctor` tells
 you when a pin is missing or off. **For a contributor** everything in the
 right column is needed, because the parity harnesses and the bats suites
-really run the argsh side — `b install` in a clone of the repo gets it.
+really run the argsh side; `b install` in a clone of the repo gets it.
 
 **Intended end state** (planned; each step is sequenced separately): `argsh`, `jq` and `bats` leave the contributor `core` group
 once the provider plugins have Go twins and the shipped `.mcp.json` targets
@@ -167,7 +167,7 @@ encrypts through the library; `yq` stays until the renderer-drift rule in
 [The Go `lo` binary](/reference/go-migration#external-tools-still-exec-d)
 is satisfied. `kustomize`, `khelm`, `kind`, `tilt`, `mkcert`, `kubectl` and
 the driver CLIs stay: they are the tools lok8s orchestrates, not
-implementation details — and on `lo` core the first two are the renderer.
+implementation details, and on `lo` core the first two are the renderer.
 
 ## Install directory
 

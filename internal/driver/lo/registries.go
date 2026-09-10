@@ -19,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
 	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
@@ -125,7 +126,7 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	var pluginBin string
 	if execPlugin {
 		pluginHome := envOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
-		pluginBin = filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
+		pluginBin = filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))
 		// The Secret plugin mints the cert. It's needed across the lok8s
 		// flow anyway, so build it on demand if it's missing and we can
 		// (bash probed `declare -F kustomize::build`; the Go seam is the

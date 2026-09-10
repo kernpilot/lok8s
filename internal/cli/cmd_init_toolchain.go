@@ -65,12 +65,22 @@ func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 			}
 			base := dir
 			if base == "" {
-				base = paths.Base
+				// The project the USER STANDS IN, never the ambient one: with
+				// PATH_BASE exported (direnv/mise shells) paths.Base is
+				// whatever project that variable points at — the leak `lo
+				// init project` closed (cmd_init.go) applies here too, and a
+				// toolchain installed into the wrong tree is worse than a
+				// stray mise.toml.
+				cwd, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				base = config.FindProjectRoot(cwd)
 			}
 			return runInitToolchain(cmd, base, groups, dryRun, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
-	cmd.Flags().StringVarP(&dir, "path", "p", "", "Project directory (default: the current project root)")
+	cmd.Flags().StringVarP(&dir, "path", "p", "", "Project directory (default: the nearest project root above the working directory, else the working directory)")
 	cmd.Flags().StringVar(&groupsFlag, "groups", strings.Join(toolchain.DefaultGroups, ","), "Groups to activate (core,local,cloud; core is implied)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Print what would be written, downloaded and run; touch nothing")
 	return cmd

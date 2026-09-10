@@ -169,7 +169,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 		pluginHome = filepath.Join(paths.Base, ".kustomize")
 	}
 	doctorOK(out, "KUSTOMIZE_PLUGIN_HOME="+pluginHome)
-	if isExecutableFile(filepath.Join(pluginHome, "secrets.lok8s.dev/v1/secret/Secret")) {
+	if isExecutableFile(filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))) {
 		doctorOK(out, "secrets.lok8s.dev plugin built")
 	} else {
 		doctorWarn(out, "secrets.lok8s.dev plugin not built (run: lo kustomize build)")
@@ -184,7 +184,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
-	if mkcert, ok := lookPathIn(path, "mkcert"); ok {
+	if mkcert, ok := toolchain.LookPath(path, "mkcert"); ok {
 		caroot := doctorCommandOutput(mkcert, "-CAROOT")
 		if caroot != "" && fileExists(filepath.Join(caroot, "rootCA.pem")) {
 			doctorOK(out, "local CA present ("+caroot+")")
@@ -302,7 +302,7 @@ func doctorBad(w io.Writer, msg string)  { fmt.Fprintf(w, "  \033[31m✗\033[0m 
 // doctorTool checks one tool on PATH (bash: doctor::_tool via `command -v`).
 // Returns false when required and missing.
 func doctorTool(w io.Writer, path, name string, required bool, purpose string) bool {
-	if _, ok := lookPathIn(path, name); ok {
+	if _, ok := toolchain.LookPath(path, name); ok {
 		doctorOK(w, name+" — "+purpose)
 		return true
 	}
@@ -337,21 +337,6 @@ func doctorPATH(p *config.Paths) string {
 	return path
 }
 
-// lookPathIn resolves a tool on an explicit PATH value (`command -v`
-// semantics: first executable file wins).
-func lookPathIn(path, tool string) (string, bool) {
-	for _, dir := range strings.Split(path, string(os.PathListSeparator)) {
-		if dir == "" {
-			dir = "."
-		}
-		candidate := filepath.Join(dir, tool)
-		if isExecutableFile(candidate) {
-			return candidate, true
-		}
-	}
-	return "", false
-}
-
 func isExecutableFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
@@ -362,7 +347,7 @@ var bashVersionRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)`)
 // doctorBashVersion reports the major.minor of the bash the prepared PATH
 // resolves (bash: BASH_VERSINFO of the running interpreter — same binary).
 func doctorBashVersion(path string) (int, int, bool) {
-	bash, ok := lookPathIn(path, "bash")
+	bash, ok := toolchain.LookPath(path, "bash")
 	if !ok {
 		return 0, 0, false
 	}
@@ -382,7 +367,7 @@ func doctorBashVersion(path string) (int, int, bool) {
 // doctorEnvsubstFlavor mirrors template::envsubst_flavor: "gnu" when
 // `envsubst --version` mentions GNU gettext, else "other".
 func doctorEnvsubstFlavor(path string) string {
-	envsubst, ok := lookPathIn(path, "envsubst")
+	envsubst, ok := toolchain.LookPath(path, "envsubst")
 	if !ok {
 		return "other"
 	}
@@ -431,7 +416,7 @@ func doctorProviderSection(paths *config.Paths, d, path string, out, stderr io.W
 		return
 	}
 
-	bash, ok := lookPathIn(path, "bash")
+	bash, ok := toolchain.LookPath(path, "bash")
 	if !ok {
 		return // no bash → the bash-side diagnosis cannot run at all
 	}

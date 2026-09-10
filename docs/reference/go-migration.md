@@ -95,30 +95,34 @@ The binary ships in **two builds from one tree**, selected by the
 | Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo init toolchain`](cli.md#lo-init) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
 | `lo --version` | `lo version 0.3.0 (core)` | `lo version 0.3.0 (full)` |
 
-Everything else — every command, the parity harnesses, the tests — is the
+Everything else (every command, the parity harnesses, the tests) is the
 same code. `go.mod` keeps khelm and the kustomize API for both; only the
 tag-gated imports decide what is linked. The pins that keep the two
 byte-identical live in **`internal/toolchain/pins.go`**: `KustomizeAPI`
 (`v0.21.1`, what lo-full links) ↔ `KustomizeCLI` (`v5.8.1`, what core execs
-and the b.yaml template pins — the `kustomizeAPIToCLI` table encodes the
+and the b.yaml template pins; the `kustomizeAPIToCLI` table encodes the
 release pairing), `KhelmVersion` (`2.8.0`: the library and the
 `ChartRenderer` binary) and `HelmVersion` (`3.21.2`). `go test
 ./internal/toolchain/` fails when `go.mod`'s kustomize/api, khelm or helm
 version moves without the pins, when the API↔CLI table lacks the pinned
-API, or when the generated `.bin/b.yaml` template stops carrying the pins —
-bumping any one side alone is a red build.
+API, or when the generated `.bin/b.yaml` template stops carrying the pins.
+Bumping any one side alone is a red build. The plugin paths under
+`.kustomize/` (`SecretPluginRel`, `ChartRendererPluginRel`) live in the
+same file; the render, the doctor and the registry mint read them from there.
 
 CI runs every gate against both builds (`go build`/`vet`/`test`/golangci
 with and without `-tags inprocess`; all ten parity harnesses against
-`bin/lo` — the exec path, i.e. the same pinned kustomize + plugins the bash
-side runs — and against `bin/lo-full`; the goreleaser snapshot asserts both
-archives). Locally: `make build build-full test test-full vet vet-full lint
-lint-full`.
+`bin/lo`, the exec path, i.e. the same pinned kustomize + plugins the bash
+side runs, and against `bin/lo-full`; the goreleaser snapshot asserts both
+archives). The toolchain is installed before the Go tests so the
+byte-parity tests in `internal/render` run against the pinned binaries;
+under `CI=true` a missing binary fails them instead of skipping. Locally:
+`make build build-full test test-full vet vet-full lint lint-full`.
 
 ### External tools still exec'd
 
 The port swapped shell for Go and, since phase 7, the kustomize renderer
-too — on the lo-full build (see [In-process rendering](#in-process-rendering)
+too, on the lo-full build (see [In-process rendering](#in-process-rendering)
 below); lo core keeps kustomize as a subprocess by design. The following
 remain subprocesses, resolved through the project's `.bin/` first and `PATH`
 second (`internal/execx.Look`):
@@ -134,22 +138,22 @@ second (`internal/execx.Look`):
 *renderer-drift rule*: a swap is allowed only once byte-parity with the
 pinned tool's output is proven for the committed domains, not just the parity
 fixtures (`internal/build/split.go` carries the TODO). The CRD render
-(`lo crds`) was the first precedent — a native `yaml.Node` transform whose
+(`lo crds`) was the first precedent: a native `yaml.Node` transform whose
 output is byte-identical to the former `yq eval` render, with the committed
 CRDs as the parity fixture. The kustomize render is the second (below).
 
 ### In-process rendering
 
-Phase 7 (WP3 + WP4) moved `kustomize build` — and both exec generators every
-lok8s render depends on — into the binary; since the core/full split this
+Phase 7 (WP3 + WP4) moved `kustomize build`, and both exec generators every
+lok8s render depends on, into the binary; since the core/full split this
 is the **lo-full** build (`-tags inprocess`). There, `lo build`, the
 bootstrap engine's addon render (`internal/addons`), the KubeOne driver's
 addon staging, the legacy `lo k8s` paths and the Lo driver's registry TLS
 mint no longer exec `kustomize`, `khelm` or the `Secret` plugin, and need
 neither a `.kustomize/` directory nor `KUSTOMIZE_PLUGIN_HOME`. (On lo core
-the registry TLS mint is the one piece that stays in-process — the imported
-generator — while every kustomize render execs the pinned binary.) The
-output is byte-identical to the exec pipeline's — that was the gate, not a
+the registry TLS mint is the one piece that stays in-process, the imported
+generator, while every kustomize render execs the pinned binary.) The
+output is byte-identical to the exec pipeline's; that was the gate, not a
 goal.
 
 **What runs where** (`internal/render`):
@@ -163,25 +167,34 @@ goal.
 **The self-exec plugin home.** kustomize's exec-plugin protocol is a
 subprocess: `<pluginhome>/<group>/<version>/<kind>/<Kind> <cfgfile>` run in
 the kustomization directory with `KUSTOMIZE_PLUGIN_CONFIG_STRING` in the
-environment. The binary keeps that protocol — nothing in the kustomize API
-is patched — and points it at itself: on the first render of a process
+environment. The binary keeps that protocol (nothing in the kustomize API
+is patched) and points it at itself: on the first render of a process
 `internal/render` creates a temp plugin home holding the two plugin paths
 as symlinks to `os.Executable()` (a copy where symlinks are unavailable),
-sets `KUSTOMIZE_PLUGIN_HOME` to it for the duration of the run, and
+sets `KUSTOMIZE_PLUGIN_HOME` to it once for the rest of the process (the
+kustomize API reads the plugin root from that variable only; a per-render
+set/restore would race other goroutines), and
 `main` dispatches on `argv[0]` **before anything else** (`render.DispatchPlugin`:
 `…/secret/Secret` → the imported generator, `…/chartrenderer/ChartRenderer`
 → the khelm library). The child is therefore `lo` again, started under the
 plugin's name; a non-zero exit fails the build with the child's stderr in
 the message exactly as before (`secret plugin: …`, `khelm: …`). The home is
-removed on exit (`render.Cleanup`).
+removed on exit (`render.Cleanup`, which also restores the caller's
+`KUSTOMIZE_PLUGIN_HOME`); the rc passthroughs (`tilt ci`, `tilt status`,
+`image list`, `deploy`, a bash driver) exit through the same cleanup.
 
 The per-render environment the exec pipeline handed to the kustomize child
 (`KUBECONFIG`, `KHELM_TRUST_ANY_REPO=true`, `LOK8S_SECRETS_DISABLE`, the
 toolchain on `PATH`, an addon entry's `env:` overrides) is `render.Options.Env`.
 The plugin children inherit the process environment, so the overlay is
 installed in it for the duration of the run and restored afterwards, under
-a package mutex — concurrent renders (the bootstrap DAG) serialize on the
-render only; the apply and wait phases stay parallel.
+a package mutex. The mutex serializes renders only: a goroutine that reads
+the environment or starts a child (kubectl via `execx`) while a render is
+in flight would inherit that render's overlay. The bootstrap DAG therefore
+applies entries one at a time when the in-process renderer is active
+(`render.InProcessActive`; `LOK8S_BOOTSTRAP_PARALLEL` is ignored with a
+debug line saying so); `LO_RENDER=exec` and lo core keep the parallel DAG,
+because there the overlay rides the kustomize child's own environment.
 
 **Chart cache.** `helm.NewHelm()` reads the same `HELM_*` environment the
 khelm binary read, so chart downloads and repository indexes land in the
@@ -201,11 +214,11 @@ value`).
 
 **The gate** (all held at the switch, 2026-09-03): `hack/parity-build.sh`
 green (bash exec vs Go in-process, byte-diffed); kubehz-cluster's committed
-`kubehz.dev` — 244 documents, the Secret generator cache-first, 20+ khelm
-charts, envsubst — `render unchanged` with identical SHA-256 under the
+`kubehz.dev` (244 documents, the Secret generator cache-first, 20+ khelm
+charts, envsubst) `render unchanged` with identical SHA-256 under the
 default and under `LO_RENDER=exec`, and still `render unchanged` with
 `KUSTOMIZE_PLUGIN_HOME=/nonexistent` (where the exec pipeline fails to find
-its plugins — the proof the in-process dispatch was taken);
+its plugins: the proof the in-process dispatch was taken);
 `internal/render`'s tests byte-compare the in-process render with the
 pinned binaries in the repo's `.bin`/`.kustomize` for a plain
 kustomization, the Secret generator and a local-chart `ChartRenderer`;
@@ -213,16 +226,16 @@ kustomization, the Secret generator and a local-chart `ChartRenderer`;
 signature, key match) against a throwaway CAROOT.
 
 What did **not** move: `yq` (split-mode transforms, `lo env services`) and
-`sops` — WP5. `lo kustomize {build,test,clean,list}` still manages the
+`sops` (WP5). `lo kustomize {build,test,clean,list}` still manages the
 standalone plugin under `.kustomize/` for the frozen tree (and for a core
 build without `b`), and `lo doctor` still reports `KUSTOMIZE_PLUGIN_HOME` /
 the built plugin because `LO_IMPL=bash`, the provider plugins, lo core and
 `LO_RENDER=exec` need them (that text is unchanged; `hack/parity-configure.sh`
-diffs it — the pinned-toolchain section doctor adds is gated on the
+diffs it; the pinned-toolchain section doctor adds is gated on the
 `lo init toolchain` marker or `--toolchain`, so the diff stays strict).
 `kubectl kustomize` in `lo kubehz deploy` is kubectl's embedded kustomize,
 not the pinned one, in both implementations. The in-process render grew the
-binary from 49 MB to 123 MB (helm + client-go + the kustomize API) — which
+binary from 49 MB to 123 MB (helm + client-go + the kustomize API), which
 is why it is the `lo-full` build and `lo` core stays at ~50 MB with the
 exec pipeline; the root module's `go` directive is `1.26.0` because khelm
 v2.8.0 requires it.
@@ -232,7 +245,7 @@ v2.8.0 requires it.
 Phase 7 / WP1 (done). The framework's first-party **data** ships inside
 the binary; a project no longer needs a synced `.lok8s/` tree for it.
 
-**What is embedded** — `internal/assets` embeds a committed mirror,
+**What is embedded.** `internal/assets` embeds a committed mirror,
 `internal/assets/lok8s/**` (113 files, ~168 KB):
 
 | Mirror path | Content | Materialization unit |
@@ -248,11 +261,14 @@ the binary; a project no longer needs a synced `.lok8s/` tree for it.
 The embedded copy is canonical. The repo's `.lok8s/**` twin stays (the
 frozen bash implementation and the parity harnesses read it) and is held
 byte-identical by `hack/sync-legacy-assets.sh` (mirror → `.lok8s`;
-`--from-legacy` the other way; `--check` diffs) and the Go test
+`--from-legacy` the other way; `--check` diffs; it refuses to replace a
+subtree that holds untracked files) and the Go test
 `TestEmbeddedMirrorMatchesLegacyTree`, which fails on any divergence in
-either direction.
+either direction. The subtree list is kept in the script and in
+`drift_test.go`; `TestMirroredListMatchesSyncScript` pins the two to each
+other.
 
-**Resolver and precedence** — `assets.Resolve(paths, rel)` returns the
+**Resolver and precedence.** `assets.Resolve(paths, rel)` returns the
 on-disk path for a rel like `addons/cilium` or
 `drivers/lo/cluster/registry`: the project's `.lok8s/<rel>` when it
 exists (whatever its content), else the embedded copy. `assets.Peek` is the
@@ -265,14 +281,16 @@ twin parsers in `internal/lint` and `internal/audit`, which peek), the
 template, the CAPI templates, the inventory CRD, the chat defaults, and
 the version (`assets.Version()`: ldflags, else the embedded `VERSION`).
 What does NOT go through it, on purpose: the bash seams (`.lok8s/lo`,
-`.lok8s/drivers/<name>/main`, `.lok8s/providers/*`) — those are the frozen
-implementation, not assets — and `lo crds generate`'s write of the
+`.lok8s/drivers/<name>/main`, `.lok8s/providers/*`), which are the frozen
+implementation, not assets, and `lo crds generate`'s write of the
 `.lok8s` CRD mirror, which is a generator output in this repo.
 
-**Eject on first use** (the default) — when a consumer needs an asset and
+**Eject on first use** (the default). When a consumer needs an asset and
 the project holds no copy, the whole unit is written into `.lok8s/<unit>/`
-(atomically: a sibling temp dir renamed into place) with a `.lo-origin`
-marker and one `[assets] ejected <rel> -> .lok8s/<rel>` line on stderr.
+(atomically: a sibling temp dir renamed into place; when two processes
+race, the loser finds the unit in place and drops its stage) with a
+`.lo-origin` marker and one `[assets] ejected <rel> -> .lok8s/<rel>` line
+on stderr.
 Read-only commands (`lint`, `audit`, the `addons` listing, `assets`
 itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
 (the embedded copy is served from a per-run temp dir, nothing is written);
@@ -288,20 +306,28 @@ files:
   values.yaml: sha256:…
 ```
 
-**Three-way diff** — `lo assets diff` classifies every file of a unit
+**Three-way diff.** `lo assets diff` classifies every file of a unit
 from ORIGIN (marker) vs LOCAL vs EMBEDDED: `unchanged`, `local modified`,
 `lo updated`, `both` (conflict), `local-only`, `builtin-only`; a copy with
 no marker (a tree vendored by `b env sync`) classifies its differences as
 `local modified` because nothing proves otherwise. `lo assets update`
 applies the embedded copy only when local == origin for every file (else
-`--force`). The full surface, the state table and the JSON shape are in
+`--force`); a copy already identical to the embedded unit is in sync,
+marker or not. The full surface, the state table and the JSON shape are in
 the [CLI reference](/reference/cli#lo-assets).
 
-**Project marker** — `config.ResolvePaths` recognizes a project by
-`clusters/` or `lok8s.yaml` (what `lo init project` writes); `.lok8s/lo`
-stays a fallback marker during the coexistence with the frozen tree.
+**Project marker.** `config.ResolvePaths` recognizes a project by
+`clusters/` or a `kind: Project` `lok8s.yaml` (what `lo init project`
+writes). A service's `lok8s.yaml` (`kind: Service`, one per submodule in
+kubehz-cluster) is not a marker: from inside a service directory the
+walk-up continues to the umbrella project. `.lok8s/lo` stays a fallback
+marker during the coexistence with the frozen tree. `config.FindProjectRoot`
+applies the same rules from an explicit directory without consulting
+`PATH_BASE`; `lo init project` and `lo init toolchain` resolve their default
+through it, so an ambient project from a direnv/mise shell is never the
+target.
 
-**Parity** — the bash implementation reads `.lok8s/**` from disk and has
+**Parity.** The bash implementation reads `.lok8s/**` from disk and has
 no embedded copy, so `lo assets` has no twin and no parity harness (its
 gate is `go test ./internal/assets/ ./internal/cli/`). Every harness
 gives its synthetic project a full `.lok8s` tree, so precedence picks the

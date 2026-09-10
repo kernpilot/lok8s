@@ -27,11 +27,14 @@ test.describe('Example — public @smoke', () => {
     expect(body.length).toBeGreaterThan(0)
   })
 
-  test('API is reachable (gated example)', async ({ api, caps }) => {
-    test.skip(!caps.canAuth && false, 'public health needs no auth — this is just a shape example')
+  test('authenticated API responds (gated example)', async ({ api, caps }) => {
+    // A REAL gate: without a token (caps.canAuth) the client sends no
+    // Authorization header, so the test skips with a reason instead of
+    // failing on an environment that cannot exercise it yet.
+    test.skip(!caps.canAuth, 'authenticated API not exercisable here: set LOK8S_TEST_TOKEN or LOK8S_TEST_CAN_AUTH=true')
     const res = await api.get('/api/health')
     // Many apps expose /api/health; if yours does not, point this at a real
-    // public endpoint or delete the test.
+    // (bearer-protected) endpoint or delete the test.
     expect([200, 404]).toContain(res.status)
   })
 })

@@ -4,13 +4,17 @@
 // derived via `: "${PATH_BASE:=...}"` chains. Precedence for every path:
 // explicit env var > derivation from the project base. The base itself is
 // env PATH_BASE > nearest ancestor of the working directory that carries a
-// project marker (`clusters/`, `lok8s.yaml`, or — during the coexistence
-// with the frozen tree — `.lok8s/lo`) > the working directory.
+// project marker (`clusters/`, a `kind: Project` `lok8s.yaml`, or — during
+// the coexistence with the frozen tree — `.lok8s/lo`) > the working
+// directory.
 package config
 
 import (
 	"os"
 	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Paths is the resolved on-disk layout of a lok8s project.
@@ -61,6 +65,16 @@ func ResolvePaths() (*Paths, error) {
 	return p, nil
 }
 
+// FindProjectRoot walks up from dir to the nearest directory that carries
+// a project marker (the same rules ResolvePaths applies) WITHOUT consulting
+// the PATH_* environment, and falls back to dir itself. Commands that must
+// act where the user stands rather than in the ambient project (an
+// exported PATH_BASE from a direnv/mise shell points at whatever project
+// that shell was opened in) resolve their default through this.
+func FindProjectRoot(dir string) string {
+	return findBase(dir)
+}
+
 // findBase walks up from dir looking for a directory that carries a
 // project marker. Falls back to dir itself.
 func findBase(dir string) string {
@@ -77,19 +91,56 @@ func findBase(dir string) string {
 }
 
 // isProjectRoot recognizes a lok8s project by `clusters/` (a directory) or
-// `lok8s.yaml` (the project file `lo init project` writes) — a project no
-// longer needs a synced .lok8s tree since the eject model. `.lok8s/lo`
-// stays a marker for the coexistence period (a project that vendors the
-// frozen tree but keeps its clusters elsewhere via PATH_CLUSTERS).
+// a `lok8s.yaml` that IS the project file `lo init project` writes (`kind:
+// Project`) — a project no longer needs a synced .lok8s tree since the
+// eject model. A service's `lok8s.yaml` (`kind: Service`, one per
+// deployable service directory) is NOT a marker: every kubehz-cluster
+// submodule carries one, and `cd <service> && lo …` must keep walking up
+// to the umbrella project. `.lok8s/lo` stays a marker for the coexistence
+// period (a project that vendors the frozen tree but keeps its clusters
+// elsewhere via PATH_CLUSTERS).
 func isProjectRoot(d string) bool {
 	if info, err := os.Stat(filepath.Join(d, "clusters")); err == nil && info.IsDir() {
 		return true
 	}
-	if info, err := os.Stat(filepath.Join(d, "lok8s.yaml")); err == nil && !info.IsDir() {
+	if isProjectFile(filepath.Join(d, "lok8s.yaml")) {
 		return true
 	}
 	_, err := os.Stat(filepath.Join(d, ".lok8s", "lo"))
 	return err == nil
+}
+
+// ProjectKind is the `kind` of the project-root lok8s.yaml.
+const ProjectKind = "Project"
+
+// isProjectFile reports whether path is a regular file parsing as a
+// `kind: Project` document. Unreadable or malformed files are not markers.
+func isProjectFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Kind string `yaml:"kind"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	return doc.Kind == ProjectKind
+}
+
+// RelTo prints p relative to base when it lives inside it, else p as is —
+// the one spelling of "show a project path the way the user sees it"
+// (assets, toolchain and the cli all print paths this way).
+func RelTo(base, p string) string {
+	if rel, err := filepath.Rel(base, p); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+		return rel
+	}
+	return p
 }
 
 func envOr(key, fallback string) string {

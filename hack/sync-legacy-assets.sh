@@ -38,9 +38,23 @@ esac
 
 # copy_tree SRC DST — replace DST with a byte-identical copy of SRC (a file
 # or a directory). Ejected .lo-origin markers never belong to either tree.
+#
+# The replace is a wipe + copy, so anything under DST that git does not
+# track would go with it. Refuse in that case: an untracked file there is
+# local work (an addon being drafted, a scratch values file), not drift.
 copy_tree() {
   local src="$1" dst="$2"
   [[ -e "${src}" ]] || { echo "error: missing source: ${src}" >&2; return 1; }
+  if [[ -e "${dst}" ]]; then
+    local untracked
+    untracked="$(git -C "${ROOT}" ls-files --others --exclude-standard -- "${dst}" | grep -v '/\.lo-origin$' || true)"
+    if [[ -n "${untracked}" ]]; then
+      echo "error: refusing to replace ${dst#"${ROOT}"/}: untracked files would be deleted:" >&2
+      sed 's/^/  /' <<<"${untracked}" >&2
+      echo "       commit, move or delete them first" >&2
+      return 1
+    fi
+  fi
   rm -rf "${dst}"
   mkdir -p "$(dirname "${dst}")"
   cp -R "${src}" "${dst}"

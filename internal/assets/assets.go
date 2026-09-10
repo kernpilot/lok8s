@@ -390,20 +390,36 @@ func eject(p *config.Paths, u Unit) error {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dest); err != nil {
-		_ = os.RemoveAll(tmp)
+	won, err := renameInto(tmp, dest)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(Stderr, "[assets] ejected %s -> %s (review with: lo assets diff %s)\n", u.Rel, relToBase(p, dest), u.Rel)
+	if !won {
+		return nil // another lo ejected the same unit first; precedence holds
+	}
+	fmt.Fprintf(Stderr, "[assets] ejected %s -> %s (review with: lo assets diff %s)\n", u.Rel, config.RelTo(p.Base, dest), u.Rel)
 	return nil
 }
 
-// relToBase prints dest relative to the project root when it lives there.
-func relToBase(p *config.Paths, dest string) string {
-	if rel, err := filepath.Rel(p.Base, dest); err == nil && !strings.HasPrefix(rel, "..") {
-		return rel
+// renameInto moves the staged unit tmp to dest. Two lo processes ejecting
+// the same unit at once both stage a copy and race on the rename; the
+// loser's rename fails with EEXIST/ENOTEMPTY (dest is a populated directory
+// by then). That is not an error — the unit is on disk, byte-identical, and
+// precedence says never overwrite — so the loser drops its stage and
+// reports won=false. Any other failure is returned as is; tmp is removed on
+// every path but success.
+func renameInto(tmp, dest string) (won bool, err error) {
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.RemoveAll(tmp)
+		// syscall.Errno maps both EEXIST and ENOTEMPTY onto fs.ErrExist.
+		if errors.Is(err, fs.ErrExist) {
+			if info, statErr := os.Stat(dest); statErr == nil && info.IsDir() {
+				return false, nil
+			}
+		}
+		return false, err
 	}
-	return dest
+	return true, nil
 }
 
 // writeUnit copies the embedded unit's files below root (0644/0755).

@@ -68,7 +68,7 @@ func defaultDriversDeps(paths *config.Paths) driversDeps {
 		lookup: driver.Get,
 		runner: execx.NewRunner(paths),
 		shim:   func(argv []string) error { return Shim(paths, argv) },
-		exit:   os.Exit,
+		exit:   exitNow,
 	}
 }
 

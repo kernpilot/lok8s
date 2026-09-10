@@ -179,7 +179,7 @@ func newTiltCI(paths *config.Paths) *cobra.Command {
 			if rc != 0 {
 				// tilt ci's own exit status IS the contract ("exits with real
 				// status") — pass it through instead of collapsing to 1.
-				os.Exit(rc)
+				exitNow(rc)
 			}
 			return nil
 		},
@@ -215,7 +215,7 @@ func newTiltStatus(paths *config.Paths) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ambientMainEnv(cmd, paths)
 			if rc := tiltContext(cmd, paths).Status(cmd.Context()); rc != 0 {
-				os.Exit(rc) // `tilt doctor` rc passthrough
+				exitNow(rc) // `tilt doctor` rc passthrough
 			}
 			return nil
 		},

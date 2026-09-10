@@ -100,6 +100,19 @@ func CurrentMode() (Mode, error) {
 	}
 }
 
+// InProcessActive reports whether Build renders in-process in this
+// process: the lo-full build with LO_RENDER unset or "inprocess". False on
+// core, under LO_RENDER=exec, and for a rejected LO_RENDER (Build reports
+// that itself). Callers that fan work out around Build (the bootstrap DAG)
+// consult it to run serially: an in-process render installs its Options.Env
+// overlay in the process environment for the duration of the run, and a
+// concurrent goroutine reading os.Getenv or snapshotting os.Environ for a
+// child would inherit another entry's variables.
+func InProcessActive() bool {
+	mode, err := CurrentMode()
+	return err == nil && mode == ModeInProcess
+}
+
 // SecretInProcess reports whether the imported secrets.lok8s.dev generator
 // runs inside this process for the registry TLS mint: true unless
 // LO_RENDER=exec asks for the subprocess pipeline explicitly. Independent
@@ -148,8 +161,14 @@ type Options struct {
 	// a PATH with the toolchain, per-addon LOK8S_* overrides. In-process
 	// the plugins are children of THIS process, so the overlay is applied
 	// to the process environment for the duration of the run (and
-	// restored afterwards) under a package mutex — concurrent renders
-	// (the bootstrap DAG) serialize on it.
+	// restored afterwards) under a package mutex. The mutex serializes
+	// RENDERS only: it does not isolate other goroutines that read the
+	// environment (os.Getenv) or snapshot it for a child (execx) while a
+	// render is in flight — they would see this render's overlay. Callers
+	// that run concurrent work around Build must serialize it themselves
+	// when InProcessActive() (the bootstrap DAG drops to one entry at a
+	// time); the exec pipeline has no such constraint, the overlay rides
+	// the child's own environment there.
 	Env []string
 	// Stderr receives what the kustomize child wrote to its stderr: in
 	// exec mode the child's stream, in-process the `Error: …` line the

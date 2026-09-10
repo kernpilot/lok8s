@@ -125,12 +125,46 @@ jobs:
           go vet ./...
           go vet -tags inprocess ./...
 
+      - name: Install toolchain (b → argsh, yq, kustomize, khelm; parity needs the bash lo)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # `argsh builtins install` drops argsh.so into PATH_BIN; without it
+          # the .so landed in the workspace root, .lok8s/lo (PATH_BIN=.bin)
+          # never found it, and the parity run used the pure-bash argsh —
+          # which cannot resolve a middle alias like 'encrypt|enc|e:+', so
+          # `lo secrets set --enc` returned rc 2 on the bash side only.
+          PATH_BIN: ${{ github.workspace }}/.bin
+        run: |
+          # Same pinned-b install as the Bats job (see its comment for why the
+          # binary is pinned rather than resolved via releases/latest).
+          # Runs BEFORE the Go tests on purpose: internal/render's byte-parity
+          # tests (TestBuildInProcessMatchesPinnedBinary*) compare the
+          # in-process render against .bin/kustomize + the .kustomize plugins
+          # b installs here. With the install after the tests they skipped
+          # silently on every CI run; under CI=true they now FAIL when the
+          # toolchain is missing (render_inprocess_test.go: requireToolchain).
+          B_VERSION=4.18.6
+          curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
+          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+          ./.bin/argsh builtins install
+          # The secrets.lok8s.dev Secret exec plugin is built from this tree
+          # (not a b asset in the contributor profile; what `lo kustomize
+          # build` runs): the Secret byte-parity test execs it from
+          # .kustomize/ next to khelm.
+          make -C kustomize build
+
       - name: Test (core + full)
         # Includes the tree-drift gate: the cobra command tree must match the
         # argsh usage list in .lok8s/lo while both implementations exist —
         # and the toolchain pin-drift gate (internal/toolchain: pins.go vs
         # go.mod vs the generated .bin/b.yaml). The in-process render tests
         # only run under the tag; core skips them and exercises the exec seam.
+        # The toolchain is installed above, so the byte-parity tests run
+        # (and fail rather than skip: CI=true is set by Actions).
         run: |
           go test ./...
           go test -tags inprocess ./...
@@ -147,27 +181,6 @@ jobs:
         with:
           version: v2.13.2
           args: --build-tags inprocess
-
-      - name: Install toolchain (b → argsh, yq; parity needs the bash lo)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          # `argsh builtins install` drops argsh.so into PATH_BIN; without it
-          # the .so landed in the workspace root, .lok8s/lo (PATH_BIN=.bin)
-          # never found it, and the parity run used the pure-bash argsh —
-          # which cannot resolve a middle alias like 'encrypt|enc|e:+', so
-          # `lo secrets set --enc` returned rc 2 on the bash side only.
-          PATH_BIN: ${{ github.workspace }}/.bin
-        run: |
-          # Same pinned-b install as the Bats job (see its comment for why the
-          # binary is pinned rather than resolved via releases/latest).
-          B_VERSION=4.18.6
-          curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
-          mkdir -p "${HOME}/.local/bin"
-          tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          b install
-          ./.bin/argsh builtins install
 
       - name: Parity (Go lo vs argsh lo) — core and full
         # Differential run of every ported command against both

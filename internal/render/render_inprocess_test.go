@@ -33,13 +33,26 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(wd, "..", ".."))
 }
 
+// missingToolchain is how the byte-parity tests react to an absent pinned
+// binary: a skip on a developer machine (run `b install` to enable them),
+// a FAILURE under CI (Actions sets CI=true) — the parity gate once skipped
+// silently on every CI run because the toolchain was installed after the
+// Go tests, and a skipped gate looks exactly like a green one.
+func missingToolchain(t *testing.T, what string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("%s — on CI the toolchain must be installed before the Go tests (ci.yml: Install toolchain); the byte-parity gate must not skip", what)
+	}
+	t.Skip(what)
+}
+
 // pinnedKustomize returns the repo's b-managed kustomize binary, skipping
-// the test when it is not installed.
+// the test when it is not installed (failing on CI).
 func pinnedKustomize(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(repoRoot(t), ".bin", "kustomize")
 	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 {
-		t.Skip("pinned kustomize not installed under .bin (b install)")
+		missingToolchain(t, "pinned kustomize not installed under .bin (b install)")
 	}
 	return bin
 }
@@ -54,7 +67,7 @@ func execKustomize(t *testing.T, dir string, enableExec bool, overlay []string, 
 	home := filepath.Join(repoRoot(t), ".kustomize")
 	for _, p := range needPlugins {
 		if info, err := os.Stat(filepath.Join(home, filepath.FromSlash(p))); err != nil || info.Mode()&0o111 == 0 {
-			t.Skipf("pinned plugin %s not installed under .kustomize", p)
+			missingToolchain(t, "pinned plugin "+p+" not installed under .kustomize")
 		}
 	}
 	args := []string{"build", "--enable-alpha-plugins"}
@@ -252,10 +265,8 @@ func TestBuildEnvOverlayReachesPluginAndIsRestored(t *testing.T) {
 	t.Setenv(ModeEnv, "")
 	t.Setenv("PATH_SECRETS", t.TempDir())
 	t.Setenv("RENDER_TEST_VALUE", "parent")
-	for _, k := range []string{"LOK8S_SECRETS_DISABLE", "KUSTOMIZE_PLUGIN_HOME"} {
-		t.Setenv(k, "") // registers the restore
-		os.Unsetenv(k)
-	}
+	t.Setenv("LOK8S_SECRETS_DISABLE", "") // registers the restore
+	os.Unsetenv("LOK8S_SECRETS_DISABLE")
 	dir := secretFixture(t)
 
 	// The overlay reaches the plugin child: the store-free switch makes
@@ -281,8 +292,93 @@ func TestBuildEnvOverlayReachesPluginAndIsRestored(t *testing.T) {
 	if os.Getenv("RENDER_TEST_VALUE") != "parent" {
 		t.Fatalf("overlay not restored: RENDER_TEST_VALUE=%q", os.Getenv("RENDER_TEST_VALUE"))
 	}
-	if _, set := os.LookupEnv("KUSTOMIZE_PLUGIN_HOME"); set {
-		t.Fatal("KUSTOMIZE_PLUGIN_HOME leaked into the process environment")
+}
+
+// KUSTOMIZE_PLUGIN_HOME is a per-process constant for the in-process
+// renderer: set ONCE to the self-exec home (never per render, never
+// restored between renders), and a caller's own value is superseded — the
+// symlinks there are the only plugins this build serves. Cleanup puts the
+// caller's value back.
+func TestBuildPluginHomeIsSetOnceForTheProcess(t *testing.T) {
+	t.Setenv(ModeEnv, "")
+	t.Setenv("PATH_SECRETS", t.TempDir())
+	t.Setenv("RENDER_TEST_VALUE", "x")
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/nowhere/.kustomize")
+	dir := secretFixture(t)
+	for i := range 2 {
+		if _, err := Build(context.Background(), dir, Options{}); err != nil {
+			t.Fatalf("render %d: %v", i, err)
+		}
+		home, err := selfExecPluginHome()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := os.Getenv("KUSTOMIZE_PLUGIN_HOME"); got != home {
+			t.Fatalf("after render %d: KUSTOMIZE_PLUGIN_HOME=%q, want the self-exec home %q", i, got, home)
+		}
+	}
+}
+
+// Two sequential renders with different per-render variables: the second
+// render's plugin child must not see the first render's variable, and the
+// process environment carries neither afterwards. `optional` + `update`
+// entries make the generator omit an unset variable instead of erroring or
+// serving a cached value.
+func TestBuildSequentialRendersDoNotLeakVarsIntoThePluginChild(t *testing.T) {
+	t.Setenv(ModeEnv, "")
+	for _, k := range []string{"LOK8S_USER_A", "LOK8S_USER_B"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"kustomization.yaml": "generators:\n  - secret.yaml\n",
+		"secret.yaml": `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata:
+  name: leak
+  namespace: demo
+env:
+  FROM_A:
+    var: LOK8S_USER_A
+    optional: true
+    update: true
+  FROM_B:
+    var: LOK8S_USER_B
+    optional: true
+    update: true
+`,
+	})
+	render := func(overlay ...string) string {
+		t.Helper()
+		t.Setenv("PATH_SECRETS", t.TempDir())
+		var stderr bytes.Buffer
+		out, err := Build(context.Background(), dir, Options{Env: overlay, Stderr: &stderr})
+		if err != nil {
+			t.Fatalf("Build: %v\n%s", err, stderr.String())
+		}
+		return string(out)
+	}
+	first := render("LOK8S_USER_A=alpha")
+	if !strings.Contains(first, "FROM_A: YWxwaGE=") || strings.Contains(first, "FROM_B") { // base64("alpha")
+		t.Fatalf("first render:\n%s", first)
+	}
+	for _, k := range []string{"LOK8S_USER_A", "LOK8S_USER_B"} {
+		if _, set := os.LookupEnv(k); set {
+			t.Fatalf("%s leaked into the process environment after the first render", k)
+		}
+	}
+	second := render("LOK8S_USER_B=beta")
+	if strings.Contains(second, "FROM_A") {
+		t.Fatalf("the first render's variable reached the second render's plugin child:\n%s", second)
+	}
+	if !strings.Contains(second, "FROM_B: YmV0YQ==") { // base64("beta")
+		t.Fatalf("second render:\n%s", second)
+	}
+	for _, k := range []string{"LOK8S_USER_A", "LOK8S_USER_B"} {
+		if _, set := os.LookupEnv(k); set {
+			t.Fatalf("%s leaked into the process environment after the second render", k)
+		}
 	}
 }
 

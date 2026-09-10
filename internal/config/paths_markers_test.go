@@ -54,6 +54,80 @@ func TestResolvePathsRecognizesEjectModelMarkers(t *testing.T) {
 	}
 }
 
+// A SERVICE's lok8s.yaml (kind: Service — every kubehz-cluster submodule
+// carries one) is not a project marker: `cd <service> && lo …` must keep
+// walking up to the umbrella project instead of resolving Base to the
+// service directory.
+func TestResolvePathsServiceLok8sYAMLIsNotAMarker(t *testing.T) {
+	serviceYAML := "apiVersion: lok8s.dev/v1\nkind: Service\nmetadata:\n  name: api\nspec:\n  build:\n    dockerfile: lok8s.Dockerfile\n"
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"kind Service", serviceYAML},
+		{"no kind", "metadata:\n  name: x\n"},
+		{"malformed", "kind: [\n"},
+		{"empty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			project := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(project, "clusters"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			service := filepath.Join(project, "services", "api")
+			if err := os.MkdirAll(filepath.Join(service, "src"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(service, "lok8s.yaml"), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// From the service dir itself and from below it.
+			for _, wd := range []string{service, filepath.Join(service, "src")} {
+				chdir(t, wd)
+				p, err := ResolvePaths()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := mustEval(p.Base), mustEval(project); got != want {
+					t.Errorf("from %s: Base = %q, want the umbrella project %q", wd, got, want)
+				}
+			}
+		})
+	}
+	// Without any project above it the walk-up falls back to the working
+	// directory, never to the service file's directory by virtue of the file.
+	clearEnv(t)
+	lone := t.TempDir()
+	os.WriteFile(filepath.Join(lone, "lok8s.yaml"), []byte(serviceYAML), 0o644)
+	sub := filepath.Join(lone, "src")
+	os.MkdirAll(sub, 0o755)
+	chdir(t, sub)
+	p, _ := ResolvePaths()
+	if got := mustEval(p.Base); got != mustEval(sub) {
+		t.Errorf("lone service file promoted to a root: Base = %q", got)
+	}
+}
+
+// FindProjectRoot applies the marker rules from an explicit directory and
+// ignores PATH_BASE — the seam for commands that must act where the user
+// stands (lo init toolchain) rather than in the ambient project.
+func TestFindProjectRootIgnoresPathBase(t *testing.T) {
+	elsewhere := t.TempDir()
+	t.Setenv("PATH_BASE", elsewhere)
+	project := t.TempDir()
+	os.WriteFile(filepath.Join(project, "lok8s.yaml"), []byte("apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: p\n"), 0o644)
+	nested := filepath.Join(project, "a", "b")
+	os.MkdirAll(nested, 0o755)
+	if got := FindProjectRoot(nested); got != project {
+		t.Errorf("FindProjectRoot(%s) = %q, want %q", nested, got, project)
+	}
+	bare := t.TempDir()
+	if got := FindProjectRoot(bare); got != bare {
+		t.Errorf("no marker: got %q, want the directory itself %q", got, bare)
+	}
+}
+
 func mustEval(p string) string {
 	out, _ := filepath.EvalSymlinks(p)
 	return out

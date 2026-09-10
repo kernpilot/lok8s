@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -99,7 +98,7 @@ func deployRun(err error) error {
 	}
 	var ee *deploy.ExitError
 	if errors.As(err, &ee) {
-		os.Exit(ee.Code)
+		exitNow(ee.Code)
 	}
 	return err
 }

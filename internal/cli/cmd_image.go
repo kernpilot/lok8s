@@ -104,7 +104,7 @@ func newImageList(paths *config.Paths) *cobra.Command {
 			if rc != 0 {
 				// bash: the function's status is the curl pipeline's (e.g.
 				// curl's 7 on connection-refused) — pass it through.
-				os.Exit(rc)
+				exitNow(rc)
 			}
 			return nil
 		},

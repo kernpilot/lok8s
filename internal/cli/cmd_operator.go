@@ -136,8 +136,9 @@ func runOperatorHook(cmd *cobra.Command, name string, args []string) error {
 	return operatorExit(hook.Trigger(cmd.Context(), events))
 }
 
-// operatorExitProcess is os.Exit behind a seam (tests).
-var operatorExitProcess = os.Exit
+// operatorExitProcess is the process exit behind a seam (tests); exitNow
+// drops the per-run temp dirs first.
+var operatorExitProcess = exitNow
 
 // operatorExit maps a hook error to the process outcome: an ExitError
 // whose status is not 1 ends the process with that status (the bash hook's

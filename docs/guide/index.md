@@ -53,12 +53,12 @@ Flags: `--version <tag>` (default: latest), `--dir <path>` (default
 plan, touch nothing).
 
 ::: tip Two builds: `lo` (core) and `lo-full`
-`lo` — the default, ~50 MB — is the **core** build: the manifest render runs
+`lo` (the default, ~50 MB) is the **core** build: the manifest render runs
 the pinned `kustomize` binary plus the two exec generators (khelm's
 `ChartRenderer`, the `secrets.lok8s.dev` Secret plugin) that
 [`lo init toolchain`](#2-the-project-toolchain) installs with `b`.
 `lo-full` (`--full`, ~120 MB) links the same kustomize API and khelm release
-into the binary and renders in-process — it needs no `kustomize`, `khelm` or
+into the binary and renders in-process; it needs no `kustomize`, `khelm` or
 `.kustomize/`. Both install as `lo`, both render byte-identical output (the
 parity gate), and `lo --version` names the build. Start with core; switch to
 full when you want the render self-contained. Details:
@@ -78,14 +78,14 @@ tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 ### 2. The project toolchain
 
 `lo` is the entrypoint, and every command runs inside the binary. What a
-project still needs next to it is a pinned **toolchain** in `.bin/` — the
+project still needs next to it is a pinned **toolchain** in `.bin/`: the
 tools `lo` orchestrates (kubectl, kustomize and its two exec generators,
-kind, Tilt, mkcert, …) — managed by [`b`](https://github.com/fentas/b).
+kind, Tilt, mkcert, …), managed by [`b`](https://github.com/fentas/b).
 `lo` provisions it for you:
 
 ```bash
 mkdir my-project && cd my-project
-lo init project        # clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml — then the toolchain
+lo init project        # clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml, then the toolchain
 lo doctor              # b, kustomize, khelm and the Secret plugin verified against the pins
 ```
 
@@ -94,24 +94,24 @@ project) writes `.bin/b.yaml` from a template pinned to the `lo` you run:
 kustomize `v5.8.1`, khelm `v2.8.0`, the `secrets.lok8s.dev` Secret plugin at
 `lo`'s own version, plus kubectl (`core`), kind/Tilt/mkcert (`local`,
 on by default) and kubeone/hcloud (`cloud`, opt-in with
-`--groups core,local,cloud`). It then installs `b` itself into `.bin/` — the
-pinned release tarball, downloaded over https and verified against the
-SHA-256 the release publishes before anything is extracted; never
-`curl | sh` — and runs `.bin/b install`. `--dry-run` prints every step;
+`--groups core,local,cloud`). It then installs `b` itself into `.bin/` from
+the pinned release tarball, downloaded over https and verified against the
+SHA-256 the release publishes before anything is extracted (never
+`curl | sh`), and runs `.bin/b install`. `--dry-run` prints every step;
 `--no-toolchain` (on `lo init project`) writes the file and skips the
 network. An existing `.bin/b.yaml` is never overwritten: you get a diff
 against the template and `lo doctor` reports which pins differ. The
 framework assets a cluster references (addons, driver templates) are
-embedded in the binary and ejected into `.lok8s/` on first use — see
+embedded in the binary and ejected into `.lok8s/` on first use; see
 [`lo assets`](/reference/cli#lo-assets). [The Toolchain](/guide/toolchain)
 documents the file.
 
 ::: details The profile path (framework tree + frozen bash reference)
-The full `b` environment — the framework tree (`.lok8s/`: addons, driver
-templates, provider plugins, the Tilt extension) and the frozen argsh
-implementation the binary is diffed against (the
-[Go migration reference](/reference/go-migration) has the map) — syncs from
-the upstream repo as a profile:
+The full `b` environment syncs from the upstream repo as a profile. It
+holds the framework tree (`.lok8s/`: addons, driver templates, provider
+plugins, the Tilt extension) and the frozen argsh implementation the binary
+is diffed against (the [Go migration reference](/reference/go-migration)
+has the map):
 
 ```bash
 # Install b if you haven't already — download, read, run

@@ -8,20 +8,27 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 // The two exec generators lok8s renders depend on, at the relative paths
-// kustomize resolves them under a plugin home:
-// <group>/<version>/<lowercase kind>/<Kind>.
+// kustomize resolves them under a plugin home
+// (<group>/<version>/<lowercase kind>/<Kind>) — the toolchain pins are the
+// one source; the same paths b installs the binaries to for lo core.
 const (
-	secretPluginRel        = "secrets.lok8s.dev/v1/secret/Secret" // #nosec G101 -- a plugin path, not a credential
-	chartRendererPluginRel = "khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
+	secretPluginRel        = toolchain.SecretPluginRel
+	chartRendererPluginRel = toolchain.ChartRendererPluginRel
 )
 
 var (
 	homeOnce sync.Once
 	homeDir  string
 	homeErr  error
+	// priorHome remembers the caller's KUSTOMIZE_PLUGIN_HOME (value, set)
+	// so Cleanup can put it back.
+	priorHome    string
+	priorHomeSet bool
 )
 
 // selfExecPluginHome returns the per-process plugin home: a temp directory
@@ -29,14 +36,27 @@ var (
 // copy where symlinks are unavailable). Created once, on first render;
 // Cleanup removes it.
 //
-// The home is what KUSTOMIZE_PLUGIN_HOME is set to for the duration of an
-// in-process run. kustomize execs `<home>/…/Secret <cfgfile>` in the
-// kustomization directory with KUSTOMIZE_PLUGIN_CONFIG_STRING in the
-// environment — so the child is `lo` again, started under the plugin's
-// name, and DispatchPlugin routes it to the generator (dispatch.go).
+// KUSTOMIZE_PLUGIN_HOME is set to the home ONCE, here, for the rest of the
+// process — not per render. The kustomize API resolves the plugin root
+// from that variable only (konfig.DefaultAbsPluginHome; PluginConfig has
+// no field for it), and a per-render set/restore would race every other
+// goroutine that reads the environment or snapshots it for a child
+// (execx). The value is a per-process constant, so setting it once is
+// both correct and race-free; it also means every child this process
+// starts after the first render (the bash shim, a provider plugin) sees
+// the self-exec home — which serves the same two generators.
+//
+// kustomize execs `<home>/…/Secret <cfgfile>` in the kustomization
+// directory with KUSTOMIZE_PLUGIN_CONFIG_STRING in the environment — so
+// the child is `lo` again, started under the plugin's name, and
+// DispatchPlugin routes it to the generator (dispatch.go).
 func selfExecPluginHome() (string, error) {
 	homeOnce.Do(func() {
 		homeDir, homeErr = makeSelfExecPluginHome()
+		if homeErr == nil {
+			priorHome, priorHomeSet = os.LookupEnv(kustomizePluginHomeEnv)
+			os.Setenv(kustomizePluginHomeEnv, homeDir)
+		}
 	})
 	return homeDir, homeErr
 }
@@ -88,11 +108,17 @@ func copyExecutable(src, dst string) error {
 	return out.Close()
 }
 
-// Cleanup removes the per-process plugin home. main defers it so every
-// exit path drops the temp dir; a second call is a no-op.
+// Cleanup removes the per-process plugin home and restores the caller's
+// KUSTOMIZE_PLUGIN_HOME. main defers it so every exit path drops the temp
+// dir; a second call is a no-op.
 func Cleanup() {
 	if homeDir != "" {
 		_ = os.RemoveAll(homeDir)
 		homeDir = ""
+		if priorHomeSet {
+			os.Setenv(kustomizePluginHomeEnv, priorHome)
+		} else {
+			os.Unsetenv(kustomizePluginHomeEnv)
+		}
 	}
 }

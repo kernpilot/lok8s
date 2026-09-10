@@ -38,11 +38,12 @@ func Update(p *config.Paths, rel string, force bool, out io.Writer) (UnitReport,
 		return r, fmt.Errorf("%w: %s (the binary ships no copy)", ErrNotAsset, r.Rel)
 	}
 	WriteShow(out, r)
-	if !r.Drifted {
-		if r.Marker != nil && !force {
-			fmt.Fprintf(out, "\n%s: already in sync\n", r.Rel)
-			return r, nil
-		}
+	// Byte-identical to what this lo ships — with or without a marker (a
+	// vendored copy that happens to match needs no --force: there is
+	// nothing to overwrite, so nothing to lose).
+	if !r.Drifted && !force {
+		fmt.Fprintf(out, "\n%s: already in sync\n", r.Rel)
+		return r, nil
 	}
 	c := r.Counts()
 	conflicts := c[StateLocalModified] + c[StateBoth]
