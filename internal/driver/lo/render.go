@@ -12,6 +12,7 @@ package lo
 
 import (
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,7 +49,7 @@ containerdConfigPatches:
     [plugins."io.containerd.grpc.v1.cri".containerd]
       max_concurrent_downloads = %s
 `, clusterName, clusterName, DefaultPodCIDR, DefaultSvcCIDR, nodesYAML,
-		envOr("LOK8S_MAX_CONCURRENT_DOWNLOADS", "3"))
+		config.EnvOr("LOK8S_MAX_CONCURRENT_DOWNLOADS", "3"))
 }
 
 // renderCertsDMount emits the certs.d extraMount entry (bash:
@@ -67,7 +68,7 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 	var b strings.Builder
 	b.WriteString("nodes:")
 
-	domain := envOr("DOMAIN_NAME", DefaultDomain)
+	domain := config.EnvOr("DOMAIN_NAME", DefaultDomain)
 	certsDHost := filepath.Join(d.deps.Paths.Clusters, domain, ".containerd", "certs.d")
 
 	cpCount := atoiOr(getenv("LOK8S_CP_COUNT"), 1)
@@ -152,7 +153,7 @@ const CertsDCAPath = "/etc/containerd/certs.d/.ca/rootCA.pem"
 
 // writeCertsD writes the containerd certs.d tree (bash: lo::write_certs_d).
 func (d *Driver) writeCertsD(errOut io.Writer) error {
-	domain := envOr("DOMAIN_NAME", DefaultDomain)
+	domain := config.EnvOr("DOMAIN_NAME", DefaultDomain)
 	certsD := filepath.Join(d.deps.Paths.Clusters, domain, ".containerd", "certs.d")
 
 	// Refresh the certs.d tree IN PLACE — do NOT remove the directory
@@ -338,7 +339,7 @@ func (d *Driver) oidcAuthConfigHostPath(domain string) string {
 // fresh content.
 func (d *Driver) writeOIDCAuthConfig(domain string, errOut io.Writer) error {
 	if domain == "" {
-		domain = envOr("DOMAIN_NAME", DefaultDomain)
+		domain = config.EnvOr("DOMAIN_NAME", DefaultDomain)
 	}
 	oidcDir := filepath.Join(d.deps.Paths.Clusters, domain, ".oidc")
 	authConfig := filepath.Join(oidcDir, "auth-config.yaml")
@@ -440,10 +441,10 @@ func renderAuthConfig(errOut io.Writer) (string, error) {
 		return "", ui.Handled(fmt.Errorf("oidc: no clientID configured"))
 	}
 
-	usernameClaim := envOr(oidc.EnvUsernameClaim, "sub")
-	usernamePrefix := envOr(oidc.EnvUsernamePrefix, "oidc:")
-	groupsClaim := envOr(oidc.EnvGroupsClaim, "groups")
-	groupsPrefix := envOr(oidc.EnvGroupsPrefix, "oidc:")
+	usernameClaim := config.EnvOr(oidc.EnvUsernameClaim, "sub")
+	usernamePrefix := config.EnvOr(oidc.EnvUsernamePrefix, "oidc:")
+	groupsClaim := config.EnvOr(oidc.EnvGroupsClaim, "groups")
+	groupsPrefix := config.EnvOr(oidc.EnvGroupsPrefix, "oidc:")
 	caBundle := getenv(oidc.EnvCABundle)
 
 	// Defensive validation at the system boundary: the issuer is an

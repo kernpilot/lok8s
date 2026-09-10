@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -315,7 +316,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 		if err != nil {
 			return err
 		}
-		value = trimTrailingNewlines(string(raw))
+		value = execx.TrimNewlines(string(raw))
 	}
 	if value == "" {
 		if c.StdinIsTTY() {
@@ -332,7 +333,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 			if err != nil {
 				return err
 			}
-			value = trimTrailingNewlines(string(raw))
+			value = execx.TrimNewlines(string(raw))
 		}
 	}
 

@@ -3,8 +3,10 @@ package assets
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -208,7 +210,7 @@ func TestClassificationMatrix(t *testing.T) {
 	}
 	dir := filepath.Join(p.Lok8s, "addons", "cilium")
 	embedded, _ := EmbeddedFiles(Unit{Rel: "addons/cilium", Kind: "addon"})
-	files := sortedKeys(embedded)
+	files := slices.Sorted(maps.Keys(embedded))
 	if len(files) < 4 {
 		t.Fatalf("cilium ships only %d files; the matrix needs 4", len(files))
 	}

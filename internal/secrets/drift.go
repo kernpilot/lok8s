@@ -54,7 +54,7 @@ func (c *Context) liveDrift(ctx context.Context, name, namespace, key, value str
 	if err != nil {
 		return
 	}
-	kctx = trimTrailingNewlines(kctx)
+	kctx = execx.TrimNewlines(kctx)
 	if kctx == "" {
 		return
 	}

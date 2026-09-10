@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -129,7 +130,7 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	netCIDR := yqsem.Or(yqsem.Lookup(root, "spec", "registries", "shared", "network", "cidr"), SharedRegistryCIDR)
 
 	sharedBase, _, _ := strings.Cut(netCIDR, "/")
-	projectNetwork := envOr("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
+	projectNetwork := config.EnvOr("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
 
 	// Framework-private registries (always on project subnet).
 	buildIP, _ := ipAdd(projectSubnet, RegistryOffsetBuild)

@@ -13,9 +13,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"io"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -312,7 +314,9 @@ func (c *Context) RenderAssessment(domain string, response []byte) error {
 	line(okMark, "storage", strconv.Itoa(scCount)+" classes · "+jstrOr(a, "0", "pvSummary", "count")+" PVs · "+jstrOr(a, "0", "pvSummary", "totalGi")+"Gi")
 	// Per-provisioner detail (dimmed) — this drives the data-move plan.
 	if by, ok := jget(a, "pvSummary", "byProvisioner").(map[string]any); ok {
-		for _, prov := range sortedKeys(by) {
+		// Sorted keys mirror jq's to_entries order over an object (jq keeps
+		// insertion order for objects it parsed, but Go maps do not).
+		for _, prov := range slices.Sorted(maps.Keys(by)) {
 			entry := by[prov]
 			fmt.Fprintf(c.out(), "      %s%s — %s PVs · %sGi%s\n", cDim, prov,
 				jstr(jget(entry, "count")), jstr(jget(entry, "totalGi")), cOff)
@@ -353,18 +357,6 @@ func jstrings(v any) []string {
 		out = append(out, jstr(e))
 	}
 	return out
-}
-
-// sortedKeys mirrors jq's to_entries order over an object (keys sorted —
-// jq keeps insertion order for objects it parsed, but Go maps do not; the
-// stable choice is sorted keys).
-func sortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // ── claim-code / claim / re-enroll (against the AMBIENT kubeconfig) ──
@@ -409,7 +401,7 @@ func base64Decode(s string) string {
 	if err != nil {
 		return ""
 	}
-	return trimNL(string(out))
+	return execx.TrimNewlines(string(out))
 }
 
 var claimNonceRe = regexp.MustCompile(`^khzn_[A-Za-z0-9_-]{15,195}$`)

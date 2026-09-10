@@ -243,7 +243,7 @@ func (c *Context) Env(name, namespace string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(c.Out, "export %s=%s\n", key, bashQuote(trimTrailingNewlines(string(raw))))
+		fmt.Fprintf(c.Out, "export %s=%s\n", key, bashQuote(execx.TrimNewlines(string(raw))))
 		found = true
 	}
 	if !found {

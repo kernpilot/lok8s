@@ -26,6 +26,10 @@ func Output(ctx context.Context, r Runner, c Cmd) ([]byte, error) {
 	return out.Bytes(), err
 }
 
+// TrimNewlines drops the trailing newlines of s, as a bash command
+// substitution (`$(…)`) does with a tool's output or a file's content.
+func TrimNewlines(s string) string { return strings.TrimRight(s, "\n") }
+
 // ExitCode maps a Runner error to the subprocess exit code: nil → 0, an
 // *exec.ExitError or anything carrying ExitCode() → its code, anything else
 // (the tool was not found, the context ended) → 1.

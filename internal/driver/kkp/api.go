@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"io"
 	"math"
 	"os"
@@ -50,17 +51,7 @@ func kkpWaitInterval() int { return envInt("KKP_WAIT_INTERVAL", 10) }
 
 // validateURL ports kkp::validate_url → http::require_https.
 func (d *Driver) validateURL(url string, stderr io.Writer) error {
-	return requireHTTPS(url, "KKP API URL", stderr)
-}
-
-// requireHTTPS ports http::require_https.
-func requireHTTPS(url, label string, stderr io.Writer) error {
-	if !strings.HasPrefix(url, "https://") {
-		ui.ErrorTo(stderr, "%s must use HTTPS: %s", label, url)
-		ui.ErrorTo(stderr, "Plain HTTP is not allowed for security reasons")
-		return ui.Handled(fmt.Errorf("kkp: %s must use HTTPS: %s", label, url))
-	}
-	return nil
+	return credentials.RequireHTTPS(url, "KKP API URL", stderr)
 }
 
 // api ports kkp::api: the generic KKP REST API caller with auth, JSON
@@ -459,7 +450,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 		case provider == "byo" || provider == "bringyourown":
 			ui.DebugTo(stderr, "bringyourown provider — no cloud credentials required")
 		case provider != "":
-			if err := requireCredentials(provider, stderr); err != nil {
+			if err := credentials.Require(provider, stderr); err != nil {
 				errors++
 			}
 		default:
@@ -475,34 +466,6 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 	}
 
 	ui.DebugTo(stderr, "KKP credentials validated")
-	return nil
-}
-
-// requireCredentials ports credentials::require (utils/credentials.sh).
-func requireCredentials(provider string, stderr io.Writer) error {
-	var missing []string
-	switch provider {
-	case "hetzner":
-		if os.Getenv("HCLOUD_TOKEN") == "" {
-			missing = append(missing, "HCLOUD_TOKEN")
-		}
-	case "aws":
-		if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-			missing = append(missing, "AWS_ACCESS_KEY_ID")
-		}
-		if os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
-			missing = append(missing, "AWS_SECRET_ACCESS_KEY")
-		}
-	default:
-		ui.ErrorTo(stderr, "unknown provider '%s' for credential check", provider)
-		return ui.Handled(fmt.Errorf("kkp: unknown provider %q for credential check", provider))
-	}
-	if len(missing) > 0 {
-		for _, v := range missing {
-			ui.ErrorTo(stderr, "required environment variable %s is not set", v)
-		}
-		return ui.Handled(fmt.Errorf("kkp: missing credentials: %s", strings.Join(missing, ", ")))
-	}
 	return nil
 }
 

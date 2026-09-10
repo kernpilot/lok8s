@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"io"
 	"os"
 	"path/filepath"
@@ -296,15 +297,13 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 			if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {
 				return err
 			}
-			var out strings.Builder
 			// Best-effort (bash: `… > file 2>/dev/null || true` — the
 			// redirect creates the file whatever the exit status).
-			_ = d.deps.Runner.Run(ctx, execx.Cmd{
-				Name:   "kind",
-				Args:   []string{"get", "kubeconfig", "--name", kindCluster},
-				Stdout: &out, Stderr: io.Discard,
+			out, _ := execx.Output(ctx, d.deps.Runner, execx.Cmd{
+				Name: "kind",
+				Args: []string{"get", "kubeconfig", "--name", kindCluster},
 			})
-			_ = writeKubeconfigFile(mgmtKubeconfig, out.String())
+			_ = writeKubeconfigFile(mgmtKubeconfig, string(out))
 		}
 	}
 
@@ -401,21 +400,19 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 		return "Unknown", nil
 	}
 
-	var out strings.Builder
-	err := d.deps.Runner.Run(ctx, execx.Cmd{
+	// bash: `$(kubectl … 2>/dev/null)`.
+	out, err := execx.Output(ctx, d.deps.Runner, execx.Cmd{
 		Name: "kubectl",
 		Args: []string{
 			"get", "cluster", clusterName,
 			"--kubeconfig", d.kubeconfigPath(mgmtDomain),
 			"-o", "jsonpath={.status.phase}",
 		},
-		Stdout: &out,
-		Stderr: io.Discard, // bash: 2>/dev/null
 	})
 	if err != nil {
 		return "NotFound", nil
 	}
-	return out.String(), nil
+	return string(out), nil
 }
 
 // Kubeconfig returns the standard kubeconfig path (bash:
@@ -431,7 +428,7 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 // upsert (delegating to EnsureCredentialsSecret, which repeats the gate —
 // exactly the double check the bash performed).
 func (d *Driver) EnsureCredentials(ctx context.Context, clusterYAML, provider, kubeconfig string) error {
-	if err := requireCredentials(provider, d.stderr()); err != nil {
+	if err := credentials.Require(provider, d.stderr()); err != nil {
 		return err
 	}
 	return d.EnsureCredentialsSecret(ctx, clusterYAML, provider, kubeconfig)
@@ -454,14 +451,11 @@ func MgmtKindName(domain string) string {
 
 // kindClusterExists mirrors `kind get clusters 2>/dev/null | grep -qx name`.
 func (d *Driver) kindClusterExists(ctx context.Context, name string) bool {
-	var out strings.Builder
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name: "kind", Args: []string{"get", "clusters"},
-		Stdout: &out, Stderr: io.Discard,
-	}); err != nil {
+	out, err := execx.Output(ctx, d.deps.Runner, execx.Cmd{Name: "kind", Args: []string{"get", "clusters"}})
+	if err != nil {
 		return false
 	}
-	return slices.Contains(strings.Split(out.String(), "\n"), name)
+	return slices.Contains(strings.Split(string(out), "\n"), name)
 }
 
 // ensureMgmt makes sure the management cluster's kubeconfig exists: a
@@ -576,23 +570,21 @@ func (d *Driver) extractWorkloadKubeconfig(ctx context.Context, mgmtKubeconfig, 
 	}
 	kc := d.kubeconfigPath(clusterName)
 	for i := 1; i <= 30; i++ {
-		var out strings.Builder
-		err := d.deps.Runner.Run(ctx, execx.Cmd{
+		// bash: `clusterctl … 2>/dev/null > "${kc}"`.
+		out, err := execx.Output(ctx, d.deps.Runner, execx.Cmd{
 			Name: "clusterctl",
 			Args: []string{
 				"get", "kubeconfig", clusterName,
 				"--namespace", namespace,
 				"--kubeconfig", mgmtKubeconfig,
 			},
-			Stdout: &out,
-			Stderr: io.Discard, // bash: 2>/dev/null
 		})
-		// bash: `clusterctl … > "${kc}"` — the redirect truncates/writes the
-		// file on EVERY attempt, whatever the exit status.
-		if werr := writeKubeconfigFile(kc, out.String()); werr != nil {
+		// The redirect truncates/writes the file on EVERY attempt, whatever
+		// the exit status.
+		if werr := writeKubeconfigFile(kc, string(out)); werr != nil {
 			return "", werr
 		}
-		if err == nil && out.Len() > 0 {
+		if err == nil && len(out) > 0 {
 			break
 		}
 		if err := d.sleepSeconds(ctx, 10); err != nil {

@@ -39,17 +39,23 @@ func Shim(p *config.Paths, argv []string) error {
 // PATH (when missing) and KUSTOMIZE_PLUGIN_HOME defaulted.
 func shimEnv(p *config.Paths) []string {
 	env := os.Environ()
+	env = setEnv(env, "PATH", childPATH(p))
+	if os.Getenv("KUSTOMIZE_PLUGIN_HOME") == "" {
+		env = setEnv(env, "KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize"))
+	}
+	return env
+}
+
+// childPATH is the PATH the binary prepares for its children: p.Lok8s and
+// p.Bin prepended to the process PATH when missing.
+func childPATH(p *config.Paths) string {
 	path := os.Getenv("PATH")
 	for _, dir := range []string{p.Lok8s, p.Bin} {
 		if !containsPathEntry(path, dir) {
 			path = dir + string(os.PathListSeparator) + path
 		}
 	}
-	env = setEnv(env, "PATH", path)
-	if os.Getenv("KUSTOMIZE_PLUGIN_HOME") == "" {
-		env = setEnv(env, "KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize"))
-	}
-	return env
+	return path
 }
 
 func containsPathEntry(path, dir string) bool {

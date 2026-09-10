@@ -182,12 +182,6 @@ func newerThan(a, b string) bool {
 	return ai.ModTime().After(bi.ModTime())
 }
 
-// trimTrailingNewlines strips trailing \n the way a bash command substitution
-// ($(cat …)) does.
-func trimTrailingNewlines(s string) string {
-	return strings.TrimRight(s, "\n")
-}
-
 // nudgeNewer makes dst's mtime strictly newer than src's when it isn't
 // already. The bash implementation gets this ordering for free — spawning the
 // sops binary always lands the output file a clock tick after its input — and

@@ -28,6 +28,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // Release is one b release: the tag and the SHA-256 of each asset lo can
@@ -147,7 +148,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 	bPath := filepath.Join(o.Bin, "b")
 	rel := o.release()
 
-	if isExecutable(bPath) {
+	if fsutil.IsExecutable(bPath) {
 		v, _ := probe(ctx, execx.NewRunner(nil), bPath, "--version")
 		fmt.Fprintf(out, "  b present: %s %s\n", relOrAbs(o.Base, bPath), strings.TrimSpace(v))
 	} else {
@@ -332,11 +333,6 @@ func extractB(archive, dst string) error {
 		}
 		return os.Rename(stage, dst)
 	}
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
 // relOrAbs prints p relative to base when it is inside it (config.RelTo).

@@ -96,7 +96,7 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag bool, out, stderr io.Writer) error {
 	r := execx.NewRunner(paths)
-	path := doctorPATH(paths)
+	path := childPATH(paths)
 
 	fmt.Fprintln(out, "=== lok8s doctor ===")
 	fmt.Fprintln(out)
@@ -202,7 +202,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		pluginHome = filepath.Join(paths.Base, ".kustomize")
 	}
 	doctorOK(out, "KUSTOMIZE_PLUGIN_HOME="+pluginHome)
-	if isExecutableFile(filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))) {
+	if fsutil.IsExecutable(filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))) {
 		doctorOK(out, "secrets.lok8s.dev plugin built")
 	} else {
 		doctorWarn(out, "secrets.lok8s.dev plugin not built (run: lo kustomize build)")
@@ -352,23 +352,6 @@ func doctorDir(w io.Writer, name, val string) {
 	}
 }
 
-// doctorPATH is the PATH the binary prepares for children (shimEnv): .lok8s +
-// .bin prepended when missing.
-func doctorPATH(p *config.Paths) string {
-	path := os.Getenv("PATH")
-	for _, dir := range []string{p.Lok8s, p.Bin} {
-		if !containsPathEntry(path, dir) {
-			path = dir + string(os.PathListSeparator) + path
-		}
-	}
-	return path
-}
-
-func isExecutableFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
-}
-
 var bashVersionRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)`)
 
 // doctorBashVersion reports the major.minor of the bash the prepared PATH
@@ -412,7 +395,7 @@ func doctorCommandOutput(ctx context.Context, r execx.Runner, cmd string, args .
 	if err != nil {
 		return ""
 	}
-	return trimTrailingNewline(string(out))
+	return execx.TrimNewlines(string(out))
 }
 
 var providerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)

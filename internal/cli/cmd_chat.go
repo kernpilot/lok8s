@@ -58,7 +58,7 @@ func newChatCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // format and returned as ErrHandled.
 func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, error) }) (string, []string, error) {
 	bin := filepath.Join(paths.Bin, "lochat")
-	if !isExecutable(bin) {
+	if !fsutil.IsExecutable(bin) {
 		bin = ""
 		if p, err := exec.LookPath("lochat"); err == nil {
 			bin = p
@@ -122,9 +122,4 @@ func argshBuiltinPresent(paths *config.Paths) bool {
 		return fsutil.FileExists(filepath.Join(filepath.Dir(p), "argsh.so"))
 	}
 	return false
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }

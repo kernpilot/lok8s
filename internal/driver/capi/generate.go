@@ -7,6 +7,7 @@ package capi
 import (
 	"context"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"io"
 	"os"
 	"path/filepath"
@@ -247,7 +248,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	secretName := credentialSecretName(spec)
 	namespace := spec.Or("default", "spec", "cluster", "namespace")
 
-	if err := requireCredentials(provider, stderr); err != nil {
+	if err := credentials.Require(provider, stderr); err != nil {
 		return err
 	}
 
@@ -297,35 +298,6 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 		Args:  []string{"apply", "--kubeconfig", kubeconfig, "-f", "-"},
 		Stdin: strings.NewReader(manifest.String()),
 	})
-}
-
-// requireCredentials ports credentials::require: env-var presence per
-// provider, all missing vars reported before failing.
-func requireCredentials(provider string, stderr io.Writer) error {
-	var missing []string
-	switch provider {
-	case "hetzner":
-		if os.Getenv("HCLOUD_TOKEN") == "" {
-			missing = append(missing, "HCLOUD_TOKEN")
-		}
-	case "aws":
-		if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-			missing = append(missing, "AWS_ACCESS_KEY_ID")
-		}
-		if os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
-			missing = append(missing, "AWS_SECRET_ACCESS_KEY")
-		}
-	default:
-		ui.ErrorTo(stderr, "unknown provider '%s' for credential check", provider)
-		return ui.Handled(fmt.Errorf("capi: unknown provider %q for credential check", provider))
-	}
-	if len(missing) > 0 {
-		for _, v := range missing {
-			ui.ErrorTo(stderr, "required environment variable %s is not set", v)
-		}
-		return ui.Handled(fmt.Errorf("capi: missing credentials: %s", strings.Join(missing, ", ")))
-	}
-	return nil
 }
 
 // WaitReady ports capi::wait_ready: poll the Cluster CR's .status.phase

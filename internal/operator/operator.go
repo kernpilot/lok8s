@@ -88,9 +88,9 @@ type Env struct {
 // Dockerfile default.
 func ResolveEnv() *Env {
 	return &Env{
-		HookDir:             envOr("PATH_LOK8S", DefaultHookDir),
-		StateDir:            envOr("LOK8S_STATE_DIR", DefaultStateDir),
-		KustomizePluginHome: envOr("KUSTOMIZE_PLUGIN_HOME", DefaultKustomizePluginHome),
+		HookDir:             config.EnvOr("PATH_LOK8S", DefaultHookDir),
+		StateDir:            config.EnvOr("LOK8S_STATE_DIR", DefaultStateDir),
+		KustomizePluginHome: config.EnvOr("KUSTOMIZE_PLUGIN_HOME", DefaultKustomizePluginHome),
 	}
 }
 
@@ -134,13 +134,6 @@ func (e *Env) Export() error {
 		}
 	}
 	return nil
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // Event is one entry of the shell-operator binding context. Only the fields

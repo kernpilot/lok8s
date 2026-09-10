@@ -15,6 +15,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // Status of one check.
@@ -82,7 +83,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 
 	// b itself.
 	bPath := filepath.Join(o.Bin, "b")
-	if isExecutable(bPath) {
+	if fsutil.IsExecutable(bPath) {
 		v, err := d.probe(bPath, "--version")
 		if err != nil {
 			d.add(Warn, "b at %s (version unknown: %v)", config.RelTo(o.Base, bPath), err)
@@ -95,7 +96,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 
 	// kustomize: .bin first, then PATH — the exec render's own lookup.
 	kPath := filepath.Join(o.Bin, "kustomize")
-	if !isExecutable(kPath) {
+	if !fsutil.IsExecutable(kPath) {
 		if p, ok := LookPath(o.path(), "kustomize"); ok {
 			kPath = p
 		} else {
@@ -165,7 +166,7 @@ type tool struct {
 // else the version against its pin.
 func (d *doctor) checkTool(t tool) {
 	rel := config.RelTo(d.o.Base, t.path)
-	if t.path == "" || !isExecutable(t.path) {
+	if t.path == "" || !fsutil.IsExecutable(t.path) {
 		if d.o.Full {
 			d.add(Warn, "%s missing at %s (optional on lo-full: in-process render; LO_RENDER=exec needs it) — %s", t.what, config.RelTo(d.o.Base, t.missingAt), Fix)
 			return
@@ -224,7 +225,7 @@ func LookPath(path, tool string) (string, bool) {
 			dir = "."
 		}
 		candidate := filepath.Join(dir, tool)
-		if isExecutable(candidate) {
+		if fsutil.IsExecutable(candidate) {
 			return candidate, true
 		}
 	}

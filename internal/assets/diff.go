@@ -9,8 +9,10 @@ package assets
 import (
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -216,7 +218,7 @@ func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
 	}
 	if !isEmbedded {
 		r.Origin = OriginColLocalOnly
-		for _, f := range sortedKeys(local) {
+		for _, f := range slices.Sorted(maps.Keys(local)) {
 			r.Files = append(r.Files, FileDiff{Path: f, State: StateLocalOnly, Local: local[f]})
 		}
 		return r, nil
@@ -245,7 +247,7 @@ func classify(marker *Marker, local, embedded map[string]string) []FileDiff {
 		names[k] = true
 	}
 	var out []FileDiff
-	for _, f := range sortedKeys(names) {
+	for _, f := range slices.Sorted(maps.Keys(names)) {
 		l, inL := local[f]
 		e, inE := embedded[f]
 		o := ""
@@ -272,15 +274,6 @@ func classify(marker *Marker, local, embedded map[string]string) []FileDiff {
 		out = append(out, d)
 	}
 	return out
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // chartVersionFS reads chart.yaml's version from the embedded mirror.

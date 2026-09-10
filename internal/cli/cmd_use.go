@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"io"
 	"os"
 	"path/filepath"
@@ -80,7 +81,7 @@ func useSetActive(paths *config.Paths, target string, out, errOut io.Writer) err
 // with what it is (bash: use::_show).
 func useShow(paths *config.Paths, out io.Writer) error {
 	if raw, err := os.ReadFile(filepath.Join(paths.Clusters, ".active")); err == nil {
-		fmt.Fprintf(out, "Active: %s\n", trimTrailingNewline(string(raw)))
+		fmt.Fprintf(out, "Active: %s\n", execx.TrimNewlines(string(raw)))
 	} else {
 		fmt.Fprintln(out, "No active domain set.")
 	}
@@ -124,11 +125,4 @@ func sortedGlob(pattern string) []string {
 	matches, _ := filepath.Glob(pattern)
 	sort.Strings(matches)
 	return matches
-}
-
-func trimTrailingNewline(s string) string {
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
-		s = s[:len(s)-1]
-	}
-	return s
 }

@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"io"
 	"io/fs"
 	"os"
@@ -244,7 +245,7 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 	if err != nil {
 		return "", err
 	}
-	location := trimNL(string(raw))
+	location := execx.TrimNewlines(string(raw))
 	switch {
 	case strings.HasPrefix(location, "kkp://"):
 		c.errorf("handover: snapshot-location '%s' is a KKP-internal locator (kkp://<destination>/<clusterID>/<backupName>) — it cannot be fetched from this node. Obtain the snapshot object via the platform (the tier2/api bundle download provides it) and re-run with --snapshot <file>", location)
@@ -305,7 +306,7 @@ func (c *Context) memberIdentity(ctx context.Context) (string, string, error) {
 	if err != nil {
 		host = ""
 	}
-	nodeName := strings.ToLower(trimNL(host))
+	nodeName := strings.ToLower(execx.TrimNewlines(host))
 	nodeIP := ""
 	if out, err := c.capture(ctx, true, "ip", "-4", "route", "get", "1.1.1.1"); err == nil {
 		nodeIP = routeSrc(out)

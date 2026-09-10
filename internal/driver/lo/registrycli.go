@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/config"
 	"io"
 	"slices"
 	"strings"
@@ -80,7 +81,7 @@ func (d *Driver) RegistryClean(ctx context.Context, domain string, shared bool, 
 		return err
 	}
 
-	d.cleanupRegistries(ctx, envOr("LOK8S_SPEC_CLUSTER_NAME", "local"))
+	d.cleanupRegistries(ctx, config.EnvOr("LOK8S_SPEC_CLUSTER_NAME", "local"))
 
 	if !shared {
 		return nil

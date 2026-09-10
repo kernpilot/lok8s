@@ -26,10 +26,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/clock"
@@ -189,15 +189,9 @@ func (c *Context) echoErr(format string, a ...any) {
 	fmt.Fprintf(c.errOut(), format+"\n", a...)
 }
 
-// requireHTTPS ports http::require_https: bearer tokens travel on these
-// URLs, never over plain HTTP.
+// requireHTTPS is http::require_https on the context's stderr.
 func (c *Context) requireHTTPS(url, label string) error {
-	if !strings.HasPrefix(url, "https://") {
-		c.errorf("%s must use HTTPS: %s", label, url)
-		c.errorf("Plain HTTP is not allowed for security reasons")
-		return ErrHandled
-	}
-	return nil
+	return credentials.RequireHTTPS(url, label, c.errOut())
 }
 
 // ── process seam ─────────────────────────────────────────
@@ -245,9 +239,6 @@ func (c *Context) captureBoth(ctx context.Context, name string, args ...string) 
 	})
 	return both.String(), err
 }
-
-// trimNL mirrors `$(...)` command substitution: trailing newlines dropped.
-func trimNL(s string) string { return strings.TrimRight(s, "\n") }
 
 // clusterYAMLPath is ${PATH_CLUSTERS}/<domain>/cluster.lok8s.yaml.
 func (c *Context) clusterYAMLPath(domain string) string {

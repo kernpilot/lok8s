@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -129,17 +130,17 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	execPlugin := !render.SecretInProcess()
 	var pluginBin string
 	if execPlugin {
-		pluginHome := envOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
+		pluginHome := config.EnvOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
 		pluginBin = filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))
 		// The Secret plugin mints the cert. It's needed across the lok8s
 		// flow anyway, so build it on demand if it's missing and we can
 		// (bash probed `declare -F kustomize::build`; the Go seam is the
 		// injectable hook); otherwise fail with guidance.
-		if !isExecutable(pluginBin) && d.Hooks.KustomizeBuild != nil {
+		if !fsutil.IsExecutable(pluginBin) && d.Hooks.KustomizeBuild != nil {
 			ui.DebugTo(errOut, "registry TLS: Secret plugin missing — building it (lo kustomize build)")
 			_ = d.Hooks.KustomizeBuild(ctx)
 		}
-		if !isExecutable(pluginBin) {
+		if !fsutil.IsExecutable(pluginBin) {
 			fmt.Fprintln(errOut, "error: spec.registries.tls is true (default) but the Secret plugin is not built at")
 			fmt.Fprintf(errOut, "       %s. Build it with 'lo kustomize build' (needs go), or set\n", pluginBin)
 			fmt.Fprintln(errOut, "       spec.registries.tls: false for plain-HTTP registries. Then retry.")
@@ -673,9 +674,4 @@ data:
 %s
 `, configmapData)
 	return d.runInput(ctx, manifest, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }

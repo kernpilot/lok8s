@@ -28,7 +28,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -154,8 +153,5 @@ func ExitCode(err error) int {
 	if errors.Is(err, ErrFullLifecycle) {
 		return 100
 	}
-	if xe, ok := errors.AsType[*exec.ExitError](err); ok {
-		return xe.ExitCode()
-	}
-	return 1
+	return execx.ExitCode(err)
 }

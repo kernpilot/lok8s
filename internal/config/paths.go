@@ -57,9 +57,9 @@ func ResolvePaths() (*Paths, error) {
 
 	p := &Paths{
 		Base:     base,
-		Bin:      envOr("PATH_BIN", filepath.Join(base, ".bin")),
-		Lok8s:    envOr("PATH_LOK8S", filepath.Join(base, ".lok8s")),
-		Clusters: envOr("PATH_CLUSTERS", filepath.Join(base, "clusters")),
+		Bin:      EnvOr("PATH_BIN", filepath.Join(base, ".bin")),
+		Lok8s:    EnvOr("PATH_LOK8S", filepath.Join(base, ".lok8s")),
+		Clusters: EnvOr("PATH_CLUSTERS", filepath.Join(base, "clusters")),
 	}
 	p.SecretsEnv, p.SecretsEnvSet = os.LookupEnv("PATH_SECRETS")
 	return p, nil
@@ -143,7 +143,9 @@ func RelTo(base, p string) string {
 	return p
 }
 
-func envOr(key, fallback string) string {
+// EnvOr returns the environment variable key when it is set and not
+// empty, else fallback (bash: `${KEY:-fallback}`).
+func EnvOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}

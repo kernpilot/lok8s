@@ -197,7 +197,7 @@ func (c *Context) defaultNodeName() string {
 	if err != nil {
 		name = ""
 	}
-	name = trimNL(name)
+	name = execx.TrimNewlines(name)
 	if name == "" {
 		name = c.getenv("HOSTNAME")
 	}
@@ -219,7 +219,7 @@ func (c *Context) kubeletVersion(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	m := kubeletVersionRe.FindStringSubmatch(trimNL(out))
+	m := kubeletVersionRe.FindStringSubmatch(execx.TrimNewlines(out))
 	if m == nil {
 		return ""
 	}

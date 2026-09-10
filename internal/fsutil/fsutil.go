@@ -32,3 +32,10 @@ func Exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+// IsExecutable reports a path that exists, is not a directory and has an
+// execute bit set (`[[ -x ]]`, as `command -v` on a path resolves it).
+func IsExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+}

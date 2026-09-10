@@ -12,6 +12,7 @@ package lo
 import (
 	"context"
 	"fmt"
+	"github.com/kernpilot/lok8s/internal/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -118,7 +119,7 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	// Reload nginx with the new config.
 	_ = d.runOut(ctx, out, errOut, "docker", "exec", proxyName, "nginx", "-s", "reload")
 
-	accessIP := envOr("LOK8S_REMOTE_IP", "localhost")
+	accessIP := config.EnvOr("LOK8S_REMOTE_IP", "localhost")
 	ui.DebugTo(errOut, "expose: nginx proxy %s running on %s:443 → %s", proxyName, accessIP, backendIP)
 	fmt.Fprintf(out, ":: cluster exposed at https://*.%s (via %s:443)\n", domain, accessIP)
 	return nil

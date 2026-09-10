@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -94,7 +95,7 @@ func TestBootstrapDownloadsVerifiesExtractsAndInstalls(t *testing.T) {
 		t.Fatalf("Bootstrap: %v\n%s", err, out.String())
 	}
 	bPath := filepath.Join(bin, "b")
-	if !isExecutable(bPath) {
+	if !fsutil.IsExecutable(bPath) {
 		t.Fatalf(".bin/b not installed executable:\n%s", out.String())
 	}
 	raw, _ := os.ReadFile(bPath)
@@ -281,7 +282,7 @@ func TestExtractBRefusesOversizedMember(t *testing.T) {
 	if err := os.WriteFile(archive, small, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractB(archive, dst); err != nil || !isExecutable(dst) {
+	if err := extractB(archive, dst); err != nil || !fsutil.IsExecutable(dst) {
 		t.Fatalf("small member: %v", err)
 	}
 }
