@@ -9,23 +9,16 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
-// repoRoot is the lok8s checkout (this package lives at internal/crds).
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
+// repoLayout is the lok8s checkout's layout; skips when the schema source
+// is not part of the checkout.
+func repoLayout(t *testing.T) Layout {
+	root := testutil.RepoRoot(t)
 	if _, err := os.Stat(filepath.Join(root, "operator", "crds", "schema")); err != nil {
 		t.Skip("repo schema source not available")
 	}
-	return root
-}
-
-func repoLayout(t *testing.T) Layout {
-	root := repoRoot(t)
 	return NewLayout(&config.Paths{Base: root, Lok8s: filepath.Join(root, ".lok8s")})
 }
 

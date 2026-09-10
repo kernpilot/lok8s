@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -351,7 +352,7 @@ func (d *Driver) writeOIDCAuthConfig(domain string, errOut io.Writer) error {
 		// file exists from a prior oidc-enabled run, clear its contents in
 		// place (keep the inode for any live mount) so a disabled cluster
 		// doesn't keep wiring.
-		if fileExists(authConfig) {
+		if fsutil.FileExists(authConfig) {
 			return os.Truncate(authConfig, 0)
 		}
 		return nil

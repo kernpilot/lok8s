@@ -21,6 +21,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -43,18 +44,18 @@ import (
 // serialize on the render, never on each other's values).
 func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
 	buildDir := addonDir
-	if fileExists(filepath.Join(addonDir, "chart.yaml")) {
+	if fsutil.FileExists(filepath.Join(addonDir, "chart.yaml")) {
 		// Stack values: base < driver < provider < inline (later wins).
 		// Facts (provider env) beat preferences (driver flavor) beat chart
 		// defaults (base); explicit caller intent (inline) beats all.
 		var valueFiles []string
-		if f := filepath.Join(addonDir, "values.yaml"); fileExists(f) {
+		if f := filepath.Join(addonDir, "values.yaml"); fsutil.FileExists(f) {
 			valueFiles = append(valueFiles, f)
 		}
-		if f := filepath.Join(addonDir, "values."+kind+".yaml"); kind != "" && fileExists(f) {
+		if f := filepath.Join(addonDir, "values."+kind+".yaml"); kind != "" && fsutil.FileExists(f) {
 			valueFiles = append(valueFiles, f)
 		}
-		if f := filepath.Join(addonDir, "values."+providerName+".yaml"); providerName != "" && fileExists(f) {
+		if f := filepath.Join(addonDir, "values."+providerName+".yaml"); providerName != "" && fsutil.FileExists(f) {
 			valueFiles = append(valueFiles, f)
 		}
 		// Copy to a temp build dir ONLY when there's overlay stacking to do.
@@ -161,11 +162,6 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 		return "", fmt.Errorf("addons render: empty output for %s", addonDir)
 	}
 	return string(coerced), nil
-}
-
-func fileExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && !fi.IsDir()
 }
 
 // copyTree copies src's CONTENTS into dst (bash: cp -r src/. dst/ —

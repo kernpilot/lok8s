@@ -18,13 +18,15 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func writeTLSSpec(t *testing.T, clustersDir, tls string) string {
 	t.Helper()
 	cy := filepath.Join(clustersDir, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
 kind: Lo
 metadata:
   name: test-tls
@@ -114,7 +116,7 @@ func TestRenderRegistryConfigTLSSwapsHTTPBlock(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	buildYAML := filepath.Join(tmp, "build.yaml")
-	writeFile(t, buildYAML, realRegistryTemplate(t, "build.yaml"))
+	testutil.WriteFile(t, buildYAML, realRegistryTemplate(t, "build.yaml"))
 
 	out, err := renderRegistryConfig(buildYAML, "", true)
 	if err != nil {
@@ -139,7 +141,7 @@ func TestRenderRegistryConfigPlainKeeps80(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	buildYAML := filepath.Join(tmp, "build.yaml")
-	writeFile(t, buildYAML, realRegistryTemplate(t, "build.yaml"))
+	testutil.WriteFile(t, buildYAML, realRegistryTemplate(t, "build.yaml"))
 
 	out, err := renderRegistryConfig(buildYAML, "", false)
 	if err != nil {
@@ -157,7 +159,7 @@ func TestRenderRegistryConfigMirrorKeepsRemoteURLUnderTLS(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	mirrorYAML := filepath.Join(tmp, "mirror.yaml")
-	writeFile(t, mirrorYAML, realRegistryTemplate(t, "mirror.yaml"))
+	testutil.WriteFile(t, mirrorYAML, realRegistryTemplate(t, "mirror.yaml"))
 
 	out, err := renderRegistryConfig(mirrorYAML, "https://registry-1.docker.io", true)
 	if err != nil {
@@ -182,7 +184,7 @@ func stubSecretPlugin(t *testing.T, runner *fakeRunner, base string) (pluginBin 
 	t.Setenv(render.ModeEnv, string(render.ModeExec))
 	pluginHome := filepath.Join(base, ".kustomize")
 	pluginBin = filepath.Join(pluginHome, "secrets.lok8s.dev", "v1", "secret", "Secret")
-	writeFile(t, pluginBin, "#!/bin/sh\nexit 1\n") // never actually executed
+	testutil.WriteFile(t, pluginBin, "#!/bin/sh\nexit 1\n") // never actually executed
 	os.Chmod(pluginBin, 0o755)
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", pluginHome)
 	t.Setenv("PATH_SECRETS", filepath.Join(base, ".secrets-store"))
@@ -264,7 +266,7 @@ func TestRegistriesTLSCertNoopWhenTLSDisabled(t *testing.T) {
 	if err := d.registriesTLSCert(context.Background(), errBuf); err != nil {
 		t.Fatal(err)
 	}
-	if fileExists(filepath.Join(p.Base, ".secrets", "tls", "registries", "tls.crt")) {
+	if fsutil.FileExists(filepath.Join(p.Base, ".secrets", "tls", "registries", "tls.crt")) {
 		t.Fatal("plain mode minted a cert")
 	}
 }
@@ -371,7 +373,7 @@ func TestRegistriesTLSCertMintsInProcess(t *testing.T) {
 	// The generator's cache is the source of truth: the store now holds
 	// the leaf under the Secret's name, and the .sans key makes the next
 	// call a no-op (idempotence shared with the exec path).
-	if !fileExists(filepath.Join(p.Base, ".secrets-store", "Secret.registries-tls.lok8s-system.tls.crt")) {
+	if !fsutil.FileExists(filepath.Join(p.Base, ".secrets-store", "Secret.registries-tls.lok8s-system.tls.crt")) {
 		t.Fatal("leaf not cached in PATH_SECRETS")
 	}
 	if got := readFileT(t, filepath.Join(tlsDir, ".sans")); !strings.Contains(got, "lok8s.local") {
@@ -397,7 +399,7 @@ func TestRegistriesTLSNudgeWarnsWhenCAUntrusted(t *testing.T) {
 	// The nudge probes for openssl via Look — plant a fake in the project
 	// .bin so the probe finds it; the verify itself goes through the fake
 	// runner (never invoked here since the CA file is absent).
-	writeFile(t, filepath.Join(p.Bin, "openssl"), "#!/bin/sh\nexit 1\n")
+	testutil.WriteFile(t, filepath.Join(p.Bin, "openssl"), "#!/bin/sh\nexit 1\n")
 	os.Chmod(filepath.Join(p.Bin, "openssl"), 0o755)
 	_ = runner
 

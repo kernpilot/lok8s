@@ -20,6 +20,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	domainpkg "github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -55,10 +56,10 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 		return nil, fmt.Errorf("invalid domain name: %s", domainName)
 	}
 	base := filepath.Join(p.Clusters, domainName)
-	if fileExists(filepath.Join(base, "cluster.lok8s.yaml")) {
+	if fsutil.FileExists(filepath.Join(base, "cluster.lok8s.yaml")) {
 		return &Spec{Domain: domainName, File: filepath.Join(base, "cluster.lok8s.yaml"), Kind: SpecKindCluster}, nil
 	}
-	if fileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
+	if fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
 		return &Spec{Domain: domainName, File: filepath.Join(base, "deploy.lok8s.yaml"), Kind: SpecKindDeploy}, nil
 	}
 	ui.Errorf(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/%s/", domainName)
@@ -72,7 +73,7 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 // path spelling. internal/build's kubeconfig resolution delegates here.
 func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (string, error) {
 	specFile := filepath.Join(p.Clusters, domainName, "deploy.lok8s.yaml")
-	if !fileExists(specFile) {
+	if !fsutil.FileExists(specFile) {
 		ui.Errorf(stderr, "No deploy.lok8s.yaml found for %s", domainName)
 		return "", fmt.Errorf("no deploy spec for %s", domainName)
 	}
@@ -86,7 +87,7 @@ func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (st
 		ui.Errorf(stderr, "clusterRef domain not found: .lok8s/%s/", ref)
 		return "", fmt.Errorf("clusterRef domain not found: %s", ref)
 	}
-	if !fileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {
+	if !fsutil.FileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {
 		ui.Errorf(stderr, "clusterRef domain %s has no cluster.lok8s.yaml", ref)
 		return "", fmt.Errorf("clusterRef domain %s has no cluster spec", ref)
 	}
@@ -157,9 +158,4 @@ func readSpecInfo(path string) (specInfo, error) {
 func specMetadataName(path string) string {
 	info, _ := readSpecInfo(path)
 	return info.Metadata.Name
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

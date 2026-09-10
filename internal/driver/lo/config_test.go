@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func fixturePath(t *testing.T, name string) string {
-	return filepath.Join(repoRoot(t), "tests", "fixtures", name)
+	return filepath.Join(testutil.RepoRoot(t), "tests", "fixtures", name)
 }
 
 // loadFixture copies a shipped fixture into the temp clusters tree (the
@@ -25,7 +27,7 @@ func fixturePath(t *testing.T, name string) string {
 func loadFixture(t *testing.T, clustersDir, fixture string) string {
 	t.Helper()
 	cy := filepath.Join(clustersDir, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, readFileT(t, fixturePath(t, fixture)))
+	testutil.WriteFile(t, cy, readFileT(t, fixturePath(t, fixture)))
 	return cy
 }
 
@@ -34,7 +36,7 @@ func loadFixture(t *testing.T, clustersDir, fixture string) string {
 func TestReadNetworkConfigRequiresExplicitCIDR(t *testing.T) {
 	_, _, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, "spec:\n  network:\n    name: lok8s\n")
+	testutil.WriteFile(t, cy, "spec:\n  network:\n    name: lok8s\n")
 
 	var errBuf bytes.Buffer
 	if err := readNetworkConfig(cy, &errBuf); err == nil {
@@ -48,7 +50,7 @@ func TestReadNetworkConfigRequiresExplicitCIDR(t *testing.T) {
 func TestReadNetworkConfigRequiresExplicitNameNamingTheFile(t *testing.T) {
 	_, _, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, "spec:\n  network:\n    cidr: \"10.125.50.0/24\"\n")
+	testutil.WriteFile(t, cy, "spec:\n  network:\n    cidr: \"10.125.50.0/24\"\n")
 
 	var errBuf bytes.Buffer
 	if err := readNetworkConfig(cy, &errBuf); err == nil {
@@ -111,7 +113,7 @@ func TestMirrorsRejectReservedBuildAndCache(t *testing.T) {
 	for _, reserved := range []string{"build", "cache"} {
 		_, _, _, p := testDriver(t)
 		cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-		writeFile(t, cy, `spec:
+		testutil.WriteFile(t, cy, `spec:
   cluster:
     domain: test.lok8s.dev
   network:
@@ -136,7 +138,7 @@ func TestMirrorsRejectReservedBuildAndCache(t *testing.T) {
 func TestMirrorMissingURLErrors(t *testing.T) {
 	_, _, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, `spec:
+	testutil.WriteFile(t, cy, `spec:
   network:
     name: lok8s
     cidr: "10.125.125.0/24"
@@ -157,7 +159,7 @@ func TestMirrorMissingURLErrors(t *testing.T) {
 
 func slotSpec(t *testing.T, p string, domain, name string) string {
 	cy := filepath.Join(p, domain, "cluster.lok8s.yaml")
-	writeFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
 kind: Lo
 metadata:
   name: `+name+`
@@ -244,7 +246,7 @@ func TestReadNodeConfigHostPortDefaults(t *testing.T) {
 func TestReadNodeConfigRejectsBadMaxConcurrentDownloads(t *testing.T) {
 	_, _, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, "spec:\n  nodes:\n    maxConcurrentDownloads: nope\n")
+	testutil.WriteFile(t, cy, "spec:\n  nodes:\n    maxConcurrentDownloads: nope\n")
 
 	var errBuf bytes.Buffer
 	if err := readNodeConfig(cy, &errBuf); err == nil {
@@ -278,7 +280,7 @@ func TestNonSlotDomainWithExplicitNetworkGetsDefaultRegistries(t *testing.T) {
 	// *.lok8s.dev-only.
 	_, _, errBuf, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "prod.example.com", "cluster.lok8s.yaml")
-	writeFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, cy, `apiVersion: cluster.lok8s.dev/v1beta1
 kind: Lo
 metadata:
   name: prod

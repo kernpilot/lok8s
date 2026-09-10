@@ -20,17 +20,18 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // writeStackAddon lays down the bats three-layer testcni fixture.
 func writeStackAddon(t *testing.T, p *config.Paths) {
 	t.Helper()
 	dir := mkChartAddon(t, p, "testcni")
-	writeFile(t, filepath.Join(dir, "values.yaml"),
+	testutil.WriteFile(t, filepath.Join(dir, "values.yaml"),
 		"only_base: \"base\"\nshared_all: \"base\"\nnested:\n  from_base: true\n  overridden: \"base\"\n")
-	writeFile(t, filepath.Join(dir, "values.lo.yaml"),
+	testutil.WriteFile(t, filepath.Join(dir, "values.lo.yaml"),
 		"only_driver: \"driver\"\nshared_all: \"driver\"\nnested:\n  from_driver: true\n  overridden: \"driver\"\n")
-	writeFile(t, filepath.Join(dir, "values.hetzner.yaml"),
+	testutil.WriteFile(t, filepath.Join(dir, "values.hetzner.yaml"),
 		"only_provider: \"provider\"\nshared_all: \"provider\"\nnested:\n  from_provider: true\n  overridden: \"provider\"\n")
 }
 
@@ -111,9 +112,9 @@ func TestApplyValueFilesBeatProviderLoseToInline(t *testing.T) {
 func TestApplyDefaultsToCiliumWhenBootstrapAbsent(t *testing.T) {
 	e, f, _, _, p := testEngine(t)
 	dir := mkChartAddon(t, p, "cilium")
-	writeFile(t, filepath.Join(dir, "values.yaml"), "marker: \"cilium-default\"\n")
+	testutil.WriteFile(t, filepath.Join(dir, "values.yaml"), "marker: \"cilium-default\"\n")
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n")
 	kc := writeKubeconfig(t, p)
 
 	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
@@ -130,7 +131,7 @@ func TestApplyDefaultsToCiliumWhenBootstrapAbsent(t *testing.T) {
 func TestApplySkipsOnExplicitEmptyList(t *testing.T) {
 	e, f, _, _, p := testEngine(t)
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, "kind: Kkp\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n  bootstrap: []\n")
+	testutil.WriteFile(t, spec, "kind: Kkp\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n  bootstrap: []\n")
 	kc := writeKubeconfig(t, p)
 	if err := e.Apply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -881,7 +882,7 @@ func hostedHarness(t *testing.T) (*Engine, *fakeRunner, *strings.Builder, string
 	e.Stderr = &errBuf
 	mkAddonDirs(t, p, "cert-manager")
 	spec := filepath.Join(p.Clusters, "h.test", "cluster.lok8s.yaml")
-	writeFile(t, spec, `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, spec, `apiVersion: cluster.lok8s.dev/v1beta1
 kind: KubeOne
 metadata: { name: h }
 spec:
@@ -889,7 +890,7 @@ spec:
   bootstrap: [cert-manager]
 `)
 	kc := filepath.Join(p.Base, ".kubeconfig", "h.yaml")
-	writeFile(t, kc, "kc\n")
+	testutil.WriteFile(t, kc, "kc\n")
 	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int { return 0 }
 	return e, f, &errBuf, spec, kc
 }
@@ -962,7 +963,7 @@ func TestHostedGateControlPlaneNodesDoNotCount(t *testing.T) {
 
 func TestHostedGateEmptyBootstrapNeverProbes(t *testing.T) {
 	e, f, _, spec, kc := hostedHarness(t)
-	writeFile(t, spec, `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, spec, `apiVersion: cluster.lok8s.dev/v1beta1
 kind: KubeOne
 metadata: { name: h }
 spec:
@@ -982,9 +983,9 @@ spec:
 func kubeoneAddonSpec(t *testing.T, p *config.Paths, name string) (string, string) {
 	t.Helper()
 	dir := mkChartAddon(t, p, name)
-	writeFile(t, filepath.Join(dir, "values.yaml"), "marker: "+name+"\n")
+	testutil.WriteFile(t, filepath.Join(dir, "values.yaml"), "marker: "+name+"\n")
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n  bootstrap:\n    - "+name+"\n")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: e2e-test\nspec:\n  provider:\n    name: hetzner\n  bootstrap:\n    - "+name+"\n")
 	return spec, writeKubeconfig(t, p)
 }
 

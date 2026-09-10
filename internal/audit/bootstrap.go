@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -151,13 +152,13 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 		// `values:` is helm-only: flag a non-chart target only when the dir
 		// EXISTS but lacks chart.yaml (a missing dir is bootstrap::apply's
 		// error to surface).
-		if isDir(e.dir) && !isFile(filepath.Join(e.dir, "chart.yaml")) {
+		if fsutil.DirExists(e.dir) && !fsutil.FileExists(filepath.Join(e.dir, "chart.yaml")) {
 			return e, false
 		}
 		e.inline = yqsem.MapGet(val, "values")
 	}
 	if yqsem.HasKey(val, "valueFiles") {
-		if isDir(e.dir) && !isFile(filepath.Join(e.dir, "chart.yaml")) {
+		if fsutil.DirExists(e.dir) && !fsutil.FileExists(filepath.Join(e.dir, "chart.yaml")) {
 			return e, false
 		}
 		vf := yqsem.MapGet(val, "valueFiles")
@@ -177,7 +178,7 @@ func (a *Auditor) parseBootstrapEntry(domainName string, entry *yaml.Node) (e bo
 			if !strings.HasPrefix(p, "/") {
 				p = a.Clusters + "/" + domainName + "/" + p
 			}
-			if !isFile(p) {
+			if !fsutil.FileExists(p) {
 				return e, false
 			}
 			files = append(files, p)

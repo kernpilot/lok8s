@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -34,20 +35,10 @@ func newLinter(t *testing.T) (*Linter, string, *bytes.Buffer, *bytes.Buffer) {
 	return l, base, out, errOut
 }
 
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestSchemaMissingFields(t *testing.T) {
 	l, base, _, errOut := newLinter(t)
 	dir := filepath.Join(base, "clusters", "a.dev")
-	writeFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "spec: {}\n")
+	testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "spec: {}\n")
 
 	if got := l.schema(dir, filepath.Join(dir, "cluster.lok8s.yaml")); got != 3 {
 		t.Fatalf("schema errors = %d, want 3", got)
@@ -66,8 +57,8 @@ func TestSchemaMissingFields(t *testing.T) {
 
 func TestApexSubdomainViolation(t *testing.T) {
 	l, base, _, errOut := newLinter(t)
-	writeFile(t, filepath.Join(base, "clusters", "apex.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
-	writeFile(t, filepath.Join(base, "clusters", "sub.apex.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
+	testutil.WriteFile(t, filepath.Join(base, "clusters", "apex.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
+	testutil.WriteFile(t, filepath.Join(base, "clusters", "sub.apex.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
 
 	if l.apex() {
 		t.Fatal("apex() = ok, want violation")
@@ -84,7 +75,7 @@ func TestBootstrapEntryNotFound(t *testing.T) {
 	spec := filepath.Join(dir, "cluster.lok8s.yaml")
 	// Neither name is an addon the binary ships (a shipped one — ccm,
 	// cilium — is always found now: the embedded copy serves it).
-	writeFile(t, spec, "kind: Lo\nspec:\n  bootstrap:\n    - nope\n    - gone:\n        wait: true\n")
+	testutil.WriteFile(t, spec, "kind: Lo\nspec:\n  bootstrap:\n    - nope\n    - gone:\n        wait: true\n")
 
 	if got := l.bootstrap(dir, spec, "a.dev"); got != 2 {
 		t.Fatalf("bootstrap errors = %d, want 2\nstderr:\n%s", got, errOut.String())
@@ -107,7 +98,7 @@ func TestBootstrapDefaultCilium(t *testing.T) {
 	spec := filepath.Join(dir, "cluster.lok8s.yaml")
 	// Absent spec.bootstrap on a Lo cluster → the per-driver default entry
 	// "cilium" (BARE, not JSON-quoted — it comes from an echo, not yq).
-	writeFile(t, spec, "kind: Lo\n")
+	testutil.WriteFile(t, spec, "kind: Lo\n")
 
 	// The default resolves to the embedded cilium (the binary ships it), so
 	// a project without a local copy lints clean — and lint, being
@@ -120,7 +111,7 @@ func TestBootstrapDefaultCilium(t *testing.T) {
 	}
 
 	// Explicit empty list = authoritative opt-out: no default, no error.
-	writeFile(t, spec, "kind: Lo\nspec:\n  bootstrap: []\n")
+	testutil.WriteFile(t, spec, "kind: Lo\nspec:\n  bootstrap: []\n")
 	if got := l.bootstrap(dir, spec, "a.dev"); got != 0 {
 		t.Fatalf("bootstrap errors with empty list = %d, want 0", got)
 	}
@@ -131,7 +122,7 @@ func TestLabelsQueryMultiDocQuirk(t *testing.T) {
 
 	// Single unlabelled doc → "0" → warns.
 	single := filepath.Join(dir, "single.yaml")
-	writeFile(t, single, "metadata:\n  name: x\n")
+	testutil.WriteFile(t, single, "metadata:\n  name: x\n")
 	if got := labelsQuery(single); got != "0" {
 		t.Fatalf("labelsQuery(single) = %q, want \"0\"", got)
 	}
@@ -140,14 +131,14 @@ func TestLabelsQueryMultiDocQuirk(t *testing.T) {
 	// (yq prints 1, then errors on doc2, then `|| echo 0`) — NOT "0", so no
 	// warning. The quirk is the contract.
 	multi := filepath.Join(dir, "multi.yaml")
-	writeFile(t, multi, "metadata:\n  labels:\n    lok8s.dev/name: x\n---\nkind: Foo\n")
+	testutil.WriteFile(t, multi, "metadata:\n  labels:\n    lok8s.dev/name: x\n---\nkind: Foo\n")
 	if got := labelsQuery(multi); got != "1\n0" {
 		t.Fatalf("labelsQuery(multi) = %q, want \"1\\n0\"", got)
 	}
 
 	// Labelled single doc → "1".
 	labelled := filepath.Join(dir, "labelled.yaml")
-	writeFile(t, labelled, "metadata:\n  labels:\n    lok8s.dev/name: x\n")
+	testutil.WriteFile(t, labelled, "metadata:\n  labels:\n    lok8s.dev/name: x\n")
 	if got := labelsQuery(labelled); got != "1" {
 		t.Fatalf("labelsQuery(labelled) = %q, want \"1\"", got)
 	}
@@ -155,7 +146,7 @@ func TestLabelsQueryMultiDocQuirk(t *testing.T) {
 
 func TestServicesImageRegistryExclusive(t *testing.T) {
 	l, base, _, errOut := newLinter(t)
-	writeFile(t, filepath.Join(base, "services.yaml"),
+	testutil.WriteFile(t, filepath.Join(base, "services.yaml"),
 		"services:\n  app:\n    image: pinned:1\n    registry:\n      endpoint: r\n")
 
 	if l.services() {

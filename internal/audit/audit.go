@@ -21,13 +21,13 @@
 package audit
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // Supported Kubernetes minors. A static list is intentional (cluster-free).
@@ -121,7 +121,7 @@ func (a *Auditor) RunDomain(d string) []Finding {
 
 	domainDir := filepath.Join(a.Clusters, d)
 	specFile := filepath.Join(domainDir, "cluster.lok8s.yaml")
-	if !isFile(specFile) {
+	if !fsutil.FileExists(specFile) {
 		r.emit(Finding{ID: "cluster-spec", Title: "Cluster spec", Severity: "high", Status: "unknown",
 			Detail:      "No cluster.lok8s.yaml under " + domainDir + " (deploy-only or missing domain).",
 			Remediation: "Audit the referenced cluster (spec.clusterRef.domain) instead."})
@@ -259,14 +259,4 @@ func (a *Auditor) relURI(path string) string {
 		return strings.TrimPrefix(path, a.Base+"/")
 	}
 	return path
-}
-
-func isFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
-}
-
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }

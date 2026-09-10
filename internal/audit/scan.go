@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 var (
@@ -34,7 +36,7 @@ func targetFiles(domainDir string) []string {
 // plus every *.yaml under clusters/<domain>/artifacts/ (bash: audit::_artifact_files).
 func artifactFiles(domainDir string) []string {
 	var files []string
-	if isFile(filepath.Join(domainDir, "artifacts.yaml")) {
+	if fsutil.FileExists(filepath.Join(domainDir, "artifacts.yaml")) {
 		files = append(files, filepath.Join(domainDir, "artifacts.yaml"))
 	}
 	files = append(files, findFiles(filepath.Join(domainDir, "artifacts"), ".yaml")...)

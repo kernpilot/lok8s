@@ -20,6 +20,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/tilt"
 )
 
@@ -32,9 +33,9 @@ func headerOf(t *testing.T, p *config.Paths, d string) string {
 
 func TestRunHeaderShapes(t *testing.T) {
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Clusters, "lo.dev", "cluster.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "lo.dev", "cluster.lok8s.yaml"),
 		"kind: Lo\nmetadata:\n  name: clu\nspec:\n  kubernetes:\n    version: v1.31.12@sha256:0f5cc49c\n")
-	writeFile(t, filepath.Join(p.Clusters, "lo.dev", ".registries.json"), `{"registries":[{"name":"build"},{"name":"cache"},{"name":"io-docker"}]}`)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "lo.dev", ".registries.json"), `{"registries":[{"name":"build"},{"name":"cache"},{"name":"io-docker"}]}`)
 	want := "\n  \033[1;36mlo.dev\033[0m  \033[2mlo · kind · v1.31.12\033[0m\n" +
 		"  \033[2mkubeconfig  .kubeconfig/clu.yaml\033[0m\n" +
 		"  \033[2mregistries  local · tls · 3\033[0m\n\n"
@@ -46,24 +47,24 @@ func TestRunHeaderShapes(t *testing.T) {
 	// as true, so the bash header says "tls" for a plain-HTTP setup and so
 	// does this one; no .registries.json → "—"; a float version prints as
 	// written.
-	writeFile(t, filepath.Join(p.Clusters, "sh.dev", "cluster.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "sh.dev", "cluster.lok8s.yaml"),
 		"kind: Lo\nmetadata:\n  name: clu\nspec:\n  kubernetes:\n    version: 1.30\n  registries:\n    tls: false\n    shared:\n      enabled: true\n")
 	if got := headerOf(t, p, "sh.dev"); !strings.Contains(got, "lo · kind · 1.30\033") || !strings.Contains(got, "registries  shared · tls · —") {
 		t.Errorf("shared header: %q", got)
 	}
 
 	// Cloud driver: no registries line; version without an @ suffix.
-	writeFile(t, filepath.Join(p.Clusters, "k1.cloud", "cluster.lok8s.yaml"), "kind: KubeOne\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "k1.cloud", "cluster.lok8s.yaml"), "kind: KubeOne\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n")
 	if got := headerOf(t, p, "k1.cloud"); !strings.Contains(got, "\033[2mkubeone · 1.31.0\033[0m") || strings.Contains(got, "registries") {
 		t.Errorf("kubeone header: %q", got)
 	}
 
 	// Deploy-only domain → "deploy → <ref>"; missing ref → "?".
-	writeFile(t, filepath.Join(p.Clusters, "dep.app", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: k1.cloud\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "dep.app", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: k1.cloud\n")
 	if got := headerOf(t, p, "dep.app"); !strings.Contains(got, "\033[2mdeploy → k1.cloud\033[0m") {
 		t.Errorf("deploy header: %q", got)
 	}
-	writeFile(t, filepath.Join(p.Clusters, "noref.app", "deploy.lok8s.yaml"), "kind: Deploy\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "noref.app", "deploy.lok8s.yaml"), "kind: Deploy\n")
 	if got := headerOf(t, p, "noref.app"); !strings.Contains(got, "deploy → ?") {
 		t.Errorf("deploy header without ref: %q", got)
 	}
@@ -73,7 +74,7 @@ func TestRunHeaderShapes(t *testing.T) {
 	if got := headerOf(t, p, "nope.dev"); !strings.Contains(got, "\033[1;36mnope.dev\033[0m  \033[2m\033[0m\n") {
 		t.Errorf("no-spec header: %q", got)
 	}
-	writeFile(t, filepath.Join(p.Clusters, "nokind.dev", "cluster.lok8s.yaml"), "metadata:\n  name: x\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "nokind.dev", "cluster.lok8s.yaml"), "metadata:\n  name: x\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n")
 	if got := headerOf(t, p, "nokind.dev"); !strings.Contains(got, "\033[2m · 1.31.0\033[0m") {
 		t.Errorf("no-kind header: %q", got)
 	}
@@ -99,7 +100,7 @@ type upHarness struct {
 func newUpHarness(t *testing.T, dispatch error) *upHarness {
 	t.Helper()
 	h := &upHarness{p: synthProject(t), out: &bytes.Buffer{}, errOut: &bytes.Buffer{}, runner: &scriptRunner{}}
-	writeFile(t, filepath.Join(h.p.Clusters, "lo.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: clu\n")
+	testutil.WriteFile(t, filepath.Join(h.p.Clusters, "lo.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: clu\n")
 	t.Setenv("DOMAIN_NAME", "lo.dev")
 	t.Setenv("TILT_PORT", "")
 	os.Unsetenv("TILT_PORT")

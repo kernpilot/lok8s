@@ -16,6 +16,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // scriptRunner is a fake execx.Runner with a scripted answer per argv.
@@ -79,7 +80,7 @@ func (h *downHarness) acted_(s string) bool {
 
 func (h *downHarness) spec(t *testing.T, body string) {
 	t.Helper()
-	writeFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "cluster.lok8s.yaml"), body)
+	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "cluster.lok8s.yaml"), body)
 }
 
 // bats: "a cloud spec DOES reach driver-destroy" — the positive control.
@@ -132,7 +133,7 @@ func TestDownSpecWithoutKindRefuses(t *testing.T) {
 func TestDownLoSpecLocalTeardown(t *testing.T) {
 	h := newDownHarness(t)
 	h.spec(t, "kind: Lo\nmetadata:\n  name: dev\n")
-	writeFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", ".registries.json"),
+	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", ".registries.json"),
 		`{"shared": false, "project_network": "devnet", "registries": [{"name": "build"}, {"name": "cache"}, {"name": ""}]}`)
 	h.runner.handler = func(c execx.Cmd) error {
 		if c.Name == "kind" && c.Args[0] == "get" {
@@ -166,7 +167,7 @@ func TestDownLoSpecLocalTeardown(t *testing.T) {
 func TestDownSharedRegistriesLeftUp(t *testing.T) {
 	h := newDownHarness(t)
 	h.spec(t, "kind: Lo\nmetadata:\n  name: dev\n")
-	writeFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", ".registries.json"),
+	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", ".registries.json"),
 		`{"shared": true, "project_network": "devnet", "registries": [{"name": "build"}, {"name": "io-docker"}]}`)
 	if err := runDown(context.Background(), h.deps, "test.dev", "dev"); err != nil {
 		t.Fatal(err)
@@ -186,7 +187,7 @@ func TestDownSharedRegistriesLeftUp(t *testing.T) {
 // or deploy-only domain has only a kind cluster to remove.
 func TestDownNoSpecTakesLocalPath(t *testing.T) {
 	h := newDownHarness(t)
-	writeFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: other\n")
+	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: other\n")
 	if err := runDown(context.Background(), h.deps, "test.dev", "local"); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestCleanVolumesAndRegistriesOnLoDomain(t *testing.T) {
 
 func TestCleanSkipsRegistriesOffLoDomains(t *testing.T) {
 	h := newDownHarness(t)
-	writeFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "deploy.lok8s.yaml"), "kind: Deploy\n")
+	testutil.WriteFile(t, filepath.Join(h.deps.paths.Clusters, "test.dev", "deploy.lok8s.yaml"), "kind: Deploy\n")
 	deps, acted := cleanHarness(t, h)
 	if err := runClean(context.Background(), deps, "test.dev", "local", false); err != nil {
 		t.Fatal(err)

@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -89,7 +90,7 @@ func (c *Context) flatStore() string {
 func (c *Context) StorePath() string {
 	if c.Domain != "" {
 		d := c.Paths.Clusters + "/" + c.Domain + "/secrets"
-		if isDir(d) {
+		if fsutil.DirExists(d) {
 			return d
 		}
 	}
@@ -102,7 +103,7 @@ func (c *Context) StorePath() string {
 // domain is in context (bash: secrets::_ensure_store). A no-op when no domain
 // is in context or the domain dir doesn't exist.
 func (c *Context) ensureStore() error {
-	if c.Domain != "" && isDir(c.Paths.Clusters+"/"+c.Domain) {
+	if c.Domain != "" && fsutil.DirExists(c.Paths.Clusters+"/"+c.Domain) {
 		return os.MkdirAll(c.Paths.Clusters+"/"+c.Domain+"/secrets", 0o755)
 	}
 	return nil
@@ -154,24 +155,6 @@ func storeEntries(dir, prefix string) []string {
 	return names
 }
 
-// isFile mirrors bash [[ -f ]] (follows symlinks).
-func isFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-// isDir mirrors bash [[ -d ]].
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-// exists mirrors bash [[ -e ]].
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // newerThan mirrors bash [[ a -nt b ]]: a exists and its mtime is strictly
 // newer than b's.
 func newerThan(a, b string) bool {
@@ -216,16 +199,16 @@ func nudgeNewer(dst, src string) {
 // plaintext secret lacks a corresponding up-to-date .enc file, true when all
 // secrets are encrypted or no secrets exist.
 func CheckUnencrypted(dir string, warnTo io.Writer) bool {
-	if !isDir(dir) {
+	if !fsutil.DirExists(dir) {
 		return true
 	}
 	ok := true
 	for _, name := range storeEntries(dir, "Secret.") {
 		plaintext := dir + "/" + name
-		if !isFile(plaintext) || strings.HasSuffix(name, ".enc") {
+		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(name, ".enc") {
 			continue
 		}
-		if !isFile(plaintext + ".enc") {
+		if !fsutil.IsRegular(plaintext + ".enc") {
 			ui.Warnf(warnTo, "Unencrypted secret: %s — run: lo secrets encrypt", name)
 			ok = false
 		} else if newerThan(plaintext, plaintext+".enc") {
@@ -257,7 +240,7 @@ func CheckFlatShadows(flat, domainDir string, out io.Writer) bool {
 
 	// Only meaningful when the domain has its OWN store, distinct from the
 	// flat one.
-	if flat == "" || !isDir(store) || !isDir(flat) {
+	if flat == "" || !fsutil.DirExists(store) || !fsutil.DirExists(flat) {
 		return true
 	}
 	if samePath(store, flat) {
@@ -267,11 +250,11 @@ func CheckFlatShadows(flat, domainDir string, out io.Writer) bool {
 	ok := true
 	for _, base := range storeEntries(store, "Secret.") {
 		plaintext := store + "/" + base
-		if !isFile(plaintext) || strings.HasSuffix(base, ".enc") || strings.HasSuffix(base, ".sha") {
+		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") || strings.HasSuffix(base, ".sha") {
 			continue
 		}
 		flatCopy := flat + "/" + base
-		if !isFile(flatCopy) {
+		if !fsutil.IsRegular(flatCopy) {
 			continue
 		}
 		if sameContent(flatCopy, plaintext) {

@@ -24,6 +24,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -177,13 +178,13 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 
 	// 3. Ensure a management cluster exists.
 	mgmtKubeconfig := d.kubeconfigPath(mgmtDomain)
-	if domain == mgmtDomain && !fileExists(mgmtKubeconfig) {
+	if domain == mgmtDomain && !fsutil.FileExists(mgmtKubeconfig) {
 		// The domain IS the management cluster — bootstrap it on the
 		// provider.
 		d.infoLine("bootstrapping management cluster %s", mgmtDomain)
 		return d.Bootstrap(ctx, domain)
 	}
-	if !fileExists(mgmtKubeconfig) {
+	if !fsutil.FileExists(mgmtKubeconfig) {
 		if mgmtLocal == "true" {
 			// Cheap, self-contained model: a local kind cluster as the CAPI
 			// management cluster (real workload nodes still on the cloud
@@ -415,7 +416,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// If the mgmt kubeconfig was lost but the local kind cluster is still
 	// up, recover it — otherwise we would delete the kind cluster below
 	// with a live workload (and its billed servers) still behind it.
-	if !fileExists(mgmtKubeconfig) && mgmtLocal == "true" {
+	if !fsutil.FileExists(mgmtKubeconfig) && mgmtLocal == "true" {
 		kindCluster := MgmtKindName(mgmtDomain)
 		if d.kindClusterExists(ctx, kindCluster) {
 			if err := os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755); err != nil {
@@ -445,13 +446,13 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// disk means the previous destroy never finished, and reporting success
 	// here would delete the only handle while Hetzner servers may still be
 	// billing.
-	if !fileExists(mgmtKubeconfig) {
+	if !fsutil.FileExists(mgmtKubeconfig) {
 		if mgmtLocal != "true" {
 			ui.Errorf(stderr, "management kubeconfig %s not found — cannot reach management cluster %s to delete workload cluster %s", mgmtKubeconfig, mgmtDomain, clusterName)
 			ui.Errorf(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
 			ui.Errorf(stderr, "  restore the management cluster kubeconfig, then re-run 'lo down'")
 			return fmt.Errorf("capi: management kubeconfig %s not found", mgmtKubeconfig)
-		} else if fileExists(workloadKubeconfig) {
+		} else if fsutil.FileExists(workloadKubeconfig) {
 			ui.Errorf(stderr, "local management kubeconfig is gone but workload cluster %s still has a kubeconfig — the previous destroy never completed", clusterName)
 			ui.Errorf(stderr, "  KEEPING %s — Hetzner servers and load balancer may still be running and billing", workloadKubeconfig)
 			ui.Errorf(stderr, "  recreate the management cluster ('lo up' on %s) and re-run 'lo down', or clean up via 'hcloud server list'", mgmtDomain)
@@ -464,7 +465,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// the management cluster before this finishes would orphan billed
 	// infrastructure.
 	var delErr error
-	if fileExists(mgmtKubeconfig) {
+	if fsutil.FileExists(mgmtKubeconfig) {
 		d.infoLine("deleting workload cluster %s — waiting for Hetzner teardown (up to 10m)", clusterName)
 		delErr = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name: "kubectl",
@@ -803,7 +804,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	// 7. Install lok8s operator on management cluster (best-effort:
 	// `2>/dev/null || true` in the bash).
 	d.infoLine("installing lok8s operator on management cluster")
-	if deployDir := filepath.Join(d.deps.Paths.Base, "operator", "deploy"); dirExists(deployDir) {
+	if deployDir := filepath.Join(d.deps.Paths.Base, "operator", "deploy"); fsutil.DirExists(deployDir) {
 		_ = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name:   "kubectl",
 			Args:   []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", deployDir + "/"},
@@ -867,17 +868,7 @@ func ensureEnvDefault(name, def string) {
 	}
 }
 
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
-}
-
 func fileNonEmpty(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && info.Size() > 0
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }

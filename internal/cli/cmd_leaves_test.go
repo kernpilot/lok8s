@@ -22,6 +22,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func repoRootDir(t *testing.T) string {
@@ -61,14 +62,6 @@ func runLo(t *testing.T, root *cobra.Command, args ...string) (stdout, stderr st
 	return out.String(), errOut.String(), err
 }
 
-func writeFile(t *testing.T, path, body string) {
-	t.Helper()
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // ── lo init ────────────────────────────────────────────────────────────
 
 func TestInitCommandRouting(t *testing.T) {
@@ -94,7 +87,7 @@ func TestInitCommandRouting(t *testing.T) {
 		t.Errorf("stdout:\n%s", stdout)
 	}
 	// The inherited --force|-f reaches the scaffold.
-	writeFile(t, svc+"/lok8s.yaml", "build: { context: ., dockerfile: Keep }\n")
+	testutil.WriteFile(t, svc+"/lok8s.yaml", "build: { context: ., dockerfile: Keep }\n")
 	if _, _, err := runLo(t, NewRoot(p), "init", "service", "foo", "-p", svc, "-f"); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +120,7 @@ func crdsSandbox(t *testing.T) *config.Paths {
 	}
 	for _, s := range schemas {
 		raw, _ := os.ReadFile(s)
-		writeFile(t, filepath.Join(p.Base, "operator", "crds", "schema", filepath.Base(s)), string(raw))
+		testutil.WriteFile(t, filepath.Join(p.Base, "operator", "crds", "schema", filepath.Base(s)), string(raw))
 	}
 	return p
 }
@@ -218,7 +211,7 @@ func addonsProject(t *testing.T) *config.Paths {
 func TestAddonsDetailInventory(t *testing.T) {
 	p := addonsProject(t)
 	os.MkdirAll(filepath.Join(p.Clusters, "inv", "targets", "networking"), 0o755)
-	writeFile(t, filepath.Join(p.Clusters, "inv", "cluster.lok8s.yaml"), `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "inv", "cluster.lok8s.yaml"), `apiVersion: cluster.lok8s.dev/v1beta1
 kind: KubeOne
 metadata: { name: inv }
 spec:
@@ -243,7 +236,7 @@ spec:
 	}
 
 	// Map-form entry stays ONE addon (no shattering into reserved keys).
-	writeFile(t, filepath.Join(p.Clusters, "mapform", "cluster.lok8s.yaml"), `kind: KubeOne
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "mapform", "cluster.lok8s.yaml"), `kind: KubeOne
 metadata: { name: m }
 spec:
   bootstrap:
@@ -265,7 +258,7 @@ spec:
 	}
 
 	// Empty bootstrap, missing spec, injected domain, malformed kind.
-	writeFile(t, filepath.Join(p.Clusters, "empty", "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata: { name: e }\nspec:\n  bootstrap: []\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "empty", "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata: { name: e }\nspec:\n  bootstrap: []\n")
 	stdout, _, _ = runLo(t, NewRoot(p), "addons", "--detail", "--domain", "empty")
 	if !strings.Contains(stdout, "deploys no addons") {
 		t.Errorf("empty:\n%s", stdout)
@@ -280,7 +273,7 @@ spec:
 			t.Errorf("%q: err=%v out=%q stderr=%q", d, err, stdout, stderr)
 		}
 	}
-	writeFile(t, filepath.Join(p.Clusters, "bad2", "cluster.lok8s.yaml"), "kind: \"a b\"\nmetadata: { name: bad2 }\nspec:\n  bootstrap:\n    - cilium\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "bad2", "cluster.lok8s.yaml"), "kind: \"a b\"\nmetadata: { name: bad2 }\nspec:\n  bootstrap:\n    - cilium\n")
 	stdout, _, err = runLo(t, NewRoot(p), "addons", "--detail", "--domain", "bad2")
 	if !errors.Is(err, ErrHandled) || strings.Contains(stdout, "kind=lo") {
 		t.Errorf("malformed kind: err=%v out=%q", err, stdout)
@@ -378,10 +371,10 @@ func driversRoot(p *config.Paths, deps driversDeps) *cobra.Command {
 
 func TestDriversList(t *testing.T) {
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Lok8s, "drivers", "bashonly", "main"), "#!/usr/bin/env argsh\n")
-	writeFile(t, filepath.Join(p.Lok8s, "drivers", "fakedrv", "main"), "#!/usr/bin/env argsh\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "bashonly", "main"), "#!/usr/bin/env argsh\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "fakedrv", "main"), "#!/usr/bin/env argsh\n")
 	os.MkdirAll(filepath.Join(p.Lok8s, "drivers", ".hidden"), 0o755)
-	writeFile(t, filepath.Join(p.Lok8s, "drivers", "README.md"), "x")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "README.md"), "x")
 	h := &driversHarness{}
 	stdout, _, err := runLo(t, driversRoot(p, h.deps()), "drivers", "--list")
 	if err != nil {
@@ -429,7 +422,7 @@ func TestDriversErrorPaths(t *testing.T) {
 
 	// A bash-only driver falls back to the argsh implementation, argv
 	// verbatim.
-	writeFile(t, filepath.Join(p.Lok8s, "drivers", "bashonly", "main"), "#!/usr/bin/env argsh\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "bashonly", "main"), "#!/usr/bin/env argsh\n")
 	saved := os.Args
 	os.Args = []string{"lo", "drivers", "bashonly", "status", "a.dev"}
 	defer func() { os.Args = saved }()
@@ -494,10 +487,10 @@ func TestDriversHelpTablesCoverRegistry(t *testing.T) {
 func chatProject(t *testing.T) *config.Paths {
 	t.Helper()
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\nexit 0\n")
+	testutil.WriteFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\nexit 0\n")
 	os.Chmod(filepath.Join(p.Bin, "lochat"), 0o755)
-	writeFile(t, filepath.Join(p.Bin, "argsh.so"), "")
-	writeFile(t, filepath.Join(p.Lok8s, "chat", "defaults.json"), "{}\n")
+	testutil.WriteFile(t, filepath.Join(p.Bin, "argsh.so"), "")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "chat", "defaults.json"), "{}\n")
 	return p
 }
 
@@ -535,13 +528,13 @@ func TestChatExecArgv(t *testing.T) {
 
 	// A per-project lo-chat.json wins over the shipped defaults; LO_CHAT_CONFIG
 	// overrides the project path.
-	writeFile(t, filepath.Join(p.Base, "lo-chat.json"), "{}\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, "lo-chat.json"), "{}\n")
 	runLo(t, NewRoot(p), "chat")
 	if gotArgv[2] != filepath.Join(p.Base, "lo-chat.json") {
 		t.Errorf("project config not preferred: %q", gotArgv[2])
 	}
 	custom := filepath.Join(p.Base, "custom.json")
-	writeFile(t, custom, "{}\n")
+	testutil.WriteFile(t, custom, "{}\n")
 	t.Setenv("LO_CHAT_CONFIG", custom)
 	runLo(t, NewRoot(p), "chat")
 	if gotArgv[2] != custom {
@@ -562,7 +555,7 @@ func TestChatPreflightErrors(t *testing.T) {
 		t.Errorf("missing lochat: err=%v stderr=%q", err, stderr)
 	}
 
-	writeFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\n")
+	testutil.WriteFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\n")
 	os.Chmod(filepath.Join(p.Bin, "lochat"), 0o755)
 	// No project config and no local .lok8s/chat: the embedded defaults are
 	// ejected on first use (the "no chat config" error is unreachable now),
@@ -589,7 +582,7 @@ func TestChatPreflightErrors(t *testing.T) {
 	// cmd_assets_test.go.)
 	t.Setenv(assets.EnvEject, "never")
 	p2 := synthProject(t)
-	writeFile(t, filepath.Join(p2.Bin, "lochat"), "#!/bin/sh\n")
+	testutil.WriteFile(t, filepath.Join(p2.Bin, "lochat"), "#!/bin/sh\n")
 	os.Chmod(filepath.Join(p2.Bin, "lochat"), 0o755)
 	_, _, _ = runLo(t, NewRoot(p2), "chat")
 	if _, err := os.Stat(filepath.Join(p2.Lok8s, "chat")); err == nil {
@@ -602,10 +595,10 @@ func TestChatPreflightErrors(t *testing.T) {
 func skillsProject(t *testing.T) *config.Paths {
 	t.Helper()
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Base, "skills", "beta", "SKILL.md"), "# beta\n")
-	writeFile(t, filepath.Join(p.Base, "skills", "alpha", "SKILL.md"), "# alpha\n")
-	writeFile(t, filepath.Join(p.Base, "skills", "alpha", "extra.txt"), "x\n")
-	writeFile(t, filepath.Join(p.Base, "skills", "noskill", "README.md"), "not a skill\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, "skills", "beta", "SKILL.md"), "# beta\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, "skills", "alpha", "SKILL.md"), "# alpha\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, "skills", "alpha", "extra.txt"), "x\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, "skills", "noskill", "README.md"), "not a skill\n")
 	return p
 }
 
@@ -702,7 +695,7 @@ func TestAiSkillsLinkUnlink(t *testing.T) {
 
 func TestAiCheckRunsRuntimeCheckThenSkills(t *testing.T) {
 	p := chatProject(t)
-	writeFile(t, filepath.Join(p.Base, "skills", "alpha", "SKILL.md"), "# alpha\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, "skills", "alpha", "SKILL.md"), "# alpha\n")
 	t.Setenv("LO_CHAT_CONFIG", "")
 	os.Unsetenv("LO_CHAT_CONFIG")
 

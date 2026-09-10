@@ -19,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver/kubeone"
 	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // orchestrateProject is a synthetic project with the routing-axis domains
@@ -26,10 +27,10 @@ import (
 func orchestrateProject(t *testing.T) (*config.Paths, *scriptRunner, *[]int) {
 	t.Helper()
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Clusters, "alpha.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: alpha\n")
-	writeFile(t, filepath.Join(p.Clusters, "beta.cloud", "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: beta\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n  bootstrap:\n    - name: cilium\n")
-	writeFile(t, filepath.Join(p.Clusters, "gamma.app", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: beta.cloud\n")
-	writeFile(t, filepath.Join(p.Clusters, "nokind.dev", "cluster.lok8s.yaml"), "metadata:\n  name: prod\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "alpha.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: alpha\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "beta.cloud", "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: beta\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n  bootstrap:\n    - name: cilium\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "gamma.app", "deploy.lok8s.yaml"), "kind: Deploy\nspec:\n  clusterRef:\n    domain: beta.cloud\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "nokind.dev", "cluster.lok8s.yaml"), "metadata:\n  name: prod\n")
 
 	r := &scriptRunner{handler: func(c execx.Cmd) error {
 		t.Errorf("unexpected exec under test: %s %v", c.Name, c.Args)
@@ -152,7 +153,7 @@ func TestRegistryDriverGate(t *testing.T) {
 	}
 	// A loaded registry JSON (Tilt subshells) skips the gate entirely.
 	rj := filepath.Join(p.Base, "reg.json")
-	writeFile(t, rj, `{"registries":[]}`)
+	testutil.WriteFile(t, rj, `{"registries":[]}`)
 	t.Setenv("LOK8S_REGISTRY_JSON", rj)
 	if err := registryGate(p, "beta.cloud", os.Stderr); err != nil {
 		t.Errorf("gate must be skipped with LOK8S_REGISTRY_JSON: %v", err)

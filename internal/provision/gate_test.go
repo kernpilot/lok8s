@@ -9,13 +9,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // gateSpecYAML is the bats fixture: a minimal cloud-driver spec the gate
@@ -48,23 +48,13 @@ func testPaths(t *testing.T) *config.Paths {
 	}
 }
 
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // gateDispatcher builds a Dispatcher with a stubbed interactive check
 // (bats: _assume_tty/_assume_no_tty redefine provision::_interactive).
 func gateDispatcher(t *testing.T, input string, interactive bool) (*Dispatcher, *bytes.Buffer, string) {
 	t.Helper()
 	p := testPaths(t)
 	specPath := filepath.Join(p.Base, "cluster.lok8s.yaml")
-	writeFile(t, specPath, gateSpecYAML)
+	testutil.WriteFile(t, specPath, gateSpecYAML)
 	var errBuf bytes.Buffer
 	d := &Dispatcher{
 		Paths:       p,
@@ -215,7 +205,7 @@ func TestGateDestroyAcceptsLiteralYes(t *testing.T) {
 func dispatchHarness(t *testing.T, input string) (*Dispatcher, *bytes.Buffer, *[]string) {
 	t.Helper()
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.prod", "cluster.lok8s.yaml"), gateSpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.prod", "cluster.lok8s.yaml"), gateSpecYAML)
 	log := &[]string{}
 	fd := &fakeDriver{log: log}
 	var errBuf bytes.Buffer

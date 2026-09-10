@@ -32,6 +32,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/env"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -63,7 +64,7 @@ type Context struct {
 // the OTHER domain's TLS scheme and fail every request (issue #89).
 func (c *Context) registryTLS(target string) bool {
 	path := os.Getenv("LOK8S_REGISTRY_JSON")
-	if path == "" || !fileExists(path) {
+	if path == "" || !fsutil.FileExists(path) {
 		path = c.Paths.Clusters + "/" + target + "/.registries.json"
 	}
 	raw, err := os.ReadFile(path)
@@ -557,9 +558,4 @@ func (c *Context) Clean(ctx context.Context, network string) error {
 
 func subst(s string) string {
 	return string(env.BareEnvsubst([]byte(s)))
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

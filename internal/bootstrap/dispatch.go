@@ -10,6 +10,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
 )
@@ -48,7 +49,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string) error {
 	}
 
 	clusterYAML := filepath.Join(e.Paths.Clusters, domainName, "cluster.lok8s.yaml")
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		return e.errorf("cluster spec not found: %s", clusterYAML)
 	}
 

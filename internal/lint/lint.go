@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/secrets"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -84,13 +85,13 @@ func (l *Linter) all(domain string) bool {
 	// Check spec file exists
 	clusterSpec := domainDir + "/cluster.lok8s.yaml"
 	deploySpec := domainDir + "/deploy.lok8s.yaml"
-	if !isFile(clusterSpec) && !isFile(deploySpec) {
+	if !fsutil.IsRegular(clusterSpec) && !fsutil.IsRegular(deploySpec) {
 		ui.Errorf(l.ErrOut, "  Missing cluster.lok8s.yaml or deploy.lok8s.yaml")
 		return false
 	}
 
 	specFile := deploySpec
-	if isFile(clusterSpec) {
+	if fsutil.IsRegular(clusterSpec) {
 		specFile = clusterSpec
 	}
 
@@ -137,7 +138,7 @@ func (l *Linter) schema(domainDir, specFile string) int {
 		errs++
 	}
 
-	if isFile(domainDir + "/cluster.lok8s.yaml") {
+	if fsutil.IsRegular(domainDir + "/cluster.lok8s.yaml") {
 		// yq: `.spec.kind // .kind // ""`
 		specRuntime := valueOr(yqsem.Lookup(root, "spec", "kind"), "")
 		if specRuntime == "" {
@@ -153,7 +154,7 @@ func (l *Linter) schema(domainDir, specFile string) int {
 // clusterref validates spec.clusterRef for deploy domains (bash:
 // lint::clusterref). Returns the number of errors.
 func (l *Linter) clusterref(domainDir, specFile string) int {
-	if !isFile(domainDir + "/deploy.lok8s.yaml") {
+	if !fsutil.IsRegular(domainDir + "/deploy.lok8s.yaml") {
 		return 0
 	}
 	root := firstDoc(specFile)
@@ -168,10 +169,10 @@ func (l *Linter) clusterref(domainDir, specFile string) int {
 	// Validate clusterRef.domain points to a valid cluster domain
 	refDomain := valueOr(yqsem.Lookup(root, "spec", "clusterRef", "domain"), "")
 	if refDomain != "" {
-		if !isDir(l.Paths.Clusters + "/" + refDomain) {
+		if !fsutil.DirExists(l.Paths.Clusters + "/" + refDomain) {
 			ui.Errorf(l.ErrOut, "  clusterRef.domain '%s' not found in .lok8s/", refDomain)
 			errs++
-		} else if !isFile(l.Paths.Clusters + "/" + refDomain + "/cluster.lok8s.yaml") {
+		} else if !fsutil.IsRegular(l.Paths.Clusters + "/" + refDomain + "/cluster.lok8s.yaml") {
 			ui.Errorf(l.ErrOut, "  clusterRef.domain '%s' has no cluster.lok8s.yaml", refDomain)
 			errs++
 		}
@@ -185,13 +186,13 @@ func (l *Linter) clusterref(domainDir, specFile string) int {
 func (l *Linter) kustomization(domainDir string) int {
 	errs := 0
 	targetsDir := domainDir + "/targets"
-	if !isDir(targetsDir) {
+	if !fsutil.DirExists(targetsDir) {
 		return 0
 	}
 	for _, tname := range sortedDirNames(targetsDir) {
 		tdir := targetsDir + "/" + tname + "/"
 		kustfile := tdir + "kustomization.yaml"
-		if !isFile(kustfile) {
+		if !fsutil.IsRegular(kustfile) {
 			ui.Warnf(l.ErrOut, "  Target %s/ missing kustomization.yaml", tname)
 			continue
 		}
@@ -208,7 +209,7 @@ func (l *Linter) kustomization(domainDir string) int {
 				continue
 			}
 			// Resources may be files or directories (bases)
-			if !exists(tdir + res) {
+			if !fsutil.Exists(tdir + res) {
 				ui.Errorf(l.ErrOut, "  Target %s/: kustomization.yaml references missing path: %s", tname, res)
 				errs++
 			}
@@ -223,7 +224,7 @@ var lok8sLabelRe = regexp.MustCompile(`^lok8s\.dev/`)
 // lint::labels; warnings only).
 func (l *Linter) labels(domainDir string) {
 	targetsDir := domainDir + "/targets"
-	if !isDir(targetsDir) {
+	if !fsutil.DirExists(targetsDir) {
 		return
 	}
 	for _, tname := range sortedDirNames(targetsDir) {
@@ -286,7 +287,7 @@ var secretDataRe = regexp.MustCompile(`(?m)^(data|stringData):`)
 func (l *Linter) secrets(domainDir, domain string) {
 	// Legacy per-domain secrets/ directory (YAML Secret manifests)
 	secretsDir := domainDir + "/secrets"
-	if isDir(secretsDir) {
+	if fsutil.DirExists(secretsDir) {
 		for _, sbase := range sortedFileNames(secretsDir, "") {
 			if strings.HasSuffix(sbase, ".enc") || strings.HasSuffix(sbase, ".age") {
 				continue
@@ -336,7 +337,7 @@ func (l *Linter) secrets(domainDir, domain string) {
 func (l *Linter) apex() bool {
 	var domains []string
 	for _, d := range sortedDirNames(l.Paths.Clusters) {
-		if isFile(l.Paths.Clusters + "/" + d + "/cluster.lok8s.yaml") {
+		if fsutil.IsRegular(l.Paths.Clusters + "/" + d + "/cluster.lok8s.yaml") {
 			domains = append(domains, d)
 		}
 	}
@@ -364,22 +365,4 @@ func bufLines(buf *bytes.Buffer) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
-}
-
-// isFile mirrors bash [[ -f ]] (follows symlinks).
-func isFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-// isDir mirrors bash [[ -d ]].
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-// exists mirrors bash [[ -e ]].
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/build"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -46,7 +47,7 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	if err != nil {
 		return err
 	}
-	if !fileExists(coreTmpl) {
+	if !fsutil.FileExists(coreTmpl) {
 		ui.Errorf(stderr, "KubeOne core template not found: %s", coreTmpl)
 		return fmt.Errorf("kubeone: core template not found: %s", coreTmpl)
 	}
@@ -211,7 +212,7 @@ func (d *Driver) injectOIDC(manifest string) error {
 	if !oidc.Enabled() {
 		return nil
 	}
-	if !fileExists(manifest) {
+	if !fsutil.FileExists(manifest) {
 		ui.Errorf(stderr, "OIDC: manifest not found: %s", manifest)
 		return fmt.Errorf("kubeone: OIDC manifest not found: %s", manifest)
 	}

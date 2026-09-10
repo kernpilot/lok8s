@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -55,7 +56,7 @@ func (a *Auditor) checkEncryption(r *run, domainName, domainDir, specFile, kind 
 	// 2. KubeOne driver default — the authoritative static signal for kubeone.
 	driverEnable := ""
 	koCore, _, _ := assets.Peek(a.paths(), "drivers/kubeone/cluster/core/kubeone.yaml")
-	if kind == "kubeone" && isFile(koCore) {
+	if kind == "kubeone" && fsutil.FileExists(koCore) {
 		driverEnable = yqRenderNode(lookupFile(koCore, "features", "encryptionProviders", "enable"))
 		if driverEnable == "null" {
 			driverEnable = ""
@@ -145,11 +146,11 @@ func (a *Auditor) checkCilium(r *run, domainName, specFile, kind, provider strin
 	// kustomize/network).
 	var vfiles []string
 	for _, name := range []string{"values.yaml", "values." + kind + ".yaml"} {
-		if isFile(filepath.Join(cil.dir, name)) {
+		if fsutil.FileExists(filepath.Join(cil.dir, name)) {
 			vfiles = append(vfiles, filepath.Join(cil.dir, name))
 		}
 	}
-	if provider != "" && isFile(filepath.Join(cil.dir, "values."+provider+".yaml")) {
+	if provider != "" && fsutil.FileExists(filepath.Join(cil.dir, "values."+provider+".yaml")) {
 		vfiles = append(vfiles, filepath.Join(cil.dir, "values."+provider+".yaml"))
 	}
 	hasInline := cil.inlineInclude

@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // The contract §2 bundle keys. The six PKI files are what preseed places;
@@ -62,7 +64,7 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 	if info, err := os.Stat(bundle); err == nil && info.IsDir() {
 		return bundle, nil
 	}
-	if fileExists(bundle) {
+	if fsutil.FileExists(bundle) {
 		var dir string
 		if workdir != "" {
 			dir = filepath.Join(workdir, "bundle")
@@ -223,7 +225,7 @@ func stripQuery(u string) string {
 // private workdir (0600). Every failure names the fix.
 func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir string) (string, error) {
 	if override != "" {
-		if !fileExists(override) {
+		if !fsutil.FileExists(override) {
 			c.errorf("handover: --snapshot file not found: %s", override)
 			return "", ErrHandled
 		}
@@ -275,7 +277,7 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 			return "", err
 		}
 	case strings.HasPrefix(location, "/"):
-		if !fileExists(location) {
+		if !fsutil.FileExists(location) {
 			c.errorf("handover: snapshot-location points at %s, which does not exist on this node — re-run with --snapshot <file>", location)
 			return "", ErrHandled
 		}

@@ -12,6 +12,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -199,7 +200,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 			ui.Errorf(stderr, "--bootstrap: cluster spec has no metadata.name (%s)", clusterYAML)
 			return fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML)
 		}
-		if !fileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
+		if !fsutil.FileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
 			ui.Errorf(stderr, "--bootstrap needs an existing cluster (no .kubeconfig/%s.yaml — run a full 'lo provision' first)", bkc)
 			return fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc)
 		}

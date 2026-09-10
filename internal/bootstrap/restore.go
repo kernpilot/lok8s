@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/secrets"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -23,7 +24,7 @@ import (
 func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	stderr := e.stderr()
 	rdir := e.Paths.Clusters + "/" + domain + "/restore.d"
-	if !dirExists(rdir) {
+	if !fsutil.DirExists(rdir) {
 		return
 	}
 	files, _ := filepath.Glob(rdir + "/*.sops.yaml")
@@ -32,7 +33,7 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	for _, f := range files {
 		// Nullglob-style guard; continue (not break) so one dangling entry
 		// can't abort the remaining valid restores.
-		if !fileExists(f) {
+		if !fsutil.FileExists(f) {
 			continue
 		}
 		base := strings.TrimSuffix(filepath.Base(f), ".sops.yaml")
@@ -45,7 +46,7 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 		// which may still point at a different domain's store from an
 		// earlier build.
 		plain := e.Paths.Clusters + "/" + domain + "/secrets/restore.d/" + base + ".yaml"
-		if fileExists(plain) {
+		if fsutil.FileExists(plain) {
 			errOut, rc := e.restoreApply(ctx, kubeconfig, "", plain)
 			if rc == 0 {
 				applied++

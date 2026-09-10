@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // mirrored lists the .lok8s subtrees the mirror carries (the sync script's
@@ -28,17 +30,8 @@ var mirrored = []string{
 	"VERSION",
 }
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return root
-}
-
 func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
-	legacy := filepath.Join(repoRoot(t), ".lok8s")
+	legacy := filepath.Join(testutil.RepoRoot(t), ".lok8s")
 	if _, err := os.Stat(filepath.Join(legacy, "lo")); err != nil {
 		t.Skipf("frozen tree not present: %v", err)
 	}
@@ -126,7 +119,7 @@ func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
 // list kept in two places (Go cannot import a bash array); this pins them
 // to each other so a subtree added on one side fails here.
 func TestMirroredListMatchesSyncScript(t *testing.T) {
-	script := filepath.Join(repoRoot(t), "hack", "sync-legacy-assets.sh")
+	script := filepath.Join(testutil.RepoRoot(t), "hack", "sync-legacy-assets.sh")
 	raw, err := os.ReadFile(script)
 	if err != nil {
 		t.Skipf("sync script not present: %v", err)

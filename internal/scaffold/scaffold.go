@@ -29,6 +29,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -146,7 +147,7 @@ services: {}
 // the bash `yq -i` byte for byte (comments kept, blank lines between
 // top-level keys dropped, line comments re-spaced).
 func MergeServices(servicesFile, name, path string, out, stderr io.Writer) error {
-	if !fileExists(servicesFile) {
+	if !fsutil.FileExists(servicesFile) {
 		if err := os.WriteFile(servicesFile, []byte(servicesTemplate), 0o644); err != nil {
 			return err
 		}
@@ -385,9 +386,4 @@ func TemplateFiles(src fs.FS) ([]string, error) {
 	})
 	sort.Strings(files)
 	return files, err
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

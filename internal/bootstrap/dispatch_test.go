@@ -16,6 +16,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/provision"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // fakeDriver implements the Driver contract; withExport adds the optional
@@ -105,7 +106,7 @@ func TestDispatchToleratesDriverWithoutExport(t *testing.T) {
 func TestDispatchFailsOnUnknownDriverKind(t *testing.T) {
 	d, e, errBuf := dispatcherFixture(t, nil, "")
 	spec := filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Bogus\nmetadata:\n  name: e2e-test\nspec:\n  bootstrap:\n    - testcni\n")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Bogus\nmetadata:\n  name: e2e-test\nspec:\n  bootstrap:\n    - testcni\n")
 	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
 		t.Error("apply must not run")
 		return 0
@@ -133,7 +134,7 @@ func TestDispatchRejectsMaliciousClusterKind(t *testing.T) {
 	// BEFORE any driver code resolves.
 	d, e, errBuf := dispatcherFixture(t, &fakeDriver{}, "lo")
 	spec := filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: ../../../tmp/evil\nmetadata:\n  name: e2e-test\n")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: ../../../tmp/evil\nmetadata:\n  name: e2e-test\n")
 	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
 		t.Error("apply must not run")
 		return 0
@@ -188,13 +189,13 @@ func TestApplyHookSatisfiesProvisionHooksSeam(t *testing.T) {
 	// Functional smoke: the hook runs the real engine (missing kubeconfig →
 	// the bash error path).
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, "kind: Lo\nmetadata:\n  name: x\nspec:\n  bootstrap: []\n")
+	testutil.WriteFile(t, spec, "kind: Lo\nmetadata:\n  name: x\nspec:\n  bootstrap: []\n")
 	if err := hooks.BootstrapApply(context.Background(), "test.lok8s.dev", spec, "/nope/kubeconfig.yaml"); err == nil {
 		t.Fatal("missing kubeconfig must error through the hook")
 	}
 	// And the no-op path succeeds (empty bootstrap, kubeconfig present).
 	kc := filepath.Join(p.Base, ".kubeconfig", "x.yaml")
-	writeFile(t, kc, "")
+	testutil.WriteFile(t, kc, "")
 	if err := hooks.BootstrapApply(context.Background(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("hook no-op failed: %v", err)
 	}

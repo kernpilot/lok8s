@@ -17,6 +17,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 func TestValidateName(t *testing.T) {
@@ -468,7 +470,7 @@ func TestProjectEnvFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			mise, envrc := fileExists(filepath.Join(dir, "mise.toml")), fileExists(filepath.Join(dir, ".envrc"))
+			mise, envrc := fsutil.FileExists(filepath.Join(dir, "mise.toml")), fsutil.FileExists(filepath.Join(dir, ".envrc"))
 			if mise != c.wantMise || envrc != c.wantEnvrc {
 				t.Fatalf("env=%q: mise.toml=%v .envrc=%v, want %v/%v", c.env, mise, envrc, c.wantMise, c.wantEnvrc)
 			}

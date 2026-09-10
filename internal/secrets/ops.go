@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -25,7 +26,7 @@ import (
 // secrets::init). The bash `command -v ssh-to-age/sops` gates disappear —
 // both are libraries in the Go build.
 func (c *Context) Init(sshKey string) error {
-	if !isFile(sshKey) {
+	if !fsutil.IsRegular(sshKey) {
 		ui.Errorf(c.ErrOut, "SSH public key not found: %s", sshKey)
 		ui.Errorf(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
 		return ErrPrinted
@@ -47,7 +48,7 @@ func (c *Context) Init(sshKey string) error {
 
 	sopsConfig := c.sopsConfigPath()
 
-	if isFile(sopsConfig) {
+	if fsutil.IsRegular(sopsConfig) {
 		raw, _ := os.ReadFile(sopsConfig)
 		// Check if this key is already present
 		if grepQF(string(raw), agePubkey) {
@@ -129,7 +130,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	if strings.HasPrefix(key, "age1") {
 		agePubkey = key
 	} else {
-		if !isFile(key) {
+		if !fsutil.IsRegular(key) {
 			ui.Errorf(c.ErrOut, "not an age key and not a readable file: %s", key)
 			ui.Errorf(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
 			return ErrPrinted
@@ -159,7 +160,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	}
 
 	sopsConfig := c.sopsConfigPath()
-	if !isFile(sopsConfig) {
+	if !fsutil.IsRegular(sopsConfig) {
 		ui.Errorf(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrPrinted
 	}
@@ -199,7 +200,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 			if strings.HasPrefix(filepath.Base(filepath.Dir(d)), ".") {
 				continue
 			}
-			if isDir(d) {
+			if fsutil.DirExists(d) {
 				stores = append(stores, d)
 			}
 		}
@@ -218,10 +219,10 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 				continue
 			}
 			enc := store + "/" + base
-			if !exists(enc) {
+			if !fsutil.Exists(enc) {
 				continue
 			}
-			if !isFile(strings.TrimSuffix(enc, ".enc")) {
+			if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
 				ui.Warnf(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", strings.TrimPrefix(enc, c.Paths.Base+"/"))
 				orphans++
 			}
@@ -241,7 +242,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 			plain := store + "/" + base
 			// bash tests [[ -e && != *.enc ]] — any existing entry counts,
 			// not just regular files.
-			if !exists(plain) || strings.HasSuffix(base, ".enc") {
+			if !fsutil.Exists(plain) || strings.HasSuffix(base, ".enc") {
 				continue
 			}
 			// The freshness skip in Encrypt is keyed on mtime, and a
@@ -376,7 +377,7 @@ func (c *Context) Set(name, namespace, key, value string, doEncrypt bool) error 
 	// quiet level to gate this on). Silent when .sops.yaml is absent
 	// (encryption isn't set up). The wording covers both cases (missing vs.
 	// stale) without asserting which.
-	if isFile(c.sopsConfigPath()) {
+	if fsutil.IsRegular(c.sopsConfigPath()) {
 		ui.Warnf(c.ErrOut, "wrote plaintext cache only — no matching .enc for this value (missing or now stale); run 'lo secrets encrypt' or re-run with --encrypt/-e before committing")
 	}
 	c.liveDrift(name, namespace, key, value)
@@ -399,7 +400,7 @@ func (c *Context) Set(name, namespace, key, value string, doEncrypt bool) error 
 // creation_rules/recipients than the one we validated.
 func (c *Context) encryptFile(plaintext string) error {
 	sopsConfig := c.sopsConfigPath()
-	if !isFile(sopsConfig) {
+	if !fsutil.IsRegular(sopsConfig) {
 		ui.Errorf(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
 		return ErrPrinted
 	}
@@ -435,7 +436,7 @@ func (c *Context) Encrypt(name string) error {
 	}
 
 	secretsDir := c.StorePath()
-	if !isDir(secretsDir) {
+	if !fsutil.DirExists(secretsDir) {
 		ui.Warnf(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
@@ -445,7 +446,7 @@ func (c *Context) Encrypt(name string) error {
 		return err
 	}
 
-	if !isFile(c.sopsConfigPath()) {
+	if !fsutil.IsRegular(c.sopsConfigPath()) {
 		ui.Errorf(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
 		return ErrPrinted
 	}
@@ -460,7 +461,7 @@ func (c *Context) Encrypt(name string) error {
 	count, skipped := 0, 0
 	for _, base := range storeEntries(secretsDir, prefix) {
 		plaintext := secretsDir + "/" + base
-		if !isFile(plaintext) {
+		if !fsutil.IsRegular(plaintext) {
 			continue
 		}
 		// Skip .enc files
@@ -470,7 +471,7 @@ func (c *Context) Encrypt(name string) error {
 
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
-		if isFile(encFile) && newerThan(encFile, plaintext) {
+		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
 			skipped++
 			continue
 		}
@@ -509,7 +510,7 @@ func (c *Context) Encrypt(name string) error {
 // secrets::decrypt).
 func (c *Context) Decrypt(sshKey string) error {
 	secretsDir := c.StorePath()
-	if !isDir(secretsDir) {
+	if !fsutil.DirExists(secretsDir) {
 		ui.Warnf(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
@@ -525,7 +526,7 @@ func (c *Context) Decrypt(sshKey string) error {
 		ageKey = keysFileIdentity()
 	}
 	if ageKey == "" {
-		if !isFile(sshKey) {
+		if !fsutil.IsRegular(sshKey) {
 			ui.Errorf(c.ErrOut, "SSH private key not found: %s", sshKey)
 			return ErrPrinted
 		}
@@ -550,13 +551,13 @@ func (c *Context) Decrypt(sshKey string) error {
 			continue
 		}
 		encFile := secretsDir + "/" + base
-		if !isFile(encFile) {
+		if !fsutil.IsRegular(encFile) {
 			continue
 		}
 
 		// Skip if plaintext is newer than .enc (already decrypted)
 		plaintext := strings.TrimSuffix(encFile, ".enc")
-		if isFile(plaintext) && newerThan(plaintext, encFile) {
+		if fsutil.IsRegular(plaintext) && newerThan(plaintext, encFile) {
 			skipped++
 			continue
 		}

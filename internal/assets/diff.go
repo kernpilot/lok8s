@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // FileState classifies one file of a unit.
@@ -137,7 +138,7 @@ func Report(p *config.Paths, rels []string) ([]UnitReport, error) {
 			}
 			u, ok := UnitFor(rel)
 			if !ok {
-				if strings.HasPrefix(rel, "addons/") && dirExists(localPath(p, rel)) {
+				if strings.HasPrefix(rel, "addons/") && fsutil.DirExists(localPath(p, rel)) {
 					u = Unit{Rel: rel, Kind: "addon"}
 				} else {
 					return nil, fmt.Errorf("%w: %s", ErrNotAsset, rel)
@@ -199,7 +200,7 @@ func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
 			r.Version.Embedded = chartVersionFS(u.Rel + "/chart.yaml")
 		}
 	}
-	if !dirExists(dir) {
+	if !fsutil.DirExists(dir) {
 		r.Origin = OriginColBuiltin
 		return r, nil
 	}
@@ -280,11 +281,6 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func dirExists(p string) bool {
-	info, err := os.Stat(p)
-	return err == nil && info.IsDir()
 }
 
 // chartVersionFS reads chart.yaml's version from the embedded mirror.

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func statusHarness(t *testing.T, kubectl bool, alive func(string) bool) (statusDeps, *scriptRunner, *bytes.Buffer) {
@@ -41,7 +42,7 @@ func TestStatusTiltSectionOnlyForLo(t *testing.T) {
 	for _, kind := range []string{"KubeOne", "Capi", "Kkp", ""} {
 		deps, _, out := statusHarness(t, false, nil)
 		if kind != "" {
-			writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: "+kind+"\n")
+			testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: "+kind+"\n")
 		}
 		runStatus(context.Background(), out, deps, "x.dev")
 		if strings.Contains(out.String(), "--- Tilt ---") {
@@ -63,9 +64,9 @@ func TestStatusTiltLiveness(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			deps, _, out := statusHarness(t, false, nil) // the REAL kill -0
-			writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
+			testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
 			if tc.name != "no pidfile" {
-				writeFile(t, filepath.Join(deps.paths.Base, ".tilt.pid"), tc.pid)
+				testutil.WriteFile(t, filepath.Join(deps.paths.Base, ".tilt.pid"), tc.pid)
 			}
 			runStatus(context.Background(), out, deps, "x.dev")
 			if !strings.HasSuffix(out.String(), "--- Tilt ---\n"+tc.want) {
@@ -77,14 +78,14 @@ func TestStatusTiltLiveness(t *testing.T) {
 
 func TestStatusSectionsByteExact(t *testing.T) {
 	deps, r, out := statusHarness(t, true, func(string) bool { return true })
-	writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
-	writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "targets", "zitadel", "kustomization.yaml"), "")
-	writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "targets", "api", "kustomization.yaml"), "")
-	writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "targets", "stray-file"), "")
-	writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "artifacts.yaml"), "")
-	writeFile(t, filepath.Join(deps.paths.Base, ".tilt.pid"), "4242\n")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "targets", "zitadel", "kustomization.yaml"), "")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "targets", "api", "kustomization.yaml"), "")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "targets", "stray-file"), "")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "artifacts.yaml"), "")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Base, ".tilt.pid"), "4242\n")
 	kc := filepath.Join(deps.paths.Base, ".kubeconfig", "x.yaml")
-	writeFile(t, kc, "apiVersion: v1\n")
+	testutil.WriteFile(t, kc, "apiVersion: v1\n")
 	t.Setenv("KUBECONFIG", kc)
 	r.handler = func(c execx.Cmd) error {
 		switch strings.Join(c.Args, " ") {
@@ -133,9 +134,9 @@ x-control-plane   Ready
 
 func TestStatusNodesUnreachableAndNoTargets(t *testing.T) {
 	deps, r, out := statusHarness(t, true, nil)
-	writeFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: KubeOne\n")
+	testutil.WriteFile(t, filepath.Join(deps.paths.Clusters, "x.dev", "cluster.lok8s.yaml"), "kind: KubeOne\n")
 	kc := filepath.Join(deps.paths.Base, ".kubeconfig", "x.yaml")
-	writeFile(t, kc, "")
+	testutil.WriteFile(t, kc, "")
 	t.Setenv("KUBECONFIG", kc)
 	r.handler = func(c execx.Cmd) error { return errors.New("connection refused") }
 	runStatus(context.Background(), out, deps, "x.dev")

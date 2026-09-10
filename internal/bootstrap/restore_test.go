@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestRestoreDNoDirIsSilentNoop(t *testing.T) {
@@ -33,9 +34,9 @@ func TestRestoreDPlaintextStoreCopyWins(t *testing.T) {
 	// store) must be IGNORED — the store resolves from the domain argument.
 	e, f, _, errOut, p := testEngine(t)
 	t.Setenv("PATH_SECRETS", filepath.Join(p.Clusters, "other.lok8s.dev", "secrets"))
-	writeFile(t, filepath.Join(p.Clusters, "other.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), "kind: WrongDomainSecret\n")
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-a.sops.yaml"), "cipher\n")
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), "kind: Secret\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "other.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), "kind: WrongDomainSecret\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-a.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), "kind: Secret\n")
 	sopsCalled := false
 	e.SopsDecrypt = func(path string) ([]byte, error) {
 		sopsCalled = true
@@ -62,7 +63,7 @@ func TestRestoreDPlaintextStoreCopyWins(t *testing.T) {
 
 func TestRestoreDSopsFallbackDecryptsInMemory(t *testing.T) {
 	e, _, _, errOut, p := testEngine(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-b.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-b.sops.yaml"), "cipher\n")
 	var decrypted string
 	e.SopsDecrypt = func(path string) ([]byte, error) {
 		decrypted = path
@@ -96,7 +97,7 @@ func TestRestoreDSopsFallbackDecryptsInMemory(t *testing.T) {
 
 func TestRestoreDDecryptFailureWarnsAndContinues(t *testing.T) {
 	e, _, _, errOut, p := testEngine(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-c.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-c.sops.yaml"), "cipher\n")
 	e.SopsDecrypt = func(path string) ([]byte, error) { return nil, fmt.Errorf("no key") }
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error { return &rcError{1} })
 	// Never fatal — DR must not wedge on a missing age key.
@@ -113,8 +114,8 @@ func TestRestoreDApplyFailureFallsThroughStoreCopyToSops(t *testing.T) {
 	// A failing store-copy apply falls through to the sops path (bash: the
 	// store-copy failure only debugs, then the .sops.yaml decrypt runs).
 	e, _, _, errOut, p := testEngine(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-d.sops.yaml"), "cipher\n")
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-d.yaml"), "kind: Secret\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-d.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-d.yaml"), "kind: Secret\n")
 	e.SopsDecrypt = func(path string) ([]byte, error) { return []byte("kind: Secret"), nil }
 	call := 0
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error {

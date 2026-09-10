@@ -15,6 +15,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // testEnv builds a throwaway project and a Context writing into buffers.
@@ -132,7 +133,7 @@ func TestEnsureStoreScaffoldsOnlyExistingDomains(t *testing.T) {
 	if err := c.ensureStore(); err != nil {
 		t.Fatal(err)
 	}
-	if isDir(c.Paths.Clusters + "/a.dev/secrets") {
+	if fsutil.DirExists(c.Paths.Clusters + "/a.dev/secrets") {
 		t.Error("scaffolded a store for a nonexistent domain")
 	}
 	// Domain dir present → store created (so the first write lands there,
@@ -141,7 +142,7 @@ func TestEnsureStoreScaffoldsOnlyExistingDomains(t *testing.T) {
 	if err := c.ensureStore(); err != nil {
 		t.Fatal(err)
 	}
-	if !isDir(c.Paths.Clusters + "/a.dev/secrets") {
+	if !fsutil.DirExists(c.Paths.Clusters + "/a.dev/secrets") {
 		t.Error("store not scaffolded")
 	}
 }
@@ -307,7 +308,7 @@ func TestAddKeySkipOrphansRekeys(t *testing.T) {
 		!strings.Contains(out.String(), "done — commit .sops.yaml and the updated .enc files together") {
 		t.Errorf("stdout: %s", out.String())
 	}
-	if !isFile(c.Paths.Clusters + "/a.dev/secrets/Secret.app.default.K.enc") {
+	if !fsutil.IsRegular(c.Paths.Clusters + "/a.dev/secrets/Secret.app.default.K.enc") {
 		t.Error("re-key did not produce the .enc")
 	}
 }
@@ -406,10 +407,10 @@ func TestSetEncryptOnlyThatFile(t *testing.T) {
 	if !strings.Contains(out.String(), "Set + encrypted app/default/KEY") {
 		t.Errorf("stdout: %s", out.String())
 	}
-	if !isFile(c.Paths.Base + "/.secrets/Secret.app.default.KEY.enc") {
+	if !fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY.enc") {
 		t.Error("no .enc produced")
 	}
-	if isFile(c.Paths.Base + "/.secrets/Secret.other.default.SIB.enc") {
+	if fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.other.default.SIB.enc") {
 		t.Error("sibling swept up")
 	}
 
@@ -435,10 +436,10 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 		t.Errorf("stderr: %s", errOut.String())
 	}
 	// Cache still written (plaintext), but no .enc produced.
-	if !isFile(c.Paths.Base + "/.secrets/Secret.app.default.KEY") {
+	if !fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY") {
 		t.Error("plaintext cache missing")
 	}
-	if isFile(c.Paths.Base + "/.secrets/Secret.app.default.KEY.enc") {
+	if fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY.enc") {
 		t.Error(".enc produced without config")
 	}
 }
@@ -456,7 +457,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The sweep includes .sha files (they get .sha.enc twins).
-	if !isFile(store+"/Secret.app.default.TOKEN.enc") || !isFile(store+"/Secret.gen.default.X.sha.enc") {
+	if !fsutil.IsRegular(store+"/Secret.app.default.TOKEN.enc") || !fsutil.IsRegular(store+"/Secret.gen.default.X.sha.enc") {
 		t.Fatal("missing .enc twins")
 	}
 	if !strings.Contains(out.String(), "Encrypted 2 secret(s)") {
@@ -533,10 +534,10 @@ func TestEncryptNameFilter(t *testing.T) {
 	if err := c.Encrypt("alpha"); err != nil {
 		t.Fatal(err)
 	}
-	if !isFile(store + "/Secret.alpha.default.T.enc") {
+	if !fsutil.IsRegular(store + "/Secret.alpha.default.T.enc") {
 		t.Error("alpha not encrypted")
 	}
-	if isFile(store + "/Secret.beta.default.T.enc") {
+	if fsutil.IsRegular(store + "/Secret.beta.default.T.enc") {
 		t.Error("beta swept up")
 	}
 	_ = out

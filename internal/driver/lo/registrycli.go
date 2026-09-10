@@ -13,6 +13,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -22,7 +23,7 @@ import (
 // or the network config cannot be resolved: every caller feeds
 // docker/network commands that would otherwise run against unset variables).
 func (d *Driver) registryInit(domain string, errOut io.Writer) error {
-	if path := getenv("LOK8S_REGISTRY_JSON"); path != "" && fileExists(path) {
+	if path := getenv("LOK8S_REGISTRY_JSON"); path != "" && fsutil.FileExists(path) {
 		return nil
 	}
 	return readNetworkConfig(d.clusterYAML(domain), errOut)

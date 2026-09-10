@@ -25,6 +25,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -162,7 +163,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// metadata.name (framework convention — bootstrap reads it).
 	clusterName := metadataName(cy)
 	src := KubeconfigPath(workDir, clusterName)
-	if !fileExists(src) {
+	if !fsutil.FileExists(src) {
 		ui.Errorf(d.stderr(), "Kubeconfig not found at %s after kubeone apply", src)
 		return fmt.Errorf("kubeone: kubeconfig not found at %s", src)
 	}
@@ -213,7 +214,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 
 	// 1. Reset Kubernetes (kubeone reset). Fail-soft: warn and continue
 	// with the infrastructure destroy.
-	if fileExists(filepath.Join(workDir, "kubeone.yaml")) {
+	if fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
 		if err := d.Reset(ctx, workDir); err != nil {
 			ui.Warnf(d.stderr(), "kubeone reset failed — continuing with infrastructure destroy")
 		}
@@ -241,7 +242,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 	workDir := d.workDir(domain)
 
-	if !fileExists(filepath.Join(workDir, "kubeone.yaml")) {
+	if !fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
 		// No kubeone config — check via the provider when available.
 		if sp, ok := d.deps.Provider.(driver.ProviderStatuser); ok {
 			return sp.ProviderStatus(ctx, d.deps.ProviderConfigFile)
@@ -265,12 +266,12 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 // --auto-approve, and --tfjson output.json when that file exists. Hetzner
 // Robot credentials ride along in the environment for the CCM.
 func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
-	if !fileExists(filepath.Join(workDir, "kubeone.yaml")) {
+	if !fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
 		ui.Errorf(d.stderr(), "kubeone.yaml not found in %s", workDir)
 		return fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir)
 	}
 	args := []string{"apply", "--manifest", "kubeone.yaml", "--auto-approve"}
-	if fileExists(filepath.Join(workDir, "output.json")) {
+	if fsutil.FileExists(filepath.Join(workDir, "output.json")) {
 		args = append(args, "--tfjson", "output.json")
 	}
 
@@ -295,12 +296,12 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 // change (reset writes nothing the work dir needs to catch).
 func (d *Driver) Reset(ctx context.Context, workDir string) error {
 	manifest := filepath.Join(workDir, "kubeone.yaml")
-	if !fileExists(manifest) {
+	if !fsutil.FileExists(manifest) {
 		ui.Errorf(d.stderr(), "kubeone.yaml not found in %s", workDir)
 		return fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir)
 	}
 	args := []string{"reset", "--manifest", manifest, "--auto-approve"}
-	if tf := filepath.Join(workDir, "output.json"); fileExists(tf) {
+	if tf := filepath.Join(workDir, "output.json"); fsutil.FileExists(tf) {
 		args = append(args, "--tfjson", tf)
 	}
 	ui.Debugf(d.stderr(), "Running: kubeone %s", strings.Join(args, " "))
@@ -313,7 +314,7 @@ func (d *Driver) Reset(ctx context.Context, workDir string) error {
 // "healthy" first reported a degraded cluster as Healthy.
 func (d *Driver) kubeoneStatus(ctx context.Context, workDir string) string {
 	args := []string{"status", "--manifest", filepath.Join(workDir, "kubeone.yaml")}
-	if tf := filepath.Join(workDir, "output.json"); fileExists(tf) {
+	if tf := filepath.Join(workDir, "output.json"); fsutil.FileExists(tf) {
 		args = append(args, "--tfjson", tf)
 	}
 	var buf strings.Builder
@@ -361,9 +362,4 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

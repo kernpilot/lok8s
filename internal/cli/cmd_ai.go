@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -172,7 +173,7 @@ func skillDirs(src string) []string {
 		if info, err := os.Stat(full); err != nil || !info.IsDir() {
 			continue
 		}
-		if !fileExists(filepath.Join(full, "SKILL.md")) {
+		if !fsutil.FileExists(filepath.Join(full, "SKILL.md")) {
 			continue
 		}
 		dirs = append(dirs, full)
@@ -184,7 +185,7 @@ func skillDirs(src string) []string {
 
 func aiSkills(paths *config.Paths, out, stderr io.Writer) error {
 	src := aiSkillsSrc(paths)
-	if !dirExists(src) {
+	if !fsutil.DirExists(src) {
 		ui.Errorf(stderr, "no skills dir: %s", src)
 		return ErrHandled
 	}
@@ -213,7 +214,7 @@ func aiLink(paths *config.Paths, who string, copyMode bool, out, stderr io.Write
 		return ErrHandled
 	}
 	src := aiSkillsSrc(paths)
-	if !dirExists(src) {
+	if !fsutil.DirExists(src) {
 		ui.Errorf(stderr, "no skills dir: %s", src)
 		return ErrHandled
 	}
@@ -254,7 +255,7 @@ func aiUnlink(paths *config.Paths, who string, out, stderr io.Writer) error {
 		ui.Errorf(stderr, "%s: no skill dir", who)
 		return ErrHandled
 	}
-	if !dirExists(dst) {
+	if !fsutil.DirExists(dst) {
 		fmt.Fprintf(out, "Nothing linked in %s.\n", dst)
 		return nil
 	}
@@ -278,7 +279,7 @@ func aiUnlink(paths *config.Paths, who string, out, stderr io.Writer) error {
 			}
 			continue
 		}
-		if dirExists(filepath.Join(src, e.Name())) {
+		if fsutil.DirExists(filepath.Join(src, e.Name())) {
 			_ = os.RemoveAll(entry)
 			n++
 		}

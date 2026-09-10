@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestProvisionRemoteNoNodesFallsBackWithWarning(t *testing.T) {
@@ -103,7 +104,7 @@ func TestProvisionRemoteHappyPathSetsDockerHost(t *testing.T) {
 
 func TestRemoteCICommandLinesAndSummary(t *testing.T) {
 	d, runner, _, p := testDriver(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)
 	t.Setenv("LOK8S_REMOTE_IP", "203.0.113.7")
 	t.Setenv("LOK8S_REMOTE_USER", "root")
 	t.Setenv("LOK8S_REMOTE_SYNC_DEST", "/workspace")

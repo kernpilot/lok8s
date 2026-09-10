@@ -33,6 +33,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -70,11 +71,11 @@ func allowedHint(list []string) string {
 // (legacy filename fallback mirrors env::services).
 func (l *Linter) servicesFile() string {
 	svcFile := l.Paths.Base + "/services.yaml"
-	if isFile(svcFile) {
+	if fsutil.IsRegular(svcFile) {
 		return svcFile
 	}
 	svcFile = l.Paths.Base + "/services.base.yaml"
-	if isFile(svcFile) {
+	if fsutil.IsRegular(svcFile) {
 		return svcFile
 	}
 	return ""
@@ -183,7 +184,7 @@ func (l *Linter) services() bool {
 		// Resolve path: and validate the per-service lok8s.yaml.
 		spath := servicePath(root, name)
 		lok8sFile := l.Paths.Base + "/" + strings.TrimPrefix(spath, "./") + "/lok8s.yaml"
-		if isFile(lok8sFile) {
+		if fsutil.IsRegular(lok8sFile) {
 			errs += l.lok8sYAML(name, lok8sFile)
 		}
 	}
@@ -301,7 +302,7 @@ func (l *Linter) drift() {
 
 	// (a) root Tiltfile hardcodes builds/manifests alongside a populated catalog.
 	tiltfile := l.Paths.Base + "/Tiltfile"
-	if svcCount > 0 && isFile(tiltfile) {
+	if svcCount > 0 && fsutil.IsRegular(tiltfile) {
 		if raw, err := os.ReadFile(tiltfile); err == nil && driftTiltRe.Match(raw) {
 			ui.Warnf(l.ErrOut, "  Tiltfile: contains docker_build()/k8s_yaml() while services.yaml declares %d service(s) — prefer the 2-line form: load('./.lok8s/tilt/Tiltfile','lok8s'); lok8s()", svcCount)
 		}
@@ -316,7 +317,7 @@ func (l *Linter) drift() {
 		sdir := l.Paths.Base + "/" + strings.TrimPrefix(spath, "./")
 
 		// (b) redundant per-submodule Tiltfile.
-		if isFile(sdir + "/Tiltfile") {
+		if fsutil.IsRegular(sdir + "/Tiltfile") {
 			ui.Warnf(l.ErrOut, "  %s: %s/Tiltfile is redundant — lok8s() reads %s/lok8s.yaml directly (remove the per-service Tiltfile)", name, spath, spath)
 		}
 
@@ -326,12 +327,12 @@ func (l *Linter) drift() {
 		// (one docker_build each), NOT the service name — so check every
 		// component's label.
 		ddir := sdir + "/deploy"
-		if !isDir(ddir) {
+		if !fsutil.DirExists(ddir) {
 			continue
 		}
 		routeNames := []string{name}
 		lokfile := sdir + "/lok8s.yaml"
-		if isFile(lokfile) {
+		if fsutil.IsRegular(lokfile) {
 			comps := yqsem.SeqItems(yqsem.Lookup(firstDoc(lokfile), "components"))
 			if len(comps) > 0 {
 				routeNames = routeNames[:0]

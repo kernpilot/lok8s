@@ -30,6 +30,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -108,7 +109,7 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 		}
 	}
 	artifact := filepath.Join(d.Paths.Clusters, domain, "artifacts.yaml")
-	if !fileExists(artifact) {
+	if !fsutil.FileExists(artifact) {
 		ui.Errorf(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
@@ -134,7 +135,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		return ErrHandled
 	}
 	artifact := filepath.Join(d.Paths.Clusters, domain, "artifacts.yaml")
-	if !fileExists(artifact) {
+	if !fsutil.FileExists(artifact) {
 		ui.Errorf(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
@@ -281,9 +282,4 @@ func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
 		return ""
 	}
 	return strings.Join(kept, "\n---\n")
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

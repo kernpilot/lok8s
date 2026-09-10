@@ -17,6 +17,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 type fakeExit struct{ code int }
@@ -70,7 +71,7 @@ func testCtx(t *testing.T) (*Context, *fakeRunner, *bytes.Buffer, *bytes.Buffer)
 
 func writeSpec(t *testing.T, c *Context, content string) {
 	t.Helper()
-	os.WriteFile(filepath.Join(c.Paths.Clusters, c.Domain, "cluster.lok8s.yaml"), []byte(content), 0o644)
+	testutil.WriteFile(t, filepath.Join(c.Paths.Clusters, c.Domain, "cluster.lok8s.yaml"), content)
 }
 
 func writeServices(t *testing.T, c *Context, content string) {

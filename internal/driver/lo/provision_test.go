@@ -24,6 +24,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // provisionFixture writes a full slot-free spec + the driver's static
@@ -42,9 +43,9 @@ func provisionFixture(t *testing.T) (*Driver, *fakeRunner, *fakeDocker, *bytes.B
 
 	// coredns static files (content irrelevant — kubectl is faked).
 	corednsDir := filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "coredns")
-	writeFile(t, filepath.Join(corednsDir, "corefile.yaml"), "{}\n")
-	writeFile(t, filepath.Join(corednsDir, "expose.yaml"), "{}\n")
-	writeFile(t, filepath.Join(corednsDir, "patch.json"), "[]\n")
+	testutil.WriteFile(t, filepath.Join(corednsDir, "corefile.yaml"), "{}\n")
+	testutil.WriteFile(t, filepath.Join(corednsDir, "expose.yaml"), "{}\n")
+	testutil.WriteFile(t, filepath.Join(corednsDir, "patch.json"), "[]\n")
 
 	runner.handler = func(c execx.Cmd) error {
 		switch c.Name {
@@ -99,7 +100,7 @@ func TestProvisionRejectedIPConfigStopsBeforeAnythingIsBuilt(t *testing.T) {
 	// with the registries: easiest honest trigger — a MetalLB pool outside
 	// the subnet in the spec.
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, strings.Replace(specShared,
+	testutil.WriteFile(t, cy, strings.Replace(specShared,
 		"  runtime: kind",
 		"  loadBalancer:\n    pool: \"10.99.0.10-10.99.0.20\"\n  runtime: kind", 1))
 
@@ -202,7 +203,7 @@ func provisionFixtureLight(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer, *
 	writeLifecycleFixture(t, p)
 	// Route the remote.mode read: append spec.remote with mode ci.
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, specShared+"  remote:\n    mode: ci\n")
+	testutil.WriteFile(t, cy, specShared+"  remote:\n    mode: ci\n")
 	return d, runner, errBuf, p
 }
 
@@ -261,10 +262,10 @@ func TestProvisionUnhappyTLSNudgeCannotFailAGoodProvision(t *testing.T) {
 	d, runner, fd, errBuf, p := provisionFixture(t)
 	// TLS spec variant so the nudge actually probes.
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, strings.Replace(specShared, "    tls: false\n", "", 1))
+	testutil.WriteFile(t, cy, strings.Replace(specShared, "    tls: false\n", "", 1))
 	// Fake plugin (mint path) + failing openssl.
 	stubbed, _ := stubSecretPlugin(t, runner, p.Base)
-	writeFile(t, filepath.Join(p.Bin, "openssl"), "#!/bin/sh\nexit 1\n")
+	testutil.WriteFile(t, filepath.Join(p.Bin, "openssl"), "#!/bin/sh\nexit 1\n")
 	os.Chmod(filepath.Join(p.Bin, "openssl"), 0o755)
 	t.Setenv("CAROOT", t.TempDir())
 
@@ -298,7 +299,7 @@ func TestProvisionUnhappyTLSNudgeCannotFailAGoodProvision(t *testing.T) {
 func TestProvisionUnsupportedRuntimeFails(t *testing.T) {
 	d, _, errBuf, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, "spec:\n  runtime: k3d\n")
+	testutil.WriteFile(t, cy, "spec:\n  runtime: k3d\n")
 	if err := d.Provision(context.Background(), "test.lok8s.dev"); err == nil {
 		t.Fatal("unsupported runtime accepted")
 	}

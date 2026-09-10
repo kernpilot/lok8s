@@ -20,6 +20,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // LoFinalizer guards Lo deletion until the driver tore the cluster down.
@@ -183,7 +184,7 @@ func (h *LoHook) kubeconfigPath(domain string) string {
 func (h *LoHook) publishKubeconfig(ctx context.Context, name, namespace, domain string) error {
 	k := h.kube()
 	kubeconfig := h.kubeconfigPath(domain)
-	if !fileExists(kubeconfig) {
+	if !fsutil.FileExists(kubeconfig) {
 		drv, err := h.driver()
 		if err != nil {
 			return err
@@ -357,9 +358,4 @@ func eventObject(ev Event) []byte {
 		return []byte("null")
 	}
 	return ev.Object
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

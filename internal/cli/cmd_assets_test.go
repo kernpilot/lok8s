@@ -18,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func quietAssets(t *testing.T) {
@@ -35,7 +36,7 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 	quietAssets(t)
 	t.Setenv("SOURCE_DATE_EPOCH", "0")
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Clusters, "a.dev", "cluster.lok8s.yaml"), "kind: Lo\nspec:\n  bootstrap:\n    - cilium\n    - metallb\n    - ./targets/glue\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "a.dev", "cluster.lok8s.yaml"), "kind: Lo\nspec:\n  bootstrap:\n    - cilium\n    - metallb\n    - ./targets/glue\n")
 
 	// --check on a fresh project: exit 1, nothing written.
 	stdout, stderr, err := runLo(t, NewRoot(p), "assets", "eject", "--check")
@@ -72,7 +73,7 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 
 	// Edit a file → local modified; diff --check exits 1; update refuses.
 	chart := filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml")
-	writeFile(t, chart, "kind: ChartRenderer\nversion: 0.0.0-mine\n")
+	testutil.WriteFile(t, chart, "kind: ChartRenderer\nversion: 0.0.0-mine\n")
 	stdout, stderr, err = runLo(t, NewRoot(p), "assets", "diff", "--check")
 	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "1 asset(s) drifted") || !strings.Contains(stdout, "local (modified)    0.0.0-mine") {
 		t.Fatalf("diff --check drift: err=%v\nstdout=%s\nstderr=%s", err, stdout, stderr)
@@ -172,12 +173,12 @@ func TestNoEjectFlag(t *testing.T) {
 func TestAddonsAndDriversOriginColumns(t *testing.T) {
 	quietAssets(t)
 	p := synthProject(t)
-	writeFile(t, filepath.Join(p.Lok8s, "addons", "mine", "kustomization.yaml"), "resources: []\n")
-	writeFile(t, filepath.Join(p.Clusters, "a.dev", "cluster.lok8s.yaml"), "kind: Lo\nspec:\n  bootstrap:\n    - cilium\n    - mine\n    - ./targets/glue\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "addons", "mine", "kustomization.yaml"), "resources: []\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "a.dev", "cluster.lok8s.yaml"), "kind: Lo\nspec:\n  bootstrap:\n    - cilium\n    - mine\n    - ./targets/glue\n")
 	if _, _, err := runLo(t, NewRoot(p), "assets", "eject", "addons/metallb"); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(p.Lok8s, "addons", "metallb", "values.yaml"), "edited: true\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "addons", "metallb", "values.yaml"), "edited: true\n")
 
 	stdout, _, err := runLo(t, NewRoot(p), "addons", "--origin")
 	if err != nil {
@@ -261,7 +262,7 @@ func TestInitProject(t *testing.T) {
 	}
 
 	// Re-run: existing files kept, .gitignore not duplicated.
-	writeFile(t, filepath.Join(dir, "lok8s.yaml"), "keep: me\n")
+	testutil.WriteFile(t, filepath.Join(dir, "lok8s.yaml"), "keep: me\n")
 	stdout, _, err = runLo(t, NewRoot(p), "init", "project", "--path", dir)
 	if err != nil || !strings.Contains(stdout, "Kept "+dir+"/lok8s.yaml (exists; --force overwrites)\n") {
 		t.Fatalf("re-run: err=%v\n%s", err, stdout)
@@ -298,7 +299,7 @@ func TestDoctorAssetsLine(t *testing.T) {
 	if line = doctorAssetsLine(t, p); !strings.Contains(line, "✓\033[0m assets: 1 local, all in sync with the binary") {
 		t.Errorf("in sync: %q", line)
 	}
-	writeFile(t, filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml"), "edited\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml"), "edited\n")
 	if line = doctorAssetsLine(t, p); !strings.Contains(line, "!\033[0m assets: 1 of 1 local assets drifted (lo assets diff)") {
 		t.Errorf("drift: %q", line)
 	}

@@ -14,12 +14,14 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func writeSpec(t *testing.T, d *Driver, content string) string {
 	t.Helper()
 	path := filepath.Join(d.deps.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, path, content)
+	testutil.WriteFile(t, path, content)
 	return path
 }
 
@@ -128,7 +130,7 @@ func genDriver(t *testing.T) (*Driver, string, string) {
 	t.Helper()
 	clearVarEnv(t)
 	d, _, _, p := testDriver(t, nil)
-	writeFile(t, filepath.Join(p.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"), realCoreTemplate(t))
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "kubeone", "cluster", "core", "kubeone.yaml"), realCoreTemplate(t))
 	outDir := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
 	return d, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), outDir
 }
@@ -185,7 +187,7 @@ func TestGenerateConfigRendersCoreTemplate(t *testing.T) {
 
 func TestGenerateConfigDynamicWorkersHetzner(t *testing.T) {
 	d, cy, outDir := genDriver(t)
-	writeFile(t, cy, testSpecYAML+`  datacenter: nbg1
+	testutil.WriteFile(t, cy, testSpecYAML+`  datacenter: nbg1
   workers:
     pool-a:
       replicas: 3
@@ -261,7 +263,7 @@ func TestGenerateConfigRejectsBadPools(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, cy, outDir := genDriver(t)
 			errBuf := d.deps.Stderr.(interface{ String() string })
-			writeFile(t, cy, testSpecYAML+tc.workers)
+			testutil.WriteFile(t, cy, testSpecYAML+tc.workers)
 			if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err == nil {
 				t.Fatal("expected failure")
 			}
@@ -274,7 +276,7 @@ func TestGenerateConfigRejectsBadPools(t *testing.T) {
 
 func TestGenerateConfigUnsupportedWorkerProvider(t *testing.T) {
 	d, cy, outDir := genDriver(t)
-	writeFile(t, cy, testSpecYAML+"  workers:\n    pool-a:\n      type: t3.large\n")
+	testutil.WriteFile(t, cy, testSpecYAML+"  workers:\n    pool-a:\n      type: t3.large\n")
 	if err := d.GenerateConfig(context.Background(), cy, "gcp", outDir); err == nil {
 		t.Fatal("expected failure")
 	}
@@ -282,7 +284,7 @@ func TestGenerateConfigUnsupportedWorkerProvider(t *testing.T) {
 
 func TestGenerateConfigInjectsOIDC(t *testing.T) {
 	d, cy, outDir := genDriver(t)
-	writeFile(t, cy, testSpecYAML+`  oidc:
+	testutil.WriteFile(t, cy, testSpecYAML+`  oidc:
     issuer: https://id.kubehz.dev
     clientID: kubectl
 `)
@@ -337,7 +339,7 @@ const registriesSpec = testSpecYAML + `  registries:
 func TestRegistryAuthNeedsDomainName(t *testing.T) {
 	d, cy, outDir := genDriver(t)
 	errBuf := d.deps.Stderr.(interface{ String() string })
-	writeFile(t, cy, registriesSpec)
+	testutil.WriteFile(t, cy, registriesSpec)
 	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err == nil {
 		t.Fatal("expected failure")
 	}
@@ -349,10 +351,10 @@ func TestRegistryAuthNeedsDomainName(t *testing.T) {
 func TestRegistryAuthInjectsResolvedCreds(t *testing.T) {
 	d, cy, outDir := genDriver(t)
 	t.Setenv("DOMAIN_NAME", "test.lok8s.dev")
-	writeFile(t, cy, registriesSpec)
+	testutil.WriteFile(t, cy, registriesSpec)
 	secd := filepath.Join(d.deps.Paths.Clusters, "test.lok8s.dev", "secrets")
-	writeFile(t, filepath.Join(secd, "Secret.dockerio.provisioning.username"), "user1\n")
-	writeFile(t, filepath.Join(secd, "Secret.dockerio.provisioning.password"), "pass1\n")
+	testutil.WriteFile(t, filepath.Join(secd, "Secret.dockerio.provisioning.username"), "user1\n")
+	testutil.WriteFile(t, filepath.Join(secd, "Secret.dockerio.provisioning.password"), "pass1\n")
 
 	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err != nil {
 		t.Fatal(err)
@@ -368,7 +370,7 @@ func TestRegistryAuthAllUnconfiguredIsError(t *testing.T) {
 	d, cy, outDir := genDriver(t)
 	errBuf := d.deps.Stderr.(interface{ String() string })
 	t.Setenv("DOMAIN_NAME", "test.lok8s.dev")
-	writeFile(t, cy, registriesSpec) // no secret files → nothing configurable
+	testutil.WriteFile(t, cy, registriesSpec) // no secret files → nothing configurable
 
 	if err := d.GenerateConfig(context.Background(), cy, "hetzner", outDir); err == nil {
 		t.Fatal("declared-but-unconfigurable registries are a breaking misconfig, not a silent anonymous fallback")

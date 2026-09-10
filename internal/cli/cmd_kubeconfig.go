@@ -29,6 +29,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -85,7 +86,7 @@ func newKubeconfigCommand(paths *config.Paths, spec commandSpec) *cobra.Command 
 			// per-cluster kubeconfig `lo` writes (<metadata.name>.yaml) under
 			// .kubeconfig/.
 			kubeconfig := os.Getenv("KUBECONFIG")
-			if kubeconfig == "" || !fileExists(kubeconfig) {
+			if kubeconfig == "" || !fsutil.FileExists(kubeconfig) {
 				adminPath, ok := kubeconfigAdminPath(paths, d)
 				if !ok {
 					ui.Errorf(stderr, "could not resolve a kubeconfig for %s (is the cluster provisioned?)", d)
@@ -93,7 +94,7 @@ func newKubeconfigCommand(paths *config.Paths, spec commandSpec) *cobra.Command 
 				}
 				kubeconfig = adminPath
 			}
-			if !fileExists(kubeconfig) {
+			if !fsutil.FileExists(kubeconfig) {
 				ui.Errorf(stderr, "kubeconfig not found: %s (provision the cluster first)", kubeconfig)
 				return ErrHandled
 			}
@@ -127,14 +128,14 @@ func kubeconfigClusterYAML(p *config.Paths, d string) (string, bool) {
 	clusterYAML := filepath.Join(domainDir, "cluster.lok8s.yaml")
 
 	// Deploy domain → follow clusterRef to the real cluster.
-	if !fileExists(clusterYAML) && fileExists(filepath.Join(domainDir, "deploy.lok8s.yaml")) {
+	if !fsutil.FileExists(clusterYAML) && fsutil.FileExists(filepath.Join(domainDir, "deploy.lok8s.yaml")) {
 		ref := silentClusterRef(p, d)
 		if ref == "" {
 			return "", false
 		}
 		clusterYAML = filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")
 	}
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		return "", false
 	}
 	return clusterYAML, true
@@ -162,7 +163,7 @@ func silentClusterRef(p *config.Paths, d string) string {
 	if info, err := os.Stat(filepath.Join(p.Clusters, ref)); err != nil || !info.IsDir() {
 		return ""
 	}
-	if !fileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {
+	if !fsutil.FileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {
 		return ""
 	}
 	return ref

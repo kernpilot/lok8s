@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -241,7 +242,7 @@ func pruneStaleArtifactDirs(artifactsDir string) {
 			continue
 		}
 		sub := filepath.Join(artifactsDir, e.Name())
-		if fileExists(filepath.Join(sub, "artifacts.yaml")) {
+		if fsutil.FileExists(filepath.Join(sub, "artifacts.yaml")) {
 			_ = os.RemoveAll(sub)
 		}
 	}

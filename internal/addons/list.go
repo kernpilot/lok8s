@@ -18,6 +18,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -125,7 +126,7 @@ func Type(dir string) string {
 	if m := readChart(dir); m.present && m.kind == "ChartRenderer" {
 		return "khelm"
 	}
-	if fileExists(filepath.Join(dir, "kustomization.yaml")) || fileExists(filepath.Join(dir, "kustomization.yml")) {
+	if fsutil.FileExists(filepath.Join(dir, "kustomization.yaml")) || fsutil.FileExists(filepath.Join(dir, "kustomization.yml")) {
 		// Has kustomization but no chart.yaml → raw or composition
 		return "raw"
 	}
@@ -264,7 +265,7 @@ func show(p *config.Paths, d, name string, out, stderr io.Writer, withOrigin boo
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if fileExists(filepath.Join(dir, e.Name())) {
+		if fsutil.FileExists(filepath.Join(dir, e.Name())) {
 			names = append(names, e.Name())
 		}
 	}
@@ -389,7 +390,7 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 		return nil
 	}
 	spec := p.Clusters + "/" + d + "/cluster.lok8s.yaml"
-	if !fileExists(spec) {
+	if !fsutil.FileExists(spec) {
 		ui.Warnf(stderr, "No cluster spec for '%s' (%s) — nothing to inventory", d, spec)
 		return nil
 	}

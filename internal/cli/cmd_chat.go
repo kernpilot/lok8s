@@ -20,6 +20,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -81,10 +82,10 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	if err != nil {
 		return "", nil, err
 	}
-	if !fileExists(cfg) {
+	if !fsutil.FileExists(cfg) {
 		cfg = defaults
 	}
-	if !fileExists(cfg) {
+	if !fsutil.FileExists(cfg) {
 		ui.Errorf(stderr, "no chat config (looked for %s or %s)", cfgProject, defaults)
 		return "", nil, ErrHandled
 	}
@@ -114,11 +115,11 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 // argshBuiltinPresent checks for argsh.so next to the toolchain argsh (bash:
 // ${PATH_BIN}/argsh.so, else beside the argsh on PATH).
 func argshBuiltinPresent(paths *config.Paths) bool {
-	if fileExists(filepath.Join(paths.Bin, "argsh.so")) {
+	if fsutil.FileExists(filepath.Join(paths.Bin, "argsh.so")) {
 		return true
 	}
 	if p, err := exec.LookPath("argsh"); err == nil {
-		return fileExists(filepath.Join(filepath.Dir(p), "argsh.so"))
+		return fsutil.FileExists(filepath.Join(filepath.Dir(p), "argsh.so"))
 	}
 	return false
 }

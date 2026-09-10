@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	agessh "github.com/Mic92/ssh-to-age"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // agePubkeyRe validates the bech32 shape of an age public key. Validated
@@ -83,7 +85,7 @@ func keysFileIdentity() string {
 	if keyFile == "" {
 		keyFile = os.Getenv("HOME") + "/.config/sops/age/keys.txt"
 	}
-	if !isFile(keyFile) {
+	if !fsutil.IsRegular(keyFile) {
 		return ""
 	}
 	raw, err := os.ReadFile(keyFile)

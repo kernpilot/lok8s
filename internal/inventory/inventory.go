@@ -45,6 +45,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -103,10 +104,10 @@ type Addon struct {
 func CRDManifest(p *config.Paths) (string, bool) {
 	// The .lok8s mirror resolves through the asset resolver: the project's
 	// copy when present, else the embedded CRD (ejected on first use).
-	if c, _, err := assets.Resolve(p, "libs/inventory/manifests/clusterinventory.crd.yaml"); err == nil && fileExists(c) {
+	if c, _, err := assets.Resolve(p, "libs/inventory/manifests/clusterinventory.crd.yaml"); err == nil && fsutil.FileExists(c) {
 		return c, true
 	}
-	if c := filepath.Join(p.Base, "operator", "crds", "clusterinventory.yaml"); fileExists(c) {
+	if c := filepath.Join(p.Base, "operator", "crds", "clusterinventory.yaml"); fsutil.FileExists(c) {
 		return c, true
 	}
 	return "", false
@@ -134,7 +135,7 @@ func now() string {
 // + version/category metadata are emitted — inline values/env never leave
 // this function. Errors are printed (bash error()) and returned.
 func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*CR, error) {
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		ui.Errorf(stderr, "inventory: cluster spec not found: %s", clusterYAML)
 		return nil, fmt.Errorf("inventory: cluster spec not found: %s", clusterYAML)
 	}
@@ -275,7 +276,7 @@ func entryKey(entry string) string {
 // otherwise). A yq failure (unparsable chart.yaml) printed nothing → "".
 func chartVersion(dir string) string {
 	chart := filepath.Join(dir, "chart.yaml")
-	if !fileExists(chart) {
+	if !fsutil.FileExists(chart) {
 		return "-"
 	}
 	raw, err := os.ReadFile(chart)
@@ -344,11 +345,11 @@ func Publish(ctx context.Context, p *config.Paths, r execx.Runner, stderr io.Wri
 	// Deploy domains (and anything else without its own cluster.lok8s.yaml)
 	// have no inventory of their own — the referenced cluster's inventory is
 	// written when THAT cluster provisions/bootstraps.
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		ui.Debugf(stderr, "inventory: no cluster spec at %s — nothing to publish", clusterYAML)
 		return
 	}
-	if !fileExists(kubeconfig) {
+	if !fsutil.FileExists(kubeconfig) {
 		ui.Warnf(stderr, "inventory: kubeconfig not found (%s) — skipping ClusterInventory publish", kubeconfig)
 		return
 	}
@@ -399,8 +400,3 @@ func PublishHook(p *config.Paths, r execx.Runner, stderr io.Writer) func(ctx con
 // ErrMalformedKind reports a spec whose .kind is present but not a bare
 // driver name (never defaulted).
 var ErrMalformedKind = errors.New("inventory: malformed kind")
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
-}

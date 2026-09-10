@@ -32,6 +32,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // ── harness ───────────────────────────────────────────────
@@ -83,14 +84,8 @@ func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer) {
 
 func writeSpec(t *testing.T, d *Driver, domain, yaml string) string {
 	t.Helper()
-	dir := filepath.Join(d.deps.Paths.Clusters, domain)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "cluster.lok8s.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(d.deps.Paths.Clusters, domain, "cluster.lok8s.yaml")
+	testutil.WriteFile(t, path, yaml)
 	return path
 }
 

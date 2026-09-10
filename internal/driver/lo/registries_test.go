@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func runRegistries(t *testing.T, d *Driver, cy string) (string, string, error) {
@@ -301,7 +303,7 @@ func TestRegistriesMovingStateDirRecreates(t *testing.T) {
 	if !strings.Contains(out, "registry/lok8s-registry-build configured") {
 		t.Fatalf("state-dir move did not recreate:\n%s", out)
 	}
-	if !fileExists(filepath.Join(registryStateDir(), "lok8s-registry-build.yaml")) {
+	if !fsutil.FileExists(filepath.Join(registryStateDir(), "lok8s-registry-build.yaml")) {
 		t.Fatal("config not written to the new state dir")
 	}
 }
@@ -487,7 +489,7 @@ func TestRegistryConfigmapManifestBytes(t *testing.T) {
 	// line between entries (jq -r's extra newline per result), trailing run
 	// stripped by the $() capture — and the KNOWN .port "5000" DEFECT.
 	d, runner, _, _, p, cy := lifecycleDriver(t)
-	writeFile(t, filepath.Join(p.Base, ".kubeconfig", "test-lifecycle.yaml"), "apiVersion: v1\n")
+	testutil.WriteFile(t, filepath.Join(p.Base, ".kubeconfig", "test-lifecycle.yaml"), "apiVersion: v1\n")
 
 	var manifest string
 	base := runner.handler
@@ -544,17 +546,17 @@ func TestCleanupKeepsSharedMirrors(t *testing.T) {
 	if _, _, ok := fd.containerStatus("lok8s-registry-build"); ok {
 		t.Fatal("project registry container survived cleanup")
 	}
-	if fileExists(filepath.Join(registryStateDir(), "lok8s-registry-build.yaml")) {
+	if fsutil.FileExists(filepath.Join(registryStateDir(), "lok8s-registry-build.yaml")) {
 		t.Fatal("project registry config survived cleanup")
 	}
-	if fileExists(filepath.Join(registryStateDir(), "lok8s-registry-cache.yaml")) {
+	if fsutil.FileExists(filepath.Join(registryStateDir(), "lok8s-registry-cache.yaml")) {
 		t.Fatal("cache registry config survived cleanup")
 	}
 	// Shared mirrors persist across project lifecycles.
 	if _, _, ok := fd.containerStatus("lok8s-registry-io-docker"); !ok {
 		t.Fatal("shared mirror was removed by project cleanup")
 	}
-	if !fileExists(filepath.Join(registryStateDir(), "lok8s-registry-io-docker.yaml")) {
+	if !fsutil.FileExists(filepath.Join(registryStateDir(), "lok8s-registry-io-docker.yaml")) {
 		t.Fatal("shared mirror config was removed by project cleanup")
 	}
 }

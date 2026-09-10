@@ -21,6 +21,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 func init() { registerPorted("status", newStatusCommand) }
@@ -88,7 +89,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 		hasKubectl = func() bool { _, ok := execx.Look(deps.paths, "kubectl"); return ok }
 	}
 	kubeconfig := os.Getenv("KUBECONFIG")
-	kubectlOK := hasKubectl() && fileExists(kubeconfig)
+	kubectlOK := hasKubectl() && fsutil.FileExists(kubeconfig)
 
 	// ── Nodes ──
 	if kubectlOK {
@@ -129,7 +130,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 	} else {
 		fmt.Fprintln(out, "  No targets directory")
 	}
-	if fileExists(filepath.Join(domainDir, "artifacts.yaml")) {
+	if fsutil.FileExists(filepath.Join(domainDir, "artifacts.yaml")) {
 		fmt.Fprintln(out, "  artifacts.yaml: built")
 	} else {
 		fmt.Fprintln(out, "  artifacts.yaml: not built (run 'lo build')")

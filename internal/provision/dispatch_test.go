@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/driver"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // loSpecYAML mirrors the lo-cluster fixture the bats copy in.
@@ -87,7 +88,7 @@ func (f fakePostProvisionDriver) PostProvision(ctx context.Context, domain strin
 func loDispatcher(t *testing.T, drv driver.Driver) (*Dispatcher, *bytes.Buffer) {
 	t.Helper()
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
 	var errBuf bytes.Buffer
 	d := &Dispatcher{
 		Paths:  p,
@@ -120,7 +121,7 @@ func TestResolveSpecCluster(t *testing.T) {
 // bats: "provision::resolve_spec resolves deploy.lok8s.yaml"
 func TestResolveSpecDeploy(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
 	spec, err := ResolveSpec(p, "test.lok8s.dev", &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
@@ -144,8 +145,8 @@ func TestResolveSpecMissingDomain(t *testing.T) {
 // bats: "provision::resolve_spec prefers cluster.lok8s.yaml over deploy.lok8s.yaml"
 func TestResolveSpecPrefersCluster(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
 	spec, err := ResolveSpec(p, "test.lok8s.dev", &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +193,7 @@ func TestDispatchReadsKindAndProvisions(t *testing.T) {
 // bats: "provision::dispatch fails for deploy domains"
 func TestDispatchRefusesDeployDomain(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
 	var errBuf bytes.Buffer
 	d := &Dispatcher{Paths: p, Stderr: &errBuf}
 	if err := d.Dispatch(context.Background(), "test.lok8s.dev", false); err == nil {
@@ -214,7 +215,7 @@ func TestDispatchUnknownKind(t *testing.T) {
 // A malformed `.kind` is NEVER defaulted (bash: read_kind rc 2 branch).
 func TestDispatchMalformedKind(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "bad.dev", "cluster.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "bad.dev", "cluster.lok8s.yaml"),
 		"kind: \"lo; rm -rf /\"\nmetadata:\n  name: x\n")
 	var errBuf bytes.Buffer
 	d := &Dispatcher{Paths: p, Stderr: &errBuf}
@@ -232,7 +233,7 @@ func TestDispatchBootstrapOnlyRunsExportAndBootstrap(t *testing.T) {
 	log := []string{}
 	d, _ := loDispatcher(t, fakeExportingDriver{&fakeDriver{log: &log}})
 	// An existing kubeconfig so the --bootstrap guard passes.
-	writeFile(t, filepath.Join(d.Paths.Base, ".kubeconfig", "test-cluster.yaml"), "")
+	testutil.WriteFile(t, filepath.Join(d.Paths.Base, ".kubeconfig", "test-cluster.yaml"), "")
 	d.Hooks.BootstrapApply = func(ctx context.Context, domain, yaml, kubeconfig string) error {
 		log = append(log, "bootstrap_applied:"+domain)
 		if !strings.HasSuffix(kubeconfig, filepath.Join(".kubeconfig", "test-cluster.yaml")) {
@@ -277,7 +278,7 @@ func TestDispatchInvokesPostProvision(t *testing.T) {
 func TestDispatchTriggersGitops(t *testing.T) {
 	log := []string{}
 	d, _ := loDispatcher(t, &fakeDriver{log: &log})
-	writeFile(t, filepath.Join(d.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(d.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
 		loSpecYAML+"  gitops:\n    provider: flux\n")
 	gitopsCalled := ""
 	d.Hooks.GitopsBootstrap = func(ctx context.Context, domain, provider string) error {
@@ -327,7 +328,7 @@ func TestDispatchDestroyCallsDriver(t *testing.T) {
 // bats: "provision::dispatch_destroy fails for deploy domains"
 func TestDispatchDestroyRefusesDeployDomain(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
 	var errBuf bytes.Buffer
 	d := &Dispatcher{Paths: p, Stderr: &errBuf}
 	if err := d.DispatchDestroy(context.Background(), "test.lok8s.dev"); err == nil {
@@ -354,7 +355,7 @@ func TestDispatchStatusCallsDriver(t *testing.T) {
 func TestDispatchStatusFollowsClusterRef(t *testing.T) {
 	log := []string{}
 	d, _ := loDispatcher(t, &fakeDriver{log: &log})
-	writeFile(t, filepath.Join(d.Paths.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+	testutil.WriteFile(t, filepath.Join(d.Paths.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
 	var out bytes.Buffer
 	d.Stdout = &out
 	if err := d.DispatchStatus(context.Background(), "staging.lok8s.dev"); err != nil {
@@ -369,7 +370,7 @@ func TestDispatchStatusFollowsClusterRef(t *testing.T) {
 // bats: "provision::dispatch_status fails for deploy domain without clusterRef"
 func TestDispatchStatusDeployMissingClusterRef(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "orphan.lok8s.dev", "deploy.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "orphan.lok8s.dev", "deploy.lok8s.yaml"),
 		"apiVersion: cluster.lok8s.dev/v1beta1\nkind: Deploy\nmetadata:\n  name: orphan-apps\nspec: {}\n")
 	var errBuf bytes.Buffer
 	d := &Dispatcher{Paths: p, Stderr: &errBuf}
@@ -384,8 +385,8 @@ func TestDispatchStatusDeployMissingClusterRef(t *testing.T) {
 // bats: "provision::resolve_clusterref resolves valid clusterRef"
 func TestResolveClusterRefValid(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
-	writeFile(t, filepath.Join(p.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
 	ref, err := ResolveClusterRef(p, "staging.lok8s.dev", &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
@@ -398,7 +399,7 @@ func TestResolveClusterRefValid(t *testing.T) {
 // bats: "provision::resolve_clusterref fails for non-deploy domain"
 func TestResolveClusterRefNonDeploy(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
 	var errBuf bytes.Buffer
 	if _, err := ResolveClusterRef(p, "test.lok8s.dev", &errBuf); err == nil {
 		t.Fatal("expected failure")
@@ -409,7 +410,7 @@ func TestResolveClusterRefNonDeploy(t *testing.T) {
 // bats: "provision::resolve_clusterref fails for missing clusterRef"
 func TestResolveClusterRefMissingRef(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "orphan.lok8s.dev", "deploy.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "orphan.lok8s.dev", "deploy.lok8s.yaml"),
 		"apiVersion: cluster.lok8s.dev/v1beta1\nkind: Deploy\nmetadata:\n  name: orphan\nspec: {}\n")
 	var errBuf bytes.Buffer
 	if _, err := ResolveClusterRef(p, "orphan.lok8s.dev", &errBuf); err == nil {
@@ -421,7 +422,7 @@ func TestResolveClusterRefMissingRef(t *testing.T) {
 // bats: "provision::resolve_clusterref fails when referenced domain missing"
 func TestResolveClusterRefDanglingRef(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "bad-ref.lok8s.dev", "deploy.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "bad-ref.lok8s.dev", "deploy.lok8s.yaml"),
 		"apiVersion: cluster.lok8s.dev/v1beta1\nkind: Deploy\nmetadata:\n  name: bad-ref\nspec:\n  clusterRef:\n    domain: nonexistent.lok8s.dev\n")
 	var errBuf bytes.Buffer
 	if _, err := ResolveClusterRef(p, "bad-ref.lok8s.dev", &errBuf); err == nil {
@@ -459,9 +460,9 @@ func TestLoadProviderCredsLoadsStore(t *testing.T) {
 	clearCredsEnv(t)
 	p := testPaths(t)
 	secd := filepath.Join(p.Clusters, "test.lok8s.dev", "secrets")
-	writeFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HCLOUD_TOKEN"), "tok-123")
-	writeFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HROBOT_USER"), "rob-usr")
-	writeFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HROBOT_PASSWORD"), "rob-pwd")
+	testutil.WriteFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HCLOUD_TOKEN"), "tok-123")
+	testutil.WriteFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HROBOT_USER"), "rob-usr")
+	testutil.WriteFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HROBOT_PASSWORD"), "rob-pwd")
 
 	if err := LoadProviderCreds(p, "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
@@ -485,7 +486,7 @@ func TestLoadProviderCredsKeepsPresetEnv(t *testing.T) {
 	clearCredsEnv(t)
 	p := testPaths(t)
 	secd := filepath.Join(p.Clusters, "test.lok8s.dev", "secrets")
-	writeFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HCLOUD_TOKEN"), "store-token")
+	testutil.WriteFile(t, filepath.Join(secd, "Secret.hetzner.provisioning.HCLOUD_TOKEN"), "store-token")
 	t.Setenv("HCLOUD_TOKEN", "env-token")
 
 	if err := LoadProviderCreds(p, "test.lok8s.dev"); err != nil {

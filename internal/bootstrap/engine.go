@@ -15,6 +15,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -189,11 +190,11 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// secrets.lok8s.dev generators read $PATH_SECRETS — without it a target
 	// carrying a passwd Secret fails to render. Mirror
 	// libs/build::_export_secrets_path.
-	if dirExists(e.Paths.Clusters + "/" + domain + "/secrets") {
+	if fsutil.DirExists(e.Paths.Clusters + "/" + domain + "/secrets") {
 		os.Setenv("PATH_SECRETS", e.Paths.Clusters+"/"+domain+"/secrets")
 	}
 
-	if !fileExists(kubeconfig) {
+	if !fsutil.FileExists(kubeconfig) {
 		return e.errorf("bootstrap: kubeconfig not found: %s", kubeconfig)
 	}
 
@@ -273,7 +274,7 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 			}
 			parsed.Dir = dir
 		}
-		if !dirExists(parsed.Dir) {
+		if !fsutil.DirExists(parsed.Dir) {
 			return e.errorf("bootstrap: addon not found: %s (resolved to %s)", entry, parsed.Dir)
 		}
 		nodes = append(nodes, &node{entry: parsed, deps: map[int]bool{}})

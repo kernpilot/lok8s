@@ -22,6 +22,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/provision"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // The compile-time pins: Publish's shape IS the no-error hook contract of
@@ -57,12 +58,7 @@ func realPaths(t *testing.T) *config.Paths {
 func writeSpec(t *testing.T, p *config.Paths, domainName, content string) string {
 	t.Helper()
 	path := filepath.Join(p.Clusters, domainName, "cluster.lok8s.yaml")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteFile(t, path, content)
 	return path
 }
 

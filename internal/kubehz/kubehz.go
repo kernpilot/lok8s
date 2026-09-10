@@ -34,6 +34,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -260,14 +261,9 @@ func (c *Context) requireDomainSpec(domain string) (string, error) {
 		return "", ErrHandled
 	}
 	cy := c.clusterYAMLPath(domain)
-	if !fileExists(cy) {
+	if !fsutil.FileExists(cy) {
 		c.errorf("No cluster.lok8s.yaml for domain: %s", domain)
 		return "", ErrHandled
 	}
 	return cy, nil
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

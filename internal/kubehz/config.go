@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // Config is the LOK8S_KUBEHZ_* export set of kubehz::read_config. Field
@@ -40,7 +41,7 @@ type Config struct {
 // this call, and a guard over a function that could never fail was a
 // no-op that sent a driver down the wrong branch on a missing file.
 func (c *Context) ReadConfig(clusterYAML string) (*Config, error) {
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		if clusterYAML == "" {
 			clusterYAML = "<empty path>"
 		}

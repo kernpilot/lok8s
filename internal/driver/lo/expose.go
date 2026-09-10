@@ -19,6 +19,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/build"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -53,7 +54,7 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	if err != nil {
 		return err
 	}
-	if !fileExists(nginxTemplate) {
+	if !fsutil.FileExists(nginxTemplate) {
 		ui.Errorf(errOut, "expose: nginx template not found at %s", nginxTemplate)
 		return fmt.Errorf("nginx template not found at %s", nginxTemplate)
 	}
@@ -99,7 +100,7 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	// Copy rendered config + optional TLS certs into the running container.
 	_ = d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf")
 
-	if fileExists(certPath) && fileExists(keyPath) {
+	if fsutil.FileExists(certPath) && fsutil.FileExists(keyPath) {
 		// KNOWN DEFECT, PRESERVED ON PURPOSE: the shipped nginx.conf
 		// references `ssl_certificate /tls.cert` (with an E), but the copy
 		// below lands the file at /tls.CRT — so nginx's TLS server block

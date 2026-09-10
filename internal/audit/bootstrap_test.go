@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -36,10 +37,10 @@ spec:
 	// A bare name resolves through the asset resolver: the fixture holds no
 	// cilium, so the embedded copy (read-only, temp dir — the audit never
 	// ejects) is what the check reads.
-	if filepath.Base(entries[0].dir) != "cilium" || !isDir(entries[0].dir) || strings.HasPrefix(entries[0].dir, a.Lok8s) {
+	if filepath.Base(entries[0].dir) != "cilium" || !fsutil.DirExists(entries[0].dir) || strings.HasPrefix(entries[0].dir, a.Lok8s) {
 		t.Errorf("bare name dir = %s (want the embedded copy)", entries[0].dir)
 	}
-	if isDir(a.Lok8s + "/addons/cilium") {
+	if fsutil.DirExists(a.Lok8s + "/addons/cilium") {
 		t.Error("the audit ejected cilium into the project")
 	}
 	if entries[1].dir != a.Clusters+"/d.dev/./targets/x" {

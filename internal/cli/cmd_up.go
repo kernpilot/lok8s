@@ -18,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -156,7 +157,7 @@ func writeRunHeader(out io.Writer, paths *config.Paths, domainName, kubeconfig s
 	spec := filepath.Join(paths.Clusters, domainName, "cluster.lok8s.yaml")
 	deploySpec := filepath.Join(paths.Clusters, domainName, "deploy.lok8s.yaml")
 	meta, kind := "", ""
-	if fileExists(spec) {
+	if fsutil.FileExists(spec) {
 		if k, err := domain.SpecDriver(spec, ""); err == nil {
 			kind = k
 		}
@@ -167,7 +168,7 @@ func writeRunHeader(out io.Writer, paths *config.Paths, domainName, kubeconfig s
 		if ver := yqScalar(spec, "", "spec", "kubernetes", "version"); ver != "" && ver != "null" {
 			meta += " · " + strings.SplitN(ver, "@", 2)[0]
 		}
-	} else if fileExists(deploySpec) {
+	} else if fsutil.FileExists(deploySpec) {
 		meta = "deploy → " + yqScalar(deploySpec, "?", "spec", "clusterRef", "domain")
 	}
 	fmt.Fprintf(out, "\n  \033[1;36m%s\033[0m  \033[2m%s\033[0m\n", domainName, meta)

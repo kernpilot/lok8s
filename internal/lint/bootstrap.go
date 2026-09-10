@@ -30,6 +30,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -43,7 +44,7 @@ type bootstrapEntry struct {
 // directory (bash: lint::bootstrap). Returns the number of errors found.
 func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 	// Only cluster specs carry spec.bootstrap
-	if !isFile(domainDir + "/cluster.lok8s.yaml") {
+	if !fsutil.IsRegular(domainDir + "/cluster.lok8s.yaml") {
 		return 0
 	}
 	kind, err := domain.SpecDriver(specFile, "")
@@ -61,7 +62,7 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 			errs++
 			continue
 		}
-		if !isDir(dir) {
+		if !fsutil.DirExists(dir) {
 			// Report the ORIGINAL entry (matches the apply path's
 			// addon-not-found error) — the parsed name alone hides which YAML
 			// entry failed for the path/name: forms.
@@ -231,7 +232,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 		// let the apply path surface the authoritative "addon not found" —
 		// otherwise a typo'd addon name with `values:` misleads with "not a
 		// chart addon" instead.
-		if isDir(dir) && !isFile(dir+"/chart.yaml") {
+		if fsutil.DirExists(dir) && !fsutil.IsRegular(dir+"/chart.yaml") {
 			ui.Errorf(l.ErrOut, "bootstrap: '%s' sets 'values:' but is not a chart addon (no chart.yaml under %s); 'values:' is helm-only", raw, dir)
 			return "", "", false
 		}
@@ -240,7 +241,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 	if yqsem.HasKey(val, "valueFiles") {
 		// valueFiles: same helm-only rule as `values:` (a kustomize target
 		// has no chart to feed); same missing-dir leniency.
-		if isDir(dir) && !isFile(dir+"/chart.yaml") {
+		if fsutil.DirExists(dir) && !fsutil.IsRegular(dir+"/chart.yaml") {
 			ui.Errorf(l.ErrOut, "bootstrap: '%s' sets 'valueFiles:' but is not a chart addon (no chart.yaml under %s); 'valueFiles:' is helm-only", raw, dir)
 			return "", "", false
 		}
@@ -281,7 +282,7 @@ func (l *Linter) parseEntry(domainName string, entry bootstrapEntry) (name, dir 
 			if !strings.HasPrefix(vf, "/") {
 				vf = l.Paths.Clusters + "/" + domainName + "/" + vf
 			}
-			if !isFile(vf) {
+			if !fsutil.IsRegular(vf) {
 				ui.Errorf(l.ErrOut, "bootstrap: '%s' valueFiles: file not found: %s", raw, vf)
 				return "", "", false
 			}

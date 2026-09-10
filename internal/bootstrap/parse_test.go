@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func testPaths(t *testing.T) *config.Paths {
@@ -32,22 +34,12 @@ func testPaths(t *testing.T) *config.Paths {
 	return p
 }
 
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // mkChartAddon lays down the minimal chart addon the bats setup created
 // (testcni with chart.yaml), so `values:`/`valueFiles:` are legal on it.
 func mkChartAddon(t *testing.T, p *config.Paths, name string) string {
 	t.Helper()
 	dir := filepath.Join(p.Lok8s, "addons", name)
-	writeFile(t, filepath.Join(dir, "chart.yaml"),
+	testutil.WriteFile(t, filepath.Join(dir, "chart.yaml"),
 		"apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: "+name+"\nvalueFiles:\n  - values.yaml\n")
 	return dir
 }
@@ -57,7 +49,7 @@ func mkChartAddon(t *testing.T, p *config.Paths, name string) string {
 func resolveFromSpec(t *testing.T, spec, kind string) []string {
 	t.Helper()
 	f := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
-	writeFile(t, f, spec)
+	testutil.WriteFile(t, f, spec)
 	entries, err := ResolveEntries(f, kind)
 	if err != nil {
 		t.Fatalf("ResolveEntries: %v", err)
@@ -150,10 +142,10 @@ func TestParseEntryBareName(t *testing.T) {
 	e := mustParse(t, p, `"cilium"`)
 	// The fixture holds no cilium: the parser peeks at the embedded copy
 	// (temp dir, nothing written into the project) and flags it builtin.
-	if e.Name != "cilium" || !e.Builtin || filepath.Base(e.Dir) != "cilium" || !dirExists(e.Dir) || strings.HasPrefix(e.Dir, p.Lok8s) {
+	if e.Name != "cilium" || !e.Builtin || filepath.Base(e.Dir) != "cilium" || !fsutil.DirExists(e.Dir) || strings.HasPrefix(e.Dir, p.Lok8s) {
 		t.Errorf("name/dir/builtin = %q/%q/%v", e.Name, e.Dir, e.Builtin)
 	}
-	if dirExists(p.Lok8s + "/addons/cilium") {
+	if fsutil.DirExists(p.Lok8s + "/addons/cilium") {
 		t.Error("ParseEntry ejected into the project")
 	}
 	if e.Inline != "" || e.EnvLines != "" || e.Wait || len(e.Deps) != 0 || e.Explicit {
@@ -182,7 +174,7 @@ func TestParseEntryDefaultBareWordEntry(t *testing.T) {
 	// quoting) — the parser must treat it identically to "cilium".
 	p := testPaths(t)
 	e := mustParse(t, p, "cilium")
-	if e.Name != "cilium" || !e.Builtin || filepath.Base(e.Dir) != "cilium" || !dirExists(e.Dir) {
+	if e.Name != "cilium" || !e.Builtin || filepath.Base(e.Dir) != "cilium" || !fsutil.DirExists(e.Dir) {
 		t.Errorf("name/dir = %q/%q", e.Name, e.Dir)
 	}
 }
@@ -259,7 +251,7 @@ func TestParseEntryLegacyWholeMapIsHelmValues(t *testing.T) {
 
 func TestParseEntryValuesOnNonChartTargetRejected(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev/targets/raw/kustomization.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev/targets/raw/kustomization.yaml"),
 		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n")
 	mustFail(t, p, `{"./targets/raw":{"values":{"x":1}}}`, "not a chart addon")
 }
@@ -410,7 +402,7 @@ func TestParseEntryQuotedBoolLikeNameAccepted(t *testing.T) {
 func writeValueFile(t *testing.T, p *config.Paths, rel, content string) string {
 	t.Helper()
 	f := filepath.Join(p.Clusters, "test.lok8s.dev", rel)
-	writeFile(t, f, content)
+	testutil.WriteFile(t, f, content)
 	return f
 }
 
@@ -473,7 +465,7 @@ func TestParseEntryAbsoluteValueFilePassesThrough(t *testing.T) {
 	p := testPaths(t)
 	mkChartAddon(t, p, "testcni")
 	abs := filepath.Join(t.TempDir(), "abs-values.yaml")
-	writeFile(t, abs, "marker: \"absolute\"\n")
+	testutil.WriteFile(t, abs, "marker: \"absolute\"\n")
 	e := mustParse(t, p, `{"testcni":{"valueFiles":["`+abs+`"]}}`)
 	if got := inlineGet(t, e.Inline, "marker"); got != "absolute" {
 		t.Errorf("marker = %q", got)
@@ -533,7 +525,7 @@ func TestParseEntryEmptyStringValueFileElementHardError(t *testing.T) {
 
 func TestParseEntryValueFilesOnNonChartTargetRejected(t *testing.T) {
 	p := testPaths(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev/targets/rawvf/kustomization.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev/targets/rawvf/kustomization.yaml"),
 		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n")
 	writeValueFile(t, p, "vf/x.yaml", "marker: x\n")
 	mustFail(t, p, `{"./targets/rawvf":{"valueFiles":["./vf/x.yaml"]}}`, "not a chart addon")
@@ -545,7 +537,7 @@ func TestInlineValuesMatchesFrameworkEntryNotTarget(t *testing.T) {
 	p := testPaths(t)
 	mkChartAddon(t, p, "cilium")
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, spec, `kind: KubeOne
+	testutil.WriteFile(t, spec, `kind: KubeOne
 spec:
   bootstrap:
     - ./targets/cilium

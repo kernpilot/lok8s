@@ -94,7 +94,7 @@ Rules that came from incidents:
 | Area | Go (canonical) | Frozen bash reference |
 |------|----------------|-----------------------|
 | cli | `cmd/lo`, `internal/cli/` (cobra tree, one `cmd_<name>.go` per command, `shim.go`, `dispatch.go`) | `.lok8s/lo`, `.lok8s/libs/` (argsh) |
-| utils | `internal/{config,domain,execx,ui,kapply,oidc,env,hooks,yqsem}` (`yqsem`: the ONE yq-semantics reader — `//` flavours pinned in its test) | `.lok8s/utils/` (ip, http, credentials, targets, template, verbose, types, kapply, oidc, spec, domain) |
+| utils | `internal/{config,domain,execx,ui,kapply,oidc,env,hooks,yqsem,fsutil,testutil}` (`yqsem`: the ONE yq-semantics reader — `//` flavours pinned in its test; `fsutil`: the `-f`/`-d`/`-e` predicates; `testutil`: RepoRoot + WriteFile for package tests) | `.lok8s/utils/` (ip, http, credentials, targets, template, verbose, types, kapply, oidc, spec, domain) |
 | drivers | `internal/driver/{lo,capi,kubeone,kkp,kubehz}` (registry in `internal/driver`, linked from `internal/cli/drivers.go`) | `.lok8s/drivers/{lo,capi,kubeone,kkp}/` — each exposes `main::driver` |
 | providers | `internal/provider/bridge` (runs the bash plugins as `bash -c` children) | `.lok8s/providers/hetzner/` (`main` + `utils/`) — **still the live implementation** |
 | provisioning | `internal/provision` (dispatch, gates, spec), `internal/bootstrap` (the addon DAG), `internal/inventory`, `internal/recover` | `.lok8s/libs/{provision,bootstrap,inventory,recover}` |

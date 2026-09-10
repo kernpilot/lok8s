@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // NodeOpts carries the `lo kubehz node` flags.
@@ -42,7 +43,7 @@ func (c *Context) nodePreflight(ctx context.Context, domain, action, clusterIDFl
 		return nil, "", ErrHandled
 	}
 	cy := c.clusterYAMLPath(domain)
-	if !fileExists(cy) {
+	if !fsutil.FileExists(cy) {
 		c.errorf("No cluster.lok8s.yaml for domain: %s", domain)
 		return nil, "", ErrHandled
 	}

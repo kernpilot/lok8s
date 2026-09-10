@@ -21,17 +21,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-)
 
-// repoRoot is the lok8s checkout (three levels up from internal/render).
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Clean(filepath.Join(wd, "..", ".."))
-}
+	"github.com/kernpilot/lok8s/internal/testutil"
+)
 
 // missingToolchain is how the byte-parity tests react to an absent pinned
 // binary: a skip on a developer machine (run `b install` to enable them),
@@ -50,7 +42,7 @@ func missingToolchain(t *testing.T, what string) {
 // the test when it is not installed (failing on CI).
 func pinnedKustomize(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(repoRoot(t), ".bin", "kustomize")
+	bin := filepath.Join(testutil.RepoRoot(t), ".bin", "kustomize")
 	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 {
 		missingToolchain(t, "pinned kustomize not installed under .bin (b install)")
 	}
@@ -64,7 +56,7 @@ func pinnedKustomize(t *testing.T) string {
 func execKustomize(t *testing.T, dir string, enableExec bool, overlay []string, needPlugins ...string) []byte {
 	t.Helper()
 	bin := pinnedKustomize(t)
-	home := filepath.Join(repoRoot(t), ".kustomize")
+	home := filepath.Join(testutil.RepoRoot(t), ".kustomize")
 	for _, p := range needPlugins {
 		if info, err := os.Stat(filepath.Join(home, filepath.FromSlash(p))); err != nil || info.Mode()&0o111 == 0 {
 			missingToolchain(t, "pinned plugin "+p+" not installed under .kustomize")

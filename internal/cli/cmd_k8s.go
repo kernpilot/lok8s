@@ -21,6 +21,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/driver/capi"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -110,11 +111,11 @@ func newK8sCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 func k8sCapi(paths *config.Paths, d, specPath, outPath string, stderr io.Writer) error {
 	if specPath == "" {
 		specPath = paths.Clusters + "/" + d + "/cluster.lok8s.yaml"
-		if !fileExists(specPath) {
+		if !fsutil.FileExists(specPath) {
 			specPath = paths.Base + "/" + d + ".lok8s.yaml"
 		}
 	}
-	if !fileExists(specPath) {
+	if !fsutil.FileExists(specPath) {
 		ui.Errorf(stderr, "Spec not found: %s", specPath)
 		return ErrHandled
 	}
@@ -213,7 +214,7 @@ func k8sKustomizeArtifact(paths *config.Paths, d, src, outDir, file string, stde
 // bash heredocs wrote next to each artifact.
 func writeKustomizationIfAbsent(dir, resource string) error {
 	path := dir + "/kustomization.yaml"
-	if fileExists(path) {
+	if fsutil.FileExists(path) {
 		return nil
 	}
 	body := fmt.Sprintf("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - %s\n", resource)

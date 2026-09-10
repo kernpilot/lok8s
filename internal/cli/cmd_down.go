@@ -28,6 +28,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -97,7 +98,7 @@ func runDown(ctx context.Context, deps downDeps, domainName, cluster string) err
 	// "deploy" there and would send those domains down the driver branch.
 	spec := filepath.Join(deps.paths.Clusters, domainName, "cluster.lok8s.yaml")
 	kind := ""
-	if fileExists(spec) {
+	if fsutil.FileExists(spec) {
 		k, err := provision.ReadKind(spec, deps.stderr)
 		if err != nil {
 			// ReadKind has already said WHICH way it is wrong (absent vs

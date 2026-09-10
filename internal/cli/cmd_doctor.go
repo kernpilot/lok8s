@@ -29,6 +29,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -186,7 +187,7 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
 	if mkcert, ok := toolchain.LookPath(path, "mkcert"); ok {
 		caroot := doctorCommandOutput(mkcert, "-CAROOT")
-		if caroot != "" && fileExists(filepath.Join(caroot, "rootCA.pem")) {
+		if caroot != "" && fsutil.FileExists(filepath.Join(caroot, "rootCA.pem")) {
 			doctorOK(out, "local CA present ("+caroot+")")
 			dd := d
 			if dd == "" {
@@ -206,13 +207,13 @@ func runDoctor(paths *config.Paths, d string, toolchainFlag bool, out, stderr io
 		spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
 		deploySpec := filepath.Join(paths.Clusters, d, "deploy.lok8s.yaml")
 		switch {
-		case fileExists(spec):
+		case fsutil.FileExists(spec):
 			kind, err := domain.SpecDriver(spec, "?")
 			if err != nil {
 				kind = "?"
 			}
 			doctorOK(out, "active: "+d+" (kind "+kind+")")
-		case fileExists(deploySpec):
+		case fsutil.FileExists(deploySpec):
 			doctorOK(out, "active: "+d+" (Deploy -> "+deployClusterRef(deploySpec)+")")
 		default:
 			doctorWarn(out, "active domain '"+d+"' has no cluster.lok8s.yaml / deploy.lok8s.yaml")
@@ -315,7 +316,7 @@ func doctorTool(w io.Writer, path, name string, required bool, purpose string) b
 }
 
 func doctorDir(w io.Writer, name, val string) {
-	if val != "" && dirExists(val) {
+	if val != "" && fsutil.DirExists(val) {
 		doctorOK(w, name+"="+val)
 	} else {
 		if val == "" {
@@ -406,7 +407,7 @@ func doctorProviderSection(paths *config.Paths, d, path string, out, stderr io.W
 		return
 	}
 	spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
-	if !fileExists(spec) {
+	if !fsutil.FileExists(spec) {
 		return
 	}
 	// provider::read_name, errors suppressed (bash: 2>/dev/null || return 0):

@@ -19,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -112,7 +113,7 @@ func writeClusterSpec(t *testing.T, p *config.Paths, entries ...string) string {
 		b.WriteString("  - " + e + "\n")
 	}
 	f := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, f, b.String())
+	testutil.WriteFile(t, f, b.String())
 	return f
 }
 
@@ -120,7 +121,7 @@ func writeClusterSpec(t *testing.T, p *config.Paths, entries ...string) string {
 func writeKubeconfig(t *testing.T, p *config.Paths) string {
 	t.Helper()
 	f := filepath.Join(p.Base, ".kubeconfig", "e2e-test.yaml")
-	writeFile(t, f, "")
+	testutil.WriteFile(t, f, "")
 	return f
 }
 

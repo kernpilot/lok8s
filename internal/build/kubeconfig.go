@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -66,8 +67,8 @@ func resolveClusterRef(p *config.Paths, domain string, stderr io.Writer) (string
 func ResolveKubeconfigForDomain(p *config.Paths, domain, clusterOverride string, stderr io.Writer) error {
 	domainDir := filepath.Join(p.Clusters, domain)
 	refCluster := ""
-	deployOnly := fileExists(filepath.Join(domainDir, "deploy.lok8s.yaml")) &&
-		!fileExists(filepath.Join(domainDir, "cluster.lok8s.yaml"))
+	deployOnly := fsutil.FileExists(filepath.Join(domainDir, "deploy.lok8s.yaml")) &&
+		!fsutil.FileExists(filepath.Join(domainDir, "cluster.lok8s.yaml"))
 	if deployOnly {
 		refCluster = clusterOverride
 		if refCluster == "" {
@@ -87,9 +88,9 @@ func ResolveKubeconfigForDomain(p *config.Paths, domain, clusterOverride string,
 
 	kubeconfig := filepath.Join(p.Base, ".kubeconfig", "secret."+refCluster+".yaml")
 	refSpec := filepath.Join(p.Clusters, refCluster, "cluster.lok8s.yaml")
-	if !fileExists(kubeconfig) && fileExists(refSpec) {
+	if !fsutil.FileExists(kubeconfig) && fsutil.FileExists(refSpec) {
 		if refName := specMetadataName(refSpec); refName != "" {
-			if named := filepath.Join(p.Base, ".kubeconfig", refName+".yaml"); fileExists(named) {
+			if named := filepath.Join(p.Base, ".kubeconfig", refName+".yaml"); fsutil.FileExists(named) {
 				kubeconfig = named
 			}
 		}
@@ -105,13 +106,13 @@ func ResolveKubeconfigForDomain(p *config.Paths, domain, clusterOverride string,
 // nonexistent path — tolerated (the plugins degrade gracefully).
 func renderKubeconfig(p *config.Paths, domain string) string {
 	kubeconfig := filepath.Join(p.Base, ".kubeconfig", "secret."+domain+".yaml")
-	if fileExists(kubeconfig) {
+	if fsutil.FileExists(kubeconfig) {
 		return kubeconfig
 	}
 	clusterSpec := filepath.Join(p.Clusters, domain, "cluster.lok8s.yaml")
-	if fileExists(clusterSpec) {
+	if fsutil.FileExists(clusterSpec) {
 		if name := specMetadataName(clusterSpec); name != "" {
-			if named := filepath.Join(p.Base, ".kubeconfig", name+".yaml"); fileExists(named) {
+			if named := filepath.Join(p.Base, ".kubeconfig", name+".yaml"); fsutil.FileExists(named) {
 				return named
 			}
 		}
@@ -127,20 +128,20 @@ func renderKubeconfig(p *config.Paths, domain string) string {
 // build::_resolve_api.
 func resolveAPI(p *config.Paths, domainDir string) {
 	kubeconfig := os.Getenv("KUBECONFIG")
-	if kubeconfig == "" || !fileExists(kubeconfig) {
+	if kubeconfig == "" || !fsutil.FileExists(kubeconfig) {
 		// Deploy domains (deploy.lok8s.yaml + clusterRef) have NO
 		// cluster.lok8s.yaml — read the name only when the file is present.
 		clusterSpec := filepath.Join(domainDir, "cluster.lok8s.yaml")
-		if fileExists(clusterSpec) {
+		if fsutil.FileExists(clusterSpec) {
 			if name := specMetadataName(clusterSpec); name != "" {
-				if named := filepath.Join(p.Base, ".kubeconfig", name+".yaml"); fileExists(named) {
+				if named := filepath.Join(p.Base, ".kubeconfig", name+".yaml"); fsutil.FileExists(named) {
 					kubeconfig = named
 				}
 			}
 		}
 	}
 	api := ""
-	if fileExists(kubeconfig) {
+	if fsutil.FileExists(kubeconfig) {
 		api = kubeconfigServer(kubeconfig)
 	}
 	// Strip the scheme like bash's `${api#http*://}` (shortest glob match).
@@ -178,9 +179,4 @@ func kubeconfigServer(path string) string {
 		return ""
 	}
 	return doc.Clusters[0].Cluster.Server
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

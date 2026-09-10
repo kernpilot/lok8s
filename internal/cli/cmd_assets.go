@@ -27,6 +27,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/bootstrap"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -257,7 +258,7 @@ func referencedAssets(paths *config.Paths, stderr io.Writer) []string {
 			continue
 		}
 		spec := filepath.Join(paths.Clusters, e.Name(), "cluster.lok8s.yaml")
-		if !fileExists(spec) {
+		if !fsutil.FileExists(spec) {
 			continue
 		}
 		kind, err := domain.SpecDriver(spec, "lo")

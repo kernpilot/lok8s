@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 type hoHarness struct {
@@ -89,8 +90,6 @@ func (ho *hoHarness) lineIndex(prefix string) int {
 	return -1
 }
 
-func exists(p string) bool { _, err := os.Stat(p); return err == nil }
-
 func tarBundle(t *testing.T, dir, out string) {
 	t.Helper()
 	f, err := os.Create(out)
@@ -131,7 +130,7 @@ func TestHandoverResolveBundleUnpacksTarball(t *testing.T) {
 	tarBundle(t, ho.bundle, tarball)
 	dir, err := ho.ctx.resolveBundle(tarball, filepath.Join(ho.base, "work"))
 	mustOK(t, err, ho.output())
-	if !exists(filepath.Join(dir, "ca.crt")) || !exists(filepath.Join(dir, "endpoint-dns")) {
+	if !fsutil.Exists(filepath.Join(dir, "ca.crt")) || !fsutil.Exists(filepath.Join(dir, "endpoint-dns")) {
 		t.Fatal("bundle not extracted")
 	}
 	if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
@@ -164,7 +163,7 @@ func TestHandoverResolveBundleTraversalGuard(t *testing.T) {
 	_, err := ho.ctx.resolveBundle(evil, filepath.Join(ho.base, "work"))
 	mustErr(t, err)
 	mustContain(t, ho.output(), "escapes the bundle dir")
-	if exists(filepath.Join(ho.base, "escaped")) || exists(filepath.Join(ho.base, "work", "escaped")) {
+	if fsutil.Exists(filepath.Join(ho.base, "escaped")) || fsutil.Exists(filepath.Join(ho.base, "work", "escaped")) {
 		t.Fatal("entry escaped")
 	}
 }
@@ -252,7 +251,7 @@ func TestHandoverReceiveEtcdVersionPin(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(ho.bundle, "etcd-version"), []byte("3.5.21-0\" evil\n"), 0o644)
 	mustErr(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}))
 	mustContain(t, ho.output(), "not a plain image tag")
-	if exists(filepath.Join(ho.k8sDir, "pki")) {
+	if fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
 		t.Fatal("seeded before the tag check")
 	}
 
@@ -261,7 +260,7 @@ func TestHandoverReceiveEtcdVersionPin(t *testing.T) {
 	ho.env["KUBEHZ_HANDOVER_ETCD_IMAGE_TAG"] = "3.5.21-0\" evil"
 	mustErr(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}))
 	mustContain(t, ho.output(), "not a plain image tag")
-	if exists(filepath.Join(ho.k8sDir, "pki")) {
+	if fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
 		t.Fatal("seeded before the tag check")
 	}
 }
@@ -279,7 +278,7 @@ func TestHandoverReceiveRefusesTamperedBundleBeforeMutation(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(ho.bundle, tc.key), []byte(tc.content), 0o644)
 		mustErr(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}))
 		mustContain(t, ho.output(), tc.want)
-		if exists(filepath.Join(ho.k8sDir, "pki")) || exists(filepath.Join(ho.etcdDir, "member")) {
+		if fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) || fsutil.Exists(filepath.Join(ho.etcdDir, "member")) {
 			t.Fatalf("%s: node mutated before the check", tc.key)
 		}
 	}
@@ -409,7 +408,7 @@ func TestHandoverReceiveFailsBeforeMutation(t *testing.T) {
 	ho.mockNodeBinaries(nil)
 	mustErr(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}))
 	mustContain(t, ho.output(), "missing or empty key: front-proxy-ca.crt")
-	if len(ho.calls) != 0 || exists(filepath.Join(ho.k8sDir, "pki")) {
+	if len(ho.calls) != 0 || fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
 		t.Fatal("mutated")
 	}
 
@@ -423,7 +422,7 @@ func TestHandoverReceiveFailsBeforeMutation(t *testing.T) {
 	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ip": func(c execx.Cmd) error { return exitErr(1) }})
 	mustErr(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}))
 	mustContain(t, ho.output(), "cannot determine this node's advertise address")
-	if exists(filepath.Join(ho.k8sDir, "pki")) {
+	if fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
 		t.Fatal("stranded PKI")
 	}
 
@@ -433,7 +432,7 @@ func TestHandoverReceiveFailsBeforeMutation(t *testing.T) {
 	mustErr(t, ho.receive(ReceiveOpts{}))
 	mustContain(t, ho.output(), "KKP-internal locator")
 	mustContain(t, ho.output(), "--snapshot")
-	if len(ho.calls) != 0 || exists(filepath.Join(ho.k8sDir, "pki")) {
+	if len(ho.calls) != 0 || fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
 		t.Fatal("mutated")
 	}
 }
@@ -443,7 +442,7 @@ func TestHandoverReceivePKIAndEncryptionBeforeInit(t *testing.T) {
 	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{
 		"kubeadm": func(c execx.Cmd) error {
 			for _, k := range handoverPKIKeys {
-				if !exists(filepath.Join(ho.k8sDir, "pki", k)) {
+				if !fsutil.Exists(filepath.Join(ho.k8sDir, "pki", k)) {
 					t.Fatalf("%s placed AFTER kubeadm init", k)
 				}
 			}
@@ -498,7 +497,7 @@ func TestHandoverReceiveScrubsScratch(t *testing.T) {
 	if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
 		t.Fatalf("scratch left behind: %v", entries)
 	}
-	if !exists(tarball) {
+	if !fsutil.Exists(tarball) {
 		t.Fatal("the user's archive must survive")
 	}
 
@@ -511,7 +510,7 @@ func TestHandoverReceiveScrubsScratch(t *testing.T) {
 	if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
 		t.Fatalf("scratch left behind: %v", entries)
 	}
-	if !exists(ho2.snapshot) {
+	if !fsutil.Exists(ho2.snapshot) {
 		t.Fatal("the user-provided snapshot must survive")
 	}
 }
@@ -522,7 +521,7 @@ func TestHandoverWritersRejectInjection(t *testing.T) {
 	out := filepath.Join(ho.base, "out.yaml")
 	mustErr(t, ho.ctx.writeKubeadmConfig(ho.bundle, ho.k8sDir, out, "3.5.21-0"))
 	mustContain(t, ho.output(), "not a plain hostname")
-	if exists(out) {
+	if fsutil.Exists(out) {
 		t.Fatal("wrote despite refusal")
 	}
 	ho = newHandover(t)

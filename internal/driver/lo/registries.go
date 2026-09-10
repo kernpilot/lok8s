@@ -18,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -191,7 +192,7 @@ func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error 
 	// Up to date? (cert present and the SAN set unchanged since the last
 	// mint — the .sans cache file is the comparison key.)
 	sansRepr := strings.Join(uniq, "\n")
-	if fileExists(crt) && fileExists(key) && fileExists(sansFile) {
+	if fsutil.FileExists(crt) && fsutil.FileExists(key) && fsutil.FileExists(sansFile) {
 		if prev, err := os.ReadFile(sansFile); err == nil &&
 			strings.TrimRight(string(prev), "\n") == sansRepr {
 			ui.Debugf(errOut, "registry TLS cert up to date (%d SANs)", len(uniq))
@@ -312,7 +313,7 @@ func (d *Driver) registriesTLSNudge(ctx context.Context, errOut io.Writer) {
 		caroot = data + "/mkcert"
 	}
 	ca := filepath.Join(caroot, "rootCA.pem")
-	if fileExists(ca) && d.runQuiet(ctx, "openssl", "verify", ca) == nil {
+	if fsutil.FileExists(ca) && d.runQuiet(ctx, "openssl", "verify", ca) == nil {
 		return // CA is in the host trust store → host pushes will verify
 	}
 
@@ -364,7 +365,7 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 	certSig := ""
 	if rf.TLS {
 		certDir := filepath.Join(d.deps.Paths.Base, ".secrets", "tls", "registries")
-		if !fileExists(filepath.Join(certDir, "tls.crt")) || !fileExists(filepath.Join(certDir, "tls.key")) {
+		if !fsutil.FileExists(filepath.Join(certDir, "tls.crt")) || !fsutil.FileExists(filepath.Join(certDir, "tls.key")) {
 			fmt.Fprintf(errOut, "error: spec.registries.tls is enabled but no cert at %s\n", certDir)
 			fmt.Fprintln(errOut, "       lo::registries_tls_cert must run before lo::registries (ensure the")
 			fmt.Fprintln(errOut, "       Secret plugin is built: lo kustomize build).")
@@ -387,10 +388,10 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 		regName, regNetwork := rf.containerFor(r.Name)
 
 		configFile := filepath.Join(registryConfigDir, r.Name+".yaml")
-		if !fileExists(configFile) && r.URL != "" {
+		if !fsutil.FileExists(configFile) && r.URL != "" {
 			configFile = filepath.Join(registryConfigDir, "mirror.yaml")
 		}
-		if !fileExists(configFile) {
+		if !fsutil.FileExists(configFile) {
 			fmt.Fprintf(errOut, "error: registry/%s: no config for '%s' at %s\n", regName, r.Name, registryConfigDir)
 			failed = true
 			continue
@@ -550,7 +551,7 @@ func (d *Driver) applyLocalRegistryHosting(ctx context.Context, out, errOut io.W
 		clusterName = ""
 	}
 	kubeconfig := filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml")
-	if !fileExists(kubeconfig) {
+	if !fsutil.FileExists(kubeconfig) {
 		fmt.Fprintf(errOut, "warning: no kubeconfig at %s, skipping local-registry-hosting\n", kubeconfig)
 		return nil
 	}

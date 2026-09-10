@@ -15,6 +15,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -61,7 +62,7 @@ func useSetActive(paths *config.Paths, target string, out, errOut io.Writer) err
 		return ErrHandled
 	}
 	base := filepath.Join(paths.Clusters, target)
-	if !fileExists(filepath.Join(base, "cluster.lok8s.yaml")) && !fileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
+	if !fsutil.FileExists(filepath.Join(base, "cluster.lok8s.yaml")) && !fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
 		ui.Errorf(errOut, "domain not found: clusters/%s/ (no cluster.lok8s.yaml or deploy.lok8s.yaml)", target)
 		return ErrHandled
 	}
@@ -116,11 +117,6 @@ func deployClusterRef(specPath string) string {
 		return "?"
 	}
 	return doc.Spec.ClusterRef.Domain
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 // sortedGlob matches bash's alphabetically-sorted glob expansion.

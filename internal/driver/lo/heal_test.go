@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 type healFixture struct {
@@ -64,15 +65,15 @@ func newHealFixture(t *testing.T) *healFixture {
 			os.MkdirAll(filepath.Join(h.root(node), sub), 0o755)
 		}
 	}
-	writeFile(t, h.flagPath("good"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.2 --node-labels="`+"\n")
-	writeFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.2 --node-labels="`+"\n")
+	testutil.WriteFile(t, h.flagPath("good"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.2 --node-labels="`+"\n")
+	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.2 --node-labels="`+"\n")
 	// What a drifted node really looks like: the entrypoint has rewritten
 	// the stale address into old-ipv4 AND the kubeadm files.
 	os.WriteFile(h.oldIPPath("bad"), []byte("172.31.0.2"), 0o644)
 	os.WriteFile(h.oldIPPath("good"), []byte("10.9.0.2"), 0o644)
 	// A SUPERSTRING of the stale address — the \b-anchored sed must NOT
 	// touch it.
-	writeFile(t, h.confPath("bad"), "server: https://172.31.0.2:6443\npeer: 172.31.0.20\n")
+	testutil.WriteFile(t, h.confPath("bad"), "server: https://172.31.0.2:6443\npeer: 172.31.0.20\n")
 
 	runner.handler = func(c execx.Cmd) error {
 		joined := strings.Join(c.Args, " ")
@@ -216,7 +217,7 @@ func TestHealRepairsOnlyTheDriftedNode(t *testing.T) {
 func TestHealHealthyClusterIsSilentNoop(t *testing.T) {
 	h := newHealFixture(t)
 	// Repair the drifted node up front, so nothing needs healing.
-	writeFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
+	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
 
 	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
@@ -232,7 +233,7 @@ func TestHealLatchUpRestartsKubeletOnly(t *testing.T) {
 	// forever), but kubelet still runs on the dead one — visible as a
 	// frozen Node InternalIP.
 	h := newHealFixture(t)
-	writeFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
+	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
 	h.observed["bad"] = "172.31.0.2"
 
 	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
@@ -254,7 +255,7 @@ func TestHealDualStackWarnedNeverRewritten(t *testing.T) {
 	// naive rewrite would silently drop the v6 half and break dual-stack
 	// clusters.
 	h := newHealFixture(t)
-	writeFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.2,fd00::2 --node-labels="`+"\n")
+	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.2,fd00::2 --node-labels="`+"\n")
 
 	if err := h.d.healNodeIPs(context.Background(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
 		t.Fatal(err)
@@ -291,7 +292,7 @@ func TestNodesOnRegistryNetworkGate(t *testing.T) {
 	// must decide.
 	d, runner, _, _ := testDriver(t)
 	jsonPath := filepath.Join(t.TempDir(), ".registries.json")
-	writeFile(t, jsonPath, `{"shared":false,"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"lok8s","registries":[]}`)
+	testutil.WriteFile(t, jsonPath, `{"shared":false,"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"lok8s","registries":[]}`)
 	t.Setenv("LOK8S_REGISTRY_JSON", jsonPath)
 
 	members := "lok8s-registry-io-docker bad "

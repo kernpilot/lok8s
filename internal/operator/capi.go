@@ -24,6 +24,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // CapiFinalizer intercepts deletion so the workload cluster is torn down
@@ -160,7 +161,7 @@ func (h *CapiHook) generate(spec any, provider, name string) (string, bool) {
 	core, _ := filepath.Glob(filepath.Join(tmplDir, "core", "*.yaml"))
 	first := true
 	for _, tmpl := range core {
-		if !fileExists(tmpl) {
+		if !fsutil.FileExists(tmpl) {
 			continue
 		}
 		if first {
@@ -176,7 +177,7 @@ func (h *CapiHook) generate(spec any, provider, name string) (string, bool) {
 	if info, err := os.Stat(providerDir); err == nil && info.IsDir() {
 		provs, _ := filepath.Glob(filepath.Join(providerDir, "*.yaml"))
 		for _, tmpl := range provs {
-			if !fileExists(tmpl) {
+			if !fsutil.FileExists(tmpl) {
 				continue
 			}
 			b.WriteString("---\n")
@@ -196,7 +197,7 @@ func (h *CapiHook) generate(spec any, provider, name string) (string, bool) {
 			h.export("POOL_TYPE", h.poolField(get(spec, "workers"), pool, "type", nil))
 			b.WriteString("---\n")
 			h.renderTemplate(&b, filepath.Join(tmplDir, "core", "machine-deployment.yaml"))
-			if hm := filepath.Join(providerDir, "hcloud-machine-template.yaml"); fileExists(hm) {
+			if hm := filepath.Join(providerDir, "hcloud-machine-template.yaml"); fsutil.FileExists(hm) {
 				b.WriteString("---\n")
 				h.renderTemplate(&b, hm)
 			}

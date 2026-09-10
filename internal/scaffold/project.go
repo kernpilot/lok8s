@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
@@ -238,7 +239,7 @@ func EnsureGitignore(dir string, out io.Writer) error {
 // writeUnlessPresent writes content to path unless it exists (force
 // overwrites), reporting either way.
 func writeUnlessPresent(path, content string, force bool, out io.Writer) error {
-	if fileExists(path) && !force {
+	if fsutil.FileExists(path) && !force {
 		fmt.Fprintf(out, "Kept %s (exists; --force overwrites)\n", path)
 		return nil
 	}

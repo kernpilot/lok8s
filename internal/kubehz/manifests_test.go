@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestEmbeddedManifestsMatchBashTree(t *testing.T) {
-	bashTree := filepath.Join(repoRoot(t), ".lok8s", "libs", "kubehz", "manifests")
+	bashTree := filepath.Join(testutil.RepoRoot(t), ".lok8s", "libs", "kubehz", "manifests")
 	if _, err := os.Stat(bashTree); err != nil {
 		t.Skipf("bash tree not present: %v", err)
 	}

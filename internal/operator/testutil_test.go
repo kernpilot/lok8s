@@ -22,6 +22,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // klog is the shared call log (bats: KLOG).
@@ -198,17 +199,7 @@ func newCapiFixture(t *testing.T) *capiFixture {
 func (f *capiFixture) writeTemplates(t *testing.T, files map[string]string) {
 	t.Helper()
 	for rel, content := range files {
-		writeFile(t, filepath.Join(f.tmpl, rel), content)
-	}
-}
-
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+		testutil.WriteFile(t, filepath.Join(f.tmpl, rel), content)
 	}
 }
 
@@ -225,7 +216,7 @@ func readFileT(t *testing.T, path string) string {
 func bindingFile(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "binding.json")
-	writeFile(t, path, content)
+	testutil.WriteFile(t, path, content)
 	return path
 }
 

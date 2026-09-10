@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/driver"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -57,7 +58,7 @@ func WriteProviderConfig(specFile string, stderr io.Writer) (configFile string, 
 
 	if ref := info.Spec.Provider.ConfigRef; ref != "" {
 		refPath := filepath.Join(filepath.Dir(specFile), ref)
-		if !fileExists(refPath) {
+		if !fsutil.FileExists(refPath) {
 			ui.Errorf(stderr, "provider.configRef '%s' not found at %s", ref, refPath)
 			return "", nil, fmt.Errorf("provider configRef not found: %s", ref)
 		}

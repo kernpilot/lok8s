@@ -24,6 +24,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 func init() { registerPorted("registry", newRegistryCommand) }
@@ -111,7 +112,7 @@ func newRegistryCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // registry JSON is already loaded (LOK8S_REGISTRY_JSON — Tilt subshells),
 // otherwise the domain MUST be a Lo cluster.
 func registryGate(paths *config.Paths, domainName string, stderr io.Writer) error {
-	if path := os.Getenv("LOK8S_REGISTRY_JSON"); path != "" && fileExists(path) {
+	if path := os.Getenv("LOK8S_REGISTRY_JSON"); path != "" && fsutil.FileExists(path) {
 		return nil
 	}
 	if err := domain.RequireDriver("lo", paths.Clusters, domainName, "registry management", stderr); err != nil {

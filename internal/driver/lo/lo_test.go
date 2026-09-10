@@ -14,6 +14,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestDriverRegisteredAsLo(t *testing.T) {
@@ -33,7 +34,7 @@ func TestDriverRegisteredAsLo(t *testing.T) {
 
 func TestStatusRunningAndNotFound(t *testing.T) {
 	d, runner, _, p := testDriver(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
 		"metadata:\n  name: test-local\n")
 
 	runner.handler = func(c execx.Cmd) error {
@@ -59,7 +60,7 @@ func TestStatusRunningAndNotFound(t *testing.T) {
 
 func TestKubeconfigExtractsAndReturnsPath(t *testing.T) {
 	d, runner, _, p := testDriver(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
 		"metadata:\n  name: test-local\n")
 	runner.handler = func(c execx.Cmd) error {
 		if c.Name == "kind" && len(c.Args) >= 2 && c.Args[0] == "get" && c.Args[1] == "kubeconfig" {
@@ -127,7 +128,7 @@ func TestDestroyDeletesClusterCleansRegistriesAndProxy(t *testing.T) {
 
 func TestExportSetsSpecEnvs(t *testing.T) {
 	d, _, errBuf, p := testDriver(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)
 
 	if err := d.Export(context.Background(), "test.lok8s.dev"); err != nil {
 		t.Fatalf("Export: %v\n%s", err, errBuf.String())
@@ -165,7 +166,7 @@ func TestReadRemoteConfigRejectsUnsafeSyncDest(t *testing.T) {
 	// the quoting on the remote host.
 	_, _, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, "spec:\n  remote:\n    sync:\n      dest: \"/tmp/x'; rm -rf /\"\n")
+	testutil.WriteFile(t, cy, "spec:\n  remote:\n    sync:\n      dest: \"/tmp/x'; rm -rf /\"\n")
 
 	var errBuf strings.Builder
 	if err := readRemoteConfig(cy, remoteDeps{}, &errBuf); err == nil {
@@ -176,7 +177,7 @@ func TestReadRemoteConfigRejectsUnsafeSyncDest(t *testing.T) {
 	}
 
 	// Tilde is refused too (single quotes suppress remote tilde expansion).
-	writeFile(t, cy, "spec:\n  remote:\n    sync:\n      dest: \"~/work\"\n")
+	testutil.WriteFile(t, cy, "spec:\n  remote:\n    sync:\n      dest: \"~/work\"\n")
 	if err := readRemoteConfig(cy, remoteDeps{}, &errBuf); err == nil {
 		t.Fatal("tilde dest accepted")
 	}

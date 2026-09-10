@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -81,10 +82,10 @@ func newKustomizeCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // a fresh project gets the framework plugins without carrying the Go source.
 func kustomizeSources(paths *config.Paths) []string {
 	var sources []string
-	if fw := filepath.Join(filepath.Dir(paths.Lok8s), "kustomize"); dirExists(fw) {
+	if fw := filepath.Join(filepath.Dir(paths.Lok8s), "kustomize"); fsutil.DirExists(fw) {
 		sources = append(sources, fw)
 	}
-	if own := filepath.Join(paths.Base, "kustomize"); own != "" && dirExists(own) && !contains(sources, own) {
+	if own := filepath.Join(paths.Base, "kustomize"); own != "" && fsutil.DirExists(own) && !contains(sources, own) {
 		sources = append(sources, own)
 	}
 	return sources
@@ -136,7 +137,7 @@ func kustomizeClean(paths *config.Paths) error {
 
 func kustomizeList(paths *config.Paths, cmd *cobra.Command) error {
 	root := filepath.Join(paths.Base, ".kustomize")
-	if !dirExists(root) {
+	if !fsutil.DirExists(root) {
 		ui.Warn("No .kustomize/ directory found")
 		return nil
 	}
@@ -179,11 +180,6 @@ func runMake(dir string, env []string, target string) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }
 
 func contains(list []string, v string) bool {

@@ -23,6 +23,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -76,10 +77,10 @@ func (c *Context) servicesYAML(ctx context.Context, onlyServices, onlyRegistry b
 	ui.Debugf(errOut, "Print services")
 
 	baseFile := c.Paths.Base + "/services.yaml"
-	if !fileExists(baseFile) {
+	if !fsutil.FileExists(baseFile) {
 		// Fall back to legacy filenames.
 		baseFile = c.Paths.Base + "/services.base.yaml"
-		if !fileExists(baseFile) {
+		if !fsutil.FileExists(baseFile) {
 			// No services config at all — return empty YAML.
 			ui.Debugf(errOut, "No services.yaml found; returning empty config")
 			return []byte("{}\n"), nil
@@ -208,7 +209,7 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	buf.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\n")
 	buf.WriteString("kind: Kustomization\n")
 	buf.WriteString("\n")
-	if fileExists(domainArtifact) {
+	if fsutil.FileExists(domainArtifact) {
 		// ../artifacts.yaml is a raw file above the overlay root — Tilt
 		// builds this dir with --load-restrictor=LoadRestrictionsNone so the
 		// reference resolves.
@@ -348,9 +349,4 @@ func (c *Context) generateImages(doc *yaml.Node, defaultBuild, gPrefix, gCache, 
 
 func subst(s string) string {
 	return string(BareEnvsubst([]byte(s)))
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

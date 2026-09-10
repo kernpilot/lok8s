@@ -16,6 +16,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func frameworkLok8s(t *testing.T) string {
@@ -39,11 +40,7 @@ func sandbox(t *testing.T, lok8s string) *config.Paths {
 
 func writeSpec(t *testing.T, p *config.Paths, d, body string) {
 	t.Helper()
-	dir := filepath.Join(p.Clusters, d)
-	os.MkdirAll(dir, 0o755)
-	if err := os.WriteFile(filepath.Join(dir, "cluster.lok8s.yaml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteFile(t, filepath.Join(p.Clusters, d, "cluster.lok8s.yaml"), body)
 }
 
 func TestCategoryReadsLabel(t *testing.T) {

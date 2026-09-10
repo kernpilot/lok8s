@@ -57,6 +57,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -451,7 +452,7 @@ func (r *Runner) verify(ctx context.Context) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "--- verify ---")
 	kubeconfig := r.kubeconfigPath(ctx)
-	if !fileExists(kubeconfig) {
+	if !fsutil.FileExists(kubeconfig) {
 		fmt.Fprintf(stderr, "  \033[33m!\033[0m recovered kubeconfig not found (%s) — cannot confirm node readiness\n", kubeconfig)
 	}
 	ready := r.readyNodes(ctx, kubeconfig)
@@ -504,7 +505,7 @@ func (r *Runner) readyNodes(ctx context.Context, kubeconfig string) int {
 	if !r.kubectlAvailable() {
 		return 0
 	}
-	if kubeconfig == "" || !fileExists(kubeconfig) {
+	if kubeconfig == "" || !fsutil.FileExists(kubeconfig) {
 		return 0
 	}
 	var buf strings.Builder
@@ -630,7 +631,7 @@ func (r *Runner) kubeconfigPath(ctx context.Context) string {
 		return path
 	}
 	name := ""
-	if fileExists(r.spec) {
+	if fsutil.FileExists(r.spec) {
 		name = specMetadataName(r.spec)
 	}
 	if name == "" || name == "null" {
@@ -666,10 +667,10 @@ func (r *Runner) driverKubeconfig(ctx context.Context) (string, error) {
 // metadata.name, else the domain.
 func (r *Runner) resolveClusterName() string {
 	n := ""
-	if fileExists(r.config) {
+	if fsutil.FileExists(r.config) {
 		n = yamlScalar(r.config, "cluster_name")
 	}
-	if (n == "" || n == "null") && fileExists(r.spec) {
+	if (n == "" || n == "null") && fsutil.FileExists(r.spec) {
 		n = specMetadataName(r.spec)
 	}
 	if n == "" || n == "null" {
@@ -708,11 +709,6 @@ func PickDomain(stderr io.Writer, fallback string, positionals []string) (string
 		return positionals[0], nil
 	}
 	return fallback, nil
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 // specMetadataName is `yq -r '.metadata.name // ""'` ("" when unreadable).

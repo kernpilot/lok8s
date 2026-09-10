@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 const loCR = `{"metadata":{"name":"test-lo","namespace":"default","finalizers":[]},"spec":{"cluster":{"domain":"test.lok8s.dev"},"runtime":"kind"}}`
@@ -65,7 +67,7 @@ func TestLoFreshCRProvisions(t *testing.T) {
 	)
 	// spec materialized where the driver contract expects it
 	spec := filepath.Join(f.paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	if !fileExists(spec) {
+	if !fsutil.FileExists(spec) {
 		t.Fatalf("spec not materialized at %s", spec)
 	}
 	// … as block YAML (yq -P), key order preserved.
@@ -145,7 +147,7 @@ func TestLoRunningClusterSkipsProvision(t *testing.T) {
 func TestLoPublishReusesExistingKubeconfig(t *testing.T) {
 	f := newLoFixture(t)
 	f.drv.status = "Running"
-	writeFile(t, filepath.Join(f.paths.Base, ".kubeconfig", "test-lo.yaml"), "kc\n")
+	testutil.WriteFile(t, filepath.Join(f.paths.Base, ".kubeconfig", "test-lo.yaml"), "kc\n")
 	f.hook.Reconcile(context.Background(), []byte(loCR))
 	refuteHas(t, f.log, "driver::kubeconfig")
 	assertHas(t, f.log, "create secret generic test-lo-kubeconfig")
@@ -177,7 +179,7 @@ func TestLoFailedTeardownKeepsFinalizer(t *testing.T) {
 	assertHas(t, f.log, "DestroyFailed")
 	refuteHas(t, f.log, `{"metadata":{"finalizers":[]}}`, "delete secret")
 	assertStderr(t, f.stderr, "error: Lo default/test-lo teardown failed (will retry)\n")
-	if !fileExists(filepath.Join(f.paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")) {
+	if !fsutil.FileExists(filepath.Join(f.paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")) {
 		t.Error("spec must survive a failed teardown (the retry needs it)")
 	}
 }

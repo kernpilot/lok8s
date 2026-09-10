@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -138,7 +139,7 @@ func readNetworkConfig(clusterYAML string, errOut io.Writer) error {
 	// Missing spec is its own error, checked BEFORE any read: under `set -e`
 	// a failing yq on a missing file would kill the caller before the
 	// intended message could ever print.
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		fmt.Fprintf(errOut, "error: cluster spec not found: %s\n", clusterYAML)
 		return fmt.Errorf("cluster spec not found: %s", clusterYAML)
 	}
@@ -357,9 +358,4 @@ func exportSpecEnvs(clusterYAML string, errOut io.Writer) error {
 	os.Setenv("LOK8S_SPEC_KIND_PODSUBNET", DefaultPodCIDR)
 	os.Setenv("LOK8S_SPEC_KIND_SERVICESUBNET", DefaultSvcCIDR)
 	return nil
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

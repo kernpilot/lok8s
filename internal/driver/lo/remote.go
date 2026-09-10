@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -185,7 +186,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		return fmt.Errorf("rsync failed: %w", err)
 	}
 
-	if d.deps.Paths.Clusters != repoRoot+"/clusters" && dirExists(d.deps.Paths.Clusters) {
+	if d.deps.Paths.Clusters != repoRoot+"/clusters" && fsutil.DirExists(d.deps.Paths.Clusters) {
 		// Best-effort: an external clusters dir rides along, failure tolerated.
 		_ = d.runOut(ctx, out, errOut, "rsync", "-az", d.deps.Paths.Clusters+"/", remote+":"+dest+"/clusters/")
 	}
@@ -232,12 +233,12 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 
 	// Set up kubeconfig + SSH tunnel.
 	kubeconfigPath := filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml")
-	if !fileExists(kubeconfigPath) {
+	if !fsutil.FileExists(kubeconfigPath) {
 		_ = os.MkdirAll(filepath.Join(d.deps.Paths.Base, ".kubeconfig"), 0o755)
 		_ = d.runQuiet(ctx, "scp", remote+":"+dest+"/.kubeconfig/"+clusterName+".yaml", kubeconfigPath)
 	}
 
-	if fileExists(kubeconfigPath) {
+	if fsutil.FileExists(kubeconfigPath) {
 		_ = d.kubeconfigTunnel(ctx, kubeconfigPath, getenv("LOK8S_REMOTE_USER"), getenv("LOK8S_REMOTE_IP"), errOut)
 	}
 
@@ -254,9 +255,4 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	}
 	fmt.Fprintf(out, "   Sync:       rsync -az %s %s:%s/\n", syncSrc, remote, dest)
 	return nil
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }

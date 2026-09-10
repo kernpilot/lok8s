@@ -36,6 +36,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	// The Go drivers register themselves in init(); drivers.go is the ONE
 	// place the binary links them (shared with the provision dispatch).
@@ -151,7 +152,7 @@ func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) 
 			}
 			// A Go driver never reaches here (its subcommand resolves first);
 			// this is the bash-only fallback.
-			if fileExists(filepath.Join(paths.Lok8s, "drivers", name, "main")) {
+			if fsutil.FileExists(filepath.Join(paths.Lok8s, "drivers", name, "main")) {
 				return deps.shim(os.Args[1:])
 			}
 			ui.Errorf(stderr, "Driver '%s' not found", name)

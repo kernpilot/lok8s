@@ -16,12 +16,13 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func corednsFixture(t *testing.T, corednsSpec string) (*Driver, *fakeRunner, *config.Paths) {
 	t.Helper()
 	d, runner, _, p := testDriver(t)
-	writeFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), `apiVersion: cluster.lok8s.dev/v1beta1
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), `apiVersion: cluster.lok8s.dev/v1beta1
 kind: Lo
 metadata:
   name: test-dns
@@ -32,9 +33,9 @@ spec:
     pool: "10.125.50.125-10.125.50.150"
 `+corednsSpec)
 	corednsDir := filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "coredns")
-	writeFile(t, filepath.Join(corednsDir, "corefile.yaml"), "{}\n")
-	writeFile(t, filepath.Join(corednsDir, "expose.yaml"), "{}\n")
-	writeFile(t, filepath.Join(corednsDir, "patch.json"), "[]\n")
+	testutil.WriteFile(t, filepath.Join(corednsDir, "corefile.yaml"), "{}\n")
+	testutil.WriteFile(t, filepath.Join(corednsDir, "expose.yaml"), "{}\n")
+	testutil.WriteFile(t, filepath.Join(corednsDir, "patch.json"), "[]\n")
 	return d, runner, p
 }
 
@@ -144,11 +145,11 @@ func exposeFixture(t *testing.T) (*Driver, *fakeRunner, *config.Paths, string) {
 	t.Helper()
 	d, runner, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, "spec:\n  cluster:\n    domain: test.lok8s.dev\n")
+	testutil.WriteFile(t, cy, "spec:\n  cluster:\n    domain: test.lok8s.dev\n")
 	// The REAL shipped nginx template — the envsubst whitelist + the
 	// /tls.cert defect are properties of this exact file.
-	writeFile(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"),
-		readFileT(t, filepath.Join(repoRoot(t), ".lok8s", "drivers", "lo", "cluster", "expose", "nginx.conf")))
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"),
+		readFileT(t, filepath.Join(testutil.RepoRoot(t), ".lok8s", "drivers", "lo", "cluster", "expose", "nginx.conf")))
 	t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
 	t.Setenv("LOK8S_LB_POOL", "10.125.50.125-10.125.50.150")
 	return d, runner, p, cy
@@ -192,8 +193,8 @@ func TestExposeTLSCertDefectPreserved(t *testing.T) {
 	// lands /tls.crt. This test FAILS if either side is "fixed" in
 	// isolation — the fix is a coordinated change with its own test.
 	d, runner, p, cy := exposeFixture(t)
-	writeFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
-	writeFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
+	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
+	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
 
 	var out, errBuf bytes.Buffer
 	if err := d.expose(context.Background(), "test-dns", cy, &out, &errBuf); err != nil {
@@ -234,7 +235,7 @@ func TestExposeMissingTemplateFails(t *testing.T) {
 func TestKubeconfigTunnelRewritesServerEvenWhenTunnelFails(t *testing.T) {
 	d, runner, _, p := testDriver(t)
 	kc := filepath.Join(p.Base, ".kubeconfig", "x.yaml")
-	writeFile(t, kc, `apiVersion: v1
+	testutil.WriteFile(t, kc, `apiVersion: v1
 clusters:
   - cluster:
       server: https://10.0.0.5:6443

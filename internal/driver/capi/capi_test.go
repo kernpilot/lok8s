@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // ── provision guards ──────────────────────────────────────
@@ -239,7 +240,7 @@ func TestDestroyFailedDeleteDoesNotReportSuccess(t *testing.T) {
 	}
 	// Same reasoning as the kubeone guard: the failed teardown leaves live
 	// infrastructure, and the kubeconfig is how an operator reaches it.
-	if !fileExists(d.kubeconfigPath("destroytest")) {
+	if !fsutil.FileExists(d.kubeconfigPath("destroytest")) {
 		t.Fatal("the workload kubeconfig was deleted after a FAILED teardown")
 	}
 }
@@ -254,7 +255,7 @@ func TestDestroyMissingRemoteMgmtKubeconfigFails(t *testing.T) {
 	if err := d.Destroy(context.Background(), "test.dev"); err == nil {
 		t.Fatal("destroy returned success although no delete was ever attempted")
 	}
-	if !fileExists(d.kubeconfigPath("destroytest")) {
+	if !fsutil.FileExists(d.kubeconfigPath("destroytest")) {
 		t.Fatal("the workload kubeconfig was deleted although the destroy never ran")
 	}
 	if !strings.Contains(stderr.String(), "KEEPING") {
@@ -273,7 +274,7 @@ func TestDestroyLocalMgmtGoneWorkloadPresentFails(t *testing.T) {
 	if err := d.Destroy(context.Background(), "test.dev"); err == nil {
 		t.Fatal("an incomplete destroy was reported as a completed one")
 	}
-	if !fileExists(d.kubeconfigPath("destroytest")) {
+	if !fsutil.FileExists(d.kubeconfigPath("destroytest")) {
 		t.Fatal("the workload kubeconfig was deleted on the incomplete-destroy path")
 	}
 }
@@ -294,7 +295,7 @@ func TestDestroyHappyPathRemovesKubeconfig(t *testing.T) {
 	if err := d.Destroy(context.Background(), "test.dev"); err != nil {
 		t.Fatalf("capi destroy happy path regressed: %v", err)
 	}
-	if fileExists(d.kubeconfigPath("destroytest")) {
+	if fsutil.FileExists(d.kubeconfigPath("destroytest")) {
 		t.Fatal("a SUCCESSFUL destroy left the workload kubeconfig behind")
 	}
 	// The blocking delete argv, exactly as the bash issued it.

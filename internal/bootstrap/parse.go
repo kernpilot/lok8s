@@ -11,6 +11,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 	"gopkg.in/yaml.v3"
@@ -269,7 +270,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		// Only flag a non-chart target when the dir EXISTS but lacks
 		// chart.yaml. If the dir is missing entirely, stay silent here and
 		// let Engine.Apply surface the authoritative "addon not found".
-		if dirExists(e.Dir) && !fileExists(filepath.Join(e.Dir, "chart.yaml")) {
+		if fsutil.DirExists(e.Dir) && !fsutil.FileExists(filepath.Join(e.Dir, "chart.yaml")) {
 			return nil, parseError(stderr, "bootstrap: '%s' sets 'values:' but is not a chart addon (no chart.yaml under %s); 'values:' is helm-only", raw, e.Dir)
 		}
 		e.Inline = yamlString(yqsem.MapGet(val, "values"))
@@ -278,7 +279,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 	if yqsem.HasKey(val, "valueFiles") {
 		// valueFiles: same helm-only rule as `values:` (a kustomize target
 		// has no chart to feed); same missing-dir leniency.
-		if dirExists(e.Dir) && !fileExists(filepath.Join(e.Dir, "chart.yaml")) {
+		if fsutil.DirExists(e.Dir) && !fsutil.FileExists(filepath.Join(e.Dir, "chart.yaml")) {
 			return nil, parseError(stderr, "bootstrap: '%s' sets 'valueFiles:' but is not a chart addon (no chart.yaml under %s); 'valueFiles:' is helm-only", raw, e.Dir)
 		}
 		vf := yqsem.MapGet(val, "valueFiles")
@@ -313,7 +314,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 			if !strings.HasPrefix(v, "/") {
 				v = p.Clusters + "/" + domain + "/" + v
 			}
-			if !fileExists(v) {
+			if !fsutil.FileExists(v) {
 				return nil, parseError(stderr, "bootstrap: '%s' valueFiles: file not found: %s", raw, v)
 			}
 			files = append(files, v)
@@ -422,7 +423,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 // inline-only value silently reverted at upgrade time). A parse error is a
 // hard error, never a silent empty.
 func InlineValues(p *config.Paths, stderr io.Writer, domain, clusterYAML, addon string) (string, error) {
-	if !fileExists(clusterYAML) {
+	if !fsutil.FileExists(clusterYAML) {
 		return "", parseError(stderr, "inline_values: cluster yaml not found: %s", clusterYAML)
 	}
 	raw, err := os.ReadFile(clusterYAML)
@@ -454,14 +455,4 @@ func InlineValues(p *config.Paths, stderr io.Writer, domain, clusterYAML, addon 
 		}
 	}
 	return "", nil
-}
-
-func fileExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && !fi.IsDir()
-}
-
-func dirExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }

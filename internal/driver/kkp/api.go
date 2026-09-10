@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -102,7 +103,7 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 	// system trust store. HTTPS is still enforced above; --cacert only
 	// changes WHICH CA verifies the peer, it never disables verification.
 	if ca := os.Getenv("KKP_CA_CERT"); ca != "" {
-		if fileExists(ca) {
+		if fsutil.FileExists(ca) {
 			curlArgs = append(curlArgs, "--cacert", ca)
 		} else {
 			ui.Errorf(stderr, "KKP_CA_CERT set but not a readable file: %s", ca)
@@ -435,7 +436,7 @@ func (d *Driver) validateCredentials(clusterYAML string) error {
 			if !strings.HasPrefix(specCA, "/") {
 				specCA = filepath.Join(filepath.Dir(clusterYAML), specCA)
 			}
-			if fileExists(specCA) {
+			if fsutil.FileExists(specCA) {
 				os.Setenv("KKP_CA_CERT", specCA)
 				ui.Debugf(stderr, "KKP CA cert from spec.kkp.caCert: %s", specCA)
 			} else {
@@ -510,9 +511,4 @@ func jsonStringField(jsonText, field string) string {
 		return s
 	}
 	return ""
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

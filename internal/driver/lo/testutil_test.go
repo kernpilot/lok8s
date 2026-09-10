@@ -25,6 +25,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 type fakeRunner struct {
@@ -106,16 +107,6 @@ func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer, *config.Path
 	return d, runner, &errBuf, p
 }
 
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func readFileT(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -156,14 +147,14 @@ spec:
 func writeLifecycleFixture(t *testing.T, p *config.Paths) string {
 	t.Helper()
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
-	writeFile(t, cy, specShared)
+	testutil.WriteFile(t, cy, specShared)
 	regDir := filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "registry")
-	writeFile(t, filepath.Join(regDir, "build.yaml"), "version: 0.1\n")
-	writeFile(t, filepath.Join(regDir, "cache.yaml"), "version: 0.1\n")
+	testutil.WriteFile(t, filepath.Join(regDir, "build.yaml"), "version: 0.1\n")
+	testutil.WriteFile(t, filepath.Join(regDir, "cache.yaml"), "version: 0.1\n")
 	// The real mirror template (no per-mirror io-docker.yaml, matching the
 	// shipped config dir) so the ${REMOTE_URL} substitution is exercised
 	// via fallback.
-	writeFile(t, filepath.Join(regDir, "mirror.yaml"), realMirrorTemplate(t))
+	testutil.WriteFile(t, filepath.Join(regDir, "mirror.yaml"), realMirrorTemplate(t))
 	return cy
 }
 
@@ -171,33 +162,14 @@ func writeLifecycleFixture(t *testing.T, p *config.Paths) string {
 // render tests must exercise the real http:/proxy: stanzas, not stubs.
 func realMirrorTemplate(t *testing.T) string {
 	t.Helper()
-	root := repoRoot(t)
+	root := testutil.RepoRoot(t)
 	return readFileT(t, filepath.Join(root, ".lok8s", "drivers", "lo", "cluster", "registry", "mirror.yaml"))
 }
 
 func realRegistryTemplate(t *testing.T, name string) string {
 	t.Helper()
-	root := repoRoot(t)
+	root := testutil.RepoRoot(t)
 	return readFileT(t, filepath.Join(root, ".lok8s", "drivers", "lo", "cluster", "registry", name))
-}
-
-// repoRoot finds the lok8s repo root from the test's working directory.
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for d := dir; ; {
-		if _, err := os.Stat(filepath.Join(d, ".lok8s", "lo")); err == nil {
-			return d
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			t.Fatalf("repo root not found from %s", dir)
-		}
-		d = parent
-	}
 }
 
 // ── file-backed fake docker ──────────────────────────────

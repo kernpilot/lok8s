@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // secretsProject scaffolds a minimal project with one domain that has its own
@@ -81,14 +82,14 @@ func TestSecretsSetHandParser(t *testing.T) {
 	if _, _, err := runSecrets(t, paths, "secrets", "set", "-n", "app", "--name=x2", "K2", "v2"); err != nil {
 		t.Fatalf("--name=: %v", err)
 	}
-	if !fileExists(paths.Base + "/.secrets/Secret.x2.default.K2") {
+	if !fsutil.FileExists(paths.Base + "/.secrets/Secret.x2.default.K2") {
 		t.Error("--name=x2 did not win over -n app")
 	}
 
 	if _, _, err := runSecrets(t, paths, "secrets", "set", "--domain", "alpha.dev", "-n", "app", "K3", "v3"); err != nil {
 		t.Fatalf("--domain: %v", err)
 	}
-	if !fileExists(paths.Clusters + "/alpha.dev/secrets/Secret.app.default.K3") {
+	if !fsutil.FileExists(paths.Clusters + "/alpha.dev/secrets/Secret.app.default.K3") {
 		t.Error("--domain write landed in the wrong store")
 	}
 
@@ -104,7 +105,7 @@ func TestSecretsSetHandParser(t *testing.T) {
 		if raw, rerr := os.ReadFile(paths.Base + "/.secrets/Secret.app.default.K4"); rerr != nil || string(raw) != "v4" {
 			t.Errorf("%s: cache %q %v", flag, raw, rerr)
 		}
-		if fileExists(paths.Base + "/.secrets/Secret.app.default.K4.enc") {
+		if fsutil.FileExists(paths.Base + "/.secrets/Secret.app.default.K4.enc") {
 			t.Errorf("%s: .enc produced without config", flag)
 		}
 	}

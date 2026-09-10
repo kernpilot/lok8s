@@ -164,7 +164,7 @@ func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := readFile(c.Paths.Clusters + "/" + domainName + "/artifacts.yaml")
+	raw, err := os.ReadFile(c.Paths.Clusters + "/" + domainName + "/artifacts.yaml")
 	if err != nil {
 		return nil, nil
 	}
@@ -447,7 +447,3 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 }
 
 // ── yaml.Node helpers ────────────────────────────────────
-
-func readFile(path string) ([]byte, error) {
-	return os.ReadFile(path)
-}

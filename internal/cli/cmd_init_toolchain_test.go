@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestInitToolchainDefaultsToTheProjectAboveCwdNotPathBase(t *testing.T) {
@@ -20,7 +22,7 @@ func TestInitToolchainDefaultsToTheProjectAboveCwdNotPathBase(t *testing.T) {
 	// The project the user stands in: a kind: Project marker above a
 	// nested working directory.
 	project := t.TempDir()
-	writeFile(t, filepath.Join(project, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: standing\n")
+	testutil.WriteFile(t, filepath.Join(project, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: standing\n")
 	nested := filepath.Join(project, "services", "api")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
@@ -51,7 +53,7 @@ func TestInitToolchainPathFlagWins(t *testing.T) {
 	ambient := synthProject(t)
 	t.Setenv("PATH_BASE", ambient.Base)
 	standing := t.TempDir()
-	writeFile(t, filepath.Join(standing, "lok8s.yaml"), "kind: Project\n")
+	testutil.WriteFile(t, filepath.Join(standing, "lok8s.yaml"), "kind: Project\n")
 	t.Chdir(standing)
 	target := t.TempDir()
 

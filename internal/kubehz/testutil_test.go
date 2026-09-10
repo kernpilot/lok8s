@@ -263,16 +263,6 @@ func readFile(t *testing.T, path string) string {
 	return string(raw)
 }
 
-// repoRoot locates the repository root (internal/kubehz → ../../).
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
 // exitErr is a fake subprocess failure (bash: `return N` from a stubbed
 // binary).
 type exitErr int

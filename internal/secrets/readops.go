@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -31,7 +32,7 @@ const (
 // see kustomize/plugins/secret/generator/bash.go verifyBashAllow.)
 func (c *Context) Allow() error {
 	secretsDir := c.StorePath()
-	if !isDir(secretsDir) {
+	if !fsutil.DirExists(secretsDir) {
 		ui.Warnf(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
@@ -40,7 +41,7 @@ func (c *Context) Allow() error {
 	// Secret.*.sha).
 	var shaFiles, hashes []string
 	for _, base := range storeEntries(secretsDir, "") {
-		if !strings.HasSuffix(base, ".sha") || !isFile(secretsDir+"/"+base) {
+		if !strings.HasSuffix(base, ".sha") || !fsutil.IsRegular(secretsDir+"/"+base) {
 			continue
 		}
 		raw, err := os.ReadFile(secretsDir + "/" + base)
@@ -94,16 +95,16 @@ func stripSpace(s string) string {
 // secrets::list).
 func (c *Context) List() error {
 	secretsDir := c.StorePath()
-	if !isDir(secretsDir) {
+	if !fsutil.DirExists(secretsDir) {
 		ui.Warnf(c.ErrOut, "Secrets directory not found: %s", secretsDir)
 		return nil
 	}
 	for _, base := range storeEntries(secretsDir, "Secret.") {
 		secret := secretsDir + "/" + base
-		if !isFile(secret) || strings.HasSuffix(base, ".enc") {
+		if !fsutil.IsRegular(secret) || strings.HasSuffix(base, ".enc") {
 			continue
 		}
-		if isFile(secret + ".enc") {
+		if fsutil.IsRegular(secret + ".enc") {
 			fmt.Fprintf(c.Out, "%s (encrypted)\n", base)
 		} else {
 			fmt.Fprintf(c.Out, "%s (plaintext)\n", base)
@@ -115,10 +116,10 @@ func (c *Context) List() error {
 			continue
 		}
 		enc := secretsDir + "/" + base
-		if !isFile(enc) {
+		if !fsutil.IsRegular(enc) {
 			continue
 		}
-		if !isFile(strings.TrimSuffix(enc, ".enc")) {
+		if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
 			fmt.Fprintf(c.Out, "%s (needs decrypt)\n", base)
 		}
 	}
@@ -137,7 +138,7 @@ func (c *Context) Print(patterns []string, onlyOne, copy bool) error {
 	var matches []string
 	for _, base := range storeEntries(secretsDir, "Secret.") {
 		secret := secretsDir + "/" + base
-		if !isFile(secret) || strings.HasSuffix(base, ".enc") {
+		if !fsutil.IsRegular(secret) || strings.HasSuffix(base, ".enc") {
 			continue
 		}
 		matched := true
@@ -234,7 +235,7 @@ func (c *Context) Env(name, namespace string) error {
 	found := false
 	for _, base := range storeEntries(secretsDir, prefix) {
 		f := secretsDir + "/" + base
-		if !isFile(f) || strings.HasSuffix(base, ".enc") || strings.HasSuffix(base, ".sha") {
+		if !fsutil.IsRegular(f) || strings.HasSuffix(base, ".enc") || strings.HasSuffix(base, ".sha") {
 			continue
 		}
 		key := base[len(prefix):]
