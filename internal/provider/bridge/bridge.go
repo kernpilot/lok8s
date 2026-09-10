@@ -75,8 +75,8 @@ func (l *Loader) runner() execx.Runner {
 	return execx.NewRunner(l.Paths)
 }
 
-// PATH prepends .lok8s + .bin to PATH when missing (cli.shimEnv).
-func PATH(p *config.Paths) string {
+// PathEnv prepends .lok8s + .bin to PathEnv when missing (cli.shimEnv).
+func PathEnv(p *config.Paths) string {
 	path := os.Getenv("PATH")
 	for _, dir := range []string{p.Lok8s, p.Bin} {
 		found := false
@@ -101,7 +101,7 @@ func Env(p *config.Paths) []string {
 		secretsVal = filepath.Join(p.Base, ".secrets")
 	}
 	return []string{
-		"PATH=" + PATH(p),
+		"PATH=" + PathEnv(p),
 		"PATH_BASE=" + p.Base,
 		"PATH_BIN=" + p.Bin,
 		"PATH_LOK8S=" + p.Lok8s,
@@ -154,11 +154,11 @@ kubeone::render_addons "${2}" "${3}"`
 
 // Load probes the plugin once (bash: provider::load + provider::check_contract
 // — its diagnostics print on Stderr) and returns the bridged provider.
-func (l *Loader) Load(name string) (driver.Provider, error) {
+func (l *Loader) Load(ctx context.Context, name string) (driver.Provider, error) {
 	if !nameRe.MatchString(name) {
 		return nil, fmt.Errorf("bridge: invalid provider name %q", name)
 	}
-	err := l.runner().Run(context.Background(), execx.Cmd{
+	err := l.runner().Run(ctx, execx.Cmd{
 		Name:   "bash",
 		Args:   []string{"-c", probeScript, "lo-provider", name},
 		Dir:    l.Paths.Base,

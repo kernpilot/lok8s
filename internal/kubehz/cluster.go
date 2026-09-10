@@ -481,8 +481,6 @@ func (c *Context) Claim(ctx context.Context, nonce string) error {
 	return nil
 }
 
-var sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 // ReEnroll is `lo kubehz re-enroll`: re-enroll a REGENERATED in-cluster
 // agent token with the platform (POST /api/clusters/{id}/agent-token with
 // the USER's bearer). The token plaintext never leaves this machine and is
@@ -530,10 +528,6 @@ func (c *Context) ReEnroll(ctx context.Context, domain string) error {
 	// Only the hash leaves this function; the token string is not reused.
 	sum := sha256.Sum256([]byte(agentToken))
 	tokenHash := hex.EncodeToString(sum[:])
-	if !sha256HexRe.MatchString(tokenHash) {
-		c.errorf("could not hash the agent token (need sha256sum or openssl)")
-		return ErrHandled
-	}
 
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
 	if err != nil {

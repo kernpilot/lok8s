@@ -6,6 +6,7 @@ package kubehz
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 )
@@ -330,7 +331,7 @@ func optSuffix(prefix, val string) string {
 // jnum reads a JSON number as int (0 for anything else) — the
 // `.meta.pagination.total // 0` shape.
 func jnum(v any) int {
-	if n, ok := v.(interface{ Int64() (int64, error) }); ok {
+	if n, ok := v.(json.Number); ok {
 		if i, err := n.Int64(); err == nil {
 			return int(i)
 		}

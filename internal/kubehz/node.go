@@ -114,7 +114,7 @@ func scrub(s string) string {
 
 // nodeAPIError ports node::api_error: the api's refusal codes, each an
 // instruction.
-func (c *Context) nodeAPIError(context string, res *httpResult) {
+func (c *Context) nodeAPIError(what string, res *httpResult) {
 	code := apiCode(res.Body)
 	msg := scrub(apiMessage(res.Body))
 	switch code {
@@ -163,7 +163,7 @@ func (c *Context) nodeAPIError(context string, res *httpResult) {
 		c.errorf("kubehz: the hosted control-plane backend did not answer%s", optSuffix(" — ", msg))
 		c.echoErr("  Nothing changed. Try again shortly, or contact kubehz support.")
 	default:
-		c.spaceAPIError(context, res)
+		c.spaceAPIError(what, res)
 	}
 }
 
@@ -527,19 +527,19 @@ func (c *Context) NodeStatus(ctx context.Context, domain string, o NodeOpts) err
 		c.nodeAPIError("Failed to list the nodes of "+clusterID, res)
 		return ErrHandled
 	}
-	used, max, discoveryReady := "0", "-", "false"
+	used, maxNodes, discoveryReady := "0", "-", "false"
 	var nodes []any
 	if v, ok := parseJSON(res.Body); ok {
 		body := envelope(v)
 		used = jstrOr(body, "0", "usage", "nodes")
-		max = jstrOr(body, "-", "usage", "maxStaticNodes")
+		maxNodes = jstrOr(body, "-", "usage", "maxStaticNodes")
 		discoveryReady = jstrOr(body, "false", "discoveryReady")
 		nodes, _ = jget(body, "nodes").([]any)
 	}
-	used, max = scrub(used), scrub(max)
+	used, maxNodes = scrub(used), scrub(maxNodes)
 
 	c.echo("Cluster: %s (%s)", clusterID, domain)
-	c.echo("Nodes:   %s/%s", used, max)
+	c.echo("Nodes:   %s/%s", used, maxNodes)
 
 	if len(nodes) > 0 {
 		c.echo("")

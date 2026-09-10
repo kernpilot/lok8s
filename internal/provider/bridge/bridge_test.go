@@ -47,7 +47,7 @@ func hasEnv(c execx.Cmd, kv string) bool {
 
 func TestLoadProbesThenCallsThroughBash(t *testing.T) {
 	l, r, _ := testLoader(t)
-	prov, err := l.Load("hetzner")
+	prov, err := l.Load(t.Context(), "hetzner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +79,10 @@ func TestLoadProbesThenCallsThroughBash(t *testing.T) {
 func TestLoadFailsWhenProbeFails(t *testing.T) {
 	l, r, _ := testLoader(t)
 	r.handler = func(c execx.Cmd) error { return errors.New("exit status 1") }
-	if _, err := l.Load("nosuch"); err == nil {
+	if _, err := l.Load(t.Context(), "nosuch"); err == nil {
 		t.Fatal("expected the probe failure to surface")
 	}
-	if _, err := l.Load("../evil"); err == nil {
+	if _, err := l.Load(t.Context(), "../evil"); err == nil {
 		t.Fatal("expected the name allowlist to refuse a traversal")
 	}
 }
@@ -159,7 +159,7 @@ func TestKubeoneSeamsReadTheProviderAtCallTime(t *testing.T) {
 func TestPATHPrependsProjectDirsOnce(t *testing.T) {
 	p := &config.Paths{Base: "/p", Bin: "/p/.bin", Lok8s: "/p/.lok8s"}
 	t.Setenv("PATH", "/usr/bin:/p/.bin")
-	got := PATH(p)
+	got := PathEnv(p)
 	if !strings.HasPrefix(got, "/p/.lok8s"+string(os.PathListSeparator)) || strings.Count(got, "/p/.bin") != 1 {
 		t.Errorf("PATH = %q", got)
 	}

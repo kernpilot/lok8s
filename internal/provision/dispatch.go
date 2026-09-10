@@ -120,13 +120,13 @@ func (d *Dispatcher) newDeps() *driver.Deps {
 }
 
 // loadProvider resolves + loads a named provider (bash: provider::load).
-func (d *Dispatcher) loadProvider(name string) (driver.Provider, error) {
+func (d *Dispatcher) loadProvider(ctx context.Context, name string) (driver.Provider, error) {
 	if d.Providers == nil {
 		ui.Errorf(d.errWriter(), "provider '%s' not found at %s", name,
 			filepath.Join(d.Paths.Lok8s, "providers", name, "main"))
 		return nil, fmt.Errorf("provider %s not found", name)
 	}
-	return d.Providers.Load(name)
+	return d.Providers.Load(ctx, name)
 }
 
 // Dispatch provisions a domain (bash: provision::dispatch). bootstrapOnly
@@ -222,7 +222,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 				if cleanup != nil {
 					defer cleanup()
 				}
-				prov, err := d.loadProvider(name)
+				prov, err := d.loadProvider(ctx, name)
 				if err != nil {
 					return err
 				}
@@ -354,7 +354,7 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 			if cleanup != nil {
 				defer cleanup()
 			}
-			prov, err := d.loadProvider(name)
+			prov, err := d.loadProvider(ctx, name)
 			if err != nil {
 				return err
 			}

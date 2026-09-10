@@ -83,10 +83,10 @@ func (c *Context) spaceAPIQuiet(ctx context.Context, cfg *Config, method, path s
 // spaceAPIError ports kubehz::space_api_error: the message + help halves of
 // a non-2xx envelope. Both are server strings: scrubbed before they reach
 // the terminal (node.go does the same for every api string it shows).
-func (c *Context) spaceAPIError(context string, res *httpResult) {
+func (c *Context) spaceAPIError(what string, res *httpResult) {
 	msg := scrub(apiMessage(res.Body))
 	help := scrub(apiHelp(res.Body))
-	c.errorf("%s (HTTP %d)%s", context, res.Status, optSuffix(": ", msg))
+	c.errorf("%s (HTTP %d)%s", what, res.Status, optSuffix(": ", msg))
 	if help != "" {
 		c.echoErr("  %s", help)
 	}
@@ -207,12 +207,12 @@ func (c *Context) spaceWaitActive(ctx context.Context, cfg *Config, spaceID stri
 // clip bounds a server string headed for one terminal line: a timestamp or
 // an endpoint is a few dozen runes; past 256 the rest is not information.
 func clip(s string) string {
-	const max = 256
+	const maxRunes = 256
 	r := []rune(s)
-	if len(r) <= max {
+	if len(r) <= maxRunes {
 		return s
 	}
-	return string(r[:max]) + "…"
+	return string(r[:maxRunes]) + "…"
 }
 
 // joinTokenRe is the kubeadm bootstrap-token shape the platform mints

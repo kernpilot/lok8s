@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -21,7 +22,7 @@ import (
 // "no providers available" and any named provider fails with the bash
 // not-found error.
 type ProviderLoader interface {
-	Load(name string) (driver.Provider, error)
+	Load(ctx context.Context, name string) (driver.Provider, error)
 }
 
 // providerNameRe is the provider-name allowlist (bash: provider::read_name).

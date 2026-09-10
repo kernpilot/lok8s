@@ -160,6 +160,9 @@ func (c *Context) resolveCacheNet() cacheNet {
 	return cacheNet{ip: ip, tls: &tls}
 }
 
+// digitsRe is the registry.parallel shape: a non-negative integer.
+var digitsRe = regexp.MustCompile(`^[0-9]+$`)
+
 var slotRe = regexp.MustCompile(`^([0-9]+)\.lok8s\.dev$`)
 var mirrorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
@@ -274,7 +277,7 @@ func (c *Context) Cache(ctx context.Context, service string, force, all bool) er
 	if parallel == "null" {
 		parallel = "1"
 	}
-	if !regexp.MustCompile(`^[0-9]+$`).MatchString(parallel) {
+	if !digitsRe.MatchString(parallel) {
 		ui.Errorf(c.ErrOut, "registry.parallel must be a non-negative integer, got: %s", parallel)
 		return ErrHandled
 	}
