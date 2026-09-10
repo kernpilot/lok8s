@@ -274,8 +274,10 @@ func providerNameOf(deps *driver.Deps) string {
 // KubeoneAppendInventory is kubeone.Hooks.AppendInventory: the bash
 // _append_inventory <config> <manifest> over the loaded provider.
 func (l *Loader) KubeoneAppendInventory(deps *driver.Deps) func(ctx context.Context, configFile, manifest string) error {
+	// Deps are complete at driver construction (the dispatch loads the
+	// provider first), so the name is read once here.
+	name := providerNameOf(deps)
 	return func(ctx context.Context, configFile, manifest string) error {
-		name := providerNameOf(deps)
 		if name == "" {
 			return ErrNoProvider
 		}
@@ -295,8 +297,8 @@ func (l *Loader) KubeoneAppendInventory(deps *driver.Deps) func(ctx context.Cont
 // render_addons) with the bash guards. Works without a provider loaded
 // (the trio reads the manifest + spec, not the cloud).
 func (l *Loader) KubeonePrepareApply(deps *driver.Deps) func(ctx context.Context, workDir, clusterYAML string) error {
+	name := providerNameOf(deps)
 	return func(ctx context.Context, workDir, clusterYAML string) error {
-		name := providerNameOf(deps)
 		return l.runner().Run(ctx, execx.Cmd{
 			Name:   "bash",
 			Args:   []string{"-c", kubeonePrepareApplyScript, "lo-kubeone", name, workDir, clusterYAML},

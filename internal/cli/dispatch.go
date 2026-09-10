@@ -99,10 +99,11 @@ func newDispatcher(cmd *cobra.Command, paths *config.Paths) *provision.Dispatche
 // wiredDrivers wraps the driver registry so every constructed driver gets
 // its seams: the kubehz hosted branches (kubeone/capi), the bridged
 // hetzner-inventory seams (kubeone), the on-demand secrets-plugin build
-// (lo). The kubehz context's ProviderOutput seam is bound to the SAME
-// deps the dispatch fills after construction, so the kubeone fingerprint
-// reader sees the provider once it is loaded — the bash `declare -F
-// provider::output` probe, evaluated at call time.
+// (lo). The dispatch loads the provider BEFORE it builds the driver, so
+// Deps are complete here: the kubehz context's ProviderOutput seam (the
+// kubeone fingerprint reader; bash: the `declare -F provider::output`
+// probe) is bound once, to the loaded provider, or left nil when the
+// dispatch loaded none.
 func wiredDrivers(paths *config.Paths, kc *kubehz.Context, loader *bridge.Loader) func(string) (driver.Factory, bool) {
 	return func(name string) (driver.Factory, bool) {
 		f, ok := driver.Get(name)
@@ -114,12 +115,7 @@ func wiredDrivers(paths *config.Paths, kc *kubehz.Context, loader *bridge.Loader
 			if err != nil {
 				return nil, err
 			}
-			kc.ProviderOutput = func(ctx context.Context) ([]byte, error) {
-				if deps.Provider == nil {
-					return nil, bridge.ErrNoProvider
-				}
-				return deps.Provider.Output(ctx, deps.ProviderConfigFile)
-			}
+			kc.ProviderOutput = providerOutput(deps)
 			switch d := drv.(type) {
 			case *kubeone.Driver:
 				d.Hooks = kc.KubeoneHooks()
@@ -133,6 +129,17 @@ func wiredDrivers(paths *config.Paths, kc *kubehz.Context, loader *bridge.Loader
 			return drv, nil
 		}, true
 	}
+}
+
+// providerOutput binds the loaded provider's inventory read (bash:
+// provider::output) for the kubehz fingerprint reader; nil when the
+// dispatch loaded no provider, which the reader treats as "no output".
+func providerOutput(deps *driver.Deps) func(ctx context.Context) ([]byte, error) {
+	if deps.Provider == nil {
+		return nil
+	}
+	prov, cfg := deps.Provider, deps.ProviderConfigFile
+	return func(ctx context.Context) ([]byte, error) { return prov.Output(ctx, cfg) }
 }
 
 // argshFlagErrors makes a cobra flag-parse failure print in the argsh

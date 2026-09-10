@@ -9,6 +9,7 @@ package provision
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -494,5 +495,73 @@ func TestLoadProviderCredsKeepsPresetEnv(t *testing.T) {
 	}
 	if got := os.Getenv("HCLOUD_TOKEN"); got != "env-token" {
 		t.Fatalf("HCLOUD_TOKEN = %q, want env-token", got)
+	}
+}
+
+// fakeProvider is a loaded provider that records nothing and validates.
+type fakeProvider struct{ name string }
+
+func (p *fakeProvider) Validate(context.Context, string) error { return nil }
+func (p *fakeProvider) CredentialData(context.Context, string) (map[string]string, error) {
+	return nil, nil
+}
+func (p *fakeProvider) Provision(context.Context, string, string) error { return nil }
+func (p *fakeProvider) Destroy(context.Context, string, string) error   { return nil }
+func (p *fakeProvider) Output(context.Context, string) ([]byte, error) {
+	return []byte(`{"nodes":[]}`), nil
+}
+
+type fakeLoader struct{ loaded []string }
+
+func (l *fakeLoader) Load(_ context.Context, name string) (driver.Provider, error) {
+	l.loaded = append(l.loaded, name)
+	return &fakeProvider{name: name}, nil
+}
+
+// The provider is loaded and validated BEFORE the driver is built, so the
+// driver's Deps carry it from construction on (the seams bound at
+// construction, bridge.KubeoneAppendInventory and the kubehz fingerprint
+// reader, see it). Same on the destroy path in remote mode.
+func TestDispatchLoadsProviderBeforeDriverConstruction(t *testing.T) {
+	p := testPaths(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "cloud.dev", "cluster.lok8s.yaml"), `kind: KubeOne
+metadata:
+  name: cloud
+spec:
+  provider:
+    name: hetzner
+    config:
+      location: fsn1
+`)
+	log := []string{}
+	var seen []string
+	loader := &fakeLoader{}
+	d := &Dispatcher{
+		Paths: p, Stderr: &bytes.Buffer{}, Stdout: &bytes.Buffer{},
+		Force:     true,
+		Remote:    true,
+		Providers: loader,
+		Drivers: func(name string) (driver.Factory, bool) {
+			return func(deps *driver.Deps) (driver.Driver, error) {
+				got := "none"
+				if deps.Provider != nil {
+					got = deps.ProviderName + ":" + filepath.Base(deps.ProviderConfigFile)
+				}
+				seen = append(seen, got)
+				return &fakeDriver{log: &log}, nil
+			}, true
+		},
+	}
+	if err := d.Dispatch(context.Background(), "cloud.dev", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DispatchDestroy(context.Background(), "cloud.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || !strings.HasPrefix(seen[0], "hetzner:lok8s-provider-config.") || !strings.HasPrefix(seen[1], "hetzner:lok8s-provider-config.") {
+		t.Errorf("the driver was built without the provider: %v (loaded %v)", seen, loader.loaded)
+	}
+	if fmt.Sprint(log) != "[provision:cloud.dev destroy:cloud.dev]" {
+		t.Errorf("driver calls = %v", log)
 	}
 }

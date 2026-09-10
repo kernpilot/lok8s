@@ -116,15 +116,19 @@ func TestCredentialDataAndOutputCaptureStdout(t *testing.T) {
 	var _ driver.ProviderStatuser = p
 }
 
-func TestKubeoneSeamsReadTheProviderAtCallTime(t *testing.T) {
+func TestKubeoneSeamsBindTheProviderAtConstruction(t *testing.T) {
 	l, r, _ := testLoader(t)
-	deps := &driver.Deps{Paths: l.Paths}
-	appendInv := l.KubeoneAppendInventory(deps)
-	if err := appendInv(context.Background(), "/cfg", "/work/kubeone.yaml"); !errors.Is(err, ErrNoProvider) {
-		t.Fatalf("expected ErrNoProvider before the dispatch loads a provider, got %v", err)
+	// No provider in Deps when the driver is built: the inventory seam
+	// reports it, whatever happens to Deps later (the dispatch completes
+	// Deps BEFORE it builds the driver, so nothing does).
+	bare := &driver.Deps{Paths: l.Paths}
+	noProv := l.KubeoneAppendInventory(bare)
+	bare.Provider, bare.ProviderName = &Provider{l: l, name: "hetzner"}, "hetzner"
+	if err := noProv(context.Background(), "/cfg", "/work/kubeone.yaml"); !errors.Is(err, ErrNoProvider) {
+		t.Fatalf("expected ErrNoProvider for a driver built without a provider, got %v", err)
 	}
-	// The dispatch fills the provider AFTER the factory ran.
-	deps.Provider, deps.ProviderName = &Provider{l: l, name: "hetzner"}, "hetzner"
+	deps := &driver.Deps{Paths: l.Paths, Provider: &Provider{l: l, name: "hetzner"}, ProviderName: "hetzner"}
+	appendInv := l.KubeoneAppendInventory(deps)
 	if err := appendInv(context.Background(), "/cfg", "/work/kubeone.yaml"); err != nil {
 		t.Fatal(err)
 	}

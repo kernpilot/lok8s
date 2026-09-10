@@ -137,11 +137,13 @@ func (d *Dispatcher) loadProvider(ctx context.Context, name string) (driver.Prov
 // touches infra) → load provider creds → deploy-domain refusal → read kind
 // (never defaulted when malformed) → driver-existence check → the
 // real-infrastructure gate (a decline propagates driver.ErrDeclined) →
-// driver construction → [bootstrap-only guard | provider load+validate →
+// [provider load+validate] → driver construction → [bootstrap-only guard |
 // driver.Provision (ErrFullLifecycle → success, skip the tail) →
 // PostProvision hook] → Export hook → LOK8S_BOOTSTRAP_ONLY export → kubehz
 // registration hook → bootstrap hook → inventory hook (fail-soft) → gitops
-// hook.
+// hook. The provider loads before the driver is built (bash sourced the
+// driver file first, which prints nothing), so the driver's Deps are
+// complete from construction on and never change afterwards.
 func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapOnly bool) error {
 	stderr := d.errWriter()
 
@@ -186,26 +188,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 	}
 
 	deps := d.newDeps()
-	drv, err := factory(deps)
-	if err != nil {
-		return err
-	}
-
-	if bootstrapOnly {
-		// Re-apply spec.bootstrap on an ALREADY-provisioned cluster: skip
-		// the provider reconcile + driver provision, fall through to the
-		// shared bootstrap tail.
-		bkc := specMetadataName(clusterYAML)
-		if bkc == "" {
-			ui.Errorf(stderr, "--bootstrap: cluster spec has no metadata.name (%s)", clusterYAML)
-			return ui.Handled(fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML))
-		}
-		if !fsutil.FileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
-			ui.Errorf(stderr, "--bootstrap needs an existing cluster (no .kubeconfig/%s.yaml — run a full 'lo provision' first)", bkc)
-			return ui.Handled(fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc))
-		}
-		ui.Debugf(stderr, "Re-applying spec.bootstrap on %s (skipping infra reconcile)", domainName)
-	} else {
+	if !bootstrapOnly {
 		// Provider loading rules (review A1: provider loading belongs to
 		// the dispatch, not behind --remote):
 		//   - lo: only relevant with --remote (provision a cloud VM that
@@ -234,7 +217,29 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 				ui.Debugf(stderr, "Provider '%s' loaded and validated", name)
 			}
 		}
+	}
 
+	// Deps are complete: the driver sees the provider from here on.
+	drv, err := factory(deps)
+	if err != nil {
+		return err
+	}
+
+	if bootstrapOnly {
+		// Re-apply spec.bootstrap on an ALREADY-provisioned cluster: skip
+		// the provider reconcile + driver provision, fall through to the
+		// shared bootstrap tail.
+		bkc := specMetadataName(clusterYAML)
+		if bkc == "" {
+			ui.Errorf(stderr, "--bootstrap: cluster spec has no metadata.name (%s)", clusterYAML)
+			return ui.Handled(fmt.Errorf("bootstrap-only: no metadata.name in %s", clusterYAML))
+		}
+		if !fsutil.FileExists(filepath.Join(d.Paths.Base, ".kubeconfig", bkc+".yaml")) {
+			ui.Errorf(stderr, "--bootstrap needs an existing cluster (no .kubeconfig/%s.yaml — run a full 'lo provision' first)", bkc)
+			return ui.Handled(fmt.Errorf("bootstrap-only: cluster %s not provisioned", bkc))
+		}
+		ui.Debugf(stderr, "Re-applying spec.bootstrap on %s (skipping infra reconcile)", domainName)
+	} else {
 		ui.Debugf(stderr, "Provisioning %s with kind=%s", domainName, kind)
 		if err := drv.Provision(ctx, domainName); err != nil {
 			// ErrFullLifecycle (bash rc 100) = driver handled the full
@@ -337,14 +342,10 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 		return err
 	}
 
-	deps := d.newDeps()
-	drv, err := factory(deps)
-	if err != nil {
-		return err
-	}
-
 	// Provider only in remote mode (bash: destroy loads it for --remote;
 	// note: load only, no validate — matching the bash destroy path).
+	// Loaded before the driver is built, so its Deps are complete.
+	deps := d.newDeps()
 	if d.Remote {
 		if name := ReadProviderName(clusterYAML); name != "" {
 			cfg, cleanup, err := WriteProviderConfig(clusterYAML, stderr)
@@ -360,6 +361,10 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 			}
 			deps.Provider, deps.ProviderName, deps.ProviderConfigFile = prov, name, cfg
 		}
+	}
+	drv, err := factory(deps)
+	if err != nil {
+		return err
 	}
 
 	// kubehz deregistration: best-effort HERE only — a dead platform api
