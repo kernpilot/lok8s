@@ -587,6 +587,79 @@ func firstRealContent(dir string) (string, error) {
 	return found, walkErr
 }
 
+// receivePlan is what receivePreflight resolved before the node is
+// touched.
+type receivePlan struct {
+	snapshotFile string
+	nodeName     string
+	peerURL      string
+	etcdTag      string
+	endpoint     string
+}
+
+// receivePreflight fails before touching the node: the target dirs must
+// be empty (or --force), then the snapshot, the member identity, the etcd
+// pin and EVERY bundle-derived value are resolved first.
+func (c *Context) receivePreflight(ctx context.Context, o ReceiveOpts, bundleDir, workdir, k8sDir, etcdDir string) (receivePlan, error) {
+	var pre receivePlan
+	// "not empty" means REAL content: kubeadm's package skeleton dirs
+	// (manifests/, pki/) never block.
+	if info, err := os.Stat(k8sDir); err == nil && info.IsDir() {
+		real, findErr := firstRealContent(k8sDir)
+		if findErr != nil && real == "" && !o.Force {
+			c.errorf("handover: cannot inspect %s (find exit %d) — refusing to assume it is empty; fix permissions or re-run with --force.", k8sDir, 1)
+			return pre, ErrHandled
+		}
+		if real != "" && !o.Force {
+			c.errorf("handover: %s holds existing content (%s) — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains.", k8sDir, real)
+			return pre, ErrHandled
+		}
+	}
+	if entries, err := os.ReadDir(etcdDir); err == nil && len(entries) > 0 {
+		if o.Force {
+			_ = os.RemoveAll(etcdDir)
+		} else {
+			c.errorf("handover: %s is not empty — refusing to restore over existing etcd data (re-run with --force to overwrite).", etcdDir)
+			return pre, ErrHandled
+		}
+	}
+
+	var err error
+	pre.snapshotFile, err = c.fetchSnapshot(ctx, bundleDir, o.Snapshot, workdir)
+	if err != nil {
+		return pre, err
+	}
+	pre.nodeName, pre.peerURL, err = c.memberIdentity(ctx)
+	if err != nil {
+		return pre, err
+	}
+	pre.etcdTag = c.getenv("KUBEHZ_HANDOVER_ETCD_IMAGE_TAG")
+	bundleTag := bundleValue(bundleDir, "etcd-version", "")
+	if pre.etcdTag == "" {
+		pre.etcdTag = bundleTag
+		if pre.etcdTag == "" {
+			pre.etcdTag = "3.5.21-0"
+		}
+	} else if bundleTag != "" && bundleTag != pre.etcdTag {
+		c.warnf("handover: KUBEHZ_HANDOVER_ETCD_IMAGE_TAG '%s' overrides the bundle's etcd-version '%s'", pre.etcdTag, bundleTag)
+	}
+	if !imageTagRe.MatchString(pre.etcdTag) {
+		c.errorf("handover: etcd image tag '%s' is not a plain image tag — refusing before touching the node", head(pre.etcdTag, 64))
+		return pre, ErrHandled
+	}
+	if _, _, err := c.encryptionMetadata(bundleDir); err != nil {
+		return pre, err
+	}
+	if _, err := c.encryptionKey(bundleDir); err != nil {
+		return pre, err
+	}
+	pre.endpoint, err = c.endpointDNS(bundleDir)
+	if err != nil {
+		return pre, err
+	}
+	return pre, nil
+}
+
 // HandoverReceive ports handover::receive — RUNS ON THE TARGET NODE.
 func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	k8sDir := c.getenv("KUBEHZ_HANDOVER_K8S_DIR")
@@ -614,75 +687,23 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	if err := c.validateBundle(bundleDir); err != nil {
 		return err
 	}
-
-	// "not empty" means REAL content: kubeadm's package skeleton dirs
-	// (manifests/, pki/) never block.
-	if info, err := os.Stat(k8sDir); err == nil && info.IsDir() {
-		real, findErr := firstRealContent(k8sDir)
-		if findErr != nil && real == "" && !o.Force {
-			c.errorf("handover: cannot inspect %s (find exit %d) — refusing to assume it is empty; fix permissions or re-run with --force.", k8sDir, 1)
-			return ErrHandled
-		}
-		if real != "" && !o.Force {
-			c.errorf("handover: %s holds existing content (%s) — either this node already runs (or ran) Kubernetes, or a previous receive attempt left its seeded state behind. Clean up first ('kubeadm reset' clears the seeded PKI and etcd data), then re-run — with --force if you really mean to overwrite what remains.", k8sDir, real)
-			return ErrHandled
-		}
-	}
-	if entries, err := os.ReadDir(etcdDir); err == nil && len(entries) > 0 {
-		if o.Force {
-			_ = os.RemoveAll(etcdDir)
-		} else {
-			c.errorf("handover: %s is not empty — refusing to restore over existing etcd data (re-run with --force to overwrite).", etcdDir)
-			return ErrHandled
-		}
-	}
-
-	// Fail before touching the node: snapshot, member identity, etcd pin,
-	// and EVERY bundle-derived value first.
-	snapshotFile, err := c.fetchSnapshot(ctx, bundleDir, o.Snapshot, workdir)
+	pre, err := c.receivePreflight(ctx, o, bundleDir, workdir, k8sDir, etcdDir)
 	if err != nil {
 		return err
 	}
-	nodeName, peerURL, err := c.memberIdentity(ctx)
-	if err != nil {
-		return err
-	}
-	etcdTag := c.getenv("KUBEHZ_HANDOVER_ETCD_IMAGE_TAG")
-	bundleTag := bundleValue(bundleDir, "etcd-version", "")
-	if etcdTag == "" {
-		etcdTag = bundleTag
-		if etcdTag == "" {
-			etcdTag = "3.5.21-0"
-		}
-	} else if bundleTag != "" && bundleTag != etcdTag {
-		c.warnf("handover: KUBEHZ_HANDOVER_ETCD_IMAGE_TAG '%s' overrides the bundle's etcd-version '%s'", etcdTag, bundleTag)
-	}
-	if !imageTagRe.MatchString(etcdTag) {
-		c.errorf("handover: etcd image tag '%s' is not a plain image tag — refusing before touching the node", head(etcdTag, 64))
-		return ErrHandled
-	}
-	if _, _, err := c.encryptionMetadata(bundleDir); err != nil {
-		return err
-	}
-	if _, err := c.encryptionKey(bundleDir); err != nil {
-		return err
-	}
-	endpoint, err := c.endpointDNS(bundleDir)
-	if err != nil {
-		return err
-	}
+	endpoint := pre.endpoint
 
 	if err := c.placePKI(bundleDir, k8sDir); err != nil {
 		return err
 	}
-	if err := c.restoreSnapshot(ctx, snapshotFile, etcdDir, nodeName, peerURL); err != nil {
+	if err := c.restoreSnapshot(ctx, pre.snapshotFile, etcdDir, pre.nodeName, pre.peerURL); err != nil {
 		return err
 	}
 	if _, err := c.writeEncryptionConfig(bundleDir, k8sDir); err != nil {
 		return err
 	}
 	kubeadmConfig := filepath.Join(k8sDir, "kubehz-handover-kubeadm.yaml")
-	if err := c.writeKubeadmConfig(bundleDir, k8sDir, kubeadmConfig, etcdTag); err != nil {
+	if err := c.writeKubeadmConfig(bundleDir, k8sDir, kubeadmConfig, pre.etcdTag); err != nil {
 		return err
 	}
 	if err := c.kubeadmInit(ctx, kubeadmConfig); err != nil {

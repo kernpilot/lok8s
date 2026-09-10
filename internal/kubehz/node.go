@@ -371,7 +371,32 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 		c.echoErr("  Or add --print-only and run the printed command as root yourself.")
 		return ErrHandled
 	}
-	declared := o.KubeletVersion
+	ticket, err := c.mintTicket(ctx, cfg, clusterID, nodeName, nodePool, o.KubeletVersion)
+	if err != nil {
+		return err
+	}
+	joinArgv := strings.Fields(ticket.joinCommand)
+	if o.NodeIP != "" {
+		joinArgv = append(joinArgv, "--node-ip", o.NodeIP)
+	}
+	if o.PrintOnly {
+		c.printJoin(nodeName, nodePool, clusterID, ticket.expires, joinArgv)
+		return nil
+	}
+	return c.runJoin(ctx, nodeName, nodePool, clusterID, joinArgv)
+}
+
+// mintedTicket is a minted join ticket as the platform returned it.
+type mintedTicket struct {
+	joinCommand string
+	expires     string
+}
+
+// mintTicket asks the platform for a join ticket and checks the join
+// command it returned. A 2xx body is not a promise of JSON — every read
+// is guarded.
+func (c *Context) mintTicket(ctx context.Context, cfg *Config, clusterID, nodeName, nodePool, kubeletVersion string) (mintedTicket, error) {
+	declared := kubeletVersion
 	if declared == "" {
 		declared = c.kubeletVersion(ctx)
 	}
@@ -381,61 +406,61 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 	}
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/clusters/"+clusterID+"/nodes/join-token", compactJSON(pairs...))
 	if err != nil {
-		return err
+		return mintedTicket{}, err
 	}
 	if !is2xx(res.Status) {
 		c.nodeAPIError("Failed to mint a join ticket for '"+nodeName+"'", res)
-		return ErrHandled
+		return mintedTicket{}, ErrHandled
 	}
 
-	// A 2xx body is not a promise of JSON — every read is guarded.
-	joinCommand, expires, ready := "", "", ""
+	var t mintedTicket
+	ready := ""
 	if v, ok := parseJSON(res.Body); ok {
 		body := envelope(v)
-		joinCommand = jstrOr(body, "", "joinCommand")
-		expires = scrub(jstrOr(body, "", "expiresAt"))
+		t.joinCommand = jstrOr(body, "", "joinCommand")
+		t.expires = scrub(jstrOr(body, "", "expiresAt"))
 		// `.ready` WITHOUT a `//` alternative: an absent key reads "null".
 		ready = jstr(jget(body, "ready"))
 	}
-	if joinCommand == "" {
+	if t.joinCommand == "" {
 		c.errorf("kubehz: the platform accepted the mint but returned no join command this CLI could read.")
 		c.echoErr("  A ticket may have been minted — if so it holds a node slot for about ten")
 		c.echoErr("  minutes. Check for it and free the slot if it is there:")
 		c.echoErr("    lo kubehz node status")
 		c.echoErr("    lo kubehz node remove --name %s", nodeName)
-		return ErrHandled
+		return mintedTicket{}, ErrHandled
 	}
-	if err := c.AssertJoinCommand(joinCommand); err != nil {
+	if err := c.AssertJoinCommand(t.joinCommand); err != nil {
 		c.mintedSlotNote(nodeName)
-		return err
+		return mintedTicket{}, err
 	}
 	if ready == "false" {
 		c.warnf("kubehz: the platform has not armed this ticket yet — the join may time out.")
 		c.warnf("Mint again in a minute if it does.")
 	}
+	return t, nil
+}
 
-	joinArgv := strings.Fields(joinCommand)
-	if o.NodeIP != "" {
-		joinArgv = append(joinArgv, "--node-ip", o.NodeIP)
+// printJoin is --print-only: the join command for another machine.
+func (c *Context) printJoin(nodeName, nodePool, clusterID, expires string, joinArgv []string) {
+	if expires == "" {
+		expires = "the ticket expires"
 	}
-	if o.PrintOnly {
-		if expires == "" {
-			expires = "the ticket expires"
-		}
-		c.echo("")
-		c.echo("  Node '%s' joins pool '%s' of cluster %s.", nodeName, nodePool, clusterID)
-		c.echo("  Run this as root on that machine before %s:", expires)
-		c.echo("")
-		c.echo("    %s", strings.Join(joinArgv, " "))
-		c.echo("")
-		c.echo("  The ticket is single use and lasts ten minutes. It already holds a node")
-		c.echo("  slot. Mint a fresh one with the same command when it expires.")
-		return nil
-	}
+	c.echo("")
+	c.echo("  Node '%s' joins pool '%s' of cluster %s.", nodeName, nodePool, clusterID)
+	c.echo("  Run this as root on that machine before %s:", expires)
+	c.echo("")
+	c.echo("    %s", strings.Join(joinArgv, " "))
+	c.echo("")
+	c.echo("  The ticket is single use and lasts ten minutes. It already holds a node")
+	c.echo("  slot. Mint a fresh one with the same command when it expires.")
+}
 
+// runJoin runs kubeadm join here. The ticket is live and holds a slot from
+// here until the join lands: a Ctrl-C mid-join must not leave the caller
+// unaware (bash: trap INT TERM).
+func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID string, joinArgv []string) error {
 	c.echo("kubehz: joining '%s' to pool '%s' of cluster %s", nodeName, nodePool, clusterID)
-	// The ticket is live and holds a slot from here until the join lands: a
-	// Ctrl-C mid-join must not leave the caller unaware (bash: trap INT TERM).
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	done := make(chan struct{})
