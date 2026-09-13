@@ -471,6 +471,24 @@ func TestEnsureCredentialsHetznerSecret(t *testing.T) {
 	}
 }
 
+// A value with a CR or LF would end its env-file line and start another
+// key, so the Secret is never built from it.
+func TestEnsureCredentialsRefusesNewlineInValue(t *testing.T) {
+	t.Setenv("HCLOUD_TOKEN", "test-token")
+	t.Setenv("HROBOT_USER", "")
+	t.Setenv("HROBOT_PASSWORD", "pw\nhcloud-token=stolen")
+	d, runner, stderr := testDriver(t)
+	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "hetzner", "/tmp/kubeconfig.yaml"); err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(stderr.String(), "environment variable HROBOT_PASSWORD must not contain a newline") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("kubectl must not run with a value that breaks the env file")
+	}
+}
+
 func TestEnsureCredentialsUnknownProvider(t *testing.T) {
 	d, runner, stderr := testDriver(t)
 	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "gcp", "/tmp/kubeconfig.yaml"); err == nil {

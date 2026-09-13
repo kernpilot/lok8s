@@ -44,6 +44,19 @@ func Require(provider string, stderr io.Writer) error {
 	return nil
 }
 
+// NoNewline refuses a credential value that contains a CR or LF. The
+// carriers the drivers feed such a value through are line based (a curl
+// config line, an env file for kubectl --from-env-file), so a newline in
+// the value breaks the line. name is the environment variable the value
+// came from. The returned error is already printed (ui.Handled).
+func NoNewline(name, value string, stderr io.Writer) error {
+	if strings.ContainsAny(value, "\r\n") {
+		ui.ErrorTo(stderr, "environment variable %s must not contain a newline", name)
+		return ui.Handled(fmt.Errorf("credentials: %s contains a newline", name))
+	}
+	return nil
+}
+
 // RequireHTTPS fails when url does not start with https://. label names
 // the URL in the error lines. The returned error is already printed.
 func RequireHTTPS(url, label string, stderr io.Writer) error {
