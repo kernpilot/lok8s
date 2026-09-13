@@ -154,9 +154,11 @@ syncs the framework tree and the frozen bash reference) is documented in
 `b install` needed just to diagnose the environment. `make build` produces the
 Go binary at `bin/lo`.
 
-**Legacy (argsh) install.** Before the Go binary, a self-contained argsh
-script (`lo-up`) bootstrapped a project — installing `b`, the profile and the
-toolchain in one go. It is retired, not removed: the source and build live
+**Legacy (argsh) install.** New installs use `lo-install.sh` (above; also
+served at [lok8s.io/lo-install.sh](https://lok8s.io/lo-install.sh)). Before
+the Go binary, a self-contained argsh script (`lo-up`) bootstrapped a
+project — installing `b`, the profile and the toolchain in one go. It does not
+install the Go binary. It is retired, not removed: the source and build live
 under [`.archive/legacy/install/`](.archive/legacy/install/README.md) and the
 published bundle stays at [lok8s.io/lo-up](https://lok8s.io/lo-up) for
 existing users. Download and read it before running it:
