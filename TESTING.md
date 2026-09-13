@@ -38,7 +38,7 @@ once a night (03:17 UTC) and on `workflow_dispatch`; it never runs on a pull
 request, so the ruleset must not require its check. `.github/workflows/security.yml` adds
 `govulncheck` and `gosec` (every PR, and weekly, over all three Go modules
 with the root toolchain — the one the release builds with), plus the trivy
-and ShellCheck-SARIF scans. Both files run on pull requests into `main`
+and ShellCheck-SARIF scans. `ci.yml` and `security.yml` run on pull requests into `main`
 and into `feat/**`. `hack/e2e-go-roundtrip.sh` is deliberately not wired
 in.
 

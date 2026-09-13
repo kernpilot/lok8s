@@ -79,7 +79,7 @@ CI (`.github/workflows/ci.yml`) runs:
 | `operator-tests` | `make build` + bats `tests/operator/` (the hook shims exec the binary) |
 | `e2e-lo-up` | a real `lo up --ci` on the `single-local-build` fixture (kind + registries + Cilium + `tilt ci`) |
 | `loup-bundle` | `docs/public/lo-up` is a byte-exact rebuild of the legacy installer |
-| `integration-tests` | CRD install / schema / inventory smoke on kind (push to `main` only) |
+| `integration-tests` | CRD install / schema / inventory smoke on kind; lives in `e2e.yml` (push to `main`, nightly, manual) |
 
 `hack/e2e-go-roundtrip.sh` — the one real provision → destroy round-trip of
 the Go orchestration — is a **manual** gate, not in CI. Run it before
