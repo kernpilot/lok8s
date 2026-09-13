@@ -383,7 +383,7 @@ func TestMirroredListCoversLegacyTree(t *testing.T) {
 	seen := map[string]bool{}
 	var names []string
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		top := strings.SplitN(strings.TrimPrefix(line, ".lok8s/"), "/", 2)[0]
+		top, _, _ := strings.Cut(strings.TrimPrefix(line, ".lok8s/"), "/")
 		if top != "" && !seen[top] {
 			seen[top] = true
 			names = append(names, top)
