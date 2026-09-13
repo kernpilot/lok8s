@@ -83,3 +83,25 @@ func TestInitProjectClusterFlags(t *testing.T) {
 		t.Error("a refused driver wrote the domain dir")
 	}
 }
+
+// `lo init project --implementation` through the cli: the wizard's
+// implementation switch and its twin share this path.
+func TestInitProjectImplementationFlag(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	p := synthProject(t)
+	stdout, stderr, err := runLo(t, NewRoot(p), "init", "project", "acme", "--env", "none", "--implementation", "bash")
+	if err != nil {
+		t.Fatalf("--implementation: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Set spec.implementation.default: bash in "+filepath.Join(dir, "lok8s.yaml")+"\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "lok8s.yaml"))
+	if !strings.Contains(string(raw), "    default: bash\n") {
+		t.Errorf("lok8s.yaml:\n%s", raw)
+	}
+	if _, _, err := runLo(t, NewRoot(p), "init", "project", "--env", "none", "--implementation", "python"); !errors.Is(err, ErrHandled) {
+		t.Errorf("python accepted: %v", err)
+	}
+}

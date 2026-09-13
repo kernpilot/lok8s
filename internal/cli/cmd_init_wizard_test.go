@@ -359,7 +359,8 @@ func TestInitWizardProjectRootMenu(t *testing.T) {
 		"==> lo init project --env direnv\n",
 		"==> lo init project --env none --cluster beta.cloud --driver kubeone\n",
 		"==> lo assets eject bash\n",
-		"==> yq -i '.spec.implementation.default = \"bash\"' lok8s.yaml\nSet spec.implementation.default: bash in " + filepath.Join(root, "lok8s.yaml") + "\n",
+		"==> lo init project --env none --implementation bash\n",
+		"Set spec.implementation.default: bash in " + filepath.Join(root, "lok8s.yaml") + "\n",
 		"==> lo use beta.cloud\nActive domain: beta.cloud\n",
 		"==> lo init test\n",
 	} {

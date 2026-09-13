@@ -256,7 +256,7 @@ func existingProject(s State, a Answers) Plan {
 		}
 		p.Actions = append(p.Actions, Action{Kind: ActionSetImplementation, Implementation: a.Implementation, Name: name,
 			Summary: "lok8s.yaml: spec.implementation.default: " + a.Implementation,
-			Command: `yq -i '.spec.implementation.default = "` + a.Implementation + `"' lok8s.yaml`})
+			Command: "lo init project --env none --implementation " + a.Implementation})
 	}
 	p.Actions = append(p.Actions, toolchainActions(a)...)
 	if a.Domain != "" && a.Use {
@@ -378,6 +378,6 @@ func Options(s State) []Option {
 		other = "go"
 	}
 	out = append(out, Option{Key: "implementation", Label: fmt.Sprintf("Switch the implementation to %s (now %s)", other, p.Implementation),
-		Command: `yq -i '.spec.implementation.default = "` + other + `"' lok8s.yaml`})
+		Command: "lo init project --env none --implementation " + other})
 	return out
 }

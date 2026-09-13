@@ -27,7 +27,8 @@ func TestClusterSpecPerDriver(t *testing.T) {
 			"apiVersion: cluster.lok8s.dev/v1beta1\n",
 			"kind: " + d.Kind + "\n",
 			"metadata:\n  name: demo\n",
-			"spec:\n  cluster:\n    domain: demo.dev\n",
+			"spec:\n",
+			"  cluster:\n    domain: demo.dev\n",
 			"  bootstrap:",
 		} {
 			if !strings.Contains(got, want) {
@@ -132,6 +133,48 @@ func TestClusterSpecPassesLint(t *testing.T) {
 		if strings.Contains(lintErr.String(), "[error]") {
 			t.Errorf("%s: lint errors:\n%s", d.Name, lintErr.String())
 		}
+	}
+}
+
+// --implementation: the project file is created with the block on a fresh
+// directory; on an existing file the comments and the other keys survive.
+func TestProjectImplementation(t *testing.T) {
+	base := t.TempDir()
+	var out, stderr bytes.Buffer
+	if err := Project(base, ProjectOptions{Name: "acme", Env: "none", Implementation: "bash"}, &out, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(base, "lok8s.yaml")
+	if !strings.Contains(out.String(), "Set spec.implementation.default: bash in "+file+"\n") {
+		t.Errorf("stdout:\n%s", out.String())
+	}
+	if impl, err := config.LoadImplementation(base); err != nil || impl.Default != config.ImplBash {
+		t.Errorf("fresh dir: %+v %v", impl, err)
+	}
+
+	os.WriteFile(file, []byte("# my header\napiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: keep # me\nspec:\n  implementation:\n    default: bash\n    bash:\n      commands: [registry] # routed\n"), 0o600)
+	out.Reset()
+	if err := Project(base, ProjectOptions{Env: "none", Implementation: "go"}, &out, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(file)
+	for _, want := range []string{"# my header\n", "name: keep # me\n", "    default: go\n", "commands: [registry] # routed\n"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("missing %q in:\n%s", want, raw)
+		}
+	}
+	if !strings.Contains(out.String(), "Kept "+file+" (exists; --force overwrites)\n") {
+		t.Errorf("the existing file was not reported kept:\n%s", out.String())
+	}
+
+	// An unknown value is refused before anything is written.
+	fresh := t.TempDir()
+	stderr.Reset()
+	if err := Project(fresh, ProjectOptions{Env: "none", Implementation: "python"}, &out, &stderr); !errors.Is(err, ErrHandled) || !strings.Contains(stderr.String(), "--implementation must be go or bash") {
+		t.Errorf("python: %v %s", err, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(fresh, "lok8s.yaml")); err == nil {
+		t.Error("a refused value wrote the project file")
 	}
 }
 

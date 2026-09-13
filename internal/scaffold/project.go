@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // projectFile is the project-root lok8s.yaml (also the project marker
@@ -154,6 +156,9 @@ type ProjectOptions struct {
 	// Domain and Driver write the first cluster spec,
 	// clusters/<Domain>/cluster.lok8s.yaml (WriteClusterSpec); "" = none.
 	Domain, Driver string
+	// Implementation sets spec.implementation.default in lok8s.yaml
+	// (SetImplementation): go or bash; "" = leave it.
+	Implementation string
 }
 
 // Project scaffolds a project into o.Dir (default: base): clusters/,
@@ -182,6 +187,10 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	if err := ValidateName(name, stderr); err != nil {
 		return err
 	}
+	if err := ValidateImplementation(o.Implementation); err != nil {
+		ui.ErrorTo(stderr, "%v", err)
+		return ErrHandled
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -203,6 +212,11 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	}
 	if o.Domain != "" {
 		if err := WriteClusterSpec(clusters, o.Domain, driverOr(o.Driver), o.Force, out, stderr); err != nil {
+			return err
+		}
+	}
+	if o.Implementation != "" {
+		if err := SetImplementation(dir, name, o.Implementation, out); err != nil {
 			return err
 		}
 	}
@@ -229,6 +243,28 @@ func driverOr(d string) string {
 		return "lo"
 	}
 	return d
+}
+
+// ValidateImplementation checks a --implementation value ("" = unset).
+func ValidateImplementation(impl string) error {
+	switch impl {
+	case "", config.ImplGo, config.ImplBash:
+		return nil
+	}
+	return fmt.Errorf("--implementation must be %s or %s, got %q", config.ImplGo, config.ImplBash, impl)
+}
+
+// SetImplementation writes spec.implementation.default = impl into
+// <dir>/lok8s.yaml (config.SetImplementationDefault: a yaml.Node edit
+// that keeps comments and the other keys, and creates the project file
+// named name when there is none) and reports it. The one function behind
+// `lo init project --implementation` and the init wizard's switch.
+func SetImplementation(dir, name, impl string, out io.Writer) error {
+	if err := config.SetImplementationDefault(dir, name, impl); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Set spec.implementation.default: %s in %s\n", impl, filepath.Join(dir, config.ProjectFile))
+	return nil
 }
 
 // EnvFile writes the selected environment file for project name into dir

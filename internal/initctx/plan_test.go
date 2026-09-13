@@ -177,7 +177,7 @@ func TestDecideProjectRoot(t *testing.T) {
 		"lo init project --env direnv",
 		"lo init project --env none --cluster beta.cloud --driver kubeone",
 		"lo assets eject bash",
-		`yq -i '.spec.implementation.default = "bash"' lok8s.yaml`,
+		"lo init project --env none --implementation bash",
 		"lo toolchain install --groups core,local,bash",
 		"lo use beta.cloud",
 		"lo init service api",
@@ -200,7 +200,7 @@ func TestDecideProjectRoot(t *testing.T) {
 	wantKinds(t, p)
 	// Back to go: no eject either way.
 	p = Decide(s, Answers{Implementation: "go"})
-	wantCommands(t, p, `yq -i '.spec.implementation.default = "go"' lok8s.yaml`)
+	wantCommands(t, p, "lo init project --env none --implementation go")
 
 	// A project marked by clusters/ alone: the name is the directory.
 	s.Project.Name = ""

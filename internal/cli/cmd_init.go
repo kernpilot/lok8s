@@ -87,7 +87,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	// Go-only (no twin in .lok8s/libs/init): the eject model's project
 	// scaffold — files only. No .lok8s/ tree (assets are ejected on first
 	// use), no network (the toolchain is `lo toolchain install`).
-	var projectPath, projectEnv, projectDomain, projectDriver string
+	var projectPath, projectEnv, projectDomain, projectDriver, projectImpl string
 	project := &cobra.Command{
 		Use:          "project [name]",
 		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, one env file, optionally the first cluster spec) — files only, no network",
@@ -114,6 +114,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				Dir: projectPath, Name: name, Env: projectEnv, Force: force,
 				BVersion: toolchain.BRelease.Version,
 				Domain:   projectDomain, Driver: projectDriver,
+				Implementation: projectImpl,
 			}, cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
@@ -121,6 +122,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file to scaffold: mise (mise.toml), direnv (.envrc) or none — PATH only, no PATH_* pins")
 	project.Flags().StringVar(&projectDomain, "cluster", "", "Also write the first cluster spec, clusters/<domain>/cluster.lok8s.yaml, for this domain")
 	project.Flags().StringVar(&projectDriver, "driver", "lo", "Driver of the --cluster spec: "+strings.Join(scaffold.DriverNames(), ", "))
+	project.Flags().StringVar(&projectImpl, "implementation", "", "Set spec.implementation.default in lok8s.yaml: go or bash (the file is created when missing; comments and other keys are kept)")
 
 	// `lo init toolchain` is the hidden alias of `lo toolchain install`
 	// for one release (WP9): same flags, same run, a deprecation hint on

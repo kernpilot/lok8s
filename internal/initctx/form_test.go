@@ -142,7 +142,7 @@ func TestAskExistingProjectMenu(t *testing.T) {
 	wantCommands(t, Decide(s, a),
 		"lo init project --env none --cluster beta.cloud --driver kkp",
 		"lo assets eject bash",
-		`yq -i '.spec.implementation.default = "bash"' lok8s.yaml`,
+		"lo init project --env none --implementation bash",
 		"lo toolchain install --groups core,local,bash",
 		"lo init test")
 

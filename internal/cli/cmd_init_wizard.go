@@ -199,11 +199,7 @@ func initAction(ctx context.Context, plan initctx.Plan, a initctx.Action, paths 
 	case initctx.ActionEjectBash:
 		return assetsEject(paths, []string{assets.BashRel}, false, false, out, stderr)
 	case initctx.ActionSetImplementation:
-		if err := config.SetImplementationDefault(plan.Dir, a.Name, a.Implementation); err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "Set spec.implementation.default: %s in %s\n", a.Implementation, filepath.Join(plan.Dir, config.ProjectFile))
-		return nil
+		return scaffold.SetImplementation(plan.Dir, a.Name, a.Implementation, out)
 	case initctx.ActionToolchainInstall:
 		return initToolchainInstall(ctx, plan.Dir, a.Groups, false, out, stderr)
 	case initctx.ActionUse:
