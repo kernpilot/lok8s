@@ -36,6 +36,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/' },
       { text: 'Reference', link: '/reference/cli' },
+      { text: 'Releases', link: '/releases/v0.3.0' },
       {
         text: 'GitHub',
         link: 'https://github.com/kernpilot/lok8s',
@@ -91,6 +92,14 @@ export default defineConfig({
             { text: 'Kind Contract', link: '/reference/kind-contract' },
             { text: 'Kustomize Plugins', link: '/reference/kustomize-plugins' },
             { text: 'The Go lo Binary', link: '/reference/go-migration' },
+          ],
+        },
+      ],
+      '/releases/': [
+        {
+          text: 'Releases',
+          items: [
+            { text: 'v0.3.0', link: '/releases/v0.3.0' },
           ],
         },
       ],

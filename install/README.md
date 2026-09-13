@@ -36,8 +36,9 @@ tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 ```
 
 Inside a lok8s project, `b` can install the same asset from `.bin/b.yaml`
-(`github.com/kernpilot/lok8s` with `asset: lo-*.tar.gz`, alias `lo`) — the
-`core` profile already declares it.
+(`github.com/kernpilot/lok8s` with `asset: lo-[^f]*.tar.gz`, alias `lo`) — the
+`core` profile already declares it. The glob leaves out `lo-full-*`: b scores
+the two archives the same, so a plain `lo-*.tar.gz` can install `lo-full`.
 
 ## What the binary needs
 
@@ -55,14 +56,30 @@ See [docs/reference/go-migration.md](../docs/reference/go-migration.md) for
 what the binary still execs, how a project chooses the implementation, and the parity
 gates.
 
+## On the docs site
+
+`docs/public/lo-install.sh` is a committed copy of this script. VitePress
+copies `docs/public/` into the site root, so the same installer is served at
+`https://lok8s.io/lo-install.sh`, next to the legacy `lo-up`.
+`tests/unit/lo_install_public_test.bats` fails when the copy differs from
+`install/lo-install.sh` by one byte. After an edit here, refresh it:
+
+```sh
+cp install/lo-install.sh docs/public/lo-install.sh
+```
+
+The release asset is the copy `checksums.txt` covers. Point users at the
+release page for the verified download; the site copy is a convenience.
+
 ## Legacy: the argsh `lo-up` installer
 
-The previous installer (`lo-up`, an argsh script bundled with its runtime and
-published at `https://lok8s.io/lo-up`) is retired but not deleted: its source,
-build script and runtime pin moved to
+New installs use `lo-install.sh`. The previous installer (`lo-up`, an argsh
+script bundled with its runtime and published at `https://lok8s.io/lo-up`) is
+retired but not deleted: its source, build script and runtime pin moved to
 [`.archive/legacy/install/`](../.archive/legacy/install/README.md), and the
-published bundle at `docs/public/lo-up` stays served for existing users. The
-`loup-bundle` CI job still rebuilds and diffs it from the legacy path.
+published bundle at `docs/public/lo-up` stays served for existing users. It
+does not install the Go binary. The `loup-bundle` CI job still rebuilds and
+diffs it from the legacy path.
 
 ## Tests
 

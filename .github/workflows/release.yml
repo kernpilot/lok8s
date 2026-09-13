@@ -27,10 +27,24 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Hand-written notes for the tag, when the repo carries them
+      # (docs/releases/<tag>.md, also a docs page). They head the release
+      # body; the github-native changelog (.goreleaser.yaml) follows.
+      - name: Release notes for this tag
+        id: notes
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "${notes}" ]; then
+            echo "args=--release-header ${notes}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::no ${notes}; the release body is the changelog only"
+            echo "args=" >> "${GITHUB_OUTPUT}"
+          fi
+
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: v2.18.0
-          args: release --clean
+          args: release --clean ${{ steps.notes.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

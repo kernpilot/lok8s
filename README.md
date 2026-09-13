@@ -100,7 +100,9 @@ bash lo-install.sh                            # → ~/.local/bin/lo  (--dir, --v
 
 The installer fetches `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
 release, refuses to extract anything whose SHA-256 does not match, and only
-then installs `lo`. Prefer no script at all? The same four steps by hand:
+then installs `lo`. What changed in this release and how to upgrade an
+existing project: [v0.3.0 release notes](docs/releases/v0.3.0.md).
+Prefer no script at all? The same four steps by hand:
 
 ```bash
 V=v0.3.0; A=lo-linux-amd64.tar.gz             # your tag and platform
@@ -154,9 +156,11 @@ syncs the framework tree and the frozen bash reference) is documented in
 `b install` needed just to diagnose the environment. `make build` produces the
 Go binary at `bin/lo`.
 
-**Legacy (argsh) install.** Before the Go binary, a self-contained argsh
-script (`lo-up`) bootstrapped a project — installing `b`, the profile and the
-toolchain in one go. It is retired, not removed: the source and build live
+**Legacy (argsh) install.** New installs use `lo-install.sh` (above; also
+served at [lok8s.io/lo-install.sh](https://lok8s.io/lo-install.sh)). Before
+the Go binary, a self-contained argsh script (`lo-up`) bootstrapped a
+project — installing `b`, the profile and the toolchain in one go. It does not
+install the Go binary. It is retired, not removed: the source and build live
 under [`.archive/legacy/install/`](.archive/legacy/install/README.md) and the
 published bundle stays at [lok8s.io/lo-up](https://lok8s.io/lo-up) for
 existing users. Download and read it before running it:

@@ -312,7 +312,7 @@ itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
 
 ```yaml
 # .lo-origin — written by lo when it ejected this asset. Do not edit.
-lo: 0.1.0
+lo: 0.3.0
 ejectedAt: 2026-09-03T10:00:00Z
 files:
   chart.yaml: sha256:…
@@ -364,8 +364,10 @@ defaults, `VERSION`) are embedded now. What changed for the user is only
 the entrypoint: `lo` on your `PATH` is the binary instead of `.lok8s/lo`.
 
 The `core` profile's `.bin/b.yaml` declares the binary
-(`github.com/kernpilot/lok8s`, asset `lo-*.tar.gz`, alias `lo`), so `b
+(`github.com/kernpilot/lok8s`, asset `lo-[^f]*.tar.gz`, alias `lo`), so `b
 install` fetches it into `.bin/` alongside the rest of the toolchain. The
+glob leaves out the `lo-full-*` archives: b scores both the same, so a
+plain `lo-*.tar.gz` can install `lo-full` under the `lo` alias. The
 [Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) page
 states what `b` still manages today versus the intended end state.
 
