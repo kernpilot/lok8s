@@ -50,7 +50,7 @@ copy_tree() {
     untracked="$(git -C "${ROOT}" ls-files --others --exclude-standard -- "${dst}" | grep -v '/\.lo-origin$' || true)"
     if [[ -n "${untracked}" ]]; then
       echo "error: refusing to replace ${dst#"${ROOT}"/}: untracked files would be deleted:" >&2
-      sed 's/^/  /' <<<"${untracked}" >&2
+      while IFS= read -r line; do printf '  %s\n' "${line}"; done <<<"${untracked}" >&2
       echo "       commit, move or delete them first" >&2
       return 1
     fi

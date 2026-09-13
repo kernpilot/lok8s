@@ -11,8 +11,9 @@
 #
 # The agent runs SharedInformers on nodes/pods/events, which require CLUSTER-WIDE
 # list/watch on those three resources. That is the blast radius: read-only on
-# nodes/pods/events plus the lok8s ClusterInventory (below), a get on ITS OWN
-# token Secret (scoped by name), and ONE narrowly-scoped write — the
+# nodes/pods/events, the lok8s ClusterInventory, CertificateSigningRequests
+# and the /readyz + /version health URLs (below), a get on ITS OWN token
+# Secret (scoped by name), and ONE narrowly-scoped write — the
 # ClusterInventory STATUS patch, a visibility feature explained at the rule. No
 # other writes; no logs/exec/secret-reads beyond the one agent Secret — those
 # are deliberately absent so the pod cannot read workload contents or credentials.
@@ -64,6 +65,24 @@ rules:
   - apiGroups: [lok8s.dev]
     resources: [clusterinventories/status]
     verbs: [patch]
+  # Heartbeat certificates.expiresAt: the earliest NotAfter across the
+  # certificates issued on CertificateSigningRequests (kubelet rotations).
+  # `list` only — the one call is a List; the agent never gets a CSR by name
+  # and never approves, signs, creates, or deletes one. A CSR carries public
+  # material only (a request + an issued cert, never a private key). This is
+  # the CronJob agent's read, ported.
+  - apiGroups: [certificates.k8s.io]
+    resources: [certificatesigningrequests]
+    verbs: [list]
+  # Heartbeat components[]: apiserver/etcd health from GET /readyz?verbose
+  # (+ /version as the reachability fallback). Read-only, and normally already
+  # granted to every authenticated principal by the default
+  # system:public-info-viewer binding — declared explicitly so the probes keep
+  # working on hardened clusters that prune the default bindings.
+  # scheduler/controller-manager health comes from the kube-system static
+  # pods through the pods list/watch above — no extra grant.
+  - nonResourceURLs: [/readyz, /version]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
