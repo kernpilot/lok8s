@@ -3,7 +3,7 @@ module github.com/kernpilot/lok8s
 go 1.26.8
 
 require (
-	filippo.io/age v1.3.1
+	filippo.io/age v1.3.2
 	github.com/Mic92/ssh-to-age v1.3.0
 	github.com/getsops/sops/v3 v3.13.3
 	github.com/kernpilot/lok8s/kustomize v0.0.0
