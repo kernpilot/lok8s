@@ -4,7 +4,7 @@
 # The hooks under operator/hooks/ are shims that exec `lo operator <hook>`
 # (Go, internal/operator — its own hermetic tests replicate every case
 # below). The bash bodies they replaced are frozen at
-# .lok8s/legacy/operator/hooks/ and stay the pinned reference: the sourced
+# .archive/legacy/operator/hooks/ and stay the pinned reference: the sourced
 # tests below run against THAT tree; the shim section at the end pins the
 # shims themselves (passthrough argv, `--config` byte-parity with the frozen
 # reference through the built Go binary).
@@ -14,7 +14,7 @@ setup() {
   setup_tmpdir
 
   export PATH_BASE="$BATS_TEST_TMPDIR"
-  LEGACY_HOOKS="${_PROJECT_ROOT}/.lok8s/legacy/operator/hooks"
+  LEGACY_HOOKS="${_PROJECT_ROOT}/.archive/legacy/operator/hooks"
   SHIM_HOOKS="${_PROJECT_ROOT}/operator/hooks"
 
   # We need jq for hook tests
