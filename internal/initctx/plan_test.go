@@ -209,6 +209,29 @@ func TestDecideProjectRoot(t *testing.T) {
 	}
 }
 
+// A spec that exists is kept, and the summary says so (the executor never
+// overwrites it): in an existing project and in a bare directory alike.
+func TestDecideKeepsAnExistingClusterSpec(t *testing.T) {
+	root := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(root, "clusters", "old.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
+	s := projectState(root, true)
+	p := Decide(s, Answers{Domain: "old.dev", Driver: "kubeone"})
+	if got := p.Actions[0].Summary; got != "keep clusters/old.dev/cluster.lok8s.yaml (exists)" {
+		t.Errorf("summary %q", got)
+	}
+	p = Decide(s, Answers{Domain: "new.dev"})
+	if got := p.Actions[0].Summary; got != "clusters/new.dev/cluster.lok8s.yaml (lo)" {
+		t.Errorf("summary %q", got)
+	}
+
+	bare := State{Cwd: root, Entries: 1, Git: Git{Available: true}}
+	bare.Project = nil
+	p = Decide(bare, Answers{Domain: "old.dev"})
+	if !strings.Contains(p.Actions[0].Summary, "keep clusters/old.dev/cluster.lok8s.yaml (exists)") {
+		t.Errorf("bare summary %q", p.Actions[0].Summary)
+	}
+}
+
 func TestDecideInsideProject(t *testing.T) {
 	root := t.TempDir()
 	s := projectState(root, false)

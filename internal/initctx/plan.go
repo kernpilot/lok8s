@@ -208,7 +208,7 @@ func newProject(s State, a Answers) Plan {
 	action := Action{Kind: ActionWriteProjectFiles, Name: name, Env: env}
 	if a.Domain != "" {
 		action.Domain, action.Driver = a.Domain, driverOr(a.Driver)
-		files = append(files, "clusters/"+a.Domain+"/cluster.lok8s.yaml ("+action.Driver+")")
+		files = append(files, clusterSpecSummary(dir, a.Domain, action.Driver))
 		cmd += " --cluster " + a.Domain + " --driver " + action.Driver
 	}
 	action.Summary = strings.Join(files, ", ")
@@ -245,7 +245,7 @@ func existingProject(s State, a Answers) Plan {
 	if a.Domain != "" {
 		driver := driverOr(a.Driver)
 		p.Actions = append(p.Actions, Action{Kind: ActionWriteClusterSpec, Domain: a.Domain, Driver: driver, Name: name,
-			Summary: "clusters/" + a.Domain + "/cluster.lok8s.yaml (" + driver + ")",
+			Summary: clusterSpecSummary(proj.Root, a.Domain, driver),
 			Command: "lo init project --env none --cluster " + a.Domain + " --driver " + driver})
 	}
 	if a.Implementation != "" && a.Implementation != proj.Implementation {
@@ -278,6 +278,16 @@ func existingProject(s State, a Answers) Plan {
 			Command: "lo init service " + svc + " --path " + path})
 	}
 	return p
+}
+
+// clusterSpecSummary names the spec a plan writes, or keeps when it
+// already exists (the executor never overwrites it).
+func clusterSpecSummary(root, dom, driver string) string {
+	rel := "clusters/" + dom + "/cluster.lok8s.yaml"
+	if fsutil.FileExists(filepath.Join(root, "clusters", dom, "cluster.lok8s.yaml")) {
+		return "keep " + rel + " (exists)"
+	}
+	return rel + " (" + driver + ")"
 }
 
 func toolchainActions(a Answers) []Action {
