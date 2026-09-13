@@ -41,11 +41,20 @@ type Drift struct {
 	Max int
 }
 
-// Diffs lists every difference, one message per entry, in key order.
+// Diffs lists every difference, one message per entry, in key order. A
+// side with no entries is reported first: two empty trees agree on
+// nothing, so an empty read (a wrong root, a skip func that drops
+// everything) must not pass as "no drift".
 func (d Drift) Diffs() []string {
 	back := d.SyncBack
 	if back == "" {
 		back = d.Sync
+	}
+	var out []string
+	for _, side := range []Tree{d.Want, d.Got} {
+		if len(side.Files) == 0 {
+			out = append(out, fmt.Sprintf("%s: no entries (an empty tree proves nothing; check the read path)", side.Name))
+		}
 	}
 	keys := map[string]bool{}
 	for k := range d.Want.Files {
@@ -59,7 +68,6 @@ func (d Drift) Diffs() []string {
 		sorted = append(sorted, k)
 	}
 	sort.Strings(sorted)
-	var out []string
 	for _, k := range sorted {
 		want, inWant := d.Want.Files[k]
 		got, inGot := d.Got.Files[k]

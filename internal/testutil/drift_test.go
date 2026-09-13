@@ -34,6 +34,25 @@ func TestDriftDiffsClassifyEveryEntry(t *testing.T) {
 	}
 }
 
+// Two empty trees are not "identical": an empty read must fail the gate.
+func TestDriftRefusesEmptyTrees(t *testing.T) {
+	t.Parallel()
+	both := Drift{Want: Tree{Name: "embed"}, Got: Tree{Name: "disk", Files: map[string]string{}}}
+	got := both.Diffs()
+	want := []string{
+		"embed: no entries (an empty tree proves nothing; check the read path)",
+		"disk: no entries (an empty tree proves nothing; check the read path)",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("two empty trees: diffs = %q, want %q", got, want)
+	}
+	one := Drift{Want: Tree{Name: "embed", Files: map[string]string{"x": "1"}}, Got: Tree{Name: "disk"}, Sync: "sync"}
+	got = one.Diffs()
+	if len(got) != 2 || got[0] != want[1] || got[1] != "x: in embed but missing from disk (run: sync)" {
+		t.Errorf("one empty side: diffs = %q", got)
+	}
+}
+
 func TestDriftCheckPassesOnIdenticalTrees(t *testing.T) {
 	t.Parallel()
 	d := Drift{
