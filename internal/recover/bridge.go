@@ -15,9 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
@@ -25,17 +23,9 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
-// bridgePATH prepends the bash tree + .bin to PATH when missing
-// (cli.shimEnv).
+// bridgePATH is .bin, then the bash tree, then PATH (cli.shimEnv's PATH).
 func bridgePATH(p *config.Paths, tree string) string {
-	path := os.Getenv("PATH")
-	for _, dir := range []string{tree, p.Bin} {
-		found := slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
-		if !found {
-			path = dir + string(os.PathListSeparator) + path
-		}
-	}
-	return path
+	return execx.PrependPATH(p.Bin, tree)
 }
 
 // bridgeEnv is the environment the argsh entrypoint would have derived:

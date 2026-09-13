@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -292,14 +291,8 @@ func runKustomize(ctx context.Context, o Options, domainDir, kubeconfig string, 
 // package's business: the self-exec home in-process, the
 // $PATH_BASE/.kustomize default in exec mode.
 func kustomizeEnv(p *config.Paths, kubeconfig, secretsDisable string) []string {
-	path := os.Getenv("PATH")
-	for _, dir := range []string{p.Lok8s, p.Bin} {
-		if !containsPathEntry(path, dir) {
-			path = dir + string(os.PathListSeparator) + path
-		}
-	}
 	return []string{
-		"PATH=" + path,
+		"PATH=" + execx.PrependPATH(p.Bin, p.Lok8s),
 		"KUBECONFIG=" + kubeconfig,
 		"KHELM_TRUST_ANY_REPO=true",
 		"LOK8S_SECRETS_DISABLE=" + secretsDisable,
@@ -340,8 +333,4 @@ func generatedFiles(dir string) []string {
 		}
 	}
 	return out
-}
-
-func containsPathEntry(path, dir string) bool {
-	return slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
 }

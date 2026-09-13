@@ -5,12 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 )
 
 // Shim replaces the current process with the argsh implementation (`lo`
@@ -74,20 +74,10 @@ func bashTreeForPATH(p *config.Paths) assets.Tree {
 	return tree
 }
 
-// childPATH is the PATH the binary prepares for its children: the bash
-// tree and p.Bin prepended to the process PATH when missing.
+// childPATH is the PATH the binary prepares for its children: p.Bin
+// first, then the bash tree, then the process PATH (execx.PrependPATH).
 func childPATH(p *config.Paths, treeDir string) string {
-	path := os.Getenv("PATH")
-	for _, dir := range []string{treeDir, p.Bin} {
-		if dir != "" && !containsPathEntry(path, dir) {
-			path = dir + string(os.PathListSeparator) + path
-		}
-	}
-	return path
-}
-
-func containsPathEntry(path, dir string) bool {
-	return slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
+	return execx.PrependPATH(p.Bin, treeDir)
 }
 
 func setEnv(env []string, key, value string) []string {
