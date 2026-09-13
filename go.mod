@@ -143,6 +143,7 @@ replace github.com/kernpilot/lok8s/kustomize => ./kustomize
 // sops is the kernpilot age-only fork (upstream v3.13.3 minus every key
 // backend except age, no CLI, no gRPC key service): it keeps the AWS, GCP,
 // Azure, Vault and gRPC SDKs out of the binary. Bump the tag here; see
-// github.com/kernpilot/sops kubehz/MERGE-GUIDE.md. A replace applies to
-// the main module only, so `go install .../cmd/lo` is unsupported.
+// github.com/kernpilot/sops kubehz/MERGE-GUIDE.md. Go refuses
+// `go install .../cmd/lo@<version>` for a module with replace directives
+// (this one and ./kustomize); build from a checkout instead.
 replace github.com/getsops/sops/v3 => github.com/kernpilot/sops/v3 v3.13.3-age.1

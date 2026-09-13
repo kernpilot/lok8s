@@ -62,8 +62,10 @@ Vault SDKs, gRPC and protobuf out of the core build; `make size-check` (CI
 rule with a KMS, GCP KMS, Azure Key Vault, Vault or PGP recipient is
 rejected with `unsupported key type <x> (age-only build)`. To bump the
 fork, follow its `kubehz/MERGE-GUIDE.md` and change the tag in the
-`replace` line. The `replace` applies to the main module only, so
-`go install .../cmd/lo` is unsupported; build from a checkout.
+`replace` line. `go install github.com/kernpilot/lok8s/cmd/lo@<version>`
+is unsupported: Go refuses a `@version` install of a module whose go.mod
+carries `replace` directives (this one and the `./kustomize` one). From
+a checkout, `go install ./cmd/lo` and `make build` work as before.
 
 How to change or port behaviour (mirror the pattern of any `internal/`
 package):
