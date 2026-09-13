@@ -765,8 +765,9 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 // HandoverPreseed ports handover::preseed — the thin kubeone variant: place
 // the six PKI files on node0 over SSH before `kubeone apply`.
 func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
-	// ssh splits `-o UserKnownHostsFile=<path>` on whitespace: a path with
-	// a space would leave the rest of it as a second, unknown option.
+	// ssh reads the value of `-o UserKnownHostsFile=<path>` as a list of
+	// files separated by whitespace. A path with a space becomes two
+	// known_hosts files, and neither is the file the caller named.
 	if strings.ContainsAny(o.KnownHosts, " \t\r\n") {
 		c.errorf("handover: --known-hosts path must not contain whitespace: %q", o.KnownHosts)
 		return ErrHandled
