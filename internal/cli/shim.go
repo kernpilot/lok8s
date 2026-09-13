@@ -56,7 +56,7 @@ func shimEnv(p *config.Paths, tree assets.Tree) []string {
 	if tree.Dir != "" && tree.Dir != p.Lok8s {
 		env = setEnv(env, "PATH_LOK8S", tree.Dir)
 	}
-	if tree.Origin != assets.OriginLocal {
+	if !tree.Source.Local() {
 		env = setEnv(env, "PATH_BASE", p.Base)
 	}
 	return env
@@ -68,7 +68,7 @@ func shimEnv(p *config.Paths, tree assets.Tree) []string {
 // PATH is harmless).
 func bashTreeForPATH(p *config.Paths) assets.Tree {
 	tree := assets.FindBashTree(p)
-	if tree.Origin == assets.OriginNone {
+	if tree.Source == assets.TreeNone {
 		tree.Dir = p.Lok8s
 	}
 	return tree

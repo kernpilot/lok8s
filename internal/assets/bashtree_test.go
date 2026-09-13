@@ -23,11 +23,22 @@ func TestBashTreeChecoutWinsOverCache(t *testing.T) {
 	cache := withCache(t)
 	p := project(t)
 
-	// PATH_LOK8S (p.Lok8s) holding lo: served as is, nothing extracted.
+	// The project's .lok8s holding lo: served as is, nothing extracted.
 	testutil.WriteFile(t, filepath.Join(p.Lok8s, "lo"), "#!/usr/bin/env bash\n")
 	tree, err := BashTree(p)
-	if err != nil || tree.Origin != OriginLocal || tree.Dir != p.Lok8s {
+	if err != nil || tree.Source != TreeProject || tree.Dir != p.Lok8s {
+		t.Fatalf("project: %+v %v", tree, err)
+	}
+	// PATH_LOK8S pointing at another tree that holds lo: a checkout.
+	checkout := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(checkout, "lo"), "#!/usr/bin/env bash\n")
+	c := *p
+	c.Lok8s = checkout
+	if tree, err := BashTree(&c); err != nil || tree.Source != TreeCheckout || tree.Dir != checkout || !tree.Source.Local() {
 		t.Fatalf("checkout: %+v %v", tree, err)
+	}
+	if TreeCache.Local() || TreeTemp.Local() || TreeNone.Local() {
+		t.Fatal("a non-local source reports Local")
 	}
 	if _, err := os.Stat(cache); err == nil {
 		t.Fatal("a checkout must not trigger a cache extract")
@@ -41,13 +52,13 @@ func TestBashTreeChecoutWinsOverCache(t *testing.T) {
 	q := *p
 	q.Lok8s = other
 	tree, err = BashTree(&q)
-	if err != nil || tree.Origin != OriginLocal || tree.Dir != p.Lok8s {
+	if err != nil || tree.Source != TreeProject || tree.Dir != p.Lok8s {
 		t.Fatalf("project tree: %+v %v", tree, err)
 	}
 	// Neither: the cache.
 	os.Remove(filepath.Join(p.Lok8s, "lo"))
 	tree, err = BashTree(&q)
-	if err != nil || tree.Origin != OriginCache || tree.Dir != cache {
+	if err != nil || tree.Source != TreeCache || tree.Dir != cache {
 		t.Fatalf("cache: %+v %v", tree, err)
 	}
 }
@@ -56,11 +67,11 @@ func TestBashTreeExtractsOnceAndRedoesAPartialExtract(t *testing.T) {
 	cache := withCache(t)
 	p := project(t)
 
-	if got := FindBashTree(p); got.Origin != OriginNone || got.Dir != cache {
+	if got := FindBashTree(p); got.Source != TreeNone || got.Dir != cache {
 		t.Fatalf("before extract: %+v", got)
 	}
 	tree, err := BashTree(p)
-	if err != nil || tree.Origin != OriginCache || tree.Dir != cache {
+	if err != nil || tree.Source != TreeCache || tree.Dir != cache {
 		t.Fatalf("%+v %v", tree, err)
 	}
 	// The whole tree, byte-identical, executable bits restored.
@@ -129,10 +140,10 @@ func TestBashTreeExtractsOnceAndRedoesAPartialExtract(t *testing.T) {
 	}
 	// A manifest from another version → redone.
 	os.WriteFile(filepath.Join(cache, MarkerFile), []byte("lo: 0.0.0\nfiles: {}\n"), 0o644)
-	if got := FindBashTree(p); got.Origin != OriginNone {
+	if got := FindBashTree(p); got.Source != TreeNone {
 		t.Fatalf("stale manifest still valid: %+v", got)
 	}
-	if tree, err := BashTree(p); err != nil || tree.Origin != OriginCache || !cacheValid(cache) {
+	if tree, err := BashTree(p); err != nil || tree.Source != TreeCache || !cacheValid(cache) {
 		t.Fatalf("stale manifest: %+v %v", tree, err)
 	}
 }
@@ -145,7 +156,7 @@ func TestBashTreeCacheLocationAndTempFallback(t *testing.T) {
 	os.Unsetenv(EnvCacheHome)
 	tree, err := BashTree(p)
 	want := filepath.Join(home, ".cache", "lok8s", Version(), "lok8s")
-	if err != nil || tree.Origin != OriginCache || tree.Dir != want {
+	if err != nil || tree.Source != TreeCache || tree.Dir != want {
 		t.Fatalf("HOME cache: %+v %v (want %s)", tree, err, want)
 	}
 
@@ -153,11 +164,11 @@ func TestBashTreeCacheLocationAndTempFallback(t *testing.T) {
 	withPolicy(t, PolicyEject)
 	t.Setenv("HOME", "")
 	os.Unsetenv("HOME")
-	if got := FindBashTree(p); got.Origin != OriginNone || got.Dir != "" {
+	if got := FindBashTree(p); got.Source != TreeNone || got.Dir != "" {
 		t.Fatalf("no cache dir: %+v", got)
 	}
 	tree, err = BashTree(p)
-	if err != nil || tree.Origin != OriginEmbedded {
+	if err != nil || tree.Source != TreeTemp {
 		t.Fatalf("temp fallback: %+v %v", tree, err)
 	}
 	for _, f := range []string{"lo", "addons/cilium/chart.yaml", "tilt/Tiltfile", "VERSION"} {
@@ -238,7 +249,7 @@ func TestEjectBashWritesTheCodeHalfBesideDataUnits(t *testing.T) {
 	}
 
 	// Precedence now: the project tree serves bash mode; a second eject refuses.
-	if tree, err := BashTree(p); err != nil || tree.Origin != OriginLocal || tree.Dir != p.Lok8s {
+	if tree, err := BashTree(p); err != nil || tree.Source != TreeProject || tree.Dir != p.Lok8s {
 		t.Fatalf("BashTree after eject: %+v %v", tree, err)
 	}
 	if _, err := Eject(p, BashRel); !errors.Is(err, ErrExists) {
@@ -296,7 +307,7 @@ func TestEjectBashCompletesAHalfWrittenTree(t *testing.T) {
 	if unitExists(p, bashUnit) || LocalExists(p, BashRel) {
 		t.Fatal("a tree without lo counts as local")
 	}
-	if tree, _ := FindBashTree(p), 0; tree.Origin == OriginLocal {
+	if tree, _ := FindBashTree(p), 0; tree.Source.Local() {
 		t.Fatal("FindBashTree honors a tree without lo")
 	}
 	notices.Reset()

@@ -27,7 +27,7 @@ func TestShimEnvPreparesPathAndPluginHome(t *testing.T) {
 		Bin:   "/proj/.bin",
 		Lok8s: "/proj/.lok8s",
 	}
-	local := assets.Tree{Dir: p.Lok8s, Origin: assets.OriginLocal}
+	local := assets.Tree{Dir: p.Lok8s, Source: assets.TreeProject}
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
 	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
@@ -62,7 +62,7 @@ func TestShimEnvPreparesPathAndPluginHome(t *testing.T) {
 	// The cache: the tree cannot derive the project from its location, so
 	// PATH_BASE and PATH_LOK8S are set and the tree leads PATH.
 	t.Setenv("PATH", "/usr/bin")
-	cache := assets.Tree{Dir: "/home/u/.cache/lok8s/1.0.0/lok8s", Origin: assets.OriginCache}
+	cache := assets.Tree{Dir: "/home/u/.cache/lok8s/1.0.0/lok8s", Source: assets.TreeCache}
 	env = shimEnv(p, cache)
 	if v, _ := envValue(env, "PATH_BASE"); v != "/proj" {
 		t.Errorf("PATH_BASE = %q", v)
@@ -94,7 +94,7 @@ func TestShimResolvesTheCacheWithoutACheckout(t *testing.T) {
 	t.Setenv(assets.EnvCacheHome, cacheRoot)
 	p := synthProject(t)
 	tree, err := assets.BashTree(p)
-	if err != nil || tree.Origin != assets.OriginCache {
+	if err != nil || tree.Source != assets.TreeCache {
 		t.Fatalf("%+v %v", tree, err)
 	}
 	if !strings.HasPrefix(tree.Dir, cacheRoot) {

@@ -49,14 +49,18 @@ func TestInitToolchainDefaultsToTheProjectAboveCwdNotPathBase(t *testing.T) {
 	}
 }
 
-// --with-bash adds the bash group (argsh, yq, jq, envsubst, sops,
-// ssh-to-age) to the selection; the template then activates its entries.
-func TestInitToolchainWithBashActivatesTheBashGroup(t *testing.T) {
+// The bash group (argsh, yq, jq, envsubst, sops, ssh-to-age) is carried
+// commented out and selectable through --groups; there is no flag of its
+// own (the project config routes to bash, WP8).
+func TestInitToolchainBashGroupThroughGroups(t *testing.T) {
 	project := synthProject(t)
 	t.Chdir(project.Base)
-	stdout, stderr, err := runLo(t, NewRoot(project), "init", "toolchain", "--dry-run", "--with-bash")
+	stdout, stderr, err := runLo(t, NewRoot(project), "init", "toolchain", "--dry-run", "--groups", "core,local,bash")
 	if err != nil {
-		t.Fatalf("init toolchain --with-bash: %v\n%s", err, stderr)
+		t.Fatalf("init toolchain --groups bash: %v\n%s", err, stderr)
+	}
+	if _, _, err := runLo(t, NewRoot(project), "init", "toolchain", "--dry-run", "--with-bash"); err == nil {
+		t.Fatal("--with-bash accepted; the bash runtime is selected by the project config, not a flag")
 	}
 	if !strings.Contains(stdout, "groups: core,local,bash)") {
 		t.Errorf("bash group not selected:\n%s", stdout)

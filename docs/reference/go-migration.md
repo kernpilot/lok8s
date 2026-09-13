@@ -403,13 +403,17 @@ the tree beside it (`lo assets eject bash`). `--list` prints the union of
 the Go registry, the project's `.lok8s/drivers/` and the embedded tree.
 
 **`LO_IMPL=bash`.** The whole process runs as `bash <tree>/lo`, described
-in the next section.
+in the next section. The variable is slated for removal: the project
+configuration will select the implementation per command (`lok8s.yaml`,
+`spec.implementation`), and a routing to bash will accept a project or
+checkout tree only, never the cache (the resolver reports the source of
+the tree as a typed value for that).
 
 What each seam needs on disk:
 
 | Seam | Needs |
 |---|---|
-| Hetzner provider | `argsh` in `.bin/` (`lo init toolchain --with-bash`, then `b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
+| Hetzner provider | `argsh` in `.bin/` (the `bash` group of `.bin/b.yaml`, then `b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
 | `lo drivers <name>` | `argsh`, plus whatever the driver calls |
 | `LO_IMPL=bash` | `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `jq`, `envsubst`, `sops`) |
 

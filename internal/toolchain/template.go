@@ -21,7 +21,8 @@ const Marker = "# lo-toolchain: managed pins — written by `lo init toolchain`"
 
 // Groups a consumer selects. core is always on: it is what every `lo`
 // path execs. bash is the runtime of the frozen bash implementation
-// (LO_IMPL=bash) and the provider plugins; opt-in (`--with-bash`).
+// and the provider plugins; carried commented out, selectable through
+// --groups until the project config routes commands to bash (WP8).
 const (
 	GroupCore  = "core"
 	GroupLocal = "local"
@@ -167,8 +168,8 @@ func Template(o TemplateOptions) (string, error) {
 	b.WriteString("# provider plugins (argsh, yq, jq, envsubst, sops, ssh-to-age; the Go binary links\n")
 	b.WriteString("# or reimplements them, the bash tree itself ships inside the binary).\n")
 	b.WriteString("# Entries outside the selected groups are kept below, commented out — uncomment\n")
-	b.WriteString("# and `.bin/b install` to opt in (or: lo init toolchain --groups core,local,cloud\n")
-	b.WriteString("# or --with-bash). Docs: https://lok8s.io/guide/toolchain\n")
+	b.WriteString("# and `.bin/b install` to opt in (or: lo init toolchain --groups core,local,cloud,bash).\n")
+	b.WriteString("# Docs: https://lok8s.io/guide/toolchain\n")
 	b.WriteString("binaries:\n")
 	for _, g := range groupOrder {
 		fmt.Fprintf(&b, "  # ── %s\n", groupTitles[g])

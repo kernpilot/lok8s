@@ -44,15 +44,37 @@ import (
 	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
-// OriginCache — the tree was served from the versioned cache (BashTree).
-const OriginCache Origin = "cache"
+// TreeSource says where a resolved bash tree comes from. It is typed so
+// a caller can decide by source: a routing of commands to bash (WP8)
+// accepts a project or checkout tree and refuses the cache.
+type TreeSource string
 
-// Tree is a resolved bash tree: where it is and where it came from
-// (OriginLocal, OriginCache or OriginEmbedded for the temp fallback;
-// OriginNone from FindBashTree when nothing is on disk yet).
+const (
+	// TreeProject — the project's own .lok8s holds lo (an ejected tree, or
+	// a vendored one).
+	TreeProject TreeSource = "project"
+	// TreeCheckout — PATH_LOK8S points at another tree that holds lo (a
+	// lok8s checkout).
+	TreeCheckout TreeSource = "checkout"
+	// TreeCache — the copy embedded in the binary, extracted into the
+	// versioned cache.
+	TreeCache TreeSource = "cache"
+	// TreeTemp — the embedded copy in the per-run temp dir (no cache dir
+	// could be derived).
+	TreeTemp TreeSource = "temp"
+	// TreeNone — nothing on disk yet (FindBashTree only): Dir is the cache
+	// dir BashTree would fill, or empty when none can be derived.
+	TreeNone TreeSource = "none"
+)
+
+// Local reports whether the source is a tree the project owns or points
+// at (project or checkout): the only sources a routing may target.
+func (s TreeSource) Local() bool { return s == TreeProject || s == TreeCheckout }
+
+// Tree is a resolved bash tree: where it is and where it came from.
 type Tree struct {
 	Dir    string
-	Origin Origin
+	Source TreeSource
 }
 
 // bashExecutables lists the mirror files that carry the executable bit
@@ -89,29 +111,29 @@ func fileMode(fp string) fs.FileMode {
 }
 
 // FindBashTree reports where BashTree would serve the tree from WITHOUT
-// extracting anything: OriginLocal for a checkout or ejected tree,
-// OriginCache for a cache that is already extracted and valid, else
-// OriginNone with the cache dir BashTree would fill (empty when no cache
+// extracting anything: TreeProject or TreeCheckout for a local tree,
+// TreeCache for a cache that is already extracted and valid, else
+// TreeNone with the cache dir BashTree would fill (empty when no cache
 // location can be derived). `lo doctor` reads it.
 func FindBashTree(p *config.Paths) Tree {
-	if dir, ok := localBashTree(p); ok {
-		return Tree{Dir: dir, Origin: OriginLocal}
+	if t, ok := localBashTree(p); ok {
+		return t
 	}
 	dir, err := cacheTreeDir()
 	if err != nil {
-		return Tree{Origin: OriginNone}
+		return Tree{Source: TreeNone}
 	}
 	if cacheValid(dir) {
-		return Tree{Dir: dir, Origin: OriginCache}
+		return Tree{Dir: dir, Source: TreeCache}
 	}
-	return Tree{Dir: dir, Origin: OriginNone}
+	return Tree{Dir: dir, Source: TreeNone}
 }
 
 // BashTree resolves the bash tree (precedence in the file comment),
 // extracting the embedded copy into the cache on first use.
 func BashTree(p *config.Paths) (Tree, error) {
-	if dir, ok := localBashTree(p); ok {
-		return Tree{Dir: dir, Origin: OriginLocal}, nil
+	if t, ok := localBashTree(p); ok {
+		return t, nil
 	}
 	dir, err := cacheTreeDir()
 	if err != nil {
@@ -119,24 +141,29 @@ func BashTree(p *config.Paths) (Tree, error) {
 		if err != nil {
 			return Tree{}, err
 		}
-		return Tree{Dir: root, Origin: OriginEmbedded}, nil
+		return Tree{Dir: root, Source: TreeTemp}, nil
 	}
 	if err := ensureCache(dir); err != nil {
 		return Tree{}, err
 	}
-	return Tree{Dir: dir, Origin: OriginCache}, nil
+	return Tree{Dir: dir, Source: TreeCache}, nil
 }
 
-// localBashTree is precedence steps 1 and 2.
-func localBashTree(p *config.Paths) (string, bool) {
-	if fsutil.FileExists(filepath.Join(p.Lok8s, "lo")) {
-		return p.Lok8s, true
-	}
+// localBashTree is precedence steps 1 and 2. p.Lok8s is the project's
+// own .lok8s unless PATH_LOK8S moved it: the same dir is TreeProject,
+// another one holding lo is TreeCheckout.
+func localBashTree(p *config.Paths) (Tree, bool) {
 	project := filepath.Join(p.Base, ".lok8s")
-	if project != p.Lok8s && fsutil.FileExists(filepath.Join(project, "lo")) {
-		return project, true
+	if fsutil.FileExists(filepath.Join(p.Lok8s, "lo")) {
+		if p.Lok8s == project {
+			return Tree{Dir: p.Lok8s, Source: TreeProject}, true
+		}
+		return Tree{Dir: p.Lok8s, Source: TreeCheckout}, true
 	}
-	return "", false
+	if project != p.Lok8s && fsutil.FileExists(filepath.Join(project, "lo")) {
+		return Tree{Dir: project, Source: TreeProject}, true
+	}
+	return Tree{}, false
 }
 
 // EnvCacheHome is the XDG variable that relocates the cache.
@@ -393,12 +420,10 @@ func moveLast(names []string, name string) []string {
 // String is the doctor spelling of a tree: its dir and where it comes
 // from.
 func (t Tree) String() string {
-	switch t.Origin {
-	case OriginLocal:
-		return t.Dir + " (checkout or ejected tree)"
-	case OriginCache:
-		return t.Dir + " (cache)"
-	case OriginEmbedded:
+	switch t.Source {
+	case TreeProject, TreeCheckout, TreeCache:
+		return t.Dir + " (" + string(t.Source) + ")"
+	case TreeTemp:
 		return t.Dir + " (temp dir)"
 	default:
 		if t.Dir == "" {

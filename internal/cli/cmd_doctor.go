@@ -305,11 +305,11 @@ func doctorBashMode(w io.Writer, paths *config.Paths) {
 	tree := assets.FindBashTree(paths)
 	argsh := filepath.Join(paths.Bin, "argsh")
 	haveArgsh := fsutil.FileExists(argsh)
-	if tree.Origin == assets.OriginLocal && haveArgsh {
+	if tree.Source.Local() && haveArgsh {
 		return
 	}
 	if !haveArgsh {
-		doctorWarn(w, "bash mode (LO_IMPL=bash, provider plugins): not runnable: argsh missing at "+config.RelTo(paths.Base, argsh)+" (fix: lo init toolchain --with-bash, then .bin/b install)")
+		doctorWarn(w, "bash mode (LO_IMPL=bash, provider plugins): not runnable: argsh missing at "+config.RelTo(paths.Base, argsh)+" (fix: uncomment the bash group in .bin/b.yaml, then .bin/b install)")
 		return
 	}
 	doctorOK(w, "bash mode (LO_IMPL=bash, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")

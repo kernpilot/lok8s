@@ -372,7 +372,7 @@ func TestAssetsEjectBash(t *testing.T) {
 	if raw, _ := os.ReadFile(filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml")); string(raw) != "version: 0.0.1-local\n" {
 		t.Error("the local cilium copy was touched")
 	}
-	if tree, err := assets.BashTree(p); err != nil || tree.Origin != assets.OriginLocal || tree.Dir != p.Lok8s {
+	if tree, err := assets.BashTree(p); err != nil || tree.Source != assets.TreeProject || tree.Dir != p.Lok8s {
 		t.Errorf("BashTree after eject bash: %+v %v", tree, err)
 	}
 
