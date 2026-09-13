@@ -33,8 +33,8 @@ binaries:
   # `lo chat` still drives the argsh mcp builtin (the bash MCP variant), and the
   # parity gates (hack/parity-*.sh) need both implementations. The intended
   # end state per group is documented in docs/guide/toolchain.md. PINNED to
-  # the first tag that carries lo-* assets; until that tag exists `b install`
-  # skips the entry non-fatally.
+  # v0.3.0, the first release that carries the lo-* archives
+  # (docs/releases/v0.3.0.md). Bump the pin with each release.
   # The glob leaves out lo-full-<os>-<arch>.tar.gz on purpose: b scores the
   # two archives the same and the release lists lo-full first, so a plain
   # lo-*.tar.gz installs lo-full under this alias
