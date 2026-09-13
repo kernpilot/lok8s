@@ -77,7 +77,7 @@ commit it.
 
 Packages with tests: `internal/{addons,audit,bootstrap,build,cli,config,
 crds,deploy,domain,driver,driver/capi,driver/kkp,driver/kubehz,
-driver/kubeone,driver/lo,env,gitops,hooks,image,inventory,kapply,kubehz,
+driver/kubeone,driver/lo,env,gitops,hooks,image,initctx,inventory,kapply,kubehz,
 execx,lint,oidc,operator,provider/bridge,provision,recover,render,scaffold,secrets,tilt,toolchain}`.
 Only `internal/ui` has none. `internal/execx` pins the runner every fake
 stands in for: `Look` prefers `.bin` over `PATH` and skips non-executables,
@@ -158,8 +158,9 @@ behind for a post-mortem where supported. What each one covers, and the
 divergences it allow-lists, is in
 [docs/reference/go-migration.md](docs/reference/go-migration.md#parity-gates).
 
-The Go-only surface (`lo assets`, `lo init project`, `lo toolchain`,
-`lo lint --notes`, `--origin`, `--no-eject`) has no bash twin and therefore
+The Go-only surface (`lo assets`, `lo init project`, the `lo init`
+wizard and `--plan`, `lo toolchain`, `lo lint --notes`, `--origin`,
+`--no-eject`) has no bash twin and therefore
 no harness: its gate is `go test ./internal/assets/ ./internal/cli/
 ./internal/scaffold/ ./internal/lint/ ./internal/config/` (precedence,
 never-overwrite, eject + marker, the six-way classification, update
@@ -168,7 +169,31 @@ the toolchain install dry run and the doctor section, the default-equal
 notes, the project-marker walk). `hack/parity-configure.sh` adds one
 Go-only contract case for `lint --notes` in its own synthetic project
 (the note prints, rc and stderr match the plain run); the notes never
-print in a `check - lint` case, so those stay byte-identical. Every harness hands its synthetic project a full
+print in a `check - lint` case, so those stay byte-identical.
+
+The init wizard (bare `lo init` on a terminal, `internal/initctx` and
+`internal/cli/cmd_init_wizard.go`) has three test layers, and none of
+them needs a terminal. `initctx.Detect` runs over `t.TempDir` fixtures
+with git scripted through the `execx.Runner` fake, and the recorded argv
+is the assertion. `initctx.Decide` has one test case per row of the
+situation table. Each case asserts the ordered action kinds and the
+flag-twin command lines.
+
+The huh forms run in huh's accessible mode over a scripted reader. Every
+prompt reads one line, from a one-byte reader because each accessible
+prompt opens its own `bufio.Scanner`. This drives `Ask` end to end with
+the real validators and defaults. The interactive bubbletea rendering of
+the same fields is not under `go test`. The cli tests replace three
+seams (`initTerminal`, `initFormIO`, `initToolchainInstall`) and the
+runner. They compare the help off a terminal, under `CI` and with
+`--yes` byte for byte with `cmd.Help()`, check that `--plan` and
+`--dry-run` write nothing, and check that a confirmed run writes the
+files, records `git init` on the fake and the toolchain call on its
+seam. Nothing reaches the network. `hack/parity-configure.sh` adds the
+Go-only contract cases: `lo init --plan` in a project root and in an
+empty directory (rc 0, the card and the commands, the tree unchanged),
+and bare `lo init` off a terminal (the help, rc 0, no writes).
+`hack/parity-leaves.sh` keeps pinning bare `lo init` at rc 0. Every harness hands its synthetic project a full
 `.lok8s` tree, so the resolver's precedence picks the local copy and the
 harnesses are unaffected — keep it that way: a harness project WITHOUT a
 `.lok8s` tree would eject into its work dir on the Go side only.
