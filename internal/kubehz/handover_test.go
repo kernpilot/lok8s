@@ -9,7 +9,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +202,25 @@ func TestHandoverExtractBundleNamesAFailedWrite(t *testing.T) {
 	ho.reset()
 	mustErr(t, ho.ctx.extractBundle(truncated, filepath.Join(ho.base, "work2")))
 	mustContain(t, ho.output(), "neither a bundle directory nor a readable .tar.gz archive")
+}
+
+// Only a write error on the target names the write. A read error on the
+// bundle file is also a *fs.PathError, and that one is the archive's fault.
+func TestHandoverExtractCopyErrorClassifiesByOperation(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	bundle := filepath.Join(ho.base, "bundle.tar.gz")
+	target := filepath.Join(ho.base, "work", "ca.crt")
+
+	mustErr(t, ho.ctx.extractCopyError(bundle, target, &fs.PathError{Op: "write", Path: target, Err: errors.New("no space left on device")}))
+	mustContain(t, ho.output(), "handover: cannot write "+target+" from "+bundle)
+
+	ho.reset()
+	mustErr(t, ho.ctx.extractCopyError(bundle, target, &fs.PathError{Op: "read", Path: bundle, Err: errors.New("input/output error")}))
+	mustContain(t, ho.output(), "neither a bundle directory nor a readable .tar.gz archive")
+	if strings.Contains(ho.output(), "cannot write") {
+		t.Fatalf("a read error on the bundle was reported as a write failure:\n%s", ho.output())
+	}
 }
 
 // A link entry is skipped, and the skip is visible under DEBUG.

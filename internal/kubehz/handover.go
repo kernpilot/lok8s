@@ -154,12 +154,13 @@ func (c *Context) extractBundle(bundle, dir string) error {
 	return c.walkBundle(bundle, extract)
 }
 
-// extractCopyError classifies a failed io.Copy of one entry: the file's
-// own write error (*fs.PathError: disk full, a closed file system) names
-// the write; anything else came from the gzip/tar reader, so the archive
-// is the unreadable one.
+// extractCopyError classifies a failed io.Copy of one entry: the target
+// file's own write error (a *fs.PathError with Op "write": disk full, a
+// closed file system) names the write; anything else, including a read
+// error on the bundle file itself (Op "read"), came from the gzip/tar
+// side, so the archive is the unreadable one.
 func (c *Context) extractCopyError(bundle, target string, err error) error {
-	if _, isWrite := errors.AsType[*fs.PathError](err); isWrite {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok && pe.Op == "write" {
 		c.errorf("handover: cannot write %s from %s: %v", target, bundle, err)
 		return ErrHandled
 	}
