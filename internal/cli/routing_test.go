@@ -510,3 +510,25 @@ func TestRoutingIgnoresInheritedPathBin(t *testing.T) {
 		t.Errorf("PATH_BIN=%q exported without an ambient value", v)
 	}
 }
+
+// F6: unknown keys are lint warnings, never a silent `go`.
+func TestRoutingUnknownKeysWarnInLint(t *testing.T) {
+	p := routedProject(t, "    defaults: bash\n    bash:\n      command: [registry]\n", true)
+	testutil.WriteFile(t, filepath.Join(p.Base, config.ProjectFile),
+		"kind: Project\nspec:\n  implementations: {default: bash}\n  implementation:\n    defaults: bash\n    bash:\n      command: [registry]\n")
+	r := newRouting(p)
+	if r.err != nil || r.active() {
+		t.Fatalf("routing = %+v", r)
+	}
+	setOSArgs(t, "lint", "--domain", "none.dev")
+	_, stderr, _ := runLo(t, NewRoot(p), "lint", "--domain", "none.dev")
+	for _, want := range []string{
+		"[warn]\033[0m lok8s.yaml: spec.implementations: unknown key. Use spec.implementation.\n",
+		"[warn]\033[0m lok8s.yaml: spec.implementation: unknown key \"defaults\".\n",
+		"[warn]\033[0m lok8s.yaml: spec.implementation.bash: unknown key \"command\".\n",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("missing %q in:\n%s", want, stderr)
+		}
+	}
+}

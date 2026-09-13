@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -57,6 +58,10 @@ type Implementation struct {
 	Tree string
 	// TreeDir is <base>/<Tree>.
 	TreeDir string
+	// Warnings lists the keys the loader did not recognise (a typo such
+	// as `defaults:` or `spec.implementations:` would otherwise select
+	// Go silently); `lo lint` prints them.
+	Warnings []string
 }
 
 // Routes reports whether the block routes anything to bash: the whole
@@ -118,6 +123,7 @@ func LoadImplementation(base string) (Implementation, error) {
 		return impl, nil
 	}
 	block := doc.Spec.Implementation
+	impl.Warnings = unknownImplementationKeys(raw)
 
 	switch block.Default {
 	case "", ImplGo:
@@ -138,6 +144,45 @@ func LoadImplementation(base string) (Implementation, error) {
 	}
 	impl.Tree, impl.TreeDir = tree, filepath.Join(base, tree)
 	return impl, nil
+}
+
+// unknownImplementationKeys lists the keys under spec.implementation (and
+// spec.implementation.bash) the loader does not read, plus a
+// `spec.implementations` typo, as lint warnings. Unknown keys elsewhere
+// in the file are not this loader's business.
+func unknownImplementationKeys(raw []byte) []string {
+	var generic struct {
+		Spec map[string]any `yaml:"spec"`
+	}
+	if yaml.Unmarshal(raw, &generic) != nil {
+		return nil
+	}
+	var warnings []string
+	if _, ok := generic.Spec["implementations"]; ok {
+		warnings = append(warnings, ProjectFile+": spec.implementations: unknown key. Use spec.implementation.")
+	}
+	block, _ := generic.Spec["implementation"].(map[string]any)
+	for _, key := range sortedKeys(block) {
+		if key != "default" && key != "bash" {
+			warnings = append(warnings, fmt.Sprintf("%s: spec.implementation: unknown key %q.", ProjectFile, key))
+		}
+	}
+	bash, _ := block["bash"].(map[string]any)
+	for _, key := range sortedKeys(bash) {
+		if key != "commands" && key != "tree" {
+			warnings = append(warnings, fmt.Sprintf("%s: spec.implementation.bash: unknown key %q.", ProjectFile, key))
+		}
+	}
+	return warnings
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // implementationTree validates spec.implementation.bash.tree and returns

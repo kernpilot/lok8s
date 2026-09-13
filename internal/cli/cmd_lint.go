@@ -38,11 +38,14 @@ func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 			// Go-only: the spec.implementation block of lok8s.yaml (every
 			// other command refuses to start on an invalid block; lint
-			// reports it, and a missing routed tree, as a finding). A
-			// valid or absent block prints nothing, so the output stays
-			// byte-identical to bash.
+			// reports it, and a missing routed tree, as a finding, and
+			// unknown keys as warnings). A valid or absent block prints
+			// nothing, so the output stays byte-identical to bash.
 			l := &lint.Linter{Paths: paths, Out: cmd.OutOrStdout(), ErrOut: stderr,
-				Implementation: func() error { return newRouting(paths).problem() }}
+				Implementation: func() ([]string, error) {
+					r := newRouting(paths)
+					return r.impl.Warnings, r.problem()
+				}}
 			if err := l.Run(d); err != nil {
 				return ErrHandled
 			}

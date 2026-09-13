@@ -139,3 +139,25 @@ func TestLoadImplementationSymlinkRuleOnlyWhenRouting(t *testing.T) {
 		t.Errorf("shape rule without routing: %v", err)
 	}
 }
+
+func TestLoadImplementationWarnsOnUnknownKeys(t *testing.T) {
+	base := t.TempDir()
+	writeProjectFile(t, base, "spec:\n  implementations: {default: bash}\n  implementation:\n    zeta: 1\n    defaults: bash\n    bash:\n      commands: []\n      trees: x\n")
+	got, err := LoadImplementation(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"lok8s.yaml: spec.implementations: unknown key. Use spec.implementation.",
+		`lok8s.yaml: spec.implementation: unknown key "defaults".`,
+		`lok8s.yaml: spec.implementation: unknown key "zeta".`,
+		`lok8s.yaml: spec.implementation.bash: unknown key "trees".`,
+	}, "\n")
+	if strings.Join(got.Warnings, "\n") != want {
+		t.Errorf("warnings:\n%s\nwant:\n%s", strings.Join(got.Warnings, "\n"), want)
+	}
+	writeProjectFile(t, base, "spec:\n  implementation:\n    default: go\n")
+	if got, _ := LoadImplementation(base); len(got.Warnings) != 0 {
+		t.Errorf("clean block warned: %v", got.Warnings)
+	}
+}

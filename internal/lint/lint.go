@@ -32,8 +32,9 @@ type Linter struct {
 	ErrOut io.Writer
 	// Implementation validates the spec.implementation block of the
 	// project file (Go-only; the cli supplies it, nil skips the check).
-	// A non-nil error is one repo-global finding.
-	Implementation func() error
+	// The warnings (unknown keys) print as such; a non-nil error is one
+	// repo-global finding.
+	Implementation func() (warnings []string, err error)
 }
 
 // Run is main::lint: per-domain checks for the given domain (all domains when
@@ -82,7 +83,11 @@ func (l *Linter) implementation() bool {
 	if l.Implementation == nil {
 		return true
 	}
-	if err := l.Implementation(); err != nil {
+	warnings, err := l.Implementation()
+	for _, w := range warnings {
+		ui.WarnTo(l.ErrOut, "%s", w)
+	}
+	if err != nil {
 		ui.ErrorTo(l.ErrOut, "%v", err)
 		return false
 	}
