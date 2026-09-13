@@ -222,3 +222,32 @@ func mustEval(p string) string {
 	out, _ := filepath.EvalSymlinks(p)
 	return out
 }
+
+// PATH_LOK8S naming a tree the binary extracted (the cache manifest at
+// its root) is not the project's .lok8s: the shim exports it to bash
+// children, and a nested Go lo must not take the cache for the project.
+func TestResolvePathsIgnoresACacheTreeInPathLok8s(t *testing.T) {
+	base := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "lok8s")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, CacheMarker), []byte("lo: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH_BASE", base)
+	t.Setenv("PATH_LOK8S", cache)
+	p, err := ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Lok8s != filepath.Join(base, ".lok8s") {
+		t.Fatalf("Lok8s = %s, want the project default", p.Lok8s)
+	}
+	// A plain checkout in PATH_LOK8S is honoured as before.
+	checkout := t.TempDir()
+	t.Setenv("PATH_LOK8S", checkout)
+	if p, _ := ResolvePaths(); p.Lok8s != checkout {
+		t.Fatalf("Lok8s = %s, want %s", p.Lok8s, checkout)
+	}
+}

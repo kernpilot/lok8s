@@ -42,7 +42,7 @@ export XDG_CACHE_HOME="${WORK}/cache"
 PARITY_DIR_GO="${BARE}" PARITY_DIR_BASH="${BARE}" check '^bash ' version
 unset XDG_CACHE_HOME
 cache_tree="$(echo "${WORK}"/cache/lok8s/*/lok8s)"
-if [[ -x "${cache_tree}/lo" && -f "${cache_tree}/libs/version" && -f "${cache_tree}/.lo-origin" ]]; then
+if [[ -x "${cache_tree}/lo" && -f "${cache_tree}/libs/version" && -f "${cache_tree}/.lo-cache" ]]; then
   echo "ok: embedded bash tree extracted into the cache (${cache_tree#"${WORK}"/})"
 else
   fail "embedded bash tree not extracted: ${cache_tree}"

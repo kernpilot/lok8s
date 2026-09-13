@@ -152,8 +152,10 @@ func CurrentPolicy() Policy {
 	return policy
 }
 
-// Cleanup removes the per-run temp dir (main defers it; the exec shim never
-// reaches here, and never materialized anything before exec either).
+// Cleanup removes the per-run temp dir (main defers it). The exec shim
+// never reaches here and never uses this dir: the bash tree it execs lives
+// in the versioned cache or its temp twin (bashtree.go), both reused
+// across runs, so nothing is left behind by the exec.
 func Cleanup() {
 	mu.Lock()
 	defer mu.Unlock()
@@ -341,8 +343,12 @@ func unitDir(p *config.Paths, u Unit) string {
 // unitExists is the precedence test: a data unit's dir exists; the bash
 // unit's entrypoint (.lok8s/lo) exists. The entrypoint is the key on
 // purpose: a bash eject writes it LAST, so a half-written tree never
-// counts as local (ejectBash).
+// counts as local (ejectBash). A cache tree (isCacheTree) is never local:
+// nothing in it counts, nothing is written into it.
 func unitExists(p *config.Paths, u Unit) bool {
+	if isCacheTree(p.Lok8s) {
+		return false
+	}
 	if u.Kind == KindBash {
 		return fsutil.FileExists(filepath.Join(p.Lok8s, "lo"))
 	}
@@ -425,6 +431,9 @@ func resolve(p *config.Paths, rel string, pol Policy) (string, Origin, error) {
 		// Precedence: the project's copy wins, whatever its content.
 		return local, OriginLocal, nil
 	}
+	if isCacheTree(p.Lok8s) {
+		pol = PolicyNever // never write into the binary's cache
+	}
 	if pol == PolicyNever {
 		root, err := tempUnit(u)
 		if err != nil {
@@ -485,7 +494,20 @@ func Eject(p *config.Paths, rel string) (Unit, error) {
 	if unitExists(p, u) {
 		return u, fmt.Errorf("%w: %s", ErrExists, unitDir(p, u))
 	}
+	if isCacheTree(p.Lok8s) {
+		return u, fmt.Errorf("%w: %s", ErrCacheTree, p.Lok8s)
+	}
 	return u, eject(p, u)
+}
+
+// ErrCacheTree marks a write aimed at the binary's cache tree (PATH_LOK8S
+// naming it).
+var ErrCacheTree = errors.New("assets: PATH_LOK8S names the bash tree cache, not a project tree")
+
+// isCacheTree reports whether dir is a tree the binary extracted (it
+// carries the cache manifest).
+func isCacheTree(dir string) bool {
+	return dir != "" && fsutil.FileExists(filepath.Join(dir, config.CacheMarker))
 }
 
 // ErrExists marks an explicit eject onto an existing local copy.

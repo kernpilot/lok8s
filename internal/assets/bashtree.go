@@ -12,17 +12,22 @@ package assets
 //  2. <project>/.lok8s when it holds `lo` (the same, with PATH_LOK8S
 //     pointing elsewhere).
 //  3. A versioned cache, ${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/lok8s,
-//     extracted once from the embed (stage dir + rename; a manifest with
-//     one sha256 per file is verified on every use, so a partial or stale
-//     extract is redone).
-//  4. A per-run temp dir when no cache location can be derived (neither
-//     XDG_CACHE_HOME nor HOME is set).
+//     extracted once from the embed (stage dir + rename; the manifest
+//     config.CacheMarker with one sha256 per file is verified on every
+//     use, so a partial, stale or foreign-file extract is redone). A
+//     relative XDG_CACHE_HOME is ignored, as the XDG spec says.
+//  4. The same tree under os.TempDir()/lok8s-<uid>/<version>/lok8s when
+//     no cache location can be derived (neither XDG_CACHE_HOME nor HOME)
+//     or the cache cannot be written (read-only HOME). Same manifest,
+//     reused across runs, so an exec'd shim leaks nothing.
 //
 // A checkout or ejected tree ALWAYS wins over the cache and is never
-// written to. The cache is outside the project, so the eject policy
+// written to. A cache tree is never local: PATH_LOK8S naming one (the
+// shim exports it to bash children, and a nested Go lo inherits it) is
+// classified TreeCache, and config.ResolvePaths ignores it for the
+// project's .lok8s. The cache is outside the project, so the eject policy
 // (--no-eject / LO_ASSETS_EJECT=never, "write nothing into the project")
-// does not switch it off; only the missing-HOME case falls back to the
-// temp dir.
+// does not switch it off.
 //
 // The project's own .lok8s (config.Paths.Lok8s, where the data units are
 // ejected) and the bash tree are the SAME directory only in a project that
@@ -39,9 +44,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // TreeSource says where a resolved bash tree comes from. It is typed so
@@ -59,8 +67,9 @@ const (
 	// TreeCache — the copy embedded in the binary, extracted into the
 	// versioned cache.
 	TreeCache TreeSource = "cache"
-	// TreeTemp — the embedded copy in the per-run temp dir (no cache dir
-	// could be derived).
+	// TreeTemp — the embedded copy under os.TempDir()/lok8s-<uid>/<version>
+	// (no cache dir could be derived or written); verified and reused like
+	// the cache.
 	TreeTemp TreeSource = "temp"
 	// TreeNone — nothing on disk yet (FindBashTree only): Dir is the cache
 	// dir BashTree would fill, or empty when none can be derived.
@@ -130,37 +139,43 @@ func FindBashTree(p *config.Paths) Tree {
 }
 
 // BashTree resolves the bash tree (precedence in the file comment),
-// extracting the embedded copy into the cache on first use.
+// extracting the embedded copy into the cache on first use. A cache that
+// cannot be derived or written falls back to the temp twin.
 func BashTree(p *config.Paths) (Tree, error) {
 	if t, ok := localBashTree(p); ok {
 		return t, nil
 	}
 	dir, err := cacheTreeDir()
-	if err != nil {
-		root, err := tempTree()
-		if err != nil {
-			return Tree{}, err
+	if err == nil {
+		if err = ensureCache(dir); err == nil {
+			return Tree{Dir: dir, Source: TreeCache}, nil
 		}
-		return Tree{Dir: root, Source: TreeTemp}, nil
 	}
-	if err := ensureCache(dir); err != nil {
+	ui.DebugTo(Stderr, "assets: bash tree cache unavailable (%v); using the temp tree", err)
+	tmp, err := tempCacheDir()
+	if err != nil {
 		return Tree{}, err
 	}
-	return Tree{Dir: dir, Source: TreeCache}, nil
+	if err := ensureCache(tmp); err != nil {
+		return Tree{}, err
+	}
+	return Tree{Dir: tmp, Source: TreeTemp}, nil
 }
 
 // localBashTree is precedence steps 1 and 2. p.Lok8s is the project's
 // own .lok8s unless PATH_LOK8S moved it: the same dir is TreeProject,
-// another one holding lo is TreeCheckout.
+// another one holding lo is TreeCheckout. A cache tree (the manifest at
+// its root) is neither: it is skipped here and served as TreeCache by the
+// caller, so nothing ever counts it as local.
 func localBashTree(p *config.Paths) (Tree, bool) {
 	project := filepath.Join(p.Base, ".lok8s")
-	if fsutil.FileExists(filepath.Join(p.Lok8s, "lo")) {
+	if !isCacheTree(p.Lok8s) && fsutil.FileExists(filepath.Join(p.Lok8s, "lo")) {
 		if p.Lok8s == project {
 			return Tree{Dir: p.Lok8s, Source: TreeProject}, true
 		}
 		return Tree{Dir: p.Lok8s, Source: TreeCheckout}, true
 	}
-	if project != p.Lok8s && fsutil.FileExists(filepath.Join(project, "lo")) {
+	if project != p.Lok8s && !isCacheTree(project) && fsutil.FileExists(filepath.Join(project, "lo")) {
 		return Tree{Dir: project, Source: TreeProject}, true
 	}
 	return Tree{}, false
@@ -172,9 +187,14 @@ const EnvCacheHome = "XDG_CACHE_HOME"
 // ErrNoCacheDir reports that no cache location can be derived.
 var ErrNoCacheDir = errors.New("assets: no cache directory (set XDG_CACHE_HOME or HOME)")
 
-// cacheTreeDir is ${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/lok8s.
+// cacheTreeDir is ${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/lok8s. A
+// relative XDG_CACHE_HOME is invalid per the XDG base directory spec and
+// is ignored (it would land the cache inside the working directory).
 func cacheTreeDir() (string, error) {
 	root := os.Getenv(EnvCacheHome)
+	if !filepath.IsAbs(root) {
+		root = ""
+	}
 	if root == "" {
 		home := os.Getenv("HOME")
 		if home == "" {
@@ -185,9 +205,28 @@ func cacheTreeDir() (string, error) {
 	return filepath.Join(root, "lok8s", Version(), "lok8s"), nil
 }
 
+// tempCacheDir is the cache's temp twin: os.TempDir()/lok8s-<uid>/<version>/lok8s.
+// The per-user base dir is created 0700 and must stay a plain directory
+// of this user with that mode (another user's or a symlink's tree would be
+// code this process execs).
+func tempCacheDir() (string, error) {
+	base := filepath.Join(os.TempDir(), fmt.Sprintf("lok8s-%d", os.Getuid()))
+	if err := os.Mkdir(base, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return "", err
+	}
+	info, err := os.Lstat(base)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || !ownedByUs(info) {
+		return "", fmt.Errorf("assets: %s is not a private directory of this user (mode %o); remove it", base, info.Mode().Perm())
+	}
+	return filepath.Join(base, Version(), "lok8s"), nil
+}
+
 // cacheManifest is the whole-tree manifest the cache carries at its root
-// (MarkerFile, the same format as a unit marker; Files covers every file
-// of the mirror). Lo pins the version the tree was extracted from.
+// (config.CacheMarker, the unit marker format; Files covers every file of
+// the mirror). Lo pins the version the tree was extracted from.
 func cacheManifest() (*Marker, error) {
 	files := map[string]string{}
 	err := fs.WalkDir(FS(), ".", func(fp string, d fs.DirEntry, err error) error {
@@ -207,11 +246,13 @@ func cacheManifest() (*Marker, error) {
 	return &Marker{Lo: Version(), EjectedAt: Now(), Files: files}, nil
 }
 
-// cacheValid reports whether dir holds a complete, byte-identical copy of
-// the embedded tree: the manifest names this version and every file, and
-// every file on disk hashes to its entry with the right mode.
+// cacheValid reports whether dir holds EXACTLY the embedded tree: the
+// manifest names this version and every file, every file on disk hashes
+// to its entry with the right mode, and nothing else is there (no extra
+// file, no symlink, no foreign entry). The tree is code this process
+// execs, so a copy with anything unlisted is replaced, not trusted.
 func cacheValid(dir string) bool {
-	m, err := ReadMarker(filepath.Join(dir, MarkerFile))
+	m, err := ReadMarker(filepath.Join(dir, config.CacheMarker))
 	if err != nil || m == nil || m.Lo != Version() {
 		return false
 	}
@@ -224,7 +265,7 @@ func cacheValid(dir string) bool {
 			return false
 		}
 		target := filepath.Join(dir, filepath.FromSlash(fp))
-		info, err := os.Stat(target)
+		info, err := os.Lstat(target)
 		if err != nil || !info.Mode().IsRegular() {
 			return false
 		}
@@ -236,7 +277,29 @@ func cacheValid(dir string) bool {
 			return false
 		}
 	}
-	return true
+	// Nothing unlisted: every entry below dir is a listed file, its
+	// directory, or the manifest.
+	extra := false
+	_ = filepath.WalkDir(dir, func(fp string, d fs.DirEntry, err error) error {
+		if err != nil {
+			extra = true
+			return fs.SkipAll
+		}
+		rel, _ := filepath.Rel(dir, fp)
+		rel = filepath.ToSlash(rel)
+		if rel == "." || rel == config.CacheMarker {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if _, ok := want.Files[rel]; !ok || !d.Type().IsRegular() {
+			extra = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return !extra
 }
 
 // ensureCache extracts the embedded tree into dir unless a valid copy is
@@ -277,7 +340,39 @@ func ensureCache(dir string) error {
 	if !won && !cacheValid(dir) {
 		return fmt.Errorf("assets: bash tree cache at %s is not the embedded tree (remove it and retry)", dir)
 	}
+	if won {
+		sweepCache(dir)
+	}
 	return nil
+}
+
+// staleStageAge is how old an abandoned stage dir must be before the sweep
+// removes it; a younger one may belong to an extract still running.
+const staleStageAge = time.Hour
+
+// sweepCache removes what an earlier extract left beside dir: abandoned
+// stage and aside dirs older than staleStageAge in the version dir, and
+// the other <version>/ dirs under the cache root (only the running
+// binary's version is kept; an older binary re-extracts on its next use).
+func sweepCache(dir string) {
+	parent := filepath.Dir(dir)
+	prefix := "." + filepath.Base(dir) + ".lo-"
+	entries, _ := os.ReadDir(parent)
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleStageAge {
+			_ = os.RemoveAll(filepath.Join(parent, e.Name()))
+		}
+	}
+	root := filepath.Dir(parent)
+	versions, _ := os.ReadDir(root)
+	for _, v := range versions {
+		if v.IsDir() && v.Name() != filepath.Base(parent) {
+			_ = os.RemoveAll(filepath.Join(root, v.Name()))
+		}
+	}
 }
 
 // writeTree writes the whole embedded tree below root with its manifest.
@@ -299,22 +394,7 @@ func writeTree(root string) error {
 	if err != nil {
 		return err
 	}
-	return m.write(filepath.Join(root, MarkerFile))
-}
-
-// tempTree materializes the whole tree under the per-run temp dir (once)
-// and returns it. Units already served from there stay where they are:
-// the data units land at their own rels, so the temp root is one
-// coherent tree.
-func tempTree() (string, error) {
-	for _, u := range Units() {
-		if _, err := tempUnit(u); err != nil {
-			return "", err
-		}
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	return tempRoot, nil
+	return m.write(filepath.Join(root, config.CacheMarker))
 }
 
 // ejectBash writes the bash unit (the code half) into the project's
@@ -429,7 +509,7 @@ func (t Tree) String() string {
 		if t.Dir == "" {
 			return "none (" + ErrNoCacheDir.Error() + ")"
 		}
-		return t.Dir + " (cache, extracted on first use)"
+		return t.Dir + " (cache, not extracted yet)"
 	}
 }
 
