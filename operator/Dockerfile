@@ -1,7 +1,9 @@
 # ── stage 1: the lo binary ──────────────────────────────────────────────
 # The hooks under /hooks are shims that exec `lo operator <hook>`; the hook
 # bodies are Go (internal/operator). Built here from the same tree the image
-# copies, stamped with .lok8s/VERSION like `make build`.
+# copies, stamped from the embedded mirror's VERSION with the Makefile's
+# -ldflags (internal/assets.BuildVersion; the assets version test pins the
+# flag across the Makefile, goreleaser and this file).
 FROM golang:1.26.8-alpine AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -13,9 +15,8 @@ RUN go mod download
 COPY kustomize/ kustomize/
 COPY cmd/ cmd/
 COPY internal/ internal/
-COPY .lok8s/VERSION .lok8s/VERSION
 RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X github.com/kernpilot/lok8s/internal/cli.version=$(cat .lok8s/VERSION)" \
+      -ldflags "-s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion=$(cat internal/assets/lok8s/VERSION)" \
       -o /out/lo ./cmd/lo
 
 # ── stage 2: shell-operator + tools + hooks ─────────────────────────────
