@@ -44,7 +44,9 @@ for name in "${HARNESSES[@]}"; do
   if (( rc == 0 && ok > 0 )); then
     printf '  ok    parity-%-12s %4d ok\n' "${name}" "${ok}"
   elif (( rc == 0 )); then
-    printf '  FAIL  parity-%-12s %4d ok, no ok: line (the run compared nothing), rc %d\n' "${name}" "${ok}" "${rc}"
+    # rc is 0 and ok is 0 on this branch by construction: name the harness
+    # and the fixed values, no placeholders.
+    printf '  FAIL  parity-%-12s rc 0, no ok: line (the run compared nothing)\n' "${name}"
     sed 's/^/        /' "${log}"
     failed=$((failed + 1))
   else

@@ -39,8 +39,10 @@ run_parity() {
   stub_harness silent 'echo "nothing compared"; exit 0'
   run_parity silent
   [ "${status}" -eq 1 ]
-  [[ "${output}" == *"FAIL  parity-silent "* ]]
-  [[ "${output}" == *"no ok: line"* ]]
+  # The line names the harness and the fixed "rc 0, no ok: line". It carries
+  # no count placeholder: both values are 0 by construction on this branch.
+  [[ "${output}" == *"FAIL  parity-silent "*"rc 0, no ok: line (the run compared nothing)"* ]]
+  [[ "${output}" != *"0 ok, no ok: line"* ]]
   [[ "${output}" == *"parity: 1 harness(es) failed"* ]]
 }
 
