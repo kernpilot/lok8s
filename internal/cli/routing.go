@@ -54,6 +54,9 @@ var goOnlySubcommands = map[string][]string{
 // sharedState names the routed commands whose state Go also writes on
 // its own paths; doctor warns about them (a customised lib then drifts
 // from what the Go side maintains).
+//
+// #nosec G101 -- command names and doctor hints; the "secrets" key is
+// the `lo secrets` command, not a credential.
 var sharedState = map[string]string{
 	"registry":  "lo up manages the same registries with Go code",
 	"image":     "lo up manages the same cache registry with Go code",
