@@ -33,15 +33,21 @@ type Driver struct {
 	Bootstrap []string
 	// kubehz is the spec.kubehz block for the hosted control plane.
 	kubehz bool
+	// stubs is whether the file carries the KubeOne fields the
+	// lok8s-cluster-spec skill calls minimal (spec.kubernetes.version,
+	// spec.provider) as commented stubs with the documented example
+	// values: there is no default for them, they must be filled in before
+	// lo provision.
+	stubs bool
 }
 
 // Drivers is the menu, in the order the wizard offers it.
 var Drivers = []Driver{
 	{Name: "lo", Kind: "Lo", Label: "lo: kind on local Docker (dev clusters)", Bootstrap: []string{"cilium"}},
-	{Name: "kubeone", Kind: "KubeOne", Label: "kubeone: KubeOne on VMs or bare metal (self-managed production)"},
+	{Name: "kubeone", Kind: "KubeOne", Label: "kubeone: KubeOne on VMs or bare metal (self-managed production)", stubs: true},
 	{Name: "capi", Kind: "Capi", Label: "capi: Cluster API managed clusters"},
 	{Name: "kkp", Kind: "Kkp", Label: "kkp: Kubermatic (KKP) user clusters"},
-	{Name: "kubehz-hosted", Kind: "KubeOne", Label: "kubehz-hosted: kubehz runs the control plane, workers on your Hetzner account", kubehz: true},
+	{Name: "kubehz-hosted", Kind: "KubeOne", Label: "kubehz-hosted: kubehz runs the control plane, workers on your Hetzner account", kubehz: true, stubs: true},
 }
 
 // DriverNames lists the --driver values.
@@ -96,13 +102,26 @@ func ClusterSpec(dom, driverName string) (string, error) {
 	fmt.Fprintf(&b, "# clusters/%s/cluster.lok8s.yaml — the %s cluster (driver: %s).\n", dom, dom, d.Name)
 	b.WriteString("# The minimal spec: every other key has a documented default (lo lint --notes\n")
 	b.WriteString("# names the ones you can drop). Schema: docs/reference/specs.md.\n")
+	if d.stubs {
+		b.WriteString("# Fill in before lo provision: spec.kubernetes.version and spec.provider (the\n")
+		b.WriteString("# commented stubs below carry the documented example values).\n")
+	}
 	b.WriteString("apiVersion: cluster.lok8s.dev/v1beta1\n")
 	b.WriteString("kind: " + d.Kind + "\n")
 	b.WriteString("metadata:\n")
 	b.WriteString("  name: " + ClusterName(dom) + "\n")
 	b.WriteString("spec:\n")
+	if d.stubs {
+		b.WriteString("  # kubernetes:\n")
+		b.WriteString("  #   version: \"v1.31.12\"              # quote the version\n")
+	}
 	b.WriteString("  cluster:\n")
 	b.WriteString("    domain: " + dom + "\n")
+	if d.stubs {
+		b.WriteString("  # provider:\n")
+		b.WriteString("  #   name: hetzner\n")
+		b.WriteString("  #   configRef: hetzner.json          # see the lok8s-bare-metal skill\n")
+	}
 	if d.kubehz {
 		b.WriteString("  kubehz:\n")
 		b.WriteString("    hosting: hosted                  # the platform runs the control plane\n")

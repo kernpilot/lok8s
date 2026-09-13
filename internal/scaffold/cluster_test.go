@@ -44,6 +44,19 @@ func TestClusterSpecPerDriver(t *testing.T) {
 		if has := strings.Contains(got, "hosting: hosted"); has != (d.Name == "kubehz-hosted") {
 			t.Errorf("%s: kubehz block present=%v", d.Name, has)
 		}
+		// The KubeOne kinds carry the skill's minimal fields as commented
+		// stubs with the documented example values and the fill-in header;
+		// the others carry none of it.
+		wantStubs := d.Kind == "KubeOne"
+		for _, stub := range []string{
+			"# Fill in before lo provision: spec.kubernetes.version and spec.provider",
+			"  # kubernetes:\n  #   version: \"v1.31.12\"",
+			"  # provider:\n  #   name: hetzner\n  #   configRef: hetzner.json",
+		} {
+			if strings.Contains(got, stub) != wantStubs {
+				t.Errorf("%s: stub %q present=%v, want %v", d.Name, stub, !wantStubs, wantStubs)
+			}
+		}
 		// The kind the readers resolve is the driver's.
 		file := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
 		os.WriteFile(file, []byte(got), 0o600)
