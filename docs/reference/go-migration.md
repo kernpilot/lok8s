@@ -312,7 +312,7 @@ itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
 
 ```yaml
 # .lo-origin — written by lo when it ejected this asset. Do not edit.
-lo: 0.1.0
+lo: 0.3.0
 ejectedAt: 2026-09-03T10:00:00Z
 files:
   chart.yaml: sha256:…
