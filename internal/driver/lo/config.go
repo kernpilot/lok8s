@@ -194,7 +194,7 @@ func readNodeConfig(clusterYAML string, errOut io.Writer) error {
 
 	cpCount, workerCount, hostPorts := "1", "0", defaultHostPorts
 	if !yqsem.IsNull(yqsem.Lookup(root, "spec", "nodes")) {
-		cpCount = yqsem.Or(yqsem.Lookup(root, "spec", "nodes", "controlPlane"), "1")
+		cpCount = yqsem.Or(yqsem.Lookup(root, "spec", "nodes", "controlPlane"), DefaultControlPlane)
 		workerCount = yqsem.Or(yqsem.Lookup(root, "spec", "nodes", "workers"), "0")
 		hp := yqsem.Raw(yqsem.Lookup(root, "spec", "nodes", "hostPorts"))
 		if hp != "null" && hp != "" {

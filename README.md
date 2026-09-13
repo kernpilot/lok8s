@@ -113,15 +113,16 @@ tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 **Two builds, one tree.** `lo` (the default, ~50 MB) is the *core* build: it
 runs the manifest render through the pinned `kustomize` binary and the two
 exec generators (khelm's `ChartRenderer`, the `secrets.lok8s.dev` Secret
-plugin) that `lo init toolchain` installs into the project with `b`. `lo-full`
+plugin) that `lo toolchain install` installs into the project with `b`. `lo-full`
 (`bash lo-install.sh --full`, ~120 MB) links the same kustomize API and khelm
 release into the binary and renders in-process — no `kustomize`, `khelm` or
 `.kustomize/` needed. Both install as `lo`; `lo --version` names the build
 (`(core)` / `(full)`), and both render byte-identical output — that is the
 gate, see [the Go binary reference](docs/reference/go-migration.md#core-and-full).
 
-Then scaffold a project — `lo init project` writes `clusters/`, `lok8s.yaml`,
-the `.gitignore` entries and `.bin/b.yaml`, then installs
+Then scaffold a project: `lo init project` writes `clusters/`, `lok8s.yaml`,
+the `.gitignore` entries and a `mise.toml` (files only, no network).
+`lo toolchain install` writes `.bin/b.yaml`, installs
 [`b`](https://github.com/fentas/b) itself into `.bin/` (pinned release,
 SHA-256-verified, no `curl | sh`) and runs `b install` for the pinned toolchain
 (kubectl, kustomize, khelm, the Secret plugin; kind, Tilt, mkcert for the dev
@@ -130,11 +131,12 @@ and ejected into `.lok8s/` on first use:
 
 ```bash
 mkdir my-project && cd my-project
-lo init project                # scaffold + toolchain (--no-toolchain skips the network step)
-lo doctor                      # b, kustomize, khelm and the Secret plugin at the pins
+lo init project                # the project files
+lo toolchain install           # b + the pinned toolchain into .bin/
+lo toolchain doctor            # b, kustomize, khelm and the Secret plugin at the pins
 ```
 
-Joining a project that already has `.bin/b.yaml`? `lo init toolchain` never
+Joining a project that already has `.bin/b.yaml`? `lo toolchain install` never
 overwrites it — it prints a diff against the pins this `lo` was built with —
 and `b install` reproduces the committed `b.lock`. The full profile-based
 path (`b env add github.com/kernpilot/lok8s#local && b install`, which also

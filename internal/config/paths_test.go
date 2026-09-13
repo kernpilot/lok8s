@@ -97,7 +97,7 @@ func TestResolvePathsFallsBackToCwdOutsideProject(t *testing.T) {
 }
 
 // Since the eject model a project needs no .lok8s tree: `clusters/` or
-// `lok8s.yaml` marks the root, `.lok8s/lo` stays a fallback marker.
+// `lok8s.yaml` marks the root. `.lok8s/lo` is not a marker (WP9).
 func TestResolvePathsRecognizesEjectModelMarkers(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -105,10 +105,6 @@ func TestResolvePathsRecognizesEjectModelMarkers(t *testing.T) {
 	}{
 		{"clusters dir", func(base string) { os.MkdirAll(filepath.Join(base, "clusters"), 0o755) }},
 		{"lok8s.yaml", func(base string) { os.WriteFile(filepath.Join(base, "lok8s.yaml"), []byte("kind: Project\n"), 0o644) }},
-		{".lok8s/lo fallback", func(base string) {
-			os.MkdirAll(filepath.Join(base, ".lok8s"), 0o755)
-			os.WriteFile(filepath.Join(base, ".lok8s", "lo"), []byte("#!/bin/bash\n"), 0o755)
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearEnv(t)
@@ -141,6 +137,42 @@ func TestResolvePathsRecognizesEjectModelMarkers(t *testing.T) {
 	p, _ := ResolvePaths()
 	if got, _ := filepath.EvalSymlinks(p.Base); got != mustEval(sub) {
 		t.Errorf("wrong-typed markers accepted: Base = %q", p.Base)
+	}
+}
+
+// A vendored bash tree alone (`.lok8s/lo`, no clusters/, no project file)
+// does not mark a root any more: the walk passes it and falls back to the
+// working directory. The same tree beside a `kind: Project` lok8s.yaml
+// resolves through the file.
+func TestResolvePathsLok8sTreeIsNotAMarker(t *testing.T) {
+	clearEnv(t)
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, ".lok8s"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, ".lok8s", "lo"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(base, "some", "dir")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, sub)
+	p, err := ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustEval(p.Base); got != mustEval(sub) {
+		t.Errorf(".lok8s/lo alone promoted to a root: Base = %q, want the working directory %q", got, mustEval(sub))
+	}
+	if got := FindProjectRoot(sub); got != sub {
+		t.Errorf("FindProjectRoot(%s) = %q, want the directory itself", sub, got)
+	}
+	if err := os.WriteFile(filepath.Join(base, "lok8s.yaml"), []byte("kind: Project\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := ResolvePaths(); mustEval(p.Base) != mustEval(base) {
+		t.Errorf("with the project file: Base = %q, want %q", p.Base, base)
 	}
 }
 

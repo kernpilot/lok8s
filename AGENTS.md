@@ -53,7 +53,7 @@ need no checkout; a routed command runs `<project>/<tree>/lo` only.
 **Two builds from one tree** (`internal/render`, build tag `inprocess`).
 `lo` (*core*, the default `make build`) renders through the pinned
 `kustomize` binary and the two b-installed exec plugins under `.kustomize/`
-(khelm `ChartRenderer`, the `Secret` plugin), which `lo init toolchain`
+(khelm `ChartRenderer`, the `Secret` plugin), which `lo toolchain install`
 provisions via `b`. `lo-full` (`make build-full`) links the kustomize API and
 khelm and renders in-process, serving both generators itself (byte-parity
 proven on the committed kubehz.dev domain). `LO_RENDER=exec` restores the
@@ -139,10 +139,10 @@ Rules that came from incidents:
 | provisioning | `internal/provision` (dispatch, gates, spec), `internal/bootstrap` (the addon DAG), `internal/inventory`, `internal/recover` | `.lok8s/libs/{provision,bootstrap,inventory,recover}` |
 | build / deploy | `internal/build`, `internal/deploy`, `internal/image`, `internal/gitops` | `.lok8s/libs/{build,deploy,image,gitops}` |
 | render | `internal/render`: `render.go` (both builds: `LO_RENDER`, the exec pipeline), `core.go` (`!inprocess`: exec only, `DispatchPlugin` a no-op), `inprocess.go` + `dispatch.go` + `pluginhome.go` + `khelm.go` (`inprocess`: `kustomize build` via sigs.k8s.io/kustomize/api, the self-exec plugin home, `Secret` → `kustomize/plugins/secret` imported, `ChartRenderer` → khelm as a library) | the pinned `kustomize` + `.kustomize/` exec plugins (what a routed command, lo core and `LO_RENDER=exec` run) |
-| toolchain | `internal/toolchain` — `pins.go` (kustomize API↔CLI, khelm, helm, drift-tested), `template.go` (the consumer `.bin/b.yaml`, never overwritten), `bootstrap.go` (b's pinned release tarball, sha256-verified, then `b install`), `doctor.go`. Also `internal/cli/cmd_init_toolchain.go` | `.bin/b.yaml` (the contributor profile file) |
+| toolchain | `internal/toolchain` — `pins.go` (kustomize API↔CLI, khelm, helm, drift-tested), `template.go` (the consumer `.bin/b.yaml`, never overwritten), `bootstrap.go` (b's pinned release tarball, sha256-verified, then `b install`), `doctor.go`. Also `internal/cli/cmd_toolchain.go` (`lo toolchain install|doctor`; `lo init toolchain` is its hidden alias for one release) | `.bin/b.yaml` (the contributor profile file) |
 | kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
-| secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
-| scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
+| secrets / lint / audit | `internal/secrets`, `internal/lint` (`defaults.go`: the Go-only `--notes` advisory), `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
+| scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`: files only, one env file from one `EnvSpec`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
 | assets (eject model) | `internal/assets`: the embedded mirror `internal/assets/lok8s/**` (**canonical**: the WHOLE `.lok8s` tree. Data units: addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `tilt/`. The bash unit (`bashtree.go`): `lo`, `libs/**`, `utils/**`, the drivers' code, `providers/**`, `VERSION`; executable bits in `bashExecutables`), `Resolve`/`Peek`, eject + `.lo-origin`, the three-way diff, `update`, `BashTree` (the cache extract). Also `internal/cli/cmd_assets.go` | `.lok8s/**`, the synced twin (`hack/sync-legacy-assets.sh`, drift-gated by `go test ./internal/assets/`, modes included). Edit the mirror, then sync. Never only one side |
 | tilt | `internal/tilt` (`lo tilt`, port slots); the extension itself is an embedded asset (`internal/assets/lok8s/tilt/`, ejected on first `lo tilt up`/`ci`) | `.lok8s/tilt/Tiltfile` (Starlark, the synced twin, still the live extension), `Tiltfile` |
 | mcp | `internal/cli/cmd_mcp.go` (ophis; `.mcp.json` launches `bin/lo mcp start`) | the argsh `mcp` builtin (`.lok8s/lo mcp`; `lo chat` still drives it) |

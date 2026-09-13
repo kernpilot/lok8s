@@ -317,6 +317,28 @@ check - lint --domain sub.alpha.dev     # apex violation reported repo-globally 
 check - lint --domain iota.dev          # fully clean domain
 check - lint --domain nowhere.dev       # no spec at all
 check - --domain iota.dev lint          # global-flag spelling
+# Go-only: --notes adds the default-equal advisory and changes nothing
+# else: same exit code, same stderr, stdout equal once the [note] lines
+# are dropped, and the note itself present for a key at its default. Its
+# own project, so the check cases above keep their fixtures and stay
+# byte-identical to the bash lint. Both runs are the Go binary.
+NOTES="${WORK}/notes"
+parity::new_project "${NOTES}"
+mkdir -p "${NOTES}/clusters/theta.dev"
+printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: theta\nspec:\n  cluster:\n    domain: theta.dev\n  runtime: kind\n  nodes:\n    controlPlane: 1\n' \
+  > "${NOTES}/clusters/theta.dev/cluster.lok8s.yaml"
+notes_rc=0; plain_rc=0
+parity::run go "${NOTES}" lint --domain theta.dev --notes || notes_rc=$?
+cp "${WORK}/go.out" "${WORK}/notes.out"; cp "${WORK}/go.err" "${WORK}/notes.err"
+parity::run go "${NOTES}" lint --domain theta.dev || plain_rc=$?
+want_note='[note] clusters/theta.dev/cluster.lok8s.yaml: spec.runtime equals the default (kind); you can drop it'
+if (( notes_rc == plain_rc )) && cmp -s "${WORK}/go.err" "${WORK}/notes.err" \
+   && grep -qxF "${want_note}" "${WORK}/notes.out" && ! grep -q '^\[note\] ' "${WORK}/go.out" \
+   && diff -q "${WORK}/go.out" <(grep -v '^\[note\] ' "${WORK}/notes.out") >/dev/null; then
+  echo "ok: lo lint --notes prints the note, keeps rc (${plain_rc}), stderr and the non-note stdout"
+else
+  fail "lo lint --notes: rc ${notes_rc} vs ${plain_rc}, the note missing, a note without the flag, or streams differ beyond [note] lines"
+fi
 
 # ── lo kubeconfig ────────────────────────────────────────────────────────────
 check - kubeconfig                          # active alpha.dev → cat alpha.yaml

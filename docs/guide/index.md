@@ -56,7 +56,7 @@ plan, touch nothing).
 `lo` (the default, ~50 MB) is the **core** build: the manifest render runs
 the pinned `kustomize` binary plus the two exec generators (khelm's
 `ChartRenderer`, the `secrets.lok8s.dev` Secret plugin) that
-[`lo init toolchain`](#2-the-project-toolchain) installs with `b`.
+[`lo toolchain install`](#2-the-project-toolchain) installs with `b`.
 `lo-full` (`--full`, ~120 MB) links the same kustomize API and khelm release
 into the binary and renders in-process; it needs no `kustomize`, `khelm` or
 `.kustomize/`. Both install as `lo`, both render byte-identical output (the
@@ -85,22 +85,23 @@ kind, Tilt, mkcert, …), managed by [`b`](https://github.com/fentas/b).
 
 ```bash
 mkdir my-project && cd my-project
-lo init project        # clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml, then the toolchain
-lo doctor              # b, kustomize, khelm and the Secret plugin verified against the pins
+lo init project        # clusters/, lok8s.yaml, .gitignore entries, mise.toml (files only)
+lo toolchain install   # .bin/b.yaml, b into .bin/, b install (the one network step)
+lo toolchain doctor    # b, kustomize, khelm and the Secret plugin verified against the pins
 ```
 
-`lo init project` (and `lo init toolchain` on its own, for an existing
-project) writes `.bin/b.yaml` from a template pinned to the `lo` you run:
+`lo toolchain install` (in a new or an existing project) writes
+`.bin/b.yaml` from a template pinned to the `lo` you run:
 kustomize `v5.8.1`, khelm `v2.8.0`, the `secrets.lok8s.dev` Secret plugin at
 `lo`'s own version, plus kubectl (`core`), kind/Tilt/mkcert (`local`,
 on by default) and kubeone/hcloud (`cloud`, opt-in with
 `--groups core,local,cloud`). It then installs `b` itself into `.bin/` from
 the pinned release tarball, downloaded over https and verified against the
 SHA-256 the release publishes before anything is extracted (never
-`curl | sh`), and runs `.bin/b install`. `--dry-run` prints every step;
-`--no-toolchain` (on `lo init project`) writes the file and skips the
-network. An existing `.bin/b.yaml` is never overwritten: you get a diff
-against the template and `lo doctor` reports which pins differ. The
+`curl | sh`), and runs `.bin/b install`. `--dry-run` prints every step and
+touches nothing. `lo init project` itself uses no network. An existing
+`.bin/b.yaml` is never overwritten: you get a diff against the template
+and `lo toolchain doctor` reports which pins differ. The
 framework assets a cluster references (addons, driver templates) are
 embedded in the binary and ejected into `.lok8s/` on first use; see
 [`lo assets`](/reference/cli#lo-assets). [The Toolchain](/guide/toolchain)
@@ -183,7 +184,7 @@ your-project/
   .kustomize/                  # kustomize plugin discovery (built binaries)
   Tiltfile                     # bootstrap: load('./.lok8s/tilt/Tiltfile', 'lok8s')
   services.yaml                # service definitions (your stuff)
-  .envrc                       # direnv: PATH_BASE, PATH_LOK8S, PATH_CLUSTERS, ...
+  .envrc                       # direnv: puts .bin on PATH (or mise.toml; no PATH_* pins)
 ```
 
 The `.lok8s/` and `.lok8s/tilt/` directories are framework code that

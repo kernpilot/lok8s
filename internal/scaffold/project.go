@@ -1,10 +1,12 @@
 package scaffold
 
 // project.go — `lo init project`: the smallest project the eject model
-// needs. No .lok8s/ tree is written; `lo` ejects the framework assets a
-// cluster references on first use (internal/assets). Go-only — the frozen
+// needs, files only. No .lok8s/ tree is written (`lo` ejects the framework
+// assets a cluster references on first use, internal/assets), no network
+// is used (the toolchain is `lo toolchain install`). Go-only — the frozen
 // implementation cannot run without a synced .lok8s tree, so it has no
-// twin.
+// twin. Also here: WriteBYAML and EnsureGitignore, the two writers `lo
+// toolchain install` shares with the scaffold.
 
 import (
 	"fmt"
@@ -31,94 +33,96 @@ func projectFile(name string) string {
 		"  name: " + name + "\n"
 }
 
-// ProjectToolchain is how `lo init project` provisions the toolchain:
-// the .bin/b.yaml template (internal/toolchain.Template with the pins of
-// the running lo; the cli supplies it) and the bootstrap that installs b
-// and runs `b install` (nil = --no-toolchain: the file is written, the
-// network step is skipped and the hint printed instead).
-type ProjectToolchain struct {
-	// Template renders the b.yaml for the project name.
-	Template func(name string) (string, error)
-	// Bootstrap installs b into <dir>/.bin and runs `b install` there.
-	Bootstrap func(dir string) error
-	// Env selects the shell-environment files (see EnvFiles); "" = mise.
-	Env string
-	// BVersion is the b release the bootstrap pins (shown in mise.toml).
+// EnvFiles are the values of `lo init project --env`: "mise" (mise.toml,
+// the default), "direnv" (.envrc), or "none" (CI). One file is written,
+// never two: the two writers render the same EnvSpec, so the files say
+// the same thing, and a project activates one tool. The binary needs
+// nothing exported — it resolves the project from lok8s.yaml — so the
+// file only puts the b-managed toolchain on PATH and deliberately pins
+// no PATH_* variable: an ambient PATH_BASE once redirected a run (and a
+// test harness) into the wrong project.
+var EnvFiles = []string{"mise", "direnv", "none"}
+
+// EnvSpec is what an environment file states: the one data struct the
+// two writers (miseTOML, envrc) render.
+type EnvSpec struct {
+	// Project is the project name (the file header).
+	Project string
+	// BinRel is the toolchain directory, relative to the project root,
+	// that goes on PATH.
+	BinRel string
+	// BVersion is the b release `lo toolchain install` pins; the mise
+	// writer shows how to let mise bootstrap b itself.
 	BVersion string
 }
 
-// bYAML is the fallback b.yaml when no ProjectToolchain.Template is
-// supplied (library callers): the lo binary plus the third-party tools
-// every `lo up` execs. The cli always supplies the pinned template.
-func bYAML(name string) string {
-	return "# " + name + " — managed by b (github.com/fentas/b). Run `b install`.\n" +
-		"# The lo binary plus the third-party tools it execs for a local\n" +
-		"# cluster; drop what your drivers do not need, add what they do\n" +
-		"# (kubeone, clusterctl, hcloud, sops, …).\n" +
-		"binaries:\n" +
-		"  github.com/kernpilot/lok8s:\n" +
-		"    alias: lo\n" +
-		"    asset: lo-*.tar.gz\n" +
-		"  kubectl: {}\n" +
-		"  kustomize: {}\n" +
-		"  yq: {}\n" +
-		"  kind: {}\n" +
-		"  tilt: {}\n"
-}
-
-// EnvFiles selects the shell-environment files `lo init project` writes:
-// "mise" (mise.toml, the default), "direnv" (.envrc), "both", or "none".
-// The binary needs nothing exported — it resolves the project from
-// lok8s.yaml — so both files only put the b-managed toolchain on PATH
-// and deliberately pin no PATH_* variable: an ambient PATH_BASE once
-// redirected a run (and a test harness) into the wrong project.
-var EnvFiles = []string{"mise", "direnv", "both", "none"}
-
-// miseTOML is the project mise.toml: PATH via mise's env activation, no
-// tool pins (those live in .bin/b.yaml; b can be bootstrapped by mise).
-func miseTOML(name, bVersion string) string {
-	return "# mise.toml — " + name + ": the lok8s project environment (https://mise.jdx.dev).\n" +
-		"#   mise trust    # once per checkout; `mise activate` in your shell puts .bin on PATH\n" +
+// miseTOML renders the project mise.toml: PATH via mise's env activation,
+// no tool pins (those live in .bin/b.yaml).
+func miseTOML(e EnvSpec) string {
+	return "# mise.toml — " + e.Project + ": the lok8s project environment (https://mise.jdx.dev).\n" +
+		"#   mise trust    # once per checkout; `mise activate` in your shell puts " + e.BinRel + " on PATH\n" +
 		"# `lo` needs nothing exported — it resolves the project from lok8s.yaml — so this\n" +
 		"# only puts the b-managed toolchain on PATH. No PATH_* pins on purpose.\n" +
 		"[env]\n" +
-		"_.path = [\"{{config_root}}/.bin\"]\n" +
+		"_.path = [\"{{config_root}}/" + e.BinRel + "\"]\n" +
 		"# KUBECONFIG = \"{{config_root}}/.kubeconfig/<cluster>.yaml\"   # lo sets it per domain; `lo kubeconfig` prints it\n" +
 		"\n" +
 		"[tools]\n" +
-		"# Tools are pinned in .bin/b.yaml (`b install`). To let mise bootstrap b itself:\n" +
-		"# \"github:fentas/b\" = \"" + bVersion + "\"\n"
+		"# Tools are pinned in .bin/b.yaml (`lo toolchain install`, `b install`). To let mise bootstrap b itself:\n" +
+		"# \"github:fentas/b\" = \"" + e.BVersion + "\"\n"
 }
 
-// envrc is the project .envrc for direnv: PATH only (see EnvFiles).
-func envrc(name string) string {
-	return "# .envrc — " + name + ": direnv puts the b-managed toolchain on PATH.\n" +
+// envrc renders the project .envrc for direnv: PATH only.
+func envrc(e EnvSpec) string {
+	return "# .envrc — " + e.Project + ": direnv puts the b-managed toolchain on PATH.\n" +
 		"# `lo` needs nothing exported (it resolves the project from lok8s.yaml);\n" +
 		"# no PATH_* pins on purpose — an ambient PATH_BASE redirects runs elsewhere.\n" +
-		"PATH_add .bin\n" +
+		"PATH_add " + e.BinRel + "\n" +
 		"# export KUBECONFIG=\"${PWD}/.kubeconfig/<cluster>.yaml\"   # lo sets it per domain; `lo kubeconfig` prints it\n"
 }
 
-// writeEnvFiles writes the selected environment files (kept unless force).
-func writeEnvFiles(dir, name, env, bVersion string, force bool, out io.Writer) error {
-	switch env {
-	case "none":
+// envWriters maps an --env value to the file it writes and its renderer.
+var envWriters = map[string]struct {
+	file   string
+	render func(EnvSpec) string
+}{
+	"mise":   {"mise.toml", miseTOML},
+	"direnv": {".envrc", envrc},
+}
+
+// EnvFileError is the --env validation: the removed "both" names the two
+// files it used to write; any other unknown value lists the valid ones.
+func EnvFileError(env string) error {
+	if env == "both" {
+		return fmt.Errorf("--env both was removed: one file per project. Use --env mise (the default) or --env direnv")
+	}
+	return fmt.Errorf("--env must be one of %s, got %q", strings.Join(EnvFiles, "|"), env)
+}
+
+// writeEnvFile writes the selected environment file (kept unless force).
+// One file per project: when the OTHER writer's file already exists
+// (`--env direnv` on a project with a mise.toml, or the reverse), the
+// selected file is not written and a `Kept` line names the existing one;
+// --force writes it and says so.
+func writeEnvFile(dir, env string, spec EnvSpec, force bool, out io.Writer) error {
+	if env == "none" {
 		return nil
-	case "mise", "direnv", "both":
-	default:
-		return fmt.Errorf("--env must be one of %s, got %q", strings.Join(EnvFiles, "|"), env)
 	}
-	if env == "mise" || env == "both" {
-		if err := writeUnlessPresent(filepath.Join(dir, "mise.toml"), miseTOML(name, bVersion), force, out); err != nil {
-			return err
+	w, ok := envWriters[env]
+	if !ok {
+		return EnvFileError(env)
+	}
+	for other, ow := range envWriters {
+		if other == env || !fsutil.FileExists(filepath.Join(dir, ow.file)) {
+			continue
 		}
-	}
-	if env == "direnv" || env == "both" {
-		if err := writeUnlessPresent(filepath.Join(dir, ".envrc"), envrc(name), force, out); err != nil {
-			return err
+		if !force {
+			fmt.Fprintf(out, "Kept %s (exists; one environment file per project, so %s is not written; --force writes it beside)\n", filepath.Join(dir, ow.file), w.file)
+			return nil
 		}
+		fmt.Fprintf(out, "Writing %s beside %s (--force; one environment file per project is the rule, two are yours to keep in sync)\n", w.file, ow.file)
 	}
-	return nil
+	return writeUnlessPresent(filepath.Join(dir, w.file), w.render(spec), force, out)
 }
 
 // gitignoreEntries are appended to .gitignore when absent (each with the
@@ -135,18 +139,42 @@ var gitignoreEntries = []string{
 	".lok8s/**/secret.yaml",
 }
 
-// Project scaffolds a project into dir (default: base): clusters/,
-// lok8s.yaml, .gitignore entries, .bin/b.yaml, then the toolchain
-// (tc.Bootstrap: b into .bin/ + `b install`) unless tc.Bootstrap is nil.
-// Existing files are kept unless force — except .bin/b.yaml, which is
-// NEVER overwritten (a differing one is diffed against the template);
-// .gitignore is only ever appended to.
-func Project(base, name, dir string, force bool, out, stderr io.Writer, tc ProjectToolchain) error {
+// ProjectOptions shapes one `lo init project` run.
+type ProjectOptions struct {
+	// Dir is the project directory ("" = Base).
+	Dir string
+	// Name is metadata.name ("" = the directory name).
+	Name string
+	// Env selects the environment file (EnvFiles; "" = mise).
+	Env string
+	// BVersion is the b release the mise file shows (EnvSpec.BVersion).
+	BVersion string
+	// Force overwrites existing files (.gitignore is still only appended to).
+	Force bool
+}
+
+// Project scaffolds a project into o.Dir (default: base): clusters/,
+// lok8s.yaml, the .gitignore entries and one environment file. Files
+// only, no network, idempotent: an existing file is kept unless o.Force;
+// .gitignore is only ever appended to. It ends with the next steps, the
+// first of which is `lo toolchain install`.
+func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
+	dir := o.Dir
 	if dir == "" {
 		dir = base
 	}
+	name := o.Name
 	if name == "" {
 		name = filepath.Base(dir)
+	}
+	env := o.Env
+	if env == "" {
+		env = "mise"
+	}
+	if env != "none" {
+		if _, ok := envWriters[env]; !ok {
+			return EnvFileError(env)
+		}
 	}
 	if err := ValidateName(name, stderr); err != nil {
 		return err
@@ -158,46 +186,22 @@ func Project(base, name, dir string, force bool, out, stderr io.Writer, tc Proje
 	if err := os.MkdirAll(clusters, 0o755); err != nil {
 		return err
 	}
-	if err := writeUnlessPresent(filepath.Join(clusters, ".gitkeep"), "", force, out); err != nil {
+	if err := writeUnlessPresent(filepath.Join(clusters, ".gitkeep"), "", o.Force, out); err != nil {
 		return err
 	}
-	if err := writeUnlessPresent(filepath.Join(dir, "lok8s.yaml"), projectFile(name), force, out); err != nil {
-		return err
-	}
-	content := bYAML(name)
-	if tc.Template != nil {
-		var err error
-		if content, err = tc.Template(name); err != nil {
-			return err
-		}
-	}
-	if err := WriteBYAML(filepath.Join(dir, ".bin"), content, false, out); err != nil {
+	if err := writeUnlessPresent(filepath.Join(dir, "lok8s.yaml"), projectFile(name), o.Force, out); err != nil {
 		return err
 	}
 	if err := appendGitignore(filepath.Join(dir, ".gitignore"), out); err != nil {
 		return err
 	}
-	env := tc.Env
-	if env == "" {
-		env = "mise"
-	}
-	if err := writeEnvFiles(dir, name, env, tc.BVersion, force, out); err != nil {
+	if err := writeEnvFile(dir, env, EnvSpec{Project: name, BinRel: ".bin", BVersion: o.BVersion}, o.Force, out); err != nil {
 		return err
 	}
-	if tc.Bootstrap != nil {
-		fmt.Fprintln(out, "Toolchain (b → .bin/):")
-		if err := tc.Bootstrap(dir); err != nil {
-			return err
-		}
-	}
 	fmt.Fprintln(out, "Done. Next:")
-	if tc.Bootstrap == nil {
-		fmt.Fprintf(out, "  cd %s && lo init toolchain   # b + the pinned toolchain into .bin/ (skipped: --no-toolchain)\n", dir)
-	} else {
-		fmt.Fprintln(out, "  lo doctor               # verify the toolchain landed")
-	}
+	fmt.Fprintf(out, "  cd %s && lo toolchain install   # .bin/b.yaml, b and the pinned toolchain into .bin/ (network)\n", dir)
 	switch env {
-	case "mise", "both":
+	case "mise":
 		fmt.Fprintln(out, "  mise trust              # then `mise activate` in your shell — .bin lands on PATH")
 	case "direnv":
 		fmt.Fprintln(out, "  direnv allow            # .bin lands on PATH")
@@ -226,7 +230,7 @@ func WriteBYAML(bin, content string, dryRun bool, out io.Writer) error {
 		for line := range strings.SplitSeq(strings.TrimRight(res.Diff, "\n"), "\n") {
 			fmt.Fprintf(out, "    %s\n", line)
 		}
-		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo init toolchain`.")
+		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo toolchain install`.")
 		fmt.Fprintln(out, "  To keep yours: merge the pins by hand — `lo doctor` reports what differs from the pins.")
 	case dryRun:
 		fmt.Fprintf(out, "would write %s\n", res.Path)

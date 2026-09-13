@@ -65,3 +65,32 @@ func registryStateDir() string {
 	}
 	return state + "/lok8s/registries"
 }
+
+// The documented spec defaults (docs/reference/specs.md, "Default
+// resolution"): the ONE place the driver and `lo lint --notes` read them
+// from, so what the driver fills in for an absent key and what lint
+// reports as droppable change together.
+
+// DefaultControlPlane is spec.nodes.controlPlane when absent.
+const DefaultControlPlane = "1"
+
+// DefaultRuntime is spec.runtime when absent.
+const DefaultRuntime = "kind"
+
+// Mirror is one spec.registries.mirrors entry: the registry name and its
+// upstream URL.
+type Mirror struct {
+	Name, URL string
+}
+
+// DefaultMirrors is spec.registries.mirrors when absent or empty: the
+// four standard upstreams. Returned as a fresh slice so a caller cannot
+// change the default.
+func DefaultMirrors() []Mirror {
+	return []Mirror{
+		{"io-docker", "https://registry-1.docker.io"},
+		{"io-quay", "https://quay.io"},
+		{"io-k8s", "https://registry.k8s.io"},
+		{"io-ghcr", "https://ghcr.io"},
+	}
+}

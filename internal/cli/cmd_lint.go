@@ -14,7 +14,8 @@ import (
 func init() { registerPorted("lint", newLintCommand) }
 
 func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
-	return &cobra.Command{
+	var notes bool
+	cmd := &cobra.Command{
 		Use:          "lint",
 		Aliases:      spec.aliases,
 		Short:        spec.short,
@@ -41,7 +42,7 @@ func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			// reports it, and a missing routed tree, as a finding, and
 			// unknown keys as warnings). A valid or absent block prints
 			// nothing, so the output stays byte-identical to bash.
-			l := &lint.Linter{Paths: paths, Out: cmd.OutOrStdout(), ErrOut: stderr,
+			l := &lint.Linter{Paths: paths, Out: cmd.OutOrStdout(), ErrOut: stderr, Notes: notes,
 				Implementation: func() ([]string, error) {
 					r := newRouting(paths)
 					return r.impl.Warnings, r.problem()
@@ -52,4 +53,9 @@ func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			return nil
 		},
 	}
+	// Go-only: the advisory for keys equal to a documented default
+	// (internal/lint/defaults.go). Opt-in so every `check - lint` parity
+	// case stays byte-identical (the bash lint prints no such line).
+	cmd.Flags().BoolVar(&notes, "notes", false, "Also print a [note] per spec key that equals its documented default (advisory; the exit code is unchanged)")
+	return cmd
 }

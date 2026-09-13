@@ -178,24 +178,14 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
-lo init project [name] [--path <dir>] [--force] [--groups core,local[,cloud]] [--no-toolchain] [--env mise|direnv|both|none]
-lo init toolchain [--path <dir>] [--groups core,local[,cloud][,bash]] [--dry-run]
+lo init project [name] [--path <dir>] [--force] [--env mise|direnv|none]
 lo init service <name> [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
 ```
 
-**`lo init project [name]`** scaffolds the smallest project the binary needs: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (`kind: Project`, the marker `lo` resolves the root from; a service's `kind: Service` file is not one, so `lo` keeps walking up from inside a service directory), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and `.bin/b.yaml` from the pinned template (below). It then runs the same steps as `lo init toolchain` unless `--no-toolchain`. It writes **no `.lok8s/` tree**: the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use; see [`lo assets`](#lo-assets). Existing files are kept (`--force` overwrites; `.gitignore` is only appended to; `.bin/b.yaml` is never overwritten). `name` defaults to the directory name.
+**`lo init project [name]`** writes the smallest project the binary needs, and nothing else: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (`kind: Project`, the marker `lo` resolves the root from; a service's `kind: Service` file is not one, so `lo` keeps walking up from inside a service directory), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and one shell environment file (`--env`). It uses no network and writes **no `.lok8s/` tree** (the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use; see [`lo assets`](#lo-assets)) and no `.bin/`: the toolchain is the next step it prints, [`lo toolchain install`](#lo-toolchain). A re-run keeps every existing file (`--force` overwrites; `.gitignore` is only appended to). `name` defaults to the directory name. The target is the working directory (`--path` names another), never the ambient `PATH_BASE` of a direnv/mise shell.
 
-`--env` also scaffolds the shell environment: `mise` (default) writes a `mise.toml` whose `[env]` puts `.bin` on `PATH` via `mise activate` (and shows how to let mise bootstrap `b` itself); `direnv` writes an `.envrc` with `PATH_add .bin`; `both` writes both; `none` skips them. Neither file pins any `PATH_*` variable on purpose: the binary resolves the project from `lok8s.yaml`, and an ambient `PATH_BASE` redirects runs into whatever project it points at. After `mise trust` / `direnv allow`, `lo` and the b-managed tools are on `PATH`.
-
-**`lo init toolchain`** (Go-only) provisions the project's toolchain with [`b`](https://github.com/fentas/b), in four steps. The project is the nearest `kind: Project` `lok8s.yaml` (or `clusters/`) above the working directory, never the ambient `PATH_BASE` of a direnv/mise shell; `--path` names one explicitly.
-
-1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against: `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin. The other entries are `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (group `local`, on by default), `kubeone`/`hcloud` (group `cloud`, opt-in) and `argsh`/`yq`/`jq`/`envsubst`/`sops`/`ssh-to-age` (group `bash`, opt-in). The template writes entries outside the selected groups commented out. `go test` checks the pins against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. The `bash` group is the runtime of the frozen bash implementation (a command routed to bash, see [Choosing the implementation](#choosing-the-implementation)) and of the provider plugins. The binary does not need those tools for its own paths. The bash tree itself ships inside the binary (see [`lo assets`](#lo-assets)). **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand; `lo doctor` reports what differs).
-2. The `.gitignore` entries (`.bin/*` with `b.yaml`/`b.lock` kept, `.kustomize/`, …).
-3. `b` itself into `.bin/b` when absent, from b's own release tarball (`b-<os>-<arch>.tar.gz`, the same asset b's installer and `b install b` resolve), pinned to a release whose SHA-256 sums are recorded in the binary from that release's published `checksums.txt`; downloaded over https to a temp file, verified, and only then extracted. A redirect off https and an oversized archive or `b` member are refused. Never `curl | sh`. `GITHUB_TOKEN` is passed through when set (b works token-free for public sources). b publishes no darwin build: on macOS the command stops with the manual-install pointer ([binary.help](https://binary.help)); put `b` on `PATH` or at `.bin/b` and re-run.
-4. `.bin/b install` in the project (`PATH_BIN=.bin`), so every binary lands in `.bin/` and the two plugins under `.kustomize/`.
-
-`--dry-run` prints each step (the diff, the download URL and expected sum, the install command) and touches neither the tree nor the network. Verify the result with `lo doctor`.
+`--env` selects the shell environment file: `mise` (default) writes a `mise.toml` whose `[env]` puts `.bin` on `PATH` via `mise activate` (and shows how to let mise bootstrap `b` itself); `direnv` writes an `.envrc` with `PATH_add .bin`; `none` writes neither (CI). One file per project: the old `both` is refused with an error that names the two valid values. The two files render one data structure, so they say the same thing, and neither pins any `PATH_*` variable: the binary resolves the project from `lok8s.yaml`, and an ambient `PATH_BASE` redirects runs into whatever project it points at. After `mise trust` / `direnv allow`, `lo` and the b-managed tools are on `PATH`.
 
 **`lo init service <name>`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader.
 
@@ -205,6 +195,45 @@ lo init test [--path <dir>] [--force]
 |------|-------------|
 | `--path`, `-p` | Target directory (project dir / service dir / `tests/` dir) |
 | `--force`, `-f` | Overwrite existing files / non-empty target |
+
+### lo toolchain
+
+Install the pinned project toolchain with [`b`](https://github.com/fentas/b), and verify it. Go-only: the bash tree gets its toolchain from the b profile and has no such step.
+
+```bash
+lo toolchain install [--path <dir>] [--groups core,local[,cloud][,bash]] [--dry-run]
+lo toolchain doctor
+```
+
+**`lo toolchain install`** runs four steps. The project is the nearest `kind: Project` `lok8s.yaml` (or `clusters/`) above the working directory, never the ambient `PATH_BASE` of a direnv/mise shell; `--path` names one explicitly.
+
+1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against: `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin. The other entries are `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (group `local`, on by default), `kubeone`/`hcloud` (group `cloud`, opt-in) and `argsh`/`yq`/`jq`/`envsubst`/`sops`/`ssh-to-age` (group `bash`, opt-in). The template writes entries outside the selected groups commented out. `go test` checks the pins against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. The `bash` group is the runtime of the frozen bash implementation (a command routed to bash, see [Choosing the implementation](#choosing-the-implementation)) and of the provider plugins. The binary does not need those tools for its own paths. The bash tree itself ships inside the binary (see [`lo assets`](#lo-assets)). **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand; `lo toolchain doctor` reports what differs).
+2. The `.gitignore` entries (`.bin/*` with `b.yaml`/`b.lock` kept, `.kustomize/`, …).
+3. `b` itself into `.bin/b` when absent, from b's own release tarball (`b-<os>-<arch>.tar.gz`, the same asset b's installer and `b install b` resolve), pinned to a release whose SHA-256 sums are recorded in the binary from that release's published `checksums.txt`; downloaded over https to a temp file, verified, and only then extracted. A redirect off https and an oversized archive or `b` member are refused. Never `curl | sh`. `GITHUB_TOKEN` is passed through when set (b works token-free for public sources). b publishes no darwin build: on macOS the command stops with the manual-install pointer ([binary.help](https://binary.help)); put `b` on `PATH` or at `.bin/b` and re-run.
+4. `.bin/b install` in the project (`PATH_BIN=.bin`), so every binary lands in `.bin/` and the two plugins under `.kustomize/`.
+
+`--dry-run` prints each step (the diff, the download URL and expected sum, the install command) and touches neither the tree nor the network.
+
+**`lo toolchain doctor`** prints the toolchain section of [`lo doctor`](#lo-doctor) on its own: `.bin/b` with its version, then `kustomize`, the khelm `ChartRenderer` and the `secrets.lok8s.dev` Secret plugin, each against its pin. No marker and no flag gate it. It takes the project of the current shell (an exported `PATH_BASE` wins, else the nearest project above the working directory), like `lo doctor`; `install` resolves from the working directory only. The exit code is `1` when a tool this build execs is missing (`lo` core); `lo-full` only warns about the render tools.
+
+`lo init toolchain` is the old name of `lo toolchain install`. It stays for one release as a hidden alias: same flags, same output, plus one hint line on stderr. Use the new name.
+**A minimal project.** Two files are enough for `lo up`: the project file and one cluster spec. The Lo driver fills the rest from documented defaults (see [Cluster specs](specs.md#default-resolution)); `lo lint --notes` names the keys you can drop because they equal a default.
+
+```
+my-project/
+  lok8s.yaml                          # kind: Project, metadata.name
+  clusters/
+    demo.dev/
+      cluster.lok8s.yaml              # kind: Lo, metadata.name, spec.cluster.domain, spec.bootstrap
+```
+
+```bash
+mkdir my-project && cd my-project
+lo init project                       # the two directories above, .gitignore entries, mise.toml
+lo toolchain install                  # .bin/b.yaml, b, the pinned toolchain (the one network step)
+$EDITOR clusters/demo.dev/cluster.lok8s.yaml
+lo use demo.dev && lo up
+```
 
 ### lo use
 
@@ -221,7 +250,7 @@ Without arguments: shows the active domain and lists all available domains with 
 Validate domain structure and specs.
 
 ```bash
-lo lint [--domain <domain>]
+lo lint [--domain <domain>] [--notes]
 ```
 
 Checks:
@@ -229,6 +258,8 @@ Checks:
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
 - Secrets: committed encrypted (`.enc` present and current), and no per-domain secret is shadowed in the deprecated flat `.secrets/` store (identical copy = stale duplicate; differing copy = active drift)
+
+`--notes` (Go-only) adds an advisory per Lo cluster spec key whose value equals its documented default (see [Cluster specs](specs.md#default-resolution)): `spec.nodes.controlPlane: 1`, `spec.runtime: kind`, and `spec.registries.mirrors` when the list is exactly the four default mirrors on their standard URLs. Each prints as `[note] <file>: <key> equals the default (<value>); you can drop it` on stdout. It is advice only: no finding, the exit code is unchanged, and the spec is never edited. The flag is opt-in because the bash lint prints no such line and the parity harnesses diff every lint case byte for byte.
 
 ### lo status
 
@@ -410,7 +441,7 @@ Until WP8 lands, start the frozen tree directly from a checkout:
 
 The entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
 
-The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project` and `lo init toolchain` have no builtin tool.
+The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project` and `lo toolchain` have no builtin tool.
 
 ### lo kubeconfig
 
@@ -446,7 +477,7 @@ Checks required binaries, versions, Docker/kind state, and common misconfigurati
 
 The **`implementation` line** (Go-only) appears only when `lok8s.yaml` routes commands to bash (see [Choosing the implementation](#choosing-the-implementation)): the routed set, the tree and its source, then one `!` line per routed command whose state Go also writes (`registry`, `image`, `secrets`, `use`, `kustomize`). An invalid block, or a routing whose tree is missing, is one `!` line (doctor runs in Go on either). The **`bash mode` line** (Go-only) says whether a command routed to bash and the provider plugins can run: the bash tree in use (the project's own tree, or the copy the binary extracts into `${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/`) and whether `argsh` is at `.bin/argsh`, where the tree sources it. When `argsh` is missing the line is a warning with the fix (uncomment the `bash` group in `.bin/b.yaml`, then `.bin/b install`). The line is omitted when the project holds the tree and `argsh` is present, which keeps the output byte-identical to the bash implementation there.
 
-The **toolchain section** (Go-only) verifies what [`lo init toolchain`](#lo-init) installed against the pins: `.bin/b` (with its version), `kustomize` (`.bin` first, then `PATH`) at the pinned release, the khelm `ChartRenderer` and the `secrets.lok8s.dev` `Secret` exec plugins at the paths the render resolves under `.kustomize/` (`KUSTOMIZE_PLUGIN_HOME`), each at its pin, the Secret plugin at this `lo`'s own version (`<plugin> --version`; a plugin built before that flag existed reports "version unknown"). A mismatch is a warning; a missing tool is a failure on `lo` (core, which execs them) and a warning on `lo-full` (in-process render; the binaries only serve `LO_RENDER=exec`). The fix is always `lo init toolchain`. The section is printed when `.bin/b.yaml` carries the `lo init toolchain` marker line, or on `--toolchain`; a profile-synced or hand-written `b.yaml` is not checked unless asked, which keeps the default output byte-identical to the bash implementation.
+The **toolchain section** (Go-only) verifies what [`lo toolchain install`](#lo-toolchain) installed against the pins: `.bin/b` (with its version), `kustomize` (`.bin` first, then `PATH`) at the pinned release, the khelm `ChartRenderer` and the `secrets.lok8s.dev` `Secret` exec plugins at the paths the render resolves under `.kustomize/` (`KUSTOMIZE_PLUGIN_HOME`), each at its pin, the Secret plugin at this `lo`'s own version (`<plugin> --version`; a plugin built before that flag existed reports "version unknown"). A mismatch is a warning; a missing tool is a failure on `lo` (core, which execs them) and a warning on `lo-full` (in-process render; the binaries only serve `LO_RENDER=exec`). The fix is always `lo toolchain install`. The section is printed when `.bin/b.yaml` carries the `lo toolchain install` marker line (the line an older `lo init toolchain` wrote also counts), or on `--toolchain`; a profile-synced or hand-written `b.yaml` is not checked unless asked, which keeps the default output byte-identical to the bash implementation. `lo toolchain doctor` prints this section alone, with no gate.
 
 ### lo trust
 
@@ -496,9 +527,8 @@ The framework's files ship **inside the binary**: the data files (every bootstra
 
 ```bash
 lo assets list [--json]                 # every asset with its origin and chart version (local vs embedded)
-lo assets show <rel>                    # one asset: path, marker, per-file state
 lo assets eject [rel...] [--all] [--check]
-lo assets diff [rel...] [--json] [--check]
+lo assets diff [rel...] [--json] [--check]   # with a rel: the unit and its per-file states
 lo assets update <rel> [--force]
 ```
 
@@ -517,7 +547,7 @@ lo assets update <rel> [--force]
 | `local-only` | exists only in the project |
 | `builtin-only` | exists only in the binary (lo added it, or it was deleted locally) |
 
-`--check` exits `1` on any drift (anything but `unchanged`/`local-only`). `--json` is a stable shape (`{"lo": "<version>", "assets": [{rel, kind, origin, drifted, version:{local,embedded}, marker:{lo,ejectedAt}, files:[{path,state,origin,local,embedded}], path}]}`).
+With one or more `<rel>` arguments the table lists each unit's files with their state (there is no separate `show` command). `--check` exits `1` on any drift (anything but `unchanged`/`local-only`). `--json` is a stable shape (`{"lo": "<version>", "assets": [{rel, kind, origin, drifted, version:{local,embedded}, marker:{lo,ejectedAt}, files:[{path,state,origin,local,embedded}], path}]}`).
 
 **`update <rel>`** applies the embedded copy over the local one only when every file is provably untouched (`unchanged` or `lo updated`) and a marker exists; otherwise it prints the classification and stops, and `--force` applies anyway. A copy that is already byte-identical to what this `lo` ships is reported as in sync, marker or not, and nothing is written. It shows the diff first, keeps local-only files, and rewrites the marker.
 
@@ -663,7 +693,7 @@ spec:
 Rules:
 
 - `default: bash` runs every command through `<tree>/lo` with the argv untouched. `default: go` with a `commands` list routes only the listed commands; every other command stays in Go.
-- `commands` takes top-level command names from `lo --help`. An alias (`r`), an unknown name and a Go-only command (`assets`, `mcp`, `operator`, and `init` for its `project` and `toolchain` subcommands) are errors. There is no `all`: `default: bash` is the whole-tree switch.
+- `commands` takes top-level command names from `lo --help`. An alias (`r`), an unknown name and a Go-only command (`assets`, `mcp`, `operator`, `toolchain`, and `init` for its `project` and `toolchain` subcommands) are errors. There is no `all`: `default: bash` is the whole-tree switch.
 - `tree` is relative to the project and stays inside it: no absolute path, no `..`. The default is `.lok8s`. When the block routes something, the tree directory and its `lo` entrypoint must also resolve inside the project (no symlink out); a project that runs Go may link its `.lok8s` anywhere.
 - A routing needs the tree in the project. The copy the binary extracts into its cache and a checkout named by `PATH_LOK8S` are never routed to. Without the tree, a routed command stops: `lo: implementation bash: the tree <project>/.lok8s/lo is missing. Run "lo assets eject bash", or set spec.implementation.default: go.` The Go-only commands, `lint`, `doctor` and `init` still run, so `lo assets eject bash` can create the tree.
 - No environment variable selects the implementation. The path variables (`PATH_BASE`, `PATH_CLUSTERS`, `PATH_LOK8S`, `PATH_BIN`) select paths for the bash tree. `PATH_BIN` also selects the argsh runtime the tree sources, so a routed command ignores an inherited `PATH_BIN` and puts `<project>/.bin` on the child's PATH and in `PATH_BIN` (the project needs its toolchain there; a link is fine); the remaining trust question (a changed tree) is why a trust layer is planned.

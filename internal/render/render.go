@@ -9,7 +9,7 @@
 //     binary from the project's toolchain (.bin first, then PATH) with
 //     KUSTOMIZE_PLUGIN_HOME defaulted to <project>/.kustomize, where the
 //     b-managed exec generators live — khelm's ChartRenderer and the
-//     kustomize-secret Secret plugin (`lo init toolchain` installs all
+//     kustomize-secret Secret plugin (`lo toolchain install` installs all
 //     three, pinned). No kustomize API, no khelm, no helm are linked in.
 //     The secrets.lok8s.dev generator itself IS still part of core
 //     (kustomize/plugins/secret, imported) — the registry TLS mint calls

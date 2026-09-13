@@ -35,6 +35,11 @@ type Linter struct {
 	// The warnings (unknown keys) print as such; a non-nil error is one
 	// repo-global finding.
 	Implementation func() (warnings []string, err error)
+	// Notes prints the `[note]` advisory for spec keys equal to their
+	// documented default (Go-only, `lo lint --notes`; see defaults.go).
+	// Off by default: the bash lint has no such line, and the parity
+	// harnesses diff every lint case byte for byte.
+	Notes bool
 }
 
 // Run is main::lint: per-domain checks for the given domain (all domains when
@@ -121,6 +126,7 @@ func (l *Linter) all(domain string) bool {
 	}
 
 	errs := l.schema(domainDir, specFile)
+	l.notes(specFile)
 	errs += l.clusterref(domainDir, specFile)
 	errs += l.bootstrap(domainDir, specFile, domain)
 	errs += l.kustomization(domainDir)

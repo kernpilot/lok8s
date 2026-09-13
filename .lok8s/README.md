@@ -74,7 +74,7 @@ The tree must be inside the project (`lo assets eject bash` writes it);
 the copy the binary extracts into its cache is never routed to.
 
 The tree needs argsh with its builtin, `yq`, `jq`, `envsubst`, `sops` and
-`ssh-to-age` on the path. `lo init toolchain` writes a `.bin/b.yaml` that carries those lines
+`ssh-to-age` on the path. `lo toolchain install` writes a `.bin/b.yaml` that carries those lines
 as comments. Uncomment them and run `b install`. `lo doctor`
 reports what is missing. The Go binary needs none of them.
 

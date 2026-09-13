@@ -6,12 +6,8 @@ package cli
 // implementation.
 
 import (
-	"context"
 	"errors"
-	"io"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -78,12 +74,12 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	test.Flags().StringVarP(&testPath, "path", "p", "", "Directory for the suite (default: ./tests)")
 
 	// Go-only (no twin in .lok8s/libs/init): the eject model's project
-	// scaffold — no .lok8s/ tree, assets are ejected on first use.
-	var projectPath, projectGroups, projectEnv string
-	var noToolchain bool
+	// scaffold — files only. No .lok8s/ tree (assets are ejected on first
+	// use), no network (the toolchain is `lo toolchain install`).
+	var projectPath, projectEnv string
 	project := &cobra.Command{
 		Use:          "project [name]",
-		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, .bin/b.yaml) — no .lok8s/ — and install the toolchain",
+		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, one env file) — files only, no network",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -93,52 +89,28 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				name = args[0]
 			}
 			force, _ := cmd.Flags().GetBool("force")
-			return runInitProject(cmd.Context(), initProjectOpts{
-				name: name, path: projectPath, groups: projectGroups, env: projectEnv,
-				force: force, noToolchain: noToolchain,
-			}, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			// A NEW project is scaffolded where the user stands, never into
+			// the ambient project: with PATH_BASE exported (direnv/mise
+			// shells), the resolved base is whatever project that variable
+			// points at — a smoke run once wrote mise.toml into a live repo
+			// this way. Kept while PATH_BASE keeps first place in
+			// config.ResolvePaths (WP9 step 1, parked).
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			return scaffoldRun(scaffold.Project(cwd, scaffold.ProjectOptions{
+				Dir: projectPath, Name: name, Env: projectEnv, Force: force,
+				BVersion: toolchain.BRelease.Version,
+			}, cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
-	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the current project root)")
-	project.Flags().StringVar(&projectGroups, "groups", strings.Join(toolchain.DefaultGroups, ","), "Toolchain groups to activate in .bin/b.yaml (core,local,cloud,bash; core is implied)")
-	project.Flags().BoolVar(&noToolchain, "no-toolchain", false, "Write .bin/b.yaml but do not install b / run b install (no network)")
-	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file(s) to scaffold: mise (mise.toml), direnv (.envrc), both, none — PATH only, no PATH_* pins")
+	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the working directory)")
+	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file to scaffold: mise (mise.toml), direnv (.envrc) or none — PATH only, no PATH_* pins")
 
-	cmd.AddCommand(service, test, project, newInitToolchainCommand(paths))
+	// `lo init toolchain` is the hidden alias of `lo toolchain install`
+	// for one release (WP9): same flags, same run, a deprecation hint on
+	// stderr first.
+	cmd.AddCommand(service, test, project, newToolchainInstallCommand(paths, "toolchain", true))
 	return cmd
-}
-
-// initProjectOpts are `lo init project`'s flags after the parse.
-type initProjectOpts struct {
-	name, path, groups, env string
-	force, noToolchain      bool
-}
-
-// runInitProject scaffolds a project and installs its toolchain.
-func runInitProject(ctx context.Context, o initProjectOpts, out, stderr io.Writer) error {
-	groups, err := toolchain.NormalizeGroups(strings.Split(o.groups, ","))
-	if err != nil {
-		return err
-	}
-	tc := scaffold.ProjectToolchain{
-		Template: func(n string) (string, error) { return toolchainTemplate(n, groups) },
-		Env:      o.env,
-		BVersion: toolchain.BRelease.Version,
-	}
-	if !o.noToolchain {
-		tc.Bootstrap = func(dir string) error {
-			return toolchain.Bootstrap(ctx, toolchain.BootstrapOptions{
-				Base: dir, Bin: filepath.Join(dir, ".bin"), Out: out, Stderr: stderr,
-			})
-		}
-	}
-	// A NEW project is scaffolded where the user stands, never into the
-	// ambient project: with PATH_BASE exported (direnv/mise shells), the
-	// resolved base is whatever project that variable points at — a smoke
-	// run once wrote mise.toml into a live repo this way.
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	return scaffoldRun(scaffold.Project(cwd, o.name, o.path, o.force, out, stderr, tc))
 }

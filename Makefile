@@ -7,7 +7,7 @@ LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion=$(sh
 
 # Two builds from one tree (internal/render):
 #   lo       (core, the default) — the render execs the pinned kustomize +
-#            the b-managed exec plugins under .kustomize/ (lo init toolchain)
+#            the b-managed exec plugins under .kustomize/ (lo toolchain install)
 #   lo-full  (-tags inprocess)   — the kustomize API + khelm linked in; renders
 #            in-process and serves both exec generators itself
 FULL_TAGS := inprocess

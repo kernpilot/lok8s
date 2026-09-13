@@ -1,6 +1,6 @@
 package assets
 
-// diff.go — the three-way comparison behind `lo assets diff|show|list`,
+// diff.go — the three-way comparison behind `lo assets diff|list`,
 // the origin column of `lo addons`/`lo drivers --list` and the doctor
 // summary. Per file it compares ORIGIN (the .lo-origin marker: what lo
 // ejected) against LOCAL (the project's copy) and EMBEDDED (what the
@@ -327,7 +327,8 @@ func WriteFiles(w io.Writer, r UnitReport, indent string) {
 	}
 }
 
-// WriteShow prints one unit in detail (`lo assets show <rel>`).
+// WriteShow prints one unit in detail (the header `lo assets update` prints
+// before the diff; `lo assets show` was dropped in WP9).
 func WriteShow(w io.Writer, r UnitReport) {
 	fmt.Fprintf(w, "asset:    %s\n", r.Rel)
 	fmt.Fprintf(w, "kind:     %s\n", r.Kind)

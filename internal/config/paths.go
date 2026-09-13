@@ -4,9 +4,11 @@
 // derived via `: "${PATH_BASE:=...}"` chains. Precedence for every path:
 // explicit env var > derivation from the project base. The base itself is
 // env PATH_BASE > nearest ancestor of the working directory that carries a
-// project marker (`clusters/`, a `kind: Project` `lok8s.yaml`, or — during
-// the coexistence with the frozen tree — `.lok8s/lo`) > the working
-// directory.
+// project marker (`clusters/`, or a `kind: Project` `lok8s.yaml`) > the
+// working directory. `.lok8s/` is the asset and tree directory, not a
+// marker (WP9): the code lives in the binary and its cache, and a vendored
+// tree beside a project's own files says nothing about where the project
+// starts.
 package config
 
 import (
@@ -118,18 +120,16 @@ func findBase(dir string) string {
 // eject model. A service's `lok8s.yaml` (`kind: Service`, one per
 // deployable service directory) is NOT a marker: every kubehz-cluster
 // submodule carries one, and `cd <service> && lo …` must keep walking up
-// to the umbrella project. `.lok8s/lo` stays a marker for the coexistence
-// period (a project that vendors the frozen tree but keeps its clusters
-// elsewhere via PATH_CLUSTERS).
+// to the umbrella project. `.lok8s/lo` is not a marker either (WP9; it
+// was one during the coexistence period): a project that keeps its
+// clusters elsewhere via PATH_CLUSTERS writes a `kind: Project`
+// lok8s.yaml. Deliberate deviation from bash, which derives PATH_BASE
+// from its own location and needs no marker (go-migration.md, D30).
 func isProjectRoot(d string) bool {
 	if info, err := os.Stat(filepath.Join(d, "clusters")); err == nil && info.IsDir() {
 		return true
 	}
-	if isProjectFile(filepath.Join(d, "lok8s.yaml")) {
-		return true
-	}
-	_, err := os.Stat(filepath.Join(d, ".lok8s", "lo"))
-	return err == nil
+	return isProjectFile(filepath.Join(d, "lok8s.yaml"))
 }
 
 // ProjectKind is the `kind` of the project-root lok8s.yaml.
