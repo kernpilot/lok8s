@@ -259,6 +259,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	// a deliberate deviation. One stdin carries every key of the Secret.
 	var createArgs []string
 	var envFile string
+	var err error
 	switch provider {
 	case "hetzner":
 		createArgs = []string{
@@ -268,11 +269,14 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 			"--from-env-file=/dev/stdin",
 			"--dry-run=client", "-o", "yaml",
 		}
-		envFile = envFileLines(
-			"hcloud-token", os.Getenv("HCLOUD_TOKEN"),
-			"robot-user", os.Getenv("HROBOT_USER"),
-			"robot-password", os.Getenv("HROBOT_PASSWORD"),
+		envFile, err = credentialEnvFile(stderr,
+			"hcloud-token", "HCLOUD_TOKEN",
+			"robot-user", "HROBOT_USER",
+			"robot-password", "HROBOT_PASSWORD",
 		)
+		if err != nil {
+			return err
+		}
 	case "aws":
 		// bash: `: "${AWS_REGION:?AWS_REGION required for AWS provider}"` —
 		// the ${:?} expansion aborts the shell; here it is a plain error.
@@ -287,29 +291,34 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 			"--from-env-file=/dev/stdin",
 			"--dry-run=client", "-o", "yaml",
 		}
-		envFile = envFileLines(
-			"access-key-id", os.Getenv("AWS_ACCESS_KEY_ID"),
-			"secret-access-key", os.Getenv("AWS_SECRET_ACCESS_KEY"),
-			"region", os.Getenv("AWS_REGION"),
+		envFile, err = credentialEnvFile(stderr,
+			"access-key-id", "AWS_ACCESS_KEY_ID",
+			"secret-access-key", "AWS_SECRET_ACCESS_KEY",
+			"region", "AWS_REGION",
 		)
+		if err != nil {
+			return err
+		}
 	default:
 		ui.ErrorTo(stderr, "Unsupported provider for credentials: %s", provider)
 		return ui.Handled(fmt.Errorf("capi: unsupported provider for credentials: %s", provider))
 	}
 
-	// bash: `kubectl create … | kubectl apply -f -` — a PIPELINE, so only
-	// the apply's status decides (this bash function predates the rendered-
-	// into-a-variable namespace guard in driver::provision and deliberately
-	// keeps the pipe: a failed create feeds apply an empty stream, and the
-	// apply's own failure is what surfaces). The create's error is ignored
-	// here for the same reason.
+	// bash: `kubectl create … | kubectl apply -f -`, a PIPELINE under the
+	// entrypoint's `set -o pipefail` (.lok8s/lo), so its status is the LAST
+	// non-zero one: a failed apply decides, and a failed create with a
+	// passing apply still fails the function. Both halves run either way (a
+	// failed create feeds apply an empty stream).
 	var manifest strings.Builder
-	_ = d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
-	return d.deps.Runner.Run(ctx, execx.Cmd{
+	createErr := d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
+	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", kubeconfig, "-f", "-"},
 		Stdin: strings.NewReader(manifest.String()),
-	})
+	}); err != nil {
+		return err
+	}
+	return createErr
 }
 
 // WaitReady ports capi::wait_ready: poll the Cluster CR's .status.phase
@@ -361,9 +370,27 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 	return ui.Handled(fmt.Errorf("capi: timed out waiting for cluster %s", clusterName))
 }
 
+// credentialEnvFile reads each (key, environment variable) pair from the
+// environment and renders the env file. A value with a CR or LF would end
+// its line early and start another key, so it is refused with the
+// variable named (credentials.NoNewline). The bash passed the values as
+// arguments; deliberate deviation (catalogue D28).
+func credentialEnvFile(stderr io.Writer, keyVar ...string) (string, error) {
+	kv := make([]string, 0, len(keyVar))
+	for i := 0; i+1 < len(keyVar); i += 2 {
+		key, name := keyVar[i], keyVar[i+1]
+		value := os.Getenv(name)
+		if err := credentials.NoNewline(name, value, stderr); err != nil {
+			return "", err
+		}
+		kv = append(kv, key, value)
+	}
+	return envFileLines(kv...), nil
+}
+
 // envFileLines renders key/value pairs as the `key=value` lines kubectl's
-// --from-env-file reads. A value must not contain a newline; the
-// credentials this feeds are tokens and names, which never do.
+// --from-env-file reads. The values come through credentialEnvFile, which
+// refuses a newline.
 func envFileLines(kv ...string) string {
 	var b strings.Builder
 	for i := 0; i+1 < len(kv); i += 2 {

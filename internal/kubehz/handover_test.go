@@ -9,7 +9,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +171,85 @@ func TestHandoverResolveBundleTraversalGuard(t *testing.T) {
 	if fsutil.Exists(filepath.Join(ho.base, "escaped")) || fsutil.Exists(filepath.Join(ho.base, "work", "escaped")) {
 		t.Fatal("entry escaped")
 	}
+}
+
+// A failed write of an entry is reported as the write it is, not as an
+// unreadable archive. /dev/full answers every write with ENOSPC.
+func TestHandoverExtractBundleNamesAFailedWrite(t *testing.T) {
+	t.Parallel()
+	if _, err := os.Stat("/dev/full"); err != nil {
+		t.Skip("/dev/full is not available")
+	}
+	ho := newHandover(t)
+	tarball := filepath.Join(ho.base, "bundle.tar.gz")
+	tarBundle(t, ho.bundle, tarball)
+	dir := filepath.Join(ho.base, "work")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/full", filepath.Join(dir, "ca.crt")); err != nil {
+		t.Fatal(err)
+	}
+	mustErr(t, ho.ctx.extractBundle(tarball, dir))
+	mustContain(t, ho.output(), "handover: cannot write "+filepath.Join(dir, "ca.crt")+" from "+tarball)
+	if strings.Contains(ho.output(), "neither a bundle directory") {
+		t.Fatalf("a write failure was reported as an unreadable archive:\n%s", ho.output())
+	}
+	// A truncated archive is still the archive's fault.
+	raw, _ := os.ReadFile(tarball)
+	truncated := filepath.Join(ho.base, "truncated.tar.gz")
+	_ = os.WriteFile(truncated, raw[:len(raw)/2], 0o600)
+	ho.reset()
+	mustErr(t, ho.ctx.extractBundle(truncated, filepath.Join(ho.base, "work2")))
+	mustContain(t, ho.output(), "neither a bundle directory nor a readable .tar.gz archive")
+}
+
+// Only a write error on the target names the write. A read error on the
+// bundle file is also a *fs.PathError, and that one is the archive's fault.
+func TestHandoverExtractCopyErrorClassifiesByOperation(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	bundle := filepath.Join(ho.base, "bundle.tar.gz")
+	target := filepath.Join(ho.base, "work", "ca.crt")
+
+	mustErr(t, ho.ctx.extractCopyError(bundle, target, &fs.PathError{Op: "write", Path: target, Err: errors.New("no space left on device")}))
+	mustContain(t, ho.output(), "handover: cannot write "+target+" from "+bundle)
+
+	ho.reset()
+	mustErr(t, ho.ctx.extractCopyError(bundle, target, &fs.PathError{Op: "read", Path: bundle, Err: errors.New("input/output error")}))
+	mustContain(t, ho.output(), "neither a bundle directory nor a readable .tar.gz archive")
+	if strings.Contains(ho.output(), "cannot write") {
+		t.Fatalf("a read error on the bundle was reported as a write failure:\n%s", ho.output())
+	}
+}
+
+// A link entry is skipped, and the skip is visible under DEBUG.
+func TestHandoverExtractBundleSkipsLinksAndSaysSo(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+	ho := newHandover(t)
+	linked := filepath.Join(ho.base, "linked.tar.gz")
+	f, _ := os.Create(linked)
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Name: "./ca.crt", Mode: 0o644, Size: 2, Typeflag: tar.TypeReg})
+	_, _ = tw.Write([]byte("x\n"))
+	_ = tw.WriteHeader(&tar.Header{Name: "./ca.key", Linkname: "/etc/passwd", Typeflag: tar.TypeSymlink})
+	_ = tw.WriteHeader(&tar.Header{Name: "./sa.key", Linkname: "./ca.crt", Typeflag: tar.TypeLink})
+	_ = tw.Close()
+	_ = gz.Close()
+	_ = f.Close()
+	dir := filepath.Join(ho.base, "work")
+	mustOK(t, ho.ctx.extractBundle(linked, dir), ho.output())
+	if !fsutil.Exists(filepath.Join(dir, "ca.crt")) {
+		t.Fatal("the regular entry was not extracted")
+	}
+	for _, name := range []string{"ca.key", "sa.key"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			t.Fatalf("link entry %s was extracted", name)
+		}
+	}
+	mustContain(t, ho.output(), "handover: skipping link entry ./ca.key in "+linked+" (links are not extracted)")
+	mustContain(t, ho.output(), "handover: skipping link entry ./sa.key in "+linked)
 }
 
 // ── receive ──────────────────────────────────────────────
@@ -570,6 +651,20 @@ func TestHandoverPreseedVerifiesTheHostKey(t *testing.T) {
 		if (strings.HasPrefix(l, "ssh ") || strings.HasPrefix(l, "scp ")) && strings.Contains(l, "UserKnownHostsFile") {
 			t.Fatalf("default run must leave the known_hosts file to ssh: %s", l)
 		}
+	}
+}
+
+// ssh splits an -o value on whitespace, so such a --known-hosts path is
+// refused before the first connection.
+func TestHandoverPreseedRefusesWhitespaceInKnownHosts(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	ho.mockNodeBinaries(nil)
+	err := ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: "/tmp/known hosts"})
+	mustErr(t, err)
+	mustContain(t, ho.output(), `handover: --known-hosts path must not contain whitespace: "/tmp/known hosts"`)
+	if len(ho.calls) != 0 {
+		t.Fatalf("nothing may run with a broken ssh option: %v", ho.calls)
 	}
 }
 

@@ -100,6 +100,9 @@ type upHarness struct {
 
 func newUpHarness(t *testing.T, dispatch error) *upHarness {
 	t.Helper()
+	// tilt.Up/CI eject the Tilt extension into the synthetic project; keep
+	// the notice out of the test output.
+	quietAssets(t)
 	h := &upHarness{p: synthProject(t), out: &bytes.Buffer{}, errOut: &bytes.Buffer{}, runner: &scriptRunner{}}
 	testutil.WriteFile(t, filepath.Join(h.p.Clusters, "lo.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: clu\n")
 	t.Setenv("DOMAIN_NAME", "lo.dev")

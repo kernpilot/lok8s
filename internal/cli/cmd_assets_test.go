@@ -137,12 +137,33 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 		t.Errorf("list: err=%v\n%s", err, stdout)
 	}
 
+	// The Tilt extension is referenced by the project-root Tiltfile, not by
+	// a spec: with the loader in place the referenced set grows by one.
+	testutil.WriteFile(t, filepath.Join(p.Base, "Tiltfile"), "load('./.lok8s/tilt/Tiltfile', 'lok8s')\nlok8s()\n")
+	stdout, _, err = runLo(t, NewRoot(p), "assets", "eject", "--check")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stdout, "would eject tilt\n") {
+		t.Errorf("eject --check with a Tiltfile loader: err=%v\n%s", err, stdout)
+	}
+	stdout, _, err = runLo(t, NewRoot(p), "assets", "list")
+	if err != nil || !strings.Contains(stdout, "tilt                            tilt        builtin") {
+		t.Errorf("list: err=%v\n%s", err, stdout)
+	}
+	// A double-quoted load() is valid Starlark and `lo tilt up` ejects the
+	// extension all the same, so --check must count it as referenced too.
+	testutil.WriteFile(t, filepath.Join(p.Base, "Tiltfile"), "load(\"./.lok8s/tilt/Tiltfile\", \"lok8s\")\nlok8s()\n")
+	stdout, _, err = runLo(t, NewRoot(p), "assets", "eject", "--check")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stdout, "would eject tilt\n") {
+		t.Errorf("eject --check with a double-quoted Tiltfile loader: err=%v\n%s", err, stdout)
+	}
+
 	// --all ejects the rest.
 	if _, _, err := runLo(t, NewRoot(p), "assets", "eject", "--all"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(p.Lok8s, "chat", assets.MarkerFile)); err != nil {
-		t.Error("--all did not eject chat")
+	for _, rel := range []string{"chat", "tilt"} {
+		if _, err := os.Stat(filepath.Join(p.Lok8s, rel, assets.MarkerFile)); err != nil {
+			t.Errorf("--all did not eject %s", rel)
+		}
 	}
 }
 

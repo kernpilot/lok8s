@@ -3,10 +3,12 @@ package cli
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/driver"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // captureExits swaps the process-exit seam for the test and returns the
@@ -73,6 +75,9 @@ func TestRcPassthroughsCleanUpBeforeExiting(t *testing.T) {
 
 	dir = materialize()
 	h := newUpHarness(t, nil)
+	// The project carries its own Tilt extension: under PolicyNever the
+	// ci path would otherwise stop before `tilt ci` (tilt.ensureExtension).
+	testutil.WriteFile(t, filepath.Join(h.p.Lok8s, "tilt", "Tiltfile"), "# local extension\n")
 	_ = runUp(t.Context(), h.p, h.out, h.deps, upOptions{domain: "lo.dev", ci: true, timeout: "10m"})
 	if _, err := os.Stat(dir); err == nil {
 		t.Fatalf("lo up --ci: temp assets dir survived the exit: %s", dir)

@@ -26,6 +26,23 @@ func TestExitCode(t *testing.T) {
 	}
 }
 
+// A child that died of a signal exits 128+n, as bash's `$?` reports it.
+// exec.ExitError.ExitCode alone gives -1 there, which os.Exit turns into
+// 255, and main's 128+n mapping never sees a child's signal.
+func TestExitCodeOfASignaledChildIs128PlusN(t *testing.T) {
+	t.Parallel()
+	r := NewRunner(nil)
+	for sig, want := range map[string]int{"INT": 130, "TERM": 143} {
+		err := r.Run(t.Context(), Cmd{Name: "/bin/sh", Args: []string{"-c", "kill -" + sig + " $$"}, Stdout: io.Discard, Stderr: io.Discard})
+		if err == nil {
+			t.Fatalf("SIG%s: the child did not die of the signal", sig)
+		}
+		if got := ExitCode(err); got != want {
+			t.Errorf("SIG%s: ExitCode = %d, want %d", sig, got, want)
+		}
+	}
+}
+
 // recordingRunner captures the Cmd handed to Run and answers scripted stdout.
 type recordingRunner struct {
 	got    Cmd

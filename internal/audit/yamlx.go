@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -68,12 +69,6 @@ func lookupFile(path string, keys ...string) *yaml.Node {
 	return yqsem.Lookup(firstDocNode(path), keys...)
 }
 
-// isNullNode reports a PRESENT YAML null (absent nodes are handled by
-// callers — yqsem.IsNull would fold the two).
-func isNullNode(n *yaml.Node) bool {
-	return n != nil && yqsem.IsNull(n)
-}
-
 // yqRenderNode mirrors `yq -r` output for a node: an absent node renders as
 // "null" (yq's missing-key result); a scalar renders as its SOURCE literal
 // (yq preserves scalar style: `~` stays "~", `True` stays "True"); a
@@ -120,12 +115,12 @@ func specLine(path string, keys ...string) int {
 
 // mergeYAMLDocs is the yq deep-merge the effective-values stack uses
 // (`yq eval-all '. as $item ireduce ({}; . * $item)'`): every document of
-// every file merges left to right into a fresh mapping — maps deep-merge,
-// everything else (lists, scalars, explicit nulls at a key) REPLACES. A
-// document that is a whole-document null is a no-op (yq: `x * null` → x); a
-// non-map document is an ERROR, exactly like yq's "cannot multiply !!map
-// with !!str" — the caller turns that into an unknown finding, never a
-// fall-through pass. extra (may be nil) merges last — the inline override.
+// every file folds left to right into a fresh mapping through
+// addons.MergeDocument, the one implementation of the idiom (maps
+// deep-merge, everything else replaces, a null document is a no-op, a
+// non-map document is yq's "cannot multiply !!map with !!str" error). The
+// caller turns that error into an unknown finding, never a fall-through
+// pass. extra (may be nil) merges last: the inline override.
 func mergeYAMLDocs(files []string, extra *yaml.Node) (*yaml.Node, error) {
 	acc := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	for _, f := range files {
@@ -134,58 +129,16 @@ func mergeYAMLDocs(files []string, extra *yaml.Node) (*yaml.Node, error) {
 			return nil, err
 		}
 		for _, d := range docs {
-			if err := mergeDoc(acc, d); err != nil {
+			if acc, err = addons.MergeDocument(acc, d); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if extra != nil {
-		if err := mergeDoc(acc, extra); err != nil {
+		var err error
+		if acc, err = addons.MergeDocument(acc, extra); err != nil {
 			return nil, err
 		}
 	}
 	return acc, nil
-}
-
-func mergeDoc(acc *yaml.Node, doc *yaml.Node) error {
-	doc = yqsem.Deref(doc)
-	if doc == nil || isNullNode(doc) {
-		return nil
-	}
-	if doc.Kind != yaml.MappingNode {
-		return errors.New("cannot multiply !!map with " + doc.Tag)
-	}
-	mergeMap(acc, doc)
-	return nil
-}
-
-// mergeMap merges src into dst: keys new to dst append; keys present in both
-// deep-merge when BOTH values are mappings, otherwise src's value replaces
-// (including an explicit null — yq replaces at key level).
-func mergeMap(dst, src *yaml.Node) {
-	for i := 0; i+1 < len(src.Content); i += 2 {
-		key := yqsem.Deref(src.Content[i])
-		val := yqsem.Deref(src.Content[i+1])
-		if key == nil {
-			continue
-		}
-		existing := -1
-		for j := 0; j+1 < len(dst.Content); j += 2 {
-			k := yqsem.Deref(dst.Content[j])
-			if k != nil && k.Value == key.Value {
-				existing = j
-				break
-			}
-		}
-		if existing < 0 {
-			dst.Content = append(dst.Content, key, val)
-			continue
-		}
-		cur := yqsem.Deref(dst.Content[existing+1])
-		if cur != nil && cur.Kind == yaml.MappingNode && val != nil && val.Kind == yaml.MappingNode {
-			mergeMap(cur, val)
-			continue
-		}
-		dst.Content[existing+1] = val
-	}
 }

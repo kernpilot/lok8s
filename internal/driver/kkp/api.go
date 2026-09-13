@@ -64,6 +64,14 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		ui.ErrorTo(stderr, "KKP_TOKEN is not set")
 		return "", ui.Handled(fmt.Errorf("kkp: KKP_TOKEN is not set"))
 	}
+	// curlConfigQuote escapes a backslash and a double quote, the two
+	// characters curl's parser unescapes. A CR or LF ends the config line
+	// instead, so the token is refused before it reaches the config. The
+	// bash passed the token as an argument; deliberate deviation
+	// (catalogue D28).
+	if err := credentials.NoNewline("KKP_TOKEN", token, stderr); err != nil {
+		return "", err
+	}
 	apiURL := os.Getenv("KKP_API_URL")
 	if apiURL == "" {
 		ui.ErrorTo(stderr, "KKP_API_URL is not set")

@@ -30,7 +30,10 @@ func init() { registerPorted("ai", newAiCommand) }
 
 // runProcess runs a child to completion with inherited stdio and returns
 // its exit code (bash: `"${PATH_LOK8S}/lo" chat --check || rc=$?`). Tests
-// swap it to capture the argv.
+// swap it to capture the argv. A raw exec.Command on purpose, not a
+// Runner child: this is a foreground chat on the terminal, and the
+// terminal's Ctrl-C reaches it directly, the way it reached the bash
+// child (catalogue D25).
 var runProcess = func(bin string, argv, env []string) int {
 	c := exec.Command(bin, argv[1:]...)
 	c.Env = env

@@ -261,6 +261,7 @@ the binary; a project no longer needs a synced `.lok8s/` tree for it.
 | `drivers/capi/cluster/**` | the CAPI core + provider templates | `drivers/capi/cluster` |
 | `libs/inventory/manifests/` | the ClusterInventory CRD mirror | `libs/inventory/manifests` |
 | `chat/` | `lo chat` defaults | `chat` |
+| `tilt/` | the Tilt extension (`Tiltfile`, its README, the registry TLS note) that the project-root two-line `Tiltfile` loads | `tilt` |
 | `VERSION` | the fallback for an unstamped build | — (never ejected) |
 
 The embedded copy is canonical. The repo's `.lok8s/**` twin stays (the
@@ -283,8 +284,12 @@ runtime read of the framework tree in the binary goes through the
 resolver: the bootstrap entry parser (`internal/bootstrap`, and the
 twin parsers in `internal/lint` and `internal/audit`, which peek), the
 `lo` driver's CoreDNS/registry/expose templates, the KubeOne core
-template, the CAPI templates, the inventory CRD, the chat defaults, and
-the version (`assets.Version()`: ldflags, else the embedded `VERSION`).
+template, the CAPI templates, the inventory CRD, the chat defaults, the
+Tilt extension (`lo tilt up` and `lo tilt ci` eject `tilt/` before Tilt
+starts, because Tilt reads `.lok8s/tilt/Tiltfile` from disk; under
+`--no-eject` / `LO_ASSETS_EJECT=never` they stop with an error that names
+`lo assets eject tilt`), and the version (`assets.Version()`: ldflags,
+else the embedded `VERSION`).
 What does NOT go through it, on purpose: the bash seams (`.lok8s/lo`,
 `.lok8s/drivers/<name>/main`, `.lok8s/providers/*`), which are the frozen
 implementation, not assets, and `lo crds generate`'s write of the
@@ -360,6 +365,48 @@ The `core` profile's `.bin/b.yaml` declares the binary
 install` fetches it into `.bin/` alongside the rest of the toolchain. The
 [Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) page
 states what `b` still manages today versus the intended end state.
+
+## What still runs as bash
+
+Three seams run bash from the frozen tree. Each one is a choice, not a
+gap in the port.
+
+**The Hetzner provider.** `internal/provider/bridge` runs
+`.lok8s/providers/hetzner/main` as `bash -c` children over the frozen
+libs. Each contract call (`provider::provision`, `provider::destroy`,
+`provider::output`, the KubeOne inventory hooks) starts one fresh process:
+it sources argsh, loads the provider, calls one function, and exits.
+
+A fresh process has no memory, and that is fine. The provider keeps its
+state at the cloud (hcloud labels) and on disk
+(`<work_dir>/hetzner.dump.json`), never in shell variables. Every child
+goes through `execx.Runner`, so the dispatch stays hermetic under a fake.
+
+**`lo drivers <name>`.** The binary hands a driver directory with no Go
+twin (`.lok8s/drivers/<name>/main` only) to the argsh implementation with
+argv untouched. `--list` prints the union of both worlds.
+
+**`LO_IMPL=bash`.** The whole process runs as `bash .lok8s/lo`, described
+in the next section.
+
+What each seam needs on disk:
+
+| Seam | Needs |
+|---|---|
+| Hetzner provider | a lok8s checkout that `PATH_LOK8S` points at (the frozen libs and the provider), `argsh` in `.bin/` (`b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
+| `lo drivers <name>` | the same checkout and `argsh`, plus whatever the driver calls |
+| `LO_IMPL=bash` | the same checkout and `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `sops`) |
+
+The binary prepares `PATH` and every `PATH_*` variable for these children
+the way the project's `.envrc` would (`bridge.Env`), so a consumer does not
+export them by hand.
+
+Why the provider stays bash: it is about 1650 lines of argsh that drive
+real infrastructure (the hcloud CLI, the Robot REST API, a cloud-init
+generator with its own template tree). A port of that size needs its own
+change, with a real Hetzner account to prove it against. The bridge keeps
+the provider correct today at no risk to live clusters. Port it when
+provider behaviour needs to change, not before.
 
 ## `LO_IMPL=bash`: the escape hatch
 
@@ -449,6 +496,7 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D11 | **KKP unsupported provider / non-numeric replicas abort before the wire.** The bash printed the error and then POSTed a mangled payload the server rejected. Same message, no request. | `internal/driver/kkp/kkp.go` |
 | D12 | **Tool-not-found checks in `lo secrets`.** `sops` and `ssh-to-age` are libraries in the binary, so their "not installed" branches do not exist. | `internal/secrets/ops.go` |
 | D24 | **sops is the kernpilot age-only fork.** `go.mod` replaces `github.com/getsops/sops/v3` with `github.com/kernpilot/sops/v3` (upstream v3.13.3 minus every key backend except age). A file or a `.sops.yaml` rule with a KMS, GCP KMS, Azure Key Vault, Vault or PGP recipient is rejected with `unsupported key type <x> (age-only build)`; bash used the full sops CLI, which could serve them. age files stay interoperable with the sops CLI. | `go.mod` (`replace`), `internal/secrets/sops.go` |
+| D28 | **A credential with a CR or LF is refused.** The binary hands `KKP_TOKEN` to curl through a config line on stdin and the CAPI credentials to kubectl through an env file (D20 family); both carriers are line based, so a newline in a value would end the line and start another option or key. `credentials.NoNewline` refuses the value with `environment variable <NAME> must not contain a newline` and no tool runs. The bash passed the values as arguments and let the tool fail or mangle them. | `internal/credentials/credentials.go`, `internal/driver/kkp/api.go`, `internal/driver/capi/generate.go` (`credentialEnvFile`) |
 
 ### Rendering and display
 
@@ -471,7 +519,18 @@ reach these paths (they stop at the local refusals, tokens unset).
 |---|---|---|
 | D20 | **CAPI and KKP kubeconfigs are written 0600.** The bash drivers' `> "${kc}"` redirects left cluster-admin kubeconfigs at the umask default (0644), readable by every local user. The binary writes them owner-only and tightens a file that already exists (`os.Chmod`), as the kind and hosted paths already did. | `internal/driver/capi/capi.go` (`writeKubeconfigFile`), `internal/driver/kkp/api.go` (`getKubeconfig`) |
 | D21 | **`lo kubehz join` (hosting: shared): the join script is private and the ticket is not echoed.** The api-shipped script lands in a fresh `os.MkdirTemp` directory — `<TMPDIR>/kubehz-join-<random>/kubehz-join-<node>.sh`, 0700 over 0600 — so a shared `/tmp` offers no name to pre-plant. The terminal repeats the plaintext ticket only on `--print-token`, or when no script came (the terminal is the only channel then). A write failure after the mint prints the live-ticket note. Server strings go through `scrub` and the ticket must match the bootstrap-token shape (`[a-z0-9]{6}.[a-z0-9]{16}`) or the mint is refused. The bash lib prints the ticket and writes no script. | `internal/kubehz/shared.go` (`spaceMintJoin`, `writeJoinScript`), `internal/cli/cmd_kubehz.go` |
+| D27 | **Handover bundles: link entries are not extracted.** The bash `tar -xzf` extracted symlink and hardlink entries of a `.tar.gz` bundle. A link in a PKI bundle has no use and can point outside the private directory, so the binary skips each one and prints a `[debug]` line that names it. Regular files and directories extract as before. | `internal/kubehz/handover.go` (`extractBundle`) |
 | D22 | **`lo kubehz claim` reads the nonce from stdin (`--nonce -`) or `KUBEHZ_CLAIM_NONCE`.** The flag form stays for parity and the refusal text is unchanged; the two additions keep the claim ticket out of shell history and `/proc/*/cmdline`. | `internal/kubehz/cluster.go` (`ClaimNonce`), `internal/cli/cmd_kubehz.go` |
+
+### Process model
+
+How the binary starts and stops children. The bash entrypoint set no
+trap and waited on every foreground child; the binary cancels a context.
+
+| # | Deviation | Where |
+|---|---|---|
+| D25 | **Two children bypass `execx.Runner` on purpose.** `lo ai check` runs the chat binary as a raw `exec.Command` with the terminal's stdio: it is a foreground chat, and the terminal's Ctrl-C reaches it directly, the same way it reached the bash child. `lo tilt up` starts Tilt with a raw `exec.Command` in its own session (`setsid`) and releases the process: the bash contract is `nohup tilt up &`, and the child must outlive the command. A Runner child is waited on and cancelled with the command context, which neither case wants. Every other tool call goes through the Runner. | `internal/cli/cmd_ai.go` (`runProcess`), `internal/tilt/tilt.go` (`startDetached`) |
+| D26 | **A cancelled context sends SIGINT to the running child.** On Ctrl-C the terminal delivers SIGINT to the whole foreground process group in both implementations. On SIGTERM the bash shell died and left the child running, orphaned. The binary cancels the command context on either signal, `cmd.Cancel` sends the child SIGINT, and the parent waits for it: kubeone, terraform and kubectl finish their own cleanup, then `lo` exits 128+n. | `internal/execx/runner.go` (`cmd.Cancel`) |
 
 ### Reproduced on purpose (so nobody "fixes" them in one implementation only)
 

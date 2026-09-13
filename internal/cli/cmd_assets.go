@@ -28,6 +28,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -249,9 +250,13 @@ func writeAssetsJSON(w io.Writer, reports []assets.UnitReport) error {
 
 // referencedAssets is the set a project applies: for every cluster spec
 // under clusters/, its builtin spec.bootstrap addons and the driver's
-// cluster templates, plus the inventory CRD every provision publishes.
+// cluster templates, plus the inventory CRD every provision publishes,
+// plus the Tilt extension when the project-root Tiltfile loads it.
 func referencedAssets(paths *config.Paths, stderr io.Writer) []string {
 	set := map[string]bool{"libs/inventory/manifests": true}
+	if raw, err := os.ReadFile(filepath.Join(paths.Base, "Tiltfile")); err == nil && tilt.LoadsExtension(raw) {
+		set["tilt"] = true
+	}
 	entries, _ := os.ReadDir(paths.Clusters)
 	for _, e := range entries {
 		if !e.IsDir() || !domain.NameRe.MatchString(e.Name()) {

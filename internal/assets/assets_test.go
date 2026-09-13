@@ -280,6 +280,7 @@ var mirrored = []string{
 	"drivers/capi/cluster",
 	"libs/inventory/manifests",
 	"chat",
+	"tilt",
 	"VERSION",
 }
 
@@ -318,7 +319,7 @@ func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
 	if len(embedded.Files) < 100 {
 		t.Fatalf("embedded mirror suspiciously small: %d files", len(embedded.Files))
 	}
-	for _, must := range []string{"addons/cilium/chart.yaml", "drivers/lo/cluster/registry/mirror.yaml", "drivers/kubeone/cluster/core/kubeone.yaml", "drivers/capi/cluster/core/cluster.yaml", "libs/inventory/manifests/clusterinventory.crd.yaml", "chat/defaults.json", "VERSION"} {
+	for _, must := range []string{"addons/cilium/chart.yaml", "drivers/lo/cluster/registry/mirror.yaml", "drivers/kubeone/cluster/core/kubeone.yaml", "drivers/capi/cluster/core/cluster.yaml", "libs/inventory/manifests/clusterinventory.crd.yaml", "chat/defaults.json", "tilt/Tiltfile", "tilt/README.md", "VERSION"} {
 		if _, ok := embedded.Files[must]; !ok {
 			t.Errorf("%s missing from the embed", must)
 		}
