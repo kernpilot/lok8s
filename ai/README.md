@@ -75,8 +75,9 @@ The benchmark puts every intent into one bucket. The bucket names the fix.
 | B format | invalid YAML or arguments | schema in context, then a LoRA only if that fails |
 | C reasoning | wrong sequence or plan | improve the Markdown decision-tree skills |
 
-`lo lint` and then `lo build` score bucket B. There is no
-`lo --dry-run`; the build is the render check. Bucket C uses a gold action
+`lo lint` scores bucket B. Add `lo build` to `train.verify.commands` to
+render as well, as `config.example.yaml` does. There is no `lo --dry-run`.
+The build is the render check. Bucket C uses a gold action
 trace or a different judge model. The conductor never judges itself.
 
 ## Install
@@ -110,6 +111,11 @@ python -m lo_ai train                       # QLoRA on the conductor's own base
 times, and prints a comparison table. The `fmt_pass` column is the evidence for
 or against a LoRA.
 
+The other rows of the model matrix come from the dedicated evals:
+`authoreval` (cluster specs), `addoneval` (addons), `agenteval` (multi-step
+debug with mocked tools) and `safetyeval` (the posture gate). `ledger` prints
+the recorded runs. Each is a subcommand of `python -m lo_ai`.
+
 ## Injection strategies (`injection.strategy`)
 
 - `raw`: every tool. This is the deliberately bad baseline.
@@ -137,5 +143,5 @@ model, and regenerate the pairs when the schema changes.
   those runs get the score `skip`.
 - Leave `llm.judge.model` empty to record traces for manual review instead
   of scoring bucket C.
-- Only benchmark models that fit VRAM (`gpu_frac=1.0`). Spilling models stay
-  in history under their old hash.
+- Only benchmark models that fit VRAM. The runner records the GPU fraction
+  from Ollama; a model that spills stays in history under its old hash.

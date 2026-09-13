@@ -1,7 +1,6 @@
 # secrets / credentials
 .env
 .secrets/*
-!.secrets/.gitignore
 !.secrets/Secret.*.enc
 
 # example projects (examples/<driver>/): credentials + per-run derived state.
@@ -86,4 +85,4 @@ argsh.so
 docs/public/addons-index.json
 
 # Tilt writes Starlark API stubs here with `tilt dump api-docs`; generated, never committed.
-api/
+/api/

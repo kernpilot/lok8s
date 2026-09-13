@@ -53,8 +53,8 @@ LO_IMPL=bash lo build            # any command
 bash hack/parity.sh bin/lo       # all ten harnesses, both implementations
 ```
 
-The tree needs argsh with its builtin, `yq`, `jq` and `envsubst` on the
-path. `lo init toolchain` writes a `.bin/b.yaml` that carries those lines
+The tree needs argsh with its builtin, `yq`, `jq`, `envsubst`, `sops` and
+`ssh-to-age` on the path. `lo init toolchain` writes a `.bin/b.yaml` that carries those lines
 as comments. Uncomment them and run `b install`. `lo doctor`
 reports what is missing. The Go binary needs none of them.
 
@@ -62,9 +62,9 @@ reports what is missing. The Go binary needs none of them.
 
 - Every import carries the `^` prefix: `import ^libs/deploy`,
   `import ^utils/domain`. The prefix resolves against `PATH_SCRIPTS`. A
-  driver's `main` imports all of its own siblings. Do not rely on `lo` to
-  import them first. `tests/unit/import_convention_test.bats` enforces
-  both rules.
+  file that calls a shared util's helpers imports that util itself. Do not
+  rely on `lo` to import it first. `tests/unit/import_convention_test.bats`
+  enforces the prefix and the missing-import rule.
 - ShellCheck and argsh-lint check every shell file
   (`bash hack/lint-shell.sh`).
 - Touch this tree only when a parity harness would otherwise go red, in the
