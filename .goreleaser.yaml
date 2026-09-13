@@ -140,6 +140,9 @@ release:
     owner: kernpilot
     name: lok8s
   prerelease: auto
+  # The hand-written notes (docs/releases/<tag>.md) head the release body
+  # through `--release-header` in release.yml; the github-native changelog
+  # follows. This goreleaser takes `header:` as a string only.
   extra_files:
     - glob: .release/lok8s-*.tar.gz
     - glob: install/lo-install.sh

@@ -100,7 +100,9 @@ bash lo-install.sh                            # → ~/.local/bin/lo  (--dir, --v
 
 The installer fetches `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
 release, refuses to extract anything whose SHA-256 does not match, and only
-then installs `lo`. Prefer no script at all? The same four steps by hand:
+then installs `lo`. What changed in this release and how to upgrade an
+existing project: [v0.3.0 release notes](docs/releases/v0.3.0.md).
+Prefer no script at all? The same four steps by hand:
 
 ```bash
 V=v0.3.0; A=lo-linux-amd64.tar.gz             # your tag and platform
