@@ -261,13 +261,22 @@ func TestInitProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"clusters/.gitkeep", "lok8s.yaml", ".gitignore", ".bin/b.yaml"} {
+	for _, f := range []string{"clusters/.gitkeep", "lok8s.yaml", ".gitignore", "mise.toml"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Errorf("%s not scaffolded", f)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".lok8s")); err == nil {
-		t.Error("init project wrote a .lok8s tree")
+	// Files only: no .lok8s tree, no .bin (the toolchain is `lo toolchain
+	// install`, the one step that touches the network).
+	for _, absent := range []string{".lok8s", ".bin"} {
+		if _, err := os.Stat(filepath.Join(dir, absent)); err == nil {
+			t.Errorf("init project wrote %s", absent)
+		}
+	}
+	for _, gone := range []string{"--no-toolchain", "--groups=core"} {
+		if _, _, err := runLo(t, NewRoot(p), "init", "project", "--path", dir, gone); err == nil {
+			t.Errorf("%s accepted; init project takes no toolchain flags", gone)
+		}
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "lok8s.yaml"))
 	if !strings.Contains(string(raw), "kind: Project\nmetadata:\n  name: myproj\n") {
@@ -279,7 +288,7 @@ func TestInitProject(t *testing.T) {
 			t.Errorf(".gitignore missing %q", want)
 		}
 	}
-	if !strings.Contains(stdout, "Scaffolded "+dir+"/lok8s.yaml\n") || !strings.Contains(stdout, "Done. Next:") {
+	if !strings.Contains(stdout, "Scaffolded "+dir+"/lok8s.yaml\n") || !strings.Contains(stdout, "Done. Next:\n  cd "+dir+" && lo toolchain install") {
 		t.Errorf("stdout:\n%s", stdout)
 	}
 
@@ -304,6 +313,25 @@ func TestInitProject(t *testing.T) {
 	}
 	if _, stderr, err := runLo(t, NewRoot(p), "init", "project", "../evil", "--path", dir); !errors.Is(err, ErrHandled) || stderr == "" {
 		t.Errorf("bad name accepted: err=%v", err)
+	}
+	// --env: direnv writes .envrc; both is gone with an error that names
+	// the two files it used to write.
+	envDir := filepath.Join(base, "envproj")
+	if _, _, err := runLo(t, NewRoot(p), "init", "project", "--path", envDir, "--env", "direnv"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(envDir, ".envrc")); err != nil {
+		t.Error("--env direnv wrote no .envrc")
+	}
+	if _, err := os.Stat(filepath.Join(envDir, "mise.toml")); err == nil {
+		t.Error("--env direnv also wrote mise.toml")
+	}
+	_, stderr, err := runLo(t, NewRoot(p), "init", "project", "--path", filepath.Join(base, "bothproj"), "--env", "both")
+	if err == nil || !strings.Contains(err.Error()+stderr, "--env both was removed: one file per project. Use --env mise (the default) or --env direnv") {
+		t.Errorf("--env both: err=%v stderr=%q", err, stderr)
+	}
+	if _, statErr := os.Stat(filepath.Join(base, "bothproj")); statErr == nil {
+		t.Error("--env both still scaffolded the project")
 	}
 }
 
