@@ -374,13 +374,21 @@ func executables(t *testing.T, root string) testutil.Tree {
 func TestMirroredListCoversLegacyTree(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
+	// Outside a repository the gate cannot run: skip locally, FAIL under
+	// CI=true (a silent skip there would pass an unmirrored entry).
+	skip := func(format string, a ...any) {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("CI=true: "+format, a...)
+		}
+		t.Skipf(format, a...)
+	}
 	git, err := exec.LookPath("git")
 	if err != nil {
-		t.Skip("git not on PATH")
+		skip("git not on PATH")
 	}
 	out, err := exec.Command(git, "-C", root, "ls-tree", "--name-only", "HEAD", "--", ".lok8s/").Output()
 	if err != nil || len(out) == 0 {
-		t.Skipf("git ls-tree HEAD .lok8s: %v", err)
+		skip("git ls-tree HEAD .lok8s: %v (empty output)", err)
 	}
 	var names []string
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
