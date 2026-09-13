@@ -252,4 +252,16 @@ run_pair "${KU}" "${KU}" ku l
 expect_rc 1 "${KU}" kustomize bogus
 expect_rc 0 "${KU}" kustomize                                   # group help: cobra vs argsh usage (D2), rc only
 
+# ── spec.implementation ──────────────────────────────────────────────────────
+# A bad spec.implementation.bash.commands entry stops every command (rc 1,
+# the message on stderr); `lo lint` runs and reports it as a finding (rc 1
+# through its own count). Go-only names and aliases are bad entries too.
+BI="${WORK}/badimpl"
+new_project "${BI}"
+PARITY_ROUTE_GO=bogus expect_rc 1 "${BI}" version
+PARITY_ROUTE_GO=bogus expect_rc 1 "${BI}" lint
+PARITY_ROUTE_GO=assets expect_rc 1 "${BI}" version
+PARITY_ROUTE_GO=r expect_rc 1 "${BI}" version
+PARITY_ROUTE_GO=registry expect_rc 0 "${BI}" version           # a valid entry: the rest stays Go
+
 report
