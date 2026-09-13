@@ -59,11 +59,32 @@ func ResolvePaths() (*Paths, error) {
 	p := &Paths{
 		Base:     base,
 		Bin:      EnvOr("PATH_BIN", filepath.Join(base, ".bin")),
-		Lok8s:    EnvOr("PATH_LOK8S", filepath.Join(base, ".lok8s")),
+		Lok8s:    lok8sDir(base),
 		Clusters: EnvOr("PATH_CLUSTERS", filepath.Join(base, "clusters")),
 	}
 	p.SecretsEnv, p.SecretsEnvSet = os.LookupEnv("PATH_SECRETS")
 	return p, nil
+}
+
+// CacheMarker is the manifest file at the root of a bash tree the binary
+// extracted into its cache (assets.BashTree). A tree that carries it is
+// the binary's copy, never a project's.
+const CacheMarker = ".lo-cache"
+
+// lok8sDir resolves Lok8s: PATH_LOK8S when set, unless it names a cache
+// tree. The bash shim exports PATH_LOK8S=<cache tree> to its children so
+// the argsh entrypoint finds its libs; a Go lo those children start would
+// otherwise take the cache for the project's .lok8s and write into it.
+func lok8sDir(base string) string {
+	def := filepath.Join(base, ".lok8s")
+	v := os.Getenv("PATH_LOK8S")
+	if v == "" {
+		return def
+	}
+	if _, err := os.Stat(filepath.Join(v, CacheMarker)); err == nil {
+		return def
+	}
+	return v
 }
 
 // FindProjectRoot walks up from dir to the nearest directory that carries

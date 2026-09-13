@@ -31,6 +31,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/provider/bridge"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -96,7 +97,7 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag bool, out, stderr io.Writer) error {
 	r := execx.NewRunner(paths)
-	path := childPATH(paths)
+	path := childPATH(paths, bashTreeForPATH(paths).Dir)
 
 	fmt.Fprintln(out, "=== lok8s doctor ===")
 	fmt.Fprintln(out)
@@ -208,6 +209,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		doctorWarn(out, "secrets.lok8s.dev plugin not built (run: lo kustomize build)")
 	}
 	doctorAssets(out, paths)
+	doctorBashMode(out, paths)
 
 	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
 		return doctorToolchain(ctx, out, paths, pluginHome, path)
@@ -289,6 +291,28 @@ func doctorAssets(w io.Writer, paths *config.Paths) {
 		return
 	}
 	doctorOK(w, line)
+}
+
+// doctorBashMode is the bash-mode line (Go-only): whether LO_IMPL=bash and
+// the provider plugins can run: where the bash tree comes from
+// (assets.FindBashTree, nothing is extracted here) and whether argsh is
+// where the entrypoint sources it (${PATH_BIN}/argsh). The line is OMITTED
+// in the one layout the frozen implementation can also run in (a local
+// tree and argsh present), so the doctor output stays byte-identical to
+// bash there (parity-configure diffs it strictly); every other state
+// prints it.
+func doctorBashMode(w io.Writer, paths *config.Paths) {
+	tree := assets.FindBashTree(paths)
+	argsh := filepath.Join(paths.Bin, "argsh")
+	haveArgsh := fsutil.FileExists(argsh)
+	if tree.Source.Local() && haveArgsh {
+		return
+	}
+	if !haveArgsh {
+		doctorWarn(w, "bash mode (LO_IMPL=bash, provider plugins): not runnable: argsh missing at "+config.RelTo(paths.Base, argsh)+" (fix: uncomment the bash group in .bin/b.yaml, then .bin/b install)")
+		return
+	}
+	doctorOK(w, "bash mode (LO_IMPL=bash, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")
 }
 
 // doctorToolchain is the pinned-toolchain section (Go-only): b under .bin,
@@ -430,29 +454,24 @@ func doctorProviderSection(ctx context.Context, r execx.Runner, paths *config.Pa
 	if !ok {
 		return // no bash → the bash-side diagnosis cannot run at all
 	}
+	// The libs come from the bash tree (a checkout or ejected tree, else
+	// the embedded copy in the cache).
+	tree, err := assets.BashTree(paths)
+	if err != nil {
+		doctorWarn(out, "provider section skipped: "+err.Error())
+		return
+	}
 	script := `set -euo pipefail
 source "${PATH_BIN}/argsh"
 import ^libs/doctor
 doctor::_provider_section "${1}"`
-	secretsVal := paths.SecretsEnv
-	if secretsVal == "" {
-		secretsVal = filepath.Join(paths.Base, ".secrets")
-	}
 	// Advisory: the bash section always returns 0 itself. Stdin is closed
 	// (the child is a diagnosis, never a prompt).
 	_ = r.Run(ctx, execx.Cmd{
-		Name: bash,
-		Args: []string{"-c", script, "lo-doctor-provider", d},
-		Dir:  paths.Base,
-		Env: []string{
-			"PATH=" + path,
-			"PATH_BASE=" + paths.Base,
-			"PATH_BIN=" + paths.Bin,
-			"PATH_LOK8S=" + paths.Lok8s,
-			"PATH_CLUSTERS=" + paths.Clusters,
-			"PATH_SECRETS=" + secretsVal,
-			"PATH_SCRIPTS=" + paths.Lok8s,
-		},
+		Name:  bash,
+		Args:  []string{"-c", script, "lo-doctor-provider", d},
+		Dir:   paths.Base,
+		Env:   bridge.Env(paths, tree.Dir),
 		Stdin: strings.NewReader(""), Stdout: out, Stderr: stderr,
 	})
 }

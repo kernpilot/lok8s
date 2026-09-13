@@ -127,11 +127,11 @@ func newAiCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // skill wiring is still shown.
 func aiCheck(paths *config.Paths, out, stderr io.Writer) error {
 	rc := 0
-	bin, argv, err := chatCommandLine(paths, stderr)
+	bin, argv, tree, err := chatCommandLine(paths, stderr)
 	if err != nil {
 		rc = 1
 	} else {
-		rc = runProcess(bin, append(argv, "--check"), shimEnv(paths))
+		rc = runProcess(bin, append(argv, "--check"), shimEnv(paths, tree))
 	}
 	fmt.Fprintln(out)
 	if err := aiSkills(paths, out, stderr); err != nil {

@@ -1,5 +1,5 @@
 // Package bridge runs the BASH infrastructure providers
-// (.lok8s/providers/<name>/main) as children of the Go dispatch.
+// (providers/<name>/main in the bash tree) as children of the Go dispatch.
 //
 // Why a bridge and not a port: the only provider today is hetzner — ~1650
 // lines of argsh driving the hcloud CLI, the Robot REST API (curl) and a
@@ -10,6 +10,11 @@
 // the ORIGINAL libs — the precedent is internal/recover/bridge.go (and `lo
 // doctor`'s provider section). Every child goes through execx.Runner, so
 // the dispatch stays hermetic under a fake.
+//
+// The bash tree the children source is resolved once per Loader through
+// assets.BashTree: the project's checkout or ejected tree when it has one,
+// else the copy embedded in the binary, extracted into the versioned
+// cache. No checkout is required.
 //
 // The provider is loaded ONCE per call (a fresh bash has no memory): the
 // state a provider needs lives at the cloud (hcloud labels) or on disk
@@ -33,9 +38,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
+	"sync"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -53,6 +59,19 @@ type Loader struct {
 	// destroy, validate) lands; nil = the process streams.
 	Stdout io.Writer
 	Stderr io.Writer
+
+	treeOnce sync.Once
+	treeDir  string
+	treeErr  error
+}
+
+// tree resolves the bash tree once (assets.BashTree) and memoizes it.
+func (l *Loader) tree() (string, error) {
+	l.treeOnce.Do(func() {
+		t, err := assets.BashTree(l.Paths)
+		l.treeDir, l.treeErr = t.Dir, err
+	})
+	return l.treeDir, l.treeErr
 }
 
 func (l *Loader) out() io.Writer {
@@ -76,33 +95,28 @@ func (l *Loader) runner() execx.Runner {
 	return execx.NewRunner(l.Paths)
 }
 
-// PathEnv prepends .lok8s + .bin to PathEnv when missing (cli.shimEnv).
-func PathEnv(p *config.Paths) string {
-	path := os.Getenv("PATH")
-	for _, dir := range []string{p.Lok8s, p.Bin} {
-		found := slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
-		if !found {
-			path = dir + string(os.PathListSeparator) + path
-		}
-	}
-	return path
+// PathEnv is .bin, then the bash tree, then PATH (cli.shimEnv's PATH).
+func PathEnv(p *config.Paths, tree string) string {
+	return execx.PrependPATH(p.Bin, tree)
 }
 
 // Env is the environment the argsh entrypoint would have derived: the
-// prepared PATH plus every PATH_* the libs read.
-func Env(p *config.Paths) []string {
+// prepared PATH plus every PATH_* the libs read. tree is the bash tree
+// (assets.BashTree): PATH_LOK8S and PATH_SCRIPTS point there, the project
+// paths stay the project's.
+func Env(p *config.Paths, tree string) []string {
 	secretsVal := p.SecretsEnv
 	if secretsVal == "" {
 		secretsVal = filepath.Join(p.Base, ".secrets")
 	}
 	return []string{
-		"PATH=" + PathEnv(p),
+		"PATH=" + PathEnv(p, tree),
 		"PATH_BASE=" + p.Base,
 		"PATH_BIN=" + p.Bin,
-		"PATH_LOK8S=" + p.Lok8s,
+		"PATH_LOK8S=" + tree,
 		"PATH_CLUSTERS=" + p.Clusters,
 		"PATH_SECRETS=" + secretsVal,
-		"PATH_SCRIPTS=" + p.Lok8s,
+		"PATH_SCRIPTS=" + tree,
 	}
 }
 
@@ -153,11 +167,15 @@ func (l *Loader) Load(ctx context.Context, name string) (driver.Provider, error)
 	if !nameRe.MatchString(name) {
 		return nil, fmt.Errorf("bridge: invalid provider name %q", name)
 	}
-	err := l.runner().Run(ctx, execx.Cmd{
+	env, err := l.env(name)
+	if err != nil {
+		return nil, err
+	}
+	err = l.runner().Run(ctx, execx.Cmd{
 		Name:   "bash",
 		Args:   []string{"-c", probeScript, "lo-provider", name},
 		Dir:    l.Paths.Base,
-		Env:    l.env(name),
+		Env:    env,
 		Stdout: io.Discard,
 		Stderr: l.errOut(),
 	})
@@ -167,22 +185,30 @@ func (l *Loader) Load(ctx context.Context, name string) (driver.Provider, error)
 	return &Provider{l: l, name: name}, nil
 }
 
-func (l *Loader) env(name string) []string {
-	env := Env(l.Paths)
+func (l *Loader) env(name string) ([]string, error) {
+	tree, err := l.tree()
+	if err != nil {
+		return nil, err
+	}
+	env := Env(l.Paths, tree)
 	if name != "" {
 		env = append(env, "PROVIDER_NAME="+name)
 	}
-	return env
+	return env, nil
 }
 
 // call runs one provider contract function in a child.
 func (l *Loader) call(ctx context.Context, name, fn string, stdout, stderr io.Writer, args ...string) error {
+	env, err := l.env(name)
+	if err != nil {
+		return err
+	}
 	argv := append([]string{"-c", callScript, "lo-provider", name, fn}, args...)
 	return l.runner().Run(ctx, execx.Cmd{
 		Name:   "bash",
 		Args:   argv,
 		Dir:    l.Paths.Base,
-		Env:    l.env(name),
+		Env:    env,
 		Stdout: stdout,
 		Stderr: stderr,
 	})
@@ -281,11 +307,15 @@ func (l *Loader) KubeoneAppendInventory(deps *driver.Deps) func(ctx context.Cont
 		if name == "" {
 			return ErrNoProvider
 		}
+		env, err := l.env(name)
+		if err != nil {
+			return err
+		}
 		return l.runner().Run(ctx, execx.Cmd{
 			Name:   "bash",
 			Args:   []string{"-c", kubeoneScript, "lo-kubeone", name, "_append_inventory", configFile, manifest},
 			Dir:    l.Paths.Base,
-			Env:    l.env(name),
+			Env:    env,
 			Stdout: l.out(),
 			Stderr: l.errOut(),
 		})
@@ -299,11 +329,15 @@ func (l *Loader) KubeoneAppendInventory(deps *driver.Deps) func(ctx context.Cont
 func (l *Loader) KubeonePrepareApply(deps *driver.Deps) func(ctx context.Context, workDir, clusterYAML string) error {
 	name := providerNameOf(deps)
 	return func(ctx context.Context, workDir, clusterYAML string) error {
+		env, err := l.env(name)
+		if err != nil {
+			return err
+		}
 		return l.runner().Run(ctx, execx.Cmd{
 			Name:   "bash",
 			Args:   []string{"-c", kubeonePrepareApplyScript, "lo-kubeone", name, workDir, clusterYAML},
 			Dir:    l.Paths.Base,
-			Env:    l.env(name),
+			Env:    env,
 			Stdout: l.out(),
 			Stderr: l.errOut(),
 		})

@@ -24,15 +24,20 @@ Security applies to every change — features, fixes, refactors, tests.
 command runs natively and every change lands there first. The argsh tree
 under `.lok8s/` is the **frozen reference** of the port: bugfix-only, never
 deleted, and still runnable in full via `LO_IMPL=bash lo …` (the binary
-execs `bash .lok8s/lo` with argv untouched).
+execs `bash <tree>/lo` with argv untouched). The binary embeds that tree
+(`internal/assets/lok8s/**`, the mirror of the whole `.lok8s/`): without a
+checkout it extracts the tree once into `${XDG_CACHE_HOME:-~/.cache}/lok8s/<version>/`
+(`assets.BashTree`); a checkout or an ejected tree (`lo assets eject bash`)
+always wins over the cache.
 
 Ten differential parity harnesses (`hack/parity-*.sh`) and a tree-drift
 `go test` hold the two together. **They must stay green.** Full map, seams
 and the deviations catalogue: [docs/reference/go-migration.md](docs/reference/go-migration.md).
 
 Three seams still run bash from the frozen tree on purpose: provider plugins
-(`.lok8s/providers/<name>/main`, via `internal/provider/bridge`), `lo drivers
-<name>` for a driver without a Go twin, and `LO_IMPL=bash`.
+(`providers/<name>/main` in the bash tree, via `internal/provider/bridge`),
+`lo drivers <name>` for a driver without a Go twin, and `LO_IMPL=bash`. All
+three resolve the tree through `assets.BashTree`; none needs a checkout.
 
 **Two builds from one tree** (`internal/render`, build tag `inprocess`).
 `lo` (*core*, the default `make build`) renders through the pinned
@@ -127,7 +132,7 @@ Rules that came from incidents:
 | kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
 | secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |
 | scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
-| assets (eject model) | `internal/assets` — the embedded mirror `internal/assets/lok8s/**` (**canonical**: addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `tilt/`, `VERSION`), `Resolve`/`Peek`, eject + `.lo-origin`, the three-way diff, `update`. Also `internal/cli/cmd_assets.go` | `.lok8s/{addons,drivers/*/cluster,libs/inventory/manifests,chat,tilt,VERSION}`, the synced twin (`hack/sync-legacy-assets.sh`, drift-gated by `go test ./internal/assets/`). Edit the mirror, then sync. Never only one side |
+| assets (eject model) | `internal/assets`: the embedded mirror `internal/assets/lok8s/**` (**canonical**: the WHOLE `.lok8s` tree. Data units: addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `tilt/`. The bash unit (`bashtree.go`): `lo`, `libs/**`, `utils/**`, the drivers' code, `providers/**`, `VERSION`; executable bits in `bashExecutables`), `Resolve`/`Peek`, eject + `.lo-origin`, the three-way diff, `update`, `BashTree` (the cache extract). Also `internal/cli/cmd_assets.go` | `.lok8s/**`, the synced twin (`hack/sync-legacy-assets.sh`, drift-gated by `go test ./internal/assets/`, modes included). Edit the mirror, then sync. Never only one side |
 | tilt | `internal/tilt` (`lo tilt`, port slots); the extension itself is an embedded asset (`internal/assets/lok8s/tilt/`, ejected on first `lo tilt up`/`ci`) | `.lok8s/tilt/Tiltfile` (Starlark, the synced twin, still the live extension), `Tiltfile` |
 | mcp | `internal/cli/cmd_mcp.go` (ophis; `.mcp.json` launches `bin/lo mcp start`) | the argsh `mcp` builtin (`.lok8s/lo mcp`; `lo chat` still drives it) |
 | operator | `internal/operator` (hook bodies), `operator/hooks/*.sh` (two-line shims), `operator/crds`, `operator/deploy` | `.archive/legacy/operator/hooks/` |
@@ -164,7 +169,7 @@ not framework code. Its imports are ESM and stay relative.
 make build                                       # bin/lo: core (stamps internal/assets/lok8s/VERSION)
 make build-full                                  # bin/lo-full: -tags inprocess
 make test test-full vet vet-full lint lint-full  # Go unit + tree-/assets-/pin-drift gates, vet, golangci, for BOTH builds
-bash hack/sync-legacy-assets.sh                  # after editing internal/assets/lok8s/**: resync the .lok8s twin
+bash hack/sync-legacy-assets.sh                  # after editing internal/assets/lok8s/** (the whole tree): resync the .lok8s twin
 bash hack/parity-test.sh "$PWD/bin/lo"           # one parity harness (ten exist; run each against bin/lo AND bin/lo-full, absolute path)
 ./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …); the bash side needs it
 ./.bin/argsh test tests/unit/ tests/operator/    # bats suites for the frozen tree

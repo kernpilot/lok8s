@@ -1,0 +1,397 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
+# vim: set syntax=bash:
+# addons — list and inspect framework-shipped bootstrap addons
+#
+# Lists addons from the shared .lok8s/addons/ tree, showing name, type
+# (khelm / raw / base), and version (parsed from chart.yaml for khelm
+# addons). Addons are framework-level and work with all drivers; the
+# active domain's driver (cluster.lok8s.yaml `kind`) only selects which
+# values overlay (values.<driver>.yaml) applies at bootstrap time.
+
+import ^utils/types
+import ^utils/domain
+import ^utils/verbose
+import ^utils/template
+
+main::addons() {
+  local domain="${domain:-${DOMAIN_NAME:-}}" detail=0
+  local -a addons
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    'detail|:+'         'Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure'
+    'addons'            'List and inspect specific addons'
+    "${args[@]:-}"
+  )
+  :args "Manage cluster addons" "${@}"
+
+  if is::set addons; then
+    for ((i=0; i<${#addons[@]}; i++)); do
+      addons::show "${addons[${i}]}"
+      [[ ${i} -lt $((${#addons[@]} - 1)) ]] &&
+        printf "\n---\n"
+    done
+    return 0
+  fi
+
+  if (( detail )); then
+    addons::detail "${domain}"
+    return 0
+  fi
+
+  addons::list
+}
+
+# Resolve the driver kind for the active domain.
+# Usage: addons::_driver [domain]
+# Echoes lowercase driver name. Falls back to "lo" if no spec found — but NOT
+# if the spec declares a malformed one (domain::spec_driver rc 2). That is the
+# reader's documented contract: rc 1 means "nothing to read" and takes the
+# fallback, rc 2 means "present but not a bare driver name" and is never
+# defaulted, because the value reaches a path we source and quietly replacing a
+# crafted one with "lo" hides the crafting.
+# shellcheck disable=SC2120 # optional [domain] arg; callers invoke it arg-less (active domain)
+addons::_driver() {
+  local target="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
+  local spec="${PATH_CLUSTERS}/${target}/cluster.lok8s.yaml"
+  local kind rc=0
+  kind=$(domain::spec_driver "${spec}" lo) || rc=$?
+  if (( rc )); then
+    error "cluster spec for '${target}' declares a malformed kind (${spec}) — refusing to assume 'lo'"
+    return 1
+  fi
+  echo "${kind}"
+}
+
+# Resolve the shared addons directory.
+addons::_dir() {
+  echo "${PATH_LOK8S}/addons"
+}
+
+# Classify an addon directory: khelm | raw | base | empty
+addons::_type() {
+  local dir="${1}"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    local kind
+    kind=$(yq -r '.kind // ""' "${dir}/chart.yaml" 2>/dev/null)
+    if [[ "${kind}" == "ChartRenderer" ]]; then
+      echo "khelm"
+      return
+    fi
+  fi
+  if [[ -f "${dir}/kustomization.yaml" || -f "${dir}/kustomization.yml" ]]; then
+    # Has kustomization but no chart.yaml → raw or composition
+    echo "raw"
+    return
+  fi
+  echo "empty"
+}
+
+# Get version for a khelm addon. Echoes "-" for non-khelm.
+addons::_version() {
+  local dir="${1}"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    yq -r '.version // "-"' "${dir}/chart.yaml" 2>/dev/null
+  else
+    echo "-"
+  fi
+}
+
+# Get the chart repository URL for a khelm addon.
+addons::_repo() {
+  local dir="${1}"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    yq -r '.repository // "-"' "${dir}/chart.yaml" 2>/dev/null
+  else
+    echo "-"
+  fi
+}
+
+# Get the chart name for a khelm addon.
+addons::_chart() {
+  local dir="${1}"
+  if [[ -f "${dir}/chart.yaml" ]]; then
+    yq -r '.chart // "-"' "${dir}/chart.yaml" 2>/dev/null
+  else
+    echo "-"
+  fi
+}
+
+# addons::list — print a table of addons for the active driver.
+addons::list() {
+  local driver addons_dir
+  driver=$(addons::_driver) || return 1
+  addons_dir=$(addons::_dir)
+
+  if [[ ! -d "${addons_dir}" ]]; then
+    warn "No addons directory (${addons_dir})"
+    return 0
+  fi
+
+  printf '%-20s  %-8s  %-12s  %s\n' "NAME" "TYPE" "VERSION" "CHART/REPO"
+  printf '%-20s  %-8s  %-12s  %s\n' "----" "----" "-------" "----------"
+
+  local had_entries=0
+  local dir
+  for dir in "${addons_dir}"/*/; do
+    [[ -d "${dir}" ]] || continue
+    local name type version chart repo
+    name=$(basename "${dir}")
+    type=$(addons::_type "${dir}")
+    version=$(addons::_version "${dir}")
+    chart=$(addons::_chart "${dir}")
+    repo=$(addons::_repo "${dir}")
+    local detail="-"
+    if [[ "${chart}" != "-" ]]; then
+      detail="${chart} (${repo})"
+    fi
+    printf '%-20s  %-8s  %-12s  %s\n' "${name}" "${type}" "${version}" "${detail}"
+    had_entries=1
+  done
+
+  if (( ! had_entries )); then
+    echo "  (no addons available)"
+  fi
+}
+
+# addons::show — print detail for one or more addons.
+# Usage: addons::show <name> [name...]
+addons::show() {
+  local name="${1}"
+  [[ -n "${name}" ]] || { error "addon name required"; return 1; }
+
+  local driver addons_dir
+  driver=$(addons::_driver) || return 1
+  addons_dir=$(addons::_dir)
+  local dir="${addons_dir}/${name}"
+
+  if [[ ! -d "${dir}" ]]; then
+    error "addon '${name}' not found (${dir})"
+    return 1
+  fi
+
+  echo "name:    ${name}"
+  echo "driver:  ${driver}"
+  echo "path:    ${dir}"
+  echo "type:    $(addons::_type "${dir}")"
+  local version chart repo
+  version=$(addons::_version "${dir}")
+  chart=$(addons::_chart "${dir}")
+  repo=$(addons::_repo "${dir}")
+  if [[ "${chart}" != "-" ]]; then
+    echo "chart:   ${chart}"
+    echo "version: ${version}"
+    echo "repo:    ${repo}"
+  fi
+  echo ""
+  echo "files:"
+  local f
+  for f in "${dir}"/*; do
+    [[ -f "${f}" ]] || continue
+    echo "  - $(basename "${f}")"
+  done
+}
+
+# Read an addon's lok8s.dev/category label from its manifests. Echoes the
+# category (infrastructure/networking/observability/storage/security/
+# gitops/dev-tools) or "-".
+addons::_category() {
+  local dir="${1}" line cat=""
+  # LC_ALL=C sort before head -1: grep -r traversal follows readdir order
+  # (filesystem-dependent), and the category feeds deterministic artifacts
+  # (ClusterInventory, addons-index.json) — pick a stable winner.
+  line=$(grep -rhoE 'lok8s\.dev/category:[[:space:]]*[a-zA-Z0-9-]+' "${dir}" 2>/dev/null | LC_ALL=C sort | head -1)
+  cat="${line##*:}"                 # drop everything up to the colon
+  cat="${cat//[[:space:]]/}"        # trim surrounding whitespace
+  echo "${cat:--}"
+}
+
+# addons::_config_hint <name> — a one-line "how to configure" pointer for a
+# framework addon. This is the small in-repo config-help catalog: every addon
+# under .lok8s/addons/ MUST have an entry here (a parity test fails on drift, so
+# adding an addon without a hint breaks CI). Keep each hint to the handful of
+# knobs users actually touch.
+addons::_config_hint() {
+  case "${1}" in
+    autoscaler)                   echo "min/max nodes per MachineDeployment via cluster-autoscaler annotations";;
+    ccm)                          echo "spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)";;
+    cert-manager)                 echo "issue TLS via ClusterIssuer/Certificate CRs in a networking target";;
+    cert-manager-webhook-hetzner) echo "needs the hetzner-dns token Secret; pair with a DNS-01 ClusterIssuer";;
+    cilium)                       echo "encryption + policy mode (policyAuditMode) in cilium inline values / values.<driver>.yaml";;
+    cnpg-operator)                echo "declare databases as CNPG Cluster CRs in a target";;
+    envoy-gateway)                echo "define Gateway + HTTPRoutes in a networking target";;
+    external-dns)                 echo "set the managed DNS zones via spec.dns.domainFilter";;
+    fluxcd)                       echo "GitRepository + Kustomization are per-cluster glue; set them inline (extraObjects) or in a flux-system target";;
+    gatus)                        echo "configure monitored endpoints in the gatus target/values";;
+    local-path-provisioner)       echo "set as default StorageClass; values in addons/local-path-provisioner";;
+    loki)                         echo "bootstrap AFTER monitoring; pin storageClass/retention inline; add the Grafana Loki datasource in the monitoring values";;
+    mailpit)                      echo "expose via an HTTPRoute target (dev SMTP capture)";;
+    metallb)                      echo "set the address pool via spec.loadBalancer.pool";;
+    metrics-server)               echo "usually no config; values in addons/metrics-server";;
+    monitoring)                   echo "Prometheus/Grafana scrape + OIDC config via the monitoring target values";;
+    oidc-rbac)                    echo "spec.oidc.groupsClaim + the oidc group->cluster-role bindings";;
+    promtail)                     echo "bootstrap AFTER loki (its push target); tolerates all taints so control-plane logs ship too";;
+    redis-operator)               echo "declare Redis CRs in a target";;
+    reflector)                    echo "annotate the source Secret/ConfigMap to mirror across namespaces";;
+    rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
+    sso-gate)                     echo "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect";;
+    system-upgrade-controller)    echo "declare upgrade Plans in a target (Rancher SUC)";;
+    tempo)                        echo "configure trace storage/retention via the tempo values";;
+    *)                            echo "";;
+  esac
+}
+
+# addons::detail [domain] — inventory the addons THIS cluster DEPLOYS.
+# Reads spec.bootstrap through the SAME shared parser the apply path uses
+# (bootstrap::_resolve_entries / _parse_entry — so map-form entries stay intact),
+# intersected with the .lok8s/addons/ tree, and prints each addon's category
+# (lok8s.dev/category label) + a one-line config pointer. `./targets/*` (and
+# absolute-path) entries are listed as per-cluster targets (glue), not framework
+# addons. Read-only, cluster-free.
+addons::detail() {
+  local domain="${1:-${domain:-${DOMAIN_NAME:-}}}"
+
+  # Reject a path-traversal / injected domain BEFORE it builds any filesystem
+  # path (same guard as bootstrap::dispatch / provision::resolve_spec /
+  # audit::run_domain — rejects '/', '..', absolute and non-allowlisted names).
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    warn "Invalid domain name '${domain}' — nothing to inventory"
+    return 0
+  fi
+
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local addons_dir
+  addons_dir=$(addons::_dir)
+
+  if [[ ! -f "${spec}" ]]; then
+    warn "No cluster spec for '${domain}' (${spec}) — nothing to inventory"
+    return 0
+  fi
+  # The bootstrap parser is loaded by the `lo` entrypoint before addons is used;
+  # guard so a direct source without it fails loud instead of mis-parsing.
+  if ! declare -f bootstrap::_resolve_entries &>/dev/null; then
+    error "bootstrap parser not loaded — run via 'lo addons --detail'"
+    return 1
+  fi
+
+  # `|| kind="lo"` here would default on rc 2 as well, which is exactly what
+  # domain::spec_driver promises never to happen — the kind selects the
+  # values.<driver>.yaml overlay and the driver's default entries, so a
+  # malformed one must be reported, not guessed away.
+  local kind
+  kind=$(domain::spec_driver "${spec}" lo) || {
+    error "cluster spec for '${domain}' declares a malformed kind (${spec})"
+    return 1
+  }
+
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+
+  printf 'Addons deployed by %s (kind=%s)\n\n' "${domain}" "${kind}"
+  printf '%-24s  %-14s  %-8s  %-10s  %s\n' "NAME" "CATEGORY" "TYPE" "VERSION" "CONFIGURE"
+  printf '%-24s  %-14s  %-8s  %-10s  %s\n' "----" "--------" "----" "-------" "---------"
+
+  local e nm dr inl ev wt dp count=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
+    count=$(( count + 1 ))
+    local base
+    base=$(basename "${dr}")
+    if [[ "${dr}" == "${addons_dir}/"* ]]; then
+      # Framework addon.
+      local cat type version hint
+      cat=$(addons::_category "${dr}")
+      type=$(addons::_type "${dr}")
+      version=$(addons::_version "${dr}")
+      hint=$(addons::_config_hint "${base}")
+      [[ -n "${hint}" ]] || hint="see docs/guide/addons.md"
+      printf '%-24s  %-14s  %-8s  %-10s  %s\n' "${nm}" "${cat}" "${type}" "${version}" "${hint}"
+    else
+      # Per-cluster target (glue) — a ./targets/* or /abs path entry.
+      local tpath="${dr//\/.\//\/}"          # normalize the /./ from ./targets
+      tpath="${tpath#"${PATH_BASE}/"}"
+      printf '%-24s  %-14s  %-8s  %-10s  %s\n' \
+        "${nm}" "target" "target" "-" "per-cluster glue in ${tpath}"
+    fi
+  done
+
+  if (( count == 0 )); then
+    echo "  (spec.bootstrap is empty — this cluster deploys no addons)"
+  fi
+  printf '\nConfigure an addon: edit its spec.bootstrap inline values, or its addons/<name>/values.<driver>.yaml — see docs/guide/addons.md.\n'
+}
+
+# Render a framework addon to stdout via the canonical khelm path — the SINGLE
+# render shared by the bootstrap engine and the KubeOne driver's pre-apply addon
+# staging. Stacks values base < driver(kind) < provider < inline (later wins),
+# rewrites the chart's valueFiles to the merged set, then
+# `kustomize build --enable-alpha-plugins` + envsubst (LOK8S_USER_* placeholders
+# the caller exported, e.g. cilium's k8sServiceHost).
+# Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values]
+addons::render() {
+  local addon_dir="${1}" kind="${2}" provider_name="${3:-}" inline_values="${4:-}"
+  local build_dir="${addon_dir}"
+  if [[ -f "${addon_dir}/chart.yaml" ]]; then
+    # Stack values: base < driver < provider < inline (later wins). Facts
+    # (provider env) beat preferences (driver flavor) beat chart defaults (base);
+    # explicit caller intent (inline) beats all.
+    local -a value_files=()
+    [[ ! -f "${addon_dir}/values.yaml" ]] || value_files+=("${addon_dir}/values.yaml")
+    [[ ! -f "${addon_dir}/values.${kind}.yaml" ]] || value_files+=("${addon_dir}/values.${kind}.yaml")
+    [[ -z "${provider_name}" ]] || [[ ! -f "${addon_dir}/values.${provider_name}.yaml" ]] \
+      || value_files+=("${addon_dir}/values.${provider_name}.yaml")
+    # Copy to a mktemp build dir ONLY when there's overlay stacking to do. A chart
+    # that pins its OWN chart.yaml valueFiles — e.g. a target referencing a
+    # cross-tree base `../../../../.lok8s/addons/<x>/values.yaml` (monitoring,
+    # gatus) — must render IN PLACE: a copy breaks those relative paths (they
+    # resolve from /tmp → /.lok8s, missing). Stacking addons carry no cross-tree refs.
+    if [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); then
+      build_dir=$(mktemp -d) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
+      # `/.` (not `/*`) so dotfiles (.helmignore, kustomize overlays, …) come too —
+      # a glob drops them and a chart referencing a dotfile would fail to render.
+      cp -r "${addon_dir}/." "${build_dir}/" \
+        || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
+      if [[ -n "${inline_values}" ]]; then
+        printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
+        value_files+=("${build_dir}/values.inline.yaml")
+      fi
+      if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" \
+             > "${build_dir}/values.merged.yaml"; then
+        error "addons::render: failed to merge values for ${addon_dir}"
+        rm -rf "${build_dir}"; return 1
+      fi
+      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
+        || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
+    fi
+  fi
+
+  # KHELM_TRUST_ANY_REPO: chart repos are declared in our own version-controlled
+  # chart.yaml (the trust boundary is code review), so trust them — no manual
+  # `helm repo add`, versions stay pinned.
+  # --enable-exec: secrets.lok8s.dev is an exec plugin (an addon may carry a
+  # Secret.*.yaml generator next to its chart, e.g. ccm's hcloud secret).
+  local whitelist rc=0 out
+  whitelist=$(template::envsubst_whitelist)
+  # Container env `value`s MUST be strings (k8s schema). Helm coerces numeric
+  # values (e.g. cilium's KUBERNETES_SERVICE_PORT from k8sServicePort) back to
+  # ints and charts emit them unquoted → `kubectl apply` rejects them. Coerce
+  # every container env value to a string; `valueFrom` entries (no `value`) are
+  # left untouched.
+  out=$(KHELM_TRUST_ANY_REPO=true kustomize build --enable-alpha-plugins --enable-exec "${build_dir}" \
+          | template::envsubst "${whitelist}" \
+          | yq eval '(.. | select(tag == "!!map" and has("env") and (.env | tag == "!!seq")) | .env[] | select(has("value")) | .value) |= tostring') || rc=$?
+  [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+  # A successful build that yields nothing means the addon rendered no resources —
+  # almost always a misconfig (wrong path, everything filtered out). Fail loud
+  # rather than report success for an empty apply.
+  if (( rc == 0 )) && [[ -z "${out}" ]]; then
+    error "addons::render: empty output for ${addon_dir} (no resources rendered)"
+    return 1
+  fi
+  (( rc == 0 )) && printf '%s\n' "${out}"
+  return ${rc}
+}
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::addons "${@}"

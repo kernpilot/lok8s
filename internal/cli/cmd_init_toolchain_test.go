@@ -49,6 +49,32 @@ func TestInitToolchainDefaultsToTheProjectAboveCwdNotPathBase(t *testing.T) {
 	}
 }
 
+// The bash group (argsh, yq, jq, envsubst, sops, ssh-to-age) is carried
+// commented out and selectable through --groups; there is no flag of its
+// own (the project config routes to bash, WP8).
+func TestInitToolchainBashGroupThroughGroups(t *testing.T) {
+	project := synthProject(t)
+	t.Chdir(project.Base)
+	stdout, stderr, err := runLo(t, NewRoot(project), "init", "toolchain", "--dry-run", "--groups", "core,local,bash")
+	if err != nil {
+		t.Fatalf("init toolchain --groups bash: %v\n%s", err, stderr)
+	}
+	if _, _, err := runLo(t, NewRoot(project), "init", "toolchain", "--dry-run", "--with-bash"); err == nil {
+		t.Fatal("--with-bash accepted; the bash runtime is selected by the project config, not a flag")
+	}
+	if !strings.Contains(stdout, "groups: core,local,bash)") {
+		t.Errorf("bash group not selected:\n%s", stdout)
+	}
+	tpl, err := toolchainTemplate("p", []string{"core", "local", "bash"})
+	if err != nil || !strings.Contains(tpl, "  github.com/arg-sh/argsh:\n    asset: argsh\n") || !strings.Contains(tpl, "  yq:\n    groups: [bash]\n") {
+		t.Errorf("template without the active bash entries: %v\n%s", err, tpl)
+	}
+	plain, _ := toolchainTemplate("p", nil)
+	if strings.Contains(plain, "\n  yq:") {
+		t.Error("the default template activates the bash group")
+	}
+}
+
 func TestInitToolchainPathFlagWins(t *testing.T) {
 	ambient := synthProject(t)
 	t.Setenv("PATH_BASE", ambient.Base)

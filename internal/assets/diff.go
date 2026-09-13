@@ -185,10 +185,10 @@ func localOnlyAddons(p *config.Paths) []Unit {
 }
 
 func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
-	dir := localPath(p, u.Rel)
+	dir := unitDir(p, u)
 	r := UnitReport{Rel: u.Rel, Kind: string(u.Kind), Path: dir, Version: VersionPair{Local: "-", Embedded: "-"}}
 	_, isEmbedded := UnitFor(u.Rel)
-	local, err := LocalFiles(dir)
+	local, err := localUnitFiles(p, u)
 	if err != nil {
 		return r, err
 	}
@@ -202,7 +202,7 @@ func reportUnit(p *config.Paths, u Unit) (UnitReport, error) {
 			r.Version.Embedded = chartVersionFS(u.Rel + "/chart.yaml")
 		}
 	}
-	if !fsutil.DirExists(dir) {
+	if !fsutil.DirExists(dir) || (isEmbedded && !unitExists(p, u)) {
 		r.Origin = OriginColBuiltin
 		return r, nil
 	}

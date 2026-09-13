@@ -245,7 +245,7 @@ func mcpSelectors(x mcpExposure) []ophis.Selector {
 // unrelated working directory.
 func mcpDefaultEnv(paths *config.Paths) map[string]string {
 	env := map[string]string{"PATH_BASE": paths.Base}
-	for _, kv := range shimEnv(paths) {
+	for _, kv := range shimEnv(paths, bashTreeForPATH(paths)) {
 		if k, v, _ := strings.Cut(kv, "="); k == "PATH" {
 			env[k] = v
 		}
@@ -256,7 +256,7 @@ func mcpDefaultEnv(paths *config.Paths) map[string]string {
 // mcpExportEnv gives the server process — and so every tool subprocess — the
 // environment the shim prepares (PATH, KUSTOMIZE_PLUGIN_HOME).
 func mcpExportEnv(paths *config.Paths) {
-	for _, kv := range shimEnv(paths) {
+	for _, kv := range shimEnv(paths, bashTreeForPATH(paths)) {
 		if k, v, _ := strings.Cut(kv, "="); k == "PATH" || k == "KUSTOMIZE_PLUGIN_HOME" {
 			os.Setenv(k, v)
 		}

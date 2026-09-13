@@ -46,7 +46,10 @@ func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 
   1. .bin/b.yaml from the template pinned to this lo (kustomize ` + toolchain.KustomizeCLI + `,
      khelm v` + toolchain.KhelmVersion + `, the secrets.lok8s.dev Secret plugin at this lo's version,
-     plus kubectl; kind/tilt/mkcert for --groups local; kubeone/hcloud for cloud).
+     plus kubectl; kind/tilt/mkcert for --groups local; kubeone/hcloud for cloud;
+     argsh/yq/jq/envsubst/sops/ssh-to-age for bash, the runtime of the frozen
+     bash implementation and the provider plugins, carried commented out).
+     The bash tree itself is embedded in the binary.
      An existing b.yaml is never overwritten — a diff is printed instead.
   2. .gitignore entries for .bin/ (b.yaml + b.lock stay committed).
   3. b itself into .bin/b: the pinned release v` + toolchain.BRelease.Version + ` tarball, downloaded over
@@ -81,7 +84,7 @@ func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&dir, "path", "p", "", "Project directory (default: the nearest project root above the working directory, else the working directory)")
-	cmd.Flags().StringVar(&groupsFlag, "groups", strings.Join(toolchain.DefaultGroups, ","), "Groups to activate (core,local,cloud; core is implied)")
+	cmd.Flags().StringVar(&groupsFlag, "groups", strings.Join(toolchain.DefaultGroups, ","), "Groups to activate (core,local,cloud,bash; core is implied)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Print what would be written, downloaded and run; touch nothing")
 	return cmd
 }

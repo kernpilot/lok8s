@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -343,4 +344,56 @@ func doctorAssetsLine(t *testing.T, p *config.Paths) string {
 	var buf bytes.Buffer
 	doctorAssets(&buf, p)
 	return buf.String()
+}
+
+// `lo assets eject bash` writes the frozen bash implementation into
+// .lok8s beside the data units and ejects every data unit the project
+// lacks, so the tree is complete; list/diff/update see it like any unit
+// and the shim serves the project tree from then on.
+func TestAssetsEjectBash(t *testing.T) {
+	quietAssets(t)
+	t.Setenv(assets.EnvCacheHome, t.TempDir())
+	p := synthProject(t)
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml"), "version: 0.0.1-local\n")
+
+	stdout, stderr, err := runLo(t, NewRoot(p), "assets", "eject", "bash")
+	if err != nil {
+		t.Fatalf("eject bash: %v\n%s", err, stderr)
+	}
+	// 1 (bash) + every data unit but the pre-existing cilium.
+	if want := fmt.Sprintf("ejected %d asset(s) into .lok8s", len(assets.Units())-1); !strings.Contains(stdout, want) {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	for _, f := range []string{"lo", "libs/build", assets.MarkerFile, "addons/metallb/" + assets.MarkerFile, "drivers/lo/cluster/" + assets.MarkerFile, "chat/" + assets.MarkerFile, "tilt/" + assets.MarkerFile} {
+		if _, err := os.Stat(filepath.Join(p.Lok8s, filepath.FromSlash(f))); err != nil {
+			t.Errorf("%s missing after eject bash", f)
+		}
+	}
+	if raw, _ := os.ReadFile(filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml")); string(raw) != "version: 0.0.1-local\n" {
+		t.Error("the local cilium copy was touched")
+	}
+	if tree, err := assets.BashTree(p); err != nil || tree.Source != assets.TreeProject || tree.Dir != p.Lok8s {
+		t.Errorf("BashTree after eject bash: %+v %v", tree, err)
+	}
+
+	stdout, _, err = runLo(t, NewRoot(p), "assets", "list")
+	if err != nil || !strings.Contains(stdout, "bash                            bash        local ") {
+		t.Errorf("list: %v\n%s", err, stdout)
+	}
+	// A second eject finds the local tree and writes nothing.
+	if stdout, stderr, err = runLo(t, NewRoot(p), "assets", "eject", "bash"); err != nil || !strings.Contains(stdout, "nothing to eject") {
+		t.Errorf("second eject: %v\n%s%s", err, stdout, stderr)
+	}
+	// --all never takes bash: a fresh project with --all gets the data
+	// units only.
+	q := synthProject(t)
+	if _, stderr, err := runLo(t, NewRoot(q), "assets", "eject", "--all"); err != nil {
+		t.Fatalf("eject --all: %v %s", err, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(q.Lok8s, "lo")); err == nil {
+		t.Error("--all ejected the bash tree")
+	}
+	if _, err := os.Stat(filepath.Join(q.Lok8s, "tilt", assets.MarkerFile)); err != nil {
+		t.Error("--all skipped a data unit")
+	}
 }

@@ -49,6 +49,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -131,6 +132,11 @@ type Runner struct {
 	configCleanup func()
 
 	promptReader *bufio.Reader
+
+	// The bash tree the children source (assets.BashTree), resolved once.
+	treeOnce sync.Once
+	treeDir  string
+	treeErr  error
 }
 
 func (r *Runner) out() io.Writer {

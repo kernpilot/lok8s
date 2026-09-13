@@ -30,6 +30,29 @@ check - use gamma.app
 # lo version — the Go binary intentionally drops the `bash` row.
 check '^bash ' version
 
+# The embedded bash tree: a project with NO .lok8s and only argsh in .bin,
+# PATH_LOK8S unset. The Go binary extracts the tree it embeds into the
+# versioned cache (XDG_CACHE_HOME) and LO_IMPL=bash runs from there; the
+# outputs still match and the project stays untouched.
+BARE="${WORK}/bare"
+mkdir -p "${BARE}/clusters" "${BARE}/.bin" "${WORK}/cache"
+ln -s "${ROOT}/.bin/argsh" "${BARE}/.bin/argsh"
+[[ -e "${ROOT}/.bin/argsh.so" ]] && ln -s "${ROOT}/.bin/argsh.so" "${BARE}/.bin/argsh.so"
+export XDG_CACHE_HOME="${WORK}/cache"
+PARITY_DIR_GO="${BARE}" PARITY_DIR_BASH="${BARE}" check '^bash ' version
+unset XDG_CACHE_HOME
+cache_tree="$(echo "${WORK}"/cache/lok8s/*/lok8s)"
+if [[ -x "${cache_tree}/lo" && -f "${cache_tree}/libs/version" && -f "${cache_tree}/.lo-cache" ]]; then
+  echo "ok: embedded bash tree extracted into the cache (${cache_tree#"${WORK}"/})"
+else
+  fail "embedded bash tree not extracted: ${cache_tree}"
+fi
+if [[ -e "${BARE}/.lok8s" ]]; then
+  fail "LO_IMPL=bash wrote .lok8s into a project without one"
+else
+  echo "ok: the bare project got no .lok8s"
+fi
+
 # ── lo secrets ───────────────────────────────────────────────────────────────
 # Stateful commands (init writes .sops.yaml, set/encrypt mutate the store), so
 # each implementation gets its OWN project clone and state builds up per impl;

@@ -1,0 +1,1413 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
+# bootstrap — framework-level cluster infrastructure addon system
+#
+# BOOTSTRAP_PLATFORM_OWNED: addon DIRS that must never bootstrap onto a
+# HOSTED cluster (the platform owns them there). Extend here, nowhere else.
+BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
+#
+# Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
+# drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
+#
+# Entries form a DAG and apply CONCURRENTLY (capped) — ordering edges come from
+# `dependsOn: [name, …]` and `wait: true`; semantics in the scheduler block below.
+#
+# Addon resolution:
+#   "cilium"          → .lok8s/addons/cilium/
+#   "./targets/foo"   → clusters/<domain>/targets/foo/
+#   "/absolute/path"  → /absolute/path/
+#
+# Provider-aware values:
+#   addons/cilium/values.yaml          — base (always loaded)
+#   addons/cilium/values.lo.yaml       — driver-specific (if exists)
+#   addons/cilium/values.hetzner.yaml  — provider-specific (if exists)
+#
+# Per-entry overrides (map form): the reserved keys values / valueFiles / env /
+# wait / dependsOn / name, plus the legacy whole-map-is-helm-values shim — full
+# schema + examples documented at bootstrap::_parse_entry. Effective helm-values
+# stack: base < driver < provider < valueFiles < values:.
+
+import ^utils/types
+import ^utils/domain
+import ^utils/verbose
+import ^utils/kapply
+import ^libs/addons
+
+# ── CLI entry point ──────────────────────────────────────
+
+main::bootstrap() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Apply bootstrap addons" "${@}"
+
+  bootstrap::dispatch "${domain}"
+}
+
+# bootstrap::dispatch <domain>
+# Standalone `lo bootstrap` core (factored out of main::bootstrap so it is
+# testable without the argsh :args builtin, mirroring main::provision →
+# provision::dispatch).
+#
+# CRITICAL: source the domain's driver and run driver::export BEFORE
+# bootstrap::apply — it populates the spec-derived env (LOK8S_SPEC_*) that
+# spec.bootstrap addons reference via envsubst; without it they render those
+# values empty. Same order provision::dispatch uses.
+bootstrap::dispatch() {
+  local domain="${1}"
+
+  # Reject a path-traversal / injected domain before it builds any filesystem
+  # path (same guard as provision::resolve_spec).
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
+    error "invalid domain name: ${domain}"; return 1
+  }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "cluster spec not found: ${cluster_yaml}"; return 1; }
+
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+
+  # Source the driver (same resolution as provision::dispatch) so its
+  # driver::export is available. Guard a missing driver the same way.
+  # domain::spec_driver constrains the value to a bare driver name — it is
+  # untrusted YAML about to be interpolated into a path we `source`.
+  local kind
+  kind=$(domain::spec_driver "${cluster_yaml}") || {
+    error "invalid cluster kind in ${cluster_yaml}"; return 1
+  }
+  local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
+  if [[ ! -f "${kind_script}" ]]; then
+    error "Unknown cluster kind: ${kind} (missing ${kind_script})"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "${kind_script}"
+
+  # driver::export: idempotent spec-derived env (LOK8S_SPEC_*, …) — optional per
+  # the driver contract (see .lok8s/drivers/README.md), so probe before calling.
+  if declare -f driver::export &>/dev/null; then
+    driver::export "${domain}"
+  fi
+
+  # A standalone `lo bootstrap` NEVER provisions — the KubeOne driver did not run
+  # `kubeone apply` this invocation, so bootstrap is the sole applier and MUST
+  # reconcile cilium/ccm from spec.bootstrap (identical intent to
+  # `lo provision --bootstrap`). Set the gate to reconcile-only so the KubeOne
+  # cilium/ccm skip in _apply_one does NOT fire.
+  export LOK8S_BOOTSTRAP_ONLY=1
+
+  bootstrap::apply "${domain}" "${cluster_yaml}" "${kubeconfig}"
+
+  # Refresh the in-cluster ClusterInventory after a standalone `lo bootstrap`
+  # too (same tail as provision::dispatch — fail-soft, probed because tests
+  # source this lib without the inventory lib loaded).
+  if declare -f inventory::publish &>/dev/null; then
+    inventory::publish "${domain}" "${cluster_yaml}" "${kubeconfig}"
+  fi
+}
+
+# ── Bootstrap engine ─────────────────────────────────────
+
+# bootstrap::_resolve_entries <cluster_yaml> <kind>
+# Resolve which bootstrap addon entries to apply, one per line (none = no
+# output). Pure (no cluster access) so it is unit-testable. Three cases:
+#   - explicit non-empty spec.bootstrap → exactly those entries, in order
+#   - explicit empty `bootstrap: []`    → nothing (authoritative opt-out)
+#   - absent spec.bootstrap             → per-driver default
+# The default is per-driver, NOT one-size-fits-all: only `lo` (kind) ships
+# without a CNI and must have one bootstrapped. KubeOne deploys its own cilium
+# during `kubeone apply`; Capi/Kkp clusters bring their CNI from the
+# management cluster / addon set. Defaulting those to [cilium] caused a stray
+# cilium apply on managed clusters.
+bootstrap::_resolve_entries() {
+  local cluster_yaml="${1}" kind="${2}"
+  local -a entries
+  # Emit each entry as compact JSON, one per line: a scalar ("cilium",
+  # "./targets/x") or a map ({"ccm":{<chart values>}}). JSON keeps a map on a
+  # single line (so mapfile doesn't shatter it) and omits YAML comments — so the
+  # apply loop reads structured entries instead of string-splitting them.
+  mapfile -t entries < <(yq -o=json -I=0 '.spec.bootstrap[]?' "${cluster_yaml}")
+  if (( ${#entries[@]} > 0 )); then
+    printf '%s\n' "${entries[@]}"
+    return 0
+  fi
+  # Empty result — distinguish a *defined* empty list (opt out) from an
+  # *absent* key (fall back to the per-driver default).
+  if [[ "$(yq -r '.spec | has("bootstrap")' "${cluster_yaml}")" == "true" ]]; then
+    return 0
+  fi
+  [[ "${kind}" == "lo" ]] && echo "cilium"
+  return 0
+}
+
+# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait> <deps> [explicit]
+# Parse ONE spec.bootstrap entry (the compact JSON from _resolve_entries) into the
+# fields the apply path needs — passed back through namerefs (the trailing args
+# are caller variable NAMES). The 9th (explicit) is OPTIONAL: set to "true" iff
+# this entry carries an explicit `name:` override, so the caller can treat a name
+# collision as a hard error instead of a tolerated basename clash; omit it and a
+# throwaway local is used instead (so existing six-out-param callers still work).
+# Returns 1 (after printing an error) on a malformed entry or on `values:` set
+# against a non-chart target. Pure apart from that one filesystem touch (the
+# chart.yaml check).
+#
+# Entry forms:
+#   scalar  "cilium" | "./targets/x" | "/abs/x"   → name/dir only
+#   map     {"<name-or-path>": <value>}
+#
+# The map VALUE is read in one of two schemas:
+#   NEW    — it carries a reserved key (values | valueFiles | env | wait | dependsOn | name):
+#              values: <helm values>   chart addons ONLY — a kustomize target
+#                                       (no chart.yaml) with `values:` is an ERROR
+#                                       (`values:` is helm-only).
+#              valueFiles: [path, ...]  helm values FILES (chart addons ONLY, same
+#                                       rule as values:) — a !!seq of path strings,
+#                                       each resolved relative to the CLUSTER DIR
+#                                       (clusters/<domain>/ — the same base
+#                                       ./targets/... entries resolve from) unless
+#                                       absolute; a missing file is an ERROR. The
+#                                       files pre-merge (in list order, inline
+#                                       values: on top) into the inline-values
+#                                       string handed to addons::render, so the
+#                                       effective stack is base < driver <
+#                                       provider < valueFiles < values:.
+#              env:    {KEY: val, ...}  envsubst overrides (see _apply_one).
+#              wait:   true|false       global barrier gate; default false.
+#              dependsOn: [name, ...]   wait for these named entries' READINESS
+#                                       before this one (a DAG edge — must be a
+#                                       list of entry names; resolved + cycle-
+#                                       checked in bootstrap::apply).
+#              name:   <identifier>     OVERRIDE this entry's identity (otherwise
+#                                       the basename / map-key) — the name used by
+#                                       the dependsOn registry, both as a target
+#                                       and a reference. Does NOT change addon_dir.
+#                                       Disambiguates a basename collision (e.g. a
+#                                       `rook-ceph` addon vs a `./targets/rook-ceph`
+#                                       target). Non-empty scalar, [A-Za-z0-9._-]+.
+#   LEGACY — no reserved key → the WHOLE value map IS the inline helm values
+#            (e.g. `- cilium: {encryption: {enabled: true}}`), unchanged from
+#            before this flag existed. A legacy chart that needs a *literal*
+#            top-level `values`/`valueFiles`/`env`/`wait`/`dependsOn`/`name` helm
+#            key must nest it under `values:` (e.g. `ccm: {env: {...}}` →
+#            `ccm: {values: {env: {...}}}`).
+bootstrap::_parse_entry() {
+  local _domain="${1}" _entry="${2}"
+  local -n _o_name="${3}" _o_dir="${4}" _o_inline="${5}" _o_env="${6}" _o_wait="${7}" _o_deps="${8}"
+  local _bs_discard_explicit=""
+  local -n _o_explicit="${9:-_bs_discard_explicit}"
+  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""; _o_explicit="false"
+
+  local _raw _valjson=""
+  if [[ "${_entry}" == \{* ]]; then
+    # Map entry {"<name-or-path>": <value>} — must have EXACTLY one key. A
+    # multi-key map is a config mistake (and `yq '.[]'` below would emit one
+    # value per key, silently mixing them).
+    local _nkeys
+    _nkeys="$(yq -r 'keys | length' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse addon name from ${_entry}"; return 1; }
+    if [[ "${_nkeys}" != "1" ]]; then
+      error "bootstrap: entry must be a single-key map, got ${_nkeys} keys: ${_entry}"
+      return 1
+    fi
+    _raw="$(yq -r 'keys | .[0]' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse addon name from ${_entry}"; return 1; }
+    _valjson="$(yq -o=json -I=0 '.[]' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse entry value from ${_entry}"; return 1; }
+    # The map VALUE must itself be a map (the {values,env,wait} schema, or the
+    # legacy whole-map-is-helm-values form) or null/empty. A scalar or sequence
+    # value — e.g. `- addon: true` → {"addon":true}, or `- addon: []` →
+    # {"addon":[]} — would let the reserved-key / legacy-values logic below run
+    # `yq '.values'/'.env'/'.wait'` against a scalar/seq and misbehave. Reject it
+    # up front with a clear type.
+    local _val_tag
+    _val_tag="$(yq -r 'tag' <<<"${_valjson}")" \
+      || { error "bootstrap: failed to parse entry value from ${_entry}"; return 1; }
+    if [[ "${_val_tag}" != "!!map" && "${_val_tag}" != "!!null" ]]; then
+      error "bootstrap: '${_raw}' entry value must be a map of {values,env,wait} or chart values, got ${_val_tag#!!}"
+      return 1
+    fi
+  else
+    # Scalar entry — decode the JSON string to its raw value.
+    _raw="$(yq -r '.' <<<"${_entry}")" \
+      || { error "bootstrap: failed to parse entry ${_entry}"; return 1; }
+  fi
+
+  # Resolve <name-or-path> → addon name + dir. Identical rules for a scalar entry
+  # and a map key: absolute path, ./|../ path relative to the cluster dir, or a
+  # bare framework-addon name.
+  if [[ "${_raw}" == /* ]]; then
+    _o_dir="${PATH_BASE}${_raw}"; _o_name="$(basename "${_raw}")"
+  elif [[ "${_raw}" == ./* || "${_raw}" == ../* ]]; then
+    _o_dir="${PATH_CLUSTERS}/${_domain}/${_raw}"; _o_name="$(basename "${_raw}")"
+  else
+    _o_name="${_raw}"; _o_dir="${PATH_LOK8S}/addons/${_raw}"
+  fi
+
+  # Scalar entry (or a map with an empty/null value): nothing more to parse.
+  [[ -n "${_valjson}" && "${_valjson}" != "null" ]] || return 0
+
+  if [[ "$(yq -r 'has("values") or has("valueFiles") or has("env") or has("wait") or has("dependsOn") or has("name")' <<<"${_valjson}")" == "true" ]]; then
+    # NEW schema.
+    # name: semantics documented in the function header. Validate as a non-empty
+    # scalar in the entry-name charset (same fail-fast spirit as the env-key check).
+    if [[ "$(yq -r 'has("name")' <<<"${_valjson}")" == "true" ]]; then
+      local _name_tag _oname
+      _name_tag="$(yq -r '.name | tag' <<<"${_valjson}")"
+      # name: must be a STRING scalar — reject any other tag (!!bool, !!int,
+      # !!float, !!null, !!map, !!seq). An unquoted YAML bool/int (name: true,
+      # name: 123) coerces to "true"/"123" and would slip past the charset check
+      # below — almost certainly a mistake, so require quoting. A QUOTED
+      # "true"/"123" is !!str and still passes.
+      if [[ "${_name_tag}" != "!!str" ]]; then
+        error "bootstrap: '${_raw}' name: must be a non-empty scalar entry name (got ${_name_tag#!!})"
+        return 1
+      fi
+      _oname="$(yq -r '.name' <<<"${_valjson}")"
+      if [[ -z "${_oname}" ]]; then
+        error "bootstrap: '${_raw}' name: must be a non-empty string"
+        return 1
+      fi
+      if [[ ! "${_oname}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        error "bootstrap: '${_raw}' name: '${_oname}' is not a valid entry name (must match [A-Za-z0-9._-]+)"
+        return 1
+      fi
+      _o_name="${_oname}"
+      _o_explicit="true"
+    fi
+    _o_wait="$(yq -r '.wait // false' <<<"${_valjson}")"
+    # `wait:` must be a real boolean. A non-boolean scalar (yes/on/1, …) would
+    # silently parse as a non-barrier — reject it. A YAML/JSON bool renders as
+    # the string "true"/"false" here, the only accepted forms.
+    if [[ "${_o_wait}" != "true" && "${_o_wait}" != "false" ]]; then
+      error "bootstrap: '${_raw}' has a non-boolean wait: '${_o_wait}' (use true or false)"
+      return 1
+    fi
+    if [[ "$(yq -r 'has("values")' <<<"${_valjson}")" == "true" ]]; then
+      # Only flag a non-chart target when the dir EXISTS but lacks chart.yaml.
+      # If the dir is missing entirely, stay silent here and let bootstrap::apply
+      # surface the authoritative "addon not found" — otherwise a typo'd addon
+      # name with `values:` misleads with "not a chart addon" instead.
+      if [[ -d "${_o_dir}" && ! -f "${_o_dir}/chart.yaml" ]]; then
+        error "bootstrap: '${_raw}' sets 'values:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'values:' is helm-only"
+        return 1
+      fi
+      _o_inline="$(yq -r '.values' <<<"${_valjson}")"
+    fi
+    if [[ "$(yq -r 'has("valueFiles")' <<<"${_valjson}")" == "true" ]]; then
+      # valueFiles: same helm-only rule as `values:` (a kustomize target has no
+      # chart to feed); same missing-dir leniency (let bootstrap::apply surface
+      # "addon not found"). Schema + precedence in the function header.
+      if [[ -d "${_o_dir}" && ! -f "${_o_dir}/chart.yaml" ]]; then
+        error "bootstrap: '${_raw}' sets 'valueFiles:' but is not a chart addon (no chart.yaml under ${_o_dir}); 'valueFiles:' is helm-only"
+        return 1
+      fi
+      # The container must be a SEQUENCE of file paths. A scalar
+      # (`valueFiles: ./x.yaml`) or a map is a config mistake — reject it up
+      # front (same fail-fast spirit as the env/dependsOn container checks).
+      local _vf_tag
+      _vf_tag="$(yq -r '.valueFiles | tag' <<<"${_valjson}")"
+      if [[ "${_vf_tag}" != "!!seq" ]]; then
+        error "bootstrap: '${_raw}' valueFiles: must be a list of file paths (got ${_vf_tag#!!})"
+        return 1
+      fi
+      # Every element must be a STRING scalar — an unquoted bool/int, a null
+      # element (`[~]` / a bare `-`), or a nested map/list is not a path (same
+      # strictness as the name: tag check).
+      local _vf_bad
+      _vf_bad="$(yq -r '[.valueFiles[] | tag | select(. != "!!str")] | .[0] // ""' <<<"${_valjson}")"
+      if [[ -n "${_vf_bad}" ]]; then
+        error "bootstrap: '${_raw}' valueFiles: each element must be a file path string (got ${_vf_bad#!!})"
+        return 1
+      fi
+      # Resolve each path against the CLUSTER DIR (the directory holding the
+      # cluster's lok8s yaml — the same base ./targets/... entries resolve
+      # from); an absolute path passes through. A missing file is a hard error:
+      # silently skipping it would render the addon with half its values.
+      local -a _vf_files=()
+      local _vf
+      while IFS= read -r _vf; do
+        # An empty-string element ("") is !!str, so it survives the tag check
+        # above — but it is not a path. Hard error (NOT a silent skip): the
+        # fail-fast contract is "never render with half the values".
+        if [[ -z "${_vf}" ]]; then
+          error "bootstrap: '${_raw}' valueFiles: empty element — each element must be a file path"
+          return 1
+        fi
+        [[ "${_vf}" == /* ]] || _vf="${PATH_CLUSTERS}/${_domain}/${_vf}"
+        if [[ ! -f "${_vf}" ]]; then
+          error "bootstrap: '${_raw}' valueFiles: file not found: ${_vf}"
+          return 1
+        fi
+        _vf_files+=("${_vf}")
+      done < <(yq -r '.valueFiles[]' <<<"${_valjson}")
+      if (( ${#_vf_files[@]} > 0 )); then
+        # Pre-merge (files in list order, inline `values:` on top) with the SAME
+        # deep-merge idiom addons::render stacks values with (maps deep-merge,
+        # lists REPLACE); the result rides render's existing inline-values arg,
+        # so addons::render needs no signature change.
+        if [[ -n "${_o_inline}" && "${_o_inline}" != "null" ]]; then
+          _o_inline="$(yq eval-all '. as $item ireduce ({}; . * $item)' \
+              "${_vf_files[@]}" <(printf '%s\n' "${_o_inline}"))" \
+            || { error "bootstrap: '${_raw}' valueFiles: failed to merge (${_vf_files[*]})"; return 1; }
+        else
+          _o_inline="$(yq eval-all '. as $item ireduce ({}; . * $item)' "${_vf_files[@]}")" \
+            || { error "bootstrap: '${_raw}' valueFiles: failed to merge (${_vf_files[*]})"; return 1; }
+        fi
+      fi
+    fi
+    if [[ "$(yq -r 'has("env")' <<<"${_valjson}")" == "true" ]]; then
+      # The env CONTAINER must itself be a map of KEY: scalar. A sequence or
+      # scalar `.env` makes the `to_entries[]` flatten below error out or emit
+      # bogus numeric keys (0=…, 1=…) — reject it up front. (A null/empty `env:`
+      # is a harmless no-op, matching the `// {}` default used below.)
+      local _env_tag
+      _env_tag="$(yq -r '.env | tag' <<<"${_valjson}")"
+      if [[ "${_env_tag}" != "!!map" && "${_env_tag}" != "!!null" ]]; then
+        error "bootstrap: '${_raw}' env: must be a map of KEY: scalar (got ${_env_tag#!!})"
+        return 1
+      fi
+      # env: takes KEY: scalar only. A map/array value would tostring-flatten to
+      # a bogus string (e.g. the ccm chart-value `env:` map mistakenly placed at
+      # the reserved-key level instead of under values:) — reject it so the
+      # mistake is loud, not silent.
+      local _bad_env
+      _bad_env="$(yq -r '.env // {} | to_entries[] | select((.value | tag == "!!map") or (.value | tag == "!!seq")) | .key' <<<"${_valjson}")"
+      if [[ -n "${_bad_env}" ]]; then
+        error "bootstrap: '${_raw}' env: values must be scalars; non-scalar value for: ${_bad_env//$'\n'/, } (did you mean values:?)"
+        return 1
+      fi
+      # Each env: key is exported VERBATIM by _apply_one, so it must be a valid
+      # POSIX shell variable name. A key containing '-'/'.' , starting with a
+      # digit, or empty would make `export` fail or silently misbehave. Validate
+      # here (fail fast at parse time, before any apply) with a clear message.
+      local _ek
+      while IFS= read -r _ek; do
+        [[ -n "${_ek}" ]] || continue
+        if [[ ! "${_ek}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          error "bootstrap: '${_raw}' env: key '${_ek}' is not a valid shell variable name (must match [A-Za-z_][A-Za-z0-9_]*)"
+          return 1
+        fi
+      done < <(yq -r '.env // {} | keys | .[]' <<<"${_valjson}")
+      # Flatten env: {KEY: scalar} → newline-separated KEY=val lines (scalar
+      # values, coerced to string). Consumed by _apply_one as exported env vars.
+      _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"
+    fi
+    if [[ "$(yq -r 'has("dependsOn")' <<<"${_valjson}")" == "true" ]]; then
+      # dependsOn: resolved to indices, edge-built, and cycle-checked in
+      # bootstrap::apply (which alone knows every entry's name). Validate only the
+      # SHAPE here, fail-fast at parse time (same style as the env CONTAINER
+      # check): a sequence container, every element a scalar name.
+      local _dep_tag
+      _dep_tag="$(yq -r '.dependsOn | tag' <<<"${_valjson}")"
+      if [[ "${_dep_tag}" != "!!seq" ]]; then
+        error "bootstrap: '${_raw}' dependsOn: must be a list of entry names (got ${_dep_tag#!!})"
+        return 1
+      fi
+      # Each element must be a scalar name; reject map/seq elements. Extract the
+      # per-element tag (one per line) and check in bash — yq's `==` precedence
+      # inside select() makes a single-expression filter unreliable here.
+      local -a _dep_tags=()
+      mapfile -t _dep_tags < <(yq -r '.dependsOn[] | tag' <<<"${_valjson}")
+      # A null element (`dependsOn: [~]` / a bare `-` list item) is NOT a name: it
+      # would coerce to the literal string "null" via tostring below and then fail
+      # downstream as a confusing "unknown entry 'null'". Reject it right here at
+      # the element-type validation with a clear message.
+      if printf '%s\n' "${_dep_tags[@]+"${_dep_tags[@]}"}" | grep -qxF '!!null'; then
+        error "bootstrap: '${_raw}' dependsOn: null element — must be a list of entry names"
+        return 1
+      fi
+      if printf '%s\n' "${_dep_tags[@]+"${_dep_tags[@]}"}" | grep -qxE '!!(map|seq)'; then
+        error "bootstrap: '${_raw}' dependsOn: each element must be a scalar entry name (got a map/list element)"
+        return 1
+      fi
+      # Flatten to newline-separated names (scalars coerced to string).
+      _o_deps="$(yq -r '.dependsOn[] | tostring' <<<"${_valjson}")"
+    fi
+  else
+    # LEGACY shim: the whole value map is the inline helm values.
+    _o_inline="$(yq -r '.' <<<"${_valjson}")"
+  fi
+  return 0
+}
+
+# bootstrap::inline_values — the cluster spec's merged inline values for ONE
+# addon, by the SAME semantics the bootstrap applies (_parse_entry: both entry
+# shapes, `values:` + `valueFiles:` pre-merge, cluster-dir resolution). Prints
+# the merged YAML, or nothing when the spec has no entry for the addon or the
+# entry carries no values. The kubeone driver's render_addons reads this so an
+# addon it renders for `kubeone apply` carries the SAME values the bootstrap
+# would overlay — before this, an inline-only value (issue #157: the cilium
+# kube-proxy-replacement flip) silently reverted at upgrade time and landed
+# mid-node-walk. A parse error is a hard error, never a silent empty.
+#
+# Usage: bootstrap::inline_values <domain> <cluster_yaml> <addon-name>
+bootstrap::inline_values() {
+  local domain="${1}" cluster_yaml="${2}" addon="${3}"
+  [[ -f "${cluster_yaml}" ]] || { error "inline_values: cluster yaml not found: ${cluster_yaml}"; return 1; }
+  local entry name dir inline env wait deps
+  while IFS= read -r entry; do
+    bootstrap::_parse_entry "${domain}" "${entry}" name dir inline env wait deps || return 1
+    # Match name AND the FRAMEWORK addon dir: a cluster-local target that
+    # happens to share the basename (`./targets/cilium`) must not shadow the
+    # framework entry's values — that would be the same silent-drop class
+    # this helper exists to fix. Keep scanning past a same-name target.
+    if [[ "${name}" == "${addon}" && "${dir}" == "${PATH_LOK8S}/addons/${addon}" ]]; then
+      [[ -z "${inline}" || "${inline}" == "null" ]] || printf '%s\n' "${inline}"
+      return 0
+    fi
+  done < <(yq -o=json -I=0 '.spec.bootstrap[]?' "${cluster_yaml}")
+  return 0
+}
+
+# bootstrap::_apply_one <name> <dir> <kind> <provider> <kubeconfig> \
+#                       <inline-values> <wait> [env-lines]
+# Apply ONE resolved bootstrap entry: the KubeOne cilium/ccm skip, addons::render
+# (value-stacking + kustomize build + envsubst), kapply::apply, the
+# immutable/terminating fail-fast, the CRD/webhook race-retry, and — only when
+# <wait> is non-empty — the post-apply kapply::wait_ready (the readiness wait the
+# scheduler requests for dep-targets / gates). Returns 0 on success, 1 on an
+# unrecoverable render/apply error.
+#
+# MUST be invoked in a subshell — `( bootstrap::_apply_one ... )` — so the
+# KAPPLY_LAST_OUTPUT global it mutates (and greps right after each apply) stays
+# local to this call. The scheduler runs non-barrier entries as concurrent
+# background subshells; a shared KAPPLY_LAST_OUTPUT would race across them.
+#
+# <env-lines> (optional) is a newline-separated list of KEY=VALUE envsubst
+# overrides from `- <name>: { env: {...} }`. Each is exported HERE (this subshell
+# only — never leaking across entries) before addons::render, so render's envsubst
+# whitelist (template::envsubst_whitelist → ${LOK8S_USER_*}/${LOK8S_SPEC_*}) picks
+# it up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
+# convention the addons reference; other names are exported but not whitelisted.
+bootstrap::_apply_one() {
+  local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
+  local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
+
+  if [[ -n "${env_lines}" ]]; then
+    local _kv _k _v
+    while IFS= read -r _kv; do
+      [[ -n "${_kv}" ]] || continue
+      _k="${_kv%%=*}"; _v="${_kv#*=}"
+      export "${_k}=${_v}"
+    done <<< "${env_lines}"
+  fi
+
+  # HOSTED clusters: the CNI + cloud integration belong to the PLATFORM —
+  # the hosted control plane manages cilium as a system application in the
+  # user cluster and runs the cloud integration on its side. Unconditional
+  # (not existence-gated): even mid-install, bootstrapping our own copy
+  # would fight the platform for ownership of the datapath. The list lives
+  # in BOOTSTRAP_PLATFORM_OWNED (top of this file) — one place to extend.
+  local _ad_base; _ad_base="$(basename "${addon_dir}")"
+  if [[ "${LOK8S_BOOTSTRAP_HOSTED:-false}" == "true" ]]; then
+    local _po
+    for _po in ${BOOTSTRAP_PLATFORM_OWNED}; do
+      if [[ "${_ad_base}" == "${_po}" ]]; then
+        echo "[bootstrap] ${_ad_base} is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping" >&2
+        return 0
+      fi
+    done
+  fi
+
+  # KubeOne applies cilium + the hcloud CCM itself during `kubeone apply` (as
+  # rendered custom addons, kubeone::render_addons) to break the cni:external
+  # deadlock. On a FULL provision that reconcile has just run — re-applying here
+  # would steal SSA field ownership (kapply uses `apply --server-side
+  # --force-conflicts`) and the next `kubeone apply` fights back, so defer to the
+  # driver. On `lo provision --bootstrap` the infra reconcile is SKIPPED —
+  # bootstrap is the ONLY applier and MUST reconcile cilium/ccm from
+  # spec.bootstrap. So gate on the PATH — LOK8S_BOOTSTRAP_ONLY, set by
+  # provision::dispatch — NOT on "does the DaemonSet exist": that check can never
+  # tell a fresh driver-apply from a weeks-old DS, so it silently blocked EVERY
+  # cilium/ccm reconcile through --bootstrap. Every other driver (Lo/Capi/Kkp)
+  # always gets them from bootstrap. Keyed on the addon DIRECTORY basename: a
+  # `name:` override changes addon_name, not addon_dir, so a renamed cilium/ccm
+  # can't defeat the skip and double-apply the driver's own.
+  if [[ "${kind}" == "kubeone" ]] && [[ "${LOK8S_BOOTSTRAP_ONLY:-0}" != "1" ]] \
+     && { [[ "${_ad_base}" == "cilium" ]] || [[ "${_ad_base}" == "ccm" ]]; }; then
+    echo "[bootstrap] ${_ad_base} is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)" >&2
+    return 0
+  fi
+
+  # Render via the canonical khelm path (value-stacking + kustomize build +
+  # envsubst) — the SAME addons::render the KubeOne driver stages addons with.
+  debug "bootstrap: rendering ${addon_name}"
+  local rendered
+  if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}"); then
+    error "bootstrap: render failed for ${addon_name}"
+    return 1
+  fi
+
+  # Apply with server-side + CRD retry. kapply::apply renders its own
+  # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating conflicts
+  # (interactive prompt, or --force-recreate), and passes CRD-not-installed /
+  # webhook-not-ready errors through unchanged so the transient-race retry below
+  # still fires. A herestring (not a pipe) keeps kapply in this shell so
+  # KAPPLY_LAST_OUTPUT is readable here.
+  local fp_rc=0
+  kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
+
+  # Unrecoverable conflict that wasn't healed (declined the prompt, or
+  # non-interactive without --force-recreate) — fail fast rather than
+  # "succeeding" and letting the next `lo up` / Tilt loop hit the same wall.
+  if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted|because it is being terminated' <<< "${KAPPLY_LAST_OUTPUT}"; then
+    error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)"
+    return 1
+  fi
+
+  # Transient race between an addon's controllers and the resources they own.
+  # Three symptoms: "ensure CRDs are installed first" and "no matches for kind"
+  # / "resource mapping not found" (a CR applied before its CRD is Established),
+  # and "failed calling webhook" (a CR applied before its validating/mutating
+  # webhook is serving — i.e. the webhook Deployment isn't Ready yet).
+  local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
+
+  # Generic apply failure: kapply::apply returned non-zero and the output matches
+  # NEITHER an immutable/terminating conflict (handled above) NOR the transient
+  # CRD/webhook race (retried below). Fail rather than silently "succeeding" and
+  # letting the next `lo up` / Tilt loop hit the same wall.
+  if (( fp_rc != 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+    error "bootstrap: ${addon_name} apply failed (rc=${fp_rc}) — see above"
+    return 1
+  fi
+
+  if grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+    debug "bootstrap: ${addon_name} hit a CRD/webhook race — settling deps before retry"
+    # (1) CRDs must be Established before their CRs resolve.
+    kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
+      --for=condition=Established crd --all --timeout=60s || true
+    # (2) The KEY wait the old single-retry skipped: this addon's own
+    #     webhook/controller Deployments must be Available before the resources
+    #     they validate will apply. Wait on THIS addon's rendered workloads.
+    kapply::wait_ready "${addon_name}" 120 --kubeconfig "${kubeconfig}" <<< "${rendered}" || true
+    # (3) Retry with backoff to absorb the brief gap between a webhook
+    #     Deployment going Available and its Service endpoints being Ready.
+    local _attempt _rc=1 _max=6 _delay=3
+    for (( _attempt = 1; _attempt <= _max; _attempt++ )); do
+      _rc=0
+      kapply::apply --label "${addon_name} (retry ${_attempt}/${_max})" \
+        --kubeconfig "${kubeconfig}" <<< "${rendered}" || _rc=$?
+      if (( _rc == 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+        break
+      fi
+      sleep "${_delay}"
+      (( _delay < 15 )) && _delay=$(( _delay + 3 ))
+    done
+    if (( _rc != 0 )) || grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+      error "bootstrap: ${addon_name} still failing after ${_max} retries — CRDs/webhook not ready (see above)"
+      return 1
+    fi
+  fi
+
+  # Post-apply health wait — run it only when the scheduler asks (do_wait set),
+  # i.e. when something depends on THIS entry being Ready: a dep-target (someone's
+  # dependsOn / a later entry behind a gate) or the entry is itself a wait-gate. A
+  # pure leaf skips it (that serial wait was the whole point of the refactor): the
+  # scheduler gates readiness only where a dependency edge needs it. _apply_one
+  # just honors the flag. Best-effort: a timeout is a ⚠, not fatal — the caller
+  # decides whether to care.
+  if [[ -n "${do_wait}" ]]; then
+    debug "bootstrap: waiting for ${addon_name} workloads to become ready"
+    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
+  fi
+  return 0
+}
+
+# ── Topological-parallel scheduler ───────────────────────
+# spec.bootstrap entries form a DAG. An entry runs as soon as its EFFECTIVE
+# dependencies have completed, up to LOK8S_BOOTSTRAP_PARALLEL at once — so
+# independent CRD-operators (cert-manager, envoy-gateway, cnpg-operator,
+# redis-operator, rook-ceph, system-upgrade-controller …) fan out in parallel
+# instead of serializing. Two things create an edge:
+#   • `dependsOn: [name, …]` — an explicit edge: wait for those entries' READINESS.
+#   • `wait: true`           — a GLOBAL gate: it depends on ALL entries before it,
+#                              and every entry after it depends on it (the old
+#                              "drain all before / ready before anything later"
+#                              barrier, expressed as edges).
+# An entry waits for its own workloads to be Ready (kapply::wait_ready) IFF
+# something depends on it (a dep-target) OR it is a wait-gate; a pure leaf
+# (nothing depends on it) just applies and is done. Edge resolution + cycle
+# detection live in bootstrap::apply; this collapses the old strictly-serial
+# apply-then-wait phase down to roughly the slowest dependency chain.
+#
+# FAILURE is isolated to the failed entry's SUBTREE — not the whole run. When an
+# entry fails, only its TRANSITIVE dependents (which would fail behind the broken
+# dep) are skipped (bootstrap::_skip_dependents BFS over the parent→children
+# reverse-adjacency); every unrelated entry still applies. A failed LEAF skips
+# nothing. A failed wait-gate skips everything after it automatically — the gate's
+# drain-all/ready-before-later edges make all-after its dependents. This is a
+# deliberate bootstrap policy: apply as much as possible, then report non-zero if
+# anything failed or was skipped (so the caller re-runs `lo up` to converge).
+#
+# State is module-level (bash has no closures) so the reap/drain helpers can share
+# it with the bootstrap::apply runner; it is reset at the top of every run.
+_BS_INFLIGHT=()     # pids of running ( _apply_one ) background jobs
+_BS_RCFILES=()      # parallel to _BS_INFLIGHT: each job's rc-capture file
+_BS_RUNIDX=()       # parallel to _BS_INFLIGHT: each job's entry INDEX
+_BS_OUTFILES=()     # parallel to _BS_INFLIGHT: each job's buffered stdout+stderr
+                    #   (rendered as one de-interleaved block on reap — the live
+                    #   collapsing UI can't be shared across concurrent jobs)
+_BS_TICKER_PID=""   # pid of the background progress ticker (animates the status
+                    #   line while the scheduler blocks on a reap)
+declare -gA _BS_COMPLETED=()  # set of completed entry indices (index → 1)
+_BS_DONE=0          # count of completed entries
+_BS_OVERALL_RC=0    # set to 1 if ANY entry failed
+_BS_PARKED=()       # entry indices that parked on an immutable/terminating
+                    #   conflict; resolved (batch-heal) at the drain point
+_BS_PARKED_NS=()    # namespaces those conflicts would FORCE-FINALIZE, harvested
+                    #   from each parked entry's kubectl output before it is
+                    #   discarded. The drain prompt names them: accepting there
+                    #   re-applies under LOK8S_FORCE_RECREATE=1, which makes
+                    #   kapply's pointed per-namespace confirm return 0 unasked.
+
+# OR a finished job's captured rc into _BS_OVERALL_RC (a missing file = failed).
+# Returns 0 iff the job SUCCEEDED (rc==0); non-zero on failure, so the caller can
+# react — the reap path uses it to skip the failed entry's transitive dependents.
+bootstrap::_collect_rc() {
+  local _rcf="${1}" _r=1
+  [[ -f "${_rcf}" ]] && _r="$(cat "${_rcf}" 2>/dev/null || echo 1)"
+  if [[ "${_r}" != "0" ]]; then
+    _BS_OVERALL_RC=1
+    return 1
+  fi
+  return 0
+}
+
+# bootstrap::_skip_dependents <failed-index>
+# BFS the reverse-adjacency (parent → children) from the failed entry and add
+# every not-yet-accounted dependent to the _skip set, logging the cause —
+# failure-isolation policy in the scheduler block above.
+#
+# Reads the DAG state (_names, _dependents, _skip, _BS_COMPLETED) from the calling
+# bootstrap::apply frame via bash's dynamic scope — this helper is only ever invoked
+# from within a bootstrap::apply run (inline for a foreground gate, or through
+# _reap_one for a background entry). A dependent already skipped is the BFS "visited"
+# guard; one already completed is left alone (defensive — a real dependent can never
+# have completed before the parent it waits on failed). The cause reported is the
+# ORIGINAL failed entry's name, propagated to the whole invalidated subtree.
+bootstrap::_skip_dependents() {
+  local _failed="${1}"
+  local _cause="${_names[${_failed}]}"
+  local -a _q=("${_failed}")
+  local _head=0
+  local _u _c
+  local -a _kids
+  # Dequeue via a head index (O(n) total), not an array-shift `_q=("${_q[@]:1}")`
+  # that recopies the whole queue every iteration (O(n²) as the DAG grows).
+  while (( _head < ${#_q[@]} )); do
+    _u="${_q[_head]}"; _head=$(( _head + 1 ))
+    _kids=()
+    [[ -z "${_dependents["${_u}"]:-}" ]] || read -ra _kids <<< "${_dependents["${_u}"]}"
+    for _c in "${_kids[@]+"${_kids[@]}"}"; do
+      [[ -z "${_skip["${_c}"]:-}" ]] || continue          # already skipped (visited)
+      [[ -z "${_BS_COMPLETED["${_c}"]:-}" ]] || continue  # already completed — leave it
+      _skip["${_c}"]=1
+      warn "bootstrap: skipping '${_names[${_c}]}' — a dependency failed (${_cause})"
+      _q+=("${_c}")
+    done
+  done
+  # Explicit success. This runs as the RHS of `|| bootstrap::_skip_dependents` in
+  # the reap path under `set -euo pipefail`; the trailing status must be a
+  # deterministic 0, not the incidental exit status of the last BFS command (e.g.
+  # an empty-queue `while` test), which could otherwise abort the reaper.
+  return 0
+}
+
+# Reap every in-flight job (collect rcs + mark each completed), leaving no
+# orphan. Used as the final safety flush after the runner loop.
+bootstrap::_drain() {
+  while (( ${#_BS_INFLIGHT[@]} )); do
+    bootstrap::_reap_one
+  done
+}
+
+# Feature probe: does this bash support `wait -n -p` (5.1+)? Factored into its own
+# function so it can be stubbed in tests to force the FIFO fallback path on a
+# newer bash (where the live probe would otherwise always take the `wait -n -p`
+# branch).
+bootstrap::_have_wait_n_p() {
+  (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))
+}
+
+# Free at least one slot: wait for ANY one of OUR in-flight jobs to finish (not
+# necessarily the oldest), so one slow job can't block scheduling while faster
+# ones have already completed. RESTRICTED to our own pids — never a bare `wait`
+# or bare `wait -n` (which could reap a background job owned by the caller, e.g.
+# lo provision running bootstrap::apply in-process). On bash 5.1+ this uses
+# `wait -n -p <var> <pids…>` (wait for any of the listed pids, capturing which
+# one finished); older bash falls back to FIFO `wait <oldest-pid>`. Either way we
+# then prune every job that has since finished: collect its rc AND mark its entry
+# INDEX completed (so the runner can launch whatever depended on it). rc
+# accounting + completion are identical on both reap paths.
+
+# bootstrap::_ticker_start / _ticker_stop — animate ONE foreground status line
+# while the scheduler blocks in a reap. Runs as a single background process, so
+# it never contends with the result blocks the reap prints: the ticker owns the
+# terminal ONLY during the blocking wait, and is stopped (+ its line erased)
+# before any result is flushed. The running set is fixed for the duration of a
+# single wait (launches happen only between reaps), so the snapshot taken here
+# stays accurate. Gated like kapply::_tty: off-tty there's nothing to animate,
+# and under DEBUG (lo -v) / CI / LOK8S_NONINTERACTIVE the frames would garble
+# the verbatim log stream. Needs kapply loaded for the spinner frames — skip
+# (don't crash the background loop under set -u) if a piecemeal-sourcing
+# sandbox loaded bootstrap without it.
+bootstrap::_ticker_start() {
+  [[ -t 1 ]] || return 0
+  [[ -z "${DEBUG:-}" && -z "${LOK8S_NONINTERACTIVE:-}" && -z "${CI:-}" ]] || return 0
+  declare -p _KAPPLY_SPIN &>/dev/null || return 0
+  local -a _rn=(); local _ri
+  for _ri in "${_BS_RUNIDX[@]+"${_BS_RUNIDX[@]}"}"; do _rn+=("${_names[_ri]}"); done
+  local _names_s="${_rn[*]}" _done="${_BS_DONE}" _total="${n}" _cols
+  _cols=$(tput cols 2>/dev/null || echo 80)
+  # Tie the ticker's life to the SCHEDULER process: if lo is SIGTERM'd (kill of
+  # the pid only — Ctrl-C already takes the whole process group), _ticker_stop
+  # never runs; the parent-alive loop condition makes the ticker exit on its
+  # own within one frame instead of spinning on the terminal forever.
+  local _parent="${BASHPID:-$$}"
+  ( _i=0
+    while kill -0 "${_parent}" 2>/dev/null; do
+      _frame="${_KAPPLY_SPIN[$(( _i % ${#_KAPPLY_SPIN[@]} ))]}"
+      _line="${_names_s}"; _budget=$(( _cols - 20 )); (( _budget < 8 )) && _budget=8
+      (( ${#_line} > _budget )) && _line="${_line:0:_budget-1}…"
+      printf '\r\033[K\033[36m%s\033[0m bootstrap \033[2m· %s · %d/%d\033[0m' \
+        "${_frame}" "${_line}" "${_done}" "${_total}"
+      _i=$(( _i + 1 )); sleep 0.1
+    done ) &
+  _BS_TICKER_PID=$!
+}
+bootstrap::_ticker_stop() {
+  [[ -n "${_BS_TICKER_PID:-}" ]] || return 0
+  kill "${_BS_TICKER_PID}" 2>/dev/null || true
+  wait "${_BS_TICKER_PID}" 2>/dev/null || true
+  _BS_TICKER_PID=""
+  printf '\r\033[K'   # erase the status line before results flush
+}
+
+bootstrap::_reap_one() {
+  (( ${#_BS_INFLIGHT[@]} )) || return 0
+  bootstrap::_ticker_start   # animate the status line while we block below
+  local _finished=""
+  if bootstrap::_have_wait_n_p; then
+    # bash 5.1+: -n restricted to our pids, -p captures the one that finished.
+    # (The ticker pid is NOT in this list, so wait -n never reaps it.)
+    wait -n -p _finished "${_BS_INFLIGHT[@]}" 2>/dev/null || true
+  fi
+  if [[ -z "${_finished}" ]]; then
+    # Fallback (bash < 5.1, or -p left it empty): wait the OLDEST pid.
+    _finished="${_BS_INFLIGHT[0]}"
+    wait "${_finished}" 2>/dev/null || true
+  fi
+  bootstrap::_ticker_stop    # stop + erase BEFORE the prune flushes result blocks
+  # Prune the reaped job plus any others that have since died; keep the alive.
+  local -a _alive=() _alive_rcf=() _alive_idx=() _alive_out=()
+  local _i _ridx _jrc
+  for _i in "${!_BS_INFLIGHT[@]}"; do
+    if [[ "${_BS_INFLIGHT[_i]}" != "${_finished}" ]] && kill -0 "${_BS_INFLIGHT[_i]}" 2>/dev/null; then
+      _alive+=("${_BS_INFLIGHT[_i]}"); _alive_rcf+=("${_BS_RCFILES[_i]}"); _alive_idx+=("${_BS_RUNIDX[_i]}")
+      _alive_out+=("${_BS_OUTFILES[_i]}")
+    else
+      # Explicitly wait the reaped/dead pid so it's removed from the job table
+      # (a `kill -0`-dead but un-waited job lingers as a "Done" entry → would look
+      # like an orphan). Idempotent for ${_finished} (already reaped → no-op).
+      wait "${_BS_INFLIGHT[_i]}" 2>/dev/null || true
+      _ridx="${_BS_RUNIDX[_i]}"
+      # PARK check FIRST. A background kapply runs under LOK8S_NONINTERACTIVE, so on
+      # an immutable/terminating conflict it can't prompt — it errors (rc != 0) and
+      # the buffered output names the conflict. Detect that pair (exact rc from the
+      # rcfile + the marker text) and PARK the entry: record it for the drain-point
+      # batch heal and DON'T complete it / DON'T OR overall_rc. Anything else falls
+      # through to the normal complete + collect_rc + render below (the `else`).
+      local _exrc=1
+      [[ -f "${_BS_RCFILES[_i]}" ]] && _exrc="$(cat "${_BS_RCFILES[_i]}" 2>/dev/null || echo 1)"
+      if [[ "${_exrc}" != "0" ]] && [[ -f "${_BS_OUTFILES[_i]}" ]] \
+        && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" && -n "${_KAPPLY_TERMINATING_RE:-}" ]] \
+        && grep -qE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_BS_OUTFILES[_i]}"; then
+        _BS_PARKED+=("${_ridx}")
+        # Harvest the namespaces this conflict would force-finalize BEFORE the
+        # buffered output is deleted below — the drain prompt has to name them,
+        # and this file is the only place that evidence exists. Same extractor
+        # kapply::_heal_terminating acts on, so the prompt cannot name a
+        # different set than the heal destroys.
+        if declare -F kapply::terminating_namespaces >/dev/null 2>&1; then
+          local _pns _seen _known
+          while read -r _pns; do
+            [[ -n "${_pns}" ]] || continue
+            _seen=0
+            for _known in ${_BS_PARKED_NS[@]+"${_BS_PARKED_NS[@]}"}; do
+              [[ "${_known}" == "${_pns}" ]] && { _seen=1; break; }
+            done
+            (( _seen )) || _BS_PARKED_NS+=("${_pns}")
+          done < <(kapply::terminating_namespaces < "${_BS_OUTFILES[_i]}")
+        fi
+        # Surface the conflict detail NOW (we own the foreground): parking would
+        # otherwise discard the buffered kubectl error, and on a fail-fast / declined
+        # heal the user needs to see WHICH object/field is blocked to resolve by hand.
+        # Then note the deferral — the batched recreate confirmation is at the drain.
+        if declare -F kapply::render_captured >/dev/null 2>&1; then
+          kapply::render_captured "${_names[_ridx]}" 1 < "${_BS_OUTFILES[_i]}" || true
+        else
+          cat "${_BS_OUTFILES[_i]}" >&2 || true
+        fi
+        printf '\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n' \
+          "${_names[_ridx]}" >&2
+        rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}"
+      else
+        _BS_COMPLETED["${_ridx}"]=1
+        _BS_DONE=$(( _BS_DONE + 1 ))
+        _jrc=0
+        # Mark completed FIRST (above), then collect rc. _collect_rc still ORs a
+        # failure into _BS_OVERALL_RC; capture its verdict here for the flush marker.
+        bootstrap::_collect_rc "${_BS_RCFILES[_i]}" || _jrc=1
+        # Flush this entry's buffered output as ONE de-interleaved block, now that
+        # we own the foreground: the concurrent jobs couldn't share /dev/tty for the
+        # live collapsing UI, so they buffered to a file (see the launch site) and
+        # we render it here — collapsed on success, errors surfaced on failure.
+        # `|| true` on every flush path: a rendering hiccup must never abort the
+        # reap loop under errexit (that would skip _drain + the rcdir cleanup).
+        if [[ -f "${_BS_OUTFILES[_i]}" ]]; then
+          if [[ -n "${DEBUG:-}" ]]; then
+            # verbose (lo -v): honor kapply's "print everything, don't aggregate"
+            # contract — still de-interleaved (buffered per job), but verbatim.
+            cat "${_BS_OUTFILES[_i]}" || true
+          elif declare -F kapply::render_captured >/dev/null 2>&1; then
+            kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}" || true
+          else
+            cat "${_BS_OUTFILES[_i]}" || true   # fallback: de-interleaved, not collapsed
+          fi
+          rm -f "${_BS_OUTFILES[_i]}"
+        fi
+        # iff this entry FAILED, skip only its transitive dependents (they would fail
+        # behind the broken dep). A failure no longer stops the world.
+        (( _jrc == 0 )) || bootstrap::_skip_dependents "${_ridx}"
+      fi
+    fi
+  done
+  _BS_INFLIGHT=("${_alive[@]+"${_alive[@]}"}")
+  _BS_RCFILES=("${_alive_rcf[@]+"${_alive_rcf[@]}"}")
+  _BS_RUNIDX=("${_alive_idx[@]+"${_alive_idx[@]}"}")
+  _BS_OUTFILES=("${_alive_out[@]+"${_alive_out[@]}"}")
+}
+
+# bootstrap::_resolve_parked
+# Batch-heal the entries parked by _reap_one on an immutable/terminating conflict.
+# Called from bootstrap::apply at the quiescent drain point (nothing in flight), so
+# the scheduler owns /dev/tty for a SINGLE prompt covering ALL parked entries —
+# replacing the old per-object foreground kapply prompts. Relies on dynamic scoping
+# for the launch locals (_names/_dirs/_inlines/_envs/_waits/_istarget + kind/
+# provider_name/kubeconfig), exactly like _reap_one and _skip_dependents.
+#
+# Decision: --force / --force-recreate (LOK8S_FORCE_RECREATE) auto-accepts; else an
+# interactive tty gets ONE y/N; else (non-interactive, no force) fail-fast per entry
+# with actionable guidance.
+# Accepted entries are re-applied FOREGROUND with LOK8S_FORCE_RECREATE=1 so kapply
+# deletes + recreates the blocked object; each is then marked completed (unblocking
+# dependents on the next launch pass) or, on failure, fails + skips its dependents.
+# The tty seams for the batched prompt — mirroring kapply::_interactive/_ask.
+# One place touches /dev/tty, which is what makes the prompt TEXT assertable in
+# a unit test (bats has no tty to type into). The gate is deliberately the same
+# expression it replaced: interactive iff both std fds are terminals AND
+# /dev/tty is usable.
+bootstrap::_interactive() { [[ -t 0 && -t 1 && -r /dev/tty && -w /dev/tty ]]; }
+
+bootstrap::_ask() {
+  local prompt="${1}" ans=""
+  printf '%s' "${prompt}" >/dev/tty 2>/dev/null
+  read -r ans </dev/tty 2>/dev/null || return 1
+  [[ "${ans}" =~ ^[Yy] ]]
+}
+
+# bootstrap::_recreate_prompt <count> <names> [stuck-namespace...]
+# Compose the batched recreate prompt. Split out from _resolve_parked because
+# this text IS the safety control — the single consent gate for every heal in
+# the batch — so it has to be assertable rather than buried in a tty write.
+#
+# The prompt REPLACES kapply's pointed per-object confirms for accepted entries
+# (they re-apply under LOK8S_FORCE_RECREATE=1, which returns 0 from both
+# kapply::_confirm_secret_recreate and kapply::_confirm_ns_finalize without
+# asking). Everything those confirms would have said must therefore be said
+# here, or it is not said at all.
+bootstrap::_recreate_prompt() {
+  local count="${1}" list="${2}"; shift 2
+  printf '\n\033[33m?\033[0m bootstrap: %d addon(s) need recreate to reconcile (immutable/terminating):%s\n' \
+    "${count}" "${list}"
+  printf ' recreate them? deletes + recreates the blocked object(s) (restarts pods);\n'
+  printf ' \033[31m!\033[0m any SEALED Secret among them is RE-KEYED by this.\n'
+  # The namespace case is strictly worse than a re-key: accepting force-finalizes
+  # these via the raw /finalize API, which COMPLETES their deletion — everything
+  # still inside dies with them (volume data, runtime-minted Secrets, buckets).
+  # One accept at an earlier prompt that did NOT name the namespaces destroyed
+  # live cluster data, hence the explicit list. Only printed when there ARE such
+  # namespaces: a warning that shows up every time is one nobody reads by the
+  # third time.
+  if (( $# )); then
+    printf ' \033[31m!!\033[0m %d namespace(s) stuck Terminating will be FORCE-FINALIZED:\n' "${#}"
+    printf '      %s\n' "${@}"
+    printf ' \033[31m!!\033[0m that COMPLETES their deletion — EVERY object still in them is\n'
+    printf '      DESTROYED IRREVERSIBLY (volume data, runtime-minted Secrets, buckets).\n'
+  fi
+  printf ' [y/N] '
+}
+
+bootstrap::_resolve_parked() {
+  local -a _parked=("${_BS_PARKED[@]+"${_BS_PARKED[@]}"}")
+  local -a _pns=("${_BS_PARKED_NS[@]+"${_BS_PARKED_NS[@]}"}")
+  _BS_PARKED=(); _BS_PARKED_NS=()
+  local _pi _accept=0 _list=""
+  for _pi in "${_parked[@]}"; do _list+=" ${_names[_pi]}"; done
+
+  if [[ -n "${LOK8S_FORCE_RECREATE:-}" ]]; then
+    _accept=1   # --force / --force-recreate → no prompt, just heal
+  elif bootstrap::_interactive; then
+    bootstrap::_ask "$(bootstrap::_recreate_prompt \
+      "${#_parked[@]}" "${_list}" ${_pns[@]+"${_pns[@]}"})" && _accept=1
+  fi
+
+  for _pi in "${_parked[@]}"; do
+    # Same readiness rule as the launch loop: wait IFF a dep-target or a wait-gate.
+    local _wflag=""
+    { (( _istarget[_pi] )) || [[ "${_waits[_pi]}" == "true" ]]; } && _wflag="wait"
+    if (( _accept )); then
+      local _rc=0
+      ( export LOK8S_FORCE_RECREATE=1
+        bootstrap::_apply_one "${_names[_pi]}" "${_dirs[_pi]}" "${kind}" "${provider_name}" \
+          "${kubeconfig}" "${_inlines[_pi]}" "${_wflag}" "${_envs[_pi]}" ) || _rc=$?
+      _BS_COMPLETED["${_pi}"]=1
+      _BS_DONE=$(( _BS_DONE + 1 ))
+      if (( _rc != 0 )); then
+        _BS_OVERALL_RC=1
+        bootstrap::_skip_dependents "${_pi}"
+      else
+        printf '\033[32m✓\033[0m %s \033[2m· recreated\033[0m\n' "${_names[_pi]}" >&2
+      fi
+    else
+      # Declined (or non-interactive with no --force): announce WHY + how to fix,
+      # then mark completed + skip its dependents (a failed heal fails the entry).
+      _BS_COMPLETED["${_pi}"]=1
+      _BS_DONE=$(( _BS_DONE + 1 ))
+      _BS_OVERALL_RC=1
+      error "bootstrap: ${_names[_pi]} needs recreate (immutable/terminating) — re-run with --force (or --force-recreate) to auto-recreate, or resolve by hand"
+      bootstrap::_skip_dependents "${_pi}"
+    fi
+  done
+}
+
+# bootstrap::_restore_d <domain> <kubeconfig>
+# Apply clusters/<domain>/restore.d/*.sops.yaml (sops-encrypted Kubernetes
+# manifests) before the bootstrap DAG. See the call site in bootstrap::apply for
+# the rationale (DR restore, e.g. issued TLS Secrets so cert-manager reuses
+# instead of re-issuing). Per-file failures WARN and continue — DR must not
+# wedge on a missing age key; the fallback (the owner controller re-creates /
+# re-issues) is the pre-restore.d behavior. Always returns 0.
+bootstrap::_restore_d() {
+  local domain="${1}" kubeconfig="${2}"
+  local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
+  [[ -d "${rdir}" ]] || return 0
+  local f base plain applied=0 skipped=0 _err=""
+  for f in "${rdir}"/*.sops.yaml; do
+    # Nullglob-style guard; `continue` (not break) so one dangling entry can't
+    # abort the remaining valid restores.
+    [[ -e "${f}" ]] || continue
+    base="$(basename "${f}" .sops.yaml)"
+    # Plaintext-first: the per-domain secret store's working copy
+    # (secrets/restore.d/<name>.yaml — gitignored, present once the operator has
+    # run `lo secrets decrypt`) needs no age identity, so restore works from an
+    # agent/CI sandbox where the SSH-derived key isn't available. The committed
+    # .sops.yaml is the fresh-checkout fallback (sops decrypts with the
+    # operator's key). Resolve the store from THIS domain — not $PATH_SECRETS,
+    # which may still point at a different domain's store from an earlier build.
+    plain="${PATH_CLUSTERS}/${domain}/secrets/restore.d/${base}.yaml"
+    if [[ -f "${plain}" ]]; then
+      if _err="$(kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f "${plain}" 2>&1 >/dev/null)"; then
+        applied=$(( applied + 1 ))
+        debug "bootstrap: restore.d applied ${base} (store working copy)"
+        continue
+      fi
+      debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err%%$'\n'*}"
+    fi
+    # Decrypt and apply as SEPARATE steps with separate stderr: piping
+    # `sops 2>&1 | kubectl` would inject sops warnings into kubectl's stdin
+    # (corrupting the YAML) and _err would only ever see kubectl's stderr.
+    local _dec="" _serr
+    _serr="$(mktemp)"
+    if _dec="$(sops -d "${f}" 2>"${_serr}")"; then
+      if _err="$(printf '%s\n' "${_dec}" \
+        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
+        applied=$(( applied + 1 ))
+        debug "bootstrap: restore.d applied ${base} (sops)"
+      else
+        skipped=$(( skipped + 1 ))
+        # First line only — kubectl errors can quote input fragments.
+        debug "bootstrap: restore.d ${base} apply failed: ${_err%%$'\n'*}"
+        warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
+      fi
+    else
+      skipped=$(( skipped + 1 ))
+      debug "bootstrap: restore.d ${base} decrypt failed: $(head -n1 "${_serr}" 2>/dev/null)"
+      warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
+    fi
+    rm -f "${_serr}"
+  done
+  (( applied == 0 && skipped == 0 )) \
+    || printf '\033[32m✓\033[0m bootstrap: restore.d — %d applied, %d skipped\n' "${applied}" "${skipped}" >&2
+  return 0
+}
+
+# bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
+# Reads spec.bootstrap from the cluster YAML and runs the entries as a
+# topological-parallel DAG (capped at LOK8S_BOOTSTRAP_PARALLEL, default 8);
+# edge semantics in the scheduler block above.
+bootstrap::apply() {
+  local domain="${1}" cluster_yaml="${2}" kubeconfig="${3}"
+
+  # lo provision drives the bootstrap directly (not via `lo build`), so the
+  # per-domain secrets store isn't exported yet. The secrets.lok8s.dev generators
+  # (passwd/env/…) read $PATH_SECRETS — without it a target carrying a passwd
+  # Secret (e.g. networking's hetzner-dns token) fails to render. Mirror
+  # libs/build::_export_secrets_path: point at clusters/<domain>/secrets if present.
+  if [[ -d "${PATH_CLUSTERS}/${domain}/secrets" ]]; then
+    export PATH_SECRETS="${PATH_CLUSTERS}/${domain}/secrets"
+  fi
+
+  [[ -f "${kubeconfig}" ]] || {
+    error "bootstrap: kubeconfig not found: ${kubeconfig}"
+    return 1
+  }
+
+  # Detect driver kind and provider for default policy + values resolution
+  local kind provider_name hosting
+  kind=$(domain::spec_driver "${cluster_yaml}") || kind=""
+  provider_name=$(yq -r '.spec.provider.name // ""' "${cluster_yaml}")
+  # Hosted flag for the per-entry subshells (_apply_one): on a hosted cluster
+  # the CNI-class addons are platform-owned and must never be bootstrapped.
+  hosting=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
+  if [[ "${hosting}" == "hosted" ]]; then
+    export LOK8S_BOOTSTRAP_HOSTED=true
+  else
+    export LOK8S_BOOTSTRAP_HOSTED=false
+  fi
+
+  # LOK8S_BOOTSTRAP_ONLY gates the KubeOne cilium/ccm skip in _apply_one. Both
+  # entry points set it EXPLICITLY before calling us — provision::dispatch to the
+  # --bootstrap flag (0 = full provision, 1 = --bootstrap), bootstrap::dispatch
+  # (standalone `lo bootstrap`) to 1 — so any value inherited from a parent
+  # process is overwritten on every real path before it reaches the gate. The
+  # `:-0` here is a pure safety floor for a hypothetical direct bootstrap::apply
+  # caller that sets nothing: default to 0 (defer to the driver) so it can never
+  # trigger a spurious re-apply that races `kubeone apply` for SSA field ownership.
+  export LOK8S_BOOTSTRAP_ONLY="${LOK8S_BOOTSTRAP_ONLY:-0}"
+
+  local -a bootstrap_entries
+  mapfile -t bootstrap_entries < <(bootstrap::_resolve_entries "${cluster_yaml}" "${kind}")
+
+  if (( ${#bootstrap_entries[@]} == 0 )); then
+    debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"
+    return 0
+  fi
+
+  # ── Hosted gate ────────────────────────────────────────────────────────
+  # AFTER the empty-entries return on purpose: a spec with no bootstrap
+  # entries (or an explicit `bootstrap: []` opt-out) must not probe the
+  # cluster at all, let alone print a misleading skip notice.
+  # Two things make a hosted apply pointless right now, and they need
+  # DIFFERENT messages (conflating them sends users chasing the wrong fix):
+  #   1. The default hosted kubeconfig is OIDC/kubelogin — it carries no
+  #      embedded credential, so a headless kubectl fails outright. That is
+  #      an AUTH/reachability problem, not "no workers".
+  #   2. A CP-only cluster (no Ready workers yet) can't run addon
+  #      workloads and wait-gated entries would hang.
+  # Both skip WITHOUT failing the provision (return 0 — the cluster itself
+  # is fine); re-running `lo provision`/`lo bootstrap` later is idempotent.
+  if [[ "${LOK8S_BOOTSTRAP_HOSTED}" == "true" ]]; then
+    local _nodes_out _nodes_rc=0
+    # Bounded: kubectl's default request timeout is unlimited — a transient
+    # API problem must not stall the provisioning path.
+    _nodes_out=$(kubectl --kubeconfig "${kubeconfig}" --request-timeout=15s get nodes --no-headers 2>&1) || _nodes_rc=$?
+    if (( _nodes_rc != 0 )); then
+      echo "[bootstrap] hosted ${domain}: cannot reach the cluster with ${kubeconfig}" >&2
+      echo "[bootstrap] the default hosted kubeconfig is OIDC (kubelogin + a browser sign-in) — install the" >&2
+      echo "[bootstrap] kubelogin plugin and run interactively, then re-run 'lo provision' or 'lo bootstrap'." >&2
+      echo "[bootstrap] bootstrap addons NOT applied. (kubectl: $(head -n1 <<<"${_nodes_out}"))" >&2
+      return 0
+    fi
+    local _ready
+    # Ready may read "Ready" or "Ready,SchedulingDisabled" — match the prefix.
+    # Control-plane-ROLE nodes don't count as workers (KKP-hosted user
+    # clusters register none — the CP runs as pods on the platform seed —
+    # but other hosted shapes might, and the message says "workers").
+    _ready=$(awk '$2 ~ /^Ready(,|$)/ && $3 !~ /control-plane|master/' <<<"${_nodes_out}" | wc -l | tr -d ' ')
+    if [[ "${_ready:-0}" == "0" ]]; then
+      echo "[bootstrap] hosted ${domain}: control plane is up but has no Ready workers yet —" >&2
+      echo "[bootstrap] skipping bootstrap addons; re-run 'lo provision' (or 'lo bootstrap') after workers join." >&2
+      return 0
+    fi
+    echo "[bootstrap] hosted ${domain}: ${_ready} Ready worker(s) — applying bootstrap addons" >&2
+  fi
+
+
+  # Export the API server endpoint (host + port) parsed from the
+  # kubeconfig so addons can target the real control-plane LB endpoint via
+  # envsubst — e.g. cilium k8sServiceHost on KubeOne, where the in-cluster
+  # ClusterIP (10.96.0.1) is unreachable from a bare-metal worker across
+  # the Hetzner vSwitch and the cilium agent hangs on startup. Picked up
+  # by template::envsubst_whitelist (LOK8S_USER_* vars).
+  local _api_url _api_hostport
+  _api_url=$(yq -r '.clusters[0].cluster.server // ""' "${kubeconfig}" 2>/dev/null)
+  _api_hostport="${_api_url#https://}"
+  _api_hostport="${_api_hostport#http://}"
+  if [[ -n "${_api_hostport}" ]]; then
+    export LOK8S_USER_API_HOST="${_api_hostport%%:*}"
+    local _p="${_api_hostport##*:}"
+    [[ "${_p}" != "${_api_hostport}" && -n "${_p}" ]] || _p="6443"
+    export LOK8S_USER_API_PORT="${_p}"
+    debug "bootstrap: API endpoint ${LOK8S_USER_API_HOST}:${LOK8S_USER_API_PORT} (for addon envsubst)"
+  fi
+
+  # ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──
+  # Applied BEFORE any addon so restored state exists when the addons'
+  # reconcilers first look for it. Canonical use: issued wildcard TLS Secrets —
+  # cert-manager finds a valid existing Secret and REUSES it instead of
+  # re-issuing via ACME (repeated recoveries would otherwise exhaust the Let's
+  # Encrypt duplicate-cert limit, 5/domain-set/week, and strand the cluster
+  # without TLS). Bootstrap-time ONLY (recover / provision / --bootstrap), never
+  # plain builds/deploys — so a cert-manager-RENEWED secret is not clobbered by
+  # a stale backup on routine rollouts. A stale (expired) restore is harmless:
+  # its owner sees it invalid and re-issues (the normal path).
+  bootstrap::_restore_d "${domain}" "${kubeconfig}"
+
+  # ── Plan the DAG: parse every entry, resolve edges, detect cycles ──
+  local max_parallel="${LOK8S_BOOTSTRAP_PARALLEL:-8}"
+  [[ "${max_parallel}" =~ ^[0-9]+$ ]] && (( max_parallel >= 1 )) || max_parallel=8
+
+  # Parse ALL entries up front into parallel arrays (array index = DAG node).
+  local -a _names=() _dirs=() _inlines=() _envs=() _waits=() _depnames=() _explicit=()
+  local n=0 entry
+  for entry in "${bootstrap_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    local _nm _dr _in _ev _wt _dp _ex
+    bootstrap::_parse_entry "${domain}" "${entry}" _nm _dr _in _ev _wt _dp _ex || return 1
+    if [[ ! -d "${_dr}" ]]; then
+      error "bootstrap: addon not found: ${entry} (resolved to ${_dr})"
+      return 1
+    fi
+    _names+=("${_nm}"); _dirs+=("${_dr}"); _inlines+=("${_in}")
+    _envs+=("${_ev}"); _waits+=("${_wt}"); _depnames+=("${_dp}"); _explicit+=("${_ex}")
+    n=$(( n + 1 ))
+  done
+  (( n > 0 )) || { debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"; return 0; }
+
+  # name → indices sharing it (a multimap). A name on >1 entry is a COLLISION;
+  # the handling depends on WHY it collides and whether anything references it:
+  #   • an explicit name: on a colliding entry              → hard error here
+  #     (a deliberately-set identifier must be unique).
+  #   • a basename/map-key collision referenced by dependsOn → hard error below
+  #     (ambiguous — the runner can't pick which entry the reference means).
+  #   • a basename/map-key collision NOTHING dependsOn       → warn (last-wins),
+  #     so a barrier-only config with colliding basenames (e.g. the `rook-ceph`
+  #     addon plus a `./targets/rook-ceph` target, no dependsOn) still applies.
+  local -A _name2idxs=()
+  local _k
+  for (( _k = 0; _k < n; _k++ )); do
+    _name2idxs["${_names[_k]}"]+=" ${_k}"
+  done
+  # An explicit name: that collides with ANY other entry (explicit or resolved) is
+  # always a hard error — two entries can't share a deliberately-set identity.
+  for (( _k = 0; _k < n; _k++ )); do
+    [[ "${_explicit[_k]}" == "true" ]] || continue
+    local -a _share=()
+    read -ra _share <<< "${_name2idxs["${_names[_k]}"]}"
+    if (( ${#_share[@]} > 1 )); then
+      error "bootstrap: duplicate entry name '${_names[_k]}' — name: must be unique (${#_share[@]} entries share it)"
+      return 1
+    fi
+  done
+
+  # Effective dependency edges, stored as a set of "child,parent" keys (child
+  # depends on parent → parent must complete first). Three unioned sources:
+  #   1. explicit dependsOn(i)
+  #   2. every wait-gate g positionally before i  (a gate ⇒ later entries wait on it)
+  #   3. if i is itself a wait-gate: ALL entries before i (a gate ⇒ drain-all-before)
+  local -A _edge=()
+  for (( _k = 0; _k < n; _k++ )); do
+    local _dname _j
+    local -a _cand
+    while IFS= read -r _dname; do
+      [[ -n "${_dname}" ]] || continue
+      _cand=()
+      [[ -z "${_name2idxs["${_dname}"]:-}" ]] || read -ra _cand <<< "${_name2idxs["${_dname}"]}"
+      if (( ${#_cand[@]} == 0 )); then
+        error "bootstrap: '${_names[_k]}': dependsOn: unknown entry '${_dname}'"
+        return 1
+      fi
+      # A reference that resolves to a COLLIDED name is ambiguous — error (the
+      # warn-only path is reserved for collisions nobody dependsOn). Set an
+      # explicit name: on one of the colliding entries to disambiguate.
+      if (( ${#_cand[@]} > 1 )); then
+        error "bootstrap: '${_names[_k]}': dependsOn: ambiguous entry '${_dname}' (${#_cand[@]} entries share it — set an explicit name:)"
+        return 1
+      fi
+      _j="${_cand[0]}"
+      _edge["${_k},${_j}"]=1
+    done <<< "${_depnames[_k]}"
+    local _g
+    for (( _g = 0; _g < _k; _g++ )); do
+      [[ "${_waits[_g]}" == "true" ]] && _edge["${_k},${_g}"]=1
+      [[ "${_waits[_k]}" == "true" ]] && _edge["${_k},${_g}"]=1
+    done
+  done
+
+  # Collisions still standing here are basename/map-key clashes that NOTHING
+  # dependsOn (a referenced one hard-errored as "ambiguous" above) and carry no
+  # explicit name: (those hard-errored too). Warn (last-wins) — visible, but it
+  # must NOT break a barrier-only config that happens to reuse a basename.
+  local _cn
+  for _cn in "${!_name2idxs[@]}"; do
+    local -a _cids=()
+    read -ra _cids <<< "${_name2idxs["${_cn}"]}"
+    (( ${#_cids[@]} > 1 )) \
+      && warn "bootstrap: duplicate entry name '${_cn}' — ${#_cids[@]} entries share it; a dependsOn on it would be ambiguous (set an explicit name:)"
+  done
+
+  # Derive, from the edge set: per-entry effective deps (space-separated parent
+  # indices), the dep-target flag (does anything depend on this entry?), in-degree
+  # and reverse adjacency (parent → dependents) — used by cycle-check + runner.
+  local -a _edeps=() _istarget=() _indeg=()
+  local -A _dependents=()
+  for (( _k = 0; _k < n; _k++ )); do _edeps[_k]=""; _istarget[_k]=0; _indeg[_k]=0; done
+  local _key _ci _pi
+  for _key in "${!_edge[@]}"; do
+    _ci="${_key%,*}"; _pi="${_key#*,}"
+    _edeps[_ci]+=" ${_pi}"
+    _istarget[_pi]=1
+    _indeg[_ci]=$(( _indeg[_ci] + 1 ))
+    _dependents["${_pi}"]+=" ${_ci}"
+  done
+
+  # Cycle detection (Kahn): peel off in-degree-0 nodes; anything left sits in (or
+  # behind) a cycle — which would deadlock the runner (nothing in it ever becomes
+  # launchable). Fail fast with the offending names.
+  local -a _queue=()
+  for (( _k = 0; _k < n; _k++ )); do (( _indeg[_k] == 0 )) && _queue+=("${_k}"); done
+  local _processed=0 _u _v
+  local -a _adj
+  while (( ${#_queue[@]} )); do
+    _u="${_queue[0]}"; _queue=("${_queue[@]:1}")
+    _processed=$(( _processed + 1 ))
+    _adj=()
+    [[ -z "${_dependents["${_u}"]:-}" ]] || read -ra _adj <<< "${_dependents["${_u}"]}"
+    for _v in "${_adj[@]+"${_adj[@]}"}"; do
+      _indeg[_v]=$(( _indeg[_v] - 1 ))
+      (( _indeg[_v] == 0 )) && _queue+=("${_v}")
+    done
+  done
+  if (( _processed < n )); then
+    local -a _cyc=()
+    for (( _k = 0; _k < n; _k++ )); do (( _indeg[_k] > 0 )) && _cyc+=("${_names[_k]}"); done
+    error "bootstrap: dependsOn: cycle detected (${_cyc[*]})"
+    return 1
+  fi
+
+  # ── Run the DAG: launch every entry whose deps are done, up to the cap ──
+  # A failure does NOT stop the world: it only adds the failed entry's transitive
+  # dependents to _skip (bootstrap::_skip_dependents), so unrelated entries still
+  # apply. An entry is launchable when its effective deps are ALL completed AND it
+  # is not started and not skipped. A skipped entry is never launched — and since
+  # its deps may never complete, it must count as "accounted for" so the loop can
+  # end. TERMINATION: every iteration either launches an entry, reaps an in-flight
+  # one, or (nothing in flight after a full launch pass) breaks — so it can't hang.
+  # At that break every remaining entry is completed OR skipped: an entry that was
+  # still launchable (all its deps completed, not skipped) would have launched with
+  # a free slot; a blocked one is transitively behind a skipped entry, hence itself
+  # already in _skip (the BFS reaches every transitive dependent).
+  local _rcdir; _rcdir=$(mktemp -d) \
+    || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
+  _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=(); _BS_OUTFILES=()
+  unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
+  _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=(); _BS_PARKED_NS=()
+  local -A _started=()
+  local -A _skip=()   # entry index → 1: skipped (a transitive dependency failed)
+  local _seq=0
+
+  while :; do
+    # Launch phase: every not-yet-started, not-skipped entry whose effective deps
+    # have all COMPLETED, capped at max_parallel concurrent.
+    local _i2
+    for (( _i2 = 0; _i2 < n; _i2++ )); do
+      [[ -z "${_started["${_i2}"]:-}" ]] || continue
+      [[ -z "${_skip["${_i2}"]:-}" ]] || continue   # never launch a skipped entry
+      (( ${#_BS_INFLIGHT[@]} < max_parallel )) || break
+      local _ready=1 _d2
+      local -a _dl=()
+      [[ -z "${_edeps[_i2]}" ]] || read -ra _dl <<< "${_edeps[_i2]}"
+      for _d2 in "${_dl[@]+"${_dl[@]}"}"; do
+        [[ -n "${_BS_COMPLETED["${_d2}"]:-}" ]] || { _ready=0; break; }
+      done
+      (( _ready )) || continue
+      # Readiness wait IFF something needs this entry Ready: a dep-target or a
+      # wait-gate. A pure leaf passes "" → _apply_one skips wait_ready (the point).
+      local _wflag=""
+      if (( _istarget[_i2] )) || [[ "${_waits[_i2]}" == "true" ]]; then
+        _wflag="wait"
+      fi
+      _started["${_i2}"]=1
+
+      # wait: true GATES run through the SAME background path as everything else —
+      # the barrier is enforced by DAG edges (built in the edge pass), NOT by
+      # foreground execution, so a gate still runs ALONE and its dependents still
+      # wait, while getting the shared spinner + collapsed render_captured UI.
+      # Immutable/terminating heal is uniform for all entries: kapply errors under
+      # LOK8S_NONINTERACTIVE, the reap PARKS the entry, and the drain point
+      # batch-heals — see _reap_one/_resolve_parked.
+      _seq=$(( _seq + 1 ))
+      local _rcf="${_rcdir}/${_seq}.rc"
+      local _out="${_rcdir}/${_seq}.out"
+      # Entries fan out as concurrent BACKGROUND subshells: each in its own
+      # subshell so KAPPLY_LAST_OUTPUT stays isolated across concurrent applies;
+      # LOK8S_NONINTERACTIVE because N backgrounded applies have no shared
+      # /dev/tty (--force-recreate still heals, it just never prompts). Their
+      # stdout+stderr is BUFFERED to ${_out} and rendered as one de-interleaved,
+      # collapsed block on reap — see bootstrap::_reap_one → render_captured.
+      # Capture the rc EXPLICITLY (|| _arc=$?) — under errexit a failing
+      # _apply_one would abort before `echo $?` runs; _collect_rc treats a missing
+      # file as a failure too. Set LOK8S_BOOTSTRAP_PARALLEL=1 for clean
+      # one-at-a-time output.
+      ( export LOK8S_NONINTERACTIVE=1
+        _arc=0
+        bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
+          "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" > "${_out}" 2>&1 || _arc=$?
+        echo "${_arc}" > "${_rcf}" ) &
+      _BS_INFLIGHT+=("$!")
+      _BS_RCFILES+=("${_rcf}")
+      _BS_RUNIDX+=("${_i2}")
+      _BS_OUTFILES+=("${_out}")
+    done
+
+    # Nothing in flight after a full launch pass → everything left is completed or
+    # skipped (or only blocked behind skipped entries, which never launch) — UNLESS
+    # entries parked on an immutable/terminating conflict. Resolve those (batch heal)
+    # at this quiescent drain point, where the scheduler owns the tty for a single
+    # prompt, then loop: resolving a parked entry completes it, unblocking dependents
+    # the next launch pass picks up. Only when nothing is in flight AND nothing is
+    # parked are we truly done.
+    (( ${#_BS_INFLIGHT[@]} )) || { (( ${#_BS_PARKED[@]} == 0 )) && break; bootstrap::_resolve_parked; continue; }
+
+    bootstrap::_reap_one
+  done
+
+  bootstrap::_drain   # safety: never leave an orphan behind
+  rm -rf "${_rcdir}"
+  # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
+  # entry completed cleanly. _BS_OVERALL_RC alone suffices: _skip is only ever
+  # populated by bootstrap::_skip_dependents, and both call sites set
+  # _BS_OVERALL_RC=1 immediately before invoking it.
+  if (( _BS_OVERALL_RC != 0 )); then
+    return 1
+  fi
+  return 0
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::bootstrap "${@}"

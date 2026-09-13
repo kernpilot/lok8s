@@ -104,7 +104,9 @@ func TestDriversList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "Available drivers:\n\n- bashonly\n- fakedrv\n"; stdout != want {
+	// The union: the project's bash driver dirs, the fake Go registry and
+	// the embedded tree's drivers (capi, kkp, kubehz, kubeone, lo).
+	if want := "Available drivers:\n\n- bashonly\n- capi\n- fakedrv\n- kkp\n- kubehz\n- kubeone\n- lo\n"; stdout != want {
 		t.Errorf("list = %q, want %q", stdout, want)
 	}
 	if stdout2, _, _ := runLo(t, driversRoot(p, h.deps()), "drivers", "-l"); stdout2 != stdout {
@@ -114,6 +116,10 @@ func TestDriversList(t *testing.T) {
 
 func TestDriversErrorPaths(t *testing.T) {
 	p := synthProject(t)
+	// The project holds the bash tree: the bash-only fallback looks for the
+	// driver there (a project without one gets the embedded tree, which
+	// carries no project driver).
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "lo"), "#!/usr/bin/env bash\n")
 	h := &driversHarness{}
 
 	_, stderr, err := runLo(t, driversRoot(p, h.deps()), "drivers")

@@ -44,11 +44,36 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 			t.Errorf("cloud entry not commented out: %q", off)
 		}
 	}
-	// The contributor-only tools are absent as entries (mentioned in the
-	// header only as an opt-in recipe).
+	// The bash runtime is carried commented out by default (opt-in).
+	for _, off := range []string{"  # yq:\n  #   groups: [bash]\n", "  # jq:\n  #   groups: [bash]\n", "  # sops:\n  #   groups: [bash]\n", "  # ssh-to-age:\n  #   groups: [bash]\n", "  # renvsubst:\n  #   alias: envsubst\n  #   groups: [bash]\n", "  # github.com/arg-sh/argsh:\n  #   asset: argsh\n  #   onPost: \"${B_BIN} builtin ${B_EVENT}\"\n  #   groups: [bash]\n"} {
+		if !strings.Contains(tpl, off) {
+			t.Errorf("bash entry not commented out: %q", off)
+		}
+	}
 	for _, absent := range []string{"\n  yq:", "\n  jq:", "\n  sops:", "\n  ssh-to-age:", "\n  github.com/arg-sh/argsh:", "\n  renvsubst:"} {
 		if strings.Contains(tpl, absent) {
-			t.Errorf("consumer template must not declare %q", absent)
+			t.Errorf("consumer template must not activate %q by default", absent)
+		}
+	}
+	// --groups bash: every bash entry uncommented, each checked on its own
+	// with its real key text; the non-selected cloud group stays commented
+	// with its real keys.
+	withBash := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"core", "local", "bash"}})
+	for _, on := range []string{
+		"  github.com/arg-sh/argsh:\n    asset: argsh\n    onPost: \"${B_BIN} builtin ${B_EVENT}\"\n    groups: [bash]\n",
+		"  yq:\n    groups: [bash]\n",
+		"  jq:\n    groups: [bash]\n",
+		"  renvsubst:\n    alias: envsubst\n    groups: [bash]\n",
+		"  sops:\n    groups: [bash]\n",
+		"  ssh-to-age:\n    groups: [bash]\n",
+	} {
+		if !strings.Contains(withBash, on) {
+			t.Errorf("--groups bash did not activate %q:\n%s", on, withBash)
+		}
+	}
+	for _, off := range []string{"  # github.com/kubermatic/kubeone:\n  #   groups: [cloud]\n", "  # hcloud:\n  #   groups: [cloud]\n"} {
+		if !strings.Contains(withBash, off) {
+			t.Errorf("--groups bash uncommented a cloud entry, want %q:\n%s", off, withBash)
 		}
 	}
 
@@ -67,6 +92,9 @@ func TestNormalizeGroups(t *testing.T) {
 	g, err := NormalizeGroups([]string{"cloud", " LOCAL ", ""})
 	if err != nil || strings.Join(g, ",") != "core,local,cloud" {
 		t.Fatalf("got %v, %v", g, err)
+	}
+	if g, err := NormalizeGroups([]string{"bash", "core"}); err != nil || strings.Join(g, ",") != "core,bash" {
+		t.Fatalf("bash group: %v, %v", g, err)
 	}
 	if _, err := NormalizeGroups([]string{"kustomize"}); err == nil {
 		t.Fatal("unknown group accepted")

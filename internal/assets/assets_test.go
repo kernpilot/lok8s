@@ -3,13 +3,14 @@ package assets
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
-
-	"io/fs"
-	"path"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -271,17 +272,20 @@ func TestMarkerRoundTrip(t *testing.T) {
 // test apply to their embeds. The embedded copy is canonical; a file edited
 // on either side without hack/sync-legacy-assets.sh fails here.
 
-// mirrored lists the .lok8s subtrees the mirror carries (the sync script's
-// list — keep the two in step).
+// mirrored lists the top-level entries of .lok8s the mirror carries: the
+// whole tree (the sync script's list — keep the two in step;
+// TestMirroredListCoversLegacyTree fails on an entry missing from it).
 var mirrored = []string{
-	"addons",
-	"drivers/lo/cluster",
-	"drivers/kubeone/cluster",
-	"drivers/capi/cluster",
-	"libs/inventory/manifests",
-	"chat",
-	"tilt",
+	"README.md",
 	"VERSION",
+	"addons",
+	"chat",
+	"drivers",
+	"libs",
+	"lo",
+	"providers",
+	"tilt",
+	"utils",
 }
 
 func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
@@ -316,13 +320,87 @@ func TestEmbeddedMirrorMatchesLegacyTree(t *testing.T) {
 		Sync:     "hack/sync-legacy-assets.sh",
 		SyncBack: "hack/sync-legacy-assets.sh --from-legacy",
 	}.Check(t)
-	if len(embedded.Files) < 100 {
+	if len(embedded.Files) < 200 {
 		t.Fatalf("embedded mirror suspiciously small: %d files", len(embedded.Files))
 	}
-	for _, must := range []string{"addons/cilium/chart.yaml", "drivers/lo/cluster/registry/mirror.yaml", "drivers/kubeone/cluster/core/kubeone.yaml", "drivers/capi/cluster/core/cluster.yaml", "libs/inventory/manifests/clusterinventory.crd.yaml", "chat/defaults.json", "tilt/Tiltfile", "tilt/README.md", "VERSION"} {
+	for _, must := range []string{"addons/cilium/chart.yaml", "drivers/lo/cluster/registry/mirror.yaml", "drivers/kubeone/cluster/core/kubeone.yaml", "drivers/capi/cluster/core/cluster.yaml", "libs/inventory/manifests/clusterinventory.crd.yaml", "chat/defaults.json", "tilt/Tiltfile", "tilt/README.md", "VERSION", "lo", "libs/build", "utils/domain.sh", "drivers/lo/main", "drivers/kubeone/main", "providers/hetzner/main", "libs/init.d/test/.gitignore"} {
 		if _, ok := embedded.Files[must]; !ok {
 			t.Errorf("%s missing from the embed", must)
 		}
+	}
+	// Executable bits: the same set on both sides, and the Go list that
+	// restores them on extract (go:embed keeps content only) matches it.
+	mirrorExec := executables(t, filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s"))
+	legacyExec := executables(t, legacy)
+	testutil.Drift{Want: mirrorExec, Got: legacyExec, Sync: "hack/sync-legacy-assets.sh", SyncBack: "hack/sync-legacy-assets.sh --from-legacy"}.Check(t)
+	listed := testutil.Tree{Name: "bashExecutables", Files: map[string]string{}}
+	for fp, on := range bashExecutables {
+		if on {
+			listed.Files[fp] = "+x"
+		}
+	}
+	testutil.Drift{Want: mirrorExec, Got: listed, Sync: "edit bashExecutables in internal/assets/bashtree.go"}.Check(t)
+}
+
+// executables lists the +x files below root ("+x" per slash path).
+func executables(t *testing.T, root string) testutil.Tree {
+	t.Helper()
+	tree := testutil.Tree{Name: root, Files: map[string]string{}}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&0o100 != 0 {
+			rel, _ := filepath.Rel(root, p)
+			tree.Files[filepath.ToSlash(rel)] = "+x"
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree
+}
+
+// Every top-level entry of .lok8s in the COMMITTED tree must be in
+// `mirrored`; an entry that is not would silently stay out of the binary.
+// The committed tree (git ls-tree HEAD), not the working dir or the index:
+// a toolchain step drops files into .lok8s on CI, and those are not part
+// of the tree the binary must carry.
+func TestMirroredListCoversLegacyTree(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	// Outside a repository the gate cannot run: skip locally, FAIL under
+	// CI=true (a silent skip there would pass an unmirrored entry).
+	skip := func(format string, a ...any) {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("CI=true: "+format, a...)
+		}
+		t.Skipf(format, a...)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		skip("git not on PATH")
+	}
+	out, err := exec.Command(git, "-C", root, "ls-tree", "--name-only", "HEAD", "--", ".lok8s/").Output()
+	if err != nil || len(out) == 0 {
+		skip("git ls-tree HEAD .lok8s: %v (empty output)", err)
+	}
+	var names []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		if top := strings.TrimPrefix(line, ".lok8s/"); top != "" {
+			names = append(names, top)
+		}
+	}
+	want := append([]string(nil), mirrored...)
+	sort.Strings(want)
+	sort.Strings(names)
+	if strings.Join(names, "\n") != strings.Join(want, "\n") {
+		t.Fatalf(".lok8s top-level entries %v, mirrored %v (add the entry to hack/sync-legacy-assets.sh and assets_test.go)", names, want)
 	}
 }
 
@@ -356,12 +434,35 @@ func TestMirroredListMatchesSyncScript(t *testing.T) {
 
 func TestUnitsCoverEveryEmbeddedFile(t *testing.T) {
 	t.Parallel()
+	// Every embedded file belongs to exactly one unit: the data units own
+	// their subtrees, the bash unit the rest; the two walks partition the
+	// mirror.
+	seen := map[string]string{}
+	for _, u := range Units() {
+		files, err := EmbeddedFiles(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rel := range files {
+			fp := rel
+			if u.Kind != KindBash {
+				fp = u.Rel + "/" + rel
+			}
+			if prev, dup := seen[fp]; dup {
+				t.Errorf("%s: in units %s and %s", fp, prev, u.Rel)
+			}
+			seen[fp] = u.Rel
+		}
+	}
 	err := fs.WalkDir(FS(), ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || p == "VERSION" {
+		if err != nil || d.IsDir() {
 			return err
 		}
-		if _, ok := UnitFor(p); !ok {
+		u, ok := UnitFor(p)
+		if !ok {
 			t.Errorf("%s: embedded but no unit covers it", p)
+		} else if seen[p] != u.Rel {
+			t.Errorf("%s: UnitFor says %s, the walk put it in %s", p, u.Rel, seen[p])
 		}
 		return nil
 	})
@@ -370,5 +471,13 @@ func TestUnitsCoverEveryEmbeddedFile(t *testing.T) {
 	}
 	if n := len(AddonNames()); n < 20 {
 		t.Fatalf("only %d embedded addons", n)
+	}
+	// The bash unit: the code half, and only that.
+	for rel, want := range map[string]bool{"lo": true, "VERSION": true, "libs/build": true, "utils/domain.sh": true, "drivers/lo/main": true, "drivers/lo/libs": true, "providers/hetzner/main": true, "bash": true,
+		"drivers": false, "drivers/lo": false, "libs": false, "addons": false, "addons/cilium/chart.yaml": false, "libs/inventory/manifests/clusterinventory.crd.yaml": false, "tilt/Tiltfile": false, "nope": false} {
+		u, ok := UnitFor(rel)
+		if got := ok && u.Kind == KindBash; got != want {
+			t.Errorf("UnitFor(%q) bash=%v (ok=%v unit=%s), want %v", rel, got, ok, u.Rel, want)
+		}
 	}
 }

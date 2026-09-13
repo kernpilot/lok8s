@@ -1,0 +1,386 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
+# vim: set syntax=bash:
+# KubeOne driver — standalone production clusters via KubeOne
+# Implements: driver::provision, driver::export, driver::destroy, driver::status, driver::kubeconfig
+#
+# Infrastructure is provisioned by the provider contract
+# (.lok8s/providers/<name>/main). KubeOne installs Kubernetes on
+# the provisioned nodes. No management cluster required.
+#
+# Work directory: clusters/<domain>/.kubeone/
+
+import ^utils/verbose
+import ^drivers/kubeone/config
+
+# ── CLI dispatch ─────────────────��────────────────────────
+
+main::driver() {
+  local -a usage=(
+    'provision|p@destructive'  'Provision a KubeOne cluster'
+    'destroy|d@destructive'    'Destroy a KubeOne cluster'
+    'status|s@readonly'        'Check cluster status'
+    'kubeconfig|k@readonly'    'Extract kubeconfig path'
+  )
+  :usage "KubeOne driver" "${@}"
+  "${usage[@]}"
+}
+
+# ── Driver contract ─���─────────────────────────────────────
+
+driver::provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Provision a KubeOne cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+
+  # Hosted path: delegate to kubehz API
+  # || return: this whole tree runs under libs/provision's `driver::provision ||
+  # provision_rc=$?`, which disables errexit — every unguarded call here is a
+  # silent-continue (issue #91).
+  kubehz::read_config "${cluster_yaml}" || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+    kubehz::provision_hosted "${domain}" "${cluster_yaml}"
+    return
+  fi
+
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+  mkdir -p "${work_dir}"
+
+  # 1. Provider is already loaded + validated by libs/provision.
+  if ! declare -F provider::provision &>/dev/null; then
+    error "KubeOne driver requires spec.provider (no provider loaded)"
+    return 1
+  fi
+
+  # 2. Provision infrastructure via the provider contract
+  # || return: without it a failed INFRASTRUCTURE reconcile falls through to the
+  # manifest render and `kubeone apply`, i.e. applying against hosts that were
+  # never created.
+  provider::provision "${PROVIDER_CONFIG_FILE}" "${work_dir}" || return 1
+
+  # 3. Generate kubeone.yaml
+  local provider_name="${PROVIDER_NAME:-}"
+  # || return: this tree runs under libs/provision's `driver::provision ||
+  # provision_rc=$?`, which disables errexit — without the explicit return, a
+  # failed manifest render falls straight through to the apply below (issue #91).
+  kubeone::generate_config "${cluster_yaml}" "${provider_name}" "${work_dir}" || return 1
+
+  # 4. Append the host inventory to the manifest itself (apiEndpoint,
+  #    controlPlane.hosts, staticWorkers.hosts). Manifest fields are
+  #    versioned and strictly validated by kubeone — unlike the legacy
+  #    tfjson envelope, whose schema drifted under us (KubeOne 1.13
+  #    rejected the old `control_plane.hosts` shape).
+  rm -f "${work_dir}/output.json"
+  _append_inventory "${PROVIDER_CONFIG_FILE}" "${work_dir}/kubeone.yaml" || return 1
+
+  # 5. Run kubeone apply (spec.oidc was wired into the manifest as
+  #    features.openidConnect during generate_config — KubeOne propagates it to
+  #    every control plane via the kubeadm ClusterConfiguration; no file delivery)
+  # || return, and this is the one that actually bit. The kubeconfig check below
+  # decides this function's exit status, and on any cluster provisioned BEFORE
+  # (a worker re-join — issue #91's scenario) that file already exists, so a
+  # failed apply was masked by a stale kubeconfig and reported as success. It
+  # only failed correctly on a first-ever provision, which is why a
+  # fresh-install test would never have caught it.
+  kubeone::apply "${work_dir}" "${cluster_yaml}" || return 1
+
+  # 6. Copy kubeconfig to standard location
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  local src_kubeconfig
+  src_kubeconfig=$(kubeone::kubeconfig_path "${work_dir}" "${cluster_name}")
+
+  if [[ -f "${src_kubeconfig}" ]]; then
+    mkdir -p "${PATH_BASE}/.kubeconfig"
+    # Named by metadata.name — framework convention (bootstrap reads it)
+    cp "${src_kubeconfig}" "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+    chmod 600 "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+  else
+    error "Kubeconfig not found at ${src_kubeconfig} after kubeone apply"
+    return 1
+  fi
+  # No post-apply CCM step: cilium + the robot-ready CCM were applied BY kubeone
+  # during apply (kubeone::render_addons → <work_dir>/addons/, spec.addons.path),
+  # so the worker joined a robot-aware CCM and nothing needs re-asserting.
+}
+
+# driver::export — spec-derived env consumed by spec.bootstrap addons (LOK8S_SPEC_*).
+# Reuses kubeone::extract_vars (pure yq→export; the extra kubeone-config vars it also
+# sets are harmless). Idempotent, no side effects. Called by provision::dispatch on
+# BOTH the full provision and `--bootstrap` paths — without it, `lo provision -b`
+# would render external-dns with an empty domainFilter and mailpit host `mailpit.`
+# (extract_vars normally runs only via generate_config, inside driver::provision).
+driver::export() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "KubeOne driver export" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  kubeone::extract_vars "${cluster_yaml}"
+}
+
+driver::destroy() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Destroy a KubeOne cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+
+  # Hosted path: delegate to kubehz API
+  # || return: errexit is suppressed here (libs/provision:463 runs
+  # `driver::destroy || destroy_rc=$?`). Without it LOK8S_KUBEHZ_HOSTING is never
+  # set, the hosted branch is skipped, and a HOSTED cluster gets the self-hosted
+  # teardown instead of the kubehz API call — the wrong destroy entirely.
+  kubehz::read_config "${cluster_yaml}" || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+    kubehz::destroy_hosted "${domain}" "${cluster_yaml}"
+    return
+  fi
+
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+
+  # 1. Reset Kubernetes (kubeone reset)
+  if [[ -f "${work_dir}/kubeone.yaml" ]]; then
+    kubeone::reset "${work_dir}" || warn "kubeone reset failed — continuing with infrastructure destroy"
+  fi
+
+  # 2. Destroy infrastructure via provider contract
+  if declare -F provider::destroy &>/dev/null; then
+    # || return: without it a failed INFRASTRUCTURE destroy falls through to the
+    # kubeconfig cleanup below, whose `rm -f` always exits 0 — so this function
+    # returned SUCCESS while the servers stayed up and billing, AND deleted the
+    # one handle left to reach them. Returning here keeps the kubeconfig.
+    provider::destroy "${PROVIDER_CONFIG_FILE:-}" "${work_dir}" || return 1
+  else
+    warn "no provider loaded — cannot destroy infrastructure"
+  fi
+
+  # 3. Clean up kubeconfig (named by metadata.name)
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  rm -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+}
+
+driver::status() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Check KubeOne cluster status" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+
+  if [[ ! -f "${work_dir}/kubeone.yaml" ]]; then
+    # No kubeone config — check via provider if available
+    if declare -F provider::status &>/dev/null; then
+      provider::status "${PROVIDER_CONFIG_FILE:-}"
+    else
+      echo "NotProvisioned"
+    fi
+    return
+  fi
+
+  kubeone::status "${work_dir}"
+}
+
+driver::kubeconfig() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Extract kubeconfig" "${@}"
+
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
+  echo "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+}
+
+# ── Internal: manifest inventory ─────────────────────────
+#
+# Appends apiEndpoint + controlPlane.hosts + staticWorkers.hosts to the
+# rendered kubeone.yaml from the standard provider::output inventory.
+# Bare-metal/pre-existing nodes (role=worker) become STATIC workers —
+# dynamic (machine-controller) pools come from spec.workers via
+# kubeone::generate_config.
+#
+# Hosts are DESCRIPTOR-ANCHORED: only servers declared in the descriptor's
+# server[] array (matched by name) are emitted — label-discovered VMs that
+# are not declared (machine-controller machines share the cluster label) are
+# skipped with a warning. Each emitted host carries its node.labels (plumbed
+# by provider::output) as hosts[].labels for KubeOne's labelNodes task.
+
+_append_inventory() {
+  local config_file="${1}" manifest="${2}"
+
+  local output
+  output=$(provider::output "${config_file}")
+
+  local ssh_key
+  ssh_key=$(echo "${output}" | jq -r '.access[0].privateKey // ""')
+  # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
+  [[ "${ssh_key}" != "~/"* ]] || ssh_key="${HOME}/${ssh_key:2}"
+  if [[ -z "${ssh_key}" || ! -f "${ssh_key}" ]]; then
+    error "kubeone inventory: ssh private key not found (descriptor sshPrivateKey: '${ssh_key}')"
+    return 1
+  fi
+
+  local api_host
+  api_host=$(echo "${output}" | jq -r '.api.endpoint // ""')
+  if [[ -z "${api_host}" ]]; then
+    error "kubeone inventory: no API endpoint (load balancer) in provider output"
+    return 1
+  fi
+
+  # The descriptor is the source of truth for cluster MEMBERSHIP.
+  # provider::output discovers cloud VMs BY LABEL (lok8s.dev/cluster=<name>) —
+  # a sweep that also matches VMs the cluster created for ITSELF at runtime:
+  # KubeOne machine-controller (MachineDeployment) workers carry the same
+  # cluster label. Those are dynamic nodes kubeone must never SSH into —
+  # emitting them as staticWorkers made `kubeone apply` try to adopt live
+  # machine-controller nodes (2026-07-10 production incident). Anchor BOTH
+  # controlPlane.hosts and staticWorkers.hosts to the descriptor's server[]
+  # list, matched by name.
+  local desc
+  desc="$(envsubst < "${config_file}")"
+  if ! echo "${desc}" | jq empty 2>/dev/null; then
+    # YAML descriptor: convert the ALREADY-envsubst'd text (stdin), never the
+    # raw file — re-reading the file discards ${VAR} expansion and anchors
+    # against unexpanded names. NB the provider's own loads still re-read the
+    # file (pre-existing, tracked as a follow-up issue). A failed/empty
+    # conversion errors HERE — falling through would surface as a misleading
+    # "declares no server[]" refusal.
+    if ! desc="$(yq -o json '.' - <<<"${desc}" 2>/dev/null)" \
+       || [[ -z "${desc}" ]] || ! echo "${desc}" | jq empty 2>/dev/null; then
+      error "kubeone inventory: descriptor ${config_file} is neither valid JSON nor valid YAML (after envsubst) — fix the descriptor before provisioning"
+      return 1
+    fi
+  fi
+  local declared
+  declared=$(echo "${desc}" | jq -c '[(.server // [])[].name // empty]' 2>/dev/null) || declared=""
+  if [[ -z "${declared}" || "$(echo "${declared}" | jq 'length')" == "0" ]]; then
+    error "kubeone inventory: descriptor ${config_file} declares no server[] — refusing to build a host inventory from label discovery alone"
+    return 1
+  fi
+  local skipped
+  while IFS= read -r skipped; do
+    [[ -n "${skipped}" ]] || continue
+    warn "kubeone inventory: skipping ${skipped} — carries the cluster label but is not declared in the descriptor's server[] (machine-controller or foreign VM, never a static host)"
+  done < <(echo "${output}" | jq -r --argjson declared "${declared}" \
+    '.nodes[] | select(.name as $n | ($declared | index($n)) == null) | "\(.name) (role=\(.role))"')
+
+  # Keep only declared nodes (their node.labels — plumbed by provider::output
+  # from hcloud server labels / the descriptor's `#labels` — ride along and are
+  # rendered below as the host's labels: map for KubeOne's labelNodes task).
+  output=$(echo "${output}" | jq --argjson declared "${declared}" \
+    '.nodes = [.nodes[] | select(.name as $n | ($declared | index($n)) != null)]') \
+    || { error "kubeone inventory: failed to anchor provider inventory to the descriptor"; return 1; }
+
+  # Zero control planes after anchoring = descriptor/provider name mismatch
+  # (e.g. envsubst env drift between runs). Fail HERE with the cause instead
+  # of handing kubeone an empty controlPlane.hosts and an opaque validation
+  # error.
+  if [[ "$(echo "${output}" | jq '[.nodes[] | select(.role == "control-plane")] | length')" == "0" ]]; then
+    error "kubeone inventory: anchoring left ZERO control-plane hosts — no provider control-plane node matches the descriptor's server[] names (name drift?)"
+    return 1
+  fi
+
+  # jq render templates (jq strings cannot hold literal newlines — use \n).
+  # Per-host kubelet config (reservations, eviction, maxPods, hardening):
+  # control planes are small VMs (modest reservations), bare-metal static
+  # workers are large boxes
+  # (bigger reservations, higher maxPods). readOnlyPort:0 disables the
+  # insecure kubelet read-only port.
+  local host_body='    - publicAddress: \"\(.public_ip)\"\n      privateAddress: \"\(.private_ip)\"\n      sshUsername: \"\(.ssh_user)\"\n      sshPort: \(.ssh_port)\n      sshPrivateKeyFile: \"\($key)\"\n      hostname: \"\(.name)\"'
+  # Node labels block: kubeone's HostConfig.labels (map[string]string) is synced
+  # to Node labels by the labelNodes task (pkg/tasks/nodes.go:109) on both `lo up`
+  # AND `lo recover` — this is how the tier.kubehz.cloud/* taxonomy from
+  # hetzner.json #labels reaches (and survives on) the Node. Empty map -> no block.
+  # Sorted (sort_by(.key)) so the rendered manifest is deterministic.
+  # @json emits each key/value as a properly-quoted+escaped JSON string, which is
+  # valid YAML — this is what prevents YAML injection when a label value contains
+  # a quote, colon or newline (raw "\(.key)":"\(.value)" would break the manifest).
+  local host_labels='\((.labels // {}) | if length > 0 then "\n      labels:" + (to_entries | sort_by(.key) | map("\n        \(.key|@json): \(.value|@json)") | join("")) else "" end)'
+  local cp_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        kubeReserved:\n          cpu: \"200m\"\n          memory: \"512Mi\"\n        evictionHard:\n          memory.available: \"500Mi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 110'
+  local worker_kubelet='\n      kubelet:\n        systemReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        kubeReserved:\n          cpu: \"500m\"\n          memory: \"1Gi\"\n        evictionHard:\n          memory.available: \"1Gi\"\n          nodefs.available: \"10%\"\n          imagefs.available: \"15%\"\n        maxPods: 250'
+  local cp_tmpl="\"${host_body}${host_labels}${cp_kubelet}\""
+  local worker_tmpl="\"${host_body}${host_labels}${worker_kubelet}\""
+
+  {
+    echo ""
+    echo "apiEndpoint:"
+    echo "  host: \"${api_host}\""
+    echo "  port: 6443"
+    # alternativeNames: every control-plane private IP + any space-separated
+    # KUBEONE_EXTRA_SANS (e.g. the LB private IP used as k8sServiceHost). The
+    # apiserver serving cert must cover these or private-net access + CP (re)joins
+    # fail with "apiserver cert not valid for <ip>" (kubeadm rejects the join).
+    echo "  alternativeNames:"
+    # The LB private IP (k8sServiceHost) — auto-derived by the provider; plus any
+    # space-separated KUBEONE_EXTRA_SANS override; plus every control-plane
+    # private IP. Without these the apiserver cert misses the in-cluster/private
+    # addresses and CP (re)joins fail "apiserver cert not valid for <ip>".
+    local lb_private_ip; lb_private_ip="$(echo "${output}" | jq -r '.api.privateEndpoint // ""')"
+    [[ -z "${lb_private_ip}" ]] || echo "    - \"${lb_private_ip}\""
+    local san
+    for san in ${KUBEONE_EXTRA_SANS:-}; do
+      [[ "${san}" == "${lb_private_ip}" ]] && continue
+      echo "    - \"${san}\""
+    done
+    echo "${output}" | jq -r '.nodes[] | select(.role == "control-plane") | "    - \"\(.private_ip)\""'
+    echo ""
+    echo "controlPlane:"
+    echo "  hosts:"
+    echo "${output}" | jq -r --arg key "${ssh_key}" \
+      ".nodes[] | select(.role == \"control-plane\") | ${cp_tmpl}"
+
+    local worker_count
+    worker_count=$(echo "${output}" | jq '[.nodes[] | select(.role == "worker")] | length')
+    if (( worker_count > 0 )); then
+      echo ""
+      echo "staticWorkers:"
+      echo "  hosts:"
+      echo "${output}" | jq -r --arg key "${ssh_key}" \
+        ".nodes[] | select(.role == \"worker\") | ${worker_tmpl}"
+    fi
+  } >> "${manifest}"
+
+  # Hetzner CCM needs the private network to resolve node IPs — without
+  # it, node initialization fails with "failed to get node address from
+  # cloud provider that matches ip: 10.x.x.x" and every node keeps its
+  # uninitialized taint (observed on a live KubeOne cluster).
+  local net_id
+  net_id=$(echo "${output}" | jq -r '.network.id // ""')
+  if [[ -n "${net_id}" ]] && \
+     [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}")" == "true" ]]; then
+    # net_id is interpolated into the yq assignment below — reject anything outside
+    # a safe charset so it can't break yq syntax or inject fields (matches the same
+    # guard in drivers/kubeone/config::render_addons).
+    [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
+      || { error "kubeone inventory: invalid networkID from provider: ${net_id}"; return 1; }
+    yq -i ".cloudProvider.hetzner.networkID = \"${net_id}\"" "${manifest}"
+  fi
+
+  # Deploy OUR cilium + robot-aware hcloud CCM via addons.path (cni: external +
+  # external CCM): render_addons writes <work_dir>/addons/{cilium,ccm-hetzner}/.
+  # cilium is a plain user addon (no embedded CNI to override); ccm-hetzner uses
+  # the embedded-addon NAME so EnsureAddonByName applies ours INSTEAD of kubeone's
+  # embedded ccm (ours is robot-aware → the bare-metal worker is recognised and
+  # the node-init taint clears before externalccm's wait). (NB delete:true does
+  # NOT disable an embedded addon — kubeone skips embedded-named declared addons
+  # before the delete check; the same-named subdir is the override. ensure.go.)
+  if [[ "$(yq -r '.cloudProvider | has("hetzner")' "${manifest}")" == "true" ]]; then
+    yq -i '.addons.enable = true | .addons.path = "./addons"' "${manifest}"
+  fi
+
+  debug "kubeone inventory appended to ${manifest} (api=${api_host}, workers=${worker_count}, networkID=${net_id:-none})"
+}

@@ -1,54 +1,63 @@
 package recover
 
 // bridge.go — the bash children recover delegates to. Providers are BASH
-// plugins (.lok8s/providers/<name>/main sourcing the argsh runtime) and the
-// provision dispatch is still the bash lib (the Go provision.Dispatcher has
-// no provider loader yet and the KubeOne driver's inventory/pre-apply hooks
-// are unwired), so both run as `bash -c` children over the ORIGINAL libs —
-// the precedent is `lo doctor`'s provider section (cli/cmd_doctor.go).
-// Every child goes through execx.Runner (hermetic under a fake).
+// plugins (providers/<name>/main in the bash tree, sourcing the argsh
+// runtime) and the provision dispatch is still the bash lib (the Go
+// provision.Dispatcher has no provider loader yet and the KubeOne driver's
+// inventory/pre-apply hooks are unwired), so both run as `bash -c` children
+// over the ORIGINAL libs — the precedent is `lo doctor`'s provider section
+// (cli/cmd_doctor.go). The tree is the project's checkout or ejected tree
+// when it has one, else the embedded copy in the versioned cache
+// (assets.BashTree). Every child goes through execx.Runner (hermetic under
+// a fake).
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
-// bridgePATH prepends .lok8s + .bin to PATH when missing (cli.shimEnv).
-func bridgePATH(p *config.Paths) string {
-	path := os.Getenv("PATH")
-	for _, dir := range []string{p.Lok8s, p.Bin} {
-		found := slices.Contains(strings.Split(path, string(os.PathListSeparator)), dir)
-		if !found {
-			path = dir + string(os.PathListSeparator) + path
-		}
-	}
-	return path
+// bridgePATH is .bin, then the bash tree, then PATH (cli.shimEnv's PATH).
+func bridgePATH(p *config.Paths, tree string) string {
+	return execx.PrependPATH(p.Bin, tree)
 }
 
 // bridgeEnv is the environment the argsh entrypoint would have derived:
-// the prepared PATH plus every PATH_* the libs read.
-func bridgeEnv(p *config.Paths) []string {
+// the prepared PATH plus every PATH_* the libs read; PATH_LOK8S and
+// PATH_SCRIPTS point at the bash tree.
+func bridgeEnv(p *config.Paths, tree string) []string {
 	secretsVal := p.SecretsEnv
 	if secretsVal == "" {
 		secretsVal = filepath.Join(p.Base, ".secrets")
 	}
 	return []string{
-		"PATH=" + bridgePATH(p),
+		"PATH=" + bridgePATH(p, tree),
 		"PATH_BASE=" + p.Base,
 		"PATH_BIN=" + p.Bin,
-		"PATH_LOK8S=" + p.Lok8s,
+		"PATH_LOK8S=" + tree,
 		"PATH_CLUSTERS=" + p.Clusters,
 		"PATH_SECRETS=" + secretsVal,
-		"PATH_SCRIPTS=" + p.Lok8s,
+		"PATH_SCRIPTS=" + tree,
 	}
+}
+
+// env resolves the bash tree once (assets.BashTree) and builds the child
+// environment over it.
+func (r *Runner) env() ([]string, error) {
+	r.treeOnce.Do(func() {
+		t, err := assets.BashTree(r.Paths)
+		r.treeDir, r.treeErr = t.Dir, err
+	})
+	if r.treeErr != nil {
+		return nil, r.treeErr
+	}
+	return bridgeEnv(r.Paths, r.treeDir), nil
 }
 
 // providerProbeScript loads the provider through utils/provider.sh
@@ -95,12 +104,16 @@ type bashProviderImpl struct {
 // bashProvider is the default NewProvider: probe the plugin once (bash:
 // provider::load + the declare -F checks in recover::_resolve).
 func (r *Runner) bashProvider(ctx context.Context, name string) (Provider, error) {
+	env, err := r.env()
+	if err != nil {
+		return nil, err
+	}
 	var out strings.Builder
-	err := r.exec().Run(ctx, execx.Cmd{
+	err = r.exec().Run(ctx, execx.Cmd{
 		Name:   "bash",
 		Args:   []string{"-c", providerProbeScript, "lo-recover-provider", name},
 		Dir:    r.Paths.Base,
-		Env:    bridgeEnv(r.Paths),
+		Env:    env,
 		Stdout: &out,
 		Stderr: r.errOut(),
 	})
@@ -123,12 +136,16 @@ func (p *bashProviderImpl) HasRebuild() bool { return p.rebuild }
 func (p *bashProviderImpl) HasDoctor() bool  { return p.doctor }
 
 func (p *bashProviderImpl) call(ctx context.Context, fn string, stdout, stderr io.Writer, args ...string) error {
+	env, err := p.r.env()
+	if err != nil {
+		return err
+	}
 	argv := append([]string{"-c", providerCallScript, "lo-recover-provider", p.name, fn}, args...)
 	return p.r.exec().Run(ctx, execx.Cmd{
 		Name:   "bash",
 		Args:   argv,
 		Dir:    p.r.Paths.Base,
-		Env:    bridgeEnv(p.r.Paths),
+		Env:    env,
 		Stdout: stdout,
 		Stderr: stderr,
 	})
@@ -160,11 +177,15 @@ func (p *bashProviderImpl) Output(ctx context.Context, configFile string) ([]byt
 // LOK8S_NONINTERACTIVE / the loaded HCLOUD_*/HROBOT_* creds ride the
 // inherited environment.
 func (r *Runner) bashProvision(ctx context.Context, domainName string) error {
-	err := r.exec().Run(ctx, execx.Cmd{
+	env, err := r.env()
+	if err != nil {
+		return err
+	}
+	err = r.exec().Run(ctx, execx.Cmd{
 		Name:   "bash",
 		Args:   []string{"-c", provisionScript, "lo-recover-provision", domainName},
 		Dir:    r.Paths.Base,
-		Env:    bridgeEnv(r.Paths),
+		Env:    env,
 		Stdout: r.out(),
 		Stderr: r.errOut(),
 	})

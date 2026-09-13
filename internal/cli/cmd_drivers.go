@@ -13,9 +13,12 @@ package cli
 // Dispatch: a name in the Go driver registry gets the Go driver
 // (provision/destroy/status/kubeconfig, positional <domain>, exactly the
 // bash main::driver grammar). A name that only exists as a bash driver
-// (.lok8s/drivers/<name>/main — e.g. kubehz until it ports) falls back to
-// the argsh implementation via Shim, argv verbatim. `--list` prints the
-// UNION of both worlds so nothing disappears mid-migration.
+// (drivers/<name>/main in the bash tree: the project's ejected tree or a
+// checkout — a driver of the project's own needs the tree beside it, `lo
+// assets eject bash`) falls back to the argsh implementation via Shim,
+// argv verbatim. `--list` prints the UNION of both worlds (the Go registry,
+// the project's .lok8s/drivers, the embedded tree) so nothing disappears
+// mid-migration.
 //
 // Note on help: the argsh :args intercepted -h/--help at the `drivers` level
 // (a `lo drivers lo status --help` printed the drivers usage, never the
@@ -25,6 +28,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -149,8 +153,12 @@ func newDriversCommand(paths *config.Paths, spec commandSpec, deps driversDeps) 
 				return ErrHandled
 			}
 			// A Go driver never reaches here (its subcommand resolves first);
-			// this is the bash-only fallback.
-			if fsutil.FileExists(filepath.Join(paths.Lok8s, "drivers", name, "main")) {
+			// this is the bash-only fallback, over the tree the shim runs.
+			tree, err := assets.BashTree(paths)
+			if err != nil {
+				return err
+			}
+			if fsutil.FileExists(filepath.Join(tree.Dir, "drivers", name, "main")) {
 				return deps.shim(os.Args[1:])
 			}
 			ui.ErrorTo(stderr, "Driver '%s' not found", name)
@@ -183,8 +191,9 @@ func driverOrigin(paths *config.Paths, deps driversDeps, name string) string {
 	return assets.OriginColLocalOnly
 }
 
-// driversList is the union of the Go registry and the bash driver
-// directories (bash: for dir in "${PATH_LOK8S}/drivers"/*/), sorted.
+// driversList is the union of the Go registry, the project's bash driver
+// directories (bash: for dir in "${PATH_LOK8S}/drivers"/*/) and the
+// embedded tree's, sorted.
 func driversList(paths *config.Paths, deps driversDeps) []string {
 	seen := map[string]bool{}
 	for _, n := range deps.names() {
@@ -196,6 +205,12 @@ func driversList(paths *config.Paths, deps driversDeps) []string {
 			continue
 		}
 		if info, err := os.Stat(filepath.Join(paths.Lok8s, "drivers", e.Name())); err == nil && info.IsDir() {
+			seen[e.Name()] = true
+		}
+	}
+	embedded, _ := fs.ReadDir(assets.FS(), "drivers")
+	for _, e := range embedded {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			seen[e.Name()] = true
 		}
 	}

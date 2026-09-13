@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
 )
@@ -56,25 +55,15 @@ func Update(p *config.Paths, rel string, force bool, out io.Writer) (UnitReport,
 		}
 	}
 	u, _ := UnitFor(r.Rel)
-	dir := localPath(p, u.Rel)
+	dir := unitDir(p, u)
 	written := 0
-	err = fs.WalkDir(FS(), u.Rel, func(fp string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		target := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(fp, u.Rel+"/")))
-		data, err := fs.ReadFile(FS(), fp)
-		if err != nil {
-			return err
-		}
+	err = walkUnit(u, func(fp, rel string, data []byte) error {
+		target := filepath.Join(dir, filepath.FromSlash(rel))
 		if cur, err := os.ReadFile(target); err == nil && string(cur) == string(data) {
 			return nil
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
 		written++
-		return os.WriteFile(target, data, 0o644)
+		return writeEmbedded(fp, target, data)
 	})
 	if err != nil {
 		return r, err

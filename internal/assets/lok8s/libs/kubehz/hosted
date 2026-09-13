@@ -1,0 +1,279 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz-hosted — kubehz hosted cluster provisioning
+# Handles creating/destroying clusters via the kubehz API for hosting: hosted mode.
+#
+# LIBRARY-ONLY: no main::* entry point and no dispatch guard — loaded via
+# libs/kubehz/main; not directly executable.
+
+import ^utils/verbose
+import ^utils/http
+
+# ── Hosted provisioning ──────────────────────────────────
+
+# Build the JSON payload for creating a hosted cluster via the kubehz API.
+# Usage: kubehz::build_cluster_payload <cluster_yaml>
+# Outputs: JSON string to stdout
+kubehz::build_cluster_payload() {
+  local cluster_yaml="${1}"
+  local domain kind provider region k8s_version cp_replicas hosting access
+  domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
+  # NOT domain::spec_driver: this is a wire field, not a driver lookup. The
+  # kubehz API receives the spec's kind in its ORIGINAL case ("KubeOne"), and
+  # lowercasing it here would change a cross-repo contract (issue #89).
+  kind=$(yq -r '.kind' "${cluster_yaml}")
+  provider=$(yq -r '.spec.provider // "hetzner"' "${cluster_yaml}")
+  region=$(yq -r '.spec.hcloud.region // .spec.aws.region // "fsn1"' "${cluster_yaml}")
+  k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+  cp_replicas=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
+  hosting=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
+  access=$(yq -r '.spec.kubehz.access // "none"' "${cluster_yaml}")
+
+  jq -n \
+    --arg domain "${domain}" \
+    --arg kind "${kind}" \
+    --arg provider "${provider}" \
+    --arg region "${region}" \
+    --arg kubernetesVersion "${k8s_version}" \
+    --argjson controlPlaneReplicas "${cp_replicas}" \
+    --arg hosting "${hosting}" \
+    --arg access "${access}" \
+    '{domain: $domain, kind: $kind, provider: $provider, region: $region,
+      kubernetesVersion: $kubernetesVersion, controlPlaneReplicas: $controlPlaneReplicas,
+      hosting: $hosting, access: $access}'
+}
+
+# Wait for a hosted cluster to reach Running state.
+# Polls the kubehz API at 10-second intervals up to a timeout.
+# Usage: kubehz::wait_for_cluster <api_url> <cluster_id> [timeout_seconds]
+kubehz::wait_for_cluster() {
+  local api_url="${1}" cluster_id="${2}" timeout="${3:-600}"
+  local elapsed=0 status_val
+
+  debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
+
+  while (( elapsed < timeout )); do
+    # GET /api/clusters/{id} is an enveloped UI route ({ok,data,traceId}), so the
+    # status is at .data.status; the // .status fallback tolerates a bare body.
+    status_val=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
+      | jq -r '.data.status // .status // "Unknown"') || status_val="Unknown"
+
+    case "${status_val}" in
+      Running|ready|Ready)
+        debug "Hosted cluster ${cluster_id} is ready"
+        return 0
+        ;;
+      Failed|Error)
+        error "Hosted cluster ${cluster_id} failed: status=${status_val}"
+        return 1
+        ;;
+    esac
+
+    debug "Cluster ${cluster_id} status: ${status_val} (${elapsed}s / ${timeout}s)"
+    sleep 10
+    elapsed=$(( elapsed + 10 ))
+  done
+
+  error "Timed out waiting for hosted cluster ${cluster_id} after ${timeout}s"
+  return 1
+}
+
+# Render a friendly, human-readable message for a capacity rejection (the
+# kubehz-api "max mechanism": POST /api/clusters answers 503 AT_CAPACITY when the
+# hosted control-plane pool for the requested plan is full). The api error body
+# carries a structured `data.detail` { tier, used, limit, retryAfter } — surface
+# it plainly so the operator knows WHY and WHAT to do, not a bare "request failed".
+# The api origin for the "live availability" pointer comes from the module-global
+# LOK8S_KUBEHZ_API_URL (set by kubehz::read_config), NOT the caller's locals.
+# Usage: kubehz::render_capacity_rejection <error_body_json>
+kubehz::render_capacity_rejection() {
+  local body="${1}"
+  local tier used limit retry
+  tier=$(echo "${body}" | jq -r '.data.detail.tier // .detail.tier // "this plan"' 2>/dev/null) || tier="this plan"
+  used=$(echo "${body}" | jq -r '.data.detail.used // .detail.used // empty' 2>/dev/null) || used=""
+  limit=$(echo "${body}" | jq -r '.data.detail.limit // .detail.limit // empty' 2>/dev/null) || limit=""
+  retry=$(echo "${body}" | jq -r '.data.detail.retryAfter // .detail.retryAfter // empty' 2>/dev/null) || retry=""
+
+  local usage=""
+  [[ -n "${used}" && -n "${limit}" ]] && usage=" (currently ${used}/${limit})"
+
+  # Humanize the raw retryAfter seconds into a friendlier "~N min" / "~Ns" so
+  # the operator doesn't have to divide by 60 in their head. Non-numeric / empty
+  # -> no hint line at all.
+  local retry_hint=""
+  if [[ "${retry}" =~ ^[0-9]+$ ]]; then
+    if (( retry >= 60 )); then
+      retry_hint="~$(( (retry + 30) / 60 )) min"
+    else
+      retry_hint="~${retry}s"
+    fi
+  fi
+
+  error "kubehz: the platform is at capacity for the '${tier}' plan right now${usage}."
+  echo "  The hosted control-plane pool for this plan is full. You can:" >&2
+  echo "    • retry later — capacity frees as clusters are torn down" >&2
+  [[ -n "${retry_hint}" ]] && echo "    • suggested wait: ${retry_hint}" >&2
+  # NOTE: the tier is chosen server-side (kubehz-api), not via a lok8s spec field
+  # — there is no spec.kubehz.plan. Point at the real levers instead: check live
+  # per-plan availability, or run self-hosted (spec.kubehz.hosting: self) now.
+  echo "    • check live per-plan availability and retry when a slot opens:" >&2
+  echo "        ${LOK8S_KUBEHZ_API_URL}/api/capacity" >&2
+  echo "    • run a self-hosted cluster meanwhile (spec.kubehz.hosting: self)" >&2
+  echo "    • still stuck? contact kubehz support with the tier + time above" >&2
+}
+
+# Provision a cluster via the kubehz hosted API.
+# Creates the cluster, waits for it, and downloads the kubeconfig.
+# Usage: kubehz::provision_hosted <domain> <cluster_yaml>
+kubehz::provision_hosted() {
+  local domain="${1}" cluster_yaml="${2}"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  local payload
+  payload=$(kubehz::build_cluster_payload "${cluster_yaml}")
+
+  debug "Creating hosted cluster for ${domain}"
+
+  # Capture BOTH the response body and the HTTP status. We deliberately drop
+  # curl's -f (fail-silently-on-HTTP-error) here so a 503 AT_CAPACITY body is
+  # available to render — the capacity envelope is the whole point. The status is
+  # appended on its own trailing line via -w and split off.
+  local raw response http_code
+  raw=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    -d "${payload}") || {
+    error "Failed to create hosted cluster via kubehz API (network error)"
+    return 1
+  }
+  http_code="${raw##*$'\n'}"
+  response="${raw%$'\n'*}"
+
+  # Capacity rejection (the "max mechanism"): a structured 503 AT_CAPACITY.
+  if [[ "${http_code}" == "503" ]] \
+    && echo "${response}" | jq -e '(.data.code // .code) == "AT_CAPACITY"' >/dev/null 2>&1; then
+    kubehz::render_capacity_rejection "${response}"
+    return 1
+  fi
+
+  # Any other non-2xx: surface the api's own message + help when it carries them
+  # (the {code,message,help} envelope — help is the actionable half).
+  if [[ "${http_code}" != 2* ]]; then
+    local msg help
+    msg=$(echo "${response}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
+    help=$(echo "${response}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
+    error "Failed to create hosted cluster via kubehz API (HTTP ${http_code})${msg:+: ${msg}}"
+    [[ -n "${help}" ]] && echo "  ${help}" >&2
+    return 1
+  fi
+
+  local cluster_id
+  cluster_id=$(echo "${response}" | jq -r '.data.id // .id')
+
+  if [[ -z "${cluster_id}" || "${cluster_id}" == "null" ]]; then
+    error "kubehz API did not return a cluster ID"
+    return 1
+  fi
+
+  debug "Hosted cluster created: ${cluster_id}"
+
+  # Gate explicitly — this runs in the errexit-suppressed provision tree, so
+  # an ungated wait lets a Failed hosted cluster "succeed" into the
+  # kubeconfig download below.
+  kubehz::wait_for_cluster "${api_url}" "${cluster_id}" || return 1
+
+  # Download kubeconfig
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  mkdir -p "$(dirname "${kubeconfig_path}")"
+  curl -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    > "${kubeconfig_path}" || {
+    error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
+    return 1
+  }
+
+  debug "Hosted cluster ${domain} ready, kubeconfig at ${kubeconfig_path}"
+
+  # provision::dispatch runs the shared bootstrap::apply AFTER this driver
+  # returns, reading .kubeconfig/<metadata.name>.yaml — mirror the download
+  # there when the spec's metadata.name differs from the domain, or the
+  # dispatch tail fails on a missing kubeconfig right after a successful
+  # hosted provision. (bootstrap::apply itself owns the hosted gates:
+  # OIDC-kubeconfig reachability, Ready-worker check, platform-owned skips.)
+  chmod 600 "${kubeconfig_path}" || true
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+  if [[ -n "${cluster_name}" && "${cluster_name}" != "null" && "${cluster_name}" != "${domain}" ]]; then
+    # Guarded: a pathological metadata.name must not fail a provision that
+    # already succeeded — warn and leave the domain-keyed file as the source.
+    if cp "${kubeconfig_path}" "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" 2>/dev/null; then
+      chmod 600 "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" || true
+    else
+      echo "[kubehz] warning: could not mirror the kubeconfig to .kubeconfig/${cluster_name}.yaml — the bootstrap step will report it missing" >&2
+    fi
+  fi
+}
+
+# Destroy a hosted cluster via the kubehz API.
+# Resolves the cluster id from the tenant registry, then sends DELETE.
+# Usage: kubehz::destroy_hosted <domain> <cluster_yaml>
+kubehz::destroy_hosted() {
+  local domain="${1}" cluster_yaml="${2}"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  # Same HTTPS guard as every other bearer-carrying kubehz call: a
+  # misconfigured http:// apiUrl must not leak KUBEHZ_TOKEN in clear.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+
+  # Resolve through kubehz::resolve_cluster_id (client-side domain filter,
+  # oldest-first). The old inline lookup GETed /api/clusters?domain=… — a
+  # server filter the api does not guarantee — and took .data[0] from the
+  # newest-first list: with more than one cluster on the tenant it deleted
+  # the NEWEST cluster, not the named domain's. resolve rc 2 = the registry
+  # answered without a row for the domain (already removed — destroy stays
+  # idempotent); rc 1 = the lookup itself failed, and a delete on a guessed
+  # id is the wrong-cluster bug again — refuse and delete nothing. Both
+  # halves of issue #65 stay closed: a lookup failure is REPORTED, never
+  # rendered as "nothing to destroy" while the cluster runs and bills.
+  local cluster_id="" resolve_rc=0
+  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
+  if (( resolve_rc == 1 )); then
+    error "kubehz: cannot read the cluster registry at ${api_url} — nothing was deleted for ${domain} and the local kubeconfigs are kept. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
+    return 1
+  fi
+
+  if (( resolve_rc == 2 )); then
+    echo "kubehz: no hosted cluster is registered for ${domain} — nothing to destroy on the platform."
+  else
+    # Status + body captured (the re-enroll idiom): a refused delete must
+    # surface with the api's own message, not vanish into `curl -f`.
+    local response http_code
+    response=$(curl -sSL -w $'\n%{http_code}' -X DELETE "${api_url}/api/clusters/${cluster_id}" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+      error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the hosted cluster can still exist and bill. Retry when ${api_url} is reachable."
+      return 1
+    }
+    http_code="${response##*$'\n'}"
+    if [[ "${http_code}" != 2* ]]; then
+      local msg
+      msg=$(jq -r '.data.message // .message // empty' <<<"${response%$'\n'*}" 2>/dev/null) || msg=""
+      error "kubehz: delete refused for ${domain} (${cluster_id}) — HTTP ${http_code}${msg:+: ${msg}}. The hosted cluster can still exist and bill; check the dashboard."
+      return 1
+    fi
+    debug "Hosted cluster ${domain} (${cluster_id}) destroyed"
+  fi
+
+  # Clean up local kubeconfigs — the domain-keyed download AND the
+  # metadata.name mirror provision_hosted made for the dispatch tail. A
+  # stale mirror is not cosmetic: libs/build PREFERS <metadata.name>.yaml
+  # when present, so after destroy+reprovision it would silently feed
+  # builds with the dead cluster's credentials.
+  rm -f "${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local _mirror_name
+  _mirror_name=$(yq -r '.metadata.name // ""' "${cluster_yaml}" 2>/dev/null) || _mirror_name=""
+  if [[ -n "${_mirror_name}" && "${_mirror_name}" != "null" && "${_mirror_name}" != "${domain}" ]]; then
+    rm -f "${PATH_BASE}/.kubeconfig/${_mirror_name}.yaml"
+  fi
+}

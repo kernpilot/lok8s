@@ -1,0 +1,57 @@
+# shellcheck shell=bash
+# argsh custom type validators for lok8s
+
+import ^utils/domain
+
+# to::domain -- validate a lok8s domain name at parse time.
+# Called by argsh when user provides a domain positional/flag value.
+# NOT called on defaults (argsh skips type validation for pre-set locals) —
+# which is why `lo` main resolves the DEFAULT itself, through the same
+# domain::resolve this validator uses (one precedence, two entry points).
+#
+# Validates:
+#   1. Character format (alphanumeric, dots, hyphens)
+#   2. Directory exists under .lok8s/
+#   3. Contains cluster.lok8s.yaml or deploy.lok8s.yaml
+#
+# Usage in args array: 'domain:~domain' 'Description'
+to::domain() {
+  local value="${1}"
+  # Same fallback chain as utils/domain.sh — a mismatch would make the
+  # validator and the resolver consult different directories.
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+
+  # Empty explicit value → the canonical default chain (env → .active).
+  value="$(domain::resolve "${value}")"
+  if [[ -z "${value}" ]]; then
+    echo "no domain specified" >&2
+    return 1
+  fi
+
+  # Character validation (prevent path traversal / injection)
+  if [[ ! "${value}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    echo "invalid domain name: ${value}" >&2
+    return 1
+  fi
+
+  local base="${path_clusters}/${value}"
+  if [[ ! -d "${base}" ]]; then
+    echo "domain not found: clusters/${value}/" >&2
+    echo "Available domains:" >&2
+    local d name
+    for d in "${path_clusters}"/*/; do
+      [[ -d "${d}" ]] || continue
+      name=$(basename "${d}")
+      [[ "${name}" == .* ]] && continue
+      echo "  ${name}" >&2
+    done
+    return 1
+  fi
+
+  if [[ ! -f "${base}/cluster.lok8s.yaml" ]] && [[ ! -f "${base}/deploy.lok8s.yaml" ]]; then
+    echo "domain '${value}' has no cluster.lok8s.yaml or deploy.lok8s.yaml" >&2
+    return 1
+  fi
+
+  echo "${value}"
+}

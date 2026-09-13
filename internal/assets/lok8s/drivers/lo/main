@@ -1,0 +1,293 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# Lo driver — local/CI clusters via kind
+# Implements: driver::provision, driver::export, driver::destroy, driver::status, driver::kubeconfig
+# Also exposes: lo drivers lo {provision,destroy,status,kubeconfig}
+
+_LO_DIR="${BASH_SOURCE[0]%/*}"
+
+# shellcheck source=../../utils/ip.sh
+source "${PATH_LOK8S}/utils/ip.sh"
+# shellcheck source=../../utils/oidc.sh
+source "${PATH_LOK8S}/utils/oidc.sh"
+# kapply (collapsing progress + heal) for the cluster-service phases.
+# shellcheck source=../../utils/kapply.sh
+source "${PATH_LOK8S}/utils/kapply.sh"
+source "${_LO_DIR}/utils/defaults.sh"
+source "${_LO_DIR}/utils/config-registry.sh"
+source "${_LO_DIR}/utils/config.sh"
+source "${_LO_DIR}/utils/render.sh"
+source "${_LO_DIR}/utils/network.sh"
+source "${_LO_DIR}/utils/registries.sh"
+source "${_LO_DIR}/utils/services.sh"
+source "${_LO_DIR}/utils/tunnel.sh"
+source "${_LO_DIR}/utils/expose.sh"
+source "${_LO_DIR}/utils/remote.sh"
+
+import ^utils/verbose
+
+# ── CLI dispatch ──────────────────────────────────────────
+
+main::driver() {
+  local -a usage=(
+    'provision|p@destructive'  'Provision a cluster'
+    'destroy|d@destructive'    'Destroy a cluster'
+    'status|s@readonly'        'Check cluster status'
+    'kubeconfig|k'             'Extract kubeconfig (writes .kubeconfig/, may open an SSH tunnel)'
+  )
+  :usage "Lo driver" "${@}"
+  "${usage[@]}"
+}
+
+driver::provision() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Provision a Lo cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local runtime
+  runtime=$(yq -r '.spec.runtime // "kind"' "${cluster_yaml}")
+
+  case "${runtime}" in
+    kind)
+      local cluster_name k8s_version
+      cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+      k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+
+      # Remote: provision VM, wait for SSH/Docker, set DOCKER_HOST
+      if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::provision &>/dev/null; then
+        # || return: errexit is suppressed here (this tree runs under
+        # provision's `driver::provision || rc=$?`), so an unreachable remote
+        # (SSH/Docker never came up) would otherwise FALL THROUGH into the
+        # local kind path below and report a provisioned cluster — the wrong
+        # cluster, on the wrong machine. (A provider that yields no nodes
+        # returns 0 with an explicit "running kind locally" — that intentional
+        # fallback is unaffected.)
+        lo::provision_remote "${domain}" "${cluster_yaml}" || {
+          error "remote provision via provider '${PROVIDER_NAME}' failed — refusing to fall back to a local kind cluster"
+          return 1
+        }
+      fi
+
+      # Remote CI mode: delegate everything to the VM, skip local post-provision
+      if [[ "${LOK8S_REMOTE:-}" == "1" ]]; then
+        # || return: this whole tree runs under provision's `driver::provision
+        # || rc=$?`, which disables errexit — without the explicit return, a
+        # failed config read (e.g. rejected sync.dest) would fall through into
+        # lo::remote_ci and ssh/rsync with the bad value anyway.
+        lo::read_remote_config "${cluster_yaml}" || return 1
+        if [[ "${LOK8S_REMOTE_MODE}" == "ci" ]] && [[ -n "${LOK8S_REMOTE_IP:-}" ]]; then
+          # || return 1: 100 is the "remote CI handled the FULL lifecycle"
+          # success sentinel (libs/provision maps it to return 0). A failed
+          # lo::remote_ci (ssh/rsync/remote provision) must surface as a
+          # failure, not be relabeled as that sentinel.
+          lo::remote_ci "${domain}" "${cluster_yaml}" || return 1
+          return 100
+        fi
+      fi
+
+      # Read all config from cluster spec
+      lo::read_config "${cluster_yaml}" || return 1
+      # || return: lo::validate_ips prints "N IP validation error(s). Aborting."
+      # and returns 1 — but errexit is suppressed here (this tree runs under
+      # provision's `driver::provision || rc=$?`, as the comment above notes), so
+      # without this the run continued past its own abort message and built the
+      # networks, registry TLS and containerd config for a REJECTED config.
+      lo::validate_ips "${LOK8S_NETWORK_SUBNET}" "${LOK8S_LB_POOL:-}" || return 1
+
+      local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK}"
+
+      # Docker networks.
+      # || return throughout this branch: errexit is suppressed here
+      # (libs/provision:341 runs `driver::provision || provision_rc=$?`), and
+      # the branch used to END on lo::registries_tls_nudge — an advisory check
+      # about the host trust store that returns 0 on every path. So its status
+      # became the function's, and every failure below was reported as a
+      # provisioned cluster.
+      lo::network || return 1
+      if registry::is_shared; then
+        lo::registry_network || return 1
+      fi
+
+      # Registry TLS cert — mint it (via the Secret plugin) before the registry
+      # containers start (they mount it) and before certs.d is written (it
+      # references the dev CA). No-op unless spec.registries.tls.
+      lo::registries_tls_cert || return 1
+
+      # Registries + containerd config (must exist before kind create).
+      # kapply::run collapses the per-registry "registry/<name> <verb>" lines
+      # into the same named progress block the cluster-service phases get.
+      kapply::run registries lo::registries "${domain}" "${cluster_yaml}" || return 1
+      lo::write_certs_d || return 1
+
+      # apiserver StructuredAuthenticationConfiguration (spec.oidc) — write the
+      # host file before `kind create` so node 0's extraMount has a target. No-op
+      # unless oidc::enabled (no spec.oidc ⇒ kind config byte-identical to today).
+      lo::write_oidc_auth_config "${domain}" || return 1
+
+      # Kind cluster
+      local rendered_config
+      # Guarded AND checked for emptiness: this is issue #91's own shape — an
+      # unguarded assignment whose failure leaves the variable empty, and the
+      # empty value then flows into `kind create --config <(echo "")`.
+      rendered_config=$(lo::render_kind_config "${cluster_name}" "${k8s_version}" "${network}" "${cluster_yaml}") || return 1
+      [[ -n "${rendered_config}" ]] || {
+        error "the kind config for ${cluster_name} rendered EMPTY — refusing to create a cluster from it"
+        return 1
+      }
+      export KIND_EXPERIMENTAL_DOCKER_NETWORK="${network}"
+      if ! kind get clusters 2>/dev/null | grep -q "^${cluster_name}$"; then
+        kind create cluster --name "${cluster_name}" --config <(echo "${rendered_config}") || return 1
+      fi
+
+      if registry::is_shared; then
+        lo::connect_nodes_to_registry_network "${cluster_name}" || return 1
+      fi
+
+      # Cluster services — each wrapped in a named, collapsing progress phase.
+      # (called for its side effect — writing the kubeconfig file; its echoed
+      # path is a return value for driver::kubeconfig, so discard it here.)
+      local node_kubeconfig
+      node_kubeconfig=$(_lo_extract_kubeconfig "${domain}") || return 1
+
+      # Repair any node kubelet pinned to the wrong docker network's address.
+      # The registry NIC (attached above) is the only thing that dual-homes a
+      # node, so single-network clusters cannot drift — but gate on NIC
+      # MEMBERSHIP, not just the spec: after the shared→per-project default
+      # flip, an already-drifted cluster whose spec omits shared.enabled reads
+      # "not shared" while its nodes still carry the registry NIC. The heal
+      # must run AFTER the attach (it is what perturbs the address resolution)
+      # and after the kubeconfig exists (the CNI nudge + latch-up check need
+      # it). No-op when every node already agrees. Advisory: a node we cannot
+      # reach into is not a reason to fail the provision.
+      if registry::is_shared || lo::nodes_on_registry_network "${cluster_name}"; then
+        lo::heal_node_ips "${cluster_name}" "${node_kubeconfig}" || true
+      fi
+
+      kapply::run registries lo::apply_local_registry_hosting "${domain}" || return 1
+      kapply::run registries lo::registry_configmap "${domain}" "${cluster_yaml}" || return 1
+      kapply::run coredns lo::coredns "${domain}" || return 1
+
+      if [[ "${LOK8S_REMOTE_EXPOSE:-false}" == "true" ]]; then
+        lo::expose "${cluster_name}" "${cluster_yaml}" || return 1
+      fi
+
+      # If registry TLS is on (default) but the dev CA isn't trusted yet, nudge
+      # the user to `lo trust` — host `docker push` validates against it.
+      # Advisory only — deliberately NOT guarded: not trusting the dev CA is a
+      # host-setup nag, not a failed provision. The explicit `return 0` is what
+      # stops its status from becoming this function's verdict.
+      lo::registries_tls_nudge
+      return 0
+      ;;
+    *)
+      echo "error: unsupported Lo runtime: ${runtime}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# driver::export — spec-derived env consumed by spec.bootstrap addons (LOK8S_SPEC_*).
+# Idempotent (safe to re-run; lo::read_config below also (re)writes the derived
+# registry map — benign). Called by provision::dispatch on BOTH the full
+# provision and `--bootstrap` paths, so a re-applied bootstrap graph renders with
+# the same env a fresh provision would set.
+driver::export() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Lo driver export" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  # read_config first: export_spec_envs derives LOK8S_SPEC_LOADBALANCER_POOL from
+  # $LOK8S_LB_POOL (set by lo::read_lb_config), so on --bootstrap (where
+  # driver::provision — which normally calls read_config — is skipped) the metallb
+  # pool would otherwise render empty.
+  lo::read_config "${cluster_yaml}"
+  lo::export_spec_envs "${cluster_yaml}"
+}
+
+driver::destroy() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Destroy a Lo cluster" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+
+  # Remote mode: reconnect DOCKER_HOST
+  if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::output &>/dev/null; then
+    local provider_output remote_ip remote_user
+    provider_output=$(provider::output "${PROVIDER_CONFIG_FILE:-}" 2>/dev/null) || true
+    remote_ip=$(echo "${provider_output}" | jq -r '.nodes[0].public_ip // empty' 2>/dev/null || echo "")
+    remote_user=$(echo "${provider_output}" | jq -r '.nodes[0].ssh_user // "root"' 2>/dev/null || echo "")
+    if [[ -n "${remote_ip}" ]]; then
+      export DOCKER_HOST="ssh://${remote_user}@${remote_ip}"
+    fi
+  fi
+
+  # Read config so we know which containers to clean up
+  lo::read_network_config "${cluster_yaml}" 2>/dev/null || true
+
+  kind delete cluster --name "${cluster_name}" 2>/dev/null || true
+  lo::cleanup_registries "${cluster_name}"
+  docker rm -f "${cluster_name}-proxy" 2>/dev/null || true
+
+  # Destroy the cloud VM after the cluster is gone
+  if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::destroy &>/dev/null; then
+    local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
+    unset DOCKER_HOST
+    provider::destroy "${PROVIDER_CONFIG_FILE:-}" "${work_dir}"
+  fi
+}
+
+driver::status() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Check cluster status" "${@}"
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
+
+  if kind get clusters 2>/dev/null | grep -q "^${cluster_name}$"; then
+    echo "Running"
+  else
+    echo "NotFound"
+  fi
+}
+
+# Internal kubeconfig extraction — called by driver::provision and driver::kubeconfig
+_lo_extract_kubeconfig() {
+  local domain="${1}"
+  local cluster_name
+  cluster_name=$(yq -r '.metadata.name' "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  kind get kubeconfig --name "${cluster_name}" > "${kubeconfig_path}"
+
+  if [[ -n "${LOK8S_REMOTE_IP:-}" ]]; then
+    lo::kubeconfig_tunnel "${kubeconfig_path}" "${LOK8S_REMOTE_USER}" "${LOK8S_REMOTE_IP}"
+  fi
+
+  echo "${kubeconfig_path}"
+}
+
+driver::kubeconfig() {
+  local domain
+  local -a args=(
+    'domain'  'Domain to use'
+  )
+  :args "Extract kubeconfig" "${@}"
+  _lo_extract_kubeconfig "${domain}"
+}

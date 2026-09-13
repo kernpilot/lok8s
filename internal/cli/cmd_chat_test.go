@@ -23,6 +23,9 @@ func chatProject(t *testing.T) *config.Paths {
 	os.Chmod(filepath.Join(p.Bin, "lochat"), 0o755)
 	testutil.WriteFile(t, filepath.Join(p.Bin, "argsh.so"), "")
 	testutil.WriteFile(t, filepath.Join(p.Lok8s, "chat", "defaults.json"), "{}\n")
+	// The project holds the bash tree: --lo is its entrypoint (without one
+	// it would be the cache copy the binary extracts).
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "lo"), "#!/usr/bin/env bash\n")
 	return p
 }
 
