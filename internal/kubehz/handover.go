@@ -139,13 +139,31 @@ func (c *Context) extractBundle(bundle, dir string) error {
 			}
 			if _, err := io.Copy(out, tr); err != nil {
 				_ = out.Close()
-				return c.notArchive(bundle)
+				return c.extractCopyError(bundle, target, err)
 			}
 			return out.Close()
+		case tar.TypeSymlink, tar.TypeLink:
+			// The bash `tar -xzf` extracted links. A link in a PKI bundle
+			// points nowhere useful and can point outside the private dir,
+			// so the binary skips it and says so. Deliberate deviation
+			// (catalogue D26).
+			c.debugf("handover: skipping link entry %s in %s (links are not extracted)", hdr.Name, bundle)
 		}
 		return nil
 	}
 	return c.walkBundle(bundle, extract)
+}
+
+// extractCopyError classifies a failed io.Copy of one entry: the file's
+// own write error (*fs.PathError: disk full, a closed file system) names
+// the write; anything else came from the gzip/tar reader, so the archive
+// is the unreadable one.
+func (c *Context) extractCopyError(bundle, target string, err error) error {
+	if _, isWrite := errors.AsType[*fs.PathError](err); isWrite {
+		c.errorf("handover: cannot write %s from %s: %v", target, bundle, err)
+		return ErrHandled
+	}
+	return c.notArchive(bundle)
 }
 
 // walkBundle opens the .tar.gz and calls visit for every entry, in order.
@@ -746,6 +764,12 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 // HandoverPreseed ports handover::preseed — the thin kubeone variant: place
 // the six PKI files on node0 over SSH before `kubeone apply`.
 func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
+	// ssh splits `-o UserKnownHostsFile=<path>` on whitespace: a path with
+	// a space would leave the rest of it as a second, unknown option.
+	if strings.ContainsAny(o.KnownHosts, " \t\r\n") {
+		c.errorf("handover: --known-hosts path must not contain whitespace: %q", o.KnownHosts)
+		return ErrHandled
+	}
 	user := o.User
 	if user == "" {
 		user = "root"
