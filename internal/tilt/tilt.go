@@ -230,7 +230,7 @@ func (c *Context) Up(ctx context.Context) error {
 // startDetached is the injectable spawn (see Context.StartDetached). A raw
 // exec.Command on purpose, not a Runner child: Tilt must outlive this
 // command (the bash contract is `nohup tilt up &`), and a Runner child is
-// waited on and cancelled with the command context (catalogue D24).
+// waited on and cancelled with the command context (catalogue D25).
 func (c *Context) startDetached(port string) (int, error) {
 	if c.StartDetached != nil {
 		return c.StartDetached(port)

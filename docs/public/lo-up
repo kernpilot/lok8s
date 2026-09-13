@@ -7,7 +7,7 @@
 # — never `curl | sh`). Prefer the same for this file: download it, read it,
 # then run it. It prints this notice on every run.
 #   curl -fsSL https://get.lok8s.io | sh
-# Built from .lok8s/legacy/install/lo-up via .lok8s/legacy/install/build
+# Built from .archive/legacy/install/lo-up via .archive/legacy/install/build
 # (argsh minify). Do not edit by hand.
 #
 # POSIX preamble: the bundle below is bash. Re-exec it under bash from a real

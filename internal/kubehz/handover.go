@@ -146,7 +146,7 @@ func (c *Context) extractBundle(bundle, dir string) error {
 			// The bash `tar -xzf` extracted links. A link in a PKI bundle
 			// points nowhere useful and can point outside the private dir,
 			// so the binary skips it and says so. Deliberate deviation
-			// (catalogue D26).
+			// (catalogue D27).
 			c.debugf("handover: skipping link entry %s in %s (links are not extracted)", hdr.Name, bundle)
 		}
 		return nil

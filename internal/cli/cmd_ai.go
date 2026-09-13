@@ -33,7 +33,7 @@ func init() { registerPorted("ai", newAiCommand) }
 // swap it to capture the argv. A raw exec.Command on purpose, not a
 // Runner child: this is a foreground chat on the terminal, and the
 // terminal's Ctrl-C reaches it directly, the way it reached the bash
-// child (catalogue D24).
+// child (catalogue D25).
 var runProcess = func(bin string, argv, env []string) int {
 	c := exec.Command(bin, argv[1:]...)
 	c.Env = env
