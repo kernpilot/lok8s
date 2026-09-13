@@ -151,6 +151,9 @@ type ProjectOptions struct {
 	BVersion string
 	// Force overwrites existing files (.gitignore is still only appended to).
 	Force bool
+	// Domain and Driver write the first cluster spec,
+	// clusters/<Domain>/cluster.lok8s.yaml (WriteClusterSpec); "" = none.
+	Domain, Driver string
 }
 
 // Project scaffolds a project into o.Dir (default: base): clusters/,
@@ -195,8 +198,13 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	if err := appendGitignore(filepath.Join(dir, ".gitignore"), out); err != nil {
 		return err
 	}
-	if err := writeEnvFile(dir, env, EnvSpec{Project: name, BinRel: ".bin", BVersion: o.BVersion}, o.Force, out); err != nil {
+	if err := EnvFile(dir, env, name, o.BVersion, o.Force, out); err != nil {
 		return err
+	}
+	if o.Domain != "" {
+		if err := WriteClusterSpec(clusters, o.Domain, driverOr(o.Driver), o.Force, out, stderr); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(out, "Done. Next:")
 	fmt.Fprintf(out, "  cd %s && lo toolchain install   # .bin/b.yaml, b and the pinned toolchain into .bin/ (network)\n", dir)
@@ -206,9 +214,29 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	case "direnv":
 		fmt.Fprintln(out, "  direnv allow            # .bin lands on PATH")
 	}
-	fmt.Fprintln(out, "  lo use <domain>         # after adding clusters/<domain>/cluster.lok8s.yaml")
+	if o.Domain != "" {
+		fmt.Fprintf(out, "  lo use %s   # then lo up\n", o.Domain)
+	} else {
+		fmt.Fprintln(out, "  lo use <domain>         # after adding clusters/<domain>/cluster.lok8s.yaml")
+	}
 	fmt.Fprintln(out, "  lo assets eject         # optional: pin the referenced framework assets now")
 	return nil
+}
+
+// driverOr defaults the --driver value to lo.
+func driverOr(d string) string {
+	if d == "" {
+		return "lo"
+	}
+	return d
+}
+
+// EnvFile writes the selected environment file for project name into dir
+// (writeEnvFile with the EnvSpec `lo init project` renders): the one
+// function behind `lo init project --env` and the init wizard's
+// environment-file step.
+func EnvFile(dir, env, name, bVersion string, force bool, out io.Writer) error {
+	return writeEnvFile(dir, env, EnvSpec{Project: name, BinRel: ".bin", BVersion: bVersion}, force, out)
 }
 
 // WriteBYAML places content at <bin>/b.yaml unless it exists — never

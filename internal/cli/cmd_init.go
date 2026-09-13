@@ -8,6 +8,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -76,10 +77,10 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	// Go-only (no twin in .lok8s/libs/init): the eject model's project
 	// scaffold — files only. No .lok8s/ tree (assets are ejected on first
 	// use), no network (the toolchain is `lo toolchain install`).
-	var projectPath, projectEnv string
+	var projectPath, projectEnv, projectDomain, projectDriver string
 	project := &cobra.Command{
 		Use:          "project [name]",
-		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, one env file) — files only, no network",
+		Short:        "Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, one env file, optionally the first cluster spec) — files only, no network",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -102,11 +103,14 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			return scaffoldRun(scaffold.Project(cwd, scaffold.ProjectOptions{
 				Dir: projectPath, Name: name, Env: projectEnv, Force: force,
 				BVersion: toolchain.BRelease.Version,
+				Domain:   projectDomain, Driver: projectDriver,
 			}, cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
 	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the working directory)")
 	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file to scaffold: mise (mise.toml), direnv (.envrc) or none — PATH only, no PATH_* pins")
+	project.Flags().StringVar(&projectDomain, "cluster", "", "Also write the first cluster spec, clusters/<domain>/cluster.lok8s.yaml, for this domain")
+	project.Flags().StringVar(&projectDriver, "driver", "lo", "Driver of the --cluster spec: "+strings.Join(scaffold.DriverNames(), ", "))
 
 	// `lo init toolchain` is the hidden alias of `lo toolchain install`
 	// for one release (WP9): same flags, same run, a deprecation hint on
