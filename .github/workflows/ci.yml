@@ -314,8 +314,9 @@ jobs:
       matrix:
         # Which `lo` orchestrates the run. `go`: bin/lo, the canonical
         # implementation — this leg is its only real-cluster proof in CI.
-        # `bash`: the same binary with LO_IMPL=bash, which execs the frozen
-        # argsh tree (.lok8s/lo) with argv untouched, so the reference
+        # `bash`: the same binary, routed to the frozen argsh tree by the
+        # fixture's lok8s.yaml (spec.implementation.default: bash), which
+        # execs <fixture>/.lok8s/lo with argv untouched, so the reference
         # keeps its own proof and the shim is exercised on the way. Before
         # the matrix existed the job put .lok8s first on PATH and never
         # built the binary: it proved the frozen tree only.
@@ -332,8 +333,25 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build lo (the binary under test; LO_IMPL=bash routes through it too)
+      - name: Build lo (the binary under test; the bash leg routes through it too)
         run: make build
+
+      - name: Select the implementation (lok8s.yaml spec.implementation)
+        # The switch is the fixture's project file, never an environment
+        # variable (the binary reads none for it). `bash` needs the tree
+        # INSIDE the project: a routing never targets a checkout elsewhere
+        # or the binary's cache extract, so the repo's .lok8s is copied in.
+        env:
+          FIXTURE: single-local-build
+          IMPLEMENTATION: ${{ matrix.lo_impl }}
+        run: |
+          set -euo pipefail
+          BASE="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE}"
+          if [ "${IMPLEMENTATION}" = bash ]; then
+            cp -R "${GITHUB_WORKSPACE}/.lok8s" "${BASE}/.lok8s"
+          fi
+          printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: e2e\nspec:\n  implementation:\n    default: %s\n' "${IMPLEMENTATION}" > "${BASE}/lok8s.yaml"
+          cat "${BASE}/lok8s.yaml"
 
       - name: Trust the plain-HTTP dev registries (10.125.0.0/16)
         # `lo up` stands up plain-HTTP registry containers on the project
@@ -403,18 +421,21 @@ jobs:
           # so a hung kind-create / cilium-wait fails in minutes, not at the
           # job's 18min ceiling.
           LOK8S_UP_TIMEOUT: 720
-          # Only the value `bash` means anything to the binary (cmd/lo/main.go):
-          # it execs the frozen tree. Anything else runs the Go implementation.
-          LO_IMPL: ${{ matrix.lo_impl }}
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}"
           BASE="${ROOT}/tests/e2e/${FIXTURE}"
 
           # Replicate the e2e helper env (tests/e2e/lib/helpers.bash :: e2e::init):
-          # the fixture dir is PATH_BASE; framework + toolchain stay at the repo root.
+          # the fixture dir is PATH_BASE; the toolchain stays at the repo root.
+          # The framework tree is the fixture's own copy on the bash leg (the
+          # routed tree, see the select step) and the repo's on the go leg.
           export PATH_BASE="${BASE}"
-          export PATH_LOK8S="${ROOT}/.lok8s"
+          if [ -d "${BASE}/.lok8s" ]; then
+            export PATH_LOK8S="${BASE}/.lok8s"
+          else
+            export PATH_LOK8S="${ROOT}/.lok8s"
+          fi
           export PATH_SCRIPTS="${PATH_LOK8S}"
           export PATH_BIN="${ROOT}/.bin"
           export PATH_CLUSTERS="${BASE}/clusters"
@@ -431,7 +452,7 @@ jobs:
           # Expose lo + the b toolchain to Tilt's local()/docker_build subprocesses.
           # bin/ FIRST: `lo` must resolve to the Go binary built above, never to
           # the argsh entrypoint in .lok8s/ (which stays on PATH for the
-          # frozen tree's own helpers and for the LO_IMPL=bash leg's exec).
+          # frozen tree's own helpers and for the bash leg's exec).
           export PATH="${ROOT}/bin:${PATH_LOK8S}:${PATH_BIN}:${PATH}"
 
           echo "::group::which lo"

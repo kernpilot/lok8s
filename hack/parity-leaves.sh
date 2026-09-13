@@ -3,7 +3,7 @@
 # the cluster-free leaf commands: init, crds, addons, drivers, chat, ai.
 #
 # For every case, runs BOTH implementations (the Go binary, and the same
-# binary with LO_IMPL=bash forcing the argsh passthrough) against a synthetic
+# binary routed to the frozen tree by the project file) against a synthetic
 # project and diffs stdout, stderr, and exit codes byte-for-byte (the work dir
 # normalized to PROJ). Stateful sections (init scaffolds files, crds writes
 # the generated CRDs + the .lok8s mirror, ai links skills) give each
@@ -28,8 +28,8 @@ run_pair() { PARITY_DIR_GO="${1}" PARITY_DIR_BASH="${2}" check - "${@:3}"; }
 # use/version precedent — so those cases are pinned here, not diffed).
 expect_rc() { PARITY_DIR="${2}" parity::expect_rc "${1}" "${@:3}"; }
 
-# new_project <dir> [copy-lok8s] — a synthetic project: framework tree +
-# toolchain linked (or the framework COPIED when the section writes into it).
+# new_project <dir> — a synthetic project: the framework tree copied, the
+# toolchain linked.
 new_project() { parity::new_project "$@"; }
 
 # ── lo init ──────────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ expect_rc 1 "${IG}" init bogus
 # each clone carries a private COPY of the framework tree. The schema source
 # is the repo's real one; the generated CRDs must equal the committed ones.
 for impl in go bash; do
-  new_project "${WORK}/crds-${impl}" 1
+  new_project "${WORK}/crds-${impl}"
   mkdir -p "${WORK}/crds-${impl}/operator/crds/schema"
   cp "${ROOT}"/operator/crds/schema/*.schema.yaml "${WORK}/crds-${impl}/operator/crds/schema/"
   rm -f "${WORK}/crds-${impl}/.lok8s/libs/inventory/manifests/clusterinventory.crd.yaml"

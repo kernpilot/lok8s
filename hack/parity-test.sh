@@ -2,7 +2,7 @@
 # parity-test.sh — differential test between the Go lo and the argsh lo.
 #
 # For every ported command, runs BOTH implementations (the Go binary, and the
-# same binary with LO_IMPL=bash forcing the argsh passthrough) against a
+# same binary routed to the frozen tree by the project file) against a
 # synthetic project and diffs stdout, stderr, and exit codes. Lines listed in
 # an ALLOW_DIFF pattern are permitted to differ (deliberate divergences, e.g.
 # `lo version` no longer reporting a bash version).
@@ -30,25 +30,31 @@ check - use gamma.app
 # lo version — the Go binary intentionally drops the `bash` row.
 check '^bash ' version
 
-# The embedded bash tree: a project with NO .lok8s and only argsh in .bin,
-# PATH_LOK8S unset. The Go binary extracts the tree it embeds into the
-# versioned cache (XDG_CACHE_HOME) and LO_IMPL=bash runs from there; the
-# outputs still match and the project stays untouched.
+# A project with NO .lok8s whose project file says `default: bash`: a
+# routing needs the tree IN the project, so the binary refuses with the
+# exact message, writes nothing into the project and extracts nothing
+# into the cache (XDG_CACHE_HOME): the embedded copy serves the provider
+# plugins and the drivers fallback, never a routing.
 BARE="${WORK}/bare"
 mkdir -p "${BARE}/clusters" "${BARE}/.bin" "${WORK}/cache"
 ln -s "${ROOT}/.bin/argsh" "${BARE}/.bin/argsh"
 [[ -e "${ROOT}/.bin/argsh.so" ]] && ln -s "${ROOT}/.bin/argsh.so" "${BARE}/.bin/argsh.so"
-export XDG_CACHE_HOME="${WORK}/cache"
-PARITY_DIR_GO="${BARE}" PARITY_DIR_BASH="${BARE}" check '^bash ' version
-unset XDG_CACHE_HOME
-cache_tree="$(echo "${WORK}"/cache/lok8s/*/lok8s)"
-if [[ -x "${cache_tree}/lo" && -f "${cache_tree}/libs/version" && -f "${cache_tree}/.lo-cache" ]]; then
-  echo "ok: embedded bash tree extracted into the cache (${cache_tree#"${WORK}"/})"
+parity::implementation "${BARE}" bash
+bare_rc=0
+(cd "${BARE}" && XDG_CACHE_HOME="${WORK}/cache" "${LO_BIN}" version </dev/null >"${WORK}/bare.out" 2>"${WORK}/bare.err") || bare_rc=$?
+want="lo: implementation bash: the tree ${BARE}/.lok8s/lo is missing. Run \"lo assets eject bash\", or set spec.implementation.default: go."
+if (( bare_rc == 1 )) && [[ "$(cat "${WORK}/bare.err")" == "${want}" && ! -s "${WORK}/bare.out" ]]; then
+  echo "ok: a routing without the tree in the project is refused (rc 1, the exact message)"
 else
-  fail "embedded bash tree not extracted: ${cache_tree}"
+  fail "routing without a tree: rc=${bare_rc} stderr=$(cat "${WORK}/bare.err")"
+fi
+if [[ -e "${WORK}/cache/lok8s" ]]; then
+  fail "a refused routing extracted the embedded tree into the cache"
+else
+  echo "ok: nothing extracted into the cache"
 fi
 if [[ -e "${BARE}/.lok8s" ]]; then
-  fail "LO_IMPL=bash wrote .lok8s into a project without one"
+  fail "a refused routing wrote .lok8s into a project without one"
 else
   echo "ok: the bare project got no .lok8s"
 fi
@@ -132,7 +138,9 @@ sec_state .sops.yaml
 rm "${WORK}/sec-go/.secrets/Secret.app.default.JWT_SECRET" \
    "${WORK}/sec-bash/.secrets/Secret.app.default.JWT_SECRET"
 cross_rc=0
-(cd "${WORK}/sec-go" && LO_IMPL=bash "${LO_BIN}" secrets decrypt >/dev/null 2>&1) || cross_rc=$?
+parity::implementation "${WORK}/sec-go" bash
+parity::implementation "${WORK}/sec-bash" go
+(cd "${WORK}/sec-go" && "${LO_BIN}" secrets decrypt >/dev/null 2>&1) || cross_rc=$?
 (cd "${WORK}/sec-bash" && "${LO_BIN}" secrets decrypt >/dev/null 2>&1) || cross_rc=$?
 if (( cross_rc == 0 )) \
   && [[ "$(cat "${WORK}/sec-go/.secrets/Secret.app.default.JWT_SECRET")" == "s3cr3t2" ]] \

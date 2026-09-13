@@ -9,7 +9,7 @@
 // the Tilt extension (tilt/, what the project-root Tiltfile loads). The
 // code half is the frozen bash implementation: the `lo` entrypoint,
 // libs/**, utils/**, the drivers' main + libs, the provider plugins and
-// VERSION (bashtree.go: what LO_IMPL=bash and the provider bridge run).
+// VERSION (bashtree.go: what a routed command and the provider bridge run).
 // The mirror is canonical; the repo's .lok8s/** twin (the parity harnesses
 // read it) is kept byte-identical, executable bits included, by
 // hack/sync-legacy-assets.sh and TestEmbeddedMirrorMatchesLegacyTree.

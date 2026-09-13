@@ -3,8 +3,8 @@
 # the Tilt-loop surface: `lo tilt`, `lo image`, `lo env`, `lo hooks`.
 #
 # Modeled on parity-test.sh: for every covered invocation, runs BOTH
-# implementations (the Go binary, and the same binary with LO_IMPL=bash
-# forcing the argsh passthrough) against a synthetic project and diffs
+# implementations (the Go binary, and the same binary routed to the frozen tree
+# by the project file) against a synthetic project and diffs
 # stdout, stderr, and exit codes.
 #
 # READ-ONLY / ERROR PATHS ONLY. This surface's destructive verbs talk to live

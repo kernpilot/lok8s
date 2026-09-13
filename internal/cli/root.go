@@ -107,9 +107,12 @@ var goOnlyCommands = []goOnlyCommand{
 }
 
 // NewRoot builds the full lo command tree: the usage-mirrored tree plus the
-// Go-only commands.
+// Go-only commands. The project's spec.implementation (routing.go) is
+// read once here: a routed command is registered as a shim to the bash
+// tree in the project, `default: bash` shims the whole usage tree, and
+// the Go-only commands stay Go.
 func NewRoot(paths *config.Paths) *cobra.Command {
-	root := newUsageTree(paths)
+	root := newUsageTree(paths, newRouting(paths))
 	for _, g := range goOnlyCommands {
 		root.AddCommand(g.build(paths))
 	}
@@ -117,10 +120,12 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 }
 
 // newUsageTree builds the part of the tree that mirrors the argsh usage
-// array one-to-one. Commands without a Go implementation yet are registered
-// as passthroughs to the argsh implementation via Shim. The MCP server
-// projects THIS tree (never the Go-only additions) into tools.
-func newUsageTree(paths *config.Paths) *cobra.Command {
+// array one-to-one. A command the routing sends to bash is registered as a
+// passthrough to the argsh implementation (newShimCommand); the rest get
+// their Go port. The MCP server projects THIS tree (never the Go-only
+// additions) into tools, built without routing so the tool names and
+// schemas never depend on the project file.
+func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	// `lo --version` names the build too: "lo version 0.3.0 (core)" /
 	// "(full)". `lo version` (the command) stays byte-identical to the bash
 	// implementation (parity-test diffs it).
@@ -134,10 +139,17 @@ func newUsageTree(paths *config.Paths) *cobra.Command {
 		// asset reads it); set it once before any command body runs.
 		// Shim commands disable flag parsing, so for them only the
 		// environment form (LO_ASSETS_EJECT=never) applies — and they read
-		// .lok8s from disk anyway.
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// .lok8s from disk anyway. An invalid spec.implementation block
+		// stops every command here (lint excepted: it reports the error as
+		// its own finding), printed the way main prints a startup error.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			noEject, _ := cmd.Flags().GetBool("no-eject")
 			assets.Configure(noEject)
+			if err := r.refuse(cmd.Name()); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "lo: %v\n", err)
+				return ErrHandled
+			}
+			return nil
 		},
 	}
 
@@ -165,20 +177,21 @@ func newUsageTree(paths *config.Paths) *cobra.Command {
 	)
 
 	for _, spec := range commandTree {
-		if build, ok := portedCommands[spec.use]; ok {
+		if build, ok := portedCommands[spec.use]; ok && !r.routed(spec.use) {
 			root.AddCommand(build(paths, spec))
 			continue
 		}
-		root.AddCommand(newShimCommand(paths, spec))
+		root.AddCommand(newShimCommand(paths, spec, r.impl.TreeDir))
 	}
 	return root
 }
 
-// newShimCommand registers a command whose implementation still lives in the
-// argsh tree. Flag parsing is disabled and the ORIGINAL argv is passed
-// through, so alias spelling, flag order, and everything else reach the bash
-// parser exactly as typed.
-func newShimCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
+// newShimCommand registers a command that runs in the argsh tree at
+// treeDir (the project's tree: routing never targets the cache). Flag
+// parsing is disabled and the ORIGINAL argv is passed through, so alias
+// spelling, flag order, and everything else reach the bash parser exactly
+// as typed.
+func newShimCommand(paths *config.Paths, spec commandSpec, treeDir string) *cobra.Command {
 	return &cobra.Command{
 		Use:                spec.use,
 		Aliases:            spec.aliases,
@@ -189,7 +202,8 @@ func newShimCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Shim(paths, os.Args[1:])
+			tree := assets.Tree{Dir: treeDir, Source: assets.TreeProject}
+			return execShim(paths, tree, os.Args[1:])
 		},
 	}
 }

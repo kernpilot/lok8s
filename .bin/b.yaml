@@ -29,7 +29,7 @@ binaries:
   # install/README.md). Every lo command runs natively in it. Nothing else
   # shrinks yet (owner sequencing): the framework tree (.lok8s/**) and argsh
   # still ship with every profile because the provider plugins and the
-  # frozen reference implementation (LO_IMPL=bash) source the argsh runtime,
+  # frozen reference implementation (routed by lok8s.yaml) source the argsh runtime,
   # `lo chat` still drives the argsh mcp builtin (the bash MCP variant), and the
   # parity gates (hack/parity-*.sh) need both implementations. The intended
   # end state per group is documented in docs/guide/toolchain.md. PINNED to
@@ -44,7 +44,7 @@ binaries:
   # kustomize + khelm: what `lo` CORE execs for every render (the pinned
   # kustomize binary + the ChartRenderer exec plugin under .kustomize/);
   # `lo-full` (-tags inprocess) links the same releases and only needs them
-  # for LO_RENDER=exec. Also the frozen bash implementation (LO_IMPL=bash)
+  # for LO_RENDER=exec. Also the frozen bash implementation (a routed command)
   # and the parity harnesses. The pins consumers get are generated from
   # internal/toolchain/pins.go (kustomize v5.8.1 ↔ api v0.21.1, khelm
   # v2.8.0 — drift-tested against go.mod); this contributor file floats

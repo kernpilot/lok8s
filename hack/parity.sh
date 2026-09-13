@@ -4,7 +4,7 @@
 # full log of every harness that failed, exit 1 if any did.
 #
 # Each harness is a differential run of the Go binary against the argsh
-# passthrough (LO_IMPL=bash) over a synthetic project; see
+# passthrough (the project file's spec.implementation) over a synthetic project; see
 # hack/lib/parity.sh for the shared machinery. The binary is resolved to an
 # absolute path: every harness cd's into its synthetic project before
 # invoking it.

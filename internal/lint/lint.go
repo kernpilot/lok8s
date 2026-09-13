@@ -30,6 +30,10 @@ type Linter struct {
 	Paths  *config.Paths
 	Out    io.Writer
 	ErrOut io.Writer
+	// Implementation validates the spec.implementation block of the
+	// project file (Go-only; the cli supplies it, nil skips the check).
+	// A non-nil error is one repo-global finding.
+	Implementation func() error
 }
 
 // Run is main::lint: per-domain checks for the given domain (all domains when
@@ -60,6 +64,9 @@ func (l *Linter) Run(domain string) error {
 	if !l.apex() {
 		errorCount++
 	}
+	if !l.implementation() {
+		errorCount++
+	}
 	l.drift() // warnings only — never bumps the error count
 
 	if errorCount != 0 {
@@ -67,6 +74,19 @@ func (l *Linter) Run(domain string) error {
 		return ErrHandled
 	}
 	return nil
+}
+
+// implementation reports the spec.implementation finding (Go-only, see
+// Linter.Implementation). Returns false on an error.
+func (l *Linter) implementation() bool {
+	if l.Implementation == nil {
+		return true
+	}
+	if err := l.Implementation(); err != nil {
+		ui.ErrorTo(l.ErrOut, "%v", err)
+		return false
+	}
+	return true
 }
 
 // listDomains lists all domain names from clusters/, excluding hidden dirs

@@ -3,7 +3,7 @@
 # for the configure/inspect commands: lint, kubeconfig, doctor.
 #
 # For every case, runs BOTH implementations (the Go binary, and the same
-# binary with LO_IMPL=bash forcing the argsh passthrough) against a synthetic
+# binary routed to the frozen tree by the project file) against a synthetic
 # project and diffs stdout, stderr, and exit codes.
 #
 # doctor's output depends on the machine's toolchain (which tools exist, the

@@ -3,7 +3,7 @@
 # implementation (same structure as hack/parity-test.sh).
 #
 # Each case runs BOTH implementations (the Go binary, and the same binary with
-# LO_IMPL=bash forcing the argsh passthrough) against a synthetic project and
+# routed to the frozen tree by the project file) against a synthetic project and
 # diffs stdout, stderr, exit code, the rendered artifacts.yaml bytes, the
 # split dir file LIST, and the non-Secret split file bytes. Secret twins are
 # never byte-compared (sops mints a fresh data key per encrypt) — parity is
@@ -125,7 +125,8 @@ domain_reset() { # <domain> — wipe generated outputs
 # Fixture: one bash-built split.dev output, reused so both impls can start a
 # case from the SAME committed state.
 domain_reset split.dev
-(cd "${PROJ}" && LO_IMPL=bash "${LO_BIN}" build --domain split.dev >/dev/null 2>&1)
+parity::implementation "${PROJ}" bash
+(cd "${PROJ}" && "${LO_BIN}" build --domain split.dev >/dev/null 2>&1)
 mkdir -p "${WORK}/fixture"
 cp "${PROJ}/clusters/split.dev/artifacts.yaml" "${WORK}/fixture/artifacts.yaml"
 cp -r "${PROJ}/clusters/split.dev/artifacts" "${WORK}/fixture/artifacts"

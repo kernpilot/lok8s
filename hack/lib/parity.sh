@@ -8,8 +8,10 @@
 # synthetic-project and stub builders, and the final report (report).
 #
 # The contract every harness relies on:
-#   - The Go binary is ${LO_BIN}; the bash twin is the same binary with
-#     LO_IMPL=bash forcing the argsh passthrough. Both run from a synthetic
+#   - The Go binary is ${LO_BIN}; the bash twin is the same binary in a
+#     project whose lok8s.yaml says `spec.implementation.default: bash`
+#     (parity::implementation writes it before every run; no environment
+#     variable selects the implementation). Both run from a synthetic
 #     project under ${WORK}, never from the developer's checkout.
 #   - A case is green when exit code, stdout and stderr match. An allow
 #     regex ("-" = none) drops matching lines from both streams before the
@@ -60,6 +62,29 @@ parity::init() {
   failures=0
   go_rc=0
   bash_rc=0
+  parity::prove_switch
+}
+
+# parity::prove_switch: the bash twin must really be bash. `lo version`
+# prints a `bash` row from the frozen tree and none from Go; a switch that
+# silently ran Go on both sides would leave every diff green and prove
+# nothing. Exit 2 unless each side answers as itself.
+parity::prove_switch() {
+  local probe="${WORK}/probe" out
+  parity::new_project "${probe}"
+  parity::implementation "${probe}" bash
+  out="$(cd "${probe}" && "${LO_BIN}" version </dev/null 2>&1)" || true
+  if ! grep -q '^bash ' <<<"${out}"; then
+    printf 'error: the bash twin did not run the bash tree (lo version):\n%s\n' "${out}" >&2
+    exit 2
+  fi
+  parity::implementation "${probe}" go
+  out="$(cd "${probe}" && "${LO_BIN}" version </dev/null 2>&1)" || true
+  if grep -q '^bash ' <<<"${out}"; then
+    echo "error: the Go side ran the bash tree (lo version printed a bash row)" >&2
+    exit 2
+  fi
+  rm -rf "${probe}"
 }
 
 # parity::cleanup: the EXIT trap. A harness-defined parity_cleanup hook
@@ -80,29 +105,56 @@ parity::require_tools() {
 
 # ── the differential runner ──────────────────────────────────────────────────
 
+# parity::implementation <dir> <go|bash> [command...]: write the project
+# file <dir>/lok8s.yaml that selects the implementation — the ONE switch
+# the binary honours (spec.implementation; cmd/lo reads no variable for
+# it). Extra arguments become spec.implementation.bash.commands: the
+# top-level commands routed to the bash tree under a `go` default.
+parity::implementation() {
+  local dir="${1}" impl="${2}"; shift 2
+  {
+    printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: parity\nspec:\n  implementation:\n    default: %s\n' "${impl}"
+    if (( $# )); then
+      printf '    bash:\n      commands: [%s]\n' "$(IFS=,; echo "$*")"
+    fi
+  } > "${dir}/lok8s.yaml"
+}
+
+# parity::select <dir> <impl>: parity::implementation for one run — `go`
+# with the commands in PARITY_ROUTE_GO (space-separated) routed to bash,
+# or the whole tree with `bash`.
+parity::select() {
+  if [[ "${2}" == bash ]]; then
+    parity::implementation "${1}" bash
+  else
+    # shellcheck disable=SC2086  # PARITY_ROUTE_GO is a word list
+    parity::implementation "${1}" go ${PARITY_ROUTE_GO:-}
+  fi
+}
+
 # parity::run <impl> <dir> <argv...>: one implementation (go | bash), run
-# from <dir> with stdin from PARITY_STDIN (empty = closed). Outputs land in
-# ${WORK}/<impl>.out and ${WORK}/<impl>.err; the exit code is returned.
-# Hooks: PARITY_PRE_EACH (a function name) runs before the command,
-# PARITY_POST_EACH <impl> after it. Stateful harnesses use them to restore
-# fixtures and to snapshot generated files per implementation.
+# from <dir> with stdin from PARITY_STDIN (empty = closed). The project
+# file is written for the implementation first (parity::select). Outputs
+# land in ${WORK}/<impl>.out and ${WORK}/<impl>.err; the exit code is
+# returned. Hooks: PARITY_PRE_EACH (a function name) runs before the
+# command, PARITY_POST_EACH <impl> after it. Stateful harnesses use them
+# to restore fixtures and to snapshot generated files per implementation.
 parity::run() {
   local impl="${1}" dir="${2}"; shift 2
-  local lo=("${LO_BIN}")
-  [[ "${impl}" != bash ]] || lo=(env LO_IMPL=bash "${LO_BIN}")
+  parity::select "${dir}" "${impl}"
   [[ -z "${PARITY_PRE_EACH:-}" ]] || "${PARITY_PRE_EACH}"
   local rc=0
   if [[ -n "${PARITY_STDIN:-}" ]]; then
-    (cd "${dir}" && "${lo[@]}" "$@" <<<"${PARITY_STDIN}" >"${WORK}/${impl}.out" 2>"${WORK}/${impl}.err") || rc=$?
+    (cd "${dir}" && "${LO_BIN}" "$@" <<<"${PARITY_STDIN}" >"${WORK}/${impl}.out" 2>"${WORK}/${impl}.err") || rc=$?
   else
-    (cd "${dir}" && "${lo[@]}" "$@" </dev/null >"${WORK}/${impl}.out" 2>"${WORK}/${impl}.err") || rc=$?
+    (cd "${dir}" && "${LO_BIN}" "$@" </dev/null >"${WORK}/${impl}.out" 2>"${WORK}/${impl}.err") || rc=$?
   fi
   [[ -z "${PARITY_POST_EACH:-}" ]] || "${PARITY_POST_EACH}" "${impl}"
   return "${rc}"
 }
 
 # parity::run_pair <argv...>: both implementations, the Go binary first,
-# then the LO_IMPL=bash twin, from PARITY_DIR_GO / PARITY_DIR_BASH (default:
+# then the bash twin, from PARITY_DIR_GO / PARITY_DIR_BASH (default:
 # ${PROJ} for both; stateful sections give each implementation its own
 # clone). Exit codes land in go_rc / bash_rc. The outputs are normalized:
 # the project dir becomes PROJ and the work dir WORK (findings and usage
@@ -194,13 +246,16 @@ fail() { echo "FAIL: ${*}"; failures=$((failures + 1)); }
 # expect_rc <rc> <argv...>: the CONTRACT check on the Go binary alone:
 # parity would also pass if both implementations drifted together, so the
 # documented exit codes are pinned explicitly. Runs from PARITY_DIR
-# (default: ${PROJ}) with stdin closed. A harness that takes the dir as an
-# argument wraps parity::expect_rc under its own signature.
+# (default: ${PROJ}) with stdin closed, the project file set to `go`
+# (plus PARITY_ROUTE_GO, see parity::select) first: the last run_pair left
+# it at `bash`. A harness that takes the dir as an argument wraps
+# parity::expect_rc under its own signature.
 expect_rc() { parity::expect_rc "$@"; }
 parity::expect_rc() {
   local want="${1}"; shift
-  local rc=0
-  (cd "${PARITY_DIR:-${PROJ}}" && "${LO_BIN}" "$@" </dev/null >/dev/null 2>&1) || rc=$?
+  local rc=0 dir="${PARITY_DIR:-${PROJ}}"
+  parity::select "${dir}" go
+  (cd "${dir}" && "${LO_BIN}" "$@" </dev/null >/dev/null 2>&1) || rc=$?
   if (( rc == want )); then
     echo "ok: rc ${want}: lo $*"
   else
@@ -225,13 +280,14 @@ parity::state_same() {
 }
 
 # tree_check <dir-go> <dir-bash> <label>: every file under the two clones
-# (the linked framework/toolchain dirs excluded) must be byte-identical, and
-# the file LISTS must match. Symlinks are compared by target. One case.
+# (the framework/toolchain dirs and the project file that selects the
+# implementation excluded) must be byte-identical, and the file LISTS must
+# match. Symlinks are compared by target. One case.
 tree_check() {
   local dgo="${1}" dbash="${2}" label="${3}"
   local list_go list_bash
-  list_go="$(cd "${dgo}" && find . -path ./.lok8s -prune -o -path ./.bin -prune -o \( -type f -o -type l \) -print | sort)"
-  list_bash="$(cd "${dbash}" && find . -path ./.lok8s -prune -o -path ./.bin -prune -o \( -type f -o -type l \) -print | sort)"
+  list_go="$(cd "${dgo}" && find . -path ./.lok8s -prune -o -path ./.bin -prune -o -path ./lok8s.yaml -prune -o \( -type f -o -type l \) -print | sort)"
+  list_bash="$(cd "${dbash}" && find . -path ./.lok8s -prune -o -path ./.bin -prune -o -path ./lok8s.yaml -prune -o \( -type f -o -type l \) -print | sort)"
   if [[ "${list_go}" != "${list_bash}" ]]; then
     echo "FAIL: tree ${label} — file lists differ:"
     diff <(echo "${list_bash}") <(echo "${list_go}") | head -20 | sed 's/^/  /' || true
@@ -264,17 +320,14 @@ tree_check() {
 
 # ── synthetic projects and stubs ─────────────────────────────────────────────
 
-# parity::new_project <dir> [copy-lok8s]: a synthetic project. clusters/,
-# the framework tree linked (or COPIED when a section writes into it), the
-# toolchain linked.
+# parity::new_project <dir>: a synthetic project. clusters/, the framework
+# tree COPIED (a command routed to bash runs <project>/.lok8s/lo, and a
+# tree that resolves outside the project is refused, so a link would not
+# do), the toolchain linked.
 parity::new_project() {
-  local dir="${1}" copy="${2:-0}"
+  local dir="${1}"
   mkdir -p "${dir}/clusters"
-  if (( copy )); then
-    cp -R "${ROOT}/.lok8s" "${dir}/.lok8s"
-  else
-    ln -s "${ROOT}/.lok8s" "${dir}/.lok8s"
-  fi
+  cp -R "${ROOT}/.lok8s" "${dir}/.lok8s"
   ln -s "${ROOT}/.bin" "${dir}/.bin"
 }
 

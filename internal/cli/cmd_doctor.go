@@ -195,8 +195,8 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 	// (shimEnv) — doctor reports the environment as prepared, not the raw
 	// shell's. The binary's OWN renders no longer need it (internal/render
 	// runs kustomize in-process and serves the Secret/khelm generators
-	// itself); the lines below still matter for LO_IMPL=bash, the provider
-	// plugins and LO_RENDER=exec, and their text is unchanged so
+	// itself); the lines below still matter for a command routed to bash,
+	// the provider plugins and LO_RENDER=exec, and their text is unchanged so
 	// hack/parity-configure.sh keeps diffing doctor byte-for-byte.
 	pluginHome := os.Getenv("KUSTOMIZE_PLUGIN_HOME")
 	if pluginHome == "" {
@@ -209,6 +209,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		doctorWarn(out, "secrets.lok8s.dev plugin not built (run: lo kustomize build)")
 	}
 	doctorAssets(out, paths)
+	doctorImplementation(out, paths)
 	doctorBashMode(out, paths)
 
 	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
@@ -293,8 +294,41 @@ func doctorAssets(w io.Writer, paths *config.Paths) {
 	doctorOK(w, line)
 }
 
-// doctorBashMode is the bash-mode line (Go-only): whether LO_IMPL=bash and
-// the provider plugins can run: where the bash tree comes from
+// doctorImplementation is the implementation line (Go-only): what
+// lok8s.yaml spec.implementation routes to the bash tree, the tree and
+// where it comes from (always the project: routing never targets the
+// cache), then one `!` line per routed command whose state Go also
+// writes on its own paths (sharedState). Printed ONLY when something is
+// routed: with the block absent, or `default: go` and no commands, the
+// doctor output stays byte-identical to the bash implementation
+// (parity-configure diffs it strictly). An invalid block is a warning
+// here; every other command refuses to start on it, and `lo lint` reports
+// it as a finding.
+func doctorImplementation(w io.Writer, paths *config.Paths) {
+	r := newRouting(paths)
+	if r.err != nil {
+		doctorWarn(w, "implementation: "+r.err.Error())
+		return
+	}
+	if !r.active() {
+		return
+	}
+	tree := config.RelTo(paths.Base, r.impl.TreeDir) + " (project, lok8s.yaml spec.implementation)"
+	if r.all {
+		doctorOK(w, "implementation: bash for every command; tree "+tree)
+		return
+	}
+	names := r.routedNames()
+	doctorOK(w, "implementation: go; bash for "+strings.Join(names, ", ")+"; tree "+tree)
+	for _, name := range names {
+		if why, ok := sharedState[name]; ok {
+			doctorWarn(w, name+" is routed to bash; "+why+". Keep the lib stock or expect drift.")
+		}
+	}
+}
+
+// doctorBashMode is the bash-mode line (Go-only): whether the bash tree
+// (a routed command) and the provider plugins can run: where the bash tree comes from
 // (assets.FindBashTree, nothing is extracted here) and whether argsh is
 // where the entrypoint sources it (${PATH_BIN}/argsh). The line is OMITTED
 // in the one layout the frozen implementation can also run in (a local
@@ -309,10 +343,10 @@ func doctorBashMode(w io.Writer, paths *config.Paths) {
 		return
 	}
 	if !haveArgsh {
-		doctorWarn(w, "bash mode (LO_IMPL=bash, provider plugins): not runnable: argsh missing at "+config.RelTo(paths.Base, argsh)+" (fix: uncomment the bash group in .bin/b.yaml, then .bin/b install)")
+		doctorWarn(w, "bash mode (spec.implementation, provider plugins): not runnable: argsh missing at "+config.RelTo(paths.Base, argsh)+" (fix: uncomment the bash group in .bin/b.yaml, then .bin/b install)")
 		return
 	}
-	doctorOK(w, "bash mode (LO_IMPL=bash, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")
+	doctorOK(w, "bash mode (spec.implementation, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")
 }
 
 // doctorToolchain is the pinned-toolchain section (Go-only): b under .bin,

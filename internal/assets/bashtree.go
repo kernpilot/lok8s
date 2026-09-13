@@ -2,9 +2,11 @@ package assets
 
 // bashtree.go — the frozen bash implementation as a runnable tree.
 //
-// The binary embeds the whole .lok8s tree (assets.go), so LO_IMPL=bash,
-// the provider bridge, `lo recover` and a bash-only `lo drivers <name>`
-// no longer need a checkout. BashTree hands them a directory that holds
+// The binary embeds the whole .lok8s tree (assets.go), so the provider
+// bridge, `lo recover` and a bash-only `lo drivers <name>` no longer need
+// a checkout (a command routed to bash by lok8s.yaml is the exception: it
+// runs the project's own tree only, never this cache; see
+// internal/cli/routing.go). BashTree hands them a directory that holds
 // the complete tree, by precedence:
 //
 //  1. PATH_LOK8S when it is set and holds `lo` (a checkout, or a project

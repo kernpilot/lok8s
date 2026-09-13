@@ -90,7 +90,7 @@ var groupTitles = map[string]string{
 	GroupCore:  "core: what `lo` execs on every path",
 	GroupLocal: "local: the kind + Tilt dev loop (lo up, lo tilt, lo trust)",
 	GroupCloud: "cloud: the provisioning drivers (KubeOne on Hetzner) — opt-in",
-	GroupBash:  "bash: the frozen bash implementation (LO_IMPL=bash) and the provider plugins — opt-in",
+	GroupBash:  "bash: the frozen bash implementation (routed by lok8s.yaml) and the provider plugins — opt-in",
 }
 
 var groupOrder = []string{GroupCore, GroupLocal, GroupCloud, GroupBash}
@@ -164,7 +164,7 @@ func Template(o TemplateOptions) (string, error) {
 	b.WriteString("#\n")
 	b.WriteString("# Groups are a lok8s convention (b ignores the key): core = what every lo path\n")
 	b.WriteString("# execs; local = the kind + Tilt dev loop; cloud = the provisioning drivers;\n")
-	b.WriteString("# bash = the runtime of the frozen bash implementation (LO_IMPL=bash) and the\n")
+	b.WriteString("# bash = the runtime of the frozen bash implementation (routed by lok8s.yaml) and the\n")
 	b.WriteString("# provider plugins (argsh, yq, jq, envsubst, sops, ssh-to-age; the Go binary links\n")
 	b.WriteString("# or reimplements them, the bash tree itself ships inside the binary).\n")
 	b.WriteString("# Entries outside the selected groups are kept below, commented out — uncomment\n")
