@@ -3,10 +3,12 @@ package cli
 // lo assets — the eject model's own surface (Go-only; see internal/assets):
 //
 //	lo assets list                      every embedded asset + its origin
-//	lo assets show <rel>                one asset: files, marker, state
 //	lo assets eject [rel…|--all] [--check]   (rel `bash` = the frozen bash implementation)
-//	lo assets diff [rel…] [--json] [--check]
+//	lo assets diff [rel…] [--json] [--check]   (diff <rel> lists the per-file state)
 //	lo assets update <rel> [--force]
+//
+// There is no `show`: `diff <rel>` prints the per-file state of one unit
+// (WP9 dropped the duplicate).
 //
 // The bash implementation reads .lok8s/** from disk and has no embedded copy
 // to compare against, so there is no twin and no parity harness — the Go
@@ -52,7 +54,6 @@ func newAssetsCommand(paths *config.Paths) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newAssetsListCommand(paths),
-		newAssetsShowCommand(paths),
 		newAssetsEjectCommand(paths),
 		newAssetsDiffCommand(paths),
 		newAssetsUpdateCommand(paths),
@@ -81,23 +82,6 @@ func newAssetsListCommand(paths *config.Paths) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Machine-readable output")
 	return cmd
-}
-
-func newAssetsShowCommand(paths *config.Paths) *cobra.Command {
-	return &cobra.Command{
-		Use:          "show <rel>",
-		Short:        "Show one asset: path, marker, chart version, per-file state",
-		Args:         cobra.ExactArgs(1),
-		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			reports, err := assets.Report(paths, []string{args[0]})
-			if err != nil {
-				return assetsErr(cmd.ErrOrStderr(), err)
-			}
-			assets.WriteShow(cmd.OutOrStdout(), reports[0])
-			return nil
-		},
-	}
 }
 
 func newAssetsEjectCommand(paths *config.Paths) *cobra.Command {

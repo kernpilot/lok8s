@@ -1,7 +1,8 @@
 package cli
 
 // cmd_assets_test.go — the Go-only eject-model surface: `lo assets
-// {list,show,eject,diff,update}`, the --no-eject flag, `lo init project`,
+// {list,eject,diff,update}` (no `show`: `diff <rel>` is the per-file
+// view), the --no-eject flag, `lo init project`,
 // the origin columns of `lo addons`/`lo drivers --list` and the doctor
 // line. No twin in the frozen tree, so the tests here ARE the gate (see
 // internal/assets for the resolver's own tests).
@@ -125,13 +126,16 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 		t.Errorf("json shape: %+v", doc)
 	}
 
-	// show + list + unknown rel.
-	stdout, _, err = runLo(t, NewRoot(p), "assets", "show", "addons/cilium")
-	if err != nil || !strings.Contains(stdout, "origin:   local\n") || !strings.Contains(stdout, "ejected:  by lo "+assets.Version()+" at 1970-01-01T00:00:00Z\n") {
-		t.Errorf("show: err=%v\n%s", err, stdout)
+	// diff <rel> is the per-file view (show is gone); unknown rel.
+	stdout, _, err = runLo(t, NewRoot(p), "assets", "diff", "addons/cilium")
+	if err != nil || !strings.Contains(stdout, "addons/cilium") || !strings.Contains(stdout, "  FILE") || !strings.Contains(stdout, "unchanged") {
+		t.Errorf("diff <rel> without the per-file state: err=%v\n%s", err, stdout)
 	}
-	if _, stderr, err := runLo(t, NewRoot(p), "assets", "show", "addons/nope"); !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "not an embedded asset: addons/nope") {
-		t.Errorf("show unknown: err=%v stderr=%s", err, stderr)
+	if _, stderr, err := runLo(t, NewRoot(p), "assets", "diff", "addons/nope"); !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "not an embedded asset: addons/nope") {
+		t.Errorf("diff unknown: err=%v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := runLo(t, NewRoot(p), "assets", "show", "addons/cilium"); err == nil || !strings.Contains(err.Error()+stderr, `unknown command "show"`) {
+		t.Errorf("assets show still exists: err=%v stderr=%s", err, stderr)
 	}
 	stdout, _, err = runLo(t, NewRoot(p), "assets", "list")
 	if err != nil || !strings.HasPrefix(stdout, "ASSET                           KIND        ORIGIN") || !strings.Contains(stdout, "chat                            chat        builtin") {

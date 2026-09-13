@@ -101,7 +101,7 @@ var goOnlyCommands = []goOnlyCommand{
 	},
 	{
 		name:  "assets",
-		why:   "the eject model (internal/assets): list/show/eject/diff/update the framework assets embedded in the binary; bash reads .lok8s/** from disk and has no embedded copy to compare against",
+		why:   "the eject model (internal/assets): list/eject/diff/update the framework assets embedded in the binary; bash reads .lok8s/** from disk and has no embedded copy to compare against",
 		build: newAssetsCommand,
 	},
 	{

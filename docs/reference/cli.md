@@ -508,9 +508,8 @@ The framework's files ship **inside the binary**: the data files (every bootstra
 
 ```bash
 lo assets list [--json]                 # every asset with its origin and chart version (local vs embedded)
-lo assets show <rel>                    # one asset: path, marker, per-file state
 lo assets eject [rel...] [--all] [--check]
-lo assets diff [rel...] [--json] [--check]
+lo assets diff [rel...] [--json] [--check]   # with a rel: the unit and its per-file states
 lo assets update <rel> [--force]
 ```
 
@@ -529,7 +528,7 @@ lo assets update <rel> [--force]
 | `local-only` | exists only in the project |
 | `builtin-only` | exists only in the binary (lo added it, or it was deleted locally) |
 
-`--check` exits `1` on any drift (anything but `unchanged`/`local-only`). `--json` is a stable shape (`{"lo": "<version>", "assets": [{rel, kind, origin, drifted, version:{local,embedded}, marker:{lo,ejectedAt}, files:[{path,state,origin,local,embedded}], path}]}`).
+With one or more `<rel>` arguments the table lists each unit's files with their state (there is no separate `show` command). `--check` exits `1` on any drift (anything but `unchanged`/`local-only`). `--json` is a stable shape (`{"lo": "<version>", "assets": [{rel, kind, origin, drifted, version:{local,embedded}, marker:{lo,ejectedAt}, files:[{path,state,origin,local,embedded}], path}]}`).
 
 **`update <rel>`** applies the embedded copy over the local one only when every file is provably untouched (`unchanged` or `lo updated`) and a marker exists; otherwise it prints the classification and stops, and `--force` applies anyway. A copy that is already byte-identical to what this `lo` ships is reported as in sync, marker or not, and nothing is written. It shows the diff first, keeps local-only files, and rewrites the marker.
 
