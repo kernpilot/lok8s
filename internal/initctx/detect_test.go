@@ -118,13 +118,20 @@ func TestDetectBareDirectory(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(dir, "README.md"), "# hi\n")
 	testutil.WriteFile(t, filepath.Join(dir, "src", "a.go"), "package a\n")
 
-	// No git at all.
+	// git installed, not a repository (rev-parse says no).
 	s := detect(t, dir, &gitFake{})
 	if s.Empty || s.Entries != 2 || !s.Git.Available || s.Git.Root != "" {
 		t.Errorf("state: %+v git %+v", s, s.Git)
 	}
 	if got := s.Situation(); got != SituationBareDir {
 		t.Errorf("situation %v, want bare directory", got)
+	}
+
+	// git binary absent (execx.ErrNotFound): unavailable, and the
+	// situation is the same bare directory.
+	s = detect(t, dir, &gitFake{absent: true})
+	if s.Git.Available || s.Git.Root != "" || s.Situation() != SituationBareDir {
+		t.Errorf("git absent: %+v", s.Git)
 	}
 
 	// At the git root, still no project: the bare conversation, without
