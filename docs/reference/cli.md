@@ -233,7 +233,7 @@ Without arguments: shows the active domain and lists all available domains with 
 Validate domain structure and specs.
 
 ```bash
-lo lint [--domain <domain>]
+lo lint [--domain <domain>] [--notes]
 ```
 
 Checks:
@@ -241,6 +241,8 @@ Checks:
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
 - Secrets: committed encrypted (`.enc` present and current), and no per-domain secret is shadowed in the deprecated flat `.secrets/` store (identical copy = stale duplicate; differing copy = active drift)
+
+`--notes` (Go-only) adds an advisory per Lo cluster spec key whose value equals its documented default (see [Cluster specs](specs.md#default-resolution)): `spec.nodes.controlPlane: 1`, `spec.runtime: kind`, and `spec.registries.mirrors` when the list is exactly the four default mirrors on their standard URLs. Each prints as `[note] <file>: <key> equals the default (<value>); you can drop it` on stdout. It is advice only: no finding, the exit code is unchanged, and the spec is never edited. The flag is opt-in because the bash lint prints no such line and the parity harnesses diff every lint case byte for byte.
 
 ### lo status
 
