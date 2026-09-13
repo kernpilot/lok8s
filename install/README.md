@@ -36,8 +36,9 @@ tar -xzf "${A}" lo && install -m 0755 lo ~/.local/bin/lo
 ```
 
 Inside a lok8s project, `b` can install the same asset from `.bin/b.yaml`
-(`github.com/kernpilot/lok8s` with `asset: lo-*.tar.gz`, alias `lo`) — the
-`core` profile already declares it.
+(`github.com/kernpilot/lok8s` with `asset: lo-[^f]*.tar.gz`, alias `lo`) — the
+`core` profile already declares it. The glob leaves out `lo-full-*`: b scores
+the two archives the same, so a plain `lo-*.tar.gz` can install `lo-full`.
 
 ## What the binary needs
 

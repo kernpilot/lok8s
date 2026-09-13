@@ -35,9 +35,13 @@ binaries:
   # end state per group is documented in docs/guide/toolchain.md. PINNED to
   # the first tag that carries lo-* assets; until that tag exists `b install`
   # skips the entry non-fatally.
+  # The glob leaves out lo-full-<os>-<arch>.tar.gz on purpose: b scores the
+  # two archives the same and the release lists lo-full first, so a plain
+  # lo-*.tar.gz installs lo-full under this alias
+  # (internal/toolchain/release_assets_test.go pins the selection).
   github.com/kernpilot/lok8s:
     alias: lo
-    asset: lo-*.tar.gz
+    asset: lo-[^f]*.tar.gz
     version: v0.3.0
     groups: [core]
 
