@@ -14,6 +14,7 @@
       "command": "bin/lo",
       "args": ["mcp", "start"],
       "env": {
+        "PATH_BASE": ".",
         "LO_MCP_ALLOW": "destructive"
       }
     }

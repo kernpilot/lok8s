@@ -375,6 +375,7 @@ Point the editor at `lo mcp start`. The `.mcp.json` at the project root does thi
       "command": "bin/lo",
       "args": ["mcp", "start"],
       "env": {
+        "PATH_BASE": ".",
         "LO_MCP_ALLOW": "destructive"
       }
     }
@@ -386,7 +387,7 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 `bin/lo` is the checkout build. Run `make build` in a fresh clone before you start the editor. Outside a checkout, run `lo mcp <editor> enable`: it writes the absolute path of the binary, the toolchain PATH and `PATH_BASE` into the editor config. You can also set `command` to the installed `lo` (from `lo-install.sh`, or `.bin/lo` from `b install`) when that binary is on the editor's PATH. Do not use a bare `lo` in a project with the `.envrc` active. The `.envrc` puts `.lok8s` first on PATH, so `lo` resolves to the bash entry. Then `.lok8s/lo mcp start` serves the bash variant without an error.
 
-The server needs no other environment. It takes the project root from `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH. Unset a stale `PATH_BASE` from another project before you start the editor.
+The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
 `LO_MCP_ALLOW=destructive` opens the full surface (90 tools). That is the set the argsh builtin served, plus the Go-only leaves. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (51 tools). The tiers follow the marker table above.
 
