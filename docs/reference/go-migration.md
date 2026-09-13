@@ -53,9 +53,10 @@ plus three commands that exist only in the binary.
 are allow-listed by name in `internal/cli/root.go` (`goOnlyCommands`) with a
 reason each. The same holds for the Go-only additions to existing commands:
 `lo init project`, `lo addons --origin`, `lo drivers --list --origin`, the
-global `--no-eject` flag — see [Embedded assets](#embedded-assets-the-eject-model). `lo mcp` replaces the argsh `mcp` builtin; the shipped
-`.mcp.json` still launches the builtin (`.lok8s/lo mcp`) until that switch is
-made deliberately — see [`lo mcp`](/reference/cli#lo-mcp).
+global `--no-eject` flag — see [Embedded assets](#embedded-assets-the-eject-model). `lo mcp` replaces the argsh `mcp` builtin.
+The shipped `.mcp.json` launches `bin/lo mcp start`. The builtin stays
+reachable as the bash variant (`.lok8s/lo mcp` from a checkout), and
+`lo chat` still drives it. See [`lo mcp`](/reference/cli#lo-mcp).
 
 ### What still calls bash
 
@@ -424,6 +425,17 @@ parsed on the way; argv reaches the argsh implementation untouched.
 Use it when a command misbehaves: if the bash side is right and the Go side
 is wrong, that is a parity bug — please report it with the command line and
 both outputs. There is no `LO_IMPL=go`; the binary is the default.
+
+Per-command routing is configured in `lok8s.yaml` (planned, WP8).
+`spec.implementation.default: go|bash` selects the implementation for the
+project. `spec.implementation.bash.commands` lists the commands the binary
+runs through the bash tree, and `spec.implementation.bash.tree` names that
+tree (default `.lok8s`). Every other command stays in Go. The list is
+explicit and committed with the project. The binary will not switch on the
+presence of a `.lok8s/libs/<x>` file, and not on an environment variable,
+because a stale tree or an inherited variable must not change the
+implementation without notice. Routing is per command, not per lib: a
+routed `lo registry ...` changes nothing that Go calls internally.
 
 ## Parity gates
 

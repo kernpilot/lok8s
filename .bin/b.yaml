@@ -30,7 +30,7 @@ binaries:
   # shrinks yet (owner sequencing): the framework tree (.lok8s/**) and argsh
   # still ship with every profile because the provider plugins and the
   # frozen reference implementation (LO_IMPL=bash) source the argsh runtime,
-  # the shipped .mcp.json still launches the argsh mcp builtin, and the
+  # `lo chat` still drives the argsh mcp builtin (the bash MCP variant), and the
   # parity gates (hack/parity-*.sh) need both implementations. The intended
   # end state per group is documented in docs/guide/toolchain.md. PINNED to
   # the first tag that carries lo-* assets; until that tag exists `b install`

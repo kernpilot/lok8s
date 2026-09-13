@@ -11,9 +11,12 @@
     },
     "lok8s": {
       "type": "stdio",
-      "command": ".lok8s/lo",
-      "args": ["mcp"],
-      "env": {}
+      "command": "bin/lo",
+      "args": ["mcp", "start"],
+      "env": {
+        "PATH_BASE": ".",
+        "LO_MCP_ALLOW": "destructive"
+      }
     }
   }
 }

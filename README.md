@@ -310,7 +310,7 @@ The optional **operator** ([shell-operator](https://github.com/flant/shell-opera
 lok8s treats AI as a first-class, **local-first** capability — not a cloud dependency.
 
 - **`lo chat` — an on-device cluster assistant.** Ask "why won't this deploy?" or "what's the LB IP?" and it routes through `lo` tools, gathers facts, and streams a markdown answer in your terminal. It runs **read-only by default**, enforced in *code* (not by trusting the model), so it can't mutate your cluster unless you switch posture with `/posture open`. Backends are local: [Ollama](https://ollama.com) or any OpenAI-compatible server (llama-server, [llamafile](https://github.com/Mozilla-Ocho/llamafile), vLLM). Frontier CLIs (claude/gemini/codex) are strictly opt-in handoffs. Run `lo chat --check` for a guided setup. ([Local AI guide](docs/guide/lo-chat.md))
-- **`lo mcp` — your CLI as agent tools.** Every leaf `lo` command is exposed as an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio, so agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root (it still launches the argsh-builtin server; `lo mcp` is the native one — see below).
+- **`lo mcp` — your CLI as agent tools.** Every leaf `lo` command is exposed as an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio, so agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root. It launches `bin/lo mcp start` with the full tool surface enabled (see below).
 - **`lo ai` — wire skills into your assistant.** The repo ships curated [skills](skills/) (cluster specs, services, addons, secrets, the dev loop, troubleshooting…). `lo ai link claude` symlinks them into `.claude/skills/` for native loading; other agents get them by injection. `lo ai check` reports the whole setup at a glance.
 
 Try it in two commands:
@@ -320,7 +320,7 @@ lo chat --check    # guided: checks the bridge + a local model, prints setup hin
 lo chat            # then ask, e.g. "why won't my deployment start?"
 ```
 
-If a piece needs setup, `lo ai check` / `lo doctor` tell you exactly what to run. (`lo mcp` is native to the binary — `lo mcp claude|vscode|cursor enable` writes the editor config; the `.mcp.json` shipped in the repo root still launches the previous argsh-builtin server, which wants `argsh builtins install`.)
+If a piece needs setup, `lo ai check` / `lo doctor` tell you exactly what to run. (`lo mcp` is native to the binary. `lo mcp claude|vscode|cursor enable` writes the editor config. The bash variant, the argsh `mcp` builtin, starts as `.lok8s/lo mcp` from a checkout and wants `argsh builtins install`; see [`lo mcp`](docs/reference/cli.md#lo-mcp).)
 
 &nbsp;
 
