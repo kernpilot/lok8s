@@ -116,9 +116,10 @@ it applies".
 The rel "bash" is the frozen bash implementation (lo, libs/, utils/, the
 drivers' code, the provider plugins). Ejecting it writes the code half into
 .lok8s/ with a .lo-origin marker at the tree root and ejects every data asset
-the project lacks, so .lok8s/ is a complete tree: LO_IMPL=bash and the
-provider plugins then run from it instead of the copy the binary extracts
-into its cache. It is never part of --all or of the referenced set.`,
+the project lacks, so .lok8s/ is a complete tree: the provider plugins then
+run from it instead of the copy the binary extracts into its cache, and
+lok8s.yaml can route commands to it (spec.implementation; a routing never
+runs from the cache). It is never part of --all or of the referenced set.`,
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

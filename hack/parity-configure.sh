@@ -3,7 +3,7 @@
 # for the configure/inspect commands: lint, kubeconfig, doctor.
 #
 # For every case, runs BOTH implementations (the Go binary, and the same
-# binary with LO_IMPL=bash forcing the argsh passthrough) against a synthetic
+# binary routed to the frozen tree by the project file) against a synthetic
 # project and diffs stdout, stderr, and exit codes.
 #
 # doctor's output depends on the machine's toolchain (which tools exist, the
@@ -355,5 +355,16 @@ check - doctor                              # active alpha.dev (kind lo)
 check - doctor --domain gamma.app           # Deploy -> alpha.dev
 check - doctor --domain nowhere.dev         # active domain has no spec
 check - doctor --domain prov.dev            # provider / infrastructure section (hetzner, offline)
+
+# ── routed commands (spec.implementation.bash.commands) ─────────────────────
+# The Go side's project file keeps `default: go` and lists one command for
+# the bash tree; the binary then execs <project>/.lok8s/lo for it with the
+# verbatim argv. Both sides run the same bash code, and the strict diff
+# proves the exec path: argv, the prepared PATH, the tree. `doctor` is the
+# widest output; `version` the smallest (routed, the Go side prints the
+# `bash` row too, so no allowance is needed).
+PARITY_ROUTE_GO=doctor check - doctor
+PARITY_ROUTE_GO=doctor check - doctor --domain gamma.app
+PARITY_ROUTE_GO=version check - version
 
 report

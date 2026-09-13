@@ -6,7 +6,7 @@
 # pass, spec-flag encryption fail, EOL/newer k8s versions, NodePort/privileged
 # /plaintext targets, SecurityPolicy deny + unmerged route override, identity-
 # only EncryptionConfiguration, deploy-only domain, invalid domain) and runs
-# BOTH implementations (the Go binary, and the same binary with LO_IMPL=bash)
+# BOTH implementations (the Go binary, and the same binary routed to the frozen tree by the project file)
 # for every domain × {human, --json, --sarif}, diffing stdout, stderr, and
 # exit codes byte-for-byte. Absolute project paths in the output are
 # normalized to PROJ (some findings embed them).

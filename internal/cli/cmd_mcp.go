@@ -202,10 +202,13 @@ var shimLeaves = map[string][]commandSpec{}
 // newMCPTree builds the tree the MCP server projects into tools: the
 // usage-mirrored tree, the shim dispatchers' leaves, and the MCP hints.
 func newMCPTree(paths *config.Paths) *cobra.Command {
-	root := newUsageTree(paths)
+	// No routing here: the projection must not depend on the project
+	// file. The tool subprocess (`lo <cmd> …`, this binary) applies
+	// spec.implementation itself.
+	root := newUsageTree(paths, routing{})
 	for _, cmd := range root.Commands() {
 		for _, spec := range shimLeaves[cmd.Name()] {
-			cmd.AddCommand(newShimCommand(paths, spec))
+			cmd.AddCommand(newShimCommand(paths, spec, paths.Lok8s, nil))
 		}
 	}
 	mcpAnnotate(root)

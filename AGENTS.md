@@ -23,21 +23,32 @@ Security applies to every change — features, fixes, refactors, tests.
 `lo` is a Go binary (`cmd/lo`, `internal/**`). **Go is canonical**: every
 command runs natively and every change lands there first. The argsh tree
 under `.lok8s/` is the **frozen reference** of the port: bugfix-only, never
-deleted, and still runnable in full via `LO_IMPL=bash lo …` (the binary
-execs `bash <tree>/lo` with argv untouched). The binary embeds that tree
+deleted, and still runnable in full. The project file `lok8s.yaml` selects
+the implementation (`spec.implementation.default: go|bash`, or
+`bash.commands: [registry, …]` for a list of top-level commands under a
+`go` default; `internal/cli/routing.go`): for a routed command the binary
+execs `bash <project>/<tree>/lo` with argv untouched. **No environment
+variable selects the implementation**: `LO_IMPL` and `LO_GO_BASH` are
+removed, and `lo` reads neither. The binary embeds that tree
 (`internal/assets/lok8s/**`, the mirror of the whole `.lok8s/`): without a
 checkout it extracts the tree once into `${XDG_CACHE_HOME:-~/.cache}/lok8s/<version>/`
-(`assets.BashTree`); a checkout or an ejected tree (`lo assets eject bash`)
-always wins over the cache.
+(`assets.BashTree`) for the provider plugins and `lo drivers <name>`; a
+checkout or an ejected tree (`lo assets eject bash`) always wins over the
+cache, and a routed command needs the tree in the project (never the cache).
 
 Ten differential parity harnesses (`hack/parity-*.sh`) and a tree-drift
-`go test` hold the two together. **They must stay green.** Full map, seams
-and the deviations catalogue: [docs/reference/go-migration.md](docs/reference/go-migration.md).
+`go test` hold the two together. **They must stay green.** The harnesses
+switch implementations by writing the synthetic project's `lok8s.yaml`
+before every run (`parity::implementation` in `hack/lib/parity.sh`;
+`PARITY_ROUTE_GO=<cmd>` routes one command on the Go side), never through
+the environment. Full map, seams and the deviations catalogue:
+[docs/reference/go-migration.md](docs/reference/go-migration.md).
 
 Three seams still run bash from the frozen tree on purpose: provider plugins
 (`providers/<name>/main` in the bash tree, via `internal/provider/bridge`),
-`lo drivers <name>` for a driver without a Go twin, and `LO_IMPL=bash`. All
-three resolve the tree through `assets.BashTree`; none needs a checkout.
+`lo drivers <name>` for a driver without a Go twin, and a command routed by
+`lok8s.yaml`. The first two resolve the tree through `assets.BashTree` and
+need no checkout; a routed command runs `<project>/<tree>/lo` only.
 
 **Two builds from one tree** (`internal/render`, build tag `inprocess`).
 `lo` (*core*, the default `make build`) renders through the pinned
@@ -127,7 +138,7 @@ Rules that came from incidents:
 | providers | `internal/provider/bridge` (runs the bash plugins as `bash -c` children) | `.lok8s/providers/hetzner/` (`main` + `utils/`) — **still the live implementation** |
 | provisioning | `internal/provision` (dispatch, gates, spec), `internal/bootstrap` (the addon DAG), `internal/inventory`, `internal/recover` | `.lok8s/libs/{provision,bootstrap,inventory,recover}` |
 | build / deploy | `internal/build`, `internal/deploy`, `internal/image`, `internal/gitops` | `.lok8s/libs/{build,deploy,image,gitops}` |
-| render | `internal/render` — `render.go` (both builds: `LO_RENDER`, the exec pipeline), `core.go` (`!inprocess`: exec only, `DispatchPlugin` a no-op), `inprocess.go` + `dispatch.go` + `pluginhome.go` + `khelm.go` (`inprocess`: `kustomize build` via sigs.k8s.io/kustomize/api, the self-exec plugin home, `Secret` → `kustomize/plugins/secret` imported, `ChartRenderer` → khelm as a library) | the pinned `kustomize` + `.kustomize/` exec plugins (what `LO_IMPL=bash`, lo core and `LO_RENDER=exec` run) |
+| render | `internal/render`: `render.go` (both builds: `LO_RENDER`, the exec pipeline), `core.go` (`!inprocess`: exec only, `DispatchPlugin` a no-op), `inprocess.go` + `dispatch.go` + `pluginhome.go` + `khelm.go` (`inprocess`: `kustomize build` via sigs.k8s.io/kustomize/api, the self-exec plugin home, `Secret` → `kustomize/plugins/secret` imported, `ChartRenderer` → khelm as a library) | the pinned `kustomize` + `.kustomize/` exec plugins (what a routed command, lo core and `LO_RENDER=exec` run) |
 | toolchain | `internal/toolchain` — `pins.go` (kustomize API↔CLI, khelm, helm, drift-tested), `template.go` (the consumer `.bin/b.yaml`, never overwritten), `bootstrap.go` (b's pinned release tarball, sha256-verified, then `b install`), `doctor.go`. Also `internal/cli/cmd_init_toolchain.go` | `.bin/b.yaml` (the contributor profile file) |
 | kubehz | `internal/kubehz`, `internal/driver/kubehz` | `.lok8s/libs/kubehz/` (main, hosted, manifests/) |
 | secrets / lint / audit | `internal/secrets`, `internal/lint`, `internal/audit` | `.lok8s/libs/{secrets,lint,audit}` |

@@ -29,9 +29,9 @@ VERSION file from the project tree.
 ```text
 $ lo <command>
    │
-   ├─ LO_IMPL=bash set? ──yes──▶ exec bash .lok8s/lo <command> …   (verbatim argv)
+   ├─ lok8s.yaml routes <command> to bash? ──yes──▶ exec bash <project>/<tree>/lo <command> …   (verbatim argv)
    │
-   └─ no ──────────────────────▶ Go implementation (internal/cli/cmd_<command>.go)
+   └─ no ─────────────────────────────────────────▶ Go implementation (internal/cli/cmd_<command>.go)
 ```
 
 ### Command inventory
@@ -69,15 +69,15 @@ nobody mistakes them for unported commands.
 |---|---|---|
 | **Providers** (`.lok8s/providers/<name>/main`, e.g. `hetzner`) | `internal/provider/bridge` (provision dispatch: `up`, `provision`, `destroy`, `recover`), `lo doctor`'s provider section, `lo recover`'s rebuild | Providers are bash plugins that source the argsh runtime. Each contract call runs as a `bash -c` child over the ORIGINAL libs; state lives at the cloud or on disk, never in shell variables, so per-call loading is correct. |
 | **`lo drivers <name> …`** for a driver directory with no Go twin | `internal/cli/cmd_drivers.go` → `Shim` | A name that exists only as `.lok8s/drivers/<name>/main` is handed to the argsh implementation with argv verbatim; `--list` prints the union of both worlds. |
-| **`LO_IMPL=bash`** | `cmd/lo/main.go` → `internal/cli/shim.go` | The whole-process escape hatch below. |
+| **A routed command** (`lok8s.yaml`, `spec.implementation`) | `internal/cli/routing.go` → `internal/cli/shim.go` | The project file's choice: [Choosing the implementation](#choosing-the-implementation). |
 
 ::: warning Custom bash drivers and the provision dispatch
 The Go provision dispatch (`lo up` / `provision` / `destroy` / `status` /
 `bootstrap`) resolves the spec's `kind:` against the **Go driver registry**
 (`lo`, `capi`, `kubeone`, `kkp`, `kubehz`). A custom driver that exists only
 as `.lok8s/drivers/<kind>/main` is reported as `Unknown cluster kind` by the
-binary. It still works through `LO_IMPL=bash lo provision …` and through
-`lo drivers <kind> …`. The [Driver Contract](/reference/kind-contract)
+binary. It still works through `lo drivers <kind> …` and through a project
+whose `lok8s.yaml` routes `provision` to bash. The [Driver Contract](/reference/kind-contract)
 describes the bash contract that the frozen tree honours; a Go driver
 contract is not published yet.
 :::
@@ -130,7 +130,7 @@ second (`internal/execx.Look`):
 
 | Tool | Used by | Why not in-process |
 |---|---|---|
-| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **lo core: every render** (`lo build`, the addon render, the KubeOne addon staging) — the pinned binary and the two b-installed plugins `lo init toolchain` provisions. lo-full: only `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and `LO_IMPL=bash` | Core stays small and exec-only on purpose (the owner decision behind the two builds); lo-full links the same releases. Both are byte-identical — the pins are drift-tested. |
+| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **lo core: every render** (`lo build`, the addon render, the KubeOne addon staging): the pinned binary and the two b-installed plugins `lo init toolchain` provisions. lo-full: only `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and a command routed to bash | Core stays small and exec-only on purpose (the owner decision behind the two builds); lo-full links the same releases. Both are byte-identical: the pins are drift-tested. |
 | `yq` | `lo build` split mode (the YAML stream transforms and per-Secret re-renders), `lo env services` (the deep-merge the Tiltfile consumes) | yq's emitter has opinions (`---` on every non-first document, sequence-dash indentation) that `gopkg.in/yaml.v3` does not reproduce byte-for-byte. Field *extraction* from YAML is native everywhere. |
 | `sops` | `lo build` split-mode Secret twins | The `.enc` files must stay interoperable with the sops CLI. (`lo secrets` itself uses the sops **library** in binary mode; the files it writes are the same format.) |
 | `kubectl`, `kind`, `docker`, `tilt`, `clusterctl`, `kubeone`, `hcloud`, `mkcert`, `envsubst` | drivers, deploy, registries, tilt, trust | These are the tools lok8s orchestrates; calling them as-is keeps "what lok8s runs is what you'd run by hand" true. |
@@ -235,7 +235,7 @@ What did **not** move: `yq` (split-mode transforms, `lo env services`) and
 `sops` (WP5). `lo kustomize {build,test,clean,list}` still manages the
 standalone plugin under `.kustomize/` for the frozen tree (and for a core
 build without `b`), and `lo doctor` still reports `KUSTOMIZE_PLUGIN_HOME` /
-the built plugin because `LO_IMPL=bash`, the provider plugins, lo core and
+the built plugin because a command routed to bash, the provider plugins, lo core and
 `LO_RENDER=exec` need them (that text is unchanged; `hack/parity-configure.sh`
 diffs it; the pinned-toolchain section doctor adds is gated on the
 `lo init toolchain` marker or `--toolchain`, so the diff stays strict).
@@ -356,7 +356,7 @@ b install` still carries `.lok8s/` and the pinned toolchain in `.bin/`,
 and the binary honors that tree first (precedence above). What the binary
 still needs from it is the bash that has no Go twin yet: the Tilt
 extension (`.lok8s/tilt/`), the provider plugins, and the frozen
-entrypoint + libraries the parity gates and `LO_IMPL=bash` run. The data
+entrypoint + libraries the parity gates and a routed command run. The data
 files it used to need (addons, driver templates, the CRD mirror, the chat
 defaults, `VERSION`) are embedded now. What changed for the user is only
 the entrypoint: `lo` on your `PATH` is the binary instead of `.lok8s/lo`.
@@ -370,8 +370,9 @@ states what `b` still manages today versus the intended end state.
 ## What still runs as bash
 
 Three seams run bash from the frozen tree. Each one is a choice, not a
-gap in the port. None of them needs a checkout: the binary embeds the
-whole tree and serves it from one of three places, in this order.
+gap in the port. The provider plugins and `lo drivers <name>` need no
+checkout: the binary embeds the whole tree and serves it from one of three
+places, in this order. A routed command runs the project's own tree only.
 
 1. `PATH_LOK8S`, when it is set and holds `lo` (a checkout, or a project
    that ran `lo assets eject bash`).
@@ -403,12 +404,10 @@ implementation with argv untouched. A driver of the project's own needs
 the tree beside it (`lo assets eject bash`). `--list` prints the union of
 the Go registry, the project's `.lok8s/drivers/` and the embedded tree.
 
-**`LO_IMPL=bash`.** The whole process runs as `bash <tree>/lo`, described
-in the next section. The variable is slated for removal: the project
-configuration will select the implementation per command (`lok8s.yaml`,
-`spec.implementation`), and a routing to bash will accept a project or
-checkout tree only, never the cache (the resolver reports the source of
-the tree as a typed value for that).
+**A routed command.** The project file names it (`spec.implementation`,
+[Choosing the implementation](#choosing-the-implementation)). The process
+is replaced by `bash <project>/<tree>/lo <argv>`. The tree must be in the
+project: never the cache, never a checkout elsewhere.
 
 What each seam needs on disk:
 
@@ -416,7 +415,7 @@ What each seam needs on disk:
 |---|---|
 | Hetzner provider | `argsh` in `.bin/` (the `bash` group of `.bin/b.yaml`, then `b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
 | `lo drivers <name>` | `argsh`, plus whatever the driver calls |
-| `LO_IMPL=bash` | `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `jq`, `envsubst`, `sops`) |
+| A routed command | `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `jq`, `envsubst`, `sops`) |
 
 The binary prepares `PATH` and every `PATH_*` variable for these children
 the way the project's `.envrc` would (`bridge.Env`), so a consumer does not
@@ -431,40 +430,53 @@ change, with a real Hetzner account to prove it against. The bridge keeps
 the provider correct today at no risk to live clusters. Port it when
 provider behaviour needs to change, not before.
 
-## `LO_IMPL=bash`: the escape hatch
+## Choosing the implementation
 
-```sh
-LO_IMPL=bash lo build          # this one call: bash implementation, Go skipped
-export LO_IMPL=bash            # this shell: every command via .lok8s/lo
+The project file names the implementation; nothing in the environment
+does. `LO_IMPL` and `LO_GO_BASH` are removed, not deprecated: an
+environment variable is inherited by every child, survives across
+directories and can be set by anything that ran before `lo`. The file is
+committed, reviewed with the project and scoped to it.
+
+```yaml
+kind: Project
+spec:
+  implementation:
+    default: go              # go | bash; go when absent
+    bash:
+      commands: [registry]   # routed to the bash tree; top-level names only
+      tree: .lok8s           # project-relative, inside the project
 ```
 
-`LO_IMPL=bash` bypasses the Go implementation entirely, for every command.
-The binary replaces itself with `bash .lok8s/lo <args>` after preparing the
-environment the way the project's `.envrc` would (toolchain and framework
-directories on `PATH`, `KUSTOMIZE_PLUGIN_HOME` defaulted). Nothing is
-parsed on the way; argv reaches the argsh implementation untouched.
+`default: bash` routes every command: the binary replaces itself with
+`bash <project>/<tree>/lo <args>` after preparing the environment the way
+the project's `.envrc` would (toolchain and framework directories on
+`PATH`, `KUSTOMIZE_PLUGIN_HOME` defaulted). Nothing is parsed on the way;
+argv reaches the argsh implementation untouched. `commands` routes the
+listed top-level commands under a `go` default. The tree is always
+`<project>/<tree>/lo`: the cache extract and a `PATH_LOK8S` checkout are
+never routed to. The full rules, the error strings and what `lo lint` and
+`lo doctor` report: [Choosing the implementation](cli.md#choosing-the-implementation)
+in the CLI reference.
 
-Use it when a command misbehaves: if the bash side is right and the Go side
-is wrong, that is a parity bug — please report it with the command line and
-both outputs. There is no `LO_IMPL=go`; the binary is the default.
+Use a routing when a command misbehaves: if the bash side is right and the
+Go side is wrong, that is a parity bug. Please report it with the command
+line and both outputs.
 
-Per-command routing is configured in `lok8s.yaml` (planned, WP8).
-`spec.implementation.default: go|bash` selects the implementation for the
-project. `spec.implementation.bash.commands` lists the commands the binary
-runs through the bash tree, and `spec.implementation.bash.tree` names that
-tree (default `.lok8s`). Every other command stays in Go. The list is
-explicit and committed with the project. The binary will not switch on the
-presence of a `.lok8s/libs/<x>` file, and not on an environment variable,
-because a stale tree or an inherited variable must not change the
-implementation without notice. Routing is per command, not per lib: a
-routed `lo registry ...` changes nothing that Go calls internally.
+Routing is per command, not per lib: a routed `lo registry …` changes
+nothing that Go calls internally (`lo up` still manages the registries with
+Go code). A customised lib behind a routed command is the project's own
+fork from that point: the parity harnesses prove the stock tree only, and
+`lo doctor` warns for the commands whose state both sides write. The binary
+never switches on the presence of a `.lok8s/libs/<x>` file: a stale tree
+must not change the implementation without notice.
 
 ## Parity gates
 
 A port is not "done" when it compiles. Every command is held to the bash
 implementation by differential tests under `hack/`: each covered invocation
-runs **both** implementations (the binary, and the same binary with
-`LO_IMPL=bash`) against a synthetic project and diffs stdout, stderr, and
+runs **both** implementations (the binary, and the same binary in a
+project whose `lok8s.yaml` says `default: bash`) against a synthetic project and diffs stdout, stderr, and
 exit codes byte-for-byte — and, where a command writes files, the resulting
 trees.
 
@@ -564,6 +576,7 @@ trap and waited on every foreground child; the binary cancels a context.
 | # | Deviation | Where |
 |---|---|---|
 | D25 | **Two children bypass `execx.Runner` on purpose.** `lo ai check` runs the chat binary as a raw `exec.Command` with the terminal's stdio: it is a foreground chat, and the terminal's Ctrl-C reaches it directly, the same way it reached the bash child. `lo tilt up` starts Tilt with a raw `exec.Command` in its own session (`setsid`) and releases the process: the bash contract is `nohup tilt up &`, and the child must outlive the command. A Runner child is waited on and cancelled with the command context, which neither case wants. Every other tool call goes through the Runner. | `internal/cli/cmd_ai.go` (`runProcess`), `internal/tilt/tilt.go` (`startDetached`) |
+| D29 | **Routing exists only in the binary.** The bash entrypoint runs what it is. The binary reads `spec.implementation` from `lok8s.yaml` and execs `<project>/<tree>/lo` for a routed command, argv untouched. No environment variable selects the implementation (`LO_IMPL` is gone), and a routing never targets the cache extract or a checkout outside the project. | `internal/cli/routing.go`, `internal/config/implementation.go` |
 | D26 | **A cancelled context sends SIGINT to the running child.** On Ctrl-C the terminal delivers SIGINT to the whole foreground process group in both implementations. On SIGTERM the bash shell died and left the child running, orphaned. The binary cancels the command context on either signal, `cmd.Cancel` sends the child SIGINT, and the parent waits for it: kubeone, terraform and kubectl finish their own cleanup, then `lo` exits 128+n. | `internal/execx/runner.go` (`cmd.Cancel`) |
 
 ### Reproduced on purpose (so nobody "fixes" them in one implementation only)

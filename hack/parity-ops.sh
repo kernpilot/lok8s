@@ -3,8 +3,8 @@
 # the cluster-touching ops surface: `lo deploy`, `lo recover`, `lo gitops`.
 #
 # Modeled on parity-test.sh: for every covered invocation, runs BOTH
-# implementations (the Go binary, and the same binary with LO_IMPL=bash
-# forcing the argsh passthrough) against a synthetic project and diffs
+# implementations (the Go binary, and the same binary routed to the frozen tree
+# by the project file) against a synthetic project and diffs
 # stdout, stderr, and exit codes. Absolute project paths are normalized to
 # PROJ.
 #
@@ -26,18 +26,10 @@ unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE
   KAPPLY_TTY KAPPLY_POLL_INTERVAL SOURCE_DATE_EPOCH CI
 
 # ── synthetic project ────────────────────────────────────────────────────────
-# .lok8s is a REAL dir of symlinks so `providers/` can carry the mock; .bin
-# likewise so kubectl can be the stub.
-mkdir -p "${PROJ}/clusters" "${PROJ}/.lok8s/providers"
-for entry in "${ROOT}"/.lok8s/* "${ROOT}"/.lok8s/.[!.]*; do
-  [[ -e "${entry}" ]] || continue
-  name="$(basename "${entry}")"
-  [[ "${name}" == "providers" ]] && continue
-  ln -s "${entry}" "${PROJ}/.lok8s/${name}"
-done
-for entry in "${ROOT}"/.lok8s/providers/*; do
-  ln -s "${entry}" "${PROJ}/.lok8s/providers/$(basename "${entry}")"
-done
+# .lok8s is a COPY (a routed tree and its `lo` must resolve inside the
+# project; a linked entrypoint is refused) so `providers/` can carry the
+# mock; .bin is a dir of links so kubectl can be the stub.
+parity::new_project "${PROJ}"
 parity::own_bin "${PROJ}"
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash

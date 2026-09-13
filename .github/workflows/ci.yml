@@ -314,8 +314,9 @@ jobs:
       matrix:
         # Which `lo` orchestrates the run. `go`: bin/lo, the canonical
         # implementation — this leg is its only real-cluster proof in CI.
-        # `bash`: the same binary with LO_IMPL=bash, which execs the frozen
-        # argsh tree (.lok8s/lo) with argv untouched, so the reference
+        # `bash`: the same binary, routed to the frozen argsh tree by the
+        # fixture's lok8s.yaml (spec.implementation.default: bash), which
+        # execs <fixture>/.lok8s/lo with argv untouched, so the reference
         # keeps its own proof and the shim is exercised on the way. Before
         # the matrix existed the job put .lok8s first on PATH and never
         # built the binary: it proved the frozen tree only.
@@ -332,8 +333,29 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build lo (the binary under test; LO_IMPL=bash routes through it too)
+      - name: Build lo (the binary under test; the bash leg routes through it too)
         run: make build
+
+      - name: Select the implementation (lok8s.yaml spec.implementation)
+        # The switch is the fixture's project file, never an environment
+        # variable (the binary reads none for it). `bash` needs the tree
+        # INSIDE the project: a routing never targets a checkout elsewhere
+        # or the binary's cache extract, so the repo's .lok8s is copied in.
+        # The routed exec also derives the toolchain from the project root
+        # (<project>/.bin, never an inherited PATH_BIN: the entrypoint
+        # sources `${PATH_BIN}/argsh`), so the repo's .bin is linked in too.
+        env:
+          FIXTURE: single-local-build
+          IMPLEMENTATION: ${{ matrix.lo_impl }}
+        run: |
+          set -euo pipefail
+          BASE="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE}"
+          if [ "${IMPLEMENTATION}" = bash ]; then
+            cp -R "${GITHUB_WORKSPACE}/.lok8s" "${BASE}/.lok8s"
+            ln -s "${GITHUB_WORKSPACE}/.bin" "${BASE}/.bin"
+          fi
+          printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: e2e\nspec:\n  implementation:\n    default: %s\n' "${IMPLEMENTATION}" > "${BASE}/lok8s.yaml"
+          cat "${BASE}/lok8s.yaml"
 
       - name: Trust the plain-HTTP dev registries (10.125.0.0/16)
         # `lo up` stands up plain-HTTP registry containers on the project
@@ -403,9 +425,7 @@ jobs:
           # so a hung kind-create / cilium-wait fails in minutes, not at the
           # job's 18min ceiling.
           LOK8S_UP_TIMEOUT: 720
-          # Only the value `bash` means anything to the binary (cmd/lo/main.go):
-          # it execs the frozen tree. Anything else runs the Go implementation.
-          LO_IMPL: ${{ matrix.lo_impl }}
+          IMPLEMENTATION: ${{ matrix.lo_impl }}
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}"
@@ -413,6 +433,9 @@ jobs:
 
           # Replicate the e2e helper env (tests/e2e/lib/helpers.bash :: e2e::init):
           # the fixture dir is PATH_BASE; framework + toolchain stay at the repo root.
+          # On the bash leg the routed exec exports PATH_LOK8S=<fixture>/.lok8s
+          # (the copied tree) to its bash child itself; the Tilt extension and
+          # .lok8s/libs/tilt read PATH_BASE only, so nothing else needs it.
           export PATH_BASE="${BASE}"
           export PATH_LOK8S="${ROOT}/.lok8s"
           export PATH_SCRIPTS="${PATH_LOK8S}"
@@ -431,13 +454,24 @@ jobs:
           # Expose lo + the b toolchain to Tilt's local()/docker_build subprocesses.
           # bin/ FIRST: `lo` must resolve to the Go binary built above, never to
           # the argsh entrypoint in .lok8s/ (which stays on PATH for the
-          # frozen tree's own helpers and for the LO_IMPL=bash leg's exec).
+          # frozen tree's own helpers and for the bash leg's exec).
           export PATH="${ROOT}/bin:${PATH_LOK8S}:${PATH_BIN}:${PATH}"
 
           echo "::group::which lo"
           # Fail loud when PATH does not resolve to the binary under test.
           test "$(command -v lo)" = "${ROOT}/bin/lo"
           lo --version
+          # The leg must run the implementation the matrix names: the frozen
+          # tree prints a `bash` row in `lo version`, the Go code does not
+          # (the same proof hack/lib/parity.sh's parity::prove_switch makes).
+          # Captured first, then grepped: `lo version | grep -q` dies of
+          # SIGPIPE under pipefail once grep has its match (rc 141).
+          version_out="$(lo version 2>/dev/null)"
+          if [ "${IMPLEMENTATION}" = bash ]; then
+            grep -q '^bash ' <<<"${version_out}"
+          else
+            ! grep -q '^bash ' <<<"${version_out}"
+          fi
           echo "::endgroup::"
 
           echo "::group::lo doctor"

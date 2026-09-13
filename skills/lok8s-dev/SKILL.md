@@ -111,7 +111,7 @@ non-empty dir).
 The lok8s codebase is a Go binary plus a frozen bash reference (not Playwright):
 ```bash
 make build && go test ./...                     # the lo binary: unit tests + the tree-drift gate
-bash hack/parity-test.sh                        # binary vs `LO_IMPL=bash`, byte-for-byte (ten harnesses)
+bash hack/parity-test.sh                        # binary vs the bash tree (routed by lok8s.yaml), byte-for-byte (ten harnesses)
 ./.bin/argsh test tests/unit/ tests/operator/   # bats: the frozen bash tree + operator hooks
 bash hack/lint-shell.sh                         # shellcheck + argsh-lint (= npm run lint)
 ```

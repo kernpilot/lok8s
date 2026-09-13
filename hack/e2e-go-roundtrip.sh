@@ -133,6 +133,9 @@ trap teardown EXIT
 mkdir -p "${PROJ}/clusters/${DOMAIN}"
 ln -s "${ROOT}/.lok8s" "${PROJ}/.lok8s"
 ln -s "${ROOT}/.bin" "${PROJ}/.bin"
+# The implementation is the project file's choice, never the environment's:
+# Go, stated explicitly (the linked tree serves the data units only).
+printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: %s\nspec:\n  implementation:\n    default: go\n' "${NAME}" > "${PROJ}/lok8s.yaml"
 printf 'Tiltfile\n' > "${PROJ}/Tiltfile"
 cat > "${PROJ}/clusters/${DOMAIN}/cluster.lok8s.yaml" <<YAML
 apiVersion: cluster.lok8s.dev/v1beta1

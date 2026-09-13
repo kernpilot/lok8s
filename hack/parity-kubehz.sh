@@ -3,7 +3,7 @@
 # argsh implementation (same structure as hack/parity-test.sh).
 #
 # Every case runs BOTH implementations (the Go binary, and the same binary
-# with LO_IMPL=bash forcing the argsh passthrough) against a synthetic
+# routed to the frozen tree by the project file) against a synthetic
 # project and diffs stdout, stderr and exit codes. ONLY cluster-free and
 # api-free paths are exercised: config validation refusals, usage/flag
 # errors, `status` with no registration, the hosting-axis routing of every
