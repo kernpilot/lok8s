@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -364,21 +365,29 @@ func executables(t *testing.T, root string) testutil.Tree {
 	return tree
 }
 
-// Every top-level entry of .lok8s must be in `mirrored`; an entry that is
-// not would silently stay out of the binary.
+// Every tracked top-level entry of .lok8s must be in `mirrored`; an entry
+// that is not would silently stay out of the binary. Tracked entries
+// only: a toolchain step may drop an untracked file into .lok8s (CI does),
+// and that is not part of the tree.
 func TestMirroredListCoversLegacyTree(t *testing.T) {
 	t.Parallel()
-	legacy := filepath.Join(testutil.RepoRoot(t), ".lok8s")
-	entries, err := os.ReadDir(legacy)
+	root := testutil.RepoRoot(t)
+	git, err := exec.LookPath("git")
 	if err != nil {
-		t.Skipf("frozen tree not present: %v", err)
+		t.Skip("git not on PATH")
 	}
+	out, err := exec.Command(git, "-C", root, "ls-files", "--", ".lok8s").Output()
+	if err != nil || len(out) == 0 {
+		t.Skipf("git ls-files .lok8s: %v", err)
+	}
+	seen := map[string]bool{}
 	var names []string
-	for _, e := range entries {
-		if e.Name() == MarkerFile {
-			continue
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		top := strings.SplitN(strings.TrimPrefix(line, ".lok8s/"), "/", 2)[0]
+		if top != "" && !seen[top] {
+			seen[top] = true
+			names = append(names, top)
 		}
-		names = append(names, e.Name())
 	}
 	want := append([]string(nil), mirrored...)
 	sort.Strings(want)

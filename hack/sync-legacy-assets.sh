@@ -66,20 +66,19 @@ copy_tree() {
   find "${dst}" -name .lo-origin -type f -delete 2>/dev/null || true
 }
 
-# Every top-level entry on either side must be listed: an entry that is not
-# would silently stay out of the mirror (and out of the binary).
+# Every TRACKED top-level entry on either side must be listed: an entry
+# that is not would silently stay out of the mirror (and out of the
+# binary). Untracked files are local work or toolchain droppings, not tree.
 listed() { local e; for e in "${SUBTREES[@]}"; do [[ "${e}" == "${1}" ]] && return 0; done; return 1; }
 rc=0
 for side in "${MIRROR}" "${LEGACY}"; do
-  for entry in "${side}"/* "${side}"/.[!.]*; do
-    [[ -e "${entry}" ]] || continue
-    name="$(basename "${entry}")"
-    [[ "${name}" == .lo-origin ]] && continue
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
     if ! listed "${name}"; then
-      echo "error: ${entry#"${ROOT}"/} is not in SUBTREES (add it to hack/sync-legacy-assets.sh and assets_test.go)" >&2
+      echo "error: ${side#"${ROOT}"/}/${name} is not in SUBTREES (add it to hack/sync-legacy-assets.sh and assets_test.go)" >&2
       rc=1
     fi
-  done
+  done < <(git -C "${ROOT}" ls-files -- "${side}" | sed -e "s|^${side#"${ROOT}"/}/||" -e 's|/.*||' | sort -u)
 done
 (( rc == 0 )) || exit "${rc}"
 for sub in "${SUBTREES[@]}"; do
