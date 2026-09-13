@@ -89,9 +89,10 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	}
 	// Go-only: the pinned-toolchain section (b, kustomize, the khelm and
 	// Secret plugins at the pins). Shown by default only in a project whose
-	// .bin/b.yaml was written by `lo init toolchain` (the marker line); the
-	// flag forces it anywhere.
-	cmd.Flags().BoolVar(&toolchainFlag, "toolchain", false, "Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo init toolchain)")
+	// .bin/b.yaml was written by `lo toolchain install` (the marker line);
+	// the flag forces it anywhere. `lo toolchain doctor` is the section on
+	// its own.
+	cmd.Flags().BoolVar(&toolchainFlag, "toolchain", false, "Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo toolchain install)")
 	return cmd
 }
 
@@ -198,10 +199,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 	// itself); the lines below still matter for a command routed to bash,
 	// the provider plugins and LO_RENDER=exec, and their text is unchanged so
 	// hack/parity-configure.sh keeps diffing doctor byte-for-byte.
-	pluginHome := os.Getenv("KUSTOMIZE_PLUGIN_HOME")
-	if pluginHome == "" {
-		pluginHome = filepath.Join(paths.Base, ".kustomize")
-	}
+	pluginHome := kustomizePluginHome(paths)
 	doctorOK(out, "KUSTOMIZE_PLUGIN_HOME="+pluginHome)
 	if fsutil.IsExecutable(filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))) {
 		doctorOK(out, "secrets.lok8s.dev plugin built")
@@ -216,6 +214,15 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		return doctorToolchain(ctx, out, paths, pluginHome, path)
 	}
 	return true
+}
+
+// kustomizePluginHome is KUSTOMIZE_PLUGIN_HOME as the render and the bash
+// children see it: the variable when set, else <project>/.kustomize.
+func kustomizePluginHome(paths *config.Paths) string {
+	if v := os.Getenv("KUSTOMIZE_PLUGIN_HOME"); v != "" {
+		return v
+	}
+	return filepath.Join(paths.Base, ".kustomize")
 }
 
 // doctorTLSSection is `--- dev TLS (cert: CA) ---` (advisory).
@@ -354,7 +361,7 @@ func doctorBashMode(w io.Writer, paths *config.Paths) {
 // kustomize, the khelm ChartRenderer and the secrets.lok8s.dev Secret
 // plugin at the paths the exec render resolves, each at the pin lo was
 // built against (internal/toolchain). Printed only when .bin/b.yaml
-// carries the `lo init toolchain` marker or --toolchain is given, so a
+// carries the `lo toolchain install` marker or --toolchain is given, so a
 // vendored/profile-synced project's doctor output stays byte-identical to
 // the bash implementation (hack/parity-configure.sh diffs it strictly).
 // Returns false when a required tool is missing (lo core execs them;

@@ -13,8 +13,9 @@ package cli
 //
 // The routed tree is ALWAYS <project>/<tree>/lo. The cache extract and a
 // PATH_LOK8S checkout are never routed to: a customised lib lives in the
-// project, reviewed with it. Go-only commands (assets, mcp, operator, and
-// init for its project|toolchain subcommands) cannot be listed.
+// project, reviewed with it. Go-only commands (assets, mcp, operator,
+// toolchain, and init for its project|toolchain subcommands) cannot be
+// listed.
 //
 // Nothing is read from the environment and nothing switches on the
 // presence of a file inside the tree.

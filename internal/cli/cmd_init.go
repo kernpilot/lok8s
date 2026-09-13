@@ -104,7 +104,10 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	project.Flags().BoolVar(&noToolchain, "no-toolchain", false, "Write .bin/b.yaml but do not install b / run b install (no network)")
 	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file(s) to scaffold: mise (mise.toml), direnv (.envrc), both, none — PATH only, no PATH_* pins")
 
-	cmd.AddCommand(service, test, project, newInitToolchainCommand(paths))
+	// `lo init toolchain` is the hidden alias of `lo toolchain install`
+	// for one release (WP9): same flags, same run, a deprecation hint on
+	// stderr first.
+	cmd.AddCommand(service, test, project, newToolchainInstallCommand(paths, "toolchain", true))
 	return cmd
 }
 

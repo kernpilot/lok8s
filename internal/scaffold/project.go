@@ -192,7 +192,7 @@ func Project(base, name, dir string, force bool, out, stderr io.Writer, tc Proje
 	}
 	fmt.Fprintln(out, "Done. Next:")
 	if tc.Bootstrap == nil {
-		fmt.Fprintf(out, "  cd %s && lo init toolchain   # b + the pinned toolchain into .bin/ (skipped: --no-toolchain)\n", dir)
+		fmt.Fprintf(out, "  cd %s && lo toolchain install   # b + the pinned toolchain into .bin/ (skipped: --no-toolchain)\n", dir)
 	} else {
 		fmt.Fprintln(out, "  lo doctor               # verify the toolchain landed")
 	}
@@ -226,7 +226,7 @@ func WriteBYAML(bin, content string, dryRun bool, out io.Writer) error {
 		for line := range strings.SplitSeq(strings.TrimRight(res.Diff, "\n"), "\n") {
 			fmt.Fprintf(out, "    %s\n", line)
 		}
-		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo init toolchain`.")
+		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo toolchain install`.")
 		fmt.Fprintln(out, "  To keep yours: merge the pins by hand — `lo doctor` reports what differs from the pins.")
 	case dryRun:
 		fmt.Fprintf(out, "would write %s\n", res.Path)

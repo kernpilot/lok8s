@@ -104,6 +104,11 @@ var goOnlyCommands = []goOnlyCommand{
 		why:   "the eject model (internal/assets): list/show/eject/diff/update the framework assets embedded in the binary; bash reads .lok8s/** from disk and has no embedded copy to compare against",
 		build: newAssetsCommand,
 	},
+	{
+		name:  "toolchain",
+		why:   "the consumer toolchain via b (internal/toolchain): install the pins this binary was built against, verify them; the bash tree is installed by the b profile and has no such step",
+		build: newToolchainCommand,
+	},
 }
 
 // NewRoot builds the full lo command tree: the usage-mirrored tree plus the

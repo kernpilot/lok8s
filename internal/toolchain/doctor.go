@@ -1,6 +1,6 @@
 package toolchain
 
-// doctor.go — verify what `lo init toolchain` + `b install` landed: b
+// doctor.go — verify what `lo toolchain install` + `b install` landed: b
 // itself, and the three render tools at the paths the exec render
 // resolves, each at the pinned version. Read-only; the fix is always the
 // same command.
@@ -66,7 +66,7 @@ type DoctorOptions struct {
 }
 
 // Fix is the remedy every failed check names.
-const Fix = "fix: lo init toolchain"
+const Fix = "fix: lo toolchain install"
 
 // Doctor runs the checks. ctx bounds the probes (each gets ten seconds
 // under it).

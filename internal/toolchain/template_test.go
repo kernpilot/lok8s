@@ -122,6 +122,22 @@ func TestWriteNeverOverwrites(t *testing.T) {
 	if !HasMarker(res.Path) {
 		t.Fatal("written b.yaml has no marker")
 	}
+	// A file `lo init toolchain` wrote before WP9 carries the legacy line
+	// and is still ours; a foreign header is not.
+	legacy := filepath.Join(t.TempDir(), "b.yaml")
+	if err := os.WriteFile(legacy, []byte("# p\n"+legacyMarker+"\nbinaries: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !HasMarker(legacy) {
+		t.Fatal("the legacy marker is not recognised")
+	}
+	foreign := filepath.Join(t.TempDir(), "b.yaml")
+	if err := os.WriteFile(foreign, []byte("# lo-toolchain: managed pins\nbinaries: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if HasMarker(foreign) {
+		t.Fatal("a foreign header counts as the marker")
+	}
 
 	// Identical content: reported as Same, nothing rewritten.
 	res, err = Write(bin, content, false)
