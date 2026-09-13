@@ -55,7 +55,7 @@ the process environment, so the bootstrap DAG stays parallel on lo-full.
 `yq` and `sops` stay subprocesses until the same proof exists for them.
 The sops **library** (`lo secrets`) is the kernpilot age-only fork:
 `go.mod` replaces `github.com/getsops/sops/v3` with
-`github.com/kernpilot/sops/v3 v3.13.3-age.1` (upstream v3.13.3 minus every
+`github.com/kernpilot/sops/v3 v3.13.3-age.2` (upstream v3.13.3 minus every
 key backend except age, no CLI, no gRPC). That keeps the AWS, GCP, Azure and
 Vault SDKs, gRPC and protobuf out of the core build; `make size-check` (CI
 `go-tests`) fails when `bin/lo` grows past 36 MiB. A file or `.sops.yaml`

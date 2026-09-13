@@ -146,4 +146,4 @@ replace github.com/kernpilot/lok8s/kustomize => ./kustomize
 // github.com/kernpilot/sops kubehz/MERGE-GUIDE.md. Go refuses
 // `go install .../cmd/lo@<version>` for a module with replace directives
 // (this one and ./kustomize); build from a checkout instead.
-replace github.com/getsops/sops/v3 => github.com/kernpilot/sops/v3 v3.13.3-age.1
+replace github.com/getsops/sops/v3 => github.com/kernpilot/sops/v3 v3.13.3-age.2
