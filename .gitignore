@@ -84,3 +84,6 @@ argsh.so
 # generated addon index (built by docs/.vitepress/build-addons-index.sh in the
 # Deploy Docs workflow; never commit a locally-generated copy)
 docs/public/addons-index.json
+
+# Tilt writes Starlark API stubs here with `tilt dump api-docs`; generated, never committed.
+api/
