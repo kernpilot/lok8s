@@ -304,19 +304,21 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 		return ui.Handled(fmt.Errorf("capi: unsupported provider for credentials: %s", provider))
 	}
 
-	// bash: `kubectl create … | kubectl apply -f -` — a PIPELINE, so only
-	// the apply's status decides (this bash function predates the rendered-
-	// into-a-variable namespace guard in driver::provision and deliberately
-	// keeps the pipe: a failed create feeds apply an empty stream, and the
-	// apply's own failure is what surfaces). The create's error is ignored
-	// here for the same reason.
+	// bash: `kubectl create … | kubectl apply -f -`, a PIPELINE under the
+	// entrypoint's `set -o pipefail` (.lok8s/lo), so its status is the LAST
+	// non-zero one: a failed apply decides, and a failed create with a
+	// passing apply still fails the function. Both halves run either way (a
+	// failed create feeds apply an empty stream).
 	var manifest strings.Builder
-	_ = d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
-	return d.deps.Runner.Run(ctx, execx.Cmd{
+	createErr := d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
+	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", kubeconfig, "-f", "-"},
 		Stdin: strings.NewReader(manifest.String()),
-	})
+	}); err != nil {
+		return err
+	}
+	return createErr
 }
 
 // WaitReady ports capi::wait_ready: poll the Cluster CR's .status.phase

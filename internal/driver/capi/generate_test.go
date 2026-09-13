@@ -489,6 +489,29 @@ func TestEnsureCredentialsRefusesNewlineInValue(t *testing.T) {
 	}
 }
 
+// pipefail: a failed create is the function's status when the apply
+// passes; the apply still runs, as the second half of the pipeline did.
+func TestEnsureCredentialsCreateFailurePropagates(t *testing.T) {
+	t.Setenv("HCLOUD_TOKEN", "test-token")
+	t.Setenv("HROBOT_USER", "")
+	t.Setenv("HROBOT_PASSWORD", "")
+	d, runner, _ := testDriver(t)
+	createErr := errors.New("create: rc 1")
+	runner.handler = func(c execx.Cmd, _ string) error {
+		if c.Args[0] == "create" {
+			return createErr
+		}
+		return nil
+	}
+	err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "hetzner", "/tmp/kubeconfig.yaml")
+	if !errors.Is(err, createErr) {
+		t.Fatalf("err = %v, want the create's", err)
+	}
+	if len(runner.calls) != 2 || runner.calls[1].Args[0] != "apply" {
+		t.Fatalf("the apply must still run after a failed create: %d calls", len(runner.calls))
+	}
+}
+
 func TestEnsureCredentialsUnknownProvider(t *testing.T) {
 	d, runner, stderr := testDriver(t)
 	if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "gcp", "/tmp/kubeconfig.yaml"); err == nil {
