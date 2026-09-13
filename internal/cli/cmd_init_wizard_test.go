@@ -382,6 +382,33 @@ func TestInitWizardProjectRootMenu(t *testing.T) {
 	}
 }
 
+// A step that fails mid-plan: the failed command and the ones never
+// started are printed so the user can continue by hand.
+func TestInitWizardFailureListsWhatWasNotRun(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	seams := installInitSeams(t, true, ".\nacme\n1\ny\ndemo.dev\n1\ny\n0\ny\n")
+	prev := initToolchainInstall
+	initToolchainInstall = func(context.Context, string, []string, bool, io.Writer, io.Writer) error {
+		return errors.New("download refused (fake)")
+	}
+	t.Cleanup(func() { initToolchainInstall = prev })
+	stdout, _, err := runLo(t, NewRoot(synthProject(t)), "init")
+	if err == nil || !strings.Contains(err.Error(), "download refused") {
+		t.Fatalf("err %v", err)
+	}
+	if !strings.Contains(stdout, "failed: lo toolchain install --groups core,local\nnot run:\n  lo use demo.dev\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "\nDone.\n") {
+		t.Error("Done printed after a failure")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "clusters", ".active")); err == nil {
+		t.Error("lo use ran after the failure")
+	}
+	_ = seams
+}
+
 func TestInitAbort(t *testing.T) {
 	var b bytes.Buffer
 	if err := initAbort(initctx.ErrAborted, &b); !errors.Is(err, ErrHandled) || !strings.Contains(b.String(), "lo init: aborted, nothing written") {

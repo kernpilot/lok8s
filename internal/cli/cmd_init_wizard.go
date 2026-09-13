@@ -172,9 +172,18 @@ func initExecute(ctx context.Context, plan initctx.Plan, runner execx.Runner, ou
 	}
 	defer func() { _ = os.Chdir(prev) }()
 	paths := projectPaths(plan.Dir)
-	for _, a := range plan.Actions {
+	for i, a := range plan.Actions {
 		fmt.Fprintf(out, "==> %s\n", a.Command)
 		if err := initAction(ctx, plan, a, paths, runner, out, stderr); err != nil {
+			// The rest is the user's to run by hand: the failed step
+			// again once fixed, then what never started.
+			fmt.Fprintf(out, "failed: %s\n", a.Command)
+			if rest := plan.Commands()[i+1:]; len(rest) > 0 {
+				fmt.Fprintln(out, "not run:")
+				for _, c := range rest {
+					fmt.Fprintf(out, "  %s\n", c)
+				}
+			}
 			return scaffoldRun(err)
 		}
 	}
