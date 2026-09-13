@@ -38,7 +38,7 @@ func toolchainTemplate(name string, groups []string) (string, error) {
 
 func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 	var dir, groupsFlag string
-	var dryRun bool
+	var dryRun, withBash bool
 	cmd := &cobra.Command{
 		Use:   "toolchain",
 		Short: "Install the pinned toolchain via b (.bin/b.yaml + b + b install)",
@@ -46,8 +46,10 @@ func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 
   1. .bin/b.yaml from the template pinned to this lo (kustomize ` + toolchain.KustomizeCLI + `,
      khelm v` + toolchain.KhelmVersion + `, the secrets.lok8s.dev Secret plugin at this lo's version,
-     plus kubectl; kind/tilt/mkcert for --groups local; kubeone/hcloud for cloud).
-     An existing b.yaml is never overwritten — a diff is printed instead.
+     plus kubectl; kind/tilt/mkcert for --groups local; kubeone/hcloud for cloud;
+     argsh/yq/jq/envsubst/sops/ssh-to-age for bash, the runtime of LO_IMPL=bash
+     and the provider plugins: --with-bash). The bash tree itself is embedded
+     in the binary. An existing b.yaml is never overwritten — a diff is printed instead.
   2. .gitignore entries for .bin/ (b.yaml + b.lock stay committed).
   3. b itself into .bin/b: the pinned release v` + toolchain.BRelease.Version + ` tarball, downloaded over
      https to a temp file and verified against its published SHA-256 before
@@ -59,7 +61,11 @@ func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			setDebugFromVerbose(cmd)
-			groups, err := toolchain.NormalizeGroups(strings.Split(groupsFlag, ","))
+			selected := strings.Split(groupsFlag, ",")
+			if withBash {
+				selected = append(selected, toolchain.GroupBash)
+			}
+			groups, err := toolchain.NormalizeGroups(selected)
 			if err != nil {
 				return err
 			}
@@ -81,7 +87,8 @@ func newInitToolchainCommand(paths *config.Paths) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&dir, "path", "p", "", "Project directory (default: the nearest project root above the working directory, else the working directory)")
-	cmd.Flags().StringVar(&groupsFlag, "groups", strings.Join(toolchain.DefaultGroups, ","), "Groups to activate (core,local,cloud; core is implied)")
+	cmd.Flags().StringVar(&groupsFlag, "groups", strings.Join(toolchain.DefaultGroups, ","), "Groups to activate (core,local,cloud,bash; core is implied)")
+	cmd.Flags().BoolVar(&withBash, "with-bash", false, "Also activate the bash group: argsh, yq, jq, envsubst, sops, ssh-to-age (what LO_IMPL=bash and the provider plugins run on)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Print what would be written, downloaded and run; touch nothing")
 	return cmd
 }

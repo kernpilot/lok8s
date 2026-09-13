@@ -20,11 +20,13 @@ import (
 const Marker = "# lo-toolchain: managed pins — written by `lo init toolchain`"
 
 // Groups a consumer selects. core is always on: it is what every `lo`
-// path execs.
+// path execs. bash is the runtime of the frozen bash implementation
+// (LO_IMPL=bash) and the provider plugins; opt-in (`--with-bash`).
 const (
 	GroupCore  = "core"
 	GroupLocal = "local"
 	GroupCloud = "cloud"
+	GroupBash  = "bash"
 )
 
 // DefaultGroups is the `lo init toolchain` default selection.
@@ -72,6 +74,14 @@ func entries(loVersion string) []entry {
 		{key: "mkcert", group: GroupLocal},
 		{key: "github.com/kubermatic/kubeone", group: GroupCloud},
 		{key: "hcloud", group: GroupCloud},
+		{key: "github.com/arg-sh/argsh", group: GroupBash,
+			comment: "argsh: the runtime the bash tree sources (${PATH_BIN}/argsh); onPost installs the\nnative builtin (argsh.so) beside it.",
+			fields:  []string{"asset: argsh", `onPost: "${B_BIN} builtin ${B_EVENT}"`}},
+		{key: "yq", group: GroupBash},
+		{key: "jq", group: GroupBash},
+		{key: "renvsubst", group: GroupBash, fields: []string{"alias: envsubst"}},
+		{key: "sops", group: GroupBash},
+		{key: "ssh-to-age", group: GroupBash},
 	}
 }
 
@@ -79,9 +89,10 @@ var groupTitles = map[string]string{
 	GroupCore:  "core: what `lo` execs on every path",
 	GroupLocal: "local: the kind + Tilt dev loop (lo up, lo tilt, lo trust)",
 	GroupCloud: "cloud: the provisioning drivers (KubeOne on Hetzner) — opt-in",
+	GroupBash:  "bash: the frozen bash implementation (LO_IMPL=bash) and the provider plugins — opt-in",
 }
 
-var groupOrder = []string{GroupCore, GroupLocal, GroupCloud}
+var groupOrder = []string{GroupCore, GroupLocal, GroupCloud, GroupBash}
 
 // vPrefixed normalizes a version to the tag form b matches ("v0.3.0").
 func vPrefixed(v string) string {
@@ -105,7 +116,7 @@ func NormalizeGroups(groups []string) ([]string, error) {
 			continue
 		}
 		if _, ok := groupTitles[g]; !ok {
-			return nil, fmt.Errorf("unknown toolchain group %q (want core, local, cloud)", g)
+			return nil, fmt.Errorf("unknown toolchain group %q (want core, local, cloud, bash)", g)
 		}
 		set[g] = true
 	}
@@ -151,16 +162,13 @@ func Template(o TemplateOptions) (string, error) {
 	b.WriteString("# moves nothing reports \"render unchanged\". Everything else floats (b update).\n")
 	b.WriteString("#\n")
 	b.WriteString("# Groups are a lok8s convention (b ignores the key): core = what every lo path\n")
-	b.WriteString("# execs; local = the kind + Tilt dev loop; cloud = the provisioning drivers.\n")
+	b.WriteString("# execs; local = the kind + Tilt dev loop; cloud = the provisioning drivers;\n")
+	b.WriteString("# bash = the runtime of the frozen bash implementation (LO_IMPL=bash) and the\n")
+	b.WriteString("# provider plugins (argsh, yq, jq, envsubst, sops, ssh-to-age; the Go binary links\n")
+	b.WriteString("# or reimplements them, the bash tree itself ships inside the binary).\n")
 	b.WriteString("# Entries outside the selected groups are kept below, commented out — uncomment\n")
-	b.WriteString("# and `.bin/b install` to opt in (or: lo init toolchain --groups core,local,cloud).\n")
-	b.WriteString("#\n")
-	b.WriteString("# Not here on purpose: argsh, yq, jq, envsubst, sops, ssh-to-age. The Go binary\n")
-	b.WriteString("# links or reimplements them; only the frozen bash implementation (LO_IMPL=bash)\n")
-	b.WriteString("# and the provider plugins need them. To run that side, add\n")
-	b.WriteString("#   github.com/arg-sh/argsh: {asset: argsh, onPost: \"${B_BIN} builtin ${B_EVENT}\"}\n")
-	b.WriteString("#   yq: {}   jq: {}   renvsubst: {alias: envsubst}   sops: {}   ssh-to-age: {}\n")
-	b.WriteString("# and `.bin/b install`. Docs: https://lok8s.io/guide/toolchain\n")
+	b.WriteString("# and `.bin/b install` to opt in (or: lo init toolchain --groups core,local,cloud\n")
+	b.WriteString("# or --with-bash). Docs: https://lok8s.io/guide/toolchain\n")
 	b.WriteString("binaries:\n")
 	for _, g := range groupOrder {
 		fmt.Fprintf(&b, "  # ── %s\n", groupTitles[g])

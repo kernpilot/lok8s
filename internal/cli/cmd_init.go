@@ -100,7 +100,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		},
 	}
 	project.Flags().StringVarP(&projectPath, "path", "p", "", "Directory for the project (default: the current project root)")
-	project.Flags().StringVar(&projectGroups, "groups", strings.Join(toolchain.DefaultGroups, ","), "Toolchain groups to activate in .bin/b.yaml (core,local,cloud; core is implied)")
+	project.Flags().StringVar(&projectGroups, "groups", strings.Join(toolchain.DefaultGroups, ","), "Toolchain groups to activate in .bin/b.yaml (core,local,cloud,bash; core is implied)")
 	project.Flags().BoolVar(&noToolchain, "no-toolchain", false, "Write .bin/b.yaml but do not install b / run b install (no network)")
 	project.Flags().StringVar(&projectEnv, "env", "mise", "Shell environment file(s) to scaffold: mise (mise.toml), direnv (.envrc), both, none — PATH only, no PATH_* pins")
 
