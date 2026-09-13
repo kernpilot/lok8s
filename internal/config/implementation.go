@@ -94,9 +94,11 @@ type implementationFile struct {
 // LoadImplementation reads spec.implementation from <base>/lok8s.yaml. A
 // missing file, or a lok8s.yaml that is not a `kind: Project` document (a
 // service file), yields the defaults. A malformed file, an unknown
-// default, or a tree that is absolute, leaves the project, or resolves
-// through a symlink to a directory outside it is an error; the message
-// names the file and the field the way `lo lint` reports it.
+// default, or a tree that is absolute or leaves the project is an error;
+// a tree that resolves through a symlink to a directory outside the
+// project is an error only when the block routes something (a project
+// that runs Go may link its .lok8s anywhere). The messages name the file
+// and the field the way `lo lint` reports them.
 func LoadImplementation(base string) (Implementation, error) {
 	impl := Implementation{Default: ImplGo, Tree: DefaultBashTree}
 	raw, err := os.ReadFile(filepath.Join(base, ProjectFile))
@@ -130,7 +132,7 @@ func LoadImplementation(base string) (Implementation, error) {
 	if block.Bash.Tree != "" {
 		impl.Tree = block.Bash.Tree
 	}
-	tree, err := implementationTree(base, impl.Tree)
+	tree, err := implementationTree(base, impl.Tree, impl.Routes())
 	if err != nil {
 		return impl, err
 	}
@@ -140,11 +142,13 @@ func LoadImplementation(base string) (Implementation, error) {
 
 // implementationTree validates spec.implementation.bash.tree and returns
 // it cleaned. The tree must be relative and stay inside the project: no
-// absolute path, no `..` after cleaning, and when the directory exists
-// its symlink-resolved location must lie under the resolved project root.
-// A tree that does not exist yet passes here; the cli reports it as
-// missing when it needs it.
-func implementationTree(base, tree string) (string, error) {
+// absolute path, no `..` after cleaning. With routes set (the block
+// routes something), the directory's symlink-resolved location must
+// also lie under the resolved project root; without a routing the tree
+// is never exec'd, so a linked .lok8s (a checkout beside the project)
+// stays legal. A tree that does not exist yet passes here; the cli
+// reports it as missing when it needs it.
+func implementationTree(base, tree string, routes bool) (string, error) {
 	const field = "spec.implementation.bash.tree"
 	if filepath.IsAbs(tree) {
 		return "", implErrorf("%s %q is absolute. Use a path relative to the project.", field, tree)
@@ -152,6 +156,9 @@ func implementationTree(base, tree string) (string, error) {
 	clean := filepath.Clean(tree)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", implErrorf("%s %q leaves the project.", field, tree)
+	}
+	if !routes {
+		return clean, nil
 	}
 	dir := filepath.Join(base, clean)
 	resolved, err := filepath.EvalSymlinks(dir)

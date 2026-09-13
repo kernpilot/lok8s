@@ -89,7 +89,7 @@ func TestLoadImplementationRejectsBadValues(t *testing.T) {
 		{"dotdot-nested", "spec:\n  implementation:\n    bash:\n      tree: ../sibling/.lok8s\n", `lok8s.yaml: spec.implementation.bash.tree "../sibling/.lok8s" leaves the project.`},
 		{"dotdot-cleaned", "spec:\n  implementation:\n    bash:\n      tree: a/../../b\n", `lok8s.yaml: spec.implementation.bash.tree "a/../../b" leaves the project.`},
 		{"absolute", "spec:\n  implementation:\n    bash:\n      tree: /opt/lok8s\n", `lok8s.yaml: spec.implementation.bash.tree "/opt/lok8s" is absolute. Use a path relative to the project.`},
-		{"symlink-out", "spec:\n  implementation:\n    bash:\n      tree: escape\n", `lok8s.yaml: spec.implementation.bash.tree "escape" resolves to ` + mustEval(outside) + `, outside the project.`},
+		{"symlink-out", "spec:\n  implementation:\n    default: bash\n    bash:\n      tree: escape\n", `lok8s.yaml: spec.implementation.bash.tree "escape" resolves to ` + mustEval(outside) + `, outside the project.`},
 	}
 	for _, c := range cases {
 		writeProjectFile(t, base, c.spec)
@@ -104,7 +104,7 @@ func TestLoadImplementationRejectsBadValues(t *testing.T) {
 
 	// A symlink that stays inside the project is fine; the tree is the
 	// path as written (cleaned), not the resolved one.
-	writeProjectFile(t, base, "spec:\n  implementation:\n    bash:\n      tree: inside\n")
+	writeProjectFile(t, base, "spec:\n  implementation:\n    default: bash\n    bash:\n      tree: inside\n")
 	got, err := LoadImplementation(base)
 	if err != nil || got.Tree != "inside" || got.TreeDir != filepath.Join(base, "inside") {
 		t.Errorf("symlink inside: %+v %v", got, err)
@@ -114,5 +114,28 @@ func TestLoadImplementationRejectsBadValues(t *testing.T) {
 	os.WriteFile(filepath.Join(base, ProjectFile), []byte("kind: Project\nspec: [\n"), 0o600)
 	if _, err := LoadImplementation(base); err == nil || !strings.HasPrefix(err.Error(), "lok8s.yaml: ") {
 		t.Errorf("malformed: %v", err)
+	}
+}
+
+// The symlink escape rule applies only when the block routes something.
+func TestLoadImplementationSymlinkRuleOnlyWhenRouting(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	os.Symlink(outside, filepath.Join(base, ".lok8s"))
+	for _, spec := range []string{"", "spec:\n  implementation:\n    default: go\n"} {
+		writeProjectFile(t, base, spec)
+		if got, err := LoadImplementation(base); err != nil || got.Routes() {
+			t.Errorf("spec %q: %+v %v", spec, got, err)
+		}
+	}
+	writeProjectFile(t, base, "spec:\n  implementation:\n    bash:\n      commands: [registry]\n")
+	want := `lok8s.yaml: spec.implementation.bash.tree ".lok8s" resolves to ` + mustEval(outside) + `, outside the project.`
+	if _, err := LoadImplementation(base); err == nil || err.Error() != want {
+		t.Errorf("routing: %v\nwant %s", err, want)
+	}
+	// The shape rules stay unconditional.
+	writeProjectFile(t, base, "spec:\n  implementation:\n    default: go\n    bash:\n      tree: ../x\n")
+	if _, err := LoadImplementation(base); err == nil || !strings.HasSuffix(err.Error(), "leaves the project.") {
+		t.Errorf("shape rule without routing: %v", err)
 	}
 }

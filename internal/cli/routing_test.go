@@ -372,3 +372,45 @@ func mustEvalSymlinks(t *testing.T, p string) string {
 	}
 	return r
 }
+
+// ── review round 1 ─────────────────────────────────────────────────────
+
+// F1: the symlink escape rule applies only when something routes. A
+// project that runs Go may link its .lok8s to a checkout elsewhere (what
+// hack/e2e-go-roundtrip.sh builds); the same link under `default: bash`
+// is refused.
+func TestRoutingSymlinkedTreeIsFineWithoutRouting(t *testing.T) {
+	outside := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(outside, "lo"), "#!/usr/bin/env bash\n")
+	for _, block := range []string{"", "    default: go\n"} {
+		p := routedProject(t, block, false)
+		os.Remove(p.Lok8s)
+		if err := os.Symlink(outside, p.Lok8s); err != nil {
+			t.Fatal(err)
+		}
+		recs := recordShim(t)
+		if r := newRouting(p); r.err != nil || r.treeErr != nil {
+			t.Errorf("block %q: %v %v", block, r.err, r.treeErr)
+		}
+		setOSArgs(t, "drivers", "--list")
+		if _, stderr, err := runLo(t, NewRoot(p), "drivers", "--list"); err != nil || strings.Contains(stderr, "lo: ") {
+			t.Errorf("block %q: Go did not run: %v %q", block, err, stderr)
+		}
+		if len(*recs) != 0 {
+			t.Errorf("block %q: exec'd", block)
+		}
+	}
+	p := routedProject(t, "    default: bash\n", false)
+	os.Remove(p.Lok8s)
+	if err := os.Symlink(outside, p.Lok8s); err != nil {
+		t.Fatal(err)
+	}
+	want := `lok8s.yaml: spec.implementation.bash.tree ".lok8s" resolves to ` + mustEvalSymlinks(t, outside) + `, outside the project.`
+	if r := newRouting(p); r.err == nil || r.err.Error() != want {
+		t.Errorf("default bash: %v\nwant %s", r.err, want)
+	}
+	setOSArgs(t, "up")
+	if _, stderr, err := runLo(t, NewRoot(p), "up"); !errors.Is(err, ErrHandled) || stderr != "lo: "+want+"\n" {
+		t.Errorf("up: %v %q", err, stderr)
+	}
+}
