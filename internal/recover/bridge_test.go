@@ -3,6 +3,7 @@ package recover
 // bridge_test.go covers the bash bridge argv.
 
 import (
+	"github.com/kernpilot/lok8s/internal/assets"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,24 @@ func TestBashBridgeArgv(t *testing.T) {
 			t.Errorf("child %d: PATH = %q", i, c.Env[0])
 		}
 	}
+	// Without a tree in the project the children source the cache copy.
+	cacheRoot := t.TempDir()
+	t.Setenv(assets.EnvCacheHome, cacheRoot)
+	bare := newHarness(t)
+	os.Remove(filepath.Join(bare.r.Paths.Lok8s, "lo"))
+	rec2 := &argvRecorder{probe: "rebuild\ndoctor\n"}
+	bare.r.Exec = rec2
+	if _, err := bare.r.bashProvider(t.Context(), "hetzner"); err != nil {
+		t.Fatal(err)
+	}
+	tree := filepath.Join(cacheRoot, "lok8s", assets.Version(), "lok8s")
+	if env := strings.Join(rec2.cmds[0].Env, "\n"); !strings.Contains(env, "PATH_LOK8S="+tree+"\n") || !strings.Contains(env, "PATH_BASE="+bare.r.Paths.Base+"\n") {
+		t.Errorf("cache env: %q", env)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "libs", "recover")); err != nil {
+		t.Errorf("cache tree not extracted: %v", err)
+	}
+
 	// The scripts hold the load-bearing pieces verbatim.
 	for _, want := range []string{`provider::load "${1}" >/dev/null`, "declare -F provider::rebuild", "declare -F provider::doctor"} {
 		if !strings.Contains(providerProbeScript, want) {

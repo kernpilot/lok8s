@@ -20,6 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 )
 
@@ -405,6 +406,7 @@ func TestMcpShimLeavesAreNotPorted(t *testing.T) {
 func TestMcpDefaultEnvCarriesToolchainPathAndBase(t *testing.T) {
 	p := &config.Paths{Base: "/proj", Bin: "/proj/.bin", Lok8s: "/proj/.lok8s"}
 	t.Setenv("PATH", "/usr/bin")
+	t.Setenv(assets.EnvCacheHome, t.TempDir()) // no extracted cache: .lok8s stays the PATH entry
 	env := mcpDefaultEnv(p)
 	if env["PATH_BASE"] != "/proj" {
 		t.Errorf("PATH_BASE = %q", env["PATH_BASE"])

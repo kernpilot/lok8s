@@ -40,11 +40,11 @@ func newChatCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bin, argv, err := chatCommandLine(paths, cmd.ErrOrStderr())
+			bin, argv, tree, err := chatCommandLine(paths, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			return execProcess(bin, append(argv, args...), shimEnv(paths))
+			return execProcess(bin, append(argv, args...), shimEnv(paths, tree))
 		},
 	}
 }
@@ -52,11 +52,13 @@ func newChatCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // chatCommandLine resolves the lochat binary and its base argv (argv[0] =
 // the binary):
 //
-//	lochat --config <cfg> --lo <PATH_LOK8S>/lo --cwd <PATH_BASE> --base-dir <PATH_BASE>
+//	lochat --config <cfg> --lo <bash tree>/lo --cwd <PATH_BASE> --base-dir <PATH_BASE>
 //
-// The caller appends the user's arguments. Errors are printed in the bash
+// --lo is the bash entrypoint (lochat drives `lo mcp`, the argsh builtin)
+// from the resolved bash tree, which the caller hands to shimEnv. The
+// caller appends the user's arguments. Errors are printed in the bash
 // format and returned as ErrHandled.
-func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, error) }) (string, []string, error) {
+func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, error) }) (string, []string, assets.Tree, error) {
 	bin := filepath.Join(paths.Bin, "lochat")
 	if !fsutil.IsExecutable(bin) {
 		bin = ""
@@ -67,7 +69,7 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	if bin == "" {
 		ui.ErrorTo(stderr, "lochat binary not found. Build it once:")
 		ui.ErrorTo(stderr, `  go build -C ai/lochat -o "${PATH_BIN}/lochat" .`)
-		return "", nil, ErrHandled
+		return "", nil, assets.Tree{}, ErrHandled
 	}
 
 	// config: per-project override, else the shipped defaults.
@@ -80,14 +82,14 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	// defaults (ejected on first use).
 	defaults, _, err := assets.Resolve(paths, "chat/defaults.json")
 	if err != nil {
-		return "", nil, err
+		return "", nil, assets.Tree{}, err
 	}
 	if !fsutil.FileExists(cfg) {
 		cfg = defaults
 	}
 	if !fsutil.FileExists(cfg) {
 		ui.ErrorTo(stderr, "no chat config (looked for %s or %s)", cfgProject, defaults)
-		return "", nil, ErrHandled
+		return "", nil, assets.Tree{}, ErrHandled
 	}
 
 	// Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an
@@ -99,17 +101,21 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 		ui.ErrorTo(stderr, "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it.")
 		ui.ErrorTo(stderr, "Install the matching builtin next to argsh, then retry:")
 		ui.ErrorTo(stderr, "  argsh builtins install")
-		return "", nil, ErrHandled
+		return "", nil, assets.Tree{}, ErrHandled
+	}
+	tree, err := assets.BashTree(paths)
+	if err != nil {
+		return "", nil, assets.Tree{}, err
 	}
 
 	argv := []string{
 		bin,
 		"--config", cfg,
-		"--lo", filepath.Join(paths.Lok8s, "lo"),
+		"--lo", filepath.Join(tree.Dir, "lo"),
 		"--cwd", paths.Base,
 		"--base-dir", paths.Base,
 	}
-	return bin, argv, nil
+	return bin, argv, tree, nil
 }
 
 // argshBuiltinPresent checks for argsh.so next to the toolchain argsh (bash:

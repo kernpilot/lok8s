@@ -21,6 +21,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/provision"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // fakeProvider records the primitives recover reuses.
@@ -96,6 +97,9 @@ func newHarness(t *testing.T) *harness {
 	os.Unsetenv("CLOUD_DRY_RUN")
 	base := t.TempDir()
 	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin"), Lok8s: filepath.Join(base, ".lok8s"), Clusters: filepath.Join(base, "clusters")}
+	// The project holds the bash tree, so the children's PATH_LOK8S is
+	// the project's own (a checkout wins over the cache).
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "lo"), "#!/usr/bin/env bash\n")
 	h := &harness{out: &bytes.Buffer{}, errBuf: &bytes.Buffer{}}
 	h.spec = filepath.Join(base, "cluster.lok8s.yaml") // non-existent → names fall back
 	h.cfg = filepath.Join(base, "hetzner.json")

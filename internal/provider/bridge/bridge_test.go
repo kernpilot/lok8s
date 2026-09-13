@@ -10,9 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 type fakeRunner struct {
@@ -28,10 +30,14 @@ func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 	return nil
 }
 
+// testLoader is a Loader over a project that holds the bash tree
+// (.lok8s/lo), so the children's PATH_LOK8S is the project's own tree
+// (precedence: a checkout wins over the cache).
 func testLoader(t *testing.T) (*Loader, *fakeRunner, *strings.Builder) {
 	t.Helper()
 	base := t.TempDir()
 	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin"), Lok8s: filepath.Join(base, ".lok8s"), Clusters: filepath.Join(base, "clusters")}
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "lo"), "#!/usr/bin/env bash\n")
 	r := &fakeRunner{}
 	var errBuf strings.Builder
 	return &Loader{Paths: p, Runner: r, Stdout: io.Discard, Stderr: &errBuf}, r, &errBuf
@@ -156,10 +162,37 @@ func TestKubeoneSeamsBindTheProviderAtConstruction(t *testing.T) {
 	}
 }
 
+// Without a checkout the children source the embedded tree, extracted
+// into the versioned cache: PATH_LOK8S/PATH_SCRIPTS point there, the
+// project paths stay the project's, and the project gets no .lok8s.
+func TestLoaderResolvesTheCacheWithoutACheckout(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv(assets.EnvCacheHome, cacheRoot)
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin"), Lok8s: filepath.Join(base, ".lok8s"), Clusters: filepath.Join(base, "clusters")}
+	r := &fakeRunner{}
+	l := &Loader{Paths: p, Runner: r, Stdout: io.Discard, Stderr: io.Discard}
+	if _, err := l.Load(t.Context(), "hetzner"); err != nil {
+		t.Fatal(err)
+	}
+	tree := filepath.Join(cacheRoot, "lok8s", assets.Version(), "lok8s")
+	for _, kv := range []string{"PATH_LOK8S=" + tree, "PATH_SCRIPTS=" + tree, "PATH_BASE=" + base, "PATH_BIN=" + p.Bin} {
+		if !hasEnv(r.calls[0], kv) {
+			t.Errorf("env missing %s: %v", kv, r.calls[0].Env)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tree, "providers", "hetzner", "main")); err != nil {
+		t.Fatalf("cache tree not extracted: %v", err)
+	}
+	if _, err := os.Stat(p.Lok8s); err == nil {
+		t.Fatal("the bridge wrote into the project")
+	}
+}
+
 func TestPATHPrependsProjectDirsOnce(t *testing.T) {
 	p := &config.Paths{Base: "/p", Bin: "/p/.bin", Lok8s: "/p/.lok8s"}
 	t.Setenv("PATH", "/usr/bin:/p/.bin")
-	got := PathEnv(p)
+	got := PathEnv(p, p.Lok8s)
 	if !strings.HasPrefix(got, "/p/.lok8s"+string(os.PathListSeparator)) || strings.Count(got, "/p/.bin") != 1 {
 		t.Errorf("PATH = %q", got)
 	}

@@ -9,49 +9,77 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 )
 
-// Shim replaces the current process with the argsh implementation
-// (`.lok8s/lo`), passing argv through verbatim so both implementations parse
-// identically. The environment is prepared the way direnv used to: the
-// toolchain and framework directories join PATH, and KUSTOMIZE_PLUGIN_HOME
-// gets its default. No PATH_* variable is exported — the bash entrypoint
-// derives those from its own location, and exporting defaults on its behalf
-// would masquerade as user-set values (see config.Paths.SecretsEnv).
+// Shim replaces the current process with the argsh implementation (`lo`
+// in the bash tree), passing argv through verbatim so both implementations
+// parse identically. The tree is a checkout or ejected tree when the
+// project has one, else the copy embedded in the binary, extracted once
+// into the versioned cache (assets.BashTree). The environment is prepared
+// the way direnv used to: the toolchain and framework directories join
+// PATH, and KUSTOMIZE_PLUGIN_HOME gets its default. With a local tree no
+// PATH_* variable is exported — the bash entrypoint derives those from its
+// own location, and exporting defaults on its behalf would masquerade as
+// user-set values (see config.Paths.SecretsEnv). A cached tree cannot
+// derive the project from its location, so PATH_BASE and PATH_LOK8S are
+// set for it (shimEnv).
 func Shim(p *config.Paths, argv []string) error {
-	script := filepath.Join(p.Lok8s, "lo")
-	if _, err := os.Stat(script); err != nil {
-		return fmt.Errorf("no lok8s project found: %s does not exist (run inside a lok8s project or set PATH_BASE)", script)
+	tree, err := assets.BashTree(p)
+	if err != nil {
+		return err
 	}
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		return fmt.Errorf("bash not found in PATH: %w", err)
 	}
 
-	args := append([]string{bash, script}, argv...)
+	args := append([]string{bash, filepath.Join(tree.Dir, "lo")}, argv...)
 	// #nosec G702 -- LO_IMPL=bash by design: argv reaches the frozen tree
 	// untouched as exec arguments; no shell parses it.
-	return syscall.Exec(bash, args, shimEnv(p))
+	return syscall.Exec(bash, args, shimEnv(p, tree))
 }
 
-// shimEnv returns the process environment with p.Bin and p.Lok8s prepended to
-// PATH (when missing) and KUSTOMIZE_PLUGIN_HOME defaulted.
-func shimEnv(p *config.Paths) []string {
+// shimEnv returns the process environment with p.Bin and the bash tree
+// prepended to PATH (when missing) and KUSTOMIZE_PLUGIN_HOME defaulted.
+// PATH_LOK8S is set when the tree is not p.Lok8s (the cache, or the
+// project's .lok8s while PATH_LOK8S points elsewhere) and PATH_BASE when
+// the tree lies outside the project (cache, temp dir): the entrypoint's
+// own-location defaults would be wrong there.
+func shimEnv(p *config.Paths, tree assets.Tree) []string {
 	env := os.Environ()
-	env = setEnv(env, "PATH", childPATH(p))
+	env = setEnv(env, "PATH", childPATH(p, tree.Dir))
 	if os.Getenv("KUSTOMIZE_PLUGIN_HOME") == "" {
 		env = setEnv(env, "KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize"))
+	}
+	if tree.Dir != "" && tree.Dir != p.Lok8s {
+		env = setEnv(env, "PATH_LOK8S", tree.Dir)
+	}
+	if tree.Origin != assets.OriginLocal {
+		env = setEnv(env, "PATH_BASE", p.Base)
 	}
 	return env
 }
 
-// childPATH is the PATH the binary prepares for its children: p.Lok8s and
-// p.Bin prepended to the process PATH when missing.
-func childPATH(p *config.Paths) string {
+// bashTreeForPATH is the tree dir the binary puts on its children's PATH
+// without extracting anything: a local tree or an extracted cache
+// (FindBashTree), else p.Lok8s (the legacy PATH entry; a missing dir on
+// PATH is harmless).
+func bashTreeForPATH(p *config.Paths) assets.Tree {
+	tree := assets.FindBashTree(p)
+	if tree.Origin == assets.OriginNone {
+		tree.Dir = p.Lok8s
+	}
+	return tree
+}
+
+// childPATH is the PATH the binary prepares for its children: the bash
+// tree and p.Bin prepended to the process PATH when missing.
+func childPATH(p *config.Paths, treeDir string) string {
 	path := os.Getenv("PATH")
-	for _, dir := range []string{p.Lok8s, p.Bin} {
-		if !containsPathEntry(path, dir) {
+	for _, dir := range []string{treeDir, p.Bin} {
+		if dir != "" && !containsPathEntry(path, dir) {
 			path = dir + string(os.PathListSeparator) + path
 		}
 	}
