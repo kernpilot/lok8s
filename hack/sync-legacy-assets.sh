@@ -20,6 +20,7 @@ MIRROR="${ROOT}/internal/assets/lok8s"
 LEGACY="${ROOT}/.lok8s"
 
 SUBTREES=(
+  README.md
   VERSION
   addons
   chat

@@ -276,6 +276,7 @@ func TestMarkerRoundTrip(t *testing.T) {
 // whole tree (the sync script's list — keep the two in step;
 // TestMirroredListCoversLegacyTree fails on an entry missing from it).
 var mirrored = []string{
+	"README.md",
 	"VERSION",
 	"addons",
 	"chat",
