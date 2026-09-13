@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // projectFile is the project-root lok8s.yaml (also the project marker
@@ -151,6 +153,12 @@ type ProjectOptions struct {
 	BVersion string
 	// Force overwrites existing files (.gitignore is still only appended to).
 	Force bool
+	// Domain and Driver write the first cluster spec,
+	// clusters/<Domain>/cluster.lok8s.yaml (WriteClusterSpec); "" = none.
+	Domain, Driver string
+	// Implementation sets spec.implementation.default in lok8s.yaml
+	// (SetImplementation): go or bash; "" = leave it.
+	Implementation string
 }
 
 // Project scaffolds a project into o.Dir (default: base): clusters/,
@@ -179,6 +187,10 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	if err := ValidateName(name, stderr); err != nil {
 		return err
 	}
+	if err := ValidateImplementation(o.Implementation); err != nil {
+		ui.ErrorTo(stderr, "%v", err)
+		return ErrHandled
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -195,8 +207,18 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	if err := appendGitignore(filepath.Join(dir, ".gitignore"), out); err != nil {
 		return err
 	}
-	if err := writeEnvFile(dir, env, EnvSpec{Project: name, BinRel: ".bin", BVersion: o.BVersion}, o.Force, out); err != nil {
+	if err := EnvFile(dir, env, name, o.BVersion, o.Force, out); err != nil {
 		return err
+	}
+	if o.Domain != "" {
+		if err := WriteClusterSpec(clusters, o.Domain, driverOr(o.Driver), o.Force, out, stderr); err != nil {
+			return err
+		}
+	}
+	if o.Implementation != "" {
+		if err := SetImplementation(dir, name, o.Implementation, out); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(out, "Done. Next:")
 	fmt.Fprintf(out, "  cd %s && lo toolchain install   # .bin/b.yaml, b and the pinned toolchain into .bin/ (network)\n", dir)
@@ -206,9 +228,51 @@ func Project(base string, o ProjectOptions, out, stderr io.Writer) error {
 	case "direnv":
 		fmt.Fprintln(out, "  direnv allow            # .bin lands on PATH")
 	}
-	fmt.Fprintln(out, "  lo use <domain>         # after adding clusters/<domain>/cluster.lok8s.yaml")
+	if o.Domain != "" {
+		fmt.Fprintf(out, "  lo use %s   # then lo up\n", o.Domain)
+	} else {
+		fmt.Fprintln(out, "  lo use <domain>         # after adding clusters/<domain>/cluster.lok8s.yaml")
+	}
 	fmt.Fprintln(out, "  lo assets eject         # optional: pin the referenced framework assets now")
 	return nil
+}
+
+// driverOr defaults the --driver value to lo.
+func driverOr(d string) string {
+	if d == "" {
+		return "lo"
+	}
+	return d
+}
+
+// ValidateImplementation checks a --implementation value ("" = unset).
+func ValidateImplementation(impl string) error {
+	switch impl {
+	case "", config.ImplGo, config.ImplBash:
+		return nil
+	}
+	return fmt.Errorf("--implementation must be %s or %s, got %q", config.ImplGo, config.ImplBash, impl)
+}
+
+// SetImplementation writes spec.implementation.default = impl into
+// <dir>/lok8s.yaml (config.SetImplementationDefault: a yaml.Node edit
+// that keeps comments and the other keys, and creates the project file
+// named name when there is none) and reports it. The one function behind
+// `lo init project --implementation` and the init wizard's switch.
+func SetImplementation(dir, name, impl string, out io.Writer) error {
+	if err := config.SetImplementationDefault(dir, name, impl); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Set spec.implementation.default: %s in %s\n", impl, filepath.Join(dir, config.ProjectFile))
+	return nil
+}
+
+// EnvFile writes the selected environment file for project name into dir
+// (writeEnvFile with the EnvSpec `lo init project` renders): the one
+// function behind `lo init project --env` and the init wizard's
+// environment-file step.
+func EnvFile(dir, env, name, bVersion string, force bool, out io.Writer) error {
+	return writeEnvFile(dir, env, EnvSpec{Project: name, BinRel: ".bin", BVersion: bVersion}, force, out)
 }
 
 // WriteBYAML places content at <bin>/b.yaml unless it exists — never

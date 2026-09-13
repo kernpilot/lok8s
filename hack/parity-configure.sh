@@ -378,6 +378,54 @@ check - doctor --domain gamma.app           # Deploy -> alpha.dev
 check - doctor --domain nowhere.dev         # active domain has no spec
 check - doctor --domain prov.dev            # provider / infrastructure section (hetzner, offline)
 
+# ── lo init --plan (Go-only contract) ────────────────────────────────────────
+# Bare `lo init` off a terminal prints the help (parity-leaves pins rc 0);
+# `lo init --plan` prints the state card and the commands the defaults
+# would run, exits 0 and writes nothing, on and off a terminal. Its own
+# synthetic projects (an empty directory, a project root), the tree
+# snapshotted before and after. Both runs are the Go binary; the bash
+# tree has no wizard.
+PLAN="${WORK}/plan"
+parity::new_project "${PLAN}"
+mkdir -p "${PLAN}/clusters/theta.dev"
+printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: theta\nspec:\n  cluster:\n    domain: theta.dev\n' \
+  > "${PLAN}/clusters/theta.dev/cluster.lok8s.yaml"
+echo "theta.dev" > "${PLAN}/clusters/.active"
+mkdir -p "${WORK}/plan-empty"
+plan_snapshot() { (cd "${1}" && find . -not -path './.bin/*' -not -path './.lok8s/*' | sort); }
+parity::select "${PLAN}" go                     # the project file first: the snapshot must include it
+plan_before="$(plan_snapshot "${PLAN}")"
+plan_rc=0
+parity::run go "${PLAN}" init --plan || plan_rc=$?
+if (( plan_rc == 0 )) && [[ ! -s "${WORK}/go.err" ]] \
+   && grep -q '^  situation: project root$' "${WORK}/go.out" \
+   && grep -q 'theta.dev (lo); active theta.dev' "${WORK}/go.out" \
+   && grep -q '^Nothing to do.$' "${WORK}/go.out" \
+   && grep -q 'lo init project --env none --cluster <domain> --driver <driver>' "${WORK}/go.out" \
+   && [[ "$(plan_snapshot "${PLAN}")" == "${plan_before}" ]]; then
+  echo "ok: lo init --plan in a project root: rc 0, the card, nothing to do, no writes"
+else
+  fail "lo init --plan in a project root: rc ${plan_rc}, or the card/menu missing, or the tree changed"
+fi
+plan_rc=0
+(cd "${WORK}/plan-empty" && "${LO_BIN}" init --plan </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || plan_rc=$?
+if (( plan_rc == 0 )) && [[ ! -s "${WORK}/go.err" ]] \
+   && grep -q '^  situation: empty directory$' "${WORK}/go.out" \
+   && grep -q '^  lo init project plan-empty --env mise$' "${WORK}/go.out" \
+   && grep -q '^  lo toolchain install --groups core,local$' "${WORK}/go.out" \
+   && [[ -z "$(find "${WORK}/plan-empty" -mindepth 1 -print -quit)" ]]; then
+  echo "ok: lo init --plan in an empty directory: rc 0, the defaults as commands, no writes"
+else
+  fail "lo init --plan in an empty directory: rc ${plan_rc}, or the commands missing, or something was written"
+fi
+plan_rc=0
+(cd "${WORK}/plan-empty" && "${LO_BIN}" init </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || plan_rc=$?
+if (( plan_rc == 0 )) && grep -q '^Usage:$' "${WORK}/go.out" && [[ -z "$(find "${WORK}/plan-empty" -mindepth 1 -print -quit)" ]]; then
+  echo "ok: bare lo init off a terminal: the help, rc 0, no writes"
+else
+  fail "bare lo init off a terminal: rc ${plan_rc}, or no help, or something was written"
+fi
+
 # ── routed commands (spec.implementation.bash.commands) ─────────────────────
 # The Go side's project file keeps `default: go` and lists one command for
 # the bash tree; the binary then execs <project>/.lok8s/lo for it with the

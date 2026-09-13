@@ -2,6 +2,7 @@ package execx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,6 +37,10 @@ type Runner interface {
 	Run(ctx context.Context, c Cmd) error
 }
 
+// ErrNotFound is the Runner's error when a tool name resolves nowhere
+// (wrapped as `<name>: executable not found`); errors.Is matches it.
+var ErrNotFound = errors.New("executable not found")
+
 // NewRunner builds the default Runner over the resolved project paths.
 func NewRunner(p *config.Paths) Runner {
 	return &osRunner{paths: p}
@@ -50,7 +55,7 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	if !strings.ContainsRune(c.Name, os.PathSeparator) {
 		resolved, ok := Look(r.paths, c.Name)
 		if !ok {
-			return fmt.Errorf("%s: executable not found", c.Name)
+			return fmt.Errorf("%s: %w", c.Name, ErrNotFound)
 		}
 		path = resolved
 	}

@@ -178,14 +178,44 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
-lo init project [name] [--path <dir>] [--force] [--env mise|direnv|none]
+lo init                                  # on a terminal: the wizard; otherwise: this help
+lo init --plan                           # what lo init sees here and the commands it would run; writes nothing
+lo init project [name] [--path <dir>] [--force] [--env mise|direnv|none] [--cluster <domain> --driver lo|kubeone|capi|kkp|kubehz-hosted] [--implementation go|bash]
 lo init service <name> [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
 ```
 
+**Bare `lo init`** first detects where you stand, then asks. On a terminal (stdin and stdout are both a TTY, `CI` is unset, no `--yes`) it runs a wizard. The wizard prints a state card and asks the questions the situation calls for. Then it prints a summary of the files it will write and the commands it will run. It writes nothing before you confirm. Off a terminal, under `CI`, or with `--yes`, it prints this help and exits 0, as it always did.
+
+Every answer has a flag twin on one of the subcommands below: `lo init project --env`, `--cluster`, `--driver`, `--implementation`, `lo init service <name>`, `lo init test`, `lo toolchain install --groups`, `lo assets eject bash`, `lo use <domain>`. The wizard fills the same options and calls the same functions. The summary prints the equivalent command lines, so a script can reproduce a run without the conversation. The wizard never overwrites an existing file, and a cluster spec that exists is listed as "keep". When a step fails, the wizard prints the failed command and the commands not run, so you can continue by hand.
+
+The five situations:
+
+| Where you stand | What the wizard offers |
+|---|---|
+| An empty directory (a `.git` entry does not count) | The welcome: project here, `git init` (when git is installed and there is no repository), the environment file, the first cluster spec (domain and driver), the toolchain and its groups, `lo use` for the new domain |
+| Inside a git repository, below its root, no project | The same, with the git root as the suggested directory and the environment file the root already has |
+| A non-empty directory without a project (no git, or at the git root) | What it sees, then the same with here or a subdirectory as the target, and `git init` when there is no repository |
+| A project root | The status card (the project, git, clusters and the active domain, the environment file, the toolchain, the implementation, plus the doctor's domain and toolchain sections), then a menu: add a cluster spec, add a service, add the test suite, add an environment file, install the toolchain, switch the implementation, or nothing |
+| Inside a project (a subdirectory, a service directory, a submodule under the umbrella project) | The card and the menu, plus "add this service to `services.yaml`" in a service directory (a kind-less `lok8s.yaml`) |
+
+The project root is the nearest `clusters/` directory or `kind: Project` `lok8s.yaml` above the working directory (the same walk every command uses); an exported `PATH_BASE` does not move it, the wizard acts where you stand. A service directory below the root keeps the umbrella project as the root: `lo init` in `services/api/` offers to register `./services/api`.
+
+| Flag | Description |
+|------|-------------|
+| `--plan` | Print the state card and the commands the defaults would run (or, in a project, the menu with its commands), then exit 0. Writes nothing and works off a terminal. |
+| `--yes`, `-y` | Never ask: print the help instead of the wizard (scripts, CI). |
+| `--dry-run`, `-n` | Run the wizard up to the summary and stop; writes nothing. Off the wizard (no terminal, `CI`, `--yes`) there is no conversation to stop, so it prints the plan like `--plan`. |
+
+The summary lists one line per step and the commands to run instead; when a step uses the network (the toolchain), the confirmation says so. Leaving the form (Ctrl-C, Esc) writes nothing and exits 1.
+
 **`lo init project [name]`** writes the smallest project the binary needs, and nothing else: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (`kind: Project`, the marker `lo` resolves the root from; a service's `kind: Service` file is not one, so `lo` keeps walking up from inside a service directory), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and one shell environment file (`--env`). It uses no network and writes **no `.lok8s/` tree** (the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use; see [`lo assets`](#lo-assets)) and no `.bin/`: the toolchain is the next step it prints, [`lo toolchain install`](#lo-toolchain). A re-run keeps every existing file (`--force` overwrites; `.gitignore` is only appended to). `name` defaults to the directory name. The target is the working directory (`--path` names another), never the ambient `PATH_BASE` of a direnv/mise shell.
 
 `--env` selects the shell environment file: `mise` (default) writes a `mise.toml` whose `[env]` puts `.bin` on `PATH` via `mise activate` (and shows how to let mise bootstrap `b` itself); `direnv` writes an `.envrc` with `PATH_add .bin`; `none` writes neither (CI). One file per project: the old `both` is refused with an error that names the two valid values. The two files render one data structure, so they say the same thing, and neither pins any `PATH_*` variable: the binary resolves the project from `lok8s.yaml`, and an ambient `PATH_BASE` redirects runs into whatever project it points at. After `mise trust` / `direnv allow`, `lo` and the b-managed tools are on `PATH`.
+
+`--cluster <domain>` also writes the first cluster spec, `clusters/<domain>/cluster.lok8s.yaml`: the minimal file the readers accept (`apiVersion`, `kind`, `metadata.name` from the domain's first label, `spec.cluster.domain`, `spec.bootstrap`), in the shape [Cluster specs](specs.md) documents. `--driver` selects the kind: `lo` (kind on local Docker, the default), `kubeone`, `capi`, `kkp`, or `kubehz-hosted`. The `lo` file makes the `cilium` default explicit, because kind ships no CNI. The `kubehz-hosted` file is a `KubeOne` spec with `spec.kubehz.hosting: hosted` and the platform API URL. The two `KubeOne` files carry `spec.kubernetes.version` and `spec.provider` as commented stubs with the documented example values, under a "fill in before `lo provision`" header. The domain must match the rule `lo use` applies. `lo lint` accepts every file this writes. On an existing project, `lo init project --env none --cluster <domain> --driver <driver>` adds a spec and keeps everything else.
+
+`--implementation go|bash` sets `spec.implementation.default` in `lok8s.yaml` (see [Choosing the implementation](#choosing-the-implementation)). The file is created when it is missing; an existing file keeps its comments and its other keys. This is the flag twin of the wizard's implementation switch, and `lo assets eject bash` is the step before it when the project has no bash tree.
 
 **`lo init service <name>`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader.
 
@@ -195,6 +225,9 @@ lo init test [--path <dir>] [--force]
 |------|-------------|
 | `--path`, `-p` | Target directory (project dir / service dir / `tests/` dir) |
 | `--force`, `-f` | Overwrite existing files / non-empty target |
+| `--env` | `project`: the environment file, `mise` (default), `direnv` or `none` |
+| `--cluster`, `--driver` | `project`: also write `clusters/<domain>/cluster.lok8s.yaml` for that driver |
+| `--implementation` | `project`: set `spec.implementation.default` (`go` or `bash`) in `lok8s.yaml` |
 
 ### lo toolchain
 
