@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -29,6 +28,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -254,7 +254,7 @@ func writeAssetsJSON(w io.Writer, reports []assets.UnitReport) error {
 // plus the Tilt extension when the project-root Tiltfile loads it.
 func referencedAssets(paths *config.Paths, stderr io.Writer) []string {
 	set := map[string]bool{"libs/inventory/manifests": true}
-	if raw, err := os.ReadFile(filepath.Join(paths.Base, "Tiltfile")); err == nil && strings.Contains(string(raw), "load('./.lok8s/tilt/Tiltfile'") {
+	if raw, err := os.ReadFile(filepath.Join(paths.Base, "Tiltfile")); err == nil && tilt.LoadsExtension(raw) {
 		set["tilt"] = true
 	}
 	entries, _ := os.ReadDir(paths.Clusters)

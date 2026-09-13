@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,6 +58,22 @@ type Context struct {
 // Tiltfile is the two-line loader of ./.lok8s/tilt/Tiltfile
 // (scaffold.canonicalTiltfile).
 const extensionRel = "tilt"
+
+// extensionLoadRe matches the load() call of the extension in either
+// Starlark quote style: load('./.lok8s/tilt/Tiltfile', ...) and
+// load("./.lok8s/tilt/Tiltfile", ...). The closing quote must match the
+// opening one (RE2 has no backreference, so the two styles are spelled
+// out).
+var extensionLoadRe = regexp.MustCompile(`load\(\s*(?:'\./\.lok8s/tilt/Tiltfile'|"\./\.lok8s/tilt/Tiltfile")`)
+
+// LoadsExtension reports whether a project-root Tiltfile loads the
+// extension. `lo tilt up` ejects the extension whenever it runs, so
+// `lo assets` counts the extension as referenced on the same test: a
+// double-quoted load() is valid Starlark and must count too, or
+// `lo assets eject --check` stays green while `lo tilt up` would eject.
+func LoadsExtension(tiltfile []byte) bool {
+	return extensionLoadRe.Match(tiltfile)
+}
 
 // ensureExtension puts the Tilt extension on disk before Tilt starts. The
 // extension ships embedded and ejects on first use like every other asset

@@ -148,6 +148,13 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 	if err != nil || !strings.Contains(stdout, "tilt                            tilt        builtin") {
 		t.Errorf("list: err=%v\n%s", err, stdout)
 	}
+	// A double-quoted load() is valid Starlark and `lo tilt up` ejects the
+	// extension all the same, so --check must count it as referenced too.
+	testutil.WriteFile(t, filepath.Join(p.Base, "Tiltfile"), "load(\"./.lok8s/tilt/Tiltfile\", \"lok8s\")\nlok8s()\n")
+	stdout, _, err = runLo(t, NewRoot(p), "assets", "eject", "--check")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stdout, "would eject tilt\n") {
+		t.Errorf("eject --check with a double-quoted Tiltfile loader: err=%v\n%s", err, stdout)
+	}
 
 	// --all ejects the rest.
 	if _, _, err := runLo(t, NewRoot(p), "assets", "eject", "--all"); err != nil {

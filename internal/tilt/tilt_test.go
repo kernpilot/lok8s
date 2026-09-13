@@ -747,3 +747,30 @@ func TestPreflightConfigDefaultsWhenSpecMissing(t *testing.T) {
 		t.Errorf("got %q %q %q %q", enabled, age, crds, allow)
 	}
 }
+
+// TestLoadsExtensionBothQuoteStyles: the loader detection behind
+// `lo assets` (referencedAssets) must accept both Starlark quote styles.
+// A double-quoted load() used to slip through, so `lo assets eject --check`
+// stayed green on a project where `lo tilt up` would eject the extension.
+func TestLoadsExtensionBothQuoteStyles(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		body string
+		want bool
+	}{
+		"single-quoted":       {"load('./.lok8s/tilt/Tiltfile', 'lok8s')\nlok8s()\n", true},
+		"double-quoted":       {"load(\"./.lok8s/tilt/Tiltfile\", \"lok8s\")\nlok8s()\n", true},
+		"space after paren":   {"load( './.lok8s/tilt/Tiltfile', 'lok8s')\n", true},
+		"mixed quotes":        {"load('./.lok8s/tilt/Tiltfile\", 'lok8s')\n", false},
+		"another extension":   {"load('./ext/Tiltfile', 'ext')\n", false},
+		"path without load()": {"# ./.lok8s/tilt/Tiltfile is not loaded here\n", false},
+		"empty":               {"", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := LoadsExtension([]byte(tc.body)); got != tc.want {
+				t.Errorf("LoadsExtension(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
