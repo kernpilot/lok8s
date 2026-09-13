@@ -55,10 +55,25 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 			t.Errorf("consumer template must not activate %q by default", absent)
 		}
 	}
+	// --groups bash: every bash entry uncommented, each checked on its own
+	// with its real key text; the non-selected cloud group stays commented
+	// with its real keys.
 	withBash := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"core", "local", "bash"}})
-	for _, on := range []string{"  github.com/arg-sh/argsh:\n    asset: argsh\n    onPost: \"${B_BIN} builtin ${B_EVENT}\"\n    groups: [bash]\n", "  yq:\n    groups: [bash]\n", "  jq:\n    groups: [bash]\n", "  renvsubst:\n    alias: envsubst\n    groups: [bash]\n", "  sops:\n    groups: [bash]\n", "  ssh-to-age:\n    groups: [bash]\n", "  # kubeone"} {
-		if !strings.Contains(withBash, on) && !strings.Contains(withBash, "  # github.com/kubermatic/kubeone:") {
+	for _, on := range []string{
+		"  github.com/arg-sh/argsh:\n    asset: argsh\n    onPost: \"${B_BIN} builtin ${B_EVENT}\"\n    groups: [bash]\n",
+		"  yq:\n    groups: [bash]\n",
+		"  jq:\n    groups: [bash]\n",
+		"  renvsubst:\n    alias: envsubst\n    groups: [bash]\n",
+		"  sops:\n    groups: [bash]\n",
+		"  ssh-to-age:\n    groups: [bash]\n",
+	} {
+		if !strings.Contains(withBash, on) {
 			t.Errorf("--groups bash did not activate %q:\n%s", on, withBash)
+		}
+	}
+	for _, off := range []string{"  # github.com/kubermatic/kubeone:\n  #   groups: [cloud]\n", "  # hcloud:\n  #   groups: [cloud]\n"} {
+		if !strings.Contains(withBash, off) {
+			t.Errorf("--groups bash uncommented a cloud entry, want %q:\n%s", off, withBash)
 		}
 	}
 
