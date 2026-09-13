@@ -341,6 +341,9 @@ jobs:
         # variable (the binary reads none for it). `bash` needs the tree
         # INSIDE the project: a routing never targets a checkout elsewhere
         # or the binary's cache extract, so the repo's .lok8s is copied in.
+        # The routed exec also derives the toolchain from the project root
+        # (<project>/.bin, never an inherited PATH_BIN: the entrypoint
+        # sources `${PATH_BIN}/argsh`), so the repo's .bin is linked in too.
         env:
           FIXTURE: single-local-build
           IMPLEMENTATION: ${{ matrix.lo_impl }}
@@ -349,6 +352,7 @@ jobs:
           BASE="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE}"
           if [ "${IMPLEMENTATION}" = bash ]; then
             cp -R "${GITHUB_WORKSPACE}/.lok8s" "${BASE}/.lok8s"
+            ln -s "${GITHUB_WORKSPACE}/.bin" "${BASE}/.bin"
           fi
           printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: e2e\nspec:\n  implementation:\n    default: %s\n' "${IMPLEMENTATION}" > "${BASE}/lok8s.yaml"
           cat "${BASE}/lok8s.yaml"
