@@ -158,11 +158,17 @@ behind for a post-mortem where supported. What each one covers, and the
 divergences it allow-lists, is in
 [docs/reference/go-migration.md](docs/reference/go-migration.md#parity-gates).
 
-The Go-only eject-model surface (`lo assets`, `lo init project`, `--origin`,
-`--no-eject`) has no bash twin and therefore no harness: its gate is
-`go test ./internal/assets/ ./internal/cli/` (precedence, never-overwrite,
-eject + marker, the six-way classification, update refusal, `--check` exit
-codes, the scaffold). Every harness hands its synthetic project a full
+The Go-only surface (`lo assets`, `lo init project`, `lo toolchain`,
+`lo lint --notes`, `--origin`, `--no-eject`) has no bash twin and therefore
+no harness: its gate is `go test ./internal/assets/ ./internal/cli/
+./internal/scaffold/ ./internal/lint/ ./internal/config/` (precedence,
+never-overwrite, eject + marker, the six-way classification, update
+refusal, `--check` exit codes, the files-only scaffold and its env file,
+the toolchain install dry run and the doctor section, the default-equal
+notes, the project-marker walk). `hack/parity-configure.sh` adds one
+Go-only contract case for `lint --notes` in its own synthetic project
+(the note prints, rc and stderr match the plain run); the notes never
+print in a `check - lint` case, so those stay byte-identical. Every harness hands its synthetic project a full
 `.lok8s` tree, so the resolver's precedence picks the local copy and the
 harnesses are unaffected — keep it that way: a harness project WITHOUT a
 `.lok8s` tree would eject into its work dir on the Go side only.

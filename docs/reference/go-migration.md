@@ -47,13 +47,14 @@ plus three commands that exist only in the binary.
 | Integrations | `chat`, `ai`, `gitops`, `kubehz`, `tilt` | `internal/gitops`, `internal/kubehz`, `internal/tilt` |
 | Components | `kustomize`, `registry`, `image`, `addons`, `secrets`, `drivers` | `internal/driver/lo` (registries), `internal/image`, `internal/addons`, `internal/secrets` |
 | Internal (hidden from `--help`) | `hooks`, `env`, `k8s`, `crds` | `internal/hooks`, `internal/env`, `internal/crds` |
-| Go-only | `mcp` (native MCP server), `operator` (the shell-operator hook bodies), `assets` (the embedded framework assets: list, eject, diff, update) | `internal/cli/cmd_mcp.go`, `internal/operator`, `internal/assets` |
+| Go-only | `mcp` (native MCP server), `operator` (the shell-operator hook bodies), `assets` (the embedded framework assets: list, eject, diff, update), `toolchain` (the pinned consumer toolchain via b: install, doctor) | `internal/cli/cmd_mcp.go`, `internal/operator`, `internal/assets`, `internal/toolchain` |
 
-`mcp`, `operator` and `assets` have no twin in the argsh usage list, so they
-are allow-listed by name in `internal/cli/root.go` (`goOnlyCommands`) with a
-reason each. The same holds for the Go-only additions to existing commands:
-`lo init project`, `lo addons --origin`, `lo drivers --list --origin`, the
-global `--no-eject` flag — see [Embedded assets](#embedded-assets-the-eject-model). `lo mcp` replaces the argsh `mcp` builtin.
+`mcp`, `operator`, `assets` and `toolchain` have no twin in the argsh usage
+list, so they are allow-listed by name in `internal/cli/root.go`
+(`goOnlyCommands`) with a reason each. The same holds for the Go-only
+additions to existing commands: `lo init project`, `lo lint --notes`,
+`lo addons --origin`, `lo drivers --list --origin`, the global `--no-eject`
+flag — see [Embedded assets](#embedded-assets-the-eject-model). `lo mcp` replaces the argsh `mcp` builtin.
 The shipped `.mcp.json` launches `bin/lo mcp start`. The builtin stays
 reachable as the bash variant (`.lok8s/lo mcp` from a checkout), and
 `lo chat` still drives it. See [`lo mcp`](/reference/cli#lo-mcp).
@@ -93,7 +94,7 @@ The binary ships in **two builds from one tree**, selected by the
 | Linked in | all first-party logic, the `secrets.lok8s.dev` generator (imported — the registry TLS mint runs it in-process on both builds; it is ours and small) | the same, plus `sigs.k8s.io/kustomize/api`, khelm v2 and helm v3 |
 | Size (linux/amd64, stripped) | **49.8 MB** | **123.1 MB** |
 | `LO_RENDER` | unset/`exec` = the exec pipeline (the only one); `inprocess` is an **error** naming lo-full (`LO_RENDER=inprocess: this is lo core … install lo-full`) | unset/`inprocess` = in-process; `exec` = the subprocess pipeline for an A/B |
-| Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo init toolchain`](cli.md#lo-init) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
+| Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo toolchain install`](cli.md#lo-toolchain) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
 | `lo --version` | `lo version 0.3.0 (core)` | `lo version 0.3.0 (full)` |
 
 Everything else (every command, the parity harnesses, the tests) is the
@@ -130,7 +131,7 @@ second (`internal/execx.Look`):
 
 | Tool | Used by | Why not in-process |
 |---|---|---|
-| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **lo core: every render** (`lo build`, the addon render, the KubeOne addon staging): the pinned binary and the two b-installed plugins `lo init toolchain` provisions. lo-full: only `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and a command routed to bash | Core stays small and exec-only on purpose (the owner decision behind the two builds); lo-full links the same releases. Both are byte-identical: the pins are drift-tested. |
+| `kustomize` (+ the `khelm` and `secrets.lok8s.dev` exec plugins under `.kustomize/`) | **lo core: every render** (`lo build`, the addon render, the KubeOne addon staging): the pinned binary and the two b-installed plugins `lo toolchain install` provisions. lo-full: only `LO_RENDER=exec` (the A/B escape hatch), `lo kustomize` (which builds the standalone plugin for the bash path), and a command routed to bash | Core stays small and exec-only on purpose (the owner decision behind the two builds); lo-full links the same releases. Both are byte-identical: the pins are drift-tested. |
 | `yq` | `lo build` split mode (the YAML stream transforms and per-Secret re-renders), `lo env services` (the deep-merge the Tiltfile consumes) | yq's emitter has opinions (`---` on every non-first document, sequence-dash indentation) that `gopkg.in/yaml.v3` does not reproduce byte-for-byte. Field *extraction* from YAML is native everywhere. |
 | `sops` | `lo build` split-mode Secret twins | The `.enc` files must stay interoperable with the sops CLI. (`lo secrets` itself uses the sops **library** in binary mode; the files it writes are the same format.) |
 | `kubectl`, `kind`, `docker`, `tilt`, `clusterctl`, `kubeone`, `hcloud`, `mkcert`, `envsubst` | drivers, deploy, registries, tilt, trust | These are the tools lok8s orchestrates; calling them as-is keeps "what lok8s runs is what you'd run by hand" true. |
@@ -238,7 +239,7 @@ build without `b`), and `lo doctor` still reports `KUSTOMIZE_PLUGIN_HOME` /
 the built plugin because a command routed to bash, the provider plugins, lo core and
 `LO_RENDER=exec` need them (that text is unchanged; `hack/parity-configure.sh`
 diffs it; the pinned-toolchain section doctor adds is gated on the
-`lo init toolchain` marker or `--toolchain`, so the diff stays strict).
+`lo toolchain install` marker or `--toolchain`, so the diff stays strict).
 `kubectl kustomize` in `lo kubehz deploy` is kubectl's embedded kustomize,
 not the pinned one, in both implementations. The in-process render grew the
 binary from 49 MB to 123 MB (helm + client-go + the kustomize API), which
@@ -331,12 +332,12 @@ the [CLI reference](/reference/cli#lo-assets).
 `clusters/` or a `kind: Project` `lok8s.yaml` (what `lo init project`
 writes). A service's `lok8s.yaml` (`kind: Service`, one per submodule in
 kubehz-cluster) is not a marker: from inside a service directory the
-walk-up continues to the umbrella project. `.lok8s/lo` stays a fallback
-marker during the coexistence with the frozen tree. `config.FindProjectRoot`
-applies the same rules from an explicit directory without consulting
-`PATH_BASE`; `lo init project` and `lo init toolchain` resolve their default
-through it, so an ambient project from a direnv/mise shell is never the
-target.
+walk-up continues to the umbrella project. `.lok8s/lo` is not a marker
+either (D30): `.lok8s/` holds the ejected assets and, when a project wants
+one, the bash tree. `config.FindProjectRoot` applies the same rules from an
+explicit directory without consulting `PATH_BASE`; `lo init project` and
+`lo toolchain install` resolve their default through it, so an ambient
+project from a direnv/mise shell is never the target.
 
 **Parity.** The bash implementation reads `.lok8s/**` from disk and has
 no embedded copy, so `lo assets` has no twin and no parity harness (its
@@ -533,6 +534,7 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D8 | **`lo status` on a domain without a spec.** The bash `dispatch_status` ignores `resolve_spec`'s return and dies on an unbound variable (`set -u`); the binary prints the invalid-domain error and continues with the cluster-free sections. A bash defect, not a parity target. | `hack/parity-orchestrate.sh` |
 | D9 | **`lo kubehz register` / `join` do not print `LOK8S_SPEC_FILE: unbound variable`.** See defect B3 below; the binary passes the spec path. | `hack/parity-kubehz.sh` |
 | D23 | **A `-s` placed before the subcommand binds to the leaf's own `-s` on `secrets set`, `secrets env` and `kubehz handover receive`.** Those leaves give `-s` to `--namespace` / `--snapshot` (the bash spec); cobra hands the leaf every flag on the line regardless of position, so `lo -s myns secrets set …` reads `myns` as the namespace, where argsh's main consumed it as `--cluster` first. After the subcommand both agree. The harnesses place `-s` after the verb. | `internal/cli/cmd_secrets.go`, `cmd_kubehz.go` |
+| D31 | **`lo init` scaffolds files only; the toolchain, the lint notes and the assets view moved.** `lo init project` writes `clusters/`, `lok8s.yaml`, the `.gitignore` entries and one environment file (`--env mise|direnv|none`; `both` is refused). The network step is `lo toolchain install`; `lo toolchain doctor` is the pinned-tools section of `lo doctor` on its own; `lo init toolchain` is a hidden alias for one release. `lo lint --notes` prints a `[note]` line per Lo spec key equal to its documented default. `lo assets show` is gone (`lo assets diff <rel>` lists the files). All Go-only: `init service`, `init test`, bare `lo init` and every `lint` case without `--notes` stay byte-identical to bash. | `internal/cli/cmd_init.go`, `cmd_toolchain.go`, `cmd_lint.go`, `cmd_assets.go`, `internal/scaffold/project.go`, `internal/lint/defaults.go` |
 | D30 | **The project root is found by a marker walk, and `.lok8s/lo` is not a marker.** The bash entrypoint derives `PATH_BASE` from its own location (`<project>/.lok8s/lo`) and needs no marker. The binary walks up from the working directory to the nearest `clusters/` directory or `kind: Project` `lok8s.yaml` (an exported `PATH_BASE` still wins, WP9 step 1 is parked). A vendored bash tree alone marks nothing since WP9: the code lives in the binary and its cache, so `.lok8s/` is the asset and tree directory only. A project that keeps its clusters elsewhere (`PATH_CLUSTERS`) writes the project file. | `internal/config/paths.go` (`isProjectRoot`, `FindProjectRoot`) |
 
 ### Fail-loud instead of fail-silent

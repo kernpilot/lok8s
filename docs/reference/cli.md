@@ -217,6 +217,23 @@ lo toolchain doctor
 **`lo toolchain doctor`** prints the toolchain section of [`lo doctor`](#lo-doctor) on its own, for the project `lo` resolved: `.bin/b` with its version, then `kustomize`, the khelm `ChartRenderer` and the `secrets.lok8s.dev` Secret plugin, each against its pin. No marker and no flag gate it. The exit code is `1` when a tool this build execs is missing (`lo` core); `lo-full` only warns about the render tools.
 
 `lo init toolchain` is the old name of `lo toolchain install`. It stays for one release as a hidden alias: same flags, same output, plus one hint line on stderr. Use the new name.
+**A minimal project.** Two files are enough for `lo up`: the project file and one cluster spec. The Lo driver fills the rest from documented defaults (see [Cluster specs](specs.md#default-resolution)); `lo lint --notes` names the keys you can drop because they equal a default.
+
+```
+my-project/
+  lok8s.yaml                          # kind: Project, metadata.name
+  clusters/
+    demo.dev/
+      cluster.lok8s.yaml              # kind: Lo, metadata.name, spec.cluster.domain, spec.bootstrap
+```
+
+```bash
+mkdir my-project && cd my-project
+lo init project                       # the two directories above, .gitignore entries, mise.toml
+lo toolchain install                  # .bin/b.yaml, b, the pinned toolchain (the one network step)
+$EDITOR clusters/demo.dev/cluster.lok8s.yaml
+lo use demo.dev && lo up
+```
 
 ### lo use
 

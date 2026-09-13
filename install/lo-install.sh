@@ -22,7 +22,7 @@
 #
 # Two builds exist (see docs/reference/go-migration.md): `lo` (core, the
 # default) renders through the pinned kustomize binary and the exec plugins
-# `lo init toolchain` installs with b; `lo-full` (--full) links the kustomize
+# `lo toolchain install` installs with b; `lo-full` (--full) links the kustomize
 # API and khelm and renders in-process. Both install as `lo`; `lo --version`
 # names the build.
 
@@ -218,15 +218,15 @@ main() {
     *) say "    \033[2mexport PATH=\"${dir}:\${PATH}\"\033[0m   \033[2m# ${dir} is not on your PATH yet\033[0m" ;;
   esac
   say "    \033[2mlo --help\033[0m"
-  say "    \033[2mmkdir my-project && cd my-project && lo init project\033[0m   \033[2m# scaffold + the pinned toolchain via b\033[0m"
+  say "    \033[2mmkdir my-project && cd my-project && lo init project && lo toolchain install\033[0m   \033[2m# the project files, then the pinned toolchain via b\033[0m"
   say "    \033[2mcd <your-project> && lo use <domain> && lo up\033[0m"
   say ""
   if (( full )); then
     say "  lo-full renders in-process; the toolchain (kubectl, kind, tilt, …) still"
-    say "  comes from 'lo init toolchain'. Details: https://lok8s.io/reference/go-migration"
+    say "  comes from 'lo toolchain install'. Details: https://lok8s.io/reference/go-migration"
   else
     say "  lo (core) renders through the pinned kustomize + plugins that"
-    say "  'lo init toolchain' installs with b — run it in every project."
+    say "  'lo toolchain install' installs with b — run it in every project."
     say "  Prefer everything linked in? Re-run with --full. Details: https://lok8s.io/reference/go-migration"
   fi
   say ""
