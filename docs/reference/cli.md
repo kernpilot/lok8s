@@ -394,22 +394,22 @@ The server needs no other environment. It takes the project root from `PATH_BASE
 
 The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (69 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
 
+The bash server runs when the project's `lok8s.yaml` sets `spec.implementation.default: bash` (planned, WP8). The same block routes single commands: `spec.implementation.bash.commands` lists the commands the binary runs through the bash tree, and `spec.implementation.bash.tree` names that tree (default `.lok8s`). Implementation selection lives in the committed project config, not in the environment.
+
+Until WP8 lands, start the frozen tree directly from a checkout:
+
 ```json
 "lok8s": {
   "type": "stdio",
-  "command": "bin/lo",
+  "command": ".lok8s/lo",
   "args": ["mcp"],
-  "env": {
-    "LO_IMPL": "bash"
-  }
+  "env": {}
 }
 ```
 
-`LO_IMPL=bash lo mcp` execs `.lok8s/lo mcp` with the environment the `.envrc` would set. The direct form is `"command": ".lok8s/lo", "args": ["mcp"]` with an empty `env`: the entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
+The entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
 
 The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project` and `lo init toolchain` have no builtin tool.
-
-Per-command routing is planned: `LO_GO_BASH=<cmd>,...` will exec the named commands through the bash tree and keep every other command in Go. See [`LO_IMPL=bash`: the escape hatch](go-migration.md#lo-impl-bash-the-escape-hatch).
 
 ### lo kubeconfig
 

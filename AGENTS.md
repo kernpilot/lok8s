@@ -129,7 +129,7 @@ Rules that came from incidents:
 | scaffolding | `internal/scaffold` (+ `templates/`, `project.go` for `lo init project`), `internal/crds`, `internal/addons` | `.lok8s/libs/{init,crds,addons}` |
 | assets (eject model) | `internal/assets` — the embedded mirror `internal/assets/lok8s/**` (**canonical**: addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `tilt/`, `VERSION`), `Resolve`/`Peek`, eject + `.lo-origin`, the three-way diff, `update`. Also `internal/cli/cmd_assets.go` | `.lok8s/{addons,drivers/*/cluster,libs/inventory/manifests,chat,tilt,VERSION}`, the synced twin (`hack/sync-legacy-assets.sh`, drift-gated by `go test ./internal/assets/`). Edit the mirror, then sync. Never only one side |
 | tilt | `internal/tilt` (`lo tilt`, port slots); the extension itself is an embedded asset (`internal/assets/lok8s/tilt/`, ejected on first `lo tilt up`/`ci`) | `.lok8s/tilt/Tiltfile` (Starlark, the synced twin, still the live extension), `Tiltfile` |
-| mcp | `internal/cli/cmd_mcp.go` (ophis; `.mcp.json` launches `bin/lo mcp start`) | the argsh `mcp` builtin (`LO_IMPL=bash lo mcp`; `lo chat` still drives it) |
+| mcp | `internal/cli/cmd_mcp.go` (ophis; `.mcp.json` launches `bin/lo mcp start`) | the argsh `mcp` builtin (`.lok8s/lo mcp`; `lo chat` still drives it) |
 | operator | `internal/operator` (hook bodies), `operator/hooks/*.sh` (two-line shims), `operator/crds`, `operator/deploy` | `.archive/legacy/operator/hooks/` |
 | installer | `install/lo-install.sh`, `.goreleaser.yaml`, `hack/release-tarball.sh` | `.archive/legacy/install/` (`lo-up`) |
 | addons | `internal/assets/lok8s/addons/` (embedded, kustomize-buildable dirs, ejected into a project's `.lok8s/addons/<name>` on first use) | `.lok8s/addons/` (synced twin) |

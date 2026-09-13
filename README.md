@@ -320,7 +320,7 @@ lo chat --check    # guided: checks the bridge + a local model, prints setup hin
 lo chat            # then ask, e.g. "why won't my deployment start?"
 ```
 
-If a piece needs setup, `lo ai check` / `lo doctor` tell you exactly what to run. (`lo mcp` is native to the binary. `lo mcp claude|vscode|cursor enable` writes the editor config. The bash variant, the argsh `mcp` builtin, stays reachable with `LO_IMPL=bash lo mcp` and wants `argsh builtins install`; see [`lo mcp`](docs/reference/cli.md#lo-mcp).)
+If a piece needs setup, `lo ai check` / `lo doctor` tell you exactly what to run. (`lo mcp` is native to the binary. `lo mcp claude|vscode|cursor enable` writes the editor config. The bash variant, the argsh `mcp` builtin, starts as `.lok8s/lo mcp` from a checkout and wants `argsh builtins install`; see [`lo mcp`](docs/reference/cli.md#lo-mcp).)
 
 &nbsp;
 

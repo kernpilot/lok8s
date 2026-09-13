@@ -7,7 +7,7 @@
 #
 # Versions mirror .bin/b.lock — bump both together. mise provisions the *tools*
 # `lo` shells out to; it does NOT provide argsh.so (the MCP builtins). For
-# the bash MCP variant (`LO_IMPL=bash lo mcp`, what `lo chat` drives), run
+# the bash MCP variant (`.lok8s/lo mcp`, what `lo chat` drives), run
 # `argsh builtins install` (see the README MCP section).
 
 [tools]
