@@ -448,6 +448,7 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D10 | **KubeOne provider detection errors out.** The bash call inside `extract_vars` ran under a disabled errexit, so a spec with no detectable provider silently rendered `cloudProvider: "": {}`. The binary prints `No provider found in cluster spec` and stops. | `internal/driver/kubeone/vars.go` |
 | D11 | **KKP unsupported provider / non-numeric replicas abort before the wire.** The bash printed the error and then POSTed a mangled payload the server rejected. Same message, no request. | `internal/driver/kkp/kkp.go` |
 | D12 | **Tool-not-found checks in `lo secrets`.** `sops` and `ssh-to-age` are libraries in the binary, so their "not installed" branches do not exist. | `internal/secrets/ops.go` |
+| D24 | **sops is the kernpilot age-only fork.** `go.mod` replaces `github.com/getsops/sops/v3` with `github.com/kernpilot/sops/v3` (upstream v3.13.3 minus every key backend except age). A file or a `.sops.yaml` rule with a KMS, GCP KMS, Azure Key Vault, Vault or PGP recipient is rejected with `unsupported key type <x> (age-only build)`; bash used the full sops CLI, which could serve them. age files stay interoperable with the sops CLI. | `go.mod` (`replace`), `internal/secrets/sops.go` |
 
 ### Rendering and display
 

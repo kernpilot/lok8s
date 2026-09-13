@@ -12,13 +12,29 @@ LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion=$(sh
 #            in-process and serves both exec generators itself
 FULL_TAGS := inprocess
 
-.PHONY: build build-full test test-full vet vet-full lint lint-full clean release-check snapshot
+.PHONY: build build-full size-check test test-full vet vet-full lint lint-full clean release-check snapshot
 
 build:
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/lo
 
 build-full:
 	$(GO) build -trimpath -tags $(FULL_TAGS) -ldflags "$(LDFLAGS)" -o $(FULL) ./cmd/lo
+
+# Size gate for the core binary. sops comes from the kernpilot age-only
+# fork (the go.mod replace): the AWS, GCP, Azure, Vault and PGP backends,
+# gRPC and protobuf are out of the core build, which took bin/lo from
+# ~50 MB to ~15 MB. A dependency that drags one of them back in shows up
+# here first. The ceiling is 36 MiB; CI runs this in the go-tests job.
+LO_MAX_BYTES ?= 37748736
+
+size-check: build
+	@size=$$(wc -c < $(BINARY)); \
+	if [ "$$size" -gt $(LO_MAX_BYTES) ]; then \
+	  echo "size-check: $(BINARY) is $$size bytes, above the $(LO_MAX_BYTES) byte ceiling"; \
+	  echo "size-check: a cloud SDK, gRPC or protobuf is probably back in the core build: go list -deps ./cmd/lo | grep -E 'aws|cloud.google|azure|vault|grpc|protobuf'"; \
+	  exit 1; \
+	fi; \
+	echo "size-check: $(BINARY) is $$size bytes (ceiling $(LO_MAX_BYTES))"
 
 test:
 	$(GO) test ./...
