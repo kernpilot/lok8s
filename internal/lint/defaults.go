@@ -7,8 +7,10 @@ package lint
 //
 // Only keys with a default in docs/reference/specs.md ("Default
 // resolution", the Lo driver): spec.nodes.controlPlane, spec.runtime and
-// the mirror list. A key that is derived from another (the slot network
-// keys) has no fixed value to compare against and gets no note.
+// the mirror list, read from the driver's own constants (internal/driver/lo
+// defaults.go) so the two cannot drift. A key that is derived from another
+// (the slot network keys) has no fixed value to compare against and gets
+// no note.
 
 import (
 	"fmt"
@@ -17,27 +19,19 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // scalarDefaults are the documented scalar defaults of a Lo cluster spec:
 // the key path under the document root and the value the driver uses
-// when the key is absent (internal/driver/lo: config.go, lo.go).
+// when the key is absent.
 var scalarDefaults = []struct {
 	path []string
 	def  string
 }{
-	{[]string{"spec", "nodes", "controlPlane"}, "1"},
-	{[]string{"spec", "runtime"}, "kind"},
-}
-
-// defaultMirrors is the mirror list the Lo driver uses when
-// spec.registries.mirrors is absent (internal/driver/lo/configregistry.go).
-var defaultMirrors = []struct{ name, url string }{
-	{"io-docker", "https://registry-1.docker.io"},
-	{"io-quay", "https://quay.io"},
-	{"io-k8s", "https://registry.k8s.io"},
-	{"io-ghcr", "https://ghcr.io"},
+	{[]string{"spec", "nodes", "controlPlane"}, lodriver.DefaultControlPlane},
+	{[]string{"spec", "runtime"}, lodriver.DefaultRuntime},
 }
 
 // notes prints one `[note]` line per key of a Lo cluster spec that equals
@@ -65,7 +59,11 @@ func (l *Linter) notes(specFile string) {
 		}
 	}
 	if mirrorsEqualDefault(yqsem.SeqItems(yqsem.Lookup(root, "spec", "registries", "mirrors"))) {
-		note("spec.registries.mirrors", "io-docker, io-quay, io-k8s, io-ghcr on the standard upstream URLs")
+		names := make([]string, 0, len(lodriver.DefaultMirrors()))
+		for _, m := range lodriver.DefaultMirrors() {
+			names = append(names, m.Name)
+		}
+		note("spec.registries.mirrors", strings.Join(names, ", ")+" on the standard upstream URLs")
 	}
 }
 
@@ -73,12 +71,13 @@ func (l *Linter) notes(specFile string) {
 // default set: the same names and URLs, no extra entry and no extra key
 // per entry (order does not matter). An empty list is absent, not equal.
 func mirrorsEqualDefault(items []*yaml.Node) bool {
-	if len(items) != len(defaultMirrors) {
+	defaults := lodriver.DefaultMirrors()
+	if len(items) != len(defaults) {
 		return false
 	}
 	want := map[string]string{}
-	for _, m := range defaultMirrors {
-		want[m.name] = m.url
+	for _, m := range defaults {
+		want[m.Name] = m.URL
 	}
 	for _, it := range items {
 		keys, ok := yqsem.MapKeys(it)

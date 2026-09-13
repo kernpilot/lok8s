@@ -183,12 +183,22 @@ func runToolchainInstall(ctx context.Context, base string, groups []string, dryR
 }
 
 // newToolchainDoctorCommand builds `lo toolchain doctor`: the pinned-tools
-// section of `lo doctor` on its own, for the ambient project (paths), with
-// no marker gate. Exit 1 when a tool this build execs is missing.
+// section of `lo doctor` on its own, with no marker gate. Exit 1 when a
+// tool this build execs is missing. Unlike install it takes the project
+// of the current shell (paths: an exported PATH_BASE wins, like `lo
+// doctor`); the two agree once WP9 step 1 lands.
 func newToolchainDoctorCommand(paths *config.Paths) *cobra.Command {
 	return &cobra.Command{
-		Use:          "doctor",
-		Short:        "Verify the b-managed toolchain against the pins (the toolchain section of lo doctor)",
+		Use:   "doctor",
+		Short: "Verify the b-managed toolchain against the pins (the toolchain section of lo doctor)",
+		Long: `Print the toolchain section of lo doctor on its own: .bin/b, kustomize, the
+khelm ChartRenderer and the secrets.lok8s.dev Secret plugin, each against its
+pin. No marker and no flag gate it. Exit 1 when a tool this build execs is
+missing (lo core); lo-full only warns about the render tools.
+
+It uses the project of the current shell (an exported PATH_BASE wins, else the
+nearest project above the working directory), like lo doctor. lo toolchain
+install resolves from the working directory only.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{AnnotationReadonly: "true"},

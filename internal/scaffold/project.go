@@ -100,6 +100,10 @@ func EnvFileError(env string) error {
 }
 
 // writeEnvFile writes the selected environment file (kept unless force).
+// One file per project: when the OTHER writer's file already exists
+// (`--env direnv` on a project with a mise.toml, or the reverse), the
+// selected file is not written and a `Kept` line names the existing one;
+// --force writes it and says so.
 func writeEnvFile(dir, env string, spec EnvSpec, force bool, out io.Writer) error {
 	if env == "none" {
 		return nil
@@ -107,6 +111,16 @@ func writeEnvFile(dir, env string, spec EnvSpec, force bool, out io.Writer) erro
 	w, ok := envWriters[env]
 	if !ok {
 		return EnvFileError(env)
+	}
+	for other, ow := range envWriters {
+		if other == env || !fsutil.FileExists(filepath.Join(dir, ow.file)) {
+			continue
+		}
+		if !force {
+			fmt.Fprintf(out, "Kept %s (exists; one environment file per project, so %s is not written; --force writes it beside)\n", filepath.Join(dir, ow.file), w.file)
+			return nil
+		}
+		fmt.Fprintf(out, "Writing %s beside %s (--force; one environment file per project is the rule, two are yours to keep in sync)\n", w.file, ow.file)
 	}
 	return writeUnlessPresent(filepath.Join(dir, w.file), w.render(spec), force, out)
 }

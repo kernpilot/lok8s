@@ -93,7 +93,7 @@ cp config.example.yaml config.yaml            # then edit endpoints and models
 ```
 
 Point `lo.cwd` at a lok8s project root and install its toolchain there
-(`lo init toolchain`, or `./.bin/b install` in an existing project).
+(`lo toolchain install`, or `./.bin/b install` in an existing project).
 
 ## Workflow
 

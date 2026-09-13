@@ -146,11 +146,8 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	var mirrors []mirror
 	specMirrors := yqsem.SeqItems(yqsem.Lookup(root, "spec", "registries", "mirrors"))
 	if len(specMirrors) == 0 {
-		mirrors = []mirror{
-			{"io-docker", "https://registry-1.docker.io"},
-			{"io-quay", "https://quay.io"},
-			{"io-k8s", "https://registry.k8s.io"},
-			{"io-ghcr", "https://ghcr.io"},
+		for _, m := range DefaultMirrors() {
+			mirrors = append(mirrors, mirror{m.Name, m.URL})
 		}
 	} else {
 		for i, m := range specMirrors {

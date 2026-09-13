@@ -145,3 +145,45 @@ func TestProjectIdempotentAndForce(t *testing.T) {
 		t.Fatalf("--force did not rewrite mise.toml: %q", raw)
 	}
 }
+
+// One environment file per project: with the other writer's file present
+// the selected one is kept out and the line names the existing file;
+// --force writes it beside. Both directions.
+func TestProjectEnvFileOtherWriterPresent(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ existing, env, wantFile string }{
+		{"mise.toml", "direnv", ".envrc"},
+		{".envrc", "mise", "mise.toml"},
+	} {
+		t.Run(c.existing+"->"+c.env, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, c.existing), []byte("mine\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errOut bytes.Buffer
+			if err := Project(dir, ProjectOptions{Name: "demo", Env: c.env}, &out, &errOut); err != nil {
+				t.Fatal(err)
+			}
+			if fsutil.FileExists(filepath.Join(dir, c.wantFile)) {
+				t.Errorf("%s written beside %s without --force", c.wantFile, c.existing)
+			}
+			want := "Kept " + filepath.Join(dir, c.existing) + " (exists; one environment file per project, so " + c.wantFile + " is not written; --force writes it beside)\n"
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("no kept line naming %s:\n%s", c.existing, out.String())
+			}
+			out.Reset()
+			if err := Project(dir, ProjectOptions{Name: "demo", Env: c.env, Force: true}, &out, &errOut); err != nil {
+				t.Fatal(err)
+			}
+			if !fsutil.FileExists(filepath.Join(dir, c.wantFile)) {
+				t.Errorf("--force did not write %s", c.wantFile)
+			}
+			if !strings.Contains(out.String(), "Writing "+c.wantFile+" beside "+c.existing+" (--force;") {
+				t.Errorf("no beside line under --force:\n%s", out.String())
+			}
+			if raw, _ := os.ReadFile(filepath.Join(dir, c.existing)); string(raw) != "mine\n" {
+				t.Errorf("--force touched the other writer's file: %q", raw)
+			}
+		})
+	}
+}

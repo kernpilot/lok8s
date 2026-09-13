@@ -214,7 +214,7 @@ lo toolchain doctor
 
 `--dry-run` prints each step (the diff, the download URL and expected sum, the install command) and touches neither the tree nor the network.
 
-**`lo toolchain doctor`** prints the toolchain section of [`lo doctor`](#lo-doctor) on its own, for the project `lo` resolved: `.bin/b` with its version, then `kustomize`, the khelm `ChartRenderer` and the `secrets.lok8s.dev` Secret plugin, each against its pin. No marker and no flag gate it. The exit code is `1` when a tool this build execs is missing (`lo` core); `lo-full` only warns about the render tools.
+**`lo toolchain doctor`** prints the toolchain section of [`lo doctor`](#lo-doctor) on its own: `.bin/b` with its version, then `kustomize`, the khelm `ChartRenderer` and the `secrets.lok8s.dev` Secret plugin, each against its pin. No marker and no flag gate it. It takes the project of the current shell (an exported `PATH_BASE` wins, else the nearest project above the working directory), like `lo doctor`; `install` resolves from the working directory only. The exit code is `1` when a tool this build execs is missing (`lo` core); `lo-full` only warns about the render tools.
 
 `lo init toolchain` is the old name of `lo toolchain install`. It stays for one release as a hidden alias: same flags, same output, plus one hint line on stderr. Use the new name.
 **A minimal project.** Two files are enough for `lo up`: the project file and one cluster spec. The Lo driver fills the rest from documented defaults (see [Cluster specs](specs.md#default-resolution)); `lo lint --notes` names the keys you can drop because they equal a default.

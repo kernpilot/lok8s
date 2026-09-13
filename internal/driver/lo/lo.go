@@ -102,7 +102,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	root := yqsem.LoadNode(cy)
 	runtime := ""
 	if root != nil {
-		runtime = yqsem.Or(yqsem.Lookup(root, "spec", "runtime"), "kind")
+		runtime = yqsem.Or(yqsem.Lookup(root, "spec", "runtime"), DefaultRuntime)
 	}
 
 	if runtime != "kind" {

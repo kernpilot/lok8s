@@ -184,7 +184,7 @@ your-project/
   .kustomize/                  # kustomize plugin discovery (built binaries)
   Tiltfile                     # bootstrap: load('./.lok8s/tilt/Tiltfile', 'lok8s')
   services.yaml                # service definitions (your stuff)
-  .envrc                       # direnv: PATH_BASE, PATH_LOK8S, PATH_CLUSTERS, ...
+  .envrc                       # direnv: puts .bin on PATH (or mise.toml; no PATH_* pins)
 ```
 
 The `.lok8s/` and `.lok8s/tilt/` directories are framework code that
