@@ -1,0 +1,44 @@
+# kind cluster config — reference template
+# NOTE: This file is no longer used directly via envsubst.
+# The lo::render_kind_config() function in .lok8s/drivers/lo/main generates
+# the full kind config dynamically from cluster.lok8s.yaml spec fields:
+#   - spec.nodes.controlPlane / spec.nodes.workers -> nodes section
+#   - spec.registries.mirrors[] -> containerdConfigPatches
+#
+# This file is kept as documentation of the kind config structure.
+# Variables: ${CLUSTER_NAME}, ${K8S_VERSION}, ${DOCKER_NETWORK}
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ${CLUSTER_NAME}
+networking:
+  disableDefaultCNI: true
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+# Nodes are rendered dynamically from spec.nodes
+nodes:
+  - role: control-plane
+    image: "kindest/node:${K8S_VERSION}"
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+      - containerPort: 8080
+        hostPort: 8080
+        protocol: TCP
+    extraMounts:
+      - hostPath: /var/run/docker.sock
+        containerPath: /var/run/docker.sock
+# containerdConfigPatches are rendered dynamically from spec.registries.mirrors[]
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"

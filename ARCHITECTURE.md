@@ -26,6 +26,12 @@ For writing addons see [`docs/guide/addons.md`](docs/guide/addons.md).
   shipped/managed by the framework (`b sync` owns it) and stays a flat,
   override-free tree. User content lives under `clusters/` and at the
   repo root.
+- **One binary, one frozen reference.** The `lo` CLI is a Go binary
+  (`cmd/lo`, `internal/**`); every command runs natively. The argsh
+  implementation it was ported from stays inside `.lok8s/` as a frozen,
+  bugfix-only reference (`LO_IMPL=bash lo …` runs it) and is diffed
+  against the binary in CI. See
+  [`docs/reference/go-migration.md`](docs/reference/go-migration.md).
 - **No framework-level workload ordering.** The only ordering primitive
   lok8s exposes is `spec.bootstrap` for cluster-infrastructure addons
   applied at provision time. Workload ordering (if needed) is expressed
@@ -56,19 +62,25 @@ healthy, via Tilt (dev) or `lo deploy` (headless/CI).
 ### 1. Cluster creation
 
 How the cluster comes into existence. Handled by the **driver**
-(`.lok8s/drivers/<kind>/main`), not by kustomize.
+(`internal/driver/<kind>`, registered by name; the frozen bash twin is
+`.lok8s/drivers/<kind>/main`), not by kustomize.
 
-| Kind | Driver              | Runtime                                   |
-| ---- | ------------------- | ----------------------------------------- |
-| `Lo` | `drivers/lo/main`  | kind (Docker-in-Docker)                   |
-| `Capi` | `drivers/capi/main` | Cluster API (any provider — Hetzner, AWS, ...)|
-| `KubeOne` | `drivers/kubeone/main` | KubeOne (imperative worker management)  |
-| `Kkp` | `drivers/kkp/main` | Kubermatic Kubernetes Platform              |
+| Kind | Driver (Go)                  | Frozen bash twin         | Runtime                                   |
+| ---- | ---------------------------- | ------------------------ | ----------------------------------------- |
+| `Lo` | `internal/driver/lo`         | `drivers/lo/main`        | kind (Docker-in-Docker)                   |
+| `Capi` | `internal/driver/capi`     | `drivers/capi/main`      | Cluster API (any provider — Hetzner, AWS, ...)|
+| `KubeOne` | `internal/driver/kubeone` | `drivers/kubeone/main` | KubeOne (imperative worker management)  |
+| `Kkp` | `internal/driver/kkp`       | `drivers/kkp/main`       | Kubermatic Kubernetes Platform              |
+| `Kubehz` | `internal/driver/kubehz` | —                        | hosted control plane (kubehz platform)     |
 
 The driver consumes `cluster.lok8s.yaml` and provisions the cluster.
-When run locally, the `lo` script invokes the driver directly. In the
-operator mode (future), the operator reads the same CRD from
-Kubernetes.
+When run locally, the `lo` binary dispatches to the driver directly
+(`internal/provision`). In operator mode the same binary runs as the
+shell-operator hook (`lo operator <hook>`, `internal/operator`) and
+reads the same spec from a CRD. Physical-infrastructure **providers**
+(`.lok8s/providers/<name>/main`, e.g. Hetzner) are still bash plugins;
+the binary runs them as `bash -c` children through
+`internal/provider/bridge`.
 
 ### 2. Cluster content
 
@@ -97,7 +109,7 @@ my-project/
 ├── services.yaml                 # service definitions + registry config (committed)
 ├── services.<config>.yaml        # personal overrides (gitignored)
 ├── Tiltfile                      # loads .lok8s/tilt/Tiltfile
-├── .bin/                         # b-managed tool binaries (argsh, kustomize, ...)
+├── .bin/                         # b-managed tool binaries (lo, kustomize, argsh, ...)
 ├── .kustomize/                   # b-managed kustomize plugin binaries
 │   ├── khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
 │   └── secrets.lok8s.dev/v1/secret/Secret
@@ -108,28 +120,53 @@ my-project/
 `cluster.lok8s.yaml` never lives at the repo root. It lives inside its
 domain directory, under `clusters/<domain>/`.
 
+The `lo` on your `PATH` is the release binary (`.bin/lo` when `b`
+installed it, `~/.local/bin/lo` from the installer). In the lok8s
+repository itself it is built with `make build` → `bin/lo` from:
+
+```
+lok8s/                            # the repository (not a consumer project)
+├── cmd/lo/                       # main: LO_IMPL=bash → exec .lok8s/lo, else the cobra tree
+├── internal/
+│   ├── cli/                      # the command tree (cmd_<name>.go per command, shim.go, dispatch.go)
+│   ├── provision/, bootstrap/    # dispatch + gates, the spec.bootstrap DAG
+│   ├── driver/{lo,capi,kubeone,kkp,kubehz}/
+│   ├── provider/bridge/          # runs the bash provider plugins as children
+│   ├── build/, deploy/, kapply/  # render, apply, the progress layer
+│   ├── secrets/, lint/, audit/, kubehz/, tilt/, image/, operator/, …
+│   └── execx/                    # the ONE seam every external tool call goes through
+├── kustomize/                    # the exec plugins (own Go module)
+├── ai/lochat/                    # the lo chat engine (own Go module)
+├── hack/                         # parity-*.sh harnesses, e2e-go-roundtrip.sh, release helpers
+└── install/                      # lo-install.sh (verified-checksum installer)
+```
+
 ---
 
 ## The `.lok8s/` tree (framework) and `clusters/` tree (yours)
 
 ```
 .lok8s/                           # framework — flat, synced, override-free
-├── lo                            # CLI entrypoint
-├── libs/                         # shared bash libraries
+├── VERSION                       # stamped into `lo --version` by local builds
+├── lo                            # FROZEN argsh entrypoint (LO_IMPL=bash; the parity oracle)
+├── libs/                         # frozen bash libraries (reference for internal/**)
 │   ├── bootstrap                 # applies spec.bootstrap (framework-level)
 │   ├── addons                    # lo addons command
 │   ├── build, deploy, env
 │   ├── lint, status
 │   ├── gitops, kubehz/
 │   └── ...
-├── utils/                        # shared helpers (verbose, ip, types, http, ...)
+├── utils/                        # frozen shared helpers (verbose, ip, types, http, ...)
+├── legacy/                       # retired code — moved here, never deleted
+│   ├── install/                  # the argsh `lo-up` installer (source, build, argsh.pin)
+│   └── operator/hooks/           # the original bash shell-operator hook bodies
 ├── addons/                       # framework-shipped bootstrap addons
 │   ├── cilium/                   # Cilium CNI (khelm ChartRenderer + layered values)
 │   └── metallb/                  # MetalLB L2 LB (khelm ChartRenderer)
-├── drivers/
+├── drivers/                      # frozen bash drivers + the templates the Go drivers still read
 │   ├── lo/
-│   │   ├── main                  # Lo driver (kind)
-│   │   ├── cluster/              # kind runtime templates
+│   │   ├── main                  # Lo driver (kind) — frozen; Go twin: internal/driver/lo
+│   │   ├── cluster/              # kind runtime templates (read by BOTH implementations)
 │   │   │   ├── config.yaml       # base kind config
 │   │   │   ├── registry/         # registry container templates
 │   │   │   └── coredns/          # CoreDNS overlay
@@ -137,10 +174,10 @@ domain directory, under `clusters/<domain>/`.
 │   ├── capi/                     # CAPI driver + envsubst templates
 │   ├── kubeone/                  # KubeOne driver
 │   └── kkp/                      # KKP driver
-├── providers/                    # physical infra providers
+├── providers/                    # physical infra providers — LIVE bash plugins
 │   └── hetzner/                  # hcloud + Robot (cloud-init, installimage)
 └── tilt/
-    └── Tiltfile                  # the lok8s() extension function
+    └── Tiltfile                  # the lok8s() extension function (live)
 
 clusters/                         # user content — one dir per FQDN
 ├── .active                       # runtime state: current domain (gitignored)
@@ -365,7 +402,8 @@ whatever's left goes in as uncategorized.
 lo up <domain>
  ├─ provision              driver creates the cluster (kind/CAPI/...)
  ├─ bootstrap              framework applies spec.bootstrap addons
- │                         (.lok8s/libs/bootstrap) in order, waits
+ │                         (internal/bootstrap; frozen twin
+ │                         .lok8s/libs/bootstrap) in order, waits
  │                         healthy between stages
  └─ tilt up                Tilt reads services.yaml, builds targets,
                            applies with service-enable filters, wires
@@ -421,5 +459,5 @@ The following are intentionally incomplete while their designs settle:
 
 | Key           | Value                                    |
 | ------------- | ---------------------------------------- |
-| Last rewrite  | 2026-06-11 (consolidated from STRUCTURE.md / STRUCTURE-PLAN.md) |
-| Related docs  | [concepts.md](docs/guide/concepts.md), [specs.md](docs/reference/specs.md), [addons.md](docs/guide/addons.md) |
+| Last rewrite  | 2026-06-11 (consolidated from STRUCTURE.md / STRUCTURE-PLAN.md); Go binary + legacy layout added 2026-09 |
+| Related docs  | [concepts.md](docs/guide/concepts.md), [specs.md](docs/reference/specs.md), [addons.md](docs/guide/addons.md), [go-migration.md](docs/reference/go-migration.md), [TESTING.md](TESTING.md) |

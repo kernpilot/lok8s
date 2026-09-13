@@ -90,6 +90,7 @@ export default defineConfig({
             { text: 'services.yaml + lok8s.yaml Schema', link: '/reference/schema' },
             { text: 'Kind Contract', link: '/reference/kind-contract' },
             { text: 'Kustomize Plugins', link: '/reference/kustomize-plugins' },
+            { text: 'The Go lo Binary', link: '/reference/go-migration' },
           ],
         },
       ],

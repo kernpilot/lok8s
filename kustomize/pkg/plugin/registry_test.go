@@ -14,7 +14,7 @@ type fakeGen struct {
 	err     error
 }
 
-func (f *fakeGen) Name() string                       { return f.name }
+func (f *fakeGen) Name() string                         { return f.name }
 func (f *fakeGen) Generate(_ *Context) ([]Entry, error) { return f.entries, f.err }
 
 func TestRegistry_Empty(t *testing.T) {

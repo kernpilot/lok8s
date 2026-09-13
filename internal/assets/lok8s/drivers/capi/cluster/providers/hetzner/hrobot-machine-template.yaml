@@ -1,0 +1,29 @@
+# Hetzner Robot bare metal machine template for dedicated servers
+# Used when spec.hrobot.hosts[] is defined in cluster.lok8s.yaml
+# Variables: ${MACHINE_TEMPLATE_NAME}, ${HOST_SERVER_NUMBER}, ${HROBOT_SSH_KEY_NAME}
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: HetznerBareMetalMachineTemplate
+metadata:
+  name: ${MACHINE_TEMPLATE_NAME}
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          hetzner.com/server-number: "${HOST_SERVER_NUMBER}"
+      sshSpec:
+        secretRef:
+          name: ${CREDENTIAL_SECRET_NAME}
+          key:
+            name: ssh-key
+        portAfterInstallImage: 22
+      installImage:
+        image:
+          name: ubuntu-22.04
+        postInstallScript: ""
+      rootDeviceHints:
+        wwn: ${ROOT_DEVICE_WWN}

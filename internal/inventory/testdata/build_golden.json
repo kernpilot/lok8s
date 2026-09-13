@@ -1,0 +1,36 @@
+{
+  "apiVersion": "lok8s.dev/v1alpha1",
+  "kind": "ClusterInventory",
+  "metadata": {
+    "name": "cluster",
+    "labels": {
+      "lok8s.dev/domain": "inv.dev"
+    }
+  },
+  "spec": {
+    "lok8sVersion": "0.1.0",
+    "kind": "kubeone",
+    "specHash": "d1a5a01e5d0438736d0ad1c5323dcf2f4ade9c2eb1bcc2493cd2cc74ece655cb",
+    "renderedAt": "2023-11-14T22:13:20Z",
+    "addons": [
+      {
+        "name": "cilium",
+        "source": "addon",
+        "chartVersion": "1.20.1",
+        "category": "networking"
+      },
+      {
+        "name": "cert-manager",
+        "source": "addon",
+        "chartVersion": "v1.21.1",
+        "category": "infrastructure"
+      },
+      {
+        "name": "networking",
+        "source": "target"
+      }
+    ],
+    "provider": "hetzner",
+    "kubernetesVersion": "v1.31.10"
+  }
+}

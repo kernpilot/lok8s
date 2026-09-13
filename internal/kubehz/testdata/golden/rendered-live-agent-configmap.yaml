@@ -1,0 +1,44 @@
+# Named kubehz-live-agent-config (NOT kubehz-agent-config): the bash heartbeat
+# CronJob owns kubehz-agent-config, and applying this file over it would clobber
+# the values feeding the live CronJob — including the heartbeat-owner marker
+# that stops the two agents from beating at once.
+#
+# Same placeholder tokens as manifests/agent/configmap.yaml, so ONE
+# substitution pass in `lo kubehz deploy` feeds both agents.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubehz-live-agent-config
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+data:
+  KUBEHZ_API_URL: "https://api.example.com/heartbeat?cluster=a&mode=push"
+  CLUSTER_ID: "acme.example.com"
+  # Read bearer A from the mounted Secret file (least privilege — no Secret GET
+  # RBAC is exercised). The agent falls back to the k8s API only if the file is
+  # absent. The Secret itself is bootstrapped by the CronJob agent and is never
+  # rotated; this agent only ever reads it.
+  KUBEHZ_AGENT_TOKEN_FILE: "/var/run/secrets/kubehz/agent-token"
+  # Privacy: keep per-namespace pod counts and event namespaces/messages OUT of
+  # the payload by default. Set to "true" to opt in.
+  KUBEHZ_REPORT_NAMESPACES: "false"
+  # ── Desired-state loop ─────────────────────────────────────────────────────
+  # NOTE: none of these ENABLE acting. Execution is authorized exclusively by
+  # the server's /desired execution{} flags (tenant tier × cluster access ×
+  # platform kill switch) plus the opt-in RBAC in ../managed — these are only
+  # guard-rails. There is no local switch that turns acting on.
+  KUBEHZ_DESIRED_POLL_SECONDS: "60"
+  # Where machine-controller serves MachineDeployments (the KubeOne default).
+  # If you move the pools, move ../managed/rbac-managed.yaml's Role with them.
+  KUBEHZ_MD_NAMESPACE: "kube-system"
+  # Per-pool replica CEILING: a desiredReplicas outside 0..this is REFUSED and
+  # reported failed — never rewritten to the bound and applied.
+  KUBEHZ_MAX_REPLICAS: "50"
+  # Self-healing eviction unwedge: a heal-deleted machine still deleting after
+  # this many seconds, with its node still unreachable, gets the pods stuck
+  # Terminating on that node force-deleted ONCE, so the teardown can finish and
+  # the dead server stops billing. Minimum 60. Needs the pods-delete ClusterRole
+  # from ../managed; without it the unwedge fails soft and healing keeps working.
+  KUBEHZ_HEAL_EVICTION_TIMEOUT_SECONDS: "300"

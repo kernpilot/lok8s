@@ -1,0 +1,8 @@
+# KubeOne (self-managed) driver overlay. Self-managed kubelets serve TLS with
+# certs metrics-server won't trust by default → --kubelet-insecure-tls. (The
+# chart's defaultArgs already set
+# --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname, so we only
+# add the insecure-tls flag here to avoid a duplicate arg.) Kept out of the base
+# values.yaml so managed/kind clusters stay strict.
+args:
+  - --kubelet-insecure-tls

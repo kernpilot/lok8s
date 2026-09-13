@@ -1,0 +1,9 @@
+# The chart's templates hardcode namespace `cattle-system` but the chart does
+# not create the namespace itself (helm convention: `--create-namespace` at
+# install time). khelm has no equivalent flag, so ship it as a static resource
+# (same pattern as the metallb / cnpg-operator addons). The consumer's upgrade
+# Plans + RBAC glue live in this same namespace and rely on it existing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cattle-system

@@ -1,0 +1,31 @@
+# tempo — Grafana Tempo single-binary distributed-tracing backend. A generic,
+# reusable atom: bootstrap `tempo` by name to get the tracing backend (chart
+# tempo @1.24.1).
+#
+# Installs into the existing `monitoring` namespace, which is OWNED by the
+# monitoring target (clusters/.targets/monitoring/namespace.yaml). We do NOT
+# ship a namespace.yaml here — same reason metrics-server omits one for
+# kube-system: the namespace is created by another target, so bootstrap `tempo`
+# AFTER monitoring (it also needs monitoring's Prometheus Operator
+# ServiceMonitor CRD). Tempo is INTERNAL-ONLY (no chart Ingress / gateway
+# HTTPRoute — consumed by Grafana + in-cluster trace senders), so all rendered
+# objects already target `monitoring` (chart.yaml pins it) and a top-level
+# `namespace:` transformer is safe.
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# StatefulSet carries an immutable selector, so the transformer must not touch
+# it (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: tempo
+      lok8s.dev/type: system
+      lok8s.dev/category: observability
+
+namespace: monitoring
+
+generators:
+  - chart.yaml

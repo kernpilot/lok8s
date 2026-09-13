@@ -1,0 +1,24 @@
+# Pull-through cache template for registry mirrors
+# Rendered by lo::registries() with REMOTE_URL substituted
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+  cache:
+    blobdescriptor: inmemory
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: :80
+  headers:
+    X-Content-Type-Options: [nosniff]
+delete:
+  enabled: true
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3
+proxy:
+  remoteurl: ${REMOTE_URL}

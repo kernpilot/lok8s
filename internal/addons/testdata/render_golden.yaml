@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: testcni
+  namespace: kube-system
+data:
+  host: "10.0.0.1"
+  untouched: "$HOME and ${NOT_LISTED} stay"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: testcni
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent
+          env:
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
+            - name: ENABLED
+              value: "true"
+            - name: ALREADY_STR
+              value: "yes"
+            - name: FROM_FIELD
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP

@@ -1,0 +1,58 @@
+# Cilium values for the Hetzner PROVIDER layer — merged ON TOP of the driver
+# layer (base < values.<driver>.yaml < this file) for ANY driver on Hetzner:
+# CAPI/CAPH clusters get base + this; a KubeOne-on-Hetzner cluster gets the
+# kubeone driver file + this (live-proven: this file's cluster-pool IPAM is
+# what the seed runs, overriding kubeone's `kubernetes` mode).
+#
+# Like kind, hcloud gives no L3-routable pod network across nodes (the example
+# runs without a private hcloud network), so pod traffic uses an overlay
+# (routingMode: tunnel) and Cilium's operator owns IPAM (cluster-pool) from the
+# cluster podCIDR — no dependency on the CCM/kube-controller-manager allocating
+# per-node CIDRs. CIDRs match the CAPI Cluster's clusterNetwork.
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    # The service CIDR (10.96.0.0/12) is the apiserver's, not a cilium
+    # knob — a `clusterPoolIPv4ServiceCIDR` key sat here until the 1.20.1
+    # bump audit found it absent from BOTH the 1.19.2 and 1.20.1 chart
+    # schemas: helm ignores unknown keys, so it never rendered anything.
+    # Removed as a no-op.
+    # /23 per node (~510 pod IPs) — /24 (~254) was the hard ceiling on
+    # hosted-CP density: the operator packs the busiest worker until Cilium
+    # returns postIpamFailure "range is full". The pod CIDR is a /16 (65 536
+    # IPs); even 7×/23 = 3 584 leaves huge headroom. Bumping the mask does NOT
+    # resize existing CiliumNode /24 blocks — the operator only hands out the
+    # new mask when it (re)allocates a fresh block, i.e. after the node's
+    # CiliumNode CR is deleted+recreated (rolling drain / node replace). Safe
+    # to run mixed masks meanwhile (the pool allocator tracks CIDRs, no overlap).
+    clusterPoolIPv4MaskSize: 23
+
+routingMode: tunnel
+
+# ── Encryption (WireGuard) — Hetzner posture, ALL drivers ──────────────
+# Transparent encryption of ALL pod-to-pod and node-to-node traffic —
+# in-kernel WireGuard (>= 5.6; the Ubuntu LTS fleets both drivers
+# provision are comfortably newer). Provider-scoped on purpose: node
+# traffic crosses SHARED Hetzner infrastructure (cloud private networks,
+# the fsn1 vSwitch) regardless of which driver built the cluster, so the
+# posture belongs to the provider layer, not a driver file. (Restored
+# 2026-07-15 from the original production reference config, kubeone
+# layer; moved here 2026-07-15 so CAPI/CAPH clusters inherit it too.)
+# Enabling on a LIVE cluster is supported: agents pair up as keys
+# distribute (no strict mode, so no drop-until-encrypted window).
+# MTU: the kubeone driver pins MTU 1380 for its mixed vSwitch/cloud
+# topology (see values.kubeone.yaml — the value−130 ceiling already
+# includes the WireGuard 80). Pure-cloud CAPH clusters deliberately do
+# NOT pin: on a uniform hcloud network cilium's auto-MTU accounts the
+# tunnel + WireGuard overhead itself (the explicit-MTU bypass only
+# matters on mixed topologies). strictMode (drop plaintext) requires
+# NATIVE routing — not available under tunnel/vxlan; it would ride a
+# future KPR/native-routing migration, if ever.
+encryption:
+  enabled: true
+  type: wireguard
+  # Node-to-node too (host-owned traffic between cluster nodes), not
+  # just pod-to-pod.
+  nodeEncryption: true

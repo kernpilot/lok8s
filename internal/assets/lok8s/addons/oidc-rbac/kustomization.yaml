@@ -1,0 +1,47 @@
+# oidc-rbac — bind OIDC groups to cluster roles (3-tier, NO aggregate-to-admin).
+#
+# A generic, reusable atom: bootstrap `oidc-rbac` by name to give OIDC users
+# (who authenticate via spec.oidc → the apiserver StructuredAuthenticationConfig)
+# RBAC by group membership. It binds three GROUP names to the three built-in
+# ClusterRoles — cluster-admin / edit / view — with NO custom aggregation.
+#
+# ── Group names are ILLUSTRATIVE DEFAULTS the operator overrides ──────────────
+# The defaults assume a "kubehz" group namespace:
+#   oidc:kubehz:cluster-admins → cluster-admin (full control)
+#   oidc:kubehz:editors        → edit          (read/write most namespaced objs)
+#   oidc:kubehz:viewers        → view          (read-only)
+#
+# The `oidc:` PREFIX on each subject name MUST match spec.oidc.groupsPrefix
+# (default "oidc:"). The apiserver prepends that prefix to every groups claim
+# before RBAC evaluation, so a token group `kubehz:editors` becomes the RBAC
+# subject `oidc:kubehz:editors`. If you change spec.oidc.groupsPrefix, change
+# these subject names to match (or RBAC will never bind).
+#
+# ── Overriding the group names cleanly ───────────────────────────────────────
+# These ship as sensible defaults. To remap to YOUR IdP's group names, layer a
+# kustomize patch in the consuming target (do NOT edit this addon):
+#
+#   patches:
+#     - target: { kind: ClusterRoleBinding, name: lok8s-oidc-cluster-admins }
+#       patch: |-
+#         - op: replace
+#           path: /subjects/0/name
+#           value: "oidc:my-org:platform-admins"
+#
+# (The Group subjects are at /subjects/0/name in each binding below.)
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): ClusterRoleBinding
+# has no selector, and we never want the transformer to mutate the built-in
+# roleRef — keep it metadata-only for consistency with the other addons.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: oidc-rbac
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+resources:
+  - bindings.yaml

@@ -1,0 +1,441 @@
+# CAPI Cluster (cluster.x-k8s.io/v1beta2).
+# Rendered by capi::generate() with an envsubst whitelist from cluster.lok8s.yaml.
+# Refs use the v1beta2 `apiGroup` contract (CAPI 1.13 / CAPH 1.1.x).
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: test-production
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["10.244.0.0/16"]
+    services:
+      cidrBlocks: ["10.96.0.0/12"]
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: KubeadmControlPlane
+    name: test-production-control-plane
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: HetznerCluster
+    name: test-production
+---
+# HetznerCluster (infrastructure.cluster.x-k8s.io/v1beta1).
+# Rendered by capi::generate() when provider=hetzner. Modelled on CAPH v1.1.7:
+# the control-plane endpoint is the hcloud load balancer on :443, and the hcloud
+# token is read from the lok8s credential Secret (created by
+# capi::ensure_credentials in the same namespace).
+#
+# hcloudNetwork.enabled is driven by spec.provider.config.network.enabled — when
+# true, CAPH creates a private hcloud network and attaches all nodes + the LB to
+# it (CAPH defaults: 10.0.0.0/16). `spread` placement groups (anti-affinity) are
+# opt-in via spec.provider.config.placementGroups and injected by capi::generate
+# (a spread group caps at 10 servers, so they are off by default).
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: HetznerCluster
+metadata:
+  name: test-production
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+spec:
+  hcloudNetwork:
+    enabled: false
+  controlPlaneRegions:
+    - fsn1
+  controlPlaneEndpoint:
+    host: ""
+    port: 443
+  controlPlaneLoadBalancer:
+    region: fsn1
+  sshKeys:
+    hcloud:
+      - name: test-key
+  hetznerSecretRef:
+    name: test-production-credentials
+    key:
+      hcloudToken: hcloud-token
+      hetznerRobotUser: robot-user
+      hetznerRobotPassword: robot-password
+---
+# KubeadmControlPlane (controlplane.cluster.x-k8s.io/v1beta2).
+# Modelled on CAPH v1.1.7's hcloud "ubuntu" flavor: installs containerd + the
+# kubeadm stack on a stock ubuntu image via preKubeadmCommands (no pre-baked
+# node image needed). The two version exports are pre-resolved by capi::generate
+# (K8S_VERSION_TRIMMED / K8S_VERSION_MINOR); every other $VAR below is a runtime
+# shell variable and is deliberately NOT in the envsubst whitelist.
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KubeadmControlPlane
+metadata:
+  name: test-production-control-plane
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+spec:
+  replicas: 3
+  version: "v1.31.10"
+  machineTemplate:
+    spec:
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: HCloudMachineTemplate
+        name: test-production-control-plane
+  kubeadmConfigSpec:
+    clusterConfiguration:
+      apiServer:
+        extraArgs:
+          - name: kubelet-preferred-address-types
+            value: ExternalIP,Hostname,InternalDNS,ExternalDNS
+      controllerManager:
+        extraArgs:
+          - name: cloud-provider
+            value: external
+      etcd:
+        local:
+          dataDir: /var/lib/etcd
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          - name: cloud-provider
+            value: external
+          - name: max-pods
+            value: "120"
+          - name: resolv-conf
+            value: /etc/kubernetes/resolv.conf
+    joinConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          - name: cloud-provider
+            value: external
+          - name: max-pods
+            value: "120"
+          - name: resolv-conf
+            value: /etc/kubernetes/resolv.conf
+    files:
+      - path: /etc/sysctl.d/99-cilium.conf
+        owner: "root:root"
+        permissions: "0744"
+        content: |
+          net.ipv4.conf.lxc*.rp_filter = 0
+      - path: /etc/modules-load.d/crio.conf
+        owner: "root:root"
+        permissions: "0744"
+        content: |
+          overlay
+          br_netfilter
+      - path: /etc/sysctl.d/99-kubernetes-cri.conf
+        owner: "root:root"
+        permissions: "0744"
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+      - path: /etc/sysctl.d/99-kubelet.conf
+        owner: "root:root"
+        permissions: "0744"
+        content: |
+          vm.overcommit_memory=1
+          kernel.panic=10
+          kernel.panic_on_oops=1
+      - path: /etc/kubernetes/resolv.conf
+        owner: "root:root"
+        permissions: "0744"
+        content: |
+          nameserver 1.1.1.1
+          nameserver 1.0.0.1
+          nameserver 2606:4700:4700::1111
+      - path: /etc/systemd/system/containerd.service
+        owner: root:root
+        permissions: "0744"
+        content: |
+          [Unit]
+          Description=containerd container runtime
+          Documentation=https://containerd.io
+          After=network.target local-fs.target dbus.service
+
+          [Service]
+          ExecStartPre=-/sbin/modprobe overlay
+          ExecStart=/usr/local/bin/containerd
+
+          Type=notify
+          Delegate=yes
+          KillMode=process
+          Restart=always
+          RestartSec=5
+
+          LimitNPROC=infinity
+          LimitCORE=infinity
+
+          TasksMax=infinity
+          OOMScoreAdjust=-999
+
+          [Install]
+          WantedBy=multi-user.target
+    preKubeadmCommands:
+      - set -x
+      - export CONTAINERD=2.3.1
+      - export RUNC=1.2.5
+      - export KUBERNETES_VERSION=1.31.10
+      - export TRIMMED_KUBERNETES_VERSION=1.31
+      - ARCH="$(dpkg --print-architecture)"
+      - localectl set-locale LANG=en_US.UTF-8
+      - localectl set-locale LANGUAGE=en_US.UTF-8
+      - apt-get update -y
+      - apt-get -y install at jq unzip wget socat mtr logrotate apt-transport-https curl gnupg
+      - sed -i '/swap/d' /etc/fstab
+      - swapoff -a
+      - modprobe overlay
+      - modprobe br_netfilter
+      - sysctl --system
+      - wget https://github.com/opencontainers/runc/releases/download/v$RUNC/runc.$ARCH
+      - wget https://github.com/opencontainers/runc/releases/download/v$RUNC/runc.sha256sum
+      - sha256sum --check --ignore-missing runc.sha256sum
+      - install runc.$ARCH /usr/local/sbin/runc
+      - rm -f runc.$ARCH runc.sha256sum
+      - wget https://github.com/containerd/containerd/releases/download/v$CONTAINERD/containerd-$CONTAINERD-linux-$ARCH.tar.gz
+      - wget https://github.com/containerd/containerd/releases/download/v$CONTAINERD/containerd-$CONTAINERD-linux-$ARCH.tar.gz.sha256sum
+      - sha256sum --check containerd-$CONTAINERD-linux-$ARCH.tar.gz.sha256sum
+      - tar -zxf containerd-$CONTAINERD-linux-$ARCH.tar.gz -C /usr/local
+      - rm -f containerd-$CONTAINERD-linux-$ARCH.tar.gz containerd-$CONTAINERD-linux-$ARCH.tar.gz.sha256sum
+      - mkdir -p /etc/containerd
+      - containerd config default > /etc/containerd/config.toml
+      - sed -i  "s/SystemdCgroup = false/SystemdCgroup = true/" /etc/containerd/config.toml
+      - systemctl daemon-reload
+      - systemctl enable containerd
+      - systemctl start containerd
+      - mkdir -p /etc/apt/keyrings/
+      - curl -fsSL https://pkgs.k8s.io/core:/stable:/v$TRIMMED_KUBERNETES_VERSION/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      - echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v$TRIMMED_KUBERNETES_VERSION/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+      - apt-get update
+      - apt-get install -y kubelet="$KUBERNETES_VERSION-*" kubeadm="$KUBERNETES_VERSION-*" kubectl="$KUBERNETES_VERSION-*" bash-completion
+      - apt-mark hold kubelet kubectl kubeadm
+      - systemctl enable kubelet
+      - kubeadm config images pull --kubernetes-version v$KUBERNETES_VERSION
+      - apt-get -y autoremove
+      - apt-get -y clean all
+---
+# HCloudMachineTemplate for the control plane (referenced by the KCP).
+# Stock image — the kubeadm stack is installed via the KCP preKubeadmCommands.
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: HCloudMachineTemplate
+metadata:
+  name: test-production-control-plane
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+spec:
+  template:
+    spec:
+      type: cax21
+      imageName: ubuntu-24.04
+---
+# MachineDeployment (cluster.x-k8s.io/v1beta2), one per worker pool.
+# Rendered by capi::generate() in the per-pool loop.
+# Variables set per pool: general, 2, cax21.
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: test-production-general
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+    nodepool: test-production-general
+spec:
+  clusterName: test-production
+  replicas: 2
+  selector:
+    matchLabels: null
+  template:
+    metadata:
+      labels:
+        nodepool: test-production-general
+    spec:
+      clusterName: test-production
+      failureDomain: fsn1
+      version: "v1.31.10"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: test-production-general
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: HCloudMachineTemplate
+        name: test-production-general
+---
+# KubeadmConfigTemplate (bootstrap.cluster.x-k8s.io/v1beta2), one per worker
+# pool. Modelled on CAPH v1.1.7's kct-md-0 "ubuntu" flavor: installs the same
+# containerd + kubeadm stack as the control plane via preKubeadmCommands. The
+# two version exports are pre-resolved by capi::generate; every other $VAR is a
+# runtime shell variable (not in the envsubst whitelist).
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: test-production-general
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+spec:
+  template:
+    spec:
+      joinConfiguration:
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: cloud-provider
+              value: external
+            - name: config
+              value: /etc/kubernetes/kubelet/config.yaml
+      files:
+        - path: /etc/sysctl.d/99-cilium.conf
+          owner: "root:root"
+          permissions: "0744"
+          content: |
+            net.ipv4.conf.lxc*.rp_filter = 0
+        - path: /etc/modules-load.d/crio.conf
+          owner: "root:root"
+          permissions: "0744"
+          content: |
+            overlay
+            br_netfilter
+        - path: /etc/sysctl.d/99-kubernetes-cri.conf
+          owner: "root:root"
+          permissions: "0744"
+          content: |
+            net.bridge.bridge-nf-call-iptables  = 1
+            net.bridge.bridge-nf-call-ip6tables = 1
+            net.ipv4.ip_forward                 = 1
+        - path: /etc/sysctl.d/99-kubelet.conf
+          owner: "root:root"
+          permissions: "0744"
+          content: |
+            vm.overcommit_memory=1
+            kernel.panic=10
+            kernel.panic_on_oops=1
+        - path: /etc/kubernetes/resolv.conf
+          owner: "root:root"
+          permissions: "0744"
+          content: |
+            nameserver 1.1.1.1
+            nameserver 1.0.0.1
+            nameserver 2606:4700:4700::1111
+        - path: /etc/kubernetes/kubelet/config.yaml
+          owner: "root:root"
+          permissions: "0644"
+          content: |
+            apiVersion: kubelet.config.k8s.io/v1beta1
+            kind: KubeletConfiguration
+            authentication:
+              anonymous:
+                enabled: false
+              webhook:
+                enabled: true
+            authorization:
+              mode: Webhook
+            eventRecordQPS: 5
+            maxPods: 220
+            readOnlyPort: 0
+            resolvConf: /etc/kubernetes/resolv.conf
+            serverTLSBootstrap: true
+            tlsCipherSuites:
+              - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+              - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+              - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+              - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+              - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+              - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+              - TLS_RSA_WITH_AES_256_GCM_SHA384
+              - TLS_RSA_WITH_AES_128_GCM_SHA256
+        - path: /etc/systemd/system/containerd.service
+          owner: root:root
+          permissions: "0744"
+          content: |
+            [Unit]
+            Description=containerd container runtime
+            Documentation=https://containerd.io
+            After=network.target local-fs.target dbus.service
+
+            [Service]
+            ExecStartPre=-/sbin/modprobe overlay
+            ExecStart=/usr/local/bin/containerd
+
+            Type=notify
+            Delegate=yes
+            KillMode=process
+            Restart=always
+            RestartSec=5
+
+            LimitNPROC=infinity
+            LimitCORE=infinity
+
+            TasksMax=infinity
+            OOMScoreAdjust=-999
+
+            [Install]
+            WantedBy=multi-user.target
+      preKubeadmCommands:
+        - set -x
+        - grep VERSION= /etc/os-release; uname -a
+        - export CONTAINERD=2.3.1
+        - export RUNC=1.2.5
+        - export KUBERNETES_VERSION=1.31.10
+        - export TRIMMED_KUBERNETES_VERSION=1.31
+        - ARCH="$(dpkg --print-architecture)"
+        - localectl set-locale LANG=en_US.UTF-8
+        - localectl set-locale LANGUAGE=en_US.UTF-8
+        - apt-get update -y
+        - apt-get -y install at jq unzip wget socat mtr logrotate apt-transport-https curl gnupg
+        - sed -i '/swap/d' /etc/fstab
+        - swapoff -a
+        - modprobe overlay
+        - modprobe br_netfilter
+        - sysctl --system
+        - wget https://github.com/opencontainers/runc/releases/download/v$RUNC/runc.$ARCH
+        - wget https://github.com/opencontainers/runc/releases/download/v$RUNC/runc.sha256sum
+        - sha256sum --check --ignore-missing runc.sha256sum
+        - install runc.$ARCH /usr/local/sbin/runc
+        - rm -f runc.$ARCH runc.sha256sum
+        - wget https://github.com/containerd/containerd/releases/download/v$CONTAINERD/containerd-$CONTAINERD-linux-$ARCH.tar.gz
+        - wget https://github.com/containerd/containerd/releases/download/v$CONTAINERD/containerd-$CONTAINERD-linux-$ARCH.tar.gz.sha256sum
+        - sha256sum --check containerd-$CONTAINERD-linux-$ARCH.tar.gz.sha256sum
+        - tar -zxf containerd-$CONTAINERD-linux-$ARCH.tar.gz -C /usr/local
+        - rm -f containerd-$CONTAINERD-linux-$ARCH.tar.gz containerd-$CONTAINERD-linux-$ARCH.tar.gz.sha256sum
+        - mkdir -p /etc/containerd
+        - containerd config default > /etc/containerd/config.toml
+        - sed -i  "s/SystemdCgroup = false/SystemdCgroup = true/" /etc/containerd/config.toml
+        - systemctl daemon-reload
+        - systemctl enable containerd
+        - systemctl start containerd
+        - mkdir -p /etc/apt/keyrings/
+        - curl -fsSL https://pkgs.k8s.io/core:/stable:/v$TRIMMED_KUBERNETES_VERSION/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        - echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v$TRIMMED_KUBERNETES_VERSION/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+        - apt-get update
+        - apt-get install -y kubelet="$KUBERNETES_VERSION-*" kubeadm="$KUBERNETES_VERSION-*" kubectl="$KUBERNETES_VERSION-*" bash-completion
+        - apt-mark hold kubelet kubectl kubeadm
+        - systemctl enable kubelet
+        - apt-get -y autoremove
+        - apt-get -y clean all
+---
+# HCloudMachineTemplate for a worker pool (referenced by the pool's
+# MachineDeployment). Rendered once per pool by capi::generate().
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: HCloudMachineTemplate
+metadata:
+  name: test-production-general
+  namespace: capi-system
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: prod.lok8s.dev
+spec:
+  template:
+    spec:
+      type: cax21
+      imageName: ubuntu-24.04

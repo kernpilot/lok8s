@@ -1,0 +1,9 @@
+# Cilium base values — shared across all drivers/providers.
+# Driver-specific overrides in values.{lo,kubeone}.yaml.
+# Provider-specific overrides in values.{hetzner,aws}.yaml.
+
+endpointRoutes:
+  enabled: true
+
+operator:
+  replicas: 1

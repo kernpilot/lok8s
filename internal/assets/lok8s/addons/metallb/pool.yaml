@@ -1,0 +1,26 @@
+# MetalLB IPAddressPool + L2Advertisement.
+#
+# The pool addresses are substituted from the cluster spec via envsubst
+# at build::artifacts time:
+#   ${LOK8S_SPEC_LOADBALANCER_POOL}        full pool string (e.g. "10.125.125.125-10.125.125.150")
+#
+# Set spec.loadBalancer.pool in cluster.lok8s.yaml. If unset, the
+# substitution leaves the addresses field empty and metallb installs
+# but hands out no IPs (effectively a no-op until configured).
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: lok8s-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - "${LOK8S_SPEC_LOADBALANCER_POOL}"
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: lok8s-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - lok8s-pool

@@ -1,0 +1,10 @@
+{
+  "domain": "test.kubehz.dev",
+  "kind": "KubeOne",
+  "provider": "hetzner",
+  "region": "nbg1",
+  "kubernetesVersion": "v1.31.10",
+  "controlPlaneReplicas": 3,
+  "hosting": "hosted",
+  "access": "managed"
+}

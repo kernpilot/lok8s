@@ -1,0 +1,17 @@
+# AWS machine template for EC2 instances
+# Rendered per control plane and per worker pool
+# Variables: ${MACHINE_TEMPLATE_NAME}, ${AWS_INSTANCE_TYPE}, ${AWS_REGION}, ${AWS_AMI_ID}
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: AWSMachineTemplate
+metadata:
+  name: ${MACHINE_TEMPLATE_NAME}
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  template:
+    spec:
+      instanceType: ${AWS_INSTANCE_TYPE}
+      iamInstanceProfile: control-plane.cluster-api-provider-aws.sigs.k8s.io
+      sshKeyName: ${AWS_SSH_KEY_NAME}

@@ -1,0 +1,21 @@
+# Mailpit Service — SMTP (1025) for apps to deliver to, HTTP (8025) for the
+# UI/API. Reachable in-cluster at mailpit.<namespace>.svc.cluster.local.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mailpit
+spec:
+  selector:
+    app: mailpit
+  ports:
+    - name: smtp
+      port: 1025
+      targetPort: 1025
+      protocol: TCP
+    - name: http
+      port: 8025
+      targetPort: 8025
+      protocol: TCP

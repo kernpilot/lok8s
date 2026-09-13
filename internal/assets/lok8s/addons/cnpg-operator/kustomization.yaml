@@ -1,0 +1,26 @@
+# cnpg-operator — CloudNativePG operator (manages PostgreSQL Clusters via the
+# postgresql.cnpg.io CRDs). A generic, reusable atom: bootstrap `cnpg-operator`
+# by name to get the operator + CRDs. The actual `Cluster` resources live in the
+# consuming cluster (NOT here) — so this addon is pure operator, no
+# cluster-specific config (it just installs the CRDs and controller).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: cnpg-operator
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: cnpg-system
+
+generators:
+  - chart.yaml
+
+resources:
+  - namespace.yaml

@@ -1,0 +1,26 @@
+# autoscaler — cluster-autoscaler (Cluster API / clusterapi provider). A generic,
+# reusable atom: bootstrap `autoscaler` by name to get the controller. Installs
+# into the existing kube-system namespace (no namespace.yaml needed, same as
+# metrics-server). It talks to the in-cluster Cluster-API machine-controller CRDs
+# (cluster.k8s.io) — no cloud API token Secret is required (machine-controller
+# owns provisioning), so unlike a direct cloud-provider wiring there is no Secret
+# generator here. The worker-pool MachineDeployment it scales lives in the
+# consuming cluster (NOT here).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
+# Deployment carries an immutable selector, so the transformer must not touch it
+# (else in-place re-applies / migrations from a target fail).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: autoscaler
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+namespace: kube-system
+
+generators:
+  - chart.yaml

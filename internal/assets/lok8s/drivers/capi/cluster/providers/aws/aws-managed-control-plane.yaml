@@ -1,0 +1,15 @@
+# AWS EKS managed control plane template (optional, for EKS mode)
+# Rendered when spec.aws.eks is true
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: AWSManagedControlPlane
+metadata:
+  name: ${CLUSTER_NAME}-control-plane
+  namespace: ${CLUSTER_NAMESPACE}
+  labels:
+    lok8s.dev/managed: "true"
+    lok8s.dev/domain: ${CLUSTER_DOMAIN}
+spec:
+  region: ${AWS_REGION}
+  sshKeyName: ${AWS_SSH_KEY_NAME}
+  version: ${K8S_VERSION}
+  eksClusterName: ${CLUSTER_NAME}

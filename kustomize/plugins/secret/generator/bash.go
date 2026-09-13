@@ -78,7 +78,7 @@ func (g *Bash) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 			}
 		} else if os.IsNotExist(err) {
 			// First run — create the .sha file.
-			if err := os.WriteFile(shaFile, []byte(entryHash+"\n"), 0644); err != nil {
+			if err := os.WriteFile(shaFile, []byte(entryHash+"\n"), 0644); err != nil { // #nosec G306 -- a content hash for the allow gate, not a secret
 				return nil, errs.Newf("bash %s: failed to write .sha file: %v", k, err)
 			}
 		} else {

@@ -10,7 +10,7 @@ import TerminalDemo from './TerminalDemo.vue'
 import WorkflowLoop from './WorkflowLoop.vue'
 
 const copied = ref(false)
-const INSTALL = 'curl -fsSL https://get.lok8s.io | sh'
+const INSTALL = 'curl -fsSLO https://github.com/kernpilot/lok8s/releases/latest/download/lo-install.sh'
 
 async function copyInstall() {
   try {
@@ -91,7 +91,7 @@ const capabilities = [
           <span class="ps1">$</span> {{ INSTALL }}
           <span class="copy">{{ copied ? '✓ copied' : 'copy' }}</span>
         </button>
-        <p class="install-note">Run it from your project root — it scaffolds <code>.bin/</code>, <code>clusters/</code> and a re-runnable <code>lo-up</code> there.</p>
+        <p class="install-note">Then verify it against the release's <code>checksums.txt</code>, read it, and run <code>bash lo-install.sh</code> — it installs the <code>lo</code> binary to <code>~/.local/bin</code>. See <a href="/guide/#installation">Getting Started</a> for the project bootstrap.</p>
       </div>
       <div class="intro-mark">
         <EnsoHero />

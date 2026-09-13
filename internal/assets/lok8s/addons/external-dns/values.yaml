@@ -1,0 +1,71 @@
+# ExternalDNS — Hetzner DNS via official webhook sidecar
+#
+# Syncs DNS records from Gateway API resources (Gateway, HTTPRoute) to
+# Hetzner DNS. The webhook runs as a sidecar in the ExternalDNS pod.
+#
+# Prereqs:
+#   - Secret "hetzner-dns" in namespace external-dns with key "token"
+#     containing a Hetzner Cloud API token with DNS read+write.
+
+# sync = create + update + delete records (vs. upsert-only)
+policy: sync
+
+# Watch Gateway API resources (Gateway + HTTPRoute), not Ingress
+sources:
+  - gateway-httproute
+  - gateway-grpcroute
+  - gateway-tlsroute
+  - gateway-tcproute
+  - gateway-udproute
+
+# Hetzner webhook sidecar
+provider:
+  name: webhook
+  webhook:
+    image:
+      repository: docker.io/hetzner/external-dns-hetzner-webhook
+      tag: v0.3.3
+    env:
+      - name: HETZNER_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: hetzner-dns
+            key: token
+      # Zones external-dns is allowed to manage. Must include EVERY zone whose
+      # hostnames appear on your HTTPRoutes, or those records are never pushed;
+      # external-dns only creates records for hostnames that actually exist on a
+      # route.
+      #
+      # This is the FRAMEWORK ADDON: the zone list is per-cluster GLUE supplied
+      # via spec.dns.domainFilter (exported as ${LOK8S_SPEC_DNS_DOMAINFILTER} and
+      # substituted at bootstrap time). The consuming cluster MUST set it. In
+      # particular do NOT list a LOCAL dev zone (a `*.dev` domain managed locally
+      # via the kind LB IP): external-dns is PROD-only (dev does not run it), and
+      # listing a dev zone would make prod publish dev hostnames into it (any
+      # stray .dev hostname on a route → a prod IP). List only the prod-facing
+      # zones.
+      - name: INCLUDE_DOMAIN_FILTER
+        value: "${LOK8S_SPEC_DNS_DOMAINFILTER}"
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: http-webhook
+      initialDelaySeconds: 10
+      timeoutSeconds: 5
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: http-webhook
+      initialDelaySeconds: 10
+      timeoutSeconds: 5
+
+# TXT record ownership to prevent conflicts with manual records
+extraArgs:
+  - "--txt-prefix=reg-%{record_type}."
+  # Don't publish private targets. The Envoy gateway LB Service carries BOTH a
+  # public IP and a private 10.x IP (the EnvoyProxy sets
+  # load-balancer.hetzner.cloud/use-private-ip=true so in-cluster/PROXY traffic
+  # uses the private hop). Without this, external-dns would publish the private
+  # 10.x address too, producing a stray A record that resolves to an
+  # unreachable IP. Harmless on local-dev (kind has no 10.x LB IPs).
+  - "--exclude-target-net=10.0.0.0/8"

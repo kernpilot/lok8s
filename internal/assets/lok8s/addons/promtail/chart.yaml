@@ -1,0 +1,14 @@
+# khelm chart spec for promtail — the node-level log collector (DaemonSet on
+# every node, control plane included) shipping container logs to the loki
+# addon's Service (loki.monitoring:3100).
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: promtail
+  namespace: monitoring
+kubeVersion: "1.35.5"
+repository: https://grafana.github.io/helm-charts
+chart: promtail
+version: 6.17.1
+valueFiles:
+  - values.yaml

@@ -1,0 +1,25 @@
+# envoy-gateway — the Envoy Gateway controller (Gateway API implementation),
+# inflated via khelm at kustomize build time. A generic, reusable install: the
+# controller + CRDs + GatewayClass. The per-cluster GLUE — the `Gateway` CR,
+# HTTPRoutes, and the cert-manager issuer/cert — stays in the consumer's
+# networking target (bootstrap this addon BEFORE that target).
+#
+# lok8s.dev labels are metadata-only (includeSelectors: false) so the transformer
+# never touches the controller Deployment's immutable selector.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: envoy-gateway-system
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: envoy-gateway
+      lok8s.dev/type: system
+      lok8s.dev/category: networking
+
+resources:
+  - namespace.yaml
+
+generators:
+  - chart.yaml

@@ -1,0 +1,36 @@
+[
+  {
+    "op": "replace",
+    "path": "/spec/replicas",
+    "value": 1
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/tolerations/-",
+    "value": {
+      "key": "node-role.kubernetes.io/control-plane",
+      "operator": "Exists",
+      "effect": "NoSchedule"
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/volumes/-",
+    "value": {
+      "name": "custom-config-volume",
+      "configMap": {
+        "name": "coredns-custom",
+        "optional": true
+      }
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/volumeMounts/-",
+    "value": {
+      "name": "custom-config-volume",
+      "mountPath": "/etc/coredns/custom",
+      "readOnly": true
+    }
+  }
+]
