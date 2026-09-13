@@ -365,10 +365,11 @@ func executables(t *testing.T, root string) testutil.Tree {
 	return tree
 }
 
-// Every tracked top-level entry of .lok8s must be in `mirrored`; an entry
-// that is not would silently stay out of the binary. Tracked entries
-// only: a toolchain step may drop an untracked file into .lok8s (CI does),
-// and that is not part of the tree.
+// Every top-level entry of .lok8s in the COMMITTED tree must be in
+// `mirrored`; an entry that is not would silently stay out of the binary.
+// The committed tree (git ls-tree HEAD), not the working dir or the index:
+// a toolchain step drops files into .lok8s on CI, and those are not part
+// of the tree the binary must carry.
 func TestMirroredListCoversLegacyTree(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
@@ -376,16 +377,13 @@ func TestMirroredListCoversLegacyTree(t *testing.T) {
 	if err != nil {
 		t.Skip("git not on PATH")
 	}
-	out, err := exec.Command(git, "-C", root, "ls-files", "--", ".lok8s").Output()
+	out, err := exec.Command(git, "-C", root, "ls-tree", "--name-only", "HEAD", "--", ".lok8s/").Output()
 	if err != nil || len(out) == 0 {
-		t.Skipf("git ls-files .lok8s: %v", err)
+		t.Skipf("git ls-tree HEAD .lok8s: %v", err)
 	}
-	seen := map[string]bool{}
 	var names []string
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		top, _, _ := strings.Cut(strings.TrimPrefix(line, ".lok8s/"), "/")
-		if top != "" && !seen[top] {
-			seen[top] = true
+		if top := strings.TrimPrefix(line, ".lok8s/"); top != "" {
 			names = append(names, top)
 		}
 	}
