@@ -4,7 +4,7 @@ package cli
 //
 //	lo assets list                      every embedded asset + its origin
 //	lo assets show <rel>                one asset: files, marker, state
-//	lo assets eject [rel…|--all] [--check]
+//	lo assets eject [rel…|--all] [--check]   (rel `bash` = the frozen bash implementation)
 //	lo assets diff [rel…] [--json] [--check]
 //	lo assets update <rel> [--force]
 //
@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -107,10 +108,17 @@ func newAssetsEjectCommand(paths *config.Paths) *cobra.Command {
 		Long: `Materialize embedded framework assets into the project so what a cluster
 applies is pinned on disk. Without arguments the set is what this project's
 cluster specs reference (every builtin spec.bootstrap addon, the driver's
-cluster templates, the inventory CRD); --all ejects every embedded asset.
+cluster templates, the inventory CRD); --all ejects every data asset.
 An existing local copy is never touched. --check writes nothing and exits 1
 when any of the set would be ejected — the CI gate for "this repo pins what
-it applies".`,
+it applies".
+
+The rel "bash" is the frozen bash implementation (lo, libs/, utils/, the
+drivers' code, the provider plugins). Ejecting it writes the code half into
+.lok8s/ with a .lo-origin marker at the tree root and ejects every data asset
+the project lacks, so .lok8s/ is a complete tree: LO_IMPL=bash and the
+provider plugins then run from it instead of the copy the binary extracts
+into its cache. It is never part of --all or of the referenced set.`,
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -119,10 +127,15 @@ it applies".`,
 			switch {
 			case all:
 				for _, u := range assets.Units() {
-					rels = append(rels, u.Rel)
+					if u.Kind != assets.KindBash {
+						rels = append(rels, u.Rel)
+					}
 				}
 			case len(rels) == 0:
 				rels = referencedAssets(paths, stderr)
+			}
+			if slices.Contains(rels, assets.BashRel) {
+				rels = append(rels, assets.MissingDataUnits(paths)...)
 			}
 			var pending []string
 			for _, rel := range rels {
