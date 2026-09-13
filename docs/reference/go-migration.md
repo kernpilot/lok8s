@@ -369,11 +369,25 @@ states what `b` still manages today versus the intended end state.
 ## What still runs as bash
 
 Three seams run bash from the frozen tree. Each one is a choice, not a
-gap in the port.
+gap in the port. None of them needs a checkout: the binary embeds the
+whole tree and serves it from one of three places, in this order.
+
+1. `PATH_LOK8S`, when it is set and holds `lo` (a checkout, or a project
+   that ran `lo assets eject bash`).
+2. The project's `.lok8s/`, when it holds `lo`.
+3. The versioned cache `${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/lok8s/`,
+   extracted once from the binary. A manifest with one sha256 per file
+   is verified on every use, so a partial or stale extract is redone.
+   With neither `XDG_CACHE_HOME` nor `HOME` set, a per-run temp dir
+   serves the tree.
+
+A local tree always wins over the cache and is never written to. The
+cache lies outside the project, so `--no-eject` does not switch it off.
+`lo doctor` prints a `bash mode` line that names the tree in use.
 
 **The Hetzner provider.** `internal/provider/bridge` runs
-`.lok8s/providers/hetzner/main` as `bash -c` children over the frozen
-libs. Each contract call (`provider::provision`, `provider::destroy`,
+`providers/hetzner/main` from that tree as `bash -c` children over the
+frozen libs. Each contract call (`provider::provision`, `provider::destroy`,
 `provider::output`, the KubeOne inventory hooks) starts one fresh process:
 it sources argsh, loads the provider, calls one function, and exits.
 
@@ -383,23 +397,27 @@ state at the cloud (hcloud labels) and on disk
 goes through `execx.Runner`, so the dispatch stays hermetic under a fake.
 
 **`lo drivers <name>`.** The binary hands a driver directory with no Go
-twin (`.lok8s/drivers/<name>/main` only) to the argsh implementation with
-argv untouched. `--list` prints the union of both worlds.
+twin (`drivers/<name>/main` in the bash tree only) to the argsh
+implementation with argv untouched. A driver of the project's own needs
+the tree beside it (`lo assets eject bash`). `--list` prints the union of
+the Go registry, the project's `.lok8s/drivers/` and the embedded tree.
 
-**`LO_IMPL=bash`.** The whole process runs as `bash .lok8s/lo`, described
+**`LO_IMPL=bash`.** The whole process runs as `bash <tree>/lo`, described
 in the next section.
 
 What each seam needs on disk:
 
 | Seam | Needs |
 |---|---|
-| Hetzner provider | a lok8s checkout that `PATH_LOK8S` points at (the frozen libs and the provider), `argsh` in `.bin/` (`b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
-| `lo drivers <name>` | the same checkout and `argsh`, plus whatever the driver calls |
-| `LO_IMPL=bash` | the same checkout and `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `sops`) |
+| Hetzner provider | `argsh` in `.bin/` (`lo init toolchain --with-bash`, then `b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
+| `lo drivers <name>` | `argsh`, plus whatever the driver calls |
+| `LO_IMPL=bash` | `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `jq`, `envsubst`, `sops`) |
 
 The binary prepares `PATH` and every `PATH_*` variable for these children
 the way the project's `.envrc` would (`bridge.Env`), so a consumer does not
-export them by hand.
+export them by hand. With the cache in use, `PATH_LOK8S` points at the
+cache and `PATH_BASE` at the project; the bash tree then reads the data
+files the binary ships, not the ones ejected into the project.
 
 Why the provider stays bash: it is about 1650 lines of argsh that drive
 real infrastructure (the hcloud CLI, the Robot REST API, a cloud-init
