@@ -215,6 +215,12 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Size gate (bin/lo stays under 36 MiB)
+        # sops is the kernpilot age-only fork (go.mod replace). A dependency
+        # that drags a cloud SDK, gRPC or protobuf back into the core build
+        # fails here before it ships. See the Makefile target.
+        run: make size-check
+
   release-config:
     name: goreleaser snapshot
     runs-on: ubuntu-latest
