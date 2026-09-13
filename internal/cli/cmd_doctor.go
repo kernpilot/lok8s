@@ -301,13 +301,14 @@ func doctorAssets(w io.Writer, paths *config.Paths) {
 // writes on its own paths (sharedState). Printed ONLY when something is
 // routed: with the block absent, or `default: go` and no commands, the
 // doctor output stays byte-identical to the bash implementation
-// (parity-configure diffs it strictly). An invalid block is a warning
-// here; every other command refuses to start on it, and `lo lint` reports
-// it as a finding.
+// (parity-configure diffs it strictly). An invalid block, or a routing
+// whose tree is missing, is a warning here; doctor itself runs in Go on
+// either (routing.refuseExempt, treeExempt), and `lo lint` reports the
+// same problem as a finding.
 func doctorImplementation(w io.Writer, paths *config.Paths) {
 	r := newRouting(paths)
-	if r.err != nil {
-		doctorWarn(w, "implementation: "+r.err.Error())
+	if err := r.problem(); err != nil {
+		doctorWarn(w, "implementation: "+err.Error())
 		return
 	}
 	if !r.active() {

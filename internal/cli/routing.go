@@ -39,10 +39,22 @@ type routing struct {
 	// all is `default: bash`.
 	all bool
 	// err is the validation error of the block, when any; no command is
-	// routed then, and every command but lint refuses to run (see
-	// routing.refuse). lint reports it as a finding instead.
+	// routed then, and every command but the diagnostic ones refuses to
+	// run (see routing.refuse). lint reports it as a finding instead.
 	err error
+	// treeErr is the routing precondition that failed: the block is valid
+	// but the tree it routes to is missing from the project. Only a routed
+	// command refuses on it (its shim prints the fix); the Go-only
+	// commands and treeExempt run, so `lo assets eject bash` can create
+	// the tree the message asks for.
+	treeErr error
 }
+
+// treeExempt lists the usage-tree commands that fall back to Go while the
+// routed tree is missing: the diagnostics (lint reports the missing tree
+// as a finding, doctor as a warning) and init (its project|toolchain
+// subcommands are Go-only).
+var treeExempt = map[string]bool{"lint": true, "doctor": true, "init": true}
 
 // goOnlySubcommands lists the usage-tree commands that carry Go-only
 // subcommands (registered by their command file, not by goOnlyCommands):
@@ -96,7 +108,7 @@ func newRouting(paths *config.Paths) routing {
 		if r.all {
 			fix = "set spec.implementation.default: go"
 		}
-		r.err = config.ImplementationError(fmt.Sprintf("implementation bash: the tree %s is missing. Run \"lo assets eject bash\", or %s.", filepath.Join(impl.TreeDir, "lo"), fix))
+		r.treeErr = config.ImplementationError(fmt.Sprintf("implementation bash: the tree %s is missing. Run \"lo assets eject bash\", or %s.", filepath.Join(impl.TreeDir, "lo"), fix))
 	}
 	return r
 }
@@ -133,10 +145,20 @@ func validateRoutedName(name string) error {
 // routed reports whether the top-level command name runs through the
 // bash tree.
 func (r routing) routed(name string) bool {
-	if r.err != nil {
+	if r.err != nil || (r.treeErr != nil && treeExempt[name]) {
 		return false
 	}
 	return r.all || r.commands[name]
+}
+
+// problem is the first thing wrong with the routing: the block's
+// validation error, else the missing tree, else nil. lint reports it as
+// a finding, doctor as a warning.
+func (r routing) problem() error {
+	if r.err != nil {
+		return r.err
+	}
+	return r.treeErr
 }
 
 // active reports whether anything is routed (the doctor lines depend on

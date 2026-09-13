@@ -272,8 +272,8 @@ func TestRoutingMissingTreeRefusesAndNeverUsesTheCache(t *testing.T) {
 	}
 	recs := recordShim(t)
 	want := "implementation bash: the tree " + filepath.Join(p.Base, ".lok8s", "lo") + ` is missing. Run "lo assets eject bash", or set spec.implementation.default: go.`
-	if r := newRouting(p); r.err == nil || r.err.Error() != want {
-		t.Errorf("routing err = %v\nwant %s", r.err, want)
+	if r := newRouting(p); r.err != nil || r.treeErr == nil || r.treeErr.Error() != want {
+		t.Errorf("routing = err %v treeErr %v\nwant %s", r.err, r.treeErr, want)
 	}
 	setOSArgs(t, "up")
 	_, stderr, err := runLo(t, NewRoot(p), "up")
@@ -287,16 +287,16 @@ func TestRoutingMissingTreeRefusesAndNeverUsesTheCache(t *testing.T) {
 	// The commands form names its own fix.
 	q := routedProject(t, "    bash:\n      commands: [registry]\n", false)
 	want = "implementation bash: the tree " + filepath.Join(q.Base, ".lok8s", "lo") + ` is missing. Run "lo assets eject bash", or remove spec.implementation.bash.commands.`
-	if r := newRouting(q); r.err == nil || r.err.Error() != want {
-		t.Errorf("commands form: err = %v\nwant %s", r.err, want)
+	if r := newRouting(q); r.treeErr == nil || r.treeErr.Error() != want {
+		t.Errorf("commands form: treeErr = %v\nwant %s", r.treeErr, want)
 	}
 
 	// A PATH_LOK8S checkout elsewhere is not the project's tree either.
 	checkout := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(checkout, "lo"), "#!/usr/bin/env bash\n")
 	t.Setenv("PATH_LOK8S", checkout)
-	if r := newRouting(q); r.err == nil || !strings.HasSuffix(r.err.Error(), "remove spec.implementation.bash.commands.") {
-		t.Errorf("checkout elsewhere accepted: %v", r.err)
+	if r := newRouting(q); r.treeErr == nil || !strings.HasSuffix(r.treeErr.Error(), "remove spec.implementation.bash.commands.") {
+		t.Errorf("checkout elsewhere accepted: %v", r.treeErr)
 	}
 }
 
@@ -412,5 +412,45 @@ func TestRoutingSymlinkedTreeIsFineWithoutRouting(t *testing.T) {
 	setOSArgs(t, "up")
 	if _, stderr, err := runLo(t, NewRoot(p), "up"); !errors.Is(err, ErrHandled) || stderr != "lo: "+want+"\n" {
 		t.Errorf("up: %v %q", err, stderr)
+	}
+}
+
+// F2: the missing tree is a routing precondition, not a block error. The
+// Go-only commands and lint/doctor/init run, so `lo assets eject bash`
+// can create the tree the message asks for; a routed command refuses
+// until then, then execs.
+func TestRoutingMissingTreeStillAllowsEject(t *testing.T) {
+	quietAssets(t)
+	p := routedProject(t, "    default: bash\n", false)
+	recs := recordShim(t)
+	want := "implementation bash: the tree " + filepath.Join(p.Base, ".lok8s", "lo") + ` is missing. Run "lo assets eject bash", or set spec.implementation.default: go.`
+	r := newRouting(p)
+	if r.err != nil || r.treeErr == nil || r.treeErr.Error() != want {
+		t.Fatalf("routing = err %v treeErr %v", r.err, r.treeErr)
+	}
+	setOSArgs(t, "up")
+	if _, stderr, err := runLo(t, NewRoot(p), "up"); !errors.Is(err, ErrHandled) || stderr != "lo: "+want+"\n" {
+		t.Errorf("up before eject: %v %q", err, stderr)
+	}
+	setOSArgs(t, "lint", "--domain", "none.dev")
+	if _, stderr, err := runLo(t, NewRoot(p), "lint", "--domain", "none.dev"); !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error]\033[0m "+want+"\n") {
+		t.Errorf("lint reports the missing tree: %v %q", err, stderr)
+	}
+	setOSArgs(t, "assets", "eject", "bash")
+	if _, stderr, err := runLo(t, NewRoot(p), "assets", "eject", "bash"); err != nil || strings.Contains(stderr, "lo: ") {
+		t.Fatalf("assets eject bash: %v %q", err, stderr)
+	}
+	if info, err := os.Stat(filepath.Join(p.Lok8s, "lo")); err != nil || info.Mode()&0o100 == 0 {
+		t.Fatalf("eject did not create the tree: %v", err)
+	}
+	if len(*recs) != 0 {
+		t.Fatalf("exec'd before the tree existed: %+v", *recs)
+	}
+	setOSArgs(t, "up")
+	if _, _, err := runLo(t, NewRoot(p), "up"); err != nil {
+		t.Fatalf("up after eject: %v", err)
+	}
+	if len(*recs) != 1 || strings.Join((*recs)[0].argv[1:], " ") != filepath.Join(p.Lok8s, "lo")+" up" {
+		t.Errorf("exec records = %+v", *recs)
 	}
 }

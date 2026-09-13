@@ -208,7 +208,7 @@ func newMCPTree(paths *config.Paths) *cobra.Command {
 	root := newUsageTree(paths, routing{})
 	for _, cmd := range root.Commands() {
 		for _, spec := range shimLeaves[cmd.Name()] {
-			cmd.AddCommand(newShimCommand(paths, spec, paths.Lok8s))
+			cmd.AddCommand(newShimCommand(paths, spec, paths.Lok8s, nil))
 		}
 	}
 	mcpAnnotate(root)

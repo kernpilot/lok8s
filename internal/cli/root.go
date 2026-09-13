@@ -181,7 +181,7 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 			root.AddCommand(build(paths, spec))
 			continue
 		}
-		root.AddCommand(newShimCommand(paths, spec, r.impl.TreeDir))
+		root.AddCommand(newShimCommand(paths, spec, r.impl.TreeDir, r.treeErr))
 	}
 	return root
 }
@@ -190,8 +190,9 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 // treeDir (the project's tree: routing never targets the cache). Flag
 // parsing is disabled and the ORIGINAL argv is passed through, so alias
 // spelling, flag order, and everything else reach the bash parser exactly
-// as typed.
-func newShimCommand(paths *config.Paths, spec commandSpec, treeDir string) *cobra.Command {
+// as typed. With treeErr set (the tree is missing) the command refuses
+// with that message instead of exec'ing.
+func newShimCommand(paths *config.Paths, spec commandSpec, treeDir string, treeErr error) *cobra.Command {
 	return &cobra.Command{
 		Use:                spec.use,
 		Aliases:            spec.aliases,
@@ -202,6 +203,10 @@ func newShimCommand(paths *config.Paths, spec commandSpec, treeDir string) *cobr
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if treeErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "lo: %v\n", treeErr)
+				return ErrHandled
+			}
 			tree := assets.Tree{Dir: treeDir, Source: assets.TreeProject}
 			return execShim(paths, tree, os.Args[1:])
 		},
