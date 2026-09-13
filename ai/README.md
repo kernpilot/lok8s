@@ -12,7 +12,7 @@ Benchmark + train a **fully-local** `lo` assistant. Two jobs:
 
 Everything is config-driven (`config.yaml`): swap endpoints, models, the tool-
 injection strategy, or the training backend without touching code. See
-[`../LOCAL-AI-PLAN.md`](../LOCAL-AI-PLAN.md) for the architecture and the why.
+the internal design note (kubehz-cluster, `docs/internal/lok8s-local-ai-plan.md`) for the architecture and the why.
 
 ## Install
 

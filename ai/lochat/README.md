@@ -6,7 +6,7 @@ Driven by the `lo chat` argsh shim (`.lok8s/libs/chat`), which resolves the lo
 runtime and execs this binary with a **JSON config + dynamic flags** (no `yq`,
 no transforms). The shim preflights for `argsh.so` (the `lo mcp` builtin) first.
 
-The architecture was chosen by the benchmark (see `../../LOCAL-AI-PLAN.md`):
+The architecture was chosen by the benchmark (internal design note, kubehz-cluster `docs/internal/lok8s-local-ai-plan.md`):
 flat diet tools · schema-in-context authoring · doctor-tree debug · a
 **deterministic** read-only posture gate (models can't self-police — proven).
 
