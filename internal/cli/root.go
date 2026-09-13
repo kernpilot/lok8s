@@ -140,12 +140,13 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 		// Shim commands disable flag parsing, so for them only the
 		// environment form (LO_ASSETS_EJECT=never) applies — and they read
 		// .lok8s from disk anyway. An invalid spec.implementation block
-		// stops every command here (lint excepted: it reports the error as
-		// its own finding), printed the way main prints a startup error.
+		// stops every command here (lint and doctor excepted: they report
+		// it themselves; help and completion run no lo code), printed the
+		// way main prints a startup error.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			noEject, _ := cmd.Flags().GetBool("no-eject")
 			assets.Configure(noEject)
-			if err := r.refuse(cmd.Name()); err != nil {
+			if err := r.refuse(topLevelName(cmd)); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "lo: %v\n", err)
 				return ErrHandled
 			}
@@ -184,6 +185,17 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 		root.AddCommand(newShimCommand(paths, spec, r.impl.TreeDir, r.treeErr))
 	}
 	return root
+}
+
+// topLevelName is the name of cmd's top-level ancestor (`lo completion
+// bash` is "completion", `lo secrets list` is "secrets"): the name the
+// routing and its exemptions are keyed by.
+func topLevelName(cmd *cobra.Command) string {
+	c := cmd
+	for c.HasParent() && c.Parent().HasParent() {
+		c = c.Parent()
+	}
+	return c.Name()
 }
 
 // newShimCommand registers a command that runs in the argsh tree at

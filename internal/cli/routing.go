@@ -56,6 +56,11 @@ type routing struct {
 // subcommands are Go-only).
 var treeExempt = map[string]bool{"lint": true, "doctor": true, "init": true}
 
+// refuseExempt lists the commands that run on an invalid block: the
+// diagnostics, which report it themselves, and cobra's own help and
+// completion, which run no lo code.
+var refuseExempt = map[string]bool{"lint": true, "doctor": true, "help": true, "completion": true}
+
 // goOnlySubcommands lists the usage-tree commands that carry Go-only
 // subcommands (registered by their command file, not by goOnlyCommands):
 // routing the parent would take those away.
@@ -175,11 +180,14 @@ func (r routing) routedNames() []string {
 	return r.impl.Commands
 }
 
-// refuse returns the block's validation error for every command but lint,
-// which reports it as a finding of its own (lint.Linter.Implementation)
-// so a broken block is diagnosable through the command made for it.
+// refuse returns the block's validation error for every command but the
+// refuseExempt set: lint reports it as a finding of its own
+// (lint.Linter.Implementation) and doctor as a warning, so a broken block
+// is diagnosable through the commands made for it. The missing-tree
+// precondition (treeErr) is not a refusal here: the routed shim reports
+// it when it runs.
 func (r routing) refuse(name string) error {
-	if r.err == nil || name == "lint" {
+	if r.err == nil || refuseExempt[name] {
 		return nil
 	}
 	return r.err

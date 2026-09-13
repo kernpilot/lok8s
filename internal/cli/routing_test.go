@@ -454,3 +454,30 @@ func TestRoutingMissingTreeStillAllowsEject(t *testing.T) {
 		t.Errorf("exec records = %+v", *recs)
 	}
 }
+
+// F3/F7: an invalid block does not stop doctor (it warns), help or
+// completion; the doctor line is asserted through the command.
+func TestRoutingInvalidBlockStillRunsDoctorHelpCompletion(t *testing.T) {
+	p := routedProject(t, "    bash:\n      commands: [bogus]\n", true)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("HOME", t.TempDir())
+	want := `lok8s.yaml: spec.implementation.bash.commands: unknown command "bogus". Use top-level command names from "lo --help".`
+	setOSArgs(t, "doctor")
+	stdout, stderr, _ := runLo(t, NewRoot(p), "doctor")
+	if strings.Contains(stderr, "lo: ") || !strings.Contains(stdout, "!\033[0m implementation: "+want+"\n") {
+		t.Errorf("doctor: stdout=%q stderr=%q", stdout, stderr)
+	}
+	for _, args := range [][]string{{"help"}, {"help", "up"}, {"completion", "bash"}} {
+		setOSArgs(t, args...)
+		if _, stderr, err := runLo(t, NewRoot(p), args...); err != nil || strings.Contains(stderr, "lo: ") {
+			t.Errorf("%v: %v %q", args, err, stderr)
+		}
+	}
+	// A missing tree: doctor runs in Go and warns.
+	q := routedProject(t, "    default: bash\n", false)
+	setOSArgs(t, "doctor")
+	stdout, _, _ = runLo(t, NewRoot(q), "doctor")
+	if !strings.Contains(stdout, "!\033[0m implementation: implementation bash: the tree ") {
+		t.Errorf("doctor without the tree:\n%s", stdout)
+	}
+}
