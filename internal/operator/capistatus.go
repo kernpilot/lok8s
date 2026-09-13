@@ -4,7 +4,7 @@ package operator
 // lok8s-managed CAPI Cluster objects (label lok8s.dev/managed=true) back to
 // the Capi CR, and runs the post-provision actions (kubeconfig Secret,
 // GitOps bootstrap or direct deploy) when a cluster becomes Provisioned
-// (.lok8s/legacy/operator/hooks/capi-status-sync.sh).
+// (.archive/legacy/operator/hooks/capi-status-sync.sh).
 
 import (
 	"context"

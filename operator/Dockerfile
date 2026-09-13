@@ -73,7 +73,7 @@ COPY operator/hooks/ /hooks/
 # (hack/parity-operator.sh). Present in the image for a manual fallback
 # (`bash /hooks/legacy/<hook>.sh` reads the same /hooks tree + state dir);
 # NOT executable, so shell-operator never runs them as hooks.
-COPY .lok8s/legacy/operator/hooks/ /hooks/legacy/
+COPY .archive/legacy/operator/hooks/ /hooks/legacy/
 
 # Copy driver contract implementations (used by the legacy hooks; the Go
 # drivers are compiled into lo)

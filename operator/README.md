@@ -192,7 +192,7 @@ binding context and reconciles through the ported packages
 lines the bash produced.
 
 The bash hooks they replaced are frozen at
-`.lok8s/legacy/operator/hooks/` (with their `runtime.sh`) — the reference
+`.archive/legacy/operator/hooks/` (with their `runtime.sh`) — the reference
 `hack/parity-operator.sh` measures the Go port against, and what the bats
 suite still sources.
 
@@ -299,7 +299,7 @@ What gets copied into the container:
 |--------|-------------|---------|
 | build stage `/out/lo` | `/usr/local/bin/lo` | The hook bodies (`lo operator <hook>`) |
 | `operator/hooks/` | `/hooks/` | shell-operator hook shims |
-| `.lok8s/legacy/operator/hooks/` | `/hooks/legacy/` | Frozen bash hooks (reference / manual fallback; not executable) |
+| `.archive/legacy/operator/hooks/` | `/hooks/legacy/` | Frozen bash hooks (reference / manual fallback; not executable) |
 | `.lok8s/drivers/` | `/hooks/drivers/` | Bash driver contracts (used by the legacy hooks) |
 | `.lok8s/providers/` | `/hooks/providers/` | Physical infra providers (hcloud, ...) |
 | `.lok8s/utils/` | `/hooks/utils/` | IP arithmetic, shared utilities |
@@ -381,7 +381,7 @@ internal/operator/              # the hook bodies (Go)
 ├── lo.go / capi.go / capistatus.go
 └── testdata/*.config.yaml      # --config goldens, generated once from the bash hooks
 
-.lok8s/legacy/operator/hooks/   # the frozen bash hooks + runtime.sh (reference)
+.archive/legacy/operator/hooks/   # the frozen bash hooks + runtime.sh (reference)
 ```
 
 ## Current limitations

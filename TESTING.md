@@ -20,9 +20,9 @@ lok8s itself.
 | golangci-lint (core + full) | `.golangci.yml` (standard set + misspell, unconvert, gocritic), with and without `--build-tags inprocess` | `go-tests` | `make lint lint-full` |
 | bats unit suite | the frozen bash libraries, function by function (88 files under `tests/unit/`) | `unit-tests` | `./.bin/argsh test tests/unit/` |
 | bats operator suite | the shell-operator hooks: the bash bodies directly, and the Go bodies through the `operator/hooks/*.sh` shims | `operator-tests` | `make build && ./.bin/argsh test tests/operator/` |
-| ShellCheck + argsh-lint | every shell file under `.lok8s/` (**including `.lok8s/legacy/`**), `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` | `shellcheck` | `bash hack/lint-shell.sh` (= `npm run lint`) |
+| ShellCheck + argsh-lint | every shell file under `.lok8s/` and `.archive/`, `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` | `shellcheck` | `bash hack/lint-shell.sh` (= `npm run lint`) |
 | yamllint | `.lok8s/`, `operator/`, `.github/` | `yamllint` | — (CI action) |
-| `lo-up` bundle | `docs/public/lo-up` is a byte-exact rebuild of `.lok8s/legacy/install/lo-up` at the pinned argsh revision | `loup-bundle` | `ARGSH_SRC=… .lok8s/legacy/install/build && git diff --exit-code docs/public/lo-up` |
+| `lo-up` bundle | `docs/public/lo-up` is a byte-exact rebuild of `.archive/legacy/install/lo-up` at the pinned argsh revision | `loup-bundle` | `ARGSH_SRC=… .archive/legacy/install/build && git diff --exit-code docs/public/lo-up` |
 | E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready — once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once with `LO_IMPL=bash` (the binary execs the frozen tree) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`; needs shellcheck, unit, operator green) | see [E2E](#e2e-lo-up-ci) |
 | Integration (Kind) | CRD install, schema rejection, `ClusterInventory` SSA round-trip, every kind served under `cluster.lok8s.dev` | `integration-tests` (push to `main` only) | — (workflow only) |
 | bats e2e scenarios | the scenario dirs under `tests/e2e/` (`no-services`, `single-local-build`, `cache-mode`, `remote-lo`, `remote-ci`), each on its own `10.125.<slot>.0/24` | no (opt-in) | `ARGSH_ENV_E2E=1 ./.bin/argsh test tests/e2e/<scenario>/test.bats` |
@@ -209,7 +209,7 @@ bash hack/lint-shell.sh      # = npm run lint; shellcheck (.shellcheckrc) + args
 File discovery lives in that script only, so the local run and CI can never
 drift. The set is `.lok8s/`, `operator/hooks/`, `docs/.vitepress/`, `hack/`,
 `install/` — `*.sh` plus every extensionless `#!/usr/bin/env argsh|bash`
-script. **`.lok8s/legacy/` is linted on purpose**: the retired installer is
+script. **`.archive/legacy/` is linted on purpose**: the retired installer is
 still rebuilt into the published `lo-up` bundle, and the retired hook bodies
 are still the parity oracle for `lo operator`. Without a local shellcheck +
 argsh-lint pair the run is forwarded to the digest-pinned argsh container.
@@ -284,5 +284,5 @@ It is not in CI on purpose; run it before merging anything that touches
 - **Prose goes through a file, not a shell argument.** Backticks in a
   double-quoted `gh --body` / `git -m` string are command-substituted; use
   `--body-file` / `-F`.
-- **Move, never delete.** A retired file moves under `.lok8s/legacy/`; the
+- **Move, never delete.** A retired file moves under `.archive/legacy/`; the
   frozen tree is only ever deleted by an explicit owner decision.

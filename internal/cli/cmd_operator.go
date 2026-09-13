@@ -2,7 +2,7 @@ package cli
 
 // lo operator — the shell-operator hook implementations (internal; exec'd
 // by the operator/hooks/*.sh shims inside the operator image). Go port of
-// the bash hooks frozen at .lok8s/legacy/operator/hooks/; the bodies live
+// the bash hooks frozen at .archive/legacy/operator/hooks/; the bodies live
 // in internal/operator.
 //
 // Go-only: shell-operator discovers hooks by executable path under /hooks,

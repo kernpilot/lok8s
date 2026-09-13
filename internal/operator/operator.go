@@ -1,5 +1,5 @@
 // Package operator is the Go port of the shell-operator hooks
-// (operator/hooks/*.sh, frozen at .lok8s/legacy/operator/hooks/): the three
+// (operator/hooks/*.sh, frozen at .archive/legacy/operator/hooks/): the three
 // reconcilers behind `lo operator <hook>`, which the hook shims exec.
 //
 // The shell-operator hook contract, unchanged: `--config` prints the binding

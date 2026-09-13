@@ -1,7 +1,7 @@
 package operator
 
 // capi.go — `lo operator capi-reconcile`: the Capi CRD reconciler
-// (.lok8s/legacy/operator/hooks/capi-reconcile.sh). Detects the CAPI
+// (.archive/legacy/operator/hooks/capi-reconcile.sh). Detects the CAPI
 // provider from the CR spec, renders the CAPI resources from the
 // capi-templates tree with a bare envsubst, applies them to the management
 // cluster; finalizer-guarded teardown deletes the CAPI Cluster.

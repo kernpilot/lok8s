@@ -1,7 +1,7 @@
 package operator
 
 // lo.go — `lo operator lo-reconcile`: the Lo CRD lifecycle hook
-// (.lok8s/legacy/operator/hooks/lo-reconcile.sh). Creation, idempotent
+// (.archive/legacy/operator/hooks/lo-reconcile.sh). Creation, idempotent
 // convergence, kubeconfig publication, drift detection on a schedule, and
 // finalizer-guarded teardown — through the same driver contract the lo CLI
 // uses (internal/driver/lo instead of the sourced drivers/lo/main).

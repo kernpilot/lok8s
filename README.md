@@ -155,7 +155,7 @@ Go binary at `bin/lo`.
 **Legacy (argsh) install.** Before the Go binary, a self-contained argsh
 script (`lo-up`) bootstrapped a project — installing `b`, the profile and the
 toolchain in one go. It is retired, not removed: the source and build live
-under [`.lok8s/legacy/install/`](.lok8s/legacy/install/README.md) and the
+under [`.archive/legacy/install/`](.archive/legacy/install/README.md) and the
 published bundle stays at [lok8s.io/lo-up](https://lok8s.io/lo-up) for
 existing users. Download and read it before running it:
 `curl -fsSL https://lok8s.io/lo-up -o lo-up && less lo-up && sh lo-up`.

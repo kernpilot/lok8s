@@ -72,7 +72,7 @@ package):
    red, then restore. Verify artifacts (files, argv logs), not exit codes.
 5. Touch `.lok8s/**` only when a harness would otherwise go red, in the same
    change. A file retired from outside `.lok8s/` moves under
-   `.lok8s/legacy/` — **move, never delete**.
+   `.archive/legacy/` — **move, never delete**.
 
 Rules that came from incidents:
 
@@ -107,8 +107,8 @@ Rules that came from incidents:
 | assets (eject model) | `internal/assets` — the embedded mirror `internal/assets/lok8s/**` (**canonical**: addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `VERSION`), `Resolve`/`Peek`, eject + `.lo-origin`, the three-way diff, `update`; `internal/cli/cmd_assets.go` | `.lok8s/{addons,drivers/*/cluster,libs/inventory/manifests,chat,VERSION}` — the synced twin (`hack/sync-legacy-assets.sh`; drift-gated by `go test ./internal/assets/`). Edit the mirror, then sync — never only one side |
 | tilt | `internal/tilt` (`lo tilt`, port slots) | `.lok8s/tilt/Tiltfile` (Starlark — still the live extension), `Tiltfile` |
 | mcp | `internal/cli/cmd_mcp.go` (ophis) | the argsh `mcp` builtin (`.mcp.json` still points here) |
-| operator | `internal/operator` (hook bodies), `operator/hooks/*.sh` (two-line shims), `operator/crds`, `operator/deploy` | `.lok8s/legacy/operator/hooks/` |
-| installer | `install/lo-install.sh`, `.goreleaser.yaml`, `hack/release-tarball.sh` | `.lok8s/legacy/install/` (`lo-up`) |
+| operator | `internal/operator` (hook bodies), `operator/hooks/*.sh` (two-line shims), `operator/crds`, `operator/deploy` | `.archive/legacy/operator/hooks/` |
+| installer | `install/lo-install.sh`, `.goreleaser.yaml`, `hack/release-tarball.sh` | `.archive/legacy/install/` (`lo-up`) |
 | addons | `internal/assets/lok8s/addons/` (embedded, kustomize-buildable dirs; ejected into a project's `.lok8s/addons/<name>` on first use) | `.lok8s/addons/` (synced twin) |
 | infra | `clusters/`, `.kustomize/` (YAML / Kustomize) | |
 | kustomize-plugins | `kustomize/` (own Go module, ALSO imported by the root module via the `replace` in go.mod — the binary serves it in-process) → `.kustomize/<group>/<version>/<kind>/<Kind>` (built standalone for the bash path + releases) | |
@@ -143,7 +143,7 @@ bash hack/sync-legacy-assets.sh                  # after editing internal/assets
 bash hack/parity-test.sh "$PWD/bin/lo"           # one parity harness (ten exist; run each against bin/lo AND bin/lo-full, absolute path)
 ./.bin/b install                                 # pinned toolchain (argsh, kustomize, yq, …); the bash side needs it
 ./.bin/argsh test tests/unit/ tests/operator/    # bats suites for the frozen tree
-npm run lint                                     # shellcheck + argsh-lint via hack/lint-shell.sh (covers .lok8s/legacy too)
+npm run lint                                     # shellcheck + argsh-lint via hack/lint-shell.sh (covers .archive/legacy too)
 ```
 
 The full matrix — including the manual `hack/e2e-go-roundtrip.sh` gate —

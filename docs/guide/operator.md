@@ -20,7 +20,7 @@ CLI mode (lo)                    Operator mode (shell-operator)
      internal/operator (the hook bodies)
 ```
 
-The operator container ships the `lo` binary and the framework tree. shell-operator discovers hooks by path, so `operator/hooks/<name>.sh` keeps its name and simply runs `exec lo operator <name> "$@"` — `--config` and the binding context pass straight through. The original bash hook bodies are frozen at `.lok8s/legacy/operator/hooks/` and are the oracle `hack/parity-operator.sh` diffs the Go hooks against (binding configuration bytes and the recorded `kubectl`/`clusterctl` argv).
+The operator container ships the `lo` binary and the framework tree. shell-operator discovers hooks by path, so `operator/hooks/<name>.sh` keeps its name and simply runs `exec lo operator <name> "$@"` — `--config` and the binding context pass straight through. The original bash hook bodies are frozen at `.archive/legacy/operator/hooks/` and are the oracle `hack/parity-operator.sh` diffs the Go hooks against (binding configuration bytes and the recorded `kubectl`/`clusterctl` argv).
 
 ## Custom Resource Definitions
 

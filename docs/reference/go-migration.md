@@ -535,15 +535,15 @@ asset serves the frozen bash tree and the render CI of projects that still
 run the exec pipeline. `make release-check` validates the goreleaser
 config; `make snapshot` runs the whole pipeline locally without publishing.
 
-## Legacy: what moved under `.lok8s/legacy/`
+## Legacy: what moved under `.archive/legacy/`
 
 Retired code is moved, never deleted (`.lok8s/` is the frozen reference; a
 file retired from *outside* it moves *under* it):
 
 | Path | What |
 |---|---|
-| `.lok8s/legacy/install/` | the argsh `lo-up` bootstrap installer (source, build script, `argsh.pin`); the published bundle stays at `docs/public/lo-up` and the `loup-bundle` CI job still rebuilds and diffs it |
-| `.lok8s/legacy/operator/hooks/` | the original bash shell-operator hook bodies; `operator/hooks/*.sh` are now two-line shims that `exec lo operator <hook>` |
+| `.archive/legacy/install/` | the argsh `lo-up` bootstrap installer (source, build script, `argsh.pin`); the published bundle stays at `docs/public/lo-up` and the `loup-bundle` CI job still rebuilds and diffs it |
+| `.archive/legacy/operator/hooks/` | the original bash shell-operator hook bodies; `operator/hooks/*.sh` are now two-line shims that `exec lo operator <hook>` |
 
 The frozen tree is bugfix-only. Anything that changes behaviour lands in
 Go first, and the bash side is changed in the same commit only if a parity

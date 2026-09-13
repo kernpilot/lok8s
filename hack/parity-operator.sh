@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # parity-operator.sh — differential test between the Go operator hooks
 # (`lo operator <hook>`, exec'd by the operator/hooks/*.sh shims) and the
-# frozen bash hooks (.lok8s/legacy/operator/hooks/).
+# frozen bash hooks (.archive/legacy/operator/hooks/).
 #
 # Two surfaces, both hermetic (no cluster, no docker, no network):
 #   1. `--config` — byte-identical binding configuration, bash vs Go, and
@@ -29,7 +29,7 @@ unset LOK8S_STATE_DIR BINDING_CONTEXT_PATH KUBECONFIG LOK8S_NONINTERACTIVE
 # post-provision gitops/deploy tail is asserted on the Go side only.
 HOOKS="${WORK}/hooks"
 mkdir -p "${HOOKS}"
-cp "${ROOT}"/.lok8s/legacy/operator/hooks/*.sh "${HOOKS}/"
+cp "${ROOT}"/.archive/legacy/operator/hooks/*.sh "${HOOKS}/"
 cp -R "${ROOT}/.lok8s/drivers/capi/cluster" "${HOOKS}/capi-templates"
 
 # Stubs on PATH — kubectl/clusterctl log to ${KLOG}; the Go binary resolves

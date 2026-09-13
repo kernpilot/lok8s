@@ -72,7 +72,7 @@ CI (`.github/workflows/ci.yml`) runs:
 
 | Job | What |
 |---|---|
-| `shellcheck` | `hack/lint-shell.sh` — shellcheck (`.shellcheckrc`) + argsh-lint over `.lok8s/` (including `.lok8s/legacy/`, on purpose), `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` |
+| `shellcheck` | `hack/lint-shell.sh` — shellcheck (`.shellcheckrc`) + argsh-lint over `.lok8s/` (including `.archive/legacy/`, on purpose), `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` |
 | `yamllint` | `.lok8s/`, `operator/`, `.github/` |
 | `unit-tests` | bats `tests/unit/` + the CRD drift gate (`lo crds check`) |
 | `go-tests` | `go build`, `go vet`, `go test ./...`, golangci-lint, then all ten `hack/parity-*.sh` |
@@ -105,7 +105,7 @@ npm run docs:build     # the strict build (dead links fail)
   Touch `.lok8s/**` only when a parity harness would otherwise go red, in the
   same change. A deliberate divergence gets a comment at the spot and a row
   in the [deviations catalogue](docs/reference/go-migration.md#deviations-catalogue).
-- **Move, never delete.** Retired code goes under `.lok8s/legacy/`.
+- **Move, never delete.** Retired code goes under `.archive/legacy/`.
 - **Security is paramount** (see [AGENTS.md](AGENTS.md)): never pipe a remote
   script into a shell (download, read, verify, then run); never commit secrets;
   never guess a dependency version (check the registry and pin it); validate

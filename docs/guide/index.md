@@ -139,7 +139,7 @@ b install   # exact pinned toolchain from the committed b.yaml / b.lock
 Before the Go binary, one self-contained argsh script (`lo-up`) did all of
 the above — it installed `b`, added the profile and ran `b install`. It is
 retired, not removed: the source and its build live under
-`.lok8s/legacy/install/` in the repo, and the published bundle stays online
+`.archive/legacy/install/` in the repo, and the published bundle stays online
 at `https://lok8s.io/lo-up` for existing projects. If you still use it,
 download and read it before running it:
 

@@ -60,7 +60,7 @@ gates.
 The previous installer (`lo-up`, an argsh script bundled with its runtime and
 published at `https://lok8s.io/lo-up`) is retired but not deleted: its source,
 build script and runtime pin moved to
-[`.lok8s/legacy/install/`](../.lok8s/legacy/install/README.md), and the
+[`.archive/legacy/install/`](../.archive/legacy/install/README.md), and the
 published bundle at `docs/public/lo-up` stays served for existing users. The
 `loup-bundle` CI job still rebuilds and diffs it from the legacy path.
 

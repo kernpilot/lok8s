@@ -1,7 +1,7 @@
 # lo-up — the LEGACY lok8s installer
 
 > **Deprecated.** `lo-up` is the installer from before the Go binary. Use
-> [`install/lo-install.sh`](../../../install/lo-install.sh) instead: it
+> [`install/lo-install.sh`](../../install/lo-install.sh) instead: it
 > downloads a release archive over HTTPS, verifies its checksum and only then
 > installs `lo` — nothing remote is piped into a shell. `lo-up` stays
 > published at https://lok8s.io/lo-up for projects that already use it and
@@ -37,10 +37,10 @@ default `local`), `-r`/`--git-ref` (default `main`), `-d`/`--dir`.
 
 ## Build
 
-Edit `.lok8s/legacy/install/lo-up`, then rebuild the published bundle:
+Edit `.archive/legacy/install/lo-up`, then rebuild the published bundle:
 
 ```sh
-./.lok8s/legacy/install/build          # → docs/public/lo-up
+./.archive/legacy/install/build          # → docs/public/lo-up
 ```
 
 `build` needs the argsh runtime (`libraries/*.sh`) **and** the `minifier`
@@ -51,10 +51,10 @@ because it is the published artifact; rebuild after every edit to `lo-up`.
 ### The runtime is pinned
 
 The bundle embeds argsh's version and commit, so it is only reproducible
-against one runtime revision. `.lok8s/legacy/install/argsh.pin` records it and `build`
+against one runtime revision. `.archive/legacy/install/argsh.pin` records it and `build`
 refuses any other checkout. That is what lets CI rebuild and diff: the
 `loup-bundle` job checks argsh out at the pin, downloads the pinned `minifier`
-release asset, runs `.lok8s/legacy/install/build`, and fails on
+release asset, runs `.archive/legacy/install/build`, and fails on
 `git diff --exit-code -- docs/public/lo-up`. Before the pin existed nothing in
 CI noticed a stale bundle, and every `curl … | sh` user kept getting the old
 script.
@@ -63,22 +63,22 @@ The pinned commit is on argsh's `feat/process-trace-phase2` branch, not on
 `main`. A force-push or a deletion of that branch makes the commit unreachable
 and the `loup-bundle` job then fails while CHECKING OUT argsh, before it builds
 anything — a "could not find the ref" error that says nothing about this pin.
-`.lok8s/legacy/install/argsh.pin` repeats the warning next to the value.
+`.archive/legacy/install/argsh.pin` repeats the warning next to the value.
 
 To move to a newer argsh:
 
 ```sh
 git -C /path/to/arg-sh/argsh checkout <new-ref>
-ARGSH_PIN_UPDATE=1 ARGSH_SRC=/path/to/arg-sh/argsh ./.lok8s/legacy/install/build
+ARGSH_PIN_UPDATE=1 ARGSH_SRC=/path/to/arg-sh/argsh ./.archive/legacy/install/build
 ```
 
-Commit `.lok8s/legacy/install/argsh.pin` and `docs/public/lo-up` together — a unit test
+Commit `.archive/legacy/install/argsh.pin` and `docs/public/lo-up` together — a unit test
 compares the pin against the runtime baked into the bundle, so a bump without a
 rebuild fails even where the byte-exact job does not run.
 
 ## How the bundle works
 
-`.lok8s/legacy/install/lo-up.min.tmpl` wraps the minified `argsh runtime + lo-up` with a POSIX
+`.archive/legacy/install/lo-up.min.tmpl` wraps the minified `argsh runtime + lo-up` with a POSIX
 `/bin/sh` preamble that re-execs under bash from a real file — so `curl … | sh`
 works even where `/bin/sh` is dash, or when the script arrives on a stdin pipe
 (where `${BASH_SOURCE[0]}` is unset under `set -u`). Two gotchas the build
