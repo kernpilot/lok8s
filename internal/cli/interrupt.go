@@ -30,8 +30,11 @@ func WatchInterrupt(parent context.Context) (ctx context.Context, exitCode func(
 			return
 		}
 		signal.Stop(ch)
-		if n, isSignal := s.(syscall.Signal); isSignal {
-			got.Store(int32(n))
+		// Signal numbers are small (below 128 on every platform Go
+		// supports), so the narrowing cannot overflow; the guard makes
+		// that explicit for the static checkers.
+		if n, isSignal := s.(syscall.Signal); isSignal && n > 0 && n < 128 {
+			got.Store(int32(n)) // #nosec G115 -- bounded by the guard above
 		}
 		cancel()
 	}()
