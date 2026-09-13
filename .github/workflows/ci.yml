@@ -464,10 +464,13 @@ jobs:
           # The leg must run the implementation the matrix names: the frozen
           # tree prints a `bash` row in `lo version`, the Go code does not
           # (the same proof hack/lib/parity.sh's parity::prove_switch makes).
+          # Captured first, then grepped: `lo version | grep -q` dies of
+          # SIGPIPE under pipefail once grep has its match (rc 141).
+          version_out="$(lo version 2>/dev/null)"
           if [ "${IMPLEMENTATION}" = bash ]; then
-            lo version | grep -q '^bash '
+            grep -q '^bash ' <<<"${version_out}"
           else
-            ! lo version | grep -q '^bash '
+            ! grep -q '^bash ' <<<"${version_out}"
           fi
           echo "::endgroup::"
 
