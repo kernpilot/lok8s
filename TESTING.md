@@ -25,14 +25,17 @@ lok8s itself.
 | ShellCheck + argsh-lint | every shell file under `.lok8s/` and `.archive/`, `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` | `shellcheck` | `bash hack/lint-shell.sh` (= `npm run lint`) |
 | yamllint | `.lok8s/`, `operator/`, `.github/` | `yamllint` | — (CI action) |
 | `lo-up` bundle | `docs/public/lo-up` is a byte-exact rebuild of `.archive/legacy/install/lo-up` at the pinned argsh revision | `loup-bundle` | `ARGSH_SRC=… .archive/legacy/install/build && git diff --exit-code docs/public/lo-up` |
-| E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready — once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once with `LO_IMPL=bash` (the binary execs the frozen tree) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`; needs shellcheck, unit, operator green) | see [E2E](#e2e-lo-up-ci) |
-| Integration (Kind) | CRD install, schema rejection, `ClusterInventory` SSA round-trip, every kind served under `cluster.lok8s.dev` | `integration-tests` (push to `main` only) | — (workflow only) |
+| E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready — once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once with `LO_IMPL=bash` (the binary execs the frozen tree) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`) in the E2E workflow: push to main, nightly, manual | see [E2E](#e2e-lo-up-ci) |
+| Integration (Kind) | CRD install, schema rejection, `ClusterInventory` SSA round-trip, every kind served under `cluster.lok8s.dev` | `integration-tests` in the E2E workflow: push to main, nightly, manual | — (workflow only) |
 | bats e2e scenarios | the scenario dirs under `tests/e2e/` (`no-services`, `single-local-build`, `cache-mode`, `remote-lo`, `remote-ci`), each on its own `10.125.<slot>.0/24` | no (opt-in) | `ARGSH_ENV_E2E=1 ./.bin/argsh test tests/e2e/<scenario>/test.bats` |
 | Go round-trip | ONE real provision → status → down → destroy with the **Go** orchestration against a synthetic kind cluster | **no — manual gate** | `bash hack/e2e-go-roundtrip.sh` |
 
 The CI job set lives in `.github/workflows/ci.yml`: `shellcheck`, `yamllint`,
-`unit-tests`, `go-tests`, `operator-tests`, `e2e-lo-up` (× 2),
-`loup-bundle`, `integration-tests`. `.github/workflows/security.yml` adds
+`unit-tests`, `go-tests`, `release-config`, `operator-tests`, `loup-bundle`.
+`.github/workflows/e2e.yml` (name `E2E`) holds the two kind-backed jobs,
+`e2e-lo-up` (× 2) and `integration-tests`, and runs on every push to `main`,
+once a night (03:17 UTC) and on `workflow_dispatch`; it never runs on a pull
+request, so the ruleset must not require its checks. `.github/workflows/security.yml` adds
 `govulncheck` and `gosec` (every PR, and weekly, over all three Go modules
 with the root toolchain — the one the release builds with), plus the trivy
 and ShellCheck-SARIF scans. Both files run on pull requests into `main`
@@ -220,7 +223,8 @@ a green lint you did not watch install its tools.
 
 ## E2E (`lo up --ci`)
 
-The CI job (`e2e-lo-up`) runs the `single-local-build` fixture end to end
+The `e2e-lo-up` job in `.github/workflows/e2e.yml` (push to `main`, nightly,
+manual) runs the `single-local-build` fixture end to end
 on a GitHub runner, twice (matrix `lo_impl: go, bash`): trusts the
 plain-HTTP `10.125.0.0/16` registries in the docker daemon, `b install`s
 the full toolchain, builds `bin/lo` and puts it FIRST on PATH (the step
