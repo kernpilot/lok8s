@@ -16,7 +16,7 @@ lok8s itself.
 | Assets-drift gate | the embedded mirror `internal/assets/lok8s/**` (canonical) is byte-identical to its `.lok8s/**` twin in both directions — addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `VERSION`; resync with `hack/sync-legacy-assets.sh` (`--from-legacy`, `--check`) | `go-tests` (part of `go test`) | `go test ./internal/assets/ -run TestEmbeddedMirrorMatchesLegacyTree` · `bash hack/sync-legacy-assets.sh --check` |
 | CRD render fixture | `lo crds` output is byte-identical to the committed `operator/crds/*.yaml` | `go-tests` (part of `go test`); `unit-tests` (`lo crds check`) | `go test ./internal/crds/` · `bin/lo crds check` |
 | Render gate | the in-process kustomize render (`internal/render`, the `lo-full` build) is byte-identical to the pinned exec pipeline (what `lo` core runs): `go test -tags inprocess ./internal/render/` byte-compares plain, Secret-generator and khelm local-chart fixtures against `.bin/kustomize` + `.kustomize/*` (skips without them); `hack/parity-build.sh` diffs `lo build` against the bash exec pipeline for both builds; the committed kubehz.dev domain must report `render unchanged` under `bin/lo` (core) and `bin/lo-full` | `go-tests` (`go test`, `parity-build` × 2); the committed-domain run is manual (see below) | `go test -tags inprocess ./internal/render/` · `bash hack/parity-build.sh` · `DEBUG=1 bin/lo build --domain <d>` and the same with `bin/lo-full` |
-| Parity harnesses (10 × 2 builds) | the binary and `LO_IMPL=bash` agree byte-for-byte on stdout, stderr, rc (and written trees) for every covered invocation — for `bin/lo` (core) and `bin/lo-full`; every harness takes the binary as `$1` (**absolute path** — the harnesses `cd` into a synthetic project) | `go-tests` | `make build build-full && bash hack/parity-<name>.sh "$PWD/bin/lo" && bash hack/parity-<name>.sh "$PWD/bin/lo-full"` |
+| Parity harnesses (10 × 2 builds) | the binary and the bash tree agree byte-for-byte on stdout, stderr, rc (and written trees) for every covered invocation, for `bin/lo` (core) and `bin/lo-full`. The bash side is the same binary in a synthetic project whose `lok8s.yaml` says `spec.implementation.default: bash`: `hack/lib/parity.sh` writes that file before every run (`parity::implementation`; `PARITY_ROUTE_GO=<cmd>` routes one command on the Go side), and no environment variable selects the implementation. Every harness takes the binary as `$1` (**absolute path**: the harnesses `cd` into a synthetic project) | `go-tests` | `make build build-full && bash hack/parity-<name>.sh "$PWD/bin/lo" && bash hack/parity-<name>.sh "$PWD/bin/lo-full"` |
 | golangci-lint (core + full) | `.golangci.yml` (standard set + misspell, unconvert, gocritic), with and without `--build-tags inprocess` | `go-tests` | `make lint lint-full` |
 | Binary size gate | `bin/lo` (core) stays under 36 MiB (`LO_MAX_BYTES`). sops is the kernpilot age-only fork (`go.mod` `replace`, no cloud SDKs, gRPC or protobuf in the core build: ~15 MB, was ~50 MB); a dependency that drags one of them back in fails here first | `go-tests` | `make size-check` |
 | sops cross-tool gate | the age-only sops fork writes and reads the upstream file format: a binary-mode `.enc` from `sopsEncryptFile` decrypts with the pinned upstream CLI (`.bin/sops --decrypt --input-type binary --output-type binary`), one from the CLI decrypts with `sopsDecryptData`, a corrupted MAC is rejected, and a `.sops.yaml` rule with `kms:` fails with `unsupported key type kms (age-only build)`. Skips without `.bin/sops` (`b install`) and FAILS under `CI=true` | `go-tests` (part of `go test`) | `go test ./internal/secrets/ -run 'SopsCLI\|EncryptRejectsKMS'` |
@@ -25,7 +25,7 @@ lok8s itself.
 | ShellCheck + argsh-lint | every shell file under `.lok8s/` and `.archive/`, `operator/hooks/`, `docs/.vitepress/`, `hack/`, `install/` | `shellcheck` | `bash hack/lint-shell.sh` (= `npm run lint`) |
 | yamllint | `.lok8s/`, `operator/`, `.github/` | `yamllint` | — (CI action) |
 | `lo-up` bundle | `docs/public/lo-up` is a byte-exact rebuild of `.archive/legacy/install/lo-up` at the pinned argsh revision | `loup-bundle` | `ARGSH_SRC=… .archive/legacy/install/build && git diff --exit-code docs/public/lo-up` |
-| E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready — once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once with `LO_IMPL=bash` (the binary execs the frozen tree) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`; needs shellcheck, unit, operator green) on every PR and on `main` | see [E2E](#e2e-lo-up-ci) |
+| E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready, once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once routed to bash (the fixture's `lok8s.yaml` says `default: bash`; the binary execs the frozen tree copied into the fixture) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`; needs shellcheck, unit, operator green) on every PR and on `main` | see [E2E](#e2e-lo-up-ci) |
 | Integration (Kind) | CRD install, schema rejection, `ClusterInventory` SSA round-trip, every kind served under `cluster.lok8s.dev` | `integration-tests` in the E2E workflow: push to main, nightly, manual | — (workflow only) |
 | bats e2e scenarios | the scenario dirs under `tests/e2e/` (`no-services`, `single-local-build`, `cache-mode`, `remote-lo`, `remote-ci`), each on its own `10.125.<slot>.0/24` | no (opt-in) | `ARGSH_ENV_E2E=1 ./.bin/argsh test tests/e2e/<scenario>/test.bats` |
 | Go round-trip | ONE real provision → status → down → destroy with the **Go** orchestration against a synthetic kind cluster | **no — manual gate** | `bash hack/e2e-go-roundtrip.sh` |
@@ -54,7 +54,7 @@ nothing about the other one unless it names it.
 | bats unit suite | no | yes |
 | bats operator suite | yes (the `operator/hooks/*.sh` shims exec the binary) | yes (the bash bodies) |
 | ShellCheck + argsh-lint, yamllint, `lo-up` bundle | no | yes |
-| E2E `lo up --ci` | yes — the `go` matrix leg | yes — the `bash` leg (`LO_IMPL=bash` through the binary's shim) |
+| E2E `lo up --ci` | yes: the `go` matrix leg | yes: the `bash` leg (routed by the fixture's `lok8s.yaml` through the binary's shim) |
 | Integration (Kind) | neither — `kubectl` against the CRDs only | neither |
 | bats e2e scenarios (opt-in) | no — `tests/e2e/lib/helpers.bash` puts `.lok8s` first on PATH | yes |
 | Go round-trip (manual) | yes | no |
@@ -200,8 +200,8 @@ reaches the container only through the `ARGSH_ENV_<X>` prefix (see
 [tests/README.md](tests/README.md)). CI pins `PATH_BIN` to the workspace
 `.bin` so `kustomize`-dependent render tests find the b-pinned binary.
 
-The bats suites keep running against the frozen tree because
-`LO_IMPL=bash`, the provider plugins and the `lo drivers` fallback still
+The bats suites keep running against the frozen tree because a command
+routed to bash, the provider plugins and the `lo drivers` fallback still
 execute it. A behaviour change lands in Go first; touch the bash only when
 a parity harness would otherwise go red, and then in the same change.
 
@@ -228,9 +228,10 @@ The CI job (`e2e-lo-up`, every PR and push to `main`) runs the
 on a GitHub runner, twice (matrix `lo_impl: go, bash`): trusts the
 plain-HTTP `10.125.0.0/16` registries in the docker daemon, `b install`s
 the full toolchain, builds `bin/lo` and puts it FIRST on PATH (the step
-asserts `command -v lo` resolves to it), sets `LO_IMPL` to the matrix
-value (only `bash` means anything to the binary: it execs `.lok8s/lo`),
-then
+asserts `command -v lo` resolves to it), writes the fixture's `lok8s.yaml`
+with `spec.implementation.default` set to the matrix value (`bash` copies
+the repo's `.lok8s` into the fixture first: a routed tree lives in the
+project), then
 
 ```bash
 # from tests/e2e/single-local-build, PATH_BASE = the fixture, PATH_LOK8S/PATH_BIN = the repo

@@ -29,7 +29,7 @@ For writing addons see [`docs/guide/addons.md`](docs/guide/addons.md).
 - **One binary, one frozen reference.** The `lo` CLI is a Go binary
   (`cmd/lo`, `internal/**`); every command runs natively. The argsh
   implementation it was ported from stays inside `.lok8s/` as a frozen,
-  bugfix-only reference (`LO_IMPL=bash lo …` runs it) and is diffed
+  bugfix-only reference (`lok8s.yaml` `spec.implementation` routes commands to it) and is diffed
   against the binary in CI. See
   [`docs/reference/go-migration.md`](docs/reference/go-migration.md).
 - **No framework-level workload ordering.** The only ordering primitive
@@ -126,7 +126,7 @@ repository itself it is built with `make build` → `bin/lo` from:
 
 ```
 lok8s/                            # the repository (not a consumer project)
-├── cmd/lo/                       # main: LO_IMPL=bash → exec .lok8s/lo, else the cobra tree
+├── cmd/lo/                       # main: the cobra tree; lok8s.yaml routes commands to .lok8s/lo (internal/cli/routing.go)
 ├── internal/
 │   ├── cli/                      # the command tree (cmd_<name>.go per command, shim.go, dispatch.go)
 │   ├── provision/, bootstrap/    # dispatch + gates, the spec.bootstrap DAG
@@ -148,7 +148,7 @@ lok8s/                            # the repository (not a consumer project)
 ```
 .lok8s/                           # framework — flat, synced, override-free
 ├── VERSION                       # stamped into `lo --version` by local builds
-├── lo                            # FROZEN argsh entrypoint (LO_IMPL=bash; the parity oracle)
+├── lo                            # FROZEN argsh entrypoint (routed by lok8s.yaml; the parity oracle)
 ├── libs/                         # frozen bash libraries (reference for internal/**)
 │   ├── bootstrap                 # applies spec.bootstrap (framework-level)
 │   ├── addons                    # lo addons command

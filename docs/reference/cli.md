@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `lo` CLI is a single static Go binary. Every command below runs natively in it; the [argsh](https://github.com/arg-sh/argsh) implementation it was ported from stays in every project at `.lok8s/lo` as a frozen reference and runs the same command line when you set `LO_IMPL=bash` (see [The Go `lo` binary](go-migration.md) for what still calls into that tree, and the catalogue of the few places the two deliberately differ — for example, argument-parse errors exit `1` in the binary where argsh exits `2`, with the same message).
+The `lo` CLI is a single static Go binary. Every command below runs natively in it; the [argsh](https://github.com/arg-sh/argsh) implementation it was ported from stays in every project at `.lok8s/lo` as a frozen reference and runs the same command line when the project file routes a command to it (see [Choosing the implementation](#choosing-the-implementation), and [The Go `lo` binary](go-migration.md) for what still calls into that tree, and the catalogue of the few places the two deliberately differ: for example, argument-parse errors exit `1` in the binary where argsh exits `2`, with the same message).
 
 `lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
@@ -190,7 +190,7 @@ lo init test [--path <dir>] [--force]
 
 **`lo init toolchain`** (Go-only) provisions the project's toolchain with [`b`](https://github.com/fentas/b), in four steps. The project is the nearest `kind: Project` `lok8s.yaml` (or `clusters/`) above the working directory, never the ambient `PATH_BASE` of a direnv/mise shell; `--path` names one explicitly.
 
-1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against: `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin. The other entries are `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (group `local`, on by default), `kubeone`/`hcloud` (group `cloud`, opt-in) and `argsh`/`yq`/`jq`/`envsubst`/`sops`/`ssh-to-age` (group `bash`, opt-in). The template writes entries outside the selected groups commented out. `go test` checks the pins against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. The `bash` group is the runtime of the frozen bash implementation (`LO_IMPL=bash`) and of the provider plugins. The binary does not need those tools for its own paths. The bash tree itself ships inside the binary (see [`lo assets`](#lo-assets)). **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand; `lo doctor` reports what differs).
+1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against: `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin. The other entries are `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (group `local`, on by default), `kubeone`/`hcloud` (group `cloud`, opt-in) and `argsh`/`yq`/`jq`/`envsubst`/`sops`/`ssh-to-age` (group `bash`, opt-in). The template writes entries outside the selected groups commented out. `go test` checks the pins against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. The `bash` group is the runtime of the frozen bash implementation (a command routed to bash, see [Choosing the implementation](#choosing-the-implementation)) and of the provider plugins. The binary does not need those tools for its own paths. The bash tree itself ships inside the binary (see [`lo assets`](#lo-assets)). **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand; `lo doctor` reports what differs).
 2. The `.gitignore` entries (`.bin/*` with `b.yaml`/`b.lock` kept, `.kustomize/`, …).
 3. `b` itself into `.bin/b` when absent, from b's own release tarball (`b-<os>-<arch>.tar.gz`, the same asset b's installer and `b install b` resolve), pinned to a release whose SHA-256 sums are recorded in the binary from that release's published `checksums.txt`; downloaded over https to a temp file, verified, and only then extracted. A redirect off https and an oversized archive or `b` member are refused. Never `curl | sh`. `GITHUB_TOKEN` is passed through when set (b works token-free for public sources). b publishes no darwin build: on macOS the command stops with the manual-install pointer ([binary.help](https://binary.help)); put `b` on `PATH` or at `.bin/b` and re-run.
 4. `.bin/b install` in the project (`PATH_BIN=.bin`), so every binary lands in `.bin/` and the two plugins under `.kustomize/`.
@@ -385,7 +385,7 @@ Point the editor at `lo mcp start`. The `.mcp.json` at the project root does thi
 
 The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_tilt_up`, ...) do not change.
 
-`bin/lo` is the checkout build. Run `make build` in a fresh clone before you start the editor. Outside a checkout, run `lo mcp <editor> enable`: it writes the absolute path of the binary, the toolchain PATH and `PATH_BASE` into the editor config. You can also set `command` to the installed `lo` (from `lo-install.sh`, or `.bin/lo` from `b install`) when that binary is on the editor's PATH. Do not use a bare `lo` in a project with the `.envrc` active. The `.envrc` puts `.lok8s` first on PATH, so `lo` resolves to the bash entry. Then `.lok8s/lo mcp start` serves the bash variant without an error.
+`bin/lo` is the checkout build. Run `make build` in a fresh clone before you start the editor. Outside a checkout, run `lo mcp <editor> enable`: it writes the absolute path of the binary, the toolchain PATH and `PATH_BASE` into the editor config. You can also set `command` to the installed `lo` (from `lo-install.sh`, or `.bin/lo` from `b install`) when that binary is on the editor's PATH. Do not use a bare `lo` in a project with the `.envrc` active. The `.envrc` puts `.lok8s` first on PATH, so `lo` resolves to the bash entry. Then `.lok8s/lo mcp start` serves the bash variant without an error. A project whose `lok8s.yaml` routes commands to bash (see [Choosing the implementation](#choosing-the-implementation)) keeps the same tool list: the server projects the Go tree without the routing, and each tool call runs `lo <cmd> …` as a subprocess, which applies the routing itself.
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
@@ -444,7 +444,7 @@ lo doctor [--toolchain]
 
 Checks required binaries, versions, Docker/kind state, and common misconfigurations, with a fix hint per finding.
 
-The **`bash mode` line** (Go-only) says whether `LO_IMPL=bash` and the provider plugins can run: the bash tree in use (the project's own tree, or the copy the binary extracts into `${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/`) and whether `argsh` is at `.bin/argsh`, where the tree sources it. When `argsh` is missing the line is a warning with the fix (uncomment the `bash` group in `.bin/b.yaml`, then `.bin/b install`). The line is omitted when the project holds the tree and `argsh` is present, which keeps the output byte-identical to the bash implementation there.
+The **`implementation` line** (Go-only) appears only when `lok8s.yaml` routes commands to bash (see [Choosing the implementation](#choosing-the-implementation)): the routed set, the tree and its source, then one `!` line per routed command whose state Go also writes (`registry`, `image`, `secrets`, `use`, `kustomize`). An invalid block is one `!` line. The **`bash mode` line** (Go-only) says whether a command routed to bash and the provider plugins can run: the bash tree in use (the project's own tree, or the copy the binary extracts into `${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/`) and whether `argsh` is at `.bin/argsh`, where the tree sources it. When `argsh` is missing the line is a warning with the fix (uncomment the `bash` group in `.bin/b.yaml`, then `.bin/b install`). The line is omitted when the project holds the tree and `argsh` is present, which keeps the output byte-identical to the bash implementation there.
 
 The **toolchain section** (Go-only) verifies what [`lo init toolchain`](#lo-init) installed against the pins: `.bin/b` (with its version), `kustomize` (`.bin` first, then `PATH`) at the pinned release, the khelm `ChartRenderer` and the `secrets.lok8s.dev` `Secret` exec plugins at the paths the render resolves under `.kustomize/` (`KUSTOMIZE_PLUGIN_HOME`), each at its pin, the Secret plugin at this `lo`'s own version (`<plugin> --version`; a plugin built before that flag existed reports "version unknown"). A mismatch is a warning; a missing tool is a failure on `lo` (core, which execs them) and a warning on `lo-full` (in-process render; the binaries only serve `LO_RENDER=exec`). The fix is always `lo init toolchain`. The section is printed when `.bin/b.yaml` carries the `lo init toolchain` marker line, or on `--toolchain`; a profile-synced or hand-written `b.yaml` is not checked unless asked, which keeps the default output byte-identical to the bash implementation.
 
@@ -504,7 +504,7 @@ lo assets update <rel> [--force]
 
 `<rel>` is the path below `.lok8s/`: `addons/cilium`, `drivers/lo/cluster`, `drivers/kubeone/cluster`, `drivers/capi/cluster`, `libs/inventory/manifests`, `chat`, `tilt`. The word `bash` names the frozen bash implementation: its files live directly below `.lok8s/` beside the data assets, its marker is `.lok8s/.lo-origin`, and `.lok8s/lo` is what makes it count as present.
 
-**`eject`** without arguments writes what this project references: each cluster spec's builtin `spec.bootstrap` addons, its driver's templates, the inventory CRD, and `tilt` when the project-root `Tiltfile` loads the extension. `--all` takes every data asset. **`eject bash`** writes the bash implementation into `.lok8s/`. It also ejects every data asset the project lacks, so `.lok8s/` becomes a complete tree. From then on `LO_IMPL=bash`, the provider plugins and `lo drivers <name>` run from the project. Without it they run from the copy the binary extracts into `${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/`. A local tree always wins over that cache. An existing file is kept, never overwritten. `lo assets diff bash` shows a kept file as `local modified`. `bash` is never part of `--all` or of the referenced set. `lo tilt up` and `lo tilt ci` eject `tilt` on first use themselves: Tilt reads `.lok8s/tilt/Tiltfile` from disk, so under `--no-eject` they stop with an error instead. `--check` writes nothing and exits `1` if any of that set would be ejected: the CI gate for "this repository pins what it applies".
+**`eject`** without arguments writes what this project references: each cluster spec's builtin `spec.bootstrap` addons, its driver's templates, the inventory CRD, and `tilt` when the project-root `Tiltfile` loads the extension. `--all` takes every data asset. **`eject bash`** writes the bash implementation into `.lok8s/`. It also ejects every data asset the project lacks, so `.lok8s/` becomes a complete tree. From then on the provider plugins and `lo drivers <name>` run from the project, and `lok8s.yaml` can route commands to it (see [Choosing the implementation](#choosing-the-implementation)). Without it they run from the copy the binary extracts into `${XDG_CACHE_HOME:-$HOME/.cache}/lok8s/<version>/`. A local tree always wins over that cache. An existing file is kept, never overwritten. `lo assets diff bash` shows a kept file as `local modified`. `bash` is never part of `--all` or of the referenced set. `lo tilt up` and `lo tilt ci` eject `tilt` on first use themselves: Tilt reads `.lok8s/tilt/Tiltfile` from disk, so under `--no-eject` they stop with an error instead. `--check` writes nothing and exits `1` if any of that set would be ejected: the CI gate for "this repository pins what it applies".
 
 **`diff`** is a three-way comparison per file, by content hash: ORIGIN (the `.lo-origin` hashes, what was ejected) vs LOCAL (the project's file) vs EMBEDDED (what this `lo` ships). The headline per addon is the chart version, local vs embedded. Per file:
 
@@ -643,6 +643,34 @@ Without `--remote`, `spec.provider` and `spec.remote` are ignored. The
 same cluster spec works for both local and remote provisioning: the
 caller drives the mode, not the file.
 
+## Choosing the implementation
+
+The project file `lok8s.yaml` (`kind: Project`) names the implementation. Go is the default. The block routes the whole command tree, or a list of top-level commands, to the frozen bash tree in the project:
+
+```yaml
+apiVersion: lok8s.dev/v1
+kind: Project
+metadata:
+  name: my-project
+spec:
+  implementation:
+    default: go              # go | bash; go when absent
+    bash:
+      commands: [registry]   # top-level commands routed to bash; names only
+      tree: .lok8s           # project-relative; the executable is <tree>/lo
+```
+
+Rules:
+
+- `default: bash` runs every command through `<tree>/lo` with the argv untouched. `default: go` with a `commands` list routes only the listed commands; every other command stays in Go.
+- `commands` takes top-level command names from `lo --help`. An alias (`r`), an unknown name and a Go-only command (`assets`, `mcp`, `operator`, and `init` for its `project` and `toolchain` subcommands) are errors. There is no `all`: `default: bash` is the whole-tree switch.
+- `tree` is relative to the project and stays inside it: no absolute path, no `..`, no symlink that resolves outside the project. The default is `.lok8s`.
+- A routing needs the tree in the project. The copy the binary extracts into its cache and a checkout named by `PATH_LOK8S` are never routed to. Without the tree, `lo` stops: `lo: implementation bash: the tree <project>/.lok8s/lo is missing. Run "lo assets eject bash", or set spec.implementation.default: go.`
+- No environment variable selects the implementation. The path variables (`PATH_BASE`, `PATH_CLUSTERS`, `PATH_LOK8S`, `PATH_BIN`) select paths for the bash tree, not code.
+- Every command reads the block at start. An invalid block stops the command with the error on stderr (`lo: lok8s.yaml: …`). `lo lint` reports the same error as a finding and completes its other checks.
+- `lo doctor` prints the effective implementation, the tree and its source, and a `!` line for each routed command whose state Go also writes (`registry`, `image`, `secrets`, `use`, `kustomize`). A customised lib behind such a command changes one writer of shared state; the parity harnesses prove the stock tree only. Such a command is the project's own fork from that point.
+- The MCP server (`lo mcp`) projects the Go tree without the routing, so the tool list is stable. Each tool call runs `lo <cmd> …` as a subprocess, which applies the routing itself.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -656,9 +684,8 @@ caller drives the mode, not the file.
 | `PATH_SECRETS` | `.secrets` | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
-| `LO_IMPL` | (empty) | `bash` runs the frozen argsh implementation (`.lok8s/lo`) for this invocation instead of the binary — see [The Go `lo` binary](go-migration.md#lo-impl-bash-the-escape-hatch) |
 | `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |
 | `LO_ASSETS_EJECT` | (empty) | `never`: the environment form of `--no-eject`; embedded framework assets are served from a temp dir, never written into the project (see [`lo assets`](#lo-assets)). The bash tree cache under `XDG_CACHE_HOME` is outside the project and stays in use |
-| `XDG_CACHE_HOME` | `$HOME/.cache` | Where the binary extracts the embedded bash tree (`lok8s/<version>/lok8s/`) for `LO_IMPL=bash` and the provider plugins when the project holds no tree |
+| `XDG_CACHE_HOME` | `$HOME/.cache` | Where the binary extracts the embedded bash tree (`lok8s/<version>/lok8s/`) for the provider plugins and `lo drivers <name>` when the project holds no tree. A command routed to bash never runs from it |
 | `LOK8S_NONINTERACTIVE` | (empty) | `1` disables prompts (consent gates refuse) and the collapsing progress UI |
 | `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so`. Only the argsh `mcp` builtin needs it: the bash MCP variant and `lo chat` |

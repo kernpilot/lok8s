@@ -167,7 +167,7 @@ your-project/
   .bin/                        # pinned toolchain (b) — incl. the lo binary
   .lok8s/                      # framework (synced via b — don't edit)
     VERSION                    # what `lo --version` reports
-    lo                         # frozen argsh CLI (LO_IMPL=bash runs it; the binary is the entrypoint)
+    lo                         # frozen argsh CLI (lok8s.yaml can route commands to it; the binary is the entrypoint)
     libs/, utils/              # frozen bash libraries (the reference the binary was ported from)
     legacy/                    # retired code (the argsh installer, the bash operator hooks)
     addons/                    # bootstrap addons (cilium, metallb, ...)

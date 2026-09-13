@@ -14,8 +14,11 @@ still runs. Go is canonical. Every change lands in Go first.
 - **Parity oracle.** Ten harnesses under `hack/parity-*.sh` run both
   implementations and diff their output byte for byte. They run in CI for
   every PR, against the core and the full build of `lo`.
-- **Second variant.** `LO_IMPL=bash lo …` runs this tree instead of the Go
-  code, with the same arguments. Some pieces run from here even under Go: the
+- **Second variant.** A project routes commands to this tree through its
+  `lok8s.yaml` (`spec.implementation.default: bash`, or
+  `bash.commands: [registry, …]`); the binary then execs
+  `<project>/.lok8s/lo` with the same arguments. No environment variable
+  selects the implementation. Some pieces run from here even under Go: the
   Hetzner provider and the kubeone inventory hooks run as argsh children of
   the Go dispatch (see `providers/README.md`).
 
@@ -47,11 +50,28 @@ Retired code does not stay here. It moves to [`../.archive/`](../.archive/README
 
 ## How to run it
 
+The switch is the project file, committed with the project:
+
+```yaml
+# lok8s.yaml at the project root
+apiVersion: lok8s.dev/v1
+kind: Project
+metadata:
+  name: my-project
+spec:
+  implementation:
+    default: bash            # every command through this tree, or:
+    bash:
+      commands: [registry]   # only these commands, under default: go
+```
+
 ```bash
-LO_IMPL=bash lo version          # the same argv, the bash implementation
-LO_IMPL=bash lo build            # any command
+lo version                       # the same argv, the bash implementation
 bash hack/parity.sh bin/lo       # all ten harnesses, both implementations
 ```
+
+The tree must be inside the project (`lo assets eject bash` writes it);
+the copy the binary extracts into its cache is never routed to.
 
 The tree needs argsh with its builtin, `yq`, `jq`, `envsubst`, `sops` and
 `ssh-to-age` on the path. `lo init toolchain` writes a `.bin/b.yaml` that carries those lines

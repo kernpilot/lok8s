@@ -121,7 +121,7 @@ binaries:
 - **Not in the consumer file:** `argsh`, `yq`, `jq`, `envsubst`, `sops`,
   `ssh-to-age`. The Go binary links or reimplements them (sops and
   ssh-to-age as libraries; the split-mode `yq`/`sops` subprocesses are
-  contributor/`LO_IMPL=bash` territory today). To run the frozen bash
+  contributor territory today, and the tree a project routes commands to). To run the frozen bash
   implementation in a consumer project, add (as the file's header
   says)
   `github.com/arg-sh/argsh: {asset: argsh, onPost: "${B_BIN} builtin ${B_EVENT}"}`,
@@ -151,7 +151,7 @@ side.
 | `kind`, `tilt`, `mkcert` (`local`) | yes (default on) | yes | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
 | `kubeone`, `hcloud` (`cloud`) | opt-in (`--groups …,cloud`) | `kubeone`/`capi` profiles (+ `clusterctl`) | the provisioning drivers exec them |
 | `docker` | no (install Docker yourself) | `oci://docker` | the Lo driver and Tilt |
-| `argsh`, `jq`, `yq`, `envsubst`, `sops`, `ssh-to-age` | **no** — the binary links or reimplements them (add them by hand for `LO_IMPL=bash`; the file's header shows how) | yes | the frozen `.lok8s/lo`, the provider plugins, `lo build` split mode (`yq`/`sops` subprocesses), the bats suites |
+| `argsh`, `jq`, `yq`, `envsubst`, `sops`, `ssh-to-age` | **no**: the binary links or reimplements them (add them by hand when `lok8s.yaml` routes commands to bash; the file's header shows how) | yes | the frozen `.lok8s/lo`, the provider plugins, `lo build` split mode (`yq`/`sops` subprocesses), the bats suites |
 | `bats` | no | yes | contributors running `tests/` |
 | `lo` itself | no — you installed it (`lo-install.sh`) | the `core` profile declares the release asset | everyone |
 

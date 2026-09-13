@@ -25,7 +25,7 @@ full map — the short version:
 
 Two implementations exist and both matter: Go is where behaviour lands; the
 argsh tree is a frozen reference that must keep agreeing with it
-(`LO_IMPL=bash lo …` runs it). Read
+(`lok8s.yaml` `spec.implementation` routes commands to it). Read
 [docs/reference/go-migration.md](docs/reference/go-migration.md) before
 touching either, and [AGENTS.md](AGENTS.md) for the porting pattern.
 
