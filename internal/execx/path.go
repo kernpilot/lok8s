@@ -13,8 +13,7 @@ import (
 func PrependPATH(dirs ...string) string {
 	path := os.Getenv("PATH")
 	entries := strings.Split(path, string(os.PathListSeparator))
-	for i := len(dirs) - 1; i >= 0; i-- {
-		dir := dirs[i]
+	for _, dir := range slices.Backward(dirs) {
 		if dir == "" || slices.Contains(entries, dir) {
 			continue
 		}
