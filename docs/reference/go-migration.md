@@ -366,6 +366,48 @@ install` fetches it into `.bin/` alongside the rest of the toolchain. The
 [Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) page
 states what `b` still manages today versus the intended end state.
 
+## What still runs as bash
+
+Three seams run bash from the frozen tree. Each one is a choice, not a
+gap in the port.
+
+**The Hetzner provider.** `internal/provider/bridge` runs
+`.lok8s/providers/hetzner/main` as `bash -c` children over the frozen
+libs. Each contract call (`provider::provision`, `provider::destroy`,
+`provider::output`, the KubeOne inventory hooks) starts one fresh process:
+it sources argsh, loads the provider, calls one function, and exits.
+
+A fresh process has no memory, and that is fine. The provider keeps its
+state at the cloud (hcloud labels) and on disk
+(`<work_dir>/hetzner.dump.json`), never in shell variables. Every child
+goes through `execx.Runner`, so the dispatch stays hermetic under a fake.
+
+**`lo drivers <name>`.** The binary hands a driver directory with no Go
+twin (`.lok8s/drivers/<name>/main` only) to the argsh implementation with
+argv untouched. `--list` prints the union of both worlds.
+
+**`LO_IMPL=bash`.** The whole process runs as `bash .lok8s/lo`, described
+in the next section.
+
+What each seam needs on disk:
+
+| Seam | Needs |
+|---|---|
+| Hetzner provider | a lok8s checkout that `PATH_LOK8S` points at (the frozen libs and the provider), `argsh` in `.bin/` (`b install`), the `hcloud` CLI, `curl` for the Robot REST API, `jq` |
+| `lo drivers <name>` | the same checkout and `argsh`, plus whatever the driver calls |
+| `LO_IMPL=bash` | the same checkout and `argsh`, plus the full toolchain the bash tree execs (`kustomize`, the `.kustomize/` plugins, `yq`, `sops`) |
+
+The binary prepares `PATH` and every `PATH_*` variable for these children
+the way the project's `.envrc` would (`bridge.Env`), so a consumer does not
+export them by hand.
+
+Why the provider stays bash: it is about 1650 lines of argsh that drive
+real infrastructure (the hcloud CLI, the Robot REST API, a cloud-init
+generator with its own template tree). A port of that size needs its own
+change, with a real Hetzner account to prove it against. The bridge keeps
+the provider correct today at no risk to live clusters. Port it when
+provider behaviour needs to change, not before.
+
 ## `LO_IMPL=bash`: the escape hatch
 
 ```sh
