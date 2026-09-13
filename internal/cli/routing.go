@@ -108,14 +108,42 @@ func newRouting(paths *config.Paths) routing {
 	}
 	// A routed command needs the tree in the project; the cache extract
 	// is never routed to.
-	if info, err := os.Stat(filepath.Join(impl.TreeDir, "lo")); err != nil || info.IsDir() {
+	entry := filepath.Join(impl.TreeDir, "lo")
+	if info, err := os.Stat(entry); err != nil || info.IsDir() {
 		fix := "remove spec.implementation.bash.commands"
 		if r.all {
 			fix = "set spec.implementation.default: go"
 		}
-		r.treeErr = config.ImplementationError(fmt.Sprintf("implementation bash: the tree %s is missing. Run \"lo assets eject bash\", or %s.", filepath.Join(impl.TreeDir, "lo"), fix))
+		r.treeErr = config.ImplementationError(fmt.Sprintf("implementation bash: the tree %s is missing. Run \"lo assets eject bash\", or %s.", entry, fix))
+		return r
+	}
+	// The entrypoint itself must resolve inside the project too: a tree
+	// directory that passes the escape rule may still hold a `lo` symlink
+	// to a checkout elsewhere (bash derives PATH_BASE from BASH_SOURCE,
+	// not from the resolved file, but the code it runs would be foreign).
+	if resolved, ok := resolvesInside(paths.Base, entry); !ok {
+		r.err = implError("spec.implementation.bash.tree: the entrypoint %s resolves to %s, outside the project.", filepath.Join(impl.Tree, "lo"), resolved)
 	}
 	return r
+}
+
+// resolvesInside reports whether path, symlinks resolved, lies under the
+// resolved base; it returns the resolved path either way ("" when it
+// cannot be resolved, which counts as outside).
+func resolvesInside(base, path string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	root, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return resolved, false
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return resolved, false
+	}
+	return resolved, true
 }
 
 // implError is a spec.implementation validation error in the loader's

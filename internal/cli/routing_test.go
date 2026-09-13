@@ -532,3 +532,32 @@ func TestRoutingUnknownKeysWarnInLint(t *testing.T) {
 		}
 	}
 }
+
+// F8: the entrypoint itself must resolve inside the project.
+func TestRoutingEntrypointSymlinkEscapeRefuses(t *testing.T) {
+	outside := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(outside, "lo"), "#!/usr/bin/env bash\n")
+	p := routedProject(t, "    bash:\n      commands: [registry]\n", false)
+	if err := os.Symlink(filepath.Join(outside, "lo"), filepath.Join(p.Lok8s, "lo")); err != nil {
+		t.Fatal(err)
+	}
+	want := "lok8s.yaml: spec.implementation.bash.tree: the entrypoint " + filepath.Join(".lok8s", "lo") + " resolves to " + mustEvalSymlinks(t, filepath.Join(outside, "lo")) + ", outside the project."
+	if r := newRouting(p); r.err == nil || r.err.Error() != want {
+		t.Errorf("routing err = %v\nwant %s", r.err, want)
+	}
+	recs := recordShim(t)
+	setOSArgs(t, "registry", "up")
+	if _, stderr, err := runLo(t, NewRoot(p), "registry", "up"); !errors.Is(err, ErrHandled) || stderr != "lo: "+want+"\n" || len(*recs) != 0 {
+		t.Errorf("registry up: %v %q %+v", err, stderr, *recs)
+	}
+	// A link that stays inside the project runs.
+	q := routedProject(t, "    bash:\n      commands: [registry]\n", false)
+	testutil.WriteFile(t, filepath.Join(q.Base, "real", "lo"), "#!/usr/bin/env bash\n")
+	if err := os.Symlink(filepath.Join(q.Base, "real", "lo"), filepath.Join(q.Lok8s, "lo")); err != nil {
+		t.Fatal(err)
+	}
+	setOSArgs(t, "registry", "up")
+	if _, _, err := runLo(t, NewRoot(q), "registry", "up"); err != nil || len(*recs) != 1 {
+		t.Errorf("inside link: %v %+v", err, *recs)
+	}
+}
