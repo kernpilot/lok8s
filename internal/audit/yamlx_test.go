@@ -52,6 +52,34 @@ func TestMergeYAMLDocsSemantics(t *testing.T) {
 	}
 }
 
+// TestMergeYAMLDocsAliasKeepsItsOwnValue pins the merge to the shared
+// addons.MergeDocument. The pinned yq (v4.53.3) merges an overlay of `x`
+// into a NEW node: `y: *a`, an alias of the same anchored value, keeps its
+// own content (`.y.q` is null after the merge). A merge that writes into
+// the accumulator's existing value node in place, as the former
+// audit-private copy did, leaks the overlay into every alias of that node.
+func TestMergeYAMLDocsAliasKeepsItsOwnValue(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yaml")
+	overlay := filepath.Join(dir, "overlay.yaml")
+	writeFileT(t, base, "x: &a\n  p: 1\ny: *a\n")
+	writeFileT(t, overlay, "x:\n  q: 2\n")
+	merged, err := mergeYAMLDocs([]string{base, overlay}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := yqRenderNode(yqsem.Lookup(merged, "x", "q")); v != "2" {
+		t.Errorf("overlay must deep-merge into x: x.q = %q", v)
+	}
+	if v := yqRenderNode(yqsem.Lookup(merged, "y", "p")); v != "1" {
+		t.Errorf("the alias must keep its own content: y.p = %q", v)
+	}
+	if v := yqRenderNode(yqsem.Lookup(merged, "y", "q")); v != "null" {
+		t.Errorf("the overlay on x leaked into the alias y: y.q = %q, yq prints null", v)
+	}
+}
+
 func TestYqRenderPreservesLiterals(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

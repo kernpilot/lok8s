@@ -63,13 +63,13 @@ func mergeStream(acc *yaml.Node, raw []byte) (*yaml.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if acc, err = mergeDocument(acc, &doc); err != nil {
+		if acc, err = MergeDocument(acc, &doc); err != nil {
 			return nil, err
 		}
 	}
 }
 
-// mergeDocument is one `. * $item` step of the ireduce, over whole
+// MergeDocument is one `. * $item` step of the ireduce, over whole
 // documents. yq v4.53.3 (the pinned .bin/yq) at this level:
 //
 //   - a null document (`null`, `~`, an empty `---`) on either side is a
@@ -81,7 +81,11 @@ func mergeStream(acc *yaml.Node, raw []byte) (*yaml.Node, error) {
 // The nested rules differ (a nested null or sequence REPLACES); those live
 // in MergeNodes. A missing document (the zero node an empty or comment-only
 // stream decodes to) is skipped like a null: yq reads no document there.
-func mergeDocument(acc, doc *yaml.Node) (*yaml.Node, error) {
+//
+// This is the ONE implementation of the idiom. The audit effective-values
+// stack (internal/audit) folds its decoded documents through it as well, so
+// the 17 pinned yq cases in merge_test.go cover both callers.
+func MergeDocument(acc, doc *yaml.Node) (*yaml.Node, error) {
 	acc, doc = yqsem.Deref(acc), yqsem.Deref(doc)
 	if isNullDocument(doc) {
 		return acc, nil
