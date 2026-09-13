@@ -421,21 +421,19 @@ jobs:
           # so a hung kind-create / cilium-wait fails in minutes, not at the
           # job's 18min ceiling.
           LOK8S_UP_TIMEOUT: 720
+          IMPLEMENTATION: ${{ matrix.lo_impl }}
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}"
           BASE="${ROOT}/tests/e2e/${FIXTURE}"
 
           # Replicate the e2e helper env (tests/e2e/lib/helpers.bash :: e2e::init):
-          # the fixture dir is PATH_BASE; the toolchain stays at the repo root.
-          # The framework tree is the fixture's own copy on the bash leg (the
-          # routed tree, see the select step) and the repo's on the go leg.
+          # the fixture dir is PATH_BASE; framework + toolchain stay at the repo root.
+          # On the bash leg the routed exec exports PATH_LOK8S=<fixture>/.lok8s
+          # (the copied tree) to its bash child itself; the Tilt extension and
+          # .lok8s/libs/tilt read PATH_BASE only, so nothing else needs it.
           export PATH_BASE="${BASE}"
-          if [ -d "${BASE}/.lok8s" ]; then
-            export PATH_LOK8S="${BASE}/.lok8s"
-          else
-            export PATH_LOK8S="${ROOT}/.lok8s"
-          fi
+          export PATH_LOK8S="${ROOT}/.lok8s"
           export PATH_SCRIPTS="${PATH_LOK8S}"
           export PATH_BIN="${ROOT}/.bin"
           export PATH_CLUSTERS="${BASE}/clusters"
@@ -459,6 +457,14 @@ jobs:
           # Fail loud when PATH does not resolve to the binary under test.
           test "$(command -v lo)" = "${ROOT}/bin/lo"
           lo --version
+          # The leg must run the implementation the matrix names: the frozen
+          # tree prints a `bash` row in `lo version`, the Go code does not
+          # (the same proof hack/lib/parity.sh's parity::prove_switch makes).
+          if [ "${IMPLEMENTATION}" = bash ]; then
+            lo version | grep -q '^bash '
+          else
+            ! lo version | grep -q '^bash '
+          fi
           echo "::endgroup::"
 
           echo "::group::lo doctor"
