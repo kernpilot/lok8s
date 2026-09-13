@@ -261,6 +261,7 @@ the binary; a project no longer needs a synced `.lok8s/` tree for it.
 | `drivers/capi/cluster/**` | the CAPI core + provider templates | `drivers/capi/cluster` |
 | `libs/inventory/manifests/` | the ClusterInventory CRD mirror | `libs/inventory/manifests` |
 | `chat/` | `lo chat` defaults | `chat` |
+| `tilt/` | the Tilt extension (`Tiltfile`, its README, the registry TLS note) that the project-root two-line `Tiltfile` loads | `tilt` |
 | `VERSION` | the fallback for an unstamped build | — (never ejected) |
 
 The embedded copy is canonical. The repo's `.lok8s/**` twin stays (the
@@ -283,8 +284,12 @@ runtime read of the framework tree in the binary goes through the
 resolver: the bootstrap entry parser (`internal/bootstrap`, and the
 twin parsers in `internal/lint` and `internal/audit`, which peek), the
 `lo` driver's CoreDNS/registry/expose templates, the KubeOne core
-template, the CAPI templates, the inventory CRD, the chat defaults, and
-the version (`assets.Version()`: ldflags, else the embedded `VERSION`).
+template, the CAPI templates, the inventory CRD, the chat defaults, the
+Tilt extension (`lo tilt up` and `lo tilt ci` eject `tilt/` before Tilt
+starts, because Tilt reads `.lok8s/tilt/Tiltfile` from disk; under
+`--no-eject` / `LO_ASSETS_EJECT=never` they stop with an error that names
+`lo assets eject tilt`), and the version (`assets.Version()`: ldflags,
+else the embedded `VERSION`).
 What does NOT go through it, on purpose: the bash seams (`.lok8s/lo`,
 `.lok8s/drivers/<name>/main`, `.lok8s/providers/*`), which are the frozen
 implementation, not assets, and `lo crds generate`'s write of the

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
@@ -270,6 +271,116 @@ func TestUpReloadFailureWarnsButSucceeds(t *testing.T) {
 }
 
 // ── tilt::ci ─────────────────────────────────────────────
+
+// quietAssets redirects the eject notice into a buffer and restores the
+// package state.
+func quietAssets(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	prev := assets.Stderr
+	var buf bytes.Buffer
+	assets.Stderr = &buf
+	t.Cleanup(func() {
+		assets.Stderr = prev
+		assets.SetPolicy(assets.PolicyEject)
+		assets.Cleanup()
+	})
+	return &buf
+}
+
+// A project without .lok8s/tilt/ gets the extension ejected before Tilt
+// starts: the project-root Tiltfile loads it from disk.
+func TestUpAndCIEjectTheExtensionOnFirstUse(t *testing.T) {
+	for _, verb := range []string{"up", "ci"} {
+		t.Run(verb, func(t *testing.T) {
+			notices := quietAssets(t)
+			assets.SetPolicy(assets.PolicyEject)
+			c, runner, _, _ := testCtx(t)
+			t.Setenv("TILT_PORT", "14242")
+			runner.handler = doctorKindHandler(false)
+			c.StartDetached = func(string) (int, error) { return 4242, nil }
+			if verb == "up" {
+				if err := c.Up(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			} else if rc, err := c.CI(t.Context(), ""); err != nil || rc != 0 {
+				t.Fatalf("rc=%d err=%v", rc, err)
+			}
+			ext := filepath.Join(c.Paths.Lok8s, "tilt")
+			for _, f := range []string{"Tiltfile", "README.md", assets.MarkerFile} {
+				if _, err := os.Stat(filepath.Join(ext, f)); err != nil {
+					t.Errorf("%s not ejected: %v", f, err)
+				}
+			}
+			if !strings.Contains(notices.String(), "ejected tilt -> .lok8s/tilt") {
+				t.Errorf("no eject notice: %q", notices.String())
+			}
+		})
+	}
+}
+
+// A project's own copy of the extension wins and is never touched.
+func TestUpLeavesALocalExtensionAlone(t *testing.T) {
+	notices := quietAssets(t)
+	assets.SetPolicy(assets.PolicyEject)
+	c, runner, _, _ := testCtx(t)
+	t.Setenv("TILT_PORT", "14242")
+	runner.handler = doctorKindHandler(false)
+	c.StartDetached = func(string) (int, error) { return 4242, nil }
+	own := filepath.Join(c.Paths.Lok8s, "tilt", "Tiltfile")
+	if err := os.MkdirAll(filepath.Dir(own), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(own, []byte("# my own extension\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Up(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(own)
+	if string(raw) != "# my own extension\n" {
+		t.Errorf("local extension overwritten: %q", raw)
+	}
+	if _, err := os.Stat(filepath.Join(c.Paths.Lok8s, "tilt", assets.MarkerFile)); err == nil {
+		t.Error("a marker was written next to a local copy")
+	}
+	if notices.Len() != 0 {
+		t.Errorf("eject notice for a local copy: %q", notices.String())
+	}
+}
+
+// Under --no-eject / LO_ASSETS_EJECT=never nothing is written, and Tilt
+// cannot read a file that is not on disk: the command stops before it.
+func TestUpAndCIRefuseToStartWithoutTheExtensionUnderNoEject(t *testing.T) {
+	for _, verb := range []string{"up", "ci"} {
+		t.Run(verb, func(t *testing.T) {
+			quietAssets(t)
+			assets.SetPolicy(assets.PolicyNever)
+			c, runner, _, errOut := testCtx(t)
+			t.Setenv("TILT_PORT", "14242")
+			runner.handler = doctorKindHandler(false)
+			started := false
+			c.StartDetached = func(string) (int, error) { started = true; return 4242, nil }
+			var err error
+			if verb == "up" {
+				err = c.Up(t.Context())
+			} else {
+				_, err = c.CI(t.Context(), "")
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v, want ErrHandled", err)
+			}
+			if !strings.Contains(errOut.String(), "the Tilt extension is not in the project (.lok8s/tilt/) and --no-eject / LO_ASSETS_EJECT=never forbids writing it") || !strings.Contains(errOut.String(), "lo assets eject tilt") {
+				t.Errorf("stderr = %q", errOut.String())
+			}
+			if started || len(runner.matching("tilt ci")) != 0 {
+				t.Error("Tilt started without its extension")
+			}
+			if _, err := os.Stat(filepath.Join(c.Paths.Lok8s, "tilt")); err == nil {
+				t.Error("--no-eject wrote into the project")
+			}
+		})
+	}
+}
 
 func TestCIInvokesTiltCIWithPortAndFile(t *testing.T) {
 	c, runner, out, _ := testCtx(t)

@@ -5,7 +5,8 @@
 // internal/assets/lok8s/ — every bootstrap addon (addons/**), the driver
 // cluster templates (drivers/{lo,kubeone,capi}/cluster/**), the
 // ClusterInventory CRD mirror (libs/inventory/manifests/), the lo chat
-// defaults (chat/) and VERSION. The mirror is canonical; the repo's
+// defaults (chat/), the Tilt extension (tilt/, what the project-root
+// Tiltfile loads) and VERSION. The mirror is canonical; the repo's
 // .lok8s/** twin (the frozen bash implementation and the parity harnesses
 // read it) is kept byte-identical by hack/sync-legacy-assets.sh and
 // TestEmbeddedMirrorMatchesLegacyTree.
@@ -161,8 +162,8 @@ func Cleanup() {
 
 // Unit is one materialization unit: the smallest tree lo ejects, diffs and
 // updates as a whole. Addons are one unit each; a driver's cluster
-// templates, the inventory CRD mirror and the chat defaults are one unit
-// per tree.
+// templates, the inventory CRD mirror, the chat defaults and the Tilt
+// extension are one unit per tree.
 type Unit struct {
 	// Rel is the unit's path below .lok8s/ ("addons/cilium",
 	// "drivers/lo/cluster", …).
@@ -183,6 +184,8 @@ const (
 	KindInventory UnitKind = "inventory"
 	// KindChat is the lo chat defaults.
 	KindChat UnitKind = "chat"
+	// KindTilt is the Tilt extension the project-root Tiltfile loads.
+	KindTilt UnitKind = "tilt"
 )
 
 // treeUnits are the non-addon units, in display order.
@@ -192,6 +195,7 @@ var treeUnits = []Unit{
 	{Rel: "drivers/capi/cluster", Kind: KindDriver},
 	{Rel: "libs/inventory/manifests", Kind: KindInventory},
 	{Rel: "chat", Kind: KindChat},
+	{Rel: "tilt", Kind: KindTilt},
 }
 
 var (

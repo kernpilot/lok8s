@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -50,6 +51,32 @@ type Context struct {
 	// nil → kapply.NewApplier(...).Preflight. Tests inject a recorder,
 	// mirroring the kapply::preflight stub in tilt_preflight_test.bats.
 	Preflighter func(ctx context.Context, manifest string, args ...string) error
+}
+
+// extensionRel is the Tilt extension's unit below .lok8s/: the project-root
+// Tiltfile is the two-line loader of ./.lok8s/tilt/Tiltfile
+// (scaffold.canonicalTiltfile).
+const extensionRel = "tilt"
+
+// ensureExtension puts the Tilt extension on disk before Tilt starts. The
+// extension ships embedded and ejects on first use like every other asset
+// (a project's own copy wins and is never touched). Tilt reads the file
+// from disk, so PolicyNever (--no-eject, LO_ASSETS_EJECT=never) cannot
+// serve it from the temp dir: the command stops with a clear error
+// instead of starting Tilt against a missing file. The bash had the file
+// on disk in every project (the synced .lok8s tree), so this prints
+// nothing there.
+func (c *Context) ensureExtension() error {
+	if assets.LocalExists(c.Paths, extensionRel) {
+		return nil
+	}
+	if assets.CurrentPolicy() == assets.PolicyNever {
+		ui.ErrorTo(c.ErrOut, "the Tilt extension is not in the project (.lok8s/%s/) and --no-eject / LO_ASSETS_EJECT=never forbids writing it", extensionRel)
+		ui.ErrorTo(c.ErrOut, "Tilt reads the extension from disk. Run without --no-eject, or run: lo assets eject %s", extensionRel)
+		return ErrHandled
+	}
+	_, _, err := assets.Resolve(c.Paths, extensionRel+"/Tiltfile")
+	return err
 }
 
 // tiltfilePath is "${PATH_BASE}/Tiltfile" — plain concatenation, NOT a
@@ -188,6 +215,9 @@ func (c *Context) Up(ctx context.Context) error {
 		ui.ErrorTo(c.ErrOut, "Did not recognize local kind environment.")
 		return ErrHandled
 	}
+	if err := c.ensureExtension(); err != nil {
+		return err
+	}
 	pid := c.Paths.Base + "/.tilt"
 	fmt.Fprintf(c.Out, "Tilt UI: http://localhost:%s\n", port)
 	p, err := c.startDetached(port)
@@ -239,6 +269,9 @@ func (c *Context) CI(ctx context.Context, timeout string) (int, error) {
 	if !c.doctorKind(ctx) {
 		ui.ErrorTo(c.ErrOut, "Did not recognize local kind environment.")
 		return 1, ErrHandled
+	}
+	if err := c.ensureExtension(); err != nil {
+		return 1, err
 	}
 	port := c.Port()
 	os.Setenv("TILT_PORT", port)

@@ -440,7 +440,7 @@ lo drivers <name> <args…>     # invoke a driver's own subcommands
 
 ### lo assets
 
-The framework's data files (every bootstrap addon, the driver cluster templates (`drivers/{lo,kubeone,capi}/cluster`), the ClusterInventory CRD mirror and the `lo chat` defaults) ship **inside the binary**. A project needs no synced `.lok8s/` tree for them. The rules:
+The framework's data files (every bootstrap addon, the driver cluster templates (`drivers/{lo,kubeone,capi}/cluster`), the ClusterInventory CRD mirror, the `lo chat` defaults and the Tilt extension the project-root `Tiltfile` loads) ship **inside the binary**. A project needs no synced `.lok8s/` tree for them. The rules:
 
 - **Precedence.** A copy under the project's `.lok8s/<rel>` always wins over the embedded one, whatever its content.
 - **Eject on first use** (the default). When a cluster references an asset (an addon in `spec.bootstrap`, a driver's templates, the CRD at publish time) and the project holds no copy, `lo` writes the embedded one into `.lok8s/<rel>/` together with a `.lo-origin` marker (the `lo` version, a timestamp, one sha256 per file) and prints one `[assets] ejected …` line. Two `lo` processes ejecting the same unit at once are safe: the second finds the unit in place and leaves it. Commit the ejected files: from then on a `lo` upgrade can never silently change what that cluster applies; the diff below shows it and you choose.
@@ -455,9 +455,9 @@ lo assets diff [rel...] [--json] [--check]
 lo assets update <rel> [--force]
 ```
 
-`<rel>` is the path below `.lok8s/`: `addons/cilium`, `drivers/lo/cluster`, `drivers/kubeone/cluster`, `drivers/capi/cluster`, `libs/inventory/manifests`, `chat`.
+`<rel>` is the path below `.lok8s/`: `addons/cilium`, `drivers/lo/cluster`, `drivers/kubeone/cluster`, `drivers/capi/cluster`, `libs/inventory/manifests`, `chat`, `tilt`.
 
-**`eject`** without arguments materializes what this project's cluster specs reference (each spec's builtin `spec.bootstrap` addons, its driver's templates, the inventory CRD); `--all` takes every embedded asset. `--check` writes nothing and exits `1` if any of that set would be ejected: the CI gate for "this repository pins what it applies".
+**`eject`** without arguments materializes what this project references (each cluster spec's builtin `spec.bootstrap` addons, its driver's templates, the inventory CRD, and `tilt` when the project-root `Tiltfile` loads the extension); `--all` takes every embedded asset. `lo tilt up` and `lo tilt ci` eject `tilt` on first use themselves: Tilt reads `.lok8s/tilt/Tiltfile` from disk, so under `--no-eject` they stop with an error instead. `--check` writes nothing and exits `1` if any of that set would be ejected: the CI gate for "this repository pins what it applies".
 
 **`diff`** is a three-way comparison per file, by content hash: ORIGIN (the `.lo-origin` hashes, what was ejected) vs LOCAL (the project's file) vs EMBEDDED (what this `lo` ships). The headline per addon is the chart version, local vs embedded. Per file:
 

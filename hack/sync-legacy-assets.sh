@@ -24,6 +24,7 @@ SUBTREES=(
   drivers/capi/cluster
   libs/inventory/manifests
   chat
+  tilt
   VERSION
 )
 
