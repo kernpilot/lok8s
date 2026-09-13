@@ -60,7 +60,9 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	// to the whole foreground process group, and the child (kubeone,
 	// terraform, kubectl) finishes its own cleanup the way it did under
 	// the bash entrypoint, which waited for it. No WaitDelay: like bash,
-	// the parent waits for the child to end.
+	// the parent waits for the child to end. On SIGTERM this is a
+	// deliberate deviation: the bash shell died and left the child
+	// running, the binary interrupts it and waits (catalogue D25).
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.Dir = c.Dir
 	if len(c.Env) > 0 {

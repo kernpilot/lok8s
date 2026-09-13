@@ -373,7 +373,8 @@ func (d *Driver) WaitReady(ctx context.Context, kubeconfig, clusterName, namespa
 // credentialEnvFile reads each (key, environment variable) pair from the
 // environment and renders the env file. A value with a CR or LF would end
 // its line early and start another key, so it is refused with the
-// variable named (credentials.NoNewline).
+// variable named (credentials.NoNewline). The bash passed the values as
+// arguments; deliberate deviation (catalogue D27).
 func credentialEnvFile(stderr io.Writer, keyVar ...string) (string, error) {
 	kv := make([]string, 0, len(keyVar))
 	for i := 0; i+1 < len(keyVar); i += 2 {
