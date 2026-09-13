@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# sync-legacy-assets.sh — keep the frozen bash tree's data files identical to
-# the embedded mirror (internal/assets/lok8s/**, the canonical copy since the
-# eject model). The bash implementation and the parity harnesses read
-# .lok8s/** from disk, so the two must not diverge; the Go test
-# TestEmbeddedMirrorMatchesLegacyTree fails on any byte difference.
+# sync-legacy-assets.sh — keep the frozen bash tree (.lok8s/**) identical to
+# the embedded mirror (internal/assets/lok8s/**, the canonical copy of the
+# WHOLE tree since the eject model: the data half and the bash
+# implementation). The parity harnesses read .lok8s/** from disk, so the two
+# must not diverge; the Go test TestEmbeddedMirrorMatchesLegacyTree fails on
+# any byte or executable-bit difference.
 #
 #   hack/sync-legacy-assets.sh                 mirror  → .lok8s   (the normal direction)
 #   hack/sync-legacy-assets.sh --from-legacy   .lok8s  → mirror   (after `lo crds generate`,
 #                                                                  or when a fix landed in .lok8s first)
 #   hack/sync-legacy-assets.sh --check         diff only; exit 1 on divergence (no Go needed)
 #
-# The subtree list is the one in internal/assets/drift_test.go (`mirrored`).
+# The entry list is the one in internal/assets/assets_test.go (`mirrored`):
+# every top-level entry of .lok8s. A new top-level entry is added to both.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,14 +20,15 @@ MIRROR="${ROOT}/internal/assets/lok8s"
 LEGACY="${ROOT}/.lok8s"
 
 SUBTREES=(
-  addons
-  drivers/lo/cluster
-  drivers/kubeone/cluster
-  drivers/capi/cluster
-  libs/inventory/manifests
-  chat
-  tilt
   VERSION
+  addons
+  chat
+  drivers
+  libs
+  lo
+  providers
+  tilt
+  utils
 )
 
 mode="to-legacy"
@@ -38,7 +41,8 @@ case "${1:-}" in
 esac
 
 # copy_tree SRC DST — replace DST with a byte-identical copy of SRC (a file
-# or a directory). Ejected .lo-origin markers never belong to either tree.
+# or a directory), modes included (cp keeps the executable bit). Ejected
+# .lo-origin markers never belong to either tree.
 #
 # The replace is a wipe + copy, so anything under DST that git does not
 # track would go with it. Refuse in that case: an untracked file there is
@@ -62,7 +66,22 @@ copy_tree() {
   find "${dst}" -name .lo-origin -type f -delete 2>/dev/null || true
 }
 
+# Every top-level entry on either side must be listed: an entry that is not
+# would silently stay out of the mirror (and out of the binary).
+listed() { local e; for e in "${SUBTREES[@]}"; do [[ "${e}" == "${1}" ]] && return 0; done; return 1; }
 rc=0
+for side in "${MIRROR}" "${LEGACY}"; do
+  for entry in "${side}"/* "${side}"/.[!.]*; do
+    [[ -e "${entry}" ]] || continue
+    name="$(basename "${entry}")"
+    [[ "${name}" == .lo-origin ]] && continue
+    if ! listed "${name}"; then
+      echo "error: ${entry#"${ROOT}"/} is not in SUBTREES (add it to hack/sync-legacy-assets.sh and assets_test.go)" >&2
+      rc=1
+    fi
+  done
+done
+(( rc == 0 )) || exit "${rc}"
 for sub in "${SUBTREES[@]}"; do
   case "${mode}" in
     to-legacy)   copy_tree "${MIRROR}/${sub}" "${LEGACY}/${sub}" ;;
@@ -71,6 +90,14 @@ for sub in "${SUBTREES[@]}"; do
       if ! diff -r --exclude=.lo-origin "${MIRROR}/${sub}" "${LEGACY}/${sub}" >/dev/null 2>&1; then
         echo "drift: ${sub} (internal/assets/lok8s vs .lok8s)" >&2
         diff -r --exclude=.lo-origin "${MIRROR}/${sub}" "${LEGACY}/${sub}" >&2 || true
+        rc=1
+      fi
+      # Executable bits: the same set of +x files on both sides.
+      if ! diff <(cd "${MIRROR}" && find "${sub}" -type f -perm -u+x | sort) \
+                <(cd "${LEGACY}" && find "${sub}" -type f -perm -u+x | sort) >/dev/null 2>&1; then
+        echo "drift: ${sub} executable bits differ (internal/assets/lok8s vs .lok8s)" >&2
+        diff <(cd "${MIRROR}" && find "${sub}" -type f -perm -u+x | sort) \
+             <(cd "${LEGACY}" && find "${sub}" -type f -perm -u+x | sort) >&2 || true
         rc=1
       fi
       ;;

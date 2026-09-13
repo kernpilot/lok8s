@@ -1,0 +1,242 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# capi — CAPI resource generation and management
+# Detects provider from cluster spec, generates CAPI resources from templates,
+# manages credential Secrets, and polls cluster readiness.
+
+import ^utils/verbose
+import ^utils/template
+import ^utils/spec
+import ^utils/credentials
+
+# Detect the CAPI provider from cluster spec fields.
+# Usage: capi::detect_provider <cluster_yaml>
+# Delegates to provider::detect from utils/provider.
+capi::detect_provider() {
+  provider::detect "${1}"
+}
+
+# The template variables capi::generate feeds to envsubst. ONE list: it is the
+# export set, the envsubst whitelist, and (because they are confined to a
+# subshell) the cleanup set. They used to be two hand-maintained copies, and a
+# variable exported but missing from the whitelist ships its `${PLACEHOLDER}`
+# verbatim into an applied manifest.
+#
+# The list is checked BOTH WAYS against the templates capi::generate actually
+# renders — see `tests/unit/capi_test.bats`. Without that the list was only
+# consistent with itself: it named the failure it prevents while never being
+# compared to a single template, and eight placeholders in the tree
+# (`AWS_*`, `HROBOT_SSH_KEY_NAME`, `ROOT_DEVICE_WWN`, `HOST_SERVER_NUMBER`,
+# `MACHINE_TEMPLATE_NAME`) were untracked. Those live in `providers/aws/` and
+# `providers/hetzner/hrobot-machine-template.yaml`, which this driver does not
+# render yet; wiring either one in means adding its variables here, and the
+# gate says so by name.
+CAPI_TEMPLATE_VARS=(
+  CLUSTER_NAME CLUSTER_NAMESPACE CLUSTER_DOMAIN
+  K8S_VERSION K8S_VERSION_TRIMMED K8S_VERSION_MINOR
+  CP_REPLICAS CP_TYPE CREDENTIAL_SECRET_NAME
+  HCLOUD_REGION HCLOUD_SSH_KEY_NAME HCLOUD_IMAGE_NAME HCLOUD_NETWORK_ENABLED
+  POOL_NAME POOL_REPLICAS POOL_TYPE
+)
+
+# capi::_allowed_vars — the GNU SHELL-FORMAT string envsubst wants,
+# '${A} ${B} …', built from the list above.
+capi::_allowed_vars() {
+  local out="" v
+  for v in "${CAPI_TEMPLATE_VARS[@]}"; do
+    out+="\${${v}} "
+  done
+  echo "${out% }"
+}
+
+# Generate CAPI resources from templates using values from cluster spec.
+# Usage: capi::generate <cluster_yaml> <provider>
+# Outputs multi-document YAML to stdout.
+#
+# Templates are modelled on CAPH v1.1.7's hcloud "ubuntu" flavor (v1beta2 CAPI
+# core + v1beta1 CAPH, kubeadm stack installed on a stock image via cloud-init).
+# Substitution uses an explicit envsubst whitelist so the cloud-init's own shell
+# variables ($ARCH, $RUNC, $CONTAINERD, $KUBERNETES_VERSION, …) pass through
+# untouched — only the lok8s template vars below are expanded.
+capi::generate() {
+  local cluster_yaml="${1}" provider="${2}"
+  local tmpl_dir="${PATH_LOK8S}/drivers/capi/cluster"
+  local core="${tmpl_dir}/core" prov="${tmpl_dir}/providers/hetzner"
+
+  if [[ ! -d "${tmpl_dir}" ]]; then
+    error "CAPI template directory not found: ${tmpl_dir}"
+    return 1
+  fi
+
+  if [[ "${provider}" != "hetzner" ]]; then
+    error "CAPI provider '${provider}' is not supported yet (only 'hetzner')."
+    return 1
+  fi
+
+  local pg_enabled
+  pg_enabled=$(yq -r '.spec.provider.config.placementGroups // false' "${cluster_yaml}")
+
+  # Only the listed variables are expanded; everything else (the cloud-init's
+  # own $ARCH, $RUNC, $KUBERNETES_VERSION …) stays literal.
+  local allowed_vars; allowed_vars="$(capi::_allowed_vars)"
+
+  # Render all resources, capturing the stream so optional placement groups can
+  # be injected afterward (envsubst can't conditionally include YAML blocks).
+  #
+  # EVERY export lives inside this subshell. They have to be exported —
+  # template::envsubst's GNU path renders in a child process — but they must not
+  # survive the call: CLUSTER_NAME and K8S_VERSION are read by the kubeone driver
+  # too, and a leaked value from an earlier capi::generate would render the wrong
+  # cluster (POST-REVIEW finding 6). This is the idiom template::render already
+  # uses, and it needs no unset list to keep in sync.
+  #
+  # `|| return 1` on the assignment is not decoration: libs/provision runs the
+  # driver as `driver::provision || rc=$?`, which disables errexit for the whole
+  # tree below, so an unguarded assignment let a FAILED render flow on as a
+  # partial manifest stream.
+  local rendered
+  rendered=$(
+    # Cluster identity + Kubernetes version (full, trimmed, and minor — the
+    # cloud-init needs the trimmed/minor forms for the apt repo + package pins).
+    export "${CAPI_TEMPLATE_VARS[@]}"
+    CLUSTER_NAME=$(yq -r '.metadata.name' "${cluster_yaml}")
+    CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
+    CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
+    K8S_VERSION=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+    K8S_VERSION_TRIMMED="${K8S_VERSION#v}"        # v1.31.12 -> 1.31.12
+    K8S_VERSION_MINOR="${K8S_VERSION_TRIMMED%.*}" # 1.31.12  -> 1.31
+    CP_REPLICAS=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
+    CP_TYPE=$(yq -r '.spec.controlPlane.type // "cax11"' "${cluster_yaml}")
+    CREDENTIAL_SECRET_NAME=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
+    HCLOUD_REGION=$(yq -r '.spec.provider.config.region // .spec.hcloud.region // "fsn1"' "${cluster_yaml}")
+    HCLOUD_SSH_KEY_NAME=$(yq -r '.spec.provider.config.sshKeyName // .spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
+    HCLOUD_IMAGE_NAME=$(yq -r '.spec.provider.config.image // "ubuntu-24.04"' "${cluster_yaml}")
+    HCLOUD_NETWORK_ENABLED=$(yq -r '.spec.provider.config.network.enabled // false' "${cluster_yaml}")
+
+    # `exit`, not `return`: this is a subshell, and the caller reads its status.
+    if [[ -z "${HCLOUD_SSH_KEY_NAME}" ]]; then
+      error "spec.provider.config.sshKeyName is required for the hetzner CAPI provider"
+      exit 1
+    fi
+
+    first=1
+    for tpl in \
+      "${core}/cluster.yaml" \
+      "${prov}/hetzner-cluster.yaml" \
+      "${core}/kubeadm-control-plane.yaml" \
+      "${prov}/hcloud-machine-template-controlplane.yaml"; do
+      (( first )) || echo "---"; first=0
+      template::envsubst "${allowed_vars}" < "${tpl}"
+    done
+    # One MachineDeployment + KubeadmConfigTemplate + worker machine template per pool.
+    # while-read, not `for … in $(yq …)`: word-splitting would break a
+    # whitespace-bearing pool name into fragments BEFORE validation — each
+    # fragment could pass the regex and generate manifests for pools that
+    # don't exist. read consumes each name exactly as yq emits it.
+    while IFS= read -r pool; do
+      [[ -n "${pool}" ]] || continue
+      spec::validate_pool_name "${pool}" || exit 1
+      POOL_NAME="${pool}"
+      POOL_REPLICAS=$(spec::pool_field "${cluster_yaml}" "${pool}" replicas 1) || exit 1
+      POOL_TYPE=$(spec::pool_field "${cluster_yaml}" "${pool}" type cax11) || exit 1
+      for tpl in \
+        "${core}/machine-deployment.yaml" \
+        "${prov}/kubeadm-config-template.yaml" \
+        "${prov}/hcloud-machine-template-worker.yaml"; do
+        echo "---"
+        # template::envsubst, NOT bare envsubst (the control-plane loop above
+        # already goes through the flavor shim). On any machine whose `envsubst`
+        # is not GNU gettext — which includes the renvsubst build `b` curates —
+        # the bare call rejects the whitelist positional arg and writes
+        # "ERROR: Unknown flag: ${CLUSTER_NAME} …" into the manifest stream, so
+        # every worker MachineDeployment / KubeadmConfigTemplate / machine
+        # template is replaced by an error line: the CAPI cluster comes up with
+        # a control plane and no workers, or fails to apply at all.
+        template::envsubst "${allowed_vars}" < "${tpl}"
+      done
+    done < <(spec::pool_names "${cluster_yaml}")
+  ) || return 1
+  [[ -n "${rendered}" ]] || {
+    error "the CAPI manifest stream rendered EMPTY from ${tmpl_dir} — refusing to continue"
+    return 1
+  }
+
+  # Optional anti-affinity: opt-in `spread` placement groups (control plane +
+  # workers), injected with yq. A spread group caps at 10 servers, so this is OFF
+  # by default — always-on would make a cluster with >10 nodes in a group fail.
+  if [[ "${pg_enabled}" == "true" ]]; then
+    printf '%s\n' "${rendered}" | yq eval '
+      (select(.kind == "HetznerCluster") | .spec.hcloudPlacementGroups) = [{"name": "control-plane", "type": "spread"}, {"name": "workers", "type": "spread"}]
+      | (select(.kind == "HCloudMachineTemplate" and (.metadata.name | test("-control-plane$"))) | .spec.template.spec.placementGroupName) = "control-plane"
+      | (select(.kind == "HCloudMachineTemplate" and (.metadata.name | test("-control-plane$") | not)) | .spec.template.spec.placementGroupName) = "workers"
+    '
+  else
+    printf '%s\n' "${rendered}"
+  fi
+}
+
+# Create or update the provider credential Secret on the management cluster.
+# Usage: capi::ensure_credentials <cluster_yaml> <provider> <kubeconfig>
+capi::ensure_credentials() {
+  local cluster_yaml="${1}" provider="${2}" kubeconfig="${3}"
+  local secret_name namespace
+  secret_name=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
+  namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
+
+  credentials::require "${provider}" || return 1
+
+  case "${provider}" in
+    hetzner)
+      kubectl create secret generic "${secret_name}" \
+        --namespace "${namespace}" \
+        --kubeconfig "${kubeconfig}" \
+        --from-literal=hcloud-token="${HCLOUD_TOKEN}" \
+        --from-literal=robot-user="${HROBOT_USER:-}" \
+        --from-literal=robot-password="${HROBOT_PASSWORD:-}" \
+        --dry-run=client -o yaml | kubectl apply --kubeconfig "${kubeconfig}" -f -
+      ;;
+    aws)
+      : "${AWS_REGION:?AWS_REGION required for AWS provider}"
+      kubectl create secret generic "${secret_name}" \
+        --namespace "${namespace}" \
+        --kubeconfig "${kubeconfig}" \
+        --from-literal=access-key-id="${AWS_ACCESS_KEY_ID}" \
+        --from-literal=secret-access-key="${AWS_SECRET_ACCESS_KEY}" \
+        --from-literal=region="${AWS_REGION}" \
+        --dry-run=client -o yaml | kubectl apply --kubeconfig "${kubeconfig}" -f -
+      ;;
+    *)
+      error "Unsupported provider for credentials: ${provider}"
+      return 1
+      ;;
+  esac
+}
+
+# Wait for a CAPI cluster to become ready.
+# Usage: capi::wait_ready <kubeconfig> <cluster_name> [namespace] [timeout_seconds]
+capi::wait_ready() {
+  local kubeconfig="${1}" cluster_name="${2}" namespace="${3:-default}" timeout="${4:-600}"
+  local elapsed=0 interval=10
+
+  debug "Waiting for CAPI cluster ${cluster_name} to become ready (timeout: ${timeout}s)"
+
+  while (( elapsed < timeout )); do
+    local phase
+    phase=$(kubectl get cluster "${cluster_name}" \
+      --namespace "${namespace}" \
+      --kubeconfig "${kubeconfig}" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+
+    if [[ "${phase}" == "Provisioned" ]]; then
+      debug "Cluster ${cluster_name} is Provisioned"
+      return 0
+    fi
+
+    debug "Cluster ${cluster_name} phase: ${phase:-Unknown} (${elapsed}/${timeout}s)"
+    sleep "${interval}"
+    elapsed=$(( elapsed + interval ))
+  done
+
+  error "Timed out waiting for cluster ${cluster_name} (${timeout}s)"
+  return 1
+}

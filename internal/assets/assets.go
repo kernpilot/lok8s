@@ -1,15 +1,18 @@
-// Package assets ships the framework's first-party data inside the binary
-// and materializes it into a project on first use (the "eject model").
+// Package assets ships the framework's first-party files inside the binary
+// and materializes them into a project on first use (the "eject model").
 //
-// What is embedded: a committed mirror of the framework tree under
-// internal/assets/lok8s/ — every bootstrap addon (addons/**), the driver
-// cluster templates (drivers/{lo,kubeone,capi}/cluster/**), the
-// ClusterInventory CRD mirror (libs/inventory/manifests/), the lo chat
-// defaults (chat/), the Tilt extension (tilt/, what the project-root
-// Tiltfile loads) and VERSION. The mirror is canonical; the repo's
-// .lok8s/** twin (the frozen bash implementation and the parity harnesses
-// read it) is kept byte-identical by hack/sync-legacy-assets.sh and
-// TestEmbeddedMirrorMatchesLegacyTree.
+// What is embedded: a committed mirror of the WHOLE framework tree under
+// internal/assets/lok8s/. Two halves live in it. The data half is what a
+// cluster applies: every bootstrap addon (addons/**), the driver cluster
+// templates (drivers/{lo,kubeone,capi}/cluster/**), the ClusterInventory
+// CRD mirror (libs/inventory/manifests/), the lo chat defaults (chat/) and
+// the Tilt extension (tilt/, what the project-root Tiltfile loads). The
+// code half is the frozen bash implementation: the `lo` entrypoint,
+// libs/**, utils/**, the drivers' main + libs, the provider plugins and
+// VERSION (bashtree.go: what LO_IMPL=bash and the provider bridge run).
+// The mirror is canonical; the repo's .lok8s/** twin (the parity harnesses
+// read it) is kept byte-identical, executable bits included, by
+// hack/sync-legacy-assets.sh and TestEmbeddedMirrorMatchesLegacyTree.
 //
 // Precedence: an on-disk `.lok8s/<rel>` in the project WINS over the
 // embedded copy. lo never overwrites an existing local file — the only
@@ -45,13 +48,14 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 //go:embed all:lok8s
 var mirrorFS embed.FS
 
-// FS is the embedded mirror rooted at "lok8s" (addons/, drivers/, libs/,
-// chat/, VERSION).
+// FS is the embedded mirror rooted at "lok8s": the whole .lok8s tree (lo,
+// addons/, chat/, drivers/, libs/, providers/, tilt/, utils/, VERSION).
 func FS() fs.FS {
 	sub, err := fs.Sub(mirrorFS, "lok8s")
 	if err != nil {
@@ -186,7 +190,32 @@ const (
 	KindChat UnitKind = "chat"
 	// KindTilt is the Tilt extension the project-root Tiltfile loads.
 	KindTilt UnitKind = "tilt"
+	// KindBash is the code half of the tree: the frozen bash implementation
+	// (lo, libs/**, utils/**, the drivers' main + libs, providers/**,
+	// VERSION). One unit, addressed by the reserved rel BashRel; its local
+	// dir is .lok8s itself and its marker .lok8s/.lo-origin.
+	KindBash UnitKind = "bash"
 )
+
+// BashRel is the rel that names the bash unit (`lo assets eject bash`). It
+// is a reserved word, not a path: the unit's files live directly below
+// .lok8s, beside the data units.
+const BashRel = "bash"
+
+// bashUnit is the one KindBash unit.
+var bashUnit = Unit{Rel: BashRel, Kind: KindBash}
+
+// dataUnits lists every unit but the bash one (the units that own a
+// subtree of their own).
+func dataUnits() []Unit {
+	var out []Unit
+	for _, u := range Units() {
+		if u.Kind != KindBash {
+			out = append(out, u)
+		}
+	}
+	return out
+}
 
 // treeUnits are the non-addon units, in display order.
 var treeUnits = []Unit{
@@ -204,7 +233,8 @@ var (
 )
 
 // Units lists every embedded unit: the addons (bytewise by name, like the
-// bash `*/` glob) followed by the driver/inventory/chat trees.
+// bash `*/` glob), the driver/inventory/chat/tilt trees, then the bash
+// unit.
 func Units() []Unit {
 	unitsOnce.Do(func() {
 		entries, _ := fs.ReadDir(FS(), "addons")
@@ -219,6 +249,7 @@ func Units() []Unit {
 			unitList = append(unitList, Unit{Rel: "addons/" + n, Kind: KindAddon})
 		}
 		unitList = append(unitList, treeUnits...)
+		unitList = append(unitList, bashUnit)
 	})
 	return append([]Unit(nil), unitList...)
 }
@@ -235,16 +266,87 @@ func AddonNames() []string {
 }
 
 // UnitFor returns the embedded unit that covers rel (rel itself or a path
-// below it). ok is false when no unit covers it — e.g. an addon name the
+// below it). The data units are matched first; the bash unit covers
+// BashRel and every embedded path that no data unit owns or contains
+// ("lo", "libs/build", "utils", … but not "drivers", which holds a data
+// unit). ok is false when no unit covers it — e.g. an addon name the
 // binary does not ship.
 func UnitFor(rel string) (Unit, bool) {
 	rel = path.Clean(rel)
-	for _, u := range Units() {
+	for _, u := range dataUnits() {
 		if rel == u.Rel || strings.HasPrefix(rel, u.Rel+"/") {
 			return u, true
 		}
 	}
+	if rel == BashRel || bashCovers(rel) {
+		return bashUnit, true
+	}
 	return Unit{}, false
+}
+
+// bashCovers reports whether rel is an embedded path that belongs to the
+// bash unit: it exists in the mirror and no data unit lies at or below it.
+func bashCovers(rel string) bool {
+	if rel == "." || rel == "" {
+		return false
+	}
+	if _, err := fs.Stat(FS(), rel); err != nil {
+		return false
+	}
+	for _, u := range dataUnits() {
+		if u.Rel == rel || strings.HasPrefix(u.Rel, rel+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+// dataUnitOwns reports whether the embedded path fp lies inside a data
+// unit (the bash unit's walk skips those subtrees).
+func dataUnitOwns(fp string) bool {
+	for _, u := range dataUnits() {
+		if fp == u.Rel || strings.HasPrefix(fp, u.Rel+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// fsRoot is where the unit's files start in the embedded mirror.
+func (u Unit) fsRoot() string {
+	if u.Kind == KindBash {
+		return "."
+	}
+	return u.Rel
+}
+
+// unitRel maps an embedded path inside the unit to its unit-relative
+// slash path (the marker key).
+func (u Unit) unitRel(fp string) string {
+	if u.Kind == KindBash {
+		return fp
+	}
+	return strings.TrimPrefix(fp, u.Rel+"/")
+}
+
+// unitDir is the unit's local root: .lok8s/<rel> for a data unit, .lok8s
+// itself for the bash unit.
+func unitDir(p *config.Paths, u Unit) string {
+	if u.Kind == KindBash {
+		return p.Lok8s
+	}
+	return localPath(p, u.Rel)
+}
+
+// unitExists is the precedence test: a data unit's dir exists; the bash
+// unit's entrypoint (.lok8s/lo) exists. The entrypoint is the key on
+// purpose: a bash eject writes it LAST, so a half-written tree never
+// counts as local (ejectBash).
+func unitExists(p *config.Paths, u Unit) bool {
+	if u.Kind == KindBash {
+		return fsutil.FileExists(filepath.Join(p.Lok8s, "lo"))
+	}
+	return fsutil.DirExists(localPath(p, u.Rel))
 }
 
 // cleanRel validates and normalizes a rel: slash-separated, relative, no
@@ -282,8 +384,7 @@ func LocalExists(p *config.Paths, rel string) bool {
 		_, err := os.Stat(localPath(p, rel))
 		return err == nil
 	}
-	_, err = os.Stat(localPath(p, u.Rel))
-	return err == nil
+	return unitExists(p, u)
 }
 
 // Resolve returns the on-disk path for rel ("addons/cilium",
@@ -317,7 +418,10 @@ func resolve(p *config.Paths, rel string, pol Policy) (string, Origin, error) {
 		}
 		return local, OriginNone, nil
 	}
-	if _, err := os.Stat(localPath(p, u.Rel)); err == nil {
+	if rel == BashRel {
+		local = unitDir(p, u)
+	}
+	if unitExists(p, u) {
 		// Precedence: the project's copy wins, whatever its content.
 		return local, OriginLocal, nil
 	}
@@ -325,6 +429,12 @@ func resolve(p *config.Paths, rel string, pol Policy) (string, Origin, error) {
 		root, err := tempUnit(u)
 		if err != nil {
 			return "", OriginNone, err
+		}
+		if u.Kind == KindBash {
+			if rel == BashRel {
+				return root, OriginEmbedded, nil
+			}
+			return filepath.Join(root, filepath.FromSlash(rel)), OriginEmbedded, nil
 		}
 		return filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(rel, u.Rel))), OriginEmbedded, nil
 	}
@@ -346,7 +456,10 @@ func tempUnit(u Unit) (string, error) {
 		}
 		tempRoot = dir
 	}
-	root := filepath.Join(tempRoot, filepath.FromSlash(u.Rel))
+	root := tempRoot
+	if u.Kind != KindBash {
+		root = filepath.Join(tempRoot, filepath.FromSlash(u.Rel))
+	}
 	if tempDone[u.Rel] {
 		return root, nil
 	}
@@ -369,8 +482,8 @@ func Eject(p *config.Paths, rel string) (Unit, error) {
 	if !ok {
 		return Unit{}, fmt.Errorf("%w: %s", ErrNotAsset, rel)
 	}
-	if _, err := os.Stat(localPath(p, u.Rel)); err == nil {
-		return u, fmt.Errorf("%w: %s", ErrExists, localPath(p, u.Rel))
+	if unitExists(p, u) {
+		return u, fmt.Errorf("%w: %s", ErrExists, unitDir(p, u))
 	}
 	return u, eject(p, u)
 }
@@ -380,8 +493,13 @@ var ErrExists = errors.New("assets: local copy exists")
 
 // eject writes unit u into the project atomically: the files land in a
 // sibling temp dir that is renamed into place, so a crash never leaves a
-// half-written unit that the next run would honor as "local".
+// half-written unit that the next run would honor as "local". The bash
+// unit shares .lok8s with the data units and takes its own path
+// (ejectBash).
 func eject(p *config.Paths, u Unit) error {
+	if u.Kind == KindBash {
+		return ejectBash(p)
+	}
 	dest := localPath(p, u.Rel)
 	if _, err := os.Stat(dest); err == nil {
 		return nil // raced with ourselves; precedence holds
@@ -439,38 +557,54 @@ func renameInto(tmp, dest string) (won bool, err error) {
 	return true, nil
 }
 
-// writeUnit copies the embedded unit's files below root (0644/0755).
-func writeUnit(u Unit, root string) error {
-	return fs.WalkDir(FS(), u.Rel, func(fp string, d fs.DirEntry, err error) error {
+// walkUnit visits every embedded file of unit u: fp is the path in the
+// mirror, rel the unit-relative key. The bash unit's walk skips the data
+// units' subtrees.
+func walkUnit(u Unit, visit func(fp, rel string, data []byte) error) error {
+	return fs.WalkDir(FS(), u.fsRoot(), func(fp string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel := strings.TrimPrefix(fp, u.Rel)
-		target := filepath.Join(root, filepath.FromSlash(rel))
+		if u.Kind == KindBash && fp != "." && dataUnitOwns(fp) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return nil
 		}
 		data, err := fs.ReadFile(FS(), fp)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, 0o644)
+		return visit(fp, u.unitRel(fp), data)
 	})
+}
+
+// writeUnit copies the embedded unit's files below root, executable bits
+// restored (go:embed drops them; fileMode holds the list).
+func writeUnit(u Unit, root string) error {
+	return walkUnit(u, func(fp, rel string, data []byte) error {
+		return writeEmbedded(fp, filepath.Join(root, filepath.FromSlash(rel)), data)
+	})
+}
+
+// writeEmbedded writes one embedded file (fp names it in the mirror) to
+// target, creating the parent and applying the file's mode.
+func writeEmbedded(fp, target string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, data, fileMode(fp)) // #nosec G306 -- framework files, 0644 or 0755 by list
 }
 
 // EmbeddedFiles lists the unit's files (slash paths relative to the unit,
 // sorted) with their sha256.
 func EmbeddedFiles(u Unit) (map[string]string, error) {
 	out := map[string]string{}
-	err := fs.WalkDir(FS(), u.Rel, func(fp string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		data, err := fs.ReadFile(FS(), fp)
-		if err != nil {
-			return err
-		}
-		out[strings.TrimPrefix(fp, u.Rel+"/")] = hashBytes(data)
+	err := walkUnit(u, func(_, rel string, data []byte) error {
+		out[rel] = hashBytes(data)
 		return nil
 	})
 	return out, err
@@ -479,17 +613,41 @@ func EmbeddedFiles(u Unit) (map[string]string, error) {
 // LocalFiles lists the files under dir (slash paths relative to dir,
 // marker excluded) with their sha256. A missing dir is an empty map.
 func LocalFiles(dir string) (map[string]string, error) {
+	return localFiles(dir, nil)
+}
+
+// localUnitFiles is LocalFiles over the unit's local dir; for the bash
+// unit the data units' subtrees (their own units) are left out.
+func localUnitFiles(p *config.Paths, u Unit) (map[string]string, error) {
+	if u.Kind != KindBash {
+		return LocalFiles(unitDir(p, u))
+	}
+	return localFiles(p.Lok8s, dataUnitOwns)
+}
+
+func localFiles(dir string, skip func(rel string) bool) (map[string]string, error) {
 	out := map[string]string{}
 	if _, err := os.Stat(dir); err != nil {
 		return out, nil
 	}
+	// A project may link its tree (the parity harnesses do); WalkDir does
+	// not descend a symlinked root, so resolve it first.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	err := filepath.WalkDir(dir, func(fp string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(dir, fp)
 		rel = filepath.ToSlash(rel)
-		if path.Base(rel) == MarkerFile {
+		if skip != nil && rel != "." && skip(rel) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || path.Base(rel) == MarkerFile {
 			return nil
 		}
 		data, err := os.ReadFile(fp)

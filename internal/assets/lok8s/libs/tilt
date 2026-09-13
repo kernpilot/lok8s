@@ -1,0 +1,266 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
+# vim: set syntax=bash:
+# tilt — Tilt lifecycle management
+
+import ^utils/types
+import ^utils/verbose
+import ^utils/domain
+import ^utils/kapply
+
+main::tilt() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  local -a usage=(
+    'up|u@destructive'       'Spin up tilt (interactive, backgrounded)'
+    'ci@destructive'         'Headless build+deploy+wait-ready (tilt ci), exits with real status'
+    'down|d@destructive'     'Spin down tilt'
+    'status|s@readonly'      'Check tilt status'
+    'restart|r@destructive'  'Restart tilt'
+    'preflight@destructive'  'Force-clear stuck-Terminating objects in the manifest on stdin'
+  )
+  :usage "Manage tilt environment" "${@}"
+  "${usage[@]}"
+}
+
+# Derive a deterministic Tilt web port from the active domain name.
+# This prevents port collisions when multiple lok8s projects run Tilt
+# simultaneously.  The port is hashed into the 10351-10499 range (10350 is
+# the Tilt default, intentionally avoided so a bare `tilt up` outside lok8s
+# doesn't collide).
+# Override: set TILT_PORT or spec.tilt.port in the cluster spec.
+tilt::port() {
+  # Explicit override takes priority
+  if [[ -n "${TILT_PORT:-}" ]]; then
+    echo "${TILT_PORT}"
+    return
+  fi
+
+  # Check cluster spec for spec.tilt.port
+  local cluster_spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-lok8s.dev}/cluster.lok8s.yaml"
+  if [[ -f "${cluster_spec}" ]] && command -v yq &>/dev/null; then
+    local spec_port
+    spec_port=$(yq -r '.spec.tilt.port // ""' "${cluster_spec}" 2>/dev/null)
+    if [[ -n "${spec_port}" && "${spec_port}" != "null" ]]; then
+      echo "${spec_port}"
+      return
+    fi
+  fi
+
+  # Hash the domain name into port range 10351-10499
+  local domain="${DOMAIN_NAME:-lok8s.dev}"
+  local hash
+  hash=$(printf '%s' "${domain}" | cksum | awk '{print $1}')
+  echo $(( (hash % 149) + 10351 ))
+}
+
+# True if a Tilt apiserver is already answering on this project's port. An
+# authoritative check — it queries the live session, so it doesn't trust a
+# possibly-stale .tilt.pid file. Usage: tilt::running [port]
+# shellcheck disable=SC2120 # default port via tilt::port; callers may pass one
+tilt::running() {
+  local port="${1:-$(tilt::port)}"
+  tilt get session --port "${port}" &>/dev/null
+}
+
+# Force an already-running Tilt to re-execute its Tiltfile, so a re-run of
+# `lo up` picks up new services / addons / regenerated artifacts without
+# spawning a duplicate instance. This reloads CONFIG only (the (Tiltfile)
+# resource) — workloads keep hot-reloading through their own live_update; we
+# never `tilt trigger` a workload. Usage: tilt::reload [port]
+# shellcheck disable=SC2120 # default port via tilt::port; callers may pass one
+tilt::reload() {
+  local port="${1:-$(tilt::port)}"
+  tilt trigger '(Tiltfile)' --port "${port}"
+}
+
+# Re-deploy ONE resource through Tilt, so Tilt's own image injection applies.
+#
+# The rule above — "we never `tilt trigger` a workload" — is about tilt::reload,
+# whose job is to reload CONFIG without disturbing workloads that hot-reload
+# themselves. This is the opposite case and is deliberate: a `hooks recreate`
+# exists precisely to re-run a workload, and it MUST go through Tilt because the
+# rendered artifact carries the declared image ref (`lok8s.local/<name>`) while
+# the pushed image only exists under Tilt's content-hash tag. Applying the
+# rendered YAML directly points the workload at an image nobody pushed.
+# Usage: tilt::trigger_resource <name> [port]
+tilt::trigger_resource() {
+  local name="${1}" port="${2:-$(tilt::port)}"
+  tilt trigger "${name}" --port "${port}" &>/dev/null
+}
+
+# Does Tilt know a resource by this name? Used to decide whether a rendered
+# object can be re-deployed through Tilt at all. Usage: tilt::has_resource <name> [port]
+tilt::has_resource() {
+  local name="${1}" port="${2:-$(tilt::port)}"
+  tilt get uiresource "${name}" --port "${port}" &>/dev/null
+}
+
+# shellcheck disable=SC2120 # argsh-dispatched; also called arg-less by tilt::restart
+tilt::up() {
+  :args "Spin up tilt" "${@}"
+  local port
+  port=$(tilt::port)
+  export TILT_PORT="${port}"
+
+  # Already running for this project? Don't race a duplicate onto the same
+  # port — reload the Tiltfile so this `lo up` picks up new services/addons.
+  if tilt::running "${port}"; then
+    echo "Tilt already running on http://localhost:${port} — reloading Tiltfile"
+    tilt::reload "${port}" || warn "Tiltfile reload trigger failed (Tilt still running on :${port})"
+    return 0
+  fi
+
+  # error() only logs (returns 0) — the gate needs its own return.
+  tilt doctor | grep 'Env: kind' &>/dev/null || {
+    error "Did not recognize local kind environment."
+    return 1
+  }
+  local pid="${PATH_BASE}/.tilt"
+  echo "Tilt UI: http://localhost:${port}"
+  nohup tilt up --port="${port}" --file="${PATH_BASE}"/Tiltfile > "${pid}.nohup" 2>&1 &
+  echo $! > "${pid}.pid"
+}
+
+# Headless bring-up for dev/CI/e2e. Unlike tilt::up (which backgrounds an
+# interactive `tilt up` and returns immediately), `tilt ci` runs in the
+# foreground: it builds + deploys every resource, waits for readiness, then
+# exits 0 on success / non-zero on failure — so this function's own exit
+# status is the real build+deploy result. Honors a `--timeout` (passed
+# straight through to `tilt ci`; tilt's default is 30m).
+# Usage: tilt::ci [--timeout <duration>]
+tilt::ci() {
+  local timeout
+  local -a args=(
+    'timeout|t'  'Max time to wait for readiness (e.g. 300s, 10m); passed to `tilt ci`'
+    "${args[@]:-}"
+  )
+  :args "Headless tilt build+deploy+wait (tilt ci)" "${@}"
+  # error() only logs (returns 0) — the gate needs its own return.
+  tilt doctor | grep 'Env: kind' &>/dev/null || {
+    error "Did not recognize local kind environment."
+    return 1
+  }
+  local port
+  port=$(tilt::port)
+  export TILT_PORT="${port}"
+  local -a ci_args=(--port="${port}" --file="${PATH_BASE}"/Tiltfile)
+  [[ -n "${timeout:-}" ]] && ci_args+=(--timeout "${timeout}")
+  echo "Tilt CI (headless) on port ${port} — building, deploying, waiting for readiness..."
+  # Foreground + no `nohup`/`&`: tilt ci exits 0 only once all resources are
+  # ready, non-zero otherwise. Returning its status lets callers gate on it.
+  tilt ci "${ci_args[@]}"
+}
+
+# shellcheck disable=SC2120 # argsh-dispatched; also called arg-less by tilt::restart
+tilt::down() {
+  :args "Spin down tilt" "${@}"
+  # Scope the pkill fallback to THIS project's tilt (match its --file=): a
+  # bare `pkill tilt` kills other projects' sessions on the same machine.
+  # The -f pattern is a REGEX — escape the path's metacharacters ('.', '+',
+  # …) so an unlucky path cannot broaden the match onto unrelated sessions.
+  local esc
+  esc="$(printf '%s' "${PATH_BASE}/Tiltfile" | sed 's/[][\\.*^$()+?{}|]/\\&/g')"
+  local match="[t]ilt up.*--file=${esc}"
+  if [[ -f "${PATH_BASE}/.tilt.pid" ]]; then
+    kill "$(cat "${PATH_BASE}/.tilt.pid")" 2>/dev/null || pkill -f "${match}" || :
+  elif (( ${force:-0} )); then
+    pkill -f "${match}" || :
+  fi
+  rm -f "${PATH_BASE}/.tilt.pid"
+}
+
+tilt::status() { :args "Check tilt status" "${@}"; tilt doctor; }
+tilt::restart() { :args "Restart tilt" "${@}"; tilt::down; tilt::up; }
+
+# tilt::preflight_config <domain> — the domain's spec.tilt.preflight from
+# cluster.lok8s.yaml (same home as spec.tilt.port), as one placeholder-safe
+# TSV line: enabled, age, crds, crd-allow-csv. "-" marks an unset field —
+# tab counts as IFS whitespace, so a genuinely empty field would collapse
+# under `read` and shift every later field. Missing spec file (deploy-only
+# domains) or unreadable YAML yields all-defaults.
+tilt::preflight_config() {
+  local domain="${1}"
+  local spec="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}/${domain}/cluster.lok8s.yaml"
+  local enabled="true" age="-" crds="-" allow="-"
+  if [[ -f "${spec}" ]]; then
+    # NOT `… // true`: the alternative operator treats an explicit `false`
+    # as empty and would read a disable as true. Read raw and compare —
+    # only a literal false disables. The scalar shorthand `preflight: false`
+    # (no map) counts too, so a terse disable isn't silently ignored.
+    enabled=$(yq -r '.spec.tilt.preflight.enabled, .spec.tilt.preflight' "${spec}" 2>/dev/null | grep -cx false) || true
+    [[ "${enabled}" != "0" ]] && enabled="false" || enabled="true"
+    age=$(yq -r '.spec.tilt.preflight.age // "-"' "${spec}" 2>/dev/null) || age="-"
+    crds=$(yq -r '.spec.tilt.preflight.crds // "-"' "${spec}" 2>/dev/null) || crds="-"
+    allow=$(yq -r '.spec.tilt.preflight.crdForceAllow // [] | join(",")' "${spec}" 2>/dev/null) || allow=""
+    [[ -n "${allow}" ]] || allow="-"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "${enabled}" "${age}" "${crds}" "${allow}"
+}
+
+# tilt::preflight — called by the Tilt extension right after it renders the
+# domain (local('lo tilt preflight', stdin=artifacts)), BEFORE any k8s_yaml
+# applies: force-clear manifest objects stuck Terminating so Tilt's apply
+# doesn't spin on "currently being deleted" until its upsert timeout and fail
+# the build. The sweep itself is kapply::preflight; GATING + policy live
+# here, with precedence CLI flag > cluster spec > kapply env defaults
+# (KAPPLY_PREFLIGHT_AGE/_CRDS backstop only what neither flag nor spec set;
+# the LOK8S_* kill switches below outrank everything):
+#   - LOK8S_PREFLIGHT=0 (env) or spec.tilt.preflight.enabled=false disables
+#     the sweep entirely;
+#   - only the `lo` (local kind) driver is force-cleared by default — remote
+#     clusters need an explicit LOK8S_FORCE_CLEAR_TERMINATING=1. Clearing a
+#     finalizer skips its controller's cleanup: fine to lose on a throwaway
+#     kind cluster, a data-loss footgun on a real one;
+#   - stuck-CRD policy (drain/skip/force + allowlist) comes from the spec
+#     unless flags override — see kapply::_preflight_crd for the semantics.
+# Always exits 0 — a preflight must never brick the `tilt up` it protects.
+tilt::preflight() {
+  local age crds crd_allow
+  local -a args=(
+    'age|a'      'Only clear objects terminating longer than this many seconds (default 30)'
+    'crds|c'     'Stuck-CRD policy: drain (clear instance finalizers), skip, or force'
+    'crd-allow|' 'Comma-separated CRD names the force policy may strip (empty = all)'
+    "${args[@]:-}"
+  )
+  :args "Force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
+  if [[ "${LOK8S_PREFLIGHT:-1}" =~ ^(0|false)$ ]]; then
+    cat >/dev/null
+    return 0
+  fi
+  local resolved driver
+  resolved=$(domain::resolve "${domain:-}")
+  driver=$(domain::driver "${resolved}") || driver=""
+  if [[ "${driver}" != "lo" && -z "${LOK8S_FORCE_CLEAR_TERMINATING:-}" ]]; then
+    warn "preflight: '${resolved}' uses the '${driver:-unknown}' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)"
+    cat >/dev/null
+    return 0
+  fi
+
+  local enabled spec_age spec_crds spec_allow
+  IFS=$'\t' read -r enabled spec_age spec_crds spec_allow < <(tilt::preflight_config "${resolved}")
+  if [[ "${enabled}" =~ ^(false|0)$ ]]; then
+    cat >/dev/null
+    return 0
+  fi
+
+  # CLI flag > spec; "-" is the spec's unset marker. Unset options are NOT
+  # passed down — kapply::preflight owns the real defaults (30 / drain).
+  local -a sweep=()
+  age="${age:-}";             [[ "${age}" == "-" ]] && age=""
+  crds="${crds:-}";           [[ "${crds}" == "-" ]] && crds=""
+  crd_allow="${crd_allow:-}"; [[ "${crd_allow}" == "-" ]] && crd_allow=""
+  [[ "${spec_age}" != "-" && -z "${age}" ]] && age="${spec_age}"
+  [[ "${spec_crds}" != "-" && -z "${crds}" ]] && crds="${spec_crds}"
+  [[ "${spec_allow}" != "-" && -z "${crd_allow}" ]] && crd_allow="${spec_allow}"
+  [[ -n "${age}" ]] && sweep+=(--age "${age}")
+  [[ -n "${crds}" ]] && sweep+=(--crds "${crds}")
+  [[ -n "${crd_allow}" ]] && sweep+=(--crd-allow "${crd_allow}")
+  kapply::preflight "${sweep[@]}"
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"

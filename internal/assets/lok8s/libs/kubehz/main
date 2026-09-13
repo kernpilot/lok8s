@@ -1,0 +1,1181 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# vim: set syntax=bash:
+# kubehz — kubehz platform integration
+# Reads spec.kubehz from cluster.lok8s.yaml, validates the two-axis model
+# (hosting x access), and provides register/deregister/status subcommands.
+#
+# Split files:
+#   libs/kubehz/hosted    — hosted cluster provisioning/destroy via kubehz API
+#   libs/kubehz/handover  — control-plane handover, eject target side
+#                           (receive/preseed) + the assess pretty-printer's
+#                           data comes from the api (see kubehz::assess below)
+#   libs/kubehz/deploy    — `lo kubehz deploy`: render + apply the in-cluster
+#                           agent the spec selects, and keep exactly one
+#                           heartbeat producer alive (see its header)
+#   libs/kubehz/node      — `lo kubehz node join|remove|status`: the machines a
+#                           tenant brings to a kubehz-HOSTED control plane
+#                           (static pools). The CLUSTER-level join/deregister
+#                           above keep their own meaning.
+#
+# TWO in-cluster agents ship as kustomize dirs, and spec.kubehz.agent picks
+# which one owns the heartbeat:
+#   libs/kubehz/manifests/agent/       CronJob kubehz-heartbeat (schema 1) —
+#                                      identity bootstrap + enrollment, always
+#                                      deployed
+#   libs/kubehz/manifests/live-agent/  Deployment kubehz-live-agent (schema 2)
+#                                      — the Go live-view + desired-state agent
+# Deploy them with `lo kubehz deploy`. Never apply both heartbeat producers by
+# hand: the platform stores the snapshot latest-wins, so two producers erase
+# each other (libs/kubehz/deploy explains the interlock).
+# The "managed" access tier is LIVE and subscription-gated (Supporter+): it
+# registers like `registered`, and the kubehz platform's management features
+# (healing policies, capacity watches, desired-state management) activate once
+# the cluster is claimed by an entitled tenant. Acting stays PULL-based: the
+# in-cluster agent fetches desired state and applies it locally — the platform
+# never pushes into the cluster.
+
+import ^utils/domain
+import ^utils/verbose
+import ^utils/http
+import ^libs/kubehz/hosted
+import ^libs/kubehz/shared
+import ^libs/kubehz/handover
+import ^libs/kubehz/deploy
+import ^libs/kubehz/node
+
+main::kubehz() {
+  local -a usage=(
+    'register|r@destructive'    'Register cluster with kubehz'
+    'deregister|d@destructive'  'Remove cluster from kubehz'
+    'deploy@destructive'        'Deploy the in-cluster agent (spec.kubehz.agent)'
+    'status|s@readonly'         'Check kubehz registration status'
+    'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
+    'node|n'                    'Nodes you bring to a hosted control plane (join/remove/status)'
+    'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
+    'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
+    're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
+    'assess|a@readonly'         'Show the platform assessment + handover feasibility'
+    'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
+  )
+  :usage "kubehz platform integration" "${@}"
+  "${usage[@]}"
+}
+
+# ── Config reader ────────────────────────────────────────
+
+# Read spec.kubehz from a cluster.lok8s.yaml and export env vars.
+# Usage: kubehz::read_config <cluster_yaml>
+# Sets: LOK8S_KUBEHZ_HOSTING, LOK8S_KUBEHZ_ACCESS, LOK8S_KUBEHZ_API_URL,
+#       LOK8S_KUBEHZ_CONNECT_TOKEN, LOK8S_KUBEHZ_AGENT,
+#       LOK8S_KUBEHZ_UPGRADES_CHANNEL, LOK8S_KUBEHZ_UPGRADES_DEFER,
+#       LOK8S_KUBEHZ_MW_EXCLUSIONS
+kubehz::read_config() {
+  local cluster_yaml="${1}"
+
+  # Fail loudly on a missing/unreadable spec. Without this check the function
+  # could NEVER return non-zero: every yq failure happened inside an assignment
+  # whose status the next statement discarded, and the trailing `export` set the
+  # function's status to 0 — so callers that guard this call (the capi/kubeone
+  # drivers) were guarding a no-op, and a missing file "succeeded" with empty
+  # vars that sent the driver down the wrong branch.
+  if [[ ! -r "${cluster_yaml}" ]]; then
+    error "cannot read cluster spec: ${cluster_yaml:-<empty path>}"
+    return 1
+  fi
+
+  # || return on every read: errexit is suppressed in the driver call trees
+  # (libs/provision runs `driver::provision || rc=$?`), so a yq parse failure
+  # must be propagated explicitly or it degrades into empty vars + exit 0.
+  LOK8S_KUBEHZ_HOSTING=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}") || return 1
+  LOK8S_KUBEHZ_API_URL=$(yq -r '.spec.kubehz.apiUrl // ""' "${cluster_yaml}") || return 1
+
+  # Handle yq boolean false issue — yq treats "none" specially
+  local access
+  access=$(yq -r '.spec.kubehz.access' "${cluster_yaml}") || return 1
+  if [[ "${access}" == "null" || -z "${access}" ]]; then
+    LOK8S_KUBEHZ_ACCESS="none"
+  else
+    LOK8S_KUBEHZ_ACCESS="${access}"
+  fi
+
+  # Opt-in: also hand the platform your HCLOUD_TOKEN so the dashboard can drive
+  # provisioning (worker pools, SSH keys) on your account. Default false — the
+  # token is otherwise used only locally by lo and never sent. Only ever acted
+  # on when a KUBEHZ_TOKEN identifies the owning tenant (see register_cluster).
+  LOK8S_KUBEHZ_CONNECT_TOKEN=$(yq -r '.spec.kubehz.connectHcloudToken // false' "${cluster_yaml}") || return 1
+
+  # Which in-cluster agent owns the heartbeat. Defaults to the bash CronJob —
+  # the agent every existing cluster already runs, so an untouched spec keeps
+  # its current behaviour. `operator` selects the Go live agent instead; the
+  # two never beat together (see libs/kubehz/deploy).
+  # Same shape as `access` above: yq's `//` covers a MISSING key, but a key
+  # written with no value (`agent:`) yields "null", and an empty scalar yields
+  # "". Both mean "not chosen" and must land on the default — otherwise
+  # validate_config refuses a spec whose only sin is a blank line.
+  LOK8S_KUBEHZ_AGENT=$(yq -r '.spec.kubehz.agent // "cronjob"' "${cluster_yaml}") || return 1
+  if [[ "${LOK8S_KUBEHZ_AGENT}" == "null" || -z "${LOK8S_KUBEHZ_AGENT}" ]]; then
+    LOK8S_KUBEHZ_AGENT="cronjob"
+  fi
+
+  # Upgrade policy + maintenance window are declarative passthrough —
+  # consumed hosted-side by the platform API (its own payload validation) and,
+  # once upgrade execution ships, self-hosted-side by the in-cluster agent
+  # reading it locally. lo shape-checks
+  # only what a typo would silently break: the two enums and the exclusion
+  # dates (validate_config). Same null/empty tolerance as `agent` above.
+  # Absent = patch: automatic patch upgrades are the shipped default.
+  # `none` stays a valid, explicit opt-out (discouraged — see the docs).
+  LOK8S_KUBEHZ_UPGRADES_CHANNEL=$(yq -r '.spec.kubehz.upgrades.channel // "patch"' "${cluster_yaml}") || return 1
+  if [[ "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" == "null" || -z "${LOK8S_KUBEHZ_UPGRADES_CHANNEL}" ]]; then
+    LOK8S_KUBEHZ_UPGRADES_CHANNEL="patch"
+  fi
+  LOK8S_KUBEHZ_UPGRADES_DEFER=$(yq -r '.spec.kubehz.upgrades.defer // "window"' "${cluster_yaml}") || return 1
+  if [[ "${LOK8S_KUBEHZ_UPGRADES_DEFER}" == "null" || -z "${LOK8S_KUBEHZ_UPGRADES_DEFER}" ]]; then
+    LOK8S_KUBEHZ_UPGRADES_DEFER="window"
+  fi
+  # Maintenance-window freeze entries, one per line (empty when absent).
+  # `... // []` then splat: a SCALAR here (exclusions: "2026-01-01") would make
+  # the splat abort with yq's raw error — coerce non-arrays to a single-entry
+  # list so validate_config rejects the CONTENT with our message, not yq's.
+  LOK8S_KUBEHZ_MW_EXCLUSIONS=$(yq -r '(.spec.kubehz.maintenanceWindow.exclusions // []) | (select(type == "!!seq") // [.]) | .[]' "${cluster_yaml}") || return 1
+  [[ "${LOK8S_KUBEHZ_MW_EXCLUSIONS}" != "null" ]] || LOK8S_KUBEHZ_MW_EXCLUSIONS=""
+
+  export LOK8S_KUBEHZ_HOSTING LOK8S_KUBEHZ_ACCESS LOK8S_KUBEHZ_API_URL LOK8S_KUBEHZ_CONNECT_TOKEN
+  export LOK8S_KUBEHZ_AGENT
+  export LOK8S_KUBEHZ_UPGRADES_CHANNEL LOK8S_KUBEHZ_UPGRADES_DEFER LOK8S_KUBEHZ_MW_EXCLUSIONS
+}
+
+# ── Validation ───────────────────────────────────────────
+
+# Validate kubehz configuration values.
+# Must be called after kubehz::read_config.
+# Usage: kubehz::validate_config
+kubehz::validate_config() {
+  case "${LOK8S_KUBEHZ_HOSTING}" in
+    self|hosted|shared) ;;
+    *) error "invalid spec.kubehz.hosting: ${LOK8S_KUBEHZ_HOSTING}"; return 1 ;;
+  esac
+  case "${LOK8S_KUBEHZ_ACCESS}" in
+    none|registered|managed) ;;
+    *) error "invalid spec.kubehz.access: ${LOK8S_KUBEHZ_ACCESS}"; return 1 ;;
+  esac
+  # One value, so a spec can never ask for two heartbeat producers. This is the
+  # first of three interlocks; the other two live in libs/kubehz/deploy (apply
+  # order) and in the CronJob itself (KUBEHZ_HEARTBEAT_OWNER).
+  #
+  # Read through a default: validate_config is reachable without read_config
+  # (callers that set the LOK8S_KUBEHZ_* vars themselves), and an unset agent
+  # means "not chosen", not "invalid" — the same tolerance the shipped default
+  # gives an untouched spec.
+  local agent="${LOK8S_KUBEHZ_AGENT:-cronjob}"
+  case "${agent}" in
+    cronjob|operator) ;;
+    *) error "invalid spec.kubehz.agent: ${agent} (expected cronjob or operator)"; return 1 ;;
+  esac
+  # The upgrade policy's consumers validate semantics where they run (the
+  # platform API for hosted payloads; the in-cluster agent for self-hosted) —
+  # but a typo'd enum or a malformed freeze date should fail HERE, at the
+  # machine that wrote it. Same read-through defaults as `agent`: unset means
+  # "not chosen", never "invalid".
+  local channel="${LOK8S_KUBEHZ_UPGRADES_CHANNEL:-patch}"
+  case "${channel}" in
+    none|patch|minor) ;;
+    *) error "invalid spec.kubehz.upgrades.channel: ${channel} (expected none, patch or minor)"; return 1 ;;
+  esac
+  local defer="${LOK8S_KUBEHZ_UPGRADES_DEFER:-window}"
+  case "${defer}" in
+    window|immediate) ;;
+    *) error "invalid spec.kubehz.upgrades.defer: ${defer} (expected window or immediate)"; return 1 ;;
+  esac
+  # Shape only — a date or an inclusive from/to range. Whether the dates are
+  # real calendar days, ordered, or sane in length is the platform's call.
+  local exclusion date_re='[0-9]{4}-[0-9]{2}-[0-9]{2}'
+  while IFS= read -r exclusion; do
+    [[ -n "${exclusion}" ]] || continue
+    if ! [[ "${exclusion}" =~ ^${date_re}(/${date_re})?$ ]]; then
+      error "invalid spec.kubehz.maintenanceWindow.exclusions entry: ${exclusion} (expected YYYY-MM-DD or YYYY-MM-DD/YYYY-MM-DD)"
+      return 1
+    fi
+  done <<< "${LOK8S_KUBEHZ_MW_EXCLUSIONS:-}"
+  # There is no agent to choose when nothing reports. Refuse the pair up front
+  # rather than deploy an agent that access: none says must not exist.
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" && "${agent}" != "cronjob" ]]; then
+    error "spec.kubehz.agent: ${agent} needs spec.kubehz.access: registered or managed (access: none deploys no agent)"
+    return 1
+  fi
+  # A Space has no cluster of its own, so it has no agent to run in one.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && "${agent}" != "cronjob" ]]; then
+    error "spec.kubehz.agent: ${agent} is not valid with hosting: shared (a Space has no in-cluster agent)"
+    return 1
+  fi
+
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    error "spec.kubehz.apiUrl is required when hosting: hosted"; return 1
+  fi
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    error "spec.kubehz.apiUrl is required when hosting: shared"; return 1
+  fi
+  # A Space has no agent to enroll: `access: registered` on hosting: shared
+  # would later run an agent deregister against a space that never had one
+  # (provision::dispatch_destroy dispatches on access). Refuse it up front.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && "${LOK8S_KUBEHZ_ACCESS}" == "registered" ]]; then
+    error "spec.kubehz.access: registered is not valid with hosting: shared (a Space has no agent; use access: none)"
+    return 1
+  fi
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" != "none" && -z "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    error "spec.kubehz.apiUrl is required when access: ${LOK8S_KUBEHZ_ACCESS}"; return 1
+  fi
+  # Bearer tokens travel on this URL — never allow plaintext transport
+  if [[ -n "${LOK8S_KUBEHZ_API_URL}" ]]; then
+    http::require_https "${LOK8S_KUBEHZ_API_URL}" "spec.kubehz.apiUrl" || return 1
+  fi
+
+  # Per-kind hosting constraints
+  local kind
+  kind=$(domain::spec_driver "${LOK8S_SPEC_FILE}") || kind=""
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "hosted" ]]; then
+    case "${kind}" in
+      lo)
+        local has_runner
+        has_runner=$(yq -r '.spec.runner // ""' "${LOK8S_SPEC_FILE}")
+        if [[ -z "${has_runner}" ]]; then
+          error "hosting: hosted with kind: Lo requires spec.runner configuration"; return 1
+        fi ;;
+    esac
+  fi
+  # The hosting axis is one vocabulary, but shared is its own driver: a space
+  # has no infrastructure for the other kinds' machinery to manage, and those
+  # drivers have no notion of a space. Keep the pairing exact both ways.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && -n "${kind}" && "${kind}" != "kubehz" ]]; then
+    error "hosting: shared requires kind: Kubehz (the space driver); got kind: ${kind}"
+    return 1
+  fi
+  if [[ "${kind}" == "kubehz" && "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
+    error "kind: Kubehz requires spec.kubehz.hosting: shared (got: ${LOK8S_KUBEHZ_HOSTING})"
+    return 1
+  fi
+}
+
+# ── SSH fingerprint extraction ───────────────────────────
+
+# Extract an SSH fingerprint (or equivalent identifier) for cluster registration.
+# The method varies by cluster kind.
+# Usage: kubehz::get_ssh_fingerprint <cluster_yaml>
+# Outputs: fingerprint string to stdout (MD5 form, e.g. "MD5:aa:bb:...:ff")
+#
+# NOTE: kubehz-core matches the fingerprint against the SSH keys in the user's
+# Hetzner Cloud account, and Hetzner exposes MD5 fingerprints — so we MUST emit
+# MD5 (`-E md5`), not SHA256. The kubehz API normalizes away the "MD5:" prefix.
+kubehz::get_ssh_fingerprint() {
+  local cluster_yaml="${1}"
+  local kind
+  kind=$(domain::spec_driver "${cluster_yaml}") || kind=""
+
+  case "${kind}" in
+    kubeone)
+      # Read SSH public key from provider output access[], fall back to spec
+      local key_file=""
+      if [[ -n "${PROVIDER_CONFIG_FILE:-}" ]] && declare -F provider::output &>/dev/null; then
+        key_file=$(provider::output "${PROVIDER_CONFIG_FILE}" 2>/dev/null | jq -r '.access[0].publicKey // ""')
+      fi
+      [[ -n "${key_file}" ]] || key_file=$(yq -r '.spec.hcloud.sshPublicKeyFile // "~/.ssh/id_ed25519.pub"' "${cluster_yaml}")
+      key_file="${key_file/#\~/${HOME}}"
+      ssh-keygen -lf "${key_file}" -E md5 | awk '{print $2}'
+      ;;
+    capi)
+      local key_name
+      key_name=$(yq -r '.spec.hcloud.sshKeyName // ""' "${cluster_yaml}")
+      if [[ -n "${key_name}" ]]; then
+        local pub_key
+        pub_key=$(hcloud ssh-key describe "${key_name}" -o json | jq -r '.public_key')
+        echo "${pub_key}" | ssh-keygen -lf /dev/stdin -E md5 2>/dev/null | awk '{print $2}'
+      fi
+      ;;
+    lo)
+      # Lo clusters don't have SSH keys — use cluster domain as identifier
+      local cluster_domain
+      cluster_domain=$(yq -r '.spec.cluster.domain // ""' "${cluster_yaml}")
+      echo "lo:${cluster_domain}"
+      ;;
+    *)
+      warn "Cannot extract SSH fingerprint for kind=${kind}"
+      return 1
+      ;;
+  esac
+}
+
+# ── Claim-key registration (API-minted) ─────────────────
+#
+# PRIMARY registration for hcloud-backed clusters: the kubehz API mints the
+# claim key SERVER-SIDE ({domain, claimKey: true}) — it stores only the MD5
+# fingerprint (equality-claimable) and discards the private key; we upload the
+# returned PUBLIC key into the owner's Hetzner Cloud account under
+# kubehz-claim-<domain>. Two-way verification: kubehz knows the fingerprint it
+# minted; only someone who can read the hcloud account can present it. The
+# user then claims with the fingerprint ALONE (dashboard, or the API with a
+# clusters:write token) — no cluster access, no CLI, no local openssh.
+#
+# Re-runs ROTATE server-side (same pending row, fresh fingerprint), so we
+# replace the hcloud key by name on every run. Fail-soft: any failure returns
+# 1 and the caller falls back to the legacy fingerprint announce.
+kubehz::ensure_claim_key() {
+  local domain="${1}" api_url="${2}"
+  local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
+  # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
+  http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
+
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg d "${domain}" '{domain: $d, claimKey: true}')") || return 1
+
+  local cluster_id public_key fingerprint key_name
+  cluster_id=$(jq -r '.id // empty' <<<"${response}")
+  public_key=$(jq -r '.claimKey.publicKey // empty' <<<"${response}")
+  fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
+  key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
+  [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
+
+  # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
+  # kubehz-claim key must not linger in the account.
+  local existing_id
+  existing_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
+  if [[ -n "${existing_id}" ]]; then
+    curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+      "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
+  fi
+  curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+    -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}')" \
+    >/dev/null || return 1
+
+  debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
+  echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
+  echo "kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:"
+  echo "  curl -X POST ${api_url}/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\"
+  echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${fingerprint}\"}'"
+  echo "  fingerprint: ${fingerprint}   (also visible in Hetzner Console -> Security -> SSH keys)"
+}
+
+# ── Direct claim (authenticated) ─────────────────────────
+
+# Register a cluster ATTRIBUTED DIRECTLY to the caller's tenant, using a
+# KUBEHZ_TOKEN (a clusters:write API token minted in the dashboard's
+# Access -> API Tokens). The API attributes the row to the token's tenant at
+# register time — no claim key, no fingerprint round-trip, no human claim step.
+#
+# When spec.kubehz.connectHcloudToken is true AND HCLOUD_TOKEN is present, it
+# then hands the platform the hcloud token (encrypted at rest, validated against
+# the cluster) so the dashboard can drive provisioning. The token is sent ONLY
+# on the HTTPS API URL and only for THIS opt-in — never printed, never logged.
+#
+# Fail-soft: any failure returns 1 and the caller falls back to the anonymous
+# flow. Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url>
+kubehz::direct_claim() {
+  local domain="${1}" cluster_yaml="${2}" api_url="${3}"
+
+  local fingerprint
+  fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
+    warn "Could not extract SSH fingerprint for ${domain}"
+    return 1
+  }
+
+  # Direct-attributed register: the bearer proves the tenant; the row lands owned.
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg d "${domain}" --arg fp "${fingerprint}" '{domain: $d, fingerprint: $fp}')") || return 1
+
+  local cluster_id claimed
+  cluster_id=$(jq -r '.id // empty' <<<"${response}")
+  claimed=$(jq -r '.claimed // false' <<<"${response}")
+  [[ -n "${cluster_id}" ]] || return 1
+
+  if [[ "${claimed}" != "true" ]]; then
+    warn "kubehz register did not attribute ${domain} to your tenant (is KUBEHZ_TOKEN a clusters:write token?)"
+    return 1
+  fi
+  echo "kubehz: cluster '${domain}' registered and claimed to your account (${cluster_id})."
+
+  # Optionally connect the hcloud token for dashboard-driven provisioning.
+  if [[ "${LOK8S_KUBEHZ_CONNECT_TOKEN:-false}" == "true" ]]; then
+    if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
+      warn "spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect."
+      return 0
+    fi
+    local cred
+    cred=$(curl -fsSL -X POST "${api_url}/api/credentials" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$(jq -n --arg v "${HCLOUD_TOKEN}" --arg c "${cluster_id}" \
+        '{type: "hcloud_token", value: $v, validate: true, clusterId: $c}')") || {
+      warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
+      return 0
+    }
+    # writable:false → stored for pricing but provisioning locked; say so plainly.
+    if [[ "$(jq -r '.data.validation.writable // "unknown"' <<<"${cred}")" == "false" ]]; then
+      echo "kubehz: hcloud token connected, but it is READ-ONLY — dashboard provisioning stays locked. Use a Read & Write token for worker pools."
+    else
+      echo "kubehz: hcloud token connected — dashboard provisioning is enabled."
+    fi
+  fi
+}
+
+# ── Registration ─────────────────────────────────────────
+
+# Register a self-hosted cluster with the kubehz API.
+#
+# VESTIGIAL for the self-hosted agent path — kept, but no longer the primary
+# mechanism. A self-hosted cluster now proves ownership with the IN-CLUSTER
+# agent-secret: the heartbeat agent (manifests/agent) self-generates the
+# agent-token A + claim-code C, POSTs {domain, sha256(A), sha256(C)} to
+# /api/clusters/agent-register, and the user claims by pasting C — via
+# `lo kubehz claim-code` — into the dashboard. That path is provider-agnostic
+# (no SSH fingerprint, no hcloud token). This function is retained as a
+# best-effort PRE-AGENT announce (it makes the cluster visible before the agent
+# is deployed) and as the lo-side half of the fingerprint-equality anchor the
+# API keeps for hosted-CP auto-claim / manual fallback; it never itself proves
+# ownership.
+#
+# It announces a PENDING cluster (POST /api/clusters/register) with the SSH-key
+# MD5 fingerprint and needs NO bearer/token. Called during provision when
+# access != none. Non-fatal: warns on failure, returns 0 so provisioning
+# continues without kubehz integration.
+# Usage: kubehz::register_cluster <domain> <cluster_yaml>
+kubehz::register_cluster() {
+  local domain="${1}" cluster_yaml="${2}"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+
+  # Defense in depth: the fingerprint travels on this URL; never over plain HTTP.
+  # validate_config already checks this, but register_cluster is also reachable
+  # standalone (lo kubehz register), so re-assert before any network call.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 0
+
+  # The 'managed' access tier is live but subscription-gated on the PLATFORM
+  # side (Supporter+): registration itself is identical to `registered`; the
+  # management features unlock in the dashboard once the cluster is claimed by
+  # an entitled tenant. lo cannot check the tenant tier here, so just say
+  # where the gate lives.
+  if [[ "${LOK8S_KUBEHZ_ACCESS:-}" == "managed" ]]; then
+    echo "kubehz: access 'managed' — management features activate in the dashboard once the cluster is claimed by a Supporter+ tenant."
+  fi
+
+  # PRIMARY (authenticated): a KUBEHZ_TOKEN (a clusters:write API token from the
+  # dashboard's Access → API Tokens) proves the owning tenant, so the cluster is
+  # claimed DIRECTLY at register time — no claim-key mint, no fingerprint hop.
+  # Optionally hands the platform the HCLOUD_TOKEN too (spec.kubehz.
+  # connectHcloudToken) so the dashboard can drive provisioning.
+  if [[ -n "${KUBEHZ_TOKEN:-}" ]]; then
+    kubehz::direct_claim "${domain}" "${cluster_yaml}" "${api_url}" && return 0
+    warn "kubehz direct claim failed for ${domain}; falling back to the anonymous registration flow"
+  fi
+
+  # SECONDARY (anonymous, hcloud-backed): API-minted claim key — the token is in
+  # env during provisioning; a human claims fingerprint-solo in the dashboard.
+  # Falls through to the legacy server-key fingerprint announce when unavailable.
+  if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+    kubehz::ensure_claim_key "${domain}" "${api_url}" && return 0
+    warn "kubehz claim-key registration failed for ${domain}; falling back to the legacy fingerprint announce"
+  fi
+
+  local fingerprint
+  fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
+    warn "Could not extract SSH fingerprint for ${domain}, skipping registration"
+    return 0
+  }
+
+  local payload
+  payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" '{domain: $d, fingerprint: $fp}')
+
+  local response
+  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    -H "Content-Type: application/json" \
+    -d "${payload}") || {
+    warn "kubehz API request failed for ${domain}, cluster will continue without kubehz integration"
+    return 0
+  }
+
+  local cluster_id
+  cluster_id=$(echo "${response}" | jq -r '.id // empty')
+  if [[ -z "${cluster_id}" ]]; then
+    warn "kubehz registration returned no cluster id, cluster will continue without kubehz integration"
+    return 0
+  fi
+
+  debug "Cluster registered with kubehz (pending claim): ${cluster_id}"
+  # Surface the claim handshake. The fingerprint is public (not a secret), so it
+  # is safe to print; the Hetzner token is NEVER printed or sent here.
+  echo "kubehz: cluster '${domain}' registered (pending). Claim it in the dashboard:"
+  echo "  fingerprint: ${fingerprint}"
+  # Point at the primary, provider-agnostic path: once the in-cluster heartbeat
+  # agent is deployed it self-registers and mints a one-time claim code.
+  echo "kubehz: preferred — deploy the heartbeat agent, then claim with:"
+  echo "  lo kubehz claim-code   # prints the code to paste at the dashboard /claim page"
+}
+
+# ── Deregistration ───────────────────────────────────────
+
+# Deregister a cluster from the kubehz API: resolve the platform id for the
+# domain, DELETE /api/clusters/<id>, then retire the hcloud claim key.
+# Called during destroy when access != none, and standalone via
+# `lo kubehz deregister`. Each outcome is reported distinctly — removed /
+# not registered / refused — and the function returns 1 whenever REMOVAL
+# FAILED (lookup error, refused delete). An already-absent row is
+# idempotent SUCCESS: the desired end state holds. (The old form DELETEd
+# /api/clusters?domain=… — a route+method the api does not serve — and
+# `|| true` swallowed the 404, so the row survived every "deregister".)
+# Usage: kubehz::deregister_cluster <domain> <cluster_yaml>
+kubehz::deregister_cluster() {
+  local domain="${1}" cluster_yaml="${2}"
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  local rc=0
+
+  # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
+  # validate_config (reachable standalone via `lo kubehz deregister`), so guard
+  # each call by its own URL — mirrors register_cluster's standalone re-assert.
+  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+    rc=1
+  else
+    local cluster_id="" resolve_rc=0
+    cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
+    if (( resolve_rc == 2 )); then
+      echo "kubehz: no cluster is registered for ${domain} — nothing to remove on the platform."
+    elif (( resolve_rc != 0 )); then
+      error "kubehz: cannot read the cluster registry at ${api_url} — the registration for ${domain} was not removed. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
+      rc=1
+    else
+      # Status + body captured (the re-enroll idiom): a refused delete must
+      # surface with the api's own message, not vanish into `curl -f`.
+      local response http_code
+      if ! response=$(curl -sSL -w $'\n%{http_code}' -X DELETE \
+        "${api_url}/api/clusters/${cluster_id}" \
+        -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}"); then
+        error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
+        rc=1
+      else
+        http_code="${response##*$'\n'}"
+        if [[ "${http_code}" == 2* ]]; then
+          echo "kubehz: cluster ${domain} (${cluster_id}) removed from the platform."
+        else
+          local msg
+          msg=$(jq -r '.data.message // .message // empty' <<<"${response%$'\n'*}" 2>/dev/null) || msg=""
+          error "kubehz: delete refused for ${domain} (${cluster_id}) — HTTP ${http_code}${msg:+: ${msg}}. The registration was not removed."
+          rc=1
+        fi
+      fi
+    fi
+  fi
+
+  # Best-effort: retire the kubehz claim key from the hcloud account. The name
+  # mirrors the API's minted convention (kubehz-claim-<domain>, see header) —
+  # deregister has no register response to read .claimKey.name from.
+  if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
+    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE"; then
+      key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+        "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
+      [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+        "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  return "${rc}"
+}
+
+# ── Subcommands ──────────────────────────────────────────
+
+# Manual cluster registration via `lo kubehz register`.
+# Reads config from active domain, validates, and calls the API.
+kubehz::register() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Register cluster with kubehz" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+  kubehz::validate_config || return 1
+
+  # A space IS its registration — creating it (lo provision) is the whole act.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    error "hosting: shared has nothing to register separately — 'lo provision' creates the space"
+    return 1
+  fi
+
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    error "spec.kubehz.access is 'none' — nothing to register"
+    return 1
+  fi
+
+  # Resolve spec kind for fingerprint extraction
+  provision::resolve_spec "${domain}" 2>/dev/null || true
+
+  kubehz::register_cluster "${domain}" "${cluster_yaml}"
+}
+
+# Manual cluster deregistration via `lo kubehz deregister`.
+kubehz::deregister() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Remove cluster from kubehz" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  # Space-aware: deregistering a shared-hosting domain removes the SPACE
+  # (namespaces + node registrations) — same act as lo destroy.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    kubehz::destroy_shared "${domain}" "${cluster_yaml}"
+    return $?
+  fi
+
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    error "spec.kubehz.access is 'none' — nothing to deregister"
+    return 1
+  fi
+
+  # Outcome reporting (removed / not registered / refused) lives inside
+  # deregister_cluster — no unconditional success line here: the old one
+  # printed "deregistered" over a swallowed 404.
+  kubehz::deregister_cluster "${domain}" "${cluster_yaml}"
+}
+
+# Check kubehz registration status via `lo kubehz status`.
+kubehz::status() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Check kubehz registration status" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  echo "Domain:  ${domain}"
+  echo "Hosting: ${LOK8S_KUBEHZ_HOSTING}"
+  echo "Access:  ${LOK8S_KUBEHZ_ACCESS}"
+  # Which agent the SPEC says owns the heartbeat. `lo kubehz deploy` is what
+  # makes the cluster match it — this line is the intent, not a live probe.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" && "${LOK8S_KUBEHZ_ACCESS}" != "none" ]]; then
+    case "${LOK8S_KUBEHZ_AGENT:-cronjob}" in
+      operator) echo "Agent:   operator (deployment/kubehz-live-agent — live view + desired state)" ;;
+      *)        echo "Agent:   cronjob (cronjob/kubehz-heartbeat — every 5 minutes)" ;;
+    esac
+  fi
+  echo "API URL: ${LOK8S_KUBEHZ_API_URL:-<not set>}"
+
+  # Space-aware: a shared-hosting domain's status IS its space's status.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    kubehz::space_status "${domain}" "${cluster_yaml}"
+    return $?
+  fi
+
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    echo "Status:  not registered (access: none)"
+    return 0
+  fi
+
+  # Query the tenant registry for the live row. The list endpoint IGNORES
+  # ?domain= and answers the pagination envelope {ok, data: […]} — the old
+  # code read `.status` off that ENVELOPE, so this line printed
+  # "Status: unknown" for every registered cluster. Filter the rows
+  # client-side (the resolve_cluster_id / space_lookup idiom) and read the
+  # ROW's fields (ClusterSchema: status, lastHeartbeat, connected).
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  local raw http_code response
+  raw=$(curl -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || {
+    echo "Status:  unknown (API unreachable: ${api_url})"
+    return 0
+  }
+  http_code="${raw##*$'\n'}"
+  response="${raw%$'\n'*}"
+  if [[ "${http_code}" != 2* ]]; then
+    echo "Status:  unknown (HTTP ${http_code} — set KUBEHZ_TOKEN to a clusters:write token of the owning tenant)"
+    return 0
+  fi
+
+  # Oldest-first, same as resolve_cluster_id: the server binds agent
+  # identity to the OLDEST active row for a domain.
+  local row
+  row=$(jq -c --arg d "${domain}" \
+    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+      | sort_by(.createdAt) | first) // empty' <<<"${response}" 2>/dev/null) || row=""
+  if [[ -z "${row}" ]]; then
+    echo "Status:  not registered (no cluster for ${domain} in this tenant's registry)"
+    return 0
+  fi
+
+  local status_val cluster_id last_beat connected
+  status_val=$(jq -r '.status // "unknown"' <<<"${row}")
+  cluster_id=$(jq -r '.id // "-"' <<<"${row}")
+  last_beat=$(jq -r '.lastHeartbeat // empty' <<<"${row}")
+  connected=$(jq -r '.connected // empty' <<<"${row}")
+  echo "Status:  ${status_val} (id: ${cluster_id})"
+  if [[ -n "${last_beat}" ]]; then
+    case "${connected}" in
+      true)  echo "Beat:    ${last_beat} (connected)" ;;
+      false) echo "Beat:    ${last_beat} (stale — outside the reporting window)" ;;
+      *)     echo "Beat:    ${last_beat}" ;;
+    esac
+  else
+    echo "Beat:    none yet — deploy the heartbeat agent (see docs/guide/kubehz.md)"
+  fi
+}
+
+# Mint a node join ticket for the active domain's space via `lo kubehz join`.
+# The ticket is single-node, single-use and short-lived; the plaintext is
+# printed exactly once and never stored.
+kubehz::join() {
+  local domain="${domain:-${DOMAIN_NAME:-}}" node
+  local -a args=(
+    'node'              'Node name the ticket may enroll (a DNS label)'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Mint a node join ticket" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+  [[ -n "${node}" ]] || { error "Node name required: lo kubehz join <node-name>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  # || return: same guard as the driver leg — an unread config must not
+  # flow into the hosting check as an empty string ("this domain is
+  # hosting: ").
+  kubehz::read_config "${cluster_yaml}" || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" != "shared" ]]; then
+    error "join tickets are for hosting: shared (this domain is hosting: ${LOK8S_KUBEHZ_HOSTING})"
+    return 1
+  fi
+  kubehz::validate_config || return 1
+  [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
+    error "KUBEHZ_TOKEN is required to mint a join ticket"
+    return 1
+  }
+
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
+  kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
+  [[ -n "${KUBEHZ_SPACE_ROW}" ]] || {
+    error "No space '${LOK8S_SPACE_SLUG}' found — run 'lo provision' first"
+    return 1
+  }
+  local space_id
+  space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
+  [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to mint a ticket"; return 1; }
+  kubehz::space_mint_join "${space_id}" "${node}"
+}
+
+# Show the platform's stored assessment + handover feasibility via
+# `lo kubehz assess` — GET /api/clusters/<id>/assessment (handover contract
+# §1), authenticated with the SAME tenant-token source `lo kubehz status`
+# uses (KUBEHZ_TOKEN on spec.kubehz.apiUrl). Read-only: the probe itself runs
+# in-cluster (the heartbeat agent) at most once per 24h — request a refresh
+# in the dashboard when the shown assessment is stale.
+kubehz::assess() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Show the platform assessment + handover feasibility" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  # Space-aware: assessment measures a cluster's own control plane for
+  # handover feasibility — a space has no control plane to assess.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    echo "Assessment does not apply to hosting: shared — a space has no control"
+    echo "plane of its own. Use 'lo kubehz status' for the space + node view."
+    return 0
+  fi
+
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
+  # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+
+  local cluster_id
+  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
+    error "kubehz: no cluster found for ${domain} — is it registered + claimed, and is KUBEHZ_TOKEN set?"
+    return 1
+  }
+
+  local response
+  response=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}/assessment" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+    error "kubehz: could not fetch the assessment for ${domain} (${cluster_id})"
+    return 1
+  }
+  kubehz::render_assessment "${domain}" "${response}"
+}
+
+# Pretty-print {assessment, assessedAt, feasibility}: one aligned line per
+# probe with kapply-style markers — the `lo registry status` output idiom.
+kubehz::render_assessment() {
+  local domain="${1}" response="${2}"
+  local c_ok='' c_warn='' c_dim='' c_off=''
+  if [[ -t 1 ]]; then
+    c_ok=$'\033[32m' c_warn=$'\033[33m' c_dim=$'\033[2m' c_off=$'\033[0m'
+  fi
+
+  local body
+  body=$(jq -c '.data // .' <<<"${response}" 2>/dev/null) || {
+    error "kubehz: unexpected assessment response (not JSON)"
+    return 1
+  }
+  if ! jq -e '.assessment != null' <<<"${body}" >/dev/null 2>&1; then
+    echo "No assessment recorded for ${domain} yet."
+    echo "The in-cluster agent sends one at most every 24h — request a refresh in the dashboard, or wait for the next heartbeat."
+    return 0
+  fi
+
+  local a assessed collected
+  a=$(jq -c '.assessment' <<<"${body}")
+  assessed=$(jq -r '.assessedAt // empty' <<<"${body}")
+  collected=$(jq -r '.collectedAt // empty' <<<"${a}")
+  echo "kubehz assessment — ${domain}${collected:+ · collected ${collected}}${assessed:+ · stored ${assessed}}"
+  echo
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" kubernetes \
+    "$(jq -r '.k8sVersion // "unknown"' <<<"${a}")"
+
+  # datastore — the restore/graft hinge: kine or unreachable etcd → recreation.
+  local datastore reachable marker note
+  datastore=$(jq -r '.datastore // "unknown"' <<<"${a}")
+  reachable=$(jq -r '.etcdReachable // false' <<<"${a}")
+  if [[ "${datastore}" == "etcd" && "${reachable}" == "true" ]]; then
+    marker="${c_ok}✓${c_off}" note="etcd · reachable"
+  elif [[ "${datastore}" == "etcd" ]]; then
+    marker="${c_warn}⚠${c_off}" note="etcd · NOT reachable"
+  else
+    marker="${c_warn}⚠${c_off}" note="${datastore}"
+  fi
+  printf '%b %-14s %s\n' "${marker}" datastore "${note}"
+
+  if [[ "$(jq -r '.capiManaged // false' <<<"${a}")" == "true" ]]; then
+    printf '%b %-14s %s\n' "${c_warn}⚠${c_off}" capi \
+      "Cluster API CRDs present — pause the CAPI controllers before handover"
+  else
+    printf '%b %-14s %s\n' "${c_ok}✓${c_off}" capi "not CAPI-managed"
+  fi
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" cni "$(jq -r '.cni // "unknown"' <<<"${a}")"
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" networks \
+    "pods $(jq -r '.podCidr // "?"' <<<"${a}") · services $(jq -r '.serviceCidr // "?"' <<<"${a}")"
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" storage \
+    "$(jq -r '.storageClasses | length' <<<"${a}") classes · $(jq -r '.pvSummary.count // 0' <<<"${a}") PVs · $(jq -r '.pvSummary.totalGi // 0' <<<"${a}")Gi"
+  # Per-provisioner detail (dimmed) — this drives the data-move plan.
+  local prov cnt gi
+  while IFS=$'\t' read -r prov cnt gi; do
+    [[ -n "${prov}" ]] || continue
+    printf '      %b%s — %s PVs · %sGi%b\n' "${c_dim}" "${prov}" "${cnt}" "${gi}" "${c_off}"
+  done < <(jq -r '.pvSummary.byProvisioner // {} | to_entries[] | "\(.key)\t\(.value.count)\t\(.value.totalGi)"' <<<"${a}")
+
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" loadbalancers \
+    "$(jq -r '.loadBalancers // 0' <<<"${a}") LoadBalancer service(s)"
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" webhooks \
+    "$(jq -r '.webhooks.validating // 0' <<<"${a}") validating · $(jq -r '.webhooks.mutating // 0' <<<"${a}") mutating"
+  printf '%b %-14s %s\n' "${c_ok}✓${c_off}" nodes \
+    "$(jq -r '.cpUsage.nodes // 0' <<<"${a}") total · $(jq -r '.cpUsage.cpNodes // 0' <<<"${a}") control-plane"
+
+  local path line
+  path=$(jq -r '.feasibility.path // empty' <<<"${body}")
+  if [[ -n "${path}" ]]; then
+    echo
+    echo "Feasibility: ${path}"
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      printf '  %b·%b %s\n' "${c_dim}" "${c_off}" "${line}"
+    done < <(jq -r '.feasibility.reasons // [] | .[]' <<<"${body}")
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      printf '  %b⚠%b %s\n' "${c_warn}" "${c_off}" "${line}"
+    done < <(jq -r '.feasibility.warnings // [] | .[]' <<<"${body}")
+  fi
+}
+
+# Print the one-time claim code (C) for the dashboard /claim page, via
+# `lo kubehz claim-code`. Reads it from the in-cluster kubehz-agent Secret using
+# the ACTIVE kubeconfig (this runs against the user's cluster, not the spec).
+#
+# SECURITY: the agent-token (A) is the live heartbeat credential and is NEVER
+# printed by any command — this subcommand only ever reads `.data.claim-code`
+# (C), the disposable one-time proof that is MEANT to transit to the dashboard.
+kubehz::claim-code() {
+  # Reads the LIVE cluster via the ambient kubeconfig (exported by main from
+  # the active domain BEFORE dispatch). The global --domain flag inherited via
+  # the args tail still parses here but does NOT re-point the kubeconfig —
+  # switch clusters with `lo use <domain>` first.
+  local -a args=("${args[@]:-}")
+  :args "Print the one-time claim code" "${@}"
+  local ns="kubehz-system" secret="kubehz-agent"
+
+  if ! kubectl -n "${ns}" get secret "${secret}" >/dev/null 2>&1; then
+    error "secret/${secret} not found in ${ns}. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster."
+    return 1
+  fi
+
+  local code
+  code=$(kubectl -n "${ns}" get secret "${secret}" \
+    -o jsonpath='{.data.claim-code}' 2>/dev/null | base64 -d)
+
+  if [[ -z "${code}" ]]; then
+    error "secret/${secret} has no claim-code yet — the agent mints it on its first run. Wait for one heartbeat, then retry."
+    return 1
+  fi
+
+  # C on stdout (pipe-friendly: `lo kubehz claim-code | pbcopy`); the human hint
+  # goes to stderr so a pipe captures only the code. A is never emitted here.
+  echo "${code}"
+  {
+    echo
+    echo "Paste this one-time claim code at the dashboard /claim page while signed in"
+    echo "to attribute this cluster to your account. It is single-use — do not share it."
+  } >&2
+}
+
+# ── Cluster-id resolution (registry lookup) ──────────────
+
+# Resolve the platform cluster id (cl-<uuid8>) for a domain from the tenant's
+# registry. The list endpoint IGNORES ?domain=, so filter CLIENT-SIDE —
+# .data[0] would silently pick the tenant's newest cluster on multi-cluster
+# tenants. Requires KUBEHZ_TOKEN (the id is only visible to the owning
+# tenant). Prints the id; on failure prints nothing and returns 1 (the list
+# request failed) or 2 (the list answered, but carries no row for the
+# domain). Callers that only need "no id" treat any non-zero rc as failure;
+# deregister/destroy branch on the distinction so a lookup FAILURE is never
+# reported as "not registered".
+# Usage: kubehz::resolve_cluster_id <domain> <api_url>
+kubehz::resolve_cluster_id() {
+  local domain="${1}" api_url="${2}" response cluster_id
+  response=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || return 1
+  # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
+  # is served newest-first, but the server binds agent identity (heartbeat,
+  # desired) to the OLDEST active row for a domain — picking the newest armed
+  # the WRONG cluster when a duplicate registration existed (review r1
+  # medium). Oldest-first matches the server's binding.
+  # `.data?` (not `.data // .`): `//` does not rescue a jq ERROR, and `.data`
+  # on a bare-list body aborts the whole program before the alternative runs
+  # (the trap the old hosted-destroy lookup documented). `?` suppresses it.
+  cluster_id=$(jq -r --arg d "${domain}" \
+    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+      | sort_by(.createdAt) | first | .id) // empty' <<<"${response}" 2>/dev/null) || return 1
+  # A >500-cluster tenant pages past the cap; a truncated list must not read
+  # as "not registered" silently.
+  local total
+  total=$(jq -r '.meta.pagination.total // 0' <<<"${response}" 2>/dev/null) || total=0
+  if [[ -z "${cluster_id}" ]] && (( total > 500 )); then
+    warn "kubehz: tenant has ${total} clusters (first 500 checked) — the domain may sit past the page cap"
+  fi
+  [[ -n "${cluster_id}" ]] || return 2
+  echo "${cluster_id}"
+}
+
+# ── Mode-3 claim nonce (challenge-response) ──────────────
+
+# Place a dashboard-minted claim-challenge nonce where the heartbeat agent can
+# echo it, via `lo kubehz claim --nonce <value>`. Mode 3 of the claim flow:
+# the signed-in user mints the nonce (POST /api/claims/challenge), places it
+# here, and the agent echoes it inside its next AUTHENTICATED heartbeat —
+# proving account (the mint) AND cluster access (the bearer beat) in one round
+# trip. On success the heartbeat response carries the additive `claim` key and
+# the agent clears the nonce; a wrong/expired nonce produces no signal (the
+# beat never fails because of it).
+#
+# The nonce persists as annotations on the kubehz-agent-config ConfigMap (the
+# agent's established marker surface): kubehz.cloud/claim-nonce + the
+# …-placed epoch stamp, written in ONE annotate call so the agent never reads
+# a half-written pair. The write runs with the OPERATOR's ambient kubeconfig
+# (exported by main from the active domain — switch clusters with
+# `lo use <domain>` first); the agent's own RBAC stays untouched — its marker
+# Role already grants get/patch on this one ConfigMap, which is exactly what
+# the CronJob needs to read and later clear the nonce.
+#
+# SECURITY: the nonce is a claim ticket — this command never prints it, and no
+# error message may echo it; only its presence/shape is reported.
+kubehz::claim() {
+  local nonce
+  local -a args=(
+    'nonce|n:!'  'Claim-challenge nonce minted in the dashboard (khzn_…)'
+    "${args[@]:-}"
+  )
+  :args "Place a claim-challenge nonce for the heartbeat agent" "${@}"
+
+  # Shape check BEFORE any cluster call: the api mints khzn_ + 43 base64url
+  # chars and its heartbeat schema bounds the whole value at 20..200 chars —
+  # reject anything outside that envelope, without echoing the value.
+  if [[ ! "${nonce}" =~ ^khzn_[A-Za-z0-9_-]{15,195}$ ]]; then
+    error "invalid claim nonce: expected a dashboard-minted khzn_… value (20-200 chars); nothing was placed"
+    return 1
+  fi
+
+  local ns="kubehz-system" cm="kubehz-agent-config"
+  if ! kubectl -n "${ns}" get configmap "${cm}" >/dev/null 2>&1; then
+    error "configmap/${cm} not found in ${ns}. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster."
+    return 1
+  fi
+
+  # One call, both annotations: the value and its placement stamp. The agent
+  # clears a stampless nonce as unsourced, and expires a stamped one after the
+  # api's challenge TTL (15 minutes) so a dead nonce never echoes forever.
+  kubectl -n "${ns}" annotate --overwrite configmap "${cm}" \
+    "kubehz.cloud/claim-nonce=${nonce}" \
+    "kubehz.cloud/claim-nonce-placed=$(date -u +%s)" >/dev/null || {
+    error "could not annotate configmap/${cm} — check your kubeconfig permissions"
+    return 1
+  }
+
+  echo "kubehz: claim nonce placed for the agent."
+  echo "The next heartbeat (within 5 minutes) echoes it to the platform; on success the"
+  echo "dashboard shows the cluster claimed and the agent clears the nonce. The challenge"
+  echo "expires 15 minutes after minting — mint and place a fresh one if it lapses."
+}
+
+# ── Agent-token re-enrollment (agent-identity contract R2) ─
+
+# Re-enroll a REGENERATED in-cluster agent token with the platform via
+# `lo kubehz re-enroll`. The recovery for a real incident class: the
+# kubehz-system namespace (and with it Secret kubehz-agent) is lost, the
+# agent's create-if-absent bootstrap mints a FRESH token — whose beats then
+# fail the platform's hash ratchet, which still expects the old hash. This
+# command reads the CURRENT in-cluster token, hashes it (sha256, lowercase
+# hex) and registers the hash via POST /api/clusters/{id}/agent-token,
+# authenticated with the USER's platform bearer (KUBEHZ_TOKEN — the same
+# clusters:write credential `lo kubehz register` uses; the tenant must own
+# the cluster). The server revokes the prior token and arms the new one;
+# heartbeats resume on the agent's next tick.
+#
+# Deliberately an OPERATOR action from OUTSIDE the cluster: the agent's own
+# RBAC has no update/patch on the Secret (the never-rotate invariant) and the
+# agent cannot re-enroll itself — exactly why the authed route exists. The
+# token plaintext never leaves this machine and is never printed; only its
+# hash is sent, HTTPS-only.
+kubehz::re-enroll() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local -a args=(
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  :args "Re-enroll the in-cluster agent token with kubehz" "${@}"
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" ]]; then
+    error "hosting: shared has no heartbeat agent to re-enroll (a Space has no agent)"
+    return 1
+  fi
+  if [[ "${LOK8S_KUBEHZ_ACCESS}" == "none" ]]; then
+    error "spec.kubehz.access is 'none' — no agent identity to re-enroll"
+    return 1
+  fi
+
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
+  # KUBEHZ_TOKEN + the token hash travel on this URL — never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
+    error "KUBEHZ_TOKEN is required to re-enroll (a clusters:write API token from the dashboard's Access -> API Tokens)"
+    return 1
+  }
+
+  # The CURRENT in-cluster token — whatever the agent's bootstrap minted —
+  # read via the ambient kubeconfig (this runs against the user's cluster;
+  # switch with `lo use <domain>` first). Never printed.
+  local agent_token
+  agent_token=$(kubectl -n kubehz-system get secret kubehz-agent \
+    -o jsonpath='{.data.agent-token}' 2>/dev/null | base64 -d) || agent_token=""
+  if [[ -z "${agent_token}" ]]; then
+    error "secret/kubehz-agent has no agent-token in kubehz-system — deploy the heartbeat agent and wait one tick (it mints the token on its first run)"
+    return 1
+  fi
+
+  # sha256, lowercase hex — the exact verifier shape the route stores. The
+  # openssl fallback mirrors the agent's own sha256_hex helper.
+  local token_hash
+  if command -v sha256sum >/dev/null 2>&1; then
+    token_hash=$(printf %s "${agent_token}" | sha256sum | cut -d' ' -f1) || token_hash=""
+  else
+    token_hash=$(printf %s "${agent_token}" | openssl dgst -sha256 | awk '{print $NF}') || token_hash=""
+  fi
+  agent_token=""
+  if [[ ! "${token_hash}" =~ ^[0-9a-f]{64}$ ]]; then
+    error "could not hash the agent token (need sha256sum or openssl)"
+    return 1
+  fi
+
+  # The agent-token route takes the canonical cl-<uuid8> id only (unlike the
+  # heartbeat, which also accepts the domain) — resolve it from the registry
+  # the way `lo kubehz assess` does.
+  local cluster_id
+  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
+    error "kubehz: no cluster found for ${domain} — is it registered + claimed, and does KUBEHZ_TOKEN belong to the owning tenant?"
+    return 1
+  }
+
+  # Capture body AND status so a refusal is reported honestly: 409
+  # AGENT_TOKEN_CONFLICT = the hash is already registered/revoked (generate a
+  # fresh token); 404 = not this tenant's cluster (the api answers a uniform
+  # 404 cross-tenant).
+  local response http_code body
+  response=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
+    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}')") || {
+    error "kubehz: agent-token request failed (network) — retry once ${api_url} is reachable"
+    return 1
+  }
+  http_code="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+
+  if [[ "${http_code}" != "200" ]]; then
+    local code msg
+    code=$(jq -r '.data.code // empty' <<<"${body}" 2>/dev/null) || code=""
+    msg=$(jq -r '.data.message // empty' <<<"${body}" 2>/dev/null) || msg=""
+    error "kubehz: re-enroll refused (HTTP ${http_code}${code:+ ${code}})${msg:+: ${msg}}"
+    return 1
+  fi
+
+  local rotated
+  rotated=$(jq -r '.rotated // false' <<<"${body}" 2>/dev/null) || rotated=""
+  if [[ "${rotated}" == "true" ]]; then
+    echo "kubehz: agent token re-enrolled for ${domain} (${cluster_id})."
+    echo "The platform revoked the previous token and armed the in-cluster one;"
+    echo "heartbeats resume on the agent's next tick (within 5 minutes)."
+  else
+    echo "kubehz: the in-cluster agent token is already the live one for ${domain} (${cluster_id}) — nothing rotated."
+    echo "If heartbeats still fail, check the agent's logs (kubehz-system, CronJob kubehz-heartbeat)."
+  fi
+}
+
+[[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::kubehz "${@}"

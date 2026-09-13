@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# kubehz LIVE AGENT — MANAGED overlay = the read-only base PLUS the acting
+# RBAC. `lo kubehz deploy` renders this one only when the spec says
+# `access: managed`; `access: registered` gets ../base and nothing more.
+#
+# The split is the point. Acting is server-gated (the /desired execution flags,
+# computed from tenant tier × cluster access × the platform kill switch), so a
+# registered-tier cluster would never use these permissions — and least
+# privilege says an unused write permission should not exist. Without the
+# overlay a (mis)authorized acting attempt fails closed as a reported Forbidden.
+#
+# VENDORED from the public kubehz-agent repo's deploy/managed. rbac-managed.yaml
+# is copied BYTE-FOR-BYTE — comments and all, so a path it mentions
+# (deploy/README.md) is an upstream path — and its digest is pinned in
+# ../UPSTREAM.sha256. The permissions a customer grants are exactly the ones the
+# agent's own public repo documents and audits, with nothing added on the way
+# through lok8s, and the pin is what proves it on every test run.
+resources:
+  - ../base
+  - rbac-managed.yaml
