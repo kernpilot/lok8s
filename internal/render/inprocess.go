@@ -35,15 +35,19 @@ var dirLocks struct {
 	m  map[string]*sync.Mutex
 }
 
+// lockDir keys on cleanDir(dir), the identity renderEnvPath names the
+// overlay file by, so two spellings of one directory (a trailing `/.`, a
+// symlink, a relative path) share one lock as they share one file.
 func lockDir(dir string) func() {
+	key := cleanDir(dir)
 	dirLocks.mu.Lock()
 	if dirLocks.m == nil {
 		dirLocks.m = map[string]*sync.Mutex{}
 	}
-	l, ok := dirLocks.m[dir]
+	l, ok := dirLocks.m[key]
 	if !ok {
 		l = &sync.Mutex{}
-		dirLocks.m[dir] = l
+		dirLocks.m[key] = l
 	}
 	dirLocks.mu.Unlock()
 	l.Lock()
