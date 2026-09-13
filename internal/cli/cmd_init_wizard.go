@@ -57,7 +57,10 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 	setDebugFromVerbose(cmd)
 	out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	term := initTerminal(f.yes)
-	if !f.plan && !term.Interactive() {
+	// Off the wizard (no terminal, CI, --yes) --dry-run has no
+	// conversation to stop; it prints the plan the defaults would run,
+	// like --plan.
+	if !f.plan && !f.dryRun && !term.Interactive() {
 		return cmd.Help()
 	}
 	cwd, err := os.Getwd()
@@ -70,7 +73,7 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 		return err
 	}
 	state.Terminal = term
-	if f.plan {
+	if f.plan || (f.dryRun && !term.Interactive()) {
 		return initPlan(cmd.Context(), state, out)
 	}
 	return initWizard(cmd.Context(), state, runner, f.dryRun, out, stderr)

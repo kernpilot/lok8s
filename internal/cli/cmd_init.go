@@ -47,7 +47,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	}
 	cmd.Flags().BoolVarP(&flags.yes, "yes", "y", false, "Never ask: print the help instead of the wizard (scripts, CI)")
 	cmd.Flags().BoolVar(&flags.plan, "plan", false, "Print what lo init sees here and the commands it would run; write nothing (works off a terminal)")
-	cmd.Flags().BoolVarP(&flags.dryRun, "dry-run", "n", false, "Run the wizard up to the summary; write nothing")
+	cmd.Flags().BoolVarP(&flags.dryRun, "dry-run", "n", false, "Run the wizard up to the summary; write nothing (off a terminal, under CI or with --yes: the same as --plan)")
 
 	var svcPath string
 	service := &cobra.Command{

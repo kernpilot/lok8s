@@ -113,7 +113,6 @@ func TestInitBareOffTerminalPrintsHelp(t *testing.T) {
 		{"CI", initctx.Terminal{StdinTTY: true, StdoutTTY: true, CI: true}, []string{"init"}},
 		{"--yes", initctx.Terminal{StdinTTY: true, StdoutTTY: true}, []string{"init", "--yes"}},
 		{"-y", initctx.Terminal{StdinTTY: true, StdoutTTY: true}, []string{"init", "-y"}},
-		{"--dry-run off a tty", initctx.Terminal{}, []string{"init", "--dry-run"}},
 	}
 	prev := initTerminal
 	t.Cleanup(func() { initTerminal = prev })
@@ -170,6 +169,27 @@ func TestInitPlanEmptyDirectory(t *testing.T) {
 	}
 	if strings.Contains(stdout, p.Base) {
 		t.Error("the ambient project leaked into the plan")
+	}
+}
+
+// Off the wizard --dry-run has no conversation to stop: it prints the
+// plan like --plan, with --yes and off a terminal alike, and writes
+// nothing.
+func TestInitDryRunOffTheWizardPrintsThePlan(t *testing.T) {
+	for _, args := range [][]string{{"init", "--dry-run"}, {"init", "--yes", "--dry-run"}} {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		installInitSeams(t, false, "")
+		stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), args...)
+		if err != nil || stderr != "" {
+			t.Fatalf("%v: %v\n%s", args, err, stderr)
+		}
+		if !strings.Contains(stdout, "situation: empty directory\n") || !strings.Contains(stdout, "  lo init project "+filepath.Base(dir)+" --env mise\n") || strings.Contains(stdout, "Usage:") {
+			t.Errorf("%v: stdout:\n%s", args, stdout)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("%v: wrote %v", args, entries)
+		}
 	}
 }
 
