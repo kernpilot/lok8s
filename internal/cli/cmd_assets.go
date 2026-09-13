@@ -107,59 +107,63 @@ runs from the cache). It is never part of --all or of the referenced set.`,
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
-			rels := args
-			switch {
-			case all:
-				for _, u := range assets.Units() {
-					if u.Kind != assets.KindBash {
-						rels = append(rels, u.Rel)
-					}
-				}
-			case len(rels) == 0:
-				rels = referencedAssets(paths, stderr)
-			}
-			if slices.Contains(rels, assets.BashRel) {
-				rels = append(rels, assets.MissingDataUnits(paths)...)
-			}
-			var pending []string
-			for _, rel := range rels {
-				if _, ok := assets.UnitFor(rel); !ok {
-					return assetsErr(stderr, fmt.Errorf("%w: %s", assets.ErrNotAsset, rel))
-				}
-				if !assets.LocalExists(paths, rel) {
-					pending = append(pending, rel)
-				}
-			}
-			sort.Strings(pending)
-			pending = dedupe(pending)
-			if check {
-				if len(pending) == 0 {
-					fmt.Fprintln(out, "assets: nothing to eject")
-					return nil
-				}
-				for _, rel := range pending {
-					fmt.Fprintf(out, "would eject %s\n", rel)
-				}
-				ui.ErrorTo(stderr, "assets: %d asset(s) would be ejected (run: lo assets eject)", len(pending))
-				return ErrCheckFailed
-			}
-			if len(pending) == 0 {
-				fmt.Fprintln(out, "assets: nothing to eject (every referenced asset has a local copy)")
-				return nil
-			}
-			for _, rel := range pending {
-				if _, err := assets.Eject(paths, rel); err != nil {
-					return assetsErr(stderr, err)
-				}
-			}
-			fmt.Fprintf(out, "assets: ejected %d asset(s) into %s\n", len(pending), config.RelTo(paths.Base, paths.Lok8s))
-			return nil
+			return assetsEject(paths, args, all, check, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Eject every embedded asset, not only the referenced ones")
 	cmd.Flags().BoolVar(&check, "check", false, "Write nothing; exit 1 if any asset would be ejected")
 	return cmd
+}
+
+// assetsEject is `lo assets eject [rel…|--all] [--check]` (also the init
+// wizard's eject-bash step, which passes rels = [bash]).
+func assetsEject(paths *config.Paths, rels []string, all, check bool, out, stderr io.Writer) error {
+	switch {
+	case all:
+		for _, u := range assets.Units() {
+			if u.Kind != assets.KindBash {
+				rels = append(rels, u.Rel)
+			}
+		}
+	case len(rels) == 0:
+		rels = referencedAssets(paths, stderr)
+	}
+	if slices.Contains(rels, assets.BashRel) {
+		rels = append(rels, assets.MissingDataUnits(paths)...)
+	}
+	var pending []string
+	for _, rel := range rels {
+		if _, ok := assets.UnitFor(rel); !ok {
+			return assetsErr(stderr, fmt.Errorf("%w: %s", assets.ErrNotAsset, rel))
+		}
+		if !assets.LocalExists(paths, rel) {
+			pending = append(pending, rel)
+		}
+	}
+	sort.Strings(pending)
+	pending = dedupe(pending)
+	if check {
+		if len(pending) == 0 {
+			fmt.Fprintln(out, "assets: nothing to eject")
+			return nil
+		}
+		for _, rel := range pending {
+			fmt.Fprintf(out, "would eject %s\n", rel)
+		}
+		ui.ErrorTo(stderr, "assets: %d asset(s) would be ejected (run: lo assets eject)", len(pending))
+		return ErrCheckFailed
+	}
+	if len(pending) == 0 {
+		fmt.Fprintln(out, "assets: nothing to eject (every referenced asset has a local copy)")
+		return nil
+	}
+	for _, rel := range pending {
+		if _, err := assets.Eject(paths, rel); err != nil {
+			return assetsErr(stderr, err)
+		}
+	}
+	fmt.Fprintf(out, "assets: ejected %d asset(s) into %s\n", len(pending), config.RelTo(paths.Base, paths.Lok8s))
+	return nil
 }
 
 func newAssetsDiffCommand(paths *config.Paths) *cobra.Command {

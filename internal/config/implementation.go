@@ -222,3 +222,95 @@ func implementationTree(base, tree string, routes bool) (string, error) {
 	}
 	return clean, nil
 }
+
+// SetImplementationDefault writes spec.implementation.default = impl into
+// <base>/lok8s.yaml (a yaml.Node edit: comments and the other keys stay).
+// A missing file is created as the `kind: Project` file `lo init project`
+// writes, named name. The init wizard's implementation switch; the flag
+// twin is the yq edit it prints.
+func SetImplementationDefault(base, name, impl string) error {
+	if impl != ImplGo && impl != ImplBash {
+		return implErrorf("spec.implementation.default %q is not %q or %q.", impl, ImplGo, ImplBash)
+	}
+	file := filepath.Join(base, ProjectFile)
+	raw, err := os.ReadFile(file)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("%s: %w", ProjectFile, err)
+	}
+	var root yaml.Node
+	if err == nil {
+		if err := yaml.Unmarshal(raw, &root); err != nil {
+			return fmt.Errorf("%s: %w", ProjectFile, err)
+		}
+	}
+	if root.Kind == 0 {
+		root = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
+	}
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return implErrorf("top level is not a mapping.")
+	}
+	kind := mappingValue(doc, "kind")
+	switch {
+	case kind == nil && raw != nil:
+		// A lok8s.yaml without a kind is a service file, never a project.
+		return implErrorf("kind %q is not %q.", "", ProjectKind)
+	case kind == nil:
+		setMappingScalar(doc, "apiVersion", "lok8s.dev/v1")
+		setMappingScalar(doc, "kind", ProjectKind)
+		metadata := ensureMapping(doc, "metadata")
+		setMappingScalar(metadata, "name", name)
+	case kind.Value != ProjectKind:
+		return implErrorf("kind %q is not %q.", kind.Value, ProjectKind)
+	}
+	spec := ensureMapping(doc, "spec")
+	block := ensureMapping(spec, "implementation")
+	setMappingScalar(block, "default", impl)
+
+	var buf strings.Builder
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(file, []byte(buf.String()), 0o644)
+}
+
+// mappingValue returns the value node of key in mapping m, nil when absent.
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// ensureMapping returns the block mapping under key, creating it or
+// replacing a non-mapping value.
+func ensureMapping(m *yaml.Node, key string) *yaml.Node {
+	if v := mappingValue(m, key); v != nil {
+		if v.Kind != yaml.MappingNode {
+			*v = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		}
+		v.Style = 0
+		return v
+	}
+	v := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, v)
+	return v
+}
+
+// setMappingScalar sets key to the string value in mapping m.
+func setMappingScalar(m *yaml.Node, key, value string) {
+	if v := mappingValue(m, key); v != nil {
+		*v = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+		return
+	}
+	m.Content = append(m.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
+}

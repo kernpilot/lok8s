@@ -29,6 +29,11 @@ func scaffoldRun(err error) error {
 }
 
 func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
+	// Bare `lo init` (Go-only, cmd_init_wizard.go): the wizard on a
+	// terminal, the help text (argshGroupRunE) off one, under CI or with
+	// --yes; --plan prints the state card and the commands the defaults
+	// would run, anywhere, and writes nothing.
+	var flags initFlags
 	cmd := &cobra.Command{
 		Use:          "init",
 		Aliases:      spec.aliases,
@@ -36,8 +41,13 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		GroupID:      spec.group,
 		Annotations:  spec.annotations(),
 		SilenceUsage: true,
-		RunE:         argshGroupRunE,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInitBare(cmd, args, paths, flags)
+		},
 	}
+	cmd.Flags().BoolVarP(&flags.yes, "yes", "y", false, "Never ask: print the help instead of the wizard (scripts, CI)")
+	cmd.Flags().BoolVar(&flags.plan, "plan", false, "Print what lo init sees here and the commands it would run; write nothing (works off a terminal)")
+	cmd.Flags().BoolVarP(&flags.dryRun, "dry-run", "n", false, "Run the wizard up to the summary; write nothing")
 
 	var svcPath string
 	service := &cobra.Command{
