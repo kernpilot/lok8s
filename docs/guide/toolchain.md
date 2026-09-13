@@ -161,8 +161,8 @@ right column is needed, because the parity harnesses and the bats suites
 really run the argsh side; `b install` in a clone of the repo gets it.
 
 **Intended end state** (planned; each step is sequenced separately): `argsh`, `jq` and `bats` leave the contributor `core` group
-once the provider plugins have Go twins and the shipped `.mcp.json` targets
-`lo mcp`; `sops` and `ssh-to-age` follow once `lo build` split mode
+once the provider plugins have Go twins and `lo chat` drives the Go
+`lo mcp start` (the shipped `.mcp.json` already does); `sops` and `ssh-to-age` follow once `lo build` split mode
 encrypts through the library; `yq` stays until the renderer-drift rule in
 [The Go `lo` binary](/reference/go-migration#external-tools-still-exec-d)
 is satisfied. `kustomize`, `khelm`, `kind`, `tilt`, `mkcert`, `kubectl` and

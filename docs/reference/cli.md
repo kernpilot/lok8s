@@ -363,9 +363,53 @@ Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_statu
 
 Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
-::: info The shipped `.mcp.json` still launches the argsh builtin
-The `.mcp.json` at the project root points at `.lok8s/lo mcp` — the previous, argsh-native server, which needs `argsh.so` (`argsh builtins install`; discoverable via `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`). It keeps working. To use the binary's server instead, run `lo mcp <editor> enable` or point your client at `lo mcp start`; the switch of the shipped file is a deliberate, separate change.
-:::
+#### MCP server
+
+Point the editor at `lo mcp start`. The `.mcp.json` at the project root does this for a checkout:
+
+```json
+{
+  "mcpServers": {
+    "lok8s": {
+      "type": "stdio",
+      "command": "bin/lo",
+      "args": ["mcp", "start"],
+      "env": {
+        "LO_MCP_ALLOW": "destructive"
+      }
+    }
+  }
+}
+```
+
+The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_tilt_up`, ...) do not change.
+
+`bin/lo` is the checkout build. Run `make build` in a fresh clone before you start the editor. Outside a checkout, run `lo mcp <editor> enable`: it writes the absolute path of the binary, the toolchain PATH and `PATH_BASE` into the editor config. You can also set `command` to the installed `lo` (from `lo-install.sh`, or `.bin/lo` from `b install`) when that binary is on the editor's PATH. Do not use a bare `lo` in a project with the `.envrc` active. The `.envrc` puts `.lok8s` first on PATH, so `lo` resolves to the bash entry. Then `.lok8s/lo mcp start` serves the bash variant without an error.
+
+The server needs no other environment. It takes the project root from `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH. Unset a stale `PATH_BASE` from another project before you start the editor.
+
+`LO_MCP_ALLOW=destructive` opens the full surface (90 tools). That is the set the argsh builtin served, plus the Go-only leaves. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (51 tools). The tiers follow the marker table above.
+
+#### Bash variant
+
+The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (69 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
+
+```json
+"lok8s": {
+  "type": "stdio",
+  "command": "bin/lo",
+  "args": ["mcp"],
+  "env": {
+    "LO_IMPL": "bash"
+  }
+}
+```
+
+`LO_IMPL=bash lo mcp` execs `.lok8s/lo mcp` with the environment the `.envrc` would set. The direct form is `"command": ".lok8s/lo", "args": ["mcp"]` with an empty `env`: the entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
+
+The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project` and `lo init toolchain` have no builtin tool.
+
+Per-command routing is planned: `LO_GO_BASH=<cmd>,...` will exec the named commands through the bash tree and keep every other command in Go. See [`LO_IMPL=bash`: the escape hatch](go-migration.md#lo-impl-bash-the-escape-hatch).
 
 ### lo kubeconfig
 
@@ -613,4 +657,4 @@ caller drives the mode, not the file.
 | `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |
 | `LO_ASSETS_EJECT` | (empty) | `never`: the environment form of `--no-eject` — embedded framework assets are served from a temp dir, never written into the project (see [`lo assets`](#lo-assets)) |
 | `LOK8S_NONINTERACTIVE` | (empty) | `1` disables prompts (consent gates refuse) and the collapsing progress UI |
-| `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so` — needed only by the argsh `mcp` builtin the shipped `.mcp.json` launches |
+| `ARGSH_BUILTIN_PATH` | (auto-detected) | Full path to `argsh.so`. Only the argsh `mcp` builtin needs it: the bash MCP variant and `lo chat` |

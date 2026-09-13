@@ -15,7 +15,7 @@ lok8s ships three things an assistant uses, plus this management layer:
 
 | Piece | What it is |
 |---|---|
-| **`lo mcp`** | the tool bridge — `.mcp.json` points an agent at `lo mcp`, which exposes every `lo` subcommand as an MCP tool (`lo_status`, `lo_build`, …). It's an `argsh.so` builtin: if a fresh checkout says *"Invalid command: mcp"*, run `argsh builtins install`. |
+| **`lo mcp`** | the tool bridge. `.mcp.json` points an agent at `bin/lo mcp start`, which exposes every `lo` subcommand as an MCP tool (`lo_status`, `lo_build`, …) in three tiers. A fresh checkout needs `make build` first. The bash variant (`LO_IMPL=bash lo mcp`, what `lo chat` drives) is an `argsh.so` builtin: if it says *"Invalid command: mcp"*, run `argsh builtins install`. |
 | **`skills/*/SKILL.md`** | the *knowledge* layer — schemas, decision trees, playbooks (this file is one). Complements the tools: tools *do*, skills *know*. |
 | **`lo chat`** | the local runtime — a small "conductor" model that routes your question over the `lo` tools, gathers facts, and streams an answer. |
 | **`lo ai`** | manage the above: check the setup, and link skills into skill-aware assistants. |

@@ -24,8 +24,9 @@ import (
 )
 
 // argshMcpTools is the surface the argsh `lo mcp` builtin advertised
-// (captured from `.lok8s/lo mcp` tools/list, 2026-09-02). The ophis surface
-// must stay a superset of it under the documented renames (argshMcpRenames).
+// (captured from `.lok8s/lo mcp` tools/list, 2026-09-02; the kubehz node
+// leaves re-captured 2026-09-13). The ophis surface must stay a superset of
+// it under the documented renames (argshMcpRenames).
 var argshMcpTools = []string{
 	"lo_addons", "lo_ai_check", "lo_ai_link", "lo_ai_skills", "lo_ai_unlink", "lo_audit",
 	"lo_bootstrap", "lo_build", "lo_chat", "lo_clean", "lo_deploy", "lo_destroy", "lo_doctor",
@@ -34,7 +35,8 @@ var argshMcpTools = []string{
 	"lo_init_test", "lo_kubeconfig", "lo_kubehz_assess", "lo_kubehz_claim", "lo_kubehz_claim-code",
 	"lo_kubehz_deploy", "lo_kubehz_deregister", "lo_kubehz_join", "lo_kubehz_re-enroll",
 	"lo_kubehz_register", "lo_kubehz_status", "lo_kustomize_build", "lo_kustomize_clean",
-	"lo_kustomize_list", "lo_kustomize_test", "lo_lint", "lo_provision", "lo_recover",
+	"lo_kustomize_list", "lo_kustomize_test", "lo_lint", "lo_node_join", "lo_node_remove",
+	"lo_node_status", "lo_provision", "lo_recover",
 	"lo_registry_clean", "lo_registry_down", "lo_registry_status", "lo_registry_up",
 	"lo_secrets_add-key", "lo_secrets_allow", "lo_secrets_decrypt", "lo_secrets_encrypt",
 	"lo_secrets_env", "lo_secrets_init", "lo_secrets_list", "lo_secrets_path", "lo_secrets_print",
@@ -44,12 +46,15 @@ var argshMcpTools = []string{
 
 // argshMcpRenames maps an argsh tool name to the ophis name(s) that replace
 // it. The argsh flattener dropped the middle of a two-level dispatcher path
-// (kubehz handover receive → lo_handover_receive); ophis keeps the full path.
-// `lo drivers` was one tool taking "<driver> <op> <domain>" as args; the Go
-// tree spells the drivers out.
+// (kubehz handover receive → lo_handover_receive, kubehz node join →
+// lo_node_join); ophis keeps the full path. `lo drivers` was one tool taking
+// "<driver> <op> <domain>" as args; the Go tree spells the drivers out.
 var argshMcpRenames = map[string][]string{
 	"lo_handover_preseed": {"lo_kubehz_handover_preseed"},
 	"lo_handover_receive": {"lo_kubehz_handover_receive"},
+	"lo_node_join":        {"lo_kubehz_node_join"},
+	"lo_node_remove":      {"lo_kubehz_node_remove"},
+	"lo_node_status":      {"lo_kubehz_node_status"},
 	"lo_drivers":          {"lo_drivers_lo_status", "lo_drivers_lo_provision", "lo_drivers_lo_destroy"},
 }
 
