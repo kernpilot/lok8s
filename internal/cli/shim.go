@@ -54,19 +54,24 @@ func execShim(p *config.Paths, tree assets.Tree, argv []string) error {
 	return shimExec(bash, args, shimEnv(p, tree))
 }
 
-// shimEnv returns the process environment with p.Bin and the bash tree
-// prepended to PATH (when missing) and KUSTOMIZE_PLUGIN_HOME defaulted.
-// PATH_LOK8S is set when the tree is not p.Lok8s (the cache, a routed
-// tree under another name, or the project's .lok8s while PATH_LOK8S
-// points elsewhere) and PATH_BASE when the tree's parent is not the
-// project root (cache, temp dir, a routed tree below a subdirectory): the
-// entrypoint derives PATH_BASE as the parent of its own directory, which
-// would be wrong there.
+// shimEnv returns the process environment with the project's .bin and the
+// bash tree prepended to PATH (when missing) and KUSTOMIZE_PLUGIN_HOME
+// defaulted. PATH_LOK8S is set when the tree is not p.Lok8s (the cache, a
+// routed tree under another name, or the project's .lok8s while
+// PATH_LOK8S points elsewhere) and PATH_BASE when the tree's parent is
+// not the project root (cache, temp dir, a routed tree below a
+// subdirectory): the entrypoint derives PATH_BASE as the parent of its
+// own directory, which would be wrong there. An inherited PATH_BIN is
+// replaced by <project>/.bin: the entrypoint sources `${PATH_BIN}/argsh`,
+// so an ambient value would select the runtime the bash tree runs on.
 func shimEnv(p *config.Paths, tree assets.Tree) []string {
 	env := os.Environ()
 	env = setEnv(env, "PATH", childPATH(p, tree.Dir))
 	if os.Getenv("KUSTOMIZE_PLUGIN_HOME") == "" {
 		env = setEnv(env, "KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize"))
+	}
+	if v := os.Getenv("PATH_BIN"); v != "" && v != projectBin(p) {
+		env = setEnv(env, "PATH_BIN", projectBin(p))
 	}
 	if tree.Dir != "" && tree.Dir != p.Lok8s {
 		env = setEnv(env, "PATH_LOK8S", tree.Dir)
@@ -89,10 +94,18 @@ func bashTreeForPATH(p *config.Paths) assets.Tree {
 	return tree
 }
 
-// childPATH is the PATH the binary prepares for its children: p.Bin
-// first, then the bash tree, then the process PATH (execx.PrependPATH).
+// childPATH is the PATH the binary prepares for its children: the
+// project's .bin first, then the bash tree, then the process PATH
+// (execx.PrependPATH). The project's .bin, not p.Bin: an inherited
+// PATH_BIN must not put another toolchain (and argsh) ahead for a bash
+// child. The binary's own tool lookups keep honouring p.Bin.
 func childPATH(p *config.Paths, treeDir string) string {
-	return execx.PrependPATH(p.Bin, treeDir)
+	return execx.PrependPATH(projectBin(p), treeDir)
+}
+
+// projectBin is <project>/.bin, derived from the project root only.
+func projectBin(p *config.Paths) string {
+	return filepath.Join(p.Base, ".bin")
 }
 
 func setEnv(env []string, key, value string) []string {

@@ -481,3 +481,32 @@ func TestRoutingInvalidBlockStillRunsDoctorHelpCompletion(t *testing.T) {
 		t.Errorf("doctor without the tree:\n%s", stdout)
 	}
 }
+
+// F4: an inherited PATH_BIN never reaches the routed exec; the child gets
+// <project>/.bin on PATH and in PATH_BIN.
+func TestRoutingIgnoresInheritedPathBin(t *testing.T) {
+	p := routedProject(t, "    bash:\n      commands: [registry]\n", true)
+	p.Bin = "/evil"
+	t.Setenv("PATH_BIN", "/evil")
+	t.Setenv("PATH", "/usr/bin:/bin")
+	recs := recordShim(t)
+	setOSArgs(t, "registry", "up")
+	if _, _, err := runLo(t, NewRoot(p), "registry", "up"); err != nil {
+		t.Fatal(err)
+	}
+	env := (*recs)[0].env
+	projBin := filepath.Join(p.Base, ".bin")
+	if v, _ := envValue(env, "PATH"); !strings.HasPrefix(v, projBin+":"+p.Lok8s+":") || strings.Contains(v, "/evil") {
+		t.Errorf("PATH = %q", v)
+	}
+	if v, _ := envValue(env, "PATH_BIN"); v != projBin {
+		t.Errorf("PATH_BIN = %q", v)
+	}
+	// Unset ambient: nothing exported on the entrypoint's behalf.
+	os.Unsetenv("PATH_BIN")
+	setOSArgs(t, "registry", "up")
+	runLo(t, NewRoot(p), "registry", "up")
+	if v, ok := envValue((*recs)[1].env, "PATH_BIN"); ok {
+		t.Errorf("PATH_BIN=%q exported without an ambient value", v)
+	}
+}
