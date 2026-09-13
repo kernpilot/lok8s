@@ -99,6 +99,12 @@ func FindProjectRoot(dir string) string {
 	return findBase(dir)
 }
 
+// IsProjectRoot reports whether dir itself carries a project marker: the
+// distinction FindProjectRoot cannot make when it falls back to dir.
+func IsProjectRoot(dir string) bool {
+	return isProjectRoot(dir)
+}
+
 // findBase walks up from dir looking for a directory that carries a
 // project marker. Falls back to dir itself.
 func findBase(dir string) string {
