@@ -1,0 +1,156 @@
+name: E2E
+
+# The kind integration job that used to run only on pushes to main from
+# ci.yml. It lives here so ci.yml produces the same check set on a pull
+# request and on main, and the main-protection ruleset can require exactly
+# that set. Runs on every push to main, once a night, and on demand.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration-tests:
+    name: Integration Tests (Kind)
+    runs-on: ubuntu-latest
+    # The push-to-main gate that used to sit here is the workflow trigger
+    # now. No `needs:` on the ci.yml jobs: they run in another workflow.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Create kind cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          cluster_name: lok8s-test
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Apply lok8s CRDs
+        run: |
+          kubectl apply --server-side -f operator/crds/
+          kubectl wait --for=condition=Established crd --all --timeout=60s
+
+      - name: Create and read back a Lo resource
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: cluster.lok8s.dev/v1beta1
+          kind: Lo
+          metadata:
+            name: ci-smoke
+          spec:
+            cluster:
+              domain: ci.lok8s.dev
+            runtime: kind
+            bootstrap:
+              - cilium
+          EOF
+          kubectl get lo ci-smoke -o yaml
+          test "$(kubectl get lo ci-smoke -o jsonpath='{.spec.cluster.domain}')" = "ci.lok8s.dev"
+
+      - name: Validate CRD schemas reject bad specs
+        run: |
+          if kubectl apply -f - <<'EOF' 2>/dev/null
+          apiVersion: cluster.lok8s.dev/v1beta1
+          kind: Lo
+          metadata:
+            name: ci-bad
+          spec: {}
+          EOF
+          then
+            echo "expected schema validation to reject a spec without cluster.domain" >&2
+            exit 1
+          fi
+
+      - name: ClusterInventory rejects non-metadata fields and round-trips
+        run: |
+          # The inventory CRD (lok8s.dev group, cluster-scoped singleton) is
+          # metadata-ONLY. lo writes it with server-side apply
+          # (libs/inventory/main), and SSA REJECTS undeclared fields outright
+          # ("field not declared in schema") rather than pruning them — values/
+          # secrets structurally cannot land in it. The old assertion expected
+          # client-side-apply pruning and failed on every run: SSA errors first.
+          cat > /tmp/smuggled-inventory.yaml <<'EOF'
+          apiVersion: lok8s.dev/v1alpha1
+          kind: ClusterInventory
+          metadata:
+            name: cluster
+          spec:
+            lok8sVersion: 0.1.0
+            kind: kubeone
+            provider: hetzner
+            kubernetesVersion: v1.31.12
+            specHash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            renderedAt: "2026-01-01T00:00:00Z"
+            values:
+              smuggled: chart-values-must-be-rejected
+            addons:
+              - name: cilium
+                chartVersion: 1.19.2
+                category: networking
+                source: addon
+                inlineValues: must-be-rejected-too
+          EOF
+          if kubectl apply --server-side --field-manager=lok8s               -f /tmp/smuggled-inventory.yaml 2>/tmp/smuggled-err.txt; then
+            echo "smuggled spec.values/inlineValues were ACCEPTED — the schema no longer rejects unknown fields" >&2
+            exit 1
+          fi
+          grep -q 'field not declared in schema' /tmp/smuggled-err.txt             || { echo "apply failed for an unexpected reason:" >&2; cat /tmp/smuggled-err.txt >&2; exit 1; }
+
+          # A clean CR (production shape) round-trips via the same SSA path.
+          kubectl apply --server-side --field-manager=lok8s -f - <<'EOF'
+          apiVersion: lok8s.dev/v1alpha1
+          kind: ClusterInventory
+          metadata:
+            name: cluster
+          spec:
+            lok8sVersion: 0.1.0
+            kind: kubeone
+            provider: hetzner
+            kubernetesVersion: v1.31.12
+            specHash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            renderedAt: "2026-01-01T00:00:00Z"
+            addons:
+              - name: cilium
+                chartVersion: 1.19.2
+                category: networking
+                source: addon
+          EOF
+          test "$(kubectl get clusterinventories.lok8s.dev cluster -o jsonpath='{.spec.kubernetesVersion}')" = "v1.31.12"
+          kubectl get clusterinventories.lok8s.dev cluster -o json | jq -e '
+            (.spec | has("values") | not) and
+            (.spec.addons[0] | has("inlineValues") | not) and
+            (.spec.addons[0].chartVersion == "1.19.2")'
+          # Status is a subresource: writable via --subresource, never via spec apply.
+          kubectl patch clusterinventories.lok8s.dev cluster --subresource=status --type=merge \
+            -p '{"status":{"lastReported":"2026-01-01T00:00:00Z","observedAddons":[{"name":"cilium","version":"1.19.2","healthy":true}]}}'
+          kubectl get clusterinventories.lok8s.dev cluster -o json \
+            | jq -e '.status.observedAddons[0].healthy == true'
+
+      - name: All cluster kinds resolve under cluster.lok8s.dev
+        run: |
+          # Every cluster kind (incl. the regrouped Deploy + new Kkp/KubeOne)
+          # must serve under the one group. A 404 here = a group drift.
+          for kind in Lo Capi Kkp KubeOne Deploy; do
+            kubectl get --raw "/apis/cluster.lok8s.dev/v1beta1" \
+              | grep -q "\"kind\":\"${kind}\"" \
+              || { echo "kind ${kind} not served under cluster.lok8s.dev" >&2; exit 1; }
+          done
+          # Round-trip a Deploy (the kind whose group was corrected).
+          kubectl apply -f - <<'EOF'
+          apiVersion: cluster.lok8s.dev/v1beta1
+          kind: Deploy
+          metadata:
+            name: ci-deploy
+          spec:
+            clusterRef:
+              domain: ci.lok8s.dev
+          EOF
+          test "$(kubectl get deploys.cluster.lok8s.dev ci-deploy -o jsonpath='{.spec.clusterRef.domain}')" = "ci.lok8s.dev"

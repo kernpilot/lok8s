@@ -2,11 +2,11 @@
 
 A single static, **dependency-free** Go binary (stdlib only → builds offline,
 fits `b`'s binary model): the transparent, streaming, read-only lok8s assistant.
-Driven by the `lo chat` argsh shim (`.lok8s/libs/chat`), which resolves the lo
-runtime and execs this binary with a **JSON config + dynamic flags** (no `yq`,
-no transforms). The shim preflights for `argsh.so` (the `lo mcp` builtin) first.
+`lo chat` (`internal/cli/cmd_chat.go`) resolves the runtime and execs this
+binary with a JSON config and dynamic flags. The frozen bash implementation
+does the same from `.lok8s/libs/chat`.
 
-The architecture was chosen by the benchmark (see `../../LOCAL-AI-PLAN.md`):
+The architecture was chosen by the benchmark (internal design note, kubehz-cluster `docs/internal/lok8s-local-ai-plan.md`):
 flat diet tools · schema-in-context authoring · doctor-tree debug · a
 **deterministic** read-only posture gate (models can't self-police — proven).
 
