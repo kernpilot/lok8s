@@ -276,7 +276,7 @@ func SetImplementationDefault(base, name, impl string) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	return os.WriteFile(file, []byte(buf.String()), 0o644)
+	return os.WriteFile(file, []byte(buf.String()), 0o644) // #nosec G306 -- the committed project file, 0644 like every scaffold write
 }
 
 // mappingValue returns the value node of key in mapping m, nil when absent.
