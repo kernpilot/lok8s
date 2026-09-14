@@ -186,7 +186,7 @@ func list(p *config.Paths, d string, out, stderr io.Writer, withOrigin bool) err
 		ui.WarnTo(stderr, "No addons directory (%s)", Dir(p))
 		return nil
 	}
-	// The bash table is printf '%-20s  %-8s  %-12s  %s'; ui.Table reproduces
+	// The bash table is printf '%-20s  %-8s  %-12s  %s'. ui.Table reproduces
 	// that layout piped (a wider name pushes its own row, as printf does)
 	// and measures the columns on a terminal.
 	header, widths := []string{"NAME", "TYPE", "VERSION", "CHART/REPO"}, []int{20, 8, 12}

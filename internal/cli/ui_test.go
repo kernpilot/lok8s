@@ -1,6 +1,6 @@
 package cli
 
-// ui_test.go — the presentation layer on the commands: piped output is the
+// ui_test.go covers the presentation layer on the commands: piped output is the
 // bash contract (no decoration change, no escapes), terminal output is the
 // house style. Both modes render into buffers through the ui overrides.
 
@@ -121,7 +121,7 @@ func TestToolchainDoctorBothModes(t *testing.T) {
 	if !strings.HasPrefix(stdout, "=== toolchain doctor ===\n\n--- toolchain (lo ") {
 		t.Errorf("piped:\n%s", stdout)
 	}
-	if !strings.HasSuffix(stderr, "\nnext: lo toolchain install   # installs the pins this lo was built against\n") {
+	if !strings.HasSuffix(stderr, "\nnext: lo toolchain install   # installs the pins of this lo build\n") {
 		t.Errorf("piped stderr = %q", stderr)
 	}
 	terminal(t, func() {
@@ -129,7 +129,7 @@ func TestToolchainDoctorBothModes(t *testing.T) {
 		if !strings.HasPrefix(stdout, "\033[1mtoolchain doctor\033[0m\n\n\033[1mtoolchain (lo ") {
 			t.Errorf("terminal:\n%q", stdout)
 		}
-		if !strings.HasSuffix(stderr, "\n\033[2mnext: lo toolchain install   # installs the pins this lo was built against\033[0m\n") {
+		if !strings.HasSuffix(stderr, "\n\033[2mnext: lo toolchain install   # installs the pins of this lo build\033[0m\n") {
 			t.Errorf("terminal stderr = %q", stderr)
 		}
 	})
@@ -207,7 +207,7 @@ func TestUseSelectNoClusters(t *testing.T) {
 	}
 }
 
-// `lo use <unknown>`: the [error] line alone off a terminal; on a terminal
+// `lo use <unknown>`: the [error] line alone off a terminal. On a terminal
 // the closest name and the available domains follow.
 func TestUseUnknownDomainSuggestsOnTerminal(t *testing.T) {
 	p := useProject(t)
@@ -274,7 +274,7 @@ func TestFlagErrorsOneShape(t *testing.T) {
 }
 
 // --no-color exports NO_COLOR for the children and turns the colour off on
-// a terminal; the shape stays the terminal's.
+// a terminal. The shape stays the terminal's.
 func TestNoColorFlag(t *testing.T) {
 	p := useProject(t)
 	t.Setenv("NO_COLOR", "")
@@ -291,7 +291,7 @@ func TestNoColorFlag(t *testing.T) {
 	}
 }
 
-// The addons table piped is the bash printf layout; on a terminal the
+// The addons table piped is the bash printf layout. On a terminal the
 // header is bold and a long name widens its column instead of pushing
 // its row.
 func TestAddonsTableBothModes(t *testing.T) {

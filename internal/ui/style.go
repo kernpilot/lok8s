@@ -1,6 +1,6 @@
 package ui
 
-// style.go — the presentation layer. Piped output (a stream that is not a
+// style.go is the presentation layer. Piped output (a stream that is not a
 // terminal) is the CONTRACT: byte for byte what the bash implementation
 // prints, which the parity harnesses diff through pipes. Terminal output
 // is PRESENTATION: one house style, colour only on a TTY, and the
@@ -30,8 +30,8 @@ type Style struct {
 // Plain is the piped style: no decoration, no colour.
 var Plain = Style{}
 
-// The palette. One accent (the doctor green), warn, bad, dim and bold; the
-// bash prefixes used "\033[0;31m" and the doctor markers "\033[31m", the
+// The palette: one accent (the doctor green), warn, bad, dim and bold.
+// The bash prefixes used "\033[0;31m" and the doctor markers "\033[31m", the
 // same colour, so the terminal rendering unifies on the short form.
 const (
 	ansiReset  = "\033[0m"
@@ -92,7 +92,7 @@ func ForceTTY(on bool) (restore func()) {
 
 // ForceColor overrides the colour decision for every writer (tests): true
 // colours even a buffer, false keeps a forced TTY plain. It implies
-// nothing about TTY; pair it with ForceTTY for the coloured terminal form.
+// nothing about TTY. Pair it with ForceTTY for the coloured terminal form.
 func ForceColor(on bool) (restore func()) {
 	styleMu.Lock()
 	prev := forceColor
@@ -171,7 +171,7 @@ func Styled(w io.Writer, s Style) io.Writer { return styledWriter{Writer: w, sty
 
 // For is the style of w: a Styled wrapper's own, the process stdout's or
 // stderr's for those files, Plain for anything else (a buffer, a pipe, a
-// file) — under the test overrides, the forced style for every writer.
+// file). Under the test overrides every writer gets the forced style.
 func For(w io.Writer) Style {
 	if s, ok := w.(Styler); ok {
 		return resolve(s.Style().TTY)
@@ -186,7 +186,7 @@ func For(w io.Writer) Style {
 }
 
 // Title writes a title line. Piped it is exactly text (the callers keep
-// their literal `=== … ===`); on a TTY the `=== ` decoration goes and the
+// their literal `=== … ===`). On a TTY the `=== ` decoration goes and the
 // text is bold.
 func Title(w io.Writer, text string) {
 	s := For(w)
@@ -242,12 +242,12 @@ func Next(w io.Writer, cmd, why string) {
 }
 
 // RawErrorTo writes the raw `error: …` line the bash `echo "error: …" >&2`
-// family prints (no [error] prefix); the word is red on a TTY.
+// family prints (no [error] prefix). The word is red on a TTY.
 func RawErrorTo(w io.Writer, format string, a ...any) {
 	fprintf(w, For(w).BadC("error:")+" "+format+"\n", a...)
 }
 
-// RawWarningTo writes the raw `warning: …` line; the word is yellow on a
+// RawWarningTo writes the raw `warning: …` line. The word is yellow on a
 // TTY.
 func RawWarningTo(w io.Writer, format string, a ...any) {
 	fprintf(w, For(w).WarnC("warning:")+" "+format+"\n", a...)

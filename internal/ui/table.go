@@ -19,7 +19,7 @@ type Columns struct {
 // NewColumns measures the columns of header over rows. minWidths are the
 // minimum column widths (nil, or 0 for a column: none). Piped, a column
 // with a minimum is exactly that wide, and a cell that is wider pushes
-// only its own row — bash printf `%-20s` semantics, so the bytes match
+// only its own row (bash printf `%-20s` semantics), so the bytes match
 // the fixed layouts of the ported commands. On a TTY every column is
 // measured (never narrower than its minimum), so nothing overflows.
 func NewColumns(w io.Writer, header []string, rows [][]string, minWidths []int) *Columns {
@@ -42,7 +42,7 @@ func NewColumns(w io.Writer, header []string, rows [][]string, minWidths []int) 
 }
 
 // Header writes the header row and its underline (one dash per header
-// rune, the shape the addons and assets tables print today); on a TTY the
+// rune, the shape the addons and assets tables print today). On a TTY the
 // header is bold and the underline dim.
 func (c *Columns) Header() {
 	underline := make([]string, len(c.header))
@@ -53,7 +53,7 @@ func (c *Columns) Header() {
 	io.WriteString(c.w, c.style.Dim(tableRow(underline, c.widths))+"\n")
 }
 
-// Row writes one row; a missing cell is empty.
+// Row writes one row. A missing cell is empty.
 func (c *Columns) Row(cells ...string) {
 	io.WriteString(c.w, tableRow(cells, c.widths)+"\n")
 }

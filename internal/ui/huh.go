@@ -6,7 +6,7 @@ import (
 )
 
 // HuhTheme is the one huh theme of the CLI: base16 (the terminal's own
-// palette) with the accent on the doctor green — the title, the selector
+// palette) with the accent on the doctor green: the title, the selector
 // and the selected option. The init wizard and the `lo use` select share
 // it.
 func HuhTheme() huh.Theme {

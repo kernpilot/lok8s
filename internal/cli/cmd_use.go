@@ -1,7 +1,7 @@
 package cli
 
 // lo use — set or show the active domain (clusters/.active).
-// Go port of .lok8s/libs/use; piped output is byte-identical. On a
+// Go port of .lok8s/libs/use. Piped output is byte-identical. On a
 // terminal (stdin and stdout) a bare `lo use` opens a select over the
 // domains instead of the listing, and `lo use <unknown>` adds the closest
 // name and the available ones under the [error] line.
@@ -29,7 +29,7 @@ import (
 
 func init() { registerPorted("use", newUseCommand) }
 
-// useIO is where the select reads and writes; Accessible runs it as a
+// useIO is where the select reads and writes. Accessible runs it as a
 // numbered line prompt (the tests script it, like the init wizard's).
 type useIO struct {
 	In         io.Reader
@@ -83,7 +83,7 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // use::_set_active). Rejects names that fail the character allowlist
 // (path-traversal guard) or that don't resolve to a real domain directory.
 // On a terminal the not-found error is followed by the closest name and
-// the available domains; piped, the [error] line is all there is.
+// the available domains. Piped, the [error] line is all there is.
 func useSetActive(paths *config.Paths, target string, out, errOut io.Writer) error {
 	if !domain.NameRe.MatchString(target) {
 		ui.ErrorTo(errOut, "invalid domain name: %s", target)
@@ -141,7 +141,7 @@ func useShow(paths *config.Paths, out io.Writer) error {
 
 // useSelect is the terminal form of a bare `lo use`: one select over the
 // domains, the active one preselected. Enter sets it through the same
-// path as `lo use <domain>`; Esc and Ctrl-C leave without a change (rc 0,
+// path as `lo use <domain>`. Esc and Ctrl-C leave without a change (rc 0,
 // nothing printed). With no cluster at all there is nothing to choose.
 func useSelect(paths *config.Paths, tio useIO, out, errOut io.Writer) error {
 	domains := useDomains(paths)
@@ -169,7 +169,7 @@ func useSelect(paths *config.Paths, tio useIO, out, errOut io.Writer) error {
 	keys := huh.NewDefaultKeyMap()
 	keys.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "leave"))
 	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Active domain").Description("Enter sets it; Esc leaves it as it is.").Options(opts...).Value(&choice),
+		huh.NewSelect[string]().Title("Active domain").Description("Enter sets it. Esc leaves it as it is.").Options(opts...).Value(&choice),
 	)).WithTheme(ui.HuhTheme()).WithKeyMap(keys).WithAccessible(tio.Accessible)
 	if tio.In != nil {
 		form = form.WithInput(tio.In)
@@ -210,7 +210,7 @@ func useDomains(paths *config.Paths) []useDomain {
 }
 
 // useActive reads clusters/.active (trailing newlines dropped, like the
-// bash $(cat …)); ok is false without the file.
+// bash $(cat …)). ok is false without the file.
 func useActive(paths *config.Paths) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(paths.Clusters, ".active"))
 	if err != nil {

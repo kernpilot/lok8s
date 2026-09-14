@@ -30,7 +30,7 @@ func Levenshtein(a, b string) int {
 
 // Closest is the candidate nearest to name by cobra's rule: an edit
 // distance of at most 2, or a candidate that starts with name. The first
-// (in candidates' order) of the nearest wins; ok is false when nothing
+// (in candidates' order) of the nearest wins. ok is false when nothing
 // qualifies.
 func Closest(name string, candidates []string) (best string, ok bool) {
 	bestDist := -1

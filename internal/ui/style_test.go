@@ -8,7 +8,7 @@ import (
 )
 
 // tty renders f into a buffer in the terminal form (colour on) and
-// returns the bytes; plain renders the piped form.
+// returns the bytes. Plain renders the piped form.
 func tty(t *testing.T, f func(w *bytes.Buffer)) string {
 	t.Helper()
 	defer ForceTTY(true)()
@@ -94,7 +94,7 @@ func TestDebugPrefixNeedsDEBUG(t *testing.T) {
 }
 
 // A terminal without colour (NO_COLOR, --no-color) keeps the terminal
-// shape — no === / --- decoration — and drops every escape.
+// shape (no === / --- decoration) and drops every escape.
 func TestTerminalWithoutColor(t *testing.T) {
 	defer ForceTTY(true)()
 	t.Setenv("NO_COLOR", "1")

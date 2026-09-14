@@ -231,7 +231,7 @@ install resolves from the working directory only.`,
 			ui.Title(out, "=== toolchain doctor ===")
 			if !doctorToolchain(cmd.Context(), out, paths, config.KustomizePluginHome(paths), path) {
 				ui.ErrorTo(stderr, "toolchain doctor: a pinned tool is missing (see ✗ above)")
-				ui.Next(stderr, "toolchain install", "installs the pins this lo was built against")
+				ui.Next(stderr, "toolchain install", "installs the pins of this lo build")
 				return ErrHandled
 			}
 			return nil

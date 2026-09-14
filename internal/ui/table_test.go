@@ -7,7 +7,7 @@ import (
 )
 
 // Piped with minimum widths, Table reproduces the fixed printf layout of
-// the ported commands byte for byte — an overflowing cell pushes only its
+// the ported commands byte for byte: an overflowing cell pushes only its
 // own row, like bash printf '%-20s'.
 func TestTablePipedMatchesPrintf(t *testing.T) {
 	header := []string{"NAME", "TYPE", "VERSION", "CHART/REPO"}

@@ -70,7 +70,7 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 // ResolveClusterRef resolves the clusterRef of a deploy.lok8s.yaml to its
 // cluster domain (spec.clusterRef.domain), validating that the referenced
 // domain exists and carries a cluster spec. Error strings verbatim from
-// bash (provision::resolve_clusterref); the not-found message names
+// bash (provision::resolve_clusterref). The not-found message names
 // `clusters/<ref>/` on both sides (see ResolveSpec). internal/build's
 // kubeconfig resolution delegates here.
 func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (string, error) {
