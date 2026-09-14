@@ -2,10 +2,13 @@ package build
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 )
@@ -144,10 +147,143 @@ func TestSplitNamingShapingAndGitignore(t *testing.T) {
 		t.Errorf("secret twin must carry sops metadata: %q", sec)
 	}
 
-	// No stage dir may survive.
-	if stale, _ := filepath.Glob(filepath.Join(domainDir, ".artifacts-stage.*")); len(stale) > 0 {
-		t.Errorf("stage dirs left behind: %v", stale)
+	// No scratch dir may survive.
+	assertNoScratch(t, domainDir)
+}
+
+// assertNoScratch fails when a split scratch dir (the yq tmp dir or the
+// stage) survives under the domain dir.
+func assertNoScratch(t *testing.T, domainDir string) {
+	t.Helper()
+	for _, pat := range []string{".artifacts-tmp.*", ".artifacts-stage.*"} {
+		if stale, _ := filepath.Glob(filepath.Join(domainDir, pat)); len(stale) > 0 {
+			t.Errorf("scratch dirs left behind: %v", stale)
+		}
 	}
+}
+
+// Both scratch dirs live IN the domain dir, next to artifacts/: every move
+// of the split then stays on one filesystem. A tmp dir under $TMPDIR broke
+// every split-mode build on a host or CI runner whose /tmp is its own
+// mount (os.Rename → EXDEV, v0.3.0).
+func TestSplitScratchDirsLiveInTheDomainDir(t *testing.T) {
+	p, domainDir := splitProject(t)
+	writeFileT(t, filepath.Join(domainDir, "artifacts.yaml"), splitArtifact)
+	r, err := newSplitRun(Options{Paths: p, Domain: "s.dev", Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []struct{ name, path, prefix string }{
+		{"tmp", r.tmpDir, ".artifacts-tmp."},
+		{"stage", r.stage, ".artifacts-stage."},
+	} {
+		if filepath.Dir(dir.path) != domainDir || !strings.HasPrefix(filepath.Base(dir.path), dir.prefix) {
+			t.Errorf("%s dir = %s, want %s", dir.name, dir.path, filepath.Join(domainDir, dir.prefix+"*"))
+		}
+		if info, err := os.Stat(dir.path); err != nil || !info.IsDir() {
+			t.Errorf("%s dir %s not created: %v", dir.name, dir.path, err)
+		}
+	}
+	r.cleanup()
+	assertNoScratch(t, domainDir)
+}
+
+// A build killed outright leaves its scratch dirs; the next split removes
+// every sibling older than this process and keeps one a running build
+// (a modification time after this process started) is still writing.
+func TestSplitSweepsStaleScratchSiblings(t *testing.T) {
+	p, domainDir := splitProject(t)
+	writeFileT(t, filepath.Join(domainDir, "artifacts.yaml"), splitArtifact)
+	old := processStart.Add(-time.Hour)
+	stale := []string{".artifacts-tmp.dead1", ".artifacts-stage.dead1"}
+	for _, name := range stale {
+		dir := filepath.Join(domainDir, name)
+		writeFileT(t, filepath.Join(dir, "ConfigMap.x.y.yml"), "kind: ConfigMap\n")
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := filepath.Join(domainDir, ".artifacts-tmp.live")
+	writeFileT(t, filepath.Join(live, "nonsecret.stream"), "")
+	if err := os.Chtimes(live, time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	if stderr, err := runSplit(t, p, false); err != nil {
+		t.Fatalf("split failed: %v (%s)", err, stderr)
+	}
+	for _, name := range stale {
+		if _, err := os.Stat(filepath.Join(domainDir, name)); !os.IsNotExist(err) {
+			t.Errorf("stale scratch dir %s survived the next split", name)
+		}
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Error("a scratch dir newer than this process belongs to a running build and must stay")
+	}
+	_ = os.RemoveAll(live)
+	assertNoScratch(t, domainDir)
+}
+
+func TestSplitScratchDirsRemovedOnSuccessAndFailure(t *testing.T) {
+	p, domainDir := splitProject(t)
+	writeFileT(t, filepath.Join(domainDir, "artifacts.yaml"), splitArtifact)
+	if stderr, err := runSplit(t, p, false); err != nil {
+		t.Fatalf("split failed: %v (%s)", err, stderr)
+	}
+	assertNoScratch(t, domainDir)
+
+	// A failure AFTER both scratch dirs are populated: the non-Secret files
+	// sit in the stage when the trust-nothing verify refuses the Secret.
+	t.Setenv("SOPS_STUB_PLAINTEXT", "1")
+	if _, err := runSplit(t, p, false); err == nil {
+		t.Fatal("the plaintext stub must fail the split")
+	}
+	assertNoScratch(t, domainDir)
+}
+
+// The regression: every rename reports EXDEV (the scratch dirs on another
+// device than artifacts/) and the split still produces the whole layout
+// through the copy fallback.
+func TestSplitSurvivesCrossDeviceScratch(t *testing.T) {
+	swapRename(t, exdev)
+	p, domainDir := splitProject(t)
+	writeFileT(t, filepath.Join(domainDir, "artifacts.yaml"), splitArtifact)
+	stderr, err := runSplit(t, p, false)
+	if err != nil {
+		t.Fatalf("split must survive a cross-device scratch dir: %v (%s)", err, stderr)
+	}
+	if strings.Contains(stderr, "failed to split") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	outDir := filepath.Join(domainDir, "artifacts")
+	want := []string{".gitignore", "ClusterRole.cr.yaml", "ConfigMap.ns1.cm.yaml", "Job.ns1.jb.yaml", "Secret.ns1.sec.sops.yaml"}
+	if got := dirNames(t, outDir); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("split dir = %v, want %v", got, want)
+	}
+	cm, _ := os.ReadFile(filepath.Join(outDir, "ConfigMap.ns1.cm.yaml"))
+	if !bytes.Contains(cm, []byte("k: v")) {
+		t.Errorf("copied ConfigMap lost its content: %q", cm)
+	}
+	assertNoScratch(t, domainDir)
+}
+
+// The failure message names the cause (D33): a rename error that is not
+// EXDEV passes through and is printed after the artifact path.
+func TestSplitFailureMessageNamesTheCause(t *testing.T) {
+	swapRename(t, func(oldpath, newpath string) error {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EACCES}
+	})
+	p, domainDir := splitProject(t)
+	writeFileT(t, filepath.Join(domainDir, "artifacts.yaml"), splitArtifact)
+	stderr, err := runSplit(t, p, false)
+	if err == nil {
+		t.Fatal("a rename failure other than EXDEV must fail the split")
+	}
+	want := "split: failed to split " + filepath.Join(domainDir, "artifacts.yaml") + ": rename "
+	if !strings.Contains(stderr, want) || !strings.Contains(stderr, "permission denied") {
+		t.Errorf("stderr = %q, want it to carry %q and the rename's error", stderr, want)
+	}
+	assertNoScratch(t, domainDir)
 }
 
 func TestSplitNoArtifact(t *testing.T) {

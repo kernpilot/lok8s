@@ -96,7 +96,7 @@ The binary ships in **two builds from one tree**, selected by the
 | Size (linux/amd64, stripped) | **49.8 MB** | **123.1 MB** |
 | `LO_RENDER` | unset/`exec` = the exec pipeline (the only one); `inprocess` is an **error** naming lo-full (`LO_RENDER=inprocess: this is lo core … install lo-full`) | unset/`inprocess` = in-process; `exec` = the subprocess pipeline for an A/B |
 | Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo toolchain install`](cli.md#lo-toolchain) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
-| `lo --version` | `lo version 0.3.0 (core)` | `lo version 0.3.0 (full)` |
+| `lo --version` | `lo version 0.3.1 (core)` | `lo version 0.3.1 (full)` |
 
 Everything else (every command, the parity harnesses, the tests) is the
 same code. `go.mod` keeps khelm and the kustomize API for both; only the
@@ -312,7 +312,7 @@ itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
 
 ```yaml
 # .lo-origin — written by lo when it ejected this asset. Do not edit.
-lo: 0.3.0
+lo: 0.3.1
 ejectedAt: 2026-09-03T10:00:00Z
 files:
   chart.yaml: sha256:…
@@ -550,6 +550,7 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D12 | **Tool-not-found checks in `lo secrets`.** `sops` and `ssh-to-age` are libraries in the binary, so their "not installed" branches do not exist. | `internal/secrets/ops.go` |
 | D24 | **sops is the kernpilot age-only fork.** `go.mod` replaces `github.com/getsops/sops/v3` with `github.com/kernpilot/sops/v3` (upstream v3.13.3 minus every key backend except age). A file or a `.sops.yaml` rule with a KMS, GCP KMS, Azure Key Vault, Vault or PGP recipient is rejected with `unsupported key type <x> (age-only build)`; bash used the full sops CLI, which could serve them. age files stay interoperable with the sops CLI. | `go.mod` (`replace`), `internal/secrets/sops.go` |
 | D28 | **A credential with a CR or LF is refused.** The binary hands `KKP_TOKEN` to curl through a config line on stdin and the CAPI credentials to kubectl through an env file (D20 family); both carriers are line based, so a newline in a value would end the line and start another option or key. `credentials.NoNewline` refuses the value with `environment variable <NAME> must not contain a newline` and no tool runs. The bash passed the values as arguments and let the tool fail or mangle them. | `internal/credentials/credentials.go`, `internal/driver/kkp/api.go`, `internal/driver/capi/generate.go` (`credentialEnvFile`) |
+| D33 | **`split: failed to split …` and `split: failed to shape …` name the cause.** The bash prints the artifact path alone; the binary appends the error it observed (`: rename …: invalid cross-device link`, `: exit status 1`, `: yq not found — install the pinned toolchain (b install)`). The scratch dir moved with it: the bash stages the split under `mktemp -d` (`$TMPDIR`) and moves the files with `mv`, a copy across devices; the binary stages under `<domain>/.artifacts-tmp.*` next to `.artifacts-stage.*` (a rename across filesystems fails with EXDEV, and v0.3.0 failed every split-mode build on a host or CI runner whose `/tmp` is its own mount) and falls back to copy + fsync + remove when a rename still crosses a device. No harness pins the messages; `hack/parity-build.sh` runs one build with `TMPDIR` on another filesystem than the project. | `internal/build/split.go`, `internal/build/move.go`, `hack/parity-build.sh` |
 
 ### Rendering and display
 

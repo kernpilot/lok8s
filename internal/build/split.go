@@ -64,6 +64,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -240,22 +241,33 @@ func newSplitRun(o Options) (*splitRun, error) {
 		r.sopsPath = path
 	}
 
-	// Everything is assembled in temp dirs first; outDir is only touched in
-	// the final swap after every document is emitted, encrypted and
+	// Everything is assembled in scratch dirs first; outDir is only touched
+	// in the final swap after every document is emitted, encrypted and
 	// verified — a mid-split failure (sops error, collision) must not leave
 	// a pruned or partial artifacts/ (the single-file build gets the same
-	// guarantee from its tmp+atomic-rename). The stage lives next to outDir
-	// so the final moves stay on one filesystem.
-	tmpDir, err := os.MkdirTemp("", "tmp.")
+	// guarantee from its tmp+atomic-rename). BOTH scratch dirs live in the
+	// domain dir, next to outDir: the files move tmp → stage → outDir by
+	// rename, and a rename across filesystems fails with EXDEV. A tmp dir
+	// under $TMPDIR (the bash `mktemp -d`) sat on tmpfs on hosts and CI
+	// runners whose project lives on another mount, and the first move
+	// failed every split-mode build (v0.3.0). The bash twin never saw it:
+	// `mv` copies across devices. moveFile keeps that fallback for a
+	// rename that still crosses a device. Both dirs are removed on every
+	// exit path (cleanup); a build killed outright leaves them, and the
+	// next split sweeps every sibling older than this process
+	// (sweepStaleScratch). The parity harness resets and the scaffolded
+	// .gitignore list them by their prefixes.
+	sweepStaleScratch(domainDir, r.stderr)
+	tmpDir, err := os.MkdirTemp(domainDir, ".artifacts-tmp.")
 	if err != nil {
-		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 		return nil, ErrHandled
 	}
 	r.tmpDir = tmpDir
 	stage, err := os.MkdirTemp(domainDir, ".artifacts-stage.")
 	if err != nil {
 		r.cleanup()
-		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 		return nil, ErrHandled
 	}
 	r.stage = stage
@@ -269,12 +281,38 @@ func newSplitRun(o Options) (*splitRun, error) {
 		content := "creation_rules:\n  - age: '" + recipients + "'\n"
 		if err := os.WriteFile(r.sopsConfig, []byte(content), 0o600); err != nil {
 			r.cleanup()
-			ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 			return nil, ErrHandled
 		}
 	}
 	r.yqPath, r.yqOK = execx.Look(o.Paths, "yq")
 	return r, nil
+}
+
+// processStart bounds the stale-scratch sweep: a scratch dir modified
+// before this process started belongs to a build that is gone.
+var processStart = time.Now()
+
+// scratchPrefixes are the split's scratch dir prefixes under the domain dir.
+var scratchPrefixes = []string{".artifacts-tmp.", ".artifacts-stage."}
+
+// sweepStaleScratch removes the scratch dirs a killed build left under the
+// domain dir. Only siblings older than this process go: a build running
+// next to this one keeps writing into its dirs, so theirs stay.
+func sweepStaleScratch(domainDir string, stderr io.Writer) {
+	for _, prefix := range scratchPrefixes {
+		for _, dir := range globSorted(filepath.Join(domainDir, prefix+"*")) {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() || !info.ModTime().Before(processStart) {
+				continue
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				ui.WarnTo(stderr, "split: cannot remove the stale scratch dir %s: %v", dir, err)
+				continue
+			}
+			ui.DebugTo(stderr, "split: removed the stale scratch dir %s", dir)
+		}
+	}
 }
 
 // cleanup drops the scratch dirs (idempotent).
@@ -291,11 +329,16 @@ func (r *splitRun) cleanup() {
 
 // emitNonSecrets shapes the NON-Secret documents: one yq pass shapes Jobs
 // + filters Secrets OUT, a second splits into <Kind>.<namespace>.<name>.yml
-// under the tmp dir, then the files move into the stage as .yaml.
+// under the tmp dir, then the files move into the stage as .yaml
+// (moveFile: a rename, with the cross-device fallback).
 func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	streamPath := filepath.Join(r.tmpDir, "nonsecret.stream")
-	if !r.yqOK || execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr) != nil {
-		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+	if !r.yqOK {
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: yq not found — install the pinned toolchain (b install)", r.artifact)
+		return ErrHandled
+	}
+	if err := execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr); err != nil {
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 		return ErrHandled
 	}
 	// Guard the empty stream (a Secrets-only render): yq -s on empty stdin
@@ -303,7 +346,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	if info, err := os.Stat(streamPath); err == nil && info.Size() > 0 {
 		streamFile, err := os.Open(streamPath)
 		if err != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 			return ErrHandled
 		}
 		runErr := r.o.runner().Run(ctx, execx.Cmd{
@@ -312,7 +355,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 		})
 		_ = streamFile.Close()
 		if runErr != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, runErr)
 			return ErrHandled
 		}
 		_ = os.Remove(streamPath)
@@ -332,8 +375,8 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	}
 	for _, f := range ymlFiles {
 		base := filepath.Base(f)
-		if err := os.Rename(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+		if err := moveFile(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 			return ErrHandled
 		}
 		r.emitted++
@@ -452,7 +495,7 @@ func (r *splitRun) verifyStage() error {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(r.stage, ".gitignore"), []byte(gitignoreContent), 0o600); err != nil {
-		ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 		return ErrHandled
 	}
 	return nil
@@ -474,7 +517,7 @@ func (r *splitRun) verifyStage() error {
 // there is correct.
 func (r *splitRun) swapStage() error {
 	if err := os.MkdirAll(r.outDir, 0o755); err != nil {
-		ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 		return ErrHandled
 	}
 	for _, name := range generatedFiles(r.outDir) {
@@ -496,8 +539,8 @@ func (r *splitRun) swapStage() error {
 		if _, err := os.Stat(f); err != nil {
 			continue
 		}
-		if err := os.Rename(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+		if err := moveFile(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 			return ErrHandled
 		}
 	}
