@@ -226,7 +226,7 @@ func TestRoutingInvalidBlockRefuses(t *testing.T) {
 		// lint runs and reports the block as a finding.
 		setOSArgs(t, "lint", "--domain", "none.dev")
 		_, stderr, err = runLo(t, NewRoot(p), "lint", "--domain", "none.dev")
-		if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error]\033[0m "+c.want+"\n") || strings.Contains(stderr, "lo: ") {
+		if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] "+c.want+"\n") || strings.Contains(stderr, "lo: ") {
 			t.Errorf("%s: lint stderr = %q", c.name, stderr)
 		}
 		if len(*recs) != 0 {
@@ -341,9 +341,9 @@ func TestDoctorImplementationLines(t *testing.T) {
 	}
 	out := doctor(routedProject(t, "    bash:\n      commands: [registry, use, lint]\n", true))
 	for _, want := range []string{
-		"✓\033[0m implementation: go; bash for registry, use, lint; tree .lok8s (project, lok8s.yaml spec.implementation)\n",
-		"!\033[0m registry is routed to bash; lo up manages the same registries with Go code. Keep the lib stock or expect drift.\n",
-		"!\033[0m use is routed to bash; every Go command reads the same clusters/.active. Keep the lib stock or expect drift.\n",
+		"  ✓ implementation: go; bash for registry, use, lint; tree .lok8s (project, lok8s.yaml spec.implementation)\n",
+		"  ! registry is routed to bash; lo up manages the same registries with Go code. Keep the lib stock or expect drift.\n",
+		"  ! use is routed to bash; every Go command reads the same clusters/.active. Keep the lib stock or expect drift.\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -353,13 +353,13 @@ func TestDoctorImplementationLines(t *testing.T) {
 		t.Errorf("lint shares no state:\n%s", out)
 	}
 	out = doctor(routedProject(t, "    default: bash\n    bash:\n      tree: vendor/lok8s\n", false))
-	if !strings.Contains(out, "!\033[0m implementation: implementation bash: the tree") {
+	if !strings.Contains(out, "  ! implementation: implementation bash: the tree") {
 		// The tree is missing: a warning, not an ok line.
 		t.Errorf("missing tree:\n%s", out)
 	}
 	p := routedProject(t, "    default: bash\n", true)
 	out = doctor(p)
-	if want := "✓\033[0m implementation: bash for every command; tree .lok8s (project, lok8s.yaml spec.implementation)\n"; !strings.Contains(out, want) || strings.Contains(out, "routed to bash;") {
+	if want := "  ✓ implementation: bash for every command; tree .lok8s (project, lok8s.yaml spec.implementation)\n"; !strings.Contains(out, want) || strings.Contains(out, "routed to bash;") {
 		t.Errorf("default bash:\n%s", out)
 	}
 }
@@ -433,7 +433,7 @@ func TestRoutingMissingTreeStillAllowsEject(t *testing.T) {
 		t.Errorf("up before eject: %v %q", err, stderr)
 	}
 	setOSArgs(t, "lint", "--domain", "none.dev")
-	if _, stderr, err := runLo(t, NewRoot(p), "lint", "--domain", "none.dev"); !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error]\033[0m "+want+"\n") {
+	if _, stderr, err := runLo(t, NewRoot(p), "lint", "--domain", "none.dev"); !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] "+want+"\n") {
 		t.Errorf("lint reports the missing tree: %v %q", err, stderr)
 	}
 	setOSArgs(t, "assets", "eject", "bash")
@@ -464,7 +464,7 @@ func TestRoutingInvalidBlockStillRunsDoctorHelpCompletion(t *testing.T) {
 	want := `lok8s.yaml: spec.implementation.bash.commands: unknown command "bogus". Use top-level command names from "lo --help".`
 	setOSArgs(t, "doctor")
 	stdout, stderr, _ := runLo(t, NewRoot(p), "doctor")
-	if strings.Contains(stderr, "lo: ") || !strings.Contains(stdout, "!\033[0m implementation: "+want+"\n") {
+	if strings.Contains(stderr, "lo: ") || !strings.Contains(stdout, "  ! implementation: "+want+"\n") {
 		t.Errorf("doctor: stdout=%q stderr=%q", stdout, stderr)
 	}
 	for _, args := range [][]string{{"help"}, {"help", "up"}, {"completion", "bash"}} {
@@ -477,7 +477,7 @@ func TestRoutingInvalidBlockStillRunsDoctorHelpCompletion(t *testing.T) {
 	q := routedProject(t, "    default: bash\n", false)
 	setOSArgs(t, "doctor")
 	stdout, _, _ = runLo(t, NewRoot(q), "doctor")
-	if !strings.Contains(stdout, "!\033[0m implementation: implementation bash: the tree ") {
+	if !strings.Contains(stdout, "  ! implementation: implementation bash: the tree ") {
 		t.Errorf("doctor without the tree:\n%s", stdout)
 	}
 }
@@ -523,9 +523,9 @@ func TestRoutingUnknownKeysWarnInLint(t *testing.T) {
 	setOSArgs(t, "lint", "--domain", "none.dev")
 	_, stderr, _ := runLo(t, NewRoot(p), "lint", "--domain", "none.dev")
 	for _, want := range []string{
-		"[warn]\033[0m lok8s.yaml: spec.implementations: unknown key. Use spec.implementation.\n",
-		"[warn]\033[0m lok8s.yaml: spec.implementation: unknown key \"defaults\".\n",
-		"[warn]\033[0m lok8s.yaml: spec.implementation.bash: unknown key \"command\".\n",
+		"[warn] lok8s.yaml: spec.implementations: unknown key. Use spec.implementation.\n",
+		"[warn] lok8s.yaml: spec.implementation: unknown key \"defaults\".\n",
+		"[warn] lok8s.yaml: spec.implementation.bash: unknown key \"command\".\n",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("missing %q in:\n%s", want, stderr)

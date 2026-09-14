@@ -1,6 +1,7 @@
-// Package ui carries the CLI's output conventions, matching the bash
-// implementation's verbose.sh helpers byte for byte so ported commands stay
-// indistinguishable from their argsh originals.
+// Package ui carries the CLI's output conventions: the [error] / [warn] /
+// [debug] prefixes of the bash implementation's verbose.sh, byte for byte
+// off a terminal so ported commands stay indistinguishable from their
+// argsh originals, and the terminal presentation layer (style.go) on top.
 package ui
 
 import (
@@ -42,12 +43,14 @@ func (e *handledError) Unwrap() error { return e.err }
 // else is answered through Unwrap.
 func (e *handledError) Is(target error) bool { return target == ErrHandled }
 
-const (
-	green  = "\033[0;32m"
-	red    = "\033[0;31m"
-	yellow = "\033[0;33m"
-	reset  = "\033[0m"
-)
+func fprintf(w io.Writer, format string, a ...any) { fmt.Fprintf(w, format, a...) }
+
+// prefix writes `[tag] line`: the tag coloured when w is a terminal that
+// allows colour, plain otherwise (the bash verbose.sh gates on `-t 2` the
+// same way, so piped stderr matches byte for byte).
+func prefix(w io.Writer, code, tag, format string, a ...any) {
+	fprintf(w, For(w).Paint(code, tag)+" "+format+"\n", a...)
+}
 
 // Debug writes a [debug] line to stderr when DEBUG is set (bash: debug()).
 func Debug(format string, a ...any) {
@@ -59,7 +62,7 @@ func DebugTo(w io.Writer, format string, a ...any) {
 	if os.Getenv("DEBUG") == "" {
 		return
 	}
-	fmt.Fprintf(w, green+"[debug]"+reset+" "+format+"\n", a...)
+	prefix(w, ansiGreen, "[debug]", format, a...)
 }
 
 // Error writes an [error] line to stderr (bash: error()).
@@ -69,7 +72,7 @@ func Error(format string, a ...any) {
 
 // ErrorTo writes an [error] line to w.
 func ErrorTo(w io.Writer, format string, a ...any) {
-	fmt.Fprintf(w, red+"[error]"+reset+" "+format+"\n", a...)
+	prefix(w, ansiRed, "[error]", format, a...)
 }
 
 // Warn writes a [warn] line to stderr (bash: warn()).
@@ -79,5 +82,5 @@ func Warn(format string, a ...any) {
 
 // WarnTo writes a [warn] line to w.
 func WarnTo(w io.Writer, format string, a ...any) {
-	fmt.Fprintf(w, yellow+"[warn]"+reset+" "+format+"\n", a...)
+	prefix(w, ansiYellow, "[warn]", format, a...)
 }

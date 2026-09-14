@@ -69,7 +69,7 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 
 	// diff: clean.
 	stdout, _, err = runLo(t, NewRoot(p), "assets", "diff", "--check")
-	if err != nil || !strings.Contains(stdout, "addons/cilium                   addon       local ") || !strings.Contains(stdout, "addons/ccm                      addon       builtin ") {
+	if err != nil || !strings.Contains(stdout, "\naddons/cilium ") || !strings.Contains(stdout, "  addon      local ") || !strings.Contains(stdout, "  addon      builtin ") {
 		t.Fatalf("diff clean: err=%v\n%s", err, stdout)
 	}
 
@@ -77,7 +77,7 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 	chart := filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml")
 	testutil.WriteFile(t, chart, "kind: ChartRenderer\nversion: 0.0.0-mine\n")
 	stdout, stderr, err = runLo(t, NewRoot(p), "assets", "diff", "--check")
-	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "1 asset(s) drifted") || !strings.Contains(stdout, "local (modified)    0.0.0-mine") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "1 asset(s) drifted") || !strings.Contains(stdout, "local (modified)  0.0.0-mine") {
 		t.Fatalf("diff --check drift: err=%v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	stdout, _, err = runLo(t, NewRoot(p), "assets", "diff", "addons/cilium")
@@ -138,7 +138,7 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 		t.Errorf("assets show still exists: err=%v stderr=%s", err, stderr)
 	}
 	stdout, _, err = runLo(t, NewRoot(p), "assets", "list")
-	if err != nil || !strings.HasPrefix(stdout, "ASSET                           KIND        ORIGIN") || !strings.Contains(stdout, "chat                            chat        builtin") {
+	if err != nil || !strings.HasPrefix(stdout, "ASSET ") || !strings.Contains(stdout, "\nchat ") || !strings.Contains(stdout, "  chat       builtin") {
 		t.Errorf("list: err=%v\n%s", err, stdout)
 	}
 
@@ -150,7 +150,7 @@ func TestAssetsEjectDiffUpdateRoundTrip(t *testing.T) {
 		t.Errorf("eject --check with a Tiltfile loader: err=%v\n%s", err, stdout)
 	}
 	stdout, _, err = runLo(t, NewRoot(p), "assets", "list")
-	if err != nil || !strings.Contains(stdout, "tilt                            tilt        builtin") {
+	if err != nil || !strings.Contains(stdout, "\ntilt ") || !strings.Contains(stdout, "  tilt       builtin") {
 		t.Errorf("list: err=%v\n%s", err, stdout)
 	}
 	// A double-quoted load() is valid Starlark and `lo tilt up` ejects the
@@ -350,11 +350,11 @@ func TestDoctorAssetsLine(t *testing.T) {
 	if _, _, err := runLo(t, NewRoot(p), "assets", "eject", "addons/cilium"); err != nil {
 		t.Fatal(err)
 	}
-	if line = doctorAssetsLine(t, p); !strings.Contains(line, "✓\033[0m assets: 1 local, all in sync with the binary") {
+	if line = doctorAssetsLine(t, p); !strings.Contains(line, "  ✓ assets: 1 local, all in sync with the binary") {
 		t.Errorf("in sync: %q", line)
 	}
 	testutil.WriteFile(t, filepath.Join(p.Lok8s, "addons", "cilium", "chart.yaml"), "edited\n")
-	if line = doctorAssetsLine(t, p); !strings.Contains(line, "!\033[0m assets: 1 of 1 local assets drifted (lo assets diff)") {
+	if line = doctorAssetsLine(t, p); !strings.Contains(line, "  ! assets: 1 of 1 local assets drifted (lo assets diff)") {
 		t.Errorf("drift: %q", line)
 	}
 	// A complete vendored tree, no markers, in sync: the line is omitted so
@@ -409,7 +409,7 @@ func TestAssetsEjectBash(t *testing.T) {
 	}
 
 	stdout, _, err = runLo(t, NewRoot(p), "assets", "list")
-	if err != nil || !strings.Contains(stdout, "bash                            bash        local ") {
+	if err != nil || !strings.Contains(stdout, "\nbash ") || !strings.Contains(stdout, "  bash       local ") {
 		t.Errorf("list: %v\n%s", err, stdout)
 	}
 	// A second eject finds the local tree and writes nothing.

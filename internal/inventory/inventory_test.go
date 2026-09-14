@@ -129,7 +129,7 @@ spec:
 	}
 	// The golden carries a trailing newline; BuildJSON does not.
 	testutil.Golden(t, filepath.Join("testdata", "build_golden.json"), out+"\n", *update)
-	if want := "\033[0;33m[warn]\033[0m inventory: skipping unparseable bootstrap entry 'bad'\n"; errBuf.String() != want {
+	if want := "[warn] inventory: skipping unparseable bootstrap entry 'bad'\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
 }
@@ -334,7 +334,7 @@ func TestBuildRefusesMalformedKind(t *testing.T) {
 	if strings.Contains(out, `"kind": "lo"`) {
 		t.Error("malformed kind laundered to lo")
 	}
-	if want := "\033[0;31m[error]\033[0m inventory: cluster spec declares a malformed kind: " + spec + "\n"; errBuf.String() != want {
+	if want := "[error] inventory: cluster spec declares a malformed kind: " + spec + "\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
 }
@@ -398,7 +398,7 @@ func TestPublishWithoutKubeconfigWarns(t *testing.T) {
 	f := &fakeRunner{}
 	var errBuf bytes.Buffer
 	Publish(t.Context(), p, f, &errBuf, "soft", spec, filepath.Join(p.Base, ".kubeconfig", "nonexistent.yaml"))
-	if want := "\033[0;33m[warn]\033[0m inventory: kubeconfig not found (" + filepath.Join(p.Base, ".kubeconfig", "nonexistent.yaml") + ") — skipping ClusterInventory publish\n"; errBuf.String() != want {
+	if want := "[warn] inventory: kubeconfig not found (" + filepath.Join(p.Base, ".kubeconfig", "nonexistent.yaml") + ") — skipping ClusterInventory publish\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
 	if len(f.calls) != 0 {
@@ -429,7 +429,7 @@ func TestPublishUnreachableClusterWarns(t *testing.T) {
 	f := &fakeRunner{fail: true}
 	var errBuf bytes.Buffer
 	Publish(t.Context(), p, f, &errBuf, "unreach", spec, kc)
-	if want := "\033[0;33m[warn]\033[0m inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish\n"; errBuf.String() != want {
+	if want := "[warn] inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
 	if len(f.calls) != 1 {
@@ -478,7 +478,7 @@ func TestPublishCRApplyFailureWarns(t *testing.T) {
 	f := &crFailRunner{}
 	var errBuf bytes.Buffer
 	Publish(t.Context(), p, f, &errBuf, "crfail", spec, kc)
-	if want := "\033[0;33m[warn]\033[0m inventory: failed to publish the ClusterInventory for crfail (provision/deploy unaffected)\n"; errBuf.String() != want {
+	if want := "[warn] inventory: failed to publish the ClusterInventory for crfail (provision/deploy unaffected)\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
 }

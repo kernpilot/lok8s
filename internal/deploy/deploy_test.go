@@ -146,7 +146,7 @@ func TestApplyMissingArtifact(t *testing.T) {
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
-	want := "\033[0;31m[error]\033[0m no artifact for test.lok8s.dev: " + filepath.Join(domainDir, "artifacts.yaml") + " — run 'lo build' first\n"
+	want := "[error] no artifact for test.lok8s.dev: " + filepath.Join(domainDir, "artifacts.yaml") + " — run 'lo build' first\n"
 	if errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
@@ -217,7 +217,7 @@ func TestApplyFilteredNoMatchWarns(t *testing.T) {
 	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "nonexistent"); err != nil {
 		t.Fatal(err)
 	}
-	want := "\033[0;33m[warn]\033[0m no objects match lok8s.dev/type=nonexistent in " + filepath.Join(domainDir, "artifacts.yaml") + "\n"
+	want := "[warn] no objects match lok8s.dev/type=nonexistent in " + filepath.Join(domainDir, "artifacts.yaml") + "\n"
 	if errBuf.String() != want {
 		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 	}
@@ -246,7 +246,7 @@ func TestApplyFilteredRejectsInjection(t *testing.T) {
 		if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", tc[0], tc[1]); !errors.Is(err, ErrHandled) {
 			t.Fatalf("%v: err = %v", tc, err)
 		}
-		want := "\033[0;31m[error]\033[0m Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)\n"
+		want := "[error] Invalid label selector: key and value must be alphanumeric with . _ - (key may also contain /)\n"
 		if errBuf.String() != want {
 			t.Errorf("stderr = %q", errBuf.String())
 		}
@@ -279,7 +279,7 @@ func TestWaitCRDs(t *testing.T) {
 	f2 := &fakeRunner{waitFail: true}
 	d2, _, errBuf, _ := newDeployer(t, f2, "")
 	d2.waitCRDs(t.Context(), "kind: CustomResourceDefinition\nmetadata:\n  name: x.y\n")
-	if want := "\033[0;33m[warn]\033[0m CRD x.y not established within timeout\n"; errBuf.String() != want {
+	if want := "[warn] CRD x.y not established within timeout\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
 }
@@ -292,7 +292,7 @@ func TestParseLabel(t *testing.T) {
 		if _, _, err := ParseLabel(&errBuf, bad); !errors.Is(err, ErrHandled) {
 			t.Errorf("%q: err = %v", bad, err)
 		}
-		want := "\033[0;31m[error]\033[0m invalid --label '" + bad + "' — expected key=value (e.g. lok8s.dev/name=zitadel)\n"
+		want := "[error] invalid --label '" + bad + "' — expected key=value (e.g. lok8s.dev/name=zitadel)\n"
 		if errBuf.String() != want {
 			t.Errorf("%q: stderr = %q", bad, errBuf.String())
 		}
