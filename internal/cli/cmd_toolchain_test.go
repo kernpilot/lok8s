@@ -186,7 +186,7 @@ func TestToolchainDoctorSectionAlone(t *testing.T) {
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want the handled sentinel (b is missing)", err)
 	}
-	if !strings.HasPrefix(stdout, "\n--- toolchain (lo ") {
+	if !strings.HasPrefix(stdout, "=== toolchain doctor ===\n\n--- toolchain (lo ") {
 		t.Errorf("no toolchain header:\n%s", stdout)
 	}
 	if strings.Contains(stdout, "=== lok8s doctor ===") || strings.Contains(stdout, "--- environment ---") {

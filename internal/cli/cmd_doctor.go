@@ -102,8 +102,12 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	r := execx.NewRunner(paths)
 	path := childPATH(paths, bashTreeForPATH(paths).Dir)
 
-	fmt.Fprintln(out, "=== lok8s doctor ===")
-	fmt.Fprintln(out)
+	// Piped: the title the bash doctor prints. On a terminal the command is
+	// the title, and the report starts with its first section.
+	if !ui.For(out).TTY {
+		ui.Title(out, "=== lok8s doctor ===")
+		fmt.Fprintln(out)
+	}
 
 	// Each section reports whether a REQUIRED check failed; every failure
 	// keeps printing so the report is complete.
@@ -136,7 +140,7 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 // of the toolchain still runs bash — report the bash the prepared PATH
 // resolves (the one the shim executes).
 func doctorRuntimeSection(ctx context.Context, r execx.Runner, path string, out io.Writer) bool {
-	fmt.Fprintln(out, "--- runtime ---")
+	ui.Section(out, "runtime")
 	major, minor, ok := doctorBashVersion(ctx, r, path)
 	if !ok {
 		// Unreachable through the bash implementation (it IS bash); the Go
@@ -156,7 +160,7 @@ func doctorRuntimeSection(ctx context.Context, r execx.Runner, path string, out 
 // doctorToolsSection is `--- tools ---`.
 func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io.Writer) bool {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "--- tools ---")
+	ui.Section(out, "tools")
 	ok := true
 	for _, t := range doctorToolsPre {
 		if !doctorTool(out, path, t.name, t.required, t.purpose) {
@@ -184,7 +188,7 @@ func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io
 // section it decides on.
 func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path string, toolchainFlag bool, out io.Writer) bool {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "--- environment ---")
+	ui.Section(out, "environment")
 	doctorDir(out, "PATH_BASE", paths.Base)
 	doctorDir(out, "PATH_LOK8S", paths.Lok8s)
 	doctorDir(out, "PATH_CLUSTERS", paths.Clusters)
@@ -226,7 +230,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 // doctorTLSSection is `--- dev TLS (cert: CA) ---` (advisory).
 func doctorTLSSection(ctx context.Context, r execx.Runner, path, d string, out io.Writer) {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "--- dev TLS (cert: CA) ---")
+	ui.Section(out, "dev TLS (cert: CA)")
 	mkcert, ok := toolchain.LookPath(path, "mkcert")
 	if !ok {
 		doctorWarn(out, "mkcert absent — only needed to TRUST the dev CA (lo trust), never to build")
@@ -270,7 +274,7 @@ func doctorRegistryTLS(ctx context.Context, r execx.Runner, paths *config.Paths,
 // doctorDomainSection is `--- domain ---` (advisory).
 func doctorDomainSection(paths *config.Paths, d string, out io.Writer) {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "--- domain ---")
+	ui.Section(out, "domain")
 	if d == "" {
 		doctorWarn(out, "no active domain (run: lo use <domain>)")
 		return
@@ -388,8 +392,8 @@ func doctorBashMode(w io.Writer, paths *config.Paths) {
 // lo-full only warns).
 func doctorToolchain(ctx context.Context, out io.Writer, paths *config.Paths, pluginHome, path string) bool {
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "--- toolchain (lo %s; pins: kustomize %s, khelm v%s, Secret %s) ---\n",
-		render.Variant(), toolchain.KustomizeCLI, toolchain.KhelmVersion, "v"+strings.TrimPrefix(assets.Version(), "v"))
+	ui.Section(out, fmt.Sprintf("toolchain (lo %s; pins: kustomize %s, khelm v%s, Secret %s)",
+		render.Variant(), toolchain.KustomizeCLI, toolchain.KhelmVersion, "v"+strings.TrimPrefix(assets.Version(), "v")))
 	ok := true
 	for _, c := range toolchain.Doctor(ctx, toolchain.DoctorOptions{
 		Base: paths.Base, Bin: paths.Bin, PluginHome: pluginHome, PATH: path,
@@ -408,9 +412,12 @@ func doctorToolchain(ctx context.Context, out io.Writer, paths *config.Paths, pl
 	return ok
 }
 
-func doctorOK(w io.Writer, msg string)   { fmt.Fprintf(w, "  \033[32m✓\033[0m %s\n", msg) }
-func doctorWarn(w io.Writer, msg string) { fmt.Fprintf(w, "  \033[33m!\033[0m %s\n", msg) }
-func doctorBad(w io.Writer, msg string)  { fmt.Fprintf(w, "  \033[31m✗\033[0m %s\n", msg) }
+// The markers: the house set (internal/ui), coloured on a terminal only.
+// The bash doctor gates its escapes on `-t 1` the same way, so piped
+// output is byte-identical on both sides (hack/parity-configure.sh).
+func doctorOK(w io.Writer, msg string)   { ui.MarkOK(w, msg) }
+func doctorWarn(w io.Writer, msg string) { ui.MarkWarn(w, msg) }
+func doctorBad(w io.Writer, msg string)  { ui.MarkBad(w, msg) }
 
 // doctorInfo is a neutral line: a fact that is neither a pass nor a
 // finding (the dim ℹ style the other commands use).

@@ -115,9 +115,12 @@ main::doctor() {
   echo "doctor: all required checks passed."
 }
 
-doctor::_ok()   { printf '  \033[32m✓\033[0m %s\n' "${1}"; }
-doctor::_warn() { printf '  \033[33m!\033[0m %s\n' "${1}"; }
-doctor::_bad()  { printf '  \033[31m✗\033[0m %s\n' "${1}"; }
+# The markers are coloured on a terminal only (stdout a tty, NO_COLOR
+# unset): piped output is the plain contract the Go binary prints too.
+doctor::_color() { [[ -t 1 && -z "${NO_COLOR:-}" ]]; }
+doctor::_ok()   { if doctor::_color; then printf '  \033[32m✓\033[0m %s\n' "${1}"; else printf '  ✓ %s\n' "${1}"; fi; }
+doctor::_warn() { if doctor::_color; then printf '  \033[33m!\033[0m %s\n' "${1}"; else printf '  ! %s\n' "${1}"; fi; }
+doctor::_bad()  { if doctor::_color; then printf '  \033[31m✗\033[0m %s\n' "${1}"; else printf '  ✗ %s\n' "${1}"; fi; }
 
 # doctor::_provider_section <domain>
 # If the active domain is a provider-backed cluster whose provider implements

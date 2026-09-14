@@ -22,6 +22,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 func init() { registerPorted("status", newStatusCommand) }
@@ -67,7 +68,8 @@ func newStatusCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 // runStatus is status::all: every section in order, each fail-soft.
 func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName string) {
-	fmt.Fprintf(out, "=== Domain: %s ===\n\n", domainName)
+	ui.Title(out, "=== Domain: "+domainName+" ===")
+	fmt.Fprintln(out)
 
 	// Resolve the driver kind so the Tilt section only runs for `lo`
 	// clusters.
@@ -77,7 +79,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 	}
 
 	// ── Cluster ──
-	fmt.Fprintln(out, "--- Cluster ---")
+	ui.Section(out, "Cluster")
 	_ = deps.dispatchStatus(ctx, out, domainName)
 	fmt.Fprintln(out)
 
@@ -90,7 +92,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 
 	// ── Nodes ──
 	if kubectlOK {
-		fmt.Fprintln(out, "--- Nodes ---")
+		ui.Section(out, "Nodes")
 		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "nodes", "-o", "wide"}, Stdout: out, Stderr: io.Discard}); err != nil {
 			fmt.Fprintln(out, "  (not reachable)")
 		}
@@ -103,7 +105,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 		var inv strings.Builder
 		err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "clusterinventories.lok8s.dev", "cluster", "-o", "json"}, Stdout: &inv, Stderr: io.Discard})
 		if err == nil && strings.TrimSpace(inv.String()) != "" {
-			fmt.Fprintln(out, "--- Inventory (ClusterInventory/cluster) ---")
+			ui.Section(out, "Inventory (ClusterInventory/cluster)")
 			if lines, ok := renderInventory(inv.String()); ok {
 				for _, l := range lines {
 					fmt.Fprintln(out, l)
@@ -117,7 +119,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 
 	// ── Targets ── enumeration only; `lo build` composes the domain into
 	// ONE clusters/<domain>/artifacts.yaml.
-	fmt.Fprintln(out, "--- Targets ---")
+	ui.Section(out, "Targets")
 	domainDir := filepath.Join(deps.paths.Clusters, domainName)
 	targets := discoverTargets(domainDir)
 	if len(targets) > 0 {
@@ -137,7 +139,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 	// ── Tilt ── only meaningful for `lo` (kind) clusters; liveness comes
 	// from lok8s's own PID file (written by tilt up), not a tilt API call.
 	if kind == "lo" {
-		fmt.Fprintln(out, "--- Tilt ---")
+		ui.Section(out, "Tilt")
 		pid := ""
 		if raw, err := os.ReadFile(filepath.Join(deps.paths.Base, ".tilt.pid")); err == nil {
 			pid = strings.TrimRight(string(raw), "\n")
