@@ -4,6 +4,42 @@ The `lo` CLI is a single static Go binary. Every command below runs natively in 
 
 `lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
+The generated [CLI commands](./cli-commands) page lists every command with its flags and examples. `go run ./hack/gen-cli-docs` writes it from the command tree, and `go test ./internal/clidoc/` fails while the committed page is stale. This page explains the commands.
+
+## A bare `lo`
+
+`lo` with no arguments on a terminal prints where you stand. The block shows the project (`metadata.name` of `lok8s.yaml`, else the directory name), the active domain with its driver, the kubeconfig when `lo up` wrote one, the six everyday commands (`up`, `status`, `build`, `deploy`, `lint`, `down`) and the next step. It reads the project tree only, so it answers at once. Off a terminal (a pipe, a script, CI) a bare `lo` prints the full help. `lo --help` prints the full help everywhere.
+
+## Shell completion
+
+`lo completion <shell>` prints the completion script for bash, zsh, fish or PowerShell. The script completes command names and flags. It also asks the binary for the values that live in the project:
+
+| Where | Values |
+|---|---|
+| `lo use`, `lo audit`, `lo recover`, every `--domain` and `--cluster-override`, `lo drivers <name> <op>` | the domains under `clusters/` |
+| `lo addons` | the addon names (embedded and local) |
+| `lo assets eject`, `diff`, `update` | the asset paths, and `bash` |
+| `lo init service` | the entries of `services.yaml` and the directories that hold a service `lok8s.yaml` |
+
+A completer only reads the tree. A Tab never writes into the project. A command routed to bash (see [Choosing the implementation](#choosing-the-implementation)) completes its name only.
+
+```bash
+# bash: for the current shell, then permanently
+source <(lo completion bash)
+lo completion bash > /etc/bash_completion.d/lo               # or ~/.local/share/bash-completion/completions/lo
+
+# zsh (needs compinit in ~/.zshrc)
+lo completion zsh > "${fpath[1]}/_lo"
+
+# fish
+lo completion fish > ~/.config/fish/completions/lo.fish
+
+# PowerShell
+lo completion powershell | Out-String | Invoke-Expression
+```
+
+Every command's `--help` ends with an `Examples:` block. The same blocks are on the [CLI commands](./cli-commands) page.
+
 ## Global Flags
 
 | Flag | Short | Description |
