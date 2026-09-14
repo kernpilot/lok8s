@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // runBare runs `lo` with no arguments (plus flags) and returns stdout,
@@ -15,9 +16,10 @@ import (
 func runBare(t *testing.T, paths *config.Paths, tty bool, args ...string) (string, string, error) {
 	t.Helper()
 	t.Setenv("DOMAIN_NAME", "")
-	prev := orientationIsTerminal
-	orientationIsTerminal = func() bool { return tty }
-	t.Cleanup(func() { orientationIsTerminal = prev })
+	// The ui overrides: a forced TTY renders the terminal form into the
+	// buffer, colour off keeps it plain.
+	t.Cleanup(ui.ForceTTY(tty))
+	t.Cleanup(ui.ForceColor(false))
 	root := NewRoot(paths)
 	var out, errOut bytes.Buffer
 	root.SetOut(&out)
@@ -39,7 +41,7 @@ func TestBareLoPipedPrintsTheFullHelp(t *testing.T) {
 	if out != help {
 		t.Errorf("bare lo piped is not `lo --help`:\n--- got ---\n%s--- want ---\n%s", out, help)
 	}
-	if !strings.Contains(out, "Cluster lifecycle:") || strings.Contains(out, "Everyday commands:") {
+	if !strings.Contains(out, "Cluster lifecycle:") || strings.Contains(out, "Everyday commands") {
 		t.Errorf("bare lo piped: expected the grouped help, got:\n%s", out)
 	}
 	// The usage block is the one the root printed before it had a RunE:
@@ -66,7 +68,7 @@ func TestBareLoOnATerminalPrintsTheOrientation(t *testing.T) {
 	want := "lok8s · acme\n" +
 		"  domain      alpha.dev (lo)\n" +
 		"\n" +
-		"Everyday commands:\n" +
+		"Everyday commands\n" +
 		"  lo up        Start cluster\n" +
 		"  lo status    Cluster health and status\n" +
 		"  lo build     Build kustomize targets\n" +
@@ -74,7 +76,7 @@ func TestBareLoOnATerminalPrintsTheOrientation(t *testing.T) {
 		"  lo lint      Validate structure and specs\n" +
 		"  lo down      Stop cluster\n" +
 		"\n" +
-		"next: lo up\n" +
+		"next: lo up   # no cluster kubeconfig yet\n" +
 		"All commands: lo --help\n"
 	if out != want {
 		t.Errorf("orientation:\n--- got ---\n%s--- want ---\n%s", out, want)
@@ -84,7 +86,7 @@ func TestBareLoOnATerminalPrintsTheOrientation(t *testing.T) {
 	os.MkdirAll(filepath.Join(paths.Base, ".kubeconfig"), 0o755)
 	os.WriteFile(filepath.Join(paths.Base, ".kubeconfig", "alpha.yaml"), []byte("{}"), 0o644)
 	out, _, _ = runBare(t, paths, true)
-	if !strings.Contains(out, "  kubeconfig  .kubeconfig/alpha.yaml\n") || !strings.Contains(out, "next: lo status\n") {
+	if !strings.Contains(out, "  kubeconfig  .kubeconfig/alpha.yaml\n") || !strings.Contains(out, "next: lo status   # the cluster has a kubeconfig\n") {
 		t.Errorf("orientation with a kubeconfig:\n%s", out)
 	}
 
@@ -102,10 +104,10 @@ func TestBareLoOrientationWithoutADomain(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No lok8s.yaml: clusters/ marks the project, the directory names it.
-	if !strings.HasPrefix(out, "lok8s · "+filepath.Base(paths.Base)+"\n  domain      none (3 available: lo use)\n") {
+	if !strings.HasPrefix(out, "lok8s · "+filepath.Base(paths.Base)+"\n  domain      none (3 available)\n") {
 		t.Errorf("orientation without an active domain:\n%s", out)
 	}
-	if !strings.Contains(out, "next: lo use <domain>\n") {
+	if !strings.Contains(out, "next: lo use <domain>   # no domain is active\n") {
 		t.Errorf("orientation without an active domain: next step:\n%s", out)
 	}
 }
@@ -117,7 +119,7 @@ func TestBareLoOrientationOutsideAProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "lok8s: no project here (no lok8s.yaml with kind: Project, no clusters/)\n\nnext: lo init\nAll commands: lo --help\n"
+	want := "lok8s: no project here\n  · no lok8s.yaml with kind: Project, no clusters/\n\nnext: lo init   # scaffold a project here\nAll commands: lo --help\n"
 	if out != want {
 		t.Errorf("orientation outside a project:\n--- got ---\n%s--- want ---\n%s", out, want)
 	}
@@ -131,7 +133,7 @@ func TestBareLoIgnoresAnInvalidImplementationBlock(t *testing.T) {
 		t.Errorf("bare lo piped on an invalid block: err %v, stderr %q, out:\n%s", err, errOut, out)
 	}
 	out, errOut, err = runBare(t, paths, true)
-	if err != nil || errOut != "" || !strings.Contains(out, "Everyday commands:") {
+	if err != nil || errOut != "" || !strings.Contains(out, "Everyday commands\n") {
 		t.Errorf("bare lo on a terminal on an invalid block: err %v, stderr %q, out:\n%s", err, errOut, out)
 	}
 	// Any other command still refuses.
@@ -143,8 +145,8 @@ func TestBareLoIgnoresAnInvalidImplementationBlock(t *testing.T) {
 
 func TestBareLoWithAnUnknownCommandIsStillAnError(t *testing.T) {
 	paths := completionProject(t)
-	_, _, err := runBare(t, paths, true, "nosuch")
-	if err == nil || !strings.Contains(err.Error(), `unknown command "nosuch"`) {
-		t.Errorf("lo nosuch: err %v", err)
+	_, errOut, err := runBare(t, paths, true, "nosuch")
+	if err == nil || !strings.Contains(errOut, `Error: unknown command "nosuch" for "lo"`) {
+		t.Errorf("lo nosuch: err %v, stderr %q", err, errOut)
 	}
 }

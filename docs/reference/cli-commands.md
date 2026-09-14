@@ -29,6 +29,7 @@ lo [flags]
       --force-recreate       On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer
   -h, --help                 help for lo
       --kubernetes string    Kubernetes version to use
+      --no-color             No ANSI colour on the terminal (env form: NO_COLOR)
       --no-eject             Never write embedded framework assets into the project (.lok8s/…); serve them from a temp dir instead
   -r, --remote               Provision on remote VM (uses spec.provider + spec.remote)
   -v, --verbose count        Enable verbose logging
@@ -2985,6 +2986,7 @@ lo registry [flags]
 * [lo registry clean](#lo-registry-clean)	 - Clean up registries
 * [lo registry down](#lo-registry-down)	 - Spin down registries
 * [lo registry status](#lo-registry-status)	 - Check registry status
+* [lo registry tls](#lo-registry-tls)	 - The registry set's TLS certificate (docker volume)
 * [lo registry up](#lo-registry-up)	 - Spin up registries
 
 ## lo registry clean
@@ -3060,6 +3062,81 @@ lo registry status [flags]
 ### SEE ALSO
 
 * [lo registry](#lo-registry)	 - Manage Docker registries
+
+## lo registry tls
+
+The registry set's TLS certificate (docker volume)
+
+```
+lo registry tls [flags]
+```
+
+### Examples
+
+```
+  lo registry tls status
+  lo registry tls renew
+```
+
+### Options
+
+```
+  -h, --help   help for tls
+```
+
+### SEE ALSO
+
+* [lo registry](#lo-registry)	 - Manage Docker registries
+* [lo registry tls renew](#lo-registry-tls-renew)	 - Mint a new certificate into the volume and restart the registries
+* [lo registry tls status](#lo-registry-tls-status)	 - Show the certificate and what each registry mounts
+
+## lo registry tls renew
+
+Mint a new certificate into the volume and restart the registries
+
+```
+lo registry tls renew [flags]
+```
+
+### Examples
+
+```
+  lo registry tls renew
+```
+
+### Options
+
+```
+  -h, --help   help for renew
+```
+
+### SEE ALSO
+
+* [lo registry tls](#lo-registry-tls)	 - The registry set's TLS certificate (docker volume)
+
+## lo registry tls status
+
+Show the certificate and what each registry mounts
+
+```
+lo registry tls status [flags]
+```
+
+### Examples
+
+```
+  lo registry tls status
+```
+
+### Options
+
+```
+  -h, --help   help for status
+```
+
+### SEE ALSO
+
+* [lo registry tls](#lo-registry-tls)	 - The registry set's TLS certificate (docker volume)
 
 ## lo registry up
 

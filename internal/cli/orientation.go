@@ -16,26 +16,25 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
-
-// orientationIsTerminal is the TTY seam (tests swap it): stdout only. A
-// terminal on stdin with stdout piped is a script capturing output.
-var orientationIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
 // everydayCommands are the six commands the orientation lists, in the
 // order of a working day. Their one-line descriptions come from the tree.
 var everydayCommands = []string{"up", "status", "build", "deploy", "lint", "down"}
 
-// runOrientation is the root's RunE.
+// runOrientation is the root's RunE for a bare `lo`. The stdout style
+// decides (ui.Stdout, ForceTTY in tests): a terminal gets the block, a
+// pipe gets the help. A terminal on stdin with stdout piped is a script
+// that captures output, so it gets the help too.
 func runOrientation(cmd *cobra.Command, paths *config.Paths) error {
-	if !orientationIsTerminal() {
+	if !ui.Stdout().TTY {
 		return cmd.Help()
 	}
 	writeOrientation(cmd.OutOrStdout(), cmd.Root(), paths)
@@ -86,22 +85,24 @@ func gatherOrientation(cmd *cobra.Command, paths *config.Paths) orientation {
 	return o
 }
 
-// writeOrientation renders the block.
+// writeOrientation renders the block with the ui helpers: a title, the
+// facts, the everyday commands as a section, then the one next step.
 func writeOrientation(out io.Writer, root *cobra.Command, paths *config.Paths) {
 	o := gatherOrientation(root, paths)
 	if o.project == "" {
-		fmt.Fprintln(out, "lok8s: no project here (no lok8s.yaml with kind: Project, no clusters/)")
+		ui.Title(out, "lok8s: no project here")
+		fmt.Fprintln(out, ui.For(out).Dim("  · no lok8s.yaml with kind: Project, no clusters/"))
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "next: lo init")
+		ui.Next(out, "init", "scaffold a project here")
 		fmt.Fprintln(out, "All commands: lo --help")
 		return
 	}
-	fmt.Fprintf(out, "lok8s · %s\n", o.project)
+	ui.Title(out, "lok8s · "+o.project)
 	switch {
 	case o.domain == "" && o.domains == 0:
 		fmt.Fprintln(out, "  domain      none (clusters/ holds no domain)")
 	case o.domain == "":
-		fmt.Fprintf(out, "  domain      none (%d available: lo use)\n", o.domains)
+		fmt.Fprintf(out, "  domain      none (%d available)\n", o.domains)
 	default:
 		fmt.Fprintf(out, "  domain      %s (%s)\n", o.domain, o.driver)
 	}
@@ -109,7 +110,7 @@ func writeOrientation(out io.Writer, root *cobra.Command, paths *config.Paths) {
 		fmt.Fprintf(out, "  kubeconfig  %s\n", o.kubeconfig)
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Everyday commands:")
+	ui.Section(out, "Everyday commands")
 	for _, name := range everydayCommands {
 		short := ""
 		if c := findByPath(root, name); c != nil {
@@ -118,23 +119,25 @@ func writeOrientation(out io.Writer, root *cobra.Command, paths *config.Paths) {
 		fmt.Fprintf(out, "  lo %-9s %s\n", name, short)
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "next: %s\n", orientationNext(o))
+	next, why := orientationNext(o)
+	ui.Next(out, next, why)
 	fmt.Fprintln(out, "All commands: lo --help")
 }
 
-// orientationNext is the one step the state calls for.
-func orientationNext(o orientation) string {
+// orientationNext is the one step the state calls for: the command
+// (without `lo`) and the reason.
+func orientationNext(o orientation) (cmd, why string) {
 	switch {
 	case o.domain == "" && o.domains == 0:
-		return "lo init project --cluster <domain> --driver lo"
+		return "init project --cluster <domain> --driver lo", "clusters/ holds no domain"
 	case o.domain == "":
-		return "lo use <domain>"
+		return "use <domain>", "no domain is active"
 	case o.driver == "no spec":
-		return "lo use <domain>  (" + o.domain + " has no cluster.lok8s.yaml or deploy.lok8s.yaml)"
+		return "use <domain>", o.domain + " has no cluster.lok8s.yaml or deploy.lok8s.yaml"
 	case o.kubeconfig == "":
-		return "lo up"
+		return "up", "no cluster kubeconfig yet"
 	default:
-		return "lo status"
+		return "status", "the cluster has a kubeconfig"
 	}
 }
 
