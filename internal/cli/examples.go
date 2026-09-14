@@ -140,6 +140,10 @@ var commandExamples = map[string]string{
   lo registry status --shared`,
 	"registry clean": `  lo registry clean
   lo registry clean --shared`,
+	"registry tls": `  lo registry tls status
+  lo registry tls renew`,
+	"registry tls status": `  lo registry tls status`,
+	"registry tls renew":  `  lo registry tls renew`,
 	"image": `  lo image cache api
   lo image list`,
 	"image cache": `  lo image cache api
