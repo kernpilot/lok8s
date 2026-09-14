@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
+
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -194,7 +197,8 @@ func TestUseSelectSetsActive(t *testing.T) {
 	}
 }
 
-// With no cluster at all the select has nothing to offer: the hint, rc 1.
+// With no cluster at all the select has nothing to offer: the hint on
+// stderr (an error state), rc 1, nothing on stdout.
 func TestUseSelectNoClusters(t *testing.T) {
 	p := synthProject(t)
 	useSelectSeams(t, "1\n")
@@ -202,8 +206,33 @@ func TestUseSelectNoClusters(t *testing.T) {
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
-	if stdout != "no clusters yet\nnext: lo init   # create a project or add a cluster\n" || stderr != "" {
+	if stderr != "no clusters yet\nnext: lo init   # create a project or add a cluster\n" || stdout != "" {
 		t.Errorf("stdout = %q, stderr = %q", stdout, stderr)
+	}
+}
+
+// The wrapper tells Esc from Ctrl-C: both abort the huh form, Ctrl-C is
+// recorded before the form sees it (rc 130 in useSelect), Esc is not
+// (rc 0).
+func TestUseFormRecordsCtrlC(t *testing.T) {
+	domains := []useDomain{{"alpha.dev", "lo"}, {"beta.cloud", "kubeone"}}
+	for _, c := range []struct {
+		key   tea.KeyPressMsg
+		ctrlC bool
+	}{
+		{tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, true},
+		{tea.KeyPressMsg{Code: tea.KeyEscape}, false},
+	} {
+		choice := "alpha.dev"
+		m := &useForm{form: useBuildForm(domains, &choice)}
+		m.Init()
+		m.Update(c.key)
+		if m.ctrlC != c.ctrlC {
+			t.Errorf("%s: ctrlC = %v, want %v", c.key, m.ctrlC, c.ctrlC)
+		}
+		if m.form.State != huh.StateAborted {
+			t.Errorf("%s: form state = %v, want aborted", c.key, m.form.State)
+		}
 	}
 }
 

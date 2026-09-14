@@ -4,6 +4,7 @@ go 1.26.8
 
 require (
 	charm.land/bubbles/v2 v2.0.0
+	charm.land/bubbletea/v2 v2.0.2
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.1
 	filippo.io/age v1.3.2
@@ -23,7 +24,6 @@ require (
 )
 
 require (
-	charm.land/bubbletea/v2 v2.0.2 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
 	filippo.io/hpke v0.4.0 // indirect

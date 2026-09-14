@@ -43,13 +43,11 @@ func (e *handledError) Unwrap() error { return e.err }
 // else is answered through Unwrap.
 func (e *handledError) Is(target error) bool { return target == ErrHandled }
 
-func fprintf(w io.Writer, format string, a ...any) { fmt.Fprintf(w, format, a...) }
-
 // prefix writes `[tag] line`: the tag coloured when w is a terminal that
 // allows colour, plain otherwise (the bash verbose.sh gates on `-t 2` the
 // same way, so piped stderr matches byte for byte).
 func prefix(w io.Writer, code, tag, format string, a ...any) {
-	fprintf(w, For(w).Paint(code, tag)+" "+format+"\n", a...)
+	fmt.Fprintf(w, For(w).Paint(code, tag)+" "+format+"\n", a...)
 }
 
 // Debug writes a [debug] line to stderr when DEBUG is set (bash: debug()).

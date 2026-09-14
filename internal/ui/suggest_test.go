@@ -12,8 +12,8 @@ func TestLevenshtein(t *testing.T) {
 		{"boostrap", "bootstrap", 1}, {"Status", "status", 0},
 	}
 	for _, c := range cases {
-		if got := Levenshtein(c.a, c.b); got != c.want {
-			t.Errorf("Levenshtein(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		if got := levenshtein(c.a, c.b); got != c.want {
+			t.Errorf("levenshtein(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
 		}
 	}
 }

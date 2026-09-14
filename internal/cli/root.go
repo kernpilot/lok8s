@@ -160,10 +160,10 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 			}
 			return nil
 		},
-		// The root is runnable so an unknown command is ITS parse error
-		// (cobra's legacyArgs only runs on a root without Args): the
-		// message with cobra's "Did you mean" block, then the `Run "lo -h"`
-		// hint every parse error carries. A bare `lo` prints the help.
+		// The root is runnable, so an unknown command is its own parse
+		// error. (cobra's legacyArgs runs only on a root without Args.)
+		// The error prints cobra's message, the "Did you mean" block and
+		// the `Run "lo -h"` hint. A bare `lo` prints the help.
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -218,8 +218,9 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	return root
 }
 
-// suggestFor are the words cobra's "Did you mean" offers a command for
-// beyond the edit distance: what a hand used to another tool types.
+// suggestFor maps words from other tools (docker, kubectl, git) to the
+// lo command they mean. cobra's "Did you mean" offers these next to the
+// edit-distance matches.
 var suggestFor = map[string][]string{
 	"up":         {"start", "create"},
 	"down":       {"stop"},

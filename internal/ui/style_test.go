@@ -36,7 +36,6 @@ func TestPipedIsPlain(t *testing.T) {
 		"ok":          {func(w *bytes.Buffer) { MarkOK(w, "bash 5.3") }, "  ✓ bash 5.3\n"},
 		"warn":        {func(w *bytes.Buffer) { MarkWarn(w, "x") }, "  ! x\n"},
 		"bad":         {func(w *bytes.Buffer) { MarkBad(w, "x") }, "  ✗ x\n"},
-		"info":        {func(w *bytes.Buffer) { MarkInfo(w, "x") }, "  · x\n"},
 		"next":        {func(w *bytes.Buffer) { Next(w, "toolchain doctor", "why") }, "next: lo toolchain doctor   # why\n"},
 		"next-no-why": {func(w *bytes.Buffer) { Next(w, "init", "") }, "next: lo init\n"},
 		"error":       {func(w *bytes.Buffer) { ErrorTo(w, "boom %d", 1) }, "[error] boom 1\n"},
@@ -65,7 +64,6 @@ func TestTerminalIsStyled(t *testing.T) {
 		"ok":       {func(w *bytes.Buffer) { MarkOK(w, "bash 5.3") }, "  \033[32m✓\033[0m bash 5.3\n"},
 		"warn":     {func(w *bytes.Buffer) { MarkWarn(w, "x") }, "  \033[33m!\033[0m x\n"},
 		"bad":      {func(w *bytes.Buffer) { MarkBad(w, "x") }, "  \033[31m✗\033[0m x\n"},
-		"info":     {func(w *bytes.Buffer) { MarkInfo(w, "x") }, "  \033[2m·\033[0m x\n"},
 		"next":     {func(w *bytes.Buffer) { Next(w, "init", "why") }, "\033[2mnext: lo init   # why\033[0m\n"},
 		"error":    {func(w *bytes.Buffer) { ErrorTo(w, "boom") }, "\033[31m[error]\033[0m boom\n"},
 		"warnpfx":  {func(w *bytes.Buffer) { WarnTo(w, "careful") }, "\033[33m[warn]\033[0m careful\n"},
@@ -139,6 +137,52 @@ func TestStyledWriterCarriesItsStyle(t *testing.T) {
 	Section(&b, "x")
 	if b.String() != "--- x ---\n" {
 		t.Errorf("buffer section: %q", b.String())
+	}
+	// The whole style is honoured: a terminal without colour never
+	// colours, even under the colour override, and NO_COLOR gates a
+	// coloured wrapper like every stream.
+	defer ForceColor(true)()
+	b.Reset()
+	Section(Styled(&b, Style{TTY: true, Color: false}), "x")
+	MarkOK(Styled(&b, Style{TTY: true, Color: false}), "y")
+	if b.String() != "x\n  ✓ y\n" {
+		t.Errorf("styled without colour: %q", b.String())
+	}
+	t.Setenv("NO_COLOR", "1")
+	if s := For(Styled(&b, Style{TTY: true, Color: true})); !s.TTY || s.Color {
+		t.Errorf("NO_COLOR on a styled writer: %+v", s)
+	}
+	if s := For(Styled(&b, Style{TTY: false, Color: true})); s.TTY || s.Color {
+		t.Errorf("a piped styled writer never colours: %+v", s)
+	}
+}
+
+// no-color.org: NO_COLOR disables colour only when it is present and
+// non-empty. An empty value keeps the colour on. The colour override is
+// test only and applies on a terminal only.
+func TestNoColorEmptyKeepsColor(t *testing.T) {
+	restoreTTY := ForceTTY(true)
+	t.Setenv("NO_COLOR", "")
+	var b bytes.Buffer
+	MarkOK(&b, "x")
+	if b.String() != "  \033[32m✓\033[0m x\n" {
+		t.Errorf("empty NO_COLOR turned colour off: %q", b.String())
+	}
+	t.Setenv("NO_COLOR", "0")
+	b.Reset()
+	MarkOK(&b, "x")
+	if b.String() != "  ✓ x\n" {
+		t.Errorf("NO_COLOR=0 kept colour: %q", b.String())
+	}
+	restoreTTY()
+	// ForceColor(true) off a terminal changes nothing.
+	defer ForceTTY(false)()
+	defer ForceColor(true)()
+	t.Setenv("NO_COLOR", "")
+	b.Reset()
+	MarkOK(&b, "x")
+	if b.String() != "  ✓ x\n" {
+		t.Errorf("ForceColor coloured a pipe: %q", b.String())
 	}
 }
 

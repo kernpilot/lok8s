@@ -2,7 +2,7 @@
 # verbose.sh — logging helpers (debug, error, warn)
 # Provides colored output when argsh :log is not sufficient. The colour is
 # terminal presentation only: it prints when stderr is a terminal and
-# NO_COLOR (https://no-color.org) is unset. Piped stderr carries the plain
+# NO_COLOR (https://no-color.org) is empty or unset. Piped stderr carries the plain
 # prefix, byte for byte what the Go binary prints (internal/ui).
 
 : "${GREEN:=\033[0;32m}"

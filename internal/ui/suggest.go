@@ -2,9 +2,9 @@ package ui
 
 import "strings"
 
-// Levenshtein is the edit distance between a and b (the distance cobra's
+// levenshtein is the edit distance between a and b (the distance cobra's
 // "Did you mean" uses, over bytes, case-insensitive).
-func Levenshtein(a, b string) int {
+func levenshtein(a, b string) int {
 	a, b = strings.ToLower(a), strings.ToLower(b)
 	if a == b {
 		return 0
@@ -36,7 +36,7 @@ func Closest(name string, candidates []string) (best string, ok bool) {
 	bestDist := -1
 	lname := strings.ToLower(name)
 	for _, c := range candidates {
-		d := Levenshtein(name, c)
+		d := levenshtein(name, c)
 		if d > 2 && !strings.HasPrefix(strings.ToLower(c), lname) {
 			continue
 		}

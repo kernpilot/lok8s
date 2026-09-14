@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -141,13 +142,15 @@ func useShow(paths *config.Paths, out io.Writer) error {
 
 // useSelect is the terminal form of a bare `lo use`: one select over the
 // domains, the active one preselected. Enter sets it through the same
-// path as `lo use <domain>`. Esc and Ctrl-C leave without a change (rc 0,
-// nothing printed). With no cluster at all there is nothing to choose.
+// path as `lo use <domain>`. Esc leaves without a change (rc 0, nothing
+// printed). Ctrl-C is an interrupt: rc 130, nothing printed, so a chained
+// `lo use && lo up` stops. With no cluster at all there is nothing to
+// choose: the hint goes to stderr, rc 1.
 func useSelect(paths *config.Paths, tio useIO, out, errOut io.Writer) error {
 	domains := useDomains(paths)
 	if len(domains) == 0 {
-		fmt.Fprintln(out, "no clusters yet")
-		ui.Next(out, "init", "create a project or add a cluster")
+		fmt.Fprintln(errOut, "no clusters yet")
+		ui.Next(errOut, "init", "create a project or add a cluster")
 		return ErrHandled
 	}
 	choice := domains[0].name
@@ -158,6 +161,42 @@ func useSelect(paths *config.Paths, tio useIO, out, errOut io.Writer) error {
 			}
 		}
 	}
+	form := useBuildForm(domains, &choice)
+	if tio.Accessible {
+		// The line-driven form (the tests): a numbered prompt, no keys.
+		form = form.WithAccessible(true)
+		if tio.In != nil {
+			form = form.WithInput(tio.In)
+		}
+		if tio.Out != nil {
+			form = form.WithOutput(tio.Out)
+		}
+		if err := form.Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return nil
+			}
+			return err
+		}
+		return useSetActive(paths, choice, out, errOut)
+	}
+	m := &useForm{form: form}
+	aborted, err := m.run(tio.In, tio.Out)
+	if err != nil {
+		return err
+	}
+	if aborted {
+		if m.ctrlC {
+			exitNow(130)
+		}
+		return nil
+	}
+	return useSetActive(paths, choice, out, errOut)
+}
+
+// useBuildForm is the select: one option per domain (`<domain>  <what>`,
+// the names padded to one width), choice preselected, Esc and Ctrl-C
+// both bound to huh's quit (the wrapper tells them apart).
+func useBuildForm(domains []useDomain, choice *string) *huh.Form {
 	width := 0
 	for _, d := range domains {
 		width = max(width, len(d.name))
@@ -168,22 +207,51 @@ func useSelect(paths *config.Paths, tio useIO, out, errOut io.Writer) error {
 	}
 	keys := huh.NewDefaultKeyMap()
 	keys.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "leave"))
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Active domain").Description("Enter sets it. Esc leaves it as it is.").Options(opts...).Value(&choice),
-	)).WithTheme(ui.HuhTheme()).WithKeyMap(keys).WithAccessible(tio.Accessible)
-	if tio.In != nil {
-		form = form.WithInput(tio.In)
+	return huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Active domain").Description("Enter sets it. Esc leaves it as it is.").Options(opts...).Value(choice),
+	)).WithTheme(ui.HuhTheme()).WithKeyMap(keys)
+}
+
+// useForm runs the huh form under bubbletea itself, so the key that
+// ended it is known. huh maps Esc and Ctrl-C to the same abort, and the
+// two must differ here: Esc leaves (rc 0), Ctrl-C interrupts (rc 130).
+// The wrapper records a Ctrl-C press before the form sees it.
+type useForm struct {
+	form  *huh.Form
+	ctrlC bool
+}
+
+func (m *useForm) Init() tea.Cmd { return m.form.Init() }
+
+func (m *useForm) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "ctrl+c" {
+		m.ctrlC = true
 	}
-	if tio.Out != nil {
-		form = form.WithOutput(tio.Out)
+	_, cmd := m.form.Update(msg)
+	return m, cmd
+}
+
+func (m *useForm) View() tea.View { return tea.NewView(m.form.View()) }
+
+// run drives the form the way huh's own Run does (submit quits, cancel
+// interrupts) and reports whether the user aborted it.
+func (m *useForm) run(in io.Reader, out io.Writer) (aborted bool, err error) {
+	m.form.SubmitCmd, m.form.CancelCmd = tea.Quit, tea.Interrupt
+	var opts []tea.ProgramOption
+	if in != nil {
+		opts = append(opts, tea.WithInput(in))
 	}
-	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return nil
-		}
-		return err
+	if out != nil {
+		opts = append(opts, tea.WithOutput(out))
 	}
-	return useSetActive(paths, choice, out, errOut)
+	_, err = tea.NewProgram(m, opts...).Run()
+	if errors.Is(err, tea.ErrInterrupted) || m.form.State == huh.StateAborted {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lo use: %w", err)
+	}
+	return false, nil
 }
 
 // useDomain is one entry of the listing: the name and what it is (the

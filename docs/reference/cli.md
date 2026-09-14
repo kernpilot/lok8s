@@ -31,7 +31,7 @@ When a stream is a terminal, `lo` renders one house style. Titles and
 sections are bold. The `✓ ! ✗ ·` markers and the `[error]`/`[warn]`
 prefixes have colour. Tables measure their columns. A command with an
 obvious next step ends on a dim `next: lo <cmd>   # why` line. Set
-`NO_COLOR` (any value, see [no-color.org](https://no-color.org)) or pass
+`NO_COLOR` to a non-empty value (see [no-color.org](https://no-color.org)) or pass
 `--no-color` to keep the terminal shape without colour. A bare `lo use`
 on a terminal opens a select over the domains (see [`lo use`](#lo-use)).
 
