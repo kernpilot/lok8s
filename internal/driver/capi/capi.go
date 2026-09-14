@@ -138,7 +138,7 @@ func (d *Driver) infoLine(format string, a ...any) {
 // rawErrorLine mirrors the bash `echo "error: …" >&2` family used by
 // capi::bootstrap (distinct from verbose.sh's colored "[error]").
 func (d *Driver) rawErrorLine(format string, a ...any) {
-	fmt.Fprintf(d.stderr(), "error: "+format+"\n", a...)
+	ui.RawErrorTo(d.stderr(), format, a...)
 }
 
 // ── Driver contract ───────────────────────────────────────

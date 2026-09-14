@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // DefaultDomain is the framework's terminal default slot. It lives HERE, at
@@ -58,11 +60,11 @@ func Resolve(explicit, clustersDir string, warnTo io.Writer) string {
 		// leading-whitespace value must reach the validator intact.
 		active = strings.TrimRight(string(raw), "\n")
 		if active != "" && !NameRe.MatchString(active) {
-			fmt.Fprintln(warnTo, "warning: invalid domain in clusters/.active, ignoring")
+			ui.RawWarningTo(warnTo, "invalid domain in clusters/.active, ignoring")
 			active = ""
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(warnTo, "warning: clusters/.active exists but is unreadable, ignoring")
+		ui.RawWarningTo(warnTo, "clusters/.active exists but is unreadable, ignoring")
 	}
 
 	if envDomain := os.Getenv("DOMAIN_NAME"); envDomain != "" {
@@ -126,11 +128,11 @@ func RequireDriver(want, clustersDir, domain, what string, errTo io.Writer) erro
 	}
 	got, err := Driver(clustersDir, domain)
 	if err != nil {
-		fmt.Fprintf(errTo, "error: domain '%s' has no readable cluster/deploy spec under clusters/ — cannot run %s\n", domain, what)
+		ui.RawErrorTo(errTo, "domain '%s' has no readable cluster/deploy spec under clusters/ — cannot run %s", domain, what)
 		return fmt.Errorf("domain %s: no readable spec", domain)
 	}
 	if got != want {
-		fmt.Fprintf(errTo, "error: domain '%s' uses the '%s' driver — %s is a '%s'-driver (local cluster) feature.\n", domain, got, what, want)
+		ui.RawErrorTo(errTo, "domain '%s' uses the '%s' driver — %s is a '%s'-driver (local cluster) feature.", domain, got, what, want)
 		fmt.Fprintf(errTo, "       Pass --domain <a-%s-domain> or switch with 'lo use <domain>'.\n", want)
 		return fmt.Errorf("domain %s: driver %s, want %s", domain, got, want)
 	}

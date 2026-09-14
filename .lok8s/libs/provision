@@ -177,7 +177,7 @@ provision::resolve_spec() {
     LOK8S_SPEC_FILE="${base}/deploy.lok8s.yaml"
     LOK8S_SPEC_KIND="deploy"
   else
-    error "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/${domain}/"
+    error "No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/${domain}/"
     return 1
   fi
 }
@@ -205,7 +205,7 @@ provision::resolve_clusterref() {
 
   # Validate the referenced cluster domain exists
   if [[ ! -d "${PATH_CLUSTERS}/${cluster_ref}" ]]; then
-    error "clusterRef domain not found: .lok8s/${cluster_ref}/"
+    error "clusterRef domain not found: clusters/${cluster_ref}/"
     return 1
   fi
 
