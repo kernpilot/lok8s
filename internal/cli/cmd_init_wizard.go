@@ -164,8 +164,7 @@ func runInitScreen(cmd *cobra.Command, f initFlags, build func() initctx.Screen)
 // the failed command, then the commands not run. nil stays nil; any
 // other error passes through scaffoldRun.
 func initReport(err error, out io.Writer) error {
-	var step *initctx.StepError
-	if errors.As(err, &step) {
+	if step, ok := errors.AsType[*initctx.StepError](err); ok {
 		fmt.Fprintf(out, "failed: %s\n", step.Command)
 		if len(step.NotRun) > 0 {
 			fmt.Fprintln(out, "not run:")

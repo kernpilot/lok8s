@@ -34,7 +34,7 @@ func TestFormModelEnds(t *testing.T) {
 		if got := m.ended(tea.ErrInterrupted); !errors.Is(got, c.want) {
 			t.Errorf("%s: interrupted program ends with %v, want %v", c.name, got, c.want)
 		}
-		if got := m.ended(tea.ErrInterrupted); (got == ErrAborted) != m.interrupted {
+		if got := m.ended(tea.ErrInterrupted); errors.Is(got, ErrAborted) != m.interrupted {
 			t.Errorf("%s: interrupted=%v, end %v", c.name, m.interrupted, got)
 		}
 	}
