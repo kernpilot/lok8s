@@ -55,6 +55,8 @@ Every command's `--help` ends with an `Examples:` block. The same blocks are on 
 | `--domain-sans` | | Domain SANs override |
 | `--no-eject` | | Never write embedded framework assets into the project; serve them from a temp dir (env form: `LO_ASSETS_EJECT=never`). See [`lo assets`](#lo-assets) |
 | `--no-color` | | No ANSI colour on the terminal (env form: `NO_COLOR`). See [Output](#output) |
+| `--quiet` | `-q` | Print errors and warnings only: no `[assets]` eject notices, no `DOMAIN_NAME` notice. Command output on stdout is unchanged. See [Levels](#levels) |
+| `--debug` | | On a failure, print the external command line (docker, kind, kubectl, …) and its exit code on stderr. See [Levels](#levels) |
 
 ## Output
 
@@ -70,6 +72,73 @@ obvious next step ends on a dim `next: lo <cmd>   # why` line. Set
 `NO_COLOR` to a non-empty value (see [no-color.org](https://no-color.org)) or pass
 `--no-color` to keep the terminal shape without colour. A bare `lo use`
 on a terminal opens a select over the domains (see [`lo use`](#lo-use)).
+
+### Levels
+
+| Flag | What prints |
+|---|---|
+| `-q`, `--quiet` | errors and warnings only. The informational stderr lines (`[assets] ejected …`, `notice: using DOMAIN_NAME=…`) do not print |
+| (none) | the command's output, warnings, errors, the notices |
+| `-v`, `--verbose` | the above plus the `[debug]` lines (the flag sets `DEBUG=1` for the run, like the bash entrypoint) |
+| `--debug` | the above. On a failure, one `[debug] exec: <command line>: exit <code>` line per failed external command |
+
+`-v` and `--debug` combine. No environment variable selects a level. `DEBUG=1` only turns on the `[debug]` lines, as before.
+
+### The error shape
+
+On a terminal an error that has a next step prints as two lines:
+
+```
+error: domain not found: clusters/prod.dev/ (no cluster.lok8s.yaml or deploy.lok8s.yaml)
+next: lo use kubehz.dev | lo use kubehz.cloud
+```
+
+Off a terminal (a pipe, a script, CI) the same site prints the line it always printed (`[error] …`). Scripts and the parity harnesses match on that line. The shape reaches one site at a time. The first sites are `lo use` and the missing-spec refusals.
+
+### Exit codes
+
+The codes the binary uses today, documented, not renumbered:
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | an error, a parse error, a declined confirmation. The argsh implementation exits `2` on a parse error, with the same message (see [the deviations catalogue](go-migration.md#deviations-catalogue)) |
+| `3` | a declined consent gate, or a gate that refused off a terminal (the cloud drivers' infrastructure gate, `lo recover`). Nothing ran, nothing is orphaned |
+| `100` | internal: a remote-mode driver signals "the remote handled everything" (see [Remote clusters](#remote-clusters)) |
+| `128+n` | the run was interrupted by signal `n` (`130` on Ctrl-C) |
+| other | a passthrough of a child's status: `tilt ci`, `tilt doctor`, `kubectl apply`, the image-list `curl`, a bash driver |
+
+### Confirmations, `--yes` and `--force`
+
+On a terminal the destructive commands list what they remove, then ask once. The commands: `lo down`, `lo clean`, `lo destroy` (local driver), `lo registry clean`, `lo image clean`.
+
+```
+lo down removes:
+  kind cluster         kubehz-dev
+  kubeconfig           .kubeconfig/kubehz-dev.yaml
+  registry containers  kubehz-registry-build, kubehz-registry-cache (volumes stay)
+Continue? [y/N]
+```
+
+`y` or `yes` continues. Any other answer aborts with `aborted: nothing removed` and exit code `1`. Off a terminal (a pipe, a script, CI, `LOK8S_NONINTERACTIVE=1`) there is no prompt and no new requirement. The command runs as before.
+
+`--yes` (`-y`) answers the prompt. `--force` (`-f`) overrides a precondition: the cloud drivers' infrastructure gate, the `lo recover` consent, a recreate of an immutable object. Neither flag implies the other. A cloud domain (`kubeone`, `capi`, `kkp`) keeps its own gate (a literal `yes`, or `--force`). `lo down` and `lo destroy` add no second prompt there.
+
+### Output formats
+
+`-o`, `--output text|json|yaml` on the commands that report state. `text` is the default and prints as before. `json` and `yaml` render one document with the same field names (lowerCamel). `yaml` re-encodes the `json` document, so the keys and their order are the same.
+
+| Command | Document | Example |
+|---|---|---|
+| `lo use -o json` | `{active, domains: [{name, kind, clusterRef?}]}` | `{"active":"kubehz.dev","domains":[{"name":"kubehz.dev","kind":"lo"},{"name":"kubehz.cloud","kind":"deploy","clusterRef":"kubehz.in.net"}]}` |
+| `lo status -o json` | `{domain, driver, cluster: [lines], nodes: [{name, ready, roles, kubeletVersion, internalIP}], inventory, targets: [], artifactsBuilt, tilt: {running, pid?}}` | `{"domain":"kubehz.dev","driver":"lo","cluster":["kind cluster kubehz-dev: running"],"nodes":[{"name":"kubehz-dev-control-plane","ready":true,"roles":"control-plane","kubeletVersion":"v1.31.12","internalIP":"10.125.125.2"}],"inventory":null,"targets":["networking"],"artifactsBuilt":true,"tilt":{"running":true,"pid":"4242"}}` |
+| `lo addons -o json` | `[{name, type, version, chart?, repository?, origin, path}]` | `[{"name":"cilium","type":"khelm","version":"1.16.5","chart":"cilium","repository":"https://helm.cilium.io","origin":"builtin","path":"/tmp/lo-assets-1/addons/cilium"}]` |
+| `lo assets list -o yaml` | the `--json` document (`{lo, assets: [{rel, kind, origin, drifted, version, marker, files, path}]}`) as yaml | `lo: 0.5.0` / `assets:` / `  - rel: addons/cilium` … |
+| `lo registry status -o json` | `{domain, registries: [{name, scope, container, endpoint, running, reachable, state}]}` | `{"domain":"kubehz.dev","registries":[{"name":"build","scope":"project","container":"kubehz-registry-build","endpoint":"https://10.125.125.101:5000","running":true,"reachable":true,"state":"3 repos"}]}` |
+| `lo version -o json` | `{lok8s, build, tools: [{name, version, path}]}` | `{"lok8s":"0.5.0","build":"core","tools":[{"name":"kubectl","version":"v1.31.0","path":".bin/kubectl"}]}` |
+| `lo doctor -o json` | `{domain, ok, sections: [{name, checks: [{status: ok|warn|bad|info, message}]}]}` | `{"domain":"kubehz.dev","ok":false,"sections":[{"name":"tools","checks":[{"status":"bad","message":"kind: missing (b install)"}]}]}` |
+
+`lo status -o json` runs `kubectl get nodes -o json` in place of the wide table. `inventory` is the `ClusterInventory/cluster` object, or `null`. `lo doctor -o json` keeps the exit code of the text form. `lo addons <name>` and `lo addons --detail` have no structured form.
 
 ## Commands
 
@@ -349,6 +418,13 @@ Checks:
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
 - Secrets: committed encrypted (`.enc` present and current), and no per-domain secret is shadowed in the deprecated flat `.secrets/` store (identical copy = stale duplicate; differing copy = active drift)
+
+`--format text|editor|github` (Go-only) selects the shape of a finding line. `text` prints as before. `editor` prints `<file>:<line>: [error] <message>`, the shape Vim, Emacs and the IDEs jump to. `github` prints `::error file=<file>,line=<line>::<message>`, the workflow command GitHub Actions turns into an annotation. The file is the path the finding names, else the spec file of the domain. The line is the one the message names, else `1` (the checks work per file). Under `GITHUB_ACTIONS=true` with stdout off a terminal the default is `github`. The environment selects a shape of the same findings, never a code path, and `--format text` overrides it. The exit code is the same in every format.
+
+```bash
+lo lint --format editor        # file:line: [level] message
+lo lint --format github        # ::error file=…,line=…::message (the default in a GitHub Actions job)
+```
 
 `--notes` (Go-only) adds an advisory per Lo cluster spec key whose value equals its documented default (see [Cluster specs](specs.md#default-resolution)): `spec.nodes.controlPlane: 1`, `spec.runtime: kind`, and `spec.registries.mirrors` when the list is exactly the four default mirrors on their standard URLs. Each prints as `[note] <file>: <key> equals the default (<value>); you can drop it` on stdout. It is advice only: no finding, the exit code is unchanged, and the spec is never edited. The flag is opt-in because the bash lint prints no such line and the parity harnesses diff every lint case byte for byte.
 
