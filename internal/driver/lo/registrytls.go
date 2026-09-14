@@ -52,11 +52,11 @@ const (
 	// legacyRegistryTLSRel is where every release before v0.4.0 (and the
 	// bash tree) extracted the cert, relative to the project root.
 	legacyRegistryTLSRel = ".secrets/tls/registries"
-	// RegistryTLSSecretName and RegistryTLSSecretNS name the Secret the
-	// mint asks the generator for.
+	// registryTLSSecretName and registryTLSSecretNS name the Secret the
+	// mint asks the generator for (file-local: the cache key only).
 	// #nosec G101 -- the generator's cache key (a Secret NAME), not a credential.
-	RegistryTLSSecretName = "registries-tls"
-	RegistryTLSSecretNS   = "lok8s-system"
+	registryTLSSecretName = "registries-tls"
+	registryTLSSecretNS   = "lok8s-system"
 )
 
 // registryTLSFiles are the volume's entries: the pair the registries
@@ -140,7 +140,10 @@ func (d *Driver) registriesTLSCert(ctx context.Context, domain string, errOut io
 		exists = imported
 	}
 	if exists {
-		crt, prev, ok := d.registryTLSRead(ctx, vol)
+		crt, prev, ok, err := d.registryTLSRead(ctx, vol, errOut)
+		if err != nil {
+			return err
+		}
 		if ok && strings.TrimRight(string(prev), "\n") == strings.Join(sans, "\n") {
 			d.tlsCrt = crt
 			ui.DebugTo(errOut, "registry TLS cert up to date (%d SANs)", len(sans))
@@ -158,10 +161,18 @@ func (d *Driver) registriesTLSCert(ctx context.Context, domain string, errOut io
 // recreates the set. Returns false when there is nothing to import.
 func (d *Driver) registryTLSImport(ctx context.Context, vol string, errOut io.Writer) (bool, error) {
 	legacy := filepath.Join(d.deps.Paths.Base, filepath.FromSlash(legacyRegistryTLSRel))
-	if !fsutil.FileExists(filepath.Join(legacy, "tls.crt")) || !fsutil.FileExists(filepath.Join(legacy, "tls.key")) {
+	hasCrt := fsutil.FileExists(filepath.Join(legacy, "tls.crt"))
+	hasKey := fsutil.FileExists(filepath.Join(legacy, "tls.key"))
+	if !hasCrt && !hasKey {
 		return false, nil
 	}
-	if err := d.registryTLSStore(ctx, vol, false, legacy, errOut); err != nil {
+	if hasCrt != hasKey {
+		// Half a pair is no pair: say so once, then mint fresh.
+		ui.WarnTo(errOut, "registry TLS: the legacy directory %s holds an incomplete pair (tls.crt or tls.key is missing). Minting a fresh certificate.", legacy)
+		return false, nil
+	}
+	// -L: a symlinked legacy file copies its target, not the link.
+	if err := d.registryTLSStore(ctx, vol, false, legacy, true, errOut); err != nil {
 		return false, err
 	}
 	ui.WarnTo(errOut, "registry TLS cert imported from %s into volume %s. The running registry containers still mount %s. Next: lo registry down && lo registry up", legacy, vol, legacy)
@@ -214,6 +225,14 @@ func (d *Driver) registryTLSMint(ctx context.Context, domain, vol string, exists
 	if err := os.MkdirAll(domainDir, 0o755); err != nil {
 		return nil, err
 	}
+	// A mint killed mid-way leaves its scratch (and the key in it) behind;
+	// sweep every stale one before creating this run's.
+	if stale, _ := filepath.Glob(filepath.Join(domainDir, registryTLSScratchPrefix+"*")); len(stale) > 0 {
+		for _, s := range stale {
+			_ = os.RemoveAll(s)
+		}
+		ui.DebugTo(errOut, "registry TLS: removed %d stale scratch dir(s) under %s", len(stale), domainDir)
+	}
 	scratch, err := os.MkdirTemp(domainDir, registryTLSScratchPrefix)
 	if err != nil {
 		return nil, err
@@ -239,7 +258,7 @@ metadata:
 type: kubernetes.io/tls
 cert:
   hosts: %s
-`, RegistryTLSSecretName, RegistryTLSSecretNS, hostsJSON.String())
+`, registryTLSSecretName, registryTLSSecretNS, hostsJSON.String())
 
 	var out strings.Builder
 	if execPlugin {
@@ -287,7 +306,7 @@ cert:
 	if err := os.WriteFile(filepath.Join(scratch, ".sans"), []byte(strings.Join(sans, "\n")+"\n"), 0o644); err != nil {
 		return nil, err
 	}
-	if err := d.registryTLSStore(ctx, vol, exists, scratch, errOut); err != nil {
+	if err := d.registryTLSStore(ctx, vol, exists, scratch, false, errOut); err != nil {
 		return nil, err
 	}
 	d.tlsCrt = crtRaw
@@ -298,8 +317,9 @@ cert:
 // registryTLSStore copies the registryTLSFiles present in dir into the
 // volume, creating it first when exists is false. Populated through a
 // throwaway container that mounts the volume: no image of our own, no
-// running registry needed.
-func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, dir string, errOut io.Writer) error {
+// running registry needed. dereference adds `docker cp -L` (the import:
+// a symlinked file copies its target).
+func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, dir string, dereference bool, errOut io.Writer) error {
 	if !exists {
 		if errText, err := d.errOutput(ctx, "docker", "volume", "create", vol); err != nil {
 			fmt.Fprintf(errOut, "error: docker volume create %s failed: %s\n", vol, firstLine(errText))
@@ -312,7 +332,12 @@ func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, 
 			if !fsutil.FileExists(src) {
 				continue
 			}
-			if errText, err := d.errOutput(ctx, "docker", "cp", src, ctr+":"+RegistryTLSMount+"/"+name); err != nil {
+			args := []string{"cp"}
+			if dereference {
+				args = append(args, "-L")
+			}
+			args = append(args, src, ctr+":"+RegistryTLSMount+"/"+name)
+			if errText, err := d.errOutput(ctx, "docker", args...); err != nil {
 				fmt.Fprintf(errOut, "error: docker cp %s into volume %s failed: %s\n", name, vol, firstLine(errText))
 				return ui.Handled(fmt.Errorf("docker cp %s into %s: %w", name, vol, err))
 			}
@@ -322,14 +347,47 @@ func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, 
 }
 
 // registryTLSRead returns tls.crt and .sans from the volume. ok is false
-// when the volume holds no cert (absent volume, or an empty one).
-func (d *Driver) registryTLSRead(ctx context.Context, vol string) (crt, sans []byte, ok bool) {
-	_ = d.withTLSVolume(ctx, vol, io.Discard, func(ctr string) error {
-		crt, ok = d.volumeRead(ctx, ctr, "tls.crt")
+// when the volume holds no complete pair: tls.crt is read, tls.key is
+// checked for presence only (its bytes are discarded, never kept), and a
+// half-populated volume (one of the two missing) counts as empty so the
+// caller mints again. err is a docker failure (the throwaway container
+// could not be created); the error line is already on errOut.
+func (d *Driver) registryTLSRead(ctx context.Context, vol string, errOut io.Writer) (crt, sans []byte, ok bool, err error) {
+	err = d.withTLSVolume(ctx, vol, errOut, func(ctr string) error {
+		var hasCrt, hasKey bool
+		crt, hasCrt = d.volumeRead(ctx, ctr, "tls.crt")
+		hasKey = d.volumeHas(ctx, ctr, "tls.key")
 		sans, _ = d.volumeRead(ctx, ctr, ".sans")
+		ok = hasCrt && hasKey
 		return nil
 	})
-	return crt, sans, ok
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return crt, sans, ok, nil
+}
+
+// volumeHas reports whether the mounted volume holds a regular file name:
+// the tar stream's headers are scanned, its bodies discarded.
+func (d *Driver) volumeHas(ctx context.Context, ctr, name string) bool {
+	var out bytes.Buffer
+	err := d.deps.Runner.Run(ctx, execx.Cmd{
+		Name: "docker", Args: []string{"cp", ctr + ":" + RegistryTLSMount + "/" + name, "-"},
+		Stdout: &out, Stderr: io.Discard,
+	})
+	if err != nil {
+		return false
+	}
+	tr := tar.NewReader(bytes.NewReader(out.Bytes()))
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			return false
+		}
+		if h.Typeflag == tar.TypeReg {
+			return true
+		}
+	}
 }
 
 // withTLSVolume runs fn against a throwaway container that mounts vol at
@@ -453,8 +511,10 @@ func (d *Driver) RegistryTLSStatus(ctx context.Context, domain string, out, errO
 	fmt.Fprintf(out, "volume        %s\n", vol)
 	if !d.volumeExists(ctx, vol) {
 		fmt.Fprintf(out, "certificate   none. The volume does not exist. Next: lo up\n")
-	} else if crt, sans, ok := d.registryTLSRead(ctx, vol); !ok {
-		fmt.Fprintf(out, "certificate   none. The volume holds no tls.crt. Next: lo registry tls renew\n")
+	} else if crt, sans, ok, err := d.registryTLSRead(ctx, vol, errOut); err != nil {
+		return err
+	} else if !ok {
+		fmt.Fprintf(out, "certificate   none. The volume holds no complete tls.crt + tls.key pair. Next: lo registry tls renew\n")
 	} else {
 		leaf, err := parseLeaf(crt)
 		if err != nil {

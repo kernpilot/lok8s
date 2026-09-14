@@ -511,8 +511,11 @@ func (f *fakeDocker) createContainer(_ execx.Cmd, rest []string) error {
 // container's cert volume) and `docker cp CTR:/etc/registry/certs/F -` (a
 // tar stream with the one entry on stdout, like the daemon's).
 func (f *fakeDocker) copyFiles(c execx.Cmd, rest []string) error {
+	if len(rest) == 3 && rest[0] == "-L" {
+		rest = rest[1:] // the fake never holds symlinks; -L is argv only
+	}
 	if len(rest) != 2 {
-		return fmt.Errorf("cp: want SRC DST")
+		return fmt.Errorf("cp: want [-L] SRC DST")
 	}
 	ctrOf := func(spec string) (ctr, file string, ok bool) {
 		ctr, path, found := strings.Cut(spec, ":")

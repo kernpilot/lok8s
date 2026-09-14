@@ -126,7 +126,7 @@ lo::registry_tls_with_volume() {
   if ! err=$(docker container create --name "${ctr}" \
       --volume "${vol}:${LO_REGISTRY_TLS_MOUNT}" "${LO_REGISTRY_IMAGE}" 2>&1 >/dev/null); then
     echo "error: docker container create ${ctr} (volume ${vol}) failed: ${err%%$'\n'*}" >&2
-    return 1
+    return 2
   fi
   "${fn}" "${ctr}" "$@" || rc=$?
   docker rm -f "${ctr}" >/dev/null 2>&1 || true
@@ -146,27 +146,46 @@ lo::registry_tls_volume_read() {
   printf '%s\001' "${data}"
 }
 
+# lo::registry_tls_volume_has <ctr> <name> — whether the mounted volume
+# holds a regular file: the tar stream's entry list only, no extraction (the
+# key's bytes are discarded, never kept).
+lo::registry_tls_volume_has() {
+  local ctr="${1}" name="${2}" entries
+  entries=$(docker cp "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" - 2>/dev/null | tar -tf - 2>/dev/null) || return 1
+  [[ -n "${entries}" ]]
+}
+
 # lo::registry_tls_read <vol> — tls.crt and .sans from the volume into
-# LO_REGISTRY_TLS_READ_CRT / LO_REGISTRY_TLS_READ_SANS. Fails when the volume
-# holds no cert (absent volume, or an empty one).
+# LO_REGISTRY_TLS_READ_CRT / LO_REGISTRY_TLS_READ_SANS. Returns 1 when the
+# volume holds no complete pair (tls.crt read, tls.key checked for presence;
+# a half-populated volume counts as empty so the caller mints again), 2 when
+# docker failed (the error line is already printed).
 lo::registry_tls_read() {
   LO_REGISTRY_TLS_READ_CRT="" LO_REGISTRY_TLS_READ_SANS=""
   _lo_registry_tls_read_files() {
-    local ctr="${1}" crt sans ok=0
-    if crt=$(lo::registry_tls_volume_read "${ctr}" tls.crt); then ok=1; fi
+    local ctr="${1}" crt sans has_crt=0 has_key=0
+    if crt=$(lo::registry_tls_volume_read "${ctr}" tls.crt); then has_crt=1; fi
+    if lo::registry_tls_volume_has "${ctr}" tls.key; then has_key=1; fi
     sans=$(lo::registry_tls_volume_read "${ctr}" .sans) || sans=$'\001'
-    (( ok )) || return 1
+    (( has_crt && has_key )) || return 1
     LO_REGISTRY_TLS_READ_CRT="${crt%$'\001'}"
     LO_REGISTRY_TLS_READ_SANS="${sans%$'\001'}"
   }
-  lo::registry_tls_with_volume "${1}" _lo_registry_tls_read_files
+  local rc=0
+  lo::registry_tls_with_volume "${1}" _lo_registry_tls_read_files || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
-# lo::registry_tls_store <vol> <exists 0|1> <dir> — copy the
-# LO_REGISTRY_TLS_FILES present in dir into the volume, creating it first when
-# exists is 0.
+# lo::registry_tls_store <vol> <exists 0|1> <dir> [dereference 0|1] — copy
+# the LO_REGISTRY_TLS_FILES present in dir into the volume, creating it first
+# when exists is 0. dereference adds `docker cp -L` (the import: a symlinked
+# file copies its target).
 lo::registry_tls_store() {
-  local vol="${1}" exists="${2}" dir="${3}" err
+  local vol="${1}" exists="${2}" dir="${3}" dereference="${4:-0}" err
   if (( ! exists )); then
     if ! err=$(docker volume create "${vol}" 2>&1 >/dev/null); then
       echo "error: docker volume create ${vol} failed: ${err%%$'\n'*}" >&2
@@ -175,10 +194,12 @@ lo::registry_tls_store() {
   fi
   _lo_registry_tls_populate() {
     local ctr="${1}" name src err
+    local -a cp_args=(cp)
+    (( dereference )) && cp_args+=(-L)
     for name in "${LO_REGISTRY_TLS_FILES[@]}"; do
       src="${dir}/${name}"
       [[ -f "${src}" ]] || continue
-      if ! err=$(docker cp "${src}" "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" 2>&1 >/dev/null); then
+      if ! err=$(docker "${cp_args[@]}" "${src}" "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" 2>&1 >/dev/null); then
         echo "error: docker cp ${name} into volume ${vol} failed: ${err%%$'\n'*}" >&2
         return 1
       fi
@@ -193,8 +214,17 @@ lo::registry_tls_store() {
 # the operator recreates the set. Returns 2 when there is nothing to import.
 lo::registry_tls_import() {
   local vol="${1}" legacy="${PATH_BASE}/.secrets/tls/registries"
-  [[ -f "${legacy}/tls.crt" && -f "${legacy}/tls.key" ]] || return 2
-  lo::registry_tls_store "${vol}" 0 "${legacy}" || return 1
+  local has_crt=0 has_key=0
+  [[ -f "${legacy}/tls.crt" ]] && has_crt=1
+  [[ -f "${legacy}/tls.key" ]] && has_key=1
+  (( has_crt || has_key )) || return 2
+  if (( has_crt != has_key )); then
+    # Half a pair is no pair: say so once, then mint fresh.
+    warn "registry TLS: the legacy directory ${legacy} holds an incomplete pair (tls.crt or tls.key is missing). Minting a fresh certificate."
+    return 2
+  fi
+  # -L: a symlinked legacy file copies its target, not the link.
+  lo::registry_tls_store "${vol}" 0 "${legacy}" 1 || return 1
   warn "registry TLS cert imported from ${legacy} into volume ${vol}. The running registry containers still mount ${legacy}. Next: lo registry down && lo registry up"
 }
 
@@ -227,13 +257,18 @@ lo::registries_tls_cert() {
       *) return 1 ;;
     esac
   fi
-  if (( exists )) && lo::registry_tls_read "${vol}"; then
-    local prev="${LO_REGISTRY_TLS_READ_SANS}"
-    while [[ "${prev}" == *$'\n' ]]; do prev="${prev%$'\n'}"; done
-    if [[ "${prev}" == "$(printf '%s\n' "${sans[@]}")" ]]; then
-      LO_REGISTRY_TLS_CRT="${LO_REGISTRY_TLS_READ_CRT}"
-      debug "registry TLS cert up to date (${#sans[@]} SANs)"
-      return 0
+  if (( exists )); then
+    rc=0
+    lo::registry_tls_read "${vol}" || rc=$?
+    (( rc != 2 )) || return 1
+    if (( rc == 0 )); then
+      local prev="${LO_REGISTRY_TLS_READ_SANS}"
+      while [[ "${prev}" == *$'\n' ]]; do prev="${prev%$'\n'}"; done
+      if [[ "${prev}" == "$(printf '%s\n' "${sans[@]}")" ]]; then
+        LO_REGISTRY_TLS_CRT="${LO_REGISTRY_TLS_READ_CRT}"
+        debug "registry TLS cert up to date (${#sans[@]} SANs)"
+        return 0
+      fi
     fi
   fi
   lo::registry_tls_mint "${domain_name}" "${vol}" "${exists}" "${sans[@]}"
@@ -265,15 +300,26 @@ lo::registry_tls_mint() {
 
   local domain_dir="${PATH_CLUSTERS}/${domain_name}"
   mkdir -p "${domain_dir}"
+  # A mint killed mid-way leaves its scratch (and the key in it) behind;
+  # sweep every stale one before creating this run's.
+  local -a stale=()
+  local s
+  for s in "${domain_dir}/${LO_REGISTRY_TLS_SCRATCH_PREFIX}"*; do
+    [[ -d "${s}" ]] && stale+=("${s}")
+  done
+  if (( ${#stale[@]} )); then
+    rm -rf "${stale[@]}"
+    debug "registry TLS: removed ${#stale[@]} stale scratch dir(s) under ${domain_dir}"
+  fi
   local scratch rc=0
   scratch=$(mktemp -d "${domain_dir}/${LO_REGISTRY_TLS_SCRATCH_PREFIX}XXXXXX") || return 1
-  _lo_registry_tls_mint_into "${scratch}" "${plugin_bin}" "${vol}" "${exists}" "$@" || rc=$?
+  lo::registry_tls_mint_into "${scratch}" "${plugin_bin}" "${vol}" "${exists}" "$@" || rc=$?
   rm -rf "${scratch}"
   return "${rc}"
 }
 
 # The mint body, run with the scratch dir owned by lo::registry_tls_mint.
-_lo_registry_tls_mint_into() {
+lo::registry_tls_mint_into() {
   local scratch="${1}" plugin_bin="${2}" vol="${3}" exists="${4}"
   shift 4
   local -a sans=("$@")
@@ -321,11 +367,11 @@ EOF
   debug "minted registry TLS cert with SANs: ${sans[*]}"
 }
 
-# _lo_registry_cert_mount <container> — what the container mounts at
+# lo::registry_cert_mount <container> — what the container mounts at
 # LO_REGISTRY_TLS_MOUNT: "volume|NAME", "bind|SOURCE", "none" (a container
 # without the mount: plain mode) or "absent" (no such container). The same
 # inspect template as the Go driver.
-_lo_registry_cert_mount() {
+lo::registry_cert_mount() {
   local out
   if ! out=$(docker inspect -f '{{range .Mounts}}{{.Destination}}|{{.Type}}|{{.Name}}|{{.Source}}{{"\n"}}{{end}}' "${1}" 2>/dev/null); then
     echo absent
@@ -398,8 +444,11 @@ lo::registries() {
     local vol
     vol=$(lo::registry_tls_volume)
     if [[ -z "${LO_REGISTRY_TLS_CRT}" ]]; then
-      if ! lo::registry_tls_read "${vol}"; then
-        echo "error: spec.registries.tls is true but volume ${vol} holds no certificate. Next: lo up" >&2
+      local read_rc=0
+      lo::registry_tls_read "${vol}" || read_rc=$?
+      (( read_rc != 2 )) || return 1
+      if (( read_rc == 1 )); then
+        echo "error: spec.registries.tls is true but volume ${vol} holds no complete tls.crt + tls.key pair. Next: lo up" >&2
         return 1
       fi
       LO_REGISTRY_TLS_CRT="${LO_REGISTRY_TLS_READ_CRT}"

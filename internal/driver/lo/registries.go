@@ -167,8 +167,11 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 		crt := d.tlsCrt
 		if crt == nil {
 			var ok bool
-			if crt, _, ok = d.registryTLSRead(ctx, vol); !ok {
-				fmt.Fprintf(errOut, "error: spec.registries.tls is true but volume %s holds no certificate. Next: lo up\n", vol)
+			var err error
+			if crt, _, ok, err = d.registryTLSRead(ctx, vol, errOut); err != nil {
+				return err
+			} else if !ok {
+				fmt.Fprintf(errOut, "error: spec.registries.tls is true but volume %s holds no complete tls.crt + tls.key pair. Next: lo up\n", vol)
 				return ui.Handled(fmt.Errorf("registry TLS cert missing in volume %s", vol))
 			}
 			d.tlsCrt = crt

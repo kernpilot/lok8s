@@ -218,8 +218,12 @@ Migrate an existing project in three steps:
    running registry containers still mount the old directory.
 3. Run `lo registry down && lo registry up`. The registries come back with the
    volume mounted. `lo registry tls status` shows `volume` for each container.
+4. Add `clusters/*/.registry-tls-tmp.*/` to the project `.gitignore`. The mint
+   writes its scratch store there. A mint that stops before its cleanup leaves
+   the directory with the private key in it. New projects get the pattern from
+   `lo init project`. `lo up` removes stale directories before each mint.
 
-After step 3, lok8s reads nothing in `.secrets/`. Remove the directory.
+After step 4, lok8s reads nothing in `.secrets/`. Remove the directory.
 
 Anything two instances were *sharing* must be **re-issued per instance** (or, if
 truly unavoidable, copied deliberately). The cleanest reset is to regenerate at

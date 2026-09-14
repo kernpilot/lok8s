@@ -324,6 +324,7 @@ _stub_docker() {
         printf 'created\n\nvolume|%s\n' "${vol}" > "${FAKE_VOL}/containers/${name}"
         ;;
       cp)
+        [[ "${1}" == "-L" ]] && shift   # the fake holds no symlinks; -L is argv only
         local src="${1}" dst="${2}" ctr file vol
         if [[ "${dst}" == "-" ]]; then
           ctr="${src%%:*}"; file="${src##*/}"
@@ -436,8 +437,79 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   run cat "${DOCKER_LOG}"
   refute_output --partial "docker volume create"
   assert_output --partial "docker cp lok8s-registry-tls-io:/etc/registry/certs/tls.crt -"
+  assert_output --partial "docker cp lok8s-registry-tls-io:/etc/registry/certs/tls.key -"   # presence only
   assert_output --partial "docker cp lok8s-registry-tls-io:/etc/registry/certs/.sans -"
-  refute_output --partial "/tls.key -"
+  [ "${LO_REGISTRY_TLS_READ_CRT:-}" != "FAKEKEY" ]
+}
+
+@test "registries_tls_cert: a volume with tls.crt but no tls.key re-mints; registries refuse it" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
+
+  lo::registries_tls_cert test.lok8s.dev
+  rm -f "${FAKE_VOL}/volumes/lok8s-registry-tls/tls.key"
+  LO_REGISTRY_TLS_CRT=""
+  run lo::registries test.lok8s.dev "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "holds no complete tls.crt + tls.key pair"
+
+  rm -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
+  : > "${DOCKER_LOG}"
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  [ -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ]          # re-minted
+  [ -f "${FAKE_VOL}/volumes/lok8s-registry-tls/tls.key" ]
+  run cat "${DOCKER_LOG}"
+  refute_output --partial "docker volume create"
+}
+
+@test "registries_tls_cert: a docker failure on the read-out is surfaced, not reported as 'no cert'" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
+  lo::registries_tls_cert test.lok8s.dev
+  LO_REGISTRY_TLS_CRT=""
+  _real_docker=$(declare -f docker)
+  docker() {
+    if [[ "${1}" == "container" && "${2}" == "create" ]]; then
+      echo "Error response from daemon: no such image: registry:2.8.3" >&2
+      return 1
+    fi
+    eval "${_real_docker/docker ()/_inner_docker ()}"
+    _inner_docker "$@"
+  }
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_failure
+  assert_output --partial "error: docker container create lok8s-registry-tls-io (volume lok8s-registry-tls) failed: Error response from daemon: no such image"
+  run lo::registries test.lok8s.dev "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "docker container create"
+  refute_output --partial "holds no complete"
+}
+
+@test "registries_tls_cert: stale .registry-tls-tmp.* dirs are swept before the mint" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  local stale="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/.registry-tls-tmp.abandoned"
+  mkdir -p "${stale}"
+  printf 'OLDKEY' > "${stale}/tls.key"
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  [ ! -e "${stale}" ]
+  run bash -c "ls -d '${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev'/.registry-tls-tmp.* 2>/dev/null"
+  assert_output ""
 }
 
 @test "registries_tls_cert: a changed SAN set re-mints without recreating the volume" {
@@ -508,10 +580,32 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   run lo::registries_tls_cert test.lok8s.dev
   assert_success
   # Exactly one [warn] over both runs, naming the directory and the next step.
-  run bash -c "cd '${BATS_TEST_TMPDIR}' && source '${_PROJECT_ROOT}/.lok8s/drivers/lo/main' && lo::read_network_config clusters/test.lok8s.dev/cluster.lok8s.yaml >/dev/null; true"
   run cat "${DOCKER_LOG}"
-  assert_output --partial "docker cp ${legacy}/tls.key lok8s-registry-tls-io:/etc/registry/certs/tls.key"
+  # -L: a symlinked legacy file copies its target, not the link.
+  assert_output --partial "docker cp -L ${legacy}/tls.key lok8s-registry-tls-io:/etc/registry/certs/tls.key"
   [ "$(grep -c 'docker volume create lok8s-registry-tls' "${DOCKER_LOG}")" -eq 1 ]
+  [ "$(grep -c "^docker cp ${legacy}" "${DOCKER_LOG}")" -eq 0 ]
+}
+
+@test "registries_tls_cert: an incomplete legacy pair is warned about once and a fresh cert minted" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  local legacy="${BATS_TEST_TMPDIR}/.secrets/tls/registries"
+  mkdir -p "${legacy}"
+  printf 'LEGACYCRT' > "${legacy}/tls.crt"
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  assert_output --partial "registry TLS: the legacy directory ${legacy} holds an incomplete pair (tls.crt or tls.key is missing). Minting a fresh certificate."
+  [ "$(grep -c '\[warn\]' <<<"${output}")" -eq 1 ]
+  [ -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ]
+  run _vol_file lok8s-registry-tls tls.crt
+  assert_output "FAKECRT"
+  run grep -c '^docker cp -L ' "${DOCKER_LOG}"
+  assert_output "0"
 }
 
 @test "registries_tls_cert: the import warns once with the legacy dir and the recreate command" {
@@ -569,7 +663,7 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
 
   run lo::registries test.lok8s.dev "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   assert_failure
-  assert_output --partial "volume lok8s-registry-tls holds no certificate. Next: lo up"
+  assert_output --partial "volume lok8s-registry-tls holds no complete tls.crt + tls.key pair. Next: lo up"
   run grep -c '^docker run ' "${DOCKER_LOG}"
   assert_output "0"
 }
@@ -663,6 +757,51 @@ STUB
   echo "lok8s.local" > "${FAKE_VOL}/volumes/lok8s-registry-tls/.sans"
   run tls::status
   assert_line "san set       stale. The registries changed since the mint. Next: lo registry tls renew"
+}
+
+@test "tls status: the dates print the same through the BSD date fallback (no -d, -j -f)" {
+  command -v openssl >/dev/null 2>&1 || skip "openssl not installed"
+  _write_tls_spec true
+  _source_registry_lib
+  _stub_secret_plugin
+  _stub_docker
+  local leaf="${BATS_TEST_TMPDIR}/leaf"
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "${leaf}.key" -out "${leaf}.crt" -days 2 \
+    -subj "/CN=lok8s.local" -addext "subjectAltName=DNS:lok8s.local" >/dev/null 2>&1
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+  cat > "${plugin}" <<STUB
+#!/usr/bin/env bash
+cat > "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: %s\n  tls.key: %s\n' "\$(base64 -w0 '${leaf}.crt')" "\$(base64 -w0 '${leaf}.key')"
+STUB
+  lo::registries_tls_cert test.lok8s.dev
+
+  run tls::status
+  assert_success
+  local gnu_before gnu_after
+  gnu_before=$(grep '^not before' <<<"${output}")
+  gnu_after=$(grep '^not after' <<<"${output}")
+  [[ "${gnu_before}" =~ ^not\ before\ +20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]]
+
+  # A BSD-shaped date: `-d`/`-ud` fail, `-j -f FMT INPUT +OUT` succeeds
+  # (answered by the real GNU date on the same input, so the stub proves the
+  # fallback branch is taken and prints the same string).
+  date() {
+    case "${1}" in
+      -d|-ud|-u) return 1 ;;
+      -j)
+        [[ "${2}" == "-f" ]] || return 1
+        command date -ud "${4}" "${5}"
+        ;;
+      *) command date "$@" ;;
+    esac
+  }
+  export -f date
+  run tls::status
+  assert_success
+  assert_line "${gnu_before}"
+  assert_line "${gnu_after}"
+  unset -f date
 }
 
 @test "tls renew: re-mints into the volume and restarts only the existing containers" {

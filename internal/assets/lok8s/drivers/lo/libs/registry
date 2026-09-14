@@ -152,7 +152,7 @@ _tls_cert_mounts() {
     local container_info
     container_info=$(registry::container "${name}")
     local reg_name="${container_info%%	*}"
-    printf '%s\t%s\n' "${reg_name}" "$(_lo_registry_cert_mount "${reg_name}")"
+    printf '%s\t%s\n' "${reg_name}" "$(lo::registry_cert_mount "${reg_name}")"
   }
   registry::each _tls_mount_entry
 }
@@ -171,17 +171,20 @@ tls::status() {
   vol=$(lo::registry_tls_volume)
   echo "registry TLS  on"
   echo "volume        ${vol}"
+  local read_rc=0
   if ! lo::registry_tls_volume_exists "${vol}"; then
     echo "certificate   none. The volume does not exist. Next: lo up"
-  elif ! lo::registry_tls_read "${vol}"; then
-    echo "certificate   none. The volume holds no tls.crt. Next: lo registry tls renew"
-  else
+  elif lo::registry_tls_read "${vol}" || { read_rc=$?; false; }; then
     _tls_print_leaf "${LO_REGISTRY_TLS_READ_CRT}"
     local prev="${LO_REGISTRY_TLS_READ_SANS}"
     while [[ "${prev}" == *$'\n' ]]; do prev="${prev%$'\n'}"; done
     if [[ "${prev}" != "$(lo::registry_tls_sans)" ]]; then
       echo "san set       stale. The registries changed since the mint. Next: lo registry tls renew"
     fi
+  elif (( read_rc == 2 )); then
+    return 1
+  else
+    echo "certificate   none. The volume holds no complete tls.crt + tls.key pair. Next: lo registry tls renew"
   fi
   echo "containers"
   local reg_name mount kind src
@@ -195,6 +198,15 @@ tls::status() {
       *)      printf '  %-28s absent\n' "${reg_name}" ;;
     esac
   done < <(_tls_cert_mounts)
+}
+
+# _tls_rfc3339 <openssl date> — "Sep 14 15:00:00 2026 GMT" as
+# 2026-09-14T15:00:00Z. GNU date first, BSD/macOS `-j -f` fallback (the
+# kapply.sh pattern), so darwin prints the same dates as the binary.
+_tls_rfc3339() {
+  date -ud "${1}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || TZ=UTC date -j -f '%b %e %H:%M:%S %Y %Z' "${1}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || echo "${1}"
 }
 
 # _tls_print_leaf <pem> — `not before`, `not after` (RFC 3339, UTC) and the
@@ -212,8 +224,8 @@ _tls_print_leaf() {
   local before after
   before=$(sed -n 's/^notBefore=//p' <<<"${dates}")
   after=$(sed -n 's/^notAfter=//p' <<<"${dates}")
-  echo "not before    $(date -u -d "${before}" +%Y-%m-%dT%H:%M:%SZ)"
-  echo "not after     $(date -u -d "${after}" +%Y-%m-%dT%H:%M:%SZ)"
+  echo "not before    $(_tls_rfc3339 "${before}")"
+  echo "not after     $(_tls_rfc3339 "${after}")"
   local san dns=() ips=() entry
   san=$(printf '%s' "${pem}" | openssl x509 -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr ',' '\n')
   while IFS= read -r entry; do

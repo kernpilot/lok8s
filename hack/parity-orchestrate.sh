@@ -350,10 +350,13 @@ SH
 chmod +x "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
 parity::stub "${PROJ}" docker <<'SH'
 #!/usr/bin/env bash
-# Parity stub (TLS phase): the plain stub plus an argv log.
+# Parity stub (TLS phase): the plain stub plus an argv log. The cert volume
+# is always absent (so the import path runs and the volume is created), the
+# read-out finds nothing (so both sides mint on every run).
 echo "docker $*" >> "${PARITY_DOCKER_LOG}"
 case "${1:-} ${2:-}" in
   "volume ls")       echo "alpha-data"; echo "alpha-cache"; exit 0 ;;
+  "volume inspect")  exit 1 ;;
   "system prune")    echo "stub: docker $*"; exit 0 ;;
   "network inspect") exit 1 ;;
   "inspect "*)       exit 1 ;;
@@ -399,6 +402,7 @@ tls_absent() {  # <label> <file> <regex>
 }
 for side in bash go; do
   tls_pin    "${side}: plugin store = a scratch under the domain dir"  "${WORK}/plugin.${side}.log" "^PATH_SECRETS=PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X$"
+  tls_pin    "${side}: the volume is created"                          "${WORK}/docker.${side}.log" "^docker volume create mintnet-registry-tls$"
   tls_pin    "${side}: volume populated through the io container"      "${WORK}/docker.${side}.log" "^docker container create --name mintnet-registry-tls-io --volume mintnet-registry-tls:/etc/registry/certs registry:2\.8\.3$"
   tls_pin    "${side}: tls.key copied into the volume"                 "${WORK}/docker.${side}.log" "^docker cp PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
   tls_pin    "${side}: registries mount the volume"                    "${WORK}/docker.${side}.log" "^docker run .* --volume mintnet-registry-tls:/etc/registry/certs:ro "
@@ -407,9 +411,38 @@ for side in bash go; do
   if [[ ! -s "${WORK}/scratch.${side}" ]]; then echo "ok: ${side}: no scratch dir left under the domain dir"; else fail "${side}: scratch left: $(cat "${WORK}/scratch.${side}")"; fi
 done
 
-# lo registry tls status / renew: the volume "exists" (the stub answers every
-# inspect with 0) and holds nothing, the containers are absent. Every case
-# runs under the TLS hooks so each side's docker argv lands in its own log.
+# The import: a legacy .secrets/tls/registries pair (one file a symlink, so
+# `docker cp -L` must follow it) is copied into a fresh volume with one
+# [warn] (in the diffed stderr); an incomplete pair is warned about and a
+# fresh cert minted instead. The argv is diffed byte for byte, as above.
+tls_pre_legacy() {
+  tls_pre
+  mkdir -p "${PROJ}/.secrets/tls/registries" "${PROJ}/.secrets/real"
+  printf 'LEGACYCRT' > "${PROJ}/.secrets/real/tls.crt"
+  ln -s ../../real/tls.crt "${PROJ}/.secrets/tls/registries/tls.crt"
+  printf 'LEGACYKEY' > "${PROJ}/.secrets/tls/registries/tls.key"
+}
+tls_pre_half() {
+  tls_pre
+  mkdir -p "${PROJ}/.secrets/tls/registries"
+  printf 'LEGACYCRT' > "${PROJ}/.secrets/tls/registries/tls.crt"
+}
+PARITY_PRE_EACH=tls_pre_legacy PARITY_POST_EACH=tls_post check "${KIND_CFG}" up --domain mint.dev
+parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo up --domain mint.dev (legacy import)" || failures=$((failures + 1))
+for side in bash go; do
+  tls_pin "${side}: the legacy pair is copied with -L"  "${WORK}/docker.${side}.log" "^docker cp -L PROJ/\.secrets/tls/registries/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
+done
+rm -rf "${PROJ}/.secrets"
+PARITY_PRE_EACH=tls_pre_half PARITY_POST_EACH=tls_post check "${KIND_CFG}" up --domain mint.dev
+parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo up --domain mint.dev (incomplete legacy pair)" || failures=$((failures + 1))
+for side in bash go; do
+  tls_absent "${side}: nothing copied from an incomplete legacy pair" "${WORK}/docker.${side}.log" "^docker cp -L "
+done
+rm -rf "${PROJ}/.secrets"
+
+# lo registry tls status / renew: the volume is absent (the stub), the
+# containers are absent. Every case runs under the TLS hooks so each side's
+# docker argv lands in its own log.
 tls_check() { PARITY_PRE_EACH=tls_pre PARITY_POST_EACH=tls_post check "$@"; }
 tls_check - registry tls status --domain mint.dev
 parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo registry tls status" || failures=$((failures + 1))

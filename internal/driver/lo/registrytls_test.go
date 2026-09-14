@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -170,6 +171,7 @@ func TestRegistriesTLSCertMintsIntoTheVolume(t *testing.T) {
 	wantSeq := []string{
 		"docker volume inspect -f {{.Name}} " + tlsVol,
 		"docker volume create " + tlsVol,
+		"docker rm -f " + tlsVolIO, // a leftover io container never shadows the create
 		"docker container create --name " + tlsVolIO + " --volume " + tlsVol + ":" + RegistryTLSMount + " " + RegistryImage,
 		"docker cp " + got + "/tls.crt " + tlsVolIO + ":" + RegistryTLSMount + "/tls.crt",
 		"docker cp " + got + "/tls.key " + tlsVolIO + ":" + RegistryTLSMount + "/tls.key",
@@ -206,15 +208,142 @@ func TestRegistriesTLSCertUpToDateSkipsTheMint(t *testing.T) {
 		t.Fatal("volume re-created on an up-to-date run")
 	}
 	// The read-out: tls.crt and .sans come out of the volume as tar
-	// streams through the throwaway container; the key never leaves it.
-	if !slices.Contains(fd.log, "docker cp "+tlsVolIO+":"+RegistryTLSMount+"/tls.crt -") {
-		t.Fatalf("tls.crt not read from the volume:\n%s", strings.Join(fd.log, "\n"))
-	}
-	if slices.ContainsFunc(fd.log, func(l string) bool { return strings.Contains(l, "/tls.key -") }) {
-		t.Fatal("the private key was read out of the volume")
+	// streams through the throwaway container; tls.key is checked for
+	// presence only (its stream is scanned for the entry and discarded:
+	// nothing on the driver holds it).
+	for _, want := range []string{
+		"docker cp " + tlsVolIO + ":" + RegistryTLSMount + "/tls.crt -",
+		"docker cp " + tlsVolIO + ":" + RegistryTLSMount + "/tls.key -",
+		"docker cp " + tlsVolIO + ":" + RegistryTLSMount + "/.sans -",
+	} {
+		if !slices.Contains(fd.log, want) {
+			t.Fatalf("%q not read from the volume:\n%s", want, strings.Join(fd.log, "\n"))
+		}
 	}
 	if string(d.tlsCrt) != "FAKECRT" {
 		t.Fatalf("cert read from the volume = %q", d.tlsCrt)
+	}
+}
+
+// A volume with tls.crt but no tls.key is no certificate: the mint runs
+// again into it, and the registries refuse to start on it.
+func TestRegistriesTLSCertHalfPopulatedVolumeRemints(t *testing.T) {
+	d, runner, fd, errBuf, p, cy := tlsDriver(t, "true")
+	_, rec := stubSecretPlugin(t, runner, p.Base)
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(fd.volumePath(tlsVol), "tls.key"))
+	d.tlsCrt = nil
+
+	var out, vErr bytes.Buffer
+	if err := d.registries(t.Context(), &out, &vErr, tlsDomain, cy); err == nil {
+		t.Fatal("registries started on a volume without tls.key")
+	}
+	if !strings.Contains(vErr.String(), "holds no complete tls.crt + tls.key pair") {
+		t.Fatalf("wrong error:\n%s", vErr.String())
+	}
+
+	rec.Manifest = ""
+	fd.log = nil
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Manifest == "" {
+		t.Fatal("a half-populated volume did not re-mint")
+	}
+	if slices.Contains(fd.log, "docker volume create "+tlsVol) {
+		t.Fatal("the existing volume was re-created")
+	}
+	if _, ok := fd.volumeFile(tlsVol, "tls.key"); !ok {
+		t.Fatal("the re-mint left the volume without tls.key")
+	}
+}
+
+// A docker failure on the read-out is a docker failure, not "no cert":
+// the mint, the registries and `tls status` all stop on it and name it.
+func TestRegistriesTLSReadSurfacesTheContainerCreateError(t *testing.T) {
+	d, runner, fd, errBuf, p, cy := tlsDriver(t, "true")
+	stubSecretPlugin(t, runner, p.Base)
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	d.tlsCrt = nil
+	fd.wrap = func(c execx.Cmd) (bool, error) {
+		if len(c.Args) >= 2 && c.Args[0] == "container" && c.Args[1] == "create" {
+			writeErr(c, "Error response from daemon: no such image: registry:2.8.3\n")
+			return true, fmt.Errorf("exit 1")
+		}
+		return false, nil
+	}
+
+	var vErr bytes.Buffer
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, &vErr); err == nil {
+		t.Fatal("the mint treated a docker failure as success")
+	}
+	if !strings.Contains(vErr.String(), "error: docker container create "+tlsVolIO+" (volume "+tlsVol+") failed: Error response from daemon: no such image") {
+		t.Fatalf("mint error:\n%s", vErr.String())
+	}
+	vErr.Reset()
+	var out bytes.Buffer
+	if err := d.registries(t.Context(), &out, &vErr, tlsDomain, cy); err == nil {
+		t.Fatal("registries started on a docker failure")
+	}
+	if strings.Contains(vErr.String(), "holds no complete") || !strings.Contains(vErr.String(), "docker container create") {
+		t.Fatalf("registries error:\n%s", vErr.String())
+	}
+	vErr.Reset()
+	out.Reset()
+	if err := d.RegistryTLSStatus(t.Context(), tlsDomain, &out, &vErr); err == nil {
+		t.Fatal("status reported success on a docker failure")
+	}
+	if strings.Contains(out.String(), "certificate   none") || !strings.Contains(vErr.String(), "docker container create") {
+		t.Fatalf("status:\n%s\n%s", out.String(), vErr.String())
+	}
+}
+
+// A mint killed mid-way leaves clusters/<domain>/.registry-tls-tmp.* behind
+// (with the key in it); every mint sweeps the stale ones first.
+func TestRegistriesTLSMintSweepsStaleScratchDirs(t *testing.T) {
+	d, runner, _, errBuf, p, _ := tlsDriver(t, "true")
+	stubSecretPlugin(t, runner, p.Base)
+	stale := filepath.Join(p.Clusters, tlsDomain, registryTLSScratchPrefix+"abandoned")
+	testutil.WriteFile(t, filepath.Join(stale, "tls.key"), "OLDKEY")
+
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+	if fsutil.DirExists(stale) {
+		t.Fatal("the stale scratch dir survived the mint")
+	}
+	if left := scratchDirs(t, p); len(left) != 0 {
+		t.Fatalf("scratch dirs left behind: %v", left)
+	}
+}
+
+// Half a legacy pair is no pair: one [warn] names it, nothing is imported,
+// a fresh cert is minted.
+func TestRegistriesTLSCertIncompleteLegacyPairWarnsAndMints(t *testing.T) {
+	d, runner, fd, errBuf, p, _ := tlsDriver(t, "true")
+	_, rec := stubSecretPlugin(t, runner, p.Base)
+	legacy := filepath.Join(p.Base, ".secrets", "tls", "registries")
+	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), "LEGACYCRT")
+
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+	want := "registry TLS: the legacy directory " + legacy + " holds an incomplete pair (tls.crt or tls.key is missing). Minting a fresh certificate."
+	if strings.Count(errBuf.String(), "[warn]") != 1 || !strings.Contains(errBuf.String(), want) {
+		t.Fatalf("want one [warn] %q, got:\n%s", want, errBuf.String())
+	}
+	if rec.Manifest == "" {
+		t.Fatal("no fresh mint after the incomplete pair")
+	}
+	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != "FAKECRT" {
+		t.Fatalf("volume tls.crt = %q, want the fresh mint", got)
+	}
+	if slices.ContainsFunc(fd.log, func(l string) bool { return strings.HasPrefix(l, "docker cp -L ") }) {
+		t.Fatalf("something was imported from the incomplete pair:\n%s", strings.Join(fd.log, "\n"))
 	}
 }
 
@@ -299,8 +428,14 @@ func TestRegistriesTLSCertImportsTheLegacyDirectory(t *testing.T) {
 			t.Fatalf("imported %s = %q, %v; want %q", file, got, ok, want)
 		}
 	}
-	if !slices.Contains(fd.log, "docker cp "+filepath.Join(legacy, "tls.key")+" "+tlsVolIO+":"+RegistryTLSMount+"/tls.key") {
-		t.Fatalf("legacy key not copied into the volume:\n%s", strings.Join(fd.log, "\n"))
+	// -L: a symlinked legacy file copies its target, not the link.
+	if !slices.Contains(fd.log, "docker cp -L "+filepath.Join(legacy, "tls.key")+" "+tlsVolIO+":"+RegistryTLSMount+"/tls.key") {
+		t.Fatalf("legacy key not copied (with -L) into the volume:\n%s", strings.Join(fd.log, "\n"))
+	}
+	for _, l := range fd.log {
+		if strings.HasPrefix(l, "docker cp ") && strings.Contains(l, legacy) && !strings.HasPrefix(l, "docker cp -L ") {
+			t.Fatalf("legacy file copied without -L: %s", l)
+		}
 	}
 	warns := strings.Count(errBuf.String(), "[warn]")
 	if warns != 1 || !strings.Contains(errBuf.String(), legacy) ||
@@ -405,7 +540,7 @@ func TestRegistriesFailWithoutACertInTheVolume(t *testing.T) {
 	if err := d.registries(t.Context(), &out, &vErr, tlsDomain, cy); err == nil {
 		t.Fatal("TLS registries started without a cert")
 	}
-	if !strings.Contains(vErr.String(), "volume "+tlsVol+" holds no certificate") {
+	if !strings.Contains(vErr.String(), "volume "+tlsVol+" holds no complete tls.crt + tls.key pair") {
 		t.Fatalf("wrong error:\n%s", vErr.String())
 	}
 	for _, l := range fd.log {
@@ -555,12 +690,21 @@ func TestRegistryTLSStatusShowsTheCertAndTheMounts(t *testing.T) {
 }
 
 func TestRegistryTLSStatusWithoutAVolume(t *testing.T) {
-	d, _, _, errBuf, _, _ := tlsDriver(t, "true")
+	d, _, fd, errBuf, _, _ := tlsDriver(t, "true")
 	var out bytes.Buffer
 	if err := d.RegistryTLSStatus(t.Context(), tlsDomain, &out, errBuf); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "certificate   none. The volume does not exist. Next: lo up") {
+		t.Fatalf("status:\n%s", out.String())
+	}
+	// An existing volume without the pair.
+	fd.createVolume(execx.Cmd{}, []string{tlsVol})
+	out.Reset()
+	if err := d.RegistryTLSStatus(t.Context(), tlsDomain, &out, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "certificate   none. The volume holds no complete tls.crt + tls.key pair. Next: lo registry tls renew") {
 		t.Fatalf("status:\n%s", out.String())
 	}
 }
