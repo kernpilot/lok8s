@@ -353,7 +353,7 @@ Registries derive entirely from `spec.registries` (the `mirrors[]` plus the fram
 
 #### lo registry tls
 
-The registry set's TLS certificate. Go-only: a project that routes `registry` to bash has no `tls` subcommand.
+The registry set's TLS certificate. Both implementations have the command; the output is the same.
 
 ```bash
 lo registry tls status            # the certificate and what each container mounts

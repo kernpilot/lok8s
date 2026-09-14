@@ -60,21 +60,193 @@ lo::render_registry_config() {
   printf '%s\n%s\n' "${without_http}" "$(lo::registry_http_block)"
 }
 
-# lo::registries_tls_cert — mint the TLS cert the registries serve in TLS mode by
-# driving the secrets.lok8s.dev Secret plugin (the binary lok8s already ships and
-# requires — no mkcert/certgen). The cert is a `cert:` leaf whose SANs are built
-# from .registries.json so it covers every registry IP plus the framework
-# hostnames; the plugin signs it with the shared dev CA at CAROOT (created on
-# demand) and we extract tls.crt/tls.key to .secrets/tls/registries/ for the
-# container mounts.
-#
-# A separate cert from any application wildcard because the SAN list is
-# registry-derived and has its own lifecycle. Idempotent: re-minted only when
-# missing or when the SAN set changed (IPs shifted, a mirror added/removed). The
-# host Docker client + containerd trust it once `lo trust` (mkcert -install) has
-# installed the CA.
+# ── Registry TLS certificate: the set's docker volume ───────────────────────
+# One leaf for the whole registry set, minted by the secrets.lok8s.dev Secret
+# plugin (the binary lok8s already ships and requires — no mkcert/certgen) and
+# kept in the docker volume <project_network>-registry-tls, next to the set's
+# data volumes (<project_network>-registry-<name>). Every registry container
+# mounts the volume at LO_REGISTRY_TLS_MOUNT. No project directory holds the
+# material (releases before v0.4.0 extracted it to .secrets/tls/registries and
+# bind-mounted that directory). The volume is written and read through a
+# throwaway container that mounts it (docker container create + docker cp +
+# docker rm): the set's own containers may not exist yet. The private key never
+# leaves the volume: `lo up` reads tls.crt (the config hash) and .sans (the
+# re-mint key); nothing in the cluster consumes the key, the kind nodes trust
+# the dev CA through certs.d. Same docker argv, same order as the Go driver
+# (internal/driver/lo/registrytls.go): hack/parity-orchestrate.sh diffs the
+# argv of both implementations byte for byte.
+
+LO_REGISTRY_TLS_SCRATCH_PREFIX=".registry-tls-tmp."
+LO_REGISTRY_TLS_FILES=(tls.crt tls.key .sans)
+# The cert the mint read or produced in this process; lo::registries hashes
+# it without a second read of the volume.
+LO_REGISTRY_TLS_CRT=""
+
+# lo::registry_tls_volume — the set's cert volume.
+lo::registry_tls_volume() {
+  echo "$(registry::project_network)-registry-tls"
+}
+
+# lo::registry_tls_sans — the SAN list, one per line: hostnames first per
+# entry, then its IP (framework registries contribute their canonical
+# hostname, mirrors the upstream domain they impersonate, every registry its
+# IP); deduplicated, order kept.
+lo::registry_tls_sans() {
+  local -a sans=()
+  _lo_registry_san() {
+    # reg_domain: keep the per-entry field from shadowing an inherited `domain`.
+    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
+    if [[ -n "${host}" ]]; then sans+=("${host}"); fi
+    if [[ -n "${reg_domain}" ]]; then sans+=("${reg_domain}"); fi
+    if [[ -n "${ip}" ]]; then sans+=("${ip}"); fi
+  }
+  registry::each _lo_registry_san
+  local -A seen=()
+  local s
+  for s in "${sans[@]}"; do
+    [[ -n "${seen[${s}]:-}" ]] && continue
+    seen[${s}]=1
+    echo "${s}"
+  done
+}
+
+# lo::registry_tls_volume_exists <vol>
+lo::registry_tls_volume_exists() {
+  docker volume inspect -f '{{.Name}}' "${1}" >/dev/null 2>&1
+}
+
+# lo::registry_tls_with_volume <vol> <fn> [args…] — run `fn <ctr> [args…]`
+# against a throwaway container that mounts the volume (docker cp needs a
+# container). The container is removed on every exit.
+lo::registry_tls_with_volume() {
+  local vol="${1}" fn="${2}"
+  shift 2
+  local ctr="${vol}-io" err rc=0
+  docker rm -f "${ctr}" >/dev/null 2>&1 || true
+  if ! err=$(docker container create --name "${ctr}" \
+      --volume "${vol}:${LO_REGISTRY_TLS_MOUNT}" "${LO_REGISTRY_IMAGE}" 2>&1 >/dev/null); then
+    echo "error: docker container create ${ctr} (volume ${vol}) failed: ${err%%$'\n'*}" >&2
+    return 1
+  fi
+  "${fn}" "${ctr}" "$@" || rc=$?
+  docker rm -f "${ctr}" >/dev/null 2>&1 || true
+  return "${rc}"
+}
+
+# lo::registry_tls_volume_read <ctr> <name> — one file of the mounted volume
+# through `docker cp <ctr>:<mount>/<name> -`, a tar stream with that one
+# entry. Prints the bytes followed by a \x01 sentinel (so a trailing newline
+# survives the caller's $(…)); fails when docker fails or the stream is empty.
+lo::registry_tls_volume_read() {
+  local ctr="${1}" name="${2}" data status
+  data=$(docker cp "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" - 2>/dev/null | tar -xOf - 2>/dev/null; printf '\001%s' "${PIPESTATUS[0]}")
+  status="${data##*$'\001'}"
+  data="${data%$'\001'*}"
+  [[ "${status}" == "0" && -n "${data}" ]] || return 1
+  printf '%s\001' "${data}"
+}
+
+# lo::registry_tls_read <vol> — tls.crt and .sans from the volume into
+# LO_REGISTRY_TLS_READ_CRT / LO_REGISTRY_TLS_READ_SANS. Fails when the volume
+# holds no cert (absent volume, or an empty one).
+lo::registry_tls_read() {
+  LO_REGISTRY_TLS_READ_CRT="" LO_REGISTRY_TLS_READ_SANS=""
+  _lo_registry_tls_read_files() {
+    local ctr="${1}" crt sans ok=0
+    if crt=$(lo::registry_tls_volume_read "${ctr}" tls.crt); then ok=1; fi
+    sans=$(lo::registry_tls_volume_read "${ctr}" .sans) || sans=$'\001'
+    (( ok )) || return 1
+    LO_REGISTRY_TLS_READ_CRT="${crt%$'\001'}"
+    LO_REGISTRY_TLS_READ_SANS="${sans%$'\001'}"
+  }
+  lo::registry_tls_with_volume "${1}" _lo_registry_tls_read_files
+}
+
+# lo::registry_tls_store <vol> <exists 0|1> <dir> — copy the
+# LO_REGISTRY_TLS_FILES present in dir into the volume, creating it first when
+# exists is 0.
+lo::registry_tls_store() {
+  local vol="${1}" exists="${2}" dir="${3}" err
+  if (( ! exists )); then
+    if ! err=$(docker volume create "${vol}" 2>&1 >/dev/null); then
+      echo "error: docker volume create ${vol} failed: ${err%%$'\n'*}" >&2
+      return 1
+    fi
+  fi
+  _lo_registry_tls_populate() {
+    local ctr="${1}" name src err
+    for name in "${LO_REGISTRY_TLS_FILES[@]}"; do
+      src="${dir}/${name}"
+      [[ -f "${src}" ]] || continue
+      if ! err=$(docker cp "${src}" "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" 2>&1 >/dev/null); then
+        echo "error: docker cp ${name} into volume ${vol} failed: ${err%%$'\n'*}" >&2
+        return 1
+      fi
+    done
+  }
+  lo::registry_tls_with_volume "${vol}" _lo_registry_tls_populate
+}
+
+# lo::registry_tls_import <vol> — create the volume from the legacy
+# ${PATH_BASE}/.secrets/tls/registries pair (a release before v0.4.0), byte
+# for byte. The files stay: the running containers still bind-mount them until
+# the operator recreates the set. Returns 2 when there is nothing to import.
+lo::registry_tls_import() {
+  local vol="${1}" legacy="${PATH_BASE}/.secrets/tls/registries"
+  [[ -f "${legacy}/tls.crt" && -f "${legacy}/tls.key" ]] || return 2
+  lo::registry_tls_store "${vol}" 0 "${legacy}" || return 1
+  warn "registry TLS cert imported from ${legacy} into volume ${vol}. The running registry containers still mount ${legacy}. Next: lo registry down && lo registry up"
+}
+
+# lo::registries_tls_cert <domain> — make sure the set's volume holds a cert
+# for the current SAN set. No-op unless spec.registries.tls. Order: a missing
+# volume is imported from the legacy directory when that holds a pair; an
+# existing volume whose .sans equals the current SAN set is up to date;
+# otherwise the plugin mints a fresh leaf into the volume.
 lo::registries_tls_cert() {
+  local domain_name="${1}"
   registry::is_tls || return 0
+
+  local -a sans=()
+  mapfile -t sans < <(lo::registry_tls_sans)
+  if (( ${#sans[@]} == 0 )); then
+    echo "error: no registry SANs resolved — cannot mint registry TLS cert" >&2
+    return 1
+  fi
+  local vol
+  vol=$(lo::registry_tls_volume)
+
+  local exists=0 rc=0
+  if lo::registry_tls_volume_exists "${vol}"; then
+    exists=1
+  else
+    lo::registry_tls_import "${vol}" || rc=$?
+    case "${rc}" in
+      0) exists=1 ;;
+      2) ;;
+      *) return 1 ;;
+    esac
+  fi
+  if (( exists )) && lo::registry_tls_read "${vol}"; then
+    local prev="${LO_REGISTRY_TLS_READ_SANS}"
+    while [[ "${prev}" == *$'\n' ]]; do prev="${prev%$'\n'}"; done
+    if [[ "${prev}" == "$(printf '%s\n' "${sans[@]}")" ]]; then
+      LO_REGISTRY_TLS_CRT="${LO_REGISTRY_TLS_READ_CRT}"
+      debug "registry TLS cert up to date (${#sans[@]} SANs)"
+      return 0
+    fi
+  fi
+  lo::registry_tls_mint "${domain_name}" "${vol}" "${exists}" "${sans[@]}"
+}
+
+# lo::registry_tls_mint <domain> <vol> <exists 0|1> <san…> — drive the Secret
+# plugin for the SAN set and store the result in the volume (created when
+# exists is 0). The plugin gets a scratch PATH_SECRETS under the domain dir
+# (its leaf cache and the extracted files), removed on every exit; never
+# $TMPDIR, never a project store. Sets LO_REGISTRY_TLS_CRT.
+lo::registry_tls_mint() {
+  local domain_name="${1}" vol="${2}" exists="${3}"
+  shift 3
 
   local plugin_bin="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}/secrets.lok8s.dev/v1/secret/Secret"
   # The Secret plugin mints the cert. It's needed across the lok8s flow anyway, so
@@ -90,63 +262,27 @@ lo::registries_tls_cert() {
     echo "       spec.registries.tls: false for plain-HTTP registries. Then retry." >&2
     return 1
   fi
-  if [[ -z "${PATH_SECRETS:-}" ]]; then
-    echo "error: PATH_SECRETS is not set — cannot mint the registry TLS cert" >&2
-    return 1
-  fi
 
-  local tls_dir="${PATH_BASE}/.secrets/tls/registries"
-  local crt="${tls_dir}/tls.crt"
-  local key="${tls_dir}/tls.key"
-  local sans_file="${tls_dir}/.sans"
-  mkdir -p "${tls_dir}"
+  local domain_dir="${PATH_CLUSTERS}/${domain_name}"
+  mkdir -p "${domain_dir}"
+  local scratch rc=0
+  scratch=$(mktemp -d "${domain_dir}/${LO_REGISTRY_TLS_SCRATCH_PREFIX}XXXXXX") || return 1
+  _lo_registry_tls_mint_into "${scratch}" "${plugin_bin}" "${vol}" "${exists}" "$@" || rc=$?
+  rm -rf "${scratch}"
+  return "${rc}"
+}
 
-  # Build the SAN list (hostnames first, then IPs) from the registry JSON.
-  # Framework registries contribute their canonical hostname; mirrors contribute
-  # the upstream domain they impersonate. Every registry contributes its IP.
-  local -a sans=()
-  _lo_registry_san() {
-    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
-    [[ -n "${host}" ]] && sans+=("${host}")
-    [[ -n "${reg_domain}" ]] && sans+=("${reg_domain}")
-    [[ -n "${ip}" ]] && sans+=("${ip}")
-  }
-  registry::each _lo_registry_san
-
-  if (( ${#sans[@]} == 0 )); then
-    echo "error: no registry SANs resolved — cannot mint registry TLS cert" >&2
-    return 1
-  fi
-
-  # Deduplicate while preserving order.
-  local -A seen=()
-  local -a uniq_sans=()
-  local s
-  for s in "${sans[@]}"; do
-    [[ -n "${seen[${s}]:-}" ]] && continue
-    seen[${s}]=1
-    uniq_sans+=("${s}")
-  done
-
-  # Up to date? (cert present and the SAN set unchanged since the last mint)
-  local sans_repr
-  sans_repr=$(printf '%s\n' "${uniq_sans[@]}")
-  if [[ -f "${crt}" && -f "${key}" && -f "${sans_file}" ]] \
-    && [[ "$(cat "${sans_file}")" == "${sans_repr}" ]]; then
-    debug "registry TLS cert up to date (${#uniq_sans[@]} SANs)"
-    return 0
-  fi
-
-  # (Re)mint. The cert: generator caches its leaf by Secret name, so drop any
-  # stale cache entry first to force a fresh signature for the new SAN set.
-  local name="registries-tls" ns="lok8s-system"
-  rm -f "${PATH_SECRETS}/Secret.${name}.${ns}.tls.crt" \
-        "${PATH_SECRETS}/Secret.${name}.${ns}.tls.key"
+# The mint body, run with the scratch dir owned by lo::registry_tls_mint.
+_lo_registry_tls_mint_into() {
+  local scratch="${1}" plugin_bin="${2}" vol="${3}" exists="${4}"
+  shift 4
+  local -a sans=("$@")
 
   # JSON array of SANs (jq guarantees valid quoting); YAML accepts it inline.
   local hosts_json
-  hosts_json=$(printf '%s\n' "${uniq_sans[@]}" | jq -R . | jq -s -c .)
+  hosts_json=$(printf '%s\n' "${sans[@]}" | jq -R . | jq -s -c .)
 
+  local name="registries-tls" ns="lok8s-system"
   local manifest
   manifest=$(cat <<EOF
 apiVersion: secrets.lok8s.dev/v1
@@ -160,8 +296,9 @@ cert:
 EOF
 )
 
+  # The scratch store rides on the child's env only (never exported here).
   local out
-  out=$(printf '%s\n' "${manifest}" | "${plugin_bin}") || {
+  out=$(printf '%s\n' "${manifest}" | PATH_SECRETS="${scratch}" "${plugin_bin}") || {
     echo "error: the Secret plugin failed to mint the registry TLS cert" >&2
     return 1
   }
@@ -173,10 +310,37 @@ EOF
     echo "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)" >&2
     return 1
   fi
-  printf '%s' "${crt_b64}" | base64 -d > "${crt}"
-  printf '%s' "${key_b64}" | base64 -d > "${key}"
-  printf '%s\n' "${sans_repr}" > "${sans_file}"
-  debug "minted registry TLS cert with SANs: ${uniq_sans[*]}"
+  printf '%s' "${crt_b64}" | base64 -d > "${scratch}/tls.crt"
+  (umask 077 && printf '%s' "${key_b64}" | base64 -d > "${scratch}/tls.key")
+  printf '%s\n' "${sans[@]}" > "${scratch}/.sans"
+
+  lo::registry_tls_store "${vol}" "${exists}" "${scratch}" || return 1
+  local crt
+  crt=$(cat "${scratch}/tls.crt"; printf '\001')
+  LO_REGISTRY_TLS_CRT="${crt%$'\001'}"
+  debug "minted registry TLS cert with SANs: ${sans[*]}"
+}
+
+# _lo_registry_cert_mount <container> — what the container mounts at
+# LO_REGISTRY_TLS_MOUNT: "volume|NAME", "bind|SOURCE", "none" (a container
+# without the mount: plain mode) or "absent" (no such container). The same
+# inspect template as the Go driver.
+_lo_registry_cert_mount() {
+  local out
+  if ! out=$(docker inspect -f '{{range .Mounts}}{{.Destination}}|{{.Type}}|{{.Name}}|{{.Source}}{{"\n"}}{{end}}' "${1}" 2>/dev/null); then
+    echo absent
+    return 0
+  fi
+  local dest type name src found=none
+  while IFS='|' read -r dest type name src; do
+    [[ "${dest}" == "${LO_REGISTRY_TLS_MOUNT}" ]] || continue
+    if [[ "${type}" == "volume" ]]; then
+      found="volume|${name}"
+    else
+      found="${type}|${src}"
+    fi
+  done <<<"${out}"
+  echo "${found}"
 }
 
 # lo::registries_tls_nudge — warn (non-fatally) if registry TLS is on but the dev
@@ -222,21 +386,26 @@ lo::registries() {
   local domain="${1}" cluster_yaml="${2}"
   local registry_config_dir="${PATH_LOK8S}/drivers/lo/cluster/registry"
 
-  # In TLS mode every registry container mounts the shared cert minted by
-  # lo::registries_tls_cert (which must run first — it does, in driver::provision).
+  # In TLS mode every registry container mounts the set's cert volume
+  # (lo::registries_tls_cert must run first — it does, in driver::provision).
   # The cert content feeds the config hash: registries read it once at startup,
-  # so a re-minted cert (SAN change) must recreate the containers.
+  # so a re-minted cert (SAN change) must recreate the containers. The mount
+  # SOURCE is not part of the hash: a container that still bind-mounts the
+  # legacy directory is recreated by the operator (`lo registry down && lo
+  # registry up`), not behind their back.
   local tls_mount_args=() cert_sig=""
   if registry::is_tls; then
-    local cert_dir="${PATH_BASE}/.secrets/tls/registries"
-    if [[ ! -f "${cert_dir}/tls.crt" ]] || [[ ! -f "${cert_dir}/tls.key" ]]; then
-      echo "error: spec.registries.tls is enabled but no cert at ${cert_dir}" >&2
-      echo "       lo::registries_tls_cert must run before lo::registries (ensure the" >&2
-      echo "       Secret plugin is built: lo kustomize build)." >&2
-      return 1
+    local vol
+    vol=$(lo::registry_tls_volume)
+    if [[ -z "${LO_REGISTRY_TLS_CRT}" ]]; then
+      if ! lo::registry_tls_read "${vol}"; then
+        echo "error: spec.registries.tls is true but volume ${vol} holds no certificate. Next: lo up" >&2
+        return 1
+      fi
+      LO_REGISTRY_TLS_CRT="${LO_REGISTRY_TLS_READ_CRT}"
     fi
-    tls_mount_args=(--volume "${cert_dir}:${LO_REGISTRY_TLS_MOUNT}:ro")
-    cert_sig=$(sha256sum "${cert_dir}/tls.crt")
+    tls_mount_args=(--volume "${vol}:${LO_REGISTRY_TLS_MOUNT}:ro")
+    cert_sig=$(printf '%s' "${LO_REGISTRY_TLS_CRT}" | sha256sum)
     cert_sig="${cert_sig%% *}"
   fi
 
@@ -436,6 +605,14 @@ lo::cleanup_registries() {
   }
 
   registry::each _lo_registry_cleanup
+
+  # The set's cert volume goes with its data volumes (re-minted by the next
+  # `lo up`). docker refuses while a shared mirror still mounts it; that
+  # mirror keeps serving the cert until `lo registry clean --shared`.
+  if registry::is_tls; then
+    docker volume rm -f "$(lo::registry_tls_volume)" 2>/dev/null || true
+    LO_REGISTRY_TLS_CRT=""
+  fi
 }
 
 lo::registry_configmap() {

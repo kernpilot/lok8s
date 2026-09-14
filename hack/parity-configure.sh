@@ -306,11 +306,9 @@ EOF
 echo "alpha.dev" > "${CL}/.active"
 
 # ── lo lint ──────────────────────────────────────────────────────────────────
-# The flat-shadow line is excluded from the two diffs that print it and
-# pinned on the Go side below (D34).
-check 'Flat-store shadow: ' lint          # active domain (alpha.dev): warnings + bad-target error
-check 'Flat-store shadow: ' l                               # alias
-check 'Flat-store shadow: ' lint --domain alpha.dev
+check - lint                            # active domain (alpha.dev): warnings + bad-target error
+check - l                               # alias
+check - lint --domain alpha.dev
 check - lint --domain beta.cloud        # schema + every bootstrap-entry error
 check - lint --domain gamma.app         # clean deploy domain
 check - lint --domain delta.app         # missing spec.clusterRef
@@ -319,17 +317,6 @@ check - lint --domain sub.alpha.dev     # apex violation reported repo-globally 
 check - lint --domain iota.dev          # fully clean domain
 check - lint --domain nowhere.dev       # no spec at all
 check - --domain iota.dev lint          # global-flag spelling
-# D34: the Go shadow line drops the "(it keeps only global TLS like
-# registries-tls)" clause (nothing is flat-only since v0.4.0); the frozen
-# tree keeps it. Pinned on the Go side; the bash side keeps its own text.
-parity::select "${PROJ}" go
-lint_go="$(cd "${PROJ}" && "${LO_BIN}" lint --domain alpha.dev </dev/null 2>&1 || true)"
-if grep -qF 'Flat-store shadow: Secret.app.default.SHADOW is duplicated in the flat .secrets/ store — flat is deprecated for domain secrets; remove the flat copy' <<<"${lint_go}" \
-  && ! grep -qF 'keeps only global TLS' <<<"${lint_go}"; then
-  echo "ok: D34 go: flat-shadow line without the registries-tls clause"
-else
-  fail "D34 go: flat-shadow line — got: $(grep 'Flat-store shadow' <<<"${lint_go}" || echo '<none>')"
-fi
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines
 # are dropped, and the note itself present for a key at its default. Its

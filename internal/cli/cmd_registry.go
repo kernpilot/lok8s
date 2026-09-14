@@ -101,11 +101,12 @@ func newRegistryCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		}),
 	)
 
-	// `lo registry tls` is Go-only (routing.go goOnlySubcommands): the bash
-	// tree keeps the certificate in $PATH_SECRETS and has no volume to
-	// inspect or renew.
+	// `lo registry tls` mirrors registry::tls in the bash tree (the same
+	// volume model on both sides, byte-identical output); the leaves are
+	// ported like the four above.
 	tlsCmd := &cobra.Command{
 		Use:          "tls",
+		Aliases:      []string{"t"},
 		Short:        "The registry set's TLS certificate (docker volume)",
 		SilenceUsage: true,
 		RunE:         argshGroupRunE,

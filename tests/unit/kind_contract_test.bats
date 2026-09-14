@@ -140,14 +140,14 @@ teardown() {
   #
   # Reproduce the CI condition locally with:
   #   KUSTOMIZE_PLUGIN_HOME=$(mktemp -d) ./.bin/argsh test tests/unit/kind_contract_test.bats
-  # The stub MINTS the cert rather than just returning 0: lo::registries verifies
-  # ${PATH_BASE}/.secrets/tls/registries/{tls.crt,tls.key} and refuses without
-  # them, so a bare `return 0` only moves the failure one line down. Mirroring the
-  # real function's observable effect keeps the rest of the path honest.
+  # The stub MINTS the cert rather than just returning 0: lo::registries hashes
+  # the cert the mint left in LO_REGISTRY_TLS_CRT (else it reads the set's
+  # docker volume, which the docker stub above cannot serve) and refuses
+  # without one, so a bare `return 0` only moves the failure one line down.
+  # Mirroring the real function's observable effect keeps the rest of the
+  # path honest.
   lo::registries_tls_cert() {
-    mkdir -p "${PATH_BASE}/.secrets/tls/registries"
-    printf 'test-cert\n' > "${PATH_BASE}/.secrets/tls/registries/tls.crt"
-    printf 'test-key\n'  > "${PATH_BASE}/.secrets/tls/registries/tls.key"
+    LO_REGISTRY_TLS_CRT="test-cert"
   }
 
   run driver::provision "test.lok8s.dev"

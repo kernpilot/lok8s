@@ -310,20 +310,19 @@ stateful "${KIND_CFG}" up --domain alpha.dev
 stateful "${KIND_CFG}" up --domain shared.dev
 stateful "${KIND_CFG}" up --domain tls.dev
 
-# ── lo up with registry TLS: a deliberate deviation (D34) ────────────────────
-# The bash tree mints the registry cert through the Secret plugin with
-# PATH_SECRETS at the flat store its entrypoint defaults (<project>/.secrets),
-# extracts the pair to .secrets/tls/registries and bind-mounts that directory
-# into every registry container. The Go binary hands the plugin a scratch
-# store under the domain dir and keeps the cert in the docker volume
-# <network>-registry-tls. The streams still match (the same progress lines);
-# the docker and plugin argv differ and are pinned per side. Both sides exec
-# the plugin (LO_RENDER=exec above): a stub that logs the store it was
-# handed and answers a fake pair. The docker stub logs every argv; `docker cp
-# CTR:PATH -` answers an empty stream (nothing in the "volume"), so the Go
-# side mints on every run. PATH_SECRETS is unset on both sides
-# (parity::init), CAROOT points at an empty dir so the trust nudge sees the
-# same absent CA on both.
+# ── lo up with registry TLS ──────────────────────────────────────────────────
+# Both implementations mint the registry cert through the Secret plugin into
+# the docker volume <network>-registry-tls (the plugin gets a scratch store
+# under the domain dir, the volume is populated and read through a throwaway
+# container, every registry mounts the volume). The streams are diffed like
+# every other case, AND the docker argv and the plugin's environment are
+# diffed byte for byte across the two sides (the scratch dir's random suffix
+# normalized). Both sides exec the plugin (LO_RENDER=exec above): a stub that
+# logs the store it was handed and answers a fake pair. The docker stub logs
+# every argv; `docker cp CTR:PATH -` answers an empty stream (nothing in the
+# "volume"), so both sides mint on every run. PATH_SECRETS is unset on both
+# sides (parity::init), CAROOT points at an empty dir so the trust nudge sees
+# the same absent CA on both.
 mkdir -p "${PROJ}/clusters/mint.dev"
 cat > "${PROJ}/clusters/mint.dev/cluster.lok8s.yaml" <<'YAML'
 kind: Lo
@@ -368,42 +367,59 @@ tls_pre() {
   reset_fixtures
   rm -rf "${PROJ}/.secrets" "${PROJ}/clusters/mint.dev/.registries.json"
 }
-tls_post() {  # <impl>: keep the logs per side, record the flat store and the scratch state
-  mv -f "${WORK}/docker.log" "${WORK}/docker.${1}.log" 2>/dev/null || : > "${WORK}/docker.${1}.log"
-  mv -f "${WORK}/plugin.log" "${WORK}/plugin.${1}.log" 2>/dev/null || : > "${WORK}/plugin.${1}.log"
+tls_post() {  # <impl>: keep the logs per side (normalized), record the flat store and the scratch state
+  local f
+  for f in docker plugin; do
+    if [[ -f "${WORK}/${f}.log" ]]; then
+      sed -E "s|${PROJ}|PROJ|g; s|\.registry-tls-tmp\.[^/ ]+|.registry-tls-tmp.X|g" "${WORK}/${f}.log" > "${WORK}/${f}.${1}.log"
+      rm -f "${WORK}/${f}.log"
+    else
+      : > "${WORK}/${f}.${1}.log"
+    fi
+  done
   { [[ -e "${PROJ}/.secrets" ]] && echo present || echo absent; } > "${WORK}/flat.${1}"
   { ls -d "${PROJ}/clusters/mint.dev"/.registry-tls-tmp.* 2>/dev/null || true; } > "${WORK}/scratch.${1}"
 }
 PARITY_PRE_EACH=tls_pre PARITY_POST_EACH=tls_post check "${KIND_CFG}" up --domain mint.dev
+parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo up --domain mint.dev" || failures=$((failures + 1))
+parity::state_same "${WORK}/plugin.bash.log" "${WORK}/plugin.go.log" "Secret plugin env of lo up --domain mint.dev" || failures=$((failures + 1))
 
-# tls_pin / tls_absent <label> <file> <regex>: one line of the side's log
-# must (not) match.
-tls_pin() {
+# Anti-vacuity: the identical argv must be the VOLUME model on both sides.
+tls_pin() {  # <label> <file> <regex>
   if grep -qE -- "${3}" "${2}"; then echo "ok: ${1}"; else
     echo "FAIL: ${1} — no line matches ${3} in ${2}:"; sed 's/^/  /' "${2}" | head -20
     failures=$((failures + 1))
   fi
 }
-tls_absent() {
+tls_absent() {  # <label> <file> <regex>
   if grep -qE -- "${3}" "${2}"; then
     echo "FAIL: ${1} — a line matches ${3} in ${2}:"; grep -E -- "${3}" "${2}" | head -5 | sed 's/^/  /'
     failures=$((failures + 1))
   else echo "ok: ${1}"; fi
 }
-# The entrypoint's `${PATH_SECRETS:=…}` is a shell variable, not an export:
-# the plugin child inherits nothing and mints without a cache (the real
-# cert: generator refuses that; only the .secrets/tls/registries extract
-# and the bind mount below are the bash contract a project relies on).
-tls_pin    "D34 bash: plugin child inherits no store"                  "${WORK}/plugin.bash.log" "^PATH_SECRETS=<unset>$"
-tls_pin    "D34 bash: registries bind-mount the flat dir"              "${WORK}/docker.bash.log" "^docker run .* --volume ${PROJ}/\.secrets/tls/registries:/etc/registry/certs:ro "
-tls_pin    "D34 go: plugin store = a scratch under the domain dir"     "${WORK}/plugin.go.log"   "^PATH_SECRETS=${PROJ}/clusters/mint\.dev/\.registry-tls-tmp\.[^/]+$"
-tls_pin    "D34 go: volume populated through the io container"         "${WORK}/docker.go.log"   "^docker container create --name mintnet-registry-tls-io --volume mintnet-registry-tls:/etc/registry/certs registry:2\.8\.3$"
-tls_pin    "D34 go: tls.key copied into the volume"                    "${WORK}/docker.go.log"   "^docker cp ${PROJ}/clusters/mint\.dev/\.registry-tls-tmp\.[^/]+/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
-tls_pin    "D34 go: the io container is removed"                       "${WORK}/docker.go.log"   "^docker rm -f mintnet-registry-tls-io$"
-tls_pin    "D34 go: registries mount the volume"                       "${WORK}/docker.go.log"   "^docker run .* --volume mintnet-registry-tls:/etc/registry/certs:ro "
-tls_absent "D34 go: no flat store in any docker argv"                  "${WORK}/docker.go.log"   "\.secrets"
-if [[ "$(cat "${WORK}/flat.go")" == absent ]]; then echo "ok: D34 go: no <project>/.secrets created"; else fail "D34 go: <project>/.secrets was created"; fi
-if [[ ! -s "${WORK}/scratch.go" ]]; then echo "ok: D34 go: no scratch dir left under the domain dir"; else fail "D34 go: scratch left: $(cat "${WORK}/scratch.go")"; fi
+for side in bash go; do
+  tls_pin    "${side}: plugin store = a scratch under the domain dir"  "${WORK}/plugin.${side}.log" "^PATH_SECRETS=PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X$"
+  tls_pin    "${side}: volume populated through the io container"      "${WORK}/docker.${side}.log" "^docker container create --name mintnet-registry-tls-io --volume mintnet-registry-tls:/etc/registry/certs registry:2\.8\.3$"
+  tls_pin    "${side}: tls.key copied into the volume"                 "${WORK}/docker.${side}.log" "^docker cp PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
+  tls_pin    "${side}: registries mount the volume"                    "${WORK}/docker.${side}.log" "^docker run .* --volume mintnet-registry-tls:/etc/registry/certs:ro "
+  tls_absent "${side}: no flat store in any docker argv"               "${WORK}/docker.${side}.log" "\.secrets"
+  if [[ "$(cat "${WORK}/flat.${side}")" == absent ]]; then echo "ok: ${side}: no <project>/.secrets created"; else fail "${side}: <project>/.secrets was created"; fi
+  if [[ ! -s "${WORK}/scratch.${side}" ]]; then echo "ok: ${side}: no scratch dir left under the domain dir"; else fail "${side}: scratch left: $(cat "${WORK}/scratch.${side}")"; fi
+done
+
+# lo registry tls status / renew: the volume "exists" (the stub answers every
+# inspect with 0) and holds nothing, the containers are absent. Every case
+# runs under the TLS hooks so each side's docker argv lands in its own log.
+tls_check() { PARITY_PRE_EACH=tls_pre PARITY_POST_EACH=tls_post check "$@"; }
+tls_check - registry tls status --domain mint.dev
+parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo registry tls status" || failures=$((failures + 1))
+tls_check - registry tls status --domain alpha.dev        # tls: false
+tls_check - registry tls status --domain beta.cloud       # driver gate
+tls_check - registry t s --domain mint.dev                # aliases
+tls_check - registry tls renew --domain mint.dev
+parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo registry tls renew" || failures=$((failures + 1))
+tls_check - registry tls renew --domain alpha.dev         # tls: false, refuses
+check_parse registry tls bogus
 unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG
 
 report
