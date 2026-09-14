@@ -22,9 +22,10 @@ safely. You need no external secret store to get started.
 - **`$PATH_SECRETS` is the active domain's store.** `lo build` and `lo deploy`
   export `PATH_SECRETS=clusters/<domain>/secrets` for the selected domain (set
   with `lo use`, recorded in `clusters/.active`), so every generator, and every
-  `secretRef:` that reads another secret, resolves *within that cluster*. Only a
-  project with **no** domain context falls back to one flat store
-  (`$PATH_SECRETS`, default `.secrets/`).
+  `secretRef:` that reads another secret, resolves *within that cluster*. The
+  per-domain store is the only secrets store. A flat `.secrets/` at the project
+  root is a leftover of releases before v0.4.0 (see
+  [Migrating a flat `.secrets/` store](#migrating-a-flat-secrets-store)).
 - Plaintext cache files are **gitignored**. To share them, commit them
   **encrypted** with SOPS/age (below).
 
@@ -195,13 +196,30 @@ creation_rules:
 
 ### Migrating a flat `.secrets/` store
 
-Per-domain is opt-in, so existing flat stores keep working until you split them:
+Releases before v0.4.0 kept a flat `.secrets/` store at the project root. It
+was the default `PATH_SECRETS` of the bash entrypoint. `lo up` also wrote the
+registry TLS certificate there. The per-domain store is now the only secrets
+store. The registry certificate is registry infrastructure, not a secret of a
+domain. It lives in the docker volume `<network>-registry-tls` next to the
+registries' data volumes (see
+[TLS registries](/guide/shared-registries#tls-registries-default)).
+Migrate an existing project in three steps:
 
-```bash
-mkdir -p clusters/<domain>/secrets
-git mv .secrets/Secret.<…>* clusters/<domain>/secrets/   # the keys that domain owns
-lo secrets --domain <domain> encrypt                     # re-encrypt in place
-```
+1. Move each domain's cache files into its store, then encrypt them in place:
+
+   ```bash
+   mkdir -p clusters/<domain>/secrets
+   git mv .secrets/Secret.<…>* clusters/<domain>/secrets/   # the keys that domain owns
+   lo secrets --domain <domain> encrypt
+   ```
+
+2. Run `lo up`. The first run imports the registry certificate from
+   `.secrets/tls/registries/` into the volume and prints one `[warn]` line: the
+   running registry containers still mount the old directory.
+3. Run `lo registry down && lo registry up`. The registries come back with the
+   volume mounted. `lo registry tls status` shows `volume` for each container.
+
+After step 3, lok8s reads nothing in `.secrets/`. Remove the directory.
 
 Anything two instances were *sharing* must be **re-issued per instance** (or, if
 truly unavoidable, copied deliberately). The cleanest reset is to regenerate at
@@ -214,8 +232,7 @@ in **both** a domain's store and the flat `.secrets/` store, a deprecated
 shadow. Identical copies are a stale duplicate to delete; **differing** copies
 are active drift: different tools then read different stores, which can re-key a
 live cluster from the wrong one. Keep domain secrets in the per-domain store
-only; leave in flat `.secrets/` just the global, non-domain material (a shared
-registry/expose TLS cert).
+only.
 
 ## Using a secret
 
@@ -259,8 +276,7 @@ lo secrets --domain <domain> print [pattern]   # show value(s)
 lo secrets --domain <domain> path              # the resolved store path for the context
 ```
 
-(Omit `--domain` to act on the flat `$PATH_SECRETS` store: single-instance
-projects, or anything not scoped to a domain.)
+(Omit `--domain` to act on the store named by `$PATH_SECRETS`.)
 
 ## See also
 

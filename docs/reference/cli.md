@@ -34,6 +34,8 @@ Needs `clusters/<domain>/cluster.lok8s.yaml` (or a `deploy.lok8s.yaml` with a `c
 
 Steps: provision cluster, apply `spec.bootstrap` addons in order via the framework bootstrap (`.lok8s/libs/bootstrap`), start Tilt.
 
+With `spec.registries.tls: true` (the default), the first run of a registry set mints its TLS certificate into the docker volume `<network>-registry-tls`. Every later run reads the certificate from the volume. It mints again only when the registry set changed. See [`lo registry tls`](#lo-registry-tls).
+
 With `--remote`: provisions a VM via `spec.provider`, then runs kind on the remote Docker host. See [Remote clusters](#remote-clusters) below.
 
 | Flag | Description |
@@ -348,6 +350,19 @@ lo registry clean [--shared|-S]   # --shared also clears the shared mirror netwo
 ```
 
 Registries derive entirely from `spec.registries` (the `mirrors[]` plus the framework-private `build` and `cache` registries): there are no per-registry flags; the only flag is `--shared`/`-S`, which includes the shared `lok8s-registries` network for `status`/`clean`. Registries run on the configured Docker bridge network (default: `lok8s` at `10.125.125.0/24` for slot 125); the driver computes IPs automatically from `spec.network.cidr` and `spec.registries.shared.network.cidr`. See [Specs reference](specs#registries-configuration).
+
+#### lo registry tls
+
+The registry set's TLS certificate. Go-only: a project that routes `registry` to bash has no `tls` subcommand.
+
+```bash
+lo registry tls status            # the certificate and what each container mounts
+lo registry tls renew             # mint a new certificate into the volume, restart the set
+```
+
+`status` prints `registry TLS on` or `off`, the volume name, `not before` and `not after`, and the `sans` line. It adds a `san set stale` line when the registries changed since the mint. Then it prints one line per container: `volume <name>`, `bind <dir> (legacy)` for a container that still mounts the directory of a release before v0.4.0, `no certificate mount`, or `absent`. It exits 0 in every one of these cases. It exits 1 when the domain is not a Lo domain or when the registry JSON cannot be resolved.
+
+`renew` mints a fresh certificate into the volume with the current SAN set. It restarts every existing container of the set and prints `registry TLS renewed: volume <name>, <n> SANs`. It exits 1 with `spec.registries.tls is false` when TLS is off. It exits 1 when the Secret plugin or docker fails, and the error names the step. The next `lo up` recreates the containers, because the certificate signature is part of their config hash.
 
 The default 6-registry set:
 
@@ -744,7 +759,7 @@ Rules:
 | `DOMAIN_NAME` | (empty) | Domain override. Full precedence: `--domain` flag > `DOMAIN_NAME` env > `clusters/.active` > `lok8s.dev`. When the env var and `.active` disagree, `lo` prints a one-line notice naming which won |
 | `DOMAIN_SANS` | `*` | Domain SANs |
 | `KIND_EXPERIMENTAL_DOCKER_NETWORK` | `lok8s` | Docker network name |
-| `PATH_SECRETS` | `.secrets` | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `.secrets` only with no domain context |
+| `PATH_SECRETS` | (empty) | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `lo secrets` without `--domain` reads it. The registry TLS mint does not read it: the certificate lives in a docker volume. The bash entrypoint defaults it to `.secrets`; the binary does not |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
 | `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |

@@ -68,7 +68,7 @@ full when you want the render self-contained. Details:
 Without the script, the same steps by hand:
 
 ```bash
-V=v0.3.1; A=lo-linux-amd64.tar.gz             # your tag and platform
+V=v0.4.0; A=lo-linux-amd64.tar.gz             # your tag and platform
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt

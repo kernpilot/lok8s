@@ -377,11 +377,13 @@ serves HTTPS with a certificate minted by the
 shared dev CA at `CAROOT`. This removes the need for an
 `insecure-registries` entry in the host Docker daemon configuration:
 
-- The cert is minted into `.secrets/tls/registries/` with every
-  registry's **IP** and (for framework registries) **hostname**
-  (`lok8s.local`, `lok8s.cache`) as Subject Alternative Names. It is
-  re-minted automatically if the IP/hostname set changes — no `mkcert`
-  binary involved (the CA at `CAROOT` is created on demand).
+- The cert is minted into the docker volume `<network>-registry-tls` with
+  every registry's **IP** and (for framework registries) **hostname**
+  (`lok8s.local`, `lok8s.cache`) as Subject Alternative Names. Every
+  registry container mounts the volume at `/etc/registry/certs`. `lo up`
+  mints again when the IP/hostname set changes. No `mkcert` binary is
+  involved (the CA at `CAROOT` is created on demand). See
+  [TLS registries](/guide/shared-registries#tls-registries-default).
 - **Containerd inside the kind nodes** trusts the cert via an explicit CA
   file: each `hosts.toml` references a copy of the dev `rootCA.pem`
   (`CAROOT`) mounted into the node's `certs.d` tree (no `skip_verify`).
