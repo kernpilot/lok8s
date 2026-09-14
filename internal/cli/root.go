@@ -11,6 +11,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -129,6 +130,8 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 	root.InitDefaultCompletionCmd()
 	applyExamples(root)
 	installCompletions(root, paths)
+	installConfirmations(root, paths)
+	installOutputs(root, paths)
 	return root
 }
 
@@ -161,6 +164,10 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 			assets.Configure(noEject)
 			noColor, _ := cmd.Flags().GetBool("no-color")
 			ui.SetNoColor(noColor)
+			quiet, _ := cmd.Flags().GetBool("quiet")
+			ui.SetQuiet(quiet)
+			debug, _ := cmd.Flags().GetBool("debug")
+			execx.Debug = debug
 			if err := r.refuse(topLevelName(cmd)); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "lo: %v\n", err)
 				return ErrHandled
@@ -210,6 +217,11 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	// Go-only: colour off on a terminal (env form: NO_COLOR, no-color.org).
 	// Piped output never carries colour.
 	pf.Bool("no-color", false, "No ANSI colour on the terminal (env form: NO_COLOR)")
+	// Go-only levels (ui.SetQuiet, execx.Debug): -q silences the
+	// informational stderr lines, --debug names every failed external
+	// command with its exit code. -v stays the [debug] channel (DEBUG=1).
+	pf.BoolP("quiet", "q", false, "Print errors and warnings only: no [assets] or DOMAIN_NAME notices")
+	pf.Bool("debug", false, "On a failure, print the external command line (docker, kind, kubectl, …) and its exit code")
 
 	root.AddGroup(
 		&cobra.Group{ID: groupLifecycle, Title: "Cluster lifecycle:"},
