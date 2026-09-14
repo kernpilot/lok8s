@@ -2,12 +2,11 @@ package initctx
 
 // loop.go — project mode: the card, the result of the last action under
 // it, and one choice from what the state allows. An entry opens its
-// action screen (screen.go); when the action is done the state is read
-// again and the card is printed again. Exit and Ctrl-C leave. Nothing is
-// written except on a screen's Create, so leaving never leaves a
-// half-written state. The rendering is a clean print per iteration: the
-// card and the list are appended, the forms draw inline and clear
-// themselves.
+// action screen (screen.go). When the action is done, the loop reads the
+// state again and prints the card again. Exit and Ctrl-C leave. Nothing
+// is written except on a screen's Create, so an exit never leaves a
+// half-written state. Each iteration prints the card and the list below
+// the previous output; the forms draw inline and clear themselves.
 
 import (
 	"errors"
@@ -38,11 +37,11 @@ const (
 	EntryExit           = "exit"
 )
 
-// Entries lists what the project state allows, in the order the list
-// shows it: a cluster, a service, the test suite when there is none,
-// the toolchain when a pinned tool is missing, the active domain with
-// several clusters, the bash tree when absent or the implementation
-// switch when present, then Exit.
+// Entries lists what the project state allows, in the order of the list.
+// Always: a cluster, a service, Exit. When there is no tests/: the test
+// suite. When a pinned tool is missing: the toolchain. With several
+// clusters: the active domain. Without a bash tree: the eject; with one:
+// the implementation switch.
 func Entries(s State) []Entry {
 	p := s.Project
 	if p == nil {

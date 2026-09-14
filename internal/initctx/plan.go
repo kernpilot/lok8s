@@ -1,11 +1,11 @@
 package initctx
 
-// plan.go — the decision layer: the defaults a situation suggests, the
-// ordered actions a set of answers makes (each with the files it writes,
-// the command it runs and the flag-twin command line a script runs
-// instead), and the `next` step a project state calls for. Pure: nothing
-// here touches the filesystem beyond one existence check for a cluster
-// spec that already exists.
+// plan.go — the decision layer. It holds the defaults a situation
+// suggests, the ordered actions a set of answers makes, and the `next`
+// step a project state calls for. Each action carries the files it
+// writes, the command it runs and the flag-twin command line a script
+// runs instead. Nothing here writes the filesystem; the one read is the
+// existence check for a cluster spec.
 
 import (
 	"path/filepath"
@@ -142,14 +142,14 @@ func Bootstrap(s State) bool {
 	return s.Project == nil || (s.Git.Available && s.Git.Root == "")
 }
 
-// DefaultAnswers are the bootstrap defaults the screen shows first. A new
-// project: the files where the situation suggests, the name from the
-// directory, the first cluster `<name>.dev` on the lo driver and made
-// active, the environment file the directory already has (else mise),
-// the toolchain, and `git init` when git exists and there is no
-// repository. An existing project without a repository: its name and
-// root, a first cluster only when it has none, the toolchain only when a
-// pin is missing, and `git init`.
+// DefaultAnswers are the bootstrap defaults the screen shows first. For
+// a new project: the files where the situation suggests; the name from
+// the directory; the first cluster `<name>.dev` on the lo driver, made
+// active; the environment file the directory has, else mise; the
+// toolchain; `git init` when git exists and there is no repository. For
+// a project without a repository: its name and root; a first cluster
+// only when it has none; the toolchain only when a pin is missing; `git
+// init`.
 func DefaultAnswers(s State) Answers {
 	dir := DefaultDir(s)
 	a := Answers{
@@ -454,10 +454,10 @@ func existingEnv(dir string) string {
 	return ""
 }
 
-// Next is the step a project state calls for, in order of need: the
-// toolchain when a pinned tool is missing, a cluster spec when there is
-// none, the active domain when none is set, the assets diff on drift,
-// `lo up` while the active domain has no kubeconfig yet, else `lo
+// Next is the step a project state calls for. The first that applies
+// wins: the toolchain when a pinned tool is missing; a cluster spec when
+// there is none; the active domain when none is set; the assets diff on
+// drift; `lo up` while the active domain has no kubeconfig; else `lo
 // status`. Outside a project: `lo init`.
 func Next(s State, drift bool) string {
 	p := s.Project

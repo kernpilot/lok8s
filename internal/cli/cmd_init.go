@@ -3,10 +3,10 @@ package cli
 // lo init — scaffold lok8s project/service config from a correct template.
 // Go port of .lok8s/libs/init (main::init); the scaffolding lives in
 // internal/scaffold. Output and emitted bytes are identical to the bash
-// implementation off a terminal. On a terminal (no --yes) `service`,
+// implementation off a terminal. On a terminal without --yes, `service`,
 // `test` and the Go-only `cluster` open their screen first
-// (cmd_init_wizard.go): the values given on the command line are fixed
-// rows, the rest are asked, Create runs the same functions.
+// (cmd_init_wizard.go). A value given on the command line is a fixed
+// row; the screen asks for the rest. Create runs the same functions.
 
 import (
 	"errors"
@@ -139,7 +139,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				plan = p
 			} else {
 				if in.Domain == "" {
-					ui.ErrorTo(cmd.ErrOrStderr(), "lo init cluster: a domain is required (lo init cluster <domain>)")
+					ui.ErrorTo(cmd.ErrOrStderr(), "lo init cluster: give a domain: lo init cluster <domain>")
 					return ErrHandled
 				}
 				p := initctx.ClusterPlan(paths.Base, in.Domain, in.Driver, in.Active)

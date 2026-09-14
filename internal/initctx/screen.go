@@ -1,19 +1,20 @@
 package initctx
 
-// screen.go — the one screen every write goes through. It shows, in the
-// card's two-column layout, the values the plan uses, the files it
-// writes (`writes`), the commands it runs (`runs`) and, dim and last,
-// the flag-twin command lines (`equivalent`); then it asks one thing:
-// Create, Change details, or Cancel. Change details turns the values
-// into fields (one per row, with help that says what the value is and
-// gives an example, never a flag) and shows the screen again. --plan
-// prints the rows alone.
+// screen.go — the one screen every write goes through. The screen has
+// the card's two-column layout. It shows the values the plan uses, the
+// files it writes (`writes`), the commands it runs (`runs`) and, dim and
+// last, the flag-twin command lines (`equivalent`). Then it asks one
+// thing: Create, Change details, or Cancel. Change details turns the
+// values into fields, one per row. The help under a field says what the
+// value is and gives an example; it never names a flag. Then the screen
+// appears again. --plan prints the rows alone.
 //
-// Three screens share it: the new project (bare `lo init` in an empty
-// or new directory, every value prefilled), a cluster (`lo init
-// cluster`), a service (`lo init service`) and the test suite (`lo init
-// test`). A value given on the command line is a fixed row, never a
-// field.
+// The screens: the bootstrap (bare `lo init` without a project or
+// without a repository, every value prefilled), a cluster (`lo init
+// cluster`), a service (`lo init service`), the test suite (`lo init
+// test`), the toolchain, the active domain, the bash tree and the
+// implementation switch (project mode). A value given on the command
+// line is a fixed row, never a field.
 
 import (
 	"fmt"
@@ -39,7 +40,7 @@ type Screen struct {
 	// Details builds the editable fields, bound to the values (nil = no
 	// details: every value came from the command line).
 	Details func() []huh.Field
-	// Incomplete is whether a required value is still empty: the details
+	// Incomplete is whether a value the screen needs is still empty: the details
 	// open before the screen is shown.
 	Incomplete bool
 }
@@ -67,11 +68,11 @@ const (
 	choiceCancel = "cancel"
 )
 
-// Run shows the screen and asks. Create returns the plan; Change details
-// runs the fields and shows the screen again; Cancel returns
-// ErrCancelled, Esc and Ctrl-C ErrAborted. build makes the screen from
-// the current values, so a changed detail is reflected on the next
-// render. The screen goes to out, the forms to tio.
+// Run shows the screen and asks. Create returns the plan. Change details
+// runs the fields and shows the screen again. Cancel returns
+// ErrCancelled; Esc and Ctrl-C return ErrAborted. build makes the screen
+// from the current values, so the next render shows a changed detail.
+// The screen goes to out, the forms to tio.
 func Run(out io.Writer, tio IO, paint ui.Paint, build func() Screen) (Plan, error) {
 	sc := build()
 	if sc.Incomplete && sc.Details != nil {
@@ -111,9 +112,9 @@ func Run(out io.Writer, tio IO, paint ui.Paint, build func() Screen) (Plan, erro
 }
 
 // prompt is one field's words: the title, the help under it (what the
-// value is, an example) and the placeholder of an empty input. Never a
-// flag: the flag twins live on the screen's equivalent row (TestPrompts
-// holds that line).
+// value is, an example) and the placeholder of an empty input. None of
+// them names a flag; the flag twins live on the screen's equivalent row.
+// TestPromptsCarryNoFlag holds that line.
 type prompt struct {
 	title, help, placeholder string
 }
@@ -134,9 +135,9 @@ var prompts = map[string]prompt{
 }
 
 // inputField is one text row of the details. An empty answer keeps the
-// value the row had (huh's accessible prompt validates the raw line
+// value the row had. huh's accessible prompt validates the raw line
 // before it falls back to the default, so the validator lets an empty
-// line through); a required value that stays empty stops Run.
+// line through. A value the screen needs that stays empty stops Run.
 func inputField(key string, v *string, validate func(string) error) huh.Field {
 	p := prompts[key]
 	f := huh.NewInput().Title(p.title).Description(p.help).Placeholder(p.placeholder).Value(v)

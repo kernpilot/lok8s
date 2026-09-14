@@ -4,18 +4,17 @@ package cli
 // verbs. On a terminal a bare `lo init` has two modes. Without a project
 // here, or in a project without a git repository: the welcome line and
 // the bootstrap screen (every value prefilled; Create, Change details,
-// Cancel), then project mode. In a project with a repository:
-// project mode — the card, one choice from what the state allows, the
-// action's screen, the card again — until Exit or Ctrl-C. Off a
-// terminal, under CI or with --yes: the help text exactly as before.
-// --plan (and --dry-run) prints the mode's screen as text and writes
-// nothing.
+// Cancel), then project mode. In a project with a repository: project
+// mode. That is the card, one choice from what the state allows, the
+// action's screen, the card again, until Exit or Ctrl-C. Off a terminal,
+// under CI or with --yes: the help text as before. --plan (and --dry-run)
+// prints the mode's screen as text and writes nothing.
 //
-// One executor: every screen's Create and every verb run the same
+// One executor runs every screen's Create and every verb: the same
 // functions (scaffold.Project, scaffold.WriteClusterSpec,
 // scaffold.Service, scaffold.Tests, runToolchainInstall, useSetActive,
-// assetsEject, scaffold.SetImplementation), and the dim `equivalent` row
-// of a screen is the verb line a script runs instead.
+// assetsEject, scaffold.SetImplementation). The dim `equivalent` row of
+// a screen is the verb line a script runs instead.
 
 import (
 	"context"

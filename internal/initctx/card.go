@@ -3,14 +3,14 @@ package initctx
 // card.go — the state card of a bare `lo init`, and the row layout the
 // screens share.
 //
-// The card is the run header's two-column layout (`lo up`): a lowercase
-// key, two spaces past the longest key, the values joined with ` · `. The
-// first key is the project (or directory) name. One path form throughout:
-// the working directory as the user typed it, and a path only when it is
-// not the working directory (the position below a project root, a
-// repository root elsewhere). A row the user can act on carries a leading
-// `!` and ends with the command to run. Colours (internal/ui) only when
-// stdout is a terminal.
+// The card has the two-column layout of the run header (`lo up`): a
+// lowercase key, two spaces past the longest key, the values joined with
+// ` · `. The first key is the project (or directory) name. The card uses
+// one path form: the working directory as the user typed it. It prints a
+// path in two cases only: the position below a project root, and a
+// repository root elsewhere. A row the user can act on starts with `!`
+// and ends with the command to run. Colours (internal/ui) apply only
+// when stdout is a terminal.
 
 import (
 	"fmt"

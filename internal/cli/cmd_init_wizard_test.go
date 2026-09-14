@@ -482,7 +482,7 @@ func TestInitClusterVerb(t *testing.T) {
 	p := synthProject(t)
 	installInitSeams(t, false, "")
 	_, stderr, err := runLo(t, NewRoot(p), "init", "cluster")
-	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "a domain is required") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "give a domain: lo init cluster <domain>") {
 		t.Errorf("no domain: err=%v stderr=%q", err, stderr)
 	}
 	stdout, _, err := runLo(t, NewRoot(p), "init", "cluster", "x.dev")

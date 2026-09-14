@@ -1,9 +1,9 @@
 package initctx
 
 // form.go — the huh side of the screens: the house theme, the form IO
-// and the one runner every form goes through. accessible selects huh's
-// line-driven mode (the tests script it over an io.Reader; a terminal
-// gets the interactive forms).
+// and the one runner every form goes through. IO.Accessible selects
+// huh's line-driven mode. The tests script that mode over an io.Reader;
+// a terminal gets the interactive forms.
 
 import (
 	"errors"
@@ -13,11 +13,12 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Theme is the house form theme: huh's base theme with the accent set to
-// the doctor's green (ANSI colour 2, the `✓` of `lo doctor`) for the
-// selection cursor, the chosen options, the focused button and the input
-// prompt; the muted text in the terminal's dim colour; and no border
-// (`lo` prints no boxes). Everything else inherits from the base theme.
+// Theme is the house form theme, derived from huh's base theme. The
+// accent is the doctor's green (ANSI colour 2, the `✓` of `lo doctor`):
+// the selection cursor, the chosen options, the focused button and the
+// input prompt use it. Muted text uses the terminal's dim colour (ANSI
+// 8). There is no border: `lo` prints no boxes. Everything else comes
+// from the base theme.
 func Theme(isDark bool) *huh.Styles {
 	t := huh.ThemeBase(isDark)
 	accent := lipgloss.Color("2")
@@ -57,15 +58,15 @@ func Theme(isDark bool) *huh.Styles {
 	return t
 }
 
-// ErrAborted is returned when the user leaves a form (Esc, Ctrl-C):
-// the run ends, nothing was written. ErrCancelled is the Cancel choice
-// of a screen: the project loop returns to its list.
+// ErrAborted means the user left a form (Esc, Ctrl-C): the run ends and
+// nothing is written. ErrCancelled is the Cancel choice of a screen: the
+// project loop returns to its list.
 var (
 	ErrAborted   = errors.New("lo init: cancelled")
 	ErrCancelled = errors.New("lo init: cancelled, back to the list")
-	// ErrIncomplete is a required value left empty (an accessible prompt
-	// at EOF): the screen cannot run.
-	ErrIncomplete = errors.New("lo init: a required value is empty")
+	// ErrIncomplete means a value the screen needs stayed empty (an
+	// accessible prompt at EOF): the screen cannot run.
+	ErrIncomplete = errors.New("lo init: a value is missing")
 )
 
 // IO is where a form reads and writes.
@@ -77,9 +78,9 @@ type IO struct {
 	Accessible bool
 }
 
-// keyMap is huh's default key map without the list filter: every list
-// of `lo init` is short, and the help line stays to the three keys that
-// matter (up, down, enter; x toggles a multi-select).
+// keyMap is huh's default key map without the list filter. Every list of
+// `lo init` is short. The help line then names the keys that matter: up,
+// down, enter (and x on a multi-select).
 func keyMap() *huh.KeyMap {
 	km := huh.NewDefaultKeyMap()
 	km.Select.Filter.SetEnabled(false)

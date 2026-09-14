@@ -1,13 +1,13 @@
-// Package initctx reads the room for a bare `lo init`: where the user
-// stands (a project root, a subdirectory, a service directory, a
-// submodule under an umbrella project, an empty or a bare directory),
-// what git says about it, what the project already has, and whether a
-// terminal is attached. Detect is the read side; Decide turns the state
-// and the wizard's answers into the ordered list of actions the cli
-// executes through the existing subcommands; Ask is the huh form layer.
+// Package initctx is the state and the screens of a bare `lo init`.
+// Detect reads where the user stands: a project root, a subdirectory, a
+// service directory, a submodule under an umbrella project, an empty or
+// a bare directory; what git says; what the project has; whether a
+// terminal is attached. Decide turns the state and the answers into the
+// ordered actions the cli runs through the verbs. The screens (screen.go)
+// and project mode (loop.go) are the huh forms.
 //
-// Everything here is pure over the filesystem except the two git reads,
-// which go through the execx.Runner seam so the tests script them.
+// Everything here reads the filesystem only. The three git reads go
+// through the execx.Runner seam, so the tests script them.
 package initctx
 
 import (
@@ -214,7 +214,7 @@ func (s State) ServiceName() string {
 	return filepath.Base(s.Cwd)
 }
 
-// Detect reads the room from cwd. r runs git (nil = no git: the state
+// Detect reads the state from cwd. r runs git (nil = no git: the state
 // reports it unavailable).
 func Detect(ctx context.Context, cwd string, r execx.Runner) (State, error) {
 	abs, err := filepath.Abs(cwd)
@@ -241,9 +241,9 @@ func Detect(ctx context.Context, cwd string, r execx.Runner) (State, error) {
 	return s, nil
 }
 
-// detectGit runs the three git reads through r: the root, the branch
-// (symbolic-ref, so an unborn branch still has a name and a detached
-// HEAD reads as none) and the porcelain status.
+// detectGit runs the three git reads through r: the root, the branch and
+// the porcelain status. The branch comes from symbolic-ref: an unborn
+// branch still has a name, and a detached HEAD reads as none.
 func detectGit(ctx context.Context, cwd string, r execx.Runner) Git {
 	g := Git{}
 	if r == nil {
@@ -280,10 +280,10 @@ func detectGit(ctx context.Context, cwd string, r execx.Runner) Git {
 	return g
 }
 
-// cwdForm rewrites root (a path git printed, symlinks resolved) into the
-// form of cwd (the path the user typed): the same relative walk from
-// the resolved cwd, re-rooted on the typed one. root unchanged when the
-// two forms cannot be related.
+// cwdForm rewrites root into the form of cwd. git prints root with
+// symlinks resolved; cwd is the path the user typed. The walk from the
+// resolved cwd to root is applied to the typed cwd. root stays as printed
+// when the two forms cannot be related.
 func cwdForm(cwd, root string) string {
 	resolved, err := filepath.EvalSymlinks(cwd)
 	if err != nil || resolved == cwd {
@@ -424,12 +424,12 @@ func listDomains(clusters string) []Domain {
 	return out
 }
 
-// pinnedTools counts the toolchain byaml pins and lists the entries that
-// do not resolve: b itself (<bin>/b), then every `binaries:` entry at the
-// path b installs it to — `file:` relative to the b.yaml directory, else
-// <bin>/<alias or the last segment of the key>. A filesystem check only
-// (no probe): `lo toolchain doctor` verifies versions. Without a b.yaml
-// nothing is pinned: 0, nil.
+// pinnedTools counts the pins of byaml and lists the entries that do not
+// resolve. The pins are b itself (<bin>/b) and every `binaries:` entry.
+// An entry resolves at the path b installs it to: `file:` relative to
+// the b.yaml directory, else <bin>/<alias>, else <bin>/<the last segment
+// of the key>. This is a filesystem check, no probe: `lo toolchain
+// doctor` verifies versions. Without a b.yaml nothing is pinned: 0, nil.
 func pinnedTools(byaml string) (int, []string) {
 	raw, err := os.ReadFile(byaml)
 	if err != nil {
