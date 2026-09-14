@@ -22,17 +22,21 @@ needed to mint** (the CA is created on demand); mkcert is only one of the ways t
   framework hostnames `lok8s.local` / `lok8s.cache` and each mirror's impersonated
   domain), pipes a `cert: {hosts: […]}` Secret manifest through the Secret plugin,
   and extracts `tls.crt`/`tls.key` (base64-decoded from the emitted Secret) into
-  `.secrets/tls/registries/`. Re-minted only when the SAN set changes (a `.sans`
-  sidecar records it; the plugin's name-keyed cache entry is dropped first to
-  force a fresh signature). No `mkcert`/`certgen` binary.
+  the docker volume `<project_network>-registry-tls` through a throwaway
+  container (`docker container create` + `docker cp` + `docker rm`). The plugin
+  gets a scratch `PATH_SECRETS` under the domain dir, removed afterwards; no
+  project directory holds the material. Re-minted only when the SAN set
+  changes (a `.sans` entry in the volume records it). No `mkcert`/`certgen`
+  binary. `lo registry tls status|renew` inspect and renew it.
 - **Listen port** — TLS registries listen on **`:443`** (not `:80`), so a bare-IP
   `docker push <ip>/…` (which defaults to 443) reaches them with no port in the
   ref and no `insecure-registries`. (`LO_REGISTRY_PORT` / `LO_REGISTRY_PORT_TLS`
   in `defaults.sh`; recorded as `port` in `.registries.json`.)
 - **Registry containers** — `lo::registries` renders the registry config's
   `http:` block for the active mode (`lo::render_registry_config` swaps the plain
-  `:80` block for a `:443` + `tls:` block) and mounts `.secrets/tls/registries`
-  read-only into each container.
+  `:80` block for a `:443` + `tls:` block) and mounts the volume
+  `<project_network>-registry-tls` read-only into each container at
+  `/etc/registry/certs`.
 - **Containerd trust** — `lo::write_certs_d` (`drivers/lo/utils/render.sh`) writes
   `server = "https://<ip>"` + `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` (no
   `skip_verify`) and copies the dev `rootCA.pem` (resolved from `CAROOT`,

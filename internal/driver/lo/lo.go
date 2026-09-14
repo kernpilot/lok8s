@@ -61,6 +61,11 @@ type Driver struct {
 	// stdout is where progress phases print off-capture; defaults to
 	// os.Stdout.
 	stdout io.Writer
+
+	// tlsCrt is the registry cert PEM the mint read or produced in this
+	// process (registrytls.go); registries() hashes it without a second
+	// read of the volume.
+	tlsCrt []byte
 }
 
 // New builds the driver over its dispatch-provided dependencies.
@@ -183,7 +188,7 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	// Registry TLS cert — mint it (via the Secret plugin) before the
 	// registry containers start (they mount it) and before certs.d is
 	// written (it references the dev CA). No-op unless spec.registries.tls.
-	if err := d.registriesTLSCert(ctx, stderr); err != nil {
+	if err := d.registriesTLSCert(ctx, domain, stderr); err != nil {
 		return err
 	}
 

@@ -48,6 +48,7 @@ main::registry() {
     'down|d'   'Spin down registries'
     'status|s' 'Check registry status'
     'clean|c'  'Clean up registries'
+    'tls|t'    "The registry set's TLS certificate (docker volume)"
   )
   local shared
   # Default from the INHERITED `domain` (lo main's resolved local, via bash
@@ -129,6 +130,148 @@ registry::clean() {
       debug "Removed registry network ${net}"
     fi
   fi
+}
+
+registry::tls() {
+  local -a usage=(
+    'status|s' 'Show the certificate and what each registry mounts'
+    'renew|r'  'Mint a new certificate into the volume and restart the registries'
+  )
+  :usage "The registry set's TLS certificate (docker volume)" "${@}"
+  "${usage[@]}"
+}
+
+# _tls_cert_mounts — one "container<TAB>mount" line per registry of the set,
+# in registry order (every container inspected before anything acts on it,
+# like the Go driver's registryCertMounts).
+_tls_cert_mounts() {
+  _tls_mount_entry() {
+    # `reg_domain`, not `domain`: the entry field must not shadow the
+    # inherited main::registry domain arg (AG012).
+    local name="${1}" ip="${2}" url="${3}" reg_domain="${4}" host="${5}" type="${6}"
+    local container_info
+    container_info=$(registry::container "${name}")
+    local reg_name="${container_info%%	*}"
+    printf '%s\t%s\n' "${reg_name}" "$(lo::registry_cert_mount "${reg_name}")"
+  }
+  registry::each _tls_mount_entry
+}
+
+# tls::status — the set's certificate and what each container mounts. The
+# output is byte-identical to the Go driver's RegistryTLSStatus.
+tls::status() {
+  _registry_init || return 1
+  local _domain
+  _domain="$(_registry_domain)"
+  if ! registry::is_tls; then
+    echo "registry TLS  off (spec.registries.tls: false in ${_domain})"
+    return 0
+  fi
+  local vol
+  vol=$(lo::registry_tls_volume)
+  echo "registry TLS  on"
+  echo "volume        ${vol}"
+  local read_rc=0
+  if ! lo::registry_tls_volume_exists "${vol}"; then
+    echo "certificate   none. The volume does not exist. Next: lo up"
+  elif lo::registry_tls_read "${vol}" || { read_rc=$?; false; }; then
+    _tls_print_leaf "${LO_REGISTRY_TLS_READ_CRT}"
+    local prev="${LO_REGISTRY_TLS_READ_SANS}"
+    while [[ "${prev}" == *$'\n' ]]; do prev="${prev%$'\n'}"; done
+    if [[ "${prev}" != "$(lo::registry_tls_sans)" ]]; then
+      echo "san set       stale. The registries changed since the mint. Next: lo registry tls renew"
+    fi
+  elif (( read_rc == 2 )); then
+    return 1
+  else
+    echo "certificate   none. The volume holds no complete tls.crt + tls.key pair. Next: lo registry tls renew"
+  fi
+  echo "containers"
+  local reg_name mount kind src
+  while IFS=$'\t' read -r reg_name mount; do
+    kind="${mount%%|*}"
+    src="${mount#*|}"
+    case "${kind}" in
+      volume) printf '  %-28s volume %s\n' "${reg_name}" "${src}" ;;
+      bind)   printf '  %-28s bind %s (legacy). Next: lo registry down && lo registry up\n' "${reg_name}" "${src}" ;;
+      none)   printf '  %-28s no certificate mount\n' "${reg_name}" ;;
+      *)      printf '  %-28s absent\n' "${reg_name}" ;;
+    esac
+  done < <(_tls_cert_mounts)
+}
+
+# _tls_rfc3339 <openssl date> — "Sep 14 15:00:00 2026 GMT" as
+# 2026-09-14T15:00:00Z. GNU date first, BSD/macOS `-j -f` fallback (the
+# kapply.sh pattern), so darwin prints the same dates as the binary.
+_tls_rfc3339() {
+  date -ud "${1}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || TZ=UTC date -j -f '%b %e %H:%M:%S %Y %Z' "${1}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || echo "${1}"
+}
+
+# _tls_print_leaf <pem> — `not before`, `not after` (RFC 3339, UTC) and the
+# `sans` line (DNS names, then IP addresses), through openssl.
+_tls_print_leaf() {
+  local pem="${1}" dates
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "certificate   unreadable: openssl not found. Next: lo registry tls renew"
+    return 0
+  fi
+  if ! dates=$(printf '%s' "${pem}" | openssl x509 -noout -startdate -enddate 2>/dev/null); then
+    echo "certificate   unreadable: no PEM block. Next: lo registry tls renew"
+    return 0
+  fi
+  local before after
+  before=$(sed -n 's/^notBefore=//p' <<<"${dates}")
+  after=$(sed -n 's/^notAfter=//p' <<<"${dates}")
+  echo "not before    $(_tls_rfc3339 "${before}")"
+  echo "not after     $(_tls_rfc3339 "${after}")"
+  local san dns=() ips=() entry
+  san=$(printf '%s' "${pem}" | openssl x509 -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr ',' '\n')
+  while IFS= read -r entry; do
+    entry="${entry#"${entry%%[! ]*}"}"
+    case "${entry}" in
+      DNS:*)        dns+=("${entry#DNS:}") ;;
+      "IP Address:"*) ips+=("${entry#IP Address:}") ;;
+    esac
+  done <<<"${san}"
+  echo "sans          ${dns[*]}${dns[*]:+ }${ips[*]}"
+}
+
+# tls::renew — mint a fresh certificate into the volume and restart the
+# set's containers. They keep their config-hash label, which carries the old
+# cert signature, so the next `lo up` recreates them with the new one; the
+# cluster nodes need nothing, they trust the dev CA.
+tls::renew() {
+  _registry_init || return 1
+  local _domain
+  _domain="$(_registry_domain)"
+  if ! registry::is_tls; then
+    echo "error: spec.registries.tls is false in ${_domain}. There is no certificate to renew." >&2
+    return 1
+  fi
+  local -a sans=()
+  mapfile -t sans < <(lo::registry_tls_sans)
+  if (( ${#sans[@]} == 0 )); then
+    echo "error: no registry SANs resolved — cannot mint registry TLS cert" >&2
+    return 1
+  fi
+  local vol exists=0
+  vol=$(lo::registry_tls_volume)
+  lo::registry_tls_volume_exists "${vol}" && exists=1
+  lo::registry_tls_mint "${_domain}" "${vol}" "${exists}" "${sans[@]}" || return 1
+  echo "registry TLS renewed: volume ${vol}, ${#sans[@]} SANs"
+  local mounts reg_name mount
+  mounts=$(_tls_cert_mounts)
+  while IFS=$'\t' read -r reg_name mount; do
+    [[ "${mount}" != "absent" ]] || continue
+    if ! docker restart "${reg_name}" >/dev/null 2>&1; then
+      echo "error: docker restart ${reg_name} failed. Next: lo registry down && lo registry up" >&2
+      return 1
+    fi
+    echo "restarted ${reg_name}"
+  done <<<"${mounts}"
+  echo "Next: run 'lo up' in each cluster that uses the set. It picks the certificate up there."
 }
 
 registry::status() {

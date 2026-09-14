@@ -26,6 +26,7 @@ examples/*/clusters/*/.oidc/
 **/clusters/*/artifacts/capi.yaml
 **/clusters/*/.artifacts-stage.*/
 **/clusters/*/.artifacts-tmp.*/
+**/clusters/*/.registry-tls-tmp.*/
 **/clusters/*/artifacts.yaml
 **/clusters/*/.kubeconfig/
 **/clusters/*/.containerd/

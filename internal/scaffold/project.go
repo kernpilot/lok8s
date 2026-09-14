@@ -141,6 +141,7 @@ var gitignoreEntries = []string{
 	".lok8s/**/secret.yaml",
 	"# lok8s — the split's scratch dirs (removed on every exit; a killed build leaves them until the next one)",
 	"**/clusters/*/.artifacts-tmp.*/",
+	"**/clusters/*/.registry-tls-tmp.*/",
 	"**/clusters/*/.artifacts-stage.*/",
 }
 

@@ -29,6 +29,8 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
+	"github.com/kernpilot/lok8s/internal/driver"
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/provider/bridge"
@@ -113,6 +115,7 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 		fail = true
 	}
 	doctorTLSSection(ctx, r, path, d, out)
+	doctorRegistryTLS(ctx, r, paths, d, out)
 	doctorDomainSection(paths, d, out)
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit
@@ -245,6 +248,28 @@ func doctorTLSSection(ctx context.Context, r execx.Runner, path, d string, out i
 		dd = "<domain>"
 	}
 	fmt.Fprintf(out, "    if *.%s TLS is rejected by your browser/curl, run: lo trust\n", dd)
+}
+
+// doctorRegistryTLS is the Go-only line under the dev-TLS section that
+// says what the active domain's registry containers mount at the cert
+// path: the set's volume, or the legacy bind-mounted directory of a
+// project that has not recreated its registries since v0.4.0. Printed only
+// when the domain has a registry JSON and at least one container of the
+// set exists, so the section stays byte-identical to bash everywhere else
+// (hack/parity-configure.sh diffs doctor strictly).
+func doctorRegistryTLS(ctx context.Context, r execx.Runner, paths *config.Paths, d string, out io.Writer) {
+	if d == "" {
+		return
+	}
+	drv := lodriver.New(&driver.Deps{Paths: paths, Runner: r, Stderr: io.Discard})
+	line, warn := drv.RegistryTLSDoctor(ctx, d)
+	switch {
+	case line == "":
+	case warn:
+		doctorWarn(out, line)
+	default:
+		doctorOK(out, line)
+	}
 }
 
 // doctorDomainSection is `--- domain ---` (advisory).

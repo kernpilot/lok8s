@@ -115,7 +115,7 @@ driver::provision() {
       # Registry TLS cert — mint it (via the Secret plugin) before the registry
       # containers start (they mount it) and before certs.d is written (it
       # references the dev CA). No-op unless spec.registries.tls.
-      lo::registries_tls_cert || return 1
+      lo::registries_tls_cert "${domain}" || return 1
 
       # Registries + containerd config (must exist before kind create).
       # kapply::run collapses the per-registry "registry/<name> <verb>" lines

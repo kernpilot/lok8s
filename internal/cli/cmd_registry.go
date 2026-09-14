@@ -100,6 +100,27 @@ func newRegistryCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			return drv.RegistryClean(ctx, d, shared, errOut)
 		}),
 	)
+
+	// `lo registry tls` mirrors registry::tls in the bash tree (the same
+	// volume model on both sides, byte-identical output); the leaves are
+	// ported like the four above.
+	tlsCmd := &cobra.Command{
+		Use:          "tls",
+		Aliases:      []string{"t"},
+		Short:        "The registry set's TLS certificate (docker volume)",
+		SilenceUsage: true,
+		RunE:         argshGroupRunE,
+	}
+	argshFlagErrors(tlsCmd)
+	tlsCmd.AddCommand(
+		sub("status", "s", "Show the certificate and what each registry mounts", func(ctx context.Context, drv *lodriver.Driver, d string, out, errOut io.Writer, _ registryDeps) error {
+			return drv.RegistryTLSStatus(ctx, d, out, errOut)
+		}),
+		sub("renew", "r", "Mint a new certificate into the volume and restart the registries", func(ctx context.Context, drv *lodriver.Driver, d string, out, errOut io.Writer, _ registryDeps) error {
+			return drv.RegistryTLSRenew(ctx, d, out, errOut)
+		}),
+	)
+	cmd.AddCommand(tlsCmd)
 	return cmd
 }
 
