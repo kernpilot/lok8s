@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"charm.land/huh/v2"
 
@@ -96,7 +97,19 @@ func Welcome(w io.Writer, s State, paint ui.Paint) {
 	if s.Situation() == SituationGitBelowRoot {
 		what = "a lok8s project at the repository root"
 	}
-	fmt.Fprintf(w, "  %s\n", paint.Bold("lo init sets up "+what+": the project file, the first cluster spec, the toolchain."))
+	line := "lo init sets up " + what + ": the project file, the first cluster spec, the toolchain."
+	if p := s.Project; p != nil {
+		// An existing project without a repository: what it lacks.
+		parts := []string{"a git repository"}
+		if len(p.Domains) == 0 {
+			parts = append(parts, "the first cluster spec")
+		}
+		if !p.BYAML || len(p.ToolsMissing) > 0 {
+			parts = append(parts, "the toolchain")
+		}
+		line = "lo init completes the project " + projectName(s) + ": " + strings.Join(parts, ", ") + "."
+	}
+	fmt.Fprintf(w, "  %s\n", paint.Bold(line))
 }
 
 // Loop is project mode. Detect reads the state again after an action;

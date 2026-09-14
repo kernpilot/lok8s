@@ -144,6 +144,50 @@ func TestDecideGitBelowRoot(t *testing.T) {
 	}
 }
 
+// A project without a repository: the defaults keep what exists (the
+// name, the clusters, the environment file, the installed toolchain) and
+// add what is missing; the files line lists only the missing files.
+func TestDecideProjectWithoutGit(t *testing.T) {
+	root := t.TempDir()
+	s := projectState(root, true)
+	s.Git = Git{Available: true}
+	s.Project.Domains = []Domain{{"alpha.dev", "lo"}}
+	s.Project.EnvFile = "direnv"
+	s.Project.BYAML, s.Project.Tools = true, 8
+	a := DefaultAnswers(s)
+	if a.Dir != root || a.Name != "acme" || a.Domain != "" || a.Use || a.Env != "direnv" || !a.GitInit || a.Toolchain {
+		t.Errorf("defaults: %+v", a)
+	}
+	p := Decide(s, a)
+	wantKinds(t, p, ActionWriteProjectFiles, ActionGitInit)
+	wantCommands(t, p, "lo init project acme --env direnv", "git init")
+	if !reflect.DeepEqual(p.Actions[0].Files, []string{".gitignore entries"}) {
+		t.Errorf("files %v", p.Actions[0].Files)
+	}
+	if verb, what := p.Result(); verb != "created" || what != "acme · git initialised" {
+		t.Errorf("result: %s %s", verb, what)
+	}
+
+	// Nothing but the marker: a first cluster, the env file and the
+	// toolchain join in; the cluster made active.
+	s.Project.Domains, s.Project.EnvFile, s.Project.BYAML = nil, "", false
+	s.Project.ProjectFile, s.Project.Name = false, ""
+	s.Cwd = filepath.Join(root, "sub")
+	a = DefaultAnswers(s)
+	if a.Name != filepath.Base(root) || a.Domain != a.Name+".dev" || !a.Use || !a.Toolchain {
+		t.Errorf("defaults: %+v", a)
+	}
+	p = Decide(s, a)
+	wantKinds(t, p, ActionWriteProjectFiles, ActionGitInit, ActionToolchainInstall, ActionUse)
+	if p.Dir != root || !reflect.DeepEqual(p.Actions[0].Files, []string{"lok8s.yaml", ".gitignore entries", "mise.toml", "clusters/" + a.Domain + "/cluster.lok8s.yaml"}) {
+		t.Errorf("plan: %s %v", p.Dir, p.Actions[0].Files)
+	}
+	// Below the root the twin names the root.
+	if want := "lo init project " + a.Name + " --env mise --path " + root + " --cluster " + a.Domain + " --driver lo"; p.Commands()[0] != want {
+		t.Errorf("command %q, want %q", p.Commands()[0], want)
+	}
+}
+
 func TestDecideBareDirectory(t *testing.T) {
 	cwd := t.TempDir()
 	s := State{Cwd: cwd, Entries: 3, Git: Git{Available: true}}

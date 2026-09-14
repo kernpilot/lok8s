@@ -189,4 +189,41 @@ func TestWelcome(t *testing.T) {
 	if !strings.Contains(b.String(), "at the repository root") {
 		t.Errorf("welcome below a root: %q", b.String())
 	}
+	// A project without a repository: what it lacks.
+	s := projectState(t.TempDir(), true)
+	s.Git = Git{Available: true}
+	b.Reset()
+	Welcome(&b, s, false)
+	if b.String() != "  lo init completes the project acme: a git repository, the first cluster spec, the toolchain.\n" {
+		t.Errorf("welcome in a project: %q", b.String())
+	}
+	s.Project.Domains = []Domain{{"a.dev", "lo"}}
+	s.Project.BYAML = true
+	b.Reset()
+	Welcome(&b, s, false)
+	if b.String() != "  lo init completes the project acme: a git repository.\n" {
+		t.Errorf("welcome in a complete project: %q", b.String())
+	}
+}
+
+// Bootstrap: no project, or a project without a repository (git
+// installed); a project with a repository, or without git at all, is
+// project mode.
+func TestBootstrap(t *testing.T) {
+	root := t.TempDir()
+	if !Bootstrap(State{Cwd: root, Empty: true}) {
+		t.Error("an empty directory is not bootstrap")
+	}
+	s := projectState(root, true)
+	if Bootstrap(s) {
+		t.Error("a project with a repository is bootstrap")
+	}
+	s.Git = Git{Available: true}
+	if !Bootstrap(s) {
+		t.Error("a project without a repository is not bootstrap")
+	}
+	s.Git = Git{}
+	if Bootstrap(s) {
+		t.Error("a project without git installed is bootstrap")
+	}
 }

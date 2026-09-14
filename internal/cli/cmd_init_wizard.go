@@ -2,8 +2,9 @@ package cli
 
 // cmd_init_wizard.go — bare `lo init` (Go-only) and the screens of its
 // verbs. On a terminal a bare `lo init` has two modes. Without a project
-// here: the welcome line and the bootstrap screen (every value prefilled;
-// Create, Change details, Cancel), then project mode. In a project:
+// here, or in a project without a git repository: the welcome line and
+// the bootstrap screen (every value prefilled; Create, Change details,
+// Cancel), then project mode. In a project with a repository:
 // project mode — the card, one choice from what the state allows, the
 // action's screen, the card again — until Exit or Ctrl-C. Off a
 // terminal, under CI or with --yes: the help text exactly as before.
@@ -88,7 +89,7 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 	}
 	paint := ui.Paint(term.StdoutTTY)
 	if f.plan || f.dryRun {
-		if state.Project == nil {
+		if initctx.Bootstrap(state) {
 			initctx.Welcome(out, state, paint)
 			fmt.Fprintln(out)
 			a := initctx.DefaultAnswers(state)
@@ -102,7 +103,7 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 	loop := initctx.Loop{Out: out, IO: tio, Detect: detect,
 		Execute: func(p initctx.Plan) error { return initExecute(ctx, p, runner, out, stderr) }}
 	var first *initctx.Plan
-	if state.Project == nil {
+	if initctx.Bootstrap(state) {
 		initctx.Welcome(out, state, paint)
 		fmt.Fprintln(out)
 		plan, err := initctx.NewProject(state, out, tio)

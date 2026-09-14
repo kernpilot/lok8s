@@ -135,29 +135,49 @@ func (p Plan) Network() bool {
 	return false
 }
 
-// DefaultAnswers are the new-project defaults the screen shows first: the
-// files where the situation suggests, the name from the directory, the
-// first cluster `<name>.dev` on the lo driver and made active, the
-// environment file the directory already has (else mise), the toolchain,
-// and `git init` when git exists and there is no repository.
+// Bootstrap reports whether the state calls for the bootstrap screen
+// (mode 1): no project here, or a project without a git repository
+// (git installed, no repository). Everything else is project mode.
+func Bootstrap(s State) bool {
+	return s.Project == nil || (s.Git.Available && s.Git.Root == "")
+}
+
+// DefaultAnswers are the bootstrap defaults the screen shows first. A new
+// project: the files where the situation suggests, the name from the
+// directory, the first cluster `<name>.dev` on the lo driver and made
+// active, the environment file the directory already has (else mise),
+// the toolchain, and `git init` when git exists and there is no
+// repository. An existing project without a repository: its name and
+// root, a first cluster only when it has none, the toolchain only when a
+// pin is missing, and `git init`.
 func DefaultAnswers(s State) Answers {
 	dir := DefaultDir(s)
-	name := DefaultName(dir)
-	return Answers{
+	a := Answers{
 		Dir:       dir,
-		Name:      name,
-		Domain:    name + ".dev",
+		Name:      DefaultName(dir),
 		Driver:    "lo",
-		Use:       true,
 		Env:       DefaultEnv(s, dir),
 		GitInit:   s.Git.Available && s.Git.Root == "",
 		Toolchain: true,
 	}
+	if p := s.Project; p != nil {
+		a.Name = projectName(s)
+		a.Toolchain = !p.BYAML || len(p.ToolsMissing) > 0
+		if len(p.Domains) > 0 {
+			return a
+		}
+	}
+	a.Domain, a.Use = a.Name+".dev", true
+	return a
 }
 
-// DefaultDir is the project directory a new project defaults to: the git
-// root when the user stands below it, else the working directory.
+// DefaultDir is the project directory the bootstrap defaults to: the
+// project's root inside one, the git root when the user stands below it,
+// else the working directory.
 func DefaultDir(s State) string {
+	if s.Project != nil {
+		return s.Project.Root
+	}
 	if s.Situation() == SituationGitBelowRoot {
 		return s.Git.Root
 	}
@@ -217,16 +237,28 @@ func Decide(s State, a Answers) Plan {
 	}
 	p := Plan{Dir: dir, Name: name}
 
-	files := []string{"clusters/", "lok8s.yaml", ".gitignore entries"}
+	// The files `lo init project` writes; inside an existing project only
+	// the ones it lacks (the scaffold keeps every existing file).
+	files := []string{}
+	proj := s.Project
+	if proj == nil || !proj.Clusters {
+		files = append(files, "clusters/")
+	}
+	if proj == nil || !proj.ProjectFile {
+		files = append(files, "lok8s.yaml")
+	}
+	files = append(files, ".gitignore entries")
 	cmd := "lo init project " + name + " --env " + env
 	if rel := relDir(s.Cwd, dir); rel != "" {
 		cmd += " --path " + rel
 	}
-	switch env {
-	case "mise":
-		files = append(files, "mise.toml")
-	case "direnv":
-		files = append(files, ".envrc")
+	if proj == nil || proj.EnvFile == "" {
+		switch env {
+		case "mise":
+			files = append(files, "mise.toml")
+		case "direnv":
+			files = append(files, ".envrc")
+		}
 	}
 	action := Action{Kind: ActionWriteProjectFiles, Name: name, Env: env}
 	if a.Domain != "" {

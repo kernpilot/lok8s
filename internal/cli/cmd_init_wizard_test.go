@@ -322,6 +322,70 @@ func TestInitBootstrapThenProjectMode(t *testing.T) {
 	}
 }
 
+// A project without a repository: the welcome names what it lacks, the
+// bootstrap screen keeps the project's name and clusters (no new domain),
+// Create runs `lo init project` (every existing file kept), `git init`
+// and the toolchain, then project mode with the result line; `--plan`
+// prints the same screen.
+func TestInitBootstrapProjectWithoutGit(t *testing.T) {
+	root := projectRoot(t, "alpha.dev")
+	t.Chdir(root)
+	before, _ := os.ReadFile(filepath.Join(root, "lok8s.yaml"))
+	installInitSeams(t, false, "")
+	stdout, _, err := runLo(t, NewRoot(synthProject(t)), "init", "--plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  lo init completes the project acme: a git repository, the toolchain.\n",
+		"  New project\n",
+		"  name         acme\n",
+		"  domain       none\n",
+		"  toolchain    install now · 8 tools · network\n",
+		"  git          initialise a repository\n",
+		"  writes       .gitignore entries · mise.toml · .bin/b.yaml · .bin/ (the pinned tools)\n",
+		"  runs         git init · lo toolchain install (network)\n",
+		"  equivalent   lo init project acme --env mise · git init · lo toolchain install --groups core,local\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "actions") || strings.Contains(stdout, "clusters/acme.dev") {
+		t.Errorf("project mode or a new cluster in the plan:\n%s", stdout)
+	}
+
+	// Create, then Exit (cluster, service, tests, eject, Exit).
+	seams := installInitSeams(t, true, "1\n5\n")
+	stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
+	if err != nil {
+		t.Fatalf("init: %v\n%s\n%s", err, stdout, stderr)
+	}
+	for _, want := range []string{
+		"==> lo init project acme --env mise\n",
+		"==> git init\nInitialized empty Git repository (fake)\n",
+		"==> lo toolchain install --groups core,local\ntoolchain (fake)\n",
+		"  \033[2mclusters\033[0m     alpha.dev (kind, active)\n",
+		"  \033[2mtoolchain\033[0m    .bin/b.yaml · 1 tool present\n",
+		"  \033[2mcreated\033[0m      acme · toolchain 8 tools · git initialised\n",
+		"  \033[2mnext\033[0m  lo up\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in:\n%s", want, stdout)
+		}
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "lok8s.yaml"))
+	if string(after) != string(before) {
+		t.Errorf("lok8s.yaml rewritten:\n%s", after)
+	}
+	if _, err := os.Stat(filepath.Join(root, "clusters", "acme.dev")); err == nil {
+		t.Error("a new cluster spec written into a project that has clusters")
+	}
+	if len(seams.git.calls) != 3 || seams.git.calls[1].Args[0] != "init" || seams.git.calls[1].Dir != root {
+		t.Errorf("git calls: %+v", seams.git.calls)
+	}
+}
+
 // Cancel on the bootstrap screen: nothing written, rc 1 with the line.
 func TestInitBootstrapCancelWritesNothing(t *testing.T) {
 	dir := t.TempDir()
