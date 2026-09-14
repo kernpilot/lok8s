@@ -105,7 +105,7 @@ existing project: [v0.3.0 release notes](docs/releases/v0.3.0.md).
 Prefer no script at all? The same four steps by hand:
 
 ```bash
-V=v0.3.0; A=lo-linux-amd64.tar.gz             # your tag and platform
+V=v0.3.1; A=lo-linux-amd64.tar.gz             # your tag and platform
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
