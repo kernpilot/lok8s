@@ -451,11 +451,8 @@ func (d *Driver) volumeExists(ctx context.Context, name string) bool {
 
 // firstLine trims a captured stderr to its first line.
 func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
+	first, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	return first
 }
 
 // registryMount is what one registry container mounts at RegistryTLSMount.
