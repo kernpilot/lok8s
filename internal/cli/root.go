@@ -167,11 +167,12 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 		// The root is runnable, so an unknown command is its own parse
 		// error. (cobra's legacyArgs runs only on a root without Args.)
 		// The error prints cobra's message, the "Did you mean" block and
-		// the `Run "lo -h"` hint. A bare `lo` prints the help.
+		// the `Run "lo -h"` hint. A bare `lo` prints the orientation block
+		// on a terminal and the full help off one (orientation.go).
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return cmd.Help()
+				return runOrientation(cmd, paths)
 			}
 			return unknownCommand(cmd, args[0])
 		},

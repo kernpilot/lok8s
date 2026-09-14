@@ -14,6 +14,10 @@ The global flags are listed once, under [lo](#lo).
 
 lok8s - local dev orchestration
 
+```
+lo [flags]
+```
+
 ### Options
 
 ```

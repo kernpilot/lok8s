@@ -20,7 +20,8 @@ func completionProject(t *testing.T) *config.Paths {
 	clusters := filepath.Join(base, "clusters")
 	for _, d := range []string{"alpha.dev", "beta.cloud"} {
 		os.MkdirAll(filepath.Join(clusters, d), 0o755)
-		os.WriteFile(filepath.Join(clusters, d, "cluster.lok8s.yaml"), []byte("kind: Lo\n"), 0o644)
+		name, _, _ := strings.Cut(d, ".")
+		os.WriteFile(filepath.Join(clusters, d, "cluster.lok8s.yaml"), []byte("kind: Lo\nmetadata:\n  name: "+name+"\n"), 0o644)
 	}
 	os.MkdirAll(filepath.Join(clusters, "gamma.app"), 0o755)
 	os.WriteFile(filepath.Join(clusters, "gamma.app", "deploy.lok8s.yaml"), []byte("kind: Deploy\n"), 0o644)
