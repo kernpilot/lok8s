@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 )
@@ -184,6 +185,42 @@ func TestSplitScratchDirsLiveInTheDomainDir(t *testing.T) {
 		}
 	}
 	r.cleanup()
+	assertNoScratch(t, domainDir)
+}
+
+// A build killed outright leaves its scratch dirs; the next split removes
+// every sibling older than this process and keeps one a running build
+// (a modification time after this process started) is still writing.
+func TestSplitSweepsStaleScratchSiblings(t *testing.T) {
+	p, domainDir := splitProject(t)
+	writeFileT(t, filepath.Join(domainDir, "artifacts.yaml"), splitArtifact)
+	old := processStart.Add(-time.Hour)
+	stale := []string{".artifacts-tmp.dead1", ".artifacts-stage.dead1"}
+	for _, name := range stale {
+		dir := filepath.Join(domainDir, name)
+		writeFileT(t, filepath.Join(dir, "ConfigMap.x.y.yml"), "kind: ConfigMap\n")
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := filepath.Join(domainDir, ".artifacts-tmp.live")
+	writeFileT(t, filepath.Join(live, "nonsecret.stream"), "")
+	if err := os.Chtimes(live, time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	if stderr, err := runSplit(t, p, false); err != nil {
+		t.Fatalf("split failed: %v (%s)", err, stderr)
+	}
+	for _, name := range stale {
+		if _, err := os.Stat(filepath.Join(domainDir, name)); !os.IsNotExist(err) {
+			t.Errorf("stale scratch dir %s survived the next split", name)
+		}
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Error("a scratch dir newer than this process belongs to a running build and must stay")
+	}
+	_ = os.RemoveAll(live)
 	assertNoScratch(t, domainDir)
 }
 

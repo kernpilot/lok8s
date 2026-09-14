@@ -105,6 +105,33 @@ func TestEnvWritersRenderOneSpec(t *testing.T) {
 	}
 }
 
+// The split's scratch dirs (clusters/<domain>/.artifacts-tmp.* and
+// .artifacts-stage.*) are ignored in every consumer project: `lo init
+// project` and EnsureGitignore write both prefixes, once.
+func TestGitignoreEntriesCoverTheSplitScratch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := EnsureGitignore(dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"**/clusters/*/.artifacts-tmp.*/\n", "**/clusters/*/.artifacts-stage.*/\n"} {
+		if strings.Count(string(raw), want) != 1 {
+			t.Errorf(".gitignore must carry %q exactly once:\n%s", want, raw)
+		}
+	}
+	if err := EnsureGitignore(dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(filepath.Join(dir, ".gitignore")); string(again) != string(raw) {
+		t.Errorf("a re-run changed .gitignore:\n%s", again)
+	}
+}
+
 // A re-run keeps every file; --force rewrites them; .gitignore is only
 // ever appended to.
 func TestProjectIdempotentAndForce(t *testing.T) {

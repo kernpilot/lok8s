@@ -64,6 +64,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -252,8 +253,11 @@ func newSplitRun(o Options) (*splitRun, error) {
 	// failed every split-mode build (v0.3.0). The bash twin never saw it:
 	// `mv` copies across devices. moveFile keeps that fallback for a
 	// rename that still crosses a device. Both dirs are removed on every
-	// exit path (cleanup); the parity harness resets and .gitignore lists
-	// them by their prefixes.
+	// exit path (cleanup); a build killed outright leaves them, and the
+	// next split sweeps every sibling older than this process
+	// (sweepStaleScratch). The parity harness resets and the scaffolded
+	// .gitignore list them by their prefixes.
+	sweepStaleScratch(domainDir, r.stderr)
 	tmpDir, err := os.MkdirTemp(domainDir, ".artifacts-tmp.")
 	if err != nil {
 		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
@@ -283,6 +287,32 @@ func newSplitRun(o Options) (*splitRun, error) {
 	}
 	r.yqPath, r.yqOK = execx.Look(o.Paths, "yq")
 	return r, nil
+}
+
+// processStart bounds the stale-scratch sweep: a scratch dir modified
+// before this process started belongs to a build that is gone.
+var processStart = time.Now()
+
+// scratchPrefixes are the split's scratch dir prefixes under the domain dir.
+var scratchPrefixes = []string{".artifacts-tmp.", ".artifacts-stage."}
+
+// sweepStaleScratch removes the scratch dirs a killed build left under the
+// domain dir. Only siblings older than this process go: a build running
+// next to this one keeps writing into its dirs, so theirs stay.
+func sweepStaleScratch(domainDir string, stderr io.Writer) {
+	for _, prefix := range scratchPrefixes {
+		for _, dir := range globSorted(filepath.Join(domainDir, prefix+"*")) {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() || !info.ModTime().Before(processStart) {
+				continue
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				ui.WarnTo(stderr, "split: cannot remove the stale scratch dir %s: %v", dir, err)
+				continue
+			}
+			ui.DebugTo(stderr, "split: removed the stale scratch dir %s", dir)
+		}
+	}
 }
 
 // cleanup drops the scratch dirs (idempotent).
