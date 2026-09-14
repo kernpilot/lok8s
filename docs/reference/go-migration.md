@@ -558,6 +558,14 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 
 ### Rendering and display
 
+Not a deviation: since v0.5.0 the `✓ ! ✗` markers of `lo doctor` and the
+`[error]`/`[warn]`/`[debug]` prefixes carry ANSI colour only on a
+terminal with `NO_COLOR` unset. **Both** implementations gate the colour
+(`internal/ui`, `utils/verbose.sh`, `libs/doctor`). The piped bytes did
+not change, and the harnesses still diff them strictly. Titles, sections
+and tables on a terminal are the binary's presentation
+([Output](cli.md#output)), which no harness diffs.
+
 | # | Deviation | Where |
 |---|---|---|
 | D13 | **Progress UI on a terminal is the final state, not a live spinner.** The bash tty path streams a spinner and a 3-line scrolling window to `/dev/tty`; the binary renders the identical *final* summary / surfaced errors after the phase. Off a terminal (CI, Tilt logs, `LOK8S_NONINTERACTIVE`, `DEBUG`) the output is byte-identical. | `internal/kapply` |

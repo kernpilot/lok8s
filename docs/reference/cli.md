@@ -18,6 +18,22 @@ The `lo` CLI is a single static Go binary. Every command below runs natively in 
 | `--domain` | | Domain name override |
 | `--domain-sans` | | Domain SANs override |
 | `--no-eject` | | Never write embedded framework assets into the project; serve them from a temp dir (env form: `LO_ASSETS_EJECT=never`). See [`lo assets`](#lo-assets) |
+| `--no-color` | | No ANSI colour on the terminal (env form: `NO_COLOR`). See [Output](#output) |
+
+## Output
+
+`lo` decides per stream. When stdout or stderr is not a terminal (a pipe,
+a file, CI), the output is plain text. It has no colour and keeps the
+`=== … ===` titles and `--- … ---` sections of the bash implementation.
+The parity harnesses diff these bytes, and scripts can match on them.
+
+When a stream is a terminal, `lo` renders one house style. Titles and
+sections are bold. The `✓ ! ✗ ·` markers and the `[error]`/`[warn]`
+prefixes have colour. Tables measure their columns. A command with an
+obvious next step ends on a dim `next: lo <cmd>   # why` line. Set
+`NO_COLOR` (any value, see [no-color.org](https://no-color.org)) or pass
+`--no-color` to keep the terminal shape without colour. A bare `lo use`
+on a terminal opens a select over the domains (see [`lo use`](#lo-use)).
 
 ## Commands
 
@@ -279,6 +295,8 @@ lo use [domain]
 ```
 
 Without arguments: shows the active domain and lists all available domains with their kind types. With a domain argument: validates the domain directory exists and writes it to `clusters/.active`.
+
+On a terminal (stdin and stdout), a bare `lo use` opens a select instead of the listing. It lists every domain with its driver (or `Deploy -> <ref>`) and preselects the active one. Enter sets the choice, the same as `lo use <domain>`. Esc or Ctrl-C leaves the active domain as it is (exit 0, no output). Without a cluster it prints `no clusters yet` and points at `lo init` (exit 1). Piped, the listing is unchanged. For an unknown domain on a terminal, the error names the closest domain and lists the available ones.
 
 ### lo lint
 
