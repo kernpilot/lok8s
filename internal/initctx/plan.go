@@ -1,6 +1,6 @@
 package initctx
 
-// plan.go — the decision layer. It holds the defaults a situation
+// plan.go: the decision layer. It holds the defaults a situation
 // suggests, the ordered actions a set of answers makes, and the `next`
 // step a project state calls for. Each action carries the files it
 // writes, the command it runs and the flag-twin command line a script
@@ -105,6 +105,18 @@ func (p Plan) Commands() []string {
 	return out
 }
 
+// StepError is a failed action of a plan: the command, the cause and the
+// commands that did not run.
+type StepError struct {
+	Command string
+	Err     error
+	NotRun  []string
+}
+
+func (e *StepError) Error() string { return e.Command + ": " + e.Err.Error() }
+
+func (e *StepError) Unwrap() error { return e.Err }
+
 // Files lists every file the plan writes, in order.
 func (p Plan) Files() []string {
 	var out []string
@@ -162,7 +174,7 @@ func DefaultAnswers(s State) Answers {
 	}
 	if p := s.Project; p != nil {
 		a.Name = projectName(s)
-		a.Toolchain = !p.BYAML || len(p.ToolsMissing) > 0
+		a.Toolchain = p.ToolchainMissing()
 		if len(p.Domains) > 0 {
 			return a
 		}
@@ -464,18 +476,12 @@ func Next(s State, drift bool) string {
 	if p == nil {
 		return "lo init"
 	}
-	active := false
-	for _, d := range p.Domains {
-		if d.Name == p.Active {
-			active = true
-		}
-	}
 	switch {
-	case !p.BYAML || len(p.ToolsMissing) > 0:
+	case p.ToolchainMissing():
 		return "lo toolchain install"
 	case len(p.Domains) == 0:
 		return "lo init cluster"
-	case !active:
+	case !p.ActiveValid():
 		return "lo use <domain>"
 	case drift:
 		return "lo assets diff"

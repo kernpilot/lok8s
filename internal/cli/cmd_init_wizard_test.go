@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -211,8 +212,8 @@ func TestInitPlanProjectRoot(t *testing.T) {
 	for _, want := range []string{
 		"  acme         project · go · main\n",
 		"  clusters     alpha.dev (kind, active)\n",
-		"! toolchain    none · lo toolchain install\n",
-		"! environment  none · lo init project --env mise|direnv\n",
+		"! toolchain    none\n",
+		"! environment  none\n",
 		"  actions     Add a cluster · Add a service · Add the test suite · Install the toolchain · Eject the bash tree · Exit\n",
 		"  equivalent  lo init cluster <domain> · lo init service <name> · lo init test · lo toolchain install · lo assets eject bash\n",
 		"  next        lo toolchain install\n",
@@ -418,7 +419,7 @@ func TestInitProjectModeAddClusterThenBack(t *testing.T) {
 		t.Fatalf("init: %v\n%s\n%s", err, stdout, stderr)
 	}
 	for _, want := range []string{
-		"\033[33m!\033[0m \033[2mclusters\033[0m     alpha.dev (kind) · none active · lo use <domain>\n",
+		"\033[33m!\033[0m \033[2mclusters\033[0m     alpha.dev (kind) · none active\n",
 		"  \033[1mNew cluster\033[0m\n",
 		"  \033[2mactive\033[0m      yes (lo use beta.dev)\n",
 		"==> lo init cluster beta.dev --driver lo\n",
@@ -512,6 +513,26 @@ func TestInitClusterVerb(t *testing.T) {
 		t.Error("an unknown driver accepted")
 	}
 
+	// --plan without the value a screen needs: refused with the same
+	// line as off a terminal, rc 1, nothing on stdout. The test suite
+	// needs no value.
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"init", "cluster", "--plan"}, initctx.MissingDomain},
+		{[]string{"init", "service", "--plan"}, initctx.MissingName},
+		{[]string{"init", "service", "--dry-run"}, initctx.MissingName},
+	} {
+		stdout, stderr, err := runLo(t, NewRoot(p), c.args...)
+		if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, c.want) || stdout != "" {
+			t.Errorf("%v: err=%v stderr=%q stdout=%q", c.args, err, stderr, stdout)
+		}
+	}
+	if stdout, _, err := runLo(t, NewRoot(p), "init", "test", "--plan"); err != nil || !strings.Contains(stdout, "  Test suite\n") {
+		t.Errorf("test --plan: %v\n%s", err, stdout)
+	}
+
 	stdout, _, err = runLo(t, NewRoot(p), "init", "cluster", "z.dev", "--plan")
 	if err != nil {
 		t.Fatal(err)
@@ -590,39 +611,72 @@ func TestInitServiceAndTestVerbScreens(t *testing.T) {
 	}
 }
 
-// A step that fails mid-plan: the failed command and the ones never
-// started are printed so the user can continue by hand.
-func TestInitBootstrapFailureListsWhatWasNotRun(t *testing.T) {
+// A step that fails in the bootstrap: the run continues into project
+// mode, the card carries the failed row (the command and the reason)
+// and the not-run row, `lo use` never ran; Exit ends with rc 0. A verb
+// prints the same as lines and returns the error.
+func TestInitBootstrapFailureShowsTheRows(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	installInitSeams(t, true, "1\n")
+	// Create; then Exit (cluster, service, tests, toolchain, the active
+	// domain (the cluster exists, .active does not), eject, Exit).
+	installInitSeams(t, true, "1\n7\n")
 	prev := initToolchainInstall
 	initToolchainInstall = func(context.Context, string, []string, bool, io.Writer, io.Writer) error {
 		return errors.New("download refused (fake)")
 	}
 	t.Cleanup(func() { initToolchainInstall = prev })
-	stdout, _, err := runLo(t, NewRoot(synthProject(t)), "init")
-	if err == nil || !strings.Contains(err.Error(), "download refused") {
-		t.Fatalf("err %v", err)
+	stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
+	if err != nil {
+		t.Fatalf("init: %v\n%s\n%s", err, stdout, stderr)
 	}
 	name := initctx.DefaultName(dir)
-	if !strings.Contains(stdout, "failed: lo toolchain install --groups core,local\nnot run:\n  lo use "+name+".dev\n") {
-		t.Errorf("stdout:\n%s", stdout)
+	for _, want := range []string{
+		"\033[33m!\033[0m \033[2mfailed\033[0m       lo toolchain install --groups core,local · download refused (fake)\n",
+		"  \033[2mnot run\033[0m      lo use " + name + ".dev\n",
+		"\033[33m!\033[0m \033[2mclusters\033[0m     " + name + ".dev (kind) · none active\n",
+		"  \033[2mnext\033[0m  lo toolchain install\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in:\n%s", want, stdout)
+		}
 	}
-	if strings.Contains(stdout, "\nDone.\n") {
-		t.Error("Done printed after a failure")
+	if strings.Contains(stdout, "\nDone.\n") || strings.Contains(stdout, "failed: ") {
+		t.Errorf("Done or the verb's lines after a failure:\n%s", stdout)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "clusters", ".active")); err == nil {
 		t.Error("lo use ran after the failure")
 	}
+
+	// The verb: the lines, then the error (the suite's target is a file).
+	p := synthProject(t)
+	testutil.WriteFile(t, filepath.Join(p.Base, "notadir"), "x")
+	installInitSeams(t, true, "1\n")
+	stdout, _, err = runLo(t, NewRoot(p), "init", "test", "--path", "./notadir")
+	if err == nil {
+		t.Error("the verb's failed step returned no error")
+	}
+	if !strings.Contains(stdout, "failed: lo init test --path ./notadir\n") || strings.Contains(stdout, "not run:") {
+		t.Errorf("verb stdout:\n%s", stdout)
+	}
 }
 
+// Ctrl-C (ErrAborted): rc 130 through the exit seam, nothing printed.
+// Esc or Cancel (ErrCancelled): the line, rc 1.
 func TestInitAbort(t *testing.T) {
-	for _, sentinel := range []error{initctx.ErrAborted, initctx.ErrCancelled} {
-		var b bytes.Buffer
-		if err := initAbort(sentinel, &b); !errors.Is(err, ErrHandled) || !strings.Contains(b.String(), "lo init: cancelled, nothing written") {
-			t.Errorf("abort: %v %q", err, b.String())
-		}
+	var codes []int
+	saved := osExit
+	osExit = func(code int) { codes = append(codes, code) }
+	t.Cleanup(func() { osExit = saved })
+	var b bytes.Buffer
+	if err := initAbort(initctx.ErrAborted, &b); !errors.Is(err, ErrHandled) || b.Len() != 0 || !reflect.DeepEqual(codes, []int{130}) {
+		t.Errorf("Ctrl-C: err %v out %q codes %v", err, b.String(), codes)
+	}
+	if err := initAbort(initctx.ErrCancelled, &b); !errors.Is(err, ErrHandled) || !strings.Contains(b.String(), "lo init: cancelled, nothing written") {
+		t.Errorf("cancel: %v %q", err, b.String())
+	}
+	if err := initAbort(nil, &b); err != nil {
+		t.Errorf("nil mapped: %v", err)
 	}
 	other := errors.New("boom")
 	if err := initAbort(other, io.Discard); !errors.Is(err, other) {

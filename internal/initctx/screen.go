@@ -1,6 +1,6 @@
 package initctx
 
-// screen.go — the one screen every write goes through. The screen has
+// screen.go: the one screen every write goes through. The screen has
 // the card's two-column layout. It shows the values the plan uses, the
 // files it writes (`writes`), the commands it runs (`runs`) and, dim and
 // last, the flag-twin command lines (`equivalent`). Then it asks one
@@ -17,6 +17,7 @@ package initctx
 // line is a fixed row, never a field.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -40,10 +41,20 @@ type Screen struct {
 	// Details builds the editable fields, bound to the values (nil = no
 	// details: every value came from the command line).
 	Details func() []huh.Field
-	// Incomplete is whether a value the screen needs is still empty: the details
-	// open before the screen is shown.
+	// Incomplete is whether a value the screen needs is still empty: the
+	// details open before the screen is shown, and --plan refuses with
+	// Missing.
 	Incomplete bool
+	// Missing is the error line for an incomplete screen off the details
+	// (--plan, or a verb off a terminal).
+	Missing string
 }
+
+// The error lines of a verb without its value, on a terminal and off.
+const (
+	MissingDomain = "lo init cluster: give a domain: lo init cluster <domain>"
+	MissingName   = "lo init service: give a name: lo init service <name>"
+)
 
 // rows are the screen's rows: the values, then writes, runs, equivalent.
 func (sc Screen) rows() []row {
@@ -135,21 +146,29 @@ var prompts = map[string]prompt{
 }
 
 // inputField is one text row of the details. An empty answer keeps the
-// value the row had. huh's accessible prompt validates the raw line
+// value the row had: huh's accessible prompt validates the raw line
 // before it falls back to the default, so the validator lets an empty
-// line through. A value the screen needs that stays empty stops Run.
-func inputField(key string, v *string, validate func(string) error) huh.Field {
+// line through while the row has a value. A required row (required is
+// the error text) with no value re-asks on an empty answer; on a
+// terminal huh keeps the field focused with the error, in accessible
+// mode the prompt repeats. Only the end of the input leaves it empty
+// (ErrIncomplete from Run).
+func inputField(key string, v *string, required string, validate func(string) error) huh.Field {
 	p := prompts[key]
 	f := huh.NewInput().Title(p.title).Description(p.help).Placeholder(p.placeholder).Value(v)
-	if validate != nil {
-		f = f.Validate(func(s string) error {
-			if strings.TrimSpace(s) == "" {
-				return nil
+	return f.Validate(func(s string) error {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			if required != "" && strings.TrimSpace(*v) == "" {
+				return errors.New(required)
 			}
-			return validate(strings.TrimSpace(s))
-		})
-	}
-	return f
+			return nil
+		}
+		if validate != nil {
+			return validate(s)
+		}
+		return nil
+	})
 }
 
 // selectField is one choice row of the details.
@@ -215,14 +234,7 @@ func validateDomainOrEmpty(v string) error {
 // than printed.
 func validateName(v string) error {
 	if err := scaffold.ValidateName(v, io.Discard); err != nil {
-		return fmt.Errorf("must match ^[a-z0-9][a-z0-9._-]*$")
-	}
-	return nil
-}
-
-func validateDir(v string) error {
-	if v == "" {
-		return fmt.Errorf("a directory is required (. for this one)")
+		return fmt.Errorf("%q must match ^[a-z0-9][a-z0-9._-]*$", v)
 	}
 	return nil
 }
@@ -258,12 +270,12 @@ func NewProjectScreen(s State, a *Answers) Screen {
 		values = append(values, row{key: "git", value: git})
 	}
 	details := func() []huh.Field {
-		fields := []huh.Field{inputField("name", &a.Name, validateName)}
+		fields := []huh.Field{inputField("name", &a.Name, "give a name", validateName)}
 		if s.Situation() == SituationGitBelowRoot {
-			fields = append(fields, inputField("directory", &a.Dir, validateDir))
+			fields = append(fields, inputField("directory", &a.Dir, "give a directory (. for this one)", nil))
 		}
 		fields = append(fields,
-			inputField("domain", &a.Domain, validateDomainOrEmpty),
+			inputField("domain", &a.Domain, "", validateDomainOrEmpty),
 			selectField("driver", &a.Driver, driverOptions()...),
 			selectField("environment", &a.Env, envOptions()...),
 			selectField("toolchain", &a.Toolchain, boolOptions("install now", "skip")...),
@@ -304,7 +316,7 @@ func ClusterScreen(dir string, in *ClusterInput) Screen {
 	if in.Active {
 		active = "yes (lo use " + in.Domain + ")"
 	}
-	sc := Screen{Title: "New cluster", Plan: plan, Incomplete: in.Domain == "",
+	sc := Screen{Title: "New cluster", Plan: plan, Incomplete: in.Domain == "", Missing: MissingDomain,
 		Values: []row{{key: "domain", value: in.Domain}, {key: "driver", value: driverValue(driverOr(in.Driver))}, {key: "active", value: active}}}
 	if in.DomainGiven && in.DriverGiven && in.ActiveGiven {
 		return sc
@@ -312,7 +324,7 @@ func ClusterScreen(dir string, in *ClusterInput) Screen {
 	sc.Details = func() []huh.Field {
 		var fields []huh.Field
 		if !in.DomainGiven {
-			fields = append(fields, inputField("domain", &in.Domain, scaffold.ValidateDomain))
+			fields = append(fields, inputField("domain", &in.Domain, "give a domain", scaffold.ValidateDomain))
 		}
 		if !in.DriverGiven {
 			fields = append(fields, selectField("driver", &in.Driver, driverOptions()...))
@@ -340,7 +352,7 @@ func ServiceScreen(dir string, in *ServiceInput) Screen {
 	if path == "" {
 		path = "./" + in.Name
 	}
-	sc := Screen{Title: "New service", Plan: plan, Incomplete: in.Name == "",
+	sc := Screen{Title: "New service", Plan: plan, Incomplete: in.Name == "", Missing: MissingName,
 		Values: []row{{key: "name", value: in.Name}, {key: "path", value: path}}}
 	if in.NameGiven && in.PathGiven {
 		return sc
@@ -348,10 +360,10 @@ func ServiceScreen(dir string, in *ServiceInput) Screen {
 	sc.Details = func() []huh.Field {
 		var fields []huh.Field
 		if !in.NameGiven {
-			fields = append(fields, inputField("service", &in.Name, validateName))
+			fields = append(fields, inputField("service", &in.Name, "give a name", validateName))
 		}
 		if !in.PathGiven {
-			fields = append(fields, inputField("path", &in.Path, nil))
+			fields = append(fields, inputField("path", &in.Path, "", nil))
 		}
 		return fields
 	}
@@ -401,7 +413,7 @@ func groupOptions(selected []string) []huh.Option[string] {
 // ActiveScreen is the active-domain screen: the domain is chosen first.
 func ActiveScreen(s State, dom *string) Screen {
 	p := s.Project
-	sc := Screen{Title: "Active domain", Plan: UsePlan(p.Root, *dom), Incomplete: *dom == "",
+	sc := Screen{Title: "Active domain", Plan: UsePlan(p.Root, *dom), Incomplete: *dom == "", Missing: "lo use: give a domain: lo use <domain>",
 		Values: []row{{key: "domain", value: *dom}}}
 	sc.Details = func() []huh.Field {
 		opts := make([]huh.Option[string], 0, len(p.Domains))
@@ -448,6 +460,6 @@ func TestsScreen(dir string, in *TestsInput) Screen {
 	if in.PathGiven {
 		return sc
 	}
-	sc.Details = func() []huh.Field { return []huh.Field{inputField("tests", &in.Path, nil)} }
+	sc.Details = func() []huh.Field { return []huh.Field{inputField("tests", &in.Path, "", nil)} }
 	return sc
 }

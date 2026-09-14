@@ -1,8 +1,7 @@
 package initctx
 
-// card_test.go — the state card (goldens off and on a terminal, the five
-// situations, the path rule, the counts), the plan summary and the
-// option hints.
+// card_test.go: the state card (goldens off and on a terminal, the path
+// rule, the counts, the `!` rows) and the next line.
 
 import (
 	"bytes"
@@ -33,28 +32,14 @@ func wantCard(t *testing.T, s State, want string) {
 	}
 }
 
-// Outside a project: the directory's name heads the card; the repository
-// row appears only when the git root is elsewhere, with the path relative
-// to the working directory.
-func TestWriteCardDirectory(t *testing.T) {
-	cwd := filepath.Join(t.TempDir(), "acme")
-	wantCard(t, State{Cwd: cwd, Empty: true}, "  acme  empty directory · no git\n")
-	wantCard(t, State{Cwd: cwd, Entries: 3, Git: Git{Available: true}},
-		"  acme  directory · 3 entries · no project · no git repository\n")
-	wantCard(t, State{Cwd: cwd, Entries: 1, ServiceDir: true, Git: Git{Available: true, Root: filepath.Dir(cwd), Branch: "main", Uncommitted: 2}},
-		"  acme        service directory · 1 entry · no project above\n"+
-			"  repository  .. · main, 2 uncommitted\n")
-	wantCard(t, State{Cwd: cwd, Entries: 3, Git: Git{Available: true, Root: cwd, AtRoot: true, Submodule: true}},
-		"  acme  directory · 3 entries · no project · detached HEAD · submodule or worktree\n")
-	if out := card(State{Cwd: cwd, Empty: true, Git: Git{Available: true, Root: cwd, AtRoot: true, Branch: "main"}}); strings.Contains(out, cwd) {
-		t.Errorf("the working directory printed as a path:\n%s", out)
-	}
-}
-
 // A project root: every fact on its row, no path (the working directory
 // is the root), the domains grouped by driver with the active one first.
+// Outside a project there is no card.
 func TestWriteCardProjectRoot(t *testing.T) {
 	root := t.TempDir()
+	if out := card(State{Cwd: root, Empty: true}); out != "" {
+		t.Errorf("a card without a project:\n%s", out)
+	}
 	s := projectState(root, true)
 	s.Git.Branch, s.Git.Uncommitted = "main", 6
 	s.Project.Domains = []Domain{{"alpha.dev", "lo"}, {"beta.cloud", "kubeone"}, {"delta.app", "deploy"}, {"gamma.app", "deploy"}}
@@ -84,10 +69,11 @@ func TestWriteCardProjectRoot(t *testing.T) {
 	}
 }
 
-// The rows the user can act on carry the `!` marker and end with the
-// command: missing tools, no b.yaml, no clusters, no active domain, an
-// active domain without a spec, no environment file, a bash
-// implementation without its tree, an invalid implementation block.
+// The rows the user can act on carry the `!` marker and facts only (no
+// command): missing tools, no b.yaml, an unreadable b.yaml, no clusters,
+// no active domain, an active domain without a spec, no environment
+// file, a bash implementation without its tree, an invalid
+// implementation block.
 func TestWriteCardActionableRows(t *testing.T) {
 	root := t.TempDir()
 	s := projectState(root, true)
@@ -95,21 +81,24 @@ func TestWriteCardActionableRows(t *testing.T) {
 	s.Project.BYAML, s.Project.Tools, s.Project.ToolsMissing = true, 17, []string{"b", "kustomize", "khelm"}
 	s.Project.Domains = []Domain{{"alpha.dev", "lo"}}
 	contains(t, card(s),
-		"! toolchain    .bin/b.yaml · 3 of 17 missing · lo toolchain install\n",
-		"! clusters     alpha.dev (kind) · none active · lo use <domain>\n",
-		"! environment  none · lo init project --env mise|direnv\n")
+		"! toolchain    .bin/b.yaml · 3 of 17 missing\n",
+		"! clusters     alpha.dev (kind) · none active\n",
+		"! environment  none\n")
 
 	s.Project.Active = "zeta.dev"
-	contains(t, card(s), "! clusters     alpha.dev (kind) · active zeta.dev has no spec · lo use <domain>\n")
+	contains(t, card(s), "! clusters     alpha.dev (kind) · active zeta.dev has no spec\n")
 
-	s.Project.BYAML, s.Project.Tools, s.Project.ToolsMissing = false, 0, nil
+	s.Project.BYAMLInvalid, s.Project.Tools, s.Project.ToolsMissing = true, 0, nil
+	contains(t, card(s), "! toolchain    .bin/b.yaml unreadable\n")
+
+	s.Project.BYAML, s.Project.BYAMLInvalid = false, false
 	s.Project.Clusters, s.Project.Domains, s.Project.Active = false, nil, ""
 	s.Project.Implementation, s.Project.BashTree = "bash", false
 	contains(t, card(s),
 		"  acme         project · bash · main\n",
-		"! toolchain    none · lo toolchain install\n",
-		"! clusters     no clusters/ directory · lo init project --cluster <domain>\n",
-		"! environment  none · lo init project --env mise|direnv · bash tree missing · lo assets eject bash\n")
+		"! toolchain    none\n",
+		"! clusters     no clusters/ directory\n",
+		"! environment  none · bash tree missing\n")
 
 	s.Project.Clusters = true
 	s.Project.ImplementationErr = "lok8s.yaml: bad"
@@ -117,8 +106,12 @@ func TestWriteCardActionableRows(t *testing.T) {
 	s.Project.EnvFile = "direnv"
 	contains(t, card(s),
 		"! acme         project · invalid implementation (lok8s.yaml: bad) · main\n",
-		"! clusters     none · lo init project --cluster <domain>\n",
+		"! clusters     none\n",
 		"  environment  .envrc · bash tree present\n")
+	// No row names a command: the list and --plan carry those.
+	if out := card(s); strings.Contains(out, "lo ") || strings.Contains(out, "--") {
+		t.Errorf("a command inside a card row:\n%s", out)
+	}
 }
 
 // Inside a project: the position below the root as a relative path, the
@@ -157,6 +150,11 @@ func TestWriteCardInsideProject(t *testing.T) {
 	s = projectState(root, true)
 	s.Git = Git{Available: true, Root: filepath.Dir(root), Branch: "main"}
 	contains(t, card(s), "  acme         project · go\n", "  repository   .. · main\n")
+	// A detached HEAD, no git at all.
+	s.Git = Git{Available: true, Root: root, AtRoot: true}
+	contains(t, card(s), "  acme         project · go · detached HEAD\n")
+	s.Git = Git{}
+	contains(t, card(s), "  acme         project · go · no git\n")
 }
 
 // On a terminal the keys are dim, the name bold, the marker yellow; the
@@ -175,13 +173,13 @@ func TestWriteCardTerminalColours(t *testing.T) {
 	contains(t, card(s),
 		"  \033[1macme\033[0m         project · go · main\n",
 		"  \033[2mclusters\033[0m     alpha.dev (kind, active)\n",
-		"\033[33m!\033[0m \033[2mtoolchain\033[0m    none · lo toolchain install\n")
+		"\033[33m!\033[0m \033[2mtoolchain\033[0m    none\n")
 }
 
 func TestPlural(t *testing.T) {
 	for in, want := range map[int]string{0: "0 entries", 1: "1 entry", 2: "2 entries"} {
-		if got := entries(in); got != want {
-			t.Errorf("entries(%d) = %q", in, got)
+		if got := plural(in, "entry"); got != want {
+			t.Errorf("plural(%d, entry) = %q", in, got)
 		}
 	}
 	if got := plural(1, "tool"); got != "1 tool" {

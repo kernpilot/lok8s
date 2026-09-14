@@ -102,7 +102,7 @@ func TestDetectEmptyDirectory(t *testing.T) {
 		!reflect.DeepEqual(g.cmds[2].Args, []string{"status", "--porcelain"}) {
 		t.Errorf("git argv: %+v", g.cmds)
 	}
-	if s.Git.Branch != "main" || s.Git.Uncommitted != 0 || s.Git.Dirty() {
+	if s.Git.Branch != "main" || s.Git.Uncommitted != 0 {
 		t.Errorf("git: %+v", s.Git)
 	}
 	// Detached HEAD: no branch, still a repository.
@@ -147,7 +147,7 @@ func TestDetectGitBelowRootWithoutProject(t *testing.T) {
 		t.Errorf("state: %+v", s)
 	}
 	// The porcelain fake lists two paths.
-	if s.Git.Root != repo || s.Git.AtRoot || !s.Git.Dirty() || s.Git.Uncommitted != 2 {
+	if s.Git.Root != repo || s.Git.AtRoot || s.Git.Uncommitted != 2 {
 		t.Errorf("git: %+v", s.Git)
 	}
 	if got := s.Situation(); got != SituationGitBelowRoot {
@@ -274,8 +274,16 @@ func TestDetectMinimalProjectAndInvalidPieces(t *testing.T) {
 	if p.Tools != 1 || !reflect.DeepEqual(p.ToolsMissing, []string{"b"}) {
 		t.Errorf("tools: %d missing %v", p.Tools, p.ToolsMissing)
 	}
-	if n, missing := pinnedTools(filepath.Join(root, "nowhere", "b.yaml")); n != 0 || missing != nil {
-		t.Errorf("tools without b.yaml: %d %v", n, missing)
+	if n, missing, invalid := pinnedTools(filepath.Join(root, "nowhere", "b.yaml")); n != 0 || missing != nil || invalid {
+		t.Errorf("tools without b.yaml: %d %v %v", n, missing, invalid)
+	}
+
+	// A b.yaml that does not parse: the pin file is unreadable, the
+	// toolchain is due, nothing is counted.
+	testutil.WriteFile(t, filepath.Join(root, ".bin", "b.yaml"), "binaries: [\n  kustomize\n")
+	p = detect(t, root, &gitFake{}).Project
+	if !p.BYAML || !p.BYAMLInvalid || p.Tools != 0 || p.ToolsMissing != nil || !p.ToolchainMissing() {
+		t.Errorf("broken b.yaml: %+v", p)
 	}
 
 	// An invalid implementation block is reported, not fatal.
@@ -299,16 +307,13 @@ func TestDetectInsideProject(t *testing.T) {
 	if got := s.Situation(); got != SituationInsideProject {
 		t.Errorf("situation %v, want inside project", got)
 	}
-	if s.ServiceName() != "" {
-		t.Errorf("service name %q outside a service dir", s.ServiceName())
-	}
 
 	// A service directory: the kind-less lok8s.yaml `lo init service`
 	// writes. It is not a marker, so the project stays the umbrella.
 	svc := filepath.Join(root, "api")
 	testutil.WriteFile(t, filepath.Join(svc, "lok8s.yaml"), "build:\n  context: .\n  dockerfile: Dockerfile\n")
 	s = detect(t, svc, &gitFake{root: root})
-	if !s.ServiceDir || s.ServiceName() != "api" || s.Project == nil || s.Project.Root != root {
+	if !s.ServiceDir || s.Project == nil || s.Project.Root != root {
 		t.Errorf("service dir state: %+v", s)
 	}
 	if got := s.Situation(); got != SituationInsideProject {
@@ -341,7 +346,7 @@ func TestDetectUmbrellaAboveSubmodule(t *testing.T) {
 	if !s.Git.Submodule || !s.Git.AtRoot || s.Git.Root != sub {
 		t.Errorf("git: %+v", s.Git)
 	}
-	if !s.ServiceDir || s.ServiceName() != "kubehz-api" {
+	if !s.ServiceDir {
 		t.Errorf("service dir: %+v", s)
 	}
 	if got := s.Situation(); got != SituationInsideProject {
@@ -406,17 +411,5 @@ func TestTerminalInteractive(t *testing.T) {
 	}
 	if got := DetectTerminal(nil, nil, false); got.StdinTTY || got.StdoutTTY {
 		t.Errorf("nil streams: %+v", got)
-	}
-}
-
-func TestSituationString(t *testing.T) {
-	for s, want := range map[Situation]string{
-		SituationEmptyDir: "empty directory", SituationGitBelowRoot: "git repository, below its root, no project",
-		SituationBareDir: "directory without a project", SituationProjectRoot: "project root",
-		SituationInsideProject: "inside a project", SituationUnknown: "unknown",
-	} {
-		if s.String() != want {
-			t.Errorf("%d: %q, want %q", s, s.String(), want)
-		}
 	}
 }

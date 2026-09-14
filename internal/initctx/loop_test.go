@@ -34,12 +34,13 @@ func TestEntries(t *testing.T) {
 		t.Errorf("labels: %+v", Entries(s))
 	}
 
-	// Missing tools: the install entry counts them. One cluster: no
-	// active-domain entry. Tests present: no tests entry. A tree: the
-	// implementation switch.
+	// Missing tools: the install entry counts them. One cluster with a
+	// valid active domain: no active-domain entry. Tests present: no
+	// tests entry. A tree: the implementation switch.
 	s.Project.BYAML, s.Project.Tools, s.Project.ToolsMissing = true, 17, []string{"b", "kind", "tilt"}
 	s.Project.Tests = true
 	s.Project.Domains = []Domain{{"a.dev", "lo"}}
+	s.Project.Active = "a.dev"
 	s.Project.BashTree = true
 	want = []string{EntryCluster, EntryService, EntryToolchain, EntryImplementation, EntryExit}
 	if got := entryKeys(s); !reflect.DeepEqual(got, want) {
@@ -50,8 +51,26 @@ func TestEntries(t *testing.T) {
 		t.Errorf("labels: %+v", e)
 	}
 
+	// One cluster and no valid active domain (absent, or a stale
+	// .active): the active-domain entry is offered. An unreadable pin
+	// file: the toolchain entry says so.
+	s.Project.Active = ""
+	s.Project.ToolsMissing, s.Project.BYAMLInvalid = nil, true
+	want = []string{EntryCluster, EntryService, EntryToolchain, EntryActive, EntryImplementation, EntryExit}
+	if got := entryKeys(s); !reflect.DeepEqual(got, want) {
+		t.Errorf("entries without an active domain %v, want %v", got, want)
+	}
+	if Entries(s)[2].Label != "Install the toolchain (pin file unreadable)" {
+		t.Errorf("labels: %+v", Entries(s))
+	}
+	s.Project.Active = "gone.dev"
+	if got := entryKeys(s); !reflect.DeepEqual(got, want) {
+		t.Errorf("entries with a stale active domain %v, want %v", got, want)
+	}
+	s.Project.BYAMLInvalid = false
+
 	// Every tool present, several clusters, bash active.
-	s.Project.ToolsMissing = nil
+	s.Project.Active = "a.dev"
 	s.Project.Domains = append(s.Project.Domains, Domain{"b.dev", "kubeone"})
 	s.Project.Implementation = "bash"
 	want = []string{EntryCluster, EntryService, EntryActive, EntryImplementation, EntryExit}
@@ -116,7 +135,7 @@ func TestLoopActionThenRefreshedCard(t *testing.T) {
 	wantCommands(t, fake.plans[0], "lo init cluster beta.dev --driver lo", "lo use beta.dev")
 	got := out.String()
 	contains(t, got,
-		"! clusters     none · lo init project --cluster <domain>\n",
+		"! clusters     none\n",
 		"  New cluster\n",
 		"  clusters     beta.dev (kind, active)\n",
 		"  added        clusters/beta.dev/cluster.lok8s.yaml · active\n",
@@ -156,12 +175,47 @@ func TestLoopCancelAndExit(t *testing.T) {
 		t.Errorf("EOF: plans %+v out:\n%s", fake.plans, out.String())
 	}
 
-	// A failed action ends the run with its error.
+	// A failed step returns to the list with the failed and not-run rows
+	// under the refreshed card; an error that is not a step ends the run.
+	out.Reset()
+	step := &StepError{Command: "lo init test", Err: errors.New("disk full (fake)"), NotRun: []string{"lo use x.dev"}}
+	l := Loop{Out: &out, IO: script("3", "1", "6"), Detect: fake.detect, Execute: func(Plan) error { return step }}
+	if err := l.Run(s, nil); err != nil {
+		t.Errorf("a failed step ended the run: %v", err)
+	}
+	contains(t, out.String(), "! failed       lo init test · disk full (fake)\n", "  not run      lo use x.dev\n", "  next  lo toolchain install\n")
+	if n := strings.Count(out.String(), "  acme         project · go · main\n"); n != 2 {
+		t.Errorf("card printed %d times after a failure, want 2:\n%s", n, out.String())
+	}
 	fail := errors.New("boom")
-	l := Loop{Out: &out, IO: script("3", "1"), Detect: fake.detect, Execute: func(Plan) error { return fail }}
+	l = Loop{Out: &out, IO: script("3", "1"), Detect: fake.detect, Execute: func(Plan) error { return fail }}
 	if err := l.Run(s, nil); !errors.Is(err, fail) {
 		t.Errorf("failure: %v", err)
 	}
+}
+
+// A new cluster becomes the active domain when the project has no valid
+// one; with a valid active domain the default is no.
+func TestLoopClusterDefaultsActive(t *testing.T) {
+	root := t.TempDir()
+	s := projectState(root, true)
+	s.Project.Domains = []Domain{{"a.dev", "lo"}}
+	s.Project.Active = "gone.dev"
+	fake := &loopFake{states: []State{s}}
+	var out bytes.Buffer
+	// Add a cluster (1): domain, driver default, active default, Create;
+	// the list has seven entries (the active-domain entry is offered).
+	tio := script("1", "b.dev", "", "", "1", "7")
+	if err := (Loop{Out: &out, IO: tio, Detect: fake.detect, Execute: fake.execute}).Run(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	wantCommands(t, fake.plans[0], "lo init cluster b.dev --driver lo", "lo use b.dev")
+	s.Project.Active = "a.dev"
+	fake = &loopFake{states: []State{s}}
+	if err := (Loop{Out: &out, IO: script("1", "c.dev", "", "", "1", "6"), Detect: fake.detect, Execute: fake.execute}).Run(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	wantCommands(t, fake.plans[0], "lo init cluster c.dev --driver lo --no-active")
 }
 
 // The first plan (the bootstrap) puts its result under the first card.
@@ -172,7 +226,7 @@ func TestLoopFirstResult(t *testing.T) {
 	first := Decide(State{Cwd: root, Empty: true, Git: Git{Available: true}}, DefaultAnswers(State{Cwd: root, Empty: true, Git: Git{Available: true}}))
 	var out bytes.Buffer
 	fake := &loopFake{states: []State{s}}
-	if err := (Loop{Out: &out, IO: script("6"), Detect: fake.detect, Execute: fake.execute}).Run(s, &first); err != nil {
+	if err := (Loop{Out: &out, IO: script("6"), Detect: fake.detect, Execute: fake.execute}).Run(s, []Result{ResultOf(first)}); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, out.String(), "  created      "+first.Name+" · clusters/"+first.Name+".dev · toolchain 8 tools · git initialised\n")

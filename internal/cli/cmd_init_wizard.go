@@ -101,7 +101,7 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 	tio := initFormIO()
 	loop := initctx.Loop{Out: out, IO: tio, Detect: detect,
 		Execute: func(p initctx.Plan) error { return initExecute(ctx, p, runner, out, stderr) }}
-	var first *initctx.Plan
+	var first []initctx.Result
 	if initctx.Bootstrap(state) {
 		initctx.Welcome(out, state, paint)
 		fmt.Fprintln(out)
@@ -109,30 +109,43 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 		if err != nil {
 			return initAbort(err, stderr)
 		}
-		if err := initExecute(ctx, plan, runner, out, stderr); err != nil {
+		var step *initctx.StepError
+		switch err := initExecute(ctx, plan, runner, out, stderr); {
+		case errors.As(err, &step):
+			// A failed step: project mode shows it under the card when
+			// the project exists; without one, the lines and rc 1.
+			first = initctx.FailureRows(step)
+		case err != nil:
 			return err
+		default:
+			first = []initctx.Result{initctx.ResultOf(plan)}
 		}
 		fmt.Fprintln(out)
-		first = &plan
 		if state, err = detect(); err != nil {
 			return err
 		}
 		if state.Project == nil {
-			return nil
+			return initReport(step, out)
 		}
 	}
-	return loop.Run(state, first)
+	return initAbort(loop.Run(state, first), stderr)
 }
 
 // runInitScreen is a verb's screen: with --plan the rows as text (nil
-// plan, nothing to do); on a terminal the details, the rows and Create;
-// the plan to execute. A cancelled screen is the handled sentinel.
+// plan, nothing to do; an incomplete screen is refused with its Missing
+// line, rc 1); on a terminal the details, the rows and Create; the plan
+// to execute. A cancelled screen is the handled sentinel.
 func runInitScreen(cmd *cobra.Command, f initFlags, build func() initctx.Screen) (*initctx.Plan, error) {
 	term := initTerminal(f.yes)
 	out := cmd.OutOrStdout()
 	paint := ui.Paint(term.StdoutTTY)
 	if f.plan || f.dryRun {
-		initctx.WriteScreen(out, build(), paint)
+		sc := build()
+		if sc.Incomplete {
+			ui.ErrorTo(cmd.ErrOrStderr(), "%s", sc.Missing)
+			return nil, ErrHandled
+		}
+		initctx.WriteScreen(out, sc, paint)
 		return nil, nil
 	}
 	plan, err := initctx.Run(out, initFormIO(), paint, build)
@@ -140,6 +153,27 @@ func runInitScreen(cmd *cobra.Command, f initFlags, build func() initctx.Screen)
 		return nil, initAbort(err, cmd.ErrOrStderr())
 	}
 	return &plan, nil
+}
+
+// initReport prints a verb's failed step the way the executor used to:
+// the failed command, then the commands not run. nil stays nil; any
+// other error passes through scaffoldRun.
+func initReport(err error, out io.Writer) error {
+	var step *initctx.StepError
+	if errors.As(err, &step) {
+		fmt.Fprintf(out, "failed: %s\n", step.Command)
+		if len(step.NotRun) > 0 {
+			fmt.Fprintln(out, "not run:")
+			for _, c := range step.NotRun {
+				fmt.Fprintf(out, "  %s\n", c)
+			}
+		}
+		return scaffoldRun(step.Err)
+	}
+	if step == nil && err != nil {
+		return err
+	}
+	return nil
 }
 
 // initInteractive reports whether a verb opens its screen: --plan
@@ -159,9 +193,15 @@ func projectPaths(root string) *config.Paths {
 	}
 }
 
-// initAbort maps a left or cancelled screen onto the handled sentinel.
+// initAbort maps how a screen ended. Ctrl-C (ErrAborted): rc 130,
+// nothing printed, so a chained `lo init && lo up` stops. Esc or Cancel
+// (ErrCancelled): the line and rc 1. Anything else passes through.
 func initAbort(err error, stderr io.Writer) error {
-	if errors.Is(err, initctx.ErrAborted) || errors.Is(err, initctx.ErrCancelled) {
+	switch {
+	case errors.Is(err, initctx.ErrAborted):
+		exitNow(130)
+		return ErrHandled
+	case errors.Is(err, initctx.ErrCancelled):
 		ui.ErrorTo(stderr, "lo init: cancelled, nothing written")
 		return ErrHandled
 	}
@@ -193,15 +233,9 @@ func initExecute(ctx context.Context, plan initctx.Plan, runner execx.Runner, ou
 		}
 		if err := initAction(ctx, plan, a, paths, runner, out, stderr); err != nil {
 			// The rest is the user's to run by hand: the failed step
-			// again once fixed, then what never started.
-			fmt.Fprintf(out, "failed: %s\n", a.Command)
-			if rest := plan.Commands()[i+1:]; len(rest) > 0 {
-				fmt.Fprintln(out, "not run:")
-				for _, c := range rest {
-					fmt.Fprintf(out, "  %s\n", c)
-				}
-			}
-			return scaffoldRun(err)
+			// again once fixed, then what never started. Project mode
+			// shows it under the card; a verb prints it (initReport).
+			return &initctx.StepError{Command: a.Command, Err: err, NotRun: plan.Commands()[i+1:]}
 		}
 	}
 	if echo {

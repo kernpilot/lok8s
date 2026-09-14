@@ -1,16 +1,17 @@
 package initctx
 
-// card.go — the state card of a bare `lo init`, and the row layout the
-// screens share.
+// card.go: the state card of a project, and the row layout the screens
+// share.
 //
 // The card has the two-column layout of the run header (`lo up`): a
 // lowercase key, two spaces past the longest key, the values joined with
-// ` · `. The first key is the project (or directory) name. The card uses
-// one path form: the working directory as the user typed it. It prints a
-// path in two cases only: the position below a project root, and a
-// repository root elsewhere. A row the user can act on starts with `!`
-// and ends with the command to run. Colours (internal/ui) apply only
-// when stdout is a terminal.
+// ` · `. The first key is the project name. The card uses one path form:
+// the working directory as the user typed it. It prints a path in two
+// cases only: the position below the project root, and a repository
+// root elsewhere. A row carries facts only; a row the user can act on
+// starts with `!`, and the command lives in the list's `equivalent` row
+// and in `--plan`. Colours (internal/ui) apply only when stdout is a
+// terminal.
 
 import (
 	"fmt"
@@ -30,10 +31,14 @@ type row struct {
 	warn, dim bool
 }
 
-// WriteCard prints the state card; extra rows (the result of the last
-// action) follow it in the same columns.
+// WriteCard prints the state card of s.Project (nothing outside a
+// project); extra rows (the result of the last action) follow it in the
+// same columns.
 func WriteCard(w io.Writer, s State, extra ...row) {
-	writeRows(w, append(cardRows(s), extra...), ui.Paint(s.Terminal.StdoutTTY), true)
+	if s.Project == nil {
+		return
+	}
+	writeRows(w, append(projectRows(s), extra...), ui.Paint(s.Terminal.StdoutTTY), true)
 }
 
 // WriteNext prints the `next` line: the step the state calls for.
@@ -66,37 +71,7 @@ func writeRows(w io.Writer, rows []row, paint ui.Paint, heading bool) {
 	}
 }
 
-// cardRows builds the card for s.
-func cardRows(s State) []row {
-	if s.Project == nil {
-		return directoryRows(s)
-	}
-	return projectRows(s)
-}
-
-// directoryRows is the card outside a project: the directory, then the
-// repository when its root is elsewhere.
-func directoryRows(s State) []row {
-	first := []string{}
-	switch {
-	case s.Empty:
-		first = append(first, "empty directory")
-	case s.ServiceDir:
-		first = append(first, "service directory", entries(s.Entries), "no project above")
-	default:
-		first = append(first, "directory", entries(s.Entries), "no project")
-	}
-	rows := []row{{key: filepath.Base(s.Cwd)}}
-	if s.Git.Root == "" || s.Git.AtRoot {
-		first = append(first, gitValues(s.Git)...)
-	} else {
-		rows = append(rows, row{key: "repository", value: joined(append([]string{relPath(s.Cwd, s.Git.Root)}, gitValues(s.Git)...))})
-	}
-	rows[0].value = joined(first)
-	return rows
-}
-
-// projectRows is the card inside a project.
+// projectRows is the card.
 func projectRows(s State) []row {
 	p := s.Project
 	name := projectName(s)
@@ -169,24 +144,23 @@ func gitValues(g Git) []string {
 }
 
 // clustersValue lists the domains grouped by driver, the active one
-// first, or the command that adds one.
+// first; the row warns without a cluster or without a valid active
+// domain.
 func clustersValue(p *Project) (string, bool) {
 	switch {
 	case !p.Clusters:
-		return "no clusters/ directory · lo init project --cluster <domain>", true
+		return "no clusters/ directory", true
 	case len(p.Domains) == 0:
-		return "none · lo init project --cluster <domain>", true
+		return "none", true
 	}
 	var (
 		parts  []string
 		order  []string
 		byKind = map[string][]string{}
-		found  bool
 	)
 	for _, d := range p.Domains {
 		if d.Name == p.Active {
 			parts = append(parts, d.Name+" ("+driverLabel(d.Kind)+", active)")
-			found = true
 			continue
 		}
 		if _, ok := byKind[d.Kind]; !ok {
@@ -199,9 +173,9 @@ func clustersValue(p *Project) (string, bool) {
 	}
 	switch {
 	case p.Active == "":
-		return joined(append(parts, "none active", "lo use <domain>")), true
-	case !found:
-		return joined(append(parts, "active "+p.Active+" has no spec", "lo use <domain>")), true
+		return joined(append(parts, "none active")), true
+	case !p.ActiveValid():
+		return joined(append(parts, "active "+p.Active+" has no spec")), true
 	}
 	return joined(parts), false
 }
@@ -218,18 +192,22 @@ func driverLabel(kind string) string {
 	return kind
 }
 
-// toolchainValue counts the pinned tools, or names the install.
+// toolchainValue counts the pinned tools; the row warns without a pin
+// file, with an unreadable one, or with a missing tool.
 func toolchainValue(p *Project) (string, bool) {
 	switch {
 	case !p.BYAML:
-		return "none · lo toolchain install", true
+		return "none", true
+	case p.BYAMLInvalid:
+		return ".bin/b.yaml unreadable", true
 	case len(p.ToolsMissing) == 0:
 		return fmt.Sprintf(".bin/b.yaml · %s present", plural(p.Tools, "tool")), false
 	}
-	return fmt.Sprintf(".bin/b.yaml · %d of %d missing · lo toolchain install", len(p.ToolsMissing), p.Tools), true
+	return fmt.Sprintf(".bin/b.yaml · %d of %d missing", len(p.ToolsMissing), p.Tools), true
 }
 
-// environmentValue is the environment file and the bash tree.
+// environmentValue is the environment file and the bash tree; the row
+// warns without a file, or with a bash implementation and no tree.
 func environmentValue(p *Project) (string, bool) {
 	var parts []string
 	warn := false
@@ -239,14 +217,14 @@ func environmentValue(p *Project) (string, bool) {
 	case "direnv":
 		parts = append(parts, ".envrc")
 	default:
-		parts = append(parts, "none", "lo init project --env mise|direnv")
+		parts = append(parts, "none")
 		warn = true
 	}
 	switch {
 	case p.BashTree:
 		parts = append(parts, "bash tree present")
 	case p.Implementation == "bash":
-		parts = append(parts, "bash tree missing", "lo assets eject bash")
+		parts = append(parts, "bash tree missing")
 		warn = true
 	}
 	return joined(parts), warn
@@ -265,8 +243,6 @@ func projectName(s State) string {
 	}
 	return filepath.Base(s.Project.Root)
 }
-
-func entries(n int) string { return plural(n, "entry") }
 
 // plural is "1 tool", "3 tools", "1 entry", "3 entries".
 func plural(n int, noun string) string {

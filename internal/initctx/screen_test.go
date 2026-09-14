@@ -353,3 +353,31 @@ func TestToolchainActiveEjectImplementationScreens(t *testing.T) {
 	}
 	contains(t, out.String(), "  implementation  go (now bash)\n")
 }
+
+// Enter on an empty required field re-asks the same field with the
+// error; the screen never ends on it. The accessible prompt repeats
+// until a value comes (on a terminal huh keeps the field focused).
+func TestRequiredFieldReAsks(t *testing.T) {
+	root := t.TempDir()
+	var out bytes.Buffer
+	tio := script("", "", "x.dev", "", "", "1")
+	in := &ClusterInput{Driver: "lo", Active: true}
+	p, err := Run(&out, tio, false, func() Screen { return ClusterScreen(root, in) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCommands(t, p, "lo init cluster x.dev --driver lo", "lo use x.dev")
+	if n := strings.Count(formOut(tio), "give a domain"); n != 2 {
+		t.Errorf("the empty answer re-asked %d times, want 2:\n%s", n, formOut(tio))
+	}
+	// A prefilled required field keeps its value on an empty answer.
+	empty := emptyDir(t)
+	out.Reset()
+	p, err = NewProject(empty, &out, script("2", "", "", "", "", "", "", "1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "shop" {
+		t.Errorf("name %q, want the prefilled shop", p.Name)
+	}
+}

@@ -28,47 +28,32 @@ import (
 	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
-// Situation is one of the five conversations `lo init` can have.
+// Situation is where a bare `lo init` stands. The first three take the
+// bootstrap screen for a new project; the last two are a project
+// (project mode, or the bootstrap screen when the project has no git
+// repository).
 type Situation int
 
 const (
 	// SituationUnknown is the zero value; Detect never returns it.
 	SituationUnknown Situation = iota
-	// SituationEmptyDir — an empty directory (a `.git` entry does not
-	// count) and no project above: the welcome conversation.
+	// SituationEmptyDir: an empty directory (a `.git` entry does not
+	// count) and no project above. The project goes here.
 	SituationEmptyDir
-	// SituationGitBelowRoot — inside a git repository, below its root,
-	// and no project above: the wizard suggests the git root.
+	// SituationGitBelowRoot: inside a git repository, below its root,
+	// and no project above. The project goes to the repository root by
+	// default.
 	SituationGitBelowRoot
-	// SituationBareDir — a non-empty directory, no project above, and
-	// either no git or cwd is the git root: the wizard says what it sees
-	// and offers here or a subdirectory.
+	// SituationBareDir: a non-empty directory, no project above, and
+	// either no git or cwd is the git root. The project goes here.
 	SituationBareDir
-	// SituationProjectRoot — cwd is a project root: the status card, then
-	// what to add.
+	// SituationProjectRoot: cwd is a project root.
 	SituationProjectRoot
-	// SituationInsideProject — cwd is inside a project (a subdirectory, a
-	// service directory, a submodule under the umbrella project): the
-	// card, plus the offer to register a service directory.
+	// SituationInsideProject: cwd is inside a project (a subdirectory, a
+	// service directory, a submodule under the umbrella project). The
+	// actions act on the project root.
 	SituationInsideProject
 )
-
-// String is the situation as the card names it.
-func (s Situation) String() string {
-	switch s {
-	case SituationEmptyDir:
-		return "empty directory"
-	case SituationGitBelowRoot:
-		return "git repository, below its root, no project"
-	case SituationBareDir:
-		return "directory without a project"
-	case SituationProjectRoot:
-		return "project root"
-	case SituationInsideProject:
-		return "inside a project"
-	}
-	return "unknown"
-}
 
 // Terminal is what decides between the wizard and the help text.
 type Terminal struct {
@@ -115,9 +100,6 @@ type Git struct {
 	Submodule bool
 }
 
-// Dirty is whether the working tree has uncommitted changes.
-func (g Git) Dirty() bool { return g.Uncommitted > 0 }
-
 // Domain is one directory under clusters/ that carries a spec.
 type Domain struct {
 	Name string
@@ -150,8 +132,9 @@ type Project struct {
 	// EnvFile is the environment file present: "mise" (mise.toml),
 	// "direnv" (.envrc), "" (none). With both present, mise.
 	EnvFile string
-	// BYAML is whether .bin/b.yaml exists.
-	BYAML bool
+	// BYAML is whether .bin/b.yaml exists; BYAMLInvalid whether it exists
+	// but cannot be read or parsed (then Tools is 0).
+	BYAML, BYAMLInvalid bool
 	// Tools counts the pinned tools: b itself plus every `binaries:`
 	// entry of .bin/b.yaml. ToolsMissing lists the ones that do not
 	// resolve under the project (by name); nil = all present.
@@ -205,13 +188,21 @@ func (s State) Situation() Situation {
 	return SituationBareDir
 }
 
-// ServiceName is the service name a service directory implies (its base
-// name), "" outside one.
-func (s State) ServiceName() string {
-	if !s.ServiceDir {
-		return ""
+// ToolchainMissing reports whether `lo toolchain install` is due: no pin
+// file, an unreadable one, or a pinned tool that does not resolve.
+func (p *Project) ToolchainMissing() bool {
+	return !p.BYAML || p.BYAMLInvalid || len(p.ToolsMissing) > 0
+}
+
+// ActiveValid reports whether clusters/.active names a domain with a
+// spec.
+func (p *Project) ActiveValid() bool {
+	for _, d := range p.Domains {
+		if d.Name == p.Active {
+			return p.Active != ""
+		}
 	}
-	return filepath.Base(s.Cwd)
+	return false
 }
 
 // Detect reads the state from cwd. r runs git (nil = no git: the state
@@ -327,15 +318,10 @@ func detectProject(root, cwd string) *Project {
 	if name := specName(filepath.Join(clusters, p.Active, "cluster.lok8s.yaml")); p.Active != "" && name != "" {
 		p.Kubeconfig = fsutil.FileExists(filepath.Join(root, ".kubeconfig", name+".yaml"))
 	}
-	switch {
-	case fsutil.FileExists(filepath.Join(root, "mise.toml")):
-		p.EnvFile = "mise"
-	case fsutil.FileExists(filepath.Join(root, ".envrc")):
-		p.EnvFile = "direnv"
-	}
+	p.EnvFile = existingEnv(root)
 	byaml := filepath.Join(root, ".bin", "b.yaml")
 	p.BYAML = fsutil.FileExists(byaml)
-	p.Tools, p.ToolsMissing = pinnedTools(byaml)
+	p.Tools, p.ToolsMissing, p.BYAMLInvalid = pinnedTools(byaml)
 	p.BashTree = fsutil.FileExists(filepath.Join(root, ".lok8s", "lo"))
 	impl, err := config.LoadImplementation(root)
 	p.Implementation = impl.Default
@@ -429,11 +415,13 @@ func listDomains(clusters string) []Domain {
 // An entry resolves at the path b installs it to: `file:` relative to
 // the b.yaml directory, else <bin>/<alias>, else <bin>/<the last segment
 // of the key>. This is a filesystem check, no probe: `lo toolchain
-// doctor` verifies versions. Without a b.yaml nothing is pinned: 0, nil.
-func pinnedTools(byaml string) (int, []string) {
+// doctor` verifies versions. Without a b.yaml nothing is pinned: 0, nil,
+// false. A b.yaml that exists but cannot be read or parsed: 0, nil,
+// true (the card says so, the toolchain install is offered).
+func pinnedTools(byaml string) (int, []string, bool) {
 	raw, err := os.ReadFile(byaml)
 	if err != nil {
-		return 0, nil
+		return 0, nil, fsutil.FileExists(byaml)
 	}
 	var doc struct {
 		Binaries map[string]*struct {
@@ -442,7 +430,7 @@ func pinnedTools(byaml string) (int, []string) {
 		} `yaml:"binaries"`
 	}
 	if yaml.Unmarshal(raw, &doc) != nil {
-		return 0, nil
+		return 0, nil, true
 	}
 	bin := filepath.Dir(byaml)
 	type pin struct{ name, path string }
@@ -470,5 +458,5 @@ func pinnedTools(byaml string) (int, []string) {
 			missing = append(missing, t.name)
 		}
 	}
-	return len(pins), missing
+	return len(pins), missing, false
 }

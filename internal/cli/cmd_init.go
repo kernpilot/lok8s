@@ -79,7 +79,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				return err
 			}
 			plan.Force = force
-			return initExecute(cmd.Context(), *plan, newRunner(paths), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return initReport(initExecute(cmd.Context(), *plan, newRunner(paths), cmd.OutOrStdout(), cmd.ErrOrStderr()), cmd.OutOrStdout())
 		},
 	}
 	service.Flags().StringVarP(&svcPath, "path", "p", "", "Directory for the service (default: ./<name>)")
@@ -104,7 +104,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				return err
 			}
 			plan.Force = force
-			return initExecute(cmd.Context(), *plan, newRunner(paths), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return initReport(initExecute(cmd.Context(), *plan, newRunner(paths), cmd.OutOrStdout(), cmd.ErrOrStderr()), cmd.OutOrStdout())
 		},
 	}
 	test.Flags().StringVarP(&testPath, "path", "p", "", "Directory for the suite (default: ./tests)")
@@ -139,14 +139,14 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				plan = p
 			} else {
 				if in.Domain == "" {
-					ui.ErrorTo(cmd.ErrOrStderr(), "lo init cluster: give a domain: lo init cluster <domain>")
+					ui.ErrorTo(cmd.ErrOrStderr(), "%s", initctx.MissingDomain)
 					return ErrHandled
 				}
 				p := initctx.ClusterPlan(paths.Base, in.Domain, in.Driver, in.Active)
 				plan = &p
 			}
 			plan.Force = force
-			return initExecute(cmd.Context(), *plan, newRunner(paths), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return initReport(initExecute(cmd.Context(), *plan, newRunner(paths), cmd.OutOrStdout(), cmd.ErrOrStderr()), cmd.OutOrStdout())
 		},
 	}
 	cluster.Flags().StringVar(&clusterDriver, "driver", "lo", "Driver of the spec: "+strings.Join(scaffold.DriverNames(), ", "))
