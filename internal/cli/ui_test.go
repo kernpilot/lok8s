@@ -211,27 +211,68 @@ func TestUseSelectNoClusters(t *testing.T) {
 	}
 }
 
-// The wrapper tells Esc from Ctrl-C: both abort the huh form, Ctrl-C is
-// recorded before the form sees it (rc 130 in useSelect), Esc is not
-// (rc 0).
-func TestUseFormRecordsCtrlC(t *testing.T) {
+// The wrapper tells Esc from an interrupt: both abort the huh form; a
+// Ctrl-C press and an InterruptMsg (an external SIGINT) are recorded
+// before the form sees them, Esc is not.
+func TestUseFormRecordsInterrupts(t *testing.T) {
 	domains := []useDomain{{"alpha.dev", "lo"}, {"beta.cloud", "kubeone"}}
 	for _, c := range []struct {
-		key   tea.KeyPressMsg
-		ctrlC bool
+		name        string
+		msg         tea.Msg
+		interrupted bool
+		aborted     bool
 	}{
-		{tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, true},
-		{tea.KeyPressMsg{Code: tea.KeyEscape}, false},
+		{"ctrl+c", tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, true, true},
+		{"esc", tea.KeyPressMsg{Code: tea.KeyEscape}, false, true},
+		{"sigint", tea.InterruptMsg{}, true, false},
 	} {
 		choice := "alpha.dev"
 		m := &useForm{form: useBuildForm(domains, &choice)}
 		m.Init()
-		m.Update(c.key)
-		if m.ctrlC != c.ctrlC {
-			t.Errorf("%s: ctrlC = %v, want %v", c.key, m.ctrlC, c.ctrlC)
+		m.Update(c.msg)
+		if m.interrupted != c.interrupted {
+			t.Errorf("%s: interrupted = %v, want %v", c.name, m.interrupted, c.interrupted)
 		}
-		if m.form.State != huh.StateAborted {
-			t.Errorf("%s: form state = %v, want aborted", c.key, m.form.State)
+		if aborted := m.form.State == huh.StateAborted; aborted != c.aborted {
+			t.Errorf("%s: form aborted = %v, want %v", c.name, aborted, c.aborted)
+		}
+	}
+}
+
+// The exit codes of the select, through the process-exit seam: an
+// interrupt (Ctrl-C, SIGINT) exits 130 with nothing printed and .active
+// untouched, Esc returns 0 with nothing printed, a choice sets the domain.
+func TestUseSelectExitCodes(t *testing.T) {
+	prevI, prevRun := useInteractive, useRunForm
+	useInteractive = func() bool { return true }
+	t.Cleanup(func() { useInteractive, useRunForm = prevI, prevRun })
+	for _, c := range []struct {
+		name        string
+		aborted     bool
+		interrupted bool
+		wantExit    []int
+		wantOut     string
+		wantActive  string
+	}{
+		{"interrupt", true, true, []int{130}, "", "alpha.dev\n"},
+		{"esc", true, false, nil, "", "alpha.dev\n"},
+		{"enter", false, false, nil, "Active domain: alpha.dev\n", "alpha.dev\n"},
+	} {
+		p := useProject(t)
+		useRunForm = func(m *useForm, in io.Reader, out io.Writer) (bool, error) {
+			m.interrupted = c.interrupted
+			return c.aborted, nil
+		}
+		exits := captureExits(t)
+		stdout, stderr, err := runLo(t, NewRoot(p), "use")
+		if err != nil || stderr != "" || stdout != c.wantOut {
+			t.Errorf("%s: err = %v, stdout = %q, stderr = %q", c.name, err, stdout, stderr)
+		}
+		if got := *exits; len(got) != len(c.wantExit) || (len(got) > 0 && got[0] != c.wantExit[0]) {
+			t.Errorf("%s: exits = %v, want %v", c.name, got, c.wantExit)
+		}
+		if raw, _ := os.ReadFile(filepath.Join(p.Clusters, ".active")); string(raw) != c.wantActive {
+			t.Errorf("%s: .active = %q", c.name, raw)
 		}
 	}
 }

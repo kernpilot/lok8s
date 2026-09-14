@@ -180,17 +180,23 @@ func useSelect(paths *config.Paths, tio useIO, out, errOut io.Writer) error {
 		return useSetActive(paths, choice, out, errOut)
 	}
 	m := &useForm{form: form}
-	aborted, err := m.run(tio.In, tio.Out)
+	aborted, err := useRunForm(m, tio.In, tio.Out)
 	if err != nil {
 		return err
 	}
 	if aborted {
-		if m.ctrlC {
+		if m.interrupted {
 			exitNow(130)
 		}
 		return nil
 	}
 	return useSetActive(paths, choice, out, errOut)
+}
+
+// useRunForm runs the wrapped form (a seam: the tests inject the outcome
+// and watch the exit through osExit).
+var useRunForm = func(m *useForm, in io.Reader, out io.Writer) (aborted bool, err error) {
+	return m.run(in, out)
 }
 
 // useBuildForm is the select: one option per domain (`<domain>  <what>`,
@@ -212,31 +218,43 @@ func useBuildForm(domains []useDomain, choice *string) *huh.Form {
 	)).WithTheme(ui.HuhTheme()).WithKeyMap(keys)
 }
 
-// useForm runs the huh form under bubbletea itself, so the key that
-// ended it is known. huh maps Esc and Ctrl-C to the same abort, and the
-// two must differ here: Esc leaves (rc 0), Ctrl-C interrupts (rc 130).
-// The wrapper records a Ctrl-C press before the form sees it.
+// useForm runs the huh form under bubbletea itself, so the way it ended
+// is known. huh maps Esc and Ctrl-C to the same abort, and the two must
+// differ here: Esc leaves (rc 0), an interrupt ends with rc 130. The
+// wrapper records a Ctrl-C press, and an InterruptMsg (an external
+// SIGINT), before the form sees them.
 type useForm struct {
-	form  *huh.Form
-	ctrlC bool
+	form        *huh.Form
+	interrupted bool
 }
 
 func (m *useForm) Init() tea.Cmd { return m.form.Init() }
 
 func (m *useForm) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "ctrl+c" {
-		m.ctrlC = true
+	switch v := msg.(type) {
+	case tea.KeyPressMsg:
+		if v.String() == "ctrl+c" {
+			m.interrupted = true
+		}
+	case tea.InterruptMsg:
+		m.interrupted = true
 	}
 	_, cmd := m.form.Update(msg)
 	return m, cmd
 }
 
-func (m *useForm) View() tea.View { return tea.NewView(m.form.View()) }
+// View is huh's own view with ReportFocus on, as huh's Run sets it.
+func (m *useForm) View() tea.View {
+	v := tea.NewView(m.form.View())
+	v.ReportFocus = true
+	return v
+}
 
-// run drives the form the way huh's own Run does (submit quits, cancel
-// interrupts) and reports whether the user aborted it.
+// run drives the form: submit and the quit keys end the program (the
+// form's State says which), an external SIGINT ends it with
+// tea.ErrInterrupted. It reports whether the user aborted it.
 func (m *useForm) run(in io.Reader, out io.Writer) (aborted bool, err error) {
-	m.form.SubmitCmd, m.form.CancelCmd = tea.Quit, tea.Interrupt
+	m.form.SubmitCmd, m.form.CancelCmd = tea.Quit, tea.Quit
 	var opts []tea.ProgramOption
 	if in != nil {
 		opts = append(opts, tea.WithInput(in))
@@ -245,13 +263,14 @@ func (m *useForm) run(in io.Reader, out io.Writer) (aborted bool, err error) {
 		opts = append(opts, tea.WithOutput(out))
 	}
 	_, err = tea.NewProgram(m, opts...).Run()
-	if errors.Is(err, tea.ErrInterrupted) || m.form.State == huh.StateAborted {
+	if errors.Is(err, tea.ErrInterrupted) {
+		m.interrupted = true
 		return true, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("lo use: %w", err)
 	}
-	return false, nil
+	return m.form.State == huh.StateAborted, nil
 }
 
 // useDomain is one entry of the listing: the name and what it is (the
