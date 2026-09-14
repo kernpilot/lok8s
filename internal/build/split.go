@@ -256,14 +256,14 @@ func newSplitRun(o Options) (*splitRun, error) {
 	// them by their prefixes.
 	tmpDir, err := os.MkdirTemp(domainDir, ".artifacts-tmp.")
 	if err != nil {
-		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 		return nil, ErrHandled
 	}
 	r.tmpDir = tmpDir
 	stage, err := os.MkdirTemp(domainDir, ".artifacts-stage.")
 	if err != nil {
 		r.cleanup()
-		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 		return nil, ErrHandled
 	}
 	r.stage = stage
@@ -277,7 +277,7 @@ func newSplitRun(o Options) (*splitRun, error) {
 		content := "creation_rules:\n  - age: '" + recipients + "'\n"
 		if err := os.WriteFile(r.sopsConfig, []byte(content), 0o600); err != nil {
 			r.cleanup()
-			ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 			return nil, ErrHandled
 		}
 	}
@@ -303,8 +303,12 @@ func (r *splitRun) cleanup() {
 // (moveFile: a rename, with the cross-device fallback).
 func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	streamPath := filepath.Join(r.tmpDir, "nonsecret.stream")
-	if !r.yqOK || execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr) != nil {
-		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
+	if !r.yqOK {
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: yq not found — install the pinned toolchain (b install)", r.artifact)
+		return ErrHandled
+	}
+	if err := execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr); err != nil {
+		ui.ErrorTo(r.stderr, "split: failed to shape %s: %v", r.artifact, err)
 		return ErrHandled
 	}
 	// Guard the empty stream (a Secrets-only render): yq -s on empty stdin
@@ -312,7 +316,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	if info, err := os.Stat(streamPath); err == nil && info.Size() > 0 {
 		streamFile, err := os.Open(streamPath)
 		if err != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 			return ErrHandled
 		}
 		runErr := r.o.runner().Run(ctx, execx.Cmd{
@@ -321,7 +325,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 		})
 		_ = streamFile.Close()
 		if runErr != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, runErr)
 			return ErrHandled
 		}
 		_ = os.Remove(streamPath)
@@ -342,7 +346,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	for _, f := range ymlFiles {
 		base := filepath.Base(f)
 		if err := moveFile(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 			return ErrHandled
 		}
 		r.emitted++
@@ -461,7 +465,7 @@ func (r *splitRun) verifyStage() error {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(r.stage, ".gitignore"), []byte(gitignoreContent), 0o600); err != nil {
-		ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 		return ErrHandled
 	}
 	return nil
@@ -483,7 +487,7 @@ func (r *splitRun) verifyStage() error {
 // there is correct.
 func (r *splitRun) swapStage() error {
 	if err := os.MkdirAll(r.outDir, 0o755); err != nil {
-		ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+		ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 		return ErrHandled
 	}
 	for _, name := range generatedFiles(r.outDir) {
@@ -506,7 +510,7 @@ func (r *splitRun) swapStage() error {
 			continue
 		}
 		if err := moveFile(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
-			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
+			ui.ErrorTo(r.stderr, "split: failed to split %s: %v", r.artifact, err)
 			return ErrHandled
 		}
 	}
