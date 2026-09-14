@@ -23,6 +23,7 @@ lo [flags]
 ```
   -s, --cluster string       Cluster name to manage
       --config string        Kind config to use
+      --debug                On a failure, print the external command line (docker, kind, kubectl, …) and its exit code
       --domain string        Domain to use
       --domain-sans string   Domain sans to use
   -f, --force                Force operation without prompts (also recreates immutable/terminating conflicts)
@@ -31,6 +32,7 @@ lo [flags]
       --kubernetes string    Kubernetes version to use
       --no-color             No ANSI colour on the terminal (env form: NO_COLOR)
       --no-eject             Never write embedded framework assets into the project (.lok8s/…); serve them from a temp dir instead
+  -q, --quiet                Print errors and warnings only: no [assets] or DOMAIN_NAME notices
   -r, --remote               Provision on remote VM (uses spec.provider + spec.remote)
   -v, --verbose count        Enable verbose logging
 ```
@@ -90,9 +92,10 @@ lo addons [addon...] [flags]
 ### Options
 
 ```
-      --detail count   Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure
-  -h, --help           help for addons
-      --origin         Add the ORIGIN column: builtin (served from the binary) · local · local (modified) · local-only (see: lo assets)
+      --detail count    Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure
+  -h, --help            help for addons
+      --origin          Add the ORIGIN column: builtin (served from the binary) · local · local (modified) · local-only (see: lo assets)
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -353,8 +356,9 @@ lo assets list [flags]
 ### Options
 
 ```
-  -h, --help   help for list
-      --json   Machine-readable output
+  -h, --help            help for list
+      --json            Machine-readable output (the same as -o json)
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -512,6 +516,7 @@ lo clean [flags]
 ```
   -a, --all    Clean up all volumes
   -h, --help   help for clean
+  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -774,6 +779,7 @@ lo destroy [flags]
 
 ```
   -h, --help   help for destroy
+  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -798,8 +804,9 @@ lo doctor [flags]
 ### Options
 
 ```
-  -h, --help        help for doctor
-      --toolchain   Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo toolchain install)
+  -h, --help            help for doctor
+  -o, --output string   Output format: text, json or yaml (default "text")
+      --toolchain       Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo toolchain install)
 ```
 
 ### SEE ALSO
@@ -825,6 +832,7 @@ lo down [flags]
 
 ```
   -h, --help   help for down
+  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -1638,6 +1646,7 @@ lo image clean [flags]
 
 ```
   -h, --help   help for clean
+  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -2446,8 +2455,9 @@ lo lint [flags]
 ### Options
 
 ```
-  -h, --help    help for lint
-      --notes   Also print a [note] per spec key that equals its documented default (advisory; the exit code is unchanged)
+      --format string   Finding format: text (default), editor (file:line: [level] message) or github (workflow commands, the default under GITHUB_ACTIONS off a terminal)
+  -h, --help            help for lint
+      --notes           Also print a [note] per spec key that equals its documented default (advisory; the exit code is unchanged)
 ```
 
 ### SEE ALSO
@@ -3077,6 +3087,7 @@ lo registry clean [flags]
 
 ```
   -h, --help   help for clean
+  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -3125,7 +3136,8 @@ lo registry status [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help            help for status
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -3543,7 +3555,8 @@ lo status [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help            help for status
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -3913,7 +3926,8 @@ lo use [domain] [flags]
 ### Options
 
 ```
-  -h, --help   help for use
+  -h, --help            help for use
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -3938,7 +3952,8 @@ lo version [flags]
 ### Options
 
 ```
-  -h, --help   help for version
+  -h, --help            help for version
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
