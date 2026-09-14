@@ -12,6 +12,7 @@ package lo
 // reconcile matrix to be exercised end-to-end without a daemon.
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
@@ -195,7 +197,7 @@ type fakeDocker struct {
 func newFakeDocker(t *testing.T) *fakeDocker {
 	t.Helper()
 	dir := t.TempDir()
-	for _, sub := range []string{"containers", "networks"} {
+	for _, sub := range []string{"containers", "networks", "volumes"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -306,6 +308,12 @@ var dockerVerbs = map[string]dockerVerb{
 	"inspect":            (*fakeDocker).inspectContainer,
 	"rm":                 (*fakeDocker).removeContainer,
 	"run":                (*fakeDocker).runContainer,
+	"restart":            (*fakeDocker).restartContainer,
+	"cp":                 (*fakeDocker).copyFiles,
+	"container create":   (*fakeDocker).createContainer,
+	"volume inspect":     (*fakeDocker).inspectVolume,
+	"volume create":      (*fakeDocker).createVolume,
+	"volume rm":          (*fakeDocker).removeVolume,
 	"network inspect":    (*fakeDocker).inspectNetwork,
 	"network disconnect": (*fakeDocker).disconnectNetwork,
 	"network connect":    (*fakeDocker).connectNetwork,
@@ -348,10 +356,21 @@ func (f *fakeDocker) inspectContainer(c execx.Cmd, rest []string) error {
 	if !ok {
 		return fmt.Errorf("no such container")
 	}
-	if strings.Contains(format, "State.Status") {
+	switch {
+	case strings.Contains(format, "State.Status"):
 		writeOut(c, status+"\n")
-	} else if strings.Contains(format, "config-hash") {
+	case strings.Contains(format, "config-hash"):
 		writeOut(c, hash+"\n")
+	case strings.Contains(format, ".Mounts"):
+		// Destination|Type|Name|Source, the driver's registryCertMounts
+		// template; Name is set for a volume, Source for a bind.
+		if kind, src, ok := strings.Cut(f.containerMount(rest[0]), "|"); ok {
+			if kind == "volume" {
+				writeOut(c, RegistryTLSMount+"|volume|"+src+"|/var/lib/docker/volumes/"+src+"/_data\n")
+			} else {
+				writeOut(c, RegistryTLSMount+"|bind||"+src+"\n")
+			}
+		}
 	}
 	return nil
 }
@@ -378,7 +397,7 @@ func (f *fakeDocker) removeContainer(_ execx.Cmd, rest []string) error {
 // lok8s.dev/config-hash=H …`. A taken address fails like the daemon does
 // and leaves the container behind in Created state.
 func (f *fakeDocker) runContainer(c execx.Cmd, rest []string) error {
-	var name, ip, net, hash string
+	var name, ip, net, hash, certMount string
 	for i := range rest {
 		switch {
 		case rest[i] == "--name" && i+1 < len(rest):
@@ -389,6 +408,8 @@ func (f *fakeDocker) runContainer(c execx.Cmd, rest []string) error {
 			net = strings.TrimPrefix(rest[i], "--net=")
 		case rest[i] == "--label" && i+1 < len(rest):
 			hash = strings.TrimPrefix(rest[i+1], "lok8s.dev/config-hash=")
+		case rest[i] == "--volume" && i+1 < len(rest):
+			certMount = mountSpec(rest[i+1])
 		}
 	}
 	for _, m := range f.members(net) {
@@ -399,8 +420,159 @@ func (f *fakeDocker) runContainer(c execx.Cmd, rest []string) error {
 		}
 	}
 	f.setContainer(name, "running", hash)
+	f.setContainerMount(name, certMount)
 	f.addMember(net, ip+"/24", name)
 	writeOut(c, "cid-"+name+"\n")
+	return nil
+}
+
+// mountSpec classifies a `--volume SRC:DST[:ro]` argument whose DST is the
+// registry cert path: "volume|NAME" for a named volume, "bind|PATH" for a
+// host directory, "" for any other mount.
+func mountSpec(arg string) string {
+	parts := strings.Split(arg, ":")
+	if len(parts) < 2 || parts[1] != RegistryTLSMount {
+		return ""
+	}
+	if strings.HasPrefix(parts[0], "/") {
+		return "bind|" + parts[0]
+	}
+	return "volume|" + parts[0]
+}
+
+// The cert mount of a container lives beside its status file.
+func (f *fakeDocker) setContainerMount(name, mount string) {
+	if mount == "" {
+		os.Remove(f.containerPath(name) + ".mount")
+		return
+	}
+	os.WriteFile(f.containerPath(name)+".mount", []byte(mount), 0o644)
+}
+
+func (f *fakeDocker) containerMount(name string) string {
+	raw, _ := os.ReadFile(f.containerPath(name) + ".mount")
+	return string(raw)
+}
+
+// Volumes are directories; their files are what `docker cp` moves.
+func (f *fakeDocker) volumePath(name string) string { return filepath.Join(f.dir, "volumes", name) }
+
+func (f *fakeDocker) volumeExists(name string) bool { return fsutil.DirExists(f.volumePath(name)) }
+
+func (f *fakeDocker) volumeFile(name, file string) (string, bool) {
+	raw, err := os.ReadFile(filepath.Join(f.volumePath(name), file))
+	return string(raw), err == nil
+}
+
+func (f *fakeDocker) inspectVolume(_ execx.Cmd, rest []string) error {
+	if len(rest) == 0 || !f.volumeExists(rest[len(rest)-1]) {
+		return fmt.Errorf("no such volume")
+	}
+	return nil
+}
+
+func (f *fakeDocker) createVolume(c execx.Cmd, rest []string) error {
+	name := rest[len(rest)-1]
+	os.MkdirAll(f.volumePath(name), 0o755)
+	writeOut(c, name+"\n")
+	return nil
+}
+
+func (f *fakeDocker) removeVolume(_ execx.Cmd, rest []string) error {
+	os.RemoveAll(f.volumePath(rest[len(rest)-1]))
+	return nil
+}
+
+// createContainer answers `docker container create --name N --volume
+// VOL:/etc/registry/certs IMAGE`: a Created container bound to the volume
+// (docker creates a missing named volume on the fly; so does the fake).
+func (f *fakeDocker) createContainer(_ execx.Cmd, rest []string) error {
+	var name, mount string
+	for i := range rest {
+		switch {
+		case rest[i] == "--name" && i+1 < len(rest):
+			name = rest[i+1]
+		case rest[i] == "--volume" && i+1 < len(rest):
+			mount = mountSpec(rest[i+1])
+		}
+	}
+	if name == "" {
+		return fmt.Errorf("no --name")
+	}
+	if vol, ok := strings.CutPrefix(mount, "volume|"); ok {
+		os.MkdirAll(f.volumePath(vol), 0o755)
+	}
+	f.setContainer(name, "created", "")
+	f.setContainerMount(name, mount)
+	return nil
+}
+
+// copyFiles answers `docker cp SRC CTR:/etc/registry/certs/F` (into the
+// container's cert volume) and `docker cp CTR:/etc/registry/certs/F -` (a
+// tar stream with the one entry on stdout, like the daemon's).
+func (f *fakeDocker) copyFiles(c execx.Cmd, rest []string) error {
+	if len(rest) != 2 {
+		return fmt.Errorf("cp: want SRC DST")
+	}
+	ctrOf := func(spec string) (ctr, file string, ok bool) {
+		ctr, path, found := strings.Cut(spec, ":")
+		if !found || !strings.HasPrefix(path, RegistryTLSMount+"/") {
+			return "", "", false
+		}
+		return ctr, strings.TrimPrefix(path, RegistryTLSMount+"/"), true
+	}
+	volumeOf := func(ctr string) (string, bool) {
+		if _, _, ok := f.containerStatus(ctr); !ok {
+			return "", false
+		}
+		return strings.CutPrefix(f.containerMount(ctr), "volume|")
+	}
+	if rest[1] == "-" {
+		ctr, file, ok := ctrOf(rest[0])
+		if !ok {
+			return fmt.Errorf("cp: bad source %s", rest[0])
+		}
+		vol, ok := volumeOf(ctr)
+		if !ok {
+			return fmt.Errorf("cp: no such container %s", ctr)
+		}
+		data, ok := f.volumeFile(vol, file)
+		if !ok {
+			return fmt.Errorf("cp: no such file %s", file)
+		}
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		tw.WriteHeader(&tar.Header{Name: file, Mode: 0o644, Size: int64(len(data)), Typeflag: tar.TypeReg})
+		tw.Write([]byte(data))
+		tw.Close()
+		if c.Stdout != nil {
+			c.Stdout.Write(buf.Bytes())
+		}
+		return nil
+	}
+	ctr, file, ok := ctrOf(rest[1])
+	if !ok {
+		return fmt.Errorf("cp: bad destination %s", rest[1])
+	}
+	vol, ok := volumeOf(ctr)
+	if !ok {
+		return fmt.Errorf("cp: no such container %s", ctr)
+	}
+	data, err := os.ReadFile(rest[0])
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(f.volumePath(vol), file), data, 0o644)
+}
+
+func (f *fakeDocker) restartContainer(_ execx.Cmd, rest []string) error {
+	name := rest[len(rest)-1]
+	status, hash, ok := f.containerStatus(name)
+	if !ok {
+		return fmt.Errorf("no such container")
+	}
+	_ = status
+	f.setContainer(name, "running", hash)
 	return nil
 }
 

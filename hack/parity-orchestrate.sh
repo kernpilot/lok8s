@@ -310,4 +310,100 @@ stateful "${KIND_CFG}" up --domain alpha.dev
 stateful "${KIND_CFG}" up --domain shared.dev
 stateful "${KIND_CFG}" up --domain tls.dev
 
+# ── lo up with registry TLS: a deliberate deviation (D34) ────────────────────
+# The bash tree mints the registry cert through the Secret plugin with
+# PATH_SECRETS at the flat store its entrypoint defaults (<project>/.secrets),
+# extracts the pair to .secrets/tls/registries and bind-mounts that directory
+# into every registry container. The Go binary hands the plugin a scratch
+# store under the domain dir and keeps the cert in the docker volume
+# <network>-registry-tls. The streams still match (the same progress lines);
+# the docker and plugin argv differ and are pinned per side. Both sides exec
+# the plugin (LO_RENDER=exec above): a stub that logs the store it was
+# handed and answers a fake pair. The docker stub logs every argv; `docker cp
+# CTR:PATH -` answers an empty stream (nothing in the "volume"), so the Go
+# side mints on every run. PATH_SECRETS is unset on both sides
+# (parity::init), CAROOT points at an empty dir so the trust nudge sees the
+# same absent CA on both.
+mkdir -p "${PROJ}/clusters/mint.dev"
+cat > "${PROJ}/clusters/mint.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: mintc
+spec:
+  runtime: kind
+  network:
+    name: mintnet
+    cidr: 10.99.10.0/24
+  registries:
+    tls: true
+    shared:
+      enabled: false
+YAML
+mkdir -p "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret"
+cat > "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" <<'SH'
+#!/usr/bin/env bash
+# Parity stub Secret plugin: log the store it was handed, answer a fake pair
+# (base64 FAKECRT / FAKEKEY).
+cat >/dev/null
+echo "PATH_SECRETS=${PATH_SECRETS:-<unset>}" >> "${PARITY_PLUGIN_LOG}"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: RkFLRUNSVA==\n  tls.key: RkFLRUtFWQ==\n'
+SH
+chmod +x "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+parity::stub "${PROJ}" docker <<'SH'
+#!/usr/bin/env bash
+# Parity stub (TLS phase): the plain stub plus an argv log.
+echo "docker $*" >> "${PARITY_DOCKER_LOG}"
+case "${1:-} ${2:-}" in
+  "volume ls")       echo "alpha-data"; echo "alpha-cache"; exit 0 ;;
+  "system prune")    echo "stub: docker $*"; exit 0 ;;
+  "network inspect") exit 1 ;;
+  "inspect "*)       exit 1 ;;
+  "ps "*)            exit 0 ;;
+esac
+exit 0
+SH
+export PARITY_DOCKER_LOG="${WORK}/docker.log" PARITY_PLUGIN_LOG="${WORK}/plugin.log"
+export CAROOT="${WORK}/caroot"
+tls_pre() {
+  reset_fixtures
+  rm -rf "${PROJ}/.secrets" "${PROJ}/clusters/mint.dev/.registries.json"
+}
+tls_post() {  # <impl>: keep the logs per side, record the flat store and the scratch state
+  mv -f "${WORK}/docker.log" "${WORK}/docker.${1}.log" 2>/dev/null || : > "${WORK}/docker.${1}.log"
+  mv -f "${WORK}/plugin.log" "${WORK}/plugin.${1}.log" 2>/dev/null || : > "${WORK}/plugin.${1}.log"
+  { [[ -e "${PROJ}/.secrets" ]] && echo present || echo absent; } > "${WORK}/flat.${1}"
+  { ls -d "${PROJ}/clusters/mint.dev"/.registry-tls-tmp.* 2>/dev/null || true; } > "${WORK}/scratch.${1}"
+}
+PARITY_PRE_EACH=tls_pre PARITY_POST_EACH=tls_post check "${KIND_CFG}" up --domain mint.dev
+
+# tls_pin / tls_absent <label> <file> <regex>: one line of the side's log
+# must (not) match.
+tls_pin() {
+  if grep -qE -- "${3}" "${2}"; then echo "ok: ${1}"; else
+    echo "FAIL: ${1} — no line matches ${3} in ${2}:"; sed 's/^/  /' "${2}" | head -20
+    failures=$((failures + 1))
+  fi
+}
+tls_absent() {
+  if grep -qE -- "${3}" "${2}"; then
+    echo "FAIL: ${1} — a line matches ${3} in ${2}:"; grep -E -- "${3}" "${2}" | head -5 | sed 's/^/  /'
+    failures=$((failures + 1))
+  else echo "ok: ${1}"; fi
+}
+# The entrypoint's `${PATH_SECRETS:=…}` is a shell variable, not an export:
+# the plugin child inherits nothing and mints without a cache (the real
+# cert: generator refuses that; only the .secrets/tls/registries extract
+# and the bind mount below are the bash contract a project relies on).
+tls_pin    "D34 bash: plugin child inherits no store"                  "${WORK}/plugin.bash.log" "^PATH_SECRETS=<unset>$"
+tls_pin    "D34 bash: registries bind-mount the flat dir"              "${WORK}/docker.bash.log" "^docker run .* --volume ${PROJ}/\.secrets/tls/registries:/etc/registry/certs:ro "
+tls_pin    "D34 go: plugin store = a scratch under the domain dir"     "${WORK}/plugin.go.log"   "^PATH_SECRETS=${PROJ}/clusters/mint\.dev/\.registry-tls-tmp\.[^/]+$"
+tls_pin    "D34 go: volume populated through the io container"         "${WORK}/docker.go.log"   "^docker container create --name mintnet-registry-tls-io --volume mintnet-registry-tls:/etc/registry/certs registry:2\.8\.3$"
+tls_pin    "D34 go: tls.key copied into the volume"                    "${WORK}/docker.go.log"   "^docker cp ${PROJ}/clusters/mint\.dev/\.registry-tls-tmp\.[^/]+/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
+tls_pin    "D34 go: the io container is removed"                       "${WORK}/docker.go.log"   "^docker rm -f mintnet-registry-tls-io$"
+tls_pin    "D34 go: registries mount the volume"                       "${WORK}/docker.go.log"   "^docker run .* --volume mintnet-registry-tls:/etc/registry/certs:ro "
+tls_absent "D34 go: no flat store in any docker argv"                  "${WORK}/docker.go.log"   "\.secrets"
+if [[ "$(cat "${WORK}/flat.go")" == absent ]]; then echo "ok: D34 go: no <project>/.secrets created"; else fail "D34 go: <project>/.secrets was created"; fi
+if [[ ! -s "${WORK}/scratch.go" ]]; then echo "ok: D34 go: no scratch dir left under the domain dir"; else fail "D34 go: scratch left: $(cat "${WORK}/scratch.go")"; fi
+unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG
+
 report

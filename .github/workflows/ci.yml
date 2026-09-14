@@ -357,13 +357,17 @@ jobs:
           printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: e2e\nspec:\n  implementation:\n    default: %s\n' "${IMPLEMENTATION}" > "${BASE}/lok8s.yaml"
           cat "${BASE}/lok8s.yaml"
 
-      - name: Trust the plain-HTTP dev registries (10.125.0.0/16)
-        # `lo up` stands up plain-HTTP registry containers on the project
-        # subnet (spec.registries.tls:false in the fixture) and Tilt pushes
-        # the locally-built image to the build registry (10.125.<slot>.101)
-        # over the host Docker daemon. Without an insecure-registries entry
-        # the host `docker push` rejects the plain-HTTP endpoint. This mirrors
-        # the range the framework's own Hetzner provider trusts (see
+      - name: Skip host-side verification for the dev registries (10.125.0.0/16)
+        # `lo up` stands up TLS registry containers on the project subnet
+        # (spec.registries.tls: true in the fixture, the default: the cert
+        # is minted into the docker volume <network>-registry-tls, which
+        # this job proves end to end) and Tilt pushes the locally-built
+        # image to the build registry (10.125.<slot>.101) over the host
+        # Docker daemon. The runner does not trust the dev CA (no `lo
+        # trust`), so the host `docker push` needs an insecure-registries
+        # entry to skip verification; in-cluster pulls trust the CA through
+        # certs.d regardless. This mirrors the range the framework's own
+        # Hetzner provider trusts (see
         # .lok8s/providers/hetzner/.../etc/docker/daemon.json).
         run: |
           sudo mkdir -p /etc/docker
@@ -441,7 +445,9 @@ jobs:
           export PATH_SCRIPTS="${PATH_LOK8S}"
           export PATH_BIN="${ROOT}/.bin"
           export PATH_CLUSTERS="${BASE}/clusters"
-          export PATH_SECRETS="${BASE}/.secrets"
+          # No PATH_SECRETS on purpose: a PATH-only shell is what broke the
+          # registry TLS mint in v0.3.1 (the bash entrypoint defaults the
+          # variable, the binary must not need it).
           export KUSTOMIZE_PLUGIN_HOME="${ROOT}/.kustomize"
           export DOMAIN_NAME="${DOMAIN}"
           export LOK8S_CLUSTER_NAME="${CLUSTER}"
