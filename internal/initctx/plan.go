@@ -275,7 +275,7 @@ func Decide(s State, a Answers) Plan {
 	action := Action{Kind: ActionWriteProjectFiles, Name: name, Env: env}
 	if a.Domain != "" {
 		action.Domain, action.Driver = a.Domain, driverOr(a.Driver)
-		files = append(files, clusterSpecFile(dir, a.Domain))
+		files = append(files, clusterSpecFile(dir, a.Domain, false))
 		cmd += " --cluster " + a.Domain + " --driver " + action.Driver
 	}
 	action.Files = files
@@ -293,14 +293,19 @@ func Decide(s State, a Answers) Plan {
 }
 
 // ClusterPlan is `lo init cluster`: the spec, then `lo use` when active.
-func ClusterPlan(dir, dom, driver string, active bool) Plan {
+// force is the verb's --force: an existing spec is replaced, and the
+// twin carries the flag.
+func ClusterPlan(dir, dom, driver string, active, force bool) Plan {
 	driver = driverOr(driver)
 	cmd := "lo init cluster " + dom + " --driver " + driver
 	if !active {
 		cmd += " --no-active"
 	}
-	p := Plan{Dir: dir, Actions: []Action{{Kind: ActionWriteClusterSpec, Domain: dom, Driver: driver,
-		Files: []string{clusterSpecFile(dir, dom)}, Command: cmd}}}
+	if force {
+		cmd += " --force"
+	}
+	p := Plan{Dir: dir, Force: force, Actions: []Action{{Kind: ActionWriteClusterSpec, Domain: dom, Driver: driver,
+		Files: []string{clusterSpecFile(dir, dom, force)}, Command: cmd}}}
 	if active {
 		p.Actions = append(p.Actions, useAction(dom))
 	}
@@ -407,14 +412,18 @@ func (p Plan) Result() (verb, what string) {
 	return "created", p.Name
 }
 
-// clusterSpecFile names the spec a plan writes, or keeps when it already
-// exists (the executor never overwrites it).
-func clusterSpecFile(root, dom string) string {
+// clusterSpecFile names the spec a plan writes. A spec that exists is
+// kept (the screens never force) or, with a verb's --force, replaced:
+// the row says which.
+func clusterSpecFile(root, dom string, force bool) string {
 	rel := "clusters/" + dom + "/cluster.lok8s.yaml"
-	if fsutil.FileExists(filepath.Join(root, "clusters", dom, "cluster.lok8s.yaml")) {
-		return rel + " (exists, kept)"
+	if !fsutil.FileExists(filepath.Join(root, "clusters", dom, "cluster.lok8s.yaml")) {
+		return rel
 	}
-	return rel
+	if force {
+		return rel + " (exists, replaced)"
+	}
+	return rel + " (exists, kept)"
 }
 
 func toolchainActions(a Answers) []Action {

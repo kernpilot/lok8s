@@ -222,9 +222,18 @@ func TestDecideKeepsAnExistingClusterSpec(t *testing.T) {
 	if !slices.Contains(p.Actions[0].Files, "clusters/old.dev/cluster.lok8s.yaml (exists, kept)") {
 		t.Errorf("files %v", p.Actions[0].Files)
 	}
-	p = ClusterPlan(root, "old.dev", "kubeone", false)
+	p = ClusterPlan(root, "old.dev", "kubeone", false, false)
 	if !reflect.DeepEqual(p.Actions[0].Files, []string{"clusters/old.dev/cluster.lok8s.yaml (exists, kept)"}) {
 		t.Errorf("files %v", p.Actions[0].Files)
+	}
+	// The verb's --force replaces it: the row and the twin say so.
+	p = ClusterPlan(root, "old.dev", "kubeone", false, true)
+	if !p.Force || !reflect.DeepEqual(p.Actions[0].Files, []string{"clusters/old.dev/cluster.lok8s.yaml (exists, replaced)"}) {
+		t.Errorf("forced files %v force %v", p.Actions[0].Files, p.Force)
+	}
+	wantCommands(t, p, "lo init cluster old.dev --driver kubeone --no-active --force")
+	if got := ClusterPlan(root, "new.dev", "lo", false, true).Actions[0].Files[0]; got != "clusters/new.dev/cluster.lok8s.yaml" {
+		t.Errorf("a new spec under --force: %q", got)
 	}
 }
 
@@ -241,13 +250,13 @@ func projectState(root string, atRoot bool) State {
 // twin with the flags given, the files as the screen lists them.
 func TestVerbPlans(t *testing.T) {
 	root := t.TempDir()
-	p := ClusterPlan(root, "beta.cloud", "kubeone", true)
+	p := ClusterPlan(root, "beta.cloud", "kubeone", true, false)
 	wantKinds(t, p, ActionWriteClusterSpec, ActionUse)
 	wantCommands(t, p, "lo init cluster beta.cloud --driver kubeone", "lo use beta.cloud")
 	if verb, what := p.Result(); verb != "added" || what != "clusters/beta.cloud/cluster.lok8s.yaml · active" {
 		t.Errorf("result: %s %s", verb, what)
 	}
-	p = ClusterPlan(root, "beta.cloud", "", false)
+	p = ClusterPlan(root, "beta.cloud", "", false, false)
 	wantCommands(t, p, "lo init cluster beta.cloud --driver lo --no-active")
 	if a := p.Actions[0]; a.Driver != "lo" || a.Domain != "beta.cloud" {
 		t.Errorf("cluster action: %+v", a)

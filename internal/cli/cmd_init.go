@@ -125,7 +125,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			setDebugFromVerbose(cmd)
 			force, _ := cmd.Flags().GetBool("force")
-			in := &initctx.ClusterInput{Driver: clusterDriver, Active: !clusterNoActive,
+			in := &initctx.ClusterInput{Driver: clusterDriver, Active: !clusterNoActive, Force: force,
 				DomainGiven: len(args) > 0, DriverGiven: cmd.Flags().Changed("driver"), ActiveGiven: cmd.Flags().Changed("no-active")}
 			if len(args) > 0 {
 				in.Domain = args[0]
@@ -142,7 +142,7 @@ func newInitCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					ui.ErrorTo(cmd.ErrOrStderr(), "%s", initctx.MissingDomain)
 					return ErrHandled
 				}
-				p := initctx.ClusterPlan(paths.Base, in.Domain, in.Driver, in.Active)
+				p := initctx.ClusterPlan(paths.Base, in.Domain, in.Driver, in.Active, in.Force)
 				plan = &p
 			}
 			plan.Force = force

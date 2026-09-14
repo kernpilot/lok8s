@@ -303,15 +303,17 @@ func NewProject(s State, out io.Writer, tio IO) (Plan, error) {
 type ClusterInput struct {
 	Domain, Driver string
 	Active         bool
-	DomainGiven    bool
-	DriverGiven    bool
-	ActiveGiven    bool
+	// Force is the verb's --force: an existing spec is replaced.
+	Force       bool
+	DomainGiven bool
+	DriverGiven bool
+	ActiveGiven bool
 }
 
 // ClusterScreen is the cluster screen for the project at dir.
 func ClusterScreen(dir string, in *ClusterInput) Screen {
 	in.Domain = strings.TrimSpace(in.Domain)
-	plan := ClusterPlan(dir, in.Domain, in.Driver, in.Active)
+	plan := ClusterPlan(dir, in.Domain, in.Driver, in.Active, in.Force)
 	active := "no"
 	if in.Active {
 		active = "yes (lo use " + in.Domain + ")"

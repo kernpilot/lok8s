@@ -56,8 +56,9 @@ const (
 	reset  = "\033[0m"
 	bold   = "\033[1m"
 	dim    = "\033[2m"
-	// The doctor's `!` colour: the plain SGR colour, no intensity reset,
-	// so a card row can carry it inside a dim or bold run.
+	// The doctor's `!` colour. Paint.wrap ends every run with SGR 0, so
+	// a painted marker never sits inside another run: the card paints
+	// the marker, the key and the value as separate runs.
 	markYellow = "\033[33m"
 )
 
