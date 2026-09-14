@@ -1,6 +1,6 @@
 package initctx
 
-// detect_test.go — Detect over temp directories with git scripted through
+// detect_test.go: Detect over temp directories with git scripted through
 // the Runner seam. Nothing reaches a real git or the network.
 
 import (

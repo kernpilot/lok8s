@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -222,6 +223,32 @@ func envValue(env string) string {
 	return "none"
 }
 
+// validateDir accepts a directory `lo init` can continue in: this one,
+// one below it, or one above it (the repository root). Detect walks up
+// from the working directory, so a project elsewhere would not be found
+// after Create.
+func validateDir(cwd, v string) error {
+	dir := filepath.Clean(filepath.Join(cwd, v))
+	if filepath.IsAbs(v) {
+		dir = filepath.Clean(v)
+	}
+	if dirReachable(cwd, dir) {
+		return nil
+	}
+	return fmt.Errorf("%q is not this directory, one below it, or one above it", v)
+}
+
+// dirReachable reports whether dir is cwd, an ancestor of cwd, or below
+// cwd.
+func dirReachable(cwd, dir string) bool {
+	up, err := filepath.Rel(dir, cwd)
+	if err == nil && up != ".." && !strings.HasPrefix(up, ".."+string(filepath.Separator)) {
+		return true
+	}
+	down, err := filepath.Rel(cwd, dir)
+	return err == nil && down != ".." && !strings.HasPrefix(down, ".."+string(filepath.Separator))
+}
+
 // validateDomainOrEmpty accepts an empty answer (no cluster yet).
 func validateDomainOrEmpty(v string) error {
 	if v == "" {
@@ -272,7 +299,7 @@ func NewProjectScreen(s State, a *Answers) Screen {
 	details := func() []huh.Field {
 		fields := []huh.Field{inputField("name", &a.Name, "give a name", validateName)}
 		if s.Situation() == SituationGitBelowRoot {
-			fields = append(fields, inputField("directory", &a.Dir, "give a directory (. for this one)", nil))
+			fields = append(fields, inputField("directory", &a.Dir, "give a directory (. for this one)", func(v string) error { return validateDir(s.Cwd, v) }))
 		}
 		fields = append(fields,
 			inputField("domain", &a.Domain, "", validateDomainOrEmpty),

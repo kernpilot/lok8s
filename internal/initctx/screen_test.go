@@ -1,6 +1,6 @@
 package initctx
 
-// screen_test.go — the screens driven headlessly through huh's
+// screen_test.go: the screens driven headlessly through huh's
 // accessible mode: every prompt reads one line from a scripted reader
 // (an empty line or EOF takes the default), so the rows, the details
 // and the plan each screen yields are asserted without a terminal.
@@ -380,4 +380,30 @@ func TestRequiredFieldReAsks(t *testing.T) {
 	if p.Name != "shop" {
 		t.Errorf("name %q, want the prefilled shop", p.Name)
 	}
+}
+
+// The directory field refuses a place Detect cannot reach from the
+// working directory (a sibling): this directory, one below or one above
+// it pass; the answer is re-asked with the error.
+func TestDirectoryMustBeReachable(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "svc")
+	for dir, want := range map[string]bool{".": true, "sub": true, "..": true, "../..": true, "../other": false, "/elsewhere": false} {
+		if got := validateDir(cwd, dir) == nil; got != want {
+			t.Errorf("validateDir(%q) accepted=%v, want %v", dir, got, want)
+		}
+	}
+	s := State{Cwd: cwd, Entries: 1, Git: Git{Available: true, Root: root, Branch: "main"}}
+	var out bytes.Buffer
+	// Change details: name kept, directory ../other refused, then "."
+	// accepted; the rest kept; Create.
+	tio := script("2", "", "../other", ".", "", "", "", "", "1")
+	p, err := NewProject(s, &out, tio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Dir != cwd {
+		t.Errorf("dir %s, want cwd", p.Dir)
+	}
+	contains(t, formOut(tio), `"../other" is not this directory, one below it, or one above it`)
 }

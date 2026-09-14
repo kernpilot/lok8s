@@ -126,18 +126,24 @@ func run(form *huh.Form, tio IO) error {
 // formModel runs a huh form under bubbletea itself, so the key that
 // ended it is known. huh maps Esc and Ctrl-C to the same abort, and the
 // two differ here: Esc cancels, Ctrl-C interrupts (rc 130). The wrapper
-// records a Ctrl-C press before the form sees it. (The same pattern as
-// the form of `lo use`; one copy stays until both land on main.)
+// records a Ctrl-C press, and an InterruptMsg (an external SIGINT),
+// before the form sees them. (The same pattern as the form of `lo use`;
+// one copy stays until both land on main.)
 type formModel struct {
-	form  *huh.Form
-	ctrlC bool
+	form        *huh.Form
+	interrupted bool
 }
 
 func (m *formModel) Init() tea.Cmd { return m.form.Init() }
 
 func (m *formModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "ctrl+c" {
-		m.ctrlC = true
+	switch v := msg.(type) {
+	case tea.KeyPressMsg:
+		if v.String() == "ctrl+c" {
+			m.interrupted = true
+		}
+	case tea.InterruptMsg:
+		m.interrupted = true
 	}
 	_, cmd := m.form.Update(msg)
 	return m, cmd
@@ -157,8 +163,15 @@ func (m *formModel) run(in io.Reader, out io.Writer) error {
 		opts = append(opts, tea.WithOutput(out))
 	}
 	_, err := tea.NewProgram(m, opts...).Run()
+	return m.ended(err)
+}
+
+// ended maps how the program ended: an interrupt or an aborted form is
+// ErrAborted after Ctrl-C or a SIGINT and ErrCancelled after Esc; any
+// other error is wrapped; nil stays nil.
+func (m *formModel) ended(err error) error {
 	if errors.Is(err, tea.ErrInterrupted) || m.form.State == huh.StateAborted {
-		if m.ctrlC {
+		if m.interrupted {
 			return ErrAborted
 		}
 		return ErrCancelled

@@ -1,6 +1,6 @@
 package initctx
 
-// plan_test.go — the decision layer: the new-project defaults and plan
+// plan_test.go: the decision layer: the new-project defaults and plan
 // per situation, the verb plans, the result line, the next step.
 
 import (

@@ -1,6 +1,6 @@
 package cli
 
-// cmd_init_wizard.go — bare `lo init` (Go-only) and the screens of its
+// cmd_init_wizard.go: bare `lo init` (Go-only) and the screens of its
 // verbs. On a terminal a bare `lo init` has two modes. Without a project
 // here, or in a project without a git repository: the welcome line and
 // the bootstrap screen (every value prefilled; Create, Change details,
@@ -125,7 +125,12 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 			return err
 		}
 		if state.Project == nil {
-			return initReport(step, out)
+			// Only a failed first step leaves no project behind (the
+			// directory field refuses a place Detect cannot reach).
+			if step != nil {
+				return initReport(step, out)
+			}
+			return nil
 		}
 	}
 	return initAbort(loop.Run(state, first), stderr)
@@ -170,10 +175,7 @@ func initReport(err error, out io.Writer) error {
 		}
 		return scaffoldRun(step.Err)
 	}
-	if step == nil && err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 // initInteractive reports whether a verb opens its screen: --plan

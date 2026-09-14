@@ -1,6 +1,6 @@
 package initctx
 
-// loop_test.go — project mode: the list per state, the loop through an
+// loop_test.go: project mode: the list per state, the loop through an
 // action and back with the card refreshed, Cancel and Exit.
 
 import (

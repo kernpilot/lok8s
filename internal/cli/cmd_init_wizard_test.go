@@ -1,6 +1,6 @@
 package cli
 
-// cmd_init_wizard_test.go — bare `lo init` and the screen verbs: the
+// cmd_init_wizard_test.go: bare `lo init` and the screen verbs: the
 // help off a terminal, under CI and with --yes (byte-identical to
 // cmd.Help()); --plan writes nothing and prints the mode's screen as
 // text; the bootstrap (mode 1) and project mode (mode 2), driven through
@@ -681,5 +681,32 @@ func TestInitAbort(t *testing.T) {
 	other := errors.New("boom")
 	if err := initAbort(other, io.Discard); !errors.Is(err, other) {
 		t.Errorf("other error mapped: %v", err)
+	}
+}
+
+// The bootstrap's first step fails (the directory is read-only): no
+// project exists afterwards, so the failed and not-run lines print and
+// the error returns; no panic, no project mode.
+func TestInitBootstrapFirstStepFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	seams := installInitSeams(t, true, "1\n")
+	stdout, _, err := runLo(t, NewRoot(synthProject(t)), "init")
+	if err == nil {
+		t.Fatal("no error after the failed first step")
+	}
+	name := initctx.DefaultName(dir)
+	if !strings.Contains(stdout, "failed: lo init project "+name+" --env mise --cluster "+name+".dev --driver lo\nnot run:\n  git init\n  lo toolchain install --groups core,local\n  lo use "+name+".dev\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "actions") || len(seams.toolchain) != 0 {
+		t.Errorf("project mode or the toolchain after the failed first step:\n%s", stdout)
 	}
 }
