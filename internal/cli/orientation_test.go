@@ -42,6 +42,16 @@ func TestBareLoPipedPrintsTheFullHelp(t *testing.T) {
 	if !strings.Contains(out, "Cluster lifecycle:") || strings.Contains(out, "Everyday commands:") {
 		t.Errorf("bare lo piped: expected the grouped help, got:\n%s", out)
 	}
+	// The usage block is the one the root printed before it had a RunE:
+	// no `lo [flags]` line (rootUsageTemplate), only the command form.
+	if !strings.Contains(out, "Usage:\n  lo [command]\n\nCluster lifecycle:") || strings.Contains(out, "lo [flags]") {
+		t.Errorf("bare lo piped: the usage block changed:\n%s", out)
+	}
+	// A child keeps cobra's default usage (both lines for a runnable group).
+	sec, _, _ := runBare(t, paths, false, "secrets", "--help")
+	if !strings.Contains(sec, "Usage:\n  lo secrets [flags]\n  lo secrets [command]\n") {
+		t.Errorf("lo secrets --help: usage block changed:\n%s", sec)
+	}
 }
 
 func TestBareLoOnATerminalPrintsTheOrientation(t *testing.T) {

@@ -47,7 +47,7 @@ func complete(t *testing.T, paths *config.Paths, words ...string) []string {
 		t.Fatalf("__complete %v: %v\n%s", words, err, errOut.String())
 	}
 	var values []string
-	for _, l := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+	for l := range strings.SplitSeq(strings.TrimRight(out.String(), "\n"), "\n") {
 		if l == "" || strings.HasPrefix(l, ":") {
 			continue
 		}

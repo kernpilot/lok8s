@@ -31,7 +31,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(base)
+	defer func() { _ = os.RemoveAll(base) }()
 	page, err := clidoc.Generate(cli.NewRoot(&config.Paths{Base: base}))
 	if err != nil {
 		return err

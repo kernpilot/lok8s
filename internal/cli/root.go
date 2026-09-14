@@ -183,6 +183,11 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	// Every flag-parse error, on every command, prints in the argsh shape
 	// (cobra walks up to the root for the handler).
 	argshFlagErrors(root)
+	// A runnable root would add `lo [flags]` above `lo [command]` in the
+	// usage block. A bare piped `lo` and `lo --help` keep the block they
+	// printed before the root had a RunE. Children inherit the template
+	// and, having a parent, render exactly cobra's default.
+	root.SetUsageTemplate(strings.Replace(root.UsageTemplate(), "{{if .Runnable}}", "{{if and .Runnable .HasParent}}", 1))
 
 	// Global flags, verbatim from the argsh entrypoint. Shim commands disable
 	// cobra flag parsing and pass argv through untouched, so these exist for

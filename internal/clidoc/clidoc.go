@@ -76,16 +76,15 @@ func gen(cmd *cobra.Command, buf *bytes.Buffer) error {
 // dropInherited removes the inherited-options section from one command's
 // page, fence included.
 func dropInherited(page string) string {
-	start := strings.Index(page, inheritedOptions)
-	if start < 0 {
+	before, rest, found := strings.Cut(page, inheritedOptions)
+	if !found {
 		return page
 	}
-	rest := page[start+len(inheritedOptions):]
-	end := strings.Index(rest, "```\n\n")
-	if end < 0 {
+	_, after, found := strings.Cut(rest, "```\n\n")
+	if !found {
 		return page
 	}
-	return page[:start] + rest[end+len("```\n\n"):]
+	return before + after
 }
 
 // anchor maps cobra's per-command file link (`lo_secrets_set.md`) to the
