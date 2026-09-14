@@ -280,7 +280,7 @@ _stub_secret_plugin() {
   cat > "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret" <<STUB
 #!/usr/bin/env bash
 cat > "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
-printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: %s\n  tls.key: %s\n' "\$(printf FAKECRT | base64)" "\$(printf FAKEKEY | base64)"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: %s\n  tls.key: %s\n' "\$(printf -- '-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n' "\$(printf FAKECRT | base64)" | base64 -w0)" "\$(printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' "\$(printf FAKEKEY | base64)" | base64 -w0)"
 STUB
   chmod +x "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret"
   export KUSTOMIZE_PLUGIN_HOME="${plugin_home}"
@@ -376,6 +376,10 @@ _stub_docker() {
 # _vol_file <vol> <file> — the content of a fake volume entry.
 _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
 
+# _pem <kind> <body> — the PEM block the stubs emit (the read-out accepts
+# only a PEM CERTIFICATE / PEM block pair).
+_pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf '%s' "${2}" | base64)" "${1}"; }
+
 @test "registries_tls_cert: mints into the volume through the io container, scratch store gone" {
   _write_tls_spec true
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
@@ -388,9 +392,9 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
 
   # The pair and the SAN set landed in the volume, nothing under .secrets.
   run _vol_file lok8s-registry-tls tls.crt
-  assert_output "FAKECRT"
+  assert_output "$(_pem CERTIFICATE FAKECRT)"
   run _vol_file lok8s-registry-tls tls.key
-  assert_output "FAKEKEY"
+  assert_output "$(_pem "PRIVATE KEY" FAKEKEY)"
   run _vol_file lok8s-registry-tls .sans
   assert_output --partial "lok8s.local"
   [ ! -e "${BATS_TEST_TMPDIR}/.secrets" ]
@@ -439,7 +443,7 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   assert_output --partial "docker cp lok8s-registry-tls-io:/etc/registry/certs/tls.crt -"
   assert_output --partial "docker cp lok8s-registry-tls-io:/etc/registry/certs/tls.key -"   # presence only
   assert_output --partial "docker cp lok8s-registry-tls-io:/etc/registry/certs/.sans -"
-  [ "${LO_REGISTRY_TLS_READ_CRT:-}" != "FAKEKEY" ]
+  [[ "${LO_REGISTRY_TLS_READ_CRT:-}" != *FAKEKEY* ]]
 }
 
 @test "registries_tls_cert: a volume with tls.crt but no tls.key re-mints; registries refuse it" {
@@ -465,6 +469,32 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   [ -f "${FAKE_VOL}/volumes/lok8s-registry-tls/tls.key" ]
   run cat "${DOCKER_LOG}"
   refute_output --partial "docker volume create"
+}
+
+@test "registries_tls_cert: an empty, truncated or non-PEM entry in the volume counts as missing and re-mints" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
+  local vol="${FAKE_VOL}/volumes/lok8s-registry-tls" case
+  for case in "tls.crt:" "tls.crt:garbage, not a certificate" "tls.crt:$(_pem 'PRIVATE KEY' X)" "tls.key:" "tls.key:garbage"; do
+    lo::registries_tls_cert test.lok8s.dev
+    printf '%s' "${case#*:}" > "${vol}/${case%%:*}"
+    LO_REGISTRY_TLS_CRT=""
+    run lo::registry_tls_read lok8s-registry-tls
+    [ "${status}" -eq 1 ] || { echo "case ${case%%:*}: read-out accepted the damaged pair (rc ${status})"; false; }
+    run lo::registries test.lok8s.dev "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+    assert_failure
+    assert_output --partial "holds no complete tls.crt + tls.key pair"
+    rm -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
+    run lo::registries_tls_cert test.lok8s.dev
+    assert_success
+    [ -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ] || { echo "case ${case%%:*}: no re-mint"; false; }
+    run _vol_file lok8s-registry-tls tls.crt
+    assert_output "$(_pem CERTIFICATE FAKECRT)"
+  done
 }
 
 @test "registries_tls_cert: a docker failure on the read-out is surfaced, not reported as 'no cert'" {
@@ -565,17 +595,17 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   _stub_docker
   local legacy="${BATS_TEST_TMPDIR}/.secrets/tls/registries"
   mkdir -p "${legacy}"
-  printf 'LEGACYCRT' > "${legacy}/tls.crt"
-  printf 'LEGACYKEY' > "${legacy}/tls.key"
+  _pem CERTIFICATE LEGACYCRT > "${legacy}/tls.crt"
+  _pem "PRIVATE KEY" LEGACYKEY > "${legacy}/tls.key"
   lo::registry_tls_sans > "${legacy}/.sans"
 
   run lo::registries_tls_cert test.lok8s.dev
   assert_success
   [ ! -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ]   # nothing minted
   run _vol_file lok8s-registry-tls tls.crt
-  assert_output "LEGACYCRT"
+  assert_output "$(_pem CERTIFICATE LEGACYCRT)"
   run _vol_file lok8s-registry-tls tls.key
-  assert_output "LEGACYKEY"
+  assert_output "$(_pem "PRIVATE KEY" LEGACYKEY)"
   [ -f "${legacy}/tls.key" ]                              # the files stay
   run lo::registries_tls_cert test.lok8s.dev
   assert_success
@@ -595,7 +625,7 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   _stub_docker
   local legacy="${BATS_TEST_TMPDIR}/.secrets/tls/registries"
   mkdir -p "${legacy}"
-  printf 'LEGACYCRT' > "${legacy}/tls.crt"
+  _pem CERTIFICATE LEGACYCRT > "${legacy}/tls.crt"
 
   run lo::registries_tls_cert test.lok8s.dev
   assert_success
@@ -603,7 +633,7 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   [ "$(grep -c '\[warn\]' <<<"${output}")" -eq 1 ]
   [ -f "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ]
   run _vol_file lok8s-registry-tls tls.crt
-  assert_output "FAKECRT"
+  assert_output "$(_pem CERTIFICATE FAKECRT)"
   run grep -c '^docker cp -L ' "${DOCKER_LOG}"
   assert_output "0"
 }
@@ -616,8 +646,8 @@ _vol_file() { cat "${FAKE_VOL}/volumes/${1}/${2}"; }
   _stub_docker
   local legacy="${BATS_TEST_TMPDIR}/.secrets/tls/registries"
   mkdir -p "${legacy}"
-  printf 'LEGACYCRT' > "${legacy}/tls.crt"
-  printf 'LEGACYKEY' > "${legacy}/tls.key"
+  _pem CERTIFICATE LEGACYCRT > "${legacy}/tls.crt"
+  _pem "PRIVATE KEY" LEGACYKEY > "${legacy}/tls.key"
   lo::registry_tls_sans > "${legacy}/.sans"
 
   run lo::registries_tls_cert test.lok8s.dev
@@ -840,7 +870,7 @@ STUB
   assert_line --index 3 "Next: run 'lo up' in each cluster that uses the set. It picks the certificate up there."
   refute_output --partial "restarted lok8s-registry-io-docker"
   run _vol_file lok8s-registry-tls tls.crt
-  assert_output "RENEWED"
+  assert_output "$(_pem CERTIFICATE RENEWED)"
   run cat "${DOCKER_LOG}"
   refute_output --partial "docker volume create"
   assert_output --partial "docker restart lok8s-registry-build"

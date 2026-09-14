@@ -354,47 +354,35 @@ func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, 
 }
 
 // registryTLSRead returns tls.crt and .sans from the volume. ok is false
-// when the volume holds no complete pair: tls.crt is read, tls.key is
-// checked for presence only (its bytes are discarded, never kept), and a
-// half-populated volume (one of the two missing) counts as empty so the
-// caller mints again. err is a docker failure (the throwaway container
-// could not be created); the error line is already on errOut.
+// when the volume holds no complete pair: tls.crt must decode to a PEM
+// CERTIFICATE block and tls.key to a PEM block (its bytes are checked and
+// discarded, never kept), so an empty, truncated or non-PEM file (a crash
+// mid `docker cp`) counts as missing and the caller mints again. err is a
+// docker failure (the throwaway container could not be created); the
+// error line is already on errOut.
 func (d *Driver) registryTLSRead(ctx context.Context, vol string, errOut io.Writer) (crt, sans []byte, ok bool, err error) {
 	err = d.withTLSVolume(ctx, vol, errOut, func(ctr string) error {
-		var hasCrt, hasKey bool
+		var hasCrt bool
 		crt, hasCrt = d.volumeRead(ctx, ctr, "tls.crt")
-		hasKey = d.volumeHas(ctx, ctr, "tls.key")
+		key, hasKey := d.volumeRead(ctx, ctr, "tls.key")
 		sans, _ = d.volumeRead(ctx, ctr, ".sans")
-		ok = hasCrt && hasKey
+		ok = hasCrt && hasKey && pemBlockIs(crt, "CERTIFICATE") && pemBlockIs(key, "")
 		return nil
 	})
 	if err != nil {
 		return nil, nil, false, err
 	}
+	if !ok {
+		crt = nil
+	}
 	return crt, sans, ok, nil
 }
 
-// volumeHas reports whether the mounted volume holds a regular file name:
-// the tar stream's headers are scanned, its bodies discarded.
-func (d *Driver) volumeHas(ctx context.Context, ctr, name string) bool {
-	var out bytes.Buffer
-	err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name: "docker", Args: []string{"cp", ctr + ":" + RegistryTLSMount + "/" + name, "-"},
-		Stdout: &out, Stderr: io.Discard,
-	})
-	if err != nil {
-		return false
-	}
-	tr := tar.NewReader(bytes.NewReader(out.Bytes()))
-	for {
-		h, err := tr.Next()
-		if err != nil {
-			return false
-		}
-		if h.Typeflag == tar.TypeReg {
-			return true
-		}
-	}
+// pemBlockIs reports whether data starts with a PEM block, of the given
+// type when typ is not empty.
+func pemBlockIs(data []byte, typ string) bool {
+	block, _ := pem.Decode(data)
+	return block != nil && (typ == "" || block.Type == typ)
 }
 
 // withTLSVolume runs fn against a throwaway container that mounts vol at
@@ -427,7 +415,13 @@ func (d *Driver) volumeRead(ctx context.Context, ctr, name string) ([]byte, bool
 	return tarFirstFile(out.Bytes())
 }
 
-// tarFirstFile returns the first regular entry of a tar stream.
+// tarFileLimit bounds one volume entry (a PEM pair is a few KiB); an
+// entry above it is refused, never truncated.
+const tarFileLimit = 1 << 20
+
+// tarFirstFile returns the first regular entry of a tar stream. ok is
+// false for an empty entry (a crash mid `docker cp` leaves one), an entry
+// above tarFileLimit, or a body shorter than its header says.
 func tarFirstFile(stream []byte) ([]byte, bool) {
 	tr := tar.NewReader(bytes.NewReader(stream))
 	for {
@@ -438,8 +432,11 @@ func tarFirstFile(stream []byte) ([]byte, bool) {
 		if h.Typeflag != tar.TypeReg {
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(tr, 1<<20))
-		if err != nil {
+		if h.Size <= 0 || h.Size > tarFileLimit {
+			return nil, false
+		}
+		data := make([]byte, h.Size)
+		if _, err := io.ReadFull(tr, data); err != nil {
 			return nil, false
 		}
 		return data, true

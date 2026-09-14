@@ -76,7 +76,7 @@ func stubSecretPlugin(t *testing.T, runner *fakeRunner, base string) (pluginBin 
 	os.Chmod(pluginBin, 0o755)
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", pluginHome)
 
-	rec = &pluginCall{Crt: "FAKECRT", Key: "FAKEKEY"}
+	rec = &pluginCall{Crt: fakePEM("CERTIFICATE", "FAKECRT"), Key: fakePEM("PRIVATE KEY", "FAKEKEY")}
 	inner := runner.handler
 	runner.handler = func(c execx.Cmd) error {
 		if c.Name != pluginBin {
@@ -110,6 +110,12 @@ func scratchDirs(t *testing.T, p *config.Paths) []string {
 		}
 	}
 	return out
+}
+
+// fakePEM is a PEM block of the given kind around body: the read-out only
+// accepts a PEM CERTIFICATE / PEM block pair, so the stubs emit these.
+func fakePEM(kind, body string) string {
+	return "-----BEGIN " + kind + "-----\n" + base64.StdEncoding.EncodeToString([]byte(body)) + "\n-----END " + kind + "-----\n"
 }
 
 func envValue(env []string, key string) (string, bool) {
@@ -154,7 +160,7 @@ func TestRegistriesTLSCertMintsIntoTheVolume(t *testing.T) {
 
 	// The volume is the only store: the extracted pair and the SAN set
 	// landed there, nothing under <Base>/.secrets.
-	for file, want := range map[string]string{"tls.crt": "FAKECRT", "tls.key": "FAKEKEY"} {
+	for file, want := range map[string]string{"tls.crt": fakePEM("CERTIFICATE", "FAKECRT"), "tls.key": fakePEM("PRIVATE KEY", "FAKEKEY")} {
 		if got, ok := fd.volumeFile(tlsVol, file); !ok || got != want {
 			t.Fatalf("volume %s/%s = %q, %v; want %q", tlsVol, file, got, ok, want)
 		}
@@ -220,7 +226,7 @@ func TestRegistriesTLSCertUpToDateSkipsTheMint(t *testing.T) {
 			t.Fatalf("%q not read from the volume:\n%s", want, strings.Join(fd.log, "\n"))
 		}
 	}
-	if string(d.tlsCrt) != "FAKECRT" {
+	if string(d.tlsCrt) != fakePEM("CERTIFICATE", "FAKECRT") {
 		t.Fatalf("cert read from the volume = %q", d.tlsCrt)
 	}
 }
@@ -335,7 +341,7 @@ func TestRegistriesTLSCertIncompleteLegacyPairWarnsAndMints(t *testing.T) {
 	d, runner, fd, errBuf, p, _ := tlsDriver(t, "true")
 	_, rec := stubSecretPlugin(t, runner, p.Base)
 	legacy := filepath.Join(p.Base, ".secrets", "tls", "registries")
-	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), "LEGACYCRT")
+	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), fakePEM("CERTIFICATE", "LEGACYCRT"))
 
 	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
 		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
@@ -347,7 +353,7 @@ func TestRegistriesTLSCertIncompleteLegacyPairWarnsAndMints(t *testing.T) {
 	if rec.Manifest == "" {
 		t.Fatal("no fresh mint after the incomplete pair")
 	}
-	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != "FAKECRT" {
+	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != fakePEM("CERTIFICATE", "FAKECRT") {
 		t.Fatalf("volume tls.crt = %q, want the fresh mint", got)
 	}
 	if slices.ContainsFunc(fd.log, func(l string) bool { return strings.HasPrefix(l, "docker cp -L ") }) {
@@ -364,7 +370,7 @@ func TestRegistriesTLSCertSANChangeRemints(t *testing.T) {
 	// The volume was minted for another SAN set (a mirror added since).
 	os.WriteFile(filepath.Join(fd.volumePath(tlsVol), ".sans"), []byte("lok8s.local\n"), 0o644)
 	rec.Manifest = ""
-	rec.Crt = "FAKECRT2"
+	rec.Crt = fakePEM("CERTIFICATE", "FAKECRT2")
 	fd.log = nil
 
 	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
@@ -376,7 +382,7 @@ func TestRegistriesTLSCertSANChangeRemints(t *testing.T) {
 	if slices.Contains(fd.log, "docker volume create "+tlsVol) {
 		t.Fatal("existing volume re-created on a re-mint")
 	}
-	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != "FAKECRT2" {
+	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != fakePEM("CERTIFICATE", "FAKECRT2") {
 		t.Fatalf("volume tls.crt = %q after the re-mint", got)
 	}
 }
@@ -421,8 +427,8 @@ func TestRegistriesTLSCertImportsTheLegacyDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy := filepath.Join(p.Base, ".secrets", "tls", "registries")
-	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), "LEGACYCRT")
-	testutil.WriteFile(t, filepath.Join(legacy, "tls.key"), "LEGACYKEY")
+	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), fakePEM("CERTIFICATE", "LEGACYCRT"))
+	testutil.WriteFile(t, filepath.Join(legacy, "tls.key"), fakePEM("PRIVATE KEY", "LEGACYKEY"))
 	testutil.WriteFile(t, filepath.Join(legacy, ".sans"), strings.Join(registryTLSSANs(rf), "\n")+"\n")
 
 	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
@@ -431,7 +437,7 @@ func TestRegistriesTLSCertImportsTheLegacyDirectory(t *testing.T) {
 	if rec.Manifest != "" {
 		t.Fatal("the generator ran although the legacy pair was imported")
 	}
-	for file, want := range map[string]string{"tls.crt": "LEGACYCRT", "tls.key": "LEGACYKEY"} {
+	for file, want := range map[string]string{"tls.crt": fakePEM("CERTIFICATE", "LEGACYCRT"), "tls.key": fakePEM("PRIVATE KEY", "LEGACYKEY")} {
 		if got, ok := fd.volumeFile(tlsVol, file); !ok || got != want {
 			t.Fatalf("imported %s = %q, %v; want %q", file, got, ok, want)
 		}
@@ -453,7 +459,7 @@ func TestRegistriesTLSCertImportsTheLegacyDirectory(t *testing.T) {
 	if !fsutil.FileExists(filepath.Join(legacy, "tls.key")) {
 		t.Fatal("the legacy files were removed")
 	}
-	if string(d.tlsCrt) != "LEGACYCRT" {
+	if string(d.tlsCrt) != fakePEM("CERTIFICATE", "LEGACYCRT") {
 		t.Fatalf("cert after import = %q", d.tlsCrt)
 	}
 
@@ -472,8 +478,8 @@ func TestRegistriesTLSCertImportWithStaleSANsRemints(t *testing.T) {
 	d, runner, fd, errBuf, p, _ := tlsDriver(t, "true")
 	_, rec := stubSecretPlugin(t, runner, p.Base)
 	legacy := filepath.Join(p.Base, ".secrets", "tls", "registries")
-	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), "LEGACYCRT")
-	testutil.WriteFile(t, filepath.Join(legacy, "tls.key"), "LEGACYKEY")
+	testutil.WriteFile(t, filepath.Join(legacy, "tls.crt"), fakePEM("CERTIFICATE", "LEGACYCRT"))
+	testutil.WriteFile(t, filepath.Join(legacy, "tls.key"), fakePEM("PRIVATE KEY", "LEGACYKEY"))
 	// No .sans: the SAN set the legacy pair was minted for is unknown.
 
 	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
@@ -482,7 +488,7 @@ func TestRegistriesTLSCertImportWithStaleSANsRemints(t *testing.T) {
 	if rec.Manifest == "" {
 		t.Fatal("an import without a SAN record must re-mint")
 	}
-	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != "FAKECRT" {
+	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != fakePEM("CERTIFICATE", "FAKECRT") {
 		t.Fatalf("volume tls.crt = %q, want the fresh mint", got)
 	}
 	if n := strings.Count(strings.Join(fd.log, "\n"), "docker volume create "+tlsVol); n != 1 {
@@ -528,7 +534,7 @@ func TestRegistriesMountTheVolume(t *testing.T) {
 
 	// A new cert (renewed, or re-minted for a new SAN set) changes the
 	// hash: the containers are recreated with it.
-	rec.Crt = "FAKECRT2"
+	rec.Crt = fakePEM("CERTIFICATE", "FAKECRT2")
 	os.WriteFile(filepath.Join(fd.volumePath(tlsVol), ".sans"), []byte("stale\n"), 0o644)
 	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
 		t.Fatal(err)
@@ -740,7 +746,7 @@ func TestRegistryTLSRenewRemintsAndRestartsTheSet(t *testing.T) {
 	}
 	os.Remove(fd.containerPath("lok8s-registry-io-docker")) // one container of the set is absent
 	rec.Manifest = ""
-	rec.Crt = "RENEWED"
+	rec.Crt = fakePEM("CERTIFICATE", "RENEWED")
 	fd.log = nil
 
 	var out bytes.Buffer
@@ -750,7 +756,7 @@ func TestRegistryTLSRenewRemintsAndRestartsTheSet(t *testing.T) {
 	if rec.Manifest == "" {
 		t.Fatal("renew did not mint")
 	}
-	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != "RENEWED" {
+	if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != fakePEM("CERTIFICATE", "RENEWED") {
 		t.Fatalf("volume tls.crt = %q after renew", got)
 	}
 	if slices.Contains(fd.log, "docker volume create "+tlsVol) {
@@ -833,6 +839,48 @@ func TestCleanupRemovesTheTLSVolume(t *testing.T) {
 	}
 }
 
+// An empty, truncated or non-PEM entry in the volume (a crash mid
+// `docker cp`) is no certificate: the read-out reports no pair and the
+// mint runs again.
+func TestRegistriesTLSReadRejectsDamagedEntries(t *testing.T) {
+	for name, damage := range map[string]map[string]string{
+		"empty crt":    {"tls.crt": ""},
+		"non-PEM crt":  {"tls.crt": "garbage, not a certificate"},
+		"key type crt": {"tls.crt": fakePEM("PRIVATE KEY", "X")},
+		"empty key":    {"tls.key": ""},
+		"non-PEM key":  {"tls.key": "garbage"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, runner, fd, errBuf, p, cy := tlsDriver(t, "true")
+			_, rec := stubSecretPlugin(t, runner, p.Base)
+			if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+				t.Fatal(err)
+			}
+			for f, content := range damage {
+				os.WriteFile(filepath.Join(fd.volumePath(tlsVol), f), []byte(content), 0o644)
+			}
+			d.tlsCrt = nil
+			if _, _, ok, err := d.registryTLSRead(t.Context(), tlsVol, errBuf); err != nil || ok {
+				t.Fatalf("read-out accepted the damaged pair: ok=%v err=%v", ok, err)
+			}
+			var out, vErr bytes.Buffer
+			if err := d.registries(t.Context(), &out, &vErr, tlsDomain, cy); err == nil || !strings.Contains(vErr.String(), "holds no complete tls.crt + tls.key pair") {
+				t.Fatalf("registries on a damaged pair: err=%v\n%s", err, vErr.String())
+			}
+			rec.Manifest = ""
+			if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Manifest == "" {
+				t.Fatal("the damaged pair did not re-mint")
+			}
+			if got, _ := fd.volumeFile(tlsVol, "tls.crt"); got != fakePEM("CERTIFICATE", "FAKECRT") {
+				t.Fatalf("volume tls.crt after the re-mint = %q", got)
+			}
+		})
+	}
+}
+
 func TestTarFirstFile(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
@@ -849,5 +897,31 @@ func TestTarFirstFile(t *testing.T) {
 	}
 	if _, ok := tarFirstFile([]byte("not a tar")); ok {
 		t.Fatal("garbage reported a file")
+	}
+	// An empty entry is not a file.
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	tw.WriteHeader(&tar.Header{Name: "tls.crt", Mode: 0o644, Size: 0, Typeflag: tar.TypeReg})
+	tw.Close()
+	if _, ok := tarFirstFile(buf.Bytes()); ok {
+		t.Fatal("an empty entry reported a file")
+	}
+	// A body shorter than its header (a stream cut mid-copy) is not a file.
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	tw.WriteHeader(&tar.Header{Name: "tls.crt", Mode: 0o644, Size: 10, Typeflag: tar.TypeReg})
+	tw.Write([]byte("short"))
+	if _, ok := tarFirstFile(buf.Bytes()); ok {
+		t.Fatal("a truncated entry reported a file")
+	}
+	// An entry above the limit is refused, never truncated.
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	big := make([]byte, tarFileLimit+1)
+	tw.WriteHeader(&tar.Header{Name: "tls.crt", Mode: 0o644, Size: int64(len(big)), Typeflag: tar.TypeReg})
+	tw.Write(big)
+	tw.Close()
+	if _, ok := tarFirstFile(buf.Bytes()); ok {
+		t.Fatal("an oversized entry reported a file")
 	}
 }

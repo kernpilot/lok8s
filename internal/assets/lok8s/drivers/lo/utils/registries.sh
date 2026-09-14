@@ -146,26 +146,30 @@ lo::registry_tls_volume_read() {
   printf '%s\001' "${data}"
 }
 
-# lo::registry_tls_volume_has <ctr> <name> — whether the mounted volume
-# holds a regular file: the tar stream's entry list only, no extraction (the
-# key's bytes are discarded, never kept).
-lo::registry_tls_volume_has() {
-  local ctr="${1}" name="${2}" entries
-  entries=$(docker cp "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" - 2>/dev/null | tar -tf - 2>/dev/null) || return 1
-  [[ -n "${entries}" ]]
+# lo::registry_tls_volume_pem <ctr> <name> [type] — the file read from the
+# mounted volume, only when it is a PEM block (of the given type when set):
+# an empty, truncated or non-PEM file (a crash mid `docker cp`) counts as
+# missing. Prints the bytes + the \001 sentinel like
+# lo::registry_tls_volume_read.
+lo::registry_tls_volume_pem() {
+  local ctr="${1}" name="${2}" type="${3:-}" data
+  data=$(lo::registry_tls_volume_read "${ctr}" "${name}") || return 1
+  [[ "${data%$'\001'}" == "-----BEGIN ${type}"* ]] || return 1
+  printf '%s' "${data}"
 }
 
 # lo::registry_tls_read <vol> — tls.crt and .sans from the volume into
 # LO_REGISTRY_TLS_READ_CRT / LO_REGISTRY_TLS_READ_SANS. Returns 1 when the
-# volume holds no complete pair (tls.crt read, tls.key checked for presence;
-# a half-populated volume counts as empty so the caller mints again), 2 when
-# docker failed (the error line is already printed).
+# volume holds no complete pair (tls.crt must be a PEM CERTIFICATE, tls.key
+# a PEM block; the key's bytes are checked and discarded, never kept; a
+# half-populated or damaged volume counts as empty so the caller mints
+# again), 2 when docker failed (the error line is already printed).
 lo::registry_tls_read() {
   LO_REGISTRY_TLS_READ_CRT="" LO_REGISTRY_TLS_READ_SANS=""
   _lo_registry_tls_read_files() {
     local ctr="${1}" crt sans has_crt=0 has_key=0
-    if crt=$(lo::registry_tls_volume_read "${ctr}" tls.crt); then has_crt=1; fi
-    if lo::registry_tls_volume_has "${ctr}" tls.key; then has_key=1; fi
+    if crt=$(lo::registry_tls_volume_pem "${ctr}" tls.crt "CERTIFICATE"); then has_crt=1; fi
+    if lo::registry_tls_volume_pem "${ctr}" tls.key >/dev/null; then has_key=1; fi
     sans=$(lo::registry_tls_volume_read "${ctr}" .sans) || sans=$'\001'
     (( has_crt && has_key )) || return 1
     LO_REGISTRY_TLS_READ_CRT="${crt%$'\001'}"
