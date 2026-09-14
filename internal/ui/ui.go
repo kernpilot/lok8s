@@ -49,6 +49,43 @@ func (e *handledError) Is(target error) bool { return target == ErrHandled }
 func prefix(w io.Writer, code, tag, format string, a ...any) {
 	fmt.Fprintf(w, For(w).Paint(code, tag)+" "+format+"\n", a...)
 }
+const (
+	green  = "\033[0;32m"
+	red    = "\033[0;31m"
+	yellow = "\033[0;33m"
+	reset  = "\033[0m"
+	bold   = "\033[1m"
+	dim    = "\033[2m"
+	// The doctor's marker colours (`✓` green, `!` yellow): the plain SGR
+	// colour, no intensity reset, so a card row can carry one inside a
+	// dim or bold run.
+	markGreen  = "\033[32m"
+	markYellow = "\033[33m"
+)
+
+// Paint applies the CLI's SGR styles when true and returns the text
+// unchanged when false (stdout is not a terminal: --plan in a pipe, CI,
+// a test). The card of `lo init` and the run header share these styles.
+type Paint bool
+
+// Bold is the emphasis of a heading (the project name of a card).
+func (p Paint) Bold(s string) string { return p.wrap(bold, s) }
+
+// Dim is the muted run (a key column, an equivalent command line).
+func (p Paint) Dim(s string) string { return p.wrap(dim, s) }
+
+// Green is the doctor's `✓` colour (the accent every `lo` form uses).
+func (p Paint) Green(s string) string { return p.wrap(markGreen, s) }
+
+// Yellow is the doctor's `!` colour (a row the user can act on).
+func (p Paint) Yellow(s string) string { return p.wrap(markYellow, s) }
+
+func (p Paint) wrap(code, s string) string {
+	if !p || s == "" {
+		return s
+	}
+	return code + s + reset
+}
 
 // Debug writes a [debug] line to stderr when DEBUG is set (bash: debug()).
 func Debug(format string, a ...any) {

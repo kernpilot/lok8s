@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -25,7 +26,6 @@ import (
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
-	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 // Situation is one of the five conversations `lo init` can have.
@@ -101,16 +101,22 @@ func DetectTerminal(stdin, stdout *os.File, yes bool) Terminal {
 type Git struct {
 	// Available is whether git ran at all.
 	Available bool
-	// Root is the repository root ("" = not a repository).
+	// Root is the repository root ("" = not a repository), in the path
+	// form of State.Cwd (git resolves symlinks; the card prints one form).
 	Root string
 	// AtRoot is whether cwd is the repository root.
 	AtRoot bool
-	// Dirty is whether `git status --porcelain` printed anything.
-	Dirty bool
+	// Branch is the current branch ("" = detached HEAD).
+	Branch string
+	// Uncommitted counts the paths `git status --porcelain` lists.
+	Uncommitted int
 	// Submodule is whether Root carries a `.git` FILE (a submodule
 	// checkout, or a worktree) rather than a directory.
 	Submodule bool
 }
+
+// Dirty is whether the working tree has uncommitted changes.
+func (g Git) Dirty() bool { return g.Uncommitted > 0 }
 
 // Domain is one directory under clusters/ that carries a spec.
 type Domain struct {
@@ -140,11 +146,12 @@ type Project struct {
 	// EnvFile is the environment file present: "mise" (mise.toml),
 	// "direnv" (.envrc), "" (none). With both present, mise.
 	EnvFile string
-	// BYAML is whether .bin/b.yaml exists; BYAMLMarker whether `lo
-	// toolchain install` wrote it.
-	BYAML, BYAMLMarker bool
-	// ToolsMissing lists the pinned tools that do not resolve under the
-	// project (b, kustomize, the two exec plugins); nil = all present.
+	// BYAML is whether .bin/b.yaml exists.
+	BYAML bool
+	// Tools counts the pinned tools: b itself plus every `binaries:`
+	// entry of .bin/b.yaml. ToolsMissing lists the ones that do not
+	// resolve under the project (by name); nil = all present.
+	Tools        int
 	ToolsMissing []string
 	// BashTree is whether Root/.lok8s/lo exists (an ejected or vendored
 	// bash tree).
@@ -230,7 +237,9 @@ func Detect(ctx context.Context, cwd string, r execx.Runner) (State, error) {
 	return s, nil
 }
 
-// detectGit runs the two git reads through r.
+// detectGit runs the three git reads through r: the root, the branch
+// (symbolic-ref, so an unborn branch still has a name and a detached
+// HEAD reads as none) and the porcelain status.
 func detectGit(ctx context.Context, cwd string, r execx.Runner) Git {
 	g := Git{}
 	if r == nil {
@@ -250,15 +259,42 @@ func detectGit(ctx context.Context, cwd string, r execx.Runner) Git {
 	if root == "" {
 		return g
 	}
-	g.Root = root
+	g.Root = cwdForm(cwd, root)
 	g.AtRoot = samePath(root, cwd)
 	if info, err := os.Lstat(filepath.Join(root, ".git")); err == nil && !info.IsDir() {
 		g.Submodule = true
 	}
+	if out, err := execx.Output(ctx, r, execx.Cmd{Name: "git", Args: []string{"symbolic-ref", "--short", "-q", "HEAD"}, Dir: cwd}); err == nil {
+		g.Branch = strings.TrimSpace(string(out))
+	}
 	if out, err := execx.Output(ctx, r, execx.Cmd{Name: "git", Args: []string{"status", "--porcelain"}, Dir: cwd}); err == nil {
-		g.Dirty = strings.TrimSpace(string(out)) != ""
+		g.Uncommitted = len(strings.Split(strings.TrimRight(string(out), "\n"), "\n"))
+		if strings.TrimSpace(string(out)) == "" {
+			g.Uncommitted = 0
+		}
 	}
 	return g
+}
+
+// cwdForm rewrites root (a path git printed, symlinks resolved) into the
+// form of cwd (the path the user typed): the same relative walk from
+// the resolved cwd, re-rooted on the typed one. root unchanged when the
+// two forms cannot be related.
+func cwdForm(cwd, root string) string {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil || resolved == cwd {
+		return root
+	}
+	rel, err := filepath.Rel(resolved, root)
+	if err != nil {
+		return root
+	}
+	typed := filepath.Join(cwd, rel)
+	// A symlink below the root breaks the walk: keep git's form then.
+	if back, err := filepath.EvalSymlinks(typed); err != nil || back != root {
+		return root
+	}
+	return typed
 }
 
 // samePath compares two paths with symlinks resolved where possible.
@@ -292,8 +328,7 @@ func detectProject(root, cwd string) *Project {
 	}
 	byaml := filepath.Join(root, ".bin", "b.yaml")
 	p.BYAML = fsutil.FileExists(byaml)
-	p.BYAMLMarker = p.BYAML && toolchain.HasMarker(byaml)
-	p.ToolsMissing = missingTools(root)
+	p.Tools, p.ToolsMissing = pinnedTools(byaml)
 	p.BashTree = fsutil.FileExists(filepath.Join(root, ".lok8s", "lo"))
 	impl, err := config.LoadImplementation(root)
 	p.Implementation = impl.Default
@@ -365,22 +400,51 @@ func listDomains(clusters string) []Domain {
 	return out
 }
 
-// missingTools lists the pinned tools that do not resolve under root: b
-// and kustomize in .bin, the two exec plugins under .kustomize. A
-// filesystem check only (no probe): the doctor sections verify versions.
-func missingTools(root string) []string {
-	bin := filepath.Join(root, ".bin")
-	home := filepath.Join(root, ".kustomize")
+// pinnedTools counts the toolchain byaml pins and lists the entries that
+// do not resolve: b itself (<bin>/b), then every `binaries:` entry at the
+// path b installs it to — `file:` relative to the b.yaml directory, else
+// <bin>/<alias or the last segment of the key>. A filesystem check only
+// (no probe): `lo toolchain doctor` verifies versions. Without a b.yaml
+// nothing is pinned: 0, nil.
+func pinnedTools(byaml string) (int, []string) {
+	raw, err := os.ReadFile(byaml)
+	if err != nil {
+		return 0, nil
+	}
+	var doc struct {
+		Binaries map[string]*struct {
+			Alias string `yaml:"alias"`
+			File  string `yaml:"file"`
+		} `yaml:"binaries"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return 0, nil
+	}
+	bin := filepath.Dir(byaml)
+	type pin struct{ name, path string }
+	pins := []pin{{"b", filepath.Join(bin, "b")}}
+	keys := make([]string, 0, len(doc.Binaries))
+	for k := range doc.Binaries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		e := doc.Binaries[k]
+		name := path.Base(k)
+		if e != nil && e.Alias != "" {
+			name = e.Alias
+		}
+		file := filepath.Join(bin, name)
+		if e != nil && e.File != "" {
+			file = filepath.Join(bin, filepath.FromSlash(e.File))
+		}
+		pins = append(pins, pin{name, file})
+	}
 	var missing []string
-	for _, t := range []struct{ name, path string }{
-		{"b", filepath.Join(bin, "b")},
-		{"kustomize", filepath.Join(bin, "kustomize")},
-		{"khelm ChartRenderer", filepath.Join(home, filepath.FromSlash(toolchain.ChartRendererPluginRel))},
-		{"secrets.lok8s.dev Secret", filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))},
-	} {
+	for _, t := range pins {
 		if !fsutil.IsExecutable(t.path) {
 			missing = append(missing, t.name)
 		}
 	}
-	return missing
+	return len(pins), missing
 }

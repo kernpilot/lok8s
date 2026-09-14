@@ -205,6 +205,8 @@ lo init test [--path <dir>] [--force]
 
 **Bare `lo init`** first detects where you stand, then asks. On a terminal (stdin and stdout are both a TTY, `CI` is unset, no `--yes`) it runs a wizard. The wizard prints a state card and asks the questions the situation calls for. Then it prints a summary of the files it will write and the commands it will run. It writes nothing before you confirm. Off a terminal, under `CI`, or with `--yes`, it prints this help and exits 0, as it always did.
 
+The card has the layout of the `lo up` header: one row per fact, the key on the left, the values joined with `·`. The first row is the project (or, outside a project, the directory): its name, the implementation, the branch and the count of uncommitted paths. The next rows are the clusters (grouped by driver, the active domain first), the toolchain (`.bin/b.yaml` and the count of pinned tools, or the count of missing ones), the environment file (and the bash tree, when present), `services.yaml` and `tests/`. A row that starts with `!` ends with the command that fixes it. A path is printed only when the working directory is not the project root (`directory`, relative to the root) or the repository root is not the project root (`repository`). On a terminal the keys are dim and the `!` is yellow; off a terminal (`--plan` in a pipe) the card is plain text.
+
 Every answer has a flag twin on one of the subcommands below: `lo init project --env`, `--cluster`, `--driver`, `--implementation`, `lo init service <name>`, `lo init test`, `lo toolchain install --groups`, `lo assets eject bash`, `lo use <domain>`. The wizard fills the same options and calls the same functions. The summary prints the equivalent command lines, so a script can reproduce a run without the conversation. The wizard never overwrites an existing file, and a cluster spec that exists is listed as "keep". When a step fails, the wizard prints the failed command and the commands not run, so you can continue by hand.
 
 The five situations:
@@ -214,18 +216,18 @@ The five situations:
 | An empty directory (a `.git` entry does not count) | The welcome: project here, `git init` (when git is installed and there is no repository), the environment file, the first cluster spec (domain and driver), the toolchain and its groups, `lo use` for the new domain |
 | Inside a git repository, below its root, no project | The same, with the git root as the suggested directory and the environment file the root already has |
 | A non-empty directory without a project (no git, or at the git root) | What it sees, then the same with here or a subdirectory as the target, and `git init` when there is no repository |
-| A project root | The status card (the project, git, clusters and the active domain, the environment file, the toolchain, the implementation, plus the doctor's domain and toolchain sections), then a menu: add a cluster spec, add a service, add the test suite, add an environment file, install the toolchain, switch the implementation, or nothing |
+| A project root | The card, then a menu (`Add to <project>`): a cluster spec, a service, the test suite, an environment file, the toolchain, the implementation switch; nothing selected ends the run after the card |
 | Inside a project (a subdirectory, a service directory, a submodule under the umbrella project) | The card and the menu, plus "add this service to `services.yaml`" in a service directory (a kind-less `lok8s.yaml`) |
 
 The project root is the nearest `clusters/` directory or `kind: Project` `lok8s.yaml` above the working directory (the same walk every command uses); an exported `PATH_BASE` does not move it, the wizard acts where you stand. A service directory below the root keeps the umbrella project as the root: `lo init` in `services/api/` offers to register `./services/api`.
 
 | Flag | Description |
 |------|-------------|
-| `--plan` | Print the state card and the commands the defaults would run (or, in a project, the menu with its commands), then exit 0. Writes nothing and works off a terminal. |
+| `--plan` | Print the state card (the same card the wizard prints) and the commands the defaults would run (or, in a project, the menu with its commands), then exit 0. Writes nothing and works off a terminal. |
 | `--yes`, `-y` | Never ask: print the help instead of the wizard (scripts, CI). |
 | `--dry-run`, `-n` | Run the wizard up to the summary and stop; writes nothing. Off the wizard (no terminal, `CI`, `--yes`) there is no conversation to stop, so it prints the plan like `--plan`. |
 
-The summary lists one line per step and the commands to run instead; when a step uses the network (the toolchain), the confirmation says so. Leaving the form (Ctrl-C, Esc) writes nothing and exits 1.
+The summary lists one line per step and the commands to run instead; when a step uses the network (the toolchain), the confirmation says so. Leaving the form (Ctrl-C, Esc) writes nothing and exits 1. The forms use one theme: the selection cursor and the chosen options in the green of `lo doctor`'s `✓`, no borders.
 
 **`lo init project [name]`** writes the smallest project the binary needs, and nothing else: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (`kind: Project`, the marker `lo` resolves the root from; a service's `kind: Service` file is not one, so `lo` keeps walking up from inside a service directory), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and one shell environment file (`--env`). It uses no network and writes **no `.lok8s/` tree** (the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use; see [`lo assets`](#lo-assets)) and no `.bin/`: the toolchain is the next step it prints, [`lo toolchain install`](#lo-toolchain). A re-run keeps every existing file (`--force` overwrites; `.gitignore` is only appended to). `name` defaults to the directory name. The target is the working directory (`--path` names another), never the ambient `PATH_BASE` of a direnv/mise shell.
 

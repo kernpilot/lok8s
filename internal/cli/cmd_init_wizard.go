@@ -74,15 +74,15 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 	}
 	state.Terminal = term
 	if f.plan || (f.dryRun && !term.Interactive()) {
-		return initPlan(cmd.Context(), state, out)
+		return initPlan(state, out)
 	}
 	return initWizard(cmd.Context(), state, runner, f.dryRun, out, stderr)
 }
 
 // initPlan is `lo init --plan`: the card, then the commands the defaults
 // would run (or the menu as hints). rc 0, no writes.
-func initPlan(ctx context.Context, s initctx.State, out io.Writer) error {
-	initCard(ctx, s, out)
+func initPlan(s initctx.State, out io.Writer) error {
+	initctx.WriteCard(out, s)
 	plan := initctx.Decide(s, initctx.DefaultAnswers(s))
 	fmt.Fprintln(out)
 	initctx.WriteSummary(out, plan, s.Cwd)
@@ -90,21 +90,6 @@ func initPlan(ctx context.Context, s initctx.State, out io.Writer) error {
 		initctx.WriteOptions(out, s)
 	}
 	return nil
-}
-
-// initCard prints the state card; inside a project the doctor's domain
-// section and, when `lo toolchain install` wrote .bin/b.yaml, its
-// toolchain section follow (the same functions `lo doctor` runs).
-func initCard(ctx context.Context, s initctx.State, out io.Writer) {
-	initctx.WriteCard(out, s)
-	if s.Project == nil {
-		return
-	}
-	p := projectPaths(s.Project.Root)
-	doctorDomainSection(p, s.Project.Active, out)
-	if s.Project.BYAMLMarker {
-		doctorToolchain(ctx, out, p, config.KustomizePluginHome(p), childPATH(p, bashTreeForPATH(p).Dir))
-	}
 }
 
 // projectPaths is the layout of the project at root (no PATH_* override:
@@ -121,7 +106,7 @@ func projectPaths(root string) *config.Paths {
 // initWizard is the conversation: the card, the questions, the summary,
 // the confirmation, then the actions.
 func initWizard(ctx context.Context, s initctx.State, runner execx.Runner, dryRun bool, out, stderr io.Writer) error {
-	initCard(ctx, s, out)
+	initctx.WriteCard(out, s)
 	fmt.Fprintln(out)
 	tio := initFormIO()
 	answers, err := initctx.Ask(s, tio)

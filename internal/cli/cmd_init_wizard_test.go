@@ -43,6 +43,8 @@ func (g *initGitFake) Run(_ context.Context, c execx.Cmd) error {
 			return errors.New("exit status 128")
 		}
 		fmt.Fprintln(c.Stdout, g.repo)
+	case "symbolic-ref":
+		fmt.Fprintln(c.Stdout, "main")
 	case "init":
 		fmt.Fprintln(c.Stdout, "Initialized empty Git repository (fake)")
 	}
@@ -147,9 +149,7 @@ func TestInitPlanEmptyDirectory(t *testing.T) {
 		t.Fatalf("init --plan: %v\n%s", err, stderr)
 	}
 	for _, want := range []string{
-		"lo init — " + dir + "\n",
-		"situation: empty directory\n",
-		"git: not a repository\n",
+		"  shop  empty directory · no git repository\n",
 		"Plan (empty directory):\n",
 		"  1. project files: clusters/, lok8s.yaml, .gitignore entries, mise.toml\n",
 		"  2. git init: a git repository in .\n",
@@ -170,6 +170,11 @@ func TestInitPlanEmptyDirectory(t *testing.T) {
 	if strings.Contains(stdout, p.Base) {
 		t.Error("the ambient project leaked into the plan")
 	}
+	// One path form: the working directory is named, never printed as a
+	// path (the plan's commands run from it).
+	if strings.Contains(stdout, dir) || strings.Contains(stdout, "\033[") {
+		t.Errorf("a path or an escape sequence off a terminal:\n%s", stdout)
+	}
 }
 
 // Off the wizard --dry-run has no conversation to stop: it prints the
@@ -184,7 +189,7 @@ func TestInitDryRunOffTheWizardPrintsThePlan(t *testing.T) {
 		if err != nil || stderr != "" {
 			t.Fatalf("%v: %v\n%s", args, err, stderr)
 		}
-		if !strings.Contains(stdout, "situation: empty directory\n") || !strings.Contains(stdout, "  lo init project "+filepath.Base(dir)+" --env mise\n") || strings.Contains(stdout, "Usage:") {
+		if !strings.Contains(stdout, "  "+filepath.Base(dir)+"  empty directory · no git repository\n") || !strings.Contains(stdout, "  lo init project "+filepath.Base(dir)+" --env mise\n") || strings.Contains(stdout, "Usage:") {
 			t.Errorf("%v: stdout:\n%s", args, stdout)
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
@@ -206,11 +211,10 @@ func TestInitPlanProjectRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"situation: project root\n",
-		"project: acme at " + root + "; you are at the root\n",
-		"clusters: alpha.dev (lo); active alpha.dev\n",
-		"--- domain ---\n",
-		"active: alpha.dev (kind lo)\n",
+		"  acme         project · go · main\n",
+		"  clusters     alpha.dev (kind, active)\n",
+		"! toolchain    none · lo toolchain install\n",
+		"! environment  none · lo init project --env mise|direnv\n",
 		"Nothing to do.\n",
 		"Available (lo init on a terminal asks; or run the command):\n",
 		"lo init project --env none --cluster <domain> --driver <driver>",
@@ -219,8 +223,35 @@ func TestInitPlanProjectRoot(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, "--- toolchain") {
-		t.Error("the toolchain section printed without the b.yaml marker")
+	// The card carries no doctor section (that is `lo doctor`), no path
+	// at the root and no colour off a terminal.
+	for _, no := range []string{"--- ", root, "\033["} {
+		if strings.Contains(stdout, no) {
+			t.Errorf("unexpected %q in:\n%s", no, stdout)
+		}
+	}
+}
+
+// Below the root the card names the position relative to it; the repository
+// row appears only when the repository root is not the project root.
+func TestInitPlanInsideProjectNamesThePosition(t *testing.T) {
+	root := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(root, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: acme\n")
+	os.MkdirAll(filepath.Join(root, "clusters"), 0o755)
+	sub := filepath.Join(root, "services", "api")
+	testutil.WriteFile(t, filepath.Join(sub, "lok8s.yaml"), "build:\n  context: .\n")
+	t.Chdir(sub)
+	seams := installInitSeams(t, false, "")
+	seams.git.repo = root
+	stdout, _, err := runLo(t, NewRoot(synthProject(t)), "init", "--plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "  acme         project · go · main\n") || !strings.Contains(stdout, "  directory    services/api · service directory\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout, root) || strings.Contains(stdout, "repository") {
+		t.Errorf("a path or a repository row:\n%s", stdout)
 	}
 }
 
@@ -249,7 +280,8 @@ func TestInitWizardEmptyDirectory(t *testing.T) {
 		t.Fatalf("wizard: %v\n%s\n%s", err, stdout, stderr)
 	}
 	for _, want := range []string{
-		"situation: empty directory",
+		// The wizard runs on a terminal: the name is bold.
+		"  \033[1macme\033[0m  empty directory · no git repository\n",
 		"Equivalent commands:\n  lo init project shop --env mise --cluster demo.dev --driver lo\n  git init\n  lo toolchain install --groups core,local\n  lo use demo.dev\n",
 		"==> lo init project shop --env mise --cluster demo.dev --driver lo\n",
 		"Scaffolded " + filepath.Join(dir, "lok8s.yaml") + "\n",

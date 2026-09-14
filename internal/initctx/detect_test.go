@@ -14,7 +14,6 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
-	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 // gitFake answers the two git reads. root "" = not a repository (rc 128);
@@ -23,6 +22,8 @@ type gitFake struct {
 	absent bool
 	root   string
 	dirty  bool
+	// branch answers symbolic-ref ("" = detached: the read fails).
+	branch string
 	cmds   []execx.Cmd
 }
 
@@ -41,9 +42,14 @@ func (g *gitFake) Run(_ context.Context, c execx.Cmd) error {
 			return errors.New("exit status 128")
 		}
 		fmt.Fprintln(c.Stdout, g.root)
+	case "symbolic-ref":
+		if g.branch == "" {
+			return errors.New("exit status 1")
+		}
+		fmt.Fprintln(c.Stdout, g.branch)
 	case "status":
 		if g.dirty {
-			fmt.Fprintln(c.Stdout, " M file")
+			fmt.Fprint(c.Stdout, " M file\n?? other\n")
 		}
 	}
 	return nil
@@ -86,13 +92,48 @@ func TestDetectEmptyDirectory(t *testing.T) {
 	}
 
 	// Every git read runs in cwd through the seam.
-	g := &gitFake{root: dir}
-	detect(t, dir, g)
-	if len(g.cmds) != 2 || g.cmds[0].Dir != dir || g.cmds[1].Dir != dir {
+	g := &gitFake{root: dir, branch: "main"}
+	s = detect(t, dir, g)
+	if len(g.cmds) != 3 || g.cmds[0].Dir != dir || g.cmds[1].Dir != dir || g.cmds[2].Dir != dir {
 		t.Errorf("git cmds: %+v", g.cmds)
 	}
-	if !reflect.DeepEqual(g.cmds[0].Args, []string{"rev-parse", "--show-toplevel"}) || !reflect.DeepEqual(g.cmds[1].Args, []string{"status", "--porcelain"}) {
+	if !reflect.DeepEqual(g.cmds[0].Args, []string{"rev-parse", "--show-toplevel"}) ||
+		!reflect.DeepEqual(g.cmds[1].Args, []string{"symbolic-ref", "--short", "-q", "HEAD"}) ||
+		!reflect.DeepEqual(g.cmds[2].Args, []string{"status", "--porcelain"}) {
 		t.Errorf("git argv: %+v", g.cmds)
+	}
+	if s.Git.Branch != "main" || s.Git.Uncommitted != 0 || s.Git.Dirty() {
+		t.Errorf("git: %+v", s.Git)
+	}
+	// Detached HEAD: no branch, still a repository.
+	if s := detect(t, dir, &gitFake{root: dir}); s.Git.Root != dir || s.Git.Branch != "" {
+		t.Errorf("detached: %+v", s.Git)
+	}
+}
+
+// git prints the repository root with symlinks resolved; the state keeps
+// the form of the working directory (one path form on the card).
+func TestDetectGitRootInTheWorkingDirectoryForm(t *testing.T) {
+	real := t.TempDir()
+	os.MkdirAll(filepath.Join(real, "repo", "sub"), 0o755)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	cwd := filepath.Join(link, "repo", "sub")
+	s := detect(t, cwd, &gitFake{root: filepath.Join(real, "repo"), branch: "main"})
+	if want := filepath.Join(link, "repo"); s.Git.Root != want {
+		t.Errorf("git root %q, want %q", s.Git.Root, want)
+	}
+	if s.Git.AtRoot {
+		t.Error("at root below it")
+	}
+	if s := detect(t, filepath.Join(link, "repo"), &gitFake{root: filepath.Join(real, "repo")}); !s.Git.AtRoot {
+		t.Error("not at root at the root")
+	}
+	// A root git printed that the typed form cannot reach stays as printed.
+	if got := cwdForm(cwd, "/elsewhere/repo"); got != "/elsewhere/repo" {
+		t.Errorf("unrelated root rewritten: %q", got)
 	}
 }
 
@@ -105,7 +146,8 @@ func TestDetectGitBelowRootWithoutProject(t *testing.T) {
 	if s.Empty || s.Entries != 1 || s.Project != nil {
 		t.Errorf("state: %+v", s)
 	}
-	if s.Git.Root != repo || s.Git.AtRoot || !s.Git.Dirty {
+	// The porcelain fake lists two paths.
+	if s.Git.Root != repo || s.Git.AtRoot || !s.Git.Dirty() || s.Git.Uncommitted != 2 {
 		t.Errorf("git: %+v", s.Git)
 	}
 	if got := s.Situation(); got != SituationGitBelowRoot {
@@ -159,7 +201,9 @@ func fullProject(t *testing.T) string {
 	testutil.WriteFile(t, filepath.Join(root, "clusters", "nospec", "notes.txt"), "")
 	testutil.WriteFile(t, filepath.Join(root, "clusters", ".active"), "alpha.dev\n")
 	testutil.WriteFile(t, filepath.Join(root, "mise.toml"), "[env]\n")
-	testutil.WriteFile(t, filepath.Join(root, ".bin", "b.yaml"), "# x\n"+toolchain.Marker+"\n")
+	// Three pins the way b.yaml spells them: a bare tool, one installed
+	// as a file under .kustomize, one under an alias.
+	testutil.WriteFile(t, filepath.Join(root, ".bin", "b.yaml"), "binaries:\n  kustomize: {}\n  github.com/mgoltzsche/khelm:\n    file: ../.kustomize/khelm/ChartRenderer\n  renvsubst:\n    alias: envsubst\n")
 	testutil.WriteFile(t, filepath.Join(root, ".lok8s", "lo"), "#!/bin/bash\n")
 	testutil.WriteFile(t, filepath.Join(root, "services.yaml"), "services: {}\n")
 	os.MkdirAll(filepath.Join(root, "tests"), 0o755)
@@ -183,19 +227,31 @@ func TestDetectProjectRoot(t *testing.T) {
 	if !reflect.DeepEqual(p.Domains, wantDomains) {
 		t.Errorf("domains %+v, want %+v", p.Domains, wantDomains)
 	}
-	if p.Active != "alpha.dev" || p.EnvFile != "mise" || !p.BYAML || !p.BYAMLMarker || !p.BashTree {
+	if p.Active != "alpha.dev" || p.EnvFile != "mise" || !p.BYAML || !p.BashTree {
 		t.Errorf("project: %+v", p)
 	}
 	if p.Implementation != "bash" || p.ImplementationErr != "" || !p.Services || !p.Tests {
 		t.Errorf("project: %+v", p)
 	}
-	// Nothing under .bin/.kustomize is executable: every pinned tool is
-	// missing.
-	if len(p.ToolsMissing) != 4 || p.ToolsMissing[0] != "b" {
-		t.Errorf("tools missing: %v", p.ToolsMissing)
+	// b plus the three pins; nothing under .bin/.kustomize is executable
+	// yet, so every one is missing: b first, then the pins by key, each
+	// under the name b installs it as.
+	if p.Tools != 4 || !reflect.DeepEqual(p.ToolsMissing, []string{"b", "khelm", "kustomize", "envsubst"}) {
+		t.Errorf("tools: %d missing %v", p.Tools, p.ToolsMissing)
 	}
 	if s.Empty || s.ServiceDir {
 		t.Errorf("root state: %+v", s)
+	}
+
+	// The pins resolve at the paths b installs to: <bin>/<name>, the
+	// alias, the file relative to the b.yaml directory.
+	for _, f := range []string{".bin/b", ".bin/envsubst", ".kustomize/khelm/ChartRenderer"} {
+		testutil.WriteFile(t, filepath.Join(root, filepath.FromSlash(f)), "#!/bin/sh\n")
+		os.Chmod(filepath.Join(root, filepath.FromSlash(f)), 0o755)
+	}
+	p = detect(t, root, &gitFake{root: root}).Project
+	if p.Tools != 4 || !reflect.DeepEqual(p.ToolsMissing, []string{"kustomize"}) {
+		t.Errorf("tools after install: %d missing %v", p.Tools, p.ToolsMissing)
 	}
 }
 
@@ -211,8 +267,15 @@ func TestDetectMinimalProjectAndInvalidPieces(t *testing.T) {
 	if p == nil || p.ProjectFile || p.Name != "" || !p.Clusters || p.Domains != nil || p.Active != "" {
 		t.Errorf("project: %+v", p)
 	}
-	if p.EnvFile != "direnv" || !p.BYAML || p.BYAMLMarker || p.Implementation != "go" || p.BashTree {
+	if p.EnvFile != "direnv" || !p.BYAML || p.Implementation != "go" || p.BashTree {
 		t.Errorf("project: %+v", p)
+	}
+	// A b.yaml without binaries pins b alone; no b.yaml pins nothing.
+	if p.Tools != 1 || !reflect.DeepEqual(p.ToolsMissing, []string{"b"}) {
+		t.Errorf("tools: %d missing %v", p.Tools, p.ToolsMissing)
+	}
+	if n, missing := pinnedTools(filepath.Join(root, "nowhere", "b.yaml")); n != 0 || missing != nil {
+		t.Errorf("tools without b.yaml: %d %v", n, missing)
 	}
 
 	// An invalid implementation block is reported, not fatal.

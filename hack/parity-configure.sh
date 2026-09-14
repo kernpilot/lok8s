@@ -391,7 +391,8 @@ PATH_SECRETS="${PROJ}/clusters" check - doctor       # set: the same line on bot
 
 # ── lo init --plan (Go-only contract) ────────────────────────────────────────
 # Bare `lo init` off a terminal prints the help (parity-leaves pins rc 0);
-# `lo init --plan` prints the state card and the commands the defaults
+# `lo init --plan` prints the state card (the two-column layout, the
+# project name first, no doctor section) and the commands the defaults
 # would run, exits 0 and writes nothing, on and off a terminal. Its own
 # synthetic projects (an empty directory, a project root), the tree
 # snapshotted before and after. Both runs are the Go binary; the bash
@@ -409,8 +410,9 @@ plan_before="$(plan_snapshot "${PLAN}")"
 plan_rc=0
 parity::run go "${PLAN}" init --plan || plan_rc=$?
 if (( plan_rc == 0 )) && [[ ! -s "${WORK}/go.err" ]] \
-   && grep -q '^  situation: project root$' "${WORK}/go.out" \
-   && grep -q 'theta.dev (lo); active theta.dev' "${WORK}/go.out" \
+   && grep -q '^  parity  *project · go' "${WORK}/go.out" \
+   && grep -q '^  clusters  *theta.dev (kind, active)$' "${WORK}/go.out" \
+   && ! grep -q '^--- ' "${WORK}/go.out" \
    && grep -q '^Nothing to do.$' "${WORK}/go.out" \
    && grep -q 'lo init project --env none --cluster <domain> --driver <driver>' "${WORK}/go.out" \
    && [[ "$(plan_snapshot "${PLAN}")" == "${plan_before}" ]]; then
@@ -421,7 +423,7 @@ fi
 plan_rc=0
 (cd "${WORK}/plan-empty" && "${LO_BIN}" init --plan </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || plan_rc=$?
 if (( plan_rc == 0 )) && [[ ! -s "${WORK}/go.err" ]] \
-   && grep -q '^  situation: empty directory$' "${WORK}/go.out" \
+   && grep -q '^  plan-empty  empty directory · no git' "${WORK}/go.out" \
    && grep -q '^  lo init project plan-empty --env mise$' "${WORK}/go.out" \
    && grep -q '^  lo toolchain install --groups core,local$' "${WORK}/go.out" \
    && [[ -z "$(find "${WORK}/plan-empty" -mindepth 1 -print -quit)" ]]; then
