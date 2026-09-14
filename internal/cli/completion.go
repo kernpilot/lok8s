@@ -1,7 +1,7 @@
 package cli
 
-// completion.go — dynamic shell completion (Go-only). cobra's built-in
-// `lo completion bash|zsh|fish|powershell` emits the script; this file adds
+// completion.go: dynamic shell completion (Go-only). cobra's built-in
+// `lo completion bash|zsh|fish|powershell` emits the script. This file adds
 // the values the script asks the binary for: domains under clusters/ for
 // `lo use <Tab>` and every `--domain` / `--cluster-override` flag, addon
 // names for `lo addons <Tab>`, asset rels for `lo assets eject|diff|update

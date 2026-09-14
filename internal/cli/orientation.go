@@ -1,6 +1,6 @@
 package cli
 
-// orientation.go — `lo` with no arguments. On a terminal the binary
+// orientation.go: `lo` with no arguments. On a terminal the binary
 // prints where you stand (the project, the active domain and its driver,
 // the kubeconfig when one was written) and the six everyday commands,
 // then the one next step. Off a terminal (a pipe, a script, CI) it prints

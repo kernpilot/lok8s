@@ -1,13 +1,13 @@
 package cli
 
-// examples.go — the `Examples:` block of every visible command, in one
+// examples.go: the `Examples:` block of every visible command, in one
 // shape: one to three lines, each `  lo <command> <real-looking values>`,
 // an aligned `# note` only where a line needs one. The block is help text
 // only (`lo <cmd> --help`, the generated reference): it never reaches a
 // command's own output, so the piped contract of a ported command is
 // untouched. The examples are keyed by command path and applied after the
 // tree is assembled (applyExamples), so the files that own the commands,
-// and the shims of a command routed to bash, need no edit; a command that
+// and the shims of a command routed to bash, need no edit. A command that
 // sets its own Example keeps it. TestEveryVisibleCommandHasExample keeps
 // the map complete.
 
@@ -214,7 +214,7 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
 }
 
 // driverOpExamples are the examples of `lo drivers <name> <op>`, one
-// template per contract op; %s is the driver name.
+// template per contract op. %s is the driver name.
 var driverOpExamples = map[string]string{
 	"":           "  lo drivers %s status kubehz.dev\n  lo drivers %s provision kubehz.dev",
 	"provision":  "  lo drivers %s provision kubehz.dev",
@@ -224,7 +224,7 @@ var driverOpExamples = map[string]string{
 }
 
 // mcpEditorExamples are the examples of `lo mcp <editor> <op>` (the
-// editor subcommands ophis adds); %s is the editor name.
+// editor subcommands ophis adds). %s is the editor name.
 var mcpEditorExamples = map[string]string{
 	"":        "  lo mcp %s enable\n  lo mcp %s list",
 	"enable":  "  lo mcp %s enable\n  lo mcp %s enable --env LO_MCP_ALLOW=destructive",
@@ -233,7 +233,7 @@ var mcpEditorExamples = map[string]string{
 }
 
 // applyExamples sets Example on every visible command that has one in the
-// map and none of its own. Keyed by the path below the root; the `lo
+// map and none of its own. Keyed by the path below the root. The `lo
 // drivers <name>` and `lo mcp <editor>` subtrees use templates.
 func applyExamples(root *cobra.Command) {
 	walkVisibleCommands(root, func(cmd *cobra.Command) {
@@ -268,7 +268,7 @@ func walkVisibleCommands(root *cobra.Command, visit func(*cobra.Command)) {
 }
 
 // templateExample answers `<group> <name>` and `<group> <name> <op>` from
-// a template map keyed by op ("" for the name itself); %s is the name.
+// a template map keyed by op ("" for the name itself). %s is the name.
 func templateExample(path, group string, templates map[string]string) (string, bool) {
 	parts := strings.Fields(path)
 	if len(parts) < 2 || len(parts) > 3 || parts[0] != group {
