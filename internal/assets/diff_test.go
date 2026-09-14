@@ -167,7 +167,19 @@ func TestReportOriginsAndDoctorLine(t *testing.T) {
 
 	var table bytes.Buffer
 	WriteTable(&table, reports, false)
-	if !strings.Contains(table.String(), "addons/cilium                   addon       local (modified)") {
+	// Measured columns (ui.Table): the header on the first line, the
+	// cilium row carrying its origin.
+	lines := strings.Split(table.String(), "\n")
+	if !strings.HasPrefix(lines[0], "ASSET ") || !strings.HasPrefix(lines[1], "----- ") {
+		t.Errorf("table header:\n%s", table.String())
+	}
+	found := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "addons/cilium ") && strings.Contains(l, "  addon      local (modified)  ") {
+			found = true
+		}
+	}
+	if !found {
 		t.Errorf("table:\n%s", table.String())
 	}
 }
