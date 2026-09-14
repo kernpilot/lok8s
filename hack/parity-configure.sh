@@ -401,6 +401,9 @@ PATH_SECRETS="${PROJ}/clusters" check - doctor       # set: the same line on bot
 # tree has no wizard.
 PLAN="${WORK}/plan"
 parity::new_project "${PLAN}"
+# A repository: a project without one gets the bootstrap screen (mode 1),
+# and this case pins project mode (the card, the list, the next step).
+git -C "${PLAN}" init -q
 mkdir -p "${PLAN}/clusters/theta.dev"
 printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: theta\nspec:\n  cluster:\n    domain: theta.dev\n' \
   > "${PLAN}/clusters/theta.dev/cluster.lok8s.yaml"
