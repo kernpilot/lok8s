@@ -100,6 +100,26 @@ func newRegistryCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			return drv.RegistryClean(ctx, d, shared, errOut)
 		}),
 	)
+
+	// `lo registry tls` is Go-only (routing.go goOnlySubcommands): the bash
+	// tree keeps the certificate in $PATH_SECRETS and has no volume to
+	// inspect or renew.
+	tlsCmd := &cobra.Command{
+		Use:          "tls",
+		Short:        "The registry set's TLS certificate (docker volume)",
+		SilenceUsage: true,
+		RunE:         argshGroupRunE,
+	}
+	argshFlagErrors(tlsCmd)
+	tlsCmd.AddCommand(
+		sub("status", "s", "Show the certificate and what each registry mounts", func(ctx context.Context, drv *lodriver.Driver, d string, out, errOut io.Writer, _ registryDeps) error {
+			return drv.RegistryTLSStatus(ctx, d, out, errOut)
+		}),
+		sub("renew", "r", "Mint a new certificate into the volume and restart the registries", func(ctx context.Context, drv *lodriver.Driver, d string, out, errOut io.Writer, _ registryDeps) error {
+			return drv.RegistryTLSRenew(ctx, d, out, errOut)
+		}),
+	)
+	cmd.AddCommand(tlsCmd)
 	return cmd
 }
 

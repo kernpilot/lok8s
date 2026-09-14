@@ -234,9 +234,9 @@ func CheckUnencrypted(dir string, warnTo io.Writer) bool {
 // silently and different tools read different stores (lo build/Tilt →
 // per-domain; a manual PATH_SECRETS=.../.secrets kustomize → flat), which can
 // re-key a live cluster from the WRONG store (this orphaned a dev IdP's etcd
-// encryption once). Per-domain is authoritative; the flat store keeps ONLY
-// global, non-domain material (e.g. a shared registry/expose TLS cert that no
-// per-domain store mirrors).
+// encryption once). Per-domain is authoritative; nothing is legitimately
+// flat-only since v0.4.0 (the registry TLS cert lives in a docker volume,
+// internal/driver/lo/registrytls.go).
 //
 // Emits one line per shadow to out (lint wraps each as a warning); returns
 // false if any shadow exists, true otherwise. An identical copy is a stale
@@ -265,7 +265,7 @@ func CheckFlatShadows(flat, domainDir string, out io.Writer) bool {
 			continue
 		}
 		if sameContent(flatCopy, plaintext) {
-			io.WriteString(out, "Flat-store shadow: "+base+" is duplicated in the flat .secrets/ store — flat is deprecated for domain secrets; remove the flat copy (it keeps only global TLS like registries-tls)\n")
+			io.WriteString(out, "Flat-store shadow: "+base+" is duplicated in the flat .secrets/ store — flat is deprecated for domain secrets; remove the flat copy\n")
 		} else {
 			io.WriteString(out, "Flat-store DRIFT: "+base+" differs between the flat .secrets/ store and "+dname+"/secrets/ — the stores diverged (a build from the wrong store can re-key a live cluster); reconcile to the per-domain value, then remove the flat copy\n")
 		}

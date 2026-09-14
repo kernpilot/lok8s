@@ -7,25 +7,17 @@ package lo
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
-	"github.com/kernpilot/lok8s/internal/config"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
-	"github.com/kernpilot/lok8s/internal/render"
-	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
-	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
-	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // registryHTTPBlock emits the registry `http:` stanza for the active mode
@@ -87,205 +79,6 @@ func renderRegistryConfig(configFile, url string, tls bool) (string, error) {
 	// bash `rendered` variable.
 	withoutHTTP := strings.TrimRight(strings.Join(kept, "\n"), "\n")
 	return withoutHTTP + "\n" + registryHTTPBlock(tls), nil
-}
-
-// registriesTLSCert mints the TLS cert the registries serve in TLS mode by
-// driving the secrets.lok8s.dev Secret generator (bash:
-// lo::registries_tls_cert). The cert is a `cert:` leaf whose SANs are built
-// from .registries.json so it covers every registry IP plus the framework
-// hostnames; the generator signs it with the shared dev CA at CAROOT
-// (created on demand) and tls.crt/tls.key are extracted to
-// .secrets/tls/registries/ for the container mounts.
-//
-// The generator is the ONE cert: implementation (leaf cache, CA handling)
-// — kustomize/plugins/secret, imported as a package (WP3): the manifest
-// below is handed to secret.Run in-process exactly as it used to go to the
-// plugin binary's stdin, and the Secret it emits is parsed the same way.
-// Under LO_RENDER=exec the binary at KUSTOMIZE_PLUGIN_HOME is exec'd as
-// before (built on demand through the KustomizeBuild hook). Do not inline a
-// second cert mint path.
-//
-// Idempotent: re-minted only when missing or when the SAN set changed (IPs
-// shifted, a mirror added/removed). The host Docker client + containerd
-// trust it once `lo trust` has installed the CA.
-func (d *Driver) registriesTLSCert(ctx context.Context, errOut io.Writer) error {
-	rf, err := regFile()
-	if err != nil {
-		// bash: registry::each prints the raw "error: …" line, then returns 1.
-		fmt.Fprintln(errOut, err)
-		return ui.Handled(err)
-	}
-	if !rf.TLS {
-		return nil
-	}
-
-	// The mode is validated (an unknown LO_RENDER fails closed here as it
-	// does in the render); which path mints is SecretInProcess: the
-	// imported generator on both builds unless LO_RENDER=exec asks for the
-	// plugin binary explicitly.
-	if _, err := render.CurrentMode(); err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return ui.Handled(err)
-	}
-	execPlugin := !render.SecretInProcess()
-	var pluginBin string
-	if execPlugin {
-		pluginHome := config.EnvOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
-		pluginBin = filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))
-		// The Secret plugin mints the cert. It's needed across the lok8s
-		// flow anyway, so build it on demand if it's missing and we can
-		// (bash probed `declare -F kustomize::build`; the Go seam is the
-		// injectable hook); otherwise fail with guidance.
-		if !fsutil.IsExecutable(pluginBin) && d.Hooks.KustomizeBuild != nil {
-			ui.DebugTo(errOut, "registry TLS: Secret plugin missing — building it (lo kustomize build)")
-			_ = d.Hooks.KustomizeBuild(ctx)
-		}
-		if !fsutil.IsExecutable(pluginBin) {
-			fmt.Fprintln(errOut, "error: spec.registries.tls is true (default) but the Secret plugin is not built at")
-			fmt.Fprintf(errOut, "       %s. Build it with 'lo kustomize build' (needs go), or set\n", pluginBin)
-			fmt.Fprintln(errOut, "       spec.registries.tls: false for plain-HTTP registries. Then retry.")
-			return ui.Handled(fmt.Errorf("secret plugin not built at %s", pluginBin))
-		}
-	}
-	pathSecrets := getenv("PATH_SECRETS")
-	if pathSecrets == "" {
-		fmt.Fprintln(errOut, "error: PATH_SECRETS is not set — cannot mint the registry TLS cert")
-		return ui.Handled(fmt.Errorf("PATH_SECRETS not set"))
-	}
-
-	tlsDir := filepath.Join(d.deps.Paths.Base, ".secrets", "tls", "registries")
-	crt := filepath.Join(tlsDir, "tls.crt")
-	key := filepath.Join(tlsDir, "tls.key")
-	sansFile := filepath.Join(tlsDir, ".sans")
-	if err := os.MkdirAll(tlsDir, 0o755); err != nil {
-		return err
-	}
-
-	// Build the SAN list (hostnames first per entry, then its IP). Framework
-	// registries contribute their canonical hostname; mirrors contribute the
-	// upstream domain they impersonate. Every registry contributes its IP.
-	var sans []string
-	for _, r := range rf.Registries {
-		if r.Host != "" {
-			sans = append(sans, r.Host)
-		}
-		if r.Domain != "" {
-			sans = append(sans, r.Domain)
-		}
-		if r.IP != "" {
-			sans = append(sans, r.IP)
-		}
-	}
-	if len(sans) == 0 {
-		fmt.Fprintln(errOut, "error: no registry SANs resolved — cannot mint registry TLS cert")
-		return ui.Handled(fmt.Errorf("no registry SANs"))
-	}
-
-	// Deduplicate while preserving order.
-	seen := map[string]bool{}
-	var uniq []string
-	for _, s := range sans {
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		uniq = append(uniq, s)
-	}
-
-	// Up to date? (cert present and the SAN set unchanged since the last
-	// mint — the .sans cache file is the comparison key.)
-	sansRepr := strings.Join(uniq, "\n")
-	if fsutil.FileExists(crt) && fsutil.FileExists(key) && fsutil.FileExists(sansFile) {
-		if prev, err := os.ReadFile(sansFile); err == nil &&
-			strings.TrimRight(string(prev), "\n") == sansRepr {
-			ui.DebugTo(errOut, "registry TLS cert up to date (%d SANs)", len(uniq))
-			return nil
-		}
-	}
-
-	// (Re)mint. The cert: generator caches its leaf by Secret name, so drop
-	// any stale cache entry first to force a fresh signature for the new SAN
-	// set.
-	name, ns := "registries-tls", "lok8s-system"
-	_ = os.Remove(filepath.Join(pathSecrets, fmt.Sprintf("Secret.%s.%s.tls.crt", name, ns)))
-	_ = os.Remove(filepath.Join(pathSecrets, fmt.Sprintf("Secret.%s.%s.tls.key", name, ns)))
-
-	// JSON array of SANs (compact, jq -c shape); YAML accepts it inline.
-	var hostsJSON strings.Builder
-	hostsJSON.WriteByte('[')
-	for i, s := range uniq {
-		if i > 0 {
-			hostsJSON.WriteByte(',')
-		}
-		fmt.Fprintf(&hostsJSON, "%q", s)
-	}
-	hostsJSON.WriteByte(']')
-
-	manifest := fmt.Sprintf(`apiVersion: secrets.lok8s.dev/v1
-kind: Secret
-metadata:
-  name: %s
-  namespace: %s
-type: kubernetes.io/tls
-cert:
-  hosts: %s
-`, name, ns, hostsJSON.String())
-
-	var out strings.Builder
-	if execPlugin {
-		err = d.deps.Runner.Run(ctx, execx.Cmd{
-			Name:   pluginBin, // absolute path — used as-is by the runner
-			Stdin:  strings.NewReader(manifest),
-			Stdout: &out,
-			Stderr: d.stderr(),
-		})
-	} else {
-		// In-process: no argv config path, so the generator reads the
-		// manifest from stdin — the same protocol the exec above uses.
-		// PATH_SECRETS/CAROOT come from the process environment, as they
-		// did for the child. A failure is reported the way the plugin
-		// binary's main did (plugin.Fail) on the same stream.
-		err = secret.Run([]string{"Secret"}, strings.NewReader(manifest), &out, plugin.DefaultEnv)
-		if err != nil {
-			fmt.Fprintln(d.stderr(), "secret plugin:", err)
-		}
-	}
-	if err != nil {
-		fmt.Fprintln(errOut, "error: the Secret plugin failed to mint the registry TLS cert")
-		return ui.Handled(fmt.Errorf("secret plugin failed: %w", err))
-	}
-
-	var secretOut struct {
-		Data map[string]string `yaml:"data"`
-	}
-	_ = yaml.Unmarshal([]byte(out.String()), &secretOut)
-	crtB64 := secretOut.Data["tls.crt"]
-	keyB64 := secretOut.Data["tls.key"]
-	if crtB64 == "" || keyB64 == "" {
-		fmt.Fprintln(errOut, "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)")
-		return ui.Handled(fmt.Errorf("secret plugin output missing tls.crt/tls.key"))
-	}
-	crtRaw, err := base64.StdEncoding.DecodeString(crtB64)
-	if err != nil {
-		fmt.Fprintln(errOut, "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)")
-		return ui.Handled(err)
-	}
-	keyRaw, err := base64.StdEncoding.DecodeString(keyB64)
-	if err != nil {
-		fmt.Fprintln(errOut, "error: registry TLS cert extraction failed (plugin output had no tls.crt/tls.key)")
-		return ui.Handled(err)
-	}
-	if err := os.WriteFile(crt, crtRaw, 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(key, keyRaw, 0o600); err != nil {
-		return err
-	}
-	if err := os.WriteFile(sansFile, []byte(sansRepr+"\n"), 0o644); err != nil {
-		return err
-	}
-	ui.DebugTo(errOut, "minted registry TLS cert with SANs: %s", strings.Join(uniq, " "))
-	return nil
 }
 
 // registriesTLSNudge warns (non-fatally) if registry TLS is on but the dev
@@ -359,27 +152,29 @@ func (d *Driver) registries(ctx context.Context, out, errOut io.Writer, domain, 
 		return err
 	}
 
-	// In TLS mode every registry container mounts the shared cert minted by
-	// registriesTLSCert (which must run first — it does, in Provision). The
-	// cert content feeds the config hash: registries read it once at
-	// startup, so a re-minted cert (SAN change) must recreate the
-	// containers.
+	// In TLS mode every registry container mounts the set's cert volume
+	// (registrytls.go; registriesTLSCert must run first — it does, in
+	// Provision). The cert content feeds the config hash: registries read
+	// it once at startup, so a re-minted cert (SAN change) must recreate the
+	// containers. The mount SOURCE is not part of the hash: a container
+	// that still bind-mounts the legacy directory is recreated by the
+	// operator (`lo registry down && lo registry up`), not behind their
+	// back. The bash bind-mounted <Base>/.secrets/tls/registries here.
 	var tlsMountArgs []string
 	certSig := ""
 	if rf.TLS {
-		certDir := filepath.Join(d.deps.Paths.Base, ".secrets", "tls", "registries")
-		if !fsutil.FileExists(filepath.Join(certDir, "tls.crt")) || !fsutil.FileExists(filepath.Join(certDir, "tls.key")) {
-			fmt.Fprintf(errOut, "error: spec.registries.tls is enabled but no cert at %s\n", certDir)
-			fmt.Fprintln(errOut, "       lo::registries_tls_cert must run before lo::registries (ensure the")
-			fmt.Fprintln(errOut, "       Secret plugin is built: lo kustomize build).")
-			return ui.Handled(fmt.Errorf("registry TLS cert missing at %s", certDir))
+		vol := rf.tlsVolume()
+		crt := d.tlsCrt
+		if crt == nil {
+			var ok bool
+			if crt, _, ok = d.registryTLSRead(ctx, vol); !ok {
+				fmt.Fprintf(errOut, "error: spec.registries.tls is true but volume %s holds no certificate. Next: lo up\n", vol)
+				return ui.Handled(fmt.Errorf("registry TLS cert missing in volume %s", vol))
+			}
+			d.tlsCrt = crt
 		}
-		tlsMountArgs = []string{"--volume", certDir + ":" + RegistryTLSMount + ":ro"}
-		raw, err := os.ReadFile(filepath.Join(certDir, "tls.crt"))
-		if err != nil {
-			return err
-		}
-		certSig = fmt.Sprintf("%x", sha256.Sum256(raw))
+		tlsMountArgs = []string{"--volume", vol + ":" + RegistryTLSMount + ":ro"}
+		certSig = fmt.Sprintf("%x", sha256.Sum256(crt))
 	}
 
 	if err := os.MkdirAll(registryStateDir(), 0o755); err != nil {
@@ -614,6 +409,13 @@ func (d *Driver) cleanupRegistries(ctx context.Context, clusterName string) {
 		_ = d.runQuiet(ctx, "docker", "rm", "-f", regName)
 		_ = d.runQuiet(ctx, "docker", "volume", "rm", "-f", regName)
 		removeStateFiles(regName)
+	}
+	// The set's cert volume goes with its data volumes (re-minted by the
+	// next `lo up`). docker refuses while a shared mirror still mounts it;
+	// that mirror keeps serving the cert until `lo registry clean --shared`.
+	if rf.TLS {
+		_ = d.runQuiet(ctx, "docker", "volume", "rm", "-f", rf.tlsVolume())
+		d.tlsCrt = nil
 	}
 }
 
