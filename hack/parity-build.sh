@@ -222,6 +222,35 @@ for impl in bash go; do
   [[ "$(cat "${WORK}/state.${impl}/split.dev.files/Secret.demo.parity-secret.sops.yaml.marker" 2>/dev/null)" == "sops-ok" ]] \
     || fail "--no-secrets prune guard (${impl}) — committed rendered Secret twin was pruned"
 done
+# Cross-device scratch: TMPDIR on a filesystem the project is not on. The
+# Go split once staged under $TMPDIR and moved the files into the project
+# with a rename, which fails with EXDEV across devices — every split-mode
+# build failed on a host or CI runner whose /tmp is its own mount (v0.3.0),
+# while the bash `mv` copied and passed. Both implementations must build
+# the same state with TMPDIR elsewhere. Skipped with a note when no
+# writable tmpfs on another device than ${PROJ} is available.
+cross_device_tmp() { # prints a writable dir on another device than PROJ
+  local d
+  for d in /dev/shm /run/shm; do
+    [[ -d "${d}" && -w "${d}" ]] || continue
+    [[ "$(stat -c %d "${d}" 2>/dev/null)" != "$(stat -c %d "${PROJ}" 2>/dev/null)" ]] || continue
+    echo "${d}"
+    return 0
+  done
+  return 1
+}
+if xdev="$(cross_device_tmp)"; then
+  saved_tmpdir="${TMPDIR-}"; had_tmpdir="${TMPDIR+set}"
+  export TMPDIR="${xdev}"
+  check "build --domain split.dev (TMPDIR on another filesystem)" prep_clean build --domain split.dev
+  if [[ -n "${had_tmpdir}" ]]; then export TMPDIR="${saved_tmpdir}"; else unset TMPDIR; fi
+  for impl in bash go; do
+    [[ -f "${WORK}/state.${impl}/split.dev.files/ConfigMap.demo.parity-cm.yaml" ]] \
+      || fail "cross-device split (${impl}) — ConfigMap.demo.parity-cm.yaml missing from the split dir"
+  done
+else
+  echo "note: no writable tmpfs on another device than ${PROJ} — the cross-device split case is skipped"
+fi
 # Empty-render refusal (prior state must survive in both).
 check "empty-render refusal"                 prep_empty_kustomization build --domain split.dev
 restore_kustomization
