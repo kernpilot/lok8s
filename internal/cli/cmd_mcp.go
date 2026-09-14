@@ -419,7 +419,7 @@ func newMcpServe(paths *config.Paths) *cobra.Command {
 	c := &cobra.Command{
 		Use:          "serve",
 		Aliases:      []string{"stream"},
-		Short:        "Serve over streamable HTTP (loopback by default; no authentication)",
+		Short:        "Serve over streamable HTTP (loopback; no authentication)",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -446,7 +446,7 @@ func newMcpTools(paths *config.Paths) *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
 		Use:          "tools",
-		Short:        "Print the tools a server would expose (name, tier, description)",
+		Short:        "Print the tools a server would expose",
 		Args:         cobra.NoArgs,
 		Annotations:  map[string]string{AnnotationReadonly: "true"},
 		SilenceUsage: true,

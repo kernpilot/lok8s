@@ -122,6 +122,10 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 	for _, g := range goOnlyCommands {
 		root.AddCommand(g.build(paths))
 	}
+	// Help text and shell completion are decorations over the assembled
+	// tree (examples.go, completion.go): neither touches a command's output.
+	applyExamples(root)
+	installCompletions(root, paths)
 	return root
 }
 

@@ -43,7 +43,7 @@ var ErrCheckFailed = ErrHandled
 func newAssetsCommand(paths *config.Paths) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "assets",
-		Short:        "Framework assets embedded in the binary: list, eject, diff, update",
+		Short:        "Manage the framework assets embedded in the binary",
 		GroupID:      groupComponents,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -65,7 +65,7 @@ func newAssetsListCommand(paths *config.Paths) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:          "list",
-		Short:        "List every embedded asset with its origin (builtin · local · local (modified) · local-only)",
+		Short:        "List every embedded asset with its origin",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -88,7 +88,7 @@ func newAssetsEjectCommand(paths *config.Paths) *cobra.Command {
 	var all, check bool
 	cmd := &cobra.Command{
 		Use:   "eject [rel...]",
-		Short: "Write embedded assets into the project (.lok8s/<rel>/ + .lo-origin); default: what the cluster specs reference",
+		Short: "Write embedded assets into the project (.lok8s/<rel>/)",
 		Long: `Materialize embedded framework assets into the project so what a cluster
 applies is pinned on disk. Without arguments the set is what this project's
 cluster specs reference (every builtin spec.bootstrap addon, the driver's
@@ -170,7 +170,7 @@ func newAssetsDiffCommand(paths *config.Paths) *cobra.Command {
 	var asJSON, check bool
 	cmd := &cobra.Command{
 		Use:   "diff [rel...]",
-		Short: "Three-way diff: origin (.lo-origin) vs local vs the copy embedded in this lo",
+		Short: "Diff an asset three ways: origin, local, embedded",
 		Long: `Per file: unchanged · local modified · lo updated · both (conflict) ·
 local-only · builtin-only. The headline per addon is the chart version
 (local vs embedded). --check exits 1 on any drift.`,
@@ -210,7 +210,7 @@ local-only · builtin-only. The headline per addon is the chart version
 func newAssetsUpdateCommand(paths *config.Paths) *cobra.Command {
 	return &cobra.Command{
 		Use:          "update <rel>",
-		Short:        "Apply the embedded copy over the local one — only when local == origin (else --force)",
+		Short:        "Apply the embedded copy over an untouched local one",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
