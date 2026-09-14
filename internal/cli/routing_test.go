@@ -199,7 +199,7 @@ func TestRoutingInvalidBlockRefuses(t *testing.T) {
 		{"go-only", "    bash:\n      commands: [assets]\n", `lok8s.yaml: "assets" has no bash implementation.`},
 		{"go-only-mcp", "    bash:\n      commands: [mcp]\n", `lok8s.yaml: "mcp" has no bash implementation.`},
 		{"go-only-operator", "    bash:\n      commands: [operator]\n", `lok8s.yaml: "operator" has no bash implementation.`},
-		{"go-only-subcommands", "    bash:\n      commands: [init]\n", `lok8s.yaml: "init" has no bash implementation for "init project|toolchain".`},
+		{"go-only-subcommands", "    bash:\n      commands: [init]\n", `lok8s.yaml: "init" has no bash implementation for "init cluster|project|toolchain".`},
 		{"alias", "    bash:\n      commands: [r]\n", `lok8s.yaml: spec.implementation.bash.commands: "r" is an alias. Use the command name "registry".`},
 		{"all", "    bash:\n      commands: [all]\n", `lok8s.yaml: spec.implementation.bash.commands: unknown command "all". Use top-level command names from "lo --help".`},
 		{"twice", "    bash:\n      commands: [registry, registry]\n", `lok8s.yaml: spec.implementation.bash.commands: "registry" is listed twice.`},

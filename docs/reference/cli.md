@@ -196,38 +196,35 @@ atomic preflight. `--dry-run` is genuinely safe (it reimages nothing).
 Scaffold lok8s config from a correct template, so nothing is hand-written from imagination.
 
 ```bash
-lo init                                  # on a terminal: the wizard; otherwise: this help
-lo init --plan                           # what lo init sees here and the commands it would run; writes nothing
-lo init project [name] [--path <dir>] [--force] [--env mise|direnv|none] [--cluster <domain> --driver lo|kubeone|capi|kkp|kubehz-hosted] [--implementation go|bash]
-lo init service <name> [--path <dir>] [--force]
+lo init                                  # on a terminal: the screens; otherwise: this help
+lo init --plan                           # what lo init sees here and offers, as text; writes nothing
+lo init cluster [domain] [--driver lo|kubeone|capi|kkp|kubehz-hosted] [--no-active] [--force]
+lo init service [name] [--path <dir>] [--force]
 lo init test [--path <dir>] [--force]
+lo init project [name] [--path <dir>] [--force] [--env mise|direnv|none] [--cluster <domain> --driver <driver>] [--implementation go|bash]
 ```
 
-**Bare `lo init`** first detects where you stand, then asks. On a terminal (stdin and stdout are both a TTY, `CI` is unset, no `--yes`) it runs a wizard. The wizard prints a state card and asks the questions the situation calls for. Then it prints a summary of the files it will write and the commands it will run. It writes nothing before you confirm. Off a terminal, under `CI`, or with `--yes`, it prints this help and exits 0, as it always did.
+**Bare `lo init`** on a terminal (stdin and stdout are both a TTY, `CI` is unset, no `--yes`) has two modes. Where you stand selects the mode. Off a terminal, under `CI`, or with `--yes`, it prints this help and exits 0, as it always did.
 
-The card has the layout of the `lo up` header: one row per fact, the key on the left, the values joined with `·`. The first row is the project (or, outside a project, the directory): its name, the implementation, the branch and the count of uncommitted paths. The next rows are the clusters (grouped by driver, the active domain first), the toolchain (`.bin/b.yaml` and the count of pinned tools, or the count of missing ones), the environment file (and the bash tree, when present), `services.yaml` and `tests/`. A row that starts with `!` ends with the command that fixes it. A path is printed only when the working directory is not the project root (`directory`, relative to the root) or the repository root is not the project root (`repository`). On a terminal the keys are dim and the `!` is yellow; off a terminal (`--plan` in a pipe) the card is plain text.
+**Without a project here** (an empty directory, a directory without a project, a place below a git root without a project), `lo init` prints one welcome line and then the bootstrap screen. Every value on the screen has a default: the project name (the directory's name), the first cluster domain (`<name>.dev`), the driver (`lo`), the environment file (`mise.toml`, or `.envrc` when one exists), the toolchain (an install now, with the count of pinned tools) and `git init` (when git exists and there is no repository). Under the values, the screen lists the files it writes (`writes`), the commands it runs (`runs`) and, dim, the equivalent commands (`equivalent`). Then it asks one thing: `Create`, `Change details` or `Cancel`. `Change details` turns the values into fields, one per row. A help line under each field says what the value is and gives an example. Then the screen appears again. `Create` runs the plan and continues in project mode, with the card refreshed and a result line under it. `lo init` writes nothing before `Create`. `Cancel`, `Esc` and `Ctrl-C` write nothing and exit 1.
 
-Every answer has a flag twin on one of the subcommands below: `lo init project --env`, `--cluster`, `--driver`, `--implementation`, `lo init service <name>`, `lo init test`, `lo toolchain install --groups`, `lo assets eject bash`, `lo use <domain>`. The wizard fills the same options and calls the same functions. The summary prints the equivalent command lines, so a script can reproduce a run without the conversation. The wizard never overwrites an existing file, and a cluster spec that exists is listed as "keep". When a step fails, the wizard prints the failed command and the commands not run, so you can continue by hand.
+**In a project**, `lo init` runs project mode: the card, then one choice from what the project state allows, until `Exit`. The card has the layout of the `lo up` header: one row per fact, the key on the left, the values joined with `·`. The first row is the project: its name, the implementation, the branch and the count of uncommitted paths. The next rows are the clusters (grouped by driver, the active domain first), the toolchain (`.bin/b.yaml` and the count of pinned tools, or the count of missing ones), the environment file (and the bash tree, when present), `services.yaml` and `tests/`. A row that starts with `!` ends with the command that fixes it. The card prints a path in two cases only: the working directory is not the project root (`directory`, relative to the root), or the repository root is not the project root (`repository`). On a terminal the keys are dim and the `!` is yellow. Off a terminal the card is plain text.
 
-The five situations:
+The list offers `Add a cluster`, `Add a service`, `Add the test suite` (when there is no `tests/`), `Install the toolchain` (when `.bin/b.yaml` or a pinned tool is missing, with the count of missing tools), `Set the active domain` (with several clusters), `Eject the bash tree` (when `.lok8s/lo` is absent) or `Switch implementation` (when it is present), and `Exit`. An entry opens its screen: the values (prefilled, or a question when the screen needs one), `writes`, `runs`, `equivalent`, then `Create`, `Change details`, `Cancel`. When the action is done, `lo init` reads the state again and prints the card again, with a one-line result under it (`added  clusters/staging.dev/cluster.lok8s.yaml · active`). `Cancel` returns to the list. `Exit` prints the `next` line and exits 0. The `next` line names the step the state calls for: `lo toolchain install`, `lo init cluster`, `lo use <domain>`, `lo assets diff`, `lo up`, or `lo status`. `Ctrl-C` exits 0 too. An action writes only on its `Create`, so an exit never leaves a half-written state.
 
-| Where you stand | What the wizard offers |
-|---|---|
-| An empty directory (a `.git` entry does not count) | The welcome: project here, `git init` (when git is installed and there is no repository), the environment file, the first cluster spec (domain and driver), the toolchain and its groups, `lo use` for the new domain |
-| Inside a git repository, below its root, no project | The same, with the git root as the suggested directory and the environment file the root already has |
-| A non-empty directory without a project (no git, or at the git root) | What it sees, then the same with here or a subdirectory as the target, and `git init` when there is no repository |
-| A project root | The card, then a menu (`Add to <project>`): a cluster spec, a service, the test suite, an environment file, the toolchain, the implementation switch; nothing selected ends the run after the card |
-| Inside a project (a subdirectory, a service directory, a submodule under the umbrella project) | The card and the menu, plus "add this service to `services.yaml`" in a service directory (a kind-less `lok8s.yaml`) |
+Every entry has a verb. A script runs the verb instead, and the dim `equivalent` row of the screen prints it: `lo init cluster`, `lo init service`, `lo init test`, `lo toolchain install`, `lo use`, `lo assets eject bash`, `lo init project --implementation`. The screens and the verbs run the same functions. No screen overwrites an existing file, and the screen lists a cluster spec that exists as kept. When a step fails, `lo init` prints the failed command and the commands not run, so you can continue by hand.
 
-The project root is the nearest `clusters/` directory or `kind: Project` `lok8s.yaml` above the working directory (the same walk every command uses); an exported `PATH_BASE` does not move it, the wizard acts where you stand. A service directory below the root keeps the umbrella project as the root: `lo init` in `services/api/` offers to register `./services/api`.
+The project root is the nearest `clusters/` directory or `kind: Project` `lok8s.yaml` above the working directory (the same walk every command uses). An exported `PATH_BASE` does not move it: the screens act where you stand. Below the root (a subdirectory, a service directory, a submodule under the umbrella project) the card names the position, and project mode acts on the umbrella project.
 
 | Flag | Description |
 |------|-------------|
-| `--plan` | Print the state card (the same card the wizard prints) and the commands the defaults would run (or, in a project, the menu with its commands), then exit 0. Writes nothing and works off a terminal. |
-| `--yes`, `-y` | Never ask: print the help instead of the wizard (scripts, CI). |
-| `--dry-run`, `-n` | Run the wizard up to the summary and stop; writes nothing. Off the wizard (no terminal, `CI`, `--yes`) there is no conversation to stop, so it prints the plan like `--plan`. |
+| `--plan` | Print the mode's screen as text: the welcome and the bootstrap screen, or the card with the list and the next step. Exits 0, writes nothing, works off a terminal. |
+| `--yes`, `-y` | Never ask: print the help instead of the screens (scripts, CI). |
+| `--dry-run`, `-n` | The same as `--plan`. |
 
-The summary lists one line per step and the commands to run instead; when a step uses the network (the toolchain), the confirmation says so. Leaving the form (Ctrl-C, Esc) writes nothing and exits 1. The forms use one theme: the selection cursor and the chosen options in the green of `lo doctor`'s `✓`, no borders.
+The forms use one theme: the selection cursor and the chosen options in the green of `lo doctor`'s `✓`, no borders.
+
+**`lo init cluster [domain]`** (Go-only) writes `clusters/<domain>/cluster.lok8s.yaml` for `--driver` (default `lo`, the same file `lo init project --cluster` writes, see below) and makes the domain the active one (`lo use`). `--no-active` keeps the active domain. On a terminal without `--yes` it opens its screen first. The screen asks for the domain and the driver when the command line does not give them, shows `active` as a row you can change in the details, and writes on `Create`. Off a terminal, the command needs the domain.
 
 **`lo init project [name]`** writes the smallest project the binary needs, and nothing else: `clusters/` (one directory per domain goes here), a project-root `lok8s.yaml` (`kind: Project`, the marker `lo` resolves the root from; a service's `kind: Service` file is not one, so `lo` keeps walking up from inside a service directory), the `.gitignore` entries for the toolchain, kubeconfigs, built plugins and secret stores, and one shell environment file (`--env`). It uses no network and writes **no `.lok8s/` tree** (the framework assets a cluster references are embedded in the binary and ejected into `.lok8s/` on first use; see [`lo assets`](#lo-assets)) and no `.bin/`: the toolchain is the next step it prints, [`lo toolchain install`](#lo-toolchain). A re-run keeps every existing file (`--force` overwrites; `.gitignore` is only appended to). `name` defaults to the directory name. The target is the working directory (`--path` names another), never the ambient `PATH_BASE` of a direnv/mise shell.
 
@@ -235,16 +232,19 @@ The summary lists one line per step and the commands to run instead; when a step
 
 `--cluster <domain>` also writes the first cluster spec, `clusters/<domain>/cluster.lok8s.yaml`: the minimal file the readers accept (`apiVersion`, `kind`, `metadata.name` from the domain's first label, `spec.cluster.domain`, `spec.bootstrap`), in the shape [Cluster specs](specs.md) documents. `--driver` selects the kind: `lo` (kind on local Docker, the default), `kubeone`, `capi`, `kkp`, or `kubehz-hosted`. The `lo` file makes the `cilium` default explicit, because kind ships no CNI. The `kubehz-hosted` file is a `KubeOne` spec with `spec.kubehz.hosting: hosted` and the platform API URL. The two `KubeOne` files carry `spec.kubernetes.version` and `spec.provider` as commented stubs with the documented example values, under a "fill in before `lo provision`" header. The domain must match the rule `lo use` applies. `lo lint` accepts every file this writes. On an existing project, `lo init project --env none --cluster <domain> --driver <driver>` adds a spec and keeps everything else.
 
-`--implementation go|bash` sets `spec.implementation.default` in `lok8s.yaml` (see [Choosing the implementation](#choosing-the-implementation)). The file is created when it is missing; an existing file keeps its comments and its other keys. This is the flag twin of the wizard's implementation switch, and `lo assets eject bash` is the step before it when the project has no bash tree.
+`--implementation go|bash` sets `spec.implementation.default` in `lok8s.yaml` (see [Choosing the implementation](#choosing-the-implementation)). The file is created when it is missing; an existing file keeps its comments and its other keys. This is the verb behind project mode's `Switch implementation`; `lo assets eject bash` (project mode's `Eject the bash tree`) is the step before it when the project has no bash tree.
 
-**`lo init service <name>`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader.
+**`lo init service [name]`** scaffolds a bare per-service `lok8s.yaml` (shaped to pass the per-service validator), registers it in the project-root `services.yaml`, and ensures the project Tiltfile is the canonical 2-line loader. On a terminal without `--yes` it opens its screen first and asks for the name when the command line does not give it. Off a terminal it runs as before and needs the name.
 
-**`lo init test`** scaffolds a domain-parameterized [Playwright](https://playwright.dev) integration suite into `tests/` (default; override with `--path`). The generated suite is project- and domain-agnostic: it runs the SAME specs against your dev cluster, staging, and production by changing only `LOK8S_TEST_DOMAIN`. See [Testing](../guide/testing.md). It refuses to overwrite a non-empty directory unless `--force` (and even then copies file-by-file, preserving local additions).
+**`lo init test`** scaffolds a domain-parameterized [Playwright](https://playwright.dev) integration suite into `tests/` (default; override with `--path`). The generated suite is project- and domain-agnostic: it runs the SAME specs against your dev cluster, staging, and production by changing only `LOK8S_TEST_DOMAIN`. See [Testing](../guide/testing.md). It refuses to overwrite a non-empty directory unless `--force` (and even then copies file-by-file, preserving local additions). On a terminal without `--yes` it opens its screen first. Off a terminal it runs as before.
 
 | Flag | Description |
 |------|-------------|
 | `--path`, `-p` | Target directory (project dir / service dir / `tests/` dir) |
 | `--force`, `-f` | Overwrite existing files / non-empty target |
+| `--driver` | `cluster`, `project --cluster`: the driver of the spec |
+| `--no-active` | `cluster`: write the spec only, keep the active domain |
+| `--yes`, `-y`, `--plan`, `--dry-run`, `-n` | `cluster`, `service`, `test`: run with the values given and ask nothing; or print the screen as text and write nothing |
 | `--env` | `project`: the environment file, `mise` (default), `direnv` or `none` |
 | `--cluster`, `--driver` | `project`: also write `clusters/<domain>/cluster.lok8s.yaml` for that driver |
 | `--implementation` | `project`: set `spec.implementation.default` (`go` or `bash`) in `lok8s.yaml` |
@@ -509,7 +509,7 @@ Until WP8 lands, start the frozen tree directly from a checkout:
 
 The entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
 
-The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project` and `lo toolchain` have no builtin tool.
+The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project`, `lo init cluster` and `lo toolchain` have no builtin tool.
 
 ### lo kubeconfig
 

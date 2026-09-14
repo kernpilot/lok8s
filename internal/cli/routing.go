@@ -66,7 +66,7 @@ var refuseExempt = map[string]bool{"lint": true, "doctor": true, "help": true, "
 // subcommands (registered by their command file, not by goOnlyCommands):
 // routing the parent would take those away.
 var goOnlySubcommands = map[string][]string{
-	"init": {"project", "toolchain"},
+	"init": {"cluster", "project", "toolchain"},
 }
 
 // sharedState names the routed commands whose state Go also writes on

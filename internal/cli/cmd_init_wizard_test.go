@@ -1,11 +1,12 @@
 package cli
 
-// cmd_init_wizard_test.go — bare `lo init`: the help off a terminal,
-// under CI and with --yes (byte-identical to cmd.Help()); --plan writes
-// nothing and prints the card and the commands; the wizard, driven
-// through huh's accessible mode over a scripted reader, writes only
-// after the summary is confirmed and runs git and the toolchain through
-// fakes (never a real git, never the network).
+// cmd_init_wizard_test.go — bare `lo init` and the screen verbs: the
+// help off a terminal, under CI and with --yes (byte-identical to
+// cmd.Help()); --plan writes nothing and prints the mode's screen as
+// text; the bootstrap (mode 1) and project mode (mode 2), driven through
+// huh's accessible mode over a scripted reader, write only on a screen's
+// Create and run git and the toolchain through fakes (never a real git,
+// never the network).
 
 import (
 	"bytes"
@@ -25,8 +26,8 @@ import (
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
-// initGitFake answers `git rev-parse` (not a repository) and records
-// `git init`.
+// initGitFake answers `git rev-parse` (not a repository unless repo is
+// set), `symbolic-ref` (main) and records `git init`.
 type initGitFake struct {
 	calls []execx.Cmd
 	repo  string // the root rev-parse reports; "" = not a repository
@@ -52,7 +53,8 @@ func (g *initGitFake) Run(_ context.Context, c execx.Cmd) error {
 }
 
 // initSeams installs the test seams: a terminal state, a scripted form,
-// a git fake and a toolchain fake that records its call.
+// a git fake and a toolchain fake that records its call and lands a
+// b.yaml with no pins plus an executable b (every pinned tool present).
 type initSeams struct {
 	git       *initGitFake
 	toolchain []string
@@ -72,7 +74,9 @@ func installInitSeams(t *testing.T, interactive bool, script string) *initSeams 
 	initToolchainInstall = func(_ context.Context, base string, groups []string, dryRun bool, out, _ io.Writer) error {
 		s.toolchain = append(s.toolchain, fmt.Sprintf("%s %s dry=%v", base, strings.Join(groups, ","), dryRun))
 		fmt.Fprintln(out, "toolchain (fake)")
-		return nil
+		testutil.WriteFile(t, filepath.Join(base, ".bin", "b.yaml"), "binaries: {}\n")
+		testutil.WriteFile(t, filepath.Join(base, ".bin", "b"), "#!/bin/sh\n")
+		return os.Chmod(filepath.Join(base, ".bin", "b"), 0o755)
 	}
 	newRunner = func(*config.Paths) execx.Runner { return s.git }
 	t.Cleanup(func() {
@@ -97,6 +101,19 @@ func initHelpText(t *testing.T, p *config.Paths) string {
 		t.Fatal(err)
 	}
 	return b.String()
+}
+
+// projectRoot writes a project with one cluster spec (alpha.dev) and
+// returns its root; active names clusters/.active ("" = none).
+func projectRoot(t *testing.T, active string) string {
+	t.Helper()
+	root := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(root, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: acme\n")
+	testutil.WriteFile(t, filepath.Join(root, "clusters", "alpha.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: alpha\n")
+	if active != "" {
+		testutil.WriteFile(t, filepath.Join(root, "clusters", ".active"), active+"\n")
+	}
+	return root
 }
 
 func TestInitBareOffTerminalPrintsHelp(t *testing.T) {
@@ -136,73 +153,54 @@ func TestInitBareOffTerminalPrintsHelp(t *testing.T) {
 	}
 }
 
+// --plan in an empty directory: the welcome and the bootstrap screen as
+// text, no path, no colour, nothing written, no form.
 func TestInitPlanEmptyDirectory(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "shop")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
-	seams := installInitSeams(t, false, "")
-	p := synthProject(t)
-	stdout, stderr, err := runLo(t, NewRoot(p), "init", "--plan")
-	if err != nil || stderr != "" {
-		t.Fatalf("init --plan: %v\n%s", err, stderr)
-	}
-	for _, want := range []string{
-		"  shop  empty directory · no git repository\n",
-		"Plan (empty directory):\n",
-		"  1. project files: clusters/, lok8s.yaml, .gitignore entries, mise.toml\n",
-		"  2. git init: a git repository in .\n",
-		"  3. toolchain: .bin/b.yaml, b and the pinned toolchain into .bin/ (groups core,local; network)\n",
-		"Equivalent commands:\n  lo init project shop --env mise\n  git init\n  lo toolchain install --groups core,local\n",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("missing %q in:\n%s", want, stdout)
+	for _, args := range [][]string{{"init", "--plan"}, {"init", "--dry-run"}, {"init", "--yes", "--dry-run"}} {
+		dir := filepath.Join(t.TempDir(), "shop")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 0 {
-		t.Errorf("--plan wrote %v", entries)
-	}
-	if len(seams.toolchain) != 0 || len(seams.git.calls) != 1 || seams.git.calls[0].Args[0] != "rev-parse" {
-		t.Errorf("--plan ran something: toolchain=%v git=%v", seams.toolchain, seams.git.calls)
-	}
-	if strings.Contains(stdout, p.Base) {
-		t.Error("the ambient project leaked into the plan")
-	}
-	// One path form: the working directory is named, never printed as a
-	// path (the plan's commands run from it).
-	if strings.Contains(stdout, dir) || strings.Contains(stdout, "\033[") {
-		t.Errorf("a path or an escape sequence off a terminal:\n%s", stdout)
-	}
-}
-
-// Off the wizard --dry-run has no conversation to stop: it prints the
-// plan like --plan, with --yes and off a terminal alike, and writes
-// nothing.
-func TestInitDryRunOffTheWizardPrintsThePlan(t *testing.T) {
-	for _, args := range [][]string{{"init", "--dry-run"}, {"init", "--yes", "--dry-run"}} {
-		dir := t.TempDir()
 		t.Chdir(dir)
-		installInitSeams(t, false, "")
-		stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), args...)
+		seams := installInitSeams(t, false, "")
+		p := synthProject(t)
+		stdout, stderr, err := runLo(t, NewRoot(p), args...)
 		if err != nil || stderr != "" {
 			t.Fatalf("%v: %v\n%s", args, err, stderr)
 		}
-		if !strings.Contains(stdout, "  "+filepath.Base(dir)+"  empty directory · no git repository\n") || !strings.Contains(stdout, "  lo init project "+filepath.Base(dir)+" --env mise\n") || strings.Contains(stdout, "Usage:") {
-			t.Errorf("%v: stdout:\n%s", args, stdout)
+		for _, want := range []string{
+			"  lo init sets up a lok8s project in this directory: the project file, the first cluster spec, the toolchain.\n",
+			"  New project\n",
+			"  name         shop\n",
+			"  domain       shop.dev\n",
+			"  driver       lo · kind on local Docker (dev clusters)\n",
+			"  environment  mise.toml\n",
+			"  toolchain    install now · 8 tools · network\n",
+			"  git          initialise a repository\n",
+			"  writes       clusters/ · lok8s.yaml · .gitignore entries · mise.toml · clusters/shop.dev/cluster.lok8s.yaml · .bin/b.yaml · .bin/ (the pinned tools) · clusters/.active\n",
+			"  runs         git init · lo toolchain install (network) · lo use shop.dev\n",
+			"  equivalent   lo init project shop --env mise --cluster shop.dev --driver lo · git init · lo toolchain install --groups core,local · lo use shop.dev\n",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("%v: missing %q in:\n%s", args, want, stdout)
+			}
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
-			t.Errorf("%v: wrote %v", args, entries)
+			t.Errorf("%v: --plan wrote %v", args, entries)
+		}
+		if len(seams.toolchain) != 0 || len(seams.git.calls) != 1 || seams.git.calls[0].Args[0] != "rev-parse" || seams.formOut.Len() != 0 {
+			t.Errorf("%v: --plan ran something: toolchain=%v git=%v form=%q", args, seams.toolchain, seams.git.calls, seams.formOut.String())
+		}
+		if strings.Contains(stdout, p.Base) || strings.Contains(stdout, dir) || strings.Contains(stdout, "\033[") || strings.Contains(stdout, "Usage:") {
+			t.Errorf("%v: a path, an escape sequence or the help:\n%s", args, stdout)
 		}
 	}
 }
 
+// --plan in a project: the card, the list as text with the twins, the
+// next step; no doctor section, no path, no colour, no form.
 func TestInitPlanProjectRoot(t *testing.T) {
-	root := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(root, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: acme\n")
-	testutil.WriteFile(t, filepath.Join(root, "clusters", "alpha.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: alpha\n")
-	testutil.WriteFile(t, filepath.Join(root, "clusters", ".active"), "alpha.dev\n")
+	root := projectRoot(t, "alpha.dev")
 	t.Chdir(root)
 	seams := installInitSeams(t, false, "")
 	seams.git.repo = root
@@ -215,29 +213,29 @@ func TestInitPlanProjectRoot(t *testing.T) {
 		"  clusters     alpha.dev (kind, active)\n",
 		"! toolchain    none · lo toolchain install\n",
 		"! environment  none · lo init project --env mise|direnv\n",
-		"Nothing to do.\n",
-		"Available (lo init on a terminal asks; or run the command):\n",
-		"lo init project --env none --cluster <domain> --driver <driver>",
+		"  actions     Add a cluster · Add a service · Add the test suite · Install the toolchain · Eject the bash tree · Exit\n",
+		"  equivalent  lo init cluster <domain> · lo init service <name> · lo init test · lo toolchain install · lo assets eject bash\n",
+		"  next        lo toolchain install\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, stdout)
 		}
 	}
-	// The card carries no doctor section (that is `lo doctor`), no path
-	// at the root and no colour off a terminal.
-	for _, no := range []string{"--- ", root, "\033["} {
+	for _, no := range []string{"--- ", root, "\033[", "New project"} {
 		if strings.Contains(stdout, no) {
 			t.Errorf("unexpected %q in:\n%s", no, stdout)
 		}
 	}
+	if seams.formOut.Len() != 0 {
+		t.Errorf("--plan opened a form:\n%s", seams.formOut.String())
+	}
 }
 
-// Below the root the card names the position relative to it; the repository
-// row appears only when the repository root is not the project root.
+// Below the root the card names the position relative to it; the
+// repository row appears only when the repository root is not the
+// project root.
 func TestInitPlanInsideProjectNamesThePosition(t *testing.T) {
-	root := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(root, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: acme\n")
-	os.MkdirAll(filepath.Join(root, "clusters"), 0o755)
+	root := projectRoot(t, "")
 	sub := filepath.Join(root, "services", "api")
 	testutil.WriteFile(t, filepath.Join(sub, "lok8s.yaml"), "build:\n  context: .\n")
 	t.Chdir(sub)
@@ -255,191 +253,285 @@ func TestInitPlanInsideProjectNamesThePosition(t *testing.T) {
 	}
 }
 
-// The welcome conversation end to end: every answer, the confirmation,
-// then the files, git init through the fake and the toolchain through
-// its seam.
-func TestInitWizardEmptyDirectory(t *testing.T) {
+// Mode 1 into mode 2: the welcome, the bootstrap screen, Create; the
+// files, git init through the fake, the toolchain through its seam, lo
+// use; then the refreshed card with the result line and the list; Exit.
+func TestInitBootstrapThenProjectMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "acme")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	seams := installInitSeams(t, true, strings.Join([]string{
-		".",        // directory
-		"shop",     // name
-		"1",        // env: mise
-		"y",        // git init
-		"demo.dev", // domain
-		"1",        // driver: lo
-		"y",        // toolchain
-		"0",        // groups: defaults
-		"y",        // confirm
-	}, "\n")+"\n")
+	seams := installInitSeams(t, true, "1\n5\n")
 	stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
 	if err != nil {
-		t.Fatalf("wizard: %v\n%s\n%s", err, stdout, stderr)
+		t.Fatalf("init: %v\n%s\n%s", err, stdout, stderr)
 	}
 	for _, want := range []string{
-		// The wizard runs on a terminal: the name is bold.
-		"  \033[1macme\033[0m  empty directory · no git repository\n",
-		"Equivalent commands:\n  lo init project shop --env mise --cluster demo.dev --driver lo\n  git init\n  lo toolchain install --groups core,local\n  lo use demo.dev\n",
-		"==> lo init project shop --env mise --cluster demo.dev --driver lo\n",
+		"  \033[1mlo init sets up a lok8s project in this directory: the project file, the first cluster spec, the toolchain.\033[0m\n",
+		"  \033[1mNew project\033[0m\n",
+		"  \033[2mname\033[0m         acme\n",
+		"==> lo init project acme --env mise --cluster acme.dev --driver lo\n",
 		"Scaffolded " + filepath.Join(dir, "lok8s.yaml") + "\n",
-		"Scaffolded " + filepath.Join(dir, "clusters", "demo.dev", "cluster.lok8s.yaml") + "\n",
+		"Scaffolded " + filepath.Join(dir, "clusters", "acme.dev", "cluster.lok8s.yaml") + "\n",
 		"==> git init\nInitialized empty Git repository (fake)\n",
 		"==> lo toolchain install --groups core,local\ntoolchain (fake)\n",
-		"==> lo use demo.dev\nActive domain: demo.dev\n",
+		"==> lo use acme.dev\nActive domain: acme.dev\n",
 		"Done.\n",
+		// Mode 2: the card of the new project, the result line, then Exit
+		// with the next step.
+		"  \033[1macme\033[0m         project · go · no git repository\n",
+		"  \033[2mclusters\033[0m     acme.dev (kind, active)\n",
+		"  \033[2mtoolchain\033[0m    .bin/b.yaml · 1 tool present\n",
+		"  \033[2menvironment\033[0m  mise.toml\n",
+		"  \033[2mcreated\033[0m      acme · clusters/acme.dev · toolchain 8 tools · git initialised\n",
+		"  \033[2mnext\033[0m  lo up\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, stdout)
 		}
 	}
-	for _, f := range []string{"lok8s.yaml", "mise.toml", ".gitignore", "clusters/.gitkeep", "clusters/demo.dev/cluster.lok8s.yaml"} {
+	if !strings.Contains(seams.formOut.String(), "1. Add a cluster\n2. Add a service\n3. Add the test suite\n4. Eject the bash tree\n5. Exit\n") {
+		t.Errorf("the list:\n%s", seams.formOut.String())
+	}
+	for _, f := range []string{"lok8s.yaml", "mise.toml", ".gitignore", "clusters/.gitkeep", "clusters/acme.dev/cluster.lok8s.yaml", "clusters/.active", ".bin/b.yaml"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Errorf("%s not written", f)
 		}
 	}
-	raw, _ := os.ReadFile(filepath.Join(dir, "lok8s.yaml"))
-	if !strings.Contains(string(raw), "  name: shop\n") {
-		t.Errorf("lok8s.yaml:\n%s", raw)
-	}
-	raw, _ = os.ReadFile(filepath.Join(dir, "clusters", ".active"))
-	if string(raw) != "demo.dev\n" {
+	raw, _ := os.ReadFile(filepath.Join(dir, "clusters", ".active"))
+	if string(raw) != "acme.dev\n" {
 		t.Errorf(".active = %q", raw)
 	}
-	// git: the detection read, then init in the project dir.
-	if len(seams.git.calls) != 2 || seams.git.calls[1].Args[0] != "init" || seams.git.calls[1].Dir != dir {
+	// git: the detection read, init in the project dir, the read again
+	// for the refreshed card.
+	if len(seams.git.calls) != 3 || seams.git.calls[1].Args[0] != "init" || seams.git.calls[1].Dir != dir {
 		t.Errorf("git calls: %+v", seams.git.calls)
 	}
 	if len(seams.toolchain) != 1 || seams.toolchain[0] != dir+" core,local dry=false" {
 		t.Errorf("toolchain calls: %v", seams.toolchain)
 	}
-	// Nothing was written before the confirmation: the summary precedes
-	// the first Scaffolded line.
-	if strings.Index(stdout, "Equivalent commands:") > strings.Index(stdout, "Scaffolded ") {
-		t.Error("files written before the summary")
-	}
-}
-
-func TestInitWizardDryRunAndDecline(t *testing.T) {
-	for _, c := range []struct {
-		name   string
-		args   []string
-		script string
-		want   string
-	}{
-		{"dry-run", []string{"init", "--dry-run"}, ".\nacme\n1\ny\n\n1\nn\n0\ny\n", "dry run — nothing was written\n"},
-		{"declined", []string{"init"}, ".\nacme\n1\ny\n\n1\nn\n0\nn\n", "Nothing written.\n"},
-	} {
-		dir := t.TempDir()
-		t.Chdir(dir)
-		seams := installInitSeams(t, true, c.script)
-		stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), c.args...)
-		if err != nil {
-			t.Fatalf("%s: %v\n%s", c.name, err, stderr)
-		}
-		if !strings.Contains(stdout, c.want) || !strings.Contains(stdout, "lo init project acme --env mise\n") {
-			t.Errorf("%s: stdout:\n%s", c.name, stdout)
-		}
-		entries, _ := os.ReadDir(dir)
-		if len(entries) != 0 {
-			t.Errorf("%s: wrote %v", c.name, entries)
-		}
-		if len(seams.git.calls) != 1 || len(seams.toolchain) != 0 {
-			t.Errorf("%s: ran git=%v toolchain=%v", c.name, seams.git.calls, seams.toolchain)
-		}
-		if c.name == "dry-run" && strings.Contains(seams.formOut.String(), "Write these files") {
-			t.Error("dry-run asked for confirmation")
-		}
-	}
-}
-
-// Inside a service directory: the registration lands in the root's
-// services.yaml with the path relative to the root, and the Tiltfile is
-// ensured; the service file itself is untouched.
-func TestInitWizardRegistersServiceDirectory(t *testing.T) {
-	root := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(root, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: acme\n")
-	os.MkdirAll(filepath.Join(root, "clusters"), 0o755)
-	svc := filepath.Join(root, "services", "api")
-	testutil.WriteFile(t, filepath.Join(svc, "lok8s.yaml"), "build:\n  context: .\n  dockerfile: Mine\n")
-	t.Chdir(svc)
-	seams := installInitSeams(t, true, "1\n0\ny\n")
-	seams.git.repo = root
-	stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
-	if err != nil {
-		t.Fatalf("wizard: %v\n%s", err, stderr)
-	}
-	if !strings.Contains(stdout, "==> lo init service api --path ./services/api\n") || !strings.Contains(stdout, "Registered services.api.path = ./services/api in "+filepath.Join(root, "services.yaml")+"\n") {
-		t.Errorf("stdout:\n%s", stdout)
-	}
-	raw, _ := os.ReadFile(filepath.Join(root, "services.yaml"))
-	if !strings.Contains(string(raw), "  api:\n    path: ./services/api\n") {
-		t.Errorf("services.yaml:\n%s", raw)
-	}
-	if _, err := os.Stat(filepath.Join(root, "Tiltfile")); err != nil {
-		t.Error("Tiltfile not ensured")
-	}
-	raw, _ = os.ReadFile(filepath.Join(svc, "lok8s.yaml"))
-	if !strings.Contains(string(raw), "dockerfile: Mine") {
-		t.Error("the service file was rewritten")
+	// Nothing was written before Create: the screen precedes the first
+	// Scaffolded line.
+	if strings.Index(stdout, "equivalent") > strings.Index(stdout, "Scaffolded ") {
+		t.Error("files written before the screen")
 	}
 	cwd, _ := os.Getwd()
-	if cwd != svc {
+	if cwd != dir {
 		t.Errorf("cwd not restored: %s", cwd)
 	}
 }
 
-// The project menu end to end: a cluster spec, the tests, the
-// implementation switch (the tree ejected first) and an environment
-// file, through the same functions the subcommands run.
-func TestInitWizardProjectRootMenu(t *testing.T) {
-	root := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(root, "lok8s.yaml"), "apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: acme\n")
-	os.MkdirAll(filepath.Join(root, "clusters"), 0o755)
+// Cancel on the bootstrap screen: nothing written, rc 1 with the line.
+func TestInitBootstrapCancelWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	seams := installInitSeams(t, true, "3\n")
+	_, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "lo init: cancelled, nothing written") {
+		t.Errorf("cancel: err=%v stderr=%q", err, stderr)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("cancel wrote %v", entries)
+	}
+	if len(seams.git.calls) != 1 || len(seams.toolchain) != 0 {
+		t.Errorf("cancel ran git=%v toolchain=%v", seams.git.calls, seams.toolchain)
+	}
+}
+
+// Mode 2: Add a cluster, its screen, Create; the card again with the
+// result line and the new cluster; Exit.
+func TestInitProjectModeAddClusterThenBack(t *testing.T) {
+	root := projectRoot(t, "")
 	t.Chdir(root)
-	// menu: cluster (1), tests (3), env (4), implementation (6); details:
-	// domain, driver kubeone (2), use yes; env direnv (2); confirm.
-	seams := installInitSeams(t, true, "1\n3\n4\n6\n0\nbeta.cloud\n2\ny\n2\ny\n")
+	// cluster (1): domain, driver default, active default (yes: no active
+	// domain), Create; then Exit, 7th once "Set the active domain" joins
+	// the list.
+	seams := installInitSeams(t, true, "1\nbeta.dev\n\n\n1\n7\n")
 	seams.git.repo = root
 	stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
 	if err != nil {
-		t.Fatalf("wizard: %v\n%s\n%s", err, stdout, stderr)
+		t.Fatalf("init: %v\n%s\n%s", err, stdout, stderr)
 	}
 	for _, want := range []string{
-		"==> lo init project --env direnv\n",
-		"==> lo init project --env none --cluster beta.cloud --driver kubeone\n",
-		"==> lo assets eject bash\n",
-		"==> lo init project --env none --implementation bash\n",
-		"Set spec.implementation.default: bash in " + filepath.Join(root, "lok8s.yaml") + "\n",
-		"==> lo use beta.cloud\nActive domain: beta.cloud\n",
-		"==> lo init test\n",
+		"\033[33m!\033[0m \033[2mclusters\033[0m     alpha.dev (kind) · none active · lo use <domain>\n",
+		"  \033[1mNew cluster\033[0m\n",
+		"  \033[2mactive\033[0m      yes (lo use beta.dev)\n",
+		"==> lo init cluster beta.dev --driver lo\n",
+		"Scaffolded " + filepath.Join(root, "clusters", "beta.dev", "cluster.lok8s.yaml") + "\n",
+		"==> lo use beta.dev\nActive domain: beta.dev\n",
+		"  \033[2mclusters\033[0m     beta.dev (kind, active) · alpha.dev (kind)\n",
+		"  \033[2madded\033[0m        clusters/beta.dev/cluster.lok8s.yaml · active\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, stdout)
 		}
 	}
-	for _, f := range []string{".envrc", "clusters/beta.cloud/cluster.lok8s.yaml", ".lok8s/lo", "tests/playwright.config.ts"} {
-		if _, err := os.Stat(filepath.Join(root, f)); err != nil {
-			t.Errorf("%s not written", f)
+	if n := strings.Count(stdout, "  \033[1macme\033[0m         project · go · main\n"); n != 2 {
+		t.Errorf("card printed %d times, want 2:\n%s", n, stdout)
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, "clusters", ".active"))
+	if string(raw) != "beta.dev\n" {
+		t.Errorf(".active = %q", raw)
+	}
+	// The list after the action offers the active-domain entry (two
+	// clusters now); Exit wrote nothing more.
+	if !strings.Contains(seams.formOut.String(), "5. Set the active domain\n6. Eject the bash tree\n7. Exit\n") {
+		t.Errorf("the refreshed list:\n%s", seams.formOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".lok8s")); err == nil {
+		t.Error("Exit ran an action")
+	}
+}
+
+// Exit leaves project mode with the next line and nothing written; the
+// list was shown, no screen opened. EOF at the first entry's prompt
+// (nothing more to read) leaves with nothing written too.
+func TestInitProjectModeExitWritesNothing(t *testing.T) {
+	for _, script := range []string{"6\n", ""} {
+		root := projectRoot(t, "alpha.dev")
+		t.Chdir(root)
+		before, _ := os.ReadDir(root)
+		seams := installInitSeams(t, true, script)
+		seams.git.repo = root
+		stdout, stderr, err := runLo(t, NewRoot(synthProject(t)), "init")
+		if err != nil || stderr != "" {
+			t.Fatalf("%q: %v\n%s", script, err, stderr)
+		}
+		after, _ := os.ReadDir(root)
+		if len(after) != len(before) {
+			t.Errorf("%q: wrote %v", script, after)
+		}
+		if !strings.Contains(seams.formOut.String(), "6. Exit\n") || strings.Contains(stdout, "==> ") {
+			t.Errorf("%q: form:\n%s\nstdout:\n%s", script, seams.formOut.String(), stdout)
+		}
+		if script != "" && !strings.Contains(stdout, "  \033[2mnext\033[0m  lo toolchain install\n") {
+			t.Errorf("%q: no next line:\n%s", script, stdout)
 		}
 	}
-	impl, err := config.LoadImplementation(root)
-	if err != nil || impl.Default != config.ImplBash {
-		t.Errorf("implementation: %+v %v", impl, err)
+}
+
+// `lo init cluster`: off a terminal the domain is required and the spec
+// is written with lo use; --no-active keeps the active domain; --plan
+// prints the screen; on a terminal the details are asked.
+func TestInitClusterVerb(t *testing.T) {
+	p := synthProject(t)
+	installInitSeams(t, false, "")
+	_, stderr, err := runLo(t, NewRoot(p), "init", "cluster")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "a domain is required") {
+		t.Errorf("no domain: err=%v stderr=%q", err, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(root, "mise.toml")); err == nil {
-		t.Error("mise.toml written beside the chosen .envrc")
+	stdout, _, err := runLo(t, NewRoot(p), "init", "cluster", "x.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "==> lo init cluster x.dev --driver lo\n") || !strings.Contains(stdout, "==> lo use x.dev\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(p.Clusters, "x.dev", "cluster.lok8s.yaml")); err != nil {
+		t.Error("spec not written")
+	}
+	raw, _ := os.ReadFile(filepath.Join(p.Clusters, ".active"))
+	if string(raw) != "x.dev\n" {
+		t.Errorf(".active = %q", raw)
+	}
+
+	stdout, _, err = runLo(t, NewRoot(p), "init", "cluster", "y.cloud", "--driver", "kubeone", "--no-active")
+	if err != nil || strings.Contains(stdout, "lo use") {
+		t.Errorf("no-active: %v\n%s", err, stdout)
+	}
+	raw, _ = os.ReadFile(filepath.Join(p.Clusters, ".active"))
+	if string(raw) != "x.dev\n" {
+		t.Errorf(".active changed: %q", raw)
+	}
+	if _, _, err := runLo(t, NewRoot(p), "init", "cluster", "y.cloud", "--driver", "nope", "-y"); err == nil {
+		t.Error("an unknown driver accepted")
+	}
+
+	stdout, _, err = runLo(t, NewRoot(p), "init", "cluster", "z.dev", "--plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "  New cluster\n  domain      z.dev\n") || !strings.Contains(stdout, "  equivalent  lo init cluster z.dev --driver lo · lo use z.dev\n") {
+		t.Errorf("plan:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(p.Clusters, "z.dev")); err == nil {
+		t.Error("--plan wrote the spec")
+	}
+
+	// On a terminal: the domain and the driver asked, active kept as
+	// given on the command line, Create.
+	installInitSeams(t, true, "w.dev\n2\n1\n")
+	stdout, _, err = runLo(t, NewRoot(p), "init", "cluster", "--no-active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "  \033[2mequivalent\033[0m  \033[2mlo init cluster w.dev --driver kubeone --no-active\033[0m\n") || !strings.Contains(stdout, "Scaffolded "+filepath.Join(p.Clusters, "w.dev", "cluster.lok8s.yaml")+"\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	// --yes asks nothing.
+	installInitSeams(t, true, "")
+	if _, _, err := runLo(t, NewRoot(p), "init", "cluster", "v.dev", "--yes"); err != nil {
+		t.Errorf("--yes: %v", err)
+	}
+}
+
+// `lo init service` and `lo init test` on a terminal open their screen;
+// the values given are fixed rows.
+func TestInitServiceAndTestVerbScreens(t *testing.T) {
+	p := synthProject(t)
+	seams := installInitSeams(t, true, "api\n\n1\n")
+	stdout, _, err := runLo(t, NewRoot(p), "init", "service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One step: no echo line, the verb's own output.
+	if !strings.Contains(stdout, "  \033[1mNew service\033[0m\n") || !strings.Contains(stdout, "Scaffolded ./api/lok8s.yaml\n") || strings.Contains(stdout, "==> ") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(p.Base, "api", "lok8s.yaml")); err != nil {
+		t.Error("service not written")
+	}
+	if !strings.Contains(seams.formOut.String(), "Name") {
+		t.Errorf("the name not asked:\n%s", seams.formOut.String())
+	}
+
+	seams = installInitSeams(t, true, "1\n")
+	stdout, _, err = runLo(t, NewRoot(p), "init", "service", "web", "--path", "./services/web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(seams.formOut.String(), "Change details") || !strings.Contains(stdout, "  \033[2mpath\033[0m        ./services/web\n") {
+		t.Errorf("given values asked, or the row missing:\nform:\n%s\nstdout:\n%s", seams.formOut.String(), stdout)
+	}
+
+	installInitSeams(t, true, "1\n")
+	stdout, _, err = runLo(t, NewRoot(p), "init", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "  \033[1mTest suite\033[0m\n") || !strings.Contains(stdout, "Scaffolded Playwright test suite into ") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(p.Base, "tests", "playwright.config.ts")); err != nil {
+		t.Error("tests not written")
+	}
+	// Cancel writes nothing: the name and the path asked, then Cancel.
+	installInitSeams(t, true, "shop\n\n3\n")
+	if _, _, err := runLo(t, NewRoot(p), "init", "service"); !errors.Is(err, ErrHandled) {
+		t.Errorf("cancel: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.Base, "shop")); err == nil {
+		t.Error("cancel wrote the service")
 	}
 }
 
 // A step that fails mid-plan: the failed command and the ones never
 // started are printed so the user can continue by hand.
-func TestInitWizardFailureListsWhatWasNotRun(t *testing.T) {
+func TestInitBootstrapFailureListsWhatWasNotRun(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	seams := installInitSeams(t, true, ".\nacme\n1\ny\ndemo.dev\n1\ny\n0\ny\n")
+	installInitSeams(t, true, "1\n")
 	prev := initToolchainInstall
 	initToolchainInstall = func(context.Context, string, []string, bool, io.Writer, io.Writer) error {
 		return errors.New("download refused (fake)")
@@ -449,7 +541,8 @@ func TestInitWizardFailureListsWhatWasNotRun(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "download refused") {
 		t.Fatalf("err %v", err)
 	}
-	if !strings.Contains(stdout, "failed: lo toolchain install --groups core,local\nnot run:\n  lo use demo.dev\n") {
+	name := initctx.DefaultName(dir)
+	if !strings.Contains(stdout, "failed: lo toolchain install --groups core,local\nnot run:\n  lo use "+name+".dev\n") {
 		t.Errorf("stdout:\n%s", stdout)
 	}
 	if strings.Contains(stdout, "\nDone.\n") {
@@ -458,16 +551,17 @@ func TestInitWizardFailureListsWhatWasNotRun(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "clusters", ".active")); err == nil {
 		t.Error("lo use ran after the failure")
 	}
-	_ = seams
 }
 
 func TestInitAbort(t *testing.T) {
-	var b bytes.Buffer
-	if err := initAbort(initctx.ErrAborted, &b); !errors.Is(err, ErrHandled) || !strings.Contains(b.String(), "lo init: aborted, nothing written") {
-		t.Errorf("abort: %v %q", err, b.String())
+	for _, sentinel := range []error{initctx.ErrAborted, initctx.ErrCancelled} {
+		var b bytes.Buffer
+		if err := initAbort(sentinel, &b); !errors.Is(err, ErrHandled) || !strings.Contains(b.String(), "lo init: cancelled, nothing written") {
+			t.Errorf("abort: %v %q", err, b.String())
+		}
 	}
 	other := errors.New("boom")
-	if err := initAbort(other, &b); !errors.Is(err, other) {
+	if err := initAbort(other, io.Discard); !errors.Is(err, other) {
 		t.Errorf("other error mapped: %v", err)
 	}
 }

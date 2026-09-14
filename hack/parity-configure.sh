@@ -391,9 +391,11 @@ PATH_SECRETS="${PROJ}/clusters" check - doctor       # set: the same line on bot
 
 # ── lo init --plan (Go-only contract) ────────────────────────────────────────
 # Bare `lo init` off a terminal prints the help (parity-leaves pins rc 0);
-# `lo init --plan` prints the state card (the two-column layout, the
-# project name first, no doctor section) and the commands the defaults
-# would run, exits 0 and writes nothing, on and off a terminal. Its own
+# `lo init --plan` prints the mode's screen as text — in a project the
+# state card (the two-column layout, the project name first, no doctor
+# section), the action list and the next step; elsewhere the welcome
+# and the bootstrap screen with the defaults — exits 0 and writes
+# nothing, on and off a terminal. Its own
 # synthetic projects (an empty directory, a project root), the tree
 # snapshotted before and after. Both runs are the Go binary; the bash
 # tree has no wizard.
@@ -413,21 +415,23 @@ if (( plan_rc == 0 )) && [[ ! -s "${WORK}/go.err" ]] \
    && grep -q '^  parity  *project · go' "${WORK}/go.out" \
    && grep -q '^  clusters  *theta.dev (kind, active)$' "${WORK}/go.out" \
    && ! grep -q '^--- ' "${WORK}/go.out" \
-   && grep -q '^Nothing to do.$' "${WORK}/go.out" \
-   && grep -q 'lo init project --env none --cluster <domain> --driver <driver>' "${WORK}/go.out" \
+   && grep -q '^  actions  *Add a cluster · Add a service' "${WORK}/go.out" \
+   && grep -q '^  equivalent  *lo init cluster <domain> · lo init service <name>' "${WORK}/go.out" \
+   && grep -q '^  next  *lo ' "${WORK}/go.out" \
    && [[ "$(plan_snapshot "${PLAN}")" == "${plan_before}" ]]; then
-  echo "ok: lo init --plan in a project root: rc 0, the card, nothing to do, no writes"
+  echo "ok: lo init --plan in a project root: rc 0, the card, the list, the next step, no writes"
 else
-  fail "lo init --plan in a project root: rc ${plan_rc}, or the card/menu missing, or the tree changed"
+  fail "lo init --plan in a project root: rc ${plan_rc}, or the card/list missing, or the tree changed"
 fi
 plan_rc=0
 (cd "${WORK}/plan-empty" && "${LO_BIN}" init --plan </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || plan_rc=$?
 if (( plan_rc == 0 )) && [[ ! -s "${WORK}/go.err" ]] \
-   && grep -q '^  plan-empty  empty directory · no git' "${WORK}/go.out" \
-   && grep -q '^  lo init project plan-empty --env mise$' "${WORK}/go.out" \
-   && grep -q '^  lo toolchain install --groups core,local$' "${WORK}/go.out" \
+   && grep -q '^  lo init sets up a lok8s project in this directory' "${WORK}/go.out" \
+   && grep -q '^  name  *plan-empty$' "${WORK}/go.out" \
+   && grep -q '^  domain  *plan-empty.dev$' "${WORK}/go.out" \
+   && grep -q '^  equivalent  *lo init project plan-empty --env mise --cluster plan-empty.dev --driver lo · git init · lo toolchain install --groups core,local · lo use plan-empty.dev$' "${WORK}/go.out" \
    && [[ -z "$(find "${WORK}/plan-empty" -mindepth 1 -print -quit)" ]]; then
-  echo "ok: lo init --plan in an empty directory: rc 0, the defaults as commands, no writes"
+  echo "ok: lo init --plan in an empty directory: rc 0, the welcome, the bootstrap screen with the defaults, no writes"
 else
   fail "lo init --plan in an empty directory: rc ${plan_rc}, or the commands missing, or something was written"
 fi

@@ -143,6 +143,10 @@ type Project struct {
 	Domains []Domain
 	// Active is clusters/.active ("" when unset or invalid).
 	Active string
+	// Kubeconfig is whether the active domain's cluster has a kubeconfig
+	// under .kubeconfig/ (<metadata.name>.yaml: the cluster was
+	// provisioned once).
+	Kubeconfig bool
 	// EnvFile is the environment file present: "mise" (mise.toml),
 	// "direnv" (.envrc), "" (none). With both present, mise.
 	EnvFile string
@@ -320,6 +324,9 @@ func detectProject(root, cwd string) *Project {
 			p.Active = active
 		}
 	}
+	if name := specName(filepath.Join(clusters, p.Active, "cluster.lok8s.yaml")); p.Active != "" && name != "" {
+		p.Kubeconfig = fsutil.FileExists(filepath.Join(root, ".kubeconfig", name+".yaml"))
+	}
 	switch {
 	case fsutil.FileExists(filepath.Join(root, "mise.toml")):
 		p.EnvFile = "mise"
@@ -356,6 +363,23 @@ func projectFileName(path string) (bool, string) {
 		return false, ""
 	}
 	return true, doc.Metadata.Name
+}
+
+// specName reads a cluster spec's metadata.name ("" when unreadable).
+func specName(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Metadata struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	return doc.Metadata.Name
 }
 
 // isServiceFile reports whether path is a lok8s.yaml without a kind: the

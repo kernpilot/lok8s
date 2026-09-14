@@ -189,30 +189,15 @@ func TestPlural(t *testing.T) {
 	}
 }
 
-func TestWriteSummaryAndOptions(t *testing.T) {
-	cwd := filepath.Join(t.TempDir(), "acme")
-	s := State{Cwd: cwd, Empty: true, Git: Git{Available: true}}
+func TestWriteNext(t *testing.T) {
 	var b bytes.Buffer
-	WriteSummary(&b, Decide(s, Answers{Dir: "sub", Domain: "d.dev", Use: true, GitInit: true}), cwd)
-	contains(t, b.String(),
-		"Plan (empty directory):\n",
-		"  1. project files: clusters/, lok8s.yaml, .gitignore entries, mise.toml, clusters/d.dev/cluster.lok8s.yaml (lo)\n",
-		"  2. git init: a git repository in sub\n",
-		"  3. use: clusters/.active = d.dev\n",
-		"Equivalent commands:\n  cd sub\n  lo init project sub --env mise --path sub --cluster d.dev --driver lo\n  git init\n  lo use d.dev\n")
-
-	b.Reset()
-	WriteSummary(&b, Plan{}, cwd)
-	if b.String() != "Nothing to do.\n" {
-		t.Errorf("empty plan: %q", b.String())
+	WriteNext(&b, "lo up", false)
+	if b.String() != "  next  lo up\n" {
+		t.Errorf("next: %q", b.String())
 	}
-
 	b.Reset()
-	WriteOptions(&b, s)
-	if b.String() != "" {
-		t.Errorf("options without a project: %q", b.String())
+	WriteNext(&b, "lo up", true)
+	if b.String() != "  \033[2mnext\033[0m  lo up\n" {
+		t.Errorf("next on a terminal: %q", b.String())
 	}
-	root := t.TempDir()
-	WriteOptions(&b, projectState(root, true))
-	contains(t, b.String(), "Available (lo init on a terminal asks; or run the command):\n", "Add a cluster spec", "lo init project --env none --cluster <domain> --driver <driver>", "lo init test")
 }

@@ -1,7 +1,7 @@
 package initctx
 
-// card.go — the state card, the plan summary and the option hints of a
-// bare `lo init`.
+// card.go — the state card of a bare `lo init`, and the row layout the
+// screens share.
 //
 // The card is the run header's two-column layout (`lo up`): a lowercase
 // key, two spaces past the longest key, the values joined with ` · `. The
@@ -22,16 +22,23 @@ import (
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// row is one line of the card.
+// row is one line of the card or a screen.
 type row struct {
 	key, value string
-	// warn marks a row the user can act on (the `!` marker).
-	warn bool
+	// warn marks a row the user can act on (the `!` marker); dim mutes
+	// the value (the equivalent command lines).
+	warn, dim bool
 }
 
-// WriteCard prints the state card.
-func WriteCard(w io.Writer, s State) {
-	writeRows(w, cardRows(s), ui.Paint(s.Terminal.StdoutTTY), true)
+// WriteCard prints the state card; extra rows (the result of the last
+// action) follow it in the same columns.
+func WriteCard(w io.Writer, s State, extra ...row) {
+	writeRows(w, append(cardRows(s), extra...), ui.Paint(s.Terminal.StdoutTTY), true)
+}
+
+// WriteNext prints the `next` line: the step the state calls for.
+func WriteNext(w io.Writer, next string, paint ui.Paint) {
+	writeRows(w, []row{{key: "next", value: next}}, paint, false)
 }
 
 // writeRows prints rows in the two-column layout. heading makes the
@@ -50,8 +57,12 @@ func writeRows(w io.Writer, rows []row, paint ui.Paint, heading bool) {
 		if heading && i == 0 {
 			key = paint.Bold(r.key)
 		}
+		value := r.value
+		if r.dim {
+			value = paint.Dim(value)
+		}
 		pad := strings.Repeat(" ", width-utf8.RuneCountInString(r.key)+2)
-		fmt.Fprintf(w, "%s%s%s%s\n", mark, key, pad, r.value)
+		fmt.Fprintf(w, "%s%s%s%s\n", mark, key, pad, value)
 	}
 }
 
@@ -243,6 +254,18 @@ func environmentValue(p *Project) (string, bool) {
 
 func joined(parts []string) string { return strings.Join(parts, " · ") }
 
+// projectName is the name the card uses: metadata.name, else the root
+// directory's name.
+func projectName(s State) string {
+	if s.Project == nil {
+		return filepath.Base(s.Cwd)
+	}
+	if s.Project.Name != "" {
+		return s.Project.Name
+	}
+	return filepath.Base(s.Project.Root)
+}
+
 func entries(n int) string { return plural(n, "entry") }
 
 // plural is "1 tool", "3 tools", "1 entry", "3 entries".
@@ -250,8 +273,8 @@ func plural(n int, noun string) string {
 	if n == 1 {
 		return "1 " + noun
 	}
-	if strings.HasSuffix(noun, "y") {
-		return fmt.Sprintf("%d %sies", n, strings.TrimSuffix(noun, "y"))
+	if stem, ok := strings.CutSuffix(noun, "y"); ok {
+		return fmt.Sprintf("%d %sies", n, stem)
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
 }
@@ -264,37 +287,4 @@ func relPath(base, path string) string {
 		return path
 	}
 	return rel
-}
-
-// WriteSummary prints the plan: the steps, then the equivalent commands
-// (run from Plan.Dir; a `cd` line names it when it is not cwd).
-func WriteSummary(w io.Writer, p Plan, cwd string) {
-	if len(p.Actions) == 0 {
-		fmt.Fprintln(w, "Nothing to do.")
-		return
-	}
-	fmt.Fprintf(w, "Plan (%s):\n", p.Situation)
-	for i, a := range p.Actions {
-		fmt.Fprintf(w, "  %d. %s: %s\n", i+1, a.Kind, a.Summary)
-	}
-	fmt.Fprintln(w, "Equivalent commands:")
-	if rel := relDir(cwd, p.Dir); rel != "" {
-		fmt.Fprintf(w, "  cd %s\n", rel)
-	}
-	for _, c := range p.Commands() {
-		fmt.Fprintf(w, "  %s\n", c)
-	}
-}
-
-// WriteOptions prints the menu of an existing project as hints (the
-// `--plan` output when there is nothing to do).
-func WriteOptions(w io.Writer, s State) {
-	opts := Options(s)
-	if len(opts) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "Available (lo init on a terminal asks; or run the command):")
-	for _, o := range opts {
-		fmt.Fprintf(w, "  %-52s %s\n", o.Label, o.Command)
-	}
 }
