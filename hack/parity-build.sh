@@ -119,7 +119,8 @@ EOF
 # ── state preparation ────────────────────────────────────────────────────────
 domain_reset() { # <domain> — wipe generated outputs
   rm -rf "${PROJ}/clusters/${1}/artifacts.yaml" "${PROJ}/clusters/${1}/artifacts" \
-         "${PROJ}/clusters/${1}"/tmp.* "${PROJ}/clusters/${1}"/.artifacts-stage.*
+         "${PROJ}/clusters/${1}"/tmp.* "${PROJ}/clusters/${1}"/.artifacts-stage.* \
+         "${PROJ}/clusters/${1}"/.artifacts-tmp.*
 }
 
 # Fixture: one bash-built split.dev output, reused so both impls can start a

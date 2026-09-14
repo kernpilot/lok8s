@@ -240,13 +240,21 @@ func newSplitRun(o Options) (*splitRun, error) {
 		r.sopsPath = path
 	}
 
-	// Everything is assembled in temp dirs first; outDir is only touched in
-	// the final swap after every document is emitted, encrypted and
+	// Everything is assembled in scratch dirs first; outDir is only touched
+	// in the final swap after every document is emitted, encrypted and
 	// verified — a mid-split failure (sops error, collision) must not leave
 	// a pruned or partial artifacts/ (the single-file build gets the same
-	// guarantee from its tmp+atomic-rename). The stage lives next to outDir
-	// so the final moves stay on one filesystem.
-	tmpDir, err := os.MkdirTemp("", "tmp.")
+	// guarantee from its tmp+atomic-rename). BOTH scratch dirs live in the
+	// domain dir, next to outDir: the files move tmp → stage → outDir by
+	// rename, and a rename across filesystems fails with EXDEV. A tmp dir
+	// under $TMPDIR (the bash `mktemp -d`) sat on tmpfs on hosts and CI
+	// runners whose project lives on another mount, and the first move
+	// failed every split-mode build (v0.3.0). The bash twin never saw it:
+	// `mv` copies across devices. moveFile keeps that fallback for a
+	// rename that still crosses a device. Both dirs are removed on every
+	// exit path (cleanup); the parity harness resets and .gitignore lists
+	// them by their prefixes.
+	tmpDir, err := os.MkdirTemp(domainDir, ".artifacts-tmp.")
 	if err != nil {
 		ui.ErrorTo(r.stderr, "split: failed to shape %s", r.artifact)
 		return nil, ErrHandled
@@ -291,7 +299,8 @@ func (r *splitRun) cleanup() {
 
 // emitNonSecrets shapes the NON-Secret documents: one yq pass shapes Jobs
 // + filters Secrets OUT, a second splits into <Kind>.<namespace>.<name>.yml
-// under the tmp dir, then the files move into the stage as .yaml.
+// under the tmp dir, then the files move into the stage as .yaml
+// (moveFile: a rename, with the cross-device fallback).
 func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	streamPath := filepath.Join(r.tmpDir, "nonsecret.stream")
 	if !r.yqOK || execToFile(ctx, r.o.runner(), r.yqPath, []string{"eval", shapeExpr, r.artifact}, "", streamPath, r.stderr) != nil {
@@ -332,7 +341,7 @@ func (r *splitRun) emitNonSecrets(ctx context.Context) error {
 	}
 	for _, f := range ymlFiles {
 		base := filepath.Base(f)
-		if err := os.Rename(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
+		if err := moveFile(f, filepath.Join(r.stage, strings.TrimSuffix(base, ".yml")+".yaml")); err != nil {
 			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
@@ -496,7 +505,7 @@ func (r *splitRun) swapStage() error {
 		if _, err := os.Stat(f); err != nil {
 			continue
 		}
-		if err := os.Rename(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
+		if err := moveFile(f, filepath.Join(r.outDir, filepath.Base(f))); err != nil {
 			ui.ErrorTo(r.stderr, "split: failed to split %s", r.artifact)
 			return ErrHandled
 		}
