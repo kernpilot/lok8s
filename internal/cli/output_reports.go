@@ -56,14 +56,13 @@ type doctorCollector struct {
 func (c *doctorCollector) Write(p []byte) (int, error) {
 	c.buf.Write(p)
 	for {
-		text := c.buf.String()
-		i := strings.IndexByte(text, '\n')
-		if i < 0 {
+		line, rest, found := strings.Cut(c.buf.String(), "\n")
+		if !found {
 			return len(p), nil
 		}
-		c.line(text[:i])
+		c.line(line)
 		c.buf.Reset()
-		c.buf.WriteString(text[i+1:])
+		c.buf.WriteString(rest)
 	}
 }
 

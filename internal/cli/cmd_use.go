@@ -128,7 +128,7 @@ func useListing(paths *config.Paths) useReport {
 // the available domains. Piped, the [error] line is all there is.
 func useSetActive(paths *config.Paths, target string, out, errOut io.Writer) error {
 	if !domain.NameRe.MatchString(target) {
-		ui.ErrorNext(errOut, "a domain name is letters, digits, dots and dashes: lo use kubehz.dev", "invalid domain name: %s", target)
+		ui.ErrorTo(errOut, "invalid domain name: %s", target)
 		return ErrHandled
 	}
 	base := filepath.Join(paths.Clusters, target)

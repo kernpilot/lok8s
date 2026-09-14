@@ -55,16 +55,15 @@ func NewFormatWriter(w io.Writer, format, fallback string) io.Writer {
 func (f *FormatWriter) Write(p []byte) (int, error) {
 	f.buf.Write(p)
 	for {
-		text := f.buf.String()
-		i := strings.IndexByte(text, '\n')
-		if i < 0 {
+		line, rest, found := strings.Cut(f.buf.String(), "\n")
+		if !found {
 			return len(p), nil
 		}
-		if _, err := io.WriteString(f.W, f.line(text[:i])+"\n"); err != nil {
+		if _, err := io.WriteString(f.W, f.line(line)+"\n"); err != nil {
 			return 0, err
 		}
 		f.buf.Reset()
-		f.buf.WriteString(text[i+1:])
+		f.buf.WriteString(rest)
 	}
 }
 
