@@ -54,6 +54,7 @@ const (
 	legacyRegistryTLSRel = ".secrets/tls/registries"
 	// RegistryTLSSecretName and RegistryTLSSecretNS name the Secret the
 	// mint asks the generator for.
+	// #nosec G101 -- the generator's cache key (a Secret NAME), not a credential.
 	RegistryTLSSecretName = "registries-tls"
 	RegistryTLSSecretNS   = "lok8s-system"
 )

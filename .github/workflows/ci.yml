@@ -412,6 +412,14 @@ jobs:
           # `lo` (which shells out to them) finds them without a per-step export.
           echo "${GITHUB_WORKSPACE}/.bin" >> "${GITHUB_PATH}"
 
+      - name: Build the Secret plugin (the bash leg mints the registry cert through it)
+        # The bash implementation execs .kustomize/secrets.lok8s.dev/v1/secret/Secret
+        # to mint the registry TLS cert (the Go leg serves the generator
+        # in-process). `lo kustomize build` from the fixture cannot see the
+        # plugin sources (they live at the repo root), so build them here into
+        # the plugin home the run step exports (KUSTOMIZE_PLUGIN_HOME).
+        run: make -C kustomize build BIN_ROOT="${GITHUB_WORKSPACE}/.kustomize"
+
       - name: Run lo up --ci against the single-local-build fixture
         # Exercises the real path: provision a kind cluster + docker registries,
         # bootstrap Cilium, then `tilt ci` builds the app image, pushes it to
