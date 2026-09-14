@@ -33,8 +33,10 @@ func moveFile(src, dst string) error {
 	return os.Remove(src)
 }
 
-// copyFileSync writes src's bytes to dst with src's permission bits and
-// fsyncs dst before it returns. A failed copy removes the partial dst.
+// copyFileSync writes src's bytes to dst with src's permission bits: into
+// dst+".tmp" in dst's directory first, fsynced, then renamed onto dst (one
+// directory, so a plain os.Rename — never the seam). A failed copy removes
+// the partial .tmp and leaves a pre-existing dst as it was.
 func copyFileSync(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -45,22 +47,27 @@ func copyFileSync(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dst)
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dst)
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := out.Close(); err != nil {
-		_ = os.Remove(dst)
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil

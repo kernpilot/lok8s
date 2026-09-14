@@ -107,3 +107,31 @@ func TestMoveFileRenamesOnOneFilesystem(t *testing.T) {
 		t.Error("source must be gone after a rename")
 	}
 }
+
+// A copy that fails half-way (here: the source is a directory, so the
+// read fails after the .tmp is open) leaves a pre-existing dst untouched
+// and no .tmp behind — the bytes go to dst+".tmp" and reach dst by rename.
+func TestCopyFallbackKeepsExistingDstOnFailure(t *testing.T) {
+	swapRename(t, exdev)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src-is-a-dir")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "dst")
+	if err := os.WriteFile(dst, []byte("old dst"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveFile(src, dst); err == nil {
+		t.Fatal("copying a directory as a file must fail")
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "old dst" {
+		t.Errorf("a failed copy changed dst: %q", got)
+	}
+	if _, err := os.Stat(dst + ".tmp"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a failed copy left %s.tmp behind (stat err %v)", dst, err)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Error("a failed copy must leave the source in place")
+	}
+}
