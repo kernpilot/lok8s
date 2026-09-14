@@ -446,6 +446,12 @@ fi
 # `bash` row too, so no allowance is needed).
 PARITY_ROUTE_GO=doctor check - doctor
 PARITY_ROUTE_GO=doctor check - doctor --domain gamma.app
+# --no-color is the binary's flag: parsed natively on the Go side, stripped
+# from argv on the routed side and handed on as NO_COLOR=1. Piped, both
+# print the plain doctor either way; the strict diff proves the routed
+# tree never sees the flag (argsh would reject it).
+check - doctor --no-color
+PARITY_ROUTE_GO=doctor check - doctor --no-color
 PARITY_ROUTE_GO=version check - version
 
 report

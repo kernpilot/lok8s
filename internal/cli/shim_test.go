@@ -10,6 +10,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 func envValue(env []string, key string) (string, bool) {
@@ -113,5 +114,67 @@ func TestShimResolvesTheCacheWithoutACheckout(t *testing.T) {
 	// Nothing landed in the project.
 	if _, err := os.Stat(filepath.Join(p.Lok8s, "lo")); err == nil {
 		t.Fatal("the shim ejected the tree into the project")
+	}
+}
+
+// stripNoColor takes the flag in every form and position and leaves the
+// rest of argv, and everything after `--`, as it is.
+func TestStripNoColor(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want []string
+		on   bool
+	}{
+		{[]string{"status"}, []string{"status"}, false},
+		{[]string{"--no-color", "status"}, []string{"status"}, true},
+		{[]string{"status", "--no-color"}, []string{"status"}, true},
+		{[]string{"status", "--no-color=true", "--domain", "x"}, []string{"status", "--domain", "x"}, true},
+		{[]string{"status", "--no-color=false"}, []string{"status"}, false},
+		{[]string{"--no-color", "secrets", "set", "k", "--", "--no-color"}, []string{"secrets", "set", "k", "--", "--no-color"}, true},
+		{[]string{"status", "--no-colors"}, []string{"status", "--no-colors"}, false},
+	}
+	for _, c := range cases {
+		got, on := stripNoColor(c.in)
+		if strings.Join(got, " ") != strings.Join(c.want, " ") || on != c.on {
+			t.Errorf("stripNoColor(%q) = %q, %v; want %q, %v", c.in, got, on, c.want, c.on)
+		}
+	}
+}
+
+// A routed command never hands --no-color to the bash tree: the flag is
+// stripped from argv (before or after the subcommand) and reaches the
+// child as NO_COLOR=1; without the flag the environment is left alone.
+func TestShimNoColorReachesTheTreeAsEnv(t *testing.T) {
+	os.Unsetenv("NO_COLOR")
+	t.Cleanup(func() { ui.SetNoColor(false); os.Unsetenv("NO_COLOR") })
+	for _, c := range []struct {
+		args    []string
+		wantArg string
+		wantEnv bool
+	}{
+		{[]string{"status", "--no-color"}, "status", true},
+		{[]string{"--no-color", "status"}, "status", true},
+		{[]string{"status", "--no-color=true", "--domain", "x.dev"}, "status --domain x.dev", true},
+		{[]string{"status", "--no-color=false"}, "status", false},
+		{[]string{"status"}, "status", false},
+	} {
+		ui.SetNoColor(false)
+		os.Unsetenv("NO_COLOR")
+		p := routedProject(t, "    default: bash\n", true)
+		recs := recordShim(t)
+		setOSArgs(t, c.args...)
+		if _, _, err := runLo(t, NewRoot(p), c.args...); err != nil {
+			t.Fatalf("%q: %v", c.args, err)
+		}
+		if len(*recs) != 1 {
+			t.Fatalf("%q: %d execs", c.args, len(*recs))
+		}
+		rec := (*recs)[0]
+		if got := strings.Join(rec.argv[2:], " "); got != c.wantArg {
+			t.Errorf("%q: argv = %q, want %q", c.args, got, c.wantArg)
+		}
+		if v, ok := envValue(rec.env, "NO_COLOR"); ok != c.wantEnv || (ok && v != "1") {
+			t.Errorf("%q: NO_COLOR in env = %q, %v; want present=%v", c.args, v, ok, c.wantEnv)
+		}
 	}
 }
