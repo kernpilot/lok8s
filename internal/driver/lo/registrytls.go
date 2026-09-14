@@ -227,11 +227,18 @@ func (d *Driver) registryTLSMint(ctx context.Context, domain, vol string, exists
 	}
 	// A mint killed mid-way leaves its scratch (and the key in it) behind;
 	// sweep every stale one before creating this run's.
-	if stale, _ := filepath.Glob(filepath.Join(domainDir, registryTLSScratchPrefix+"*")); len(stale) > 0 {
-		for _, s := range stale {
+	if matches, _ := filepath.Glob(filepath.Join(domainDir, registryTLSScratchPrefix+"*")); len(matches) > 0 {
+		removed := 0
+		for _, s := range matches {
+			if info, err := os.Stat(s); err != nil || !info.IsDir() {
+				continue // directories only, as the bash sweep
+			}
 			_ = os.RemoveAll(s)
+			removed++
 		}
-		ui.DebugTo(errOut, "registry TLS: removed %d stale scratch dir(s) under %s", len(stale), domainDir)
+		if removed > 0 {
+			ui.DebugTo(errOut, "registry TLS: removed %d stale scratch dir(s) under %s", removed, domainDir)
+		}
 	}
 	scratch, err := os.MkdirTemp(domainDir, registryTLSScratchPrefix)
 	if err != nil {

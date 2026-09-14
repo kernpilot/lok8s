@@ -225,6 +225,8 @@ Migrate an existing project in three steps:
 
 After step 4, lok8s reads nothing in `.secrets/`. Remove the directory.
 
+Two `lo up` runs on the same registry network at the same time can collide on the helper container `<network>-registry-tls-io`: that run fails, and a retry succeeds because the read-out checks both files and mints again into an incomplete volume.
+
 Anything two instances were *sharing* must be **re-issued per instance** (or, if
 truly unavoidable, copied deliberately). The cleanest reset is to regenerate at
 go-live: create the per-domain stores, drop the old flat cache, scope the

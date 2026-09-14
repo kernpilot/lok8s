@@ -309,6 +309,10 @@ func TestRegistriesTLSMintSweepsStaleScratchDirs(t *testing.T) {
 	stubSecretPlugin(t, runner, p.Base)
 	stale := filepath.Join(p.Clusters, tlsDomain, registryTLSScratchPrefix+"abandoned")
 	testutil.WriteFile(t, filepath.Join(stale, "tls.key"), "OLDKEY")
+	// A FILE with the prefix is not a scratch dir: left alone (the bash sweep
+	// removes directories only).
+	note := filepath.Join(p.Clusters, tlsDomain, registryTLSScratchPrefix+"note")
+	testutil.WriteFile(t, note, "keep")
 
 	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
 		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
@@ -316,6 +320,10 @@ func TestRegistriesTLSMintSweepsStaleScratchDirs(t *testing.T) {
 	if fsutil.DirExists(stale) {
 		t.Fatal("the stale scratch dir survived the mint")
 	}
+	if !fsutil.FileExists(note) {
+		t.Fatal("the sweep removed a file that only shares the prefix")
+	}
+	os.Remove(note)
 	if left := scratchDirs(t, p); len(left) != 0 {
 		t.Fatalf("scratch dirs left behind: %v", left)
 	}

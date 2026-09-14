@@ -790,7 +790,16 @@ STUB
     case "${1}" in
       -d|-ud|-u) return 1 ;;
       -j)
-        [[ "${2}" == "-f" ]] || return 1
+        # The fallback must hand BSD date openssl's exact shape and the
+        # matching format string; anything else fails loudly.
+        if [[ "${2}" != "-f" || "${3}" != '%b %e %H:%M:%S %Y %Z' ]]; then
+          echo "date stub: unexpected -j arguments: ${*}" >&2
+          return 99
+        fi
+        if [[ ! "${4}" =~ ^[A-Z][a-z]{2}\ [\ 0-9][0-9]\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ [0-9]{4}\ GMT$ ]]; then
+          echo "date stub: input is not openssl's 'Mon [ d]d HH:MM:SS YYYY GMT' shape: '${4}'" >&2
+          return 99
+        fi
         command date -ud "${4}" "${5}"
         ;;
       *) command date "$@" ;;
@@ -801,6 +810,13 @@ STUB
   assert_success
   assert_line "${gnu_before}"
   assert_line "${gnu_after}"
+  # A single-digit day is space-padded by openssl (`Sep  4 …`); the same
+  # stub takes it through the fallback branch.
+  run _tls_rfc3339 "Sep  4 15:00:00 2026 GMT"
+  assert_success
+  assert_output "2026-09-04T15:00:00Z"
+  run _tls_rfc3339 "2026-09-04"   # not openssl's shape: the stub refuses, the helper echoes the input
+  assert_output "2026-09-04"
   unset -f date
 }
 
