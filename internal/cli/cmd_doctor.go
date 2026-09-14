@@ -73,6 +73,7 @@ var doctorToolsPost = []struct {
 
 func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	var toolchainFlag bool
+	var format func() (string, error)
 	cmd := &cobra.Command{
 		Use:          "doctor",
 		Aliases:      spec.aliases,
@@ -86,9 +87,21 @@ func newDoctorCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			setDebugFromVerbose(cmd)
 			domainFlag, _ := cmd.Flags().GetString("domain")
 			d := domain.Resolve(domainFlag, paths.Clusters, stderr)
+			f, err := format()
+			if err != nil {
+				return err
+			}
+			if f != outputText {
+				report, runErr := doctorStructured(cmd.Context(), paths, d, toolchainFlag)
+				if err := writeOutput(cmd.OutOrStdout(), f, report); err != nil {
+					return err
+				}
+				return runErr
+			}
 			return runDoctor(cmd.Context(), paths, d, toolchainFlag, cmd.OutOrStdout(), stderr)
 		},
 	}
+	format = addOutputFlag(cmd)
 	// Go-only: the pinned-toolchain section (b, kustomize, the khelm and
 	// Secret plugins at the pins). Shown by default only in a project whose
 	// .bin/b.yaml was written by `lo toolchain install` (the marker line);

@@ -63,24 +63,36 @@ func newAssetsCommand(paths *config.Paths) *cobra.Command {
 
 func newAssetsListCommand(paths *config.Paths) *cobra.Command {
 	var asJSON bool
+	var format func() (string, error)
 	cmd := &cobra.Command{
 		Use:          "list",
 		Short:        "List every embedded asset with its origin",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := format()
+			if err != nil {
+				return err
+			}
 			reports, err := assets.Report(paths, nil)
 			if err != nil {
 				return err
 			}
-			if asJSON {
+			if reports == nil {
+				reports = []assets.UnitReport{}
+			}
+			switch {
+			case asJSON || f == outputJSON:
 				return writeAssetsJSON(cmd.OutOrStdout(), reports)
+			case f == outputYAML:
+				return writeOutput(cmd.OutOrStdout(), f, assetsJSON{Lo: assets.Version(), Assets: reports})
 			}
 			assets.WriteTable(cmd.OutOrStdout(), reports, false)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "Machine-readable output")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Machine-readable output (the same as -o json)")
+	format = addOutputFlag(cmd)
 	return cmd
 }
 

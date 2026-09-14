@@ -46,6 +46,7 @@ var (
 )
 
 func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
+	var format func() (string, error)
 	cmd := &cobra.Command{
 		Use:          "use [domain]",
 		Aliases:      spec.aliases,
@@ -71,13 +72,53 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			if target != "" {
 				return useSetActive(paths, target, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
+			f, err := format()
+			if err != nil {
+				return err
+			}
+			if f != outputText {
+				return writeOutput(cmd.OutOrStdout(), f, useListing(paths))
+			}
 			if useInteractive() {
 				return useSelect(paths, useFormIO(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
 			return useShow(paths, cmd.OutOrStdout())
 		},
 	}
+	format = addOutputFlag(cmd)
 	return cmd
+}
+
+// useReport is `lo use -o json|yaml`: the active domain and every domain
+// under clusters/ with what it is.
+type useReport struct {
+	Active  string            `json:"active"`
+	Domains []useReportDomain `json:"domains"`
+}
+
+type useReportDomain struct {
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	ClusterRef string `json:"clusterRef,omitempty"`
+}
+
+// useListing gathers what useShow prints.
+func useListing(paths *config.Paths) useReport {
+	r := useReport{Domains: []useReportDomain{}}
+	if active, ok := useActive(paths); ok {
+		r.Active = active
+	}
+	for _, specPath := range sortedGlob(filepath.Join(paths.Clusters, "*", "cluster.lok8s.yaml")) {
+		k, err := domain.SpecDriver(specPath, "?")
+		if err != nil {
+			k = "?"
+		}
+		r.Domains = append(r.Domains, useReportDomain{Name: filepath.Base(filepath.Dir(specPath)), Kind: k})
+	}
+	for _, specPath := range sortedGlob(filepath.Join(paths.Clusters, "*", "deploy.lok8s.yaml")) {
+		r.Domains = append(r.Domains, useReportDomain{Name: filepath.Base(filepath.Dir(specPath)), Kind: "deploy", ClusterRef: deployClusterRef(specPath)})
+	}
+	return r
 }
 
 // useSetActive validates and persists the active domain (bash:
@@ -87,7 +128,7 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // the available domains. Piped, the [error] line is all there is.
 func useSetActive(paths *config.Paths, target string, out, errOut io.Writer) error {
 	if !domain.NameRe.MatchString(target) {
-		ui.ErrorTo(errOut, "invalid domain name: %s", target)
+		ui.ErrorNext(errOut, "a domain name is letters, digits, dots and dashes: lo use kubehz.dev", "invalid domain name: %s", target)
 		return ErrHandled
 	}
 	base := filepath.Join(paths.Clusters, target)
