@@ -199,6 +199,7 @@ check - image cache svc --domain alpha.dev              # no endpoint configured
 # domain it parsed before dispatch, so a trailing --domain is invisible to
 # that lookup in bash only. Placed first, both name paritynet-registry-cache.
 check - --domain alpha.dev image clean                  # stub docker: rm + volume rm fail, both silent
+check - image clean --domain beta.cloud                 # non-lo driver gate: both refuse before docker
 
 # Unresolvable IP: a Lo spec without spec.network on a non-slot domain.
 mkdir -p "${PROJ}/clusters/bare.dev"

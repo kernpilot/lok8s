@@ -122,7 +122,7 @@ lo destroy removes:
 Continue? [y/N]
 ```
 
-The list uses the names the teardown removes: the registry set of the domain, the driver's proxy and certificate volume. It cannot drift from the deletion.
+The list uses the names the teardown removes: the registry set of the domain, the driver's proxy and certificate volume. The registry names come from the file the last `lo up` recorded (`clusters/<domain>/.registries.json`); the teardown regenerates that file from the spec. A spec change since the last `lo up` shows in the next `lo up`, not in the prompt. Without the file the prompt says that the run names the set from the spec.
 
 `y` or `yes` continues. Any other answer aborts with `aborted: nothing removed` and exit code `1`. Ctrl-C during the prompt exits `130` with nothing removed.
 

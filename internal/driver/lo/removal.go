@@ -66,17 +66,16 @@ func RegistryRemovalAt(path string) (*Removal, error) {
 	}
 	r := &Removal{Network: rf.Network.Name, IsShared: rf.Shared}
 	for _, reg := range rf.Registries {
-		if reg.Name == "" {
-			continue // a registry without a name names nothing (the bash skipped it)
-		}
 		if reg.Type == "mirror" {
+			// RegistryClean --shared removes every mirror by its shared
+			// name, an empty name included (`lok8s-registry-`): listed as is.
 			r.Mirrors = append(r.Mirrors, SharedRegistryPrefix+reg.Name)
 			if rf.Shared {
 				continue
 			}
 		}
-		if rf.ProjectNetwork == "" {
-			continue // no project network in the file: nothing is named
+		if reg.Name == "" || rf.ProjectNetwork == "" {
+			continue // the project set names nothing for an empty name or no network (the bash skipped both)
 		}
 		name, _ := rf.containerFor(reg.Name)
 		r.Registries = append(r.Registries, name)
