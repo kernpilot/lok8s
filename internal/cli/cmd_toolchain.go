@@ -34,14 +34,32 @@ import (
 )
 
 // toolchainTemplate renders the b.yaml for this binary: its own version
-// pins the Secret plugin asset, its variant is named in the header.
-func toolchainTemplate(name string, groups []string) (string, error) {
+// pins the Secret plugin asset, its variant is named in the header, its
+// plugin home is where the `file:` lines put the exec plugins.
+func toolchainTemplate(paths *config.Paths, name string, groups []string) (string, error) {
 	return toolchain.Template(toolchain.TemplateOptions{
-		Name:      name,
-		LoVersion: assets.Version(),
-		Variant:   render.Variant(),
-		Groups:    groups,
+		Name:          name,
+		LoVersion:     assets.Version(),
+		Variant:       render.Variant(),
+		Groups:        groups,
+		PluginFileDir: pluginFileDir(paths),
 	})
+}
+
+// pluginFileDir is the plugin home (config.KustomizePluginHome) as a path b
+// resolves from .bin, for the `file:` lines of a generated b.yaml: relative
+// to .bin when the home is inside the project (`../.kustomize` for the
+// default, byte-identical to the template before v0.4.1), the absolute path
+// otherwise. So `lo toolchain install` installs where the render and
+// `lo doctor` look, with or without an exported home.
+func pluginFileDir(paths *config.Paths) string {
+	home := config.KustomizePluginHome(paths)
+	if strings.HasPrefix(home, paths.Base+string(filepath.Separator)) {
+		if rel, err := filepath.Rel(paths.Bin, home); err == nil {
+			return rel
+		}
+	}
+	return home
 }
 
 func newToolchainCommand(paths *config.Paths) *cobra.Command {
@@ -156,7 +174,7 @@ func runToolchainInstall(ctx context.Context, base string, groups []string, dryR
 	bin := filepath.Join(base, ".bin")
 	name := projectName(base)
 	fmt.Fprintf(out, "lo toolchain install — %s (lo %s, %s; groups: %s)\n", base, assets.Version(), render.Variant(), strings.Join(groups, ","))
-	content, err := toolchainTemplate(name, groups)
+	content, err := toolchainTemplate(projectPaths(base), name, groups)
 	if err != nil {
 		return err
 	}

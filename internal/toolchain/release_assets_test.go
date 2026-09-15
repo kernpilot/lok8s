@@ -122,7 +122,7 @@ func contributorAssetGlob(t *testing.T, root string) string {
 // Secret plugin.
 func templateAssetGlob(t *testing.T) string {
 	t.Helper()
-	for _, e := range entries("0.3.0") {
+	for _, e := range entries("0.3.0", "") {
 		if e.key != "github.com/kernpilot/lok8s" {
 			continue
 		}
