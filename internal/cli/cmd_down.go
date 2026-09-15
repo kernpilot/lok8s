@@ -142,9 +142,14 @@ func runDown(ctx context.Context, deps downDeps, domainName, cluster string) err
 	// containers down (the named volumes stay, so build cache survives a
 	// later recreate).
 	// The registry names come from the driver's one source
-	// (lodriver.RegistryRemoval reads the file a run left behind); a
-	// file that is not JSON names nothing, like jq on it did, which is
-	// the non-shared branch with no containers to remove.
+	// (lodriver.RegistryRemoval reads the file a run left behind). A file
+	// that exists but cannot be read, or that is not JSON, names nothing
+	// and takes the non-shared branch with no container to remove, so the
+	// count line reads 0. That is the bash contract, not an oversight:
+	// `.lok8s/lo` enters the branch on `[[ -f … ]]` alone and reads the
+	// file with `jq … 2>/dev/null`, so a read error leaves every value
+	// empty, removes nothing, prints the same count and says nothing on
+	// stderr.
 	if rem, err := lodriver.RegistryRemovalAt(lodriver.RegistryFilePath(deps.paths, domainName)); !errors.Is(err, lodriver.ErrNoRegistryFile) {
 		if rem == nil {
 			rem = &lodriver.Removal{}

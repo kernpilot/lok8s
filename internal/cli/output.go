@@ -47,8 +47,9 @@ func addOutputFlag(cmd *cobra.Command) func() (string, error) {
 }
 
 // outputWithJSONFlag resolves -o next to an older --json flag: --json is
-// -o json, and --json with another -o value is an error naming the
-// command. The flag pair stays one source of truth.
+// -o json, and so is --json next to the default text. Every other -o
+// value with --json is an error naming the command. The flag pair stays
+// one source of truth.
 func outputWithJSONFlag(cmd *cobra.Command, format func() (string, error), asJSON bool, command string) (string, error) {
 	f, err := format()
 	if err != nil {
