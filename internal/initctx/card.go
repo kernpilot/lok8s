@@ -10,8 +10,8 @@ package initctx
 // cases only: the position below the project root, and a repository
 // root elsewhere. A row carries facts only; a row the user can act on
 // starts with `!`, and the command lives in the list's `equivalent` row
-// and in `--plan`. Colours (internal/ui) apply only when stdout is a
-// terminal.
+// and in `--plan`. The style is the writer's (internal/ui): colour on
+// a terminal that allows it, plain in a pipe.
 
 import (
 	"fmt"
@@ -38,17 +38,19 @@ func WriteCard(w io.Writer, s State, extra ...row) {
 	if s.Project == nil {
 		return
 	}
-	writeRows(w, append(projectRows(s), extra...), ui.Paint(s.Terminal.StdoutTTY), true)
+	writeRows(w, append(projectRows(s), extra...), true)
 }
 
 // WriteNext prints the `next` line: the step the state calls for.
-func WriteNext(w io.Writer, next string, paint ui.Paint) {
-	writeRows(w, []row{{key: "next", value: next}}, paint, false)
+func WriteNext(w io.Writer, next string) {
+	writeRows(w, []row{{key: "next", value: next}}, false)
 }
 
 // writeRows prints rows in the two-column layout. heading makes the
-// first key bold (the name); the other keys are dim.
-func writeRows(w io.Writer, rows []row, paint ui.Paint, heading bool) {
+// first key bold (the name); the other keys are dim. The style is the
+// writer's (internal/ui: a terminal that allows colour, else plain).
+func writeRows(w io.Writer, rows []row, heading bool) {
+	st := ui.For(w)
 	width := 0
 	for _, r := range rows {
 		width = max(width, utf8.RuneCountInString(r.key))
@@ -56,15 +58,15 @@ func writeRows(w io.Writer, rows []row, paint ui.Paint, heading bool) {
 	for i, r := range rows {
 		mark := "  "
 		if r.warn {
-			mark = paint.Yellow("!") + " "
+			mark = st.Warn("!") + " "
 		}
-		key := paint.Dim(r.key)
+		key := st.Dim(r.key)
 		if heading && i == 0 {
-			key = paint.Bold(r.key)
+			key = st.Bold(r.key)
 		}
 		value := r.value
 		if r.dim {
-			value = paint.Dim(value)
+			value = st.Dim(value)
 		}
 		pad := strings.Repeat(" ", width-utf8.RuneCountInString(r.key)+2)
 		fmt.Fprintf(w, "%s%s%s%s\n", mark, key, pad, value)

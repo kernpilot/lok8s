@@ -81,7 +81,7 @@ func Entries(s State) []Entry {
 
 // WriteEntries prints the list as text (--plan): the labels, then the
 // twins dim, then extra rows in the same columns.
-func WriteEntries(w io.Writer, entries []Entry, paint ui.Paint, extra ...row) {
+func WriteEntries(w io.Writer, entries []Entry, extra ...row) {
 	labels, twins := []string{}, []string{}
 	for _, e := range entries {
 		labels = append(labels, e.Label)
@@ -90,12 +90,12 @@ func WriteEntries(w io.Writer, entries []Entry, paint ui.Paint, extra ...row) {
 		}
 	}
 	rows := []row{{key: "actions", value: joined(labels)}, {key: "equivalent", value: joined(twins), dim: true}}
-	writeRows(w, append(rows, extra...), paint, false)
+	writeRows(w, append(rows, extra...), false)
 }
 
 // Welcome is the one line mode 1 opens with: what `lo init` is about to
 // set up here.
-func Welcome(w io.Writer, s State, paint ui.Paint) {
+func Welcome(w io.Writer, s State) {
 	what := "a lok8s project in this directory"
 	if s.Situation() == SituationGitBelowRoot {
 		what = "a lok8s project at the repository root"
@@ -112,7 +112,7 @@ func Welcome(w io.Writer, s State, paint ui.Paint) {
 		}
 		line = "lo init completes the project " + projectName(s) + ": " + strings.Join(parts, ", ") + "."
 	}
-	fmt.Fprintf(w, "  %s\n", paint.Bold(line))
+	fmt.Fprintf(w, "  %s\n", ui.For(w).Bold(line))
 }
 
 // Result is one row under the card: what the last action did (`added`,
@@ -153,7 +153,6 @@ type Loop struct {
 // failed step returns to the list with the failed and not-run rows;
 // Ctrl-C returns ErrAborted (the cli maps it to rc 130).
 func (l Loop) Run(s State, first []Result) error {
-	paint := ui.Paint(s.Terminal.StdoutTTY)
 	results := first
 	for {
 		WriteCard(l.Out, s, resultRows(results)...)
@@ -174,10 +173,10 @@ func (l Loop) Run(s State, first []Result) error {
 			return err
 		}
 		if choice == EntryExit {
-			WriteNext(l.Out, Next(s, false), paint)
+			WriteNext(l.Out, Next(s, false))
 			return nil
 		}
-		plan, err := Run(l.Out, l.IO, paint, l.actionScreen(s, choice))
+		plan, err := Run(l.Out, l.IO, l.actionScreen(s, choice))
 		switch {
 		case errors.Is(err, ErrCancelled):
 			results = []Result{{"cancelled", "nothing written"}}
@@ -244,5 +243,5 @@ func (l Loop) actionScreen(s State, key string) func() Screen {
 func WritePlan(w io.Writer, s State) {
 	WriteCard(w, s)
 	fmt.Fprintln(w)
-	WriteEntries(w, Entries(s), ui.Paint(s.Terminal.StdoutTTY), row{key: "next", value: Next(s, false)})
+	WriteEntries(w, Entries(s), row{key: "next", value: Next(s, false)})
 }

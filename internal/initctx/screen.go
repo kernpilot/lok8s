@@ -68,9 +68,9 @@ func (sc Screen) rows() []row {
 }
 
 // WriteScreen prints the screen as text: the title, then the rows.
-func WriteScreen(w io.Writer, sc Screen, paint ui.Paint) {
-	fmt.Fprintf(w, "  %s\n", paint.Bold(sc.Title))
-	writeRows(w, sc.rows(), paint, false)
+func WriteScreen(w io.Writer, sc Screen) {
+	fmt.Fprintf(w, "  %s\n", ui.For(w).Bold(sc.Title))
+	writeRows(w, sc.rows(), false)
 }
 
 // The closing choice of a screen.
@@ -85,7 +85,7 @@ const (
 // ErrCancelled; Esc and Ctrl-C return ErrAborted. build makes the screen
 // from the current values, so the next render shows a changed detail.
 // The screen goes to out, the forms to tio.
-func Run(out io.Writer, tio IO, paint ui.Paint, build func() Screen) (Plan, error) {
+func Run(out io.Writer, tio IO, build func() Screen) (Plan, error) {
 	sc := build()
 	if sc.Incomplete && sc.Details != nil {
 		if err := run(huh.NewForm(huh.NewGroup(sc.Details()...).Title(sc.Title)), tio); err != nil {
@@ -97,7 +97,7 @@ func Run(out io.Writer, tio IO, paint ui.Paint, build func() Screen) (Plan, erro
 		return Plan{}, ErrIncomplete
 	}
 	for {
-		WriteScreen(out, sc, paint)
+		WriteScreen(out, sc)
 		fmt.Fprintln(out)
 		opts := []huh.Option[string]{huh.NewOption("Create", choiceCreate)}
 		if sc.Details != nil {
@@ -319,7 +319,7 @@ func NewProjectScreen(s State, a *Answers) Screen {
 // details on request, the plan on Create.
 func NewProject(s State, out io.Writer, tio IO) (Plan, error) {
 	a := DefaultAnswers(s)
-	return Run(out, tio, ui.Paint(s.Terminal.StdoutTTY), func() Screen {
+	return Run(out, tio, func() Screen {
 		a.Name, a.Domain, a.Dir = strings.TrimSpace(a.Name), strings.TrimSpace(a.Domain), strings.TrimSpace(a.Dir)
 		return NewProjectScreen(s, &a)
 	})

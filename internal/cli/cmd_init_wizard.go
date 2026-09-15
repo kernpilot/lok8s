@@ -86,13 +86,12 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 	if err != nil {
 		return err
 	}
-	paint := ui.Paint(term.StdoutTTY)
 	if f.plan || f.dryRun {
 		if initctx.Bootstrap(state) {
-			initctx.Welcome(out, state, paint)
+			initctx.Welcome(out, state)
 			fmt.Fprintln(out)
 			a := initctx.DefaultAnswers(state)
-			initctx.WriteScreen(out, initctx.NewProjectScreen(state, &a), paint)
+			initctx.WriteScreen(out, initctx.NewProjectScreen(state, &a))
 			return nil
 		}
 		initctx.WritePlan(out, state)
@@ -103,7 +102,7 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 		Execute: func(p initctx.Plan) error { return initExecute(ctx, p, runner, out, stderr) }}
 	var first []initctx.Result
 	if initctx.Bootstrap(state) {
-		initctx.Welcome(out, state, paint)
+		initctx.Welcome(out, state)
 		fmt.Fprintln(out)
 		plan, err := initctx.NewProject(state, out, tio)
 		if err != nil {
@@ -141,19 +140,17 @@ func runInitBare(cmd *cobra.Command, args []string, paths *config.Paths, f initF
 // line, rc 1); on a terminal the details, the rows and Create; the plan
 // to execute. A cancelled screen is the handled sentinel.
 func runInitScreen(cmd *cobra.Command, f initFlags, build func() initctx.Screen) (*initctx.Plan, error) {
-	term := initTerminal(f.yes)
 	out := cmd.OutOrStdout()
-	paint := ui.Paint(term.StdoutTTY)
 	if f.plan || f.dryRun {
 		sc := build()
 		if sc.Incomplete {
 			ui.ErrorTo(cmd.ErrOrStderr(), "%s", sc.Missing)
 			return nil, ErrHandled
 		}
-		initctx.WriteScreen(out, sc, paint)
+		initctx.WriteScreen(out, sc)
 		return nil, nil
 	}
-	plan, err := initctx.Run(out, initFormIO(), paint, build)
+	plan, err := initctx.Run(out, initFormIO(), build)
 	if err != nil {
 		return nil, initAbort(err, cmd.ErrOrStderr())
 	}

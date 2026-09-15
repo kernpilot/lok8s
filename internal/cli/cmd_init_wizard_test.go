@@ -25,6 +25,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/initctx"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // initGitFake answers `git rev-parse` (not a repository unless repo is
@@ -69,6 +70,9 @@ func installInitSeams(t *testing.T, interactive bool, script string) *initSeams 
 	initTerminal = func(yes bool) initctx.Terminal {
 		return initctx.Terminal{StdinTTY: interactive, StdoutTTY: interactive, Yes: yes}
 	}
+	// The card and the screens take their style from the writer: the
+	// test buffers render as a coloured terminal when interactive.
+	restoreTTY, restoreColor := ui.ForceTTY(interactive), ui.ForceColor(interactive)
 	initFormIO = func() initctx.IO {
 		return initctx.IO{In: iotest.OneByteReader(strings.NewReader(script)), Out: &s.formOut, Accessible: true}
 	}
@@ -82,6 +86,8 @@ func installInitSeams(t *testing.T, interactive bool, script string) *initSeams 
 	newRunner = func(*config.Paths) execx.Runner { return s.git }
 	t.Cleanup(func() {
 		initTerminal, initFormIO, initToolchainInstall, newRunner = prevTerm, prevIO, prevTool, prevRunner
+		restoreColor()
+		restoreTTY()
 	})
 	return s
 }

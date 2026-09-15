@@ -82,7 +82,7 @@ func TestEntries(t *testing.T) {
 	}
 
 	var b bytes.Buffer
-	WriteEntries(&b, Entries(s), false)
+	WriteEntries(&b, Entries(s))
 	if b.String() != "  actions     Add a cluster · Add a service · Set the active domain · Switch implementation (bash → go) · Exit\n"+
 		"  equivalent  lo init cluster <domain> · lo init service <name> · lo use <domain> · lo init project --implementation go\n" {
 		t.Errorf("entries text:\n%s", b.String())
@@ -234,12 +234,12 @@ func TestLoopFirstResult(t *testing.T) {
 
 func TestWelcome(t *testing.T) {
 	var b bytes.Buffer
-	Welcome(&b, State{Cwd: "/x/shop", Empty: true}, false)
+	Welcome(&b, State{Cwd: "/x/shop", Empty: true})
 	if b.String() != "  lo init sets up a lok8s project in this directory: the project file, the first cluster spec, the toolchain.\n" {
 		t.Errorf("welcome: %q", b.String())
 	}
 	b.Reset()
-	Welcome(&b, State{Cwd: "/x/repo/sub", Entries: 1, Git: Git{Available: true, Root: "/x/repo"}}, false)
+	Welcome(&b, State{Cwd: "/x/repo/sub", Entries: 1, Git: Git{Available: true, Root: "/x/repo"}})
 	if !strings.Contains(b.String(), "at the repository root") {
 		t.Errorf("welcome below a root: %q", b.String())
 	}
@@ -247,14 +247,14 @@ func TestWelcome(t *testing.T) {
 	s := projectState(t.TempDir(), true)
 	s.Git = Git{Available: true}
 	b.Reset()
-	Welcome(&b, s, false)
+	Welcome(&b, s)
 	if b.String() != "  lo init completes the project acme: a git repository, the first cluster spec, the toolchain.\n" {
 		t.Errorf("welcome in a project: %q", b.String())
 	}
 	s.Project.Domains = []Domain{{"a.dev", "lo"}}
 	s.Project.BYAML = true
 	b.Reset()
-	Welcome(&b, s, false)
+	Welcome(&b, s)
 	if b.String() != "  lo init completes the project acme: a git repository.\n" {
 		t.Errorf("welcome in a complete project: %q", b.String())
 	}

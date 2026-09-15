@@ -48,9 +48,12 @@ func (s Style) Paint(code, text string) string {
 	return code + text + ansiReset
 }
 
-// Bold and Dim are the two weights of the palette.
+// Bold and Dim are the two weights of the palette; Warn is the `!`
+// colour for a marker inside a row the caller lays out itself (the card
+// of `lo init`; MarkWarn writes a whole line).
 func (s Style) Bold(text string) string { return s.Paint(ansiBold, text) }
 func (s Style) Dim(text string) string  { return s.Paint(ansiDim, text) }
+func (s Style) Warn(text string) string { return s.Paint(ansiYellow, text) }
 
 var (
 	styleMu     sync.Mutex

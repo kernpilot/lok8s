@@ -61,9 +61,8 @@ func TestNewProjectCreateDefaults(t *testing.T) {
 	contains(t, formOut(tio), "1. Create\n2. Change details\n3. Cancel\n")
 	// The name is bold, the keys dim and the equivalent row dim on a
 	// terminal; the values plain.
-	s.Terminal.StdoutTTY = true
 	out.Reset()
-	if _, err := NewProject(s, &out, script("1")); err != nil {
+	if _, err := NewProject(s, tty(&out), script("1")); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, out.String(), "  \033[1mNew project\033[0m\n", "  \033[2mname\033[0m         shop\n", "  \033[2mequivalent\033[0m   \033[2mlo init project shop")
@@ -119,7 +118,7 @@ func TestNewProjectChangeDetails(t *testing.T) {
 	sc := NewProjectScreen(s, &a)
 	wantCommands(t, sc.Plan, "lo init project shop --env mise", "git init", "lo toolchain install --groups core,local")
 	out.Reset()
-	WriteScreen(&out, sc, false)
+	WriteScreen(&out, sc)
 	contains(t, out.String(), "  domain       none\n")
 	if strings.Contains(out.String(), "runs         git init · lo use") {
 		t.Errorf("lo use without a domain:\n%s", out.String())
@@ -130,7 +129,7 @@ func TestNewProjectChangeDetails(t *testing.T) {
 func TestScreenIncomplete(t *testing.T) {
 	root := t.TempDir()
 	var out bytes.Buffer
-	if _, err := Run(&out, scripted(""), false, func() Screen { return ClusterScreen(root, &ClusterInput{}) }); !errors.Is(err, ErrIncomplete) {
+	if _, err := Run(&out, scripted(""), func() Screen { return ClusterScreen(root, &ClusterInput{}) }); !errors.Is(err, ErrIncomplete) {
 		t.Errorf("incomplete: %v", err)
 	}
 	if out.Len() != 0 {
@@ -220,7 +219,7 @@ func TestPromptsCarryNoFlag(t *testing.T) {
 		{"toolchain", func() Screen { return ToolchainScreen(root, &groups) }, script("2", "0", "3")},
 		{"active", func() Screen { return ActiveScreen(s, &dom) }, script("2", "3")},
 	} {
-		if _, err := Run(&out, c.tio, false, c.build); !errors.Is(err, ErrCancelled) {
+		if _, err := Run(&out, c.tio, c.build); !errors.Is(err, ErrCancelled) {
 			t.Errorf("%s: %v", c.name, err)
 		}
 		if got := formOut(c.tio); flagLike.MatchString(strings.ReplaceAll(got, "lo init: ", "")) {
@@ -237,7 +236,7 @@ func TestClusterScreen(t *testing.T) {
 	in := &ClusterInput{Driver: "lo", Active: true}
 	var out bytes.Buffer
 	tio := script("staging.dev", "", "", "1")
-	p, err := Run(&out, tio, false, func() Screen { return ClusterScreen(root, in) })
+	p, err := Run(&out, tio, func() Screen { return ClusterScreen(root, in) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +258,7 @@ func TestClusterScreen(t *testing.T) {
 	in = &ClusterInput{Domain: "x.dev", Driver: "kkp", Active: false, DomainGiven: true, DriverGiven: true, ActiveGiven: true}
 	out.Reset()
 	tio = script("1")
-	p, err = Run(&out, tio, false, func() Screen { return ClusterScreen(root, in) })
+	p, err = Run(&out, tio, func() Screen { return ClusterScreen(root, in) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +274,7 @@ func TestServiceAndTestsScreens(t *testing.T) {
 	root := t.TempDir()
 	var out bytes.Buffer
 	in := &ServiceInput{}
-	p, err := Run(&out, script("api", "./services/api", "1"), false, func() Screen { return ServiceScreen(root, in) })
+	p, err := Run(&out, script("api", "./services/api", "1"), func() Screen { return ServiceScreen(root, in) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +283,7 @@ func TestServiceAndTestsScreens(t *testing.T) {
 
 	out.Reset()
 	in = &ServiceInput{Name: "web", NameGiven: true}
-	p, err = Run(&out, script("", "1"), false, func() Screen { return ServiceScreen(root, in) })
+	p, err = Run(&out, script("", "1"), func() Screen { return ServiceScreen(root, in) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,14 +292,14 @@ func TestServiceAndTestsScreens(t *testing.T) {
 
 	out.Reset()
 	tin := &TestsInput{}
-	p, err = Run(&out, script("1"), false, func() Screen { return TestsScreen(root, tin) })
+	p, err = Run(&out, script("1"), func() Screen { return TestsScreen(root, tin) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantCommands(t, p, "lo init test")
 	contains(t, out.String(), "  Test suite\n", "  path        tests\n", "  writes      tests/ (the Playwright suite)\n", "  equivalent  lo init test\n")
 	out.Reset()
-	p, err = Run(&out, script("2", "e2e", "1"), false, func() Screen { return TestsScreen(root, tin) })
+	p, err = Run(&out, script("2", "e2e", "1"), func() Screen { return TestsScreen(root, tin) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +314,7 @@ func TestToolchainActiveEjectImplementationScreens(t *testing.T) {
 	var out bytes.Buffer
 
 	var groups []string
-	p, err := Run(&out, script("2", "2", "0", "1"), false, func() Screen { return ToolchainScreen(root, &groups) })
+	p, err := Run(&out, script("2", "2", "0", "1"), func() Screen { return ToolchainScreen(root, &groups) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +323,7 @@ func TestToolchainActiveEjectImplementationScreens(t *testing.T) {
 
 	out.Reset()
 	dom := ""
-	p, err = Run(&out, script("2", "1"), false, func() Screen { return ActiveScreen(s, &dom) })
+	p, err = Run(&out, script("2", "1"), func() Screen { return ActiveScreen(s, &dom) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +331,7 @@ func TestToolchainActiveEjectImplementationScreens(t *testing.T) {
 	contains(t, out.String(), "  Active domain\n", "  domain      b.dev\n")
 
 	out.Reset()
-	p, err = Run(&out, script("1"), false, func() Screen { return EjectScreen(s) })
+	p, err = Run(&out, script("1"), func() Screen { return EjectScreen(s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +339,7 @@ func TestToolchainActiveEjectImplementationScreens(t *testing.T) {
 	contains(t, out.String(), "  Bash tree\n", "  writes      .lok8s/ (the bash implementation, plus every data asset the project lacks)\n")
 
 	out.Reset()
-	p, err = Run(&out, script("1"), false, func() Screen { return ImplementationScreen(s) })
+	p, err = Run(&out, script("1"), func() Screen { return ImplementationScreen(s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +347,7 @@ func TestToolchainActiveEjectImplementationScreens(t *testing.T) {
 	contains(t, out.String(), "  Implementation\n", "  implementation  bash (now go)\n")
 	s.Project.Implementation = "bash"
 	out.Reset()
-	if _, err := Run(&out, script("1"), false, func() Screen { return ImplementationScreen(s) }); err != nil {
+	if _, err := Run(&out, script("1"), func() Screen { return ImplementationScreen(s) }); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, out.String(), "  implementation  go (now bash)\n")
@@ -362,7 +361,7 @@ func TestRequiredFieldReAsks(t *testing.T) {
 	var out bytes.Buffer
 	tio := script("", "", "x.dev", "", "", "1")
 	in := &ClusterInput{Driver: "lo", Active: true}
-	p, err := Run(&out, tio, false, func() Screen { return ClusterScreen(root, in) })
+	p, err := Run(&out, tio, func() Screen { return ClusterScreen(root, in) })
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,9 +5,12 @@ package initctx
 
 import (
 	"bytes"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 func contains(t *testing.T, out string, wants ...string) {
@@ -22,6 +25,15 @@ func contains(t *testing.T, out string, wants ...string) {
 func card(s State) string {
 	var b bytes.Buffer
 	WriteCard(&b, s)
+	return b.String()
+}
+
+// tty renders w as a terminal that allows colour.
+func tty(w io.Writer) io.Writer { return ui.Styled(w, ui.Style{TTY: true, Color: true}) }
+
+func cardTTY(s State) string {
+	var b bytes.Buffer
+	WriteCard(tty(&b), s)
 	return b.String()
 }
 
@@ -169,8 +181,7 @@ func TestWriteCardTerminalColours(t *testing.T) {
 	if out := card(s); strings.Contains(out, "\033[") {
 		t.Errorf("escape sequences off a terminal:\n%q", out)
 	}
-	s.Terminal.StdoutTTY = true
-	contains(t, card(s),
+	contains(t, cardTTY(s),
 		"  \033[1macme\033[0m         project · go · main\n",
 		"  \033[2mclusters\033[0m     alpha.dev (kind, active)\n",
 		"\033[33m!\033[0m \033[2mtoolchain\033[0m    none\n")
@@ -189,12 +200,12 @@ func TestPlural(t *testing.T) {
 
 func TestWriteNext(t *testing.T) {
 	var b bytes.Buffer
-	WriteNext(&b, "lo up", false)
+	WriteNext(&b, "lo up")
 	if b.String() != "  next  lo up\n" {
 		t.Errorf("next: %q", b.String())
 	}
 	b.Reset()
-	WriteNext(&b, "lo up", true)
+	WriteNext(tty(&b), "lo up")
 	if b.String() != "  \033[2mnext\033[0m  lo up\n" {
 		t.Errorf("next on a terminal: %q", b.String())
 	}

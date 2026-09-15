@@ -222,7 +222,7 @@ The project root is the nearest `clusters/` directory or `kind: Project` `lok8s.
 | `--yes`, `-y` | Never ask: print the help instead of the screens (scripts, CI). |
 | `--dry-run`, `-n` | The same as `--plan`. |
 
-The forms use one theme: the selection cursor and the chosen options in the green of `lo doctor`'s `✓`, no borders.
+The forms use the CLI's one huh theme (see [Output](#output)): the title, the selection cursor and the chosen options in the doctor green.
 
 **`lo init cluster [domain]`** (Go-only) writes `clusters/<domain>/cluster.lok8s.yaml` for `--driver` (default `lo`, the same file `lo init project --cluster` writes, see below) and makes the domain the active one (`lo use`). `--no-active` keeps the active domain. On a terminal without `--yes` it opens its screen first. The screen asks for the domain and the driver when the command line does not give them, shows `active` as a row you can change in the details, and writes on `Create`. Off a terminal, the command needs the domain.
 

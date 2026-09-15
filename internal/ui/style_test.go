@@ -208,3 +208,13 @@ func TestForResolvesProcessStreams(t *testing.T) {
 		t.Error("colour off a terminal")
 	}
 }
+
+// Warn paints the `!` of a row the caller lays out; plain without colour.
+func TestStyleWarn(t *testing.T) {
+	if got := (Style{TTY: true, Color: true}).Warn("!"); got != "\033[33m!\033[0m" {
+		t.Errorf("warn: %q", got)
+	}
+	if got := (Style{TTY: true}).Warn("!"); got != "!" {
+		t.Errorf("warn without colour: %q", got)
+	}
+}
