@@ -34,7 +34,6 @@ import (
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
-	"github.com/kernpilot/lok8s/internal/driver"
 	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/image"
@@ -75,23 +74,22 @@ func installConfirmations(root *cobra.Command, paths *config.Paths) {
 			return run(cmd, args)
 		}
 	}
-	guard("down", func(cmd *cobra.Command) []removal { return downPlan(cmd, paths) })
+	guard("down", func(cmd *cobra.Command) []removal { return downPlan(cmd, paths, true) })
 	guard("clean", func(cmd *cobra.Command) []removal {
-		items := downPlan(cmd, paths)
+		// runClean: `--all` prunes docker after the teardown and stops;
+		// without it the cluster's volumes and the whole registry set go
+		// (containers, volumes, the certificate volume): one registry line.
+		all, _ := cmd.Flags().GetBool("all")
+		items := downPlan(cmd, paths, all)
 		if items == nil {
 			return nil
 		}
-		// runClean: `--all` prunes docker after the teardown and stops;
-		// without it the cluster's volumes and the registry set go.
-		if all, _ := cmd.Flags().GetBool("all"); all {
+		if all {
 			return append(items, removal{"docker", "system prune -f (every unused image, container, network)"})
 		}
 		d, cluster := ambientMain(cmd, paths)
 		items = append(items, removal{"docker volumes", "every volume named " + cluster + "-*"})
-		if rem := registryRemoval(paths, d); rem != nil {
-			items = append(items, registrySetRemovals(rem)...)
-		}
-		return items
+		return append(items, registrySetRemovals(paths, d)...)
 	})
 	guard("destroy", func(cmd *cobra.Command) []removal {
 		d, cluster := ambientMain(cmd, paths)
@@ -100,22 +98,26 @@ func installConfirmations(root *cobra.Command, paths *config.Paths) {
 		}
 		items := []removal{{"kind cluster", cluster}}
 		items = append(items, kubeconfigRemoval(paths, d)...)
-		if rem := registryRemoval(paths, d); rem != nil {
-			items = append(items, registrySetRemovals(rem)...)
-		}
+		items = append(items, registrySetRemovals(paths, d)...)
 		return append(items, removal{"proxy container", lodriver.ProxyContainer(cluster)})
 	})
 	guard("registry clean", func(cmd *cobra.Command) []removal {
 		d := ambientMainEnv(cmd, paths)
-		rem := registryRemoval(paths, d)
-		if rem == nil {
+		if domain.RequireDriver("lo", paths.Clusters, d, "", io.Discard) != nil {
 			return nil // the command's driver gate refuses
 		}
-		items := registrySetRemovals(rem)
-		if shared, _ := cmd.Flags().GetBool("shared"); shared && rem.IsShared {
-			items = append(items,
-				removal{"shared mirror containers and volumes", strings.Join(rem.Shared, ", ")},
-				removal{"docker network", rem.Network})
+		items := registrySetRemovals(paths, d)
+		// RegistryClean --shared removes the shared-network name of every
+		// mirror and the file's network, whatever the set's sharing mode.
+		if shared, _ := cmd.Flags().GetBool("shared"); shared {
+			if rem, err := lodriver.RegistryRemoval(paths, d); err == nil {
+				if len(rem.Mirrors) > 0 {
+					items = append(items, removal{"shared mirror containers and volumes", strings.Join(rem.Mirrors, ", ")})
+				}
+				if rem.Network != "" {
+					items = append(items, removal{"docker network", rem.Network})
+				}
+			}
 		}
 		return items
 	})
@@ -194,10 +196,10 @@ func readAnswer(ctx context.Context, in io.Reader) (string, error) {
 }
 
 // downPlan is what `lo down` removes for the local driver: the tilt
-// process, the kind cluster, the kubeconfig context, and the project
-// registry containers (their volumes stay). nil when the run refuses
-// (a malformed .kind) or a cloud driver's dispatch gates it.
-func downPlan(cmd *cobra.Command, paths *config.Paths) []removal {
+// process, the kind cluster, the kubeconfig context, and (registries)
+// the project registry containers, their volumes kept. nil when the run
+// refuses (a malformed .kind) or a cloud driver's dispatch gates it.
+func downPlan(cmd *cobra.Command, paths *config.Paths, registries bool) []removal {
 	d, cluster := ambientMain(cmd, paths)
 	spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
 	if fsutil.FileExists(spec) {
@@ -212,34 +214,30 @@ func downPlan(cmd *cobra.Command, paths *config.Paths) []removal {
 	}
 	items = append(items, removal{"kind cluster", cluster})
 	items = append(items, kubeconfigRemoval(paths, d)...)
-	if rem := registryRemoval(paths, d); rem != nil {
-		switch {
-		case rem.IsShared:
-			items = append(items, removal{"registries", "shared mirrors stay up (lo registry down removes them)"})
-		case len(rem.Registries) > 0:
-			items = append(items, removal{"registry containers", strings.Join(rem.Registries, ", ") + " (volumes stay)"})
-		}
+	if !registries {
+		return items
+	}
+	rem, err := lodriver.RegistryRemoval(paths, d)
+	switch {
+	case err != nil:
+		items = append(items, removal{"registries", registryFileNote(paths, d)})
+	case rem.IsShared:
+		items = append(items, removal{"registries", "shared mirrors stay up (lo registry down removes them)"})
+	case len(rem.Registries) > 0:
+		items = append(items, removal{"registry containers", strings.Join(rem.Registries, ", ") + " (volumes stay)"})
 	}
 	return items
 }
 
-// registryRemoval is the driver's own list for the domain's registry set,
-// nil when the set cannot be resolved (the command refuses on its own).
-func registryRemoval(paths *config.Paths, d string) *lodriver.Removal {
-	if domain.RequireDriver("lo", paths.Clusters, d, "", io.Discard) != nil {
-		return nil
-	}
-	drv := lodriver.New(&driver.Deps{Paths: paths, Runner: newRunner(paths), Stderr: io.Discard})
-	rem, err := drv.Removal(d, io.Discard)
+// registrySetRemovals lists a full registry teardown of the domain's set,
+// read from its registry file: the containers and data volumes, and the
+// certificate volume when the set has one. Without a file the run names
+// them itself; the plan says so.
+func registrySetRemovals(paths *config.Paths, d string) []removal {
+	rem, err := lodriver.RegistryRemoval(paths, d)
 	if err != nil {
-		return nil
+		return []removal{{"registry set", registryFileNote(paths, d)}}
 	}
-	return rem
-}
-
-// registrySetRemovals lists a full registry teardown: the containers and
-// data volumes, and the certificate volume when the set has one.
-func registrySetRemovals(rem *lodriver.Removal) []removal {
 	var items []removal
 	if len(rem.Registries) > 0 {
 		items = append(items, removal{"registry containers and volumes", strings.Join(rem.Registries, ", ")})
@@ -248,6 +246,12 @@ func registrySetRemovals(rem *lodriver.Removal) []removal {
 		items = append(items, removal{"TLS certificate volume", rem.TLSVolume})
 	}
 	return items
+}
+
+// registryFileNote is the line for a domain whose registry file is not
+// there: the run generates it from the spec, the plan does not write.
+func registryFileNote(paths *config.Paths, d string) string {
+	return "the set named by the spec (no " + config.RelTo(paths.Base, filepath.Join(paths.Clusters, d, ".registries.json")) + " yet)"
 }
 
 // specKind is the domain's driver kind, "" without a cluster spec.

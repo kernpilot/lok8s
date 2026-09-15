@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/image"
 )
@@ -116,6 +117,14 @@ func newImageClean(paths *config.Paths) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d := ambientMainEnv(cmd, paths)
+			// The same door as `image cache`: the cache registry is a
+			// Lo-driver feature, refused with the driver named before any
+			// removal; an explicit LOK8S_REGISTRY_IP_CACHE skips the gate.
+			if os.Getenv("LOK8S_REGISTRY_IP_CACHE") == "" {
+				if err := domain.RequireDriver("lo", paths.Clusters, d, "the image cache", cmd.ErrOrStderr()); err != nil {
+					return ErrHandled
+				}
+			}
 			// bash: network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s}" —
 			// ambientMainEnv already layered spec.network.name > env > lok8s.
 			return imageRun(imageContext(cmd, paths, d).Clean(cmd.Context(), os.Getenv("KIND_EXPERIMENTAL_DOCKER_NETWORK")))

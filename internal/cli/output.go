@@ -46,6 +46,23 @@ func addOutputFlag(cmd *cobra.Command) func() (string, error) {
 	}
 }
 
+// outputWithJSONFlag resolves -o next to an older --json flag: --json is
+// -o json, and --json with another -o value is an error naming the
+// command. The flag pair stays one source of truth.
+func outputWithJSONFlag(cmd *cobra.Command, format func() (string, error), asJSON bool, command string) (string, error) {
+	f, err := format()
+	if err != nil {
+		return "", err
+	}
+	if !asJSON {
+		return f, nil
+	}
+	if f != outputText && f != outputJSON {
+		return "", argshErrorf(cmd.ErrOrStderr(), "%s: --json conflicts with --output %s", command, f)
+	}
+	return outputJSON, nil
+}
+
 // writeOutput renders v as json or yaml on w.
 func writeOutput(w io.Writer, format string, v any) error {
 	switch format {
@@ -61,19 +78,25 @@ func writeOutput(w io.Writer, format string, v any) error {
 		if err != nil {
 			return err
 		}
-		var node yaml.Node
-		if err := yaml.Unmarshal(raw, &node); err != nil {
-			return err
-		}
-		blockStyle(&node)
-		enc := yaml.NewEncoder(w)
-		enc.SetIndent(2)
-		if err := enc.Encode(&node); err != nil {
-			return err
-		}
-		return enc.Close()
+		return writeJSONAsYAML(w, raw)
 	}
 	return fmt.Errorf("writeOutput: no renderer for %q", format)
+}
+
+// writeJSONAsYAML re-encodes a JSON document as block-style yaml with the
+// same keys in the same order.
+func writeJSONAsYAML(w io.Writer, raw []byte) error {
+	var node yaml.Node
+	if err := yaml.Unmarshal(raw, &node); err != nil {
+		return err
+	}
+	blockStyle(&node)
+	enc := yaml.NewEncoder(w)
+	enc.SetIndent(2)
+	if err := enc.Encode(&node); err != nil {
+		return err
+	}
+	return enc.Close()
 }
 
 // blockStyle drops the flow and quote styles the JSON text carries into

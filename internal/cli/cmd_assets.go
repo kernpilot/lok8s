@@ -74,12 +74,9 @@ func newAssetsListCommand(paths *config.Paths) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// --json is the old spelling of -o json: one source of truth.
-			if asJSON {
-				if f != outputText && f != outputJSON {
-					return argshErrorf(cmd.ErrOrStderr(), "lo assets list: --json conflicts with --output %s", f)
-				}
-				f = outputJSON
+			f, err = outputWithJSONFlag(cmd, func() (string, error) { return f, nil }, asJSON, "lo assets list")
+			if err != nil {
+				return err
 			}
 			reports, err := assets.Report(paths, nil)
 			if err != nil {
@@ -187,6 +184,7 @@ func assetsEject(paths *config.Paths, rels []string, all, check bool, out, stder
 
 func newAssetsDiffCommand(paths *config.Paths) *cobra.Command {
 	var asJSON, check bool
+	var format func() (string, error)
 	cmd := &cobra.Command{
 		Use:   "diff [rel...]",
 		Short: "Diff an asset three ways: origin, local, embedded",
@@ -197,15 +195,24 @@ local-only · builtin-only. The headline per addon is the chart version
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+			f, err := outputWithJSONFlag(cmd, format, asJSON, "lo assets diff")
+			if err != nil {
+				return err
+			}
 			reports, err := assets.Report(paths, args)
 			if err != nil {
 				return assetsErr(stderr, err)
 			}
-			if asJSON {
+			switch f {
+			case outputJSON:
 				if err := writeAssetsJSON(out, reports); err != nil {
 					return err
 				}
-			} else {
+			case outputYAML:
+				if err := writeOutput(out, f, assetsJSON{Lo: assets.Version(), Assets: reports}); err != nil {
+					return err
+				}
+			default:
 				assets.WriteTable(out, reports, len(args) > 0)
 			}
 			if check && assets.AnyDrift(reports) {
@@ -221,8 +228,9 @@ local-only · builtin-only. The headline per addon is the chart version
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "Machine-readable output (stable shape)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Machine-readable output (the same as -o json)")
 	cmd.Flags().BoolVar(&check, "check", false, "Exit 1 on any drift")
+	format = addOutputFlag(cmd)
 	return cmd
 }
 

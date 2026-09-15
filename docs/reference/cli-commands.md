@@ -283,9 +283,10 @@ lo assets diff [rel...] [flags]
 ### Options
 
 ```
-      --check   Exit 1 on any drift
-  -h, --help    help for diff
-      --json    Machine-readable output (stable shape)
+      --check           Exit 1 on any drift
+  -h, --help            help for diff
+      --json            Machine-readable output (the same as -o json)
+  -o, --output string   Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -409,9 +410,10 @@ lo audit [domain] [flags]
 ### Options
 
 ```
-  -h, --help    help for audit
-      --json    Emit machine-readable JSON (stable schema for tooling)
-      --sarif   Emit SARIF 2.1.0 (GitHub code-scanning upload)
+  -h, --help            help for audit
+      --json            Emit machine-readable JSON (stable schema for tooling; the same as -o json)
+  -o, --output string   Output format: text, json or yaml (default "text")
+      --sarif           Emit SARIF 2.1.0 (GitHub code-scanning upload)
 ```
 
 ### SEE ALSO

@@ -217,6 +217,9 @@ func TestConfirmDestroyAndCleanListTheDeletion(t *testing.T) {
 			t.Errorf("lo clean prompt lacks %q:\n%s", line, out)
 		}
 	}
+	if strings.Contains(out, "(volumes stay)") || strings.Count(out, "registry containers") != 1 {
+		t.Errorf("lo clean prompt must carry one registry line:\n%s", out)
+	}
 	// --all: runClean prunes after the teardown and stops; no volumes, no
 	// registry set.
 	root, _ = confirmRoot(t, paths, "clean")
@@ -244,6 +247,20 @@ func TestConfirmRegistryAndImageClean(t *testing.T) {
 	root, _ = confirmRoot(t, paths, "registry clean")
 	if out, _ := runConfirm(t, root, true, true, "n\n", "registry", "clean"); strings.Contains(out, "io-docker") || strings.Contains(out, "docker network") || !strings.Contains(out, "alpha-registry-tls") {
 		t.Errorf("lo registry clean without --shared:\n%s", out)
+	}
+	// --shared on a set that is NOT shared: RegistryClean still removes
+	// the shared-network name of every mirror and the file's network, so
+	// the prompt lists them from the same branch.
+	registrySet(t, paths, "alpha.dev", projectSet)
+	root, _ = confirmRoot(t, paths, "registry clean")
+	out, _ = runConfirm(t, root, true, true, "n\n", "registry", "clean", "--shared")
+	want = "lo registry clean removes:\n" +
+		"  registry containers and volumes       alpha-registry-build, alpha-registry-cache, alpha-registry-io-docker\n" +
+		"  TLS certificate volume                alpha-registry-tls\n" +
+		"  shared mirror containers and volumes  lok8s-registry-io-docker\n" +
+		"  docker network                        alpha\n"
+	if !strings.HasPrefix(out, want) {
+		t.Errorf("lo registry clean --shared on a non-shared set:\n--- got ---\n%s--- want prefix ---\n%s", out, want)
 	}
 	// A non-Lo domain: the command's driver gate refuses, no prompt first.
 	os.WriteFile(filepath.Join(paths.Clusters, "beta.cloud", "cluster.lok8s.yaml"), []byte("kind: KubeOne\nmetadata:\n  name: beta\n"), 0o644)
@@ -277,5 +294,50 @@ func TestConfirmIsOnEveryDestructiveCommand(t *testing.T) {
 		if cmd := findByPath(root, path); cmd != nil && cmd.Flags().Lookup("yes") != nil {
 			t.Errorf("lo %s: has --yes but is not in the destructive set", path)
 		}
+	}
+}
+
+// TestConfirmPlanWritesNothing: composing a plan reads the registry file
+// a run left behind and never generates one. With the file present its
+// bytes are unchanged after a "no"; without it the prompt says so and no
+// file appears. No LOK8S_REGISTRY_JSON here: the path is the domain's.
+func TestConfirmPlanWritesNothing(t *testing.T) {
+	paths := completionProject(t)
+	t.Setenv("LOK8S_REGISTRY_JSON", "")
+	os.WriteFile(filepath.Join(paths.Clusters, ".active"), []byte("alpha.dev\n"), 0o644)
+	file := filepath.Join(paths.Clusters, "alpha.dev", ".registries.json")
+	os.WriteFile(file, []byte(projectSet), 0o644)
+	before, _ := os.ReadFile(file)
+
+	root, ran := confirmRoot(t, paths, "destroy")
+	out, _ := runConfirm(t, root, true, true, "n\n", "destroy")
+	if *ran || !strings.Contains(out, "alpha-registry-tls") {
+		t.Errorf("destroy prompt from the file: ran %v, out:\n%s", *ran, out)
+	}
+	if after, _ := os.ReadFile(file); string(after) != string(before) {
+		t.Errorf("the prompt rewrote %s", file)
+	}
+
+	os.Remove(file)
+	root, ran = confirmRoot(t, paths, "destroy")
+	out, _ = runConfirm(t, root, true, true, "n\n", "destroy")
+	if *ran || !strings.Contains(out, "the set named by the spec (no clusters/alpha.dev/.registries.json yet)\n") {
+		t.Errorf("destroy prompt without the file:\n%s", out)
+	}
+	if _, err := os.Stat(file); err == nil {
+		t.Errorf("the prompt generated %s", file)
+	}
+}
+
+// TestImageCleanRefusesANonLoDomain: the cache registry is a Lo-driver
+// feature; on another driver the command refuses before any removal,
+// and the prompt has nothing to ask.
+func TestImageCleanRefusesANonLoDomain(t *testing.T) {
+	paths := completionProject(t)
+	os.WriteFile(filepath.Join(paths.Clusters, "beta.cloud", "cluster.lok8s.yaml"), []byte("kind: KubeOne\nmetadata:\n  name: beta\n"), 0o644)
+	t.Setenv("LOK8S_REGISTRY_IP_CACHE", "")
+	_, errOut, err := runOut(t, paths, "image", "clean", "--domain", "beta.cloud")
+	if err == nil || !strings.Contains(errOut, "domain 'beta.cloud' uses the 'kubeone' driver") {
+		t.Errorf("lo image clean on a KubeOne domain: err %v, stderr %q (want the driver refusal, no removal)", err, errOut)
 	}
 }

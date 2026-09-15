@@ -236,3 +236,35 @@ func TestWriteOutputKeepsAngleBrackets(t *testing.T) {
 		t.Errorf("json = %q, want %q", out.String(), want)
 	}
 }
+
+// TestJSONFlagIsOutputJSONOnDiffAndAudit: the older --json on assets diff
+// and audit is -o json; -o yaml renders the same document; --json with
+// another -o value is an error naming the command.
+func TestJSONFlagIsOutputJSONOnDiffAndAudit(t *testing.T) {
+	paths := completionProject(t)
+	a, _, _ := runOut(t, paths, "assets", "diff", "--json")
+	b, _, _ := runOut(t, paths, "assets", "diff", "-o", "json")
+	if a == "" || a != b {
+		t.Errorf("assets diff --json and -o json differ:\n%s\n---\n%s", a, b)
+	}
+	if y, _, err := runOut(t, paths, "assets", "diff", "-o", "yaml"); err != nil || !strings.HasPrefix(y, "lo: ") {
+		t.Errorf("assets diff -o yaml: err %v, out:\n%s", err, y)
+	}
+	if _, errOut, err := runOut(t, paths, "assets", "diff", "--json", "-o", "yaml"); err == nil || !strings.Contains(errOut, "Error: lo assets diff: --json conflicts with --output yaml") {
+		t.Errorf("assets diff --json -o yaml: err %v, stderr %q", err, errOut)
+	}
+
+	os.WriteFile(filepath.Join(paths.Clusters, ".active"), []byte("alpha.dev\n"), 0o644)
+	a, _, _ = runOut(t, paths, "audit", "--json")
+	b, _, _ = runOut(t, paths, "audit", "-o", "json")
+	if a == "" || a != b {
+		t.Errorf("audit --json and -o json differ:\n%s\n---\n%s", a, b)
+	}
+	var doc map[string]any
+	if y, _, _ := runOut(t, paths, "audit", "-o", "yaml"); yaml.Unmarshal([]byte(y), &doc) != nil || len(doc) == 0 {
+		t.Errorf("audit -o yaml is not a yaml document:\n%s", y)
+	}
+	if _, errOut, err := runOut(t, paths, "audit", "--sarif", "-o", "json"); err == nil || !strings.Contains(errOut, "Error: lo audit: --sarif conflicts with --output json") {
+		t.Errorf("audit --sarif -o json: err %v, stderr %q", err, errOut)
+	}
+}
