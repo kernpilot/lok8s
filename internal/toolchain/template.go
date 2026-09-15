@@ -124,6 +124,28 @@ func vPrefixed(v string) string {
 	return "v" + v
 }
 
+// Count is the number of tools an install with groups lands: b itself
+// plus the template entries of the selected groups (core implied; nil =
+// DefaultGroups). An unknown group counts nothing extra.
+func Count(groups []string) int {
+	if len(groups) == 0 {
+		groups = DefaultGroups
+	}
+	active := map[string]bool{GroupCore: true}
+	for _, g := range groups {
+		active[strings.TrimSpace(strings.ToLower(g))] = true
+	}
+	n := 1
+	// The version and the plugin home shape the entries' fields, not
+	// their number.
+	for _, e := range entries("", "") {
+		if active[e.group] {
+			n++
+		}
+	}
+	return n
+}
+
 // NormalizeGroups validates a --groups selection: known names only, core
 // implied, order canonical.
 func NormalizeGroups(groups []string) ([]string, error) {

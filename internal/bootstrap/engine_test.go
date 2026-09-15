@@ -1017,14 +1017,21 @@ func TestKubeOneUnsetGateDefaultsToDefer(t *testing.T) {
 
 // A cancelled context ends the DAG run: the reap loop returns the context
 // error instead of waiting for entries that stop only when the context
-// does.
+// does. The fake job stays in flight until the test releases it: the
+// reap loop's select then has one ready case (ctx.Done), so the outcome
+// does not depend on which of two ready cases the runtime picks (a job
+// that returned on the cancel would make it a coin flip — flaky on a
+// slow runner).
 func TestApplyReturnsWhenTheContextEnds(t *testing.T) {
 	e, _, _, _, p := testEngine(t)
 	writeStackAddon(t, p)
 	spec := writeClusterSpec(t, p, "testcni")
 	kc := writeKubeconfig(t, p)
+	release := make(chan struct{})
+	defer close(release)
 	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
 		<-ctx.Done()
+		<-release
 		return 1
 	}
 	ctx, cancel := context.WithCancel(t.Context())

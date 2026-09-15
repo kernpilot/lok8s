@@ -40,17 +40,21 @@ const (
 	ansiYellow = "\033[33m"
 )
 
-// Paint wraps text in code and a reset when the style allows colour.
+// Paint wraps text in code and a reset when the style allows colour. An
+// empty text stays empty: no bare escape pair.
 func (s Style) Paint(code, text string) string {
-	if !s.Color {
+	if !s.Color || text == "" {
 		return text
 	}
 	return code + text + ansiReset
 }
 
-// Bold and Dim are the two weights of the palette.
+// Bold and Dim are the two weights of the palette; Warn is the `!`
+// colour for a marker inside a row the caller lays out itself (the card
+// of `lo init`; MarkWarn writes a whole line).
 func (s Style) Bold(text string) string { return s.Paint(ansiBold, text) }
 func (s Style) Dim(text string) string  { return s.Paint(ansiDim, text) }
+func (s Style) Warn(text string) string { return s.Paint(ansiYellow, text) }
 
 var (
 	styleMu     sync.Mutex

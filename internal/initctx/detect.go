@@ -1,74 +1,59 @@
-// Package initctx reads the room for a bare `lo init`: where the user
-// stands (a project root, a subdirectory, a service directory, a
-// submodule under an umbrella project, an empty or a bare directory),
-// what git says about it, what the project already has, and whether a
-// terminal is attached. Detect is the read side; Decide turns the state
-// and the wizard's answers into the ordered list of actions the cli
-// executes through the existing subcommands; Ask is the huh form layer.
+// Package initctx is the state and the screens of a bare `lo init`.
+// Detect reads where the user stands: a project root, a subdirectory, a
+// service directory, a submodule under an umbrella project, an empty or
+// a bare directory; what git says; what the project has; whether a
+// terminal is attached. Decide turns the state and the answers into the
+// ordered actions the cli runs through the verbs. The screens (screen.go)
+// and project mode (loop.go) are the huh forms.
 //
-// Everything here is pure over the filesystem except the two git reads,
-// which go through the execx.Runner seam so the tests script them.
+// Everything here reads the filesystem only. The three git reads go
+// through the execx.Runner seam, so the tests script them.
 package initctx
 
 import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
-	"github.com/kernpilot/lok8s/internal/toolchain"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// Situation is one of the five conversations `lo init` can have.
+// Situation is where a bare `lo init` stands. The first three take the
+// bootstrap screen for a new project; the last two are a project
+// (project mode, or the bootstrap screen when the project has no git
+// repository).
 type Situation int
 
 const (
 	// SituationUnknown is the zero value; Detect never returns it.
 	SituationUnknown Situation = iota
-	// SituationEmptyDir — an empty directory (a `.git` entry does not
-	// count) and no project above: the welcome conversation.
+	// SituationEmptyDir: an empty directory (a `.git` entry does not
+	// count) and no project above. The project goes here.
 	SituationEmptyDir
-	// SituationGitBelowRoot — inside a git repository, below its root,
-	// and no project above: the wizard suggests the git root.
+	// SituationGitBelowRoot: inside a git repository, below its root,
+	// and no project above. The project goes to the repository root by
+	// default.
 	SituationGitBelowRoot
-	// SituationBareDir — a non-empty directory, no project above, and
-	// either no git or cwd is the git root: the wizard says what it sees
-	// and offers here or a subdirectory.
+	// SituationBareDir: a non-empty directory, no project above, and
+	// either no git or cwd is the git root. The project goes here.
 	SituationBareDir
-	// SituationProjectRoot — cwd is a project root: the status card, then
-	// what to add.
+	// SituationProjectRoot: cwd is a project root.
 	SituationProjectRoot
-	// SituationInsideProject — cwd is inside a project (a subdirectory, a
-	// service directory, a submodule under the umbrella project): the
-	// card, plus the offer to register a service directory.
+	// SituationInsideProject: cwd is inside a project (a subdirectory, a
+	// service directory, a submodule under the umbrella project). The
+	// actions act on the project root.
 	SituationInsideProject
 )
-
-// String is the situation as the card names it.
-func (s Situation) String() string {
-	switch s {
-	case SituationEmptyDir:
-		return "empty directory"
-	case SituationGitBelowRoot:
-		return "git repository, below its root, no project"
-	case SituationBareDir:
-		return "directory without a project"
-	case SituationProjectRoot:
-		return "project root"
-	case SituationInsideProject:
-		return "inside a project"
-	}
-	return "unknown"
-}
 
 // Terminal is what decides between the wizard and the help text.
 type Terminal struct {
@@ -86,12 +71,14 @@ func (t Terminal) Interactive() bool {
 	return t.StdinTTY && t.StdoutTTY && !t.CI && !t.Yes
 }
 
-// DetectTerminal reads the two streams and the CI variable.
-func DetectTerminal(stdin, stdout *os.File, yes bool) Terminal {
+// DetectTerminal reads the two streams through internal/ui (so the test
+// override ui.ForceTTY covers the screens and the card alike) and the
+// CI variable.
+func DetectTerminal(yes bool) Terminal {
 	_, ci := os.LookupEnv("CI")
 	return Terminal{
-		StdinTTY:  stdin != nil && term.IsTerminal(int(stdin.Fd())),
-		StdoutTTY: stdout != nil && term.IsTerminal(int(stdout.Fd())),
+		StdinTTY:  ui.StdinIsTerminal(),
+		StdoutTTY: ui.Stdout().TTY,
 		CI:        ci,
 		Yes:       yes,
 	}
@@ -101,12 +88,15 @@ func DetectTerminal(stdin, stdout *os.File, yes bool) Terminal {
 type Git struct {
 	// Available is whether git ran at all.
 	Available bool
-	// Root is the repository root ("" = not a repository).
+	// Root is the repository root ("" = not a repository), in the path
+	// form of State.Cwd (git resolves symlinks; the card prints one form).
 	Root string
 	// AtRoot is whether cwd is the repository root.
 	AtRoot bool
-	// Dirty is whether `git status --porcelain` printed anything.
-	Dirty bool
+	// Branch is the current branch ("" = detached HEAD).
+	Branch string
+	// Uncommitted counts the paths `git status --porcelain` lists.
+	Uncommitted int
 	// Submodule is whether Root carries a `.git` FILE (a submodule
 	// checkout, or a worktree) rather than a directory.
 	Submodule bool
@@ -137,14 +127,20 @@ type Project struct {
 	Domains []Domain
 	// Active is clusters/.active ("" when unset or invalid).
 	Active string
+	// Kubeconfig is whether the active domain's cluster has a kubeconfig
+	// under .kubeconfig/ (<metadata.name>.yaml: the cluster was
+	// provisioned once).
+	Kubeconfig bool
 	// EnvFile is the environment file present: "mise" (mise.toml),
 	// "direnv" (.envrc), "" (none). With both present, mise.
 	EnvFile string
-	// BYAML is whether .bin/b.yaml exists; BYAMLMarker whether `lo
-	// toolchain install` wrote it.
-	BYAML, BYAMLMarker bool
-	// ToolsMissing lists the pinned tools that do not resolve under the
-	// project (b, kustomize, the two exec plugins); nil = all present.
+	// BYAML is whether .bin/b.yaml exists; BYAMLInvalid whether it exists
+	// but cannot be read or parsed (then Tools is 0).
+	BYAML, BYAMLInvalid bool
+	// Tools counts the pinned tools: b itself plus every `binaries:`
+	// entry of .bin/b.yaml. ToolsMissing lists the ones that do not
+	// resolve under the project (by name); nil = all present.
+	Tools        int
 	ToolsMissing []string
 	// BashTree is whether Root/.lok8s/lo exists (an ejected or vendored
 	// bash tree).
@@ -194,16 +190,24 @@ func (s State) Situation() Situation {
 	return SituationBareDir
 }
 
-// ServiceName is the service name a service directory implies (its base
-// name), "" outside one.
-func (s State) ServiceName() string {
-	if !s.ServiceDir {
-		return ""
-	}
-	return filepath.Base(s.Cwd)
+// ToolchainMissing reports whether `lo toolchain install` is due: no pin
+// file, an unreadable one, or a pinned tool that does not resolve.
+func (p *Project) ToolchainMissing() bool {
+	return !p.BYAML || p.BYAMLInvalid || len(p.ToolsMissing) > 0
 }
 
-// Detect reads the room from cwd. r runs git (nil = no git: the state
+// ActiveValid reports whether clusters/.active names a domain with a
+// spec.
+func (p *Project) ActiveValid() bool {
+	for _, d := range p.Domains {
+		if d.Name == p.Active {
+			return p.Active != ""
+		}
+	}
+	return false
+}
+
+// Detect reads the state from cwd. r runs git (nil = no git: the state
 // reports it unavailable).
 func Detect(ctx context.Context, cwd string, r execx.Runner) (State, error) {
 	abs, err := filepath.Abs(cwd)
@@ -230,7 +234,9 @@ func Detect(ctx context.Context, cwd string, r execx.Runner) (State, error) {
 	return s, nil
 }
 
-// detectGit runs the two git reads through r.
+// detectGit runs the three git reads through r: the root, the branch and
+// the porcelain status. The branch comes from symbolic-ref: an unborn
+// branch still has a name, and a detached HEAD reads as none.
 func detectGit(ctx context.Context, cwd string, r execx.Runner) Git {
 	g := Git{}
 	if r == nil {
@@ -250,15 +256,42 @@ func detectGit(ctx context.Context, cwd string, r execx.Runner) Git {
 	if root == "" {
 		return g
 	}
-	g.Root = root
+	g.Root = cwdForm(cwd, root)
 	g.AtRoot = samePath(root, cwd)
 	if info, err := os.Lstat(filepath.Join(root, ".git")); err == nil && !info.IsDir() {
 		g.Submodule = true
 	}
+	if out, err := execx.Output(ctx, r, execx.Cmd{Name: "git", Args: []string{"symbolic-ref", "--short", "-q", "HEAD"}, Dir: cwd}); err == nil {
+		g.Branch = strings.TrimSpace(string(out))
+	}
 	if out, err := execx.Output(ctx, r, execx.Cmd{Name: "git", Args: []string{"status", "--porcelain"}, Dir: cwd}); err == nil {
-		g.Dirty = strings.TrimSpace(string(out)) != ""
+		g.Uncommitted = len(strings.Split(strings.TrimRight(string(out), "\n"), "\n"))
+		if strings.TrimSpace(string(out)) == "" {
+			g.Uncommitted = 0
+		}
 	}
 	return g
+}
+
+// cwdForm rewrites root into the form of cwd. git prints root with
+// symlinks resolved; cwd is the path the user typed. The walk from the
+// resolved cwd to root is applied to the typed cwd. root stays as printed
+// when the two forms cannot be related.
+func cwdForm(cwd, root string) string {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil || resolved == cwd {
+		return root
+	}
+	rel, err := filepath.Rel(resolved, root)
+	if err != nil {
+		return root
+	}
+	typed := filepath.Join(cwd, rel)
+	// A symlink below the root breaks the walk: keep git's form then.
+	if back, err := filepath.EvalSymlinks(typed); err != nil || back != root {
+		return root
+	}
+	return typed
 }
 
 // samePath compares two paths with symlinks resolved where possible.
@@ -284,16 +317,13 @@ func detectProject(root, cwd string) *Project {
 			p.Active = active
 		}
 	}
-	switch {
-	case fsutil.FileExists(filepath.Join(root, "mise.toml")):
-		p.EnvFile = "mise"
-	case fsutil.FileExists(filepath.Join(root, ".envrc")):
-		p.EnvFile = "direnv"
+	if name := specName(filepath.Join(clusters, p.Active, "cluster.lok8s.yaml")); p.Active != "" && name != "" {
+		p.Kubeconfig = fsutil.FileExists(filepath.Join(root, ".kubeconfig", name+".yaml"))
 	}
+	p.EnvFile = existingEnv(root)
 	byaml := filepath.Join(root, ".bin", "b.yaml")
 	p.BYAML = fsutil.FileExists(byaml)
-	p.BYAMLMarker = p.BYAML && toolchain.HasMarker(byaml)
-	p.ToolsMissing = missingTools(root)
+	p.Tools, p.ToolsMissing, p.BYAMLInvalid = pinnedTools(byaml)
 	p.BashTree = fsutil.FileExists(filepath.Join(root, ".lok8s", "lo"))
 	impl, err := config.LoadImplementation(root)
 	p.Implementation = impl.Default
@@ -321,6 +351,23 @@ func projectFileName(path string) (bool, string) {
 		return false, ""
 	}
 	return true, doc.Metadata.Name
+}
+
+// specName reads a cluster spec's metadata.name ("" when unreadable).
+func specName(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Metadata struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	return doc.Metadata.Name
 }
 
 // isServiceFile reports whether path is a lok8s.yaml without a kind: the
@@ -365,22 +412,53 @@ func listDomains(clusters string) []Domain {
 	return out
 }
 
-// missingTools lists the pinned tools that do not resolve under root: b
-// and kustomize in .bin, the two exec plugins under .kustomize. A
-// filesystem check only (no probe): the doctor sections verify versions.
-func missingTools(root string) []string {
-	bin := filepath.Join(root, ".bin")
-	home := filepath.Join(root, ".kustomize")
+// pinnedTools counts the pins of byaml and lists the entries that do not
+// resolve. The pins are b itself (<bin>/b) and every `binaries:` entry.
+// An entry resolves at the path b installs it to: `file:` relative to
+// the b.yaml directory, else <bin>/<alias>, else <bin>/<the last segment
+// of the key>. This is a filesystem check, no probe: `lo toolchain
+// doctor` verifies versions. Without a b.yaml nothing is pinned: 0, nil,
+// false. A b.yaml that exists but cannot be read or parsed: 0, nil,
+// true (the card says so, the toolchain install is offered).
+func pinnedTools(byaml string) (int, []string, bool) {
+	raw, err := os.ReadFile(byaml)
+	if err != nil {
+		return 0, nil, fsutil.FileExists(byaml)
+	}
+	var doc struct {
+		Binaries map[string]*struct {
+			Alias string `yaml:"alias"`
+			File  string `yaml:"file"`
+		} `yaml:"binaries"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return 0, nil, true
+	}
+	bin := filepath.Dir(byaml)
+	type pin struct{ name, path string }
+	pins := []pin{{"b", filepath.Join(bin, "b")}}
+	keys := make([]string, 0, len(doc.Binaries))
+	for k := range doc.Binaries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		e := doc.Binaries[k]
+		name := path.Base(k)
+		if e != nil && e.Alias != "" {
+			name = e.Alias
+		}
+		file := filepath.Join(bin, name)
+		if e != nil && e.File != "" {
+			file = filepath.Join(bin, filepath.FromSlash(e.File))
+		}
+		pins = append(pins, pin{name, file})
+	}
 	var missing []string
-	for _, t := range []struct{ name, path string }{
-		{"b", filepath.Join(bin, "b")},
-		{"kustomize", filepath.Join(bin, "kustomize")},
-		{"khelm ChartRenderer", filepath.Join(home, filepath.FromSlash(toolchain.ChartRendererPluginRel))},
-		{"secrets.lok8s.dev Secret", filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))},
-	} {
+	for _, t := range pins {
 		if !fsutil.IsExecutable(t.path) {
 			missing = append(missing, t.name)
 		}
 	}
-	return missing
+	return len(pins), missing, false
 }

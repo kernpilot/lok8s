@@ -208,3 +208,25 @@ func TestForResolvesProcessStreams(t *testing.T) {
 		t.Error("colour off a terminal")
 	}
 }
+
+// Warn paints the `!` of a row the caller lays out; plain without colour.
+func TestStyleWarn(t *testing.T) {
+	if got := (Style{TTY: true, Color: true}).Warn("!"); got != "\033[33m!\033[0m" {
+		t.Errorf("warn: %q", got)
+	}
+	if got := (Style{TTY: true}).Warn("!"); got != "!" {
+		t.Errorf("warn without colour: %q", got)
+	}
+}
+
+// An empty text paints to nothing, coloured or not.
+func TestPaintEmpty(t *testing.T) {
+	for _, st := range []Style{{TTY: true, Color: true}, {TTY: true}, {}} {
+		if got := st.Paint(ansiDim, ""); got != "" {
+			t.Errorf("%+v: Paint(\"\") = %q", st, got)
+		}
+		if got := st.Bold(""); got != "" {
+			t.Errorf("%+v: Bold(\"\") = %q", st, got)
+		}
+	}
+}

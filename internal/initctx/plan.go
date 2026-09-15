@@ -1,35 +1,36 @@
 package initctx
 
-// plan.go — the decision function: State + Answers → the ordered actions
-// the cli executes, each with the flag-twin command line a CI user can
-// run instead. Pure: nothing here touches the filesystem.
+// plan.go: the decision layer. It holds the defaults a situation
+// suggests, the ordered actions a set of answers makes, and the `next`
+// step a project state calls for. Each action carries the files it
+// writes, the command it runs and the flag-twin command line a script
+// runs instead. Nothing here writes the filesystem; the one read is the
+// existence check for a cluster spec.
 
 import (
-	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
-// Answers is what the wizard asked (or the defaults `--plan` assumes).
-// Every field has a flag twin on an existing subcommand; Decide prints it.
+// Answers is what the new-project screen holds (the defaults, or the
+// details the user changed). Every field has a flag twin on `lo init
+// project`, `git init`, `lo toolchain install` or `lo use`.
 type Answers struct {
-	// Dir is the project directory for a new project ("" = the situation's
-	// default: the working directory, or the git root below which the
-	// user stands). Ignored inside an existing project (its root).
+	// Dir is the project directory ("" = the situation's default: the
+	// working directory, or the git root below which the user stands).
 	Dir string
 	// Name is metadata.name ("" = the directory name).
 	Name string
 	// Env is the environment file: mise, direnv or none ("" = the one the
-	// directory already has, else mise). Inside an existing project it
-	// only matters when none exists yet.
+	// directory already has, else mise).
 	Env string
 	// GitInit asks for `git init` (honoured only without a repository).
 	GitInit bool
-	// Domain and Driver describe the first (or an added) cluster spec;
-	// "" = none.
+	// Domain and Driver describe the first cluster spec; "" = none.
 	Domain, Driver string
 	// Use makes Domain the active domain (`lo use`).
 	Use bool
@@ -37,15 +38,6 @@ type Answers struct {
 	// default groups).
 	Toolchain bool
 	Groups    []string
-	// Implementation switches spec.implementation.default ("" = keep;
-	// "bash" ejects the tree first when the project has none).
-	Implementation string
-	// Service adds a service (`lo init service <name>`); Tests the
-	// Playwright suite; Register adds the service directory the user
-	// stands in to services.yaml.
-	Service  string
-	Tests    bool
-	Register bool
 }
 
 // ActionKind names one action of a Plan.
@@ -58,15 +50,9 @@ const (
 	ActionWriteProjectFiles ActionKind = "project files"
 	// ActionGitInit — `git init` in the project directory.
 	ActionGitInit ActionKind = "git init"
-	// ActionWriteEnvFile — the environment file into an existing project.
-	ActionWriteEnvFile ActionKind = "environment file"
 	// ActionWriteClusterSpec — clusters/<domain>/cluster.lok8s.yaml into
 	// an existing project.
 	ActionWriteClusterSpec ActionKind = "cluster spec"
-	// ActionEjectBash — `lo assets eject bash`.
-	ActionEjectBash ActionKind = "eject bash"
-	// ActionSetImplementation — spec.implementation.default in lok8s.yaml.
-	ActionSetImplementation ActionKind = "implementation"
 	// ActionToolchainInstall — `lo toolchain install` (network).
 	ActionToolchainInstall ActionKind = "toolchain"
 	// ActionUse — `lo use <domain>`.
@@ -75,31 +61,37 @@ const (
 	ActionAddService ActionKind = "service"
 	// ActionAddTests — `lo init test`.
 	ActionAddTests ActionKind = "tests"
-	// ActionRegisterService — the service directory into services.yaml.
-	ActionRegisterService ActionKind = "register service"
+	// ActionEjectBash — `lo assets eject bash`.
+	ActionEjectBash ActionKind = "eject bash"
+	// ActionSetImplementation — spec.implementation.default in lok8s.yaml.
+	ActionSetImplementation ActionKind = "implementation"
 )
 
 // Action is one step of a Plan.
 type Action struct {
 	Kind ActionKind
-	// Summary says what the step writes or runs, in one line.
-	Summary string
+	// Files lists what the step writes (relative to Plan.Dir); Run names
+	// what it runs, in the words of the screen ("" = nothing).
+	Files []string
+	Run   string
 	// Command is the flag-twin command line, run from Plan.Dir.
 	Command string
 	// Network is whether the step needs the network.
 	Network bool
 	// The parameters the executor hands to the functions behind Command.
-	Name, Env, Domain, Driver, Service, ServicePath, Implementation string
-	Groups                                                          []string
+	Name, Env, Domain, Driver, Service, Path, Implementation string
+	Groups                                                   []string
 }
 
 // Plan is the ordered list of actions for one `lo init` run.
 type Plan struct {
-	Situation Situation
 	// Dir is the project directory every action runs in (absolute).
 	Dir string
 	// Name is the project name the actions use.
 	Name string
+	// Force overwrites existing files (a verb's --force; a screen never
+	// sets it).
+	Force bool
 	// Actions in execution order; empty = nothing to do.
 	Actions []Action
 }
@@ -109,6 +101,38 @@ func (p Plan) Commands() []string {
 	out := make([]string, 0, len(p.Actions))
 	for _, a := range p.Actions {
 		out = append(out, a.Command)
+	}
+	return out
+}
+
+// StepError is a failed action of a plan: the command, the cause and the
+// commands that did not run.
+type StepError struct {
+	Command string
+	Err     error
+	NotRun  []string
+}
+
+func (e *StepError) Error() string { return e.Command + ": " + e.Err.Error() }
+
+func (e *StepError) Unwrap() error { return e.Err }
+
+// Files lists every file the plan writes, in order.
+func (p Plan) Files() []string {
+	var out []string
+	for _, a := range p.Actions {
+		out = append(out, a.Files...)
+	}
+	return out
+}
+
+// Runs lists every command the plan runs, in the screen's words.
+func (p Plan) Runs() []string {
+	var out []string
+	for _, a := range p.Actions {
+		if a.Run != "" {
+			out = append(out, a.Run)
+		}
 	}
 	return out
 }
@@ -123,31 +147,72 @@ func (p Plan) Network() bool {
 	return false
 }
 
-// DefaultAnswers are what `--plan` assumes without a conversation: a new
-// project gets its files where the situation suggests, `git init` when
-// git exists and there is no repository, the environment file the
-// directory already has (else mise) and the toolchain; an existing
-// project gets nothing (the card, and the menu as hints).
-func DefaultAnswers(s State) Answers {
-	switch s.Situation() {
-	case SituationEmptyDir, SituationGitBelowRoot, SituationBareDir:
-		return Answers{
-			Dir:       DefaultDir(s),
-			Env:       DefaultEnv(s, DefaultDir(s)),
-			GitInit:   s.Git.Available && s.Git.Root == "",
-			Toolchain: true,
-		}
-	}
-	return Answers{}
+// Bootstrap reports whether the state calls for the bootstrap screen
+// (mode 1): no project here, or a project without a git repository
+// (git installed, no repository). Everything else is project mode.
+func Bootstrap(s State) bool {
+	return s.Project == nil || (s.Git.Available && s.Git.Root == "")
 }
 
-// DefaultDir is the project directory a new project defaults to: the git
-// root when the user stands below it, else the working directory.
+// DefaultAnswers are the bootstrap defaults the screen shows first. For
+// a new project: the files where the situation suggests; the name from
+// the directory; the first cluster `<name>.dev` on the lo driver, made
+// active; the environment file the directory has, else mise; the
+// toolchain; `git init` when git exists and there is no repository. For
+// a project without a repository: its name and root; a first cluster
+// only when it has none; the toolchain only when a pin is missing; `git
+// init`.
+func DefaultAnswers(s State) Answers {
+	dir := DefaultDir(s)
+	a := Answers{
+		Dir:       dir,
+		Name:      DefaultName(dir),
+		Driver:    "lo",
+		Env:       DefaultEnv(s, dir),
+		GitInit:   s.Git.Available && s.Git.Root == "",
+		Toolchain: true,
+	}
+	if p := s.Project; p != nil {
+		a.Name = projectName(s)
+		a.Toolchain = p.ToolchainMissing()
+		if len(p.Domains) > 0 {
+			return a
+		}
+	}
+	a.Domain, a.Use = a.Name+".dev", true
+	return a
+}
+
+// DefaultDir is the project directory the bootstrap defaults to: the
+// project's root inside one, the git root when the user stands below it,
+// else the working directory.
 func DefaultDir(s State) string {
+	if s.Project != nil {
+		return s.Project.Root
+	}
 	if s.Situation() == SituationGitBelowRoot {
 		return s.Git.Root
 	}
 	return s.Cwd
+}
+
+var (
+	nameBad   = regexp.MustCompile(`[^a-z0-9._-]+`)
+	nameStart = regexp.MustCompile(`^[^a-z0-9]+`)
+)
+
+// DefaultName is the project name a directory suggests: its base name,
+// lowercased, every run of other characters one `-`, "project" when
+// nothing is left.
+func DefaultName(dir string) string {
+	name := strings.ToLower(filepath.Base(dir))
+	name = nameBad.ReplaceAllString(name, "-")
+	name = nameStart.ReplaceAllString(name, "")
+	name = strings.TrimRight(name, "-")
+	if name == "" {
+		return "project"
+	}
+	return name
 }
 
 // DefaultEnv is the environment file a directory suggests: the one it
@@ -162,20 +227,10 @@ func DefaultEnv(s State, dir string) string {
 	return "mise"
 }
 
-// Decide turns the state and the answers into the plan. Answers that do
-// not apply to the situation are ignored (a `git init` inside a
-// repository, a registration outside a service directory).
+// Decide turns the state and the answers into the new-project plan: the
+// project files (with the first cluster spec), `git init`, the toolchain,
+// `lo use`. A `git init` inside a repository is ignored.
 func Decide(s State, a Answers) Plan {
-	sit := s.Situation()
-	switch sit {
-	case SituationProjectRoot, SituationInsideProject:
-		return existingProject(s, a)
-	}
-	return newProject(s, a)
-}
-
-// newProject is the empty, bare and git-below-root conversations.
-func newProject(s State, a Answers) Plan {
 	dir := a.Dir
 	if dir == "" {
 		dir = DefaultDir(s)
@@ -186,37 +241,49 @@ func newProject(s State, a Answers) Plan {
 	dir = filepath.Clean(dir)
 	name := a.Name
 	if name == "" {
-		name = filepath.Base(dir)
+		name = DefaultName(dir)
 	}
 	env := a.Env
 	if env == "" {
 		env = DefaultEnv(s, dir)
 	}
-	p := Plan{Situation: s.Situation(), Dir: dir, Name: name}
+	p := Plan{Dir: dir, Name: name}
 
-	files := []string{"clusters/", "lok8s.yaml", ".gitignore entries"}
+	// The files `lo init project` writes; inside an existing project only
+	// the ones it lacks (the scaffold keeps every existing file).
+	files := []string{}
+	proj := s.Project
+	if proj == nil || !proj.Clusters {
+		files = append(files, "clusters/")
+	}
+	if proj == nil || !proj.ProjectFile {
+		files = append(files, "lok8s.yaml")
+	}
+	files = append(files, ".gitignore entries")
 	cmd := "lo init project " + name + " --env " + env
 	if rel := relDir(s.Cwd, dir); rel != "" {
 		cmd += " --path " + rel
 	}
-	switch env {
-	case "mise":
-		files = append(files, "mise.toml")
-	case "direnv":
-		files = append(files, ".envrc")
+	if proj == nil || proj.EnvFile == "" {
+		switch env {
+		case "mise":
+			files = append(files, "mise.toml")
+		case "direnv":
+			files = append(files, ".envrc")
+		}
 	}
 	action := Action{Kind: ActionWriteProjectFiles, Name: name, Env: env}
 	if a.Domain != "" {
 		action.Domain, action.Driver = a.Domain, driverOr(a.Driver)
-		files = append(files, clusterSpecSummary(dir, a.Domain, action.Driver))
+		files = append(files, clusterSpecFile(dir, a.Domain, false))
 		cmd += " --cluster " + a.Domain + " --driver " + action.Driver
 	}
-	action.Summary = strings.Join(files, ", ")
+	action.Files = files
 	action.Command = cmd
 	p.Actions = append(p.Actions, action)
 
 	if a.GitInit && s.Git.Available && s.Git.Root == "" {
-		p.Actions = append(p.Actions, Action{Kind: ActionGitInit, Summary: "a git repository in " + shortDir(s.Cwd, dir), Command: "git init"})
+		p.Actions = append(p.Actions, Action{Kind: ActionGitInit, Run: "git init", Command: "git init"})
 	}
 	p.Actions = append(p.Actions, toolchainActions(a)...)
 	if a.Domain != "" && a.Use {
@@ -225,69 +292,138 @@ func newProject(s State, a Answers) Plan {
 	return p
 }
 
-// existingProject is the project-root and inside-a-project conversations.
-func existingProject(s State, a Answers) Plan {
-	proj := s.Project
-	name := proj.Name
-	if name == "" {
-		name = filepath.Base(proj.Root)
+// ClusterPlan is `lo init cluster`: the spec, then `lo use` when active.
+// force is the verb's --force: an existing spec is replaced, and the
+// twin carries the flag.
+func ClusterPlan(dir, dom, driver string, active, force bool) Plan {
+	driver = driverOr(driver)
+	cmd := "lo init cluster " + dom + " --driver " + driver
+	if !active {
+		cmd += " --no-active"
 	}
-	p := Plan{Situation: s.Situation(), Dir: proj.Root, Name: name}
-
-	if a.Env != "" && a.Env != "none" && proj.EnvFile == "" {
-		file := "mise.toml"
-		if a.Env == "direnv" {
-			file = ".envrc"
-		}
-		p.Actions = append(p.Actions, Action{Kind: ActionWriteEnvFile, Env: a.Env, Name: name,
-			Summary: file, Command: "lo init project --env " + a.Env})
+	if force {
+		cmd += " --force"
 	}
-	if a.Domain != "" {
-		driver := driverOr(a.Driver)
-		p.Actions = append(p.Actions, Action{Kind: ActionWriteClusterSpec, Domain: a.Domain, Driver: driver, Name: name,
-			Summary: clusterSpecSummary(proj.Root, a.Domain, driver),
-			Command: "lo init project --env none --cluster " + a.Domain + " --driver " + driver})
-	}
-	if a.Implementation != "" && a.Implementation != proj.Implementation {
-		if a.Implementation == "bash" && !proj.BashTree {
-			p.Actions = append(p.Actions, Action{Kind: ActionEjectBash,
-				Summary: ".lok8s/ (the bash implementation, plus every data asset the project lacks)",
-				Command: "lo assets eject bash"})
-		}
-		p.Actions = append(p.Actions, Action{Kind: ActionSetImplementation, Implementation: a.Implementation, Name: name,
-			Summary: "lok8s.yaml: spec.implementation.default: " + a.Implementation,
-			Command: "lo init project --env none --implementation " + a.Implementation})
-	}
-	p.Actions = append(p.Actions, toolchainActions(a)...)
-	if a.Domain != "" && a.Use {
-		p.Actions = append(p.Actions, useAction(a.Domain))
-	}
-	if a.Service != "" {
-		p.Actions = append(p.Actions, Action{Kind: ActionAddService, Service: a.Service, ServicePath: "./" + a.Service,
-			Summary: a.Service + "/lok8s.yaml, services.yaml entry, Tiltfile",
-			Command: "lo init service " + a.Service})
-	}
-	if a.Tests {
-		p.Actions = append(p.Actions, Action{Kind: ActionAddTests, Summary: "tests/ (the Playwright suite)", Command: "lo init test"})
-	}
-	if a.Register && s.ServiceDir && !proj.AtRoot {
-		svc := s.ServiceName()
-		path := "./" + filepath.ToSlash(relDir(proj.Root, s.Cwd))
-		p.Actions = append(p.Actions, Action{Kind: ActionRegisterService, Service: svc, ServicePath: path,
-			Summary: "services.yaml: services." + svc + ".path = " + path + ", Tiltfile",
-			Command: "lo init service " + svc + " --path " + path})
+	p := Plan{Dir: dir, Force: force, Actions: []Action{{Kind: ActionWriteClusterSpec, Domain: dom, Driver: driver,
+		Files: []string{clusterSpecFile(dir, dom, force)}, Command: cmd}}}
+	if active {
+		p.Actions = append(p.Actions, useAction(dom))
 	}
 	return p
 }
 
-// clusterSpecSummary names the spec a plan writes, or keeps when it
-// already exists (the executor never overwrites it).
-func clusterSpecSummary(root, dom, driver string) string {
+// ServicePlan is `lo init service`: the service file, its catalog entry
+// and the Tiltfile. path "" = ./<name>.
+func ServicePlan(dir, name, path string) Plan {
+	cmd := "lo init service " + name
+	if path != "" {
+		cmd += " --path " + path
+	}
+	where := path
+	if where == "" {
+		where = "./" + name
+	}
+	return Plan{Dir: dir, Actions: []Action{{Kind: ActionAddService, Service: name, Path: path,
+		Files: []string{strings.TrimPrefix(where, "./") + "/lok8s.yaml", "services.yaml entry", "Tiltfile"}, Command: cmd}}}
+}
+
+// TestsPlan is `lo init test`: the Playwright suite. path "" = tests/.
+func TestsPlan(dir, path string) Plan {
+	cmd := "lo init test"
+	if path != "" {
+		cmd += " --path " + path
+	}
+	where := path
+	if where == "" {
+		where = "tests"
+	}
+	return Plan{Dir: dir, Actions: []Action{{Kind: ActionAddTests, Path: path,
+		Files: []string{strings.TrimSuffix(strings.TrimPrefix(where, "./"), "/") + "/ (the Playwright suite)"}, Command: cmd}}}
+}
+
+// ToolchainPlan is `lo toolchain install` for the project at dir.
+func ToolchainPlan(dir string, groups []string) Plan {
+	return Plan{Dir: dir, Actions: toolchainActions(Answers{Toolchain: true, Groups: groups})}
+}
+
+// UsePlan is `lo use <domain>` for the project at dir.
+func UsePlan(dir, dom string) Plan {
+	return Plan{Dir: dir, Actions: []Action{useAction(dom)}}
+}
+
+// EjectPlan is `lo assets eject bash` for the project at dir.
+func EjectPlan(dir string) Plan {
+	return Plan{Dir: dir, Actions: []Action{{Kind: ActionEjectBash,
+		Files:   []string{".lok8s/ (the bash implementation, plus every data asset the project lacks)"},
+		Command: "lo assets eject bash"}}}
+}
+
+// ImplementationPlan sets spec.implementation.default for the project
+// name at dir.
+func ImplementationPlan(dir, name, impl string) Plan {
+	return Plan{Dir: dir, Name: name, Actions: []Action{{Kind: ActionSetImplementation, Name: name, Implementation: impl,
+		Files:   []string{"lok8s.yaml (spec.implementation.default: " + impl + ")"},
+		Command: "lo init project --env none --implementation " + impl}}}
+}
+
+// Result is the one-line outcome of an executed plan, as the project
+// loop shows it under the card: a verb and what changed.
+func (p Plan) Result() (verb, what string) {
+	if len(p.Actions) == 0 {
+		return "done", "nothing"
+	}
+	a := p.Actions[0]
+	switch a.Kind {
+	case ActionWriteProjectFiles:
+		parts := []string{p.Name}
+		if a.Domain != "" {
+			parts = append(parts, "clusters/"+a.Domain)
+		}
+		git := false
+		for _, b := range p.Actions[1:] {
+			switch b.Kind {
+			case ActionToolchainInstall:
+				parts = append(parts, "toolchain "+plural(toolchain.Count(b.Groups), "tool"))
+			case ActionGitInit:
+				git = true
+			}
+		}
+		if git {
+			parts = append(parts, "git initialised")
+		}
+		return "created", joined(parts)
+	case ActionWriteClusterSpec:
+		what = a.Files[0]
+		if len(p.Actions) > 1 && p.Actions[1].Kind == ActionUse {
+			what += " · active"
+		}
+		return "added", what
+	case ActionAddService, ActionAddTests:
+		return "added", joined(a.Files)
+	case ActionToolchainInstall:
+		return "installed", joined(a.Files)
+	case ActionUse:
+		return "active", a.Domain
+	case ActionEjectBash:
+		return "ejected", ".lok8s/"
+	case ActionSetImplementation:
+		return "set", "implementation " + a.Implementation
+	}
+	return "created", p.Name
+}
+
+// clusterSpecFile names the spec a plan writes. A spec that exists is
+// kept (the screens never force) or, with a verb's --force, replaced:
+// the row says which.
+func clusterSpecFile(root, dom string, force bool) string {
 	rel := "clusters/" + dom + "/cluster.lok8s.yaml"
-	if fsutil.FileExists(filepath.Join(root, "clusters", dom, "cluster.lok8s.yaml")) {
-		return "keep " + rel + " (exists)"
+	if !fsutil.FileExists(filepath.Join(root, "clusters", dom, "cluster.lok8s.yaml")) {
+		return rel
 	}
-	return rel + " (" + driver + ")"
+	if force {
+		return rel + " (exists, replaced)"
+	}
+	return rel + " (exists, kept)"
 }
 
 func toolchainActions(a Answers) []Action {
@@ -299,12 +435,12 @@ func toolchainActions(a Answers) []Action {
 		groups = toolchain.DefaultGroups
 	}
 	return []Action{{Kind: ActionToolchainInstall, Groups: groups, Network: true,
-		Summary: ".bin/b.yaml, b and the pinned toolchain into .bin/ (groups " + strings.Join(groups, ",") + "; network)",
-		Command: "lo toolchain install --groups " + strings.Join(groups, ",")}}
+		Files: []string{".bin/b.yaml", ".bin/ (the pinned tools)"},
+		Run:   "lo toolchain install (network)", Command: "lo toolchain install --groups " + strings.Join(groups, ",")}}
 }
 
 func useAction(domain string) Action {
-	return Action{Kind: ActionUse, Domain: domain, Summary: "clusters/.active = " + domain, Command: "lo use " + domain}
+	return Action{Kind: ActionUse, Domain: domain, Files: []string{"clusters/.active"}, Run: "lo use " + domain, Command: "lo use " + domain}
 }
 
 // driverOr defaults the driver to lo.
@@ -328,14 +464,6 @@ func relDir(cwd, dir string) string {
 	return rel
 }
 
-// shortDir is dir as the summary names it: "." for cwd, else relative.
-func shortDir(cwd, dir string) string {
-	if rel := relDir(cwd, dir); rel != "" {
-		return rel
-	}
-	return "."
-}
-
 // existingEnv is the environment file dir already has ("" = none).
 func existingEnv(dir string) string {
 	switch {
@@ -347,47 +475,27 @@ func existingEnv(dir string) string {
 	return ""
 }
 
-// Option is one entry of the "what to add" menu in an existing project,
-// with the flag twin the card prints as a hint.
-type Option struct {
-	Key     string
-	Label   string
-	Command string
-}
-
-// Options lists the menu for an existing project: what the situation
-// allows, in the order the wizard offers it.
-func Options(s State) []Option {
+// Next is the step a project state calls for. The first that applies
+// wins: the toolchain when a pinned tool is missing; a cluster spec when
+// there is none; the active domain when none is set; the assets diff on
+// drift; `lo up` while the active domain has no kubeconfig; else `lo
+// status`. Outside a project: `lo init`.
+func Next(s State, drift bool) string {
 	p := s.Project
 	if p == nil {
-		return nil
+		return "lo init"
 	}
-	var out []Option
-	if s.ServiceDir && !p.AtRoot {
-		svc := s.ServiceName()
-		path := "./" + filepath.ToSlash(relDir(p.Root, s.Cwd))
-		out = append(out, Option{Key: "register", Label: "Add this service (" + svc + ") to services.yaml", Command: "lo init service " + svc + " --path " + path})
+	switch {
+	case p.ToolchainMissing():
+		return "lo toolchain install"
+	case len(p.Domains) == 0:
+		return "lo init cluster"
+	case !p.ActiveValid():
+		return "lo use <domain>"
+	case drift:
+		return "lo assets diff"
+	case !p.Kubeconfig:
+		return "lo up"
 	}
-	out = append(out,
-		Option{Key: "cluster", Label: "Add a cluster spec", Command: "lo init project --env none --cluster <domain> --driver <driver>"},
-		Option{Key: "service", Label: "Add a service", Command: "lo init service <name>"},
-	)
-	if !p.Tests {
-		out = append(out, Option{Key: "tests", Label: "Add the Playwright test suite", Command: "lo init test"})
-	}
-	if p.EnvFile == "" {
-		out = append(out, Option{Key: "env", Label: "Add an environment file (mise.toml or .envrc)", Command: "lo init project --env mise|direnv"})
-	}
-	toolchainLabel := "Install the pinned toolchain (network)"
-	if p.BYAML && len(p.ToolsMissing) == 0 {
-		toolchainLabel = "Reinstall the pinned toolchain (network)"
-	}
-	out = append(out, Option{Key: "toolchain", Label: toolchainLabel, Command: "lo toolchain install --groups " + strings.Join(toolchain.DefaultGroups, ",")})
-	other := "bash"
-	if p.Implementation == "bash" {
-		other = "go"
-	}
-	out = append(out, Option{Key: "implementation", Label: fmt.Sprintf("Switch the implementation to %s (now %s)", other, p.Implementation),
-		Command: "lo init project --env none --implementation " + other})
-	return out
+	return "lo status"
 }

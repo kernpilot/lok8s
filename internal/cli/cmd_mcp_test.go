@@ -225,7 +225,7 @@ func TestMcpToolsDefaultReadonlyOnly(t *testing.T) {
 
 func TestMcpToolsMutatingOptIn(t *testing.T) {
 	tools := mcpToolNames(t, mcpExposure{mutating: true})
-	for _, want := range []string{"lo_build", "lo_use", "lo_secrets_encrypt", "lo_registry_up", "lo_registry_status", "lo_init_service", "lo_gitops_flux", "lo_version"} {
+	for _, want := range []string{"lo_build", "lo_use", "lo_secrets_encrypt", "lo_registry_up", "lo_registry_status", "lo_init_service", "lo_init_cluster", "lo_gitops_flux", "lo_version"} {
 		if tools[want] == nil {
 			t.Errorf("mutating tool %s missing with --allow-mutating", want)
 		}

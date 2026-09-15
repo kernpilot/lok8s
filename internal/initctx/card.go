@@ -1,170 +1,268 @@
 package initctx
 
-// card.go — the state card and the plan summary, plain text: what `lo
-// init` saw, what it would write, and the commands a CI user runs
-// instead. The cli appends the doctor sections to the card inside a
-// project.
+// card.go: the state card of a project, and the row layout the screens
+// share.
+//
+// The card has the two-column layout of the run header (`lo up`): a
+// lowercase key, two spaces past the longest key, the values joined with
+// ` · `. The first key is the project name. The card uses one path form:
+// the working directory as the user typed it. It prints a path in two
+// cases only: the position below the project root, and a repository
+// root elsewhere. A row carries facts only; a row the user can act on
+// starts with `!`, and the command lives in the list's `equivalent` row
+// and in `--plan`. The style is the writer's (internal/ui): colour on
+// a terminal that allows it, plain in a pipe.
 
 import (
 	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// WriteCard prints the state card.
-func WriteCard(w io.Writer, s State) {
-	fmt.Fprintf(w, "lo init — %s\n", s.Cwd)
-	fmt.Fprintf(w, "  situation: %s\n", s.Situation())
-	fmt.Fprintf(w, "  git: %s\n", gitLine(s))
+// row is one line of the card or a screen.
+type row struct {
+	key, value string
+	// warn marks a row the user can act on (the `!` marker); dim mutes
+	// the value (the equivalent command lines).
+	warn, dim bool
+}
+
+// WriteCard prints the state card of s.Project (nothing outside a
+// project); extra rows (the result of the last action) follow it in the
+// same columns.
+func WriteCard(w io.Writer, s State, extra ...row) {
 	if s.Project == nil {
-		switch {
-		case s.Empty:
-			fmt.Fprintln(w, "  directory: empty")
-		case s.ServiceDir:
-			fmt.Fprintf(w, "  directory: %d entries, a service directory (lok8s.yaml), no project above\n", s.Entries)
-		default:
-			fmt.Fprintf(w, "  directory: %d entries, no project marker (clusters/ or a kind: Project lok8s.yaml) here or above\n", s.Entries)
-		}
 		return
 	}
+	writeRows(w, append(projectRows(s), extra...), true)
+}
+
+// WriteNext prints the `next` line: the step the state calls for.
+func WriteNext(w io.Writer, next string) {
+	writeRows(w, []row{{key: "next", value: next}}, false)
+}
+
+// writeRows prints rows in the two-column layout. heading makes the
+// first key bold (the name); the other keys are dim. The style is the
+// writer's (internal/ui: a terminal that allows colour, else plain).
+func writeRows(w io.Writer, rows []row, heading bool) {
+	st := ui.For(w)
+	width := 0
+	for _, r := range rows {
+		width = max(width, utf8.RuneCountInString(r.key))
+	}
+	for i, r := range rows {
+		mark := "  "
+		if r.warn {
+			mark = st.Warn("!") + " "
+		}
+		key := st.Dim(r.key)
+		if heading && i == 0 {
+			key = st.Bold(r.key)
+		}
+		value := r.value
+		if r.dim {
+			value = st.Dim(value)
+		}
+		pad := strings.Repeat(" ", width-utf8.RuneCountInString(r.key)+2)
+		fmt.Fprintf(w, "%s%s%s%s\n", mark, key, pad, value)
+	}
+}
+
+// projectRows is the card.
+func projectRows(s State) []row {
 	p := s.Project
-	where := "you are at the root"
-	switch {
-	case s.ServiceDir && !p.AtRoot:
-		where = "service directory " + s.ServiceName() + " (" + relOrDot(p.Root, s.Cwd) + ")"
-	case !p.AtRoot:
-		where = relOrDot(p.Root, s.Cwd) + " below the root"
+	name := projectName(s)
+	first := []string{"project"}
+	if !p.ProjectFile {
+		first = append(first, "no lok8s.yaml")
 	}
-	if s.Git.Submodule && s.Git.Root != p.Root {
-		where += ", a submodule under the umbrella project"
-	}
-	name := p.Name
-	if name == "" {
-		name = filepath.Base(p.Root) + " (no lok8s.yaml; marked by clusters/)"
-	}
-	fmt.Fprintf(w, "  project: %s at %s; %s\n", name, p.Root, where)
-	fmt.Fprintf(w, "  clusters: %s\n", clustersLine(p))
-	env := "none (lo init project --env mise|direnv)"
-	switch p.EnvFile {
-	case "mise":
-		env = "mise.toml"
-	case "direnv":
-		env = ".envrc"
-	}
-	fmt.Fprintf(w, "  environment file: %s\n", env)
-	fmt.Fprintf(w, "  toolchain: %s\n", toolchainLine(p))
-	tree := ".lok8s/lo absent (lo assets eject bash)"
-	if p.BashTree {
-		tree = ".lok8s/lo present"
-	}
-	impl := p.Implementation
+	warn := false
 	if p.ImplementationErr != "" {
-		impl = "invalid (" + p.ImplementationErr + ")"
+		first = append(first, "invalid implementation ("+p.ImplementationErr+")")
+		warn = true
+	} else {
+		first = append(first, p.Implementation)
 	}
-	fmt.Fprintf(w, "  implementation: %s; bash tree %s\n", impl, tree)
-	extras := []string{}
+	gitAtRoot := s.Git.Root == "" || samePath(s.Git.Root, p.Root)
+	if gitAtRoot {
+		first = append(first, gitValues(s.Git)...)
+	}
+	rows := []row{{key: name, value: joined(first), warn: warn}}
+	if !p.AtRoot {
+		dir := []string{relPath(p.Root, s.Cwd)}
+		if s.ServiceDir {
+			dir = append(dir, "service directory")
+		}
+		rows = append(rows, row{key: "directory", value: joined(dir)})
+	}
+	if !gitAtRoot {
+		repo := relPath(p.Root, s.Git.Root)
+		if strings.HasPrefix(repo, "..") {
+			repo = relPath(s.Cwd, s.Git.Root)
+		}
+		rows = append(rows, row{key: "repository", value: joined(append([]string{repo}, gitValues(s.Git)...))})
+	}
+	clusters, warnClusters := clustersValue(p)
+	rows = append(rows, row{key: "clusters", value: clusters, warn: warnClusters})
+	tools, warnTools := toolchainValue(p)
+	rows = append(rows, row{key: "toolchain", value: tools, warn: warnTools})
+	env, warnEnv := environmentValue(p)
+	rows = append(rows, row{key: "environment", value: env, warn: warnEnv})
 	if p.Services {
-		extras = append(extras, "services.yaml")
+		rows = append(rows, row{key: "services", value: "services.yaml"})
 	}
 	if p.Tests {
-		extras = append(extras, "tests/")
+		rows = append(rows, row{key: "tests", value: "tests/"})
 	}
-	if len(extras) > 0 {
-		fmt.Fprintf(w, "  also: %s\n", strings.Join(extras, ", "))
-	}
+	return rows
 }
 
-func gitLine(s State) string {
+// gitValues is the repository segment: the branch with the uncommitted
+// count, or why there is none.
+func gitValues(g Git) []string {
 	switch {
-	case !s.Git.Available:
-		return "not installed"
-	case s.Git.Root == "":
-		return "not a repository"
+	case !g.Available:
+		return []string{"no git"}
+	case g.Root == "":
+		return []string{"no git repository"}
 	}
-	line := "repository at " + s.Git.Root
-	if !s.Git.AtRoot {
-		line = "repository at " + s.Git.Root + " (you are " + relOrDot(s.Git.Root, s.Cwd) + " below it)"
+	branch := g.Branch
+	if branch == "" {
+		branch = "detached HEAD"
 	}
-	if s.Git.Submodule {
-		line += ", a submodule or worktree"
+	if g.Uncommitted > 0 {
+		branch += fmt.Sprintf(", %d uncommitted", g.Uncommitted)
 	}
-	if s.Git.Dirty {
-		line += ", uncommitted changes"
-	} else {
-		line += ", clean"
+	out := []string{branch}
+	if g.Submodule {
+		out = append(out, "submodule or worktree")
 	}
-	return line
+	return out
 }
 
-func clustersLine(p *Project) string {
-	if !p.Clusters {
-		return "no clusters/ directory"
+// clustersValue lists the domains grouped by driver, the active one
+// first; the row warns without a cluster or without a valid active
+// domain.
+func clustersValue(p *Project) (string, bool) {
+	switch {
+	case !p.Clusters:
+		return "no clusters/ directory", true
+	case len(p.Domains) == 0:
+		return "none", true
 	}
-	if len(p.Domains) == 0 {
-		return "clusters/ is empty (lo init project --cluster <domain>)"
-	}
-	names := make([]string, 0, len(p.Domains))
+	var (
+		parts  []string
+		order  []string
+		byKind = map[string][]string{}
+	)
 	for _, d := range p.Domains {
-		names = append(names, d.Name+" ("+d.Kind+")")
+		if d.Name == p.Active {
+			parts = append(parts, d.Name+" ("+driverLabel(d.Kind)+", active)")
+			continue
+		}
+		if _, ok := byKind[d.Kind]; !ok {
+			order = append(order, d.Kind)
+		}
+		byKind[d.Kind] = append(byKind[d.Kind], d.Name)
 	}
-	line := strings.Join(names, ", ")
-	if p.Active != "" {
-		return line + "; active " + p.Active
+	for _, k := range order {
+		parts = append(parts, strings.Join(byKind[k], ", ")+" ("+driverLabel(k)+")")
 	}
-	return line + "; no active domain (lo use <domain>)"
+	switch {
+	case p.Active == "":
+		return joined(append(parts, "none active")), true
+	case !p.ActiveValid():
+		return joined(append(parts, "active "+p.Active+" has no spec")), true
+	}
+	return joined(parts), false
 }
 
-func toolchainLine(p *Project) string {
+// driverLabel names a driver as the card shows it: the lo driver is a
+// kind cluster; an unreadable spec says so.
+func driverLabel(kind string) string {
+	switch kind {
+	case "lo":
+		return "kind"
+	case "?":
+		return "unreadable spec"
+	}
+	return kind
+}
+
+// toolchainValue counts the pinned tools; the row warns without a pin
+// file, with an unreadable one, or with a missing tool.
+func toolchainValue(p *Project) (string, bool) {
 	switch {
 	case !p.BYAML:
-		return "no .bin/b.yaml (lo toolchain install)"
-	case len(p.ToolsMissing) == 0 && p.BYAMLMarker:
-		return ".bin/b.yaml (lo toolchain install), every pinned tool present"
+		return "none", true
+	case p.BYAMLInvalid:
+		return ".bin/b.yaml unreadable", true
 	case len(p.ToolsMissing) == 0:
-		return ".bin/b.yaml (not written by lo toolchain install), every pinned tool present"
+		return fmt.Sprintf(".bin/b.yaml · %s present", plural(p.Tools, "tool")), false
 	}
-	return ".bin/b.yaml present; missing: " + strings.Join(p.ToolsMissing, ", ") + " (lo toolchain install)"
+	return fmt.Sprintf(".bin/b.yaml · %d of %d missing", len(p.ToolsMissing), p.Tools), true
 }
 
-// relOrDot is path relative to base, "." when equal.
-func relOrDot(base, path string) string {
+// environmentValue is the environment file and the bash tree; the row
+// warns without a file, or with a bash implementation and no tree.
+func environmentValue(p *Project) (string, bool) {
+	var parts []string
+	warn := false
+	switch p.EnvFile {
+	case "mise":
+		parts = append(parts, "mise.toml")
+	case "direnv":
+		parts = append(parts, ".envrc")
+	default:
+		parts = append(parts, "none")
+		warn = true
+	}
+	switch {
+	case p.BashTree:
+		parts = append(parts, "bash tree present")
+	case p.Implementation == "bash":
+		parts = append(parts, "bash tree missing")
+		warn = true
+	}
+	return joined(parts), warn
+}
+
+func joined(parts []string) string { return strings.Join(parts, " · ") }
+
+// projectName is the name the card uses: metadata.name, else the root
+// directory's name.
+func projectName(s State) string {
+	if s.Project == nil {
+		return filepath.Base(s.Cwd)
+	}
+	if s.Project.Name != "" {
+		return s.Project.Name
+	}
+	return filepath.Base(s.Project.Root)
+}
+
+// plural is "1 tool", "3 tools", "1 entry", "3 entries".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	if stem, ok := strings.CutSuffix(noun, "y"); ok {
+		return fmt.Sprintf("%d %sies", n, stem)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// relPath is path relative to base; the path itself when the two cannot
+// be related.
+func relPath(base, path string) string {
 	rel, err := filepath.Rel(base, path)
 	if err != nil || rel == "" {
 		return path
 	}
 	return rel
-}
-
-// WriteSummary prints the plan: the steps, then the equivalent commands
-// (run from Plan.Dir; a `cd` line names it when it is not cwd).
-func WriteSummary(w io.Writer, p Plan, cwd string) {
-	if len(p.Actions) == 0 {
-		fmt.Fprintln(w, "Nothing to do.")
-		return
-	}
-	fmt.Fprintf(w, "Plan (%s):\n", p.Situation)
-	for i, a := range p.Actions {
-		fmt.Fprintf(w, "  %d. %s: %s\n", i+1, a.Kind, a.Summary)
-	}
-	fmt.Fprintln(w, "Equivalent commands:")
-	if rel := relDir(cwd, p.Dir); rel != "" {
-		fmt.Fprintf(w, "  cd %s\n", rel)
-	}
-	for _, c := range p.Commands() {
-		fmt.Fprintf(w, "  %s\n", c)
-	}
-}
-
-// WriteOptions prints the menu of an existing project as hints (the
-// `--plan` output when there is nothing to do).
-func WriteOptions(w io.Writer, s State) {
-	opts := Options(s)
-	if len(opts) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "Available (lo init on a terminal asks; or run the command):")
-	for _, o := range opts {
-		fmt.Fprintf(w, "  %-52s %s\n", o.Label, o.Command)
-	}
 }
