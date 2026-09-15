@@ -74,6 +74,13 @@ func newAssetsListCommand(paths *config.Paths) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// --json is the old spelling of -o json: one source of truth.
+			if asJSON {
+				if f != outputText && f != outputJSON {
+					return argshErrorf(cmd.ErrOrStderr(), "lo assets list: --json conflicts with --output %s", f)
+				}
+				f = outputJSON
+			}
 			reports, err := assets.Report(paths, nil)
 			if err != nil {
 				return err
@@ -81,10 +88,10 @@ func newAssetsListCommand(paths *config.Paths) *cobra.Command {
 			if reports == nil {
 				reports = []assets.UnitReport{}
 			}
-			switch {
-			case asJSON || f == outputJSON:
+			switch f {
+			case outputJSON:
 				return writeAssetsJSON(cmd.OutOrStdout(), reports)
-			case f == outputYAML:
+			case outputYAML:
 				return writeOutput(cmd.OutOrStdout(), f, assetsJSON{Lo: assets.Version(), Assets: reports})
 			}
 			assets.WriteTable(cmd.OutOrStdout(), reports, false)

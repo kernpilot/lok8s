@@ -98,10 +98,23 @@ func (f *FormatWriter) line(raw string) string {
 	}
 	switch f.Format {
 	case FormatGitHub:
-		return "::" + githubLevel(level) + " file=" + file + ",line=" + strconv.Itoa(line) + "::" + msg
+		// The workflow-command escaping rules: a message escapes % \r \n, a
+		// property value also : and , so a key or a path in a finding can
+		// never end the command or start another one.
+		return "::" + githubLevel(level) + " file=" + githubProperty(file) + ",line=" + strconv.Itoa(line) + "::" + githubData(msg)
 	default:
 		return file + ":" + strconv.Itoa(line) + ": [" + level + "] " + msg
 	}
+}
+
+// githubData escapes a workflow-command message.
+func githubData(s string) string {
+	return strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A").Replace(s)
+}
+
+// githubProperty escapes a workflow-command property value.
+func githubProperty(s string) string {
+	return strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A", ":", "%3A", ",", "%2C").Replace(s)
 }
 
 // githubLevel maps the finding level onto a workflow command.

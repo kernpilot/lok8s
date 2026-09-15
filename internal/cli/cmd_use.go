@@ -69,12 +69,15 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					target = f.Value.String()
 				}
 			}
-			if target != "" {
-				return useSetActive(paths, target, cmd.OutOrStdout(), cmd.ErrOrStderr())
-			}
 			f, err := format()
 			if err != nil {
 				return err
+			}
+			if target != "" {
+				if f != outputText {
+					return argshErrorf(cmd.ErrOrStderr(), "--output %s applies to the listing: lo use -o %s", f, f)
+				}
+				return useSetActive(paths, target, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
 			if f != outputText {
 				return writeOutput(cmd.OutOrStdout(), f, useListing(paths))

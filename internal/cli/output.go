@@ -52,6 +52,7 @@ func writeOutput(w io.Writer, format string, v any) error {
 	case outputJSON:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false) // a < in a value stays a <, like the other JSON writers
 		return enc.Encode(v)
 	case outputYAML:
 		// Through JSON, so the yaml document carries the json field names

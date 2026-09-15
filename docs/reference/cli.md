@@ -89,8 +89,8 @@ on a terminal opens a select over the domains (see [`lo use`](#lo-use)).
 On a terminal an error that has a next step prints as two lines:
 
 ```
-error: domain not found: clusters/prod.dev/ (no cluster.lok8s.yaml or deploy.lok8s.yaml)
-next: lo use kubehz.dev | lo use kubehz.cloud
+error: No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/prod.dev/
+next: lo init project --cluster prod.dev --driver lo   # write the first spec for prod.dev
 ```
 
 Off a terminal (a pipe, a script, CI) the same site prints the line it always printed (`[error] …`). Scripts and the parity harnesses match on that line. The shape reaches one site at a time. The first sites are `lo use` and the missing-spec refusals.
@@ -113,14 +113,20 @@ The codes the binary uses today, documented, not renumbered:
 On a terminal the destructive commands list what they remove, then ask once. The commands: `lo down`, `lo clean`, `lo destroy` (local driver), `lo registry clean`, `lo image clean`.
 
 ```
-lo down removes:
-  kind cluster         kubehz-dev
-  kubeconfig           .kubeconfig/kubehz-dev.yaml
-  registry containers  kubehz-registry-build, kubehz-registry-cache (volumes stay)
+lo destroy removes:
+  kind cluster                     kubehz-dev
+  kubeconfig                       .kubeconfig/kubehz-dev.yaml (the file stays, kind drops its context)
+  registry containers and volumes  kubehz-registry-build, kubehz-registry-cache, kubehz-registry-io-docker
+  TLS certificate volume           kubehz-registry-tls
+  proxy container                  kubehz-dev-proxy
 Continue? [y/N]
 ```
 
-`y` or `yes` continues. Any other answer aborts with `aborted: nothing removed` and exit code `1`. Off a terminal (a pipe, a script, CI, `LOK8S_NONINTERACTIVE=1`) there is no prompt and no new requirement. The command runs as before.
+The list uses the names the teardown removes: the registry set of the domain, the driver's proxy and certificate volume. It cannot drift from the deletion.
+
+`y` or `yes` continues. Any other answer aborts with `aborted: nothing removed` and exit code `1`. Ctrl-C during the prompt exits `130` with nothing removed.
+
+The prompt asks when stdin and stderr are both terminals: `lo down | cat` still asks, `lo down < /dev/null` and a script do not. No environment variable silences it. `--yes` is the only skip. Off a terminal there is no prompt and no new requirement. The command runs as before. A command that refuses (a malformed `.kind`, a non-Lo domain for `registry clean`) refuses before any prompt, and a cloud driver's own gate is the one question of that run.
 
 `--yes` (`-y`) answers the prompt. `--force` (`-f`) overrides a precondition: the cloud drivers' infrastructure gate, the `lo recover` consent, a recreate of an immutable object. Neither flag implies the other. A cloud domain (`kubeone`, `capi`, `kkp`) keeps its own gate (a literal `yes`, or `--force`). `lo down` and `lo destroy` add no second prompt there.
 
@@ -133,7 +139,7 @@ Continue? [y/N]
 | `lo use -o json` | `{active, domains: [{name, kind, clusterRef?}]}` | `{"active":"kubehz.dev","domains":[{"name":"kubehz.dev","kind":"lo"},{"name":"kubehz.cloud","kind":"deploy","clusterRef":"kubehz.in.net"}]}` |
 | `lo status -o json` | `{domain, driver, cluster: [lines], nodes: [{name, ready, roles, kubeletVersion, internalIP}], inventory, targets: [], artifactsBuilt, tilt: {running, pid?}}` | `{"domain":"kubehz.dev","driver":"lo","cluster":["kind cluster kubehz-dev: running"],"nodes":[{"name":"kubehz-dev-control-plane","ready":true,"roles":"control-plane","kubeletVersion":"v1.31.12","internalIP":"10.125.125.2"}],"inventory":null,"targets":["networking"],"artifactsBuilt":true,"tilt":{"running":true,"pid":"4242"}}` |
 | `lo addons -o json` | `[{name, type, version, chart?, repository?, origin, path}]` | `[{"name":"cilium","type":"khelm","version":"1.16.5","chart":"cilium","repository":"https://helm.cilium.io","origin":"builtin","path":"/tmp/lo-assets-1/addons/cilium"}]` |
-| `lo assets list -o yaml` | the `--json` document (`{lo, assets: [{rel, kind, origin, drifted, version, marker, files, path}]}`) as yaml | `lo: 0.5.0` / `assets:` / `  - rel: addons/cilium` … |
+| `lo assets list -o yaml` | the `--json` document (`--json` is `-o json`. `--json` with `-o yaml` is an error) (`{lo, assets: [{rel, kind, origin, drifted, version, marker, files, path}]}`) as yaml | `lo: 0.5.0` / `assets:` / `  - rel: addons/cilium` … |
 | `lo registry status -o json` | `{domain, registries: [{name, scope, container, endpoint, running, reachable, state}]}` | `{"domain":"kubehz.dev","registries":[{"name":"build","scope":"project","container":"kubehz-registry-build","endpoint":"https://10.125.125.101:5000","running":true,"reachable":true,"state":"3 repos"}]}` |
 | `lo version -o json` | `{lok8s, build, tools: [{name, version, path}]}` | `{"lok8s":"0.5.0","build":"core","tools":[{"name":"kubectl","version":"v1.31.0","path":".bin/kubectl"}]}` |
 | `lo doctor -o json` | `{domain, ok, sections: [{name, checks: [{status: ok|warn|bad|info, message}]}]}` | `{"domain":"kubehz.dev","ok":false,"sections":[{"name":"tools","checks":[{"status":"bad","message":"kind: missing (b install)"}]}]}` |

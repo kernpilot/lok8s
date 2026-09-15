@@ -527,10 +527,7 @@ func (c *Context) List(ctx context.Context) (int, error) {
 // entrypoint's ambient export).
 func (c *Context) Clean(ctx context.Context, network string) error {
 	ui.DebugTo(c.ErrOut, "Clean the local cache registry")
-	if network == "" {
-		network = "lok8s"
-	}
-	regName := network + "-registry-cache"
+	regName := CacheRegistry(network)
 	fmt.Fprintf(c.Out, ":: dropping cache registry volume (%s)\n", regName)
 	_ = c.Runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"rm", "-f", regName},
 		Stdout: c.Out, Stderr: io.Discard})

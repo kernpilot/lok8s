@@ -26,6 +26,12 @@ func TestLintFormatAutoSelectReadsTheRealStdoutOnly(t *testing.T) {
 	if f, _ := lintFormat(lint.FormatText, os.Stdout); f != lint.FormatText {
 		t.Errorf("--format text under GITHUB_ACTIONS: %q, want text", f)
 	}
+	// A terminal on the real stdout keeps text, GITHUB_ACTIONS or not.
+	lintStdoutIsTerminal = func() bool { return true }
+	if f, _ := lintFormat("", os.Stdout); f != lint.FormatText {
+		t.Errorf("real stdout on a terminal under GITHUB_ACTIONS: %q, want text", f)
+	}
+	lintStdoutIsTerminal = func() bool { return false }
 	t.Setenv("GITHUB_ACTIONS", "")
 	if f, _ := lintFormat("", os.Stdout); f != lint.FormatText {
 		t.Errorf("real stdout without GITHUB_ACTIONS: %q, want text", f)

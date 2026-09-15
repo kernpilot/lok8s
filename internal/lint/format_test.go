@@ -3,6 +3,7 @@ package lint
 import (
 	"bytes"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,21 @@ func TestFormatWriterLineNumberAndFlush(t *testing.T) {
 	}
 	if want := "services/api/lok8s.yaml:12: [warn] services/api/lok8s.yaml: line 12: unknown key build.contxt\n"; out.String() != want {
 		t.Errorf("flush:\n--- got ---\n%s--- want ---\n%s", out.String(), want)
+	}
+}
+
+// TestFormatWriterEscapesWorkflowCommands: a key or a path in a finding
+// cannot end the workflow command or start another one.
+func TestFormatWriterEscapesWorkflowCommands(t *testing.T) {
+	var out bytes.Buffer
+	w := NewFormatWriter(&out, FormatGitHub, "clusters/a:b,c.dev/cluster.lok8s.yaml")
+	io.WriteString(w, "[error] unknown key 'x%0A::error title=pwned::y'\rZ\n[warn] services/a,b.yaml: 100% line 3\n")
+	want := "::error file=clusters/a%3Ab%2Cc.dev/cluster.lok8s.yaml,line=1::unknown key 'x%250A::error title=pwned::y'%0DZ\n" +
+		"::warning file=services/a%2Cb.yaml,line=3::services/a,b.yaml: 100%25 line 3\n"
+	if out.String() != want {
+		t.Errorf("escaping:\n--- got ---\n%s--- want ---\n%s", out.String(), want)
+	}
+	if strings.Contains(out.String(), "\n::error title=") {
+		t.Errorf("an injected command survived")
 	}
 }

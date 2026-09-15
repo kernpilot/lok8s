@@ -196,3 +196,43 @@ func TestOutputFlagIsOnTheReportingCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestUseWithADomainRefusesOutput: -o applies to the listing; with a
+// domain it is an error, like `lo addons <name> -o`.
+func TestUseWithADomainRefusesOutput(t *testing.T) {
+	paths := completionProject(t)
+	_, errOut, err := runOut(t, paths, "use", "alpha.dev", "-o", "json")
+	if err == nil || !strings.Contains(errOut, "Error: --output json applies to the listing: lo use -o json") {
+		t.Errorf("lo use alpha.dev -o json: err %v, stderr %q", err, errOut)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(paths.Clusters, ".active")); len(raw) != 0 {
+		t.Errorf("the refused run set the active domain: %q", raw)
+	}
+}
+
+// TestAssetsListJSONFlagIsOutputJSON: --json is -o json; with a
+// conflicting -o value it is an error.
+func TestAssetsListJSONFlagIsOutputJSON(t *testing.T) {
+	paths := completionProject(t)
+	a, _, _ := runOut(t, paths, "assets", "list", "--json")
+	b, _, _ := runOut(t, paths, "assets", "list", "--json", "-o", "json")
+	if a == "" || a != b {
+		t.Errorf("--json and --json -o json differ:\n%s\n---\n%s", a, b)
+	}
+	_, errOut, err := runOut(t, paths, "assets", "list", "--json", "-o", "yaml")
+	if err == nil || !strings.Contains(errOut, "Error: lo assets list: --json conflicts with --output yaml") {
+		t.Errorf("--json -o yaml: err %v, stderr %q", err, errOut)
+	}
+}
+
+// TestWriteOutputKeepsAngleBrackets: the JSON writer does not HTML-escape
+// (a < stays a <), like the inventory and registry writers.
+func TestWriteOutputKeepsAngleBrackets(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeOutput(&out, outputJSON, map[string]string{"note": "<b> & </b>"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "{\n  \"note\": \"<b> & </b>\"\n}\n"; out.String() != want {
+		t.Errorf("json = %q, want %q", out.String(), want)
+	}
+}
