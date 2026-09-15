@@ -14,10 +14,9 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -142,31 +141,28 @@ func runDown(ctx context.Context, deps downDeps, domainName, cluster string) err
 	// non-shared setup is project-local with nothing to reuse, so tear its
 	// containers down (the named volumes stay, so build cache survives a
 	// later recreate).
-	if raw, err := os.ReadFile(filepath.Join(deps.paths.Clusters, domainName, ".registries.json")); err == nil {
-		var doc struct {
-			Shared         bool   `json:"shared"`
-			ProjectNetwork string `json:"project_network"`
-			Registries     []struct {
-				Name string `json:"name"`
-			} `json:"registries"`
+	// The registry names come from the driver's one source
+	// (lodriver.RegistryRemoval reads the file a run left behind). A file
+	// that exists but cannot be read, or that is not JSON, names nothing
+	// and takes the non-shared branch with no container to remove, so the
+	// count line reads 0. That is the bash contract, not an oversight:
+	// `.lok8s/lo` enters the branch on `[[ -f … ]]` alone and reads the
+	// file with `jq … 2>/dev/null`, so a read error leaves every value
+	// empty, removes nothing, prints the same count and says nothing on
+	// stderr.
+	if rem, err := lodriver.RegistryRemovalAt(lodriver.RegistryFilePath(deps.paths, domainName)); !errors.Is(err, lodriver.ErrNoRegistryFile) {
+		if rem == nil {
+			rem = &lodriver.Removal{}
 		}
-		// jq on a non-JSON file yields nothing for every field — the
-		// non-shared branch with no containers to remove.
-		_ = json.Unmarshal(raw, &doc)
-		if doc.Shared {
-			fmt.Fprintf(out, "  \033[2mℹ registries left up: %d containers (shared mirrors reused; build/cache kept warm)\033[0m\n", len(doc.Registries))
+		if rem.IsShared {
+			fmt.Fprintf(out, "  \033[2mℹ registries left up: %d containers (shared mirrors reused; build/cache kept warm)\033[0m\n", len(rem.Registries)+len(rem.Mirrors))
 			fmt.Fprintf(out, "  \033[2m  remove:     lo registry down\033[0m\n")
 			fmt.Fprintf(out, "  \033[2m  + volumes:  lo registry clean --shared\033[0m\n")
 		} else {
 			removed := 0
-			if doc.ProjectNetwork != "" {
-				for _, r := range doc.Registries {
-					if r.Name == "" {
-						continue
-					}
-					if err := deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"rm", "-f", doc.ProjectNetwork + "-registry-" + r.Name}, Stdout: io.Discard, Stderr: io.Discard}); err == nil {
-						removed++
-					}
+			for _, name := range rem.Registries {
+				if err := deps.runner.Run(ctx, execx.Cmd{Name: "docker", Args: []string{"rm", "-f", name}, Stdout: io.Discard, Stderr: io.Discard}); err == nil {
+					removed++
 				}
 			}
 			fmt.Fprintf(out, "  \033[2m• shut down %d registry containers (not shared — nothing to reuse; volumes kept)\033[0m\n", removed)

@@ -370,7 +370,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// own "Deleting cluster …" line) passes through, stderr is dropped.
 	_ = d.runOut(ctx, d.out(), io.Discard, "kind", "delete", "cluster", "--name", clusterName)
 	d.cleanupRegistries(ctx, clusterName)
-	_ = d.runQuiet(ctx, "docker", "rm", "-f", clusterName+"-proxy")
+	_ = d.runQuiet(ctx, "docker", "rm", "-f", ProxyContainer(clusterName))
 
 	// Destroy the cloud VM after the cluster is gone.
 	if d.deps.ProviderName != "" && d.deps.Provider != nil {

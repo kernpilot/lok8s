@@ -49,6 +49,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 //go:embed all:lok8s
@@ -554,7 +555,7 @@ func eject(p *config.Paths, u Unit) error {
 	if !won {
 		return nil // another lo ejected the same unit first; precedence holds
 	}
-	fmt.Fprintf(Stderr, "[assets] ejected %s -> %s (review with: lo assets diff %s)\n", u.Rel, config.RelTo(p.Base, dest), u.Rel)
+	ui.NoticeTo(Stderr, "[assets] ejected %s -> %s (review with: lo assets diff %s)", u.Rel, config.RelTo(p.Base, dest), u.Rel)
 	return nil
 }
 

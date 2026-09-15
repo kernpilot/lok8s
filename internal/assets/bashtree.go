@@ -438,7 +438,7 @@ func ejectBash(p *config.Paths) error {
 	if kept > 0 {
 		note = fmt.Sprintf("; %d existing file(s) kept", kept)
 	}
-	fmt.Fprintf(Stderr, "[assets] ejected %s -> %s%s (review with: lo assets diff %s)\n", BashRel, config.RelTo(p.Base, dest), note, BashRel)
+	ui.NoticeTo(Stderr, "[assets] ejected %s -> %s%s (review with: lo assets diff %s)", BashRel, config.RelTo(p.Base, dest), note, BashRel)
 	return nil
 }
 

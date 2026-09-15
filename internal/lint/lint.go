@@ -120,10 +120,7 @@ func (l *Linter) all(domain string) bool {
 		return false
 	}
 
-	specFile := deploySpec
-	if fsutil.IsRegular(clusterSpec) {
-		specFile = clusterSpec
-	}
+	specFile := SpecFile(domainDir)
 
 	errs := l.schema(domainDir, specFile)
 	l.notes(specFile)
@@ -148,6 +145,16 @@ func (l *Linter) all(domain string) bool {
 
 	fmt.Fprintln(l.Out, "  OK")
 	return true
+}
+
+// SpecFile is the file the linter validates for a domain directory:
+// cluster.lok8s.yaml when it is a regular file, else deploy.lok8s.yaml.
+// The finding formats charge a finding without a path to this file.
+func SpecFile(domainDir string) string {
+	if cluster := domainDir + "/cluster.lok8s.yaml"; fsutil.IsRegular(cluster) {
+		return cluster
+	}
+	return domainDir + "/deploy.lok8s.yaml"
 }
 
 // schema validates required fields: kind, apiVersion, metadata.name,

@@ -46,6 +46,7 @@ var (
 )
 
 func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
+	var format func() (string, error)
 	cmd := &cobra.Command{
 		Use:          "use [domain]",
 		Aliases:      spec.aliases,
@@ -68,8 +69,18 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					target = f.Value.String()
 				}
 			}
+			f, err := format()
+			if err != nil {
+				return err
+			}
 			if target != "" {
+				if f != outputText {
+					return argshErrorf(cmd.ErrOrStderr(), "--output %s applies to the listing: lo use -o %s", f, f)
+				}
 				return useSetActive(paths, target, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
+			if f != outputText {
+				return writeOutput(cmd.OutOrStdout(), f, useListing(paths))
 			}
 			if useInteractive() {
 				return useSelect(paths, useFormIO(), cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -77,7 +88,40 @@ func newUseCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			return useShow(paths, cmd.OutOrStdout())
 		},
 	}
+	format = addOutputFlag(cmd)
 	return cmd
+}
+
+// useReport is `lo use -o json|yaml`: the active domain and every domain
+// under clusters/ with what it is.
+type useReport struct {
+	Active  string            `json:"active"`
+	Domains []useReportDomain `json:"domains"`
+}
+
+type useReportDomain struct {
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	ClusterRef string `json:"clusterRef,omitempty"`
+}
+
+// useListing gathers what useShow prints.
+func useListing(paths *config.Paths) useReport {
+	r := useReport{Domains: []useReportDomain{}}
+	if active, ok := useActive(paths); ok {
+		r.Active = active
+	}
+	for _, specPath := range sortedGlob(filepath.Join(paths.Clusters, "*", "cluster.lok8s.yaml")) {
+		k, err := domain.SpecDriver(specPath, "?")
+		if err != nil {
+			k = "?"
+		}
+		r.Domains = append(r.Domains, useReportDomain{Name: filepath.Base(filepath.Dir(specPath)), Kind: k})
+	}
+	for _, specPath := range sortedGlob(filepath.Join(paths.Clusters, "*", "deploy.lok8s.yaml")) {
+		r.Domains = append(r.Domains, useReportDomain{Name: filepath.Base(filepath.Dir(specPath)), Kind: "deploy", ClusterRef: deployClusterRef(specPath)})
+	}
+	return r
 }
 
 // useSetActive validates and persists the active domain (bash:

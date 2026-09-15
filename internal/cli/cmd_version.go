@@ -15,6 +15,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 // versionTools lists the external tools reported, in bash's order, with the
@@ -36,7 +37,8 @@ var versionTools = []struct {
 func init() { registerPorted("version", newVersionCommand) }
 
 func newVersionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
-	return &cobra.Command{
+	var format func() (string, error)
+	cmd := &cobra.Command{
 		Use:          spec.use,
 		Aliases:      spec.aliases,
 		Short:        spec.short,
@@ -45,19 +47,52 @@ func newVersionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := format()
+			if err != nil {
+				return err
+			}
+			report := versionReport(cmd.Context(), paths)
+			if f != outputText {
+				return writeOutput(cmd.OutOrStdout(), f, report)
+			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "%-11s %s\n", "lok8s", lok8sVersion(paths))
-			r := execx.NewRunner(paths)
-			for _, tool := range versionTools {
-				path, ok := execx.Look(paths, tool.name)
-				if !ok {
-					continue
-				}
-				fmt.Fprintf(out, "%-11s %s\n", tool.name, toolVersion(cmd.Context(), r, path, tool.args, tool.re))
+			fmt.Fprintf(out, "%-11s %s\n", "lok8s", report.Lok8s)
+			for _, t := range report.Tools {
+				fmt.Fprintf(out, "%-11s %s\n", t.Name, t.Version)
 			}
 			return nil
 		},
 	}
+	format = addOutputFlag(cmd)
+	return cmd
+}
+
+// versionInfo is `lo version -o json|yaml`.
+type versionInfo struct {
+	Lok8s string        `json:"lok8s" yaml:"lok8s"`
+	Build string        `json:"build" yaml:"build"`
+	Tools []versionTool `json:"tools" yaml:"tools"`
+}
+
+type versionTool struct {
+	Name    string `json:"name" yaml:"name"`
+	Version string `json:"version" yaml:"version"`
+	Path    string `json:"path" yaml:"path"`
+}
+
+// versionReport gathers the lines the text form prints: lok8s, then every
+// tool on PATH in bash's order with its best-effort version.
+func versionReport(ctx context.Context, paths *config.Paths) versionInfo {
+	v := versionInfo{Lok8s: lok8sVersion(paths), Build: render.Variant(), Tools: []versionTool{}}
+	r := execx.NewRunner(paths)
+	for _, tool := range versionTools {
+		path, ok := execx.Look(paths, tool.name)
+		if !ok {
+			continue
+		}
+		v.Tools = append(v.Tools, versionTool{Name: tool.name, Version: toolVersion(ctx, r, path, tool.args, tool.re), Path: path})
+	}
+	return v
 }
 
 // lok8sVersion is the binary's version: ldflags-stamped, else the embedded

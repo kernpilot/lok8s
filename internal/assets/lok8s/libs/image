@@ -349,6 +349,11 @@ image::list() {
 image::clean() {
   :args "Drop all images from the cache registry" "${@}"
   debug "Clean the local cache registry"
+  # The same door as image::cache: the cache registry is a Lo-driver
+  # feature, refused with the driver named before any removal. An
+  # explicit LOK8S_REGISTRY_IP_CACHE skips the gate.
+  [[ -n "${LOK8S_REGISTRY_IP_CACHE:-}" ]] \
+    || domain::require_driver lo "${domain}" "the image cache" || return 1
   local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s}"
   local reg_name="${network}-registry-cache"
   echo ":: dropping cache registry volume (${reg_name})"

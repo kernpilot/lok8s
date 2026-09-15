@@ -41,7 +41,8 @@ type statusDeps struct {
 }
 
 func newStatusCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
-	return argshFlagErrors(&cobra.Command{
+	var format func() (string, error)
+	cmd := argshFlagErrors(&cobra.Command{
 		Use:          "status",
 		Aliases:      spec.aliases,
 		Short:        spec.short,
@@ -60,10 +61,19 @@ func newStatusCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 					return disp.DispatchStatus(ctx, domainName)
 				},
 			}
+			f, err := format()
+			if err != nil {
+				return err
+			}
+			if f != outputText {
+				return writeOutput(cmd.OutOrStdout(), f, gatherStatus(cmd.Context(), deps, d))
+			}
 			runStatus(cmd.Context(), cmd.OutOrStdout(), deps, d)
 			return nil
 		},
 	})
+	format = addOutputFlag(cmd)
+	return cmd
 }
 
 // runStatus is status::all: every section in order, each fail-soft.

@@ -63,7 +63,10 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 	if fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
 		return &Spec{Domain: domainName, File: filepath.Join(base, "deploy.lok8s.yaml"), Kind: SpecKindDeploy}, nil
 	}
-	ui.ErrorTo(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/%s/", domainName)
+	// On a terminal the line carries the next step (ui.ErrorNext); piped it
+	// is the [error] line both implementations print.
+	ui.ErrorNext(stderr, "init project --cluster "+domainName+" --driver lo", "write the first spec for "+domainName,
+		"No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/%s/", domainName)
 	return nil, ui.Handled(fmt.Errorf("no spec for domain %s", domainName))
 }
 

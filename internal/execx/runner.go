@@ -37,6 +37,14 @@ type Runner interface {
 	Run(ctx context.Context, c Cmd) error
 }
 
+// Debug, when set (the root --debug flag; no environment variable sets
+// it), prints every failed external command with its exit code on
+// stderr, so a failure names the docker/kind/kubectl line behind it.
+var Debug bool
+
+// DebugOut receives the --debug lines; tests redirect it.
+var DebugOut io.Writer = os.Stderr
+
 // ErrNotFound is the Runner's error when a tool name resolves nowhere
 // (wrapped as `<name>: executable not found`); errors.Is matches it.
 var ErrNotFound = errors.New("executable not found")
@@ -88,5 +96,23 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	} else {
 		cmd.Stderr = os.Stderr
 	}
-	return cmd.Run()
+	err := cmd.Run()
+	if err != nil && Debug {
+		fmt.Fprintf(DebugOut, "[debug] exec: %s: exit %d\n", shellWords(append([]string{path}, c.Args...)), ExitCode(err))
+	}
+	return err
+}
+
+// shellWords joins argv for a human, quoting the words a shell would need
+// quoted.
+func shellWords(argv []string) string {
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		if a == "" || strings.ContainsAny(a, " \t\n'\"$`\\|&;<>()*?[]#~") {
+			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+			continue
+		}
+		out[i] = a
+	}
+	return strings.Join(out, " ")
 }

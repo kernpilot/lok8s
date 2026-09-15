@@ -57,6 +57,10 @@ parity::init() {
 
   unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
     DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG
+  # GITHUB_ACTIONS: on a workflow runner `lo lint` renders its findings as
+  # workflow commands when stdout is not a terminal (documented). The
+  # harness proves the plain contract, so it runs without the variable.
+  unset GITHUB_ACTIONS
   export LC_ALL=C
 
   failures=0

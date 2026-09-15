@@ -69,7 +69,7 @@ func Resolve(explicit, clustersDir string, warnTo io.Writer) string {
 
 	if envDomain := os.Getenv("DOMAIN_NAME"); envDomain != "" {
 		if active != "" && active != envDomain {
-			fmt.Fprintf(warnTo, "notice: using DOMAIN_NAME=%s (env); the active domain is '%s' — pass --domain or unset DOMAIN_NAME to switch\n", envDomain, active)
+			ui.NoticeTo(warnTo, "notice: using DOMAIN_NAME=%s (env); the active domain is '%s' — pass --domain or unset DOMAIN_NAME to switch", envDomain, active)
 		}
 		return envDomain
 	}

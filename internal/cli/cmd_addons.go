@@ -28,6 +28,7 @@ func addonsRun(err error) error {
 }
 
 func newAddonsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
+	var format func() (string, error)
 	cmd := &cobra.Command{
 		Use:          "addons [addon...]",
 		Aliases:      spec.aliases,
@@ -45,6 +46,22 @@ func newAddonsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			// --origin (Go-only): the eject-model column — builtin · local ·
 			// local (modified) · local-only. Opt-in so the default table
 			// stays byte-identical to the frozen implementation.
+			f, err := format()
+			if err != nil {
+				return err
+			}
+			if f != outputText {
+				// Go-only: the list as data; a named addon and --detail
+				// keep their text forms.
+				if len(args) > 0 {
+					return argshErrorf(stderr, "--output %s applies to the list: lo addons -o %s", f, f)
+				}
+				entries, err := addons.Entries(paths, d, stderr)
+				if err != nil {
+					return addonsRun(err)
+				}
+				return writeOutput(out, f, entries)
+			}
 			origin, _ := cmd.Flags().GetBool("origin")
 			show, detailFn, list := addons.Show, addons.Detail, addons.List
 			if origin {
@@ -72,6 +89,7 @@ func newAddonsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	// argsh 'detail|:+' is a counting flag.
 	cmd.Flags().Count("detail", "Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure")
 	cmd.Flags().Bool("origin", false, "Add the ORIGIN column: builtin (served from the binary) · local · local (modified) · local-only (see: lo assets)")
+	format = addOutputFlag(cmd)
 	return cmd
 }
 
