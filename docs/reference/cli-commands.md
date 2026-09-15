@@ -3174,7 +3174,7 @@ lo secrets [flags]
 
 ```
   lo secrets init
-  lo secrets set --name db --namespace app dbPassword <value>
+  lo secrets set --name db --namespace app dbUser <value>
   lo secrets encrypt
 ```
 
@@ -3437,9 +3437,9 @@ lo secrets set [--name N] [--namespace NS] [--encrypt] <key> [value] [flags]
 ### Examples
 
 ```
-  lo secrets set --name db --namespace app dbPassword <value>
-  lo secrets set --name db dbPassword - < value.txt
-  lo secrets set --name db dbPassword <value> --encrypt
+  lo secrets set --name db --namespace app dbUser <value>
+  lo secrets set --name db dbUser - < value.txt
+  lo secrets set --name db dbUser <value> --encrypt
 ```
 
 ### Options

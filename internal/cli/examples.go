@@ -18,7 +18,8 @@ import (
 )
 
 // commandExamples maps a command path below the root to its example block.
-var commandExamples = map[string]string{
+// Help text only: the values are placeholders, not credentials.
+var commandExamples = map[string]string{ // #nosec G101 -- example command lines, no credential
 	// Cluster lifecycle.
 	"up": `  lo up
   lo up --open-tilt
@@ -154,7 +155,7 @@ var commandExamples = map[string]string{
   lo addons cilium
   lo addons --detail --origin`,
 	"secrets": `  lo secrets init
-  lo secrets set --name db --namespace app dbPassword <value>
+  lo secrets set --name db --namespace app dbUser <value>
   lo secrets encrypt`,
 	"secrets init": `  lo secrets init`,
 	"secrets add-key": `  lo secrets add-key ~/.ssh/id_ed25519.pub
@@ -166,9 +167,9 @@ var commandExamples = map[string]string{
 	"secrets print": `  lo secrets print
   lo secrets print 'Secret.db.*'`,
 	"secrets path": `  lo secrets path`,
-	"secrets set": `  lo secrets set --name db --namespace app dbPassword <value>
-  lo secrets set --name db dbPassword - < value.txt
-  lo secrets set --name db dbPassword <value> --encrypt`,
+	"secrets set": `  lo secrets set --name db --namespace app dbUser <value>
+  lo secrets set --name db dbUser - < value.txt
+  lo secrets set --name db dbUser <value> --encrypt`,
 	"secrets env": `  eval "$(lo secrets env --name db --namespace app)"`,
 	"drivers": `  lo drivers --list
   lo drivers lo status kubehz.dev`,
