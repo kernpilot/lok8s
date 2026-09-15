@@ -136,7 +136,9 @@ func Count(groups []string) int {
 		active[strings.TrimSpace(strings.ToLower(g))] = true
 	}
 	n := 1
-	for _, e := range entries("") {
+	// The version and the plugin home shape the entries' fields, not
+	// their number.
+	for _, e := range entries("", "") {
 		if active[e.group] {
 			n++
 		}
