@@ -51,9 +51,7 @@ func (f *initFlags) add(cmd *cobra.Command) {
 // TTY), the form IO (scripted, accessible) and the toolchain step (never
 // the network under go test).
 var (
-	initTerminal = func(yes bool) initctx.Terminal {
-		return initctx.DetectTerminal(os.Stdin, os.Stdout, yes)
-	}
+	initTerminal = initctx.DetectTerminal
 	initFormIO = func() initctx.IO {
 		return initctx.IO{In: os.Stdin, Out: os.Stdout}
 	}

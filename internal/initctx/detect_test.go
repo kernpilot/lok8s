@@ -14,6 +14,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // gitFake answers the two git reads. root "" = not a repository (rc 128);
@@ -393,23 +394,24 @@ func TestTerminalInteractive(t *testing.T) {
 		}
 	}
 
-	// DetectTerminal: a pipe is not a terminal; CI is read as presence.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	defer w.Close()
+	// DetectTerminal reads the streams through internal/ui, so the test
+	// override covers it: under go test the streams are pipes (no
+	// terminal); ui.ForceTTY(true) makes both terminals. CI is read as
+	// presence.
+	restore := ui.ForceTTY(false)
 	t.Setenv("CI", "")
-	got := DetectTerminal(r, w, true)
+	got := DetectTerminal(true)
 	if got.StdinTTY || got.StdoutTTY || !got.CI || !got.Yes {
 		t.Errorf("pipe terminal: %+v", got)
 	}
 	os.Unsetenv("CI")
-	if got := DetectTerminal(r, w, false); got.CI || got.Yes {
+	if got := DetectTerminal(false); got.CI || got.Yes || got.Interactive() {
 		t.Errorf("CI unset: %+v", got)
 	}
-	if got := DetectTerminal(nil, nil, false); got.StdinTTY || got.StdoutTTY {
-		t.Errorf("nil streams: %+v", got)
+	restore()
+	restore = ui.ForceTTY(true)
+	defer restore()
+	if got := DetectTerminal(false); !got.StdinTTY || !got.StdoutTTY || !got.Interactive() {
+		t.Errorf("forced terminal: %+v", got)
 	}
 }

@@ -40,9 +40,10 @@ const (
 	ansiYellow = "\033[33m"
 )
 
-// Paint wraps text in code and a reset when the style allows colour.
+// Paint wraps text in code and a reset when the style allows colour. An
+// empty text stays empty: no bare escape pair.
 func (s Style) Paint(code, text string) string {
-	if !s.Color {
+	if !s.Color || text == "" {
 		return text
 	}
 	return code + text + ansiReset

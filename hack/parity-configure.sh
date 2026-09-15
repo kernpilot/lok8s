@@ -391,11 +391,11 @@ PATH_SECRETS="${PROJ}/clusters" check - doctor       # set: the same line on bot
 
 # ── lo init --plan (Go-only contract) ────────────────────────────────────────
 # Bare `lo init` off a terminal prints the help (parity-leaves pins rc 0);
-# `lo init --plan` prints the mode's screen as text — in a project the
-# state card (the two-column layout, the project name first, no doctor
-# section), the action list and the next step; elsewhere the welcome
-# and the bootstrap screen with the defaults — exits 0 and writes
-# nothing, on and off a terminal. Its own
+# `lo init --plan` prints the mode's screen as text, exits 0 and writes
+# nothing, on and off a terminal. In a project the screen is the state
+# card (the two-column layout, the project name first, no doctor
+# section), the action list and the next step; elsewhere it is the
+# welcome and the bootstrap screen with the defaults. Its own
 # synthetic projects (an empty directory, a project root), the tree
 # snapshotted before and after. Both runs are the Go binary; the bash
 # tree has no wizard.

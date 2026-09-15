@@ -19,13 +19,13 @@ import (
 	"sort"
 	"strings"
 
-	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // Situation is where a bare `lo init` stands. The first three take the
@@ -71,12 +71,14 @@ func (t Terminal) Interactive() bool {
 	return t.StdinTTY && t.StdoutTTY && !t.CI && !t.Yes
 }
 
-// DetectTerminal reads the two streams and the CI variable.
-func DetectTerminal(stdin, stdout *os.File, yes bool) Terminal {
+// DetectTerminal reads the two streams through internal/ui (so the test
+// override ui.ForceTTY covers the screens and the card alike) and the
+// CI variable.
+func DetectTerminal(yes bool) Terminal {
 	_, ci := os.LookupEnv("CI")
 	return Terminal{
-		StdinTTY:  stdin != nil && term.IsTerminal(int(stdin.Fd())),
-		StdoutTTY: stdout != nil && term.IsTerminal(int(stdout.Fd())),
+		StdinTTY:  ui.StdinIsTerminal(),
+		StdoutTTY: ui.Stdout().TTY,
 		CI:        ci,
 		Yes:       yes,
 	}
