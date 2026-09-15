@@ -11,9 +11,11 @@ package cli
 //
 // The hooks are installed by command path after the tree is built
 // (installCompletions), so the files that own those commands stay as they
-// are. A command routed to bash (a shim) keeps flag parsing off, but the
-// completion request never runs the command: the shell completes its
-// name, and the positional and --domain values complete there too.
+// are. A command routed to bash (a shim) keeps flag parsing off, and the
+// completion request never runs the command. There the shell completes
+// the name, the positional values, and --domain when it precedes the
+// command (`lo --domain <Tab> down`); after the name cobra skips flag
+// values under DisableFlagParsing.
 
 import (
 	"os"

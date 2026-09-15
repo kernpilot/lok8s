@@ -21,7 +21,7 @@ The generated [CLI commands](./cli-commands) page lists every command with its f
 | `lo assets eject`, `diff`, `update` | the asset paths, and `bash` |
 | `lo init service` | the entries of `services.yaml` and the directories that hold a service `lok8s.yaml` |
 
-A completer only reads the tree. A Tab never writes into the project. A command routed to bash (see [Choosing the implementation](#choosing-the-implementation)) completes the same way: the request never runs the command, so its name, its positional and `--domain` complete there too.
+A completer only reads the tree. A Tab never writes into the project. A command routed to bash (see [Choosing the implementation](#choosing-the-implementation)) completes its name, its positional values, and `--domain` when the flag precedes the command (`lo --domain <Tab> down`). The request never runs the command; after the command name the shell completes no flag values there.
 
 ```bash
 # bash: for the current shell, then permanently

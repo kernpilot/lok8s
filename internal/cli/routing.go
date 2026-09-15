@@ -61,14 +61,14 @@ var treeExempt = map[string]bool{"lint": true, "doctor": true, "init": true}
 
 // refuseExempt lists the commands that run on an invalid block: the
 // diagnostics, which report it themselves, and cobra's own help and
-// completion, which run no lo code, the completion requests the shell
-// scripts send (`__complete`, `__completeNoDesc`: a Tab must answer on a
-// broken project too), and the bare root (`lo` alone: the orientation
-// block or the help, which printed on an invalid block before the root
-// had a RunE and still does).
+// completion, which run no lo code, the completion request the shell
+// scripts send (`__complete`: a Tab must answer on a broken project too;
+// `__completeNoDesc` is its alias, so the one name covers both), and the
+// bare root (`lo` alone: the orientation block or the help, which printed
+// on an invalid block before the root had a RunE and still does).
 var refuseExempt = map[string]bool{
 	"lint": true, "doctor": true, "help": true, "completion": true, "lo": true,
-	cobra.ShellCompRequestCmd: true, cobra.ShellCompNoDescRequestCmd: true,
+	cobra.ShellCompRequestCmd: true,
 }
 
 // goOnlySubcommands lists the usage-tree commands that carry Go-only
