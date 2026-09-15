@@ -96,7 +96,7 @@ The binary ships in **two builds from one tree**, selected by the
 | Size (linux/amd64, stripped) | **49.8 MB** | **123.1 MB** |
 | `LO_RENDER` | unset/`exec` = the exec pipeline (the only one); `inprocess` is an **error** naming lo-full (`LO_RENDER=inprocess: this is lo core … install lo-full`) | unset/`inprocess` = in-process; `exec` = the subprocess pipeline for an A/B |
 | Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo toolchain install`](cli.md#lo-toolchain) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
-| `lo --version` | `lo version 0.4.0 (core)` | `lo version 0.4.0 (full)` |
+| `lo --version` | `lo version 0.4.1 (core)` | `lo version 0.4.1 (full)` |
 
 Everything else (every command, the parity harnesses, the tests) is the
 same code. `go.mod` keeps khelm and the kustomize API for both; only the
@@ -213,7 +213,8 @@ still decides whether an undeclared repository is trusted.
 
 **`LO_RENDER=exec`** restores the subprocess pipeline everywhere
 (`internal/render` execs the pinned `kustomize` from `.bin` with
-`KUSTOMIZE_PLUGIN_HOME` defaulted to `<project>/.kustomize` for `lo build`,
+`KUSTOMIZE_PLUGIN_HOME` set to `<project>/.kustomize` when the shell does
+not export it — for every render: `lo build`, the addon render, `lo k8s` —
 and the registry TLS mint execs the built `Secret` plugin as before). Use
 it to A/B a render: `lo build` promotes `artifacts.yaml` only when the bytes
 change, so a `DEBUG=1 lo build` that reports `render unchanged` under both
@@ -312,7 +313,7 @@ itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
 
 ```yaml
 # .lo-origin — written by lo when it ejected this asset. Do not edit.
-lo: 0.4.0
+lo: 0.4.1
 ejectedAt: 2026-09-03T10:00:00Z
 files:
   chart.yaml: sha256:…
@@ -552,6 +553,8 @@ allow-lists. Everything not listed here is expected to be byte-identical.
 | D28 | **A credential with a CR or LF is refused.** The binary hands `KKP_TOKEN` to curl through a config line on stdin and the CAPI credentials to kubectl through an env file (D20 family); both carriers are line based, so a newline in a value would end the line and start another option or key. `credentials.NoNewline` refuses the value with `environment variable <NAME> must not contain a newline` and no tool runs. The bash passed the values as arguments and let the tool fail or mangle them. | `internal/credentials/credentials.go`, `internal/driver/kkp/api.go`, `internal/driver/capi/generate.go` (`credentialEnvFile`) |
 | D33 | **`split: failed to split …` and `split: failed to shape …` name the cause.** The bash prints the artifact path alone; the binary appends the error it observed (`: rename …: invalid cross-device link`, `: exit status 1`, `: yq not found — install the pinned toolchain (b install)`). The scratch dir moved with it: the bash stages the split under `mktemp -d` (`$TMPDIR`) and moves the files with `mv`, a copy across devices; the binary stages under `<domain>/.artifacts-tmp.*` next to `.artifacts-stage.*` (a rename across filesystems fails with EXDEV, and v0.3.0 failed every split-mode build on a host or CI runner whose `/tmp` is its own mount) and falls back to copy + fsync + remove when a rename still crosses a device. No harness pins the messages; `hack/parity-build.sh` runs one build with `TMPDIR` on another filesystem than the project. | `internal/build/split.go`, `internal/build/move.go`, `hack/parity-build.sh` |
 | D34 | **`lo doctor` reports the registry containers' certificate mount.** Both implementations keep the registry TLS certificate in the docker volume `<network>-registry-tls` since v0.4.0 (the mint hands the Secret plugin a scratch `PATH_SECRETS` under `clusters/<domain>/.registry-tls-tmp.*`, populates and reads the volume through a throwaway container, every registry mounts it at `/etc/registry/certs`, a legacy `<Base>/.secrets/tls/registries` pair is imported once with one `[warn]`; `hack/parity-orchestrate.sh` diffs the docker argv and the plugin environment of `lo up` and `lo registry tls renew` byte for byte, and `lo registry tls status|renew` print the same lines on both sides). Only the binary adds one line under `lo doctor`'s dev-TLS section when at least one registry container of the active domain exists: `registry TLS: N containers mount volume <vol>`, or a warning naming the legacy directory the containers still bind-mount and the recreate command. The bash doctor prints nothing there; the line is omitted without containers, so `hack/parity-configure.sh` keeps diffing doctor strictly. One more text can differ: `lo registry tls status` names an unreadable certificate `unreadable: <reason>`; the bash says `no PEM block` (openssl's failure carries no usable reason) or `openssl not found` (no openssl on the host), the binary prints the parser's reason (`no PEM block` for a non-PEM blob, the x509 error for a malformed one). No row claims a docker argv deviation: the argv of both implementations is diffed byte for byte. | `internal/cli/cmd_doctor.go` (`doctorRegistryTLS`), `internal/driver/lo/registrytls.go` (`RegistryTLSDoctor`) |
+| D35 | **`lo doctor` reports `PATH_SECRETS` as it is.** The bash entrypoint defaults `PATH_SECRETS` to `<project>/.secrets` before doctor runs, so the bash doctor prints that path (`! PATH_SECRETS unset or not a directory (<project>/.secrets)` when the directory is absent). The binary defaults nothing (since v0.4.0 every store is per domain and the flat store is retired): with the variable unset it prints the info line `ℹ PATH_SECRETS unset (per-domain stores; the flat store is retired)`; with the variable set both print the same `PATH_SECRETS=<dir>` line. `hack/parity-configure.sh` allow-lists the one line in the strict doctor cases, pins the binary's text, and diffs the set case strictly. | `internal/cli/cmd_doctor.go` (`doctorEnvironmentSection`) |
+| D36 | **`lo kustomize build\|clean\|list` and the generated `.bin/b.yaml` follow `KUSTOMIZE_PLUGIN_HOME`.** The bash `libs/kustomize` installs and lists under `${PATH_BASE}/.kustomize` whatever the variable says. The binary uses `config.KustomizePluginHome` (the variable when set, else `<project>/.kustomize`): the plugins land where the render and `lo doctor` look, so doctor's fix hints (`lo kustomize build`, `lo toolchain install`) hold with an exported home. The `file:` lines of a generated `b.yaml` name the home relative to `.bin` when it is inside the project (`../.kustomize/…` by default, byte-identical to before) and absolute otherwise. With the variable unset — the parity harnesses unset it — both implementations agree. | `internal/cli/cmd_kustomize.go`, `internal/cli/cmd_toolchain.go` (`pluginFileDir`), `internal/toolchain/template.go` (`PluginFileDir`) |
 
 ### Rendering and display
 

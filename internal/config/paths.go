@@ -179,3 +179,18 @@ func EnvOr(key, fallback string) string {
 	}
 	return fallback
 }
+
+// KustomizePluginHomeEnv is kustomize's plugin-home variable, spelled out
+// here so the core build does not link the kustomize API for one name.
+const KustomizePluginHomeEnv = "KUSTOMIZE_PLUGIN_HOME"
+
+// KustomizePluginHome is KUSTOMIZE_PLUGIN_HOME as every child of this
+// binary sees it: the variable when set, else <Base>/.kustomize. The
+// default mirrors the project's .envrc
+// (`${KUSTOMIZE_PLUGIN_HOME:="${PATH_BASE}/.kustomize"}`), which the bash
+// tree relied on for the whole process. The exec render, the shim, the
+// registry TLS mint and `lo doctor` all read this one function, so doctor
+// cannot report a home that a kustomize child does not get.
+func KustomizePluginHome(p *Paths) string {
+	return EnvOr(KustomizePluginHomeEnv, filepath.Join(p.Base, ".kustomize"))
+}

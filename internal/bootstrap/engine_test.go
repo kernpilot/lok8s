@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1037,5 +1038,42 @@ func TestApplyReturnsWhenTheContextEnds(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Apply did not return after the cancel")
+	}
+}
+
+// TestApplyRenderEnvCarriesKustomizePluginHome pins the path a PATH-only
+// shell hit in v0.4.0: `lo up` rendered cilium through a kustomize child
+// that had no plugin home and failed on `unable to find plugin root`. The
+// child must get <Base>/.kustomize when the variable is unset and the
+// exported value otherwise (config.KustomizePluginHome, the value `lo
+// doctor` prints).
+func TestApplyRenderEnvCarriesKustomizePluginHome(t *testing.T) {
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
+	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
+	e, f, _, _, p := testEngine(t)
+	mkChartAddon(t, p, "testcni")
+	spec := writeClusterSpec(t, p, "testcni")
+	kc := writeKubeconfig(t, p)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(f.kustomizeEnvs) != 1 {
+		t.Fatalf("kustomize calls = %d", len(f.kustomizeEnvs))
+	}
+	want := "KUSTOMIZE_PLUGIN_HOME=" + filepath.Join(p.Base, ".kustomize")
+	if !slices.Contains(f.kustomizeEnvs[0], want) {
+		t.Errorf("unset in the shell: %s missing from the render env: %v", want, f.kustomizeEnvs[0])
+	}
+
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/elsewhere/plugins")
+	e, f, _, _, p = testEngine(t)
+	mkChartAddon(t, p, "testcni")
+	spec = writeClusterSpec(t, p, "testcni")
+	kc = writeKubeconfig(t, p)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !slices.Contains(f.kustomizeEnvs[0], "KUSTOMIZE_PLUGIN_HOME=/elsewhere/plugins") {
+		t.Errorf("exported in the shell: the value is not passed through: %v", f.kustomizeEnvs[0])
 	}
 }

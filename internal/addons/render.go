@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/build"
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
@@ -37,13 +38,20 @@ import (
 // (LOK8S_USER_*/LOK8S_SPEC_* placeholders) + the container-env tostring
 // coercion.
 //
+// paths locates the project: in exec mode the kustomize child gets
+// KUSTOMIZE_PLUGIN_HOME from config.KustomizePluginHome (the variable when
+// set, else <Base>/.kustomize), the same value `lo doctor` prints. Without
+// it a shell that exports only PATH left the child with no plugin home and
+// the bootstrap render of every addon failed on `unable to find plugin
+// root`.
+//
 // env carries the per-entry `env:` overrides (bash exports them in the
 // entry's subshell before render): they join the kustomize process env AND
 // the envsubst whitelist/lookup. In exec mode they ride the child's
 // environment; in-process, render.Build installs them for the duration of
 // the render under its mutex and restores them (concurrent DAG entries
 // serialize on the render, never on each other's values).
-func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
+func Render(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
 	buildDir := addonDir
 	if fsutil.FileExists(filepath.Join(addonDir, "chart.yaml")) {
 		// Stack values: base < driver < provider < inline (later wins).
@@ -121,6 +129,7 @@ func Render(ctx context.Context, runner execx.Runner, stderr io.Writer, addonDir
 	// pinned kustomize binary via the runner seam under LO_RENDER=exec
 	// (which is also how the hermetic tests stub it).
 	out, err := render.Build(ctx, buildDir, render.Options{
+		Paths:      paths,
 		Runner:     runner,
 		EnableExec: true,
 		Env:        cmdEnv,

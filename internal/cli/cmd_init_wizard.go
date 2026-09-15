@@ -103,7 +103,7 @@ func initCard(ctx context.Context, s initctx.State, out io.Writer) {
 	p := projectPaths(s.Project.Root)
 	doctorDomainSection(p, s.Project.Active, out)
 	if s.Project.BYAMLMarker {
-		doctorToolchain(ctx, out, p, kustomizePluginHome(p), childPATH(p, bashTreeForPATH(p).Dir))
+		doctorToolchain(ctx, out, p, config.KustomizePluginHome(p), childPATH(p, bashTreeForPATH(p).Dir))
 	}
 }
 

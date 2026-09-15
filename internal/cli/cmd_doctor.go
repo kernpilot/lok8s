@@ -188,21 +188,25 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 	doctorDir(out, "PATH_BASE", paths.Base)
 	doctorDir(out, "PATH_LOK8S", paths.Lok8s)
 	doctorDir(out, "PATH_CLUSTERS", paths.Clusters)
-	// The bash entrypoint defaults PATH_SECRETS to ${PATH_BASE}/.secrets
-	// before doctor reads it — report the same effective value.
-	secretsVal := paths.SecretsEnv
-	if secretsVal == "" {
-		secretsVal = filepath.Join(paths.Base, ".secrets")
+	// PATH_SECRETS: the binary defaults nothing here (since v0.4.0 every
+	// store is per domain and the flat .secrets/ is retired), so an unset
+	// variable is reported as unset. The bash entrypoint still defaults it
+	// to ${PATH_BASE}/.secrets and the bash doctor prints that path; the
+	// line is allow-listed in hack/parity-configure.sh (D35).
+	if paths.SecretsEnv != "" {
+		doctorDir(out, "PATH_SECRETS", paths.SecretsEnv)
+	} else {
+		doctorInfo(out, "PATH_SECRETS unset (per-domain stores; the flat store is retired)")
 	}
-	doctorDir(out, "PATH_SECRETS", secretsVal)
-	// KUSTOMIZE_PLUGIN_HOME: this binary defaults it for every bash child
-	// (shimEnv) — doctor reports the environment as prepared, not the raw
-	// shell's. The binary's OWN renders no longer need it (internal/render
-	// runs kustomize in-process and serves the Secret/khelm generators
-	// itself); the lines below still matter for a command routed to bash,
-	// the provider plugins and LO_RENDER=exec, and their text is unchanged so
+	// KUSTOMIZE_PLUGIN_HOME: this binary sets it for every kustomize child
+	// (the exec render) and every bash child (shimEnv) from
+	// config.KustomizePluginHome — doctor reports that one value, not the
+	// raw shell's, so a green line here means the render gets the same
+	// home. The in-process render (lo-full) does not need it; the lines
+	// below still matter for lo core, a command routed to bash, the
+	// provider plugins and LO_RENDER=exec, and their text is unchanged so
 	// hack/parity-configure.sh keeps diffing doctor byte-for-byte.
-	pluginHome := kustomizePluginHome(paths)
+	pluginHome := config.KustomizePluginHome(paths)
 	doctorOK(out, "KUSTOMIZE_PLUGIN_HOME="+pluginHome)
 	if fsutil.IsExecutable(filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))) {
 		doctorOK(out, "secrets.lok8s.dev plugin built")
@@ -217,15 +221,6 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		return doctorToolchain(ctx, out, paths, pluginHome, path)
 	}
 	return true
-}
-
-// kustomizePluginHome is KUSTOMIZE_PLUGIN_HOME as the render and the bash
-// children see it: the variable when set, else <project>/.kustomize.
-func kustomizePluginHome(paths *config.Paths) string {
-	if v := os.Getenv("KUSTOMIZE_PLUGIN_HOME"); v != "" {
-		return v
-	}
-	return filepath.Join(paths.Base, ".kustomize")
 }
 
 // doctorTLSSection is `--- dev TLS (cert: CA) ---` (advisory).
@@ -416,6 +411,10 @@ func doctorToolchain(ctx context.Context, out io.Writer, paths *config.Paths, pl
 func doctorOK(w io.Writer, msg string)   { fmt.Fprintf(w, "  \033[32m✓\033[0m %s\n", msg) }
 func doctorWarn(w io.Writer, msg string) { fmt.Fprintf(w, "  \033[33m!\033[0m %s\n", msg) }
 func doctorBad(w io.Writer, msg string)  { fmt.Fprintf(w, "  \033[31m✗\033[0m %s\n", msg) }
+
+// doctorInfo is a neutral line: a fact that is neither a pass nor a
+// finding (the dim ℹ style the other commands use).
+func doctorInfo(w io.Writer, msg string) { fmt.Fprintf(w, "  \033[2mℹ %s\033[0m\n", msg) }
 
 // doctorTool checks one tool on PATH (bash: doctor::_tool via `command -v`).
 // Returns false when required and missing.

@@ -203,7 +203,7 @@ func (d *Driver) registryTLSMint(ctx context.Context, domain, vol string, exists
 	execPlugin := !render.SecretInProcess()
 	var pluginBin string
 	if execPlugin {
-		pluginHome := config.EnvOr("KUSTOMIZE_PLUGIN_HOME", filepath.Join(d.deps.Paths.Base, ".kustomize"))
+		pluginHome := config.KustomizePluginHome(d.deps.Paths)
 		pluginBin = filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))
 		// The Secret plugin mints the cert. It's needed across the lok8s
 		// flow anyway, so build it on demand if it's missing and we can

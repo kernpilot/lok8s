@@ -123,8 +123,29 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 		t.Fatalf("env = %v, want %v", r.cmd.Env, wantEnv)
 	}
 
-	// No Paths (the addon call shape): the plugin home is left to the
-	// environment, exactly as before.
+	// Exported: the child gets the exported value, and gets it explicitly.
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/elsewhere/plugins")
+	r = &recordingRunner{}
+	if _, err := Build(t.Context(), "/some/dir", Options{Paths: p, Runner: r}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(r.cmd.Env, "\n") != "KUSTOMIZE_PLUGIN_HOME=/elsewhere/plugins" {
+		t.Fatalf("env with the variable exported = %v", r.cmd.Env)
+	}
+
+	// An overlay that carries the key wins over the environment.
+	r = &recordingRunner{}
+	if _, err := Build(t.Context(), "/some/dir", Options{Paths: p, Runner: r, Env: []string{"KUSTOMIZE_PLUGIN_HOME=/overlay"}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(r.cmd.Env, "\n") != "KUSTOMIZE_PLUGIN_HOME=/overlay" {
+		t.Fatalf("env with the key in the overlay = %v", r.cmd.Env)
+	}
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
+	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
+
+	// No Paths (a render outside a project): the plugin home is left to
+	// the environment.
 	r = &recordingRunner{}
 	if _, err := Build(t.Context(), "/d", Options{Runner: r}); err != nil {
 		t.Fatal(err)

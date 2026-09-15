@@ -371,12 +371,23 @@ check - kubeconfig --domain eta.dev --oidc        # http issuer → load_spec bo
 # ── lo doctor ────────────────────────────────────────────────────────────────
 # Strict diffs on purpose: every environment-driven doctor line (tool
 # presence, bash version, mkcert CA state) is produced from the SAME
-# environment by both implementations, so no allow-filter is needed — an
-# environment allowance would only mask a genuine port divergence.
-check - doctor                              # active alpha.dev (kind lo)
-check - doctor --domain gamma.app           # Deploy -> alpha.dev
-check - doctor --domain nowhere.dev         # active domain has no spec
-check - doctor --domain prov.dev            # provider / infrastructure section (hetzner, offline)
+# environment by both implementations, so no environment allowance is
+# needed — it would only mask a genuine port divergence. The ONE allowed
+# line is PATH_SECRETS (D35): the bash entrypoint defaults the variable to
+# <project>/.secrets and its doctor prints that path; the binary defaults
+# nothing and prints an info line. The binary's text is pinned below, and
+# the set case (both print `PATH_SECRETS=<dir>`) is diffed strictly.
+check PATH_SECRETS doctor                   # active alpha.dev (kind lo)
+check PATH_SECRETS doctor --domain gamma.app           # Deploy -> alpha.dev
+check PATH_SECRETS doctor --domain nowhere.dev         # active domain has no spec
+check PATH_SECRETS doctor --domain prov.dev            # provider / infrastructure section (hetzner, offline)
+parity::select "${PROJ}" go
+if (cd "${PROJ}" && "${LO_BIN}" doctor </dev/null 2>/dev/null || true) | grep -q 'PATH_SECRETS unset (per-domain stores; the flat store is retired)'; then
+  echo "ok: doctor: the binary reports PATH_SECRETS unset"
+else
+  fail "doctor: the binary does not report PATH_SECRETS unset"
+fi
+PATH_SECRETS="${PROJ}/clusters" check - doctor       # set: the same line on both sides
 
 # ── lo init --plan (Go-only contract) ────────────────────────────────────────
 # Bare `lo init` off a terminal prints the help (parity-leaves pins rc 0);

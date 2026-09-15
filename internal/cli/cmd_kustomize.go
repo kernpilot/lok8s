@@ -81,9 +81,16 @@ func newKustomizeCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 
 // kustomizeSources returns the plugin source dirs: the lok8s FRAMEWORK
 // plugins (shipped with the framework, sibling of .lok8s) plus the project's
-// own kustomize/ if present. Build output installs into the PROJECT's plugin
-// home (${PATH_BASE}/.kustomize) via the Makefile's overridable BIN_ROOT, so
-// a fresh project gets the framework plugins without carrying the Go source.
+// own kustomize/ if present. Build output installs into the plugin home via
+// the Makefile's overridable BIN_ROOT, so a fresh project gets the framework
+// plugins without carrying the Go source.
+//
+// The plugin home is config.KustomizePluginHome: the variable when set, else
+// <Base>/.kustomize. Deliberate deviation (D36): the bash libs/kustomize
+// uses ${PATH_BASE}/.kustomize whatever the variable says, so with an
+// exported home its plugins land where the render does not look and
+// doctor's fix hint (`run: lo kustomize build`) does not hold. With the
+// variable unset both implementations agree.
 func kustomizeSources(paths *config.Paths) []string {
 	var sources []string
 	if fw := filepath.Join(filepath.Dir(paths.Lok8s), "kustomize"); fsutil.DirExists(fw) {
@@ -105,9 +112,10 @@ func kustomizeBuild(ctx context.Context, r execx.Runner, paths *config.Paths) er
 		ui.Error("no kustomize plugin sources (lok8s/kustomize or %s/kustomize)", paths.Base)
 		return ErrHandled
 	}
+	home := config.KustomizePluginHome(paths)
 	for _, s := range sources {
-		ui.Debug("kustomize: building %s -> %s/.kustomize", s, paths.Base)
-		if err := runMake(ctx, r, s, []string{"BIN_ROOT=" + filepath.Join(paths.Base, ".kustomize")}, "build"); err != nil {
+		ui.Debug("kustomize: building %s -> %s", s, home)
+		if err := runMake(ctx, r, s, []string{"BIN_ROOT=" + home}, "build"); err != nil {
 			return ErrHandled
 		}
 	}
@@ -134,13 +142,13 @@ func kustomizeTest(ctx context.Context, r execx.Runner, paths *config.Paths) err
 func kustomizeClean(ctx context.Context, r execx.Runner, paths *config.Paths) error {
 	for _, s := range kustomizeSources(paths) {
 		// Best-effort, like the bash `|| true`.
-		_ = runMake(ctx, r, s, []string{"BIN_ROOT=" + filepath.Join(paths.Base, ".kustomize")}, "clean")
+		_ = runMake(ctx, r, s, []string{"BIN_ROOT=" + config.KustomizePluginHome(paths)}, "clean")
 	}
 	return nil
 }
 
 func kustomizeList(paths *config.Paths, cmd *cobra.Command) error {
-	root := filepath.Join(paths.Base, ".kustomize")
+	root := config.KustomizePluginHome(paths)
 	if !fsutil.DirExists(root) {
 		ui.Warn("No .kustomize/ directory found")
 		return nil

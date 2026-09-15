@@ -171,3 +171,29 @@ func TestUnifiedDiffShape(t *testing.T) {
 		t.Fatalf("diff = %q, want %q", d, want)
 	}
 }
+
+func TestTemplatePluginFileDir(t *testing.T) {
+	// The `file:` lines name the plugin home as b resolves it from .bin:
+	// ../.kustomize by default, the given directory otherwise.
+	def := mustTemplate(t, TemplateOptions{Name: "p", LoVersion: "0.4.1", Variant: "core"})
+	for _, want := range []string{
+		"file: ../.kustomize/" + ChartRendererPluginRel,
+		"file: ../.kustomize/" + SecretPluginRel,
+	} {
+		if !strings.Contains(def, want) {
+			t.Errorf("default template lacks %q:\n%s", want, def)
+		}
+	}
+	custom := mustTemplate(t, TemplateOptions{Name: "p", LoVersion: "0.4.1", Variant: "core", PluginFileDir: "/opt/plugins"})
+	for _, want := range []string{
+		"file: /opt/plugins/" + ChartRendererPluginRel,
+		"file: /opt/plugins/" + SecretPluginRel,
+	} {
+		if !strings.Contains(custom, want) {
+			t.Errorf("custom template lacks %q:\n%s", want, custom)
+		}
+	}
+	if strings.Contains(custom, "../.kustomize/") {
+		t.Errorf("custom template still names the default home:\n%s", custom)
+	}
+}

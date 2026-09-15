@@ -760,6 +760,7 @@ Rules:
 | `DOMAIN_SANS` | `*` | Domain SANs |
 | `KIND_EXPERIMENTAL_DOCKER_NETWORK` | `lok8s` | Docker network name |
 | `PATH_SECRETS` | (empty) | Active domain's store: `lo build`/`lo deploy` set it to `clusters/<domain>/secrets`; `lo secrets` without `--domain` reads it. The registry TLS mint does not read it: the certificate lives in a docker volume. The bash entrypoint defaults it to `.secrets`; the binary does not |
+| `KUSTOMIZE_PLUGIN_HOME` | `<project>/.kustomize` | Where kustomize finds the exec plugins (the khelm `ChartRenderer`, the `Secret` generator). The binary sets it for every kustomize child (`lo build`, the addon render of `lo up`/`lo bootstrap`, `lo k8s`), for the registry TLS mint under `LO_RENDER=exec` and for every bash child; `lo doctor` prints the same value. The in-process render of `lo-full` does not read it |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
 | `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |

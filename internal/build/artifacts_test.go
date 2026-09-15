@@ -12,11 +12,13 @@ import (
 )
 
 // stubKustomize installs a fake kustomize into p.Bin that cats the file
-// named by KUSTOMIZE_STUB_OUTPUT (empty output when unset) and exits with
-// KUSTOMIZE_STUB_RC — and pins the render to the exec pipeline
-// (LO_RENDER=exec) so the stub is what runs. The promote/guard logic under
-// test is pipeline-agnostic; TestArtifactsInProcessRender covers the
-// default in-process pipeline over a real kustomization.
+// named by KUSTOMIZE_STUB_OUTPUT (empty output when unset), writes the
+// KUSTOMIZE_PLUGIN_HOME it was given to the file named by
+// KUSTOMIZE_STUB_ENVLOG (when set) and exits with KUSTOMIZE_STUB_RC — and
+// pins the render to the exec pipeline (LO_RENDER=exec) so the stub is
+// what runs. The promote/guard logic under test is pipeline-agnostic;
+// TestArtifactsInProcessRender covers the default in-process pipeline over
+// a real kustomization.
 func stubKustomize(t *testing.T, p *config.Paths) {
 	t.Helper()
 	t.Setenv(render.ModeEnv, string(render.ModeExec))
@@ -25,6 +27,7 @@ func stubKustomize(t *testing.T, p *config.Paths) {
 	}
 	script := "#!/bin/sh\n" +
 		"[ -n \"${KUSTOMIZE_STUB_OUTPUT:-}\" ] && cat \"${KUSTOMIZE_STUB_OUTPUT}\"\n" +
+		"[ -n \"${KUSTOMIZE_STUB_ENVLOG:-}\" ] && printf '%s\\n' \"${KUSTOMIZE_PLUGIN_HOME:-<unset>}\" > \"${KUSTOMIZE_STUB_ENVLOG}\"\n" +
 		"exit \"${KUSTOMIZE_STUB_RC:-0}\"\n"
 	if err := os.WriteFile(filepath.Join(p.Bin, "kustomize"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -296,5 +299,40 @@ func TestArtifactsInProcessRender(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "lo build: d.dev rendered 1 document(s)") {
 		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+// TestArtifactsRenderEnvCarriesKustomizePluginHome: the domain build's
+// kustomize child gets KUSTOMIZE_PLUGIN_HOME from config.KustomizePluginHome
+// — <Base>/.kustomize in a shell that exports only PATH, the exported value
+// otherwise. The stub records what it was given.
+func TestArtifactsRenderEnvCarriesKustomizePluginHome(t *testing.T) {
+	p, _ := artifactsProject(t)
+	stubRender(t, p, twoDocRender)
+	log := filepath.Join(p.Base, "kustomize-env.log")
+	t.Setenv("KUSTOMIZE_STUB_ENVLOG", log)
+	readLog := func() string {
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatalf("the stub wrote no env log: %v", err)
+		}
+		return strings.TrimSpace(string(raw))
+	}
+
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
+	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
+	if stderr, err := runArtifacts(t, p); err != nil {
+		t.Fatalf("Artifacts: %v\n%s", err, stderr)
+	}
+	if got, want := readLog(), filepath.Join(p.Base, ".kustomize"); got != want {
+		t.Errorf("unset in the shell: the child saw KUSTOMIZE_PLUGIN_HOME=%q, want %q", got, want)
+	}
+
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/elsewhere/plugins")
+	if stderr, err := runArtifacts(t, p); err != nil {
+		t.Fatalf("Artifacts: %v\n%s", err, stderr)
+	}
+	if got := readLog(); got != "/elsewhere/plugins" {
+		t.Errorf("exported in the shell: the child saw KUSTOMIZE_PLUGIN_HOME=%q, want the exported value", got)
 	}
 }

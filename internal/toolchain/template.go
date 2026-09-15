@@ -50,7 +50,16 @@ type TemplateOptions struct {
 	// Groups selects which entries are active; entries of other groups are
 	// emitted commented out. core is implied.
 	Groups []string
+	// PluginFileDir is the directory of the exec plugins in the `file:`
+	// lines, as a path b resolves from .bin. Empty = ../.kustomize (the
+	// default plugin home). The cli derives it from
+	// config.KustomizePluginHome, so `lo toolchain install` puts the
+	// plugins where the render and `lo doctor` look.
+	PluginFileDir string
 }
+
+// DefaultPluginFileDir is the default plugin home seen from .bin.
+const DefaultPluginFileDir = "../.kustomize"
 
 // entry is one binaries: item of the template.
 type entry struct {
@@ -63,7 +72,10 @@ type entry struct {
 // entries is the consumer toolchain, in emission order: core (kubectl +
 // the three render tools), local (the kind + Tilt dev loop), cloud (the
 // provisioning drivers).
-func entries(loVersion string) []entry {
+func entries(loVersion, pluginFileDir string) []entry {
+	if pluginFileDir == "" {
+		pluginFileDir = DefaultPluginFileDir
+	}
 	return []entry{
 		{key: "kubectl", group: GroupCore, fields: nil},
 		{key: "kustomize", group: GroupCore,
@@ -71,10 +83,10 @@ func entries(loVersion string) []entry {
 			fields:  []string{"version: " + KustomizeCLI}},
 		{key: "github.com/mgoltzsche/khelm", group: GroupCore,
 			comment: "khelm — the kustomize exec plugin that inflates the Helm charts the addons use.\nInstalled as a FILE under .kustomize/ (KUSTOMIZE_PLUGIN_HOME), not on PATH.",
-			fields:  []string{"version: v" + KhelmVersion, "file: ../.kustomize/" + ChartRendererPluginRel}},
+			fields:  []string{"version: v" + KhelmVersion, "file: " + pluginFileDir + "/" + ChartRendererPluginRel}},
 		{key: "github.com/kernpilot/lok8s", group: GroupCore,
 			comment: "secrets.lok8s.dev/v1/Secret — lok8s' own generator, shipped with every lok8s\nrelease as kustomize-secret-<os>-<arch>; pinned to the version of THIS lo.",
-			fields:  []string{"version: " + vPrefixed(loVersion), "asset: kustomize-secret-*", "file: ../.kustomize/" + SecretPluginRel}},
+			fields:  []string{"version: " + vPrefixed(loVersion), "asset: kustomize-secret-*", "file: " + pluginFileDir + "/" + SecretPluginRel}},
 		{key: "kind", group: GroupLocal},
 		{key: "tilt", group: GroupLocal},
 		{key: "mkcert", group: GroupLocal},
@@ -178,7 +190,7 @@ func Template(o TemplateOptions) (string, error) {
 	b.WriteString("binaries:\n")
 	for _, g := range groupOrder {
 		fmt.Fprintf(&b, "  # ── %s\n", groupTitles[g])
-		for _, e := range entries(o.LoVersion) {
+		for _, e := range entries(o.LoVersion, o.PluginFileDir) {
 			if e.group != g {
 				continue
 			}
@@ -227,7 +239,7 @@ func HasMarker(path string) bool {
 // tests and for doctor's expectation table.
 func PinnedEntries(loVersion string) map[string]string {
 	out := map[string]string{}
-	for _, e := range entries(loVersion) {
+	for _, e := range entries(loVersion, "") {
 		for _, f := range e.fields {
 			if v, ok := strings.CutPrefix(f, "version: "); ok {
 				out[e.key] = v
