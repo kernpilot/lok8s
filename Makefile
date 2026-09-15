@@ -12,7 +12,12 @@ LDFLAGS ?= -s -w -X github.com/kernpilot/lok8s/internal/assets.BuildVersion=$(sh
 #            in-process and serves both exec generators itself
 FULL_TAGS := inprocess
 
-.PHONY: build build-full size-check test test-full vet vet-full lint lint-full clean release-check snapshot
+.PHONY: build build-full size-check test test-full vet vet-full lint lint-full clean release-check snapshot docs-cli
+
+# The generated command reference (docs/reference/cli-commands.md) from the
+# cobra tree; `go test ./internal/clidoc/` fails while it is stale.
+docs-cli:
+	$(GO) run ./hack/gen-cli-docs
 
 build:
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/lo

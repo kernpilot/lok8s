@@ -122,6 +122,13 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 	for _, g := range goOnlyCommands {
 		root.AddCommand(g.build(paths))
 	}
+	// Help text and shell completion are decorations over the assembled
+	// tree (examples.go, completion.go): neither touches a command's output.
+	// cobra's completion command is added here, before the examples, so
+	// its `--help` carries one too.
+	root.InitDefaultCompletionCmd()
+	applyExamples(root)
+	installCompletions(root, paths)
 	return root
 }
 
@@ -163,11 +170,12 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 		// The root is runnable, so an unknown command is its own parse
 		// error. (cobra's legacyArgs runs only on a root without Args.)
 		// The error prints cobra's message, the "Did you mean" block and
-		// the `Run "lo -h"` hint. A bare `lo` prints the help.
+		// the `Run "lo -h"` hint. A bare `lo` prints the orientation block
+		// on a terminal and the full help off one (orientation.go).
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return cmd.Help()
+				return runOrientation(cmd, paths)
 			}
 			return unknownCommand(cmd, args[0])
 		},
@@ -178,6 +186,11 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	// Every flag-parse error, on every command, prints in the argsh shape
 	// (cobra walks up to the root for the handler).
 	argshFlagErrors(root)
+	// A runnable root would add `lo [flags]` above `lo [command]` in the
+	// usage block. A bare piped `lo` and `lo --help` keep the block they
+	// printed before the root had a RunE. Children inherit the template
+	// and, having a parent, render exactly cobra's default.
+	root.SetUsageTemplate(strings.Replace(root.UsageTemplate(), "{{if .Runnable}}", "{{if and .Runnable .HasParent}}", 1))
 
 	// Global flags, verbatim from the argsh entrypoint. Shim commands disable
 	// cobra flag parsing and pass argv through untouched, so these exist for

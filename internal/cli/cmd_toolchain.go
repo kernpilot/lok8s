@@ -65,7 +65,7 @@ func pluginFileDir(paths *config.Paths) string {
 func newToolchainCommand(paths *config.Paths) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "toolchain",
-		Short:        "The pinned project toolchain via b: install it, verify it",
+		Short:        "Install and verify the pinned project toolchain via b",
 		GroupID:      groupConfigure,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -110,7 +110,7 @@ func newToolchainInstallCommand(paths *config.Paths, use string, deprecated bool
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:          use,
-		Short:        "Install the pinned toolchain via b (.bin/b.yaml + b + b install)",
+		Short:        "Install the pinned toolchain via b",
 		Long:         toolchainInstallLong(),
 		Args:         cobra.NoArgs,
 		Hidden:       deprecated,
@@ -209,7 +209,7 @@ func runToolchainInstall(ctx context.Context, base string, groups []string, dryR
 func newToolchainDoctorCommand(paths *config.Paths) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Verify the b-managed toolchain against the pins (the toolchain section of lo doctor)",
+		Short: "Verify the b-managed toolchain against the pins",
 		Long: `Print the toolchain section of lo doctor on its own: .bin/b, kustomize, the
 khelm ChartRenderer and the secrets.lok8s.dev Secret plugin, each against its
 pin. No marker and no flag gate it. Exit 1 when a tool this build execs is

@@ -87,6 +87,7 @@ export default defineConfig({
           text: 'Reference',
           items: [
             { text: 'CLI', link: '/reference/cli' },
+            { text: 'CLI commands (generated)', link: '/reference/cli-commands' },
             { text: 'Spec Files', link: '/reference/specs' },
             { text: 'services.yaml + lok8s.yaml Schema', link: '/reference/schema' },
             { text: 'Kind Contract', link: '/reference/kind-contract' },

@@ -160,9 +160,11 @@ divergences it allow-lists, is in
 
 The Go-only surface (`lo assets`, `lo init project`, the `lo init`
 wizard and `--plan`, `lo toolchain`, `lo lint --notes`, `--origin`,
-`--no-eject`) has no bash twin and therefore
+`--no-eject`, `lo completion` with its dynamic values, the `Examples:`
+blocks, the orientation a bare `lo` prints on a terminal, the generated
+`docs/reference/cli-commands.md`) has no bash twin and therefore
 no harness: its gate is `go test ./internal/assets/ ./internal/cli/
-./internal/scaffold/ ./internal/lint/ ./internal/config/` (precedence,
+./internal/scaffold/ ./internal/lint/ ./internal/config/ ./internal/clidoc/` (precedence,
 never-overwrite, eject + marker, the six-way classification, update
 refusal, `--check` exit codes, the files-only scaffold and its env file,
 the toolchain install dry run and the doctor section, the default-equal
