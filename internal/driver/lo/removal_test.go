@@ -1,6 +1,7 @@
 package lo
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,7 @@ func TestRegistryRemovalAtListsWhatTheTeardownRemoves(t *testing.T) {
 	if rem.TLSVolume != "alpha-registry-tls" || rem.Network != "alpha" || rem.IsShared {
 		t.Errorf("rem = %+v", rem)
 	}
-	if _, err := RegistryRemovalAt(filepath.Join(dir, "missing.json")); err != ErrNoRegistryFile {
+	if _, err := RegistryRemovalAt(filepath.Join(dir, "missing.json")); !errors.Is(err, ErrNoRegistryFile) {
 		t.Errorf("missing file: err %v, want ErrNoRegistryFile", err)
 	}
 }
