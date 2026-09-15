@@ -121,3 +121,51 @@ func TestCompletionOutsideProjectIsEmptyNotAnError(t *testing.T) {
 		t.Errorf("lo init service <Tab> in an empty dir = %v, want nothing", got)
 	}
 }
+
+// TestCompletionAnswersOnAnInvalidImplementationBlock: a broken lok8s.yaml
+// stops every command with the refusal, but a Tab must still answer (the
+// completion requests are exempt, like `completion` and `help`).
+func TestCompletionAnswersOnAnInvalidImplementationBlock(t *testing.T) {
+	paths := completionProject(t)
+	os.WriteFile(filepath.Join(paths.Base, "lok8s.yaml"), []byte("kind: Project\nspec:\n  implementation:\n    default: cobol\n"), 0o644)
+	want := "alpha.dev,beta.cloud,gamma.app"
+	for _, req := range []string{cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd} {
+		root := NewRoot(paths)
+		var out, errOut bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&errOut)
+		root.SetArgs([]string{req, "use", ""})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%s on an invalid block: %v (stderr %q)", req, err, errOut.String())
+		}
+		var got []string
+		for l := range strings.SplitSeq(strings.TrimRight(out.String(), "\n"), "\n") {
+			if l != "" && !strings.HasPrefix(l, ":") {
+				got = append(got, l)
+			}
+		}
+		if strings.Join(got, ",") != want || strings.Contains(errOut.String(), "lo: lok8s.yaml") {
+			t.Errorf("%s on an invalid block = %v (stderr %q), want %s", req, got, errOut.String(), want)
+		}
+	}
+	// The refusal itself is unchanged for a real command.
+	_, errOut, err := runBare(t, paths, false, "version")
+	if err == nil || !strings.Contains(errOut, "lo: lok8s.yaml") {
+		t.Errorf("lo version on an invalid block: err %v, stderr %q", err, errOut)
+	}
+}
+
+// TestCompletionServicesSkipsProjectFiles: a directory whose lok8s.yaml is
+// a kind: Project file (a nested project) is not a service.
+func TestCompletionServicesSkipsProjectFiles(t *testing.T) {
+	paths := completionProject(t)
+	os.MkdirAll(filepath.Join(paths.Base, "nested"), 0o755)
+	os.WriteFile(filepath.Join(paths.Base, "nested", "lok8s.yaml"), []byte("kind: Project\nmetadata:\n  name: nested\n"), 0o644)
+	os.MkdirAll(filepath.Join(paths.Base, "web"), 0o755)
+	os.WriteFile(filepath.Join(paths.Base, "web", "lok8s.yaml"), []byte("spec:\n  build:\n    dockerfile: Dockerfile\n"), 0o644)
+	os.MkdirAll(filepath.Join(paths.Base, "broken"), 0o755)
+	os.WriteFile(filepath.Join(paths.Base, "broken", "lok8s.yaml"), []byte("kind: [\n"), 0o644)
+	if got := complete(t, paths, "init", "service", ""); strings.Join(got, ",") != "api,web,worker" {
+		t.Errorf("lo init service <Tab> = %v, want api,web,worker (no Project, no unreadable file)", got)
+	}
+}

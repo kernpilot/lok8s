@@ -74,6 +74,9 @@ func TestCommandTreeMatchesArgshUsage(t *testing.T) {
 		if _, ok := goOnly[name]; ok {
 			continue
 		}
+		if name == "completion" { // cobra's own, added by NewRoot so its help carries examples
+			continue
+		}
 		t.Errorf("command %q is in the Go root but neither in .lok8s/lo nor allowlisted in goOnlyCommands", name)
 	}
 }

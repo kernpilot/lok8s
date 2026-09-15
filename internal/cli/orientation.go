@@ -51,7 +51,7 @@ type orientation struct {
 	domains    int    // how many domains clusters/ holds
 }
 
-// gather reads the project tree.
+// gatherOrientation reads the project tree.
 func gatherOrientation(cmd *cobra.Command, paths *config.Paths) orientation {
 	o := orientation{project: orientationProject(paths), domains: len(completeDomains(paths))}
 	explicit := ""

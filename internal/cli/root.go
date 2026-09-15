@@ -124,6 +124,9 @@ func NewRoot(paths *config.Paths) *cobra.Command {
 	}
 	// Help text and shell completion are decorations over the assembled
 	// tree (examples.go, completion.go): neither touches a command's output.
+	// cobra's completion command is added here, before the examples, so
+	// its `--help` carries one too.
+	root.InitDefaultCompletionCmd()
 	applyExamples(root)
 	installCompletions(root, paths)
 	return root

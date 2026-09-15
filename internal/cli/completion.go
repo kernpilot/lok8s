@@ -11,8 +11,9 @@ package cli
 //
 // The hooks are installed by command path after the tree is built
 // (installCompletions), so the files that own those commands stay as they
-// are. A command routed to bash (a shim) keeps flag parsing off and gets
-// no dynamic values; the shell still completes its name.
+// are. A command routed to bash (a shim) keeps flag parsing off, but the
+// completion request never runs the command: the shell completes its
+// name, and the positional and --domain values complete there too.
 
 import (
 	"os"
@@ -143,8 +144,9 @@ func completeDomains(paths *config.Paths) []string {
 
 // completeServices lists the names `lo init service` can take: the
 // services registered in services.yaml and the directories below the
-// project root that hold a service file (a kind-less or kind: Service
-// lok8s.yaml), sorted and unique.
+// project root that hold a service file (a lok8s.yaml with no kind or
+// with kind: Service; a kind: Project file is a project, not a service),
+// sorted and unique.
 func completeServices(paths *config.Paths) []string {
 	seen := map[string]bool{}
 	if raw, err := os.ReadFile(filepath.Join(paths.Base, "services.yaml")); err == nil {
@@ -162,7 +164,7 @@ func completeServices(paths *config.Paths) []string {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if fsutil.FileExists(filepath.Join(paths.Base, e.Name(), "lok8s.yaml")) {
+		if isServiceFile(filepath.Join(paths.Base, e.Name(), "lok8s.yaml")) {
 			seen[e.Name()] = true
 		}
 	}
@@ -172,6 +174,22 @@ func completeServices(paths *config.Paths) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// isServiceFile reports whether path is a service lok8s.yaml: readable
+// YAML with no kind, or kind: Service.
+func isServiceFile(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Kind string `yaml:"kind"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	return doc.Kind == "" || doc.Kind == "Service"
 }
 
 // completeAssetRels lists the asset units `lo assets` addresses, plus the
@@ -196,7 +214,7 @@ func without(values, typed []string) []string {
 	for _, t := range typed {
 		skip[t] = true
 	}
-	out := values[:0:0]
+	out := make([]string, 0, len(values))
 	for _, v := range values {
 		if !skip[v] {
 			out = append(out, v)

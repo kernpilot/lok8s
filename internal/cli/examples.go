@@ -175,6 +175,13 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
   lo drivers lo status kubehz.dev`,
 
 	// Go-only.
+	"completion": `  source <(lo completion bash)
+  lo completion zsh > "${fpath[1]}/_lo"`,
+	"completion bash": `  source <(lo completion bash)
+  lo completion bash > /etc/bash_completion.d/lo`,
+	"completion zsh":        `  lo completion zsh > "${fpath[1]}/_lo"`,
+	"completion fish":       `  lo completion fish > ~/.config/fish/completions/lo.fish`,
+	"completion powershell": `  lo completion powershell | Out-String | Invoke-Expression`,
 	"mcp": `  lo mcp start
   lo mcp tools --allow-mutating
   lo mcp claude enable`,

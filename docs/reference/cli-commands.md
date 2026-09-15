@@ -528,6 +528,13 @@ Generate the autocompletion script for lo for the specified shell.
 See each sub-command's help for details on how to use the generated script.
 
 
+### Examples
+
+```
+  source <(lo completion bash)
+  lo completion zsh > "${fpath[1]}/_lo"
+```
+
 ### Options
 
 ```
@@ -574,6 +581,13 @@ You will need to start a new shell for this setup to take effect.
 lo completion bash
 ```
 
+### Examples
+
+```
+  source <(lo completion bash)
+  lo completion bash > /etc/bash_completion.d/lo
+```
+
 ### Options
 
 ```
@@ -608,6 +622,12 @@ You will need to start a new shell for this setup to take effect.
 lo completion fish [flags]
 ```
 
+### Examples
+
+```
+  lo completion fish > ~/.config/fish/completions/lo.fish
+```
+
 ### Options
 
 ```
@@ -637,6 +657,12 @@ to your powershell profile.
 
 ```
 lo completion powershell [flags]
+```
+
+### Examples
+
+```
+  lo completion powershell | Out-String | Invoke-Expression
 ```
 
 ### Options
@@ -682,6 +708,12 @@ You will need to start a new shell for this setup to take effect.
 
 ```
 lo completion zsh [flags]
+```
+
+### Examples
+
+```
+  lo completion zsh > "${fpath[1]}/_lo"
 ```
 
 ### Options
