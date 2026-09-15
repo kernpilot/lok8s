@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -151,13 +152,32 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			noEject, _ := cmd.Flags().GetBool("no-eject")
 			assets.Configure(noEject)
+			noColor, _ := cmd.Flags().GetBool("no-color")
+			ui.SetNoColor(noColor)
 			if err := r.refuse(topLevelName(cmd)); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "lo: %v\n", err)
 				return ErrHandled
 			}
 			return nil
 		},
+		// The root is runnable, so an unknown command is its own parse
+		// error. (cobra's legacyArgs runs only on a root without Args.)
+		// The error prints cobra's message, the "Did you mean" block and
+		// the `Run "lo -h"` hint. A bare `lo` prints the help.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			return unknownCommand(cmd, args[0])
+		},
+		// SuggestionsFor reads the distance as set (cobra defaults it only
+		// on its own legacyArgs path).
+		SuggestionsMinimumDistance: 2,
 	}
+	// Every flag-parse error, on every command, prints in the argsh shape
+	// (cobra walks up to the root for the handler).
+	argshFlagErrors(root)
 
 	// Global flags, verbatim from the argsh entrypoint. Shim commands disable
 	// cobra flag parsing and pass argv through untouched, so these exist for
@@ -174,6 +194,9 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	pf.String("domain-sans", "", "Domain sans to use")
 	// Go-only: the eject model's opt-out (env form: LO_ASSETS_EJECT=never).
 	pf.Bool("no-eject", false, "Never write embedded framework assets into the project (.lok8s/…); serve them from a temp dir instead")
+	// Go-only: colour off on a terminal (env form: NO_COLOR, no-color.org).
+	// Piped output never carries colour.
+	pf.Bool("no-color", false, "No ANSI colour on the terminal (env form: NO_COLOR)")
 
 	root.AddGroup(
 		&cobra.Group{ID: groupLifecycle, Title: "Cluster lifecycle:"},
@@ -183,13 +206,47 @@ func newUsageTree(paths *config.Paths, r routing) *cobra.Command {
 	)
 
 	for _, spec := range commandTree {
+		var c *cobra.Command
 		if build, ok := portedCommands[spec.use]; ok && !r.routed(spec.use) {
-			root.AddCommand(build(paths, spec))
-			continue
+			c = build(paths, spec)
+		} else {
+			c = newShimCommand(paths, spec, r.impl.TreeDir, r.treeErr)
 		}
-		root.AddCommand(newShimCommand(paths, spec, r.impl.TreeDir, r.treeErr))
+		c.SuggestFor = suggestFor[spec.use]
+		root.AddCommand(c)
 	}
 	return root
+}
+
+// suggestFor maps words from other tools (docker, kubectl, git) to the
+// lo command they mean. cobra's "Did you mean" offers these next to the
+// edit-distance matches.
+var suggestFor = map[string][]string{
+	"up":         {"start", "create"},
+	"down":       {"stop"},
+	"destroy":    {"delete", "rm", "remove"},
+	"status":     {"ps", "info", "health"},
+	"use":        {"switch", "select", "context"},
+	"build":      {"render"},
+	"deploy":     {"apply"},
+	"lint":       {"validate", "check"},
+	"doctor":     {"diagnose", "preflight"},
+	"secrets":    {"secret"},
+	"addons":     {"addon"},
+	"drivers":    {"driver"},
+	"registry":   {"registries"},
+	"kubeconfig": {"kubecfg"},
+}
+
+// unknownCommand is the root's parse error for a word that is no command:
+// cobra's message and its "Did you mean this?" block (the edit distance,
+// a prefix, and the SuggestFor words), then the argsh hint.
+func unknownCommand(root *cobra.Command, name string) error {
+	msg := fmt.Sprintf("unknown command %q for %q", name, root.CommandPath())
+	if suggestions := root.SuggestionsFor(name); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return argshErrorf(root.ErrOrStderr(), "%s", msg)
 }
 
 // topLevelName is the name of cmd's top-level ancestor (`lo completion

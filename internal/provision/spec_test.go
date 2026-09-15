@@ -47,7 +47,7 @@ func TestResolveSpecMissingDomain(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 	// The historical ".lok8s/<domain>/" spelling is part of the contract.
-	assertContains(t, errBuf.String(), "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/nonexistent.domain/")
+	assertContains(t, errBuf.String(), "No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/nonexistent.domain/")
 }
 
 // bats: "provision::resolve_spec prefers cluster.lok8s.yaml over deploy.lok8s.yaml"

@@ -562,7 +562,7 @@ env:
 		if r.err != nil {
 			t.Fatalf("render %d: %v", i, r.err)
 		}
-		want := "TAG: " + base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("tag-%d", i)))
+		want := "TAG: " + base64.StdEncoding.EncodeToString(fmt.Appendf(nil, "tag-%d", i))
 		if !strings.Contains(r.out, want) {
 			t.Errorf("render %d did not get its own overlay:\n%s", i, r.out)
 		}

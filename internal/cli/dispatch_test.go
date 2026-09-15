@@ -76,7 +76,7 @@ func TestDispatchExitMapping(t *testing.T) {
 	if err := dispatchExit(&stderr, errors.New("plain")); !errors.Is(err, ErrHandled) || len(*exits) != 0 {
 		t.Errorf("plain: err=%v exits=%v", err, *exits)
 	}
-	if got, want := stderr.String(), "\033[0;31m[error]\033[0m plain\n"; got != want {
+	if got, want := stderr.String(), "[error] plain\n"; got != want {
 		t.Errorf("unprinted error: stderr = %q, want %q", got, want)
 	}
 	// Already printed where it happened (ui.Handled, or the sentinel

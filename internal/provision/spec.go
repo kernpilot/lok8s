@@ -40,10 +40,11 @@ type Spec struct {
 
 // ResolveSpec resolves the cluster spec YAML for a domain. Cluster domains
 // carry cluster.lok8s.yaml, deployment domains deploy.lok8s.yaml (a domain
-// with both is a cluster domain). Error strings verbatim from bash,
-// including the historical ".lok8s/<domain>/" spelling AND the two distinct
-// error families: the invalid-domain message is the raw `error: …` echo,
-// not the [error]-prefixed verbose.sh line.
+// with both is a cluster domain). Error strings verbatim from bash (the
+// not-found message names `clusters/<domain>/`, fixed on both sides: the
+// historical `.lok8s/<domain>/` spelling pointed at a directory that holds
+// no spec) AND the two distinct error families: the invalid-domain message
+// is the raw `error: …` echo, not the [error]-prefixed verbose.sh line.
 func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, error) {
 	// No active domain → actionable error instead of a cryptic empty path.
 	if domainName == "" {
@@ -52,7 +53,7 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 	}
 	// Validate domain name to prevent path traversal and injection.
 	if !domainpkg.NameRe.MatchString(domainName) {
-		fmt.Fprintf(stderr, "error: invalid domain name: %s\n", domainName)
+		ui.RawErrorTo(stderr, "invalid domain name: %s", domainName)
 		return nil, ui.Handled(fmt.Errorf("invalid domain name: %s", domainName))
 	}
 	base := filepath.Join(p.Clusters, domainName)
@@ -62,15 +63,16 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 	if fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
 		return &Spec{Domain: domainName, File: filepath.Join(base, "deploy.lok8s.yaml"), Kind: SpecKindDeploy}, nil
 	}
-	ui.ErrorTo(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/%s/", domainName)
+	ui.ErrorTo(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/%s/", domainName)
 	return nil, ui.Handled(fmt.Errorf("no spec for domain %s", domainName))
 }
 
 // ResolveClusterRef resolves the clusterRef of a deploy.lok8s.yaml to its
 // cluster domain (spec.clusterRef.domain), validating that the referenced
 // domain exists and carries a cluster spec. Error strings verbatim from
-// bash (provision::resolve_clusterref), including the historical `.lok8s/`
-// path spelling. internal/build's kubeconfig resolution delegates here.
+// bash (provision::resolve_clusterref). The not-found message names
+// `clusters/<ref>/` on both sides (see ResolveSpec). internal/build's
+// kubeconfig resolution delegates here.
 func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (string, error) {
 	specFile := filepath.Join(p.Clusters, domainName, "deploy.lok8s.yaml")
 	if !fsutil.FileExists(specFile) {
@@ -84,7 +86,7 @@ func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (st
 		return "", ui.Handled(fmt.Errorf("missing clusterRef for %s", domainName))
 	}
 	if info, err := os.Stat(filepath.Join(p.Clusters, ref)); err != nil || !info.IsDir() {
-		ui.ErrorTo(stderr, "clusterRef domain not found: .lok8s/%s/", ref)
+		ui.ErrorTo(stderr, "clusterRef domain not found: clusters/%s/", ref)
 		return "", ui.Handled(fmt.Errorf("clusterRef domain not found: %s", ref))
 	}
 	if !fsutil.FileExists(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml")) {

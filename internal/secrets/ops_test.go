@@ -468,7 +468,7 @@ func TestDecryptIdentityErrors(t *testing.T) {
 	}
 	// Exact stderr: the six ported [error] lines and nothing else (same
 	// containment rationale as TestAddKeyContainment).
-	e := "\033[0;31m[error]\033[0m "
+	e := "[error] "
 	want := e + "Failed to derive age key from " + badKey + "\n" +
 		e + "If your SSH key is passphrase-protected, derive once:\n" +
 		e + "  mkdir -p ~/.config/sops/age\n" +
@@ -504,8 +504,8 @@ func TestAddKeyContainment(t *testing.T) {
 	// own parse errors happen not to embed input material today, so a
 	// canary-only assertion would pass even if the raw error were surfaced —
 	// this pins that nothing beyond the ported messages reaches the operator.
-	want := "\033[0;31m[error]\033[0m could not derive an age key from " + keyPath + "\n" +
-		"\033[0;31m[error]\033[0m only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
+	want := "[error] could not derive an age key from " + keyPath + "\n" +
+		"[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
 	if errOut.String() != want {
 		t.Errorf("stderr not contained to the ported messages:\n%q\nwant:\n%q", errOut.String(), want)
 	}

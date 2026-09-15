@@ -186,15 +186,14 @@ func list(p *config.Paths, d string, out, stderr io.Writer, withOrigin bool) err
 		ui.WarnTo(stderr, "No addons directory (%s)", Dir(p))
 		return nil
 	}
-	row := func(name, typ, version, origin, detail string) {
-		if withOrigin {
-			fmt.Fprintf(out, "%-20s  %-8s  %-12s  %-18s  %s\n", name, typ, version, origin, detail)
-			return
-		}
-		fmt.Fprintf(out, "%-20s  %-8s  %-12s  %s\n", name, typ, version, detail)
+	// The bash table is printf '%-20s  %-8s  %-12s  %s'. ui.Table reproduces
+	// that layout piped (a wider name pushes its own row, as printf does)
+	// and measures the columns on a terminal.
+	header, widths := []string{"NAME", "TYPE", "VERSION", "CHART/REPO"}, []int{20, 8, 12}
+	if withOrigin {
+		header, widths = []string{"NAME", "TYPE", "VERSION", "ORIGIN", "CHART/REPO"}, []int{20, 8, 12, 18}
 	}
-	row("NAME", "TYPE", "VERSION", "ORIGIN", "CHART/REPO")
-	row("----", "----", "-------", "------", "----------")
+	var rows [][]string
 	for _, name := range names {
 		// Peek: a listing never ejects.
 		dir, _, err := assets.Peek(p, "addons/"+name)
@@ -206,12 +205,13 @@ func list(p *config.Paths, d string, out, stderr io.Writer, withOrigin bool) err
 		if m.chart != "-" {
 			detail = m.chart + " (" + m.repository + ")"
 		}
-		origin := ""
+		cells := []string{name, Type(dir), m.version}
 		if withOrigin {
-			origin = OriginOf(p, name)
+			cells = append(cells, OriginOf(p, name))
 		}
-		row(name, Type(dir), m.version, origin, detail)
+		rows = append(rows, append(cells, detail))
 	}
+	ui.Table(out, header, rows, widths)
 	return nil
 }
 
@@ -404,16 +404,20 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 	entries := resolve(spec, kind, d)
 
 	fmt.Fprintf(out, "Addons deployed by %s (kind=%s)\n\n", d, kind)
-	row := func(name, category, typ, version, origin, configure string) {
-		if withOrigin {
-			fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %-18s  %s\n", name, category, typ, version, origin, configure)
-			return
-		}
-		fmt.Fprintf(out, "%-24s  %-14s  %-8s  %-10s  %s\n", name, category, typ, version, configure)
+	// bash: printf '%-24s  %-14s  %-8s  %-10s  %s' (see list for the rule).
+	header, widths := []string{"NAME", "CATEGORY", "TYPE", "VERSION", "CONFIGURE"}, []int{24, 14, 8, 10}
+	if withOrigin {
+		header, widths = []string{"NAME", "CATEGORY", "TYPE", "VERSION", "ORIGIN", "CONFIGURE"}, []int{24, 14, 8, 10, 18}
 	}
-	row("NAME", "CATEGORY", "TYPE", "VERSION", "ORIGIN", "CONFIGURE")
-	row("----", "--------", "----", "-------", "------", "---------")
+	row := func(name, category, typ, version, origin, configure string) []string {
+		cells := []string{name, category, typ, version}
+		if withOrigin {
+			cells = append(cells, origin)
+		}
+		return append(cells, configure)
+	}
 
+	var rows [][]string
 	count := 0
 	for _, e := range entries {
 		count++
@@ -426,7 +430,7 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 			if withOrigin {
 				origin = OriginOf(p, filepath.Base(e.Dir))
 			}
-			row(e.Name, Category(e.Dir), Type(e.Dir), Version(e.Dir), origin, hint)
+			rows = append(rows, row(e.Name, Category(e.Dir), Type(e.Dir), Version(e.Dir), origin, hint))
 			continue
 		}
 		// Per-cluster target (glue) — a ./targets/* or /abs path entry.
@@ -436,8 +440,9 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 		if withOrigin {
 			origin = "target"
 		}
-		row(e.Name, "target", "target", "-", origin, "per-cluster glue in "+tpath)
+		rows = append(rows, row(e.Name, "target", "target", "-", origin, "per-cluster glue in "+tpath))
 	}
+	ui.Table(out, header, rows, widths)
 	if count == 0 {
 		fmt.Fprintln(out, "  (spec.bootstrap is empty — this cluster deploys no addons)")
 	}

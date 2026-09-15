@@ -196,7 +196,8 @@ func runToolchainInstall(ctx context.Context, base string, groups []string, dryR
 		fmt.Fprintln(out, "dry run — nothing was written, downloaded or run")
 		return nil
 	}
-	fmt.Fprintln(out, "Done. Next: lo toolchain doctor   # verifies b, kustomize, khelm and the Secret plugin against the pins")
+	fmt.Fprintln(out, "Done.")
+	ui.Next(out, "toolchain doctor", "verifies b, kustomize, khelm and the Secret plugin against the pins")
 	return nil
 }
 
@@ -222,9 +223,15 @@ install resolves from the working directory only.`,
 		Annotations:  map[string]string{AnnotationReadonly: "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			setDebugFromVerbose(cmd)
+			out, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			path := childPATH(paths, bashTreeForPATH(paths).Dir)
-			if !doctorToolchain(cmd.Context(), cmd.OutOrStdout(), paths, config.KustomizePluginHome(paths), path) {
-				ui.ErrorTo(cmd.ErrOrStderr(), "toolchain doctor: a pinned tool is missing (see ✗ above)")
+			// Go-only, so the title prints in both modes (bold on a
+			// terminal). doctorToolchain opens with the blank line and the
+			// section header it prints inside lo doctor.
+			ui.Title(out, "=== toolchain doctor ===")
+			if !doctorToolchain(cmd.Context(), out, paths, config.KustomizePluginHome(paths), path) {
+				ui.ErrorTo(stderr, "toolchain doctor: a pinned tool is missing (see ✗ above)")
+				ui.Next(stderr, "toolchain install", "installs the pins of this lo build")
 				return ErrHandled
 			}
 			return nil

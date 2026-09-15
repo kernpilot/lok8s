@@ -48,7 +48,7 @@ func TestProvisionDeployDomainRefusal(t *testing.T) {
 		}
 	}
 	_, stderr, err = runLo(t, NewRoot(p), "p", "--domain", "nope.dev")
-	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in .lok8s/nope.dev/") {
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/nope.dev/") {
 		t.Errorf("alias/no spec: err=%v stderr=%q", err, stderr)
 	}
 	_, stderr, err = runLo(t, NewRoot(p), "provision", "--domain", "nokind.dev")

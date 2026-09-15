@@ -20,6 +20,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // FileState classifies one file of a unit.
@@ -307,12 +308,17 @@ func chartVersion(raw []byte) string {
 // ── rendering ────────────────────────────────────────────────────────────
 
 // WriteTable prints the unit table (`lo assets list` / `lo assets diff`
-// without a rel): aligned columns, one line per unit.
+// without a rel): measured columns (Go-only, no bash twin to match), one
+// line per unit.
 func WriteTable(w io.Writer, reports []UnitReport, withFiles bool) {
-	fmt.Fprintf(w, "%-30s  %-10s  %-18s  %-10s  %-10s  %s\n", "ASSET", "KIND", "ORIGIN", "LOCAL", "EMBEDDED", "STATUS")
-	fmt.Fprintf(w, "%-30s  %-10s  %-18s  %-10s  %-10s  %s\n", "-----", "----", "------", "-----", "--------", "------")
+	rows := make([][]string, 0, len(reports))
 	for _, r := range reports {
-		fmt.Fprintf(w, "%-30s  %-10s  %-18s  %-10s  %-10s  %s\n", r.Rel, r.Kind, r.Origin, r.Version.Local, r.Version.Embedded, r.Summary())
+		rows = append(rows, []string{r.Rel, r.Kind, r.Origin, r.Version.Local, r.Version.Embedded, r.Summary()})
+	}
+	cols := ui.NewColumns(w, []string{"ASSET", "KIND", "ORIGIN", "LOCAL", "EMBEDDED", "STATUS"}, rows, nil)
+	cols.Header()
+	for i, r := range reports {
+		cols.Row(rows[i]...)
 		if withFiles && len(r.Files) > 0 {
 			WriteFiles(w, r, "  ")
 		}

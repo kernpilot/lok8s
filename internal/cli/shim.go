@@ -11,6 +11,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // shimExec is the exec seam of the shim (syscall.Exec). Tests swap in a
@@ -48,10 +49,37 @@ func execShim(p *config.Paths, tree assets.Tree, argv []string) error {
 		return fmt.Errorf("bash not found in PATH: %w", err)
 	}
 
+	// --no-color is the binary's flag; argsh does not know it. It leaves
+	// argv here and reaches the tree as NO_COLOR=1 in the environment
+	// (verbose.sh and libs/doctor honour it). Without the flag the
+	// environment is left alone.
+	argv, noColor := stripNoColor(argv)
+	if noColor {
+		ui.SetNoColor(true)
+	}
 	args := append([]string{bash, filepath.Join(tree.Dir, "lo")}, argv...)
 	// #nosec G702 -- by design: argv reaches the frozen tree untouched as
 	// exec arguments; no shell parses it.
 	return shimExec(bash, args, shimEnv(p, tree))
+}
+
+// stripNoColor removes every --no-color, --no-color=true and
+// --no-color=false from argv, anywhere before a `--` terminator, and
+// reports whether the flag was given as on (a bare --no-color or =true).
+func stripNoColor(argv []string) (out []string, on bool) {
+	out = make([]string, 0, len(argv))
+	for i, a := range argv {
+		switch a {
+		case "--":
+			return append(out, argv[i:]...), on
+		case "--no-color", "--no-color=true":
+			on = true
+		case "--no-color=false":
+		default:
+			out = append(out, a)
+		}
+	}
+	return out, on
 }
 
 // shimEnv returns the process environment with the project's .bin and the

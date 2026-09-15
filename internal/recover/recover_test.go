@@ -324,7 +324,7 @@ func TestConfirmDeclines(t *testing.T) {
 		if !errors.Is(err, ErrHandled) {
 			t.Errorf("%q: err = %v", in, err)
 		}
-		if !strings.Contains(h.errBuf.String(), "\033[0;33m[warn]\033[0m recover: aborted by operator — nothing was changed\n") {
+		if !strings.Contains(h.errBuf.String(), "[warn] recover: aborted by operator — nothing was changed\n") {
 			t.Errorf("%q: stderr = %q", in, h.errBuf.String())
 		}
 		if strings.Contains(h.recorded(), "rebuild cfg=") || strings.Contains(h.recorded(), "provision") {
@@ -416,7 +416,7 @@ func TestRunRebuildFailureStops(t *testing.T) {
 	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
-	if !strings.Contains(h.errBuf.String(), "\033[0;31m[error]\033[0m recover: rebuild failed — NOT provisioning on a half-reset cluster\n") {
+	if !strings.Contains(h.errBuf.String(), "[error] recover: rebuild failed — NOT provisioning on a half-reset cluster\n") {
 		t.Errorf("stderr = %q", h.errBuf.String())
 	}
 	if !strings.Contains(h.recorded(), "rebuild cfg=") || strings.Contains(h.recorded(), "provision") {
@@ -487,7 +487,7 @@ func TestLoadProviderRealPath(t *testing.T) {
 	if err := h.r.loadProvider(t.Context()); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v", err)
 	}
-	if !strings.Contains(h.errBuf.String(), "\033[0;31m[error]\033[0m recover: provider 'mock' failed to load\n") {
+	if !strings.Contains(h.errBuf.String(), "[error] recover: provider 'mock' failed to load\n") {
 		t.Errorf("stderr = %q", h.errBuf.String())
 	}
 }
@@ -570,7 +570,7 @@ func TestPickDomain(t *testing.T) {
 	if _, err := PickDomain(&errBuf, "active.dom", []string{"explicit.dom", "stray-token"}); !errors.Is(err, ErrHandled) {
 		t.Errorf("err = %v", err)
 	}
-	if want := "\033[0;31m[error]\033[0m too many arguments: stray-token\n"; errBuf.String() != want {
+	if want := "[error] too many arguments: stray-token\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
 }

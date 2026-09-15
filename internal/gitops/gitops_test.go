@@ -22,7 +22,7 @@ func TestFluxDeferred(t *testing.T) {
 	if err := Flux(&errBuf); !errors.Is(err, ErrDeferred) {
 		t.Fatalf("err = %v", err)
 	}
-	if want := "\033[0;31m[error]\033[0m lo gitops flux is deferred (redesign after services.yaml targets lands)\n"; errBuf.String() != want {
+	if want := "[error] lo gitops flux is deferred (redesign after services.yaml targets lands)\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
 }
@@ -34,7 +34,7 @@ func TestArgoDeferred(t *testing.T) {
 	if err := Argo(&errBuf); !errors.Is(err, ErrDeferred) {
 		t.Fatalf("err = %v", err)
 	}
-	if want := "\033[0;31m[error]\033[0m lo gitops argo is deferred (redesign after services.yaml targets lands)\n"; errBuf.String() != want {
+	if want := "[error] lo gitops argo is deferred (redesign after services.yaml targets lands)\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
 }
@@ -46,7 +46,7 @@ func TestBootstrapNoOp(t *testing.T) {
 	if err := BootstrapHook(&errBuf)(t.Context(), "test.lok8s.dev", "flux"); err != nil {
 		t.Fatal(err)
 	}
-	if want := "\033[0;33m[warn]\033[0m lo gitops is being redesigned post-refactor; no-op for now\n"; errBuf.String() != want {
+	if want := "[warn] lo gitops is being redesigned post-refactor; no-op for now\n"; errBuf.String() != want {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
 }

@@ -76,8 +76,8 @@ SCRIPT
   # status GLYPH tied to its message (not just the message substring) so a
   # prefix-stripping / wrong-status regression — dropping the glyph or mapping
   # ok→! (or vice-versa) — fails instead of silently passing.
-  assert_output --partial $'\033[32m✓\033[0m hcloud API reachable'
-  assert_output --partial $'\033[33m!\033[0m Robot creds unset'
+  assert_output --partial '  ✓ hcloud API reachable'
+  assert_output --partial '  ! Robot creds unset'
   assert_output --partial "1 ok, 1 warn"
 }
 

@@ -465,10 +465,17 @@ func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, ba
 
 		// A cancelled context (SIGINT) ends the run here; the in-flight
 		// applies stop on their own through the same context, and the
-		// buffered channel lets their goroutines finish.
+		// buffered channel lets their goroutines finish. An apply that
+		// finished because of the cancel can land on done first (select
+		// picks at random when both are ready), so the cancel is checked
+		// again after the receive: a cancelled run always reports
+		// ctx.Err(), never a failed entry.
 		var f finished
 		select {
 		case f = <-done:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
