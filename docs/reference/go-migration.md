@@ -96,7 +96,7 @@ The binary ships in **two builds from one tree**, selected by the
 | Size (linux/amd64, stripped) | **49.8 MB** | **123.1 MB** |
 | `LO_RENDER` | unset/`exec` = the exec pipeline (the only one); `inprocess` is an **error** naming lo-full (`LO_RENDER=inprocess: this is lo core … install lo-full`) | unset/`inprocess` = in-process; `exec` = the subprocess pipeline for an A/B |
 | Needs in the project | `.bin/kustomize` + `.kustomize/{khelm…/ChartRenderer, secrets.lok8s.dev/…/Secret}` — what [`lo toolchain install`](cli.md#lo-toolchain) installs, pinned; `lo doctor` fails when they are missing | nothing for the render (the toolchain is still needed for kubectl/kind/tilt); `lo doctor` only warns about absent render tools |
-| `lo --version` | `lo version 0.4.0 (core)` | `lo version 0.4.0 (full)` |
+| `lo --version` | `lo version 0.4.1 (core)` | `lo version 0.4.1 (full)` |
 
 Everything else (every command, the parity harnesses, the tests) is the
 same code. `go.mod` keeps khelm and the kustomize API for both; only the
@@ -213,7 +213,8 @@ still decides whether an undeclared repository is trusted.
 
 **`LO_RENDER=exec`** restores the subprocess pipeline everywhere
 (`internal/render` execs the pinned `kustomize` from `.bin` with
-`KUSTOMIZE_PLUGIN_HOME` defaulted to `<project>/.kustomize` for `lo build`,
+`KUSTOMIZE_PLUGIN_HOME` set to `<project>/.kustomize` when the shell does
+not export it — for every render: `lo build`, the addon render, `lo k8s` —
 and the registry TLS mint execs the built `Secret` plugin as before). Use
 it to A/B a render: `lo build` promotes `artifacts.yaml` only when the bytes
 change, so a `DEBUG=1 lo build` that reports `render unchanged` under both
@@ -312,7 +313,7 @@ itself) never eject. Opt-outs: `--no-eject` / `LO_ASSETS_EJECT=never`
 
 ```yaml
 # .lo-origin — written by lo when it ejected this asset. Do not edit.
-lo: 0.4.0
+lo: 0.4.1
 ejectedAt: 2026-09-03T10:00:00Z
 files:
   chart.yaml: sha256:…

@@ -195,14 +195,15 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		secretsVal = filepath.Join(paths.Base, ".secrets")
 	}
 	doctorDir(out, "PATH_SECRETS", secretsVal)
-	// KUSTOMIZE_PLUGIN_HOME: this binary defaults it for every bash child
-	// (shimEnv) — doctor reports the environment as prepared, not the raw
-	// shell's. The binary's OWN renders no longer need it (internal/render
-	// runs kustomize in-process and serves the Secret/khelm generators
-	// itself); the lines below still matter for a command routed to bash,
-	// the provider plugins and LO_RENDER=exec, and their text is unchanged so
+	// KUSTOMIZE_PLUGIN_HOME: this binary sets it for every kustomize child
+	// (the exec render) and every bash child (shimEnv) from
+	// config.KustomizePluginHome — doctor reports that one value, not the
+	// raw shell's, so a green line here means the render gets the same
+	// home. The in-process render (lo-full) does not need it; the lines
+	// below still matter for lo core, a command routed to bash, the
+	// provider plugins and LO_RENDER=exec, and their text is unchanged so
 	// hack/parity-configure.sh keeps diffing doctor byte-for-byte.
-	pluginHome := kustomizePluginHome(paths)
+	pluginHome := config.KustomizePluginHome(paths)
 	doctorOK(out, "KUSTOMIZE_PLUGIN_HOME="+pluginHome)
 	if fsutil.IsExecutable(filepath.Join(pluginHome, filepath.FromSlash(toolchain.SecretPluginRel))) {
 		doctorOK(out, "secrets.lok8s.dev plugin built")
@@ -217,15 +218,6 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 		return doctorToolchain(ctx, out, paths, pluginHome, path)
 	}
 	return true
-}
-
-// kustomizePluginHome is KUSTOMIZE_PLUGIN_HOME as the render and the bash
-// children see it: the variable when set, else <project>/.kustomize.
-func kustomizePluginHome(paths *config.Paths) string {
-	if v := os.Getenv("KUSTOMIZE_PLUGIN_HOME"); v != "" {
-		return v
-	}
-	return filepath.Join(paths.Base, ".kustomize")
 }
 
 // doctorTLSSection is `--- dev TLS (cert: CA) ---` (advisory).

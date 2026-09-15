@@ -67,9 +67,7 @@ func execShim(p *config.Paths, tree assets.Tree, argv []string) error {
 func shimEnv(p *config.Paths, tree assets.Tree) []string {
 	env := os.Environ()
 	env = setEnv(env, "PATH", childPATH(p, tree.Dir))
-	if os.Getenv("KUSTOMIZE_PLUGIN_HOME") == "" {
-		env = setEnv(env, "KUSTOMIZE_PLUGIN_HOME", filepath.Join(p.Base, ".kustomize"))
-	}
+	env = setEnv(env, config.KustomizePluginHomeEnv, config.KustomizePluginHome(p))
 	if v := os.Getenv("PATH_BIN"); v != "" && v != projectBin(p) {
 		env = setEnv(env, "PATH_BIN", projectBin(p))
 	}

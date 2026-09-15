@@ -455,4 +455,54 @@ tls_check - registry tls renew --domain alpha.dev         # tls: false, refuses
 check_parse registry tls bogus
 unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG
 
+# ── lo bootstrap — the render's plugin home ──────────────────────────────────
+# A shell that exports only PATH (KUSTOMIZE_PLUGIN_HOME is unset above): the
+# kustomize child of the addon render must still get <project>/.kustomize on
+# BOTH sides (bash: the shim's default; Go: config.KustomizePluginHome).
+# v0.4.0 handed the bootstrap render no home on the Go side and every addon
+# failed on `unable to find plugin root`. The stub kustomize logs the home it
+# was given and fails the build, so the case stops at the render (no kubectl,
+# no retry loop); the log is diffed across the sides and pinned to the
+# project value.
+mkdir -p "${PROJ}/clusters/boot.dev" "${PROJ}/.kubeconfig"
+cat > "${PROJ}/clusters/boot.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: bootc
+spec:
+  runtime: kind
+  network:
+    name: bootnet
+    cidr: 10.99.11.0/24
+  registries:
+    tls: false
+  bootstrap:
+    - cilium
+YAML
+: > "${PROJ}/.kubeconfig/bootc.yaml"
+parity::stub "${PROJ}" kustomize <<'SH'
+#!/usr/bin/env bash
+# Parity stub kustomize: log the plugin home the render handed over, then
+# fail the build (the case stops at the render).
+echo "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
+echo "Error: parity stub: no render" >&2
+exit 1
+SH
+export PARITY_KUSTOMIZE_LOG="${WORK}/kustomize.log"
+boot_pre() { reset_fixtures; rm -f "${PROJ}/clusters/boot.dev/.registries.json"; }
+boot_post() {  # <impl>: keep the log per side (normalized)
+  if [[ -f "${WORK}/kustomize.log" ]]; then
+    sed -E "s|${PROJ}|PROJ|g" "${WORK}/kustomize.log" > "${WORK}/kustomize.${1}.log"
+    rm -f "${WORK}/kustomize.log"
+  else
+    : > "${WORK}/kustomize.${1}.log"
+  fi
+}
+PARITY_PRE_EACH=boot_pre PARITY_POST_EACH=boot_post check - bootstrap --domain boot.dev
+parity::state_same "${WORK}/kustomize.bash.log" "${WORK}/kustomize.go.log" "plugin home of the bootstrap render" || failures=$((failures + 1))
+for side in bash go; do
+  tls_pin "${side}: the render's kustomize child has the project plugin home" "${WORK}/kustomize.${side}.log" "^KUSTOMIZE_PLUGIN_HOME=PROJ/\.kustomize$"
+done
+unset PARITY_KUSTOMIZE_LOG
+
 report

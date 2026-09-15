@@ -22,11 +22,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"flag"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -162,7 +164,7 @@ func TestRenderStacksBaseDriverProviderInline(t *testing.T) {
 	var errBuf strings.Builder
 	t.Setenv("LOK8S_USER_API_HOST", "10.0.0.1")
 
-	out, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", inlineValues, nil)
+	out, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", inlineValues, nil)
 	if err != nil {
 		t.Fatalf("Render: %v (stderr: %s)", err, errBuf.String())
 	}
@@ -261,7 +263,7 @@ func TestRenderFallsBackToDriverWithoutProviderValues(t *testing.T) {
 	os.Remove(filepath.Join(dir, "values.hetzner.yaml"))
 	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
-	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+	if _, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if got := yqr(t, f.mergedOut, "shared_all"); got != "driver" {
@@ -278,7 +280,7 @@ func TestRenderBaseOnlyWhenNoOverlays(t *testing.T) {
 	os.Remove(filepath.Join(dir, "values.hetzner.yaml"))
 	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
-	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+	if _, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if got := yqr(t, f.mergedOut, "shared_all"); got != "base" {
@@ -296,7 +298,7 @@ func TestRenderInPlaceWhenNothingToStack(t *testing.T) {
 		[]byte("kind: ChartRenderer\nvalueFiles:\n  - ../../../../.lok8s/addons/x/values.yaml\n"), 0o644)
 	f := newFakeKustomize(t, kustomizeManifest)
 	var errBuf strings.Builder
-	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "", "", nil); err != nil {
+	if _, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if f.buildDirs[0] != dir {
@@ -323,7 +325,7 @@ func TestRenderDotfilesSurviveTheCopy(t *testing.T) {
 			t.Errorf(".helmignore missing from staged copy %s", buildDir)
 		}
 	}, manifest: kustomizeManifest}
-	if _, err := Render(t.Context(), probe, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+	if _, err := Render(t.Context(), testPaths(t), probe, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 }
@@ -349,7 +351,7 @@ func TestRenderEmptyOutputIsAnError(t *testing.T) {
 	dir := writeAddon(t)
 	f := newFakeKustomize(t, "")
 	var errBuf strings.Builder
-	_, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil)
+	_, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil)
 	if err == nil {
 		t.Fatal("empty render must fail")
 	}
@@ -363,7 +365,7 @@ func TestRenderBuildFailurePropagates(t *testing.T) {
 	f := newFakeKustomize(t, "")
 	f.fail = true
 	var errBuf strings.Builder
-	if _, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "", nil); err == nil {
+	if _, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil); err == nil {
 		t.Fatal("build failure must propagate")
 	}
 }
@@ -375,7 +377,7 @@ func TestRenderPerEntryEnvReachesProcessAndEnvsubst(t *testing.T) {
 	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  v: \"${LOK8S_USER_TESTVAR}\"\n"
 	f := newFakeKustomize(t, manifest)
 	var errBuf strings.Builder
-	out, err := Render(t.Context(), f, &errBuf, dir, "lo", "hetzner", "",
+	out, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "",
 		map[string]string{"LOK8S_USER_TESTVAR": "hello"})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
@@ -416,7 +418,7 @@ func TestRenderInProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	var errBuf strings.Builder
-	got, err := Render(t.Context(), nil, &errBuf, dir, "lo", "", "", map[string]string{"LOK8S_USER_API_HOST": "api.example"})
+	got, err := Render(t.Context(), testPaths(t), nil, &errBuf, dir, "lo", "", "", map[string]string{"LOK8S_USER_API_HOST": "api.example"})
 	if err != nil {
 		t.Fatalf("Render: %v\n%s", err, errBuf.String())
 	}
@@ -424,5 +426,47 @@ func TestRenderInProcess(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+// testPaths is a project root for the render: the kustomize child's
+// plugin home derives from it.
+func testPaths(t *testing.T) *config.Paths {
+	t.Helper()
+	base := t.TempDir()
+	return &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+}
+
+// TestRenderHandsKustomizePluginHomeToTheChild pins the bootstrap render
+// path a PATH-only shell hit: without KUSTOMIZE_PLUGIN_HOME in the
+// environment the kustomize child must get <Base>/.kustomize
+// (config.KustomizePluginHome); an exported value passes through.
+func TestRenderHandsKustomizePluginHomeToTheChild(t *testing.T) {
+	dir := writeAddon(t)
+	p := testPaths(t)
+	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+	var errBuf strings.Builder
+
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
+	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
+	f := newFakeKustomize(t, manifest)
+	if _, err := Render(t.Context(), p, f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "KUSTOMIZE_PLUGIN_HOME=" + filepath.Join(p.Base, ".kustomize")
+	if !slices.Contains(f.envs[0], want) {
+		t.Errorf("unset in the shell: %s missing from the kustomize env: %v", want, f.envs[0])
+	}
+
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/elsewhere/plugins")
+	f = newFakeKustomize(t, manifest)
+	if _, err := Render(t.Context(), p, f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !slices.Contains(f.envs[0], "KUSTOMIZE_PLUGIN_HOME=/elsewhere/plugins") {
+		t.Errorf("exported in the shell: the value is not passed through: %v", f.envs[0])
+	}
+	if slices.Contains(f.envs[0], want) {
+		t.Errorf("exported in the shell: the default is still in the env: %v", f.envs[0])
 	}
 }

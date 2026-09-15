@@ -205,7 +205,7 @@ install resolves from the working directory only.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			setDebugFromVerbose(cmd)
 			path := childPATH(paths, bashTreeForPATH(paths).Dir)
-			if !doctorToolchain(cmd.Context(), cmd.OutOrStdout(), paths, kustomizePluginHome(paths), path) {
+			if !doctorToolchain(cmd.Context(), cmd.OutOrStdout(), paths, config.KustomizePluginHome(paths), path) {
 				ui.ErrorTo(cmd.ErrOrStderr(), "toolchain doctor: a pinned tool is missing (see ✗ above)")
 				return ErrHandled
 			}

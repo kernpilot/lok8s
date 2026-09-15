@@ -87,7 +87,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// + envsubst) — the SAME addons.Render the KubeOne driver stages addons
 	// with.
 	ui.DebugTo(stderr, "bootstrap: rendering %s", job.Name)
-	rendered, err := addons.Render(ctx, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env)
+	rendered, err := addons.Render(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env)
 	if err != nil {
 		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
 		return 1

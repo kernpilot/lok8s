@@ -37,7 +37,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -126,11 +125,12 @@ const (
 // Options shapes one render.
 type Options struct {
 	// Paths locates the project. In-process it is unused; in exec mode it
-	// resolves the kustomize binary (.bin first) and, when
-	// KUSTOMIZE_PLUGIN_HOME is unset, defaults it to <Base>/.kustomize
-	// the way `lo build` always did. Nil is allowed (addons pass none):
-	// then exec mode needs Runner and leaves the plugin home to the
-	// process environment, again as before.
+	// resolves the kustomize binary (.bin first) and hands the child
+	// KUSTOMIZE_PLUGIN_HOME from config.KustomizePluginHome: the variable
+	// when set, else <Base>/.kustomize. Every render that runs in a
+	// project (the domain build, the addon render, `lo k8s`) passes it.
+	// Nil is allowed only for a render outside a project: then exec mode
+	// needs Runner and leaves the plugin home to the process environment.
 	Paths *config.Paths
 	// Runner runs the exec-mode kustomize child (the hermetic seam the
 	// addon tests stub). Nil = execx.NewRunner(Paths).
@@ -189,9 +189,11 @@ func Build(ctx context.Context, dir string, o Options) ([]byte, error) {
 
 // buildExec is the subprocess pipeline (core's only one; lo-full's
 // LO_RENDER=exec): the pinned kustomize binary (.bin first, then PATH)
-// with the overlay appended to its environment and, when Paths is known
-// and the caller's environment has no plugin home, KUSTOMIZE_PLUGIN_HOME
-// defaulted to <Base>/.kustomize.
+// with the overlay appended to its environment and, when Paths is known,
+// KUSTOMIZE_PLUGIN_HOME set to config.KustomizePluginHome (the variable
+// when set, else <Base>/.kustomize). The child gets the value explicitly,
+// so what `lo doctor` prints is what the child reads. An overlay that
+// already carries the key wins.
 func buildExec(ctx context.Context, dir string, o Options) ([]byte, error) {
 	runner := o.Runner
 	if runner == nil {
@@ -209,8 +211,8 @@ func buildExec(ctx context.Context, dir string, o Options) ([]byte, error) {
 	}
 	args = append(args, dir)
 	env := append([]string{}, o.Env...)
-	if o.Paths != nil && os.Getenv(kustomizePluginHomeEnv) == "" && !hasKey(env, kustomizePluginHomeEnv) {
-		env = append(env, kustomizePluginHomeEnv+"="+filepath.Join(o.Paths.Base, ".kustomize"))
+	if o.Paths != nil && !hasKey(env, kustomizePluginHomeEnv) {
+		env = append(env, kustomizePluginHomeEnv+"="+config.KustomizePluginHome(o.Paths))
 	}
 	var out bytes.Buffer
 	err := runner.Run(ctx, execx.Cmd{

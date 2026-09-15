@@ -283,3 +283,21 @@ func TestResolvePathsIgnoresACacheTreeInPathLok8s(t *testing.T) {
 		t.Fatalf("Lok8s = %s, want %s", p.Lok8s, checkout)
 	}
 }
+
+func TestKustomizePluginHomeDefaultsToProjectDir(t *testing.T) {
+	p := &Paths{Base: "/proj"}
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
+	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
+	if got, want := KustomizePluginHome(p), filepath.Join("/proj", ".kustomize"); got != want {
+		t.Errorf("unset: got %q, want %q", got, want)
+	}
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "/elsewhere/plugins")
+	if got := KustomizePluginHome(p); got != "/elsewhere/plugins" {
+		t.Errorf("exported: got %q, want the exported value", got)
+	}
+	// An exported empty value counts as unset (bash: `${KUSTOMIZE_PLUGIN_HOME:-…}`).
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
+	if got, want := KustomizePluginHome(p), filepath.Join("/proj", ".kustomize"); got != want {
+		t.Errorf("exported empty: got %q, want %q", got, want)
+	}
+}
