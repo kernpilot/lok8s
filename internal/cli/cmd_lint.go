@@ -52,7 +52,9 @@ func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			if err != nil {
 				return argshErrorf(stderr, "invalid --format %q: text, editor or github", format)
 			}
-			fallback := filepath.Join("clusters", d, "cluster.lok8s.yaml")
+			// A finding without a path is charged to the file the linter
+			// validates for the domain (cluster.lok8s.yaml, else deploy).
+			fallback := filepath.Join("clusters", d, filepath.Base(lint.SpecFile(filepath.Join(paths.Clusters, d))))
 			out := lint.NewFormatWriter(cmd.OutOrStdout(), f, fallback)
 			findings := lint.NewFormatWriter(stderr, f, fallback)
 			defer func() {

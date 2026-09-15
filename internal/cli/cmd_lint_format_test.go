@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/lint"
@@ -38,5 +39,21 @@ func TestLintFormatAutoSelectReadsTheRealStdoutOnly(t *testing.T) {
 	}
 	if _, err := lintFormat("xml", os.Stdout); err == nil {
 		t.Errorf("an unknown format must be an error")
+	}
+}
+
+// TestLintFormatChargesTheValidatedSpecFile: a finding without a path is
+// charged to the file the linter validated, deploy.lok8s.yaml for a
+// deploy domain.
+func TestLintFormatChargesTheValidatedSpecFile(t *testing.T) {
+	paths := completionProject(t)
+	t.Setenv("GITHUB_ACTIONS", "")
+	_, errOut, _ := runOut(t, paths, "lint", "--domain", "gamma.app", "--format", "editor")
+	if !strings.Contains(errOut, "clusters/gamma.app/deploy.lok8s.yaml:1: [error]") || strings.Contains(errOut, "cluster.lok8s.yaml:1:") {
+		t.Errorf("deploy domain findings:\n%s", errOut)
+	}
+	_, errOut, _ = runOut(t, paths, "lint", "--domain", "beta.cloud", "--format", "editor")
+	if !strings.Contains(errOut, "clusters/beta.cloud/cluster.lok8s.yaml:1: [error]") {
+		t.Errorf("cluster domain findings:\n%s", errOut)
 	}
 }

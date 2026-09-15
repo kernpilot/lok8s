@@ -60,7 +60,7 @@ func (f *FormatWriter) Write(p []byte) (int, error) {
 			return len(p), nil
 		}
 		if _, err := io.WriteString(f.W, f.line(line)+"\n"); err != nil {
-			return 0, err
+			return len(p), err // p is in the buffer: consumed, then the write failed
 		}
 		f.buf.Reset()
 		f.buf.WriteString(rest)

@@ -76,3 +76,19 @@ func TestFormatWriterEscapesWorkflowCommands(t *testing.T) {
 		t.Errorf("an injected command survived")
 	}
 }
+
+// failingWriter accepts nothing.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// TestFormatWriterReportsConsumedBytesOnError: the bytes went into the
+// buffer before the sink failed, so Write returns len(p) with the error.
+func TestFormatWriterReportsConsumedBytesOnError(t *testing.T) {
+	w := NewFormatWriter(failingWriter{}, FormatEditor, "spec.yaml")
+	p := []byte("[error] x\n")
+	n, err := w.Write(p)
+	if n != len(p) || err == nil {
+		t.Errorf("Write = (%d, %v), want (%d, an error)", n, err, len(p))
+	}
+}
