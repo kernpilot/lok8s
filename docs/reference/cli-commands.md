@@ -1687,18 +1687,49 @@ lo init [flags]
 ### Options
 
 ```
-  -n, --dry-run   Run the wizard up to the summary; write nothing (off a terminal, under CI or with --yes: the same as --plan)
+  -n, --dry-run   The same as --plan
   -h, --help      help for init
-      --plan      Print what lo init sees here and the commands it would run; write nothing (works off a terminal)
-  -y, --yes       Never ask: print the help instead of the wizard (scripts, CI)
+      --plan      Print what lo init sees here and offers, as text; write nothing (works off a terminal)
+  -y, --yes       Never ask: print the help instead of the screens (scripts, CI)
 ```
 
 ### SEE ALSO
 
 * [lo](#lo)	 - lok8s - local dev orchestration
+* [lo init cluster](#lo-init-cluster)	 - Scaffold a cluster spec, clusters/<domain>/cluster.lok8s.yaml, and make it the active domain
 * [lo init project](#lo-init-project)	 - Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, one env file, optionally the first cluster spec) — files only, no network
 * [lo init service](#lo-init-service)	 - Scaffold a bare service (lok8s.yaml + services.yaml + Tiltfile)
 * [lo init test](#lo-init-test)	 - Scaffold a Playwright integration suite (tests/)
+
+## lo init cluster
+
+Scaffold a cluster spec, clusters/<domain>/cluster.lok8s.yaml, and make it the active domain
+
+```
+lo init cluster [domain] [flags]
+```
+
+### Examples
+
+```
+  lo init cluster demo.dev
+  lo init cluster prod.example.com --driver kubeone
+```
+
+### Options
+
+```
+      --driver string   Driver of the spec: lo, kubeone, capi, kkp, kubehz-hosted (default "lo")
+  -n, --dry-run         The same as --plan
+  -h, --help            help for cluster
+      --no-active       Write the spec only; keep the active domain as it is
+      --plan            Print the screen as text and write nothing (works off a terminal)
+  -y, --yes             Never ask: run with the values given (scripts, CI)
+```
+
+### SEE ALSO
+
+* [lo init](#lo-init)	 - Scaffold service config (lok8s.yaml/services.yaml/Tiltfile)
 
 ## lo init project
 
@@ -1736,7 +1767,7 @@ lo init project [name] [flags]
 Scaffold a bare service (lok8s.yaml + services.yaml + Tiltfile)
 
 ```
-lo init service <name> [flags]
+lo init service [name] [flags]
 ```
 
 ### Examples
@@ -1749,8 +1780,11 @@ lo init service <name> [flags]
 ### Options
 
 ```
+  -n, --dry-run       The same as --plan
   -h, --help          help for service
   -p, --path string   Directory for the service (default: ./<name>)
+      --plan          Print the screen as text and write nothing (works off a terminal)
+  -y, --yes           Never ask: run with the values given (scripts, CI)
 ```
 
 ### SEE ALSO
@@ -1775,8 +1809,11 @@ lo init test [flags]
 ### Options
 
 ```
+  -n, --dry-run       The same as --plan
   -h, --help          help for test
   -p, --path string   Directory for the suite (default: ./tests)
+      --plan          Print the screen as text and write nothing (works off a terminal)
+  -y, --yes           Never ask: run with the values given (scripts, CI)
 ```
 
 ### SEE ALSO

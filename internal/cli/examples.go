@@ -57,6 +57,8 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
   lo init service worker --path services/worker`,
 	"init test": `  lo init test
   lo init test --path e2e --force`,
+	"init cluster": `  lo init cluster demo.dev
+  lo init cluster prod.example.com --driver kubeone`,
 	"init project": `  lo init project
   lo init project acme --env direnv
   lo init project --cluster demo.dev --driver lo`,
