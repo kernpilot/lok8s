@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,9 +28,15 @@ func TestKustomizeBuildInstallsIntoThePluginHome(t *testing.T) {
 	// fix hint (`run: lo kustomize build`) puts the plugins where the render
 	// looks. The bash libs/kustomize always used ${PATH_BASE}/.kustomize
 	// (D36).
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("no go on PATH")
+	//
+	// kustomizeBuild refuses without `go` on PATH (its own guard, before
+	// any make runs). The test never execs go: a stub on a test-owned PATH
+	// satisfies the guard, and the fake runner records the make argv.
+	stubBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stubBin, "go"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	t.Setenv("PATH", stubBin)
 	p := kustomizePaths(t)
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
 	os.Unsetenv("KUSTOMIZE_PLUGIN_HOME")
