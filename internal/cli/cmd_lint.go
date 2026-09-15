@@ -48,7 +48,7 @@ func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			// GITHUB_ACTIONS=true with stdout off a terminal the default
 			// becomes github (the environment chooses a rendering, never a
 			// code path; text on a terminal, or on --format text).
-			f, err := lintFormat(format)
+			f, err := lintFormat(format, cmd.OutOrStdout())
 			if err != nil {
 				return argshErrorf(stderr, "invalid --format %q: text, editor or github", format)
 			}
@@ -95,14 +95,16 @@ func newLintCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 // swap it).
 var lintStdoutIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
-// lintFormat resolves --format: the flag when given; else github under
-// GITHUB_ACTIONS=true with stdout off a terminal; else text.
-func lintFormat(flag string) (string, error) {
+// lintFormat resolves --format: the flag when given. Without one, github
+// under GITHUB_ACTIONS=true when out is the process stdout and that is
+// not a terminal (a workflow step). A writer a caller supplied (a test
+// buffer, the MCP server) never reads the environment. Else text.
+func lintFormat(flag string, out io.Writer) (string, error) {
 	switch flag {
 	case lint.FormatText, lint.FormatEditor, lint.FormatGitHub:
 		return flag, nil
 	case "":
-		if os.Getenv("GITHUB_ACTIONS") == "true" && !lintStdoutIsTerminal() {
+		if out == io.Writer(os.Stdout) && os.Getenv("GITHUB_ACTIONS") == "true" && !lintStdoutIsTerminal() {
 			return lint.FormatGitHub, nil
 		}
 		return lint.FormatText, nil

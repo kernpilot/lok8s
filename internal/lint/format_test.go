@@ -7,6 +7,7 @@ import (
 )
 
 func TestFormatWriterRewritesFindings(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
 	in := "Validating: alpha.dev\n" +
 		"\033[0;31m[error]\033[0m   Missing required field: kind\n" +
 		"\033[0;33m[warn]\033[0m   clusters/alpha.dev/targets/app/kustomization.yaml: missing resource ./deploy.yaml\n" +
@@ -44,6 +45,7 @@ func TestFormatWriterRewritesFindings(t *testing.T) {
 }
 
 func TestFormatWriterLineNumberAndFlush(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
 	var out bytes.Buffer
 	w := NewFormatWriter(&out, FormatEditor, "spec.yaml").(*FormatWriter)
 	io.WriteString(w, "[warn] services/api/lok8s.yaml: line 12: unknown key build.contxt")
