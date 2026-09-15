@@ -224,9 +224,9 @@ func envValue(env string) string {
 }
 
 // validateDir accepts a directory `lo init` can continue in: this one,
-// one below it, or one above it (the repository root). Detect walks up
-// from the working directory, so a project elsewhere would not be found
-// after Create.
+// any directory below it, or any parent of it (up to the repository
+// root and beyond). Detect walks up from the working directory, so a
+// project elsewhere (a sibling) would not be found after Create.
 func validateDir(cwd, v string) error {
 	dir := filepath.Clean(filepath.Join(cwd, v))
 	if filepath.IsAbs(v) {
@@ -235,11 +235,11 @@ func validateDir(cwd, v string) error {
 	if dirReachable(cwd, dir) {
 		return nil
 	}
-	return fmt.Errorf("%q is not this directory, one below it, or one above it", v)
+	return fmt.Errorf("%q is not this directory, a directory below it, or a parent of it", v)
 }
 
-// dirReachable reports whether dir is cwd, an ancestor of cwd, or below
-// cwd.
+// dirReachable reports whether dir is cwd, a parent of cwd at any
+// level, or below cwd at any level.
 func dirReachable(cwd, dir string) bool {
 	up, err := filepath.Rel(dir, cwd)
 	if err == nil && up != ".." && !strings.HasPrefix(up, ".."+string(filepath.Separator)) {

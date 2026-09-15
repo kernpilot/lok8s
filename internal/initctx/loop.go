@@ -72,7 +72,7 @@ func Entries(s State) []Entry {
 		if p.Implementation == "bash" {
 			other = "go"
 		}
-		out = append(out, Entry{EntryImplementation, "Switch implementation (" + p.Implementation + " → " + other + ")", "lo init project --implementation " + other})
+		out = append(out, Entry{EntryImplementation, "Switch implementation (" + p.Implementation + " → " + other + ")", "lo init project --env none --implementation " + other})
 	} else {
 		out = append(out, Entry{EntryEject, "Eject the bash tree", "lo assets eject bash"})
 	}

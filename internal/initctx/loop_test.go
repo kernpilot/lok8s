@@ -47,7 +47,7 @@ func TestEntries(t *testing.T) {
 		t.Errorf("entries %v, want %v", got, want)
 	}
 	e := Entries(s)
-	if e[2].Label != "Install the toolchain (3 of 17 missing)" || e[3].Label != "Switch implementation (go → bash)" || e[3].Twin != "lo init project --implementation bash" {
+	if e[2].Label != "Install the toolchain (3 of 17 missing)" || e[3].Label != "Switch implementation (go → bash)" || e[3].Twin != "lo init project --env none --implementation bash" {
 		t.Errorf("labels: %+v", e)
 	}
 
@@ -84,7 +84,7 @@ func TestEntries(t *testing.T) {
 	var b bytes.Buffer
 	WriteEntries(&b, Entries(s))
 	if b.String() != "  actions     Add a cluster · Add a service · Set the active domain · Switch implementation (bash → go) · Exit\n"+
-		"  equivalent  lo init cluster <domain> · lo init service <name> · lo use <domain> · lo init project --implementation go\n" {
+		"  equivalent  lo init cluster <domain> · lo init service <name> · lo use <domain> · lo init project --env none --implementation go\n" {
 		t.Errorf("entries text:\n%s", b.String())
 	}
 }

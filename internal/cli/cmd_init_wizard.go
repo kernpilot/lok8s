@@ -52,7 +52,7 @@ func (f *initFlags) add(cmd *cobra.Command) {
 // the network under go test).
 var (
 	initTerminal = initctx.DetectTerminal
-	initFormIO = func() initctx.IO {
+	initFormIO   = func() initctx.IO {
 		return initctx.IO{In: os.Stdin, Out: os.Stdout}
 	}
 	initToolchainInstall = runToolchainInstall

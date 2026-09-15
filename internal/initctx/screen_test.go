@@ -404,5 +404,5 @@ func TestDirectoryMustBeReachable(t *testing.T) {
 	if p.Dir != cwd {
 		t.Errorf("dir %s, want cwd", p.Dir)
 	}
-	contains(t, formOut(tio), `"../other" is not this directory, one below it, or one above it`)
+	contains(t, formOut(tio), `"../other" is not this directory, a directory below it, or a parent of it`)
 }
