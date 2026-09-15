@@ -3174,7 +3174,7 @@ lo secrets [flags]
 
 ```
   lo secrets init
-  lo secrets set --name db --namespace app password
+  lo secrets set --name db --namespace app dbPassword <value>
   lo secrets encrypt
 ```
 
@@ -3210,7 +3210,7 @@ lo secrets add-key <key> [flags]
 
 ```
   lo secrets add-key ~/.ssh/id_ed25519.pub
-  lo secrets add-key age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq --all
+  lo secrets add-key age1<recipient> --all
 ```
 
 ### Options
@@ -3437,9 +3437,9 @@ lo secrets set [--name N] [--namespace NS] [--encrypt] <key> [value] [flags]
 ### Examples
 
 ```
-  lo secrets set --name db --namespace app password
-  lo secrets set --name db password - < password.txt
-  lo secrets set --name db password s3cret --encrypt
+  lo secrets set --name db --namespace app dbPassword <value>
+  lo secrets set --name db dbPassword - < value.txt
+  lo secrets set --name db dbPassword <value> --encrypt
 ```
 
 ### Options

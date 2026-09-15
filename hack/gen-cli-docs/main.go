@@ -40,7 +40,7 @@ func run() error {
 	if len(os.Args) > 1 {
 		out = os.Args[1]
 	}
-	if err := os.WriteFile(out, page, 0o644); err != nil {
+	if err := os.WriteFile(out, page, 0o600); err != nil {
 		return err
 	}
 	fmt.Printf("wrote %s\n", out)

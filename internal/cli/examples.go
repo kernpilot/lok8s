@@ -154,11 +154,11 @@ var commandExamples = map[string]string{
   lo addons cilium
   lo addons --detail --origin`,
 	"secrets": `  lo secrets init
-  lo secrets set --name db --namespace app password
+  lo secrets set --name db --namespace app dbPassword <value>
   lo secrets encrypt`,
 	"secrets init": `  lo secrets init`,
 	"secrets add-key": `  lo secrets add-key ~/.ssh/id_ed25519.pub
-  lo secrets add-key age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq --all`,
+  lo secrets add-key age1<recipient> --all`,
 	"secrets encrypt": `  lo secrets encrypt`,
 	"secrets decrypt": `  lo secrets decrypt`,
 	"secrets allow":   `  lo secrets allow`,
@@ -166,9 +166,9 @@ var commandExamples = map[string]string{
 	"secrets print": `  lo secrets print
   lo secrets print 'Secret.db.*'`,
 	"secrets path": `  lo secrets path`,
-	"secrets set": `  lo secrets set --name db --namespace app password
-  lo secrets set --name db password - < password.txt
-  lo secrets set --name db password s3cret --encrypt`,
+	"secrets set": `  lo secrets set --name db --namespace app dbPassword <value>
+  lo secrets set --name db dbPassword - < value.txt
+  lo secrets set --name db dbPassword <value> --encrypt`,
 	"secrets env": `  eval "$(lo secrets env --name db --namespace app)"`,
 	"drivers": `  lo drivers --list
   lo drivers lo status kubehz.dev`,
