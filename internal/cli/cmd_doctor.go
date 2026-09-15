@@ -420,8 +420,9 @@ func doctorWarn(w io.Writer, msg string) { ui.MarkWarn(w, msg) }
 func doctorBad(w io.Writer, msg string)  { ui.MarkBad(w, msg) }
 
 // doctorInfo is a neutral line: a fact that is neither a pass nor a
-// finding (the dim ℹ style the other commands use).
-func doctorInfo(w io.Writer, msg string) { fmt.Fprintf(w, "  \033[2mℹ %s\033[0m\n", msg) }
+// finding (the dim ℹ style the other commands use), dim on a terminal
+// and plain when piped like the other markers.
+func doctorInfo(w io.Writer, msg string) { ui.MarkInfo(w, msg) }
 
 // doctorTool checks one tool on PATH (bash: doctor::_tool via `command -v`).
 // Returns false when required and missing.

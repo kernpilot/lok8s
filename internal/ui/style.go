@@ -214,11 +214,12 @@ func Section(w io.Writer, label string) {
 	io.WriteString(w, s.Bold(label)+"\n")
 }
 
-// The marker set: ✓ ! ✗ at a two-space indent, coloured on a TTY.
+// The marker set: ✓ ! ✗ ℹ at a two-space indent, coloured on a TTY.
 const (
 	markOK   = "✓"
 	markWarn = "!"
 	markBad  = "✗"
+	markInfo = "ℹ"
 )
 
 func marker(w io.Writer, code, mark, msg string) {
@@ -233,6 +234,13 @@ func MarkWarn(w io.Writer, msg string) { marker(w, ansiYellow, markWarn, msg) }
 
 // MarkBad writes `  ✗ msg` (red on a TTY).
 func MarkBad(w io.Writer, msg string) { marker(w, ansiRed, markBad, msg) }
+
+// MarkInfo writes `  ℹ msg`, a neutral fact that is neither a pass nor a
+// finding. The whole line is dim on a TTY (the style the lifecycle
+// commands use for their notes).
+func MarkInfo(w io.Writer, msg string) {
+	io.WriteString(w, "  "+For(w).Dim(markInfo+" "+msg)+"\n")
+}
 
 // Next writes the one hint shape: `next: lo <cmd>   # why`, dim on a TTY.
 func Next(w io.Writer, cmd, why string) {

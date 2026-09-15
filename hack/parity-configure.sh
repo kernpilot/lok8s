@@ -450,8 +450,8 @@ PARITY_ROUTE_GO=doctor check - doctor --domain gamma.app
 # from argv on the routed side and handed on as NO_COLOR=1. Piped, both
 # print the plain doctor either way; the strict diff proves the routed
 # tree never sees the flag (argsh would reject it).
-check - doctor --no-color
-PARITY_ROUTE_GO=doctor check - doctor --no-color
+check PATH_SECRETS doctor --no-color               # native vs the shim; the D35 line
+PARITY_ROUTE_GO=doctor check - doctor --no-color   # routed on both sides
 PARITY_ROUTE_GO=version check - version
 
 report
