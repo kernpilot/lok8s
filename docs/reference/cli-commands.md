@@ -254,7 +254,7 @@ lo assets [flags]
 
 * [lo](#lo)	 - lok8s - local dev orchestration
 * [lo assets diff](#lo-assets-diff)	 - Diff an asset three ways: origin, local, embedded
-* [lo assets eject](#lo-assets-eject)	 - Write embedded assets into the project (.lok8s/<rel>/)
+* [lo assets eject](#lo-assets-eject)	 - Write embedded assets into the project (.lok8s/&lt;rel>/)
 * [lo assets list](#lo-assets-list)	 - List every embedded asset with its origin
 * [lo assets update](#lo-assets-update)	 - Apply the embedded copy over an untouched local one
 
@@ -295,7 +295,7 @@ lo assets diff [rel...] [flags]
 
 ## lo assets eject
 
-Write embedded assets into the project (.lok8s/<rel>/)
+Write embedded assets into the project (.lok8s/&lt;rel>/)
 
 ### Synopsis
 
@@ -569,7 +569,7 @@ If it is not installed already, you can install it via your OS's package manager
 
 To load completions in your current shell session:
 
-	source <(lo completion bash)
+	source &lt;(lo completion bash)
 
 To load completions for every new session, execute once:
 
@@ -698,7 +698,7 @@ to enable it.  You can execute the following once:
 
 To load completions in your current shell session:
 
-	source <(lo completion zsh)
+	source &lt;(lo completion zsh)
 
 To load completions for every new session, execute once:
 
@@ -1707,14 +1707,14 @@ lo init [flags]
 ### SEE ALSO
 
 * [lo](#lo)	 - lok8s - local dev orchestration
-* [lo init cluster](#lo-init-cluster)	 - Scaffold a cluster spec, clusters/<domain>/cluster.lok8s.yaml, and make it the active domain
+* [lo init cluster](#lo-init-cluster)	 - Scaffold a cluster spec, clusters/&lt;domain>/cluster.lok8s.yaml, and make it the active domain
 * [lo init project](#lo-init-project)	 - Scaffold a project (clusters/, lok8s.yaml, .gitignore entries, one env file, optionally the first cluster spec) — files only, no network
 * [lo init service](#lo-init-service)	 - Scaffold a bare service (lok8s.yaml + services.yaml + Tiltfile)
 * [lo init test](#lo-init-test)	 - Scaffold a Playwright integration suite (tests/)
 
 ## lo init cluster
 
-Scaffold a cluster spec, clusters/<domain>/cluster.lok8s.yaml, and make it the active domain
+Scaffold a cluster spec, clusters/&lt;domain>/cluster.lok8s.yaml, and make it the active domain
 
 ```
 lo init cluster [domain] [flags]
@@ -2474,7 +2474,7 @@ Serve the lo commands as MCP tools (stdio or HTTP)
 
 Serve the lo commands to AI agents and editors as MCP tools.
 
-Every leaf command becomes one tool named lo_<path with underscores>:
+Every leaf command becomes one tool named lo_&lt;path with underscores>:
 lo_status, lo_secrets_encrypt, lo_kubehz_join, lo_registry_up, ...
 Dispatchers (secrets, tilt, kubehz, ...) are traversed, not exposed.
 A tool call runs the same lo binary as a subprocess and returns its

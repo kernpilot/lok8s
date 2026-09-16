@@ -142,7 +142,7 @@ The prompt asks when stdin and stderr are both terminals: `lo down | cat` still 
 | `lo assets list -o yaml` | the `--json` document (`--json` is `-o json`. `--json` with `-o yaml` is an error) (`{lo, assets: [{rel, kind, origin, drifted, version, marker, files, path}]}`) as yaml | `lo: 0.5.0` / `assets:` / `  - rel: addons/cilium` … |
 | `lo registry status -o json` | `{domain, registries: [{name, scope, container, endpoint, running, reachable, state}]}` | `{"domain":"kubehz.dev","registries":[{"name":"build","scope":"project","container":"kubehz-registry-build","endpoint":"https://10.125.125.101:5000","running":true,"reachable":true,"state":"3 repos"}]}` |
 | `lo version -o json` | `{lok8s, build, tools: [{name, version, path}]}` | `{"lok8s":"0.5.0","build":"core","tools":[{"name":"kubectl","version":"v1.31.0","path":".bin/kubectl"}]}` |
-| `lo doctor -o json` | `{domain, ok, sections: [{name, checks: [{status: ok|warn|bad|info, message}]}]}` | `{"domain":"kubehz.dev","ok":false,"sections":[{"name":"tools","checks":[{"status":"bad","message":"kind: missing (b install)"}]}]}` |
+| `lo doctor -o json` | `{domain, ok, sections: [{name, checks: [{status: ok\|warn\|bad\|info, message}]}]}` | `{"domain":"kubehz.dev","ok":false,"sections":[{"name":"tools","checks":[{"status":"bad","message":"kind: missing (b install)"}]}]}` |
 
 `lo status -o json` runs `kubectl get nodes -o json` in place of the wide table. `inventory` is the `ClusterInventory/cluster` object, or `null`. `lo doctor -o json` keeps the exit code of the text form. `lo addons <name>` and `lo addons --detail` have no structured form.
 
