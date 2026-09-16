@@ -150,14 +150,13 @@ e2e::_unmet() {
 # state with jq. They are added here rather than in each scenario,
 # because the requirement follows the LEG, not the subject.
 e2e::require_tools() {
-  local -a tools=("$@")
+  local tool -a tools=("$@")
   [[ "${E2E_LO_IMPL}" == "go" ]] || tools+=(yq jq)
   for tool in "${tools[@]}"; do
     command -v "${tool}" >/dev/null 2>&1 || {
       e2e::_unmet "e2e: '${tool}' not in PATH"
     }
   done
-  unset tool
   if command -v docker >/dev/null 2>&1; then
     docker info >/dev/null 2>&1 || e2e::_unmet "e2e: docker daemon not running"
   fi
