@@ -8,22 +8,28 @@
 #   E2E=1 tests/e2e/run.sh ...          # actually spin up clusters
 #                                       # (tests skip otherwise)
 #
-# Uses argsh's bats runner. If argsh is not in PATH, falls back to
-# a system bats binary.
+# Runs bats. `b install` puts one under .bin/bin, together with the
+# bats-support and bats-assert the helpers load from .bin/lib.
 
 set -euo pipefail
 
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _ROOT="$(cd "${_HERE}/../.." && pwd)"
 
-# Resolve bats runner: prefer argsh test, fall back to system bats.
-if command -v argsh &>/dev/null; then
-  _run_bats() { argsh test "$@"; }
-elif command -v bats &>/dev/null; then
+# Resolve the bats runner. A host bats comes FIRST, and `argsh test` is
+# the fallback: argsh runs bats on the host when it finds one, but
+# forwards to its container when it does not — and a cluster scenario in
+# a container without the docker socket fails in a way that says nothing
+# about the code under test.
+if command -v bats &>/dev/null; then
   _run_bats() { bats "$@"; }
+elif [[ -x "${_ROOT}/.bin/bin/bats" ]]; then
+  _run_bats() { "${_ROOT}/.bin/bin/bats" "$@"; }
+elif command -v argsh &>/dev/null; then
+  _run_bats() { argsh test "$@"; }
 else
-  echo "error: neither argsh nor bats found in PATH" >&2
-  echo "       install argsh: https://arg.sh" >&2
+  echo "error: no bats in PATH and none under .bin/bin" >&2
+  echo "       run: ./.bin/b install" >&2
   exit 1
 fi
 

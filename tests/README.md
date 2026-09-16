@@ -26,25 +26,25 @@ argsh test tests/operator/
 # A single unit test file
 argsh test tests/unit/bootstrap_test.bats
 
-# e2e (opt-in, spins up real kind clusters)
-E2E=1 argsh test tests/e2e/no-services/test.bats
+# e2e (opt-in, stands real kind clusters up — needs `make build` first)
+E2E=1 bats tests/e2e/no-services/test.bats
 
 # e2e — all scenarios via the wrapper
 E2E=1 tests/e2e/run.sh
 ```
 
-Env vars set in the outer shell reach the test **only** via the
-`ARGSH_ENV_<X>` prefix; the prefix is stripped when crossing into
-the argsh container:
+Env vars set in the outer shell reach the unit and operator suites
+**only** via the `ARGSH_ENV_<X>` prefix; the prefix is stripped when
+crossing into the argsh container:
 
 ```bash
-ARGSH_ENV_E2E=1 argsh test tests/e2e/no-services/test.bats
-#             └─ inside the container, ${E2E} = 1
+ARGSH_ENV_DEBUG=1 argsh test tests/unit/build_test.bats
+#                └─ inside the container, ${DEBUG} = 1
 ```
 
-Plain `E2E=1 argsh test …` is **not** forwarded when argsh is
-running in docker mode. It does work when `bats` is on the host
-`PATH` (argsh skips docker), so use the prefix to stay portable.
+The e2e scenarios run on the HOST, not in that container: they drive
+docker and kind. `tests/e2e/run.sh` therefore picks a host bats first
+(`b install` puts one under `.bin/bin`) and falls back to `argsh test`.
 
 Without `E2E=1`, every e2e scenario skips at setup time.
 
@@ -71,8 +71,11 @@ never touch a real cluster or network.
 
 **E2e scenario**: pick a free slot in `tests/e2e/SUBNETS.md`, create
 `tests/e2e/<name>/{test.bats, Tiltfile, clusters/<slot>.lok8s.dev/}`,
-add a gate (`e2e::require_e2e_enabled`) and scenario-specific tool
-requires at the top of `setup_file`. See
+and open `setup_file` with the gate (`e2e::require_e2e_enabled`),
+`e2e::init`, the scenario's tool requires, `e2e::require_binary`,
+`e2e::banner` and `e2e::snapshot_world`. Name every object `e2e-*`,
+assert each teardown with `e2e::assert_torn_down`, and end
+`teardown_file` with `e2e::final_teardown`. See
 [`tests/e2e/README.md`](e2e/README.md) for the full contract.
 
 ## CI
