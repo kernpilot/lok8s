@@ -1,9 +1,10 @@
 name: E2E
 
-# The kind integration job that used to run only on pushes to main from
-# ci.yml. It lives here so ci.yml produces the same check set on a pull
-# request and on main, and the main-protection ruleset can require exactly
-# that set. Runs on every push to main, once a night, and on demand.
+# The cluster-backed jobs: the kind integration job that used to run only
+# on pushes to main from ci.yml, and the cluster matrix (tests/e2e/*).
+# They live here so ci.yml produces the same check set on a pull request
+# and on main, and the main-protection ruleset can require exactly that
+# set. Runs on every push to main, once a night, and on demand.
 on:
   push:
     branches: [main]
@@ -154,3 +155,248 @@ jobs:
               domain: ci.lok8s.dev
           EOF
           test "$(kubectl get deploys.cluster.lok8s.dev ci-deploy -o jsonpath='{.spec.clusterRef.domain}')" = "ci.lok8s.dev"
+
+  cluster-matrix:
+    name: Cluster (${{ matrix.scenario }}, ${{ matrix.impl }})
+    runs-on: ubuntu-latest
+    # A backstop, nothing more: every call into `lo` is bounded by its own
+    # `timeout` in tests/e2e/lib/helpers.bash, so a hang dies at the
+    # operation that hung, with a message. This cap has to sit ABOVE the
+    # sum of those budgets or it fires first and names nothing — and a
+    # job-level timeout CANCELS the job, which is a different thing from
+    # a failure (the diagnostics below use `always()` for exactly that
+    # reason: `failure()` does not run on a cancelled job). The worst leg
+    # (lifecycle) budgets 5x300 + 2x180 + 5x120 = 41 minutes; the
+    # toolchain setup above costs ~6. A healthy leg is ~3 minutes.
+    timeout-minutes: 60
+    strategy:
+      # Every leg runs. One broken scenario must not hide the state of the
+      # other nine.
+      fail-fast: false
+      matrix:
+        # scenario × implementation. Both implementations are first class,
+        # and the leg is chosen the way a user chooses it: the scenario's
+        # lok8s.yaml (spec.implementation), read by the SAME binary. There
+        # is no environment variable for it, and nothing here invokes the
+        # bash entrypoint directly.
+        #
+        # `mixed` is the shape a project adopts while it migrates: a `go`
+        # default with a few commands routed to the bash tree. The
+        # lifecycle scenario carries it, with status and registry routed
+        # against a live cluster. `version` rides along because it is the
+        # provenance probe: its `bash` row is how e2e::assert_provenance
+        # proves the routed half really execs the tree, and `lo doctor`
+        # (not routed) proves the other half is still native.
+        #
+        # cache-mode runs the go leg only: it is the slowest scenario (a
+        # `tilt ci` that pre-pulls from Docker Hub), and ci.yml's
+        # e2e-lo-up already runs the same Tilt path on both
+        # implementations over the single-local-build fixture on every
+        # pull request. single-local-build is not here for the same
+        # reason — e2e-lo-up owns it.
+        include:
+          - {scenario: lifecycle, impl: go}
+          - {scenario: lifecycle, impl: bash}
+          - {scenario: lifecycle, impl: mixed, routed: version status registry}
+          - {scenario: registry-tls, impl: go}
+          - {scenario: registry-tls, impl: bash}
+          - {scenario: shared-registries, impl: go}
+          - {scenario: shared-registries, impl: bash}
+          - {scenario: no-services, impl: go}
+          - {scenario: no-services, impl: bash}
+          - {scenario: cache-mode, impl: go}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build lo (the one binary every leg runs)
+        run: make build
+
+      - name: Host prerequisites (dig for the DNS preflight, jq, envsubst)
+        # Without dig the DNS preflight cannot run. It would SKIP the
+        # scenario, and E2E_STRICT=1 below turns that skip into a failure
+        # rather than a green leg that tested nothing — so install it.
+        run: sudo apt-get update && sudo apt-get install -y bind9-dnsutils jq gettext-base
+
+      - name: Skip host-side verification for the dev registries (10.125.0.0/16)
+        # The plain-HTTP scenarios put registries on the project subnet.
+        # In-cluster pulls trust them through certs.d either way; a host
+        # docker pull needs the range marked insecure. This mirrors the
+        # range the framework's own Hetzner provider trusts.
+        run: |
+          sudo mkdir -p /etc/docker
+          existing='{}'
+          [ -f /etc/docker/daemon.json ] && existing="$(cat /etc/docker/daemon.json)"
+          echo "${existing}" \
+            | jq '.["insecure-registries"] = (((.["insecure-registries"] // []) + ["10.125.0.0/16"]) | unique)' \
+            | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{json .RegistryConfig.InsecureRegistryCIDRs}}'
+
+      - name: Install toolchain (b → argsh, kind, tilt, kustomize, khelm)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Pin the binary, not just the installer: install.sh resolves
+          # `releases/latest` with an unauthenticated curl, which a
+          # rate-limited runner IP answers without a tag_name. The
+          # checksum makes the download verifiable, which resolving
+          # "latest" never was.
+          B_VERSION=4.18.6
+          curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
+          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          b install
+          ./.bin/argsh builtins install   # argsh.so — the argsh runtime
+          # .bin holds the tools `lo` shells out to; .bin/bin holds bats
+          # (installed by the next step, not by b) and .bin/lib the
+          # bats-support/bats-assert the helpers load.
+          echo "${GITHUB_WORKSPACE}/.bin" >> "${GITHUB_PATH}"
+          echo "${GITHUB_WORKSPACE}/.bin/bin" >> "${GITHUB_PATH}"
+
+      - name: Install bats and its libraries (pinned)
+        # NOT left to `b install`. On the first dispatch of this matrix it
+        # printed "github.com/bats-core/bats-core ... fail!" for exactly
+        # this entry and still exited 0, so every leg died at `bats:
+        # command not found` — a silent skip that cost ten green-looking
+        # 30-second failures. These land where tests/lib/bats_libs.bash
+        # looks (.bin/bin and .bin/lib), at the versions a developer
+        # machine carries, each tarball checksum-verified.
+        run: |
+          set -euo pipefail
+          install_tarball() { # <repo> <tag> <sha256> <dest>
+            local repo="$1" tag="$2" sum="$3" dest="$4" tmp
+            tmp="$(mktemp -d)"
+            curl -fsSL "https://github.com/bats-core/${repo}/archive/refs/tags/${tag}.tar.gz" -o "${tmp}/src.tar.gz"
+            echo "${sum}  ${tmp}/src.tar.gz" | sha256sum -c -
+            mkdir -p "${dest}"
+            tar -xzf "${tmp}/src.tar.gz" -C "${dest}" --strip-components=1
+            rm -rf "${tmp}"
+          }
+          BIN="${GITHUB_WORKSPACE}/.bin"
+          install_tarball bats-core v1.13.0 \
+            a85e12b8828271a152b338ca8109aa23493b57950987c8e6dff97ba492772ff3 "${BIN}/src/bats-core"
+          "${BIN}/src/bats-core/install.sh" "${BIN}"
+          install_tarball bats-support v0.3.0 \
+            7815237aafeb42ddcc1b8c698fc5808026d33317d8701d5ec2396e9634e2918f "${BIN}/lib/bats-support"
+          install_tarball bats-assert v2.1.0 \
+            98ca3b685f8b8993e48ec057565e6e2abcc541034ed5b0e81f191505682037fd "${BIN}/lib/bats-assert"
+
+      - name: Verify the prerequisites
+        # The suite fails a MISSING prerequisite rather than skipping
+        # (E2E_STRICT below), but bats is the runner itself and cannot
+        # check for its own absence. This step is where a broken
+        # toolchain install stops the job, naming what is missing,
+        # instead of surfacing as "command not found" inside the run.
+        run: |
+          set -euo pipefail
+          missing=0
+          for t in bats kind docker kustomize yq jq tilt dig openssl script; do
+            if command -v "${t}" >/dev/null 2>&1; then
+              printf '  ok      %-10s %s\n' "${t}" "$(command -v "${t}")"
+            else
+              printf '  MISSING %s\n' "${t}"; missing=1
+            fi
+          done
+          for d in bats-support bats-assert; do
+            if [ -d "${GITHUB_WORKSPACE}/.bin/lib/${d}" ]; then
+              printf '  ok      %s\n' "${d}"
+            else
+              printf '  MISSING %s\n' "${d}"; missing=1
+            fi
+          done
+          bats --version
+          [ "${missing}" -eq 0 ] || { echo "::error::the toolchain install did not provide every prerequisite"; exit 1; }
+
+      - name: Build the Secret plugin (the bash leg mints the registry cert through it)
+        # The bash implementation execs
+        # .kustomize/secrets.lok8s.dev/v1/secret/Secret to mint the
+        # registry TLS certificate; the Go build serves that generator
+        # in-process. Built here for every leg, so the step is one line
+        # rather than one condition.
+        run: make -C kustomize build BIN_ROOT="${GITHUB_WORKSPACE}/.kustomize"
+
+      - name: ${{ matrix.scenario }} (${{ matrix.impl }})
+        env:
+          E2E: '1'
+          # A missing prerequisite is a FAILURE here, not a skip: this job
+          # installs every one of them, so a skipped leg would be a green
+          # check over an empty run.
+          E2E_STRICT: '1'
+          E2E_LO_IMPL: ${{ matrix.impl }}
+          E2E_LO_ROUTED: ${{ matrix.routed }}
+        run: |
+          set -euo pipefail
+          # The ambient project pointers of a developer shell are not set
+          # on a runner, but unset them anyway: inherited, they redirect
+          # every write into another project.
+          unset PATH_BASE PATH_BIN PATH_LOK8S PATH_SCRIPTS PATH_CLUSTERS \
+                PATH_SECRETS PATH_TESTS DOMAIN_NAME LOK8S_CLUSTER_NAME \
+                KUBECONFIG KUSTOMIZE_PLUGIN_HOME || true
+          bats "tests/e2e/${{ matrix.scenario }}/test.bats"
+
+      - name: The terminal transcripts
+        # What the confirmation prompt printed and what was answered. Only
+        # the lifecycle scenario writes one.
+        if: always()
+        timeout-minutes: 5
+        run: |
+          f="tests/e2e/${{ matrix.scenario }}/.e2e-state/pty-transcript.log"
+          [ -s "${f}" ] && cat "${f}" || echo "no pty transcript for this scenario"
+
+      - name: What is left on the runner
+        # The scenario asserts this itself. Printing it makes a failure
+        # readable without a re-run.
+        if: always()
+        timeout-minutes: 5
+        run: |
+          kind get clusters || true
+          docker ps -a --format '{{.Names}}\t{{.Status}}'
+          docker volume ls --format '{{.Name}}'
+          docker network ls --format '{{.Name}}'
+
+      - name: Cluster and registry logs
+        # A provision that fails leaves nothing else to look at: the
+        # scenario tears its cluster down, and a runner is gone minutes
+        # later. `kind export logs` writes the kubelet, containerd and
+        # control-plane logs of whatever is still up, and the registry
+        # containers explain a push or a certificate failure. Without
+        # this, every provision failure costs a re-run to diagnose, and a
+        # nightly-only job may not reproduce at all.
+        #
+        # `always()`, not `failure()`: the case this exists for includes
+        # the job hitting its cap, and a cap CANCELS the job. `failure()`
+        # does not run on a cancelled job; `always()` does. Its own cap
+        # keeps the failure path from hanging past the job's.
+        if: always()
+        timeout-minutes: 5
+        run: |
+          mkdir -p /tmp/e2e-logs
+          for c in $(kind get clusters 2>/dev/null); do
+            kind export logs "/tmp/e2e-logs/${c}" --name "${c}" || true
+          done
+          for n in $(docker ps -a --filter 'name=^e2e-' --format '{{.Names}}'; \
+                     docker ps -a --filter 'name=^lok8s-registry-e2e-' --format '{{.Names}}'); do
+            echo "===== docker logs ${n} ====="
+            docker logs --tail 200 "${n}" 2>&1 || true
+          done > /tmp/e2e-logs/containers.log
+          tail -c 200000 /tmp/e2e-logs/containers.log || true
+
+      - name: Upload the logs
+        # always(), for the same reason as the step above. A green leg
+        # uploads a small listing; a cancelled one uploads what it had.
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-logs-${{ matrix.scenario }}-${{ matrix.impl }}
+          path: /tmp/e2e-logs
+          retention-days: 7
+          if-no-files-found: ignore

@@ -1,0 +1,36 @@
+# Slot 131 — the registry-TLS scenario.
+#
+# spec.registries.tls is the framework default (true) and this scenario
+# is the one place it is exercised end to end: the Secret generator mints
+# one leaf for the whole set, it lives in the docker volume
+# `<network>-registry-tls`, and every registry container mounts that
+# volume read-only at /etc/registry/certs.
+#
+# network.name and network.cidr are written out even though the slot
+# defaults supply both: they are the scenario's ownership prefix, and the
+# harness refuses to act on a name it did not derive from this file.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-rtls
+spec:
+  runtime: kind
+  kubernetes:
+    # Pinned by digest: the node image the framework defaults to, so the
+    # run costs no pull on a machine that ran any other lok8s cluster.
+    version: v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2
+  cluster:
+    domain: 131.lok8s.dev
+  network:
+    name: e2e-rtls
+    cidr: 10.125.131.0/24
+  registries:
+    # The subject of the scenario. The registries serve HTTPS on :443
+    # with a dev-CA-signed leaf; the kind nodes trust the CA through
+    # certs.d, so nothing needs an insecure-registries entry.
+    tls: true
+    shared:
+      enabled: false
+  # No addons: a CNI would add minutes and prove nothing about the
+  # certificate.
+  bootstrap: []

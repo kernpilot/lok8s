@@ -27,15 +27,16 @@ lok8s itself.
 | `lo-up` bundle | `docs/public/lo-up` is a byte-exact rebuild of `.archive/legacy/install/lo-up` at the pinned argsh revision | `loup-bundle` | `ARGSH_SRC=… .archive/legacy/install/build && git diff --exit-code docs/public/lo-up` |
 | E2E `lo up --ci` | a real kind cluster + registries + Cilium bootstrap, then `tilt ci` builds, pushes and deploys the fixture app and waits for it to be Ready, once with the **Go** `lo` (`bin/lo` built in the job and first on PATH) and once routed to bash (the fixture's `lok8s.yaml` says `default: bash`; the binary execs the frozen tree copied into the fixture) | `e2e-lo-up` × 2 (matrix `lo_impl: go, bash`; needs shellcheck, unit, operator green) on every PR and on `main` | see [E2E](#e2e-lo-up-ci) |
 | Integration (Kind) | CRD install, schema rejection, `ClusterInventory` SSA round-trip, every kind served under `cluster.lok8s.dev` | `integration-tests` in the E2E workflow: push to main, nightly, manual | — (workflow only) |
-| bats e2e scenarios | the scenario dirs under `tests/e2e/` (`no-services`, `single-local-build`, `cache-mode`, `remote-lo`, `remote-ci`), each on its own `10.125.<slot>.0/24` | no (opt-in) | `ARGSH_ENV_E2E=1 ./.bin/argsh test tests/e2e/<scenario>/test.bats` |
+| bats e2e cluster matrix | the scenario dirs under `tests/e2e/`, each on its own `10.125.<slot>.0/24`: a real kind cluster stands up, the scenario's subject is exercised, and the teardown is ASSERTED (`e2e::assert_torn_down` after `lo down` and again after `lo destroy`). One binary runs every leg; the implementation comes from the scenario's `lok8s.yaml` | `cluster-matrix` in the E2E workflow (push to main, nightly, manual): ten legs, `fail-fast: false`. The two remote scenarios are opt-in and NOT in CI | `E2E=1 bats tests/e2e/<scenario>/test.bats` — see [The cluster matrix](#the-cluster-matrix) |
 | Go round-trip | ONE real provision → status → down → destroy with the **Go** orchestration against a synthetic kind cluster | **no — manual gate** | `bash hack/e2e-go-roundtrip.sh` |
 
 The CI job set lives in `.github/workflows/ci.yml`: `shellcheck`, `yamllint`,
 `unit-tests`, `go-tests`, `release-config`, `operator-tests`, `e2e-lo-up` (× 2),
 `loup-bundle`. `.github/workflows/e2e.yml` (name `E2E`) holds the kind
-integration job, `integration-tests`, and runs on every push to `main`,
-once a night (03:17 UTC) and on `workflow_dispatch`; it never runs on a pull
-request, so the ruleset must not require its check. `.github/workflows/security.yml` adds
+integration job, `integration-tests`, and the ten-leg `cluster-matrix`, and
+runs on every push to `main`, once a night (03:17 UTC) and on
+`workflow_dispatch`; it never runs on a pull request, so the ruleset must
+not require its checks and a pull request keeps its current cost. `.github/workflows/security.yml` adds
 `govulncheck` and `gosec` (every PR, and weekly, over all three Go modules
 with the root toolchain — the one the release builds with), plus the trivy
 and ShellCheck-SARIF scans. `ci.yml` and `security.yml` run on pull requests into `main`
@@ -56,7 +57,7 @@ nothing about the other one unless it names it.
 | ShellCheck + argsh-lint, yamllint, `lo-up` bundle | no | yes |
 | E2E `lo up --ci` | yes: the `go` matrix leg | yes: the `bash` leg (routed by the fixture's `lok8s.yaml` through the binary's shim) |
 | Integration (Kind) | neither — `kubectl` against the CRDs only | neither |
-| bats e2e scenarios (opt-in) | no — `tests/e2e/lib/helpers.bash` puts `.lok8s` first on PATH | yes |
+| bats e2e cluster matrix | yes: the `go` legs, and the native half of the `mixed` leg | yes: the `bash` legs, and the routed half of `mixed` — through the same binary, selected by the scenario's `lok8s.yaml` |
 | Go round-trip (manual) | yes | no |
 
 ## Go
@@ -257,14 +258,25 @@ bash hack/lint-shell.sh      # = npm run lint; shellcheck (.shellcheckrc) + args
 ```
 
 File discovery lives in that script only, so the local run and CI can never
-drift. The set is `.lok8s/`, `operator/hooks/`, `docs/.vitepress/`, `hack/`,
-`install/` — `*.sh` plus every extensionless `#!/usr/bin/env argsh|bash`
-script. **`.archive/legacy/` is linted on purpose**: the retired installer is
+drift. The set is `.lok8s/`, `.archive/`, `operator/hooks/`,
+`docs/.vitepress/`, `hack/`, `install/` and `tests/` — `*.sh` and `*.bash`,
+plus every extensionless `#!/usr/bin/env argsh|bash` script.
+**`.archive/legacy/` is linted on purpose**: the retired installer is
 still rebuilt into the published `lo-up` bundle, and the retired hook bodies
-are still the parity oracle for `lo operator`. Without a local shellcheck +
-argsh-lint pair the run is forwarded to the digest-pinned argsh container.
-A local `argsh lint` that finds neither tool exits 0 silently — do not trust
-a green lint you did not watch install its tools.
+are still the parity oracle for `lo operator`. **`tests/` is linted too**:
+the e2e harness drives docker, kind and `lo` against a machine with live
+clusters on it. Two exclusions there — the `*.bats` suites (bats syntax is
+not bash) and the per-run copies of the frozen tree under
+`tests/e2e/*/.lok8s/`, which are gitignored and byte-identical to the
+`.lok8s/` already in the set.
+
+Without a local shellcheck + argsh-lint pair the run is forwarded to the
+digest-pinned argsh container. Run it through this script and read its
+output: an ad-hoc `./.bin/argsh lint <file>` is not the same invocation
+and has been seen to print nothing and exit 0 on a file this script does
+report. The exit code alone is not the signal either — on a checkout whose
+`^`-prefixed imports the container cannot resolve, the run is already
+non-zero before your file is reached. Look for your file in the output.
 
 ## E2E (`lo up --ci`)
 
@@ -286,11 +298,131 @@ kubectl get pod -l app=app -o jsonpath='{.items[0].status.phase}'   # must be Ru
 ```
 
 `lo up --ci` exits non-zero unless the whole stack converges, so the step's
-exit status is the result. Locally the same scenario runs through the bats
-wrapper (`ARGSH_ENV_E2E=1 tests/e2e/run.sh single-local-build`); every
-scenario skips without `E2E=1` so a plain `argsh test` never pulls in a
-five-minute cluster lifecycle. Slot allocation is in
+exit status is the result. Locally the same scenario runs through bats
+(`E2E=1 bats tests/e2e/single-local-build/test.bats`); every scenario skips
+without `E2E=1` so a plain `argsh test` never pulls in a five-minute
+cluster lifecycle. Slot allocation is in
 [tests/e2e/SUBNETS.md](tests/e2e/SUBNETS.md).
+
+## The cluster matrix
+
+The scenarios under `tests/e2e/` each stand a real kind cluster up with
+`lo`, exercise one subject, and tear the cluster down again — and the
+teardown is an assertion, not a sweep. Full detail, including the safety
+contract and the per-scenario prerequisites, is in
+[tests/e2e/README.md](tests/e2e/README.md).
+
+| Scenario | Slot | What it proves | Legs in CI |
+|---|---|---|---|
+| `no-services` | 126 | provision + the framework bootstrap (cilium), and the empty-services render path | go, bash |
+| `single-local-build` | 127 | the Tilt build → push → deploy roundtrip | (owned by `e2e-lo-up`, both implementations, every PR) |
+| `cache-mode` | 128 | `build: false` → cache pre-pull → image swap, the pod pulling from `lok8s.cache` | go |
+| `registry-tls` | 131 | the registry set's certificate: minted into the volume `<network>-registry-tls`, mounted by every registry, served on the wire; `registry tls status`, `registry tls renew`, `registry clean`, and the one-time import of a pre-v0.4.0 `.secrets/tls/registries` pair | go, bash |
+| `shared-registries` | 132 + 133 | two domains, one mirror set: the second domain reuses it, `lo down` on one leaves it up, `lo registry clean --shared` removes the mirrors and the shared network | go, bash |
+| `lifecycle` | 134 | up, up again (idempotent), `--force-recreate`, down, up again, destroy — and the confirmation prompts on a real terminal | go, bash, mixed |
+| `remote-lo`, `remote-ci` | 129, 130 | a Lo cluster on a remote Hetzner VM, docker and CI mode | none — opt-in, they cost a billed VM |
+
+### The suite runs the Go binary
+
+It did not, until now: `tests/e2e/lib/helpers.bash` used to call
+`.lok8s/lo` directly, so every scenario exercised the frozen bash tree
+and none of them ever ran the binary the project ships. That path is
+gone.
+
+One binary runs every leg. `E2E_LO_BIN` (default `bin/lo`) picks WHICH
+binary — `bin/lo`, `bin/lo-full`, a released `lo` — and never which
+implementation. The implementation comes from committed configuration,
+the way a user chooses it: `spec.implementation` in the scenario's
+`lok8s.yaml`, read by that same binary (`internal/cli/routing.go`). The
+mechanism is `hack/lib/parity.sh`'s `parity::implementation`, which the
+parity harnesses already use.
+
+`E2E_LO_IMPL` writes the block: `go` (native), `bash` (the whole tree
+routed), or `mixed` (`E2E_LO_ROUTED` routed under a `go` default — the
+shape a project adopts while it migrates). A routing leg gets its own
+copy of the tree inside the scenario directory, because a routed command
+runs `<project>/<tree>/lo` and routing refuses both the binary's cache
+extract and a tree that resolves outside the project.
+
+Both legs must reach the same end state. Where one legitimately differs
+— the confirmation prompts are Go-only — the scenario skips that test
+and names the reason, rather than loosening the assertion.
+
+Each scenario opens with `e2e::assert_provenance`, which proves the leg
+runs the implementation it claims. Without it a routing regression is
+invisible: a `routed()` that wrongly answered false would make the bash
+and mixed legs re-run the Go code and stay green, and the suite would
+claim two implementations while covering one. The signal is the one
+`hack/lib/parity.sh` uses for its own self-check — `lo version` prints a
+`bash <version>` row only when the frozen entrypoint produced the
+output. The mixed leg routes `version` for exactly that, and also
+asserts that `lo doctor`, which it does NOT route, prints the
+`implementation:` line only the Go doctor writes: one command from each
+half.
+
+### Running one locally
+
+```bash
+make build
+env -u PATH_BASE -u PATH_BIN -u PATH_LOK8S -u PATH_CLUSTERS -u PATH_SECRETS \
+    -u KUBECONFIG -u KUSTOMIZE_PLUGIN_HOME \
+    E2E=1 bats tests/e2e/lifecycle/test.bats
+
+# one leg
+E2E=1 E2E_LO_IMPL=bash bats tests/e2e/registry-tls/test.bats
+E2E=1 E2E_LO_IMPL=mixed E2E_LO_ROUTED="version status registry" \
+      bats tests/e2e/lifecycle/test.bats
+```
+
+The `env -u` preamble is the same ambient-env hazard as everywhere else
+(see below): inherited `PATH_*` redirect the run into the live project.
+
+### The teardown assertion
+
+`e2e::assert_torn_down <down|destroy>` runs after each teardown. The kind
+cluster is gone from `kind get clusters`, the pre-existing clusters are
+untouched, the node containers and the registry containers are gone, and
+after `destroy` the registry data volumes and the certificate volume are
+gone too. What the framework keeps is asserted, not ignored: the project
+docker network survives both verbs by design, a shared set survives a
+`lo down`, and the shared mirrors are removed only by `lo registry clean
+--shared`.
+
+The belt-and-braces `kind delete` stays, and now FAILS the test when it
+had something to delete, naming `lo <phase>` as what left it behind.
+`lo destroy` is always asserted against a LIVE cluster — a scenario
+stands the cluster back up after its `lo down` case — because a destroy
+on an already-downed cluster removes nothing and would pass however
+broken its cluster deletion is.
+
+### A red nightly
+
+`cluster-matrix` runs on push to `main`, at 03:17 UTC, and on demand. It
+does NOT run on a pull request, so nothing blocks a merge on it and
+nothing pages anyone when a night goes red. The repo has no notification
+wiring to hang this off, so the habit is the mechanism:
+
+```bash
+gh run list --workflow=e2e.yml --limit 7        # the last week of nights
+gh run view <id> --log-failed                   # what broke
+```
+
+Check it when you start on lok8s, and always after merging anything that
+touches `internal/provision`, `internal/driver/lo`, the registry
+lifecycle or `tests/e2e/`. A failed leg uploads its `kind export logs`
+and container logs as an artifact (`e2e-logs-<scenario>-<impl>`, kept 7
+days), so a night that went red is diagnosable the next morning without
+reproducing it. If this repo ever gains a notification channel, this job
+is the first thing to wire into it.
+
+### The confirmation prompts
+
+`lifecycle` drives `lo down` through a pseudo-terminal (`script -qec`)
+and TYPES the answer into it: the prompt names the cluster and the
+registry containers, `n` leaves the cluster running, `y` removes it,
+`--yes` removes it with no prompt, and a run whose stdin is a pipe is
+unchanged — it asks nothing and proceeds. Piping an answer into the
+command's own stdin does not test the prompt; it turns the prompt off.
 
 ## The Go round-trip (manual gate)
 

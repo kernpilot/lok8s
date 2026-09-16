@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-placeholder
+  namespace: default
+data:
+  scenario: lifecycle
+  note: |
+    Placeholder ConfigMap so build::artifacts has at least one target to
+    render. The lifecycle scenario never applies it — it is here because
+    a domain with no target at all renders an empty artifact.

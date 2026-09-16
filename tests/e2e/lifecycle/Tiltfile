@@ -1,0 +1,6 @@
+# E2E: lifecycle Tiltfile. The scenario never starts Tilt — `lo status`
+# reads the Tilt section of the project and a project without a Tiltfile
+# is not the shape under test.
+load('../../../.lok8s/tilt/Tiltfile', 'lok8s')
+
+lok8s(auto_cache_pull = False)

@@ -11,16 +11,22 @@
 setup_file() {
   load "${BATS_TEST_DIRNAME}/../lib/helpers"
   e2e::require_e2e_enabled
+  # init first: it puts the project's own toolchain on PATH, so the tool
+  # check below reports on the binaries the run will actually use.
+  e2e::init "${BATS_TEST_DIRNAME}" 126.lok8s.dev
   e2e::require_tools docker kind kustomize yq tilt dig
   e2e::require_dns 126.lok8s.dev
-  e2e::init "${BATS_TEST_DIRNAME}" 126.lok8s.dev
+  e2e::require_binary
+  e2e::banner
+  e2e::assert_provenance
+  e2e::snapshot_world
   e2e::provision
 }
 
 teardown_file() {
   load "${BATS_TEST_DIRNAME}/../lib/helpers"
   e2e::init "${BATS_TEST_DIRNAME}" 126.lok8s.dev
-  e2e::destroy
+  e2e::final_teardown
 }
 
 setup() {
@@ -49,4 +55,26 @@ setup() {
   # composed domain artifact one level up (../artifacts.yaml).
   e2e::assert_kustomization_has '\.\./artifacts\.yaml'
   e2e::assert_kustomization_missing '^images:'
+}
+
+@test "lo down and lo destroy leave the machine clean" {
+  # The teardown is an assertion, not a best-effort sweep: the cluster,
+  # its node containers and the registry containers go, the data volumes
+  # and the project network stay, and `lo destroy` then takes the volumes
+  # too. Anything the scenario owns that survives is removed here and
+  # reported as a failure.
+  run e2e::down
+  assert_success
+  e2e::assert_torn_down down
+
+  # Stand it back up before destroying. `lo destroy` on a cluster that is
+  # already down removes nothing and would pass however broken its own
+  # cluster deletion is — the destroy assertion has to act on a live one.
+  e2e::provision
+  run kind get clusters
+  assert_line "${LOK8S_CLUSTER_NAME}"
+
+  run e2e::destroy
+  assert_success
+  e2e::assert_torn_down destroy
 }

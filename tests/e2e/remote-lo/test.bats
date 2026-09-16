@@ -114,7 +114,10 @@ teardown_file() {
   fi
 
   e2e::init "${BATS_TEST_DIRNAME}" 129.lok8s.dev
-  e2e::destroy
+  # Best effort here, and only here: the hcloud cleanup below removes
+  # billed resources, and a non-zero destroy must not stop the
+  # teardown before it runs.
+  e2e::destroy_best_effort
 
   # Belt and braces: clean up Hetzner resources by label
   if command -v hcloud &>/dev/null && [[ -n "${HCLOUD_TOKEN:-}" ]]; then

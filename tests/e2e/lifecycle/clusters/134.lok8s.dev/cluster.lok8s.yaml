@@ -1,0 +1,37 @@
+# Slot 134 — the lifecycle scenario. Up, up again, down, up, destroy.
+#
+# The spec is deliberately the cheapest cluster the driver can build: one
+# control plane, no bootstrap addons, plain-HTTP registries. The subject
+# here is the lifecycle of the cluster, the registry set and the docker
+# objects around them, not what runs inside.
+#
+# network.name and network.cidr are written out even though the slot
+# defaults would supply both. They are the scenario's ownership prefix:
+# every container, volume and network the run may touch is named after
+# them, and the harness refuses to act on a name it did not derive from
+# this file (e2e::guard_name).
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-life
+spec:
+  runtime: kind
+  kubernetes:
+    # Pinned by digest: the same node image the framework defaults to, so
+    # a machine that ran any other lok8s cluster already has it and the
+    # run costs no pull.
+    version: v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2
+  cluster:
+    domain: 134.lok8s.dev
+  network:
+    name: e2e-life
+    cidr: 10.125.134.0/24
+  registries:
+    # Plain HTTP keeps this scenario off the Secret plugin and the dev CA.
+    # The certificate path has its own scenario (registry-tls, slot 131).
+    tls: false
+    shared:
+      enabled: false
+  # No addons: a CNI would add minutes and prove nothing this scenario
+  # asks about. `lo status` reports Running without one.
+  bootstrap: []

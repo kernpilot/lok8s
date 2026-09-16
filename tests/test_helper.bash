@@ -144,6 +144,10 @@ vendor_lo_utils() {
 mock_command() {
   local name="$1" exit_code="${2:-0}" stdout="${3:-}"
   eval "${name}() { echo '${stdout}'; return ${exit_code}; }"
+  # shellcheck disable=SC2163  # the expansion IS the point: the eval above
+  # defined a function named after ${name}, and that is the function to
+  # export. Exporting the literal string "name" is what the check
+  # suggests instead, and it is not what this line means.
   export -f "${name}"
 }
 

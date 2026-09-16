@@ -71,6 +71,14 @@ docs/.vitepress/cache/
 # local artifacts
 lint.log
 tests/e2e/*/.secrets/
+# Per-run e2e scenario state. The scenario dir IS the project under test,
+# so a run writes the project file that picks the implementation leg, the
+# bash tree a routing leg needs, a .bin link, and the scratch that carries
+# the world snapshot and the pty typescripts between bats processes.
+tests/e2e/*/lok8s.yaml
+tests/e2e/*/.lok8s/
+tests/e2e/*/.bin
+tests/e2e/*/.e2e-state/
 
 # Go build output (make build) + goreleaser (make snapshot / release)
 /bin/
