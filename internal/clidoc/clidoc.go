@@ -53,22 +53,44 @@ func Generate(root *cobra.Command) ([]byte, error) {
 // escapeAngles hides a placeholder such as <domain> from the site build.
 // Help texts write their placeholders in plain prose, and the site reads
 // a page as a template, where <domain> opens an element that never closes
-// and the build stops. Prose only: inside a fence or an inline code span
-// the text is literal already, and an entity there would print as the
+// and the build stops. Prose only: a fence, an indented block (an example
+// such as `source <(lo completion bash)` arrives indented) and an inline
+// code span are literal already, and an entity there would print as the
 // entity.
 func escapeAngles(page string) string {
 	lines := strings.Split(page, "\n")
-	fence := false
+	fence, indented := false, false
 	for i, line := range lines {
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
 			fence = !fence
+			indented = false
 			continue
 		}
-		if !fence {
+		if fence {
+			continue
+		}
+		blank := strings.TrimSpace(line) == ""
+		switch {
+		case blank:
+			// A blank line neither opens nor closes the block: an
+			// example may have one in the middle.
+		case isIndented(line):
+			// An indented block opens after a blank line and runs
+			// until a line that is not indented.
+			indented = indented || i == 0 || strings.TrimSpace(lines[i-1]) == ""
+		default:
+			indented = false
+		}
+		if !indented {
 			lines[i] = escapeAnglesInProse(line)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// isIndented reports the four spaces or the tab that open a code block.
+func isIndented(line string) bool {
+	return strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ")
 }
 
 // escapeAnglesInProse escapes every `<` of one line except inside an

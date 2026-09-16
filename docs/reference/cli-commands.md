@@ -569,7 +569,7 @@ If it is not installed already, you can install it via your OS's package manager
 
 To load completions in your current shell session:
 
-	source &lt;(lo completion bash)
+	source <(lo completion bash)
 
 To load completions for every new session, execute once:
 
@@ -698,7 +698,7 @@ to enable it.  You can execute the following once:
 
 To load completions in your current shell session:
 
-	source &lt;(lo completion zsh)
+	source <(lo completion zsh)
 
 To load completions for every new session, execute once:
 

@@ -76,6 +76,9 @@ func TestPlaceholdersAreEscapedForTheSite(t *testing.T) {
 		{"double backticks", "``x`<y`` and <z", "``x`<y`` and &lt;z"},
 		{"unclosed span", "a `b and <c", "a `b and &lt;c"},
 		{"fence", "```\n<domain>\n```", "```\n<domain>\n```"},
+		{"indented block", "text\n\n\tsource <(lo completion bash)\n", "text\n\n\tsource <(lo completion bash)\n"},
+		{"four spaces", "text\n\n    lo init <domain>\n", "text\n\n    lo init <domain>\n"},
+		{"indented then prose", "text\n\n\tsource <(x)\n\nsee <domain>", "text\n\n\tsource <(x)\n\nsee &lt;domain>"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := escapeAngles(c.in); got != c.want {
