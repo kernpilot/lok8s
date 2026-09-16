@@ -337,6 +337,18 @@ Both legs must reach the same end state. Where one legitimately differs
 — the confirmation prompts are Go-only — the scenario skips that test
 and names the reason, rather than loosening the assertion.
 
+Each scenario opens with `e2e::assert_provenance`, which proves the leg
+runs the implementation it claims. Without it a routing regression is
+invisible: a `routed()` that wrongly answered false would make the bash
+and mixed legs re-run the Go code and stay green, and the suite would
+claim two implementations while covering one. The signal is the one
+`hack/lib/parity.sh` uses for its own self-check — `lo version` prints a
+`bash <version>` row only when the frozen entrypoint produced the
+output. The mixed leg routes `version` for exactly that, and also
+asserts that `lo doctor`, which it does NOT route, prints the
+`implementation:` line only the Go doctor writes: one command from each
+half.
+
 ### Running one locally
 
 ```bash
@@ -347,7 +359,7 @@ env -u PATH_BASE -u PATH_BIN -u PATH_LOK8S -u PATH_CLUSTERS -u PATH_SECRETS \
 
 # one leg
 E2E=1 E2E_LO_IMPL=bash bats tests/e2e/registry-tls/test.bats
-E2E=1 E2E_LO_IMPL=mixed E2E_LO_ROUTED="status registry" \
+E2E=1 E2E_LO_IMPL=mixed E2E_LO_ROUTED="version status registry" \
       bats tests/e2e/lifecycle/test.bats
 ```
 
@@ -371,6 +383,26 @@ had something to delete, naming `lo <phase>` as what left it behind.
 stands the cluster back up after its `lo down` case — because a destroy
 on an already-downed cluster removes nothing and would pass however
 broken its cluster deletion is.
+
+### A red nightly
+
+`cluster-matrix` runs on push to `main`, at 03:17 UTC, and on demand. It
+does NOT run on a pull request, so nothing blocks a merge on it and
+nothing pages anyone when a night goes red. The repo has no notification
+wiring to hang this off, so the habit is the mechanism:
+
+```bash
+gh run list --workflow=e2e.yml --limit 7        # the last week of nights
+gh run view <id> --log-failed                   # what broke
+```
+
+Check it when you start on lok8s, and always after merging anything that
+touches `internal/provision`, `internal/driver/lo`, the registry
+lifecycle or `tests/e2e/`. A failed leg uploads its `kind export logs`
+and container logs as an artifact (`e2e-logs-<scenario>-<impl>`, kept 7
+days), so a night that went red is diagnosable the next morning without
+reproducing it. If this repo ever gains a notification channel, this job
+is the first thing to wire into it.
 
 ### The confirmation prompts
 

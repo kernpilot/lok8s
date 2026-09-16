@@ -87,8 +87,16 @@ _load_bats_libs
 
 # Default timeouts. Scenarios can override by setting these before
 # calling helpers.
-: "${E2E_PROVISION_TIMEOUT:=600}"   # 10 min to provision a kind cluster
-: "${E2E_DESTROY_TIMEOUT:=180}"     # 3 min to tear down
+#
+# These have to ADD UP under the CI job's own cap, or a slow leg dies at
+# the cap with no message instead of at the operation that hung, and the
+# failure diagnostics never run. The worst leg is `lifecycle`: four
+# provisions, three downs and two destroys. 4x300 + 5x120 = 1800s = 30
+# minutes of budget, and .github/workflows/e2e.yml caps the job at 45 to
+# leave room for the ~6 minutes of toolchain setup. A healthy leg is
+# ~3 minutes; these are the ceilings, not the expectation.
+: "${E2E_PROVISION_TIMEOUT:=300}"   # 5 min to provision a kind cluster
+: "${E2E_DESTROY_TIMEOUT:=120}"     # 2 min to tear down
 : "${E2E_TILT_CI_TIMEOUT:=600}"     # 10 min for tilt ci to reach steady state
 
 # The binary under test. ONE binary runs every leg: bin/lo by default,
@@ -131,12 +139,20 @@ e2e::_unmet() {
 
 # e2e::require_tools — call from setup() to skip when prereqs are missing.
 # Usage: e2e::require_tools docker kind kustomize yq tilt
+#
+# A routing leg needs the bash tree's own toolchain on top of whatever
+# the scenario asks for: the frozen libs read specs with yq and registry
+# state with jq. They are added here rather than in each scenario,
+# because the requirement follows the LEG, not the subject.
 e2e::require_tools() {
-  for tool in "$@"; do
+  local -a tools=("$@")
+  [[ "${E2E_LO_IMPL}" == "go" ]] || tools+=(yq jq)
+  for tool in "${tools[@]}"; do
     command -v "${tool}" >/dev/null 2>&1 || {
       e2e::_unmet "e2e: '${tool}' not in PATH"
     }
   done
+  unset tool
   if command -v docker >/dev/null 2>&1; then
     docker info >/dev/null 2>&1 || e2e::_unmet "e2e: docker daemon not running"
   fi
@@ -159,8 +175,11 @@ e2e::require_binary() {
 }
 
 # e2e::require_go_impl <what> — skip one test whose subject has no bash
-# twin (the confirmation prompts, `lo registry tls`). The caller names
-# the subject, so the skip line says what is not covered on this leg.
+# twin. Today that is the confirmation prompts and nothing else:
+# `lo registry tls` DOES exist in the frozen tree (registry::tls, the
+# same volume model), so the registry-tls scenario runs on every leg.
+# The caller names the subject, so the skip line says what this leg does
+# not cover.
 e2e::require_go_impl() {
   [[ "${E2E_LO_IMPL}" == "go" ]] || skip "e2e: ${1} runs on the go leg only (this leg: ${E2E_LO_IMPL})"
 }
@@ -275,7 +294,13 @@ e2e::init() {
   # shim resolves to E2E_LO_BIN, so a child runs the same binary the test
   # runs — what the e2e-lo-up CI job asserts about its own PATH too.
   ln -sfn "${E2E_LO_BIN}" "${E2E_STATE}/bin/lo"
-  export PATH="${E2E_STATE}/bin:${PATH_BIN}:${PATH}"
+  # Prepended ONCE. e2e::init runs in every setup(), and an unguarded
+  # prepend grows PATH by two entries per test until it is unreadable in
+  # a diagnostic dump.
+  case ":${PATH}:" in
+    *":${E2E_STATE}/bin:"*) ;;
+    *) export PATH="${E2E_STATE}/bin:${PATH_BIN}:${PATH}" ;;
+  esac
 
   # Tilt port: derive from slot to avoid collisions with a dev tilt
   # running at the default 10350. Slot 126 -> 10426, etc.
@@ -347,7 +372,15 @@ e2e::_bash_tree() {
   local dir="$1"
   local stamp="${dir}/.lok8s/.e2e-stamp"
   local want
-  want="$(cd "${_PROJECT_ROOT}" && find .lok8s -type f -printf '%T@ %s %p\n' 2>/dev/null | sort | cksum)"
+  # Content, not mtimes: `find -printf` is GNU-only, and on a BSD find it
+  # prints nothing, which froze the stamp and left the leg re-testing a
+  # stale copy of the tree forever. `-exec cksum {} +` and `cksum` are
+  # POSIX, and a checksum over every path and its bytes also skips the
+  # copy when a touched file did not actually change.
+  want="$(cd "${_PROJECT_ROOT}" && find .lok8s -type f -exec cksum {} + 2>/dev/null | LC_ALL=C sort | cksum)"
+  # An empty tree would hash to a constant and match forever; a checkout
+  # without .lok8s is a broken run, not a cached one.
+  [[ -n "${want}" ]] || fail "e2e: no bash tree at ${_PROJECT_ROOT}/.lok8s to copy into the project"
   if [[ -f "${stamp}" && "$(cat "${stamp}")" == "${want}" ]]; then
     return 0
   fi
@@ -368,6 +401,48 @@ e2e::banner() {
   e2e::log "e2e: leg      ${E2E_LO_IMPL}${E2E_LO_ROUTED:+ (routed: ${E2E_LO_ROUTED})}"
   e2e::log "e2e: project  ${PATH_BASE}"
   e2e::log "e2e: domain   ${DOMAIN_NAME} · cluster ${LOK8S_CLUSTER_NAME} · network ${E2E_NETWORK}"
+}
+
+# e2e::assert_provenance — prove the leg ran the implementation it says
+# it runs. Called once per scenario, from setup_file.
+#
+# Without it a routing regression is invisible: if `routing.routed()`
+# ever returned false where it should return true, the bash and mixed
+# legs would silently re-run the Go code and stay green, and the suite
+# would claim to cover two implementations while covering one.
+#
+# The signal is the one `hack/lib/parity.sh` uses for the same self-check
+# (parity::init): `lo version` prints a `bash <version>` row only when
+# the frozen entrypoint produced the output. The Go implementation has no
+# such row, because it is not running under bash.
+#
+#   go     no bash row — nothing was routed behind our back
+#   bash   a bash row — the whole tree really is routed
+#   mixed  a bash row from the routed `version`, AND `lo doctor` (which
+#          is NOT routed) printing its `implementation:` line, which only
+#          the Go doctor writes. One command from each half.
+e2e::assert_provenance() {
+  local version doctor
+  version="$("${E2E_LO_BIN}" version </dev/null 2>&1)"
+  case "${E2E_LO_IMPL}" in
+    go)
+      ! grep -q '^bash ' <<<"${version}" \
+        || fail "e2e: the go leg ran the bash tree (lo version printed a bash row):
+${version}"
+      ;;
+    bash|mixed)
+      grep -q '^bash ' <<<"${version}" \
+        || fail "e2e: the ${E2E_LO_IMPL} leg did NOT run the bash tree — lo version printed no bash row, so this leg is re-testing Go:
+${version}"
+      ;;
+  esac
+  if [[ "${E2E_LO_IMPL}" == "mixed" ]]; then
+    doctor="$("${E2E_LO_BIN}" doctor </dev/null 2>&1 || true)"
+    grep -q 'implementation: go; bash for ' <<<"${doctor}" \
+      || fail "e2e: the mixed leg has no native half — lo doctor printed no Go implementation line, so the whole tree is routed:
+${doctor}"
+  fi
+  e2e::log "e2e: provenance ok — the ${E2E_LO_IMPL} leg runs what it says"
 }
 
 # e2e::lo <args...> — invoke the binary under test with the scenario's
@@ -510,6 +585,29 @@ e2e::_docker_names() {
   esac
 }
 
+# e2e::_remove_report <what> <names> — remove the named docker objects
+# (<what> is ps | volume) and describe the OUTCOME, not the attempt:
+# which ones the safety net removed and which ones survived it. A report
+# written from the list gathered before the removal reads as a clean-up
+# even when nothing could be cleaned up.
+e2e::_remove_report() {
+  local what="$1" names="$2" removed="" survived="" n
+  while IFS= read -r n; do
+    [[ -n "${n}" ]] || continue
+    case "${what}" in
+      ps)     docker rm -f "${n}" >/dev/null 2>&1 || true ;;
+      volume) docker volume rm -f "${n}" >/dev/null 2>&1 || true ;;
+    esac
+    if [[ -n "$(e2e::_docker_names "${what}" "^${n}$")" ]]; then
+      survived+="${n} "
+    else
+      removed+="${n} "
+    fi
+  done <<<"${names}"
+  [[ -z "${removed}" ]] || printf '%s(removed by the safety net) ' "${removed}"
+  [[ -z "${survived}" ]] || printf 'STILL THERE: %s' "${survived}"
+}
+
 # e2e::assert_torn_down <phase>
 #
 # The teardown IS the assertion. <phase> is what just ran:
@@ -550,17 +648,25 @@ e2e::assert_torn_down() {
     shared=1
   fi
 
-  # 1. The kind cluster. The belt-and-braces delete stays, and says so.
+  # 1. The kind cluster. The belt-and-braces delete stays, and it reports
+  #    what is TRUE after it ran, not what it attempted. `kind delete` can
+  #    fail too, and a failure message that claims the cluster was cleaned
+  #    up while it is still running is the one lie this suite cannot
+  #    afford: the next scenario would then trip over it and blame itself.
   if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
     kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true
-    leftovers+=("kind cluster ${cluster} — lo ${phase} left it behind; the safety net deleted it")
+    if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
+      leftovers+=("kind cluster ${cluster} — lo ${phase} left it behind AND the safety net could not delete it. It is STILL RUNNING. Remove it by hand: kind delete cluster --name ${cluster}")
+    else
+      leftovers+=("kind cluster ${cluster} — lo ${phase} left it behind; the safety net deleted it")
+    fi
   fi
 
-  # 2. The kind nodes and the proxy: never a documented keep.
+  # 2. The kind nodes and the proxy: never a documented keep. Same rule
+  #    as the cluster — say which ones actually went.
   names="$(e2e::_docker_names ps "^${cluster}-" | grep -v "^${net}-registry-" || true)"
   if [[ -n "${names}" ]]; then
-    xargs -r docker rm -f >/dev/null 2>&1 <<<"${names}" || true
-    leftovers+=("containers after lo ${phase}: $(tr '\n' ' ' <<<"${names}")")
+    leftovers+=("containers after lo ${phase}: $(e2e::_remove_report ps "${names}")")
   fi
 
   # 3. The project's registry containers. Gone, except after a `down` on
@@ -570,8 +676,7 @@ e2e::assert_torn_down() {
     if (( shared )) && [[ "${phase}" == "down" ]]; then
       e2e::log "e2e: shared set — lo down keeps $(tr '\n' ' ' <<<"${regs}")"
     else
-      xargs -r docker rm -f >/dev/null 2>&1 <<<"${regs}" || true
-      leftovers+=("registry containers after lo ${phase}: $(tr '\n' ' ' <<<"${regs}")")
+      leftovers+=("registry containers after lo ${phase}: $(e2e::_remove_report ps "${regs}")")
     fi
   fi
 
@@ -590,8 +695,7 @@ e2e::assert_torn_down() {
     done <<<"${names}"
     [[ -z "${unexpected}" ]] || leftovers+=("unexpected volumes after lo down: ${unexpected}")
   elif [[ -n "${names}" ]]; then
-    xargs -r docker volume rm -f >/dev/null 2>&1 <<<"${names}" || true
-    leftovers+=("volumes after lo destroy: $(tr '\n' ' ' <<<"${names}")")
+    leftovers+=("volumes after lo destroy: $(e2e::_remove_report volume "${names}")")
   fi
 
   # 5. The project docker network persists BY DESIGN across down and
@@ -639,16 +743,38 @@ e2e::assert_registry_containers() {
 # design (the project docker network) and fail if anything else the
 # scenario owns is still there. Call it from teardown_file AFTER the
 # last e2e::assert_torn_down.
+#
+# The kind cluster is checked here too. assert_torn_down deletes one it
+# finds, but that delete can fail, and a scenario whose last assertion
+# already failed must not leave the next one to discover a running
+# cluster and blame itself for it.
 e2e::sweep() {
-  local net="${E2E_NETWORK}"
+  local net="${E2E_NETWORK}" cluster="${LOK8S_CLUSTER_NAME}"
   e2e::guard_name network "${net}"
+  e2e::guard_name cluster "${cluster}"
   docker network rm "${net}" >/dev/null 2>&1 || true
-  local left=""
-  left+="$(e2e::_docker_names ps "^${LOK8S_CLUSTER_NAME}-")"
-  left+="$(e2e::_docker_names volume "^${net}-")"
-  left+="$(e2e::_docker_names network "^${net}$")"
-  rm -rf "${E2E_STATE:?}/bin" "${E2E_STATE:?}/provisioned.${LOK8S_CLUSTER_NAME}"
-  [[ -z "${left}" ]] || fail "e2e: sweep found leftovers: $(tr '\n' ' ' <<<"${left}")"
+
+  local -a left=()
+  if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
+    kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true
+    if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
+      left+=("kind cluster ${cluster} (STILL RUNNING — remove it by hand)")
+    else
+      left+=("kind cluster ${cluster} (removed by the sweep)")
+    fi
+  fi
+  # One list per kind, each on its own line: concatenating three command
+  # substitutions runs the last name of one into the first of the next.
+  local names
+  for names in \
+    "$(e2e::_docker_names ps "^${cluster}-")" \
+    "$(e2e::_docker_names volume "^${net}-")" \
+    "$(e2e::_docker_names network "^${net}$")"; do
+    [[ -z "${names}" ]] || left+=("$(tr '\n' ' ' <<<"${names}")")
+  done
+
+  rm -rf "${E2E_STATE:?}/bin" "${E2E_STATE:?}/provisioned.${cluster}"
+  (( ${#left[@]} == 0 )) || fail "e2e: sweep found leftovers: ${left[*]}"
 }
 
 # e2e::final_teardown — teardown_file's one call: destroy whatever is
@@ -690,7 +816,12 @@ e2e::tls_volume_read() {
   local vol ctr
   vol="$(e2e::tls_volume)"
   docker volume inspect "${vol}" >/dev/null 2>&1 || return 1
-  ctr="${vol}-read"
+  # Named OUTSIDE the `<network>-` prefix that assert_torn_down polices:
+  # a reader killed mid-run would otherwise look like a container `lo`
+  # failed to remove, and the failure would name the wrong culprit. The
+  # `e2e-` prefix still marks it as this suite's, and the removals below
+  # bracket every use.
+  ctr="e2e-tlsread-${vol}"
   docker rm -f "${ctr}" >/dev/null 2>&1 || true
   docker container create --name "${ctr}" --volume "${vol}:/etc/registry/certs" \
     registry:2.8.3 >/dev/null 2>&1 || return 1

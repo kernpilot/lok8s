@@ -159,10 +159,13 @@ jobs:
   cluster-matrix:
     name: Cluster (${{ matrix.scenario }}, ${{ matrix.impl }})
     runs-on: ubuntu-latest
-    # Each leg stands a real kind cluster up and tears it down again, more
-    # than once. A healthy leg is a few minutes; this is the ceiling that
-    # kills a hung provision.
-    timeout-minutes: 30
+    # The cap has to sit ABOVE the sum of the per-operation budgets in
+    # tests/e2e/lib/helpers.bash, or a slow leg dies here with no message
+    # instead of at the operation that hung, and the diagnostics below
+    # never run. The worst leg (lifecycle) budgets 4x300s of provision and
+    # 5x120s of teardown = 30 minutes; the toolchain setup above costs
+    # ~6. A healthy leg is ~3 minutes end to end.
+    timeout-minutes: 45
     strategy:
       # Every leg runs. One broken scenario must not hide the state of the
       # other nine.
@@ -175,9 +178,12 @@ jobs:
         # bash entrypoint directly.
         #
         # `mixed` is the shape a project adopts while it migrates: a `go`
-        # default with a couple of commands routed to the bash tree. The
+        # default with a few commands routed to the bash tree. The
         # lifecycle scenario carries it, with status and registry routed
-        # against a live cluster.
+        # against a live cluster. `version` rides along because it is the
+        # provenance probe: its `bash` row is how e2e::assert_provenance
+        # proves the routed half really execs the tree, and `lo doctor`
+        # (not routed) proves the other half is still native.
         #
         # cache-mode runs the go leg only: it is the slowest scenario (a
         # `tilt ci` that pre-pulls from Docker Hub), and ci.yml's
@@ -188,7 +194,7 @@ jobs:
         include:
           - {scenario: lifecycle, impl: go}
           - {scenario: lifecycle, impl: bash}
-          - {scenario: lifecycle, impl: mixed, routed: status registry}
+          - {scenario: lifecycle, impl: mixed, routed: version status registry}
           - {scenario: registry-tls, impl: go}
           - {scenario: registry-tls, impl: bash}
           - {scenario: shared-registries, impl: go}
@@ -295,3 +301,33 @@ jobs:
           docker ps -a --format '{{.Names}}\t{{.Status}}'
           docker volume ls --format '{{.Name}}'
           docker network ls --format '{{.Name}}'
+
+      - name: Cluster and registry logs
+        # A provision that fails leaves nothing else to look at: the
+        # scenario tears its cluster down, and a runner is gone minutes
+        # later. `kind export logs` writes the kubelet, containerd and
+        # control-plane logs of whatever is still up, and the registry
+        # containers explain a push or a certificate failure. Without
+        # this, every provision failure costs a re-run to diagnose, and a
+        # nightly-only job may not reproduce at all.
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-logs
+          for c in $(kind get clusters 2>/dev/null); do
+            kind export logs "/tmp/e2e-logs/${c}" --name "${c}" || true
+          done
+          for n in $(docker ps -a --filter 'name=^e2e-' --format '{{.Names}}'; \
+                     docker ps -a --filter 'name=^lok8s-registry-e2e-' --format '{{.Names}}'); do
+            echo "===== docker logs ${n} ====="
+            docker logs --tail 200 "${n}" 2>&1 || true
+          done > /tmp/e2e-logs/containers.log
+          tail -c 200000 /tmp/e2e-logs/containers.log || true
+
+      - name: Upload the logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-logs-${{ matrix.scenario }}-${{ matrix.impl }}
+          path: /tmp/e2e-logs
+          retention-days: 7
+          if-no-files-found: ignore

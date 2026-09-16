@@ -24,8 +24,23 @@ export ARGSH_DOCKER_IMAGE="${ARGSH_DOCKER_IMAGE:-ghcr.io/arg-sh/argsh@sha256:990
 # grep exits 1 on zero matches — tolerate exactly that (the find half may
 # still yield files) while real errors (exit 2) kill the run with their
 # original status.
+#
+# tests/ carries its own set and is linted too: the e2e harness drives
+# docker, kind and `lo` against a machine with live clusters on it, which
+# is the last shell in this repo that should go unchecked. Two exclusions
+# there, both deliberate:
+#
+#   *.bats           bats syntax, not bash. `@test "..." {` is a parse
+#                    error to shellcheck, so the suites are not linted as
+#                    shell; their helpers (*.bash, *.sh) are.
+#   */.lok8s         a per-run copy of the frozen tree that a routing e2e
+#                    leg makes inside the scenario directory. It is
+#                    gitignored, it is byte-identical to .lok8s/ which is
+#                    already in the set above, and linting it would
+#                    report every finding N times over.
+SETS=(.lok8s .archive operator/hooks docs/.vitepress hack install tests)
 {
-  find .lok8s .archive operator/hooks docs/.vitepress hack install -type f -name '*.sh'
-  grep -rlE '^#!/usr/bin/env (argsh|bash)' .lok8s .archive operator/hooks docs/.vitepress hack install \
+  find "${SETS[@]}" -type f \( -name '*.sh' -o -name '*.bash' \) -print
+  grep -rlE '^#!/usr/bin/env (argsh|bash)' --exclude='*.bats' "${SETS[@]}" \
     || { rc="${?}"; [[ "${rc}" -eq 1 ]] || exit "${rc}"; }
-} | sort -u | xargs -r ./.bin/argsh lint
+} | sort -u | grep -v '^tests/e2e/[^/]*/\.lok8s/' | xargs -r ./.bin/argsh lint

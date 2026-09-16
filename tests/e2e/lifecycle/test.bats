@@ -37,10 +37,13 @@ setup_file() {
   # init first: it puts the project's own toolchain on PATH, so the tool
   # check below reports on the binaries the run will actually use.
   e2e::init "${BATS_TEST_DIRNAME}" 134.lok8s.dev
+  # require_tools adds yq and jq of its own accord on a routing leg: the
+  # frozen libs read specs with yq and registry state with jq.
   e2e::require_tools docker kind
   e2e::require_dns 134.lok8s.dev
   e2e::require_binary
   e2e::banner
+  e2e::assert_provenance
   e2e::snapshot_world
 }
 
@@ -185,17 +188,20 @@ _ids() {
   e2e::assert_registry_containers up build cache
 }
 
-@test "--yes removes the cluster on a terminal without asking" {
-  if [[ "${E2E_LO_IMPL}" == "go" ]]; then
-    e2e::pty_run "" down --domain "${DOMAIN_NAME}" --yes
-    assert_equal "${E2E_PTY_RC}" "0"
-    # --yes is the only skip. Nothing is printed and nothing is read.
-    assert [ -z "$(grep -F 'Continue? [y/N]' <<<"${E2E_PTY_OUTPUT}")" ]
-    assert [ -z "$(grep -F 'lo down removes:' <<<"${E2E_PTY_OUTPUT}")" ]
-  else
-    run e2e::down
-    assert_success
-  fi
+@test "on a terminal, --yes removes the cluster without asking" {
+  # Go-only, and named for it. The flag exists only where the prompt
+  # does, and a run that took the `else` branch would have been a plain
+  # `lo down` under a name that promised `--yes`. The legs that skip here
+  # leave the cluster up; the next test provisions (idempotent) before it
+  # destroys, so the sequence is the same either way.
+  e2e::require_go_impl "--yes on a terminal"
+
+  e2e::pty_run "" down --domain "${DOMAIN_NAME}" --yes
+  assert_equal "${E2E_PTY_RC}" "0"
+  # --yes is the only skip. Nothing is printed and nothing is read.
+  assert [ -z "$(grep -F 'Continue? [y/N]' <<<"${E2E_PTY_OUTPUT}")" ]
+  assert [ -z "$(grep -F 'lo down removes:' <<<"${E2E_PTY_OUTPUT}")" ]
+
   e2e::assert_torn_down down
 }
 

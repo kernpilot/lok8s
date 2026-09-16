@@ -52,6 +52,14 @@ Both legs must reach the same end state. Where one legitimately differs
 (the confirmation prompts are Go-only), the scenario skips that one test
 and says so, rather than loosening the assertion.
 
+Every scenario opens with `e2e::assert_provenance`, which proves the leg
+runs what it claims: `lo version` prints a `bash <version>` row only when
+the frozen entrypoint produced the output (the same signal
+`hack/lib/parity.sh` checks itself against). The mixed leg routes
+`version` for that, and also asserts `lo doctor` — not routed — prints
+the `implementation:` line only the Go doctor writes. Without this a
+routing regression would make both routing legs silently re-test Go.
+
 ## Running
 
 ```bash
@@ -63,7 +71,7 @@ E2E=1 bats tests/e2e/lifecycle/test.bats     # the same, directly
 
 # one leg
 E2E=1 E2E_LO_IMPL=bash  bats tests/e2e/registry-tls/test.bats
-E2E=1 E2E_LO_IMPL=mixed E2E_LO_ROUTED="status registry" \
+E2E=1 E2E_LO_IMPL=mixed E2E_LO_ROUTED="version status registry" \
       bats tests/e2e/lifecycle/test.bats
 
 # another binary

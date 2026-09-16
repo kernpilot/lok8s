@@ -21,6 +21,7 @@ setup_file() {
   e2e::require_dns 128.lok8s.dev
   e2e::require_binary
   e2e::banner
+  e2e::assert_provenance
   e2e::snapshot_world
   e2e::provision
 }

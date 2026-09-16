@@ -16,20 +16,48 @@ set -euo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _ROOT="$(cd "${_HERE}/../.." && pwd)"
 
+# _have_bats_libs — can the helpers load bats-support and bats-assert?
+#
+# A bats binary alone is not enough: every scenario loads those two
+# through tests/lib/bats_libs.bash, and without them the run dies in
+# setup() with "Could not find library 'bats-support'" — which reads as a
+# broken branch, not a missing install. The candidate list mirrors that
+# loader (it is the authority; keep the two in step), including the main
+# working tree's .bin/lib so a linked git worktree resolves.
+_have_bats_libs() {
+  local d common main_root=""
+  if common="$(git -C "${_ROOT}" rev-parse --git-common-dir 2>/dev/null)"; then
+    [[ "${common}" == /* ]] || common="${_ROOT}/${common}"
+    main_root="$(cd "${common}/.." 2>/dev/null && pwd)" || main_root=""
+  fi
+  for d in /usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib \
+    "${_ROOT}/.bin/lib" ${main_root:+"${main_root}/.bin/lib"}; do
+    [[ -d "${d}/bats-support" && -d "${d}/bats-assert" ]] && return 0
+  done
+  return 1
+}
+
 # Resolve the bats runner. A host bats comes FIRST, and `argsh test` is
 # the fallback: argsh runs bats on the host when it finds one, but
 # forwards to its container when it does not — and a cluster scenario in
 # a container without the docker socket fails in a way that says nothing
 # about the code under test.
-if command -v bats &>/dev/null; then
+if _have_bats_libs && command -v bats &>/dev/null; then
   _run_bats() { bats "$@"; }
-elif [[ -x "${_ROOT}/.bin/bin/bats" ]]; then
+elif _have_bats_libs && [[ -x "${_ROOT}/.bin/bin/bats" ]]; then
   _run_bats() { "${_ROOT}/.bin/bin/bats" "$@"; }
 elif command -v argsh &>/dev/null; then
+  if ! _have_bats_libs; then
+    echo "note: bats-support/bats-assert are not installed, so this run goes" >&2
+    echo "      through 'argsh test'. If argsh has no host bats either it" >&2
+    echo "      forwards to its container, which has no docker socket and" >&2
+    echo "      cannot stand a cluster up. Install them with: ./.bin/b install" >&2
+  fi
   _run_bats() { argsh test "$@"; }
 else
-  echo "error: no bats in PATH and none under .bin/bin" >&2
-  echo "       run: ./.bin/b install" >&2
+  echo "error: no usable bats runner." >&2
+  echo "       run: ./.bin/b install   (installs bats under .bin/bin and" >&2
+  echo "       bats-support + bats-assert under .bin/lib)" >&2
   exit 1
 fi
 

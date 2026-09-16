@@ -34,6 +34,7 @@ setup_file() {
   e2e::require_dns 131.lok8s.dev
   e2e::require_binary
   e2e::banner
+  e2e::assert_provenance
   e2e::snapshot_world
 }
 
@@ -41,6 +42,9 @@ teardown_file() {
   load "${BATS_TEST_DIRNAME}/../lib/helpers"
   e2e::init "${BATS_TEST_DIRNAME}" 131.lok8s.dev
   e2e::final_teardown
+  # The volume reader is named outside the prefix assert_torn_down
+  # polices, so it is swept here instead.
+  docker rm -f "e2e-tlsread-$(e2e::tls_volume)" >/dev/null 2>&1 || true
   rm -rf "${BATS_TEST_DIRNAME}/.secrets"
 }
 
