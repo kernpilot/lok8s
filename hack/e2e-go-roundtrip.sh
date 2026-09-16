@@ -31,6 +31,9 @@ indent() { while IFS= read -r line; do printf '  %s\n' "${line}"; done; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LO_BIN="${1:-${ROOT}/bin/lo}"
+# Absolute, because every call runs from inside the synthetic project: a
+# relative path (`bin/lo`) resolves against that directory and is not there.
+[[ "${LO_BIN}" = /* ]] || LO_BIN="$(cd "$(dirname "${LO_BIN}")" 2>/dev/null && pwd)/$(basename "${LO_BIN}")"
 [[ -x "${LO_BIN}" ]] || { echo "error: ${LO_BIN} not built (make build)" >&2; exit 2; }
 for tool in docker kind; do
   command -v "${tool}" >/dev/null || [[ -x "${ROOT}/.bin/${tool}" ]] || { echo "error: ${tool} not available" >&2; exit 2; }
