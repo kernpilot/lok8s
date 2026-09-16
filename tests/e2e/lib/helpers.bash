@@ -150,7 +150,8 @@ e2e::_unmet() {
 # state with jq. They are added here rather than in each scenario,
 # because the requirement follows the LEG, not the subject.
 e2e::require_tools() {
-  local tool -a tools=("$@")
+  local tool
+  local -a tools=("$@")
   [[ "${E2E_LO_IMPL}" == "go" ]] || tools+=(yq jq)
   for tool in "${tools[@]}"; do
     command -v "${tool}" >/dev/null 2>&1 || {
