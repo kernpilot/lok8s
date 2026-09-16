@@ -237,7 +237,7 @@ jobs:
           for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
           docker info --format '{{json .RegistryConfig.InsecureRegistryCIDRs}}'
 
-      - name: Install toolchain (b → argsh, bats, kind, tilt, kustomize, khelm)
+      - name: Install toolchain (b → argsh, kind, tilt, kustomize, khelm)
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -255,10 +255,65 @@ jobs:
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
           ./.bin/argsh builtins install   # argsh.so — the argsh runtime
-          # .bin holds the tools `lo` shells out to; .bin/bin holds bats,
-          # and .bin/lib the bats-support/bats-assert the helpers load.
+          # .bin holds the tools `lo` shells out to; .bin/bin holds bats
+          # (installed by the next step, not by b) and .bin/lib the
+          # bats-support/bats-assert the helpers load.
           echo "${GITHUB_WORKSPACE}/.bin" >> "${GITHUB_PATH}"
           echo "${GITHUB_WORKSPACE}/.bin/bin" >> "${GITHUB_PATH}"
+
+      - name: Install bats and its libraries (pinned)
+        # NOT left to `b install`. On the first dispatch of this matrix it
+        # printed "github.com/bats-core/bats-core ... fail!" for exactly
+        # this entry and still exited 0, so every leg died at `bats:
+        # command not found` — a silent skip that cost ten green-looking
+        # 30-second failures. These land where tests/lib/bats_libs.bash
+        # looks (.bin/bin and .bin/lib), at the versions a developer
+        # machine carries, each tarball checksum-verified.
+        run: |
+          set -euo pipefail
+          install_tarball() { # <repo> <tag> <sha256> <dest>
+            local repo="$1" tag="$2" sum="$3" dest="$4" tmp
+            tmp="$(mktemp -d)"
+            curl -fsSL "https://github.com/bats-core/${repo}/archive/refs/tags/${tag}.tar.gz" -o "${tmp}/src.tar.gz"
+            echo "${sum}  ${tmp}/src.tar.gz" | sha256sum -c -
+            mkdir -p "${dest}"
+            tar -xzf "${tmp}/src.tar.gz" -C "${dest}" --strip-components=1
+            rm -rf "${tmp}"
+          }
+          BIN="${GITHUB_WORKSPACE}/.bin"
+          install_tarball bats-core v1.13.0 \
+            a85e12b8828271a152b338ca8109aa23493b57950987c8e6dff97ba492772ff3 "${BIN}/src/bats-core"
+          "${BIN}/src/bats-core/install.sh" "${BIN}"
+          install_tarball bats-support v0.3.0 \
+            7815237aafeb42ddcc1b8c698fc5808026d33317d8701d5ec2396e9634e2918f "${BIN}/lib/bats-support"
+          install_tarball bats-assert v2.1.0 \
+            98ca3b685f8b8993e48ec057565e6e2abcc541034ed5b0e81f191505682037fd "${BIN}/lib/bats-assert"
+
+      - name: Verify the prerequisites
+        # The suite fails a MISSING prerequisite rather than skipping
+        # (E2E_STRICT below), but bats is the runner itself and cannot
+        # check for its own absence. This step is where a broken
+        # toolchain install stops the job, naming what is missing,
+        # instead of surfacing as "command not found" inside the run.
+        run: |
+          set -euo pipefail
+          missing=0
+          for t in bats kind docker kustomize yq jq tilt dig openssl script; do
+            if command -v "${t}" >/dev/null 2>&1; then
+              printf '  ok      %-10s %s\n' "${t}" "$(command -v "${t}")"
+            else
+              printf '  MISSING %s\n' "${t}"; missing=1
+            fi
+          done
+          for d in bats-support bats-assert; do
+            if [ -d "${GITHUB_WORKSPACE}/.bin/lib/${d}" ]; then
+              printf '  ok      %s\n' "${d}"
+            else
+              printf '  MISSING %s\n' "${d}"; missing=1
+            fi
+          done
+          bats --version
+          [ "${missing}" -eq 0 ] || { echo "::error::the toolchain install did not provide every prerequisite"; exit 1; }
 
       - name: Build the Secret plugin (the bash leg mints the registry cert through it)
         # The bash implementation execs
