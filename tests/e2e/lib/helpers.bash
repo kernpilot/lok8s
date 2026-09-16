@@ -88,15 +88,20 @@ _load_bats_libs
 # Default timeouts. Scenarios can override by setting these before
 # calling helpers.
 #
-# These have to ADD UP under the CI job's own cap, or a slow leg dies at
-# the cap with no message instead of at the operation that hung, and the
-# failure diagnostics never run. The worst leg is `lifecycle`: four
-# provisions, three downs and two destroys. 4x300 + 5x120 = 1800s = 30
-# minutes of budget, and .github/workflows/e2e.yml caps the job at 45 to
+# EVERY call into `lo` is bounded by one of these — e2e::lo, e2e::provision,
+# e2e::down, e2e::destroy and e2e::pty_run all wrap `timeout`. An unbounded
+# one would hang until the CI job's own cap, and a cap CANCELS the job, so
+# the operation that hung is never named.
+#
+# They have to add up under that cap. The worst leg is `lifecycle`: five
+# provisions (300 each), two other `lo` calls (180), three prompt-driven
+# downs and two destroys (120 each). 5x300 + 2x180 + 5x120 = 2460s = 41
+# minutes of budget, and .github/workflows/e2e.yml caps the job at 60 to
 # leave room for the ~6 minutes of toolchain setup. A healthy leg is
-# ~3 minutes; these are the ceilings, not the expectation.
+# ~3 minutes; these are ceilings, not expectations.
 : "${E2E_PROVISION_TIMEOUT:=300}"   # 5 min to provision a kind cluster
 : "${E2E_DESTROY_TIMEOUT:=120}"     # 2 min to tear down
+: "${E2E_LO_TIMEOUT:=180}"          # 3 min for any other single `lo` call
 : "${E2E_TILT_CI_TIMEOUT:=600}"     # 10 min for tilt ci to reach steady state
 
 # The binary under test. ONE binary runs every leg: bin/lo by default,
@@ -377,7 +382,14 @@ e2e::_bash_tree() {
   # stale copy of the tree forever. `-exec cksum {} +` and `cksum` are
   # POSIX, and a checksum over every path and its bytes also skips the
   # copy when a touched file did not actually change.
-  want="$(cd "${_PROJECT_ROOT}" && find .lok8s -type f -exec cksum {} + 2>/dev/null | LC_ALL=C sort | cksum)"
+  # The executable bit is part of the tree contract (internal/assets
+  # carries a bashExecutables list for it), and a checksum over contents
+  # alone cannot see a chmod. `-perm -u+x` is POSIX and names the
+  # executable set alongside the content sums.
+  want="$(cd "${_PROJECT_ROOT}" && {
+    find .lok8s -type f -exec cksum {} +
+    find .lok8s -type f -perm -u+x -print
+  } 2>/dev/null | LC_ALL=C sort | cksum)"
   # An empty tree would hash to a constant and match forever; a checkout
   # without .lok8s is a broken run, not a cached one.
   [[ -n "${want}" ]] || fail "e2e: no bash tree at ${_PROJECT_ROOT}/.lok8s to copy into the project"
@@ -416,16 +428,29 @@ e2e::banner() {
 # the frozen entrypoint produced the output. The Go implementation has no
 # such row, because it is not running under bash.
 #
-#   go     no bash row — nothing was routed behind our back
+#   go     `lo version -o json` parses and carries the build field. The
+#          frozen tree has no -o flag at all and answers "unknown flag",
+#          so this is a POSITIVE signal: an empty or errored run fails it,
+#          where asserting the ABSENCE of the bash row would have passed
+#          on both. The absence is still checked, as a second opinion.
 #   bash   a bash row — the whole tree really is routed
 #   mixed  a bash row from the routed `version`, AND `lo doctor` (which
 #          is NOT routed) printing its `implementation:` line, which only
 #          the Go doctor writes. One command from each half.
 e2e::assert_provenance() {
-  local version doctor
-  version="$("${E2E_LO_BIN}" version </dev/null 2>&1)"
+  local version doctor json
+  # `|| true` on every probe: these commands are EXPECTED to fail on the
+  # wrong implementation (the frozen tree answers "unknown flag: -o" and
+  # exits non-zero), and under bats' errexit a failing command
+  # substitution aborts the function before the assertion below can say
+  # what went wrong — the run then reports a bare status 2.
+  version="$(timeout "${E2E_LO_TIMEOUT}" "${E2E_LO_BIN}" version </dev/null 2>&1 || true)"
   case "${E2E_LO_IMPL}" in
     go)
+      json="$(timeout "${E2E_LO_TIMEOUT}" "${E2E_LO_BIN}" version -o json </dev/null 2>&1 || true)"
+      grep -q '"build"' <<<"${json}" \
+        || fail "e2e: the go leg is not running the Go implementation — 'lo version -o json' produced no build field. The frozen tree has no -o flag, so this is what a routed run looks like:
+${json}"
       ! grep -q '^bash ' <<<"${version}" \
         || fail "e2e: the go leg ran the bash tree (lo version printed a bash row):
 ${version}"
@@ -437,7 +462,7 @@ ${version}"
       ;;
   esac
   if [[ "${E2E_LO_IMPL}" == "mixed" ]]; then
-    doctor="$("${E2E_LO_BIN}" doctor </dev/null 2>&1 || true)"
+    doctor="$(timeout "${E2E_LO_TIMEOUT}" "${E2E_LO_BIN}" doctor </dev/null 2>&1 || true)"
     grep -q 'implementation: go; bash for ' <<<"${doctor}" \
       || fail "e2e: the mixed leg has no native half — lo doctor printed no Go implementation line, so the whole tree is routed:
 ${doctor}"
@@ -454,16 +479,19 @@ ${doctor}"
 # test the question and wait forever. The prompt has its own tests, which
 # give it a real pty (e2e::pty_run) instead of this.
 e2e::lo() {
-  "${E2E_LO_BIN}" "$@" </dev/null
+  timeout "${E2E_LO_TIMEOUT}" "${E2E_LO_BIN}" "$@" </dev/null
 }
 
 # e2e::provision — run lo provision for the active scenario domain.
 # Times out after E2E_PROVISION_TIMEOUT.
 # When E2E_REMOTE=1, passes --remote to activate provider + remote flow.
+# Extra arguments are appended (`e2e::provision --force-recreate`), so a
+# provision variant keeps the provision budget instead of the generic
+# one a plain e2e::lo call would get.
 e2e::provision() {
   e2e::require_binary
   e2e::guard_name cluster "${LOK8S_CLUSTER_NAME}"
-  local -a _args=(provision --domain "${DOMAIN_NAME}")
+  local -a _args=(provision --domain "${DOMAIN_NAME}" "$@")
   [[ "${E2E_REMOTE:-}" == "1" ]] && _args+=(--remote)
   # The marker tells teardown_file that there is something to tear down.
   # Without it a scenario that skipped every test would "fail" its
@@ -575,6 +603,15 @@ e2e::assert_world_unchanged() {
   [[ -z "${problems}" ]] || fail "e2e: ${problems}"
 }
 
+# e2e::_re_escape <text> — <text> as a literal for docker's `name=`
+# filter, which is a regex. A `.` in a container name would otherwise
+# match any character, so `^a.b$` would also select `axb`. No name in
+# this suite carries one today; an anchored filter that is only correct
+# by accident is not an anchored filter.
+e2e::_re_escape() {
+  printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|\/]/\\&/g'
+}
+
 # e2e::_docker_names <what> <filter> — the names of matching docker
 # objects, one per line. <what> is ps | volume | network.
 e2e::_docker_names() {
@@ -598,7 +635,7 @@ e2e::_remove_report() {
       ps)     docker rm -f "${n}" >/dev/null 2>&1 || true ;;
       volume) docker volume rm -f "${n}" >/dev/null 2>&1 || true ;;
     esac
-    if [[ -n "$(e2e::_docker_names "${what}" "^${n}$")" ]]; then
+    if [[ -n "$(e2e::_docker_names "${what}" "^$(e2e::_re_escape "${n}")$")" ]]; then
       survived+="${n} "
     else
       removed+="${n} "
@@ -752,8 +789,11 @@ e2e::sweep() {
   local net="${E2E_NETWORK}" cluster="${LOK8S_CLUSTER_NAME}"
   e2e::guard_name network "${net}"
   e2e::guard_name cluster "${cluster}"
-  docker network rm "${net}" >/dev/null 2>&1 || true
 
+  # The cluster goes FIRST. Its nodes are attached to the project network,
+  # and docker refuses to remove a network with a live endpoint on it — so
+  # removing the network first fails silently and leaves it behind, in the
+  # one case (a surviving cluster) where the sweep matters most.
   local -a left=()
   if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
     kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true
@@ -763,6 +803,7 @@ e2e::sweep() {
       left+=("kind cluster ${cluster} (removed by the sweep)")
     fi
   fi
+  docker network rm "${net}" >/dev/null 2>&1 || true
   # One list per kind, each on its own line: concatenating three command
   # substitutions runs the last name of one into the first of the next.
   local names
@@ -860,8 +901,11 @@ e2e::pty_run() {
   local cmdline
   cmdline="$(printf '%q ' "${E2E_LO_BIN}" "$@")"
   E2E_PTY_RC=0
+  # Bounded like every other call into `lo`: a prompt that never returns
+  # (a read that blocks on a pty nobody answers) would otherwise run to
+  # the CI job's cap. These drive teardowns, so the teardown budget.
   printf '%s\n' "${answer}" \
-    | script -q -e -c "${cmdline}" "${log}" >/dev/null 2>&1 || E2E_PTY_RC=$?
+    | timeout "${E2E_DESTROY_TIMEOUT}" script -q -e -c "${cmdline}" "${log}" >/dev/null 2>&1 || E2E_PTY_RC=$?
   E2E_PTY_OUTPUT="$(tr -d '\r' < "${log}")"
   export E2E_PTY_OUTPUT E2E_PTY_RC
   # Every transcript is kept, in order: what the prompt printed and what

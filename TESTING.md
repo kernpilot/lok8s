@@ -258,14 +258,25 @@ bash hack/lint-shell.sh      # = npm run lint; shellcheck (.shellcheckrc) + args
 ```
 
 File discovery lives in that script only, so the local run and CI can never
-drift. The set is `.lok8s/`, `operator/hooks/`, `docs/.vitepress/`, `hack/`,
-`install/` — `*.sh` plus every extensionless `#!/usr/bin/env argsh|bash`
-script. **`.archive/legacy/` is linted on purpose**: the retired installer is
+drift. The set is `.lok8s/`, `.archive/`, `operator/hooks/`,
+`docs/.vitepress/`, `hack/`, `install/` and `tests/` — `*.sh` and `*.bash`,
+plus every extensionless `#!/usr/bin/env argsh|bash` script.
+**`.archive/legacy/` is linted on purpose**: the retired installer is
 still rebuilt into the published `lo-up` bundle, and the retired hook bodies
-are still the parity oracle for `lo operator`. Without a local shellcheck +
-argsh-lint pair the run is forwarded to the digest-pinned argsh container.
-A local `argsh lint` that finds neither tool exits 0 silently — do not trust
-a green lint you did not watch install its tools.
+are still the parity oracle for `lo operator`. **`tests/` is linted too**:
+the e2e harness drives docker, kind and `lo` against a machine with live
+clusters on it. Two exclusions there — the `*.bats` suites (bats syntax is
+not bash) and the per-run copies of the frozen tree under
+`tests/e2e/*/.lok8s/`, which are gitignored and byte-identical to the
+`.lok8s/` already in the set.
+
+Without a local shellcheck + argsh-lint pair the run is forwarded to the
+digest-pinned argsh container. Run it through this script and read its
+output: an ad-hoc `./.bin/argsh lint <file>` is not the same invocation
+and has been seen to print nothing and exit 0 on a file this script does
+report. The exit code alone is not the signal either — on a checkout whose
+`^`-prefixed imports the container cannot resolve, the run is already
+non-zero before your file is reached. Look for your file in the output.
 
 ## E2E (`lo up --ci`)
 

@@ -41,10 +41,13 @@ setup_file() {
 teardown_file() {
   load "${BATS_TEST_DIRNAME}/../lib/helpers"
   e2e::init "${BATS_TEST_DIRNAME}" 131.lok8s.dev
-  e2e::final_teardown
-  # The volume reader is named outside the prefix assert_torn_down
-  # polices, so it is swept here instead.
+  # The reader goes FIRST. It mounts the certificate volume, and docker
+  # refuses to remove a volume a container still holds — a leaked reader
+  # would make `lo destroy` look like it failed to drop the volume, and
+  # the failure would name the wrong culprit. It is swept here because it
+  # is deliberately named outside the prefix assert_torn_down polices.
   docker rm -f "e2e-tlsread-$(e2e::tls_volume)" >/dev/null 2>&1 || true
+  e2e::final_teardown
   rm -rf "${BATS_TEST_DIRNAME}/.secrets"
 }
 

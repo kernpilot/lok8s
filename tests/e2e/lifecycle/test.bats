@@ -118,7 +118,9 @@ _ids() {
   # field, a stuck finalizer). With `bootstrap: []` there is nothing to
   # apply, so the cluster and the registry set must come through it
   # untouched — the flag is not a "rebuild the cluster" switch.
-  run e2e::lo provision --domain "${DOMAIN_NAME}" --force-recreate
+  # Through e2e::provision, not e2e::lo: it does cluster work and needs
+  # the provision budget, not the shorter one a generic call gets.
+  run e2e::provision --force-recreate
   assert_success
 
   assert_equal "$(kind get clusters | sort)" "${before_clusters}"
@@ -217,7 +219,7 @@ _ids() {
   # stdin is a pipe, so it is not a terminal and the gate does not fire:
   # the command runs to completion with no question. This is what every
   # script, CI job and parity harness sees, and it must stay that way.
-  run bash -c "printf '' | '${E2E_LO_BIN}' destroy --domain '${DOMAIN_NAME}' --force 2>&1"
+  run bash -c "printf '' | timeout ${E2E_DESTROY_TIMEOUT} '${E2E_LO_BIN}' destroy --domain '${DOMAIN_NAME}' --force 2>&1"
   assert_success
   refute_output --partial "Continue? [y/N]"
   refute_output --partial "lo destroy removes:"

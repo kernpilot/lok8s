@@ -159,13 +159,16 @@ jobs:
   cluster-matrix:
     name: Cluster (${{ matrix.scenario }}, ${{ matrix.impl }})
     runs-on: ubuntu-latest
-    # The cap has to sit ABOVE the sum of the per-operation budgets in
-    # tests/e2e/lib/helpers.bash, or a slow leg dies here with no message
-    # instead of at the operation that hung, and the diagnostics below
-    # never run. The worst leg (lifecycle) budgets 4x300s of provision and
-    # 5x120s of teardown = 30 minutes; the toolchain setup above costs
-    # ~6. A healthy leg is ~3 minutes end to end.
-    timeout-minutes: 45
+    # A backstop, nothing more: every call into `lo` is bounded by its own
+    # `timeout` in tests/e2e/lib/helpers.bash, so a hang dies at the
+    # operation that hung, with a message. This cap has to sit ABOVE the
+    # sum of those budgets or it fires first and names nothing — and a
+    # job-level timeout CANCELS the job, which is a different thing from
+    # a failure (the diagnostics below use `always()` for exactly that
+    # reason: `failure()` does not run on a cancelled job). The worst leg
+    # (lifecycle) budgets 5x300 + 2x180 + 5x120 = 41 minutes; the
+    # toolchain setup above costs ~6. A healthy leg is ~3 minutes.
+    timeout-minutes: 60
     strategy:
       # Every leg runs. One broken scenario must not hide the state of the
       # other nine.
@@ -288,6 +291,7 @@ jobs:
         # What the confirmation prompt printed and what was answered. Only
         # the lifecycle scenario writes one.
         if: always()
+        timeout-minutes: 5
         run: |
           f="tests/e2e/${{ matrix.scenario }}/.e2e-state/pty-transcript.log"
           [ -s "${f}" ] && cat "${f}" || echo "no pty transcript for this scenario"
@@ -296,6 +300,7 @@ jobs:
         # The scenario asserts this itself. Printing it makes a failure
         # readable without a re-run.
         if: always()
+        timeout-minutes: 5
         run: |
           kind get clusters || true
           docker ps -a --format '{{.Names}}\t{{.Status}}'
@@ -310,7 +315,13 @@ jobs:
         # containers explain a push or a certificate failure. Without
         # this, every provision failure costs a re-run to diagnose, and a
         # nightly-only job may not reproduce at all.
-        if: failure()
+        #
+        # `always()`, not `failure()`: the case this exists for includes
+        # the job hitting its cap, and a cap CANCELS the job. `failure()`
+        # does not run on a cancelled job; `always()` does. Its own cap
+        # keeps the failure path from hanging past the job's.
+        if: always()
+        timeout-minutes: 5
         run: |
           mkdir -p /tmp/e2e-logs
           for c in $(kind get clusters 2>/dev/null); do
@@ -324,7 +335,10 @@ jobs:
           tail -c 200000 /tmp/e2e-logs/containers.log || true
 
       - name: Upload the logs
-        if: failure()
+        # always(), for the same reason as the step above. A green leg
+        # uploads a small listing; a cancelled one uploads what it had.
+        if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-logs-${{ matrix.scenario }}-${{ matrix.impl }}

@@ -35,9 +35,10 @@ export ARGSH_DOCKER_IMAGE="${ARGSH_DOCKER_IMAGE:-ghcr.io/arg-sh/argsh@sha256:990
 #                    shell; their helpers (*.bash, *.sh) are.
 #   */.lok8s         a per-run copy of the frozen tree that a routing e2e
 #                    leg makes inside the scenario directory. It is
-#                    gitignored, it is byte-identical to .lok8s/ which is
-#                    already in the set above, and linting it would
-#                    report every finding N times over.
+#                    gitignored (.gitignore: tests/e2e/*/.lok8s/ — check
+#                    with `git check-ignore -v`), it is byte-identical to
+#                    the .lok8s/ already in the set above, and linting it
+#                    would report every finding N times over.
 SETS=(.lok8s .archive operator/hooks docs/.vitepress hack install tests)
 {
   find "${SETS[@]}" -type f \( -name '*.sh' -o -name '*.bash' \) -print

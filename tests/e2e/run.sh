@@ -30,8 +30,15 @@ _have_bats_libs() {
     [[ "${common}" == /* ]] || common="${_ROOT}/${common}"
     main_root="$(cd "${common}/.." 2>/dev/null && pwd)" || main_root=""
   fi
-  for d in /usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib \
-    "${_ROOT}/.bin/lib" ${main_root:+"${main_root}/.bin/lib"}; do
+  # A pre-set BATS_LIB_PATH comes first: a host that already resolves the
+  # libraries through it works, and answering "not installed" there would
+  # send a perfectly good machine down the fallback.
+  local -a dirs=()
+  [[ -z "${BATS_LIB_PATH:-}" ]] || IFS=: read -r -a dirs <<<"${BATS_LIB_PATH}"
+  dirs+=(/usr/lib /usr/local/lib "${HOME}/.local/lib" /opt/homebrew/lib
+    "${_ROOT}/.bin/lib" ${main_root:+"${main_root}/.bin/lib"})
+  for d in "${dirs[@]}"; do
+    [[ -n "${d}" ]] || continue
     [[ -d "${d}/bats-support" && -d "${d}/bats-assert" ]] && return 0
   done
   return 1
