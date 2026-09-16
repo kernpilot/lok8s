@@ -63,3 +63,27 @@ func TestGenerateShape(t *testing.T) {
 		t.Errorf("page lacks the lo use example block")
 	}
 }
+
+// TestPlaceholdersAreEscapedForTheSite pins what broke the docs deploy:
+// a help text writes a placeholder in plain prose, the page carried it
+// verbatim, and the site build stopped at an element that never closes.
+// Prose is escaped, a code span and a fence keep their text.
+func TestPlaceholdersAreEscapedForTheSite(t *testing.T) {
+	for _, c := range []struct{ name, in, want string }{
+		{"prose", "clusters/<domain>/cluster.lok8s.yaml", "clusters/&lt;domain>/cluster.lok8s.yaml"},
+		{"code span", "write `lo init <domain>` first", "write `lo init <domain>` first"},
+		{"mixed", "`a<b` and c<d", "`a<b` and c&lt;d"},
+		{"double backticks", "``x`<y`` and <z", "``x`<y`` and &lt;z"},
+		{"unclosed span", "a `b and <c", "a `b and &lt;c"},
+		{"fence", "```\n<domain>\n```", "```\n<domain>\n```"},
+		{"indented block", "text\n\n\tsource <(lo completion bash)\n", "text\n\n\tsource <(lo completion bash)\n"},
+		{"four spaces", "text\n\n    lo init <domain>\n", "text\n\n    lo init <domain>\n"},
+		{"indented then prose", "text\n\n\tsource <(x)\n\nsee <domain>", "text\n\n\tsource <(x)\n\nsee &lt;domain>"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := escapeAngles(c.in); got != c.want {
+				t.Errorf("escapeAngles(%q)\n got %q\nwant %q", c.in, got, c.want)
+			}
+		})
+	}
+}

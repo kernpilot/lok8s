@@ -47,7 +47,103 @@ func Generate(root *cobra.Command) ([]byte, error) {
 	if err := gen(root, &buf); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return []byte(escapeAngles(buf.String())), nil
+}
+
+// escapeAngles hides a placeholder such as <domain> from the site build.
+// Help texts write their placeholders in plain prose, and the site reads
+// a page as a template, where <domain> opens an element that never closes
+// and the build stops. Prose only: a fence, an indented block (an example
+// such as `source <(lo completion bash)` arrives indented) and an inline
+// code span are literal already, and an entity there would print as the
+// entity.
+func escapeAngles(page string) string {
+	lines := strings.Split(page, "\n")
+	fence, indented := false, false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			fence = !fence
+			indented = false
+			continue
+		}
+		if fence {
+			continue
+		}
+		blank := strings.TrimSpace(line) == ""
+		switch {
+		case blank:
+			// A blank line neither opens nor closes the block: an
+			// example may have one in the middle.
+		case isIndented(line):
+			// An indented block opens after a blank line and runs
+			// until a line that is not indented.
+			indented = indented || i == 0 || strings.TrimSpace(lines[i-1]) == ""
+		default:
+			indented = false
+		}
+		if !indented {
+			lines[i] = escapeAnglesInProse(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isIndented reports the four spaces or the tab that open a code block.
+func isIndented(line string) bool {
+	return strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ")
+}
+
+// escapeAnglesInProse escapes every `<` of one line except inside an
+// inline code span. A span opens with a run of backticks and closes with
+// the next run of the same length; a run that never closes is text.
+func escapeAnglesInProse(line string) string {
+	var out strings.Builder
+	for i := 0; i < len(line); {
+		if line[i] != '`' {
+			if line[i] == '<' {
+				out.WriteString("&lt;")
+			} else {
+				out.WriteByte(line[i])
+			}
+			i++
+			continue
+		}
+		open := backtickRun(line, i)
+		if end := spanEnd(line, i+open, open); end > 0 {
+			out.WriteString(line[i:end])
+			i = end
+			continue
+		}
+		out.WriteString(line[i : i+open])
+		i += open
+	}
+	return out.String()
+}
+
+// backtickRun counts the backticks that start at i.
+func backtickRun(line string, i int) int {
+	n := 0
+	for i+n < len(line) && line[i+n] == '`' {
+		n++
+	}
+	return n
+}
+
+// spanEnd returns the index just past the run of want backticks that
+// closes a span, or 0 when the line has none.
+func spanEnd(line string, from, want int) int {
+	for i := from; i < len(line); {
+		if line[i] != '`' {
+			i++
+			continue
+		}
+		n := backtickRun(line, i)
+		if n == want {
+			return i + n
+		}
+		i += n
+	}
+	return 0
 }
 
 // inheritedOptions opens the section cobra repeats under every command:
