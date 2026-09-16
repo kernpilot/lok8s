@@ -466,29 +466,38 @@ e2e::snapshot_world() {
   e2e::log "e2e: kind get clusters (before): $(tr '\n' ' ' < "${E2E_STATE}/clusters.before")"
 }
 
-# e2e::assert_world_unchanged — every kind cluster that was here before
-# the scenario is still here, and nothing appeared that the scenario does
-# not own.
+# e2e::_world_problems — what is wrong with the kind clusters right now,
+# one line per problem, empty when nothing is. Printed, not failed, so
+# e2e::assert_torn_down can report it together with whatever else the
+# teardown left behind instead of stopping at the first of the two.
 #
-# Not a plain equality: a scenario with two domains still has its second
-# cluster up while the first one is torn down, and that is the shape it
-# is testing. An addition is therefore allowed only when it carries the
-# `e2e-` prefix the harness owns; anything else is a foreign cluster this
-# run has no business creating.
-e2e::assert_world_unchanged() {
+# Not a plain equality against the snapshot: a scenario with two domains
+# still has its second cluster up while the first one is torn down, and
+# that is the shape it is testing. An addition is allowed only when it
+# carries the `e2e-` prefix the harness owns; anything else is a foreign
+# cluster this run has no business creating.
+e2e::_world_problems() {
   local snapshot="${E2E_STATE}/clusters.before"
-  [[ -f "${snapshot}" ]] || fail "e2e: no world snapshot — call e2e::snapshot_world in setup_file"
+  [[ -f "${snapshot}" ]] || {
+    echo "no world snapshot — call e2e::snapshot_world in setup_file"
+    return 0
+  }
   local after missing extra
   after="$(kind get clusters 2>/dev/null | sort)"
   e2e::log "e2e: kind get clusters (after):  $(tr '\n' ' ' <<<"${after}")"
 
   missing="$(comm -23 "${snapshot}" <(printf '%s\n' "${after}"))"
-  [[ -z "${missing}" ]] || fail "e2e: pre-existing kind clusters disappeared: $(tr '\n' ' ' <<<"${missing}")
-before: $(tr '\n' ' ' < "${snapshot}")
-after:  $(tr '\n' ' ' <<<"${after}")"
+  [[ -z "${missing}" ]] || echo "pre-existing kind clusters disappeared: $(tr '\n' ' ' <<<"${missing}") (before: $(tr '\n' ' ' < "${snapshot}"))"
 
   extra="$(comm -13 "${snapshot}" <(printf '%s\n' "${after}") | grep -v '^e2e-' || true)"
-  [[ -z "${extra}" ]] || fail "e2e: a kind cluster this run does not own appeared: $(tr '\n' ' ' <<<"${extra}")"
+  [[ -z "${extra}" ]] || echo "a kind cluster this run does not own appeared: $(tr '\n' ' ' <<<"${extra}")"
+}
+
+# e2e::assert_world_unchanged — e2e::_world_problems, as an assertion.
+e2e::assert_world_unchanged() {
+  local problems
+  problems="$(e2e::_world_problems)"
+  [[ -z "${problems}" ]] || fail "e2e: ${problems}"
 }
 
 # e2e::_docker_names <what> <filter> — the names of matching docker
@@ -592,7 +601,13 @@ e2e::assert_torn_down() {
     leftovers+=("the project network ${net} is gone — the framework keeps it across lo ${phase}")
   fi
 
-  e2e::assert_world_unchanged
+  # 6. The kind clusters. Collected, not failed on the spot: a teardown
+  #    that both changed the world AND left objects behind has to report
+  #    both, or the second finding waits for the next run.
+  local problem
+  while IFS= read -r problem; do
+    [[ -z "${problem}" ]] || leftovers+=("${problem}")
+  done < <(e2e::_world_problems)
 
   if (( ${#leftovers[@]} )); then
     local report="" item
