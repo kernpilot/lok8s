@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-placeholder
+  namespace: default
+data:
+  scenario: shared-registries
+  domain: "133.lok8s.dev"

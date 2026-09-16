@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-placeholder
+  namespace: default
+data:
+  scenario: registry-tls

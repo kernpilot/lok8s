@@ -1,0 +1,6 @@
+# Trivial workload target: build::artifacts iterates over targets/<name>/
+# directories and wants at least one.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - placeholder-configmap.yaml

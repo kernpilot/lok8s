@@ -1,0 +1,42 @@
+# Slot 133 — one of the two domains of the shared-registries scenario.
+#
+# Both domains opt into spec.registries.shared: their pull-through mirrors
+# live on ONE docker network, reused across clusters, instead of one set
+# per project. build and cache stay project-private either way.
+#
+# Every name here is the scenario's own. The framework's default shared
+# network is `lok8s-registries` and its mirror containers are
+# `lok8s-registry-<mirror name>`, which on a developer machine are live
+# objects of other projects — and standing the shared network up removes
+# the matching containers attached to it. The mirror names therefore
+# carry the e2e marker (`lok8s-registry-e2e-docker`), and the network is
+# named after the scenario.
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-shr-b
+spec:
+  runtime: kind
+  kubernetes:
+    version: v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2
+  cluster:
+    domain: 133.lok8s.dev
+  network:
+    name: e2e-shr-b
+    cidr: 10.125.133.0/24
+  registries:
+    # Plain HTTP: the certificate has its own scenario (registry-tls).
+    tls: false
+    shared:
+      enabled: true
+      network:
+        name: e2e-shr-net
+        cidr: 10.125.201.0/24
+    # Two mirrors, not the default four: the set is the subject, its size
+    # is not, and each one is a container to start and stop.
+    mirrors:
+      - name: e2e-docker
+        url: https://registry-1.docker.io
+      - name: e2e-quay
+        url: https://quay.io
+  bootstrap: []
