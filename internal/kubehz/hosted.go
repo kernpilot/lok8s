@@ -99,6 +99,21 @@ func capacityDetail(v any, key string) string {
 // subject, without the plan words. The "live capacity" pointer uses the
 // module-global api URL (cfg.APIURL): GET /api/capacity lists used/limit
 // per shape preset.
+// slotUsage renders " (3/3 in use, 0 free)"; the free count only when both
+// sides are numbers, nothing when one side is absent.
+func slotUsage(used, limit string) string {
+	if used == "" || limit == "" {
+		return ""
+	}
+	usage := " (" + used + "/" + limit + " in use"
+	if digitsRe.MatchString(used) && digitsRe.MatchString(limit) {
+		u, _ := strconv.Atoi(used)
+		l, _ := strconv.Atoi(limit)
+		usage += ", " + strconv.Itoa(max(l-u, 0)) + " free"
+	}
+	return usage + ")"
+}
+
 func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 	v, _ := parseJSON(body)
 	replicas := capacityDetail(v, "replicas")
@@ -109,40 +124,39 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 	limit := capacityDetail(v, "limit")
 	retry := capacityDetail(v, "retryAfter")
 
-	// The subject of the headline and the hint that fits it.
-	var subject, hint string
+	// The subject of the headline, the count in parentheses and the hint
+	// that fits it. The shape hint is the default; the option and pool
+	// branches replace it.
+	subject := "this shape"
+	hint := "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
+	usage := ""
 	switch {
 	case option != "":
+		// The metal gate counts nodes present vs required, not slots: no
+		// free count here.
 		subject = "the '" + option + "' option"
-		limit = capacityDetail(v, "metalRequired")
-		used = capacityDetail(v, "metalNodes")
+		nodes := capacityDetail(v, "metalNodes")
+		required := capacityDetail(v, "metalRequired")
+		if nodes != "" && required != "" {
+			usage = " (" + nodes + "/" + required + " metal nodes present)"
+		}
 		hint = "    • create the cluster without the '" + option + "' option now and turn it on later (it migrates live)"
 	case pool != "":
 		subject = "the " + pool + " hosted control-plane pool"
-		limit = capacityDetail(v, "cap")
+		usage = slotUsage(used, capacityDetail(v, "cap"))
 		hint = "    • add a payment method: paid hosted control planes do not share this pool"
 	case replicas != "":
-		subject = "a control plane with " + replicas + " apiserver replicas"
-		hint = "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
+		subject = "a control plane with " + replicas + " apiserver replica"
+		if replicas != "1" {
+			subject += "s"
+		}
+		usage = slotUsage(used, limit)
 	case tier != "":
 		// Fallback for an api that still keys capacity on a tier name.
 		subject = "the '" + tier + "' shape"
-		hint = "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
+		usage = slotUsage(used, limit)
 	default:
-		subject = "this shape"
-		hint = "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
-	}
-
-	// "(3/3 in use, 0 free)": the free count only when both sides are numbers.
-	usage := ""
-	if used != "" && limit != "" {
-		usage = " (" + used + "/" + limit + " in use"
-		if digitsRe.MatchString(used) && digitsRe.MatchString(limit) {
-			u, _ := strconv.Atoi(used)
-			l, _ := strconv.Atoi(limit)
-			usage += ", " + strconv.Itoa(max(l-u, 0)) + " free"
-		}
-		usage += ")"
+		usage = slotUsage(used, limit)
 	}
 	// Humanize retryAfter seconds into "~N min" / "~Ns".
 	retryHint := ""

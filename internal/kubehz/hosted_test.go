@@ -170,7 +170,7 @@ func TestProvisionHostedCapacityEnvelope(t *testing.T) {
 // ("control-plane" holds "plan" as a substring, so the phrases are matched).
 func mustNotMentionPlan(t *testing.T, out string) {
 	t.Helper()
-	for _, phrase := range []string{"' plan", "this plan", "per-plan", "plan right now", "spec.kubehz.plan"} {
+	for _, phrase := range []string{"' plan", "plan '", "this plan", "per-plan", "plan right now", "spec.kubehz.plan"} {
 		mustNotContain(t, out, phrase)
 	}
 }
@@ -180,6 +180,7 @@ func TestRenderCapacityRejectionHints(t *testing.T) {
 	h := newHarness(t)
 	cfg := &Config{APIURL: "https://api.kubehz.dev"}
 	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"replicas":1,"used":3,"limit":3,"retryAfter":45}}}`))
+	mustContain(t, h.output(), "with 1 apiserver replica right now (3/3 in use, 0 free).")
 	mustContain(t, h.output(), "~45s")
 	mustNotContain(t, h.output(), "min")
 
@@ -214,7 +215,9 @@ func TestRenderCapacityRejectionOptionAndPool(t *testing.T) {
 	// without it. No smaller-shape hint.
 	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"option":"dedicated","metalNodes":2,"metalRequired":3,"retryAfter":3600}}}`))
 	out := h.output()
-	mustContain(t, out, "at capacity for the 'dedicated' option right now (2/3 in use, 1 free).")
+	mustContain(t, out, "at capacity for the 'dedicated' option right now (2/3 metal nodes present).")
+	mustNotContain(t, out, " free)")
+	mustNotContain(t, out, "in use")
 	mustContain(t, out, "create the cluster without the 'dedicated' option now")
 	mustNotContain(t, out, "fewer apiserver replicas")
 	mustNotMentionPlan(t, out)
