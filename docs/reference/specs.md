@@ -626,7 +626,11 @@ spec:
 
 **Deprecated fields** (use provider config instead):
 - ~~`spec.ssh`~~ → provider config `sshUser`, `sshPrivateKey`, `sshPublicKey`
-- ~~`spec.controlPlane.replicas`~~ → derived from provider output node count
+- ~~`spec.controlPlane.replicas`~~ → derived from provider output node count.
+  This holds for a cluster you provision yourself. With
+  `spec.kubehz.hosting: hosted` the same key is not deprecated: it carries
+  the apiserver replicas of the hosted control plane, which the platform
+  cannot derive from a provider.
 - ~~`spec.workers`~~ → defined in provider config (hetzner.json server entries)
 
 These fields are still read as fallbacks for backward compatibility but

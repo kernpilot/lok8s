@@ -170,7 +170,9 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 	}
 
 	c.errorf("kubehz: the platform is at capacity for %s right now%s.", subject, usage)
-	c.echoErr("  The hosted control-plane pool is full for this request. You can:")
+	// Variant-neutral: only the free-pool gate is about a pool. The metal
+	// gate counts nodes and the shape gate counts replica slots.
+	c.echoErr("  You can:")
 	c.echoErr("    • retry later: capacity frees when a cluster is deleted")
 	if retryHint != "" {
 		c.echoErr("    • suggested wait: %s", retryHint)

@@ -183,6 +183,8 @@ func TestRenderCapacityRejectionHints(t *testing.T) {
 	mustContain(t, h.output(), "with 1 apiserver replica right now (3/3 in use, 0 free).")
 	mustContain(t, h.output(), "~45s")
 	mustNotContain(t, h.output(), "min")
+	// The shape gate counts replica slots, not a pool.
+	mustNotContain(t, h.output(), "pool")
 
 	// No retryAfter: no wait line. A bare (un-enveloped) body reads too.
 	h.reset()
@@ -220,6 +222,8 @@ func TestRenderCapacityRejectionOptionAndPool(t *testing.T) {
 	mustNotContain(t, out, "in use")
 	mustContain(t, out, "create the cluster without the 'dedicated' option now")
 	mustNotContain(t, out, "fewer apiserver replicas")
+	// Only the free-pool gate is about a pool: the metal gate counts nodes.
+	mustNotContain(t, out, "pool")
 	mustNotMentionPlan(t, out)
 
 	// The free pool: `cap` is the limit, the hint is the payment method.
