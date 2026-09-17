@@ -79,6 +79,7 @@ spec:
 | `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
 | `spec.kubehz.agent` | no | `cronjob` | Which in-cluster agent owns the heartbeat: `cronjob` (the bash CronJob — node status, control-plane health, certificate expiry, every 5 minutes) or `operator` (the Go live agent — live view within seconds, plus worker scaling, self-healing and worker upgrades where your tier allows). Exactly one of them beats; `lo kubehz deploy` applies the one you name. Needs `access: registered` or `managed`, and is not valid with `hosting: shared`. See the [kubehz guide](../guide/kubehz.md#choosing-an-agent) |
 | `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting` is `hosted` or `shared`, or `access != none`; must be HTTPS |
+| `spec.controlPlane.replicas` | no | `1` | For `hosting: hosted`: the apiserver replicas of the hosted control plane (1 to 3), the one shape value `lo provision` sends. There is no plan and no tier: the state limit and its auto-grow step and cap live in the dashboard, and the bill is per hour. See the [kubehz guide](../guide/kubehz.md#the-hosted-control-plane-shape) |
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
 | `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — node names to mint a single-use join ticket for during `lo provision` |
@@ -625,7 +626,11 @@ spec:
 
 **Deprecated fields** (use provider config instead):
 - ~~`spec.ssh`~~ → provider config `sshUser`, `sshPrivateKey`, `sshPublicKey`
-- ~~`spec.controlPlane.replicas`~~ → derived from provider output node count
+- ~~`spec.controlPlane.replicas`~~ → derived from provider output node count.
+  This holds for a cluster you provision yourself. With
+  `spec.kubehz.hosting: hosted` the same key is not deprecated: it carries
+  the apiserver replicas of the hosted control plane, which the platform
+  cannot derive from a provider.
 - ~~`spec.workers`~~ → defined in provider config (hetzner.json server entries)
 
 These fields are still read as fallbacks for backward compatibility but

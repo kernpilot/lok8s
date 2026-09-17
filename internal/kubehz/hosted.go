@@ -77,19 +77,91 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 
 var digitsRe = regexp.MustCompile(`^[0-9]+$`)
 
-// renderCapacityRejection ports kubehz::render_capacity_rejection: the
-// friendly message for the api's 503 AT_CAPACITY envelope. The "live
-// availability" pointer uses the module-global api URL (cfg.APIURL).
+// capacityDetail reads one `detail` field of the 503 envelope: the UI route
+// nests it under `data`, the bare body does not. Absent → "". Every value
+// here reaches a terminal, so it passes through the same scrub and clip the
+// rest of the package applies to a server string: a control character could
+// rewrite the screen, and a long one could bury the message.
+func capacityDetail(v any, key string) string {
+	return clip(scrub(jstr(jalt("", jget(v, "data", "detail", key), jget(v, "detail", key)))))
+}
+
+// renderCapacityRejection renders the api's 503 AT_CAPACITY envelope. It
+// deviates from kubehz::render_capacity_rejection (D37): the frozen bash
+// reads `detail.tier` and speaks of plans. Plans are gone. The api keys
+// capacity on the control-plane SHAPE (kubehz-api server/domains/capacity)
+// and `detail` carries one of three variants:
+//
+//   - the shape gate:    { replicas, used, limit, retryAfter }
+//   - the metal gate:    { option: "dedicated", metalNodes, metalRequired, retryAfter }
+//   - the free pool:     { pool: "free", used, cap, retryAfter }
+//
+// The gate counts apiserver replicas only (footprint = base + replicas ×
+// per-replica requests); the state limit does not enter it. An older api
+// still sends { tier, used, limit, retryAfter }: `tier` stays as a fallback
+// subject, without the plan words. The "live capacity" pointer uses the
+// module-global api URL (cfg.APIURL): GET /api/capacity lists used/limit
+// per shape preset.
+// slotUsage renders " (3/3 in use, 0 free)"; the free count only when both
+// sides are numbers, nothing when one side is absent. A run of digits can
+// still overflow an int, and Atoi then returns the clamped value with an
+// error: print the counts the api sent and drop the subtraction.
+func slotUsage(used, limit string) string {
+	if used == "" || limit == "" {
+		return ""
+	}
+	usage := " (" + used + "/" + limit + " in use"
+	u, uErr := strconv.Atoi(used)
+	l, lErr := strconv.Atoi(limit)
+	if uErr == nil && lErr == nil && u >= 0 && l >= 0 {
+		usage += ", " + strconv.Itoa(max(l-u, 0)) + " free"
+	}
+	return usage + ")"
+}
+
 func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 	v, _ := parseJSON(body)
-	tier := jstr(jalt("this plan", jget(v, "data", "detail", "tier"), jget(v, "detail", "tier")))
-	used := jstr(jalt("", jget(v, "data", "detail", "used"), jget(v, "detail", "used")))
-	limit := jstr(jalt("", jget(v, "data", "detail", "limit"), jget(v, "detail", "limit")))
-	retry := jstr(jalt("", jget(v, "data", "detail", "retryAfter"), jget(v, "detail", "retryAfter")))
+	replicas := capacityDetail(v, "replicas")
+	option := capacityDetail(v, "option")
+	pool := capacityDetail(v, "pool")
+	tier := capacityDetail(v, "tier")
+	used := capacityDetail(v, "used")
+	limit := capacityDetail(v, "limit")
+	retry := capacityDetail(v, "retryAfter")
 
+	// The subject of the headline, the count in parentheses and the hint
+	// that fits it. The shape hint is the default; the option and pool
+	// branches replace it.
+	subject := "this shape"
+	hint := "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
 	usage := ""
-	if used != "" && limit != "" {
-		usage = " (currently " + used + "/" + limit + ")"
+	switch {
+	case option != "":
+		// The metal gate counts nodes present vs required, not slots: no
+		// free count here.
+		subject = "the '" + option + "' option"
+		nodes := capacityDetail(v, "metalNodes")
+		required := capacityDetail(v, "metalRequired")
+		if nodes != "" && required != "" {
+			usage = " (" + nodes + "/" + required + " metal nodes present)"
+		}
+		hint = "    • create the cluster without the '" + option + "' option now and turn it on later (it migrates live)"
+	case pool != "":
+		subject = "the " + pool + " hosted control-plane pool"
+		usage = slotUsage(used, capacityDetail(v, "cap"))
+		hint = "    • add a payment method: paid hosted control planes do not share this pool"
+	case replicas != "":
+		subject = "a control plane with " + replicas + " apiserver replica"
+		if replicas != "1" {
+			subject += "s"
+		}
+		usage = slotUsage(used, limit)
+	case tier != "":
+		// Fallback for an api that still keys capacity on a tier name.
+		subject = "the '" + tier + "' shape"
+		usage = slotUsage(used, limit)
+	default:
+		usage = slotUsage(used, limit)
 	}
 	// Humanize retryAfter seconds into "~N min" / "~Ns".
 	retryHint := ""
@@ -102,16 +174,19 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 		}
 	}
 
-	c.errorf("kubehz: the platform is at capacity for the '%s' plan right now%s.", tier, usage)
-	c.echoErr("  The hosted control-plane pool for this plan is full. You can:")
-	c.echoErr("    • retry later — capacity frees as clusters are torn down")
+	c.errorf("kubehz: the platform is at capacity for %s right now%s.", subject, usage)
+	// Variant-neutral: only the free-pool gate is about a pool. The metal
+	// gate counts nodes and the shape gate counts replica slots.
+	c.echoErr("  You can:")
+	c.echoErr("    • retry later: capacity frees when a cluster is deleted")
 	if retryHint != "" {
 		c.echoErr("    • suggested wait: %s", retryHint)
 	}
-	c.echoErr("    • check live per-plan availability and retry when a slot opens:")
+	c.echoErr("%s", hint)
+	c.echoErr("    • check the live capacity per shape and retry when a slot opens:")
 	c.echoErr("        %s/api/capacity", cfg.APIURL)
 	c.echoErr("    • run a self-hosted cluster meanwhile (spec.kubehz.hosting: self)")
-	c.echoErr("    • still stuck? contact kubehz support with the tier + time above")
+	c.echoErr("    • still stuck? contact kubehz support with the shape + time above")
 }
 
 // ProvisionHosted ports kubehz::provision_hosted: create the cluster via

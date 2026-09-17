@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -140,37 +141,123 @@ func TestProvisionHostedCapacityEnvelope(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	spec := hostedSpec(h, "x")
-	h.handle("POST /api/clusters", 503, `{"ok":false,"data":{"code":"AT_CAPACITY","message":"at capacity","detail":{"tier":"dev","used":40,"limit":40,"retryAfter":3600}}}`)
+	// The shape gate: the envelope the api builds since the metered shape
+	// (kubehz-api server/domains/capacity atCapacityError).
+	h.handle("POST /api/clusters", 503, `{"ok":false,"data":{"code":"AT_CAPACITY","message":"at capacity","detail":{"replicas":3,"used":40,"limit":40,"retryAfter":3600}}}`)
 	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
 	out := h.output()
-	mustContain(t, out, "at capacity for the 'dev' plan")
-	mustContain(t, out, "40/40")
+	mustContain(t, out, "at capacity for a control plane with 3 apiserver replicas right now (40/40 in use, 0 free).")
+	mustContain(t, out, "pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)")
+	mustContain(t, out, "check the live capacity per shape")
 	mustContain(t, out, "hosting: self")
 	mustContain(t, out, h.apiURL()+"/api/capacity")
 	mustContain(t, out, "~60 min")
 	mustNotContain(t, out, "~3600s")
 	mustNotContain(t, out, "spec.kubehz.plan")
+	mustNotMentionPlan(t, out)
+	mustNotContain(t, out, "tier")
 
+	// A pretty-printed body, and the legacy `tier` envelope of an older api:
+	// the tier names the subject, the plan words stay gone.
 	h.reset()
 	h.handle("POST /api/clusters", 503, "{\n  \"ok\": false,\n  \"data\": {\n    \"code\": \"AT_CAPACITY\",\n    \"detail\": {\n      \"tier\": \"starter\",\n      \"used\": 20,\n      \"limit\": 20,\n      \"retryAfter\": 1800\n    }\n  }\n}")
 	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
-	mustContain(t, h.output(), "at capacity for the 'starter' plan")
-	mustContain(t, h.output(), "20/20")
+	mustContain(t, h.output(), "at capacity for the 'starter' shape right now (20/20 in use, 0 free).")
 	mustContain(t, h.output(), "~30 min")
+	mustNotMentionPlan(t, h.output())
+}
+
+// mustNotMentionPlan asserts the plan wording of the frozen bash is gone
+// ("control-plane" holds "plan" as a substring, so the phrases are matched).
+func mustNotMentionPlan(t *testing.T, out string) {
+	t.Helper()
+	for _, phrase := range []string{"' plan", "plan '", "this plan", "per-plan", "plan right now", "spec.kubehz.plan"} {
+		mustNotContain(t, out, phrase)
+	}
 }
 
 func TestRenderCapacityRejectionHints(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	cfg := &Config{APIURL: "https://api.kubehz.dev"}
-	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"tier":"dev","used":3,"limit":3,"retryAfter":45}}}`))
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"replicas":1,"used":3,"limit":3,"retryAfter":45}}}`))
+	mustContain(t, h.output(), "with 1 apiserver replica right now (3/3 in use, 0 free).")
 	mustContain(t, h.output(), "~45s")
 	mustNotContain(t, h.output(), "min")
+	// The shape gate counts replica slots, not a pool.
+	mustNotContain(t, h.output(), "pool")
+
+	// No retryAfter: no wait line. A bare (un-enveloped) body reads too.
+	h.reset()
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"detail":{"replicas":2}}`))
+	mustContain(t, h.output(), "at capacity for a control plane with 2 apiserver replicas right now.")
+	mustNotContain(t, h.output(), "suggested wait")
+	mustNotContain(t, h.output(), "in use")
+	mustNotMentionPlan(t, h.output())
+
+	// The legacy tier fallback without counts.
 	h.reset()
 	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"tier":"dev"}}}`))
-	mustContain(t, h.output(), "at capacity for the 'dev' plan")
+	mustContain(t, h.output(), "at capacity for the 'dev' shape right now.")
 	mustNotContain(t, h.output(), "suggested wait")
-	mustNotContain(t, h.output(), "spec.kubehz.plan")
+	mustNotMentionPlan(t, h.output())
+
+	// An empty detail: the generic subject, the shape hint stays.
+	h.reset()
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"code":"AT_CAPACITY"}}`))
+	mustContain(t, h.output(), "at capacity for this shape right now.")
+	mustContain(t, h.output(), "fewer apiserver replicas")
+
+	// Counts that do not fit an int: print what the api sent, no free
+	// count. Atoi clamps and reports the overflow, so the subtraction
+	// would otherwise invent a number.
+	h.reset()
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"replicas":1,"used":99999999999999999999,"limit":99999999999999999999}}}`))
+	mustContain(t, h.output(), "(99999999999999999999/99999999999999999999 in use)")
+	mustNotContain(t, h.output(), " free)")
+
+	// A server string reaches a terminal: control characters are stripped
+	// and a long one is bounded, the way the rest of the package treats
+	// anything the api sends.
+	h.reset()
+	long := strings.Repeat("z", 400)
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"tier":"de\u001b[2Jv\u0007","used":"`+long+`","limit":"3"}}}`))
+	out := h.output()
+	mustNotContain(t, out, "\x1b")
+	mustNotContain(t, out, "\a")
+	mustContain(t, out, "the 'de[2Jv' shape")
+	mustContain(t, out, "…")
+	if strings.Contains(out, long) {
+		t.Fatalf("a 400-rune server value was not clipped:\n%s", out)
+	}
+}
+
+func TestRenderCapacityRejectionOptionAndPool(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	cfg := &Config{APIURL: "https://api.kubehz.dev"}
+
+	// The metal gate: the option is the subject, the hint is to create
+	// without it. No smaller-shape hint.
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"option":"dedicated","metalNodes":2,"metalRequired":3,"retryAfter":3600}}}`))
+	out := h.output()
+	mustContain(t, out, "at capacity for the 'dedicated' option right now (2/3 metal nodes present).")
+	mustNotContain(t, out, " free)")
+	mustNotContain(t, out, "in use")
+	mustContain(t, out, "create the cluster without the 'dedicated' option now")
+	mustNotContain(t, out, "fewer apiserver replicas")
+	// Only the free-pool gate is about a pool: the metal gate counts nodes.
+	mustNotContain(t, out, "pool")
+	mustNotMentionPlan(t, out)
+
+	// The free pool: `cap` is the limit, the hint is the payment method.
+	h.reset()
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"pool":"free","used":25,"cap":25,"retryAfter":3600}}}`))
+	out = h.output()
+	mustContain(t, out, "at capacity for the free hosted control-plane pool right now (25/25 in use, 0 free).")
+	mustContain(t, out, "add a payment method")
+	mustNotContain(t, out, "fewer apiserver replicas")
+	mustNotMentionPlan(t, out)
 }
 
 func TestProvisionHostedSurfacesAPIMessage(t *testing.T) {
