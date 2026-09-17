@@ -66,10 +66,13 @@ step and the cap live in the dashboard.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with
-the api's `503 AT_CAPACITY`. The message prints the shape, the count in use
-and the free slots, then the ways out: retry later (with a suggested wait),
-pick a smaller shape with fewer apiserver replicas, watch the live capacity,
-run a self-hosted cluster meanwhile, or contact support.
+the api's `503 AT_CAPACITY`. The message names what is full and counts it
+the way that gate counts: slots in use and free for a shape or for the free
+pool, and nodes present against nodes required when a cluster asks for
+dedicated hardware. Then it gives the ways out: retry later (with a
+suggested wait), pick a smaller shape with fewer apiserver replicas or drop
+the option, watch the live capacity, run a self-hosted cluster meanwhile, or
+contact support.
 `GET <apiUrl>/api/capacity` lists the live capacity per shape without a
 token.
 
