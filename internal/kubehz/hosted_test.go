@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -214,6 +215,21 @@ func TestRenderCapacityRejectionHints(t *testing.T) {
 	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"replicas":1,"used":99999999999999999999,"limit":99999999999999999999}}}`))
 	mustContain(t, h.output(), "(99999999999999999999/99999999999999999999 in use)")
 	mustNotContain(t, h.output(), " free)")
+
+	// A server string reaches a terminal: control characters are stripped
+	// and a long one is bounded, the way the rest of the package treats
+	// anything the api sends.
+	h.reset()
+	long := strings.Repeat("z", 400)
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"tier":"de\u001b[2Jv\u0007","used":"`+long+`","limit":"3"}}}`))
+	out := h.output()
+	mustNotContain(t, out, "\x1b")
+	mustNotContain(t, out, "\a")
+	mustContain(t, out, "the 'de[2Jv' shape")
+	mustContain(t, out, "…")
+	if strings.Contains(out, long) {
+		t.Fatalf("a 400-rune server value was not clipped:\n%s", out)
+	}
 }
 
 func TestRenderCapacityRejectionOptionAndPool(t *testing.T) {

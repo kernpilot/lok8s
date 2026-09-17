@@ -78,9 +78,12 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 var digitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // capacityDetail reads one `detail` field of the 503 envelope: the UI route
-// nests it under `data`, the bare body does not. Absent → "".
+// nests it under `data`, the bare body does not. Absent → "". Every value
+// here reaches a terminal, so it passes through the same scrub and clip the
+// rest of the package applies to a server string: a control character could
+// rewrite the screen, and a long one could bury the message.
 func capacityDetail(v any, key string) string {
-	return jstr(jalt("", jget(v, "data", "detail", key), jget(v, "detail", key)))
+	return clip(scrub(jstr(jalt("", jget(v, "data", "detail", key), jget(v, "detail", key)))))
 }
 
 // renderCapacityRejection renders the api's 503 AT_CAPACITY envelope. It
