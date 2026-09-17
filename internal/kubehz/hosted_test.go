@@ -206,6 +206,14 @@ func TestRenderCapacityRejectionHints(t *testing.T) {
 	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"code":"AT_CAPACITY"}}`))
 	mustContain(t, h.output(), "at capacity for this shape right now.")
 	mustContain(t, h.output(), "fewer apiserver replicas")
+
+	// Counts that do not fit an int: print what the api sent, no free
+	// count. Atoi clamps and reports the overflow, so the subtraction
+	// would otherwise invent a number.
+	h.reset()
+	h.ctx.renderCapacityRejection(cfg, []byte(`{"data":{"detail":{"replicas":1,"used":99999999999999999999,"limit":99999999999999999999}}}`))
+	mustContain(t, h.output(), "(99999999999999999999/99999999999999999999 in use)")
+	mustNotContain(t, h.output(), " free)")
 }
 
 func TestRenderCapacityRejectionOptionAndPool(t *testing.T) {

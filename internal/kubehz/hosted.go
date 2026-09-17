@@ -100,15 +100,17 @@ func capacityDetail(v any, key string) string {
 // module-global api URL (cfg.APIURL): GET /api/capacity lists used/limit
 // per shape preset.
 // slotUsage renders " (3/3 in use, 0 free)"; the free count only when both
-// sides are numbers, nothing when one side is absent.
+// sides are numbers, nothing when one side is absent. A run of digits can
+// still overflow an int, and Atoi then returns the clamped value with an
+// error: print the counts the api sent and drop the subtraction.
 func slotUsage(used, limit string) string {
 	if used == "" || limit == "" {
 		return ""
 	}
 	usage := " (" + used + "/" + limit + " in use"
-	if digitsRe.MatchString(used) && digitsRe.MatchString(limit) {
-		u, _ := strconv.Atoi(used)
-		l, _ := strconv.Atoi(limit)
+	u, uErr := strconv.Atoi(used)
+	l, lErr := strconv.Atoi(limit)
+	if uErr == nil && lErr == nil && u >= 0 && l >= 0 {
 		usage += ", " + strconv.Itoa(max(l-u, 0)) + " free"
 	}
 	return usage + ")"
