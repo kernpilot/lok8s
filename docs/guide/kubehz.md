@@ -50,6 +50,28 @@ Plus two more keys:
 must be **HTTPS**: the agent's bearer token travels on this URL, so `lo`
 refuses plain-HTTP endpoints outright.
 
+### The hosted control-plane shape
+
+A hosted control plane has no plan and no tier. Its **shape** describes it:
+
+| Value | Range | Default | Meaning |
+|-------|-------|---------|---------|
+| `spec.controlPlane.replicas` | 1 to 3 | 1 | apiserver replicas. `lo provision` sends this count to the platform. |
+| state limit | 1 GB to the datastore maximum | 2 GB | How much cluster state the control plane holds (etcd: up to 8 GB, kine: up to 32 GB). |
+| auto-grow step and cap | 1 GB steps, up to the datastore maximum | 1 GB, the datastore maximum | The platform raises the limit by one step at 80% use, until the cap. |
+
+The presets in the dashboard (`dev`: one apiserver, `ha`: three) are defaults
+only. The bill is per hour for what runs, with no cap. The state limit, the
+step and the cap live in the dashboard.
+
+The platform admits a hosted cluster by the shape it asks for. When the pool
+cannot hold one more control plane of that shape, `lo provision` stops with
+the api's `503 AT_CAPACITY`. The message prints the shape, the count in use
+and the free slots. It gives two ways out: retry later (with a suggested
+wait), or pick a smaller shape with fewer apiserver replicas.
+`GET <apiUrl>/api/capacity` lists the live capacity per preset without a
+token.
+
 ## Upgrades and maintenance windows
 
 Two more optional blocks under `spec.kubehz` tell the platform how far it may

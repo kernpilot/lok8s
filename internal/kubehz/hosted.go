@@ -77,19 +77,72 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 
 var digitsRe = regexp.MustCompile(`^[0-9]+$`)
 
-// renderCapacityRejection ports kubehz::render_capacity_rejection: the
-// friendly message for the api's 503 AT_CAPACITY envelope. The "live
-// availability" pointer uses the module-global api URL (cfg.APIURL).
+// capacityDetail reads one `detail` field of the 503 envelope: the UI route
+// nests it under `data`, the bare body does not. Absent → "".
+func capacityDetail(v any, key string) string {
+	return jstr(jalt("", jget(v, "data", "detail", key), jget(v, "detail", key)))
+}
+
+// renderCapacityRejection renders the api's 503 AT_CAPACITY envelope. It
+// deviates from kubehz::render_capacity_rejection (D37): the frozen bash
+// reads `detail.tier` and speaks of plans. Plans are gone. The api keys
+// capacity on the control-plane SHAPE (kubehz-api server/domains/capacity)
+// and `detail` carries one of three variants:
+//
+//   - the shape gate:    { replicas, used, limit, retryAfter }
+//   - the metal gate:    { option: "dedicated", metalNodes, metalRequired, retryAfter }
+//   - the free pool:     { pool: "free", used, cap, retryAfter }
+//
+// The gate counts apiserver replicas only (footprint = base + replicas ×
+// per-replica requests); the state limit does not enter it. An older api
+// still sends { tier, used, limit, retryAfter }: `tier` stays as a fallback
+// subject, without the plan words. The "live capacity" pointer uses the
+// module-global api URL (cfg.APIURL): GET /api/capacity lists used/limit
+// per shape preset.
 func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 	v, _ := parseJSON(body)
-	tier := jstr(jalt("this plan", jget(v, "data", "detail", "tier"), jget(v, "detail", "tier")))
-	used := jstr(jalt("", jget(v, "data", "detail", "used"), jget(v, "detail", "used")))
-	limit := jstr(jalt("", jget(v, "data", "detail", "limit"), jget(v, "detail", "limit")))
-	retry := jstr(jalt("", jget(v, "data", "detail", "retryAfter"), jget(v, "detail", "retryAfter")))
+	replicas := capacityDetail(v, "replicas")
+	option := capacityDetail(v, "option")
+	pool := capacityDetail(v, "pool")
+	tier := capacityDetail(v, "tier")
+	used := capacityDetail(v, "used")
+	limit := capacityDetail(v, "limit")
+	retry := capacityDetail(v, "retryAfter")
 
+	// The subject of the headline and the hint that fits it.
+	var subject, hint string
+	switch {
+	case option != "":
+		subject = "the '" + option + "' option"
+		limit = capacityDetail(v, "metalRequired")
+		used = capacityDetail(v, "metalNodes")
+		hint = "    • create the cluster without the '" + option + "' option now and turn it on later (it migrates live)"
+	case pool != "":
+		subject = "the " + pool + " hosted control-plane pool"
+		limit = capacityDetail(v, "cap")
+		hint = "    • add a payment method: paid hosted control planes do not share this pool"
+	case replicas != "":
+		subject = "a control plane with " + replicas + " apiserver replicas"
+		hint = "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
+	case tier != "":
+		// Fallback for an api that still keys capacity on a tier name.
+		subject = "the '" + tier + "' shape"
+		hint = "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
+	default:
+		subject = "this shape"
+		hint = "    • pick a smaller shape: fewer apiserver replicas (spec.controlPlane.replicas, 1 to 3)"
+	}
+
+	// "(3/3 in use, 0 free)": the free count only when both sides are numbers.
 	usage := ""
 	if used != "" && limit != "" {
-		usage = " (currently " + used + "/" + limit + ")"
+		usage = " (" + used + "/" + limit + " in use"
+		if digitsRe.MatchString(used) && digitsRe.MatchString(limit) {
+			u, _ := strconv.Atoi(used)
+			l, _ := strconv.Atoi(limit)
+			usage += ", " + strconv.Itoa(max(l-u, 0)) + " free"
+		}
+		usage += ")"
 	}
 	// Humanize retryAfter seconds into "~N min" / "~Ns".
 	retryHint := ""
@@ -102,16 +155,17 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 		}
 	}
 
-	c.errorf("kubehz: the platform is at capacity for the '%s' plan right now%s.", tier, usage)
-	c.echoErr("  The hosted control-plane pool for this plan is full. You can:")
-	c.echoErr("    • retry later — capacity frees as clusters are torn down")
+	c.errorf("kubehz: the platform is at capacity for %s right now%s.", subject, usage)
+	c.echoErr("  The hosted control-plane pool is full for this request. You can:")
+	c.echoErr("    • retry later: capacity frees when a cluster is deleted")
 	if retryHint != "" {
 		c.echoErr("    • suggested wait: %s", retryHint)
 	}
-	c.echoErr("    • check live per-plan availability and retry when a slot opens:")
+	c.echoErr("%s", hint)
+	c.echoErr("    • check the live capacity per shape and retry when a slot opens:")
 	c.echoErr("        %s/api/capacity", cfg.APIURL)
 	c.echoErr("    • run a self-hosted cluster meanwhile (spec.kubehz.hosting: self)")
-	c.echoErr("    • still stuck? contact kubehz support with the tier + time above")
+	c.echoErr("    • still stuck? contact kubehz support with the shape + time above")
 }
 
 // ProvisionHosted ports kubehz::provision_hosted: create the cluster via
