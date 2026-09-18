@@ -11,23 +11,50 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/yqsem"
+)
+
+// The three numbers a space is made of, with the bounds the platform
+// accepts. A space has no plan: the tenant sets the node count, the
+// namespace count and the object cap (the size limit for one Secret or
+// ConfigMap in the space's namespaces).
+const (
+	spaceNodesDefault      = 2
+	spaceNodesMin          = 1
+	spaceNodesMax          = 5
+	spaceNamespacesDefault = 1
+	spaceNamespacesMin     = 1
+	spaceNamespacesMax     = 3
+	spaceObjectCapDefault  = 256
+	spaceObjectCapMin      = 64
+	spaceObjectCapMax      = 512
 )
 
 // SpaceConfig is the LOK8S_SPACE_* export set of kubehz::space_config.
 type SpaceConfig struct {
 	Slug   string
 	Name   string
-	Plan   string
 	Region string
-	Nodes  []string
+	// MaxNodes, MaxNamespaces and MaxObjectKiB are the space's three
+	// numbers (spec.kubehz.space.nodes / namespaces / objectCapKiB).
+	MaxNodes      int
+	MaxNamespaces int
+	MaxObjectKiB  int
+	// NodeNames are the machines to mint a join ticket for
+	// (spec.kubehz.space.nodeNames).
+	NodeNames []string
 }
 
-// SpaceConfig ports kubehz::space_config: everything is optional — the slug
-// defaults to the first DNS label of the domain, the display name to the
-// slug. A yq PARSE failure is an error, never a defaulted slug (destroy
-// would target the WRONG space).
+// SpaceConfig ports kubehz::space_config: the slug defaults to the first DNS
+// label of the domain, the display name to the slug, and the three numbers to
+// 2 nodes, 1 namespace and a 256 KiB object cap. A yq PARSE failure is an
+// error, never a defaulted slug (destroy would target the WRONG space).
 func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) {
 	doc := loadSpec(clusterYAML)
 	if doc.Err != nil {
@@ -38,11 +65,17 @@ func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) 
 	if before, _, ok := strings.Cut(domain, "."); ok {
 		defaultSlug = before
 	}
+	nodes, namespaces, objectCap, err := c.spaceLimits(doc)
+	if err != nil {
+		return nil, err
+	}
 	sp := &SpaceConfig{
-		Slug:   doc.Or("", "spec", "kubehz", "space", "slug"),
-		Name:   doc.Or("", "spec", "kubehz", "space", "name"),
-		Plan:   doc.Or("", "spec", "kubehz", "space", "plan"),
-		Region: doc.Or("", "spec", "kubehz", "space", "region"),
+		Slug:          doc.Or("", "spec", "kubehz", "space", "slug"),
+		Name:          doc.Or("", "spec", "kubehz", "space", "name"),
+		Region:        doc.Or("", "spec", "kubehz", "space", "region"),
+		MaxNodes:      nodes,
+		MaxNamespaces: namespaces,
+		MaxObjectKiB:  objectCap,
 	}
 	if sp.Slug == "" {
 		sp.Slug = defaultSlug
@@ -50,12 +83,62 @@ func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) 
 	if sp.Name == "" {
 		sp.Name = sp.Slug
 	}
-	for _, n := range doc.seqStrings("spec", "kubehz", "space", "nodes") {
+	for _, n := range doc.seqStrings("spec", "kubehz", "space", "nodeNames") {
 		if n != "" && n != "null" {
-			sp.Nodes = append(sp.Nodes, n)
+			sp.NodeNames = append(sp.NodeNames, n)
 		}
 	}
 	return sp, nil
+}
+
+// spaceLimits reads and bounds the three numbers of a space. A value outside
+// its range is refused here, before the api sees it: the message names the
+// field, the value and the range.
+func (c *Context) spaceLimits(doc specDoc) (nodes, namespaces, objectCap int, err error) {
+	// Space plans are retired. A spec that still carries one asks for a
+	// shape the platform no longer has, so say so instead of ignoring it.
+	if plan := doc.Or("", "spec", "kubehz", "space", "plan"); plan != "" && plan != "null" {
+		c.errorf("spec.kubehz.space.plan is not valid: space plans are retired")
+		c.echoErr("  Set spec.kubehz.space.nodes, spec.kubehz.space.namespaces and")
+		c.echoErr("  spec.kubehz.space.objectCapKiB instead.")
+		return 0, 0, 0, ErrHandled
+	}
+	if nodes, err = c.spaceNumber(doc, "nodes", spaceNodesDefault, spaceNodesMin, spaceNodesMax); err != nil {
+		return 0, 0, 0, err
+	}
+	if namespaces, err = c.spaceNumber(doc, "namespaces", spaceNamespacesDefault, spaceNamespacesMin, spaceNamespacesMax); err != nil {
+		return 0, 0, 0, err
+	}
+	if objectCap, err = c.spaceNumber(doc, "objectCapKiB", spaceObjectCapDefault, spaceObjectCapMin, spaceObjectCapMax); err != nil {
+		return 0, 0, 0, err
+	}
+	return nodes, namespaces, objectCap, nil
+}
+
+// spaceNumber reads one of the three numbers. A missing or null value takes
+// the default. `nodes` held a list of machine names before the numbers
+// replaced the plan, so a list there gets its own message.
+func (c *Context) spaceNumber(doc specDoc, field string, def, min, max int) (int, error) {
+	n := doc.Lookup("spec", "kubehz", "space", field)
+	if yqsem.IsNull(n) {
+		return def, nil
+	}
+	if n.Kind == yaml.SequenceNode && field == "nodes" {
+		c.errorf("spec.kubehz.space.nodes is a list: it is now the node count")
+		c.echoErr("  Set spec.kubehz.space.nodes to a whole number from %d to %d.", spaceNodesMin, spaceNodesMax)
+		c.echoErr("  Put the machine names under spec.kubehz.space.nodeNames.")
+		return 0, ErrHandled
+	}
+	if n.Kind != yaml.ScalarNode {
+		c.errorf("invalid spec.kubehz.space.%s: expected a whole number from %d to %d", field, min, max)
+		return 0, ErrHandled
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(n.Value))
+	if err != nil || value < min || value > max {
+		c.errorf("invalid spec.kubehz.space.%s: %s (expected a whole number from %d to %d)", field, n.Value, min, max)
+		return 0, ErrHandled
+	}
+	return value, nil
 }
 
 // spaceAPI ports kubehz::space_api: one call with the envelope contract.
@@ -126,12 +209,16 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 			c.errorf("space row carries no id — refusing to continue")
 			return "", ErrHandled
 		}
+		c.noteLimitsDrift(row, sp)
 		return id, nil
 	}
 
-	pairs := []jsonPair{{"name", sp.Name}, {"slug", sp.Slug}}
-	if sp.Plan != "" {
-		pairs = append(pairs, jsonPair{"planId", sp.Plan})
+	pairs := []jsonPair{
+		{"name", sp.Name},
+		{"slug", sp.Slug},
+		{"maxNodes", sp.MaxNodes},
+		{"maxNamespaces", sp.MaxNamespaces},
+		{"maxObjectKiB", sp.MaxObjectKiB},
 	}
 	if sp.Region != "" {
 		pairs = append(pairs, jsonPair{"region", sp.Region})
@@ -147,6 +234,23 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 			c.echoErr("  Capacity frees as spaces are removed and as new planes come online. You can:")
 			c.echoErr("    • retry later")
 			c.echoErr("    • run your own cluster meanwhile (spec.kubehz.hosting: self)")
+			return "", ErrHandled
+		case "SPACE_LIMITS_ABOVE_FREE":
+			c.errorf("kubehz refused the space limits (%s): they are above the free allowance", sp.limitsLine())
+			c.echoErr("  A free account gets 1 space with 2 nodes and 1 namespace.")
+			c.echoErr("  Decrease the values in spec.kubehz.space, or upgrade the account in the")
+			c.echoErr("  kubehz dashboard.")
+			return "", ErrHandled
+		case "SPACE_LIMITS_ABOVE_SHARED":
+			c.errorf("kubehz refused the space limits (%s): they are above the maximum of a shared control plane", sp.limitsLine())
+			c.echoErr("  Decrease the values in spec.kubehz.space, or use a hosted control plane:")
+			c.echoErr("  set spec.kubehz.hosting to hosted.")
+			return "", ErrHandled
+		case "SPACE_PLAN_RETIRED":
+			c.errorf("kubehz refused the request: space plans are retired")
+			c.echoErr("  A space uses three numbers: nodes, namespaces and objectCapKiB.")
+			c.echoErr("  Remove spec.kubehz.space.plan from the cluster spec. Then run")
+			c.echoErr("  lo provision again.")
 			return "", ErrHandled
 		default:
 			// Lost a create race? The adopt path answers it — retry the lookup once.
@@ -168,6 +272,35 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 	}
 	v, _ := parseJSON(res.Body)
 	return jstr(jalt(nil, jget(v, "data", "id"), jget(v, "id"))), nil
+}
+
+// limitsLine renders the three numbers for one terminal line.
+func (sp *SpaceConfig) limitsLine() string {
+	return "nodes " + strconv.Itoa(sp.MaxNodes) +
+		", namespaces " + strconv.Itoa(sp.MaxNamespaces) +
+		", object cap " + strconv.Itoa(sp.MaxObjectKiB) + " KiB"
+}
+
+// noteLimitsDrift reports a space whose limits differ from the spec. Adoption
+// stays read-only: lo creates a space with the three numbers, and never
+// changes the numbers of a space that exists. Without this note the edit in
+// the spec would do nothing and say nothing.
+func (c *Context) noteLimitsDrift(row any, sp *SpaceConfig) {
+	liveNodes := jstrOr(row, "", "maxNodes")
+	liveNamespaces := jstrOr(row, "", "maxNamespaces")
+	liveObjectCap := jstrOr(row, "", "maxObjectKiB")
+	// An api that does not report the three numbers gives nothing to compare.
+	if liveNodes == "" || liveNamespaces == "" || liveObjectCap == "" {
+		return
+	}
+	if liveNodes == strconv.Itoa(sp.MaxNodes) &&
+		liveNamespaces == strconv.Itoa(sp.MaxNamespaces) &&
+		liveObjectCap == strconv.Itoa(sp.MaxObjectKiB) {
+		return
+	}
+	c.echo("  Note: this space keeps the limits it was created with.")
+	c.echo("  The spec asks for %s.", sp.limitsLine())
+	c.echo("  lo does not change them. Change the limits in the kubehz dashboard.")
 }
 
 // spaceWaitActive ports kubehz::space_wait_active: wait for the Active
@@ -376,14 +509,14 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 	c.echo("  Namespace: %s", sp.Slug)
 	c.echo("  Access: sign in with your kubehz account (OIDC) — the control plane")
 	c.echo("  itself is operated by the platform and is not directly accessible.")
-	for _, node := range sp.Nodes {
+	for _, node := range sp.NodeNames {
 		if err := c.spaceMintJoin(ctx, cfg, spaceID, node, false); err != nil {
 			return err
 		}
 	}
-	if len(sp.Nodes) == 0 {
+	if len(sp.NodeNames) == 0 {
 		c.echo("")
-		c.echo("  No nodes declared under spec.kubehz.space.nodes — mint a join")
+		c.echo("  No nodes declared under spec.kubehz.space.nodeNames — mint a join")
 		c.echo("  ticket any time with: lo kubehz join <node-name>")
 	}
 	return nil
@@ -441,7 +574,8 @@ func (c *Context) SpaceStatus(ctx context.Context, cfg *Config, domain, clusterY
 	}
 	c.echo("Space:   %s (id: %s)", sp.Slug, spaceID)
 	c.echo("Phase:   %s", jstrOr(row, "Unknown", "status"))
-	c.echo("Plan:    %s", jstrOr(row, "-", "planId"))
+	c.echo("Limits:  nodes %s, namespaces %s, object cap %s KiB",
+		jstrOr(row, "-", "maxNodes"), jstrOr(row, "-", "maxNamespaces"), jstrOr(row, "-", "maxObjectKiB"))
 
 	res := c.spaceAPIQuiet(ctx, cfg, "GET", "/api/spaces/"+spaceID+"/nodes")
 	if !is2xx(res.Status) {

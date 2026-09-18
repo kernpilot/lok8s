@@ -128,7 +128,7 @@ func TestDestroyAndStatus(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.sharedSpec("acme.example.org")
-	f.handle("GET /api/spaces", 200, `{"data":[{"id":"sp-9","slug":"acme","status":"Active","planId":"shared-free"}]}`)
+	f.handle("GET /api/spaces", 200, `{"data":[{"id":"sp-9","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256}]}`)
 	f.handle("DELETE /api/spaces/sp-9", 200, `{}`)
 	f.handle("GET /api/spaces/sp-9/nodes", 200, `{"data":{"nodes":[{"name":"worker-1","status":"Ready","lane":"hcloud"}],"usage":{"nodes":1,"maxNodes":2}}}`)
 	if err := f.d.Destroy(t.Context(), "acme.example.org"); err != nil {
@@ -141,7 +141,7 @@ func TestDestroyAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Space:   acme (id: sp-9)\nPhase:   Active\nPlan:    shared-free\nNodes:   1/2\n  worker-1  Ready  hcloud"
+	want := "Space:   acme (id: sp-9)\nPhase:   Active\nLimits:  nodes 2, namespaces 1, object cap 256 KiB\nNodes:   1/2\n  worker-1  Ready  hcloud"
 	if status != want {
 		t.Fatalf("status:\n%s\nwant:\n%s", status, want)
 	}

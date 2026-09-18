@@ -17,13 +17,90 @@ import ^utils/verbose
 
 # ── Config reader ────────────────────────────────────────
 
+# The three numbers a space is made of, with the bounds the platform accepts.
+# A space has no plan: the tenant sets the node count, the namespace count and
+# the object cap (the size limit for one Secret or ConfigMap in the space's
+# namespaces).
+LOK8S_SPACE_NODES_DEFAULT=2
+LOK8S_SPACE_NODES_MIN=1
+LOK8S_SPACE_NODES_MAX=5
+LOK8S_SPACE_NAMESPACES_DEFAULT=1
+LOK8S_SPACE_NAMESPACES_MIN=1
+LOK8S_SPACE_NAMESPACES_MAX=3
+LOK8S_SPACE_OBJECT_CAP_DEFAULT=256
+LOK8S_SPACE_OBJECT_CAP_MIN=64
+LOK8S_SPACE_OBJECT_CAP_MAX=512
+
+# Read one of the three numbers. A missing or null value takes the default.
+# `nodes` held a list of machine names before the numbers replaced the plan,
+# so a list there gets its own message.
+# Usage: kubehz::space_number <cluster_yaml> <field> <default> <min> <max>
+# Outputs: the number to stdout
+kubehz::space_number() {
+  local cluster_yaml="${1}" field="${2}" def="${3}" min="${4}" max="${5}"
+  local type value
+  type=$(yq -r ".spec.kubehz.space.${field} | type" "${cluster_yaml}" 2>/dev/null) || type=""
+  case "${type}" in
+    ''|null|'!!null')
+      echo "${def}"
+      return 0 ;;
+    '!!int'|'!!str') ;;
+    '!!seq')
+      if [[ "${field}" == "nodes" ]]; then
+        error "spec.kubehz.space.nodes is a list: it is now the node count"
+        echo "  Set spec.kubehz.space.nodes to a whole number from ${LOK8S_SPACE_NODES_MIN} to ${LOK8S_SPACE_NODES_MAX}." >&2
+        echo "  Put the machine names under spec.kubehz.space.nodeNames." >&2
+      else
+        error "invalid spec.kubehz.space.${field}: expected a whole number from ${min} to ${max}"
+      fi
+      return 1 ;;
+    *)
+      error "invalid spec.kubehz.space.${field}: expected a whole number from ${min} to ${max}"
+      return 1 ;;
+  esac
+  value=$(yq -r ".spec.kubehz.space.${field}" "${cluster_yaml}") || return 1
+  if ! [[ "${value}" =~ ^-?[0-9]+$ ]] || (( value < min )) || (( value > max )); then
+    error "invalid spec.kubehz.space.${field}: ${value} (expected a whole number from ${min} to ${max})"
+    return 1
+  fi
+  echo "${value}"
+}
+
+# Read and bound the three numbers of a space. A value outside its range is
+# refused here, before the api sees it: the message names the field, the value
+# and the range.
+# Usage: kubehz::space_limits <cluster_yaml>
+# Sets: LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
+kubehz::space_limits() {
+  local cluster_yaml="${1}"
+  local plan
+  # Space plans are retired. A spec that still carries one asks for a shape
+  # the platform no longer has, so say so instead of ignoring it.
+  plan=$(yq -r '.spec.kubehz.space.plan // ""' "${cluster_yaml}") || return 1
+  if [[ -n "${plan}" && "${plan}" != "null" ]]; then
+    error "spec.kubehz.space.plan is not valid: space plans are retired"
+    echo "  Set spec.kubehz.space.nodes, spec.kubehz.space.namespaces and" >&2
+    echo "  spec.kubehz.space.objectCapKiB instead." >&2
+    return 1
+  fi
+  LOK8S_SPACE_MAX_NODES=$(kubehz::space_number "${cluster_yaml}" nodes \
+    "${LOK8S_SPACE_NODES_DEFAULT}" "${LOK8S_SPACE_NODES_MIN}" "${LOK8S_SPACE_NODES_MAX}") || return 1
+  LOK8S_SPACE_MAX_NAMESPACES=$(kubehz::space_number "${cluster_yaml}" namespaces \
+    "${LOK8S_SPACE_NAMESPACES_DEFAULT}" "${LOK8S_SPACE_NAMESPACES_MIN}" "${LOK8S_SPACE_NAMESPACES_MAX}") || return 1
+  LOK8S_SPACE_MAX_OBJECT_KIB=$(kubehz::space_number "${cluster_yaml}" objectCapKiB \
+    "${LOK8S_SPACE_OBJECT_CAP_DEFAULT}" "${LOK8S_SPACE_OBJECT_CAP_MIN}" "${LOK8S_SPACE_OBJECT_CAP_MAX}") || return 1
+  export LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
+}
+
 # Read spec.kubehz.space from a cluster.lok8s.yaml. Everything is optional:
 # the slug defaults to the first DNS label of the domain, the display name to
-# the slug. Node names listed under spec.kubehz.space.nodes[] get a join
-# ticket minted at provision time.
+# the slug, and the three numbers to 2 nodes, 1 namespace and a 256 KiB object
+# cap. Node names listed under spec.kubehz.space.nodeNames[] get a join ticket
+# minted at provision time.
 # Usage: kubehz::space_config <domain> <cluster_yaml>
-# Sets: LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_PLAN LOK8S_SPACE_REGION
-#       LOK8S_SPACE_NODES (array)
+# Sets: LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_REGION
+#       LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
+#       LOK8S_SPACE_NODE_NAMES (array)
 kubehz::space_config() {
   local domain="${1}" cluster_yaml="${2}"
   local default_slug="${domain%%.*}"
@@ -35,16 +112,16 @@ kubehz::space_config() {
   [[ -n "${LOK8S_SPACE_SLUG}" ]] || LOK8S_SPACE_SLUG="${default_slug}"
   LOK8S_SPACE_NAME=$(yq -r '.spec.kubehz.space.name // ""' "${cluster_yaml}") || return 1
   [[ -n "${LOK8S_SPACE_NAME}" ]] || LOK8S_SPACE_NAME="${LOK8S_SPACE_SLUG}"
-  LOK8S_SPACE_PLAN=$(yq -r '.spec.kubehz.space.plan // ""' "${cluster_yaml}") || return 1
   LOK8S_SPACE_REGION=$(yq -r '.spec.kubehz.space.region // ""' "${cluster_yaml}") || return 1
+  kubehz::space_limits "${cluster_yaml}" || return 1
 
-  LOK8S_SPACE_NODES=()
+  LOK8S_SPACE_NODE_NAMES=()
   local node
   while IFS= read -r node; do
-    [[ -n "${node}" && "${node}" != "null" ]] && LOK8S_SPACE_NODES+=("${node}")
-  done < <(yq -r '.spec.kubehz.space.nodes[]?' "${cluster_yaml}" 2>/dev/null)
+    [[ -n "${node}" && "${node}" != "null" ]] && LOK8S_SPACE_NODE_NAMES+=("${node}")
+  done < <(yq -r '.spec.kubehz.space.nodeNames[]?' "${cluster_yaml}" 2>/dev/null)
 
-  export LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_PLAN LOK8S_SPACE_REGION
+  export LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_REGION
 }
 
 # ── API plumbing ─────────────────────────────────────────
@@ -109,6 +186,34 @@ kubehz::space_lookup() {
 
 # ── Provision (create-or-adopt + join tickets) ───────────
 
+# Render the three numbers for one terminal line.
+# Usage: kubehz::space_limits_line
+kubehz::space_limits_line() {
+  echo "nodes ${LOK8S_SPACE_MAX_NODES}, namespaces ${LOK8S_SPACE_MAX_NAMESPACES}, object cap ${LOK8S_SPACE_MAX_OBJECT_KIB} KiB"
+}
+
+# Report a space whose limits differ from the spec. Adoption stays read-only:
+# lo creates a space with the three numbers, and never changes the numbers of a
+# space that exists. Without this note the edit in the spec would do nothing
+# and say nothing.
+# Usage: kubehz::space_note_limits_drift
+kubehz::space_note_limits_drift() {
+  local live_nodes live_namespaces live_object_cap
+  live_nodes=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxNodes // "" | tostring' 2>/dev/null) || return 0
+  live_namespaces=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxNamespaces // "" | tostring' 2>/dev/null) || return 0
+  live_object_cap=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxObjectKiB // "" | tostring' 2>/dev/null) || return 0
+  # An api that does not report the three numbers gives nothing to compare.
+  [[ -n "${live_nodes}" && -n "${live_namespaces}" && -n "${live_object_cap}" ]] || return 0
+  if [[ "${live_nodes}" == "${LOK8S_SPACE_MAX_NODES}" \
+    && "${live_namespaces}" == "${LOK8S_SPACE_MAX_NAMESPACES}" \
+    && "${live_object_cap}" == "${LOK8S_SPACE_MAX_OBJECT_KIB}" ]]; then
+    return 0
+  fi
+  echo "  Note: this space keeps the limits it was created with."
+  echo "  The spec asks for $(kubehz::space_limits_line)."
+  echo "  lo does not change them. Change the limits in the kubehz dashboard."
+}
+
 # Create the Space, or adopt it when it already exists (idempotent
 # re-provision — the same contract every lo driver honors).
 # Result in KUBEHZ_SPACE_ID.
@@ -122,6 +227,7 @@ kubehz::space_ensure() {
     debug "Space '${LOK8S_SPACE_SLUG}' already exists — adopting"
     KUBEHZ_SPACE_ID=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
     [[ -n "${KUBEHZ_SPACE_ID}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
+    kubehz::space_note_limits_drift
     return 0
   fi
 
@@ -129,10 +235,11 @@ kubehz::space_ensure() {
   payload=$(jq -n \
     --arg name "${LOK8S_SPACE_NAME}" \
     --arg slug "${LOK8S_SPACE_SLUG}" \
-    --arg plan "${LOK8S_SPACE_PLAN}" \
+    --argjson maxNodes "${LOK8S_SPACE_MAX_NODES}" \
+    --argjson maxNamespaces "${LOK8S_SPACE_MAX_NAMESPACES}" \
+    --argjson maxObjectKiB "${LOK8S_SPACE_MAX_OBJECT_KIB}" \
     --arg region "${LOK8S_SPACE_REGION}" \
-    '{name: $name, slug: $slug}
-      + (if $plan   != "" then {planId: $plan}   else {} end)
+    '{name: $name, slug: $slug, maxNodes: $maxNodes, maxNamespaces: $maxNamespaces, maxObjectKiB: $maxObjectKiB}
       + (if $region != "" then {region: $region} else {} end)')
 
   local rc=0
@@ -148,6 +255,23 @@ kubehz::space_ensure() {
         echo "  Capacity frees as spaces are removed and as new planes come online. You can:" >&2
         echo "    • retry later" >&2
         echo "    • run your own cluster meanwhile (spec.kubehz.hosting: self)" >&2
+        return 1 ;;
+      SPACE_LIMITS_ABOVE_FREE)
+        error "kubehz refused the space limits ($(kubehz::space_limits_line)): they are above the free allowance"
+        echo "  A free account gets 1 space with 2 nodes and 1 namespace." >&2
+        echo "  Decrease the values in spec.kubehz.space, or upgrade the account in the" >&2
+        echo "  kubehz dashboard." >&2
+        return 1 ;;
+      SPACE_LIMITS_ABOVE_SHARED)
+        error "kubehz refused the space limits ($(kubehz::space_limits_line)): they are above the maximum of a shared control plane"
+        echo "  Decrease the values in spec.kubehz.space, or use a hosted control plane:" >&2
+        echo "  set spec.kubehz.hosting to hosted." >&2
+        return 1 ;;
+      SPACE_PLAN_RETIRED)
+        error "kubehz refused the request: space plans are retired"
+        echo "  A space uses three numbers: nodes, namespaces and objectCapKiB." >&2
+        echo "  Remove spec.kubehz.space.plan from the cluster spec. Then run" >&2
+        echo "  lo provision again." >&2
         return 1 ;;
       *)
         # Lost a create race? The adopt path answers it — retry the lookup once.
@@ -267,12 +391,12 @@ kubehz::provision_shared() {
   echo "  itself is operated by the platform and is not directly accessible."
 
   local node
-  for node in "${LOK8S_SPACE_NODES[@]}"; do
+  for node in "${LOK8S_SPACE_NODE_NAMES[@]}"; do
     kubehz::space_mint_join "${space_id}" "${node}" || return 1
   done
-  if (( ${#LOK8S_SPACE_NODES[@]} == 0 )); then
+  if (( ${#LOK8S_SPACE_NODE_NAMES[@]} == 0 )); then
     echo ""
-    echo "  No nodes declared under spec.kubehz.space.nodes — mint a join"
+    echo "  No nodes declared under spec.kubehz.space.nodeNames — mint a join"
     echo "  ticket any time with: lo kubehz join <node-name>"
   fi
 }
@@ -320,14 +444,16 @@ kubehz::space_status() {
     return 0
   fi
 
-  local space_id phase plan
+  local space_id phase max_nodes max_namespaces max_object
   space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
   [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
   phase=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.status // "Unknown"')
-  plan=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.planId // "-"')
+  max_nodes=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxNodes // "-"')
+  max_namespaces=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxNamespaces // "-"')
+  max_object=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxObjectKiB // "-"')
   echo "Space:   ${LOK8S_SPACE_SLUG} (id: ${space_id})"
   echo "Phase:   ${phase}"
-  echo "Plan:    ${plan}"
+  echo "Limits:  nodes ${max_nodes}, namespaces ${max_namespaces}, object cap ${max_object} KiB"
 
   kubehz::space_api GET "/api/spaces/${space_id}/nodes" 2>/dev/null || {
     echo "Nodes:   unknown (API unreachable)"

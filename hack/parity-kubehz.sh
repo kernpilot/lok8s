@@ -75,6 +75,72 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
 EOF
+# space-*.dev — one refused space number each (a Space is three numbers, and
+# every one of them has a range lo checks before the api sees it).
+mk space-nodes-0.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      nodes: 0
+EOF
+mk space-nodes-6.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      nodes: 6
+EOF
+mk space-ns-4.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      namespaces: 4
+EOF
+mk space-cap-63.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      objectCapKiB: 63
+EOF
+mk space-cap-513.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      objectCapKiB: 513
+EOF
+# space-plan.dev — a retired plan; space-nodes-list.dev — the old node list.
+mk space-plan.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      plan: shared-s
+EOF
+mk space-nodes-list.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      nodes: [worker-1, worker-2]
+EOF
 # hosted-http.dev — hosted with a plain-http apiUrl: the https gate.
 mk hosted-http.dev <<'EOF'
 kind: KubeOne
@@ -177,6 +243,15 @@ check - kh s
 check - kubehz status --domain alpha.dev
 check - kubehz status --domain nonexist.dev
 check "${PARSEERR}" kubehz status --domain broken.dev
+
+# ── the three numbers of a space: every bound, refused locally ──────────────
+check - kubehz status --domain space-nodes-0.dev
+check - kubehz status --domain space-nodes-6.dev
+check - kubehz status --domain space-ns-4.dev
+check - kubehz status --domain space-cap-63.dev
+check - kubehz status --domain space-cap-513.dev
+check - kubehz status --domain space-plan.dev
+check - kubehz status --domain space-nodes-list.dev
 
 # ── register / deregister: config validation refusals ───────────────────────
 check "${UNBOUND}" kubehz register

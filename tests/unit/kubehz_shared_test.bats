@@ -34,15 +34,22 @@ teardown() {
   teardown_tmpdir
 }
 
-# yq mock for a spec with an explicit space block + two declared nodes.
+# yq mock for a spec with an explicit space block + two declared machines.
+# The three numbers are the space: nodes 3, namespaces 2, object cap 128 KiB.
 yq_space_spec() {
   yq() {
     case "$2" in
       '.spec.kubehz.space.slug // ""')   echo "acme" ;;
       '.spec.kubehz.space.name // ""')   echo "Acme Prod" ;;
-      '.spec.kubehz.space.plan // ""')   echo "shared-s" ;;
       '.spec.kubehz.space.region // ""') echo "" ;;
-      '.spec.kubehz.space.nodes[]?')     printf 'worker-1\nworker-2\n' ;;
+      '.spec.kubehz.space.plan // ""')   echo "" ;;
+      '.spec.kubehz.space.nodes | type')        echo '!!int' ;;
+      '.spec.kubehz.space.namespaces | type')   echo '!!int' ;;
+      '.spec.kubehz.space.objectCapKiB | type') echo '!!int' ;;
+      '.spec.kubehz.space.nodes')        echo "3" ;;
+      '.spec.kubehz.space.namespaces')   echo "2" ;;
+      '.spec.kubehz.space.objectCapKiB') echo "128" ;;
+      '.spec.kubehz.space.nodeNames[]?') printf 'worker-1\nworker-2\n' ;;
       *) echo "" ;;
     esac
   }
@@ -53,7 +60,25 @@ yq_space_spec() {
 yq_space_defaults() {
   yq() {
     case "$2" in
-      '.spec.kubehz.space.nodes[]?') : ;;
+      '.spec.kubehz.space.nodeNames[]?') : ;;
+      *'| type') echo '!!null' ;;
+      *'// ""'*) echo "" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+}
+
+# yq mock with ONE space field set to a value the caller names.
+# Usage: yq_space_field <field> <type> <value>
+yq_space_field() {
+  export _SPACE_FIELD="$1" _SPACE_TYPE="$2" _SPACE_VALUE="$3"
+  yq() {
+    case "$2" in
+      ".spec.kubehz.space.${_SPACE_FIELD} | type") echo "${_SPACE_TYPE}" ;;
+      ".spec.kubehz.space.${_SPACE_FIELD}")        echo "${_SPACE_VALUE}" ;;
+      '.spec.kubehz.space.nodeNames[]?') : ;;
+      *'| type') echo '!!null' ;;
       *'// ""'*) echo "" ;;
       *) echo "" ;;
     esac
@@ -138,7 +163,87 @@ yq_space_defaults() {
 
   [ "${LOK8S_SPACE_SLUG}" = "acme" ]
   [ "${LOK8S_SPACE_NAME}" = "acme" ]
-  [ "${#LOK8S_SPACE_NODES[@]}" -eq 0 ]
+  [ "${#LOK8S_SPACE_NODE_NAMES[@]}" -eq 0 ]
+  [ "${LOK8S_SPACE_MAX_NODES}" -eq 2 ]
+  [ "${LOK8S_SPACE_MAX_NAMESPACES}" -eq 1 ]
+  [ "${LOK8S_SPACE_MAX_OBJECT_KIB}" -eq 256 ]
+}
+
+# ── space_limits: the three numbers and their bounds ─────
+
+@test "space_limits: reads the three numbers the spec sets" {
+  yq_space_spec
+
+  kubehz::space_limits "/dev/null"
+
+  [ "${LOK8S_SPACE_MAX_NODES}" -eq 3 ]
+  [ "${LOK8S_SPACE_MAX_NAMESPACES}" -eq 2 ]
+  [ "${LOK8S_SPACE_MAX_OBJECT_KIB}" -eq 128 ]
+}
+
+@test "space_limits: refuses a node count out of range" {
+  yq_space_field nodes '!!int' 6
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.nodes: 6 (expected a whole number from 1 to 5)"
+}
+
+@test "space_limits: refuses zero nodes" {
+  yq_space_field nodes '!!int' 0
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.nodes: 0"
+}
+
+@test "space_limits: refuses a namespace count out of range" {
+  yq_space_field namespaces '!!int' 4
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.namespaces: 4 (expected a whole number from 1 to 3)"
+}
+
+@test "space_limits: refuses an object cap below 64 KiB" {
+  yq_space_field objectCapKiB '!!int' 63
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.objectCapKiB: 63 (expected a whole number from 64 to 512)"
+}
+
+@test "space_limits: refuses an object cap above 512 KiB" {
+  yq_space_field objectCapKiB '!!int' 513
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.objectCapKiB: 513"
+}
+
+@test "space_limits: refuses a retired plan" {
+  yq() {
+    case "$2" in
+      '.spec.kubehz.space.plan // ""') echo "shared-s" ;;
+      *'| type') echo '!!null' ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "spec.kubehz.space.plan is not valid: space plans are retired"
+  assert_output --partial "spec.kubehz.space.objectCapKiB instead."
+}
+
+@test "space_limits: a list under nodes names the new field" {
+  yq_space_field nodes '!!seq' ''
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "spec.kubehz.space.nodes is a list: it is now the node count"
+  assert_output --partial "spec.kubehz.space.nodeNames"
 }
 
 # ── provision: create → wait → mint per node ─────────────
@@ -177,6 +282,39 @@ yq_space_defaults() {
   assert_output --partial "worker-2"
   # Two nodes declared → the plaintext ticket appears exactly twice.
   [ "$(grep -c "a1b2c3.d4e5f6g7h8i9j0k1" <<<"${output}")" -eq 2 ]
+}
+
+@test "space_ensure: the create body carries the three numbers" {
+  yq_space_spec
+  CURL_BODY="${BATS_TEST_TMPDIR}/body"
+  export CURL_BODY
+  curl() {
+    local method="GET" url="" body=""
+    while (( $# )); do
+      case "$1" in
+        -X) method="$2"; shift 2 ;;
+        https://*) url="$1"; shift ;;
+        -d) body="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${method} ${url##*api.example.test}" in
+      "GET /api/spaces")
+        printf '{"ok":true,"data":[]}\n200' ;;
+      "POST /api/spaces")
+        printf '%s' "${body}" > "${CURL_BODY}"
+        printf '{"ok":true,"data":{"id":"sp-123"}}\n201' ;;
+      *)
+        printf '{"ok":false}\n500' ;;
+    esac
+  }
+  export -f curl
+
+  kubehz::space_config "acme.example.org" "/dev/null"
+  run kubehz::space_ensure "acme.example.org" "/dev/null"
+  assert_success
+  run jq -c '[.maxNodes, .maxNamespaces, .maxObjectKiB]' "${CURL_BODY}"
+  assert_output '[3,2,128]'
 }
 
 @test "provision_shared: adopts an existing space instead of re-creating" {
@@ -332,7 +470,7 @@ yq_space_defaults() {
 
 # ── status ───────────────────────────────────────────────
 
-@test "space_status: renders phase, plan and the node table" {
+@test "space_status: renders phase, the three numbers and the node table" {
   yq_space_defaults
   curl() {
     local method="GET" url=""
@@ -346,7 +484,7 @@ yq_space_defaults() {
     done
     case "${method} ${url##*api.example.test}" in
       "GET /api/spaces")
-        printf '{"ok":true,"data":[{"id":"sp-5","slug":"acme","status":"Active","planId":"shared-free"}]}\n200' ;;
+        printf '{"ok":true,"data":[{"id":"sp-5","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256}]}\n200' ;;
       "GET /api/spaces/sp-5/nodes")
         # The REAL route shape (kubehz-api nodes.get.ts): an OBJECT with
         # `nodes` (each {name,…} — not nodeName) and `usage` — the old
@@ -361,7 +499,7 @@ yq_space_defaults() {
   run kubehz::space_status "acme.example.org" "/dev/null"
   assert_success
   assert_output --partial "Phase:   Active"
-  assert_output --partial "Plan:    shared-free"
+  assert_output --partial "Limits:  nodes 2, namespaces 1, object cap 256 KiB"
   assert_output --partial "worker-1  Ready  hcloud"
 }
 

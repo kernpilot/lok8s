@@ -160,19 +160,29 @@ spec:
     space:
       slug: acme          # optional — defaults to the domain's first label
       name: Acme Prod     # optional — defaults to the slug
-      nodes:              # optional — one join ticket minted per name
+      nodes: 2            # optional — the node ceiling, 1 to 5 (default 2)
+      namespaces: 1       # optional — the namespace ceiling, 1 to 3 (default 1)
+      objectCapKiB: 256   # optional — KiB per Secret/ConfigMap, 64 to 512 (default 256)
+      nodeNames:          # optional — one join ticket minted per name
         - worker-1
         - worker-2
 ```
 
+A space is three numbers, and you set all three. `nodes` is how many machines
+the space takes, `namespaces` is how many namespaces it holds, and
+`objectCapKiB` is the size cap for one Secret or ConfigMap in those
+namespaces. There is no plan to pick. The defaults are 2 nodes, 1 namespace
+and a 256 KiB object cap. `lo` refuses a value outside its range before the
+platform sees it.
+
 `lo provision` creates the space (or adopts it, if it already exists) and
-mints a single-use join ticket for every node listed under
-`space.nodes`. `lo destroy` removes the space.
+mints a single-use join ticket for every machine listed under
+`space.nodeNames`. `lo destroy` removes the space.
 
 ```bash
 lo provision                  # create/adopt the space + mint join tickets
 lo kubehz join worker-3       # mint another ticket, any time
-lo kubehz status              # space phase, plan, and the registered nodes
+lo kubehz status              # space phase, the three numbers, the nodes
 lo kubehz deregister          # remove the space
 ```
 
@@ -191,6 +201,11 @@ A few things worth knowing before you reach for it:
   the ticket; `lo kubehz join <node> --print-token` shows it when you need it
   in the open. Older platforms without the script print the ticket and a
   pointer to the node-join guide instead.
+- **The three numbers apply when the space is created.** A later
+  `lo provision` adopts the space and changes nothing on the platform. An
+  edit to `space.nodes`, `space.namespaces` or `space.objectCapKiB` therefore
+  gets a note in the output instead of a silent no-op. Change the numbers of
+  a live space in the dashboard.
 - **A join ticket is minted once**, is bound to one node name, and expires
   quickly. Nothing stores the plaintext outside the script: a lost ticket
   gets re-minted, never recovered.
@@ -213,12 +228,21 @@ A few things worth knowing before you reach for it:
 
 ### Limits, and whose problem each one is
 
-A space runs inside two independent budgets, and the error codes keep them
+A space runs inside three independent budgets, and the error codes keep them
 apart deliberately:
 
-- **Your space's plan quota**: nodes and namespaces per space. Exceeding it
-  answers `403 QUOTA_EXCEEDED` and names the limit. Fix: remove something or
-  move to a bigger plan.
+- **Your space's own three numbers**: `nodes`, `namespaces` and
+  `objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and names the
+  limit. Fix: remove something, or raise the number in the spec.
+- **What your account allows**: a free account gets 1 space with 2 nodes and
+  the first namespace. Above that, the create answers `400
+  SPACE_LIMITS_ABOVE_FREE`. A paid account reaches the maximum of a shared
+  plane: 5 nodes, 3 namespaces, a 512 KiB object cap. Above *that*, the
+  answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that large needs a
+  control plane of its own, so use `hosting: hosted`. A request that
+  still carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
+  `spec.kubehz.space.plan`. `lo` turns each of these into the values it sent
+  and the next step.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
   join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
