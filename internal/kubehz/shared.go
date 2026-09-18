@@ -99,7 +99,10 @@ func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) 
 func (c *Context) spaceLimits(doc specDoc) (nodes, namespaces, objectCap int, err error) {
 	// Space plans are retired. A spec that still carries one asks for a
 	// shape the platform no longer has, so say so instead of ignoring it.
-	if plan := doc.Or("", "spec", "kubehz", "space", "plan"); plan != "" && plan != "null" {
+	// The test is the raw node, not Or(): Or() carries yq's `//` semantics,
+	// which read `plan: false` and `plan: ""` as absent and would let those
+	// specs through unrefused. Any node that is not null is a plan.
+	if !yqsem.IsNull(doc.Lookup("spec", "kubehz", "space", "plan")) {
 		c.errorf("spec.kubehz.space.plan is not valid: space plans are retired")
 		c.echoErr("  Set spec.kubehz.space.limits.nodes, spec.kubehz.space.limits.namespaces")
 		c.echoErr("  and spec.kubehz.space.limits.objectCapKiB instead.")

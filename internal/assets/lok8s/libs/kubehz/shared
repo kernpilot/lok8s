@@ -77,11 +77,15 @@ kubehz::space_number() {
 # Sets: LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
 kubehz::space_limits() {
   local cluster_yaml="${1}"
-  local plan
+  local plan_type
   # Space plans are retired. A spec that still carries one asks for a shape
-  # the platform no longer has, so say so instead of ignoring it.
-  plan=$(yq -r '.spec.kubehz.space.plan // ""' "${cluster_yaml}") || return 1
-  if [[ -n "${plan}" && "${plan}" != "null" ]]; then
+  # the platform no longer has, so say so instead of ignoring it. The test is
+  # the TYPE, not `// ""`: yq's `//` reads `plan: false` and `plan: ""` as
+  # absent and would let those specs through unrefused. Any type that is not
+  # null is a plan. The read keeps `|| return 1`, so a parse failure still
+  # stops here instead of reading as "no plan".
+  plan_type=$(yq -r '.spec.kubehz.space.plan | type' "${cluster_yaml}") || return 1
+  if [[ "${plan_type}" != "!!null" && "${plan_type}" != "null" && -n "${plan_type}" ]]; then
     error "spec.kubehz.space.plan is not valid: space plans are retired"
     echo "  Set spec.kubehz.space.limits.nodes, spec.kubehz.space.limits.namespaces" >&2
     echo "  and spec.kubehz.space.limits.objectCapKiB instead." >&2

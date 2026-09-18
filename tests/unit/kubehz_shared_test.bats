@@ -272,20 +272,38 @@ yq_space_field() {
   [ -z "${LOK8S_SPACE_MAX_OBJECT_KIB}" ]
 }
 
-@test "space_limits: refuses a retired plan" {
+# ANY plan node is a plan. yq's `//` reads `false` and `""` as absent, so a
+# check built on it would let those two specs through unrefused. The Go twin
+# pins the same set.
+yq_space_plan_type() {
+  export _PLAN_TYPE="$1"
   yq() {
     case "$2" in
-      '.spec.kubehz.space.plan // ""') echo "shared-s" ;;
+      '.spec.kubehz.space.plan | type') echo "${_PLAN_TYPE}" ;;
       *'| type') echo '!!null' ;;
       *) echo "" ;;
     esac
   }
   export -f yq
+}
+
+@test "space_limits: refuses a retired plan" {
+  local t
+  for t in '!!str' '!!bool' '!!int' '!!map'; do
+    yq_space_plan_type "${t}"
+
+    run kubehz::space_limits "/dev/null"
+    assert_failure
+    assert_output --partial "spec.kubehz.space.plan is not valid: space plans are retired"
+    assert_output --partial "spec.kubehz.space.limits.objectCapKiB instead."
+  done
+}
+
+@test "space_limits: an explicit null plan is not a plan" {
+  yq_space_plan_type '!!null'
 
   run kubehz::space_limits "/dev/null"
-  assert_failure
-  assert_output --partial "spec.kubehz.space.plan is not valid: space plans are retired"
-  assert_output --partial "spec.kubehz.space.limits.objectCapKiB instead."
+  assert_success
 }
 
 @test "space_limits: a list under limits.nodes names both fields" {

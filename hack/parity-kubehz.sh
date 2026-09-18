@@ -182,6 +182,16 @@ spec:
     space:
       plan: shared-s
 EOF
+# A plan that yq's `//` reads as absent: still a plan, still refused.
+mk space-plan-false.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      plan: false
+EOF
 mk space-limits-list.dev <<'EOF'
 kind: Kubehz
 spec:
@@ -303,6 +313,7 @@ check - kubehz status --domain space-nodes-float.dev
 check - kubehz status --domain space-nodes-bool.dev
 check - kubehz status --domain space-ns-map.dev
 check - kubehz status --domain space-plan.dev
+check - kubehz status --domain space-plan-false.dev
 check - kubehz status --domain space-limits-list.dev
 
 # ── register / deregister: config validation refusals ───────────────────────

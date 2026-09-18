@@ -46,8 +46,10 @@ func TestSpaceConfigReadsTheThreeNumbers(t *testing.T) {
 	}
 }
 
-// Each number has a range, and a value outside it is refused locally: the
-// message names the field, the value and the range.
+// Only the SHAPE of each number is local: a whole number, 1 or more. There is
+// no upper bound here, because the ceiling belongs to the account and lives on
+// the platform. A value that fails the shape check is refused with the field,
+// the value and the rule named.
 func TestSpaceLimitsBounds(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -98,11 +100,25 @@ func TestSpaceLimitsBounds(t *testing.T) {
 
 func TestSpaceConfigRefusesARetiredPlan(t *testing.T) {
 	t.Parallel()
+	// ANY plan node is a plan. yq's `//` reads `false` and `""` as absent, so
+	// a check built on it would let those two specs through unrefused.
+	for _, block := range []string{
+		"    space:\n      plan: shared-s\n",
+		"    space:\n      plan: false\n",
+		"    space:\n      plan: \"\"\n",
+		"    space:\n      plan: 0\n",
+		"    space:\n      plan:\n        id: shared-s\n",
+	} {
+		h := newHarness(t)
+		_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, block))
+		mustErr(t, err)
+		mustContain(t, h.output(), "spec.kubehz.space.plan is not valid: space plans are retired")
+		mustContain(t, h.output(), "spec.kubehz.space.limits.objectCapKiB instead.")
+	}
+	// An explicit null is not a plan.
 	h := newHarness(t)
-	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      plan: shared-s\n"))
-	mustErr(t, err)
-	mustContain(t, h.output(), "spec.kubehz.space.plan is not valid: space plans are retired")
-	mustContain(t, h.output(), "spec.kubehz.space.limits.objectCapKiB instead.")
+	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      plan: null\n"))
+	mustOK(t, err, h.output())
 }
 
 // spec.kubehz.space.nodes holds the machine names and keeps that meaning. A
