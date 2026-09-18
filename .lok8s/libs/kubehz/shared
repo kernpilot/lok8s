@@ -90,6 +90,9 @@ kubehz::space_number_value() {
   if (( ${#digits} > 19 )); then
     return 1
   fi
+  # A STRING comparison on purpose: both sides are 19 digits here, so it is
+  # the numeric one, and it cannot overflow the way (( )) would.
+  # shellcheck disable=SC2071
   if (( ${#digits} == 19 )) && [[ "${digits}" > "9223372036854775807" ]]; then
     return 1
   fi
