@@ -35,7 +35,7 @@ teardown() {
 }
 
 # yq mock for a spec with an explicit space block + two declared machines.
-# The three numbers are the space: nodes 3, namespaces 2, object cap 128 KiB.
+# The limits block is the space: nodes 3, namespaces 2, object cap 128 KiB.
 yq_space_spec() {
   yq() {
     case "$2" in
@@ -43,13 +43,13 @@ yq_space_spec() {
       '.spec.kubehz.space.name // ""')   echo "Acme Prod" ;;
       '.spec.kubehz.space.region // ""') echo "" ;;
       '.spec.kubehz.space.plan // ""')   echo "" ;;
-      '.spec.kubehz.space.nodes | type')        echo '!!int' ;;
-      '.spec.kubehz.space.namespaces | type')   echo '!!int' ;;
-      '.spec.kubehz.space.objectCapKiB | type') echo '!!int' ;;
-      '.spec.kubehz.space.nodes')        echo "3" ;;
-      '.spec.kubehz.space.namespaces')   echo "2" ;;
-      '.spec.kubehz.space.objectCapKiB') echo "128" ;;
-      '.spec.kubehz.space.nodeNames[]?') printf 'worker-1\nworker-2\n' ;;
+      '.spec.kubehz.space.limits.nodes | type')        echo '!!int' ;;
+      '.spec.kubehz.space.limits.namespaces | type')   echo '!!int' ;;
+      '.spec.kubehz.space.limits.objectCapKiB | type') echo '!!int' ;;
+      '.spec.kubehz.space.limits.nodes')        echo "3" ;;
+      '.spec.kubehz.space.limits.namespaces')   echo "2" ;;
+      '.spec.kubehz.space.limits.objectCapKiB') echo "128" ;;
+      '.spec.kubehz.space.nodes[]?')     printf 'worker-1\nworker-2\n' ;;
       *) echo "" ;;
     esac
   }
@@ -60,7 +60,7 @@ yq_space_spec() {
 yq_space_defaults() {
   yq() {
     case "$2" in
-      '.spec.kubehz.space.nodeNames[]?') : ;;
+      '.spec.kubehz.space.nodes[]?') : ;;
       *'| type') echo '!!null' ;;
       *'// ""'*) echo "" ;;
       *) echo "" ;;
@@ -69,15 +69,15 @@ yq_space_defaults() {
   export -f yq
 }
 
-# yq mock with ONE space field set to a value the caller names.
+# yq mock with ONE limits field set to a value the caller names.
 # Usage: yq_space_field <field> <type> <value>
 yq_space_field() {
   export _SPACE_FIELD="$1" _SPACE_TYPE="$2" _SPACE_VALUE="$3"
   yq() {
     case "$2" in
-      ".spec.kubehz.space.${_SPACE_FIELD} | type") echo "${_SPACE_TYPE}" ;;
-      ".spec.kubehz.space.${_SPACE_FIELD}")        echo "${_SPACE_VALUE}" ;;
-      '.spec.kubehz.space.nodeNames[]?') : ;;
+      ".spec.kubehz.space.limits.${_SPACE_FIELD} | type") echo "${_SPACE_TYPE}" ;;
+      ".spec.kubehz.space.limits.${_SPACE_FIELD}")        echo "${_SPACE_VALUE}" ;;
+      '.spec.kubehz.space.nodes[]?') : ;;
       *'| type') echo '!!null' ;;
       *'// ""'*) echo "" ;;
       *) echo "" ;;
@@ -163,7 +163,7 @@ yq_space_field() {
 
   [ "${LOK8S_SPACE_SLUG}" = "acme" ]
   [ "${LOK8S_SPACE_NAME}" = "acme" ]
-  [ "${#LOK8S_SPACE_NODE_NAMES[@]}" -eq 0 ]
+  [ "${#LOK8S_SPACE_NODES[@]}" -eq 0 ]
   [ "${LOK8S_SPACE_MAX_NODES}" -eq 2 ]
   [ "${LOK8S_SPACE_MAX_NAMESPACES}" -eq 1 ]
   [ "${LOK8S_SPACE_MAX_OBJECT_KIB}" -eq 256 ]
@@ -171,7 +171,7 @@ yq_space_field() {
 
 # ── space_limits: the three numbers and their bounds ─────
 
-@test "space_limits: reads the three numbers the spec sets" {
+@test "space_limits: reads the three numbers the limits block sets" {
   yq_space_spec
 
   kubehz::space_limits "/dev/null"
@@ -186,7 +186,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.nodes: 6 (expected a whole number from 1 to 5)"
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 6 (expected a whole number from 1 to 5)"
 }
 
 @test "space_limits: refuses zero nodes" {
@@ -194,7 +194,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.nodes: 0"
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 0"
 }
 
 @test "space_limits: refuses a namespace count out of range" {
@@ -202,7 +202,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.namespaces: 4 (expected a whole number from 1 to 3)"
+  assert_output --partial "invalid spec.kubehz.space.limits.namespaces: 4 (expected a whole number from 1 to 3)"
 }
 
 @test "space_limits: refuses an object cap below 64 KiB" {
@@ -210,7 +210,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.objectCapKiB: 63 (expected a whole number from 64 to 512)"
+  assert_output --partial "invalid spec.kubehz.space.limits.objectCapKiB: 63 (expected a whole number from 64 to 512)"
 }
 
 @test "space_limits: refuses an object cap above 512 KiB" {
@@ -218,7 +218,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.objectCapKiB: 513"
+  assert_output --partial "invalid spec.kubehz.space.limits.objectCapKiB: 513"
 }
 
 @test "space_limits: refuses a retired plan" {
@@ -234,16 +234,25 @@ yq_space_field() {
   run kubehz::space_limits "/dev/null"
   assert_failure
   assert_output --partial "spec.kubehz.space.plan is not valid: space plans are retired"
-  assert_output --partial "spec.kubehz.space.objectCapKiB instead."
+  assert_output --partial "spec.kubehz.space.limits.objectCapKiB instead."
 }
 
-@test "space_limits: a list under nodes names the new field" {
+@test "space_limits: a list under limits.nodes names both fields" {
   yq_space_field nodes '!!seq' ''
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "spec.kubehz.space.nodes is a list: it is now the node count"
-  assert_output --partial "spec.kubehz.space.nodeNames"
+  assert_output --partial "spec.kubehz.space.limits.nodes is a list: it is the node ceiling"
+  assert_output --partial "The machine names stay under spec.kubehz.space.nodes."
+}
+
+@test "space_config: the machine-name list under space.nodes is untouched" {
+  yq_space_spec
+
+  kubehz::space_config "acme.example.org" "/dev/null"
+
+  [ "${#LOK8S_SPACE_NODES[@]}" -eq 2 ]
+  [ "${LOK8S_SPACE_NODES[0]}" = "worker-1" ]
 }
 
 # ── provision: create → wait → mint per node ─────────────

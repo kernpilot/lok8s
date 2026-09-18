@@ -21,10 +21,10 @@ func TestSpaceConfigDefaults(t *testing.T) {
 	h := newHarness(t)
 	sp, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, ""))
 	mustOK(t, err, h.output())
-	if sp.Slug != "acme" || sp.Name != "acme" || len(sp.NodeNames) != 0 {
+	if sp.Slug != "acme" || sp.Name != "acme" || len(sp.Nodes) != 0 {
 		t.Fatalf("%+v", sp)
 	}
-	// The three numbers default to 2 nodes, 1 namespace, a 256 KiB object cap.
+	// A spec with no limits block takes 2 nodes, 1 namespace, a 256 KiB cap.
 	if sp.MaxNodes != 2 || sp.MaxNamespaces != 1 || sp.MaxObjectKiB != 256 {
 		t.Fatalf("%+v", sp)
 	}
@@ -38,8 +38,8 @@ func TestSpaceConfigReadsTheThreeNumbers(t *testing.T) {
 	if sp.MaxNodes != 3 || sp.MaxNamespaces != 2 || sp.MaxObjectKiB != 128 {
 		t.Fatalf("%+v", sp)
 	}
-	if len(sp.NodeNames) != 2 {
-		t.Fatalf("%+v", sp.NodeNames)
+	if len(sp.Nodes) != 2 {
+		t.Fatalf("%+v", sp.Nodes)
 	}
 }
 
@@ -51,13 +51,13 @@ func TestSpaceLimitsBounds(t *testing.T) {
 		block string
 		want  string
 	}{
-		{"    space:\n      nodes: 0\n", "invalid spec.kubehz.space.nodes: 0 (expected a whole number from 1 to 5)"},
-		{"    space:\n      nodes: 6\n", "invalid spec.kubehz.space.nodes: 6 (expected a whole number from 1 to 5)"},
-		{"    space:\n      namespaces: 0\n", "invalid spec.kubehz.space.namespaces: 0 (expected a whole number from 1 to 3)"},
-		{"    space:\n      namespaces: 4\n", "invalid spec.kubehz.space.namespaces: 4 (expected a whole number from 1 to 3)"},
-		{"    space:\n      objectCapKiB: 63\n", "invalid spec.kubehz.space.objectCapKiB: 63 (expected a whole number from 64 to 512)"},
-		{"    space:\n      objectCapKiB: 513\n", "invalid spec.kubehz.space.objectCapKiB: 513 (expected a whole number from 64 to 512)"},
-		{"    space:\n      nodes: two\n", "invalid spec.kubehz.space.nodes: two (expected a whole number from 1 to 5)"},
+		{"    space:\n      limits:\n        nodes: 0\n", "invalid spec.kubehz.space.limits.nodes: 0 (expected a whole number from 1 to 5)"},
+		{"    space:\n      limits:\n        nodes: 6\n", "invalid spec.kubehz.space.limits.nodes: 6 (expected a whole number from 1 to 5)"},
+		{"    space:\n      limits:\n        namespaces: 0\n", "invalid spec.kubehz.space.limits.namespaces: 0 (expected a whole number from 1 to 3)"},
+		{"    space:\n      limits:\n        namespaces: 4\n", "invalid spec.kubehz.space.limits.namespaces: 4 (expected a whole number from 1 to 3)"},
+		{"    space:\n      limits:\n        objectCapKiB: 63\n", "invalid spec.kubehz.space.limits.objectCapKiB: 63 (expected a whole number from 64 to 512)"},
+		{"    space:\n      limits:\n        objectCapKiB: 513\n", "invalid spec.kubehz.space.limits.objectCapKiB: 513 (expected a whole number from 64 to 512)"},
+		{"    space:\n      limits:\n        nodes: two\n", "invalid spec.kubehz.space.limits.nodes: two (expected a whole number from 1 to 5)"},
 	} {
 		h := newHarness(t)
 		_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, tc.block))
@@ -67,7 +67,7 @@ func TestSpaceLimitsBounds(t *testing.T) {
 	// The ends of every range are accepted.
 	h := newHarness(t)
 	sp, err := h.ctx.SpaceConfig("acme.example.org",
-		spaceSpec(h, "    space:\n      nodes: 5\n      namespaces: 3\n      objectCapKiB: 64\n"))
+		spaceSpec(h, "    space:\n      limits:\n        nodes: 5\n        namespaces: 3\n        objectCapKiB: 64\n"))
 	mustOK(t, err, h.output())
 	if sp.MaxNodes != 5 || sp.MaxNamespaces != 3 || sp.MaxObjectKiB != 64 {
 		t.Fatalf("%+v", sp)
@@ -80,18 +80,35 @@ func TestSpaceConfigRefusesARetiredPlan(t *testing.T) {
 	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      plan: shared-s\n"))
 	mustErr(t, err)
 	mustContain(t, h.output(), "spec.kubehz.space.plan is not valid: space plans are retired")
-	mustContain(t, h.output(), "spec.kubehz.space.objectCapKiB instead.")
+	mustContain(t, h.output(), "spec.kubehz.space.limits.objectCapKiB instead.")
 }
 
-// `nodes` carried the machine names before it became the node count. A list
-// there is the old shape: the message names the field that holds them now.
-func TestSpaceConfigRefusesANodeList(t *testing.T) {
+// spec.kubehz.space.nodes holds the machine names and keeps that meaning. A
+// list under limits.nodes is the two fields confused: the message names both.
+func TestSpaceConfigRefusesANodeListUnderLimits(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      nodes: [worker-1]\n"))
+	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      limits:\n        nodes: [worker-1]\n"))
 	mustErr(t, err)
-	mustContain(t, h.output(), "spec.kubehz.space.nodes is a list: it is now the node count")
-	mustContain(t, h.output(), "spec.kubehz.space.nodeNames")
+	mustContain(t, h.output(), "spec.kubehz.space.limits.nodes is a list: it is the node ceiling")
+	mustContain(t, h.output(), "The machine names stay under spec.kubehz.space.nodes.")
+}
+
+// The machine-name list under spec.kubehz.space.nodes is untouched by the
+// limits block: it still mints one join ticket per name.
+func TestSpaceConfigKeepsTheMachineNameList(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	sp, err := h.ctx.SpaceConfig("acme.example.org",
+		spaceSpec(h, "    space:\n      nodes: [worker-1, worker-2, worker-3]\n"))
+	mustOK(t, err, h.output())
+	if len(sp.Nodes) != 3 || sp.Nodes[0] != "worker-1" {
+		t.Fatalf("%+v", sp.Nodes)
+	}
+	// No limits block: the three defaults hold.
+	if sp.MaxNodes != 2 || sp.MaxNamespaces != 1 || sp.MaxObjectKiB != 256 {
+		t.Fatalf("%+v", sp)
+	}
 }
 
 func TestSpaceConfigParseFailureNeverDefaultsSlug(t *testing.T) {
@@ -103,7 +120,7 @@ func TestSpaceConfigParseFailureNeverDefaultsSlug(t *testing.T) {
 	mustErr(t, err)
 }
 
-const spaceBlock = "    space:\n      slug: acme\n      name: Acme Prod\n      nodes: 3\n      namespaces: 2\n      objectCapKiB: 128\n      nodeNames: [worker-1, worker-2]\n"
+const spaceBlock = "    space:\n      slug: acme\n      name: Acme Prod\n      nodes: [worker-1, worker-2]\n      limits:\n        nodes: 3\n        namespaces: 2\n        objectCapKiB: 128\n"
 
 func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
 	t.Parallel()
@@ -134,7 +151,7 @@ func TestProvisionSharedAdoptsExisting(t *testing.T) {
 	h.handle("GET /api/spaces/sp-777", 200, `{"ok":true,"data":{"id":"sp-777","status":"Active"}}`)
 	mustOK(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Space 'acme' is Active (id: sp-777)")
-	mustContain(t, h.output(), "No nodes declared under spec.kubehz.space.nodeNames")
+	mustContain(t, h.output(), "No nodes declared under spec.kubehz.space.nodes")
 	for _, r := range h.reqs() {
 		if r.Method == "POST" {
 			t.Fatal("adoption must be read-only")
@@ -537,15 +554,15 @@ func TestProvisionSharedLimitRefusals(t *testing.T) {
 		{"SPACE_LIMITS_ABOVE_FREE", []string{
 			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the free allowance",
 			"A free account gets 1 space with 2 nodes and 1 namespace.",
-			"or upgrade the account in the",
+			"or upgrade the account in",
 		}},
 		{"SPACE_LIMITS_ABOVE_SHARED", []string{
 			"they are above the maximum of a shared control plane",
-			"set spec.kubehz.hosting to hosted.",
+			"plane: set spec.kubehz.hosting to hosted.",
 		}},
 		{"SPACE_PLAN_RETIRED", []string{
 			"kubehz refused the request: space plans are retired",
-			"A space uses three numbers: nodes, namespaces and objectCapKiB.",
+			"A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB.",
 		}},
 	} {
 		h := newHarness(t)
@@ -575,7 +592,7 @@ func TestProvisionSharedNotesLimitsDrift(t *testing.T) {
 
 	// The same numbers on both sides: no note.
 	h2 := newHarness(t)
-	spec2 := spaceSpec(h2, "    space:\n      nodes: 2\n      namespaces: 1\n      objectCapKiB: 256\n")
+	spec2 := spaceSpec(h2, "    space:\n      limits:\n        nodes: 2\n        namespaces: 1\n        objectCapKiB: 256\n")
 	h2.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-8","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256}]}`)
 	h2.handle("GET /api/spaces/sp-8", 200, `{"ok":true,"data":{"id":"sp-8","status":"Active"}}`)
 	mustOK(t, h2.ctx.ProvisionShared(t.Context(), &Config{APIURL: h2.apiURL()}, "acme.example.org", spec2), h2.output())
@@ -587,9 +604,9 @@ func TestProvisionSharedNotesLimitsDrift(t *testing.T) {
 func TestValidateRefusesSpaceLimitsOutOfRange(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	spec := spaceSpec(h, "    space:\n      namespaces: 4\n")
+	spec := spaceSpec(h, "    space:\n      limits:\n        namespaces: 4\n")
 	cfg, err := h.ctx.ReadConfig(spec)
 	mustOK(t, err, h.output())
 	mustErr(t, h.ctx.Validate(cfg, spec))
-	mustContain(t, h.output(), "invalid spec.kubehz.space.namespaces: 4 (expected a whole number from 1 to 3)")
+	mustContain(t, h.output(), "invalid spec.kubehz.space.limits.namespaces: 4 (expected a whole number from 1 to 3)")
 }

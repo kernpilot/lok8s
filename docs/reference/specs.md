@@ -39,10 +39,11 @@ spec:
     space:                                # hosting: shared only (kind: Kubehz)
       slug: acme                          # namespace name; defaults to the domain's first label
       name: Acme Prod                     # display name; defaults to the slug
-      nodes: 2                            # node ceiling, 1 to 5 (default 2)
-      namespaces: 1                       # namespace ceiling, 1 to 3 (default 1)
-      objectCapKiB: 256                   # size cap per Secret/ConfigMap, 64 to 512 (default 256)
-      nodeNames: [worker-1]               # join tickets minted for these names on provision
+      nodes: [worker-1]                   # join tickets minted for these names on provision
+      limits:                             # the three numbers a space is (whole block optional)
+        nodes: 2                          # node ceiling, 1 to 5 (default 2)
+        namespaces: 1                     # namespace ceiling, 1 to 3 (default 1)
+        objectCapKiB: 256                 # size cap per Secret/ConfigMap, 64 to 512 (default 256)
     upgrades:                             # platform-driven upgrade policy (optional)
       channel: none | patch | minor       # how far the platform may upgrade unasked (default patch)
       defer: window | immediate           # when an allowed upgrade may start
@@ -85,10 +86,10 @@ spec:
 | `spec.controlPlane.replicas` | no | `1` | For `hosting: hosted`: the apiserver replicas of the hosted control plane (1 to 3), the one shape value `lo provision` sends. There is no plan and no tier: the state limit and its auto-grow step and cap live in the dashboard, and the bill is per hour. See the [kubehz guide](../guide/kubehz.md#the-hosted-control-plane-shape) |
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
-| `spec.kubehz.space.nodes` | no | `2` | `hosting: shared` — the node ceiling of the space, a whole number from 1 to 5. A space has no plan: this and the next two values are the space. A free account gets 1 space with 2 nodes and 1 namespace |
-| `spec.kubehz.space.namespaces` | no | `1` | `hosting: shared` — the namespace ceiling of the space, a whole number from 1 to 3 |
-| `spec.kubehz.space.objectCapKiB` | no | `256` | `hosting: shared` — the size cap for one Secret or ConfigMap in the space's namespaces, a whole number of KiB from 64 to 512 |
-| `spec.kubehz.space.nodeNames` | no | `[]` | `hosting: shared` — machine names to mint a single-use join ticket for during `lo provision`. This list held the field name `nodes` before `nodes` became the node ceiling |
+| `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — machine names to mint a single-use join ticket for during `lo provision`. A list of names, not a count: the count is `spec.kubehz.space.limits.nodes` |
+| `spec.kubehz.space.limits.nodes` | no | `2` | `hosting: shared` — the node ceiling of the space, a whole number from 1 to 5. A space has no plan: this and the next two values are the space. A free account gets 1 space with 2 nodes and 1 namespace |
+| `spec.kubehz.space.limits.namespaces` | no | `1` | `hosting: shared` — the namespace ceiling of the space, a whole number from 1 to 3 |
+| `spec.kubehz.space.limits.objectCapKiB` | no | `256` | `hosting: shared` — the size cap for one Secret or ConfigMap in the space's namespaces, a whole number of KiB from 64 to 512 |
 | `spec.kubehz.upgrades.channel` | no | `patch` | How far the platform may upgrade the cluster unasked: `patch` (patch releases — the default), `minor` (minor releases too), or `none` (no automatic upgrades — **not recommended**: you forgo automatic security patches). Clusters running releases that fall too far behind are upgraded by the platform regardless of channel (end-of-support floor), with notice. See the [kubehz guide](../guide/kubehz.md#upgrades-and-maintenance-windows) |
 | `spec.kubehz.upgrades.defer` | no | `window` | When an allowed upgrade may start: `window` (wait for the next maintenance window) or `immediate` (as soon as it is available) |
 | `spec.kubehz.maintenanceWindow` | no | — | When platform-driven work may run: `enabled`, `daysOfWeek`, `startTime` (`HH:MM`), `durationMinutes`, `timezone` (IANA name), `exclusions` (absolute freezes — a `YYYY-MM-DD` date or `from/to` range). `lo` shape-checks the two `upgrades` enums and the exclusion dates; full semantics are validated where the block is consumed — the platform API for hosted payloads, the managed-tier agent for self-hosted (once upgrade execution ships) |

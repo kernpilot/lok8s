@@ -160,24 +160,29 @@ spec:
     space:
       slug: acme          # optional — defaults to the domain's first label
       name: Acme Prod     # optional — defaults to the slug
-      nodes: 2            # optional — the node ceiling, 1 to 5 (default 2)
-      namespaces: 1       # optional — the namespace ceiling, 1 to 3 (default 1)
-      objectCapKiB: 256   # optional — KiB per Secret/ConfigMap, 64 to 512 (default 256)
-      nodeNames:          # optional — one join ticket minted per name
+      nodes:              # optional — one join ticket minted per name
         - worker-1
         - worker-2
+      limits:             # optional — the whole block defaults
+        nodes: 2          # the node ceiling, 1 to 5 (default 2)
+        namespaces: 1     # the namespace ceiling, 1 to 3 (default 1)
+        objectCapKiB: 256 # KiB per Secret/ConfigMap, 64 to 512 (default 256)
 ```
 
-A space is three numbers, and you set all three. `nodes` is how many machines
-the space takes, `namespaces` is how many namespaces it holds, and
-`objectCapKiB` is the size cap for one Secret or ConfigMap in those
-namespaces. There is no plan to pick. The defaults are 2 nodes, 1 namespace
-and a 256 KiB object cap. `lo` refuses a value outside its range before the
-platform sees it.
+A space is three numbers, and they live under `space.limits`. `nodes` is how
+many machines the space takes, `namespaces` is how many namespaces it holds,
+and `objectCapKiB` is the size cap for one Secret or ConfigMap in those
+namespaces. There is no plan to pick. Leave the block out and you get 2 nodes,
+1 namespace and a 256 KiB object cap. `lo` refuses a value outside its range
+before the platform sees it.
+
+`space.limits.nodes` is a count; `space.nodes` is the list of machine names to
+mint a ticket for. They are different fields, and a list under
+`space.limits.nodes` is refused with both names.
 
 `lo provision` creates the space (or adopts it, if it already exists) and
 mints a single-use join ticket for every machine listed under
-`space.nodeNames`. `lo destroy` removes the space.
+`space.nodes`. `lo destroy` removes the space.
 
 ```bash
 lo provision                  # create/adopt the space + mint join tickets
@@ -203,9 +208,8 @@ A few things worth knowing before you reach for it:
   pointer to the node-join guide instead.
 - **The three numbers apply when the space is created.** A later
   `lo provision` adopts the space and changes nothing on the platform. An
-  edit to `space.nodes`, `space.namespaces` or `space.objectCapKiB` therefore
-  gets a note in the output instead of a silent no-op. Change the numbers of
-  a live space in the dashboard.
+  edit under `space.limits` therefore gets a note in the output instead of a
+  silent no-op. Change the numbers of a live space in the dashboard.
 - **A join ticket is minted once**, is bound to one node name, and expires
   quickly. Nothing stores the plaintext outside the script: a lost ticket
   gets re-minted, never recovered.
@@ -231,8 +235,8 @@ A few things worth knowing before you reach for it:
 A space runs inside three independent budgets, and the error codes keep them
 apart deliberately:
 
-- **Your space's own three numbers**: `nodes`, `namespaces` and
-  `objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and names the
+- **Your space's own three numbers**: `limits.nodes`, `limits.namespaces`
+  and `limits.objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and names the
   limit. Fix: remove something, or raise the limit in the dashboard. The
   numbers in the spec apply when the space is created, so raising one there
   does nothing to a space that already exists.
@@ -243,7 +247,7 @@ apart deliberately:
   answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that large needs a
   control plane of its own, so use `hosting: hosted`. A request that
   still carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
-  `spec.kubehz.space.plan`. `lo` turns each of these into the values it sent
+  `spec.kubehz.space.plan` and use `spec.kubehz.space.limits`. `lo` turns each of these into the values it sent
   and the next step.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node

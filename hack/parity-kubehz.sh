@@ -44,6 +44,12 @@ mkdir -p "${HOME}"
 
 CL="${PROJ}/clusters"
 parity::new_project "${PROJ}"
+# `kubehz claim-code` reads the agent Secret from the cluster in scope. With
+# the real kubectl on PATH that call reaches whatever cluster the developer's
+# ambient context points at (a live one, on a dev machine) and stalls the
+# harness on its timeout. Stub it: no parity case may touch a cluster.
+parity::own_bin "${PROJ}"
+parity::stub_kubectl_fail "${PROJ}"
 echo "alpha.dev" > "${CL}/.active"
 
 # ── Synthetic domains ────────────────────────────────────────────────────────
@@ -84,7 +90,8 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
     space:
-      nodes: 0
+      limits:
+        nodes: 0
 EOF
 mk space-nodes-6.dev <<'EOF'
 kind: Kubehz
@@ -93,7 +100,8 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
     space:
-      nodes: 6
+      limits:
+        nodes: 6
 EOF
 mk space-ns-4.dev <<'EOF'
 kind: Kubehz
@@ -102,7 +110,8 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
     space:
-      namespaces: 4
+      limits:
+        namespaces: 4
 EOF
 mk space-cap-63.dev <<'EOF'
 kind: Kubehz
@@ -111,7 +120,8 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
     space:
-      objectCapKiB: 63
+      limits:
+        objectCapKiB: 63
 EOF
 mk space-cap-513.dev <<'EOF'
 kind: Kubehz
@@ -120,9 +130,11 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
     space:
-      objectCapKiB: 513
+      limits:
+        objectCapKiB: 513
 EOF
-# space-plan.dev — a retired plan; space-nodes-list.dev — the old node list.
+# space-plan.dev — a retired plan; space-limits-list.dev — the machine-name
+# list put under limits.nodes (the two fields confused).
 mk space-plan.dev <<'EOF'
 kind: Kubehz
 spec:
@@ -132,14 +144,15 @@ spec:
     space:
       plan: shared-s
 EOF
-mk space-nodes-list.dev <<'EOF'
+mk space-limits-list.dev <<'EOF'
 kind: Kubehz
 spec:
   kubehz:
     hosting: shared
     apiUrl: https://api.kubehz.example
     space:
-      nodes: [worker-1, worker-2]
+      limits:
+        nodes: [worker-1, worker-2]
 EOF
 # hosted-http.dev — hosted with a plain-http apiUrl: the https gate.
 mk hosted-http.dev <<'EOF'
@@ -251,7 +264,7 @@ check - kubehz status --domain space-ns-4.dev
 check - kubehz status --domain space-cap-63.dev
 check - kubehz status --domain space-cap-513.dev
 check - kubehz status --domain space-plan.dev
-check - kubehz status --domain space-nodes-list.dev
+check - kubehz status --domain space-limits-list.dev
 
 # ── register / deregister: config validation refusals ───────────────────────
 check "${UNBOUND}" kubehz register
