@@ -71,6 +71,12 @@ func TestSpaceLimitsBounds(t *testing.T) {
 		{"    space:\n      limits:\n        nodes: true\n", "invalid spec.kubehz.space.limits.nodes: true (expected a whole number of 1 or more)"},
 		// A map has no single value to quote back.
 		{"    space:\n      limits:\n        namespaces: {a: 1}\n", "invalid spec.kubehz.space.limits.namespaces: expected a whole number of 1 or more"},
+		// The frozen tree's contract is digits only, and Go follows it.
+		// strconv alone would take "+5", and a TrimSpace would take " 5 ".
+		{"    space:\n      limits:\n        nodes: +5\n", "invalid spec.kubehz.space.limits.nodes: +5 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        nodes: \" 5 \"\n", "invalid spec.kubehz.space.limits.nodes:  5  (expected a whole number of 1 or more)"},
+		// Past the strconv range: refused on both sides, not wrapped.
+		{"    space:\n      limits:\n        nodes: 99999999999999999999\n", "invalid spec.kubehz.space.limits.nodes: 99999999999999999999 (expected a whole number of 1 or more)"},
 	} {
 		h := newHarness(t)
 		_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, tc.block))
@@ -87,6 +93,14 @@ func TestSpaceLimitsBounds(t *testing.T) {
 	mustOK(t, err, h.output())
 	if sp.MaxNodes != 6 || sp.MaxNamespaces != 4 || sp.MaxObjectKiB != 513 {
 		t.Fatalf("%+v", sp)
+	}
+	// A leading zero is not octal: "008" is eight, and both trees print 8.
+	h3 := newHarness(t)
+	sp3, err := h3.ctx.SpaceConfig("acme.example.org",
+		spaceSpec(h3, "    space:\n      limits:\n        nodes: 008\n"))
+	mustOK(t, err, h3.output())
+	if sp3.MaxNodes != 8 {
+		t.Fatalf("%+v", sp3)
 	}
 	// The smallest shape each number may take is still accepted.
 	h2 := newHarness(t)
@@ -660,6 +674,8 @@ func TestProvisionSharedLimitRefusals(t *testing.T) {
 		// fallback states NO number: lo does not know the account's ceiling.
 		{"free without a message", 403, "SPACE_LIMITS_ABOVE_FREE", "", "", []string{
 			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above what this account allows",
+			// The spec names numbers, so the next step is to lower them.
+			"Decrease the values in spec.kubehz.space.limits, or raise the ceiling",
 			"of the account in the kubehz dashboard.",
 		}},
 		{"shared without a message", 400, "SPACE_LIMITS_ABOVE_SHARED", "", "", []string{
@@ -738,6 +754,49 @@ func TestProvisionSharedScrubsTheSharedCeilingMessage(t *testing.T) {
 	mustContain(t, got, `literal:\t and \\ stay`)
 	if want := golden(t, "space-above-shared.txt", got); got != want {
 		t.Fatalf("rendered refusal differs from the golden:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A spec that names NO number must not be told to decrease values that are
+// not there: the next step is to set them.
+func TestProvisionSharedAdvisesSettingTheValuesWhenTheSpecNamesNone(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, "    space:\n      slug: acme\n")
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+	h.handle("POST /api/spaces", 403, `{"ok":false,"data":{"code":"SPACE_LIMITS_ABOVE_FREE"}}`)
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+	mustContain(t, h.output(), "kubehz refused the space limits (the spec sets none)")
+	mustContain(t, h.output(), "Set the values in spec.kubehz.space.limits, or raise the ceiling")
+	mustNotContain(t, h.output(), "Decrease the values")
+}
+
+// spaceAPIError is the FIRST thing an api can print through: `lo provision`
+// lists the spaces before it does anything else. A message that carries an
+// escape sequence would clear the caller's terminal, so both halves are
+// scrubbed and bounded, exactly as the refusal path does. The golden holds
+// the bytes and the bats suite asserts the bash tree against the same file.
+func TestSpaceAPIErrorScrubsAndClipsBothHalves(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	body, err := json.Marshal(map[string]any{
+		"ok":      false,
+		"message": spaceAPIMessageFixture(t, "space-above-shared-message.txt"),
+		"help":    spaceAPIMessageFixture(t, "space-above-shared-help.txt"),
+	})
+	mustOK(t, err, "marshal")
+	h.handle("GET /api/spaces", 500, string(body))
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+
+	got := h.output()
+	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+		mustNotContain(t, got, bad)
+	}
+	mustContain(t, got, `literal:\033[2J`)
+	mustContain(t, got, `literal:\t and \\ stay`)
+	if want := golden(t, "space-api-error.txt", got); got != want {
+		t.Fatalf("rendered api error differs from the golden:\n got: %q\nwant: %q", got, want)
 	}
 }
 

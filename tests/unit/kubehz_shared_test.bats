@@ -235,6 +235,47 @@ yq_space_field() {
   assert_output --partial "invalid spec.kubehz.space.limits.nodes: expected a whole number of 1 or more"
 }
 
+# The contract is digits only: no sign, no spaces. The Go twin follows this
+# tree, not strconv's leniency.
+@test "space_limits: refuses a leading plus" {
+  yq_space_field nodes '!!str' '+5'
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: +5 (expected a whole number of 1 or more)"
+}
+
+@test "space_limits: refuses a padded value" {
+  yq_space_field nodes '!!str' ' 5 '
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes:  5  (expected a whole number of 1 or more)"
+}
+
+# Past the strconv range the Go twin parses. `(( ))` would wrap silently here.
+@test "space_limits: refuses a value past the integer range" {
+  yq_space_field nodes '!!int' 99999999999999999999
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 99999999999999999999 (expected a whole number of 1 or more)"
+}
+
+# A leading zero is NOT octal. `(( 008 ))` would print `value too great for
+# base`; both trees read eight and print eight.
+@test "space_limits: a leading zero is a decimal, not an octal" {
+  yq_space_field nodes '!!int' 008
+
+  run kubehz::space_limits "/dev/null"
+  assert_success
+  refute_output --partial "value too great for base"
+
+  yq_space_field nodes '!!int' 008
+  kubehz::space_limits "/dev/null"
+  [ "${LOK8S_SPACE_MAX_NODES}" = "8" ]
+}
+
 # There is NO local upper bound any more. What an account may ask for differs
 # per account and extra resources are bought, so a number the platform will
 # refuse still leaves this CLI: the api answers with the account's real
@@ -570,6 +611,8 @@ curl_space_refusal() {
   run kubehz::provision_shared "acme.example.org" "/dev/null"
   assert_failure
   assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above what this account allows"
+  # The spec names numbers, so the next step is to lower them.
+  assert_output --partial "Decrease the values in spec.kubehz.space.limits, or raise the ceiling"
   assert_output --partial "of the account in the kubehz dashboard."
 }
 
@@ -604,6 +647,9 @@ curl_space_refusal() {
   run kubehz::provision_shared "acme.example.org" "/dev/null"
   assert_failure
   assert_output --partial "kubehz refused the space limits (the spec sets none): they are above what this account allows"
+  # Nothing to decrease: the next step is to SET the values.
+  assert_output --partial "Set the values in spec.kubehz.space.limits, or raise the ceiling"
+  refute_output --partial "Decrease the values"
 }
 
 # A refusal message and its help are SERVER strings. The api could hide an
@@ -636,6 +682,34 @@ curl_space_refusal() {
   refute_output --partial "$(printf '\007')"
   # The characters the api sent stay exactly as many characters, on BOTH
   # print paths.
+  assert_output --partial 'literal:\033[2J'
+  assert_output --partial 'literal:\t and \\ stay'
+}
+
+# space_api_error is the FIRST thing an api can print through: `lo provision`
+# lists the spaces before it does anything else. A message carrying an escape
+# sequence would clear the caller's terminal, so both halves are scrubbed and
+# bounded, exactly as the refusal path does. Same golden set, same bytes as
+# TestSpaceAPIErrorScrubsAndClipsBothHalves.
+@test "space_api_error: both halves are scrubbed and clipped" {
+  local golden_dir="${_PROJECT_ROOT}/internal/kubehz/testdata/golden"
+  yq_space_spec
+  _ERR_BODY=$(jq -nc \
+    --arg m "$(cat "${golden_dir}/space-above-shared-message.txt")" \
+    --arg h "$(cat "${golden_dir}/space-above-shared-help.txt")" \
+    '{ok: false, message: $m, help: $h}')
+  export _ERR_BODY
+  curl() {
+    printf '%s\n500' "${_ERR_BODY}"
+  }
+  export -f curl
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  # Byte for byte what the Go twin renders from the same two strings.
+  assert_output "$(cat "${golden_dir}/space-api-error.txt")"
+  refute_output --partial "$(printf '\033')"
+  refute_output --partial "$(printf '\007')"
   assert_output --partial 'literal:\033[2J'
   assert_output --partial 'literal:\t and \\ stay'
 }

@@ -60,13 +60,40 @@ kubehz::space_number() {
       return 1 ;;
   esac
   value=$(yq -r ".spec.kubehz.space.limits.${field}" "${cluster_yaml}") || return 1
-  # No upper bound on purpose: a number the account may not have is the api's
-  # refusal, and its message names the account's real ceiling.
-  if ! [[ "${value}" =~ ^-?[0-9]+$ ]] || (( value < LOK8S_SPACE_NUMBER_MIN )); then
+  # No upper bound on the CEILING: a number the account may not have is the
+  # api's refusal to make. The bound below is on the NUMBER ITSELF, and it is
+  # the Go twin's strconv range, so both trees accept the same set.
+  local number
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] || ! number=$(kubehz::space_number_value "${value}"); then
     error "invalid spec.kubehz.space.limits.${field}: ${value} (expected a whole number of 1 or more)"
     return 1
   fi
-  echo "${value}"
+  echo "${number}"
+}
+
+# Turn a digits-only string into the number the Go twin parses, or fail.
+# Leading zeros are dropped, so "008" is eight and never octal, and the value
+# is printed the way the Go twin prints it. Fails on zero and on anything
+# outside the int64 range strconv parses.
+#
+# The comparisons avoid (( )) on the value on purpose: bash arithmetic reads a
+# leading zero as octal ("008" prints `value too great for base`) and wraps
+# silently past int64, so both would disagree with the Go twin.
+# Usage: kubehz::space_number_value <digits>
+# Outputs: the number to stdout
+kubehz::space_number_value() {
+  local digits
+  [[ "${1}" =~ ^0*([0-9]+)$ ]] || return 1
+  digits="${BASH_REMATCH[1]}"
+  [[ "${digits}" != "0" ]] || return 1
+  # Same length makes a string compare a numeric one.
+  if (( ${#digits} > 19 )); then
+    return 1
+  fi
+  if (( ${#digits} == 19 )) && [[ "${digits}" > "9223372036854775807" ]]; then
+    return 1
+  fi
+  echo "${digits}"
 }
 
 # Read the three numbers of a space. Only the SHAPE is checked here: a whole
@@ -230,6 +257,13 @@ kubehz::space_api_error() {
   local msg help
   msg=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
   help=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
+  # Both halves are SERVER strings and this is the FIRST api call lo makes,
+  # so an api that hides \033[2J\033[H in a message would clear the caller's
+  # terminal before anything else is printed. The message reaches error()
+  # (echo -e) and needs the backslash escape; the help reaches a plain echo
+  # and must not be escaped.
+  [[ -z "${msg}" ]] || msg=$(kubehz::space_safe_string "${msg}")
+  [[ -z "${help}" ]] || help=$(kubehz::space_bound_string "${help}")
   error "${context} (HTTP ${KUBEHZ_SPACE_API_STATUS})${msg:+: ${msg}}"
   [[ -n "${help}" ]] && echo "  ${help}" >&2
   return 0
@@ -250,6 +284,18 @@ kubehz::space_lookup() {
 }
 
 # ── Provision (create-or-adopt + join tickets) ───────────
+
+# The local next step: a spec that names numbers gets them lowered, a spec
+# that names none gets them set. Telling a reader to decrease values that are
+# not there reads as nonsense.
+# Usage: kubehz::space_limits_verb
+kubehz::space_limits_verb() {
+  if [[ -z "${LOK8S_SPACE_MAX_NODES}${LOK8S_SPACE_MAX_NAMESPACES}${LOK8S_SPACE_MAX_OBJECT_KIB}" ]]; then
+    echo "Set"
+  else
+    echo "Decrease"
+  fi
+}
 
 # Render the numbers the SPEC names, in a fixed order. A number the spec
 # leaves out is not shown, because it was never sent.
@@ -354,12 +400,12 @@ kubehz::space_ensure() {
       # asked for and the local next step.
       SPACE_LIMITS_ABOVE_FREE)
         kubehz::space_limits_refused "they are above what this account allows"
-        echo "  Decrease the values in spec.kubehz.space.limits, or raise the ceiling" >&2
+        echo "  $(kubehz::space_limits_verb) the values in spec.kubehz.space.limits, or raise the ceiling" >&2
         echo "  of the account in the kubehz dashboard." >&2
         return 1 ;;
       SPACE_LIMITS_ABOVE_SHARED)
         kubehz::space_limits_refused "they are above what this account may set on a shared control plane"
-        echo "  Decrease the values in spec.kubehz.space.limits, or use a hosted control" >&2
+        echo "  $(kubehz::space_limits_verb) the values in spec.kubehz.space.limits, or use a hosted control" >&2
         echo "  plane: set spec.kubehz.hosting to hosted." >&2
         return 1 ;;
       SPACE_PLAN_RETIRED)

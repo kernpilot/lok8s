@@ -142,15 +142,28 @@ func (c *Context) spaceNumber(doc specDoc, field string) (int, error) {
 		c.errorf("invalid spec.kubehz.space.limits.%s: expected a whole number of 1 or more", field)
 		return 0, ErrHandled
 	}
-	// No upper bound on purpose: a number the account may not have is the
-	// api's refusal, and its message names the account's real ceiling.
-	value, err := strconv.Atoi(strings.TrimSpace(n.Value))
+	// No upper bound on the CEILING: a number the account may not have is the
+	// api's refusal to make. The shape below is the BASH twin's contract, not
+	// strconv's: strconv alone would take "+5" and, after a TrimSpace, " 5 "
+	// as well, and the frozen tree takes neither. Bash wins on a divergence.
+	if !spaceDigits.MatchString(n.Value) {
+		c.errorf("invalid spec.kubehz.space.limits.%s: %s (expected a whole number of 1 or more)", field, n.Value)
+		return 0, ErrHandled
+	}
+	// Leading zeros drop out here, so "008" is eight and never octal, and a
+	// value past the strconv range is refused on both sides.
+	value, err := strconv.Atoi(n.Value)
 	if err != nil || value < spaceNumberMin {
 		c.errorf("invalid spec.kubehz.space.limits.%s: %s (expected a whole number of 1 or more)", field, n.Value)
 		return 0, ErrHandled
 	}
 	return value, nil
 }
+
+// spaceDigits is the shape a limit must have: digits only. No sign, no
+// spaces, no underscores — the frozen tree's regexp, character for
+// character.
+var spaceDigits = regexp.MustCompile(`^[0-9]+$`)
 
 // spaceAPI ports kubehz::space_api: one call with the envelope contract.
 // Returns status + body; err only for a transport failure (already
@@ -178,8 +191,11 @@ func (c *Context) spaceAPIQuiet(ctx context.Context, cfg *Config, method, path s
 // a non-2xx envelope. Both are server strings: scrubbed before they reach
 // the terminal (node.go does the same for every api string it shows).
 func (c *Context) spaceAPIError(what string, res *httpResult) {
-	msg := scrub(apiMessage(res.Body))
-	help := scrub(apiHelp(res.Body))
+	// Clipped as well as scrubbed: this is the FIRST api call lo makes, and
+	// an unbounded server string here is a terminal full of whatever the api
+	// chose. The bash twin bounds both halves the same way.
+	msg := clip(scrub(apiMessage(res.Body)))
+	help := clip(scrub(apiHelp(res.Body)))
 	c.errorf("%s (HTTP %d)%s", what, res.Status, optSuffix(": ", msg))
 	if help != "" {
 		c.echoErr("  %s", help)
@@ -263,12 +279,12 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 		// the spec asked for and the local next step.
 		case "SPACE_LIMITS_ABOVE_FREE":
 			c.spaceLimitsRefused(sp, res, "they are above what this account allows")
-			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or raise the ceiling")
+			c.echoErr("  %s the values in spec.kubehz.space.limits, or raise the ceiling", sp.limitsVerb())
 			c.echoErr("  of the account in the kubehz dashboard.")
 			return "", ErrHandled
 		case "SPACE_LIMITS_ABOVE_SHARED":
 			c.spaceLimitsRefused(sp, res, "they are above what this account may set on a shared control plane")
-			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or use a hosted control")
+			c.echoErr("  %s the values in spec.kubehz.space.limits, or use a hosted control", sp.limitsVerb())
 			c.echoErr("  plane: set spec.kubehz.hosting to hosted.")
 			return "", ErrHandled
 		case "SPACE_PLAN_RETIRED":
@@ -317,6 +333,16 @@ func (c *Context) spaceAPIReason(what string, res *httpResult, fallback string) 
 // that is too much.
 func (c *Context) spaceLimitsRefused(sp *SpaceConfig, res *httpResult, fallback string) {
 	c.spaceAPIReason("kubehz refused the space limits ("+sp.limitsLine()+")", res, fallback)
+}
+
+// limitsVerb is the local next step: a spec that names numbers gets them
+// lowered, a spec that names none gets them set. Telling a reader to decrease
+// values that are not there reads as nonsense.
+func (sp *SpaceConfig) limitsVerb() string {
+	if sp.MaxNodes == 0 && sp.MaxNamespaces == 0 && sp.MaxObjectKiB == 0 {
+		return "Set"
+	}
+	return "Decrease"
 }
 
 // limitsLine renders the numbers the SPEC names, in a fixed order. A number

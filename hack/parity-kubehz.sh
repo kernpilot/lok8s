@@ -156,6 +156,49 @@ spec:
         namespaces:
           a: 1
 EOF
+# The scalar contract is digits only, and it is the FROZEN TREE's: a sign, a
+# padded value and a value past the integer range are refused on both sides,
+# and a leading zero is a decimal (008 is eight, never octal).
+mk space-nodes-plus.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: +5
+EOF
+mk space-nodes-padded.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: " 5 "
+EOF
+mk space-nodes-huge.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 99999999999999999999
+EOF
+mk space-nodes-008.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 008
+EOF
 # space-above-ceiling.dev — numbers the PLATFORM refuses and lo does not.
 # Both implementations must let these through to the api, which answers with
 # the account's real ceiling.
@@ -312,6 +355,9 @@ check - kubehz status --domain space-cap-0.dev
 check - kubehz status --domain space-nodes-float.dev
 check - kubehz status --domain space-nodes-bool.dev
 check - kubehz status --domain space-ns-map.dev
+check - kubehz status --domain space-nodes-plus.dev
+check - kubehz status --domain space-nodes-padded.dev
+check - kubehz status --domain space-nodes-huge.dev
 check - kubehz status --domain space-plan.dev
 check - kubehz status --domain space-plan-false.dev
 check - kubehz status --domain space-limits-list.dev
@@ -339,6 +385,7 @@ check - kubehz deploy --domain shared.dev
 # accepts them, and deploy stops on the hosting rule. `status` cannot carry
 # this case, because nothing local stops it and it would reach the api.
 check - kubehz deploy --domain space-above-ceiling.dev
+check - kubehz deploy --domain space-nodes-008.dev
 check - kubehz deploy --domain hosted-http.dev
 check - kubehz deploy --domain bad-agent.dev
 check - kubehz deploy --domain operator-none.dev
