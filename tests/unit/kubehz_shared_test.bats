@@ -416,10 +416,13 @@ yq_space_field() {
 }
 
 # One curl mock for the limit refusals: the create answers the code, the
-# status and the message the caller names.
+# status and the message the caller names. jq builds the body, so a message
+# may carry quotes, backslashes, control characters and newlines.
 # Usage: curl_space_refusal <code> <status> [message]
 curl_space_refusal() {
-  export _REFUSE_CODE="$1" _REFUSE_STATUS="$2" _REFUSE_MESSAGE="${3:-}"
+  _REFUSE_BODY=$(jq -nc --arg c "$1" --arg m "${3:-}" \
+    '{ok: false, data: {code: $c, message: $m}}')
+  export _REFUSE_BODY _REFUSE_STATUS="$2"
   curl() {
     local method="GET" url=""
     while (( $# )); do
@@ -434,8 +437,7 @@ curl_space_refusal() {
       "GET /api/spaces")
         printf '{"ok":true,"data":[]}\n200' ;;
       "POST /api/spaces")
-        printf '{"ok":false,"data":{"code":"%s","message":"%s"}}\n%s' \
-          "${_REFUSE_CODE}" "${_REFUSE_MESSAGE}" "${_REFUSE_STATUS}" ;;
+        printf '%s\n%s' "${_REFUSE_BODY}" "${_REFUSE_STATUS}" ;;
       *)
         printf '{"ok":false}\n500' ;;
     esac
@@ -476,6 +478,35 @@ curl_space_refusal() {
   assert_failure
   assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the maximum of a shared control plane"
   assert_output --partial "plane: set spec.kubehz.hosting to hosted."
+}
+
+# A refusal message is a SERVER string. The api could hide an escape sequence
+# in it and redraw this terminal, so both implementations scrub it, clip it to
+# 256 characters and (here only, because error() prints through `echo -e`)
+# escape the backslashes last.
+#
+# The fixture and the expected bytes are the GOLDEN PAIR the Go twin owns
+# (internal/kubehz/testdata/golden/, written by `go test ./internal/kubehz/
+# -run TestProvisionSharedScrubsTheSharedCeilingMessage -update`). Both
+# implementations are fed the same message and asserted against the same
+# bytes, so a drift on either side turns one of the two suites red. The parity
+# harness cannot carry this case: spec.kubehz.apiUrl must be HTTPS, so no
+# plain-http stub can answer either implementation.
+@test "provision_shared: the shared refusal is scrubbed, clipped and escaped" {
+  local golden_dir="${_PROJECT_ROOT}/internal/kubehz/testdata/golden"
+  yq_space_spec
+  curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 \
+    "$(cat "${golden_dir}/space-above-shared-message.txt")"
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  # Byte for byte what the Go twin renders from the same message.
+  assert_output "$(cat "${golden_dir}/space-above-shared.txt")"
+  # No control character reaches the terminal, and the six characters the api
+  # sent stay six characters.
+  refute_output --partial "$(printf '\033')"
+  refute_output --partial "$(printf '\007')"
+  assert_output --partial 'literal:\033[2J'
 }
 
 @test "provision_shared: a lost create race adopts via re-lookup" {

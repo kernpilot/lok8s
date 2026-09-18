@@ -3,6 +3,7 @@ package kubehz
 // shared_test.go ports tests/unit/kubehz_shared_test.bats.
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -596,6 +597,49 @@ func TestProvisionSharedLimitRefusals(t *testing.T) {
 				mustContain(t, h.output(), want)
 			}
 		})
+	}
+}
+
+// spaceAPIMessageFixture is the hostile refusal message both implementations
+// are fed: one real newline, a raw ESC sequence, the six characters an api
+// would send to slip an escape sequence through `echo -e`, a BEL, a DEL, and
+// enough padding to pass the 256-character clip.
+func spaceAPIMessageFixture(t *testing.T) string {
+	t.Helper()
+	return strings.TrimSuffix(
+		readFile(t, filepath.Join("testdata", "golden", "space-above-shared-message.txt")), "\n")
+}
+
+// A refusal message is a SERVER string, and the two implementations must
+// disarm it identically: scrub, then clip, and (bash only, because error()
+// prints through `echo -e`) escape the backslashes last. The golden holds the
+// rendered bytes; tests/unit/kubehz_shared_test.bats asserts the bash tree
+// against the SAME file, so a drift on either side turns one of them red.
+func TestProvisionSharedScrubsTheSharedCeilingMessage(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	body, err := json.Marshal(map[string]any{
+		"ok": false,
+		"data": map[string]any{
+			"code":    "SPACE_LIMITS_ABOVE_SHARED",
+			"message": spaceAPIMessageFixture(t),
+		},
+	})
+	mustOK(t, err, "marshal")
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+	h.handle("POST /api/spaces", 400, string(body))
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+
+	got := h.output()
+	// No control character may survive into the terminal.
+	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+		mustNotContain(t, got, bad)
+	}
+	// The six characters the api sent stay six characters.
+	mustContain(t, got, `literal:\033[2J`)
+	if want := golden(t, "space-above-shared.txt", got); got != want {
+		t.Fatalf("rendered refusal differs from the golden:\n got: %q\nwant: %q", got, want)
 	}
 }
 

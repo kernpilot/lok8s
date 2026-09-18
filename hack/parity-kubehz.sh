@@ -11,6 +11,16 @@
 # kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN/HCLOUD_TOKEN
 # are unset and every api-bearing path stops at a local refusal.
 #
+# What this harness CANNOT cover: how the two implementations render a SERVER
+# string (the api's own refusal message — scrubbed, clipped, and in the bash
+# tree escaped for `echo -e`). Every case here is api-free, and
+# spec.kubehz.apiUrl must be HTTPS, so no plain-http stub can answer either
+# implementation. That rendering is pinned instead by a golden PAIR both
+# suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
+# (the hostile input) and space-above-shared.txt (the bytes both must print),
+# asserted by TestProvisionSharedScrubsTheSharedCeilingMessage and by
+# tests/unit/kubehz_shared_test.bats.
+#
 # Known, deliberate divergences (allowed via the per-check regex):
 #   - argsh parse errors exit 2, the Go binary exits 1 (the cli-wide
 #     convention): check_parse tolerates exactly that rc pair.

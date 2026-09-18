@@ -87,7 +87,7 @@ spec:
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
 | `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — machine names to mint a single-use join ticket for during `lo provision`. A list of names, not a count: the count is `spec.kubehz.space.limits.nodes` |
-| `spec.kubehz.space.limits.nodes` | no | `2` | `hosting: shared` — the node ceiling of the space, a whole number from 1 to 5. A space has no plan: this and the next two values are the space. A free account gets 1 space with 2 nodes and 1 namespace |
+| `spec.kubehz.space.limits.nodes` | no | `2` | `hosting: shared` — the node ceiling of the space, a whole number from 1 to 5. A space has no plan: this and the next two values are the space. A free account gets 1 space with 2 nodes, 1 namespace and 256 KiB per object |
 | `spec.kubehz.space.limits.namespaces` | no | `1` | `hosting: shared` — the namespace ceiling of the space, a whole number from 1 to 3 |
 | `spec.kubehz.space.limits.objectCapKiB` | no | `256` | `hosting: shared` — the size cap for one Secret or ConfigMap in the space's namespaces, a whole number of KiB from 64 to 512 |
 | `spec.kubehz.upgrades.channel` | no | `patch` | How far the platform may upgrade the cluster unasked: `patch` (patch releases — the default), `minor` (minor releases too), or `none` (no automatic upgrades — **not recommended**: you forgo automatic security patches). Clusters running releases that fall too far behind are upgraded by the platform regardless of channel (end-of-support floor), with notice. See the [kubehz guide](../guide/kubehz.md#upgrades-and-maintenance-windows) |

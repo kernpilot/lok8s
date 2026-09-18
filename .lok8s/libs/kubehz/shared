@@ -159,6 +159,33 @@ kubehz::space_api() {
   [[ "${KUBEHZ_SPACE_API_STATUS}" == 2* ]] || return 2
 }
 
+# Bound and disarm a SERVER string before it reaches the terminal. The Go twin
+# runs clip(scrub(...)) on the same strings, so the three steps run in the same
+# order and produce the same bytes:
+#
+#   scrub   drop every character below 0x20 except tab and newline, and DEL.
+#           A compromised api could otherwise hide ANSI escapes in a refusal
+#           and redraw the caller's terminal (the rule node::scrub applies to
+#           the node rows).
+#   clip    256 characters, then one ellipsis. A ceiling or an endpoint is a
+#           few dozen characters; past that the rest is not information.
+#   escape  double every backslash. error() prints through `echo -e`, so an
+#           api that sends the six characters \033[2J would get a real escape
+#           sequence out of this tree while the Go twin prints the six
+#           characters. This step runs LAST so it cannot move the clip
+#           boundary.
+#
+# Two known limits: the character count is the shell's, so it counts runes
+# only in a UTF-8 locale (Go always counts runes), and `$(...)` drops a
+# trailing newline the Go twin would keep.
+# Usage: kubehz::space_safe_string <string>
+kubehz::space_safe_string() {
+  local s
+  s=$(tr -d '\000-\010\013-\037\177' <<<"${1}")
+  (( ${#s} <= 256 )) || s="${s:0:256}…"
+  echo "${s//\\/\\\\}"
+}
+
 # Render the message + help halves of a non-2xx envelope — the api's own words
 # are almost always the actionable ones.
 # Usage: kubehz::space_api_error <context>
@@ -270,9 +297,10 @@ kubehz::space_ensure() {
       SPACE_LIMITS_ABOVE_SHARED)
         # The ceiling moves with the account, so the api's own message carries
         # it. The fixed text is the fallback for an api that sends the code
-        # alone. The Go twin scrubs and bounds the server string first (D21);
-        # this tree prints it as it arrives, like space_api_error does.
+        # alone. The message is a server string: scrubbed, clipped and escaped
+        # exactly as the Go twin does before it reaches the terminal.
         reason=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || reason=""
+        [[ -z "${reason}" ]] || reason=$(kubehz::space_safe_string "${reason}")
         [[ -n "${reason}" ]] || reason="they are above the maximum of a shared control plane"
         error "kubehz refused the space limits ($(kubehz::space_limits_line)): ${reason}"
         echo "  Decrease the values in spec.kubehz.space.limits, or use a hosted control" >&2
