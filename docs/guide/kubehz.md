@@ -236,25 +236,25 @@ A space runs inside three independent budgets, and the error codes keep them
 apart deliberately:
 
 - **Your space's own three numbers**: `limits.nodes`, `limits.namespaces`
-  and `limits.objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and names the
-  limit. Fix: remove something, or raise the limit in the dashboard. The
-  numbers in the spec apply when the space is created, so raising one there
-  does nothing to a space that already exists.
-- **What your account allows**: a free account gets 1 space with 2 nodes and
-  the first namespace. Above that, the create answers `400
-  SPACE_LIMITS_ABOVE_FREE`. A paid account reaches the maximum of a shared
-  plane: 5 nodes, 3 namespaces, a 512 KiB object cap. Above *that*, the
-  answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that large needs a
-  control plane of its own, so use `hosting: hosted`. A request that
-  still carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
-  `spec.kubehz.space.plan` and use `spec.kubehz.space.limits`. `lo` turns each of these into the values it sent
-  and the next step.
+  and `limits.objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and
+  names the limit. Fix: remove something, or raise the limit in the
+  dashboard. The numbers in the spec apply when the space is created, so
+  raising one there does nothing to a space that already exists.
+- **What your account allows**: a free account gets 1 space with 2 nodes, the
+  first namespace and a 256 KiB object cap. Above that, the create answers
+  `403 SPACE_LIMITS_ABOVE_FREE`. A paid account reaches the maximum of a
+  shared plane: 5 nodes, 3 namespaces, a 512 KiB object cap. Above *that*,
+  the answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that large needs a
+  control plane of its own, so use `hosting: hosted`. A request that still
+  carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
+  `spec.kubehz.space.plan` and use `spec.kubehz.space.limits`. `lo` turns
+  each of these into the values it sent and the next step.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
   join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
   (a space create with nowhere to land). Both say so explicitly: *"this is a
-  platform capacity limit, not an account limit"*. Upgrading your plan will
-  not change them, and nothing you delete will either.
+  platform capacity limit, not an account limit"*. A larger account does not
+  change them, and nothing you delete will either.
 
 The platform manages its own headroom (it adds shared planes as they fill),
 so the 409s are expected to be rare and transient. Retry later, and if one

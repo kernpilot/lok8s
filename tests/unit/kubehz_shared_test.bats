@@ -197,6 +197,33 @@ yq_space_field() {
   assert_output --partial "invalid spec.kubehz.space.limits.nodes: 0"
 }
 
+# A fraction and a boolean are scalars: the refusal names the value the spec
+# carries, the same as a word does. Only a list and a map have no value to
+# name. The Go twin pins the same three.
+@test "space_limits: names the value of a fraction" {
+  yq_space_field nodes '!!float' 2.5
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 2.5 (expected a whole number from 1 to 5)"
+}
+
+@test "space_limits: names the value of a boolean" {
+  yq_space_field nodes '!!bool' true
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: true (expected a whole number from 1 to 5)"
+}
+
+@test "space_limits: a map under a limit has no value to name" {
+  yq_space_field nodes '!!map' ''
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: expected a whole number from 1 to 5"
+}
+
 @test "space_limits: refuses a namespace count out of range" {
   yq_space_field namespaces '!!int' 4
 
@@ -386,6 +413,69 @@ yq_space_field() {
   assert_failure
   assert_output --partial "no shared control plane has room"
   assert_output --partial "hosting: self"
+}
+
+# One curl mock for the limit refusals: the create answers the code, the
+# status and the message the caller names.
+# Usage: curl_space_refusal <code> <status> [message]
+curl_space_refusal() {
+  export _REFUSE_CODE="$1" _REFUSE_STATUS="$2" _REFUSE_MESSAGE="${3:-}"
+  curl() {
+    local method="GET" url=""
+    while (( $# )); do
+      case "$1" in
+        -X) method="$2"; shift 2 ;;
+        https://*) url="$1"; shift ;;
+        -d) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${method} ${url##*api.example.test}" in
+      "GET /api/spaces")
+        printf '{"ok":true,"data":[]}\n200' ;;
+      "POST /api/spaces")
+        printf '{"ok":false,"data":{"code":"%s","message":"%s"}}\n%s' \
+          "${_REFUSE_CODE}" "${_REFUSE_MESSAGE}" "${_REFUSE_STATUS}" ;;
+      *)
+        printf '{"ok":false}\n500' ;;
+    esac
+  }
+  export -f curl
+}
+
+# The free ceiling is three numbers, so the refusal names three on each side:
+# what the spec asks for, and what a free account allows.
+@test "provision_shared: the free refusal names all three numbers" {
+  yq_space_spec
+  curl_space_refusal SPACE_LIMITS_ABOVE_FREE 403 refused
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the free allowance"
+  assert_output --partial "A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap."
+}
+
+# The shared ceiling moves with the account, so the api's message carries the
+# real numbers and lo prints it instead of a fixed maximum.
+@test "provision_shared: the shared refusal prints the api message" {
+  yq_space_spec
+  curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 \
+    "This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5"
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5"
+  assert_output --partial "plane: set spec.kubehz.hosting to hosted."
+}
+
+@test "provision_shared: the shared refusal falls back without an api message" {
+  yq_space_spec
+  curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 ""
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the maximum of a shared control plane"
+  assert_output --partial "plane: set spec.kubehz.hosting to hosted."
 }
 
 @test "provision_shared: a lost create race adopts via re-lookup" {

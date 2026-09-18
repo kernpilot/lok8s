@@ -133,6 +133,28 @@ spec:
       limits:
         objectCapKiB: 513
 EOF
+# A limit that is not a whole number: a fraction and a boolean are scalars, so
+# both refusals must name the value the spec carries.
+mk space-nodes-float.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 2.5
+EOF
+mk space-nodes-bool.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: true
+EOF
 # space-plan.dev — a retired plan; space-limits-list.dev — the machine-name
 # list put under limits.nodes (the two fields confused).
 mk space-plan.dev <<'EOF'
@@ -263,6 +285,8 @@ check - kubehz status --domain space-nodes-6.dev
 check - kubehz status --domain space-ns-4.dev
 check - kubehz status --domain space-cap-63.dev
 check - kubehz status --domain space-cap-513.dev
+check - kubehz status --domain space-nodes-float.dev
+check - kubehz status --domain space-nodes-bool.dev
 check - kubehz status --domain space-plan.dev
 check - kubehz status --domain space-limits-list.dev
 

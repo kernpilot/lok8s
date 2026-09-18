@@ -130,6 +130,9 @@ func (c *Context) spaceNumber(doc specDoc, field string, def, min, max int) (int
 		c.echoErr("  The machine names stay under spec.kubehz.space.nodes.")
 		return 0, ErrHandled
 	}
+	// Only a list and a map hold no single value to quote back. Every other
+	// type is a scalar, so it falls through to the read below and the refusal
+	// names what the spec says (2.5, true, two). The bash twin does the same.
 	if n.Kind != yaml.ScalarNode {
 		c.errorf("invalid spec.kubehz.space.limits.%s: expected a whole number from %d to %d", field, min, max)
 		return 0, ErrHandled
@@ -237,13 +240,23 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 			c.echoErr("    • run your own cluster meanwhile (spec.kubehz.hosting: self)")
 			return "", ErrHandled
 		case "SPACE_LIMITS_ABOVE_FREE":
+			// All three numbers on both sides: what the spec asks for, and
+			// what a free account allows. Two of the three left the reader
+			// guessing which number was too large.
 			c.errorf("kubehz refused the space limits (%s): they are above the free allowance", sp.limitsLine())
-			c.echoErr("  A free account gets 1 space with 2 nodes and 1 namespace.")
+			c.echoErr("  A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap.")
 			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or upgrade the account in")
 			c.echoErr("  the kubehz dashboard.")
 			return "", ErrHandled
 		case "SPACE_LIMITS_ABOVE_SHARED":
-			c.errorf("kubehz refused the space limits (%s): they are above the maximum of a shared control plane", sp.limitsLine())
+			// The ceiling moves with the account, so the api's own message
+			// carries it. The fixed text is the fallback for an api that
+			// sends the code alone.
+			reason := clip(scrub(apiMessage(res.Body)))
+			if reason == "" {
+				reason = "they are above the maximum of a shared control plane"
+			}
+			c.errorf("kubehz refused the space limits (%s): %s", sp.limitsLine(), reason)
 			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or use a hosted control")
 			c.echoErr("  plane: set spec.kubehz.hosting to hosted.")
 			return "", ErrHandled

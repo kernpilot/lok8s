@@ -40,11 +40,13 @@ kubehz::space_number() {
   local cluster_yaml="${1}" field="${2}" def="${3}" min="${4}" max="${5}"
   local type value
   type=$(yq -r ".spec.kubehz.space.limits.${field} | type" "${cluster_yaml}" 2>/dev/null) || type=""
+  # Only a list and a map hold no single value to quote back. Every other
+  # type is a scalar, so it falls through to the read below and the refusal
+  # names what the spec says (2.5, true, two). The Go twin does the same.
   case "${type}" in
     ''|null|'!!null')
       echo "${def}"
       return 0 ;;
-    '!!int'|'!!str') ;;
     '!!seq')
       if [[ "${field}" == "nodes" ]]; then
         error "spec.kubehz.space.limits.nodes is a list: it is the node ceiling"
@@ -54,7 +56,7 @@ kubehz::space_number() {
         error "invalid spec.kubehz.space.limits.${field}: expected a whole number from ${min} to ${max}"
       fi
       return 1 ;;
-    *)
+    '!!map')
       error "invalid spec.kubehz.space.limits.${field}: expected a whole number from ${min} to ${max}"
       return 1 ;;
   esac
@@ -247,7 +249,7 @@ kubehz::space_ensure() {
   if (( rc == 1 )); then
     return 1
   elif (( rc == 2 )); then
-    local code
+    local code reason
     code=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.code // .code // empty' 2>/dev/null) || code=""
     case "${code}" in
       NO_SHARD_AVAILABLE)
@@ -257,13 +259,22 @@ kubehz::space_ensure() {
         echo "    • run your own cluster meanwhile (spec.kubehz.hosting: self)" >&2
         return 1 ;;
       SPACE_LIMITS_ABOVE_FREE)
+        # All three numbers on both sides: what the spec asks for, and what a
+        # free account allows. Two of the three left the reader guessing which
+        # number was too large.
         error "kubehz refused the space limits ($(kubehz::space_limits_line)): they are above the free allowance"
-        echo "  A free account gets 1 space with 2 nodes and 1 namespace." >&2
+        echo "  A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap." >&2
         echo "  Decrease the values in spec.kubehz.space.limits, or upgrade the account in" >&2
         echo "  the kubehz dashboard." >&2
         return 1 ;;
       SPACE_LIMITS_ABOVE_SHARED)
-        error "kubehz refused the space limits ($(kubehz::space_limits_line)): they are above the maximum of a shared control plane"
+        # The ceiling moves with the account, so the api's own message carries
+        # it. The fixed text is the fallback for an api that sends the code
+        # alone. The Go twin scrubs and bounds the server string first (D21);
+        # this tree prints it as it arrives, like space_api_error does.
+        reason=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || reason=""
+        [[ -n "${reason}" ]] || reason="they are above the maximum of a shared control plane"
+        error "kubehz refused the space limits ($(kubehz::space_limits_line)): ${reason}"
         echo "  Decrease the values in spec.kubehz.space.limits, or use a hosted control" >&2
         echo "  plane: set spec.kubehz.hosting to hosted." >&2
         return 1 ;;

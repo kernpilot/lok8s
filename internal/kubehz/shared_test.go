@@ -58,6 +58,12 @@ func TestSpaceLimitsBounds(t *testing.T) {
 		{"    space:\n      limits:\n        objectCapKiB: 63\n", "invalid spec.kubehz.space.limits.objectCapKiB: 63 (expected a whole number from 64 to 512)"},
 		{"    space:\n      limits:\n        objectCapKiB: 513\n", "invalid spec.kubehz.space.limits.objectCapKiB: 513 (expected a whole number from 64 to 512)"},
 		{"    space:\n      limits:\n        nodes: two\n", "invalid spec.kubehz.space.limits.nodes: two (expected a whole number from 1 to 5)"},
+		// A scalar that is not a whole number is quoted back the same way a
+		// word is. A fraction and a boolean are both shapes a spec really
+		// carries, and "expected a whole number" alone never says which value
+		// was read. The bash twin pins the same two.
+		{"    space:\n      limits:\n        nodes: 2.5\n", "invalid spec.kubehz.space.limits.nodes: 2.5 (expected a whole number from 1 to 5)"},
+		{"    space:\n      limits:\n        nodes: true\n", "invalid spec.kubehz.space.limits.nodes: true (expected a whole number from 1 to 5)"},
 	} {
 		h := newHarness(t)
 		_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, tc.block))
@@ -547,32 +553,49 @@ func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
 // code: what was asked for, what the account allows, and what to change.
 func TestProvisionSharedLimitRefusals(t *testing.T) {
 	t.Parallel()
+	// The status is the api's own: SPACE_LIMITS_ABOVE_FREE answers 403, the
+	// other two answer 400. lo branches on the code, so the status only has
+	// to be the real one here, never the thing that selects the message.
 	for _, tc := range []struct {
-		code string
-		want []string
+		name    string
+		status  int
+		code    string
+		message string
+		want    []string
 	}{
-		{"SPACE_LIMITS_ABOVE_FREE", []string{
+		{"free", 403, "SPACE_LIMITS_ABOVE_FREE", "refused", []string{
 			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the free allowance",
-			"A free account gets 1 space with 2 nodes and 1 namespace.",
+			"A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap.",
 			"or upgrade the account in",
 		}},
-		{"SPACE_LIMITS_ABOVE_SHARED", []string{
-			"they are above the maximum of a shared control plane",
+		// The shared ceiling moves with the account, so the api's message is
+		// the one that carries the real numbers.
+		{"shared", 400, "SPACE_LIMITS_ABOVE_SHARED", "This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5", []string{
+			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5",
 			"plane: set spec.kubehz.hosting to hosted.",
 		}},
-		{"SPACE_PLAN_RETIRED", []string{
+		// An api that sends the code alone still gets a usable line.
+		{"shared without a message", 400, "SPACE_LIMITS_ABOVE_SHARED", "", []string{
+			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the maximum of a shared control plane",
+			"plane: set spec.kubehz.hosting to hosted.",
+		}},
+		{"plan retired", 400, "SPACE_PLAN_RETIRED", "refused", []string{
 			"kubehz refused the request: space plans are retired",
 			"A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB.",
 		}},
 	} {
-		h := newHarness(t)
-		spec := spaceSpec(h, spaceBlock)
-		h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
-		h.handle("POST /api/spaces", 400, `{"ok":false,"data":{"code":"`+tc.code+`","message":"refused"}}`)
-		mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
-		for _, want := range tc.want {
-			mustContain(t, h.output(), want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			spec := spaceSpec(h, spaceBlock)
+			// tc.message holds no quote and no backslash: no escaping needed.
+			body := `{"ok":false,"data":{"code":"` + tc.code + `","message":"` + tc.message + `"}}`
+			h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+			h.handle("POST /api/spaces", tc.status, body)
+			mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+			for _, want := range tc.want {
+				mustContain(t, h.output(), want)
+			}
+		})
 	}
 }
 
