@@ -3,6 +3,7 @@ package kubehz
 // shared_test.go ports tests/unit/kubehz_shared_test.bats.
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -24,6 +25,143 @@ func TestSpaceConfigDefaults(t *testing.T) {
 	if sp.Slug != "acme" || sp.Name != "acme" || len(sp.Nodes) != 0 {
 		t.Fatalf("%+v", sp)
 	}
+	// A spec with no limits block names no number. lo holds no default of
+	// its own: zero means "not set", and the field is left out of the
+	// request so the api applies the platform's default.
+	if sp.MaxNodes != 0 || sp.MaxNamespaces != 0 || sp.MaxObjectKiB != 0 {
+		t.Fatalf("%+v", sp)
+	}
+}
+
+func TestSpaceConfigReadsTheThreeNumbers(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	sp, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, spaceBlock))
+	mustOK(t, err, h.output())
+	if sp.MaxNodes != 3 || sp.MaxNamespaces != 2 || sp.MaxObjectKiB != 128 {
+		t.Fatalf("%+v", sp)
+	}
+	if len(sp.Nodes) != 2 {
+		t.Fatalf("%+v", sp.Nodes)
+	}
+}
+
+// Only the SHAPE of each number is local: a whole number, 1 or more. There is
+// no upper bound here, because the ceiling belongs to the account and lives on
+// the platform. A value that fails the shape check is refused with the field,
+// the value and the rule named.
+func TestSpaceLimitsBounds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		block string
+		want  string
+	}{
+		// Only the SHAPE is local: a whole number, 1 or more. Zero and a
+		// negative number can never be a ceiling, so they die here.
+		{"    space:\n      limits:\n        nodes: 0\n", "invalid spec.kubehz.space.limits.nodes: 0 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        nodes: -1\n", "invalid spec.kubehz.space.limits.nodes: -1 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        namespaces: 0\n", "invalid spec.kubehz.space.limits.namespaces: 0 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        objectCapKiB: 0\n", "invalid spec.kubehz.space.limits.objectCapKiB: 0 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        nodes: two\n", "invalid spec.kubehz.space.limits.nodes: two (expected a whole number of 1 or more)"},
+		// A scalar that is not a whole number is quoted back the same way a
+		// word is. A fraction and a boolean are both shapes a spec really
+		// carries, and "expected a whole number" alone never says which value
+		// was read. The bash twin pins the same two.
+		{"    space:\n      limits:\n        nodes: 2.5\n", "invalid spec.kubehz.space.limits.nodes: 2.5 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        nodes: true\n", "invalid spec.kubehz.space.limits.nodes: true (expected a whole number of 1 or more)"},
+		// A map has no single value to quote back.
+		{"    space:\n      limits:\n        namespaces: {a: 1}\n", "invalid spec.kubehz.space.limits.namespaces: expected a whole number of 1 or more"},
+		// The frozen tree's contract is digits only, and Go follows it.
+		// strconv alone would take "+5", and a TrimSpace would take " 5 ".
+		{"    space:\n      limits:\n        nodes: +5\n", "invalid spec.kubehz.space.limits.nodes: +5 (expected a whole number of 1 or more)"},
+		{"    space:\n      limits:\n        nodes: \" 5 \"\n", "invalid spec.kubehz.space.limits.nodes:  5  (expected a whole number of 1 or more)"},
+		// Past the strconv range: refused on both sides, not wrapped.
+		{"    space:\n      limits:\n        nodes: 99999999999999999999\n", "invalid spec.kubehz.space.limits.nodes: 99999999999999999999 (expected a whole number of 1 or more)"},
+	} {
+		h := newHarness(t)
+		_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, tc.block))
+		mustErr(t, err)
+		mustContain(t, h.output(), tc.want)
+	}
+	// There is NO local upper bound any more. What an account may ask for
+	// differs per account and extra resources are bought, so a number the
+	// platform will refuse still leaves this CLI: the api answers with the
+	// account's real ceiling. These three were refused locally before.
+	h := newHarness(t)
+	sp, err := h.ctx.SpaceConfig("acme.example.org",
+		spaceSpec(h, "    space:\n      limits:\n        nodes: 6\n        namespaces: 4\n        objectCapKiB: 513\n"))
+	mustOK(t, err, h.output())
+	if sp.MaxNodes != 6 || sp.MaxNamespaces != 4 || sp.MaxObjectKiB != 513 {
+		t.Fatalf("%+v", sp)
+	}
+	// A leading zero is not octal: "008" is eight, and both trees print 8.
+	h3 := newHarness(t)
+	sp3, err := h3.ctx.SpaceConfig("acme.example.org",
+		spaceSpec(h3, "    space:\n      limits:\n        nodes: 008\n"))
+	mustOK(t, err, h3.output())
+	if sp3.MaxNodes != 8 {
+		t.Fatalf("%+v", sp3)
+	}
+	// The smallest shape each number may take is still accepted.
+	h2 := newHarness(t)
+	sp2, err := h2.ctx.SpaceConfig("acme.example.org",
+		spaceSpec(h2, "    space:\n      limits:\n        nodes: 1\n        namespaces: 1\n        objectCapKiB: 1\n"))
+	mustOK(t, err, h2.output())
+	if sp2.MaxNodes != 1 || sp2.MaxNamespaces != 1 || sp2.MaxObjectKiB != 1 {
+		t.Fatalf("%+v", sp2)
+	}
+}
+
+func TestSpaceConfigRefusesARetiredPlan(t *testing.T) {
+	t.Parallel()
+	// ANY plan node is a plan. yq's `//` reads `false` and `""` as absent, so
+	// a check built on it would let those two specs through unrefused.
+	for _, block := range []string{
+		"    space:\n      plan: shared-s\n",
+		"    space:\n      plan: false\n",
+		"    space:\n      plan: \"\"\n",
+		"    space:\n      plan: 0\n",
+		"    space:\n      plan:\n        id: shared-s\n",
+	} {
+		h := newHarness(t)
+		_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, block))
+		mustErr(t, err)
+		mustContain(t, h.output(), "spec.kubehz.space.plan is not valid: space plans are retired")
+		mustContain(t, h.output(), "spec.kubehz.space.limits.objectCapKiB instead.")
+	}
+	// An explicit null is not a plan.
+	h := newHarness(t)
+	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      plan: null\n"))
+	mustOK(t, err, h.output())
+}
+
+// spec.kubehz.space.nodes holds the machine names and keeps that meaning. A
+// list under limits.nodes is the two fields confused: the message names both.
+func TestSpaceConfigRefusesANodeListUnderLimits(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	_, err := h.ctx.SpaceConfig("acme.example.org", spaceSpec(h, "    space:\n      limits:\n        nodes: [worker-1]\n"))
+	mustErr(t, err)
+	mustContain(t, h.output(), "spec.kubehz.space.limits.nodes is a list: it is the node ceiling")
+	mustContain(t, h.output(), "Set spec.kubehz.space.limits.nodes to a whole number of 1 or more.")
+	mustContain(t, h.output(), "The machine names stay under spec.kubehz.space.nodes.")
+}
+
+// The machine-name list under spec.kubehz.space.nodes is untouched by the
+// limits block: it still mints one join ticket per name.
+func TestSpaceConfigKeepsTheMachineNameList(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	sp, err := h.ctx.SpaceConfig("acme.example.org",
+		spaceSpec(h, "    space:\n      nodes: [worker-1, worker-2, worker-3]\n"))
+	mustOK(t, err, h.output())
+	if len(sp.Nodes) != 3 || sp.Nodes[0] != "worker-1" {
+		t.Fatalf("%+v", sp.Nodes)
+	}
+	// No limits block: no number is set, so none is sent.
+	if sp.MaxNodes != 0 || sp.MaxNamespaces != 0 || sp.MaxObjectKiB != 0 {
+		t.Fatalf("%+v", sp)
+	}
 }
 
 func TestSpaceConfigParseFailureNeverDefaultsSlug(t *testing.T) {
@@ -35,7 +173,7 @@ func TestSpaceConfigParseFailureNeverDefaultsSlug(t *testing.T) {
 	mustErr(t, err)
 }
 
-const spaceBlock = "    space:\n      slug: acme\n      name: Acme Prod\n      plan: shared-s\n      nodes: [worker-1, worker-2]\n"
+const spaceBlock = "    space:\n      slug: acme\n      name: Acme Prod\n      nodes: [worker-1, worker-2]\n      limits:\n        nodes: 3\n        namespaces: 2\n        objectCapKiB: 128\n"
 
 func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
 	t.Parallel()
@@ -53,8 +191,50 @@ func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
 	if strings.Count(h.output(), "a1b2c3.d4e5f6g7h8i9j0k1") != 2 {
 		t.Fatalf("ticket count:\n%s", h.output())
 	}
-	if r := h.lastReq("POST", "/api/spaces"); r.Body != `{"name":"Acme Prod","slug":"acme","planId":"shared-s"}` {
+	if r := h.lastReq("POST", "/api/spaces"); r.Body != `{"name":"Acme Prod","slug":"acme","maxNodes":3,"maxNamespaces":2,"maxObjectKiB":128}` {
 		t.Fatalf("create body: %s", r.Body)
+	}
+}
+
+// A limit the spec does not name is LEFT OUT of the create body. lo holds no
+// default of its own, so the api applies the platform's — and a value the
+// account may later have more of is never pinned by this CLI. The bash twin
+// sends the same bytes (tests/unit/kubehz_shared_test.bats).
+func TestProvisionSharedOmitsTheLimitsTheSpecLeavesOut(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		block string
+		want  string
+	}{
+		{
+			"no limits block at all",
+			"    space:\n      slug: acme\n      name: Acme Prod\n",
+			`{"name":"Acme Prod","slug":"acme"}`,
+		},
+		{
+			"one number only",
+			"    space:\n      slug: acme\n      name: Acme Prod\n      limits:\n        namespaces: 2\n",
+			`{"name":"Acme Prod","slug":"acme","maxNamespaces":2}`,
+		},
+		{
+			"an explicit null is not a value",
+			"    space:\n      slug: acme\n      name: Acme Prod\n      limits:\n        nodes: null\n        objectCapKiB: 128\n",
+			`{"name":"Acme Prod","slug":"acme","maxObjectKiB":128}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			spec := spaceSpec(h, tc.block)
+			h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+			h.handle("POST /api/spaces", 201, `{"ok":true,"data":{"id":"sp-1","slug":"acme","status":"Pending"}}`)
+			h.handle("GET /api/spaces/sp-1", 200, `{"ok":true,"data":{"id":"sp-1","status":"Active"}}`)
+			cfg := &Config{APIURL: h.apiURL(), Hosting: "shared"}
+			mustOK(t, h.ctx.ProvisionShared(t.Context(), cfg, "acme.example.org", spec), h.output())
+			if r := h.lastReq("POST", "/api/spaces"); r.Body != tc.want {
+				t.Fatalf("create body:\n got: %s\nwant: %s", r.Body, tc.want)
+			}
+		})
 	}
 }
 
@@ -134,11 +314,11 @@ func TestSpaceStatusRendersTable(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	spec := spaceSpec(h, "")
-	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-5","slug":"acme","status":"Active","planId":"shared-free"}]}`)
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-5","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256}]}`)
 	h.handle("GET /api/spaces/sp-5/nodes", 200, `{"ok":true,"data":{"nodes":[{"name":"worker-1","status":"Ready","lane":"hcloud"}],"usage":{"nodes":1,"maxNodes":2}}}`)
 	mustOK(t, h.ctx.SpaceStatus(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	mustContain(t, h.output(), "Phase:   Active")
-	mustContain(t, h.output(), "Plan:    shared-free")
+	mustContain(t, h.output(), "Limits:  nodes 2, namespaces 1, object cap 256 KiB")
 	mustContain(t, h.output(), "Nodes:   1/2")
 	mustContain(t, h.output(), "  worker-1  Ready  hcloud")
 }
@@ -456,4 +636,213 @@ func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
 	mustNotContain(t, h.output(), "\x07")
 	mustContain(t, h.output(), "bad[2Jnode")
 	mustContain(t, h.output(), "tryagain")
+}
+
+// The api's limit refusals reach the terminal as an instruction, not as a
+// code. The ACCOUNT's ceiling differs per account and extra resources are
+// bought, so the api's own message is the only place the real numbers exist:
+// lo prints it, adds the values it sent, and names the next step.
+func TestProvisionSharedLimitRefusals(t *testing.T) {
+	t.Parallel()
+	// The status is the api's own: SPACE_LIMITS_ABOVE_FREE answers 403, the
+	// other two answer 400. lo branches on the code, so the status only has
+	// to be the real one here, never the thing that selects the message.
+	for _, tc := range []struct {
+		name    string
+		status  int
+		code    string
+		message string
+		help    string
+		want    []string
+	}{
+		{"free", 403, "SPACE_LIMITS_ABOVE_FREE",
+			"A free account allows 2 nodes, 1 namespace and an object cap of 256 KiB for one space: maxNodes is 3, the limit is 2",
+			"Add a payment method to the account, or lower the values.", []string{
+				"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): A free account allows 2 nodes, 1 namespace and an object cap of 256 KiB for one space: maxNodes is 3, the limit is 2",
+				"  Add a payment method to the account, or lower the values.",
+				"Decrease the values in spec.kubehz.space.limits, or raise the ceiling",
+				"of the account in the kubehz dashboard.",
+			}},
+		{"shared", 400, "SPACE_LIMITS_ABOVE_SHARED",
+			"This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5",
+			"Lower the values, or create a hosted control plane for a larger cluster.", []string{
+				"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5",
+				"  Lower the values, or create a hosted control plane for a larger cluster.",
+				"plane: set spec.kubehz.hosting to hosted.",
+			}},
+		// An api that sends the code alone still gets a usable line. The
+		// fallback states NO number: lo does not know the account's ceiling.
+		{"free without a message", 403, "SPACE_LIMITS_ABOVE_FREE", "", "", []string{
+			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above what this account allows",
+			// The spec names numbers, so the next step is to lower them.
+			"Decrease the values in spec.kubehz.space.limits, or raise the ceiling",
+			"of the account in the kubehz dashboard.",
+		}},
+		{"shared without a message", 400, "SPACE_LIMITS_ABOVE_SHARED", "", "", []string{
+			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above what this account may set on a shared control plane",
+			"plane: set spec.kubehz.hosting to hosted.",
+		}},
+		{"plan retired", 400, "SPACE_PLAN_RETIRED",
+			"Space plans are retired. The request sends planId, which the platform no longer accepts.",
+			"Send maxNodes, maxNamespaces and maxObjectKiB instead.", []string{
+				"kubehz refused the request: Space plans are retired. The request sends planId, which the platform no longer accepts.",
+				"  Send maxNodes, maxNamespaces and maxObjectKiB instead.",
+				"A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB.",
+			}},
+		{"plan retired without a message", 400, "SPACE_PLAN_RETIRED", "", "", []string{
+			"kubehz refused the request: space plans are retired",
+			"A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB.",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			spec := spaceSpec(h, spaceBlock)
+			// tc.message and tc.help hold no quote and no backslash.
+			body := `{"ok":false,"data":{"code":"` + tc.code + `","message":"` + tc.message + `","help":"` + tc.help + `"}}`
+			h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+			h.handle("POST /api/spaces", tc.status, body)
+			mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+			for _, want := range tc.want {
+				mustContain(t, h.output(), want)
+			}
+		})
+	}
+}
+
+// spaceAPIMessageFixture is the hostile refusal message both implementations
+// are fed: one real newline, a raw ESC sequence, the six characters an api
+// would send to slip an escape sequence through `echo -e`, a BEL, a DEL, and
+// enough padding to pass the 256-character clip.
+func spaceAPIMessageFixture(t *testing.T, name string) string {
+	t.Helper()
+	return strings.TrimSuffix(
+		readFile(t, filepath.Join("testdata", "golden", name)), "\n")
+}
+
+// A refusal message is a SERVER string, and the two implementations must
+// disarm it identically: scrub, then clip, and (bash only, because error()
+// prints through `echo -e`) escape the backslashes last. The golden holds the
+// rendered bytes; tests/unit/kubehz_shared_test.bats asserts the bash tree
+// against the SAME file, so a drift on either side turns one of them red.
+func TestProvisionSharedScrubsTheSharedCeilingMessage(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	body, err := json.Marshal(map[string]any{
+		"ok": false,
+		"data": map[string]any{
+			"code":    "SPACE_LIMITS_ABOVE_SHARED",
+			"message": spaceAPIMessageFixture(t, "space-above-shared-message.txt"),
+			// The help travels the OTHER print path: a plain echo in bash,
+			// which must NOT get the backslash escape error() needs.
+			"help": spaceAPIMessageFixture(t, "space-above-shared-help.txt"),
+		},
+	})
+	mustOK(t, err, "marshal")
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+	h.handle("POST /api/spaces", 400, string(body))
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+
+	got := h.output()
+	// No control character may survive into the terminal.
+	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+		mustNotContain(t, got, bad)
+	}
+	// The characters the api sent stay exactly as many characters, on both
+	// print paths: the message reaches error(), the help a plain echo.
+	mustContain(t, got, `literal:\033[2J`)
+	mustContain(t, got, `literal:\t and \\ stay`)
+	if want := golden(t, "space-above-shared.txt", got); got != want {
+		t.Fatalf("rendered refusal differs from the golden:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A spec that names NO number must not be told to decrease values that are
+// not there: the next step is to set them.
+func TestProvisionSharedAdvisesSettingTheValuesWhenTheSpecNamesNone(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, "    space:\n      slug: acme\n")
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+	h.handle("POST /api/spaces", 403, `{"ok":false,"data":{"code":"SPACE_LIMITS_ABOVE_FREE"}}`)
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+	mustContain(t, h.output(), "kubehz refused the space limits (the spec sets none)")
+	mustContain(t, h.output(), "Set the values in spec.kubehz.space.limits, or raise the ceiling")
+	mustNotContain(t, h.output(), "Decrease the values")
+}
+
+// spaceAPIError is the FIRST thing an api can print through: `lo provision`
+// lists the spaces before it does anything else. A message that carries an
+// escape sequence would clear the caller's terminal, so both halves are
+// scrubbed and bounded, exactly as the refusal path does. The golden holds
+// the bytes and the bats suite asserts the bash tree against the same file.
+func TestSpaceAPIErrorScrubsAndClipsBothHalves(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	body, err := json.Marshal(map[string]any{
+		"ok":      false,
+		"message": spaceAPIMessageFixture(t, "space-above-shared-message.txt"),
+		"help":    spaceAPIMessageFixture(t, "space-above-shared-help.txt"),
+	})
+	mustOK(t, err, "marshal")
+	h.handle("GET /api/spaces", 500, string(body))
+	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
+
+	got := h.output()
+	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+		mustNotContain(t, got, bad)
+	}
+	mustContain(t, got, `literal:\033[2J`)
+	mustContain(t, got, `literal:\t and \\ stay`)
+	if want := golden(t, "space-api-error.txt", got); got != want {
+		t.Fatalf("rendered api error differs from the golden:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// Adoption is read-only, so an edited spec changes nothing server-side. Say
+// so instead of letting the edit pass unreported.
+func TestProvisionSharedNotesLimitsDrift(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-7","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256}]}`)
+	h.handle("GET /api/spaces/sp-7", 200, `{"ok":true,"data":{"id":"sp-7","status":"Active"}}`)
+	h.handle("POST /api/spaces/sp-7/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"soon"}}`)
+	mustOK(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
+	mustContain(t, h.output(), "Note: this space keeps the limits it was created with.")
+	mustContain(t, h.output(), "The spec asks for nodes 3, namespaces 2, object cap 128 KiB.")
+	mustContain(t, h.output(), "Change the limits in the kubehz dashboard.")
+
+	// The same numbers on both sides: no note.
+	h2 := newHarness(t)
+	spec2 := spaceSpec(h2, "    space:\n      limits:\n        nodes: 2\n        namespaces: 1\n        objectCapKiB: 256\n")
+	h2.handle("GET /api/spaces", 200, `{"ok":true,"data":[{"id":"sp-8","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256}]}`)
+	h2.handle("GET /api/spaces/sp-8", 200, `{"ok":true,"data":{"id":"sp-8","status":"Active"}}`)
+	mustOK(t, h2.ctx.ProvisionShared(t.Context(), &Config{APIURL: h2.apiURL()}, "acme.example.org", spec2), h2.output())
+	mustNotContain(t, h2.output(), "keeps the limits it was created with")
+}
+
+// A space spec is validated where it is written: lo kubehz register reaches
+// validate_config, and a value that is not a whole number of 1 or more stops
+// there.
+func TestValidateRefusesAMalformedSpaceLimit(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, "    space:\n      limits:\n        namespaces: 0\n")
+	cfg, err := h.ctx.ReadConfig(spec)
+	mustOK(t, err, h.output())
+	mustErr(t, h.ctx.Validate(cfg, spec))
+	mustContain(t, h.output(), "invalid spec.kubehz.space.limits.namespaces: 0 (expected a whole number of 1 or more)")
+}
+
+// The same door lets a number the PLATFORM will refuse through: the ceiling
+// is the account's, and only the api knows it.
+func TestValidateAcceptsANumberAboveThePlatformCeiling(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, "    space:\n      limits:\n        namespaces: 4\n        nodes: 6\n        objectCapKiB: 513\n")
+	cfg, err := h.ctx.ReadConfig(spec)
+	mustOK(t, err, h.output())
+	mustOK(t, h.ctx.Validate(cfg, spec), h.output())
 }

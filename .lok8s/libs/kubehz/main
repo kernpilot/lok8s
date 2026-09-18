@@ -255,6 +255,11 @@ kubehz::validate_config() {
     error "kind: Kubehz requires spec.kubehz.hosting: shared (got: ${LOK8S_KUBEHZ_HOSTING})"
     return 1
   fi
+  # The three numbers of a space: refuse a value out of range here, where the
+  # spec was written, and not at the api.
+  if [[ "${LOK8S_KUBEHZ_HOSTING}" == "shared" && -n "${LOK8S_SPEC_FILE:-}" ]]; then
+    kubehz::space_limits "${LOK8S_SPEC_FILE}" || return 1
+  fi
 }
 
 # ── SSH fingerprint extraction ───────────────────────────

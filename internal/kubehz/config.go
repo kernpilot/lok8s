@@ -210,5 +210,12 @@ func (c *Context) Validate(cfg *Config, specFile string) error {
 		c.errorf("kind: Kubehz requires spec.kubehz.hosting: shared (got: %s)", cfg.Hosting)
 		return ErrHandled
 	}
+	// The three numbers of a space: refuse a value out of range here, where
+	// the spec was written, and not at the api.
+	if cfg.Hosting == "shared" && specFile != "" {
+		if _, _, _, err := c.spaceLimits(loadSpec(specFile)); err != nil {
+			return err
+		}
+	}
 	return nil
 }

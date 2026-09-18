@@ -17,12 +17,124 @@ import ^utils/verbose
 
 # ── Config reader ────────────────────────────────────────
 
+# The three numbers a space is made of: the node ceiling, the namespace
+# ceiling and the object cap (the size limit for one Secret or ConfigMap in
+# the space's namespaces), under spec.kubehz.space.limits.
+#
+# lo does NOT carry the platform's policy. What an account may ask for differs
+# per account, and extra resources are bought, so the platform is the only
+# place that knows the ceiling. This CLI checks the SHAPE of a value (a whole
+# number, 1 or more) and sends what the spec says; a value above the account's
+# ceiling is the api's refusal to make, and the api's message carries the
+# account's real numbers. A field the spec leaves out is not sent at all, so
+# the api applies its own default.
+LOK8S_SPACE_NUMBER_MIN=1
+
+# Read one of the three numbers. A missing or null value prints NOTHING: the
+# field is left out of the request and the api applies its own default.
+# spec.kubehz.space.nodes is the machine-name list, so a list under
+# limits.nodes is the two fields confused: name both.
+# Usage: kubehz::space_number <cluster_yaml> <field>
+# Outputs: the number to stdout, or nothing when the spec names none
+kubehz::space_number() {
+  local cluster_yaml="${1}" field="${2}"
+  local type value
+  type=$(yq -r ".spec.kubehz.space.limits.${field} | type" "${cluster_yaml}" 2>/dev/null) || type=""
+  # Only a list and a map hold no single value to quote back. Every other
+  # type is a scalar, so it falls through to the read below and the refusal
+  # names what the spec says (2.5, true, two). The Go twin does the same.
+  case "${type}" in
+    ''|null|'!!null')
+      return 0 ;;
+    '!!seq')
+      if [[ "${field}" == "nodes" ]]; then
+        error "spec.kubehz.space.limits.nodes is a list: it is the node ceiling"
+        echo "  Set spec.kubehz.space.limits.nodes to a whole number of 1 or more." >&2
+        echo "  The machine names stay under spec.kubehz.space.nodes." >&2
+      else
+        error "invalid spec.kubehz.space.limits.${field}: expected a whole number of 1 or more"
+      fi
+      return 1 ;;
+    '!!map')
+      error "invalid spec.kubehz.space.limits.${field}: expected a whole number of 1 or more"
+      return 1 ;;
+  esac
+  value=$(yq -r ".spec.kubehz.space.limits.${field}" "${cluster_yaml}") || return 1
+  # No upper bound on the CEILING: a number the account may not have is the
+  # api's refusal to make. The bound below is on the NUMBER ITSELF, and it is
+  # the Go twin's strconv range, so both trees accept the same set.
+  local number
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] || ! number=$(kubehz::space_number_value "${value}"); then
+    error "invalid spec.kubehz.space.limits.${field}: ${value} (expected a whole number of 1 or more)"
+    return 1
+  fi
+  echo "${number}"
+}
+
+# Turn a digits-only string into the number the Go twin parses, or fail.
+# Leading zeros are dropped, so "008" is eight and never octal, and the value
+# is printed the way the Go twin prints it. Fails on zero and on anything
+# outside the int64 range strconv parses.
+#
+# The comparisons avoid (( )) on the value on purpose: bash arithmetic reads a
+# leading zero as octal ("008" prints `value too great for base`) and wraps
+# silently past int64, so both would disagree with the Go twin.
+# Usage: kubehz::space_number_value <digits>
+# Outputs: the number to stdout
+kubehz::space_number_value() {
+  local digits
+  [[ "${1}" =~ ^0*([0-9]+)$ ]] || return 1
+  digits="${BASH_REMATCH[1]}"
+  [[ "${digits}" != "0" ]] || return 1
+  # Same length makes a string compare a numeric one.
+  if (( ${#digits} > 19 )); then
+    return 1
+  fi
+  # A STRING comparison on purpose: both sides are 19 digits here, so it is
+  # the numeric one, and it cannot overflow the way (( )) would.
+  # shellcheck disable=SC2071
+  if (( ${#digits} == 19 )) && [[ "${digits}" > "9223372036854775807" ]]; then
+    return 1
+  fi
+  echo "${digits}"
+}
+
+# Read the three numbers of a space. Only the SHAPE is checked here: a whole
+# number, 1 or more. There is no upper bound, because the ceiling belongs to
+# the account and lives on the platform. A field the spec leaves out stays
+# EMPTY and is not sent.
+# Usage: kubehz::space_limits <cluster_yaml>
+# Sets: LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
+kubehz::space_limits() {
+  local cluster_yaml="${1}"
+  local plan_type
+  # Space plans are retired. A spec that still carries one asks for a shape
+  # the platform no longer has, so say so instead of ignoring it. The test is
+  # the TYPE, not `// ""`: yq's `//` reads `plan: false` and `plan: ""` as
+  # absent and would let those specs through unrefused. Any type that is not
+  # null is a plan. The read keeps `|| return 1`, so a parse failure still
+  # stops here instead of reading as "no plan".
+  plan_type=$(yq -r '.spec.kubehz.space.plan | type' "${cluster_yaml}") || return 1
+  if [[ "${plan_type}" != "!!null" && "${plan_type}" != "null" && -n "${plan_type}" ]]; then
+    error "spec.kubehz.space.plan is not valid: space plans are retired"
+    echo "  Set spec.kubehz.space.limits.nodes, spec.kubehz.space.limits.namespaces" >&2
+    echo "  and spec.kubehz.space.limits.objectCapKiB instead." >&2
+    return 1
+  fi
+  LOK8S_SPACE_MAX_NODES=$(kubehz::space_number "${cluster_yaml}" nodes) || return 1
+  LOK8S_SPACE_MAX_NAMESPACES=$(kubehz::space_number "${cluster_yaml}" namespaces) || return 1
+  LOK8S_SPACE_MAX_OBJECT_KIB=$(kubehz::space_number "${cluster_yaml}" objectCapKiB) || return 1
+  export LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
+}
+
 # Read spec.kubehz.space from a cluster.lok8s.yaml. Everything is optional:
-# the slug defaults to the first DNS label of the domain, the display name to
-# the slug. Node names listed under spec.kubehz.space.nodes[] get a join
-# ticket minted at provision time.
+# the slug defaults to the first DNS label of the domain and the display name
+# to the slug. A limit the spec leaves out stays empty and is not sent, so the
+# api applies its own default. Node names listed under
+# spec.kubehz.space.nodes[] get a join ticket minted at provision time.
 # Usage: kubehz::space_config <domain> <cluster_yaml>
-# Sets: LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_PLAN LOK8S_SPACE_REGION
+# Sets: LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_REGION
+#       LOK8S_SPACE_MAX_NODES LOK8S_SPACE_MAX_NAMESPACES LOK8S_SPACE_MAX_OBJECT_KIB
 #       LOK8S_SPACE_NODES (array)
 kubehz::space_config() {
   local domain="${1}" cluster_yaml="${2}"
@@ -35,8 +147,8 @@ kubehz::space_config() {
   [[ -n "${LOK8S_SPACE_SLUG}" ]] || LOK8S_SPACE_SLUG="${default_slug}"
   LOK8S_SPACE_NAME=$(yq -r '.spec.kubehz.space.name // ""' "${cluster_yaml}") || return 1
   [[ -n "${LOK8S_SPACE_NAME}" ]] || LOK8S_SPACE_NAME="${LOK8S_SPACE_SLUG}"
-  LOK8S_SPACE_PLAN=$(yq -r '.spec.kubehz.space.plan // ""' "${cluster_yaml}") || return 1
   LOK8S_SPACE_REGION=$(yq -r '.spec.kubehz.space.region // ""' "${cluster_yaml}") || return 1
+  kubehz::space_limits "${cluster_yaml}" || return 1
 
   LOK8S_SPACE_NODES=()
   local node
@@ -44,7 +156,7 @@ kubehz::space_config() {
     [[ -n "${node}" && "${node}" != "null" ]] && LOK8S_SPACE_NODES+=("${node}")
   done < <(yq -r '.spec.kubehz.space.nodes[]?' "${cluster_yaml}" 2>/dev/null)
 
-  export LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_PLAN LOK8S_SPACE_REGION
+  export LOK8S_SPACE_SLUG LOK8S_SPACE_NAME LOK8S_SPACE_REGION
 }
 
 # ── API plumbing ─────────────────────────────────────────
@@ -80,6 +192,66 @@ kubehz::space_api() {
   [[ "${KUBEHZ_SPACE_API_STATUS}" == 2* ]] || return 2
 }
 
+# Bound and disarm a SERVER string before it reaches the terminal. The Go twin
+# runs clip(scrub(...)) on the same strings, so the three steps run in the same
+# order and produce the same bytes:
+#
+#   scrub   drop every character below 0x20 except tab and newline, and DEL.
+#           A compromised api could otherwise hide ANSI escapes in a refusal
+#           and redraw the caller's terminal (the rule node::scrub applies to
+#           the node rows).
+#   clip    256 characters, then one ellipsis. A ceiling or an endpoint is a
+#           few dozen characters; past that the rest is not information.
+#   escape  double every backslash. This step belongs to error() ONLY, which
+#           prints through `echo -e`: an api that sends the six characters
+#           \033[2J would get a real escape sequence out of this tree while
+#           the Go twin prints the six characters. A string printed with a
+#           plain `echo` must NOT be escaped, or the backslashes double on
+#           screen. kubehz::space_bound_string is that half.
+#
+# Two known limits: the character count is the shell's, so it counts runes
+# only in a UTF-8 locale (Go always counts runes), and `$(...)` drops a
+# trailing newline the Go twin would keep.
+# Usage: kubehz::space_bound_string <string>
+kubehz::space_bound_string() {
+  local s
+  s=$(tr -d '\000-\010\013-\037\177' <<<"${1}")
+  (( ${#s} <= 256 )) || s="${s:0:256}…"
+  echo "${s}"
+}
+
+# The same string, plus the backslash escape `echo -e` needs. Use this one for
+# anything that reaches error(), warn() or debug(); use space_bound_string for
+# a plain `echo`. The escape runs LAST so it cannot move the clip boundary.
+# Usage: kubehz::space_safe_string <string>
+kubehz::space_safe_string() {
+  local s
+  s=$(kubehz::space_bound_string "${1}")
+  echo "${s//\\/\\\\}"
+}
+
+# Print "<what>: <the api's message>", then the api's help. The fallback
+# stands in for an api that sends the code alone, and states no number of its
+# own. Both server strings are scrubbed and bounded; only the one that reaches
+# error() is escaped.
+# Usage: kubehz::space_api_reason <what> <fallback>
+kubehz::space_api_reason() {
+  local what="${1}" fallback="${2}" reason help
+  reason=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || reason=""
+  [[ -z "${reason}" ]] || reason=$(kubehz::space_safe_string "${reason}")
+  [[ -n "${reason}" ]] || reason="${fallback}"
+  error "${what}: ${reason}"
+  help=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
+  [[ -z "${help}" ]] || help=$(kubehz::space_bound_string "${help}")
+  [[ -z "${help}" ]] || echo "  ${help}" >&2
+}
+
+# Name what the spec asked for, then let the api say why that is too much.
+# Usage: kubehz::space_limits_refused <fallback>
+kubehz::space_limits_refused() {
+  kubehz::space_api_reason "kubehz refused the space limits ($(kubehz::space_limits_line))" "${1}"
+}
+
 # Render the message + help halves of a non-2xx envelope — the api's own words
 # are almost always the actionable ones.
 # Usage: kubehz::space_api_error <context>
@@ -88,6 +260,13 @@ kubehz::space_api_error() {
   local msg help
   msg=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
   help=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
+  # Both halves are SERVER strings and this is the FIRST api call lo makes,
+  # so an api that hides \033[2J\033[H in a message would clear the caller's
+  # terminal before anything else is printed. The message reaches error()
+  # (echo -e) and needs the backslash escape; the help reaches a plain echo
+  # and must not be escaped.
+  [[ -z "${msg}" ]] || msg=$(kubehz::space_safe_string "${msg}")
+  [[ -z "${help}" ]] || help=$(kubehz::space_bound_string "${help}")
   error "${context} (HTTP ${KUBEHZ_SPACE_API_STATUS})${msg:+: ${msg}}"
   [[ -n "${help}" ]] && echo "  ${help}" >&2
   return 0
@@ -109,6 +288,63 @@ kubehz::space_lookup() {
 
 # ── Provision (create-or-adopt + join tickets) ───────────
 
+# The local next step: a spec that names numbers gets them lowered, a spec
+# that names none gets them set. Telling a reader to decrease values that are
+# not there reads as nonsense.
+# Usage: kubehz::space_limits_verb
+kubehz::space_limits_verb() {
+  if [[ -z "${LOK8S_SPACE_MAX_NODES}${LOK8S_SPACE_MAX_NAMESPACES}${LOK8S_SPACE_MAX_OBJECT_KIB}" ]]; then
+    echo "Set"
+  else
+    echo "Decrease"
+  fi
+}
+
+# Render the numbers the SPEC names, in a fixed order. A number the spec
+# leaves out is not shown, because it was never sent.
+# Usage: kubehz::space_limits_line
+kubehz::space_limits_line() {
+  local parts=() out="" p
+  [[ -z "${LOK8S_SPACE_MAX_NODES}" ]] || parts+=("nodes ${LOK8S_SPACE_MAX_NODES}")
+  [[ -z "${LOK8S_SPACE_MAX_NAMESPACES}" ]] || parts+=("namespaces ${LOK8S_SPACE_MAX_NAMESPACES}")
+  [[ -z "${LOK8S_SPACE_MAX_OBJECT_KIB}" ]] || parts+=("object cap ${LOK8S_SPACE_MAX_OBJECT_KIB} KiB")
+  if (( ${#parts[@]} == 0 )); then
+    echo "the spec sets none"
+    return 0
+  fi
+  for p in "${parts[@]}"; do
+    [[ -n "${out}" ]] && out="${out}, ${p}" || out="${p}"
+  done
+  echo "${out}"
+}
+
+# Report a space whose limits differ from the spec. Adoption stays read-only:
+# lo creates a space with the three numbers, and never changes the numbers of a
+# space that exists. Without this note the edit in the spec would do nothing
+# and say nothing.
+# Usage: kubehz::space_note_limits_drift
+kubehz::space_note_limits_drift() {
+  # Only a number the SPEC names can drift. A field the spec leaves out was
+  # never sent, so whatever the space holds for it is the api's own value and
+  # is not a disagreement.
+  local drift=0 entry key want live
+  for entry in "maxNodes ${LOK8S_SPACE_MAX_NODES}" \
+    "maxNamespaces ${LOK8S_SPACE_MAX_NAMESPACES}" \
+    "maxObjectKiB ${LOK8S_SPACE_MAX_OBJECT_KIB}"; do
+    key="${entry%% *}"
+    want="${entry#* }"
+    [[ -n "${want}" ]] || continue
+    live=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r --arg k "${key}" '.[$k] // "" | tostring' 2>/dev/null) || return 0
+    # An api that does not report the number gives nothing to compare.
+    [[ -n "${live}" ]] || return 0
+    [[ "${live}" == "${want}" ]] || drift=1
+  done
+  (( drift )) || return 0
+  echo "  Note: this space keeps the limits it was created with."
+  echo "  The spec asks for $(kubehz::space_limits_line)."
+  echo "  lo does not change them. Change the limits in the kubehz dashboard."
+}
+
 # Create the Space, or adopt it when it already exists (idempotent
 # re-provision — the same contract every lo driver honors).
 # Result in KUBEHZ_SPACE_ID.
@@ -122,17 +358,29 @@ kubehz::space_ensure() {
     debug "Space '${LOK8S_SPACE_SLUG}' already exists — adopting"
     KUBEHZ_SPACE_ID=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
     [[ -n "${KUBEHZ_SPACE_ID}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
+    kubehz::space_note_limits_drift
     return 0
   fi
 
+  # A number the spec does not name is LEFT OUT of the body. Sending a
+  # locally chosen default would make this CLI the author of a policy that
+  # belongs to the platform, and would pin a value the account may later have
+  # more of. The api's schema makes all three optional and applies its own
+  # default to whatever is absent. `-c` and the key order match the Go twin's
+  # compactJSON, so both trees put the SAME bytes on the wire (this tree used
+  # to send the pretty form).
   local payload
-  payload=$(jq -n \
+  payload=$(jq -nc \
     --arg name "${LOK8S_SPACE_NAME}" \
     --arg slug "${LOK8S_SPACE_SLUG}" \
-    --arg plan "${LOK8S_SPACE_PLAN}" \
+    --arg maxNodes "${LOK8S_SPACE_MAX_NODES}" \
+    --arg maxNamespaces "${LOK8S_SPACE_MAX_NAMESPACES}" \
+    --arg maxObjectKiB "${LOK8S_SPACE_MAX_OBJECT_KIB}" \
     --arg region "${LOK8S_SPACE_REGION}" \
     '{name: $name, slug: $slug}
-      + (if $plan   != "" then {planId: $plan}   else {} end)
+      + (if $maxNodes != "" then {maxNodes: ($maxNodes | tonumber)} else {} end)
+      + (if $maxNamespaces != "" then {maxNamespaces: ($maxNamespaces | tonumber)} else {} end)
+      + (if $maxObjectKiB != "" then {maxObjectKiB: ($maxObjectKiB | tonumber)} else {} end)
       + (if $region != "" then {region: $region} else {} end)')
 
   local rc=0
@@ -148,6 +396,26 @@ kubehz::space_ensure() {
         echo "  Capacity frees as spaces are removed and as new planes come online. You can:" >&2
         echo "    • retry later" >&2
         echo "    • run your own cluster meanwhile (spec.kubehz.hosting: self)" >&2
+        return 1 ;;
+      # The three space-limit codes all render the api's own words. The
+      # account's ceiling differs per account and extra resources are bought,
+      # so the platform holds the only true numbers; lo adds what the spec
+      # asked for and the local next step.
+      SPACE_LIMITS_ABOVE_FREE)
+        kubehz::space_limits_refused "they are above what this account allows"
+        echo "  $(kubehz::space_limits_verb) the values in spec.kubehz.space.limits, or raise the ceiling" >&2
+        echo "  of the account in the kubehz dashboard." >&2
+        return 1 ;;
+      SPACE_LIMITS_ABOVE_SHARED)
+        kubehz::space_limits_refused "they are above what this account may set on a shared control plane"
+        echo "  $(kubehz::space_limits_verb) the values in spec.kubehz.space.limits, or use a hosted control" >&2
+        echo "  plane: set spec.kubehz.hosting to hosted." >&2
+        return 1 ;;
+      SPACE_PLAN_RETIRED)
+        kubehz::space_api_reason "kubehz refused the request" "space plans are retired"
+        echo "  A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB." >&2
+        echo "  Remove spec.kubehz.space.plan from the cluster spec. Then run" >&2
+        echo "  lo provision again." >&2
         return 1 ;;
       *)
         # Lost a create race? The adopt path answers it — retry the lookup once.
@@ -320,14 +588,16 @@ kubehz::space_status() {
     return 0
   fi
 
-  local space_id phase plan
+  local space_id phase max_nodes max_namespaces max_object
   space_id=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.id // empty')
   [[ -n "${space_id}" ]] || { error "space row carries no id — refusing to continue"; return 1; }
   phase=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.status // "Unknown"')
-  plan=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.planId // "-"')
+  max_nodes=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxNodes // "-"')
+  max_namespaces=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxNamespaces // "-"')
+  max_object=$(echo "${KUBEHZ_SPACE_ROW}" | jq -r '.maxObjectKiB // "-"')
   echo "Space:   ${LOK8S_SPACE_SLUG} (id: ${space_id})"
   echo "Phase:   ${phase}"
-  echo "Plan:    ${plan}"
+  echo "Limits:  nodes ${max_nodes}, namespaces ${max_namespaces}, object cap ${max_object} KiB"
 
   kubehz::space_api GET "/api/spaces/${space_id}/nodes" 2>/dev/null || {
     echo "Nodes:   unknown (API unreachable)"

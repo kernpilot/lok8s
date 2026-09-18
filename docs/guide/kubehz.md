@@ -163,16 +163,37 @@ spec:
       nodes:              # optional — one join ticket minted per name
         - worker-1
         - worker-2
+      limits:             # optional — omit a number to take the platform's
+        nodes: 2          # the node ceiling
+        namespaces: 1     # the namespace ceiling
+        objectCapKiB: 256 # KiB per Secret/ConfigMap
 ```
 
+A space is three numbers, and they live under `space.limits`. `nodes` is how
+many machines the space takes, `namespaces` is how many namespaces it holds,
+and `objectCapKiB` is the size cap for one Secret or ConfigMap in those
+namespaces. There is no plan to pick.
+
+**The ceiling on each number belongs to your account, not to `lo`.** It
+differs per account, and extra resources are bought, so the platform is the
+only place that knows it. `lo` checks that a value is a whole number of 1 or
+more and sends it; the platform answers with your account's real ceiling if
+you asked for more. A number you leave out is not sent at all, and the
+platform applies its own default. Your current ceiling is in the kubehz
+dashboard.
+
+`space.limits.nodes` is a count; `space.nodes` is the list of machine names to
+mint a ticket for. They are different fields, and a list under
+`space.limits.nodes` is refused with both names.
+
 `lo provision` creates the space (or adopts it, if it already exists) and
-mints a single-use join ticket for every node listed under
+mints a single-use join ticket for every machine listed under
 `space.nodes`. `lo destroy` removes the space.
 
 ```bash
 lo provision                  # create/adopt the space + mint join tickets
 lo kubehz join worker-3       # mint another ticket, any time
-lo kubehz status              # space phase, plan, and the registered nodes
+lo kubehz status              # space phase, the three numbers, the nodes
 lo kubehz deregister          # remove the space
 ```
 
@@ -191,6 +212,10 @@ A few things worth knowing before you reach for it:
   the ticket; `lo kubehz join <node> --print-token` shows it when you need it
   in the open. Older platforms without the script print the ticket and a
   pointer to the node-join guide instead.
+- **The three numbers apply when the space is created.** A later
+  `lo provision` adopts the space and changes nothing on the platform. An
+  edit under `space.limits` therefore gets a note in the output instead of a
+  silent no-op. Change the numbers of a live space in the dashboard.
 - **A join ticket is minted once**, is bound to one node name, and expires
   quickly. Nothing stores the plaintext outside the script: a lost ticket
   gets re-minted, never recovered.
@@ -213,18 +238,31 @@ A few things worth knowing before you reach for it:
 
 ### Limits, and whose problem each one is
 
-A space runs inside two independent budgets, and the error codes keep them
+A space runs inside three independent budgets, and the error codes keep them
 apart deliberately:
 
-- **Your space's plan quota**: nodes and namespaces per space. Exceeding it
-  answers `403 QUOTA_EXCEEDED` and names the limit. Fix: remove something or
-  move to a bigger plan.
+- **Your space's own three numbers**: `limits.nodes`, `limits.namespaces`
+  and `limits.objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and
+  names the limit. Fix: remove something, or raise the limit in the
+  dashboard. The numbers in the spec apply when the space is created, so
+  raising one there does nothing to a space that already exists.
+- **What your account allows**: the ceiling on each of the three numbers,
+  which differs per account and rises with what the account has bought. Ask
+  for more than it allows and the create answers `403
+  SPACE_LIMITS_ABOVE_FREE`; ask for more than a shared plane can hold for any
+  account and it answers `400 SPACE_LIMITS_ABOVE_SHARED`, which means a
+  cluster that large needs a control plane of its own, so use
+  `hosting: hosted`. A request that still carries a plan answers `400
+  SPACE_PLAN_RETIRED`: remove `spec.kubehz.space.plan` and use
+  `spec.kubehz.space.limits`. Each refusal names the account's real ceiling,
+  and `lo` prints that message together with the values it sent. The current
+  ceiling is in the kubehz dashboard.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
   join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
   (a space create with nowhere to land). Both say so explicitly: *"this is a
-  platform capacity limit, not an account limit"*. Upgrading your plan will
-  not change them, and nothing you delete will either.
+  platform capacity limit, not an account limit"*. A larger account does not
+  change them, and nothing you delete will either.
 
 The platform manages its own headroom (it adds shared planes as they fill),
 so the 409s are expected to be rare and transient. Retry later, and if one

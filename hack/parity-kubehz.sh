@@ -11,6 +11,16 @@
 # kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN/HCLOUD_TOKEN
 # are unset and every api-bearing path stops at a local refusal.
 #
+# What this harness CANNOT cover: how the two implementations render a SERVER
+# string (the api's own refusal message — scrubbed, clipped, and in the bash
+# tree escaped for `echo -e`). Every case here is api-free, and
+# spec.kubehz.apiUrl must be HTTPS, so no plain-http stub can answer either
+# implementation. That rendering is pinned instead by a golden PAIR both
+# suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
+# (the hostile input) and space-above-shared.txt (the bytes both must print),
+# asserted by TestProvisionSharedScrubsTheSharedCeilingMessage and by
+# tests/unit/kubehz_shared_test.bats.
+#
 # Known, deliberate divergences (allowed via the per-check regex):
 #   - argsh parse errors exit 2, the Go binary exits 1 (the cli-wide
 #     convention): check_parse tolerates exactly that rc pair.
@@ -44,6 +54,12 @@ mkdir -p "${HOME}"
 
 CL="${PROJ}/clusters"
 parity::new_project "${PROJ}"
+# `kubehz claim-code` reads the agent Secret from the cluster in scope. With
+# the real kubectl on PATH that call reaches whatever cluster the developer's
+# ambient context points at (a live one, on a dev machine) and stalls the
+# harness on its timeout. Stub it: no parity case may touch a cluster.
+parity::own_bin "${PROJ}"
+parity::stub_kubectl_fail "${PROJ}"
 echo "alpha.dev" > "${CL}/.active"
 
 # ── Synthetic domains ────────────────────────────────────────────────────────
@@ -74,6 +90,160 @@ spec:
   kubehz:
     hosting: shared
     apiUrl: https://api.kubehz.example
+EOF
+# space-*.dev — the SHAPE checks lo still makes on the three numbers. The
+# ceiling is the account's and lives on the platform, so lo refuses only what
+# can never be a ceiling: zero, a negative number, and a value that is not a
+# whole number at all.
+mk space-nodes-0.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 0
+EOF
+mk space-nodes-neg.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: -1
+EOF
+mk space-cap-0.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        objectCapKiB: 0
+EOF
+mk space-nodes-float.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 2.5
+EOF
+mk space-nodes-bool.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: true
+EOF
+mk space-ns-map.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        namespaces:
+          a: 1
+EOF
+# The scalar contract is digits only, and it is the FROZEN TREE's: a sign, a
+# padded value and a value past the integer range are refused on both sides,
+# and a leading zero is a decimal (008 is eight, never octal).
+mk space-nodes-plus.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: +5
+EOF
+mk space-nodes-padded.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: " 5 "
+EOF
+mk space-nodes-huge.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 99999999999999999999
+EOF
+mk space-nodes-008.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 008
+EOF
+# space-above-ceiling.dev — numbers the PLATFORM refuses and lo does not.
+# Both implementations must let these through to the api, which answers with
+# the account's real ceiling.
+mk space-above-ceiling.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 6
+        namespaces: 4
+        objectCapKiB: 513
+EOF
+# space-plan.dev — a retired plan; space-limits-list.dev — the machine-name
+# list put under limits.nodes (the two fields confused).
+mk space-plan.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      plan: shared-s
+EOF
+# A plan that yq's `//` reads as absent: still a plan, still refused.
+mk space-plan-false.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      plan: false
+EOF
+mk space-limits-list.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: [worker-1, worker-2]
 EOF
 # hosted-http.dev — hosted with a plain-http apiUrl: the https gate.
 mk hosted-http.dev <<'EOF'
@@ -178,6 +348,20 @@ check - kubehz status --domain alpha.dev
 check - kubehz status --domain nonexist.dev
 check "${PARSEERR}" kubehz status --domain broken.dev
 
+# ── the three numbers: the shapes lo refuses, and the one it passes on ─────
+check - kubehz status --domain space-nodes-0.dev
+check - kubehz status --domain space-nodes-neg.dev
+check - kubehz status --domain space-cap-0.dev
+check - kubehz status --domain space-nodes-float.dev
+check - kubehz status --domain space-nodes-bool.dev
+check - kubehz status --domain space-ns-map.dev
+check - kubehz status --domain space-nodes-plus.dev
+check - kubehz status --domain space-nodes-padded.dev
+check - kubehz status --domain space-nodes-huge.dev
+check - kubehz status --domain space-plan.dev
+check - kubehz status --domain space-plan-false.dev
+check - kubehz status --domain space-limits-list.dev
+
 # ── register / deregister: config validation refusals ───────────────────────
 check "${UNBOUND}" kubehz register
 check "${UNBOUND}" kubehz r
@@ -197,6 +381,11 @@ check - kubehz deregister --domain nonexist.dev
 # ── deploy / re-enroll / assess: routing without a cluster ──────────────────
 check - kubehz deploy
 check - kubehz deploy --domain shared.dev
+# Numbers the PLATFORM refuses and lo does not: validate_config reads them,
+# accepts them, and deploy stops on the hosting rule. `status` cannot carry
+# this case, because nothing local stops it and it would reach the api.
+check - kubehz deploy --domain space-above-ceiling.dev
+check - kubehz deploy --domain space-nodes-008.dev
 check - kubehz deploy --domain hosted-http.dev
 check - kubehz deploy --domain bad-agent.dev
 check - kubehz deploy --domain operator-none.dev
