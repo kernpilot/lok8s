@@ -455,6 +455,9 @@ curl_space_refusal() {
   assert_failure
   assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the free allowance"
   assert_output --partial "A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap."
+  # The ceiling keys on a payment method, so that is the next action.
+  assert_output --partial "Add a payment method to the account to raise them."
+  assert_output --partial "To keep the free allowance, decrease the values in spec.kubehz.space.limits."
 }
 
 # The shared ceiling moves with the account, so the api's message carries the

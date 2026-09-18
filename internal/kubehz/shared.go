@@ -242,11 +242,13 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 		case "SPACE_LIMITS_ABOVE_FREE":
 			// All three numbers on both sides: what the spec asks for, and
 			// what a free account allows. Two of the three left the reader
-			// guessing which number was too large.
+			// guessing which number was too large. The ceiling keys on a
+			// payment method, not on an account mode, so the next action is
+			// to add one, never to "upgrade".
 			c.errorf("kubehz refused the space limits (%s): they are above the free allowance", sp.limitsLine())
 			c.echoErr("  A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap.")
-			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or upgrade the account in")
-			c.echoErr("  the kubehz dashboard.")
+			c.echoErr("  Add a payment method to the account to raise them.")
+			c.echoErr("  To keep the free allowance, decrease the values in spec.kubehz.space.limits.")
 			return "", ErrHandled
 		case "SPACE_LIMITS_ABOVE_SHARED":
 			// The ceiling moves with the account, so the api's own message

@@ -567,7 +567,9 @@ func TestProvisionSharedLimitRefusals(t *testing.T) {
 		{"free", 403, "SPACE_LIMITS_ABOVE_FREE", "refused", []string{
 			"kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the free allowance",
 			"A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap.",
-			"or upgrade the account in",
+			// The ceiling keys on a payment method, so that is the next action.
+			"Add a payment method to the account to raise them.",
+			"To keep the free allowance, decrease the values in spec.kubehz.space.limits.",
 		}},
 		// The shared ceiling moves with the account, so the api's message is
 		// the one that carries the real numbers.

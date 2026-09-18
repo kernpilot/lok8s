@@ -241,12 +241,13 @@ apart deliberately:
   dashboard. The numbers in the spec apply when the space is created, so
   raising one there does nothing to a space that already exists.
 - **What your account allows**: a free account gets 1 space with 2 nodes, the
-  first namespace and a 256 KiB object cap. Above that, the create answers
-  `403 SPACE_LIMITS_ABOVE_FREE`. A paid account reaches the maximum of a
-  shared plane: 5 nodes, 3 namespaces, a 512 KiB object cap. Above *that*,
-  the answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that large needs a
-  control plane of its own, so use `hosting: hosted`. A request that still
-  carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
+  first namespace and a 256 KiB object cap, and keeps that allowance until a
+  payment method is on the account. Above that, the create answers
+  `403 SPACE_LIMITS_ABOVE_FREE`. An account with a payment method reaches the
+  maximum of a shared plane: 5 nodes, 3 namespaces, a 512 KiB object cap.
+  Above *that*, the answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that
+  large needs a control plane of its own, so use `hosting: hosted`. A request
+  that still carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
   `spec.kubehz.space.plan` and use `spec.kubehz.space.limits`. `lo` turns
   each of these into the values it sent and the next step.
 - **The platform's capacity**: how much a shared control plane can carry.
