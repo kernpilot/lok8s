@@ -91,8 +91,10 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
 EOF
-# space-*.dev — one refused space number each (a Space is three numbers, and
-# every one of them has a range lo checks before the api sees it).
+# space-*.dev — the SHAPE checks lo still makes on the three numbers. The
+# ceiling is the account's and lives on the platform, so lo refuses only what
+# can never be a ceiling: zero, a negative number, and a value that is not a
+# whole number at all.
 mk space-nodes-0.dev <<'EOF'
 kind: Kubehz
 spec:
@@ -103,7 +105,7 @@ spec:
       limits:
         nodes: 0
 EOF
-mk space-nodes-6.dev <<'EOF'
+mk space-nodes-neg.dev <<'EOF'
 kind: Kubehz
 spec:
   kubehz:
@@ -111,9 +113,9 @@ spec:
     apiUrl: https://api.kubehz.example
     space:
       limits:
-        nodes: 6
+        nodes: -1
 EOF
-mk space-ns-4.dev <<'EOF'
+mk space-cap-0.dev <<'EOF'
 kind: Kubehz
 spec:
   kubehz:
@@ -121,30 +123,8 @@ spec:
     apiUrl: https://api.kubehz.example
     space:
       limits:
-        namespaces: 4
+        objectCapKiB: 0
 EOF
-mk space-cap-63.dev <<'EOF'
-kind: Kubehz
-spec:
-  kubehz:
-    hosting: shared
-    apiUrl: https://api.kubehz.example
-    space:
-      limits:
-        objectCapKiB: 63
-EOF
-mk space-cap-513.dev <<'EOF'
-kind: Kubehz
-spec:
-  kubehz:
-    hosting: shared
-    apiUrl: https://api.kubehz.example
-    space:
-      limits:
-        objectCapKiB: 513
-EOF
-# A limit that is not a whole number: a fraction and a boolean are scalars, so
-# both refusals must name the value the spec carries.
 mk space-nodes-float.dev <<'EOF'
 kind: Kubehz
 spec:
@@ -164,6 +144,32 @@ spec:
     space:
       limits:
         nodes: true
+EOF
+mk space-ns-map.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        namespaces:
+          a: 1
+EOF
+# space-above-ceiling.dev — numbers the PLATFORM refuses and lo does not.
+# Both implementations must let these through to the api, which answers with
+# the account's real ceiling.
+mk space-above-ceiling.dev <<'EOF'
+kind: Kubehz
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://api.kubehz.example
+    space:
+      limits:
+        nodes: 6
+        namespaces: 4
+        objectCapKiB: 513
 EOF
 # space-plan.dev — a retired plan; space-limits-list.dev — the machine-name
 # list put under limits.nodes (the two fields confused).
@@ -289,14 +295,13 @@ check - kubehz status --domain alpha.dev
 check - kubehz status --domain nonexist.dev
 check "${PARSEERR}" kubehz status --domain broken.dev
 
-# ── the three numbers of a space: every bound, refused locally ──────────────
+# ── the three numbers: the shapes lo refuses, and the one it passes on ─────
 check - kubehz status --domain space-nodes-0.dev
-check - kubehz status --domain space-nodes-6.dev
-check - kubehz status --domain space-ns-4.dev
-check - kubehz status --domain space-cap-63.dev
-check - kubehz status --domain space-cap-513.dev
+check - kubehz status --domain space-nodes-neg.dev
+check - kubehz status --domain space-cap-0.dev
 check - kubehz status --domain space-nodes-float.dev
 check - kubehz status --domain space-nodes-bool.dev
+check - kubehz status --domain space-ns-map.dev
 check - kubehz status --domain space-plan.dev
 check - kubehz status --domain space-limits-list.dev
 
@@ -319,6 +324,10 @@ check - kubehz deregister --domain nonexist.dev
 # ── deploy / re-enroll / assess: routing without a cluster ──────────────────
 check - kubehz deploy
 check - kubehz deploy --domain shared.dev
+# Numbers the PLATFORM refuses and lo does not: validate_config reads them,
+# accepts them, and deploy stops on the hosting rule. `status` cannot carry
+# this case, because nothing local stops it and it would reach the api.
+check - kubehz deploy --domain space-above-ceiling.dev
 check - kubehz deploy --domain hosted-http.dev
 check - kubehz deploy --domain bad-agent.dev
 check - kubehz deploy --domain operator-none.dev

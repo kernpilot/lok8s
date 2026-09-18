@@ -164,9 +164,10 @@ yq_space_field() {
   [ "${LOK8S_SPACE_SLUG}" = "acme" ]
   [ "${LOK8S_SPACE_NAME}" = "acme" ]
   [ "${#LOK8S_SPACE_NODES[@]}" -eq 0 ]
-  [ "${LOK8S_SPACE_MAX_NODES}" -eq 2 ]
-  [ "${LOK8S_SPACE_MAX_NAMESPACES}" -eq 1 ]
-  [ "${LOK8S_SPACE_MAX_OBJECT_KIB}" -eq 256 ]
+  # No limits block: no number is set, so none is sent.
+  [ -z "${LOK8S_SPACE_MAX_NODES}" ]
+  [ -z "${LOK8S_SPACE_MAX_NAMESPACES}" ]
+  [ -z "${LOK8S_SPACE_MAX_OBJECT_KIB}" ]
 }
 
 # ── space_limits: the three numbers and their bounds ─────
@@ -181,20 +182,30 @@ yq_space_field() {
   [ "${LOK8S_SPACE_MAX_OBJECT_KIB}" -eq 128 ]
 }
 
-@test "space_limits: refuses a node count out of range" {
-  yq_space_field nodes '!!int' 6
-
-  run kubehz::space_limits "/dev/null"
-  assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 6 (expected a whole number from 1 to 5)"
-}
-
+# Only the SHAPE is local: a whole number, 1 or more. Zero and a negative
+# number can never be a ceiling, so they die here.
 @test "space_limits: refuses zero nodes" {
   yq_space_field nodes '!!int' 0
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 0"
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 0 (expected a whole number of 1 or more)"
+}
+
+@test "space_limits: refuses a negative node count" {
+  yq_space_field nodes '!!int' -1
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: -1 (expected a whole number of 1 or more)"
+}
+
+@test "space_limits: refuses a zero object cap" {
+  yq_space_field objectCapKiB '!!int' 0
+
+  run kubehz::space_limits "/dev/null"
+  assert_failure
+  assert_output --partial "invalid spec.kubehz.space.limits.objectCapKiB: 0 (expected a whole number of 1 or more)"
 }
 
 # A fraction and a boolean are scalars: the refusal names the value the spec
@@ -205,7 +216,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 2.5 (expected a whole number from 1 to 5)"
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: 2.5 (expected a whole number of 1 or more)"
 }
 
 @test "space_limits: names the value of a boolean" {
@@ -213,7 +224,7 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.nodes: true (expected a whole number from 1 to 5)"
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: true (expected a whole number of 1 or more)"
 }
 
 @test "space_limits: a map under a limit has no value to name" {
@@ -221,31 +232,44 @@ yq_space_field() {
 
   run kubehz::space_limits "/dev/null"
   assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.nodes: expected a whole number from 1 to 5"
+  assert_output --partial "invalid spec.kubehz.space.limits.nodes: expected a whole number of 1 or more"
 }
 
-@test "space_limits: refuses a namespace count out of range" {
+# There is NO local upper bound any more. What an account may ask for differs
+# per account and extra resources are bought, so a number the platform will
+# refuse still leaves this CLI: the api answers with the account's real
+# ceiling. All three were refused locally before.
+@test "space_limits: accepts a node count the platform will refuse" {
+  yq_space_field nodes '!!int' 6
+
+  run kubehz::space_limits "/dev/null"
+  assert_success
+}
+
+@test "space_limits: accepts a namespace count the platform will refuse" {
   yq_space_field namespaces '!!int' 4
 
   run kubehz::space_limits "/dev/null"
-  assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.namespaces: 4 (expected a whole number from 1 to 3)"
+  assert_success
 }
 
-@test "space_limits: refuses an object cap below 64 KiB" {
-  yq_space_field objectCapKiB '!!int' 63
-
-  run kubehz::space_limits "/dev/null"
-  assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.objectCapKiB: 63 (expected a whole number from 64 to 512)"
-}
-
-@test "space_limits: refuses an object cap above 512 KiB" {
+@test "space_limits: accepts an object cap the platform will refuse" {
   yq_space_field objectCapKiB '!!int' 513
 
   run kubehz::space_limits "/dev/null"
-  assert_failure
-  assert_output --partial "invalid spec.kubehz.space.limits.objectCapKiB: 513"
+  assert_success
+}
+
+# A spec that names no number leaves every one of them EMPTY: lo holds no
+# default of its own, and an empty value is left out of the request.
+@test "space_limits: a spec with no limits block sets no number" {
+  yq_space_defaults
+
+  kubehz::space_limits "/dev/null"
+
+  [ -z "${LOK8S_SPACE_MAX_NODES}" ]
+  [ -z "${LOK8S_SPACE_MAX_NAMESPACES}" ]
+  [ -z "${LOK8S_SPACE_MAX_OBJECT_KIB}" ]
 }
 
 @test "space_limits: refuses a retired plan" {
@@ -270,6 +294,7 @@ yq_space_field() {
   run kubehz::space_limits "/dev/null"
   assert_failure
   assert_output --partial "spec.kubehz.space.limits.nodes is a list: it is the node ceiling"
+  assert_output --partial "Set spec.kubehz.space.limits.nodes to a whole number of 1 or more."
   assert_output --partial "The machine names stay under spec.kubehz.space.nodes."
 }
 
@@ -320,8 +345,8 @@ yq_space_field() {
   [ "$(grep -c "a1b2c3.d4e5f6g7h8i9j0k1" <<<"${output}")" -eq 2 ]
 }
 
-@test "space_ensure: the create body carries the three numbers" {
-  yq_space_spec
+# A curl mock that saves the create body to ${CURL_BODY}.
+curl_capture_create() {
   CURL_BODY="${BATS_TEST_TMPDIR}/body"
   export CURL_BODY
   curl() {
@@ -345,12 +370,55 @@ yq_space_field() {
     esac
   }
   export -f curl
+}
+
+@test "space_ensure: the create body carries the three numbers" {
+  yq_space_spec
+  curl_capture_create
 
   kubehz::space_config "acme.example.org" "/dev/null"
   run kubehz::space_ensure "acme.example.org" "/dev/null"
   assert_success
-  run jq -c '[.maxNodes, .maxNamespaces, .maxObjectKiB]' "${CURL_BODY}"
-  assert_output '[3,2,128]'
+  # Byte for byte what the Go twin sends (TestProvisionSharedCreatesWaitsMints).
+  run cat "${CURL_BODY}"
+  assert_output '{"name":"Acme Prod","slug":"acme","maxNodes":3,"maxNamespaces":2,"maxObjectKiB":128}'
+}
+
+# A limit the spec does not name is LEFT OUT of the create body. lo holds no
+# default of its own, so the api applies the platform's — and a value the
+# account may later have more of is never pinned by this CLI. The Go twin
+# sends the same bytes (TestProvisionSharedOmitsTheLimitsTheSpecLeavesOut).
+@test "space_ensure: a limit the spec leaves out is not in the create body" {
+  yq() {
+    case "$2" in
+      '.spec.kubehz.space.slug // ""')   echo "acme" ;;
+      '.spec.kubehz.space.name // ""')   echo "Acme Prod" ;;
+      '.spec.kubehz.space.limits.namespaces | type') echo '!!int' ;;
+      '.spec.kubehz.space.limits.namespaces')        echo "2" ;;
+      '.spec.kubehz.space.nodes[]?') : ;;
+      *'| type') echo '!!null' ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  curl_capture_create
+
+  kubehz::space_config "acme.example.org" "/dev/null"
+  run kubehz::space_ensure "acme.example.org" "/dev/null"
+  assert_success
+  run cat "${CURL_BODY}"
+  assert_output '{"name":"Acme Prod","slug":"acme","maxNamespaces":2}'
+}
+
+@test "space_ensure: a spec with no limits block sends none of the three" {
+  yq_space_defaults
+  curl_capture_create
+
+  kubehz::space_config "acme.example.org" "/dev/null"
+  run kubehz::space_ensure "acme.example.org" "/dev/null"
+  assert_success
+  run cat "${CURL_BODY}"
+  assert_output '{"name":"acme","slug":"acme"}'
 }
 
 @test "provision_shared: adopts an existing space instead of re-creating" {
@@ -418,10 +486,10 @@ yq_space_field() {
 # One curl mock for the limit refusals: the create answers the code, the
 # status and the message the caller names. jq builds the body, so a message
 # may carry quotes, backslashes, control characters and newlines.
-# Usage: curl_space_refusal <code> <status> [message]
+# Usage: curl_space_refusal <code> <status> [message] [help]
 curl_space_refusal() {
-  _REFUSE_BODY=$(jq -nc --arg c "$1" --arg m "${3:-}" \
-    '{ok: false, data: {code: $c, message: $m}}')
+  _REFUSE_BODY=$(jq -nc --arg c "$1" --arg m "${3:-}" --arg h "${4:-}" \
+    '{ok: false, data: {code: $c, message: $m, help: $h}}')
   export _REFUSE_BODY _REFUSE_STATUS="$2"
   curl() {
     local method="GET" url=""
@@ -445,53 +513,92 @@ curl_space_refusal() {
   export -f curl
 }
 
-# The free ceiling is three numbers, so the refusal names three on each side:
-# what the spec asks for, and what a free account allows.
-@test "provision_shared: the free refusal names all three numbers" {
+# The ACCOUNT's ceiling differs per account and extra resources are bought, so
+# the api's own message is the only place the real numbers exist. lo prints it,
+# adds the values it sent, and names the next step.
+@test "provision_shared: the free refusal prints the api message and help" {
   yq_space_spec
-  curl_space_refusal SPACE_LIMITS_ABOVE_FREE 403 refused
+  curl_space_refusal SPACE_LIMITS_ABOVE_FREE 403 \
+    "A free account allows 2 nodes, 1 namespace and an object cap of 256 KiB for one space: maxNodes is 3, the limit is 2" \
+    "Add a payment method to the account, or lower the values."
 
   run kubehz::provision_shared "acme.example.org" "/dev/null"
   assert_failure
-  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the free allowance"
-  assert_output --partial "A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap."
-  # The ceiling keys on a payment method, so that is the next action.
-  assert_output --partial "Add a payment method to the account to raise them."
-  assert_output --partial "To keep the free allowance, decrease the values in spec.kubehz.space.limits."
+  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): A free account allows 2 nodes, 1 namespace and an object cap of 256 KiB for one space: maxNodes is 3, the limit is 2"
+  assert_output --partial "  Add a payment method to the account, or lower the values."
+  assert_output --partial "Decrease the values in spec.kubehz.space.limits, or raise the ceiling"
+  assert_output --partial "of the account in the kubehz dashboard."
 }
 
-# The shared ceiling moves with the account, so the api's message carries the
-# real numbers and lo prints it instead of a fixed maximum.
 @test "provision_shared: the shared refusal prints the api message" {
   yq_space_spec
   curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 \
-    "This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5"
+    "This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5" \
+    "Lower the values, or create a hosted control plane for a larger cluster."
 
   run kubehz::provision_shared "acme.example.org" "/dev/null"
   assert_failure
   assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): This account allows 5 nodes, 3 namespaces and an object cap of 512 KiB for one space: maxNodes is 9, the limit is 5"
+  assert_output --partial "  Lower the values, or create a hosted control plane for a larger cluster."
   assert_output --partial "plane: set spec.kubehz.hosting to hosted."
+}
+
+# An api that sends the code alone still gets a usable line. The fallback
+# states NO number: lo does not know the account's ceiling.
+@test "provision_shared: the free refusal falls back without an api message" {
+  yq_space_spec
+  curl_space_refusal SPACE_LIMITS_ABOVE_FREE 403 "" ""
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above what this account allows"
+  assert_output --partial "of the account in the kubehz dashboard."
 }
 
 @test "provision_shared: the shared refusal falls back without an api message" {
   yq_space_spec
-  curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 ""
+  curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 "" ""
 
   run kubehz::provision_shared "acme.example.org" "/dev/null"
   assert_failure
-  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above the maximum of a shared control plane"
+  assert_output --partial "kubehz refused the space limits (nodes 3, namespaces 2, object cap 128 KiB): they are above what this account may set on a shared control plane"
   assert_output --partial "plane: set spec.kubehz.hosting to hosted."
 }
 
-# A refusal message is a SERVER string. The api could hide an escape sequence
-# in it and redraw this terminal, so both implementations scrub it, clip it to
-# 256 characters and (here only, because error() prints through `echo -e`)
-# escape the backslashes last.
+@test "provision_shared: the retired-plan refusal prints the api message" {
+  yq_space_spec
+  curl_space_refusal SPACE_PLAN_RETIRED 400 \
+    "Space plans are retired. The request sends planId, which the platform no longer accepts." \
+    "Send maxNodes, maxNamespaces and maxObjectKiB instead."
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  assert_output --partial "kubehz refused the request: Space plans are retired. The request sends planId, which the platform no longer accepts."
+  assert_output --partial "  Send maxNodes, maxNamespaces and maxObjectKiB instead."
+  assert_output --partial "A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB."
+}
+
+# A spec that names no number still gets a readable refusal.
+@test "provision_shared: the refusal says so when the spec sets no number" {
+  yq_space_defaults
+  curl_space_refusal SPACE_LIMITS_ABOVE_FREE 403 "" ""
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_failure
+  assert_output --partial "kubehz refused the space limits (the spec sets none): they are above what this account allows"
+}
+
+# A refusal message and its help are SERVER strings. The api could hide an
+# escape sequence in either and redraw this terminal, so both implementations
+# scrub them and clip them to 256 characters. The message additionally gets
+# the backslash escape error() needs, because error() prints through
+# `echo -e`; the help does NOT, because a plain echo would then double every
+# backslash on screen.
 #
-# The fixture and the expected bytes are the GOLDEN PAIR the Go twin owns
+# The fixtures and the expected bytes are the GOLDEN SET the Go twin owns
 # (internal/kubehz/testdata/golden/, written by `go test ./internal/kubehz/
 # -run TestProvisionSharedScrubsTheSharedCeilingMessage -update`). Both
-# implementations are fed the same message and asserted against the same
+# implementations are fed the same strings and asserted against the same
 # bytes, so a drift on either side turns one of the two suites red. The parity
 # harness cannot carry this case: spec.kubehz.apiUrl must be HTTPS, so no
 # plain-http stub can answer either implementation.
@@ -499,17 +606,20 @@ curl_space_refusal() {
   local golden_dir="${_PROJECT_ROOT}/internal/kubehz/testdata/golden"
   yq_space_spec
   curl_space_refusal SPACE_LIMITS_ABOVE_SHARED 400 \
-    "$(cat "${golden_dir}/space-above-shared-message.txt")"
+    "$(cat "${golden_dir}/space-above-shared-message.txt")" \
+    "$(cat "${golden_dir}/space-above-shared-help.txt")"
 
   run kubehz::provision_shared "acme.example.org" "/dev/null"
   assert_failure
-  # Byte for byte what the Go twin renders from the same message.
+  # Byte for byte what the Go twin renders from the same two strings.
   assert_output "$(cat "${golden_dir}/space-above-shared.txt")"
-  # No control character reaches the terminal, and the six characters the api
-  # sent stay six characters.
+  # No control character reaches the terminal.
   refute_output --partial "$(printf '\033')"
   refute_output --partial "$(printf '\007')"
+  # The characters the api sent stay exactly as many characters, on BOTH
+  # print paths.
   assert_output --partial 'literal:\033[2J'
+  assert_output --partial 'literal:\t and \\ stay'
 }
 
 @test "provision_shared: a lost create race adopts via re-lookup" {

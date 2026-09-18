@@ -41,9 +41,9 @@ spec:
       name: Acme Prod                     # display name; defaults to the slug
       nodes: [worker-1]                   # join tickets minted for these names on provision
       limits:                             # the three numbers a space is (whole block optional)
-        nodes: 2                          # node ceiling, 1 to 5 (default 2)
-        namespaces: 1                     # namespace ceiling, 1 to 3 (default 1)
-        objectCapKiB: 256                 # size cap per Secret/ConfigMap, 64 to 512 (default 256)
+        nodes: 2                          # node ceiling; omit to take the platform's
+        namespaces: 1                     # namespace ceiling; omit to take the platform's
+        objectCapKiB: 256                 # size cap per Secret/ConfigMap; omit to take the platform's
     upgrades:                             # platform-driven upgrade policy (optional)
       channel: none | patch | minor       # how far the platform may upgrade unasked (default patch)
       defer: window | immediate           # when an allowed upgrade may start
@@ -87,9 +87,9 @@ spec:
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
 | `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — machine names to mint a single-use join ticket for during `lo provision`. A list of names, not a count: the count is `spec.kubehz.space.limits.nodes` |
-| `spec.kubehz.space.limits.nodes` | no | `2` | `hosting: shared` — the node ceiling of the space, a whole number from 1 to 5. A space has no plan: this and the next two values are the space. A free account gets 1 space with 2 nodes, 1 namespace and 256 KiB per object |
-| `spec.kubehz.space.limits.namespaces` | no | `1` | `hosting: shared` — the namespace ceiling of the space, a whole number from 1 to 3 |
-| `spec.kubehz.space.limits.objectCapKiB` | no | `256` | `hosting: shared` — the size cap for one Secret or ConfigMap in the space's namespaces, a whole number of KiB from 64 to 512 |
+| `spec.kubehz.space.limits.nodes` | no | the platform's | `hosting: shared` — the node ceiling of the space, a whole number of 1 or more. A space has no plan: this and the next two values are the space. The ceiling your account may set is the platform's, and it differs per account: `lo` sends what you write, the api refuses what your account may not have and names its real ceiling. Omit the field and the platform applies its own default. The current ceiling is in the dashboard |
+| `spec.kubehz.space.limits.namespaces` | no | the platform's | `hosting: shared` — the namespace ceiling of the space, a whole number of 1 or more |
+| `spec.kubehz.space.limits.objectCapKiB` | no | the platform's | `hosting: shared` — the size cap for one Secret or ConfigMap in the space's namespaces, a whole number of KiB |
 | `spec.kubehz.upgrades.channel` | no | `patch` | How far the platform may upgrade the cluster unasked: `patch` (patch releases — the default), `minor` (minor releases too), or `none` (no automatic upgrades — **not recommended**: you forgo automatic security patches). Clusters running releases that fall too far behind are upgraded by the platform regardless of channel (end-of-support floor), with notice. See the [kubehz guide](../guide/kubehz.md#upgrades-and-maintenance-windows) |
 | `spec.kubehz.upgrades.defer` | no | `window` | When an allowed upgrade may start: `window` (wait for the next maintenance window) or `immediate` (as soon as it is available) |
 | `spec.kubehz.maintenanceWindow` | no | — | When platform-driven work may run: `enabled`, `daysOfWeek`, `startTime` (`HH:MM`), `durationMinutes`, `timezone` (IANA name), `exclusions` (absolute freezes — a `YYYY-MM-DD` date or `from/to` range). `lo` shape-checks the two `upgrades` enums and the exclusion dates; full semantics are validated where the block is consumed — the platform API for hosted payloads, the managed-tier agent for self-hosted (once upgrade execution ships) |

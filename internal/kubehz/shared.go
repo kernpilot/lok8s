@@ -20,21 +20,18 @@ import (
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
-// The three numbers a space is made of, with the bounds the platform
-// accepts. A space has no plan: the tenant sets the node ceiling, the
-// namespace ceiling and the object cap (the size limit for one Secret or
-// ConfigMap in the space's namespaces), under spec.kubehz.space.limits.
-const (
-	spaceNodesDefault      = 2
-	spaceNodesMin          = 1
-	spaceNodesMax          = 5
-	spaceNamespacesDefault = 1
-	spaceNamespacesMin     = 1
-	spaceNamespacesMax     = 3
-	spaceObjectCapDefault  = 256
-	spaceObjectCapMin      = 64
-	spaceObjectCapMax      = 512
-)
+// The three numbers a space is made of: the node ceiling, the namespace
+// ceiling and the object cap (the size limit for one Secret or ConfigMap in
+// the space's namespaces), under spec.kubehz.space.limits.
+//
+// lo does NOT carry the platform's policy. What an account may ask for
+// differs per account, and extra resources are bought, so the platform is
+// the only place that knows the ceiling. This CLI checks the SHAPE of a
+// value (a whole number, 1 or more) and sends what the spec says; a value
+// above the account's ceiling is the api's refusal to make, and the api's
+// message carries the account's real numbers. A field the spec leaves out
+// is not sent at all, so the api applies its own default.
+const spaceNumberMin = 1
 
 // SpaceConfig is the LOK8S_SPACE_* export set of kubehz::space_config.
 type SpaceConfig struct {
@@ -43,6 +40,9 @@ type SpaceConfig struct {
 	Region string
 	// MaxNodes, MaxNamespaces and MaxObjectKiB are the space's three
 	// numbers (spec.kubehz.space.limits.{nodes,namespaces,objectCapKiB}).
+	// ZERO means the spec names no value: the field is left out of the
+	// create body and the api applies its own default. A real value is
+	// always 1 or more, so zero cannot collide with one.
 	MaxNodes      int
 	MaxNamespaces int
 	MaxObjectKiB  int
@@ -52,9 +52,10 @@ type SpaceConfig struct {
 }
 
 // SpaceConfig ports kubehz::space_config: the slug defaults to the first DNS
-// label of the domain, the display name to the slug, and the three limits to
-// 2 nodes, 1 namespace and a 256 KiB object cap. A yq PARSE failure is an
-// error, never a defaulted slug (destroy would target the WRONG space).
+// label of the domain and the display name to the slug. A limit the spec
+// leaves out stays zero and is not sent, so the api applies its own default.
+// A yq PARSE failure is an error, never a defaulted slug (destroy would
+// target the WRONG space).
 func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) {
 	doc := loadSpec(clusterYAML)
 	if doc.Err != nil {
@@ -91,10 +92,10 @@ func (c *Context) SpaceConfig(domain, clusterYAML string) (*SpaceConfig, error) 
 	return sp, nil
 }
 
-// spaceLimits reads and bounds the three numbers of a space. A value outside
-// its range is refused here, before the api sees it: the message names the
-// field, the value and the range. A spec without the block takes all three
-// defaults.
+// spaceLimits reads the three numbers of a space. Only the SHAPE is checked
+// here: a whole number, 1 or more. There is no upper bound, because the
+// ceiling belongs to the account and lives on the platform. A field the spec
+// leaves out comes back as zero and is not sent.
 func (c *Context) spaceLimits(doc specDoc) (nodes, namespaces, objectCap int, err error) {
 	// Space plans are retired. A spec that still carries one asks for a
 	// shape the platform no longer has, so say so instead of ignoring it.
@@ -104,29 +105,30 @@ func (c *Context) spaceLimits(doc specDoc) (nodes, namespaces, objectCap int, er
 		c.echoErr("  and spec.kubehz.space.limits.objectCapKiB instead.")
 		return 0, 0, 0, ErrHandled
 	}
-	if nodes, err = c.spaceNumber(doc, "nodes", spaceNodesDefault, spaceNodesMin, spaceNodesMax); err != nil {
+	if nodes, err = c.spaceNumber(doc, "nodes"); err != nil {
 		return 0, 0, 0, err
 	}
-	if namespaces, err = c.spaceNumber(doc, "namespaces", spaceNamespacesDefault, spaceNamespacesMin, spaceNamespacesMax); err != nil {
+	if namespaces, err = c.spaceNumber(doc, "namespaces"); err != nil {
 		return 0, 0, 0, err
 	}
-	if objectCap, err = c.spaceNumber(doc, "objectCapKiB", spaceObjectCapDefault, spaceObjectCapMin, spaceObjectCapMax); err != nil {
+	if objectCap, err = c.spaceNumber(doc, "objectCapKiB"); err != nil {
 		return 0, 0, 0, err
 	}
 	return nodes, namespaces, objectCap, nil
 }
 
-// spaceNumber reads one of the three numbers. A missing or null value takes
-// the default. spec.kubehz.space.nodes is the machine-name list, so a list
-// under limits.nodes is the two fields confused: name both.
-func (c *Context) spaceNumber(doc specDoc, field string, def, min, max int) (int, error) {
+// spaceNumber reads one of the three numbers. A missing or null value returns
+// zero: the field is left out of the request and the api applies its own
+// default. spec.kubehz.space.nodes is the machine-name list, so a list under
+// limits.nodes is the two fields confused: name both.
+func (c *Context) spaceNumber(doc specDoc, field string) (int, error) {
 	n := doc.Lookup("spec", "kubehz", "space", "limits", field)
 	if yqsem.IsNull(n) {
-		return def, nil
+		return 0, nil
 	}
 	if n.Kind == yaml.SequenceNode && field == "nodes" {
 		c.errorf("spec.kubehz.space.limits.nodes is a list: it is the node ceiling")
-		c.echoErr("  Set spec.kubehz.space.limits.nodes to a whole number from %d to %d.", spaceNodesMin, spaceNodesMax)
+		c.echoErr("  Set spec.kubehz.space.limits.nodes to a whole number of 1 or more.")
 		c.echoErr("  The machine names stay under spec.kubehz.space.nodes.")
 		return 0, ErrHandled
 	}
@@ -134,12 +136,14 @@ func (c *Context) spaceNumber(doc specDoc, field string, def, min, max int) (int
 	// type is a scalar, so it falls through to the read below and the refusal
 	// names what the spec says (2.5, true, two). The bash twin does the same.
 	if n.Kind != yaml.ScalarNode {
-		c.errorf("invalid spec.kubehz.space.limits.%s: expected a whole number from %d to %d", field, min, max)
+		c.errorf("invalid spec.kubehz.space.limits.%s: expected a whole number of 1 or more", field)
 		return 0, ErrHandled
 	}
+	// No upper bound on purpose: a number the account may not have is the
+	// api's refusal, and its message names the account's real ceiling.
 	value, err := strconv.Atoi(strings.TrimSpace(n.Value))
-	if err != nil || value < min || value > max {
-		c.errorf("invalid spec.kubehz.space.limits.%s: %s (expected a whole number from %d to %d)", field, n.Value, min, max)
+	if err != nil || value < spaceNumberMin {
+		c.errorf("invalid spec.kubehz.space.limits.%s: %s (expected a whole number of 1 or more)", field, n.Value)
 		return 0, ErrHandled
 	}
 	return value, nil
@@ -217,12 +221,23 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 		return id, nil
 	}
 
+	// A number the spec does not name is LEFT OUT of the body. Sending a
+	// locally chosen default would make this CLI the author of a policy that
+	// belongs to the platform, and would pin a value the account may later
+	// have more of. The api's schema makes all three optional and applies
+	// its own default to whatever is absent.
 	pairs := []jsonPair{
 		{"name", sp.Name},
 		{"slug", sp.Slug},
-		{"maxNodes", sp.MaxNodes},
-		{"maxNamespaces", sp.MaxNamespaces},
-		{"maxObjectKiB", sp.MaxObjectKiB},
+	}
+	if sp.MaxNodes > 0 {
+		pairs = append(pairs, jsonPair{"maxNodes", sp.MaxNodes})
+	}
+	if sp.MaxNamespaces > 0 {
+		pairs = append(pairs, jsonPair{"maxNamespaces", sp.MaxNamespaces})
+	}
+	if sp.MaxObjectKiB > 0 {
+		pairs = append(pairs, jsonPair{"maxObjectKiB", sp.MaxObjectKiB})
 	}
 	if sp.Region != "" {
 		pairs = append(pairs, jsonPair{"region", sp.Region})
@@ -239,31 +254,22 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 			c.echoErr("    • retry later")
 			c.echoErr("    • run your own cluster meanwhile (spec.kubehz.hosting: self)")
 			return "", ErrHandled
+		// The three space-limit codes all render the api's own words. The
+		// account's ceiling differs per account and extra resources are
+		// bought, so the platform holds the only true numbers; lo adds what
+		// the spec asked for and the local next step.
 		case "SPACE_LIMITS_ABOVE_FREE":
-			// All three numbers on both sides: what the spec asks for, and
-			// what a free account allows. Two of the three left the reader
-			// guessing which number was too large. The ceiling keys on a
-			// payment method, not on an account mode, so the next action is
-			// to add one, never to "upgrade".
-			c.errorf("kubehz refused the space limits (%s): they are above the free allowance", sp.limitsLine())
-			c.echoErr("  A free account gets 1 space with 2 nodes, 1 namespace and a 256 KiB object cap.")
-			c.echoErr("  Add a payment method to the account to raise them.")
-			c.echoErr("  To keep the free allowance, decrease the values in spec.kubehz.space.limits.")
+			c.spaceLimitsRefused(sp, res, "they are above what this account allows")
+			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or raise the ceiling")
+			c.echoErr("  of the account in the kubehz dashboard.")
 			return "", ErrHandled
 		case "SPACE_LIMITS_ABOVE_SHARED":
-			// The ceiling moves with the account, so the api's own message
-			// carries it. The fixed text is the fallback for an api that
-			// sends the code alone.
-			reason := clip(scrub(apiMessage(res.Body)))
-			if reason == "" {
-				reason = "they are above the maximum of a shared control plane"
-			}
-			c.errorf("kubehz refused the space limits (%s): %s", sp.limitsLine(), reason)
+			c.spaceLimitsRefused(sp, res, "they are above what this account may set on a shared control plane")
 			c.echoErr("  Decrease the values in spec.kubehz.space.limits, or use a hosted control")
 			c.echoErr("  plane: set spec.kubehz.hosting to hosted.")
 			return "", ErrHandled
 		case "SPACE_PLAN_RETIRED":
-			c.errorf("kubehz refused the request: space plans are retired")
+			c.spaceAPIReason("kubehz refused the request", res, "space plans are retired")
 			c.echoErr("  A space uses spec.kubehz.space.limits: nodes, namespaces and objectCapKiB.")
 			c.echoErr("  Remove spec.kubehz.space.plan from the cluster spec. Then run")
 			c.echoErr("  lo provision again.")
@@ -290,11 +296,43 @@ func (c *Context) spaceEnsure(ctx context.Context, cfg *Config, sp *SpaceConfig)
 	return jstr(jalt(nil, jget(v, "data", "id"), jget(v, "id"))), nil
 }
 
-// limitsLine renders the three numbers for one terminal line.
+// spaceAPIReason prints "<what>: <the api's message>", then the api's help.
+// The fallback stands in for an api that sends the code alone, and states no
+// number of its own. Both server strings are scrubbed and bounded.
+func (c *Context) spaceAPIReason(what string, res *httpResult, fallback string) {
+	reason := clip(scrub(apiMessage(res.Body)))
+	if reason == "" {
+		reason = fallback
+	}
+	c.errorf("%s: %s", what, reason)
+	if help := clip(scrub(apiHelp(res.Body))); help != "" {
+		c.echoErr("  %s", help)
+	}
+}
+
+// spaceLimitsRefused names what the spec asked for, then lets the api say why
+// that is too much.
+func (c *Context) spaceLimitsRefused(sp *SpaceConfig, res *httpResult, fallback string) {
+	c.spaceAPIReason("kubehz refused the space limits ("+sp.limitsLine()+")", res, fallback)
+}
+
+// limitsLine renders the numbers the SPEC names, in a fixed order. A number
+// the spec leaves out is not shown, because it was never sent.
 func (sp *SpaceConfig) limitsLine() string {
-	return "nodes " + strconv.Itoa(sp.MaxNodes) +
-		", namespaces " + strconv.Itoa(sp.MaxNamespaces) +
-		", object cap " + strconv.Itoa(sp.MaxObjectKiB) + " KiB"
+	var parts []string
+	if sp.MaxNodes > 0 {
+		parts = append(parts, "nodes "+strconv.Itoa(sp.MaxNodes))
+	}
+	if sp.MaxNamespaces > 0 {
+		parts = append(parts, "namespaces "+strconv.Itoa(sp.MaxNamespaces))
+	}
+	if sp.MaxObjectKiB > 0 {
+		parts = append(parts, "object cap "+strconv.Itoa(sp.MaxObjectKiB)+" KiB")
+	}
+	if len(parts) == 0 {
+		return "the spec sets none"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // noteLimitsDrift reports a space whose limits differ from the spec. Adoption
@@ -302,16 +340,32 @@ func (sp *SpaceConfig) limitsLine() string {
 // changes the numbers of a space that exists. Without this note the edit in
 // the spec would do nothing and say nothing.
 func (c *Context) noteLimitsDrift(row any, sp *SpaceConfig) {
-	liveNodes := jstrOr(row, "", "maxNodes")
-	liveNamespaces := jstrOr(row, "", "maxNamespaces")
-	liveObjectCap := jstrOr(row, "", "maxObjectKiB")
-	// An api that does not report the three numbers gives nothing to compare.
-	if liveNodes == "" || liveNamespaces == "" || liveObjectCap == "" {
-		return
+	// Only a number the SPEC names can drift. A field the spec leaves out
+	// was never sent, so whatever the space holds for it is the api's own
+	// value and is not a disagreement.
+	want := []struct {
+		field string
+		value int
+	}{
+		{"maxNodes", sp.MaxNodes},
+		{"maxNamespaces", sp.MaxNamespaces},
+		{"maxObjectKiB", sp.MaxObjectKiB},
 	}
-	if liveNodes == strconv.Itoa(sp.MaxNodes) &&
-		liveNamespaces == strconv.Itoa(sp.MaxNamespaces) &&
-		liveObjectCap == strconv.Itoa(sp.MaxObjectKiB) {
+	drift := false
+	for _, w := range want {
+		if w.value == 0 {
+			continue
+		}
+		live := jstrOr(row, "", w.field)
+		// An api that does not report the number gives nothing to compare.
+		if live == "" {
+			return
+		}
+		if live != strconv.Itoa(w.value) {
+			drift = true
+		}
+	}
+	if !drift {
 		return
 	}
 	c.echo("  Note: this space keeps the limits it was created with.")

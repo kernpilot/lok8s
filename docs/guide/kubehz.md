@@ -163,18 +163,24 @@ spec:
       nodes:              # optional — one join ticket minted per name
         - worker-1
         - worker-2
-      limits:             # optional — the whole block defaults
-        nodes: 2          # the node ceiling, 1 to 5 (default 2)
-        namespaces: 1     # the namespace ceiling, 1 to 3 (default 1)
-        objectCapKiB: 256 # KiB per Secret/ConfigMap, 64 to 512 (default 256)
+      limits:             # optional — omit a number to take the platform's
+        nodes: 2          # the node ceiling
+        namespaces: 1     # the namespace ceiling
+        objectCapKiB: 256 # KiB per Secret/ConfigMap
 ```
 
 A space is three numbers, and they live under `space.limits`. `nodes` is how
 many machines the space takes, `namespaces` is how many namespaces it holds,
 and `objectCapKiB` is the size cap for one Secret or ConfigMap in those
-namespaces. There is no plan to pick. Leave the block out and you get 2 nodes,
-1 namespace and a 256 KiB object cap. `lo` refuses a value outside its range
-before the platform sees it.
+namespaces. There is no plan to pick.
+
+**The ceiling on each number belongs to your account, not to `lo`.** It
+differs per account, and extra resources are bought, so the platform is the
+only place that knows it. `lo` checks that a value is a whole number of 1 or
+more and sends it; the platform answers with your account's real ceiling if
+you asked for more. A number you leave out is not sent at all, and the
+platform applies its own default. Your current ceiling is in the kubehz
+dashboard.
 
 `space.limits.nodes` is a count; `space.nodes` is the list of machine names to
 mint a ticket for. They are different fields, and a list under
@@ -240,16 +246,17 @@ apart deliberately:
   names the limit. Fix: remove something, or raise the limit in the
   dashboard. The numbers in the spec apply when the space is created, so
   raising one there does nothing to a space that already exists.
-- **What your account allows**: a free account gets 1 space with 2 nodes, the
-  first namespace and a 256 KiB object cap, and keeps that allowance until a
-  payment method is on the account. Above that, the create answers
-  `403 SPACE_LIMITS_ABOVE_FREE`. An account with a payment method reaches the
-  maximum of a shared plane: 5 nodes, 3 namespaces, a 512 KiB object cap.
-  Above *that*, the answer is `400 SPACE_LIMITS_ABOVE_SHARED`: a cluster that
-  large needs a control plane of its own, so use `hosting: hosted`. A request
-  that still carries a plan answers `400 SPACE_PLAN_RETIRED`: remove
-  `spec.kubehz.space.plan` and use `spec.kubehz.space.limits`. `lo` turns
-  each of these into the values it sent and the next step.
+- **What your account allows**: the ceiling on each of the three numbers,
+  which differs per account and rises with what the account has bought. Ask
+  for more than it allows and the create answers `403
+  SPACE_LIMITS_ABOVE_FREE`; ask for more than a shared plane can hold for any
+  account and it answers `400 SPACE_LIMITS_ABOVE_SHARED`, which means a
+  cluster that large needs a control plane of its own, so use
+  `hosting: hosted`. A request that still carries a plan answers `400
+  SPACE_PLAN_RETIRED`: remove `spec.kubehz.space.plan` and use
+  `spec.kubehz.space.limits`. Each refusal names the account's real ceiling,
+  and `lo` prints that message together with the values it sent. The current
+  ceiling is in the kubehz dashboard.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
   join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
