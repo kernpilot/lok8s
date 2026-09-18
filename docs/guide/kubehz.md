@@ -233,7 +233,9 @@ apart deliberately:
 
 - **Your space's own three numbers**: `nodes`, `namespaces` and
   `objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and names the
-  limit. Fix: remove something, or raise the number in the spec.
+  limit. Fix: remove something, or raise the limit in the dashboard. The
+  numbers in the spec apply when the space is created, so raising one there
+  does nothing to a space that already exists.
 - **What your account allows**: a free account gets 1 space with 2 nodes and
   the first namespace. Above that, the create answers `400
   SPACE_LIMITS_ABOVE_FREE`. A paid account reaches the maximum of a shared
