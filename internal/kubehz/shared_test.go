@@ -846,3 +846,48 @@ func TestValidateAcceptsANumberAboveThePlatformCeiling(t *testing.T) {
 	mustOK(t, err, h.output())
 	mustOK(t, h.ctx.Validate(cfg, spec), h.output())
 }
+
+// D30: an Active shared space gets its kubectl kubeconfig from the api,
+// written beside the hosted path's file at 0600, and the echo names the
+// context the file carries.
+func TestProvisionSharedWritesTheKubeconfig(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+	h.handle("POST /api/spaces", 201, `{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Pending"}}`)
+	h.handle("GET /api/spaces/sp-123", 200, `{"ok":true,"data":{"id":"sp-123","status":"Active"}}`)
+	h.handle("GET /api/spaces/sp-123/kubeconfig", 200, "apiVersion: v1\nkind: Config\ncurrent-context: kubehz-acme\n")
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}`)
+	cfg := &Config{APIURL: h.apiURL(), Hosting: "shared"}
+	mustOK(t, h.ctx.ProvisionShared(t.Context(), cfg, "acme.example.org", spec), h.output())
+	path := filepath.Join(h.ctx.Paths.Base, ".kubeconfig", "acme.example.org.yaml")
+	b, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(b), "current-context: kubehz-acme") {
+		t.Fatalf("kubeconfig at %s: err=%v body=%q", path, err, b)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Fatalf("kubeconfig mode %v, want 0600", st.Mode().Perm())
+	}
+	mustContain(t, h.output(), "kubectl --context kubehz-acme -n acme get pods")
+	mustContain(t, h.output(), "Kubeconfig: "+path)
+}
+
+// An api without the route (or a space still wiring up) leaves no file and
+// keeps the older access lines; the provision still succeeds.
+func TestProvisionSharedWithoutAKubeconfigKeepsTheOldLines(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := spaceSpec(h, spaceBlock)
+	h.handle("GET /api/spaces", 200, `{"ok":true,"data":[]}`)
+	h.handle("POST /api/spaces", 201, `{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Pending"}}`)
+	h.handle("GET /api/spaces/sp-123", 200, `{"ok":true,"data":{"id":"sp-123","status":"Active"}}`)
+	h.handle("GET /api/spaces/sp-123/kubeconfig", 503, `{"ok":false,"error":{"code":"SPACE_KUBECONFIG_NOT_READY","message":"not yet"}}`)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}`)
+	cfg := &Config{APIURL: h.apiURL(), Hosting: "shared"}
+	mustOK(t, h.ctx.ProvisionShared(t.Context(), cfg, "acme.example.org", spec), h.output())
+	if _, err := os.Stat(filepath.Join(h.ctx.Paths.Base, ".kubeconfig", "acme.example.org.yaml")); err == nil {
+		t.Fatal("no kubeconfig file must be written on a 503")
+	}
+	mustContain(t, h.output(), "Access: sign in with your kubehz account (OIDC)")
+}
