@@ -99,6 +99,13 @@ driver::kubeconfig() {
   )
   :args "Space access" "${@}"
 
+  # The kubeconfig provision wrote (D30) — the kubelogin file the api serves
+  # for a shared space.
+  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  if [[ -f "${path}" ]]; then
+    echo "${path}"
+    return 0
+  fi
   error "A space has no downloadable kubeconfig — the control plane is platform-operated."
   echo "  Access your namespaces with your kubehz account (OIDC): the dashboard's" >&2
   echo "  space page provides a ready-made kubeconfig snippet for 'kubectl oidc-login'." >&2

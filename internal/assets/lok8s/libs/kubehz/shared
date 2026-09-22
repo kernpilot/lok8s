@@ -531,8 +531,19 @@ kubehz::provision_shared() {
 
   echo "Space '${LOK8S_SPACE_SLUG}' is Active (id: ${space_id})"
   echo "  Namespace: ${LOK8S_SPACE_SLUG}"
-  echo "  Access: sign in with your kubehz account (OIDC) — the control plane"
-  echo "  itself is operated by the platform and is not directly accessible."
+  # The space's kubectl kubeconfig (D30): the api serves a kubelogin file for
+  # a shared space (the public endpoint, the shard's sign-in client, the
+  # context kubehz-<slug>; no credential inside). An api without the route, a
+  # space still wiring up or one with a dedicated plane keep the older two
+  # lines, and nothing fails: the space is Active either way.
+  local kubeconfig_path
+  if kubeconfig_path="$(kubehz::space_kubeconfig "${space_id}" "${domain}")"; then
+    echo "  Access: kubectl --context kubehz-${LOK8S_SPACE_SLUG} -n ${LOK8S_SPACE_SLUG} get pods"
+    echo "  Kubeconfig: ${kubeconfig_path} (kubectl signs you in with your kubehz account)"
+  else
+    echo "  Access: sign in with your kubehz account (OIDC) — the control plane"
+    echo "  itself is operated by the platform and is not directly accessible."
+  fi
 
   local node
   for node in "${LOK8S_SPACE_NODES[@]}"; do
@@ -543,6 +554,21 @@ kubehz::provision_shared() {
     echo "  No nodes declared under spec.kubehz.space.nodes — mint a join"
     echo "  ticket any time with: lo kubehz join <node-name>"
   fi
+}
+
+# Fetch the shared space's kubectl kubeconfig and write it to
+# .kubeconfig/<domain>.yaml (0600, the hosted path's location). Prints the
+# path; returns 1 when the api has no file for this space (see the caller).
+# Usage: kubehz::space_kubeconfig <space_id> <domain>
+kubehz::space_kubeconfig() {
+  local space_id="${1}" domain="${2}"
+  kubehz::space_api GET "/api/spaces/${space_id}/kubeconfig" >/dev/null 2>&1 || return 1
+  [[ -n "${KUBEHZ_SPACE_API_BODY}" ]] || return 1
+  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  mkdir -p "$(dirname "${path}")" || return 1
+  ( umask 077; printf '%s\n' "${KUBEHZ_SPACE_API_BODY}" > "${path}" ) || return 1
+  chmod 600 "${path}"
+  echo "${path}"
 }
 
 # ── Destroy ──────────────────────────────────────────────
