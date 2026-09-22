@@ -5,8 +5,9 @@
 // The thinnest driver in the tree, on purpose: a Space has no
 // infrastructure of its own. The platform operates the control plane; you
 // bring machines and join them as nodes. Provision = create/adopt the Space
-// + mint join tickets; destroy = deregister it. There is no kubeconfig to
-// extract — access is via your kubehz login (OIDC).
+// + mint join tickets; destroy = deregister it. Provision also writes the
+// space's kubeconfig (D30): a kubelogin file the api serves, no credential
+// inside; access is via your kubehz login (OIDC).
 //
 // Requires: spec.kubehz.hosting: shared, spec.kubehz.apiUrl, KUBEHZ_TOKEN.
 package kubehz
@@ -134,10 +135,20 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
-// Kubeconfig explains how space access works — there is no download.
+// Kubeconfig returns the space's kubeconfig written by provision (D30: the
+// kubelogin file the api serves for a shared space), or explains how space
+// access works when no file exists yet.
 func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) {
+	if path := filepath.Join(d.deps.Paths.Base, ".kubeconfig", domain+".yaml"); fileExists(path) {
+		return path, nil
+	}
 	ui.ErrorTo(d.stderr(), "A space has no downloadable kubeconfig — the control plane is platform-operated.")
 	io.WriteString(d.stderr(), "  Access your namespaces with your kubehz account (OIDC): the dashboard's\n")
 	io.WriteString(d.stderr(), "  space page provides a ready-made kubeconfig snippet for 'kubectl oidc-login'.\n")
 	return "", ui.Handled(errors.New("kubehz: a space has no downloadable kubeconfig"))
+}
+
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
 }

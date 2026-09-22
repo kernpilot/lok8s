@@ -102,7 +102,7 @@ var driverUsages = map[string]driverUsage{
 	},
 	"kubehz": {
 		title: "kubehz space driver", provision: "Create/adopt the space + mint node join tickets", destroy: "Remove the space from kubehz",
-		status: "Show space + node status", kubeconfig: "Explain how space access works (no kubeconfig download)", kubeconfigReadonly: true,
+		status: "Show space + node status", kubeconfig: "Print the space kubeconfig path written by provision", kubeconfigReadonly: true,
 	},
 }
 

@@ -158,3 +158,24 @@ func TestKubeconfigRefuses(t *testing.T) {
 		t.Fatalf("stderr: %s", f.stderr.String())
 	}
 }
+
+// D30: once provision wrote the space's kubeconfig, the verb returns its
+// path instead of the explanation.
+func TestKubeconfigReturnsTheProvisionedFile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	path := filepath.Join(f.base, ".kubeconfig", "acme.example.org.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.d.Kubeconfig(t.Context(), "acme.example.org")
+	if err != nil || got != path {
+		t.Fatalf("kubeconfig: got %q err=%v, want %q", got, err, path)
+	}
+	if f.stderr.Len() != 0 {
+		t.Fatalf("stderr must stay empty: %s", f.stderr.String())
+	}
+}

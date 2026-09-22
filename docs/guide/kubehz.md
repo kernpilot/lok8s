@@ -219,10 +219,11 @@ A few things worth knowing before you reach for it:
 - **A join ticket is minted once**, is bound to one node name, and expires
   quickly. Nothing stores the plaintext outside the script: a lost ticket
   gets re-minted, never recovered.
-- **There is no kubeconfig to download.** The control plane is
-  platform-operated and is not handed out; you reach your namespaces with
-  your kubehz account (OIDC). `lo kubeconfig` on a space says exactly that
-  rather than producing a file that could not work.
+- **The kubeconfig holds no credential.** The control plane is
+  platform-operated and is not handed out. `lo provision` writes
+  `.kubeconfig/<domain>.yaml`, the kubelogin file the api serves for the
+  space: `kubectl --context kubehz-<slug>` signs you in with your kubehz
+  account (OIDC) on first use. `lo kubeconfig` prints that path.
 - **`spec.bootstrap` does not apply.** The platform baseline (CNI, ingress,
   certificates, DNS) is already running on the shared plane, and a space
   cannot install cluster-scoped things anyway.

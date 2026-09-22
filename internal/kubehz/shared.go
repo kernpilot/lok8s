@@ -606,8 +606,20 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 	}
 	c.echo("Space '%s' is Active (id: %s)", sp.Slug, spaceID)
 	c.echo("  Namespace: %s", sp.Slug)
-	c.echo("  Access: sign in with your kubehz account (OIDC) — the control plane")
-	c.echo("  itself is operated by the platform and is not directly accessible.")
+	// D30 (both implementations): the space's kubectl kubeconfig. The api
+	// serves a kubelogin file for a shared space (kubehz-api #127, B221). It
+	// holds the public endpoint, the shard's sign-in client and the context
+	// kubehz-<slug>, and no credential. The file lands beside the hosted
+	// path's file. An api without the route, a space still wiring up or one
+	// with a dedicated plane keep the older two lines. Nothing fails: the
+	// space is Active either way.
+	if path := c.spaceKubeconfig(ctx, cfg, domain, spaceID); path != "" {
+		c.echo("  Access: kubectl --context kubehz-%s -n %s get pods", sp.Slug, sp.Slug)
+		c.echo("  Kubeconfig: %s (kubectl signs you in with your kubehz account)", path)
+	} else {
+		c.echo("  Access: sign in with your kubehz account (OIDC) — the control plane")
+		c.echo("  itself is operated by the platform and is not directly accessible.")
+	}
 	for _, node := range sp.Nodes {
 		if err := c.spaceMintJoin(ctx, cfg, spaceID, node, false); err != nil {
 			return err
@@ -619,6 +631,41 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 		c.echo("  ticket any time with: lo kubehz join <node-name>")
 	}
 	return nil
+}
+
+// spaceKubeconfig fetches the shared space's kubectl kubeconfig and writes it
+// to .kubeconfig/<domain>.yaml (0600, the hosted path's location). Returns
+// the path, or "" when the api has no file for this space yet (see the
+// caller). The file holds no credential; the mode matches the hosted one.
+func (c *Context) spaceKubeconfig(ctx context.Context, cfg *Config, domain, spaceID string) string {
+	res, err := c.fetchStatus(ctx, "GET", cfg.APIURL+"/api/spaces/"+spaceID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	if err != nil || !is2xx(res.Status) || len(res.Body) == 0 {
+		if err == nil {
+			c.debugf("space %s: no kubeconfig from the api (HTTP %d)", spaceID, res.Status)
+		}
+		return ""
+	}
+	path := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		c.debugf("space %s: kubeconfig dir: %v", spaceID, err)
+		return ""
+	}
+	// Whole file or nothing: a temp file in the same directory, the mode
+	// set on it, then one rename. An existing file keeps nothing of its old
+	// mode either (review of #218).
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kubeconfig-*")
+	if err != nil {
+		c.debugf("space %s: kubeconfig temp: %v", spaceID, err)
+		return ""
+	}
+	_, werr := tmp.Write(res.Body)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil || os.Chmod(tmp.Name(), 0o600) != nil || os.Rename(tmp.Name(), path) != nil {
+		_ = os.Remove(tmp.Name())
+		c.debugf("space %s: kubeconfig write failed", spaceID)
+		return ""
+	}
+	return path
 }
 
 // DestroyShared ports kubehz::destroy_shared: deregister the Space.
@@ -649,6 +696,8 @@ func (c *Context) DestroyShared(ctx context.Context, cfg *Config, domain, cluste
 		return ErrHandled
 	}
 	c.echo("Space '%s' removed (id: %s)", sp.Slug, spaceID)
+	// The kubeconfig provision wrote (D30) names a space that is gone.
+	_ = os.Remove(filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml"))
 	return nil
 }
 

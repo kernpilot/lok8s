@@ -1148,7 +1148,7 @@ lo drivers kubehz [flags]
 
 * [lo drivers](#lo-drivers)	 - Driver-specific commands
 * [lo drivers kubehz destroy](#lo-drivers-kubehz-destroy)	 - Remove the space from kubehz
-* [lo drivers kubehz kubeconfig](#lo-drivers-kubehz-kubeconfig)	 - Explain how space access works (no kubeconfig download)
+* [lo drivers kubehz kubeconfig](#lo-drivers-kubehz-kubeconfig)	 - Print the space kubeconfig path written by provision
 * [lo drivers kubehz provision](#lo-drivers-kubehz-provision)	 - Create/adopt the space + mint node join tickets
 * [lo drivers kubehz status](#lo-drivers-kubehz-status)	 - Show space + node status
 
@@ -1178,7 +1178,7 @@ lo drivers kubehz destroy <domain> [flags]
 
 ## lo drivers kubehz kubeconfig
 
-Explain how space access works (no kubeconfig download)
+Print the space kubeconfig path written by provision
 
 ```
 lo drivers kubehz kubeconfig <domain> [flags]

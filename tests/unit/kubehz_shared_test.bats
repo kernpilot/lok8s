@@ -971,3 +971,108 @@ curl_space_refusal() {
   [[ "$output" != *"invalid spec.kubehz.hosting:"* ]]
   rm -rf "${PATH_CLUSTERS}/${dom}"
 }
+
+@test "provision_shared: writes the space kubeconfig the api serves and names the context (D30)" {
+  yq_space_spec
+  curl() {
+    local method="GET" url=""
+    while (( $# )); do
+      case "$1" in
+        -X) method="$2"; shift 2 ;;
+        https://*) url="$1"; shift ;;
+        -d) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${method} ${url##*api.example.test}" in
+      "GET /api/spaces")
+        printf '{"ok":true,"data":[]}\n200' ;;
+      "POST /api/spaces")
+        printf '{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Pending"}}\n201' ;;
+      "GET /api/spaces/sp-123")
+        printf '{"ok":true,"data":{"id":"sp-123","status":"Active"}}\n200' ;;
+      "GET /api/spaces/sp-123/kubeconfig")
+        printf 'apiVersion: v1\nkind: Config\ncurrent-context: kubehz-acme\n200' ;;
+      "POST /api/spaces/sp-123/join-token")
+        printf '{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}\n201' ;;
+      *)
+        printf '{"ok":false}\n500' ;;
+    esac
+  }
+  export -f curl
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_success
+  assert_output --partial "kubectl --context kubehz-acme -n acme get pods"
+  assert_output --partial "Kubeconfig: ${PATH_BASE}/.kubeconfig/acme.example.org.yaml"
+  run cat "${PATH_BASE}/.kubeconfig/acme.example.org.yaml"
+  assert_output --partial "current-context: kubehz-acme"
+  run stat -c '%a' "${PATH_BASE}/.kubeconfig/acme.example.org.yaml"
+  assert_output "600"
+}
+
+@test "provision_shared: keeps the older access lines when the api has no kubeconfig for the space" {
+  yq_space_spec
+  curl() {
+    local method="GET" url=""
+    while (( $# )); do
+      case "$1" in
+        -X) method="$2"; shift 2 ;;
+        https://*) url="$1"; shift ;;
+        -d) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${method} ${url##*api.example.test}" in
+      "GET /api/spaces")
+        printf '{"ok":true,"data":[]}\n200' ;;
+      "POST /api/spaces")
+        printf '{"ok":true,"data":{"id":"sp-123","slug":"acme","status":"Pending"}}\n201' ;;
+      "GET /api/spaces/sp-123")
+        printf '{"ok":true,"data":{"id":"sp-123","status":"Active"}}\n200' ;;
+      "GET /api/spaces/sp-123/kubeconfig")
+        printf '{"ok":false,"error":{"code":"SPACE_KUBECONFIG_NOT_READY"}}\n503' ;;
+      "POST /api/spaces/sp-123/join-token")
+        printf '{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"w","expiresAt":"2026-08-07T20:00:00Z"}}\n201' ;;
+      *)
+        printf '{"ok":false}\n500' ;;
+    esac
+  }
+  export -f curl
+
+  run kubehz::provision_shared "acme.example.org" "/dev/null"
+  assert_success
+  assert_output --partial "Access: sign in with your kubehz account (OIDC)"
+  [ ! -e "${PATH_BASE}/.kubeconfig/acme.example.org.yaml" ]
+}
+
+@test "destroy_shared: removes the kubeconfig provision wrote (D30)" {
+  yq_space_spec
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  printf 'apiVersion: v1\n' > "${PATH_BASE}/.kubeconfig/acme.example.org.yaml"
+  curl() {
+    local method="GET" url=""
+    while (( $# )); do
+      case "$1" in
+        -X) method="$2"; shift 2 ;;
+        https://*) url="$1"; shift ;;
+        -d) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${method} ${url##*api.example.test}" in
+      "GET /api/spaces")
+        printf '{"ok":true,"data":[{"id":"sp-123","slug":"acme","status":"Active"}]}\n200' ;;
+      "DELETE /api/spaces/sp-123")
+        printf '{"ok":true}\n200' ;;
+      *)
+        printf '{"ok":false}\n500' ;;
+    esac
+  }
+  export -f curl
+
+  run kubehz::destroy_shared "acme.example.org" "/dev/null"
+  assert_success
+  assert_output --partial "Space 'acme' removed (id: sp-123)"
+  [ ! -e "${PATH_BASE}/.kubeconfig/acme.example.org.yaml" ]
+}
