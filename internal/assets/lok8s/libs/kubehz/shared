@@ -564,10 +564,14 @@ kubehz::space_kubeconfig() {
   local space_id="${1}" domain="${2}"
   kubehz::space_api GET "/api/spaces/${space_id}/kubeconfig" >/dev/null 2>&1 || return 1
   [[ -n "${KUBEHZ_SPACE_API_BODY}" ]] || return 1
-  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml" tmp
   mkdir -p "$(dirname "${path}")" || return 1
-  ( umask 077; printf '%s\n' "${KUBEHZ_SPACE_API_BODY}" > "${path}" ) || return 1
-  chmod 600 "${path}"
+  # Whole file or nothing: a temp file beside it, the mode set, one rename.
+  tmp="$(mktemp "$(dirname "${path}")/.kubeconfig-XXXXXX")" || return 1
+  if ! printf '%s\n' "${KUBEHZ_SPACE_API_BODY}" > "${tmp}" || ! chmod 600 "${tmp}" || ! mv -f "${tmp}" "${path}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
   echo "${path}"
 }
 
@@ -597,6 +601,8 @@ kubehz::destroy_shared() {
     return 1
   fi
   echo "Space '${LOK8S_SPACE_SLUG}' removed (id: ${space_id})"
+  # The kubeconfig provision wrote (D30) names a space that is gone.
+  rm -f "${PATH_BASE}/.kubeconfig/${domain}.yaml"
 }
 
 # ── Status ───────────────────────────────────────────────

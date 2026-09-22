@@ -7,8 +7,9 @@
 # The thinnest driver in the tree, on purpose: a Space has no infrastructure
 # of its own. The platform operates the control plane; you bring machines and
 # join them as nodes. Provision = create/adopt the Space + mint join tickets;
-# destroy = deregister it. There is no kubeconfig to extract — access is via
-# your kubehz login (OIDC), and the control plane is never directly exposed.
+# destroy = deregister it. Provision also writes the space's kubeconfig (D30):
+# a kubelogin file the api serves, no credential inside; access is via your
+# kubehz login (OIDC), and the control plane is never directly exposed.
 #
 # Requires: spec.kubehz.hosting: shared, spec.kubehz.apiUrl, KUBEHZ_TOKEN.
 
@@ -22,7 +23,7 @@ main::driver() {
     'provision|p@destructive'  'Create/adopt the space + mint node join tickets'
     'destroy|d@destructive'    'Remove the space from kubehz'
     'status|s@readonly'        'Show space + node status'
-    'kubeconfig|k@readonly'    'Explain how space access works (no kubeconfig download)'
+    'kubeconfig|k@readonly'    'Print the space kubeconfig path written by provision'
   )
   :usage "kubehz space driver" "${@}"
   "${usage[@]}"

@@ -5,8 +5,9 @@
 // The thinnest driver in the tree, on purpose: a Space has no
 // infrastructure of its own. The platform operates the control plane; you
 // bring machines and join them as nodes. Provision = create/adopt the Space
-// + mint join tickets; destroy = deregister it. There is no kubeconfig to
-// extract — access is via your kubehz login (OIDC).
+// + mint join tickets; destroy = deregister it. Provision also writes the
+// space's kubeconfig (D30): a kubelogin file the api serves, no credential
+// inside; access is via your kubehz login (OIDC).
 //
 // Requires: spec.kubehz.hosting: shared, spec.kubehz.apiUrl, KUBEHZ_TOKEN.
 package kubehz

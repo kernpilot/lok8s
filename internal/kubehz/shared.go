@@ -606,12 +606,13 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 	}
 	c.echo("Space '%s' is Active (id: %s)", sp.Slug, spaceID)
 	c.echo("  Namespace: %s", sp.Slug)
-	// D30 (both implementations): the space's kubectl kubeconfig. The api serves a kubelogin
-	// file for a shared space (kubehz-api #127, B221): the public endpoint, the
-	// shard's sign-in client, the context kubehz-<slug>. No credential inside.
-	// Written beside the hosted path's file; an api without the route (404),
-	// a space still wiring up (503) or one with a dedicated plane (409) keep
-	// the older two lines, and nothing fails: the space is Active either way.
+	// D30 (both implementations): the space's kubectl kubeconfig. The api
+	// serves a kubelogin file for a shared space (kubehz-api #127, B221). It
+	// holds the public endpoint, the shard's sign-in client and the context
+	// kubehz-<slug>, and no credential. The file lands beside the hosted
+	// path's file. An api without the route, a space still wiring up or one
+	// with a dedicated plane keep the older two lines. Nothing fails: the
+	// space is Active either way.
 	if path := c.spaceKubeconfig(ctx, cfg, domain, spaceID); path != "" {
 		c.echo("  Access: kubectl --context kubehz-%s -n %s get pods", sp.Slug, sp.Slug)
 		c.echo("  Kubeconfig: %s (kubectl signs you in with your kubehz account)", path)
@@ -649,8 +650,19 @@ func (c *Context) spaceKubeconfig(ctx context.Context, cfg *Config, domain, spac
 		c.debugf("space %s: kubeconfig dir: %v", spaceID, err)
 		return ""
 	}
-	if err := os.WriteFile(path, res.Body, 0o600); err != nil {
-		c.debugf("space %s: kubeconfig write: %v", spaceID, err)
+	// Whole file or nothing: a temp file in the same directory, the mode
+	// set on it, then one rename. An existing file keeps nothing of its old
+	// mode either (review of #218).
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kubeconfig-*")
+	if err != nil {
+		c.debugf("space %s: kubeconfig temp: %v", spaceID, err)
+		return ""
+	}
+	_, werr := tmp.Write(res.Body)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil || os.Chmod(tmp.Name(), 0o600) != nil || os.Rename(tmp.Name(), path) != nil {
+		_ = os.Remove(tmp.Name())
+		c.debugf("space %s: kubeconfig write failed", spaceID)
 		return ""
 	}
 	return path
@@ -684,6 +696,8 @@ func (c *Context) DestroyShared(ctx context.Context, cfg *Config, domain, cluste
 		return ErrHandled
 	}
 	c.echo("Space '%s' removed (id: %s)", sp.Slug, spaceID)
+	// The kubeconfig provision wrote (D30) names a space that is gone.
+	_ = os.Remove(filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml"))
 	return nil
 }
 

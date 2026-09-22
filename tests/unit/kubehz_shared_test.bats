@@ -1045,3 +1045,34 @@ curl_space_refusal() {
   assert_output --partial "Access: sign in with your kubehz account (OIDC)"
   [ ! -e "${PATH_BASE}/.kubeconfig/acme.example.org.yaml" ]
 }
+
+@test "destroy_shared: removes the kubeconfig provision wrote (D30)" {
+  yq_space_spec
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  printf 'apiVersion: v1\n' > "${PATH_BASE}/.kubeconfig/acme.example.org.yaml"
+  curl() {
+    local method="GET" url=""
+    while (( $# )); do
+      case "$1" in
+        -X) method="$2"; shift 2 ;;
+        https://*) url="$1"; shift ;;
+        -d) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${method} ${url##*api.example.test}" in
+      "GET /api/spaces")
+        printf '{"ok":true,"data":[{"id":"sp-123","slug":"acme","status":"Active"}]}\n200' ;;
+      "DELETE /api/spaces/sp-123")
+        printf '{"ok":true}\n200' ;;
+      *)
+        printf '{"ok":false}\n500' ;;
+    esac
+  }
+  export -f curl
+
+  run kubehz::destroy_shared "acme.example.org" "/dev/null"
+  assert_success
+  assert_output --partial "Space 'acme' removed (id: sp-123)"
+  [ ! -e "${PATH_BASE}/.kubeconfig/acme.example.org.yaml" ]
+}
