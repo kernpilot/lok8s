@@ -88,14 +88,23 @@ tempo:
       wal:
         path: /var/tempo/wal
 
-  # Single-binary, single small worker. Memory limit gives headroom for the
-  # metrics-generator without an OOM-prone cap.
+  # No Go ballast: the chart's default (1024 MiB) equals a 1 GiB limit, so
+  # the GC target sits at the limit and the kernel kills the process on the
+  # block replay at start (102 kills in a month on one cluster, 2026-09).
+  # GOMEMLIMIT makes the runtime collect before the limit instead.
+  memBallastSizeMbs: 0
+  extraEnv:
+    - name: GOMEMLIMIT
+      value: 1280MiB
+
+  # Single-binary, single small worker. The limit covers the block replay at
+  # start and the metrics-generator; GOMEMLIMIT above keeps the heap under it.
   resources:
     requests:
       cpu: 100m
-      memory: 256Mi
+      memory: 512Mi
     limits:
-      memory: 1Gi
+      memory: 1536Mi
 
 # Persist trace blocks + WAL across pod restarts. Mounts at /var/tempo, which is
 # where storage.trace.local.path / wal.path point. (The metrics-generator keeps
