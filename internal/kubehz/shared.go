@@ -606,7 +606,7 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 	}
 	c.echo("Space '%s' is Active (id: %s)", sp.Slug, spaceID)
 	c.echo("  Namespace: %s", sp.Slug)
-	// Go-only (D30): the space's kubectl kubeconfig. The api serves a kubelogin
+	// D30 (both implementations): the space's kubectl kubeconfig. The api serves a kubelogin
 	// file for a shared space (kubehz-api #127, B221): the public endpoint, the
 	// shard's sign-in client, the context kubehz-<slug>. No credential inside.
 	// Written beside the hosted path's file; an api without the route (404),
