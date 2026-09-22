@@ -7,11 +7,10 @@
 #   - tempo.monitoring:4317          OTLP gRPC receiver  (trace senders)
 #   - tempo.monitoring:4318          OTLP HTTP receiver  (trace senders)
 #
-# Storage: `local-path` (the rancher local-path provisioner on the single FSN1
-# worker — see clusters/.targets/storage). The cluster default class is
-# `kubermatic-fast`, but we pin `local-path` explicitly so this PVC is not
-# silently re-homed if the default class changes. Single-node pilot: one
-# StatefulSet, one local PVC, no replication. Accepted SPOF for the pilot.
+# Storage: one PVC on the `ceph-bulk` class (see `persistence` below). The
+# class is pinned so a change of the cluster default does not re-home the
+# volume. One StatefulSet, one PVC, no replication: an accepted single point
+# of failure for the pilot.
 #
 # ── Grafana datasource (ACTION REQUIRED, handled outside this target) ────────
 # Grafana queries Tempo DIRECTLY via a Tempo datasource — there is no
@@ -88,10 +87,10 @@ tempo:
       wal:
         path: /var/tempo/wal
 
-  # No Go ballast: the chart's default (1024 MiB) equals a 1 GiB limit, so
-  # the GC target sits at the limit and the kernel kills the process on the
-  # block replay at start (102 kills in a month on one cluster, 2026-09).
-  # GOMEMLIMIT makes the runtime collect before the limit instead.
+  # No Go ballast. The chart's default (1024 MiB) equals a 1 GiB limit, so
+  # the GC target sits at the limit. The kernel then kills the process on
+  # the block replay at start (102 kills in a month on one cluster,
+  # 2026-09). GOMEMLIMIT makes the runtime collect before the limit.
   memBallastSizeMbs: 0
   extraEnv:
     - name: GOMEMLIMIT
