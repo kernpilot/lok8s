@@ -74,7 +74,7 @@ re-running `lo up` / `lo bootstrap` simply refreshes `spec` in place.
 
 ```
 --- Inventory (ClusterInventory/cluster) ---
-  lok8s:      0.5.0
+  lok8s:      0.7.0
   driver:     kubeone · hetzner
   kubernetes: v1.31.10
   specHash:   3fb0c5e02a41…
