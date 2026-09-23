@@ -536,13 +536,13 @@ kubeone::render_addons() {
 
   # ccm (robot-aware) — the addon now ALSO emits the `hcloud` secret (env: token
   # required, HROBOT_* optional → omitted without a bare-metal worker), so the
-  # creds the provider loaded into the env render straight in. No kubectl. Inline
-  # robot values match the `ccm` bootstrap entry (HCLOUD_NETWORK = networkID).
+  # creds the provider loaded into the env render straight in. No kubectl. The
+  # inline values match the `ccm` bootstrap entry.
   # The private network reaches the CCM as HCLOUD_NETWORK whenever the
   # manifest carries one: the CCM resolves a node's InternalIP against it,
   # and without it a kubelet started with a private --node-ip is refused
   # ("provided node ip ... is not valid") and the node never initializes.
-  # This used to hang off the Robot credentials, so every cloud-only
+  # This depended on the Robot credentials, so every cloud-only
   # cluster with a private network timed out in "waiting for nodes to
   # initialize by CCM".
   local inline=""
