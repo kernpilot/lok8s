@@ -142,6 +142,28 @@ _inline_of() {
   [ "$(yq -r '.env.ROBOT_ENABLED // "absent"' <<<"${inline}")" = "absent" ]
 }
 
+@test "render_addons: a static CLOUD worker needs no Robot credentials" {
+  # A cloud VM declared as a worker in server[] is a static host the hcloud
+  # CCM finds by itself; only a #cloud.root server is Robot's business
+  # (2026-09-23: a cloud-only cluster with one declared worker was refused).
+  unset HROBOT_USER HROBOT_PASSWORD
+  yq -i '.staticWorkers.hosts = [{"publicAddress": "10.0.0.9"}]' "${work_dir}/kubeone.yaml"
+  printf '%s\n' '{"server":[{"name":"cp-1","label":"lok8s.dev/role=control-plane"},{"name":"w-1","label":"lok8s.dev/role=worker"}]}' > "${work_dir}/hetzner.dump.json"
+  local cy; cy=$(_cluster_yaml '')
+  run kubeone::render_addons "${work_dir}" "${cy}"
+  [ "${status}" -eq 0 ]
+}
+
+@test "render_addons: a bare-metal server without Robot credentials is refused early" {
+  unset HROBOT_USER HROBOT_PASSWORD
+  yq -i '.staticWorkers.hosts = [{"publicAddress": "10.0.0.9"}]' "${work_dir}/kubeone.yaml"
+  printf '%s\n' '{"server":[{"name":"cp-1"},{"name":"metal-1","#cloud.root":"true","label":"lok8s.dev/role=worker"}]}' > "${work_dir}/hetzner.dump.json"
+  local cy; cy=$(_cluster_yaml '')
+  run kubeone::render_addons "${work_dir}" "${cy}"
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"bare-metal server present but Robot creds missing"* ]]
+}
+
 @test "render_addons: on a COLLIDING key the cluster's ccm value wins (precedence, not just merge)" {
   # Non-colliding keys green under either operand order — this collision is
   # the only assertion that pins 'explicit cluster intent beats derived

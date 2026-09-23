@@ -527,9 +527,16 @@ kubeone::render_addons() {
   # The generator omits the robot keys when HROBOT_* are unset (keeps the addon
   # portable), so catch the real gap HERE — an early, legible error beats
   # rendering an addon we'd only reject, then a 10-minute CCM-init timeout + flap.
-  local nworkers; nworkers=$(yq -r '(.staticWorkers.hosts // []) | length' "${manifest}" 2>/dev/null || echo 0)
-  if (( nworkers > 0 )) && [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
-    error "render_addons: bare-metal worker present but Robot creds missing (HROBOT_USER/HROBOT_PASSWORD)"
+  # Bare metal is a `#cloud.root` server in the descriptor (the provider's dump
+  # beside the manifest); a cloud VM declared as a static worker is found by
+  # the hcloud CCM and needs no Robot access. Counting every static worker
+  # refused a cloud-only cluster with one declared worker (2026-09-23).
+  local nmetal=0
+  if [[ -f "$(dirname "${manifest}")/hetzner.dump.json" ]]; then
+    nmetal=$(jq '[(.server // [])[] | select(.["#cloud.root"] == "true")] | length' "$(dirname "${manifest}")/hetzner.dump.json" 2>/dev/null || echo 0)
+  fi
+  if (( nmetal > 0 )) && [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
+    error "render_addons: bare-metal server present but Robot creds missing (HROBOT_USER/HROBOT_PASSWORD)"
     error "  fix: lo secrets set --name hetzner --namespace provisioning HROBOT_USER <user> (+ HROBOT_PASSWORD <pass>)"
     return 1
   fi
