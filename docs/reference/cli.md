@@ -782,10 +782,15 @@ the new agent to be `Ready`, or for the deleted one's pod to be gone) and
 fails instead of continuing if a step does not complete, or if it cannot see
 whether the step completed. So it never starts the second producer itself: it
 either finishes the switch or stops with the cluster in the single-agent state
-it was already in. Extend the waits with `KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS`
+it was already in. The one exception is a first deploy to `agent: operator`
+that stops before the live agent: the CronJob agent is already applied with
+the live owner, so no producer beats until the re-run, and the message says
+so. Extend the waits with `KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS`
 (Ready, 120 s), `KUBEHZ_LIVE_AGENT_DRAIN_SECONDS` (the live agent's pod is
-gone, 120 s) and `KUBEHZ_HEARTBEAT_DRAIN_SECONDS` (an in-flight CronJob pod has
-finished, 130 s) when a cold image pull or a slow link needs longer. A pod
+gone, 120 s), `KUBEHZ_HEARTBEAT_DRAIN_SECONDS` (an in-flight CronJob pod has
+finished, 130 s) and `KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS` (a first deploy's
+one-off bootstrap Job has completed, 150 s) when a cold image pull or a slow
+link needs longer. A pod
 that stays Pending points at scheduling, not at the wait: both agents tolerate
 the control-plane taint, so a control-plane-only cluster runs them too. See the
 [kubehz guide](../guide/kubehz.md#choosing-an-agent).

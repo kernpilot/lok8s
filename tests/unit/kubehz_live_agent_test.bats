@@ -450,13 +450,172 @@ _stub_kubectl_log() {
   # live agent would beat while the CronJob still did.
   run head -1 "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
+  # Line 2 reads the identity Secret (B244); present here, so no bootstrap
+  # job runs and line 3 starts the live agent.
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "get secret kubehz-agent"
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
-  # Line 3 waits for the Deployment to be Ready. Accepted is not running, and
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  # Line 4 waits for the Deployment to be Ready. Accepted is not running, and
   # between the marker and Ready NOTHING owns the beat — so the command may not
   # report a successful handover until this returns.
-  run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  run sed -n '4p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "rollout status deployment/kubehz-live-agent"
+}
+
+@test "apply order (to operator): a first deploy runs the CronJob's bootstrap once and waits for its Job to complete (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1b"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  # The Secret is absent until the one-off bootstrap Job has completed.
+  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*)
+        echo "$*" >> "${STUB_KUBECTL_LOG}"
+        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
+        echo "Error from server (NotFound): secrets \"kubehz-agent\" not found" >&2; return 1 ;;
+      *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_success
+  assert_output --partial "running the CronJob's bootstrap once"
+  run grep -n "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
+  assert_success
+  assert_output --partial -- "--from=cronjob/kubehz-heartbeat"
+  # create, wait for completion, delete, then the live agent — in that order,
+  # after the CronJob apply.
+  local create_line wait_line del_line live_line
+  create_line=$(grep -n "create job" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  wait_line=$(grep -n "wait --for=condition=complete job/kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  del_line=$(grep -n "delete job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  live_line=$(grep -n "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  [ "${create_line}" -gt 1 ] && [ "${create_line}" -lt "${wait_line}" ] && [ "${wait_line}" -lt "${del_line}" ] && [ "${del_line}" -lt "${live_line}" ]
+  run grep -c -- "--timeout=150s" "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  # The wait and the delete name the Job the create made, not another.
+  local name
+  name=$(grep -oE "create job kubehz-heartbeat-bootstrap-[0-9]+-[0-9a-f]{4} " "${STUB_KUBECTL_LOG}" | head -1 | awk '{print $3}')
+  [ -n "${name}" ]
+  run grep -c "wait --for=condition=complete job/${name} " "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run grep -c "delete job ${name} " "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+}
+
+@test "apply order (to operator): an identity Secret that never appears FAILS the deploy before the live agent (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1c"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
+      *"wait --for=condition=complete"*) echo "error: timed out waiting for the condition" >&2; return 1 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+  export KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS=10
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_failure
+  assert_output --partial "did not complete within 10s"
+  assert_output --partial "describe job kubehz-heartbeat-bootstrap-"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "delete job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply order (to operator): a Secret probe that exits without output names the exit status (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1f"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) return 127 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_failure
+  assert_output --partial "could not read Secret kubehz-agent in kubehz-system: kubectl exited without output (exit status 127)"
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply order (to operator): a Secret read that fails for any reason but NotFound STOPS the deploy without a bootstrap (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1d"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) echo 'Error from server (Forbidden): secrets "kubehz-agent" is forbidden' >&2; return 1 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_failure
+  assert_output --partial "could not read Secret kubehz-agent"
+  assert_output --partial "Forbidden"
+  assert_output --partial "reporting NOTHING"
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply order (to operator): a NotFound behind a warning line still runs the bootstrap (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1e"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*)
+        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
+        echo "Warning: the kubeconfig field exec.apiVersion v1alpha1 is deprecated" >&2
+        echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
+      *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_success
+  run grep -c "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
+  assert_output "1"
 }
 
 @test "apply order (to operator): a live agent that never becomes Ready FAILS the deploy" {
@@ -651,7 +810,8 @@ _stub_kubectl_log() {
   run kubehz::deploy_apply "${work}" operator managed
   assert_success
   assert_output --partial "could not check for an in-flight heartbeat pod"
-  run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  # Line 2 reads the identity Secret (B244); the live agent follows on line 3.
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
 }
 

@@ -13,6 +13,8 @@ package kubehz
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,7 +24,7 @@ import (
 	"time"
 )
 
-// The three waits, all in seconds, all overridable from the environment.
+// The four waits, all in seconds, all overridable from the environment.
 func (c *Context) envSeconds(name string, def int) int {
 	if v := c.getenv(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -40,6 +42,12 @@ func (c *Context) liveAgentRolloutSeconds() int {
 }
 func (c *Context) liveAgentDrainSeconds() int {
 	return c.envSeconds("KUBEHZ_LIVE_AGENT_DRAIN_SECONDS", 120)
+}
+
+// How long a first deploy waits for the one-off identity bootstrap Job to
+// complete. The Job's own deadline is 120 s; this allows a little more.
+func (c *Context) identityBootstrapSeconds() int {
+	return c.envSeconds("KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS", 150)
 }
 
 // Deploy is `lo kubehz deploy [--dry-run]` for the active domain. Applies
@@ -260,6 +268,13 @@ func (c *Context) deployApply(ctx context.Context, workdir, owner, access string
 		}
 		// 2. Wait out an in-flight heartbeat pod (fail-soft).
 		c.waitHeartbeatIdle(ctx)
+		// 2b. The identity Secret. The live agent mounts kubehz-agent, which only
+		// the CronJob's bootstrap creates, on its next five-minute tick; a first
+		// deploy that waits for the rollout alone loses that race about half
+		// the time (B244). Run the bootstrap now and wait for its Job to complete.
+		if err := c.ensureIdentitySecret(ctx); err != nil {
+			return err
+		}
 		// 3. The live agent, which becomes the only producer.
 		if err := c.run(ctx, "kubectl", "apply", "-k", overlay); err != nil {
 			c.errorf("kubehz: could not apply the live agent. The CronJob is no longer beating (KUBEHZ_HEARTBEAT_OWNER=operator), so this cluster is reporting NOTHING until you retry or set spec.kubehz.agent back to cronjob and re-run.")
@@ -308,6 +323,59 @@ func podLines(out string) bool {
 }
 
 func oneLine(s string) string { return strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", " ") }
+
+// ensureIdentitySecret runs the CronJob's bootstrap once when the identity
+// Secret kubehz-agent is absent (a first deploy) and waits for that Job to
+// COMPLETE, not only for the Secret: the bootstrap writes the Secret first
+// and attempts the registration after it (best-effort; a refused POST still
+// completes the Job), so a Job cut off at the Secret would skip that attempt
+// until the CronJob's next tick. The Job's own deadline is 120 s; the wait
+// allows a little more.
+func (c *Context) ensureIdentitySecret(ctx context.Context) error {
+	probe, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name")
+	if err == nil {
+		return nil
+	}
+	// Only a NotFound answer means "absent". A refused or unreachable read
+	// says nothing about the Secret, and a bootstrap on top of an existing
+	// identity is not what the operator asked for.
+	if !strings.Contains(probe, "NotFound") {
+		reason := strings.TrimSpace(probe)
+		if reason == "" {
+			reason = "kubectl exited without output (" + err.Error() + ")"
+		}
+		c.errorf("kubehz: could not read Secret kubehz-agent in kubehz-system: %s. The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until you fix the kubeconfig or the RBAC and re-run 'lo kubehz deploy'.", reason)
+		return ErrHandled
+	}
+	// Unix seconds plus four random hex digits: two deploys in the same
+	// second, from two machines, get two Jobs.
+	job := "kubehz-heartbeat-bootstrap-" + strconv.FormatInt(c.now().Unix(), 10) + "-" + randomHex4()
+	c.echo("kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/%s)…", job)
+	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "job", job, "--from=cronjob/kubehz-heartbeat"); err != nil {
+		c.errorf("kubehz: could not start the identity bootstrap (job/%s). The CronJob agent is applied with the live owner: it bootstraps the identity on its next tick but does not beat, and the live agent was NOT applied, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy' (after that tick, or after a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-$(date +%%s) --from=cronjob/kubehz-heartbeat).", job)
+		return ErrHandled
+	}
+	wait := c.identityBootstrapSeconds()
+	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "wait", "--for=condition=complete", "job/"+job, "--timeout="+strconv.Itoa(wait)+"s"); err != nil {
+		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause. A Job that failed stays until you delete it. Read its state: kubectl -n kubehz-system describe job %s. Read its log: kubectl -n kubehz-system logs job/%s (after the deadline the pod is gone and this call fails). Delete it after you read them: kubectl -n kubehz-system delete job %s. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'.", job, wait, job, job, job)
+		return ErrHandled
+	}
+	if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err != nil {
+		c.errorf("kubehz: the identity bootstrap (job/%s) completed but left no Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/%s. The live agent was NOT applied.", job, job)
+		return ErrHandled
+	}
+	_ = c.runQuiet(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
+	return nil
+}
+
+// randomHex4 is four hex digits from crypto/rand; a name suffix, not a key.
+func randomHex4() string {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "0000"
+	}
+	return hex.EncodeToString(b[:])
+}
 
 // waitHeartbeatIdle ports kubehz::wait_heartbeat_idle — FAIL-SOFT: an
 // unreadable probe or a stuck pod WARNS and lets the deploy continue.
