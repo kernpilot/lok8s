@@ -455,10 +455,10 @@ kubehz::ensure_identity_secret() {
     error "kubehz: could not read Secret kubehz-agent in kubehz-system: ${probe:-kubectl exited without output}. The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until you fix the kubeconfig or the RBAC and re-run 'lo kubehz deploy'."
     return 1
   fi
-  # Unix seconds plus the pid: two deploys in the same second, from two
-  # shells, get two Jobs.
+  # Unix seconds plus four random hex digits: two deploys in the same
+  # second, from two machines, get two Jobs.
   local job
-  job="kubehz-heartbeat-bootstrap-$(date +%s)-$$"
+  job="kubehz-heartbeat-bootstrap-$(date +%s)-$(printf '%04x' "$((RANDOM % 65536))")"
   echo "kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/${job})…"
   kubectl -n kubehz-system create job "${job}" --from=cronjob/kubehz-heartbeat || {
     error "kubehz: could not start the identity bootstrap (job/${job}). The CronJob agent is applied and bootstraps on its next tick; re-run 'lo kubehz deploy' after that, or start a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-\$(date +%s) --from=cronjob/kubehz-heartbeat"

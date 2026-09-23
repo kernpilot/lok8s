@@ -13,6 +13,8 @@ package kubehz
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -338,9 +340,9 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 		c.errorf("kubehz: could not read Secret kubehz-agent in kubehz-system: %s. The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until you fix the kubeconfig or the RBAC and re-run 'lo kubehz deploy'.", reason)
 		return ErrHandled
 	}
-	// Unix seconds plus the pid: two deploys in the same second, from two
-	// shells, get two Jobs.
-	job := "kubehz-heartbeat-bootstrap-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + strconv.Itoa(os.Getpid())
+	// Unix seconds plus four random hex digits: two deploys in the same
+	// second, from two machines, get two Jobs.
+	job := "kubehz-heartbeat-bootstrap-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + randomHex4()
 	c.echo("kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/%s)…", job)
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "job", job, "--from=cronjob/kubehz-heartbeat"); err != nil {
 		c.errorf("kubehz: could not start the identity bootstrap (job/%s). The CronJob agent is applied and bootstraps on its next tick; re-run 'lo kubehz deploy' after that, or start a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-$(date +%%s) --from=cronjob/kubehz-heartbeat", job)
@@ -357,6 +359,15 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 	}
 	_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
 	return nil
+}
+
+// randomHex4 is four hex digits from crypto/rand; a name suffix, not a key.
+func randomHex4() string {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "0000"
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // waitHeartbeatIdle ports kubehz::wait_heartbeat_idle — FAIL-SOFT: an
