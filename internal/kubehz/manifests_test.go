@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"gopkg.in/yaml.v3"
 )
 
 func TestEmbeddedManifestsMatchBashTree(t *testing.T) {
@@ -95,4 +96,58 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// B242: a self-hosted cluster can be control-plane-only, or its workers can
+// join after the deploy; both agent pods must tolerate the control-plane
+// taint or the cluster reports nothing. The manifests are parsed and the
+// tolerations read at the pod spec, so a block that is commented out, or
+// placed at the wrong level, fails here.
+func TestAgentManifestsTolerateTheControlPlaneTaint(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "kubehz", "manifests")
+	cases := []struct {
+		rel  string
+		path []string // the pod spec under the document's spec
+	}{
+		{"live-agent/base/deployment.yaml", []string{"spec", "template", "spec"}},
+		{"agent/cronjob.yaml", []string{"spec", "jobTemplate", "spec", "template", "spec"}},
+	}
+	for _, tc := range cases {
+		b, err := os.ReadFile(filepath.Join(root, tc.rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(b, &doc); err != nil {
+			t.Fatalf("%s: %v", tc.rel, err)
+		}
+		var node any = doc
+		for _, k := range tc.path {
+			m, ok := node.(map[string]any)
+			if !ok {
+				t.Fatalf("%s: no map at %q", tc.rel, k)
+			}
+			node = m[k]
+		}
+		podSpec, ok := node.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: no pod spec at %v", tc.rel, tc.path)
+		}
+		tols, _ := podSpec["tolerations"].([]any)
+		seen := map[string]bool{}
+		for _, raw := range tols {
+			tol, _ := raw.(map[string]any)
+			if tol["operator"] == "Exists" && tol["effect"] == "NoSchedule" {
+				if key, _ := tol["key"].(string); key != "" {
+					seen[key] = true
+				}
+			}
+		}
+		for _, key := range []string{"node-role.kubernetes.io/control-plane", "node-role.kubernetes.io/master"} {
+			if !seen[key] {
+				t.Errorf("%s: no Exists/NoSchedule toleration for %s at the pod spec", tc.rel, key)
+			}
+		}
+	}
 }

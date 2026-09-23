@@ -785,7 +785,9 @@ either finishes the switch or stops with the cluster in the single-agent state
 it was already in. Extend the waits with `KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS`
 (Ready, 120 s), `KUBEHZ_LIVE_AGENT_DRAIN_SECONDS` (the live agent's pod is
 gone, 120 s) and `KUBEHZ_HEARTBEAT_DRAIN_SECONDS` (an in-flight CronJob pod has
-finished, 130 s) when a cold image pull or a slow link needs longer. See the
+finished, 130 s) when a cold image pull or a slow link needs longer. A pod
+that stays Pending points at scheduling, not at the wait: both agents tolerate
+the control-plane taint, so a control-plane-only cluster runs them too. See the
 [kubehz guide](../guide/kubehz.md#choosing-an-agent).
 
 ### lo kustomize
