@@ -514,7 +514,7 @@ _stub_kubectl_log() {
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
-      *"get secret kubehz-agent"*) return 1 ;;
+      *"get secret kubehz-agent"*) echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
       *"wait --for=condition=complete"*) echo "error: timed out waiting for the condition" >&2; return 1 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
@@ -526,6 +526,32 @@ _stub_kubectl_log() {
   run kubehz::deploy_apply "${work}" operator managed
   assert_failure
   assert_output --partial "did not complete within 10s"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply order (to operator): a Secret read that fails for any reason but NotFound STOPS the deploy without a bootstrap (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1d"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) echo 'Error from server (Forbidden): secrets "kubehz-agent" is forbidden' >&2; return 1 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_failure
+  assert_output --partial "could not read Secret kubehz-agent"
+  assert_output --partial "Forbidden"
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
   run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }

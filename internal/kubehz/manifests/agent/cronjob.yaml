@@ -136,7 +136,7 @@ spec:
                   # only ever reads the Secret, and mints nothing), and they must
                   # keep running so a lost kubehz-system namespace re-enrolls.
                   # A first `lo kubehz deploy` runs this once as a one-off Job
-                  # (kubehz-heartbeat-bootstrap-<unix>) and waits for it.
+                  # (kubehz-heartbeat-bootstrap-<unix>-<pid>) and waits for it.
                   # We stop here, before the snapshot, the heartbeat POST and
                   # the desired-state poll. Exit 0: this tick did its work.
                   if [ "${KUBEHZ_HEARTBEAT_OWNER:-cronjob}" = "operator" ]; then

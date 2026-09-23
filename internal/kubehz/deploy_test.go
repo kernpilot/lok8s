@@ -149,7 +149,7 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 }
 
 // B244: a first deploy finds no identity Secret. The deploy runs the
-// CronJob's bootstrap once, waits for the Secret, removes the one-off job,
+// CronJob's bootstrap once, waits for its Job to complete, removes the one-off job,
 // and only then applies the live agent.
 func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	h := newHarness(t)
@@ -193,6 +193,7 @@ func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
 	h.env["KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS"] = "10"
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
 		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
+			io.WriteString(c.Stderr, "Error from server (NotFound): secrets \"kubehz-agent\" not found\n")
 			return true, exitErr(1)
 		}
 		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
@@ -204,6 +205,27 @@ func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
 	mustContain(t, h.output(), "did not complete within 10s")
 	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "live-agent", "managed"))
+}
+
+// A Secret read that fails for any reason but NotFound (RBAC, an unreachable
+// apiserver) is not "absent": the deploy stops, starts no bootstrap and applies
+// no live agent.
+func TestDeployApplyIdentitySecretUnreadableStops(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
+			io.WriteString(c.Stderr, "Error from server (Forbidden): secrets \"kubehz-agent\" is forbidden\n")
+			return true, exitErr(1)
+		}
+		return false, nil
+	})
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustContain(t, h.output(), "could not read Secret kubehz-agent")
+	mustContain(t, h.output(), "Forbidden")
+	joined := strings.Join(*log, "\n")
+	mustNotContain(t, joined, "create job")
+	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
 }
 
 func TestDeployApplyNeverReadyFails(t *testing.T) {
