@@ -722,7 +722,8 @@ _stub_kubectl_log() {
   run kubehz::deploy_apply "${work}" operator managed
   assert_success
   assert_output --partial "could not check for an in-flight heartbeat pod"
-  run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  # Line 2 reads the identity Secret (B244); the live agent follows on line 3.
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
 }
 
