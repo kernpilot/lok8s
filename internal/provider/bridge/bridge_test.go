@@ -202,14 +202,7 @@ func TestPATHPrependsProjectDirsOnce(t *testing.T) {
 // binary's own kustomize children; a clean shell has no such variable.
 func TestEnvCarriesKustomizePluginHome(t *testing.T) {
 	p := &config.Paths{Base: "/proj", Bin: "/proj/.bin", Clusters: "/proj/clusters"}
-	has := func(want string) bool {
-		for _, kv := range Env(p, "/tree") {
-			if kv == want {
-				return true
-			}
-		}
-		return false
-	}
+	has := func(want string) bool { return slices.Contains(Env(p, "/tree"), want) }
 	t.Setenv(config.KustomizePluginHomeEnv, "")
 	if !has("KUSTOMIZE_PLUGIN_HOME=/proj/.kustomize") {
 		t.Fatalf("Env lacks the project's plugin home: %v", Env(p, "/tree"))
