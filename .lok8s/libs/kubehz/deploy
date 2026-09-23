@@ -388,7 +388,7 @@ kubehz::deploy_apply() {
     #    a handover that an ImagePullBackOff quietly never completed.
     kubectl -n kubehz-system rollout status deployment/kubehz-live-agent \
       --timeout="${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s" || {
-      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
+      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image or an untolerated node taint is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
       return 1
     }
     return 0
