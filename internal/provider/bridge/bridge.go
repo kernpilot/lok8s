@@ -117,6 +117,11 @@ func Env(p *config.Paths, tree string) []string {
 		"PATH_CLUSTERS=" + p.Clusters,
 		"PATH_SECRETS=" + secretsVal,
 		"PATH_SCRIPTS=" + tree,
+		// The bash libs run kustomize with the project's plugin home, as the
+		// shim does for this binary's own kustomize children. Without it a
+		// clean shell's `lo provision` (kubeone driver) failed in the
+		// driver's render: "unable to find plugin root" (2026-09-23).
+		config.KustomizePluginHomeEnv + "=" + config.KustomizePluginHome(p),
 	}
 }
 

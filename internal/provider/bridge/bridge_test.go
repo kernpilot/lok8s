@@ -197,3 +197,17 @@ func TestPATHPrependsProjectDirsOnce(t *testing.T) {
 		t.Errorf("PATH = %q", got)
 	}
 }
+
+// The bash tree's kustomize runs need the plugin home the shim gives the
+// binary's own kustomize children; a clean shell has no such variable.
+func TestEnvCarriesKustomizePluginHome(t *testing.T) {
+	t.Setenv(config.KustomizePluginHomeEnv, "")
+	p := &config.Paths{Base: "/proj", Bin: "/proj/.bin", Clusters: "/proj/clusters"}
+	want := config.KustomizePluginHomeEnv + "=" + config.KustomizePluginHome(p)
+	for _, kv := range Env(p, "/tree") {
+		if kv == want {
+			return
+		}
+	}
+	t.Fatalf("Env lacks %s", want)
+}
