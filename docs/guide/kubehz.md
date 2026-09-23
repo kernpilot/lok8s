@@ -612,6 +612,9 @@ namespace that runs **every five minutes** and POSTs a status snapshot to
 is why it stays deployed even when the live agent takes over the heartbeat: it
 creates the identity Secret and enrolls it, and the live agent only reads that
 Secret. Properties worth knowing:
+Both agents tolerate the control-plane taint, so a cluster with no worker
+yet, or one that is control-plane-only by design, runs them on the control
+plane.
 
 - **Self-bootstrapping identity.** On each run the agent ensures one Secret,
   `kubehz-agent` in `kubehz-system`, holding a self-generated agent-token `A`

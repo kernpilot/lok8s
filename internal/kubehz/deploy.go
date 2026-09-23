@@ -269,7 +269,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, owner, access string
 		rollout := c.liveAgentRolloutSeconds()
 		if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "rollout", "status", "deployment/kubehz-live-agent",
 			"--timeout="+strconv.Itoa(rollout)+"s"); err != nil {
-			c.errorf("kubehz: the live agent was accepted but never became Ready within %ds. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back.", rollout)
+			c.errorf("kubehz: the live agent was accepted but never became Ready within %ds. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image or an untolerated node taint is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back.", rollout)
 			return ErrHandled
 		}
 		return nil
