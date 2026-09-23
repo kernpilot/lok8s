@@ -550,10 +550,38 @@ _stub_kubectl_log() {
   assert_failure
   assert_output --partial "could not read Secret kubehz-agent"
   assert_output --partial "Forbidden"
+  assert_output --partial "reporting NOTHING"
   run grep -c "create job" "${STUB_KUBECTL_LOG}"
   assert_output "0"
   run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
   assert_output "0"
+}
+
+@test "apply order (to operator): a NotFound behind a warning line still runs the bootstrap (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1e"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*)
+        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
+        echo "Warning: the kubeconfig field exec.apiVersion v1alpha1 is deprecated" >&2
+        echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
+      *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_success
+  run grep -c "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
+  assert_output "1"
 }
 
 @test "apply order (to operator): a live agent that never becomes Ready FAILS the deploy" {

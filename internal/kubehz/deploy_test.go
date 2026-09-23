@@ -182,7 +182,7 @@ func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	create := strings.Index(joined, "create job")
 	wait := strings.Index(joined, "wait --for=condition=complete")
 	del := strings.Index(joined, "delete job kubehz-heartbeat-bootstrap-")
-	if create < 0 || wait < 0 || del < 0 || live < 0 || !(create < wait && wait < del && del < live) {
+	if create < 0 || wait < 0 || del < 0 || live < 0 || create >= wait || wait >= del || del >= live {
 		t.Fatalf("expected create < wait < delete < live apply: %v", *log)
 	}
 }
@@ -223,9 +223,46 @@ func TestDeployApplyIdentitySecretUnreadableStops(t *testing.T) {
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
 	mustContain(t, h.output(), "could not read Secret kubehz-agent")
 	mustContain(t, h.output(), "Forbidden")
+	mustContain(t, h.output(), "reporting NOTHING")
 	joined := strings.Join(*log, "\n")
 	mustNotContain(t, joined, "create job")
 	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
+}
+
+// A probe that exits without output (a kubectl that could not start) names
+// the exec error, not an empty string.
+func TestDeployApplyIdentitySecretProbeWithoutOutputNamesTheError(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
+			return true, exitErr(127)
+		}
+		return false, nil
+	})
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustContain(t, h.output(), "could not read Secret kubehz-agent in kubehz-system: exit status 127")
+}
+
+// A warning line before the NotFound (a kubeconfig deprecation, say) still
+// reads as "absent": the bootstrap runs.
+func TestDeployApplyIdentitySecretNotFoundBehindAWarningBootstraps(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	completed := false
+	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
+			completed = true
+			return false, nil
+		}
+		if strings.Contains(argvLine(c), "get secret kubehz-agent") && !completed {
+			io.WriteString(c.Stderr, "Warning: the kubeconfig field exec.apiVersion v1alpha1 is deprecated\nError from server (NotFound): secrets \"kubehz-agent\" not found\n")
+			return true, exitErr(1)
+		}
+		return false, nil
+	})
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustContain(t, strings.Join(*log, "\n"), "create job kubehz-heartbeat-bootstrap-")
 }
 
 func TestDeployApplyNeverReadyFails(t *testing.T) {
