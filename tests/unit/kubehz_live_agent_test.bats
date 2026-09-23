@@ -471,7 +471,7 @@ _stub_kubectl_log() {
   local work="${BATS_TEST_TMPDIR}/a1b"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  # The Secret is absent until the bootstrap job has been created.
+  # The Secret is absent until the one-off bootstrap Job has completed.
   export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
   kubectl() {
     case "$*" in
@@ -480,14 +480,12 @@ _stub_kubectl_log() {
         echo "$*" >> "${STUB_KUBECTL_LOG}"
         [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
         echo "Error from server (NotFound): secrets \"kubehz-agent\" not found" >&2; return 1 ;;
-      *"create job"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
+      *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
   }
   export -f kubectl
-  sleep() { :; }
-  export -f sleep
 
   run kubehz::deploy_apply "${work}" operator managed
   assert_success
@@ -495,12 +493,15 @@ _stub_kubectl_log() {
   run grep -n "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
   assert_success
   assert_output --partial -- "--from=cronjob/kubehz-heartbeat"
-  # The job is created after the CronJob apply and before the live agent.
-  local job_line live_line
-  job_line=$(grep -n "create job" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  # create, wait for completion, delete, then the live agent — in that order,
+  # after the CronJob apply.
+  local create_line wait_line del_line live_line
+  create_line=$(grep -n "create job" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  wait_line=$(grep -n "wait --for=condition=complete job/kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
+  del_line=$(grep -n "delete job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
   live_line=$(grep -n "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}" | head -1 | cut -d: -f1)
-  [ "${job_line}" -gt 1 ] && [ "${job_line}" -lt "${live_line}" ]
-  run grep -c "delete job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
+  [ "${create_line}" -gt 1 ] && [ "${create_line}" -lt "${wait_line}" ] && [ "${wait_line}" -lt "${del_line}" ] && [ "${del_line}" -lt "${live_line}" ]
+  run grep -c -- "--timeout=150s" "${STUB_KUBECTL_LOG}"
   assert_output "1"
 }
 
@@ -514,18 +515,17 @@ _stub_kubectl_log() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
       *"get secret kubehz-agent"*) return 1 ;;
+      *"wait --for=condition=complete"*) echo "error: timed out waiting for the condition" >&2; return 1 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
   }
   export -f kubectl
-  sleep() { :; }
-  export -f sleep
   export KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS=10
 
   run kubehz::deploy_apply "${work}" operator managed
   assert_failure
-  assert_output --partial "did not appear within 10s"
+  assert_output --partial "did not complete within 10s"
   run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }

@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// The three waits, all in seconds, all overridable from the environment.
+// The four waits, all in seconds, all overridable from the environment.
 func (c *Context) envSeconds(name string, def int) int {
 	if v := c.getenv(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -316,11 +316,12 @@ func podLines(out string) bool {
 
 func oneLine(s string) string { return strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", " ") }
 
-// waitHeartbeatIdle ports kubehz::wait_heartbeat_idle — FAIL-SOFT: an
-// unreadable probe or a stuck pod WARNS and lets the deploy continue.
 // ensureIdentitySecret runs the CronJob's bootstrap once when the identity
-// Secret kubehz-agent is absent (a first deploy), then waits for the Secret.
-// The bootstrap's own deadline is 120 s; the wait allows a little more.
+// Secret kubehz-agent is absent (a first deploy) and waits for that Job to
+// COMPLETE, not only for the Secret: the bootstrap writes the Secret first
+// and registers the agent after it, so a Job cut off at the Secret would
+// leave an unenrolled token until the CronJob's next tick. The Job's own
+// deadline is 120 s; the wait allows a little more.
 func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 	if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err == nil {
 		return nil
@@ -332,19 +333,20 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 		return ErrHandled
 	}
 	wait := c.envSeconds("KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS", 150)
-	for waited := 0; waited < wait; waited += 5 {
-		if c.sleep(ctx, 5*time.Second) != nil {
-			return ctx.Err()
-		}
-		if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err == nil {
-			_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
-			return nil
-		}
+	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "wait", "--for=condition=complete", "job/"+job, "--timeout="+strconv.Itoa(wait)+"s"); err != nil {
+		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. Read its log: kubectl -n kubehz-system logs job/%s (an unreachable api or a refused registration is the usual cause). The live agent was NOT applied.", job, wait, job)
+		return ErrHandled
 	}
-	c.errorf("kubehz: the identity Secret kubehz-agent did not appear within %ds. Read the bootstrap's log: kubectl -n kubehz-system logs job/%s (an unreachable api or a refused registration is the usual cause). The live agent was NOT applied.", wait, job)
-	return ErrHandled
+	if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err != nil {
+		c.errorf("kubehz: the identity bootstrap (job/%s) completed but left no Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/%s. The live agent was NOT applied.", job, job)
+		return ErrHandled
+	}
+	_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
+	return nil
 }
 
+// waitHeartbeatIdle ports kubehz::wait_heartbeat_idle — FAIL-SOFT: an
+// unreadable probe or a stuck pod WARNS and lets the deploy continue.
 func (c *Context) waitHeartbeatIdle(ctx context.Context) {
 	drain := c.heartbeatDrainSeconds()
 	for waited := 0; waited < drain; waited += 5 {

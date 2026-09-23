@@ -154,15 +154,16 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
-	polls := 0
+	// Absent before the bootstrap, present once the one-off Job completed.
+	completed := false
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
-		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
-			polls++
-			if polls <= 2 {
-				io.WriteString(c.Stderr, "Error from server (NotFound): secrets \"kubehz-agent\" not found\n")
-				return true, exitErr(1)
-			}
-			return true, nil
+		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
+			completed = true
+			return false, nil
+		}
+		if strings.Contains(argvLine(c), "get secret kubehz-agent") && !completed {
+			io.WriteString(c.Stderr, "Error from server (NotFound): secrets \"kubehz-agent\" not found\n")
+			return true, exitErr(1)
 		}
 		return false, nil
 	})
@@ -171,14 +172,18 @@ func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	joined := strings.Join(*log, "\n")
 	mustContain(t, joined, "create job kubehz-heartbeat-bootstrap-")
 	mustContain(t, joined, "--from=cronjob/kubehz-heartbeat")
-	mustContain(t, joined, "delete job kubehz-heartbeat-bootstrap-")
+	mustContain(t, joined, "wait --for=condition=complete job/kubehz-heartbeat-bootstrap-")
+	mustContain(t, joined, "--timeout=150s")
 	if !strings.Contains((*log)[0], "apply -k "+filepath.Join(work, "agent")) {
 		t.Fatalf("the CronJob agent must be applied first: %v", *log)
 	}
+	// create, wait, delete, then the live agent — in that order.
 	live := strings.Index(joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
-	job := strings.Index(joined, "create job")
-	if job < 0 || live < 0 || job > live {
-		t.Fatalf("the bootstrap job must run before the live agent is applied: %v", *log)
+	create := strings.Index(joined, "create job")
+	wait := strings.Index(joined, "wait --for=condition=complete")
+	del := strings.Index(joined, "delete job kubehz-heartbeat-bootstrap-")
+	if create < 0 || wait < 0 || del < 0 || live < 0 || !(create < wait && wait < del && del < live) {
+		t.Fatalf("expected create < wait < delete < live apply: %v", *log)
 	}
 }
 
@@ -190,10 +195,14 @@ func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
 		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
 			return true, exitErr(1)
 		}
+		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
+			io.WriteString(c.Stderr, "error: timed out waiting for the condition on jobs/kubehz-heartbeat-bootstrap\n")
+			return true, exitErr(1)
+		}
 		return false, nil
 	})
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
-	mustContain(t, h.output(), "did not appear within 10s")
+	mustContain(t, h.output(), "did not complete within 10s")
 	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "live-agent", "managed"))
 }
 
