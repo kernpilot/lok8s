@@ -254,6 +254,65 @@ docker() {
   assert_output "10.125.125.192/26"
 }
 
+@test "network_bridge_name: a name of at most 15 bytes (IFNAMSIZ-1) is unchanged" {
+  _load_driver
+  run lo::network_bridge_name "kubehz"
+  assert_success
+  assert_output "kubehz"
+  run lo::network_bridge_name "fifteen-chars-x"
+  assert_success
+  assert_output "fifteen-chars-x"
+}
+
+@test "network_bridge_name: a longer name becomes lo-<12 hex of sha256>" {
+  _load_driver
+  run lo::network_bridge_name "crowdhour36t01-0"
+  assert_success
+  assert_output "lo-490238385610"
+}
+
+@test "network_bridge_name: without sha256sum the digest comes from shasum -a 256" {
+  _load_driver
+  # The runner may carry neither tool (CI has no shasum): both are stubs.
+  # The stub answers the coreutils format for the known input only, so the
+  # test proves the fallback is called with -a 256 and read from stdin.
+  sha256sum() { return 127; }
+  shasum() {
+    [[ "$*" == "-a 256" ]] || return 2
+    [[ "$(cat)" == "crowdhour36t01-0" ]] || return 3
+    echo "490238385610ffffffffffffffffffffffffffffffffffffffffffffffffffff  -"
+  }
+  export -f sha256sum shasum
+  run lo::network_bridge_name "crowdhour36t01-0"
+  assert_success
+  assert_output "lo-490238385610"
+}
+
+@test "network_bridge_name: with neither tool the name fails loudly" {
+  _load_driver
+  sha256sum() { return 127; }
+  shasum() { return 127; }
+  export -f sha256sum shasum
+  run lo::network_bridge_name "crowdhour36t01-0"
+  assert_failure
+  assert_output --partial "needs sha256sum or shasum"
+}
+
+@test "network: a long project name gets a bridge the kernel accepts" {
+  _load_driver
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK="crowdhour36t01-0"
+  rm -f "${FAKE_DOCKER}/networks/crowdhour36t01-0"
+
+  run lo::network
+  assert_success
+  grep -q -- "bridge.name=crowdhour36t01-0" "${DOCKER_LOG}" && {
+    echo "the 16-character network name was passed as the bridge name;" >&2
+    echo "docker answers \"numerical result out of range\"." >&2
+    return 1
+  }
+  grep -q -- "bridge.name=lo-490238385610" "${DOCKER_LOG}"
+}
+
 @test "network: fresh project network reserves the node range" {
   _load_driver
   rm -f "${FAKE_DOCKER}/networks/lok8s"

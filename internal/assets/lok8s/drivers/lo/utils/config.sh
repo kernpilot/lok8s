@@ -2,7 +2,7 @@
 # config.sh — Lo driver config readers, validators, and spec-env export
 #
 # Exported interface (set after lo::read_config):
-#   KIND_EXPERIMENTAL_DOCKER_NETWORK  — docker bridge name
+#   KIND_EXPERIMENTAL_DOCKER_NETWORK  — docker network name (the host bridge is named by lo::network_bridge_name)
 #   LOK8S_NETWORK_CIDR                — project /24 subnet
 #   LOK8S_NETWORK_SUBNET              — alias for CIDR
 #   LOK8S_NETWORK_BASE_IP             — /24 base (e.g. 10.125.130.0)

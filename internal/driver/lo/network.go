@@ -5,6 +5,8 @@ package lo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +16,24 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/ui"
 )
+
+// bridgeMaxLen is IFNAMSIZ-1: the longest name a Linux network interface
+// can carry (IFNAMSIZ is 16 and counts the NUL terminator).
+const bridgeMaxLen = 15
+
+// bridgeName is the host bridge interface for a project network (bash:
+// lo::network_bridge_name). A name of at most bridgeMaxLen bytes is used
+// as it is, so every existing bridge keeps its name. A longer one becomes
+// "lo-<12 hex of its sha256>": Docker hands the option to the kernel
+// unchecked, and the kernel answers a 16-byte name with "numerical
+// result out of range".
+func bridgeName(network string) string {
+	if len(network) <= bridgeMaxLen {
+		return network
+	}
+	sum := sha256.Sum256([]byte(network))
+	return "lo-" + hex.EncodeToString(sum[:])[:12]
+}
 
 // network ensures the project docker bridge exists with the reserved
 // dynamic range (bash: lo::network).
@@ -50,7 +70,7 @@ func (d *Driver) network(ctx context.Context, errOut io.Writer) error {
 			args = append(args, "--ip-range", rng)
 		}
 		args = append(args,
-			"-o", "com.docker.network.bridge.name="+network,
+			"-o", "com.docker.network.bridge.name="+bridgeName(network),
 			"-o", "com.docker.network.bridge.enable_ip_masquerade=true",
 			"-o", "com.docker.network.bridge.enable_icc=true",
 			"-o", "com.docker.network.bridge.host_binding_ipv4=0.0.0.0",

@@ -32,12 +32,39 @@ lo::network() {
     fi
     docker network create -d=bridge --subnet "${subnet}" \
       "${ip_range_args[@]}" \
-      -o "com.docker.network.bridge.name=${network}" \
+      -o "com.docker.network.bridge.name=$(lo::network_bridge_name "${network}")" \
       -o "com.docker.network.bridge.enable_ip_masquerade=true" \
       -o "com.docker.network.bridge.enable_icc=true" \
       -o "com.docker.network.bridge.host_binding_ipv4=0.0.0.0" \
       "${network}"
   fi
+}
+
+# lo::network_bridge_name <network> — the host bridge interface for a
+# project network. A name of at most 15 bytes (IFNAMSIZ-1: IFNAMSIZ is 16
+# and counts the NUL terminator) is used as it is, so every existing
+# bridge keeps its name. A longer one becomes "lo-<12 hex of its sha256>":
+# Docker hands the option to the kernel unchecked, and the kernel answers
+# a 16-byte name with "numerical result out of range". Same rule as the
+# Go driver's bridgeName: bytes, not characters, and the hash of the raw
+# bytes without a newline.
+lo::network_bridge_name() {
+  local network="${1}"
+  local -i bytes
+  bytes="$(printf '%s' "${network}" | wc -c)"
+  if (( bytes <= 15 )); then
+    echo "${network}"
+    return 0
+  fi
+  # coreutils on Linux, shasum on macOS (the kubehz lib does the same).
+  local sum
+  sum="$(printf '%s' "${network}" | sha256sum 2>/dev/null | cut -c1-12)"
+  [[ -n "${sum}" ]] || sum="$(printf '%s' "${network}" | shasum -a 256 2>/dev/null | cut -c1-12)"
+  if [[ -z "${sum}" ]]; then
+    echo "error: lo::network_bridge_name needs sha256sum or shasum for the bridge name of '${network}'" >&2
+    return 1
+  fi
+  echo "lo-${sum}"
 }
 
 # lo::network_dynamic_range <cidr> — the upper QUARTER of <cidr> as its own
