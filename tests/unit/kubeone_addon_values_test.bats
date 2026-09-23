@@ -127,6 +127,21 @@ _inline_of() {
   [ "$(yq -r '.env.HCLOUD_LOAD_BALANCERS_ENABLED.value' <<<"${inline}")" = "false" ]
 }
 
+@test "render_addons: the network reaches the CCM WITHOUT Robot credentials (cloud-only cluster)" {
+  # A cloud-only cluster with a private network: the CCM must learn the
+  # network id or it refuses every node's private InternalIP and the
+  # nodes never initialize (2026-09-23, a one-node KubeOne cluster hung
+  # in "waiting for nodes to initialize by CCM").
+  unset HROBOT_USER HROBOT_PASSWORD
+  yq -i '.cloudProvider.hetzner.networkID = "net-7"' "${work_dir}/kubeone.yaml"
+  local cy; cy=$(_cluster_yaml '')
+  run kubeone::render_addons "${work_dir}" "${cy}"
+  [ "${status}" -eq 0 ]
+  local inline; inline=$(_inline_of ccm)
+  [ "$(yq -r '.env.HCLOUD_NETWORK.value' <<<"${inline}")" = "net-7" ]
+  [ "$(yq -r '.env.ROBOT_ENABLED // "absent"' <<<"${inline}")" = "absent" ]
+}
+
 @test "render_addons: on a COLLIDING key the cluster's ccm value wins (precedence, not just merge)" {
   # Non-colliding keys green under either operand order — this collision is
   # the only assertion that pins 'explicit cluster intent beats derived

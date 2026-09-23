@@ -538,17 +538,25 @@ kubeone::render_addons() {
   # required, HROBOT_* optional → omitted without a bare-metal worker), so the
   # creds the provider loaded into the env render straight in. No kubectl. Inline
   # robot values match the `ccm` bootstrap entry (HCLOUD_NETWORK = networkID).
+  # The private network reaches the CCM as HCLOUD_NETWORK whenever the
+  # manifest carries one: the CCM resolves a node's InternalIP against it,
+  # and without it a kubelet started with a private --node-ip is refused
+  # ("provided node ip ... is not valid") and the node never initializes.
+  # This used to hang off the Robot credentials, so every cloud-only
+  # cluster with a private network timed out in "waiting for nodes to
+  # initialize by CCM".
   local inline=""
+  local net_id; net_id=$(yq -r '.cloudProvider.hetzner.networkID // ""' "${manifest}" 2>/dev/null)
+  if [[ -n "${net_id}" ]]; then
+    # net_id is interpolated into inline YAML below — reject anything outside a
+    # safe charset so it can't inject fields or malform the values doc.
+    [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
+      || { error "render_addons: invalid networkID '${net_id}' (expected alphanumeric, '-' or '_')"; return 1; }
+    inline=$'env:\n'"  HCLOUD_NETWORK: {value: \"${net_id}\"}"
+  fi
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
-    local net_id; net_id=$(yq -r '.cloudProvider.hetzner.networkID // ""' "${manifest}" 2>/dev/null)
-    inline=$'env:\n  ROBOT_ENABLED: {value: "true"}\n  HCLOUD_NETWORK_ROUTES_ENABLED: {value: "false"}'
-    if [[ -n "${net_id}" ]]; then
-      # net_id is interpolated into inline YAML below — reject anything outside a
-      # safe charset so it can't inject fields or malform the values doc.
-      [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
-        || { error "render_addons: invalid networkID '${net_id}' (expected alphanumeric, '-' or '_')"; return 1; }
-      inline+=$'\n'"  HCLOUD_NETWORK: {value: \"${net_id}\"}"
-    fi
+    [[ -n "${inline}" ]] || inline=$'env:'
+    inline+=$'\n  ROBOT_ENABLED: {value: "true"}\n  HCLOUD_NETWORK_ROUTES_ENABLED: {value: "false"}'
   fi
   # The hcloud CCM secret embeds HCLOUD_TOKEN (the addon declares it required); fail
   # loud here rather than emit a Secret with an empty token the CCM can't auth with.
