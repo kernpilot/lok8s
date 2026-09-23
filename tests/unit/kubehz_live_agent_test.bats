@@ -503,6 +503,14 @@ _stub_kubectl_log() {
   [ "${create_line}" -gt 1 ] && [ "${create_line}" -lt "${wait_line}" ] && [ "${wait_line}" -lt "${del_line}" ] && [ "${del_line}" -lt "${live_line}" ]
   run grep -c -- "--timeout=150s" "${STUB_KUBECTL_LOG}"
   assert_output "1"
+  # The wait and the delete name the Job the create made, not another.
+  local name
+  name=$(grep -oE "create job kubehz-heartbeat-bootstrap-[0-9]+-[0-9a-f]{4} " "${STUB_KUBECTL_LOG}" | head -1 | awk '{print $3}')
+  [ -n "${name}" ]
+  run grep -c "wait --for=condition=complete job/${name} " "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run grep -c "delete job ${name} " "${STUB_KUBECTL_LOG}"
+  assert_output "1"
 }
 
 @test "apply order (to operator): an identity Secret that never appears FAILS the deploy before the live agent (B244)" {
@@ -526,7 +534,33 @@ _stub_kubectl_log() {
   run kubehz::deploy_apply "${work}" operator managed
   assert_failure
   assert_output --partial "did not complete within 10s"
+  assert_output --partial "describe job kubehz-heartbeat-bootstrap-"
   run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "delete job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply order (to operator): a Secret probe that exits without output names the exit status (B244)" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1f"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) return 127 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" operator managed
+  assert_failure
+  assert_output --partial "could not read Secret kubehz-agent in kubehz-system: kubectl exited without output (exit status 127)"
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }
 

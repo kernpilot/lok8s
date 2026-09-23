@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -174,6 +175,13 @@ func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	mustContain(t, joined, "--from=cronjob/kubehz-heartbeat")
 	mustContain(t, joined, "wait --for=condition=complete job/kubehz-heartbeat-bootstrap-")
 	mustContain(t, joined, "--timeout=150s")
+	// The wait and the delete name the Job the create made, not another.
+	name := regexp.MustCompile(`create job (kubehz-heartbeat-bootstrap-\d+-[0-9a-f]{4}) `).FindStringSubmatch(joined)
+	if name == nil {
+		t.Fatalf("no create job with the <unix>-<hex4> name in %v", *log)
+	}
+	mustContain(t, joined, "wait --for=condition=complete job/"+name[1]+" ")
+	mustContain(t, joined, "delete job "+name[1]+" ")
 	if !strings.Contains((*log)[0], "apply -k "+filepath.Join(work, "agent")) {
 		t.Fatalf("the CronJob agent must be applied first: %v", *log)
 	}
@@ -204,7 +212,11 @@ func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
 	})
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
 	mustContain(t, h.output(), "did not complete within 10s")
-	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	mustContain(t, h.output(), "describe job kubehz-heartbeat-bootstrap-")
+	joined := strings.Join(*log, "\n")
+	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	// The Job stays for the operator to read; the deploy does not delete it.
+	mustNotContain(t, joined, "delete job")
 }
 
 // A Secret read that fails for any reason but NotFound (RBAC, an unreachable
@@ -241,7 +253,7 @@ func TestDeployApplyIdentitySecretProbeWithoutOutputNamesTheError(t *testing.T) 
 		return false, nil
 	})
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
-	mustContain(t, h.output(), "could not read Secret kubehz-agent in kubehz-system: exit status 127")
+	mustContain(t, h.output(), "could not read Secret kubehz-agent in kubehz-system: kubectl exited without output (exit status 127)")
 }
 
 // A warning line before the NotFound (a kubeconfig deprecation, say) still

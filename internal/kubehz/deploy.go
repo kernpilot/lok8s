@@ -44,6 +44,12 @@ func (c *Context) liveAgentDrainSeconds() int {
 	return c.envSeconds("KUBEHZ_LIVE_AGENT_DRAIN_SECONDS", 120)
 }
 
+// How long a first deploy waits for the one-off identity bootstrap Job to
+// complete. The Job's own deadline is 120 s; this allows a little more.
+func (c *Context) identityBootstrapSeconds() int {
+	return c.envSeconds("KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS", 150)
+}
+
 // Deploy is `lo kubehz deploy [--dry-run]` for the active domain. Applies
 // against the AMBIENT kubeconfig.
 func (c *Context) Deploy(ctx context.Context, domain string, dryRun bool) error {
@@ -321,9 +327,10 @@ func oneLine(s string) string { return strings.ReplaceAll(strings.TrimRight(s, "
 // ensureIdentitySecret runs the CronJob's bootstrap once when the identity
 // Secret kubehz-agent is absent (a first deploy) and waits for that Job to
 // COMPLETE, not only for the Secret: the bootstrap writes the Secret first
-// and registers the agent after it, so a Job cut off at the Secret would
-// leave an unenrolled token until the CronJob's next tick. The Job's own
-// deadline is 120 s; the wait allows a little more.
+// and attempts the registration after it (best-effort; a refused POST still
+// completes the Job), so a Job cut off at the Secret would skip that attempt
+// until the CronJob's next tick. The Job's own deadline is 120 s; the wait
+// allows a little more.
 func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 	probe, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name")
 	if err == nil {
@@ -335,7 +342,7 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 	if !strings.Contains(probe, "NotFound") {
 		reason := strings.TrimSpace(probe)
 		if reason == "" {
-			reason = err.Error()
+			reason = "kubectl exited without output (" + err.Error() + ")"
 		}
 		c.errorf("kubehz: could not read Secret kubehz-agent in kubehz-system: %s. The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until you fix the kubeconfig or the RBAC and re-run 'lo kubehz deploy'.", reason)
 		return ErrHandled
@@ -348,16 +355,16 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 		c.errorf("kubehz: could not start the identity bootstrap (job/%s). The CronJob agent is applied and bootstraps on its next tick; re-run 'lo kubehz deploy' after that, or start a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-$(date +%%s) --from=cronjob/kubehz-heartbeat", job)
 		return ErrHandled
 	}
-	wait := c.envSeconds("KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS", 150)
+	wait := c.identityBootstrapSeconds()
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "wait", "--for=condition=complete", "job/"+job, "--timeout="+strconv.Itoa(wait)+"s"); err != nil {
-		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause; a Job that failed stays until you delete it. Read its log: kubectl -n kubehz-system logs job/%s; delete it after you read the log: kubectl -n kubehz-system delete job %s. The live agent was NOT applied.", job, wait, job, job)
+		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause; a Job that failed stays until you delete it. Read its state and its log: kubectl -n kubehz-system describe job %s; kubectl -n kubehz-system logs job/%s (the deadline removes the pod, so the log can be empty); delete it after you read them: kubectl -n kubehz-system delete job %s. The live agent was NOT applied.", job, wait, job, job, job)
 		return ErrHandled
 	}
 	if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err != nil {
 		c.errorf("kubehz: the identity bootstrap (job/%s) completed but left no Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/%s. The live agent was NOT applied.", job, job)
 		return ErrHandled
 	}
-	_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
+	_ = c.runQuiet(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
 	return nil
 }
 
