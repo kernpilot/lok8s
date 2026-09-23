@@ -349,7 +349,7 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 	}
 	// Unix seconds plus four random hex digits: two deploys in the same
 	// second, from two machines, get two Jobs.
-	job := "kubehz-heartbeat-bootstrap-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + randomHex4()
+	job := "kubehz-heartbeat-bootstrap-" + strconv.FormatInt(c.now().Unix(), 10) + "-" + randomHex4()
 	c.echo("kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/%s)…", job)
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "job", job, "--from=cronjob/kubehz-heartbeat"); err != nil {
 		c.errorf("kubehz: could not start the identity bootstrap (job/%s). The CronJob agent is applied with the live owner: it bootstraps the identity on its next tick but does not beat, and the live agent was NOT applied, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy' (after that tick, or after a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-$(date +%%s) --from=cronjob/kubehz-heartbeat).", job)
