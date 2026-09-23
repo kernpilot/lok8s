@@ -28,7 +28,7 @@ only then copies `lo` into place.
 Without the script — the same four steps by hand:
 
 ```sh
-V=v0.7.1; A=lo-linux-amd64.tar.gz        # pick your tag and platform
+V=v0.7.2; A=lo-linux-amd64.tar.gz        # pick your tag and platform
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
