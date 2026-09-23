@@ -187,3 +187,37 @@ func TestRegistryNetworkLegacyRecreateSurvivesLaggingEndpointRelease(t *testing.
 		t.Fatalf("network not recreated with range (got %q)", ipRange)
 	}
 }
+
+func TestBridgeNameFitsInterfaceLimit(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"kubehz":           "kubehz",          // fits: unchanged, existing bridges keep their name
+		"fifteen-chars-x":  "fifteen-chars-x", // exactly IFNAMSIZ-1: unchanged
+		"crowdhour36t01-0": "lo-490238385610", // 16: the kernel refuses it, hash instead
+	}
+	for network, want := range cases {
+		if got := bridgeName(network); got != want {
+			t.Errorf("bridgeName(%q) = %q want %q", network, got, want)
+		}
+		if len(bridgeName(network)) > bridgeMaxLen {
+			t.Errorf("bridgeName(%q) is longer than IFNAMSIZ-1", network)
+		}
+	}
+}
+
+func TestNetworkLongNameGetsAKernelSizedBridge(t *testing.T) {
+	d, _, fd, errBuf, _, _ := lifecycleDriver(t)
+	t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "crowdhour36t01-0")
+	os.Remove(fd.networkPath("crowdhour36t01-0"))
+
+	if err := d.network(t.Context(), errBuf); err != nil {
+		t.Fatalf("network: %v\n%s", err, errBuf.String())
+	}
+	joined := strings.Join(fd.log, "\n")
+	if strings.Contains(joined, "com.docker.network.bridge.name=crowdhour36t01-0") {
+		t.Fatal("the 16-character network name was passed as the bridge name — docker answers \"numerical result out of range\"")
+	}
+	if !strings.Contains(joined, "com.docker.network.bridge.name=lo-490238385610") {
+		t.Fatalf("the bridge was not named lo-<hash>:\n%s", joined)
+	}
+}

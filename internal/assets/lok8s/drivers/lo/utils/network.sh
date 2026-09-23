@@ -32,12 +32,29 @@ lo::network() {
     fi
     docker network create -d=bridge --subnet "${subnet}" \
       "${ip_range_args[@]}" \
-      -o "com.docker.network.bridge.name=${network}" \
+      -o "com.docker.network.bridge.name=$(lo::network_bridge_name "${network}")" \
       -o "com.docker.network.bridge.enable_ip_masquerade=true" \
       -o "com.docker.network.bridge.enable_icc=true" \
       -o "com.docker.network.bridge.host_binding_ipv4=0.0.0.0" \
       "${network}"
   fi
+}
+
+# lo::network_bridge_name <network> — the host bridge interface for a
+# project network. A name that fits IFNAMSIZ (15 characters) is used as it
+# is, so every existing bridge keeps its name. A longer one becomes
+# "lo-<12 hex of its sha256>": Docker hands the option to the kernel
+# unchecked, and the kernel answers a 16-character name with "numerical
+# result out of range".
+lo::network_bridge_name() {
+  local network="${1}"
+  if (( ${#network} <= 15 )); then
+    echo "${network}"
+    return 0
+  fi
+  local sum
+  sum="$(printf '%s' "${network}" | sha256sum | cut -c1-12)"
+  echo "lo-${sum}"
 }
 
 # lo::network_dynamic_range <cidr> — the upper QUARTER of <cidr> as its own
