@@ -144,7 +144,7 @@ _inline_of() {
 
 @test "render_addons: a static CLOUD worker needs no Robot credentials" {
   # A cloud VM declared as a worker in server[] is a static host the hcloud
-  # CCM finds by itself; only a #cloud.root server is Robot's business
+  # CCM finds by itself; only a #cloud.root server needs Robot access
   # (2026-09-23: a cloud-only cluster with one declared worker was refused).
   unset HROBOT_USER HROBOT_PASSWORD
   yq -i '.staticWorkers.hosts = [{"publicAddress": "10.0.0.9"}]' "${work_dir}/kubeone.yaml"

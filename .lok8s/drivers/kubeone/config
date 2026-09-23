@@ -522,8 +522,8 @@ kubeone::render_addons() {
   addons::render "${PATH_LOK8S}/addons/cilium" kubeone hetzner "${cilium_user_values}" \
     > "${addons_dir}/cilium/cilium.yaml" || { error "render cilium addon failed"; return 1; }
 
-  # Context validation (BEFORE rendering the CCM): a bare-metal (static) worker
-  # MUST have Robot creds, or the CCM deletes its Node as "gone from the cloud".
+  # Context validation (BEFORE rendering the CCM): a bare-metal server MUST
+  # have Robot creds, or the CCM deletes its Node as "gone from the cloud".
   # The generator omits the robot keys when HROBOT_* are unset (keeps the addon
   # portable), so catch the real gap HERE — an early, legible error beats
   # rendering an addon we'd only reject, then a 10-minute CCM-init timeout + flap.
@@ -534,6 +534,8 @@ kubeone::render_addons() {
   local nmetal=0
   if [[ -f "$(dirname "${manifest}")/hetzner.dump.json" ]]; then
     nmetal=$(jq '[(.server // [])[] | select(.["#cloud.root"] == "true")] | length' "$(dirname "${manifest}")/hetzner.dump.json" 2>/dev/null || echo 0)
+  else
+    warn "render_addons: no hetzner.dump.json beside the manifest; the bare-metal check is skipped"
   fi
   if (( nmetal > 0 )) && [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
     error "render_addons: bare-metal server present but Robot creds missing (HROBOT_USER/HROBOT_PASSWORD)"
@@ -542,7 +544,7 @@ kubeone::render_addons() {
   fi
 
   # ccm (robot-aware) — the addon now ALSO emits the `hcloud` secret (env: token
-  # required, HROBOT_* optional → omitted without a bare-metal worker), so the
+  # required, HROBOT_* optional → omitted without a bare-metal server), so the
   # creds the provider loaded into the env render straight in. No kubectl. The
   # inline values match the `ccm` bootstrap entry.
   # The private network reaches the CCM as HCLOUD_NETWORK whenever the
