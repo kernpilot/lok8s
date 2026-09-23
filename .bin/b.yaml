@@ -42,7 +42,7 @@ binaries:
   github.com/kernpilot/lok8s:
     alias: lo
     asset: lo-[^f]*.tar.gz
-    version: v0.7.3
+    version: v0.7.4
     groups: [core]
 
   # kustomize + khelm: what `lo` CORE execs for every render (the pinned

@@ -8,7 +8,7 @@
     }
   },
   "spec": {
-    "lok8sVersion": "0.7.3",
+    "lok8sVersion": "0.7.4",
     "kind": "kubeone",
     "specHash": "d1a5a01e5d0438736d0ad1c5323dcf2f4ade9c2eb1bcc2493cd2cc74ece655cb",
     "renderedAt": "2023-11-14T22:13:20Z",
