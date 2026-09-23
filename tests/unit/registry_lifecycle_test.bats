@@ -271,14 +271,31 @@ docker() {
   assert_output "lo-490238385610"
 }
 
-@test "network_bridge_name: the shasum fallback gives the same name" {
+@test "network_bridge_name: without sha256sum the digest comes from shasum -a 256" {
   _load_driver
+  # The runner may carry neither tool (CI has no shasum): both are stubs.
+  # The stub answers the coreutils format for the known input only, so the
+  # test proves the fallback is called with -a 256 and read from stdin.
   sha256sum() { return 127; }
-  export -f sha256sum
-  hash -r
+  shasum() {
+    [[ "$*" == "-a 256" ]] || return 2
+    [[ "$(cat)" == "crowdhour36t01-0" ]] || return 3
+    echo "490238385610ffffffffffffffffffffffffffffffffffffffffffffffffffff  -"
+  }
+  export -f sha256sum shasum
   run lo::network_bridge_name "crowdhour36t01-0"
   assert_success
   assert_output "lo-490238385610"
+}
+
+@test "network_bridge_name: with neither tool the name fails loudly" {
+  _load_driver
+  sha256sum() { return 127; }
+  shasum() { return 127; }
+  export -f sha256sum shasum
+  run lo::network_bridge_name "crowdhour36t01-0"
+  assert_failure
+  assert_output --partial "needs sha256sum or shasum"
 }
 
 @test "network: a long project name gets a bridge the kernel accepts" {
