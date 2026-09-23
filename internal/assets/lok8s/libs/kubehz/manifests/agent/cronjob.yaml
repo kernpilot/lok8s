@@ -24,6 +24,15 @@ spec:
         spec:
           serviceAccountName: kubehz-agent
           restartPolicy: Never
+          # The heartbeat runs on a control-plane-only cluster too (B242): the
+          # same tolerations as the live agent's Deployment.
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
           containers:
             - name: heartbeat
               # alpine/k8s carries a shell + bash/curl/kubectl/sha256sum/coreutils

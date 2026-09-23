@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -95,4 +96,26 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// B242: a self-hosted cluster can be control-plane-only, or its workers can
+// join after the deploy; both agent pods must tolerate the control-plane
+// taint or the cluster reports nothing.
+func TestAgentManifestsTolerateTheControlPlaneTaint(t *testing.T) {
+	root := filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "kubehz", "manifests")
+	for _, rel := range []string{"live-agent/base/deployment.yaml", "agent/cronjob.yaml"} {
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"node-role.kubernetes.io/control-plane", "node-role.kubernetes.io/master"} {
+			want := "- key: " + key + "\n"
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s: no toleration for %s", rel, key)
+			}
+		}
+		if !strings.Contains(string(b), "effect: NoSchedule") {
+			t.Errorf("%s: the tolerations carry no NoSchedule effect", rel)
+		}
+	}
 }
