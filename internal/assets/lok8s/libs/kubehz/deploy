@@ -378,6 +378,11 @@ kubehz::deploy_apply() {
     #    and will still POST once. Wait it out, so the live agent's first beat
     #    cannot overlap it.
     kubehz::wait_heartbeat_idle
+    # 2b. The identity Secret. The live agent mounts kubehz-agent, which only
+    #     the CronJob's bootstrap creates, on its next five-minute tick; a
+    #     first deploy that waits for the rollout alone loses that race about
+    #     half the time (B244). Run the bootstrap now and wait for the Secret.
+    kubehz::ensure_identity_secret || return 1
     # 3. Now the live agent, which becomes the only producer.
     kubectl apply -k "${overlay}" || {
       error "kubehz: could not apply the live agent. The CronJob is no longer beating (KUBEHZ_HEARTBEAT_OWNER=operator), so this cluster is reporting NOTHING until you retry or set spec.kubehz.agent back to cronjob and re-run."
@@ -438,6 +443,31 @@ kubehz::deploy_apply() {
 # deadline, WARNS and lets the deploy continue. Its worst case is one last
 # schema-1 beat overlapping the live agent's first, which the live agent
 # overwrites within a minute — not a standing second producer.
+# Run the CronJob's bootstrap once when the identity Secret kubehz-agent is
+# absent (a first deploy), then wait for the Secret (the bootstrap's own
+# deadline is 120 s; the wait allows a little more).
+kubehz::ensure_identity_secret() {
+  if kubectl -n kubehz-system get secret kubehz-agent -o name >/dev/null 2>&1; then
+    return 0
+  fi
+  local job="kubehz-heartbeat-bootstrap-$(date +%s)"
+  echo "kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/${job})…"
+  kubectl -n kubehz-system create job "${job}" --from=cronjob/kubehz-heartbeat || {
+    error "kubehz: could not start the identity bootstrap (job/${job}). The CronJob agent is applied and bootstraps on its next tick; re-run 'lo kubehz deploy' after that, or start the job by hand: kubectl -n kubehz-system create job ${job} --from=cronjob/kubehz-heartbeat"
+    return 1
+  }
+  local wait="${KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS:-150}" waited=0
+  while (( waited < wait )); do
+    sleep 5; waited=$((waited + 5))
+    if kubectl -n kubehz-system get secret kubehz-agent -o name >/dev/null 2>&1; then
+      kubectl -n kubehz-system delete job "${job}" --ignore-not-found=true >/dev/null 2>&1 || true
+      return 0
+    fi
+  done
+  error "kubehz: the identity Secret kubehz-agent did not appear within ${wait}s. Read the bootstrap's log: kubectl -n kubehz-system logs job/${job} (an unreachable api or a refused registration is the usual cause). The live agent was NOT applied."
+  return 1
+}
+
 kubehz::wait_heartbeat_idle() {
   local waited=0 out rc running
   while (( waited < KUBEHZ_HEARTBEAT_DRAIN_SECONDS )); do

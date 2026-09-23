@@ -135,13 +135,66 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 	work := renderInto(t, h, "operator", "managed")
 	log := kubectlLogger(h, nil)
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
-	if len(*log) != 3 {
+	if len(*log) != 4 {
 		t.Fatalf("calls: %v", *log)
 	}
 	mustContain(t, (*log)[0], "apply -k "+filepath.Join(work, "agent"))
-	mustContain(t, (*log)[1], "apply -k "+filepath.Join(work, "live-agent", "managed"))
-	mustContain(t, (*log)[2], "rollout status deployment/kubehz-live-agent")
-	mustContain(t, (*log)[2], "--timeout=120s")
+	// The identity Secret is read between the two applies (B244): present
+	// here, so no bootstrap job runs.
+	mustContain(t, (*log)[1], "get secret kubehz-agent")
+	mustContain(t, (*log)[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	mustContain(t, (*log)[3], "rollout status deployment/kubehz-live-agent")
+	mustContain(t, (*log)[3], "--timeout=120s")
+	mustNotContain(t, strings.Join(*log, "\n"), "create job")
+}
+
+// B244: a first deploy finds no identity Secret. The deploy runs the
+// CronJob's bootstrap once, waits for the Secret, removes the one-off job,
+// and only then applies the live agent.
+func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	polls := 0
+	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
+			polls++
+			if polls <= 2 {
+				io.WriteString(c.Stderr, "Error from server (NotFound): secrets \"kubehz-agent\" not found\n")
+				return true, exitErr(1)
+			}
+			return true, nil
+		}
+		return false, nil
+	})
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustContain(t, h.output(), "running the CronJob's bootstrap once")
+	joined := strings.Join(*log, "\n")
+	mustContain(t, joined, "create job kubehz-heartbeat-bootstrap-")
+	mustContain(t, joined, "--from=cronjob/kubehz-heartbeat")
+	mustContain(t, joined, "delete job kubehz-heartbeat-bootstrap-")
+	if !strings.Contains((*log)[0], "apply -k "+filepath.Join(work, "agent")) {
+		t.Fatalf("the CronJob agent must be applied first: %v", *log)
+	}
+	live := strings.Index(joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	job := strings.Index(joined, "create job")
+	if job < 0 || live < 0 || job > live {
+		t.Fatalf("the bootstrap job must run before the live agent is applied: %v", *log)
+	}
+}
+
+func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	h.env["KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS"] = "10"
+	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
+			return true, exitErr(1)
+		}
+		return false, nil
+	})
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustContain(t, h.output(), "did not appear within 10s")
+	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "live-agent", "managed"))
 }
 
 func TestDeployApplyNeverReadyFails(t *testing.T) {
@@ -246,7 +299,8 @@ func TestDeployApplyUnreadableHeartbeatProbeWarnsAndContinues(t *testing.T) {
 	}
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
 	mustContain(t, h.output(), "could not check for an in-flight heartbeat pod")
-	mustContain(t, log[1], "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	mustContain(t, log[1], "get secret kubehz-agent")
+	mustContain(t, log[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))
 }
 
 func TestWaitsIgnoreApiserverWarnings(t *testing.T) {

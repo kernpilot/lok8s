@@ -260,6 +260,13 @@ func (c *Context) deployApply(ctx context.Context, workdir, owner, access string
 		}
 		// 2. Wait out an in-flight heartbeat pod (fail-soft).
 		c.waitHeartbeatIdle(ctx)
+		// 2b. The identity Secret. The live agent mounts kubehz-agent, which only
+		// the CronJob's bootstrap creates, on its next five-minute tick; a first
+		// deploy that waits for the rollout alone loses that race about half
+		// the time (B244). Run the bootstrap now and wait for the Secret.
+		if err := c.ensureIdentitySecret(ctx); err != nil {
+			return err
+		}
 		// 3. The live agent, which becomes the only producer.
 		if err := c.run(ctx, "kubectl", "apply", "-k", overlay); err != nil {
 			c.errorf("kubehz: could not apply the live agent. The CronJob is no longer beating (KUBEHZ_HEARTBEAT_OWNER=operator), so this cluster is reporting NOTHING until you retry or set spec.kubehz.agent back to cronjob and re-run.")
@@ -311,6 +318,33 @@ func oneLine(s string) string { return strings.ReplaceAll(strings.TrimRight(s, "
 
 // waitHeartbeatIdle ports kubehz::wait_heartbeat_idle — FAIL-SOFT: an
 // unreadable probe or a stuck pod WARNS and lets the deploy continue.
+// ensureIdentitySecret runs the CronJob's bootstrap once when the identity
+// Secret kubehz-agent is absent (a first deploy), then waits for the Secret.
+// The bootstrap's own deadline is 120 s; the wait allows a little more.
+func (c *Context) ensureIdentitySecret(ctx context.Context) error {
+	if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err == nil {
+		return nil
+	}
+	job := "kubehz-heartbeat-bootstrap-" + strconv.FormatInt(time.Now().Unix(), 10)
+	c.echo("kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/%s)…", job)
+	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "job", job, "--from=cronjob/kubehz-heartbeat"); err != nil {
+		c.errorf("kubehz: could not start the identity bootstrap (job/%s). The CronJob agent is applied and bootstraps on its next tick; re-run 'lo kubehz deploy' after that, or start the job by hand: kubectl -n kubehz-system create job %s --from=cronjob/kubehz-heartbeat", job, job)
+		return ErrHandled
+	}
+	wait := c.envSeconds("KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS", 150)
+	for waited := 0; waited < wait; waited += 5 {
+		if c.sleep(ctx, 5*time.Second) != nil {
+			return ctx.Err()
+		}
+		if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err == nil {
+			_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
+			return nil
+		}
+	}
+	c.errorf("kubehz: the identity Secret kubehz-agent did not appear within %ds. Read the bootstrap's log: kubectl -n kubehz-system logs job/%s (an unreachable api or a refused registration is the usual cause). The live agent was NOT applied.", wait, job)
+	return ErrHandled
+}
+
 func (c *Context) waitHeartbeatIdle(ctx context.Context) {
 	drain := c.heartbeatDrainSeconds()
 	for waited := 0; waited < drain; waited += 5 {
