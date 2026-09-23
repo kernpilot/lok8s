@@ -474,7 +474,7 @@ kubehz::ensure_identity_secret() {
   }
   local wait="${KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS}"
   kubectl -n kubehz-system wait --for=condition=complete "job/${job}" --timeout="${wait}s" || {
-    error "kubehz: the identity bootstrap (job/${job}) did not complete within ${wait}s. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause; a Job that failed stays until you delete it. Read its state and its log: kubectl -n kubehz-system describe job ${job}; kubectl -n kubehz-system logs job/${job} (the deadline removes the pod, so the log can be empty); delete it after you read them: kubectl -n kubehz-system delete job ${job}. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
+    error "kubehz: the identity bootstrap (job/${job}) did not complete within ${wait}s. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause. A Job that failed stays until you delete it. Read its state: kubectl -n kubehz-system describe job ${job}. Read its log: kubectl -n kubehz-system logs job/${job} (after the deadline the pod is gone and this call fails). Delete it after you read them: kubectl -n kubehz-system delete job ${job}. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
     return 1
   }
   kubectl -n kubehz-system get secret kubehz-agent -o name >/dev/null 2>&1 || {

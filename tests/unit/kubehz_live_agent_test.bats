@@ -465,7 +465,7 @@ _stub_kubectl_log() {
   assert_output --partial "rollout status deployment/kubehz-live-agent"
 }
 
-@test "apply order (to operator): a first deploy runs the CronJob's bootstrap once and waits for the identity Secret (B244)" {
+@test "apply order (to operator): a first deploy runs the CronJob's bootstrap once and waits for its Job to complete (B244)" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1b"

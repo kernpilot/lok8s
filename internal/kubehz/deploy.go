@@ -357,7 +357,7 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 	}
 	wait := c.identityBootstrapSeconds()
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "wait", "--for=condition=complete", "job/"+job, "--timeout="+strconv.Itoa(wait)+"s"); err != nil {
-		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause; a Job that failed stays until you delete it. Read its state and its log: kubectl -n kubehz-system describe job %s; kubectl -n kubehz-system logs job/%s (the deadline removes the pod, so the log can be empty); delete it after you read them: kubectl -n kubehz-system delete job %s. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'.", job, wait, job, job, job)
+		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause. A Job that failed stays until you delete it. Read its state: kubectl -n kubehz-system describe job %s. Read its log: kubectl -n kubehz-system logs job/%s (after the deadline the pod is gone and this call fails). Delete it after you read them: kubectl -n kubehz-system delete job %s. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'.", job, wait, job, job, job)
 		return ErrHandled
 	}
 	if _, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", "name"); err != nil {
