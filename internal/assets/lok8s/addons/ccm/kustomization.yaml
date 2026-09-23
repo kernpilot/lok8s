@@ -34,5 +34,5 @@ generators:
   - chart.yaml
   # The `hcloud` secret the CCM mounts — ONE place, every driver. Sourced from
   # the env each provider loads (HCLOUD_TOKEN required; HROBOT_* optional → the
-  # keys are simply omitted on clusters without a bare-metal worker).
+  # keys are simply omitted on clusters without a bare-metal server).
   - Secret.hcloud.kube-system.yaml
