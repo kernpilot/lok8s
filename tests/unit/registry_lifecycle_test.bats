@@ -254,7 +254,7 @@ docker() {
   assert_output "10.125.125.192/26"
 }
 
-@test "network_bridge_name: a name that fits IFNAMSIZ is unchanged" {
+@test "network_bridge_name: a name of at most 15 bytes (IFNAMSIZ-1) is unchanged" {
   _load_driver
   run lo::network_bridge_name "kubehz"
   assert_success
@@ -266,6 +266,16 @@ docker() {
 
 @test "network_bridge_name: a longer name becomes lo-<12 hex of sha256>" {
   _load_driver
+  run lo::network_bridge_name "crowdhour36t01-0"
+  assert_success
+  assert_output "lo-490238385610"
+}
+
+@test "network_bridge_name: the shasum fallback gives the same name" {
+  _load_driver
+  sha256sum() { return 127; }
+  export -f sha256sum
+  hash -r
   run lo::network_bridge_name "crowdhour36t01-0"
   assert_success
   assert_output "lo-490238385610"

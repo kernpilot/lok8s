@@ -18,15 +18,15 @@ import (
 )
 
 // bridgeMaxLen is IFNAMSIZ-1: the longest name a Linux network interface
-// can carry.
+// can carry (IFNAMSIZ is 16 and counts the NUL terminator).
 const bridgeMaxLen = 15
 
 // bridgeName is the host bridge interface for a project network (bash:
-// lo::network_bridge_name). A name that fits IFNAMSIZ is used as it is,
-// so every existing bridge keeps its name. A longer one becomes
+// lo::network_bridge_name). A name of at most bridgeMaxLen bytes is used
+// as it is, so every existing bridge keeps its name. A longer one becomes
 // "lo-<12 hex of its sha256>": Docker hands the option to the kernel
-// unchecked, and the kernel answers a 16-character name with
-// "numerical result out of range" (the crowd's crowdhour36t01-0).
+// unchecked, and the kernel answers a 16-byte name with "numerical
+// result out of range".
 func bridgeName(network string) string {
 	if len(network) <= bridgeMaxLen {
 		return network

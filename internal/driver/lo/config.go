@@ -7,7 +7,7 @@ package lo
 // exported; Tilt's local(), the bootstrap addon renders and the build
 // envsubst whitelist read them):
 //
-//	KIND_EXPERIMENTAL_DOCKER_NETWORK  — docker bridge name
+//	KIND_EXPERIMENTAL_DOCKER_NETWORK  — docker network name (the host bridge is named by bridgeName)
 //	LOK8S_NETWORK_CIDR                — project /24 subnet
 //	LOK8S_NETWORK_SUBNET              — alias for CIDR
 //	LOK8S_NETWORK_BASE_IP             — /24 base (e.g. 10.125.130.0)
