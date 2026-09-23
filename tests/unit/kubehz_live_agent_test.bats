@@ -1043,13 +1043,25 @@ _podspec() {
     assert_line "containers.0.resources.limits.cpu=200m"
     assert_line "containers.0.resources.limits.memory=256Mi"
 
-    # THE GUARD. Twenty-eight leaves, and the twenty-eight above are all of
+    # Scheduling (B242): a control-plane-only cluster runs the agent on its
+    # control plane; with workers present the agent prefers one of them.
+    assert_line "tolerations.0.key=node-role.kubernetes.io/control-plane"
+    assert_line "tolerations.0.operator=Exists"
+    assert_line "tolerations.0.effect=NoSchedule"
+    assert_line "tolerations.1.key=node-role.kubernetes.io/master"
+    assert_line "tolerations.1.operator=Exists"
+    assert_line "tolerations.1.effect=NoSchedule"
+    assert_line "affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.weight=100"
+    assert_line "affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.preference.matchExpressions.0.key=node-role.kubernetes.io/control-plane"
+    assert_line "affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.preference.matchExpressions.0.operator=DoesNotExist"
+
+    # THE GUARD. Thirty-seven leaves, and the thirty-seven above are all of
     # them. A second container, a second volume, an added env var, `hostPID:
     # true`, `hostNetwork: true`, `hostIPC: true`, `privileged: true`, a
-    # hostPath — every one of those is a twenty-ninth line, and fails here
+    # hostPath — every one of those is a thirty-eighth line, and fails here
     # without anyone having had to predict which one it would be.
-    [ "${#lines[@]}" -eq 28 ] || fail \
-      "${overlay}: the pod spec has ${#lines[@]} leaf fields, expected 28 — a field was added or removed:"$'\n'"${output}"
+    [ "${#lines[@]}" -eq 37 ] || fail \
+      "${overlay}: the pod spec has ${#lines[@]} leaf fields, expected 37 — a field was added or removed:"$'\n'"${output}"
   done
 }
 
