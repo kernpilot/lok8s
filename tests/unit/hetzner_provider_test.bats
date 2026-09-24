@@ -431,3 +431,47 @@ JSON
   refute_output --partial "blkdiscard"
   refute_output --partial "installimage -a"
 }
+
+# ── B248: a failed create stops the provision with Hetzner's reason ────────────
+# crowd hour72 (2026-09-24): `hcloud server create` answered "error during
+# placement (resource_unavailable)", the exit status was dropped, and the run
+# walked on into the KubeOne inventory, which then blamed name drift.
+
+@test "hetzner::create stops on a failed create, names the resource, and never runs the lookup" {
+  export CLOUD_HETZNER_JSON='{"server":[{"name":"cp-0","type":"cx33","location":"fsn1"}]}'
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    case "$1 $2" in
+      "server create") echo "hcloud: error during placement (resource_unavailable, a6c75d4a)" >&2; return 1 ;;
+      "server list") echo '[]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  run hetzner::create 'server'
+  assert_failure
+  assert_output --partial "could not create server 'cp-0'"
+  assert_output --partial "resource_unavailable"
+  run grep -c "^server create" "${HCLOUD_LOG}"
+  assert_output "1"
+  run grep -c "^server list" "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "hetzner::create runs the lookup after a create that succeeded" {
+  export CLOUD_HETZNER_JSON='{"server":[{"name":"cp-0","type":"cx33","location":"fsn1"}]}'
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    case "$1 $2" in
+      "server list") echo '[{"name":"cp-0","id":42}]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  run hetzner::create 'server'
+  assert_success
+  run grep -c "^server create" "${HCLOUD_LOG}"
+  assert_output "1"
+  run grep -c "^server list" "${HCLOUD_LOG}"
+  assert_output "1"
+}
