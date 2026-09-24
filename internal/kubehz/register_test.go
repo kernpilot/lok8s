@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,96 @@ func TestDirectClaimNonClaimedFails(t *testing.T) {
 	h := newHarness(t)
 	h.handle("POST /api/clusters/register", 200, `{"id":"cl-1","claimed":false}`)
 	mustErr(t, h.ctx.directClaim(t.Context(), &Config{}, "test.kubehz.dev", loSpec(h), h.apiURL()))
+}
+
+// ── bind secret (B243) ───────────────────────────────────
+
+const bindSecretFixture = "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+
+func bindSecretFile(h *harness, domain string) string {
+	return filepath.Join(h.ctx.Paths.Clusters, domain, ".kubehz-bind")
+}
+
+// persistBindSecret writes the announce's one-time secret at 0600 with no
+// trailing newline (the deploy reads it into a Secret whose value must be the
+// exact 64 hex), writes nothing for an empty secret, and rotates on a re-run.
+func TestPersistBindSecret(t *testing.T) {
+	t.Run("writes the exact secret at 0600, no trailing newline", func(t *testing.T) {
+		h := newHarness(t)
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		p := bindSecretFile(h, "test.kubehz.dev")
+		if got := readFile(t, p); got != bindSecretFixture {
+			t.Fatalf("bind secret file = %q, want %q with no trailing newline", got, bindSecretFixture)
+		}
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("bind secret file mode = %v, want 0600", fi.Mode().Perm())
+		}
+	})
+	t.Run("an empty secret writes nothing", func(t *testing.T) {
+		h := newHarness(t)
+		h.ctx.persistBindSecret("test.kubehz.dev", "")
+		if _, err := os.Stat(bindSecretFile(h, "test.kubehz.dev")); !os.IsNotExist(err) {
+			t.Fatalf("an empty secret must leave no file (stat err = %v)", err)
+		}
+	})
+	t.Run("a re-announce rotates the stored secret", func(t *testing.T) {
+		h := newHarness(t)
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		next := "00" + bindSecretFixture[2:]
+		h.ctx.persistBindSecret("test.kubehz.dev", next)
+		if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != next {
+			t.Fatalf("rotated secret = %q, want %q", got, next)
+		}
+	})
+}
+
+// Every register mode stores the bind secret the announce returned; a response
+// without one leaves no file (an older api mints none, and the deploy falls back).
+func TestRegisterModesPersistBindSecret(t *testing.T) {
+	t.Run("the legacy fingerprint announce", func(t *testing.T) {
+		h := newHarness(t)
+		delete(h.env, "KUBEHZ_TOKEN")
+		h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","registered":true,"bindSecret":"`+bindSecretFixture+`"}`)
+		cfg := &Config{APIURL: h.apiURL(), Access: "registered"}
+		mustOK(t, h.ctx.RegisterCluster(t.Context(), cfg, "test.kubehz.dev", loSpec(h)), h.output())
+		if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != bindSecretFixture {
+			t.Fatalf("legacy announce did not store the bind secret: %q", got)
+		}
+	})
+	t.Run("the direct claim", func(t *testing.T) {
+		h := newHarness(t)
+		h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","claimed":true,"bindSecret":"`+bindSecretFixture+`"}`)
+		mustOK(t, h.ctx.directClaim(t.Context(), &Config{}, "test.kubehz.dev", loSpec(h), h.apiURL()), h.output())
+		if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != bindSecretFixture {
+			t.Fatalf("direct claim did not store the bind secret: %q", got)
+		}
+	})
+	t.Run("the claim-key registration", func(t *testing.T) {
+		h := newHarness(t)
+		h.env["HCLOUD_TOKEN"] = "hc_test"
+		h.env["HCLOUD_API_BASE"] = h.apiURL()
+		h.handle("POST /api/clusters/register", 200, `{"id":"cl-5","bindSecret":"`+bindSecretFixture+`","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}`)
+		h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[]}`)
+		h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
+		mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
+		if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != bindSecretFixture {
+			t.Fatalf("claim-key register did not store the bind secret: %q", got)
+		}
+	})
+	t.Run("a response with no bind secret leaves no file", func(t *testing.T) {
+		h := newHarness(t)
+		delete(h.env, "KUBEHZ_TOKEN")
+		h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","registered":true}`)
+		cfg := &Config{APIURL: h.apiURL(), Access: "registered"}
+		mustOK(t, h.ctx.RegisterCluster(t.Context(), cfg, "test.kubehz.dev", loSpec(h)), h.output())
+		if _, err := os.Stat(bindSecretFile(h, "test.kubehz.dev")); !os.IsNotExist(err) {
+			t.Fatalf("a response without a bindSecret must leave no file (stat err = %v)", err)
+		}
+	})
 }
 
 func TestDirectClaimConnectsHcloudToken(t *testing.T) {

@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // The four waits, all in seconds, all overridable from the environment.
@@ -123,7 +125,7 @@ func (c *Context) DeployAgent(ctx context.Context, cfg *Config, domain string, d
 	if dryRun {
 		return c.deployPrint(ctx, workdir, owner, access)
 	}
-	if err := c.deployApply(ctx, workdir, owner, access); err != nil {
+	if err := c.deployApply(ctx, workdir, domain, owner, access); err != nil {
 		return err
 	}
 	c.deploySummary(domain, owner, access)
@@ -256,7 +258,7 @@ func (c *Context) deployPrint(ctx context.Context, workdir, owner, access string
 }
 
 // deployApply ports kubehz::deploy_apply — the load-bearing apply order.
-func (c *Context) deployApply(ctx context.Context, workdir, owner, access string) error {
+func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, access string) error {
 	overlay := liveAgentOverlay(workdir, access)
 	agentDir := filepath.Join(workdir, "agent")
 
@@ -266,6 +268,10 @@ func (c *Context) deployApply(ctx context.Context, workdir, owner, access string
 			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap) — nothing else was changed")
 			return ErrHandled
 		}
+		// 1b. Stage the bind secret (B243) so the bootstrap can ADOPT the
+		// announced row. The namespace exists now (step 1 created it), and the
+		// Secret must be present before the bootstrap Job runs (step 2b reads it).
+		c.applyBindSecret(ctx, domain)
 		// 2. Wait out an in-flight heartbeat pod (fail-soft).
 		c.waitHeartbeatIdle(ctx)
 		// 2b. The identity Secret. The live agent mounts kubehz-agent, which only
@@ -308,7 +314,30 @@ func (c *Context) deployApply(ctx context.Context, workdir, owner, access string
 		c.errorf("kubehz: could not apply the CronJob agent. The live agent is gone and the marker was not rewritten, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'.")
 		return ErrHandled
 	}
+	// Stage the bind secret (B243) for the CronJob's next tick to ADOPT with.
+	c.applyBindSecret(ctx, domain)
 	return nil
+}
+
+// applyBindSecret upserts the one-time bind secret (B243) into the Secret
+// kubehz-system/kubehz-agent-bind from clusters/<domain>/.kubehz-bind, when a
+// register wrote one. The CronJob's bootstrap reads it (the optional env
+// BIND_SECRET) and presents it on agent-register to ADOPT the announced row
+// instead of minting a sibling. The value goes in through --from-file, never
+// argv, so it is not visible in `ps`. Delete-then-create so a re-announce's
+// rotated secret replaces the old one. Best-effort: no file is the normal
+// case (no bind secret in play), and a failed upsert only means the agent
+// adopts via the pending-pool path if it can, else the user claims by code.
+func (c *Context) applyBindSecret(ctx context.Context, domain string) {
+	path := c.bindSecretPath(domain)
+	if !fsutil.FileExists(path) {
+		return
+	}
+	_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "secret", "kubehz-agent-bind", "--ignore-not-found=true")
+	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
+		"--from-file=bind-secret="+path); err != nil {
+		c.warnf("kubehz: could not stage the bind secret. The agent adopts via the pending-pool path if it can, else claim by claim-code.")
+	}
 }
 
 // podLines keeps only the `pod/<name>` lines of a merged capture — an

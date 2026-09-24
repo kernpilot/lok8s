@@ -135,7 +135,7 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
 	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	if len(*log) != 4 {
 		t.Fatalf("calls: %v", *log)
 	}
@@ -147,6 +147,73 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 	mustContain(t, (*log)[3], "rollout status deployment/kubehz-live-agent")
 	mustContain(t, (*log)[3], "--timeout=120s")
 	mustNotContain(t, strings.Join(*log, "\n"), "create job")
+}
+
+// writeBindSecret installs clusters/<domain>/.kubehz-bind, as a register would.
+func writeBindSecret(t *testing.T, h *harness, domain, secret string) string {
+	t.Helper()
+	dir := filepath.Join(h.ctx.Paths.Clusters, domain)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, ".kubehz-bind")
+	if err := os.WriteFile(p, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// B243: with a bind secret staged, the operator deploy upserts it into
+// kubehz-agent-bind AFTER the CronJob agent apply (the namespace exists) and
+// BEFORE the identity bootstrap reads it. The value goes in via --from-file,
+// never argv.
+func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	p := writeBindSecret(t, h, "acme.example.com", "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70")
+	log := kubectlLogger(h, nil)
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
+	joined := strings.Join(*log, "\n")
+	mustContain(t, joined, "delete secret kubehz-agent-bind --ignore-not-found=true")
+	mustContain(t, joined, "create secret generic kubehz-agent-bind --from-file=bind-secret="+p)
+	// The secret must be read from the file, never handed on the command line.
+	mustNotContain(t, joined, "--from-literal")
+	mustNotContain(t, joined, "9f1c2b3a4d5e6f70")
+	// Ordering: after the CronJob apply, before the identity Secret read.
+	agentApply, createSecret, idRead := -1, -1, -1
+	for i, l := range *log {
+		if agentApply == -1 && strings.Contains(l, "apply -k "+filepath.Join(work, "agent")) {
+			agentApply = i
+		}
+		if strings.Contains(l, "create secret generic kubehz-agent-bind") {
+			createSecret = i
+		}
+		if idRead == -1 && strings.Contains(l, "get secret kubehz-agent ") {
+			idRead = i
+		}
+	}
+	if agentApply < 0 || createSecret <= agentApply || idRead <= createSecret {
+		t.Fatalf("bind-secret stage out of order (agentApply=%d createSecret=%d idRead=%d): %v", agentApply, createSecret, idRead, *log)
+	}
+}
+
+// B243: cronjob mode stages the bind secret too, after the final agent apply.
+func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "cronjob", "registered")
+	writeBindSecret(t, h, "acme.example.com", "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70")
+	log := kubectlLogger(h, nil)
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
+	mustContain(t, strings.Join(*log, "\n"), "create secret generic kubehz-agent-bind --from-file=bind-secret=")
+}
+
+// No bind secret staged: the deploy touches kubehz-agent-bind not at all.
+func TestDeployApplyNoBindSecretNoSecretCall(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	log := kubectlLogger(h, nil)
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
+	mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
 }
 
 // B244: a first deploy finds no identity Secret. The deploy runs the
@@ -168,7 +235,7 @@ func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, h.output(), "running the CronJob's bootstrap once")
 	joined := strings.Join(*log, "\n")
 	mustContain(t, joined, "create job kubehz-heartbeat-bootstrap-")
@@ -210,7 +277,7 @@ func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "did not complete within 10s")
 	mustContain(t, h.output(), "describe job kubehz-heartbeat-bootstrap-")
 	joined := strings.Join(*log, "\n")
@@ -232,7 +299,7 @@ func TestDeployApplyIdentitySecretUnreadableStops(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "could not read Secret kubehz-agent")
 	mustContain(t, h.output(), "Forbidden")
 	mustContain(t, h.output(), "reporting NOTHING")
@@ -252,7 +319,7 @@ func TestDeployApplyIdentitySecretProbeWithoutOutputNamesTheError(t *testing.T) 
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "could not read Secret kubehz-agent in kubehz-system: kubectl exited without output (exit status 127)")
 }
 
@@ -273,7 +340,7 @@ func TestDeployApplyIdentitySecretNotFoundBehindAWarningBootstraps(t *testing.T)
 		}
 		return false, nil
 	})
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, strings.Join(*log, "\n"), "create job kubehz-heartbeat-bootstrap-")
 }
 
@@ -286,7 +353,7 @@ func TestDeployApplyNeverReadyFails(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "never became Ready")
 	mustContain(t, h.output(), "NOTHING owns the heartbeat")
 }
@@ -296,7 +363,7 @@ func TestDeployApplyRolloutTimeoutFromEnv(t *testing.T) {
 	h.env["KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS"] = "600"
 	work := renderInto(t, h, "operator", "managed")
 	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, strings.Join(*log, "\n"), "--timeout=600s")
 }
 
@@ -304,7 +371,7 @@ func TestDeployApplyToCronjobOrder(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "cronjob", "registered")
 	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
 	if len(*log) != 3 {
 		t.Fatalf("calls: %v", *log)
 	}
@@ -323,7 +390,7 @@ func TestDeployApplyFailedDeleteNeverRearms(t *testing.T) {
 		}
 		return false, nil
 	})
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"))
 	mustContain(t, h.output(), "could not remove the live agent")
 	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "agent"))
 }
@@ -341,7 +408,7 @@ func TestDeployApplyPodWontTerminateBlocks(t *testing.T) {
 		log = append(log, argvLine(c))
 		return nil
 	}
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"))
 	mustContain(t, h.output(), "still running")
 	mustNotContain(t, strings.Join(log, "\n"), "apply -k "+filepath.Join(work, "agent"))
 }
@@ -359,7 +426,7 @@ func TestDeployApplyBlindProbeNeverRearms(t *testing.T) {
 		log = append(log, argvLine(c))
 		return nil
 	}
-	mustErr(t, h.ctx.deployApply(t.Context(), work, "cronjob", "registered"))
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"))
 	mustContain(t, h.output(), "could not tell whether")
 	mustContain(t, h.output(), "Forbidden")
 	mustNotContain(t, strings.Join(log, "\n"), "apply -k "+filepath.Join(work, "agent"))
@@ -377,7 +444,7 @@ func TestDeployApplyUnreadableHeartbeatProbeWarnsAndContinues(t *testing.T) {
 		log = append(log, argvLine(c))
 		return nil
 	}
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, h.output(), "could not check for an in-flight heartbeat pod")
 	mustContain(t, log[1], "get secret kubehz-agent")
 	mustContain(t, log[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))

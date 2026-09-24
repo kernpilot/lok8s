@@ -444,6 +444,21 @@ and needs no token; if the API is unreachable it warns and provisioning
 continues.
 :::
 
+::: details Claim before you deploy: the bind secret
+The pre-agent announce also hands back a one-time **bind secret**.
+`lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode
+0600). `lo kubehz deploy` stages it into the cluster, and the agent presents
+it on its first `agent-register`. The platform then adopts the row the
+announce created, wherever it sits by then. The row can still be pending, or
+already claimed in the dashboard. Either way the agent binds there instead of
+making a second row, so a cluster you claim before the agent deploys still
+shows its own heartbeats.
+
+The secret proves only that the operator who deploys is the operator who
+announced. It rotates on every re-announce and is spent on the first
+adoption. It is a credential: keep `.kubehz-bind` out of version control.
+:::
+
 ## Claiming
 
 Claiming attaches a registered cluster to your account. It is

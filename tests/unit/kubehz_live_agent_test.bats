@@ -442,7 +442,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
 
   # Line 1 applies the CronJob tree (which carries KUBEHZ_HEARTBEAT_OWNER=
@@ -487,7 +487,7 @@ _stub_kubectl_log() {
   }
   export -f kubectl
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   assert_output --partial "running the CronJob's bootstrap once"
   run grep -n "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
@@ -531,7 +531,7 @@ _stub_kubectl_log() {
   export -f kubectl
   export KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS=10
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_failure
   assert_output --partial "did not complete within 10s"
   assert_output --partial "describe job kubehz-heartbeat-bootstrap-"
@@ -557,7 +557,7 @@ _stub_kubectl_log() {
   }
   export -f kubectl
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_failure
   assert_output --partial "could not read Secret kubehz-agent in kubehz-system: kubectl exited without output (exit status 127)"
   run grep -c "create job" "${STUB_KUBECTL_LOG}"
@@ -580,7 +580,7 @@ _stub_kubectl_log() {
   }
   export -f kubectl
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_failure
   assert_output --partial "could not read Secret kubehz-agent"
   assert_output --partial "Forbidden"
@@ -612,7 +612,7 @@ _stub_kubectl_log() {
   }
   export -f kubectl
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   run grep -c "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
   assert_output "1"
@@ -638,7 +638,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_failure
   # The message must name the state the operator is now in — nothing beating —
   # not just report a failed command.
@@ -657,7 +657,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   run grep -F 'rollout status deployment/kubehz-live-agent' "${STUB_KUBECTL_LOG}"
   assert_output --partial "--timeout=600s"
@@ -670,7 +670,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
 
-  run kubehz::deploy_apply "${work}" cronjob registered
+  run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
   assert_success
 
   # The delete targets the MANAGED overlay: it is a superset of the base, so
@@ -710,7 +710,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
 
-  run kubehz::deploy_apply "${work}" cronjob registered
+  run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
   assert_failure
   assert_output --partial "could not remove the live agent"
 
@@ -743,7 +743,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
 
-  run kubehz::deploy_apply "${work}" cronjob registered
+  run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
   assert_failure
   assert_output --partial "still running"
   refute [ "$(grep -c "apply -k ${work}/agent" "${STUB_KUBECTL_LOG}")" != "0" ]
@@ -777,7 +777,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
 
-  run kubehz::deploy_apply "${work}" cronjob registered
+  run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
   assert_failure
   # Refused, and honest about WHY: unknown, not "gone" and not "still there".
   assert_output --partial "could not tell whether"
@@ -807,7 +807,7 @@ _stub_kubectl_log() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
 
-  run kubehz::deploy_apply "${work}" operator managed
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   assert_output --partial "could not check for an in-flight heartbeat pod"
   # Line 2 reads the identity Secret (B244); the live agent follows on line 3.
@@ -1260,4 +1260,53 @@ _podspec() {
   # from callers that set the LOK8S_KUBEHZ_* vars themselves.
   run kubehz::validate_config
   assert_success
+}
+
+# ── apply_bind_secret (B243) ─────────────────────────────
+
+@test "apply_bind_secret: a staged bind secret is upserted into kubehz-agent-bind from the file, never argv" {
+  _source_deploy
+  _stub_kubectl_log
+  local secret="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+  mkdir -p "${PATH_CLUSTERS}/acme.example.com"
+  printf %s "${secret}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+
+  run kubehz::apply_bind_secret "acme.example.com"
+  assert_success
+  run grep -c "delete secret kubehz-agent-bind --ignore-not-found=true" "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run grep -c -- "create secret generic kubehz-agent-bind --from-file=bind-secret=${PATH_CLUSTERS}/acme.example.com/.kubehz-bind" "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  # The secret value is read from the file, never placed on the command line.
+  run grep -c "from-literal" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "${secret}" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply_bind_secret: no staged secret touches kubehz-agent-bind not at all" {
+  _source_deploy
+  _stub_kubectl_log
+  run kubehz::apply_bind_secret "acme.example.com"
+  assert_success
+  run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+@test "apply order (to operator): a staged bind secret is upserted after the CronJob apply, before the identity read" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/bind1"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  mkdir -p "${PATH_CLUSTERS}/acme.example.com"
+  printf %s "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_success
+  # order: apply agent (1), delete+create the bind Secret (2,3), identity read.
+  run grep -n "apply -k ${work}/agent\|create secret generic kubehz-agent-bind\|get secret kubehz-agent " "${STUB_KUBECTL_LOG}"
+  assert_line --index 0 --partial "apply -k ${work}/agent"
+  assert_line --index 1 --partial "create secret generic kubehz-agent-bind"
+  assert_line --index 2 --partial "get secret kubehz-agent "
 }
