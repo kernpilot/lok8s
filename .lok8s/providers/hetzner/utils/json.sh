@@ -222,7 +222,17 @@ hetzner::create() {
 
     _hetzner_print "📦 create \033[3m${what}\033[0m \033[1m${name}\033[0m"
     _hetzner_log "   $ ${cmd[*]}"
-    "${cmd[@]}"
+    # A create that fails stops the provision HERE, with Hetzner's own reason
+    # on the line above. The exit status used to be dropped: a capacity
+    # refusal ("error during placement (resource_unavailable)") printed one
+    # line and the run walked on into the KubeOne inventory, which reported
+    # ZERO control-plane hosts and hinted at name drift (B248, 2026-09-24,
+    # crowd hour72). Nothing is rolled back: a re-run keeps what exists (the
+    # id check above) and creates the rest.
+    if ! "${cmd[@]}"; then
+      error "hetzner: could not create ${what} '${name}'. Hetzner refused or failed the request; its message is above. For a placement refusal (resource_unavailable), choose another server type or location in the descriptor, or retry later. A re-run keeps what exists and creates the rest."
+      return 1
+    fi
 
     [[ -z "${create_after-}" ]] ||
       hetzner::create::after
