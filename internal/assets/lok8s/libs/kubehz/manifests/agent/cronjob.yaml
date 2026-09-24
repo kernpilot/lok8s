@@ -109,7 +109,9 @@ spec:
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
                     BIND_FIELD=""
-                    if [ -n "${BIND_SECRET}" ] && printf %s "${BIND_SECRET}" | grep -Eq '^[0-9a-f]{64}$'; then
+                    if [ -n "${BIND_SECRET}" ] \
+                      && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
+                      && printf %s "${BIND_SECRET}" | grep -Eq '^[0-9a-f]{64}$'; then
                       BIND_FIELD=$(printf ',"bindSecret":"%s"' "${BIND_SECRET}")
                     fi
                     REGISTER_PAYLOAD=$(printf \

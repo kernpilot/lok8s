@@ -22,8 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // The four waits, all in seconds, all overridable from the environment.
@@ -330,13 +328,16 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 // adopts via the pending-pool path if it can, else the user claims by code.
 func (c *Context) applyBindSecret(ctx context.Context, domain string) {
 	path := c.bindSecretPath(domain)
-	if !fsutil.FileExists(path) {
+	// A REGULAR file only, matching the bash `[[ -f ]]`: a device, socket or
+	// FIFO in this slot is not a bind secret, and `--from-file` on a FIFO would
+	// block the deploy.
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
 		return
 	}
 	_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "secret", "kubehz-agent-bind", "--ignore-not-found=true")
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
 		"--from-file=bind-secret="+path); err != nil {
-		c.warnf("kubehz: could not stage the bind secret. The agent adopts via the pending-pool path if it can, else claim by claim-code.")
+		c.warnf("kubehz: could not stage the bind secret (%s). The agent adopts via the pending-pool path if it can, else claim by claim-code.", err)
 	}
 }
 

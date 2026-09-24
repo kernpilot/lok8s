@@ -765,7 +765,8 @@ EOF
   run cat "${bind_file}"
   assert_output "${secret}"
   # No trailing newline: the deploy reads the value into a Secret verbatim.
-  run wc -c < "${bind_file}"
+  # stat, not wc -c: GNU wc pads its count with leading spaces.
+  run stat -c '%s' "${bind_file}"
   assert_output "64"
   # 0600: nobody but the operator reads the bind secret.
   run stat -c '%a' "${bind_file}"
