@@ -324,6 +324,22 @@ kubehz::get_ssh_fingerprint() {
 # Re-runs ROTATE server-side (same pending row, fresh fingerprint), so we
 # replace the hcloud key by name on every run. Fail-soft: any failure returns
 # 1 and the caller falls back to the legacy fingerprint announce.
+# Store the announce's one-time bind secret (B243) at
+# ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline — deploy
+# reads it into a Secret whose value must be the exact 64 hex). An empty secret
+# writes nothing (an older api mints none, and the deploy then falls back). A
+# write failure warns but never fails the register: the agent can still adopt
+# via the pending-pool path, or the user can claim by claim-code.
+# Usage: kubehz::persist_bind_secret <domain> <secret>
+kubehz::persist_bind_secret() {
+  local domain="${1}" secret="${2}"
+  [[ -n "${secret}" ]] || return 0
+  local dir="${PATH_CLUSTERS}/${domain}"
+  mkdir -p "${dir}" || { warn "kubehz: could not create ${dir} to store the bind secret"; return 0; }
+  ( umask 077; printf %s "${secret}" > "${dir}/.kubehz-bind"; ) ||
+    warn "kubehz: could not store the bind secret"
+}
+
 kubehz::ensure_claim_key() {
   local domain="${1}" api_url="${2}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
@@ -341,6 +357,8 @@ kubehz::ensure_claim_key() {
   fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
   key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
   [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
+  # The announce hands out a one-time bind secret (B243); keep it for the deploy.
+  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
 
   # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
   # kubehz-claim key must not linger in the account.
@@ -404,6 +422,8 @@ kubehz::direct_claim() {
     warn "kubehz register did not attribute ${domain} to your tenant (is KUBEHZ_TOKEN a clusters:write token?)"
     return 1
   fi
+  # The announce hands out a one-time bind secret (B243); keep it for the deploy.
+  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
   echo "kubehz: cluster '${domain}' registered and claimed to your account (${cluster_id})."
 
   # Optionally connect the hcloud token for dashboard-driven provisioning.
@@ -510,6 +530,8 @@ kubehz::register_cluster() {
     warn "kubehz registration returned no cluster id, cluster will continue without kubehz integration"
     return 0
   fi
+  # The announce hands out a one-time bind secret (B243); keep it for the deploy.
+  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
 
   debug "Cluster registered with kubehz (pending claim): ${cluster_id}"
   # Surface the claim handshake. The fingerprint is public (not a secret), so it

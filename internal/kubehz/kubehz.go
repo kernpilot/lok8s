@@ -245,6 +245,33 @@ func (c *Context) clusterYAMLPath(domain string) string {
 	return c.Paths.Clusters + "/" + domain + "/cluster.lok8s.yaml"
 }
 
+// bindSecretPath is ${PATH_CLUSTERS}/<domain>/.kubehz-bind — the one-time
+// bind secret (B243) a register wrote, that `lo kubehz deploy` hands to the
+// in-cluster agent to ADOPT the announced row instead of minting a sibling.
+func (c *Context) bindSecretPath(domain string) string {
+	return c.Paths.Clusters + "/" + domain + "/.kubehz-bind"
+}
+
+// persistBindSecret stores the announce's one-time bind secret (B243) at
+// bindSecretPath, mode 0600, with NO trailing newline (deploy reads it into a
+// Secret whose value must be the exact 64 hex). An empty secret writes
+// nothing (an older api mints none, and the deploy then falls back). A write
+// failure warns but never fails the register: the agent can still adopt via
+// the pending-pool path, or the user can claim by claim-code.
+func (c *Context) persistBindSecret(domain, secret string) {
+	if secret == "" {
+		return
+	}
+	dir := c.Paths.Clusters + "/" + domain
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		c.warnf("kubehz: could not create %s to store the bind secret: %s", dir, err)
+		return
+	}
+	if err := os.WriteFile(dir+"/.kubehz-bind", []byte(secret), 0o600); err != nil {
+		c.warnf("kubehz: could not store the bind secret: %s", err)
+	}
+}
+
 // requireDomainSpec is the shared subcommand preamble: an active domain and
 // its cluster.lok8s.yaml.
 func (c *Context) requireDomainSpec(domain string) (string, error) {

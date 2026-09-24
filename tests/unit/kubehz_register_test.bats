@@ -726,3 +726,77 @@ EOF
   assert_success
   assert_output --partial "READ-ONLY"
 }
+
+# ── register_cluster: stores the announce's bind secret (B243) ───────────
+
+@test "register_cluster: stores the announce bind secret at clusters/<domain>/.kubehz-bind (0600, no newline)" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  local secret="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+  curl() {
+    echo '{"id":"cl-001","domain":"test.kubehz.dev","registered":true,"bindSecret":"9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"}'
+  }
+  export -f curl
+
+  jq() {
+    case "$2" in
+      '.id // empty') echo "cl-001" ;;
+      '.bindSecret // empty') echo "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+
+  local bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  assert [ -f "${bind_file}" ]
+  run cat "${bind_file}"
+  assert_output "${secret}"
+  # No trailing newline: the deploy reads the value into a Secret verbatim.
+  # stat, not wc -c: GNU wc pads its count with leading spaces.
+  run stat -c '%s' "${bind_file}"
+  assert_output "64"
+  # 0600: nobody but the operator reads the bind secret.
+  run stat -c '%a' "${bind_file}"
+  assert_output "600"
+}
+
+@test "register_cluster: a response with no bind secret writes no .kubehz-bind" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+
+  curl() { echo '{"id":"cl-001","domain":"test.kubehz.dev","registered":true}'; }
+  export -f curl
+  jq() {
+    case "$2" in
+      '.id // empty') echo "cl-001" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f jq
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert [ ! -f "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" ]
+}

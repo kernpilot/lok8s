@@ -45,6 +45,8 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	if clusterID == "" || publicKey == "" || fingerprint == "" || keyName == "" {
 		return errors.New("kubehz: incomplete claim-key response")
 	}
+	// The announce hands out a one-time bind secret (B243); keep it for the deploy.
+	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 
 	hcloudAuth := withBearer(c.getenv("HCLOUD_TOKEN"))
 	// Replace-by-name: a stale kubehz-claim key must not linger.
@@ -101,6 +103,8 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 		c.warnf("kubehz register did not attribute %s to your tenant (is KUBEHZ_TOKEN a clusters:write token?)", domain)
 		return ErrHandled
 	}
+	// The announce hands out a one-time bind secret (B243); keep it for the deploy.
+	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 	c.echo("kubehz: cluster '%s' registered and claimed to your account (%s).", domain, clusterID)
 
 	// Optionally connect the hcloud token for dashboard-driven provisioning.
@@ -185,6 +189,8 @@ func (c *Context) RegisterCluster(ctx context.Context, cfg *Config, domain, clus
 		c.warnf("kubehz registration returned no cluster id, cluster will continue without kubehz integration")
 		return nil
 	}
+	// The announce hands out a one-time bind secret (B243); keep it for the deploy.
+	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 
 	c.debugf("Cluster registered with kubehz (pending claim): %s", clusterID)
 	// The fingerprint is public (not a secret), so it is safe to print; the

@@ -101,9 +101,22 @@ spec:
                   if [ -n "${AGENT_TOKEN}" ] && [ -n "${CLAIM_CODE}" ]; then
                     AGENT_TOKEN_HASH=$(printf %s "${AGENT_TOKEN}" | sha256_hex)
                     CLAIM_CODE_HASH=$(printf %s "${CLAIM_CODE}" | sha256_hex)
+                    # BIND_SECRET (B243): the one-time secret `lo kubehz deploy`
+                    # staged (optional env from kubehz-agent-bind). Present: the
+                    # register ADOPTS the announced row wherever it lives now
+                    # (pending, claimed or attributed) instead of minting a
+                    # sibling. Sent only when it is exactly 64 hex, so a garbled
+                    # value never makes the JSON invalid; the server consumes it
+                    # on the first adoption and every later tick is idempotent.
+                    BIND_FIELD=""
+                    if [ -n "${BIND_SECRET}" ] \
+                      && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
+                      && printf %s "${BIND_SECRET}" | grep -Eq '^[0-9a-f]{64}$'; then
+                      BIND_FIELD=$(printf ',"bindSecret":"%s"' "${BIND_SECRET}")
+                    fi
                     REGISTER_PAYLOAD=$(printf \
-                      '{"domain":"%s","agentTokenHash":"%s","claimCodeHash":"%s"}' \
-                      "${CLUSTER_ID}" "${AGENT_TOKEN_HASH}" "${CLAIM_CODE_HASH}")
+                      '{"domain":"%s","agentTokenHash":"%s","claimCodeHash":"%s"%s}' \
+                      "${CLUSTER_ID}" "${AGENT_TOKEN_HASH}" "${CLAIM_CODE_HASH}" "${BIND_FIELD}")
                     curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
                       -H "Content-Type: application/json" \
                       -d "${REGISTER_PAYLOAD}" >/dev/null 2>&1 \
@@ -727,6 +740,18 @@ spec:
               envFrom:
                 - configMapRef:
                     name: kubehz-agent-config
+              env:
+                # The one-time bind secret (B243) `lo kubehz deploy` stages in
+                # kubehz-agent-bind when a register wrote one. Optional: the
+                # Secret is absent on any install with no bind secret in play,
+                # and the bootstrap then registers without it (the pending-pool
+                # adoption, as before).
+                - name: BIND_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: kubehz-agent-bind
+                      key: bind-secret
+                      optional: true
               resources:
                 requests:
                   cpu: 50m

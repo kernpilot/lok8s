@@ -139,6 +139,8 @@ var gitignoreEntries = []string{
 	".kustomize/",
 	".secrets/",
 	".lok8s/**/secret.yaml",
+	"# lok8s — the kubehz agent bind secret (a register writes it; it is a credential)",
+	"**/clusters/*/.kubehz-bind",
 	"# lok8s — the split's scratch dirs (removed on every exit; a killed build leaves them until the next one)",
 	"**/clusters/*/.artifacts-tmp.*/",
 	"**/clusters/*/.registry-tls-tmp.*/",
