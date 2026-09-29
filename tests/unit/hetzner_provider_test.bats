@@ -475,3 +475,28 @@ JSON
   run grep -c "^server list" "${HCLOUD_LOG}"
   assert_output "1"
 }
+
+# ── boolean descriptor keys (B263, 2026-09-30) ───────────────────
+# A boolean value is a bare hcloud switch. `without-ipv6: true` used to become
+# `--without-ipv6 true`, which hcloud read as a stray argument; it is one
+# `--without-ipv6=true` token now, and `false` stays explicit.
+@test "hetzner::create passes a boolean key as one --key=value token, never a stray value" {
+  export CLOUD_HETZNER_JSON='{"server":[{"name":"w-1","type":"cx23","image":"ubuntu-24.04","without-ipv6":true,"label":"lok8s.dev/cluster=t"}]}'
+  run hetzner::create 'server'
+  assert_success
+  run grep -E '^server create' "${HCLOUD_LOG}"
+  assert_success
+  assert_output --partial '--without-ipv6=true'
+  refute_output --partial '--without-ipv6 true'
+  refute_output --regexp 'without-ipv6=true +(true|"")'
+  assert_output --partial '--type cx23'
+}
+
+@test "hetzner::create keeps a false boolean explicit (--key=false) and other values verbatim" {
+  export CLOUD_HETZNER_JSON='{"server":[{"name":"w-2","type":"cx23","image":"ubuntu-24.04","without-ipv6":false}]}'
+  run hetzner::create 'server'
+  assert_success
+  run grep -E '^server create' "${HCLOUD_LOG}"
+  assert_output --partial '--without-ipv6=false'
+  assert_output --partial '--image ubuntu-24.04'
+}
