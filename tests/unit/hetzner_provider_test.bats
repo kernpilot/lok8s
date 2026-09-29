@@ -489,6 +489,9 @@ JSON
   assert_output --partial '--without-ipv6=true'
   refute_output --partial '--without-ipv6 true'
   refute_output --regexp 'without-ipv6=true +(true|"")'
+  # Adjacency: the next flag follows the switch directly — no placeholder
+  # reached hcloud and no pair shifted (a swallowed --label would show here).
+  assert_output --partial '--without-ipv6=true --label lok8s.dev/cluster=t'
   assert_output --partial '--type cx23'
 }
 
