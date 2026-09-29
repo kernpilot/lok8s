@@ -218,9 +218,10 @@ hetzner::create() {
       [[ "${fields[x]:2:1}" != "#" ]] ||
         continue
 
-      # A boolean switch is one "--key=value" token; its placeholder is dropped.
+      # A boolean switch is one "--key=value" token; its placeholder is dropped
+      # (the hook-suffix strip below applies to it like to any other key).
       if [[ "${fields[x]}" == --*=* ]]; then
-        args+=("${fields[x]}")
+        args+=("${fields[x]/%#*}")
         continue
       fi
 
