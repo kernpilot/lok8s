@@ -174,6 +174,12 @@ hetzner::create() {
     # Cloud VMs: standard hcloud create
 
     # fetch all fields
+    # A boolean value is a bare hcloud switch (`without-ipv6: true` →
+    # `--without-ipv6=true`, the form cobra takes with no value token). It
+    # travels as one "--key=value" token plus an empty placeholder that the
+    # consumer below drops. Before this, `true` became `--without-ipv6 true`
+    # and hcloud read the value as a stray argument (2026-09-30, B263: the
+    # crowd's KubeOne workers needed IPv4-only image pulls).
     # shellcheck disable=2016
     mapfile -t fields < <(hetzner::json -rc \
       --arg what "${what}" \
@@ -181,8 +187,13 @@ hetzner::create() {
         .[$what][$i]
           | to_entries
           | .[]
-          | "--" + .key, (
-            if .value
+          | "--" + .key + (
+              if (.value | type) == "boolean" then "=" + (.value | tostring) else "" end
+            ), (
+            if (.value | type) == "boolean"
+            then
+              ""
+            elif .value
               | type == "number"
             then
               $root[.key][.value].id
@@ -206,6 +217,13 @@ hetzner::create() {
     for (( x=0; x < ${#fields[@]}; x=x+2 )); do
       [[ "${fields[x]:2:1}" != "#" ]] ||
         continue
+
+      # A boolean switch is one "--key=value" token; its placeholder is dropped
+      # (the hook-suffix strip below applies to it like to any other key).
+      if [[ "${fields[x]}" == --*=* ]]; then
+        args+=("${fields[x]/%#*}")
+        continue
+      fi
 
       val="${fields[x + 1]}"
       # hcloud receives values verbatim — expand a leading ~ ourselves
