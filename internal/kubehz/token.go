@@ -47,15 +47,15 @@ import (
 // Agent-key environment (the names the platform docs and the create answer use).
 const (
 	EnvAgentClientID     = "KUBEHZ_AGENT_CLIENT_ID"
-	EnvAgentClientSecret = "KUBEHZ_AGENT_CLIENT_SECRET"
-	EnvAgentTokenURL     = "KUBEHZ_AGENT_TOKEN_URL"
+	EnvAgentClientSecret = "KUBEHZ_AGENT_CLIENT_SECRET" // #nosec G101 -- the variable NAME, not a credential
+	EnvAgentTokenURL     = "KUBEHZ_AGENT_TOKEN_URL"     // #nosec G101 -- the variable NAME, not a credential
 	EnvAgentScope        = "KUBEHZ_AGENT_SCOPE"
 )
 
 // Token output formats.
 const (
-	TokenFormatExecCredential = "exec-credential"
-	TokenFormatToken          = "token"
+	TokenFormatExecCredential = "exec-credential" // #nosec G101 -- an output format name, not a credential
+	TokenFormatToken          = "token"           // #nosec G101 -- an output format name, not a credential
 )
 
 const (
@@ -279,6 +279,8 @@ func writeTokenCache(file string, e tokenCacheEntry) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// #nosec G117 -- the cache exists to hold the access token: a 0600 file
+	// under a 0700 dir, read back only when nobody else can read it.
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
