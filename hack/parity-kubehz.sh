@@ -409,6 +409,12 @@ check - kubehz claim --nonce bad
 check - kubehz claim -n khzn_short
 check - kubehz claim-code                                # no cluster reachable → local refusal
 
+# ── token (agent-key exec plugin): the local refusals, no endpoint reached ──
+check - kubehz token
+check - kubehz token --token-url http://id.example/t --scope s
+check - kubehz token --token-url https://id.example/t --scope s    # no key in the env
+check - kubehz token --format yaml
+
 # ── node: the hosting gate, the https gate, the global --cluster trap ───────
 check - kubehz node join
 check - kubehz n j --domain shared.dev

@@ -1895,6 +1895,7 @@ lo kubehz [flags]
 * [lo kubehz re-enroll](#lo-kubehz-re-enroll)	 - Re-enroll a regenerated in-cluster agent token with the platform
 * [lo kubehz register](#lo-kubehz-register)	 - Register cluster with kubehz
 * [lo kubehz status](#lo-kubehz-status)	 - Check kubehz registration status
+* [lo kubehz token](#lo-kubehz-token)	 - Print an access token for the agent key in the environment (kubectl exec plugin)
 
 ## lo kubehz assess
 
@@ -2308,6 +2309,36 @@ lo kubehz status [flags]
 
 ```
   -h, --help   help for status
+```
+
+### SEE ALSO
+
+* [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+
+## lo kubehz token
+
+Print an access token for the agent key in the environment (kubectl exec plugin)
+
+```
+lo kubehz token [flags]
+```
+
+### Examples
+
+```
+  lo kubehz token --token-url https://id.kubehz.cloud/oauth/v2/token --scope "$KUBEHZ_AGENT_SCOPE"
+  KUBEHZ_TOKEN=$(lo kubehz token --format token) lo kubehz status
+```
+
+### Options
+
+```
+      --format string        Output: exec-credential (kubectl) or token (the bare access token) (default "exec-credential")
+  -h, --help                 help for token
+      --no-cache             Always ask the token endpoint and write no cache file
+      --scope string         The scope to request (the key's tokenScope), or set KUBEHZ_AGENT_SCOPE
+      --secret-file string   Read the client secret from this file instead of KUBEHZ_AGENT_CLIENT_SECRET
+      --token-url string     The platform token endpoint (https), or set KUBEHZ_AGENT_TOKEN_URL
 ```
 
 ### SEE ALSO
