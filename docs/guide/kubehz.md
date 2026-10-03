@@ -805,7 +805,7 @@ The command caches the access token in
 token endpoint again five minutes before the token expires. `--no-cache`
 always asks and writes nothing. When an owner revokes the key, the api refuses
 it at once. A token that was already issued stays valid at the apiservers
-until it expires (at most 12 hours).
+until it expires: at most the platform's token lifetime (1 hour).
 
 A key that was created a moment ago can be refused for a short time, until
 the identity provider knows it. Thus the command tries again after 0.25, 0.5

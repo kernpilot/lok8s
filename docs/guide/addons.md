@@ -535,6 +535,14 @@ copy-paste patches):
 3. **Redirect URI**: register `https://<each-protected-host>/oauth2/callback`
    at your issuer.
 
+The policy asks for the `offline_access` scope. The issuer then returns a
+refresh token, and Envoy renews the session with it when the access token
+expires (`refreshToken` is on by default).
+
+Without a refresh token, the session ends with the access token, and the
+user signs in again. If your issuer refuses the scope, patch `scopes` from
+your consuming target, as you do for the issuer.
+
 One sharp edge: `targetSelectors` matches routes in the **same namespace**
 as the policy. That is the selector's default behavior, and this addon ships
 it with the `default` namespace. Envoy Gateway can widen it with
