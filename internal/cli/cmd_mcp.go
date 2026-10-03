@@ -24,6 +24,8 @@ package cli
 //     --allow-destructive, which implies --allow-mutating;
 //   - a command without any marker (own or inherited) counts as mutating —
 //     it is not known to be safe;
+//   - a command whose output is a credential (AnnotationCredentialOutput,
+//     `kubehz token`) is never exposed;
 //   - flags that carry a credential (token, secret, password, key, nonce, …)
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
@@ -235,7 +237,8 @@ func mcpSelectors(x mcpExposure) []ophis.Selector {
 	flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) }
 	return []ophis.Selector{{
 		CmdSelector: func(cmd *cobra.Command) bool {
-			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && x.allows(mcpTier(cmd))
+			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) &&
+				cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
 		},
 		LocalFlagSelector:     flagOK,
 		InheritedFlagSelector: flagOK,

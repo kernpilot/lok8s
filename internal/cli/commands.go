@@ -7,6 +7,9 @@ const (
 	AnnotationDestructive = "lok8s.dev/destructive"
 	AnnotationReadonly    = "lok8s.dev/readonly"
 	AnnotationIdempotent  = "lok8s.dev/idempotent"
+	// AnnotationCredentialOutput marks a command whose output is a
+	// credential. `lo mcp` never exposes it.
+	AnnotationCredentialOutput = "lok8s.dev/credential-output" // #nosec G101 -- an annotation key, not a credential
 )
 
 // Command groups shown in help output.

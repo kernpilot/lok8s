@@ -44,9 +44,13 @@
 # Usage: hack/parity-kubehz.sh [path-to-go-lo]   (default: bin/lo)
 source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
 parity::init "${1:-}"
-# The kubehz tokens are unset so no path can reach a real api.
+# The kubehz tokens and agent keys are unset so no path can reach a real
+# api or token endpoint; XDG_CACHE_HOME is unset so the token cache lives
+# under the isolated HOME below.
 unset KUBECONFIG KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE \
-  KUBEHZ_HANDOVER_K8S_DIR KUBEHZ_HANDOVER_ETCD_DIR KUBEHZ_HANDOVER_ETCD_IMAGE_TAG
+  KUBEHZ_HANDOVER_K8S_DIR KUBEHZ_HANDOVER_ETCD_DIR KUBEHZ_HANDOVER_ETCD_IMAGE_TAG \
+  KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE \
+  XDG_CACHE_HOME KUBERNETES_EXEC_INFO
 
 # Isolated HOME so neither implementation can find a real ~/.kube/config.
 export HOME="${WORK}/home"
@@ -408,6 +412,31 @@ check_parse - kubehz claim
 check - kubehz claim --nonce bad
 check - kubehz claim -n khzn_short
 check - kubehz claim-code                                # no cluster reachable → local refusal
+
+# ── token (agent-key exec plugin): the local refusals, no endpoint reached ──
+check - kubehz token
+check - kubehz token --token-url http://id.example/t --scope s
+check - kubehz token --token-url https://id.example/t --scope s    # no key in the env
+check - kubehz token --format yaml
+check_parse - kubehz token --token-url https://id.example/t --scope s extra
+
+# The success path, without a network: a seeded cache entry that both
+# implementations must find under the same name and print the same way.
+# id.example never resolves, so a cache miss would fail both sides, not
+# reach an endpoint.
+token_cache="${HOME}/.cache/lok8s/kubehz-token"
+mkdir -p "${token_cache}" && chmod 700 "${token_cache}"
+token_entry="${token_cache}/$(printf '%s\n%s\n%s' https://id.example/t parity-cid s | sha256sum | cut -c1-32).json"
+printf '{"access_token":"parity-jwt","expires_at":4102444800}\n' > "${token_entry}"
+chmod 600 "${token_entry}"
+export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
+check - kubehz token --token-url https://id.example/t --scope s
+# rc 0 only on a cache hit: a miss cannot reach id.example and fails.
+expect_rc 0 kubehz token --token-url https://id.example/t --scope s
+check - kubehz token --token-url https://id.example/t --scope s --format token
+KUBERNETES_EXEC_INFO='{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential"}' \
+  check - kubehz token --token-url https://id.example/t --scope s
+unset KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET
 
 # ── node: the hosting gate, the https gate, the global --cluster trap ───────
 check - kubehz node join

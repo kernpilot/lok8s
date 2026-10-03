@@ -54,6 +54,7 @@ main::kubehz() {
     'node|n'                    'Nodes you bring to a hosted control plane (join/remove/status)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
     'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
+    '#token'                    'Print an access token for the agent key in the environment (kubectl exec plugin)'
     're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
@@ -1084,6 +1085,193 @@ kubehz::claim() {
   echo "The next heartbeat (within 5 minutes) echoes it to the platform; on success the"
   echo "dashboard shows the cluster claimed and the agent clears the nonce. The challenge"
   echo "expires 15 minutes after minting — mint and place a fresh one if it lapses."
+}
+
+# ── Agent keys: the kubectl exec credential plugin ───────
+
+# `lo kubehz token`: run the OAuth client_credentials grant for the agent key
+# in the environment (KUBEHZ_AGENT_CLIENT_ID + KUBEHZ_AGENT_CLIENT_SECRET, or
+# --secret-file) and print the access token, by default as a kubectl
+# ExecCredential. The Go twin is internal/kubehz/token.go: the same messages,
+# the same bytes on stdout, the same cache file
+# (${XDG_CACHE_HOME:-~/.cache}/lok8s/kubehz-token/<sha256 prefix>.json,
+# {"access_token":…,"expires_at":<epoch s>}, 0600, reused until five
+# minutes before expiry). The secret never reaches argv: curl reads it from
+# a config on stdin, and `-q` keeps a ~/.curlrc out of that request. A
+# failure that can pass (no answer, a 5xx, invalid_client: a key made a
+# moment ago) is tried again after 0.25, 0.5 and 1 s; an attempt that ran
+# out of time (curl exit 28) is not. Only the last failure is printed.
+kubehz::token() {
+  local token_url="" scope="" secret_file="" format="exec-credential" no_cache=0
+  local -a args=(
+    'token-url|'    'The platform token endpoint (https), or set KUBEHZ_AGENT_TOKEN_URL'
+    'scope|'        "The scope to request (the key's tokenScope), or set KUBEHZ_AGENT_SCOPE"
+    'secret-file|'  'Read the client secret from this file instead of KUBEHZ_AGENT_CLIENT_SECRET'
+    'format|'       'Output: exec-credential (kubectl) or token (the bare access token)'
+    'no-cache|:+'   'Always ask the token endpoint and write no cache file'
+    "${args[@]:-}"
+  )
+  :args "Print an access token for the agent key in the environment (kubectl exec plugin)" "${@}"
+
+  case "${format}" in
+    exec-credential|token) ;;
+    *) error "unknown --format ${format} (want exec-credential or token)"; return 1 ;;
+  esac
+  token_url="${token_url:-${KUBEHZ_AGENT_TOKEN_URL:-}}"
+  scope="${scope:-${KUBEHZ_AGENT_SCOPE:-}}"
+  if [[ -z "${token_url}" || -z "${scope}" ]]; then
+    error "token url and scope are required: pass --token-url and --scope, or set KUBEHZ_AGENT_TOKEN_URL and KUBEHZ_AGENT_SCOPE"
+    return 1
+  fi
+  http::require_https "${token_url}" "Token URL" || return 1
+  local client_id="${KUBEHZ_AGENT_CLIENT_ID:-}" secret="${KUBEHZ_AGENT_CLIENT_SECRET:-}"
+  if [[ -n "${secret_file}" ]]; then
+    # -r and not a directory: a pipe (<(pass show …), /dev/stdin) is fine.
+    if [[ ! -r "${secret_file}" || -d "${secret_file}" ]]; then
+      error "cannot read the secret file ${secret_file}"
+      return 1
+    fi
+    secret=$(<"${secret_file}")
+    secret="${secret#"${secret%%[![:space:]]*}"}"
+    secret="${secret%"${secret##*[![:space:]]}"}"
+  fi
+  if [[ -z "${client_id}" || -z "${secret}" ]]; then
+    error "no agent key: set KUBEHZ_AGENT_CLIENT_ID and KUBEHZ_AGENT_CLIENT_SECRET (or pass --secret-file)"
+    return 1
+  fi
+  # A line break would end the curl config line below and make the rest a
+  # curl option.
+  if kubehz::token_has_control "${client_id}${secret}"; then
+    error "the agent key holds a control character: check KUBEHZ_AGENT_CLIENT_ID and the client secret"
+    return 1
+  fi
+
+  local now cache_file="" dir entry access_token expires_at
+  now=$(date -u +%s)
+  if (( ! no_cache )); then
+    dir="${XDG_CACHE_HOME:-${HOME:+${HOME}/.cache}}"
+    if [[ -n "${dir}" ]]; then
+      cache_file="${dir}/lok8s/kubehz-token/$(printf '%s\n%s\n%s' "${token_url}" "${client_id}" "${scope}" | sha256sum | cut -c1-32).json"
+    fi
+  fi
+  if [[ -n "${cache_file}" ]] && entry=$(kubehz::token_cache_read "${cache_file}"); then
+    access_token=$(jq -r '.access_token' <<<"${entry}")
+    expires_at=$(jq -r '.expires_at' <<<"${entry}")
+    if (( expires_at - now > 300 )); then
+      kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
+      return
+    fi
+  fi
+
+  # client_secret_basic. The config line quotes backslashes and quotes, so a
+  # value can never end the string early.
+  local user="${client_id}:${secret}" answer status reason code expires_in msg attempt retry rc
+  local -a delays=(0.25 0.5 1)
+  user="${user//\\/\\\\}"
+  user="${user//\"/\\\"}"
+  for (( attempt = 0; ; attempt++ )); do
+    retry=0
+    if answer=$(printf 'user = "%s"\n' "${user}" | curl -q -sS --proto =https \
+      --connect-timeout 10 --max-time 30 -K - \
+      -H 'Accept: application/json' \
+      --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
+      -w $'\n%{http_code}' "${token_url}" 2>/dev/null); then
+      status="${answer##*$'\n'}"
+      answer="${answer%$'\n'*}"
+      [[ "${status}" == "200" ]] && break
+      # Control characters become spaces inside jq: a NUL would not
+      # survive the command substitution (Go's printable does the same).
+      reason=$(jq -r '(.error // "") + " " + (.error_description // "") | explode | map(if . < 32 or . == 127 then 32 else . end) | implode' <<<"${answer}" 2>/dev/null) || reason=""
+      reason="${reason#"${reason%%[![:space:]]*}"}"
+      reason="${reason%"${reason##*[![:space:]]}"}"
+      [[ -n "${reason}" ]] || reason="no reason given"
+      msg="token request refused: HTTP ${status}: ${reason:0:200}"
+      code=$(jq -r '.error // empty' <<<"${answer}" 2>/dev/null) || code=""
+      if (( 10#${status} >= 500 )) || [[ "${code}" == "invalid_client" ]]; then
+        retry=1
+      fi
+    else
+      rc=$?
+      msg="token request to ${token_url} failed: no answer"
+      debug "token request: curl exit ${rc}"
+      (( rc == 28 )) || retry=1
+    fi
+    # error() and debug() print through `echo -e`: double the backslashes,
+    # or a refusal text could carry a real escape sequence (the
+    # kubehz::space_safe_string rule).
+    if (( ! retry || attempt == ${#delays[@]} )); then
+      error "${msg//\\/\\\\}"
+      return 1
+    fi
+    debug "token request failed, trying again: ${msg//\\/\\\\}"
+    sleep "${delays[attempt]}"
+  done
+  access_token=$(jq -r '.access_token // empty' <<<"${answer}" 2>/dev/null) || access_token=""
+  # Floor and clamp in jq: a huge number would print as 1e+30, and Go clamps
+  # it to a day.
+  expires_in=$(jq -r '(.expires_in // 0) | floor | if . > 86400 then 86400 else . end' <<<"${answer}" 2>/dev/null) || expires_in=0
+  if [[ -z "${access_token}" || ! "${expires_in}" =~ ^[0-9]+$ ]] || (( expires_in <= 0 )); then
+    error "token endpoint answered without an access token or a lifetime"
+    return 1
+  fi
+  (( expires_in > 86400 )) && expires_in=86400
+  expires_at=$(( now + expires_in ))
+  if [[ -n "${cache_file}" ]]; then
+    kubehz::token_cache_write "${cache_file}" "${access_token}" "${expires_at}" \
+      || debug "token cache not written: ${cache_file}"
+  fi
+  kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
+}
+
+# Whether the string holds a C0 control character or DEL. LC_ALL=C pins the
+# class to those bytes: in a UTF-8 locale [[:cntrl:]] also matches U+0085,
+# which the Go twin (isControl) accepts.
+# Usage: kubehz::token_has_control <string>
+kubehz::token_has_control() {
+  local LC_ALL=C
+  [[ "${1}" == *[[:cntrl:]]* ]]
+}
+
+# A cache entry, only from a regular file of ours that nobody else can read.
+# Usage: kubehz::token_cache_read <file>  (prints the entry, or returns 1)
+kubehz::token_cache_read() {
+  local file="${1}" mode entry
+  [[ -f "${file}" && ! -L "${file}" && -O "${file}" ]] || return 1
+  mode=$(stat -c '%a' "${file}" 2>/dev/null) || return 1
+  (( (8#${mode} & 8#077) == 0 )) || return 1
+  entry=$(jq -ce 'select((.access_token | type) == "string" and .access_token != ""
+    and (.expires_at | type) == "number" and .expires_at > 0)' "${file}" 2>/dev/null) || return 1
+  echo "${entry}"
+}
+
+# Usage: kubehz::token_cache_write <file> <access_token> <expires_at>
+kubehz::token_cache_write() {
+  local file="${1}" dir tmp
+  dir="${file%/*}"
+  (umask 077 && mkdir -p "${dir}") || return 1
+  tmp=$(mktemp "${dir}/.token-XXXXXX") || return 1
+  if jq -cn --arg t "${2}" --argjson e "${3}" '{access_token:$t,expires_at:$e}' >"${tmp}" \
+    && mv -f "${tmp}" "${file}"; then
+    return 0
+  fi
+  rm -f "${tmp}"
+  return 1
+}
+
+# Usage: kubehz::token_emit <format> <access_token> <expires_at>
+kubehz::token_emit() {
+  local format="${1}" token="${2}" exp="${3}" version
+  if [[ "${format}" == "token" ]]; then
+    printf '%s\n' "${token}"
+    return 0
+  fi
+  version=$(jq -r '.apiVersion // empty' <<<"${KUBERNETES_EXEC_INFO:-}" 2>/dev/null) || version=""
+  case "${version}" in
+    client.authentication.k8s.io/v1|client.authentication.k8s.io/v1beta1) ;;
+    *) version="client.authentication.k8s.io/v1" ;;
+  esac
+  jq -cn --arg v "${version}" --arg t "${token}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
+    '{apiVersion:$v,kind:"ExecCredential",status:{token:$t,expirationTimestamp:$e}}'
 }
 
 # ── Agent-token re-enrollment (agent-identity contract R2) ─

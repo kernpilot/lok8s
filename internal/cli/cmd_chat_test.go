@@ -4,12 +4,16 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -122,5 +126,45 @@ func TestChatPreflightErrors(t *testing.T) {
 	_, _, _ = runLo(t, NewRoot(p2), "chat")
 	if _, err := os.Stat(filepath.Join(p2.Lok8s, "chat")); err == nil {
 		t.Error("LO_ASSETS_EJECT=never still wrote .lok8s/chat")
+	}
+}
+
+// TestChatDeniesEveryCredentialOutputCommand: `lo chat` drives the bash tree's
+// argsh `lo mcp`, which knows nothing of AnnotationCredentialOutput. The chat
+// defaults' deny list is the only gate there, so every such command must be
+// on it (in the project tree and in the embedded copy).
+func TestChatDeniesEveryCredentialOutputCommand(t *testing.T) {
+	var tools []string
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Annotations[AnnotationCredentialOutput] == "true" {
+			tools = append(tools, strings.ReplaceAll(c.CommandPath(), " ", "_"))
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(newUsageTree(synthProject(t), routing{}))
+	if !slices.Contains(tools, "lo_kubehz_token") {
+		t.Fatalf("credential-output commands = %v: lo_kubehz_token lost its annotation, the check proves nothing", tools)
+	}
+	for _, file := range []string{"../../.lok8s/chat/defaults.json", "../assets/lok8s/chat/defaults.json"} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var defaults struct {
+			Injection struct {
+				Deny []string `json:"deny"`
+			} `json:"injection"`
+		}
+		if err := json.Unmarshal(raw, &defaults); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		for _, tool := range tools {
+			if !slices.Contains(defaults.Injection.Deny, tool) {
+				t.Errorf("%s: injection.deny lacks %s, a command whose output is a credential", file, tool)
+			}
+		}
 	}
 }

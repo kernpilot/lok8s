@@ -60,6 +60,7 @@ func newKubehzCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		newKubehzNode(paths),
 		newKubehzClaimCode(paths),
 		newKubehzClaim(paths),
+		newKubehzToken(paths),
 		newKubehzReEnroll(paths),
 		newKubehzAssess(paths),
 		newKubehzHandover(paths),
@@ -184,6 +185,39 @@ func newKubehzClaim(paths *config.Paths) *cobra.Command {
 		},
 	}
 	c.Flags().StringP("nonce", "n", "", "Claim-challenge nonce minted in the dashboard (khzn_…); '-' reads it from stdin, or set KUBEHZ_CLAIM_NONCE")
+	return c
+}
+
+// newKubehzToken is the kubectl exec credential plugin for an agent key
+// (internal/kubehz/token.go). It reads no project and prints no run header:
+// kubectl runs it from any directory and parses stdout as the credential.
+func newKubehzToken(paths *config.Paths) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "token",
+		Short: "Print an access token for the agent key in the environment (kubectl exec plugin)",
+		// Its stdout IS a bearer token: never an MCP tool, whatever the
+		// opt-in, or the token lands in the agent's transcript. Hidden as in
+		// the argsh usage ('#token'): the argsh `lo mcp` that `lo chat`
+		// drives skips hidden leaves, whatever a project's chat config says.
+		Hidden:       true,
+		Annotations:  map[string]string{AnnotationCredentialOutput: "true"},
+		Args:         argshNoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var o kubehz.TokenOptions
+			o.TokenURL, _ = cmd.Flags().GetString("token-url")
+			o.Scope, _ = cmd.Flags().GetString("scope")
+			o.SecretFile, _ = cmd.Flags().GetString("secret-file")
+			o.Format, _ = cmd.Flags().GetString("format")
+			o.NoCache, _ = cmd.Flags().GetBool("no-cache")
+			return kubehzRun(kubehzContext(cmd, paths).Token(cmd.Context(), o))
+		},
+	}
+	c.Flags().String("token-url", "", "The platform token endpoint (https), or set KUBEHZ_AGENT_TOKEN_URL")
+	c.Flags().String("scope", "", "The scope to request (the key's tokenScope), or set KUBEHZ_AGENT_SCOPE")
+	c.Flags().String("secret-file", "", "Read the client secret from this file instead of KUBEHZ_AGENT_CLIENT_SECRET")
+	c.Flags().String("format", "exec-credential", "Output: exec-credential (kubectl) or token (the bare access token)")
+	c.Flags().Bool("no-cache", false, "Always ask the token endpoint and write no cache file")
 	return c
 }
 

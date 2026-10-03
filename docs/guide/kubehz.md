@@ -766,6 +766,58 @@ Both should print `No resources found`. If you moved the worker pools out of
 `kube-system` with `KUBEHZ_MD_NAMESPACE`, the managed `Role` moved with them.
 The `-A` query above finds it wherever it is.
 
+## Agent keys
+
+An agent key is a machine identity for an AI agent or a pipeline. A tenant
+owner or admin creates it in the dashboard or with `POST /api/agent-keys`. The
+answer shows the client id and the client secret once, the token endpoint,
+and the scope to request.
+
+`lo kubehz token` turns the key into an access token. kubectl runs it as an
+exec credential plugin:
+
+```yaml
+users:
+- name: agent
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: lo
+      args: [kubehz, token, --token-url, "https://id.kubehz.cloud/oauth/v2/token", --scope, "<tokenScope>"]
+      interactiveMode: Never
+```
+
+Set `KUBEHZ_AGENT_CLIENT_ID` and `KUBEHZ_AGENT_CLIENT_SECRET` in the agent's
+environment, or keep the secret in a file and pass `--secret-file`. The file
+can be a pipe, for example `--secret-file <(pass show kubehz/agent)`. The
+secret is never a flag, because every user on the machine can read a command
+line.
+
+The same token works against the platform api:
+
+```bash
+export KUBEHZ_TOKEN=$(lo kubehz token --format token)
+lo kubehz status
+```
+
+The command caches the access token in
+`${XDG_CACHE_HOME:-~/.cache}/lok8s/kubehz-token/` (mode 0600). It asks the
+token endpoint again five minutes before the token expires. `--no-cache`
+always asks and writes nothing. When an owner revokes the key, the api refuses
+it at once. A token that was already issued stays valid at the apiservers
+until it expires (at most 12 hours).
+
+A key that was created a moment ago can be refused for a short time, until
+the identity provider knows it. Thus the command tries again after 0.25, 0.5
+and 1 second when the connection fails, the endpoint answers with a 5xx
+status, or it answers `invalid_client`. It prints only the last failure and
+never caches one. An attempt ends after 30 seconds and is not tried again,
+so a stalled endpoint holds kubectl for 30 seconds at most.
+
+The output of this command is a bearer token. Thus the command is hidden
+from `lo kubehz --help`, no `lo mcp` server offers it as a tool, and `lo chat`
+denies it to the model.
+
 ## Assessment and handover
 
 The heartbeat agent also collects a compact **assessment** of the cluster:
