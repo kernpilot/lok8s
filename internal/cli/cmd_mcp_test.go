@@ -45,6 +45,17 @@ var argshMcpTools = []string{
 	"lo_tilt_restart", "lo_tilt_status", "lo_tilt_up", "lo_trust", "lo_up", "lo_use", "lo_version",
 }
 
+// argshMcpWithheld are argsh tools the Go server withholds on purpose: their
+// output is a credential (AnnotationCredentialOutput), and a tool result
+// lands in the model's transcript. The superset check skips them, and
+// TestMcpNeverExposesACommandThatPrintsACredential pins their absence.
+var argshMcpWithheld = map[string]bool{
+	"lo_kubeconfig":        true,
+	"lo_secrets_print":     true,
+	"lo_secrets_env":       true,
+	"lo_kubehz_claim-code": true,
+}
+
 // argshMcpRenames maps an argsh tool name to the ophis name(s) that replace
 // it. The argsh flattener dropped the middle of a two-level dispatcher path
 // (kubehz handover receive → lo_handover_receive, kubehz node join →
@@ -265,8 +276,12 @@ func TestMcpToolsDestructiveOptInIsSupersetOfArgsh(t *testing.T) {
 			t.Errorf("dispatcher %s exposed as a tool", parent)
 		}
 	}
-	// Superset of the argsh surface under the documented renames.
+	// Superset of the argsh surface under the documented renames, less the
+	// withheld credential tools.
 	for _, name := range argshMcpTools {
+		if argshMcpWithheld[name] {
+			continue
+		}
 		wanted := []string{name}
 		if renamed, ok := argshMcpRenames[name]; ok {
 			wanted = renamed
@@ -289,6 +304,12 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 		}
 	}
 	// Concrete flags that exist on the tree today.
+	if flagNames(t, tools["lo_kubehz_node_join"])["print-only"] {
+		t.Error("lo_kubehz_node_join exposes --print-only (it prints the bootstrap token)")
+	}
+	if tools["lo_kubehz_node_join"] == nil {
+		t.Error("lo_kubehz_node_join is gone: the --print-only check proves nothing")
+	}
 	if flagNames(t, tools["lo_kubehz_claim"])["nonce"] {
 		t.Error("lo_kubehz_claim exposes --nonce")
 	}
@@ -301,11 +322,14 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 }
 
 func TestMcpNeverExposesACommandThatPrintsACredential(t *testing.T) {
-	// `lo kubehz token` prints a bearer token: as a tool, the token would
-	// land in the agent's transcript. Not even --allow-destructive exposes it.
+	// Each of these prints a credential (a bearer token, an admin kubeconfig,
+	// a secret, a claim code): as a tool, it would land in the agent's
+	// transcript. Not even --allow-destructive exposes them.
 	tools := mcpToolNames(t, mcpExposure{destructive: true})
-	if _, ok := tools["lo_kubehz_token"]; ok {
-		t.Error("lo_kubehz_token is an MCP tool")
+	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env", "lo_kubehz_claim-code"} {
+		if _, ok := tools[name]; ok {
+			t.Errorf("%s is an MCP tool: its output is a credential", name)
+		}
 	}
 	if _, ok := tools["lo_kubehz_claim"]; !ok {
 		t.Error("lo_kubehz_claim is gone: the check above proves nothing")

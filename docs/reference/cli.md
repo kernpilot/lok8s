@@ -578,7 +578,7 @@ Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_statu
 | `@destructive` | `destructiveHint: true` | with `--allow-destructive` (implies `--allow-mutating`) |
 | `@idempotent` | `idempotentHint: true` | informational |
 
-Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
+A command whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz token`, `kubehz claim-code`) is never a tool, in any tier: a tool result lands in the model's transcript. `--print-only` of `kubehz node join` is never exposed either, because it prints the bootstrap token. Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
 #### MCP server
 
@@ -606,7 +606,7 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
-`LO_MCP_ALLOW=destructive` opens the full surface (90 tools). That is the set the argsh builtin served, plus the Go-only leaves. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (51 tools). The tiers follow the marker table above.
+`LO_MCP_ALLOW=destructive` opens the full surface (88 tools). That is the set the argsh builtin served, without the four commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`), plus the Go-only leaves. Remove the `env` entry for the readonly default (25 tools), or set `mutating` for the middle tier (49 tools). The tiers follow the marker table above.
 
 #### Bash variant
 
@@ -627,7 +627,7 @@ Until WP8 lands, start the frozen tree directly from a checkout:
 
 The entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
 
-The two servers differ in three places. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project`, `lo init cluster` and `lo toolchain` have no builtin tool.
+The two servers differ in four places. The builtin still serves `lo_kubeconfig`, `lo_secrets_print`, `lo_secrets_env` and `lo_kubehz_claim-code`; only the deny list of `lo chat` gates them there. The Go server withholds them. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project`, `lo init cluster` and `lo toolchain` have no builtin tool.
 
 ### lo kubeconfig
 

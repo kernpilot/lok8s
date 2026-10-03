@@ -2483,15 +2483,18 @@ stdout, stderr and exit code.
 Exposure policy — what an agent can call:
 
   default              readonly commands only (status, lint, audit,
-                       kubeconfig, secrets list, tilt status, ...)
+                       secrets list, tilt status, ...)
   --allow-mutating     + mutating, non-destructive commands
                        (build, use, init, secrets encrypt, ...)
   --allow-destructive  + destructive commands (up, down, deploy, destroy,
                        tilt down, kubehz deregister, ...) and the --force
                        flags; implies --allow-mutating
 
-A command without a marker counts as mutating. Flags that carry a
-credential (token, secret, password, key, nonce, ...) are never exposed.
+A command without a marker counts as mutating. A command whose output is
+a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
+claim-code) is never exposed: a tool result lands in the model's
+transcript. Flags that carry a credential (token, secret, password, key,
+nonce, ...) are never exposed either.
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
 for editor configs (flags win).

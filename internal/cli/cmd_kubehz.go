@@ -148,7 +148,7 @@ func newKubehzClaimCode(paths *config.Paths) *cobra.Command {
 		Use:          "claim-code",
 		Aliases:      []string{"c"},
 		Short:        "Print the one-time claim code to paste into the dashboard",
-		Annotations:  commandSpec{readonly: true}.annotations(),
+		Annotations:  commandSpec{readonly: true, credentialOutput: true}.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -200,7 +200,7 @@ func newKubehzToken(paths *config.Paths) *cobra.Command {
 		// the argsh usage ('#token'): the argsh `lo mcp` that `lo chat`
 		// drives skips hidden leaves, whatever a project's chat config says.
 		Hidden:       true,
-		Annotations:  map[string]string{AnnotationCredentialOutput: "true"},
+		Annotations:  commandSpec{credentialOutput: true}.annotations(),
 		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
