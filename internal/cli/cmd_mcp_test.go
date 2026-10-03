@@ -522,3 +522,32 @@ func TestMcpStdioSmoke(t *testing.T) {
 	}
 	outW.Close()
 }
+
+// TestKubehzHiddenMarkersMatchArgshUsage: a `kubehz` subcommand is hidden in
+// the Go tree exactly when the argsh usage hides it ('#name'). Hidden is a
+// security property here: the argsh `lo mcp` that `lo chat` drives skips
+// hidden leaves, and `kubehz token` prints a bearer token.
+func TestKubehzHiddenMarkersMatchArgshUsage(t *testing.T) {
+	bash := parseShimUsage(t, filepath.Join("..", "..", ".lok8s", "libs", "kubehz", "main"), "main::kubehz() {")
+	var kubehz *cobra.Command
+	for _, c := range newUsageTree(synthProject(t), routing{}).Commands() {
+		if c.Name() == "kubehz" {
+			kubehz = c
+		}
+	}
+	if kubehz == nil {
+		t.Fatal("no kubehz command in the usage tree")
+	}
+	for _, sub := range kubehz.Commands() {
+		spec, ok := bash[sub.Name()]
+		if !ok {
+			continue // Go-only helpers (completion, help) have no usage entry
+		}
+		if sub.Hidden != spec.hidden {
+			t.Errorf("lo kubehz %s: Go Hidden=%v, argsh usage hidden=%v", sub.Name(), sub.Hidden, spec.hidden)
+		}
+	}
+	if !bash["token"].hidden {
+		t.Error("the argsh usage lists `kubehz token` without '#': the argsh lo mcp would offer it")
+	}
+}

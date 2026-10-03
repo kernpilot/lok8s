@@ -196,7 +196,10 @@ func newKubehzToken(paths *config.Paths) *cobra.Command {
 		Use:   "token",
 		Short: "Print an access token for the agent key in the environment (kubectl exec plugin)",
 		// Its stdout IS a bearer token: never an MCP tool, whatever the
-		// opt-in, or the token lands in the agent's transcript.
+		// opt-in, or the token lands in the agent's transcript. Hidden as in
+		// the argsh usage ('#token'): the argsh `lo mcp` that `lo chat`
+		// drives skips hidden leaves, whatever a project's chat config says.
+		Hidden:       true,
 		Annotations:  map[string]string{AnnotationCredentialOutput: "true"},
 		Args:         argshNoArgs,
 		SilenceUsage: true,

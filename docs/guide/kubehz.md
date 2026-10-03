@@ -814,8 +814,9 @@ status, or it answers `invalid_client`. It prints only the last failure and
 never caches one. An attempt ends after 30 seconds and is not tried again,
 so a stalled endpoint holds kubectl for 30 seconds at most.
 
-The output of this command is a bearer token. Thus `lo mcp` never offers it
-as a tool, and `lo chat` denies it to the model.
+The output of this command is a bearer token. Thus the command is hidden
+from `lo kubehz --help`, no `lo mcp` server offers it as a tool, and `lo chat`
+denies it to the model.
 
 ## Assessment and handover
 

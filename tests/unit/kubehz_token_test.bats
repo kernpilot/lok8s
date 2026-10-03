@@ -288,3 +288,22 @@ calls() { [[ -f "${CURL_CALLS}" ]] && wc -l < "${CURL_CALLS}" | tr -d ' ' || ech
   assert_success
   assert_output --partial '"expirationTimestamp":"2023-11-15T22:13:20Z"'
 }
+
+@test "token: a NUL in a refusal text becomes a space (the Go twin's printable)" {
+  STUB_CODE=400
+  STUB_BODY='{"error":"invalid_request","error_description":"a\u0000b"}'
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  assert_output --partial 'token request refused: HTTP 400: invalid_request a b'
+  refute_output --partial 'ignored null byte'
+}
+
+@test "token: the retry debug line prints a refusal text as plain characters" {
+  export STUB_SEQ="${BATS_TEST_TMPDIR}/seq"
+  printf '%s\n' '503 {"error":"server_error","error_description":"x \\033[2J y"}' \
+    '200 {"access_token":"jwt-ok","expires_in":3600}' > "${STUB_SEQ}"
+  DEBUG=1 run kubehz::token --token-url "${URL}" --scope scope
+  assert_success
+  assert_output --partial 'token request failed, trying again: token request refused: HTTP 503: server_error x \033[2J y'
+  [[ "${output}" != *$'\e'* ]]
+}

@@ -88,6 +88,7 @@ injection:
     - lo_secrets_print
     - lo_secrets_env
     - lo_kubeconfig
+    - lo_kubehz_token
 
 # ---------------------------------------------------------------------------
 # Benchmark

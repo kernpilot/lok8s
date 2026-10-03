@@ -5,12 +5,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -217,8 +220,8 @@ func TestTokenEndsAStalledAttemptAndDoesNotRetryIt(t *testing.T) {
 	t.Cleanup(func() { tokenAttemptTimeout = saved })
 	h, _, cache := tokenHarness(t)
 	h.handleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
-		// No answer at all. The client's header timeout is 2 minutes, so only
-		// the per-attempt deadline ends this within the test.
+		// No answer at all. The test client sets no header timeout, so only
+		// the per-attempt deadline ends this.
 		select {
 		case <-r.Context().Done():
 		case <-time.After(5 * time.Second):
@@ -235,6 +238,70 @@ func TestTokenEndsAStalledAttemptAndDoesNotRetryIt(t *testing.T) {
 	}
 	if len(waits) != 0 || time.Since(start) > 3*time.Second {
 		t.Errorf("a stalled attempt was retried (waits %v) or not bounded (%v)", waits, time.Since(start))
+	}
+}
+
+func TestTokenDoesNotRetryAStalledTLSHandshake(t *testing.T) {
+	// TCP accepts, TLS never answers: the transport's handshake timeout is
+	// no DeadlineExceeded, and curl's --connect-timeout ends it as exit 28.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn) // held open, never answered
+			mu.Unlock()
+		}
+	}()
+	h, _, cache := tokenHarness(t)
+	h.ctx.HTTP = &http.Client{Transport: &http.Transport{TLSHandshakeTimeout: 50 * time.Millisecond}}
+	var waits []time.Duration
+	h.ctx.Sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	o := tokenOpts(h, cache)
+	o.TokenURL = "https://" + ln.Addr().String() + "/oauth/v2/token"
+	err = h.ctx.Token(context.Background(), o)
+	if !errors.Is(err, ErrHandled) || !strings.Contains(h.errOut.String(), "failed: no answer") {
+		t.Fatalf("err = %v, stderr = %q", err, h.errOut.String())
+	}
+	if len(waits) != 0 {
+		t.Errorf("a TLS handshake timeout was retried (waits %v)", waits)
+	}
+}
+
+func TestTokenIgnoresAFIFOAtTheCachePath(t *testing.T) {
+	h, calls, cache := tokenHarness(t)
+	o := tokenOpts(h, cache)
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(cache, tokenCacheName(o.TokenURL, "kubehz-agent-ak-1a2b3c4d", o.Scope)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.ctx.Token(context.Background(), o) }()
+	select {
+	case err := <-done:
+		if err != nil || *calls != 1 {
+			t.Errorf("err = %v, calls = %d", err, *calls)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO at the cache path blocked")
 	}
 }
 
@@ -281,6 +348,17 @@ func TestTokenPrintsARefusalAsPlainText(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(h.errOut.String(), `token request refused: HTTP 400: invalid_request bad \033[2J request`) {
+		t.Errorf("stderr = %q", h.errOut.String())
+	}
+}
+
+func TestTokenRefusalTurnsANULIntoASpace(t *testing.T) {
+	h, _, cache := tokenHarness(t)
+	h.handle("POST /oauth/v2/token", 400, `{"error":"invalid_request","error_description":"a\u0000b"}`)
+	if err := h.ctx.Token(context.Background(), tokenOpts(h, cache)); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(h.errOut.String(), "token request refused: HTTP 400: invalid_request a b\n") {
 		t.Errorf("stderr = %q", h.errOut.String())
 	}
 }

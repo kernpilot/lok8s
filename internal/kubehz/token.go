@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -223,9 +224,14 @@ func (c *Context) tokenAttempt(ctx context.Context, tokenURL, clientID, secret, 
 	// certificate name), so it is printed plain.
 	noAnswer := func(err error) *tokenFailure {
 		c.debugf("token request: %s", printable(err.Error(), 300))
+		// Any timeout ends the grant: the attempt deadline, and the
+		// transport's own TLS handshake timeout, which is no
+		// DeadlineExceeded (curl's --connect-timeout covers both, exit 28).
+		var ne net.Error
+		timedOut := errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 		return &tokenFailure{
 			msg:   "token request to " + tokenURL + " failed: no answer",
-			retry: !errors.Is(err, context.DeadlineExceeded),
+			retry: !timedOut,
 		}
 	}
 	resp, err := c.httpClient().Do(req)

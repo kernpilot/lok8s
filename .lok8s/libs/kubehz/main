@@ -54,7 +54,7 @@ main::kubehz() {
     'node|n'                    'Nodes you bring to a hosted control plane (join/remove/status)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
     'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
-    'token'                     'Print an access token for the agent key in the environment (kubectl exec plugin)'
+    '#token'                    'Print an access token for the agent key in the environment (kubectl exec plugin)'
     're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
@@ -1179,10 +1179,11 @@ kubehz::token() {
       status="${answer##*$'\n'}"
       answer="${answer%$'\n'*}"
       [[ "${status}" == "200" ]] && break
-      reason=$(jq -r '(.error // "") + " " + (.error_description // "")' <<<"${answer}" 2>/dev/null) || reason=""
+      # Control characters become spaces inside jq: a NUL would not
+      # survive the command substitution (Go's printable does the same).
+      reason=$(jq -r '(.error // "") + " " + (.error_description // "") | explode | map(if . < 32 or . == 127 then 32 else . end) | implode' <<<"${answer}" 2>/dev/null) || reason=""
       reason="${reason#"${reason%%[![:space:]]*}"}"
       reason="${reason%"${reason##*[![:space:]]}"}"
-      reason=$(printf '%s' "${reason}" | tr '\000-\037\177' ' ')
       [[ -n "${reason}" ]] || reason="no reason given"
       msg="token request refused: HTTP ${status}: ${reason:0:200}"
       code=$(jq -r '.error // empty' <<<"${answer}" 2>/dev/null) || code=""
