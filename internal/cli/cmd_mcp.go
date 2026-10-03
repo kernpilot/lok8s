@@ -24,8 +24,9 @@ package cli
 //     --allow-destructive, which implies --allow-mutating;
 //   - a command without any marker (own or inherited) counts as mutating —
 //     it is not known to be safe;
-//   - a command whose output is a credential (AnnotationCredentialOutput,
-//     `kubehz token`) is never exposed;
+//   - a command whose output is a credential (AnnotationCredentialOutput:
+//     kubeconfig, secrets print, secrets env, kubehz token, kubehz
+//     claim-code) is never exposed;
 //   - flags that carry a credential (token, secret, password, key, nonce, …)
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
@@ -115,8 +116,9 @@ var mcpSensitiveFlagWords = map[string]bool{
 var mcpDestructiveOnlyFlags = map[string]bool{"force": true, "force-recreate": true}
 
 // mcpNeverFlags are never exposed: `verbose` is a count flag (see the file
-// comment); `help` is cobra's own.
-var mcpNeverFlags = map[string]bool{"verbose": true, "help": true}
+// comment); `help` is cobra's own; `print-only` (kubehz node join) prints
+// the kubeadm join line with its bootstrap token instead of running it.
+var mcpNeverFlags = map[string]bool{"verbose": true, "help": true, "print-only": true}
 
 func mcpSensitiveFlag(name string) bool {
 	for word := range strings.SplitSeq(strings.ToLower(name), "-") {
@@ -355,8 +357,8 @@ Exposure policy — what an agent can call:
                        flags; implies --allow-mutating
 
 A command without a marker counts as mutating. A command whose output is
-a credential (kubeconfig, secrets print, secrets env, kubehz token) is
-never exposed: a tool result lands in the model's transcript. Flags that
+a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
+claim-code) is never exposed: a tool result lands in the model's transcript. Flags that
 carry a credential (token, secret, password, key, nonce, ...) are never
 exposed either.
 A command that is not exposed is not registered, so it cannot be called.

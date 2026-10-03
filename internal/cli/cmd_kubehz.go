@@ -148,7 +148,7 @@ func newKubehzClaimCode(paths *config.Paths) *cobra.Command {
 		Use:          "claim-code",
 		Aliases:      []string{"c"},
 		Short:        "Print the one-time claim code to paste into the dashboard",
-		Annotations:  commandSpec{readonly: true}.annotations(),
+		Annotations:  commandSpec{readonly: true, credentialOutput: true}.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

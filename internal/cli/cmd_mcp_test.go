@@ -50,9 +50,10 @@ var argshMcpTools = []string{
 // lands in the model's transcript. The superset check skips them, and
 // TestMcpNeverExposesACommandThatPrintsACredential pins their absence.
 var argshMcpWithheld = map[string]bool{
-	"lo_kubeconfig":    true,
-	"lo_secrets_print": true,
-	"lo_secrets_env":   true,
+	"lo_kubeconfig":        true,
+	"lo_secrets_print":     true,
+	"lo_secrets_env":       true,
+	"lo_kubehz_claim-code": true,
 }
 
 // argshMcpRenames maps an argsh tool name to the ophis name(s) that replace
@@ -303,6 +304,12 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 		}
 	}
 	// Concrete flags that exist on the tree today.
+	if flagNames(t, tools["lo_kubehz_node_join"])["print-only"] {
+		t.Error("lo_kubehz_node_join exposes --print-only (it prints the bootstrap token)")
+	}
+	if tools["lo_kubehz_node_join"] == nil {
+		t.Error("lo_kubehz_node_join is gone: the --print-only check proves nothing")
+	}
 	if flagNames(t, tools["lo_kubehz_claim"])["nonce"] {
 		t.Error("lo_kubehz_claim exposes --nonce")
 	}
@@ -315,10 +322,11 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 }
 
 func TestMcpNeverExposesACommandThatPrintsACredential(t *testing.T) {
-	// `lo kubehz token` prints a bearer token: as a tool, the token would
-	// land in the agent's transcript. Not even --allow-destructive exposes it.
+	// Each of these prints a credential (a bearer token, an admin kubeconfig,
+	// a secret, a claim code): as a tool, it would land in the agent's
+	// transcript. Not even --allow-destructive exposes them.
 	tools := mcpToolNames(t, mcpExposure{destructive: true})
-	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env"} {
+	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env", "lo_kubehz_claim-code"} {
 		if _, ok := tools[name]; ok {
 			t.Errorf("%s is an MCP tool: its output is a credential", name)
 		}

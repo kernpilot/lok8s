@@ -167,7 +167,9 @@ func TestChatDeniesEveryCredentialOutputCommand(t *testing.T) {
 			}
 		}
 		// And back: a denied tool that is not annotated would still be an
-		// MCP tool of the Go server.
+		// MCP tool of the Go server. This makes the chat deny list exactly
+		// the credential-output set; a deny for another reason needs its
+		// own list.
 		for _, denied := range defaults.Injection.Deny {
 			if !slices.Contains(tools, denied) {
 				t.Errorf("%s: %s is denied to chat but not annotated %s", file, denied, AnnotationCredentialOutput)
