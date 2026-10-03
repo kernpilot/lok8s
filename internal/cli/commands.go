@@ -30,6 +30,10 @@ type commandSpec struct {
 	destructive bool
 	readonly    bool
 	idempotent  bool
+	// credentialOutput: the command prints a credential (a kubeconfig with
+	// a client key, a secret, a bearer token). `lo mcp` never offers it,
+	// whatever the opt-in: a tool result lands in the model's transcript.
+	credentialOutput bool
 }
 
 // commandTree is the full `lo` surface, verbatim from the argsh usage list in
@@ -48,7 +52,7 @@ var commandTree = []commandSpec{
 	{use: "recover", short: "Rebuild a cluster from bare metal (disaster recovery)", group: groupLifecycle, destructive: true},
 
 	{use: "use", short: "Set/show active domain", group: groupConfigure, idempotent: true},
-	{use: "kubeconfig", aliases: []string{"kc"}, short: "Print a domain kubeconfig (--oidc for kubelogin exec-plugin)", group: groupConfigure, readonly: true},
+	{use: "kubeconfig", aliases: []string{"kc"}, short: "Print a domain kubeconfig (--oidc for kubelogin exec-plugin)", group: groupConfigure, readonly: true, credentialOutput: true},
 	{use: "init", short: "Scaffold service config (lok8s.yaml/services.yaml/Tiltfile)", group: groupConfigure, idempotent: true},
 	{use: "lint", aliases: []string{"l"}, short: "Validate structure and specs", group: groupConfigure, readonly: true},
 	{use: "audit", aliases: []string{"au"}, short: "Static security-posture audit (read-only, cluster-free; --json | --sarif)", group: groupConfigure, readonly: true},
@@ -86,6 +90,9 @@ func (s commandSpec) annotations() map[string]string {
 	}
 	if s.idempotent {
 		a[AnnotationIdempotent] = "true"
+	}
+	if s.credentialOutput {
+		a[AnnotationCredentialOutput] = "true"
 	}
 	return a
 }

@@ -121,7 +121,7 @@ to a file keeps the raw markdown with no escape codes.
 
 | Posture | What runs |
 | --- | --- |
-| `read-only` (default) | only `[read]` tools: status, doctor, lint, kubeconfig, … |
+| `read-only` (default) | only `[read]` tools: status, doctor, lint, … |
 | `open` | all tools, including writes |
 
 Switch per session with `--posture`, or live with `/posture`. The gate is enforced

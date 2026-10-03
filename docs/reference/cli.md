@@ -578,7 +578,7 @@ Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_statu
 | `@destructive` | `destructiveHint: true` | with `--allow-destructive` (implies `--allow-mutating`) |
 | `@idempotent` | `idempotentHint: true` | informational |
 
-Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
+A command whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz token`) is never a tool, in any tier: a tool result lands in the model's transcript. Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
 #### MCP server
 
@@ -606,7 +606,7 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
-`LO_MCP_ALLOW=destructive` opens the full surface (90 tools). That is the set the argsh builtin served, plus the Go-only leaves. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (51 tools). The tiers follow the marker table above.
+`LO_MCP_ALLOW=destructive` opens the full surface (89 tools). That is the set the argsh builtin served, less the three commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`), plus the Go-only leaves. Remove the `env` entry for the readonly default (26 tools), or set `mutating` for the middle tier (50 tools). The tiers follow the marker table above.
 
 #### Bash variant
 

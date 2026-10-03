@@ -258,7 +258,7 @@ func newSecretsPrint(paths *config.Paths) *cobra.Command {
 		Use:          "print [pattern...]",
 		Aliases:      []string{"p"},
 		Short:        "Print secret(s)",
-		Annotations:  commandSpec{readonly: true}.annotations(),
+		Annotations:  commandSpec{readonly: true, credentialOutput: true}.annotations(),
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -335,7 +335,7 @@ func newSecretsEnv(paths *config.Paths) *cobra.Command {
 	c := &cobra.Command{
 		Use:          "env --name N [--namespace NS]",
 		Short:        "Emit export KEY=value lines for a cached secret",
-		Annotations:  commandSpec{readonly: true}.annotations(),
+		Annotations:  commandSpec{readonly: true, credentialOutput: true}.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
