@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -210,27 +211,86 @@ func TestTokenDoesNotRetryARealRefusal(t *testing.T) {
 	}
 }
 
-func TestTokenEndsAStalledAttempt(t *testing.T) {
+func TestTokenEndsAStalledAttemptAndDoesNotRetryIt(t *testing.T) {
 	saved := tokenAttemptTimeout
 	tokenAttemptTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { tokenAttemptTimeout = saved })
-	h, calls, cache := tokenHarness(t)
+	h, _, cache := tokenHarness(t)
 	h.handleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
-		*calls++
-		w.WriteHeader(200)
-		w.(http.Flusher).Flush() // headers out, the body never: only a deadline ends it
+		// No answer at all. The client's header timeout is 2 minutes, so only
+		// the per-attempt deadline ends this within the test.
 		select {
 		case <-r.Context().Done():
 		case <-time.After(5 * time.Second):
 		}
 	})
+	// Counted on the client side: a handler the client gave up on still
+	// runs on a server goroutine, with no happens-before to this test.
+	var waits []time.Duration
+	h.ctx.Sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
 	start := time.Now()
 	err := h.ctx.Token(context.Background(), tokenOpts(h, cache))
 	if !errors.Is(err, ErrHandled) || !strings.Contains(h.errOut.String(), "failed: no answer") {
 		t.Fatalf("err = %v, stderr = %q", err, h.errOut.String())
 	}
-	if *calls != 4 || time.Since(start) > 3*time.Second {
-		t.Errorf("calls = %d after %v, want 4 bounded attempts", *calls, time.Since(start))
+	if len(waits) != 0 || time.Since(start) > 3*time.Second {
+		t.Errorf("a stalled attempt was retried (waits %v) or not bounded (%v)", waits, time.Since(start))
+	}
+}
+
+func TestTokenRetriesADroppedConnection(t *testing.T) {
+	h, _, cache := tokenHarness(t)
+	var hits atomic.Int32
+	h.handleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close() // no status line: the client sees a transport error
+			}
+			return
+		}
+		_, _ = w.Write([]byte(`{"access_token":"jwt-again","expires_in":3600}`))
+	})
+	var waits []time.Duration
+	h.ctx.Sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	if err := h.ctx.Token(context.Background(), tokenOpts(h, cache)); err != nil {
+		t.Fatalf("Token: %v (stderr %q)", err, h.errOut.String())
+	}
+	if !strings.Contains(h.out.String(), `"token":"jwt-again"`) || !slices.Equal(waits, []time.Duration{250 * time.Millisecond}) {
+		t.Errorf("out = %q, waits = %v", h.out.String(), waits)
+	}
+}
+
+func TestTokenFloorsAFractionalLifetime(t *testing.T) {
+	h, _, cache := tokenHarness(t)
+	h.handle("POST /oauth/v2/token", 200, `{"access_token":"jwt-frac","expires_in":3600.7}`)
+	if err := h.ctx.Token(context.Background(), tokenOpts(h, cache)); err != nil {
+		t.Fatalf("Token: %v (stderr %q)", err, h.errOut.String())
+	}
+	// 1700000000 + 3600, as the bash twin's jq floor gives.
+	if !strings.Contains(h.out.String(), `"expirationTimestamp":"2023-11-14T23:13:20Z"`) {
+		t.Errorf("out = %q", h.out.String())
+	}
+}
+
+func TestTokenPrintsARefusalAsPlainText(t *testing.T) {
+	h, _, cache := tokenHarness(t)
+	// The JSON holds a backslash, then 033[2J: six characters, never an escape.
+	h.handle("POST /oauth/v2/token", 400, `{"error":"invalid_request","error_description":"bad \\033[2J request"}`)
+	if err := h.ctx.Token(context.Background(), tokenOpts(h, cache)); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(h.errOut.String(), `token request refused: HTTP 400: invalid_request bad \033[2J request`) {
+		t.Errorf("stderr = %q", h.errOut.String())
+	}
+}
+
+func TestTokenAcceptsAC1Character(t *testing.T) {
+	// U+0085 is not a C0 control: both twins accept it (bash tests under LC_ALL=C).
+	h, calls, cache := tokenHarness(t)
+	h.env[EnvAgentClientID] = "cid\u0085x"
+	if err := h.ctx.Token(context.Background(), tokenOpts(h, cache)); err != nil || *calls != 1 {
+		t.Errorf("err = %v, calls = %d, stderr %q", err, *calls, h.errOut.String())
 	}
 }
 

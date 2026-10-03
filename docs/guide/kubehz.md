@@ -809,10 +809,13 @@ until it expires (at most 12 hours).
 
 A key that was created a moment ago can be refused for a short time, until
 the identity provider knows it. Thus the command tries again after 0.25, 0.5
-and 1 second when the endpoint gives no answer, answers with a 5xx status, or
-answers `invalid_client`. It prints only the last failure and never caches
-one. Each attempt ends after 30 seconds. `lo mcp` never offers this command
-as a tool, because its output is a bearer token.
+and 1 second when the connection fails, the endpoint answers with a 5xx
+status, or it answers `invalid_client`. It prints only the last failure and
+never caches one. An attempt ends after 30 seconds and is not tried again,
+so a stalled endpoint holds kubectl for 30 seconds at most.
+
+The output of this command is a bearer token. Thus `lo mcp` never offers it
+as a tool, and `lo chat` denies it to the model.
 
 ## Assessment and handover
 

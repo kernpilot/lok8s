@@ -50,8 +50,8 @@ setup() {
   export STUB_BODY='{"access_token":"jwt-1","token_type":"Bearer","expires_in":43199}'
 
   # curl stub: records argv and stdin, answers STUB_BODY + "\n<code>".
-  # With STUB_SEQ (a file), call N answers line N ("<code> <body>", or
-  # "fail" for no answer); the last line repeats.
+  # With STUB_SEQ (a file), call N answers line N ("<code> <body>", "fail"
+  # for no answer, "timeout" for curl's exit 28); the last line repeats.
   curl() {
     printf '%s\n' "$*" >> "${CURL_ARGS}"
     cat >> "${CURL_STDIN}"
@@ -62,6 +62,7 @@ setup() {
       line=$(sed -n "${n}p" "${STUB_SEQ}")
       [[ -n "${line}" ]] || line=$(tail -n 1 "${STUB_SEQ}")
       [[ "${line}" != "fail" ]] || return 7
+      [[ "${line}" != "timeout" ]] || return 28
       code="${line%% *}" body="${line#* }"
     fi
     printf '%s\n%s' "${body}" "${code}"
@@ -248,4 +249,42 @@ calls() { [[ -f "${CURL_CALLS}" ]] && wc -l < "${CURL_CALLS}" | tr -d ' ' || ech
   assert_output --partial 'token request refused: HTTP 400: invalid_scope'
   [ "$(calls)" -eq 1 ]
   [ ! -e "${SLEEPS}" ]
+}
+
+@test "token: an attempt that ran out of time is not tried again" {
+  export STUB_SEQ="${BATS_TEST_TMPDIR}/seq"
+  printf '%s\n' 'timeout' '200 {"access_token":"jwt-late","expires_in":3600}' > "${STUB_SEQ}"
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  assert_output --partial "token request to ${URL} failed: no answer"
+  [ "$(calls)" -eq 1 ]
+  [ ! -e "${SLEEPS}" ]
+}
+
+@test "token: a refusal text prints as plain characters, never an escape" {
+  STUB_CODE=400
+  STUB_BODY='{"error":"invalid_request","error_description":"bad \\033[2J request"}'
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  assert_output --partial 'token request refused: HTTP 400: invalid_request bad \033[2J request'
+  [[ "${output}" != *$'\e'* ]]
+}
+
+@test "token: a C1 character is not a control character (the Go twin's set)" {
+  # U+0085 as UTF-8 bytes, in a UTF-8 locale where [[:cntrl:]] would match it.
+  LC_ALL=C.UTF-8 KUBEHZ_AGENT_CLIENT_ID=$'cid\xc2\x85x' run kubehz::token --token-url "${URL}" --scope scope
+  assert_success
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "token: a fractional lifetime is floored, a huge one capped at a day" {
+  STUB_BODY='{"access_token":"jwt-1","expires_in":3600.7}'
+  run kubehz::token --token-url "${URL}" --scope scope --format token
+  assert_success
+  run cat "${XDG_CACHE_HOME}/lok8s/kubehz-token/307dcc769135510a4f46243554b6d3b1.json"
+  assert_output '{"access_token":"jwt-1","expires_at":1700003600}'
+  STUB_BODY='{"access_token":"jwt-2","expires_in":1e30}'
+  run kubehz::token --token-url "${URL}" --scope scope --no-cache
+  assert_success
+  assert_output --partial '"expirationTimestamp":"2023-11-15T22:13:20Z"'
 }

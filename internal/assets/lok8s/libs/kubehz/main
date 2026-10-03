@@ -1099,8 +1099,8 @@ kubehz::claim() {
 # minutes before expiry). The secret never reaches argv: curl reads it from
 # a config on stdin, and `-q` keeps a ~/.curlrc out of that request. A
 # failure that can pass (no answer, a 5xx, invalid_client: a key made a
-# moment ago) is tried again after 0.25, 0.5 and 1 s; only the last is
-# printed.
+# moment ago) is tried again after 0.25, 0.5 and 1 s; an attempt that ran
+# out of time (curl exit 28) is not. Only the last failure is printed.
 kubehz::token() {
   local token_url="" scope="" secret_file="" format="exec-credential" no_cache=0
   local -a args=(
@@ -1141,7 +1141,7 @@ kubehz::token() {
   fi
   # A line break would end the curl config line below and make the rest a
   # curl option.
-  if [[ "${client_id}${secret}" == *[[:cntrl:]]* ]]; then
+  if kubehz::token_has_control "${client_id}${secret}"; then
     error "the agent key holds a control character: check KUBEHZ_AGENT_CLIENT_ID and the client secret"
     return 1
   fi
@@ -1165,7 +1165,7 @@ kubehz::token() {
 
   # client_secret_basic. The config line quotes backslashes and quotes, so a
   # value can never end the string early.
-  local user="${client_id}:${secret}" answer status reason code expires_in msg attempt retry
+  local user="${client_id}:${secret}" answer status reason code expires_in msg attempt retry rc
   local -a delays=(0.25 0.5 1)
   user="${user//\\/\\\\}"
   user="${user//\"/\\\"}"
@@ -1190,18 +1190,25 @@ kubehz::token() {
         retry=1
       fi
     else
+      rc=$?
       msg="token request to ${token_url} failed: no answer"
-      retry=1
+      debug "token request: curl exit ${rc}"
+      (( rc == 28 )) || retry=1
     fi
+    # error() and debug() print through `echo -e`: double the backslashes,
+    # or a refusal text could carry a real escape sequence (the
+    # kubehz::space_safe_string rule).
     if (( ! retry || attempt == ${#delays[@]} )); then
-      error "${msg}"
+      error "${msg//\\/\\\\}"
       return 1
     fi
-    debug "token request failed, trying again: ${msg}"
+    debug "token request failed, trying again: ${msg//\\/\\\\}"
     sleep "${delays[attempt]}"
   done
   access_token=$(jq -r '.access_token // empty' <<<"${answer}" 2>/dev/null) || access_token=""
-  expires_in=$(jq -r '(.expires_in // 0) | floor' <<<"${answer}" 2>/dev/null) || expires_in=0
+  # Floor and clamp in jq: a huge number would print as 1e+30, and Go clamps
+  # it to a day.
+  expires_in=$(jq -r '(.expires_in // 0) | floor | if . > 86400 then 86400 else . end' <<<"${answer}" 2>/dev/null) || expires_in=0
   if [[ -z "${access_token}" || ! "${expires_in}" =~ ^[0-9]+$ ]] || (( expires_in <= 0 )); then
     error "token endpoint answered without an access token or a lifetime"
     return 1
@@ -1213,6 +1220,15 @@ kubehz::token() {
       || debug "token cache not written: ${cache_file}"
   fi
   kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
+}
+
+# Whether the string holds a C0 control character or DEL. LC_ALL=C pins the
+# class to those bytes: in a UTF-8 locale [[:cntrl:]] also matches U+0085,
+# which the Go twin (isControl) accepts.
+# Usage: kubehz::token_has_control <string>
+kubehz::token_has_control() {
+  local LC_ALL=C
+  [[ "${1}" == *[[:cntrl:]]* ]]
 }
 
 # A cache entry, only from a regular file of ours that nobody else can read.
