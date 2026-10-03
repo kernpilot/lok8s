@@ -50,13 +50,28 @@ setup() {
   export STUB_BODY='{"access_token":"jwt-1","token_type":"Bearer","expires_in":43199}'
 
   # curl stub: records argv and stdin, answers STUB_BODY + "\n<code>".
+  # With STUB_SEQ (a file), call N answers line N ("<code> <body>", or
+  # "fail" for no answer); the last line repeats.
   curl() {
     printf '%s\n' "$*" >> "${CURL_ARGS}"
     cat >> "${CURL_STDIN}"
     echo x >> "${CURL_CALLS}"
-    printf '%s\n%s' "${STUB_BODY}" "${STUB_CODE}"
+    local code="${STUB_CODE}" body="${STUB_BODY}" n line
+    if [[ -n "${STUB_SEQ:-}" ]]; then
+      n=$(wc -l < "${CURL_CALLS}")
+      line=$(sed -n "${n}p" "${STUB_SEQ}")
+      [[ -n "${line}" ]] || line=$(tail -n 1 "${STUB_SEQ}")
+      [[ "${line}" != "fail" ]] || return 7
+      code="${line%% *}" body="${line#* }"
+    fi
+    printf '%s\n%s' "${body}" "${code}"
   }
   export -f curl
+
+  # sleep stub: records the waits, never waits.
+  export SLEEPS="${BATS_TEST_TMPDIR}/sleeps"
+  sleep() { echo "${1}" >> "${SLEEPS}"; }
+  export -f sleep
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   URL="https://id.example/oauth/v2/token"
@@ -83,6 +98,9 @@ calls() { [[ -f "${CURL_CALLS}" ]] && wc -l < "${CURL_CALLS}" | tr -d ' ' || ech
   refute_output --partial 's3cr3t-value'
   assert_output --partial '--proto =https'
   assert_output --partial 'grant_type=client_credentials'
+  # -q first: a ~/.curlrc never applies to the request with the secret.
+  assert_output --regexp '^-q -sS '
+  assert_output --partial '--connect-timeout 10 --max-time 30'
   assert_output --partial 'scope=scope'
 }
 
@@ -148,6 +166,15 @@ calls() { [[ -f "${CURL_CALLS}" ]] && wc -l < "${CURL_CALLS}" | tr -d ' ' || ech
   run kubehz::token --token-url "${URL}" --scope scope --secret-file /nonexistent/secret
   assert_failure
   assert_output --partial 'cannot read the secret file /nonexistent/secret'
+  run kubehz::token --token-url "${URL}" --scope scope --secret-file "${BATS_TEST_TMPDIR}"
+  assert_failure
+  assert_output --partial "cannot read the secret file ${BATS_TEST_TMPDIR}"
+  KUBEHZ_AGENT_CLIENT_ID=$'cid\nproxy = "http://x"' run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  assert_output --partial 'the agent key holds a control character: check KUBEHZ_AGENT_CLIENT_ID and the client secret'
+  KUBEHZ_AGENT_CLIENT_SECRET=$'s3cr3t\x1b' run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  assert_output --partial 'the agent key holds a control character'
   [ "$(calls)" -eq 0 ]
 }
 
@@ -168,4 +195,57 @@ calls() { [[ -f "${CURL_CALLS}" ]] && wc -l < "${CURL_CALLS}" | tr -d ' ' || ech
   run cat "${CURL_STDIN}"
   assert_output 'user = "cid:from-file"'
   [ ! -e "${XDG_CACHE_HOME}/lok8s" ]
+}
+
+@test "token: --secret-file reads a pipe" {
+  KUBEHZ_AGENT_CLIENT_SECRET="" run kubehz::token --token-url "${URL}" --scope scope --secret-file <(printf 'piped\n') --no-cache
+  assert_success
+  run cat "${CURL_STDIN}"
+  assert_output 'user = "cid:piped"'
+}
+
+@test "token: a symlinked cache file is ignored" {
+  local d="${XDG_CACHE_HOME}/lok8s/kubehz-token"
+  mkdir -p "${d}"
+  echo '{"access_token":"planted","expires_at":9999999999}' > "${BATS_TEST_TMPDIR}/planted.json"
+  chmod 600 "${BATS_TEST_TMPDIR}/planted.json"
+  ln -s "${BATS_TEST_TMPDIR}/planted.json" "${d}/307dcc769135510a4f46243554b6d3b1.json"
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_success
+  refute_output --partial 'planted'
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "token: a fresh key's invalid_client and an outage are tried again" {
+  export STUB_SEQ="${BATS_TEST_TMPDIR}/seq"
+  printf '%s\n' '401 {"error":"invalid_client","error_description":"client not found"}' 'fail' \
+    '200 {"access_token":"jwt-ok","expires_in":3600}' > "${STUB_SEQ}"
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_success
+  assert_output --partial '"token":"jwt-ok"'
+  refute_output --partial 'refused'
+  [ "$(calls)" -eq 3 ]
+  run cat "${SLEEPS}"
+  assert_output $'0.25\n0.5'
+}
+
+@test "token: four failed attempts print the last failure once and cache nothing" {
+  STUB_CODE=503
+  STUB_BODY='{"error":"server_error"}'
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  [ "$(grep -c 'token request refused: HTTP 503: server_error' <<<"${output}")" -eq 1 ]
+  [ "$(calls)" -eq 4 ]
+  [ "$(wc -l < "${SLEEPS}")" -eq 3 ]
+  [ ! -e "${XDG_CACHE_HOME}/lok8s/kubehz-token/307dcc769135510a4f46243554b6d3b1.json" ]
+}
+
+@test "token: a real refusal is not tried again" {
+  STUB_CODE=400
+  STUB_BODY='{"error":"invalid_scope"}'
+  run kubehz::token --token-url "${URL}" --scope scope
+  assert_failure
+  assert_output --partial 'token request refused: HTTP 400: invalid_scope'
+  [ "$(calls)" -eq 1 ]
+  [ ! -e "${SLEEPS}" ]
 }

@@ -300,6 +300,18 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 	}
 }
 
+func TestMcpNeverExposesACommandThatPrintsACredential(t *testing.T) {
+	// `lo kubehz token` prints a bearer token: as a tool, the token would
+	// land in the agent's transcript. Not even --allow-destructive exposes it.
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	if _, ok := tools["lo_kubehz_token"]; ok {
+		t.Error("lo_kubehz_token is an MCP tool")
+	}
+	if _, ok := tools["lo_kubehz_claim"]; !ok {
+		t.Error("lo_kubehz_claim is gone: the check above proves nothing")
+	}
+}
+
 // ── shim leaves ────────────────────────────────────────────────────────
 
 // shimLeafSources maps each shim dispatcher in shimLeaves to the bash file

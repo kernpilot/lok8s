@@ -193,10 +193,12 @@ func newKubehzClaim(paths *config.Paths) *cobra.Command {
 // kubectl runs it from any directory and parses stdout as the credential.
 func newKubehzToken(paths *config.Paths) *cobra.Command {
 	c := &cobra.Command{
-		Use:          "token",
-		Short:        "Print an access token for the agent key in the environment (kubectl exec plugin)",
-		Annotations:  commandSpec{}.annotations(),
-		Args:         secretsArgs(0, 0),
+		Use:   "token",
+		Short: "Print an access token for the agent key in the environment (kubectl exec plugin)",
+		// Its stdout IS a bearer token: never an MCP tool, whatever the
+		// opt-in, or the token lands in the agent's transcript.
+		Annotations:  map[string]string{AnnotationCredentialOutput: "true"},
+		Args:         argshNoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var o kubehz.TokenOptions

@@ -1097,7 +1097,10 @@ kubehz::claim() {
 # (${XDG_CACHE_HOME:-~/.cache}/lok8s/kubehz-token/<sha256 prefix>.json,
 # {"access_token":…,"expires_at":<epoch s>}, 0600, reused until five
 # minutes before expiry). The secret never reaches argv: curl reads it from
-# a config on stdin.
+# a config on stdin, and `-q` keeps a ~/.curlrc out of that request. A
+# failure that can pass (no answer, a 5xx, invalid_client: a key made a
+# moment ago) is tried again after 0.25, 0.5 and 1 s; only the last is
+# printed.
 kubehz::token() {
   local token_url="" scope="" secret_file="" format="exec-credential" no_cache=0
   local -a args=(
@@ -1123,7 +1126,8 @@ kubehz::token() {
   http::require_https "${token_url}" "Token URL" || return 1
   local client_id="${KUBEHZ_AGENT_CLIENT_ID:-}" secret="${KUBEHZ_AGENT_CLIENT_SECRET:-}"
   if [[ -n "${secret_file}" ]]; then
-    if [[ ! -r "${secret_file}" || ! -f "${secret_file}" ]]; then
+    # -r and not a directory: a pipe (<(pass show …), /dev/stdin) is fine.
+    if [[ ! -r "${secret_file}" || -d "${secret_file}" ]]; then
       error "cannot read the secret file ${secret_file}"
       return 1
     fi
@@ -1133,6 +1137,12 @@ kubehz::token() {
   fi
   if [[ -z "${client_id}" || -z "${secret}" ]]; then
     error "no agent key: set KUBEHZ_AGENT_CLIENT_ID and KUBEHZ_AGENT_CLIENT_SECRET (or pass --secret-file)"
+    return 1
+  fi
+  # A line break would end the curl config line below and make the rest a
+  # curl option.
+  if [[ "${client_id}${secret}" == *[[:cntrl:]]* ]]; then
+    error "the agent key holds a control character: check KUBEHZ_AGENT_CLIENT_ID and the client secret"
     return 1
   fi
 
@@ -1155,27 +1165,41 @@ kubehz::token() {
 
   # client_secret_basic. The config line quotes backslashes and quotes, so a
   # value can never end the string early.
-  local user="${client_id}:${secret}" answer status reason expires_in
+  local user="${client_id}:${secret}" answer status reason code expires_in msg attempt retry
+  local -a delays=(0.25 0.5 1)
   user="${user//\\/\\\\}"
   user="${user//\"/\\\"}"
-  answer=$(printf 'user = "%s"\n' "${user}" | curl -sS --proto =https -K - \
-    -H 'Accept: application/json' \
-    --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
-    -w $'\n%{http_code}' "${token_url}" 2>/dev/null) || {
-    error "token request to ${token_url} failed: no answer"
-    return 1
-  }
-  status="${answer##*$'\n'}"
-  answer="${answer%$'\n'*}"
-  if [[ "${status}" != "200" ]]; then
-    reason=$(jq -r '(.error // "") + " " + (.error_description // "")' <<<"${answer}" 2>/dev/null) || reason=""
-    reason="${reason#"${reason%%[![:space:]]*}"}"
-    reason="${reason%"${reason##*[![:space:]]}"}"
-    reason=$(printf '%s' "${reason}" | tr '\000-\037\177' ' ')
-    [[ -n "${reason}" ]] || reason="no reason given"
-    error "token request refused: HTTP ${status}: ${reason:0:200}"
-    return 1
-  fi
+  for (( attempt = 0; ; attempt++ )); do
+    retry=0
+    if answer=$(printf 'user = "%s"\n' "${user}" | curl -q -sS --proto =https \
+      --connect-timeout 10 --max-time 30 -K - \
+      -H 'Accept: application/json' \
+      --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
+      -w $'\n%{http_code}' "${token_url}" 2>/dev/null); then
+      status="${answer##*$'\n'}"
+      answer="${answer%$'\n'*}"
+      [[ "${status}" == "200" ]] && break
+      reason=$(jq -r '(.error // "") + " " + (.error_description // "")' <<<"${answer}" 2>/dev/null) || reason=""
+      reason="${reason#"${reason%%[![:space:]]*}"}"
+      reason="${reason%"${reason##*[![:space:]]}"}"
+      reason=$(printf '%s' "${reason}" | tr '\000-\037\177' ' ')
+      [[ -n "${reason}" ]] || reason="no reason given"
+      msg="token request refused: HTTP ${status}: ${reason:0:200}"
+      code=$(jq -r '.error // empty' <<<"${answer}" 2>/dev/null) || code=""
+      if (( 10#${status} >= 500 )) || [[ "${code}" == "invalid_client" ]]; then
+        retry=1
+      fi
+    else
+      msg="token request to ${token_url} failed: no answer"
+      retry=1
+    fi
+    if (( ! retry || attempt == ${#delays[@]} )); then
+      error "${msg}"
+      return 1
+    fi
+    debug "token request failed, trying again: ${msg}"
+    sleep "${delays[attempt]}"
+  done
   access_token=$(jq -r '.access_token // empty' <<<"${answer}" 2>/dev/null) || access_token=""
   expires_in=$(jq -r '(.expires_in // 0) | floor' <<<"${answer}" 2>/dev/null) || expires_in=0
   if [[ -z "${access_token}" || ! "${expires_in}" =~ ^[0-9]+$ ]] || (( expires_in <= 0 )); then
@@ -1191,11 +1215,11 @@ kubehz::token() {
   kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
 }
 
-# A cache entry, only from a regular file nobody else can read.
+# A cache entry, only from a regular file of ours that nobody else can read.
 # Usage: kubehz::token_cache_read <file>  (prints the entry, or returns 1)
 kubehz::token_cache_read() {
   local file="${1}" mode entry
-  [[ -f "${file}" && ! -L "${file}" ]] || return 1
+  [[ -f "${file}" && ! -L "${file}" && -O "${file}" ]] || return 1
   mode=$(stat -c '%a' "${file}" 2>/dev/null) || return 1
   (( (8#${mode} & 8#077) == 0 )) || return 1
   entry=$(jq -ce 'select((.access_token | type) == "string" and .access_token != ""

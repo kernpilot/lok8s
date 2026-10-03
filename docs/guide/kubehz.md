@@ -788,8 +788,10 @@ users:
 ```
 
 Set `KUBEHZ_AGENT_CLIENT_ID` and `KUBEHZ_AGENT_CLIENT_SECRET` in the agent's
-environment, or keep the secret in a file and pass `--secret-file`. The secret
-is never a flag, because every user on the machine can read a command line.
+environment, or keep the secret in a file and pass `--secret-file`. The file
+can be a pipe, for example `--secret-file <(pass show kubehz/agent)`. The
+secret is never a flag, because every user on the machine can read a command
+line.
 
 The same token works against the platform api:
 
@@ -804,6 +806,13 @@ token endpoint again five minutes before the token expires. `--no-cache`
 always asks and writes nothing. When an owner revokes the key, the api refuses
 it at once. A token that was already issued stays valid at the apiservers
 until it expires (at most 12 hours).
+
+A key that was created a moment ago can be refused for a short time, until
+the identity provider knows it. Thus the command tries again after 0.25, 0.5
+and 1 second when the endpoint gives no answer, answers with a 5xx status, or
+answers `invalid_client`. It prints only the last failure and never caches
+one. Each attempt ends after 30 seconds. `lo mcp` never offers this command
+as a tool, because its output is a bearer token.
 
 ## Assessment and handover
 

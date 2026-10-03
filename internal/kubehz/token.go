@@ -70,6 +70,18 @@ const (
 	execCredentialV1 = "client.authentication.k8s.io/v1"
 )
 
+// tokenRetryDelays are the waits before the second, third and fourth grant.
+// A key made a moment ago can answer invalid_client until the identity
+// provider's read side has it (about 100 ms measured on ZITADEL), and a
+// gateway can drop one request: a pipeline that creates a key and runs
+// kubectl at once must not fail on either.
+var tokenRetryDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second}
+
+// tokenAttemptTimeout bounds one grant, the body included: kubectl waits on
+// this command, so a stalled endpoint must end it (bash: curl --max-time 30).
+// A variable only so the tests can shorten it.
+var tokenAttemptTimeout = 30 * time.Second
+
 // TokenOptions are the command's flags.
 type TokenOptions struct {
 	TokenURL   string // --token-url, else KUBEHZ_AGENT_TOKEN_URL
@@ -131,6 +143,12 @@ func (c *Context) Token(ctx context.Context, o TokenOptions) error {
 		c.errorf("no agent key: set %s and %s (or pass --secret-file)", EnvAgentClientID, EnvAgentClientSecret)
 		return ErrHandled
 	}
+	// A line break inside a value would end the bash twin's curl config
+	// line and make the rest a curl option: both refuse it.
+	if hasControl(clientID) || hasControl(secret) {
+		c.errorf("the agent key holds a control character: check %s and the client secret", EnvAgentClientID)
+		return ErrHandled
+	}
 
 	now := c.now()
 	cacheFile := ""
@@ -158,12 +176,37 @@ func (c *Context) Token(ctx context.Context, o TokenOptions) error {
 }
 
 // requestToken runs client_credentials (RFC 6749 4.4, client_secret_basic).
+// A failure that can pass (no answer, a 5xx, invalid_client) is tried again
+// after each of tokenRetryDelays. Only the last failure is printed, and no
+// failure is cached.
 func (c *Context) requestToken(ctx context.Context, tokenURL, clientID, secret, scope string, now time.Time) (tokenCacheEntry, error) {
+	for attempt := 0; ; attempt++ {
+		e, fail := c.tokenAttempt(ctx, tokenURL, clientID, secret, scope, now)
+		if fail == nil {
+			return e, nil
+		}
+		if !fail.retry || attempt == len(tokenRetryDelays) || c.sleep(ctx, tokenRetryDelays[attempt]) != nil {
+			c.errorf("%s", fail.msg)
+			return tokenCacheEntry{}, ErrHandled
+		}
+		c.debugf("token request failed, trying again: %s", fail.msg)
+	}
+}
+
+// tokenFailure is one failed grant: the message the command prints if it is
+// the last, and whether another attempt can pass.
+type tokenFailure struct {
+	msg   string
+	retry bool
+}
+
+func (c *Context) tokenAttempt(ctx context.Context, tokenURL, clientID, secret, scope string, now time.Time) (tokenCacheEntry, *tokenFailure) {
+	ctx, cancel := context.WithTimeout(ctx, tokenAttemptTimeout)
+	defer cancel()
 	form := url.Values{"grant_type": {"client_credentials"}, "scope": {scope}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		c.errorf("invalid token url: %s", tokenURL)
-		return tokenCacheEntry{}, ErrHandled
+		return tokenCacheEntry{}, &tokenFailure{msg: "invalid token url: " + tokenURL}
 	}
 	// Raw, like curl's `user` in the bash twin: ZITADEL's client ids and
 	// generated secrets are URL-safe, so the RFC 6749 2.3.1 form-encoding
@@ -171,13 +214,20 @@ func (c *Context) requestToken(ctx context.Context, tokenURL, clientID, secret, 
 	req.SetBasicAuth(clientID, secret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	noAnswer := &tokenFailure{msg: "token request to " + tokenURL + " failed: no answer", retry: true}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		c.errorf("token request to %s failed: no answer", tokenURL)
-		return tokenCacheEntry{}, ErrHandled
+		// The error names the url and the transport cause, never the
+		// Authorization header.
+		c.debugf("token request: %v", err)
+		return tokenCacheEntry{}, noAnswer
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		c.debugf("token answer: %v", err)
+		return tokenCacheEntry{}, noAnswer
+	}
 
 	var answer struct {
 		AccessToken      string `json:"access_token"`
@@ -191,14 +241,19 @@ func (c *Context) requestToken(ctx context.Context, tokenURL, clientID, secret, 
 		if reason == "" {
 			reason = "no reason given"
 		}
-		c.errorf("token request refused: HTTP %d: %s", resp.StatusCode, printable(reason, 200))
-		return tokenCacheEntry{}, ErrHandled
+		return tokenCacheEntry{}, &tokenFailure{
+			msg:   fmt.Sprintf("token request refused: HTTP %d: %s", resp.StatusCode, printable(reason, 200)),
+			retry: resp.StatusCode >= 500 || answer.Error == "invalid_client",
+		}
 	}
 	if answer.AccessToken == "" || answer.ExpiresIn <= 0 {
-		c.errorf("token endpoint answered without an access token or a lifetime")
-		return tokenCacheEntry{}, ErrHandled
+		return tokenCacheEntry{}, &tokenFailure{msg: "token endpoint answered without an access token or a lifetime"}
 	}
-	life := min(time.Duration(answer.ExpiresIn)*time.Second, tokenMaxLifetime)
+	// Clamp in seconds first: a huge expires_in would wrap the Duration.
+	life := tokenMaxLifetime
+	if answer.ExpiresIn < int64(tokenMaxLifetime/time.Second) {
+		life = time.Duration(answer.ExpiresIn) * time.Second
+	}
 	return tokenCacheEntry{AccessToken: answer.AccessToken, ExpiresAt: now.Add(life).Unix()}, nil
 }
 
@@ -258,9 +313,10 @@ func tokenCacheName(tokenURL, clientID, scope string) string {
 }
 
 func readTokenCache(file string) (tokenCacheEntry, bool) {
-	fi, err := os.Stat(file)
-	// A cache file anyone else can read is not ours to trust: ignore it.
-	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 {
+	// A link, a file of another user, or one anyone else can read is not
+	// ours to trust: ignore it (the bash twin: -f, ! -L, -O, mode).
+	fi, err := os.Lstat(file)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 || !ownedByUs(fi) {
 		return tokenCacheEntry{}, false
 	}
 	b, err := os.ReadFile(file)
@@ -285,24 +341,22 @@ func writeTokenCache(file string, e tokenCacheEntry) error {
 	if err != nil {
 		return err
 	}
+	// CreateTemp makes the file 0600 (bash: mktemp), so the token is never
+	// readable by others, not even before the rename.
 	tmp, err := os.CreateTemp(dir, ".token-*")
 	if err != nil {
 		return err
 	}
 	name := tmp.Name()
-	if err := tmp.Chmod(0o600); err == nil {
-		_, err = tmp.Write(append(b, '\n'))
-		if cerr := tmp.Close(); err == nil {
-			err = cerr
-		}
-		if err == nil {
-			err = os.Rename(name, file)
-		}
-		if err == nil {
-			return nil
-		}
-	} else {
-		_ = tmp.Close()
+	_, err = tmp.Write(append(b, '\n'))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(name, file)
+	}
+	if err == nil {
+		return nil
 	}
 	_ = os.Remove(name)
 	return fmt.Errorf("write %s: %w", file, err)
@@ -320,6 +374,11 @@ func printable(s string, limit int) string {
 		r = r[:limit]
 	}
 	return string(r)
+}
+
+// hasControl reports a C0 control character or DEL.
+func hasControl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 func firstNonEmpty(a ...string) string {
