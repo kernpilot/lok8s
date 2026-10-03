@@ -12,7 +12,7 @@ require (
 	github.com/getsops/sops/v3 v3.13.3
 	github.com/kernpilot/lok8s/kustomize v0.0.0
 	github.com/mgoltzsche/khelm/v2 v2.8.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/njayp/ophis v1.1.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
