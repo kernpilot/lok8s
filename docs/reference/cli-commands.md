@@ -2492,9 +2492,9 @@ Exposure policy — what an agent can call:
 
 A command without a marker counts as mutating. A command whose output is
 a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
-claim-code) is never exposed: a tool result lands in the model's transcript. Flags that
-carry a credential (token, secret, password, key, nonce, ...) are never
-exposed either.
+claim-code) is never exposed: a tool result lands in the model's
+transcript. Flags that carry a credential (token, secret, password, key,
+nonce, ...) are never exposed either.
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
 for editor configs (flags win).
