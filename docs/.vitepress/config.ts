@@ -36,7 +36,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/' },
       { text: 'Reference', link: '/reference/cli' },
-      { text: 'Releases', link: '/releases/v0.7.6' },
+      { text: 'Releases', link: '/releases/v0.7.7' },
       {
         text: 'GitHub',
         link: 'https://github.com/kernpilot/lok8s',
@@ -100,6 +100,7 @@ export default defineConfig({
         {
           text: 'Releases',
           items: [
+            { text: 'v0.7.7', link: '/releases/v0.7.7' },
             { text: 'v0.7.6', link: '/releases/v0.7.6' },
             { text: 'v0.7.5', link: '/releases/v0.7.5' },
             { text: 'v0.7.4', link: '/releases/v0.7.4' },
