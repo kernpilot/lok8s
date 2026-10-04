@@ -106,6 +106,16 @@ api_calls() {
 }
 # quiet: run with stderr dropped, so ${output} is stdout alone.
 quiet() { "$@" 2>/dev/null; }
+# foreign_file: a regular file that another user (root) owns. The argsh
+# container bind-mounts an /etc/passwd of the test user, so the first
+# candidate is not always one.
+foreign_file() {
+  local f
+  for f in /etc/passwd "$(realpath "$(command -v bash)")" "$(realpath /bin/sh)"; do
+    [[ -f "${f}" && "$(stat -c '%u' -- "${f}")" == 0 ]] && { echo "${f}"; return 0; }
+  done
+  return 1
+}
 
 SPACE='{"id":"sp-1a2b3c4d","tenantId":"t-1","name":"Acme Prod","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256,"leaseExpiresAt":"2026-10-04T14:00:00.000Z","createdAt":"2026-10-04T12:00:00.000Z","namespaces":["acme"],"nodeCount":1}'
 ODD='{"id":"sp-9z9z9z9z","name":"Ev\u001b[2Jil \\ na\u2028me\u0085\u009b\u202e\u2066 \u00fc","slug":"yes","status":"Pending","maxNodes":1,"maxNamespaces":3,"maxObjectKiB":null,"leaseExpiresAt":null,"createdAt":"2026-10-04T12:30:00.000Z","namespaces":["yes",7],"nodeCount":0}'
@@ -540,11 +550,12 @@ EOF
 }
 
 @test "kubeconfig: a link is written through only when we own the link and its target" {
-  [[ "$(id -u)" != 0 ]] || skip "root owns /etc/passwd: no foreign target to point at"
+  [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root"
+  local d="${BATS_TEST_TMPDIR}/own" want foreign
+  foreign=$(foreign_file) || skip "no file of root to point at"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  local d="${BATS_TEST_TMPDIR}/own" want
   mkdir -p "${d}"
-  ln -s /etc/passwd "${d}/link"
+  ln -s "${foreign}" "${d}/link"
   want="[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/link is a link, and the link or its target belongs to another user
   lo writes through a link only when you own the link and its target. Name another file."
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
@@ -560,14 +571,15 @@ EOF
 }
 
 @test "kubeconfig: the path rules run again just before the write" {
-  [[ "$(id -u)" != 0 ]] || skip "root owns /etc/passwd: no foreign target to point at"
+  [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root"
+  local d="${BATS_TEST_TMPDIR}/again" foreign
+  foreign=$(foreign_file) || skip "no file of root to point at"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  local d="${BATS_TEST_TMPDIR}/again"
   mkdir -p "${d}"
   echo contexts > "${d}/real"
   ln -s real "${d}/link"
   # The link moves to another user's file during the download.
-  STUB_HOOK="ln -sfn /etc/passwd '${d}/link'" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
+  STUB_HOOK="ln -sfn '${foreign}' '${d}/link'" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
   assert_output --partial 'is a link, and the link or its target belongs to another user'
   run cat "${d}/real"

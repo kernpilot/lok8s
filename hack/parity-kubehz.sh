@@ -614,36 +614,8 @@ mcp_call() {
   label="mcp (${route}) ${tool} ${arguments}"
   : > "${WORK}/stub.log"
   rm -rf "${HOME}/.cache/lok8s/kubehz-token"
-  if ! (cd "${PROJ}" && python3 - "${LO_BIN}" "${tool}" "${arguments}" > "${WORK}/mcp.out" 2>"${WORK}/mcp.err") <<'PY'
-import json, subprocess, sys
-lo, tool, arguments = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-p = subprocess.Popen([lo, "mcp", "start", "--allow-destructive", "--log-level", "error"],
-                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-def send(msg):
-    p.stdin.write(json.dumps(msg) + "\n")
-    p.stdin.flush()
-def answer(want_id):
-    for line in p.stdout:
-        msg = json.loads(line)
-        if msg.get("id") == want_id:
-            return msg
-    raise SystemExit("the server closed stdout before answering")
-send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "parity", "version": "0"}}})
-answer(1)
-send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
-res = answer(2)["result"]
-p.stdin.close()
-p.wait(timeout=30)
-text = "".join(c.get("text", "") for c in res.get("content", []))
-try:
-    text = json.loads(text).get("stdout", "") + json.loads(text).get("stderr", "")
-except (ValueError, AttributeError):
-    pass
-print("error" if res.get("isError") else "ok")
-print(text)
-PY
+  if ! (cd "${PROJ}" && python3 "${ROOT}/hack/lib/mcp-call.py" "${LO_BIN}" "${tool}" "${arguments}" \
+    > "${WORK}/mcp.out" 2>"${WORK}/mcp.err")
   then
     fail "${label} — the MCP client failed: $(head -c 300 "${WORK}/mcp.err")"
     return

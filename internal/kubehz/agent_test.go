@@ -764,9 +764,7 @@ func TestAgentKubeconfigPathRules(t *testing.T) {
 // this user: a link that another user planted in a shared directory must
 // not move the write to a file of theirs.
 func TestAgentKubeconfigWritesThroughOnlyALinkOfOurOwn(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root owns /etc/passwd: no foreign target to point at")
-	}
+	foreign := foreignFile(t)
 	const want = "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/link is a link, and the link or its target belongs to another user\n" +
 		"  lo writes through a link only when you own the link and its target. Name another file.\n"
 	for _, tc := range []struct {
@@ -774,10 +772,10 @@ func TestAgentKubeconfigWritesThroughOnlyALinkOfOurOwn(t *testing.T) {
 		target func(dir string) string
 		euid   func() int
 	}{
-		{"the target belongs to another user", func(string) string { return "/etc/passwd" }, nil},
+		{"the target belongs to another user", func(string) string { return foreign }, nil},
 		// The seam makes root the user: the target (root's) passes, the
 		// link (ours) does not.
-		{"the link belongs to another user", func(string) string { return "/etc/passwd" }, func() int { return 0 }},
+		{"the link belongs to another user", func(string) string { return foreign }, func() int { return 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := agentHarness(t)
@@ -851,9 +849,7 @@ func TestPublishKubeconfigNeverReplacesWithoutForce(t *testing.T) {
 // The path rules run again just before the write: a link that is pointed
 // at another user's file during the download is refused then.
 func TestAgentKubeconfigChecksThePathAgainBeforeTheWrite(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root owns /etc/passwd: no foreign target to point at")
-	}
+	foreign := foreignFile(t)
 	h := agentHarness(t)
 	dir := t.TempDir()
 	link := filepath.Join(dir, "link")
@@ -861,7 +857,7 @@ func TestAgentKubeconfigChecksThePathAgainBeforeTheWrite(t *testing.T) {
 	must(t, os.Symlink("real", link))
 	h.handleFunc("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", func(w http.ResponseWriter, r *http.Request) {
 		must(t, os.Remove(link))
-		must(t, os.Symlink("/etc/passwd", link))
+		must(t, os.Symlink(foreign, link))
 		_, _ = w.Write([]byte(agentKubeconfigYAML))
 	})
 	_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", link, true)
@@ -895,6 +891,26 @@ func TestAgentKubeconfigKeepsAFileThatAppearsDuringTheDownload(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Errorf("dir holds %d entries: a temporary file was left behind", len(entries))
 	}
+}
+
+// foreignFile is a regular file that root owns, for a link that points at
+// another user's file. A container can bind-mount an /etc/passwd of the
+// test user, so the first candidate is not always one.
+func foreignFile(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("the test needs a user other than root")
+	}
+	sh, _ := filepath.EvalSymlinks("/bin/sh")
+	for _, f := range []string{"/etc/passwd", sh} {
+		if fi, err := os.Stat(f); err == nil && fi.Mode().IsRegular() {
+			if uid, ok := fileOwner(fi); ok && uid == 0 {
+				return f
+			}
+		}
+	}
+	t.Skip("no file of root to point at")
+	return ""
 }
 
 func must(t *testing.T, err error) {
