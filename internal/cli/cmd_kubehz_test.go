@@ -99,6 +99,10 @@ func TestKubehzTreeMatchesArgshUsage(t *testing.T) {
 	assertTreeMatches(t, node, parseUsageArray(t, filepath.Join(lib, "node"), "kubehz::node"))
 	ho, _, _ := root.Find([]string{"kubehz", "handover"})
 	assertTreeMatches(t, ho, parseUsageArray(t, filepath.Join(lib, "handover"), "kubehz::handover"))
+	space, _, _ := root.Find([]string{"kubehz", "space"})
+	assertTreeMatches(t, space, parseUsageArray(t, filepath.Join(lib, "agent"), "kubehz::space"))
+	cluster, _, _ := root.Find([]string{"kubehz", "cluster"})
+	assertTreeMatches(t, cluster, parseUsageArray(t, filepath.Join(lib, "agent"), "kubehz::cluster"))
 	for _, path := range [][]string{{"kh", "s"}, {"kubehz", "n", "j"}, {"kubehz", "h", "r"}, {"kubehz", "c"}} {
 		if _, _, err := root.Find(path); err != nil {
 			t.Errorf("alias path %v: %v", path, err)

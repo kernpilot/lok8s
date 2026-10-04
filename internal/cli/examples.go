@@ -107,6 +107,24 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
   KUBEHZ_TOKEN=$(lo kubehz token --format token) lo kubehz status`,
 	"kubehz claim": `  lo kubehz claim --nonce khzn_2f9c1e
   lo kubehz claim --nonce - < nonce.txt`,
+	"kubehz space": `  lo kubehz space list
+  lo kubehz space create --name "CI run" --slug ci-1234 --lease-hours 3`,
+	"kubehz space list": `  lo kubehz space list
+  lo kubehz space list -o json`,
+	"kubehz space get": `  lo kubehz space get sp-1a2b3c4d
+  lo kubehz space get sp-1a2b3c4d -o yaml`,
+	"kubehz space create": `  lo kubehz space create --name "CI run" --slug ci-1234
+  lo kubehz space create --name Demo --slug demo --nodes 2 --lease-hours 24 -o json`,
+	"kubehz space delete":     `  lo kubehz space delete sp-1a2b3c4d`,
+	"kubehz space lease":      `  lo kubehz space lease sp-1a2b3c4d --hours 6`,
+	"kubehz space kubeconfig": `  lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml`,
+	"kubehz cluster": `  lo kubehz cluster list
+  lo kubehz cluster lease cl-1a2b3c4d --hours 4`,
+	"kubehz cluster list": `  lo kubehz cluster list
+  lo kubehz cluster list -o yaml`,
+	"kubehz cluster get":        `  lo kubehz cluster get cl-1a2b3c4d -o json`,
+	"kubehz cluster lease":      `  lo kubehz cluster lease cl-1a2b3c4d --hours 4`,
+	"kubehz cluster kubeconfig": `  lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml`,
 	"kubehz node": `  lo kubehz node join
   lo kubehz node status`,
 	"kubehz node join": `  sudo lo kubehz node join

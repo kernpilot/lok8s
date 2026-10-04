@@ -1887,6 +1887,7 @@ lo kubehz [flags]
 * [lo kubehz assess](#lo-kubehz-assess)	 - Show the platform assessment + handover feasibility
 * [lo kubehz claim](#lo-kubehz-claim)	 - Place a dashboard-minted claim nonce for the agent to echo (mode 3)
 * [lo kubehz claim-code](#lo-kubehz-claim-code)	 - Print the one-time claim code to paste into the dashboard
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
 * [lo kubehz deploy](#lo-kubehz-deploy)	 - Deploy the in-cluster agent (spec.kubehz.agent)
 * [lo kubehz deregister](#lo-kubehz-deregister)	 - Remove cluster from kubehz
 * [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target)
@@ -1894,6 +1895,7 @@ lo kubehz [flags]
 * [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
 * [lo kubehz re-enroll](#lo-kubehz-re-enroll)	 - Re-enroll a regenerated in-cluster agent token with the platform
 * [lo kubehz register](#lo-kubehz-register)	 - Register cluster with kubehz
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
 * [lo kubehz status](#lo-kubehz-status)	 - Check kubehz registration status
 
 ## lo kubehz assess
@@ -1969,6 +1971,138 @@ lo kubehz claim-code [flags]
 ### SEE ALSO
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+
+## lo kubehz cluster
+
+Clusters through the kubehz api (agent tools)
+
+```
+lo kubehz cluster [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster list
+  lo kubehz cluster lease cl-1a2b3c4d --hours 4
+```
+
+### Options
+
+```
+  -h, --help   help for cluster
+```
+
+### SEE ALSO
+
+* [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+* [lo kubehz cluster get](#lo-kubehz-cluster-get)	 - Show one cluster
+* [lo kubehz cluster kubeconfig](#lo-kubehz-cluster-kubeconfig)	 - Write the agent kubeconfig of a hosted cluster to a file
+* [lo kubehz cluster lease](#lo-kubehz-cluster-lease)	 - Set the hours until the platform deletes a hosted cluster
+* [lo kubehz cluster list](#lo-kubehz-cluster-list)	 - List the clusters the credential reaches
+
+## lo kubehz cluster get
+
+Show one cluster
+
+```
+lo kubehz cluster get <id> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster get cl-1a2b3c4d -o json
+```
+
+### Options
+
+```
+  -h, --help            help for get
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
+
+## lo kubehz cluster kubeconfig
+
+Write the agent kubeconfig of a hosted cluster to a file
+
+```
+lo kubehz cluster kubeconfig <id> --file <path> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml
+```
+
+### Options
+
+```
+      --file string     Write the kubeconfig to this file (mode 0600); it prints the path
+  -h, --help            help for kubeconfig
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
+
+## lo kubehz cluster lease
+
+Set the hours until the platform deletes a hosted cluster
+
+```
+lo kubehz cluster lease <id> --hours <n> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster lease cl-1a2b3c4d --hours 4
+```
+
+### Options
+
+```
+  -h, --help            help for lease
+      --hours string    Hours from now until the platform deletes it (1 to 720)
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
+
+## lo kubehz cluster list
+
+List the clusters the credential reaches
+
+```
+lo kubehz cluster list [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster list
+  lo kubehz cluster list -o yaml
+```
+
+### Options
+
+```
+  -h, --help            help for list
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
 
 ## lo kubehz deploy
 
@@ -2290,6 +2424,199 @@ lo kubehz register [flags]
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
 
+## lo kubehz space
+
+Spaces through the kubehz api (agent tools)
+
+```
+lo kubehz space [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space list
+  lo kubehz space create --name "CI run" --slug ci-1234 --lease-hours 3
+```
+
+### Options
+
+```
+  -h, --help   help for space
+```
+
+### SEE ALSO
+
+* [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+* [lo kubehz space create](#lo-kubehz-space-create)	 - Create a space (an agent key sets a lease)
+* [lo kubehz space delete](#lo-kubehz-space-delete)	 - Delete a space
+* [lo kubehz space get](#lo-kubehz-space-get)	 - Show one space
+* [lo kubehz space kubeconfig](#lo-kubehz-space-kubeconfig)	 - Write the agent kubeconfig of a space to a file
+* [lo kubehz space lease](#lo-kubehz-space-lease)	 - Set the hours until the platform deletes a space
+* [lo kubehz space list](#lo-kubehz-space-list)	 - List the spaces the credential reaches
+
+## lo kubehz space create
+
+Create a space (an agent key sets a lease)
+
+```
+lo kubehz space create --name <name> --slug <slug> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space create --name "CI run" --slug ci-1234
+  lo kubehz space create --name Demo --slug demo --nodes 2 --lease-hours 24 -o json
+```
+
+### Options
+
+```
+  -h, --help                    help for create
+      --lease-hours string      Hours until the platform deletes the space (1 to 720); an agent key gets 2 without it
+      --name string             Display name of the space
+      --namespaces string       Namespace limit; default: the platform's
+      --nodes string            Node limit; default: the platform's
+      --object-cap-kib string   Size cap of one Secret or ConfigMap in KiB; default: the platform's
+  -o, --output string           Output format: text, json or yaml (default "text")
+      --region string           Region to place the space in; default: the platform's choice
+      --slug string             DNS label of the space, unique on the platform (the namespace name)
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space delete
+
+Delete a space
+
+```
+lo kubehz space delete <id> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space delete sp-1a2b3c4d
+```
+
+### Options
+
+```
+  -h, --help            help for delete
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space get
+
+Show one space
+
+```
+lo kubehz space get <id> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space get sp-1a2b3c4d
+  lo kubehz space get sp-1a2b3c4d -o yaml
+```
+
+### Options
+
+```
+  -h, --help            help for get
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space kubeconfig
+
+Write the agent kubeconfig of a space to a file
+
+```
+lo kubehz space kubeconfig <id> --file <path> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
+```
+
+### Options
+
+```
+      --file string     Write the kubeconfig to this file (mode 0600); it prints the path
+  -h, --help            help for kubeconfig
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space lease
+
+Set the hours until the platform deletes a space
+
+```
+lo kubehz space lease <id> --hours <n> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space lease sp-1a2b3c4d --hours 6
+```
+
+### Options
+
+```
+  -h, --help            help for lease
+      --hours string    Hours from now until the platform deletes it (1 to 720)
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space list
+
+List the spaces the credential reaches
+
+```
+lo kubehz space list [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space list
+  lo kubehz space list -o json
+```
+
+### Options
+
+```
+  -h, --help            help for list
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
 ## lo kubehz status
 
 Check kubehz registration status
@@ -2492,8 +2819,8 @@ Exposure policy — what an agent can call:
 
 A command without a marker counts as mutating. A command whose output is
 a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
-claim-code) is never exposed: a tool result lands in the model's
-transcript. Flags that carry a credential (token, secret, password, key,
+claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
+result lands in the model's transcript. Flags that carry a credential (token, secret, password, key,
 nonce, ...) are never exposed either.
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,

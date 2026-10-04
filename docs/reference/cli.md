@@ -143,6 +143,11 @@ The prompt asks when stdin and stderr are both terminals: `lo down | cat` still 
 | `lo registry status -o json` | `{domain, registries: [{name, scope, container, endpoint, running, reachable, state}]}` | `{"domain":"kubehz.dev","registries":[{"name":"build","scope":"project","container":"kubehz-registry-build","endpoint":"https://10.125.125.101:5000","running":true,"reachable":true,"state":"3 repos"}]}` |
 | `lo version -o json` | `{lok8s, build, tools: [{name, version, path}]}` | `{"lok8s":"0.5.0","build":"core","tools":[{"name":"kubectl","version":"v1.31.0","path":".bin/kubectl"}]}` |
 | `lo doctor -o json` | `{domain, ok, sections: [{name, checks: [{status: ok\|warn\|bad\|info, message}]}]}` | `{"domain":"kubehz.dev","ok":false,"sections":[{"name":"tools","checks":[{"status":"bad","message":"kind: missing (b install)"}]}]}` |
+| `lo kubehz space list -o json` | `{spaces: [{id, name, slug, status, maxNodes, maxNamespaces, maxObjectKiB, nodeCount, namespaces, leaseExpiresAt, createdAt}]}` (`space get` is one record plus `endpoint` and `nodes: [{name, status}]`; `space create` is one record) | `{"spaces":[{"id":"sp-1a2b3c4d","name":"CI run","slug":"ci-1234","status":"Active","maxNodes":1,"maxNamespaces":1,"maxObjectKiB":256,"nodeCount":0,"namespaces":["ci-1234"],"leaseExpiresAt":"2026-10-04T14:00:00.000Z","createdAt":"2026-10-04T12:00:00.000Z"}]}` |
+| `lo kubehz cluster list -o json` | `{clusters: [{id, domain, hosting, status, region, kubernetesVersion, controlPlaneReplicas, apiEndpoint, health, leaseExpiresAt, createdAt}]}` (`cluster get` is one record) | `{"clusters":[{"id":"cl-1a2b3c4d","domain":"ci.example.org","hosting":"hosted","status":"Running","region":"fsn1","kubernetesVersion":"v1.34.1","controlPlaneReplicas":1,"apiEndpoint":"https://203.0.113.7:6443","health":"healthy","leaseExpiresAt":null,"createdAt":"2026-10-04T12:00:00.000Z"}]}` |
+| `lo kubehz space\|cluster lease -o json` | `{id, leaseExpiresAt}`; `space delete` is `{id, status}`; `space\|cluster kubeconfig` is `{id, file}` | `{"id":"sp-1a2b3c4d","leaseExpiresAt":"2026-10-04T18:00:00.000Z"}` |
+
+The `lo kubehz space` and `lo kubehz cluster` documents are the same in both implementations. A field the api leaves out is `null`, and every string from the api loses its control characters.
 
 `lo status -o json` runs `kubectl get nodes -o json` in place of the wide table. `inventory` is the `ClusterInventory/cluster` object, or `null`. `lo doctor -o json` keeps the exit code of the text form. `lo addons <name>` and `lo addons --detail` have no structured form.
 
@@ -578,7 +583,7 @@ Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_statu
 | `@destructive` | `destructiveHint: true` | with `--allow-destructive` (implies `--allow-mutating`) |
 | `@idempotent` | `idempotentHint: true` | informational |
 
-A command whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz token`, `kubehz claim-code`) is never a tool, in any tier: a tool result lands in the model's transcript. `--print-only` of `kubehz node join` is never exposed either, because it prints the bootstrap token. Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
+A command whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz token`, `kubehz claim-code`, and the agent kubeconfig writers `kubehz space kubeconfig` and `kubehz cluster kubeconfig`) is never a tool, in any tier: a tool result lands in the model's transcript. `--print-only` of `kubehz node join` is never exposed either, because it prints the bootstrap token. Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
 #### MCP server
 
@@ -606,11 +611,11 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
-`LO_MCP_ALLOW=destructive` opens the full surface (88 tools). That is the set the argsh builtin served, without the four commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`), plus the Go-only leaves. Remove the `env` entry for the readonly default (25 tools), or set `mutating` for the middle tier (49 tools). The tiers follow the marker table above.
+`LO_MCP_ALLOW=destructive` opens the full surface (96 tools). That is the set the argsh builtin serves, without the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`), plus the Go-only leaves. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (54 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) sit in the same tiers: list and get in the default, create with `mutating`, delete and lease with `destructive`.
 
 #### Bash variant
 
-The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (69 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
+The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (81 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
 
 The bash server runs when the project's `lok8s.yaml` sets `spec.implementation.default: bash` (planned, WP8). The same block routes single commands: `spec.implementation.bash.commands` lists the commands the binary runs through the bash tree, and `spec.implementation.bash.tree` names that tree (default `.lok8s`). Implementation selection lives in the committed project config, not in the environment.
 
@@ -627,7 +632,7 @@ Until WP8 lands, start the frozen tree directly from a checkout:
 
 The entry point derives `PATH_BASE`, `PATH_BIN` and `PATH_LOK8S` from its own location. Set `PATH_LOK8S` only for a framework tree outside the project.
 
-The two servers differ in four places. The builtin still serves `lo_kubeconfig`, `lo_secrets_print`, `lo_secrets_env` and `lo_kubehz_claim-code`; only the deny list of `lo chat` gates them there. The Go server withholds them. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project`, `lo init cluster` and `lo toolchain` have no builtin tool.
+The two servers differ in four places. The builtin still serves `lo_kubeconfig`, `lo_secrets_print`, `lo_secrets_env`, `lo_kubehz_claim-code`, `lo_space_kubeconfig` and `lo_cluster_kubeconfig`; only the deny list of `lo chat` gates them there. The Go server withholds them. The builtin flattens a two-level dispatcher path (`lo_handover_receive`, `lo_node_join`, `lo_space_list`). The Go server keeps the full path (`lo_kubehz_handover_receive`, `lo_kubehz_node_join`, `lo_kubehz_space_list`). The builtin exposes `lo drivers` as one tool. The Go server spells out every driver and operation (`lo_drivers_lo_provision`, ...). The Go-only commands `lo init project`, `lo init cluster` and `lo toolchain` have no builtin tool.
 
 ### lo kubeconfig
 
@@ -759,7 +764,13 @@ lo kubehz handover            # control-plane handover (receive/preseed on the e
 lo kubehz node join           # join THIS machine to a hosted cluster (static pool)
 lo kubehz node status         # the nodes you brought, and the slot count
 lo kubehz node remove --name <n>  # remove one node and free its slot
+lo kubehz space list|get|create|delete|lease|kubeconfig   # spaces through the api (agent tools)
+lo kubehz cluster list|get|lease|kubeconfig               # hosted clusters through the api (agent tools)
 ```
+
+The `space` and `cluster` groups call the kubehz api with an agent key and
+need no project. `lo mcp` offers them as tools. See
+[Agent tools](../guide/kubehz.md#agent-tools).
 
 The `node` group is the node-level surface of a **hosted** control plane: the
 machines you bring yourself (`kind: static` worker pools). `node join` mints a

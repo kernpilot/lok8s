@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -323,10 +324,12 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 
 func TestMcpNeverExposesACommandThatPrintsACredential(t *testing.T) {
 	// Each of these prints a credential (a bearer token, an admin kubeconfig,
-	// a secret, a claim code): as a tool, it would land in the agent's
-	// transcript. Not even --allow-destructive exposes them.
+	// a secret, a claim code) or writes a kubeconfig: as a tool, it would
+	// land in the agent's transcript. Not even --allow-destructive exposes
+	// them.
 	tools := mcpToolNames(t, mcpExposure{destructive: true})
-	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env", "lo_kubehz_claim-code"} {
+	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env", "lo_kubehz_claim-code",
+		"lo_kubehz_space_kubeconfig", "lo_kubehz_cluster_kubeconfig"} {
 		if _, ok := tools[name]; ok {
 			t.Errorf("%s is an MCP tool: its output is a credential", name)
 		}
@@ -573,5 +576,102 @@ func TestKubehzHiddenMarkersMatchArgshUsage(t *testing.T) {
 	}
 	if !bash["token"].hidden {
 		t.Error("the argsh usage lists `kubehz token` without '#': the argsh lo mcp would offer it")
+	}
+}
+
+// TestMcpAgentToolsTiers: the kubehz agent tools sit in the tier their
+// markers name. Reading is the default tier; create needs --allow-mutating;
+// delete and lease (a lease can bring the delete closer) need
+// --allow-destructive.
+func TestMcpAgentToolsTiers(t *testing.T) {
+	read := []string{"lo_kubehz_space_list", "lo_kubehz_space_get", "lo_kubehz_cluster_list", "lo_kubehz_cluster_get"}
+	destructive := []string{"lo_kubehz_space_delete", "lo_kubehz_space_lease", "lo_kubehz_cluster_lease"}
+	for _, tc := range []struct {
+		x       mcpExposure
+		present []string
+		absent  []string
+	}{
+		{mcpExposure{}, read, append([]string{"lo_kubehz_space_create"}, destructive...)},
+		{mcpExposure{mutating: true}, append([]string{"lo_kubehz_space_create"}, read...), destructive},
+		{mcpExposure{destructive: true}, append(append([]string{"lo_kubehz_space_create"}, read...), destructive...), nil},
+	} {
+		tools := mcpToolNames(t, tc.x)
+		for _, name := range tc.present {
+			if tools[name] == nil {
+				t.Errorf("%+v: %s missing", tc.x, name)
+			}
+		}
+		for _, name := range tc.absent {
+			if tools[name] != nil {
+				t.Errorf("%+v: %s exposed", tc.x, name)
+			}
+		}
+	}
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	for _, name := range read {
+		if a := tools[name].Annotations; a == nil || !a.ReadOnlyHint {
+			t.Errorf("%s lacks readOnlyHint", name)
+		}
+	}
+	for _, name := range destructive {
+		if a := tools[name].Annotations; a == nil || a.DestructiveHint == nil || !*a.DestructiveHint {
+			t.Errorf("%s lacks destructiveHint=true", name)
+		}
+	}
+	for _, flag := range []string{"name", "slug", "nodes", "namespaces", "object-cap-kib", "region", "lease-hours", "output"} {
+		if !flagNames(t, tools["lo_kubehz_space_create"])[flag] {
+			t.Errorf("lo_kubehz_space_create lacks --%s", flag)
+		}
+	}
+	if !flagNames(t, tools["lo_kubehz_cluster_lease"])["hours"] {
+		t.Error("lo_kubehz_cluster_lease lacks --hours")
+	}
+}
+
+// TestMcpAgentToolsTakeNoFlagThatMovesTheBearer: the api URL and the
+// credential come from the environment of the `lo mcp` server only. A flag
+// that named a URL would let the model send the agent's bearer to any host.
+func TestMcpAgentToolsTakeNoFlagThatMovesTheBearer(t *testing.T) {
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	seen := 0
+	for name, tool := range tools {
+		if !strings.HasPrefix(name, "lo_kubehz_space_") && !strings.HasPrefix(name, "lo_kubehz_cluster_") {
+			continue
+		}
+		seen++
+		for flag := range flagNames(t, tool) {
+			for _, word := range []string{"url", "api", "endpoint", "host", "server", "issuer"} {
+				if strings.Contains(flag, word) {
+					t.Errorf("%s takes --%s: it names where the bearer goes", name, flag)
+				}
+			}
+		}
+	}
+	if seen != 8 {
+		t.Errorf("agent tools = %d, want 8 (the check proves nothing on fewer)", seen)
+	}
+}
+
+// TestMcpTierCountsMatchTheDocs pins how many tools each tier holds, and
+// that docs/reference/cli.md states the same numbers.
+func TestMcpTierCountsMatchTheDocs(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join(repoRootDir(t), "docs", "reference", "cli.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		x    mcpExposure
+		want int
+	}{
+		{mcpExposure{}, 29},
+		{mcpExposure{mutating: true}, 54},
+		{mcpExposure{destructive: true}, 96},
+	} {
+		if got := len(mcpToolNames(t, tc.x)); got != tc.want {
+			t.Errorf("%+v: %d tools, want %d (update the count here and in docs/reference/cli.md)", tc.x, got, tc.want)
+		}
+		if !strings.Contains(string(doc), fmt.Sprintf("(%d tools)", tc.want)) {
+			t.Errorf("docs/reference/cli.md does not state %d tools", tc.want)
+		}
 	}
 }

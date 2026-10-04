@@ -123,14 +123,27 @@ func (c *Context) Token(ctx context.Context, o TokenOptions) error {
 		c.errorf("unknown --format %s (want exec-credential or token)", format)
 		return ErrHandled
 	}
-	tokenURL := firstNonEmpty(o.TokenURL, c.getenv(EnvAgentTokenURL))
-	scope := firstNonEmpty(o.Scope, c.getenv(EnvAgentScope))
-	if tokenURL == "" || scope == "" {
+	o.TokenURL = firstNonEmpty(o.TokenURL, c.getenv(EnvAgentTokenURL))
+	o.Scope = firstNonEmpty(o.Scope, c.getenv(EnvAgentScope))
+	if o.TokenURL == "" || o.Scope == "" {
 		c.errorf("token url and scope are required: pass --token-url and --scope, or set %s and %s", EnvAgentTokenURL, EnvAgentScope)
 		return ErrHandled
 	}
+	e, err := c.agentAccessToken(ctx, o)
+	if err != nil {
+		return err
+	}
+	return c.emitToken(format, e)
+}
+
+// agentAccessToken is the grant behind `lo kubehz token` and the agent
+// commands (agent.go): the https gate, the key from the environment (or
+// o.SecretFile), the cache, then client_credentials. The caller resolves
+// o.TokenURL and o.Scope. The bash twin is kubehz::token_access.
+func (c *Context) agentAccessToken(ctx context.Context, o TokenOptions) (tokenCacheEntry, error) {
+	tokenURL, scope := o.TokenURL, o.Scope
 	if err := c.requireHTTPS(tokenURL, "Token URL"); err != nil {
-		return ErrHandled
+		return tokenCacheEntry{}, ErrHandled
 	}
 	clientID := c.getenv(EnvAgentClientID)
 	secret := c.getenv(EnvAgentClientSecret)
@@ -138,19 +151,19 @@ func (c *Context) Token(ctx context.Context, o TokenOptions) error {
 		b, err := os.ReadFile(o.SecretFile)
 		if err != nil {
 			c.errorf("cannot read the secret file %s", o.SecretFile)
-			return ErrHandled
+			return tokenCacheEntry{}, ErrHandled
 		}
 		secret = strings.TrimSpace(string(b))
 	}
 	if clientID == "" || secret == "" {
 		c.errorf("no agent key: set %s and %s (or pass --secret-file)", EnvAgentClientID, EnvAgentClientSecret)
-		return ErrHandled
+		return tokenCacheEntry{}, ErrHandled
 	}
 	// A line break inside a value would end the bash twin's curl config
 	// line and make the rest a curl option: both refuse it.
 	if hasControl(clientID) || hasControl(secret) {
 		c.errorf("the agent key holds a control character: check %s and the client secret", EnvAgentClientID)
-		return ErrHandled
+		return tokenCacheEntry{}, ErrHandled
 	}
 
 	now := c.now()
@@ -162,20 +175,20 @@ func (c *Context) Token(ctx context.Context, o TokenOptions) error {
 	}
 	if cacheFile != "" {
 		if e, ok := readTokenCache(cacheFile); ok && time.Unix(e.ExpiresAt, 0).Sub(now) > tokenRefreshMargin {
-			return c.emitToken(format, e)
+			return e, nil
 		}
 	}
 
 	e, err := c.requestToken(ctx, tokenURL, clientID, secret, scope, now)
 	if err != nil {
-		return err
+		return tokenCacheEntry{}, err
 	}
 	if cacheFile != "" {
 		if err := writeTokenCache(cacheFile, e); err != nil {
 			c.debugf("token cache not written: %v", err)
 		}
 	}
-	return c.emitToken(format, e)
+	return e, nil
 }
 
 // requestToken runs client_credentials (RFC 6749 4.4, client_secret_basic).

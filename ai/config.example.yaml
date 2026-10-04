@@ -77,19 +77,24 @@ injection:
     readonly:
       [lo_status, lo_doctor, lo_lint, lo_audit, lo_addons,
        lo_secrets_list, lo_secrets_path,
-       lo_tilt_status, lo_kubehz_status, lo_registry_status, lo_image_list]
+       lo_tilt_status, lo_kubehz_status, lo_registry_status, lo_image_list,
+       lo_space_list, lo_space_get, lo_cluster_list, lo_cluster_get]
     idempotent:
       [lo_build, lo_kustomize_build]
     # anything not listed above is treated as `mutating`.
 
   # secret/credential-emitting tools: NEVER expose to the model, even though
   # they're @readonly (lo_kubeconfig prints the admin client cert+key).
+  # The argsh `lo mcp` names a third-level command by its last two words:
+  # lo_space_kubeconfig is `lo kubehz space kubeconfig`.
   deny:
     - lo_secrets_print
     - lo_secrets_env
     - lo_kubeconfig
     - lo_kubehz_token
     - lo_kubehz_claim-code
+    - lo_space_kubeconfig
+    - lo_cluster_kubeconfig
 
 # ---------------------------------------------------------------------------
 # Benchmark

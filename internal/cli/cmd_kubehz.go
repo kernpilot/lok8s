@@ -10,6 +10,7 @@ package cli
 
 import (
 	"errors"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -22,6 +23,10 @@ import (
 
 func init() { registerPorted("kubehz", newKubehzCommand) }
 
+// kubehzHTTP is the platform-api client of the kubehz commands (nil: the
+// library's own). Tests point it at an httptest TLS server.
+var kubehzHTTP *http.Client
+
 // kubehzContext binds the library to the command's streams and paths.
 func kubehzContext(cmd *cobra.Command, paths *config.Paths) *kubehz.Context {
 	return &kubehz.Context{
@@ -29,6 +34,7 @@ func kubehzContext(cmd *cobra.Command, paths *config.Paths) *kubehz.Context {
 		Runner: execx.NewRunner(paths),
 		Out:    cmd.OutOrStdout(),
 		ErrOut: cmd.ErrOrStderr(),
+		HTTP:   kubehzHTTP,
 		IsTTY:  func() bool { return term.IsTerminal(int(os.Stdout.Fd())) },
 	}
 }
@@ -61,6 +67,8 @@ func newKubehzCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		newKubehzClaimCode(paths),
 		newKubehzClaim(paths),
 		newKubehzToken(paths),
+		newKubehzSpace(paths),
+		newKubehzCluster(paths),
 		newKubehzReEnroll(paths),
 		newKubehzAssess(paths),
 		newKubehzHandover(paths),

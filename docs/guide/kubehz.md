@@ -841,6 +841,140 @@ The output of this command is a bearer token. Thus the command is hidden
 from `lo kubehz --help`, no `lo mcp` server offers it as a tool, and `lo chat`
 denies it to the model.
 
+## Agent tools
+
+`lo kubehz space` and `lo kubehz cluster` call the kubehz api with an
+[agent key](#agent-keys). They need no project and no cluster spec. `lo mcp`
+turns them into tools, so an AI agent that runs `lo mcp` on your machine can
+create a space for a task, extend its lease, and delete it when the task is
+done.
+
+### The environment
+
+The commands read five values from the environment, never from a flag:
+
+| Variable | Value |
+|----------|-------|
+| `KUBEHZ_API_URL` | The kubehz api, for example `https://api.kubehz.cloud`. HTTPS only. |
+| `KUBEHZ_AGENT_CLIENT_ID` | `clientId` of the key |
+| `KUBEHZ_AGENT_CLIENT_SECRET` | `clientSecret` of the key |
+| `KUBEHZ_AGENT_TOKEN_URL` | `tokenEndpoint` of the key |
+| `KUBEHZ_AGENT_SCOPE` | `tokenScope` of the key |
+
+The answer that created the key holds the last four values. `lo` gets the
+access token the same way `lo kubehz token` does, and uses the same cache.
+Without an agent key, the commands send `KUBEHZ_TOKEN` (an API token from the
+dashboard). When both are set, `lo` uses the agent key.
+
+No flag sets the api URL or the credential. A model that could set the URL
+could send the token to another host.
+
+### Commands
+
+```bash
+lo kubehz space list                          # the spaces the key reaches
+lo kubehz space get sp-1a2b3c4d               # one space: limits, nodes, endpoint, lease
+lo kubehz space create --name "CI run" --slug ci-1234 --lease-hours 3
+lo kubehz space lease sp-1a2b3c4d --hours 6   # the platform deletes the space 6 hours from now
+lo kubehz space delete sp-1a2b3c4d
+lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
+
+lo kubehz cluster list                        # the clusters the key reaches
+lo kubehz cluster get cl-1a2b3c4d
+lo kubehz cluster lease cl-1a2b3c4d --hours 4 # hosted clusters only
+lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml
+```
+
+`space create` also takes `--nodes`, `--namespaces` and `--object-cap-kib`
+(the [three numbers](#spaces)) and `--region`. A number you leave out is not
+sent, and the platform applies its default.
+
+Every command takes `-o text|json|yaml`. `text` prints a table for a list and
+one line per field for one record. `json` and `yaml` print fixed fields, which
+a script or an agent can read (see
+[Output formats](../reference/cli.md#output-formats)). A field that the api
+leaves out is `null`. Every string from the api loses its control characters
+before `lo` prints it.
+
+`kubeconfig` writes the agent kubeconfig to the file you name (mode 0600) and
+prints the path. The file holds no secret: its exec stanza runs
+`lo kubehz token`, so kubectl uses the agent key from the environment.
+
+```bash
+lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
+KUBECONFIG=agent.yaml kubectl get pods
+```
+
+### What the api enforces
+
+`lo` adds no authority. It checks the shape of an id (`sp-…`, `cl-…`) and of
+a number, then sends the request. The api decides:
+
+- **The role of the key.** A viewer key can read. A create, a lease or a
+  delete answers `403 TOKEN_SCOPE_MISSING`. Use a key with the role editor or
+  admin.
+- **The scope of the key.** A key with the scope `resources` reaches only the
+  clusters and spaces it names and the ones it creates. Another space answers
+  `404`, the same as a space that does not exist.
+- **The spend cap.** When the spend of this month on what the key created
+  reaches its cap, a create or a lease extension answers
+  `409 AGENT_KEY_SPEND_CAP`. What already runs keeps running until its lease
+  ends.
+- **The lease.** A space or a hosted cluster that an agent key creates gets a
+  lease: 2 hours, or the hours that `--lease-hours` names (1 to 720). When the
+  lease ends, the platform deletes the resource. `lease --hours N` sets the
+  end to N hours from now. An agent key cannot remove a lease.
+
+A refusal prints the HTTP status, the code and message of the api, and the
+next step.
+
+### As MCP tools
+
+`lo mcp` puts each command in the tier its marker names:
+
+| Tool | Tier |
+|------|------|
+| `lo_kubehz_space_list`, `lo_kubehz_space_get`, `lo_kubehz_cluster_list`, `lo_kubehz_cluster_get` | default (read only) |
+| `lo_kubehz_space_create` | `--allow-mutating` |
+| `lo_kubehz_space_delete`, `lo_kubehz_space_lease`, `lo_kubehz_cluster_lease` | `--allow-destructive` |
+| `lo kubehz space kubeconfig`, `lo kubehz cluster kubeconfig` | never a tool |
+
+`lease` is in the destructive tier because a shorter lease brings the delete
+closer. The two `kubeconfig` commands write a file that a model must not
+read, so no tier offers them.
+
+Start the server with the agent key in its environment, not with your own
+credentials:
+
+```json
+{
+  "mcpServers": {
+    "lok8s": {
+      "type": "stdio",
+      "command": "lo",
+      "args": ["mcp", "start"],
+      "env": {
+        "LO_MCP_ALLOW": "mutating",
+        "KUBEHZ_API_URL": "https://api.kubehz.cloud",
+        "KUBEHZ_AGENT_CLIENT_ID": "<clientId>",
+        "KUBEHZ_AGENT_CLIENT_SECRET": "<clientSecret>",
+        "KUBEHZ_AGENT_TOKEN_URL": "<tokenEndpoint>",
+        "KUBEHZ_AGENT_SCOPE": "<tokenScope>"
+      }
+    }
+  }
+}
+```
+
+This file holds the client secret: keep it out of version control. With
+`mutating`, the agent can create spaces that end after two hours. With
+`destructive`, it can also extend leases and delete.
+
+The bash variant of `lo mcp` (the argsh builtin that `lo chat` drives) has no
+tiers and names the tools by their last two words: `lo_space_list`,
+`lo_cluster_get`. `lo chat` treats list and get as read tools and denies
+`lo_space_kubeconfig` and `lo_cluster_kubeconfig`.
+
 ## Assessment and handover
 
 The heartbeat agent also collects a compact **assessment** of the cluster:

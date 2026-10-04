@@ -129,24 +129,59 @@ func TestChatPreflightErrors(t *testing.T) {
 	}
 }
 
+// argshToolName is the tool name the argsh `lo mcp` builtin gives a command:
+// lo_ and the path, of which a command three or more levels deep keeps only
+// its last two words (`lo kubehz space kubeconfig` is lo_space_kubeconfig).
+// The builtin prefixes the parent's name onto its children only, never onto
+// the grandchildren.
+func argshToolName(c *cobra.Command) string {
+	words := strings.Fields(c.CommandPath())[1:]
+	if len(words) > 2 {
+		words = words[len(words)-2:]
+	}
+	return "lo_" + strings.Join(words, "_")
+}
+
+func TestArgshToolName(t *testing.T) {
+	root := newUsageTree(synthProject(t), routing{})
+	for path, want := range map[string]string{
+		"kubeconfig":                "lo_kubeconfig",
+		"kubehz token":              "lo_kubehz_token",
+		"kubehz node join":          "lo_node_join",
+		"kubehz space kubeconfig":   "lo_space_kubeconfig",
+		"kubehz cluster kubeconfig": "lo_cluster_kubeconfig",
+	} {
+		cmd := findByPath(root, path)
+		if cmd == nil {
+			t.Fatalf("no command %q", path)
+		}
+		if got := argshToolName(cmd); got != want {
+			t.Errorf("%s: %s, want %s", path, got, want)
+		}
+	}
+}
+
 // TestChatDeniesEveryCredentialOutputCommand: `lo chat` drives the bash tree's
 // argsh `lo mcp`, which knows nothing of AnnotationCredentialOutput. The chat
 // defaults' deny list is the only gate there, so every such command must be
-// on it (in the project tree and in the embedded copy).
+// on it (in the project tree and in the embedded copy), under the name the
+// argsh server gives it.
 func TestChatDeniesEveryCredentialOutputCommand(t *testing.T) {
 	var tools []string
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		if c.Annotations[AnnotationCredentialOutput] == "true" {
-			tools = append(tools, strings.ReplaceAll(c.CommandPath(), " ", "_"))
+			tools = append(tools, argshToolName(c))
 		}
 		for _, sub := range c.Commands() {
 			walk(sub)
 		}
 	}
 	walk(newUsageTree(synthProject(t), routing{}))
-	if !slices.Contains(tools, "lo_kubehz_token") {
-		t.Fatalf("credential-output commands = %v: lo_kubehz_token lost its annotation, the check proves nothing", tools)
+	for _, must := range []string{"lo_kubehz_token", "lo_space_kubeconfig", "lo_cluster_kubeconfig"} {
+		if !slices.Contains(tools, must) {
+			t.Fatalf("credential-output commands = %v: %s lost its annotation, the check proves nothing", tools, must)
+		}
 	}
 	for _, file := range []string{"../../.lok8s/chat/defaults.json", "../assets/lok8s/chat/defaults.json"} {
 		raw, err := os.ReadFile(file)

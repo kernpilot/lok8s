@@ -4,21 +4,25 @@
 #
 # Every case runs BOTH implementations (the Go binary, and the same binary
 # routed to the frozen tree by the project file) against a synthetic
-# project and diffs stdout, stderr and exit codes. ONLY cluster-free paths
-# are exercised: config validation refusals, usage/flag errors, `status`
-# with no registration, the hosting-axis routing of every subcommand, the
-# handover bundle checks, the first kubectl calls of `deploy` (the
-# bind-secret stage) against a stub, and the register request bodies against
-# a local HTTPS stub (the last section). No case reaches a kubeconfig, a
-# real kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN and
-# HCLOUD_TOKEN are unset except for dummy values in the register section.
+# project and diffs stdout, stderr and exit codes. Every case is
+# cluster-free: config validation refusals, usage/flag errors, `status` with
+# no registration, the hosting-axis routing of every subcommand, the
+# handover bundle checks, and the first kubectl calls of `deploy` (the
+# bind-secret stage) against a stub kubectl. No case reaches a kubeconfig, a
+# real kubectl, the platform api or the Hetzner api. Two sections talk to one
+# local https stub (hack/lib/kubehz-api-stub.py, a self-signed certificate
+# that both implementations trust through SSL_CERT_FILE and
+# CURL_CA_BUNDLE): the agent tools, and the register request bodies (the
+# last section). There the harness also diffs the requests that each
+# implementation sent. KUBEHZ_TOKEN and HCLOUD_TOKEN are unset except for
+# dummy values in those two sections.
 #
-# What this harness CANNOT cover: how the two implementations render a SERVER
-# string (the api's own refusal message — scrubbed, clipped, and in the bash
-# tree escaped for `echo -e`). Only the register section talks to a stub,
-# and that stub answers 2xx. That rendering is pinned instead by a golden
-# PAIR both suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
-# (the hostile input) and space-above-shared.txt (the bytes both must print),
+# The provision path renders a SERVER string too (the api's own refusal
+# message, scrubbed, clipped, and in the bash tree escaped for `echo -e`),
+# and no case here reaches it: spec.kubehz.apiUrl of a provision case is
+# not the stub. That rendering is pinned by a golden PAIR both suites read:
+# internal/kubehz/testdata/golden/space-above-shared-message.txt (the
+# hostile input) and space-above-shared.txt (the bytes both must print),
 # asserted by TestProvisionSharedScrubsTheSharedCeilingMessage and by
 # tests/unit/kubehz_shared_test.bats.
 #
@@ -51,7 +55,7 @@ parity::init "${1:-}"
 unset KUBECONFIG KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE \
   KUBEHZ_HANDOVER_K8S_DIR KUBEHZ_HANDOVER_ETCD_DIR KUBEHZ_HANDOVER_ETCD_IMAGE_TAG \
   KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE \
-  XDG_CACHE_HOME KUBERNETES_EXEC_INFO
+  KUBEHZ_API_URL SSL_CERT_FILE CURL_CA_BUNDLE XDG_CACHE_HOME KUBERNETES_EXEC_INFO
 
 # Isolated HOME so neither implementation can find a real ~/.kube/config.
 export HOME="${WORK}/home"
@@ -507,6 +511,145 @@ check - kubehz token --token-url https://id.example/t --scope s --format token
 KUBERNETES_EXEC_INFO='{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential"}' \
   check - kubehz token --token-url https://id.example/t --scope s
 unset KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET
+
+# ── agent tools (space / cluster): the local refusals, no api reached ───────
+check - kubehz space list                                # KUBEHZ_API_URL unset
+KUBEHZ_API_URL=http://api.kubehz.example check - kubehz cluster list
+export KUBEHZ_API_URL=https://127.0.0.1:1
+check - kubehz space list                                # no credential
+KUBEHZ_AGENT_CLIENT_ID=cid check - kubehz space list     # half an agent key
+KUBEHZ_TOKEN=$'a\nb' check - kubehz cluster list          # a line break in the bearer
+check_parse - kubehz space get
+check_parse - kubehz space get sp-1a2b3c4d sp-2
+check_parse - kubehz cluster list extra
+check - kubehz space get ../clusters
+check - kubehz cluster get sp-1a2b3c4d
+check - kubehz space get sp-1a2b3c4d -o xml
+check_parse - kubehz space lease sp-1a2b3c4d
+check - kubehz space lease sp-1a2b3c4d --hours 721
+check - kubehz cluster lease cl-1a2b3c4d --hours 0x1
+check_parse - kubehz space create --name Acme
+check_parse - kubehz space create --slug acme
+check - kubehz space create --name Acme --slug acme --nodes 0
+check - kubehz space create --name Acme --slug acme --namespaces 99999999999999999999
+check - kubehz space create --name Acme --slug acme --lease-hours 0
+check_parse - kubehz cluster kubeconfig cl-1a2b3c4d
+check_parse - kubehz space bogus
+check_parse - kubehz cluster bogus
+# Nothing listens on port 1: both answer "did not answer" the same way.
+KUBEHZ_TOKEN=khzt_parity check - kubehz space get sp-1a2b3c4d
+unset KUBEHZ_API_URL
+
+# ── agent tools against an https stub of the api ────────────────────────────
+# Both implementations call the stub with the agent key: each run mints its
+# own token (the cache is cleared before every run), so the request logs
+# carry the grant too. check_api diffs the logs on top of the outputs, and
+# refuses an empty log (two empty logs prove nothing).
+agent_stub() {
+  command -v python3 >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || return 1
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
+    -addext subjectAltName=IP:127.0.0.1 -keyout "${WORK}/stub.key" -out "${WORK}/stub.pem" >/dev/null 2>&1 || return 1
+  python3 "${ROOT}/hack/lib/kubehz-api-stub.py" "${WORK}/stub.pem" "${WORK}/stub.key" \
+    "${WORK}/stub.port" "${WORK}/stub.log" >"${WORK}/stub.out" 2>&1 &
+  STUB_API_PID=$!
+  local _
+  for _ in $(seq 1 100); do
+    [[ -s "${WORK}/stub.port" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+parity_cleanup() { [[ -z "${STUB_API_PID:-}" ]] || kill "${STUB_API_PID}" 2>/dev/null || :; }
+
+agent_pre() {
+  rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml"
+  : > "${WORK}/stub.log"
+}
+agent_post() {
+  cp "${WORK}/stub.log" "${WORK}/req.${1}"
+  if [[ -e "${PROJ}/kc.yaml" ]]; then
+    cp -p "${PROJ}/kc.yaml" "${WORK}/kc.${1}"
+    stat -c '%a' "${PROJ}/kc.yaml" >> "${WORK}/kc.${1}"
+  else
+    rm -f "${WORK}/kc.${1}"
+  fi
+}
+
+# check_api <allow|-> <argv...>: check, then the request logs must match and
+# hold at least the grant.
+check_api() {
+  PARITY_PRE_EACH=agent_pre PARITY_POST_EACH=agent_post check "$@"
+  shift
+  if [[ ! -s "${WORK}/req.go" ]]; then
+    fail "requests lo $* — the Go run sent nothing; the diff proves nothing"
+  elif diff -q "${WORK}/req.bash" "${WORK}/req.go" >/dev/null; then
+    echo "ok: requests lo $*"
+  else
+    fail "requests lo $* — the two implementations sent different requests:"
+    diff "${WORK}/req.bash" "${WORK}/req.go" | head -10 | sed 's/^/  /' || true
+  fi
+}
+
+if agent_stub; then
+  STUB_PORT="$(cat "${WORK}/stub.port")"
+  export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem"
+  export KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}/"
+  export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
+  export KUBEHZ_AGENT_TOKEN_URL="https://127.0.0.1:${STUB_PORT}/oauth/v2/token" KUBEHZ_AGENT_SCOPE=parity-scope
+
+  for format in text json yaml; do
+    check_api - kubehz space list -o "${format}"
+    check_api - kubehz space get sp-1a2b3c4d -o "${format}"
+    check_api - kubehz cluster list -o "${format}"     # a short page: the warning
+    check_api - kubehz cluster get cl-1a2b3c4d -o "${format}"
+    check_api - kubehz space delete sp-1a2b3c4d -o "${format}"
+    check_api - kubehz space lease sp-1a2b3c4d --hours 024 -o "${format}"
+    check_api - kubehz cluster lease cl-1a2b3c4d --hours 3 -o "${format}"
+    check_api - kubehz space create --name 'Acme Prod' --slug acme -o "${format}"
+  done
+  check_api - kubehz space create --name Acme --slug acme --nodes 2 --namespaces 008 \
+    --object-cap-kib 256 --region fsn1 --lease-hours 0720
+  for slug in taken big full capped; do
+    check_api - kubehz space create --name Acme --slug "${slug}"
+  done
+  for id in sp-gone0001 sp-scoped01 sp-broken01 sp-boom0001 sp-hostile1; do
+    check_api - kubehz space get "${id}"
+  done
+  check_api - kubehz space delete sp-gone0001
+  check_api - kubehz space lease sp-capped01 --hours 2
+  check_api - kubehz cluster lease cl-self0001 --hours 3
+  check_api - kubehz cluster lease cl-viewer01 --hours 3
+  check_api - kubehz cluster kubeconfig cl-pending1 --file kc.yaml
+  check_api - kubehz space kubeconfig sp-dedicat1 --file kc.yaml
+
+  # The kubeconfig: the same bytes and mode in both, the path on stdout.
+  for format in text json; do
+    check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml -o "${format}"
+    if [[ ! -e "${WORK}/kc.go" ]]; then
+      fail "kubeconfig file (-o ${format}) — the Go run wrote none"
+    elif ! parity::state_same "${WORK}/kc.bash" "${WORK}/kc.go" "kubeconfig file (-o ${format})"; then
+      failures=$((failures + 1))
+    fi
+  done
+  check_api - kubehz cluster kubeconfig cl-1a2b3c4d --file clusters   # a directory: refused
+
+  # KUBEHZ_TOKEN without a key: no grant; the minted token is the stub's
+  # bearer, so the same value passes, another one is refused.
+  unset KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET
+  KUBEHZ_TOKEN=parity-jwt check_api - kubehz space list -o json
+  KUBEHZ_TOKEN=wrong check_api - kubehz space get sp-1a2b3c4d
+  export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
+  # The contract on the Go side alone: 0 on success, 1 on a refusal.
+  expect_rc 0 kubehz space list
+  expect_rc 1 kubehz space get sp-gone0001
+
+  unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_API_URL KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET \
+    KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE
+elif [[ -n "${CI:-}" ]]; then
+  fail "agent tools: the https stub did not start (python3 and openssl are on every CI runner)"
+else
+  echo "skip: agent tools https stub (python3 or openssl missing, or the stub did not start)"
+fi
 
 # ── node: the hosting gate, the https gate, the global --cluster trap ───────
 check - kubehz node join
