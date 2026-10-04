@@ -1,29 +1,29 @@
 package kubehz
 
-// agent.go — `lo kubehz space …` and `lo kubehz cluster …`: the kubehz api
-// calls an AI agent or a pipeline makes with an agent key. `lo mcp` turns
-// these commands into tools like every other leaf of the tree, so an agent
-// that runs `lo mcp` locally manages spaces and hosted-cluster leases with
-// the key in its environment.
+// agent.go — `lo kubehz space …` and `lo kubehz cluster …`. An AI agent or
+// a pipeline makes these kubehz api calls with an agent key. `lo mcp` turns
+// the commands into tools, like every other leaf of the tree. Thus an
+// agent that runs `lo mcp` manages spaces and the leases of hosted
+// clusters with the key in its environment.
 //
-// THE CREDENTIAL: the agent key (KUBEHZ_AGENT_CLIENT_ID,
-// KUBEHZ_AGENT_CLIENT_SECRET, KUBEHZ_AGENT_TOKEN_URL, KUBEHZ_AGENT_SCOPE),
-// turned into an access token by the grant `lo kubehz token` runs (the same
-// cache file). Without a key, KUBEHZ_TOKEN is the bearer. The api base URL
-// is KUBEHZ_API_URL. No flag names the URL or carries a credential: a model
-// that could set the URL could send the bearer to any host.
+// THE CREDENTIAL: the agent key is four variables (KUBEHZ_AGENT_CLIENT_ID,
+// KUBEHZ_AGENT_CLIENT_SECRET, KUBEHZ_AGENT_TOKEN_URL, KUBEHZ_AGENT_SCOPE).
+// The grant of `lo kubehz token` turns it into an access token, with the
+// same cache file. Without a key, KUBEHZ_TOKEN is the bearer.
+// KUBEHZ_API_URL names the api. No flag names the URL or holds a
+// credential: a model that could set the URL could send the bearer to any
+// host.
 //
-// lo adds no authority. The api enforces the role of the key, its scope
-// (tenant or resources), its monthly spend cap and the lease (what a key
-// creates ends after two hours unless the key extends it). lo checks only
-// the shape of what it sends: an id that goes into a URL path, and whole
-// numbers.
+// lo adds no authority. The api enforces the role of the key, its scope,
+// its monthly spend cap and the lease. What a key creates ends after two
+// hours unless the key extends the lease. lo checks only the shape of what
+// it sends: an id that goes into a URL path, and whole numbers.
 //
-// OUTPUT: -o text (a table for a list, label lines for one record), json or
-// yaml (internal/cli writeOutput) with fixed lowerCamel fields. The records
-// are projections, so a new api field changes no output. Every string from
-// the api loses its control characters (C0, DEL, U+2028, U+2029) before it
-// is printed, in every format.
+// OUTPUT: -o text prints a table for a list and label lines for one
+// record. json and yaml (internal/cli writeOutput) print fixed lowerCamel
+// fields. The records are projections, so a new api field changes no
+// output. Every string from the api loses its control characters
+// (cleanText) in every format.
 //
 // The bash twin is libs/kubehz/agent. Both print the same bytes:
 // hack/parity-kubehz.sh diffs them against an https stub of the api.
@@ -49,9 +49,9 @@ import (
 const EnvAPIURL = "KUBEHZ_API_URL"
 
 const (
-	// agentRequestTimeout bounds one api call, the body included: an
-	// agent waits on the tool, so a stalled api must end it (bash: curl
-	// --max-time 60).
+	// agentRequestTimeout bounds one api call, the body included. An
+	// agent waits on the tool, so a stalled api must end the call (bash:
+	// curl --max-time 60).
 	agentRequestTimeout = 60 * time.Second
 	// agentMaxBody caps what lo reads from one answer.
 	agentMaxBody = 16 << 20
@@ -139,8 +139,8 @@ func (c *Context) openSession(ctx context.Context, action string) (*agentSession
 		c.echoErr("  Set %s and %s (an agent key), or KUBEHZ_TOKEN.", EnvAgentClientID, EnvAgentClientSecret)
 		return nil, ErrHandled
 	}
-	// A line break would end the bash twin's curl config line and make
-	// the rest a curl option: both refuse it.
+	// A line break would end the curl config line of the bash twin. The
+	// rest would be a curl option, so both twins refuse it.
 	if hasControl(s.bearer) {
 		c.errorf("kubehz %s: the access token holds a control character", action)
 		return nil, ErrHandled
@@ -156,10 +156,10 @@ func joinAnd(names []string) string {
 	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
-// agentCall is one api request: the bearer in the Authorization header, no
-// redirect followed (a 3xx is a refusal), bounded by agentRequestTimeout.
-// err only for a transport failure, already printed. The bash twin is
-// kubehz::agent_api.
+// agentCall is one api request. The bearer goes in the Authorization
+// header. No redirect is followed: a 3xx is a refusal. agentRequestTimeout
+// bounds the call. err is set only for a transport failure, which is
+// already printed. The bash twin is kubehz::agent_api.
 func (c *Context) agentCall(ctx context.Context, s *agentSession, action, method, path string, body []byte) (*httpResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, agentRequestTimeout)
 	defer cancel()
@@ -177,8 +177,8 @@ func (c *Context) agentCall(ctx context.Context, s *agentSession, action, method
 		return noAnswer()
 	}
 	// openSession refuses a URL that is not https. This second check keeps
-	// the bearer off any other scheme if that refusal is ever lost (the
-	// bash twin: curl --proto =https).
+	// the bearer off any other scheme if that refusal is ever lost. The
+	// bash twin has curl --proto =https.
 	if req.URL.Scheme != "https" {
 		c.errorf("kubehz %s: %s is not an https URL: lo sends no bearer there", action, s.base)
 		return nil, ErrHandled
@@ -202,18 +202,18 @@ func (c *Context) agentCall(ctx context.Context, s *agentSession, action, method
 	return &httpResult{Status: resp.StatusCode, Body: raw}, nil
 }
 
-// agentRefused prints a non-2xx answer: what failed with the api's status,
-// code and message, then the next step. lo's own hint wins where lo knows
-// more than the api (a flag name, the list command); else the api's help.
-// Both server strings lose every control character (a line break or a tab
-// too: one refusal is two lines) and are clipped. The bash twin is
-// kubehz::agent_refused.
+// agentRefused prints a non-2xx answer: what failed, with the status, the
+// code and the message of the api. Then it prints the next step. lo prints
+// its own hint where it knows more than the api (a flag name, the list
+// command). Else it prints the help of the api. Both server strings lose
+// every control character and are clipped. A line break goes too, because
+// one refusal is two lines. The bash twin is kubehz::agent_refused.
 func (c *Context) agentRefused(s *agentSession, k agentKind, action, id string, res *httpResult) {
 	code := apiCode(res.Body)
 	if !apiCodeRe.MatchString(code) {
 		code = ""
 	}
-	msg := clip(cleanText(apiMessage(res.Body)))
+	msg := clip(cleanText(apiSaid(res.Body, "message")))
 	if msg == "" {
 		msg = "no reason given"
 	}
@@ -222,15 +222,32 @@ func (c *Context) agentRefused(s *agentSession, k agentKind, action, id string, 
 		c.echoErr("  %s", hint)
 		return
 	}
-	if help := clip(cleanText(apiHelp(res.Body))); help != "" {
+	if help := clip(cleanText(apiSaid(res.Body, "help"))); help != "" {
 		c.echoErr("  %s", help)
 	}
 }
 
-// agentHint is lo's next step for a refusal, "" when the api's help says
-// it best. A resource-scoped agent key never sees AGENT_KEY_OUT_OF_SCOPE on
-// these routes: a space or cluster outside its reach answers 404, the same
-// as one that does not exist (kubehz-api classifyScopedAgentRoute).
+// apiSaid is the first string of .data.<field> and .<field> in an api
+// answer, or "" when neither is a string. A number or an object there
+// counts as absent. lo prints what the api said, never its JSON.
+func apiSaid(body []byte, field string) string {
+	v, ok := parseJSON(body)
+	if !ok {
+		return ""
+	}
+	for _, x := range []any{jget(v, "data", field), jget(v, field)} {
+		if s, ok := x.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// agentHint is the next step of lo for a refusal, or "" when the help of
+// the api says it best. A resource-scoped agent key never gets
+// AGENT_KEY_OUT_OF_SCOPE on these routes. A space or a cluster outside its
+// reach answers 404, the same as one that does not exist (kubehz-api
+// classifyScopedAgentRoute).
 func agentHint(s *agentSession, k agentKind, id string, status int, code string) string {
 	switch {
 	case status == http.StatusUnauthorized && s.key:
@@ -279,8 +296,8 @@ func agentData(body []byte) map[string]any {
 // ── numbers ──────────────────────────────────────────────
 
 // wholeNumber reads a flag value as a whole number of 1 or more: digits
-// only, inside the int64 range (the frozen tree's kubehz::space_number_value
-// accepts the same set; "008" is eight).
+// only, inside the int64 range. kubehz::space_number_value in the frozen
+// tree accepts the same set. "008" is eight.
 func wholeNumber(s string) (int64, bool) {
 	if !spaceDigits.MatchString(s) {
 		return 0, false
@@ -304,20 +321,24 @@ func (c *Context) leaseHours(action, flag, s string) (int64, error) {
 
 // ── records ──────────────────────────────────────────────
 
-// cleanText drops the characters that can move a terminal or end a line:
-// C0 controls, DEL, U+2028 and U+2029. The bash twin's jq `clean` drops the
+// cleanText drops the characters that can move a terminal, end a line or
+// turn text around. These are the C0 controls, DEL, the C1 controls
+// (U+0080 to U+009F), U+2028 and U+2029. The bidi controls go too (U+202A
+// to U+202E, U+2066 to U+2069). The jq `clean` of the bash twin drops the
 // same set.
 func cleanText(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == 0x2028 || r == 0x2029 {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f, r == 0x2028, r == 0x2029,
+			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
 			return -1
 		}
 		return r
 	}, s)
 }
 
-// apiText is a string field of an api record, cleaned; nil (JSON null)
-// for a missing field or another type.
+// apiText is a string field of an api record, cleaned. It is nil (JSON
+// null) for a missing field or another type.
 func apiText(v any) any {
 	if s, ok := v.(string); ok {
 		return cleanText(s)
@@ -325,7 +346,7 @@ func apiText(v any) any {
 	return nil
 }
 
-// apiNumber is a number field of an api record as written; nil otherwise.
+// apiNumber is a number field of an api record as written, else nil.
 func apiNumber(v any) any {
 	if n, ok := v.(json.Number); ok {
 		return n
@@ -333,7 +354,7 @@ func apiNumber(v any) any {
 	return nil
 }
 
-// apiTexts is a list of strings, cleaned; other entries are left out.
+// apiTexts is a list of strings, cleaned. Other entries are left out.
 func apiTexts(v any) []string {
 	out := []string{}
 	arr, _ := v.([]any)
@@ -538,9 +559,10 @@ func (l *ClusterList) WriteText(w io.Writer) {
 	writeTable(w, rows)
 }
 
-// writeTable prints the header row and the rows through ui.Columns: every
-// column but the last padded to its widest cell in code points (as jq's
-// `length` in the bash twin counts them), two spaces apart, no underline.
+// writeTable prints the header row and the rows through ui.Columns. Each
+// column but the last is padded to its widest cell in code points, as the
+// jq `length` of the bash twin counts them. The columns are two spaces
+// apart, with no underline.
 func writeTable(w io.Writer, rows [][]string) {
 	c := ui.NewColumns(w, rows[0], rows[1:], nil)
 	for _, row := range rows {
@@ -665,8 +687,8 @@ func (c *Context) SpaceGet(ctx context.Context, id string) (*SpaceDetail, error)
 	return spaceDetail(m), nil
 }
 
-// SpaceCreateOptions are the flags of `lo kubehz space create`; "" is a
-// flag not given (the api applies its own default).
+// SpaceCreateOptions are the flags of `lo kubehz space create`. "" is a
+// flag that was not given: the api applies its own default.
 type SpaceCreateOptions struct {
 	Name, Slug                                  string
 	Nodes, Namespaces, ObjectCapKiB, LeaseHours string
@@ -728,7 +750,7 @@ func (c *Context) SpaceLease(ctx context.Context, id, hours string) (*LeaseResul
 	return c.agentLease(ctx, kindSpace, id, hours)
 }
 
-// SpaceKubeconfig writes the agent kubeconfig of a space to file; force
+// SpaceKubeconfig writes the agent kubeconfig of a space to file. force
 // replaces a file that exists.
 func (c *Context) SpaceKubeconfig(ctx context.Context, id, file string, force bool) (*KubeconfigResult, error) {
 	return c.agentKubeconfig(ctx, kindSpace, id, file, force)
@@ -766,7 +788,7 @@ func (c *Context) ClusterLease(ctx context.Context, id, hours string) (*LeaseRes
 }
 
 // ClusterKubeconfig writes the agent kubeconfig of a hosted cluster to
-// file; force replaces a file that exists.
+// file. force replaces a file that exists.
 func (c *Context) ClusterKubeconfig(ctx context.Context, id, file string, force bool) (*KubeconfigResult, error) {
 	return c.agentKubeconfig(ctx, kindCluster, id, file, force)
 }
@@ -798,8 +820,9 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 		return nil, err
 	}
 	action := k.noun + " kubeconfig " + id
-	target, err := c.kubeconfigTarget(action, file, force)
-	if err != nil {
+	// First before any request: a refused path costs no grant and no
+	// download.
+	if _, err := c.kubeconfigTarget(action, file, force); err != nil {
 		return nil, err
 	}
 	s, err := c.openSession(ctx, action)
@@ -818,7 +841,17 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 		c.errorf("kubehz %s: the api answered without a kubeconfig", action)
 		return nil, ErrHandled
 	}
-	if err := writePrivateFile(target, res.Body); err != nil {
+	// Again just before the write: the path can change during the grant
+	// and the download.
+	target, err := c.kubeconfigTarget(action, file, force)
+	if err != nil {
+		return nil, err
+	}
+	if err := publishKubeconfig(target, res.Body, force); err != nil {
+		if _, lerr := os.Lstat(file); !force && lerr == nil {
+			c.kubeconfigExists(action, file)
+			return nil, ErrHandled
+		}
 		c.errorf("kubehz %s: cannot write %s", action, file)
 		c.echoErr("  Name a file in a directory that exists and that you can write to.")
 		return nil, ErrHandled
@@ -826,12 +859,30 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 	return &KubeconfigResult{ID: id, File: file}, nil
 }
 
-// kubeconfigTarget decides where the kubeconfig goes, before any request:
-//   - a directory, or a link to one: refused;
-//   - a path that exists (a file, any link): refused without force, so
-//     --file ~/.kube/config cannot lose its contexts by accident;
-//   - with force, a link is written through: its target is replaced and
-//     the link stays (a link to nothing cannot be resolved: refused).
+// kubeconfigExists prints the refusal for a path that exists without
+// --force.
+func (c *Context) kubeconfigExists(action, file string) {
+	c.errorf("kubehz %s: %s exists", action, file)
+	c.echoErr("  Pass --force to replace it, or name a new file.")
+}
+
+// kubeconfigTarget decides where the kubeconfig goes. It runs before any
+// request and again just before the write:
+//   - A directory, or a link to one, is refused.
+//   - A path that exists (a file or a link) is refused without force. Thus
+//     --file ~/.kube/config cannot lose its contexts by accident.
+//   - With force, lo writes through a link: the target becomes a new file
+//     (owned by this user, mode 0600) and the link stays. A hard link to
+//     the old target keeps the old content.
+//   - lo writes through a link only when the link and its target belong to
+//     this user. lo resolves the link itself and renames onto the target,
+//     so the kernel rule fs.protected_symlinks does not apply. A link that
+//     another user put in a shared directory (/tmp/kc.yaml) must not move
+//     the write to a file of theirs. A link to nothing is refused.
+//
+// A short race stays. Between the last check and the rename, a user who
+// can write the directory of a link can point the link somewhere else. The
+// check just before the write keeps that window as short as lo can.
 //
 // The bash twin is kubehz::agent_target.
 func (c *Context) kubeconfigTarget(action, file string, force bool) (string, error) {
@@ -845,8 +896,7 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 		return file, nil
 	}
 	if !force {
-		c.errorf("kubehz %s: %s exists", action, file)
-		c.echoErr("  Pass --force to replace it, or name a new file.")
+		c.kubeconfigExists(action, file)
 		return "", ErrHandled
 	}
 	if li.Mode()&os.ModeSymlink == 0 {
@@ -858,13 +908,28 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 		c.echoErr("  Name a file in a directory that exists and that you can write to.")
 		return "", ErrHandled
 	}
+	ti, err := os.Stat(target)
+	if err != nil || !c.ownedByMe(li) || !c.ownedByMe(ti) {
+		c.errorf("kubehz %s: %s is a link, and the link or its target belongs to another user", action, file)
+		c.echoErr("  lo writes through a link only when you own the link and its target. Name another file.")
+		return "", ErrHandled
+	}
 	return target, nil
 }
 
-// writePrivateFile replaces file with data, mode 0600, through a temporary
-// file next to it (kubeconfigTarget decided that file may be replaced).
-func writePrivateFile(file string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(file), ".kubeconfig-*")
+// ownedByMe reports whether the effective user owns the entry.
+func (c *Context) ownedByMe(info os.FileInfo) bool {
+	uid, ok := fileOwner(info)
+	return ok && uid == c.euid()
+}
+
+// publishKubeconfig writes data to target through a temporary file next to
+// it (mode 0600). With force, a rename replaces the target. Without force,
+// a hard link publishes the file. link(2) fails when the path exists, so a
+// file that appeared during the download stays as it is. The temporary
+// file goes in both cases.
+func publishKubeconfig(target string, data []byte, force bool) error {
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".kubeconfig-*")
 	if err != nil {
 		return err
 	}
@@ -873,8 +938,11 @@ func writePrivateFile(file string, data []byte) error {
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = os.Rename(name, file)
+	if err == nil && force {
+		err = os.Rename(name, target)
+	} else if err == nil {
+		err = os.Link(name, target)
+		_ = os.Remove(name)
 	}
 	if err != nil {
 		_ = os.Remove(name)

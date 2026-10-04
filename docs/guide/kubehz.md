@@ -895,8 +895,10 @@ one line per field for one record. `json` and `yaml` print fixed fields (see
 script or an agent: `-o yaml` prints a string such as `yes` without quotes,
 and a YAML 1.1 reader takes it for a boolean
 ([#246](https://github.com/kernpilot/lok8s/issues/246)). A field that the api
-leaves out is `null`. Every string from the api loses its control characters
-before `lo` prints it.
+leaves out is `null`. Before `lo` prints a string from the api, it removes
+the control characters: C0, DEL, C1 (U+0080 to U+009F), the line and
+paragraph separators (U+2028, U+2029) and the bidi controls (U+202A to
+U+202E, U+2066 to U+2069).
 
 `kubeconfig` writes the agent kubeconfig to the file you name (mode 0600) and
 prints the path. The file holds no secret: its exec stanza runs
@@ -908,10 +910,17 @@ KUBECONFIG=agent.yaml kubectl get pods
 ```
 
 The command does not replace a file that exists, so `--file ~/.kube/config`
-cannot remove your other contexts by accident. Add `--force` (or `-f`) to
-replace the file. When the path is a link, `--force` replaces the file that
-the link points to, and the link stays. A directory, or a link to one, is
-refused. `lo` checks the path before it calls the api.
+cannot remove your other contexts by accident. A file that appears while
+`lo` downloads stays too. Add `--force` (or `-f`) to replace the file. The
+new file belongs to you and has mode 0600. A hard link to the old file keeps
+the old content.
+
+When the path is a link, `--force` replaces the file that the link points
+to, and the link stays. `lo` does this only when you own the link and its
+target. Thus a link that another user puts in a shared directory such as
+`/tmp` cannot send the kubeconfig to a file of theirs. A directory, a link
+to one, and a link to nothing are refused. `lo` checks the path before it
+calls the api, and again just before it writes.
 
 ### What the api enforces
 
@@ -981,9 +990,11 @@ This file holds the client secret: keep it out of version control. With
 ends: after two hours, or after the hours that the create names (720 at
 most). With `destructive`, the agent can also change leases and delete.
 
-`lo mcp` puts a `--` in front of the positional arguments of a call. Thus an
-argument such as `--force` from the model cannot set a flag that the tool
-does not offer.
+`lo mcp` refuses a call when a positional argument starts with a dash, and
+nothing runs. Thus an argument such as `--force` from the model cannot set a
+flag that the tool does not offer. `lo mcp` never offers `lo chat`: it passes
+its arguments on unread, and `--lo <path>` would run any file with the agent
+key in its environment.
 
 `lo chat` cannot run these tools yet. It drives the bash variant of
 `lo mcp` (the argsh builtin), which names a command three levels deep by its

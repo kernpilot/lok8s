@@ -11,7 +11,10 @@ different key order is not a difference). The harness diffs that log
 between the two implementations.
 
 POST /oauth/v2/redirect answers 307 to the token endpoint: a grant that
-followed it would hand the client secret to another URL.
+followed it would hand the client secret to another URL. GET
+/api/spaces/sp-race0001/kubeconfig/agent writes "planted" to the file that
+STUB_RACE_FILE names before it answers: a file that appears during the
+download.
 
 Usage: kubehz-api-stub.py <cert.pem> <key.pem> <port-file> <request-log>
 It binds 127.0.0.1 on a free port and writes the port to <port-file>.
@@ -32,10 +35,10 @@ SPACE = {
     "limitsCeiling": {"nodes": 5}, "leaseExpiresAt": "2026-10-04T14:00:00.000Z",
     "createdAt": "2026-10-04T12:00:00.000Z", "updatedAt": None, "namespaces": ["acme"], "nodeCount": 1,
 }
-# Hostile strings: an ANSI escape, a backslash, a line separator, a word YAML
-# reads as a bool, a number-like slug, no lease, a missing field.
+# Hostile strings: an ANSI escape, a backslash, a line separator, C1 and bidi
+# controls, a word YAML reads as a bool, no lease, a missing field.
 ODD_SPACE = {
-    "id": "sp-9z9z9z9z", "name": "Ev\u001b[2Jil \\ na\u2028me \u00fc\u2713", "slug": "yes",
+    "id": "sp-9z9z9z9z", "name": "Ev\u001b[2Jil \\ na\u2028me\u0085\u009b\u202e\u2066 \u00fc\u2713", "slug": "yes",
     "status": "Pending", "maxNodes": 1, "maxNamespaces": 3, "maxObjectKiB": None,
     "leaseExpiresAt": None, "createdAt": "2026-10-04T12:30:00.000Z", "namespaces": ["yes", 7], "nodeCount": 0,
 }
@@ -103,6 +106,8 @@ ROUTES = {
     ("GET", "/api/spaces/sp-broken01"): (200, "<html>gateway</html>"),
     ("GET", "/api/spaces/sp-boom0001"): (502, ""),
     ("GET", "/api/spaces/sp-hostile1"): refusal(418, "not a code", "Te\u001b]0;pwned\u0007a \\e[31m\n\ttime", "\u001b[2JHelp\t\\033[0m\n"),
+    # A message and a help that are not strings: lo treats both as absent.
+    ("GET", "/api/spaces/sp-numeric1"): (400, {"statusCode": 400, "data": {"code": "BAD_REQUEST", "message": 5, "help": {"a": 1}}}),
     # A KUBEHZ_TOKEN with clusters:write but no read (kubehz-api api-tokens.ts).
     ("GET", "/api/spaces/sp-noread01"): refusal(403, "TOKEN_SCOPE_MISSING", "This endpoint requires the 'read' scope",
                                                 "The presented API token lacks the 'read' scope. Mint a token carrying it (POST /api/tokens)."),
@@ -183,6 +188,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(*refusal(401, "UNAUTHORIZED", "Invalid or expired agent key",
                                         "The agent key is revoked or expired. Create a new one under Settings -> Agent keys."))
         path = self.path.split("?", 1)[0]
+        if path == "/api/spaces/sp-race0001/kubeconfig/agent":
+            with open(os.environ["STUB_RACE_FILE"], "w", encoding="utf-8") as planted:
+                planted.write("planted\n")
+            return self.answer(200, KUBECONFIG)
         if self.command == "POST" and path == "/api/spaces" and isinstance(body, dict):
             return self.answer(*CREATES.get(body.get("slug"), refusal(400, "BAD_REQUEST", "slug: invalid")))
         return self.answer(*ROUTES.get((self.command, path), refusal(404, "NOT_FOUND", "Not found")))

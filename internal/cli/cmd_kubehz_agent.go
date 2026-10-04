@@ -1,17 +1,17 @@
 package cli
 
 // cmd_kubehz_agent.go — `lo kubehz space …` and `lo kubehz cluster …`, the
-// kubehz api calls of an agent key (internal/kubehz/agent.go; the bash twin
-// is .lok8s/libs/kubehz/agent). They are plain commands: `lo mcp` turns
-// them into tools by their markers, like every other leaf. list and get are
-// readonly (the default tier), create is mutating (it adds a space and
-// changes nothing that exists), delete and lease are destructive (a lease
-// can bring the delete closer), and kubeconfig is credential output, so no
-// MCP server offers it.
+// kubehz api calls of an agent key. The library is internal/kubehz/agent.go,
+// and the bash twin is .lok8s/libs/kubehz/agent. They are plain commands:
+// `lo mcp` turns them into tools by their markers, like every other leaf.
+//   - list and get are readonly, the default tier.
+//   - create is mutating: it adds a space and changes nothing that exists.
+//   - delete and lease are destructive: a lease can bring the delete closer.
+//   - kubeconfig is credential output, so no MCP server offers it.
 //
-// Every leaf takes -o text|json|yaml. The required flags are checked first,
-// in the argsh shape (`Error: missing required flag: <name>`), as the bash
-// `:!` flags are.
+// Every leaf takes -o text|json|yaml. The required flags come first, in the
+// argsh shape (`Error: missing required flag: <name>`), as the `:!` flags
+// of the bash twin do.
 
 import (
 	"context"
@@ -27,8 +27,9 @@ import (
 // and yaml through writeOutput.
 type agentReport interface{ WriteText(io.Writer) }
 
-// agentLeaf builds one leaf: the positional arguments, the required string
-// flags, -o, then run and the report in the chosen format.
+// agentLeaf builds one leaf. It checks the positional arguments, the
+// required string flags and -o, then runs the command and prints the report
+// in the chosen format.
 func agentLeaf(paths *config.Paths, use, short string, spec commandSpec, positional, required []string,
 	run func(kc *kubehz.Context, cmd *cobra.Command, args []string) (agentReport, error)) *cobra.Command {
 	var format func() (string, error)
@@ -165,10 +166,10 @@ func agentLeaseLeaf(paths *config.Paths, short string,
 	return c
 }
 
-// agentKubeconfigLeaf is `kubeconfig <id> --file <path>`: the file holds no
-// secret (its exec stanza runs `lo kubehz token`), but the command counts
-// as credential output, so `lo mcp` never offers it and `lo chat` denies it.
-// An existing file needs the global --force (a link is written through).
+// agentKubeconfigLeaf is `kubeconfig <id> --file <path>`. The file holds no
+// secret: its exec stanza runs `lo kubehz token`. Still the command counts
+// as credential output, so `lo mcp` never offers it and `lo chat` denies
+// it. A file that exists needs the global --force.
 func agentKubeconfigLeaf(paths *config.Paths, short string,
 	download func(kc *kubehz.Context, ctx context.Context, id, file string, force bool) (*kubehz.KubeconfigResult, error)) *cobra.Command {
 	c := agentLeaf(paths, "kubeconfig <id> --file <path>", short, commandSpec{credentialOutput: true}, []string{"id"}, []string{"file"},

@@ -35,7 +35,7 @@ const (
 	spaceRow = `{"id":"sp-1a2b3c4d","tenantId":"t-1","shardId":"sh-1","name":"Acme Prod","slug":"acme",` +
 		`"status":"Active","maxNodes":2,"maxNamespaces":1,"maxObjectKiB":256,"limitsCeiling":{"nodes":5},` +
 		`"leaseExpiresAt":"2026-10-04T14:00:00.000Z","createdAt":"2026-10-04T12:00:00.000Z","namespaces":["acme"],"nodeCount":1}`
-	oddSpaceRow = `{"id":"sp-9z9z9z9z","name":"Ev\u001b[2Jil \\ na\u2028me \u00fc","slug":"yes","status":"Pending",` +
+	oddSpaceRow = `{"id":"sp-9z9z9z9z","name":"Ev\u001b[2Jil \\ na\u2028me\u0085\u009b\u202e\u2066 \u00fc","slug":"yes","status":"Pending",` +
 		`"maxNodes":1,"maxNamespaces":3,"maxObjectKiB":null,"leaseExpiresAt":null,"createdAt":"2026-10-04T12:30:00.000Z",` +
 		`"namespaces":["yes",7],"nodeCount":0}`
 	spaceDetailRow = `{"id":"sp-1a2b3c4d","name":"Acme Prod","slug":"acme","status":"Active","maxNodes":2,"maxNamespaces":1,` +
@@ -124,7 +124,7 @@ func TestAgentRecordsDropEveryControlCharacterInEveryFormat(t *testing.T) {
 	if got != want {
 		t.Errorf("json:\n%s\nwant:\n%s", got, want)
 	}
-	for _, bad := range []string{"\x1b", "\u2028", `\u001b`, `\u2028`} {
+	for _, bad := range []string{"\x1b", "\u2028", `\u001b`, `\u2028`, "\u0085", "\u009b", "\u202e", "\u2066", `\u0085`, `\u202e`} {
 		if strings.Contains(got, bad) {
 			t.Errorf("json output carries %q", bad)
 		}
@@ -395,7 +395,13 @@ func TestAgentRefusalsNameTheStatusTheCodeAndTheNextStep(t *testing.T) {
 			"(HTTP 502): no reason given\n"},
 		{"a code in another shape is not repeated", 418, `{"data":{"code":"x; rm","message":"m"}}`, false,
 			"(HTTP 418): m\n"},
-		{"server strings are cleaned", 400, `{"data":{"code":"BAD_REQUEST","message":"a\u001b[2Jb\nc\td","help":"\u001b]0;t\u0007c\n"}}`, false,
+		// A message or help that is not a string counts as absent: lo
+		// never prints a rendering of the api's JSON.
+		{"a number as the message, an object as the help", 400, `{"data":{"code":"BAD_REQUEST","message":5,"help":{"a":1}}}`, false,
+			"(HTTP 400 BAD_REQUEST): no reason given\n"},
+		{"the top-level message when data.message is no string", 400, `{"data":{"message":["x"]},"message":"top"}`, false,
+			"(HTTP 400): top\n"},
+		{"server strings are cleaned", 400, `{"data":{"code":"BAD_REQUEST","message":"a\u001b[2Jb\nc\td\u009b\u202e\u2069","help":"\u001b]0;t\u0007c\n\u0085"}}`, false,
 			"(HTTP 400 BAD_REQUEST): a[2Jbcd\n  ]0;tc\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -751,6 +757,92 @@ func TestAgentKubeconfigPathRules(t *testing.T) {
 				c.check(t, dir)
 			}
 		})
+	}
+}
+
+// A link is written through only when the link and its target belong to
+// this user: a link that another user planted in a shared directory must
+// not move the write to a file of theirs.
+func TestAgentKubeconfigWritesThroughOnlyALinkOfOurOwn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns /etc/passwd: no foreign target to point at")
+	}
+	const want = "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/link is a link, and the link or its target belongs to another user\n" +
+		"  lo writes through a link only when you own the link and its target. Name another file.\n"
+	for _, tc := range []struct {
+		name   string
+		target func(dir string) string
+		euid   func() int
+	}{
+		{"the target belongs to another user", func(string) string { return "/etc/passwd" }, nil},
+		// The seam makes root the user: the target (root's) passes, the
+		// link (ours) does not.
+		{"the link belongs to another user", func(string) string { return "/etc/passwd" }, func() int { return 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := agentHarness(t)
+			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+			h.ctx.Euid = tc.euid
+			dir := t.TempDir()
+			must(t, os.Symlink(tc.target(dir), filepath.Join(dir, "link")))
+			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", filepath.Join(dir, "link"), true)
+			mustErr(t, err)
+			if got := strings.ReplaceAll(h.errOut.String(), dir, "DIR"); got != want {
+				t.Errorf("stderr = %q, want %q", got, want)
+			}
+			if n := len(h.reqs()); n != 0 {
+				t.Errorf("%d requests: the refusal must come before the grant", n)
+			}
+		})
+	}
+}
+
+// The path rules run again just before the write: a link that is pointed
+// at another user's file during the download is refused then.
+func TestAgentKubeconfigChecksThePathAgainBeforeTheWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns /etc/passwd: no foreign target to point at")
+	}
+	h := agentHarness(t)
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link")
+	must(t, os.WriteFile(filepath.Join(dir, "real"), []byte("contexts"), 0o600))
+	must(t, os.Symlink("real", link))
+	h.handleFunc("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", func(w http.ResponseWriter, r *http.Request) {
+		must(t, os.Remove(link))
+		must(t, os.Symlink("/etc/passwd", link))
+		_, _ = w.Write([]byte(agentKubeconfigYAML))
+	})
+	_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", link, true)
+	mustErr(t, err)
+	mustContain(t, h.errOut.String(), "is a link, and the link or its target belongs to another user\n")
+	if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
+		t.Errorf("real = %q", got)
+	}
+}
+
+// Without force, a file that appears during the download stays as it is:
+// a hard link publishes the kubeconfig, and link(2) fails on a path that
+// exists.
+func TestAgentKubeconfigKeepsAFileThatAppearsDuringTheDownload(t *testing.T) {
+	h := agentHarness(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "kc.yaml")
+	h.handleFunc("GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent", func(w http.ResponseWriter, r *http.Request) {
+		must(t, os.WriteFile(file, []byte("planted"), 0o600))
+		_, _ = w.Write([]byte(agentKubeconfigYAML))
+	})
+	_, err := h.ctx.SpaceKubeconfig(context.Background(), "sp-1a2b3c4d", file, false)
+	mustErr(t, err)
+	want := "[error] kubehz space kubeconfig sp-1a2b3c4d: " + file + " exists\n  Pass --force to replace it, or name a new file.\n"
+	if got := h.errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if got := readFile(t, file); got != "planted" {
+		t.Errorf("file = %q: the file that appeared was replaced", got)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("dir holds %d entries: a temporary file was left behind", len(entries))
 	}
 }
 

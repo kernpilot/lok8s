@@ -29,6 +29,16 @@ func ownedByUs(info fs.FileInfo) bool {
 	return ok && int(st.Uid) == os.Geteuid()
 }
 
+// fileOwner is the uid that owns the entry (false when the platform does
+// not say).
+func fileOwner(info fs.FileInfo) (int, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
 // errNotPrivate: the file is a link, not a regular file, not ours, or
 // readable by others.
 var errNotPrivate = errors.New("not a private file")

@@ -31,10 +31,15 @@ package cli
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
 //     `--verbose N`, which cobra would take as a stray positional);
-//   - the model's positional arguments follow a `--` (mcpPositionalOnly),
-//     so `args: ["sp-1", "--force"]` cannot set a flag the schema hides.
-//     The schema itself refuses a flag it does not list
-//     (additionalProperties: false, validated by the MCP SDK).
+//   - a command that parses its own argv (DisableFlagParsing: `lo chat`) is
+//     never exposed: the flag policy cannot see what reaches it, and
+//     `lo chat --lo <path>` would run any file with the server's
+//     environment (an agent key, for one);
+//   - a positional argument that starts with "-" is refused before anything
+//     runs (mcpNoDashArgs). ophis appends the model's arguments after the
+//     flags, so "--force" there would parse as the flag. The schema itself
+//     refuses a flag it does not list (additionalProperties: false,
+//     validated by the MCP SDK).
 //
 // LO_MCP_ALLOW=mutating|destructive is the env form of the opt-in, for the
 // editor configs `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes.
@@ -236,52 +241,36 @@ func mcpHiddenSubtree(cmd *cobra.Command) bool {
 }
 
 // mcpSelectors is the single ophis selector: leaves only (dispatchers are
-// traversed, not exposed — as in the argsh server), outside hidden subtrees,
-// gated by tier, with the flag policy applied to local and inherited flags
-// alike, and every call through mcpPositionalOnly. rawArgs names the tools
-// whose command parses its own argv (DisableFlagParsing): they get the
-// arguments as the model sent them.
-func mcpSelectors(x mcpExposure, rawArgs map[string]bool) []ophis.Selector {
+// traversed, not exposed, as in the argsh server), outside hidden subtrees,
+// never a command that parses its own argv, gated by tier, with the flag
+// policy on local and inherited flags alike, and every call through
+// mcpNoDashArgs.
+func mcpSelectors(x mcpExposure) []ophis.Selector {
 	flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) }
 	return []ophis.Selector{{
 		CmdSelector: func(cmd *cobra.Command) bool {
-			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) &&
+			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && !cmd.DisableFlagParsing &&
 				cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
 		},
 		LocalFlagSelector:     flagOK,
 		InheritedFlagSelector: flagOK,
-		Middleware:            mcpPositionalOnly(rawArgs),
+		Middleware:            mcpNoDashArgs,
 	}}
 }
 
-// mcpPositionalOnly puts a `--` in front of the model's positional
-// arguments. ophis builds the argv as <command path> <flags> <args> with
-// no separator, so an argument "--force" would parse as the flag. After
-// `--`, cobra reads every argument as positional, and a command with a
-// fixed count refuses the extra ones.
-func mcpPositionalOnly(rawArgs map[string]bool) ophis.MiddlewareFunc {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in ophis.ToolInput, next ophis.ExecuteFunc) (*mcp.CallToolResult, ophis.ToolOutput, error) {
-		if len(in.Args) > 0 && (req == nil || req.Params == nil || !rawArgs[req.Params.Name]) {
-			in.Args = append([]string{"--"}, in.Args...)
-		}
-		return next(ctx, req, in)
-	}
-}
-
-// mcpRawArgTools lists the tools of tree whose command parses its own argv.
-func mcpRawArgTools(tree *cobra.Command) map[string]bool {
-	raw := map[string]bool{}
-	var walk func(c *cobra.Command)
-	walk = func(c *cobra.Command) {
-		if c.DisableFlagParsing {
-			raw[strings.ReplaceAll(c.CommandPath(), " ", "_")] = true
-		}
-		for _, sub := range c.Commands() {
-			walk(sub)
+// mcpNoDashArgs refuses a call when one of the model's positional arguments
+// starts with "-". ophis builds the argv as <command path> <flags> <args>
+// without a separator, so "--force" there would parse as a flag that the
+// schema hides. A "--" cannot help: the argsh tree, which a project can
+// route a command to, has no end-of-options marker. The argv of an allowed
+// call does not change.
+func mcpNoDashArgs(ctx context.Context, req *mcp.CallToolRequest, in ophis.ToolInput, next ophis.ExecuteFunc) (*mcp.CallToolResult, ophis.ToolOutput, error) {
+	for _, a := range in.Args {
+		if strings.HasPrefix(a, "-") {
+			return nil, ophis.ToolOutput{}, fmt.Errorf("lo mcp: the argument %q starts with a dash. Set flags in \"flags\", not in \"args\". Nothing ran", a)
 		}
 	}
-	walk(tree)
-	return raw
+	return next(ctx, req, in)
 }
 
 // mcpDefaultEnv is what `lo mcp <editor> enable` records for the launched
@@ -308,9 +297,9 @@ func mcpExportEnv(paths *config.Paths) {
 	}
 }
 
-func mcpConfig(paths *config.Paths, x mcpExposure, rawArgs map[string]bool, transport mcp.Transport, quiet bool) *ophis.Config {
+func mcpConfig(paths *config.Paths, x mcpExposure, transport mcp.Transport, quiet bool) *ophis.Config {
 	cfg := &ophis.Config{
-		Selectors:  mcpSelectors(x, rawArgs),
+		Selectors:  mcpSelectors(x),
 		Transport:  transport,
 		DefaultEnv: mcpDefaultEnv(paths),
 	}
@@ -326,7 +315,7 @@ func mcpConfig(paths *config.Paths, x mcpExposure, rawArgs map[string]bool, tran
 // stdio (ophis's default).
 func mcpRun(ctx context.Context, paths *config.Paths, x mcpExposure, transport mcp.Transport, quiet bool, out, errOut io.Writer, args ...string) error {
 	tree := newMCPTree(paths)
-	tree.AddCommand(ophis.Command(mcpConfig(paths, x, mcpRawArgTools(tree), transport, quiet)))
+	tree.AddCommand(ophis.Command(mcpConfig(paths, x, transport, quiet)))
 	tree.SetOut(out)
 	tree.SetErr(errOut)
 	tree.SetArgs(append([]string{"mcp"}, args...))
@@ -396,7 +385,9 @@ Exposure policy — what an agent can call:
 A command without a marker counts as mutating. A command whose output is
 a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
 claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
-result lands in the model's transcript. Flags that carry a credential (token, secret, password, key,
+result lands in the model's transcript. Neither is chat: it passes its
+arguments on unread. A call whose positional argument starts with "-" is
+refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
 nonce, ...) are never exposed either.
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
@@ -426,7 +417,7 @@ func newMcpCommand(paths *config.Paths) *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newMcpStart(paths), newMcpServe(paths), newMcpTools(paths))
-	for _, sub := range ophis.Command(mcpConfig(paths, mcpExposure{}, nil, nil, false)).Commands() {
+	for _, sub := range ophis.Command(mcpConfig(paths, mcpExposure{}, nil, false)).Commands() {
 		switch sub.Name() {
 		case "claude", "vscode", "cursor":
 			cmd.AddCommand(sub)

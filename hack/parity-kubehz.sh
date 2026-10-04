@@ -549,7 +549,7 @@ agent_stub() {
   command -v python3 >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || return 1
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
     -addext subjectAltName=IP:127.0.0.1 -keyout "${WORK}/stub.key" -out "${WORK}/stub.pem" >/dev/null 2>&1 || return 1
-  python3 "${ROOT}/hack/lib/kubehz-api-stub.py" "${WORK}/stub.pem" "${WORK}/stub.key" \
+  STUB_RACE_FILE="${PROJ}/kc.yaml" python3 "${ROOT}/hack/lib/kubehz-api-stub.py" "${WORK}/stub.pem" "${WORK}/stub.key" \
     "${WORK}/stub.port" "${WORK}/stub.log" >"${WORK}/stub.out" 2>&1 &
   STUB_API_PID=$!
   local _
@@ -568,6 +568,7 @@ kc_exists() { echo contexts > "${PROJ}/kc.yaml"; }
 kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
 kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
 kc_link_nothing() { ln -s gone "${PROJ}/kc.yaml"; }
+kc_link_foreign() { ln -s /etc/passwd "${PROJ}/kc.yaml"; }
 
 agent_pre() {
   rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
@@ -601,6 +602,60 @@ check_api() {
   else
     fail "requests lo $* — the two implementations sent different requests:"
     diff "${WORK}/req.bash" "${WORK}/req.go" | head -10 | sed 's/^/  /' || true
+  fi
+}
+
+# mcp_call <route> <tool> <arguments-json> <ok|error> <text> <request>: one
+# tools/call through `lo mcp start --allow-destructive` in ${PROJ}. The
+# result must be ok or an error and hold <text>. The stub log must hold
+# <request>, or, when it is empty, no api request at all.
+mcp_call() {
+  local route="${1}" tool="${2}" arguments="${3}" want="${4}" text="${5}" request="${6}" label
+  label="mcp (${route}) ${tool} ${arguments}"
+  : > "${WORK}/stub.log"
+  rm -rf "${HOME}/.cache/lok8s/kubehz-token"
+  if ! (cd "${PROJ}" && python3 - "${LO_BIN}" "${tool}" "${arguments}" > "${WORK}/mcp.out" 2>"${WORK}/mcp.err") <<'PY'
+import json, subprocess, sys
+lo, tool, arguments = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+p = subprocess.Popen([lo, "mcp", "start", "--allow-destructive", "--log-level", "error"],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+def send(msg):
+    p.stdin.write(json.dumps(msg) + "\n")
+    p.stdin.flush()
+def answer(want_id):
+    for line in p.stdout:
+        msg = json.loads(line)
+        if msg.get("id") == want_id:
+            return msg
+    raise SystemExit("the server closed stdout before answering")
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "parity", "version": "0"}}})
+answer(1)
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
+res = answer(2)["result"]
+p.stdin.close()
+p.wait(timeout=30)
+text = "".join(c.get("text", "") for c in res.get("content", []))
+try:
+    text = json.loads(text).get("stdout", "") + json.loads(text).get("stderr", "")
+except (ValueError, AttributeError):
+    pass
+print("error" if res.get("isError") else "ok")
+print(text)
+PY
+  then
+    fail "${label} — the MCP client failed: $(head -c 300 "${WORK}/mcp.err")"
+    return
+  fi
+  if [[ "$(head -n 1 "${WORK}/mcp.out")" != "${want}" ]] || ! grep -qF -- "${text}" "${WORK}/mcp.out"; then
+    fail "${label} — want ${want} with ${text}, got: $(head -c 400 "${WORK}/mcp.out")"
+  elif [[ -n "${request}" ]] && ! grep -qF -- "${request}" "${WORK}/stub.log"; then
+    fail "${label} — the api did not get ${request}"
+  elif [[ -z "${request}" && -s "${WORK}/stub.log" ]]; then
+    fail "${label} — a refused call reached the api"
+  else
+    echo "ok: ${label}"
   fi
 }
 
@@ -648,7 +703,7 @@ if agent_stub; then
   for slug in taken big full capped; do
     check_api - kubehz space create --name Acme --slug "${slug}"
   done
-  for id in sp-gone0001 sp-broken01 sp-boom0001 sp-hostile1 sp-noread01; do
+  for id in sp-gone0001 sp-broken01 sp-boom0001 sp-hostile1 sp-noread01 sp-numeric1; do
     check_api - kubehz space get "${id}"
   done
   check_api - kubehz space delete sp-gone0001
@@ -675,6 +730,15 @@ if agent_stub; then
   kc_state "--force replaces a file"
   KC_SETUP=kc_link_file check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml -f
   kc_state "-f writes through a link"
+  # Without --force, a file that appears during the download stays.
+  check_api - kubehz space kubeconfig sp-race0001 --file kc.yaml
+  kc_state "a file that appears during the download"
+  # A link to another user's file is never written through.
+  if [[ "$(id -u)" != 0 ]]; then
+    KC_SETUP=kc_link_foreign check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  else
+    echo "skip: a link to another user's file (root owns /etc/passwd)"
+  fi
 
   # The grant follows no redirect: the stub's redirect route would hand
   # the client secret to the token endpoint, and no request may reach it.
@@ -695,6 +759,24 @@ if agent_stub; then
   # The contract on the Go side alone: 0 on success, 1 on a refusal.
   expect_rc 0 kubehz space list
   expect_rc 1 kubehz space get sp-gone0001
+
+  # Real tool calls through `lo mcp start` (the Go server, whatever the
+  # project routes): an allowed call runs with its argv unchanged, also when
+  # the project routes kubehz to the argsh tree, which has no "--" marker.
+  # A positional argument that starts with "-" is refused, and nothing runs.
+  for route in go bash kubehz; do
+    case "${route}" in
+      go) parity::implementation "${PROJ}" go ;;
+      bash) parity::implementation "${PROJ}" bash ;;
+      kubehz) parity::implementation "${PROJ}" go kubehz ;;
+    esac
+    mcp_call "${route}" lo_kubehz_space_lease '{"flags":{"hours":"2"},"args":["sp-1a2b3c4d"]}' \
+      ok 'space sp-1a2b3c4d: the lease ends 2026-10-05T12:00:00.000Z' '"PATCH"'
+    mcp_call "${route}" lo_kubehz_space_get '{"flags":{},"args":["sp-1a2b3c4d","-o","json"]}' \
+      error 'starts with a dash' ''
+    mcp_call "${route}" lo_kubehz_space_get '{"flags":{"output":"json"},"args":["sp-1a2b3c4d"]}' \
+      ok '"endpoint": "https://acme.k8s.kubehz.example"' '"GET"'
+  done
 
   unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_API_URL KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET \
     KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE
