@@ -940,8 +940,9 @@ next step.
 | `lo kubehz space kubeconfig`, `lo kubehz cluster kubeconfig` | never a tool |
 
 `lease` is in the destructive tier because a shorter lease brings the delete
-closer. The two `kubeconfig` commands write a file that a model must not
-read, so no tier offers them.
+closer. The two `kubeconfig` commands count as credential output, as
+`lo kubeconfig` does, so no tier offers them. The agent kubeconfig holds no
+secret, but run these two commands yourself, outside the MCP server.
 
 Start the server with the agent key in its environment, not with your own
 credentials:
@@ -967,8 +968,9 @@ credentials:
 ```
 
 This file holds the client secret: keep it out of version control. With
-`mutating`, the agent can create spaces that end after two hours. With
-`destructive`, it can also extend leases and delete.
+`mutating`, the agent can create spaces. Each space ends when its lease
+ends: after two hours, or after the hours that the create names (720 at
+most). With `destructive`, the agent can also change leases and delete.
 
 The bash variant of `lo mcp` (the argsh builtin that `lo chat` drives) has no
 tiers and names the tools by their last two words: `lo_space_list`,

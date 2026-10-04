@@ -808,11 +808,10 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 }
 
 // writePrivateFile replaces file with data, mode 0600, through a temporary
-// file next to it. A directory is never replaced.
+// file next to it. A directory is never replaced: rename(2) refuses to put
+// a file over a directory (EISDIR). The bash twin checks with -d first,
+// because mv would move the file into the directory.
 func writePrivateFile(file string, data []byte) error {
-	if fi, err := os.Stat(file); err == nil && fi.IsDir() {
-		return fmt.Errorf("%s is a directory", file)
-	}
 	tmp, err := os.CreateTemp(filepath.Dir(file), ".kubeconfig-*")
 	if err != nil {
 		return err
