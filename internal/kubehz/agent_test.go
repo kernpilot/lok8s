@@ -797,6 +797,57 @@ func TestAgentKubeconfigWritesThroughOnlyALinkOfOurOwn(t *testing.T) {
 	}
 }
 
+// The owner check reads the user from the Euid seam: a link and a target of
+// ours count as another user's when the user is root.
+func TestAgentKubeconfigOwnerCheckReadsTheEffectiveUser(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the test needs a user other than root")
+	}
+	h := agentHarness(t)
+	h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+	h.ctx.Euid = func() int { return 0 }
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "real"), []byte("contexts"), 0o600))
+	must(t, os.Symlink("real", filepath.Join(dir, "link")))
+	_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", filepath.Join(dir, "link"), true)
+	mustErr(t, err)
+	mustContain(t, h.errOut.String(), "is a link, and the link or its target belongs to another user\n")
+	if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
+		t.Errorf("real = %q", got)
+	}
+}
+
+// The publish step on its own: without force, link(2) refuses a path that
+// exists, whatever the checks before saw. The race window after the last
+// check is too short to hit through the command.
+func TestPublishKubeconfigNeverReplacesWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "kc.yaml")
+	must(t, os.WriteFile(file, []byte("planted"), 0o644))
+	if err := publishKubeconfig(file, []byte("new"), false); err == nil {
+		t.Fatal("publish without force replaced a file that exists")
+	}
+	if got := readFile(t, file); got != "planted" {
+		t.Errorf("file = %q", got)
+	}
+	if err := publishKubeconfig(file, []byte("new"), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, file); got != "new" {
+		t.Errorf("file = %q after force", got)
+	}
+	fresh := filepath.Join(dir, "fresh.yaml")
+	if err := publishKubeconfig(fresh, []byte("new"), false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(fresh); fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Errorf("dir holds %d entries: a temporary file was left behind", len(entries))
+	}
+}
+
 // The path rules run again just before the write: a link that is pointed
 // at another user's file during the download is refused then.
 func TestAgentKubeconfigChecksThePathAgainBeforeTheWrite(t *testing.T) {

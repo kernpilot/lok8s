@@ -574,6 +574,29 @@ EOF
   assert_output contexts
 }
 
+@test "kubeconfig: the write step on its own never replaces a file without --force" {
+  # The race window after the last check is too short to hit through the
+  # command: ln, not mv, keeps a file that appeared there.
+  local d="${BATS_TEST_TMPDIR}/write"
+  mkdir -p "${d}"
+  echo planted > "${d}/kc.yaml"
+  KUBEHZ_AGENT_BODY='new'
+  run kubehz::agent_write "${d}/kc.yaml" 0
+  assert_failure
+  run cat "${d}/kc.yaml"
+  assert_output planted
+  run kubehz::agent_write "${d}/kc.yaml" 1
+  assert_success
+  run cat "${d}/kc.yaml"
+  assert_output new
+  run kubehz::agent_write "${d}/fresh.yaml" 0
+  assert_success
+  run stat -c '%a' "${d}/fresh.yaml"
+  assert_output 600
+  run ls -A "${d}"
+  assert_output $'fresh.yaml\nkc.yaml'
+}
+
 @test "kubeconfig: without --force, a file that appears during the download stays" {
   route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   local d="${BATS_TEST_TMPDIR}/race"
