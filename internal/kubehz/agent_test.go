@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -340,7 +342,10 @@ func TestAgentIDShapeIsCheckedBeforeAnyRequest(t *testing.T) {
 			return err
 		},
 			"is not a cluster id"},
-		{func(c *Context) error { _, err := c.SpaceKubeconfig(context.Background(), "sp-a?b", "kc"); return err },
+		{func(c *Context) error {
+			_, err := c.SpaceKubeconfig(context.Background(), "sp-a?b", "kc", false)
+			return err
+		},
 			"[error] kubehz space kubeconfig: sp-a?b is not a space id"},
 		{func(c *Context) error { _, err := c.SpaceGet(context.Background(), "sp-\x1b[2Jx"); return err },
 			"[error] kubehz space get: sp-[2Jx is not a space id"},
@@ -368,11 +373,17 @@ func TestAgentRefusalsNameTheStatusTheCodeAndTheNextStep(t *testing.T) {
 				"  The api did not accept the agent key. A revoked or expired key needs a new key from a tenant owner.\n"},
 		{"401 KUBEHZ_TOKEN", 401, refusalBody("UNAUTHORIZED", "Invalid or expired API token", "api help"), true,
 			"  The api did not accept KUBEHZ_TOKEN. Mint a new token in the kubehz dashboard.\n"},
-		{"scope", 403, refusalBody("TOKEN_SCOPE_MISSING", "This endpoint requires the 'clusters:write' scope", "api help"), false,
+		{"scope, agent key", 403, refusalBody("TOKEN_SCOPE_MISSING", "This endpoint requires the 'clusters:write' scope", "api help"), false,
 			"(HTTP 403 TOKEN_SCOPE_MISSING): This endpoint requires the 'clusters:write' scope\n" +
-				"  The credential can read but not write. Use an agent key with the role editor or admin.\n"},
-		{"out of scope", 403, refusalBody("AGENT_KEY_OUT_OF_SCOPE", "A resource-scoped agent key cannot read tenant-wide data", "api help"), false,
-			"  The agent key reaches only its own clusters and spaces. Use a key with the scope tenant.\n"},
+				"  The agent key can read but not write. Use an agent key with the role editor or admin.\n"},
+		// A KUBEHZ_TOKEN can hold clusters:write without read: lo cannot
+		// say which scope is missing, the api's help does.
+		{"scope, KUBEHZ_TOKEN: the api's help", 403, refusalBody("TOKEN_SCOPE_MISSING", "This endpoint requires the 'read' scope", "Mint a token carrying it."), true,
+			"(HTTP 403 TOKEN_SCOPE_MISSING): This endpoint requires the 'read' scope\n  Mint a token carrying it.\n"},
+		// The api never answers AGENT_KEY_OUT_OF_SCOPE on these routes (a
+		// space outside the reach is a 404); if it does, its help stands.
+		{"out of scope: the api's help", 403, refusalBody("AGENT_KEY_OUT_OF_SCOPE", "tenant-wide", "Use an agent key with the scope tenant."), false,
+			"(HTTP 403 AGENT_KEY_OUT_OF_SCOPE): tenant-wide\n  Use an agent key with the scope tenant.\n"},
 		{"spend cap", 409, refusalBody("AGENT_KEY_SPEND_CAP", "This agent key spent 1200 of its 1000 cents this month", "api help"), false,
 			"(HTTP 409 AGENT_KEY_SPEND_CAP): This agent key spent 1200 of its 1000 cents this month\n" +
 				"  Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC).\n"},
@@ -384,8 +395,8 @@ func TestAgentRefusalsNameTheStatusTheCodeAndTheNextStep(t *testing.T) {
 			"(HTTP 502): no reason given\n"},
 		{"a code in another shape is not repeated", 418, `{"data":{"code":"x; rm","message":"m"}}`, false,
 			"(HTTP 418): m\n"},
-		{"server strings are scrubbed", 400, `{"data":{"code":"BAD_REQUEST","message":"a\u001b[2Jb","help":"\u001b]0;t\u0007c"}}`, false,
-			"(HTTP 400 BAD_REQUEST): a[2Jb\n  ]0;tc\n"},
+		{"server strings are cleaned", 400, `{"data":{"code":"BAD_REQUEST","message":"a\u001b[2Jb\nc\td","help":"\u001b]0;t\u0007c\n"}}`, false,
+			"(HTTP 400 BAD_REQUEST): a[2Jbcd\n  ]0;tc\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := agentHarness(t)
@@ -423,10 +434,10 @@ func TestAgentListRefusalNamesNoID(t *testing.T) {
 
 func TestAgentCreateHintsNameTheFlags(t *testing.T) {
 	for code, want := range map[string]string{
-		"SPACE_LIMITS_ABOVE_FREE":   "  Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default.\n",
+		"SPACE_LIMITS_ABOVE_FREE":   "  Pick a different slug.\n",
 		"SPACE_LIMITS_ABOVE_SHARED": "  Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default.\n",
-		"NO_SHARD_AVAILABLE":        "  This is a platform capacity limit, not an account limit. Try again later.\n",
-		"SHARD_AT_CAPACITY":         "  This is a platform capacity limit, not an account limit. Try again later.\n",
+		"NO_SHARD_AVAILABLE":        "  This is a platform capacity limit, not an account limit. Try again later, or name another region with --region.\n",
+		"SHARD_AT_CAPACITY":         "  This is a platform capacity limit, not an account limit. Try again later, or name another region with --region.\n",
 		"SPACE_EXISTS":              "  Pick a different slug.\n",
 	} {
 		h := agentHarness(t)
@@ -445,8 +456,6 @@ func TestAgentSessionRefusals(t *testing.T) {
 	}{
 		{"no url", map[string]string{EnvAPIURL: ""},
 			"[error] kubehz space list: KUBEHZ_API_URL is not set\n  Set it to the kubehz api, for example: export KUBEHZ_API_URL=https://api.kubehz.cloud\n"},
-		{"plain http", map[string]string{EnvAPIURL: "http://api.example"},
-			"[error] KUBEHZ_API_URL must use HTTPS: http://api.example\n[error] Plain HTTP is not allowed for security reasons\n"},
 		{"no credential", map[string]string{EnvAgentClientID: "", EnvAgentClientSecret: ""},
 			"[error] kubehz space list: no credential for the kubehz api\n  Set KUBEHZ_AGENT_CLIENT_ID and KUBEHZ_AGENT_CLIENT_SECRET (an agent key), or KUBEHZ_TOKEN.\n"},
 		{"half a key", map[string]string{EnvAgentClientSecret: ""},
@@ -604,7 +613,7 @@ func TestAgentKubeconfigWritesAPrivateFileAndPrintsThePath(t *testing.T) {
 	if err := os.WriteFile(file, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r, err := h.ctx.SpaceKubeconfig(context.Background(), "sp-1a2b3c4d", file)
+	r, err := h.ctx.SpaceKubeconfig(context.Background(), "sp-1a2b3c4d", file, true)
 	mustOK(t, err, h.output())
 	if got := readFile(t, file); got != agentKubeconfigYAML {
 		t.Errorf("file = %q", got)
@@ -632,9 +641,8 @@ func TestAgentKubeconfigRefusals(t *testing.T) {
 		status     int
 		body, want string
 	}{
-		{"a directory is never replaced", dir, 200, agentKubeconfigYAML,
-			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + dir + "\n  Name a file in a directory that exists and that you can write to.\n"},
-		{"a missing directory", filepath.Join(dir, "no", "kc.yaml"), 200, agentKubeconfigYAML, "cannot write"},
+		{"a missing directory", filepath.Join(dir, "no", "kc.yaml"), 200, agentKubeconfigYAML,
+			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + filepath.Join(dir, "no", "kc.yaml") + "\n  Name a file in a directory that exists and that you can write to.\n"},
 		{"an empty answer", filepath.Join(dir, "kc.yaml"), 200, " \n",
 			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: the api answered without a kubeconfig\n"},
 		{"a refusal", filepath.Join(dir, "kc.yaml"), 409, refusalBody("KUBECONFIG_NOT_READY", "not ready", "Poll, then retry."),
@@ -643,13 +651,182 @@ func TestAgentKubeconfigRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := agentHarness(t)
 			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", tc.status, tc.body)
-			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", tc.file)
+			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", tc.file, false)
 			mustErr(t, err)
 			mustContain(t, h.errOut.String(), tc.want)
 			if _, err := os.Stat(filepath.Join(dir, "kc.yaml")); err == nil {
 				t.Error("a file was written")
 			}
 		})
+	}
+}
+
+// The path rules run before any request, so a refused path costs no grant
+// and no download: a directory (or a link to one) is never replaced, a
+// path that exists needs force, and force writes through a link.
+func TestAgentKubeconfigPathRules(t *testing.T) {
+	type tc struct {
+		name  string
+		setup func(dir string) string // returns the --file value
+		force bool
+		want  string // stderr, "" for success
+		check func(t *testing.T, dir string)
+	}
+	for _, c := range []tc{
+		{"a directory", func(dir string) string { return dir }, true,
+			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR is a directory\n  Name a file, not a directory.\n", nil},
+		{"a link to a directory", func(dir string) string {
+			must(t, os.Mkdir(filepath.Join(dir, "d"), 0o755))
+			must(t, os.Symlink(filepath.Join(dir, "d"), filepath.Join(dir, "link")))
+			return filepath.Join(dir, "link")
+		}, true, "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/link is a directory\n", func(t *testing.T, dir string) {
+			if fi, err := os.Lstat(filepath.Join(dir, "link")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Error("the link to the directory was replaced")
+			}
+		}},
+		{"a file that exists, no force", func(dir string) string {
+			must(t, os.WriteFile(filepath.Join(dir, "config"), []byte("contexts"), 0o600))
+			return filepath.Join(dir, "config")
+		}, false, "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/config exists\n  Pass --force to replace it, or name a new file.\n",
+			func(t *testing.T, dir string) {
+				if got := readFile(t, filepath.Join(dir, "config")); got != "contexts" {
+					t.Errorf("the file changed: %q", got)
+				}
+			}},
+		{"a link to a file, no force", func(dir string) string {
+			must(t, os.WriteFile(filepath.Join(dir, "real"), []byte("contexts"), 0o600))
+			must(t, os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")))
+			return filepath.Join(dir, "link")
+		}, false, "DIR/link exists\n", nil},
+		{"a link to nothing, no force", func(dir string) string {
+			must(t, os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "link")))
+			return filepath.Join(dir, "link")
+		}, false, "DIR/link exists\n", nil},
+		{"a link to nothing, force", func(dir string) string {
+			must(t, os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "link")))
+			return filepath.Join(dir, "link")
+		}, true, "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write DIR/link\n", nil},
+		{"force replaces a file", func(dir string) string {
+			must(t, os.WriteFile(filepath.Join(dir, "config"), []byte("contexts"), 0o644))
+			return filepath.Join(dir, "config")
+		}, true, "", func(t *testing.T, dir string) {
+			if got := readFile(t, filepath.Join(dir, "config")); got != agentKubeconfigYAML {
+				t.Errorf("file = %q", got)
+			}
+		}},
+		{"force writes through a link", func(dir string) string {
+			must(t, os.Mkdir(filepath.Join(dir, "kube"), 0o755))
+			must(t, os.WriteFile(filepath.Join(dir, "kube", "real"), []byte("contexts"), 0o644))
+			must(t, os.Symlink(filepath.Join("kube", "real"), filepath.Join(dir, "link")))
+			return filepath.Join(dir, "link")
+		}, true, "", func(t *testing.T, dir string) {
+			if fi, err := os.Lstat(filepath.Join(dir, "link")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatal("the link was replaced")
+			}
+			if got := readFile(t, filepath.Join(dir, "kube", "real")); got != agentKubeconfigYAML {
+				t.Errorf("link target = %q", got)
+			}
+			if entries, _ := os.ReadDir(filepath.Join(dir, "kube")); len(entries) != 1 {
+				t.Errorf("kube/ holds %d entries: a temporary file was left behind", len(entries))
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := agentHarness(t)
+			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+			dir := t.TempDir()
+			file := c.setup(dir)
+			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", file, c.force)
+			got := strings.ReplaceAll(h.errOut.String(), dir, "DIR")
+			if c.want == "" {
+				mustOK(t, err, got)
+			} else {
+				mustErr(t, err)
+				mustContain(t, got, c.want)
+				if n := len(h.reqs()); n != 0 {
+					t.Errorf("%d requests: a refused path must cost no grant and no download", n)
+				}
+			}
+			if c.check != nil {
+				c.check(t, dir)
+			}
+		})
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A plain-http KUBEHZ_API_URL reaches no server: neither the api nor the
+// token endpoint gets a request, and only the session's refusal prints.
+func TestAgentPlainHTTPReachesNoServer(t *testing.T) {
+	var hits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer plain.Close()
+	h := agentHarness(t)
+	h.env[EnvAPIURL] = plain.URL
+	_, err := h.ctx.SpaceList(context.Background())
+	mustErr(t, err)
+	if n := hits.Load(); n != 0 {
+		t.Errorf("the plain-http server got %d requests", n)
+	}
+	if n := len(h.reqs()); n != 0 {
+		t.Errorf("%d requests reached the token endpoint: the refusal must stop before the grant", n)
+	}
+	want := "[error] KUBEHZ_API_URL must use HTTPS: " + plain.URL + "\n[error] Plain HTTP is not allowed for security reasons\n"
+	if got := h.errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// The second guard: agentCall itself sends no bearer to a base that is not
+// https, whatever the session holds.
+func TestAgentCallRefusesAPlainHTTPBase(t *testing.T) {
+	var hits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer plain.Close()
+	h := agentHarness(t)
+	h.ctx.HTTP = plain.Client()
+	_, err := h.ctx.agentCall(context.Background(), &agentSession{base: plain.URL, bearer: "jwt-agent", key: true},
+		"space list", http.MethodGet, "/api/spaces", nil)
+	mustErr(t, err)
+	if n := hits.Load(); n != 0 {
+		t.Errorf("the plain-http server got %d requests", n)
+	}
+	mustContain(t, h.errOut.String(), "[error] kubehz space list: "+plain.URL+" is not an https URL: lo sends no bearer there\n")
+}
+
+// The grant follows no redirect: the Basic client secret and the form
+// stay with the token endpoint the key names.
+func TestTokenGrantFollowsNoRedirect(t *testing.T) {
+	for _, viaAgent := range []bool{false, true} {
+		h := agentHarness(t)
+		h.handleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/elsewhere/token", http.StatusTemporaryRedirect)
+		})
+		h.handle("POST /elsewhere/token", 200, `{"access_token":"jwt-agent","token_type":"Bearer","expires_in":43199}`)
+		h.handle("GET /api/spaces", 200, okBody(`[]`))
+		var err error
+		if viaAgent {
+			_, err = h.ctx.SpaceList(context.Background())
+		} else {
+			err = h.ctx.Token(context.Background(), TokenOptions{TokenURL: h.apiURL() + "/oauth/v2/token", Scope: "s"})
+		}
+		mustErr(t, err)
+		if h.anyReq("POST", "/elsewhere/token") {
+			t.Errorf("viaAgent=%v: the redirect target got the grant", viaAgent)
+		}
+		if got := h.errOut.String(); got != "[error] token request refused: HTTP 307: no reason given\n" {
+			t.Errorf("viaAgent=%v: stderr = %q", viaAgent, got)
+		}
 	}
 }
 

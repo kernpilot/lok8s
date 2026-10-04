@@ -18,7 +18,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
 
   # argsh `:args` stub: positionals in the order the args array names them,
-  # `--name value` pairs, and -o.
+  # `--name value` pairs, -o, and the one boolean --force/-f.
   :args() {
     shift
     local -a _pos=()
@@ -29,6 +29,7 @@ setup() {
     while (( $# )); do
       case "$1" in
         -o) shift; printf -v output '%s' "${1:-}" ;;
+        --force|-f) force=1 ;;
         --*) _n="${1#--}"; _n="${_n//-/_}"; shift; printf -v "${_n}" '%s' "${1:-}" ;;
         *) printf -v "${_pos[_p]}" '%s' "$1"; _p=$(( _p + 1 )) ;;
       esac
@@ -324,11 +325,12 @@ status: Deleting'
     assert_output "[error] kubehz space get sp-1a2b3c4d: the api refused the request (HTTP 409 ${code}): ${msg}
   ${want}"
   done <<'EOF'
-TOKEN_SCOPE_MISSING|This endpoint requires the 'clusters:write' scope|The credential can read but not write. Use an agent key with the role editor or admin.
-AGENT_KEY_OUT_OF_SCOPE|A resource-scoped agent key cannot read tenant-wide data|The agent key reaches only its own clusters and spaces. Use a key with the scope tenant.
+TOKEN_SCOPE_MISSING|This endpoint requires the 'clusters:write' scope|The agent key can read but not write. Use an agent key with the role editor or admin.
+AGENT_KEY_OUT_OF_SCOPE|tenant-wide|api help
 AGENT_KEY_SPEND_CAP|This agent key spent 1200 of its 1000 cents this month|Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC).
-SPACE_LIMITS_ABOVE_FREE|too big|Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default.
-NO_SHARD_AVAILABLE|full|This is a platform capacity limit, not an account limit. Try again later.
+SPACE_LIMITS_ABOVE_FREE|too big|api help
+SPACE_LIMITS_ABOVE_SHARED|too big|Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default.
+NO_SHARD_AVAILABLE|full|This is a platform capacity limit, not an account limit. Try again later, or name another region with --region.
 KUBECONFIG_NOT_READY|not ready|api help
 EOF
   : > "${ROUTES}"
@@ -337,10 +339,20 @@ EOF
   assert_line --index 1 '  No space sp-1a2b3c4d exists, or the credential cannot reach it. List what it reaches: lo kubehz space list'
 }
 
-@test "refusals: server strings are scrubbed, an odd code is not repeated, an empty body has no reason" {
-  route GET /api/spaces/sp-1a2b3c4d 400 '{"data":{"code":"BAD_REQUEST","message":"a\u001b[2Jb \\e[31m","help":"\u001b]0;t\u0007c"}}'
+@test "refusals: TOKEN_SCOPE_MISSING with KUBEHZ_TOKEN prints the api's help" {
+  # A KUBEHZ_TOKEN can hold clusters:write without read: lo cannot say
+  # which scope is missing, the api's help does.
+  route GET /api/spaces/sp-1a2b3c4d 403 '{"data":{"code":"TOKEN_SCOPE_MISSING","message":"This endpoint requires the '"'read'"' scope","help":"Mint a token carrying it."}}'
+  KUBEHZ_TOKEN=khzt_x KUBEHZ_AGENT_CLIENT_ID="" KUBEHZ_AGENT_CLIENT_SECRET="" run kubehz::space::get sp-1a2b3c4d
+  assert_failure
+  assert_output "[error] kubehz space get sp-1a2b3c4d: the api refused the request (HTTP 403 TOKEN_SCOPE_MISSING): This endpoint requires the 'read' scope
+  Mint a token carrying it."
+}
+
+@test "refusals: server strings are cleaned, an odd code is not repeated, an empty body has no reason" {
+  route GET /api/spaces/sp-1a2b3c4d 400 '{"data":{"code":"BAD_REQUEST","message":"a\u001b[2Jb \\e[31m\nc\td","help":"\u001b]0;t\u0007c\n"}}'
   run kubehz::space::get sp-1a2b3c4d
-  assert_output '[error] kubehz space get sp-1a2b3c4d: the api refused the request (HTTP 400 BAD_REQUEST): a[2Jb \e[31m
+  assert_output '[error] kubehz space get sp-1a2b3c4d: the api refused the request (HTTP 400 BAD_REQUEST): a[2Jb \e[31mcd
   ]0;tc'
   : > "${ROUTES}"
   route GET /api/spaces/sp-1a2b3c4d 418 '{"data":{"code":"x; rm","message":"m"}}'
@@ -436,7 +448,6 @@ EOF
   route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   local file="${BATS_TEST_TMPDIR}/out/kc.yaml"
   mkdir -p "${BATS_TEST_TMPDIR}/out"
-  echo old > "${file}"
   run kubehz::space::kubeconfig sp-1a2b3c4d --file "${file}"
   assert_success
   assert_output "${file}"
@@ -446,21 +457,19 @@ EOF
   assert_output 600
   run ls -A "${BATS_TEST_TMPDIR}/out"
   assert_output 'kc.yaml'
-  run kubehz::space::kubeconfig sp-1a2b3c4d --file "${file}" -o json
+  run kubehz::space::kubeconfig sp-1a2b3c4d --file "${file}" -o json --force
   assert_output '{
   "id": "sp-1a2b3c4d",
   "file": "'"${file}"'"
 }'
 }
 
-@test "kubeconfig: a directory, a missing directory, an empty answer and a refusal write nothing" {
+@test "kubeconfig: a missing directory, an empty answer and a refusal write nothing" {
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${BATS_TEST_TMPDIR}"
-  assert_failure
-  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${BATS_TEST_TMPDIR}
-  Name a file in a directory that exists and that you can write to."
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${BATS_TEST_TMPDIR}/no/kc.yaml"
-  assert_output --partial 'cannot write'
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${BATS_TEST_TMPDIR}/no/kc.yaml
+  Name a file in a directory that exists and that you can write to."
   : > "${ROUTES}"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 ' '
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${BATS_TEST_TMPDIR}/kc.yaml"
@@ -471,6 +480,59 @@ EOF
   assert_output '[error] kubehz cluster kubeconfig cl-1a2b3c4d: the api refused the request (HTTP 409 KUBECONFIG_NOT_READY): not ready
   Poll, then retry.'
   [ ! -e "${BATS_TEST_TMPDIR}/kc.yaml" ]
+}
+
+@test "kubeconfig: the path rules run before any request, as the Go twin's kubeconfigTarget" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/p"
+  mkdir -p "${d}/dir" "${d}/kube"
+  ln -s "${d}/dir" "${d}/to-dir"
+  echo contexts > "${d}/config"
+  echo contexts > "${d}/kube/real"
+  ln -s kube/real "${d}/to-file"
+  ln -s "${d}/gone" "${d}/to-nothing"
+
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/dir" --force
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/dir is a directory
+  Name a file, not a directory."
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/to-dir" --force
+  assert_output --partial "${d}/to-dir is a directory"
+  [ -L "${d}/to-dir" ]
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/config"
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/config exists
+  Pass --force to replace it, or name a new file."
+  run cat "${d}/config"
+  assert_output contexts
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/to-file"
+  assert_output --partial "${d}/to-file exists"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/to-nothing"
+  assert_output --partial "${d}/to-nothing exists"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/to-nothing" -f
+  assert_output --partial "cannot write ${d}/to-nothing"
+  # A refused path costs no grant and no download.
+  [ ! -e "${CURL_ARGS}" ]
+
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/config" --force
+  assert_success
+  run cat "${d}/config"
+  assert_output 'apiVersion: v1'
+  # --force writes through a link: the target changes, the link stays.
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/to-file" -f
+  assert_success
+  assert_output "${d}/to-file"
+  [ -L "${d}/to-file" ]
+  run cat "${d}/kube/real"
+  assert_output 'apiVersion: v1'
+  run ls -A "${d}/kube"
+  assert_output 'real'
+}
+
+@test "the bearer reaches curl's config with its quotes and backslashes escaped" {
+  route GET /api/spaces 200 '{"ok":true,"data":[]}'
+  KUBEHZ_TOKEN='a"b\c' KUBEHZ_AGENT_CLIENT_ID="" KUBEHZ_AGENT_CLIENT_SECRET="" run kubehz::agent_list space text
+  assert_success
+  run cat "${CURL_STDIN}"
+  assert_output 'header = "Authorization: Bearer a\"b\\c"'
 }
 
 @test "the usage arrays carry the markers the tiers read, and kubeconfig none" {

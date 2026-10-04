@@ -5,9 +5,13 @@ It serves the routes of `lo kubehz space ...` and `lo kubehz cluster ...`
 plus the agent-key token endpoint, with fixed answers in the api's shapes
 (the {ok, data, traceId} envelope, the {statusCode, data: {code, message,
 help}} refusal). Every request is appended to a log as one JSON line:
-method, path, whether the bearer was the minted token, and the body (parsed
-JSON with sorted keys, so a different key order is not a difference). The
-harness diffs that log between the two implementations.
+method, path, whether the bearer was the minted token, the Accept and
+Content-Type headers, and the body (parsed JSON with sorted keys, so a
+different key order is not a difference). The harness diffs that log
+between the two implementations.
+
+POST /oauth/v2/redirect answers 307 to the token endpoint: a grant that
+followed it would hand the client secret to another URL.
 
 Usage: kubehz-api-stub.py <cert.pem> <key.pem> <port-file> <request-log>
 It binds 127.0.0.1 on a free port and writes the port to <port-file>.
@@ -96,11 +100,12 @@ ROUTES = {
     ("GET", "/api/spaces"): (200, ok([SPACE, ODD_SPACE], {"pagination": {"page": 1, "perPage": 500, "total": 2, "pages": 1}})),
     ("GET", "/api/spaces/sp-1a2b3c4d"): (200, ok(SPACE_DETAIL)),
     ("GET", "/api/spaces/sp-gone0001"): NOT_FOUND,
-    ("GET", "/api/spaces/sp-scoped01"): refusal(403, "AGENT_KEY_OUT_OF_SCOPE", "A resource-scoped agent key cannot read tenant-wide data",
-                                                "Use an agent key with the scope \"tenant\" for this endpoint."),
     ("GET", "/api/spaces/sp-broken01"): (200, "<html>gateway</html>"),
     ("GET", "/api/spaces/sp-boom0001"): (502, ""),
-    ("GET", "/api/spaces/sp-hostile1"): refusal(418, "not a code", "Te\u001b]0;pwned\u0007a \\e[31m time", "\u001b[2JHelp \\033[0m"),
+    ("GET", "/api/spaces/sp-hostile1"): refusal(418, "not a code", "Te\u001b]0;pwned\u0007a \\e[31m\n\ttime", "\u001b[2JHelp\t\\033[0m\n"),
+    # A KUBEHZ_TOKEN with clusters:write but no read (kubehz-api api-tokens.ts).
+    ("GET", "/api/spaces/sp-noread01"): refusal(403, "TOKEN_SCOPE_MISSING", "This endpoint requires the 'read' scope",
+                                                "The presented API token lacks the 'read' scope. Mint a token carrying it (POST /api/tokens)."),
     ("DELETE", "/api/spaces/sp-1a2b3c4d"): (200, ok({"id": "sp-1a2b3c4d", "status": "Deleting"})),
     ("DELETE", "/api/spaces/sp-gone0001"): NOT_FOUND,
     ("PATCH", "/api/spaces/sp-1a2b3c4d/lease"): (200, ok({"id": "sp-1a2b3c4d", "leaseExpiresAt": "2026-10-05T12:00:00.000Z"})),
@@ -157,14 +162,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode() if length else ""
         try:
-            body = json.loads(raw) if raw and self.path != "/oauth/v2/token" else raw
+            body = json.loads(raw) if raw and not self.path.startswith("/oauth/") else raw
         except ValueError:
             body = raw
         auth = self.headers.get("Authorization", "")
         with open(LOG, "a", encoding="utf-8") as log:
             log.write(json.dumps({"method": self.command, "path": self.path,
-                                  "bearer": auth == "Bearer " + TOKEN if self.path != "/oauth/v2/token" else None,
-                                  "accept": self.headers.get("Accept"), "body": body}, sort_keys=True) + "\n")
+                                  "bearer": auth == "Bearer " + TOKEN if not self.path.startswith("/oauth/") else None,
+                                  "accept": self.headers.get("Accept"), "content_type": self.headers.get("Content-Type"),
+                                  "body": body}, sort_keys=True) + "\n")
+        if self.path == "/oauth/v2/redirect":
+            self.send_response(307)
+            self.send_header("Location", "/oauth/v2/token")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if self.path == "/oauth/v2/token":
             return self.answer(200, {"access_token": TOKEN, "token_type": "Bearer", "expires_in": 3600})
         if auth != "Bearer " + TOKEN:

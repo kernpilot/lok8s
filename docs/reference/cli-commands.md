@@ -2043,7 +2043,7 @@ lo kubehz cluster kubeconfig <id> --file <path> [flags]
 ### Options
 
 ```
-      --file string     Write the kubeconfig to this file (mode 0600); it prints the path
+      --file string     Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
   -h, --help            help for kubeconfig
   -o, --output string   Output format: text, json or yaml (default "text")
 ```
@@ -2556,7 +2556,7 @@ lo kubehz space kubeconfig <id> --file <path> [flags]
 ### Options
 
 ```
-      --file string     Write the kubeconfig to this file (mode 0600); it prints the path
+      --file string     Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
   -h, --help            help for kubeconfig
   -o, --output string   Output format: text, json or yaml (default "text")
 ```

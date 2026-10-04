@@ -111,7 +111,7 @@ kubehz::space::create() {
     namespaces      maxNamespaces  "${namespaces}"
     object-cap-kib  maxObjectKiB   "${object_cap_kib}"
   )
-  action="space create $(kubehz::space_safe_string "${slug}")"
+  action="space create $(kubehz::agent_clean_e "${slug}")"
   body=$(jq -cn --arg name "${name}" --arg slug "${slug}" '{name: $name, slug: $slug}') || return 1
   # A number the flags leave out is not sent: the api applies its default.
   for (( i = 0; i < ${#numbers[@]}; i += 3 )); do
@@ -120,7 +120,7 @@ kubehz::space::create() {
     value="${numbers[i + 2]}"
     [[ -n "${value}" ]] || continue
     if ! kubehz::agent_match "${value}" '^[0-9]+$' || ! number=$(kubehz::space_number_value "${value}"); then
-      error "kubehz ${action}: --${flag} $(kubehz::space_safe_string "${value}") is not valid"
+      error "kubehz ${action}: --${flag} $(kubehz::agent_clean_e "${value}") is not valid"
       echo "  Use a whole number of 1 or more, or leave the flag out for the platform default." >&2
       return 1
     fi
@@ -165,15 +165,17 @@ kubehz::space::lease() {
 }
 
 kubehz::space::kubeconfig() {
-  local id file="" output="text"
+  # force: the inherited global --force (the handover::receive idiom).
+  local id file="" output="text" force="${force:-0}"
   local -a args=(
-    'id'        'Space id (sp-…)'
-    'file|:!'   'Write the kubeconfig to this file (mode 0600); it prints the path'
-    'output|o'  'Output format: text, json or yaml'
+    'id'           'Space id (sp-…)'
+    'file|:!'      'Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force'
+    'force|f:^:+'  'Replace a file that exists (a link is written through)'
+    'output|o'     'Output format: text, json or yaml'
     "${args[@]:-}"
   )
   :args "Write the agent kubeconfig of a space to a file" "${@}"
-  kubehz::agent_kubeconfig space "${id}" "${file}" "${output}"
+  kubehz::agent_kubeconfig space "${id}" "${file}" "${force}" "${output}"
 }
 
 kubehz::cluster::list() {
@@ -213,15 +215,17 @@ kubehz::cluster::lease() {
 }
 
 kubehz::cluster::kubeconfig() {
-  local id file="" output="text"
+  # force: the inherited global --force (the handover::receive idiom).
+  local id file="" output="text" force="${force:-0}"
   local -a args=(
-    'id'        'Cluster id (cl-…)'
-    'file|:!'   'Write the kubeconfig to this file (mode 0600); it prints the path'
-    'output|o'  'Output format: text, json or yaml'
+    'id'           'Cluster id (cl-…)'
+    'file|:!'      'Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force'
+    'force|f:^:+'  'Replace a file that exists (a link is written through)'
+    'output|o'     'Output format: text, json or yaml'
     "${args[@]:-}"
   )
   :args "Write the agent kubeconfig of a hosted cluster to a file" "${@}"
-  kubehz::agent_kubeconfig cluster "${id}" "${file}" "${output}"
+  kubehz::agent_kubeconfig cluster "${id}" "${file}" "${force}" "${output}"
 }
 
 # ── shared steps ─────────────────────────────────────────
@@ -232,6 +236,9 @@ kubehz::cluster::kubeconfig() {
 # labelLine, `table` its writeTable (widths in characters).
 KUBEHZ_AGENT_JQ='
 def clean: explode | map(select(. >= 32 and . != 127 and . != 8232 and . != 8233)) | implode;
+def clip: if length > 256 then .[0:256] + "…" else . end;
+def said($f): ((.data? | objects | .[$f]) // (objects | .[$f]) // empty)
+  | (if type == "string" then . else tojson end) | clean | clip;
 def str: if type == "string" then clean else null end;
 def num: if type == "number" then . else null end;
 def strs: if type == "array" then map(select(type == "string") | clean) else [] end;
@@ -295,6 +302,23 @@ kubehz::agent_match() {
   [[ "${1}" =~ ${2} ]]
 }
 
+# A user value or a server string as the Go twin prints it,
+# clip(cleanText(s)): no C0 control, DEL, U+2028 or U+2029, then 256 code
+# points and an ellipsis (jq counts code points in any locale).
+# Usage: kubehz::agent_clean <string>
+kubehz::agent_clean() {
+  jq -nr --arg s "${1}" "${KUBEHZ_AGENT_JQ}"' $s | clean | clip'
+}
+
+# The same, with the backslashes doubled for error() and warn(), which
+# print through `echo -e`.
+# Usage: kubehz::agent_clean_e <string>
+kubehz::agent_clean_e() {
+  local s
+  s=$(kubehz::agent_clean "${1}")
+  printf '%s\n' "${s//\\/\\\\}"
+}
+
 # Refuse an -o value other than text, json or yaml, in the shape the Go
 # twin's --output check prints.
 # Usage: kubehz::agent_output <format>
@@ -315,7 +339,7 @@ kubehz::agent_check_id() {
   local noun="${1}" verb="${2}" id="${3}" prefix="sp-"
   [[ "${noun}" == space ]] || prefix="cl-"
   kubehz::agent_match "${id}" "^${prefix}[A-Za-z0-9-]{1,64}\$" && return 0
-  error "kubehz ${noun} ${verb}: $(kubehz::space_safe_string "${id}") is not a ${noun} id"
+  error "kubehz ${noun} ${verb}: $(kubehz::agent_clean_e "${id}") is not a ${noun} id"
   echo "  A ${noun} id is ${prefix} and 1 to 64 letters, digits or dashes. List them: lo kubehz ${noun} list" >&2
   return 1
 }
@@ -331,7 +355,7 @@ kubehz::agent_hours() {
     KUBEHZ_AGENT_HOURS="${n}"
     return 0
   fi
-  error "kubehz ${action}: --${flag} $(kubehz::space_safe_string "${value}") is not valid"
+  error "kubehz ${action}: --${flag} $(kubehz::agent_clean_e "${value}") is not valid"
   echo "  Use a whole number of hours from 1 to 720." >&2
   return 1
 }
@@ -426,17 +450,19 @@ kubehz::agent_api() {
 # Print a non-2xx answer: what failed with the api's status, code and
 # message, then the next step. lo's own hint wins where lo knows more than
 # the api (a flag name, the list command); else the api's help. Both server
-# strings are scrubbed and clipped; only the one that reaches error() is
-# escaped for `echo -e`.
+# strings lose every control character (a line break or a tab too: one
+# refusal is two lines) and are clipped; only the one that reaches error()
+# is escaped for `echo -e`. A resource-scoped key never sees
+# AGENT_KEY_OUT_OF_SCOPE here: a space or cluster outside its reach answers
+# 404, the same as one that does not exist.
 # Usage: kubehz::agent_refused <space|cluster> <action> <id>
 kubehz::agent_refused() {
   local noun="${1}" action="${2}" id="${3}" code msg help hint=""
   code=$(jq -r '.data.code // .code // empty' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || code=""
   kubehz::agent_match "${code}" '^[A-Z0-9_]{1,64}$' || code=""
-  msg=$(jq -r '.data.message // .message // empty' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || msg=""
-  [[ -z "${msg}" ]] || msg=$(kubehz::space_safe_string "${msg}")
+  msg=$(jq -r "${KUBEHZ_AGENT_JQ}"' said("message")' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || msg=""
   [[ -n "${msg}" ]] || msg="no reason given"
-  error "kubehz ${action}: the api refused the request (HTTP ${KUBEHZ_AGENT_STATUS}${code:+ ${code}}): ${msg}"
+  error "kubehz ${action}: the api refused the request (HTTP ${KUBEHZ_AGENT_STATUS}${code:+ ${code}}): ${msg//\\/\\\\}"
 
   if [[ "${KUBEHZ_AGENT_STATUS}" == 401 ]] && (( KUBEHZ_AGENT_KEY )); then
     hint="The api did not accept the agent key. A revoked or expired key needs a new key from a tenant owner."
@@ -444,16 +470,19 @@ kubehz::agent_refused() {
     hint="The api did not accept KUBEHZ_TOKEN. Mint a new token in the kubehz dashboard."
   else
     case "${code}" in
+      # Only an agent key: its role viewer holds read alone. A KUBEHZ_TOKEN
+      # can hold clusters:write without read, and the api's help names the
+      # scope it misses.
       TOKEN_SCOPE_MISSING)
-        hint="The credential can read but not write. Use an agent key with the role editor or admin." ;;
-      AGENT_KEY_OUT_OF_SCOPE)
-        hint="The agent key reaches only its own clusters and spaces. Use a key with the scope tenant." ;;
+        if (( KUBEHZ_AGENT_KEY )); then
+          hint="The agent key can read but not write. Use an agent key with the role editor or admin."
+        fi ;;
       AGENT_KEY_SPEND_CAP)
         hint="Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC)." ;;
-      SPACE_LIMITS_ABOVE_FREE|SPACE_LIMITS_ABOVE_SHARED)
+      SPACE_LIMITS_ABOVE_SHARED)
         hint="Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default." ;;
       NO_SHARD_AVAILABLE|SHARD_AT_CAPACITY)
-        hint="This is a platform capacity limit, not an account limit. Try again later." ;;
+        hint="This is a platform capacity limit, not an account limit. Try again later, or name another region with --region." ;;
       *)
         if [[ "${KUBEHZ_AGENT_STATUS}" == 404 && -n "${id}" ]]; then
           hint="No ${noun} ${id} exists, or the credential cannot reach it. List what it reaches: lo kubehz ${noun} list"
@@ -464,8 +493,7 @@ kubehz::agent_refused() {
     echo "  ${hint}" >&2
     return 0
   fi
-  help=$(jq -r '.data.help // .help // empty' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || help=""
-  [[ -z "${help}" ]] || help=$(kubehz::space_bound_string "${help}")
+  help=$(jq -r "${KUBEHZ_AGENT_JQ}"' said("help")' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || help=""
   [[ -z "${help}" ]] || echo "  ${help}" >&2
   return 0
 }
@@ -544,21 +572,22 @@ kubehz::agent_lease() {
   action="${noun} lease ${id}"
   kubehz::agent_hours "${action}" hours "${hours}" || return 1
   kubehz::agent_one "${noun}" "${action}" "${id}" PATCH "/api/${noun}s/${id}/lease" \
-    "{\"hours\":${KUBEHZ_AGENT_HOURS}}" || return 1
+    '{"hours":'"${KUBEHZ_AGENT_HOURS}"'}' || return 1
   kubehz::agent_print "${format}" '{id: (.id | str), leaseExpiresAt: (.leaseExpiresAt | str)}' \
-    "\"${noun} \\(.id | cell): the lease ends \\(.leaseExpiresAt | cell)\""
+    '"'"${noun}"' \(.id | cell): the lease ends \(.leaseExpiresAt | cell)"'
 }
 
 # `<noun> kubeconfig <id> --file <path>`: download …/kubeconfig/agent and
-# write it to the file (0600, through a temporary file next to it; a
-# directory is never replaced). The file holds no secret: its exec stanza
-# runs `lo kubehz token`.
-# Usage: kubehz::agent_kubeconfig <space|cluster> <id> <file> <format>
+# write it where kubehz::agent_target says (0600, through a temporary file
+# next to it). The file holds no secret: its exec stanza runs
+# `lo kubehz token`.
+# Usage: kubehz::agent_kubeconfig <space|cluster> <id> <file> <force> <format>
 kubehz::agent_kubeconfig() {
-  local noun="${1}" id="${2}" file="${3}" format="${4}" action rc=0
+  local noun="${1}" id="${2}" file="${3}" force="${4}" format="${5}" action rc=0
   kubehz::agent_output "${format}" || return 1
   kubehz::agent_check_id "${noun}" kubeconfig "${id}" || return 1
   action="${noun} kubeconfig ${id}"
+  kubehz::agent_target "${action}" "${file}" "${force}" || return 1
   kubehz::agent_session "${action}" || return 1
   kubehz::agent_api "${action}" GET "/api/${noun}s/${id}/kubeconfig/agent" || rc=$?
   (( rc != 1 )) || return 1
@@ -570,7 +599,7 @@ kubehz::agent_kubeconfig() {
     error "kubehz ${action}: the api answered without a kubeconfig"
     return 1
   fi
-  if ! kubehz::agent_write "${file}"; then
+  if ! kubehz::agent_write "${KUBEHZ_AGENT_TARGET}"; then
     error "kubehz ${action}: cannot write ${file//\\/\\\\}"
     echo "  Name a file in a directory that exists and that you can write to." >&2
     return 1
@@ -582,8 +611,40 @@ kubehz::agent_kubeconfig() {
   esac
 }
 
+# Decide where the kubeconfig goes, before any request (the Go twin's
+# kubeconfigTarget):
+#   - a directory, or a link to one: refused;
+#   - a path that exists (a file, any link): refused without --force, so
+#     --file ~/.kube/config cannot lose its contexts by accident;
+#   - with --force, a link is written through: its target is replaced and
+#     the link stays (a link to nothing cannot be resolved: refused).
+# Usage: kubehz::agent_target <action> <file> <force>
+# Sets: KUBEHZ_AGENT_TARGET
+kubehz::agent_target() {
+  local action="${1}" file="${2}" force="${3}"
+  KUBEHZ_AGENT_TARGET="${file}"
+  if [[ -d "${file}" ]]; then
+    error "kubehz ${action}: ${file//\\/\\\\} is a directory"
+    echo "  Name a file, not a directory." >&2
+    return 1
+  fi
+  [[ -e "${file}" || -L "${file}" ]] || return 0
+  if (( ! force )); then
+    error "kubehz ${action}: ${file//\\/\\\\} exists"
+    echo "  Pass --force to replace it, or name a new file." >&2
+    return 1
+  fi
+  [[ -L "${file}" ]] || return 0
+  if ! KUBEHZ_AGENT_TARGET=$(realpath -e -- "${file}" 2>/dev/null); then
+    error "kubehz ${action}: cannot write ${file//\\/\\\\}"
+    echo "  Name a file in a directory that exists and that you can write to." >&2
+    return 1
+  fi
+}
+
 # Replace the file with KUBEHZ_AGENT_BODY, mode 0600 (mktemp), through a
-# temporary file next to it. A directory is never replaced.
+# temporary file next to it (kubehz::agent_target decided that it may be
+# replaced). A directory is never replaced: mv would move the file into it.
 # Usage: kubehz::agent_write <file>
 kubehz::agent_write() {
   local file="${1}" tmp

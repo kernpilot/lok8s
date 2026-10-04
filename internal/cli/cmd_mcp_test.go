@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +20,9 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/njayp/ophis"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -628,27 +631,90 @@ func TestMcpAgentToolsTiers(t *testing.T) {
 	}
 }
 
-// TestMcpAgentToolsTakeNoFlagThatMovesTheBearer: the api URL and the
-// credential come from the environment of the `lo mcp` server only. A flag
-// that named a URL would let the model send the agent's bearer to any host.
+// TestMcpAgentToolsTakeNoFlagThatMovesTheBearer: the api URL, the token
+// endpoint and the credential come from the environment of the `lo mcp`
+// server only. A flag that named one would let the model send the bearer
+// or the client secret to any host. The check reads every flag the command
+// parses (local and inherited, hidden ones too), not the MCP schema: the
+// schema hides a sensitive flag, but cobra would still parse it.
 func TestMcpAgentToolsTakeNoFlagThatMovesTheBearer(t *testing.T) {
-	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	root := newUsageTree(synthProject(t), routing{})
 	seen := 0
-	for name, tool := range tools {
-		if !strings.HasPrefix(name, "lo_kubehz_space_") && !strings.HasPrefix(name, "lo_kubehz_cluster_") {
-			continue
+	for _, group := range []string{"kubehz space", "kubehz cluster"} {
+		parent := findByPath(root, group)
+		if parent == nil {
+			t.Fatalf("no %s group", group)
 		}
-		seen++
-		for flag := range flagNames(t, tool) {
-			for _, word := range []string{"url", "api", "endpoint", "host", "server", "issuer"} {
-				if strings.Contains(flag, word) {
-					t.Errorf("%s takes --%s: it names where the bearer goes", name, flag)
+		for _, leaf := range parent.Commands() {
+			seen++
+			check := func(f *pflag.Flag) {
+				name := strings.ToLower(f.Name)
+				for _, word := range []string{"url", "uri", "endpoint", "host", "server", "issuer", "token", "secret", "proxy"} {
+					if strings.Contains(name, word) {
+						t.Errorf("lo %s %s takes --%s: it names where the bearer or the secret goes", group, leaf.Name(), f.Name)
+					}
+				}
+				for word := range strings.SplitSeq(name, "-") {
+					if word == "api" {
+						t.Errorf("lo %s %s takes --%s: it names where the bearer goes", group, leaf.Name(), f.Name)
+					}
 				}
 			}
+			leaf.Flags().VisitAll(check)
+			leaf.InheritedFlags().VisitAll(check)
 		}
 	}
-	if seen != 8 {
-		t.Errorf("agent tools = %d, want 8 (the check proves nothing on fewer)", seen)
+	if seen != 10 {
+		t.Errorf("agent leaves = %d, want 10 (the check proves nothing on fewer)", seen)
+	}
+}
+
+// TestMcpPositionalOnly: the model's positional arguments follow a `--`,
+// so an argument "--force" cannot set a flag. A tool whose command parses
+// its own argv gets the arguments as sent.
+func TestMcpPositionalOnly(t *testing.T) {
+	var got []string
+	next := func(_ context.Context, _ *mcp.CallToolRequest, in ophis.ToolInput) (*mcp.CallToolResult, ophis.ToolOutput, error) {
+		got = in.Args
+		return nil, ophis.ToolOutput{}, nil
+	}
+	call := func(tool string, args []string) []string {
+		got = nil
+		req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: tool}}
+		_, _, _ = mcpPositionalOnly(map[string]bool{"lo_chat": true})(context.Background(), req, ophis.ToolInput{Args: args}, next)
+		return got
+	}
+	if a := call("lo_kubehz_space_get", []string{"sp-1a2b3c4d", "--force", "-v"}); strings.Join(a, " ") != "-- sp-1a2b3c4d --force -v" {
+		t.Errorf("args = %q, want the -- first", a)
+	}
+	if a := call("lo_kubehz_space_list", nil); len(a) != 0 {
+		t.Errorf("no args: %q, want none (a lone -- is noise)", a)
+	}
+	if a := call("lo_chat", []string{"--model", "x"}); strings.Join(a, " ") != "--model x" {
+		t.Errorf("raw tool: %q, want the args as sent", a)
+	}
+	// The selector the server uses carries the middleware.
+	if sel := mcpSelectors(mcpExposure{}, nil); len(sel) != 1 || sel[0].Middleware == nil {
+		t.Fatal("the MCP selector has no middleware: the -- is never inserted")
+	}
+	// Every DisableFlagParsing leaf of the projected tree is raw, and no
+	// agent tool is.
+	raw := mcpRawArgTools(newMCPTree(synthProject(t)))
+	if !raw["lo_chat"] || raw["lo_kubehz_space_get"] {
+		t.Errorf("raw-arg tools = %v", raw)
+	}
+}
+
+// After the `--`, cobra reads "--force" as a positional: the command
+// refuses it and reaches no api.
+func TestMcpPositionalOnlyReachesTheCommandAsArguments(t *testing.T) {
+	calls := agentAPI(t, map[string]string{"GET /api/spaces/sp-1a2b3c4d": `{"ok":true,"data":{"id":"sp-1a2b3c4d"}}`})
+	_, stderr, err := runKubehzLo(t, t.TempDir(), "kubehz", "space", "get", "--", "sp-1a2b3c4d", "--force", "-v")
+	if !errors.Is(err, ErrHandled) || !strings.HasPrefix(stderr, "Error: too many arguments: --force\n") {
+		t.Errorf("err=%v stderr=%q", err, stderr)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d requests reached the api", n)
 	}
 }
 

@@ -247,7 +247,12 @@ func (c *Context) tokenAttempt(ctx context.Context, tokenURL, clientID, secret, 
 			retry: !timedOut,
 		}
 	}
-	resp, err := c.httpClient().Do(req)
+	// No redirect is followed: a Location header must not receive the
+	// client secret and the form (bash: curl without -L). A 3xx is a
+	// refusal like any other status.
+	client := *c.httpClient()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return tokenCacheEntry{}, noAnswer(err)
 	}

@@ -156,6 +156,34 @@ func TestKubehzAgentKubeconfigGoesToTheFileOnly(t *testing.T) {
 	}
 }
 
+// A file that exists needs the global --force (or -f): --file
+// ~/.kube/config must not lose its contexts by accident.
+func TestKubehzAgentKubeconfigNeedsForceForAnExistingFile(t *testing.T) {
+	const kc = "apiVersion: v1\nkind: Config\n"
+	calls := agentAPI(t, map[string]string{"GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent": kc})
+	base := t.TempDir()
+	file := filepath.Join(base, "config")
+	if err := os.WriteFile(file, []byte("contexts"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runKubehzLo(t, base, "kubehz", "cluster", "kubeconfig", "cl-1a2b3c4d", "--file", file)
+	if !errors.Is(err, ErrHandled) || stderr != "[error] kubehz cluster kubeconfig cl-1a2b3c4d: "+file+" exists\n  Pass --force to replace it, or name a new file.\n" {
+		t.Fatalf("err=%v stderr=%q", err, stderr)
+	}
+	if raw, _ := os.ReadFile(file); string(raw) != "contexts" || calls.Load() != 0 {
+		t.Fatalf("file = %q, requests = %d: a refusal changes nothing and calls nothing", raw, calls.Load())
+	}
+	for _, force := range []string{"--force", "-f"} {
+		_ = os.WriteFile(file, []byte("contexts"), 0o600)
+		if _, stderr, err := runKubehzLo(t, base, "kubehz", "cluster", "kubeconfig", "cl-1a2b3c4d", "--file", file, force); err != nil {
+			t.Fatalf("%s: %v %s", force, err, stderr)
+		}
+		if raw, _ := os.ReadFile(file); string(raw) != kc {
+			t.Errorf("%s: file = %q", force, raw)
+		}
+	}
+}
+
 // The commands read no project and print no run header: an agent runs
 // `lo mcp` from any directory.
 func TestKubehzAgentCommandsNeedNoProject(t *testing.T) {

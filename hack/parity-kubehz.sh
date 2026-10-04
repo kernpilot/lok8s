@@ -561,15 +561,29 @@ agent_stub() {
 }
 parity_cleanup() { [[ -z "${STUB_API_PID:-}" ]] || kill "${STUB_API_PID}" 2>/dev/null || :; }
 
+# The kubeconfig fixtures (KC_SETUP names one; agent_pre runs it before each
+# implementation): kc.yaml as a file that exists, a link to a file, a link
+# to a directory, a link to nothing.
+kc_exists() { echo contexts > "${PROJ}/kc.yaml"; }
+kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
+kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
+kc_link_nothing() { ln -s gone "${PROJ}/kc.yaml"; }
+
 agent_pre() {
-  rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml"
+  rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
   : > "${WORK}/stub.log"
+  [[ -z "${KC_SETUP:-}" ]] || "${KC_SETUP}"
 }
+# agent_post: the requests, and what kc.yaml is afterwards: a link or a
+# file, its content and mode (followed), and the content of kube/real.
 agent_post() {
   cp "${WORK}/stub.log" "${WORK}/req.${1}"
-  if [[ -e "${PROJ}/kc.yaml" ]]; then
-    cp -p "${PROJ}/kc.yaml" "${WORK}/kc.${1}"
-    stat -c '%a' "${PROJ}/kc.yaml" >> "${WORK}/kc.${1}"
+  if [[ -e "${PROJ}/kc.yaml" || -L "${PROJ}/kc.yaml" ]]; then
+    {
+      if [[ -L "${PROJ}/kc.yaml" ]]; then echo "link -> $(readlink "${PROJ}/kc.yaml")"; else echo file; fi
+      if [[ -f "${PROJ}/kc.yaml" ]]; then cat "${PROJ}/kc.yaml"; stat -L -c '%a' "${PROJ}/kc.yaml"; fi
+      if [[ -f "${PROJ}/kube/real" ]]; then echo "kube/real:"; cat "${PROJ}/kube/real"; ls -A "${PROJ}/kube"; fi
+    } > "${WORK}/kc.${1}"
   else
     rm -f "${WORK}/kc.${1}"
   fi
@@ -587,6 +601,28 @@ check_api() {
   else
     fail "requests lo $* — the two implementations sent different requests:"
     diff "${WORK}/req.bash" "${WORK}/req.go" | head -10 | sed 's/^/  /' || true
+  fi
+}
+
+# check_api_none <allow|-> <argv...>: check, then neither implementation may
+# have sent a request (a local refusal costs no grant and no download).
+check_api_none() {
+  PARITY_PRE_EACH=agent_pre PARITY_POST_EACH=agent_post check "$@"
+  shift
+  if [[ -s "${WORK}/req.go" || -s "${WORK}/req.bash" ]]; then
+    fail "requests lo $* — a local refusal sent requests"
+  else
+    echo "ok: no requests lo $*"
+  fi
+}
+
+# kc_state <label>: kc.yaml (and a link target) is the same in both, and
+# exists (a missing file in both would prove nothing).
+kc_state() {
+  if [[ ! -e "${WORK}/kc.go" ]]; then
+    fail "kubeconfig file (${1}) — the Go run left no kc.yaml"
+  elif ! parity::state_same "${WORK}/kc.bash" "${WORK}/kc.go" "kubeconfig file (${1})"; then
+    failures=$((failures + 1))
   fi
 }
 
@@ -612,7 +648,7 @@ if agent_stub; then
   for slug in taken big full capped; do
     check_api - kubehz space create --name Acme --slug "${slug}"
   done
-  for id in sp-gone0001 sp-scoped01 sp-broken01 sp-boom0001 sp-hostile1; do
+  for id in sp-gone0001 sp-broken01 sp-boom0001 sp-hostile1 sp-noread01; do
     check_api - kubehz space get "${id}"
   done
   check_api - kubehz space delete sp-gone0001
@@ -625,18 +661,35 @@ if agent_stub; then
   # The kubeconfig: the same bytes and mode in both, the path on stdout.
   for format in text json; do
     check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml -o "${format}"
-    if [[ ! -e "${WORK}/kc.go" ]]; then
-      fail "kubeconfig file (-o ${format}) — the Go run wrote none"
-    elif ! parity::state_same "${WORK}/kc.bash" "${WORK}/kc.go" "kubeconfig file (-o ${format})"; then
-      failures=$((failures + 1))
-    fi
+    kc_state "-o ${format}"
   done
-  check_api - kubehz cluster kubeconfig cl-1a2b3c4d --file clusters   # a directory: refused
+  # The path rules: a directory or a link to one is refused, a path that
+  # exists needs --force, --force writes through a link.
+  check_api_none - kubehz cluster kubeconfig cl-1a2b3c4d --file clusters
+  KC_SETUP=kc_link_dir check_api_none - kubehz cluster kubeconfig cl-1a2b3c4d --file kc.yaml --force
+  KC_SETUP=kc_exists check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml
+  kc_state "a file that exists, no --force"
+  KC_SETUP=kc_link_nothing check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml
+  KC_SETUP=kc_link_nothing check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  KC_SETUP=kc_exists check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_state "--force replaces a file"
+  KC_SETUP=kc_link_file check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml -f
+  kc_state "-f writes through a link"
+
+  # The grant follows no redirect: the stub's redirect route would hand
+  # the client secret to the token endpoint, and no request may reach it.
+  KUBEHZ_AGENT_TOKEN_URL="https://127.0.0.1:${STUB_PORT}/oauth/v2/redirect" check_api - kubehz space list
+  if grep -q '"/oauth/v2/token"' "${WORK}/req.go" "${WORK}/req.bash"; then
+    fail "a token grant followed the redirect"
+  else
+    echo "ok: no grant followed the redirect"
+  fi
 
   # KUBEHZ_TOKEN without a key: no grant; the minted token is the stub's
   # bearer, so the same value passes, another one is refused.
   unset KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET
   KUBEHZ_TOKEN=parity-jwt check_api - kubehz space list -o json
+  KUBEHZ_TOKEN=parity-jwt check_api - kubehz space get sp-noread01   # the api's help, not lo's hint
   KUBEHZ_TOKEN=wrong check_api - kubehz space get sp-1a2b3c4d
   export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
   # The contract on the Go side alone: 0 on success, 1 on a refusal.

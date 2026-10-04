@@ -25,8 +25,7 @@
     "tiers": {
       "readonly": ["lo_status", "lo_doctor", "lo_lint", "lo_audit", "lo_addons",
                    "lo_secrets_list", "lo_secrets_path",
-                   "lo_tilt_status", "lo_kubehz_status", "lo_registry_status", "lo_image_list",
-                   "lo_space_list", "lo_space_get", "lo_cluster_list", "lo_cluster_get"],
+                   "lo_tilt_status", "lo_kubehz_status", "lo_registry_status", "lo_image_list"],
       "idempotent": ["lo_build", "lo_kustomize_build"]
     }
   }

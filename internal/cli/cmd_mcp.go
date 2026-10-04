@@ -30,7 +30,11 @@ package cli
 //   - flags that carry a credential (token, secret, password, key, nonce, …)
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
-//     `--verbose N`, which cobra would take as a stray positional).
+//     `--verbose N`, which cobra would take as a stray positional);
+//   - the model's positional arguments follow a `--` (mcpPositionalOnly),
+//     so `args: ["sp-1", "--force"]` cannot set a flag the schema hides.
+//     The schema itself refuses a flag it does not list
+//     (additionalProperties: false, validated by the MCP SDK).
 //
 // LO_MCP_ALLOW=mutating|destructive is the env form of the opt-in, for the
 // editor configs `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes.
@@ -234,8 +238,10 @@ func mcpHiddenSubtree(cmd *cobra.Command) bool {
 // mcpSelectors is the single ophis selector: leaves only (dispatchers are
 // traversed, not exposed — as in the argsh server), outside hidden subtrees,
 // gated by tier, with the flag policy applied to local and inherited flags
-// alike.
-func mcpSelectors(x mcpExposure) []ophis.Selector {
+// alike, and every call through mcpPositionalOnly. rawArgs names the tools
+// whose command parses its own argv (DisableFlagParsing): they get the
+// arguments as the model sent them.
+func mcpSelectors(x mcpExposure, rawArgs map[string]bool) []ophis.Selector {
 	flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) }
 	return []ophis.Selector{{
 		CmdSelector: func(cmd *cobra.Command) bool {
@@ -244,7 +250,38 @@ func mcpSelectors(x mcpExposure) []ophis.Selector {
 		},
 		LocalFlagSelector:     flagOK,
 		InheritedFlagSelector: flagOK,
+		Middleware:            mcpPositionalOnly(rawArgs),
 	}}
+}
+
+// mcpPositionalOnly puts a `--` in front of the model's positional
+// arguments. ophis builds the argv as <command path> <flags> <args> with
+// no separator, so an argument "--force" would parse as the flag. After
+// `--`, cobra reads every argument as positional, and a command with a
+// fixed count refuses the extra ones.
+func mcpPositionalOnly(rawArgs map[string]bool) ophis.MiddlewareFunc {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in ophis.ToolInput, next ophis.ExecuteFunc) (*mcp.CallToolResult, ophis.ToolOutput, error) {
+		if len(in.Args) > 0 && (req == nil || req.Params == nil || !rawArgs[req.Params.Name]) {
+			in.Args = append([]string{"--"}, in.Args...)
+		}
+		return next(ctx, req, in)
+	}
+}
+
+// mcpRawArgTools lists the tools of tree whose command parses its own argv.
+func mcpRawArgTools(tree *cobra.Command) map[string]bool {
+	raw := map[string]bool{}
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.DisableFlagParsing {
+			raw[strings.ReplaceAll(c.CommandPath(), " ", "_")] = true
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(tree)
+	return raw
 }
 
 // mcpDefaultEnv is what `lo mcp <editor> enable` records for the launched
@@ -271,9 +308,9 @@ func mcpExportEnv(paths *config.Paths) {
 	}
 }
 
-func mcpConfig(paths *config.Paths, x mcpExposure, transport mcp.Transport, quiet bool) *ophis.Config {
+func mcpConfig(paths *config.Paths, x mcpExposure, rawArgs map[string]bool, transport mcp.Transport, quiet bool) *ophis.Config {
 	cfg := &ophis.Config{
-		Selectors:  mcpSelectors(x),
+		Selectors:  mcpSelectors(x, rawArgs),
 		Transport:  transport,
 		DefaultEnv: mcpDefaultEnv(paths),
 	}
@@ -289,7 +326,7 @@ func mcpConfig(paths *config.Paths, x mcpExposure, transport mcp.Transport, quie
 // stdio (ophis's default).
 func mcpRun(ctx context.Context, paths *config.Paths, x mcpExposure, transport mcp.Transport, quiet bool, out, errOut io.Writer, args ...string) error {
 	tree := newMCPTree(paths)
-	tree.AddCommand(ophis.Command(mcpConfig(paths, x, transport, quiet)))
+	tree.AddCommand(ophis.Command(mcpConfig(paths, x, mcpRawArgTools(tree), transport, quiet)))
 	tree.SetOut(out)
 	tree.SetErr(errOut)
 	tree.SetArgs(append([]string{"mcp"}, args...))
@@ -389,7 +426,7 @@ func newMcpCommand(paths *config.Paths) *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newMcpStart(paths), newMcpServe(paths), newMcpTools(paths))
-	for _, sub := range ophis.Command(mcpConfig(paths, mcpExposure{}, nil, false)).Commands() {
+	for _, sub := range ophis.Command(mcpConfig(paths, mcpExposure{}, nil, nil, false)).Commands() {
 		switch sub.Name() {
 		case "claude", "vscode", "cursor":
 			cmd.AddCommand(sub)

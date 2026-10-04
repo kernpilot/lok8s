@@ -41,7 +41,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
+
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // EnvAPIURL is the kubehz api base URL of the agent commands.
@@ -96,9 +97,9 @@ type agentSession struct {
 	key    bool // the bearer came from an agent key (else KUBEHZ_TOKEN)
 }
 
-// agentSession resolves the api URL and the bearer. Every refusal is
+// openSession resolves the api URL and the bearer. Every refusal is
 // printed here. The bash twin is kubehz::agent_session.
-func (c *Context) agentSession(ctx context.Context, action string) (*agentSession, error) {
+func (c *Context) openSession(ctx context.Context, action string) (*agentSession, error) {
 	base := c.getenv(EnvAPIURL)
 	if base == "" {
 		c.errorf("kubehz %s: %s is not set", action, EnvAPIURL)
@@ -175,6 +176,13 @@ func (c *Context) agentCall(ctx context.Context, s *agentSession, action, method
 	if err != nil {
 		return noAnswer()
 	}
+	// openSession refuses a URL that is not https. This second check keeps
+	// the bearer off any other scheme if that refusal is ever lost (the
+	// bash twin: curl --proto =https).
+	if req.URL.Scheme != "https" {
+		c.errorf("kubehz %s: %s is not an https URL: lo sends no bearer there", action, s.base)
+		return nil, ErrHandled
+	}
 	req.Header.Set("Authorization", "Bearer "+s.bearer)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -197,14 +205,15 @@ func (c *Context) agentCall(ctx context.Context, s *agentSession, action, method
 // agentRefused prints a non-2xx answer: what failed with the api's status,
 // code and message, then the next step. lo's own hint wins where lo knows
 // more than the api (a flag name, the list command); else the api's help.
-// Both server strings are scrubbed and clipped. The bash twin is
+// Both server strings lose every control character (a line break or a tab
+// too: one refusal is two lines) and are clipped. The bash twin is
 // kubehz::agent_refused.
 func (c *Context) agentRefused(s *agentSession, k agentKind, action, id string, res *httpResult) {
 	code := apiCode(res.Body)
 	if !apiCodeRe.MatchString(code) {
 		code = ""
 	}
-	msg := clip(scrub(apiMessage(res.Body)))
+	msg := clip(cleanText(apiMessage(res.Body)))
 	if msg == "" {
 		msg = "no reason given"
 	}
@@ -213,29 +222,32 @@ func (c *Context) agentRefused(s *agentSession, k agentKind, action, id string, 
 		c.echoErr("  %s", hint)
 		return
 	}
-	if help := clip(scrub(apiHelp(res.Body))); help != "" {
+	if help := clip(cleanText(apiHelp(res.Body))); help != "" {
 		c.echoErr("  %s", help)
 	}
 }
 
 // agentHint is lo's next step for a refusal, "" when the api's help says
-// it best.
+// it best. A resource-scoped agent key never sees AGENT_KEY_OUT_OF_SCOPE on
+// these routes: a space or cluster outside its reach answers 404, the same
+// as one that does not exist (kubehz-api classifyScopedAgentRoute).
 func agentHint(s *agentSession, k agentKind, id string, status int, code string) string {
 	switch {
 	case status == http.StatusUnauthorized && s.key:
 		return "The api did not accept the agent key. A revoked or expired key needs a new key from a tenant owner."
 	case status == http.StatusUnauthorized:
 		return "The api did not accept KUBEHZ_TOKEN. Mint a new token in the kubehz dashboard."
-	case code == "TOKEN_SCOPE_MISSING":
-		return "The credential can read but not write. Use an agent key with the role editor or admin."
-	case code == "AGENT_KEY_OUT_OF_SCOPE":
-		return "The agent key reaches only its own clusters and spaces. Use a key with the scope tenant."
+	// Only an agent key: its role viewer holds read alone. A KUBEHZ_TOKEN
+	// can hold clusters:write without read, and the api's help names the
+	// scope it misses.
+	case code == "TOKEN_SCOPE_MISSING" && s.key:
+		return "The agent key can read but not write. Use an agent key with the role editor or admin."
 	case code == "AGENT_KEY_SPEND_CAP":
 		return "Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC)."
-	case code == "SPACE_LIMITS_ABOVE_FREE" || code == "SPACE_LIMITS_ABOVE_SHARED":
+	case code == "SPACE_LIMITS_ABOVE_SHARED":
 		return "Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default."
 	case code == "NO_SHARD_AVAILABLE" || code == "SHARD_AT_CAPACITY":
-		return "This is a platform capacity limit, not an account limit. Try again later."
+		return "This is a platform capacity limit, not an account limit. Try again later, or name another region with --region."
 	case status == http.StatusNotFound && id != "":
 		return fmt.Sprintf("No %s %s exists, or the credential cannot reach it. List what it reaches: lo kubehz %s list", k.noun, id, k.noun)
 	}
@@ -244,12 +256,12 @@ func agentHint(s *agentSession, k agentKind, id string, status int, code string)
 
 // agentCheckID refuses an id that is not the api's shape. The refusal
 // names the command without the id: the id is user input, shown once,
-// scrubbed and clipped.
+// cleaned and clipped.
 func (c *Context) agentCheckID(k agentKind, verb, id string) error {
 	if k.id.MatchString(id) {
 		return nil
 	}
-	c.errorf("kubehz %s %s: %s is not a %s id", k.noun, verb, clip(scrub(id)), k.noun)
+	c.errorf("kubehz %s %s: %s is not a %s id", k.noun, verb, clip(cleanText(id)), k.noun)
 	c.echoErr("  A %s id is %s and 1 to 64 letters, digits or dashes. List them: lo kubehz %s list", k.noun, k.prefix, k.noun)
 	return ErrHandled
 }
@@ -285,7 +297,7 @@ func (c *Context) leaseHours(action, flag, s string) (int64, error) {
 	if n, ok := wholeNumber(s); ok && n <= LeaseMaxHours {
 		return n, nil
 	}
-	c.errorf("kubehz %s: --%s %s is not valid", action, flag, clip(scrub(s)))
+	c.errorf("kubehz %s: --%s %s is not valid", action, flag, clip(cleanText(s)))
 	c.echoErr("  Use a whole number of hours from 1 to %d.", LeaseMaxHours)
 	return 0, ErrHandled
 }
@@ -304,25 +316,25 @@ func cleanText(s string) string {
 	}, s)
 }
 
-// text is a string field of an api record, cleaned; nil (JSON null) for a
-// missing field or another type.
-func text(v any) any {
+// apiText is a string field of an api record, cleaned; nil (JSON null)
+// for a missing field or another type.
+func apiText(v any) any {
 	if s, ok := v.(string); ok {
 		return cleanText(s)
 	}
 	return nil
 }
 
-// number is a number field of an api record as written; nil otherwise.
-func number(v any) any {
+// apiNumber is a number field of an api record as written; nil otherwise.
+func apiNumber(v any) any {
 	if n, ok := v.(json.Number); ok {
 		return n
 	}
 	return nil
 }
 
-// texts is a list of strings, cleaned; other entries are left out.
-func texts(v any) []string {
+// apiTexts is a list of strings, cleaned; other entries are left out.
+func apiTexts(v any) []string {
 	out := []string{}
 	arr, _ := v.([]any)
 	for _, e := range arr {
@@ -333,8 +345,8 @@ func texts(v any) []string {
 	return out
 }
 
-// cell renders a record value for the text form: "-" for null or "".
-func cell(v any) string {
+// textCell renders a record value for the text form: "-" for null or "".
+func textCell(v any) string {
 	switch t := v.(type) {
 	case string:
 		if t != "" {
@@ -364,10 +376,10 @@ type SpaceRecord struct {
 // spaceRecord projects a SpaceSchema row (GET /api/spaces, the create).
 func spaceRecord(m map[string]any) SpaceRecord {
 	return SpaceRecord{
-		ID: text(m["id"]), Name: text(m["name"]), Slug: text(m["slug"]), Status: text(m["status"]),
-		MaxNodes: number(m["maxNodes"]), MaxNamespaces: number(m["maxNamespaces"]), MaxObjectKiB: number(m["maxObjectKiB"]),
-		NodeCount: number(m["nodeCount"]), Namespaces: texts(m["namespaces"]),
-		LeaseExpiresAt: text(m["leaseExpiresAt"]), CreatedAt: text(m["createdAt"]),
+		ID: apiText(m["id"]), Name: apiText(m["name"]), Slug: apiText(m["slug"]), Status: apiText(m["status"]),
+		MaxNodes: apiNumber(m["maxNodes"]), MaxNamespaces: apiNumber(m["maxNamespaces"]), MaxObjectKiB: apiNumber(m["maxObjectKiB"]),
+		NodeCount: apiNumber(m["nodeCount"]), Namespaces: apiTexts(m["namespaces"]),
+		LeaseExpiresAt: apiText(m["leaseExpiresAt"]), CreatedAt: apiText(m["createdAt"]),
 	}
 }
 
@@ -388,8 +400,8 @@ type SpaceDetail struct {
 // spaceDetail projects GET /api/spaces/{id} (SpaceDetailSchema): the
 // namespaces are objects there and the node count sits under usage.
 func spaceDetail(m map[string]any) *SpaceDetail {
-	d := &SpaceDetail{SpaceRecord: spaceRecord(m), Endpoint: text(m["endpoint"]), Nodes: []SpaceNode{}}
-	d.NodeCount = number(jget(m, "usage", "nodes"))
+	d := &SpaceDetail{SpaceRecord: spaceRecord(m), Endpoint: apiText(m["endpoint"]), Nodes: []SpaceNode{}}
+	d.NodeCount = apiNumber(jget(m, "usage", "nodes"))
 	d.Namespaces = []string{}
 	if arr, ok := m["namespaces"].([]any); ok {
 		for _, e := range arr {
@@ -401,46 +413,58 @@ func spaceDetail(m map[string]any) *SpaceDetail {
 	if arr, ok := m["nodes"].([]any); ok {
 		for _, e := range arr {
 			if n, ok := e.(map[string]any); ok {
-				d.Nodes = append(d.Nodes, SpaceNode{Name: text(n["name"]), Status: text(n["status"])})
+				d.Nodes = append(d.Nodes, SpaceNode{Name: apiText(n["name"]), Status: apiText(n["status"])})
 			}
 		}
 	}
 	return d
 }
 
-// labelLine is one line of the text form of a record.
-func labelLine(w io.Writer, label, value string) {
-	fmt.Fprintf(w, "%-13s%s\n", label+":", value)
+// labelWidth is the label column of the text form of one record: the
+// longest label with its colon ("Namespaces:"). The bash twin's jq `field`
+// pads to it and adds the same two spaces.
+const labelWidth = 11
+
+// writeLabels prints one record as label lines (ui.Columns: the label
+// column, two spaces, the value).
+func writeLabels(w io.Writer, lines [][]string) {
+	c := ui.NewColumns(w, []string{"", ""}, lines, []int{labelWidth, 0})
+	for _, l := range lines {
+		c.Row(l...)
+	}
 }
 
-func (r *SpaceRecord) writeLabels(w io.Writer, endpoint any, withEndpoint bool) {
+func (r *SpaceRecord) labels(endpoint any, withEndpoint bool) [][]string {
 	ns := strings.Join(r.Namespaces, ", ")
 	if ns == "" {
 		ns = "-"
 	}
 	objectCap := "-"
 	if r.MaxObjectKiB != nil {
-		objectCap = cell(r.MaxObjectKiB) + " KiB"
+		objectCap = textCell(r.MaxObjectKiB) + " KiB"
 	}
-	labelLine(w, "ID", cell(r.ID))
-	labelLine(w, "Name", cell(r.Name))
-	labelLine(w, "Slug", cell(r.Slug))
-	labelLine(w, "Status", cell(r.Status))
-	labelLine(w, "Nodes", cell(r.NodeCount)+" of "+cell(r.MaxNodes))
-	labelLine(w, "Namespaces", ns+" (limit "+cell(r.MaxNamespaces)+")")
-	labelLine(w, "Object cap", objectCap)
+	lines := [][]string{
+		{"ID:", textCell(r.ID)},
+		{"Name:", textCell(r.Name)},
+		{"Slug:", textCell(r.Slug)},
+		{"Status:", textCell(r.Status)},
+		{"Nodes:", textCell(r.NodeCount) + " of " + textCell(r.MaxNodes)},
+		{"Namespaces:", ns + " (limit " + textCell(r.MaxNamespaces) + ")"},
+		{"Object cap:", objectCap},
+	}
 	if withEndpoint {
-		labelLine(w, "Endpoint", cell(endpoint))
+		lines = append(lines, []string{"Endpoint:", textCell(endpoint)})
 	}
-	labelLine(w, "Lease ends", cell(r.LeaseExpiresAt))
-	labelLine(w, "Created", cell(r.CreatedAt))
+	return append(lines,
+		[]string{"Lease ends:", textCell(r.LeaseExpiresAt)},
+		[]string{"Created:", textCell(r.CreatedAt)})
 }
 
 // WriteText prints the created space.
-func (r *SpaceRecord) WriteText(w io.Writer) { r.writeLabels(w, nil, false) }
+func (r *SpaceRecord) WriteText(w io.Writer) { writeLabels(w, r.labels(nil, false)) }
 
 // WriteText prints one space with its endpoint.
-func (d *SpaceDetail) WriteText(w io.Writer) { d.writeLabels(w, d.Endpoint, true) }
+func (d *SpaceDetail) WriteText(w io.Writer) { writeLabels(w, d.labels(d.Endpoint, true)) }
 
 // SpaceList is `lo kubehz space list`.
 type SpaceList struct {
@@ -451,8 +475,8 @@ type SpaceList struct {
 func (l *SpaceList) WriteText(w io.Writer) {
 	rows := [][]string{{"ID", "SLUG", "NAME", "STATUS", "NODES", "LEASE ENDS"}}
 	for _, s := range l.Spaces {
-		rows = append(rows, []string{cell(s.ID), cell(s.Slug), cell(s.Name), cell(s.Status),
-			cell(s.NodeCount) + "/" + cell(s.MaxNodes), cell(s.LeaseExpiresAt)})
+		rows = append(rows, []string{textCell(s.ID), textCell(s.Slug), textCell(s.Name), textCell(s.Status),
+			textCell(s.NodeCount) + "/" + textCell(s.MaxNodes), textCell(s.LeaseExpiresAt)})
 	}
 	writeTable(w, rows)
 }
@@ -473,28 +497,30 @@ type ClusterRecord struct {
 }
 
 // clusterRecord projects a ClusterSchema row (the list and the get).
-func clusterRecord(m map[string]any) *ClusterRecord {
-	return &ClusterRecord{
-		ID: text(m["id"]), Domain: text(m["domain"]), Hosting: text(m["hosting"]), Status: text(m["status"]),
-		Region: text(m["region"]), KubernetesVersion: text(m["kubernetesVersion"]),
-		ControlPlaneReplicas: number(m["controlPlaneReplicas"]), APIEndpoint: text(m["apiEndpoint"]),
-		Health: text(m["health"]), LeaseExpiresAt: text(m["leaseExpiresAt"]), CreatedAt: text(m["createdAt"]),
+func clusterRecord(m map[string]any) ClusterRecord {
+	return ClusterRecord{
+		ID: apiText(m["id"]), Domain: apiText(m["domain"]), Hosting: apiText(m["hosting"]), Status: apiText(m["status"]),
+		Region: apiText(m["region"]), KubernetesVersion: apiText(m["kubernetesVersion"]),
+		ControlPlaneReplicas: apiNumber(m["controlPlaneReplicas"]), APIEndpoint: apiText(m["apiEndpoint"]),
+		Health: apiText(m["health"]), LeaseExpiresAt: apiText(m["leaseExpiresAt"]), CreatedAt: apiText(m["createdAt"]),
 	}
 }
 
 // WriteText prints one cluster.
 func (r *ClusterRecord) WriteText(w io.Writer) {
-	labelLine(w, "ID", cell(r.ID))
-	labelLine(w, "Domain", cell(r.Domain))
-	labelLine(w, "Hosting", cell(r.Hosting))
-	labelLine(w, "Status", cell(r.Status))
-	labelLine(w, "Health", cell(r.Health))
-	labelLine(w, "Region", cell(r.Region))
-	labelLine(w, "Version", cell(r.KubernetesVersion))
-	labelLine(w, "Apiservers", cell(r.ControlPlaneReplicas))
-	labelLine(w, "Endpoint", cell(r.APIEndpoint))
-	labelLine(w, "Lease ends", cell(r.LeaseExpiresAt))
-	labelLine(w, "Created", cell(r.CreatedAt))
+	writeLabels(w, [][]string{
+		{"ID:", textCell(r.ID)},
+		{"Domain:", textCell(r.Domain)},
+		{"Hosting:", textCell(r.Hosting)},
+		{"Status:", textCell(r.Status)},
+		{"Health:", textCell(r.Health)},
+		{"Region:", textCell(r.Region)},
+		{"Version:", textCell(r.KubernetesVersion)},
+		{"Apiservers:", textCell(r.ControlPlaneReplicas)},
+		{"Endpoint:", textCell(r.APIEndpoint)},
+		{"Lease ends:", textCell(r.LeaseExpiresAt)},
+		{"Created:", textCell(r.CreatedAt)},
+	})
 }
 
 // ClusterList is `lo kubehz cluster list`.
@@ -506,33 +532,19 @@ type ClusterList struct {
 func (l *ClusterList) WriteText(w io.Writer) {
 	rows := [][]string{{"ID", "DOMAIN", "HOSTING", "STATUS", "VERSION", "LEASE ENDS"}}
 	for _, r := range l.Clusters {
-		rows = append(rows, []string{cell(r.ID), cell(r.Domain), cell(r.Hosting), cell(r.Status),
-			cell(r.KubernetesVersion), cell(r.LeaseExpiresAt)})
+		rows = append(rows, []string{textCell(r.ID), textCell(r.Domain), textCell(r.Hosting), textCell(r.Status),
+			textCell(r.KubernetesVersion), textCell(r.LeaseExpiresAt)})
 	}
 	writeTable(w, rows)
 }
 
-// writeTable pads every column but the last to its widest cell, in
-// characters (code points, as jq's `length` in the bash twin counts them),
-// two spaces apart.
+// writeTable prints the header row and the rows through ui.Columns: every
+// column but the last padded to its widest cell in code points (as jq's
+// `length` in the bash twin counts them), two spaces apart, no underline.
 func writeTable(w io.Writer, rows [][]string) {
-	widths := make([]int, len(rows[0]))
+	c := ui.NewColumns(w, rows[0], rows[1:], nil)
 	for _, row := range rows {
-		for i, c := range row {
-			widths[i] = max(widths[i], utf8.RuneCountInString(c))
-		}
-	}
-	for _, row := range rows {
-		var b strings.Builder
-		for i, c := range row {
-			if i == len(row)-1 {
-				b.WriteString(c)
-				break
-			}
-			b.WriteString(c)
-			b.WriteString(strings.Repeat(" ", widths[i]-utf8.RuneCountInString(c)+2))
-		}
-		fmt.Fprintln(w, b.String())
+		c.Row(row...)
 	}
 }
 
@@ -545,7 +557,7 @@ type DeleteResult struct {
 
 // WriteText prints "<noun> <id>: <status>".
 func (r *DeleteResult) WriteText(w io.Writer) {
-	fmt.Fprintf(w, "%s %s: %s\n", r.noun, cell(r.ID), cell(r.Status))
+	fmt.Fprintf(w, "%s %s: %s\n", r.noun, textCell(r.ID), textCell(r.Status))
 }
 
 // LeaseResult is `lo kubehz space|cluster lease`.
@@ -557,7 +569,7 @@ type LeaseResult struct {
 
 // WriteText prints when the lease ends.
 func (r *LeaseResult) WriteText(w io.Writer) {
-	fmt.Fprintf(w, "%s %s: the lease ends %s\n", r.noun, cell(r.ID), cell(r.LeaseExpiresAt))
+	fmt.Fprintf(w, "%s %s: the lease ends %s\n", r.noun, textCell(r.ID), textCell(r.LeaseExpiresAt))
 }
 
 // KubeconfigResult is `lo kubehz space|cluster kubeconfig`: where the file is.
@@ -575,7 +587,7 @@ func (r *KubeconfigResult) WriteText(w io.Writer) { fmt.Fprintln(w, r.File) }
 // only). A total past the page gets a warning.
 func (c *Context) agentList(ctx context.Context, k agentKind) ([]map[string]any, error) {
 	action := k.noun + " list"
-	s, err := c.agentSession(ctx, action)
+	s, err := c.openSession(ctx, action)
 	if err != nil {
 		return nil, err
 	}
@@ -608,7 +620,7 @@ func (c *Context) agentList(ctx context.Context, k agentKind) ([]map[string]any,
 // agentOne runs one call that answers a record: the session, the call, the
 // refusal, the `data` object. The caller checked the id.
 func (c *Context) agentOne(ctx context.Context, k agentKind, action, id, method, path string, body []byte) (map[string]any, error) {
-	s, err := c.agentSession(ctx, action)
+	s, err := c.openSession(ctx, action)
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +675,7 @@ type SpaceCreateOptions struct {
 
 // SpaceCreate creates a space. A number the flags leave out is not sent.
 func (c *Context) SpaceCreate(ctx context.Context, o SpaceCreateOptions) (*SpaceRecord, error) {
-	action := "space create " + clip(scrub(o.Slug))
+	action := "space create " + clip(cleanText(o.Slug))
 	pairs := []jsonPair{{"name", o.Name}, {"slug", o.Slug}}
 	for _, f := range []struct{ flag, field, value string }{
 		{"nodes", "maxNodes", o.Nodes},
@@ -675,7 +687,7 @@ func (c *Context) SpaceCreate(ctx context.Context, o SpaceCreateOptions) (*Space
 		}
 		n, ok := wholeNumber(f.value)
 		if !ok {
-			c.errorf("kubehz %s: --%s %s is not valid", action, f.flag, clip(scrub(f.value)))
+			c.errorf("kubehz %s: --%s %s is not valid", action, f.flag, clip(cleanText(f.value)))
 			c.echoErr("  Use a whole number of 1 or more, or leave the flag out for the platform default.")
 			return nil, ErrHandled
 		}
@@ -708,7 +720,7 @@ func (c *Context) SpaceDelete(ctx context.Context, id string) (*DeleteResult, er
 	if err != nil {
 		return nil, err
 	}
-	return &DeleteResult{ID: text(m["id"]), Status: text(m["status"]), noun: "space"}, nil
+	return &DeleteResult{ID: apiText(m["id"]), Status: apiText(m["status"]), noun: "space"}, nil
 }
 
 // SpaceLease sets the lease of a space: hours from now.
@@ -716,9 +728,10 @@ func (c *Context) SpaceLease(ctx context.Context, id, hours string) (*LeaseResul
 	return c.agentLease(ctx, kindSpace, id, hours)
 }
 
-// SpaceKubeconfig writes the agent kubeconfig of a space to file.
-func (c *Context) SpaceKubeconfig(ctx context.Context, id, file string) (*KubeconfigResult, error) {
-	return c.agentKubeconfig(ctx, kindSpace, id, file)
+// SpaceKubeconfig writes the agent kubeconfig of a space to file; force
+// replaces a file that exists.
+func (c *Context) SpaceKubeconfig(ctx context.Context, id, file string, force bool) (*KubeconfigResult, error) {
+	return c.agentKubeconfig(ctx, kindSpace, id, file, force)
 }
 
 // ClusterList lists the clusters the credential reaches.
@@ -729,7 +742,7 @@ func (c *Context) ClusterList(ctx context.Context) (*ClusterList, error) {
 	}
 	l := &ClusterList{Clusters: []ClusterRecord{}}
 	for _, m := range rows {
-		l.Clusters = append(l.Clusters, *clusterRecord(m))
+		l.Clusters = append(l.Clusters, clusterRecord(m))
 	}
 	return l, nil
 }
@@ -743,7 +756,8 @@ func (c *Context) ClusterGet(ctx context.Context, id string) (*ClusterRecord, er
 	if err != nil {
 		return nil, err
 	}
-	return clusterRecord(m), nil
+	r := clusterRecord(m)
+	return &r, nil
 }
 
 // ClusterLease sets the lease of a hosted cluster: hours from now.
@@ -751,9 +765,10 @@ func (c *Context) ClusterLease(ctx context.Context, id, hours string) (*LeaseRes
 	return c.agentLease(ctx, kindCluster, id, hours)
 }
 
-// ClusterKubeconfig writes the agent kubeconfig of a hosted cluster to file.
-func (c *Context) ClusterKubeconfig(ctx context.Context, id, file string) (*KubeconfigResult, error) {
-	return c.agentKubeconfig(ctx, kindCluster, id, file)
+// ClusterKubeconfig writes the agent kubeconfig of a hosted cluster to
+// file; force replaces a file that exists.
+func (c *Context) ClusterKubeconfig(ctx context.Context, id, file string, force bool) (*KubeconfigResult, error) {
+	return c.agentKubeconfig(ctx, kindCluster, id, file, force)
 }
 
 // agentLease is PATCH <collection>/<id>/lease {hours}. lo always sends a
@@ -771,19 +786,23 @@ func (c *Context) agentLease(ctx context.Context, k agentKind, id, hours string)
 	if err != nil {
 		return nil, err
 	}
-	return &LeaseResult{ID: text(m["id"]), LeaseExpiresAt: text(m["leaseExpiresAt"]), noun: k.noun}, nil
+	return &LeaseResult{ID: apiText(m["id"]), LeaseExpiresAt: apiText(m["leaseExpiresAt"]), noun: k.noun}, nil
 }
 
 // agentKubeconfig downloads <collection>/<id>/kubeconfig/agent and writes it
 // to file (0600, through a temporary file in the same directory). The file
 // holds no secret: its exec stanza runs `lo kubehz token`. The command still
 // counts as credential output, so `lo mcp` never offers it.
-func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file string) (*KubeconfigResult, error) {
+func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file string, force bool) (*KubeconfigResult, error) {
 	if err := c.agentCheckID(k, "kubeconfig", id); err != nil {
 		return nil, err
 	}
 	action := k.noun + " kubeconfig " + id
-	s, err := c.agentSession(ctx, action)
+	target, err := c.kubeconfigTarget(action, file, force)
+	if err != nil {
+		return nil, err
+	}
+	s, err := c.openSession(ctx, action)
 	if err != nil {
 		return nil, err
 	}
@@ -799,7 +818,7 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 		c.errorf("kubehz %s: the api answered without a kubeconfig", action)
 		return nil, ErrHandled
 	}
-	if err := writePrivateFile(file, res.Body); err != nil {
+	if err := writePrivateFile(target, res.Body); err != nil {
 		c.errorf("kubehz %s: cannot write %s", action, file)
 		c.echoErr("  Name a file in a directory that exists and that you can write to.")
 		return nil, ErrHandled
@@ -807,10 +826,43 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 	return &KubeconfigResult{ID: id, File: file}, nil
 }
 
+// kubeconfigTarget decides where the kubeconfig goes, before any request:
+//   - a directory, or a link to one: refused;
+//   - a path that exists (a file, any link): refused without force, so
+//     --file ~/.kube/config cannot lose its contexts by accident;
+//   - with force, a link is written through: its target is replaced and
+//     the link stays (a link to nothing cannot be resolved: refused).
+//
+// The bash twin is kubehz::agent_target.
+func (c *Context) kubeconfigTarget(action, file string, force bool) (string, error) {
+	if fi, err := os.Stat(file); err == nil && fi.IsDir() {
+		c.errorf("kubehz %s: %s is a directory", action, file)
+		c.echoErr("  Name a file, not a directory.")
+		return "", ErrHandled
+	}
+	li, err := os.Lstat(file)
+	if err != nil {
+		return file, nil
+	}
+	if !force {
+		c.errorf("kubehz %s: %s exists", action, file)
+		c.echoErr("  Pass --force to replace it, or name a new file.")
+		return "", ErrHandled
+	}
+	if li.Mode()&os.ModeSymlink == 0 {
+		return file, nil
+	}
+	target, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		c.errorf("kubehz %s: cannot write %s", action, file)
+		c.echoErr("  Name a file in a directory that exists and that you can write to.")
+		return "", ErrHandled
+	}
+	return target, nil
+}
+
 // writePrivateFile replaces file with data, mode 0600, through a temporary
-// file next to it. A directory is never replaced: rename(2) refuses to put
-// a file over a directory (EISDIR). The bash twin checks with -d first,
-// because mv would move the file into the directory.
+// file next to it (kubeconfigTarget decided that file may be replaced).
 func writePrivateFile(file string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(file), ".kubeconfig-*")
 	if err != nil {

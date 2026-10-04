@@ -168,13 +168,15 @@ func agentLeaseLeaf(paths *config.Paths, short string,
 // agentKubeconfigLeaf is `kubeconfig <id> --file <path>`: the file holds no
 // secret (its exec stanza runs `lo kubehz token`), but the command counts
 // as credential output, so `lo mcp` never offers it and `lo chat` denies it.
+// An existing file needs the global --force (a link is written through).
 func agentKubeconfigLeaf(paths *config.Paths, short string,
-	download func(kc *kubehz.Context, ctx context.Context, id, file string) (*kubehz.KubeconfigResult, error)) *cobra.Command {
+	download func(kc *kubehz.Context, ctx context.Context, id, file string, force bool) (*kubehz.KubeconfigResult, error)) *cobra.Command {
 	c := agentLeaf(paths, "kubeconfig <id> --file <path>", short, commandSpec{credentialOutput: true}, []string{"id"}, []string{"file"},
 		func(kc *kubehz.Context, cmd *cobra.Command, args []string) (agentReport, error) {
 			file, _ := cmd.Flags().GetString("file")
-			return download(kc, cmd.Context(), args[0], file)
+			force, _ := cmd.Flags().GetBool("force")
+			return download(kc, cmd.Context(), args[0], file, force)
 		})
-	c.Flags().String("file", "", "Write the kubeconfig to this file (mode 0600); it prints the path")
+	c.Flags().String("file", "", "Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force")
 	return c
 }
