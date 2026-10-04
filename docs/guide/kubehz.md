@@ -890,9 +890,11 @@ lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml
 sent, and the platform applies its default.
 
 Every command takes `-o text|json|yaml`. `text` prints a table for a list and
-one line per field for one record. `json` and `yaml` print fixed fields, which
-a script or an agent can read (see
-[Output formats](../reference/cli.md#output-formats)). A field that the api
+one line per field for one record. `json` and `yaml` print fixed fields (see
+[Output formats](../reference/cli.md#output-formats)). Use `-o json` in a
+script or an agent: `-o yaml` prints a string such as `yes` without quotes,
+and a YAML 1.1 reader takes it for a boolean
+([#246](https://github.com/kernpilot/lok8s/issues/246)). A field that the api
 leaves out is `null`. Every string from the api loses its control characters
 before `lo` prints it.
 
@@ -905,6 +907,12 @@ lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
 KUBECONFIG=agent.yaml kubectl get pods
 ```
 
+The command does not replace a file that exists, so `--file ~/.kube/config`
+cannot remove your other contexts by accident. Add `--force` (or `-f`) to
+replace the file. When the path is a link, `--force` replaces the file that
+the link points to, and the link stays. A directory, or a link to one, is
+refused. `lo` checks the path before it calls the api.
+
 ### What the api enforces
 
 `lo` adds no authority. It checks the shape of an id (`sp-…`, `cl-…`) and of
@@ -912,7 +920,8 @@ a number, then sends the request. The api decides:
 
 - **The role of the key.** A viewer key can read. A create, a lease or a
   delete answers `403 TOKEN_SCOPE_MISSING`. Use a key with the role editor or
-  admin.
+  admin. With `KUBEHZ_TOKEN`, the same code names the scope that the token
+  does not hold.
 - **The scope of the key.** A key with the scope `resources` reaches only the
   clusters and spaces it names and the ones it creates. Another space answers
   `404`, the same as a space that does not exist.
@@ -972,10 +981,15 @@ This file holds the client secret: keep it out of version control. With
 ends: after two hours, or after the hours that the create names (720 at
 most). With `destructive`, the agent can also change leases and delete.
 
-The bash variant of `lo mcp` (the argsh builtin that `lo chat` drives) has no
-tiers and names the tools by their last two words: `lo_space_list`,
-`lo_cluster_get`. `lo chat` treats list and get as read tools and denies
-`lo_space_kubeconfig` and `lo_cluster_kubeconfig`.
+`lo mcp` puts a `--` in front of the positional arguments of a call. Thus an
+argument such as `--force` from the model cannot set a flag that the tool
+does not offer.
+
+`lo chat` cannot run these tools yet. It drives the bash variant of
+`lo mcp` (the argsh builtin), which names a command three levels deep by its
+last two words (`lo_space_list`) and then cannot run it
+([#245](https://github.com/kernpilot/lok8s/issues/245)). The `lo chat`
+defaults deny `lo_space_kubeconfig` and `lo_cluster_kubeconfig`.
 
 ## Assessment and handover
 

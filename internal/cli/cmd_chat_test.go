@@ -161,6 +161,55 @@ func TestArgshToolName(t *testing.T) {
 	}
 }
 
+// TestChatTiersNameNoToolTheArgshServerCannotRun: the argsh `lo mcp` that
+// `lo chat` drives names a command three levels deep by its last two words
+// and then cannot run it (#245). A tier entry for such a tool would offer
+// the model a tool that always fails. The deny list may name them.
+func TestChatTiersNameNoToolTheArgshServerCannotRun(t *testing.T) {
+	broken, runnable := map[string]bool{}, map[string]bool{}
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if len(strings.Fields(c.CommandPath())) > 3 {
+			broken[argshToolName(c)] = true
+		} else {
+			runnable[argshToolName(c)] = true
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(newUsageTree(synthProject(t), routing{}))
+	// A two-word name that a real two-level command also carries
+	// (`lo drivers kubehz status` and `lo kubehz status`) runs that one.
+	for name := range runnable {
+		delete(broken, name)
+	}
+	if !broken["lo_space_list"] {
+		t.Fatalf("no third-level tool found (%v): the check proves nothing", broken)
+	}
+	for _, file := range []string{"../../.lok8s/chat/defaults.json", "../assets/lok8s/chat/defaults.json"} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var defaults struct {
+			Injection struct {
+				Tiers map[string][]string `json:"tiers"`
+			} `json:"injection"`
+		}
+		if err := json.Unmarshal(raw, &defaults); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		for tier, tools := range defaults.Injection.Tiers {
+			for _, tool := range tools {
+				if broken[tool] {
+					t.Errorf("%s: tier %s names %s, which the argsh lo mcp cannot run (#245)", file, tier, tool)
+				}
+			}
+		}
+	}
+}
+
 // TestChatDeniesEveryCredentialOutputCommand: `lo chat` drives the bash tree's
 // argsh `lo mcp`, which knows nothing of AnnotationCredentialOutput. The chat
 // defaults' deny list is the only gate there, so every such command must be
