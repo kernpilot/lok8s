@@ -800,3 +800,109 @@ EOF
   assert_success
   assert [ ! -f "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" ]
 }
+
+# ── register: sends the stored bind secret (B289) ───────────────────────
+
+BIND_STORED="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+BIND_NEXT="009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+
+# _register_sandbox <response bindSecret>: the real jq behind a wrapper that
+# saves its argv, a Lo spec through the yq stub, and a curl that saves its
+# argv and its stdin (the request body). Every register response hands out
+# <response bindSecret>.
+_register_sandbox() {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  export STUB_NEXT="${1}" STUB_CURL_ARGV="${BATS_TEST_TMPDIR}/curl.argv" STUB_CURL_BODY="${BATS_TEST_TMPDIR}/curl.body"
+  export STUB_JQ_ARGV="${BATS_TEST_TMPDIR}/jq.argv"
+  : > "${STUB_CURL_ARGV}"
+  : > "${STUB_CURL_BODY}"
+  : > "${STUB_JQ_ARGV}"
+  jq() {
+    echo "$*" >> "${STUB_JQ_ARGV}"
+    command jq "$@"
+  }
+  export -f jq
+  curl() {
+    echo "$*" >> "${STUB_CURL_ARGV}"
+    [[ " $* " != *" --data-binary @- "* ]] || cat >> "${STUB_CURL_BODY}"
+    case "$*" in
+      *"/api/clusters/register"*)
+        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}\n' "${STUB_NEXT}" ;;
+      *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n' ;;
+      *) printf '{}\n' ;;
+    esac
+  }
+  export -f curl
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  unset KUBEHZ_TOKEN HCLOUD_TOKEN
+}
+
+# _register_mode <legacy|bearer|claim-key>: one register call in that mode.
+_register_mode() {
+  case "${1}" in
+    legacy) kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" ;;
+    bearer) KUBEHZ_TOKEN="khzt_test" kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev" ;;
+    claim-key) HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example" kubehz::ensure_claim_key "test.kubehz.dev" "https://api.kubehz.dev" ;;
+  esac
+}
+
+# _register_base <mode>: the body each mode sends without a bind secret.
+_register_base() {
+  case "${1}" in
+    claim-key) echo '{"domain":"test.kubehz.dev","claimKey":true}' ;;
+    *) echo '{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"}' ;;
+  esac
+}
+
+@test "register: every mode sends the stored bind secret in the body, never on argv, and stores the new one (B289)" {
+  local mode bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    _register_sandbox "${BIND_NEXT}"
+    printf %s "${BIND_STORED}" > "${bind_file}"
+
+    run _register_mode "${mode}"
+    assert_success
+    refute_output --partial "${BIND_STORED}"
+    # `command jq`: the test's own jq calls stay out of the argv record.
+    run command jq -c . "${STUB_CURL_BODY}"
+    assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_STORED}" '. + {bindSecret: $b}')"
+    run grep -c -e "${BIND_STORED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"
+    assert_output "${STUB_CURL_ARGV}:0
+${STUB_JQ_ARGV}:0"
+    run cat "${bind_file}"
+    assert_output "${BIND_NEXT}"
+  done
+}
+
+@test "register: a missing, irregular or malformed stored bind secret adds no bindSecret (B289)" {
+  local mode stored bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    for stored in missing directory upper short short-newline newline not-hex; do
+      _register_sandbox ""
+      rm -rf "${bind_file}"
+      case "${stored}" in
+        missing) ;;
+        directory) mkdir -p "${bind_file}" ;;
+        upper) printf %s "${BIND_STORED^^}" > "${bind_file}" ;;
+        short) printf %s "${BIND_STORED:1}" > "${bind_file}" ;;
+        short-newline) printf '%s\n' "${BIND_STORED:1}" > "${bind_file}" ;;
+        newline) printf '%s\n' "${BIND_STORED}" > "${bind_file}" ;;
+        not-hex) printf %s "g${BIND_STORED:1}" > "${bind_file}" ;;
+      esac
+
+      run _register_mode "${mode}"
+      assert_success
+      run command jq -c . "${STUB_CURL_BODY}"
+      assert_output "$(_register_base "${mode}")"
+    done
+  done
+  rm -rf "${bind_file}"
+}

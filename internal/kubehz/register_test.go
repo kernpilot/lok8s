@@ -196,6 +196,109 @@ func TestRegisterModesPersistBindSecret(t *testing.T) {
 	})
 }
 
+// registerMode runs one register mode against the harness api. The response
+// hands out next as the new bind secret.
+type registerMode struct {
+	name string
+	run  func(t *testing.T, h *harness, next string)
+	base string // the body without bindSecret and without the closing brace
+}
+
+var registerModes = []registerMode{
+	{
+		name: "the legacy fingerprint announce",
+		run: func(t *testing.T, h *harness, next string) {
+			delete(h.env, "KUBEHZ_TOKEN")
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","registered":true,"bindSecret":"`+next+`"}`)
+			cfg := &Config{APIURL: h.apiURL(), Access: "registered"}
+			mustOK(t, h.ctx.RegisterCluster(t.Context(), cfg, "test.kubehz.dev", loSpec(h)), h.output())
+		},
+		base: `{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"`,
+	},
+	{
+		name: "the direct claim",
+		run: func(t *testing.T, h *harness, next string) {
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","claimed":true,"bindSecret":"`+next+`"}`)
+			mustOK(t, h.ctx.directClaim(t.Context(), &Config{}, "test.kubehz.dev", loSpec(h), h.apiURL()), h.output())
+		},
+		base: `{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"`,
+	},
+	{
+		name: "the claim-key registration",
+		run: func(t *testing.T, h *harness, next string) {
+			h.env["HCLOUD_TOKEN"] = "hc_test"
+			h.env["HCLOUD_API_BASE"] = h.apiURL()
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-5","bindSecret":"`+next+`","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}`)
+			h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[]}`)
+			h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
+			mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
+		},
+		base: `{"domain":"test.kubehz.dev","claimKey":true`,
+	},
+}
+
+// B289: every register mode sends the stored bind secret, so a re-run keeps
+// the same cluster record, and stores the one the response hands out.
+func TestRegisterModesSendTheStoredBindSecret(t *testing.T) {
+	next := "00" + bindSecretFixture[2:]
+	for _, m := range registerModes {
+		t.Run(m.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+			m.run(t, h, next)
+			r := h.lastReq("POST", "/api/clusters/register")
+			if want := m.base + `,"bindSecret":"` + bindSecretFixture + `"}`; r == nil || r.Body != want {
+				t.Fatalf("register body = %+v, want %s", r, want)
+			}
+			if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != next {
+				t.Fatalf("the new bind secret was not stored: %q", got)
+			}
+			mustNotContain(t, h.output(), bindSecretFixture)
+			mustNotContain(t, h.output(), next)
+		})
+	}
+}
+
+// B289: a missing, irregular or malformed stored value adds no bindSecret
+// (the api refuses a malformed one).
+func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
+	stored := map[string]string{
+		"upper-case hex":       strings.ToUpper(bindSecretFixture),
+		"63 hex":               bindSecretFixture[1:],
+		"63 hex and a newline": bindSecretFixture[1:] + "\n",
+		"64 hex and a newline": bindSecretFixture + "\n",
+		"not hex":              "g" + bindSecretFixture[1:],
+	}
+	for _, m := range registerModes {
+		for _, name := range []string{"missing", "a directory", "upper-case hex", "63 hex", "63 hex and a newline", "64 hex and a newline", "not hex"} {
+			t.Run(m.name+"/"+name, func(t *testing.T) {
+				h := newHarness(t)
+				path := bindSecretFile(h, "test.kubehz.dev")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				switch name {
+				case "missing":
+				case "a directory":
+					if err := os.Mkdir(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					if err := os.WriteFile(path, []byte(stored[name]), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// The response hands out no new secret: nothing to store.
+				m.run(t, h, "")
+				r := h.lastReq("POST", "/api/clusters/register")
+				if want := m.base + `}`; r == nil || r.Body != want {
+					t.Fatalf("register body = %+v, want %s", r, want)
+				}
+			})
+		}
+	}
+}
+
 func TestDirectClaimConnectsHcloudToken(t *testing.T) {
 	t.Run("writable", func(t *testing.T) {
 		h := newHarness(t)

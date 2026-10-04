@@ -494,7 +494,7 @@ trees.
 | `hack/parity-loop.sh` | `tilt`, `image`, `env`, `hooks` | read-only / error paths; stub `tilt`/`kubectl`/`docker`/`kind` in the synthetic `.bin` |
 | `hack/parity-leaves.sh` | `init`, `crds`, `addons`, `drivers`, `chat`, `ai` | stateful sections get one project clone per implementation and byte-diff the trees |
 | `hack/parity-ops.sh` | `deploy`, `recover`, `gitops` | cluster-free paths; stub `kubectl`, a scripted `mock` provider whose rebuild refuses outside `CLOUD_DRY_RUN` |
-| `hack/parity-kubehz.sh` | `lo kubehz` | config validation, usage errors, hosting-axis routing, handover bundle checks, the bind-secret stage of `deploy` (stub `kubectl` that names its calls); no api tokens set |
+| `hack/parity-kubehz.sh` | `lo kubehz` | config validation, usage errors, hosting-axis routing, handover bundle checks, the bind-secret stage of `deploy` (stub `kubectl` that names its calls), the `register` request bodies against a local HTTPS stub (Linux, python3, openssl); no real api tokens set |
 | `hack/parity-operator.sh` | `lo operator <hook>` vs the frozen bash hooks | `--config` bytes and stubbed `kubectl`/`clusterctl` call logs |
 | `hack/parity-orchestrate.sh` | `up`, `down`, `clean`, `provision`, `destroy`, `bootstrap`, `status`, `registry` | stub `tilt`/`kind`/`docker`/`kubectl`/Secret plugin; consent gates driven with closed stdin; `LO_RENDER=exec` pinned so both implementations exec the (stub) Secret plugin for the registry TLS mint (D19), whose docker argv, plugin environment and `[warn]` lines are diffed byte for byte |
 

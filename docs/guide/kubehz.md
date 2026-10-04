@@ -458,6 +458,11 @@ The secret proves only that the operator who deploys is the operator who
 announced. It rotates on every re-announce and is spent on the first
 adoption. It is a credential: keep `.kubehz-bind` out of version control.
 
+A re-run of `lo kubehz register` sends the stored secret, so the re-run
+keeps the same cluster record and stores the new secret it gets back. lo
+sends the value only when the file holds exactly 64 lowercase hex
+characters, and it never puts the value on a command line.
+
 The platform does not adopt an announced row by its domain alone. An agent
 that registers without the secret gets a separate pending row, and the
 announced row gets no heartbeats. So `lo kubehz deploy` stages the secret

@@ -342,6 +342,25 @@ kubehz::persist_bind_secret() {
     warn "kubehz: could not store the bind secret"
 }
 
+# Print the JSON body of a register call: the object that <filter> builds
+# from the jq arguments, plus bindSecret when clusters/<domain>/.kubehz-bind
+# is a regular file that holds exactly 64 lowercase hex. Every register call
+# sends it (B289), so a re-run keeps the same cluster record. A missing,
+# irregular or malformed file adds nothing: the api refuses a malformed
+# value. jq reads the value from the file (--rawfile), and the caller pipes
+# the body into curl (--data-binary @-), so the value never reaches argv.
+# Usage: kubehz::register_body <domain> <filter> [jq args...]
+kubehz::register_body() {
+  local domain="${1}" filter="${2}"; shift 2
+  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind"
+  if [[ -f "${path}" ]]; then
+    jq -n "${@}" --rawfile bind "${path}" \
+      "${filter}"' + (if $bind | test("\\A[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)'
+  else
+    jq -n "${@}" "${filter}"
+  fi
+}
+
 kubehz::ensure_claim_key() {
   local domain="${1}" api_url="${2}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
@@ -349,9 +368,11 @@ kubehz::ensure_claim_key() {
   http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
 
   local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg d "${domain}" '{domain: $d, claimKey: true}')") || return 1
+  # shellcheck disable=SC2016  # the filter is jq program text
+  response=$(kubehz::register_body "${domain}" '{domain: $d, claimKey: true}' --arg d "${domain}" |
+    curl -fsSL -X POST "${api_url}/api/clusters/register" \
+      -H "Content-Type: application/json" \
+      --data-binary @-) || return 1
 
   local cluster_id public_key fingerprint key_name
   cluster_id=$(jq -r '.id // empty' <<<"${response}")
@@ -410,10 +431,13 @@ kubehz::direct_claim() {
 
   # Direct-attributed register: the bearer proves the tenant; the row lands owned.
   local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg d "${domain}" --arg fp "${fingerprint}" '{domain: $d, fingerprint: $fp}')") || return 1
+  # shellcheck disable=SC2016  # the filter is jq program text
+  response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
+      --arg d "${domain}" --arg fp "${fingerprint}" |
+    curl -fsSL -X POST "${api_url}/api/clusters/register" \
+      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+      -H "Content-Type: application/json" \
+      --data-binary @-) || return 1
 
   local cluster_id claimed
   cluster_id=$(jq -r '.id // empty' <<<"${response}")
@@ -515,13 +539,13 @@ kubehz::register_cluster() {
     return 0
   }
 
-  local payload
-  payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" '{domain: $d, fingerprint: $fp}')
-
   local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
-    -H "Content-Type: application/json" \
-    -d "${payload}") || {
+  # shellcheck disable=SC2016  # the filter is jq program text
+  response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
+      --arg d "${domain}" --arg fp "${fingerprint}" |
+    curl -fsSL -X POST "${api_url}/api/clusters/register" \
+      -H "Content-Type: application/json" \
+      --data-binary @-) || {
     warn "kubehz API request failed for ${domain}, cluster will continue without kubehz integration"
     return 0
   }

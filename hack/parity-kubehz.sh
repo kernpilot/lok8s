@@ -4,20 +4,19 @@
 #
 # Every case runs BOTH implementations (the Go binary, and the same binary
 # routed to the frozen tree by the project file) against a synthetic
-# project and diffs stdout, stderr and exit codes. ONLY cluster-free and
-# api-free paths are exercised: config validation refusals, usage/flag
-# errors, `status` with no registration, the hosting-axis routing of every
-# subcommand, the handover bundle checks, and the first kubectl calls of
-# `deploy` (the bind-secret stage) against a stub. No case reaches a
-# kubeconfig, a real kubectl, the platform api or the Hetzner api —
-# KUBEHZ_TOKEN/HCLOUD_TOKEN are unset and every api-bearing path stops at a
-# local refusal.
+# project and diffs stdout, stderr and exit codes. ONLY cluster-free paths
+# are exercised: config validation refusals, usage/flag errors, `status`
+# with no registration, the hosting-axis routing of every subcommand, the
+# handover bundle checks, the first kubectl calls of `deploy` (the
+# bind-secret stage) against a stub, and the register request bodies against
+# a local HTTPS stub (the last section). No case reaches a kubeconfig, a
+# real kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN and
+# HCLOUD_TOKEN are unset except for dummy values in the register section.
 #
 # What this harness CANNOT cover: how the two implementations render a SERVER
 # string (the api's own refusal message — scrubbed, clipped, and in the bash
-# tree escaped for `echo -e`). Every case here is api-free, and
-# spec.kubehz.apiUrl must be HTTPS, so no plain-http stub can answer either
-# implementation. That rendering is pinned instead by a golden PAIR both
+# tree escaped for `echo -e`). Only the register section talks to a stub,
+# and that stub answers 2xx. That rendering is pinned instead by a golden PAIR both
 # suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
 # (the hostile input) and space-above-shared.txt (the bytes both must print),
 # asserted by TestProvisionSharedScrubsTheSharedCeilingMessage and by
@@ -520,5 +519,132 @@ check - kubehz h r -b "${WORK}/notarchive"
 check_parse - kubehz bogus
 check_parse - kubehz node bogus
 check_parse - kubehz handover bogus
+
+# ── register: lo sends its stored bind secret (B289) ────────────────────────
+# Every register mode sends the value of .kubehz-bind as bindSecret, so a
+# re-run keeps the same cluster record. These cases need an api, so they run
+# against a local HTTPS stub (a self-signed certificate that SSL_CERT_FILE
+# hands to Go and CURL_CA_BUNDLE to curl). The stub records each request
+# without the Authorization value. After each run, the record and the
+# stored .kubehz-bind join that run's stdout, so the diff covers the request
+# bodies and the stored secret. Linux only: Go reads SSL_CERT_FILE there.
+BIND_STORED=9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70
+STUB_HTTPS_PID=""
+parity_cleanup() { [[ -z "${STUB_HTTPS_PID}" ]] || kill "${STUB_HTTPS_PID}" 2>/dev/null || :; }
+if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  echo "skip: register bind-secret cases (need Linux, python3 and openssl)"
+else
+  mkdir -p "${WORK}/tls"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+    -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
+    -keyout "${WORK}/tls/key.pem" -out "${WORK}/tls/cert.pem" 2>/dev/null
+  cat > "${WORK}/tls/stub.py" <<'PY'
+import http.server, json, ssl, sys
+
+log, cert, key = sys.argv[1:4]
+NEXT = "009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def record(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        try:
+            body = json.dumps(json.loads(raw), sort_keys=True) if raw else "-"
+        except ValueError:
+            body = "unparsable"
+        bearer = "yes" if self.headers.get("Authorization") else "no"
+        with open(log, "a") as f:
+            f.write(f"{self.command} {self.path.split('?')[0]} bearer={bearer} {body}\n")
+
+    def reply(self, code, obj):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        self.record()
+        self.reply(200, {"ssh_keys": []})
+
+    def do_POST(self):
+        self.record()
+        if self.path == "/api/clusters/register":
+            self.reply(200, {"id": "cl-parity", "registered": True, "claimed": True, "bindSecret": NEXT,
+                             "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb",
+                                          "name": "kubehz-claim-bind-reg.dev"}})
+        else:
+            self.reply(201, {"ssh_key": {"id": 43}})
+
+    def log_message(self, *args):
+        pass
+
+
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(cert, key)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+print(f"port {srv.server_address[1]}", flush=True)
+srv.serve_forever()
+PY
+  python3 -u "${WORK}/tls/stub.py" "${WORK}/tls/requests.log" "${WORK}/tls/cert.pem" "${WORK}/tls/key.pem" \
+    >"${WORK}/tls/stub.out" 2>&1 &
+  STUB_HTTPS_PID=$!
+  STUB_PORT=""
+  for _ in $(seq 1 50); do
+    STUB_PORT="$(sed -nE 's/^port ([0-9]+)$/\1/p' "${WORK}/tls/stub.out")"
+    [[ -n "${STUB_PORT}" ]] && break
+    sleep 0.1
+  done
+  if [[ -z "${STUB_PORT}" ]]; then
+    echo "FAIL: register bind-secret cases — the HTTPS stub did not start: $(cat "${WORK}/tls/stub.out")"
+    failures=$((failures + 1))
+  else
+    mk bind-reg.dev <<EOF
+kind: Lo
+metadata:
+  name: bind-reg
+spec:
+  cluster:
+    domain: bind-reg.dev
+  kubehz:
+    access: registered
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+    export SSL_CERT_FILE="${WORK}/tls/cert.pem" CURL_CA_BUNDLE="${WORK}/tls/cert.pem"
+    # BIND_FIXTURE: what .kubehz-bind holds before each run (valid,
+    # malformed or missing).
+    bind_reset() {
+      rm -f "${CL}/bind-reg.dev/.kubehz-bind"
+      : > "${WORK}/tls/requests.log"
+      case "${BIND_FIXTURE}" in
+        valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+        malformed) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      esac
+    }
+    bind_record() {
+      {
+        echo "--- requests"
+        cat "${WORK}/tls/requests.log"
+        echo "--- .kubehz-bind"
+        cat "${CL}/bind-reg.dev/.kubehz-bind" 2>/dev/null || echo "(none)"
+        echo
+      } >> "${WORK}/${1}.out"
+    }
+    PARITY_PRE_EACH=bind_reset
+    PARITY_POST_EACH=bind_record
+    for BIND_FIXTURE in valid malformed missing; do
+      check "${UNBOUND}" kubehz register --domain bind-reg.dev                 # fingerprint announce
+      export KUBEHZ_TOKEN=khzt_parity
+      check "${UNBOUND}" kubehz register --domain bind-reg.dev                 # bearer (direct claim)
+      unset KUBEHZ_TOKEN
+      export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+      check "${UNBOUND}" kubehz register --domain bind-reg.dev                 # claim key
+      unset HCLOUD_TOKEN HCLOUD_API_BASE
+    done
+    unset PARITY_PRE_EACH PARITY_POST_EACH SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE
+  fi
+fi
 
 report

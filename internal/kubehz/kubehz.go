@@ -30,6 +30,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/clock"
@@ -271,6 +272,35 @@ func (c *Context) persistBindSecret(domain, secret string) {
 	if err := os.WriteFile(dir+"/.kubehz-bind", []byte(secret), 0o600); err != nil {
 		c.warnf("kubehz: could not store the bind secret: %s", err)
 	}
+}
+
+var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// storedBindSecret is the bind secret a previous register stored at
+// bindSecretPath, when the file is a regular file that holds exactly 64
+// lowercase hex. Every register call sends it as bindSecret (B289), so a
+// re-run keeps the same cluster record. A missing, irregular or malformed
+// file gives "", and the call sends no bindSecret: the api refuses a
+// malformed value.
+func (c *Context) storedBindSecret(domain string) string {
+	path := c.bindSecretPath(domain)
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() != 64 {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !bindSecretRe.Match(raw) {
+		return ""
+	}
+	return string(raw)
+}
+
+// registerBody is the JSON body of a register call: the pairs, then
+// bindSecret when storedBindSecret has one.
+func (c *Context) registerBody(domain string, pairs ...jsonPair) []byte {
+	if secret := c.storedBindSecret(domain); secret != "" {
+		pairs = append(pairs, jsonPair{"bindSecret", secret})
+	}
+	return compactJSON(pairs...)
 }
 
 // requireDomainSpec is the shared subcommand preamble: an active domain and
