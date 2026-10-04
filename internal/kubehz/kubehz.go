@@ -256,8 +256,9 @@ func (c *Context) bindSecretPath(domain string) string {
 // bindSecretPath, mode 0600, with NO trailing newline (deploy reads it into a
 // Secret whose value must be the exact 64 hex). An empty secret writes
 // nothing (an older api mints none, and the deploy then falls back). A write
-// failure warns but never fails the register: the agent can still adopt via
-// the pending-pool path, or the user can claim by claim-code.
+// failure warns but never fails the register. The deploy then finds no file,
+// and the agent registers a separate pending row that the user claims by its
+// claim code (B288).
 func (c *Context) persistBindSecret(domain, secret string) {
 	if secret == "" {
 		return

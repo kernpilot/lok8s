@@ -1262,51 +1262,153 @@ _podspec() {
   assert_success
 }
 
-# ── apply_bind_secret (B243) ─────────────────────────────
+# ── stage_bind_secret (B243, B288) ───────────────────────
 
-@test "apply_bind_secret: a staged bind secret is upserted into kubehz-agent-bind from the file, never argv" {
-  _source_deploy
-  _stub_kubectl_log
-  local secret="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+BIND_SECRET_VALUE="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+BIND_MANIFEST='kind: Secret
+metadata:
+  name: kubehz-agent-bind
+  namespace: kubehz-system
+data:
+  bind-secret: OWYxYw=='
+
+# _stub_kubectl_bind [fail]: log every call. The dry-run create prints
+# BIND_MANIFEST; the server-side apply saves its stdin; a call whose argv
+# contains <fail> exits 1.
+_stub_kubectl_bind() {
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  export STUB_KUBECTL_FAIL="${1:-}"
+  export STUB_SSA_STDIN="${BATS_TEST_TMPDIR}/ssa.stdin"
+  export BIND_MANIFEST
+  : > "${STUB_KUBECTL_LOG}"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    if [[ -n "${STUB_KUBECTL_FAIL}" && "$*" == *"${STUB_KUBECTL_FAIL}"* ]]; then
+      return 1
+    fi
+    case "$*" in
+      *"create secret generic kubehz-agent-bind"*) printf '%s\n' "${BIND_MANIFEST}" ;;
+      *"apply --server-side"*) cat > "${STUB_SSA_STDIN}" ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+}
+
+_write_bind_secret() {
   mkdir -p "${PATH_CLUSTERS}/acme.example.com"
-  printf %s "${secret}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  printf %s "${BIND_SECRET_VALUE}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+}
 
-  run kubehz::apply_bind_secret "acme.example.com"
-  assert_success
-  run grep -c "delete secret kubehz-agent-bind --ignore-not-found=true" "${STUB_KUBECTL_LOG}"
-  assert_output "1"
-  run grep -c -- "create secret generic kubehz-agent-bind --from-file=bind-secret=${PATH_CLUSTERS}/acme.example.com/.kubehz-bind" "${STUB_KUBECTL_LOG}"
-  assert_output "1"
-  # The secret value is read from the file, never placed on the command line.
-  run grep -c "from-literal" "${STUB_KUBECTL_LOG}"
-  assert_output "0"
-  run grep -c "${secret}" "${STUB_KUBECTL_LOG}"
+# _assert_bind_staged_first <work> <first change>: lines 1-3 stage the Secret
+# (namespace, dry-run create from the file, server-side apply of the dry-run
+# output on stdin), and line 4 is the first call that changes the agent.
+_assert_bind_staged_first() {
+  local work="${1}" first="${2}"
+  run sed -n '1p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply -f ${work}/agent/namespace.yaml"
+  run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=${PATH_CLUSTERS}/acme.example.com/.kubehz-bind --dry-run=client -o yaml"
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply --server-side --force-conflicts -f -"
+  run sed -n '4p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "${first}"
+  # The apply reads what the dry run printed, on stdin.
+  run cat "${STUB_SSA_STDIN}"
+  assert_output "${BIND_MANIFEST}"
+  # The value comes from the file, never from the command line. An upsert
+  # in place: no delete leaves a running CronJob without the Secret.
+  run grep -c -e "from-literal" -e "${BIND_SECRET_VALUE}" -e "delete secret kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }
 
-@test "apply_bind_secret: no staged secret touches kubehz-agent-bind not at all" {
+@test "apply order (to operator): the bind secret is staged BEFORE the CronJob agent and the identity bootstrap (B288)" {
   _source_deploy
-  _stub_kubectl_log
-  run kubehz::apply_bind_secret "acme.example.com"
-  assert_success
-  run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
-  assert_output "0"
-}
-
-@test "apply order (to operator): a staged bind secret is upserted after the CronJob apply, before the identity read" {
-  _source_deploy
-  _stub_kubectl_log
+  _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind1"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  mkdir -p "${PATH_CLUSTERS}/acme.example.com"
-  printf %s "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  _write_bind_secret
 
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
-  # order: apply agent (1), delete+create the bind Secret (2,3), identity read.
-  run grep -n "apply -k ${work}/agent\|create secret generic kubehz-agent-bind\|get secret kubehz-agent " "${STUB_KUBECTL_LOG}"
-  assert_line --index 0 --partial "apply -k ${work}/agent"
-  assert_line --index 1 --partial "create secret generic kubehz-agent-bind"
-  assert_line --index 2 --partial "get secret kubehz-agent "
+  refute_output --partial "no bind secret"
+  _assert_bind_staged_first "${work}" "apply -k ${work}/agent"
+  run sed -n '5p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "get secret kubehz-agent "
+}
+
+@test "apply order (to cronjob): the bind secret is staged BEFORE the live agent goes and the CronJob agent returns (B288)" {
+  _source_deploy
+  _stub_kubectl_bind
+  local work="${BATS_TEST_TMPDIR}/bind2"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+  _write_bind_secret
+
+  run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
+  assert_success
+  _assert_bind_staged_first "${work}" "delete -k ${work}/live-agent/managed"
+  run tail -1 "${STUB_KUBECTL_LOG}"
+  assert_output --partial "apply -k ${work}/agent"
+}
+
+@test "stage_bind_secret: a failed stage with a bind secret on disk stops before the CronJob agent, in both directions (B288)" {
+  _source_deploy
+  _write_bind_secret
+  local mode owner access step work n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    for step in "namespace.yaml" "--dry-run=client" "apply --server-side"; do
+      n=$(( n + 1 ))
+      _stub_kubectl_bind "${step}"
+      work="${BATS_TEST_TMPDIR}/fail${n}"
+      mkdir -p "${work}"
+      kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+      run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+      assert_failure
+      assert_output --partial "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind"
+      assert_output --partial "The deploy stopped before the CronJob agent."
+      assert_output --partial "registers a separate pending row"
+      refute_output --partial "pending-pool"
+      # Nothing that changes an agent ran: no CronJob, no live-agent delete,
+      # no bootstrap Job.
+      run grep -c -e "apply -k" -e "delete -k" -e "create job" "${STUB_KUBECTL_LOG}"
+      assert_output "0"
+    done
+  done
+}
+
+@test "stage_bind_secret: no bind secret on disk warns, touches no Secret and keeps the order" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/bind3"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_success
+  assert_output --partial "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind."
+  assert_output --partial "the agent registers a separate pending row."
+  assert_output --partial "Claim the new row with the code from 'lo kubehz claim-code'."
+  run grep -c -e "kubehz-agent-bind" -e "namespace.yaml" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run head -1 "${STUB_KUBECTL_LOG}"
+  assert_output --partial "apply -k ${work}/agent"
+}
+
+@test "stage_bind_secret: a directory in the bind-secret slot is not a bind secret" {
+  _source_deploy
+  _stub_kubectl_log
+  mkdir -p "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+
+  run kubehz::stage_bind_secret "${BATS_TEST_TMPDIR}" acme.example.com
+  assert_success
+  assert_output --partial "no bind secret at clusters/acme.example.com/.kubehz-bind"
+  run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
 }

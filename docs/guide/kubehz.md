@@ -457,6 +457,14 @@ shows its own heartbeats.
 The secret proves only that the operator who deploys is the operator who
 announced. It rotates on every re-announce and is spent on the first
 adoption. It is a credential: keep `.kubehz-bind` out of version control.
+
+The platform does not adopt an announced row by its domain alone. An agent
+that registers without the secret gets a separate pending row, and the
+announced row gets no heartbeats. So `lo kubehz deploy` stages the secret
+before it applies the agent. If it cannot stage the secret, it stops before
+it changes an agent. A deploy from a checkout without `.kubehz-bind` (for
+example, `lo kubehz register` ran on another machine) warns and continues.
+Claim the new row with the code from `lo kubehz claim-code`.
 :::
 
 ## Claiming

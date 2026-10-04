@@ -7,9 +7,11 @@
 # project and diffs stdout, stderr and exit codes. ONLY cluster-free and
 # api-free paths are exercised: config validation refusals, usage/flag
 # errors, `status` with no registration, the hosting-axis routing of every
-# subcommand, and the handover bundle checks. No case reaches a kubeconfig,
-# kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN/HCLOUD_TOKEN
-# are unset and every api-bearing path stops at a local refusal.
+# subcommand, the handover bundle checks, and the first kubectl calls of
+# `deploy` (the bind-secret stage) against a stub. No case reaches a
+# kubeconfig, a real kubectl, the platform api or the Hetzner api —
+# KUBEHZ_TOKEN/HCLOUD_TOKEN are unset and every api-bearing path stops at a
+# local refusal.
 #
 # What this harness CANNOT cover: how the two implementations render a SERVER
 # string (the api's own refusal message — scrubbed, clipped, and in the bash
@@ -327,6 +329,35 @@ spec:
   kubehz:
     agent: operator
 EOF
+# op-reg.dev — agent operator, access registered, no bind secret on disk.
+mk op-reg.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    agent: operator
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+# bind-cron.dev / bind-op.dev — a register stored a bind secret: the deploy
+# stages it before it changes an agent, in both directions (B288).
+mk bind-cron.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+mk bind-op.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    agent: operator
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+for d in bind-cron.dev bind-op.dev; do
+  printf %s 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/${d}/.kubehz-bind"
+done
 # broken.dev — unparsable spec.
 mkdir -p "${CL}/broken.dev"
 printf '{{ not yaml' > "${CL}/broken.dev/cluster.lok8s.yaml"
@@ -396,6 +427,32 @@ check - kubehz deploy --domain operator-none.dev
 check - kubehz deploy --domain lo-hosted.dev
 check - kubehz deploy --domain kubehz-self.dev
 check "${PARSEERR}" kubehz deploy --domain broken.dev
+
+# ── deploy: the bind secret goes in before an agent changes (B288) ──────────
+# A kubectl that names each call on stderr, answers the three staging calls
+# and fails the first call after them. The diff then covers the staging
+# calls, the stdin of the server-side apply and the first call that changes
+# an agent, in order. The render dir is random per run (Go /tmp/<n>, bash
+# /tmp/tmp.<x>), so the stub prints it as <work>.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: no live cluster may be reached.
+printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' >&2
+case "$*" in
+  "apply -f "*/agent/namespace.yaml) exit 0 ;;
+  *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml") printf 'kind: Secret\n'; exit 0 ;;
+  "apply --server-side --force-conflicts -f -") sed 's/^/stdin: /' >&2; exit 0 ;;
+esac
+exit 1
+SH
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+check - kubehz deploy --domain reg.dev                   # no bind secret: warn, then today's order
+check - kubehz deploy --domain op-reg.dev
+# A failed stage stops the deploy before the CronJob agent.
+parity::stub_kubectl_fail "${PROJ}"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
 check - kubehz re-enroll
 check - kubehz re-enroll --domain shared.dev
 check - kubehz re-enroll --domain hosted-http.dev
