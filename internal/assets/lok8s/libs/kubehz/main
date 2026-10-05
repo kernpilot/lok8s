@@ -424,18 +424,19 @@ kubehz::ensure_claim_key() {
 
   # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
   # kubehz-claim key must not linger in the account.
+  # HCLOUD_TOKEN reaches curl in a config (http::curl_config), never on argv.
   local existing_id
-  existing_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+  existing_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
     "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
   if [[ -n "${existing_id}" ]]; then
-    curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL -X DELETE \
       "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
   fi
-  curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
-    -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}')" \
-    >/dev/null || return 1
+  jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}' |
+    curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+      -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
+      -H "Content-Type: application/json" \
+      --data-binary @- >/dev/null || return 1
 
   debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
@@ -474,7 +475,7 @@ kubehz::direct_claim() {
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
     curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+      -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
       -H "Content-Type: application/json" \
       --data-binary @-) || return 1
 
@@ -497,12 +498,16 @@ kubehz::direct_claim() {
       warn "spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect."
       return 0
     fi
+    # The token goes into the body through jq's stdin (-Rs: the whole input
+    # as one string) and the body into curl through stdin. Neither the
+    # token nor the bearer is on argv.
     local cred
-    cred=$(curl -fsSL -X POST "${api_url}/api/credentials" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg v "${HCLOUD_TOKEN}" --arg c "${cluster_id}" \
-        '{type: "hcloud_token", value: $v, validate: true, clusterId: $c}')") || {
+    cred=$(printf '%s' "${HCLOUD_TOKEN}" |
+      jq -Rs --arg c "${cluster_id}" '{type: "hcloud_token", value: ., validate: true, clusterId: $c}' |
+      curl -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
+        -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
+        -H "Content-Type: application/json" \
+        --data-binary @-) || {
       warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
       return 0
     }
@@ -643,9 +648,9 @@ kubehz::deregister_cluster() {
       # Status + body captured (the re-enroll idiom): a refused delete must
       # surface with the api's own message, not vanish into `curl -f`.
       local response http_code
-      if ! response=$(curl -sSL -w $'\n%{http_code}' -X DELETE \
-        "${api_url}/api/clusters/${cluster_id}" \
-        -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}"); then
+      if ! response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+        curl -K - -sSL -w $'\n%{http_code}' -X DELETE \
+        "${api_url}/api/clusters/${cluster_id}"); then
         error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
         rc=1
       else
@@ -668,10 +673,10 @@ kubehz::deregister_cluster() {
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
     local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
     if http::require_https "${hcloud_api}" "HCLOUD_API_BASE"; then
-      key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+      key_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
         "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
-      [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-        "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+      [[ -z "${key_id}" ]] || http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" |
+        curl -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -796,8 +801,8 @@ kubehz::status() {
   # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
   local raw http_code response
-  raw=$(curl -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || {
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null) || {
     echo "Status:  unknown (API unreachable: ${api_url})"
     return 0
   }
@@ -919,8 +924,8 @@ kubehz::assess() {
   }
 
   local response
-  response=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}/assessment" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}/assessment") || {
     error "kubehz: could not fetch the assessment for ${domain} (${cluster_id})"
     return 1
   }
@@ -1067,8 +1072,8 @@ kubehz::claim-code() {
 # Usage: kubehz::resolve_cluster_id <domain> <api_url>
 kubehz::resolve_cluster_id() {
   local domain="${1}" api_url="${2}" response cluster_id
-  response=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || return 1
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -fsSL "${api_url}/api/clusters?perPage=500" 2>/dev/null) || return 1
   # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
   # is served newest-first, but the server binds agent identity (heartbeat,
   # desired) to the OLDEST active row for a domain — picking the newest armed
@@ -1331,7 +1336,8 @@ kubehz::token_cache_write() {
   dir="${file%/*}"
   (umask 077 && mkdir -p "${dir}") || return 1
   tmp=$(mktemp "${dir}/.token-XXXXXX") || return 1
-  if jq -cn --arg t "${2}" --argjson e "${3}" '{access_token:$t,expires_at:$e}' >"${tmp}" \
+  # The token reaches jq on stdin (-Rs), not on argv.
+  if printf '%s' "${2}" | jq -cRs --argjson e "${3}" '{access_token:.,expires_at:$e}' >"${tmp}" \
     && mv -f "${tmp}" "${file}"; then
     return 0
   fi
@@ -1351,8 +1357,9 @@ kubehz::token_emit() {
     client.authentication.k8s.io/v1|client.authentication.k8s.io/v1beta1) ;;
     *) version="client.authentication.k8s.io/v1" ;;
   esac
-  jq -cn --arg v "${version}" --arg t "${token}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
-    '{apiVersion:$v,kind:"ExecCredential",status:{token:$t,expirationTimestamp:$e}}'
+  # The token reaches jq on stdin (-Rs), not on argv.
+  printf '%s' "${token}" | jq -cRs --arg v "${version}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
+    '{apiVersion:$v,kind:"ExecCredential",status:{token:.,expirationTimestamp:$e}}'
 }
 
 # ── Agent-token re-enrollment (agent-identity contract R2) ─
@@ -1444,10 +1451,11 @@ kubehz::re-enroll() {
   # fresh token); 404 = not this tenant's cluster (the api answers a uniform
   # 404 cross-tenant).
   local response http_code body
-  response=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+  response=$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}' |
+    curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
+    -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}')") || {
+    --data-binary @-) || {
     error "kubehz: agent-token request failed (network) — retry once ${api_url} is reachable"
     return 1
   }

@@ -64,3 +64,26 @@ first (`policyAuditMode: true`), confirm with `hubble observe --verdict AUDIT`
 that nothing critical (etcd 2379/2380, apiserver 6443, kubelet 10250, vxlan
 8472) gets denied, *then* flip to enforce. Going straight to enforce
 without a complete allow set will deadlock the cluster.
+
+## Credentials and command lines
+
+Every local user can read the command line of a process (`ps`,
+`/proc/<pid>/cmdline`), and audit tools such as auditd store it. Thus `lo`
+gives no credential to a child process as an argument:
+
+- curl gets a bearer token, a user and password, or a body with a secret in
+  a config on stdin (`curl -K -`), or as `-K <(…)` when stdin carries the
+  body.
+- jq reads a secret from stdin or from a pipe (`--rawfile`), not from
+  `--arg`.
+- kubectl gets the values of a Secret from a file or from an env file on
+  stdin (`--from-env-file=/dev/stdin`), not from `--from-literal`.
+
+This includes the Hetzner Cloud token, the Hetzner Robot password, the kubehz
+token, the KKP token, the AWS keys and the kubehz agent token in the agent
+CronJob. Both implementations follow the rule. `tests/unit/credentials_argv_test.bats`
+and `internal/execx/argv_credentials_test.go` check it with sentinel values.
+
+One exception stays: `lo kubehz node join` runs the `kubeadm join` line
+of the platform, and `kubeadm join` takes its bootstrap token as `--token`.
+The token is valid for a short time only.

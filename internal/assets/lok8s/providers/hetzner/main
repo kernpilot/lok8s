@@ -10,6 +10,7 @@ import ^utils/verbose
 import ^utils/types
 import ^utils/template
 import ^utils/credentials
+import ^utils/http
 
 : "${CLOUD_HETZNER_JSON:=""}"
 : "${CLOUD_DRY_RUN:=""}"
@@ -630,6 +631,16 @@ hetzner::_rescue_fingerprint() {
     | grep -oE 'MD5:[0-9a-f:]+' | sed 's/^MD5://' | head -1
 }
 
+# hetzner::_robot_curl <curl args...>
+# curl with the Robot user and password in a config on stdin (`-K -`). The
+# password never goes on argv, which every local user can read (ps,
+# /proc/<pid>/cmdline) and audit tools store: it can boot a bare-metal
+# server into rescue and reset it. A user or password with a control
+# character gives no config, so the call fails on the missing credential.
+hetzner::_robot_curl() {
+  http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - "${@}"
+}
+
 # hetzner::_robot_server_number_by_ip <ip> [connect_timeout] [max_time]
 #   → Robot server_number for the UNIQUE server whose main IP == <ip>.
 # Robot's server_name is free-text and NOT unique, so we never match on it for a
@@ -642,8 +653,8 @@ hetzner::_robot_server_number_by_ip() {
   local connect_timeout="${2:-${HROBOT_CONNECT_TIMEOUT}}" max_time="${3:-${HROBOT_MAX_TIME}}"
   [[ -n "${ip}" ]] || return 1
   local json matches count
-  json="$(curl -f -sS --connect-timeout "${connect_timeout}" --max-time "${max_time}" \
-            -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" 2>/dev/null)" || return 1
+  json="$(hetzner::_robot_curl -f -sS --connect-timeout "${connect_timeout}" --max-time "${max_time}" \
+            "${HROBOT_API}/server" 2>/dev/null)" || return 1
   matches="$(echo "${json}" | jq -c --arg ip "${ip}" \
               '[.[].server | select(.server_ip==$ip)]' 2>/dev/null)" || return 1
   count="$(echo "${matches}" | jq 'length' 2>/dev/null || echo 0)"
@@ -667,14 +678,14 @@ hetzner::_cloud_server_unique_labeled() {
 hetzner::_robot_rescue() {
   local num="${1}" fingerprint="${2}"
   # Honor dry-run: PRINT the intended activation and issue no POST. Kept as an
-  # explicit branch (not dry-run::cmd) so the Robot user:password on the curl
-  # command line is never teed into the plan log.
+  # explicit branch (not dry-run::cmd): the plan log gets this line, not the
+  # curl call.
   if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
     _hetzner_print "🧪 [dry-run] would activate Robot rescue on robot#${num} (POST ${HROBOT_API}/boot/${num}/rescue os=linux authorized_key=${fingerprint})"
     return 0
   fi
-  curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
-    -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
+  hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
+    "${HROBOT_API}/boot/${num}/rescue" \
     -d os=linux --data-urlencode "authorized_key=${fingerprint}" >/dev/null 2>&1 \
     || { error "rebuild: rescue activation failed for robot#${num}"; return 1; }
 }
@@ -686,8 +697,8 @@ hetzner::_robot_reset() {
     _hetzner_print "🧪 [dry-run] would hardware-reset robot#${num} (POST ${HROBOT_API}/reset/${num} type=hw)"
     return 0
   fi
-  curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
-    -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/reset/${num}" \
+  hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
+    "${HROBOT_API}/reset/${num}" \
     -d type=hw >/dev/null 2>&1 \
     || { error "rebuild: hardware reset failed for robot#${num}"; return 1; }
 }
@@ -741,8 +752,8 @@ hetzner::_doctor_checks() {
   local have_robot=0 robot_api_ok=0
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
     have_robot=1
-    if curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
-         -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" >/dev/null 2>&1; then
+    if hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+         "${HROBOT_API}/server" >/dev/null 2>&1; then
       robot_api_ok=1
       printf 'ok\tRobot API reachable\n'
     else
@@ -773,8 +784,8 @@ hetzner::_doctor_checks() {
         printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
       else
         local keys
-        if keys="$(curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
-                      -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null)"; then
+        if keys="$(hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+                      "${HROBOT_API}/key" 2>/dev/null)"; then
           # Exact, whole-value fingerprint match (case-insensitive). A loose
           # substring grep would let a short/truncated fingerprint false-match a
           # longer registered key — compare the /key fingerprint field as a whole.

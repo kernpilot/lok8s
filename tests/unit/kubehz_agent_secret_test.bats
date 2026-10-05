@@ -52,6 +52,7 @@ _build_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
 kubectl() {
+  argv_log kubectl "$@"
   case "$*" in
     "get secret kubehz-agent -n kubehz-system")
       # Existence probe (no -o): present iff the store file exists.
@@ -69,13 +70,20 @@ kubectl() {
       # create-if-absent: mimic kubectl (fails if the Secret already exists),
       # which is what proves the guard never rotates.
       [ -f "${STORE_A}" ] && return 1
+      # A and C come as an env file on stdin (kubectl_env_file), never on
+      # argv.
       _a=""; _c=""
-      for _arg in "$@"; do
-        case "${_arg}" in
-          --from-literal=agent-token=*) _a="${_arg#--from-literal=agent-token=}" ;;
-          --from-literal=claim-code=*)  _c="${_arg#--from-literal=claim-code=}" ;;
+      _env=$(kubectl_env_file "$@")
+      _kv_ifs="${IFS}"
+      IFS='
+'
+      for _kv in ${_env}; do
+        case "${_kv}" in
+          agent-token=*) _a="${_kv#agent-token=}" ;;
+          claim-code=*)  _c="${_kv#claim-code=}" ;;
         esac
       done
+      IFS="${_kv_ifs}"
       printf '%s' "${_a}" > "${STORE_A}"
       printf '%s' "${_c}" > "${STORE_C}"
       return 0
@@ -118,15 +126,15 @@ kubectl() {
   esac
 }
 curl() {
-  _url=""; _body=""; _hdrs=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -d) _body="$2"; shift ;;
-      -H) _hdrs="${_hdrs} ${2} ;"; shift ;;
-      http://*|https://*) _url="$1" ;;
-    esac
-    shift
-  done
+  # curl_capture reads the call the way curl does: headers from -H and the
+  # config (-K), the body from stdin.
+  curl_capture "$@"
+  _url="${CURL_URL}"; _body="${CURL_BODY}"; _hdrs=""
+  _hdr_ifs="${IFS}"
+  IFS='
+'
+  for _h in ${CURL_HEADERS}; do _hdrs="${_hdrs} ${_h} ;"; done
+  IFS="${_hdr_ifs}"
   case "${_url}" in
     *"/agent-register")
       printf '%s' "${_body}" > "${REGISTER_OUT}"
@@ -140,7 +148,7 @@ curl() {
 STUBS_EOF
 
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
 }
 
 # ── The shipped script stays valid POSIX sh ──────────────
@@ -191,6 +199,29 @@ STUBS_EOF
 }
 
 # ── L2: agent-register carries the two HASHES, never plaintext ─
+
+@test "agent: A, C and the bind secret never reach a command line" {
+  # Every process on the node can read argv (ps, /proc/<pid>/cmdline). The
+  # stubs log the argv of each curl and kubectl call (curl_capture.sh).
+  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
+  export BIND_SECRET="5e175e175e175e175e175e175e175e175e175e175e175e175e175e175e175e17"
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+
+  local a c
+  a="$(cat "${STORE_A}")"
+  c="$(cat "${STORE_C}")"
+  [ -s "${ARGV_LOG}" ]
+  run grep -cF -e "${a}" -e "${c}" -e "${BIND_SECRET}" "${ARGV_LOG}"
+  assert_output 0
+  # They still arrive: the bind secret in the register body, A as the
+  # bearer of the beat.
+  run command jq -r '.bindSecret' "${REGISTER_OUT}"
+  assert_output "${BIND_SECRET}"
+  run cat "${HEARTBEAT_HDRS}"
+  assert_output --partial "Authorization: Bearer ${a} ;"
+}
 
 @test "agent: agent-register posts sha256(A)/sha256(C) — never the plaintext secrets" {
   _build_runner

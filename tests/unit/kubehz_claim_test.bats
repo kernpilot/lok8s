@@ -95,19 +95,15 @@ _stub_kubectl() {
 # agent-token POST captures the body and answers STUB_AT_BODY + the trailing
 # `\n<code>` line the CLI's `-w '\n%{http_code}'` parsing expects.
 _stub_curl() {
+  # The bearer comes in a curl config, the body on stdin (curl_capture).
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
   curl() {
-    local a=("$@") body="" url=""
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        -d) body="$2"; shift ;;
-        http*://*) url="$1" ;;
-      esac
-      shift
-    done
-    if [[ "${url}" == *"/agent-token" ]]; then
-      printf '%s' "${body}" > "${CURL_BODY_OUT}"
-      [[ " ${a[*]} " == *"Authorization: Bearer khzt_bats"* ]] \
-        || { echo "agent-token POST missing the user bearer: ${a[*]}" >&2; return 1; }
+    [[ " $* " != *"khzt_bats"* ]] || { echo "the user bearer is on argv: $*" >&2; return 1; }
+    curl_capture "$@"
+    if [[ "${CURL_URL}" == *"/agent-token" ]]; then
+      printf '%s' "${CURL_BODY}" > "${CURL_BODY_OUT}"
+      [[ "${CURL_HEADERS}" == *"Authorization: Bearer khzt_bats"* ]] \
+        || { echo "agent-token POST missing the user bearer: ${CURL_HEADERS}" >&2; return 1; }
       printf '%s\n%s' "${STUB_AT_BODY}" "${STUB_AT_CODE}"
       return 0
     fi

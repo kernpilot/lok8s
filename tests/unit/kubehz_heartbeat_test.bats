@@ -45,6 +45,7 @@ setup() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
 kubectl() {
+  argv_log kubectl "$@"
   case "$*" in
     # An enrolled agent identity exists: the heartbeat reads its agent-token
     # back and authenticates with it. The empty-token guard skips the POST when
@@ -148,17 +149,20 @@ curl() {
   # format (header dump, blank line, one-line body, __code marker) driven by
   # STUB_DESIRED_CODE/_ETAG/_BODY; the presented If-None-Match lands in
   # STUB_DESIRED_INM_OUT.
-  _body=""
-  _url=""
+  # curl_capture (tests/lib/curl_capture.sh) reads the call the way curl
+  # does: the bearer from the config (-K), the body from stdin.
+  curl_capture "$@"
+  printf '%s' "${CURL_HEADERS}" | grep '^Authorization: ' >> "${STUB_AUTH_LOG}" || :
+  _body="${CURL_BODY}"
+  _url="${CURL_URL}"
   _inm=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -d) _body="$2"; shift ;;
-      -H) case "$2" in "If-None-Match: "*) _inm="${2#If-None-Match: }" ;; esac; shift ;;
-      http*://*) _url="$1" ;;
-    esac
-    shift
+  _hdr_ifs="${IFS}"
+  IFS='
+'
+  for _h in ${CURL_HEADERS}; do
+    case "${_h}" in "If-None-Match: "*) _inm="${_h#If-None-Match: }" ;; esac
   done
+  IFS="${_hdr_ifs}"
   echo "curl ${_url}" >> "${STUB_CURL_LOG}"
   case "${_url}" in
     */desired)
@@ -182,13 +186,15 @@ STUBS_EOF
 
   # Prepend the stubs to the real script → a self-contained, runnable heartbeat.
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
+  # The Authorization headers that curl got (from its config).
+  export STUB_AUTH_LOG="${BATS_TEST_TMPDIR}/auth.log"
   # Desired-state poll fixtures: default 304 (unchanged → silent) so the
   # heartbeat-focused tests see no extra output/annotations; the poll tests
   # flip STUB_DESIRED_CODE to 200/401 and assert the report-only behavior.
@@ -654,6 +660,28 @@ teardown() {
   # Not cleared: the stub response carried no claim.verified cue.
   run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
   assert_failure
+}
+
+@test "claim: the nonce and the agent token never reach a command line" {
+  # Every process on the node can read argv (ps, /proc/<pid>/cmdline). The
+  # stubs log the argv of each curl and kubectl call (curl_capture.sh).
+  local now nonce
+  now=$(date -u +%s)
+  nonce="khzn_SENTINEL_n0ncE_43charsBase64urlValue00"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
+
+  run bash "${RUNNER}"
+  assert_success
+  [ -s "${ARGV_LOG}" ]
+  run grep -cF -e "${nonce}" -e "khz_agt_test" "${ARGV_LOG}"
+  assert_output 0
+  # Both still arrive: the nonce in the body, the token as the bearer of
+  # the beat and of the desired-state poll.
+  run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
+  assert_output "${nonce}"
+  run grep -c "Authorization: Bearer khz_agt_test" "${STUB_AUTH_LOG}"
+  assert_output 2
 }
 
 @test "claim: no nonce annotation means no claim key on the wire" {
