@@ -4,21 +4,25 @@
 #
 # Every case runs BOTH implementations (the Go binary, and the same binary
 # routed to the frozen tree by the project file) against a synthetic
-# project and diffs stdout, stderr and exit codes. ONLY cluster-free paths
-# are exercised: config validation refusals, usage/flag errors, `status`
-# with no registration, the hosting-axis routing of every subcommand, the
-# handover bundle checks, the first kubectl calls of `deploy` (the
-# bind-secret stage) against a stub, and the register request bodies against
-# a local HTTPS stub (the last section). No case reaches a kubeconfig, a
-# real kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN and
-# HCLOUD_TOKEN are unset except for dummy values in the register section.
+# project and diffs stdout, stderr and exit codes. Every case is
+# cluster-free: config validation refusals, usage/flag errors, `status` with
+# no registration, the hosting-axis routing of every subcommand, the
+# handover bundle checks, and the first kubectl calls of `deploy` (the
+# bind-secret stage) against a stub kubectl. No case reaches a kubeconfig, a
+# real kubectl, the platform api or the Hetzner api. Two sections talk to one
+# local https stub (hack/lib/kubehz-api-stub.py, a self-signed certificate
+# that both implementations trust through SSL_CERT_FILE and
+# CURL_CA_BUNDLE): the agent tools, and the register request bodies (the
+# last section). There the harness also diffs the requests that each
+# implementation sent. KUBEHZ_TOKEN and HCLOUD_TOKEN are unset except for
+# dummy values in those two sections.
 #
-# What this harness CANNOT cover: how the two implementations render a SERVER
-# string (the api's own refusal message — scrubbed, clipped, and in the bash
-# tree escaped for `echo -e`). Only the register section talks to a stub,
-# and that stub answers 2xx. That rendering is pinned instead by a golden
-# PAIR both suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
-# (the hostile input) and space-above-shared.txt (the bytes both must print),
+# The provision path renders a SERVER string too (the api's own refusal
+# message, scrubbed, clipped, and in the bash tree escaped for `echo -e`),
+# and no case here reaches it: spec.kubehz.apiUrl of a provision case is
+# not the stub. That rendering is pinned by a golden PAIR both suites read:
+# internal/kubehz/testdata/golden/space-above-shared-message.txt (the
+# hostile input) and space-above-shared.txt (the bytes both must print),
 # asserted by TestProvisionSharedScrubsTheSharedCeilingMessage and by
 # tests/unit/kubehz_shared_test.bats.
 #
@@ -51,7 +55,7 @@ parity::init "${1:-}"
 unset KUBECONFIG KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE \
   KUBEHZ_HANDOVER_K8S_DIR KUBEHZ_HANDOVER_ETCD_DIR KUBEHZ_HANDOVER_ETCD_IMAGE_TAG \
   KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE \
-  XDG_CACHE_HOME KUBERNETES_EXEC_INFO
+  KUBEHZ_API_URL SSL_CERT_FILE CURL_CA_BUNDLE XDG_CACHE_HOME KUBERNETES_EXEC_INFO
 
 # Isolated HOME so neither implementation can find a real ~/.kube/config.
 export HOME="${WORK}/home"
@@ -508,6 +512,283 @@ KUBERNETES_EXEC_INFO='{"apiVersion":"client.authentication.k8s.io/v1beta1","kind
   check - kubehz token --token-url https://id.example/t --scope s
 unset KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET
 
+# ── agent tools (space / cluster): the local refusals, no api reached ───────
+check - kubehz space list                                # KUBEHZ_API_URL unset
+KUBEHZ_API_URL=http://api.kubehz.example check - kubehz cluster list
+export KUBEHZ_API_URL=https://127.0.0.1:1
+check - kubehz space list                                # no credential
+KUBEHZ_AGENT_CLIENT_ID=cid check - kubehz space list     # half an agent key
+KUBEHZ_TOKEN=$'a\nb' check - kubehz cluster list          # a line break in the bearer
+check_parse - kubehz space get
+check_parse - kubehz space get sp-1a2b3c4d sp-2
+check_parse - kubehz cluster list extra
+check - kubehz space get ../clusters
+check - kubehz cluster get sp-1a2b3c4d
+check - kubehz space get sp-1a2b3c4d -o xml
+check_parse - kubehz space lease sp-1a2b3c4d
+check - kubehz space lease sp-1a2b3c4d --hours 721
+check - kubehz cluster lease cl-1a2b3c4d --hours 0x1
+check_parse - kubehz space create --name Acme
+check_parse - kubehz space create --slug acme
+check - kubehz space create --name Acme --slug acme --nodes 0
+check - kubehz space create --name Acme --slug acme --namespaces 99999999999999999999
+check - kubehz space create --name Acme --slug acme --lease-hours 0
+check_parse - kubehz cluster kubeconfig cl-1a2b3c4d
+check_parse - kubehz space bogus
+check_parse - kubehz cluster bogus
+# Nothing listens on port 1: both answer "did not answer" the same way.
+KUBEHZ_TOKEN=khzt_parity check - kubehz space get sp-1a2b3c4d
+unset KUBEHZ_API_URL
+
+# ── the https stub of the api (the agent tools and the register cases) ──────
+# One local server, hack/lib/kubehz-api-stub.py, with a self-signed
+# certificate: SSL_CERT_FILE hands it to Go and CURL_CA_BUNDLE to curl. Go
+# reads SSL_CERT_FILE on Linux only, so the two sections that need the stub
+# run on Linux only. The stub appends each request to STUB_LOG as one JSON
+# line, never with the value of a credential. Without Linux, python3 or
+# openssl both sections are skipped, except under CI. A stub that does not
+# start is a failure.
+STUB_API_PID=""
+STUB_PORT=""
+STUB_LOG="${WORK}/stub.log"
+parity_cleanup() { [[ -z "${STUB_API_PID}" ]] || kill "${STUB_API_PID}" 2>/dev/null || :; }
+api_stub() {
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
+    -addext subjectAltName=IP:127.0.0.1 -keyout "${WORK}/stub.key" -out "${WORK}/stub.pem" >/dev/null 2>&1 || return 1
+  STUB_RACE_FILE="${PROJ}/kc.yaml" python3 "${PARITY_LIB_DIR}/kubehz-api-stub.py" "${WORK}/stub.pem" "${WORK}/stub.key" \
+    "${WORK}/stub.port" "${STUB_LOG}" >"${WORK}/stub.out" 2>&1 &
+  STUB_API_PID=$!
+  local _
+  for _ in $(seq 1 100); do
+    if [[ -s "${WORK}/stub.port" ]]; then
+      STUB_PORT="$(cat "${WORK}/stub.port")"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  if [[ -n "${CI:-}" ]]; then
+    fail "the https stub needs Linux, python3 and openssl, and the CI runner has them"
+  else
+    echo "skip: the agent tools and the register cases (the https stub needs Linux, python3 and openssl)"
+  fi
+elif ! api_stub; then
+  fail "the https stub of the api did not start: $(head -c 300 "${WORK}/stub.out")"
+fi
+
+# ── agent tools against the https stub ──────────────────────────────────────
+# Both implementations call the stub with the agent key: each run mints its
+# own token (the cache is cleared before every run), so the request logs
+# carry the grant too. check_api diffs the logs on top of the outputs, and
+# refuses an empty log (two empty logs prove nothing).
+
+# The kubeconfig fixtures (KC_SETUP names one; agent_pre runs it before each
+# implementation): kc.yaml as a file that exists, a link to a file, a link
+# to a directory, a link to nothing.
+kc_exists() { echo contexts > "${PROJ}/kc.yaml"; }
+kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
+kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
+kc_link_nothing() { ln -s gone "${PROJ}/kc.yaml"; }
+kc_link_foreign() { ln -s /etc/passwd "${PROJ}/kc.yaml"; }
+kc_link_proc() { ln -s /proc/self/fd/1 "${PROJ}/kc.yaml"; }
+
+agent_pre() {
+  rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
+  : > "${STUB_LOG}"
+  [[ -z "${KC_SETUP:-}" ]] || "${KC_SETUP}"
+}
+# agent_post: the requests, and what kc.yaml is afterwards: a link or a
+# file, its content and mode (followed), and the content of kube/real.
+agent_post() {
+  cp "${STUB_LOG}" "${WORK}/req.${1}"
+  if [[ -e "${PROJ}/kc.yaml" || -L "${PROJ}/kc.yaml" ]]; then
+    {
+      if [[ -L "${PROJ}/kc.yaml" ]]; then echo "link -> $(readlink "${PROJ}/kc.yaml")"; else echo file; fi
+      # A link into /proc would name this block's own output file.
+      if [[ -f "${PROJ}/kc.yaml" && "$(readlink "${PROJ}/kc.yaml")" != /proc/* ]]; then
+        cat "${PROJ}/kc.yaml"; stat -L -c '%a' "${PROJ}/kc.yaml"
+      fi
+      if [[ -f "${PROJ}/kube/real" ]]; then echo "kube/real:"; cat "${PROJ}/kube/real"; ls -A "${PROJ}/kube"; fi
+    } > "${WORK}/kc.${1}"
+  else
+    rm -f "${WORK}/kc.${1}"
+  fi
+}
+
+# check_api <allow|-> <argv...>: check, then the request logs must match and
+# hold at least the grant.
+check_api() {
+  PARITY_PRE_EACH=agent_pre PARITY_POST_EACH=agent_post check "$@"
+  shift
+  if [[ ! -s "${WORK}/req.go" ]]; then
+    fail "requests lo $* — the Go run sent nothing; the diff proves nothing"
+  elif diff -q "${WORK}/req.bash" "${WORK}/req.go" >/dev/null; then
+    echo "ok: requests lo $*"
+  else
+    fail "requests lo $* — the two implementations sent different requests:"
+    diff "${WORK}/req.bash" "${WORK}/req.go" | head -10 | sed 's/^/  /' || true
+  fi
+}
+
+# mcp_call <route> <tool> <arguments-json> <ok|error> <text> <request>: one
+# tools/call through `lo mcp start --allow-destructive` in ${PROJ}. The
+# result must be ok or an error and hold <text>. The stub log must hold
+# <request>, or, when it is empty, no api request at all.
+mcp_call() {
+  local route="${1}" tool="${2}" arguments="${3}" want="${4}" text="${5}" request="${6}" label
+  label="mcp (${route}) ${tool} ${arguments}"
+  : > "${STUB_LOG}"
+  rm -rf "${HOME}/.cache/lok8s/kubehz-token"
+  if ! (cd "${PROJ}" && python3 "${ROOT}/hack/lib/mcp-call.py" "${LO_BIN}" "${tool}" "${arguments}" \
+    > "${WORK}/mcp.out" 2>"${WORK}/mcp.err")
+  then
+    fail "${label} — the MCP client failed: $(head -c 300 "${WORK}/mcp.err")"
+    return
+  fi
+  if [[ "$(head -n 1 "${WORK}/mcp.out")" != "${want}" ]] || ! grep -qF -- "${text}" "${WORK}/mcp.out"; then
+    fail "${label} — want ${want} with ${text}, got: $(head -c 400 "${WORK}/mcp.out")"
+  elif [[ -n "${request}" ]] && ! grep -qF -- "${request}" "${STUB_LOG}"; then
+    fail "${label} — the api did not get ${request}"
+  elif [[ -z "${request}" && -s "${STUB_LOG}" ]]; then
+    fail "${label} — a refused call reached the api"
+  else
+    echo "ok: ${label}"
+  fi
+}
+
+# check_api_none <allow|-> <argv...>: check, then neither implementation may
+# have sent a request (a local refusal costs no grant and no download).
+check_api_none() {
+  PARITY_PRE_EACH=agent_pre PARITY_POST_EACH=agent_post check "$@"
+  shift
+  if [[ -s "${WORK}/req.go" || -s "${WORK}/req.bash" ]]; then
+    fail "requests lo $* — a local refusal sent requests"
+  else
+    echo "ok: no requests lo $*"
+  fi
+}
+
+# kc_state <label>: kc.yaml (and a link target) is the same in both, and
+# exists (a missing file in both would prove nothing).
+kc_state() {
+  if [[ ! -e "${WORK}/kc.go" ]]; then
+    fail "kubeconfig file (${1}) — the Go run left no kc.yaml"
+  elif ! parity::state_same "${WORK}/kc.bash" "${WORK}/kc.go" "kubeconfig file (${1})"; then
+    failures=$((failures + 1))
+  fi
+}
+
+if [[ -n "${STUB_PORT}" ]]; then
+  export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem"
+  export KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}/"
+  export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
+  export KUBEHZ_AGENT_TOKEN_URL="https://127.0.0.1:${STUB_PORT}/oauth/v2/token" KUBEHZ_AGENT_SCOPE=parity-scope
+
+  for format in text json yaml; do
+    check_api - kubehz space list -o "${format}"
+    check_api - kubehz space get sp-1a2b3c4d -o "${format}"
+    check_api - kubehz cluster list -o "${format}"     # a short page: the warning
+    check_api - kubehz cluster get cl-1a2b3c4d -o "${format}"
+    check_api - kubehz space delete sp-1a2b3c4d -o "${format}"
+    check_api - kubehz space lease sp-1a2b3c4d --hours 024 -o "${format}"
+    check_api - kubehz cluster lease cl-1a2b3c4d --hours 3 -o "${format}"
+    check_api - kubehz space create --name 'Acme Prod' --slug acme -o "${format}"
+  done
+  check_api - kubehz space create --name Acme --slug acme --nodes 2 --namespaces 008 \
+    --object-cap-kib 256 --region fsn1 --lease-hours 0720
+  for slug in taken big full capped; do
+    check_api - kubehz space create --name Acme --slug "${slug}"
+  done
+  for id in sp-gone0001 sp-broken01 sp-boom0001 sp-hostile1 sp-noread01 sp-numeric1; do
+    check_api - kubehz space get "${id}"
+  done
+  check_api - kubehz space delete sp-gone0001
+  check_api - kubehz space lease sp-capped01 --hours 2
+  check_api - kubehz cluster lease cl-self0001 --hours 3
+  check_api - kubehz cluster lease cl-viewer01 --hours 3
+  check_api - kubehz cluster kubeconfig cl-pending1 --file kc.yaml
+  check_api - kubehz space kubeconfig sp-dedicat1 --file kc.yaml
+
+  # The kubeconfig: the same bytes and mode in both, the path on stdout.
+  for format in text json; do
+    check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml -o "${format}"
+    kc_state "-o ${format}"
+  done
+  # The path rules: a directory or a link to one is refused, a path that
+  # exists needs --force, --force writes through a link.
+  check_api_none - kubehz cluster kubeconfig cl-1a2b3c4d --file clusters
+  KC_SETUP=kc_link_dir check_api_none - kubehz cluster kubeconfig cl-1a2b3c4d --file kc.yaml --force
+  KC_SETUP=kc_exists check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml
+  kc_state "a file that exists, no --force"
+  KC_SETUP=kc_link_nothing check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml
+  KC_SETUP=kc_link_nothing check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  KC_SETUP=kc_exists check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_state "--force replaces a file"
+  KC_SETUP=kc_link_file check_api - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml -f
+  kc_state "-f writes through a link"
+  # Without --force, a file that appears during the download stays.
+  check_api - kubehz space kubeconfig sp-race0001 --file kc.yaml
+  kc_state "a file that appears during the download"
+  # A link to another user's file is never written through.
+  if [[ "$(id -u)" != 0 ]]; then
+    KC_SETUP=kc_link_foreign check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  else
+    echo "skip: a link to another user's file (root owns /etc/passwd)"
+  fi
+  # /proc and /dev are refused, also through a link. /proc/self resolves
+  # against the process that asks: fd 1 of lo is the harness's output file.
+  if [[ -d /proc/self/fd ]]; then
+    check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file /proc/self/fd/1 --force
+    check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file /dev/stdout --force
+    KC_SETUP=kc_link_proc check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  else
+    echo "skip: /proc and /dev (this system has no /proc)"
+  fi
+
+  # The grant follows no redirect: the stub's redirect route would hand
+  # the client secret to the token endpoint, and no request may reach it.
+  KUBEHZ_AGENT_TOKEN_URL="https://127.0.0.1:${STUB_PORT}/oauth/v2/redirect" check_api - kubehz space list
+  if grep -q '"/oauth/v2/token"' "${WORK}/req.go" "${WORK}/req.bash"; then
+    fail "a token grant followed the redirect"
+  else
+    echo "ok: no grant followed the redirect"
+  fi
+
+  # KUBEHZ_TOKEN without a key: no grant; the minted token is the stub's
+  # bearer, so the same value passes, another one is refused.
+  unset KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET
+  KUBEHZ_TOKEN=parity-jwt check_api - kubehz space list -o json
+  KUBEHZ_TOKEN=parity-jwt check_api - kubehz space get sp-noread01   # the api's help, not lo's hint
+  KUBEHZ_TOKEN=wrong check_api - kubehz space get sp-1a2b3c4d
+  export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
+  # The contract on the Go side alone: 0 on success, 1 on a refusal.
+  expect_rc 0 kubehz space list
+  expect_rc 1 kubehz space get sp-gone0001
+
+  # Real tool calls through `lo mcp start` (the Go server, whatever the
+  # project routes): an allowed call runs with its argv unchanged, also when
+  # the project routes kubehz to the argsh tree, which has no "--" marker.
+  # A positional argument that starts with "-" is refused, and nothing runs.
+  for route in go bash kubehz; do
+    case "${route}" in
+      go) parity::implementation "${PROJ}" go ;;
+      bash) parity::implementation "${PROJ}" bash ;;
+      kubehz) parity::implementation "${PROJ}" go kubehz ;;
+    esac
+    mcp_call "${route}" lo_kubehz_space_lease '{"flags":{"hours":"2"},"args":["sp-1a2b3c4d"]}' \
+      ok 'space sp-1a2b3c4d: the lease ends 2026-10-05T12:00:00.000Z' '"PATCH"'
+    mcp_call "${route}" lo_kubehz_space_get '{"flags":{},"args":["sp-1a2b3c4d","-o","json"]}' \
+      error 'starts with a dash' ''
+    mcp_call "${route}" lo_kubehz_space_get '{"flags":{"output":"json"},"args":["sp-1a2b3c4d"]}' \
+      ok '"endpoint": "https://acme.k8s.kubehz.example"' '"GET"'
+  done
+
+  unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_API_URL KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET \
+    KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE
+fi
+
 # ── node: the hosting gate, the https gate, the global --cluster trap ───────
 check - kubehz node join
 check - kubehz n j --domain shared.dev
@@ -537,36 +818,12 @@ check_parse - kubehz handover bogus
 # ── register: lo sends its stored bind secret (B289) ────────────────────────
 # Every register mode sends the value of .kubehz-bind as bindSecret, so a
 # re-run keeps the same cluster record. These cases need an api, so they run
-# against a local HTTPS stub, hack/lib/kubehz-api-stub.py (a self-signed
-# certificate that SSL_CERT_FILE hands to Go and CURL_CA_BUNDLE to curl).
-# The stub records each request without the Authorization value. After each
-# run, the record and the stored .kubehz-bind join that run's stdout, so the
-# diff covers the request bodies and the stored secret. Linux only: Go reads
-# SSL_CERT_FILE there.
+# against the https stub (see its section above). After each run, the
+# request log and the stored .kubehz-bind join that run's stdout, so the
+# diff covers the request bodies and the stored secret.
 BIND_STORED=9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70
-STUB_HTTPS_PID=""
-parity_cleanup() { [[ -z "${STUB_HTTPS_PID}" ]] || kill "${STUB_HTTPS_PID}" 2>/dev/null || :; }
-if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
-  echo "skip: register bind-secret cases (need Linux, python3 and openssl)"
-else
-  mkdir -p "${WORK}/tls"
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
-    -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
-    -keyout "${WORK}/tls/key.pem" -out "${WORK}/tls/cert.pem" 2>/dev/null
-  python3 -u "${PARITY_LIB_DIR}/kubehz-api-stub.py" "${WORK}/tls/requests.log" "${WORK}/tls/cert.pem" "${WORK}/tls/key.pem" \
-    >"${WORK}/tls/stub.out" 2>&1 &
-  STUB_HTTPS_PID=$!
-  STUB_PORT=""
-  for _ in $(seq 1 50); do
-    STUB_PORT="$(sed -nE 's/^port ([0-9]+)$/\1/p' "${WORK}/tls/stub.out")"
-    [[ -n "${STUB_PORT}" ]] && break
-    sleep 0.1
-  done
-  if [[ -z "${STUB_PORT}" ]]; then
-    echo "FAIL: register bind-secret cases — the HTTPS stub did not start: $(cat "${WORK}/tls/stub.out")"
-    failures=$((failures + 1))
-  else
-    mk bind-reg.dev <<EOF
+if [[ -n "${STUB_PORT}" ]]; then
+  mk bind-reg.dev <<EOF
 kind: Lo
 metadata:
   name: bind-reg
@@ -577,60 +834,59 @@ spec:
     access: registered
     apiUrl: https://127.0.0.1:${STUB_PORT}
 EOF
-    export SSL_CERT_FILE="${WORK}/tls/cert.pem" CURL_CA_BUNDLE="${WORK}/tls/cert.pem"
-    # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
-    # value, one with a trailing newline, one in upper case, a valid value in
-    # a file nobody may read, a valid value with 200 kB after it, a
-    # directory, a link to a directory, or no file.
-    bind_reset() {
-      rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
-      : > "${WORK}/tls/requests.log"
-      case "${BIND_FIXTURE}" in
-        valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        unreadable)
-          printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
-          chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
-          ;;
-        oversized)
-          { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${CL}/bind-reg.dev/.kubehz-bind"
-          ;;
-        directory) mkdir "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        dirlink)
-          mkdir "${WORK}/bind-target"
-          ln -s "${WORK}/bind-target" "${CL}/bind-reg.dev/.kubehz-bind"
-          ;;
-      esac
-    }
-    bind_record() {
-      {
-        echo "--- requests"
-        cat "${WORK}/tls/requests.log"
-        echo "--- .kubehz-bind"
-        cat "${CL}/bind-reg.dev/.kubehz-bind" 2>/dev/null || echo "(none)"
-        echo
-        echo "--- clusters/bind-reg.dev"
-        ls -A "${CL}/bind-reg.dev"
-        echo "--- link target"
-        ls -A "${WORK}/bind-target" 2>/dev/null || echo "(none)"
-      } >> "${WORK}/${1}.out"
-    }
-    bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
-    BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
-    # root reads a 0000 file, so the case proves nothing there.
-    [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
-    for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
-      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # fingerprint announce
-      export KUBEHZ_TOKEN=khzt_parity
-      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # bearer (direct claim)
-      unset KUBEHZ_TOKEN
-      export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
-      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
-      unset HCLOUD_TOKEN HCLOUD_API_BASE
-    done
-    unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
-  fi
+  export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem"
+  # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
+  # value, one with a trailing newline, one in upper case, a valid value in
+  # a file nobody may read, a valid value with 200 kB after it, a
+  # directory, a link to a directory, or no file.
+  bind_reset() {
+    rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
+    : > "${STUB_LOG}"
+    case "${BIND_FIXTURE}" in
+      valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      unreadable)
+        printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
+        chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
+        ;;
+      oversized)
+        { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${CL}/bind-reg.dev/.kubehz-bind"
+        ;;
+      directory) mkdir "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      dirlink)
+        mkdir "${WORK}/bind-target"
+        ln -s "${WORK}/bind-target" "${CL}/bind-reg.dev/.kubehz-bind"
+        ;;
+    esac
+  }
+  bind_record() {
+    {
+      echo "--- requests"
+      cat "${STUB_LOG}"
+      echo "--- .kubehz-bind"
+      cat "${CL}/bind-reg.dev/.kubehz-bind" 2>/dev/null || echo "(none)"
+      echo
+      echo "--- clusters/bind-reg.dev"
+      ls -A "${CL}/bind-reg.dev"
+      echo "--- link target"
+      ls -A "${WORK}/bind-target" 2>/dev/null || echo "(none)"
+    } >> "${WORK}/${1}.out"
+  }
+  bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
+  BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
+  # root reads a 0000 file, so the case proves nothing there.
+  [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
+  for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
+    bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # fingerprint announce
+    export KUBEHZ_TOKEN=khzt_parity
+    bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # bearer (direct claim)
+    unset KUBEHZ_TOKEN
+    export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+    bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
+    unset HCLOUD_TOKEN HCLOUD_API_BASE
+  done
+  unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
 fi
 
 report

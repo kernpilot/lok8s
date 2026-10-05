@@ -84,12 +84,16 @@ injection:
 
   # secret/credential-emitting tools: NEVER expose to the model, even though
   # they're @readonly (lo_kubeconfig prints the admin client cert+key).
+  # The argsh `lo mcp` names a third-level command by its last two words:
+  # lo_space_kubeconfig is `lo kubehz space kubeconfig`.
   deny:
     - lo_secrets_print
     - lo_secrets_env
     - lo_kubeconfig
     - lo_kubehz_token
     - lo_kubehz_claim-code
+    - lo_space_kubeconfig
+    - lo_cluster_kubeconfig
 
 # ---------------------------------------------------------------------------
 # Benchmark

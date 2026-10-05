@@ -73,6 +73,10 @@ type Context struct {
 	Hostname func() (string, error)
 	// IsRoot is node::is_root (nil = euid == 0).
 	IsRoot func() bool
+	// Euid is the effective user id (nil = os.Geteuid): the owner a link
+	// and its target must have before the agent kubeconfig writes through
+	// the link (agent.go kubeconfigTarget).
+	Euid func() int
 	// LookPath is `command -v <tool>` (nil = execx.Look over Paths).
 	LookPath func(tool string) bool
 	// IsTTY reports whether stdout is a terminal (nil = false) — the
@@ -125,6 +129,13 @@ func (c *Context) hostname() (string, error) {
 		return c.Hostname()
 	}
 	return os.Hostname()
+}
+
+func (c *Context) euid() int {
+	if c.Euid != nil {
+		return c.Euid()
+	}
+	return os.Geteuid()
 }
 
 func (c *Context) isRoot() bool {

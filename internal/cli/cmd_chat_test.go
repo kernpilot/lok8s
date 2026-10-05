@@ -129,24 +129,108 @@ func TestChatPreflightErrors(t *testing.T) {
 	}
 }
 
-// TestChatDeniesEveryCredentialOutputCommand: `lo chat` drives the bash tree's
-// argsh `lo mcp`, which knows nothing of AnnotationCredentialOutput. The chat
-// defaults' deny list is the only gate there, so every such command must be
-// on it (in the project tree and in the embedded copy).
-func TestChatDeniesEveryCredentialOutputCommand(t *testing.T) {
-	var tools []string
+// argshToolName is the tool name the argsh `lo mcp` builtin gives a command:
+// lo_ and the path, of which a command three or more levels deep keeps only
+// its last two words (`lo kubehz space kubeconfig` is lo_space_kubeconfig).
+// The builtin prefixes the parent's name onto its children only, never onto
+// the grandchildren.
+func argshToolName(c *cobra.Command) string {
+	words := strings.Fields(c.CommandPath())[1:]
+	if len(words) > 2 {
+		words = words[len(words)-2:]
+	}
+	return "lo_" + strings.Join(words, "_")
+}
+
+func TestArgshToolName(t *testing.T) {
+	root := newUsageTree(synthProject(t), routing{})
+	for path, want := range map[string]string{
+		"kubeconfig":                "lo_kubeconfig",
+		"kubehz token":              "lo_kubehz_token",
+		"kubehz node join":          "lo_node_join",
+		"kubehz space kubeconfig":   "lo_space_kubeconfig",
+		"kubehz cluster kubeconfig": "lo_cluster_kubeconfig",
+	} {
+		cmd := findByPath(root, path)
+		if cmd == nil {
+			t.Fatalf("no command %q", path)
+		}
+		if got := argshToolName(cmd); got != want {
+			t.Errorf("%s: %s, want %s", path, got, want)
+		}
+	}
+}
+
+// TestChatTiersNameNoToolTheArgshServerCannotRun: the argsh `lo mcp` that
+// `lo chat` drives names a command three levels deep by its last two words
+// and then cannot run it (#245). A tier entry for such a tool would offer
+// the model a tool that always fails. The deny list may name them.
+func TestChatTiersNameNoToolTheArgshServerCannotRun(t *testing.T) {
+	broken, runnable := map[string]bool{}, map[string]bool{}
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
-		if c.Annotations[AnnotationCredentialOutput] == "true" {
-			tools = append(tools, strings.ReplaceAll(c.CommandPath(), " ", "_"))
+		if len(strings.Fields(c.CommandPath())) > 3 {
+			broken[argshToolName(c)] = true
+		} else {
+			runnable[argshToolName(c)] = true
 		}
 		for _, sub := range c.Commands() {
 			walk(sub)
 		}
 	}
 	walk(newUsageTree(synthProject(t), routing{}))
-	if !slices.Contains(tools, "lo_kubehz_token") {
-		t.Fatalf("credential-output commands = %v: lo_kubehz_token lost its annotation, the check proves nothing", tools)
+	// A two-word name that a real two-level command also carries
+	// (`lo drivers kubehz status` and `lo kubehz status`) runs that one.
+	for name := range runnable {
+		delete(broken, name)
+	}
+	if !broken["lo_space_list"] {
+		t.Fatalf("no third-level tool found (%v): the check proves nothing", broken)
+	}
+	for _, file := range []string{"../../.lok8s/chat/defaults.json", "../assets/lok8s/chat/defaults.json"} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var defaults struct {
+			Injection struct {
+				Tiers map[string][]string `json:"tiers"`
+			} `json:"injection"`
+		}
+		if err := json.Unmarshal(raw, &defaults); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		for tier, tools := range defaults.Injection.Tiers {
+			for _, tool := range tools {
+				if broken[tool] {
+					t.Errorf("%s: tier %s names %s, which the argsh lo mcp cannot run (#245)", file, tier, tool)
+				}
+			}
+		}
+	}
+}
+
+// TestChatDeniesEveryCredentialOutputCommand: `lo chat` drives the bash tree's
+// argsh `lo mcp`, which knows nothing of AnnotationCredentialOutput. The chat
+// defaults' deny list is the only gate there, so every such command must be
+// on it (in the project tree and in the embedded copy), under the name the
+// argsh server gives it.
+func TestChatDeniesEveryCredentialOutputCommand(t *testing.T) {
+	var tools []string
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Annotations[AnnotationCredentialOutput] == "true" {
+			tools = append(tools, argshToolName(c))
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(newUsageTree(synthProject(t), routing{}))
+	for _, must := range []string{"lo_kubehz_token", "lo_space_kubeconfig", "lo_cluster_kubeconfig"} {
+		if !slices.Contains(tools, must) {
+			t.Fatalf("credential-output commands = %v: %s lost its annotation, the check proves nothing", tools, must)
+		}
 	}
 	for _, file := range []string{"../../.lok8s/chat/defaults.json", "../assets/lok8s/chat/defaults.json"} {
 		raw, err := os.ReadFile(file)

@@ -1,0 +1,735 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2016,SC2034
+# SC2016: single-quoted $ here is jq program text
+# vim: set syntax=bash:
+# kubehz-agent — `lo kubehz space …` and `lo kubehz cluster …`. An AI agent or
+# a pipeline makes these kubehz api calls with an agent key. `lo mcp` turns
+# the commands into tools, like every other leaf. The Go twin is
+# internal/kubehz/agent.go, with the same messages and the same bytes on
+# stdout. hack/parity-kubehz.sh diffs both against an https stub of the api.
+#
+# THE CREDENTIAL: the agent key is four variables (KUBEHZ_AGENT_CLIENT_ID,
+# KUBEHZ_AGENT_CLIENT_SECRET, KUBEHZ_AGENT_TOKEN_URL, KUBEHZ_AGENT_SCOPE).
+# The grant of `lo kubehz token` (kubehz::token_access) turns it into an
+# access token, with the same cache file. Without a key, KUBEHZ_TOKEN is the
+# bearer. KUBEHZ_API_URL names the api. No flag names the URL or holds a
+# credential: a model that could set the URL could send the bearer to any
+# host. The bearer reaches curl in a config on stdin, never on argv.
+#
+# lo adds no authority. The api enforces the role of the key, its scope, its
+# monthly spend cap and the lease. What a key creates ends after two hours
+# unless the key extends the lease. lo checks only the shape of what it
+# sends: an id that goes into a URL path, and whole numbers.
+#
+# OUTPUT: -o text prints a table for a list and label lines for one record.
+# json and yaml print fixed lowerCamel fields. The records are projections, so
+# a new api field changes no output. Every string from the api loses its
+# control characters (the jq `clean`) in every format.
+#
+# The two `kubeconfig` leaves count as credential output. The Go `lo mcp`
+# never offers them. The `lo chat` defaults deny them under the names that
+# the argsh `lo mcp` gives (lo_space_kubeconfig, lo_cluster_kubeconfig).
+#
+# LIBRARY-ONLY: loaded through libs/kubehz/main; not directly executable.
+
+import ^utils/verbose
+import ^utils/http
+import ^libs/kubehz/shared
+
+kubehz::space() {
+  local -a usage=(
+    'list@readonly'       'List the spaces the credential reaches'
+    'get@readonly'        'Show one space'
+    'create'              'Create a space (an agent key sets a lease)'
+    'delete@destructive'  'Delete a space'
+    'lease@destructive'   'Set the hours until the platform deletes a space'
+    'kubeconfig'          'Write the agent kubeconfig of a space to a file'
+  )
+  :usage "Spaces through the kubehz api (agent tools)" "${@}"
+  "${usage[@]}"
+}
+
+kubehz::cluster() {
+  local -a usage=(
+    'list@readonly'       'List the clusters the credential reaches'
+    'get@readonly'        'Show one cluster'
+    'lease@destructive'   'Set the hours until the platform deletes a hosted cluster'
+    'kubeconfig'          'Write the agent kubeconfig of a hosted cluster to a file'
+  )
+  :usage "Clusters through the kubehz api (agent tools)" "${@}"
+  "${usage[@]}"
+}
+
+# ── the leaves ───────────────────────────────────────────
+
+kubehz::space::list() {
+  local output="text"
+  local -a args=(
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "List the spaces the credential reaches" "${@}"
+  kubehz::agent_list space "${output}"
+}
+
+kubehz::space::get() {
+  local id output="text"
+  local -a args=(
+    'id'        'Space id (sp-…)'
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Show one space" "${@}"
+  kubehz::agent_output "${output}" || return 1
+  kubehz::agent_check_id space get "${id}" || return 1
+  kubehz::agent_one space "space get ${id}" "${id}" GET "/api/spaces/${id}" || return 1
+  kubehz::agent_print "${output}" space_detail space_detail_text
+}
+
+kubehz::space::create() {
+  local name="" slug="" nodes="" namespaces="" object_cap_kib="" region="" lease_hours="" output="text"
+  local -a args=(
+    'name|:!'            'Display name of the space'
+    'slug|:!'            'DNS label of the space, unique on the platform (the namespace name)'
+    'nodes|'             "Node limit; default: the platform's"
+    'namespaces|'        "Namespace limit; default: the platform's"
+    'object-cap-kib|'    "Size cap of one Secret or ConfigMap in KiB; default: the platform's"
+    'region|'            "Region to place the space in; default: the platform's choice"
+    'lease-hours|'       'Hours until the platform deletes the space (1 to 720); an agent key gets 2 without it'
+    'output|o'           'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Create a space (an agent key sets a lease)" "${@}"
+  kubehz::agent_output "${output}" || return 1
+
+  local action body i flag field value number
+  # flag, request field, value: in the order the Go twin checks them.
+  local -a numbers=(
+    nodes           maxNodes       "${nodes}"
+    namespaces      maxNamespaces  "${namespaces}"
+    object-cap-kib  maxObjectKiB   "${object_cap_kib}"
+  )
+  action="space create $(kubehz::agent_clean_e "${slug}")"
+  body=$(jq -cn --arg name "${name}" --arg slug "${slug}" '{name: $name, slug: $slug}') || return 1
+  # A number the flags leave out is not sent: the api applies its default.
+  for (( i = 0; i < ${#numbers[@]}; i += 3 )); do
+    flag="${numbers[i]}"
+    field="${numbers[i + 1]}"
+    value="${numbers[i + 2]}"
+    [[ -n "${value}" ]] || continue
+    if ! kubehz::agent_match "${value}" '^[0-9]+$' || ! number=$(kubehz::space_number_value "${value}"); then
+      error "kubehz ${action}: --${flag} $(kubehz::agent_clean_e "${value}") is not valid"
+      echo "  Use a whole number of 1 or more, or leave the flag out for the platform default." >&2
+      return 1
+    fi
+    body=$(jq -c --arg f "${field}" --argjson n "${number}" '. + {($f): $n}' <<<"${body}") || return 1
+  done
+  if [[ -n "${region}" ]]; then
+    body=$(jq -c --arg r "${region}" '. + {region: $r}' <<<"${body}") || return 1
+  fi
+  if [[ -n "${lease_hours}" ]]; then
+    kubehz::agent_hours "${action}" lease-hours "${lease_hours}" || return 1
+    body=$(jq -c --argjson n "${KUBEHZ_AGENT_HOURS}" '. + {leaseHours: $n}' <<<"${body}") || return 1
+  fi
+  kubehz::agent_one space "${action}" "" POST "/api/spaces" "${body}" || return 1
+  kubehz::agent_print "${output}" space space_text
+}
+
+kubehz::space::delete() {
+  local id output="text"
+  local -a args=(
+    'id'        'Space id (sp-…)'
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Delete a space" "${@}"
+  kubehz::agent_output "${output}" || return 1
+  kubehz::agent_check_id space delete "${id}" || return 1
+  kubehz::agent_one space "space delete ${id}" "${id}" DELETE "/api/spaces/${id}" || return 1
+  kubehz::agent_print "${output}" '{id: (.id | str), status: (.status | str)}' \
+    '"space \(.id | cell): \(.status | cell)"'
+}
+
+kubehz::space::lease() {
+  local id hours="" output="text"
+  local -a args=(
+    'id'        'Space id (sp-…)'
+    'hours|:!'  'Hours from now until the platform deletes it (1 to 720)'
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Set the hours until the platform deletes a space" "${@}"
+  kubehz::agent_lease space "${id}" "${hours}" "${output}"
+}
+
+kubehz::space::kubeconfig() {
+  # force: the inherited global --force (the handover::receive idiom).
+  local id file="" output="text" force="${force:-0}"
+  local -a args=(
+    'id'           'Space id (sp-…)'
+    'file|:!'      'Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force'
+    'force|f:^:+'  'Replace a file that exists (a link is written through)'
+    'output|o'     'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Write the agent kubeconfig of a space to a file" "${@}"
+  kubehz::agent_kubeconfig space "${id}" "${file}" "${force}" "${output}"
+}
+
+kubehz::cluster::list() {
+  local output="text"
+  local -a args=(
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "List the clusters the credential reaches" "${@}"
+  kubehz::agent_list cluster "${output}"
+}
+
+kubehz::cluster::get() {
+  local id output="text"
+  local -a args=(
+    'id'        'Cluster id (cl-…)'
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Show one cluster" "${@}"
+  kubehz::agent_output "${output}" || return 1
+  kubehz::agent_check_id cluster get "${id}" || return 1
+  kubehz::agent_one cluster "cluster get ${id}" "${id}" GET "/api/clusters/${id}" || return 1
+  kubehz::agent_print "${output}" cluster cluster_text
+}
+
+kubehz::cluster::lease() {
+  local id hours="" output="text"
+  local -a args=(
+    'id'        'Cluster id (cl-…)'
+    'hours|:!'  'Hours from now until the platform deletes it (1 to 720)'
+    'output|o'  'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Set the hours until the platform deletes a hosted cluster" "${@}"
+  kubehz::agent_lease cluster "${id}" "${hours}" "${output}"
+}
+
+kubehz::cluster::kubeconfig() {
+  # force: the inherited global --force (the handover::receive idiom).
+  local id file="" output="text" force="${force:-0}"
+  local -a args=(
+    'id'           'Cluster id (cl-…)'
+    'file|:!'      'Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force'
+    'force|f:^:+'  'Replace a file that exists (a link is written through)'
+    'output|o'     'Output format: text, json or yaml'
+    "${args[@]:-}"
+  )
+  :args "Write the agent kubeconfig of a hosted cluster to a file" "${@}"
+  kubehz::agent_kubeconfig cluster "${id}" "${file}" "${force}" "${output}"
+}
+
+# ── shared steps ─────────────────────────────────────────
+
+# The jq definitions of the records and their text forms. SpaceRecord,
+# SpaceDetail and ClusterRecord in the Go twin carry the same fields in the
+# same order. `clean` is cleanText there, `cell` is textCell, `field` is
+# writeLabels and `table` is writeTable (widths in code points).
+KUBEHZ_AGENT_JQ='
+def clean: explode | map(select(. >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233
+  and (. < 8234 or . > 8238) and (. < 8294 or . > 8297))) | implode;
+def clip: if length > 256 then .[0:256] + "…" else . end;
+def said($f): [(.data? | objects | .[$f]), (objects | .[$f])] | map(strings) | first // empty
+  | clean | clip;
+def str: if type == "string" then clean else null end;
+def num: if type == "number" then . else null end;
+def strs: if type == "array" then map(select(type == "string") | clean) else [] end;
+def cell: if . == null or . == "" then "-" else tostring end;
+def field($l): ($l + ":") as $s | $s + ([range(0; 13 - ($s | length))] | map(" ") | join(""));
+def table: . as $rows | ($rows[0] | length) as $n
+  | [range(0; $n) as $i | $rows | map(.[$i] | length) | max] as $w
+  | $rows[] | . as $row
+  | [range(0; $n) as $i | if $i == $n - 1 then $row[$i]
+      else $row[$i] + ([range(0; $w[$i] - ($row[$i] | length) + 2)] | map(" ") | join("")) end]
+  | join("");
+def space: {id: (.id | str), name: (.name | str), slug: (.slug | str), status: (.status | str),
+  maxNodes: (.maxNodes | num), maxNamespaces: (.maxNamespaces | num), maxObjectKiB: (.maxObjectKiB | num),
+  nodeCount: (.nodeCount | num), namespaces: (.namespaces | strs),
+  leaseExpiresAt: (.leaseExpiresAt | str), createdAt: (.createdAt | str)};
+def space_detail: space + {
+  nodeCount: (if (.usage | type) == "object" then .usage.nodes else null end | num),
+  namespaces: (if (.namespaces | type) == "array"
+    then [.namespaces[] | select(type == "object") | .name | select(type == "string") | clean] else [] end),
+  endpoint: (.endpoint | str),
+  nodes: (if (.nodes | type) == "array"
+    then [.nodes[] | select(type == "object") | {name: (.name | str), status: (.status | str)}] else [] end)};
+def space_lines($detail):
+  [field("ID") + (.id | cell), field("Name") + (.name | cell), field("Slug") + (.slug | cell),
+   field("Status") + (.status | cell),
+   field("Nodes") + (.nodeCount | cell) + " of " + (.maxNodes | cell),
+   field("Namespaces") + (if (.namespaces | length) == 0 then "-" else (.namespaces | join(", ")) end)
+     + " (limit " + (.maxNamespaces | cell) + ")",
+   field("Object cap") + (if .maxObjectKiB == null then "-" else (.maxObjectKiB | cell) + " KiB" end)]
+  + (if $detail then [field("Endpoint") + (.endpoint | cell)] else [] end)
+  + [field("Lease ends") + (.leaseExpiresAt | cell), field("Created") + (.createdAt | cell)]
+  | .[];
+def space_text: space_lines(false);
+def space_detail_text: space_lines(true);
+def spaces: {spaces: [.data[] | select(type == "object") | space]};
+def spaces_text: [["ID", "SLUG", "NAME", "STATUS", "NODES", "LEASE ENDS"]]
+  + [.spaces[] | [(.id | cell), (.slug | cell), (.name | cell), (.status | cell),
+     ((.nodeCount | cell) + "/" + (.maxNodes | cell)), (.leaseExpiresAt | cell)]] | table;
+def cluster: {id: (.id | str), domain: (.domain | str), hosting: (.hosting | str), status: (.status | str),
+  region: (.region | str), kubernetesVersion: (.kubernetesVersion | str),
+  controlPlaneReplicas: (.controlPlaneReplicas | num), apiEndpoint: (.apiEndpoint | str),
+  health: (.health | str), leaseExpiresAt: (.leaseExpiresAt | str), createdAt: (.createdAt | str)};
+def cluster_text:
+  field("ID") + (.id | cell), field("Domain") + (.domain | cell), field("Hosting") + (.hosting | cell),
+  field("Status") + (.status | cell), field("Health") + (.health | cell), field("Region") + (.region | cell),
+  field("Version") + (.kubernetesVersion | cell), field("Apiservers") + (.controlPlaneReplicas | cell),
+  field("Endpoint") + (.apiEndpoint | cell), field("Lease ends") + (.leaseExpiresAt | cell),
+  field("Created") + (.createdAt | cell);
+def clusters: {clusters: [.data[] | select(type == "object") | cluster]};
+def clusters_text: [["ID", "DOMAIN", "HOSTING", "STATUS", "VERSION", "LEASE ENDS"]]
+  + [.clusters[] | [(.id | cell), (.domain | cell), (.hosting | cell), (.status | cell),
+     (.kubernetesVersion | cell), (.leaseExpiresAt | cell)]] | table;
+'
+
+# Whether the string matches the regex in the C locale. In another locale a
+# bracket range like [A-Z] can match more than ASCII. The regexps of the Go
+# twin match ASCII only.
+# Usage: kubehz::agent_match <string> <regex>
+kubehz::agent_match() {
+  local LC_ALL=C
+  [[ "${1}" =~ ${2} ]]
+}
+
+# A user value or a server string as the Go twin prints it:
+# clip(cleanText(s)). The jq `clean` drops the control characters. Then
+# `clip` keeps 256 code points and adds an ellipsis. jq counts code points
+# in any locale.
+# Usage: kubehz::agent_clean <string>
+kubehz::agent_clean() {
+  jq -nr --arg s "${1}" "${KUBEHZ_AGENT_JQ}"' $s | clean | clip'
+}
+
+# The same, with the backslashes doubled for error() and warn(), which
+# print through `echo -e`.
+# Usage: kubehz::agent_clean_e <string>
+kubehz::agent_clean_e() {
+  local s
+  s=$(kubehz::agent_clean "${1}")
+  printf '%s\n' "${s//\\/\\\\}"
+}
+
+# Refuse an -o value other than text, json or yaml, in the shape the Go
+# twin's --output check prints.
+# Usage: kubehz::agent_output <format>
+kubehz::agent_output() {
+  case "${1}" in
+    text|json|yaml) return 0 ;;
+  esac
+  printf 'Error: invalid --output "%s": text, json or yaml\n\n  Run "lo -h" for more information.\n' "${1}" >&2
+  return 1
+}
+
+# Refuse an id that is not the shape of the api (utils/agent-keys.ts
+# CLUSTER_ID, SPACE_ID). An id goes into a URL path, so nothing else may
+# pass: a `../` would address another route. The refusal shows the id once,
+# cleaned and clipped.
+# Usage: kubehz::agent_check_id <space|cluster> <verb> <id>
+kubehz::agent_check_id() {
+  local noun="${1}" verb="${2}" id="${3}" prefix="sp-"
+  [[ "${noun}" == space ]] || prefix="cl-"
+  kubehz::agent_match "${id}" "^${prefix}[A-Za-z0-9-]{1,64}\$" && return 0
+  error "kubehz ${noun} ${verb}: $(kubehz::agent_clean_e "${id}") is not a ${noun} id"
+  echo "  A ${noun} id is ${prefix} and 1 to 64 letters, digits or dashes. List them: lo kubehz ${noun} list" >&2
+  return 1
+}
+
+# Read an hours value: a whole number from 1 to 720, the longest lease.
+# Usage: kubehz::agent_hours <action> <flag> <value>
+# Sets: KUBEHZ_AGENT_HOURS
+kubehz::agent_hours() {
+  local action="${1}" flag="${2}" value="${3}" n=""
+  KUBEHZ_AGENT_HOURS=""
+  if kubehz::agent_match "${value}" '^[0-9]+$' && n=$(kubehz::space_number_value "${value}") \
+    && (( ${#n} <= 3 )) && (( 10#${n} <= 720 )); then
+    KUBEHZ_AGENT_HOURS="${n}"
+    return 0
+  fi
+  error "kubehz ${action}: --${flag} $(kubehz::agent_clean_e "${value}") is not valid"
+  echo "  Use a whole number of hours from 1 to 720." >&2
+  return 1
+}
+
+# Join names as "a", "a and b" or "a, b and c".
+# Usage: kubehz::agent_join_and <name>...
+kubehz::agent_join_and() {
+  local out="${1}" i
+  for (( i = 2; i <= $#; i++ )); do
+    if (( i == $# )); then out+=" and ${!i}"; else out+=", ${!i}"; fi
+  done
+  echo "${out}"
+}
+
+# Resolve the api URL and the bearer. Every refusal is printed here.
+# Usage: kubehz::agent_session <action>
+# Sets: KUBEHZ_AGENT_BASE KUBEHZ_AGENT_BEARER KUBEHZ_AGENT_KEY (1 = agent key)
+kubehz::agent_session() {
+  local action="${1}" base="${KUBEHZ_API_URL:-}"
+  KUBEHZ_AGENT_BASE=""
+  KUBEHZ_AGENT_BEARER=""
+  KUBEHZ_AGENT_KEY=0
+  if [[ -z "${base}" ]]; then
+    error "kubehz ${action}: KUBEHZ_API_URL is not set"
+    echo "  Set it to the kubehz api, for example: export KUBEHZ_API_URL=https://api.kubehz.cloud" >&2
+    return 1
+  fi
+  http::require_https "${base}" "KUBEHZ_API_URL" || return 1
+  # A double slash in the path is not canonical: the api refuses it for a
+  # machine credential (400 PATH_NOT_CANONICAL).
+  while [[ "${base}" == */ ]]; do base="${base%/}"; done
+  KUBEHZ_AGENT_BASE="${base}"
+
+  if [[ -n "${KUBEHZ_AGENT_CLIENT_ID:-}${KUBEHZ_AGENT_CLIENT_SECRET:-}" ]]; then
+    local name missing=()
+    for name in KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE; do
+      [[ -n "${!name:-}" ]] || missing+=("${name}")
+    done
+    if (( ${#missing[@]} )); then
+      error "kubehz ${action}: the agent key needs $(kubehz::agent_join_and "${missing[@]}")"
+      echo "  The answer that created the key holds the four values: clientId, clientSecret, tokenEndpoint and tokenScope." >&2
+      return 1
+    fi
+    kubehz::token_access "${KUBEHZ_AGENT_TOKEN_URL}" "${KUBEHZ_AGENT_SCOPE}" "" 0 || return 1
+    KUBEHZ_AGENT_BEARER="${KUBEHZ_TOKEN_ACCESS}"
+    KUBEHZ_AGENT_KEY=1
+  elif [[ -n "${KUBEHZ_TOKEN:-}" ]]; then
+    KUBEHZ_AGENT_BEARER="${KUBEHZ_TOKEN}"
+  else
+    error "kubehz ${action}: no credential for the kubehz api"
+    echo "  Set KUBEHZ_AGENT_CLIENT_ID and KUBEHZ_AGENT_CLIENT_SECRET (an agent key), or KUBEHZ_TOKEN." >&2
+    return 1
+  fi
+  # A line break would end the curl config line and make the rest a curl
+  # option.
+  if kubehz::token_has_control "${KUBEHZ_AGENT_BEARER}"; then
+    error "kubehz ${action}: the access token holds a control character"
+    return 1
+  fi
+}
+
+# One api call. The bearer reaches curl in a config on stdin (`-q -K -`),
+# never on argv. Every user of the machine can read a command line. No
+# redirect is followed: a 3xx is a refusal. The call ends after 60 s. The
+# result travels in globals (the kubehz::space_api rule):
+#   rc 0  → 2xx, the body in KUBEHZ_AGENT_BODY
+#   rc 2  → not 2xx, KUBEHZ_AGENT_STATUS and KUBEHZ_AGENT_BODY set
+#   rc 1  → no answer, already printed
+# Usage: kubehz::agent_api <action> <method> <path> [json_body]
+kubehz::agent_api() {
+  local action="${1}" method="${2}" path="${3}" body="${4:-}" auth raw
+  local -a extra=()
+  KUBEHZ_AGENT_STATUS=""
+  KUBEHZ_AGENT_BODY=""
+  [[ -z "${body}" ]] || extra=(-H 'Content-Type: application/json' --data-binary "${body}")
+  # The config line quotes backslashes and quotes, so the value can never
+  # end the string early.
+  auth="${KUBEHZ_AGENT_BEARER//\\/\\\\}"
+  auth="${auth//\"/\\\"}"
+  if ! raw=$(printf 'header = "Authorization: Bearer %s"\n' "${auth}" | curl -q -sS --proto =https \
+    --connect-timeout 10 --max-time 60 -K - -X "${method}" -H 'Accept: application/json' "${extra[@]}" \
+    -w $'\n%{http_code}' "${KUBEHZ_AGENT_BASE}${path}" 2>/dev/null); then
+    error "kubehz ${action}: the api at ${KUBEHZ_AGENT_BASE//\\/\\\\} did not answer"
+    echo "  Check KUBEHZ_API_URL and the network. Then try again." >&2
+    return 1
+  fi
+  KUBEHZ_AGENT_STATUS="${raw##*$'\n'}"
+  KUBEHZ_AGENT_BODY="${raw%$'\n'*}"
+  [[ "${KUBEHZ_AGENT_STATUS}" == 2* ]] || return 2
+}
+
+# Print a non-2xx answer: what failed, with the status, the code and the
+# message of the api. Then print the next step. lo prints its own hint where
+# it knows more than the api (a flag name, the list command). Else it prints
+# the help of the api. Both server strings lose every control character and
+# are clipped. A line break goes too, because one refusal is two lines. Only
+# the string that reaches error() is escaped for `echo -e`. A
+# resource-scoped key never gets AGENT_KEY_OUT_OF_SCOPE here. A space or a
+# cluster outside its reach answers 404, like one that does not exist.
+# Usage: kubehz::agent_refused <space|cluster> <action> <id>
+kubehz::agent_refused() {
+  local noun="${1}" action="${2}" id="${3}" code msg help hint=""
+  code=$(jq -r '.data.code // .code // empty' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || code=""
+  kubehz::agent_match "${code}" '^[A-Z0-9_]{1,64}$' || code=""
+  msg=$(jq -r "${KUBEHZ_AGENT_JQ}"' said("message")' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || msg=""
+  [[ -n "${msg}" ]] || msg="no reason given"
+  error "kubehz ${action}: the api refused the request (HTTP ${KUBEHZ_AGENT_STATUS}${code:+ ${code}}): ${msg//\\/\\\\}"
+
+  if [[ "${KUBEHZ_AGENT_STATUS}" == 401 ]] && (( KUBEHZ_AGENT_KEY )); then
+    hint="The api did not accept the agent key. A revoked or expired key needs a new key from a tenant owner."
+  elif [[ "${KUBEHZ_AGENT_STATUS}" == 401 ]]; then
+    hint="The api did not accept KUBEHZ_TOKEN. Mint a new token in the kubehz dashboard."
+  else
+    case "${code}" in
+      # Only an agent key: its role viewer holds read alone. A KUBEHZ_TOKEN
+      # can hold clusters:write without read, and the api's help names the
+      # scope it misses.
+      TOKEN_SCOPE_MISSING)
+        if (( KUBEHZ_AGENT_KEY )); then
+          hint="The agent key can read but not write. Use an agent key with the role editor or admin."
+        fi ;;
+      AGENT_KEY_SPEND_CAP)
+        hint="Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC)." ;;
+      SPACE_LIMITS_ABOVE_SHARED)
+        hint="Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default." ;;
+      NO_SHARD_AVAILABLE|SHARD_AT_CAPACITY)
+        hint="This is a platform capacity limit, not an account limit. Try again later, or name another region with --region." ;;
+      *)
+        if [[ "${KUBEHZ_AGENT_STATUS}" == 404 && -n "${id}" ]]; then
+          hint="No ${noun} ${id} exists, or the credential cannot reach it. List what it reaches: lo kubehz ${noun} list"
+        fi ;;
+    esac
+  fi
+  if [[ -n "${hint}" ]]; then
+    echo "  ${hint}" >&2
+    return 0
+  fi
+  help=$(jq -r "${KUBEHZ_AGENT_JQ}"' said("help")' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || help=""
+  [[ -z "${help}" ]] || echo "  ${help}" >&2
+  return 0
+}
+
+# One call that answers a record: the session, the call, the refusal, the
+# `data` object. The caller checked the id.
+# Usage: kubehz::agent_one <space|cluster> <action> <id> <method> <path> [json_body]
+# Sets: KUBEHZ_AGENT_DATA (the data object, compact JSON)
+kubehz::agent_one() {
+  local noun="${1}" action="${2}" id="${3}" method="${4}" path="${5}" body="${6:-}" rc=0
+  KUBEHZ_AGENT_DATA=""
+  kubehz::agent_session "${action}" || return 1
+  kubehz::agent_api "${action}" "${method}" "${path}" "${body}" || rc=$?
+  (( rc != 1 )) || return 1
+  if (( rc == 2 )); then
+    kubehz::agent_refused "${noun}" "${action}" "${id}"
+    return 1
+  fi
+  KUBEHZ_AGENT_DATA=$(jq -c 'if type == "object" and (.data | type) == "object" then .data else empty end' \
+    <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || KUBEHZ_AGENT_DATA=""
+  if [[ -z "${KUBEHZ_AGENT_DATA}" ]]; then
+    error "kubehz ${action}: the api answered without a ${noun} record"
+    return 1
+  fi
+}
+
+# Print KUBEHZ_AGENT_DATA. json is the record filter in the pretty form of
+# jq (two spaces, as the encoder of the Go twin). yaml goes through yq in
+# block style. text is the text filter over the record.
+# Usage: kubehz::agent_print <format> <record-filter> <text-filter> [input]
+kubehz::agent_print() {
+  local format="${1}" record="${2}" text="${3}" input="${4:-${KUBEHZ_AGENT_DATA}}" doc
+  case "${format}" in
+    json) jq "${KUBEHZ_AGENT_JQ} ${record}" <<<"${input}" ;;
+    yaml)
+      doc=$(jq -c "${KUBEHZ_AGENT_JQ} ${record}" <<<"${input}") || return 1
+      yq -p json -o yaml -P '.' <<<"${doc}" ;;
+    *) jq -r "${KUBEHZ_AGENT_JQ} ${record} | ${text}" <<<"${input}" ;;
+  esac
+}
+
+# `<noun> list`: one page of the collection, the maximum of the api. A
+# total past the page gets a warning.
+# Usage: kubehz::agent_list <space|cluster> <format>
+kubehz::agent_list() {
+  local noun="${1}" format="${2}" action="${1} list" rc=0 counts
+  kubehz::agent_output "${format}" || return 1
+  kubehz::agent_session "${action}" || return 1
+  kubehz::agent_api "${action}" GET "/api/${noun}s?perPage=500" || rc=$?
+  (( rc != 1 )) || return 1
+  if (( rc == 2 )); then
+    kubehz::agent_refused "${noun}" "${action}" ""
+    return 1
+  fi
+  if ! counts=$(jq -r 'if type == "object" and (.data | type) == "array" then
+      "\(.data | length) \(if (.meta | type) == "object" and (.meta.pagination | type) == "object"
+        and (.meta.pagination.total | type) == "number" and .meta.pagination.total == (.meta.pagination.total | floor)
+        then .meta.pagination.total else 0 end)"
+    else error("no list") end' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null); then
+    error "kubehz ${action}: the api answered without a list of ${noun}s"
+    return 1
+  fi
+  if (( ${counts#* } > ${counts%% *} )); then
+    warn "kubehz ${action}: the list shows ${counts%% *} of ${counts#* } ${noun}s"
+  fi
+  kubehz::agent_print "${format}" "${noun}s" "${noun}s_text" "${KUBEHZ_AGENT_BODY}"
+}
+
+# `<noun> lease <id> --hours <n>`: PATCH …/lease {hours}. lo always sends a
+# number: removing a lease is a person's action in the dashboard.
+# Usage: kubehz::agent_lease <space|cluster> <id> <hours> <format>
+kubehz::agent_lease() {
+  local noun="${1}" id="${2}" hours="${3}" format="${4}" action
+  kubehz::agent_output "${format}" || return 1
+  kubehz::agent_check_id "${noun}" lease "${id}" || return 1
+  action="${noun} lease ${id}"
+  kubehz::agent_hours "${action}" hours "${hours}" || return 1
+  kubehz::agent_one "${noun}" "${action}" "${id}" PATCH "/api/${noun}s/${id}/lease" \
+    '{"hours":'"${KUBEHZ_AGENT_HOURS}"'}' || return 1
+  kubehz::agent_print "${format}" '{id: (.id | str), leaseExpiresAt: (.leaseExpiresAt | str)}' \
+    '"'"${noun}"' \(.id | cell): the lease ends \(.leaseExpiresAt | cell)"'
+}
+
+# `<noun> kubeconfig <id> --file <path>`: download …/kubeconfig/agent. Then
+# write it where kubehz::agent_target says, mode 0600, through a temporary
+# file next to it. The file holds no secret: its exec stanza runs
+# `lo kubehz token`.
+# Usage: kubehz::agent_kubeconfig <space|cluster> <id> <file> <force> <format>
+kubehz::agent_kubeconfig() {
+  local noun="${1}" id="${2}" file="${3}" force="${4}" format="${5}" action rc=0
+  kubehz::agent_output "${format}" || return 1
+  kubehz::agent_check_id "${noun}" kubeconfig "${id}" || return 1
+  action="${noun} kubeconfig ${id}"
+  # First before any request: a refused path costs no grant and no download.
+  kubehz::agent_target "${action}" "${file}" "${force}" || return 1
+  kubehz::agent_session "${action}" || return 1
+  kubehz::agent_api "${action}" GET "/api/${noun}s/${id}/kubeconfig/agent" || rc=$?
+  (( rc != 1 )) || return 1
+  if (( rc == 2 )); then
+    kubehz::agent_refused "${noun}" "${action}" "${id}"
+    return 1
+  fi
+  if [[ -z "${KUBEHZ_AGENT_BODY//[[:space:]]/}" ]]; then
+    error "kubehz ${action}: the api answered without a kubeconfig"
+    return 1
+  fi
+  # Again just before the write: the path can change during the grant and
+  # the download.
+  kubehz::agent_target "${action}" "${file}" "${force}" || return 1
+  if ! kubehz::agent_write "${KUBEHZ_AGENT_TARGET}" "${force}"; then
+    if (( ! force )) && [[ -e "${file}" || -L "${file}" ]]; then
+      kubehz::agent_exists "${action}" "${file}"
+      return 1
+    fi
+    error "kubehz ${action}: cannot write ${file//\\/\\\\}"
+    echo "  Name a file in a directory that exists and that you can write to." >&2
+    return 1
+  fi
+  case "${format}" in
+    text) printf '%s\n' "${file}" ;;
+    json) jq -n --arg id "${id}" --arg file "${file}" '{id: $id, file: $file}' ;;
+    yaml) jq -cn --arg id "${id}" --arg file "${file}" '{id: $id, file: $file}' | yq -p json -o yaml -P '.' ;;
+  esac
+}
+
+# Decide where the kubeconfig goes, the Go twin's kubeconfigTarget. It runs
+# before any request and again just before the write:
+#   - A path in /proc or /dev, or a path that a link sends there, is
+#     refused (see kubehz::agent_in_proc_or_dev).
+#   - A directory, or a link to one, is refused.
+#   - A path that exists (a file or a link) is refused without --force.
+#     Thus --file ~/.kube/config cannot lose its contexts by accident.
+#   - With --force, lo writes through a link: the target becomes a new file
+#     (owned by this user, mode 0600) and the link stays.
+#   - lo writes through a link only when the link and its target belong to
+#     this user. lo resolves the link itself, so fs.protected_symlinks does
+#     not apply: a link that another user put in /tmp must not send the
+#     write to a file of this user, such as ~/.bashrc. A link to nothing is
+#     refused.
+# A short race stays between the last check and the mv. A user who can write
+# the directory of a link can point the link somewhere else.
+# Usage: kubehz::agent_target <action> <file> <force>
+# Sets: KUBEHZ_AGENT_TARGET
+kubehz::agent_target() {
+  local action="${1}" file="${2}" force="${3}" me link_uid target_uid
+  KUBEHZ_AGENT_TARGET="${file}"
+  if kubehz::agent_in_proc_or_dev "${file}"; then
+    error "kubehz ${action}: ${file//\\/\\\\} is in /proc or /dev, or a link in its path points there"
+    echo "  lo does not write to /proc or /dev. Name a file in another directory." >&2
+    return 1
+  fi
+  if [[ -d "${file}" ]]; then
+    error "kubehz ${action}: ${file//\\/\\\\} is a directory"
+    echo "  Name a file, not a directory." >&2
+    return 1
+  fi
+  [[ -e "${file}" || -L "${file}" ]] || return 0
+  if (( ! force )); then
+    kubehz::agent_exists "${action}" "${file}"
+    return 1
+  fi
+  [[ -L "${file}" ]] || return 0
+  if ! KUBEHZ_AGENT_TARGET=$(realpath -e -- "${file}" 2>/dev/null); then
+    error "kubehz ${action}: cannot write ${file//\\/\\\\}"
+    echo "  Name a file in a directory that exists and that you can write to." >&2
+    return 1
+  fi
+  me=$(id -u)
+  link_uid=$(stat -c '%u' -- "${file}" 2>/dev/null) || link_uid=""
+  target_uid=$(stat -c '%u' -- "${KUBEHZ_AGENT_TARGET}" 2>/dev/null) || target_uid=""
+  if [[ "${link_uid}" != "${me}" || "${target_uid}" != "${me}" ]]; then
+    error "kubehz ${action}: ${file//\\/\\\\} is a link, and the link or its target belongs to another user"
+    echo "  lo writes through a link only when you own the link and its target. Name another file." >&2
+    return 1
+  fi
+}
+
+# Is the path in /proc or /dev, or does a link on its path point there? The
+# Go twin's inProcOrDev. The kernel resolves /proc/self against the process
+# that asks: realpath here, lo in Go. Thus a resolved path names another
+# file in each. The walk reads each link itself, hop by hop, and checks each
+# component before it reads a link there. ".." goes up from the resolved
+# path, as in the kernel. A relative path starts at the working directory.
+# After 40 links the walk stops with "no": the write then fails anyway.
+# Usage: kubehz::agent_in_proc_or_dev <file>
+kubehz::agent_in_proc_or_dev() {
+  local rest="${1}" walked="" name next dest links=0
+  [[ "${rest}" == /* ]] || rest="${PWD}/${rest}"
+  while [[ -n "${rest}" ]]; do
+    name="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${name}" in
+      "" | .) continue ;;
+      ..) walked="${walked%/*}"; continue ;;
+    esac
+    next="${walked}/${name}"
+    [[ "${next}" != /proc && "${next}" != /dev ]] || return 0
+    if [[ ! -L "${next}" ]]; then
+      walked="${next}"
+      continue
+    fi
+    (( ++links <= 40 )) || return 1
+    # readlink prints a newline: the x keeps the trailing newlines of a name.
+    dest=$(readlink -- "${next}" && printf x) || return 1
+    dest="${dest%$'\n'x}"
+    [[ "${dest}" != /* ]] || walked=""
+    [[ -z "${rest}" ]] || dest+="/${rest}"
+    rest="${dest}"
+  done
+  return 1
+}
+
+# The refusal for a path that exists without --force.
+# Usage: kubehz::agent_exists <action> <file>
+kubehz::agent_exists() {
+  error "kubehz ${1}: ${2//\\/\\\\} exists"
+  echo "  Pass --force to replace it, or name a new file." >&2
+}
+
+# Write KUBEHZ_AGENT_BODY to the file through a temporary file next to it
+# (mktemp: mode 0600). With force, mv replaces the file. Without force, a
+# hard link publishes it. ln fails when the path exists, so a file that
+# appeared during the download stays as it is. -T keeps both from moving the
+# file into a directory. The temporary file goes in both cases.
+# Usage: kubehz::agent_write <file> <force>
+kubehz::agent_write() {
+  local file="${1}" force="${2}" tmp rc=0
+  [[ ! -d "${file}" ]] || return 1
+  tmp=$(mktemp "$(dirname -- "${file}")/.kubeconfig-XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s' "${KUBEHZ_AGENT_BODY}" >"${tmp}"; then
+    rc=1
+  elif (( force )); then
+    mv -fT -- "${tmp}" "${file}" 2>/dev/null || rc=1
+  else
+    ln -T -- "${tmp}" "${file}" 2>/dev/null || rc=1
+  fi
+  rm -f -- "${tmp}" 2>/dev/null
+  return "${rc}"
+}

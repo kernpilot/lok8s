@@ -17,6 +17,9 @@
 #                           tenant brings to a kubehz-HOSTED control plane
 #                           (static pools). The CLUSTER-level join/deregister
 #                           above keep their own meaning.
+#   libs/kubehz/agent     — `lo kubehz space …` and `lo kubehz cluster …`: the
+#                           kubehz api calls of an agent key (the agent tools
+#                           `lo mcp` offers)
 #
 # TWO in-cluster agents ship as kustomize dirs, and spec.kubehz.agent picks
 # which one owns the heartbeat:
@@ -43,6 +46,7 @@ import ^libs/kubehz/shared
 import ^libs/kubehz/handover
 import ^libs/kubehz/deploy
 import ^libs/kubehz/node
+import ^libs/kubehz/agent
 
 main::kubehz() {
   local -a usage=(
@@ -55,6 +59,8 @@ main::kubehz() {
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
     'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
     '#token'                    'Print an access token for the agent key in the environment (kubectl exec plugin)'
+    'space'                     'Spaces through the kubehz api (agent tools)'
+    'cluster'                   'Clusters through the kubehz api (agent tools)'
     're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
@@ -1181,6 +1187,21 @@ kubehz::token() {
     error "token url and scope are required: pass --token-url and --scope, or set KUBEHZ_AGENT_TOKEN_URL and KUBEHZ_AGENT_SCOPE"
     return 1
   fi
+  kubehz::token_access "${token_url}" "${scope}" "${secret_file}" "${no_cache}" || return 1
+  kubehz::token_emit "${format}" "${KUBEHZ_TOKEN_ACCESS}" "${KUBEHZ_TOKEN_EXPIRES}"
+}
+
+# The grant behind `lo kubehz token` and the agent commands (libs/kubehz/agent):
+# the https gate, the key from the environment (or the secret file), the
+# cache, then client_credentials. The caller resolves the token url and the
+# scope. The result travels in globals, never on stdout: a `$(...)` capture
+# would lose a refusal's status. The Go twin is agentAccessToken.
+# Usage: kubehz::token_access <token_url> <scope> <secret_file> <no_cache>
+# Sets: KUBEHZ_TOKEN_ACCESS KUBEHZ_TOKEN_EXPIRES (epoch s)
+kubehz::token_access() {
+  local token_url="${1}" scope="${2}" secret_file="${3}" no_cache="${4}"
+  KUBEHZ_TOKEN_ACCESS=""
+  KUBEHZ_TOKEN_EXPIRES=""
   http::require_https "${token_url}" "Token URL" || return 1
   local client_id="${KUBEHZ_AGENT_CLIENT_ID:-}" secret="${KUBEHZ_AGENT_CLIENT_SECRET:-}"
   if [[ -n "${secret_file}" ]]; then
@@ -1216,8 +1237,9 @@ kubehz::token() {
     access_token=$(jq -r '.access_token' <<<"${entry}")
     expires_at=$(jq -r '.expires_at' <<<"${entry}")
     if (( expires_at - now > 300 )); then
-      kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
-      return
+      KUBEHZ_TOKEN_ACCESS="${access_token}"
+      KUBEHZ_TOKEN_EXPIRES="${expires_at}"
+      return 0
     fi
   fi
 
@@ -1278,7 +1300,8 @@ kubehz::token() {
     kubehz::token_cache_write "${cache_file}" "${access_token}" "${expires_at}" \
       || debug "token cache not written: ${cache_file}"
   fi
-  kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
+  KUBEHZ_TOKEN_ACCESS="${access_token}"
+  KUBEHZ_TOKEN_EXPIRES="${expires_at}"
 }
 
 # Whether the string holds a C0 control character or DEL. LC_ALL=C pins the

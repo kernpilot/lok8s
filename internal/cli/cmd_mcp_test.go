@@ -11,6 +11,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -47,13 +50,16 @@ var argshMcpTools = []string{
 
 // argshMcpWithheld are argsh tools the Go server withholds on purpose: their
 // output is a credential (AnnotationCredentialOutput), and a tool result
-// lands in the model's transcript. The superset check skips them, and
-// TestMcpNeverExposesACommandThatPrintsACredential pins their absence.
+// lands in the model's transcript, or the command reads no flag (lo_chat
+// passes its arguments to lochat unread). The superset check skips them;
+// TestMcpNeverExposesACommandThatPrintsACredential and
+// TestMcpNeverExposesARawArgvCommand pin their absence.
 var argshMcpWithheld = map[string]bool{
 	"lo_kubeconfig":        true,
 	"lo_secrets_print":     true,
 	"lo_secrets_env":       true,
 	"lo_kubehz_claim-code": true,
+	"lo_chat":              true,
 }
 
 // argshMcpRenames maps an argsh tool name to the ophis name(s) that replace
@@ -323,10 +329,12 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 
 func TestMcpNeverExposesACommandThatPrintsACredential(t *testing.T) {
 	// Each of these prints a credential (a bearer token, an admin kubeconfig,
-	// a secret, a claim code): as a tool, it would land in the agent's
-	// transcript. Not even --allow-destructive exposes them.
+	// a secret, a claim code) or writes a kubeconfig: as a tool, it would
+	// land in the agent's transcript. Not even --allow-destructive exposes
+	// them.
 	tools := mcpToolNames(t, mcpExposure{destructive: true})
-	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env", "lo_kubehz_claim-code"} {
+	for _, name := range []string{"lo_kubehz_token", "lo_kubeconfig", "lo_secrets_print", "lo_secrets_env", "lo_kubehz_claim-code",
+		"lo_kubehz_space_kubeconfig", "lo_kubehz_cluster_kubeconfig"} {
 		if _, ok := tools[name]; ok {
 			t.Errorf("%s is an MCP tool: its output is a credential", name)
 		}
@@ -573,5 +581,224 @@ func TestKubehzHiddenMarkersMatchArgshUsage(t *testing.T) {
 	}
 	if !bash["token"].hidden {
 		t.Error("the argsh usage lists `kubehz token` without '#': the argsh lo mcp would offer it")
+	}
+}
+
+// TestMcpAgentToolsTiers: the kubehz agent tools sit in the tier their
+// markers name. Reading is the default tier; create needs --allow-mutating;
+// delete and lease (a lease can bring the delete closer) need
+// --allow-destructive.
+func TestMcpAgentToolsTiers(t *testing.T) {
+	read := []string{"lo_kubehz_space_list", "lo_kubehz_space_get", "lo_kubehz_cluster_list", "lo_kubehz_cluster_get"}
+	destructive := []string{"lo_kubehz_space_delete", "lo_kubehz_space_lease", "lo_kubehz_cluster_lease"}
+	for _, tc := range []struct {
+		x       mcpExposure
+		present []string
+		absent  []string
+	}{
+		{mcpExposure{}, read, append([]string{"lo_kubehz_space_create"}, destructive...)},
+		{mcpExposure{mutating: true}, append([]string{"lo_kubehz_space_create"}, read...), destructive},
+		{mcpExposure{destructive: true}, append(append([]string{"lo_kubehz_space_create"}, read...), destructive...), nil},
+	} {
+		tools := mcpToolNames(t, tc.x)
+		for _, name := range tc.present {
+			if tools[name] == nil {
+				t.Errorf("%+v: %s missing", tc.x, name)
+			}
+		}
+		for _, name := range tc.absent {
+			if tools[name] != nil {
+				t.Errorf("%+v: %s exposed", tc.x, name)
+			}
+		}
+	}
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	for _, name := range read {
+		if a := tools[name].Annotations; a == nil || !a.ReadOnlyHint {
+			t.Errorf("%s lacks readOnlyHint", name)
+		}
+	}
+	for _, name := range destructive {
+		if a := tools[name].Annotations; a == nil || a.DestructiveHint == nil || !*a.DestructiveHint {
+			t.Errorf("%s lacks destructiveHint=true", name)
+		}
+	}
+	for _, flag := range []string{"name", "slug", "nodes", "namespaces", "object-cap-kib", "region", "lease-hours", "output"} {
+		if !flagNames(t, tools["lo_kubehz_space_create"])[flag] {
+			t.Errorf("lo_kubehz_space_create lacks --%s", flag)
+		}
+	}
+	if !flagNames(t, tools["lo_kubehz_cluster_lease"])["hours"] {
+		t.Error("lo_kubehz_cluster_lease lacks --hours")
+	}
+}
+
+// TestMcpAgentToolsTakeNoFlagThatMovesTheBearer: the api URL, the token
+// endpoint and the credential come from the environment of the `lo mcp`
+// server only. A flag that named one would let the model send the bearer
+// or the client secret to any host. Each agent command parses exactly the
+// flags below (local and inherited, hidden ones too): a new flag fails
+// here until someone adds it on purpose.
+func TestMcpAgentToolsTakeNoFlagThatMovesTheBearer(t *testing.T) {
+	inherited := map[string]bool{
+		"verbose": true, "force": true, "force-recreate": true, "remote": true, "kubernetes": true,
+		"cluster": true, "config": true, "domain": true, "domain-sans": true, "no-eject": true,
+		"no-color": true, "quiet": true, "debug": true,
+	}
+	local := map[string]map[string]bool{
+		"kubehz space list":         {"output": true},
+		"kubehz space get":          {"output": true},
+		"kubehz space create":       {"output": true, "name": true, "slug": true, "nodes": true, "namespaces": true, "object-cap-kib": true, "region": true, "lease-hours": true},
+		"kubehz space delete":       {"output": true},
+		"kubehz space lease":        {"output": true, "hours": true},
+		"kubehz space kubeconfig":   {"output": true, "file": true},
+		"kubehz cluster list":       {"output": true},
+		"kubehz cluster get":        {"output": true},
+		"kubehz cluster lease":      {"output": true, "hours": true},
+		"kubehz cluster kubeconfig": {"output": true, "file": true},
+	}
+	root := newUsageTree(synthProject(t), routing{})
+	seen := 0
+	for _, group := range []string{"kubehz space", "kubehz cluster"} {
+		parent := findByPath(root, group)
+		if parent == nil {
+			t.Fatalf("no %s group", group)
+		}
+		for _, leaf := range parent.Commands() {
+			path := group + " " + leaf.Name()
+			allowed, ok := local[path]
+			if !ok {
+				t.Errorf("lo %s: a new agent command, add its flags to this test", path)
+				continue
+			}
+			seen++
+			leaf.LocalFlags().VisitAll(func(f *pflag.Flag) {
+				if !allowed[f.Name] && f.Name != "help" {
+					t.Errorf("lo %s takes --%s: no agent command takes a flag outside the list", path, f.Name)
+				}
+			})
+			leaf.InheritedFlags().VisitAll(func(f *pflag.Flag) {
+				if !inherited[f.Name] {
+					t.Errorf("lo %s inherits --%s: no agent command inherits a flag outside the list", path, f.Name)
+				}
+			})
+		}
+	}
+	if seen != 10 {
+		t.Errorf("agent leaves = %d, want 10 (the check proves nothing on fewer)", seen)
+	}
+}
+
+// mcpCall runs one tools/call through a real server (exposure x, an
+// in-memory transport) and returns the result. A call that is not refused
+// spawns this test binary, which TestMain turns into a probe that prints
+// its argv (toolCallArgvEnv) and exits.
+func mcpCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, args []string) *mcp.CallToolResult {
+	t.Helper()
+	t.Setenv(toolCallArgvEnv, "1")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	clientT, serverT := mcp.NewInMemoryTransports()
+	served := make(chan error, 1)
+	go func() { served <- mcpRun(ctx, synthProject(t), x, serverT, true, io.Discard, io.Discard, "start") }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "lo-mcp-test", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close(); cancel(); <-served }()
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"flags": flags, "args": args}})
+	if err != nil {
+		t.Fatalf("tools/call %s: %v", tool, err)
+	}
+	return res
+}
+
+// resultText is every text block of a tool result, joined.
+func resultText(res *mcp.CallToolResult) string {
+	var b strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	return b.String()
+}
+
+// TestMcpRefusesADashArgumentAndRunsNothing: through the real server, a
+// positional argument that starts with "-" is an MCP error and no process
+// starts. ophis puts the model's arguments after the flags, so "-o" or
+// "--force" there would parse as a flag the schema does not offer.
+func TestMcpRefusesADashArgumentAndRunsNothing(t *testing.T) {
+	for _, args := range [][]string{{"sp-1a2b3c4d", "-o", "json"}, {"sp-1a2b3c4d", "--force"}, {"-"}} {
+		res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, args)
+		text := resultText(res)
+		if !res.IsError || !strings.Contains(text, "starts with a dash") || !strings.Contains(text, "Nothing ran") {
+			t.Errorf("args %q: isError=%v text=%q, want the refusal", args, res.IsError, text)
+		}
+		if strings.Contains(text, toolCallArgvMark) {
+			t.Errorf("args %q: a process ran: %q", args, text)
+		}
+	}
+}
+
+// TestMcpRunsAnAllowedCallWithItsArgvUnchanged: the argv of an allowed
+// call is <command path> <flags> <args>, nothing added. A routed project
+// hands it to the argsh tree, which has no "--" marker.
+func TestMcpRunsAnAllowedCallWithItsArgvUnchanged(t *testing.T) {
+	res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_lease", map[string]any{"hours": "2"}, []string{"sp-1a2b3c4d"})
+	// The text block is the JSON of the tool output: the probe's newline
+	// reads as the two characters \n there.
+	if text := resultText(res); res.IsError || !strings.Contains(text, toolCallArgvMark+"kubehz space lease --hours 2 sp-1a2b3c4d\\n") {
+		t.Errorf("isError=%v text=%q, want the argv kubehz space lease --hours 2 sp-1a2b3c4d", res.IsError, text)
+	}
+}
+
+// TestMcpNeverExposesARawArgvCommand: a command that parses its own argv
+// (DisableFlagParsing) is no tool in any tier. `lo chat --lo <path>` would
+// run any file with the server's environment, an agent key included.
+func TestMcpNeverExposesARawArgvCommand(t *testing.T) {
+	byName := map[string]*cobra.Command{}
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		byName[strings.ReplaceAll(c.CommandPath(), " ", "_")] = c
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(newMCPTree(synthProject(t)))
+	if c := byName["lo_chat"]; c == nil || !c.DisableFlagParsing {
+		t.Fatal("lo chat is gone or parses its flags: the check proves nothing")
+	}
+	for _, x := range []mcpExposure{{}, {mutating: true}, {destructive: true}} {
+		for name := range mcpToolNames(t, x) {
+			if c := byName[name]; c == nil || c.DisableFlagParsing {
+				t.Errorf("%+v: %s is a tool, and its command parses its own argv", x, name)
+			}
+		}
+	}
+}
+
+// TestMcpTierCountsMatchTheDocs pins how many tools each tier holds, and
+// that docs/reference/cli.md states the same numbers.
+func TestMcpTierCountsMatchTheDocs(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join(repoRootDir(t), "docs", "reference", "cli.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		x    mcpExposure
+		want int
+	}{
+		{mcpExposure{}, 29},
+		{mcpExposure{mutating: true}, 53},
+		{mcpExposure{destructive: true}, 95},
+	} {
+		if got := len(mcpToolNames(t, tc.x)); got != tc.want {
+			t.Errorf("%+v: %d tools, want %d (update the count here and in docs/reference/cli.md)", tc.x, got, tc.want)
+		}
+		if !strings.Contains(string(doc), fmt.Sprintf("(%d tools)", tc.want)) {
+			t.Errorf("docs/reference/cli.md does not state %d tools", tc.want)
+		}
 	}
 }
