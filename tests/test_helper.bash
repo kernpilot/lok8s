@@ -130,8 +130,10 @@ export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 # in tests/unit/kind_contract_test.bats.
 #
 # bats creates BATS_TEST_TMPDIR before setup() runs. A file that loads this
-# helper outside setup() has no BATS_TEST_TMPDIR yet. Then the call fails, and
-# no test runs against the real directories.
+# helper outside setup() has no BATS_TEST_TMPDIR yet. Then the load fails, and
+# no test runs against the real directories. The call below needs its
+# `|| return 1`: bats sources this file inside `if ! source`, where errexit
+# is off, so a failed command alone does not stop the load.
 isolate_state_dirs() {
   if [[ -z "${BATS_TEST_TMPDIR:-}" ]]; then
     echo "isolate_state_dirs: BATS_TEST_TMPDIR is not set; load test_helper in setup()" >&2
@@ -141,7 +143,7 @@ isolate_state_dirs() {
   export XDG_CACHE_HOME="${BATS_TEST_TMPDIR}/xdg-cache"
   export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 }
-isolate_state_dirs
+isolate_state_dirs || return 1
 
 # Create a temporary directory per test for scratch files.
 # Also exports PATH_BASE / PATH_LOK8S / PATH_SCRIPTS pointed at the

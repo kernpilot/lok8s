@@ -185,10 +185,10 @@ _provision_shared() {
   _provision_shared
   assert_success
 
-  # The fixture's project network and the shared mirror prefix
-  # (LO_SHARED_REGISTRY_PREFIX) are both "lok8s", so every config is named
-  # lok8s-registry-<name>: build and cache as <network>-registry-<name>, the
-  # mirrors as ${LO_SHARED_REGISTRY_PREFIX}<name>.
+  # The fixture's project network is "lok8s", and LO_SHARED_REGISTRY_PREFIX
+  # is "lok8s-registry-". Thus every config is named lok8s-registry-<name>:
+  # build and cache as <network>-registry-<name>, the mirrors as
+  # ${LO_SHARED_REGISTRY_PREFIX}<name>.
   local reg
   for reg in "${SHARED_FIXTURE_REGISTRIES[@]}"; do
     [[ -f "${state_dir}/lok8s-registry-${reg}.yaml" ]] \

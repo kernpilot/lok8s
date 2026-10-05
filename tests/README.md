@@ -72,9 +72,11 @@ never touch a real cluster or network.
 The helper sets `XDG_STATE_HOME`, `XDG_CACHE_HOME` and
 `LO_REGISTRY_STATE_DIR` to directories under `BATS_TEST_TMPDIR` for each
 test (`isolate_state_dirs`). Load the helper in `setup()`, where
-`BATS_TEST_TMPDIR` exists. Do not set these variables to a path outside
-`BATS_TEST_TMPDIR`. The default state directory holds the configs that
-the shared registries on your machine mount.
+`BATS_TEST_TMPDIR` exists. Elsewhere the load fails.
+
+Do not set these variables to a path outside `BATS_TEST_TMPDIR`. The
+default state directory holds the configs that the shared registries on
+your machine mount.
 
 **E2e scenario**: pick a free slot in `tests/e2e/SUBNETS.md`, create
 `tests/e2e/<name>/{test.bats, Tiltfile, clusters/<slot>.lok8s.dev/}`,
