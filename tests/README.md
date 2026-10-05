@@ -72,7 +72,8 @@ never touch a real cluster or network.
 The helper sets `XDG_STATE_HOME`, `XDG_CACHE_HOME` and
 `LO_REGISTRY_STATE_DIR` to directories under `BATS_TEST_TMPDIR` for each
 test (`isolate_state_dirs`). Load the helper in `setup()`, where
-`BATS_TEST_TMPDIR` exists. Elsewhere the load fails.
+`BATS_TEST_TMPDIR` exists. In `setup_file()` or at file scope, the load
+fails.
 
 Do not set these variables to a path outside `BATS_TEST_TMPDIR`. The
 default state directory holds the configs that the shared registries on

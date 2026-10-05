@@ -130,8 +130,8 @@ export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 # in tests/unit/kind_contract_test.bats.
 #
 # bats creates BATS_TEST_TMPDIR before setup() runs. A file that loads this
-# helper outside setup() has no BATS_TEST_TMPDIR yet. Then the load fails, and
-# no test runs against the real directories. The call below needs its
+# helper in setup_file() or at file scope has no BATS_TEST_TMPDIR yet. Then
+# the load fails, and no test runs against the real directories. The call below needs its
 # `|| return 1`: bats sources this file inside `if ! source`, where errexit
 # is off, so a failed command alone does not stop the load.
 isolate_state_dirs() {
