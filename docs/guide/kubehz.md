@@ -448,15 +448,38 @@ continues.
 The pre-agent announce also hands back a one-time **bind secret**.
 `lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode
 0600). `lo kubehz deploy` stages it into the cluster, and the agent presents
-it on its first `agent-register`. The platform then adopts the row the
-announce created, wherever it sits by then. The row can still be pending, or
-already claimed in the dashboard. Either way the agent binds there instead of
-making a second row, so a cluster you claim before the agent deploys still
-shows its own heartbeats.
+it on its first `agent-register`. The platform then adopts the announced row
+(the row that `lo kubehz register` created), wherever it sits by then. The
+row can still be pending, or already claimed in the dashboard. Either way
+the agent binds there instead of making a second row, so a cluster you
+claim before the agent deploys still shows its own heartbeats.
 
 The secret proves only that the operator who deploys is the operator who
 announced. It rotates on every re-announce and is spent on the first
 adoption. It is a credential: keep `.kubehz-bind` out of version control.
+
+A re-run of `lo kubehz register` sends the stored secret, so the re-run
+keeps the same cluster record and stores the new secret it gets back. lo
+uses the file only when it is readable and holds exactly 64 lowercase hex
+characters, and it never puts the value on a command line.
+
+The platform does not adopt the announced row by its domain alone. An agent
+that registers without the secret gets a separate pending row, and the
+announced row gets no heartbeats. So `lo kubehz deploy` stages the secret
+before it applies the agent:
+
+- The deploy applies the namespace `kubehz-system`, then the Secret
+  `kubehz-agent-bind` with a server-side apply. The kubeconfig needs `patch`
+  on Secrets in `kubehz-system`, and `create` when the Secret is new. It does
+  not need `delete`.
+- If the deploy cannot stage the secret, it stops before it changes an agent.
+- If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on
+  another machine) or holds no valid secret, the deploy warns and continues
+  without the secret.
+
+To deploy without the secret on purpose, remove `.kubehz-bind`. The agent
+then registers a separate pending row. Claim that row with the code from
+`lo kubehz claim-code`. The announced row gets no heartbeats.
 :::
 
 ## Claiming

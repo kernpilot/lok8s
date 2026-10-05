@@ -33,7 +33,7 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	}
 
 	body, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", bearer{},
-		compactJSON(jsonPair{"domain", domain}, jsonPair{"claimKey", true}))
+		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"claimKey", true}))
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 
 	auth := withBearer(c.getenv("KUBEHZ_TOKEN"))
 	body, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", auth,
-		compactJSON(jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
+		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func (c *Context) RegisterCluster(ctx context.Context, cfg *Config, domain, clus
 	}
 
 	body, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", bearer{},
-		compactJSON(jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
+		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
 	if err != nil {
 		c.warnf("kubehz API request failed for %s, cluster will continue without kubehz integration", domain)
 		return nil

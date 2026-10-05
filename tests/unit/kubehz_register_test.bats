@@ -800,3 +800,266 @@ EOF
   assert_success
   assert [ ! -f "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" ]
 }
+
+# ── register: sends the stored bind secret (B289) ───────────────────────
+
+BIND_STORED="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+BIND_NEXT="009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+
+# _register_sandbox <response bindSecret>: the real jq behind a wrapper that
+# saves its argv, a Lo spec through the yq stub, and a curl that saves its
+# argv and its stdin (the request body). Every register response hands out
+# <response bindSecret>.
+_register_sandbox() {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  export STUB_NEXT="${1}" STUB_CURL_ARGV="${BATS_TEST_TMPDIR}/curl.argv" STUB_CURL_BODY="${BATS_TEST_TMPDIR}/curl.body"
+  export STUB_JQ_ARGV="${BATS_TEST_TMPDIR}/jq.argv"
+  : > "${STUB_CURL_ARGV}"
+  : > "${STUB_CURL_BODY}"
+  : > "${STUB_JQ_ARGV}"
+  jq() {
+    echo "$*" >> "${STUB_JQ_ARGV}"
+    command jq "$@"
+  }
+  export -f jq
+  curl() {
+    echo "$*" >> "${STUB_CURL_ARGV}"
+    [[ " $* " != *" --data-binary @- "* ]] || cat >> "${STUB_CURL_BODY}"
+    case "$*" in
+      *"/api/clusters/register"*)
+        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}\n' "${STUB_NEXT}" ;;
+      *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n' ;;
+      *) printf '{}\n' ;;
+    esac
+  }
+  export -f curl
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  unset KUBEHZ_TOKEN HCLOUD_TOKEN
+}
+
+# _register_mode <legacy|bearer|claim-key>: one register call in that mode.
+_register_mode() {
+  case "${1}" in
+    legacy) kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" ;;
+    bearer) KUBEHZ_TOKEN="khzt_test" kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev" ;;
+    claim-key) HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example" kubehz::ensure_claim_key "test.kubehz.dev" "https://api.kubehz.dev" ;;
+  esac
+}
+
+# _register_base <mode>: the body each mode sends without a bind secret.
+_register_base() {
+  case "${1}" in
+    claim-key) echo '{"domain":"test.kubehz.dev","claimKey":true}' ;;
+    *) echo '{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"}' ;;
+  esac
+}
+
+@test "register: every mode sends the stored bind secret in the body, never on argv, and stores the new one (B289)" {
+  local mode bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    _register_sandbox "${BIND_NEXT}"
+    printf %s "${BIND_STORED}" > "${bind_file}"
+
+    run _register_mode "${mode}"
+    assert_success
+    refute_output --partial "${BIND_STORED}"
+    # `command jq`: the test's own jq calls stay out of the argv record.
+    run command jq -c . "${STUB_CURL_BODY}"
+    assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_STORED}" '. + {bindSecret: $b}')"
+    # The register call refuses a redirect off https (F7).
+    run grep -c -e " --proto-redir =https -X POST https://api.kubehz.dev/api/clusters/register " "${STUB_CURL_ARGV}"
+    assert_output "1"
+    run grep -c -e "${BIND_STORED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"
+    assert_output "${STUB_CURL_ARGV}:0
+${STUB_JQ_ARGV}:0"
+    run cat "${bind_file}"
+    assert_output "${BIND_NEXT}"
+  done
+}
+
+@test "register: a missing, irregular or malformed stored bind secret adds no bindSecret (B289)" {
+  local mode stored bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    for stored in missing directory unreadable upper short short-newline newline not-hex oversized; do
+      [[ "${stored}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
+      _register_sandbox ""
+      rm -rf "${bind_file}"
+      case "${stored}" in
+        missing) ;;
+        unreadable) printf %s "${BIND_STORED}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+        oversized) { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${bind_file}" ;;
+        directory) mkdir -p "${bind_file}" ;;
+        upper) printf %s "${BIND_STORED^^}" > "${bind_file}" ;;
+        short) printf %s "${BIND_STORED:1}" > "${bind_file}" ;;
+        short-newline) printf '%s\n' "${BIND_STORED:1}" > "${bind_file}" ;;
+        newline) printf '%s\n' "${BIND_STORED}" > "${bind_file}" ;;
+        not-hex) printf %s "g${BIND_STORED:1}" > "${bind_file}" ;;
+      esac
+
+      run _register_mode "${mode}"
+      assert_success
+      # One call, no fallback: the file never breaks the body, and no shell
+      # error reaches the output.
+      refute_output --partial "jq:"
+      refute_output --partial "failed"
+      refute_output --partial "denied"
+      run command jq -c . "${STUB_CURL_BODY}"
+      assert_output "$(_register_base "${mode}")"
+    done
+  done
+  rm -rf "${bind_file}"
+}
+
+@test "register: a new bind secret replaces an unreadable stored file (0600, no temporary file left)" {
+  [[ "$(id -u)" != 0 ]] || skip "root reads a 0000 file"
+  local bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  _register_sandbox "${BIND_NEXT}"
+  printf %s "${BIND_STORED}" > "${bind_file}"
+  chmod 000 "${bind_file}"
+
+  run _register_mode legacy
+  assert_success
+  refute_output --partial "could not store"
+  run cat "${bind_file}"
+  assert_output "${BIND_NEXT}"
+  run stat -c '%a' "${bind_file}"
+  assert_output "600"
+  run ls -A "${PATH_CLUSTERS}/test.kubehz.dev"
+  assert_output ".kubehz-bind"
+}
+
+# ── persist_bind_secret: the in-place writer (review B-1, B-2, B-4) ─────
+
+_source_main_for_persist() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  mkdir -p "${PATH_CLUSTERS}/test.kubehz.dev"
+}
+
+@test "persist_bind_secret: a directory in the slot is kept, nothing goes into it, nothing is left next to it" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkdir -p "${slot}"
+
+  run kubehz::persist_bind_secret test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory"
+  assert [ -d "${slot}" ]
+  run ls -A "${slot}"
+  assert_output ""
+  run ls -A "${PATH_CLUSTERS}/test.kubehz.dev"
+  assert_output ".kubehz-bind"
+}
+
+@test "persist_bind_secret: a link to a directory in the slot is kept (the same as Go)" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" target="${BATS_TEST_TMPDIR}/elsewhere"
+  mkdir -p "${target}"
+  ln -s "${target}" "${slot}"
+
+  run kubehz::persist_bind_secret test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory"
+  assert [ -L "${slot}" ]
+  run ls -A "${target}"
+  assert_output ""
+}
+
+# A write that fails after the create (printf overridden in run's subshell
+# only, so the bats helpers keep the builtin).
+_persist_with_a_failing_write() {
+  printf() { return 1; }
+  kubehz::persist_bind_secret "$@"
+}
+
+@test "persist_bind_secret: a failing write leaves nothing behind and warns" {
+  _source_main_for_persist
+  local dir="${PATH_CLUSTERS}/test.kubehz.dev"
+  printf %s "${BIND_STORED}" > "${dir}/.kubehz-bind"
+
+  run _persist_with_a_failing_write test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret"
+  run ls -A "${dir}"
+  assert_output ""
+}
+
+@test "register_body: jq checks the value again where it uses it (a file that changes after the check)" {
+  _source_main_for_persist
+  local bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  printf '%s\n' "${BIND_STORED}" > "${bind_file}"
+  # The shared check passes; the file then holds no valid value.
+  kubehz::bind_secret_ok() { return 0; }
+
+  # shellcheck disable=SC2016  # jq program text
+  run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
+  assert_success
+  run command jq -c . <<<"${output}"
+  assert_output '{"domain":"test.kubehz.dev"}'
+}
+
+# Plant a link to PLANT_TARGET in the slot right after the unlink, before the
+# create: the window between rm and the noclobber create. rm is overridden in
+# run's subshell only, and plants once.
+_persist_with_a_planted_link() {
+  rm() {
+    command rm "$@"
+    if [[ ! -e "${BATS_TEST_TMPDIR}/planted" ]]; then
+      : > "${BATS_TEST_TMPDIR}/planted"
+      ln -s "${PLANT_TARGET}" "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+    fi
+  }
+  kubehz::persist_bind_secret "$@"
+}
+
+@test "persist_bind_secret: a link planted between the unlink and the create is never followed" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  printf %s "${BIND_STORED}" > "${slot}"
+  export PLANT_TARGET="${BATS_TEST_TMPDIR}/outside"
+
+  run _persist_with_a_planted_link test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output --partial "[warn] kubehz: could not store the bind secret"
+  # The secret never reached the link's target, and the link is gone.
+  assert [ ! -e "${BATS_TEST_TMPDIR}/outside" ]
+  assert [ ! -L "${slot}" ]
+}
+
+@test "persist_bind_secret: a link to a device planted between the unlink and the create is removed, with a warning (N1)" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  printf %s "${BIND_STORED}" > "${slot}"
+  # noclobber writes through a link to an existing device; the check after
+  # the create must catch it.
+  export PLANT_TARGET=/dev/null
+
+  run _persist_with_a_planted_link test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret"
+  assert [ ! -L "${slot}" ]
+  assert [ ! -e "${slot}" ]
+  assert [ -c /dev/null ]
+}
+
+@test "bind_secret_ok and register_body: a FIFO in the slot is no bind secret and never blocks (N3)" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkfifo "${slot}"
+  export -f kubehz::bind_secret_ok kubehz::register_body
+
+  # A read of a FIFO waits for a writer; timeout turns a hang into status 124.
+  run timeout 10 bash -c 'kubehz::bind_secret_ok "$1"' _ "${slot}"
+  assert_failure 1
+  # shellcheck disable=SC2016  # jq program text
+  run timeout 10 bash -c 'kubehz::register_body "$1" "{domain: \$d}" --arg d "$1" | command jq -c .' _ test.kubehz.dev
+  assert_success
+  assert_output '{"domain":"test.kubehz.dev"}'
+}

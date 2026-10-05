@@ -4,19 +4,20 @@
 #
 # Every case runs BOTH implementations (the Go binary, and the same binary
 # routed to the frozen tree by the project file) against a synthetic
-# project and diffs stdout, stderr and exit codes. ONLY cluster-free and
-# api-free paths are exercised: config validation refusals, usage/flag
-# errors, `status` with no registration, the hosting-axis routing of every
-# subcommand, and the handover bundle checks. No case reaches a kubeconfig,
-# kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN/HCLOUD_TOKEN
-# are unset and every api-bearing path stops at a local refusal.
+# project and diffs stdout, stderr and exit codes. ONLY cluster-free paths
+# are exercised: config validation refusals, usage/flag errors, `status`
+# with no registration, the hosting-axis routing of every subcommand, the
+# handover bundle checks, the first kubectl calls of `deploy` (the
+# bind-secret stage) against a stub, and the register request bodies against
+# a local HTTPS stub (the last section). No case reaches a kubeconfig, a
+# real kubectl, the platform api or the Hetzner api — KUBEHZ_TOKEN and
+# HCLOUD_TOKEN are unset except for dummy values in the register section.
 #
 # What this harness CANNOT cover: how the two implementations render a SERVER
 # string (the api's own refusal message — scrubbed, clipped, and in the bash
-# tree escaped for `echo -e`). Every case here is api-free, and
-# spec.kubehz.apiUrl must be HTTPS, so no plain-http stub can answer either
-# implementation. That rendering is pinned instead by a golden PAIR both
-# suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
+# tree escaped for `echo -e`). Only the register section talks to a stub,
+# and that stub answers 2xx. That rendering is pinned instead by a golden
+# PAIR both suites read: internal/kubehz/testdata/golden/space-above-shared-message.txt
 # (the hostile input) and space-above-shared.txt (the bytes both must print),
 # asserted by TestProvisionSharedScrubsTheSharedCeilingMessage and by
 # tests/unit/kubehz_shared_test.bats.
@@ -327,6 +328,45 @@ spec:
   kubehz:
     agent: operator
 EOF
+# op-reg.dev — agent operator, access registered, no bind secret on disk.
+mk op-reg.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    agent: operator
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+# bind-cron.dev / bind-op.dev — a register stored a bind secret: the deploy
+# stages it before it changes an agent, in both directions (B288).
+mk bind-cron.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+mk bind-op.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    agent: operator
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+for d in bind-cron.dev bind-op.dev; do
+  printf %s 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/${d}/.kubehz-bind"
+done
+# bind-bad.dev — the file holds no bind secret (a trailing newline): the
+# deploy warns and stages nothing.
+mk bind-bad.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+printf '%s\n' 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/bind-bad.dev/.kubehz-bind"
 # broken.dev — unparsable spec.
 mkdir -p "${CL}/broken.dev"
 printf '{{ not yaml' > "${CL}/broken.dev/cluster.lok8s.yaml"
@@ -396,6 +436,36 @@ check - kubehz deploy --domain operator-none.dev
 check - kubehz deploy --domain lo-hosted.dev
 check - kubehz deploy --domain kubehz-self.dev
 check "${PARSEERR}" kubehz deploy --domain broken.dev
+
+# ── deploy: the bind secret goes in before an agent changes (B288) ──────────
+# A kubectl that names each call on stderr, answers the three staging calls
+# and the dry-run render, and fails the first call after them. The diff then
+# covers the staging calls, the stdin of the server-side apply and the first
+# call that changes an agent, in order. The render dir is random per run (Go
+# /tmp/<n>, bash /tmp/tmp.<x>), so the stub prints it as <work>.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: no live cluster may be reached.
+printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' >&2
+case "$*" in
+  "apply -f "*/agent/namespace.yaml) exit 0 ;;
+  *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml") printf 'kind: Secret\n'; exit 0 ;;
+  "apply --server-side --force-conflicts -f -") sed 's/^/stdin: /' >&2; exit 0 ;;
+  "kustomize "*) printf 'kind: Rendered\n'; exit 0 ;;
+esac
+exit 1
+SH
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+check - kubehz deploy --domain reg.dev                   # no bind secret: warn, then today's order
+check - kubehz deploy --domain op-reg.dev
+check - kubehz deploy --domain bind-bad.dev              # no bind secret in the file: warn, stage nothing
+check - kubehz deploy --dry-run --domain bind-cron.dev    # the Secret line comes first
+check - kubehz deploy --dry-run --domain reg.dev
+# A failed stage stops the deploy before the CronJob agent.
+parity::stub_kubectl_fail "${PROJ}"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
 check - kubehz re-enroll
 check - kubehz re-enroll --domain shared.dev
 check - kubehz re-enroll --domain hosted-http.dev
@@ -463,5 +533,104 @@ check - kubehz h r -b "${WORK}/notarchive"
 check_parse - kubehz bogus
 check_parse - kubehz node bogus
 check_parse - kubehz handover bogus
+
+# ── register: lo sends its stored bind secret (B289) ────────────────────────
+# Every register mode sends the value of .kubehz-bind as bindSecret, so a
+# re-run keeps the same cluster record. These cases need an api, so they run
+# against a local HTTPS stub, hack/lib/kubehz-api-stub.py (a self-signed
+# certificate that SSL_CERT_FILE hands to Go and CURL_CA_BUNDLE to curl).
+# The stub records each request without the Authorization value. After each
+# run, the record and the stored .kubehz-bind join that run's stdout, so the
+# diff covers the request bodies and the stored secret. Linux only: Go reads
+# SSL_CERT_FILE there.
+BIND_STORED=9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70
+STUB_HTTPS_PID=""
+parity_cleanup() { [[ -z "${STUB_HTTPS_PID}" ]] || kill "${STUB_HTTPS_PID}" 2>/dev/null || :; }
+if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  echo "skip: register bind-secret cases (need Linux, python3 and openssl)"
+else
+  mkdir -p "${WORK}/tls"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+    -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
+    -keyout "${WORK}/tls/key.pem" -out "${WORK}/tls/cert.pem" 2>/dev/null
+  python3 -u "${PARITY_LIB_DIR}/kubehz-api-stub.py" "${WORK}/tls/requests.log" "${WORK}/tls/cert.pem" "${WORK}/tls/key.pem" \
+    >"${WORK}/tls/stub.out" 2>&1 &
+  STUB_HTTPS_PID=$!
+  STUB_PORT=""
+  for _ in $(seq 1 50); do
+    STUB_PORT="$(sed -nE 's/^port ([0-9]+)$/\1/p' "${WORK}/tls/stub.out")"
+    [[ -n "${STUB_PORT}" ]] && break
+    sleep 0.1
+  done
+  if [[ -z "${STUB_PORT}" ]]; then
+    echo "FAIL: register bind-secret cases — the HTTPS stub did not start: $(cat "${WORK}/tls/stub.out")"
+    failures=$((failures + 1))
+  else
+    mk bind-reg.dev <<EOF
+kind: Lo
+metadata:
+  name: bind-reg
+spec:
+  cluster:
+    domain: bind-reg.dev
+  kubehz:
+    access: registered
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+    export SSL_CERT_FILE="${WORK}/tls/cert.pem" CURL_CA_BUNDLE="${WORK}/tls/cert.pem"
+    # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
+    # value, one with a trailing newline, one in upper case, a valid value in
+    # a file nobody may read, a valid value with 200 kB after it, a
+    # directory, a link to a directory, or no file.
+    bind_reset() {
+      rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
+      : > "${WORK}/tls/requests.log"
+      case "${BIND_FIXTURE}" in
+        valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+        newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+        upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+        unreadable)
+          printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
+          chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
+          ;;
+        oversized)
+          { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${CL}/bind-reg.dev/.kubehz-bind"
+          ;;
+        directory) mkdir "${CL}/bind-reg.dev/.kubehz-bind" ;;
+        dirlink)
+          mkdir "${WORK}/bind-target"
+          ln -s "${WORK}/bind-target" "${CL}/bind-reg.dev/.kubehz-bind"
+          ;;
+      esac
+    }
+    bind_record() {
+      {
+        echo "--- requests"
+        cat "${WORK}/tls/requests.log"
+        echo "--- .kubehz-bind"
+        cat "${CL}/bind-reg.dev/.kubehz-bind" 2>/dev/null || echo "(none)"
+        echo
+        echo "--- clusters/bind-reg.dev"
+        ls -A "${CL}/bind-reg.dev"
+        echo "--- link target"
+        ls -A "${WORK}/bind-target" 2>/dev/null || echo "(none)"
+      } >> "${WORK}/${1}.out"
+    }
+    bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
+    BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
+    # root reads a 0000 file, so the case proves nothing there.
+    [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
+    for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
+      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # fingerprint announce
+      export KUBEHZ_TOKEN=khzt_parity
+      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # bearer (direct claim)
+      unset KUBEHZ_TOKEN
+      export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
+      unset HCLOUD_TOKEN HCLOUD_API_BASE
+    done
+    unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
+  fi
+fi
 
 report

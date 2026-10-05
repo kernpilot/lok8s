@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const registryListFixture = `{"ok":true,"data":[
@@ -120,6 +122,9 @@ func bindSecretFile(h *harness, domain string) string {
 func TestPersistBindSecret(t *testing.T) {
 	t.Run("writes the exact secret at 0600, no trailing newline", func(t *testing.T) {
 		h := newHarness(t)
+		// After the harness (t.TempDir reads TMPDIR): a write that leaves the
+		// directory, such as a temporary file in TMPDIR, fails.
+		t.Setenv("TMPDIR", "/nonexistent")
 		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
 		p := bindSecretFile(h, "test.kubehz.dev")
 		if got := readFile(t, p); got != bindSecretFixture {
@@ -138,6 +143,82 @@ func TestPersistBindSecret(t *testing.T) {
 		h.ctx.persistBindSecret("test.kubehz.dev", "")
 		if _, err := os.Stat(bindSecretFile(h, "test.kubehz.dev")); !os.IsNotExist(err) {
 			t.Fatalf("an empty secret must leave no file (stat err = %v)", err)
+		}
+	})
+	t.Run("a new secret replaces an unreadable file", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a 0000 file")
+		}
+		h := newHarness(t)
+		t.Setenv("TMPDIR", "/nonexistent")
+		p := bindSecretFile(h, "test.kubehz.dev")
+		mustMkdir(t, filepath.Dir(p))
+		mustWrite(t, p, "00"+bindSecretFixture[2:], 0o000)
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		if got := readFile(t, p); got != bindSecretFixture {
+			t.Fatalf("bind secret file = %q, want %q", got, bindSecretFixture)
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("bind secret file mode = %v (%v), want 0600", fi.Mode().Perm(), err)
+		}
+		entries, _ := os.ReadDir(filepath.Dir(p))
+		if len(entries) != 1 {
+			t.Fatalf("the temporary file stayed behind: %v", entries)
+		}
+		mustNotContain(t, h.output(), "could not store")
+	})
+	// B-2: a directory in the slot stays as it is; nothing is written into it
+	// and no other file is left next to it.
+	t.Run("a directory in the slot is kept", func(t *testing.T) {
+		h := newHarness(t)
+		p := bindSecretFile(h, "test.kubehz.dev")
+		mustMkdir(t, p)
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		mustContain(t, h.output(), "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory")
+		if fi, err := os.Lstat(p); err != nil || !fi.IsDir() {
+			t.Fatalf("the directory in the slot was replaced (%v)", err)
+		}
+		assertDirEntries(t, p)
+		assertDirEntries(t, filepath.Dir(p), ".kubehz-bind")
+	})
+	// B-4: a link to a directory is kept too, the same as in bash.
+	t.Run("a link to a directory in the slot is kept", func(t *testing.T) {
+		h := newHarness(t)
+		p := bindSecretFile(h, "test.kubehz.dev")
+		target := filepath.Join(h.base, "elsewhere")
+		mustMkdir(t, target)
+		mustMkdir(t, filepath.Dir(p))
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		mustContain(t, h.output(), "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory")
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link in the slot was replaced (%v)", err)
+		}
+		assertDirEntries(t, target)
+	})
+	// N4: a filesystem without fsync (EINVAL, ENOTSUP) keeps the written
+	// file; any other sync error removes it and warns.
+	t.Run("a sync the filesystem does not support keeps the file", func(t *testing.T) {
+		t.Cleanup(func() { syncFile = (*os.File).Sync })
+		for _, tc := range []struct {
+			err  error
+			kept bool
+		}{{syscall.EINVAL, true}, {syscall.ENOTSUP, true}, {syscall.EIO, false}} {
+			h := newHarness(t)
+			syncFile = func(*os.File) error { return tc.err }
+			h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+			p := bindSecretFile(h, "test.kubehz.dev")
+			if tc.kept {
+				if got := readFile(t, p); got != bindSecretFixture {
+					t.Fatalf("%v: bind secret file = %q", tc.err, got)
+				}
+				mustNotContain(t, h.output(), "could not store")
+			} else {
+				assertDirEntries(t, filepath.Dir(p))
+				mustContain(t, h.output(), "[warn] kubehz: could not store the bind secret")
+			}
 		}
 	})
 	t.Run("a re-announce rotates the stored secret", func(t *testing.T) {
@@ -194,6 +275,152 @@ func TestRegisterModesPersistBindSecret(t *testing.T) {
 			t.Fatalf("a response without a bindSecret must leave no file (stat err = %v)", err)
 		}
 	})
+}
+
+// registerMode runs one register mode against the harness api. The response
+// hands out next as the new bind secret.
+type registerMode struct {
+	name string
+	run  func(t *testing.T, h *harness, next string)
+	base string // the body without bindSecret and without the closing brace
+}
+
+var registerModes = []registerMode{
+	{
+		name: "the legacy fingerprint announce",
+		run: func(t *testing.T, h *harness, next string) {
+			delete(h.env, "KUBEHZ_TOKEN")
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","registered":true,"bindSecret":"`+next+`"}`)
+			cfg := &Config{APIURL: h.apiURL(), Access: "registered"}
+			mustOK(t, h.ctx.RegisterCluster(t.Context(), cfg, "test.kubehz.dev", loSpec(h)), h.output())
+		},
+		base: `{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"`,
+	},
+	{
+		name: "the direct claim",
+		run: func(t *testing.T, h *harness, next string) {
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","claimed":true,"bindSecret":"`+next+`"}`)
+			mustOK(t, h.ctx.directClaim(t.Context(), &Config{}, "test.kubehz.dev", loSpec(h), h.apiURL()), h.output())
+		},
+		base: `{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"`,
+	},
+	{
+		name: "the claim-key registration",
+		run: func(t *testing.T, h *harness, next string) {
+			h.env["HCLOUD_TOKEN"] = "hc_test"
+			h.env["HCLOUD_API_BASE"] = h.apiURL()
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-5","bindSecret":"`+next+`","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}`)
+			h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[]}`)
+			h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
+			mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
+		},
+		base: `{"domain":"test.kubehz.dev","claimKey":true`,
+	},
+}
+
+// N3: a FIFO in the slot is no bind secret, and reading it does not block (a
+// plain open of a FIFO waits for a writer).
+func TestStoredBindSecretIgnoresAFIFO(t *testing.T) {
+	h := newHarness(t)
+	p := bindSecretFile(h, "test.kubehz.dev")
+	mustMkdir(t, filepath.Dir(p))
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- h.ctx.storedBindSecret("test.kubehz.dev") }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("a FIFO gave a bind secret: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO in the bind-secret slot blocked")
+	}
+}
+
+// B289: every register mode sends the stored bind secret, so a re-run keeps
+// the same cluster record, and stores the one the response hands out.
+func TestRegisterModesSendTheStoredBindSecret(t *testing.T) {
+	next := "00" + bindSecretFixture[2:]
+	for _, m := range registerModes {
+		t.Run(m.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+			m.run(t, h, next)
+			r := h.lastReq("POST", "/api/clusters/register")
+			if want := m.base + `,"bindSecret":"` + bindSecretFixture + `"}`; r == nil || r.Body != want {
+				t.Fatalf("register body = %+v, want %s", r, want)
+			}
+			if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != next {
+				t.Fatalf("the new bind secret was not stored: %q", got)
+			}
+			mustNotContain(t, h.output(), bindSecretFixture)
+			mustNotContain(t, h.output(), next)
+		})
+	}
+}
+
+// B289: a missing, irregular or malformed stored value adds no bindSecret
+// (the api refuses a malformed one).
+func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
+	stored := map[string]string{
+		"upper-case hex":       strings.ToUpper(bindSecretFixture),
+		"63 hex":               bindSecretFixture[1:],
+		"63 hex and a newline": bindSecretFixture[1:] + "\n",
+		"64 hex and a newline": bindSecretFixture + "\n",
+		"not hex":              "g" + bindSecretFixture[1:],
+		"oversized":            bindSecretFixture + strings.Repeat("a", 200000),
+	}
+	for _, m := range registerModes {
+		for _, name := range []string{"missing", "a directory", "unreadable", "upper-case hex", "63 hex", "63 hex and a newline", "64 hex and a newline", "not hex", "oversized"} {
+			t.Run(m.name+"/"+name, func(t *testing.T) {
+				h := newHarness(t)
+				path := bindSecretFile(h, "test.kubehz.dev")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				switch name {
+				case "missing":
+				case "a directory":
+					if err := os.Mkdir(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				case "unreadable":
+					if os.Geteuid() == 0 {
+						t.Skip("root reads a 0000 file")
+					}
+					mustWrite(t, path, bindSecretFixture, 0o000)
+				default:
+					if err := os.WriteFile(path, []byte(stored[name]), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// The response hands out no new secret: nothing to store.
+				m.run(t, h, "")
+				r := h.lastReq("POST", "/api/clusters/register")
+				if want := m.base + `}`; r == nil || r.Body != want {
+					t.Fatalf("register body = %+v, want %s", r, want)
+				}
+			})
+		}
+	}
+}
+
+// assertDirEntries fails unless dir holds exactly the names want.
+func assertDirEntries(t *testing.T, dir string, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("%s holds %v, want %v", dir, got, want)
+	}
 }
 
 func TestDirectClaimConnectsHcloudToken(t *testing.T) {

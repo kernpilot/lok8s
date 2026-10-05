@@ -28,8 +28,10 @@ import (
 	"fmt"
 	"github.com/kernpilot/lok8s/internal/credentials"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/clock"
@@ -253,11 +255,14 @@ func (c *Context) bindSecretPath(domain string) string {
 }
 
 // persistBindSecret stores the announce's one-time bind secret (B243) at
-// bindSecretPath, mode 0600, with NO trailing newline (deploy reads it into a
-// Secret whose value must be the exact 64 hex). An empty secret writes
-// nothing (an older api mints none, and the deploy then falls back). A write
-// failure warns but never fails the register: the agent can still adopt via
-// the pending-pool path, or the user can claim by claim-code.
+// bindSecretPath, mode 0600, with NO trailing newline (the deploy and every
+// later register read the exact 64 hex). An empty secret writes nothing: an
+// api without bind secrets sends none. The write happens in place under the
+// ignored name (createBindSecret), so no state of the write leaves the secret
+// in a file that .gitignore does not match. A write failure warns but never
+// fails the register. The deploy then finds no bind secret, and the agent
+// registers a separate pending row that the user claims by its claim code
+// (B288).
 func (c *Context) persistBindSecret(domain, secret string) {
 	if secret == "" {
 		return
@@ -267,9 +272,84 @@ func (c *Context) persistBindSecret(domain, secret string) {
 		c.warnf("kubehz: could not create %s to store the bind secret: %s", dir, err)
 		return
 	}
-	if err := os.WriteFile(dir+"/.kubehz-bind", []byte(secret), 0o600); err != nil {
+	path := dir + "/.kubehz-bind"
+	// A directory, or a link to one, is never replaced (the bash `[[ -d ]]`).
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		c.warnf("kubehz: could not store the bind secret: clusters/%s/.kubehz-bind is a directory", domain)
+		return
+	}
+	if err := createBindSecret(path, secret); err != nil {
 		c.warnf("kubehz: could not store the bind secret: %s", err)
 	}
+}
+
+// syncFile is f.Sync, a variable so a test can fail it.
+var syncFile = (*os.File).Sync
+
+// createBindSecret replaces path with content in place. It unlinks the old
+// file first (that needs write access to the directory only, so a file that
+// cannot be read is replaced too), then creates the file with O_EXCL at 0600,
+// writes, syncs and closes it. A failed write removes the new file. A sync
+// that the filesystem does not support (syncUnsupported) keeps the file.
+// Every state on the way has the ignored name.
+func createBindSecret(path, content string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(content)
+	serr := syncFile(f)
+	if syncUnsupported(serr) {
+		serr = nil
+	}
+	cerr := f.Close()
+	if err := errors.Join(werr, serr, cerr); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// storedBindSecret is the bind secret a previous register stored at
+// bindSecretPath: a readable regular file of exactly 64 lowercase hex
+// characters. A missing, unreadable, irregular or malformed file gives "".
+// Every register call sends the value as bindSecret (B289), so a re-run
+// keeps the same cluster record, and the deploy stages only this value. The
+// api refuses a malformed value, so lo never sends one.
+//
+// The file is opened once, without blocking (openNonblock: a FIFO in the
+// slot would block a plain open), checked on the open file as a regular file,
+// and read for at most 65 bytes: the count and the anchored pattern each
+// refuse a longer file, and the cap bounds the read.
+func (c *Context) storedBindSecret(domain string) string {
+	f, err := openNonblock(c.bindSecretPath(domain))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	buf := make([]byte, 65)
+	n, _ := io.ReadFull(f, buf)
+	if n != 64 || !bindSecretRe.Match(buf[:n]) {
+		return ""
+	}
+	return string(buf[:n])
+}
+
+// registerBody is the JSON body of a register call: the pairs, then
+// bindSecret when storedBindSecret has one.
+func (c *Context) registerBody(domain string, pairs ...jsonPair) []byte {
+	if secret := c.storedBindSecret(domain); secret != "" {
+		pairs = append(pairs, jsonPair{"bindSecret", secret})
+	}
+	return compactJSON(pairs...)
 }
 
 // requireDomainSpec is the shared subcommand preamble: an active domain and

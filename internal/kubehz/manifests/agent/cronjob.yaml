@@ -108,6 +108,10 @@ spec:
                     # sibling. Sent only when it is exactly 64 hex, so a garbled
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
+                    # Absent: the api does not adopt an announced row by
+                    # domain alone (B288), so the register gets a separate
+                    # pending row. That is why the deploy stages the Secret
+                    # before it applies this CronJob.
                     BIND_FIELD=""
                     if [ -n "${BIND_SECRET}" ] \
                       && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
@@ -742,10 +746,11 @@ spec:
                     name: kubehz-agent-config
               env:
                 # The one-time bind secret (B243) `lo kubehz deploy` stages in
-                # kubehz-agent-bind when a register wrote one. Optional: the
-                # Secret is absent on any install with no bind secret in play,
-                # and the bootstrap then registers without it (the pending-pool
-                # adoption, as before).
+                # kubehz-agent-bind, before it applies this CronJob, when a
+                # register wrote one. Optional: the Secret is absent on any
+                # install with no bind secret in play. The bootstrap then
+                # registers without it and gets a separate pending row, which
+                # the user claims by its claim code (B288).
                 - name: BIND_SECRET
                   valueFrom:
                     secretKeyRef:
