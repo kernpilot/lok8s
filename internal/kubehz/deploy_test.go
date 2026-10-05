@@ -143,7 +143,7 @@ func TestDeployPrintNamesTheBindSecretFirst(t *testing.T) {
 		return nil
 	}
 	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
-	first := strings.SplitN(h.output(), "\n", 2)[0]
+	first, _, _ := strings.Cut(h.output(), "\n")
 	if first != "# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied first; the value is not printed ---" {
 		t.Fatalf("first dry-run line = %q", first)
 	}
