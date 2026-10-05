@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const registryListFixture = `{"ok":true,"data":[
@@ -196,21 +198,26 @@ func TestPersistBindSecret(t *testing.T) {
 		}
 		assertDirEntries(t, target)
 	})
-	// B-1: a killed write of an earlier build left the secret in
-	// .kubehz-bind.*, which .gitignore does not match. Persist removes it,
-	// with or without a new secret.
-	t.Run("stale temporary files are swept", func(t *testing.T) {
-		for _, secret := range []string{bindSecretFixture, ""} {
+	// N4: a filesystem without fsync (EINVAL, ENOTSUP) keeps the written
+	// file; any other sync error removes it and warns.
+	t.Run("a sync the filesystem does not support keeps the file", func(t *testing.T) {
+		t.Cleanup(func() { syncFile = (*os.File).Sync })
+		for _, tc := range []struct {
+			err  error
+			kept bool
+		}{{syscall.EINVAL, true}, {syscall.ENOTSUP, true}, {syscall.EIO, false}} {
 			h := newHarness(t)
-			dir := filepath.Dir(bindSecretFile(h, "test.kubehz.dev"))
-			mustMkdir(t, dir)
-			mustWrite(t, filepath.Join(dir, ".kubehz-bind.123456789"), bindSecretFixture, 0o600)
-			mustWrite(t, filepath.Join(dir, ".kubehz-bind.AbCdEf"), bindSecretFixture, 0o600)
-			h.ctx.persistBindSecret("test.kubehz.dev", secret)
-			if secret == "" {
-				assertDirEntries(t, dir)
+			syncFile = func(*os.File) error { return tc.err }
+			h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+			p := bindSecretFile(h, "test.kubehz.dev")
+			if tc.kept {
+				if got := readFile(t, p); got != bindSecretFixture {
+					t.Fatalf("%v: bind secret file = %q", tc.err, got)
+				}
+				mustNotContain(t, h.output(), "could not store")
 			} else {
-				assertDirEntries(t, dir, ".kubehz-bind")
+				assertDirEntries(t, filepath.Dir(p))
+				mustContain(t, h.output(), "[warn] kubehz: could not store the bind secret")
 			}
 		}
 	})
@@ -309,6 +316,27 @@ var registerModes = []registerMode{
 		},
 		base: `{"domain":"test.kubehz.dev","claimKey":true`,
 	},
+}
+
+// N3: a FIFO in the slot is no bind secret, and reading it does not block (a
+// plain open of a FIFO waits for a writer).
+func TestStoredBindSecretIgnoresAFIFO(t *testing.T) {
+	h := newHarness(t)
+	p := bindSecretFile(h, "test.kubehz.dev")
+	mustMkdir(t, filepath.Dir(p))
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- h.ctx.storedBindSecret("test.kubehz.dev") }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("a FIFO gave a bind secret: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO in the bind-secret slot blocked")
+	}
 }
 
 // B289: every register mode sends the stored bind secret, so a re-run keeps

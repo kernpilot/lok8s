@@ -10,6 +10,18 @@ import (
 	"syscall"
 )
 
+// openNonblock opens file for reading without blocking: a FIFO opens at once
+// instead of waiting for a writer, so the caller can check the open file.
+func openNonblock(file string) (*os.File, error) {
+	return os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
+// syncUnsupported reports a sync error that means the filesystem has no fsync
+// (EINVAL, ENOTSUP). The data is written; only the flush is not available.
+func syncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP)
+}
+
 // ownedByUs reports whether the entry belongs to this process's effective
 // uid (bash `-O`, the twin's test).
 func ownedByUs(info fs.FileInfo) bool {

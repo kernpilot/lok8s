@@ -581,10 +581,9 @@ EOF
     # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
     # value, one with a trailing newline, one in upper case, a valid value in
     # a file nobody may read, a valid value with 200 kB after it, a
-    # directory, a link to a directory, a valid value next to a stale
-    # .kubehz-bind.* file of a killed write, or no file.
+    # directory, a link to a directory, or no file.
     bind_reset() {
-      rm -rf "${CL}/bind-reg.dev"/.kubehz-bind* "${WORK}/bind-target"
+      rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
       : > "${WORK}/tls/requests.log"
       case "${BIND_FIXTURE}" in
         valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
@@ -602,10 +601,6 @@ EOF
           mkdir "${WORK}/bind-target"
           ln -s "${WORK}/bind-target" "${CL}/bind-reg.dev/.kubehz-bind"
           ;;
-        stale)
-          printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
-          printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind.123456"
-          ;;
       esac
     }
     bind_record() {
@@ -622,7 +617,7 @@ EOF
       } >> "${WORK}/${1}.out"
     }
     bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
-    BIND_FIXTURES=(valid newline upper oversized directory dirlink stale missing)
+    BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
     # root reads a 0000 file, so the case proves nothing there.
     [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
     for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do

@@ -972,25 +972,6 @@ _source_main_for_persist() {
   assert_output ""
 }
 
-@test "persist_bind_secret: stale .kubehz-bind.* files of a killed write are swept, with or without a new secret" {
-  _source_main_for_persist
-  local dir="${PATH_CLUSTERS}/test.kubehz.dev" secret
-  for secret in "${BIND_NEXT}" ""; do
-    rm -f "${dir}"/.kubehz-bind*
-    printf %s "${BIND_STORED}" > "${dir}/.kubehz-bind.123456789"
-    printf %s "${BIND_STORED}" > "${dir}/.kubehz-bind.AbCdEf"
-
-    run kubehz::persist_bind_secret test.kubehz.dev "${secret}"
-    assert_success
-    run ls -A "${dir}"
-    if [[ -n "${secret}" ]]; then
-      assert_output ".kubehz-bind"
-    else
-      assert_output ""
-    fi
-  done
-}
-
 # A write that fails after the create (printf overridden in run's subshell
 # only, so the bats helpers keep the builtin).
 _persist_with_a_failing_write() {
@@ -1024,15 +1005,15 @@ _persist_with_a_failing_write() {
   assert_output '{"domain":"test.kubehz.dev"}'
 }
 
-# Plant a dangling link in the slot right after the unlink, before the
-# create: the race the O_EXCL create (noclobber) closes. rm is overridden in
-# run's subshell only.
+# Plant a link to PLANT_TARGET in the slot right after the unlink, before the
+# create: the window between rm and the noclobber create. rm is overridden in
+# run's subshell only, and plants once.
 _persist_with_a_planted_link() {
   rm() {
     command rm "$@"
     if [[ ! -e "${BATS_TEST_TMPDIR}/planted" ]]; then
       : > "${BATS_TEST_TMPDIR}/planted"
-      ln -s "${BATS_TEST_TMPDIR}/outside" "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+      ln -s "${PLANT_TARGET}" "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
     fi
   }
   kubehz::persist_bind_secret "$@"
@@ -1042,6 +1023,7 @@ _persist_with_a_planted_link() {
   _source_main_for_persist
   local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   printf %s "${BIND_STORED}" > "${slot}"
+  export PLANT_TARGET="${BATS_TEST_TMPDIR}/outside"
 
   run _persist_with_a_planted_link test.kubehz.dev "${BIND_NEXT}"
   assert_success
@@ -1049,4 +1031,35 @@ _persist_with_a_planted_link() {
   # The secret never reached the link's target, and the link is gone.
   assert [ ! -e "${BATS_TEST_TMPDIR}/outside" ]
   assert [ ! -L "${slot}" ]
+}
+
+@test "persist_bind_secret: a link to a device planted between the unlink and the create is removed, with a warning (N1)" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  printf %s "${BIND_STORED}" > "${slot}"
+  # noclobber writes through a link to an existing device; the check after
+  # the create must catch it.
+  export PLANT_TARGET=/dev/null
+
+  run _persist_with_a_planted_link test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret"
+  assert [ ! -L "${slot}" ]
+  assert [ ! -e "${slot}" ]
+  assert [ -c /dev/null ]
+}
+
+@test "bind_secret_ok and register_body: a FIFO in the slot is no bind secret and never blocks (N3)" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkfifo "${slot}"
+  export -f kubehz::bind_secret_ok kubehz::register_body
+
+  # A read of a FIFO waits for a writer; timeout turns a hang into status 124.
+  run timeout 10 bash -c 'kubehz::bind_secret_ok "$1"' _ "${slot}"
+  assert_failure 1
+  # shellcheck disable=SC2016  # jq program text
+  run timeout 10 bash -c 'kubehz::register_body "$1" "{domain: \$d}" --arg d "$1" | command jq -c .' _ test.kubehz.dev
+  assert_success
+  assert_output '{"domain":"test.kubehz.dev"}'
 }

@@ -331,29 +331,30 @@ kubehz::get_ssh_fingerprint() {
 # nothing: an api without bind secrets sends none. The write happens in place
 # under the ignored name: rm unlinks the old file (that needs write access to
 # the directory only, so a file that cannot be read is replaced too), then
-# noclobber creates the new one with O_EXCL at 0600. No state of the write
-# leaves the secret in a file that .gitignore does not match. A directory, or
-# a link to one, is never replaced. A write failure warns but never fails the
-# register. The deploy then finds no bind secret, and the agent registers a
-# separate pending row that the user claims by its claim code (B288).
+# noclobber creates the new one at 0600. No state of the write leaves the
+# secret in a file that .gitignore does not match. A directory, or a link to
+# one, is never replaced. A write failure warns but never fails the register.
+# The deploy then finds no bind secret, and the agent registers a separate
+# pending row that the user claims by its claim code (B288).
+#
+# noclobber refuses an existing regular file, and a link to nothing, but it
+# writes through a link to an existing FIFO or device. A link put in the slot
+# between the rm and the create therefore gets the secret. The check after the
+# create sees that the path is no regular file, removes it and warns.
 # Usage: kubehz::persist_bind_secret <domain> <secret>
 kubehz::persist_bind_secret() {
   local domain="${1}" secret="${2}"
-  local dir="${PATH_CLUSTERS}/${domain}"
-  local path="${dir}/.kubehz-bind" stale
-  # A killed write of an earlier lo build left the secret in a regular file
-  # .kubehz-bind.*, under a name that .gitignore does not match.
-  for stale in "${dir}"/.kubehz-bind.*; do
-    if [[ -f "${stale}" && ! -L "${stale}" ]]; then rm -f "${stale}"; fi
-  done
   [[ -n "${secret}" ]] || return 0
+  local dir="${PATH_CLUSTERS}/${domain}"
+  local path="${dir}/.kubehz-bind"
   mkdir -p "${dir}" || { warn "kubehz: could not create ${dir} to store the bind secret"; return 0; }
   if [[ -d "${path}" ]]; then
     warn "kubehz: could not store the bind secret: clusters/${domain}/.kubehz-bind is a directory"
     return 0
   fi
   rm -f "${path}" || { warn "kubehz: could not store the bind secret"; return 0; }
-  if ! ( set -C; umask 077; printf '%s' "${secret}" > "${path}" ); then
+  if ! ( set -C; umask 077; printf '%s' "${secret}" > "${path}" ) \
+    || [[ ! -f "${path}" || -L "${path}" ]]; then
     rm -f "${path}"
     warn "kubehz: could not store the bind secret"
   fi

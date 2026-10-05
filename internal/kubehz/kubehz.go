@@ -31,7 +31,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"time"
 
@@ -265,11 +264,10 @@ func (c *Context) bindSecretPath(domain string) string {
 // registers a separate pending row that the user claims by its claim code
 // (B288).
 func (c *Context) persistBindSecret(domain, secret string) {
-	dir := c.Paths.Clusters + "/" + domain
-	sweepBindSecretTemps(dir)
 	if secret == "" {
 		return
 	}
+	dir := c.Paths.Clusters + "/" + domain
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.warnf("kubehz: could not create %s to store the bind secret: %s", dir, err)
 		return
@@ -285,23 +283,15 @@ func (c *Context) persistBindSecret(domain, secret string) {
 	}
 }
 
-// sweepBindSecretTemps removes the regular files <dir>/.kubehz-bind.*: a
-// killed write of an earlier lo build left the secret there, under a name
-// that .gitignore does not match.
-func sweepBindSecretTemps(dir string) {
-	stale, _ := filepath.Glob(filepath.Join(dir, ".kubehz-bind.*"))
-	for _, p := range stale {
-		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
-			_ = os.Remove(p)
-		}
-	}
-}
+// syncFile is f.Sync, a variable so a test can fail it.
+var syncFile = (*os.File).Sync
 
 // createBindSecret replaces path with content in place. It unlinks the old
 // file first (that needs write access to the directory only, so a file that
 // cannot be read is replaced too), then creates the file with O_EXCL at 0600,
-// writes, syncs and closes it. A failed write removes the new file. Every
-// state on the way has the ignored name.
+// writes, syncs and closes it. A failed write removes the new file. A sync
+// that the filesystem does not support (syncUnsupported) keeps the file.
+// Every state on the way has the ignored name.
 func createBindSecret(path, content string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -311,7 +301,10 @@ func createBindSecret(path, content string) error {
 		return err
 	}
 	_, werr := f.WriteString(content)
-	serr := f.Sync()
+	serr := syncFile(f)
+	if syncUnsupported(serr) {
+		serr = nil
+	}
 	cerr := f.Close()
 	if err := errors.Join(werr, serr, cerr); err != nil {
 		_ = os.Remove(path)
@@ -329,16 +322,12 @@ var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // keeps the same cluster record, and the deploy stages only this value. The
 // api refuses a malformed value, so lo never sends one.
 //
-// The path is stat'ed first, because an open of a FIFO blocks. Then the file
-// is opened once, checked again as a regular file, and read for at most 65
-// bytes: the count and the anchored pattern each refuse a longer file, and
-// the cap bounds the read.
+// The file is opened once, without blocking (openNonblock: a FIFO in the
+// slot would block a plain open), checked on the open file as a regular file,
+// and read for at most 65 bytes: the count and the anchored pattern each
+// refuse a longer file, and the cap bounds the read.
 func (c *Context) storedBindSecret(domain string) string {
-	path := c.bindSecretPath(domain)
-	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	f, err := os.Open(path)
+	f, err := openNonblock(c.bindSecretPath(domain))
 	if err != nil {
 		return ""
 	}
