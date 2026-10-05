@@ -120,17 +120,26 @@ export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 # configuration provided").
 #
 # This function sets both variables to directories under BATS_TEST_TMPDIR.
-# It replaces the values that the calling shell exports, because those values
-# point at the real directory. The call below this function runs for every
-# test that loads this helper. setup_tmpdir calls it again, because
-# setup_tmpdir replaces BATS_TEST_TMPDIR. The guard is the test
+# It also moves XDG_CACHE_HOME there, because lo keeps the kubehz token cache
+# under it. It replaces the values that the calling shell exports, because
+# those values point at the real directories. The call below this function
+# runs for every test that loads this helper. setup_tmpdir calls it again,
+# because setup_tmpdir replaces BATS_TEST_TMPDIR. The guards are
+# tests/unit/test_helper_isolation_test.bats (the call at load) and the test
 # "lo.sh driver::provision writes the registry configs under BATS_TEST_TMPDIR"
 # in tests/unit/kind_contract_test.bats.
+#
+# bats creates BATS_TEST_TMPDIR before setup() runs. A file that loads this
+# helper outside setup() has no BATS_TEST_TMPDIR yet. Then the call fails, and
+# no test runs against the real directories.
 isolate_state_dirs() {
-  local root="${BATS_TEST_TMPDIR:-}"
-  [[ -n "${root}" ]] || root="$(mktemp -d)"
-  export XDG_STATE_HOME="${root}/xdg-state"
-  export LO_REGISTRY_STATE_DIR="${root}/registry-state"
+  if [[ -z "${BATS_TEST_TMPDIR:-}" ]]; then
+    echo "isolate_state_dirs: BATS_TEST_TMPDIR is not set; load test_helper in setup()" >&2
+    return 1
+  fi
+  export XDG_STATE_HOME="${BATS_TEST_TMPDIR}/xdg-state"
+  export XDG_CACHE_HOME="${BATS_TEST_TMPDIR}/xdg-cache"
+  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 }
 isolate_state_dirs
 
