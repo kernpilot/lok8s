@@ -143,6 +143,26 @@ YAML
   echo "${PATH_CLUSTERS}/d.example/cluster.lok8s.yaml"
 }
 
+# ── the config writer ──
+
+@test "http::curl_config quotes a value, escapes the data options and refuses a line break elsewhere" {
+  run http::curl_config header 'Authorization: Bearer a"b\c' user 'u:p'
+  assert_success
+  assert_output 'header = "Authorization: Bearer a\"b\\c"
+user = "u:p"'
+  run http::curl_config data-raw $'{\n\t"k": "v"}\r'
+  assert_output 'data-raw = "{\n\t\"k\": \"v\"}\r"'
+  local bad
+  for bad in $'a\nb' $'a\rb' $'a\tb' $'a\x01b'; do
+    run http::curl_config header "${bad}"
+    assert_failure
+    assert_output ""
+  done
+  run http::curl_config data-raw $'a\x01b'
+  assert_failure
+  assert_output ""
+}
+
 # ── Hetzner Robot: the password can boot a server into rescue ──
 
 @test "Robot: lookup, rescue, reset and doctor send the user and password in a curl config" {

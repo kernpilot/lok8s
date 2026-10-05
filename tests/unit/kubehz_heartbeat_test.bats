@@ -52,7 +52,7 @@ kubectl() {
     # no token is readable, so the fixture must supply one for the heartbeat to
     # fire. claim-code is left to the default (empty) → the best-effort
     # self-register stays a no-op here.
-    *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
+    *"get secret kubehz-agent"*"agent-token"*) printf '%s' "${STUB_AGENT_TOKEN:-khz_agt_test}" | base64 | tr -d '\n' ;;
 
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (a single "gitVersion" → unambiguous). `version -o json`
@@ -682,6 +682,20 @@ teardown() {
   assert_output "${nonce}"
   run grep -c "Authorization: Bearer khz_agt_test" "${STUB_AUTH_LOG}"
   assert_output 2
+}
+
+@test "heartbeat: a token that a curl config line cannot carry skips the beat" {
+  # A quote, a backslash, a space or a line break would end the config line
+  # and start a curl option. The agent never mints such a token.
+  local tok
+  for tok in 'khz_agt_a"b' 'khz_agt_a\b' 'khz_agt_a b' $'khz_agt_a\nurl = https://x'; do
+    : > "${STUB_CURL_LOG}"
+    STUB_AGENT_TOKEN="${tok}" run bash "${RUNNER}"
+    assert_success
+    assert_output --partial "agent-token holds a character that a curl config cannot carry; skipping heartbeat"
+    run grep -c "/heartbeat" "${STUB_CURL_LOG}"
+    assert_output 0
+  done
 }
 
 @test "claim: no nonce annotation means no claim key on the wire" {
