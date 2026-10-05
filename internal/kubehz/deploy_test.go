@@ -374,7 +374,7 @@ func TestDeployApplyFailureNamesWhatChanged(t *testing.T) {
 			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", tc.owner, tc.access))
 			want := tc.prefix + "nothing else was changed"
 			if staged {
-				want = tc.prefix + "only the bind Secret and its namespace changed"
+				want = tc.prefix + "only the bind Secret changed"
 			}
 			mustContain(t, h.output(), want)
 		}

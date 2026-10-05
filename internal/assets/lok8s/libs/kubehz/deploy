@@ -386,7 +386,7 @@ kubehz::deploy_apply() {
   # valid file put the Secret in.
   local changed="nothing else was changed"
   if kubehz::bind_secret_ok "${PATH_CLUSTERS}/${domain}/.kubehz-bind"; then
-    changed="only the bind Secret and its namespace changed"
+    changed="only the bind Secret changed"
   fi
 
   if [[ "${owner}" == "operator" ]]; then

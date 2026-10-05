@@ -1459,7 +1459,7 @@ _assert_bind_staged_first() {
       run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
       assert_failure
       if (( staged )); then
-        assert_output --partial "${prefix} only the bind Secret and its namespace changed"
+        assert_output --partial "${prefix} only the bind Secret changed"
       else
         assert_output --partial "${prefix} nothing else was changed"
       fi

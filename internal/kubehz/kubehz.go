@@ -28,8 +28,10 @@ import (
 	"fmt"
 	"github.com/kernpilot/lok8s/internal/credentials"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -256,41 +258,63 @@ func (c *Context) bindSecretPath(domain string) string {
 // persistBindSecret stores the announce's one-time bind secret (B243) at
 // bindSecretPath, mode 0600, with NO trailing newline (the deploy and every
 // later register read the exact 64 hex). An empty secret writes nothing: an
-// api without bind secrets sends none. The write goes to a temporary file in
-// the same directory, and a rename replaces the old file, so a file that
-// cannot be read or written does not block the new secret. A write failure
-// warns but never fails the register. The deploy then finds no bind secret,
-// and the agent registers a separate pending row that the user claims by its
-// claim code (B288).
+// api without bind secrets sends none. The write happens in place under the
+// ignored name (createBindSecret), so no state of the write leaves the secret
+// in a file that .gitignore does not match. A write failure warns but never
+// fails the register. The deploy then finds no bind secret, and the agent
+// registers a separate pending row that the user claims by its claim code
+// (B288).
 func (c *Context) persistBindSecret(domain, secret string) {
+	dir := c.Paths.Clusters + "/" + domain
+	sweepBindSecretTemps(dir)
 	if secret == "" {
 		return
 	}
-	dir := c.Paths.Clusters + "/" + domain
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.warnf("kubehz: could not create %s to store the bind secret: %s", dir, err)
 		return
 	}
-	if err := writeReplace(dir, ".kubehz-bind", secret); err != nil {
+	path := dir + "/.kubehz-bind"
+	// A directory, or a link to one, is never replaced (the bash `[[ -d ]]`).
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		c.warnf("kubehz: could not store the bind secret: clusters/%s/.kubehz-bind is a directory", domain)
+		return
+	}
+	if err := createBindSecret(path, secret); err != nil {
 		c.warnf("kubehz: could not store the bind secret: %s", err)
 	}
 }
 
-// writeReplace writes content to <dir>/<name> through a 0600 temporary file in
-// <dir> and a rename, which stays on one filesystem.
-func writeReplace(dir, name, content string) error {
-	f, err := os.CreateTemp(dir, name+".*")
+// sweepBindSecretTemps removes the regular files <dir>/.kubehz-bind.*: a
+// killed write of an earlier lo build left the secret there, under a name
+// that .gitignore does not match.
+func sweepBindSecretTemps(dir string) {
+	stale, _ := filepath.Glob(filepath.Join(dir, ".kubehz-bind.*"))
+	for _, p := range stale {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(p)
+		}
+	}
+}
+
+// createBindSecret replaces path with content in place. It unlinks the old
+// file first (that needs write access to the directory only, so a file that
+// cannot be read is replaced too), then creates the file with O_EXCL at 0600,
+// writes, syncs and closes it. A failed write removes the new file. Every
+// state on the way has the ignored name.
+func createBindSecret(path, content string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
 	_, werr := f.WriteString(content)
+	serr := f.Sync()
 	cerr := f.Close()
-	if err := errors.Join(werr, cerr); err != nil {
-		_ = os.Remove(f.Name())
-		return err
-	}
-	if err := os.Rename(f.Name(), dir+"/"+name); err != nil {
-		_ = os.Remove(f.Name())
+	if err := errors.Join(werr, serr, cerr); err != nil {
+		_ = os.Remove(path)
 		return err
 	}
 	return nil
@@ -304,16 +328,30 @@ var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // Every register call sends the value as bindSecret (B289), so a re-run
 // keeps the same cluster record, and the deploy stages only this value. The
 // api refuses a malformed value, so lo never sends one.
+//
+// The path is stat'ed first, because an open of a FIFO blocks. Then the file
+// is opened once, checked again as a regular file, and read for at most 65
+// bytes: the count and the anchored pattern each refuse a longer file, and
+// the cap bounds the read.
 func (c *Context) storedBindSecret(domain string) string {
 	path := c.bindSecretPath(domain)
-	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() != 64 {
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
 		return ""
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil || !bindSecretRe.Match(raw) {
+	f, err := os.Open(path)
+	if err != nil {
 		return ""
 	}
-	return string(raw)
+	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	buf := make([]byte, 65)
+	n, _ := io.ReadFull(f, buf)
+	if n != 64 || !bindSecretRe.Match(buf[:n]) {
+		return ""
+	}
+	return string(buf[:n])
 }
 
 // registerBody is the JSON body of a register call: the pairs, then

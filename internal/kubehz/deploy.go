@@ -275,7 +275,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 	// What a failure below has changed so far.
 	changed := "nothing else was changed"
 	if staged {
-		changed = "only the bind Secret and its namespace changed"
+		changed = "only the bind Secret changed"
 	}
 
 	if owner == "operator" {

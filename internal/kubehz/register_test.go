@@ -120,6 +120,9 @@ func bindSecretFile(h *harness, domain string) string {
 func TestPersistBindSecret(t *testing.T) {
 	t.Run("writes the exact secret at 0600, no trailing newline", func(t *testing.T) {
 		h := newHarness(t)
+		// After the harness (t.TempDir reads TMPDIR): a write that leaves the
+		// directory, such as a temporary file in TMPDIR, fails.
+		t.Setenv("TMPDIR", "/nonexistent")
 		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
 		p := bindSecretFile(h, "test.kubehz.dev")
 		if got := readFile(t, p); got != bindSecretFixture {
@@ -145,6 +148,7 @@ func TestPersistBindSecret(t *testing.T) {
 			t.Skip("root reads a 0000 file")
 		}
 		h := newHarness(t)
+		t.Setenv("TMPDIR", "/nonexistent")
 		p := bindSecretFile(h, "test.kubehz.dev")
 		mustMkdir(t, filepath.Dir(p))
 		mustWrite(t, p, "00"+bindSecretFixture[2:], 0o000)
@@ -160,6 +164,55 @@ func TestPersistBindSecret(t *testing.T) {
 			t.Fatalf("the temporary file stayed behind: %v", entries)
 		}
 		mustNotContain(t, h.output(), "could not store")
+	})
+	// B-2: a directory in the slot stays as it is; nothing is written into it
+	// and no other file is left next to it.
+	t.Run("a directory in the slot is kept", func(t *testing.T) {
+		h := newHarness(t)
+		p := bindSecretFile(h, "test.kubehz.dev")
+		mustMkdir(t, p)
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		mustContain(t, h.output(), "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory")
+		if fi, err := os.Lstat(p); err != nil || !fi.IsDir() {
+			t.Fatalf("the directory in the slot was replaced (%v)", err)
+		}
+		assertDirEntries(t, p)
+		assertDirEntries(t, filepath.Dir(p), ".kubehz-bind")
+	})
+	// B-4: a link to a directory is kept too, the same as in bash.
+	t.Run("a link to a directory in the slot is kept", func(t *testing.T) {
+		h := newHarness(t)
+		p := bindSecretFile(h, "test.kubehz.dev")
+		target := filepath.Join(h.base, "elsewhere")
+		mustMkdir(t, target)
+		mustMkdir(t, filepath.Dir(p))
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		mustContain(t, h.output(), "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory")
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link in the slot was replaced (%v)", err)
+		}
+		assertDirEntries(t, target)
+	})
+	// B-1: a killed write of an earlier build left the secret in
+	// .kubehz-bind.*, which .gitignore does not match. Persist removes it,
+	// with or without a new secret.
+	t.Run("stale temporary files are swept", func(t *testing.T) {
+		for _, secret := range []string{bindSecretFixture, ""} {
+			h := newHarness(t)
+			dir := filepath.Dir(bindSecretFile(h, "test.kubehz.dev"))
+			mustMkdir(t, dir)
+			mustWrite(t, filepath.Join(dir, ".kubehz-bind.123456789"), bindSecretFixture, 0o600)
+			mustWrite(t, filepath.Join(dir, ".kubehz-bind.AbCdEf"), bindSecretFixture, 0o600)
+			h.ctx.persistBindSecret("test.kubehz.dev", secret)
+			if secret == "" {
+				assertDirEntries(t, dir)
+			} else {
+				assertDirEntries(t, dir, ".kubehz-bind")
+			}
+		}
 	})
 	t.Run("a re-announce rotates the stored secret", func(t *testing.T) {
 		h := newHarness(t)
@@ -323,6 +376,22 @@ func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// assertDirEntries fails unless dir holds exactly the names want.
+func assertDirEntries(t *testing.T, dir string, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("%s holds %v, want %v", dir, got, want)
 	}
 }
 

@@ -935,3 +935,118 @@ ${STUB_JQ_ARGV}:0"
   run ls -A "${PATH_CLUSTERS}/test.kubehz.dev"
   assert_output ".kubehz-bind"
 }
+
+# ── persist_bind_secret: the in-place writer (review B-1, B-2, B-4) ─────
+
+_source_main_for_persist() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  mkdir -p "${PATH_CLUSTERS}/test.kubehz.dev"
+}
+
+@test "persist_bind_secret: a directory in the slot is kept, nothing goes into it, nothing is left next to it" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkdir -p "${slot}"
+
+  run kubehz::persist_bind_secret test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory"
+  assert [ -d "${slot}" ]
+  run ls -A "${slot}"
+  assert_output ""
+  run ls -A "${PATH_CLUSTERS}/test.kubehz.dev"
+  assert_output ".kubehz-bind"
+}
+
+@test "persist_bind_secret: a link to a directory in the slot is kept (the same as Go)" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" target="${BATS_TEST_TMPDIR}/elsewhere"
+  mkdir -p "${target}"
+  ln -s "${target}" "${slot}"
+
+  run kubehz::persist_bind_secret test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret: clusters/test.kubehz.dev/.kubehz-bind is a directory"
+  assert [ -L "${slot}" ]
+  run ls -A "${target}"
+  assert_output ""
+}
+
+@test "persist_bind_secret: stale .kubehz-bind.* files of a killed write are swept, with or without a new secret" {
+  _source_main_for_persist
+  local dir="${PATH_CLUSTERS}/test.kubehz.dev" secret
+  for secret in "${BIND_NEXT}" ""; do
+    rm -f "${dir}"/.kubehz-bind*
+    printf %s "${BIND_STORED}" > "${dir}/.kubehz-bind.123456789"
+    printf %s "${BIND_STORED}" > "${dir}/.kubehz-bind.AbCdEf"
+
+    run kubehz::persist_bind_secret test.kubehz.dev "${secret}"
+    assert_success
+    run ls -A "${dir}"
+    if [[ -n "${secret}" ]]; then
+      assert_output ".kubehz-bind"
+    else
+      assert_output ""
+    fi
+  done
+}
+
+# A write that fails after the create (printf overridden in run's subshell
+# only, so the bats helpers keep the builtin).
+_persist_with_a_failing_write() {
+  printf() { return 1; }
+  kubehz::persist_bind_secret "$@"
+}
+
+@test "persist_bind_secret: a failing write leaves nothing behind and warns" {
+  _source_main_for_persist
+  local dir="${PATH_CLUSTERS}/test.kubehz.dev"
+  printf %s "${BIND_STORED}" > "${dir}/.kubehz-bind"
+
+  run _persist_with_a_failing_write test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output "[warn] kubehz: could not store the bind secret"
+  run ls -A "${dir}"
+  assert_output ""
+}
+
+@test "register_body: jq checks the value again where it uses it (a file that changes after the check)" {
+  _source_main_for_persist
+  local bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  printf '%s\n' "${BIND_STORED}" > "${bind_file}"
+  # The shared check passes; the file then holds no valid value.
+  kubehz::bind_secret_ok() { return 0; }
+
+  # shellcheck disable=SC2016  # jq program text
+  run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
+  assert_success
+  run command jq -c . <<<"${output}"
+  assert_output '{"domain":"test.kubehz.dev"}'
+}
+
+# Plant a dangling link in the slot right after the unlink, before the
+# create: the race the O_EXCL create (noclobber) closes. rm is overridden in
+# run's subshell only.
+_persist_with_a_planted_link() {
+  rm() {
+    command rm "$@"
+    if [[ ! -e "${BATS_TEST_TMPDIR}/planted" ]]; then
+      : > "${BATS_TEST_TMPDIR}/planted"
+      ln -s "${BATS_TEST_TMPDIR}/outside" "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+    fi
+  }
+  kubehz::persist_bind_secret "$@"
+}
+
+@test "persist_bind_secret: a link planted between the unlink and the create is never followed" {
+  _source_main_for_persist
+  local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  printf %s "${BIND_STORED}" > "${slot}"
+
+  run _persist_with_a_planted_link test.kubehz.dev "${BIND_NEXT}"
+  assert_success
+  assert_output --partial "[warn] kubehz: could not store the bind secret"
+  # The secret never reached the link's target, and the link is gone.
+  assert [ ! -e "${BATS_TEST_TMPDIR}/outside" ]
+  assert [ ! -L "${slot}" ]
+}
