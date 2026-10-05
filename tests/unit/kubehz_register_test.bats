@@ -621,12 +621,16 @@ EOF
   }
   export -f yq
 
-  # Must send the bearer to the REGISTER endpoint.
+  # Must send the bearer to the REGISTER endpoint, in the curl config and
+  # never on argv.
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
   curl() {
     [[ " $* " == *" https://api.kubehz.dev/api/clusters/register "* ]] \
       || { echo "wrong endpoint: $*" >&2; return 1; }
-    [[ " $* " == *"Authorization: Bearer khzt_test"* ]] \
-      || { echo "missing bearer: $*" >&2; return 1; }
+    [[ " $* " != *"khzt_test"* ]] || { echo "bearer on argv: $*" >&2; return 1; }
+    curl_capture "$@"
+    [[ "${CURL_HEADERS}" == *"Authorization: Bearer khzt_test"* ]] \
+      || { echo "missing bearer: ${CURL_HEADERS}" >&2; return 1; }
     echo '{"id":"cl-777","claimed":true}'
   }
   export -f curl
@@ -668,10 +672,14 @@ EOF
   yq() { case "$2" in '.kind // ""') echo "Lo" ;; '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;; *) echo "" ;; esac; }
   export -f yq
 
-  # Register → claimed; credentials POST → writable token.
+  # Register → claimed; credentials POST → writable token. The bearer comes
+  # in the curl config, never on argv.
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
   curl() {
-    if [[ " $* " == *"/api/credentials"* ]]; then
-      [[ " $* " == *"Authorization: Bearer khzt_test"* ]] || { echo "cred missing bearer" >&2; return 1; }
+    [[ " $* " != *"khzt_test"* && " $* " != *"hc_test"* ]] || { echo "a credential on argv: $*" >&2; return 1; }
+    curl_capture "$@"
+    if [[ "${CURL_URL}" == *"/api/credentials"* ]]; then
+      [[ "${CURL_HEADERS}" == *"Authorization: Bearer khzt_test"* ]] || { echo "cred missing bearer" >&2; return 1; }
       echo '{"data":{"stored":true,"validation":{"checked":true,"authenticated":true,"writable":true}}}'
     else
       echo '{"id":"cl-9","claimed":true}'
@@ -829,9 +837,11 @@ _register_sandbox() {
     command jq "$@"
   }
   export -f jq
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
   curl() {
     echo "$*" >> "${STUB_CURL_ARGV}"
-    [[ " $* " != *" --data-binary @- "* ]] || cat >> "${STUB_CURL_BODY}"
+    curl_capture "$@"
+    [[ "${CURL_URL}" != *"/api/clusters/register" ]] || printf '%s' "${CURL_BODY}" >> "${STUB_CURL_BODY}"
     case "$*" in
       *"/api/clusters/register"*)
         printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}\n' "${STUB_NEXT}" ;;

@@ -267,13 +267,10 @@ func (a *kkpAPI) handler(c execx.Cmd) error {
 	if c.Name != "curl" {
 		a.t.Fatalf("unexpected exec: %s", argvLine(c))
 	}
-	method, url, body := "", "", ""
+	method, url, body := "", "", configBody(c)
 	for i, arg := range c.Args {
-		switch arg {
-		case "--request":
+		if arg == "--request" {
 			method = c.Args[i+1]
-		case "--data":
-			body = c.Args[i+1]
 		}
 	}
 	url = c.Args[len(c.Args)-1]

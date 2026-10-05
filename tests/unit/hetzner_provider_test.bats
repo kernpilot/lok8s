@@ -26,6 +26,8 @@ setup() {
   # replaced the envsubst/yq BINARY calls the provider used to make — a shell
   # function needs loading where a binary did not (AUDIT.md r329).
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+  # The Robot calls write their config with http::curl_config.
+  source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
 
   # Recording fakes' log files.
   export HCLOUD_LOG="${BATS_TEST_TMPDIR}/hcloud.log"

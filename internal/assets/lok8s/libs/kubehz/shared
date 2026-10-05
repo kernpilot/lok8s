@@ -14,6 +14,7 @@
 # libs/kubehz/main; not directly executable.
 
 import ^utils/verbose
+import ^utils/http
 
 # ── Config reader ────────────────────────────────────────
 
@@ -174,14 +175,16 @@ kubehz::space_api() {
   local method="${1}" path="${2}" body="${3:-}"
   KUBEHZ_SPACE_API_STATUS=""
   KUBEHZ_SPACE_API_BODY=""
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
   local raw
-  raw=$(curl -sSL -w $'\n%{http_code}' -X "${method}" \
+  # The bearer reaches curl in a config on stdin, never on argv.
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -sSL -w $'\n%{http_code}' -X "${method}" \
     "${LOK8S_KUBEHZ_API_URL}${path}" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" \
     "${extra[@]}") || {
     error "kubehz API unreachable (${method} ${path})"
     return 1

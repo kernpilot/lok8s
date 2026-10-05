@@ -78,9 +78,11 @@ spec:
                     NEW_A="khz_agt_$(rand_hex)"
                     NEW_C="khzc_$(rand_hex)"
                     # create-if-absent; tolerate a concurrent creator so we never rotate.
-                    kubectl create secret generic kubehz-agent -n kubehz-system \
-                      --from-literal=agent-token="${NEW_A}" \
-                      --from-literal=claim-code="${NEW_C}" >/dev/null 2>&1 || true
+                    # A and C reach kubectl as an env file on stdin, never on argv: every
+                    # process on the node can read argv (ps, /proc/<pid>/cmdline).
+                    printf 'agent-token=%s\nclaim-code=%s\n' "${NEW_A}" "${NEW_C}" |
+                      kubectl create secret generic kubehz-agent -n kubehz-system \
+                      --from-env-file=/dev/stdin >/dev/null 2>&1 || true
                     NEW_A=""
                     NEW_C=""
                   fi
@@ -121,9 +123,12 @@ spec:
                     REGISTER_PAYLOAD=$(printf \
                       '{"domain":"%s","agentTokenHash":"%s","claimCodeHash":"%s"%s}' \
                       "${CLUSTER_ID}" "${AGENT_TOKEN_HASH}" "${CLAIM_CODE_HASH}" "${BIND_FIELD}")
-                    curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
+                    # The payload (it can carry the bind secret) reaches curl on stdin,
+                    # never on argv.
+                    printf '%s' "${REGISTER_PAYLOAD}" |
+                      curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
                       -H "Content-Type: application/json" \
-                      -d "${REGISTER_PAYLOAD}" >/dev/null 2>&1 \
+                      --data-binary @- >/dev/null 2>&1 \
                       || echo "kubehz: agent-register attempt failed; retrying next tick" >&2
                   fi
                   # C stayed in memory only to compute its hash above; drop it now.
@@ -557,6 +562,18 @@ spec:
                     echo "kubehz: agent-token unavailable; skipping heartbeat (retrying next tick)" >&2
                     exit 0
                   fi
+                  # A goes to curl in a config line (-K), never on argv: every process on
+                  # the node can read argv (ps, /proc/<pid>/cmdline). A quote or a
+                  # backslash would end the quoted value early, and a line break would end
+                  # the line: curl would read the rest as an option. The agent mints
+                  # khz_agt_<hex>, so the guard allows only the characters of such a token
+                  # and of base64, and skips the beat for any other token.
+                  case "${AGENT_TOKEN}" in
+                    *[!A-Za-z0-9_.~+/=-]*)
+                      echo "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry" >&2
+                      exit 0
+                      ;;
+                  esac
                   # The POST is GUARDED (|| rc): an unguarded RESPONSE=$(curl -f …)
                   # under set -e aborts BEFORE the marker write — a rejected
                   # assessment (e.g. an over-cap array 400ing the zod schema)
@@ -565,10 +582,15 @@ spec:
                   # assessment attached, retry ONCE without it so the plain
                   # heartbeat always lands; only then handle the marker.
                   HB_RC=0
-                  RESPONSE=$(curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                  # The bearer reaches curl in a config on fd 3 (a here-document), the
+                  # payload (it can carry the claim nonce) on stdin. Neither is on argv.
+                  RESPONSE=$(printf '%s' "${PAYLOAD}" |
+                    curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
-                    -H "Authorization: Bearer ${AGENT_TOKEN}" \
-                    -d "${PAYLOAD}") || HB_RC=$?
+                    -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
+                  header = "Authorization: Bearer ${AGENT_TOKEN}"
+                  AUTH_EOF
+                  ) || HB_RC=$?
                   ASSESS_DELIVERED=""
                   if [ "${HB_RC}" -eq 0 ] && [ -n "${ASSESSMENT}" ]; then
                     ASSESS_DELIVERED=1
@@ -588,10 +610,13 @@ spec:
                   PLAIN_EOF
                   )
                     HB_RC=0
-                    RESPONSE=$(curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                    RESPONSE=$(printf '%s' "${PLAIN_PAYLOAD}" |
+                      curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                       -H "Content-Type: application/json" \
-                      -H "Authorization: Bearer ${AGENT_TOKEN}" \
-                      -d "${PLAIN_PAYLOAD}") || HB_RC=$?
+                      -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
+                  header = "Authorization: Bearer ${AGENT_TOKEN}"
+                  AUTH_EOF
+                    ) || HB_RC=$?
                     if [ "${HB_RC}" -eq 0 ]; then
                       # The plain beat landed → the assessment itself was the
                       # poison. Move the marker anyway: resending a rejected
@@ -677,10 +702,12 @@ spec:
                     # tick would re-poll and re-log — skip entirely.
                     echo "kubehz: desired-state poll skipped (marker ConfigMap unreadable)" >&2
                   else
-                  set -- -H "Authorization: Bearer ${AGENT_TOKEN}"
-                  [ -z "${DESIRED_ETAG}" ] || set -- "$@" -H "If-None-Match: ${DESIRED_ETAG}"
+                  set --
+                  [ -z "${DESIRED_ETAG}" ] || set -- -H "If-None-Match: ${DESIRED_ETAG}"
                   DES_RC=0
-                  DES_OUT=$(curl -sS -D - -w '\n__code=%{http_code}' "$@" \
+                  # The bearer reaches curl in a config on stdin (-K -), never on argv.
+                  DES_OUT=$(printf 'header = "Authorization: Bearer %s"\n' "${AGENT_TOKEN}" |
+                    curl -sS -D - -w '\n__code=%{http_code}' -K - "$@" \
                     "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/desired" 2>/dev/null) || DES_RC=$?
                   if [ "${DES_RC}" -ne 0 ]; then
                     echo "kubehz: desired-state poll failed (curl rc=${DES_RC}); retrying next tick" >&2

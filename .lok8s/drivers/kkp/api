@@ -48,6 +48,13 @@ kkp::api() {
     return 1
   fi
 
+  # A CR or LF would end the config line below (the Go twin:
+  # credentials.NoNewline).
+  if [[ "${KKP_TOKEN}" == *[$'\r\n']* ]]; then
+    error "environment variable KKP_TOKEN must not contain a newline"
+    return 1
+  fi
+
   if [[ -z "${KKP_API_URL:-}" ]]; then
     error "KKP_API_URL is not set"
     return 1
@@ -55,22 +62,31 @@ kkp::api() {
 
   kkp::validate_url "${KKP_API_URL}" || return 1
 
+  # The bearer token and the request body reach curl through its config on
+  # stdin (--config -), never as arguments: every local user can read argv
+  # (ps, /proc/<pid>/cmdline), and audit tools store it. The body of a
+  # cluster create carries the cloud credentials. The Go twin writes the
+  # same config (internal/driver/kkp api).
+  local -a config=(header "Authorization: Bearer ${KKP_TOKEN}")
+  [[ -z "${body}" ]] || config+=(data-raw "${body}")
+  local curl_config
+  if ! curl_config=$(http::curl_config "${config[@]}"); then
+    error "KKP API: the request body holds a control character that a curl config cannot carry"
+    return 1
+  fi
+
   local url="${KKP_API_URL}${path}"
   local -a curl_args=(
     --silent
     --show-error
     --fail-with-body
     --location
-    --header "Authorization: Bearer ${KKP_TOKEN}"
+    --config -
     --header "Content-Type: application/json"
     --header "Accept: application/json"
     --write-out "\n%{http_code}"
     --request "${method}"
   )
-
-  if [[ -n "${body}" ]]; then
-    curl_args+=(--data "${body}")
-  fi
 
   # Optional custom CA for the TLS handshake — needed when KKP serves a
   # self-signed / private-CA cert (local mkcert, CI) that isn't in the system
@@ -92,7 +108,7 @@ kkp::api() {
   while (( attempt < KKP_MAX_RETRIES )); do
     attempt=$(( attempt + 1 ))
 
-    output=$(curl "${curl_args[@]}" "${url}" 2>&1) || true
+    output=$(printf '%s\n' "${curl_config}" | curl "${curl_args[@]}" "${url}" 2>&1) || true
 
     # Split response body and HTTP status code
     http_code=$(echo "${output}" | tail -n1)

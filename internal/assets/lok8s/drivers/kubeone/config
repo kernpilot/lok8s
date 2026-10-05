@@ -14,6 +14,7 @@ import ^utils/template
 import ^utils/oidc
 import ^utils/spec
 import ^utils/credentials
+import ^utils/http
 import ^libs/bootstrap
 
 # ── Provider detection ──────────────────────────────────
@@ -599,6 +600,7 @@ kubeone::render_addons() {
 kubeone::_name_robot_workers() {
   local manifest="${1}"
   [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]] || return 0
+  http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
   local n hostname pubip num servers
   n=$(yq -r '.staticWorkers.hosts | length' "${manifest}" 2>/dev/null || echo 0)
   for (( i = 0; i < n; i++ )); do
@@ -611,8 +613,10 @@ kubeone::_name_robot_workers() {
       || { error "robot: invalid hostname '${hostname}' (expected alphanumeric, '.' or '-')"; return 1; }
     # List Robot servers. `-f` makes HTTP errors (401 bad creds, 5xx) a non-zero
     # exit instead of a 200-shaped error body; a real failure here must surface —
-    # an unnamed server can't be matched by the CCM and stays NotReady.
-    if ! servers=$(curl -sS -f -u "${HROBOT_USER}:${HROBOT_PASSWORD}" \
+    # an unnamed server can't be matched by the CCM and stays NotReady. The
+    # user and password reach curl in a config on stdin, never on argv
+    # (http::curl_config).
+    if ! servers=$(http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - -sS -f \
         "https://robot-ws.your-server.de/server" 2>/dev/null); then
       error "robot: failed to list servers (network/credentials?) — cannot name worker ${hostname}"
       return 1
@@ -620,7 +624,7 @@ kubeone::_name_robot_workers() {
     num=$(jq -r --arg ip "${pubip}" '.[].server | select(.server_ip==$ip) | .server_number' <<<"${servers}" 2>/dev/null | head -1)
     # Not in the Robot inventory → a cloud (non-bare-metal) static worker; skip.
     [[ -n "${num}" ]] || continue
-    if ! curl -sS -f -u "${HROBOT_USER}:${HROBOT_PASSWORD}" \
+    if ! http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - -sS -f \
         -d "server_name=${hostname}" "https://robot-ws.your-server.de/server/${num}" >/dev/null 2>&1; then
       error "robot: failed to set name '${hostname}' on server ${num}"
       return 1

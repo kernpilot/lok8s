@@ -223,15 +223,14 @@ YAML
   assert_output --partial "must use HTTPS"
 }
 
-@test "kkp::api calls curl with correct auth header" {
+@test "kkp::api sends the auth header and the body in the curl config, never on argv" {
+  # The cluster-create body carries the cloud credentials (hc-sentinel).
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
+  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
   curl() {
-    local has_auth=false
-    for arg in "$@"; do
-      if [[ "${arg}" == *"Bearer test-kkp-token-abc123"* ]]; then
-        has_auth=true
-      fi
-    done
-    if [[ "${has_auth}" == "true" ]]; then
+    curl_capture "$@"
+    printf '%s' "${CURL_BODY}" > "${BATS_TEST_TMPDIR}/body"
+    if [[ "${CURL_HEADERS}" == *"Authorization: Bearer test-kkp-token-abc123"* ]]; then
       printf '{"ok": true}\n200'
     else
       printf '{"error": "no auth"}\n401'
@@ -239,9 +238,23 @@ YAML
   }
   export -f curl
 
-  run kkp::api GET "/api/v2/dc"
+  local body=$'{\n  "cloud": {"hetzner": {"token": "hc-sentinel \\" \\\\"}},\n\t"x": 1\n}'
+  run kkp::api POST "/api/v2/dc" "${body}"
   assert_success
   assert_output --partial '"ok": true'
+  run grep -c -e test-kkp-token-abc123 -e hc-sentinel "${ARGV_LOG}"
+  assert_output 0
+  run cat "${BATS_TEST_TMPDIR}/body"
+  assert_output "${body}"
+}
+
+@test "kkp::api refuses a token with a newline before curl runs" {
+  curl() { echo "curl ran" >&2; return 99; }
+  export -f curl
+  KKP_TOKEN=$'tok\nurl = https://evil.example.com' run kkp::api GET "/api/v2/dc"
+  assert_failure
+  assert_output --partial "environment variable KKP_TOKEN must not contain a newline"
+  refute_output --partial "curl ran"
 }
 
 @test "kkp::api passes --cacert when KKP_CA_CERT is a readable file" {

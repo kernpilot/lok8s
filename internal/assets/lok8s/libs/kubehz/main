@@ -405,6 +405,7 @@ kubehz::ensure_claim_key() {
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
   # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
   http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
+  http::credential_ok HCLOUD_TOKEN || return 1
 
   local response
   # shellcheck disable=SC2016  # the filter is jq program text
@@ -424,18 +425,19 @@ kubehz::ensure_claim_key() {
 
   # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
   # kubehz-claim key must not linger in the account.
+  # HCLOUD_TOKEN reaches curl in a config (http::curl_config), never on argv.
   local existing_id
-  existing_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+  existing_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
     "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
   if [[ -n "${existing_id}" ]]; then
-    curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL -X DELETE \
       "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
   fi
-  curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
-    -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}')" \
-    >/dev/null || return 1
+  jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}' |
+    curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+      -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
+      -H "Content-Type: application/json" \
+      --data-binary @- >/dev/null || return 1
 
   debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
@@ -461,6 +463,7 @@ kubehz::ensure_claim_key() {
 # flow. Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url>
 kubehz::direct_claim() {
   local domain="${1}" cluster_yaml="${2}" api_url="${3}"
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local fingerprint
   fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
@@ -474,7 +477,7 @@ kubehz::direct_claim() {
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
     curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+      -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
       -H "Content-Type: application/json" \
       --data-binary @-) || return 1
 
@@ -497,12 +500,20 @@ kubehz::direct_claim() {
       warn "spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect."
       return 0
     fi
+    # The token goes into the body through jq's stdin (-Rs: the whole input
+    # as one string) and the body into curl through stdin. Neither the
+    # token nor the bearer is on argv.
+    if ! http::credential_ok HCLOUD_TOKEN; then
+      warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
+      return 0
+    fi
     local cred
-    cred=$(curl -fsSL -X POST "${api_url}/api/credentials" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg v "${HCLOUD_TOKEN}" --arg c "${cluster_id}" \
-        '{type: "hcloud_token", value: $v, validate: true, clusterId: $c}')") || {
+    cred=$(printf '%s' "${HCLOUD_TOKEN}" |
+      jq -Rs --arg c "${cluster_id}" '{type: "hcloud_token", value: ., validate: true, clusterId: $c}' |
+      curl -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
+        -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
+        -H "Content-Type: application/json" \
+        --data-binary @-) || {
       warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
       return 0
     }
@@ -629,7 +640,7 @@ kubehz::deregister_cluster() {
   # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
   # validate_config (reachable standalone via `lo kubehz deregister`), so guard
   # each call by its own URL — mirrors register_cluster's standalone re-assert.
-  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl" || ! http::credential_ok KUBEHZ_TOKEN; then
     rc=1
   else
     local cluster_id="" resolve_rc=0
@@ -643,9 +654,9 @@ kubehz::deregister_cluster() {
       # Status + body captured (the re-enroll idiom): a refused delete must
       # surface with the api's own message, not vanish into `curl -f`.
       local response http_code
-      if ! response=$(curl -sSL -w $'\n%{http_code}' -X DELETE \
-        "${api_url}/api/clusters/${cluster_id}" \
-        -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}"); then
+      if ! response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+        curl -K - -sSL -w $'\n%{http_code}' -X DELETE \
+        "${api_url}/api/clusters/${cluster_id}"); then
         error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
         rc=1
       else
@@ -667,11 +678,11 @@ kubehz::deregister_cluster() {
   # deregister has no register response to read .claimKey.name from.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
     local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
-    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE"; then
-      key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE" && http::credential_ok HCLOUD_TOKEN; then
+      key_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
         "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
-      [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-        "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+      [[ -z "${key_id}" ]] || http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" |
+        curl -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -795,9 +806,10 @@ kubehz::status() {
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
   local raw http_code response
-  raw=$(curl -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || {
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null) || {
     echo "Status:  unknown (API unreachable: ${api_url})"
     return 0
   }
@@ -911,6 +923,7 @@ kubehz::assess() {
   [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
   # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local cluster_id
   cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
@@ -919,8 +932,8 @@ kubehz::assess() {
   }
 
   local response
-  response=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}/assessment" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}/assessment") || {
     error "kubehz: could not fetch the assessment for ${domain} (${cluster_id})"
     return 1
   }
@@ -1067,8 +1080,9 @@ kubehz::claim-code() {
 # Usage: kubehz::resolve_cluster_id <domain> <api_url>
 kubehz::resolve_cluster_id() {
   local domain="${1}" api_url="${2}" response cluster_id
-  response=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -fsSL "${api_url}/api/clusters?perPage=500" 2>/dev/null) || return 1
   # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
   # is served newest-first, but the server binds agent identity (heartbeat,
   # desired) to the OLDEST active row for a domain — picking the newest armed
@@ -1104,8 +1118,10 @@ kubehz::resolve_cluster_id() {
 #
 # The nonce persists as annotations on the kubehz-agent-config ConfigMap (the
 # agent's established marker surface): kubehz.cloud/claim-nonce + the
-# …-placed epoch stamp, written in ONE annotate call so the agent never reads
-# a half-written pair. The write runs with the OPERATOR's ambient kubeconfig
+# …-placed epoch stamp, written in ONE merge patch so the agent never reads a
+# half-written pair. The nonce reaches kubectl in that patch on stdin, never
+# on argv: every local user can read argv (ps, /proc/<pid>/cmdline). The Go
+# twin sends the same patch. The write runs with the OPERATOR's ambient kubeconfig
 # (exported by main from the active domain — switch clusters with
 # `lo use <domain>` first); the agent's own RBAC stays untouched — its marker
 # Role already grants get/patch on this one ConfigMap, which is exactly what
@@ -1113,13 +1129,28 @@ kubehz::resolve_cluster_id() {
 #
 # SECURITY: the nonce is a claim ticket — this command never prints it, and no
 # error message may echo it; only its presence/shape is reported.
+# `--nonce -` reads it from stdin (one line, surrounding whitespace dropped),
+# so it stays out of shell history and argv, as in the Go twin
+# (ClaimNonce). KUBEHZ_CLAIM_NONCE is Go-only (D22).
 kubehz::claim() {
   local nonce
   local -a args=(
-    'nonce|n:!'  'Claim-challenge nonce minted in the dashboard (khzn_…)'
+    'nonce|n:!'  "Claim-challenge nonce minted in the dashboard (khzn_…); '-' reads it from stdin"
     "${args[@]:-}"
   )
   :args "Place a claim-challenge nonce for the heartbeat agent" "${@}"
+
+  if [[ "${nonce}" == "-" ]]; then
+    [[ ! -t 0 ]] || echo "reading the claim nonce from stdin (one line, then Enter)…" >&2
+    nonce=""
+    IFS= read -r -n 4096 nonce || :
+    nonce="${nonce#"${nonce%%[![:space:]]*}"}"
+    nonce="${nonce%"${nonce##*[![:space:]]}"}"
+    if [[ -z "${nonce}" ]]; then
+      error "no claim nonce on stdin (--nonce - reads one line)"
+      return 1
+    fi
+  fi
 
   # Shape check BEFORE any cluster call: the api mints khzn_ + 43 base64url
   # chars and its heartbeat schema bounds the whole value at 20..200 chars —
@@ -1138,9 +1169,12 @@ kubehz::claim() {
   # One call, both annotations: the value and its placement stamp. The agent
   # clears a stampless nonce as unsourced, and expires a stamped one after the
   # api's challenge TTL (15 minutes) so a dead nonce never echoes forever.
-  kubectl -n "${ns}" annotate --overwrite configmap "${cm}" \
-    "kubehz.cloud/claim-nonce=${nonce}" \
-    "kubehz.cloud/claim-nonce-placed=$(date -u +%s)" >/dev/null || {
+  # jq reads the nonce on stdin, kubectl the patch: neither gets it on argv.
+  # shellcheck disable=SC2016  # $t is jq program text
+  printf '%s' "${nonce}" |
+    jq -cRs --arg t "$(date -u +%s)" \
+      '{metadata: {annotations: {"kubehz.cloud/claim-nonce": ., "kubehz.cloud/claim-nonce-placed": $t}}}' |
+    kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch-file /dev/stdin >/dev/null || {
     error "could not annotate configmap/${cm} — check your kubeconfig permissions"
     return 1
   }
@@ -1243,15 +1277,14 @@ kubehz::token_access() {
     fi
   fi
 
-  # client_secret_basic. The config line quotes backslashes and quotes, so a
-  # value can never end the string early.
-  local user="${client_id}:${secret}" answer status reason code expires_in msg attempt retry rc
+  # client_secret_basic. http::curl_config quotes backslashes and quotes,
+  # so a value can never end the string early. The control-character check
+  # above refused a line break.
+  local answer status reason code expires_in msg attempt retry rc
   local -a delays=(0.25 0.5 1)
-  user="${user//\\/\\\\}"
-  user="${user//\"/\\\"}"
   for (( attempt = 0; ; attempt++ )); do
     retry=0
-    if answer=$(printf 'user = "%s"\n' "${user}" | curl -q -sS --proto =https \
+    if answer=$(http::curl_config user "${client_id}:${secret}" | curl -q -sS --proto =https \
       --connect-timeout 10 --max-time 30 -K - \
       -H 'Accept: application/json' \
       --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
@@ -1331,7 +1364,8 @@ kubehz::token_cache_write() {
   dir="${file%/*}"
   (umask 077 && mkdir -p "${dir}") || return 1
   tmp=$(mktemp "${dir}/.token-XXXXXX") || return 1
-  if jq -cn --arg t "${2}" --argjson e "${3}" '{access_token:$t,expires_at:$e}' >"${tmp}" \
+  # The token reaches jq on stdin (-Rs), not on argv.
+  if printf '%s' "${2}" | jq -cRs --argjson e "${3}" '{access_token:.,expires_at:$e}' >"${tmp}" \
     && mv -f "${tmp}" "${file}"; then
     return 0
   fi
@@ -1351,8 +1385,9 @@ kubehz::token_emit() {
     client.authentication.k8s.io/v1|client.authentication.k8s.io/v1beta1) ;;
     *) version="client.authentication.k8s.io/v1" ;;
   esac
-  jq -cn --arg v "${version}" --arg t "${token}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
-    '{apiVersion:$v,kind:"ExecCredential",status:{token:$t,expirationTimestamp:$e}}'
+  # The token reaches jq on stdin (-Rs), not on argv.
+  printf '%s' "${token}" | jq -cRs --arg v "${version}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
+    '{apiVersion:$v,kind:"ExecCredential",status:{token:.,expirationTimestamp:$e}}'
 }
 
 # ── Agent-token re-enrollment (agent-identity contract R2) ─
@@ -1400,6 +1435,7 @@ kubehz::re-enroll() {
   [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
   # KUBEHZ_TOKEN + the token hash travel on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
   [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
     error "KUBEHZ_TOKEN is required to re-enroll (a clusters:write API token from the dashboard's Access -> API Tokens)"
     return 1
@@ -1444,10 +1480,11 @@ kubehz::re-enroll() {
   # fresh token); 404 = not this tenant's cluster (the api answers a uniform
   # 404 cross-tenant).
   local response http_code body
-  response=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+  response=$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}' |
+    curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
+    -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}')") || {
+    --data-binary @-) || {
     error "kubehz: agent-token request failed (network) — retry once ${api_url} is reachable"
     return 1
   }

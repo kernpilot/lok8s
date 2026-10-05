@@ -287,14 +287,16 @@ _build_cloud_spec() {
   fi
 
   case "${provider}" in
+    # The credentials reach jq through pipes (--rawfile <(…)), never on
+    # argv: every local user can read argv (ps, /proc/<pid>/cmdline).
     hetzner)
-      jq -n --arg token "${HCLOUD_TOKEN:-}" \
+      jq -n --rawfile token <(printf '%s' "${HCLOUD_TOKEN:-}") \
         '{hetzner: {token: $token}}'
       ;;
     aws)
       jq -n \
-        --arg key "${AWS_ACCESS_KEY_ID:-}" \
-        --arg secret "${AWS_SECRET_ACCESS_KEY:-}" \
+        --rawfile key <(printf '%s' "${AWS_ACCESS_KEY_ID:-}") \
+        --rawfile secret <(printf '%s' "${AWS_SECRET_ACCESS_KEY:-}") \
         '{aws: {accessKeyID: $key, secretAccessKey: $secret}}'
       ;;
     byo | bringyourown)

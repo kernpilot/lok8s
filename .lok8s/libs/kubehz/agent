@@ -426,16 +426,14 @@ kubehz::agent_session() {
 #   rc 1  → no answer, already printed
 # Usage: kubehz::agent_api <action> <method> <path> [json_body]
 kubehz::agent_api() {
-  local action="${1}" method="${2}" path="${3}" body="${4:-}" auth raw
+  local action="${1}" method="${2}" path="${3}" body="${4:-}" raw
   local -a extra=()
   KUBEHZ_AGENT_STATUS=""
   KUBEHZ_AGENT_BODY=""
   [[ -z "${body}" ]] || extra=(-H 'Content-Type: application/json' --data-binary "${body}")
-  # The config line quotes backslashes and quotes, so the value can never
-  # end the string early.
-  auth="${KUBEHZ_AGENT_BEARER//\\/\\\\}"
-  auth="${auth//\"/\\\"}"
-  if ! raw=$(printf 'header = "Authorization: Bearer %s"\n' "${auth}" | curl -q -sS --proto =https \
+  # http::curl_config quotes backslashes and quotes, so the value can never
+  # end the string early. kubehz::agent_session refused a control character.
+  if ! raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_AGENT_BEARER}" | curl -q -sS --proto =https \
     --connect-timeout 10 --max-time 60 -K - -X "${method}" -H 'Accept: application/json' "${extra[@]}" \
     -w $'\n%{http_code}' "${KUBEHZ_AGENT_BASE}${path}" 2>/dev/null); then
     error "kubehz ${action}: the api at ${KUBEHZ_AGENT_BASE//\\/\\\\} did not answer"
