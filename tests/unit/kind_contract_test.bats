@@ -58,12 +58,12 @@ teardown() {
 
 # ── .lok8s/drivers/lo/main ─────────────────────────────────────
 
-@test "lo.sh driver::provision calls kind create cluster" {
+# _provision_shared: run driver::provision on the shared-registry fixture.
+# The caller asserts on ${status} and ${output}.
+_provision_shared() {
   # Use the real lo-cluster-shared.lok8s.yaml fixture (slot 125, 10.125.x
   # layout) and real yq. Mocks only the externals that actually run code
   # we don't want to hit (docker, kind, kubectl, helm, mkcert).
-  command -v yq >/dev/null 2>&1 || skip "yq not in PATH"
-
   cp "${FIXTURES_DIR}/lo-cluster-shared.lok8s.yaml" \
     "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 
@@ -151,7 +151,41 @@ teardown() {
   }
 
   run driver::provision "test.lok8s.dev"
+}
+
+@test "lo.sh driver::provision calls kind create cluster" {
+  command -v yq >/dev/null 2>&1 || skip "yq not in PATH"
+  _provision_shared
   assert_success
+}
+
+# The guard for isolate_state_dirs (tests/test_helper.bash). This provision
+# path writes one config per registry into LO_REGISTRY_STATE_DIR. Without the
+# isolation, it wrote six stub configs into the real state directory of the
+# developer, and the shared registries that mount them crash-looped.
+@test "lo.sh driver::provision writes the registry configs under BATS_TEST_TMPDIR" {
+  command -v yq >/dev/null 2>&1 || skip "yq not in PATH"
+  export HOME="${BATS_TEST_TMPDIR}/home"
+  mkdir -p "${HOME}"
+
+  # Check the state directories BEFORE the provision run. If the isolation
+  # is missing, the test must stop here, before a write can occur.
+  [[ "${XDG_STATE_HOME:-}" == "${BATS_TEST_TMPDIR}/"* ]] \
+    || fail "XDG_STATE_HOME is not under BATS_TEST_TMPDIR: '${XDG_STATE_HOME:-}'"
+  [[ "${LO_REGISTRY_STATE_DIR:-}" == "${BATS_TEST_TMPDIR}/"* ]] \
+    || fail "LO_REGISTRY_STATE_DIR is not under BATS_TEST_TMPDIR: '${LO_REGISTRY_STATE_DIR:-}'"
+  local state_dir="${LO_REGISTRY_STATE_DIR}"
+
+  _provision_shared
+  assert_success
+
+  local reg
+  for reg in build cache io-docker io-quay io-k8s io-ghcr; do
+    [[ -f "${state_dir}/lok8s-registry-${reg}.yaml" ]] \
+      || fail "no config for '${reg}' in ${state_dir}"
+  done
+  [[ ! -e "${HOME}/.local/state/lok8s" ]] \
+    || fail "the provision run wrote under HOME: $(find "${HOME}/.local/state/lok8s")"
 }
 
 @test "lo.sh driver::destroy deletes kind cluster" {

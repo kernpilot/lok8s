@@ -69,6 +69,12 @@ library-under-test and its utility deps (see
 (`yq`, `kubectl`, `docker`, `kustomize`, `kubehz::*`) — unit tests
 never touch a real cluster or network.
 
+The helper sets `XDG_STATE_HOME` and `LO_REGISTRY_STATE_DIR` to
+directories under `BATS_TEST_TMPDIR` for each test
+(`isolate_state_dirs`). Do not set them to a path outside
+`BATS_TEST_TMPDIR`. The default directory holds the configs that the
+shared registries on your machine mount.
+
 **E2e scenario**: pick a free slot in `tests/e2e/SUBNETS.md`, create
 `tests/e2e/<name>/{test.bats, Tiltfile, clusters/<slot>.lok8s.dev/}`,
 and open `setup_file` with the gate (`e2e::require_e2e_enabled`),

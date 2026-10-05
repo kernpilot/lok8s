@@ -109,13 +109,40 @@ assert_pattern_matches() {
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 
+# isolate_state_dirs: give the test its own state directories.
+#
+# The lo driver writes each rendered registry config to
+# ${LO_REGISTRY_STATE_DIR}/<container>.yaml. The default directory is
+# ${XDG_STATE_HOME:-$HOME/.local/state}/lok8s/registries. On a developer
+# machine, the shared registry containers bind-mount their configs from that
+# directory. A test that writes its stub config there replaces the live
+# config, and the registry fails at its next restart ("no storage
+# configuration provided").
+#
+# This function sets both variables to directories under BATS_TEST_TMPDIR.
+# It replaces the values that the calling shell exports, because those values
+# point at the real directory. The call below this function runs for every
+# test that loads this helper. setup_tmpdir calls it again, because
+# setup_tmpdir replaces BATS_TEST_TMPDIR. The guard is the test
+# "lo.sh driver::provision writes the registry configs under BATS_TEST_TMPDIR"
+# in tests/unit/kind_contract_test.bats.
+isolate_state_dirs() {
+  local root="${BATS_TEST_TMPDIR:-}"
+  [[ -n "${root}" ]] || root="$(mktemp -d)"
+  export XDG_STATE_HOME="${root}/xdg-state"
+  export LO_REGISTRY_STATE_DIR="${root}/registry-state"
+}
+isolate_state_dirs
+
 # Create a temporary directory per test for scratch files.
 # Also exports PATH_BASE / PATH_LOK8S / PATH_SCRIPTS pointed at the
 # tmpdir so that library code reading those vars resolves under the
-# per-test sandbox.
+# per-test sandbox, and moves the state directories into it
+# (isolate_state_dirs).
 setup_tmpdir() {
   BATS_TEST_TMPDIR="$(mktemp -d)"
   export BATS_TEST_TMPDIR
+  isolate_state_dirs
   export PATH_BASE="${BATS_TEST_TMPDIR}"
   export PATH_LOK8S="${BATS_TEST_TMPDIR}/.lok8s"
   export PATH_SCRIPTS="${PATH_LOK8S}"

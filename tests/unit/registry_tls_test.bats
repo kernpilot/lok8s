@@ -452,7 +452,6 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   _stub_secret_plugin
   _stub_docker
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 
   lo::registries_tls_cert test.lok8s.dev
   rm -f "${FAKE_VOL}/volumes/lok8s-registry-tls/tls.key"
@@ -477,7 +476,6 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   _stub_secret_plugin
   _stub_docker
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
   local vol="${FAKE_VOL}/volumes/lok8s-registry-tls" case
   for case in "tls.crt:" "tls.crt:garbage, not a certificate" "tls.crt:$(_pem 'PRIVATE KEY' X)" "tls.key:" "tls.key:garbage"; do
     lo::registries_tls_cert test.lok8s.dev
@@ -503,7 +501,6 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   _stub_secret_plugin
   _stub_docker
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
   lo::registries_tls_cert test.lok8s.dev
   LO_REGISTRY_TLS_CRT=""
   _real_docker=$(declare -f docker)
@@ -663,7 +660,6 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   _stub_secret_plugin
   _stub_docker
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
   export LOK8S_NONINTERACTIVE=1
 
   lo::registries_tls_cert test.lok8s.dev
@@ -689,7 +685,6 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   _stub_docker
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 
   run lo::registries test.lok8s.dev "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   assert_failure
@@ -704,7 +699,6 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
   _stub_secret_plugin
   _stub_docker
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 
   lo::registries_tls_cert test.lok8s.dev
   [ -d "${FAKE_VOL}/volumes/lok8s-registry-tls" ]
@@ -724,7 +718,6 @@ _source_registry_lib() {
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/libs/registry"
   export DOMAIN_NAME=test.lok8s.dev
   lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
   export LOK8S_NONINTERACTIVE=1
 }
 
