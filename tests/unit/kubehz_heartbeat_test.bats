@@ -203,6 +203,14 @@ STUBS_EOF
   export STUB_DESIRED_BODY='{"revision":7,"kubernetesVersion":null,"workerPools":[],"execution":{"scaling":true,"upgrades":false,"healing":false},"healing":{"enabled":false}}'
 }
 
+# _argv_spies: log the argv of every curl and kubectl stub call and of the
+# tools that a filter or redaction step could hand a secret to.
+_argv_spies() {
+  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
+  source "${_PROJECT_ROOT}/tests/lib/argv_sentinels.bash"
+  argv_spy "${ARGV_SPY_TOOLS[@]}"
+}
+
 teardown() {
   teardown_tmpdir
 }
@@ -669,30 +677,41 @@ teardown() {
   now=$(date -u +%s)
   nonce="khzn_SENTINEL_n0ncE_43charsBase64urlValue00"
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
-  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
+  _argv_spies
 
   run bash "${RUNNER}"
   assert_success
-  [ -s "${ARGV_LOG}" ]
-  run grep -cF -e "${nonce}" -e "khz_agt_test" "${ARGV_LOG}"
-  assert_output 0
+  assert_argv_clean "${nonce}" khz_agt_test
   # Both still arrive: the nonce in the body, the token as the bearer of
   # the beat and of the desired-state poll.
   run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
   assert_output "${nonce}"
-  run grep -c "Authorization: Bearer khz_agt_test" "${STUB_AUTH_LOG}"
-  assert_output 2
+  [ "$(ARGV_LOG="" grep -c "^Authorization: Bearer khz_agt_test$" "${STUB_AUTH_LOG}")" = 2 ]
+}
+
+@test "heartbeat: the plain retry after a rejected assessment keeps the token off argv too" {
+  export STUB_CURL_FAIL_ASSESS=1
+  _argv_spies
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "retrying once without it"
+  assert_argv_clean khz_agt_test
+  # The beat with the assessment, the plain retry and the desired-state
+  # poll: each carries the bearer from its config.
+  [ "$(ARGV_LOG="" grep -c '/heartbeat$' "${STUB_CURL_LOG}")" = 2 ]
+  [ "$(ARGV_LOG="" grep -c "^Authorization: Bearer khz_agt_test$" "${STUB_AUTH_LOG}")" = 3 ]
 }
 
 @test "heartbeat: a token that a curl config line cannot carry skips the beat" {
-  # A quote, a backslash, a space or a line break would end the config line
-  # and start a curl option. The agent never mints such a token.
+  # A quote, a backslash or a line break would break the config line, and
+  # the guard allows no space either. The agent never mints such a token.
   local tok
   for tok in 'khz_agt_a"b' 'khz_agt_a\b' 'khz_agt_a b' $'khz_agt_a\nurl = https://x'; do
     : > "${STUB_CURL_LOG}"
     STUB_AGENT_TOKEN="${tok}" run bash "${RUNNER}"
     assert_success
-    assert_output --partial "agent-token holds a character that a curl config cannot carry; skipping heartbeat"
+    assert_output --partial "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry"
     run grep -c "/heartbeat" "${STUB_CURL_LOG}"
     assert_output 0
   done

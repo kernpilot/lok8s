@@ -563,13 +563,14 @@ spec:
                     exit 0
                   fi
                   # A goes to curl in a config line (-K), never on argv: every process on
-                  # the node can read argv (ps, /proc/<pid>/cmdline). A quote, a
-                  # backslash, a space or a line break would end that line, and the rest
-                  # would be a curl option. The agent mints khz_agt_<hex>; skip any token
-                  # outside the safe characters.
+                  # the node can read argv (ps, /proc/<pid>/cmdline). A quote or a
+                  # backslash would end the quoted value early, and a line break would end
+                  # the line: curl would read the rest as an option. The agent mints
+                  # khz_agt_<hex>, so the guard allows only the characters of such a token
+                  # and of base64, and skips the beat for any other token.
                   case "${AGENT_TOKEN}" in
                     *[!A-Za-z0-9_.~+/=-]*)
-                      echo "kubehz: agent-token holds a character that a curl config cannot carry; skipping heartbeat" >&2
+                      echo "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry" >&2
                       exit 0
                       ;;
                   esac

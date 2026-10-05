@@ -48,6 +48,7 @@ setup() {
   touch "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
 
   export KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  export KUBECTL_PATCH_OUT="${BATS_TEST_TMPDIR}/kubectl.patch"
   export CURL_BODY_OUT="${BATS_TEST_TMPDIR}/curl-body.json"
   export STUB_AT_BODY='{"rotated":true,"clusterId":"cl-123"}'
   export STUB_AT_CODE="200"
@@ -82,6 +83,8 @@ _stub_kubectl() {
         [ -z "${STUB_CM_MISSING:-}" ] || return 1
         return 0 ;;
       *"annotate"*) return 0 ;;
+      # The claim patch comes on stdin (--patch-file /dev/stdin).
+      *"patch configmap"*) cat > "${KUBECTL_PATCH_OUT}"; return 0 ;;
       *"get secret kubehz-agent"*)
         [ -z "${STUB_SECRET_MISSING:-}" ] || return 1
         printf 'khz_agt_bats' | base64 | tr -d '\n' ;;
@@ -140,7 +143,7 @@ _stub_curl() {
 
 # ── claim: placement (one annotate call, operator kubeconfig) ─
 
-@test "claim: places nonce + epoch stamp in ONE annotate call and never prints the value" {
+@test "claim: places nonce + epoch stamp in ONE patch on stdin and never prints the value" {
   _stub_kubectl
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
@@ -151,14 +154,35 @@ _stub_curl() {
   assert_output --partial "15 minutes"
   refute_output --partial "${nonce}"
 
-  # ONE annotate call carries BOTH annotations (the agent clears a stampless
-  # nonce as unsourced, so a half-written pair must be impossible).
-  run grep -c "annotate" "${KUBECTL_LOG}"
+  # ONE patch call carries BOTH annotations (the agent clears a stampless
+  # nonce as unsourced, so a half-written pair must be impossible). The
+  # nonce is a claim ticket: on stdin, never on argv (the Go twin's call).
+  run grep -c "patch configmap" "${KUBECTL_LOG}"
   assert_output "1"
-  run grep "annotate" "${KUBECTL_LOG}"
-  assert_output --partial "kubehz.cloud/claim-nonce=${nonce}"
-  assert_output --partial "kubehz.cloud/claim-nonce-placed="
-  assert_output --partial "--overwrite"
+  run grep "patch configmap" "${KUBECTL_LOG}"
+  assert_output "-n kubehz-system patch configmap kubehz-agent-config --type merge --patch-file /dev/stdin"
+  run grep -c -F "${nonce}" "${KUBECTL_LOG}"
+  assert_output "0"
+  run command jq -r '.metadata.annotations["kubehz.cloud/claim-nonce"]' "${KUBECTL_PATCH_OUT}"
+  assert_output "${nonce}"
+  run command jq -r '.metadata.annotations["kubehz.cloud/claim-nonce-placed"] | test("^[0-9]+$")' "${KUBECTL_PATCH_OUT}"
+  assert_output "true"
+}
+
+@test "claim: --nonce - reads the nonce from stdin, as the Go twin" {
+  _stub_kubectl
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  local nonce="khzn_batsStdinNonce_43charsBase64urlValue0000"
+  run kubehz::claim --nonce - <<<"  ${nonce}  "
+  assert_success
+  refute_output --partial "${nonce}"
+  run command jq -r '.metadata.annotations["kubehz.cloud/claim-nonce"]' "${KUBECTL_PATCH_OUT}"
+  assert_output "${nonce}"
+
+  run kubehz::claim --nonce - < /dev/null
+  assert_failure
+  assert_output --partial "no claim nonce on stdin (--nonce - reads one line)"
 }
 
 @test "claim: a missing agent ConfigMap errors with deploy guidance" {

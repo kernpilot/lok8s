@@ -203,8 +203,12 @@ STUBS_EOF
 @test "agent: A, C and the bind secret never reach a command line" {
   # Every process on the node can read argv (ps, /proc/<pid>/cmdline). The
   # stubs log the argv of each curl and kubectl call (curl_capture.sh).
+  # Spies for the tools that a filter or redaction step could hand a
+  # secret to (sed, grep, base64, …) log their argv too.
   export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
   export BIND_SECRET="5e175e175e175e175e175e175e175e175e175e175e175e175e175e175e175e17"
+  source "${_PROJECT_ROOT}/tests/lib/argv_sentinels.bash"
+  argv_spy "${ARGV_SPY_TOOLS[@]}"
   _build_runner
   run sh "${RUNNER}"
   assert_success
@@ -212,9 +216,7 @@ STUBS_EOF
   local a c
   a="$(cat "${STORE_A}")"
   c="$(cat "${STORE_C}")"
-  [ -s "${ARGV_LOG}" ]
-  run grep -cF -e "${a}" -e "${c}" -e "${BIND_SECRET}" "${ARGV_LOG}"
-  assert_output 0
+  assert_argv_clean "${a}" "${c}" "${BIND_SECRET}"
   # They still arrive: the bind secret in the register body, A as the
   # bearer of the beat.
   run command jq -r '.bindSecret' "${REGISTER_OUT}"

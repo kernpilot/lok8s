@@ -7,19 +7,22 @@ package kubehz
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/kernpilot/lok8s/internal/execx"
 	"io"
 	"maps"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/execx"
 )
 
 // Register is `lo kubehz register`: read + validate the active domain's
@@ -410,7 +413,8 @@ var claimNonceRe = regexp.MustCompile(`^khzn_[A-Za-z0-9_-]{15,195}$`)
 // nonce is a claim ticket: a value on argv sits in shell history and in
 // /proc/*/cmdline for its 15-minute life, where every local user can read
 // it. `--nonce -` (stdin) and this variable keep it off the command line.
-// Go-only (deviation D22): the bash twin takes the flag only.
+// The variable is Go-only (deviation D22); the bash twin reads the flag and
+// `--nonce -`.
 const ClaimNonceEnv = "KUBEHZ_CLAIM_NONCE"
 
 // ClaimNonce resolves the nonce Claim gets, in order: the flag value as
@@ -459,10 +463,23 @@ func (c *Context) Claim(ctx context.Context, nonce string) error {
 		c.errorf("configmap/%s not found in %s. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster.", agentConfigName, agentNamespace)
 		return ErrHandled
 	}
-	// One call, both annotations: the value and its placement stamp.
+	// One call, both annotations: the value and its placement stamp. The
+	// nonce reaches kubectl in a merge patch on stdin, never on argv:
+	// every local user can read argv (ps, /proc/<pid>/cmdline). The bash
+	// twin sends the same patch.
 	stamp := strconv.FormatInt(c.now().Unix(), 10)
-	if _, err := c.capture(ctx, false, "kubectl", "-n", agentNamespace, "annotate", "--overwrite", "configmap", agentConfigName,
-		"kubehz.cloud/claim-nonce="+nonce, "kubehz.cloud/claim-nonce-placed="+stamp); err != nil {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
+		"kubehz.cloud/claim-nonce": nonce, "kubehz.cloud/claim-nonce-placed": stamp,
+	}}})
+	if err != nil {
+		return err
+	}
+	if err := c.Runner.Run(ctx, execx.Cmd{
+		Name: "kubectl",
+		Args: []string{"-n", agentNamespace, "patch", "configmap", agentConfigName,
+			"--type", "merge", "--patch-file", "/dev/stdin"},
+		Stdin: bytes.NewReader(patch), Stdout: io.Discard, Stderr: c.errOut(),
+	}); err != nil {
 		c.errorf("could not annotate configmap/%s — check your kubeconfig permissions", agentConfigName)
 		return ErrHandled
 	}

@@ -3,8 +3,11 @@
 #
 # Every local user can read the argv of a process (ps, /proc/<pid>/cmdline),
 # and audit tools store it. Each site that sends a credential runs here with
-# sentinel values and spy executables for curl, jq, kubectl, yq and hcloud
-# (tests/lib/argv_sentinels.bash). Each test checks two things:
+# sentinel values and spy executables for the tools that get a credential
+# (curl, jq, kubectl, yq, hcloud) and for the tools that a filter or a
+# redaction step could hand one to (sed, awk, grep, tr, base64, openssl,
+# env, xargs and more: ARGV_SPY_TOOLS in tests/lib/argv_sentinels.bash).
+# Each test checks two things:
 #   - no sentinel is in any recorded argv (assert_argv_clean);
 #   - the credential still reached the request: the curl config, the body
 #     or the env file, which the spies read the way the real tools do
@@ -61,8 +64,10 @@ setup() {
   SENTINELS=(hcloud-SENTINEL-1a2b khzt_SENTINEL_3c4d robot-pw-SENTINEL-7g8h kkp-SENTINEL-9i0j
     AKIASENTINEL1K2L aws-secret-SENTINEL khz_agt_SENTINEL_5o6p access-SENTINEL-7q8r)
 
+  # The real curl, for the test that runs one (resolved before the spies).
+  REAL_CURL=$(command -v curl || true)
   export -f curl_respond kubectl_respond hcloud_respond
-  argv_spy curl jq kubectl yq hcloud
+  argv_spy "${ARGV_SPY_TOOLS[@]}"
 }
 
 teardown() {
@@ -109,6 +114,9 @@ kubectl_respond() {
       printf 'kind: Secret\n'
       ;;
     "apply "*) cat > /dev/null ;;
+    *"patch configmap kubehz-agent-config --type merge --patch-file /dev/stdin")
+      printf 'patch: %s\n' "$(cat)" >> "${REQ_LOG}"
+      ;;
     *"get secret kubehz-agent"*) printf '%s' "${AGENT_TOKEN_IN_CLUSTER}" | base64 | tr -d '\n' ;;
   esac
   return 0
@@ -123,8 +131,9 @@ hcloud_respond() {
   return 0
 }
 
-# req_count <fixed text>: how many requests in REQ_LOG hold the text.
-req_count() { grep -cF -- "${1}" "${REQ_LOG}" || true; }
+# req_count <fixed text>: how many requests in REQ_LOG hold the text. The
+# grep runs with ARGV_LOG empty: its pattern can hold a sentinel.
+req_count() { ARGV_LOG="" grep -cF -- "${1}" "${REQ_LOG}" || true; }
 
 # _cluster_yaml: a self-hosted registered cluster spec for d.example.
 _cluster_yaml() {
@@ -152,20 +161,92 @@ YAML
 user = "u:p"'
   run http::curl_config data-raw $'{\n\t"k": "v"}\r'
   assert_output 'data-raw = "{\n\t\"k\": \"v\"}\r"'
+  # A refused value gets an error and a config line that curl refuses, so
+  # no request goes out without the credential.
   local bad
   for bad in $'a\nb' $'a\rb' $'a\tb' $'a\x01b'; do
     run http::curl_config header "${bad}"
     assert_failure
-    assert_output ""
+    assert_output --partial "a value for the curl option header holds a control character: lo sends no request"
+    assert_output --partial 'lo-refused-a-value = "header"'
+    refute_output --partial "a${bad:1:1}b"
   done
   run http::curl_config data-raw $'a\x01b'
   assert_failure
-  assert_output ""
+  assert_output --partial 'lo-refused-a-value = "data-raw"'
+}
+
+@test "http::curl_config: curl stops on the refused line before it connects" {
+  [[ -n "${REAL_CURL}" ]] || skip "no curl on this machine"
+  local cfg
+  cfg=$(http::curl_config header $'Authorization: Bearer tok\r' 2>/dev/null) || :
+  # Port 9 (discard): a connect attempt would fail with 7, not 2.
+  run "${REAL_CURL}" -q -sS -K <(printf '%s\n' "${cfg}") http://127.0.0.1:9/
+  [ "${status}" = 2 ]
+  assert_output --partial "lo-refused-a-value"
+}
+
+@test "a credential with a control character is refused by its name before any request" {
+  # A CRLF .env file leaves a CR at the end of the value.
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.example" HCLOUD_API_BASE="https://hc.example"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/shared"
+  local want="must not contain a control character"
+
+  KUBEHZ_TOKEN=$'khzt_SENTINEL_3c4d\r' run kubehz::space_api GET /api/spaces
+  assert_failure
+  assert_output --partial "environment variable KUBEHZ_TOKEN ${want}"
+  assert_output --partial "CRLF line ends"
+  KUBEHZ_TOKEN=$'khzt_SENTINEL_3c4d\r' run kubehz::resolve_cluster_id d.example https://api.kubehz.example
+  assert_failure
+  assert_output --partial "environment variable KUBEHZ_TOKEN ${want}"
+  KUBEHZ_TOKEN=$'khzt_SENTINEL_3c4d\r' run kubehz::deregister_cluster d.example "$(_cluster_yaml)"
+  assert_failure
+  assert_output --partial "environment variable KUBEHZ_TOKEN ${want}"
+  HCLOUD_TOKEN=$'hcloud-SENTINEL-1a2b\r' run kubehz::ensure_claim_key d.example https://api.kubehz.example
+  assert_failure
+  assert_output --partial "environment variable HCLOUD_TOKEN ${want}"
+
+  _robot_fixture
+  # The doctor names the problem; a helper whose caller drops stderr still
+  # sends nothing.
+  HROBOT_PASSWORD=$'robot-pw-SENTINEL-7g8h\r' run provider::doctor "${ROBOT_DESC}"
+  assert_output --partial $'warn\tHROBOT_USER or HROBOT_PASSWORD holds a control character'
+  HROBOT_PASSWORD=$'robot-pw-SENTINEL-7g8h\r' run hetzner::_robot_reset 12345
+  assert_failure
+  HROBOT_PASSWORD=$'robot-pw-SENTINEL-7g8h\r' run hetzner::_robot_curl -f -sS "${HROBOT_API}/server"
+  assert_failure
+  assert_output --partial "environment variable HROBOT_PASSWORD ${want}"
+
+  # No request went out with a refused credential: no call of the kubehz
+  # api or of Robot. The deregister still retires the claim key with the
+  # valid HCLOUD_TOKEN (best effort, as before).
+  [ "$(req_count "api.kubehz.example")" = 0 ]
+  [ "$(req_count "robot.test")" = 0 ]
+  [ "$(req_count $'\r')" = 0 ]
+  [ "$(req_count "https://hc.example/")" = 2 ]
+}
+
+# ── the claim nonce: a claim ticket ──
+
+@test "kubehz claim: the nonce reaches kubectl in a merge patch on stdin, also with --nonce -" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  local nonce="khzn_SENTINEL_n0ncE_43charsBase64urlValue00"
+  run kubehz::claim --nonce "${nonce}"
+  assert_success
+  run kubehz::claim --nonce - <<<"${nonce}"
+  assert_success
+  refute_output --partial "${nonce}"
+
+  assert_argv_clean "${nonce}"
+  [ "$(req_count "patch: {\"metadata\":{\"annotations\":{\"kubehz.cloud/claim-nonce\":\"${nonce}\",\"kubehz.cloud/claim-nonce-placed\":\"")" = 2 ]
 }
 
 # ── Hetzner Robot: the password can boot a server into rescue ──
 
-@test "Robot: lookup, rescue, reset and doctor send the user and password in a curl config" {
+# _robot_fixture: the hetzner provider with a descriptor of one cloud node
+# and one bare-metal worker, at ${ROBOT_DESC}.
+_robot_fixture() {
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s" CLOUD_LOG_FILE="${BATS_TEST_TMPDIR}/hetzner.log"
   export HROBOT_API="https://robot.test"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
@@ -190,8 +271,12 @@ user = "u:p"'
   ]
 }
 JSON
+  ROBOT_DESC="${cfg}/hetzner.json"
   source "${_PROJECT_ROOT}/.lok8s/providers/hetzner/main"
+}
 
+@test "Robot: lookup, rescue, reset and doctor send the user and password in a curl config" {
+  _robot_fixture
   run hetzner::_robot_server_number_by_ip 203.0.113.10
   assert_success
   assert_output 12345
@@ -199,7 +284,7 @@ JSON
   assert_success
   run hetzner::_robot_reset 12345
   assert_success
-  PROVIDER_ROBOT_RESCUE_FP=de:ad:be:ef run provider::doctor "${cfg}/hetzner.json"
+  PROVIDER_ROBOT_RESCUE_FP=de:ad:be:ef run provider::doctor "${ROBOT_DESC}"
   assert_output --partial $'ok\tRobot API reachable'
   assert_output --partial "rescue SSH key registered in Robot"
 
@@ -364,6 +449,5 @@ YAML
   HCLOUD_TOKEN=$'tok\nrobot-password=x' run capi::ensure_credentials "${yaml}" hetzner "${BATS_TEST_TMPDIR}/kc"
   assert_failure
   assert_output --partial "environment variable HCLOUD_TOKEN must not contain a newline"
-  run grep -c '^kubectl' "${ARGV_LOG}"
-  assert_output 0
+  [ "$(ARGV_LOG="" grep -c '^kubectl' "${ARGV_LOG}")" = 0 ]
 }

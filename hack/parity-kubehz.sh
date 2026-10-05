@@ -485,6 +485,9 @@ check "${UNBOUND}" kubehz j n1 --domain shared-reg.dev
 check_parse - kubehz claim
 check - kubehz claim --nonce bad
 check - kubehz claim -n khzn_short
+# --nonce - reads the nonce from stdin in both: a bad one, and none.
+PARITY_STDIN="  khzn_short  " check - kubehz claim --nonce -
+check - kubehz claim --nonce -
 check - kubehz claim-code                                # no cluster reachable → local refusal
 
 # ── token (agent-key exec plugin): the local refusals, no endpoint reached ──

@@ -600,6 +600,7 @@ kubeone::render_addons() {
 kubeone::_name_robot_workers() {
   local manifest="${1}"
   [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]] || return 0
+  http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
   local n hostname pubip num servers
   n=$(yq -r '.staticWorkers.hosts | length' "${manifest}" 2>/dev/null || echo 0)
   for (( i = 0; i < n; i++ )); do

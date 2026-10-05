@@ -479,6 +479,9 @@ provider::rebuild() {
       if [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
         error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"; return 1
       fi
+      # Here, not in hetzner::_robot_curl only: the Robot calls below send
+      # their stderr to /dev/null, which would hide the variable's name.
+      http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
       if [[ -z "${fingerprint}" ]]; then
         fingerprint="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || fingerprint=""
       fi
@@ -636,8 +639,9 @@ hetzner::_rescue_fingerprint() {
 # password never goes on argv, which every local user can read (ps,
 # /proc/<pid>/cmdline) and audit tools store: it can boot a bare-metal
 # server into rescue and reset it. A user or password with a control
-# character gives no config, so the call fails on the missing credential.
+# character is refused with its name (http::credential_ok), and no call runs.
 hetzner::_robot_curl() {
+  http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
   http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - "${@}"
 }
 
@@ -752,7 +756,9 @@ hetzner::_doctor_checks() {
   local have_robot=0 robot_api_ok=0
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
     have_robot=1
-    if hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+    if ! http::credential_ok HROBOT_USER HROBOT_PASSWORD 2>/dev/null; then
+      printf 'warn\tHROBOT_USER or HROBOT_PASSWORD holds a control character (a CR from a file with CRLF line ends?) — remove it\n'
+    elif hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
          "${HROBOT_API}/server" >/dev/null 2>&1; then
       robot_api_ok=1
       printf 'ok\tRobot API reachable\n'

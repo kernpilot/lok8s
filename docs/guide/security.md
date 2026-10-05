@@ -84,6 +84,14 @@ token, the KKP token, the AWS keys and the kubehz agent token in the agent
 CronJob. Both implementations follow the rule. `tests/unit/credentials_argv_test.bats`
 and `internal/execx/argv_credentials_test.go` check it with sentinel values.
 
+curl still reads `~/.curlrc` (for example a proxy setting) when `lo` starts
+it without `-q`. That is so for most calls of the bash implementation, and
+for the KKP calls of both implementations. The agent tools
+(`lo kubehz space …`, `lo kubehz cluster …`) and `lo kubehz token` start
+curl with `-q`. A `config` or a `trace` line in `~/.curlrc` can read or
+record what `lo` sends, the credentials included. Thus keep `~/.curlrc`
+private, and examine it on a shared machine.
+
 One exception stays: `lo kubehz node join` runs the `kubeadm join` line
 of the platform, and `kubeadm join` takes its bootstrap token as `--token`.
 The token is valid for a short time only.

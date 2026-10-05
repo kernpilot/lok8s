@@ -28,7 +28,11 @@ http::require_https() {
 # back into the same bytes. Any other control character, or a line break
 # in another option, makes the function refuse the value: the line would
 # end there, and curl would read the rest as an option (a header could
-# also get a second line). Then the function prints nothing and returns 1.
+# also get a second line). Then the function prints an error on stderr and
+# one config line that curl refuses (an unknown option), so curl stops
+# before it connects instead of sending the request without the
+# credential, and returns 1. Callers check each credential first with
+# http::credential_ok, which names the variable.
 # The Go twins are curlConfigQuote and curlConfigData (internal/driver/kkp).
 # Usage: http::curl_config <option> <value> [<option> <value> ...]
 http::curl_config() {
@@ -46,8 +50,30 @@ http::curl_config() {
         value="${value//$'\t'/\\t}"
         ;;
     esac
-    [[ "${value}" != *[[:cntrl:]]* ]] || return 1
+    if [[ "${value}" == *[[:cntrl:]]* ]]; then
+      error "a value for the curl option ${opt} holds a control character: lo sends no request"
+      printf 'lo-refused-a-value = "%s"\n' "${opt}"
+      return 1
+    fi
     out+="${opt} = \"${value}\""$'\n'
   done
   printf '%s' "${out}"
+}
+
+# Succeed when no named variable holds a control character. A credential
+# goes into a curl config line (http::curl_config), and a control character
+# would end that line. A common cause is a CR at the end of a value from a
+# file with CRLF line ends. Each refused variable gets an error with its
+# name. An unset or empty variable passes: the caller decides on that.
+# Usage: http::credential_ok <variable name>...
+http::credential_ok() {
+  local LC_ALL=C name rc=0
+  for name in "${@}"; do
+    if [[ "${!name:-}" == *[[:cntrl:]]* ]]; then
+      error "environment variable ${name} must not contain a control character"
+      echo "  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again." >&2
+      rc=1
+    fi
+  done
+  return "${rc}"
 }

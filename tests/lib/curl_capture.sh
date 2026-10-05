@@ -128,9 +128,27 @@ kubectl_env_file() {
 }
 
 # argv_log <tool> <args...>: one line in ARGV_LOG (when set): the tool and
-# its arguments, with a line break in an argument written as \n.
+# its arguments, with a line break in an argument written as \n. Builtins
+# only: the spies of tests/lib/argv_sentinels.bash call this function, and
+# awk or sed may be spies themselves.
 argv_log() {
   [ -n "${ARGV_LOG:-}" ] || return 0
-  _al_line="$*"
-  printf '%s\n' "${_al_line}" | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 } END { print "" }' >> "${ARGV_LOG}"
+  _al_rest="$*"
+  _al_out=""
+  while :; do
+    case "${_al_rest}" in
+      *'
+'*)
+        _al_out="${_al_out}${_al_rest%%'
+'*}\\n"
+        _al_rest="${_al_rest#*'
+'}"
+        ;;
+      *)
+        _al_out="${_al_out}${_al_rest}"
+        break
+        ;;
+    esac
+  done
+  printf '%s\n' "${_al_out}" >> "${ARGV_LOG}"
 }

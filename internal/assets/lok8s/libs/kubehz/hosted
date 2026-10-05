@@ -49,6 +49,7 @@ kubehz::build_cluster_payload() {
 # Usage: kubehz::wait_for_cluster <api_url> <cluster_id> [timeout_seconds]
 kubehz::wait_for_cluster() {
   local api_url="${1}" cluster_id="${2}" timeout="${3:-600}"
+  http::credential_ok KUBEHZ_TOKEN || return 1
   local elapsed=0 status_val
 
   debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
@@ -130,6 +131,7 @@ kubehz::render_capacity_rejection() {
 kubehz::provision_hosted() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local payload
   payload=$(kubehz::build_cluster_payload "${cluster_yaml}")
@@ -226,6 +228,7 @@ kubehz::destroy_hosted() {
   # Same HTTPS guard as every other bearer-carrying kubehz call: a
   # misconfigured http:// apiUrl must not leak KUBEHZ_TOKEN in clear.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   # Resolve through kubehz::resolve_cluster_id (client-side domain filter,
   # oldest-first). The old inline lookup GETed /api/clusters?domain=… — a

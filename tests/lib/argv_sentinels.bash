@@ -48,22 +48,29 @@ SPY
 
 # assert_argv_clean [sentinel...]: no recorded argv holds a sentinel. With
 # no arguments, the sentinels are the SENTINELS array. Fails when nothing
-# is in the log: an empty log proves nothing.
+# is in the log: an empty log proves nothing. Its own grep runs with
+# ARGV_LOG empty: a spied grep would log the sentinel it looks for.
 assert_argv_clean() {
   local -a values=("$@")
   (( ${#values[@]} )) || values=("${SENTINELS[@]}")
-  if [[ ! -s "${ARGV_LOG}" ]]; then
-    echo "assert_argv_clean: the argv log is empty (${ARGV_LOG})" >&2
+  local log="${ARGV_LOG}" v hits=0
+  if [[ ! -s "${log}" ]]; then
+    echo "assert_argv_clean: the argv log is empty (${log})" >&2
     return 1
   fi
-  local v hits=0
   for v in "${values[@]}"; do
     [[ -n "${v}" ]] || continue
-    if grep -qF -- "${v}" "${ARGV_LOG}"; then
+    if ARGV_LOG="" grep -qF -- "${v}" "${log}"; then
       echo "a secret is on argv: ${v}" >&2
-      grep -nF -- "${v}" "${ARGV_LOG}" | head -5 >&2
+      ARGV_LOG="" grep -nF -- "${v}" "${log}" >&2
       hits=$(( hits + 1 ))
     fi
   done
   (( hits == 0 ))
 }
+
+# The tools that the spies of the sentinel tests cover: the tools that get
+# a credential, and the tools that a filter or redaction step could hand
+# one to.
+ARGV_SPY_TOOLS=(curl jq kubectl yq hcloud sed awk grep tr base64 openssl env xargs
+  sha256sum cut head tail od wc date)

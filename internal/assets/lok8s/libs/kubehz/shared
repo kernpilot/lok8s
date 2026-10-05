@@ -175,6 +175,7 @@ kubehz::space_api() {
   local method="${1}" path="${2}" body="${3:-}"
   KUBEHZ_SPACE_API_STATUS=""
   KUBEHZ_SPACE_API_BODY=""
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
