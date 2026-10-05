@@ -29,9 +29,11 @@ http::require_https() {
 # in another option, makes the function refuse the value: the line would
 # end there, and curl would read the rest as an option (a header could
 # also get a second line). Then the function prints an error on stderr and
-# one config line that curl refuses (an unknown option), so curl stops
-# before it connects instead of sending the request without the
-# credential, and returns 1. Callers check each credential first with
+# the config line `proto = "-all"`, and returns 1. That line turns off every
+# protocol, so curl stops before it connects (curl 8.20 refuses the line,
+# older versions refuse the URL) instead of sending the request without the
+# credential. A --proto after the -K would turn a protocol on again: the
+# callers put theirs first. Callers check each credential first with
 # http::credential_ok, which names the variable.
 # The Go twins are curlConfigQuote and curlConfigData (internal/driver/kkp).
 # Usage: http::curl_config <option> <value> [<option> <value> ...]
@@ -52,7 +54,7 @@ http::curl_config() {
     esac
     if [[ "${value}" == *[[:cntrl:]]* ]]; then
       error "a value for the curl option ${opt} holds a control character: lo sends no request"
-      printf 'lo-refused-a-value = "%s"\n' "${opt}"
+      printf 'proto = "-all"\n'
       return 1
     fi
     out+="${opt} = \"${value}\""$'\n'

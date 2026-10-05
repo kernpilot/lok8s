@@ -168,22 +168,25 @@ user = "u:p"'
     run http::curl_config header "${bad}"
     assert_failure
     assert_output --partial "a value for the curl option header holds a control character: lo sends no request"
-    assert_output --partial 'lo-refused-a-value = "header"'
+    assert_output --partial 'proto = "-all"'
     refute_output --partial "a${bad:1:1}b"
   done
   run http::curl_config data-raw $'a\x01b'
   assert_failure
-  assert_output --partial 'lo-refused-a-value = "data-raw"'
+  assert_output --partial 'a value for the curl option data-raw holds a control character'
+  assert_output --partial 'proto = "-all"'
 }
 
 @test "http::curl_config: curl stops on the refused line before it connects" {
   [[ -n "${REAL_CURL}" ]] || skip "no curl on this machine"
   local cfg
   cfg=$(http::curl_config header $'Authorization: Bearer tok\r' 2>/dev/null) || :
-  # Port 9 (discard): a connect attempt would fail with 7, not 2.
+  # Port 9 (discard): a connect attempt would fail with 7. curl 8.20 refuses
+  # the line (2), older versions refuse the protocol (1).
   run "${REAL_CURL}" -q -sS -K <(printf '%s\n' "${cfg}") http://127.0.0.1:9/
-  [ "${status}" = 2 ]
-  assert_output --partial "lo-refused-a-value"
+  [[ "${status}" == 1 || "${status}" == 2 ]]
+  run "${REAL_CURL}" -q -sS --proto =https -K <(printf '%s\n' "${cfg}") https://127.0.0.1:9/
+  [[ "${status}" == 1 || "${status}" == 2 ]]
 }
 
 @test "a credential with a control character is refused by its name before any request" {

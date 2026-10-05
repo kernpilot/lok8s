@@ -72,5 +72,6 @@ assert_argv_clean() {
 # The tools that the spies of the sentinel tests cover: the tools that get
 # a credential, and the tools that a filter or redaction step could hand
 # one to.
+# shellcheck disable=SC2034  # the suites that source this file read it
 ARGV_SPY_TOOLS=(curl jq kubectl yq hcloud sed awk grep tr base64 openssl env xargs
   sha256sum cut head tail od wc date)
