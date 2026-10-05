@@ -109,13 +109,51 @@ assert_pattern_matches() {
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 
+# isolate_state_dirs: give the test its own state directories.
+#
+# The lo driver writes each rendered registry config to
+# ${LO_REGISTRY_STATE_DIR}/<container>.yaml. The default directory is
+# ${XDG_STATE_HOME:-$HOME/.local/state}/lok8s/registries. On a developer
+# machine, the shared registry containers bind-mount their configs from that
+# directory. A test that writes its stub config there replaces the live
+# config, and the registry fails at its next restart ("no storage
+# configuration provided").
+#
+# This function sets both variables to directories under BATS_TEST_TMPDIR.
+# It also moves XDG_CACHE_HOME there, because lo keeps the kubehz token cache
+# under it. It replaces the values that the calling shell exports, because
+# those values point at the real directories. The call below this function
+# runs for every test that loads this helper. setup_tmpdir calls it again,
+# because setup_tmpdir replaces BATS_TEST_TMPDIR. The guards are
+# tests/unit/test_helper_isolation_test.bats (the call at load) and the test
+# "lo.sh driver::provision writes the registry configs under BATS_TEST_TMPDIR"
+# in tests/unit/kind_contract_test.bats.
+#
+# bats creates BATS_TEST_TMPDIR before setup() runs. A file that loads this
+# helper in setup_file() or at file scope has no BATS_TEST_TMPDIR yet. Then
+# the load fails, and no test runs against the real directories. The call below needs its
+# `|| return 1`: bats sources this file inside `if ! source`, where errexit
+# is off, so a failed command alone does not stop the load.
+isolate_state_dirs() {
+  if [[ -z "${BATS_TEST_TMPDIR:-}" ]]; then
+    echo "isolate_state_dirs: BATS_TEST_TMPDIR is not set; load test_helper in setup()" >&2
+    return 1
+  fi
+  export XDG_STATE_HOME="${BATS_TEST_TMPDIR}/xdg-state"
+  export XDG_CACHE_HOME="${BATS_TEST_TMPDIR}/xdg-cache"
+  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
+}
+isolate_state_dirs || return 1
+
 # Create a temporary directory per test for scratch files.
 # Also exports PATH_BASE / PATH_LOK8S / PATH_SCRIPTS pointed at the
 # tmpdir so that library code reading those vars resolves under the
-# per-test sandbox.
+# per-test sandbox, and moves the state directories into it
+# (isolate_state_dirs).
 setup_tmpdir() {
   BATS_TEST_TMPDIR="$(mktemp -d)"
   export BATS_TEST_TMPDIR
+  isolate_state_dirs
   export PATH_BASE="${BATS_TEST_TMPDIR}"
   export PATH_LOK8S="${BATS_TEST_TMPDIR}/.lok8s"
   export PATH_SCRIPTS="${PATH_LOK8S}"

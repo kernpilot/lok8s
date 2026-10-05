@@ -15,7 +15,6 @@ setup() {
   setup_tmpdir
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 
   import() { :; }
   export -f import
