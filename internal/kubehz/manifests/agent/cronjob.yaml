@@ -108,7 +108,7 @@ spec:
                     # sibling. Sent only when it is exactly 64 hex, so a garbled
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
-                    # Absent: the api no longer adopts an announced row by
+                    # Absent: the api does not adopt an announced row by
                     # domain alone (B288), so the register gets a separate
                     # pending row. That is why the deploy stages the Secret
                     # before it applies this CronJob.

@@ -326,36 +326,59 @@ kubehz::get_ssh_fingerprint() {
 # replace the hcloud key by name on every run. Fail-soft: any failure returns
 # 1 and the caller falls back to the legacy fingerprint announce.
 # Store the announce's one-time bind secret (B243) at
-# ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline — deploy
-# reads it into a Secret whose value must be the exact 64 hex). An empty secret
-# writes nothing (an older api mints none, and the deploy then falls back). A
+# ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline: the deploy
+# and every later register read the exact 64 hex). An empty secret writes
+# nothing: an api without bind secrets sends none. The write goes to a
+# temporary file in the same directory, and a rename replaces the old file, so
+# a file that cannot be read or written does not block the new secret. A
 # write failure warns but never fails the register. The deploy then finds no
-# file, and the agent registers a separate pending row that the user claims by
-# its claim code (B288).
+# bind secret, and the agent registers a separate pending row that the user
+# claims by its claim code (B288).
 # Usage: kubehz::persist_bind_secret <domain> <secret>
 kubehz::persist_bind_secret() {
   local domain="${1}" secret="${2}"
   [[ -n "${secret}" ]] || return 0
-  local dir="${PATH_CLUSTERS}/${domain}"
+  local dir="${PATH_CLUSTERS}/${domain}" tmp
   mkdir -p "${dir}" || { warn "kubehz: could not create ${dir} to store the bind secret"; return 0; }
-  ( umask 077; printf %s "${secret}" > "${dir}/.kubehz-bind"; ) ||
+  # A directory in the slot would take the rename INTO it.
+  if [[ -d "${dir}/.kubehz-bind" ]] || ! tmp=$(mktemp "${dir}/.kubehz-bind.XXXXXX"); then
     warn "kubehz: could not store the bind secret"
+    return 0
+  fi
+  if ! { printf %s "${secret}" > "${tmp}" && mv -f "${tmp}" "${dir}/.kubehz-bind"; }; then
+    rm -f "${tmp}"
+    warn "kubehz: could not store the bind secret"
+  fi
+}
+
+# Succeed when <path> holds a bind secret: a readable regular file of exactly
+# 64 lowercase hex characters, with no newline. The register calls and the
+# deploy use this one check. The size comes first, so an oversized file is
+# never read.
+# Usage: kubehz::bind_secret_ok <path>
+kubehz::bind_secret_ok() {
+  local path="${1}" size
+  [[ -f "${path}" && -r "${path}" ]] || return 1
+  size=$(wc -c < "${path}") || return 1
+  (( size == 64 )) || return 1
+  grep -Eqx '[0-9a-f]{64}' "${path}"
 }
 
 # Print the JSON body of a register call: the object that <filter> builds
 # from the jq arguments, plus bindSecret when clusters/<domain>/.kubehz-bind
-# is a regular file that holds exactly 64 lowercase hex. Every register call
-# sends it (B289), so a re-run keeps the same cluster record. A missing,
-# irregular or malformed file adds nothing: the api refuses a malformed
-# value. jq reads the value from the file (--rawfile), and the caller pipes
-# the body into curl (--data-binary @-), so the value never reaches argv.
+# passes kubehz::bind_secret_ok. Every register call sends it (B289), so a
+# re-run keeps the same cluster record. Any other file adds nothing: the api
+# refuses a malformed value. jq reads the value from the file (--rawfile), and
+# the caller pipes the body into curl (--data-binary @-), so the value never
+# reaches argv.
 # Usage: kubehz::register_body <domain> <filter> [jq args...]
 kubehz::register_body() {
-  local domain="${1}" filter="${2}"; shift 2
+  local domain="${1}" filter="${2}"
+  shift 2
   local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind"
-  if [[ -f "${path}" ]]; then
-    jq -n "${@}" --rawfile bind "${path}" \
-      "${filter}"' + (if $bind | test("\\A[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)'
+  if kubehz::bind_secret_ok "${path}"; then
+    # shellcheck disable=SC2016  # $bind is jq program text
+    jq -n "${@}" --rawfile bind "${path}" "${filter}"' + {bindSecret: $bind}'
   else
     jq -n "${@}" "${filter}"
   fi
@@ -370,7 +393,7 @@ kubehz::ensure_claim_key() {
   local response
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, claimKey: true}' --arg d "${domain}" |
-    curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
       -H "Content-Type: application/json" \
       --data-binary @-) || return 1
 
@@ -434,7 +457,7 @@ kubehz::direct_claim() {
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
-    curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
       -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
       -H "Content-Type: application/json" \
       --data-binary @-) || return 1
@@ -543,7 +566,7 @@ kubehz::register_cluster() {
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
-    curl -fsSL -X POST "${api_url}/api/clusters/register" \
+    curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
       -H "Content-Type: application/json" \
       --data-binary @-) || {
     warn "kubehz API request failed for ${domain}, cluster will continue without kubehz integration"

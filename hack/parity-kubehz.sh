@@ -357,6 +357,16 @@ EOF
 for d in bind-cron.dev bind-op.dev; do
   printf %s 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/${d}/.kubehz-bind"
 done
+# bind-bad.dev — the file holds no bind secret (a trailing newline): the
+# deploy warns and stages nothing.
+mk bind-bad.dev <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+printf '%s\n' 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/bind-bad.dev/.kubehz-bind"
 # broken.dev — unparsable spec.
 mkdir -p "${CL}/broken.dev"
 printf '{{ not yaml' > "${CL}/broken.dev/cluster.lok8s.yaml"
@@ -429,10 +439,10 @@ check "${PARSEERR}" kubehz deploy --domain broken.dev
 
 # ── deploy: the bind secret goes in before an agent changes (B288) ──────────
 # A kubectl that names each call on stderr, answers the three staging calls
-# and fails the first call after them. The diff then covers the staging
-# calls, the stdin of the server-side apply and the first call that changes
-# an agent, in order. The render dir is random per run (Go /tmp/<n>, bash
-# /tmp/tmp.<x>), so the stub prints it as <work>.
+# and the dry-run render, and fails the first call after them. The diff then
+# covers the staging calls, the stdin of the server-side apply and the first
+# call that changes an agent, in order. The render dir is random per run (Go
+# /tmp/<n>, bash /tmp/tmp.<x>), so the stub prints it as <work>.
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
 # Parity stub: no live cluster may be reached.
@@ -441,6 +451,7 @@ case "$*" in
   "apply -f "*/agent/namespace.yaml) exit 0 ;;
   *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml") printf 'kind: Secret\n'; exit 0 ;;
   "apply --server-side --force-conflicts -f -") sed 's/^/stdin: /' >&2; exit 0 ;;
+  "kustomize "*) printf 'kind: Rendered\n'; exit 0 ;;
 esac
 exit 1
 SH
@@ -448,6 +459,9 @@ check - kubehz deploy --domain bind-cron.dev
 check - kubehz deploy --domain bind-op.dev
 check - kubehz deploy --domain reg.dev                   # no bind secret: warn, then today's order
 check - kubehz deploy --domain op-reg.dev
+check - kubehz deploy --domain bind-bad.dev              # no bind secret in the file: warn, stage nothing
+check - kubehz deploy --dry-run --domain bind-cron.dev    # the Secret line comes first
+check - kubehz deploy --dry-run --domain reg.dev
 # A failed stage stops the deploy before the CronJob agent.
 parity::stub_kubectl_fail "${PROJ}"
 check - kubehz deploy --domain bind-cron.dev
@@ -565,7 +579,8 @@ spec:
 EOF
     export SSL_CERT_FILE="${WORK}/tls/cert.pem" CURL_CA_BUNDLE="${WORK}/tls/cert.pem"
     # BIND_FIXTURE: what .kubehz-bind holds before each run: a valid value,
-    # one with a trailing newline, one in upper case, or no file.
+    # one with a trailing newline, one in upper case, a valid value in a file
+    # nobody may read, a valid value with 200 kB after it, or no file.
     bind_reset() {
       rm -f "${CL}/bind-reg.dev/.kubehz-bind"
       : > "${WORK}/tls/requests.log"
@@ -573,6 +588,13 @@ EOF
         valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
         newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
         upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+        unreadable)
+          printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
+          chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
+          ;;
+        oversized)
+          { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${CL}/bind-reg.dev/.kubehz-bind"
+          ;;
       esac
     }
     bind_record() {
@@ -585,7 +607,10 @@ EOF
       } >> "${WORK}/${1}.out"
     }
     bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
-    for BIND_FIXTURE in valid newline upper missing; do
+    BIND_FIXTURES=(valid newline upper oversized missing)
+    # root reads a 0000 file, so the case proves nothing there.
+    [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
+    for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
       bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # fingerprint announce
       export KUBEHZ_TOKEN=khzt_parity
       bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # bearer (direct claim)
@@ -594,7 +619,7 @@ EOF
       bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
       unset HCLOUD_TOKEN HCLOUD_API_BASE
     done
-    unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE
+    unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
   fi
 fi
 

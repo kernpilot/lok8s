@@ -140,6 +140,27 @@ func TestPersistBindSecret(t *testing.T) {
 			t.Fatalf("an empty secret must leave no file (stat err = %v)", err)
 		}
 	})
+	t.Run("a new secret replaces an unreadable file", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a 0000 file")
+		}
+		h := newHarness(t)
+		p := bindSecretFile(h, "test.kubehz.dev")
+		mustMkdir(t, filepath.Dir(p))
+		mustWrite(t, p, "00"+bindSecretFixture[2:], 0o000)
+		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+		if got := readFile(t, p); got != bindSecretFixture {
+			t.Fatalf("bind secret file = %q, want %q", got, bindSecretFixture)
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("bind secret file mode = %v (%v), want 0600", fi.Mode().Perm(), err)
+		}
+		entries, _ := os.ReadDir(filepath.Dir(p))
+		if len(entries) != 1 {
+			t.Fatalf("the temporary file stayed behind: %v", entries)
+		}
+		mustNotContain(t, h.output(), "could not store")
+	})
 	t.Run("a re-announce rotates the stored secret", func(t *testing.T) {
 		h := newHarness(t)
 		h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
@@ -268,9 +289,10 @@ func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
 		"63 hex and a newline": bindSecretFixture[1:] + "\n",
 		"64 hex and a newline": bindSecretFixture + "\n",
 		"not hex":              "g" + bindSecretFixture[1:],
+		"oversized":            bindSecretFixture + strings.Repeat("a", 200000),
 	}
 	for _, m := range registerModes {
-		for _, name := range []string{"missing", "a directory", "upper-case hex", "63 hex", "63 hex and a newline", "64 hex and a newline", "not hex"} {
+		for _, name := range []string{"missing", "a directory", "unreadable", "upper-case hex", "63 hex", "63 hex and a newline", "64 hex and a newline", "not hex", "oversized"} {
 			t.Run(m.name+"/"+name, func(t *testing.T) {
 				h := newHarness(t)
 				path := bindSecretFile(h, "test.kubehz.dev")
@@ -283,6 +305,11 @@ func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
 					if err := os.Mkdir(path, 0o700); err != nil {
 						t.Fatal(err)
 					}
+				case "unreadable":
+					if os.Geteuid() == 0 {
+						t.Skip("root reads a 0000 file")
+					}
+					mustWrite(t, path, bindSecretFixture, 0o000)
 				default:
 					if err := os.WriteFile(path, []byte(stored[name]), 0o600); err != nil {
 						t.Fatal(err)

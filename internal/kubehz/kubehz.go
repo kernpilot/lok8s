@@ -254,10 +254,12 @@ func (c *Context) bindSecretPath(domain string) string {
 }
 
 // persistBindSecret stores the announce's one-time bind secret (B243) at
-// bindSecretPath, mode 0600, with NO trailing newline (deploy reads it into a
-// Secret whose value must be the exact 64 hex). An empty secret writes
-// nothing (an older api mints none, and the deploy then falls back). A write
-// failure warns but never fails the register. The deploy then finds no file,
+// bindSecretPath, mode 0600, with NO trailing newline (the deploy and every
+// later register read the exact 64 hex). An empty secret writes nothing: an
+// api without bind secrets sends none. The write goes to a temporary file in
+// the same directory, and a rename replaces the old file, so a file that
+// cannot be read or written does not block the new secret. A write failure
+// warns but never fails the register. The deploy then finds no bind secret,
 // and the agent registers a separate pending row that the user claims by its
 // claim code (B288).
 func (c *Context) persistBindSecret(domain, secret string) {
@@ -269,19 +271,39 @@ func (c *Context) persistBindSecret(domain, secret string) {
 		c.warnf("kubehz: could not create %s to store the bind secret: %s", dir, err)
 		return
 	}
-	if err := os.WriteFile(dir+"/.kubehz-bind", []byte(secret), 0o600); err != nil {
+	if err := writeReplace(dir, ".kubehz-bind", secret); err != nil {
 		c.warnf("kubehz: could not store the bind secret: %s", err)
 	}
+}
+
+// writeReplace writes content to <dir>/<name> through a 0600 temporary file in
+// <dir> and a rename, which stays on one filesystem.
+func writeReplace(dir, name, content string) error {
+	f, err := os.CreateTemp(dir, name+".*")
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(content)
+	cerr := f.Close()
+	if err := errors.Join(werr, cerr); err != nil {
+		_ = os.Remove(f.Name())
+		return err
+	}
+	if err := os.Rename(f.Name(), dir+"/"+name); err != nil {
+		_ = os.Remove(f.Name())
+		return err
+	}
+	return nil
 }
 
 var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // storedBindSecret is the bind secret a previous register stored at
-// bindSecretPath, when the file is a regular file that holds exactly 64
-// lowercase hex. Every register call sends it as bindSecret (B289), so a
-// re-run keeps the same cluster record. A missing, irregular or malformed
-// file gives "", and the call sends no bindSecret: the api refuses a
-// malformed value.
+// bindSecretPath: a readable regular file of exactly 64 lowercase hex
+// characters. A missing, unreadable, irregular or malformed file gives "".
+// Every register call sends the value as bindSecret (B289), so a re-run
+// keeps the same cluster record, and the deploy stages only this value. The
+// api refuses a malformed value, so lo never sends one.
 func (c *Context) storedBindSecret(domain string) string {
 	path := c.bindSecretPath(domain)
 	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() != 64 {

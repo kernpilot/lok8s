@@ -874,6 +874,9 @@ _register_base() {
     # `command jq`: the test's own jq calls stay out of the argv record.
     run command jq -c . "${STUB_CURL_BODY}"
     assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_STORED}" '. + {bindSecret: $b}')"
+    # The register call refuses a redirect off https (F7).
+    run grep -c -e " --proto-redir =https -X POST https://api.kubehz.dev/api/clusters/register " "${STUB_CURL_ARGV}"
+    assert_output "1"
     run grep -c -e "${BIND_STORED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"
     assert_output "${STUB_CURL_ARGV}:0
 ${STUB_JQ_ARGV}:0"
@@ -885,11 +888,14 @@ ${STUB_JQ_ARGV}:0"
 @test "register: a missing, irregular or malformed stored bind secret adds no bindSecret (B289)" {
   local mode stored bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   for mode in legacy bearer claim-key; do
-    for stored in missing directory upper short short-newline newline not-hex; do
+    for stored in missing directory unreadable upper short short-newline newline not-hex oversized; do
+      [[ "${stored}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
       _register_sandbox ""
       rm -rf "${bind_file}"
       case "${stored}" in
         missing) ;;
+        unreadable) printf %s "${BIND_STORED}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+        oversized) { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${bind_file}" ;;
         directory) mkdir -p "${bind_file}" ;;
         upper) printf %s "${BIND_STORED^^}" > "${bind_file}" ;;
         short) printf %s "${BIND_STORED:1}" > "${bind_file}" ;;
@@ -900,9 +906,32 @@ ${STUB_JQ_ARGV}:0"
 
       run _register_mode "${mode}"
       assert_success
+      # One call, no fallback: the file never breaks the body, and no shell
+      # error reaches the output.
+      refute_output --partial "jq:"
+      refute_output --partial "failed"
+      refute_output --partial "denied"
       run command jq -c . "${STUB_CURL_BODY}"
       assert_output "$(_register_base "${mode}")"
     done
   done
   rm -rf "${bind_file}"
+}
+
+@test "register: a new bind secret replaces an unreadable stored file (0600, no temporary file left)" {
+  [[ "$(id -u)" != 0 ]] || skip "root reads a 0000 file"
+  local bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  _register_sandbox "${BIND_NEXT}"
+  printf %s "${BIND_STORED}" > "${bind_file}"
+  chmod 000 "${bind_file}"
+
+  run _register_mode legacy
+  assert_success
+  refute_output --partial "could not store"
+  run cat "${bind_file}"
+  assert_output "${BIND_NEXT}"
+  run stat -c '%a' "${bind_file}"
+  assert_output "600"
+  run ls -A "${PATH_CLUSTERS}/test.kubehz.dev"
+  assert_output ".kubehz-bind"
 }

@@ -120,15 +120,39 @@ func TestDeployPrint(t *testing.T) {
 		io.WriteString(c.Stdout, "kind: Rendered\ndir: "+c.Args[1]+"\n")
 		return nil
 	}
-	mustOK(t, h.ctx.deployPrint(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, h.output(), "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: operator ---")
+	mustNotContain(t, h.output(), "kubehz-agent-bind")
 	mustContain(t, h.output(), "# --- Live agent (kubehz-live-agent) — managed tier RBAC ---")
 	mustContain(t, h.output(), "dir: "+filepath.Join(work, "live-agent", "managed"))
 
 	h.reset()
-	mustOK(t, h.ctx.deployPrint(t.Context(), work, "cronjob", "registered"), h.output())
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
 	mustContain(t, h.output(), "# The live agent is NOT deployed in cronjob mode; a previous install would be removed.")
 	mustNotContain(t, h.output(), "live-agent")
+}
+
+// F5: with a bind secret on disk, the dry run says first that the Secret goes
+// in first, and never prints the value.
+func TestDeployPrintNamesTheBindSecretFirst(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "cronjob", "registered")
+	writeBindSecret(t, h, "acme.example.com", testBindSecret)
+	h.runner.handler = func(c execx.Cmd, _ string) error {
+		io.WriteString(c.Stdout, "kind: Rendered\n")
+		return nil
+	}
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
+	first := strings.SplitN(h.output(), "\n", 2)[0]
+	if first != "# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied first; the value is not printed ---" {
+		t.Fatalf("first dry-run line = %q", first)
+	}
+	mustNotContain(t, h.output(), "9f1c2b3a4d5e6f70")
+	for _, l := range h.runner.lines() {
+		if !strings.HasPrefix(l, "kubectl kustomize ") {
+			t.Fatalf("dry run must apply nothing: %s", l)
+		}
+	}
 }
 
 func TestDeployApplyToOperatorOrder(t *testing.T) {
@@ -266,7 +290,9 @@ func TestDeployApplyFailedBindStageStopsBeforeTheCronJob(t *testing.T) {
 				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access))
 				mustContain(t, h.output(), "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind")
 				mustContain(t, h.output(), "The deploy stopped before the CronJob agent.")
-				mustContain(t, h.output(), "registers a separate pending row")
+				mustContain(t, h.output(), "registers a separate pending row, and the announced row gets no heartbeats.")
+				mustContain(t, h.output(), "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
+				mustContain(t, h.output(), "To deploy without the secret, remove the file")
 				mustNotContain(t, h.output(), "pending-pool")
 				joined := strings.Join(*log, "\n")
 				mustNotContain(t, joined, "apply -k")
@@ -293,22 +319,84 @@ func TestDeployApplyNoBindSecretWarnsAndContinues(t *testing.T) {
 		mustContain(t, (*log)[0], mode.first)
 		mustContain(t, h.output(), "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind.")
 		mustContain(t, h.output(), "the agent registers a separate pending row.")
+		mustContain(t, h.output(), "The announced row stays as it is and gets no heartbeats.")
 		mustContain(t, h.output(), "Claim the new row with the code from 'lo kubehz claim-code'.")
 	}
 }
 
-// A directory in the bind-secret slot is not a bind secret: the deploy warns
-// as if no file were there and never hands the path to kubectl.
-func TestDeployApplyBindSlotNotARegularFile(t *testing.T) {
-	h := newHarness(t)
-	work := renderInto(t, h, "cronjob", "registered")
-	if err := os.MkdirAll(filepath.Join(h.ctx.Paths.Clusters, "acme.example.com", ".kubehz-bind"), 0o755); err != nil {
+// F6: a file that is not a bind secret (the register check: a readable
+// regular file of exactly 64 lowercase hex) is never staged. The deploy warns
+// that the file holds no bind secret and keeps today's order.
+func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, path string){
+		"a directory":          func(t *testing.T, p string) { mustMkdir(t, p) },
+		"64 hex and a newline": func(t *testing.T, p string) { mustWrite(t, p, testBindSecret+"\n", 0o600) },
+		"upper-case hex":       func(t *testing.T, p string) { mustWrite(t, p, strings.ToUpper(testBindSecret), 0o600) },
+		"63 hex":               func(t *testing.T, p string) { mustWrite(t, p, testBindSecret[1:], 0o600) },
+		"unreadable": func(t *testing.T, p string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root reads a 0000 file")
+			}
+			mustWrite(t, p, testBindSecret, 0o000)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			work := renderInto(t, h, "cronjob", "registered")
+			path := filepath.Join(h.ctx.Paths.Clusters, "acme.example.com", ".kubehz-bind")
+			mustMkdir(t, filepath.Dir(path))
+			setup(t, path)
+			log := kubectlLogger(h, nil)
+			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
+			mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
+			mustContain(t, (*log)[0], "delete -k ")
+			mustContain(t, h.output(), "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters).")
+			mustContain(t, h.output(), "The announced row stays as it is and gets no heartbeats.")
+		})
+	}
+}
+
+// F2: a failure after the stage names what the deploy changed so far: the
+// bind Secret when one was staged, nothing otherwise.
+func TestDeployApplyFailureNamesWhatChanged(t *testing.T) {
+	for _, tc := range []struct{ owner, access, fail, prefix string }{
+		{"operator", "managed", "apply -k ", "could not apply the CronJob agent (identity bootstrap) — "},
+		{"cronjob", "registered", "delete -k ", "could not remove the live agent — "},
+		{"cronjob", "registered", "delete deployment -l", "could not sweep live-agent Deployments by label — "},
+	} {
+		for _, staged := range []bool{true, false} {
+			h := newHarness(t)
+			work := renderInto(t, h, tc.owner, tc.access)
+			if staged {
+				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+			}
+			bindStageLogger(h, tc.fail)
+			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", tc.owner, tc.access))
+			want := tc.prefix + "nothing else was changed"
+			if staged {
+				want = tc.prefix + "only the bind Secret and its namespace changed"
+			}
+			mustContain(t, h.output(), want)
+		}
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
-	mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
-	mustContain(t, h.output(), "no bind secret at clusters/acme.example.com/.kubehz-bind")
+}
+
+func mustWrite(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile applies the umask; set the mode the case asks for.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // B244: a first deploy finds no identity Secret. The deploy runs the
