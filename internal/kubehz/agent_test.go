@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -762,7 +764,7 @@ func TestAgentKubeconfigPathRules(t *testing.T) {
 
 // A link is written through only when the link and its target belong to
 // this user: a link that another user planted in a shared directory must
-// not move the write to a file of theirs.
+// not send the write to a file of this user.
 func TestAgentKubeconfigWritesThroughOnlyALinkOfOurOwn(t *testing.T) {
 	foreign := foreignFile(t)
 	const want = "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/link is a link, and the link or its target belongs to another user\n" +
@@ -812,6 +814,86 @@ func TestAgentKubeconfigOwnerCheckReadsTheEffectiveUser(t *testing.T) {
 	mustContain(t, h.errOut.String(), "is a link, and the link or its target belongs to another user\n")
 	if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
 		t.Errorf("real = %q", got)
+	}
+}
+
+// A path in /proc or /dev, or a path that a link sends there, is refused
+// with and without force, before any request. /proc/self resolves against
+// lo itself: with force, /proc/self/fd/N named the file open on that
+// descriptor (lo's stdout for N=1) and /proc/self/exe the lo binary.
+func TestAgentKubeconfigRefusesProcAndDev(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("this system has no /proc")
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+	must(t, os.WriteFile(out, []byte("stdout"), 0o600))
+	f, err := os.OpenFile(out, os.O_WRONLY, 0)
+	must(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+	fd := strconv.Itoa(int(f.Fd()))
+	must(t, os.Symlink("/proc/self/fd/"+fd, filepath.Join(dir, "link")))
+	must(t, os.Symlink("/proc/self/fd", filepath.Join(dir, "fds")))
+	must(t, os.Symlink("fds", filepath.Join(dir, "hop")))
+	up := dir + strings.Repeat("/..", strings.Count(dir, "/"))
+	for _, tc := range []struct {
+		file  string
+		force bool
+	}{
+		{"/proc/self/fd/" + fd, true},
+		{"/proc/self/fd/" + fd, false},
+		{"/dev/fd/" + fd, true},
+		{"/dev", true},
+		{up + "/proc/self/fd/" + fd, true},
+		{filepath.Join(dir, "link"), true},
+		{filepath.Join(dir, "hop", fd), true},
+	} {
+		t.Run(fmt.Sprintf("%s force=%v", strings.ReplaceAll(tc.file, dir, "DIR"), tc.force), func(t *testing.T) {
+			h := agentHarness(t)
+			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", tc.file, tc.force)
+			mustErr(t, err)
+			want := "[error] kubehz cluster kubeconfig cl-1a2b3c4d: " + tc.file +
+				" is in /proc or /dev, or a link in its path points there\n" +
+				"  lo does not write to /proc or /dev. Name a file in another directory.\n"
+			if got := h.errOut.String(); got != want {
+				t.Errorf("stderr = %q, want %q", got, want)
+			}
+			if n := len(h.reqs()); n != 0 {
+				t.Errorf("%d requests: the refusal must come before the grant", n)
+			}
+			if got := readFile(t, out); got != "stdout" {
+				t.Errorf("out.txt = %q: the write went through /proc", got)
+			}
+		})
+	}
+}
+
+// inProcOrDev walks the path itself: only the components /proc and /dev
+// count, a link counts by where it points, and a relative path starts at
+// the working directory.
+func TestInProcOrDev(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	must(t, os.Mkdir("proc", 0o755))
+	must(t, os.Symlink("/proc", "p"))
+	must(t, os.Symlink("/dev/shm", "shm"))
+	must(t, os.Symlink("proc", "here"))
+	must(t, os.Symlink("loop", "loop"))
+	must(t, os.Mkdir("real", 0o755))
+	must(t, os.Symlink("/proc", filepath.Join("real", "x")))
+	must(t, os.Symlink("real", "sub"))
+	for file, want := range map[string]bool{
+		"/proc": true, "/proc/": true, "/proc/1/x": true, "//proc/x": true, "/./dev/x": true,
+		"/dev": true, "/dev/null": true, "/tmp/../dev/x": true,
+		"/procfs/x": false, "/devx": false, "/device/x": false, "/tmp/proc": false,
+		"kc.yaml": false, "proc/kc.yaml": false, "here/kc.yaml": false,
+		"p": true, "p/kc.yaml": true, "shm/kc.yaml": true, "proc/../p/x": true, "sub/x/1": true,
+		"loop/kc.yaml": false,
+	} {
+		if got := inProcOrDev(file); got != want {
+			t.Errorf("inProcOrDev(%q) = %v, want %v", file, got, want)
+		}
 	}
 }
 

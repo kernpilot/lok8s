@@ -918,9 +918,14 @@ the old content.
 When the path is a link, `--force` replaces the file that the link points
 to, and the link stays. `lo` does this only when you own the link and its
 target. Thus a link that another user puts in a shared directory such as
-`/tmp` cannot send the kubeconfig to a file of theirs. A directory, a link
-to one, and a link to nothing are refused. `lo` checks the path before it
-calls the api, and again just before it writes.
+`/tmp` cannot make `lo` replace one of your files. A directory, a link to
+one, and a link to nothing are refused.
+
+A path in `/proc` or `/dev` is refused, also when a link in the path points
+there. Some of these paths change with the process that opens them: for
+`lo`, `/proc/self/exe` is the `lo` binary, and `/dev/stdout` is the file
+that its output goes to. `lo` checks the path before it calls the api, and
+again just before it writes.
 
 ### What the api enforces
 

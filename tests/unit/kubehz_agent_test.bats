@@ -586,6 +586,56 @@ EOF
   assert_output contexts
 }
 
+@test "kubeconfig: a path in /proc or /dev, or a link there, is refused before any request" {
+  [[ -d /proc/self/fd ]] || skip "this system has no /proc"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/virt" up f i slashes
+  mkdir -p "${d}"
+  echo stdout > "${d}/out.txt"
+  # Bats uses fd 3. /proc/self/fd/8 names out.txt in every process that
+  # inherits fd 8, realpath too.
+  exec 8>>"${d}/out.txt"
+  ln -s /proc/self/fd/8 "${d}/link"
+  ln -s /proc/self/fd "${d}/fds"
+  ln -s fds "${d}/hop"
+  up="${d}"
+  slashes="${d//[^\/]/}"
+  for (( i = 0; i < ${#slashes}; i++ )); do up+="/.."; done
+  for f in /proc/self/fd/8 /dev/fd/8 /dev "${up}/proc/self/fd/8" "${d}/link" "${d}/hop/8"; do
+    run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${f}" --force
+    assert_failure
+    assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${f} is in /proc or /dev, or a link in its path points there
+  lo does not write to /proc or /dev. Name a file in another directory."
+  done
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file /proc/self/fd/8
+  assert_failure
+  assert_output --partial "/proc/self/fd/8 is in /proc or /dev"
+  exec 8>&-
+  run cat "${d}/out.txt"
+  assert_output stdout
+  [ ! -e "${CURL_ARGS}" ]
+}
+
+@test "the /proc and /dev walk: only those components count, a link by where it points" {
+  local d="${BATS_TEST_TMPDIR}/walk" f
+  mkdir -p "${d}/proc"
+  ln -s /proc "${d}/p"
+  ln -s /dev/shm "${d}/shm"
+  ln -s proc "${d}/here"
+  ln -s loop "${d}/loop"
+  mkdir -p "${d}/real"
+  ln -s /proc "${d}/real/x"
+  ln -s real "${d}/sub"
+  cd "${d}"
+  for f in /proc /proc/ /proc/1/x //proc/x /./dev/x /dev /dev/null /tmp/../dev/x \
+    p p/kc.yaml shm/kc.yaml proc/../p/x sub/x/1; do
+    kubehz::agent_in_proc_or_dev "${f}" || fail "${f}: want in /proc or /dev"
+  done
+  for f in /procfs/x /devx /device/x /tmp/proc kc.yaml proc/kc.yaml here/kc.yaml loop/kc.yaml; do
+    ! kubehz::agent_in_proc_or_dev "${f}" || fail "${f}: want not in /proc or /dev"
+  done
+}
+
 @test "kubeconfig: the write step on its own never replaces a file without --force" {
   # The race window after the last check is too short to hit through the
   # command: ln, not mv, keeps a file that appeared there.

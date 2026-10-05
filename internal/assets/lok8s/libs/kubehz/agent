@@ -621,6 +621,8 @@ kubehz::agent_kubeconfig() {
 
 # Decide where the kubeconfig goes, the Go twin's kubeconfigTarget. It runs
 # before any request and again just before the write:
+#   - A path in /proc or /dev, or a path that a link sends there, is
+#     refused (see kubehz::agent_in_proc_or_dev).
 #   - A directory, or a link to one, is refused.
 #   - A path that exists (a file or a link) is refused without --force.
 #     Thus --file ~/.kube/config cannot lose its contexts by accident.
@@ -628,8 +630,9 @@ kubehz::agent_kubeconfig() {
 #     (owned by this user, mode 0600) and the link stays.
 #   - lo writes through a link only when the link and its target belong to
 #     this user. lo resolves the link itself, so fs.protected_symlinks does
-#     not apply: a link that another user put in /tmp must not move the
-#     write to a file of theirs. A link to nothing is refused.
+#     not apply: a link that another user put in /tmp must not send the
+#     write to a file of this user, such as ~/.bashrc. A link to nothing is
+#     refused.
 # A short race stays between the last check and the mv. A user who can write
 # the directory of a link can point the link somewhere else.
 # Usage: kubehz::agent_target <action> <file> <force>
@@ -637,6 +640,11 @@ kubehz::agent_kubeconfig() {
 kubehz::agent_target() {
   local action="${1}" file="${2}" force="${3}" me link_uid target_uid
   KUBEHZ_AGENT_TARGET="${file}"
+  if kubehz::agent_in_proc_or_dev "${file}"; then
+    error "kubehz ${action}: ${file//\\/\\\\} is in /proc or /dev, or a link in its path points there"
+    echo "  lo does not write to /proc or /dev. Name a file in another directory." >&2
+    return 1
+  fi
   if [[ -d "${file}" ]]; then
     error "kubehz ${action}: ${file//\\/\\\\} is a directory"
     echo "  Name a file, not a directory." >&2
@@ -661,6 +669,41 @@ kubehz::agent_target() {
     echo "  lo writes through a link only when you own the link and its target. Name another file." >&2
     return 1
   fi
+}
+
+# Is the path in /proc or /dev, or does a link on its path point there? The
+# Go twin's inProcOrDev. The kernel resolves /proc/self against the process
+# that asks: realpath here, lo in Go. Thus a resolved path names another
+# file in each. The walk reads each link itself, hop by hop, and checks each
+# component before it reads a link there. ".." goes up from the resolved
+# path, as in the kernel. A relative path starts at the working directory.
+# After 40 links the walk stops with "no": the write then fails anyway.
+# Usage: kubehz::agent_in_proc_or_dev <file>
+kubehz::agent_in_proc_or_dev() {
+  local rest="${1}" walked="" name next dest links=0
+  [[ "${rest}" == /* ]] || rest="${PWD}/${rest}"
+  while [[ -n "${rest}" ]]; do
+    name="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${name}" in
+      "" | .) continue ;;
+      ..) walked="${walked%/*}"; continue ;;
+    esac
+    next="${walked}/${name}"
+    [[ "${next}" != /proc && "${next}" != /dev ]] || return 0
+    if [[ ! -L "${next}" ]]; then
+      walked="${next}"
+      continue
+    fi
+    (( ++links <= 40 )) || return 1
+    # readlink prints a newline: the x keeps the trailing newlines of a name.
+    dest=$(readlink -- "${next}" && printf x) || return 1
+    dest="${dest%$'\n'x}"
+    [[ "${dest}" != /* ]] || walked=""
+    [[ -z "${rest}" ]] || dest+="/${rest}"
+    rest="${dest}"
+  done
+  return 1
 }
 
 # The refusal for a path that exists without --force.

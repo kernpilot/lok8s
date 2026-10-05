@@ -868,6 +868,8 @@ func (c *Context) kubeconfigExists(action, file string) {
 
 // kubeconfigTarget decides where the kubeconfig goes. It runs before any
 // request and again just before the write:
+//   - A path in /proc or /dev, or a path that a link sends there, is
+//     refused (see inProcOrDev).
 //   - A directory, or a link to one, is refused.
 //   - A path that exists (a file or a link) is refused without force. Thus
 //     --file ~/.kube/config cannot lose its contexts by accident.
@@ -877,8 +879,9 @@ func (c *Context) kubeconfigExists(action, file string) {
 //   - lo writes through a link only when the link and its target belong to
 //     this user. lo resolves the link itself and renames onto the target,
 //     so the kernel rule fs.protected_symlinks does not apply. A link that
-//     another user put in a shared directory (/tmp/kc.yaml) must not move
-//     the write to a file of theirs. A link to nothing is refused.
+//     another user put in a shared directory (/tmp/kc.yaml) must not send
+//     the write to a file of this user, such as ~/.bashrc. A link to
+//     nothing is refused.
 //
 // A short race stays. Between the last check and the rename, a user who
 // can write the directory of a link can point the link somewhere else. The
@@ -886,6 +889,11 @@ func (c *Context) kubeconfigExists(action, file string) {
 //
 // The bash twin is kubehz::agent_target.
 func (c *Context) kubeconfigTarget(action, file string, force bool) (string, error) {
+	if inProcOrDev(file) {
+		c.errorf("kubehz %s: %s is in /proc or /dev, or a link in its path points there", action, file)
+		c.echoErr("  lo does not write to /proc or /dev. Name a file in another directory.")
+		return "", ErrHandled
+	}
 	if fi, err := os.Stat(file); err == nil && fi.IsDir() {
 		c.errorf("kubehz %s: %s is a directory", action, file)
 		c.echoErr("  Name a file, not a directory.")
@@ -915,6 +923,66 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 		return "", ErrHandled
 	}
 	return target, nil
+}
+
+// inProcOrDev reports whether file is in /proc or /dev, or whether a link
+// on its path points there. The kernel resolves /proc/self against the
+// process that asks. Thus for lo, /proc/self/exe is the lo binary and
+// /proc/self/fd/1 is the file that stdout goes to, and a resolved path
+// looks like a usual file. The walk reads each link itself, hop by hop, and
+// checks each component before it reads a link there. ".." goes up from
+// the resolved path, as in the kernel. A relative path starts at the
+// working directory. After 40 links the walk stops with false: the write
+// then fails anyway.
+//
+// The bash twin is kubehz::agent_in_proc_or_dev.
+func inProcOrDev(file string) bool {
+	rest := file
+	if !strings.HasPrefix(rest, "/") {
+		wd, err := os.Getwd()
+		if err != nil {
+			return false
+		}
+		rest = wd + "/" + rest
+	}
+	walked, links := "", 0
+	for rest != "" {
+		name, after, _ := strings.Cut(rest, "/")
+		rest = after
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			if i := strings.LastIndex(walked, "/"); i >= 0 {
+				walked = walked[:i]
+			}
+			continue
+		}
+		next := walked + "/" + name
+		if next == "/proc" || next == "/dev" {
+			return true
+		}
+		li, err := os.Lstat(next)
+		if err != nil || li.Mode()&os.ModeSymlink == 0 {
+			walked = next
+			continue
+		}
+		if links++; links > 40 {
+			return false
+		}
+		dest, err := os.Readlink(next)
+		if err != nil {
+			return false
+		}
+		if strings.HasPrefix(dest, "/") {
+			walked = ""
+		}
+		if rest != "" {
+			dest += "/" + rest
+		}
+		rest = dest
+	}
+	return false
 }
 
 // ownedByMe reports whether the effective user owns the entry.

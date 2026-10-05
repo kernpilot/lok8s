@@ -569,6 +569,7 @@ kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; l
 kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
 kc_link_nothing() { ln -s gone "${PROJ}/kc.yaml"; }
 kc_link_foreign() { ln -s /etc/passwd "${PROJ}/kc.yaml"; }
+kc_link_proc() { ln -s /proc/self/fd/1 "${PROJ}/kc.yaml"; }
 
 agent_pre() {
   rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
@@ -582,7 +583,10 @@ agent_post() {
   if [[ -e "${PROJ}/kc.yaml" || -L "${PROJ}/kc.yaml" ]]; then
     {
       if [[ -L "${PROJ}/kc.yaml" ]]; then echo "link -> $(readlink "${PROJ}/kc.yaml")"; else echo file; fi
-      if [[ -f "${PROJ}/kc.yaml" ]]; then cat "${PROJ}/kc.yaml"; stat -L -c '%a' "${PROJ}/kc.yaml"; fi
+      # A link into /proc would name this block's own output file.
+      if [[ -f "${PROJ}/kc.yaml" && "$(readlink "${PROJ}/kc.yaml")" != /proc/* ]]; then
+        cat "${PROJ}/kc.yaml"; stat -L -c '%a' "${PROJ}/kc.yaml"
+      fi
       if [[ -f "${PROJ}/kube/real" ]]; then echo "kube/real:"; cat "${PROJ}/kube/real"; ls -A "${PROJ}/kube"; fi
     } > "${WORK}/kc.${1}"
   else
@@ -710,6 +714,15 @@ if agent_stub; then
     KC_SETUP=kc_link_foreign check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
   else
     echo "skip: a link to another user's file (root owns /etc/passwd)"
+  fi
+  # /proc and /dev are refused, also through a link. /proc/self resolves
+  # against the process that asks: fd 1 of lo is the harness's output file.
+  if [[ -d /proc/self/fd ]]; then
+    check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file /proc/self/fd/1 --force
+    check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file /dev/stdout --force
+    KC_SETUP=kc_link_proc check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  else
+    echo "skip: /proc and /dev (this system has no /proc)"
   fi
 
   # The grant follows no redirect: the stub's redirect route would hand
