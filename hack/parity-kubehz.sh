@@ -540,26 +540,49 @@ check_parse - kubehz cluster bogus
 KUBEHZ_TOKEN=khzt_parity check - kubehz space get sp-1a2b3c4d
 unset KUBEHZ_API_URL
 
-# ── agent tools against an https stub of the api ────────────────────────────
-# Both implementations call the stub with the agent key: each run mints its
-# own token (the cache is cleared before every run), so the request logs
-# carry the grant too. check_api diffs the logs on top of the outputs, and
-# refuses an empty log (two empty logs prove nothing).
-agent_stub() {
-  command -v python3 >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || return 1
+# ── the https stub of the api (the agent tools and the register cases) ──────
+# One local server, hack/lib/kubehz-api-stub.py, with a self-signed
+# certificate: SSL_CERT_FILE hands it to Go and CURL_CA_BUNDLE to curl. Go
+# reads SSL_CERT_FILE on Linux only, so the two sections that need the stub
+# run on Linux only. The stub appends each request to STUB_LOG as one JSON
+# line, never with the value of a credential. Without Linux, python3 or
+# openssl both sections are skipped, except under CI. A stub that does not
+# start is a failure.
+STUB_API_PID=""
+STUB_PORT=""
+STUB_LOG="${WORK}/stub.log"
+parity_cleanup() { [[ -z "${STUB_API_PID}" ]] || kill "${STUB_API_PID}" 2>/dev/null || :; }
+api_stub() {
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
     -addext subjectAltName=IP:127.0.0.1 -keyout "${WORK}/stub.key" -out "${WORK}/stub.pem" >/dev/null 2>&1 || return 1
-  STUB_RACE_FILE="${PROJ}/kc.yaml" python3 "${ROOT}/hack/lib/kubehz-api-stub.py" "${WORK}/stub.pem" "${WORK}/stub.key" \
-    "${WORK}/stub.port" "${WORK}/stub.log" >"${WORK}/stub.out" 2>&1 &
+  STUB_RACE_FILE="${PROJ}/kc.yaml" python3 "${PARITY_LIB_DIR}/kubehz-api-stub.py" "${WORK}/stub.pem" "${WORK}/stub.key" \
+    "${WORK}/stub.port" "${STUB_LOG}" >"${WORK}/stub.out" 2>&1 &
   STUB_API_PID=$!
   local _
   for _ in $(seq 1 100); do
-    [[ -s "${WORK}/stub.port" ]] && return 0
+    if [[ -s "${WORK}/stub.port" ]]; then
+      STUB_PORT="$(cat "${WORK}/stub.port")"
+      return 0
+    fi
     sleep 0.1
   done
   return 1
 }
-parity_cleanup() { [[ -z "${STUB_API_PID:-}" ]] || kill "${STUB_API_PID}" 2>/dev/null || :; }
+if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  if [[ -n "${CI:-}" ]]; then
+    fail "the https stub needs Linux, python3 and openssl, and the CI runner has them"
+  else
+    echo "skip: the agent tools and the register cases (the https stub needs Linux, python3 and openssl)"
+  fi
+elif ! api_stub; then
+  fail "the https stub of the api did not start: $(head -c 300 "${WORK}/stub.out")"
+fi
+
+# ── agent tools against the https stub ──────────────────────────────────────
+# Both implementations call the stub with the agent key: each run mints its
+# own token (the cache is cleared before every run), so the request logs
+# carry the grant too. check_api diffs the logs on top of the outputs, and
+# refuses an empty log (two empty logs prove nothing).
 
 # The kubeconfig fixtures (KC_SETUP names one; agent_pre runs it before each
 # implementation): kc.yaml as a file that exists, a link to a file, a link
@@ -573,13 +596,13 @@ kc_link_proc() { ln -s /proc/self/fd/1 "${PROJ}/kc.yaml"; }
 
 agent_pre() {
   rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
-  : > "${WORK}/stub.log"
+  : > "${STUB_LOG}"
   [[ -z "${KC_SETUP:-}" ]] || "${KC_SETUP}"
 }
 # agent_post: the requests, and what kc.yaml is afterwards: a link or a
 # file, its content and mode (followed), and the content of kube/real.
 agent_post() {
-  cp "${WORK}/stub.log" "${WORK}/req.${1}"
+  cp "${STUB_LOG}" "${WORK}/req.${1}"
   if [[ -e "${PROJ}/kc.yaml" || -L "${PROJ}/kc.yaml" ]]; then
     {
       if [[ -L "${PROJ}/kc.yaml" ]]; then echo "link -> $(readlink "${PROJ}/kc.yaml")"; else echo file; fi
@@ -616,7 +639,7 @@ check_api() {
 mcp_call() {
   local route="${1}" tool="${2}" arguments="${3}" want="${4}" text="${5}" request="${6}" label
   label="mcp (${route}) ${tool} ${arguments}"
-  : > "${WORK}/stub.log"
+  : > "${STUB_LOG}"
   rm -rf "${HOME}/.cache/lok8s/kubehz-token"
   if ! (cd "${PROJ}" && python3 "${ROOT}/hack/lib/mcp-call.py" "${LO_BIN}" "${tool}" "${arguments}" \
     > "${WORK}/mcp.out" 2>"${WORK}/mcp.err")
@@ -626,9 +649,9 @@ mcp_call() {
   fi
   if [[ "$(head -n 1 "${WORK}/mcp.out")" != "${want}" ]] || ! grep -qF -- "${text}" "${WORK}/mcp.out"; then
     fail "${label} — want ${want} with ${text}, got: $(head -c 400 "${WORK}/mcp.out")"
-  elif [[ -n "${request}" ]] && ! grep -qF -- "${request}" "${WORK}/stub.log"; then
+  elif [[ -n "${request}" ]] && ! grep -qF -- "${request}" "${STUB_LOG}"; then
     fail "${label} — the api did not get ${request}"
-  elif [[ -z "${request}" && -s "${WORK}/stub.log" ]]; then
+  elif [[ -z "${request}" && -s "${STUB_LOG}" ]]; then
     fail "${label} — a refused call reached the api"
   else
     echo "ok: ${label}"
@@ -657,8 +680,7 @@ kc_state() {
   fi
 }
 
-if agent_stub; then
-  STUB_PORT="$(cat "${WORK}/stub.port")"
+if [[ -n "${STUB_PORT}" ]]; then
   export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem"
   export KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}/"
   export KUBEHZ_AGENT_CLIENT_ID=parity-cid KUBEHZ_AGENT_CLIENT_SECRET=parity-secret
@@ -765,10 +787,6 @@ if agent_stub; then
 
   unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_API_URL KUBEHZ_AGENT_CLIENT_ID KUBEHZ_AGENT_CLIENT_SECRET \
     KUBEHZ_AGENT_TOKEN_URL KUBEHZ_AGENT_SCOPE
-elif [[ -n "${CI:-}" ]]; then
-  fail "agent tools: the https stub did not start (python3 and openssl are on every CI runner)"
-else
-  echo "skip: agent tools https stub (python3 or openssl missing, or the stub did not start)"
 fi
 
 # ── node: the hosting gate, the https gate, the global --cluster trap ───────
@@ -800,36 +818,12 @@ check_parse - kubehz handover bogus
 # ── register: lo sends its stored bind secret (B289) ────────────────────────
 # Every register mode sends the value of .kubehz-bind as bindSecret, so a
 # re-run keeps the same cluster record. These cases need an api, so they run
-# against a local HTTPS stub, hack/lib/kubehz-api-stub.py (a self-signed
-# certificate that SSL_CERT_FILE hands to Go and CURL_CA_BUNDLE to curl).
-# The stub records each request without the Authorization value. After each
-# run, the record and the stored .kubehz-bind join that run's stdout, so the
-# diff covers the request bodies and the stored secret. Linux only: Go reads
-# SSL_CERT_FILE there.
+# against the https stub (see its section above). After each run, the
+# request log and the stored .kubehz-bind join that run's stdout, so the
+# diff covers the request bodies and the stored secret.
 BIND_STORED=9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70
-STUB_HTTPS_PID=""
-parity_cleanup() { [[ -z "${STUB_HTTPS_PID}" ]] || kill "${STUB_HTTPS_PID}" 2>/dev/null || :; }
-if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
-  echo "skip: register bind-secret cases (need Linux, python3 and openssl)"
-else
-  mkdir -p "${WORK}/tls"
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
-    -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
-    -keyout "${WORK}/tls/key.pem" -out "${WORK}/tls/cert.pem" 2>/dev/null
-  python3 -u "${PARITY_LIB_DIR}/kubehz-api-stub.py" "${WORK}/tls/requests.log" "${WORK}/tls/cert.pem" "${WORK}/tls/key.pem" \
-    >"${WORK}/tls/stub.out" 2>&1 &
-  STUB_HTTPS_PID=$!
-  STUB_PORT=""
-  for _ in $(seq 1 50); do
-    STUB_PORT="$(sed -nE 's/^port ([0-9]+)$/\1/p' "${WORK}/tls/stub.out")"
-    [[ -n "${STUB_PORT}" ]] && break
-    sleep 0.1
-  done
-  if [[ -z "${STUB_PORT}" ]]; then
-    echo "FAIL: register bind-secret cases — the HTTPS stub did not start: $(cat "${WORK}/tls/stub.out")"
-    failures=$((failures + 1))
-  else
-    mk bind-reg.dev <<EOF
+if [[ -n "${STUB_PORT}" ]]; then
+  mk bind-reg.dev <<EOF
 kind: Lo
 metadata:
   name: bind-reg
@@ -840,60 +834,59 @@ spec:
     access: registered
     apiUrl: https://127.0.0.1:${STUB_PORT}
 EOF
-    export SSL_CERT_FILE="${WORK}/tls/cert.pem" CURL_CA_BUNDLE="${WORK}/tls/cert.pem"
-    # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
-    # value, one with a trailing newline, one in upper case, a valid value in
-    # a file nobody may read, a valid value with 200 kB after it, a
-    # directory, a link to a directory, or no file.
-    bind_reset() {
-      rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
-      : > "${WORK}/tls/requests.log"
-      case "${BIND_FIXTURE}" in
-        valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        unreadable)
-          printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
-          chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
-          ;;
-        oversized)
-          { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${CL}/bind-reg.dev/.kubehz-bind"
-          ;;
-        directory) mkdir "${CL}/bind-reg.dev/.kubehz-bind" ;;
-        dirlink)
-          mkdir "${WORK}/bind-target"
-          ln -s "${WORK}/bind-target" "${CL}/bind-reg.dev/.kubehz-bind"
-          ;;
-      esac
-    }
-    bind_record() {
-      {
-        echo "--- requests"
-        cat "${WORK}/tls/requests.log"
-        echo "--- .kubehz-bind"
-        cat "${CL}/bind-reg.dev/.kubehz-bind" 2>/dev/null || echo "(none)"
-        echo
-        echo "--- clusters/bind-reg.dev"
-        ls -A "${CL}/bind-reg.dev"
-        echo "--- link target"
-        ls -A "${WORK}/bind-target" 2>/dev/null || echo "(none)"
-      } >> "${WORK}/${1}.out"
-    }
-    bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
-    BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
-    # root reads a 0000 file, so the case proves nothing there.
-    [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
-    for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
-      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # fingerprint announce
-      export KUBEHZ_TOKEN=khzt_parity
-      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # bearer (direct claim)
-      unset KUBEHZ_TOKEN
-      export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
-      bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
-      unset HCLOUD_TOKEN HCLOUD_API_BASE
-    done
-    unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
-  fi
+  export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem"
+  # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
+  # value, one with a trailing newline, one in upper case, a valid value in
+  # a file nobody may read, a valid value with 200 kB after it, a
+  # directory, a link to a directory, or no file.
+  bind_reset() {
+    rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
+    : > "${STUB_LOG}"
+    case "${BIND_FIXTURE}" in
+      valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      unreadable)
+        printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
+        chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
+        ;;
+      oversized)
+        { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${CL}/bind-reg.dev/.kubehz-bind"
+        ;;
+      directory) mkdir "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      dirlink)
+        mkdir "${WORK}/bind-target"
+        ln -s "${WORK}/bind-target" "${CL}/bind-reg.dev/.kubehz-bind"
+        ;;
+    esac
+  }
+  bind_record() {
+    {
+      echo "--- requests"
+      cat "${STUB_LOG}"
+      echo "--- .kubehz-bind"
+      cat "${CL}/bind-reg.dev/.kubehz-bind" 2>/dev/null || echo "(none)"
+      echo
+      echo "--- clusters/bind-reg.dev"
+      ls -A "${CL}/bind-reg.dev"
+      echo "--- link target"
+      ls -A "${WORK}/bind-target" 2>/dev/null || echo "(none)"
+    } >> "${WORK}/${1}.out"
+  }
+  bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
+  BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
+  # root reads a 0000 file, so the case proves nothing there.
+  [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
+  for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
+    bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # fingerprint announce
+    export KUBEHZ_TOKEN=khzt_parity
+    bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # bearer (direct claim)
+    unset KUBEHZ_TOKEN
+    export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+    bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
+    unset HCLOUD_TOKEN HCLOUD_API_BASE
+  done
+  unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
 fi
 
 report

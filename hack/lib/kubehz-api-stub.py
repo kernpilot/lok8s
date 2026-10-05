@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """kubehz-api-stub.py: an https stub of the kubehz api for hack/parity-kubehz.sh.
 
-It serves the routes of `lo kubehz space ...` and `lo kubehz cluster ...`
-plus the agent-key token endpoint, with fixed answers in the api's shapes
-(the {ok, data, traceId} envelope, the {statusCode, data: {code, message,
-help}} refusal). Every request is appended to a log as one JSON line:
-method, path, whether the bearer was the minted token, the Accept and
-Content-Type headers, and the body (parsed JSON with sorted keys, so a
-different key order is not a difference). The harness diffs that log
-between the two implementations.
+One server for the two sections of the harness that need an api:
+
+- The agent tools: the routes of `lo kubehz space ...` and `lo kubehz
+  cluster ...` and the agent-key token endpoint, with fixed answers in the
+  api's shapes (the {ok, data, traceId} envelope, the {statusCode, data:
+  {code, message, help}} refusal). These routes need the minted bearer.
+- The register cases: POST /api/clusters/register answers one response that
+  fits every register mode and hands out a new bind secret. The Hetzner
+  calls of the claim-key mode (/v1/ssh_keys) get an empty key list and a
+  created key. These routes take any credential.
+
+Every request is appended to a log as one JSON line: the method, the path,
+the credential (none, the minted bearer, another bearer, or another scheme;
+never its value), the Accept header ("*/*" logs as no header) and the
+Content-Type header, and the body (parsed
+JSON with sorted keys, so a different key order is not a difference). The
+harness diffs that log between the two implementations.
 
 POST /oauth/v2/redirect answers 307 to the token endpoint: a grant that
 followed it would hand the client secret to another URL. GET
@@ -28,6 +37,11 @@ import sys
 
 CERT, KEY, PORT_FILE, LOG = sys.argv[1:5]
 TOKEN = "parity-jwt"
+# The bind secret that a register hands out (B289).
+NEXT_BIND = "009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecret": NEXT_BIND,
+              "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb",
+                           "name": "kubehz-claim-bind-reg.dev"}}
 
 SPACE = {
     "id": "sp-1a2b3c4d", "tenantId": "t-1", "shardId": "sh-1", "name": "Acme Prod", "slug": "acme",
@@ -171,10 +185,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             body = raw
         auth = self.headers.get("Authorization", "")
+        if not auth:
+            cred = "none"
+        elif auth == "Bearer " + TOKEN:
+            cred = "minted"
+        else:
+            cred = "bearer" if auth.startswith("Bearer ") else "other"
+        # No Accept header and "*/*" (curl's default) mean the same: the
+        # client takes any media type (RFC 9110, 12.5.1). Both log as null.
+        accept = self.headers.get("Accept")
+        if accept == "*/*":
+            accept = None
         with open(LOG, "a", encoding="utf-8") as log:
-            log.write(json.dumps({"method": self.command, "path": self.path,
-                                  "bearer": auth == "Bearer " + TOKEN if not self.path.startswith("/oauth/") else None,
-                                  "accept": self.headers.get("Accept"), "content_type": self.headers.get("Content-Type"),
+            log.write(json.dumps({"method": self.command, "path": self.path, "auth": cred,
+                                  "accept": accept, "content_type": self.headers.get("Content-Type"),
                                   "body": body}, sort_keys=True) + "\n")
         if self.path == "/oauth/v2/redirect":
             self.send_response(307)
@@ -184,10 +208,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
         if self.path == "/oauth/v2/token":
             return self.answer(200, {"access_token": TOKEN, "token_type": "Bearer", "expires_in": 3600})
+        path = self.path.split("?", 1)[0]
+        if self.command == "POST" and path == "/api/clusters/register":
+            return self.answer(200, REGISTERED)
+        if path == "/v1/ssh_keys":
+            if self.command == "POST":
+                return self.answer(201, {"ssh_key": {"id": 43}})
+            return self.answer(200, {"ssh_keys": []})
         if auth != "Bearer " + TOKEN:
             return self.answer(*refusal(401, "UNAUTHORIZED", "Invalid or expired agent key",
                                         "The agent key is revoked or expired. Create a new one under Settings -> Agent keys."))
-        path = self.path.split("?", 1)[0]
         if path == "/api/spaces/sp-race0001/kubeconfig/agent":
             with open(os.environ["STUB_RACE_FILE"], "w", encoding="utf-8") as planted:
                 planted.write("planted\n")
