@@ -18,6 +18,11 @@ func loadYAMLDoc(path string) (*yaml.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseYAMLDoc(raw)
+}
+
+// parseYAMLDoc is loadYAMLDoc on bytes already read.
+func parseYAMLDoc(raw []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return nil, err

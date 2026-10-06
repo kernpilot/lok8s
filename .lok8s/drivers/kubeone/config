@@ -239,6 +239,7 @@ kubeone::_audit_log_read() {
     unreadable) error "audit log: cannot read the policy file ${policy_path}. Make it readable for the user that runs lo."; return 1 ;;
     directive)  error "audit log: ${policy_path} has a YAML directive (a line that starts with %). ${plain} Remove the directive."; return 1 ;;
     invalid)    error "audit log: ${policy_path} is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."; return 1 ;;
+    marker)     error "audit log: ${policy_path} has a value on a document marker line (--- or ...). ${plain} Move the value to the next line."; return 1 ;;
     emptyfirst) error "audit log: ${policy_path} starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."; return 1 ;;
     duplicate)  error "audit log: ${policy_path} has a duplicate key. ${plain} Keep each key once."; return 1 ;;
     alias)      error "audit log: ${policy_path} has an anchor or an alias (&name, *name). ${plain} Write the value out in full."; return 1 ;;
@@ -253,8 +254,9 @@ kubeone::_audit_log_read() {
 }
 
 # kubeone::_audit_policy_verdict <file>: check the policy file and print one
-# word: ok, unreadable, directive, invalid, emptyfirst, duplicate, alias,
-# merge, notpolicy or norules, or "yqfailed: <detail>" when yq itself fails.
+# word: ok, unreadable, directive, marker, emptyfirst, invalid, duplicate,
+# alias, merge, notpolicy or norules, or "yqfailed: <detail>" when yq itself
+# fails (for example a yq that is not mikefarah yq v4).
 # Go twin: auditPolicyVerdict (the same words, the same order). The fixtures
 # in tests/fixtures/audit-policy/ are named after them.
 #
@@ -267,22 +269,26 @@ kubeone::_audit_policy_verdict() {
   [[ -r "${file}" ]] || { echo unreadable; return 0; }
   # yaml.v3 (and the apiserver) refuse "%YAML 1.2"; yq reads it.
   if grep -q '^%' "${file}"; then echo directive; return 0; fi
+  # A value on a document marker line ("--- {…}", "--- null"): yq v4.54
+  # parses some of these wrongly. A comment after the marker is fine.
+  if grep -Eq '^(---|\.\.\.)[[:space:]]+[^#[:space:]]' "${file}"; then echo marker; return 0; fi
   # yq v4.54 drops the first key after a "--- # comment" line. The comment
   # holds no data, so strip it from the document markers first.
   text=$(sed -E 's/^(---|\.\.\.)[[:space:]]+#.*$/\1/' "${file}")
-  # Every document must parse. When yq cannot read even a known-good input,
-  # yq is broken: that is not the file's fault.
+  # The apiserver reads only the first document. An empty one (yq skips it)
+  # stops the apiserver. A text rule, before the parse, as in Go.
+  if kubeone::_audit_empty_first <<<"${text}"; then echo emptyfirst; return 0; fi
+  # Every document must parse. When yq cannot read even a known-good input
+  # with a v4 operator, yq is broken or not mikefarah yq v4 (a distro's
+  # Python yq runs `.` but not `document_index`): not the file's fault.
   if ! yq -r 'document_index' - <<<"${text}" >/dev/null 2>&1; then
-    if yq -r '.' - <<<'a: 1' >/dev/null 2>&1; then
+    if yq -r 'document_index' - <<<'a: 1' >/dev/null 2>&1; then
       echo invalid
     else
-      echo "yqfailed: $(yq -r '.' - <<<'a: 1' 2>&1 | head -n 1)"
+      echo "yqfailed: $(yq -r 'document_index' - <<<'a: 1' 2>&1 >/dev/null | head -n 1)"
     fi
     return 0
   fi
-  # The apiserver reads only the first document. An empty one (yq skips it)
-  # stops the apiserver.
-  if kubeone::_audit_empty_first <<<"${text}"; then echo emptyfirst; return 0; fi
 
   # kubeone::_audit_policy_read <yq expression>: one read of the first
   # document; on a yq failure it prints the yqfailed word and returns 1.
@@ -349,8 +355,12 @@ kubeone::_inject_audit_log() {
   [[ -n "${_AUDIT_LOG_POLICY}" ]] || return 0
   # Name the cause: a manifest that does not parse is a template problem; a
   # write that fails is a disk or permission problem. Go twin: injectAuditLog.
+  if [[ ! -r "${manifest}" ]]; then
+    error "audit log: lok8s cannot read the rendered manifest in ${manifest%/*}. Check the permissions of the directory, then run lo provision again."
+    return 1
+  fi
   if ! yq -r 'document_index' "${manifest}" >/dev/null 2>&1; then
-    error "audit log: the rendered manifest in ${manifest%/*} does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+    error "audit log: lok8s cannot parse the rendered manifest in ${manifest%/*} as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
     return 1
   fi
   local write_error="audit log: cannot write the manifest in ${manifest%/*}. Check the free disk space and the permissions of the directory, then run lo provision again."
@@ -593,7 +603,7 @@ kubeone::_temp_traps() {
   q=$(printf '%q' "${1}")
   for sig in INT TERM HUP; do
     # shellcheck disable=SC2064 # expand the path now: the trap can fire after the caller returned
-    trap "rm -f -- ${q}; trap - ${sig}; kill -${sig} \$\$" "${sig}"
+    trap "rm -f -- ${q}; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
   done
 }
 
@@ -617,11 +627,13 @@ kubeone::_render_manifest() {
   kubeone::_inject_audit_log "${work}" "${cluster_yaml}" || { rm -f "${work}"; return 1; }
   # spec.registries → containerd registry auth (optional; resolves a secretRef).
   kubeone::_inject_registry_auth "${work}" "${cluster_yaml}" || { rm -f "${work}"; return 1; }
-  mv -f "${work}" "${output_dir}/kubeone.yaml" || {
+  # A directory named kubeone.yaml would take the file INTO it (mv), where
+  # the Go rename fails: refuse it the same way.
+  if [[ -d "${output_dir}/kubeone.yaml" ]] || ! mv -f "${work}" "${output_dir}/kubeone.yaml"; then
     rm -f "${work}"
     error "cannot replace ${output_dir}/kubeone.yaml. Check the permissions of ${output_dir}, then run lo provision again."
     return 1
-  }
+  fi
   debug "Generated kubeone.yaml at ${output_dir}/kubeone.yaml"
 }
 

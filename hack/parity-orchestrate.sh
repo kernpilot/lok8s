@@ -631,12 +631,13 @@ ko_refused auditmap.cloud
 # The policy-file check over the shared fixtures
 # (tests/fixtures/audit-policy/<verdict>--<case>.yaml; the Go and bats tests
 # read the same files). yq and yaml.v3 read some YAML differently (a
-# "--- # comment" header, an empty first document, a directive, an anchor or
-# alias, a merge key, a duplicate key): each such case is a fixture here, so
-# a future divergence fails.
+# "--- # comment" header, a value on a --- line, an empty first document, a
+# directive, an anchor or alias, a merge key, a duplicate key): each such
+# case is a fixture here, so a future divergence fails.
 declare -A ko_reason=(
   [ok]="ssh private key not found"
   [directive]="has a YAML directive (a line that starts with %)"
+  [marker]="has a value on a document marker line (--- or ...)"
   [invalid]="is not valid YAML"
   [emptyfirst]="starts with an empty YAML document"
   [duplicate]="has a duplicate key"

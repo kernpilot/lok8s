@@ -246,6 +246,8 @@ func TestGenerateConfigAuditLogRefusesBadPolicyFile(t *testing.T) {
 			wantErr: "audit log: POLICY has a duplicate key. lok8s reads a policy file only as plain YAML. Keep each key once."},
 		{name: "alias", content: "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - &r {level: None}\n  - *r\n",
 			wantErr: "audit log: POLICY has an anchor or an alias (&name, *name). lok8s reads a policy file only as plain YAML. Write the value out in full."},
+		{name: "value on a marker line", content: "--- null\n---\n" + testAuditPolicy,
+			wantErr: "audit log: POLICY has a value on a document marker line (--- or ...). lok8s reads a policy file only as plain YAML. Move the value to the next line."},
 		{name: "empty first document", content: "---\n---\n" + testAuditPolicy,
 			wantErr: "audit log: POLICY starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."},
 		{name: "merge key", content: "<<: {apiVersion: audit.k8s.io/v1, kind: Policy}\nrules: [{level: None}]\n",
@@ -312,9 +314,18 @@ func TestInjectAuditLogNamesTheCause(t *testing.T) {
 	errBuf := d.deps.Stderr.(interface{ String() string })
 	auditSpec(t, cy, "  auditLog:\n    policy: audit-policy.yaml\n")
 	manifest := filepath.Join(outDir, "kubeone.yaml")
+	err := d.injectAuditLog(manifest, cy) // no manifest yet: a read error
+	want := "audit log: lok8s cannot read the rendered manifest in " + outDir + ". Check the permissions of the directory, then run lo provision again."
+	if err == nil || !strings.Contains(errBuf.String(), want) {
+		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error %v does not wrap the read error", err)
+	}
+
 	testutil.WriteFile(t, manifest, "features: [\n")
-	err := d.injectAuditLog(manifest, cy)
-	want := "audit log: the rendered manifest in " + outDir + " does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+	err = d.injectAuditLog(manifest, cy)
+	want = "audit log: lok8s cannot parse the rendered manifest in " + outDir + " as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
 	if err == nil || !strings.Contains(errBuf.String(), want) {
 		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
 	}
@@ -331,6 +342,29 @@ func TestInjectAuditLogNamesTheCause(t *testing.T) {
 	}
 	err = d.injectAuditLog(manifest, cy)
 	want = "audit log: cannot write the manifest in " + outDir + ". Check the free disk space and the permissions of the directory, then run lo provision again."
+	if err == nil || !strings.Contains(errBuf.String(), want) {
+		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("error %v does not wrap the permission error", err)
+	}
+}
+
+func TestGenerateConfigNamesACreateFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	d, cy, outDir := genDriver(t)
+	errBuf := d.deps.Stderr.(interface{ String() string })
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outDir, 0o755) })
+	err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir)
+	want := "cannot create a temp file in " + outDir + ". Check the free disk space and the permissions of the directory, then run lo provision again."
 	if err == nil || !strings.Contains(errBuf.String(), want) {
 		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
 	}
@@ -424,7 +458,7 @@ func TestAuditPolicyVerdictFixtures(t *testing.T) {
 		seen[want] = true
 	}
 	// Anti-vacuity: every verdict a file can get has a fixture.
-	for _, v := range []string{policyOK, policyDirective, policyInvalid, policyEmptyFirst, policyDuplicate, policyAlias, policyMerge, policyNotPolicy, policyNoRules} {
+	for _, v := range []string{policyOK, policyDirective, policyMarker, policyInvalid, policyEmptyFirst, policyDuplicate, policyAlias, policyMerge, policyNotPolicy, policyNoRules} {
 		if !seen[v] {
 			t.Errorf("no fixture for the verdict %q", v)
 		}

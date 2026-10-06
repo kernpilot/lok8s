@@ -215,6 +215,8 @@ _refused() {
   _refused "${spec}" "audit log: ${p} has a duplicate key. ${plain} Keep each key once."
   printf 'apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - &r {level: None}\n  - *r\n' >"${POLICY}"
   _refused "${spec}" "audit log: ${p} has an anchor or an alias (&name, *name). ${plain} Write the value out in full."
+  printf -- '--- null\n---\napiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None}]\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} has a value on a document marker line (--- or ...). ${plain} Move the value to the next line."
   printf -- '---\n---\napiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None}]\n' >"${POLICY}"
   _refused "${spec}" "audit log: ${p} starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."
   printf '<<: {apiVersion: audit.k8s.io/v1, kind: Policy}\nrules: [{level: None}]\n' >"${POLICY}"
@@ -320,6 +322,8 @@ exec "${REAL_YQ}" "$@"'
   pinned=$(command -v yq)
   [[ -x "${other}" ]] || skip "no second yq (${other})"
   [[ "$(readlink -f "${other}")" != "$(readlink -f "${pinned}")" ]] || skip "the second yq is the pinned one"
+  # TAP diagnostic: CI shows which yq ran.
+  echo "# second yq: $("${other}" --version 2>&1)" >&3
   mkdir -p "${BATS_TEST_TMPDIR}/otheryq"
   ln -s "${other}" "${BATS_TEST_TMPDIR}/otheryq/yq"
   local f want got
@@ -359,6 +363,8 @@ exec "${REAL_YQ}" "$@"'
     policy: audit-policy.yaml'
   trap 'echo caller-int' INT
   local before; before=$(trap -p INT TERM HUP)
+  # Anti-vacuity: there must be a trap to restore.
+  [[ "${before}" == *caller-int* ]] || { echo "no caller trap set: '${before}'" >&2; return 1; }
   kubeone::generate_config "${CY}" hetzner "${OUT}"
   [ "$(trap -p INT TERM HUP)" = "${before}" ] || { echo "traps changed: $(trap -p INT TERM HUP)" >&2; return 1; }
   trap - INT
@@ -371,7 +377,10 @@ exec "${REAL_YQ}" "$@"'
   printf 'features: [\n' > "${m}"
   run kubeone::_inject_audit_log "${m}" "${CY}"
   assert_failure
-  assert_output --partial "audit log: the rendered manifest in ${BATS_TEST_TMPDIR} does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+  assert_output --partial "audit log: lok8s cannot parse the rendered manifest in ${BATS_TEST_TMPDIR} as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+  run kubeone::_inject_audit_log "${BATS_TEST_TMPDIR}/absent.yaml" "${CY}"
+  assert_failure
+  assert_output --partial "audit log: lok8s cannot read the rendered manifest in ${BATS_TEST_TMPDIR}. Check the permissions of the directory, then run lo provision again."
   # yq -i writes through a temp file and falls back to writing in place:
   # only a read-only file in a read-only directory makes it fail.
   [[ "$(id -u)" != 0 ]] || skip "root writes a read-only file"
@@ -385,4 +394,33 @@ exec "${REAL_YQ}" "$@"'
   chmod 600 "${ro}/m.yaml"
   assert_failure
   assert_output --partial "audit log: cannot write the manifest in ${ro}. Check the free disk space and the permissions of the directory, then run lo provision again."
+}
+
+@test "a yq that is not mikefarah yq v4 is a yq failure, not an invalid file" {
+  # A distro's Python yq (a jq wrapper) runs `.` but not `document_index`:
+  # every valid policy would read as "not valid YAML". This fake behaves
+  # the same way.
+  _fake_yq "${BATS_TEST_TMPDIR}/pyyq" 'for a in "$@"; do [[ "${a}" == *document_index* ]] && { echo "jq: error: document_index/0 is not defined at <top-level>, line 1:" >&2; exit 3; }; done
+echo null'
+  run env PATH="${BATS_TEST_TMPDIR}/pyyq:${PATH}" bash -c 'import() { :; }; source "$1"; kubeone::_audit_policy_verdict "$2"' bash "${PATH_LOK8S}/drivers/kubeone/config" "${POLICY}"
+  assert_output "yqfailed: jq: error: document_index/0 is not defined at <top-level>, line 1:"
+}
+
+@test "generate_config names a temp file it cannot create and a manifest it cannot replace" {
+  _spec '  auditLog:
+    policy: audit-policy.yaml'
+  # kubeone.yaml is a directory: mv would put the file INTO it.
+  mkdir -p "${M}/keep"
+  run kubeone::generate_config "${CY}" hetzner "${OUT}"
+  assert_failure
+  assert_output --partial "cannot replace ${M}. Check the permissions of ${OUT}, then run lo provision again."
+  [ -z "$(find "${OUT}" -name '.kubeone.yaml.*')" ] || { echo "temp file left: $(find "${OUT}" -name '.kubeone.yaml.*')" >&2; return 1; }
+  rm -rf "${M}"
+
+  [[ "$(id -u)" != 0 ]] || skip "root writes into a read-only directory"
+  chmod 500 "${OUT}"
+  run kubeone::generate_config "${CY}" hetzner "${OUT}"
+  chmod 700 "${OUT}"
+  assert_failure
+  assert_output --partial "cannot create a temp file in ${OUT}. Check the free disk space and the permissions of the directory, then run lo provision again."
 }

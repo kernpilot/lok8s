@@ -160,8 +160,12 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 		return ui.Handled(fmt.Errorf("kubeone: temp manifest: %w", err))
 	}
 	// Removed on every return but the success one (work is cleared after
-	// the rename). On SIGINT/SIGTERM lo cancels the context and this
-	// function returns normally, so the defer runs then too.
+	// the rename). On the first SIGINT or SIGTERM lo cancels the context
+	// (cli.WatchInterrupt) and this function still returns, so the defer
+	// runs then too. A SIGHUP or a second signal ends lo at once and can
+	// leave the file: WatchInterrupt does not catch SIGHUP, because
+	// signal.Notify would undo the SIGHUP ignore of `nohup lo …`. (The
+	// bash removes the file on INT, TERM and HUP.)
 	work := tmp.Name()
 	defer func() {
 		if work != "" {

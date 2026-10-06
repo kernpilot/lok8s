@@ -53,6 +53,7 @@ const (
 	policyOK         = "ok"
 	policyUnreadable = "unreadable" // the file cannot be read
 	policyDirective  = "directive"  // a line starts with % (yaml.v3 and the apiserver refuse %YAML 1.2; yq reads it)
+	policyMarker     = "marker"     // a value on a --- or ... line (yq v4.54 parses some of these wrongly)
 	policyInvalid    = "invalid"    // a document does not parse
 	policyEmptyFirst = "emptyfirst" // the first document is empty: the apiserver reads only that one
 	policyDuplicate  = "duplicate"  // a mapping has a key twice
@@ -166,6 +167,8 @@ func auditPolicyRefusal(verdict, path string) string {
 		return "audit log: " + path + " has a YAML directive (a line that starts with %). " + plain + " Remove the directive."
 	case policyInvalid:
 		return "audit log: " + path + " is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."
+	case policyMarker:
+		return "audit log: " + path + " has a value on a document marker line (--- or ...). " + plain + " Move the value to the next line."
 	case policyEmptyFirst:
 		return "audit log: " + path + " starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."
 	case policyDuplicate:
@@ -200,6 +203,18 @@ func auditPolicyVerdict(path string) (string, error) {
 			return policyDirective, nil
 		}
 	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if yamlMarkerValueRe.MatchString(line) {
+			return policyMarker, nil
+		}
+	}
+	// The text rule is the one the bash twin applies, before the parse as
+	// there (yq skips an empty document, so the bash cannot ask yq). An
+	// empty first document that the rule does not see still fails below:
+	// its root is not a mapping.
+	if emptyFirstDocument(raw) {
+		return policyEmptyFirst, nil
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var first *yaml.Node
 	for {
@@ -214,12 +229,6 @@ func auditPolicyVerdict(path string) (string, error) {
 		if first == nil {
 			first = doc
 		}
-	}
-	// The text rule is the one the bash twin applies (yq skips an empty
-	// document, so the bash cannot ask yq). An empty first document that
-	// the rule does not see still fails below: its root is not a mapping.
-	if emptyFirstDocument(raw) {
-		return policyEmptyFirst, nil
 	}
 	if first == nil || len(first.Content) == 0 {
 		return policyNotPolicy, nil
@@ -287,8 +296,9 @@ func scanYAML(n *yaml.Node, dup, alias, merge *bool) {
 // empty first document. A comment or a blank line before the first --- is
 // not.
 var (
-	yamlSkipLineRe = regexp.MustCompile(`^\s*(#.*)?$`)
-	yamlMarkerRe   = regexp.MustCompile(`^(---|\.\.\.)(\s+#.*|\s*)$`)
+	yamlSkipLineRe    = regexp.MustCompile(`^\s*(#.*)?$`)
+	yamlMarkerRe      = regexp.MustCompile(`^(---|\.\.\.)(\s+#.*|\s*)$`)
+	yamlMarkerValueRe = regexp.MustCompile(`^(---|\.\.\.)\s+[^#\s]`)
 )
 
 func emptyFirstDocument(raw []byte) bool {
@@ -317,17 +327,21 @@ func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
 	if err != nil || al == nil {
 		return err
 	}
-	// Name the cause: a manifest that does not parse is a template
-	// problem; a write that fails is a disk or permission problem (bash:
-	// the same two lines).
+	// Name the cause: a manifest lok8s cannot read is a permission problem,
+	// one it cannot parse is a template problem, a write that fails is a
+	// disk or permission problem (bash: the same three lines).
 	fail := func(msg string, cause error) error {
 		ui.ErrorTo(d.stderr(), "%s", msg)
 		return ui.Handled(fmt.Errorf("kubeone: %s: %w", msg, cause))
 	}
 	dir := filepath.Dir(manifest)
-	doc, err := loadYAMLDoc(manifest)
+	raw, err := os.ReadFile(manifest)
 	if err != nil {
-		return fail("audit log: the rendered manifest in "+dir+" does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again.", err)
+		return fail("audit log: lok8s cannot read the rendered manifest in "+dir+". Check the permissions of the directory, then run lo provision again.", err)
+	}
+	doc, err := parseYAMLDoc(raw)
+	if err != nil {
+		return fail("audit log: lok8s cannot parse the rendered manifest in "+dir+" as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again.", err)
 	}
 	sal := ensureMapPath(doc, "features", "staticAuditLog")
 	setKey(sal, "enable", boolNode(true))

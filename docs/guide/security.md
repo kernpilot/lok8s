@@ -97,7 +97,10 @@ manifest.
 The driver writes the manifest to a temporary file (mode 0600: the manifest
 can hold registry credentials). It replaces `kubeone.yaml` only when every
 step succeeded, so a refusal never leaves a half-written manifest. When a
-signal stops the run, the driver removes the temporary file.
+first INT or TERM signal stops `lo`, the driver removes the temporary file.
+A second signal, or a HUP signal to the Go `lo`, ends `lo` at once. Then a
+file `.kubeone/.kubeone.yaml.*` can stay. Delete it, because it can hold
+registry credentials.
 
 The driver stops with an error that names the file or the value and the fix
 when:
@@ -108,6 +111,7 @@ when:
 - a limit is not a whole number from 1 to 999999999 (to use the KubeOne
   default, leave the field out),
 - the policy file does not exist, or you cannot read it,
+- a document marker line has a value (for example `--- {…}` or `--- null`),
 - the first YAML document of the policy file is empty (for example two `---`
   lines before the policy): the apiserver reads only the first document,
 - the first YAML document does not have `apiVersion: audit.k8s.io/v1` and
@@ -138,7 +142,7 @@ uses.
 ### Example policy
 
 ::: details An EXAMPLE policy. Review it before you use it.
-This example records metadata (who, what, when; never the object content)
+This example records metadata (who, what and when, but not the object content)
 for Secrets, ConfigMaps, service account tokens, `exec`, `attach` and
 `port-forward` into pods, and for all requests of admin users. It records
 nothing else.
@@ -179,7 +183,8 @@ the first rule.
 
 ### Verify the audit log
 
-On a control-plane host, follow the log. Then list Secrets from your machine:
+On a control-plane host, show the new lines of the log. Then list Secrets
+from your machine:
 
 ```bash
 # on a control-plane host
