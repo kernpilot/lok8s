@@ -2,9 +2,14 @@ package audit
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // specWith builds a minimal cluster spec with extra spec-level YAML appended.
@@ -456,17 +461,22 @@ func k8sFinding(t *testing.T, spec string) Finding {
 
 func TestCheckK8sVersion(t *testing.T) {
 	cases := []struct {
-		name, version, kind, wantStatus, wantSeverity, wantDetail string
+		name, today, version, kind, wantStatus, wantSeverity, wantDetail string
 	}{
-		{"supported passes", "v1.35.4", "KubeOne", "pass", "high", "Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36)."},
-		{"eol fails on prod intent", "v1.33.2", "KubeOne", "fail", "high", "Kubernetes 1.33 is End-of-Life (oldest supported minor: 1.34) — no upstream security patches."},
-		{"eol warns on dev", "v1.33.2", "Lo", "warn", "medium", "Kubernetes 1.33 is End-of-Life (oldest supported minor: 1.34) — no upstream security patches."},
-		{"newer than known warns", "v1.99.0", "KubeOne", "warn", "low", "Kubernetes 1.99 is newer than the newest minor this audit knows (1.36) — the support list may be stale."},
-		{"pinned digest suffix stripped", "v1.34.1@sha256:abc", "KubeOne", "pass", "high", "Kubernetes 1.34 is within the supported window (1.34, 1.35, 1.36)."},
-		{"unparseable is unknown", "latest", "KubeOne", "unknown", "medium", "Could not parse spec.kubernetes.version ('latest')."},
+		{"supported passes", "2026-10-06", "v1.35.4", "KubeOne", "pass", "high", "Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+		{"eol fails on prod intent", "2026-10-06", "v1.33.2", "KubeOne", "fail", "high", "Kubernetes 1.33 is End-of-Life (oldest supported minor: 1.34) — no upstream security patches."},
+		{"eol warns on dev", "2026-10-06", "v1.33.2", "Lo", "warn", "medium", "Kubernetes 1.33 is End-of-Life (oldest supported minor: 1.34) — no upstream security patches."},
+		{"newer than known warns", "2026-10-06", "v1.99.0", "KubeOne", "warn", "low", "Kubernetes 1.99 is newer than the newest minor this audit knows (1.37) — the support list may be stale."},
+		{"pinned digest suffix stripped", "2026-10-06", "v1.34.1@sha256:abc", "KubeOne", "pass", "high", "Kubernetes 1.34 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+		{"unparseable is unknown", "2026-10-06", "latest", "KubeOne", "unknown", "medium", "Could not parse spec.kubernetes.version ('latest')."},
+		// The table is dated: a minor reaches EOL on its date with no code change.
+		{"the day before the EOL date still passes", "2026-10-26", "v1.34.8", "KubeOne", "pass", "high", "Kubernetes 1.34 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+		{"on the EOL date it fails", "2026-10-27", "v1.34.8", "KubeOne", "fail", "high", "Kubernetes 1.34 is End-of-Life (oldest supported minor: 1.35) — no upstream security patches."},
+		{"a table that is all past EOL warns that it is out of date", "2028-01-01", "v1.36.1", "KubeOne", "warn", "low", "Kubernetes 1.36: every minor this audit knows is past its EOL date. The support table is out of date."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(k8sTodayEnv, tc.today)
 			f := k8sFinding(t, fmt.Sprintf("kind: %s\nspec:\n  kubernetes:\n    version: %s\n", tc.kind, tc.version))
 			if f.Status != tc.wantStatus || f.Severity != tc.wantSeverity {
 				t.Errorf("status/severity = %s/%s, want %s/%s", f.Status, f.Severity, tc.wantStatus, tc.wantSeverity)
@@ -487,12 +497,63 @@ func TestCheckK8sVersion(t *testing.T) {
 }
 
 func TestCheckK8sVersionAbsent(t *testing.T) {
+	t.Setenv(k8sTodayEnv, "2026-10-06")
 	f := k8sFinding(t, "kind: KubeOne\n")
 	if f.Status != "unknown" || f.Detail != "Could not parse spec.kubernetes.version ('<empty>')." {
 		t.Errorf("%+v", f)
 	}
 	if f.Line != 0 {
 		t.Errorf("absent key line = %d, want 0", f.Line)
+	}
+}
+
+// The support table: newest first, one row per minor, valid dates, and at
+// least one row past its EOL (it names the oldest minor the table knows).
+func TestK8sMinorEOLTable(t *testing.T) {
+	for i, row := range k8sMinorEOL {
+		if _, err := time.Parse("2006-01-02", row.eol); err != nil {
+			t.Errorf("row %d (%s): EOL %q is not yyyy-mm-dd", i, row.minor, row.eol)
+		}
+		if i > 0 {
+			prev := k8sMinorEOL[i-1]
+			if minorRank(row.minor) >= minorRank(prev.minor) {
+				t.Errorf("row %d: %s is not older than %s", i, row.minor, prev.minor)
+			}
+			if row.eol >= prev.eol {
+				t.Errorf("row %d: %s ends %s, not before %s (%s)", i, row.minor, row.eol, prev.minor, prev.eol)
+			}
+		}
+	}
+}
+
+// The bash twin reads the same table (_AUDIT_K8S_MINOR_EOL in the embedded
+// mirror of .lok8s/libs/audit). Two hand-kept copies drift; this fails first.
+func TestK8sMinorEOLMatchesBash(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^_AUDIT_K8S_MINOR_EOL="([^"]*)"$`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("_AUDIT_K8S_MINOR_EOL not found in libs/audit")
+	}
+	var goRows []string
+	for _, row := range k8sMinorEOL {
+		goRows = append(goRows, row.minor+":"+row.eol)
+	}
+	if got, want := string(m[1]), strings.Join(goRows, " "); got != want {
+		t.Errorf("bash table %q != Go table %q", got, want)
+	}
+}
+
+func TestK8sTodayEnv(t *testing.T) {
+	t.Setenv(k8sTodayEnv, "2026-10-27")
+	if got := k8sToday(); got != "2026-10-27" {
+		t.Errorf("pinned today = %q", got)
+	}
+	t.Setenv(k8sTodayEnv, "not-a-date")
+	if got := k8sToday(); got != time.Now().UTC().Format("2006-01-02") {
+		t.Errorf("a malformed pin must fall back to today, got %q", got)
 	}
 }
 
