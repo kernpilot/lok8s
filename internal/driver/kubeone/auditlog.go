@@ -1,9 +1,11 @@
 package kubeone
 
-// auditlog.go ports kubeone::_inject_audit_log: spec.auditLog becomes
-// KubeOne's features.staticAuditLog, so the apiserver on every control
-// plane writes an audit log. KubeOne uploads the policy file to each
-// control plane itself, thus the file only has to exist on this machine.
+// auditlog.go ports the spec.auditLog half of drivers/kubeone/config
+// (kubeone::_audit_log_read, kubeone::_audit_policy_verdict,
+// kubeone::_inject_audit_log): spec.auditLog becomes KubeOne's
+// features.staticAuditLog, so the apiserver on every control plane writes
+// an audit log. KubeOne uploads the policy file to each control plane
+// itself, thus the file only has to exist on this machine.
 
 import (
 	"bytes"
@@ -38,57 +40,84 @@ var auditLogLimits = []struct{ spec, kubeone string }{
 	{"maxSize", "logMaxSize"},
 }
 
-// auditLimitRe is a whole number from 1 to 999999999. KubeOne refuses 0
-// and negative values, and nine digits cannot overflow its int.
+// auditLimitRe is a whole number from 1 to 999999999. KubeOne reads 0 as
+// "not set" and applies its default, so a written 0 would hide that
+// default: to get it, leave the field out. Nine digits fit KubeOne's int.
 var auditLimitRe = regexp.MustCompile(`^[1-9][0-9]{0,8}$`)
 
-// injectAuditLog merges spec.auditLog into the manifest as
-// features.staticAuditLog: enable, the ABSOLUTE policyFilePath, and only
-// the limits the spec sets (KubeOne applies its defaults to the rest).
-// No-op without spec.auditLog. The spec shape and the policy file are
-// checked first; a bad value stops the render with an error that names
-// the value and the fix.
-func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
+// The verdicts of the policy-file check. The bash twin
+// kubeone::_audit_policy_verdict prints the same words, in the same order
+// of checks, and the shared fixtures in tests/fixtures/audit-policy/ are
+// named after them.
+const (
+	policyOK         = "ok"
+	policyUnreadable = "unreadable" // the file cannot be read
+	policyDirective  = "directive"  // a line starts with % (yaml.v3 and the apiserver refuse %YAML 1.2; yq reads it)
+	policyInvalid    = "invalid"    // a document does not parse
+	policyDuplicate  = "duplicate"  // a mapping has a key twice
+	policyAlias      = "alias"      // an alias (*name): Go follows it, yq does not compare through it
+	policyMerge      = "merge"      // a merge key (<<): yq follows it, a plain read does not
+	policyNotPolicy  = "notpolicy"  // the first document is not an audit.k8s.io/v1 Policy
+	policyNoRules    = "norules"    // no rules list, or an empty one: the apiserver refuses to start
+)
+
+// auditLogSpec is a checked spec.auditLog: the absolute policy path and
+// the limits the spec sets, in auditLogLimits order.
+type auditLogSpec struct {
+	policyPath string
+	limits     []auditLimit
+}
+
+type auditLimit struct{ field, value string }
+
+// readAuditLog checks spec.auditLog and its policy file (bash:
+// kubeone::_audit_log_read). It returns nil without spec.auditLog. A bad
+// value prints an error that names the value and the fix. Provision calls
+// it before the infrastructure step, so a typo fails fast; the merge calls
+// it again.
+func (d *Driver) readAuditLog(clusterYAML string) (*auditLogSpec, error) {
 	stderr := d.stderr()
-	fail := func(format string, args ...any) error {
+	fail := func(cause error, format string, args ...any) error {
 		msg := fmt.Sprintf(format, args...)
 		ui.ErrorTo(stderr, "%s", msg)
+		if cause != nil {
+			return ui.Handled(fmt.Errorf("kubeone: %s: %w", msg, cause))
+		}
 		return ui.Handled(fmt.Errorf("kubeone: %s", msg))
 	}
 
 	spec := yqsem.Load(clusterYAML)
 	if !spec.OK() {
-		return fail("audit log: cannot read %s", clusterYAML)
+		return nil, fail(spec.Err, "audit log: cannot read %s", clusterYAML)
 	}
 	node := spec.Lookup("spec", "auditLog")
 	tag := yamlTag(node)
 	if tag == "!!null" {
-		return nil
+		return nil, nil
 	}
 	if tag != "!!map" {
-		return fail("audit log: spec.auditLog in %s is not a mapping. Set spec.auditLog.policy to the path of an audit Policy file.", clusterYAML)
+		return nil, fail(nil, "audit log: spec.auditLog in %s is not a mapping. Set spec.auditLog.policy to the path of an audit Policy file.", clusterYAML)
 	}
 	keys, _ := yqsem.MapKeys(node)
 	for _, key := range keys {
 		switch key {
 		case "policy", "maxAge", "maxBackup", "maxSize":
 		default:
-			return fail("audit log: spec.auditLog.%s in %s is not a known field. Use policy, maxAge, maxBackup or maxSize.", key, clusterYAML)
+			return nil, fail(nil, "audit log: spec.auditLog.%s in %s is not a known field. Use policy, maxAge, maxBackup or maxSize.", key, clusterYAML)
 		}
 	}
 
 	policyNode := yqsem.MapGet(node, "policy")
 	policyTag := yamlTag(policyNode)
 	if policyTag == "!!null" || (policyTag == "!!str" && yqText(policyNode) == "") {
-		return fail("audit log: spec.auditLog.policy in %s is not set. Set it to the path of an audit Policy file, relative to the cluster file.", clusterYAML)
+		return nil, fail(nil, "audit log: spec.auditLog.policy in %s is not set. Set it to the path of an audit Policy file, relative to the cluster file.", clusterYAML)
 	}
 	if policyTag != "!!str" {
-		return fail("audit log: spec.auditLog.policy in %s is not a file path (found %s). Set it to the path of an audit Policy file, relative to the cluster file.", clusterYAML, auditShown(policyNode))
+		return nil, fail(nil, "audit log: spec.auditLog.policy in %s is not a file path (found %s). Set it to the path of an audit Policy file, relative to the cluster file.", clusterYAML, auditShown(policyNode))
 	}
 	policy := yqText(policyNode)
 
-	type limit struct{ field, value string }
-	var limits []limit
+	al := &auditLogSpec{}
 	for _, l := range auditLogLimits {
 		n := yqsem.MapGet(node, l.spec)
 		t := yamlTag(n)
@@ -96,9 +125,9 @@ func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
 			continue
 		}
 		if t != "!!int" || !auditLimitRe.MatchString(yqText(n)) {
-			return fail("audit log: spec.auditLog.%s in %s must be a whole number from 1 to 999999999 (found %s). Fix the value, or remove the field to use the KubeOne default.", l.spec, clusterYAML, auditShown(n))
+			return nil, fail(nil, "audit log: spec.auditLog.%s in %s must be a whole number from 1 to 999999999 (found %s). Fix the value, or remove the field to use the KubeOne default.", l.spec, clusterYAML, auditShown(n))
 		}
-		limits = append(limits, limit{l.kubeone, yqText(n)})
+		al.limits = append(al.limits, auditLimit{l.kubeone, yqText(n)})
 	}
 
 	// The policy path is relative to the cluster file. KubeOne resolves a
@@ -111,35 +140,179 @@ func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
 	}
 	abs, err := filepath.Abs(policyPath)
 	if err != nil { // only without a working directory; bash reads $PWD
-		return fail("audit log: cannot resolve the policy path %s", policyPath)
+		return nil, fail(err, "audit log: cannot resolve the policy path %s", policyPath)
 	}
-	policyPath = abs
-	if !fsutil.IsRegular(policyPath) {
-		return fail("audit log: policy file not found: %s (spec.auditLog.policy: %s). Create the file, or fix spec.auditLog.policy in %s.", policyPath, policy, clusterYAML)
+	al.policyPath = abs
+	if !fsutil.IsRegular(abs) {
+		return nil, fail(nil, "audit log: policy file not found: %s (spec.auditLog.policy: %s). Create the file, or fix spec.auditLog.policy in %s.", abs, policy, clusterYAML)
 	}
-	if !isAuditPolicy(policyPath) {
-		return fail("audit log: %s is not an audit Policy. The file must be YAML with apiVersion %s and kind %s. Fix the file, or set spec.auditLog.policy to another file.", policyPath, auditPolicyAPIVersion, auditPolicyKind)
+	verdict, cause := auditPolicyVerdict(abs)
+	if verdict != policyOK {
+		return nil, fail(cause, "%s", auditPolicyRefusal(verdict, abs))
 	}
+	return al, nil
+}
 
+// auditPolicyRefusal is the error line for a verdict other than ok (bash:
+// the case in kubeone::_audit_log_read). Each line names the file and the
+// next step.
+func auditPolicyRefusal(verdict, path string) string {
+	const plain = "lok8s reads a policy file only as plain YAML."
+	switch verdict {
+	case policyUnreadable:
+		return "audit log: cannot read the policy file " + path + ". Make it readable for the user that runs lo."
+	case policyDirective:
+		return "audit log: " + path + " has a YAML directive (a line that starts with %). " + plain + " Remove the directive."
+	case policyInvalid:
+		return "audit log: " + path + " is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."
+	case policyDuplicate:
+		return "audit log: " + path + " has a duplicate key. " + plain + " Keep each key once."
+	case policyAlias:
+		return "audit log: " + path + " has an alias (*name). " + plain + " Write the value out in full."
+	case policyMerge:
+		return "audit log: " + path + " has a merge key (<<). " + plain + " Write the keys out in full."
+	case policyNoRules:
+		return "audit log: " + path + " has no rules. The apiserver does not start with a policy that has no rules. Add at least one rule to the rules list."
+	default: // policyNotPolicy
+		return "audit log: " + path + " is not an audit Policy. The file must have apiVersion " + auditPolicyAPIVersion + " and kind " + auditPolicyKind + ". Fix the file, or set spec.auditLog.policy to another file."
+	}
+}
+
+// auditPolicyVerdict checks the policy file (bash:
+// kubeone::_audit_policy_verdict; the same words, the same order). The
+// error is the cause for the unreadable and invalid verdicts.
+//
+// The first document counts, as for the apiserver. Where yq and yaml.v3
+// read a construct differently (a directive, an alias, a merge key, a
+// duplicate key), both implementations refuse it, so they agree and the
+// file means one thing.
+func auditPolicyVerdict(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return policyUnreadable, err
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if strings.HasPrefix(line, "%") {
+			return policyDirective, nil
+		}
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	var first *yaml.Node
+	for {
+		doc := &yaml.Node{}
+		err := dec.Decode(doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return policyInvalid, err
+		}
+		// yq's document_index skips a document without content.
+		if first == nil && !emptyDocument(doc) {
+			first = doc
+		}
+	}
+	if first == nil || len(first.Content) == 0 {
+		return policyNotPolicy, nil
+	}
+	root := first.Content[0]
+	var dup, alias, merge bool
+	scanYAML(root, &dup, &alias, &merge)
+	switch {
+	case dup:
+		return policyDuplicate, nil
+	case alias:
+		return policyAlias, nil
+	case merge:
+		return policyMerge, nil
+	}
+	if root.Kind != yaml.MappingNode ||
+		yqsem.Scalar(yqsem.MapGet(root, "apiVersion")) != auditPolicyAPIVersion ||
+		yqsem.Scalar(yqsem.MapGet(root, "kind")) != auditPolicyKind {
+		return policyNotPolicy, nil
+	}
+	if rules := yqsem.MapGet(root, "rules"); rules == nil || rules.Kind != yaml.SequenceNode || len(rules.Content) == 0 {
+		return policyNoRules, nil
+	}
+	return policyOK, nil
+}
+
+// scanYAML walks every node, keys included (yq: `...`), and reports a
+// mapping with a key twice, an alias, and a merge key (<<).
+func scanYAML(n *yaml.Node, dup, alias, merge *bool) {
+	if n == nil {
+		return
+	}
+	if n.Kind == yaml.AliasNode {
+		*alias = true
+		return
+	}
+	if n.Kind == yaml.MappingNode {
+		seen := map[string]bool{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i]
+			if key.Tag == "!!merge" {
+				*merge = true
+			}
+			if key.Kind == yaml.ScalarNode {
+				if seen[key.Value] {
+					*dup = true
+				}
+				seen[key.Value] = true
+			}
+		}
+	}
+	for _, c := range n.Content {
+		scanYAML(c, dup, alias, merge)
+	}
+}
+
+// emptyDocument reports a document without content (`---` with nothing
+// after it). An explicit `null` document has content.
+func emptyDocument(doc *yaml.Node) bool {
+	if len(doc.Content) == 0 {
+		return true
+	}
+	root := doc.Content[0]
+	return root.Kind == yaml.ScalarNode && root.Tag == "!!null" && root.Value == ""
+}
+
+// injectAuditLog merges spec.auditLog into the manifest as
+// features.staticAuditLog: enable, the ABSOLUTE policyFilePath, and only
+// the limits the spec sets (KubeOne applies its defaults to the rest).
+// No-op without spec.auditLog.
+func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
+	al, err := d.readAuditLog(clusterYAML)
+	if err != nil || al == nil {
+		return err
+	}
+	failWrite := func(cause error) error {
+		msg := fmt.Sprintf("audit log: cannot write features.staticAuditLog into the manifest in %s. Make the directory writable, then run lo provision again.", filepath.Dir(manifest))
+		ui.ErrorTo(d.stderr(), "%s", msg)
+		return ui.Handled(fmt.Errorf("kubeone: %s: %w", msg, cause))
+	}
 	doc, err := loadYAMLDoc(manifest)
 	if err != nil {
-		return fail("audit log: failed to inject features.staticAuditLog")
+		return failWrite(err)
 	}
 	sal := ensureMapPath(doc, "features", "staticAuditLog")
 	setKey(sal, "enable", boolNode(true))
 	cfg := ensureMapPath(doc, "features", "staticAuditLog", "config")
-	setKey(cfg, "policyFilePath", strNode(policyPath))
-	for _, l := range limits {
+	setKey(cfg, "policyFilePath", strNode(al.policyPath))
+	for _, l := range al.limits {
 		setKey(cfg, l.field, intNode(l.value))
 	}
 	if err := saveYAMLDoc(manifest, doc); err != nil {
-		return fail("audit log: failed to inject features.staticAuditLog")
+		return failWrite(err)
 	}
-	ui.DebugTo(stderr, "audit log: features.staticAuditLog injected (policy %s)", policyPath)
+	ui.DebugTo(d.stderr(), "audit log: features.staticAuditLog injected (policy %s)", al.policyPath)
 	return nil
 }
 
 // yamlTag is yq's `tag` on a resolved node: "!!null" for a missing node.
+// It is not in yqsem: the private tag helpers of bootstrapspec (by kind),
+// addons (no deref, ShortTag) and lint (the JSON round trip) each read a
+// tag in another way, so one shared helper would change two of them.
 func yamlTag(n *yaml.Node) string {
 	n = yqsem.Deref(n)
 	if n == nil {
@@ -162,51 +335,4 @@ func auditShown(n *yaml.Node) string {
 		return tag
 	}
 	return tag + " '" + yqText(n) + "'"
-}
-
-// isAuditPolicy reports whether the first YAML document of the file is an
-// audit.k8s.io/v1 Policy. It mirrors the bash check
-// `yq 'select(document_index == 0) | …'`: every document must parse, and
-// yq skips a document without content, so the first document is the first
-// one with content.
-func isAuditPolicy(path string) bool {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	var first *yaml.Node
-	for {
-		doc := &yaml.Node{}
-		err := dec.Decode(doc)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return false
-		}
-		if first == nil && !emptyDocument(doc) {
-			first = doc
-		}
-	}
-	root := yqsem.Deref(first)
-	if root == nil || root.Kind != yaml.MappingNode {
-		return false
-	}
-	return yqsem.Scalar(yqsem.MapGet(root, "apiVersion")) == auditPolicyAPIVersion &&
-		yqsem.Scalar(yqsem.MapGet(root, "kind")) == auditPolicyKind
-}
-
-// emptyDocument reports a document without content (`---` with nothing
-// after it). An explicit `null` document has content.
-func emptyDocument(doc *yaml.Node) bool {
-	if len(doc.Content) == 0 {
-		return true
-	}
-	root := doc.Content[0]
-	return root.Kind == yaml.ScalarNode && root.Tag == "!!null" && root.Value == ""
-}
-
-func intNode(v string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: v}
 }

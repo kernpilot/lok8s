@@ -644,8 +644,8 @@ spec:
 | `spec.auditLog.maxSize` | no | KubeOne: `100` | Size in MB at which the audit log file rotates (`logMaxSize`), a whole number from 1 to 999999999 |
 
 `spec.auditLog` turns on KubeOne's `features.staticAuditLog`. The driver
-checks the spec and the policy file at `lo provision`, before it writes the
-manifest. See [Security: apiserver audit log](../guide/security.md#apiserver-audit-log)
+checks the spec and the policy file at `lo provision`, before the provider
+creates or changes a server and before it writes the manifest. See [Security: apiserver audit log](../guide/security.md#apiserver-audit-log)
 for the checks, an example policy, and the forced apply that a running
 cluster needs.
 

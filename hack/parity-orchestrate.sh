@@ -506,13 +506,15 @@ done
 unset PARITY_KUSTOMIZE_LOG
 
 # ── lo provision — the KubeOne manifest (spec.auditLog, spec.oidc) ───────────
-# A mock provider whose provision succeeds and whose output holds no
-# inventory: the driver renders kubeone.yaml (generate_config: the core
-# template, then the spec.oidc and spec.auditLog merges), then stops at the
-# inventory step ("ssh private key not found"), before kubeone apply. The
-# streams are diffed, and so is the rendered manifest. The Go merge writes
-# with yaml.v3 and the bash with yq -i, so the CONTENT is the contract: both
-# sides are compared as sorted JSON.
+# A mock provider whose provision succeeds (and says so on stderr) and whose
+# output holds no inventory: the driver checks spec.auditLog, provisions,
+# renders kubeone.yaml (generate_config: the core template, then the spec.oidc
+# and spec.auditLog merges), then stops at the inventory step ("ssh private
+# key not found"), before kubeone apply. The streams are diffed, and so is the
+# rendered manifest. The Go merge writes with yaml.v3 and the bash with yq -i,
+# so the CONTENT is the contract: both sides are compared as sorted JSON. A
+# refused spec.auditLog must stop BEFORE the provision ("mock provision ran"
+# absent) and leave no manifest and no temp file.
 mkdir -p "${PROJ}/.lok8s/providers/mock"
 cat > "${PROJ}/.lok8s/providers/mock/main" <<'SH'
 #!/usr/bin/env argsh
@@ -521,7 +523,7 @@ cat > "${PROJ}/.lok8s/providers/mock/main" <<'SH'
 # the manifest render.
 provider::validate() { return 0; }
 provider::credential_data() { return 0; }
-provider::provision() { return 0; }
+provider::provision() { echo "mock provision ran" >&2; return 0; }
 provider::destroy() { echo "mock destroy must not run" >&2; return 1; }
 provider::output() { printf '{}\n'; }
 SH
@@ -553,13 +555,14 @@ ko_spec auditmap.cloud '  auditLog: true'
 
 # ko_check <domain> <argv…>: one case, plus the rendered manifest diffed.
 ko_pre() { rm -rf "${PROJ}/clusters/${KO_DOMAIN}/.kubeone"; }
-ko_post() {  # <impl>: the manifest as sorted JSON (or "absent")
+ko_post() {  # <impl>: the manifest as sorted JSON (or "absent"), then the temp-file count
   local m="${PROJ}/clusters/${KO_DOMAIN}/.kubeone/kubeone.yaml"
   if [[ -f "${m}" ]]; then
     "${ROOT}/.bin/yq" -o=json -P 'sort_keys(..)' "${m}" | sed "s|${PROJ}|PROJ|g" > "${WORK}/kubeone.${1}.json"
   else
     echo absent > "${WORK}/kubeone.${1}.json"
   fi
+  printf 'temp files: %s\n' "$(find "${PROJ}/clusters/${KO_DOMAIN}" -name '.kubeone.yaml.*' 2>/dev/null | wc -l)" >> "${WORK}/kubeone.${1}.json"
 }
 ko_check() {
   KO_DOMAIN="${1}"; shift
@@ -583,6 +586,17 @@ ko_lacks() {
     echo "FAIL: ${1} — '${3}' found in ${2}"; failures=$((failures + 1))
   else echo "ok: ${1}"; fi
 }
+# ko_refused <label>: the last case stopped BEFORE the provision and left no
+# manifest and no temp file (the whole snapshot, compared exactly).
+ko_refused() {
+  ko_lacks "go: ${1} refused before the provision" "${WORK}/go.err" "mock provision ran"
+  if [[ "$(cat "${WORK}/kubeone.go.json")" == $'absent\ntemp files: 0' ]]; then
+    echo "ok: go: ${1} left no manifest and no temp file"
+  else
+    echo "FAIL: go: ${1} left a manifest or a temp file:"; sed 's/^/  /' "${WORK}/kubeone.go.json" | head -5
+    failures=$((failures + 1))
+  fi
+}
 ko_check audit.cloud provision --domain audit.cloud -f          # oidc + auditLog with every limit
 for want in '"staticAuditLog": {' '"enable": true' \
   '"policyFilePath": "PROJ/clusters/audit.cloud/audit-policy.yaml"' \
@@ -590,6 +604,8 @@ for want in '"staticAuditLog": {' '"enable": true' \
   ko_has "go: kubeone.yaml of audit.cloud has ${want}" "${WORK}/kubeone.go.json" "${want}"
 done
 ko_has "go: the provision stopped at the inventory step" "${WORK}/go.err" "ssh private key not found"
+ko_has "go: audit.cloud provisioned after the check" "${WORK}/go.err" "mock provision ran"
+ko_has "go: audit.cloud left no temp file" "${WORK}/kubeone.go.json" "temp files: 0"
 ko_check auditmin.cloud provision --domain auditmin.cloud -f    # a relative path with .. cleaned; unset limits omitted
 ko_has "go: auditmin.cloud resolves the shared policy" "${WORK}/kubeone.go.json" '"policyFilePath": "PROJ/clusters/audit.cloud/audit-policy.yaml"'
 ko_lacks "go: auditmin.cloud leaves logMaxAge to KubeOne" "${WORK}/kubeone.go.json" '"logMaxAge"'
@@ -598,13 +614,50 @@ ko_has "go: auditnone.cloud rendered a manifest" "${WORK}/kubeone.go.json" '"enc
 ko_lacks "go: auditnone.cloud has no staticAuditLog" "${WORK}/kubeone.go.json" 'staticAuditLog'
 ko_check auditkind.cloud provision --domain auditkind.cloud -f  # the policy file is not a Policy
 ko_has "go: auditkind.cloud refused" "${WORK}/go.err" "is not an audit Policy"
+ko_refused auditkind.cloud
 ko_check auditmiss.cloud provision --domain auditmiss.cloud -f  # the policy file does not exist
 ko_has "go: auditmiss.cloud refused" "${WORK}/go.err" "policy file not found: PROJ/clusters/auditmiss.cloud/missing.yaml"
+ko_refused auditmiss.cloud
 ko_check auditkey.cloud provision --domain auditkey.cloud -f    # an unknown field
 ko_has "go: auditkey.cloud refused" "${WORK}/go.err" "spec.auditLog.maxBackups in PROJ/clusters/auditkey.cloud/cluster.lok8s.yaml is not a known field"
+ko_refused auditkey.cloud
 ko_check auditlim.cloud provision --domain auditlim.cloud -f    # a limit as text
 ko_has "go: auditlim.cloud refused" "${WORK}/go.err" "(found !!str '100')"
+ko_refused auditlim.cloud
 ko_check auditmap.cloud provision --domain auditmap.cloud -f    # spec.auditLog is not a mapping
 ko_has "go: auditmap.cloud refused" "${WORK}/go.err" "spec.auditLog in PROJ/clusters/auditmap.cloud/cluster.lok8s.yaml is not a mapping"
+ko_refused auditmap.cloud
+
+# The policy-file check over the shared fixtures
+# (tests/fixtures/audit-policy/<verdict>--<case>.yaml; the Go and bats tests
+# read the same files). yq and yaml.v3 read some YAML differently (a
+# "--- # comment" header, a directive, an alias, a merge key, a duplicate
+# key): each such case is a fixture here, so a future divergence fails.
+declare -A ko_reason=(
+  [ok]="ssh private key not found"
+  [directive]="has a YAML directive (a line that starts with %)"
+  [invalid]="is not valid YAML"
+  [duplicate]="has a duplicate key"
+  [alias]="has an alias (*name)"
+  [merge]="has a merge key (<<)"
+  [notpolicy]="is not an audit Policy"
+  [norules]="has no rules"
+)
+ko_n=0
+for fixture in "${ROOT}"/tests/fixtures/audit-policy/*--*.yaml; do
+  ko_n=$((ko_n + 1))
+  verdict="${fixture##*/}"; verdict="${verdict%%--*}"
+  domain="pf${ko_n}.cloud"
+  ko_spec "${domain}" '  auditLog:' '    policy: audit-policy.yaml'
+  cp "${fixture}" "${PROJ}/clusters/${domain}/audit-policy.yaml"
+  ko_check "${domain}" provision --domain "${domain}" -f          # fixture ${fixture##*/}
+  ko_has "go: ${fixture##*/} → ${verdict}" "${WORK}/go.err" "${ko_reason[${verdict}]}"
+  if [[ "${verdict}" == ok ]]; then
+    ko_has "go: ${fixture##*/} merged" "${WORK}/kubeone.go.json" '"staticAuditLog": {'
+  else
+    ko_refused "${fixture##*/}"
+  fi
+done
+(( ko_n >= 20 )) || fail "only ${ko_n} audit policy fixtures found"
 
 report

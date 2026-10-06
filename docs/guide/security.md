@@ -90,20 +90,31 @@ copies the policy file to each control-plane host and sets the apiserver
 audit flags. The apiserver writes the log to `/var/log/kubernetes/audit.log`
 on each control-plane host.
 
-The driver checks the spec before it writes the manifest. It stops with an
-error that names the value and the fix when:
+The driver checks the spec and the policy file first, before the provider
+creates or changes a server. It checks them again when it writes the
+manifest. It writes the manifest to a temporary file and replaces
+`kubeone.yaml` only when every step succeeded, so a refusal never leaves a
+half-written manifest. The driver stops with an error that names the file or
+the value and the fix when:
 
 - `spec.auditLog` is not a mapping, or it has a field that is not in the
   table above (for example the typo `maxBackups`),
 - `policy` is not set, or it is not a text value,
-- a limit is not a whole number from 1 to 999999999,
-- the policy file does not exist,
+- a limit is not a whole number from 1 to 999999999 (to use the KubeOne
+  default, leave the field out),
+- the policy file does not exist, or you cannot read it,
 - the first YAML document of the policy file does not have
-  `apiVersion: audit.k8s.io/v1` and `kind: Policy`.
+  `apiVersion: audit.k8s.io/v1` and `kind: Policy`,
+- the policy has no rules (the apiserver does not start with such a
+  policy),
+- the policy file is not plain YAML: it has a directive (a line that starts
+  with `%`, for example `%YAML 1.2`), an alias (`*name`), a merge key (`<<`)
+  or a duplicate key. Different YAML readers read these in different ways,
+  so the driver refuses them. A comment after `---` is fine.
 
-The driver does not check the rules in the policy. The apiserver reads them
-when it starts. A cluster with `spec.kubehz.hosting: hosted` does not use a
-KubeOne manifest, so the driver ignores `spec.auditLog` there.
+The driver does not check the single rules in the policy. The apiserver
+reads them when it starts. A cluster with `spec.kubehz.hosting: hosted` does
+not use a KubeOne manifest, so the driver ignores `spec.auditLog` there.
 
 ::: warning Existing clusters
 KubeOne changes a feature on running control planes only with

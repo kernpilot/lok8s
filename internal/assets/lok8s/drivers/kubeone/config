@@ -164,19 +164,18 @@ kubeone::_inject_oidc() {
 
 # ── Audit log (KubeOne-native features.staticAuditLog) ───
 
-# spec.auditLog → features.staticAuditLog, so the apiserver on every control
-# plane writes an audit log. KubeOne uploads the policy file to each control
-# plane itself, thus the file only has to exist on this machine. The manifest
-# gets enable, the ABSOLUTE policyFilePath (KubeOne resolves a relative path
-# against its own manifest in .kubeone/), and only the limits the spec sets:
-# KubeOne applies its defaults to the rest. The spec shape and the policy file
-# are checked first. No-op without spec.auditLog.
-# Go twin: internal/driver/kubeone/auditlog.go (same checks, same order).
-# Usage: kubeone::_inject_audit_log <kubeone.yaml> <cluster_yaml>
-kubeone::_inject_audit_log() {
-  local manifest="${1}" cluster_yaml="${2}"
-  local tag key val policy policy_path ok pair spec_key ko_key
-  local -a ko_keys=() ko_vals=()
+# kubeone::_audit_log_read <cluster_yaml>: check spec.auditLog and its policy
+# file. On success it sets _AUDIT_LOG_POLICY (the ABSOLUTE policy path; empty
+# without spec.auditLog) and _AUDIT_LOG_KEYS / _AUDIT_LOG_VALS (the KubeOne
+# limit fields and the values the spec sets). A bad value prints an error that
+# names the value and the fix. driver::provision calls it before the
+# infrastructure step, so a typo fails fast; _inject_audit_log calls it again.
+# Go twin: readAuditLog in internal/driver/kubeone/auditlog.go (same checks,
+# same order, same text).
+kubeone::_audit_log_read() {
+  local cluster_yaml="${1}"
+  local tag key val policy policy_path verdict pair spec_key ko_key
+  _AUDIT_LOG_POLICY="" _AUDIT_LOG_KEYS=() _AUDIT_LOG_VALS=()
 
   tag=$(yq -r '.spec.auditLog | tag' "${cluster_yaml}" 2>/dev/null) \
     || { error "audit log: cannot read ${cluster_yaml}"; return 1; }
@@ -207,14 +206,16 @@ kubeone::_inject_audit_log() {
   fi
 
   # The limits: a fixed list, so the key is safe inside the yq expression.
+  local -a ko_keys=() ko_vals=()
   for pair in maxAge:logMaxAge maxBackup:logMaxBackup maxSize:logMaxSize; do
     spec_key="${pair%%:*}"
     ko_key="${pair#*:}"
     tag=$(yq -r ".spec.auditLog.${spec_key} | tag" "${cluster_yaml}")
     [[ "${tag}" != "!!null" ]] || continue
     val=$(yq -r ".spec.auditLog.${spec_key}" "${cluster_yaml}")
-    # A whole number from 1 to 999999999: KubeOne refuses 0 and negative
-    # values, and nine digits cannot overflow its int.
+    # A whole number from 1 to 999999999. KubeOne reads 0 as "not set" and
+    # applies its default, so a written 0 would hide that default: to get it,
+    # leave the field out. Nine digits fit KubeOne's int.
     if [[ "${tag}" != "!!int" || ! "${val}" =~ ^[1-9][0-9]{0,8}$ ]]; then
       error "audit log: spec.auditLog.${spec_key} in ${cluster_yaml} must be a whole number from 1 to 999999999 (found $(kubeone::_audit_shown "${tag}" "${val}")). Fix the value, or remove the field to use the KubeOne default."
       return 1
@@ -231,25 +232,79 @@ kubeone::_inject_audit_log() {
     error "audit log: policy file not found: ${policy_path} (spec.auditLog.policy: ${policy}). Create the file, or fix spec.auditLog.policy in ${cluster_yaml}."
     return 1
   fi
-  # The first YAML document must be an audit.k8s.io/v1 Policy. A file that does
-  # not parse makes yq fail, and that also counts as "not a Policy".
-  ok=$(yq -r 'select(document_index == 0) | (.apiVersion == "audit.k8s.io/v1" and .kind == "Policy")' "${policy_path}" 2>/dev/null) || ok=""
-  if [[ "${ok}" != "true" ]]; then
-    error "audit log: ${policy_path} is not an audit Policy. The file must be YAML with apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."
-    return 1
-  fi
+  verdict=$(kubeone::_audit_policy_verdict "${policy_path}")
+  local plain="lok8s reads a policy file only as plain YAML."
+  case "${verdict}" in
+    ok) ;;
+    unreadable) error "audit log: cannot read the policy file ${policy_path}. Make it readable for the user that runs lo."; return 1 ;;
+    directive)  error "audit log: ${policy_path} has a YAML directive (a line that starts with %). ${plain} Remove the directive."; return 1 ;;
+    invalid)    error "audit log: ${policy_path} is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."; return 1 ;;
+    duplicate)  error "audit log: ${policy_path} has a duplicate key. ${plain} Keep each key once."; return 1 ;;
+    alias)      error "audit log: ${policy_path} has an alias (*name). ${plain} Write the value out in full."; return 1 ;;
+    merge)      error "audit log: ${policy_path} has a merge key (<<). ${plain} Write the keys out in full."; return 1 ;;
+    norules)    error "audit log: ${policy_path} has no rules. The apiserver does not start with a policy that has no rules. Add at least one rule to the rules list."; return 1 ;;
+    *)          error "audit log: ${policy_path} is not an audit Policy. The file must have apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."; return 1 ;;
+  esac
+  _AUDIT_LOG_POLICY="${policy_path}"
+  _AUDIT_LOG_KEYS=("${ko_keys[@]}")
+  _AUDIT_LOG_VALS=("${ko_vals[@]}")
+}
 
-  AUDIT_POLICY="${policy_path}" yq -i '
+# The yq program of kubeone::_audit_policy_verdict: one word for the first
+# document. Where yq and yaml.v3 read a construct differently (an alias, a
+# merge key, a duplicate key), both implementations refuse it, so they agree
+# and the file means one thing. `...` walks the keys too.
+_KUBEONE_AUDIT_VERDICT='select(document_index == 0) |
+  if ([... | select(kind == "map") | select((keys | length) != (keys | unique | length))] | length) > 0 then "duplicate"
+  elif ([... | select(kind == "alias")] | length) > 0 then "alias"
+  elif ([... | select(kind == "map") | keys | .[] | select(tag == "!!merge")] | length) > 0 then "merge"
+  elif kind != "map" then "notpolicy"
+  elif .apiVersion != "audit.k8s.io/v1" or .kind != "Policy" then "notpolicy"
+  elif (.rules | kind) != "seq" or (.rules | length) == 0 then "norules"
+  else "ok" end'
+
+# kubeone::_audit_policy_verdict <file>: check the policy file and print one
+# word: ok, unreadable, directive, invalid, duplicate, alias, merge,
+# notpolicy or norules. Go twin: auditPolicyVerdict (the same words, the same
+# order). The fixtures in tests/fixtures/audit-policy/ are named after them.
+kubeone::_audit_policy_verdict() {
+  local file="${1}" text verdict
+  [[ -r "${file}" ]] || { echo unreadable; return 0; }
+  # yaml.v3 (and the apiserver) refuse "%YAML 1.2"; yq reads it.
+  if grep -q '^%' "${file}"; then echo directive; return 0; fi
+  # yq v4.54 drops the first key after a "--- # comment" line. The comment
+  # holds no data, so strip it from the document markers first.
+  text=$(sed -E 's/^(---|\.\.\.)[[:space:]]+#.*$/\1/' "${file}")
+  # A document that does not parse makes yq fail: invalid.
+  verdict=$(yq -r "${_KUBEONE_AUDIT_VERDICT}" - <<<"${text}" 2>/dev/null) || { echo invalid; return 0; }
+  verdict="${verdict%%$'\n'*}"
+  echo "${verdict:-notpolicy}"
+}
+
+# spec.auditLog → features.staticAuditLog, so the apiserver on every control
+# plane writes an audit log. KubeOne uploads the policy file to each control
+# plane itself, thus the file only has to exist on this machine. The manifest
+# gets enable, the ABSOLUTE policyFilePath (KubeOne resolves a relative path
+# against its own manifest in .kubeone/), and only the limits the spec sets:
+# KubeOne applies its defaults to the rest. No-op without spec.auditLog.
+# Go twin: injectAuditLog.
+# Usage: kubeone::_inject_audit_log <kubeone.yaml> <cluster_yaml>
+kubeone::_inject_audit_log() {
+  local manifest="${1}" cluster_yaml="${2}" i
+  kubeone::_audit_log_read "${cluster_yaml}" || return 1
+  [[ -n "${_AUDIT_LOG_POLICY}" ]] || return 0
+  local write_error="audit log: cannot write features.staticAuditLog into the manifest in ${manifest%/*}. Make the directory writable, then run lo provision again."
+
+  AUDIT_POLICY="${_AUDIT_LOG_POLICY}" yq -i '
     .features.staticAuditLog.enable = true |
     .features.staticAuditLog.config.policyFilePath = strenv(AUDIT_POLICY)
-  ' "${manifest}" || { error "audit log: failed to inject features.staticAuditLog"; return 1; }
-  local i
-  for i in "${!ko_keys[@]}"; do
+  ' "${manifest}" || { error "${write_error}"; return 1; }
+  for i in "${!_AUDIT_LOG_KEYS[@]}"; do
     # env() reads the value as YAML: the validated digits land as an integer.
-    AUDIT_LIMIT="${ko_vals[i]}" yq -i ".features.staticAuditLog.config.${ko_keys[i]} = env(AUDIT_LIMIT)" "${manifest}" \
-      || { error "audit log: failed to inject features.staticAuditLog"; return 1; }
+    AUDIT_LIMIT="${_AUDIT_LOG_VALS[i]}" yq -i ".features.staticAuditLog.config.${_AUDIT_LOG_KEYS[i]} = env(AUDIT_LIMIT)" "${manifest}" \
+      || { error "${write_error}"; return 1; }
   done
-  debug "audit log: features.staticAuditLog injected (policy ${policy_path})"
+  debug "audit log: features.staticAuditLog injected (policy ${_AUDIT_LOG_POLICY})"
 }
 
 # The absolute, lexically clean form of a path, as Go's filepath.Abs makes it:
@@ -448,16 +503,27 @@ kubeone::generate_config() {
     done < <(spec::pool_names "${cluster_yaml}")
   fi
 
-  echo "${rendered}" > "${output_dir}/kubeone.yaml"
+  # The render and the merges below write a temp file beside the manifest. It
+  # replaces kubeone.yaml only when every merge succeeded, so a refused merge
+  # never leaves a half-written manifest (an older, complete one stays). mktemp
+  # makes it 0600: the registry merge can write credentials into it. Go twin:
+  # os.CreateTemp + os.Rename in GenerateConfig.
+  local work
+  work=$(mktemp "${output_dir}/.kubeone.yaml.XXXXXX") || {
+    error "cannot create a temp file in ${output_dir}. Make the directory writable, then run lo provision again."
+    return 1
+  }
+  echo "${rendered}" > "${work}" || { rm -f "${work}"; return 1; }
 
   # spec.oidc → features.openidConnect, merged into the manifest's features block
   # (no-op without spec.oidc). KubeOne-native: propagates to joiners, no file.
-  kubeone::_inject_oidc "${output_dir}/kubeone.yaml" || return 1
+  kubeone::_inject_oidc "${work}" || { rm -f "${work}"; return 1; }
   # spec.auditLog → features.staticAuditLog, merged the same way (no-op without
   # spec.auditLog). KubeOne uploads the policy file itself.
-  kubeone::_inject_audit_log "${output_dir}/kubeone.yaml" "${cluster_yaml}" || return 1
+  kubeone::_inject_audit_log "${work}" "${cluster_yaml}" || { rm -f "${work}"; return 1; }
   # spec.registries → containerd registry auth (optional; resolves a secretRef).
-  kubeone::_inject_registry_auth "${output_dir}/kubeone.yaml" "${cluster_yaml}" || return 1
+  kubeone::_inject_registry_auth "${work}" "${cluster_yaml}" || { rm -f "${work}"; return 1; }
+  mv -f "${work}" "${output_dir}/kubeone.yaml" || { rm -f "${work}"; return 1; }
   debug "Generated kubeone.yaml at ${output_dir}/kubeone.yaml"
 }
 

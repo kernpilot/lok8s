@@ -99,3 +99,8 @@ func boolNode(v bool) *yaml.Node {
 	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: val}
 }
+
+// intNode is an integer scalar; v must already be validated digits.
+func intNode(v string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: v}
+}

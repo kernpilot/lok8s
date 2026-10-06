@@ -7,7 +7,10 @@ package kubeone
 // bats twin is tests/unit/kubeone_audit_log_test.bats.
 
 import (
+	"errors"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,6 +164,19 @@ func TestGenerateConfigAuditLogAbsentLeavesManifestUntouched(t *testing.T) {
 	}
 }
 
+// assertNoManifest: a refused render leaves no kubeone.yaml and no temp
+// file behind (the render writes a temp file and renames it only on
+// success).
+func assertNoManifest(t *testing.T, outDir string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(outDir, "kubeone.yaml")); !os.IsNotExist(err) {
+		t.Errorf("a refused render left %s/kubeone.yaml (stat err %v)", outDir, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(outDir, ".kubeone.yaml.*")); len(left) > 0 {
+		t.Errorf("a refused render left temp files: %v", left)
+	}
+}
+
 func TestGenerateConfigAuditLogRefusesBadSpec(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -202,19 +218,15 @@ func TestGenerateConfigAuditLogRefusesBadSpec(t *testing.T) {
 			if !strings.Contains(errBuf.String(), want) {
 				t.Errorf("stderr = %q\nwant  %q", errBuf.String(), want)
 			}
-			features := parseManifest(t, filepath.Join(outDir, "kubeone.yaml"))["features"].(map[string]any)
-			if _, present := features["staticAuditLog"]; present {
-				t.Error("a refused spec.auditLog must not reach the manifest")
-			}
+			assertNoManifest(t, outDir)
 		})
 	}
 }
 
 func TestGenerateConfigAuditLogRefusesBadPolicyFile(t *testing.T) {
-	notPolicy := "is not an audit Policy. The file must be YAML with apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."
 	cases := []struct {
 		name    string
-		content string // "" with dir=true: a directory
+		content string
 		dir     bool
 		missing bool
 		wantErr string
@@ -222,12 +234,20 @@ func TestGenerateConfigAuditLogRefusesBadPolicyFile(t *testing.T) {
 		{name: "missing", missing: true,
 			wantErr: "audit log: policy file not found: POLICY (spec.auditLog.policy: audit-policy.yaml). Create the file, or fix spec.auditLog.policy in CY."},
 		{name: "directory", dir: true, wantErr: "audit log: policy file not found: POLICY"},
-		{name: "wrong kind", content: "apiVersion: audit.k8s.io/v1\nkind: Event\n", wantErr: notPolicy},
-		{name: "wrong version", content: "apiVersion: audit.k8s.io/v1beta1\nkind: Policy\n", wantErr: notPolicy},
-		{name: "empty", content: "\n", wantErr: notPolicy},
-		{name: "a list", content: "- apiVersion: audit.k8s.io/v1\n  kind: Policy\n", wantErr: notPolicy},
-		{name: "not YAML", content: "apiVersion: [\n", wantErr: notPolicy},
-		{name: "broken second document", content: testAuditPolicy + "---\nrules: [\n", wantErr: notPolicy},
+		{name: "not a Policy", content: "apiVersion: audit.k8s.io/v1\nkind: Event\nrules: [{level: None}]\n",
+			wantErr: "audit log: POLICY is not an audit Policy. The file must have apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."},
+		{name: "no rules", content: "apiVersion: audit.k8s.io/v1\nkind: Policy\n",
+			wantErr: "audit log: POLICY has no rules. The apiserver does not start with a policy that has no rules. Add at least one rule to the rules list."},
+		{name: "not YAML", content: "apiVersion: [\n",
+			wantErr: "audit log: POLICY is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."},
+		{name: "directive", content: "%YAML 1.2\n---\n" + testAuditPolicy,
+			wantErr: "audit log: POLICY has a YAML directive (a line that starts with %). lok8s reads a policy file only as plain YAML. Remove the directive."},
+		{name: "duplicate key", content: "kind: Policy\n" + testAuditPolicy,
+			wantErr: "audit log: POLICY has a duplicate key. lok8s reads a policy file only as plain YAML. Keep each key once."},
+		{name: "alias", content: "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - &r {level: None}\n  - *r\n",
+			wantErr: "audit log: POLICY has an alias (*name). lok8s reads a policy file only as plain YAML. Write the value out in full."},
+		{name: "merge key", content: "<<: {apiVersion: audit.k8s.io/v1, kind: Policy}\nrules: [{level: None}]\n",
+			wantErr: "audit log: POLICY has a merge key (<<). lok8s reads a policy file only as plain YAML. Write the keys out in full."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,28 +272,139 @@ func TestGenerateConfigAuditLogRefusesBadPolicyFile(t *testing.T) {
 			if !strings.Contains(errBuf.String(), want) {
 				t.Errorf("stderr = %q\nwant  %q", errBuf.String(), want)
 			}
+			assertNoManifest(t, outDir)
 		})
 	}
 }
 
-func TestIsAuditPolicyFirstDocument(t *testing.T) {
-	// yq's document_index skips a document without content; an explicit
-	// null document counts. The Go check follows yq.
-	cases := map[string]bool{
-		testAuditPolicy:                               true,
-		"---\n" + testAuditPolicy:                     true,
-		"---\n---\n" + testAuditPolicy:                true,
-		testAuditPolicy + "---\n":                     true,
-		"null\n---\n" + testAuditPolicy:               false,
-		"kind: Policy\napiVersion: audit.k8s.io/v1\n": true,
-		"apiVersion: audit.k8s.io/v1\n":               false,
-		"hello\n":                                     false,
+func TestGenerateConfigAuditLogUnreadablePolicy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file without read permission")
 	}
-	for content, want := range cases {
-		path := filepath.Join(t.TempDir(), "p.yaml")
-		testutil.WriteFile(t, path, content)
-		if got := isAuditPolicy(path); got != want {
-			t.Errorf("isAuditPolicy(%q) = %v, want %v", content, got, want)
+	d, cy, outDir := genDriver(t)
+	errBuf := d.deps.Stderr.(interface{ String() string })
+	policy := auditSpec(t, cy, "  auditLog:\n    policy: audit-policy.yaml\n")
+	if err := os.Chmod(policy, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(policy, 0o600) })
+	err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	want := "audit log: cannot read the policy file " + policy + ". Make it readable for the user that runs lo."
+	if !strings.Contains(errBuf.String(), want) {
+		t.Errorf("stderr = %q\nwant  %q", errBuf.String(), want)
+	}
+	// The cause stays on the error chain.
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("error %v does not wrap the permission error", err)
+	}
+}
+
+func TestGenerateConfigAuditLogRefusalKeepsTheOldManifest(t *testing.T) {
+	// A refused render must not replace (or truncate) the manifest of the
+	// last good render.
+	d, cy, outDir := genDriver(t)
+	auditSpec(t, cy, "  auditLog:\n    policy: audit-policy.yaml\n")
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err != nil {
+		t.Fatal(err)
+	}
+	good, err := os.ReadFile(filepath.Join(outDir, "kubeone.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, cy, testSpecYAML+"  auditLog:\n    policy: audit-policy.yaml\n    maxAge: 0\n")
+	if err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir); err == nil {
+		t.Fatal("expected failure")
+	}
+	now, err := os.ReadFile(filepath.Join(outDir, "kubeone.yaml"))
+	if err != nil || string(now) != string(good) {
+		t.Errorf("the last good manifest changed after a refused render (err %v)", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(outDir, ".kubeone.yaml.*")); len(left) > 0 {
+		t.Errorf("temp files left: %v", left)
+	}
+}
+
+func TestProvisionChecksAuditLogBeforeTheInfrastructure(t *testing.T) {
+	clearVarEnv(t)
+	prov := &fakeProvider{}
+	d, _, errBuf, p := testDriver(t, prov)
+	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, cy, testSpecYAML+"  auditLog:\n    policy: audit-policy.yaml\n    maxBackups: 3\n")
+	if err := d.Provision(t.Context(), "test.lok8s.dev"); err == nil {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(errBuf.String(), "spec.auditLog.maxBackups") {
+		t.Errorf("stderr = %q", errBuf.String())
+	}
+	for _, l := range prov.log {
+		if strings.HasPrefix(l, "provision:") {
+			t.Fatalf("the provider provisioned before the spec.auditLog check: %v", prov.log)
+		}
+	}
+}
+
+// auditPolicyFixtures lists tests/fixtures/audit-policy/<verdict>--<case>.yaml.
+// The same files drive the bats twin and hack/parity-orchestrate.sh.
+func auditPolicyFixtures(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(testutil.RepoRoot(t), "tests", "fixtures", "audit-policy", "*--*.yaml"))
+	if err != nil || len(files) < 20 {
+		t.Fatalf("audit policy fixtures missing (%d found, err %v)", len(files), err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		out[f] = strings.SplitN(filepath.Base(f), "--", 2)[0]
+	}
+	return out
+}
+
+func TestAuditPolicyVerdictFixtures(t *testing.T) {
+	seen := map[string]bool{}
+	for path, want := range auditPolicyFixtures(t) {
+		got, _ := auditPolicyVerdict(path)
+		if got != want {
+			t.Errorf("%s: verdict %q, want %q", filepath.Base(path), got, want)
+		}
+		seen[want] = true
+	}
+	// Anti-vacuity: every verdict a file can get has a fixture.
+	for _, v := range []string{policyOK, policyDirective, policyInvalid, policyDuplicate, policyAlias, policyMerge, policyNotPolicy, policyNoRules} {
+		if !seen[v] {
+			t.Errorf("no fixture for the verdict %q", v)
+		}
+	}
+}
+
+// TestAuditPolicyVerdictMatchesYq runs the bash twin's own verdict
+// function on every fixture and compares it with the Go verdict. It needs
+// bash and the pinned yq (.bin/yq); it skips without them, and fails
+// without them under CI=true.
+func TestAuditPolicyVerdictMatchesYq(t *testing.T) {
+	root := testutil.RepoRoot(t)
+	yq := filepath.Join(root, ".bin", "yq")
+	if _, err := os.Stat(yq); err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("the pinned yq is missing under CI: %v", err)
+		}
+		t.Skip("no .bin/yq (b install)")
+	}
+	config := filepath.Join(root, ".lok8s", "drivers", "kubeone", "config")
+	for path := range auditPolicyFixtures(t) {
+		goVerdict, _ := auditPolicyVerdict(path)
+		// Source the twin with the argsh pieces stubbed: only the verdict
+		// function runs.
+		script := `import() { :; }; source "$1"; kubeone::_audit_policy_verdict "$2"`
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", config, path)
+		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, ".bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: the bash verdict failed: %v", filepath.Base(path), err)
+		}
+		if bashVerdict := strings.TrimSpace(string(out)); bashVerdict != goVerdict {
+			t.Errorf("%s: Go %q, bash %q", filepath.Base(path), goVerdict, bashVerdict)
 		}
 	}
 }

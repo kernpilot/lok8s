@@ -140,14 +140,17 @@ YAML
 }
 
 # _refused <spec-lines> <expected error text> — generate_config must fail with
-# the text, and the refused block must not reach the manifest.
+# the text, and leave no kubeone.yaml and no temp file behind (the render
+# writes a temp file and renames it only on success).
 _refused() {
   _spec "${1}"
+  rm -rf "${OUT}"
   run kubeone::generate_config "${CY}" hetzner "${OUT}"
   assert_failure
   assert_output --partial "${2}"
-  run yq -r '.features | has("staticAuditLog")' "${M}"
-  assert_output "false"
+  [ ! -e "${M}" ] || { echo "a refused render left ${M}" >&2; return 1; }
+  local left; left=$(find "${OUT}" -name '.kubeone.yaml.*' 2>/dev/null)
+  [ -z "${left}" ] || { echo "a refused render left temp files: ${left}" >&2; return 1; }
 }
 
 @test "generate_config refuses a spec.auditLog that is not a mapping" {
@@ -195,20 +198,81 @@ _refused() {
     "audit log: policy file not found: ${POLICY}"
 }
 
-@test "generate_config refuses a policy file that is not an audit.k8s.io/v1 Policy" {
-  local content
-  local want="audit log: ${POLICY} is not an audit Policy. The file must be YAML with apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."
-  local -a contents=(
-    $'apiVersion: audit.k8s.io/v1\nkind: Event'
-    $'apiVersion: audit.k8s.io/v1beta1\nkind: Policy'
-    ''
-    $'- apiVersion: audit.k8s.io/v1\n  kind: Policy'
-    'apiVersion: ['
-    $'apiVersion: audit.k8s.io/v1\nkind: Policy\n---\nrules: ['
-  )
-  for content in "${contents[@]}"; do
-    printf '%s\n' "${content}" >"${POLICY}"
-    _refused '  auditLog:
-    policy: audit-policy.yaml' "${want}"
+@test "generate_config names the reason when the policy file is refused" {
+  local p="${POLICY}"
+  local plain="lok8s reads a policy file only as plain YAML."
+  local spec='  auditLog:
+    policy: audit-policy.yaml'
+  printf 'apiVersion: audit.k8s.io/v1\nkind: Event\nrules: [{level: None}]\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} is not an audit Policy. The file must have apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."
+  printf 'apiVersion: audit.k8s.io/v1\nkind: Policy\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} has no rules. The apiserver does not start with a policy that has no rules. Add at least one rule to the rules list."
+  printf 'apiVersion: [\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."
+  printf '%%YAML 1.2\n---\napiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None}]\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} has a YAML directive (a line that starts with %). ${plain} Remove the directive."
+  printf 'kind: Policy\napiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None}]\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} has a duplicate key. ${plain} Keep each key once."
+  printf 'apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - &r {level: None}\n  - *r\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} has an alias (*name). ${plain} Write the value out in full."
+  printf '<<: {apiVersion: audit.k8s.io/v1, kind: Policy}\nrules: [{level: None}]\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} has a merge key (<<). ${plain} Write the keys out in full."
+}
+
+@test "generate_config refuses an unreadable policy file with a read error" {
+  [[ "$(id -u)" != 0 ]] || skip "root reads a file without read permission"
+  chmod 000 "${POLICY}"
+  _refused '  auditLog:
+    policy: audit-policy.yaml' \
+    "audit log: cannot read the policy file ${POLICY}. Make it readable for the user that runs lo."
+  chmod 600 "${POLICY}"
+}
+
+@test "kubeone::_audit_policy_verdict gives every shared fixture its verdict" {
+  # tests/fixtures/audit-policy/<verdict>--<case>.yaml: the same files drive
+  # the Go test (TestAuditPolicyVerdictFixtures) and hack/parity-orchestrate.sh.
+  local f want got n=0
+  local -a wrong=()
+  for f in "${FIXTURES_DIR}"/audit-policy/*--*.yaml; do
+    want="${f##*/}"; want="${want%%--*}"
+    got=$(kubeone::_audit_policy_verdict "${f}")
+    [[ "${got}" == "${want}" ]] || wrong+=("${f##*/}: got ${got}")
+    n=$(( n + 1 ))
   done
+  (( n >= 20 )) || { echo "only ${n} fixtures found" >&2; return 1; }
+  (( ${#wrong[@]} == 0 )) || { printf '%s\n' "${wrong[@]}" >&2; return 1; }
+}
+
+@test "a refused render keeps the manifest of the last good render" {
+  _spec '  auditLog:
+    policy: audit-policy.yaml'
+  run kubeone::generate_config "${CY}" hetzner "${OUT}"
+  assert_success
+  cp "${M}" "${BATS_TEST_TMPDIR}/good.yaml"
+  _spec '  auditLog:
+    policy: audit-policy.yaml
+    maxAge: 0'
+  run kubeone::generate_config "${CY}" hetzner "${OUT}"
+  assert_failure
+  cmp -s "${M}" "${BATS_TEST_TMPDIR}/good.yaml" || { echo "the last good manifest changed" >&2; return 1; }
+  [ -z "$(find "${OUT}" -name '.kubeone.yaml.*')" ]
+}
+
+@test "driver::provision checks spec.auditLog before the infrastructure step" {
+  # The real check, wired into the real driver::provision: a typo must fail
+  # before provider::provision reconciles any server.
+  source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/main"
+  :args() { domain="ko.cloud"; }
+  kubehz::read_config() { export LOK8S_KUBEHZ_HOSTING="self-hosted"; return 0; }
+  local trace="${BATS_TEST_TMPDIR}/trace"; : > "${trace}"
+  provider::provision() { echo provision >> "${trace}"; return 0; }
+  export PROVIDER_CONFIG_FILE="${BATS_TEST_TMPDIR}/provider.json" PROVIDER_NAME=hetzner
+  _spec '  auditLog:
+    policy: audit-policy.yaml
+    maxBackups: 3'
+  local rc=0
+  driver::provision ko.cloud 2>"${BATS_TEST_TMPDIR}/err" || rc=$?
+  [ "${rc}" -ne 0 ]
+  grep -q "spec.auditLog.maxBackups" "${BATS_TEST_TMPDIR}/err"
+  [ ! -s "${trace}" ] || { echo "provider::provision ran before the spec.auditLog check" >&2; return 1; }
 }

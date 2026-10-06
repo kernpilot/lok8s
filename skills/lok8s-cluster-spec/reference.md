@@ -75,7 +75,9 @@ spec:
   oidc: { issuer: ..., clientID: ... }     # same field names as Lo
   auditLog:                                # optional → features.staticAuditLog (enable + ABSOLUTE policyFilePath)
     policy: audit-policy.yaml              # REQUIRED in auditLog; relative to the cluster file; must be
-                                           #   apiVersion audit.k8s.io/v1, kind Policy (checked at render)
+                                           #   apiVersion audit.k8s.io/v1, kind Policy, a non-empty rules list,
+                                           #   plain YAML (no %directive / *alias / << / duplicate key);
+                                           #   checked BEFORE provider provision and again at render
     maxAge: 30                             # optional ints 1..999999999 → logMaxAge / logMaxBackup / logMaxSize;
     maxBackup: 10                          #   unset = KubeOne default (30 / 3 / 100). Unknown keys are refused.
     maxSize: 100                           # Running cluster: needs `kubeone apply --force-upgrade` (lo has no flag yet)

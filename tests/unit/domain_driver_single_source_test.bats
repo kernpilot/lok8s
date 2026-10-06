@@ -237,7 +237,6 @@ _allowed_kind_reads() {
 .lok8s/libs/lint|spec_runtime=$(yq -r '.spec.kind // .kind // ""' "${spec_file}")
 .lok8s/libs/kubehz/hosted|kind=$(yq -r '.kind' "${cluster_yaml}")
 .lok8s/utils/kapply.sh|yq -r 'select(.kind == "Deployment"
-.lok8s/drivers/kubeone/config|ok=$(yq -r 'select(document_index == 0) | (.apiVersion == "audit.k8s.io/v1" and .kind == "Policy")'
 ALLOW
 }
 # Reasons, in the same order:
@@ -267,9 +266,6 @@ ALLOW
 #                       and third `.kind` in that select (each preceded by a
 #                       space, not by `(`). The row is the price of catching
 #                       `yq -r .kind` and `| .kind`, and it is a cheap one.
-#   drivers/kubeone/config — kubeone::_inject_audit_log checks that the
-#                       spec.auditLog policy FILE is an audit.k8s.io/v1 Policy.
-#                       A Kubernetes object kind in a user file, not a driver.
 
 # Every spelling the sweep is claimed to cover, as a line it must match. This
 # is the gate's real anti-vacuity check: it does not depend on any particular

@@ -128,6 +128,13 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return ui.Handled(errors.New("kubeone: no provider loaded"))
 	}
 
+	// 1b. Check spec.auditLog and its policy file BEFORE the infrastructure
+	// step: a typo must not wait for a full server reconcile. The merge in
+	// GenerateConfig checks it again.
+	if _, err := d.readAuditLog(cy); err != nil {
+		return err
+	}
+
 	// 2. Provision infrastructure via the provider contract. Guarded:
 	// without it a failed INFRASTRUCTURE reconcile would fall through to
 	// the manifest render and `kubeone apply` against hosts that were
