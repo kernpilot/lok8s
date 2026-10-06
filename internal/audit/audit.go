@@ -21,23 +21,72 @@
 package audit
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
-// Supported Kubernetes minors. A static list is intentional (cluster-free).
-// UPDATE THIS when new minors release or old ones reach End-of-Life — see
-// https://kubernetes.io/releases/ (upstream supports the newest 3 minors; a
-// minor is EOL ~14 months after release). Mirrors _AUDIT_K8S_SUPPORTED_MINORS
-// in .lok8s/libs/audit — keep the two lists in lockstep.
-var k8sSupportedMinors = []string{"1.34", "1.35", "1.36"}
+// k8sMinorEOL is the Kubernetes support table, newest minor first: the date
+// (UTC, yyyy-mm-dd) upstream patch support ends for each minor. A static table
+// is intentional (the audit is cluster-free and offline). A minor is supported
+// while its date is in the future, so a minor reaches End-of-Life on its date
+// with no change here. ADD a row when a new minor releases (about every four
+// months; https://kubernetes.io/releases/, https://endoflife.date/kubernetes).
+// Keep at least one row past its EOL: it names the oldest minor the table
+// knows. Mirrors _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit;
+// TestK8sMinorEOLMatchesBash fails when the two differ.
+var k8sMinorEOL = []k8sMinorRow{
+	{"1.37", "2027-10-28"},
+	{"1.36", "2027-06-28"},
+	{"1.35", "2027-02-28"},
+	{"1.34", "2026-10-27"},
+	{"1.33", "2026-06-28"},
+}
 
-const k8sLatestMinor = "1.36"
+// k8sMinorRow is one row of k8sMinorEOL.
+type k8sMinorRow struct {
+	minor string
+	eol   string
+}
+
+// k8sTodayEnv pins the audit's date (yyyy-mm-dd) for tests, in both
+// implementations (bash: the same variable). Unset, the audit uses today (UTC).
+const k8sTodayEnv = "_AUDIT_TODAY"
+
+var isoDateRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+
+// k8sToday is the date the support table is read against (bash:
+// audit::_k8s_today).
+func k8sToday() string {
+	if v := os.Getenv(k8sTodayEnv); isoDateRe.MatchString(v) {
+		return v
+	}
+	return time.Now().UTC().Format("2006-01-02")
+}
+
+// k8sSupportedMinors are the minors whose EOL date is after `today`, oldest
+// first (bash: audit::_k8s_supported).
+func k8sSupportedMinors(today string) []string {
+	var out []string
+	for _, row := range slices.Backward(k8sMinorEOL) {
+		if row.eol > today {
+			out = append(out, row.minor)
+		}
+	}
+	return out
+}
+
+// k8sLatestMinor is the newest minor the table knows.
+func k8sLatestMinor() string {
+	return k8sMinorEOL[0].minor
+}
 
 // domainNameRe is the same path-traversal guard bootstrap::dispatch /
 // provision::resolve_spec use (and domain.NameRe): reject an injected domain

@@ -163,20 +163,30 @@ CI example:
     sarif_file: audit.sarif
 ```
 
-## Kubernetes version support list
+## Kubernetes version support table
 
-The supported-minors list is static (the audit is cluster-free) and lives in
+The audit is cluster-free, so the support table is static. It holds one row
+per minor with the date upstream patch support ends, newest first. The Go
+binary keeps it in `internal/audit/audit.go` (`k8sMinorEOL`), the bash tree in
 `.lok8s/libs/audit`:
 
 ```bash
-_AUDIT_K8S_SUPPORTED_MINORS="1.34 1.35 1.36"
-_AUDIT_K8S_LATEST_MINOR="1.36"
+_AUDIT_K8S_MINOR_EOL="1.37:2027-10-28 1.36:2027-06-28 1.35:2027-02-28 1.34:2026-10-27 1.33:2026-06-28"
 ```
 
-Update it when new minors release or old ones reach End-of-Life. See the
-[Kubernetes releases page](https://kubernetes.io/releases/). The audit reports
-a version newer than `_AUDIT_K8S_LATEST_MINOR` as a low warn ("the support list
-may be stale"), so a bump reminds you to refresh the list.
+A minor is supported while its date is in the future. So a minor reaches
+End-of-Life on its date with no change to the table. Add a row when a new
+minor releases (about every four months; see the
+[Kubernetes releases page](https://kubernetes.io/releases/) and
+[endoflife.date](https://endoflife.date/kubernetes)), in both places: a test
+fails when the two tables differ.
+
+The audit reports a version newer than the newest row as a low warn ("the
+support list may be stale"). When every row is past its date, it warns that
+the table is out of date.
+
+`_AUDIT_TODAY` (yyyy-mm-dd) pins the day the table is read against. The tests
+use it; leave it unset otherwise.
 
 ## Addon overview (`lo addons --detail`)
 

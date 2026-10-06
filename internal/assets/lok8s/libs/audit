@@ -43,15 +43,16 @@ import ^utils/domain
 import ^utils/verbose
 import ^libs/bootstrap
 
-# ── Supported Kubernetes minors ──────────────────────────────────────────────
-# A static list is intentional (cluster-free). UPDATE THIS when new minors
-# release or old ones reach End-of-Life — see https://kubernetes.io/releases/
-# (upstream supports the newest 3 minors; a minor is EOL ~14 months after
-# release). Verified 2026-07-06 against endoflife.date: 1.34 EOL 2026-10-27,
-# 1.35 EOL 2027-02-28, 1.36 EOL 2027-06-28 — while 1.33 reached EOL 2026-06-28
-# (so a 1.33 cluster now flags EOL).
-_AUDIT_K8S_SUPPORTED_MINORS="1.34 1.35 1.36"
-_AUDIT_K8S_LATEST_MINOR="1.36"
+# ── Kubernetes support table ─────────────────────────────────────────────────
+# Newest minor first, "<minor>:<EOL date, UTC yyyy-mm-dd>". A static table is
+# intentional (cluster-free, offline). A minor is supported while its date is
+# in the future, so a minor reaches End-of-Life on its date with no change
+# here. ADD a row when a new minor releases (about every four months; see
+# https://kubernetes.io/releases/ and https://endoflife.date/kubernetes). Keep
+# at least one row past its EOL. Mirrors k8sMinorEOL in
+# internal/audit/audit.go; TestK8sMinorEOLMatchesBash fails when they differ.
+# Verified 2026-10-06 against endoflife.date.
+_AUDIT_K8S_MINOR_EOL="1.37:2027-10-28 1.36:2027-06-28 1.35:2027-02-28 1.34:2026-10-27 1.33:2026-06-28"
 
 # Findings accumulator — TSV lines: id \t title \t severity \t status \t detail
 # \t remediation \t file \t lineno. The last two are OPTIONAL (empty when a
@@ -456,45 +457,81 @@ audit::check_k8s_version() {
   spec_uri=$(audit::_rel_uri "${spec_file}")
   spec_lineno=$(audit::_spec_line "${spec_file}" '.spec.kubernetes.version')
 
+  local supported latest
+  supported=$(audit::_k8s_supported "$(audit::_k8s_today)")
+  latest="${_AUDIT_K8S_MINOR_EOL%%:*}"
+
   local raw
   raw=$(yq -r '.spec.kubernetes.version // ""' "${spec_file}" 2>/dev/null || echo "")
   raw="${raw%%@*}"; raw="${raw#v}"
   if [[ ! "${raw}" =~ ^([0-9]+)\.([0-9]+) ]]; then
     audit::_emit "${id}" "${title}" medium unknown \
       "Could not parse spec.kubernetes.version ('${raw:-<empty>}')." \
-      "Set spec.kubernetes.version to a supported release, e.g. v${_AUDIT_K8S_LATEST_MINOR}.x." \
+      "Set spec.kubernetes.version to a supported release, e.g. v${latest}.x." \
       "${spec_uri}" "${spec_lineno}"
     return 0
   fi
   local minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
   local rank=$(( BASH_REMATCH[1] * 1000 + BASH_REMATCH[2] ))
-  local oldest="${_AUDIT_K8S_SUPPORTED_MINORS%% *}"
-  local oldest_rank latest_rank
-  oldest_rank=$(audit::_minor_rank "${oldest}")
-  latest_rank=$(audit::_minor_rank "${_AUDIT_K8S_LATEST_MINOR}")
+  local latest_rank
+  latest_rank=$(audit::_minor_rank "${latest}")
 
-  # shellcheck disable=SC2086  # deliberate word-split: the constant is a space-separated list
-  if audit::_in_list "${minor}" ${_AUDIT_K8S_SUPPORTED_MINORS}; then
+  # shellcheck disable=SC2086  # deliberate word-split: a space-separated list
+  if audit::_in_list "${minor}" ${supported}; then
     audit::_emit "${id}" "${title}" high pass \
-      "Kubernetes ${minor} is within the supported window (${_AUDIT_K8S_SUPPORTED_MINORS// /, })." \
+      "Kubernetes ${minor} is within the supported window (${supported// /, })." \
       "Keep upgrading within the window; plan the next minor before this one reaches EOL." \
       "${spec_uri}" "${spec_lineno}"
     return 0
   fi
   if (( rank > latest_rank )); then
     audit::_emit "${id}" "${title}" low warn \
-      "Kubernetes ${minor} is newer than the newest minor this audit knows (${_AUDIT_K8S_LATEST_MINOR}) — the support list may be stale." \
-      "Update _AUDIT_K8S_SUPPORTED_MINORS in .lok8s/libs/audit (see https://kubernetes.io/releases/)." \
+      "Kubernetes ${minor} is newer than the newest minor this audit knows (${latest}) — the support list may be stale." \
+      "Add the minor and its EOL date to the support table (k8sMinorEOL in internal/audit/audit.go and _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit; see https://kubernetes.io/releases/)." \
       "${spec_uri}" "${spec_lineno}"
     return 0
   fi
+  # Every row of the table is past its EOL: the table itself is out of date,
+  # and no minor can be called supported.
+  if [[ -z "${supported}" ]]; then
+    audit::_emit "${id}" "${title}" low warn \
+      "Kubernetes ${minor}: every minor this audit knows is past its EOL date. The support table is out of date." \
+      "Add the newer minors and their EOL dates to the support table (k8sMinorEOL in internal/audit/audit.go and _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit; see https://kubernetes.io/releases/)." \
+      "${spec_uri}" "${spec_lineno}"
+    return 0
+  fi
+  local oldest="${supported%% *}"
   local severity="high" status="fail"
   audit::_prod_intent "${kind}" || { severity="medium"; status="warn"; }
   audit::_emit "${id}" "${title}" "${severity}" "${status}" \
     "Kubernetes ${minor} is End-of-Life (oldest supported minor: ${oldest}) — no upstream security patches." \
-    "Upgrade to a supported minor (${_AUDIT_K8S_SUPPORTED_MINORS// /, }); for KubeOne bump spec.kubernetes.version and run 'lo provision'." \
+    "Upgrade to a supported minor (${supported// /, }); for KubeOne bump spec.kubernetes.version and run 'lo provision'." \
     "${spec_uri}" "${spec_lineno}"
   return 0
+}
+
+# audit::_k8s_today → the date (UTC yyyy-mm-dd) the support table is read
+# against. _AUDIT_TODAY pins it for tests, in both implementations.
+audit::_k8s_today() {
+  if [[ "${_AUDIT_TODAY:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "${_AUDIT_TODAY}"
+    return 0
+  fi
+  date -u +%Y-%m-%d
+}
+
+# audit::_k8s_supported <today> → the minors whose EOL date is after <today>,
+# oldest first, space-separated.
+audit::_k8s_supported() {
+  local today="${1//-/}" row eol out=""
+  for row in ${_AUDIT_K8S_MINOR_EOL}; do
+    eol="${row#*:}"
+    # Numeric, not [[ > ]]: a string compare in [[ ]] follows the locale.
+    if (( 10#${eol//-/} > 10#${today} )); then
+      out="${row%%:*}${out:+ ${out}}"
+    fi
+  done
+  echo "${out}"
 }
 
 # Privileged / host-level workloads — privileged securityContext, hostNetwork,
