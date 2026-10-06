@@ -57,6 +57,7 @@ _load_provision() {
   # :args normally parses the arg spec; here the domain is passed positionally.
   :args() { domain="test.dev"; }
   kubehz::read_config()      { export LOK8S_KUBEHZ_HOSTING="self-hosted"; return 0; }
+  kubeone::_audit_log_read() { return 0; }
   provider::provision()      { return 0; }
   kubeone::generate_config() { return 0; }
   _append_inventory()        { return 0; }
@@ -109,6 +110,25 @@ _seed_previous_kubeconfig() {
   [ ! -s "${trace}" ] || {
     echo "steps ran AFTER provider::provision failed:" >&2
     sed 's/^/    /' "${trace}" >&2
+    return 1
+  }
+}
+
+@test "a FAILED spec.auditLog check stops before the infrastructure step" {
+  _load_provision
+  _seed_previous_kubeconfig
+  local trace="${BATS_TEST_TMPDIR}/trace"; : > "${trace}"
+  kubeone::_audit_log_read() { return 1; }
+  provider::provision()      { echo provision >> "${trace}"; return 0; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although the spec.auditLog check FAILED" >&2
+    return 1
+  }
+  [ ! -s "${trace}" ] || {
+    echo "provider::provision ran although the spec.auditLog check failed" >&2
     return 1
   }
 }

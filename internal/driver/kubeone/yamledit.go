@@ -18,6 +18,11 @@ func loadYAMLDoc(path string) (*yaml.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseYAMLDoc(raw)
+}
+
+// parseYAMLDoc is loadYAMLDoc on bytes already read.
+func parseYAMLDoc(raw []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return nil, err
@@ -28,9 +33,12 @@ func loadYAMLDoc(path string) (*yaml.Node, error) {
 	return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}, nil
 }
 
-// saveYAMLDoc writes the mapping node back with 2-space indentation.
+// saveYAMLDoc writes the mapping node back with 2-space indentation. Every
+// caller rewrites the 0600 temp manifest of GenerateConfig in place, and
+// that manifest can hold registry credentials: a file this call creates
+// gets 0600 as well (an existing file keeps its mode).
 func saveYAMLDoc(path string, root *yaml.Node) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) // #nosec G302 -- rewrites a spec/values YAML in place; no secret material
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -98,4 +106,9 @@ func boolNode(v bool) *yaml.Node {
 		val = "true"
 	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: val}
+}
+
+// intNode is an integer scalar; v must already be validated digits.
+func intNode(v string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: v}
 }

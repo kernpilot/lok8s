@@ -55,6 +55,147 @@ etcdctl get /registry/secrets/default/enc-test | grep -aoE 'k8s:enc:[a-z0-9:_-]+
 `aescbc` is KubeOne's default; `aes-gcm` is marginally stronger if you choose
 to rotate up later.
 
+## Apiserver audit log
+
+The apiserver can write an audit log: one line for each request, with the
+user, the verb, the object and the time. Use it to record who reads Secrets
+or opens a shell in a pod, for example operator access to tenant
+namespaces. It is a control-plane setting, like encryption at rest, so the
+KubeOne driver sets it. It is off by default. You turn it on per cluster in
+the cluster spec:
+
+```yaml
+# clusters/<domain>/cluster.lok8s.yaml
+spec:
+  auditLog:
+    policy: audit-policy.yaml   # required: the policy file, relative to this file
+    maxAge: 30                  # optional: days to keep old log files
+    maxBackup: 10               # optional: number of old log files to keep
+    maxSize: 100                # optional: size in MB before the log file rotates
+```
+
+| Field | Required | KubeOne field | Default |
+|-------|----------|---------------|---------|
+| `spec.auditLog.policy` | yes | `policyFilePath` | — |
+| `spec.auditLog.maxAge` | no | `logMaxAge` | `30` (KubeOne) |
+| `spec.auditLog.maxBackup` | no | `logMaxBackup` | `3` (KubeOne) |
+| `spec.auditLog.maxSize` | no | `logMaxSize` | `100` (KubeOne) |
+
+At `lo provision`, the driver adds KubeOne's `features.staticAuditLog` to the
+generated `clusters/<domain>/.kubeone/kubeone.yaml`. It sets `enable: true`,
+the **absolute** path of the policy file, and only the limits that you set.
+KubeOne applies its defaults to the other limits. The other features of the
+template (for example `encryptionProviders`) stay as they are. KubeOne then
+copies the policy file to each control-plane host and sets the apiserver
+audit flags. The apiserver writes the log to `/var/log/kubernetes/audit.log`
+on each control-plane host.
+
+The driver checks the spec and the policy file first, before the provider
+creates or changes a server. It checks them again when it writes the
+manifest.
+
+The driver writes the manifest to a temporary file (mode 0600: the manifest
+can hold registry credentials). It replaces `kubeone.yaml` only when every
+step succeeded, so a refusal never leaves a half-written manifest. When a
+first INT or TERM signal stops `lo`, the driver removes the temporary file.
+A second signal, or a HUP signal to the Go `lo`, ends `lo` at once. Then a
+file `.kubeone/.kubeone.yaml.*` can stay. Delete it, because it can hold
+registry credentials.
+
+The driver stops with an error that names the file or the value and the fix
+when:
+
+- `spec.auditLog` is not a mapping, or it has a field that is not in the
+  table above (for example the typo `maxBackups`),
+- `policy` is not set, or it is not a text value,
+- a limit is not a whole number from 1 to 999999999 (to use the KubeOne
+  default, leave the field out),
+- the policy file does not exist, or you cannot read it,
+- a document marker line has a value (for example `--- {…}` or `--- null`),
+- the first YAML document of the policy file is empty (for example two `---`
+  lines before the policy): the apiserver reads only the first document,
+- the first YAML document does not have `apiVersion: audit.k8s.io/v1` and
+  `kind: Policy`,
+- the policy has no rules (the apiserver does not start with such a
+  policy),
+- the policy file is not plain YAML: it has a directive (a line that starts
+  with `%`, for example `%YAML 1.2`), an anchor or an alias (`&name`,
+  `*name`), a merge key (`<<`) or a duplicate key. Different YAML readers
+  read these in different ways, so the driver refuses them. A comment after
+  `---` is fine.
+
+The driver does not check each rule in the policy. The apiserver reads the
+rules when it starts. A cluster with `spec.kubehz.hosting: hosted` does not
+use a KubeOne manifest, so the driver ignores `spec.auditLog` there.
+
+::: warning Existing clusters
+KubeOne changes a feature on running control planes only with
+`kubeone apply --force-upgrade` (see the KubeOne docs). `lo provision` runs a
+plain `kubeone apply`, and `lo` has no flag for the forced apply yet. When you
+add `spec.auditLog` to a running cluster, or change the policy file, run
+`lo provision` to render the manifest. Then run
+`kubeone apply --manifest kubeone.yaml --force-upgrade` in
+`clusters/<domain>/.kubeone/`, with the same credentials that `lo provision`
+uses.
+:::
+
+### Example policy
+
+::: details An EXAMPLE policy. Review it before you use it.
+This example records metadata (who, what and when, but not the object content)
+for Secrets, ConfigMaps, service account tokens, `exec`, `attach` and
+`port-forward` into pods, and for all requests of admin users. It records
+nothing else.
+
+```yaml
+# audit-policy.yaml: an EXAMPLE only. Change it for your cluster.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+# ResponseComplete has the same data as RequestReceived: skip the duplicate.
+omitStages:
+  - RequestReceived
+rules:
+  # Secrets, ConfigMaps and service account tokens. Metadata only, so the
+  # log never holds a secret value.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps", "serviceaccounts/token"]
+  # A shell or a tunnel into a pod.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+  # Every request of an admin user. system:masters is the group of the admin
+  # kubeconfig. Replace oidc:admins with your OIDC admin group (with the
+  # spec.oidc groupsPrefix).
+  - level: Metadata
+    userGroups: ["system:masters", "oidc:admins"]
+  # Nothing else.
+  - level: None
+```
+
+The apiserver uses the first rule that matches a request. Controllers read
+Secrets and ConfigMaps all the time, so the first rule can write many lines.
+To skip a noisy controller, add a `level: None` rule with its `users` before
+the first rule.
+:::
+
+### Verify the audit log
+
+On a control-plane host, show the new lines of the log. Then list Secrets
+from your machine:
+
+```bash
+# on a control-plane host
+sudo tail -f /var/log/kubernetes/audit.log
+# on your machine
+kubectl -n default get secrets
+```
+
+A line with `"resource":"secrets"`, your user name and `"verb":"list"` shows
+that the audit log works.
+
 ## Host firewall
 
 The other major hardening layer (a default-deny host firewall) is the
