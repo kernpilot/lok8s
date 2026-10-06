@@ -28,9 +28,12 @@ func loadYAMLDoc(path string) (*yaml.Node, error) {
 	return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}, nil
 }
 
-// saveYAMLDoc writes the mapping node back with 2-space indentation.
+// saveYAMLDoc writes the mapping node back with 2-space indentation. Every
+// caller rewrites the 0600 temp manifest of GenerateConfig in place, and
+// that manifest can hold registry credentials: a file this call creates
+// gets 0600 as well (an existing file keeps its mode).
 func saveYAMLDoc(path string, root *yaml.Node) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) // #nosec G302 -- rewrites a spec/values YAML in place; no secret material
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

@@ -54,8 +54,9 @@ const (
 	policyUnreadable = "unreadable" // the file cannot be read
 	policyDirective  = "directive"  // a line starts with % (yaml.v3 and the apiserver refuse %YAML 1.2; yq reads it)
 	policyInvalid    = "invalid"    // a document does not parse
+	policyEmptyFirst = "emptyfirst" // the first document is empty: the apiserver reads only that one
 	policyDuplicate  = "duplicate"  // a mapping has a key twice
-	policyAlias      = "alias"      // an alias (*name): Go follows it, yq does not compare through it
+	policyAlias      = "alias"      // an anchor or alias (&name, *name): Go follows it, yq does not compare through it
 	policyMerge      = "merge"      // a merge key (<<): yq follows it, a plain read does not
 	policyNotPolicy  = "notpolicy"  // the first document is not an audit.k8s.io/v1 Policy
 	policyNoRules    = "norules"    // no rules list, or an empty one: the apiserver refuses to start
@@ -165,10 +166,12 @@ func auditPolicyRefusal(verdict, path string) string {
 		return "audit log: " + path + " has a YAML directive (a line that starts with %). " + plain + " Remove the directive."
 	case policyInvalid:
 		return "audit log: " + path + " is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."
+	case policyEmptyFirst:
+		return "audit log: " + path + " starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."
 	case policyDuplicate:
 		return "audit log: " + path + " has a duplicate key. " + plain + " Keep each key once."
 	case policyAlias:
-		return "audit log: " + path + " has an alias (*name). " + plain + " Write the value out in full."
+		return "audit log: " + path + " has an anchor or an alias (&name, *name). " + plain + " Write the value out in full."
 	case policyMerge:
 		return "audit log: " + path + " has a merge key (<<). " + plain + " Write the keys out in full."
 	case policyNoRules:
@@ -182,10 +185,11 @@ func auditPolicyRefusal(verdict, path string) string {
 // kubeone::_audit_policy_verdict; the same words, the same order). The
 // error is the cause for the unreadable and invalid verdicts.
 //
-// The first document counts, as for the apiserver. Where yq and yaml.v3
-// read a construct differently (a directive, an alias, a merge key, a
-// duplicate key), both implementations refuse it, so they agree and the
-// file means one thing.
+// The first document counts, as for the apiserver: an empty first document
+// is refused (the apiserver reads it as null and does not start). Where yq
+// and yaml.v3 read a construct differently (a directive, an anchor or
+// alias, a merge key, a duplicate key), both implementations refuse it, so
+// they agree and the file means one thing.
 func auditPolicyVerdict(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -207,10 +211,15 @@ func auditPolicyVerdict(path string) (string, error) {
 		if err != nil {
 			return policyInvalid, err
 		}
-		// yq's document_index skips a document without content.
-		if first == nil && !emptyDocument(doc) {
+		if first == nil {
 			first = doc
 		}
+	}
+	// The text rule is the one the bash twin applies (yq skips an empty
+	// document, so the bash cannot ask yq). An empty first document that
+	// the rule does not see still fails below: its root is not a mapping.
+	if emptyFirstDocument(raw) {
+		return policyEmptyFirst, nil
 	}
 	if first == nil || len(first.Content) == 0 {
 		return policyNotPolicy, nil
@@ -238,10 +247,15 @@ func auditPolicyVerdict(path string) (string, error) {
 }
 
 // scanYAML walks every node, keys included (yq: `...`), and reports a
-// mapping with a key twice, an alias, and a merge key (<<).
+// mapping with a key twice, an anchor or alias, and a merge key (<<). Every
+// alias needs an anchor, so the bash counts anchors (yq: `anchor`); Go
+// counts both.
 func scanYAML(n *yaml.Node, dup, alias, merge *bool) {
 	if n == nil {
 		return
+	}
+	if n.Anchor != "" {
+		*alias = true
 	}
 	if n.Kind == yaml.AliasNode {
 		*alias = true
@@ -267,14 +281,31 @@ func scanYAML(n *yaml.Node, dup, alias, merge *bool) {
 	}
 }
 
-// emptyDocument reports a document without content (`---` with nothing
-// after it). An explicit `null` document has content.
-func emptyDocument(doc *yaml.Node) bool {
-	if len(doc.Content) == 0 {
-		return true
+// The empty-first-document rule (bash: kubeone::_audit_empty_first). Blank
+// lines and comment lines do not count. A document marker (--- or ...,
+// with an optional comment) followed by another marker or by nothing is an
+// empty first document. A comment or a blank line before the first --- is
+// not.
+var (
+	yamlSkipLineRe = regexp.MustCompile(`^\s*(#.*)?$`)
+	yamlMarkerRe   = regexp.MustCompile(`^(---|\.\.\.)(\s+#.*|\s*)$`)
+)
+
+func emptyFirstDocument(raw []byte) bool {
+	var lines []string
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if yamlSkipLineRe.MatchString(line) {
+			continue
+		}
+		lines = append(lines, line)
+		if len(lines) == 2 {
+			break
+		}
 	}
-	root := doc.Content[0]
-	return root.Kind == yaml.ScalarNode && root.Tag == "!!null" && root.Value == ""
+	if len(lines) == 0 || !yamlMarkerRe.MatchString(lines[0]) {
+		return false
+	}
+	return len(lines) == 1 || yamlMarkerRe.MatchString(lines[1])
 }
 
 // injectAuditLog merges spec.auditLog into the manifest as
@@ -286,14 +317,17 @@ func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
 	if err != nil || al == nil {
 		return err
 	}
-	failWrite := func(cause error) error {
-		msg := fmt.Sprintf("audit log: cannot write features.staticAuditLog into the manifest in %s. Make the directory writable, then run lo provision again.", filepath.Dir(manifest))
+	// Name the cause: a manifest that does not parse is a template
+	// problem; a write that fails is a disk or permission problem (bash:
+	// the same two lines).
+	fail := func(msg string, cause error) error {
 		ui.ErrorTo(d.stderr(), "%s", msg)
 		return ui.Handled(fmt.Errorf("kubeone: %s: %w", msg, cause))
 	}
+	dir := filepath.Dir(manifest)
 	doc, err := loadYAMLDoc(manifest)
 	if err != nil {
-		return failWrite(err)
+		return fail("audit log: the rendered manifest in "+dir+" does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again.", err)
 	}
 	sal := ensureMapPath(doc, "features", "staticAuditLog")
 	setKey(sal, "enable", boolNode(true))
@@ -303,7 +337,7 @@ func (d *Driver) injectAuditLog(manifest, clusterYAML string) error {
 		setKey(cfg, l.field, intNode(l.value))
 	}
 	if err := saveYAMLDoc(manifest, doc); err != nil {
-		return failWrite(err)
+		return fail("audit log: cannot write the manifest in "+dir+". Check the free disk space and the permissions of the directory, then run lo provision again.", err)
 	}
 	ui.DebugTo(d.stderr(), "audit log: features.staticAuditLog injected (policy %s)", al.policyPath)
 	return nil

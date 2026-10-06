@@ -245,7 +245,9 @@ func TestGenerateConfigAuditLogRefusesBadPolicyFile(t *testing.T) {
 		{name: "duplicate key", content: "kind: Policy\n" + testAuditPolicy,
 			wantErr: "audit log: POLICY has a duplicate key. lok8s reads a policy file only as plain YAML. Keep each key once."},
 		{name: "alias", content: "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - &r {level: None}\n  - *r\n",
-			wantErr: "audit log: POLICY has an alias (*name). lok8s reads a policy file only as plain YAML. Write the value out in full."},
+			wantErr: "audit log: POLICY has an anchor or an alias (&name, *name). lok8s reads a policy file only as plain YAML. Write the value out in full."},
+		{name: "empty first document", content: "---\n---\n" + testAuditPolicy,
+			wantErr: "audit log: POLICY starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."},
 		{name: "merge key", content: "<<: {apiVersion: audit.k8s.io/v1, kind: Policy}\nrules: [{level: None}]\n",
 			wantErr: "audit log: POLICY has a merge key (<<). lok8s reads a policy file only as plain YAML. Write the keys out in full."},
 	}
@@ -299,6 +301,57 @@ func TestGenerateConfigAuditLogUnreadablePolicy(t *testing.T) {
 	// The cause stays on the error chain.
 	if !errors.Is(err, fs.ErrPermission) {
 		t.Errorf("error %v does not wrap the permission error", err)
+	}
+	assertNoManifest(t, outDir)
+}
+
+func TestInjectAuditLogNamesTheCause(t *testing.T) {
+	// A manifest that does not parse is a template problem; a write that
+	// fails is a disk or permission problem. Each gets its own next step.
+	d, cy, outDir := genDriver(t)
+	errBuf := d.deps.Stderr.(interface{ String() string })
+	auditSpec(t, cy, "  auditLog:\n    policy: audit-policy.yaml\n")
+	manifest := filepath.Join(outDir, "kubeone.yaml")
+	testutil.WriteFile(t, manifest, "features: [\n")
+	err := d.injectAuditLog(manifest, cy)
+	want := "audit log: the rendered manifest in " + outDir + " does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+	if err == nil || !strings.Contains(errBuf.String(), want) {
+		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Errorf("error %v does not keep its cause", err)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("root writes a read-only file")
+	}
+	testutil.WriteFile(t, manifest, "features: {}\n")
+	if err := os.Chmod(manifest, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	err = d.injectAuditLog(manifest, cy)
+	want = "audit log: cannot write the manifest in " + outDir + ". Check the free disk space and the permissions of the directory, then run lo provision again."
+	if err == nil || !strings.Contains(errBuf.String(), want) {
+		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("error %v does not wrap the permission error", err)
+	}
+}
+
+func TestGenerateConfigNamesARenameFailure(t *testing.T) {
+	// kubeone.yaml is a directory that is not empty: the rename fails. The
+	// error names the file and the next step, and the temp file goes.
+	d, cy, outDir := genDriver(t)
+	errBuf := d.deps.Stderr.(interface{ String() string })
+	testutil.WriteFile(t, filepath.Join(outDir, "kubeone.yaml", "keep"), "x")
+	err := d.GenerateConfig(t.Context(), cy, "hetzner", outDir)
+	want := "cannot replace " + filepath.Join(outDir, "kubeone.yaml") + ". Check the permissions of " + outDir + ", then run lo provision again."
+	if err == nil || !strings.Contains(errBuf.String(), want) {
+		t.Errorf("err %v, stderr = %q\nwant  %q", err, errBuf.String(), want)
+	}
+	if left, _ := filepath.Glob(filepath.Join(outDir, ".kubeone.yaml.*")); len(left) > 0 {
+		t.Errorf("temp files left: %v", left)
 	}
 }
 
@@ -371,7 +424,7 @@ func TestAuditPolicyVerdictFixtures(t *testing.T) {
 		seen[want] = true
 	}
 	// Anti-vacuity: every verdict a file can get has a fixture.
-	for _, v := range []string{policyOK, policyDirective, policyInvalid, policyDuplicate, policyAlias, policyMerge, policyNotPolicy, policyNoRules} {
+	for _, v := range []string{policyOK, policyDirective, policyInvalid, policyEmptyFirst, policyDuplicate, policyAlias, policyMerge, policyNotPolicy, policyNoRules} {
 		if !seen[v] {
 			t.Errorf("no fixture for the verdict %q", v)
 		}
@@ -406,5 +459,21 @@ func TestAuditPolicyVerdictMatchesYq(t *testing.T) {
 		if bashVerdict := strings.TrimSpace(string(out)); bashVerdict != goVerdict {
 			t.Errorf("%s: Go %q, bash %q", filepath.Base(path), goVerdict, bashVerdict)
 		}
+	}
+}
+
+func TestSaveYAMLDocCreatesPrivateFiles(t *testing.T) {
+	// The manifest can hold registry credentials: a file saveYAMLDoc
+	// creates is 0600, like the temp manifest it normally rewrites.
+	path := filepath.Join(t.TempDir(), "new.yaml")
+	if err := saveYAMLDoc(path, strNode("x")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode = %o, want 600", perm)
 	}
 }

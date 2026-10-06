@@ -153,11 +153,15 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	// complete one stays). The temp file is 0600, like the bash mktemp:
 	// the registry merge can write credentials into it.
 	manifest := filepath.Join(outputDir, "kubeone.yaml")
+	diskHint := "Check the free disk space and the permissions of the directory, then run lo provision again."
 	tmp, err := os.CreateTemp(outputDir, ".kubeone.yaml.")
 	if err != nil {
-		ui.ErrorTo(stderr, "cannot create a temp file in %s. Make the directory writable, then run lo provision again.", outputDir)
+		ui.ErrorTo(stderr, "cannot create a temp file in %s. %s", outputDir, diskHint)
 		return ui.Handled(fmt.Errorf("kubeone: temp manifest: %w", err))
 	}
+	// Removed on every return but the success one (work is cleared after
+	// the rename). On SIGINT/SIGTERM lo cancels the context and this
+	// function returns normally, so the defer runs then too.
 	work := tmp.Name()
 	defer func() {
 		if work != "" {
@@ -169,7 +173,8 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 		werr = cerr
 	}
 	if werr != nil {
-		return werr
+		ui.ErrorTo(stderr, "cannot write the manifest in %s. %s", outputDir, diskHint)
+		return ui.Handled(fmt.Errorf("kubeone: write manifest: %w", werr))
 	}
 
 	// spec.oidc → features.openidConnect, merged into the manifest's
@@ -188,7 +193,8 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 		return err
 	}
 	if err := os.Rename(work, manifest); err != nil {
-		return err
+		ui.ErrorTo(stderr, "cannot replace %s. Check the permissions of %s, then run lo provision again.", manifest, outputDir)
+		return ui.Handled(fmt.Errorf("kubeone: rename manifest: %w", err))
 	}
 	work = ""
 	ui.DebugTo(stderr, "Generated kubeone.yaml at %s", manifest)

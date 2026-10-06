@@ -214,7 +214,9 @@ _refused() {
   printf 'kind: Policy\napiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None}]\n' >"${POLICY}"
   _refused "${spec}" "audit log: ${p} has a duplicate key. ${plain} Keep each key once."
   printf 'apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - &r {level: None}\n  - *r\n' >"${POLICY}"
-  _refused "${spec}" "audit log: ${p} has an alias (*name). ${plain} Write the value out in full."
+  _refused "${spec}" "audit log: ${p} has an anchor or an alias (&name, *name). ${plain} Write the value out in full."
+  printf -- '---\n---\napiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None}]\n' >"${POLICY}"
+  _refused "${spec}" "audit log: ${p} starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."
   printf '<<: {apiVersion: audit.k8s.io/v1, kind: Policy}\nrules: [{level: None}]\n' >"${POLICY}"
   _refused "${spec}" "audit log: ${p} has a merge key (<<). ${plain} Write the keys out in full."
 }
@@ -275,4 +277,112 @@ _refused() {
   [ "${rc}" -ne 0 ]
   grep -q "spec.auditLog.maxBackups" "${BATS_TEST_TMPDIR}/err"
   [ ! -s "${trace}" ] || { echo "provider::provision ran before the spec.auditLog check" >&2; return 1; }
+}
+
+# _fake_yq <dir> <script body>: a yq on PATH in front of the real one.
+_fake_yq() {
+  local dir="${1}" real; real=$(command -v yq)
+  mkdir -p "${dir}"
+  printf '#!/usr/bin/env bash\nREAL_YQ=%q\n%s\n' "${real}" "${2}" > "${dir}/yq"
+  chmod +x "${dir}/yq"
+}
+
+@test "a yq that cannot run the check is a yq failure, not an invalid file" {
+  # An older or broken yq must never turn a valid policy into "is not valid
+  # YAML". This yq parses, but fails on one read of the check.
+  _fake_yq "${BATS_TEST_TMPDIR}/fakeyq" 'for a in "$@"; do [[ "${a}" == *"anchor"* ]] && { echo "Error: unknown operator: anchor" >&2; exit 1; }; done
+exec "${REAL_YQ}" "$@"'
+  run env PATH="${BATS_TEST_TMPDIR}/fakeyq:${PATH}" bash -c 'import() { :; }; source "$1"; kubeone::_audit_policy_verdict "$2"' bash "${PATH_LOK8S}/drivers/kubeone/config" "${POLICY}"
+  assert_output "yqfailed: Error: unknown operator: anchor"
+
+  _spec '  auditLog:
+    policy: audit-policy.yaml'
+  local saved_path="${PATH}"
+  PATH="${BATS_TEST_TMPDIR}/fakeyq:${PATH}"
+  run kubeone::generate_config "${CY}" hetzner "${OUT}"
+  PATH="${saved_path}"
+  assert_failure
+  assert_output --partial "audit log: yq failed while it checked ${POLICY}: Error: unknown operator: anchor. Make sure that yq is a working v4 release (b install), then run lo provision again."
+  refute_output --partial "is not valid YAML"
+}
+
+@test "a yq that does not run at all is a yq failure, not an invalid file" {
+  _fake_yq "${BATS_TEST_TMPDIR}/brokenyq" 'echo "yq: cannot execute binary file" >&2; exit 126'
+  run env PATH="${BATS_TEST_TMPDIR}/brokenyq:${PATH}" bash -c 'import() { :; }; source "$1"; kubeone::_audit_policy_verdict "$2"' bash "${PATH_LOK8S}/drivers/kubeone/config" "${POLICY}"
+  assert_output "yqfailed: yq: cannot execute binary file"
+}
+
+@test "kubeone::_audit_policy_verdict gives the same verdicts on a second yq release" {
+  # The check uses only small reads that every yq v4 from v4.30 runs. The
+  # argsh test image ships its own yq (/usr/local/bin/yq) beside the pinned
+  # one; LOK8S_TEST_OLD_YQ names another (a manual run).
+  local other="${LOK8S_TEST_OLD_YQ:-/usr/local/bin/yq}" pinned
+  pinned=$(command -v yq)
+  [[ -x "${other}" ]] || skip "no second yq (${other})"
+  [[ "$(readlink -f "${other}")" != "$(readlink -f "${pinned}")" ]] || skip "the second yq is the pinned one"
+  mkdir -p "${BATS_TEST_TMPDIR}/otheryq"
+  ln -s "${other}" "${BATS_TEST_TMPDIR}/otheryq/yq"
+  local f want got
+  local -a wrong=()
+  for f in "${FIXTURES_DIR}"/audit-policy/*--*.yaml; do
+    want="${f##*/}"; want="${want%%--*}"
+    got=$(PATH="${BATS_TEST_TMPDIR}/otheryq:${PATH}" bash -c 'import() { :; }; source "$1"; kubeone::_audit_policy_verdict "$2"' bash "${PATH_LOK8S}/drivers/kubeone/config" "${f}")
+    [[ "${got}" == "${want}" ]] || wrong+=("${f##*/}: got ${got}")
+  done
+  (( ${#wrong[@]} == 0 )) || { "${other}" --version >&2; printf '%s\n' "${wrong[@]}" >&2; return 1; }
+}
+
+@test "a signal during the render leaves no temp file behind" {
+  # The temp manifest can hold registry credentials. A child shell renders,
+  # and a merge step sends it SIGTERM: the trap removes the temp file and
+  # the signal still ends the run.
+  _spec '  auditLog:
+    policy: audit-policy.yaml'
+  run bash -c '
+    import() { :; }
+    provider::detect() { echo hetzner; }
+    source "${4}/utils/verbose.sh"; source "${4}/utils/spec.sh"
+    source "${4}/utils/template.sh"; source "${4}/utils/oidc.sh"
+    source "${4}/drivers/kubeone/config"
+    kubeone::_inject_registry_auth() { kill -TERM $$; sleep 5; }
+    kubeone::generate_config "${1}" hetzner "${2}"
+    echo "not ended by the signal"
+  ' bash "${CY}" "${OUT}" unused "${PATH_LOK8S}"
+  [ "${status}" -eq 143 ] || { echo "status ${status}: ${output}" >&2; return 1; }
+  refute_output --partial "not ended by the signal"
+  [ -z "$(find "${OUT}" -name '.kubeone.yaml.*')" ] || { echo "temp file left: $(ls -a "${OUT}")" >&2; return 1; }
+  [ ! -e "${M}" ]
+}
+
+@test "the render restores the INT, TERM and HUP traps it found" {
+  _spec '  auditLog:
+    policy: audit-policy.yaml'
+  trap 'echo caller-int' INT
+  local before; before=$(trap -p INT TERM HUP)
+  kubeone::generate_config "${CY}" hetzner "${OUT}"
+  [ "$(trap -p INT TERM HUP)" = "${before}" ] || { echo "traps changed: $(trap -p INT TERM HUP)" >&2; return 1; }
+  trap - INT
+}
+
+@test "kubeone::_inject_audit_log names the cause: a manifest that does not parse, or a failed write" {
+  _spec '  auditLog:
+    policy: audit-policy.yaml'
+  local m="${BATS_TEST_TMPDIR}/m.yaml"
+  printf 'features: [\n' > "${m}"
+  run kubeone::_inject_audit_log "${m}" "${CY}"
+  assert_failure
+  assert_output --partial "audit log: the rendered manifest in ${BATS_TEST_TMPDIR} does not parse as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+  # yq -i writes through a temp file and falls back to writing in place:
+  # only a read-only file in a read-only directory makes it fail.
+  [[ "$(id -u)" != 0 ]] || skip "root writes a read-only file"
+  local ro="${BATS_TEST_TMPDIR}/ro"
+  mkdir -p "${ro}"
+  printf 'features: {}\n' > "${ro}/m.yaml"
+  chmod 400 "${ro}/m.yaml"
+  chmod 500 "${ro}"
+  run kubeone::_inject_audit_log "${ro}/m.yaml" "${CY}"
+  chmod 700 "${ro}"
+  chmod 600 "${ro}/m.yaml"
+  assert_failure
+  assert_output --partial "audit log: cannot write the manifest in ${ro}. Check the free disk space and the permissions of the directory, then run lo provision again."
 }
