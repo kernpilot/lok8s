@@ -505,4 +505,106 @@ for side in bash go; do
 done
 unset PARITY_KUSTOMIZE_LOG
 
+# ── lo provision — the KubeOne manifest (spec.auditLog, spec.oidc) ───────────
+# A mock provider whose provision succeeds and whose output holds no
+# inventory: the driver renders kubeone.yaml (generate_config: the core
+# template, then the spec.oidc and spec.auditLog merges), then stops at the
+# inventory step ("ssh private key not found"), before kubeone apply. The
+# streams are diffed, and so is the rendered manifest. The Go merge writes
+# with yaml.v3 and the bash with yq -i, so the CONTENT is the contract: both
+# sides are compared as sorted JSON.
+mkdir -p "${PROJ}/.lok8s/providers/mock"
+cat > "${PROJ}/.lok8s/providers/mock/main" <<'SH'
+#!/usr/bin/env argsh
+# mock — parity-harness provider: provision succeeds without touching
+# anything; the output holds no inventory, so the driver stops right after
+# the manifest render.
+provider::validate() { return 0; }
+provider::credential_data() { return 0; }
+provider::provision() { return 0; }
+provider::destroy() { echo "mock destroy must not run" >&2; return 1; }
+provider::output() { printf '{}\n'; }
+SH
+# ko_spec <domain> [spec lines…]: a KubeOne spec on the mock provider.
+ko_spec() {
+  local domain="${1}"; shift
+  mkdir -p "${PROJ}/clusters/${domain}"
+  printf 'cluster_name: %s\n' "${domain%%.*}" > "${PROJ}/clusters/${domain}/provider.yaml"
+  {
+    printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  kubernetes:\n    version: "1.31.0"\n' "${domain%%.*}"
+    printf '  provider:\n    name: mock\n    configRef: provider.yaml\n'
+    if (( $# )); then printf '%s\n' "$@"; fi
+  } > "${PROJ}/clusters/${domain}/cluster.lok8s.yaml"
+}
+ko_policy() {  # <file> [kind]: an audit Policy (or another kind)
+  printf 'apiVersion: audit.k8s.io/v1\nkind: %s\nrules:\n  - level: Metadata\n    resources:\n      - group: ""\n        resources: ["secrets"]\n  - level: None\n' "${2:-Policy}" > "${1}"
+}
+ko_spec audit.cloud '  oidc:' '    issuer: https://id.example.com' '    clientID: kubectl' \
+  '  auditLog:' '    policy: audit-policy.yaml' '    maxAge: 30' '    maxBackup: 10' '    maxSize: 100'
+ko_policy "${PROJ}/clusters/audit.cloud/audit-policy.yaml"
+ko_spec auditmin.cloud '  auditLog:' '    policy: ./sub/../../audit.cloud/audit-policy.yaml' '    maxBackup: 5'
+ko_spec auditnone.cloud
+ko_spec auditkind.cloud '  auditLog:' '    policy: audit-policy.yaml'
+ko_policy "${PROJ}/clusters/auditkind.cloud/audit-policy.yaml" Event
+ko_spec auditmiss.cloud '  auditLog:' '    policy: missing.yaml'
+ko_spec auditkey.cloud '  auditLog:' '    policy: audit-policy.yaml' '    maxBackups: 3'
+ko_spec auditlim.cloud '  auditLog:' '    policy: audit-policy.yaml' '    maxSize: "100"'
+ko_spec auditmap.cloud '  auditLog: true'
+
+# ko_check <domain> <argv…>: one case, plus the rendered manifest diffed.
+ko_pre() { rm -rf "${PROJ}/clusters/${KO_DOMAIN}/.kubeone"; }
+ko_post() {  # <impl>: the manifest as sorted JSON (or "absent")
+  local m="${PROJ}/clusters/${KO_DOMAIN}/.kubeone/kubeone.yaml"
+  if [[ -f "${m}" ]]; then
+    "${ROOT}/.bin/yq" -o=json -P 'sort_keys(..)' "${m}" | sed "s|${PROJ}|PROJ|g" > "${WORK}/kubeone.${1}.json"
+  else
+    echo absent > "${WORK}/kubeone.${1}.json"
+  fi
+}
+ko_check() {
+  KO_DOMAIN="${1}"; shift
+  local ok=1
+  PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post parity::run_pair "$@"
+  parity::compare "lo $*" - || ok=0
+  parity::state_same "${WORK}/kubeone.bash.json" "${WORK}/kubeone.go.json" "kubeone.yaml of lo $*" || ok=0
+  parity::record "${ok}" "lo $*"
+}
+# ko_has / ko_lacks <label> <file> <fixed string>: anti-vacuity pins. Parity
+# also passes when both sides drift together (or render nothing), so the Go
+# side's output is pinned to the contract as well.
+ko_has() {
+  if grep -qF -- "${3}" "${2}"; then echo "ok: ${1}"; else
+    echo "FAIL: ${1} — '${3}' not in ${2}:"; sed 's/^/  /' "${2}" | head -40
+    failures=$((failures + 1))
+  fi
+}
+ko_lacks() {
+  if grep -qF -- "${3}" "${2}"; then
+    echo "FAIL: ${1} — '${3}' found in ${2}"; failures=$((failures + 1))
+  else echo "ok: ${1}"; fi
+}
+ko_check audit.cloud provision --domain audit.cloud -f          # oidc + auditLog with every limit
+for want in '"staticAuditLog": {' '"enable": true' \
+  '"policyFilePath": "PROJ/clusters/audit.cloud/audit-policy.yaml"' \
+  '"logMaxAge": 30' '"logMaxBackup": 10' '"logMaxSize": 100' '"openidConnect": {' '"encryptionProviders": {'; do
+  ko_has "go: kubeone.yaml of audit.cloud has ${want}" "${WORK}/kubeone.go.json" "${want}"
+done
+ko_has "go: the provision stopped at the inventory step" "${WORK}/go.err" "ssh private key not found"
+ko_check auditmin.cloud provision --domain auditmin.cloud -f    # a relative path with .. cleaned; unset limits omitted
+ko_has "go: auditmin.cloud resolves the shared policy" "${WORK}/kubeone.go.json" '"policyFilePath": "PROJ/clusters/audit.cloud/audit-policy.yaml"'
+ko_lacks "go: auditmin.cloud leaves logMaxAge to KubeOne" "${WORK}/kubeone.go.json" '"logMaxAge"'
+ko_check auditnone.cloud provision --domain auditnone.cloud -f  # no spec.auditLog: no staticAuditLog
+ko_has "go: auditnone.cloud rendered a manifest" "${WORK}/kubeone.go.json" '"encryptionProviders": {'
+ko_lacks "go: auditnone.cloud has no staticAuditLog" "${WORK}/kubeone.go.json" 'staticAuditLog'
+ko_check auditkind.cloud provision --domain auditkind.cloud -f  # the policy file is not a Policy
+ko_has "go: auditkind.cloud refused" "${WORK}/go.err" "is not an audit Policy"
+ko_check auditmiss.cloud provision --domain auditmiss.cloud -f  # the policy file does not exist
+ko_has "go: auditmiss.cloud refused" "${WORK}/go.err" "policy file not found: PROJ/clusters/auditmiss.cloud/missing.yaml"
+ko_check auditkey.cloud provision --domain auditkey.cloud -f    # an unknown field
+ko_has "go: auditkey.cloud refused" "${WORK}/go.err" "spec.auditLog.maxBackups in PROJ/clusters/auditkey.cloud/cluster.lok8s.yaml is not a known field"
+ko_check auditlim.cloud provision --domain auditlim.cloud -f    # a limit as text
+ko_has "go: auditlim.cloud refused" "${WORK}/go.err" "(found !!str '100')"
+ko_check auditmap.cloud provision --domain auditmap.cloud -f    # spec.auditLog is not a mapping
+ko_has "go: auditmap.cloud refused" "${WORK}/go.err" "spec.auditLog in PROJ/clusters/auditmap.cloud/cluster.lok8s.yaml is not a mapping"
+
 report

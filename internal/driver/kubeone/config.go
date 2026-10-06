@@ -36,9 +36,9 @@ var (
 
 // GenerateConfig ports kubeone::generate_config: render kubeone.yaml from
 // the core template + cluster spec, append a dynamicWorkers block for each
-// pool in spec.workers, then merge spec.oidc (features.openidConnect) and
-// spec.registries (containerd registry auth) into the manifest. Writes
-// <outputDir>/kubeone.yaml.
+// pool in spec.workers, then merge spec.oidc (features.openidConnect),
+// spec.auditLog (features.staticAuditLog) and spec.registries (containerd
+// registry auth) into the manifest. Writes <outputDir>/kubeone.yaml.
 func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outputDir string) error {
 	stderr := d.stderr()
 	// The project's copy wins; else the embedded template (ejected on first
@@ -156,6 +156,11 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	// features block (no-op without spec.oidc). KubeOne-native: propagates
 	// to joiners, no file delivery.
 	if err := d.injectOIDC(manifest); err != nil {
+		return err
+	}
+	// spec.auditLog → features.staticAuditLog, merged the same way (no-op
+	// without spec.auditLog). KubeOne uploads the policy file itself.
+	if err := d.injectAuditLog(manifest, clusterYAML); err != nil {
 		return err
 	}
 	// spec.registries → containerd registry auth (optional secretRef).
