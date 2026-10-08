@@ -23,7 +23,9 @@ needed to mint** (the CA is created on demand); mkcert is only one of the ways t
   domain), pipes a `cert: {hosts: […]}` Secret manifest through the Secret plugin,
   and extracts `tls.crt`/`tls.key` (base64-decoded from the emitted Secret) into
   the docker volume `<project_network>-registry-tls` through a throwaway
-  container (`docker container create` + `docker cp` + `docker rm`). The plugin
+  container (`docker container create` + `docker cp` + `docker rm`; the
+  registry image is pulled first when it is not local, with up to three
+  retries after 2 s, 5 s and 10 s). The plugin
   gets a scratch `PATH_SECRETS` under the domain dir, removed afterwards; no
   project directory holds the material. Re-minted only when the SAN set
   changes (a `.sans` entry in the volume records it). No `mkcert`/`certgen`

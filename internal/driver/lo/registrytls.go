@@ -329,7 +329,7 @@ cert:
 func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, dir string, dereference bool, errOut io.Writer) error {
 	if !exists {
 		if errText, err := d.errOutput(ctx, "docker", "volume", "create", vol); err != nil {
-			fmt.Fprintf(errOut, "error: docker volume create %s failed: %s\n", vol, firstLine(errText))
+			fmt.Fprintf(errOut, "error: docker volume create %s failed: %s\n", vol, dockerErrSummary(errText))
 			return ui.Handled(fmt.Errorf("docker volume create %s: %w", vol, err))
 		}
 	}
@@ -345,7 +345,7 @@ func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, 
 			}
 			args = append(args, src, ctr+":"+RegistryTLSMount+"/"+name)
 			if errText, err := d.errOutput(ctx, "docker", args...); err != nil {
-				fmt.Fprintf(errOut, "error: docker cp %s into volume %s failed: %s\n", name, vol, firstLine(errText))
+				fmt.Fprintf(errOut, "error: docker cp %s into volume %s failed: %s\n", name, vol, dockerErrSummary(errText))
 				return ui.Handled(fmt.Errorf("docker cp %s into %s: %w", name, vol, err))
 			}
 		}
@@ -358,8 +358,9 @@ func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, 
 // CERTIFICATE block and tls.key to a PEM block (its bytes are checked and
 // discarded, never kept), so an empty, truncated or non-PEM file (a crash
 // mid `docker cp`) counts as missing and the caller mints again. err is a
-// docker failure (the throwaway container could not be created); the
-// error line is already on errOut.
+// docker failure (the registry image could not be pulled, or the throwaway
+// container could not be created; the error line is already on errOut) or
+// a cancelled context.
 func (d *Driver) registryTLSRead(ctx context.Context, vol string, errOut io.Writer) (crt, sans []byte, ok bool, err error) {
 	err = d.withTLSVolume(ctx, vol, errOut, func(ctr string) error {
 		var hasCrt bool
@@ -391,9 +392,12 @@ func pemBlockIs(data []byte, typ string) bool {
 func (d *Driver) withTLSVolume(ctx context.Context, vol string, errOut io.Writer, fn func(ctr string) error) error {
 	ctr := vol + "-io"
 	_ = d.runQuiet(ctx, "docker", "rm", "-f", ctr)
+	if err := d.ensureRegistryImage(ctx, errOut); err != nil {
+		return err
+	}
 	if errText, err := d.errOutput(ctx, "docker", "container", "create", "--name", ctr,
 		"--volume", vol+":"+RegistryTLSMount, RegistryImage); err != nil {
-		fmt.Fprintf(errOut, "error: docker container create %s (volume %s) failed: %s\n", ctr, vol, firstLine(errText))
+		fmt.Fprintf(errOut, "error: docker container create %s (volume %s) failed: %s\n", ctr, vol, dockerErrSummary(errText))
 		return ui.Handled(fmt.Errorf("docker container create %s: %w", ctr, err))
 	}
 	defer func() { _ = d.runQuiet(ctx, "docker", "rm", "-f", ctr) }()
@@ -447,12 +451,6 @@ func tarFirstFile(stream []byte) ([]byte, bool) {
 func (d *Driver) volumeExists(ctx context.Context, name string) bool {
 	_, err := d.output(ctx, "docker", "volume", "inspect", "-f", "{{.Name}}", name)
 	return err == nil
-}
-
-// firstLine trims a captured stderr to its first line.
-func firstLine(s string) string {
-	first, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
-	return first
 }
 
 // registryMount is what one registry container mounts at RegistryTLSMount.
