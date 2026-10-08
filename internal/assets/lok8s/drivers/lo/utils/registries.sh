@@ -80,8 +80,11 @@ LO_REGISTRY_IMAGE_READY=""
 # implicit-pull notice ("Unable to find image … locally") and the
 # "See/Run 'docker … --help'" hint are dropped, then the last three lines are
 # kept, joined with " | ". The cause is at the end: on the implicit-pull path
-# the notice comes first. The user:password@ part of a URL is masked as ***@.
+# the notice comes first. The user:password@ part of a URL (up to the last @
+# before the host: a password can hold a raw @) is masked as ***@. LC_ALL=C:
+# the trim and the mask work on bytes, like the Go twin.
 lo::docker_err_summary() {
+  local -x LC_ALL=C
   local line out="" i start
   local -a kept=()
   while IFS= read -r line; do
@@ -95,7 +98,7 @@ lo::docker_err_summary() {
   for (( i = start; i < ${#kept[@]}; i++ )); do
     out+="${out:+ | }${kept[i]}"
   done
-  printf '%s' "${out}" | sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@#\1***@#g'
+  printf '%s' "${out}" | sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/[:space:]]+@#\1***@#g'
 }
 
 # lo::registry_image_ensure — make sure LO_REGISTRY_IMAGE is in the local image
@@ -189,7 +192,9 @@ lo::registry_tls_volume_exists() {
 
 # lo::registry_tls_with_volume <vol> <fn> [args…] — run `fn <ctr> [args…]`
 # against a throwaway container that mounts the volume (docker cp needs a
-# container). The container is removed on every exit.
+# container). The container is removed on every exit. Returns 2 when the
+# registry image cannot be pulled or the container cannot be created (the
+# error line is already printed), else the return of fn.
 lo::registry_tls_with_volume() {
   local vol="${1}" fn="${2}"
   shift 2
@@ -677,7 +682,7 @@ lo::registries() {
       fi
     done
 
-    echo "error: registry/${reg_name}: ${run_err}" >&2
+    echo "error: registry/${reg_name}: $(lo::docker_err_summary "${run_err}")" >&2
     return 1
   }
 

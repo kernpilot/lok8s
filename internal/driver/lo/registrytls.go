@@ -358,8 +358,9 @@ func (d *Driver) registryTLSStore(ctx context.Context, vol string, exists bool, 
 // CERTIFICATE block and tls.key to a PEM block (its bytes are checked and
 // discarded, never kept), so an empty, truncated or non-PEM file (a crash
 // mid `docker cp`) counts as missing and the caller mints again. err is a
-// docker failure (the throwaway container could not be created); the
-// error line is already on errOut.
+// docker failure (the registry image could not be pulled, or the throwaway
+// container could not be created; the error line is already on errOut) or
+// a cancelled context.
 func (d *Driver) registryTLSRead(ctx context.Context, vol string, errOut io.Writer) (crt, sans []byte, ok bool, err error) {
 	err = d.withTLSVolume(ctx, vol, errOut, func(ctr string) error {
 		var hasCrt bool

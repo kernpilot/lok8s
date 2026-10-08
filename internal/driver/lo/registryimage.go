@@ -58,7 +58,7 @@ func (d *Driver) pullRegistryImage(ctx context.Context, errOut io.Writer) error 
 		if errText, err = d.errOutput(ctx, "docker", "pull", RegistryImage); err == nil {
 			return nil
 		}
-		if attempt == attempts {
+		if attempt == attempts || ctx.Err() != nil {
 			break
 		}
 		wait := registryPullBackoff[attempt-1]
@@ -68,13 +68,17 @@ func (d *Driver) pullRegistryImage(ctx context.Context, errOut io.Writer) error 
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	fmt.Fprintf(errOut, "error: docker pull %s failed after %d attempts: %s\n",
 		RegistryImage, attempts, dockerErrSummary(errText))
 	return ui.Handled(fmt.Errorf("docker pull %s failed after %d attempts", RegistryImage, attempts))
 }
 
-// urlUserinfo matches the user:password@ part of a URL.
-var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@`)
+// urlUserinfo matches the user:password@ part of a URL, up to the last @
+// before the host: a password can hold a raw @.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/[:space:]]+@`)
 
 // dockerErrSummary reduces a docker stderr to the lines that name the
 // cause (bash: lo::docker_err_summary). Each line loses its trailing white

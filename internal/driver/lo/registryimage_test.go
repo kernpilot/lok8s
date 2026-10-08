@@ -254,6 +254,38 @@ func TestRegistriesTLSCertReportsTheCauseOfAFailedCreate(t *testing.T) {
 	}
 }
 
+// A cancelled context ends the retries without a [warn] or an error line,
+// and it is not kept as the result: the next call checks and pulls again.
+func TestEnsureRegistryImageCancelledIsNotKept(t *testing.T) {
+	d, _, fd, _, _, _ := lifecycleDriver(t)
+	ps := &pullScript{failures: 1, stderr: pullCause + "\n"}
+	ps.install(fd)
+	ctx, cancel := context.WithCancel(t.Context())
+	d.sleep = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	var errOut strings.Builder
+	if err := d.ensureRegistryImage(ctx, &errOut); err == nil {
+		t.Fatal("a cancelled pull reported success")
+	}
+	if d.registryImage.done {
+		t.Fatal("a cancelled pull was kept as the result")
+	}
+	if strings.Contains(errOut.String(), "error: docker pull") {
+		t.Fatalf("a cancelled pull printed the failure line:\n%s", errOut.String())
+	}
+
+	errOut.Reset()
+	if err := d.ensureRegistryImage(t.Context(), &errOut); err != nil {
+		t.Fatalf("the next call did not pull again: %v\n%s", err, errOut.String())
+	}
+	if ps.pulls != 2 {
+		t.Fatalf("pulls = %d, want 2 (one cancelled, one on the next call)", ps.pulls)
+	}
+}
+
 func TestDockerErrSummary(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, want string
@@ -272,6 +304,9 @@ func TestDockerErrSummary(t *testing.T) {
 		{"URL credentials masked",
 			`Error response from daemon: Get "https://robot:s3cret@registry.example/v2/": proxyconnect tcp: http://u:p@proxy:3128 refused`,
 			`Error response from daemon: Get "https://***@registry.example/v2/": proxyconnect tcp: http://***@proxy:3128 refused`},
+		{"a raw @ in the password is masked too",
+			`Get "https://u:p@ss@proxy.example:3128/v2/": EOF`,
+			`Get "https://***@proxy.example:3128/v2/": EOF`},
 		{"a URL without credentials is kept",
 			`Get "https://registry-1.docker.io/v2/": EOF and user@host`,
 			`Get "https://registry-1.docker.io/v2/": EOF and user@host`},

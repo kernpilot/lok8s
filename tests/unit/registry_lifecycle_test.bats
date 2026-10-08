@@ -713,6 +713,19 @@ _pull_script() {
   assert_output "2"
 }
 
+# warn prints with echo -e: a backslash in the cause must print as is, and
+# an escape such as \c must not cut the line.
+@test "registries: a backslash in the pull error prints as is in the [warn] line" {
+  _load_driver
+  _pull_script 0 1
+  PULL_CAUSE='Error response from daemon: open C:\new\cache: \c denied'
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_line '[warn] docker pull registry:2.8.3 failed (attempt 1 of 4): Error response from daemon: open C:\new\cache: \c denied. Retrying in 2s.'
+}
+
 @test "registries: when every pull fails the error names the cause and no container starts" {
   _load_driver
   _pull_script 0 99

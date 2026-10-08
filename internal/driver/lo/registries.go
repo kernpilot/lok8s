@@ -331,7 +331,7 @@ func (d *Driver) startRegistry(ctx context.Context, out, errOut io.Writer,
 		}
 	}
 
-	fmt.Fprintf(errOut, "error: registry/%s: %s\n", regName, runErr)
+	fmt.Fprintf(errOut, "error: registry/%s: %s\n", regName, dockerErrSummary(runErr))
 	return ui.Handled(fmt.Errorf("registry %s failed to start", regName))
 }
 

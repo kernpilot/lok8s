@@ -630,6 +630,8 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   assert_output "two | three | four"
   run lo::docker_err_summary 'Error response from daemon: Get "https://robot:s3cret@registry.example/v2/": proxyconnect tcp: http://u:p@proxy:3128 refused'
   assert_output 'Error response from daemon: Get "https://***@registry.example/v2/": proxyconnect tcp: http://***@proxy:3128 refused'
+  run lo::docker_err_summary 'Get "https://u:p@ss@proxy.example:3128/v2/": EOF'
+  assert_output 'Get "https://***@proxy.example:3128/v2/": EOF'
   run lo::docker_err_summary 'Get "https://registry-1.docker.io/v2/": EOF and user@host'
   assert_output 'Get "https://registry-1.docker.io/v2/": EOF and user@host'
 }
