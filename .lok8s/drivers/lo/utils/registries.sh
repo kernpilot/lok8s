@@ -60,6 +60,78 @@ lo::render_registry_config() {
   printf '%s\n%s\n' "${without_http}" "$(lo::registry_http_block)"
 }
 
+# ── Registry image: an explicit pull before the first container ────────────
+# docker container create and docker run pull a missing image implicitly. On
+# that path docker prints "Unable to find image … locally" first and the pull
+# error after it, and one transient network error fails the whole command. An
+# explicit docker pull with a bounded retry rides out a short outage, and
+# lo::docker_err_summary keeps the lines that name the cause. Same docker argv,
+# same messages as the Go driver (internal/driver/lo/registryimage.go).
+
+# The wait in seconds before each retry of the registry image pull. The pull
+# runs once, plus one retry for each entry.
+LO_REGISTRY_PULL_BACKOFF=(2 5 10)
+# The result of lo::registry_image_ensure in this process: "" (not checked
+# yet), 1 (the image is local), 0 (the pull failed, the error is printed).
+LO_REGISTRY_IMAGE_READY=""
+
+# lo::docker_err_summary <stderr> — the lines of a docker stderr that name the
+# cause. Each line loses its trailing white space. Empty lines, docker's
+# implicit-pull notice ("Unable to find image … locally") and the
+# "See/Run 'docker … --help'" hint are dropped, then the last three lines are
+# kept, joined with " | ". The cause is at the end: on the implicit-pull path
+# the notice comes first. The user:password@ part of a URL is masked as ***@.
+lo::docker_err_summary() {
+  local line out="" i start
+  local -a kept=()
+  while IFS= read -r line; do
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "${line}" ]] || continue
+    [[ "${line}" == "Unable to find image "* ]] && continue
+    [[ "${line}" == "See 'docker "*"--help'"* || "${line}" == "Run 'docker "*"--help'"* ]] && continue
+    kept+=("${line}")
+  done <<< "${1}"
+  start=$(( ${#kept[@]} > 3 ? ${#kept[@]} - 3 : 0 ))
+  for (( i = start; i < ${#kept[@]}; i++ )); do
+    out+="${out:+ | }${kept[i]}"
+  done
+  printf '%s' "${out}" | sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@#\1***@#g'
+}
+
+# lo::registry_image_ensure — make sure LO_REGISTRY_IMAGE is in the local image
+# store. When `docker image inspect` finds it, nothing is pulled. Otherwise
+# `docker pull` runs, and a failed pull is retried after each
+# LO_REGISTRY_PULL_BACKOFF wait. The result is kept in LO_REGISTRY_IMAGE_READY:
+# a later call returns it and runs no docker command. A failure prints one
+# error line with the last pull's cause; later calls print nothing more.
+lo::registry_image_ensure() {
+  case "${LO_REGISTRY_IMAGE_READY}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  if docker image inspect -f '{{.Id}}' "${LO_REGISTRY_IMAGE}" >/dev/null 2>&1; then
+    LO_REGISTRY_IMAGE_READY=1
+    return 0
+  fi
+  local attempts=$(( ${#LO_REGISTRY_PULL_BACKOFF[@]} + 1 )) attempt err="" cause wait
+  debug "registry image ${LO_REGISTRY_IMAGE}: not found locally, pulling"
+  for (( attempt = 1; attempt <= attempts; attempt++ )); do
+    if err=$(docker pull "${LO_REGISTRY_IMAGE}" 2>&1 >/dev/null); then
+      LO_REGISTRY_IMAGE_READY=1
+      return 0
+    fi
+    (( attempt < attempts )) || break
+    wait="${LO_REGISTRY_PULL_BACKOFF[attempt - 1]}"
+    cause=$(lo::docker_err_summary "${err}")
+    # warn prints with echo -e: double each backslash so the cause prints as is.
+    warn "docker pull ${LO_REGISTRY_IMAGE} failed (attempt ${attempt} of ${attempts}): ${cause//\\/\\\\}. Retrying in ${wait}s."
+    sleep "${wait}"
+  done
+  LO_REGISTRY_IMAGE_READY=0
+  echo "error: docker pull ${LO_REGISTRY_IMAGE} failed after ${attempts} attempts: $(lo::docker_err_summary "${err}")" >&2
+  return 1
+}
+
 # ── Registry TLS certificate: the set's docker volume ───────────────────────
 # One leaf for the whole registry set, minted by the secrets.lok8s.dev Secret
 # plugin (the binary lok8s already ships and requires — no mkcert/certgen) and
@@ -123,9 +195,10 @@ lo::registry_tls_with_volume() {
   shift 2
   local ctr="${vol}-io" err rc=0
   docker rm -f "${ctr}" >/dev/null 2>&1 || true
+  lo::registry_image_ensure || return 2
   if ! err=$(docker container create --name "${ctr}" \
       --volume "${vol}:${LO_REGISTRY_TLS_MOUNT}" "${LO_REGISTRY_IMAGE}" 2>&1 >/dev/null); then
-    echo "error: docker container create ${ctr} (volume ${vol}) failed: ${err%%$'\n'*}" >&2
+    echo "error: docker container create ${ctr} (volume ${vol}) failed: $(lo::docker_err_summary "${err}")" >&2
     return 2
   fi
   "${fn}" "${ctr}" "$@" || rc=$?
@@ -192,7 +265,7 @@ lo::registry_tls_store() {
   local vol="${1}" exists="${2}" dir="${3}" dereference="${4:-0}" err
   if (( ! exists )); then
     if ! err=$(docker volume create "${vol}" 2>&1 >/dev/null); then
-      echo "error: docker volume create ${vol} failed: ${err%%$'\n'*}" >&2
+      echo "error: docker volume create ${vol} failed: $(lo::docker_err_summary "${err}")" >&2
       return 1
     fi
   fi
@@ -204,7 +277,7 @@ lo::registry_tls_store() {
       src="${dir}/${name}"
       [[ -f "${src}" ]] || continue
       if ! err=$(docker "${cp_args[@]}" "${src}" "${ctr}:${LO_REGISTRY_TLS_MOUNT}/${name}" 2>&1 >/dev/null); then
-        echo "error: docker cp ${name} into volume ${vol} failed: ${err%%$'\n'*}" >&2
+        echo "error: docker cp ${name} into volume ${vol} failed: $(lo::docker_err_summary "${err}")" >&2
         return 1
       fi
     done
@@ -533,6 +606,10 @@ lo::registries() {
       running) verb="configured" ;;   # up, but config/image/cert drifted
       *)       verb="restarted" ;;    # created/exited/dead — recreate
     esac
+
+    # The image comes first: a pull that fails must not remove a running
+    # container (an image change in the hash keeps the old one serving).
+    lo::registry_image_ensure || return 1
 
     # Durable config path — the daemon re-binds it on every container restart
     # (see LO_REGISTRY_STATE_DIR in defaults.sh). Guarded: a failed write

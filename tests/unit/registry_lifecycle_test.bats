@@ -639,6 +639,116 @@ docker() {
   assert_output --partial "registry/lok8s-registry-io-docker unchanged"
 }
 
+# ── The registry image: an explicit pull with a bounded retry ───────────
+
+# The docker pull stderr for a transient network error (the Go tests use
+# the same line: internal/driver/lo/registryimage_test.go).
+PULL_CAUSE='Error response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: i/o timeout'
+
+# _pull_script <present 0|1> <failures> — `docker image inspect` finds the
+# image when present is 1; otherwise the first <failures> pulls fail with
+# PULL_CAUSE and the next one succeeds. Every wait is logged to
+# ${BATS_TEST_TMPDIR}/sleeps instead of slept.
+_pull_script() {
+  PULL_PRESENT="${1}" PULL_FAILURES="${2}"
+  PULL_COUNT="${BATS_TEST_TMPDIR}/pulls"
+  : > "${PULL_COUNT}"
+  eval "_real_docker() $(declare -f docker | tail -n +2)"
+  docker() {
+    case "${1} ${2:-}" in
+      "image inspect")
+        echo "docker ${*}" >> "${DOCKER_LOG}"
+        (( PULL_PRESENT )) && return 0
+        echo "Error response from daemon: No such image: registry:2.8.3" >&2
+        return 1
+        ;;
+      "pull "*)
+        echo "docker ${*}" >> "${DOCKER_LOG}"
+        echo x >> "${PULL_COUNT}"
+        if (( $(wc -l < "${PULL_COUNT}") <= PULL_FAILURES )); then
+          printf '%s\n\n' "${PULL_CAUSE}" >&2
+          return 1
+        fi
+        PULL_PRESENT=1
+        return 0
+        ;;
+      *) _real_docker "${@}" ;;
+    esac
+  }
+  sleep() { echo "${1}" >> "${BATS_TEST_TMPDIR}/sleeps"; }
+  : > "${BATS_TEST_TMPDIR}/sleeps"
+}
+
+@test "registries: a local registry image is checked once and not pulled" {
+  _load_driver
+  _pull_script 1 0
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-build created"
+  run grep -c '^docker image inspect -f {{.Id}} registry:2.8.3$' "${DOCKER_LOG}"
+  assert_output "1"
+  run grep -c '^docker pull ' "${DOCKER_LOG}"
+  assert_output "0"
+  # The check comes before the first container.
+  run grep -m1 -E '^docker (image inspect|run) ' "${DOCKER_LOG}"
+  assert_output --regexp '^docker image inspect '
+}
+
+@test "registries: a failed pull is retried after 2s, then every container starts" {
+  _load_driver
+  _pull_script 0 1
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-build created"
+  assert_output --partial "registry/lok8s-registry-cache created"
+  assert_output --partial "registry/lok8s-registry-io-docker created"
+  assert_line "[warn] docker pull registry:2.8.3 failed (attempt 1 of 4): ${PULL_CAUSE}. Retrying in 2s."
+  run grep -c '^docker pull registry:2.8.3$' "${DOCKER_LOG}"
+  assert_output "2"
+  run cat "${BATS_TEST_TMPDIR}/sleeps"
+  assert_output "2"
+}
+
+@test "registries: when every pull fails the error names the cause and no container starts" {
+  _load_driver
+  _pull_script 0 99
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_line "error: docker pull registry:2.8.3 failed after 4 attempts: ${PULL_CAUSE}"
+  [ "$(grep -c '^error: docker pull' <<< "${output}")" -eq 1 ]
+  # One pull series for the set: the result is kept for the other registries.
+  run grep -c '^docker pull registry:2.8.3$' "${DOCKER_LOG}"
+  assert_output "4"
+  run grep -c '^docker run ' "${DOCKER_LOG}"
+  assert_output "0"
+  run cat "${BATS_TEST_TMPDIR}/sleeps"
+  assert_output "$(printf '2\n5\n10')"
+}
+
+@test "registries: a failed pull keeps a running container that would be recreated" {
+  _load_driver
+  lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" > /dev/null
+  sed -i '2s/.*/stale-hash/' "${FAKE_DOCKER}/containers/lok8s-registry-build"
+  LO_REGISTRY_IMAGE_READY=""   # a new process
+  _pull_script 0 99
+  : > "${DOCKER_LOG}"
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  run sed -n 1p "${FAKE_DOCKER}/containers/lok8s-registry-build"
+  assert_output "running"
+  run grep -c '^docker rm -f lok8s-registry-build$' "${DOCKER_LOG}"
+  assert_output "0"
+}
+
 # ── Cleanup ──────────────────────────────────────────────
 
 @test "cleanup: removes project containers + configs, keeps shared mirrors" {

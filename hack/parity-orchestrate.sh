@@ -352,8 +352,22 @@ parity::stub "${PROJ}" docker <<'SH'
 #!/usr/bin/env bash
 # Parity stub (TLS phase): the plain stub plus an argv log. The cert volume
 # is always absent (so the import path runs and the volume is created), the
-# read-out finds nothing (so both sides mint on every run).
+# read-out finds nothing (so both sides mint on every run). The registry
+# image is local, unless PARITY_PULL_FAILS is set: then it is not, and the
+# first PARITY_PULL_FAILS pulls fail with a transient network error.
 echo "docker $*" >> "${PARITY_DOCKER_LOG}"
+if [[ -n "${PARITY_PULL_FAILS:-}" ]]; then
+  case "${1:-} ${2:-}" in
+    "image inspect") exit 1 ;;
+    "pull "*)
+      echo x >> "${PARITY_PULL_COUNT}"
+      if (( $(wc -l < "${PARITY_PULL_COUNT}") <= PARITY_PULL_FAILS )); then
+        printf '%s\n\n' 'Error response from daemon: Get "https://registry-1.docker.io/v2/": proxyconnect tcp: dial tcp http://user:secret@proxy.invalid:3128: i/o timeout' >&2
+        exit 1
+      fi
+      exit 0 ;;
+  esac
+fi
 case "${1:-} ${2:-}" in
   "volume ls")       echo "alpha-data"; echo "alpha-cache"; exit 0 ;;
   "volume inspect")  exit 1 ;;
@@ -410,6 +424,24 @@ for side in bash go; do
   if [[ "$(cat "${WORK}/flat.${side}")" == absent ]]; then echo "ok: ${side}: no <project>/.secrets created"; else fail "${side}: <project>/.secrets was created"; fi
   if [[ ! -s "${WORK}/scratch.${side}" ]]; then echo "ok: ${side}: no scratch dir left under the domain dir"; else fail "${side}: scratch left: $(cat "${WORK}/scratch.${side}")"; fi
 done
+
+# The registry image is not local and the first pull fails with a
+# transient network error: both sides warn once with the same cause (the
+# proxy credentials masked), wait 2 s, pull again and only then create the
+# io container. The streams and the docker argv are diffed byte for byte.
+tls_pre_pull() { tls_pre; : > "${PARITY_PULL_COUNT}"; }
+export PARITY_PULL_COUNT="${WORK}/pulls"
+PARITY_PULL_FAILS=1 PARITY_PRE_EACH=tls_pre_pull PARITY_POST_EACH=tls_post check "${KIND_CFG}" up --domain mint.dev
+parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo up --domain mint.dev (one failed pull)" || failures=$((failures + 1))
+for side in bash go; do
+  if [[ "$(grep -c '^docker pull registry:2\.8\.3$' "${WORK}/docker.${side}.log")" == 2 ]]; then echo "ok: ${side}: the failed pull is retried once"; else fail "${side}: want 2 pulls in ${WORK}/docker.${side}.log"; fi
+  if grep -A1 '^docker pull registry:2\.8\.3$' "${WORK}/docker.${side}.log" | tail -1 | grep -q '^docker container create --name mintnet-registry-tls-io '; then
+    echo "ok: ${side}: the io container is created after the pull"
+  else fail "${side}: the io container does not follow the last pull"; fi
+  tls_pin "${side}: one [warn] names the cause, credentials masked" "${WORK}/${side}.err" '^\[warn\] docker pull registry:2\.8\.3 failed \(attempt 1 of 4\): Error response from daemon: Get "https://registry-1\.docker\.io/v2/": proxyconnect tcp: dial tcp http://\*\*\*@proxy\.invalid:3128: i/o timeout\. Retrying in 2s\.$'
+  tls_absent "${side}: no credentials on stderr" "${WORK}/${side}.err" 'user:secret'
+done
+unset PARITY_PULL_COUNT
 
 # The import: a legacy .secrets/tls/registries pair (one file a symlink, so
 # `docker cp -L` must follow it) is copied into a fresh volume with one

@@ -267,6 +267,12 @@ func (d *Driver) registryReconcile(ctx context.Context, out, errOut io.Writer,
 		verb = "restarted" // created/exited/dead — recreate
 	}
 
+	// The image comes first: a pull that fails must not remove a running
+	// container (an image change in the hash keeps the old one serving).
+	if err := d.ensureRegistryImage(ctx, errOut); err != nil {
+		return err
+	}
+
 	// Durable config path — the daemon re-binds it on every container
 	// restart (see registryStateDir in defaults.go). Guarded: a failed
 	// write (read-only dir, disk full) must not proceed to remove a healthy
