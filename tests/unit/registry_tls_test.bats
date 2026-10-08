@@ -632,8 +632,21 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   assert_output 'Error response from daemon: Get "https://***@registry.example/v2/": proxyconnect tcp: http://***@proxy:3128 refused'
   run lo::docker_err_summary 'Get "https://u:p@ss@proxy.example:3128/v2/": EOF'
   assert_output 'Get "https://***@proxy.example:3128/v2/": EOF'
+  run lo::docker_err_summary '"https://u:p@h","x@y"'
+  assert_output '"https://***@y"'
   run lo::docker_err_summary 'Get "https://registry-1.docker.io/v2/": EOF and user@host'
   assert_output 'Get "https://registry-1.docker.io/v2/": EOF and user@host'
+}
+
+# The Go twin works on bytes. Under a UTF-8 locale the bash summary still
+# must: invalid UTF-8 and U+2003 in a userinfo are masked, a trailing U+2003
+# is not white space (the Go TestDockerErrSummary row).
+@test "docker_err_summary: works on bytes under a UTF-8 locale" {
+  locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$' || skip "no C.UTF-8 locale on this host"
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  LC_ALL=C.UTF-8 run lo::docker_err_summary $'https://u:\xff\xfe@h/ https://u:p\u2003x@h/ end\u2003 \n'
+  assert_success
+  assert_output $'https://***@h/ https://***@h/ end\u2003'
 }
 
 @test "registries_tls_cert: stale .registry-tls-tmp.* dirs are swept before the mint" {

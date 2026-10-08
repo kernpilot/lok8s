@@ -86,7 +86,8 @@ var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/[:space:]]+
 // to find image … locally") and the "See/Run 'docker … --help'" hint, then
 // keeps the last dockerErrLines lines, joined with " | ". The cause is at
 // the end: on the implicit-pull path the notice comes first. The
-// user:password@ part of a URL is masked as ***@.
+// user:password@ part of a URL, up to the last @ before a / or a white
+// space, is masked as ***@.
 func dockerErrSummary(s string) string {
 	var kept []string
 	for line := range strings.SplitSeq(s, "\n") {

@@ -254,35 +254,76 @@ func TestRegistriesTLSCertReportsTheCauseOfAFailedCreate(t *testing.T) {
 	}
 }
 
-// A cancelled context ends the retries without a [warn] or an error line,
-// and it is not kept as the result: the next call checks and pulls again.
+// A pull cancelled by the context (Ctrl-C) ends the retries with nothing
+// on stderr: no [warn], no failure line. The cancelled result is not kept:
+// the next call checks and pulls again.
 func TestEnsureRegistryImageCancelledIsNotKept(t *testing.T) {
-	d, _, fd, _, _, _ := lifecycleDriver(t)
-	ps := &pullScript{failures: 1, stderr: pullCause + "\n"}
-	ps.install(fd)
-	ctx, cancel := context.WithCancel(t.Context())
-	d.sleep = func(context.Context, time.Duration) error {
-		cancel()
-		return context.Canceled
+	for _, cancelAt := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pull %d", cancelAt), func(t *testing.T) {
+			d, _, fd, _, _, _ := lifecycleDriver(t)
+			recordSleeps(d)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			ps := &pullScript{failures: cancelAt, stderr: pullCause + "\n"}
+			ps.install(fd)
+			inner := fd.wrap
+			fd.wrap = func(c execx.Cmd) (bool, error) {
+				if len(c.Args) >= 1 && c.Args[0] == "pull" && ps.pulls+1 == cancelAt {
+					cancel() // docker pull dies with the context
+				}
+				return inner(c)
+			}
+
+			var errOut strings.Builder
+			if err := d.ensureRegistryImage(ctx, &errOut); err == nil {
+				t.Fatal("a cancelled pull reported success")
+			}
+			if d.registryImage.done {
+				t.Fatal("a cancelled pull was kept as the result")
+			}
+			var wantErr strings.Builder
+			for a := 1; a < cancelAt; a++ { // the attempts before the cancel warn as usual
+				fmt.Fprintf(&wantErr, "[warn] docker pull %s failed (attempt %d of 4): %s. Retrying in %ds.\n",
+					RegistryImage, a, pullCause, registryPullBackoff[a-1])
+			}
+			if errOut.String() != wantErr.String() {
+				t.Fatalf("stderr = %q\nwant     %q", errOut.String(), wantErr.String())
+			}
+
+			fd.wrap = inner
+			ps.failures = 0
+			errOut.Reset()
+			if err := d.ensureRegistryImage(t.Context(), &errOut); err != nil {
+				t.Fatalf("the next call did not pull again: %v\n%s", err, errOut.String())
+			}
+			if ps.pulls != cancelAt+1 {
+				t.Fatalf("pulls = %d, want %d (the cancelled series, then one on the next call)", ps.pulls, cancelAt+1)
+			}
+		})
+	}
+}
+
+// The registry start error goes through the summary: the --help hint is
+// dropped.
+func TestRegistriesStartErrorIsSummarized(t *testing.T) {
+	d, _, fd, _, _, cy := lifecycleDriver(t)
+	fd.wrap = func(c execx.Cmd) (bool, error) {
+		if len(c.Args) >= 1 && c.Args[0] == "run" && slices.Contains(c.Args, "lok8s-registry-build") {
+			writeErr(c, "docker: Error response from daemon: Conflict.\nSee 'docker run --help'.\n")
+			return true, fmt.Errorf("exit 125")
+		}
+		return false, nil
 	}
 
-	var errOut strings.Builder
-	if err := d.ensureRegistryImage(ctx, &errOut); err == nil {
-		t.Fatal("a cancelled pull reported success")
+	_, errOut, err := runRegistries(t, d, cy)
+	if err == nil {
+		t.Fatal("registries succeeded with a failed docker run")
 	}
-	if d.registryImage.done {
-		t.Fatal("a cancelled pull was kept as the result")
+	if !strings.Contains(errOut, "error: registry/lok8s-registry-build: docker: Error response from daemon: Conflict.\n") {
+		t.Fatalf("stderr:\n%s", errOut)
 	}
-	if strings.Contains(errOut.String(), "error: docker pull") {
-		t.Fatalf("a cancelled pull printed the failure line:\n%s", errOut.String())
-	}
-
-	errOut.Reset()
-	if err := d.ensureRegistryImage(t.Context(), &errOut); err != nil {
-		t.Fatalf("the next call did not pull again: %v\n%s", err, errOut.String())
-	}
-	if ps.pulls != 2 {
-		t.Fatalf("pulls = %d, want 2 (one cancelled, one on the next call)", ps.pulls)
+	if strings.Contains(errOut, "--help") {
+		t.Fatalf("the --help hint was printed:\n%s", errOut)
 	}
 }
 
@@ -307,6 +348,12 @@ func TestDockerErrSummary(t *testing.T) {
 		{"a raw @ in the password is masked too",
 			`Get "https://u:p@ss@proxy.example:3128/v2/": EOF`,
 			`Get "https://***@proxy.example:3128/v2/": EOF`},
+		{"bytes, not characters: invalid UTF-8 and U+2003 in the userinfo are masked, a trailing U+2003 is kept",
+			"https://u:\xff\xfe@h/ https://u:p\u2003x@h/ end\u2003 \n",
+			"https://***@h/ https://***@h/ end\u2003"},
+		{"two @ before a / or a white space: masked up to the last one",
+			`"https://u:p@h","x@y"`,
+			`"https://***@y"`},
 		{"a URL without credentials is kept",
 			`Get "https://registry-1.docker.io/v2/": EOF and user@host`,
 			`Get "https://registry-1.docker.io/v2/": EOF and user@host`},

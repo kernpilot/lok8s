@@ -726,6 +726,25 @@ _pull_script() {
   assert_line '[warn] docker pull registry:2.8.3 failed (attempt 1 of 4): Error response from daemon: open C:\new\cache: \c denied. Retrying in 2s.'
 }
 
+@test "registries: the start error goes through the summary, the --help hint dropped" {
+  _load_driver
+  eval "_real_docker() $(declare -f docker | tail -n +2)"
+  docker() {
+    if [[ "${1} ${2:-}" == "run -d" && "${*}" == *lok8s-registry-build* ]]; then
+      echo "docker ${*}" >> "${DOCKER_LOG}"
+      printf '%s\n' "docker: Error response from daemon: Conflict." "See 'docker run --help'." >&2
+      return 125
+    fi
+    _real_docker "${@}"
+  }
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_line "error: registry/lok8s-registry-build: docker: Error response from daemon: Conflict."
+  refute_output --partial "--help"
+}
+
 @test "registries: when every pull fails the error names the cause and no container starts" {
   _load_driver
   _pull_script 0 99
