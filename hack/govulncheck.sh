@@ -19,9 +19,10 @@ command -v jq >/dev/null || { echo "error: jq not on PATH" >&2; exit 2; }
 
 # Every module is scanned with the ROOT go.mod toolchain — the one the
 # release builds all three with (release.yml: setup-go, go-version-file:
-# go.mod). Without the pin GOTOOLCHAIN=auto would scan kustomize/ (go 1.25)
-# and ai/lochat/ (go 1.22) with whatever Go is local, and the stdlib
-# verdict would describe a binary nobody ships.
+# go.mod). Without the pin GOTOOLCHAIN=auto would scan a side module
+# (kustomize/, ai/lochat/) whose `go` line is lower than the root's with
+# whatever Go is local, and the stdlib verdict would describe a binary
+# nobody ships.
 GOTOOLCHAIN="go$(sed -n 's/^go //p' "${ROOT}/go.mod")"
 export GOTOOLCHAIN
 echo "toolchain: ${GOTOOLCHAIN}"

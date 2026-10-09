@@ -288,7 +288,7 @@ Built from the project root:
 docker build -t ghcr.io/kernpilot/lok8s-operator:0.1.0 -f operator/Dockerfile .
 ```
 
-Base image: `ghcr.io/flant/shell-operator:v1.19.5`; a `golang:1.25-alpine`
+Base image: `ghcr.io/flant/shell-operator:v1.19.5`; a `golang:1.26.9-alpine`
 build stage compiles the `lo` binary from the same tree.
 
 Bundled tools: lo, kubectl, kustomize, yq, jq, clusterctl, flux, kind, docker-cli, git, openssh-client, envsubst, khelm
