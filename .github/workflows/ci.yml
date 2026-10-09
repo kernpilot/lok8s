@@ -174,7 +174,7 @@ jobs:
         # root `./...`: kustomize/ (its own module, also imported by the
         # root via the replace directive) and ai/lochat/ (the lo chat
         # engine). Each runs with its own go.mod under the root toolchain
-        # (GOTOOLCHAIN=auto honours a lower `go` directive).
+        # (GOTOOLCHAIN=auto honours a lower or equal `go` directive).
         run: |
           go test -C kustomize ./...
           go test -C ai/lochat ./...

@@ -246,8 +246,8 @@ diffs it; the pinned-toolchain section doctor adds is gated on the
 not the pinned one, in both implementations. The in-process render grew the
 binary from 49 MB to 123 MB (helm + client-go + the kustomize API), which
 is why it is the `lo-full` build and `lo` core stays at ~50 MB with the
-exec pipeline; the root module's `go` directive must be `1.26.0` or later
-because khelm v2.8.0 requires it.
+exec pipeline. khelm v2.8.0 requires `go 1.26.0` or later in the root
+`go.mod`.
 
 ## Embedded assets: the eject model
 
