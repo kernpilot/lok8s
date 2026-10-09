@@ -17,11 +17,12 @@ IGNORE="${ROOT}/.github/govulncheck-ignore.json"
 command -v govulncheck >/dev/null || { echo "error: govulncheck not on PATH" >&2; exit 2; }
 command -v jq >/dev/null || { echo "error: jq not on PATH" >&2; exit 2; }
 
-# Every module is scanned with the ROOT go.mod toolchain — the one the
-# release builds all three with (release.yml: setup-go, go-version-file:
-# go.mod). Without the pin GOTOOLCHAIN=auto would scan kustomize/ (go 1.25)
-# and ai/lochat/ (go 1.22) with whatever Go is local, and the stdlib
-# verdict would describe a binary nobody ships.
+# Every module is scanned with the ROOT go.mod toolchain. The release
+# builds all three modules with that toolchain (release.yml: setup-go,
+# go-version-file: go.mod). GOTOOLCHAIN=auto uses the local Go when it is
+# the same as or newer than a module's `go` line. Then the stdlib verdict
+# describes a binary that nobody ships. The pin makes all four scans use
+# the Go version of the root `go` line.
 GOTOOLCHAIN="go$(sed -n 's/^go //p' "${ROOT}/go.mod")"
 export GOTOOLCHAIN
 echo "toolchain: ${GOTOOLCHAIN}"
