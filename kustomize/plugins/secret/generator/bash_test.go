@@ -27,6 +27,79 @@ func bashCtx(t *testing.T) (*plugin.Context, string) {
 	}, dir
 }
 
+// ── dry-run refusal (lok8s #268 review: a dry run must never EXECUTE a
+// bash: generator, whatever the cache state — it can run kubectl/lo
+// against the live cluster, independent of the rendered diff) ──────────
+
+func TestBash_DryRunRefusesWithoutAllow(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "")
+	ctx, dir := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "touch " + filepath.Join(dir, "ran") + " && echo hello"},
+	})
+	entries, err := g.Generate(ctx)
+	if err == nil {
+		t.Fatal("want an error, got none")
+	}
+	if !strings.Contains(err.Error(), "executable generator not run in dry-run") {
+		t.Errorf("err = %v", err)
+	}
+	if entries != nil {
+		t.Errorf("entries = %v, want nil", entries)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "ran")); statErr == nil {
+		t.Error("the exec: command actually ran")
+	}
+	// No cache write, no .sha, no .bash-allow — refused BEFORE any cache
+	// touch, not merely "refused to persist the result".
+	leftovers, _ := os.ReadDir(dir)
+	for _, f := range leftovers {
+		t.Errorf("dry-run refusal still wrote %s", f.Name())
+	}
+}
+
+func TestBash_DryRunRefusesAnUpdateEntryToo(t *testing.T) {
+	// update: true always re-runs on a real build (bypasses the cache) —
+	// the exact shape that would re-mint a live secret on every preview.
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	ctx, _ := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "echo hello", Update: true},
+	})
+	if _, err := g.Generate(ctx); err == nil || !strings.Contains(err.Error(), "executable generator not run in dry-run") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestBash_DryRunRunsWithAllowGenerators(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "1")
+	ctx, _ := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "echo hello"},
+	})
+	entries, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(entries) != 1 || string(entries[0].Value) != "hello" {
+		t.Errorf("entries = %v", entries)
+	}
+}
+
+// Outside a dry run (the env unset — the default, real-apply state), the
+// generator runs exactly as before.
+func TestBash_RunsNormallyOutsideDryRun(t *testing.T) {
+	ctx, _ := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "echo hello"},
+	})
+	if _, err := g.Generate(ctx); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+}
+
 // ── shorthand exec ──────────────────────────────────────
 
 func TestBash_ExecShorthand(t *testing.T) {

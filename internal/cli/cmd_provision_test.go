@@ -111,9 +111,12 @@ func TestBootstrapModeFlagDependencies(t *testing.T) {
 		{[]string{"provision", "--dry-run", "--domain", "alpha.dev"}, "--dry-run requires --bootstrap"},
 		{[]string{"provision", "--only", "cilium", "--domain", "alpha.dev"}, "--only requires --bootstrap"},
 		{[]string{"provision", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --bootstrap"},
+		{[]string{"provision", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --bootstrap"},
 		{[]string{"provision", "-b", "--no-diff", "--domain", "alpha.dev"}, "--no-diff requires --dry-run"},
+		{[]string{"provision", "-b", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --dry-run"},
 		{[]string{"bootstrap", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --dry-run"},
 		{[]string{"bootstrap", "--no-diff", "--domain", "alpha.dev"}, "--no-diff requires --dry-run"},
+		{[]string{"bootstrap", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --dry-run"},
 	} {
 		_, stderr, err := runLo(t, NewRoot(p), tc.argv...)
 		if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] "+tc.want) || len(*exits) != 0 {
@@ -133,6 +136,20 @@ func TestProvisionBootstrapDryRunIsNotGated(t *testing.T) {
 	}
 	if strings.Contains(stderr, "real infrastructure") || !strings.Contains(stderr, "--bootstrap needs an existing cluster") {
 		t.Errorf("stderr = %q", stderr)
+	}
+}
+
+// --only GIVEN but blank (every value whitespace/empty after a comma split)
+// is an error, never "no filter" — the latter is what an ABSENT --only
+// means, and the two must not silently collapse into the same full,
+// unfiltered apply.
+func TestBootstrapOnlyBlankIsAnError(t *testing.T) {
+	p, _, exits := orchestrateProject(t)
+	for _, only := range []string{" ", ",", " , "} {
+		_, stderr, err := runLo(t, NewRoot(p), "bootstrap", "--only", only, "--domain", "alpha.dev")
+		if !errors.Is(err, ErrHandled) || len(*exits) != 0 || !strings.Contains(stderr, "[error] --only: no entry names given") {
+			t.Errorf("--only %q: err=%v exits=%v stderr=%q", only, err, *exits, stderr)
+		}
 	}
 }
 

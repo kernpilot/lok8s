@@ -7,6 +7,8 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
@@ -269,19 +272,56 @@ func TestDryRunReportsTheRealRunsSkips(t *testing.T) {
 	}
 }
 
-func TestDryRunDoesNotApplyRestoreD(t *testing.T) {
+// A dry run NEVER applies restore.d — but it DOES decrypt it in memory
+// (read-only, same as any other sops decrypt in this codebase) so it can
+// report what a real run would restore, as its own entry ahead of the
+// addons.
+func TestDryRunDiffsRestoreDAsItsOwnEntry(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "testcni")
+	testutil.WriteFile(t, filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "restore.d", "tls.sops.yaml"), "sops: {}\n")
+	decrypted := false
+	e.SopsDecrypt = func(string) ([]byte, error) {
+		decrypted = true
+		return []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n"), nil
+	}
+	diffAnswers(t, f, 1, 0) // restore.d differs, testcni unchanged
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	if !errors.Is(err, ErrDryRunDiffers) {
+		t.Fatalf("err = %v", err)
+	}
+	if !decrypted {
+		t.Error("a dry run must decrypt restore.d to diff it (never to apply it)")
+	}
+	want := "bootstrap dry-run: restore.d: differs changed=1 new=2\n" +
+		"bootstrap dry-run: 01-testcni: unchanged\n" +
+		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0\n"
+	if got := stdoutOf(e); got != want {
+		t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
+	}
+	if log := f.log(); strings.Contains(log, " apply ") {
+		t.Errorf("a dry run applied restore.d:\n%s", log)
+	}
+}
+
+// --only takes restore.d out of scope entirely — never applied, never
+// diffed — and says so.
+func TestDryRunOnlySkipsRestoreD(t *testing.T) {
 	e, f, spec, kc := dryEngine(t, "testcni")
 	testutil.WriteFile(t, filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "restore.d", "tls.sops.yaml"), "sops: {}\n")
 	decrypted := false
 	e.SopsDecrypt = func(string) ([]byte, error) { decrypted = true; return nil, nil }
+	e.Options.Only = []string{"testcni"}
 	diffAnswers(t, f, 0)
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if decrypted {
-		t.Error("a dry run decrypted restore.d")
+		t.Error("--only must not decrypt restore.d either")
 	}
-	if !strings.Contains(stderrOf(e), "[bootstrap] dry-run: restore.d not applied (1 file(s) under clusters/test.lok8s.dev/restore.d)") {
+	if strings.Contains(stdoutOf(e), "restore.d") {
+		t.Errorf("--only must not report a restore.d entry:\n%s", stdoutOf(e))
+	}
+	if !strings.Contains(stderrOf(e), "[bootstrap] --only: restore.d skipped (not applied) — 1 file(s) under clusters/test.lok8s.dev/restore.d") {
 		t.Errorf("stderr:\n%s", stderrOf(e))
 	}
 }
@@ -289,8 +329,15 @@ func TestDryRunDoesNotApplyRestoreD(t *testing.T) {
 func TestDryRunRenderFailureIsAnError(t *testing.T) {
 	e, f, spec, kc := dryEngine(t, "testcni", "second")
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error {
-		if c.Name == "kustomize" && strings.Contains(c.Args[len(c.Args)-1], "second") {
-			return &rcError{1}
+		// "second" is a chart.yaml addon: RenderIsolated always copies it
+		// to a temp dir under dry-run (see addons.RenderIsolated), so the
+		// build dir path itself no longer names the addon — identify it by
+		// the copied chart.yaml's own content instead.
+		if c.Name == "kustomize" {
+			buildDir := c.Args[len(c.Args)-1]
+			if raw, err := os.ReadFile(filepath.Join(buildDir, "chart.yaml")); err == nil && strings.Contains(string(raw), "name: second") {
+				return &rcError{1}
+			}
 		}
 		return f.Run(ctx, c)
 	})
@@ -408,6 +455,179 @@ func TestOnlyDryRunNumbersTheSelection(t *testing.T) {
 	}
 }
 
+// An unknown --only name is validated BEFORE any writer runs — restore.d
+// included. A typo must never apply (or dry-run-apply) restore.d and only
+// THEN fail; it must not even decrypt it.
+func TestOnlyTypoNeverTouchesRestoreD(t *testing.T) {
+	e, log, spec, kc, p := schedEngine(t, "a", "b: {name: bee}", "c")
+	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
+		log.add(job.Name)
+		return 0
+	}
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls.sops.yaml"), "sops: {}\n")
+	decrypted := false
+	e.SopsDecrypt = func(string) ([]byte, error) { decrypted = true; return nil, nil }
+	var applyCalls []string
+	runner := runnerFunc(func(ctx context.Context, c execx.Cmd) error {
+		applyCalls = append(applyCalls, c.Name+" "+strings.Join(c.Args, " "))
+		return nil
+	})
+	e.Runner = runner
+	e.Options.Only = []string{"a", "nope"}
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	if err == nil || driver.ExitCode(err) != 1 {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(stderrOf(e), "bootstrap: --only: unknown entry 'nope'") {
+		t.Errorf("stderr:\n%s", stderrOf(e))
+	}
+	if log.count() != 0 {
+		t.Errorf("applied: %v", log.events)
+	}
+	if decrypted {
+		t.Error("--only typo decrypted restore.d before failing")
+	}
+	for _, c := range applyCalls {
+		if strings.Contains(c, "apply") {
+			t.Errorf("--only typo reached a kubectl apply: %s", c)
+		}
+	}
+}
+
+// A hosted cluster a dry run cannot reach (or that has no Ready workers
+// yet) is an INCONCLUSIVE assessment, never "nothing would change" — that
+// must exit >1, not the clean 0 a real run gets for the identical miss.
+func TestHostedGateDryRunUnreachableIsExitTwo(t *testing.T) {
+	e, f, errBuf, spec, kc := hostedHarness(t)
+	f.handler = func(c execx.Cmd) error {
+		fmt.Fprintln(c.Stderr, "error: You must be logged in")
+		return &rcError{1}
+	}
+	e.Options.DryRun = true
+	err := e.Apply(t.Context(), "h.test", spec, kc)
+	if driver.ExitCode(err) != 2 {
+		t.Fatalf("err = %v, want rc 2", err)
+	}
+	if !strings.Contains(errBuf.String(), "assessment not done") {
+		t.Errorf("stderr:\n%s", errBuf.String())
+	}
+}
+
+func TestHostedGateDryRunNoWorkersIsExitTwo(t *testing.T) {
+	e, f, _, spec, kc := hostedHarness(t)
+	f.handler = func(c execx.Cmd) error {
+		fmt.Fprintln(c.Stdout, "cp1 NotReady control-plane 1d v1.33")
+		return nil
+	}
+	e.Options.DryRun = true
+	err := e.Apply(t.Context(), "h.test", spec, kc)
+	if driver.ExitCode(err) != 2 {
+		t.Fatalf("err = %v, want rc 2", err)
+	}
+}
+
+// A hermetic filesystem snapshot: the WHOLE project tree is byte-for-byte
+// identical before and after a --dry-run — a builtin addon (served from
+// the embed via Peek, never ejected) and the per-domain secrets store (read
+// through an isolated copy, never the original) both included.
+func TestDryRunChangesNothingOnDisk(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "cilium", "testcni")
+	testutil.WriteFile(t, filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "secrets", "Secret.app.default.TOKEN"), "ENC[token]\n")
+	diffAnswers(t, f, 0, 0)
+
+	before := hashTree(t, e.Paths.Base)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	after := hashTree(t, e.Paths.Base)
+	if before != after {
+		t.Error("a dry run changed the project tree")
+	}
+	if fsutil.DirExists(filepath.Join(e.Paths.Lok8s, "addons", "cilium")) {
+		t.Error("a dry run ejected the builtin cilium addon into the project")
+	}
+}
+
+// hashTree hashes every path's name, mode, size and content under root into
+// one digest — a cheap, exact "did anything change" oracle for a dry run.
+func hashTree(t *testing.T, root string) string {
+	t.Helper()
+	h := sha256.New()
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		fmt.Fprintf(h, "%s|%s|%d\n", rel, info.Mode(), info.Size())
+		if info.IsDir() {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		h.Write(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("hashTree(%s): %v", root, err)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// The real apply and the dry run's diff must see the EXACT SAME per-entry
+// env: dropping jobEnv(job) from either path (dryRunOne or applyOne) would
+// render a DIFFERENT manifest — an entry's env: override feeds envsubst —
+// and kubectl would apply or diff something this run never actually
+// rendered.
+func TestApplyAndDryRunSendTheSameManifest(t *testing.T) {
+	e, f, _, _, p := testEngine(t)
+	writeStackAddon(t, p)
+	f.manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: testcni\ndata:\n  foo: ${LOK8S_USER_FOO}\n"
+	kc := writeKubeconfig(t, p)
+
+	job := Job{Name: "testcni", Dir: filepath.Join(p.Lok8s, "addons", "testcni"), Kubeconfig: kc, EnvLines: "LOK8S_USER_FOO=bar123"}
+
+	var applyStdin string
+	f.handler = func(c execx.Cmd) error {
+		if len(c.Args) > 2 && c.Args[2] == "apply" {
+			raw, _ := io.ReadAll(c.Stdin)
+			applyStdin = string(raw)
+		}
+		return nil
+	}
+	if rc := e.applyOne(t.Context(), job, io.Discard, io.Discard); rc != 0 {
+		t.Fatalf("applyOne rc=%d", rc)
+	}
+
+	var diffStdin string
+	f.handler = func(c execx.Cmd) error {
+		if len(c.Args) > 2 && c.Args[2] == "diff" {
+			raw, _ := io.ReadAll(c.Stdin)
+			diffStdin = string(raw)
+		}
+		return nil
+	}
+	e.Options.DryRun = true
+	res := e.dryRunOne(t.Context(), job, "01-testcni")
+	if res.status != dryUnchanged {
+		t.Fatalf("dryRunOne status = %v (%s)", res.status, stderrOf(e))
+	}
+
+	if applyStdin == "" || diffStdin == "" {
+		t.Fatalf("missing capture: apply=%q diff=%q", applyStdin, diffStdin)
+	}
+	if !strings.Contains(applyStdin, "bar123") {
+		t.Errorf("apply stdin missing the env: override:\n%s", applyStdin)
+	}
+	if applyStdin != diffStdin {
+		t.Errorf("apply and dry-run rendered DIFFERENT manifests:\napply:\n%s\ndiff:\n%s", applyStdin, diffStdin)
+	}
+}
+
 func TestDispatchDryRunSkipsTheInventory(t *testing.T) {
 	p := testPaths(t)
 	spec := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
@@ -428,5 +648,53 @@ func TestDispatchDryRunSkipsTheInventory(t *testing.T) {
 	}
 	if published {
 		t.Error("a dry run published the inventory")
+	}
+}
+
+// PATH_SECRETS, under a dry run, must point at a COPY of the store — never
+// the original path — so a generator's cache write (passwd:, or bash: with
+// --allow-generators) lands in something disposable. The copy carries the
+// same content and is gone again once Apply returns; PATH_SECRETS itself
+// is restored to whatever it was before (never leaked across calls).
+func TestDryRunIsolatesPathSecrets(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "testcni")
+	secretsDir := filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "secrets")
+	testutil.WriteFile(t, filepath.Join(secretsDir, "Secret.app.default.TOKEN"), "ENC[token]\n")
+	os.Setenv("PATH_SECRETS", "/should-be-restored")
+	t.Cleanup(func() { os.Unsetenv("PATH_SECRETS") })
+
+	// Observed and read INSIDE the handler, while Apply is still running:
+	// the isolation copy is removed by the time Apply returns (correctly —
+	// that's the cleanup assertion below), so the content check has to
+	// happen before then.
+	var seenDuring, copyContent string
+	var copyReadErr error
+	diffAnswers(t, f, 0)
+	f2 := f.handler
+	f.handler = func(c execx.Cmd) error {
+		if seenDuring == "" {
+			seenDuring = os.Getenv("PATH_SECRETS")
+			raw, err := os.ReadFile(filepath.Join(seenDuring, "Secret.app.default.TOKEN"))
+			copyContent, copyReadErr = string(raw), err
+		}
+		return f2(c)
+	}
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if seenDuring == "" {
+		t.Fatal("PATH_SECRETS was never observed during the run")
+	}
+	if seenDuring == secretsDir {
+		t.Errorf("PATH_SECRETS pointed at the real store during a dry run: %s", seenDuring)
+	}
+	if copyReadErr != nil || copyContent != "ENC[token]\n" {
+		t.Errorf("the copy did not carry the real store's content: %v %q", copyReadErr, copyContent)
+	}
+	if fsutil.DirExists(seenDuring) {
+		t.Errorf("the isolated copy %s was not cleaned up", seenDuring)
+	}
+	if got := os.Getenv("PATH_SECRETS"); got != "/should-be-restored" {
+		t.Errorf("PATH_SECRETS = %q after Apply, want the restored prior value", got)
 	}
 }
