@@ -36,50 +36,8 @@ var raceRe = regexp.MustCompile(`ensure CRDs are installed first|failed calling 
 // concurrent jobs) maps to the Applier being function-local here: each
 // invocation owns its own output state, so concurrent goroutines never race.
 func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer) int {
-	// job env overrides (bash: exported per-subshell before addons::render,
-	// never leaking across entries). Name the keys LOK8S_USER_*/LOK8S_SPEC_*
-	// — the same convention the addons reference; other names are passed to
-	// the render process but not envsubst-whitelisted.
-	env := map[string]string{}
-	if job.EnvLines != "" {
-		for kv := range strings.SplitSeq(job.EnvLines, "\n") {
-			if kv == "" {
-				continue
-			}
-			k, v, _ := strings.Cut(kv, "=")
-			env[k] = v
-		}
-	}
-
-	// HOSTED clusters: the CNI + cloud integration belong to the PLATFORM —
-	// the hosted control plane manages cilium as a system application in
-	// the user cluster and runs the cloud integration on its side.
-	// Unconditional (not existence-gated): even mid-install, bootstrapping
-	// our own copy would fight the platform for ownership of the datapath.
-	// The list lives in PlatformOwned — one place to extend.
-	adBase := filepath.Base(job.Dir)
-	if job.Hosted {
-		if slices.Contains(PlatformOwned, adBase) {
-			fmt.Fprintf(stderr, "[bootstrap] %s is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping\n", adBase)
-			return 0
-		}
-	}
-
-	// KubeOne applies cilium + the hcloud CCM itself during `kubeone apply`
-	// (rendered custom addons) to break the cni:external deadlock. On a
-	// FULL provision that reconcile has just run — re-applying here would
-	// steal SSA field ownership and the next `kubeone apply` fights back,
-	// so defer to the driver. On `lo provision --bootstrap` the infra
-	// reconcile is SKIPPED — bootstrap is the ONLY applier and MUST
-	// reconcile cilium/ccm from spec.bootstrap. So gate on the PATH —
-	// LOK8S_BOOTSTRAP_ONLY — NOT on "does the DaemonSet exist": that check
-	// can never tell a fresh driver-apply from a weeks-old DS, so it
-	// silently blocked EVERY cilium/ccm reconcile through --bootstrap.
-	// Keyed on the addon DIRECTORY basename: a `name:` override changes
-	// job.Name, not job.Dir, so a renamed cilium/ccm can't defeat the skip
-	// and double-apply the driver's own.
-	if job.Kind == "kubeone" && !job.BootstrapOnly && (adBase == "cilium" || adBase == "ccm") {
-		fmt.Fprintf(stderr, "[bootstrap] %s is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)\n", adBase)
+	if reason, skip := e.skipReason(job); skip {
+		fmt.Fprintln(stderr, reason)
 		return 0
 	}
 
@@ -87,7 +45,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// + envsubst) — the SAME addons.Render the KubeOne driver stages addons
 	// with.
 	ui.DebugTo(stderr, "bootstrap: rendering %s", job.Name)
-	rendered, err := addons.Render(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env)
+	rendered, err := addons.Render(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, jobEnv(job))
 	if err != nil {
 		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
 		return 1
@@ -170,6 +128,61 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 		_ = applier.WaitReady(ctx, job.Name, 180, rendered, kcFlags...)
 	}
 	return 0
+}
+
+// jobEnv parses the job's env overrides (bash: exported per-subshell before
+// addons::render, never leaking across entries). Name the keys
+// LOK8S_USER_*/LOK8S_SPEC_* — the same convention the addons reference;
+// other names are passed to the render process but not
+// envsubst-whitelisted.
+func jobEnv(job Job) map[string]string {
+	env := map[string]string{}
+	if job.EnvLines == "" {
+		return env
+	}
+	for kv := range strings.SplitSeq(job.EnvLines, "\n") {
+		if kv == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	return env
+}
+
+// skipReason decides whether the entry is left alone, and names why (the
+// stderr line of the real run). Shared by the apply and the dry run, so the
+// dry run reports exactly what the real run would not touch.
+//
+// HOSTED clusters: the CNI + cloud integration belong to the PLATFORM —
+// the hosted control plane manages cilium as a system application in the
+// user cluster and runs the cloud integration on its side. Unconditional
+// (not existence-gated): even mid-install, bootstrapping our own copy
+// would fight the platform for ownership of the datapath. The list lives
+// in PlatformOwned — one place to extend.
+//
+// KubeOne applies cilium + the hcloud CCM itself during `kubeone apply`
+// (rendered custom addons) to break the cni:external deadlock. On a FULL
+// provision that reconcile has just run — re-applying here would steal
+// SSA field ownership and the next `kubeone apply` fights back, so defer
+// to the driver. On `lo provision --bootstrap` the infra reconcile is
+// SKIPPED — bootstrap is the ONLY applier and MUST reconcile cilium/ccm
+// from spec.bootstrap. So gate on the PATH — LOK8S_BOOTSTRAP_ONLY — NOT
+// on "does the DaemonSet exist": that check can never tell a fresh
+// driver-apply from a weeks-old DS, so it silently blocked EVERY
+// cilium/ccm reconcile through --bootstrap. Keyed on the addon DIRECTORY
+// basename: a `name:` override changes job.Name, not job.Dir, so a
+// renamed cilium/ccm can't defeat the skip and double-apply the driver's
+// own.
+func (e *Engine) skipReason(job Job) (string, bool) {
+	adBase := filepath.Base(job.Dir)
+	if job.Hosted && slices.Contains(PlatformOwned, adBase) {
+		return fmt.Sprintf("[bootstrap] %s is platform-owned on a hosted cluster (the platform manages the CNI/cloud integration) — skipping", adBase), true
+	}
+	if job.Kind == "kubeone" && !job.BootstrapOnly && (adBase == "cilium" || adBase == "ccm") {
+		return fmt.Sprintf("[bootstrap] %s is applied by the KubeOne driver on a full provision — skipping (use 'lo provision --bootstrap' to reconcile it from spec.bootstrap)", adBase), true
+	}
+	return "", false
 }
 
 // newApplier builds the per-job kapply Applier: force from the job (the

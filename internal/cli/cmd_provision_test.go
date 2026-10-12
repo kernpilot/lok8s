@@ -8,8 +8,11 @@ package cli
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestOrchestrateArgshShapedParseErrors(t *testing.T) {
@@ -94,5 +97,52 @@ func TestDestroyAndBootstrapRefusals(t *testing.T) {
 	_, stderr, err = runLo(t, NewRoot(p), "bootstrap", "--domain", "../evil")
 	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "invalid domain name: ../evil") {
 		t.Errorf("bootstrap traversal: err=%v stderr=%q", err, stderr)
+	}
+}
+
+// The run-mode flags: --render-dir/--no-diff need --dry-run, and on
+// provision all four need --bootstrap (bash: the same error lines, rc 1).
+func TestBootstrapModeFlagDependencies(t *testing.T) {
+	p, _, exits := orchestrateProject(t)
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"provision", "--dry-run", "--domain", "alpha.dev"}, "--dry-run requires --bootstrap"},
+		{[]string{"provision", "--only", "cilium", "--domain", "alpha.dev"}, "--only requires --bootstrap"},
+		{[]string{"provision", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --bootstrap"},
+		{[]string{"provision", "-b", "--no-diff", "--domain", "alpha.dev"}, "--no-diff requires --dry-run"},
+		{[]string{"bootstrap", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --dry-run"},
+		{[]string{"bootstrap", "--no-diff", "--domain", "alpha.dev"}, "--no-diff requires --dry-run"},
+	} {
+		_, stderr, err := runLo(t, NewRoot(p), tc.argv...)
+		if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] "+tc.want) || len(*exits) != 0 {
+			t.Errorf("%v: err=%v exits=%v stderr=%q", tc.argv, err, *exits, stderr)
+		}
+	}
+}
+
+// A bootstrap dry run is not gated: on a cloud domain without --force it
+// passes the real-infrastructure gate and stops at the next guard (no
+// kubeconfig yet) with rc 1, never the decline's rc 3.
+func TestProvisionBootstrapDryRunIsNotGated(t *testing.T) {
+	p, _, exits := orchestrateProject(t)
+	_, stderr, err := runLo(t, NewRoot(p), "provision", "--bootstrap", "--dry-run", "--domain", "beta.cloud")
+	if !errors.Is(err, ErrHandled) || len(*exits) != 0 {
+		t.Fatalf("err=%v exits=%v stderr=%q", err, *exits, stderr)
+	}
+	if strings.Contains(stderr, "real infrastructure") || !strings.Contains(stderr, "--bootstrap needs an existing cluster") {
+		t.Errorf("stderr = %q", stderr)
+	}
+}
+
+// --only reaches the engine: an unknown name lists the valid entries.
+func TestBootstrapOnlyUnknownNameListsEntries(t *testing.T) {
+	p, _, exits := orchestrateProject(t)
+	testutil.WriteFile(t, filepath.Join(p.Base, ".kubeconfig", "onlyc.yaml"), "")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "only.lok8s.dev", "cluster.lok8s.yaml"), "kind: Lo\nmetadata:\n  name: onlyc\nspec:\n  runtime: kind\n  network:\n    name: onlynet\n    cidr: 10.99.12.0/24\n  registries:\n    tls: false\n  bootstrap:\n    - cilium\n    - ccm: {name: cloud}\n")
+	_, stderr, err := runLo(t, NewRoot(p), "bootstrap", "--only", "cilium,nope", "--domain", "only.lok8s.dev")
+	if !errors.Is(err, ErrHandled) || len(*exits) != 0 || !strings.Contains(stderr, "bootstrap: --only: unknown entry 'nope' (valid: cilium, cloud)") {
+		t.Errorf("err=%v exits=%v stderr=%q", err, *exits, stderr)
 	}
 }

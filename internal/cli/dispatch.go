@@ -78,7 +78,7 @@ func newDispatcher(cmd *cobra.Command, paths *config.Paths) *provision.Dispatche
 	loader := &bridge.Loader{Paths: paths, Runner: runner, Stdout: stdout, Stderr: stderr}
 
 	hooks := kc.ProvisionHooks()
-	hooks.BootstrapApply = bootstrap.ApplyHook(paths, runner, stdout, stderr)
+	hooks.BootstrapApply = bootstrap.ApplyHook(paths, runner, stdout, stderr, bootstrap.Options{})
 	hooks.InventoryPublish = inventory.PublishHook(paths, runner, stderr)
 	hooks.GitopsBootstrap = gitops.BootstrapHook(stderr)
 

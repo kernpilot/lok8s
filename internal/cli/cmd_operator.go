@@ -87,7 +87,7 @@ func runOperatorHook(cmd *cobra.Command, name string, args []string) error {
 	case "lo-reconcile":
 		hook = &operator.LoHook{
 			Paths: p, Runner: runner, Stdout: stdout, Stderr: stderr,
-			BootstrapApply: bootstrap.ApplyHook(p, runner, stdout, stderr),
+			BootstrapApply: bootstrap.ApplyHook(p, runner, stdout, stderr, bootstrap.Options{}),
 		}
 	case "capi-reconcile":
 		hook = &operator.CapiHook{

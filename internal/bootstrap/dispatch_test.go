@@ -180,7 +180,7 @@ func TestDispatchInventoryPublishRunsAfterApply(t *testing.T) {
 func TestApplyHookSatisfiesProvisionHooksSeam(t *testing.T) {
 	p := testPaths(t)
 	hook := ApplyHook(p, runnerFunc(func(ctx context.Context, c execx.Cmd) error { return nil }),
-		io.Discard, io.Discard)
+		io.Discard, io.Discard, Options{})
 	// Compile-time: the hook slots into the dispatch seam it was built for.
 	hooks := provision.Hooks{BootstrapApply: hook}
 	if hooks.BootstrapApply == nil {

@@ -71,6 +71,13 @@ type Dispatcher struct {
 	// provision::_interactive).
 	Interactive func() bool
 
+	// BootstrapDryRun is `--bootstrap --dry-run`: the bootstrap hook
+	// renders and diffs but applies nothing, so the run is read-only. The
+	// real-infrastructure gate is not asked and the tail's writers (the
+	// kubehz registration, the inventory, the gitops bootstrap) are
+	// skipped. Only honoured with bootstrapOnly.
+	BootstrapDryRun bool
+
 	// Drivers overrides the driver lookup (nil → the package registry,
 	// driver.Get). The lookup answers "does this kind exist" BEFORE the
 	// gate, exactly where bash stats drivers/<kind>/main; the factory runs
@@ -178,13 +185,17 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 
 	// Real-infrastructure gate: summary + confirmation BEFORE the provider
 	// or driver touch anything (after the kind check, so a bogus kind stays
-	// a plain error). A decline propagates its sentinel.
+	// a plain error). A decline propagates its sentinel. A bootstrap dry
+	// run changes nothing, so it is not gated.
+	dryRun := bootstrapOnly && d.BootstrapDryRun
 	gateAction := ActionReconcile
 	if bootstrapOnly {
 		gateAction = ActionBootstrap
 	}
-	if err := d.ConfirmInfra(domainName, clusterYAML, kind, gateAction); err != nil {
-		return err
+	if !dryRun {
+		if err := d.ConfirmInfra(domainName, clusterYAML, kind, gateAction); err != nil {
+			return err
+		}
 	}
 
 	deps := d.newDeps()
@@ -228,7 +239,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 			}
 		}
 	}
-	return d.runTail(ctx, drv, domainName, clusterYAML, bootstrapOnly)
+	return d.runTail(ctx, drv, domainName, clusterYAML, bootstrapOnly, dryRun)
 }
 
 // loadSpecProvider loads and validates the spec's provider into deps for
@@ -285,8 +296,10 @@ func (d *Dispatcher) bootstrapOnlyGuard(clusterYAML, domainName string) error {
 }
 
 // runTail is the shared post-provision tail: Export → LOK8S_BOOTSTRAP_ONLY
-// → kubehz registration → bootstrap → inventory (fail-soft) → gitops.
-func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName, clusterYAML string, bootstrapOnly bool) error {
+// → kubehz registration → bootstrap → inventory (fail-soft) → gitops. A
+// bootstrap dry run keeps only Export and the bootstrap hook: every other
+// step writes somewhere.
+func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName, clusterYAML string, bootstrapOnly, dryRun bool) error {
 	stderr := d.errWriter()
 
 	// Export: spec-derived env for spec.bootstrap addons. Runs on BOTH
@@ -306,7 +319,7 @@ func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName,
 		os.Setenv("LOK8S_BOOTSTRAP_ONLY", "0")
 	}
 
-	if d.Hooks.KubehzRegister != nil {
+	if d.Hooks.KubehzRegister != nil && !dryRun {
 		if err := d.Hooks.KubehzRegister(ctx, domainName, clusterYAML); err != nil {
 			return err
 		}
@@ -317,6 +330,9 @@ func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName,
 		if err := d.Hooks.BootstrapApply(ctx, domainName, clusterYAML, bootstrapKubeconfig); err != nil {
 			return err
 		}
+	}
+	if dryRun {
+		return nil
 	}
 
 	if d.Hooks.InventoryPublish != nil {

@@ -82,6 +82,10 @@ type Engine struct {
 	// SopsDecrypt decrypts one restore.d/*.sops.yaml in memory (nil → the
 	// secrets package's sops library decrypt — NEVER a sops|kubectl pipe).
 	SopsDecrypt func(path string) ([]byte, error)
+
+	// Options are the run modes (--dry-run, --render-dir, --no-diff,
+	// --only); the zero value is the plain apply.
+	Options Options
 }
 
 func (e *Engine) stdout() io.Writer {
@@ -211,8 +215,9 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// AFTER the empty-entries return on purpose: a spec with no bootstrap
 	// entries must not probe the cluster at all. Both skip WITHOUT failing
 	// the provision (the cluster itself is fine); re-running later is
-	// idempotent.
-	if base.Hosted {
+	// idempotent. A render-only dry run (--no-diff) never touches the
+	// cluster, so it does not probe either.
+	if base.Hosted && (!e.Options.DryRun || !e.Options.NoDiff) {
 		proceed, err := e.hostedGate(ctx, domain, kubeconfig)
 		if err != nil || !proceed {
 			return err
@@ -232,16 +237,41 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// reconcilers first look for it (canonical use: issued wildcard TLS
 	// Secrets — cert-manager REUSES instead of re-issuing via ACME, keeping
 	// clear of the Let's Encrypt duplicate-cert limit).
-	e.restoreD(ctx, domain, kubeconfig)
+	if e.Options.DryRun {
+		// A dry run applies nothing, restore.d included. Say so when the
+		// real run would have applied something there.
+		if n := countRestoreD(e.Paths.Clusters + "/" + domain); n > 0 {
+			fmt.Fprintf(stderr, "[bootstrap] dry-run: restore.d not applied (%d file(s) under clusters/%s/restore.d)\n", n, domain)
+		}
+	} else {
+		e.restoreD(ctx, domain, kubeconfig)
+	}
 
 	nodes, err := e.loadNodes(stderr, domain, kind, entries)
 	if err != nil || len(nodes) == 0 {
 		return err
 	}
+	// The whole graph is validated (names, edges, cycles) before --only
+	// narrows it, so a typo in a dependsOn is reported either way.
 	if err := planDAG(stderr, nodes); err != nil {
 		return err
 	}
+	if len(e.Options.Only) > 0 {
+		if nodes, err = selectOnly(stderr, nodes, e.Options.Only); err != nil {
+			return err
+		}
+	}
+	if e.Options.DryRun {
+		return e.runDryRun(ctx, nodes, base)
+	}
 	return e.runDAG(ctx, stderr, nodes, base)
+}
+
+// countRestoreD counts the clusters/<domain>/restore.d/*.sops.yaml files
+// the real run would apply before the DAG.
+func countRestoreD(domainDir string) int {
+	matches, _ := filepath.Glob(filepath.Join(domainDir, "restore.d", "*.sops.yaml"))
+	return len(matches)
 }
 
 // loadNodes parses every entry and resolves its addon dir (ejecting a
@@ -346,8 +376,13 @@ func planDAG(stderr io.Writer, nodes []*node) error {
 		}
 	}
 
-	// Derive per-entry effective deps, the dep-target flag, in-degree and
-	// reverse adjacency — used by cycle-check + runner.
+	return checkCycle(stderr, nodes, deriveEdges(nodes))
+}
+
+// deriveEdges derives, from each node's deps set, the per-entry effective
+// deps, the dep-target flag and the reverse adjacency (used by the cycle
+// check, the runner and the --only subset), returning the in-degrees.
+func deriveEdges(nodes []*node) []int {
 	indeg := make([]int, len(nodes))
 	for i, nd := range nodes {
 		for pi := range nd.deps {
@@ -357,7 +392,7 @@ func planDAG(stderr io.Writer, nodes []*node) error {
 			indeg[i]++
 		}
 	}
-	return checkCycle(stderr, nodes, indeg)
+	return indeg
 }
 
 // checkCycle is the cycle detection (Kahn): peel off in-degree-0 nodes;

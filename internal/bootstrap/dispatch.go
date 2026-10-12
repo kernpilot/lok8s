@@ -93,8 +93,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string) error {
 	}
 
 	// Refresh the in-cluster ClusterInventory after a standalone
-	// `lo bootstrap` too (fail-soft; nil hook = the lib isn't loaded).
-	if d.InventoryPublish != nil {
+	// `lo bootstrap` too (fail-soft; nil hook = the lib isn't loaded). A
+	// dry run writes nothing to the cluster, the inventory included.
+	if d.InventoryPublish != nil && !e.Options.DryRun {
 		d.InventoryPublish(ctx, domainName, clusterYAML, kubeconfig)
 	}
 	return nil
@@ -132,10 +133,11 @@ func specMetadataName(clusterYAML string) string {
 // full-provision and --bootstrap paths. The engine is built per call so
 // each invocation reads the decision env (LOK8S_FORCE_RECREATE,
 // LOK8S_BOOTSTRAP_ONLY, LOK8S_BOOTSTRAP_PARALLEL) at apply time, exactly
-// like the sourced bash lib did.
-func ApplyHook(p *config.Paths, r execx.Runner, stdout, stderr io.Writer) func(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
+// like the sourced bash lib did. opts carries the run modes of
+// `lo provision --bootstrap` (--dry-run, --render-dir, --no-diff, --only).
+func ApplyHook(p *config.Paths, r execx.Runner, stdout, stderr io.Writer, opts Options) func(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
 	return func(ctx context.Context, domainName, clusterYAML, kubeconfig string) error {
-		e := &Engine{Paths: p, Runner: r, Stdout: stdout, Stderr: stderr}
+		e := &Engine{Paths: p, Runner: r, Stdout: stdout, Stderr: stderr, Options: opts}
 		return e.Apply(ctx, domainName, clusterYAML, kubeconfig)
 	}
 }

@@ -9,6 +9,7 @@ package provision
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -270,5 +271,55 @@ spec:
 	}
 	if fmt.Sprint(log) != "[provision:cloud.dev destroy:cloud.dev]" {
 		t.Errorf("driver calls = %v", log)
+	}
+}
+
+// A bootstrap dry run is read-only: no gate, no registration, no inventory,
+// no gitops — only the export and the bootstrap hook run.
+func TestDispatchBootstrapDryRunSkipsGateAndWriters(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
+	log := []string{}
+	d, errBuf := loDispatcher(t, fakeExportingDriver{&fakeDriver{log: &log}})
+	// A cloud kind so the gate would refuse without --force.
+	testutil.WriteFile(t, filepath.Join(d.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+		"kind: KubeOne\nmetadata:\n  name: test-cluster\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n  gitops:\n    provider: flux\n")
+	d.Drivers = func(name string) (driver.Factory, bool) {
+		if name != "kubeone" {
+			return nil, false
+		}
+		return func(deps *driver.Deps) (driver.Driver, error) {
+			return fakeExportingDriver{&fakeDriver{log: &log}}, nil
+		}, true
+	}
+	d.Interactive = func() bool { return false }
+	d.BootstrapDryRun = true
+	testutil.WriteFile(t, filepath.Join(d.Paths.Base, ".kubeconfig", "test-cluster.yaml"), "")
+	d.Hooks.KubehzRegister = func(ctx context.Context, domain, yaml string) error {
+		log = append(log, "registered")
+		return nil
+	}
+	d.Hooks.BootstrapApply = func(ctx context.Context, domain, yaml, kubeconfig string) error {
+		log = append(log, "bootstrap_applied:"+domain)
+		return nil
+	}
+	d.Hooks.InventoryPublish = func(ctx context.Context, domain, yaml, kubeconfig string) {
+		log = append(log, "inventory")
+	}
+	d.Hooks.GitopsBootstrap = func(ctx context.Context, domain, provider string) error {
+		log = append(log, "gitops")
+		return nil
+	}
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", true); err != nil {
+		t.Fatalf("Dispatch: %v\n%s", err, errBuf.String())
+	}
+	if joined := strings.Join(log, ","); joined != "export:test.lok8s.dev,bootstrap_applied:test.lok8s.dev" {
+		t.Errorf("log = %s", joined)
+	}
+	refuteContains(t, errBuf.String(), "real infrastructure")
+	// Without --bootstrap the field is inert: the gate still asks.
+	d.BootstrapDryRun = true
+	log = nil
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", false); !errors.Is(err, driver.ErrDeclined) {
+		t.Errorf("a full provision with the dry-run field set must still be gated, got %v", err)
 	}
 }
