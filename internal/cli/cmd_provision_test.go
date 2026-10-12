@@ -145,11 +145,33 @@ func TestProvisionBootstrapDryRunIsNotGated(t *testing.T) {
 // unfiltered apply.
 func TestBootstrapOnlyBlankIsAnError(t *testing.T) {
 	p, _, exits := orchestrateProject(t)
-	for _, only := range []string{" ", ",", " , "} {
+	// "" is the review round-2 escape (item E): pflag's StringSliceVar
+	// parses an EMPTY value through a CSV reader that returns ZERO
+	// elements for "" — len(f.only) alone cannot tell "--only ''" apart
+	// from "--only never given" at all; only cmd.Flags().Changed can.
+	for _, only := range []string{"", " ", ",", " , "} {
 		_, stderr, err := runLo(t, NewRoot(p), "bootstrap", "--only", only, "--domain", "alpha.dev")
 		if !errors.Is(err, ErrHandled) || len(*exits) != 0 || !strings.Contains(stderr, "[error] --only: no entry names given") {
 			t.Errorf("--only %q: err=%v exits=%v stderr=%q", only, err, *exits, stderr)
 		}
+	}
+}
+
+// --with-restore requires --only (and, transitively, --bootstrap on
+// `lo provision`) — review round 2, item H's flag.
+func TestWithRestoreRequiresOnly(t *testing.T) {
+	p, _, exits := orchestrateProject(t)
+	_, stderr, err := runLo(t, NewRoot(p), "bootstrap", "--with-restore", "--domain", "alpha.dev")
+	if !errors.Is(err, ErrHandled) || len(*exits) != 0 || !strings.Contains(stderr, "[error] --with-restore requires --only") {
+		t.Errorf("err=%v exits=%v stderr=%q", err, *exits, stderr)
+	}
+}
+
+func TestWithRestoreRequiresBootstrapOnProvision(t *testing.T) {
+	p, _, exits := orchestrateProject(t)
+	_, stderr, err := runLo(t, NewRoot(p), "provision", "--only", "cilium", "--with-restore", "--domain", "alpha.dev")
+	if !errors.Is(err, ErrHandled) || len(*exits) != 0 || !strings.Contains(stderr, "[error] --only requires --bootstrap") {
+		t.Errorf("err=%v exits=%v stderr=%q", err, *exits, stderr)
 	}
 }
 

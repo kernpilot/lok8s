@@ -111,7 +111,7 @@ func TestDryRunDiffsEveryEntryAndAppliesNothing(t *testing.T) {
 	}
 	want := "bootstrap dry-run: 01-testcni: unchanged\n" +
 		"bootstrap dry-run: 02-second: differs changed=1 new=2\n" +
-		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0\n"
+		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
 	}
@@ -140,7 +140,7 @@ func TestDryRunRenderDirHoldsManifestsAndDiffs(t *testing.T) {
 	for _, en := range entries {
 		names = append(names, en.Name())
 	}
-	if got := strings.Join(names, " "); got != "01-testcni.diff 01-testcni.yaml 02-second.diff 02-second.yaml" {
+	if got := strings.Join(names, " "); got != ".lo-dry-run 01-testcni.diff 01-testcni.yaml 02-second.diff 02-second.yaml" {
 		t.Errorf("files = %q", got)
 	}
 	manifest, _ := os.ReadFile(filepath.Join(dir, "01-testcni.yaml"))
@@ -197,7 +197,7 @@ func TestDryRunNoDiffNeverReachesTheCluster(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	want := "bootstrap dry-run: 01-testcni: rendered\n" +
-		"bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 errors=0\n"
+		"bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 inconclusive=0 errors=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s", got)
 	}
@@ -294,7 +294,7 @@ func TestDryRunDiffsRestoreDAsItsOwnEntry(t *testing.T) {
 	}
 	want := "bootstrap dry-run: restore.d: differs changed=1 new=2\n" +
 		"bootstrap dry-run: 01-testcni: unchanged\n" +
-		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0\n"
+		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
 	}
@@ -449,7 +449,7 @@ func TestOnlyDryRunNumbersTheSelection(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	want := "bootstrap dry-run: 01-second: unchanged\n" +
-		"bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 errors=0\n"
+		"bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 inconclusive=0 errors=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s", got)
 	}
@@ -531,9 +531,13 @@ func TestHostedGateDryRunNoWorkersIsExitTwo(t *testing.T) {
 // the embed via Peek, never ejected) and the per-domain secrets store (read
 // through an isolated copy, never the original) both included.
 func TestDryRunChangesNothingOnDisk(t *testing.T) {
-	e, f, spec, kc := dryEngine(t, "cilium", "testcni")
+	e, f, spec, kc := dryEngine(t, "cilium", "testcni", "barechart")
 	testutil.WriteFile(t, filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "secrets", "Secret.app.default.TOKEN"), "ENC[token]\n")
-	diffAnswers(t, f, 0, 0)
+	// barechart is mkChartAddon's bare chart.yaml with NO values overlay —
+	// the "nothing to stack" render.go branch (forceCopy-only, no merge)
+	// a review-round-2 mutation found the disk-safety test never exercised.
+	mkChartAddon(t, e.Paths, "barechart")
+	diffAnswers(t, f, 0, 0, 0)
 
 	before := hashTree(t, e.Paths.Base)
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {

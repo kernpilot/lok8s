@@ -108,6 +108,72 @@ func TestDispatchBootstrapOnlyNeedsExistingCluster(t *testing.T) {
 	refuteContains(t, strings.Join(log, ","), "provision:")
 }
 
+// dryRunEnvCapturingDriver's Export records LOK8S_BOOTSTRAP_DRYRUN/
+// LOK8S_BOOTSTRAP_ALLOW_GENERATORS at the instant it runs — the ONLY way
+// to prove ordering (review round 2, item D), since a later read in the
+// test body would see runTail's own defer having already restored them.
+type dryRunEnvCapturingDriver struct {
+	*fakeDriver
+	seenDryRun, seenAllow *string
+}
+
+func (d dryRunEnvCapturingDriver) Export(ctx context.Context, domain string) error {
+	*d.seenDryRun = os.Getenv("LOK8S_BOOTSTRAP_DRYRUN")
+	*d.seenAllow = os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS")
+	return nil
+}
+
+// Review round 2, item D: through the REAL dispatch path (runTail), not
+// Engine.Apply alone — LOK8S_BOOTSTRAP_DRYRUN/ALLOW_GENERATORS must be
+// live BEFORE driver::export runs, so Export's own writes (the Lo driver's
+// .registries.json) are gated too, and restored once Dispatch returns.
+func TestDispatchBootstrapDryRunSetsEnvBeforeExport(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "")
+	var seenDryRun, seenAllow string
+	log := []string{}
+	d, _ := loDispatcher(t, dryRunEnvCapturingDriver{&fakeDriver{log: &log}, &seenDryRun, &seenAllow})
+	testutil.WriteFile(t, filepath.Join(d.Paths.Base, ".kubeconfig", "test-cluster.yaml"), "")
+	d.BootstrapDryRun = true
+	d.BootstrapAllowGenerators = true
+	d.Hooks.BootstrapApply = func(ctx context.Context, domain, yaml, kubeconfig string) error { return nil }
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", true); err != nil {
+		t.Fatal(err)
+	}
+	if seenDryRun != "1" {
+		t.Errorf("LOK8S_BOOTSTRAP_DRYRUN during Export = %q, want 1", seenDryRun)
+	}
+	if seenAllow != "1" {
+		t.Errorf("LOK8S_BOOTSTRAP_ALLOW_GENERATORS during Export = %q, want 1", seenAllow)
+	}
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") != "" {
+		t.Error("LOK8S_BOOTSTRAP_DRYRUN leaked past Dispatch")
+	}
+	if os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "" {
+		t.Error("LOK8S_BOOTSTRAP_ALLOW_GENERATORS leaked past Dispatch")
+	}
+}
+
+// A non-dry-run Export must see NEITHER variable, even with
+// BootstrapAllowGenerators left set from a prior flag parse (it has no
+// effect without BootstrapDryRun).
+func TestDispatchRealRunExportSeesNoDryRunEnv(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "")
+	var seenDryRun, seenAllow string
+	log := []string{}
+	d, _ := loDispatcher(t, dryRunEnvCapturingDriver{&fakeDriver{log: &log}, &seenDryRun, &seenAllow})
+	d.BootstrapAllowGenerators = true
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", false); err != nil {
+		t.Fatal(err)
+	}
+	if seenDryRun != "" || seenAllow != "" {
+		t.Errorf("a real run's Export saw DRYRUN=%q ALLOW=%q, want both empty", seenDryRun, seenAllow)
+	}
+}
+
 // bats: "provision::dispatch invokes driver::post_provision when defined"
 func TestDispatchInvokesPostProvision(t *testing.T) {
 	log := []string{}

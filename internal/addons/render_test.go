@@ -370,6 +370,99 @@ func TestRenderBuildFailurePropagates(t *testing.T) {
 	}
 }
 
+// Review round 2, item C: a non-builtin exec plugin referenced from the
+// addon's OWN kustomization.yaml is refused before kustomize ever runs —
+// the fake runner fails the test if it is invoked at all.
+func TestRenderIsolatedRefusesNonBuiltinExecPlugin(t *testing.T) {
+	dir := writeAddon(t)
+	testutil.WriteFile(t, filepath.Join(dir, "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\ngenerators:\n  - chart.yaml\n  - evil.yaml\n")
+	testutil.WriteFile(t, filepath.Join(dir, "evil.yaml"),
+		"apiVersion: evil.example.com/v1\nkind: EvilGenerator\nmetadata:\n  name: x\n")
+	f := newFakeKustomize(t, "")
+	var errBuf strings.Builder
+	_, err := RenderIsolated(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil, false)
+	if err == nil {
+		t.Fatal("expected refusal")
+	}
+	if !strings.Contains(err.Error(), "evil.example.com/v1") || !strings.Contains(err.Error(), "EvilGenerator") {
+		t.Errorf("error = %v, want it to name the plugin", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("kustomize ran despite the refusal: %v", f.calls)
+	}
+}
+
+// --allow-generators (allowGenerators=true) lets it through: the scan is
+// skipped entirely, same as today's bash: generator gate.
+func TestRenderIsolatedAllowGeneratorsSkipsTheScan(t *testing.T) {
+	dir := writeAddon(t)
+	testutil.WriteFile(t, filepath.Join(dir, "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\ngenerators:\n  - chart.yaml\n  - evil.yaml\n")
+	testutil.WriteFile(t, filepath.Join(dir, "evil.yaml"),
+		"apiVersion: evil.example.com/v1\nkind: EvilGenerator\nmetadata:\n  name: x\n")
+	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+	f := newFakeKustomize(t, manifest)
+	var errBuf strings.Builder
+	out, err := RenderIsolated(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil, true)
+	if err != nil {
+		t.Fatalf("RenderIsolated: %v", err)
+	}
+	if !strings.Contains(out, "kind: ConfigMap") {
+		t.Errorf("out = %q", out)
+	}
+}
+
+// Review round 2, item B: an entry's env: may never decide one of the
+// engine's own safety variables — ProtectedEnvOverride reports the attempt
+// by name rather than letting it silently do nothing.
+func TestProtectedEnvOverride(t *testing.T) {
+	if got := ProtectedEnvOverride(map[string]string{"LOK8S_USER_FOO": "x"}); got != "" {
+		t.Errorf("an ordinary entry var reported as protected: %q", got)
+	}
+	if got := ProtectedEnvOverride(map[string]string{"HOME": "/tmp/evil"}); got != "HOME" {
+		t.Errorf("got %q, want HOME", got)
+	}
+	if got := ProtectedEnvOverride(map[string]string{"KUBECONFIG": "/tmp/evil.yaml"}); got != "KUBECONFIG" {
+		t.Errorf("got %q, want KUBECONFIG", got)
+	}
+}
+
+// renderAddon forces every protected variable back to the ENGINE's own
+// current value AFTER merging the entry's env — the backstop behind
+// ProtectedEnvOverride's explicit, named error. A kustomize child that
+// could see the entry's HOME override would be the sandbox escape item B
+// exists to close.
+func TestRenderForcesProtectedEnvAfterEntryMerge(t *testing.T) {
+	t.Setenv("HOME", "/sandboxed/home")
+	dir := writeAddon(t)
+	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+	f := newFakeKustomize(t, manifest)
+	var errBuf strings.Builder
+	if _, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "",
+		map[string]string{"HOME": "/tmp/evil"}); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// os/exec keeps only the LAST value for a duplicate key (exec.Cmd.Env's
+	// documented behavior) — matching that is what makes "appended after"
+	// the actual defense, not just string presence.
+	if got := lastEnvValue(f.envs[0], "HOME"); got != "/sandboxed/home" {
+		t.Errorf("effective HOME = %q, want /sandboxed/home (envs: %v)", got, f.envs[0])
+	}
+}
+
+// lastEnvValue is os/exec's own "last duplicate wins" rule, read back for
+// an assertion.
+func lastEnvValue(env []string, key string) string {
+	val := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			val = v
+		}
+	}
+	return val
+}
+
 func TestRenderPerEntryEnvReachesProcessAndEnvsubst(t *testing.T) {
 	// The per-entry env: overrides join the kustomize process env AND the
 	// envsubst lookup — without touching the shared process environment.
