@@ -187,8 +187,7 @@ func (e *Engine) remapDryRunExit(err error) error {
 	if errors.Is(err, ErrDryRunDiffers) {
 		return err // already the correct rc 1 — "something would change"
 	}
-	var ee *driver.ExitError
-	if errors.As(err, &ee) {
+	if _, ok := errors.AsType[*driver.ExitError](err); ok {
 		return err // already carries an explicit code (e.g. runDryRun's rc 2)
 	}
 	return &driver.ExitError{Code: 2, Err: err}
