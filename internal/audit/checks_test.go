@@ -552,8 +552,13 @@ func TestK8sTodayEnv(t *testing.T) {
 		t.Errorf("pinned today = %q", got)
 	}
 	t.Setenv(k8sTodayEnv, "not-a-date")
-	if got := k8sToday(); got != time.Now().UTC().Format("2006-01-02") {
-		t.Errorf("a malformed pin must fall back to today, got %q", got)
+	// k8sToday reads the clock between the two reads here, so its date is one
+	// of the two: equal to both except across UTC midnight.
+	before := time.Now().UTC().Format("2006-01-02")
+	got := k8sToday()
+	after := time.Now().UTC().Format("2006-01-02")
+	if got != before && got != after {
+		t.Errorf("a malformed pin must fall back to today (%s..%s), got %q", before, after, got)
 	}
 }
 
