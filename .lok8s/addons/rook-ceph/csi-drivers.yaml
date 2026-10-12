@@ -46,6 +46,11 @@ values:
         tolerations:
           - operator: Exists
     cephfs:
+      # Off. The name is still set, so the node plugin ClusterRole a cluster
+      # gets when it turns CephFS on is the one the least-privilege patch in
+      # kustomization.yaml targets (the chart default, cephfs.csi.ceph.com,
+      # would yield cephfs-csi-ceph-com-nodeplugin-cr and miss the patch).
+      name: rook-ceph.cephfs.csi.ceph.com
       enabled: false
     nfs:
       enabled: false

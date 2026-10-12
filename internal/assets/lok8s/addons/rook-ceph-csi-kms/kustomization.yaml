@@ -1,20 +1,27 @@
-# rook-ceph-csi-kms — OPT-IN. Gives the Ceph CSI node plugin back the five
+# rook-ceph-csi-kms — opt-in. Gives the Ceph CSI node plugin back the five
 # API grants the `rook-ceph` addon removes from its ClusterRole (see the
 # `patches:` block in ../rook-ceph/kustomization.yaml for the per-rule
 # evidence): Secrets, ConfigMaps, ServiceAccounts, ServiceAccount tokens and
-# TokenReviews. Bootstrap it ONLY when a cluster uses one of the ceph-csi
+# TokenReviews. Bootstrap it only when a cluster uses one of the ceph-csi
 # features that reads them through the Kubernetes API:
 #
 #   - volume encryption with an external KMS (`encrypted: "true"` +
 #     `encryptionKMSID` on a StorageClass: Vault, vaulttokens, vaulttenantsa,
 #     the metadata/secrets KMS, …);
 #   - the `mounter: rbd-nbd` StorageClass parameter (the plugin's volume
-#     healer re-reads the node-stage Secret after a restart).
+#     healer re-reads the node-stage Secret after a restart);
+#   - usage metrics for `volumeMode: Block` volumes (NodeGetVolumeStats reads
+#     the controller-publish Secret to report the used bytes).
 #
-# A plain krbd/CephFS mount needs neither: kubelet passes the Ceph user
-# credentials inside the CSI request. Keep this addon off unless one of the
-# two applies, because `serviceaccounts/token create` lets any node that runs
-# the plugin mint a token for any ServiceAccount.
+# A plain krbd/CephFS mount needs none of them: kubelet passes the Ceph user
+# credentials inside the CSI request.
+#
+# What this addon restores is the upstream rule set, not the minimum each
+# feature needs. With it, root on any node that runs the plugin can read
+# every Secret in the cluster and mint a token for any ServiceAccount again
+# (`serviceaccounts/token create` is cluster-wide). Keep it off unless one of
+# the three cases above applies. Narrower, per-feature grants are tracked in
+# https://github.com/kernpilot/lok8s/issues/265.
 #
 #   spec:
 #     bootstrap:

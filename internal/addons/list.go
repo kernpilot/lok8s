@@ -340,7 +340,7 @@ var configHints = map[string]string{
 	"redis-operator":               "declare Redis CRs in a target",
 	"reflector":                    "annotate the source Secret/ConfigMap to mirror across namespaces",
 	"rook-ceph":                    "CephCluster/pool/StorageClass in a target: replica count + device filter",
-	"rook-ceph-csi-kms":            "opt-in, after rook-ceph: restores the node plugin's Secret/ServiceAccount-token grants for KMS-encrypted volumes or mounter=rbd-nbd",
+	"rook-ceph-csi-kms":            "opt-in after rook-ceph: restores the node plugin's Secret + ServiceAccount-token grants (KMS encryption, mounter=rbd-nbd)",
 	"sso-gate":                     "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect",
 	"system-upgrade-controller":    "declare upgrade Plans in a target (Rancher SUC)",
 	"tempo":                        "configure trace storage/retention via the tempo values",

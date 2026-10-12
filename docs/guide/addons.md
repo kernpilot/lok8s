@@ -672,21 +672,22 @@ and the gateway's guard came off. Note the filter order: Envoy runs
 source goes to the issuer first and gets refused after it returns.
 Access stays gated, but the service's existence is no longer hidden.
 
-### rook-ceph — the CSI node plugin runs with least privilege {#rook-ceph}
+### rook-ceph: least privilege for the CSI node plugin {#rook-ceph}
 
 The `rook-ceph` addon installs the Rook operator and the ceph-csi-operator
 "work orders" (the `Driver`, the plugin ServiceAccounts and their RBAC).
+
 The CSI **node plugin** is a DaemonSet that tolerates every taint, so it
 runs on every node, control planes included. Its ClusterRole is therefore
-what an attacker holds after taking over any one node.
+what an attacker holds after a takeover of any one node.
 
 The upstream `ceph-csi-drivers` chart grants that role ten rules. Five of
-them serve only volume encryption with an external KMS (and one more
-feature, below), and the addon removes them:
+them serve volume encryption with an external KMS, and the addon removes
+them:
 
 | Rule | What ceph-csi uses it for |
 |---|---|
-| `secrets` get/list/watch | the KMS passphrase Secret, the Vault tenant token; the `rbd-nbd` volume healer |
+| `secrets` get/list/watch | the KMS passphrase Secret, the Vault tenant token, the `rbd-nbd` volume healer, and the block-volume usage metrics (see the exception below) |
 | `configmaps` get | the KMS configuration ConfigMap, the per-tenant Vault config |
 | `serviceaccounts` get | the tenant ServiceAccount (`vaulttenantsa`) |
 | `serviceaccounts/token` create | a `TokenRequest` for that ServiceAccount: **mints a token for any ServiceAccount in the cluster** |
@@ -695,29 +696,47 @@ feature, below), and the addon removes them:
 A plain, unencrypted RBD or CephFS mount uses none of them: kubelet passes
 the Ceph user credentials to the plugin inside the CSI request. The
 remaining rules (`nodes` get, `persistentvolumes` and `volumeattachments`
-get/list, `persistentvolumeclaims` get, `events`) stay, because the plugin
-reads them on every start and none of them returns a credential.
+get/list, `persistentvolumeclaims` get, `events`) stay. The plugin reads
+them on every start, and none of them returns a credential.
 
-The removal is a guarded JSON patch in the addon's `kustomization.yaml`:
-each `remove` is preceded by a `test` on the rule it expects, so a chart
-bump that reorders the rules **fails the render** instead of removing the
-wrong rule. When you bump `ceph-csi-drivers`, compare the indices with the
-chart's `templates/*-nodeplugin-cr-rbac.yaml` and adjust the patch. The
-same patch covers the CephFS node plugin role; it is a no-op while
+One exception is not about encryption. `NodeGetVolumeStats` on a
+`volumeMode: Block` RBD volume reads the controller-publish Secret to
+report the used bytes (ceph-csi `internal/rbd/nodeserver.go`,
+`blockNodeGetVolumeStats`).
+
+With the narrowed role that read fails on the volume **stats** of block
+volumes, not on their mount. Kubelet logs the error and the volume keeps
+working. A cluster that needs usage metrics for block volumes bootstraps
+`rook-ceph-csi-kms` (below).
+
+The removal is a guarded JSON patch in the addon's `kustomization.yaml`.
+A `test` on the complete rule precedes each `remove`. A chart bump that
+reorders, merges or widens a rule therefore **fails the render** instead
+of removing the wrong rule.
+
+When you bump `ceph-csi-drivers`, compare the indices with the chart's
+`templates/*-nodeplugin-cr-rbac.yaml` and adjust the patch. Then refresh
+the fixture the render test reads (`internal/addons/testdata/rook-ceph/`,
+its header says how).
+
+The same patch covers the CephFS node plugin role. The addon pins the
+CephFS driver name (`rook-ceph.cephfs.csi.ceph.com`) so that role gets the
+name the patch targets. The patch is a no-op while
 `drivers.cephfs.enabled` is `false` and takes effect when you turn CephFS on.
 
 #### When you need the grants back
 
-Two ceph-csi features read those objects through the Kubernetes API:
+Three ceph-csi features read those objects through the Kubernetes API:
 
 - **encrypted volumes with a KMS**: a StorageClass with `encrypted: "true"`
   and an `encryptionKMSID` (Vault, `vaulttokens`, `vaulttenantsa`, the
-  metadata KMS, ...);
+  metadata KMS, ...)
 - **`mounter: rbd-nbd`**: after a plugin restart the volume healer re-reads
-  each attached volume's node-stage Secret to re-map the device.
+  each attached volume's node-stage Secret to re-map the device
+- **usage metrics for `volumeMode: Block` volumes** (the exception above)
 
 For those clusters bootstrap the opt-in `rook-ceph-csi-kms` addon after
-`rook-ceph`. It binds exactly the five removed rules to the RBD node plugin
+`rook-ceph`. It binds the five removed rules to the RBD node plugin
 ServiceAccount again, so the effective permissions equal the upstream
 chart's:
 
@@ -728,6 +747,14 @@ spec:
     - rook-ceph-csi-kms:
         dependsOn: [rook-ceph]
 ```
+
+::: warning This restores the every-node escalation path
+`rook-ceph-csi-kms` restores the upstream grants, not the minimum a KMS
+needs. With it, root on any node that runs the plugin can read every
+Secret and mint a token for any ServiceAccount again. Enable it only for
+one of the three features above, and track the narrower, per-feature
+grants in [kernpilot/lok8s#265](https://github.com/kernpilot/lok8s/issues/265).
+:::
 
 The binding names the RBD ServiceAccount only. A cluster that also runs the
 CephFS driver with encryption adds that ServiceAccount from a patch in its
